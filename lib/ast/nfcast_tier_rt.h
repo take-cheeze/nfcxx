@@ -223,6 +223,8 @@ typedef struct nfcr_Ctx {
   nfcr_W* fv;          // the free variables (upvalues and globals) the unit reads, gathered at entry: two words each, the value and (an N) its kind;
                        // the ones the code assigns are copied back by the engine when the run has ended
   nfcr_i64 rtag;       // the kind of a result that is an nfcr_N: 1 a float (the result is in W.d), 0 an integer
+  nfcr_i64 tgt;        // a tail call of another function of the unit that runs next: 1 + its instance, 0 for none (see Gen::tail_jump)
+  nfcr_W targ[24];     // its arguments: two words per parameter (an N takes two, as in the entry trampoline), at most 12 parameters
 } nfcr_Ctx;
 
 #endif  // NFCAST_TIER_RT_H

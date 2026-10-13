@@ -286,9 +286,10 @@ from the frame chain: `error(msg, 2)` blames the caller of the function that mad
 frame for those too). The tier is asked about the callee again each time round the loop, like for a call. Two consequences for
 the inliner: a tail site is never inlined (the inlined frame would sit above the caller's), and a callee whose body has a `return f(x)`
 is not a candidate (a clone cannot replace its frame); both are decided in `nfcast_inline.inc` and `CallUninit` / `MethodTab`.
-Native code made by the tier recurses in C, except for one case: a tail call of the function to itself is a jump in the native code
-(`Gen::self_tail`, see "Tiering"), so a self tail recursion of any depth runs in one entry. A tail call of another function still recurses
-in C: a tail recursion of that kind deeper than the depth limit bails out of it, and the interpreter then runs it in constant stack.
+Native code made by the tier recurses in C, except for tail calls: a tail call of the function to itself is a jump in the native code
+(`Gen::self_tail`, see "Tiering"), and so is a tail call of another function of the same unit with the same result type (`Gen::tail_jump`),
+so a tail recursion of any depth between kernels runs in one entry too. A tail call between functions with results of different types still
+recurses in C: a tail recursion of that kind deeper than the depth limit bails out of it, and the interpreter then runs it in constant stack.
 
 An error message about a value read with a computed key (`t[k].x` with `t[k]` nil) says `(field '?')` as Lua's does, `t[1]` says
 `(field 'integer index')`; and the errors of integer division and modulo by zero when an operand is a string have no position, like
@@ -392,8 +393,13 @@ interpreter*, with nothing to undo:
   after the abandoned run), and the code is not run at all when the interpreter's value stack could not hold that many frames of
   the unit. A tail call does not count, as in the interpreter (`call_closure` reuses the frame of `return f(...)`), so a self
   tail call is compiled as a jump: the arguments go into temporaries first (they read the parameters that are about to change),
-  the parameters take them, and the body starts again after the depth was counted. A tail call with another instance of the same
-  function (other argument types) is an ordinary call. Only a tail call written `return f(...)` is one: `return (f(...))` is a
+  the parameters take them, and the body starts again after the depth was counted. A tail call of another instance of the unit with the
+  same result type (another function, or the same one with other argument types) is a **jump through the context**: the arguments go
+  into `cx->targ` as words, `cx->tgt` names the callee, the depth is given back and the function returns. The wrapper `nfct_cN` that made
+  the call which entered the chain runs the callee (`nfct_dR` switches on the index), and so on until a function returns normally, so
+  the C stack stays flat and the depth is the one of the entry (the callee counts its own entry, as the interpreter's frame reuse does).
+  A unit with such jumps calls every instance through its wrapper; a unit without them calls the instances directly (`#define`). A tail
+  call with another result type is an ordinary call. Only a tail call written `return f(...)` is one: `return (f(...))` is a
   call that counts (the view of the tier keeps the two apart, `TierView::tail`, as `ReturnNode` does).
 
 - **Assigned upvalues are copied in and out.** A kernel may assign an upvalue that holds a number or a boolean. The generated code
@@ -505,16 +511,16 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   patch `nfcr_N`'s flag is a 32-bit `int` again; with a QBE built without it, 4 checks of `tier.cpp` and `tier_kernels.lua` fail on
   qbe, so re-run `scripts/setup-qbe.sh` after pulling.
 - A kernel that fails often costs the failed run plus the interpreter's run until it is given up.
-- **Tail calls between functions are not loops.** A self tail call is (above); a tail call of another kernel, mutual recursion
-  included (`is_even` / `is_odd` written as `return is_odd(n - 1)`), is a C call that counts depth. Such a recursion deeper than
-  `State::max_depth` (1500) abandons its run at the limit and the interpreter goes on in constant stack, as before the self-loop was
-  added; each tail call that the interpreter makes is offered to the compiled version again, which runs up to the limit and is
-  abandoned, and a version that aborts in more than a quarter of its runs, after eight, is given up. Measured (`is_even(1000000)` and `is_odd(1000001)`, qbe, warm
-  cache, best of three, the machine loaded by other jobs): the interpreter 0.57 s; the tier 1.07 s at the default threshold and 1.44 s
-  at threshold 1 before the self loop, and 1.31 s and 1.40 s after it (the same). Each version takes eight aborts and is given up,
-  and then the interpreter pays `tier_dispatch` at each of its tail calls (a signature and a lookup per call); that is the likely
-  cause of the difference (not profiled). Making such calls loops too would need the callee's frame to be the caller's (a jump between the instances of the
-  unit with the callee's arguments); that is not done, and neither is the cheaper dispatch for given-up versions.
+- **A tail call between functions with results of different types is still a C call.** The jump above needs the callee to return the
+  same type as the caller (`return g(x)` in `f` where `g` returns a float and `f` an integer is not one). Such a recursion deeper than
+  `State::max_depth` (1500) abandons its run at the limit, and the interpreter goes on in constant stack; each tail call that the
+  interpreter makes is offered to the compiled version again, which runs up to the limit and is abandoned, and a version that aborts in
+  more than a quarter of its runs, after eight, is given up. A given-up version is then found by its argument types without building a
+  signature (`try_versions` sets `given_up`); before that, every interpreted call of such a function built a signature vector and looked
+  it up, which was about two thirds of the cost of the mutual recursion below (not a native cost: `tier_calls` stays at zero there).
+- **Mutual tail recursion** (`is_even` / `is_odd` written as `return is_odd(n - 1)`, same result type) is a jump, and was measured as
+  such (below). Before the change it was a C call per step: the native runs stopped at the depth limit, eight of them per version,
+  and the interpreter paid for each attempt and for each signature lookup on the way.
 - Entering native code from the interpreter costs about as much as a call of a small function in the interpreter (the checks, a
   `setjmp`): a tiny kernel called from a loop in the interpreter gains little (ten million calls of
   `x * 2 + 1`, 0.54 s instead of 0.53 s); what gains is a kernel with a loop or a recursion inside, which runs inside one entry.
@@ -528,8 +534,9 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   metatables, errors and their messages, control flow, algorithms, garbage-heavy code, proper tail calls (`tail_calls`), numeric
   kernels, `tier_kernels`, `tier_osr`: loops taken over in the middle of a call (see below), and `tail_loop`: a million-deep self
   tail recursion as a kernel (integer and float accumulators, arguments that swap, a tail call that changes a type, a loop that calls
-  one each time), depth counted only by the calls that are not tail calls, mutual recursion, and the errors inside deep tail
-  recursions) and, for the inlining, thirteen more named
+  one each time), depth counted only by the calls that are not tail calls, mutual recursion (a million steps, and a deep chain whose
+  last step divides by zero, and a chain with calls that count depth past the limit, compared with the interpreter's `stack overflow`),
+  and the errors inside deep tail recursions) and, for the inlining, thirteen more named
   `inline_*` (argument adjustment and the order of evaluation; parameter substitution (`inline_subst`: locals, constants and
   expressions as arguments, a parameter assigned, the same local twice, side effects between pure arguments, a boxed local and
   an upvalue the callee changes, error messages that name the callee's parameter, chains four deep, recursion, methods, a site
@@ -640,10 +647,12 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   capture (integer, float, both kinds, boolean), kernels that assign upvalues (also several at once, both kinds, a boolean, a float
   that is assigned an integer), and one variable reached in two ways while it is assigned. The counters of a run in the four
   configurations: 46 loops taken over, 7 left to the interpreter by a guard or an abandoned run, 10 that cannot be compiled.
-- `tests/ast/tier.cpp`: 332 checks of the tier through the C++ API, with the nfcxx driver of the build. The first compile and
+- `tests/ast/tier.cpp`: 347 checks of the tier through the C++ API, with the nfcxx driver of the build. The first compile and
   its counters; a float argument to an integer kernel (a bailout, later a second version); recursion; a self tail call as a loop (a
   million deep in one entry with no abandoned run, an error inside it abandoned and then the interpreter's, `return (f(n))` against
-  `return f(n)` at the depth limit); mutual recursion; numeric
+  `return f(n)` at the depth limit); mutual tail recursion as jumps (a million deep in one entry, with the counters; an accumulator
+  that is a number of either kind passed along the chain; float arguments; an error at the end of a chain, the interpreter's message;
+  calls that count depth inside a chain, within and past the limit); mutual recursion; numeric
   upvalues and globals that change their value and their type; numbers of either kind (accumulators that start as an integer,
   results and parameters of either kind, bitwise operators, `//` and `%` and comparisons around 2^53 on them, a call made while a
   variable still had the type it was later widened from); a function rebound after it was compiled (a local, a global,
@@ -860,6 +869,26 @@ threshold 1 and 3.8 s at the default threshold, where every compiled run went up
 interpreter started it again, eight times per version, before the version was given up; after the change 0.039 s at threshold 1 and
 0.13 s at the default threshold, where the first 2000 calls of each version run in the interpreter and the rest run natively in one
 entry, with no abandoned run.
+
+**Mutual tail recursion** is a jump too (see "Soundness", Depth). The program `is_even(1000000)` and `is_odd(1000001)` (`return is_odd(n - 1)`
+and `return is_even(n - 1)`, each returning a boolean), with the tier at its default threshold and at threshold 1, best of three, warm
+cache. The machine was loaded and the interpreter's own time moved between the two sessions (0.66 s and 1.05 s on qbe), so the rows compare
+the drivers of one session with each other: the driver of the commit before the change (`tests/ast/driver.cpp` built from `origin/main`)
+and the one after it, run one after the other:
+
+| back end | driver | interpreter | tier, default threshold | tier, threshold 1 |
+| --- | --- | --- | --- | --- |
+| qbe | before | 1.05 s | 2.42 s | 2.20 s |
+| qbe | after | 0.66 s | 0.07 s | 0.06 s |
+| gcc | before | 0.38 s | 1.48 s | 1.20 s |
+| gcc | after | 0.53 s | 0.03 s | 0.03 s |
+
+Before the change the tier was 2.3 times slower than the interpreter on qbe and 3.9 on gcc. After it, the two calls run natively in one
+entry each (`tier_calls` counts them, and nothing is abandoned), and the program is 9 to 18 times faster than the interpreter. The
+other benchmarks of `tests/ast/bench` are where they were within the noise (`fib` and `mandel` on both back ends, before and after).
+Earlier, when the change was first measured on the same machine at a higher load, the interpreter was 0.68 s and the tier 1.44 s (qbe) and
+0.25 s and 0.81 s (gcc). The fix (`tier_dispatch`'s given-up path, and the jumps) was chosen over making such groups interpreted again:
+refusing to compile them would keep the interpreter's speed, and the jumps give the native speed for the same code, which is the larger gain.
 
 What the tier does not help: a work that is not a kernel (tables, strings, native functions, closures in the hot part), and a loop whose
 iterations are cheap enough that the compile of 0.2 to 0.3 s is not paid back. A tiny kernel called from an interpreted loop
