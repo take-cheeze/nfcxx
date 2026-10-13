@@ -135,7 +135,10 @@ puts '-- a definition on the module itself stops it'
 [
   ['a Ruby frame on RGSS::Profiler', "module RGSS::Profiler; def self.frame; yield; end; end\n", 'frame'],
   ['a Ruby section on RGSS::Profiler', "module RGSS::Profiler; def self.section(n); yield; end; end\n", 'section'],
-  ['a rebound constant', "module RGSS; Profiler = Object.new; end\n", 'frame']
+  ['a rebound constant', "module RGSS; Profiler = Object.new; end\n", 'frame'],
+  # A top-level module named Profiler is not RGSS::Profiler, but the owner test matches the last name segment
+  # (profiler_owner? in codegen_profiler_results.rb); a qualified-only test would inline past it.
+  ['a top-level Profiler module: frame keeps the call', "module Profiler; def self.frame(&b); b.call; end; end\n", 'frame']
 ].each do |what, extra, meth|
   c, = generate(extra)
   check.call("#{what}: #{meth} keeps the call", c.include?("BLOCK_FALLBACK :#{meth}") && !c.include?('#error'))
