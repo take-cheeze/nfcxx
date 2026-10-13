@@ -116,3 +116,39 @@ g = h.make_graph(
     initializer=[nh.from_array(np.array(a, dtype=np.int64), n) for n, a in
                  [("st", [0, 3]), ("en", [3, -5]), ("axs", [0, 1]), ("stp", [2, -2]), ("pads", [0, 1, 0, 0]), ("shp", [4, 2, 3])]])
 save("imp_slices", g, 18, {"x": x})
+
+# 5. the forward operators of hir (Conv with groups, MaxPool, AveragePool, the three normalizations, Gemm, Erf, Gather) as the onnx
+#    package writes them (its own attribute encoding, opset 18), computed by onnxruntime
+xc = rng.uniform(-1, 1, (2, 3, 6, 5)).astype(f32)
+w4 = rng.uniform(-1, 1, (4, 3, 2, 2)).astype(f32)
+w3 = rng.uniform(-1, 1, (3, 1, 2, 2)).astype(f32)
+g = h.make_graph(
+    [
+        h.make_node("Conv", ["x", "w4", "b4"], ["c1"], strides=[1, 2], pads=[0, 1, 1, 0]),
+        h.make_node("Conv", ["x", "w3"], ["c2"], group=3, strides=[1, 2], pads=[0, 1, 1, 0]),
+    ],
+    "conv", [vi("x", TP.FLOAT, [2, 3, 6, 5])], [vi("c1", TP.FLOAT, [2, 4, 6, 3]), vi("c2", TP.FLOAT, [2, 3, 6, 3])],
+    initializer=[nh.from_array(w4, "w4"), nh.from_array(w3, "w3"), nh.from_array(np.array([0.5, -0.5, 0.25, 0.0], dtype=f32), "b4")])
+save("imp_fwd_conv", g, 18, {"x": xc})
+
+xp = rng.uniform(-2, 2, (2, 3, 4, 5)).astype(f32)
+g = h.make_graph(
+    [
+        h.make_node("MaxPool", ["x"], ["mp"], kernel_shape=[2, 2], strides=[2, 2]),
+        h.make_node("AveragePool", ["x"], ["ap"], kernel_shape=[3, 3], pads=[1, 1, 1, 1]),
+        h.make_node("BatchNormalization", ["x", "s", "b", "mu", "va"], ["bn"], epsilon=0.001),
+        h.make_node("InstanceNormalization", ["x", "s", "b"], ["inn"]),
+        h.make_node("LayerNormalization", ["x", "ls", "lb"], ["lnn"], axis=-2),
+        h.make_node("Gemm", ["a", "w2", "c2"], ["gm"], alpha=1.5, beta=0.5, transB=0),
+        h.make_node("Erf", ["gm"], ["ef"]),
+        h.make_node("Gather", ["ef", "gidx"], ["gat"], axis=0),
+    ],
+    "pool_norm", [vi("x", TP.FLOAT, [2, 3, 4, 5]), vi("a", TP.FLOAT, [3, 4])],
+    [vi("mp", TP.FLOAT, [2, 3, 2, 2]), vi("ap", TP.FLOAT, [2, 3, 4, 5]), vi("bn", TP.FLOAT, [2, 3, 4, 5]), vi("inn", TP.FLOAT, [2, 3, 4, 5]),
+     vi("lnn", TP.FLOAT, [2, 3, 4, 5]), vi("gat", TP.FLOAT, [2, 2])],
+    initializer=[nh.from_array(np.array([0.5, 1.0, 1.5], dtype=f32), "s"), nh.from_array(np.array([0.1, -0.1, 0.0], dtype=f32), "b"),
+                 nh.from_array(np.array([0.0, 0.2, -0.4], dtype=f32), "mu"), nh.from_array(np.array([1.0, 0.5, 2.0], dtype=f32), "va"),
+                 nh.from_array(rng.uniform(0.5, 1.5, (4, 5)).astype(f32), "ls"), nh.from_array(rng.uniform(-0.5, 0.5, (4, 5)).astype(f32), "lb"),
+                 nh.from_array(rng.uniform(-1, 1, (4, 2)).astype(f32), "w2"), nh.from_array(np.array([0.25, -0.5], dtype=f32), "c2"),
+                 nh.from_array(np.array([1, 0], dtype=np.int64), "gidx")])
+save("imp_fwd_pool_norm", g, 18, {"x": xp, "a": rng.uniform(-1, 1, (3, 4)).astype(f32)})
