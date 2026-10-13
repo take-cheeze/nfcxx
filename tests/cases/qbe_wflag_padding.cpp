@@ -49,3 +49,4 @@ int main() {
   if (z.f != 1 || z.w.d != 6.0) bad |= 4;
   return bad;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

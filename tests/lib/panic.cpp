@@ -10,3 +10,4 @@ int main() {
   std::size_t i = a.size() + 3;   // out of range
   return a.at(i);                 // panics, so the process aborts
 }
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only
