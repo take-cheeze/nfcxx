@@ -119,6 +119,7 @@ void tier_view(Node* n, TierView& v) {
     v.kind = TV::K_RETURN;
     v.kids = ret->exprs_;
     v.multi_last = ret->multi_last_;
+    v.tail = ret->exprs_.size() == 1 && ret->exprs_[0]->is_call();  // the interpreter's own test (ReturnNode's constructor)
   } else if (dynamic_cast<BreakNode*>(n)) {
     v.kind = TV::K_BREAK;
   }
