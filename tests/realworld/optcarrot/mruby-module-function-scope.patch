@@ -1,0 +1,176 @@
+mruby gap: bare `module_function` (the "every method defined from here on
+in this module body becomes a module function" scope form, called with no
+arguments) is a literal no-op in vendored mruby -- src/class.c's own
+mrb_mod_module_function: `if (argc == 0) { /* set MODFUNC SCOPE if
+implemented */ return mod; }`, explicitly unimplemented upstream.
+
+`ruby -e 'module Foo; module_function; def bar(x); x*2; end; end; p
+Foo.bar(3)'` returns 6 in CRuby; the same script under unpatched vendored
+mruby raises `NoMethodError: undefined method 'bar' for Module`.
+
+The explicit named-method-list form (`module_function :bar, :baz`) already
+works and is the template this patch follows: it looks up the target
+method, flips its visibility to public, and installs that same method_t
+(same underlying proc/func -- no independent copy) into the module's
+singleton class via a second mrb_define_method_raw call. The scope form
+needs the identical installation, just decided automatically for every
+`def` in the scope instead of by an explicit symbol list -- and mruby
+already has a real, working mechanism for exactly that kind of "every def
+in this scope gets treated a certain way" decision: bare
+private/protected/public's own scope tracking (MRB_CI_VISIBILITY /
+MRB_ENV_VISIBILITY, set by mrb_mod_visibility, resolved lazily at each
+OP_DEF-triggered mrb_define_method_raw call via find_visibility_scope).
+
+This patch is that same mechanism, extended by one bit: mrb_callinfo.vis
+and REnv.flags both have a documented-but-unused ("ZERO") bit immediately
+after the existing 2-bit visibility field and its neighboring "separate
+module" break bit (mruby.h's own vis field comment: "5(ZERO):1(separate
+module):2(method visibility)"; proc.h's REnv flags comment: "1(ZERO):
+1(separate module):2(visibility):..."). MRB_CI_MODFUNC_P/MRB_CI_SET_MODFUNC
+and MRB_ENV_MODFUNC_P/MRB_ENV_SET_MODFUNC (mruby/internal.h, mruby/proc.h)
+claim exactly one of those previously-unused bits each; MRB_ENV_COPY_FLAGS_
+FROM_CI's copy width grows from 3 to 4 bits to carry the new one across
+into a block's captured env the same way it already carries the existing
+three. mrb_mod_module_function's argc==0 branch sets private visibility
+plus this new bit on the current scope (mirroring mrb_mod_visibility
+exactly, just fixed at MRB_METHOD_PRIVATE_FL instead of a caller-supplied
+value). mrb_define_method_raw's own scope-visibility-resolution branch
+checks the bit and, when set, additionally installs a public copy on the
+target's singleton class -- same shared-method_t technique as the explicit
+form above, so this patch adds no new proc-duplication machinery; it just
+triggers the existing one automatically.
+
+Verified: (1) singleton call, second def in the same scope, instance-side
+privacy (including that Kernel#send still reaches it, i.e. it is really
+private and not simply missing), a block/`Module.new do ... end` env-based
+scope, and that an explicit `public`/`private` call after `module_function`
+correctly ends the scope for later defs -- all match real Ruby's documented
+semantics. (2) Zero regressions against mruby's own full bundled mrbtest
+suite: identical 1874 OK / 0 KO / 2 Skip before and after this patch; the
+one "Crash" in both runs is UDPSocket.new failing in this sandboxed
+container (no socket permission), reproduces byte-for-byte on unpatched
+mruby too, unrelated to this change.
+
+Found scoping tools/optcarrot_probe (see its own README.md) against
+optcarrot's real upstream source, which uses exactly this bare-scope idiom
+in lib/optcarrot/driver.rb, lib/optcarrot/palette.rb, and lib/optcarrot/
+driver/misc.rb. Same patch-in-place treatment as this project's other
+mruby-*.patch files, for the same reason (no fork of upstream mruby/mruby
+this project controls).
+
+diff --git a/include/mruby.h b/include/mruby.h
+index 1c6e838..695319c 100644
+--- a/include/mruby.h
++++ b/include/mruby.h
+@@ -166,8 +166,8 @@ typedef struct {
+   uint8_t n:4;                  /* (15=*) c=n|nk<<4 */
+   uint8_t nk:4;                 /* (15=*) */
+   uint8_t cci;                  /* called from C function */
+-  uint8_t vis;                  /* 5(ZERO):1(separate module):2(method visibility) */
+-                                /* under 3-bit flags are copied to env, and after that, env takes precedence */
++  uint8_t vis;                  /* 4(ZERO):1(module function):1(separate module):2(method visibility) */
++                                /* under 4-bit flags are copied to env, and after that, env takes precedence */
+   mrb_sym mid;
+   const struct RProc *proc;
+   struct RProc *blk;
+diff --git a/include/mruby/internal.h b/include/mruby/internal.h
+index 4b06dd5..b7fa420 100644
+--- a/include/mruby/internal.h
++++ b/include/mruby/internal.h
+@@ -208,6 +208,14 @@ void mrb_free_shape(mrb_state*);
+ #define MRB_CI_SET_VISIBILITY(ci, visi) MRB_FLAGS_SET((ci)->vis, 0, 2, visi)
+ #define MRB_CI_VISIBILITY_BREAK_P(ci) MRB_FLAG_CHECK((ci)->vis, 2)
+ #define MRB_CI_SET_VISIBILITY_BREAK(ci) MRB_FLAG_ON((ci)->vis, 2)
++/* bit 3 of the 5 previously-unused ("ZERO") bits in mrb_callinfo.vis (see
++ * mruby.h's own field comment) -- bare `module_function` (module_function's
++ * "everything def'd from here on in this scope" form, called with no
++ * arguments) scope marker: subsequent method defs in this scope become
++ * module functions (private instance method + public singleton copy), the
++ * same way MRB_CI_VISIBILITY tracks bare private/protected/public's scope. */
++#define MRB_CI_MODFUNC_P(ci) MRB_FLAG_CHECK((ci)->vis, 3)
++#define MRB_CI_SET_MODFUNC(ci) MRB_FLAG_ON((ci)->vis, 3)
+ mrb_int mrb_ci_bidx(mrb_callinfo *ci);
+ mrb_int mrb_ci_nregs(mrb_callinfo *ci);
+ mrb_value mrb_exec_irep(mrb_state *mrb, mrb_value self, const struct RProc *p);
+diff --git a/include/mruby/proc.h b/include/mruby/proc.h
+index 3a8a405..6fde025 100644
+--- a/include/mruby/proc.h
++++ b/include/mruby/proc.h
+@@ -30,7 +30,7 @@ struct REnv {
+   mrb_sym mid;
+ };
+
+-/* flags (20bits): 1(ZERO):1(separate module):2(visibility):8(cioff/bidx):8(stack_len) */
++/* flags (20bits): 1(module function):1(separate module):2(visibility):8(cioff/bidx):8(stack_len) */
+ #define MRB_ENV_SET_LEN(e,len) ((e)->flags = (((e)->flags & ~0xff)|((unsigned int)(len) & 0xff)))
+ #define MRB_ENV_LEN(e) ((mrb_int)((e)->flags & 0xff))
+ #define MRB_ENV_CLOSE(e) ((e)->cxt = NULL)
+@@ -40,7 +40,12 @@ struct REnv {
+ #define MRB_ENV_SET_VISIBILITY(e, vis) MRB_FLAGS_SET((e)->flags, 16, 2, vis)
+ #define MRB_ENV_VISIBILITY(e) MRB_FLAGS_GET((e)->flags, 16, 2)
+ #define MRB_ENV_VISIBILITY_BREAK_P(e) MRB_FLAG_CHECK((e)->flags, 18)
+-#define MRB_ENV_COPY_FLAGS_FROM_CI(e, ci) MRB_FLAGS_SET((e)->flags, 16, 3, (ci)->vis)
++/* bit 19 -- the last previously-unused ("ZERO") bit here -- mirrors
++ * MRB_CI_MODFUNC_P/MRB_CI_SET_MODFUNC (mruby/internal.h) for a block's
++ * captured env, the same way MRB_ENV_VISIBILITY mirrors MRB_CI_VISIBILITY. */
++#define MRB_ENV_MODFUNC_P(e) MRB_FLAG_CHECK((e)->flags, 19)
++#define MRB_ENV_SET_MODFUNC(e) MRB_FLAG_ON((e)->flags, 19)
++#define MRB_ENV_COPY_FLAGS_FROM_CI(e, ci) MRB_FLAGS_SET((e)->flags, 16, 4, (ci)->vis)
+
+ /*
+  * Returns TRUE on success.
+diff --git a/src/class.c b/src/class.c
+index c5e9428..1a5512e 100644
+--- a/src/class.c
++++ b/src/class.c
+@@ -1058,6 +1058,23 @@ mrb_define_method_raw(mrb_state *mrb, struct RClass *c, mrb_sym mid, mrb_method_
+       find_visibility_scope(mrb, c, 0, &ci, &e);
+       mrb_assert(ci || e);
+       MRB_SET_VISIBILITY_FLAGS(flags, (uint32_t)(e ? MRB_ENV_VISIBILITY(e) : MRB_CI_VISIBILITY(ci)) << 25);
++      if (e ? MRB_ENV_MODFUNC_P(e) : MRB_CI_MODFUNC_P(ci)) {
++        /* Bare `module_function` scope (mrb_mod_module_function's argc==0
++         * case, below in this file): this def also becomes a public
++         * singleton (module-function) method, sharing the same underlying
++         * proc/func -- the same proc-into-a-second-class mt_put technique
++         * mrb_mod_module_function's own explicit named-method-list form
++         * (argc>0 case) already uses. No infinite recursion: m2.flags is
++         * already resolved (PUBLIC, not MT_VDEFAULT) and its target is a
++         * singleton class, which takes the "singleton methods are always
++         * public" branch above instead of this one. */
++        mrb_method_t m2;
++        m2.flags = flags;
++        MRB_SET_VISIBILITY_FLAGS(m2.flags, MRB_METHOD_PUBLIC_FL);
++        if (MRB_METHOD_PROC_P(m)) { m2.as.proc = ptr.proc; } else { m2.as.func = ptr.func; }
++        prepare_singleton_class(mrb, (struct RBasic*)c);
++        mrb_define_method_raw(mrb, c->c, mid, m2);
++      }
+     }
+   }
+   mt_put(mrb, h, mid, flags, ptr);
+@@ -3874,7 +3891,26 @@ mrb_mod_module_function(mrb_state *mrb, mrb_value mod)
+
+   mrb_get_args(mrb, "*", &argv, &argc);
+   if (argc == 0) {
+-    /* set MODFUNC SCOPE if implemented */
++    /* Bare module_function: every method subsequently defined in this
++     * scope becomes a module function (private instance method plus a
++     * public singleton copy) -- mirrors bare private/protected/public's
++     * own scope tracking just above (mrb_mod_visibility), reusing the
++     * same find_visibility_scope lookup and CI/ENV flag pair, plus the
++     * new MODFUNC bit (see mruby/internal.h and mruby/proc.h) that
++     * mrb_define_method_raw's own OP_DEF-time visibility resolution
++     * (above in this file) checks to decide whether to also install the
++     * singleton copy. */
++    mrb_callinfo *ci;
++    struct REnv *e;
++    find_visibility_scope(mrb, NULL, 1, &ci, &e);
++    if (e) {
++      MRB_ENV_SET_VISIBILITY(e, MRB_METHOD_PRIVATE_FL >> 25);
++      MRB_ENV_SET_MODFUNC(e);
++    }
++    else {
++      MRB_CI_SET_VISIBILITY(ci, MRB_METHOD_PRIVATE_FL >> 25);
++      MRB_CI_SET_MODFUNC(ci);
++    }
+     return mod;
+   }

@@ -76,6 +76,9 @@ jobs:
       - name: mruby rake build with nfcc (both backends)
         run: tests/realworld/run_mruby.sh
 
+      - name: optcarrot benchmark on an nfcc-built mruby (both backends, checksum 59662)
+        run: tests/realworld/run_optcarrot.sh
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats

@@ -91,7 +91,8 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 - `hir::Graph` holds `Value`s (name, dtype, static shape) and `Node`s that are ONNX operators with ONNX's names, inputs and
   attributes: `Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Add Sub Mul Div Mod Max Min And Or Xor BitwiseAnd
   BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Transpose Reshape Squeeze Unsqueeze
-  Expand ReduceSum ReduceMean ReduceMax ReduceMin ReduceProd Softmax LogSoftmax Slice Concat Pad Gather Tile CumSum ArgMax ArgMin Pow Floor
+  Expand ReduceSum ReduceMean ReduceMax ReduceMin ReduceProd Softmax LogSoftmax Slice Concat Pad Gemm Gather Erf Conv MaxPool
+  AveragePool BatchNormalization (inference) InstanceNormalization LayerNormalization Tile CumSum ArgMax ArgMin Pow Floor
   Ceil IsNaN IsInf`, and the forward operators listed in `nfcuop_hir.hpp`. Operands that ONNX wants as constants
   (Reshape's shape, the axes of Squeeze/Unsqueeze/Reduce*, Slice's bounds) are initializers; `add_node` infers dtype and shape
   with ONNX's rules (numpy broadcasting, no implicit dtype conversion, `Div` on ints truncates, `Mod` with `fmod=0` follows the

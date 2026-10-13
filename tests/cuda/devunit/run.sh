@@ -3,6 +3,9 @@
 # angle include is carried (QK_K); a host struct with a std::string member, and a host function whose head returns an
 # enum, are not; a typedef, an enum and an anonymous union are. The macro case also runs on the GPU through the driver.
 # File-scope enums: an anonymous and a named one used by a kernel are carried and run on the GPU; a host-only one is not.
+# Dynamic shared memory: `extern __shared__` used bare and subscripted in a template device function (mmq.cuh's
+# shape), with a static __shared__ array of the same name in another kernel; the device unit matches its golden and
+# the program prints "dynshared: 0 mismatches" on the GPU.
 # Needs the CUDA toolkit (CUDA_HOME, default /usr/local/cuda) and an NVIDIA GPU for the run; the golden check
 # needs only the rewriter (mruby).
 cd "$(dirname "$0")"
@@ -53,6 +56,23 @@ if [ -f "$cuda/include/cuda_runtime.h" ] && [ -e "$cuda/lib64/libcudart.so" ] &&
     echo "enum run: $run"
   else
     echo "enum run: FAIL"; grep -v "pragma\|NV_SILENCE\|^ *\^\|warning\|^ *$" "$out/enum.log" | head -5; fail=1
+  fi
+fi
+# 4. Dynamic shared memory: the device unit matches its golden, and the GPU run checks the values.
+if ! "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device src/dynshared.cu > "$out/dynshared.dev.cpp" \
+   || ! diff -u src/dynshared.device.expected.cpp "$out/dynshared.dev.cpp"; then
+  echo "device unit dynshared: FAIL"; fail=1
+else
+  echo "device unit dynshared: ok"
+fi
+if [ -f "$cuda/include/cuda_runtime.h" ] && [ -e "$cuda/lib64/libcudart.so" ] && command -v nvidia-smi >/dev/null; then
+  export TMPDIR=$out NFCXX_BACKEND=gcc
+  if "$root/nfcxx" -c -I"$cuda/include" src/dynshared.cu -o "$out/dynshared.o" > "$out/dynshared.log" 2>&1 \
+     && "$root/nfcxx" "$out/dynshared.o" -L"$cuda/lib64" -lcudart -o "$out/dynshared" >> "$out/dynshared.log" 2>&1 \
+     && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dynshared") && [[ "$run" == "dynshared: 0 mismatches" ]]; then
+    echo "dynshared run: $run"
+  else
+    echo "dynshared run: FAIL"; grep -v "pragma\|NV_SILENCE\|^ *\^\|warning\|^ *$" "$out/dynshared.log" | head -5; fail=1
   fi
 fi
 exit $fail
