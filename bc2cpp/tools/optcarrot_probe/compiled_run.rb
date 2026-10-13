@@ -457,7 +457,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
       # QBE has no indirect jump, so the computed-goto dispatch (goto *label, which EDG emits for the C++ VM) cannot be
       # compiled by the qbe back end; the switch dispatch can. Only the qbe build changes; the gcc build keeps computed goto.
-      cc.defines << 'MRB_USE_VM_SWITCH_DISPATCH' if ENV['NFCXX_BACKEND'] == 'qbe'
+      if ENV['NFCXX_BACKEND'] == 'qbe'
+        cc.defines << 'MRB_USE_VM_SWITCH_DISPATCH'
+        cxx.defines << 'MRB_USE_VM_SWITCH_DISPATCH'
+      end
       #{debug ? 'enable_debug' : '# Keep the toolchain optimization defaults for FPS measurements.'}
     end
     # mruby's gperf step (mrbgems/mruby-compiler/mrbgem.rake) runs on MRuby.targets['host'], which the default
