@@ -114,6 +114,16 @@ class CodeGen
       argc.zero? && class_test_name_safe?(name) ? [0, class_test_object(:falsy, nil)] : nil
     when 'class'
       argc.zero? && insn.op == 'SEND0' && class_test_name_safe?(name) ? [0, CLASS_OF] : nil
+    when 'field?'
+      # LCF.field?(obj, :name) (lcf.rb): a true answer needs obj to answer :name, so for a name nil does not answer,
+      # the true edge is a non-nil obj. The false edge says nothing (any object may answer false).
+      return nil unless argc == 2 && insn.op == 'SEND' && irep.agreed_constant_name(index, insn.reg.to_s) == 'LCF'
+      return nil unless @registry.fetch('field?', []).all? { |d| d.owner.start_with?('LCF') }
+
+      meth = irep.walk_dominating_writers(index - 1, (insn.reg.to_i + 2).to_s, use: index, follow_moves: true) do |writer|
+        writer.sym if writer.op == 'LOADSYM'
+      end
+      meth.is_a?(String) && nil_unanswerable?(meth) ? [1, class_test_object(:present, nil)] : nil
     when 'respond_to?'
       return nil unless argc == 1 && insn.op == 'SEND' && class_test_name_safe?(name) && respond_to_missing_absent?
 
@@ -268,6 +278,9 @@ class CodeGen
 
   # [passing bits, failing bits] over the bits that name a class today.
   def class_test_partition(test)
+    # :present (LCF.field?): the true edge drops nil and keeps every other bit; the false edge keeps all.
+    return [~NumericFlow::NIL, -1] if test.kind == :present
+
     pass = 0
     fail = 0
     named = CLASS_TEST_CORE_BITS.merge((@numeric_class_bits || {}).to_h { |klass, bit| [bit, klass] })
@@ -292,6 +305,7 @@ class CodeGen
 
   def compute_class_test_positive(test)
     return NumericFlow::NIL if test.kind == :nil
+    return nil if test.kind == :present
     return nil if test.kind == :falsy
     return class_test_responds_positive(test.klass) if test.kind == :responds
 
