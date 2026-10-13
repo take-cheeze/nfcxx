@@ -32,6 +32,9 @@ cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=()
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
+# CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
+# in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
+obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
 sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); isa=()
@@ -77,10 +80,12 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   local base; base=$(basename "$src" .cu)
   # The -I directories: the rewriter inlines the project headers they name (quoted and angle-bracket includes).
   local incs=(); local f; for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*) incs+=("$f");; esac; done
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} "$src" > "$copy" || exit $?
+  # Kernel name obfuscation: one seed for both copies of the file (the host copy and the device unit must agree).
+  local obf=(); if [ "$obfuscate" = 1 ]; then obf=(--obfuscate="${NFCXX_OBFUSCATE_SEED:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"); fi
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} ${obf[@]+"${obf[@]}"} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
   "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
@@ -94,6 +99,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
     --backend=*) backend=${1#--backend=}; backend_explicit=1 ;;
+    --obfuscate-kernels) obfuscate=1 ;;
     -fsanitize=address) asan=1 ;;
     -fno-sanitize=address) asan=0 ;;
     -fsanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=address; docs/notes/asan.md)" >&2; exit 2 ;;
