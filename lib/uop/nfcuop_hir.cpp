@@ -227,6 +227,18 @@ Value infer(const Graph& g, const Node& n) {
     }
     return Value{"", DType::Int64, out};
   }
+  if (op == "Tile") {   // repeats: a constant, one entry per dimension, each at least 1 (ONNX allows 0, which gives an empty tensor)
+    want_inputs(2, 2);
+    const Shape& d = V(0).shape;
+    std::vector<int64_t> reps = consts(1);
+    if (reps.size() != d.size()) fail("repeats has " + std::to_string(reps.size()) + " entries for rank " + std::to_string(d.size()));
+    Shape out = d;
+    for (size_t k = 0; k < d.size(); k++) {
+      if (reps[k] < 1) fail("repeats must be at least 1, got " + std::to_string(reps[k]));
+      out[k] = d[k] * reps[k];
+    }
+    return Value{"", V(0).dtype, out};
+  }
   if (op == "CumSum") {   // the axis is a constant: a scalar (or one element) of int32 or int64
     want_inputs(2, 2);
     const Value& x = V(0);

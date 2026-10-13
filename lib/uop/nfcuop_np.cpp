@@ -599,6 +599,33 @@ Tensor stack(const std::vector<Tensor>& ts, int64_t axis) {
   return concatenate(parts, axis);
 }
 
+Tensor tile(const Tensor& a, const Shape& reps) {
+  check(a);
+  for (int64_t r : reps)
+    if (r < 1) throw Error("np: tile repetitions must be at least 1, got " + std::to_string(r));
+  const size_t n = std::max(reps.size(), static_cast<size_t>(a.ndim()));
+  Shape rp(n - reps.size(), 1);
+  rp.insert(rp.end(), reps.begin(), reps.end());
+  Tensor x = a;
+  if (static_cast<size_t>(a.ndim()) < n) {
+    Shape s(n - static_cast<size_t>(a.ndim()), 1);
+    s.insert(s.end(), a.shape().begin(), a.shape().end());
+    x = a.reshape(s);
+  }
+  return node(x, "Tile", {x.id(), int64_const(x, rp).id()});
+}
+
+Tensor take(const Tensor& a, const Tensor& indices, int64_t axis) {
+  same_session(a, indices);
+  if (!is_int(indices.dtype())) throw Error("np: take needs integer indices, got " + std::string(name(indices.dtype())));
+  Tensor src = axis == None ? a.flatten() : a;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, a.ndim());
+  if (src.dtype() != DType::Bool) return node(src, "Gather", {src.id(), indices.id()}, {Attribute::Int("axis", ax)});
+  // ONNX Gather has no bool data: the values go through the default int and back (exact)
+  Tensor data = cast_to(src, a.session().default_int);
+  return cast_to(node(data, "Gather", {data.id(), indices.id()}, {Attribute::Int("axis", ax)}), DType::Bool);
+}
+
 Tensor pow(const Tensor& a, const Tensor& b) {
   same_session(a, b);
   DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));

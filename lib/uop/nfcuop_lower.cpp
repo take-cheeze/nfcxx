@@ -244,6 +244,16 @@ ut::Tensor Lowerer::lower_one(int id) {
     else if (op == "Erf") out = erf_tensor(arg(0));
     else if (op == "ArgMax" || op == "ArgMin")
       out = (op == "ArgMax" ? ut::argmax : ut::argmin)(arg(0), n.attr_int("axis", 0), n.attr_int("keepdims", 1) != 0, n.attr_int("select_last_index", 0) != 0);
+    else if (op == "Tile") {   // (d0, d1, ..) -> (1, d0, 1, d1, ..) -> (r0, d0, r1, d1, ..) by Expand -> (r0 d0, r1 d1, ..)
+      ut::Tensor x = arg(0);
+      const std::vector<int64_t> reps = ints(1);
+      Shape inter, big;
+      for (size_t k = 0; k < x.shape().size(); k++) {
+        inter.insert(inter.end(), {1, x.shape()[k]});
+        big.insert(big.end(), {reps[k], x.shape()[k]});
+      }
+      out = x.reshape(inter).broadcast_to(big).reshape(v.shape);
+    }
     else if (op == "CumSum") out = arg(0).cumsum(ints(1).at(0), n.attr_int("exclusive", 0) != 0, n.attr_int("reverse", 0) != 0);
     else if (op == "Pow") out = ut::pow(arg(0), arg(1));
     else if (op == "Floor") out = arg(0).floor();

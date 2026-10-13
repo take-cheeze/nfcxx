@@ -456,6 +456,54 @@ static void argmax_and_argmin() {
   onnx_round_trip(np, {{"am", fx.argmax(1)}, {"an", fx.argmin(0, true)}, {"af", fx.argmax()}}, {{"x", fxa}});
 }
 
+static void tile_and_take() {
+  using hir::Attribute;
+  const DType i32 = DType::Int32, f32 = DType::Float32, b = DType::Bool;
+  Session np;
+  Tensor a = np.array({1, 2});
+  CHECK(tile(a, {3}).str() == "[1., 2., 1., 2., 1., 2.]" && tile(a, 3).shape() == (Shape{6}));
+  CHECK(tile(a, {2, 2}).str() == "[[1., 2., 1., 2.], [1., 2., 1., 2.]]");   // a is read as (1, 2)
+  Tensor m = np.array2d({{1, 2}, {3, 4}});
+  CHECK(tile(m, {2}).str() == "[[1., 2., 1., 2.], [3., 4., 3., 4.]]");   // reps is read as (1, 2)
+  CHECK(tile(m, {2, 1, 3}).shape() == (Shape{2, 2, 6}) && tile(m, {2, 1, 3}).tolist()[23] == 4);   // [1][1][5] = m[1][1]
+  CHECK(tile(np.array({5}, i32), {2}).str() == "[5, 5]" && tile(np.array({5}, i32), {2}).dtype() == i32);
+  CHECK(tile(np.array({1, 0}, b), {2}).str() == "[True, False, True, False]");
+  CHECK(tile(a, {1}).str() == "[1., 2.]");
+  CHECK_THROWS(tile(a, {0}));
+  CHECK_THROWS(tile(a, {2, -1}));
+  // take: along an axis, with negative indices, indices of any shape, a scalar index, the flattened array for axis None
+  Tensor arr = np.array2d({{10, 11, 12}, {20, 21, 22}});
+  Tensor idx = np.array({2, -1}, i32);
+  CHECK(take(arr, idx, 1).str() == "[[12., 12.], [22., 22.]]");
+  CHECK(take(arr, np.array({1, 0}, i32), 0).str() == "[[20., 21., 22.], [10., 11., 12.]]");
+  CHECK(take(arr, np.array({2, 0}, i32)).str() == "[12., 10.]");   // axis None: the flattened array
+  CHECK(take(arr, np.array({0, 1}, DType::Int64), -1).str() == "[[10., 11.], [20., 21.]]");
+  CHECK(take(arr, np.array({0, 1, 2, 2}, i32).reshape({2, 2}), 1).shape() == (Shape{2, 2, 2}));
+  CHECK(take(arr, np.scalar(1, i32), 0).str() == "[20., 21., 22.]" && take(arr, np.scalar(1, i32), 0).shape() == (Shape{3}));
+  CHECK(take(np.array({1, 0, 1}, b), np.array({0, 2}, i32)).str() == "[True, True]" && take(np.array({1, 0, 1}, b), np.array({0, 2}, i32)).dtype() == b);
+  CHECK(take(np.array({3, 4}, i32), np.array({1}, i32)).dtype() == i32);
+  CHECK_THROWS(take(arr, np.array({0.0}), 1));        // indices must be integers
+  CHECK_THROWS(take(arr, np.array({3}, i32), 1));     // out of range (constant indices are checked)
+  CHECK_THROWS(take(arr, idx, 2));
+  // hir errors for Tile
+  hir::Graph hg;
+  int x = hg.add_input("x", f32, {2, 3});
+  int r2 = hg.add_initializer("", Array(DType::Int64, {2}, {Scalar::from_int(DType::Int64, 2), Scalar::from_int(DType::Int64, 1)}));
+  int r0 = hg.add_initializer("", Array(DType::Int64, {2}, {Scalar::from_int(DType::Int64, 0), Scalar::from_int(DType::Int64, 1)}));
+  int r3 = hg.add_initializer("", Array(DType::Int64, {3}, {Scalar::from_int(DType::Int64, 1), Scalar::from_int(DType::Int64, 1), Scalar::from_int(DType::Int64, 1)}));
+  int rin = hg.add_input("rin", DType::Int64, {2});
+  CHECK(hg.value(hg.add_node("Tile", {x, r2})).shape == (Shape{4, 3}));
+  CHECK_THROWS(hg.add_node("Tile", {x, r0}));
+  CHECK_THROWS(hg.add_node("Tile", {x, r3}));
+  CHECK_THROWS(hg.add_node("Tile", {x, rin}));       // repeats must be a constant
+  // ONNX round trip and the read-back graph
+  Tensor fx = np.placeholder("x", {2, 3});
+  Tensor ix = np.placeholder("i", {4}, i32);
+  Array fxa = Array::from_doubles(f32, {2, 3}, {1, -2, 3, 4, -5, 6});
+  Array ixa = Array::from_doubles(i32, {4}, {1, -1, 0, 2});
+  onnx_round_trip(np, {{"tl", tile(fx, {2, 2})}, {"tk", take(fx, ix.reshape({2, 2}), 1)}, {"tf", take(fx, ix)}}, {{"x", fxa}, {"i", ixa}});
+}
+
 static void graph_and_onnx(const std::string& dir) {
   const DType i32 = DType::Int32;
   Session np;
@@ -594,6 +642,14 @@ static void graph_and_onnx(const std::string& dir) {
       Array ax = Array::from_doubles(DType::Float32, {2, 3}, {1, 5, 5, 7, 2, -9});
       emit("argext", s, {{"amax0", x2.argmax(0)}, {"amin1", x2.argmin(1, true)}, {"amax", x2.argmax()}}, {{"x", ax}});
     }
+    {  // tile and take (Gather over an axis)
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3});
+      Tensor i2 = s.placeholder("i", {4}, i32);
+      Array ax = Array::from_doubles(DType::Float32, {2, 3}, {1, -2, 3, 4, -5, 6});
+      Array ai = Array::from_doubles(i32, {4}, {1, -1, 0, 2});
+      emit("tile_take", s, {{"tl", tile(x2, {2, 2})}, {"tk", take(x2, i2, 1)}, {"tf", take(x2, i2.reshape({2, 2}))}}, {{"x", ax}, {"i", ai}});
+    }
     {  // matmul variants
       Session s;
       Tensor x2 = s.placeholder("x", {2, 3, 4});
@@ -612,6 +668,7 @@ int main(int argc, char** argv) {
   new_operators();
   cumsum_and_prod();
   argmax_and_argmin();
+  tile_and_take();
   graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);

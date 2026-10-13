@@ -208,6 +208,14 @@ Tensor logical_not(const Tensor& a);
 Tensor pow(const Tensor& a, const Tensor& b);
 Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis = 0);
 Tensor stack(const std::vector<Tensor>& ts, int64_t axis = 0);
+// numpy's tile: `reps` has one entry per dimension; a shorter reps gets leading 1s, and a shorter shape gets leading 1s (the
+// result has max(ndim, reps) dimensions). Every repetition is at least 1 (numpy's 0 would give an empty tensor).
+Tensor tile(const Tensor& a, const Shape& reps);
+inline Tensor tile(const Tensor& a, int64_t reps) { return tile(a, Shape{reps}); }
+// numpy's take: the elements of `a` at `indices` along `axis` (ONNX Gather); axis None takes from the flattened array, like numpy.
+// The indices must be integers (a Tensor of them, e.g. np.array({0, 2}, DType::Int32)); negative ones count from the end.
+// Constant indices are checked against the axis (an error if out of range); runtime ones are not (they select nothing, a -0.0).
+Tensor take(const Tensor& a, const Tensor& indices, int64_t axis = None);
 inline Tensor relu(const Tensor& a) { return a.relu(); }
 inline Tensor exp(const Tensor& a) { return a.exp(); }
 inline Tensor log(const Tensor& a) { return a.log(); }
