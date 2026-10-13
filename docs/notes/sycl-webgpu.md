@@ -1,6 +1,6 @@
 # SYCL on WebGPU
 
-Status: **working for a SYCL 2020 subset**, checked on Chromium's WebGPU (SwiftShader, so no GPU is needed). Kernels written
+Status: **working for a SYCL 2020 subset** (the Vulkan backend, which lifts most of the limits below, is in `docs/notes/sycl-vulkan.md`), checked on Chromium's WebGPU (SwiftShader, so no GPU is needed). Kernels written
 as C++ lambdas are compiled to WGSL by `scripts/pathb-wgsl-emit.rb` and run through WebGPU; the rest of the program runs as
 native code built by nfcxx. `tests/sycl/run.sh` is the regression suite; `tests/sycl/compat/` measures how much real SYCL
 code the library accepts.
