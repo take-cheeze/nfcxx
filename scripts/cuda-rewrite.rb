@@ -1549,6 +1549,43 @@ BUILTIN_DEFS = {
   "powf" => "extern \"C\" float __nfcxx_expf(float);\nextern \"C\" float __nfcxx_logf(float);\n" \
             "static inline float powf(float x, float y) { if (y == 0.0f) return 1.0f; if (x == 0.0f) return y > 0.0f ? 0.0f : 1.0f / 0.0f; " \
             "if (x < 0.0f) return (x - x) / (x - x); return __nfcxx_expf(y * __nfcxx_logf(x)); }\n",
+  # Constants of <math.h> and <float.h> that the device unit uses.
+  "INFINITY" => "#define INFINITY __builtin_inff()\n",
+  "FLT_MAX" => "#define FLT_MAX 3.40282346638528859812e+38F\n",
+  "uintptr_t" => "typedef unsigned long uintptr_t;\n",
+  # floorf and trunc: one PTX instruction each (cvt.rmi, cvt.rzi: exact). roundf is halfway away from zero, which is
+  # trunc plus one when the fraction is at least one half (the fraction x - trunc(x) is exact for every float).
+  "floorf" => "extern \"C\" float __nfcxx_floorf(float);\nstatic inline float floorf(float a) { return __nfcxx_floorf(a); }\n",
+  "trunc" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float trunc(float a) { return __nfcxx_truncf(a); }\n",
+  "roundf" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float roundf(float a) { float t = __nfcxx_truncf(a); float d = a - t; " \
+              "if (d >= 0.5f) t += 1.0f; else if (d <= -0.5f) t -= 1.0f; return t; }\n",
+  # sinf and cosf (the helper is shared, see needed in the rewrite): Cephes-style. The argument is reduced to r in
+  # [-pi/4, pi/4] by the nearest multiple n of pi/2 (three-part constant, exact for n < 2^15 or so), and the quadrant
+  # n mod 4 picks sin or cos of r and the sign. Polynomials of Cephes' sinf/cosf. Error and bound: docs/notes/gpu.md.
+  "__nfcxx_sincosf" => "extern \"C\" int __nfcxx_rni_s32(float);\n" \
+    "static inline float __nfcxx_sincosf(float x, int cosine) { if (x != x) return x; if (x - x != 0.0f) return x - x; " \
+    "double d = (double)x; double a = d < 0.0 ? -d : d; int n = (int)(a * 0.63661977236758134 + 0.5); double fn = (double)n; " \
+    "double r = (a - fn * 1.57079632673412561417) - fn * 6.07710050650619224932e-11; double r2 = r * r; " \
+    "int q = (cosine ? n + 1 : n) & 3; double s = r, t = r, c = 1.0, u = 1.0; " \
+    "for (int i = 1; i <= 8; i++) { t = -t * r2 / (double)((2 * i) * (2 * i + 1)); s += t; } " \
+    "for (int i = 1; i <= 8; i++) { u = -u * r2 / (double)((2 * i - 1) * (2 * i)); c += u; } " \
+    "double v = (q & 1) ? c : s; if (q >= 2) v = -v; if (!cosine && 1.0 / d < 0.0) v = -v; return (float)v; }\n",
+  "sinf" => "static inline float sinf(float x) { return __nfcxx_sincosf(x, 0); }\n",
+  "cosf" => "static inline float cosf(float x) { return __nfcxx_sincosf(x, 1); }\n",
+  # expm1 in double: a Taylor series for |x| < 1/32 (no cancellation), else exp(x) - 1 with exp(x) = 2^k * exp(r), r = x - k ln2
+  # (|r| <= ln2 / 2, Taylor to r^14). tanhf(x) = e / (e + 2) with e = expm1(2|x|); |x| >= 10 is 1 in float.
+  "__nfcxx_expm1f" => "static inline double __nfcxx_expm1d(double x) { if (x < 0.03125 && x > -0.03125) { double s = x, t = x; " \
+    "for (int i = 2; i <= 12; i++) { t = t * x / (double)i; s += t; } return s; } " \
+    "int k = (int)(x * 1.4426950408889634 + (x < 0.0 ? -0.5 : 0.5)); double r = (x - (double)k * 0.6931471805599453) - (double)k * 2.3190468138462996e-17; " \
+    "double s = 1.0, t = 1.0; for (int i = 1; i <= 14; i++) { t = t * r / (double)i; s += t; } " \
+    "double p = 1.0, b = k < 0 ? 0.5 : 2.0; int m = k < 0 ? -k : k; while (m) { if (m & 1) p *= b; b *= b; m >>= 1; } " \
+    "return s * p - 1.0; }\n" \
+    "static inline float __nfcxx_expm1f(float x) { if (x != x || x == 0.0f) return x; if (x > 100.0f) return 1.0f / 0.0f; if (x < -100.0f) return -1.0f; " \
+    "return (float)__nfcxx_expm1d((double)x); }\n",
+  "expm1f" => "static inline float expm1f(float x) { return __nfcxx_expm1f(x); }\n",
+  "tanhf" => "static inline float tanhf(float x) { if (x != x || x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
+    "if (ax >= 10.0) return x < 0.0f ? -1.0f : 1.0f; double e = __nfcxx_expm1d(2.0 * ax); double t = e / (e + 2.0); " \
+    "return (float)(d < 0.0 ? -t : t); }\n",
   # memcpy and memset as byte loops (the device unit has no C library; the host copy keeps the real header).
   "memcpy" => "static inline void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = (unsigned char *)d; " \
               "const unsigned char *b = (const unsigned char *)s; for (size_t i = 0; i < n; i++) a[i] = b[i]; return d; }\n",
@@ -2382,6 +2419,9 @@ def device_tu(text)
     %w[__hadd2 __hsub2 __hmul2 __hdiv2].each { |n| needed[n] = true }
   end
   needed["is_same"] = true if needed["is_same_v"]   # std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
+  # Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
+  needed["__nfcxx_sincosf"] = true if needed["sinf"] || needed["cosf"]
+  needed["__nfcxx_expm1f"] = true if needed["expm1f"] || needed["tanhf"]
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
