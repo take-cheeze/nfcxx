@@ -18,8 +18,9 @@ object's 8-byte granule and 32 zero bytes into the same data item, and the unit'
 `.init_array`) poisons them. Both use `__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says
 `stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
-leading redzone (an access before the object is not reported); thread-local globals get none; objects over 16-byte
-alignment, variable-length arrays and `alloca` get no redzones. Use after scope is covered (next section). Not yet:
+leading redzone (an access before the object is not reported); thread-local globals get none; C++ variable-length arrays
+(EDG's `__vla_alloc` pool) get none. Objects over 16-byte alignment, C-input VLAs and `alloca` have redzones. Use after
+scope is covered (next section). Not yet:
 use-after-return (the `ASAN-ONLY: gcc` case skips on qbe), and volatile (qbe rejects volatile stores, a known limit). Block
 copies and `va_arg` loads are checked as ordinary accesses.
 
@@ -52,8 +53,9 @@ Limits, all false negatives (nothing is reported that is valid, the missing chec
   through a pointer kept from that block is not reported.
 - Use after return (a pointer to a local of a block that `return` left, read after the function returned) needs a fake
   stack; not done. `return` itself poisons nothing.
-- Variable-length arrays and `alloca` have no redzones, so they get no scope poison either (the other milestone, `asan-plan.md`).
-- Objects over 16-byte alignment get none.
+- C++ variable-length arrays are EDG's `__vla_alloc` pool, so they have neither redzones nor a scope poison.
+- `alloca` has redzones but no scope poison, on purpose: C keeps its memory until the function returns, so a read after its
+  block is valid. C-input VLAs are scope objects (poisoned where their block ends, from entry-block slots).
 
 The default (non-ASan) output is byte-identical: every hook is gated on `asanon`, and the scope fields are only set and read
 under it.

@@ -67,6 +67,8 @@ int main(int argc, char** argv) {
                    static_cast<unsigned long long>(st.tier_failed), static_cast<unsigned long long>(st.tier_calls),
                    static_cast<unsigned long long>(st.tier_bailouts), static_cast<unsigned long long>(st.tier_guard_misses),
                    static_cast<unsigned long long>(st.tier_aborts));
+      std::fprintf(stderr, "tier-osr: runs=%llu bailouts=%llu ineligible=%llu\n", static_cast<unsigned long long>(st.tier_osr_runs),
+                   static_cast<unsigned long long>(st.tier_osr_bailouts), static_cast<unsigned long long>(st.tier_osr_ineligible));
     }
   }
   return rc;

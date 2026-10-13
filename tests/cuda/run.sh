@@ -22,7 +22,7 @@ trap 'rm -rf "$out"' EXIT
 rw() { "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1"; }
 
 # 1. The rewrite matches the goldens.
-for c in rewrite/cases mul2 rewrite/template; do
+for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage rewrite/member_linkage; do
   if rw "$c.cu" > "$out/$(basename "$c").cpp" && diff -u "$c.expected.cpp" "$out/$(basename "$c").cpp"; then
     echo "rewrite $c: ok"
   else
@@ -36,6 +36,34 @@ if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/template
   echo "device unit template: ok"
 else
   echo "device unit template: FAIL"; fail=1
+fi
+
+# 1b3. The device pass takes only the branches of the conditionals it evaluates (#if/#elif/#else/#ifndef), so the
+# kernels of the untaken branches are not in the unit and not in the kernel list.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device --kernels="$out/cond.kernels" rewrite/conditional_kernel.cu > "$out/cond.device.cpp" \
+   && diff -u rewrite/conditional_kernel.device.expected.cpp "$out/cond.device.cpp" \
+   && [ "$(cat "$out/cond.kernels")" = "$(printf 'fast_kernel\narch_kernel\nifndef_kernel')" ]; then
+  echo "device unit conditionals: ok"
+else
+  echo "device unit conditionals: FAIL"; fail=1
+fi
+
+# 1b2. The device unit of __syncwarp (both forms) matches its golden.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/syncwarp.cu > "$out/syncwarp.device.cpp" \
+   && diff -u rewrite/syncwarp.device.expected.cpp "$out/syncwarp.device.cpp"; then
+  echo "device unit syncwarp: ok"
+else
+  echo "device unit syncwarp: FAIL"; fail=1
+fi
+
+# 1c. Included headers are expanded once each: a diamond-shaped include tree (each level includes the next one three
+# times) gave 46k lines and took 6 s with the expansion repeated per include; the device unit is 110 lines and
+# takes milliseconds. The 10 s limit catches the blow-up again.
+if timeout 10 "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/include/main.cu > "$out/include.device.cpp" \
+   && diff -u rewrite/include/main.device.expected.cpp "$out/include.device.cpp"; then
+  echo "device unit include tree: ok"
+else
+  echo "device unit include tree: FAIL"; fail=1
 fi
 
 # 2. Unsupported launch forms are refused with exit 3.

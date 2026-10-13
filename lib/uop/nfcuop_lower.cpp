@@ -1,12 +1,34 @@
 // nfcuop::hir::Lowerer: the ONNX operators of a hir::Graph as UOp tensors (nfcuop_ut.hpp). See nfcuop_hir.hpp.
 #include "nfcuop_hir.hpp"
 
+#include <algorithm>
+#include <set>
+#include <vector>
+
 namespace nfcuop {
 namespace hir {
 
 ut::Tensor Lowerer::get(int id) {
   auto it = memo_.find(id);
   if (it != memo_.end()) return it->second;
+  // the values `id` needs that are not lowered yet: an explicit stack, then lowering in id order (producers have smaller ids)
+  std::vector<int> need, stack{id};
+  std::set<int> seen;
+  while (!stack.empty()) {
+    int v = stack.back();
+    stack.pop_back();
+    if (memo_.count(v) || !seen.insert(v).second) continue;
+    need.push_back(v);
+    if (g_.initializer(v) != nullptr || g_.producer(v) < 0) continue;
+    for (int in : g_.nodes()[static_cast<size_t>(g_.producer(v))].inputs)
+      if (in >= 0 && g_.initializer(in) == nullptr) stack.push_back(in);
+  }
+  std::sort(need.begin(), need.end());
+  for (int v : need) lower_one(v);
+  return memo_.at(id);
+}
+
+ut::Tensor Lowerer::lower_one(int id) {
   const Value& v = g_.value(id);
   ut::Tensor out;
   if (const Array* a = g_.initializer(id)) {
@@ -21,11 +43,11 @@ ut::Tensor Lowerer::get(int id) {
     const std::string& op = n.op;
     std::vector<ut::Tensor> in(n.inputs.size());
     for (size_t k = 0; k < n.inputs.size(); k++)
-      if (n.inputs[k] >= 0 && g_.initializer(n.inputs[k]) == nullptr) in[k] = get(n.inputs[k]);
+      if (n.inputs[k] >= 0 && g_.initializer(n.inputs[k]) == nullptr) in[k] = memo_.at(n.inputs[k]);
     // inputs that ONNX wants as constants are read, not lowered
     auto ints = [&](size_t k) { return g_.const_ints(n.inputs[k]); };
     auto has = [&](size_t k) { return k < n.inputs.size() && n.inputs[k] >= 0; };
-    auto arg = [&](size_t k) { return in[k].valid() ? in[k] : get(n.inputs[k]); };
+    auto arg = [&](size_t k) { return in[k].valid() ? in[k] : get(n.inputs[k]); };   // an initializer used as data: lowered here
     if (op == "Identity") out = arg(0);
     else if (op == "Cast") out = arg(0).astype(v.dtype);
     else if (op == "Neg") out = -arg(0);

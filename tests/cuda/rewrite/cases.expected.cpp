@@ -1,6 +1,6 @@
 #line 1 "rewrite/cases.cu"
-__global__ void mul2(const int *a, int *b, int n) { }
-__global__ void noargs() { }
+static void mul2(const int *a, int *b, int n) { }
+static void noargs() { }
 int main() {
   const char *s = "not a<<<launch>>>(x)";  // a<<<b>>>(c) in a comment
   /* k<<<1, 2>>>(y) */

@@ -2,12 +2,24 @@
 typedef unsigned int uint;
 typedef unsigned short ushort;
 typedef unsigned long ulong;
+typedef unsigned long size_t;
 #ifndef NULL
 #define NULL 0
 #endif
 #define __shared__ static
+// The device pass architecture, for plain uses of __CUDA_ARCH__ (the conditionals are resolved with it too).
+#define __CUDA_ARCH__ 750
+// The qualifiers as macros too: a macro body of a carried header can name them (ggml-common.h: GGML_TABLE_BEGIN).
+#define __device__
+#define __global__
+#define __host__
+#define __forceinline__
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
+// Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.
+extern "C" int printf(const char *, ...);
+extern "C" int vprintf(const char *, const void *);
 extern "C" unsigned __nfcxx_tid_x(void);
 extern "C" unsigned __nfcxx_tid_y(void);
 extern "C" unsigned __nfcxx_tid_z(void);
@@ -20,7 +32,8 @@ extern "C" unsigned __nfcxx_ntid_z(void);
 extern "C" unsigned __nfcxx_nctaid_x(void);
 extern "C" unsigned __nfcxx_nctaid_y(void);
 extern "C" unsigned __nfcxx_nctaid_z(void);
-
+                                                                                                                  
+                                                                                 
 
 typedef unsigned int uint;
 #define SCALE 3

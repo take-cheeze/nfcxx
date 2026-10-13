@@ -248,7 +248,7 @@ end
 def reg_class(t)
   return "p" if t[0] == "int" && t[3]
   return "rd" if t[0] == "ptr" || (t[0] == "int" && t[1] == 8)
-  return "r" if t[0] == "int" && t[1] == 4
+  return "r" if t[0] == "int" && (t[1] == 1 || t[1] == 2 || t[1] == 4)
   return "f" if t[0] == "float" && t[1] == 4
   return "fd" if t[0] == "float" && t[1] == 8
   raise Refused, "value of type #{t[0]} #{t[1]} bytes"
@@ -259,14 +259,24 @@ def ptx_type(t)
   return "u64" if t[0] == "ptr"
   return "f#{t[1] * 8}" if t[0] == "float" && (t[1] == 4 || t[1] == 8)
   raise Refused, "bool in arithmetic or memory" if t[0] == "int" && t[3]
+  # a 2-byte integer (the IR's unsigned_short, and CUDA's half, which is one) is computed in 32 bits: its register
+  # holds the value sign- or zero-extended, so the 32-bit operations give the 16-bit result (see Fn#canon)
+  return(t[2] ? "s32" : "u32") if t[0] == "int" && (t[1] == 1 || t[1] == 2)
   raise Refused, "integer of #{t[1]} bytes" unless t[0] == "int" && (t[1] == 4 || t[1] == 8)
   (t[2] ? "s" : "u") + (t[1] * 8).to_s
 end
 
+# The memory suffix of a load or store: the 16-bit forms for a 2-byte integer, else ptx_type.
+def mem_type(t)
+  return(t[2] ? "s8" : "u8") if t[0] == "int" && t[1] == 1 && !t[3]
+  return(t[2] ? "s16" : "u16") if t[0] == "int" && t[1] == 2 && !t[3]
+  ptx_type(t)
+end
+
 # The untyped bit suffix (b32, b64) for and, or, xor, not and shl, where the signedness does not matter.
 def bits_type(t)
-  raise Refused, "bitwise operation on #{t[0]}" unless (t[0] == "int" && !t[3] && (t[1] == 4 || t[1] == 8)) || t[0] == "ptr"
-  "b" + (type_size(t) * 8).to_s
+  raise Refused, "bitwise operation on #{t[0]}" unless (t[0] == "int" && !t[3] && (t[1] == 1 || t[1] == 2 || t[1] == 4 || t[1] == 8)) || t[0] == "ptr"
+  "b" + (t[0] == "int" && (t[1] == 1 || t[1] == 2) ? 32 : type_size(t) * 8).to_s
 end
 
 # A decimal float literal, exact in the type: a finite number as printed by the IR (shortest form that reads back), or
@@ -320,6 +330,12 @@ def imm(t, v)
 end
 
 # The special registers of the GPU: tid, ctaid, ntid, nctaid with a component x, y or z (no regex: mruby's build may lack it).
+# The dynamic shared memory of a launch: one extern symbol per module, used by every kernel that calls
+# __nfcxx_dynshared_addr. The launch passes its size (dynamicSmemBytes).
+DYNSHARED_SYM = "__nfcxx_dynshared"
+# The module-level symbol of a string constant (a printf format): the IR's data name with this prefix.
+STRING_PREFIX = "__nfcxx_str_"
+
 # Device intrinsics a kernel calls by name (extern "C"), and the special register each reads.
 DEVICE_INTRINSICS = {
   "__nfcxx_tid_x" => "tid.x", "__nfcxx_tid_y" => "tid.y", "__nfcxx_tid_z" => "tid.z",
@@ -338,11 +354,41 @@ WARP_SHUFFLES = {
   "__nfcxx_shfl_up_sync_i" => "up", "__nfcxx_shfl_up_sync_f" => "up",
 }
 WARP_VOTES = { "__nfcxx_ballot_sync" => "ballot", "__nfcxx_any_sync" => "any", "__nfcxx_all_sync" => "all" }
+# Scalar 32-bit integer intrinsics that map to one PTX instruction: name => [PTX instruction, number of operands].
+# The CUDA names (__umulhi, __popc, __byte_perm) are wrappers in the device prelude (cuda-rewrite.rb, BUILTIN_DEFS).
+SCALAR_U32 = {
+  "__nfcxx_umulhi" => ["mul.hi.u32", 2],
+  "__nfcxx_popc" => ["popc.b32", 1],
+  "__nfcxx_byte_perm" => ["prmt.b32", 3],
+  # __dp4a(a, b, c): c plus the dot product of the four 8-bit lanes of a and b (signed), sm_61 and later.
+  "__nfcxx_dp4a" => ["dp4a.s32.s32", 3],
+}
+# Float intrinsics: name => [PTX instruction, number of operands]. The CUDA names are wrappers in the device prelude
+# (cuda-rewrite.rb, BUILTIN_DEFS). The instructions are exact (max/min follow CUDA's NaN rule: a NaN operand is ignored
+# when the other is a number; sqrt is correctly rounded), except rsqrt and div, which are approximate (rsqrt.approx.f32
+# and div.approx.f32: about 2 ulp). expf, __expf, logf and __logf are ex2.approx / lg2.approx with a scale; see
+# float_builtin. Their error is documented in docs/notes/gpu.md, and tested with a tolerance.
+FLOAT_BUILTINS = {
+  "__nfcxx_fmaxf" => ["max.f32", 2],
+  "__nfcxx_fminf" => ["min.f32", 2],
+  "__nfcxx_fabsf" => ["abs.f32", 1],
+  "__nfcxx_sqrtf" => ["sqrt.rn.f32", 1],
+  "__nfcxx_rsqrtf" => ["rsqrt.approx.f32", 1],
+  "__nfcxx_fdividef" => ["div.approx.f32", 2],
+  "__nfcxx_saturatef" => ["cvt.sat.f32.f32", 1],
+  "__nfcxx_expf" => [:exp, 1],
+  "__nfcxx_logf" => [:log, 1],
+}
 # name => [PTX atom op, PTX type]: the pointer is a generic address (global or shared), the result is the old value
 ATOMICS = {
   "__nfcxx_atomic_add_i" => ["add", "s32"], "__nfcxx_atomic_add_f" => ["add", "f32"],
   "__nfcxx_atomic_max_i" => ["max", "s32"], "__nfcxx_atomic_cas_i" => ["cas", "b32"],
 }
+
+# A function the IR marks static (internal linkage: `(static)` after the signature, as the IR spec gives it).
+def static_fn?(fn)
+  fn.form.any? { |x| x.is_a?(Array) && head_of(x) == "static" }
+end
 
 def special_register?(name)
   parts = name.split(".")
@@ -371,8 +417,8 @@ def check_recursion(name, callees, state)
 end
 
 class Fn
-  attr_reader :name, :params, :ret, :form
-  attr_accessor :kernel, :module_fns, :shared, :globals
+  attr_reader :name, :params, :ret, :form, :uses_dynshared
+  attr_accessor :kernel, :module_fns, :shared, :globals, :strings, :uses_printf
 
   def initialize(form, index)
     @form = form
@@ -440,7 +486,7 @@ class Fn
         elsif @kernel
           raise Refused, "kernel #{@name} returns a value"
         else
-          ok = (ret[0] == "ptr") || (ret[0] == "int" && !ret[3] && (ret[1] == 4 || ret[1] == 8)) || (ret[0] == "float" && (ret[1] == 4 || ret[1] == 8))
+          ok = (ret[0] == "ptr") || (ret[0] == "int" && !ret[3] && (ret[1] == 1 || ret[1] == 2 || ret[1] == 4 || ret[1] == 8)) || (ret[0] == "float" && (ret[1] == 4 || ret[1] == 8))
           raise Refused, "function #{@name} returns a #{ret[0]} (scalars only)" unless ok
           @ret = ret
         end
@@ -450,7 +496,7 @@ class Fn
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param" && p.length == 4
           raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
           ty = parse_type(p[3])
-          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
+          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
       elsif h == "static" || h == "weak"
@@ -507,6 +553,8 @@ class Fn
         emit("cvta.shared.u64 #{t}, #{ptx_sym(x.name)};")
       elsif @globals.key?(x.name)
         emit("cvta.global.u64 #{t}, #{ptx_sym(x.name)};")
+      elsif @strings.key?(x.name)
+        emit("cvta.const.u64 #{t}, #{ptx_sym(STRING_PREFIX + x.name)};")
       else
         raise Refused, "static object @\"#{x.name}\" (only block-shared and device globals are lowered)"
       end
@@ -558,7 +606,7 @@ class Fn
         emit("ld.u8 #{b}, [#{reg_of(addr, aty)}];")
         emit("setp.ne.u32 #{dest}, #{b}, 0;")
       else
-        emit("ld.#{ptx_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
+        emit("ld.#{mem_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
       end
     when "bitcast"
       ty = parse_type(x[1])
@@ -686,12 +734,25 @@ class Fn
       callee = x[2]
       name = callee.is_a?(IRSym) && callee.sig == "&" ? callee.name : nil
       reg = name && DEVICE_INTRINSICS[name]
-      if reg
+      if name == "__nfcxx_dynshared_addr"
+        # The dynamic shared memory of the launch (`extern __shared__ T buf[]`, rewritten by cuda-rewrite.rb): one
+        # module-level extern .shared symbol, whose generic address is taken with cvta.shared (see emit_module).
+        raise Refused, "intrinsic #{name} takes no arguments" if x.length != 3
+        raise Refused, "intrinsic #{name} returns #{ty[0]}, not a pointer" unless ty[0] == "ptr"
+        emit("cvta.shared.u64 #{dest}, #{DYNSHARED_SYM};")
+        @uses_dynshared = true
+      elsif reg
         raise Refused, "intrinsic #{name} takes no arguments" if x.length != 3
         raise Refused, "intrinsic #{name} returns #{ty[0]}, not a 32-bit unsigned" unless ty[0] == "int" && type_size(ty) == 4
         emit("mov.u32 #{dest}, %#{reg};")
-      elsif WARP_SHUFFLES.key?(name) || WARP_VOTES.key?(name) || ATOMICS.key?(name)
+      elsif name == "printf"
+        printf_call(x, dest, ty)
+      elsif WARP_SHUFFLES.key?(name) || WARP_VOTES.key?(name) || ATOMICS.key?(name) || name == "__nfcxx_reduce_add_sync"
         device_builtin(name, x, dest, ty)
+      elsif SCALAR_U32.key?(name)
+        scalar_u32(name, x, dest, ty)
+      elsif FLOAT_BUILTINS.key?(name)
+        float_builtin(name, x, dest, ty)
       else
         call_site(x, dest, ty)
       end
@@ -741,7 +802,7 @@ class Fn
   # cdiv (signed or unsigned) and crem: trap on a zero divisor, and for signed types on INT_MIN / -1.
   # The checks are predicated traps; a constant divisor needs only the checks that can fail.
   def checked_div(op, dest, ty, xa, xb)
-    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
     t = ptx_type(ty)
     a, _ = operand(xa)
     b, _ = operand(xb)
@@ -772,7 +833,7 @@ class Fn
   # cshl and cshr (count in ty's width, as the IR gives it): trap unless 0 <= count < width. The count is compared
   # unsigned, so a negative count fails the test too. A 64-bit count is narrowed to 32 bits after the test.
   def checked_shift(op, dest, ty, xa, xb)
-    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
     bits = ty[1] * 8
     a, _ = operand(xa)
     a = reg_of(a, ty)
@@ -803,7 +864,7 @@ class Fn
   # iconv: integer to integer, sign-extending from a signed source and zero-extending from an unsigned one, and
   # truncating to a narrower target (cvt does all three).
   def int_convert(dest, ty, a, aty)
-    raise Refused, "iconv to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    raise Refused, "iconv to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
     raise BadIR, "iconv of a #{aty[0]}" unless aty[0] == "int"
     if aty[3]
       b = fresh("r")
@@ -815,8 +876,10 @@ class Fn
       end
       return
     end
-    if type_size(ty) == type_size(aty)
+    if type_size(ty) == type_size(aty) || (type_size(ty) < 4 && type_size(aty) == 4)
       emit("mov.#{ptx_type(ty)} #{dest}, #{a};")
+    elsif type_size(ty) < 4
+      emit("cvt.u32.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
     else
       emit("cvt.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
     end
@@ -852,6 +915,20 @@ class Fn
 
   # ---- statements
 
+  # A 2-byte integer lives in a 32-bit register extended to 32 bits: sign-extended for a signed type, zero-extended
+  # for an unsigned one. A result computed in 32 bits is brought back into that form here.
+  def canon(dest, t)
+    return unless t[0] == "int" && (t[1] == 1 || t[1] == 2) && !t[3]
+    bits = t[1] * 8
+    if t[2]
+      tmp = fresh("r")
+      emit("shl.b32 #{tmp}, #{dest}, #{32 - bits};")
+      emit("shr.s32 #{dest}, #{tmp}, #{32 - bits};")
+    else
+      emit("and.b32 #{dest}, #{dest}, #{(1 << bits) - 1};")
+    end
+  end
+
   def stmt(s)
     h = head_of(s)
     case h
@@ -861,6 +938,7 @@ class Fn
       ty = parse_type(s[2])
       dest = ir_reg(s[1], ty)
       rval(s[3], dest, ty)
+      canon(dest, ty)
     when "set"
       r = @regs[s[1]]
       raise BadIR, "set of #{s[1]} before its let" if r.nil?
@@ -879,7 +957,7 @@ class Fn
         emit("selp.u32 #{b}, 1, 0, #{val};")
         emit("st.u8 [#{reg_of(addr, aty)}], #{b};")
       else
-        emit("st.#{ptx_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
+        emit("st.#{mem_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
       end
     when "if"
       cond, cty = operand(s[1])
@@ -1033,6 +1111,48 @@ class Fn
     raise Refused, "#{name}: only the full-warp mask 0xffffffff is lowered (mask operand #{text})" unless ["4294967295", "-1"].include?(text)
   end
 
+  # A scalar 32-bit intrinsic of SCALAR_U32: one instruction, operands and result all 32-bit integers.
+  def scalar_u32(name, x, dest, ty)
+    op, arity = SCALAR_U32[name]
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes #{arity} argument(s)" unless args.length == arity
+    raise Refused, "#{name} returns #{ty[0]}" unless ty[0] == "int" && type_size(ty) == 4
+    regs = args.map do |a|
+      v, vty = operand(a)
+      raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "int" && vty[1] == 4
+      reg_of(v, vty)
+    end
+    emit("#{op} #{dest}, #{regs.join(', ')};")
+  end
+
+  # A float intrinsic of FLOAT_BUILTINS: operands and result are 32-bit floats. exp and log are two instructions:
+  # expf(x) = 2^(x * log2(e)) and logf(x) = log2(x) * ln(2), with the scale in the f32 hex form (exact constants).
+  def float_builtin(name, x, dest, ty)
+    op, arity = FLOAT_BUILTINS[name]
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes #{arity} argument(s)" unless args.length == arity
+    raise Refused, "#{name} returns #{ty[0]}, not a 32-bit float" unless ty[0] == "float" && type_size(ty) == 4
+    regs = args.map do |a|
+      v, vty = operand(a)
+      raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "float" && vty[1] == 4
+      reg_of(v, vty)
+    end
+    case op
+    when :exp
+      t = fresh("f")
+      emit("mul.rn.f32 #{t}, #{regs[0]}, 0f3FB8AA3B;")    # log2(e)
+      emit("ex2.approx.f32 #{dest}, #{t};")
+    when :log
+      t = fresh("f")
+      emit("lg2.approx.f32 #{t}, #{regs[0]};")
+      emit("mul.rn.f32 #{dest}, #{t}, 0f3F317218;")       # ln(2)
+    else
+      emit("#{op} #{dest}, #{regs.join(', ')};")
+    end
+  end
+
   def device_builtin(name, x, dest, ty)
     args = x[3..-1] || []
     raise Refused, "#{name} has no value" if dest.nil?
@@ -1057,6 +1177,20 @@ class Fn
         emit("mov.b32 #{dest}, #{out};")
       else
         emit("shfl.sync.#{mode}.b32 #{dest}, #{src}, #{lane}, #{clamp}, 0xffffffff;")
+      end
+    elsif name == "__nfcxx_reduce_add_sync"
+      # __reduce_add_sync(mask, value) for the full warp: a butterfly sum over the five lane offsets, so every lane gets
+      # the sum of the 32 values (unsigned addition wraps, as the CUDA intrinsic). redux.sync needs sm_80; this is sm_75.
+      raise Refused, "#{name} takes (mask, value)" unless args.length == 2
+      full_mask!(args[0], name)
+      raise Refused, "#{name} returns #{ty[0]}, not a 32-bit integer" unless ty[0] == "int" && type_size(ty) == 4
+      v, vty = operand(args[1])
+      raise Refused, "#{name}: value of type #{vty[0]}" unless vty[0] == "int" && vty[1] == 4
+      emit("mov.b32 #{dest}, #{reg_of(v, vty)};")
+      [16, 8, 4, 2, 1].each do |off|
+        t = fresh("r")
+        emit("shfl.sync.bfly.b32 #{t}, #{dest}, #{off}, 31, 0xffffffff;")
+        emit("add.s32 #{dest}, #{dest}, #{t};")
       end
     elsif WARP_VOTES.key?(name)
       raise Refused, "#{name} takes (mask, predicate)" unless args.length == 2
@@ -1090,6 +1224,60 @@ class Fn
     end
   end
 
+  # Does this body call printf? (the function then needs its frame pointer, for the argument buffer)
+  def contains_printf?(f)
+    return false unless f.is_a?(Array)
+    return true if head_of(f) == "call" && f.length > 2 && f[2].is_a?(IRSym) && f[2].sig == "&" && f[2].name == "printf"
+    f.any? { |c| contains_printf?(c) }
+  end
+
+  # printf, as CUDA's device runtime lowers it: the format is a string constant (a module-level .const array, the IR's
+  # `(data NAME (string ...))`), the arguments are stored into a frame buffer at their C layout by their IR types, and
+  # vprintf(format, buffer) is called; the runtime prints the line when the kernel completes (cudaDeviceSynchronize).
+  def printf_call(x, dest, ty)
+    raise Refused, "printf returns #{ty[0]}, not int" unless ty[0] == "int" && type_size(ty) == 4
+    raise Refused, "printf is not a variadic call of one fixed argument" unless head_of(x[3]) == "variadic" && x.length >= 5 && as_int(x[3][1]) == 1
+    fmt = x[4]
+    raise Refused, "printf format must be a string constant" unless fmt.is_a?(IRSym) && fmt.sig == "@" && @strings.key?(fmt.name)
+    vargs = x.length > 5 ? x[5..-1] : []
+    # the operands first (they may emit code), then the layout: each argument at its own size, naturally aligned
+    ops = vargs.map { |a| operand(a) }
+    layout = []
+    off = 0
+    ops.each do |op, t|
+      unless (t[0] == "int" && (t[1] == 4 || t[1] == 8)) || (t[0] == "float" && t[1] == 8) || t[0] == "ptr"
+        raise Refused, "printf argument of type #{t[0]} #{t[1]} bytes (an int of 4 or 8 bytes, a double or a pointer)"
+      end
+      size = t[0] == "ptr" ? 8 : t[1]
+      off = (off + size - 1) / size * size
+      layout << [op, t, off]
+      off += size
+    end
+    buf = (@frame + 7) / 8 * 8
+    @frame = buf + (off + 7) / 8 * 8
+    base = fresh("rd")
+    emit("add.u64 #{base}, #{@sp}, #{buf};")
+    layout.each do |op, t, o|
+      value = reg_of(op, t)
+      addr = fresh("rd")
+      emit("add.u64 #{addr}, #{base}, #{o};")
+      emit("st.#{ptx_type(t)} [#{addr}], #{value};")
+    end
+    fmt_reg = fresh("rd")
+    emit("cvta.const.u64 #{fmt_reg}, #{ptx_sym(STRING_PREFIX + fmt.name)};")
+    n = (@nlab += 1)
+    emit("{")
+    emit("  .param .b64 __pf_fmt_#{n};")
+    emit("  .param .b64 __pf_buf_#{n};")
+    emit("  .param .b32 __pf_rv_#{n};")
+    emit("  st.param.b64 [__pf_fmt_#{n}], #{fmt_reg};")
+    emit("  st.param.b64 [__pf_buf_#{n}], #{base};")
+    emit("  call (__pf_rv_#{n}), vprintf, (__pf_fmt_#{n}, __pf_buf_#{n});")
+    emit("  ld.param.b32 #{dest}, [__pf_rv_#{n}];") if dest
+    emit("}")
+    @uses_printf = true
+  end
+
   def call_site(x, dest, ty)
     callee_sym = x[2]
     raise Refused, "indirect call" unless callee_sym.is_a?(IRSym) && callee_sym.sig == "&"
@@ -1099,6 +1287,45 @@ class Fn
       raise Refused, "__nfcxx_syncthreads takes no arguments" unless x.length == 3
       raise Refused, "__nfcxx_syncthreads has no value" unless dest.nil?
       emit("bar.sync 0;")
+      return
+    end
+    if cname == "__nfcxx_threadfence_system"
+      # a memory fence visible to the whole system (membar.sys); no operands, no value
+      raise Refused, "__nfcxx_threadfence_system takes no arguments" unless x.length == 3
+      raise Refused, "__nfcxx_threadfence_system has no value" unless dest.nil?
+      emit("membar.sys;")
+      return
+    end
+    if cname == "__nfcxx_nanosleep"
+      # nanosleep.u32: suspend the thread for about the given number of nanoseconds (a hint)
+      raise Refused, "__nfcxx_nanosleep takes (ns)" unless x.length == 4
+      raise Refused, "__nfcxx_nanosleep has no value" unless dest.nil?
+      nv, nty = operand(x[3])
+      raise Refused, "__nfcxx_nanosleep: argument of type #{nty[0]}" unless nty[0] == "int" && nty[1] == 4
+      emit("nanosleep.u32 #{reg_of(nv, nty)};")
+      return
+    end
+    if cname == "__nfcxx_syncthreads_or"
+      # the block barrier that also ORs a predicate over the block: bar.red.or.pred, then 1 or 0 in the result
+      raise Refused, "__nfcxx_syncthreads_or takes (predicate)" unless x.length == 4
+      raise Refused, "__nfcxx_syncthreads_or has no value" if dest.nil?
+      raise Refused, "__nfcxx_syncthreads_or returns #{ty[0]}, not a 32-bit integer" unless ty[0] == "int" && type_size(ty) == 4
+      pv, pty = operand(x[3])
+      raise Refused, "__nfcxx_syncthreads_or: predicate of type #{pty[0]}" unless pty[0] == "int" && pty[1] == 4
+      pr = fresh("p")
+      q = fresh("p")
+      emit("setp.ne.s32 #{pr}, #{reg_of(pv, pty)}, 0;")
+      emit("bar.red.or.pred #{q}, 0, #{pr};")
+      emit("selp.s32 #{dest}, 1, 0, #{q};")
+      return
+    end
+    if cname == "__nfcxx_syncwarp"
+      # the warp barrier of the mask: bar.warp.sync takes the mask (32 bits) as its operand
+      raise Refused, "__nfcxx_syncwarp takes one mask argument" unless x.length == 4
+      raise Refused, "__nfcxx_syncwarp has no value" unless dest.nil?
+      mop, mty = operand(x[3])
+      raise Refused, "__nfcxx_syncwarp mask is not a 32-bit integer" unless mty[0] == "int" && type_size(mty) == 4
+      emit("bar.warp.sync #{reg_of(mop, mty)};")
       return
     end
     raise Refused, "call of intrinsic #{cname} as a statement" if DEVICE_INTRINSICS.key?(cname)
@@ -1136,7 +1363,7 @@ class Fn
 
   def compile
     setup
-    if @frame > 0
+    if @frame > 0 || contains_printf?(@body)
       @sp = fresh("rd")
       @prologue << "mov.u64 #{@sp}, __local_depot#{@index};"
       @prologue << "cvta.local.u64 #{@sp}, #{@sp};"
@@ -1195,12 +1422,20 @@ def emit_module(src, sm, kernels = [])
   fns = []
   shared = {}
   globals = {}
+  strings = {}
   forms.each do |f|
     h = head_of(f)
     if h == "ir-module"
       next
     elsif h == "function"
       fns << Fn.new(f, fns.length)
+    elsif h == "data"
+      # a string constant (a printf format): its bytes, as a .const array in the module
+      name = f[1].to_s
+      payload = f[3]
+      raise Refused, "data #{name} (only string constants are lowered)" unless head_of(payload) == "string" && payload.length == 2
+      raise Refused, "data #{name} is defined twice" if strings.key?(name)
+      strings[name] = payload[1].to_s.bytes
     elsif h == "global"
       # A file-scope static array of the device unit is block-shared memory (CUDA's __shared__): its name and
       # size come from the IR, and it must be zero-initialized. Any other global is refused.
@@ -1228,6 +1463,33 @@ def emit_module(src, sm, kernels = [])
     end
   end
   raise BadIR, "no function in the IR" if fns.empty?
+  # A listed kernel is named as the source names it (cuda-rewrite.rb --kernels writes plain names). A C++ function's IR
+  # name is its Itanium mangled name, so a plain name matches by the rule scripts/cuda-embed.rb uses.
+  kernels = kernels.map do |k|
+    hits = fns.map(&:name).select { |n| n == k || n.start_with?("_Z#{k.length}#{k}") }
+    raise BadIR, "no function named #{k} in the IR" if hits.empty?
+    raise BadIR, "#{hits.length} functions named #{k} in the IR" if hits.length > 1
+    hits[0]
+  end
+  # Keep the functions reachable from the kernels: the listed kernels, or else the functions that are not static and
+  # not called. A static function that nothing reaches is dead code (a C++ header's unused inline helper): it is not
+  # emitted, rather than taken for a kernel (which could not return its value).
+  pre_by = {}
+  fns.each { |fn| pre_by[fn.name] = fn }
+  pre_callees = {}
+  fns.each { |fn| pre_callees[fn.name] = collect_calls(fn.form, []).select { |c| pre_by.key?(c) }.uniq }
+  pre_called = {}
+  pre_callees.each { |caller, cs| cs.each { |c| pre_called[c] = caller } }
+  roots = kernels.empty? ? fns.reject { |fn| static_fn?(fn) || pre_called.key?(fn.name) }.map(&:name) : kernels
+  live = {}
+  stack = roots.dup
+  until stack.empty?
+    n = stack.pop
+    next if live[n] || !pre_by.key?(n)
+    live[n] = true
+    stack.concat(pre_callees[n])
+  end
+  fns = fns.select { |fn| live[fn.name] }
   by_name = {}
   fns.each { |fn| by_name[fn.name] = fn }
   callees = {}
@@ -1243,10 +1505,13 @@ def emit_module(src, sm, kernels = [])
   end
   state = {}
   fns.each { |fn| check_recursion(fn.name, callees, state) }
-  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals }
+  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals; fn.strings = strings }
   fns.each { |fn| fn.compile }
   out = "// Generated by scripts/pathb-ptx-emit.rb from the Path B IR; do not edit.\n"
   out << ".version 8.0\n.target #{sm}\n.address_size 64\n\n"
+  out << ".extern .shared .align 16 .b8 #{DYNSHARED_SYM}[];\n" if fns.any?(&:uses_dynshared)
+  strings.each { |name, bytes| out << ".const .align 1 .b8 #{ptx_sym(STRING_PREFIX + name)}[#{bytes.length}] = {#{bytes.join(',')}};\n" }
+  out << ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n" if fns.any?(&:uses_printf)
   shared.each { |name, (size, align)| out << ".shared .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
   globals.each { |name, (size, align)| out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
   out << "\n" unless shared.empty? && globals.empty?

@@ -19,7 +19,10 @@
 #   - tests/uop/onnx_check.py   those models through onnx.checker and onnxruntime, against the UOp interpreter's results
 #   - tests/uop/np_compat.cpp/.py   100 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
 #                               with the 32-bit default dtypes (10 documented dtype differences) and once with float64/int64 (none)
-#   The Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
+#   - tests/uop/run_poly.sh     the API from scripts (lib/uop/nfcuop_poly.cpp, docs/notes/uop-poly.md): one model in Ruby, Lua, Python,
+#                               JavaScript and Go, equal to the C++ API in values and in the bytes of the ONNX file; operators, errors,
+#                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
+#   The two Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 #   UOP_HOST=1              build with the host g++ (-fsanitize=address,undefined) and nothing else; for a machine
 #                           where nfcxx is not built
@@ -62,9 +65,11 @@ run_all() {
 }
 if [ -n "$UOP_HOST" ]; then
   run_all host g++ -std=c++17 -Wall -Wextra -O1 -fsanitize=address,undefined
+  tests/uop/run_poly.sh || fail=1
   exit $fail
 fi
 for be in $backends; do
   CC_IS_NFCXX=1 NFCXX_BACKEND=$be run_all "$be" ./nfcxx -O2
 done
+tests/uop/run_poly.sh || fail=1   # the same API from Ruby, Lua, Python, JavaScript and Go (nfcpoly)
 exit $fail

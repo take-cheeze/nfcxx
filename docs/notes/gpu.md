@@ -104,3 +104,28 @@ names the type.
 
 Not done: the emitter beyond the kernels in `tests/gpu/kernels` (it refuses other nodes with exit 3), the front
 end's CUDA input (EDG here has no CUDA mode, so `__global__` and `<<<>>>` do not parse), and an nvcc-compatible driver.
+
+## Math and dp4a intrinsics (ggml-cuda)
+
+Lowered by the emitter (`FLOAT_BUILTINS`, `SCALAR_U32`) and wrapped in the device prelude (`BUILTIN_DEFS`):
+`fmaxf`, `fminf` (`max.f32` / `min.f32`: a NaN operand is ignored when the other is a number, as CUDA),
+`fabsf` (`abs.f32`), `sqrtf` (`sqrt.rn.f32`, correctly rounded), `__saturatef` (`cvt.sat.f32.f32`), `__dp4a`
+(`dp4a.s32.s32`, sm_61 and later), `__ldg` (a plain load of the pointee), and the shuffle `__shfl_up_sync`.
+Approximate, with their PTX instructions:
+
+| Function | Lowering | Max observed error (test inputs) |
+| --- | --- | --- |
+| `rsqrtf` | `rsqrt.approx.f32` | 7.1e-8 |
+| `__fdividef` | `div.approx.f32` | 9.7e-8 |
+| `expf`, `__expf` | `mul.rn` by log2(e), then `ex2.approx.f32` | 1.4e-7 |
+| `logf`, `__logf` | `lg2.approx.f32`, then `mul.rn` by ln(2) | 1.4e-7 |
+
+The error is `|got - ref| / (1 + |ref|)` against a double-precision reference, over 4096 inputs in [-8, 8) with
+the special values (a NaN operand, a zero divisor). The approximate instructions are not correctly rounded, so
+the bounds hold for the tested range only; the PTX ISA is the reference for the general case.
+
+`tests/cuda/intrinsics/math.cu` checks these on the GPU against the host: exact functions bit for bit, the
+approximate ones within the tolerance above. It is not yet in `tests/cuda/intrinsics/run.sh`: its host copy needs
+host placeholders for `__fdividef`, `__saturatef`, `__ldg` and `__dp4a` in `lib/cuda/nfcxx_cuda.h`. Until those land,
+the device side was checked by lowering the kernel to PTX, assembling it, and running it with a harness that
+loads the cubin (0 mismatches over 57,344 checks; the mutant max -> min gives 4094 mismatches).
