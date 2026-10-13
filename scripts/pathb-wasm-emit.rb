@@ -8,6 +8,18 @@
 #   3  refused: the IR has a node, type or marker this emitter does not handle yet; the reason is on stderr
 #   1  error: malformed IR text
 #
+# Usage with --asan (before the file): scripts/mrb scripts/pathb-wasm-emit.rb --asan prog.ir > out.wasm. The mruby
+# interpreter has no ENV, so the mode is an argument, and tests/wasm/run.sh passes it when NFCXX_WASM_ASAN=1.
+# The mode is an AddressSanitizer-style check (docs/notes/pathb-wasm.md, "AddressSanitizer"): a shadow region at the
+# top of the memory, redzones around the static objects and the slots of each frame, and a check before each load,
+# store and copy that reports a violation through the import env.__asan_report and traps. Without --asan the module is
+# the same as before the mode existed, byte for byte.
+#
+# Usage with --emscripten (before the file): the same module with the exports that the Emscripten JS runtime reads:
+# __indirect_function_table (an empty funcref table), __stack_pointer, __data_end and __heap_base (immutable i32
+# globals). The layout and the code are unchanged. --asan and --emscripten are not combined. Without the argument the
+# module is byte-identical to the one before the mode existed. docs/notes/pathb-wasm.md, "Emscripten".
+#
 # Layout and representation. The IR's layout is LP64 (pointers 8 bytes), and the emitter keeps it: a pointer value is an
 # i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Integers of 1, 2 and 4 bytes are
 # i32 values kept canonical (sign- or zero-extended from their width), so a comparison or a widening is a plain
@@ -322,6 +334,8 @@ VT = { :i32 => 0x7f, :i64 => 0x7e, :f32 => 0x7d, :f64 => 0x7c }
 class Module_
   attr_reader :types, :imports, :import_index, :defined_index
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
+  attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
+  attr_accessor :emscripten   # the Emscripten exports (see encode_module)
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
@@ -400,6 +414,14 @@ end
 # Address 0 is no object, so a null pointer never points at one.
 STATIC_BASE = 16
 
+# ASan mode. The shadow byte of the granule (8 bytes) at address a is the byte at shadow_base + a / 8: 0 when the granule
+# is addressable, k in 1..7 when its first k bytes are, and a poison code (>= 0x80) otherwise, as in libasan. The codes
+# are libasan's: a stack redzone 0xf1, a global redzone 0xf9, and 0xf5 for the frame of a function that has returned.
+ASAN_RZ = 32                  # the redzone before and after each object (a static object or a slot)
+ASAN_STACK_RZ = 0xf1
+ASAN_GLOBAL_RZ = 0xf9
+ASAN_RETURN = 0xf5
+
 # (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT): a defined global with its initializer. The TYPE is not needed:
 # the size and alignment come from BYTES and ALIGN. An extern declaration, a thread-local and a dynamic initializer are
 # refused.
@@ -450,15 +472,50 @@ def parse_data(d)
 end
 
 # Gives each object an address, in order, after address 0. Returns the end of the data: the stack starts above it.
-def layout_statics(objs)
+# With asan, each object is 8-byte aligned and has a redzone before it and after the last one (a granule of the
+# redzone is never shared with an object), so that the shadow of the data is whole granules.
+def layout_statics(objs, asan = false)
   pos = STATIC_BASE
   objs.each do |o|
     next unless o.refusal.nil?             # no storage for those
-    pos = (pos + o.align - 1) / o.align * o.align
+    al = asan && o.align < 8 ? 8 : o.align
+    pos += ASAN_RZ if asan
+    pos = (pos + al - 1) / al * al
     o.addr = pos
     pos += o.size
+    pos = (pos + 7) / 8 * 8 if asan
   end
+  pos += ASAN_RZ if asan && objs.any? { |o| o.refusal.nil? }
   pos
+end
+
+# ASan: the shadow of the static data, as [address, bytes] data segments. A granule of a redzone is ASAN_GLOBAL_RZ, the
+# last granule of an object whose size is not a multiple of 8 holds its size mod 8, and the other granules are 0 (the
+# memory starts zeroed). Null page granules are left at 0: no static object is there and no check reports them.
+def static_shadow(objs, data_end, shadow_base)
+  codes = Array.new(data_end / 8, 0)
+  cur = STATIC_BASE / 8
+  objs.each do |o|
+    next unless o.refusal.nil?
+    g = o.addr / 8
+    (cur...g).each { |i| codes[i] = ASAN_GLOBAL_RZ }
+    codes[g + o.size / 8] = o.size % 8 if o.size % 8 != 0
+    cur = g + (o.size + 7) / 8
+  end
+  (cur...codes.length).each { |i| codes[i] = ASAN_GLOBAL_RZ }
+  segs = []
+  i = 0
+  while i < codes.length
+    if codes[i] == 0
+      i += 1
+      next
+    end
+    j = i
+    j += 1 while j < codes.length && codes[j] != 0
+    segs << [shadow_base + i, codes[i...j]]
+    i = j
+  end
+  segs
 end
 
 # The little-endian bytes of an integer of n bytes.
@@ -562,9 +619,9 @@ def static_contents(mod, o)
 end
 
 # The static objects of the module, with their addresses and contents, in the order of the forms.
-def build_statics(mod, objs)
+def build_statics(mod, objs, asan = false)
   mod.add_statics(objs)
-  end_addr = layout_statics(objs)
+  end_addr = layout_statics(objs, asan)
   objs.each do |o|
     o.bytes = static_contents(mod, o) unless o.data || !o.refusal.nil?
   end
@@ -599,6 +656,8 @@ class Fn
     @brk = {}                # label name => the loop it leaves (the label just after the loop)
     @loop_n = 0
     @pending_brk = nil       # the label that follows the loop being compiled
+    @asan = mod.asan
+    @frame_codes = []        # asan: the granule codes of the frame (see layout_asan_slots)
   end
 
   def e(*bytes)
@@ -623,6 +682,7 @@ class Fn
   def setup
     ret = nil
     params = []
+    slot_list = []           # asan: [name, size, align] of each slot, laid out after the loop
     body_start = nil
     @form.each_with_index do |f, i|
       next if i < 2
@@ -652,14 +712,19 @@ class Fn
           align = type_align(slot_ty)
         end
         align = 1 if align < 1
-        @frame = (@frame + align - 1) / align * align
-        @slots[f[1].to_s] = @frame
-        @frame += size
+        if @asan
+          slot_list << [f[1].to_s, size, align]
+        else
+          @frame = (@frame + align - 1) / align * align
+          @slots[f[1].to_s] = @frame
+          @frame += size
+        end
       else
         body_start = i if body_start.nil?
       end
     end
     raise BadIR, "function without a return type" if ret.nil?
+    layout_asan_slots(slot_list) if @asan
     @ret = ret
     @result = wtype(ret)
     @frame = (@frame + 15) / 16 * 16
@@ -672,6 +737,12 @@ class Fn
     @tmp64 = params.length + 2
     @local_types << :i32 << :i32 << :i64
     @next_local = params.length + 3
+    if @asan
+      # asan: a scratch i32 for the address of a checked access (the check reads it back, see asan_addr)
+      @tmp32 = @next_local
+      @local_types << :i32
+      @next_local += 1
+    end
     @body = body_forms
     @body.each { |s| collect_lets(s) }
     @type_index = @mod.type_of(@param_types, @result)
@@ -707,6 +778,32 @@ class Fn
 
   def slot_offset(name)
     @slots.fetch(name) { raise Refused, "unknown slot $\"#{name}\"" }
+  end
+
+  # asan: each slot is an object of its own, 8-byte aligned, with a redzone of ASAN_RZ bytes before it and after the last
+  # one, so a granule holds the bytes of one object only. Sets the frame size (a multiple of 16) and the granule codes
+  # of the frame: the redzones, the objects' granules (0) and the partial granule of an object whose size is not a
+  # multiple of 8 (its size mod 8).
+  def layout_asan_slots(list)
+    pos = 0
+    objs = []
+    list.each do |name, size, align|
+      pos += ASAN_RZ
+      a = align < 8 ? 8 : align
+      pos = (pos + a - 1) / a * a
+      @slots[name] = pos
+      objs << [pos, size]
+      pos = (pos + size + 7) / 8 * 8
+    end
+    pos += ASAN_RZ unless list.empty?
+    pos = (pos + 15) / 16 * 16
+    @frame = pos
+    @frame_codes = Array.new(pos / 8, ASAN_STACK_RZ)
+    objs.each do |off, size|
+      g = off / 8
+      (size / 8).times { |i| @frame_codes[g + i] = 0 }
+      @frame_codes[g + size / 8] = size % 8 if size % 8 != 0
+    end
   end
 
   # ---- operands
@@ -775,6 +872,49 @@ class Fn
     end
   end
 
+  # The address of a memory access of size bytes, as an i32: in asan mode it is checked first (asan_addr).
+  def mem_addr(op, size)
+    if @asan
+      asan_addr(op, size)
+    else
+      addr32(op)
+    end
+  end
+
+  # asan: pushes the address of an access of size bytes after a call of the check, which traps on a violation. The
+  # address goes through the scratch local, since the check takes it as an argument and the access needs it again.
+  def asan_addr(op, size)
+    addr32(op)
+    e(0x22); leb_u(@tmp32)                 # local.tee
+    e(0x41); leb_s(size)
+    e(0x10); leb_u(@mod.check_index)       # call the check: (address, size)
+    e(0x20); leb_u(@tmp32)                 # local.get: the address of the access
+  end
+
+  # asan: memory.fill of the shadow of granules [g0, g0 + len) of this frame with code. The frame base is a multiple of 16,
+  # so its granules are whole: the shadow of the granule at fp + 8 * g is at shadow_base + fp / 8 + g.
+  def asan_fill(g0, len, code)
+    e(0x20); leb_u(@fp_local)
+    e(0x41); leb_s(3); e(0x76)             # i32.shr_u: fp / 8
+    e(0x41); leb_s(@mod.shadow_base + g0); e(0x6a)
+    e(0x41); leb_s(code)
+    e(0x41); leb_s(len)
+    e(0xfc, 0x0b, 0x00)                    # memory.fill
+  end
+
+  # asan: the redzones and objects of the frame, as the shadow of its granules, runs of equal codes at a time.
+  def asan_poison_frame
+    runs = []
+    @frame_codes.each_with_index do |c, g|
+      if !runs.empty? && runs[-1][2] == c
+        runs[-1][1] += 1
+      else
+        runs << [g, 1, c]
+      end
+    end
+    runs.each { |g0, len, code| asan_fill(g0, len, code) }
+  end
+
   # Pushes an integer operand as an i64, sign-extended when sext is set, else by the signedness of its type.
   def push_i64(op, sext)
     ty = op_type(op)
@@ -839,7 +979,7 @@ class Fn
     when "load", "load.v"
       ty = parse_type(x[1])
       raise Refused, "load of #{ty[0]}" if wtype(ty).nil?
-      addr32(x[2])
+      mem_addr(x[2], type_size(ty))
       load_op(ty)
       wtype(ty)
     when "wadd", "wsub", "wmul"
@@ -1170,13 +1310,13 @@ class Fn
     when "store", "store.v"
       ty = parse_type(s[1])
       raise Refused, "store of #{ty[0]}" if wtype(ty).nil?
-      addr32(s[2])
+      mem_addr(s[2], type_size(ty))
       push_op(s[3], wtype(ty))
       store_op(ty)
     when "copy"
       n = as_int(s[1])
-      addr32(s[2])
-      addr32(s[3])
+      mem_addr(s[2], n)
+      mem_addr(s[3], n)
       e(0x41); leb_s(n)
       e(0xfc, 0x0a, 0x00, 0x00)            # memory.copy: destination, source, length
     when "eval"
@@ -1414,6 +1554,8 @@ class Fn
   end
 
   def restore_sp
+    # asan: the frame has returned, so its shadow says so (a use after the return is reported as such)
+    asan_fill(0, @frame / 8, ASAN_RETURN) if @asan && @frame > 0
     e(0x20); leb_u(@old_local)
     e(0x24); leb_u(0)                      # global.set 0: the stack pointer
   end
@@ -1433,6 +1575,7 @@ class Fn
     e(0x21); leb_u(@fp_local)
     e(0x20); leb_u(@fp_local)
     e(0x24); leb_u(0)                      # global.set 0
+    asan_poison_frame if @asan && @frame > 0
     stmt_list(@body)
     if @result.nil?
       restore_sp
@@ -1452,9 +1595,70 @@ class Fn
   end
 end
 
+# ------------------------------------------------------------------ asan: the check
+
+# asan: the body of the check, check(a, n) for an access of n bytes at a: it traps unless every granule the access
+# touches is addressable. In a granule the access uses the bytes up to the last one it touches, and that count must be
+# within the shadow byte's k (0 is all eight). A violation calls env.__asan_report(a, n, code) and traps: code is the
+# poison code of the granule, or for a partial granule (k in 1..7, which ends an object) the code of the next granule,
+# the redzone that follows the object. The function is the module's last one (after the defined functions).
+#
+#   if n == 0 return;  last = a + n - 1;  g = a >> 3
+#   loop:  s = shadow[g];  if s != 0:  end = min(last - 8g + 1, 8)
+#            if !(s < 8 && end <= s): report(a, n, s >= 0x80 ? s : shadow[g + 1]); unreachable
+#          g = g + 1; br_if loop while g <= last >> 3
+def asan_check_body(mod)
+  sh = mod.shadow_base
+  rep = mod.import_index.fetch("__asan_report")
+  c = []
+  c.concat([0x01, 0x04, VT[:i32]])                  # locals: last, g, s, end (after the parameters a and n)
+  c.concat([0x20, 1, 0x45, 0x04, 0x40, 0x0f, 0x0b]) # if n == 0: return
+  c.concat([0x20, 0, 0x20, 1, 0x6a, 0x41, 1, 0x6b, 0x21, 2])   # last = a + n - 1
+  c.concat([0x20, 0, 0x41, 3, 0x76, 0x21, 3])                  # g = a >> 3
+  c.concat([0x03, 0x40])                                       # loop
+  c << 0x41; sleb(sh, c)
+  c.concat([0x20, 3, 0x6a, 0x2d, 0, 0, 0x21, 4])               # s = shadow[g] (i32.load8_u)
+  c.concat([0x20, 4, 0x04, 0x40])                              # if s != 0
+  c.concat([0x20, 2, 0x20, 3, 0x41, 3, 0x74, 0x6b, 0x41, 1, 0x6a, 0x21, 5])  # end = last - 8g + 1
+  c.concat([0x41, 8, 0x20, 5, 0x20, 5, 0x41, 8, 0x4b, 0x1b, 0x21, 5])        # end = min(end, 8)
+  c.concat([0x20, 4, 0x41, 8, 0x49])                           # s < 8
+  c.concat([0x20, 5, 0x20, 4, 0x4d, 0x71])                     # and end <= s
+  c.concat([0x45, 0x04, 0x40])                                 # if not: the access is a violation
+  c.concat([0x20, 0, 0x20, 1])                                 # report(a, n, code)
+  c.concat([0x20, 4, 0x41]); sleb(0x80, c); c << 0x4f          # s >= 0x80 (i32.ge_u)
+  c.concat([0x04, 0x7f, 0x20, 4, 0x05])                        # if (result i32) s else
+  c << 0x41; sleb(sh, c)
+  c.concat([0x20, 3, 0x6a, 0x2d, 0, 1])                        # shadow[g + 1] (the offset is 1)
+  c.concat([0x0b])                                             # end
+  c << 0x10; uleb(rep, c)                                      # call env.__asan_report
+  c.concat([0x00, 0x0b])                                       # unreachable; end (the violation)
+  c.concat([0x0b])                                             # end (s != 0)
+  c.concat([0x20, 3, 0x41, 1, 0x6a, 0x22, 3])                  # g = g + 1
+  c.concat([0x20, 2, 0x41, 3, 0x76, 0x4d, 0x0d, 0])            # br_if loop while g <= last >> 3
+  c.concat([0x0b, 0x0b])                                       # end (loop); end (function)
+  c
+end
+
+# asan: the shadow of the static data (see static_shadow), and the mode's imports and check function.
+def asan_setup(mod, objs)
+  pages = [2, (mod.data_end + 65536 + 57343) / 57344].max
+  mod.pages = pages
+  mod.shadow_base = pages * 57344        # the top of the memory less a shadow of 1/8 of it: pages * 65536 * 7 / 8
+  mod.stack_top = mod.shadow_base
+  mod.segments += static_shadow(objs, mod.data_end, mod.shadow_base)
+  mod.import_of("__asan_report", [:i32, :i32, :i32], nil)
+  mod.check_type = mod.type_of([:i32, :i32], nil)
+  mod.check_index = 0                    # set once the imports are known (emit_module); the first pass discards its calls
+end
+
 # ------------------------------------------------------------------ the module
 
-def emit_module(src)
+# --emscripten: the exports the mode adds (encode_module). A function of the module may not take one of these names.
+EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base"]
+
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten] [FILE.ir | -] > out.wasm\n"
+
+def emit_module(src, asan = false, emscripten = false)
   forms = parse_forms(tokenize(src))
   defs = {}
   order = []
@@ -1478,15 +1682,32 @@ def emit_module(src)
       raise Refused, "top-level form #{h || form_text(f)}"
     end
   end
+  if emscripten
+    order.each do |nm|
+      raise Refused, "function #{nm} takes the name of an export of --emscripten" if EMSCRIPTEN_EXPORTS.include?(nm)
+    end
+  end
   mod = Module_.new(defs)
-  mod.data_end = build_statics(mod, objs)
+  mod.asan = asan
+  mod.emscripten = emscripten
+  mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
   mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
+  if asan
+    asan_setup(mod, objs)
+  else
+    # the memory: two pages (128 KB), or more when the static objects leave less than 64 KB for the stack; the stack
+    # grows down from its top, above the static objects
+    mod.pages = [2, (mod.data_end + 65536 + 65535) / 65536].max
+    mod.stack_top = mod.pages * 65536
+  end
   # The import list comes from the calls, so the first pass only collects it: the index of a defined function is not
   # known until the imports are, and the calls of the first pass are discarded.
   order.each_with_index { |nm, i| mod.defined_index[nm] = i }
   order.each { |nm| Fn.new(mod, defs[nm]).compile }
   order.each_with_index { |nm, i| mod.defined_index[nm] = mod.imports.length + i }
+  # the check is the module's last function, after the defined ones
+  mod.check_index = mod.imports.length + order.length if asan
   bodies = order.map do |nm|
     fn = Fn.new(mod, defs[nm])
     fn.compile
@@ -1524,33 +1745,68 @@ def encode_module(mod, bodies)
     end
     section(2, im, out)
   end
-  # functions
+  # functions (asan: the check is the last one)
   fsec = []
-  uleb(bodies.length, fsec)
+  uleb(bodies.length + (mod.asan ? 1 : 0), fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
+  uleb(mod.check_type, fsec) if mod.asan
   section(3, fsec, out)
-  # memory: two pages (128 KB), or more when the static objects leave less than 64 KB for the stack; the stack grows down
-  # from its top, above the static objects
-  pages = [2, (mod.data_end + 65536 + 65535) / 65536].max
+  # emscripten: the function table, exported empty. The emitter has no indirect calls and no function values (both are
+  # refused, see Fn#call and op_type), so no element segment is needed. It is exported under the name the glue looks for.
+  if mod.emscripten
+    tb = []
+    uleb(1, tb)
+    tb << 0x70 << 0x00                   # funcref, limits without a maximum
+    uleb(0, tb)                          # minimum 0 elements
+    section(4, tb, out)
+  end
+  # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow
   mem = []
   uleb(1, mem)
   mem << 0x00
-  uleb(pages, mem)
+  uleb(mod.pages, mem)
   section(5, mem, out)
-  # global 0: the stack pointer, mutable i32, starts at the top of the memory
+  # global 0: the stack pointer, mutable i32, starts at the top of the memory (asan: below the shadow). The memory
+  # addresses are i32, so the stack pointer is too, in both modes. emscripten: global 1 is __data_end (the end of the
+  # static data) and global 2 is __heap_base (the top of the memory: the stack grows down from it, and a heap would
+  # begin there and grow the memory with memory.grow), both immutable i32.
   gl = []
-  uleb(1, gl)
+  uleb(mod.emscripten ? 3 : 1, gl)
   gl << VT[:i32] << 0x01
   gl << 0x41
-  sleb(pages * 65536, gl)
+  sleb(mod.stack_top, gl)
   gl << 0x0b
+  if mod.emscripten
+    gl << VT[:i32] << 0x00 << 0x41
+    sleb(mod.data_end, gl)
+    gl << 0x0b
+    gl << VT[:i32] << 0x00 << 0x41
+    sleb(mod.stack_top, gl)
+    gl << 0x0b
+  end
   section(6, gl, out)
-  # exports: the memory, then each function under its IR name
+  # exports: the memory, (emscripten: the table and the globals), then each function under its IR name
   ex = []
-  uleb(1 + bodies.length, ex)
+  nexp = 1 + bodies.length
+  nexp += 4 if mod.emscripten
+  uleb(nexp, ex)
   name_bytes("memory", ex)
   ex << 0x02
   uleb(0, ex)
+  if mod.emscripten
+    name_bytes("__indirect_function_table", ex)
+    ex << 0x01
+    uleb(0, ex)
+    name_bytes("__stack_pointer", ex)
+    ex << 0x03
+    uleb(0, ex)
+    name_bytes("__data_end", ex)
+    ex << 0x03
+    uleb(1, ex)
+    name_bytes("__heap_base", ex)
+    ex << 0x03
+    uleb(2, ex)
+  end
   bodies.each_with_index do |(nm, _), i|
     raise Refused, "function name #{nm.inspect} is not ASCII (an export name must be UTF-8)" if nm.bytes.any? { |b| b >= 0x80 }
     name_bytes(nm, ex)
@@ -1560,9 +1816,14 @@ def encode_module(mod, bodies)
   section(7, ex, out)
   # code
   code = []
-  uleb(bodies.length, code)
+  uleb(bodies.length + (mod.asan ? 1 : 0), code)
   bodies.each do |nm, fn|
     b = fn.encode
+    uleb(b.length, code)
+    b.each { |x| code << x }
+  end
+  if mod.asan
+    b = asan_check_body(mod)
     uleb(b.length, code)
     b.each { |x| code << x }
   end
@@ -1590,13 +1851,30 @@ end
 
 def main(argv)
   args = argv.dup
+  asan = false
+  emscripten = false
+  while !args.empty? && args.first.start_with?("--")
+    flag = args.shift
+    if flag == "--asan"
+      asan = true
+    elsif flag == "--emscripten"
+      emscripten = true
+    else
+      $stderr.write(USAGE)
+      return 1
+    end
+  end
   if args.length > 1
-    $stderr.write("usage: pathb-wasm-emit.rb [FILE.ir | -] > out.wasm\n")
+    $stderr.write(USAGE)
+    return 1
+  end
+  if asan && emscripten
+    $stderr.write("error: --asan and --emscripten are not combined (the shadow would sit where the heap begins)\n")
     return 1
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src)
+    bytes = emit_module(src, asan, emscripten)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3
