@@ -1,3 +1,4 @@
+// X86-ONLY: x86-64 SysV ABI test; its gcc peer float16_abi_peer.c uses x86 inline asm (eax)
 // EXPECT: 0
 // GCC: float16_abi_peer.c
 /* _Float16 across the x86-64 SysV ABI between nfcxx's cproc-QBE chain and gcc. This file is compiled by nfcxx's backend,

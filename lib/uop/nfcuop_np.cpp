@@ -68,6 +68,11 @@ int64_t norm_axis(int64_t ax, int64_t nd) {
   return ax < 0 ? ax + nd : ax;
 }
 
+Tensor int64_scalar(const Tensor& like, int64_t v) {
+  Array a(DType::Int64, {}, {Scalar::from_int(DType::Int64, v)});
+  return Tensor(&like.session(), like.session().constant(a));
+}
+
 Axes all_axes(int64_t nd) {
   Axes a;
   for (int64_t k = 0; k < nd; k++) a.push_back(k);
@@ -290,6 +295,36 @@ Tensor Tensor::var(const Axes& axes, bool keepdims) const {
 
 Tensor Tensor::stddev(const Axes& axes, bool keepdims) const { return var(axes, keepdims).sqrt(); }
 
+Tensor Tensor::prod(const Axes& axes, bool keepdims) const {
+  check(*this);
+  DType dt = dtype();
+  if (dt == DType::Bool || (is_int(dt) && dt < s_->default_int)) dt = s_->default_int;
+  return reduce("ReduceProd", cast_to(*this, dt), axes, keepdims);
+}
+
+Tensor arg_node(const Tensor& x, const char* op, int64_t axis, bool keepdims) {
+  check(x);
+  Tensor src = axis == None ? x.flatten() : x;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, x.ndim());
+  if (src.dtype() == DType::Bool) src = cast_to(src, src.session().default_int);   // ONNX has no bool ArgMax
+  Tensor r = node(src, op, {src.id()}, {Attribute::Int("axis", ax), Attribute::Int("keepdims", keepdims ? 1 : 0)});
+  if (axis == None && keepdims) r = r.reshape(Shape(static_cast<size_t>(x.ndim()), 1));
+  return cast_to(r, x.session().default_int);
+}
+
+Tensor Tensor::argmax(int64_t axis, bool keepdims) const { return arg_node(*this, "ArgMax", axis, keepdims); }
+Tensor Tensor::argmin(int64_t axis, bool keepdims) const { return arg_node(*this, "ArgMin", axis, keepdims); }
+
+Tensor Tensor::cumsum(int64_t axis) const {
+  check(*this);
+  Tensor x = axis == None ? flatten() : *this;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, ndim());
+  DType dt = x.dtype();
+  if (dt == DType::Bool || (is_int(dt) && dt < s_->default_int)) dt = s_->default_int;
+  x = cast_to(x, dt);
+  return node(x, "CumSum", {x.id(), int64_scalar(x, ax).id()});
+}
+
 // ---- Tensor: elementwise ----
 
 Tensor Tensor::operator-() const {
@@ -342,6 +377,32 @@ Tensor Tensor::clip(double lo, double hi) const {
   check(*this);
   Tensor x = to_float(*this);
   return node(x, "Clip", {x.id(), sconst(x, lo).id(), sconst(x, hi).id()});
+}
+
+// numpy keeps an integer's dtype (floor of int32 is int32); a bool has no float16 here and gives default_float
+Tensor Tensor::floor() const {
+  check(*this);
+  if (is_int(dtype())) return *this;
+  Tensor x = to_float(*this);
+  return node(x, "Floor", {x.id()});
+}
+Tensor Tensor::ceil() const {
+  check(*this);
+  if (is_int(dtype())) return *this;
+  Tensor x = to_float(*this);
+  return node(x, "Ceil", {x.id()});
+}
+
+Tensor Tensor::isnan() const {
+  check(*this);
+  if (!is_float(dtype())) return s_->zeros(shape(), DType::Bool);   // numpy: no integer or bool is NaN
+  return node(*this, "IsNaN", {id_});
+}
+
+Tensor Tensor::isinf() const {
+  check(*this);
+  if (!is_float(dtype())) return s_->zeros(shape(), DType::Bool);
+  return node(*this, "IsInf", {id_});
 }
 
 // ---- Tensor: realization ----
@@ -547,6 +608,39 @@ Tensor stack(const std::vector<Tensor>& ts, int64_t axis) {
     parts.push_back(t.expand_dims(axis));
   }
   return concatenate(parts, axis);
+}
+
+Tensor tile(const Tensor& a, const Shape& reps) {
+  check(a);
+  for (int64_t r : reps)
+    if (r < 1) throw Error("np: tile repetitions must be at least 1, got " + std::to_string(r));
+  const size_t n = std::max(reps.size(), static_cast<size_t>(a.ndim()));
+  Shape rp(n - reps.size(), 1);
+  rp.insert(rp.end(), reps.begin(), reps.end());
+  Tensor x = a;
+  if (static_cast<size_t>(a.ndim()) < n) {
+    Shape s(n - static_cast<size_t>(a.ndim()), 1);
+    s.insert(s.end(), a.shape().begin(), a.shape().end());
+    x = a.reshape(s);
+  }
+  return node(x, "Tile", {x.id(), int64_const(x, rp).id()});
+}
+
+Tensor take(const Tensor& a, const Tensor& indices, int64_t axis) {
+  same_session(a, indices);
+  if (!is_int(indices.dtype())) throw Error("np: take needs integer indices, got " + std::string(name(indices.dtype())));
+  Tensor src = axis == None ? a.flatten() : a;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, a.ndim());
+  if (src.dtype() != DType::Bool) return node(src, "Gather", {src.id(), indices.id()}, {Attribute::Int("axis", ax)});
+  // ONNX Gather has no bool data: the values go through the default int and back (exact)
+  Tensor data = cast_to(src, a.session().default_int);
+  return cast_to(node(data, "Gather", {data.id(), indices.id()}, {Attribute::Int("axis", ax)}), DType::Bool);
+}
+
+Tensor pow(const Tensor& a, const Tensor& b) {
+  same_session(a, b);
+  DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));
+  return node("Pow", {cast_to(a, dt), cast_to(b, dt)});
 }
 
 Tensor matmul(const Tensor& a, const Tensor& b) {

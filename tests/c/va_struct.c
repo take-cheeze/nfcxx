@@ -1,3 +1,4 @@
+// X86-ONLY-qbe: the x86-64 SysV va_list layout for integer-class structs
 // EXPECT: 0
 // SOURCES: va_struct.c va_struct_take.c
 /* va_arg of 8- and 16-byte integer-class structs (cproc needs scripts/cproc-vaarg-aggregate.patch): the

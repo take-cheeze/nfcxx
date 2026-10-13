@@ -10,8 +10,11 @@
 100000
 90000	5.0
 false	true
+1500000	1499999
+false	tail_loop.lua:65: attempt to divide by zero
+0
 20210
-false	tail_loop.lua:66: attempt to divide by zero
-false	tail_loop.lua:68: attempt to divide by zero
-false	tail_loop.lua:70: number has no integer representation
+false	tail_loop.lua:75: attempt to divide by zero
+false	tail_loop.lua:77: attempt to divide by zero
+false	tail_loop.lua:79: number has no integer representation
 2	true

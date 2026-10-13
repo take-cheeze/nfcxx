@@ -5,6 +5,7 @@
 #   // DIALECT: clang           compile in the clang front-end mode (default g++).
 #   // XFAIL-qbe: <reason>      known failure on the qbe backend; reported as xfail.
 #   // XFAIL-gcc: <reason>      same for the gcc backend. An XFAIL that passes is a failure (remove the marker).
+#   // X86-ONLY-<backend>: <reason>  skip that backend on hosts other than x86-64.
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -14,6 +15,10 @@ for be in $backends; do
     want=$(sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$f" | head -1)
     dialect=$(sed -n 's,^// DIALECT: *\(.*\),\1,p' "$f" | head -1)
     xfail=$(sed -n "s,^// XFAIL-$be: *\(.*\),\1,p" "$f" | head -1)
+    x86only=$(sed -n "s,^// X86-ONLY-$be: *\(.*\),\1,p" "$f" | head -1)
+    if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
+      echo "skip  $be $name (x86-64 only: $x86only)"; continue
+    fi
     if ./nfcxx --gnu-version=130000 ${dialect:+--dialect=$dialect} --backend="$be" "$f" -o "$tmp/t" 2>"$tmp/err"; then
       "$tmp/t" >/dev/null 2>&1; got=$?
       if [ $((got & 255)) -eq $((want & 255)) ]; then st=ok; else st=FAIL; fi

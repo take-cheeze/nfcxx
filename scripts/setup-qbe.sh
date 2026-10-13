@@ -26,12 +26,21 @@ make -C "$root/build/qbe" -j"$(nproc)" >/dev/null
 # cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
 # EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
+# cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
 (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$(nproc)" cproc-qbe >/dev/null)
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of
 # libnfcxxld.a (be/nfcxx_ldrt.c), which must be on the link line. The archive has one object, so -u on one of its helpers
 # pulls all of them; -lgcc/-lgcc_s give __multf3 and friends, -lstdc++ the __float128 to_chars wrappers.
-ldrt=$("$root/scripts/pathb-ldrt")
-(cd "$root/build/cproc" && PATH="$root/build/qbe:$PATH" make -j"$(nproc)" stage2 \
-  LDFLAGS="-Wl,-u,__nfcxx_ld_add $ldrt -lgcc -lgcc_s -lstdc++" >/dev/null)
-echo "built: $root/build/qbe/qbe $root/build/cproc/cproc-qbe $root/build/cproc/stage2/cproc-qbe"
+# be/nfcxx_ldrt.c is x87 code (x86-64 only), so the stage-2 build runs only on x86-64 hosts.
+if [ "$(uname -m)" = x86_64 ]; then
+  ldrt=$("$root/scripts/pathb-ldrt")
+  (cd "$root/build/cproc" && PATH="$root/build/qbe:$PATH" make -j"$(nproc)" stage2 \
+    LDFLAGS="-Wl,-u,__nfcxx_ld_add $ldrt -lgcc -lgcc_s -lstdc++" >/dev/null)
+fi
+if [ "$(uname -m)" = x86_64 ]; then
+  echo "built: $root/build/qbe/qbe $root/build/cproc/cproc-qbe $root/build/cproc/stage2/cproc-qbe"
+else
+  echo "built: $root/build/qbe/qbe $root/build/cproc/cproc-qbe"
+fi

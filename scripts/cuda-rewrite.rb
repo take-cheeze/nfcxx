@@ -337,10 +337,189 @@ def matching_angle(s, open)
   nil
 end
 
-# The directives of a text: start index => end index (a launch in a #define is not a launch in code).
+# The directives of a text, at any depth (a #define inside a function body too): [start, end) pairs, the end at the
+# newline that closes the directive (continuation lines included). A `#` that starts a line is a directive.
+def directive_spans(text)
+  spans = []
+  n = text.length
+  i = 0
+  bol = true
+  while i < n
+    if bol
+      j = i
+      j += 1 while j < n && (text[j] == " " || text[j] == "\t")
+      if j < n && text[j] == "#"
+        k = j
+        while true
+          nl = text.index("\n", k) || n
+          if nl < n && nl > 0 && text[nl - 1] == "\\"
+            k = nl + 1
+          else
+            k = nl
+            break
+          end
+        end
+        spans << [i, k]
+        i = k
+        bol = false
+        next
+      end
+    end
+    bol = (text[i] == "\n")
+    i += 1
+  end
+  spans
+end
+
+# The directives of a text: start index => end index (a launch in a #define is not a launch in code). The start is the
+# line's first character, so an indented directive is keyed at its line start.
 def directive_ends(text)
   out = {}
-  top_pieces(text).each { |st, en, kind, _b| out[st] = en if kind == :pp }
+  directive_spans(text).each { |st, en| out[st] = en }
+  out
+end
+
+# The value of the nearest `constexpr`-style declaration of name before pos whose block is still open at pos (a
+# declaration in a sibling `if` that has closed is not in scope); nil when none. local_constant gives the value of one
+# declaration, so each candidate is checked here.
+def local_constant_visible(text, pos, name)
+  seg = text[0...pos]
+  found = nil
+  i = 0
+  while (k = seg.index(name, i))
+    e = k + name.length
+    i = e
+    next if (k > 0 && ident_char?(seg[k - 1])) || (e < seg.length && ident_char?(seg[e]))
+    b = k - 1
+    b -= 1 while b >= 0 && white?(seg[b])
+    next unless b >= 0 && ident_char?(seg[b])
+    a = e
+    a += 1 while a < seg.length && white?(seg[a])
+    next unless seg[a] == "=" && seg[a + 1] != "="
+    semi = seg.index(";", a)
+    next if semi.nil?
+    blk = enclosing_block(text, k)
+    next unless blk.nil? || blk[1] > pos
+    found = seg[(a + 1)...semi].strip
+  end
+  found
+end
+
+# The value of an integer expression written with literals, `+ - * / %`, parentheses and names of visible local
+# constants (`K_VECS_PER_WARP * WARPS_PER_BLOCK`), or nil when it is not one. A recursive-descent reader, not eval.
+def int_expr_value(text, pos, s, depth = 0)
+  return nil if depth > 8
+  toks = []
+  i = 0
+  while i < s.length
+    c = s[i]
+    if white?(c)
+      i += 1
+    elsif c >= "0" && c <= "9" || ident_char?(c)
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      toks << [c >= "0" && c <= "9" ? :num : :id, s[i...j]]
+      i = j
+    elsif "+-*/%()".include?(c)
+      toks << [:op, c]
+      i += 1
+    else
+      return nil
+    end
+  end
+  return nil if toks.empty?
+  p = 0
+  factor = nil
+  term = nil
+  expr = lambda do
+    v = term.call
+    return nil if v.nil?
+    while p < toks.length && toks[p][0] == :op && (toks[p][1] == "+" || toks[p][1] == "-")
+      op = toks[p][1]
+      p += 1
+      r = term.call
+      return nil if r.nil?
+      v = op == "+" ? v + r : v - r
+    end
+    v
+  end
+  term = lambda do
+    v = factor.call
+    return nil if v.nil?
+    while p < toks.length && toks[p][0] == :op && "*/%".include?(toks[p][1])
+      op = toks[p][1]
+      p += 1
+      r = factor.call
+      return nil if r.nil? || (op != "*" && r == 0)
+      v = op == "*" ? v * r : (op == "/" ? v / r : v % r)
+    end
+    v
+  end
+  factor = lambda do
+    return nil if p >= toks.length
+    kind, tx = toks[p]
+    p += 1
+    if kind == :num
+      digits = tx
+      digits = digits[0...-1] while digits.length > 0 && "uUlL".include?(digits[-1])
+      digits.start_with?("0x") ? digits[2..-1].to_i(16) : digits.to_i
+    elsif kind == :id
+      val = local_constant_visible(text, pos, tx)
+      val.nil? ? nil : int_expr_value(text, pos, val, depth + 1)
+    elsif tx == "("
+      v = expr.call
+      return nil unless v && p < toks.length && toks[p] == [:op, ")"]
+      p += 1
+      v
+    elsif tx == "-"
+      v = factor.call
+      v && -v
+    end
+  end
+  value = expr.call
+  p == toks.length ? value : nil
+end
+
+# The template arguments of a launch at pos with each bare name that is a `constexpr` local of an enclosing block
+# replaced by its value (`LAUNCH(kernel, ...)` in ggml-cuda's lightning-indexer.cu passes its block's K_VECS_PER_BLOCK
+# and WARPS_PER_BLOCK). The wrapper names the values, so the device unit does not need the locals. A name with no such
+# declaration stays as it is.
+def resolve_local_constants(text, targs, pos)
+  return targs unless targs.chars.any? { |c| ident_char?(c) && !(c >= "0" && c <= "9") }
+  return targs if enclosing_block(text, pos).nil?
+  outer = enclosing_template(text, pos)
+  out = ""
+  i = 0
+  while i < targs.length
+    if ident_char?(targs[i]) && !(targs[i] >= "0" && targs[i] <= "9")
+      j = i
+      j += 1 while j < targs.length && ident_char?(targs[j])
+      v = targs[i...j]
+      # A parameter of the enclosing template is that template's, not a local: its launch is dependent (see dependent_launches).
+      val = outer && outer[:names].include?(v) ? nil : local_constant_visible(text, pos, v)
+      if val
+        # An integer expression of constants is its value. A single name (a macro, or a type alias such as
+        # `using T = half`) is carried as the name. Anything else (a generic lambda's `decltype(I)::value`) is not
+        # carried: the wrapper would name a local the device unit lacks.
+        n = int_expr_value(text, pos, val)
+        if n
+          out << n.to_s
+          i = j
+          next
+        end
+        line = text[0...pos].count("\n") + 1
+        single = val.length > 0 && val.chars.all? { |c| ident_char?(c) }
+        refuse("template argument #{v} of the launch at line #{line} is #{val}: only an integer constant or a name is carried") unless single
+        out << val
+      else
+        out << v
+      end
+      i = j
+    else
+      out << targs[i]
+      i += 1
+    end
+  end
   out
 end
 
@@ -375,7 +554,7 @@ def template_launches(text)
       e2 = k + 1
       k -= 1 while k >= 0 && ident_char?(text[k])
       name = text[(k + 1)...e2]
-      found << [name, text[(j + 1)...gt].strip, i] unless name.empty?
+      found << [name, resolve_local_constants(text, text[(j + 1)...gt].strip, i), i] unless name.empty?
     end
     i += 1
   end
@@ -892,6 +1071,8 @@ def rewrite(text, orig)
         i += 1
         next
       end
+      # The same resolution as template_launches: the wrapper of this launch is named by the values of its constants.
+      targs = resolve_local_constants(text, targs, i) if targs
       # The call copied so far ends with the name and its arguments: take them back out.
       out = out[0...(out.length - (i - name_start))]
 
@@ -973,8 +1154,7 @@ QUAL_WORDS = ["const", "volatile", "__restrict__", "__restrict", "restrict"]
 # The function-like macros whose body holds a launch: name => { params:, body: } (continuation lines joined).
 def launch_macros(text)
   out = {}
-  top_pieces(text).each do |st, en, kind, _body|
-    next unless kind == :pp
+  directive_spans(text).each do |st, en|
     t = text[st...en].sub("#", "").gsub("\\\n", " ").strip
     next unless t.start_with?("define")
     rest = t[6..-1].lstrip
@@ -1370,6 +1550,7 @@ typedef unsigned long size_t;
 #define __global__
 #define __host__
 #define __forceinline__
+#define __align__(n) __attribute__((aligned(n)))
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
@@ -1555,6 +1736,43 @@ BUILTIN_DEFS = {
   "powf" => "extern \"C\" float __nfcxx_expf(float);\nextern \"C\" float __nfcxx_logf(float);\n" \
             "static inline float powf(float x, float y) { if (y == 0.0f) return 1.0f; if (x == 0.0f) return y > 0.0f ? 0.0f : 1.0f / 0.0f; " \
             "if (x < 0.0f) return (x - x) / (x - x); return __nfcxx_expf(y * __nfcxx_logf(x)); }\n",
+  # Constants of <math.h> and <float.h> that the device unit uses.
+  "INFINITY" => "#define INFINITY __builtin_inff()\n",
+  "FLT_MAX" => "#define FLT_MAX 3.40282346638528859812e+38F\n",
+  "uintptr_t" => "typedef unsigned long uintptr_t;\n",
+  # floorf and trunc: one PTX instruction each (cvt.rmi, cvt.rzi: exact). roundf is halfway away from zero, which is
+  # trunc plus one when the fraction is at least one half (the fraction x - trunc(x) is exact for every float).
+  "floorf" => "extern \"C\" float __nfcxx_floorf(float);\nstatic inline float floorf(float a) { return __nfcxx_floorf(a); }\n",
+  "trunc" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float trunc(float a) { return __nfcxx_truncf(a); }\n",
+  "roundf" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float roundf(float a) { float t = __nfcxx_truncf(a); float d = a - t; " \
+              "if (d >= 0.5f) t += 1.0f; else if (d <= -0.5f) t -= 1.0f; return t; }\n",
+  # sinf and cosf (the helper is shared, see needed in the rewrite): Cephes-style. The argument is reduced to r in
+  # [-pi/4, pi/4] by the nearest multiple n of pi/2 (three-part constant, exact for n < 2^15 or so), and the quadrant
+  # n mod 4 picks sin or cos of r and the sign. Polynomials of Cephes' sinf/cosf. Error and bound: docs/notes/gpu.md.
+  "__nfcxx_sincosf" => "extern \"C\" int __nfcxx_rni_s32(float);\n" \
+    "static inline float __nfcxx_sincosf(float x, int cosine) { if (x != x) return x; if (x - x != 0.0f) return x - x; " \
+    "double d = (double)x; double a = d < 0.0 ? -d : d; int n = (int)(a * 0.63661977236758134 + 0.5); double fn = (double)n; " \
+    "double r = (a - fn * 1.57079632673412561417) - fn * 6.07710050650619224932e-11; double r2 = r * r; " \
+    "int q = (cosine ? n + 1 : n) & 3; double s = r, t = r, c = 1.0, u = 1.0; " \
+    "for (int i = 1; i <= 8; i++) { t = -t * r2 / (double)((2 * i) * (2 * i + 1)); s += t; } " \
+    "for (int i = 1; i <= 8; i++) { u = -u * r2 / (double)((2 * i - 1) * (2 * i)); c += u; } " \
+    "double v = (q & 1) ? c : s; if (q >= 2) v = -v; if (!cosine && 1.0 / d < 0.0) v = -v; return (float)v; }\n",
+  "sinf" => "static inline float sinf(float x) { return __nfcxx_sincosf(x, 0); }\n",
+  "cosf" => "static inline float cosf(float x) { return __nfcxx_sincosf(x, 1); }\n",
+  # expm1 in double: a Taylor series for |x| < 1/32 (no cancellation), else exp(x) - 1 with exp(x) = 2^k * exp(r), r = x - k ln2
+  # (|r| <= ln2 / 2, Taylor to r^14). tanhf(x) = e / (e + 2) with e = expm1(2|x|); |x| >= 10 is 1 in float.
+  "__nfcxx_expm1f" => "static inline double __nfcxx_expm1d(double x) { if (x < 0.03125 && x > -0.03125) { double s = x, t = x; " \
+    "for (int i = 2; i <= 12; i++) { t = t * x / (double)i; s += t; } return s; } " \
+    "int k = (int)(x * 1.4426950408889634 + (x < 0.0 ? -0.5 : 0.5)); double r = (x - (double)k * 0.6931471805599453) - (double)k * 2.3190468138462996e-17; " \
+    "double s = 1.0, t = 1.0; for (int i = 1; i <= 14; i++) { t = t * r / (double)i; s += t; } " \
+    "double p = 1.0, b = k < 0 ? 0.5 : 2.0; int m = k < 0 ? -k : k; while (m) { if (m & 1) p *= b; b *= b; m >>= 1; } " \
+    "return s * p - 1.0; }\n" \
+    "static inline float __nfcxx_expm1f(float x) { if (x != x || x == 0.0f) return x; if (x > 100.0f) return 1.0f / 0.0f; if (x < -100.0f) return -1.0f; " \
+    "return (float)__nfcxx_expm1d((double)x); }\n",
+  "expm1f" => "static inline float expm1f(float x) { return __nfcxx_expm1f(x); }\n",
+  "tanhf" => "static inline float tanhf(float x) { if (x != x || x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
+    "if (ax >= 10.0) return x < 0.0f ? -1.0f : 1.0f; double e = __nfcxx_expm1d(2.0 * ax); double t = e / (e + 2.0); " \
+    "return (float)(d < 0.0 ? -t : t); }\n",
   # memcpy and memset as byte loops (the device unit has no C library; the host copy keeps the real header).
   "memcpy" => "static inline void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = (unsigned char *)d; " \
               "const unsigned char *b = (const unsigned char *)s; for (size_t i = 0; i < n; i++) a[i] = b[i]; return d; }\n",
@@ -1886,7 +2104,8 @@ end
 # device pass therefore evaluates the conditionals first: the branches not taken are blanked (the line count is
 # kept), the #if/#ifdef/#else/#endif lines are removed, and #define and #undef of the taken branches stay.
 # The device pass defines CUDA's device-compile macros; the host pass is not affected.
-DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750" }
+# __cplusplus: the device unit is C++, so a `#ifndef __cplusplus` branch (ggml-common.h's C-only static_assert) is not taken.
+DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750", "__cplusplus" => "201703" }
 
 def cond_tokens(s, line)
   toks = []
@@ -2350,6 +2569,12 @@ def device_tu(text)
   end
 
   # Fixed point: a host declaration is carried over when the unit refers to a name it defines.
+  # The wrappers (see template_site) name their template arguments and parameters: a macro or constant among them is
+  # a name the unit needs even when no kept kernel body mentions it (ggml-cuda's mmf: MMF_ROWS_PER_BLOCK_CDNA).
+  $sites.each_value do |site|
+    seeds.concat(tokens_of(site[:targs].to_s))
+    seeds.concat(tokens_of(site[:decl].to_s))
+  end
   needed = {}
   (seeds + tokens_of(DEVICE_PRELUDE)).each { |x| needed[x] = true }
   changed = true
@@ -2388,6 +2613,9 @@ def device_tu(text)
     %w[__hadd2 __hsub2 __hmul2 __hdiv2].each { |n| needed[n] = true }
   end
   needed["is_same"] = true if needed["is_same_v"]   # std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
+  # Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
+  needed["__nfcxx_sincosf"] = true if needed["sinf"] || needed["cosf"]
+  needed["__nfcxx_expm1f"] = true if needed["expm1f"] || needed["tanhf"]
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
@@ -2521,6 +2749,29 @@ def dynamic_shared_rewrite(s)
   replace_dynamic_uses(out, names)
 end
 
+# The device image does not carry the alignment of a __shared__ object (the emitter sizes and aligns shared arrays from
+# their type), and a `__align__(N)` on one would be dropped silently: a kernel that reads it as a wider vector (conv2d's
+# int4 stores into a half2 array) would then misalign on the device. Refused by name instead.
+def refuse_shared_align(s)
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(s, i, "__shared__")
+      j = i + 10
+      j += 1 while j < s.length && white?(s[j])
+      if word_at?(s, j, "__align__")
+        line = s[0...i].count("\n") + 1
+        refuse("__shared__ __align__ at line #{line}: the device image does not carry shared-object alignment")
+      end
+    end
+    i += 1
+  end
+end
+
 # The innermost `{ ... }` block that contains position pos, as [open, close] indices; nil at file scope.
 def enclosing_block(s, pos)
   stack = []
@@ -2582,15 +2833,85 @@ def static_shared_names(s)
   found
 end
 
-# True when the use at pos is inside a block that declares a static __shared__ array of the same name.
-def shadowed_by_static?(s, statics, tok, pos)
-  statics.each do |name, decl|
-    next unless name == tok
-    blk = enclosing_block(s, decl)
-    next if blk.nil?
-    return true if pos > blk[0] && pos < blk[1]
+# True when the use at pos is inside a range where tok is declared again (blocks: name => [start, end] ranges, see
+# replace_dynamic_uses).
+def shadowed_by_static?(blocks, tok, pos)
+  (blocks[tok] || []).any? { |blk| pos >= blk[0] && pos < blk[1] }
+end
+
+# Words before a `(` that make it a statement or an expression, not a function's parameter list.
+PAREN_WORDS = %w[if while for switch catch return sizeof decltype alignof].freeze
+# Words before a name that make it a use, not a declaration.
+USE_WORDS = %w[return case else do throw delete new goto sizeof co_return co_await co_yield].freeze
+
+# Positions of the identifier tok in s, as whole words.
+def token_positions(s, tok)
+  found = []
+  from = 0
+  while (k = s.index(tok, from))
+    e = k + tok.length
+    found << k if (k == 0 || !ident_char?(s[k - 1])) && (e >= s.length || !ident_char?(s[e]))
+    from = e
   end
-  false
+  found
+end
+
+# True when the identifier at pos declares a variable or parameter: a type word, `*` or `&` before it, and `,`, `)`,
+# `;`, `=` or `[` after it. A use (`return name;`, `f(a * name)`) does not.
+def declares_name?(s, pos, tok)
+  q = pos - 1
+  q -= 1 while q >= 0 && white?(s[q])
+  return false if q < 0
+  if ident_char?(s[q])
+    w = q
+    w -= 1 while w >= 0 && ident_char?(s[w])
+    return false if USE_WORDS.include?(s[(w + 1)..q])
+  elsif s[q] != "*" && s[q] != "&"
+    return false
+  end
+  n = pos + tok.length
+  n += 1 while n < s.length && white?(s[n])
+  n < s.length && ",);=[".include?(s[n])
+end
+
+# The range where a name declared at pos is visible, as [start, end]: a parameter of a function definition lasts
+# through its body, a local through its block. nil when there is none (a prototype, or a call's argument).
+def declaration_scope(s, pos)
+  o = pos - 1
+  depth = 0
+  open = nil
+  while o >= 0
+    c = s[o]
+    if c == ")"
+      depth += 1
+    elsif c == "("
+      if depth == 0
+        open = o
+        break
+      end
+      depth -= 1
+    elsif c == ";" || c == "{" || c == "}"
+      break
+    end
+    o -= 1
+  end
+  unless open
+    blk = enclosing_block(s, pos)
+    return blk.nil? ? nil : [pos, blk[1]]
+  end
+  w = open - 1
+  w -= 1 while w >= 0 && white?(s[w])
+  w_end = w
+  w -= 1 while w >= 0 && ident_char?(s[w])
+  word = s[(w + 1)..w_end].to_s
+  return nil if word.empty? || PAREN_WORDS.include?(word)
+  close = matching_paren(s, open)
+  return nil if close.nil?
+  b = close + 1
+  b += 1 while b < s.length && (white?(s[b]) || ident_char?(s[b]))
+  return nil unless b < s.length && s[b] == "{"
+  bclose = matching_brace(s, b)
+  bclose.nil? ? nil : [pos, bclose]
 end
 
 # Replaces the uses of the dynamic shared arrays (every use, see dynamic_shared_rewrite). A member (`.name`, `->name`) is
@@ -2598,7 +2919,21 @@ end
 def replace_dynamic_uses(s, names)
   out = ""
   i = 0
-  statics = static_shared_names(s)
+  # name => the ranges where the name is declared again (a static __shared__ array, a parameter, a local): such a name
+  # there is that declaration, not the dynamic array. Computed once here, not per use.
+  blocks = {}
+  static_shared_names(s).each do |name, decl|
+    next unless names.key?(name)
+    blk = enclosing_block(s, decl)
+    (blocks[name] ||= []) << blk unless blk.nil?
+  end
+  names.each_key do |name|
+    token_positions(s, name).each do |p|
+      next unless declares_name?(s, p, name)
+      sc = declaration_scope(s, p)
+      (blocks[name] ||= []) << sc unless sc.nil?
+    end
+  end
   while i < s.length
     e = skip_literal(s, i)
     if e
@@ -2613,7 +2948,7 @@ def replace_dynamic_uses(s, names)
       q = i - 1
       q -= 1 while q >= 0 && white?(s[q])
       member = q >= 0 && (s[q] == "." || (s[q] == ">" && q > 0 && s[q - 1] == "-"))
-      if names.key?(tok) && !member && !shadowed_by_static?(s, statics, tok, i)
+      if names.key?(tok) && !member && !shadowed_by_static?(blocks, tok, i)
         out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
         i = j
         next
@@ -2720,7 +3055,11 @@ def host_linkage(text)
         # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
         # A class member keeps its linkage (static is not allowed on a member function, const member or constructor).
         after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
-        out << (after_static || in_class_body?(out) ? "" : host_storage(out, "static"))
+        # `[&] __device__ (...) {...}`: a device lambda. Its qualifier goes; `static` after a capture list is not C++.
+        p = out.length - 1
+        p -= 1 while p >= 0 && white?(out[p])
+        lambda = p >= 0 && out[p] == "]"
+        out << (after_static || lambda || in_class_body?(out) ? "" : host_storage(out, "static"))
         i += 10
         next
       end
@@ -2788,6 +3127,7 @@ usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
 text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
+refuse_shared_align(text) if device
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
 if device

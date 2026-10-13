@@ -16,3 +16,4 @@ int main() {
     if (g_registrar.v != 5) return 2;
     return 0;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

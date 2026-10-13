@@ -11,6 +11,8 @@
 #   pass:    asm_ptx_widths.cu (CUB's ld and st inline PTX with 16-, 32- and 64-bit operands, "h" and "l" constraints).
 #   pass:    bf16_forms.cu (__float2bfloat16, __bfloat162float, __float22bfloat162_rn, __bfloat1622float2, __low2/high2bfloat16
 #            against CUDA host results, bit for bit, NaN canonical as the host).
+#   pass:    math_fns.cu (sinf, cosf, tanhf, expm1f within 1 ulp of a double reference up to 1e6; floorf, roundf, trunc
+#            exact; INFINITY and FLT_MAX).
 # Needs the CUDA toolkit (CUDA_HOME, default /usr/local/cuda) and an NVIDIA GPU; skips (exit 0) when missing.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -68,6 +70,7 @@ pass fma_round.cu "half fma: no error, 0 mismatches"
 pass float2int_round.cu "float2int_rn: no error, 0 mismatches"
 pass bf16_forms.cu "bf16 forms: no error, 0 mismatches"
 pass asm_ptx_widths.cu "ptx widths: no error, 0 mismatches"
+pass math_fns.cu "math_fns: no error, 9175155 checks, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
 exit $fail

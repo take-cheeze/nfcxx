@@ -12,6 +12,9 @@ export NFCXX_BACKEND=${NFCXX_BACKEND:-qbe}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for f in "${files[@]}"; do
   name=$(basename "$f" .cpp); same=1
+  if x86only=$(sed -n 's,^// X86-ONLY: *\(.*\),\1,p' "$f" | head -1); [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
+    echo "skip $f (x86-64 only: $x86only)"; continue
+  fi
   for i in $(seq 1 "$runs"); do
     if ! ./nfcxx -c "$f" -o "$tmp/$name.$i.o" 2>"$tmp/err"; then
       echo "FAIL (compile) $f"; head -5 "$tmp/err"; fail=1; same=0; break
