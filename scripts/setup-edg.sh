@@ -33,6 +33,9 @@ if [ "$(uname -s)" = Darwin ]; then
   sed -i.bak 's|^EDG_C_TO_OBJ_COMPILER=clang|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-clang}|' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
   # The base builds universal (arm64 + x86_64) objects by default; clang refuses to emit one assembly for several -arch.
   sed -i.bak 's| -arch arm64 -arch x86_64||' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
+  # The prelinker reads `nm -og` output. Mach-O values are 16 hex digits, so the nm format is MacOSX64 (-f); without it
+  # the default parser rejects the template-info objects ("invalid input format").
+  sed -i.bak 's|"nm -og 2>/dev/null" |"nm -og 2>/dev/null" -fMacOSX64 |' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
   cd "$src"
   EDG_BASE=$base cmake --preset "$preset" -B "$out" >/dev/null
   cd "$out"

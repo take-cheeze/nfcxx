@@ -36,7 +36,8 @@ host_sys_includes() {
   fi
   # awk, not sed: BSD sed (macOS) rejects the one-line form of this script.
   printf '' | "$cxx" -E -x c++ -v - 2>&1 >/dev/null |
-    awk '/search starts here:/ { on = 1; next } /End of search list/ { on = 0 } on && /^ / { sub(/^ +/, ""); print }'
+    awk '/search starts here:/ { on = 1; next } /End of search list/ { on = 0 } on && /^ / { sub(/^ +/, "") }
+      on && /framework directory/ { next } on && /^[^ ]/ { print }'
 }
 host_gnu_version() {
   local ver
