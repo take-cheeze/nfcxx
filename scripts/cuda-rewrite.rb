@@ -21,6 +21,15 @@ def white?(c)
   c == " " || c == "\t" || c == "\n" || c == "\r"
 end
 
+# The [start, end) range of a sorted, non-overlapping list (top_pieces' pieces of one kind) that holds position i, or
+# nil. A scan asks it at increasing positions, so cursor (a one-element array) only moves forward: the scan costs the
+# text length plus the number of ranges, not that product.
+def piece_at(ranges, cursor, i)
+  cursor[0] += 1 while cursor[0] < ranges.length && ranges[cursor[0]][1] <= i
+  r = ranges[cursor[0]]
+  r && r[0] <= i ? r : nil
+end
+
 def ident_char?(c)
   return false if c.nil?
   o = c.ord
@@ -554,6 +563,7 @@ def call_sites(text, name)
     index = Hash.new { |h, k| h[k] = [] }
     # Directives are not code: a #define's body names its parameters (DECL_MMQ_CASE(type)), which are not calls.
     pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
+    pp_cursor = [0]
     i = 0
     while i < text.length
       e = skip_literal(text, i)
@@ -561,8 +571,8 @@ def call_sites(text, name)
         i = e
         next
       end
-      if pp.any? { |a, b| a <= i && i < b }
-        i = pp.find { |a, b| a <= i && i < b }[1]
+      if (hit = piece_at(pp, pp_cursor, i))
+        i = hit[1]
         next
       end
       if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && !(text[i] >= "0" && text[i] <= "9")
@@ -600,6 +610,7 @@ DECL_WORDS = %w[void static inline int float double bool size_t unsigned long ch
 def plain_call_sites(text, name)
   out = []
   pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
+  pp_cursor = [0]
   i = 0
   while i < text.length
     e = skip_literal(text, i)
@@ -607,8 +618,8 @@ def plain_call_sites(text, name)
       i = e
       next
     end
-    if pp.any? { |a, b| a <= i && i < b }
-      i = pp.find { |a, b| a <= i && i < b }[1]
+    if (hit = piece_at(pp, pp_cursor, i))
+      i = hit[1]
       next
     end
     # A qualified call (`cg::reduce(...)`) or a member call (`x.reduce(...)`) names another function.
@@ -983,6 +994,7 @@ def expand_launch_macros(text, depth = 0)
   return text if macros.empty?
   refuse("launch macros nest more than 4 deep") if depth > 4
   code = top_pieces(text).select { |pc| pc[2] == :code }.map { |pc| [pc[0], pc[1]] }
+  code_cursor = [0]
   n = text.length
   out = ""
   changed = false
@@ -994,7 +1006,7 @@ def expand_launch_macros(text, depth = 0)
       i = e
       next
     end
-    if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && code.any? { |a, b| a <= i && i < b }
+    if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && piece_at(code, code_cursor, i)
       j = i
       j += 1 while j < n && ident_char?(text[j])
       name = text[i...j]
