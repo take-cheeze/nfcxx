@@ -318,7 +318,37 @@ def dependent_on_template(text, i, targs)
 end
 
 # Index of the `>` closing the `<` at s[open] (nesting counted), or nil.
+# A text is indexed once for all its code `<` (see angle_index): the scan from each `<` is one pass with a stack, and
+# a `<` that is a comparison would otherwise scan to the end of the text, which is quadratic on a large unit.
+def angle_index(s)
+  return $angle_index if $angle_index_for.equal?(s)
+  idx = {}
+  stack = []
+  k = 0
+  while k < s.length
+    e = skip_literal(s, k)
+    if e
+      k = e
+      next
+    end
+    if s[k] == "<"
+      idx[k] = nil
+      stack.push(k)
+    elsif s[k] == ">" && !stack.empty?
+      idx[stack.pop] = k
+    end
+    k += 1
+  end
+  $angle_index_for = s
+  $angle_index = idx
+  idx
+end
+
 def matching_angle(s, open)
+  if s.length >= 4000
+    idx = angle_index(s)
+    return idx[open] if idx.key?(open)
+  end
   depth = 0
   k = open
   while k < s.length
@@ -880,6 +910,14 @@ end
 
 def template_instances(name, text, stack)
   refuse("dependent launch: #{(stack + [name]).join(' -> ')} instantiates itself through its template arguments") if stack.include?(name)
+  # The instances of a name depend on the text only (the stack decides only the refusal above, and a name reached
+  # again on a cycle is refused before its instances are used). Memoized per text: the mutual recursion of
+  # mul_mat_f_cuda and mul_mat_f_switch_ids otherwise explores every path again.
+  unless $template_instances_for.equal?(text)
+    $template_instances_for = text
+    $template_instances = {}
+  end
+  return $template_instances[name].dup if $template_instances.key?(name)
   out = []
   sites = call_sites(text, name).map { |targs, pos| [split_top(targs), pos] }
   # Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
@@ -909,7 +947,8 @@ def template_instances(name, text, stack)
       out << args
     end
   end
-  out.uniq
+  $template_instances[name] = out.uniq
+  $template_instances[name].dup
 end
 
 # Line (1-based) and column (0-based) of position pos in s. The newline positions of s are indexed once.
@@ -2897,7 +2936,57 @@ def refuse_unlowered_cccl(s)
 end
 
 # The innermost `{ ... }` block that contains position pos, as [open, close] indices; nil at file scope.
+# A large text is indexed once (see block_index): the same answers, without a scan from the start per query.
 def enclosing_block(s, pos)
+  return enclosing_block_scan(s, pos) if s.length < 4000
+  idx = block_index(s)
+  events = idx[:events]
+  lo = 0
+  hi = events.length
+  while lo < hi
+    mid = (lo + hi) / 2
+    if events[mid][0] < pos
+      lo = mid + 1
+    else
+      hi = mid
+    end
+  end
+  return nil if lo == 0
+  open = events[lo - 1][1]
+  return nil if open.nil?
+  [open, idx[:closes][open]]
+end
+
+# Every `{` and `}` of a text in one pass, as the scan of enclosing_block_scan sees them: events are [position, the
+# innermost open `{` after the brace] in order, and closes maps each `{` to the `}` that closes it (s.length if none).
+def block_index(s)
+  return $block_index if $block_index_for.equal?(s)
+  events = []
+  closes = {}
+  stack = []
+  k = 0
+  while k < s.length
+    e = skip_literal(s, k)
+    if e
+      k = e
+      next
+    end
+    if s[k] == "{"
+      stack.push(k)
+      events << [k, stack[-1]]
+    elsif s[k] == "}" && !stack.empty?
+      closes[stack.pop] = k
+      events << [k, stack[-1]]
+    end
+    k += 1
+  end
+  stack.each { |o| closes[o] = s.length }
+  $block_index_for = s
+  $block_index = { events: events, closes: closes }
+  $block_index
+end
+
+def enclosing_block_scan(s, pos)
   stack = []
   i = 0
   while i < pos
