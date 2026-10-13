@@ -1,7 +1,8 @@
 # AddressSanitizer for the other backends: plan
 
-Status: the gcc backend is done, and the qbe backend has milestones 1-6 below (loads and stores, redzones, use after scope;
-`asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter. Nothing here is implemented; it comes from reading `qbe-prep.rb`, cproc's `qbe.c`,
+Status: the gcc backend is done, and the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
+use after return; `asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter.
+Nothing of Path B or wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
 ## Common design
@@ -20,8 +21,9 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-6): the cproc changes are the `nfcxx-asan-unwind` branch of take-cheeze/cproc (pinned as `3rd/cproc`; it
-is `nfcxx-asan` plus the setjmp return poison), see `asan.md`. Remaining: the optional part of 6 below.
+Done (milestones 1-7): the cproc changes are the `nfcxx-asan` branch of take-cheeze/cproc, combined on `nfcxx-asan-combined`
+(`3rd/cproc` is pinned to it: `nfcxx-asan`, plus the setjmp return poison and use after return). See `asan.md`. Remaining: elision of
+checks (optional, below).
 
 Options considered:
 
@@ -44,7 +46,13 @@ Milestones:
    every object whose block is not open at the call (`asansetjmp`, `asanfinish`): that covers a C longjmp and EDG's throw to a
    `try` in the same frame, with no record of the longjmp. Tests: `scope_throw_escape.cpp`, `scope_longjmp_escape.c` (qbe
    only) and their clean cases. Not done: a setjmp under another name, and an exit that leaves a callee's frame (the callee's
-   objects). Still open, optional: fake stack (use after return), elision of checks on non-escaping locals.
+   objects). Still open, optional: elision of checks on non-escaping locals.
+   block. Return needs nothing (funcret). Still open, optional: elision of checks on
+   non-escaping locals.
+7. Use after return (done, `asanalloc`, `asanselect`, `asanfree`, `asan.md` "Use after return"): every fixed-size object of
+   align 16 or less is in a libasan fake frame (`__asan_stack_malloc_N` at the entry, `__asan_stack_free_N` at each return),
+   with gcc's ABI and header, so the report is `stack-use-after-return` on both backends. Not done: one frame per function
+   (gcc's), objects over 16-byte alignment, VLA and alloca (the real frame only).
 Open check: the unwinder wants `rbp` chains; QBE keeps them, but verify with a report.
 
 ## Path B: emit from `pathb-qbe-emit.rb`
