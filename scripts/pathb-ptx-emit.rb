@@ -493,9 +493,17 @@ class Fn
       elsif h == "params"
         f.drop(1).each_with_index do |p, k|
           raise Refused, "variadic function" if head_of(p) == "ellipsis"
+          if head_of(p) == "sret"
+            # the hidden result parameter of a function returning a struct: the address of the result object
+            raise Refused, "sret form #{form_text(p)}" unless p.length == 3
+            raise BadIR, "sret register must be %#{k}" unless p[1] == "%#{k}"
+            @params << ["ptr", nil]
+            next
+          end
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param" && p.length == 4
           raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
-          ty = parse_type(p[3])
+          # a byval parameter: the address of the caller's copy (the value is read through it)
+          ty = head_of(p[3]) == "byval" ? ["ptr", nil] : parse_type(p[3])
           raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
@@ -946,6 +954,20 @@ class Fn
       expect(r[1], ty)
       # a bool register is a predicate: its value is copied as a predicate (operand gives one for a bool)
       emit(reg_class(r[1]) == "p" ? "mov.pred #{r[0]}, #{text};" : "mov.#{ptx_type(r[1])} #{r[0]}, #{text};")
+    when "copy"
+      # (copy BYTES DST SRC): the bytes of an aggregate, moved through generic addresses
+      n = as_int(s[1])
+      dv, dty = operand(s[2])
+      sv, sty = operand(s[3])
+      dr = reg_of(dv, dty)
+      sr = reg_of(sv, sty)
+      # Byte moves: the IR's copy does not give the alignment of the objects, and a wider access of a struct with
+      # alignment 2 (a half2) is a misaligned address on the device. (Slower than the aligned widths would be.)
+      (0...n).each do |off|
+        t = fresh("r")
+        emit("ld.u8 #{t}, [#{sr}+#{off}];")
+        emit("st.u8 [#{dr}+#{off}], #{t};")
+      end
     when "store"
       ty = parse_type(s[1])
       addr, aty = operand(s[2])
@@ -1344,6 +1366,8 @@ class Fn
     emit("{")
     regs = []
     args.each_with_index do |a, k|
+      # (byval (struct ...) OBJ) and (sret (struct ...) OBJ): the object's address is the argument
+      a = a[2] if head_of(a) == "byval" || head_of(a) == "sret"
       v, aty = operand(a)
       expect(callee.params[k], aty)
       regs << reg_of(v, aty)
@@ -1436,6 +1460,10 @@ def emit_module(src, sm, kernels = [])
       raise Refused, "data #{name} (only string constants are lowered)" unless head_of(payload) == "string" && payload.length == 2
       raise Refused, "data #{name} is defined twice" if strings.key?(name)
       strings[name] = payload[1].to_s.bytes
+    elsif h == "abi-type"
+      # the ABI class of a struct (for the host calling convention): the device code passes such values by address
+      # (byval and sret, below), so the record needs no code
+      next
     elsif h == "global"
       # A file-scope static array of the device unit is block-shared memory (CUDA's __shared__): its name and
       # size come from the IR, and it must be zero-initialized. Any other global is refused.

@@ -1276,7 +1276,7 @@ HALF_CORE = "#ifndef __NFCXX_HALF_CORE\n#define __NFCXX_HALF_CORE\n" \
 # __half2: two halves packed in an unsigned int, the low half in bits 0..15 (x) and the high half in bits 16..31 (y).
 # The pair functions are plain integer code on that packing; the lanes use the half operations above, through one
 # guarded helper so that several pair functions in a unit define it once.
-HALF2_TYPE = "#ifndef __NFCXX_HALF2_TYPE\n#define __NFCXX_HALF2_TYPE\ntypedef unsigned int __half2;\n#endif\n"
+HALF2_TYPE = "#ifndef __NFCXX_HALF2_TYPE\n#define __NFCXX_HALF2_TYPE\ntypedef struct __nfcxx_half2 { unsigned short x, y; } __half2;\n#endif\n"
 HALF_LANE = HALF_CORE + "#ifndef __NFCXX_HALF_LANE\n#define __NFCXX_HALF_LANE\n" \
   "static inline unsigned short __nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __hadd(a, b) : __hmul(a, b); }\n" \
   "#endif\n"
@@ -1368,15 +1368,17 @@ BUILTIN_DEFS = {
   "ldexpf" => "static inline float ldexpf(float x, int e) { return x * (float)(1 << (e > 30 ? 30 : (e < -30 ? -30 : e))); }\n",
   "fmaxf" => "static inline float fmaxf(float a, float b) { return a != a ? b : (b != b ? a : (a > b ? a : b)); }\n",
   "__half2" => HALF2_TYPE,
-  "__halves2half2" => HALF2_TYPE + "static inline __half2 __halves2half2(unsigned short a, unsigned short b) { return (unsigned)a | ((unsigned)b << 16); }\n",
-  "__low2half" => HALF2_TYPE + "static inline unsigned short __low2half(__half2 h) { return (unsigned short)(h & 0xffffu); }\n",
-  "__high2half" => HALF2_TYPE + "static inline unsigned short __high2half(__half2 h) { return (unsigned short)(h >> 16); }\n",
-  "__half2half2" => HALF2_TYPE + "static inline __half2 __half2half2(unsigned short h) { return (unsigned)h | ((unsigned)h << 16); }\n",
-  "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { return (a & 0xffffu) | ((b & 0xffffu) << 16); }\n",
-  "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { return (a >> 16) | ((b >> 16) << 16); }\n",
-  "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float((unsigned short)(h >> 16)); }\n",
-  "__low2float" => HALF2_TYPE + HALF_CORE + "static inline float __low2float(__half2 h) { return __half2float((unsigned short)(h & 0xffffu)); }\n",
-  "__hmax2" => HALF2_TYPE + HALF_CORE + HMAXL + "static inline __half2 __hmax2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hmaxl((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu)) | ((unsigned)__nfcxx_hmaxl((unsigned short)(a >> 16), (unsigned short)(b >> 16)) << 16); }\n",
+  "__halves2half2" => HALF2_TYPE + "static inline __half2 __halves2half2(unsigned short a, unsigned short b) { __half2 r; r.x = a; r.y = b; return r; }\n",
+  "__low2half" => HALF2_TYPE + "static inline unsigned short __low2half(__half2 h) { return h.x; }\n",
+  "__high2half" => HALF2_TYPE + "static inline unsigned short __high2half(__half2 h) { return h.y; }\n",
+  "__half2half2" => HALF2_TYPE + "static inline __half2 __half2half2(unsigned short h) { __half2 r; r.x = h; r.y = h; return r; }\n",
+  "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { __half2 r; r.x = a.x; r.y = b.x; return r; }\n",
+  "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { __half2 r; r.x = a.y; r.y = b.y; return r; }\n",
+  "__half22float2" => HALF2_TYPE + HALF_CORE + "static inline float2 __half22float2(__half2 h) { return make_float2(__half2float(h.x), __half2float(h.y)); }\n",
+  "__float22half2_rn" => HALF2_TYPE + HALF_CORE + "static inline __half2 __float22half2_rn(float2 f) { __half2 r; r.x = __float2half(f.x); r.y = __float2half(f.y); return r; }\n",
+  "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float(h.y); }\n",
+  "__low2float" => HALF2_TYPE + HALF_CORE + "static inline float __low2float(__half2 h) { return __half2float(h.x); }\n",
+  "__hmax2" => HALF2_TYPE + HALF_CORE + HMAXL + "static inline __half2 __hmax2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hmaxl(a.x, b.x); r.y = __nfcxx_hmaxl(a.y, b.y); return r; }\n",
   "nv_bfloat16" => BF16_CORE,
   "nv_bfloat162" => BF16_CORE,
   "__nv_bfloat16" => BF16_CORE,
@@ -1385,8 +1387,8 @@ BUILTIN_DEFS = {
   "__bfloat162float" => BF16_CORE,
   "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return (unsigned short)(h & 0xffffu); }\n",
   "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return (unsigned short)(h >> 16); }\n",
-  "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 1) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 1) << 16); }\n",
-  "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 0) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 0) << 16); }\n",
+  "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
+  "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
   "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
   "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",
@@ -2171,6 +2173,8 @@ def device_tu(text)
   out << DEVICE_PRELUDE << device_decls << "\n"
   # A vector type the device code names, and the source does not define: its declaration (once per type).
   done = {}
+  # The float2 conversions below take or return float2: its declaration is needed whenever one of them is.
+  needed["float2"] = true if needed["__half22float2"] || needed["__float22half2_rn"]
   VECTOR_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
