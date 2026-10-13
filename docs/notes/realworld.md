@@ -337,6 +337,24 @@ Other things the build exposed, not on cproc's side:
 - The QBE backend of `nfcc` ignores `-O*`/`-g`: no optimisation levels and no debug info (assembly from `-S`
   has no `.loc` lines). The gcc backend honours them.
 
+## optcarrot (benchmark on an nfcc-built mruby)
+
+[optcarrot](https://github.com/mame/optcarrot), a pure-Ruby NES emulator used as a Ruby implementation benchmark, was
+migrated here from rpg-maker-clone's `tools/optcarrot_probe` (its interpreted-mruby configuration; the bc2cpp compiled
+configurations stay in that repository). `tests/realworld/run_optcarrot.sh` fetches mruby (the `run_mruby.sh` pin),
+optcarrot (`c215378a`, rpg-maker-clone's `3rd/optcarrot` pin) and mruby-onig-regexp (`4962d7eb`) into `build/realworld`,
+builds mruby with `nfcc` through `tests/realworld/optcarrot/mruby_build_config.rb` and runs the unmodified upstream
+source as one script (`tests/realworld/optcarrot/build_bundle.rb`: mruby has no `require_relative`, so the files are
+concatenated in load order with `shims.rb` and `runner_tail.rb`). Two things mruby 4.0.0 lacks for it: Regexp (the onig
+gem, whose bundled Onigmo is built by `./configure` and `make` with `nfcc` as `CC`) and bare `module_function`
+(`tests/realworld/optcarrot/mruby-module-function-scope.patch`, applied to the clone). The check is the video checksum of
+the 180-frame run on `examples/Lan_Master.nes`, 59662, the same as CRuby's; the script prints the frames per second.
+
+Checked: the gcc control build (`OPTCARROT_CONTROL=1`; host gcc as the mruby compiler) gave checksum 59662 at about
+12 fps, and CRuby 3.3.6 gave 59662 at about 37 fps. **Not run with nfcc**: the session that wrote this had no access to
+the private `3rd/edg` submodule, so neither backend of `nfcc`/`nfcxx` was built. The first CI run is the first test of
+Onigmo's autotools build under `nfcc` and of the qbe-built VM's speed on 180 frames.
+
 ## Next candidates
 
 Projects with no dependencies and their own tests, to find the next gaps: a small compression library in C++, or
