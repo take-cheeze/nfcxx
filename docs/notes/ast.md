@@ -286,8 +286,9 @@ from the frame chain: `error(msg, 2)` blames the caller of the function that mad
 frame for those too). The tier is asked about the callee again each time round the loop, like for a call. Two consequences for
 the inliner: a tail site is never inlined (the inlined frame would sit above the caller's), and a callee whose body has a `return f(x)`
 is not a candidate (a clone cannot replace its frame); both are decided in `nfcast_inline.inc` and `CallUninit` / `MethodTab`.
-Native code made by the tier recurses in C: a tail recursion deeper than the depth limit bails out of it, and the interpreter then
-runs it in constant stack.
+Native code made by the tier recurses in C, except for one case: a tail call of the function to itself is a jump in the native code
+(`Gen::self_tail`, see "Tiering"), so a self tail recursion of any depth runs in one entry. A tail call of another function still recurses
+in C: a tail recursion of that kind deeper than the depth limit bails out of it, and the interpreter then runs it in constant stack.
 
 An error message about a value read with a computed key (`t[k].x` with `t[k]` nil) says `(field '?')` as Lua's does, `t[1]` says
 `(field 'integer index')`; and the errors of integer division and modulo by zero when an operand is a string have no position, like
@@ -389,7 +390,11 @@ interpreter*, with nothing to undo:
   such operand goes into a temporary first.
 - **Depth**: the compiled calls count like `State::depth`, with the same limit (`stack overflow` comes from the interpreter
   after the abandoned run), and the code is not run at all when the interpreter's value stack could not hold that many frames of
-  the unit.
+  the unit. A tail call does not count, as in the interpreter (`call_closure` reuses the frame of `return f(...)`), so a self
+  tail call is compiled as a jump: the arguments go into temporaries first (they read the parameters that are about to change),
+  the parameters take them, and the body starts again after the depth was counted. A tail call with another instance of the same
+  function (other argument types) is an ordinary call. Only a tail call written `return f(...)` is one: `return (f(...))` is a
+  call that counts (the view of the tier keeps the two apart, `TierView::tail`, as `ReturnNode` does).
 
 - **Assigned upvalues are copied in and out.** A kernel may assign an upvalue that holds a number or a boolean. The generated code
   works on a copy of it (the free variables are two words each in the array the engine fills at entry: the value, and for a number
@@ -500,6 +505,16 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   patch `nfcr_N`'s flag is a 32-bit `int` again; with a QBE built without it, 4 checks of `tier.cpp` and `tier_kernels.lua` fail on
   qbe, so re-run `scripts/setup-qbe.sh` after pulling.
 - A kernel that fails often costs the failed run plus the interpreter's run until it is given up.
+- **Tail calls between functions are not loops.** A self tail call is (above); a tail call of another kernel, mutual recursion
+  included (`is_even` / `is_odd` written as `return is_odd(n - 1)`), is a C call that counts depth. Such a recursion deeper than
+  `State::max_depth` (1500) abandons its run at the limit and the interpreter goes on in constant stack, as before the self-loop was
+  added; each tail call that the interpreter makes is offered to the compiled version again, which runs up to the limit and is
+  abandoned, and a version that aborts in more than a quarter of its runs, after eight, is given up. Measured (`is_even(1000000)` and `is_odd(1000001)`, qbe, warm
+  cache, best of three, the machine loaded by other jobs): the interpreter 0.57 s; the tier 1.07 s at the default threshold and 1.44 s
+  at threshold 1 before the self loop, and 1.31 s and 1.40 s after it (the same). Each version takes eight aborts and is given up,
+  and then the interpreter pays `tier_dispatch` at each of its tail calls (a signature and a lookup per call); that is the likely
+  cause of the difference (not profiled). Making such calls loops too would need the callee's frame to be the caller's (a jump between the instances of the
+  unit with the callee's arguments); that is not done, and neither is the cheaper dispatch for given-up versions.
 - Entering native code from the interpreter costs about as much as a call of a small function in the interpreter (the checks, a
   `setjmp`): a tiny kernel called from a loop in the interpreter gains little (ten million calls of
   `x * 2 + 1`, 0.54 s instead of 0.53 s); what gains is a kernel with a loop or a recursion inside, which runs inside one entry.
@@ -509,9 +524,12 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
 
 ## Verification
 
-- `tests/ast/cases/*.lua`: eleven programs (arithmetic and number formatting, strings and patterns, tables, closures,
-  metatables, errors and their messages, control flow, algorithms, garbage-heavy code, numeric kernels, and `tier_osr`: loops taken over
-  in the middle of a call (see below)) and, for the inlining, ten more named
+- `tests/ast/cases/*.lua`: sixteen programs (arithmetic and number formatting, strings and patterns, tables, closures,
+  metatables, errors and their messages, control flow, algorithms, garbage-heavy code, proper tail calls (`tail_calls`), numeric
+  kernels, `tier_kernels`, `tier_osr`: loops taken over in the middle of a call (see below), and `tail_loop`: a million-deep self
+  tail recursion as a kernel (integer and float accumulators, arguments that swap, a tail call that changes a type, a loop that calls
+  one each time), depth counted only by the calls that are not tail calls, mutual recursion, and the errors inside deep tail
+  recursions) and, for the inlining, thirteen more named
   `inline_*` (argument adjustment and the order of evaluation; parameter substitution (`inline_subst`: locals, constants and
   expressions as arguments, a parameter assigned, the same local twice, side effects between pure arguments, a boxed local and
   an upvalue the callee changes, error messages that name the callee's parameter, chains four deep, recursion, methods, a site
@@ -532,9 +550,9 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   point, each with inlining as it is by default, with a site rewritten as soon as it is used twice (`NFCAST_INLINE_WARM=1`) and
   with inlining off (`NFCAST_INLINE=0`); and with the tier on and every function compiled at its first call (`NFCAST_TIER=sync`,
   `NFCAST_TIER_THRESHOLD=1`): normally, with the collector stress, with early inlining, and with the tier compiling in the
-  background (`NFCAST_TIER=async`): 28 programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
+  background (`NFCAST_TIER=async`): 29 programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
   first version and compared equal because *both* implementations refused them: the check also requires that the reference run
-  succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr). Thirteen of the 23 programs are `inline_*`.
+  succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr). Thirteen of the 29 programs are `inline_*`.
 - `tests/ast/engine.cpp`: 194 checks through the C++ API (13 of them for the operators that read their operands in place) (the specialization counters, the collector, host objects, errors, the
   state of the interpreter after errors, pins) and, for the inlining, with `State::stats`: a loop of calls rewrites its site once
   and runs the rest inlined (97 of 100 calls with the default count, 98 with `inline_warm = 1`), a state with inlining off or
@@ -621,8 +639,10 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   capture (integer, float, both kinds, boolean), kernels that assign upvalues (also several at once, both kinds, a boolean, a float
   that is assigned an integer), and one variable reached in two ways while it is assigned. The counters of a run in the four
   configurations: 46 loops taken over, 7 left to the interpreter by a guard or an abandoned run, 10 that cannot be compiled.
-- `tests/ast/tier.cpp`: 318 checks of the tier through the C++ API, with the nfcxx driver of the build. The first compile and
-  its counters; a float argument to an integer kernel (a bailout, later a second version); recursion; mutual recursion; numeric
+- `tests/ast/tier.cpp`: 332 checks of the tier through the C++ API, with the nfcxx driver of the build. The first compile and
+  its counters; a float argument to an integer kernel (a bailout, later a second version); recursion; a self tail call as a loop (a
+  million deep in one entry with no abandoned run, an error inside it abandoned and then the interpreter's, `return (f(n))` against
+  `return f(n)` at the depth limit); mutual recursion; numeric
   upvalues and globals that change their value and their type; numbers of either kind (accumulators that start as an integer,
   results and parameters of either kind, bitwise operators, `//` and `%` and comparisons around 2^53 on them, a call made while a
   variable still had the type it was later widened from); a function rebound after it was compiled (a local, a global,
@@ -662,6 +682,9 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   not kernels as a whole (they make a table), with locals of the four types, one that a closure captures, a local function, and
   random loops (every kind, with `break` and `return`) that read and assign them, called three times with changing arguments and
   free variables, so that only the loops are compiled. Result: 40 seeds of 8 functions on gcc (488 functions and loops compiled, 1846 calls and 121 loops ran as native code) and 40 on qbe (504; 1845; 473), no mismatch.
+  The generator also ends about half of the recursive functions with a tail call of themselves (`return k(d - 1, ...)`, a loop in the
+  tier). After that change, `NFCXX_BACKEND=gcc tests/ast/fuzz_tier.sh 15 8 5`: 15 seeds of 8 functions, no mismatch (167 functions and
+  loops compiled, 617 calls and 59 loops ran as native code); `NFCXX_BACKEND=qbe` with the same arguments: the same counts and no mismatch.
 - The tier test, the engine test and the programs of `tests/ast/cases` with the tier at threshold 1 and the collector stress, under
   AddressSanitizer and UBSan (host g++ for the engine, nfcxx for the generated code): no report (rerun after the on-stack replacement: engine test, tier test with 315 checks, and the tier cases, clean).
 - Mutation checks on scratch copies of `nfcast_tier.cpp`: 21 mutants, each breaking one guard or one rule (the check of the callee, of the argument types, of the types of the free variables; the integer `//` by zero left to the interpreter; the depth limit; a `for` step of zero; the exact comparison of an integer with a float, in the generated code and in the shared header, for `<`, `<=` and `==` and for each order of the operands; the order in which a multiple assignment stores; the number type's zero divisor, conversion for bitwise operators, `>`, widening and result kind; the instances that widened types leave behind). The tier test fails for 20 of them (one by running into its `alarm`), and the golden kernels program differs for 13; the mutant of the equality of an integer and a float of either kind passed at first, which is why the test now has a grid of every comparison around 2^53 and 2^63 on such numbers. The one it does not notice: the hoisting of operands that can fail into temporaries is not needed by this toolchain, which evaluates operands left to right, so removing it changes nothing here; the check that would hang without it only has teeth on a C compiler that evaluates the other way.
@@ -828,6 +851,14 @@ machine (the tier off, the same engine without and with the new hooks: `intloop`
 and the threshold at 1, a program whose main chunk calls kernels from loops pays for the compile of the loops too (`mandel`: 0.25 s
 interpreted, 0.79 s with an empty cache, 0.02 s with the cache warm: its three loops of the main chunk are each a compile of about 0.2 s); the
 default threshold avoids that for loops that do not run long.
+
+A **self tail recursion** is a loop in the native code (see "Soundness", Depth). The program `local function loop(n, acc) if n == 0 then
+return acc end return loop(n - 1, acc + 1) end print(loop(1000000, 0)) print(loop(3000000, 0.5))`, qbe, warm cache, best of three on a
+machine that other jobs were loading (a factor of 1.5 is the noise): the interpreter 0.89 s; the tier before the change 2.8 s at
+threshold 1 and 3.8 s at the default threshold, where every compiled run went up to the depth limit, was abandoned, and the
+interpreter started it again, eight times per version, before the version was given up; after the change 0.039 s at threshold 1 and
+0.13 s at the default threshold, where the first 2000 calls of each version run in the interpreter and the rest run natively in one
+entry, with no abandoned run.
 
 What the tier does not help: a work that is not a kernel (tables, strings, native functions, closures in the hot part), and a loop whose
 iterations are cheap enough that the compile of 0.2 to 0.3 s is not paid back. A tiny kernel called from an interpreted loop
