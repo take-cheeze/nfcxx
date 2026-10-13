@@ -8,6 +8,8 @@
 #   pass:    block.cu (__syncthreads_or, __reduce_add_sync, __threadfence_system, __nanosleep, __isnanf, __shfl_up_sync),
 #            hmax.cu (__hmax) and math.cu (the float math and __dp4a, __ldg, __saturatef, __fdividef, within tolerances).
 #   pass:    shared_bf16.cu (a static __shared__ array named like a dynamic one in another kernel; nv_bfloat162 as two lanes).
+#   pass:    bf16_forms.cu (__float2bfloat16, __bfloat162float, __float22bfloat162_rn, __bfloat1622float2, __low2/high2bfloat16
+#            against CUDA host results, bit for bit, NaN canonical as the host).
 # Needs the CUDA toolkit (CUDA_HOME, default /usr/local/cuda) and an NVIDIA GPU; skips (exit 0) when missing.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -61,6 +63,7 @@ pass half2_member.cu "half2 member: no error, 0 mismatches"
 pass scalars.cu "scalars: no error, 0 mismatches"
 pass shared_bf16.cu "shared bf16: no error, 0 mismatches"
 pass prelude_gaps.cu "prelude gaps: no error, 0 mismatches"
+pass bf16_forms.cu "bf16 forms: no error, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
 exit $fail
