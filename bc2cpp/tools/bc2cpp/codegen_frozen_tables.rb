@@ -62,6 +62,19 @@ class CodeGen
     ENV.fetch('BC2CPP_SYMBOL_CLASS', '1') != '0' && immediate_class_bits_enabled?
   end
 
+  # BC2CPP_LOADSYM_CLASS=0 turns off the Symbol bit of a LOADSYM register in the numeric flow and the Symbol class
+  # chain of a class test (ADR 0429); the output is then the output before that change.
+  def loadsym_class_enabled?
+    ENV.fetch('BC2CPP_LOADSYM_CLASS', '1') != '0'
+  end
+
+  # The Symbol bit a LOADSYM register carries in the numeric flow (ADR 0429): the same bit as frozen_symbol_bit, so
+  # the register and a table slot name Symbol alike. nil (OTHER) when the switch is off, and when no bit was
+  # allocated (BC2CPP_SYMBOL_CLASS=0, or frozen tables refused): the bit is never allocated here.
+  def numeric_loadsym_bit
+    loadsym_class_enabled? ? frozen_symbol_bit : nil
+  end
+
   # The kind `LITERAL.freeze` at SEND0 +index+ evaluates to, 0 when the site is not a tracked one.
   def frozen_table_freeze_site(irep, index)
     @frozen_table_sites && @frozen_table_sites[[irep.label, index]]
