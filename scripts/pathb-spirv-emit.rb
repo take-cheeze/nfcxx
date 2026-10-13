@@ -1513,6 +1513,9 @@ class SFn
       raise Refused, "#{name} on a #{fty[0]}" unless fty[0] == "float"
       ft = sty(fty)
       g = GLSL_OF_MATH[k]
+      if k == 37
+        return [copysign_bits(xs[0], xs[1], fty), fty]
+      end
       if g.nil? && k == 36
         # fmod: x - y * trunc(x / y)
         q = res(136, ft, xs[0], xs[1])
@@ -1548,6 +1551,14 @@ class SFn
       p = atomic_ptr(args[0])
       v = u32_of(operand(args[1])[0], ["int", 4, false, false])
       return [res(code, @spv.t_int(32), p, @spv.c_u32(SCOPE_DEVICE), @spv.c_u32(SEM_RELAXED), v), ["int", 4, false, false]]
+    end
+    if name == "copysignf" || name == "__builtin_copysignf"
+      xs = args.map { |a| operand(a)[0] }
+      return [copysign_bits(xs[0], xs[1], ["float", 4]), ["float", 4]]
+    end
+    if name == "copysign" || name == "__builtin_copysign"
+      xs = args.map { |a| operand(a)[0] }
+      return [copysign_bits(xs[0], xs[1], ["float", 8]), ["float", 8]]
     end
     if name == "fmodf" || name == "__builtin_fmodf"
       xs = args.map { |a| operand(a)[0] }
@@ -1600,6 +1611,25 @@ class SFn
 
   def res_cas_value(p, e, d)
     res(230, @spv.t_int(32), p, @spv.c_u32(SCOPE_DEVICE), @spv.c_u32(SEM_RELAXED), @spv.c_u32(SEM_RELAXED), d, e)
+  end
+
+  # copysign(x, y): |x| with the sign bit of y (the bit patterns of f32 and f64)
+  def copysign_bits(x, y, fty)
+    if fty[1] == 4
+      ut, mag, sign = @spv.t_int(32), 0x7fffffff, 0x80000000
+      xb = res(124, ut, x)
+      yb = res(124, ut, y)
+      r = res(199, ut, xb, @spv.c_u32(mag))
+      sg = res(199, ut, yb, @spv.c_u32(sign))
+      res(124, @spv.t_float(32), res(197, ut, r, sg))
+    else
+      ut = @spv.t_int(64)
+      xb = res(124, ut, x)
+      yb = res(124, ut, y)
+      r = res(199, ut, xb, @spv.c_u64(0x7fffffffffffffff))
+      sg = res(199, ut, yb, @spv.c_u64(0x8000000000000000))
+      res(124, @spv.t_float(64), res(197, ut, r, sg))
+    end
   end
 
   def glsl_op(g, xs, ft)

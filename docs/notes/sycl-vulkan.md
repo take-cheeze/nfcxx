@@ -72,7 +72,7 @@ never touches memory again. Loops are arranged so this is legal SPIR-V: the loop
 ## Tests
 
 `tests/sycl/run.sh` runs each program on both backends. On Vulkan: `vecadd`, `saxpy2d`, `reduce`, `bytes`, `chain`,
-`matmul`, `usm`, `tables`, `libm`, `groups`, `barvar`, `atomics`, `redcustom`, `double`, and `trap_div` (exit 71). The
+`matmul`, `usm`, `tables`, `libm`, `groups`, `barvar`, `atomics`, `redcustom`, `double`, `copysign`, and `trap_div` (exit 71). The
 WGSL-only refusal (`refuse_double`) is a WebGPU check; Vulkan accepts `double`.
 
 Checked by mutation: changing the `OpFAdd` of `vecadd` to `OpFSub` in the emitted module fails the program (`vecadd FAIL
