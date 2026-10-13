@@ -453,7 +453,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   File.write(config, <<~RUBY)
     base = proc do
       toolchain
-      gembox 'full-core'
+      # full-core adds mruby-cmath, whose C _Complex cproc (the qbe back end) does not support; the default gembox has
+      # everything else this probe needs (Fiber, Set, Struct, Complex, Rational, metaprog).
+      gembox(ENV['NFCXX_BACKEND'] == 'qbe' ? 'default' : 'full-core')
       gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
       # QBE has no indirect jump, so the computed-goto dispatch (goto *label, which EDG emits for the C++ VM) cannot be
       # compiled by the qbe back end; the switch dispatch can. Only the qbe build changes; the gcc build keeps computed goto.
