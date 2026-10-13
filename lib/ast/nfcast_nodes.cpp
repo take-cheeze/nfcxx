@@ -245,12 +245,65 @@ inline Value ar_nn(State& S, const Value& a, const Value& b) {
   }
 }
 
+// ---- operands read in place ------------------------------------------------------------------------------------------------
+// An arithmetic or comparison node whose operand is a local of the running frame that is not boxed, a local of an outer frame
+// (a substituted parameter of an inlined body, nfcast_inline.inc) or a constant reads that operand itself, without the virtual
+// call to its node. The specialized nodes are instantiated for each shape of their operands (ArithII<OP, LK, RK> and so on; a
+// shape is kGen when the operand is evaluated through its node, as before). The operand's node stays the parent either way: the
+// generic path and the messages of errors (`describe`) still go through it. The shape is taken when a node is specialized, which
+// is after its function is complete, so the boxed flag of a local is final then; an Uninit node always evaluates its operands.
+constexpr int kGen = 0, kLocal = 1, kConst = 2;  // shapes of an operand
+
+struct Opnd {
+  enum K : unsigned char { Node_, Slot, Outer, Const } k = Node_;
+  int up = 0;    // Outer: frames back from the running one (1: the caller), as SubstLocal
+  int slot = 0;  // Slot, Outer
+  Value c;       // Const
+};
+Opnd bind_operand(Node* n);  // nfcast_inline.inc: the operand kind of a node, by its class (the inliner's classes are defined there)
+
+inline int shape_of(const Opnd& o) { return o.k == Opnd::Node_ ? kGen : o.k == Opnd::Const ? kConst : kLocal; }
+
+// The value of an operand of shape K.
+template <int K>
+inline Value read_operand(Frame& f, const Opnd& o, Node* n) {
+  if constexpr (K == kConst) {
+    return o.c;
+  } else if constexpr (K == kLocal) {
+    Frame* r = &f;  // as SubstLocal::eval: UP frames back, for an outer local; 0 for the frame's own
+    for (int i = 0; i < o.up; ++i) r = r->prev;
+    return r->base[o.slot];
+  } else {
+    return n->eval(f);
+  }
+}
+
+// Both operands, left to right, as the generic node evaluates them: the first is rooted while the second, if it runs code, is
+// evaluated. A local or a constant on the right runs no code, so nothing needs rooting for it.
+template <int LK, int RK>
+inline void read_operands(Frame& f, Node* l, Node* r, const Opnd& lo, const Opnd& ro, Value& a, Value& b) {
+  a = read_operand<LK>(f, lo, l);
+  if constexpr (RK != kGen) {
+    b = read_operand<RK>(f, ro, r);
+  } else if (a.is_gc() && !r->is_simple()) {
+    Pushed p(*f.S, a);
+    b = r->eval(f);
+  } else {
+    b = r->eval(f);
+  }
+}
+
 struct ArithBase : Node {
   int op;
   Node *l_, *r_;
+  Opnd lo_, ro_;  // the operands as bind_operand sees them (set by a specialized node's constructor)
   ArithBase(int o, Node* l, Node* r) : op(o), l_(l), r_(r) {
     adopt(l_);
     adopt(r_);
+  }
+  void bind() {
+    lo_ = bind_operand(l_);
+    ro_ = bind_operand(r_);
   }
   // Evaluates the operands left to right, keeping the first rooted while the second runs, then computes.
   Value eval(Frame& f) override {
@@ -278,10 +331,33 @@ struct ArithGen : ArithBase {
 ArithBase* make_ii(Frame& f, Node* self, int op, Node* l, Node* r);
 ArithBase* make_nn(Frame& f, Node* self, int op, Node* l, Node* r);
 
-template <int OP>
+// The node of class C<OP, LK, RK> for the shapes of the operands L and R, made in place of SELF.
+template <template <int, int, int> class C, int OP, class B>
+B* respec_shape(Frame& f, Node* self, Node* l, Node* r) {
+  switch (shape_of(bind_operand(l)) * 3 + shape_of(bind_operand(r))) {
+    case kGen * 3 + kGen: return respec<C<OP, kGen, kGen>>(f, self, l, r);
+    case kGen * 3 + kLocal: return respec<C<OP, kGen, kLocal>>(f, self, l, r);
+    case kGen * 3 + kConst: return respec<C<OP, kGen, kConst>>(f, self, l, r);
+    case kLocal * 3 + kGen: return respec<C<OP, kLocal, kGen>>(f, self, l, r);
+    case kLocal * 3 + kLocal: return respec<C<OP, kLocal, kLocal>>(f, self, l, r);
+    case kLocal * 3 + kConst: return respec<C<OP, kLocal, kConst>>(f, self, l, r);
+    case kConst * 3 + kGen: return respec<C<OP, kConst, kGen>>(f, self, l, r);
+    case kConst * 3 + kLocal: return respec<C<OP, kConst, kLocal>>(f, self, l, r);
+    default: return respec<C<OP, kConst, kConst>>(f, self, l, r);
+  }
+}
+
+// The operator node for two integers: calc takes any other operands to the number node or the generic one (a deopt).
+template <int OP, int LK, int RK>
 struct ArithII : ArithBase {
-  ArithII(Node* l, Node* r) : ArithBase(OP, l, r) {}
-  Value compute(Frame& f, const Value& a, const Value& b) override {
+  ArithII(Node* l, Node* r) : ArithBase(OP, l, r) { bind(); }
+  Value eval(Frame& f) override {
+    Value a, b;
+    read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
+    return calc(f, a, b);
+  }
+  Value compute(Frame& f, const Value& a, const Value& b) override { return calc(f, a, b); }
+  Value calc(Frame& f, const Value& a, const Value& b) {
     if (a.t == T_INT && b.t == T_INT) {
       if (OP == AR_MOD || OP == AR_IDIV) f.line = line;
       return ar_ii<OP>(*f.S, a.i, b.i);
@@ -293,10 +369,16 @@ struct ArithII : ArithBase {
   }
 };
 
-template <int OP>
+template <int OP, int LK, int RK>
 struct ArithNN : ArithBase {
-  ArithNN(Node* l, Node* r) : ArithBase(OP, l, r) {}
-  Value compute(Frame& f, const Value& a, const Value& b) override {
+  ArithNN(Node* l, Node* r) : ArithBase(OP, l, r) { bind(); }
+  Value eval(Frame& f) override {
+    Value a, b;
+    read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
+    return calc(f, a, b);
+  }
+  Value compute(Frame& f, const Value& a, const Value& b) override { return calc(f, a, b); }
+  Value calc(Frame& f, const Value& a, const Value& b) {
     if (a.is_number() && b.is_number()) {
       if (OP == AR_ADD || OP == AR_SUB || OP == AR_MUL || OP == AR_MOD || OP == AR_IDIV) {
         if (a.t == T_INT && b.t == T_INT) {
@@ -313,29 +395,29 @@ struct ArithNN : ArithBase {
 
 ArithBase* make_ii(Frame& f, Node* self, int op, Node* l, Node* r) {
   switch (op) {
-    case AR_ADD: return respec<ArithII<AR_ADD>>(f, self, l, r);
-    case AR_SUB: return respec<ArithII<AR_SUB>>(f, self, l, r);
-    case AR_MUL: return respec<ArithII<AR_MUL>>(f, self, l, r);
-    case AR_MOD: return respec<ArithII<AR_MOD>>(f, self, l, r);
-    case AR_IDIV: return respec<ArithII<AR_IDIV>>(f, self, l, r);
-    case AR_BAND: return respec<ArithII<AR_BAND>>(f, self, l, r);
-    case AR_BOR: return respec<ArithII<AR_BOR>>(f, self, l, r);
-    case AR_BXOR: return respec<ArithII<AR_BXOR>>(f, self, l, r);
-    case AR_SHL: return respec<ArithII<AR_SHL>>(f, self, l, r);
-    case AR_SHR: return respec<ArithII<AR_SHR>>(f, self, l, r);
+    case AR_ADD: return respec_shape<ArithII, AR_ADD, ArithBase>(f, self, l, r);
+    case AR_SUB: return respec_shape<ArithII, AR_SUB, ArithBase>(f, self, l, r);
+    case AR_MUL: return respec_shape<ArithII, AR_MUL, ArithBase>(f, self, l, r);
+    case AR_MOD: return respec_shape<ArithII, AR_MOD, ArithBase>(f, self, l, r);
+    case AR_IDIV: return respec_shape<ArithII, AR_IDIV, ArithBase>(f, self, l, r);
+    case AR_BAND: return respec_shape<ArithII, AR_BAND, ArithBase>(f, self, l, r);
+    case AR_BOR: return respec_shape<ArithII, AR_BOR, ArithBase>(f, self, l, r);
+    case AR_BXOR: return respec_shape<ArithII, AR_BXOR, ArithBase>(f, self, l, r);
+    case AR_SHL: return respec_shape<ArithII, AR_SHL, ArithBase>(f, self, l, r);
+    case AR_SHR: return respec_shape<ArithII, AR_SHR, ArithBase>(f, self, l, r);
     default: return respec<ArithGen>(f, self, op, l, r);
   }
 }
 
 ArithBase* make_nn(Frame& f, Node* self, int op, Node* l, Node* r) {
   switch (op) {
-    case AR_ADD: return respec<ArithNN<AR_ADD>>(f, self, l, r);
-    case AR_SUB: return respec<ArithNN<AR_SUB>>(f, self, l, r);
-    case AR_MUL: return respec<ArithNN<AR_MUL>>(f, self, l, r);
-    case AR_DIV: return respec<ArithNN<AR_DIV>>(f, self, l, r);
-    case AR_POW: return respec<ArithNN<AR_POW>>(f, self, l, r);
-    case AR_MOD: return respec<ArithNN<AR_MOD>>(f, self, l, r);
-    case AR_IDIV: return respec<ArithNN<AR_IDIV>>(f, self, l, r);
+    case AR_ADD: return respec_shape<ArithNN, AR_ADD, ArithBase>(f, self, l, r);
+    case AR_SUB: return respec_shape<ArithNN, AR_SUB, ArithBase>(f, self, l, r);
+    case AR_MUL: return respec_shape<ArithNN, AR_MUL, ArithBase>(f, self, l, r);
+    case AR_DIV: return respec_shape<ArithNN, AR_DIV, ArithBase>(f, self, l, r);
+    case AR_POW: return respec_shape<ArithNN, AR_POW, ArithBase>(f, self, l, r);
+    case AR_MOD: return respec_shape<ArithNN, AR_MOD, ArithBase>(f, self, l, r);
+    case AR_IDIV: return respec_shape<ArithNN, AR_IDIV, ArithBase>(f, self, l, r);
     default: return respec<ArithGen>(f, self, op, l, r);
   }
 }
@@ -453,9 +535,14 @@ inline bool cmp_ii(int op, std::int64_t a, std::int64_t b) {
 struct CmpBase : Node {
   int op;
   Node *l_, *r_;
+  Opnd lo_, ro_;  // the operands as bind_operand sees them (set by a specialized node's constructor, see ArithBase)
   CmpBase(int o, Node* l, Node* r) : op(o), l_(l), r_(r) {
     adopt(l_);
     adopt(r_);
+  }
+  void bind() {
+    lo_ = bind_operand(l_);
+    ro_ = bind_operand(r_);
   }
   Value eval(Frame& f) override {
     Value a = l_->eval(f), b;
@@ -484,20 +571,32 @@ struct CmpGen : CmpBase {
   Value compute(Frame& f, const Value& a, const Value& b) override { return generic(f, a, b); }
 };
 
-template <int OP>
+template <int OP, int LK, int RK>
 struct CmpII : CmpBase {
-  CmpII(Node* l, Node* r) : CmpBase(OP, l, r) {}
-  Value compute(Frame& f, const Value& a, const Value& b) override {
+  CmpII(Node* l, Node* r) : CmpBase(OP, l, r) { bind(); }
+  Value eval(Frame& f) override {
+    Value a, b;
+    read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
+    return calc(f, a, b);
+  }
+  Value compute(Frame& f, const Value& a, const Value& b) override { return calc(f, a, b); }
+  Value calc(Frame& f, const Value& a, const Value& b) {
     if (a.t == T_INT && b.t == T_INT) return Value::boolean(cmp_ii(OP, a.i, b.i));
     ++f.S->stats.deopts;
     return respec<CmpGen>(f, this, op, l_, r_)->compute(f, a, b);
   }
 };
 
-template <int OP>
+template <int OP, int LK, int RK>
 struct CmpFF : CmpBase {  // both floats
-  CmpFF(Node* l, Node* r) : CmpBase(OP, l, r) {}
-  Value compute(Frame& f, const Value& a, const Value& b) override {
+  CmpFF(Node* l, Node* r) : CmpBase(OP, l, r) { bind(); }
+  Value eval(Frame& f) override {
+    Value a, b;
+    read_operands<LK, RK>(f, l_, r_, lo_, ro_, a, b);
+    return calc(f, a, b);
+  }
+  Value compute(Frame& f, const Value& a, const Value& b) override { return calc(f, a, b); }
+  Value calc(Frame& f, const Value& a, const Value& b) {
     if (a.t == T_FLT && b.t == T_FLT) {
       switch (OP) {
         case CMP_LT: return Value::boolean(a.d < b.d);
@@ -514,18 +613,18 @@ struct CmpFF : CmpBase {  // both floats
 CmpBase* make_cmp(Frame& f, Node* self, int op, Node* l, Node* r, bool ints, bool floats) {
   if (ints) {
     switch (op) {
-      case CMP_LT: return respec<CmpII<CMP_LT>>(f, self, l, r);
-      case CMP_LE: return respec<CmpII<CMP_LE>>(f, self, l, r);
-      case CMP_GT: return respec<CmpII<CMP_GT>>(f, self, l, r);
-      default: return respec<CmpII<CMP_GE>>(f, self, l, r);
+      case CMP_LT: return respec_shape<CmpII, CMP_LT, CmpBase>(f, self, l, r);
+      case CMP_LE: return respec_shape<CmpII, CMP_LE, CmpBase>(f, self, l, r);
+      case CMP_GT: return respec_shape<CmpII, CMP_GT, CmpBase>(f, self, l, r);
+      default: return respec_shape<CmpII, CMP_GE, CmpBase>(f, self, l, r);
     }
   }
   if (floats) {
     switch (op) {
-      case CMP_LT: return respec<CmpFF<CMP_LT>>(f, self, l, r);
-      case CMP_LE: return respec<CmpFF<CMP_LE>>(f, self, l, r);
-      case CMP_GT: return respec<CmpFF<CMP_GT>>(f, self, l, r);
-      default: return respec<CmpFF<CMP_GE>>(f, self, l, r);
+      case CMP_LT: return respec_shape<CmpFF, CMP_LT, CmpBase>(f, self, l, r);
+      case CMP_LE: return respec_shape<CmpFF, CMP_LE, CmpBase>(f, self, l, r);
+      case CMP_GT: return respec_shape<CmpFF, CMP_GT, CmpBase>(f, self, l, r);
+      default: return respec_shape<CmpFF, CMP_GE, CmpBase>(f, self, l, r);
     }
   }
   return respec<CmpGen>(f, self, op, l, r);
