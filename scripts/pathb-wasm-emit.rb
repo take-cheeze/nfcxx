@@ -15,6 +15,11 @@
 # store and copy that reports a violation through the import env.__asan_report and traps. Without --asan the module is
 # the same as before the mode existed, byte for byte.
 #
+# Usage with --emscripten (before the file): the same module with the exports that the Emscripten JS runtime reads:
+# __indirect_function_table (an empty funcref table), __stack_pointer, __data_end and __heap_base (immutable i32
+# globals). The layout and the code are unchanged. --asan and --emscripten are not combined. Without the argument the
+# module is byte-identical to the one before the mode existed. docs/notes/pathb-wasm.md, "Emscripten".
+#
 # Layout and representation. The IR's layout is LP64 (pointers 8 bytes), and the emitter keeps it: a pointer value is an
 # i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Integers of 1, 2 and 4 bytes are
 # i32 values kept canonical (sign- or zero-extended from their width), so a comparison or a widening is a plain
@@ -330,6 +335,7 @@ class Module_
   attr_reader :types, :imports, :import_index, :defined_index
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
+  attr_accessor :emscripten   # the Emscripten exports (see encode_module)
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
@@ -1647,7 +1653,12 @@ end
 
 # ------------------------------------------------------------------ the module
 
-def emit_module(src, asan = false)
+# --emscripten: the exports the mode adds (encode_module). A function of the module may not take one of these names.
+EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base"]
+
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten] [FILE.ir | -] > out.wasm\n"
+
+def emit_module(src, asan = false, emscripten = false)
   forms = parse_forms(tokenize(src))
   defs = {}
   order = []
@@ -1671,8 +1682,14 @@ def emit_module(src, asan = false)
       raise Refused, "top-level form #{h || form_text(f)}"
     end
   end
+  if emscripten
+    order.each do |nm|
+      raise Refused, "function #{nm} takes the name of an export of --emscripten" if EMSCRIPTEN_EXPORTS.include?(nm)
+    end
+  end
   mod = Module_.new(defs)
   mod.asan = asan
+  mod.emscripten = emscripten
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
   mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
@@ -1734,26 +1751,62 @@ def encode_module(mod, bodies)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   uleb(mod.check_type, fsec) if mod.asan
   section(3, fsec, out)
+  # emscripten: the function table, exported empty. The emitter has no indirect calls and no function values (both are
+  # refused, see Fn#call and op_type), so no element segment is needed. It is exported under the name the glue looks for.
+  if mod.emscripten
+    tb = []
+    uleb(1, tb)
+    tb << 0x70 << 0x00                   # funcref, limits without a maximum
+    uleb(0, tb)                          # minimum 0 elements
+    section(4, tb, out)
+  end
   # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow
   mem = []
   uleb(1, mem)
   mem << 0x00
   uleb(mod.pages, mem)
   section(5, mem, out)
-  # global 0: the stack pointer, mutable i32, starts at the top of the memory (asan: below the shadow)
+  # global 0: the stack pointer, mutable i32, starts at the top of the memory (asan: below the shadow). The memory
+  # addresses are i32, so the stack pointer is too, in both modes. emscripten: global 1 is __data_end (the end of the
+  # static data) and global 2 is __heap_base (the top of the memory: the stack grows down from it, and a heap would
+  # begin there and grow the memory with memory.grow), both immutable i32.
   gl = []
-  uleb(1, gl)
+  uleb(mod.emscripten ? 3 : 1, gl)
   gl << VT[:i32] << 0x01
   gl << 0x41
   sleb(mod.stack_top, gl)
   gl << 0x0b
+  if mod.emscripten
+    gl << VT[:i32] << 0x00 << 0x41
+    sleb(mod.data_end, gl)
+    gl << 0x0b
+    gl << VT[:i32] << 0x00 << 0x41
+    sleb(mod.stack_top, gl)
+    gl << 0x0b
+  end
   section(6, gl, out)
-  # exports: the memory, then each function under its IR name
+  # exports: the memory, (emscripten: the table and the globals), then each function under its IR name
   ex = []
-  uleb(1 + bodies.length, ex)
+  nexp = 1 + bodies.length
+  nexp += 4 if mod.emscripten
+  uleb(nexp, ex)
   name_bytes("memory", ex)
   ex << 0x02
   uleb(0, ex)
+  if mod.emscripten
+    name_bytes("__indirect_function_table", ex)
+    ex << 0x01
+    uleb(0, ex)
+    name_bytes("__stack_pointer", ex)
+    ex << 0x03
+    uleb(0, ex)
+    name_bytes("__data_end", ex)
+    ex << 0x03
+    uleb(1, ex)
+    name_bytes("__heap_base", ex)
+    ex << 0x03
+    uleb(2, ex)
+  end
   bodies.each_with_index do |(nm, _), i|
     raise Refused, "function name #{nm.inspect} is not ASCII (an export name must be UTF-8)" if nm.bytes.any? { |b| b >= 0x80 }
     name_bytes(nm, ex)
@@ -1798,15 +1851,30 @@ end
 
 def main(argv)
   args = argv.dup
-  asan = args.first == "--asan"
-  args.shift if asan
+  asan = false
+  emscripten = false
+  while !args.empty? && args.first.start_with?("--")
+    flag = args.shift
+    if flag == "--asan"
+      asan = true
+    elsif flag == "--emscripten"
+      emscripten = true
+    else
+      $stderr.write(USAGE)
+      return 1
+    end
+  end
   if args.length > 1
-    $stderr.write("usage: pathb-wasm-emit.rb [--asan] [FILE.ir | -] > out.wasm\n")
+    $stderr.write(USAGE)
+    return 1
+  end
+  if asan && emscripten
+    $stderr.write("error: --asan and --emscripten are not combined (the shadow would sit where the heap begins)\n")
     return 1
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src, asan)
+    bytes = emit_module(src, asan, emscripten)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3

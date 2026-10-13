@@ -100,6 +100,66 @@ value in both modes.
 - The null page, addresses below 16. Accesses into the shadow itself (the top 1/8 of the memory) are not checked.
 - Uninitialized reads, leaks and the other checks of libasan.
 
+## Emscripten (`--emscripten`)
+
+`scripts/mrb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the same module with the exports the
+Emscripten JS runtime reads. It is the first step of the Emscripten compatibility plan. The layout and the code are
+unchanged; without the argument the module is byte-identical to the one before the mode existed. `--asan` and
+`--emscripten` are refused together (the shadow would sit where the heap begins). `NFCXX_WASM_EMSCRIPTEN=1` in
+`tests/wasm/run.sh` emits every test with the flag and runs `tests/wasm/emscripten.cjs` on each module.
+
+| Export | Kind | Value |
+| --- | --- | --- |
+| `memory` | memory | the linear memory (exported, not imported) |
+| `__indirect_function_table` | table, funcref | empty: 0 elements, no maximum |
+| `__stack_pointer` | global, mutable i32 | global 0, the stack pointer, at the top of the memory |
+| `__data_end` | global, immutable i32 | the end of the static data (the first address after the last object) |
+| `__heap_base` | global, immutable i32 | the top of the memory, which is also the initial stack pointer |
+
+- **The table.** The emitter refuses indirect calls (`Fn#call`) and function addresses (`op_type`, and a static
+  initializer of `&"f"`), so no function is ever stored in a table and the table has no element segment. It is exported
+  empty so that the table accessor the glue uses finds an export under that name. Whether the glue needs it at all is not
+  checked (see the list below).
+- **The stack pointer's type is i32, not the pointer type i64.** The IR's pointer values are i64 (LP64 is kept), but the
+  stack pointer only ever holds a linear-memory address, and a memory address is i32 in this module already (a memory
+  access wraps the i64 to i32). So the prologue is unchanged, and the glue's i32 is met. The consequence is that the
+  two kinds of pointer differ in wasm: a `T*` argument of an exported function is an i64, which a JS caller passes as a
+  BigInt, not a Number. Making the stack pointer i64 would have meant an i64 prologue and a wrap at each memory access,
+  and would have broken the i32 the glue reads.
+- **The heap base.** There is no allocator in the module, and the stack grows down from the top of the memory to the
+  static data. So the heap is placed where the stack starts: `__heap_base` is the top of the memory (`pages * 65536`),
+  and an `sbrk`-style allocator would grow the memory from there (the memory is not grown by the module itself). The
+  heap is empty at the start: it has no room until the memory grows.
+- **The imports** are unchanged: functions of module `env` that the IR calls without defining. No
+  `wasi_snapshot_preview1` import is added.
+- **Names.** A function of the IR may not take an export name of the mode (`EMSCRIPTEN_EXPORTS`): the module is refused.
+
+**Glue expectations not met** (the list for step 2; checked against the module, not against an Emscripten JS runtime,
+since none is installed here):
+
+1. **Pointer width.** The IR's pointer values are i64 (LP64), where the Emscripten wasm32 glue treats pointers as i32
+   numbers. A pointer crossing the JS boundary is a BigInt. Only the stack pointer and the globals are i32.
+2. **Memory import.** The memory is exported. Emscripten's default is to export it too, but `IMPORTED_MEMORY` (or a
+   shared memory) expects `env.memory`; that is not supported.
+3. **The table has no entries.** Function pointers are refused, so a call through the table (`addFunction`, a dynamic
+   call) would trap; the table is present only so that the accessor finds it.
+4. **Linking sections.** No `dylink.0`, `linking` or `reloc.*` custom section. That is needed for dynamic linking
+   (`MAIN_MODULE`, `SIDE_MODULE`) only.
+5. **Runtime imports.** The module imports every function the IR calls and does not define, under its C++ or C name
+   (`printf`, `malloc`, `free`, `__cxa_*`, ...). Emscripten's runtime provides `emscripten_*`, `__syscall_*`, `fd_write`
+   and its libc under other names, so an unmodified Emscripten runtime fails at instantiation with a LinkError for each
+   missing name. The programs in `tests/wasm` import only the host's stubs.
+6. **Exports the glue calls.** Not exported: `__wasm_call_ctors` (the static constructors), `malloc`/`free` (the glue's
+   `_malloc`, `allocate`), and the stack functions the glue uses (`emscripten_stack_get_current` and the other
+   `emscripten_stack_*` functions for `stackSave`). The `main` export is there; the glue calls it with the argument
+   list of the JS host.
+7. **Memory growth.** The heap has no room at the start (point 5 of "The heap base" above), so a `sbrk` that calls
+   `emscripten_resize_heap` (an import, not provided) would fail on the first allocation.
+8. **Stack checks.** The module has no stack limits (`__set_stack_limits`, the stack-overflow checks of the glue).
+
+The glue expectations above come from the Emscripten runtime as it is generally documented; no Emscripten checkout or
+`emcc` was available for this step, so they are a list to check in step 2, not a run.
+
 ## What is handled
 
 Scalars, pointers and their arithmetic (`offset`, `index`, `pdiff`), the integer and float operators, comparisons,
@@ -140,7 +200,7 @@ too. The tests write such expressions as `? 1 : 0`.
 
 ## Checks
 
-`tests/wasm/run.sh` compiles each test with the harness (`scripts/setup-pathb.sh`), emits it, validates and runs it under
+`tests/wasm/run.sh` (`NFCXX_WASM_EMSCRIPTEN=1` for the `--emscripten` mode, see above) compiles each test with the harness (`scripts/setup-pathb.sh`), emits it, validates and runs it under
 node, and compares the result with the expectation. The tests for the statics (`globals_*.cpp`) cover an array with an
 initializer, a struct with a pointer to another global, a string read through a pointer, an address with an addend, a
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
