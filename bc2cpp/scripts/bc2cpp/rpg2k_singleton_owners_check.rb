@@ -65,10 +65,11 @@ slices = lambda do
   end
   walk.call(tree, [])
   common = found.fetch('Game::CommonEvent')
-  # The slice keeps its own indentation; the first line starts mid-line.
+  # The slice keeps its own indentation; the first line starts mid-line. Prism offsets are bytes: a character
+  # index drifts past every multibyte comment above the node under a UTF-8 locale (game.rb has Japanese ones).
   text = lambda do |node|
-    line_start = source.rindex("\n", node.location.start_offset - 1).to_i + 1
-    source[line_start...node.location.end_offset]
+    line_start = source.byterindex("\n", node.location.start_offset - 1).to_i + 1
+    source.byteslice(line_start, node.location.end_offset - line_start)
   end
   [text.call(common), text.call(found.fetch('Game::MoveRoute.from_page')), text.call(found.fetch('Game::MoveRoute.same_route?'))]
 end
@@ -178,7 +179,10 @@ RUBY
 
 # name => [extra Ruby, sites that must bind (site => marker), sites that must not (site => marker)].
 # A site is "Class#method"; its marker is the text the generated body carries when it is bound.
-LOAD_BOUND = 'MONO :load -> Game::CommonEvent.singleton#load'
+# A constant receiver is bound as MONO, or as CLOSED_WORLD_CONSTANT_OBJECT (ADR 0259) once the closed world proves the
+# singleton unique; both are a direct C++ call to the owner's _impl, and the closed world with every submodule decides which.
+LOAD_BOUND = ['MONO :load -> Game::CommonEvent.singleton#load',
+              'CLOSED_WORLD_CONSTANT_OBJECT :load -> Game::CommonEvent.singleton#load'].freeze
 SAME_BOUND = 'MONO :same_route? -> Game::MoveRoute.singleton#same_route?'
 PAGE_BOUND = 'MONO :from_page -> Game::MoveRoute.singleton#from_page'
 KEYWORD_NEW = 'MONO :new -> Game::MoveRoute, direct compiled construct with real KEYWORD arguments'
@@ -249,7 +253,8 @@ worlds.each do |name, world|
              refused == expected)
   (world[:bound] || {}).each do |site, marker|
     body = body_of.call(code, site)
-    check.call("#{name}: #{site} carries `#{marker}`", !body.empty? && body.include?(marker))
+    markers = Array(marker)
+    check.call("#{name}: #{site} carries `#{markers.join('` or `')}`", !body.empty? && markers.any? { |m| body.include?(m) })
   end
   (world[:kept] || {}).each do |site, marker|
     body = body_of.call(code, site)
@@ -276,7 +281,8 @@ if selected.nil? || selected.include?('base')
   end
   # RSO_REGISTER names a modified copy (the mutation check).
   register = File.read(ENV.fetch('RSO_REGISTER') { File.join(ROOT, 'mruby-rpg2k-compiled/src/register.cxx') })
-  guarded = register[/^#ifndef BC2CPP_HOT_ONLY_STUBS\n(.*?)^#endif  \/\/ BC2CPP_HOT_ONLY_STUBS/m, 1].to_s
+  # The hot-only guard is register.cxx's own (ADR 0428 keeps the hand registrations under KEEP_HAND_REGISTRATIONS).
+  guarded = register[%r{^#if !defined\(BC2CPP_HOT_ONLY_STUBS\) \|\| defined\(BC2CPP_KEEP_HAND_REGISTRATIONS\)\n(.*?)^#endif  // BC2CPP_HOT_ONLY_STUBS}m, 1].to_s
   {
     'load' => 'common_event', 'eligible' => 'common_event', 'from_page' => 'move_route', 'same_route?' => 'move_route'
   }.each do |name, klass|
@@ -289,7 +295,7 @@ if selected.nil? || selected.include?('base')
   check.call('register.cxx guards move_route.from_page with BC2CPP_SKIPPED_Game__MoveRoute_singleton_from_page',
              guarded.match?(/^#ifndef BC2CPP_SKIPPED_Game__MoveRoute_singleton_from_page\n\s*mrb_define_class_method\(M, move_route, "from_page",/))
   Dir.mktmpdir do |dir|
-    code, = runtime.generate(FIXTURE + worlds.fetch('an open world')[:extra], dir, only_owners: OWNERS, build_gems: TIME_GEM,
+    code, = runtime.generate(FIXTURE + WORLDS.fetch('an open world')[:extra], dir, only_owners: OWNERS, build_gems: TIME_GEM,
                                                                                     drop_gems: ENGINE_GEMS, skip_unsupported: true, closed: false)
     check.call('an open world, shipped pass: from_page is dropped and BC2CPP_SKIPPED_Game__MoveRoute_singleton_from_page says so',
                code.include?("#define BC2CPP_SKIPPED_Game__MoveRoute_singleton_from_page 1\n"))
