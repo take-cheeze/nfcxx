@@ -7,17 +7,25 @@
 #   // XFAIL-gcc: <reason>      same for the gcc backend. An XFAIL that passes is a failure (remove the marker).
 #   // X86-ONLY-<backend>: <reason>  skip that backend on hosts other than x86-64.
 cd "$(dirname "$0")/../.."
+#   // GCC-DIALECT-ONLY: <reason>  skip the probe when the host C++ compiler is clang (Apple's g++; its builtins differ).
+cd_root=$PWD; source "$cd_root/scripts/host-sys.sh"
+host_is_clang=$( [ "$(host_dialect)" = clang ] && echo 1 || echo 0 )
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   for f in tests/builtins/*.cpp; do
     name=$(basename "$f" .cpp)
-    want=$(sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$f" | head -1)
+    want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
     dialect=$(sed -n 's,^// DIALECT: *\(.*\),\1,p' "$f" | head -1)
     xfail=$(sed -n "s,^// XFAIL-$be: *\(.*\),\1,p" "$f" | head -1)
     x86only=$(sed -n "s,^// X86-ONLY-$be: *\(.*\),\1,p" "$f" | head -1)
+    if [ "$(uname -s)" = Darwin ] && [ -z "$xfail" ]; then xfail=$(sed -n "s,^// MACOS-XFAIL-$be: *\(.*\),\1,p" "$f" | head -1); fi
     if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
       echo "skip  $be $name (x86-64 only: $x86only)"; continue
+    fi
+    gccdialect=$(sed -n 's,^// GCC-DIALECT-ONLY: *\(.*\),\1,p' "$f" | head -1)
+    if [ -n "$gccdialect" ] && [ $host_is_clang = 1 ]; then
+      echo "skip  $be $name (host C++ compiler is clang: $gccdialect)"; continue
     fi
     if ./nfcxx --gnu-version=130000 ${dialect:+--dialect=$dialect} --backend="$be" "$f" -o "$tmp/t" 2>"$tmp/err"; then
       "$tmp/t" >/dev/null 2>&1; got=$?

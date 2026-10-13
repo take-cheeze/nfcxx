@@ -18,7 +18,7 @@ case $lang in ruby|lua|js) ;; *) echo "usage: $0 ruby|lua|js" >&2; exit 1 ;; esa
 for t in curl tar gcc g++ ar; do command -v $t >/dev/null || skip "$t not found"; done
 dest=$work/$lang
 [ -z "${FORCE:-}" ] && [ -f "$dest/.built" ] && exit 0
-mkdir -p "$work"; exec 9>"$work/.lock"; flock 9
+mkdir -p "$work"; exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && [ -f "$dest/.built" ] && exit 0
 log=$work/build-$lang.log; : > "$log"
 fail() { tail -20 "$log" >&2; echo "setup-poly-host: $lang build failed (log: $log)" >&2; exit 1; }

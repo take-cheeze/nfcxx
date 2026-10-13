@@ -1774,6 +1774,27 @@ BUILTIN_DEFS = {
   "tanhf" => "static inline float tanhf(float x) { if (x != x || x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
     "if (ax >= 10.0) return x < 0.0f ? -1.0f : 1.0f; double e = __nfcxx_expm1d(2.0 * ax); double t = e / (e + 2.0); " \
     "return (float)(d < 0.0 ? -t : t); }\n",
+  # log1pf in double: u = 1 + x is exact for |x| >= 2^-29 (x is a float); u is scaled by powers of two into [1/sqrt2, sqrt2)
+  # and log(u) = k ln2 + 2 atanh(s), s = (u - 1) / (u + 1), |s| <= 0.1716, 15 odd terms (below 2^-53). |x| < 2^-30 is x.
+  # NaN and +inf pass through; x == -1 is -inf; x < -1 is NaN.
+  "log1pf" => "static inline float log1pf(float x) { if (x != x || x == 1.0f / 0.0f) return x; if (x == -1.0f) return -1.0f / 0.0f; " \
+    "if (x < -1.0f) return 0.0f / 0.0f; if (x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
+    "if (ax < 1.0 / 1073741824.0) return x; double U = 1.0 + d; int k = 0; " \
+    "while (U >= 65536.0) { U *= 1.0 / 65536.0; k += 16; } while (U < 1.0 / 65536.0) { U *= 65536.0; k -= 16; } " \
+    "while (U >= 1.4142135623730951) { U *= 0.5; k++; } while (U < 0.7071067811865476) { U *= 2.0; k--; } " \
+    "double s = (U - 1.0) / (U + 1.0), s2 = s * s, p = s, acc = 0.0; " \
+    "for (int j = 1; j <= 15; j++) { acc += p / (double)(2 * j - 1); p *= s2; } " \
+    "return (float)((double)k * 0.6931471805599453 + (double)k * 2.3190468138462996e-17 + 2.0 * acc); }\n",
+  # The atomics the emitter lowers (ATOMICS): int add and max, int compare-and-swap, float add. The unsigned add is the
+  # signed one on the same bits (the sum wraps the same way).
+  "atomicAdd" => "extern \"C\" int __nfcxx_atomic_add_i(int *, int);\nextern \"C\" float __nfcxx_atomic_add_f(float *, float);\n" \
+    "static inline int atomicAdd(int *p, int v) { return __nfcxx_atomic_add_i(p, v); }\n" \
+    "static inline unsigned atomicAdd(unsigned *p, unsigned v) { return (unsigned)__nfcxx_atomic_add_i((int *)p, (int)v); }\n" \
+    "static inline float atomicAdd(float *p, float v) { return __nfcxx_atomic_add_f(p, v); }\n",
+  "atomicMax" => "extern \"C\" int __nfcxx_atomic_max_i(int *, int);\n" \
+    "static inline int atomicMax(int *p, int v) { return __nfcxx_atomic_max_i(p, v); }\n",
+  "atomicCAS" => "extern \"C\" int __nfcxx_atomic_cas_i(int *, int, int);\n" \
+    "static inline int atomicCAS(int *p, int c, int v) { return __nfcxx_atomic_cas_i(p, c, v); }\n",
   # memcpy and memset as byte loops (the device unit has no C library; the host copy keeps the real header).
   "memcpy" => "static inline void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = (unsigned char *)d; " \
               "const unsigned char *b = (const unsigned char *)s; for (size_t i = 0; i < n; i++) a[i] = b[i]; return d; }\n",
@@ -2477,11 +2498,79 @@ def function_head?(t)
   h.index("(") && !(h.index("=") && h.index("=") < h.index("("))
 end
 
-def device_tu(text)
-  pieces = top_pieces(text).map do |pc|
+# A host `const` or `constexpr` declaration is a constant that device code may read only when it is a value. A
+# reference or pointer (`const T &r = ...`, `const T *p = ...`) is host state, and so is an initializer that calls a
+# function, takes an address, or dereferences (`*(const Ctx *) p`): carrying it would carry its type too, with the
+# host-only members of that type (FILE *, a host struct), and the unit has no definition for them.
+def device_constant_decl?(t)
+  eq = t.index("=")
+  cut = [eq, t.index("["), t.index(";")].compact.min || t.length
+  head = t[0...cut]
+  return false if head.include?("&") || head.include?("*")
+  return true if eq.nil? || eq >= t.length
+  init = t[(eq + 1)..-1].to_s
+  semi = init.index(";")
+  init = init[0...semi] if semi
+  return false if init.include?("&")
+  return false if init.strip.start_with?("*")
+  return false if init.include?("*") && init.include?("(")
+  i = 0
+  while (i = init.index("(", i))
+    j = i - 1
+    j -= 1 while j >= 0 && white?(init[j])
+    word_end = j
+    j -= 1 while j >= 0 && ident_char?(init[j])
+    word = word_end > j ? init[(j + 1)..word_end] : ""
+    return false if !word.empty? && !%w[sizeof alignof decltype static_cast].include?(word)
+    i += 1
+  end
+  true
+end
+
+# The opener and closer of a linkage or namespace block (`extern "C" {`, `namespace n {`) that starts the piece t, as
+# [open, close] indices of its braces in t; nil when t is not one.
+def linkage_block(t)
+  f = 0
+  f += 1 while f < t.length && white?(t[f])
+  s = t[f..-1].to_s
+  return nil unless s.start_with?('extern "') || s.start_with?("namespace ")
+  b = s.index("{")
+  return nil if b.nil?
+  h = s[0...b]
+  return nil if h.include?("(") || h.include?("=") || h.include?(";")
+  open = f + b
+  close = matching_brace(t, open)
+  close.nil? ? nil : [open, close]
+end
+
+# A linkage or namespace block with device code is cut into its own top-level pieces, so the device unit keeps only
+# the pieces it needs (ggml.h's extern "C" block holds the host API and its types). Each piece keeps the block's opener
+# and closer as its wrap (nested blocks compose), so kernels keep their linkage and namespace. Preprocessor lines are
+# not wrapped: they stay at the top level.
+def flatten_linkage(text, raw)
+  raw.flat_map do |pc|
     st, en, kind, body = pc
     t = text[st...en]
-    info = { text: t, kind: kind, body: body, toks: tokens_of(t), defined: [], keep: false, device: false }
+    blk = kind != :pp && body ? linkage_block(t) : nil
+    next [pc] unless blk
+    open, close = blk
+    inner = t[(open + 1)...close]
+    base = st + open + 1
+    sub = top_pieces(inner).map { |s2, e2, k2, b2| [base + s2, base + e2, k2, b2] }
+    wo = t[0..open]
+    wc = t[close..-1]
+    flatten_linkage(text, sub).map do |inn|
+      iw = inn[4]
+      [inn[0], inn[1], inn[2], inn[3], [wo + (iw ? iw[0] : ""), (iw ? iw[1] : "") + wc]]
+    end
+  end
+end
+
+def device_tu(text)
+  pieces = flatten_linkage(text, top_pieces(text)).map do |pc|
+    st, en, kind, body = pc
+    t = text[st...en]
+    info = { text: t, kind: kind, body: body, toks: tokens_of(t), defined: [], keep: false, device: false, wrap: pc[4] }
     if kind == :pp
       rest = t.sub("#", "").gsub("\n", " ").strip
       d = rest.split(" ")[0] || ""
@@ -2566,8 +2655,9 @@ def device_tu(text)
       pc[:defined] += enum_enumerators(t) if kw == "enum"
     elsif pc[:body]
       next
-    elsif toks.include?("const") || toks.include?("constexpr")
-      # a constant: device code may read it. Other host variables are not reachable from device code.
+    elsif (toks.include?("const") || toks.include?("constexpr")) && device_constant_decl?(t)
+      # a constant: device code may read it. Other host variables are not reachable from device code, and neither are
+      # the const references and pointers that device_constant_decl? leaves out.
       cut = t.index("=") || t.index("[") || t.index(";") || t.length
       pc[:defined] = [tokens_of(t[0...cut]).last].compact
     end
@@ -2631,7 +2721,8 @@ def device_tu(text)
   end
   pieces.each do |pc|
     next unless pc[:keep]
-    out << rewrite_is_same_v(rewrite_builtins(pc[:text])) << "\n"
+    code = rewrite_is_same_v(rewrite_builtins(pc[:text]))
+    out << (pc[:wrap] && pc[:kind] != :pp ? pc[:wrap][0] + code + pc[:wrap][1] : code) << "\n"
   end
   $sites.each do |w, site|
     out << "extern \"C\" void #{w}(#{site[:decl]}) { #{site[:name]}<#{site[:targs]}>(#{site[:call].join(", ")}); }\n"
@@ -2772,6 +2863,34 @@ def refuse_shared_align(s)
         line = s[0...i].count("\n") + 1
         refuse("__shared__ __align__ at line #{line}: the device image does not carry shared-object alignment")
       end
+    end
+    i += 1
+  end
+end
+
+# CUDA library names the device image does not lower, refused by name in the device pass: CUB (`cub::`, its headers
+# are not in the device unit) and grid-wide cooperative groups (`this_grid`, `grid_group`: a grid barrier needs a
+# cooperative launch, which the image does not have). Without this, the front end reports the name as undefined.
+def refuse_unlowered_cccl(s)
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(s, i, "cub")
+      j = i + 3
+      j += 1 while j < s.length && white?(s[j])
+      if s[j, 2] == "::"
+        line = s[0...i].count("\n") + 1
+        refuse("cub:: at line #{line}: CUB is not lowered (the device unit does not carry its headers)")
+      end
+    end
+    %w[this_grid grid_group].each do |name|
+      next unless word_at?(s, i, name)
+      line = s[0...i].count("\n") + 1
+      refuse("#{name} at line #{line}: grid-wide cooperative groups are not lowered (a grid barrier needs a cooperative launch)")
     end
     i += 1
   end
@@ -3133,6 +3252,7 @@ text = File.open(path, "rb") { |f| f.read }
 text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
 refuse_shared_align(text) if device
+refuse_unlowered_cccl(text) if device
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
 if device

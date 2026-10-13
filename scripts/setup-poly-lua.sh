@@ -24,7 +24,7 @@ fresh() { [ -f "$dest/lib/liblua.a" ] && [ "$dest/lib/liblua.a" -nt scripts/lua-
 [ -z "${FORCE:-}" ] && fresh && exit 0
 [ -x "$root/build/edg/bin/eccp" ] || { echo "setup-poly-lua: EDG not built; run scripts/setup-edg.sh" >&2; exit 1; }
 mkdir -p "$work"
-exec 9>"$work/.lock"; flock 9
+exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && fresh && exit 0
 if [ ! -d "$src/.git" ]; then
   mkdir -p "$src" && git -C "$src" init -q &&

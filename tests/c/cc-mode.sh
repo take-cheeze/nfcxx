@@ -127,7 +127,7 @@ EOF
   check "--version" bash -c "'$nfcc' --version | head -1 | grep -q nfcc"
   check "-dumpmachine" bash -c "test \"\$('$nfcc' -dumpmachine)\" = \"\$(cc -dumpmachine)\""
   check "-dumpversion" bash -c "'$nfcc' -dumpversion | grep -q '^[0-9]'"
-  check "-v alone" bash -c "'$nfcc' -v 2>&1 | grep -q 'gcc version'"
+  check "-v alone" bash -c "'$nfcc' -v 2>&1 | grep -q 'version'"
   # autoconf-style probes: tiny program compile/link/run, no output name -> a.out
   mkdir -p conf && echo 'int main(void) { return 0; }' > conf/conftest.c
   check "autoconf probe: compile, link, run conftest" bash -c "cd conf && '$nfcc' conftest.c -o conftest && ./conftest && '$nfcc' conftest.c && ./a.out && '$nfcc' -c conftest.c && test -f conftest.o"
@@ -171,10 +171,10 @@ EOF
     fp=rbp; [ "$(uname -m)" = x86_64 ] || fp='sp, sp,'
     "$nfcc" -S opt.c -o opt_def.s; "$nfcc" -O0 -S opt.c -o opt0.s; "$nfcc" -O2 -S opt.c -o opt2.s; "$nfcc" -S -g opt.c -o optg.s
     "$nfcc" -O0 -O3 -S opt.c -o opt03.s; "$nfcc" -O3 -S opt.c -O0 -o opt30.s
-    if grep -q $fp opt0.s && ! grep -q $fp opt2.s && ! grep -q $fp opt_def.s; then ok "gcc backend: -O0 is unoptimised, -O2 and the default optimise"
-    else bad "gcc backend -O levels" "$fp in -O0: $(grep -c $fp opt0.s) -O2: $(grep -c $fp opt2.s) default: $(grep -c $fp opt_def.s)"; fi
-    if ! grep -q $fp opt03.s && grep -q $fp opt30.s; then ok "gcc backend: the last -O wins"
-    else bad "gcc backend: last -O wins" "-O0 -O3 $fp=$(grep -c $fp opt03.s), -O3 -O0 $fp=$(grep -c $fp opt30.s)"; fi
+    if grep -q "$fp" opt0.s && ! grep -q "$fp" opt2.s && ! grep -q "$fp" opt_def.s; then ok "gcc backend: -O0 is unoptimised, -O2 and the default optimise"
+    else bad "gcc backend -O levels" "$fp in -O0: $(grep -c "$fp" opt0.s) -O2: $(grep -c "$fp" opt2.s) default: $(grep -c "$fp" opt_def.s)"; fi
+    if ! grep -q "$fp" opt03.s && grep -q "$fp" opt30.s; then ok "gcc backend: the last -O wins"
+    else bad "gcc backend: last -O wins" "-O0 -O3 $fp=$(grep -c "$fp" opt03.s), -O3 -O0 $fp=$(grep -c "$fp" opt30.s)"; fi
     if grep -q '\.loc' optg.s && ! grep -q '\.loc' opt2.s; then ok "gcc backend: -g produces debug info, no -g does not"
     else bad "gcc backend -g" ".loc with -g: $(grep -c '\.loc' optg.s) without: $(grep -c '\.loc' opt2.s)"; fi
   else

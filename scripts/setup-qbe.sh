@@ -11,6 +11,7 @@
 # scripts/qbe-uninit-slot.patch and scripts/qbe-wflag.patch are applied to the QBE copy. Re-run this script after changing the pin.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
 git -C "$root" submodule update --init 3rd/qbe 3rd/cproc
 
 for p in qbe cproc; do
@@ -22,13 +23,20 @@ done
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
 # QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
-make -C "$root/build/qbe" -j"$(nproc)" >/dev/null
+make -C "$root/build/qbe" -j"$jobs" >/dev/null
 # cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
 # EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
 # cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
-(cd "$root/build/cproc" && ./configure >/dev/null && make -j"$(nproc)" cproc-qbe >/dev/null)
+# cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
+# and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
+if [ "$(uname -s)" = Darwin ]; then
+  case "$(uname -m)" in arm64) cproc_triple=aarch64-apple-darwin ;; x86_64) cproc_triple=x86_64-apple-darwin ;; esac
+  (cd "$root/build/cproc" && ./configure --host=$cproc_triple --target=$cproc_triple >/dev/null && make -j"$jobs" cproc-qbe >/dev/null)
+else
+  (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$jobs" cproc-qbe >/dev/null)
+fi
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of
 # libnfcxxld.a (be/nfcxx_ldrt.c), which must be on the link line. The archive has one object, so -u on one of its helpers
@@ -36,7 +44,7 @@ patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.pat
 # be/nfcxx_ldrt.c is x87 code (x86-64 only), so the stage-2 build runs only on x86-64 hosts.
 if [ "$(uname -m)" = x86_64 ]; then
   ldrt=$("$root/scripts/pathb-ldrt")
-  (cd "$root/build/cproc" && PATH="$root/build/qbe:$PATH" make -j"$(nproc)" stage2 \
+  (cd "$root/build/cproc" && PATH="$root/build/qbe:$PATH" make -j"$jobs" stage2 \
     LDFLAGS="-Wl,-u,__nfcxx_ld_add $ldrt -lgcc -lgcc_s -lstdc++" >/dev/null)
 fi
 if [ "$(uname -m)" = x86_64 ]; then

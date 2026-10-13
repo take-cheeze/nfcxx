@@ -254,6 +254,21 @@ def reg_class(t)
   raise Refused, "value of type #{t[0]} #{t[1]} bytes"
 end
 
+# The operand types of an inline PTX statement (ptx_asm): 2-, 4- and 8-byte integers (not bool), 4- and 8-byte floats,
+# and pointers.
+def asm_operand_ok(t)
+  return true if t[0] == "ptr"
+  return [2, 4, 8].include?(type_size(t)) if t[0] == "int" && !t[3]
+  return [4, 8].include?(type_size(t)) if t[0] == "float"
+  false
+end
+
+# The register of an inline PTX operand: a 2-byte integer takes a 16-bit register (.b16, the PTX constraint "h"), any
+# other operand its reg_class.
+def asm_class(t)
+  t[0] == "int" && t[1] == 2 ? "h" : reg_class(t)
+end
+
 # The PTX type suffix for a value or a memory access of an IR type: s32, u32, s64, u64 (a pointer is u64), f32, f64.
 def ptx_type(t)
   return "u64" if t[0] == "ptr"
@@ -612,10 +627,12 @@ class Fn
     raise BadIR, "value of type #{ty[0]} (#{type_size(ty)} bytes) stored in a #{dty[0]} (#{type_size(dty)} bytes)" unless reg_class(dty) == reg_class(ty)
   end
 
-  # (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...): an inline PTX statement (the mma.sync forms of llama.cpp's mma.cuh).
+  # (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...): an inline PTX statement (the mma.sync forms of llama.cpp's mma.cuh,
+  # and CUB's ld and st forms).
   # KIND out or inout: ARG is the address of the output (inout is loaded first); in: ARG is the value. Each operand
   # gets a register of its type's class; the template's %N is operand N in order (outputs first, as gcc numbers
-  # them). Outputs are stored back after the instruction. Only 4-byte integers and floats are lowered.
+  # them). Outputs are stored back after the instruction. Operands are 2-, 4- or 8-byte integers, 4- or 8-byte floats,
+  # or pointers (see asm_operand_ok).
   def ptx_asm(s)
     tmpl = s[1].to_s
     regs = []
@@ -625,16 +642,20 @@ class Fn
       kind = o[1].to_s
       arg = o[2]
       ty = parse_type(o[3])
-      raise Refused, "asm operand of type #{ty[0]} #{type_size(ty)} bytes (4-byte integers and floats only)" unless type_size(ty) == 4 && (ty[0] == "int" || ty[0] == "float") && !(ty[0] == "int" && ty[3])
+      raise Refused, "asm operand of type #{ty[0]} #{type_size(ty)} bytes (2-, 4- and 8-byte integers, 4- and 8-byte floats, pointers)" unless asm_operand_ok(ty)
       if kind == "in"
         v, _ = operand(arg)
-        r = fresh(reg_class(ty))
-        emit("mov.#{ptx_type(ty)} #{r}, #{v};")
+        r = fresh(asm_class(ty))
+        if asm_class(ty) == "h"
+          emit("cvt.#{mem_type(ty)}.#{ptx_type(ty)} #{r}, #{v};")
+        else
+          emit("mov.#{ptx_type(ty)} #{r}, #{v};")
+        end
         regs << r
       else
         addr, _ = operand(arg)
-        r = fresh(reg_class(ty))
-        emit("ld.#{ptx_type(ty)} #{r}, [#{addr}];") if kind == "inout"
+        r = fresh(asm_class(ty))
+        emit("ld.#{mem_type(ty)} #{r}, [#{addr}];") if kind == "inout"
         regs << r
         stores << [addr, r, ty]
       end
@@ -659,7 +680,7 @@ class Fn
       line = line.strip
       emit(line) unless line.empty?
     end
-    stores.each { |addr, r, ty| emit("st.#{ptx_type(ty)} [#{addr}], #{r};") }
+    stores.each { |addr, r, ty| emit("st.#{mem_type(ty)} [#{addr}], #{r};") }
   end
 
   # ---- expressions: store the value of x in register dest, of IR type dty

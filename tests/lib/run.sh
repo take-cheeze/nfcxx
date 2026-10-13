@@ -10,7 +10,7 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   for f in tests/lib/*.cpp; do
     name=$(basename "$f" .cpp)
-    want=$(sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$f" | head -1)
+    want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
     xfail=$(sed -n "s,^// XFAIL-$be: *\(.*\),\1,p" "$f" | head -1)
     x86only=$(sed -n "s,^// X86-ONLY-$be: *\(.*\),\1,p" "$f" | head -1)
     if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
