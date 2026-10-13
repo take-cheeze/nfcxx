@@ -457,6 +457,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
       #{debug ? 'enable_debug' : '# Keep the toolchain optimization defaults for FPS measurements.'}
     end
+    # mruby's gperf step (mrbgems/mruby-compiler/mrbgem.rake) runs on MRuby.targets['host'], which the default
+    # build config provides and this generated config would otherwise lack.
+    MRuby::Build.new('host') { toolchain }
     unless #{site_profile ? true : false}
       MRuby::Build.new(#{interpreted_target.dump}) do
         instance_eval(&base)
