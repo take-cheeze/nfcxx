@@ -292,7 +292,7 @@ Value infer(const Graph& g, const Node& n) {
   if (op == "IsNaN" || op == "IsInf") {
     want_inputs(1, 1);
     if (!is_float(V(0).dtype)) fail("float input needed, got " + std::string(name(V(0).dtype)));
-    return Value{"", DType::Bool, V(0).shape};
+    return make_value("", DType::Bool, D(0));
   }
   if (op == "ArgMax" || op == "ArgMin") {   // int64 indices; axis (default 0), keepdims (1), select_last_index (0)
     want_inputs(1, 1);
@@ -334,13 +334,13 @@ Value infer(const Graph& g, const Node& n) {
       const int64_t f = n.attr_int(a, 0);
       if (f != 0 && f != 1) fail(std::string(a) + " must be 0 or 1");
     }
-    return Value{"", x.dtype, x.shape};
+    return make_value("", x.dtype, D(0));
   }
   if (op == "Pow") {
     want_inputs(2, 2);
     same_dtype(V(0), V(1));   // ONNX allows another type for the exponent; hir does not convert, so the operands must agree
     if (V(0).dtype == DType::Bool) fail("not defined for bool");
-    return Value{"", V(0).dtype, bcast2(op, V(0).shape, V(1).shape)};
+    return make_value("", V(0).dtype, bcast2(op, D(0), D(1)));
   }
   if (op == "Not") {
     want_inputs(1, 1);
