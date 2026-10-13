@@ -1364,6 +1364,7 @@ typedef unsigned long size_t;
 #define __global__
 #define __host__
 #define __forceinline__
+#define __align__(n) __attribute__((aligned(n)))
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
@@ -1880,7 +1881,8 @@ end
 # device pass therefore evaluates the conditionals first: the branches not taken are blanked (the line count is
 # kept), the #if/#ifdef/#else/#endif lines are removed, and #define and #undef of the taken branches stay.
 # The device pass defines CUDA's device-compile macros; the host pass is not affected.
-DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750" }
+# __cplusplus: the device unit is C++, so a `#ifndef __cplusplus` branch (ggml-common.h's C-only static_assert) is not taken.
+DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750", "__cplusplus" => "201703" }
 
 def cond_tokens(s, line)
   toks = []
@@ -2576,15 +2578,85 @@ def static_shared_names(s)
   found
 end
 
-# True when the use at pos is inside a block that declares a static __shared__ array of the same name.
-def shadowed_by_static?(s, statics, tok, pos)
-  statics.each do |name, decl|
-    next unless name == tok
-    blk = enclosing_block(s, decl)
-    next if blk.nil?
-    return true if pos > blk[0] && pos < blk[1]
+# True when the use at pos is inside a range where tok is declared again (blocks: name => [start, end] ranges, see
+# replace_dynamic_uses).
+def shadowed_by_static?(blocks, tok, pos)
+  (blocks[tok] || []).any? { |blk| pos >= blk[0] && pos < blk[1] }
+end
+
+# Words before a `(` that make it a statement or an expression, not a function's parameter list.
+PAREN_WORDS = %w[if while for switch catch return sizeof decltype alignof].freeze
+# Words before a name that make it a use, not a declaration.
+USE_WORDS = %w[return case else do throw delete new goto sizeof co_return co_await co_yield].freeze
+
+# Positions of the identifier tok in s, as whole words.
+def token_positions(s, tok)
+  found = []
+  from = 0
+  while (k = s.index(tok, from))
+    e = k + tok.length
+    found << k if (k == 0 || !ident_char?(s[k - 1])) && (e >= s.length || !ident_char?(s[e]))
+    from = e
   end
-  false
+  found
+end
+
+# True when the identifier at pos declares a variable or parameter: a type word, `*` or `&` before it, and `,`, `)`,
+# `;`, `=` or `[` after it. A use (`return name;`, `f(a * name)`) does not.
+def declares_name?(s, pos, tok)
+  q = pos - 1
+  q -= 1 while q >= 0 && white?(s[q])
+  return false if q < 0
+  if ident_char?(s[q])
+    w = q
+    w -= 1 while w >= 0 && ident_char?(s[w])
+    return false if USE_WORDS.include?(s[(w + 1)..q])
+  elsif s[q] != "*" && s[q] != "&"
+    return false
+  end
+  n = pos + tok.length
+  n += 1 while n < s.length && white?(s[n])
+  n < s.length && ",);=[".include?(s[n])
+end
+
+# The range where a name declared at pos is visible, as [start, end]: a parameter of a function definition lasts
+# through its body, a local through its block. nil when there is none (a prototype, or a call's argument).
+def declaration_scope(s, pos)
+  o = pos - 1
+  depth = 0
+  open = nil
+  while o >= 0
+    c = s[o]
+    if c == ")"
+      depth += 1
+    elsif c == "("
+      if depth == 0
+        open = o
+        break
+      end
+      depth -= 1
+    elsif c == ";" || c == "{" || c == "}"
+      break
+    end
+    o -= 1
+  end
+  unless open
+    blk = enclosing_block(s, pos)
+    return blk.nil? ? nil : [pos, blk[1]]
+  end
+  w = open - 1
+  w -= 1 while w >= 0 && white?(s[w])
+  w_end = w
+  w -= 1 while w >= 0 && ident_char?(s[w])
+  word = s[(w + 1)..w_end].to_s
+  return nil if word.empty? || PAREN_WORDS.include?(word)
+  close = matching_paren(s, open)
+  return nil if close.nil?
+  b = close + 1
+  b += 1 while b < s.length && (white?(s[b]) || ident_char?(s[b]))
+  return nil unless b < s.length && s[b] == "{"
+  bclose = matching_brace(s, b)
+  bclose.nil? ? nil : [pos, bclose]
 end
 
 # Replaces the uses of the dynamic shared arrays (every use, see dynamic_shared_rewrite). A member (`.name`, `->name`) is
@@ -2592,7 +2664,21 @@ end
 def replace_dynamic_uses(s, names)
   out = ""
   i = 0
-  statics = static_shared_names(s)
+  # name => the ranges where the name is declared again (a static __shared__ array, a parameter, a local): such a name
+  # there is that declaration, not the dynamic array. Computed once here, not per use.
+  blocks = {}
+  static_shared_names(s).each do |name, decl|
+    next unless names.key?(name)
+    blk = enclosing_block(s, decl)
+    (blocks[name] ||= []) << blk unless blk.nil?
+  end
+  names.each_key do |name|
+    token_positions(s, name).each do |p|
+      next unless declares_name?(s, p, name)
+      sc = declaration_scope(s, p)
+      (blocks[name] ||= []) << sc unless sc.nil?
+    end
+  end
   while i < s.length
     e = skip_literal(s, i)
     if e
@@ -2607,7 +2693,7 @@ def replace_dynamic_uses(s, names)
       q = i - 1
       q -= 1 while q >= 0 && white?(s[q])
       member = q >= 0 && (s[q] == "." || (s[q] == ">" && q > 0 && s[q - 1] == "-"))
-      if names.key?(tok) && !member && !shadowed_by_static?(s, statics, tok, i)
+      if names.key?(tok) && !member && !shadowed_by_static?(blocks, tok, i)
         out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
         i = j
         next
@@ -2714,7 +2800,11 @@ def host_linkage(text)
         # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
         # A class member keeps its linkage (static is not allowed on a member function, const member or constructor).
         after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
-        out << (after_static || in_class_body?(out) ? "" : host_storage(out, "static"))
+        # `[&] __device__ (...) {...}`: a device lambda. Its qualifier goes; `static` after a capture list is not C++.
+        p = out.length - 1
+        p -= 1 while p >= 0 && white?(out[p])
+        lambda = p >= 0 && out[p] == "]"
+        out << (after_static || lambda || in_class_body?(out) ? "" : host_storage(out, "static"))
         i += 10
         next
       end
