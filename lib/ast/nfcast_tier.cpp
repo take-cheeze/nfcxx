@@ -126,6 +126,7 @@ struct IStmt {
   std::vector<IExpr*> exprs;    // Decl, Assign: values; If: conditions; While, Repeat: the condition; For: start, limit, step; Return: 0 or 1; CallStat: the call
   std::vector<IStmt*> blocks;   // Block: statements; If: the blocks (then the else block); loops: the body
   bool has_else = false;
+  bool tail = false;  // Return: `return f(...)`, a tail call (a self call of the function is a loop, see Gen::self_tail)
   int osr = 0;  // the loop at which a unit for on-stack replacement starts: 1 `while` or `repeat`, 2 an integer `for`, 3 a float `for` (no header)
 };
 
@@ -775,6 +776,7 @@ struct Builder {
       case TV::K_RETURN: {
         if (v.kids.size() > 1) return fail.set("a return of several values"), nullptr;
         IStmt* s = mk_stmt(IStmt::Return, v.line);
+        s->tail = v.tail;
         if (!v.kids.empty()) {
           IExpr* e = expr(v.kids[0]);
           if (!e) return nullptr;
@@ -1217,6 +1219,7 @@ struct Gen {
   std::string cur;  // the statements being written
   int ntmp = 0;
   int inst_idx = 0;
+  bool top_used = false;  // a self tail call was written: the body has the label it jumps to
 
   Gen(Unit& u, Infer& i) : U(u), in(i) {}
 
@@ -1550,6 +1553,10 @@ struct Gen {
           cur += "return 1;\n";
           break;
         }
+        if (s->tail && !(inst_idx == 0 && is_osr()) && self_call(s->exprs[0])) {  // not in the loop of an OSR unit, which returns out of its frame
+          self_tail(s->exprs[0]);
+          break;
+        }
         if (s->exprs.empty()) {
           cur += "--cx->depth;\nreturn;\n";
         } else {
@@ -1567,6 +1574,32 @@ struct Gen {
         break;
       }
     }
+  }
+
+  // A tail call of the function itself, with the arguments of this instance (`return f(n - 1, acc + 1)` in f). The interpreter
+  // reuses the frame for it and counts no depth (call_closure), so it is a jump: the arguments are evaluated into temporaries
+  // (they read the parameters that are about to change), the parameters take them, and the body starts again after the depth was
+  // counted. A call with another instance of the same function (other argument types) is an ordinary call.
+  bool self_call(const IExpr* e) {
+    return e->k == IExpr::Call && inst().cinst[static_cast<std::size_t>(e->id)] == inst_idx &&
+           e->kids.size() == static_cast<std::size_t>(proto().nparams);
+  }
+
+  void self_tail(const IExpr* e) {
+    Inst& I = inst();
+    ProtoIR& P = proto();
+    std::vector<std::string> o = operands(e->kids);
+    std::vector<std::string> t;
+    for (std::size_t k = 0; k < o.size(); ++k) {
+      t.push_back(tmp());
+      cur += std::string(ty_c(I.sig[k])) + " " + t[k] + " = " + o[k] + ";\n";
+    }
+    for (std::size_t k = 0; k < o.size(); ++k) {
+      int v = P.pvars[k];
+      cur += vname(v) + " = " + conv(t[k], I.sig[k], I.vty[static_cast<std::size_t>(v)]) + ";\n";
+    }
+    cur += "goto nfct_top;\n";
+    top_used = true;
   }
 
   void for_loop(const IStmt* s) {
@@ -1713,7 +1746,10 @@ struct Gen {
       cur += std::string(ty_c(t)) + " " + vname(v) + " = " + init + ";\n";
     }
     cur += "if (cx->depth >= cx->maxd) nfct_bail(cx);\n++cx->depth;\n";
+    std::size_t top = cur.size();  // after the depth is counted: a self tail call starts the body again without counting it
+    top_used = false;
     emit_block(P.body);
+    if (top_used) cur.insert(top, "nfct_top:;\n");
     if (can_complete(P.body)) cur += "--cx->depth;\n";
     else if (I.ret != Y_V) cur += "return " + zero(I.ret) + ";\n";
     return head(idx) + " {\n" + cur + "}\n";
