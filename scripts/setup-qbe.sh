@@ -23,6 +23,9 @@ done
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
 # QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
+# QBE: scripts/qbe-empty-struct.patch (an empty struct with no alignment left 1 << -1 in parse.c: a garbage alloc size when it
+# is passed by value, e.g. libc++'s std::min comparator)
+patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-struct.patch"
 make -C "$root/build/qbe" -j"$jobs" >/dev/null
 # cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
 # EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".

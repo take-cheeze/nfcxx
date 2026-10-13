@@ -259,8 +259,8 @@ if [ $emit_c = 1 ]; then
   # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
   for x in ${files[@]+"${files[@]}"}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+"${inc[@]}"}) ;; esac; done
   t=$(trace_start)
-  posix_def=-D_POSIX_SOURCE; [ "$(uname -s)" = Darwin ] && posix_def=-D_DARWIN_C_SOURCE
-  (cd "$base" && "$edg/cpfe" "$posix_def" -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
+  posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)   # as the macOS base
+  (cd "$base" && "$edg/cpfe" "${posix_def[@]}" -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
       "${inc[@]}" --gen_c_file_name="$tmp/out.c" "$f")
   trace_end "$t" "cpfe --emit-c (front end)" frontend
   cat "$tmp/out.c"
@@ -304,6 +304,8 @@ if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncp
   s=$("$root/scripts/ehshim") || s=""
   trace_end "$t" "EH shim" driver
   [ -z "$s" ] || shim=("$s")
+  # macOS: the thunks that pass the result of libc++'s class-returning functions in x8 (scripts/darwin-sret.sh)
+  if [ "$(uname -s)" = Darwin ]; then shim+=("$("$root/scripts/darwin-sret.sh")"); fi
   rtlib=(-lC)
   if [ $asan = 1 ]; then
     t=$(trace_start)
