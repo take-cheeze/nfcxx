@@ -278,13 +278,21 @@ esac
 #    exception runtime; NFCXX_EHSHIM=0 leaves it out;
 #  - libC.a (EDG's runtime) ahead of libstdc++, as Path B links it: eccp puts -lC last, after -lstdc++, so `operator new`
 #    came from libstdc++.so and threw a gcc-ABI std::bad_alloc that EDG's handlers cannot catch.
-shim=(); rtlib=()
+# With -fsanitize=address, the C++ VLA runtime (lib/asan/nfcxx_vla_asan.c, docs/notes/asan.md) goes ahead of libC.a: it
+# defines the four VLA entry points, so EDG's allocator in libC.a is not linked.
+shim=(); rtlib=(); vlart=()
 if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncpp + nobj)) -gt 0 ]; then
   t=$(trace_start)
   s=$("$root/scripts/ehshim") || s=""
   trace_end "$t" "EH shim" driver
   [ -z "$s" ] || shim=("$s")
   rtlib=(-lC)
+  if [ $asan = 1 ]; then
+    t=$(trace_start)
+    v=$("$root/scripts/asan-vla") || { echo "nfcxx: cannot build the C++ VLA runtime for -fsanitize=address (scripts/asan-vla)" >&2; exit 2; }
+    trace_end "$t" "VLA runtime (asan)" driver
+    vlart=("$v")
+  fi
 fi
 
 # -fPIC / -rdynamic / -shared reach the C compiler and the link. EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces the
@@ -391,7 +399,7 @@ for f in ${files[@]+"${files[@]}"}; do
 done
 t=$(trace_start)
 "$edg/eccp" "$std" --"$dialect" "${extra[@]}" ${userinc[@]+"${userinc[@]}"} "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
-  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
+  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${vlart[@]+"${vlart[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
