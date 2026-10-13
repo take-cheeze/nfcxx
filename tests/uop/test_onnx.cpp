@@ -412,7 +412,7 @@ int main(int argc, char** argv) {
   merging();
   errors();
   pad();
-  if (argc > 1) python_models(argv[1], {"imp_typed", "imp_attrs", "imp_f64", "imp_slices"});
+  if (argc > 1) python_models(argv[1], {"imp_typed", "imp_attrs", "imp_f64", "imp_slices", "imp_fwd_conv", "imp_fwd_pool_norm"});
   if (imported_models == 0) std::printf("SKIP importing models made by the onnx package: no models in the directory (python3, onnx or onnxruntime missing)\n");
   std::printf("%d models made by the onnx package imported and equal to onnxruntime\n", imported_models);
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }

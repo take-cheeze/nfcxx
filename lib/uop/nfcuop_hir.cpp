@@ -16,6 +16,14 @@ int64_t Node::attr_int(const std::string& n, int64_t dflt) const {
   const Attribute* a = attr(n);
   return a ? a->i : dflt;
 }
+double Node::attr_float(const std::string& n, double dflt) const {
+  const Attribute* a = attr(n);
+  return a ? a->f : static_cast<float>(dflt);
+}
+std::vector<int64_t> Node::attr_ints(const std::string& n) const {
+  const Attribute* a = attr(n);
+  return a ? a->ints : std::vector<int64_t>{};
+}
 
 int onnx_dtype(DType d) {
   switch (d) {
@@ -109,6 +117,60 @@ int64_t norm(const std::string& op, int64_t axis, int64_t rank) {
   return axis < 0 ? axis + rank : axis;
 }
 
+// The spatial attributes of Conv and the pooling operators (ONNX): one value per spatial axis for strides and dilations
+// (default 1), and pads as ONNX lists them (the begin of every axis, then the ends; default 0). auto_pad must be NOTSET:
+// SAME_UPPER, SAME_LOWER and VALID are refused rather than guessed.
+std::vector<int64_t> per_axis(const Node& n, const std::string& attr, size_t count, int64_t dflt, bool positive) {
+  std::vector<int64_t> v = n.attr_ints(attr);
+  if (v.empty()) return std::vector<int64_t>(count, dflt);
+  if (v.size() != count) throw Error(n.op + ": " + attr + " has " + std::to_string(v.size()) + " entries, expected " + std::to_string(count));
+  for (int64_t x : v)
+    if (positive ? x < 1 : x < 0) throw Error(n.op + ": " + attr + " has the entry " + std::to_string(x) + ", which is out of range");
+  return v;
+}
+
+struct Window {
+  Shape strides, dilations, pads_begin, pads_end;
+  Shape out;  // the spatial output shape
+};
+
+// Output sizes per ONNX: floor((in + pad_begin + pad_end - dilation*(kernel-1) - 1) / stride) + 1. ceil_mode=1 is accepted only
+// where it gives the same size (ONNX's ceil formula, including its last-window correction); otherwise it is refused.
+Window window(const Node& n, const Shape& in, const Shape& kernel, bool ceil_mode) {
+  if (n.has_attr("auto_pad") && n.attr("auto_pad")->s != "NOTSET")
+    throw Error(n.op + ": auto_pad " + n.attr("auto_pad")->s + " is not supported (give pads)");
+  const size_t d = in.size();
+  Window w;
+  w.strides = per_axis(n, "strides", d, 1, true);
+  w.dilations = per_axis(n, "dilations", d, 1, true);
+  Shape pads = per_axis(n, "pads", 2 * d, 0, false);
+  w.pads_begin.assign(pads.begin(), pads.begin() + static_cast<std::ptrdiff_t>(d));
+  w.pads_end.assign(pads.begin() + static_cast<std::ptrdiff_t>(d), pads.end());
+  for (size_t k = 0; k < d; k++) {
+    const int64_t extent = w.dilations[k] * (kernel[k] - 1) + 1;
+    const int64_t span = in[k] + w.pads_begin[k] + w.pads_end[k] - extent;
+    if (span < 0) throw Error(n.op + ": the kernel (extent " + std::to_string(extent) + ") does not fit in axis " + std::to_string(k) + " of size " + std::to_string(in[k]) + " with its pads");
+    const int64_t floor_out = span / w.strides[k] + 1;
+    if (ceil_mode) {
+      int64_t ceil_out = (span + w.strides[k] - 1) / w.strides[k] + 1;
+      if ((ceil_out - 1) * w.strides[k] >= in[k] + w.pads_begin[k]) ceil_out--;
+      if (ceil_out != floor_out) throw Error(n.op + ": ceil_mode=1 changes the output size of axis " + std::to_string(k) + "; only ceil_mode=0 is supported");
+    }
+    w.out.push_back(floor_out);
+  }
+  return w;
+}
+
+// Gemm's C input: unidirectional broadcasting to `out` (C is at most 2-D and each of its dimensions is 1 or the same)
+bool broadcasts_to(const Shape& c, const Shape& out) {
+  if (c.size() > out.size()) return false;
+  for (size_t k = 0; k < c.size(); k++) {
+    int64_t dc = c[c.size() - 1 - k], dout = out[out.size() - 1 - k];
+    if (dc != 1 && dc != dout) return false;
+  }
+  return true;
+}
+
 Value infer(const Graph& g, const Node& n) {
   const std::string& op = n.op;
   auto fail = [&](const std::string& why) -> Value { throw Error(op + ": " + why); };
@@ -125,7 +187,7 @@ Value infer(const Graph& g, const Node& n) {
   };
   auto consts = [&](size_t k) { return g.const_ints(n.inputs[k]); };
 
-  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid"};
+  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid", "Erf"};
   static const std::set<std::string> arith = {"Add", "Sub", "Mul", "Div", "Max", "Min"};
   static const std::set<std::string> logical = {"And", "Or", "Xor"};
   static const std::set<std::string> bitwise = {"BitwiseAnd", "BitwiseOr", "BitwiseXor"};
@@ -351,6 +413,114 @@ Value infer(const Graph& g, const Node& n) {
     }
     out[axis] = total;
     return Value{"", V(0).dtype, out};
+  }
+  if (op == "Gemm") {
+    want_inputs(2, 3);
+    const Value &a = V(0), &b = V(1);
+    if (!is_float(a.dtype)) fail("float inputs needed, got " + std::string(name(a.dtype)));
+    same_dtype(a, b);
+    if (present(2)) same_dtype(a, V(2));
+    if (a.shape.size() != 2 || b.shape.size() != 2) fail("A and B must be 2-D, got " + to_string(a.shape) + " and " + to_string(b.shape));
+    const int64_t tA = n.attr_int("transA", 0), tB = n.attr_int("transB", 0);
+    if ((tA != 0 && tA != 1) || (tB != 0 && tB != 1)) fail("transA and transB must be 0 or 1");
+    const Shape A = tA ? Shape{a.shape[1], a.shape[0]} : a.shape;
+    const Shape B = tB ? Shape{b.shape[1], b.shape[0]} : b.shape;
+    if (A[1] != B[0]) fail("op(A) " + to_string(A) + " and op(B) " + to_string(B) + " do not align");
+    const Shape out{A[0], B[1]};
+    if (present(2) && !broadcasts_to(V(2).shape, out)) fail("C " + to_string(V(2).shape) + " does not broadcast to " + to_string(out));
+    return Value{"", a.dtype, out};
+  }
+  if (op == "Gather") {
+    want_inputs(2, 2);
+    const Value &d = V(0), &ix = V(1);
+    if (d.dtype == DType::Bool) fail("bool data is not supported");
+    if (ix.dtype != DType::Int32 && ix.dtype != DType::Int64) fail("indices must be int32 or int64, got " + std::string(name(ix.dtype)));
+    const int64_t r = static_cast<int64_t>(d.shape.size());
+    if (r < 1) fail("data must be at least 1-D");
+    const int64_t ax = norm(op, n.attr_int("axis", 0), r);
+    if (const Array* c = g.initializer(n.inputs[1]))   // constant indices are checked now; runtime ones cannot be
+      for (const Scalar& s : c->data)
+        if (s.i < -d.shape[ax] || s.i >= d.shape[ax]) fail("index " + std::to_string(s.i) + " is out of range for axis " + std::to_string(ax) + " of size " + std::to_string(d.shape[ax]));
+    Shape out(d.shape.begin(), d.shape.begin() + ax);
+    out.insert(out.end(), ix.shape.begin(), ix.shape.end());
+    out.insert(out.end(), d.shape.begin() + ax + 1, d.shape.end());
+    return Value{"", d.dtype, out};
+  }
+  if (op == "Conv") {
+    want_inputs(2, 3);
+    const Value &x = V(0), &w = V(1);
+    if (!is_float(x.dtype)) fail("float inputs needed, got " + std::string(name(x.dtype)));
+    same_dtype(x, w);
+    if (present(2)) same_dtype(x, V(2));
+    if (x.shape.size() < 3) fail("X must be (N, C, D1, ...) with at least one spatial axis, got " + to_string(x.shape));
+    if (w.shape.size() != x.shape.size()) fail("W " + to_string(w.shape) + " must have the rank of X " + to_string(x.shape));
+    const int64_t group = n.attr_int("group", 1), C = x.shape[1], M = w.shape[0];
+    if (group < 1 || C % group != 0 || M % group != 0) fail("group " + std::to_string(group) + " must divide the channels C=" + std::to_string(C) + " and M=" + std::to_string(M));
+    if (w.shape[1] != C / group) fail("W has " + std::to_string(w.shape[1]) + " input channels per group, expected C/group = " + std::to_string(C / group));
+    Shape kernel(w.shape.begin() + 2, w.shape.end());
+    if (n.has_attr("kernel_shape") && n.attr_ints("kernel_shape") != kernel) fail("kernel_shape does not match the spatial shape of W " + to_string(w.shape));
+    if (present(2) && V(2).shape != Shape{M}) fail("B must have shape [M] = [" + std::to_string(M) + "]");
+    Window win = window(n, Shape(x.shape.begin() + 2, x.shape.end()), kernel, false);
+    Shape out{x.shape[0], M};
+    out.insert(out.end(), win.out.begin(), win.out.end());
+    return Value{"", x.dtype, out};
+  }
+  if (op == "MaxPool" || op == "AveragePool") {
+    want_inputs(1, 1);
+    const Value& x = V(0);
+    if (!is_float(x.dtype)) fail("float input needed, got " + std::string(name(x.dtype)));
+    if (x.shape.size() < 3) fail("X must be (N, C, D1, ...) with at least one spatial axis, got " + to_string(x.shape));
+    if (!n.has_attr("kernel_shape")) fail("attribute kernel_shape is required");
+    const size_t d = x.shape.size() - 2;
+    Shape kernel = per_axis(n, "kernel_shape", d, 1, true);
+    if (op == "AveragePool" && n.has_attr("dilations")) fail("AveragePool has no dilations attribute");
+    Window win = window(n, Shape(x.shape.begin() + 2, x.shape.end()), kernel, n.attr_int("ceil_mode", 0) != 0);
+    for (size_t k = 0; k < d; k++)   // a window that lies only in the padding has no value: refused
+      if (win.pads_begin[k] >= win.dilations[k] * (kernel[k] - 1) + 1 || win.pads_end[k] >= win.dilations[k] * (kernel[k] - 1) + 1)
+        fail("pads of axis " + std::to_string(k) + " reach a whole window (pads must be smaller than the kernel extent)");
+    Shape out{x.shape[0], x.shape[1]};
+    out.insert(out.end(), win.out.begin(), win.out.end());
+    return Value{"", x.dtype, out};
+  }
+  if (op == "BatchNormalization") {
+    want_inputs(5, 5);
+    const Value& x = V(0);
+    if (!is_float(x.dtype)) fail("float input needed, got " + std::string(name(x.dtype)));
+    if (x.shape.size() < 2) fail("X must be (N, C, D1, ...), got " + to_string(x.shape));
+    if (n.attr_int("training_mode", 0) != 0) fail("training_mode=1 is not supported (inference only: training_mode=0)");
+    const int64_t C = x.shape[1];
+    for (size_t k = 1; k < 5; k++) {   // scale, B, input_mean, input_var: [C]
+      same_dtype(x, V(k));
+      if (V(k).shape != Shape{C}) fail("parameter " + std::to_string(k) + " must have shape [C] = [" + std::to_string(C) + "], got " + to_string(V(k).shape));
+    }
+    return Value{"", x.dtype, x.shape};
+  }
+  if (op == "InstanceNormalization") {
+    want_inputs(3, 3);
+    const Value& x = V(0);
+    if (!is_float(x.dtype)) fail("float input needed, got " + std::string(name(x.dtype)));
+    if (x.shape.size() < 3) fail("input must be (N, C, D1, ...) with at least one spatial axis, got " + to_string(x.shape));
+    const int64_t C = x.shape[1];
+    for (size_t k = 1; k < 3; k++) {   // scale, B: [C]
+      same_dtype(x, V(k));
+      if (V(k).shape != Shape{C}) fail("scale and B must have shape [C] = [" + std::to_string(C) + "], got " + to_string(V(k).shape));
+    }
+    return Value{"", x.dtype, x.shape};
+  }
+  if (op == "LayerNormalization") {
+    want_inputs(2, 3);
+    const Value& x = V(0);
+    if (!is_float(x.dtype)) fail("float input needed, got " + std::string(name(x.dtype)));
+    const int64_t r = static_cast<int64_t>(x.shape.size());
+    const int64_t axis = norm(op, n.attr_int("axis", -1), r);
+    const Shape normalized(x.shape.begin() + axis, x.shape.end());   // Scale and B have this shape
+    same_dtype(x, V(1));
+    if (V(1).shape != normalized) fail("Scale must have the normalized shape " + to_string(normalized) + ", got " + to_string(V(1).shape));
+    if (present(2)) {
+      same_dtype(x, V(2));
+      if (V(2).shape != normalized) fail("B must have the normalized shape " + to_string(normalized) + ", got " + to_string(V(2).shape));
+    }
+    return Value{"", x.dtype, x.shape};
   }
   return fail("unsupported operator");
 }
