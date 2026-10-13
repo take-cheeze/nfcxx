@@ -22,9 +22,9 @@ abort 'SKIP: set MRBC' unless ENV['MRBC']
 # [name, file, pattern, replacement, check label that must FAIL, needs the run half]
 MUTANTS = [
   ['BC2CPP_STRICT_HINTS=0 turns the tier on', 'strict_hints.rb',
-   "return [] if env.nil? || env.empty? || env == '0'",
-   "return [] if env.nil? || env.empty?\n    return DEFAULT_FAMILIES if env == '0'",
-   /select no family|BC2CPP_STRICT_HINTS=0 emits/, false],
+   "return [] if env == '0'",
+   "return DEFAULT_FAMILIES if env == '0'",
+   /0 selects no family|0 output has no hint/, false],
   ['an unknown family name is silently ignored', 'strict_hints.rb',
    "list = env.split(',').map(&:strip).reject(&:empty?)",
    "list = env.split(',').map(&:strip).select { |f| FAMILIES.include?(f) }",

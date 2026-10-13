@@ -1620,7 +1620,9 @@ if $PROGRAM_NAME == __FILE__
       StrictHints.family_counts(compiled).sort.each { |f, n| warn "  STRICT_HINT #{f}: #{n}" }
       hint_sites.map { |s| s[:key] }.uniq.sort.each { |k| warn "  STRICT_HINT_SITE #{k}" }
       warn ''
-      hint_violations = StrictHints.violations(hint_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
+      # Unreviewed only: STRICT_HINTS_REVIEWED is the union of the full and the hot-only runs, so one run cannot
+      # prove an entry stale. strict_hints_reviewed_check holds the union exact over both runs.
+      hint_violations = StrictHints.violations(hint_sites, compiled, stale: false)
       unless hint_violations.empty?
         msg = "bc2cpp: #{hint_violations.size} STRICT_HINTS_REVIEWED violation(s) (docs/adr/0419):\n  " \
               "#{hint_violations.join("\n  ")}\n" \

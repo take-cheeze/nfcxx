@@ -5,7 +5,8 @@
 # with BC2CPP_STRICT_HINTS=1 the else arm of the families below is `bc2cpp_hint_violation`, which
 # logs `[RPG2k] hint violation: <Class>#<name> at <Owner#method (FAMILY)>` to $stderr and raises
 # BC2cppHintViolation < NoMethodError, so no by-name send is left at the site and a wrong hint
-# fails loudly instead of costing speed. Default OFF: the default output is byte-identical.
+# fails loudly instead of costing speed. Default ON (ADR 0438): unset or empty selects `1`; `0` is the
+# byte-identical baseline with the tier off.
 #
 # Families (BC2CPP_STRICT_HINTS=1 selects the first four, `all` every one; a comma list selects some):
 #   typed             TYPED / CLOSED_WORLD_TYPED_INHERITED: receiver class traced from a ClassLayout ivar
@@ -45,11 +46,11 @@ module StrictHints
 
   module_function
 
-  # The enabled families: nil/""/"0" none, "1" the receiver-hint families, "all" every family, else a
-  # comma list (unknown names abort).
+  # The enabled families: "0" none, nil/""/"1" the receiver-hint families (the default), "all" every
+  # family, else a comma list (unknown names abort).
   def families(env = ENV[ENV_NAME])
-    return [] if env.nil? || env.empty? || env == '0'
-    return DEFAULT_FAMILIES if env == '1'
+    return [] if env == '0'
+    return DEFAULT_FAMILIES if env.nil? || env.empty? || env == '1'
     return FAMILIES if env == 'all'
 
     list = env.split(',').map(&:strip).reject(&:empty?)

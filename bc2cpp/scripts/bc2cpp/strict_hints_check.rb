@@ -40,7 +40,8 @@ runtime = Bc2cppFixtureRuntime
 puts '== switch, marker, listing, reviewed list'
 # The gate only judges the families this run forces.
 ENV['BC2CPP_STRICT_HINTS'] = '1'
-check.call('unset, empty and 0 select no family', [nil, '', '0'].all? { |v| StrictHints.families(v).empty? })
+check.call('0 selects no family; unset and empty select the default receiver-hint families',
+           StrictHints.families('0').empty? && [nil, ''].all? { |v| StrictHints.families(v) == StrictHints::DEFAULT_FAMILIES })
 check.call('1 selects the receiver-hint families, all every family',
            StrictHints.families('1') == StrictHints::DEFAULT_FAMILIES &&
              StrictHints.families('all') == StrictHints::FAMILIES &&
@@ -247,17 +248,17 @@ if ENV['MRBC']
   Dir.mktmpdir do |dir|
     Dir.mktmpdir do |off_dir|
       Dir.mktmpdir do |zero_dir|
-        base_code, base_err = generate.call(off_dir, nil)
+        base_code, base_err = generate.call(off_dir, '0')
         empty_code, = generate.call(zero_dir, '')
-        check.call('default output has no hint violation, marker, helper or listing',
+        unset_code, = generate.call(Dir.mktmpdir, nil)
+        check.call('0 output has no hint violation, marker, helper or listing',
                    !base_code.match?(VIOLATION) && !base_code.include?('STRICT_HINT') &&
                      !base_code.include?('bc2cpp_hint_violation') && !base_err.include?('STRICT_HINT'))
-        check.call('BC2CPP_STRICT_HINTS unset and empty emit byte-identical code', base_code == empty_code)
-        Dir.mktmpdir do |off2|
-          off_code, = generate.call(off2, '0')
-          check.call('BC2CPP_STRICT_HINTS=0 emits byte-identical code', base_code == off_code)
-        end
+        check.call('unset and empty are the same default output', unset_code == empty_code)
+        check.call('the default output forces hints (it differs from the 0 baseline)',
+                   empty_code.match?(VIOLATION) && empty_code != base_code)
         code, err = generate.call(dir, '1')
+        check.call('the default output is the 1 output', empty_code == code)
         hint_sites = base_code.scan(DISPATCH).size - code.scan(DISPATCH).size
         %w[read_value read_label read_size].each do |m|
           text = chunk.call(code, "ShHolder##{m}")
@@ -406,20 +407,20 @@ if ENV['MRBC'] && build && runtime.compiler? && !ENV['SH_GENERATED_ONLY']
   end
 
   Dir.mktmpdir do |default_dir|
-    _code, err = generate.call(default_dir, nil)
+    _code, err = generate.call(default_dir, '0')
     built, results = outputs.call(default_dir, err)
-    check.call('the default build compiles and runs against real mruby', built)
+    check.call('the off build (BC2CPP_STRICT_HINTS=0) compiles and runs against real mruby', built)
     if built
       (ok_out, ok_status), (bad_out, bad_status) = results
       interpreted, compiled = values.call(ok_out)
       puts ok_out if interpreted != compiled || ENV['BC2CPP_CHECK_VERBOSE']
-      check.call('default build, hints honoured: compiled answers what the interpreter answers',
+      check.call('off build, hints honoured: compiled answers what the interpreter answers',
                  ok_status && !interpreted.empty? && interpreted == compiled)
       check.call('  ... with the answers the fixture is written for',
                  interpreted.include?('read_value => 4') && interpreted.include?('take => 30'))
       interpreted, compiled = values.call(bad_out)
       puts bad_out if interpreted != compiled || ENV['BC2CPP_CHECK_VERBOSE']
-      check.call('default build, hints violated: the by-name dispatch answers what the interpreter answers',
+      check.call('off build, hints violated: the by-name dispatch answers what the interpreter answers',
                  bad_status && interpreted.include?('read_value => 100') && interpreted == compiled)
       check.call('  ... and logs no hint violation', !bad_out.include?('hint violation'))
     end
