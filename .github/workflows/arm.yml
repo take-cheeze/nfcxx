@@ -50,10 +50,9 @@ jobs:
               tests/c/run.sh
               tests/c/cc-mode.sh
               tests/cxx-driver/run.sh
-          - name: determinism, float-to-integer
-            run: |
-              tests/determinism/run.sh
-              tests/float-to-int/run.sh
+          # float-to-int checks the x87 helpers of be/nfcxx_ldrt.c, which exist only on x86-64, so it stays off this runner.
+          - name: determinism
+            run: tests/determinism/run.sh
     name: arm64 ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
