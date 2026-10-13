@@ -1,8 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Regenerates STRICT_HINTS_REVIEWED (tools/bc2cpp/strict_hints_reviewed.rb) from a full wio closed-world
-# run of all three compiled gems with BC2CPP_STRICT_HINTS=1 (docs/adr/0419).
+# Regenerates STRICT_HINTS_REVIEWED (tools/bc2cpp/strict_hints_reviewed.rb) from a full and a hot-only wio closed-world
+# run of the compiled gems with BC2CPP_STRICT_HINTS=1 (docs/adr/0419).
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/strict_hints_update.rb [--write]
 #
@@ -15,9 +15,11 @@ require_relative '../../tools/bc2cpp/strict_hints'
 root = File.expand_path('../..', __dir__)
 mrbc = ENV['MRBC'] || 'mrbc'
 ENV[StrictHints::ENV_NAME] = 'all'
-sites = BC2CPP_COMPILED_GEMS.keys.map do |gem_name|
+# The full run and the hot-only run: a hot-only build forces sites the full build turns into another form
+# (ADR 0428), and both must be listed.
+sites = BC2CPP_COMPILED_GEMS.keys.product([nil, BC2CPP_HOT_METHODS_PATH]).map do |gem_name, hot|
   Thread.new do
-    _out, err, status = NomethodReviewedProbe.run(gem_name, root, mrbc, hot_methods: nil, allow: true)
+    _out, err, status = NomethodReviewedProbe.run(gem_name, root, mrbc, hot_methods: hot, allow: true)
     raise "#{gem_name}: bc2cpp.rb failed:\n#{err[-4000..] || err}" unless status.success?
 
     StrictHints.parse_listing(err).map { |key| { key: key, gem: gem_name } }

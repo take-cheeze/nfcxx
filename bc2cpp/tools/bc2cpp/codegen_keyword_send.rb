@@ -299,8 +299,7 @@ class CodeGen
     owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
     return nil unless owner_emitted
 
-    @direct_construct_used << known
-    accessor = direct_construct_class_fn(known)
+    accessor = direct_construct_class_expr(known)
     init_impl = cpp_name(known, 'initialize') + '_impl'
     # (value, given) arguments as in compile_keyword_call (see
     # KEYWORD_CALLSITE_ARITY_FIX).
@@ -340,7 +339,7 @@ class CodeGen
            "a trailing positional Hash, which is only correct for a callee declaring no keywords " \
            "at all (vm.c OP_ENTER's own kd == 0 arm; see compile_keyword_hash_positional_send).\n" \
            "  // Runtime-guarded exactly the way the non-keyword direct-construct path is: " \
-           "#{known} could have been reassigned at the constant level since #{accessor}'s own " \
+           "#{known} could have been reassigned at the constant level since #{direct_construct_class_fn(known)}'s own " \
            "class was captured at gem-init, so #{recv} (this call site's own already-resolved " \
            "receiver) is compared against it rather than trusted outright, falling back to " \
            "ordinary mrb_funcall if they differ.\n"
@@ -365,7 +364,7 @@ class CodeGen
                  dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])
                end
     "#{note}" \
-      "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
+      "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
       "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
       "    #{init_impl}(M, #{(["r#{d}"] + argv + opt_args + kw_args).join(', ')});\n" \
       "  } else {\n" \
