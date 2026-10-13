@@ -17,7 +17,7 @@ have_nfcxx=0
 [ -x "$root/build/edg/bin/eccp" ] && [ -x "$root/build/qbe/qbe" ] && have_nfcxx=1
 
 # ---- host path
-for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom; do
+for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom double slices; do
   want="$t ok"
   if "$root/scripts/sycl-build.sh" --cpu "$t.cpp" -o "$out/$t.g++" > "$out/$t.log" 2>&1 && [ "$("$out/$t.g++" | tail -1)" = "$want" ]; then
     echo "host g++   $t: ok"
@@ -34,6 +34,33 @@ for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar 
   fi
 done
 
+# ---- Vulkan path (scripts/pathb-spirv-emit.rb, lib/sycl/include/sycl/rt_vulkan.hpp): the same programs on a Vulkan compute
+# device (lavapipe in CI; any device with bufferDeviceAddress, Int64, Float64 and the Vulkan memory model). Skips when the
+# loader, spirv-val or a device is missing.
+vk_ok=0
+libvk=$(ldconfig -p 2>/dev/null | grep libvulkan || true)
+if [ $have_nfcxx = 1 ] && command -v spirv-val >/dev/null && [ -n "$libvk" ]; then vk_ok=1; fi
+if [ $vk_ok = 1 ]; then
+  vkbuild() { "$root/scripts/sycl-build.sh" --backend=vulkan --cxx="$nfcxx" "$1.cpp" -o "$out/vk_$1" > "$out/vk_$1.log" 2>&1; }
+  vkprobe=1
+  for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom double slices; do
+    if ! vkbuild $t; then echo "vulkan     $t: FAIL (build)"; grep -v prelinker "$out/vk_$t.log" | head -3; fail=1; continue; fi
+    "$out/vk_$t" > "$out/vk_$t.out" 2> "$out/vk_$t.err"; rc=$?
+    if [ $rc = 70 ] && grep -q "Vulkan runtime" "$out/vk_$t.err"; then vkprobe=0; break; fi
+    if [ "$(tail -1 "$out/vk_$t.out")" = "$t ok" ]; then echo "vulkan     $t: ok"; else echo "vulkan     $t: FAIL (exit $rc)"; cat "$out/vk_$t.err" "$out/vk_$t.out" | tail -3; fail=1; fi
+  done
+  if [ $vkprobe = 0 ]; then
+    echo "SKIP: vulkan: no usable Vulkan device ($(head -c 120 "$out/vk_vecadd.err" 2>/dev/null))"
+  else
+    if vkbuild trap_div; then
+      "$out/vk_trap_div" > /dev/null 2> "$out/vk_trap_div.err"; rc=$?
+      if [ $rc = 71 ] && grep -q "division by zero" "$out/vk_trap_div.err"; then echo "vulkan     trap_div: trapped (exit 71)"; else echo "vulkan     trap_div: FAIL (exit $rc)"; cat "$out/vk_trap_div.err"; fail=1; fi
+    else echo "vulkan     trap_div: FAIL (build)"; fail=1; fi
+  fi
+else
+  echo "SKIP: vulkan: needs the nfcxx build, spirv-val and libvulkan"
+fi
+
 # ---- WebGPU path
 if [ ! -x "$root/build/pathb/cmake/bin/cpfe" ] || [ $have_nfcxx = 0 ] || ! command -v node >/dev/null || ! node server.cjs --probe >/dev/null 2>&1; then
   echo "SKIP: sycl webgpu: needs the Path B harness, the nfcxx build, node, Playwright and a Chromium with WebGPU"
@@ -41,7 +68,7 @@ if [ ! -x "$root/build/pathb/cmake/bin/cpfe" ] || [ $have_nfcxx = 0 ] || ! comma
 fi
 export NFCXX_SYCL_NODE=${NFCXX_SYCL_NODE:-node}
 build() { "$root/scripts/sycl-build.sh" --cxx="$nfcxx" "$1.cpp" -o "$out/$1" > "$out/$1.log" 2>&1; }
-for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom; do
+for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom slices; do
   if build $t && [ "$("$out/$t" 2>"$out/$t.err" | tail -1)" = "$t ok" ]; then
     echo "webgpu     $t: ok"
   else
@@ -53,7 +80,7 @@ if build trap_div; then
   "$out/trap_div" > "$out/trap_div.out" 2> "$out/trap_div.err"; rc=$?
   if [ $rc = 71 ] && grep -q "division by zero" "$out/trap_div.err"; then echo "webgpu     trap_div: trapped (exit 71)"; else echo "webgpu     trap_div: FAIL (exit $rc)"; cat "$out/trap_div.err"; fail=1; fi
 else echo "webgpu     trap_div: FAIL (build)"; tail -3 "$out/trap_div.log"; fail=1; fi
-# a refusal: double
+# a refusal: double (WebGPU core has no f64; Vulkan has it, see double.cpp)
 rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_double.cpp -o "$out/refuse_double" > "$out/refuse.log" 2>&1 || rc=$?
 if [ $rc = 3 ] && grep -q "double" "$out/refuse.log"; then echo "webgpu     refuse_double: refused (exit 3)"; else echo "webgpu     refuse_double: FAIL (exit $rc)"; cat "$out/refuse.log"; fail=1; fi
 exit $fail
