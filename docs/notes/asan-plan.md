@@ -21,9 +21,9 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-7): the cproc changes are the `nfcxx-asan` branch of take-cheeze/cproc (`3rd/cproc` is pinned to its
-`nfcxx-asan-uar` commit, which adds use after return on top of `nfcxx-asan`), see `asan.md`. Remaining: elision of checks
-(optional, below).
+Done (milestones 1-7): the cproc changes are the `nfcxx-asan` branch of take-cheeze/cproc, combined on `nfcxx-asan-combined`
+(`3rd/cproc` is pinned to it: `nfcxx-asan`, plus the setjmp return poison and use after return). See `asan.md`. Remaining: elision of
+checks (optional, below).
 
 Options considered:
 
@@ -36,13 +36,17 @@ Options considered:
 Milestones:
 1. cproc flag `-fsanitize=address`; `scripts/qbe-cc` passes it and links with `-fsanitize=address`.
 2. Checks before every load, store and `funccopy`/blit; skip `va_arg`/`reg_save_area` and `__nfcxx_*` helpers. Tests: heap overflow, use after free, double free.
-3. Stack redzones (done, `asanalloc`, `asandynalloc` for alloca and VLA): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons the
-   redzones at the declaration, unpoisons in `funcret`.
+3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at entry, unpoisons in `funcret`. alloca, VLA and over-aligned objects too (`asandynalloc`, eae3989).
 4. Global redzones (done, `emitdata` and `emitasanctor`): a trailing redzone in each global's own data item, poisoned by a per-unit constructor in `.init_array`. No leading redzone.
 5. Source lines (done): `qbe-cc` keeps the line markers under `NFCXX_ASAN`, cproc emits `dbgloc` and `dbgfile`.
 6. Use after scope (done, `asanend`/`asanleave`/`asangoto`/`asanlabel`/`asancase`, `asan.md` "Use after scope"): a block's
    objects are poisoned with `__asan_poison_stack_memory` when the block is left (normal end, break, continue, goto, and
    the jumps EDG lowers from C++ break, continue and switch) and unpoisoned by their declaration or by a jump into the
+   block. Return needs nothing (funcret). A setjmp call (`setjmp`, `_setjmp`, `sigsetjmp`, `__sigsetjmp`) poisons, at its return,
+   every object whose block is not open at the call (`asansetjmp`, `asanfinish`): that covers a C longjmp and EDG's throw to a
+   `try` in the same frame, with no record of the longjmp. Tests: `scope_throw_escape.cpp`, `scope_longjmp_escape.c` (qbe
+   only) and their clean cases. Not done: a setjmp under another name, and an exit that leaves a callee's frame (the callee's
+   objects). Still open, optional: elision of checks on non-escaping locals.
    block. Return needs nothing (funcret). Still open, optional: elision of checks on
    non-escaping locals.
 7. Use after return (done, `asanalloc`, `asanselect`, `asanfree`, `asan.md` "Use after return"): every fixed-size object of
@@ -62,7 +66,7 @@ Milestones:
 1. `NFCXX_PATHB_ASAN=1`: emit `__asan_load/storeN` before `r_load`, `s_store`, bit-field and copy/zero-fill; link libasan. Tests: heap overflow, use after free.
 2. Slot redzones: enlarge each address-taken slot to `[rz | obj | rz]` (as the over-aligned slot code ~2529 does), poison in `@start`, unpoison before every `ret` and the `@abort` block. Non-address-taken slots stay promotable and need none.
 3. Global redzones in `emit_global` (2426) with `__asan_register_globals` from a constructor.
-4. setjmp/longjmp EH (EDG's ABI; libasan's longjmp interceptor unpoisons the stack), VLA (EDG lowers to `__vla_alloc` pool calls, seen as malloc blocks) and alloca. Test: copy of `tests/asan/cases/clean.cpp`.
+4. setjmp/longjmp EH (EDG's ABI; libasan's longjmp interceptor unpoisons the stack), VLA (EDG lowers to `__vla_alloc` pool calls, seen as malloc blocks) and alloca. Test: copy of `tests/asan/cases/clean.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
 5. Driver and tests: a `// ASAN-EXPECT:` runner next to `traps/` in `tests/pathb-qbe/`, compared with the gcc report.
 6. Use after scope needs `(scope-begin/end $slot)` IR forms from `ir.c`.
 7. Optional: redundant-check elimination within a block, own runtime.
