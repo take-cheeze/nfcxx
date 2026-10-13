@@ -1450,14 +1450,15 @@ HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
   "#endif\n"
 # bf16 as a 16-bit integer (the upper half of a float, round to nearest even). nv_bfloat162 is a two-lane struct, as
 # __half2 is (CUDA's type has .x and .y, and llama.cpp brace-initializes it as such). Operators on nv_bfloat16 are
-# integer operators here, as for half: a unit that uses them is not handled correctly.
+# integer operators here, as for half: a unit that uses them is not handled correctly. float(x) of an nv_bfloat16 is
+# the bits, not the value (a class with a converting constructor is refused by the front end in a device unit).
 BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
   "typedef unsigned short nv_bfloat16;\n" \
   "typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;\n" \
   "typedef unsigned short __nv_bfloat16;\n" \
   "typedef nv_bfloat162 __nv_bfloat162;\n" \
   "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
-  "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return (unsigned short)((x >> 16) | 0x40u); x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
   "#endif\n"
 
 BUILTIN_DEFS = {
@@ -1561,6 +1562,8 @@ BUILTIN_DEFS = {
   "__bfloat162float" => BF16_CORE,
   "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return h.x; }\n",
   "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return h.y; }\n",
+  "__bfloat1622float2" => BF16_CORE + "static inline float2 __bfloat1622float2(nv_bfloat162 h) { return make_float2(__bfloat162float(h.x), __bfloat162float(h.y)); }\n",
+  "__float22bfloat162_rn" => BF16_CORE + "static inline nv_bfloat162 __float22bfloat162_rn(float2 f) { nv_bfloat162 r; r.x = __float2bfloat16(f.x); r.y = __float2bfloat16(f.y); return r; }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
   "__hsub2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hsub2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) - __half2float(b.x)); r.y = __float2half(__half2float(a.y) - __half2float(b.y)); return r; }\n",
