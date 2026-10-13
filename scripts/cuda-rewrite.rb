@@ -886,6 +886,12 @@ def rewrite(text, orig)
       name_start -= 1 while name_start > 0 && ident_char?(text[name_start - 1])
       name = text[name_start...name_end]
       refuse("launch without a kernel name at line #{line}") if name.empty?
+      if $edg_launches && targs.nil?
+        # A launch without template arguments is left to the front end (--cuda parses it, see docs/notes/gpu.md).
+        out << text[i]
+        i += 1
+        next
+      end
       # The call copied so far ends with the name and its arguments: take them back out.
       out = out[0...(out.length - (i - name_start))]
 
@@ -2623,7 +2629,7 @@ def replace_dynamic_uses(s, names)
 end
 
 def usage
-  $stderr.puts "usage: cuda-rewrite.rb [--device [--kernels=FILE]] FILE.cu"
+  $stderr.puts "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] FILE.cu"
   exit(2)
 end
 
@@ -2768,6 +2774,8 @@ ARGV.each do |a|
   elsif a == "--device"
     device = true
     $device = true
+  elsif a == "--edg-launches"
+    $edg_launches = true
   elsif a.start_with?("--kernels=")
     kernels_path = a[10..-1]
   elsif path.nil?

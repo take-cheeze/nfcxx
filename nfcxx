@@ -77,7 +77,14 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   local base; base=$(basename "$src" .cu)
   # The -I directories: the rewriter inlines the project headers they name (quoted and angle-bracket includes).
   local incs=(); local f; for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*) incs+=("$f");; esac; done
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} "$src" > "$copy" || exit $?
+  # NFCXX_CUDA_EDG_LAUNCH=1: the front end parses the plain kernel launches (EDG --cuda, 3rd/edg). The rewriter leaves
+  # them; launches with template arguments are still rewritten here, and the device unit is unchanged.
+  local rw=()
+  if [ "${NFCXX_CUDA_EDG_LAUNCH:-0}" = 1 ]; then
+    rw+=(--edg-launches)
+    export EDG_CPFE_DEFAULT_OPTIONS="--cuda ${EDG_CPFE_DEFAULT_OPTIONS:-}"
+  fi
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} ${rw[@]+"${rw[@]}"} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
   "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
