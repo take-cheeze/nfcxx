@@ -73,9 +73,15 @@ jobs:
           # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
           - name: nfcpoly host (QBE backend)
             go: true
+            interp: true
+            suite: poly
+            backend: qbe
             run: NFCXX_BACKEND=qbe tests/poly/run.sh
           - name: nfcpoly host (gcc backend)
             go: true
+            interp: true
+            suite: poly
+            backend: gcc
             run: NFCXX_BACKEND=gcc tests/poly/run.sh
           - name: nfcpoly Go under AddressSanitizer
             go: true
@@ -87,10 +93,16 @@ jobs:
           - name: uop (QBE backend)
             go: true
             onnx: true
+            interp: true
+            suite: uop
+            backend: qbe
             run: NFCXX_BACKEND=qbe tests/uop/run.sh
           - name: uop (gcc backend)
             go: true
             onnx: true
+            interp: true
+            suite: uop
+            backend: gcc
             run: NFCXX_BACKEND=gcc tests/uop/run.sh
           - name: mruby scripts
             run: tests/mruby/run.sh
@@ -122,6 +134,54 @@ jobs:
           go-version-file: lib/poly/go/go.mod
           cache-dependency-path: lib/poly/go/go.sum
 
+      # Build outputs that the test steps below would otherwise rebuild on every run. Each cache key holds what the output is
+      # built from (the sources the build script and the compiler read, and the toolchain), so a hit is the output this commit
+      # would build. The test programs are cached in the same way; they still run on every run.
+      - name: Cache keys for the rebuilt outputs
+        id: key
+        run: |
+          echo "toolchain=$(git rev-parse HEAD:3rd/edg)-$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)" >> "$GITHUB_OUTPUT"
+          echo "host=$(gcc -dumpfullversion)-$(g++ -dumpfullversion)-ruby$(ruby -e 'print RUBY_VERSION')" >> "$GITHUB_OUTPUT"
+          echo "go=$(go env GOVERSION 2>/dev/null)" >> "$GITHUB_OUTPUT"
+
+      # scripts/mrb runs nfcxx's scripts with this mruby, and every QBE-backend compile runs it, so each QBE job built it on
+      # first use. setup-mruby.sh only checks that the executable exists, so the key holds the script, its config and mrb.
+      - name: Restore the mruby tool
+        uses: actions/cache@v4
+        with:
+          path: build/mruby-tool/bin/mruby
+          key: mruby-tool-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}-${{ steps.key.outputs.host }}
+
+      # The nfcpoly interpreters (scripts/setup-poly.sh, setup-poly-lua.sh, setup-poly-js.sh) for one back end. Their inputs are
+      # the scripts, the patches and the pins in them, the compiler (nfcxx, nfcc, be/, the runtime files of lib/ that the
+      # driver adds) and the toolchain.
+      - name: Restore the nfcpoly interpreters
+        if: matrix.interp
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/poly/${{ matrix.backend }}
+            build/poly-lua/${{ matrix.backend }}
+            build/poly-js/${{ matrix.backend }}
+          key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
+
+      # The Go library (scripts/setup-poly-go.sh: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
+      - name: Restore the nfcpoly Go library
+        if: matrix.go
+        uses: actions/cache@v4
+        with:
+          path: build/poly-go
+          key: nfcpoly-go-${{ runner.os }}-${{ hashFiles('scripts/setup-poly-go.sh', 'lib/poly/go/**') }}-${{ steps.key.outputs.go }}-${{ steps.key.outputs.host }}
+
+      # actions/cache restores files with the modification times they were saved with (GNU tar keeps them), which are older
+      # than the checkout just made, and the setup scripts rebuild an output that is not newer than its inputs. The key already
+      # says the restored output is built from these inputs, so the restored files are touched to say so.
+      - name: Mark the restored outputs as up to date
+        run: |
+          for d in build/poly/*/ build/poly-lua/*/ build/poly-js/*/ build/poly-go/; do
+            if [ -d "$d" ]; then find "$d" -type f -exec touch {} +; fi
+          done
+
       # tests/uop/run.sh differentiates with onnxsim and checks models with onnx and onnxruntime (docs/notes/uop-autodiff.md); without
       # them those tests print SKIP. The C++ library is the primary way (scripts/setup-onnxsim.sh builds onnxsim 0.8.1's sources, pinned
       # by hash, in about 2 minutes; the cache key holds the script and the shim); the pip packages also serve the Python fallback.
@@ -145,7 +205,20 @@ jobs:
         if: matrix.onnx && steps.onnxsim.outputs.cache-hit != 'true'
         run: scripts/setup-onnxsim.sh
 
+      # The nfcpoly and nfcuop test programs. tests/poly/run.sh and tests/uop/run.sh keep each program they compile in
+      # TEST_BIN_CACHE, named by a hash of its command line, and run it on every run. The key holds the sources those
+      # programs include (poly: lib/poly and lib/ast; uop: lib/uop and lib/poly; the suite's tests), the runtime files the
+      # driver links (lib/ehshim, lib/asan, lib/cuda), the scripts and the compiler, the back end and the toolchain.
+      - name: Restore the test programs
+        if: matrix.suite
+        uses: actions/cache@v4
+        with:
+          path: build/test-bin
+          key: test-bin-${{ matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+
       - name: ${{ matrix.name }}
+        env:
+          TEST_BIN_CACHE: ${{ matrix.suite && 'build/test-bin' || '' }}
         run: ${{ matrix.run }}
 
       - name: sccache stats

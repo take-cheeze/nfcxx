@@ -34,6 +34,7 @@
 #   UOP_HOST=1              build with the host g++ (-fsanitize=address,undefined) and nothing else; for a machine
 #                           where nfcxx is not built
 cd "$(dirname "$0")/../.."
+. tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled programs are kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp)
 tests=(test test_ut test_np test_nn test_onnx test_sym test_grad test_cgen np_compat)
@@ -46,8 +47,14 @@ run_all() {
   for t in "${tests[@]}"; do
     ldx=()   # nfcxx programs export type_info vtables that break the exceptions inside libnfconnxsim.so: export nothing (scripts/onnxsim/exe.map)
     [ -n "$CC_IS_NFCXX" ] && [ "$t" = test_grad ] && ldx=(-Wl,--version-script=scripts/onnxsim/exe.map)
-    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
+    cargs=(-I lib/uop tests/uop/$t.cpp "${lib[@]}" -ldl "${ldx[@]}")
+    cached=""; [ -n "$UOP_HOST" ] || cached=$(bin_cache_file "$t-$label" "NFCXX_BACKEND=${NFCXX_BACKEND:-}" "$@" "${cargs[@]}")
+    if [ -n "$cached" ] && [ -x "$cached" ]; then
+      cp -p "$cached" "$tmp/$label/$t"; echo "     $label uop/$t: compile skipped, program from $cached"
+    elif ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
+    else
+      [ -z "$cached" ] || bin_cache_store "$tmp/$label/$t" "$cached"
     fi
     case $t in
       test_np|test_grad|test_nn|test_sym) args=("$tmp/$label/onnx") ;;
