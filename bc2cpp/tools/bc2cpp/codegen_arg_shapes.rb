@@ -197,8 +197,8 @@ module ArgShapeCalls
       head << if extra.empty?
                 'mrb_ary_new(M)'
               else
-                "({ mrb_value bc2cpp_rest[] = { #{extra.join(', ')} }; " \
-                  "mrb_ary_new_from_values(M, #{extra.size}, bc2cpp_rest); })"
+                "[&]() { mrb_value bc2cpp_rest[] = { #{extra.join(', ')} }; " \
+                  "return mrb_ary_new_from_values(M, #{extra.size}, bc2cpp_rest); }()"
               end
     end
     head.insert(mand + (rest ? 1 : positional_optional_count(t_irep)), @call_block_expr || 'mrb_nil_value()') if takes_block_param?(t_irep)

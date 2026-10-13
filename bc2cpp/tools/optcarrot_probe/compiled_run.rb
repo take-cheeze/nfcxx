@@ -453,10 +453,21 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   File.write(config, <<~RUBY)
     base = proc do
       toolchain
-      gembox 'full-core'
+      # full-core adds mruby-cmath, whose C _Complex cproc (the qbe back end) does not support; the default gembox has
+      # everything else this probe needs (Fiber, Set, Struct, Complex, Rational, metaprog).
+      gembox(ENV['NFCXX_BACKEND'] == 'qbe' ? 'default' : 'full-core')
       gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
+      # QBE has no indirect jump, so the computed-goto dispatch (goto *label, which EDG emits for the C++ VM) cannot be
+      # compiled by the qbe back end; the switch dispatch can. Only the qbe build changes; the gcc build keeps computed goto.
+      if ENV['NFCXX_BACKEND'] == 'qbe'
+        cc.defines << 'MRB_USE_VM_SWITCH_DISPATCH'
+        cxx.defines << 'MRB_USE_VM_SWITCH_DISPATCH'
+      end
       #{debug ? 'enable_debug' : '# Keep the toolchain optimization defaults for FPS measurements.'}
     end
+    # mruby's gperf step (mrbgems/mruby-compiler/mrbgem.rake) runs on MRuby.targets['host'], which the default
+    # build config provides and this generated config would otherwise lack.
+    MRuby::Build.new('host') { toolchain }
     unless #{site_profile ? true : false}
       MRuby::Build.new(#{interpreted_target.dump}) do
         instance_eval(&base)
@@ -512,6 +523,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # do -- left `register.cxx` uncompilable ("'mrb_state' has no member named
   # 'errinfo'"), so the probe could not link at all. Same set the real build
   # uses, so the probe's mruby is the mruby bc2cpp is written against.
+  # mruby-vm-goto-table-void.patch: vm.c's computed-goto table is `const void *`; the C++ build (vm-cxx.cxx, EDG) needs
+  # `void *` for `goto *`. Same dispatch, only the element type changes.
+  # mruby-cxx-novolatile.patch: error.c's `volatile int err` in the C++ exception path; cproc (nfcxx's qbe backend)
+  # cannot store to a volatile object. The C++ exception path does not longjmp, so the volatile is not needed.
   # mruby-rdata-ivar-slots.patch is required, not optional: without it the
   # interpreted PPU reads embedded ivars out of an empty iv_tbl and crashes.
   %w[
@@ -523,6 +538,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     mruby-nomemoryerror-reentrant-alloc.patch
     mruby-gc-type-live-counts.patch
     mruby-rdata-ivar-slots.patch
+    mruby-cxx-novolatile.patch
+    mruby-vm-goto-table-void.patch
   ].each do |patch|
     path = File.join(ROOT, 'patches', patch)
     system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY, path, exception: true)
