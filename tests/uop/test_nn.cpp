@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -287,7 +288,8 @@ static void erf_check() {
     const float gv = static_cast<float>(got.data[k].f);
     if (std::isnan(xf)) { specials_ok = specials_ok && std::isnan(gv); continue; }
     if (ref == 0 || std::isinf(ref)) { specials_ok = specials_ok && gv == ref && std::signbit(gv) == std::signbit(ref); continue; }
-    const double ulp = std::nextafter(std::fabs(static_cast<double>(ref)), INFINITY) - std::fabs(static_cast<double>(ref));
+    const double inf = std::numeric_limits<double>::infinity();
+    const double ulp = std::nextafter(std::fabs(static_cast<double>(ref)), inf) - std::fabs(static_cast<double>(ref));
     const double e = std::fabs(static_cast<double>(gv) - static_cast<double>(ref)) / ulp;
     if (e > max_ulp) { max_ulp = e; at_ulp = xf; }
   }
@@ -394,7 +396,7 @@ static void pool_check() {
     for (int64_t n = 0; n < xs[0]; n++)
       for (int64_t ch = 0; ch < xs[1]; ch++)
         each_index(O, [&](const Shape& o) {
-          double best = -INFINITY, sum = 0;
+          double best = -std::numeric_limits<double>::infinity(), sum = 0;
           int64_t valid = 0, slots = 0;
           each_index(c.kernel, [&](const Shape& kap) {
             Shape at_x{n, ch};
