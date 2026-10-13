@@ -270,6 +270,44 @@ else
     File.write(File.join(dir, 'sends.rb'), SENDS)
     line_of = ->(src, text) { src.lines.index { |l| l.include?(text) } + 1 }
 
+    # TC1005 (ADR 0439): an index op on a receiver no nil check dominates is an error; a nil check first clears it.
+    NILIDX = <<~RUBY
+      class TcNil
+        def initialize
+          @items = nil
+        end
+
+        def fill
+          @items = [1, 2]
+        end
+
+        def first_unguarded
+          @items[0]
+        end
+
+        def first_guarded
+          return nil unless @items
+          @items[0]
+        end
+
+        def set_unguarded(v)
+          @items[0] = v
+        end
+      end
+    RUBY
+    File.write(File.join(dir, 'nilidx.rb'), NILIDX)
+    puts '== nilable index (fixture nilidx.rb)'
+    nout, _nerr, nst = type_check.call('--files', 'nilidx.rb', '--no-sends', '-q', chdir: dir)
+    nlines = nout.lines.map(&:chomp)
+    nu = line_of.(NILIDX, 'def first_unguarded') + 1
+    ng = line_of.(NILIDX, 'def first_guarded') + 2
+    check.call('an unguarded index read on a nilable ivar is a TC1005 warning',
+               nlines.include?("nilidx.rb:#{nu}:1: warning: TcNil#first_unguarded: index `[]` on a receiver that may be nil; check it for nil first (ADR 0439) [TC1005]"))
+    check.call('an unguarded index write on a nilable ivar is a TC1005 warning',
+               nlines.any? { |l| l.start_with?("nilidx.rb:#{line_of.(NILIDX, 'def set_unguarded') + 1}:1: warning: TcNil#set_unguarded: index `[]=`") })
+    check.call('a nil check before the index clears TC1005', nlines.none? { |l| l.start_with?("nilidx.rb:#{ng}:") })
+    check.call('the nilable-index fixture exits 0 (a warning does not fail)', nst.exitstatus.zero?)
+
     puts '== contradictions and annotation warnings (fixture contra.rb)'
     out, err, st = type_check.call('--files', 'contra.rb', '--no-sends', '-q', chdir: dir)
     check.call("exit status 1 (#{st.exitstatus}) #{err.lines.first&.strip}", st.exitstatus == 1)

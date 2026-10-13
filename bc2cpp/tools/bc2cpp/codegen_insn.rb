@@ -623,6 +623,7 @@ class CodeGen
       # index-type check; an Array still needs mrb_integer_p (bc2cpp_ary_entry only
       # takes a fixnum).
       d, s = insn.regs.first(2)
+      note_unguarded_index(irep, idx, insn, unshift_proof_reg(d, reg_offset), '[]')
       exact = index_exact_class(irep, idx, unshift_proof_reg(d, reg_offset))
       index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
@@ -729,6 +730,7 @@ class CodeGen
       # `idx_reg`: `idx` would shadow compile_insn's instruction position, which
       # static_indexable_class needs.
       d, idx_reg, val = insn.regs.first(3)
+      note_unguarded_index(irep, idx, insn, unshift_proof_reg(d, reg_offset), '[]=')
       exact = index_exact_class(irep, idx, unshift_proof_reg(d, reg_offset))
       index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class

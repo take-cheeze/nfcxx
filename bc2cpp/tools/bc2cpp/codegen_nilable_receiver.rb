@@ -68,6 +68,26 @@ module NilableReceiverSend
     { key: [irep.label, idx, reg], klass: klass, name: insn.sym, argv: (1..n).map { |k| "r#{reg + k}" } }
   end
 
+  # GETIDX / SETIDX (ADR 0439): an index on a receiver the flow leaves nilable, with no nil check dominating it (a
+  # `return unless x`, `if x` or `x&.` narrows the register out of the mask first). Recorded once per site, for the
+  # type check (TC1005). `reg` is the receiver register as exact_flow_mask reads it.
+  def note_unguarded_index(irep, idx, insn, reg, name)
+    return unless @class_pools_on && @closed_world && irep && idx
+
+    mask = exact_flow_mask(irep, idx, reg)
+    return unless mask.is_a?(Integer) && mask.anybits?(NumericFlow::NIL)
+
+    @unguarded_index ||= {}
+    defn = numeric_irep_owner[irep.label]
+    @unguarded_index[[irep.label, insn.lineno, name]] ||= {
+      file: irep.file, line: insn.lineno, name: name, owner: defn&.owner, method: defn&.name
+    }
+  end
+
+  def unguarded_index_sites
+    (@unguarded_index || {}).values
+  end
+
   # What nil does with the call: the NoMethodError its dispatch raises when nothing answers the
   # name (a marked helper, so the site is not a dynamic send), else the dispatch itself.
   def nilable_nil_arm(insn, recv, name, argv)

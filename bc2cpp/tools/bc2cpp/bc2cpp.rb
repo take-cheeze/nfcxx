@@ -1113,6 +1113,11 @@ if $PROGRAM_NAME == __FILE__
   end
   compiled += gen.emit_synthesized_accessors(only_owners: only_owners)
   profile_phase.call('compile all methods')
+  # TC1005 (ADR 0439): index ops on a receiver no nil check dominates, collected while the methods compiled.
+  if type_facts_path
+    require_relative 'type_facts'
+    TypeFacts.append_nilable_index(type_facts_path, gen.unguarded_index_sites, ENV['BC2CPP_TYPE_FACTS_ROOT'])
+  end
 
   # SKIP_UNSUPPORTED=1 drops methods containing `#error` from the output; they
   # stay interpreted. CLI exploration keeps the markers visible; real builds

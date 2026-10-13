@@ -154,6 +154,11 @@ module TypeCheckReport
       out << Diagnostic.new(file: a['file'], line: a['line'], col: a['col'], severity: 'error', code: 'TC1004',
                             message: "#{a['owner']}##{a['name']}: annotation #{a['arity_mismatch']}")
     end
+    Array(facts['nilable_index']).each do |n|
+      out << Diagnostic.new(file: n['file'], line: n['line'], col: n['col'], severity: 'warning', code: 'TC1005',
+                            message: "#{n['owner']}##{n['method']}: index `#{n['name']}` on a receiver that may be nil; " \
+                                     'check it for nil first (ADR 0439)')
+    end
     Array(facts['signature_diagnostics']).each do |d|
       out << Diagnostic.new(file: d['file'], line: d['line'], col: d['col'], severity: d['severity'], code: d['code'],
                             message: d['message'])

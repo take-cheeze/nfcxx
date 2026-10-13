@@ -647,6 +647,19 @@ module TypeFacts
     }
   end
 
+  # Adds the nilable-index rows (TC1005) to a facts file already written by `write`. Rows are collected after
+  # the methods compile, so they are appended here rather than in `collect`.
+  def append_nilable_index(path, sites, root)
+    facts = JSON.parse(File.read(path))
+    facts['nilable_index'] = sites.filter_map do |s|
+      next unless s[:owner] && s[:method]
+
+      { 'owner' => s[:owner], 'method' => s[:method], 'name' => s[:name], 'file' => relative(Struct.new(:root).new(root), s[:file]),
+        'line' => s[:line], 'col' => 1 }
+    end
+    File.write(path, JSON.generate(facts))
+  end
+
   def write(path, facts)
     File.write(path, JSON.pretty_generate(facts))
   end
