@@ -41,6 +41,12 @@ EDG_BASE=$base cmake --preset linux-gcc-release -B "$out" >/dev/null
 if ! echo '#include <quadmath.h>' | g++ -x c++ -fsyntax-only - 2>/dev/null; then
   sed -i 's/^#define USE_QUADMATH_LIBRARY 1$/#define USE_QUADMATH_LIBRARY 0\n#define APPROXIMATE_QUADMATH 1/' "$out/src/includes/cmake_defines.h"
 fi
+# The same cmakedef enables __float80 and __float128, which only x86 GCC provides. __float80 is x87-only, so
+# turn it off. The front end keeps __float128 (glibc's floatn.h needs it); the C it generates spells it _Float128.
+if [ "$(uname -m)" != x86_64 ]; then
+  sed -i 's/^#define FLOAT80_ENABLING_POSSIBLE 1$/#define FLOAT80_ENABLING_POSSIBLE 0/' "$out/src/includes/cmake_defines.h"
+  sed -i 's/-w -Dva_copy=__va_copy/-w -D__float128=_Float128 -Dva_copy=__va_copy/' "$base/edg_eccp_config"
+fi
 cd "$out"
 ninja bin/cpfe bin/edg_prelink lib/libC.a
 echo "EDG built: $out/bin/eccp"
