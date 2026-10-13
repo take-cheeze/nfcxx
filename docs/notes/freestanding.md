@@ -60,8 +60,8 @@ anyway, so default mode has no hosted library headers either.
 - **Empty class definitions (fixed by a local cproc patch).** EDG emits every instantiated empty class as
   `struct X {};`, and cproc rejected that ("no type in struct member declaration"). This covers trait metafunctions
   (`remove_reference<int&>`), `char_traits<char>`, `nullopt_t` and `integer_sequence<>`. The patch is
-  `cproc-empty-struct` (a commit on take-cheeze/cproc branch nfcxx-patches); `scripts/setup-qbe.sh` applies it to the build copy of cproc (`3rd/cproc`
-  itself is unchanged). It makes three changes in cproc: an empty struct or union body is accepted (size 0,
+  `cproc-empty-struct`, a commit on take-cheeze/cproc branch `nfcxx-asan-combined` (the pin of `3rd/cproc`); `scripts/setup-qbe.sh`
+  builds cproc from that pin, so the patch is in the build. It makes three changes in cproc: an empty struct or union body is accepted (size 0,
   alignment 1, the GNU C rule that gcc follows); a zero-size object, or an array of them, gets a zero-byte
   allocation (cproc assumed only arrays are zero-size); and a constant-length array of zero-size elements is a
   static array, not a VLA. Regenerate the patch if `3rd/cproc` moves. An older `build/cproc` without the patch fails on
@@ -92,8 +92,8 @@ The `panic` test expects exit status 134 (SIGABRT): the abort path is tested as 
 
 ## Reproduce
 
-The qbe path needs the patched cproc: run `scripts/setup-qbe.sh` (it applies `cproc-empty-struct` (a commit on take-cheeze/cproc branch nfcxx-patches))
-before testing, and rerun it after pulling a change to the patch.
+The qbe path needs the patched cproc: run `scripts/setup-qbe.sh` (it builds the pinned cproc, which has `cproc-empty-struct`
+as a commit on take-cheeze/cproc branch `nfcxx-asan-combined`) before testing, and rerun it after moving the pin.
 
 ```
 scripts/setup-qbe.sh                               # build/qbe and build/cproc, with the cproc patch

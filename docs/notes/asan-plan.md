@@ -1,7 +1,8 @@
 # AddressSanitizer for the other backends: plan
 
-Status: the gcc backend is done, and the qbe backend has milestones 1-6 below (loads and stores, redzones, use after scope;
-`asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter. Nothing here is implemented; it comes from reading `qbe-prep.rb`, cproc's `qbe.c`,
+Status: the gcc backend is done, and the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
+use after return; `asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter.
+Nothing of Path B or wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
 ## Common design
@@ -15,13 +16,13 @@ the latter is libasan-version specific, so it is pinned to the host gcc (CI: gcc
 access, which also keeps QBE from merging or forwarding the load (the reason volatile accesses are helper calls).
 Known limit for all: EDG's `libC.a` is not instrumented; heap errors are still found through `malloc` interposition.
 
-The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below, not before the backend passes
+The driver rule of `asan.md` (Path B refused) is lifted per milestone below, not before the backend passes
 `tests/asan/run.sh`. The same cases run on every backend; the report text is the contract, so results are comparable.
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-6): the cproc changes are the `nfcxx-asan-unwind` branch of take-cheeze/cproc (pinned as `3rd/cproc`; it
-is `nfcxx-asan` plus the setjmp return poison), see `asan.md`. Remaining: the optional part of 6 below.
+Done (milestones 1-7). The cproc changes are on the `nfcxx-asan-combined` branch of take-cheeze/cproc, and `3rd/cproc` is
+pinned to its commit a44a644. See `asan.md`. Open: elision of checks (optional, below).
 
 Options considered:
 
@@ -32,9 +33,11 @@ Options considered:
 | C. A QBE pass after `promote`/`ssa` | Fewer redundant checks and also covers Path B output, but loses C types, volatile and line info, and needs blit expansion and abi0 handling. Revisit for check elimination. |
 
 Milestones:
-1. cproc flag `-fsanitize=address`; `scripts/qbe-cc` passes it and links with `-fsanitize=address`.
-2. Checks before every load, store and `funccopy`/blit; skip `va_arg`/`reg_save_area` and `__nfcxx_*` helpers. Tests: heap overflow, use after free, double free.
-3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at entry, unpoisons in `funcret`. alloca, VLA and over-aligned objects too (`asandynalloc`, eae3989).
+1. Done: `NFCXX_ASAN=1` selects the instrumentation; `scripts/qbe-cc` links with `-fsanitize=address` under it.
+2. Done (`funcinst`): a check before every load and store, the chunks of a block copy (`funccopy`) included. No exemptions
+   were needed: the `va_arg` save area is ordinary stack memory, and the scalar `IVAARG` instruction is not checked. Tests:
+   heap overflow, use after free, double free.
+3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at the declaration, unpoisons in `funcret`. alloca, C-input VLA and over-aligned objects too (`asandynalloc` and the over-aligned branch of `asanalloc`).
 4. Global redzones (done, `emitdata` and `emitasanctor`): a trailing redzone in each global's own data item, poisoned by a per-unit constructor in `.init_array`. No leading redzone.
 5. Source lines (done): `qbe-cc` keeps the line markers under `NFCXX_ASAN`, cproc emits `dbgloc` and `dbgfile`.
 6. Use after scope (done, `asanend`/`asanleave`/`asangoto`/`asanlabel`/`asancase`, `asan.md` "Use after scope"): a block's
@@ -44,7 +47,11 @@ Milestones:
    every object whose block is not open at the call (`asansetjmp`, `asanfinish`): that covers a C longjmp and EDG's throw to a
    `try` in the same frame, with no record of the longjmp. Tests: `scope_throw_escape.cpp`, `scope_longjmp_escape.c` (qbe
    only) and their clean cases. Not done: a setjmp under another name, and an exit that leaves a callee's frame (the callee's
-   objects). Still open, optional: fake stack (use after return), elision of checks on non-escaping locals.
+   objects). Still open, optional: elision of checks on non-escaping locals.
+7. Use after return (done, `asanalloc`, `asanselect`, `asanfree`, `asan.md` "Use after return"): every fixed-size object of
+   align 16 or less is in a libasan fake frame (`__asan_stack_malloc_N` at the entry, `__asan_stack_free_N` at each return),
+   with gcc's ABI and header, so the report is `stack-use-after-return` on both backends. Not done: one frame per function
+   (gcc's), objects over 16-byte alignment, VLA and alloca (the real frame only).
 Open check: the unwinder wants `rbp` chains; QBE keeps them, but verify with a report.
 
 ## Path B: emit from `pathb-qbe-emit.rb`
