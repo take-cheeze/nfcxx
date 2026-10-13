@@ -5,9 +5,14 @@ require_relative 'bytecode_ir_inline'
 class CodeGen
   def bytecode_ir_inline_code(target, dest, argv, owner_def, self_implicit, caller_irep)
     return nil unless ENV['BC2CPP_IR_INLINE'] == '1' && self_implicit && owner_def
-    return nil unless caller_irep&.label == owner_def.irep
+    if @resumable
+      return nil unless ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1' && @resumable.flat && caller_irep
+      return nil if @fiber_yield_names.include?(target.name)
+    else
+      return nil unless caller_irep&.label == owner_def.irep
+    end
     return nil unless target.owner == owner_def.owner && !target.core && target.name != 'initialize'
-    return nil if @resumable || @fiber_unsafe_methods.include?(target.irep)
+    return nil if @fiber_unsafe_methods.include?(target.irep)
     return nil unless native_arg_types(target, argv.size).compact.empty?
 
     stack = (@ir_inline_stack ||= [])
@@ -21,6 +26,8 @@ class CodeGen
     return nil unless region
     return nil if irep.instructions.size > @ir_inline_remaining
 
+    return nil if @resumable && region.program.branch_edges.any? { |edge| region.program.insn_at_addr(edge.target)&.op == 'ENTER' }
+
     @ir_inline_remaining -= irep.instructions.size
 
     serial = (@ir_inline_serial = (@ir_inline_serial || 0) + 1)
@@ -28,16 +35,18 @@ class CodeGen
     exit_label = "#{prefix}exit"
     result = "#{prefix}result"
     args = argv.each_index.map { |i| "#{prefix}arg#{i}" }
-    out = "  // BYTECODE_IR_INLINE #{target.owner}##{target.name}\n  {\n"
+    marker = @resumable ? 'BYTECODE_IR_RESUMABLE_INLINE' : 'BYTECODE_IR_INLINE'
+    out = "  // #{marker} #{target.owner}##{target.name}\n  {\n"
     args.each_with_index { |arg, i| out << "  mrb_value #{arg} = #{argv[i]};\n" }
     out << "  mrb_value #{result} = mrb_nil_value();\n  {\n"
-    (0...irep.nregs).each { |i| out << "  mrb_value r#{i} = #{i.zero? ? 'self' : 'mrb_nil_value()'};\n" }
-    args.each_with_index { |arg, i| out << "  r#{i + 1} = #{arg};\n" }
+    local = String.new
+    (0...irep.nregs).each { |i| local << "  mrb_value r#{i} = #{i.zero? ? 'self' : 'mrb_nil_value()'};\n" }
+    args.each_with_index { |arg, i| local << "  r#{i + 1} = #{arg};\n" }
     stack << target.irep
     begin
       region.program.instructions.each do |node|
         insn = node.source
-        out << "#{prefix}#{node.addr}:;\n" if region.program.branch_targets.include?(node.addr)
+        local << "#{prefix}#{node.addr}:;\n" if region.program.branch_targets.include?(node.addr)
         code = case node.op
                when 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE'
                  value = { 'RETSELF' => 'self', 'RETNIL' => 'mrb_nil_value()',
@@ -53,11 +62,20 @@ class CodeGen
                end
         return nil if code.include?('#error')
 
-        out << code
+        local << code
       end
     ensure
       stack.pop
     end
-    out << "#{exit_label}:;\n  }\n  r#{dest} = #{result};\n  }\n"
+    local << "#{exit_label}:;\n"
+    if @resumable
+      # These regions cannot suspend; only the caller needs persistent registers.
+      # Rename identifiers outside literals so frame assembly ignores local values.
+      local = local.gsub(RESUMABLE_REGISTER_TOKENS) do |token|
+        reg = Regexp.last_match[:reg]
+        reg ? "#{prefix}r#{reg}" : token
+      end
+    end
+    out << local << "  }\n  r#{dest} = #{result};\n  }\n"
   end
 end
