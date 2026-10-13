@@ -31,7 +31,7 @@ covers say so.
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
 | [pathb-stage3.md](notes/pathb-stage3.md) | The IR-to-QBE emitter, translation validation, and the rounds of closed gaps (volatile, TLS, exceptions, dynamic init, bit-fields, VLAs). |
-| [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`). |
+| [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the ILP32 layout of wasm32 under `--emscripten` (i32 pointers), the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`). |
 | [realworld.md](notes/realworld.md) | tinyxml2, doctest, Lua, mruby built with nfcxx/nfcc, what each needed, `nfcc` options. |
 | [ubsan.md](notes/ubsan.md) | `nfcxx -fsanitize=undefined` (Path B): checked operations that report `file:line: runtime error: ...`, and `[[likely]]`/`[[unlikely]]` as block layout. `tests/pathb-qbe/run.sh` (traps/ubsan_*, cases/ubsan_clean, cases/likely_unlikely). |
 | [tracing.md](notes/tracing.md) | `--trace` Chrome/Perfetto JSON of the driver steps. |

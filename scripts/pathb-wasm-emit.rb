@@ -16,20 +16,23 @@
 # mode malloc and free are the module's own (a heap between the static data and the stack, with a quarantine), not
 # imports. Without --asan the module is the same as before the mode existed, byte for byte.
 #
-# Usage with --emscripten (before the file): the same module with the exports that the Emscripten JS runtime reads:
+# Usage with --emscripten (before the file): the module of the ILP32 IR (pathb-dump --target linux_riscv32) with the
+# exports that the Emscripten JS runtime reads:
 # __indirect_function_table (an empty funcref table), __stack_pointer, __data_end and __heap_base (immutable i32
 # globals), and __wasm_call_ctors (an empty function: the IR has no constructor list). The layout and the code are
 # unchanged. --emscripten-import-memory (with --emscripten) imports env.memory instead of exporting memory.
 # --asan and --emscripten are not combined. Without the arguments the module is byte-identical to the one before the
 # mode existed. docs/notes/pathb-wasm.md, "Emscripten".
 #
-# Layout and representation. The IR's layout is LP64 (pointers 8 bytes), and the emitter keeps it: a pointer value is an
-# i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Integers of 1, 2 and 4 bytes are
-# i32 values kept canonical (sign- or zero-extended from their width), so a comparison or a widening is a plain
-# operation; 8-byte integers and pointers are i64; float and double are f32 and f64. A register is a wasm local (the
-# IR is not SSA, so a register may be set more than once). A slot is a frame in the linear memory: a shadow stack grows
-# down from the top of the memory (global 0). Each function's frame starts at the stack pointer it found on entry, minus
-# its frame size, aligned to 16, and the stack pointer is restored before each return.
+# Layout and representation. The IR's layout is LP64 (pointers 8 bytes) by default, and the emitter keeps it: a pointer
+# value is an i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Under --emscripten the
+# IR is ILP32 (pointers and long 4 bytes, the model of wasm32), and a pointer is an i32 that needs no wrap (see layout_model).
+# Integers of 1, 2 and 4 bytes are i32 values kept canonical (sign- or zero-extended from their width), so a comparison
+# or a widening is a plain operation; 8-byte integers are i64, and pointers are i64 (i32 under ILP32); float and double
+# are f32 and f64. A register is a wasm local (the IR is not SSA, so a register may be set more than once). A slot is a
+# frame in the linear memory: a shadow stack grows down from the top of the memory (global 0). Each function's frame
+# starts at the stack pointer it found on entry, minus its frame size, aligned to 16, and the stack pointer is restored
+# before each return.
 #
 # Checked operations. Division by zero, INT_MIN / -1 and float-to-integer conversions out of range or from NaN trap
 # through wasm's own traps, which match the IR's checked forms. A shift whose count is not below the width of its left
@@ -231,10 +234,35 @@ SCALARS = {
   "double" => ["float", 8],
 }
 
+# The data model. LP64 is the IR's default. ILP32 (the layout of EDG's linux_riscv32 target, which pathb-dump selects with
+# --target) is the model of Emscripten's wasm32: pointers and long are 4 bytes. The IR's (layout ...) header gives the
+# model (layout_model), and emit_module sets these once per run: $ptr_bytes is the pointer size, $scalars the table of
+# the integer sizes. Under LP64 they are the tables above, so the module is the one emitted before they existed.
+SCALARS_ILP32 = SCALARS.merge("long" => ["int", 4, true, false], "unsigned_long" => ["int", 4, false, false])
+LAYOUT_LP64 = { "short" => 2, "int" => 4, "long" => 8, "long_long" => 8, "pointer" => 8, "float" => 4, "double" => 8 }
+LAYOUT_ILP32 = { "short" => 2, "int" => 4, "long" => 4, "long_long" => 8, "pointer" => 4, "float" => 4, "double" => 8 }
+$ptr_bytes = 8
+$scalars = SCALARS
+
+# The model that a layout names: :lp64 or :ilp32. sizes is the header's (layout ...) as a Hash (empty when the IR has
+# none, which is LP64, as the QBE emitter takes it). long_double is not checked: no 16-byte type is emitted.
+def layout_model(sizes)
+  return :lp64 if sizes.empty?
+  s = sizes.reject { |k, _| k == "long_double" }
+  return :lp64 if s == LAYOUT_LP64
+  return :ilp32 if s == LAYOUT_ILP32
+  raise Refused, "layout #{sizes.map { |k, v| "#{k} #{v}" }.join(", ")} is neither LP64 nor ILP32"
+end
+
+# The wasm type of a pointer: i64 under LP64, i32 under ILP32 (the linear memory's address).
+def ptr_wtype
+  $ptr_bytes == 8 ? :i64 : :i32
+end
+
 def parse_type(x)
   if x.is_a?(String)
     return VOID if x == "void"
-    return SCALARS[x] if SCALARS.key?(x)
+    return $scalars[x] if $scalars.key?(x)
     raise Refused, "type #{x}"
   end
   raise BadIR, "bad type form #{form_text(x)}" if !x.is_a?(Array) || x.empty?
@@ -250,7 +278,7 @@ end
 
 # The size and alignment of an object of type t, from the layout of the IR (scalars and arrays of them).
 def type_size(t)
-  return 8 if t[0] == "ptr"
+  return $ptr_bytes if t[0] == "ptr"
   return t[1] if t[0] == "int" || t[0] == "float"
   if t[0] == "array"
     raise Refused, "variable-length array" if t[1].nil?
@@ -281,7 +309,7 @@ def wtype(t)
     return :i64 if t[1] == 8
     raise Refused, "integer of #{t[1]} bytes"
   end
-  return :i64 if t[0] == "ptr"
+  return ptr_wtype if t[0] == "ptr"
   if t[0] == "float"
     return :f32 if t[1] == 4
     return :f64 if t[1] == 8
@@ -569,7 +597,7 @@ def static_contents(mod, o)
       raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
       raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
       raise Refused, "address of the function #{target.name} in a static initializer (a function table is not lowered)" if target.sig == "&"
-      items << [off, 8, false, le_bytes(mod.static_addr(target.name) + add, 8)]
+      items << [off, $ptr_bytes, false, le_bytes(mod.static_addr(target.name) + add, $ptr_bytes)]
     elsif h == "bytes"
       off = as_int(it[1].to_s)
       n = as_int(it[2].to_s)
@@ -849,14 +877,14 @@ class Fn
     if op.is_a?(String) && op[0] == "%"
       e(0x20); leb_u(reg_info(op)[0])
     elsif op.is_a?(IRSym) && op.sig == "@"
-      e(0x42); leb_s(@mod.static_addr(op.name))   # the address of the static object
+      ptr_const(@mod.static_addr(op.name))   # the address of the static object
     elsif op.is_a?(IRSym)
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
       e(0x6a)                              # i32.add
-      e(0xad)                              # i64.extend_i32_u
+      e(0xad) if $ptr_bytes == 8           # i64.extend_i32_u (the address is an i32 under ILP32)
     elsif head_of(op) == "null"
-      e(0x42); leb_s(0)
+      ptr_const(0)
     else
       push_const(parse_type(op[1]), op[2])
     end
@@ -868,10 +896,10 @@ class Fn
     if op.is_a?(IRSym)
       raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
       @mod.static_addr(op.name) if op.sig == "@"
-      return :i64
+      return ptr_wtype
     end
     return reg_info(op)[1] if op.is_a?(String) && op[0] == "%"
-    return :i64 if head_of(op) == "null"
+    return ptr_wtype if head_of(op) == "null"
     return wtype(parse_type(op[1])) if head_of(op) == "const"
     raise Refused, "operand #{form_text(op)}"
   end
@@ -883,8 +911,8 @@ class Fn
       e(0x41); leb_s(slot_offset(op.name))
       e(0x6a)
     else
-      push_op(op, :i64)
-      e(0xa7)                              # i32.wrap_i64
+      push_op(op, ptr_wtype)
+      e(0xa7) if $ptr_bytes == 8           # i32.wrap_i64 (an i32 address needs no wrap)
     end
   end
 
@@ -937,7 +965,34 @@ class Fn
     raise Refused, "non-integer where an integer is needed" unless ty[0] == "int" || ty[0] == "ptr"
     push_op(op)
     return if wtype(ty) == :i64
-    e((sext || (ty[0] == "int" && ty[2])) ? 0xac : 0xad)   # i64.extend_i32_s / _u
+    e((ty[0] == "int" && (sext || ty[2])) ? 0xac : 0xad)   # i64.extend_i32_s / _u (an address is unsigned)
+  end
+
+  # Pushes an index operand (an integer) as the pointer width, sign-extended when it is narrower (as the IR says).
+  # Under LP64 this is push_i64; under ILP32 an i64 index is wrapped and an i32 one is used as it is.
+  def push_index(op)
+    return push_i64(op, true) if $ptr_bytes == 8
+    ty = op_type(op)
+    raise Refused, "non-integer where an integer is needed" unless ty[0] == "int"
+    push_op(op)
+    e(0xa7) if wtype(ty) == :i64         # i32.wrap_i64
+  end
+
+  # An integer constant of the pointer width (the address of an object, an offset, 0 for null).
+  def ptr_const(n)
+    if $ptr_bytes == 8
+      e(0x42); leb_s(n)
+    else
+      n &= 0xffffffff
+      n -= 0x100000000 if n >= 0x80000000
+      e(0x41); leb_s(n)
+    end
+  end
+
+  # Pointer-width arithmetic: i64 under LP64, i32 under ILP32. op is :add, :sub, :mul or :div_s.
+  def ptr_arith(op)
+    e(($ptr_bytes == 8 ? { :add => 0x7c, :sub => 0x7d, :mul => 0x7e, :div_s => 0x7f } :
+                         { :add => 0x6a, :sub => 0x6b, :mul => 0x6c, :div_s => 0x6d })[op])
   end
 
   def push_const(ty, v)
@@ -1135,18 +1190,23 @@ class Fn
       raise Refused, "p2i to a non-integer" unless dst[0] == "int"
       push_op(x[2])
       if wtype(dst) == :i32
-        e(0xa7)
+        e(0xa7) if ptr_wtype == :i64       # i32.wrap_i64 (an i32 address needs no wrap)
         normalize(dst)
         :i32
       else
+        e(0xad) if ptr_wtype == :i32       # i64.extend_i32_u: an address is unsigned
         :i64
       end
     when "i2p"
       src = op_type(x[2])
       raise Refused, "i2p from a non-integer" unless src[0] == "int"
       push_op(x[2])
-      e(src[2] ? 0xac : 0xad) if wtype(src) == :i32
-      :i64
+      if ptr_wtype == :i64
+        e(src[2] ? 0xac : 0xad) if wtype(src) == :i32
+      else
+        e(0xa7) if wtype(src) == :i64      # i32.wrap_i64
+      end
+      ptr_wtype
     when "i2f", "u2f"
       dst = parse_type(x[1])
       raise Refused, "i2f to a non-float" unless float_type?(dst)
@@ -1198,29 +1258,29 @@ class Fn
       push_const(parse_type(x[1]), x[2])
       wtype(parse_type(x[1]))
     when "null"
-      e(0x42); leb_s(0)
-      :i64
+      ptr_const(0)
+      ptr_wtype
     when "offset"
       # (offset ADDR N): no type; the result is a pointer
       push_op(x[1])
-      e(0x42); leb_s(as_int(x[2]))
-      e(0x7c)                              # i64.add
-      :i64
+      ptr_const(as_int(x[2]))
+      ptr_arith(:add)
+      ptr_wtype
     when "index"
       # (index BASE IDX SIZE): no type; the result is a pointer. The index is sign-extended, as the IR says.
       push_op(x[1])
-      push_i64(x[2], true)
-      e(0x42); leb_s(as_int(x[3]))
-      e(0x7e)                              # i64.mul
-      e(0x7c)                              # i64.add
-      :i64
+      push_index(x[2])
+      ptr_const(as_int(x[3]))
+      ptr_arith(:mul)
+      ptr_arith(:add)
+      ptr_wtype
     when "pdiff"
-      # (pdiff A B SIZE): no type; the result is the pointer difference, a long
+      # (pdiff A B SIZE): no type; the result is the pointer difference, a long (the width of a pointer in both models)
       push_op(x[1]); push_op(x[2])
-      e(0x7d)                              # i64.sub
-      e(0x42); leb_s(as_int(x[3]))
-      e(0x7f)                              # i64.div_s
-      :i64
+      ptr_arith(:sub)
+      ptr_const(as_int(x[3]))
+      ptr_arith(:div_s)
+      wtype($scalars["long"])
     when "call"
       call(x)
     when "unsupported"
@@ -1240,7 +1300,7 @@ class Fn
       else raise Refused, "load of #{ty[1]} bytes"
       end
     elsif ty[0] == "ptr"
-      e(0x29)
+      e($ptr_bytes == 8 ? 0x29 : 0x28)     # i64.load / i32.load
     else
       e(ty[1] == 4 ? 0x2a : 0x2b)
     end
@@ -1257,7 +1317,7 @@ class Fn
       else raise Refused, "store of #{ty[1]} bytes"
       end
     elsif ty[0] == "ptr"
-      e(0x37)
+      e($ptr_bytes == 8 ? 0x37 : 0x36)     # i64.store / i32.store
     else
       e(ty[1] == 4 ? 0x38 : 0x39)
     end
@@ -1424,7 +1484,7 @@ class Fn
     when "nonnull"
       # (nonnull P): traps when the pointer is null
       push_op(s[1])
-      e(0x50)                              # i64.eqz
+      e($ptr_bytes == 8 ? 0x50 : 0x45)     # i64.eqz (i32.eqz under ILP32)
       e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. The index is compared as unsigned, so a negative one traps too.
@@ -1861,6 +1921,25 @@ USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-m
 
 def emit_module(src, asan = false, emscripten = false, import_memory = false)
   forms = parse_forms(tokenize(src))
+  # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
+  # takes ILP32 only). The model is set before any type is read.
+  sizes = {}
+  forms.each do |f|
+    next unless head_of(f) == "ir-module"
+    f.drop(2).each do |part|
+      next unless head_of(part) == "layout"
+      part.drop(1).each { |item| sizes[item[0].to_s] = as_int(item[1].to_s) }
+    end
+  end
+  model = layout_model(sizes)
+  if model == :ilp32 && !emscripten
+    raise Refused, "layout: ILP32 (pointer 4) is emitted with --emscripten only"
+  end
+  if model == :lp64 && emscripten
+    raise Refused, "layout: --emscripten needs an ILP32 IR (pathb-dump --freestanding --target linux_riscv32), not LP64"
+  end
+  $ptr_bytes = model == :ilp32 ? 4 : 8
+  $scalars = model == :ilp32 ? SCALARS_ILP32 : SCALARS
   defs = {}
   order = []
   objs = []
