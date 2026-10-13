@@ -1284,6 +1284,21 @@ HALF_LANE = HALF_LANE.sub("__nfcxx_hlane(unsigned short a, unsigned short b, int
   "__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __float2half(__half2float(a) + __half2float(b)) : __float2half(__half2float(a) * __half2float(b)); }")
 HALF2_PAIR = HALF2_TYPE + HALF_LANE
 
+# The C++ operators on __half2 (llama.cpp uses them). Included when the unit names half2 (or __half2); they call the
+# pair functions above, which are included with them.
+HALF2_OPS = HALF2_TYPE + [
+  "static inline __half2 operator+(__half2 a, __half2 b) { return __hadd2(a, b); }\n",
+  "static inline __half2 operator-(__half2 a, __half2 b) { return __hsub2(a, b); }\n",
+  "static inline __half2 operator*(__half2 a, __half2 b) { return __hmul2(a, b); }\n",
+  "static inline __half2 operator/(__half2 a, __half2 b) { return __hdiv2(a, b); }\n",
+  "static inline __half2 operator-(__half2 a) { __half2 r; r.x = a.x ^ 0x8000u; r.y = a.y ^ 0x8000u; return r; }\n",
+  "static inline __half2 &operator+=(__half2 &a, __half2 b) { a = __hadd2(a, b); return a; }\n",
+  "static inline __half2 &operator-=(__half2 &a, __half2 b) { a = __hsub2(a, b); return a; }\n",
+  "static inline __half2 &operator*=(__half2 &a, __half2 b) { a = __hmul2(a, b); return a; }\n",
+  "static inline __half2 &operator/=(__half2 &a, __half2 b) { a = __hdiv2(a, b); return a; }\n",
+  "static inline int operator==(__half2 a, __half2 b) { return __half2float(a.x) == __half2float(b.x) && __half2float(a.y) == __half2float(b.y); }\n",
+].join
+
 # __hmax2: the lane rule of __hmax (NaN loses; a zero tie gives +0 for mixed signs), defined once per unit.
 HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
   "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
@@ -1389,6 +1404,10 @@ BUILTIN_DEFS = {
   "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return (unsigned short)(h >> 16); }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
+  "__hsub2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hsub2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) - __half2float(b.x)); r.y = __float2half(__half2float(a.y) - __half2float(b.y)); return r; }\n",
+  "__hdiv2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hdiv2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) / __half2float(b.x)); r.y = __float2half(__half2float(a.y) / __half2float(b.y)); return r; }\n",
+  # The C++ operators on half2 (llama.cpp uses them). Included when the unit names half2; they use the pair functions above.
+  "__nfcxx_half2_ops" => HALF2_OPS,
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
   "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
   "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",
@@ -2182,6 +2201,10 @@ def device_tu(text)
     next if done[base]
     done[base] = true
     out << VECTOR_DEFS[base] << "\n"
+  end
+  if needed["half2"] || needed["__half2"]
+    needed["__nfcxx_half2_ops"] = true
+    %w[__hadd2 __hsub2 __hmul2 __hdiv2].each { |n| needed[n] = true }
   end
   needed["is_same"] = true if needed["is_same_v"]   # std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
   BUILTIN_DEFS.each do |name, text|
