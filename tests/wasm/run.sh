@@ -10,7 +10,8 @@
 # is a clean program that needs the mode (its malloc and free are the module's own only under --asan): it runs under the
 # mode, which must give N, and is skipped otherwise.
 # NFCXX_WASM_EMSCRIPTEN=1 emits every module with --emscripten (tests/wasm/emscripten.cjs checks its exports and
-# layout), and the tests must still give their results. It is not combined with NFCXX_WASM_ASAN.
+# layout), and the tests must still give their results. NFCXX_WASM_EMSCRIPTEN=import adds --emscripten-import-memory
+# (the memory is imported as env.memory; the host provides it). Neither is combined with NFCXX_WASM_ASAN.
 # Skipped, not failed, without node (set NODE to a binary) or without the Path B harness (scripts/setup-pathb.sh).
 cd "$(dirname "$0")/../.."
 root=$PWD; dir=$root/tests/wasm
@@ -19,6 +20,7 @@ node=${NODE:-$(command -v node || true)}
 asan=0; emscripten=0; mode_args=(); mode=plain
 if [ "${NFCXX_WASM_ASAN:-}" = 1 ]; then asan=1; mode_args=(--asan); mode=asan; fi
 if [ "${NFCXX_WASM_EMSCRIPTEN:-}" = 1 ]; then emscripten=1; mode_args=(--emscripten); mode=emscripten; fi
+if [ "${NFCXX_WASM_EMSCRIPTEN:-}" = import ]; then emscripten=1; mode_args=(--emscripten --emscripten-import-memory); mode=emscripten-import; fi
 [ $asan = 1 ] && [ $emscripten = 1 ] && { echo "tests/wasm: NFCXX_WASM_ASAN and NFCXX_WASM_EMSCRIPTEN are not combined" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0; skip=0

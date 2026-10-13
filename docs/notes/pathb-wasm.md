@@ -149,23 +149,33 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
 ## Emscripten (`--emscripten`)
 
 `scripts/mrb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the same module with the exports the
-Emscripten JS runtime reads. It is the first step of the Emscripten compatibility plan. The layout and the code are
-unchanged; without the argument the module is byte-identical to the one before the mode existed. `--asan` and
-`--emscripten` are refused together (the shadow would sit where the heap begins). `NFCXX_WASM_EMSCRIPTEN=1` in
-`tests/wasm/run.sh` emits every test with the flag and runs `tests/wasm/emscripten.cjs` on each module.
+Emscripten JS runtime reads. `--emscripten-import-memory` (with `--emscripten`) imports the memory as `env.memory`
+instead of exporting it, the layout of Emscripten's `IMPORTED_MEMORY`. The layout and the code are unchanged; without
+the arguments the module is byte-identical to the one before the mode existed. `--asan` and `--emscripten` are refused
+together (the shadow would sit where the heap begins), and `--emscripten-import-memory` without `--emscripten` is an
+error. `NFCXX_WASM_EMSCRIPTEN=1` in `tests/wasm/run.sh` emits every test with `--emscripten`, and
+`NFCXX_WASM_EMSCRIPTEN=import` with `--emscripten-import-memory`; each module is checked by `tests/wasm/emscripten.cjs`.
 
 | Export | Kind | Value |
 | --- | --- | --- |
-| `memory` | memory | the linear memory (exported, not imported) |
+| `memory` | memory | the linear memory, exported (not with `--emscripten-import-memory`) |
 | `__indirect_function_table` | table, funcref | empty: 0 elements, no maximum |
 | `__stack_pointer` | global, mutable i32 | global 0, the stack pointer, at the top of the memory |
 | `__data_end` | global, immutable i32 | the end of the static data (the first address after the last object) |
 | `__heap_base` | global, immutable i32 | the top of the memory, which is also the initial stack pointer |
+| `__wasm_call_ctors` | function, `() -> ()` | empty: runs no static constructors (see below) |
+
+With `--emscripten-import-memory` the module imports `env.memory` (no maximum, initial size the module's pages) and has
+no memory section or `memory` export. Growing it is the host's `memory.grow`; the module does not grow it.
 
 - **The table.** The emitter refuses indirect calls (`Fn#call`) and function addresses (`op_type`, and a static
-  initializer of `&"f"`), so no function is ever stored in a table and the table has no element segment. It is exported
-  empty so that the table accessor the glue uses finds an export under that name. Whether the glue needs it at all is not
-  checked (see the list below).
+  initializer of `&"f"`), and it emits no `call_indirect`. So no module code calls through the table, and no function is
+  stored in it: the table has no element segment, and no call through it can trap. It is exported empty, with no
+  maximum, so the JS side can grow it (`tests/wasm/emscripten.cjs` grows it by one). Whether the Emscripten glue uses
+  the table at all is not checked (point 3 below).
+- **Constructors.** The IR has no list of static constructors: a dynamically initialized global is refused (`(unsupported
+  init ...)`, see "What is refused"), so there is nothing for `__wasm_call_ctors` to run. It is exported as an empty
+  function that returns and leaves the stack pointer alone.
 - **The stack pointer's type is i32, not the pointer type i64.** The IR's pointer values are i64 (LP64 is kept), but the
   stack pointer only ever holds a linear-memory address, and a memory address is i32 in this module already (a memory
   access wraps the i64 to i32). So the prologue is unchanged, and the glue's i32 is met. The consequence is that the
@@ -173,38 +183,46 @@ unchanged; without the argument the module is byte-identical to the one before t
   BigInt, not a Number. Making the stack pointer i64 would have meant an i64 prologue and a wrap at each memory access,
   and would have broken the i32 the glue reads.
 - **The heap base.** There is no allocator in the module, and the stack grows down from the top of the memory to the
-  static data. So the heap is placed where the stack starts: `__heap_base` is the top of the memory (`pages * 65536`),
-  and an `sbrk`-style allocator would grow the memory from there (the memory is not grown by the module itself). The
-  heap is empty at the start: it has no room until the memory grows.
-- **The imports** are unchanged: functions of module `env` that the IR calls without defining. No
-  `wasi_snapshot_preview1` import is added.
+  static data. So the heap is placed where the stack starts: `__heap_base` is the top of the memory (`pages * 65536`).
+  The heap is empty at the start: it has no room until the memory grows, and nothing in the module grows it.
+- **The imports** are functions of module `env` that the IR calls without defining (the memory with
+  `--emscripten-import-memory`). No `wasi_snapshot_preview1` import is added. Under `--emscripten` each import name is
+  looked up in `EMSCRIPTEN_IMPORT_NAMES`, a table of IR name to Emscripten name; it is empty (point 5).
 - **Names.** A function of the IR may not take an export name of the mode (`EMSCRIPTEN_EXPORTS`): the module is refused.
 
-**Glue expectations not met** (the list for step 2; checked against the module, not against an Emscripten JS runtime,
-since none is installed here):
+**The list for step 2, and where each point stands.** Checked against the module, not against an Emscripten JS runtime:
+none is installed here, and the Emscripten sources were not reachable from this environment (see "Unverified names").
 
-1. **Pointer width.** The IR's pointer values are i64 (LP64), where the Emscripten wasm32 glue treats pointers as i32
-   numbers. A pointer crossing the JS boundary is a BigInt. Only the stack pointer and the globals are i32.
-2. **Memory import.** The memory is exported. Emscripten's default is to export it too, but `IMPORTED_MEMORY` (or a
-   shared memory) expects `env.memory`; that is not supported.
-3. **The table has no entries.** Function pointers are refused, so a call through the table (`addFunction`, a dynamic
-   call) would trap; the table is present only so that the accessor finds it.
-4. **Linking sections.** No `dylink.0`, `linking` or `reloc.*` custom section. That is needed for dynamic linking
-   (`MAIN_MODULE`, `SIDE_MODULE`) only.
-5. **Runtime imports.** The module imports every function the IR calls and does not define, under its C++ or C name
-   (`printf`, `malloc`, `free`, `__cxa_*`, ...). Emscripten's runtime provides `emscripten_*`, `__syscall_*`, `fd_write`
-   and its libc under other names, so an unmodified Emscripten runtime fails at instantiation with a LinkError for each
-   missing name. The programs in `tests/wasm` import only the host's stubs.
-6. **Exports the glue calls.** Not exported: `__wasm_call_ctors` (the static constructors), `malloc`/`free` (the glue's
-   `_malloc`, `allocate`), and the stack functions the glue uses (`emscripten_stack_get_current` and the other
-   `emscripten_stack_*` functions for `stackSave`). The `main` export is there; the glue calls it with the argument
-   list of the JS host.
-7. **Memory growth.** The heap has no room at the start (point 5 of "The heap base" above), so a `sbrk` that calls
-   `emscripten_resize_heap` (an import, not provided) would fail on the first allocation.
-8. **Stack checks.** The module has no stack limits (`__set_stack_limits`, the stack-overflow checks of the glue).
+1. **Pointer width: open, out of scope.** The IR's pointer values are i64 (LP64), where the Emscripten wasm32 glue treats
+   pointers as i32 numbers. A pointer crossing the JS boundary is a BigInt. Only the stack pointer and the globals are i32.
+   Changing it changes the data model.
+2. **Memory import: closed.** `--emscripten-import-memory` imports `env.memory` with no maximum, at the module's pages.
+   `tests/wasm/emscripten.cjs` checks the import (name, kind, no maximum, and that the memory it is instantiated with is
+   the one `__heap_base` ends), and `NFCXX_WASM_EMSCRIPTEN=import` runs every test in this layout. Default is still export.
+3. **The table: documented, unreachable.** No call through the table is emitted, so an empty table is never called. The
+   table has no maximum, so a JS-side grow works (the checker grows it). Whether the glue calls `addFunction` is not
+   checked here, since no glue is run.
+4. **Linking sections: open, out of scope.** No `dylink.0`, `linking` or `reloc.*` custom section. That is needed for
+   dynamic linking (`MAIN_MODULE`, `SIDE_MODULE`) only.
+5. **Runtime imports: open.** `EMSCRIPTEN_IMPORT_NAMES` is empty: no IR name is mapped, because no pair (IR name, Emscripten
+   name) could be verified. Emscripten's libc (`printf`, `malloc`, `memcpy`, ...) is linked into the module, so those
+   names are not imports under Emscripten at all; a program that calls them, or `__cxa_*`, does not instantiate under an
+   unmodified runtime and needs the import mapped or provided. The emitter does not claim otherwise.
+6. **Exports the glue calls: partly closed.** `__wasm_call_ctors` is exported (empty, point "Constructors"). Not exported,
+   on purpose: `malloc` and `free` (no allocator here, see point 7), and the `emscripten_stack_*` functions (they need
+   stack limits, point 8). `main` is there.
+7. **Memory growth: open.** The module has no allocator and no call that grows the memory. An `emscripten_resize_heap`
+   import would be unused (nothing in the module calls it), and an export under that name would be an interface the
+   runtime does not define on that side, so neither is added. The memory grows only in the host (with the import). The
+   heap that `__heap_base` marks is empty, so an `sbrk`-style allocator would need the memory grown first.
+8. **Stack limits: open.** `__set_stack_limits` is not exported. The module has no stack-overflow check and no place for
+   limits to be read from: a stored limit that nothing reads would be a fake, so the export is left out.
 
-The glue expectations above come from the Emscripten runtime as it is generally documented; no Emscripten checkout or
-`emcc` was available for this step, so they are a list to check in step 2, not a run.
+**Unverified names.** The Emscripten runtime names above (`emscripten_resize_heap`, `__set_stack_limits`,
+`emscripten_stack_get_current`, the `__syscall_*` and `fd_write` imports, and the libc behavior in point 5) are not
+verified here: no `emcc` is installed, `emscripten.org` did not resolve, and the Emscripten source was not reachable
+(the raw GitHub path returned 404, and the GitHub API was not enabled for this session). None of them is added to the
+module or to `EMSCRIPTEN_IMPORT_NAMES`.
 
 ## What is handled
 

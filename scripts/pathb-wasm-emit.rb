@@ -18,8 +18,10 @@
 #
 # Usage with --emscripten (before the file): the same module with the exports that the Emscripten JS runtime reads:
 # __indirect_function_table (an empty funcref table), __stack_pointer, __data_end and __heap_base (immutable i32
-# globals). The layout and the code are unchanged. --asan and --emscripten are not combined. Without the argument the
-# module is byte-identical to the one before the mode existed. docs/notes/pathb-wasm.md, "Emscripten".
+# globals), and __wasm_call_ctors (an empty function: the IR has no constructor list). The layout and the code are
+# unchanged. --emscripten-import-memory (with --emscripten) imports env.memory instead of exporting memory.
+# --asan and --emscripten are not combined. Without the arguments the module is byte-identical to the one before the
+# mode existed. docs/notes/pathb-wasm.md, "Emscripten".
 #
 # Layout and representation. The IR's layout is LP64 (pointers 8 bytes), and the emitter keeps it: a pointer value is an
 # i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Integers of 1, 2 and 4 bytes are
@@ -336,9 +338,9 @@ class Module_
   attr_reader :types, :imports, :import_index, :defined_index
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
+  attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
   attr_accessor :alloc_index, :alloc_type   # asan: the function index and the type of malloc and free (name => ...)
-  attr_accessor :emscripten   # the Emscripten exports (see encode_module)
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
@@ -1846,11 +1848,18 @@ end
 # ------------------------------------------------------------------ the module
 
 # --emscripten: the exports the mode adds (encode_module). A function of the module may not take one of these names.
-EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base"]
+EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base",
+                      "__wasm_call_ctors"]
 
-USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten] [FILE.ir | -] > out.wasm\n"
+# --emscripten: the imports the IR calls under a libc or C++ name that Emscripten's runtime provides under another
+# name, as [IR name => Emscripten name]. Empty: no such pair is verified (docs/notes/pathb-wasm.md, "Emscripten",
+# point 5). Emscripten's libc is linked into the module, so the libc names are not imports there at all. An entry
+# is added only with a source that names both sides.
+EMSCRIPTEN_IMPORT_NAMES = {}
 
-def emit_module(src, asan = false, emscripten = false)
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [FILE.ir | -] > out.wasm\n"
+
+def emit_module(src, asan = false, emscripten = false, import_memory = false)
   forms = parse_forms(tokenize(src))
   defs = {}
   order = []
@@ -1882,6 +1891,8 @@ def emit_module(src, asan = false, emscripten = false)
   mod = Module_.new(defs)
   mod.asan = asan
   mod.emscripten = emscripten
+  mod.import_memory = import_memory
+  mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
   mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
@@ -1901,6 +1912,7 @@ def emit_module(src, asan = false, emscripten = false)
   # the check is the module's last function, after the defined ones; asan's malloc and free follow it
   mod.check_index = mod.imports.length + order.length if asan
   mod.alloc_index = { "malloc" => mod.check_index + 1, "free" => mod.check_index + 2 } if asan
+  mod.ctors_index = mod.imports.length + order.length + (asan ? 3 : 0) if emscripten
   bodies = order.map do |nm|
     fn = Fn.new(mod, defs[nm])
     fn.compile
@@ -1926,27 +1938,38 @@ def encode_module(mod, bodies)
     end
   end
   section(1, t, out)
-  # imports: functions of the module "env"
-  unless mod.imports.empty?
+  # imports: functions of the module "env", then (emscripten-import-memory) the memory env.memory, which is the last
+  # entry: the function indices do not count it
+  nimports = mod.imports.length + (mod.import_memory ? 1 : 0)
+  unless nimports == 0
     im = []
-    uleb(mod.imports.length, im)
+    uleb(nimports, im)
     mod.imports.each do |name, ti|
+      name = EMSCRIPTEN_IMPORT_NAMES.fetch(name, name) if mod.emscripten
       name_bytes("env", im)
       name_bytes(name, im)
       im << 0x00
       uleb(ti, im)
     end
+    if mod.import_memory
+      name_bytes("env", im)
+      name_bytes("memory", im)
+      im << 0x02                         # memory
+      im << 0x00                         # limits without a maximum: the host's memory may grow
+      uleb(mod.pages, im)                # the initial size: the pages the module's layout is built on
+    end
     section(2, im, out)
   end
-  # functions (asan: the check, then malloc and free, are the last ones)
+  # functions (asan: the check, then malloc and free, are the last ones; emscripten: then __wasm_call_ctors)
   fsec = []
-  uleb(bodies.length + (mod.asan ? 3 : 0), fsec)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   if mod.asan
     uleb(mod.check_type, fsec)
     uleb(mod.alloc_type["malloc"], fsec)
     uleb(mod.alloc_type["free"], fsec)
   end
+  uleb(mod.ctors_type, fsec) if mod.emscripten
   section(3, fsec, out)
   # emscripten: the function table, exported empty. The emitter has no indirect calls and no function values (both are
   # refused, see Fn#call and op_type), so no element segment is needed. It is exported under the name the glue looks for.
@@ -1957,12 +1980,15 @@ def encode_module(mod, bodies)
     uleb(0, tb)                          # minimum 0 elements
     section(4, tb, out)
   end
-  # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow
-  mem = []
-  uleb(1, mem)
-  mem << 0x00
-  uleb(mod.pages, mem)
-  section(5, mem, out)
+  # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow. With
+  # --emscripten-import-memory the memory is the import above, so there is no memory section.
+  unless mod.import_memory
+    mem = []
+    uleb(1, mem)
+    mem << 0x00
+    uleb(mod.pages, mem)
+    section(5, mem, out)
+  end
   # global 0: the stack pointer, mutable i32, starts at the top of the memory (asan: below the shadow). The memory
   # addresses are i32, so the stack pointer is too, in both modes. emscripten: global 1 is __data_end (the end of the
   # static data) and global 2 is __heap_base (the top of the memory: the stack grows down from it, and a heap would
@@ -1991,14 +2017,17 @@ def encode_module(mod, bodies)
     gl << 0x0b
   end
   section(6, gl, out)
-  # exports: the memory, (emscripten: the table and the globals), then each function under its IR name
+  # exports: the memory (not with an imported one), (emscripten: the table, the globals and __wasm_call_ctors), then
+  # each function under its IR name
   ex = []
-  nexp = 1 + bodies.length
-  nexp += 4 if mod.emscripten
+  nexp = (mod.import_memory ? 0 : 1) + bodies.length
+  nexp += 5 if mod.emscripten
   uleb(nexp, ex)
-  name_bytes("memory", ex)
-  ex << 0x02
-  uleb(0, ex)
+  unless mod.import_memory
+    name_bytes("memory", ex)
+    ex << 0x02
+    uleb(0, ex)
+  end
   if mod.emscripten
     name_bytes("__indirect_function_table", ex)
     ex << 0x01
@@ -2012,6 +2041,9 @@ def encode_module(mod, bodies)
     name_bytes("__heap_base", ex)
     ex << 0x03
     uleb(2, ex)
+    name_bytes("__wasm_call_ctors", ex)
+    ex << 0x00
+    uleb(mod.ctors_index, ex)
   end
   bodies.each_with_index do |(nm, _), i|
     raise Refused, "function name #{nm.inspect} is not ASCII (an export name must be UTF-8)" if nm.bytes.any? { |b| b >= 0x80 }
@@ -2022,7 +2054,7 @@ def encode_module(mod, bodies)
   section(7, ex, out)
   # code
   code = []
-  uleb(bodies.length + (mod.asan ? 3 : 0), code)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), code)
   bodies.each do |nm, fn|
     b = fn.encode
     uleb(b.length, code)
@@ -2033,6 +2065,11 @@ def encode_module(mod, bodies)
       uleb(b.length, code)
       b.each { |x| code << x }
     end
+  end
+  if mod.emscripten
+    b = [0x00, 0x0b]                     # no locals, end: __wasm_call_ctors does nothing (no constructor list in the IR)
+    uleb(b.length, code)
+    b.each { |x| code << x }
   end
   section(10, code, out)
   # data: the segments of the static objects, each at its address (an active segment in memory 0)
@@ -2060,12 +2097,15 @@ def main(argv)
   args = argv.dup
   asan = false
   emscripten = false
+  import_memory = false
   while !args.empty? && args.first.start_with?("--")
     flag = args.shift
     if flag == "--asan"
       asan = true
     elsif flag == "--emscripten"
       emscripten = true
+    elsif flag == "--emscripten-import-memory"
+      import_memory = true
     else
       $stderr.write(USAGE)
       return 1
@@ -2079,9 +2119,13 @@ def main(argv)
     $stderr.write("error: --asan and --emscripten are not combined (the shadow would sit where the heap begins)\n")
     return 1
   end
+  if import_memory && !emscripten
+    $stderr.write("error: --emscripten-import-memory needs --emscripten\n")
+    return 1
+  end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src, asan, emscripten)
+    bytes = emit_module(src, asan, emscripten, import_memory)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3
