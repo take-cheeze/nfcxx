@@ -84,6 +84,24 @@ else
   echo "device unit shadow_decl: FAIL"; fail=1
 fi
 
+# 1b3. A host `const` reference is not a constant: the device unit carries neither its initializer nor its struct type
+# (with a FILE * member). A value constant (LIMIT) is still carried.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/const_host_ref.cu > "$out/const_host_ref.device.cpp" \
+   && diff -u rewrite/const_host_ref.device.expected.cpp "$out/const_host_ref.device.cpp"; then
+  echo "device unit const_host_ref: ok"
+else
+  echo "device unit const_host_ref: FAIL"; fail=1
+fi
+
+# 1b4. A linkage block (extern "C" { ... }) is split: only the pieces the device unit needs are carried, each inside the
+# block's linkage. The host struct with a FILE * member is not carried.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/linkage_block.cu > "$out/linkage_block.device.cpp" \
+   && diff -u rewrite/linkage_block.device.expected.cpp "$out/linkage_block.device.cpp"; then
+  echo "device unit linkage_block: ok"
+else
+  echo "device unit linkage_block: FAIL"; fail=1
+fi
+
 # 1c. Included headers are expanded once each: a diamond-shaped include tree (each level includes the next one three
 # times) gave 46k lines and took 6 s with the expansion repeated per include; the device unit is 110 lines and
 # takes milliseconds. The 10 s limit catches the blow-up again.
