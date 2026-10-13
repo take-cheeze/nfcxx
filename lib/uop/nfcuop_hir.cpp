@@ -1,5 +1,6 @@
 // nfcuop::hir: the ONNX-style graph, shape inference and the ONNX exporter. See nfcuop_hir.hpp.
 #include "nfcuop_hir.hpp"
+#include "nfcuop_shaping.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -7,6 +8,9 @@
 
 namespace nfcuop {
 namespace hir {
+
+using onnxsim::SymExpr;
+namespace shaping = onnxsim::shaping;
 
 const Attribute* Node::attr(const std::string& n) const {
   for (const Attribute& a : attrs) if (a.name == n) return &a;
@@ -189,18 +193,39 @@ namespace {
 
 bool is_one(const Dim& d) { return !d.is_symbol() && d.size() == 1; }
 
+// The shape rules of onnxsim (nfcuop_shaping.hpp) compute the shapes below; a dimension they could only name with a fresh symbol
+// (unk_N, one of none of the inputs) is refused here, as hir has always refused what it cannot shape.
+shaping::Shape to_shape(const Dims& d) {
+  shaping::Shape s;
+  for (const Dim& x : d) s.push_back(x.expr);
+  return s;
+}
+
+Dims from_shape(const shaping::Shape& s) {
+  Dims d;
+  for (const SymExpr& e : s) d.push_back(Dim(e));
+  return d;
+}
+
+bool is_fresh(const SymExpr& e, const Dims& inputs) {
+  const std::string text = e.str();
+  if (text.rfind("unk_", 0) != 0) return false;
+  for (const Dim& d : inputs)
+    if (d.str() == text) return false;
+  return true;
+}
+
 // Numpy broadcasting of two shapes: 1 broadcasts to anything, a symbolic dimension to an equal one or to 1 (an ONNX rule: the
-// dimension must be 1 at evaluation when it is not the same, so it is refused).
+// dimension must be 1 at evaluation when it is not the same, so it is refused). The validation is here; the shape is onnxsim's.
 Dims bcast2(const std::string& op, const Dims& a, const Dims& b) {
   size_t n = std::max(a.size(), b.size());
-  Dims out(n);
   for (size_t k = 0; k < n; k++) {
     Dim da = k < n - a.size() ? Dim(1) : a[k - (n - a.size())];
     Dim db = k < n - b.size() ? Dim(1) : b[k - (n - b.size())];
     if (da != db && !is_one(da) && !is_one(db)) throw Error(op + ": shapes " + to_string(a) + " and " + to_string(b) + " cannot be broadcast together");
-    out[k] = is_one(da) ? db : da;
   }
-  return out;
+  shaping::FreshDims fresh;
+  return from_shape(shaping::Broadcast({to_shape(a), to_shape(b)}, fresh));
 }
 
 int64_t norm(const std::string& op, int64_t axis, int64_t rank) {
@@ -373,13 +398,13 @@ Value infer(const Graph& g, const Node& n) {
     else for (size_t k = s.size(); k-- > 0;) perm.push_back(static_cast<int64_t>(k));
     std::vector<bool> seen(s.size(), false);
     if (perm.size() != s.size()) fail("perm " + to_string(perm) + " does not match rank " + std::to_string(s.size()));
-    Dims out;
     for (int64_t p : perm) {
       if (p < 0 || p >= static_cast<int64_t>(s.size()) || seen[p]) fail("perm " + to_string(perm) + " is not a permutation");
       seen[p] = true;
-      out.push_back(s[p]);
     }
-    return make_value("", V(0).dtype, out);
+    const std::optional<shaping::Shape> out = shaping::Transpose(to_shape(s), perm);
+    if (!out) fail("perm " + to_string(perm) + " does not match rank " + std::to_string(s.size()));
+    return make_value("", V(0).dtype, from_shape(*out));
   }
   if (op == "Reshape") {
     // The target holds integers, 0 (copy the input's dimension at that position) and at most one -1 (the rest). Sizes are exact
@@ -413,9 +438,11 @@ Value infer(const Graph& g, const Node& n) {
       if (known != total) fail("cannot reshape " + to_string(in) + " into " + to_string(target));
       return make_value("", V(0).dtype, out);
     }
-    const std::optional<onnxsim::SymExpr> rest = onnxsim::TryExactDivide(total.expr, known.expr);
-    if (!rest) fail("cannot reshape " + to_string(in) + " into " + to_string(target) + ": " + total.str() + " is not a multiple of " + known.str());
-    out[static_cast<size_t>(unknown)] = Dim(*rest);
+    shaping::FreshDims fresh;
+    const shaping::Shape r = shaping::Reshape(to_shape(in), target, fresh);   // the -1 is the exact quotient of the sizes
+    const SymExpr& rest = r[static_cast<size_t>(unknown)];
+    if (is_fresh(rest, in)) fail("cannot reshape " + to_string(in) + " into " + to_string(target) + ": " + total.str() + " is not a multiple of " + known.str());
+    out[static_cast<size_t>(unknown)] = Dim(rest);
     return make_value("", V(0).dtype, out);
   }
   if (op == "Squeeze") {
@@ -423,13 +450,13 @@ Value infer(const Graph& g, const Node& n) {
     const Dims in = D(0);
     std::set<int64_t> axes;
     if (present(1)) for (int64_t a : consts(1)) axes.insert(norm(op, a, static_cast<int64_t>(in.size())));
-    Dims out;
     for (size_t k = 0; k < in.size(); k++) {
-      bool drop = present(1) ? axes.count(static_cast<int64_t>(k)) != 0 : is_one(in[k]);
+      const bool drop = present(1) ? axes.count(static_cast<int64_t>(k)) != 0 : is_one(in[k]);
       if (drop && !is_one(in[k])) fail("cannot squeeze axis " + std::to_string(k) + " of shape " + to_string(in));
-      if (!drop) out.push_back(in[k]);
     }
-    return make_value("", V(0).dtype, out);
+    std::optional<std::vector<int64_t>> squeezed;
+    if (present(1)) squeezed = std::vector<int64_t>(axes.begin(), axes.end());
+    return make_value("", V(0).dtype, from_shape(shaping::Squeeze(to_shape(in), squeezed)));
   }
   if (op == "Unsqueeze") {
     want_inputs(2, 2);
@@ -438,10 +465,9 @@ Value infer(const Graph& g, const Node& n) {
     int64_t rank = static_cast<int64_t>(in.size() + axes.size());
     std::set<int64_t> at;
     for (int64_t a : axes) if (!at.insert(norm(op, a, rank)).second) fail("repeated axis");
-    Dims out;
-    size_t src = 0;
-    for (int64_t k = 0; k < rank; k++) out.push_back(at.count(k) ? Dim(1) : in[src++]);
-    return make_value("", V(0).dtype, out);
+    const std::optional<shaping::Shape> out = shaping::Unsqueeze(to_shape(in), std::vector<int64_t>(at.begin(), at.end()));
+    if (!out) fail("the axes do not fit the rank");
+    return make_value("", V(0).dtype, from_shape(*out));
   }
   if (op == "Expand") {
     want_inputs(2, 2);
@@ -460,12 +486,10 @@ Value infer(const Graph& g, const Node& n) {
     if (present(1)) for (int64_t a : consts(1)) axes.insert(norm(op, a, rank));
     if (!present(1) || axes.empty()) for (int64_t k = 0; k < rank; k++) axes.insert(k);
     const bool keep = n.attr_int("keepdims", 1) != 0;
-    Dims out;
-    for (int64_t k = 0; k < rank; k++) {
-      if (!axes.count(k)) out.push_back(xd[static_cast<size_t>(k)]);
-      else if (keep) out.push_back(Dim(1));
-    }
-    return make_value("", x.dtype, out);
+    // the axes are the ones named (normalized above), or all of them when none are (ONNX's rule for an absent or empty axes input)
+    std::optional<std::vector<int64_t>> named;
+    if (present(1) && !consts(1).empty()) named = std::vector<int64_t>(axes.begin(), axes.end());
+    return make_value("", x.dtype, from_shape(shaping::Reduce(to_shape(xd), keep, named, false)));
   }
   if (op == "Softmax" || op == "LogSoftmax") {
     want_inputs(1, 1);
