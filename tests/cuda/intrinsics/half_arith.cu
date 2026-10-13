@@ -56,7 +56,9 @@ int main() {
     __half x, y, z;
     memcpy(&x, &ha[i], 2); memcpy(&y, &hb[i], 2); memcpy(&z, &hc[i], 2);
     float fx = __half2float(x), fy = __half2float(y), fz = __half2float(z);
-    __half es = __float2half(fx + fy), ep = __float2half(fx * fy), ef = __float2half(fx * fy + fz);
+    // __hfma is the correctly rounded fma: the double sum of the exact product and c, rounded to half once.
+    __half es = __float2half(fx + fy), ep = __float2half(fx * fy),
+           ef = __double2half((double)fx * (double)fy + (double)fz);
     unsigned short bs, bp, bf;
     memcpy(&bs, &es, 2); memcpy(&bp, &ep, 2); memcpy(&bf, &ef, 2);
     bad += rs[i] != bs;

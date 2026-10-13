@@ -1415,9 +1415,9 @@ HALF_CORE = "#ifndef __NFCXX_HALF_CORE\n#define __NFCXX_HALF_CORE\n" \
 # The integer intrinsics of llama.cpp's ggml-cuda. __umulhi, __popc and __byte_perm wrap the scalar intrinsics of the
 # emitter (SCALAR_U32 in pathb-ptx-emit.rb, one PTX instruction each); the others are plain integer code. The half type
 # is an unsigned short here (16-bit integers are lowered by the emitter), and the conversions do the IEEE work in 32-bit
-# integers and float arithmetic: round to nearest, even, as CUDA's __float2half. __hadd, __hsub, __hmul and __hfma compute
-# in float and round once more to half: for these operands the float result is exact or rounds the same way, except for
-# rare double-rounding cases of __hfma (the sum of an exact product with c).
+# integers and float arithmetic: round to nearest, even, as CUDA's __float2half. __hadd, __hsub and __hmul compute in
+# float and round once more to half: a float add or multiply of two halves is exact or rounds the same way. __hfma is
+# fma.rn.f16 (the emitter's HALF_BUILTINS): a float product plus c would round twice.
 # __half2: two halves packed in an unsigned int, the low half in bits 0..15 (x) and the high half in bits 16..31 (y).
 # The pair functions are plain integer code on that packing; the lanes use the half operations above, through one
 # guarded helper so that several pair functions in a unit define it once.
@@ -1470,10 +1470,10 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
-  # Scalar helpers of ggml-cuda. __float_as_uint is a union read (the bits); __float2int_rn rounds half to even and
-  # saturates like cvt.rni (NaN gives 0) through exact float steps; __frcp_rn is a correctly rounded division.
+  # Scalar helpers of ggml-cuda. __float_as_uint is a union read (the bits); __float2int_rn is cvt.rni (round to nearest
+  # even, saturating, NaN gives 0: the emitter's FLOAT_TO_INT_BUILTINS); __frcp_rn is a correctly rounded division.
   "__float_as_uint" => "static inline unsigned int __float_as_uint(float f) { union { float f; unsigned int u; } v; v.f = f; return v.u; }\n",
-  "__float2int_rn" => "static inline int __float2int_rn(float f) { if (f != f) return 0; if (f >= 2147483647.0f) return 2147483647; if (f <= -2147483648.0f) return -2147483647 - 1; int i = (int)f; float d = f - (float)i; if (d > 0.5f || (d == 0.5f && (i & 1))) i += 1; else if (d < -0.5f || (d == -0.5f && (i & 1))) i -= 1; return i; }\n",
+  "__float2int_rn" => "extern \"C\" int __nfcxx_rni_s32(float);\nstatic inline int __float2int_rn(float f) { return __nfcxx_rni_s32(f); }\n",
   "__frcp_rn" => "static inline float __frcp_rn(float x) { return 1.0f / x; }\n",
   # Not lowered: the address conversion (a PTX cvta.to.shared the emitter does not have) and the half2 mask (its lanes
   # are a pair of halves; the emitter has no half2 comparison). Both are declared; a device call is refused by name.
@@ -1573,7 +1573,8 @@ BUILTIN_DEFS = {
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
   "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
   "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",
-  "__hfma" => HALF_CORE + "static inline unsigned short __hfma(unsigned short a, unsigned short b, unsigned short c) { return __float2half(__half2float(a) * __half2float(b) + __half2float(c)); }\n",
+  "__hfma" => HALF_CORE + "extern \"C\" unsigned short __nfcxx_hfma_rn(unsigned short, unsigned short, unsigned short);\n" \
+    "static inline unsigned short __hfma(unsigned short a, unsigned short b, unsigned short c) { return __nfcxx_hfma_rn(a, b, c); }\n",
   "__shfl_xor_sync" => SHFL_DEFS["bfly"],
   "__shfl_down_sync" => SHFL_DEFS["down"],
   "__shfl_up_sync" => SHFL_DEFS["up"],
