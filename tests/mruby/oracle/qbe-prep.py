@@ -289,6 +289,12 @@ LIBC_BUILTINS = {  # builtin -> (libc function, prototype); cproc has the builti
     '__builtin_fabsf': ('fabsf', 'float fabsf(float);'),  # libcu++ (<cuda/cmath>) and the CUDA headers
     '__builtin_fabs': ('fabs', 'double fabs(double);'),
 }
+for _n in 'sqrt exp log sin cos tan floor ceil trunc round exp2 log2 asin acos atan sinh cosh tanh log10'.split():  # libstdc++ <cmath> wrappers
+    LIBC_BUILTINS['__builtin_%sf' % _n] = ('%sf' % _n, 'float %sf(float);' % _n)
+    LIBC_BUILTINS['__builtin_%s' % _n] = (_n, 'double %s(double);' % _n)
+for _n in 'pow fmod atan2 copysign fmin fmax hypot'.split():
+    LIBC_BUILTINS['__builtin_%sf' % _n] = ('%sf' % _n, 'float %sf(float, float);' % _n)
+    LIBC_BUILTINS['__builtin_%s' % _n] = (_n, 'double %s(double, double);' % _n)
 HELPER_BUILTINS = {  # builtin -> (helper name, definition in the prelude)
     '__builtin_huge_val': ('__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'),
     '__builtin_nan': ('__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'),
