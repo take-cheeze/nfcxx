@@ -538,7 +538,7 @@ module TypeFacts
       ret = m && m[2]
       enter = irep.enter
       mand = enter ? enter.enter_fields.first.to_i : 0
-      known = ->(t) { t.empty? || Annotations::TYPES.key?(t) || owners.include?(t) || %w[Array Hash].include?(t) || container_known?(t, owners) }
+      known = ->(t) { t.empty? || Annotations::TYPES.key?(t) || owners.include?(t) || %w[Array Hash String].include?(t) || container_known?(t, owners) }
       ignored = tokens.reject(&known)
       ignored << ret unless ret.nil? || known.call(ret.sub(/<.*>\z/, ''))
       { 'owner' => d.owner, 'name' => d.name, 'file' => file, 'line' => aline, 'col' => acol,

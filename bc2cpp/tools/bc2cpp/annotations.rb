@@ -68,6 +68,9 @@ class Annotations
 
   Annotation = Struct.new(:args, :ret, keyword_init: true)
 
+  # `String` is a known core class token (the type check reads it as a class, not an ignored
+  # token). It has NO codegen effect yet: it is not in TYPES, so it contributes nothing, like any
+  # other class token. A String return gate (the Array one below) is future work.
   # `:array` (the `Array` token) feeds ONLY the block-receiver return-type gate
   # (annotated_array_return; the emitter's mrb_array_p tripwire checks it at
   # runtime). It must never reach struct-field codegen: native_arg_types has no
