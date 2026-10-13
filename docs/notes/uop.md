@@ -26,7 +26,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 | 3b | `hir::Graph`: ONNX-style operators with shape inference, ONNX export, lowering to UOps; `np::Tensor` over it | done |
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
-| 6 | Autodiff on the `hir` graph by onnxsim (`hir::gradients_via_onnxsim`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** (`Graph::from_onnx` / `merge_onnx`) | done (onnxsim's rules cover a subset of the operators; Conv, pooling, normalization, `Gather`, `Erf` gradients exist there but those forward operators are not in `hir` yet: a follow-up) |
+| 6 | Autodiff on the `hir` graph by onnxsim (`hir::gradients_via_onnxsim`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** (`Graph::from_onnx` / `merge_onnx`) | done (onnxsim's rules cover a subset of the operators; the forward operators `Gemm Gather Erf Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` are in `hir` now (`tests/uop/test_nn.cpp`), and their gradients come from onnxsim's rules, not yet checked in `test_grad`) |
 | 7 | Dynamic shapes (below) | not started |
 
 ## Stage 1: the scalar core
