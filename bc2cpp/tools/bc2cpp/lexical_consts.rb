@@ -35,8 +35,18 @@ module LexicalConsts
     Model.new(ireps).results
   end
 
+  # Only a string argument evaluates code. A block runs in the lexical cref (mruby: `Foo.class_eval { BAR }`
+  # reads the lexical BAR), so the block form of these sends keeps the model. An unknown count may carry a string.
   def eval_send?(irep)
-    irep.instructions.any? { |insn| insn.op.start_with?('SEND', 'SSEND') && STRING_EVAL_SENDS.include?(insn.sym) }
+    irep.instructions.any? do |insn|
+      insn.op.start_with?('SEND', 'SSEND') && STRING_EVAL_SENDS.include?(insn.sym) && string_argument?(insn)
+    end
+  end
+
+  def string_argument?(insn)
+    return false if insn.op.end_with?('0') # SEND0 / SSEND0 carry no arguments
+
+    insn.n_spec != '0' || !insn.nk_spec.nil?
   end
 
   def qualify(scope, name)

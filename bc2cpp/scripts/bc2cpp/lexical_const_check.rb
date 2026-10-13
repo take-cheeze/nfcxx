@@ -117,6 +117,13 @@ check.call('a scoped read of a private constant is refused (it raises from outsi
 evaled = analyze.call("class K; def f; X; end; end\nK.class_eval('X = 1')\n")
 check.call('a string class_eval makes the whole world unresolved', evaled[:read_keys].zero?)
 
+blocked = analyze.call("class K; V = 1; def f; V; end; end\nK.class_eval { 1 }\nK.instance_eval { 2 }\n")
+check.call('a block-form class_eval / instance_eval keeps the model (its block runs in the lexical cref)',
+           named.call(blocked, 'V') == [['GETCONST', 'V', 'K::V']])
+
+splatted = analyze.call("class K; def f; X; end; end\nargs = ['X = 1']\nK.class_eval(*args)\n")
+check.call('a splatted class_eval argument may be a string: the whole world is unresolved', splatted[:read_keys].zero?)
+
 unstatic = analyze.call("class A1; V = 1; def f; V; end; end\n", static: false)
 check.call('non-static constants (const_set and friends) make the whole world unresolved', unstatic[:read_keys].zero?)
 
