@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -158,6 +159,11 @@ ut::Tensor Lowerer::get(int id) {
 
 ut::Tensor Lowerer::lower_one(int id) {
   const Value& v = g_.value(id);
+  if (!v.syms.empty()) {
+    std::string syms;
+    for (const std::string& x : v.syms) if (!x.empty()) syms += (syms.empty() ? "" : ", ") + x;
+    throw Error("hir: lowering " + v.name + " needs its symbolic dimensions bound (" + syms + "): bind the graph first (Graph::bind, or hir::Evaluator)");
+  }
   ut::Tensor out;
   if (const Array* a = g_.initializer(id)) {
     bool uniform = !a->data.empty();
@@ -345,6 +351,23 @@ ut::Tensor Lowerer::lower_one(int id) {
     throw Error("lowering of " + v.name + " gave " + name(out.dtype()) + to_string(out.shape()) + ", expected " + name(v.dtype) + to_string(v.shape));
   memo_[id] = out;
   return out;
+}
+
+std::vector<Array> Evaluator::eval(const Bindings& b, const std::vector<int>& outputs, const std::map<std::string, Array>& feeds) {
+  std::string key;  // the bindings in name order, each name length-prefixed so that no two keys are alike
+  for (const auto& kv : b) key += std::to_string(kv.first.size()) + ":" + kv.first + "=" + std::to_string(kv.second) + ";";
+  auto it = cache_.find(key);
+  if (it == cache_.end()) it = cache_.emplace(key, std::unique_ptr<Entry>(new Entry(g_.bind(b)))).first;
+  Entry& e = *it->second;
+  for (int in : e.bound.inputs()) {
+    const Value& v = e.bound.value(in);
+    auto f = feeds.find(v.name);
+    if (f != feeds.end() && (f->second.shape != v.shape || f->second.dtype != v.dtype))
+      throw Error("hir: the feed for " + v.name + " is " + name(f->second.dtype) + to_string(f->second.shape) + ", the bound graph needs " + name(v.dtype) + to_string(v.shape));
+  }
+  std::vector<ut::Tensor> ts;
+  for (int o : outputs) ts.push_back(e.low.get(o));
+  return e.s.eval_all(ts, feeds);
 }
 
 }  // namespace hir

@@ -185,7 +185,7 @@ struct InfoMsg {
   std::string name;
   bool has_type = false;
   DType dtype = DType::Float32;
-  Shape shape;
+  Dims shape;  // integers (dim_value) and symbols (dim_param)
 };
 
 InfoMsg read_value_info(const Bytes& b) {
@@ -202,12 +202,17 @@ InfoMsg read_value_info(const Bytes& b) {
           if (tt.field == 1) elem = tt.as_int();
           else if (tt.field == 2) {                // TensorShapeProto
             for (Rd sh(tt.data); sh.next();) {
-              if (sh.field != 1) continue;         // Dimension
-              bool has_value = false;
+              if (sh.field != 1) continue;         // Dimension: one of dim_value, dim_param
+              bool has_value = false, has_param = false;
               int64_t dv = 0;
-              for (Rd dim(sh.data); dim.next();) if (dim.field == 1) { has_value = true; dv = dim.as_int(); }
-              if (!has_value) dynamic = true;
-              vi.shape.push_back(dv);
+              std::string param;
+              for (Rd dim(sh.data); dim.next();) {
+                if (dim.field == 1) { has_value = true; dv = dim.as_int(); }
+                else if (dim.field == 2) { has_param = true; param = dim.data.str(); }
+              }
+              if (has_value) vi.shape.push_back(Dim(dv));
+              else if (has_param && !param.empty()) vi.shape.push_back(Dim::symbol(param));
+              else dynamic = true;
             }
           }
         }
@@ -215,7 +220,7 @@ InfoMsg read_value_info(const Bytes& b) {
     }
   }
   if (vi.has_type) {
-    if (dynamic) throw Error("onnx import: " + vi.name + " has a dynamic dimension (shapes are static)");
+    if (dynamic) throw Error("onnx import: " + vi.name + " has a dynamic dimension (neither dim_value nor dim_param)");
     vi.dtype = need_dtype(elem, "value " + vi.name);
   }
   return vi;
@@ -310,10 +315,10 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
   if (opset < 13) throw Error("onnx import: the default-domain opset is " + std::to_string(opset) + "; opset 13 or newer is needed");
 
   std::map<std::string, int> local;  // name in the model -> value id here
-  auto check_existing = [&](int id, DType d, const Shape& shape, const std::string& name) {
+  auto check_existing = [&](int id, DType d, const Dims& shape, const std::string& name) {
     const Value& v = value(id);
-    if (v.dtype != d || v.shape != shape)
-      throw Error("onnx import: value " + name + " is " + std::string(nfcuop::name(d)) + to_string(shape) + " in the model but " + nfcuop::name(v.dtype) + to_string(v.shape) + " in the graph (name collision)");
+    if (v.dtype != d || dims(id) != shape)
+      throw Error("onnx import: value " + name + " is " + std::string(nfcuop::name(d)) + to_string(shape) + " in the model but " + nfcuop::name(v.dtype) + to_string(dims(id)) + " in the graph (name collision)");
   };
 
   // initializers first: an input of the same name is the initializer
@@ -341,7 +346,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
       check_existing(id, vi.dtype, vi.shape, vi.name);
       local[vi.name] = id;
     } else {
-      local[vi.name] = add_input(vi.name, vi.dtype, vi.shape);
+      local[vi.name] = add_symbolic_input(vi.name, vi.dtype, vi.shape);
     }
   }
 
