@@ -62,6 +62,7 @@ struct TierView {
   std::vector<int> tkinds;
   bool captured = false;
   bool multi_last = false;
+  bool tail = false;  // K_RETURN: `return f(...)` of a call, a tail call for the interpreter (not `return (f(...))`)
 };
 
 // nfcast_tier_view.inc (compiled inside nfcast_nodes.cpp, where the node classes are).

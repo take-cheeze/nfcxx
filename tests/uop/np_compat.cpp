@@ -65,6 +65,13 @@ int main(int argc, char** argv) {
   CASE("matmul_vv", matmul(b, b)); CASE("matmul_int", matmul(ia, ia.T()));
   CASE("arange", np.arange(5)); CASE("arange_step", np.arange(1.0, 2.0, 0.25)); CASE("linspace", np.linspace(0, 1, 5));
   CASE("eye", np.eye(3)); CASE("zeros", np.zeros({2, 2})); CASE("ones_i", np.ones({2}, i32)); CASE("full", np.full({2}, 7));
+  CASE("floor", v.floor()); CASE("ceil", v.ceil()); CASE("isnan", v.log().isnan()); CASE("isinf", v.reciprocal().isinf());
+  CASE("ifloor", ia.floor()); CASE("pow_f", pow(v.abs() + 1, v)); CASE("pow_s", pow(a, 2)); CASE("ipow", pow(ia, 2));
+  CASE("cumsum0", a.cumsum(0)); CASE("cumsum_all", m.cumsum(2)); CASE("icumsum", ia.cumsum(1));
+  CASE("prod0", a.prod(0)); CASE("prod_all", a.prod()); CASE("iprod", ia.prod(0));
+  CASE("argmax0", a.argmax(0)); CASE("argmin1", a.argmin(1)); CASE("argmax_all", ia.argmax());
+  CASE("tile", tile(a, {2, 1})); CASE("tile1", tile(b, 2));
+  CASE("take", take(a, np.array({2, 0}, i32), 1)); CASE("take_flat", take(ia, np.array({5, -1}, i32)));
 #undef CASE
   std::vector<Tensor> all;
   for (const auto& e : c) all.push_back(e.second);

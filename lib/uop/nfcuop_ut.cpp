@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 namespace nfcuop {
 namespace ut {
@@ -133,6 +134,52 @@ Tensor reduce(const Tensor& x, Op op, const Axes& axes_in, bool keepdims) {
   const UOp* u = op == Op::ReduceSum ? G(x).reduce_sum(x.uop(), axes) : G(x).reduce_max(x.uop(), axes);
   Tensor r = wrap(x, u);
   return keepdims ? r : drop_axes(r, axes);
+}
+
+// floor (up = false) or ceil of a float tensor: from its truncation t, which is exact below 2^52 (the larger values, infinities and
+// NaN are integers or not numbers, and are kept). Signed zeros: ceil of a value in (-1, 0) is -0.0, and floor and ceil keep x = +-0.
+Tensor integral(const Tensor& x, bool up) {
+  Tensor t = x.astype(DType::Int64).astype(x.dtype());
+  Tensor y = up ? where(t < x, t + 1.0, t) : where(t > x, t - 1.0, t);
+  if (up) y = where((y == 0.0) & (x < 0.0), cst_t(y, -0.0), y);
+  Tensor small = x.abs() < 4503599627370496.0;   // 2^52
+  return where(x == 0.0, x, where(small, y, x));
+}
+
+// a ** b for ints of one dtype, by squaring over the bits of b (the exponent's bits are read by floor division)
+Tensor int_pow(const Tensor& x, const Tensor& y) {
+  const int bits = x.dtype() == DType::Int32 ? 31 : 63;   // the bits of a non-negative exponent of that dtype
+  Tensor result = cst_t(x, 1), base = x, e = y;
+  for (int k = 0; k < bits; k++) {
+    Tensor bit = (e % 2) != 0;
+    result = where(bit, result * base, result);
+    base = base * base;
+    e = trunc_divide(e, detail::lift(e, 2, true));
+  }
+  Tensor odd = (y % 2) != 0;
+  Tensor neg_value = where(x == 1, cst_t(x, 1), where(x == -1, where(odd, cst_t(x, -1), cst_t(x, 1)), cst_t(x, 0)));
+  return where(y < 0, neg_value, result);
+}
+
+// argmax (want_max) or argmin along `axis`: the first index of the extreme value, or the last one (`last`); a NaN wins
+Tensor arg_select(const Tensor& x, int64_t axis, bool keepdims, bool want_max, bool last) {
+  check(x);
+  axis = norm_axis(axis, x.ndim());
+  const int64_t S = x.shape()[static_cast<size_t>(axis)];
+  Shape vshape(static_cast<size_t>(x.ndim()), 1);
+  vshape[static_cast<size_t>(axis)] = S;
+  Tensor idx = x.session().arange(S, DType::Int64).reshape(vshape);
+  const int64_t none = last ? -1 : S;   // the index that no element has
+  Tensor m = want_max ? x.max(Axes{axis}, true) : x.min(Axes{axis}, true);
+  Tensor cand = where(x == m, idx, cst_t(idx, static_cast<double>(none)));
+  Tensor r = last ? cand.max(Axes{axis}, true) : cand.min(Axes{axis}, true);
+  if (is_float(x.dtype())) {   // numpy: the first NaN (the last with `last`) wins over every other element
+    Tensor nan = x != x;
+    Tensor nc = where(nan, idx, cst_t(idx, static_cast<double>(none)));
+    Tensor nr = last ? nc.max(Axes{axis}, true) : nc.min(Axes{axis}, true);
+    r = where(nr != cst_t(nr, static_cast<double>(none)), nr, r);
+  }
+  return keepdims ? r : drop_axes(r, Axes{axis});
 }
 
 std::string fmt(const Scalar& s) {
@@ -339,6 +386,49 @@ Tensor Tensor::var(const Axes& axes, bool keepdims) const {
 
 Tensor Tensor::stddev(const Axes& axes, bool keepdims) const { return var(axes, keepdims).sqrt(); }
 
+Tensor Tensor::prod(const Axes& axes, bool keepdims) const {
+  check(*this);
+  Axes red = norm_axes(axes, ndim());
+  Axes perm;
+  Shape kept;
+  int64_t K = 1;
+  for (int64_t k = 0; k < ndim(); k++)
+    if (!std::binary_search(red.begin(), red.end(), k)) { perm.push_back(k); kept.push_back(shape()[static_cast<size_t>(k)]); }
+  for (int64_t k : red) { perm.push_back(k); K *= shape()[static_cast<size_t>(k)]; }
+  Shape flat = kept;
+  flat.push_back(K);
+  Tensor x = transpose(perm).reshape(flat);     // the reduced factors are the last axis, in row-major order
+  Tensor acc = x.slice(static_cast<int64_t>(kept.size()), true, 0, true, 1, 1);
+  for (int64_t k = 1; k < K; k++) acc = acc * x.slice(static_cast<int64_t>(kept.size()), true, k, true, k + 1, 1);
+  Shape out;
+  for (int64_t k = 0; k < ndim(); k++) {
+    if (!std::binary_search(red.begin(), red.end(), k)) out.push_back(shape()[static_cast<size_t>(k)]);
+    else if (keepdims) out.push_back(1);
+  }
+  return acc.reshape(out);
+}
+
+Tensor Tensor::cumsum(int64_t axis, bool exclusive, bool reverse) const {
+  check(*this);
+  axis = norm_axis(axis, ndim());
+  const size_t a = static_cast<size_t>(axis);
+  const int64_t S = shape()[a];
+  // out[.., i, ..] = sum over j of x[.., j, ..] where j is in the window of i: j <= i (j < i when exclusive; j >= i when reverse)
+  Shape xs = shape();
+  xs.insert(xs.begin() + axis + 1, 1);                       // (.., S (j), 1 (i), ..)
+  Shape js(static_cast<size_t>(ndim()) + 1, 1), is(js);
+  js[a] = S;                                                 // the index j runs over axis a, i over axis a + 1
+  is[a + 1] = S;
+  Tensor j = session().arange(S, DType::Int64).reshape(js);
+  Tensor i = session().arange(S, DType::Int64).reshape(is);
+  Tensor in_window = reverse ? (exclusive ? j > i : j >= i) : (exclusive ? j < i : j <= i);
+  // masked elements are the zero of the sum: -0.0 keeps the sign of the first element (an exclusive sum starts at +0); a scalar
+  // constant, so that it broadcasts from the right
+  Tensor fill(&session(), G(*this).constant(Scalar::from_double(dtype(), is_float(dtype()) && !exclusive ? -0.0 : 0.0)));
+  Tensor picked = where(in_window, reshape(xs), fill);       // broadcast: (.., S (j), S (i), ..)
+  return picked.sum(Axes{axis}, false);
+}
+
 // ---- Tensor: elementwise ----
 
 Tensor Tensor::operator-() const {
@@ -399,6 +489,28 @@ Tensor Tensor::log_softmax(int64_t axis) const {
 Tensor Tensor::clip(double lo, double hi) const {
   check(*this);
   return minimum(maximum(*this, detail::lift(*this, lo, false)), detail::lift(*this, hi, false));
+}
+
+Tensor Tensor::floor() const {
+  check(*this);
+  return is_float(dtype()) ? integral(*this, false) : *this;
+}
+
+Tensor Tensor::ceil() const {
+  check(*this);
+  return is_float(dtype()) ? integral(*this, true) : *this;
+}
+
+Tensor Tensor::isnan() const {
+  check(*this);
+  if (!is_float(dtype())) return wrap(*this, G(*this).constant(Scalar::from_int(DType::Bool, 0), shape()));
+  return *this != *this;   // NaN is the one value unequal to itself (the symbolic simplifier keeps this)
+}
+
+Tensor Tensor::isinf() const {
+  check(*this);
+  if (!is_float(dtype())) return wrap(*this, G(*this).constant(Scalar::from_int(DType::Bool, 0), shape()));
+  return abs() == cst_t(*this, std::numeric_limits<double>::infinity());
 }
 
 // ---- Tensor: realization ----
@@ -617,6 +729,34 @@ Tensor c_remainder(const Tensor& a, const Tensor& b) {
   prepare(x, y, dt);
   return wrap(x, G(x).mod(x.uop(), y.uop()));
 }
+
+Tensor pow(const Tensor& a, const Tensor& b) {
+  same_session(a, b);
+  DType dt = promote(a.dtype(), b.dtype());
+  if (dt == DType::Bool) dt = DType::Int32;
+  Tensor x = a, y = b;
+  prepare(x, y, dt);
+  if (is_int(dt)) return int_pow(x, y);
+  // exp(y log|x|) in float64; the cases C99 pow treats specially are then set by where, from the last to the first in the
+  // order of their precedence
+  const double inf = std::numeric_limits<double>::infinity();
+  Tensor X = cast_to(x, DType::Float64), Y = cast_to(y, DType::Float64);
+  Tensor r = (Y * X.abs().log()).exp();
+  Tensor y_int = Y.floor() == Y;                               // false for NaN; +-inf counts as an integer, as in C
+  Tensor y_odd = (Y - (Y * 0.5).floor() * 2.0) == 1.0;         // odd integers only (NaN and inf are not)
+  Tensor x_negzero = (X == 0.0) & ((1.0 / X) < 0.0);
+  Tensor x_neg = (X < 0.0) | x_negzero;                        // a negative base, a negative zero, or -inf
+  r = where(x_neg & y_int & y_odd, -r, r);
+  Tensor not_real = (X < 0.0) & (X != -inf) & (Y != Y.floor());   // a negative base to a non-integer power
+  r = where(not_real, cst_t(r, std::numeric_limits<double>::quiet_NaN()), r);
+  r = where((X == -1.0) & (Y.abs() == inf), cst_t(r, 1), r);   // (-1) ** +-inf
+  r = where(X == 1.0, cst_t(r, 1), r);                          // 1 ** y, NaN included
+  r = where(Y == 0.0, cst_t(r, 1), r);                          // x ** 0, NaN included
+  return cast_to(r, dt);
+}
+
+Tensor argmax(const Tensor& x, int64_t axis, bool keepdims, bool last) { return arg_select(x, axis, keepdims, true, last); }
+Tensor argmin(const Tensor& x, int64_t axis, bool keepdims, bool last) { return arg_select(x, axis, keepdims, false, last); }
 
 Tensor matmul(const Tensor& a, const Tensor& b) {
   same_session(a, b);

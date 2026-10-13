@@ -13,9 +13,10 @@
 // Supported operators: Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Erf Add Sub Mul Div Mod Max Min
 // And Or Xor BitwiseAnd BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Gemm
 // Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad (mode constant)
-// Gather Conv MaxPool AveragePool BatchNormalization (inference) InstanceNormalization LayerNormalization (see the operator notes in
-// nfcuop_lower.cpp for their lowering and cost). A dimension may be a symbol (ONNX dim_param, e.g. "N"): see Dim, Graph::bind and
-// Evaluator below. Everything is static once the symbols are bound. See docs/notes/uop.md.
+// Pow Floor Ceil IsNaN IsInf CumSum ReduceProd ArgMax ArgMin Tile Gather Conv MaxPool AveragePool BatchNormalization (inference)
+// InstanceNormalization LayerNormalization (see the operator notes in nfcuop_lower.cpp for their lowering and cost). A dimension may be
+// a symbol (ONNX dim_param, e.g. "N"): see Dim, Graph::bind and Evaluator below. Everything is static once the symbols are bound.
+// See docs/notes/uop.md.
 #pragma once
 #include <deque>
 #include <map>

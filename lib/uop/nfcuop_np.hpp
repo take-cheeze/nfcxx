@@ -85,6 +85,14 @@ class Tensor {
   Tensor min(int64_t axis, bool keepdims = false) const { return min(Axes{axis}, keepdims); }
   Tensor var(const Axes& axes = {}, bool keepdims = false) const;  // population variance (ddof = 0)
   Tensor stddev(const Axes& axes = {}, bool keepdims = false) const;
+  Tensor prod(const Axes& axes = {}, bool keepdims = false) const;   // ReduceProd; bool and narrow ints give default_int, as sum
+  Tensor prod(int64_t axis, bool keepdims = false) const { return prod(Axes{axis}, keepdims); }
+  // Running sum along `axis` (ONNX CumSum); axis None flattens first, like numpy. bool and narrow ints give default_int.
+  Tensor cumsum(int64_t axis = None) const;
+  // Index of the first maximum (minimum) along `axis` (ONNX ArgMax/ArgMin, an int32 by default: numpy's intp is int64 and
+  // default_int is int32). None flattens first. A NaN wins, as in numpy; bool operands are read as ints.
+  Tensor argmax(int64_t axis = None, bool keepdims = false) const;
+  Tensor argmin(int64_t axis = None, bool keepdims = false) const;
 
   // elementwise
   Tensor operator-() const;
@@ -102,6 +110,10 @@ class Tensor {
   Tensor softmax(int64_t axis = -1) const;
   Tensor log_softmax(int64_t axis = -1) const;
   Tensor clip(double lo, double hi) const;
+  Tensor floor() const;   // ONNX Floor; an integer tensor is returned as it is (numpy keeps the integer dtype); bool gives default_float
+  Tensor ceil() const;    // ONNX Ceil; likewise
+  Tensor isnan() const;   // Bool; all false for integers and bools
+  Tensor isinf() const;   // Bool; all false for integers and bools
 
   // realization (lowers the graph to UOps and evaluates it)
   Array numpy() const;
@@ -191,8 +203,19 @@ Tensor remainder(const Tensor& a, const Tensor& b);     // ints only; the sign o
 Tensor matmul(const Tensor& a, const Tensor& b);        // 1-D and N-D like numpy, batch dimensions broadcast
 inline Tensor dot(const Tensor& a, const Tensor& b) { return matmul(a, b); }  // for 1-D and 2-D operands
 Tensor logical_not(const Tensor& a);
+// a ** b (C++ has no ** operator). The dtype is the promoted one, and a Python-style scalar is weak as in the operators. Floats follow
+// C99 pow, the values numpy gives; integers wrap, and a negative integer exponent is not an error (see docs/notes/uop.md).
+Tensor pow(const Tensor& a, const Tensor& b);
 Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis = 0);
 Tensor stack(const std::vector<Tensor>& ts, int64_t axis = 0);
+// numpy's tile: `reps` has one entry per dimension; a shorter reps gets leading 1s, and a shorter shape gets leading 1s (the
+// result has max(ndim, reps) dimensions). Every repetition is at least 1 (numpy's 0 would give an empty tensor).
+Tensor tile(const Tensor& a, const Shape& reps);
+inline Tensor tile(const Tensor& a, int64_t reps) { return tile(a, Shape{reps}); }
+// numpy's take: the elements of `a` at `indices` along `axis` (ONNX Gather); axis None takes from the flattened array, like numpy.
+// The indices must be integers (a Tensor of them, e.g. np.array({0, 2}, DType::Int32)); negative ones count from the end.
+// Constant indices are checked against the axis (an error if out of range); runtime ones are not (they select nothing, a -0.0).
+Tensor take(const Tensor& a, const Tensor& indices, int64_t axis = None);
 inline Tensor relu(const Tensor& a) { return a.relu(); }
 inline Tensor exp(const Tensor& a) { return a.exp(); }
 inline Tensor log(const Tensor& a) { return a.log(); }
@@ -246,6 +269,10 @@ NFCUOP_NP_SCALAR_OP(>=)
 NFCUOP_NP_SCALAR_OP(==)
 NFCUOP_NP_SCALAR_OP(!=)
 #undef NFCUOP_NP_SCALAR_OP
+template <class T, detail::IsNum<T> = 0>
+Tensor pow(const Tensor& a, T v) { return pow(a, detail::lift(a, static_cast<double>(v), std::is_integral<T>::value)); }
+template <class T, detail::IsNum<T> = 0>
+Tensor pow(T v, const Tensor& b) { return pow(detail::lift(b, static_cast<double>(v), std::is_integral<T>::value), b); }
 
 }  // namespace np
 }  // namespace nfcuop

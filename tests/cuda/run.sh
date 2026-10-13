@@ -56,6 +56,15 @@ else
   echo "device unit syncwarp: FAIL"; fail=1
 fi
 
+# 1b2b. A static __shared__ array shadows a dynamic one of the same name in its block only (the device unit keeps the
+# static block's uses as the array and rewrites the dynamic kernel's uses to the pointer).
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_shared.cu > "$out/shadow.device.cpp" \
+   && diff -u rewrite/shadow_shared.device.expected.cpp "$out/shadow.device.cpp"; then
+  echo "device unit shadow_shared: ok"
+else
+  echo "device unit shadow_shared: FAIL"; fail=1
+fi
+
 # 1c. Included headers are expanded once each: a diamond-shaped include tree (each level includes the next one three
 # times) gave 46k lines and took 6 s with the expansion repeated per include; the device unit is 110 lines and
 # takes milliseconds. The 10 s limit catches the blow-up again.

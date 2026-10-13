@@ -150,6 +150,38 @@ int main() {
     CHECK(consistent(S));
   }
 
+  std::printf("-- a self tail call is a loop: a deep tail recursion runs as native code in one entry, with no depth counted\n");
+  {
+    State S;
+    S.open_libs();
+    tier_on(S, TierOptions::Sync, 1, cache);
+    CHECK(eval(S, "local function loop(n, acc) if n == 0 then return acc end return loop(n - 1, acc + 1) end return loop(1000000, 0)") == "1000000");
+    CHECK(S.stats.tier_aborts == 0 && S.stats.tier_bailouts == 0 && S.stats.tier_compiled >= 1);
+    CHECK(eval(S, "local function swap(a, b, n) if n == 0 then return a * 10 + b end return swap(b, a, n - 1) end return swap(1, 2, 301)") == "21");
+    CHECK(S.stats.tier_aborts == 0 && S.stats.tier_bailouts == 0);
+    CHECK(eval(S, "local function f(n, acc) if n == 0 then return acc end return f(n - 1, acc // (n - 3)) end return f(10, 1)")
+              .compare(0, 4, "ERR:") == 0);                  // the division fails in the loop: abandoned, the interpreter's error
+    CHECK(S.stats.tier_aborts >= 1);
+    CHECK(consistent(S));
+    std::uint64_t aborts = S.stats.tier_aborts;
+    CHECK(eval(S, "local function g(n, x) if n == 0 then return x end return g(n - 1, x * 1.5) end return g(40, 1)") == eval_plain(
+              "local function g(n, x) if n == 0 then return x end return g(n - 1, x * 1.5) end return g(40, 1)"));
+    CHECK(S.stats.tier_aborts == aborts);
+    CHECK(consistent(S));
+  }
+  {
+    // (f(n)) is not a tail call (the interpreter counts its depth): both the interpreter and the tier say `stack overflow`
+    State P, S;
+    P.open_libs();
+    S.open_libs();
+    tier_on(S, TierOptions::Sync, 1, cache);
+    const char* deep_paren = "local function d(n) if n == 0 then return 0 end return (d(n - 1)) end return d(3000)";
+    same(P, S, deep_paren, "a parenthesized call is not a tail call");
+    CHECK(eval(S, deep_paren).compare(0, 4, "ERR:") == 0);
+    same(P, S, "local function d(n) if n == 0 then return 0 end return d(n - 1) end return d(3000)", "a tail call is not counted");
+    CHECK(consistent(S));
+  }
+
   std::printf("-- a float to an integer kernel\n");
   {
     State S;
