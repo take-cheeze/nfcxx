@@ -1,6 +1,7 @@
 name: Path B
 
-# Path B checks (docs/notes/pathb-stage1.md to pathb-stage3.md): the harness cpfe whose back end is be/nfcxx_*.c
+# Path B checks (docs/notes/pathb-stage1.md to pathb-stage3.md; a build job makes the harness and the mruby tool, and
+# the suites run in parallel from their caches): the harness cpfe whose back end is be/nfcxx_*.c
 # (scripts/setup-pathb.sh), the IR goldens, and the IR -> QBE emitter run by the mruby interpreter. Building the
 # harness compiles the whole EDG front end a second time, so this is kept out of the main CI job and runs only when
 # a change can affect it. Runs on demand too (workflow_dispatch).
@@ -31,6 +32,10 @@ on:
       - "tests/pathb/**"
       - "tests/pathb-*/**"
       - "tests/wasm/**"
+      - "tests/sycl/**"
+      - "lib/sycl/**"
+      - "scripts/sycl-build.sh"
+      - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
       - "tests/ehshim/**"
@@ -56,6 +61,10 @@ on:
       - "tests/pathb/**"
       - "tests/pathb-*/**"
       - "tests/wasm/**"
+      - "tests/sycl/**"
+      - "lib/sycl/**"
+      - "scripts/sycl-build.sh"
+      - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
       - "tests/ehshim/**"
@@ -66,8 +75,15 @@ on:
       - ".github/workflows/pathb.yml"
   workflow_dispatch:
 
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  pathb:
+  # Builds the Path B harness and the mruby tool once and saves them to the Actions cache; the test matrix below
+  # restores them. The EDG and QBE builds come from the shared toolchain cache (.github/actions/toolchain).
+  build:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -83,11 +99,9 @@ jobs:
           submodules: true
 
       # python3 only for the oracles of tests/mruby/run.sh; ruby and rake only bootstrap the mruby build.
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 ruby rake
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 ruby rake
 
       # The harness (build/pathb) depends on be/, on the script that assembles it and on the EDG revision. An
       # exact hit skips the build; on a miss sccache still serves the unchanged EDG compiles.
@@ -106,40 +120,83 @@ jobs:
         if: steps.harness.outputs.cache-hit != 'true'
         run: scripts/setup-pathb.sh
 
-      # The production pieces the Path B tests link against: EDG's runtime (build/edg/lib/libC.a) and QBE.
-      - name: Build EDG front end
-        run: scripts/setup-edg.sh
-
-      - name: Build QBE and cproc
-        run: scripts/setup-qbe.sh
+      - name: Restore the mruby tool
+        id: mruby
+        uses: actions/cache@v4
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
 
       - name: Build the mruby interpreter (runs scripts/pathb-qbe-emit.rb)
+        if: steps.mruby.outputs.cache-hit != 'true'
         run: scripts/setup-mruby.sh
 
-      - name: Path B stage 1 IL goldens
-        run: tests/pathb/run.sh
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
-      - name: Path B stage 2 IR goldens
-        run: tests/pathb-ir/run.sh
+  # One suite per job, all restoring the build job's caches. The slowest suite (tests/mruby/run.sh, about 9 minutes
+  # in its Path B emitter check) sets the total time.
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Path B stages 1-2 and wasm
+            run: |
+              tests/pathb/run.sh
+              tests/pathb-ir/run.sh
+              tests/wasm/run.sh
+          - name: Path B stage 3 (IR to QBE translation validation)
+            run: tests/pathb-qbe/run.sh
+          - name: Hosted Path B (NFCXX_PATH=b)
+            run: tests/pathb-qbe/hosted.sh
+          - name: EH shim (gcc, qbe and Path B)
+            run: tests/ehshim/run.sh
+          - name: SYCL on WebGPU (host path, and Chromium's WebGPU through Playwright)
+            run: |
+              npm install --prefix "$RUNNER_TEMP/pw" playwright
+              "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+              NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
+          - name: mruby scripts against their Python oracles (Path B parts enabled)
+            run: tests/mruby/run.sh
+    name: ${{ matrix.name }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Path B stage 3 IR to QBE translation validation
-        run: tests/pathb-qbe/run.sh
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 ruby rake
 
-      # The wasm emitter: the IR of each test is emitted as a module and run under node (skipped without node).
-      - name: Path B wasm emitter
-        run: tests/wasm/run.sh
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
 
-      # Hosted Path B: the hosted probes, tests/cases through the driver (NFCXX_PATH=b) and tinyxml2
-      # (cloned at its pinned commit; skipped when the fetch fails).
-      - name: Hosted Path B (NFCXX_PATH=b)
-        run: tests/pathb-qbe/hosted.sh
+      - name: Restore the Path B harness
+        uses: actions/cache/restore@v4
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+          fail-on-cache-miss: true
 
-      # The EH shim (lib/ehshim) on Path B too: exceptions thrown by libstdc++, std::exception_ptr; output compared with host g++.
-      - name: EH shim (gcc, qbe and Path B)
-        run: tests/ehshim/run.sh
+      - name: Restore the mruby tool
+        uses: actions/cache/restore@v4
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          fail-on-cache-miss: true
 
-      - name: mruby scripts against their Python oracles (Path B parts enabled)
-        run: tests/mruby/run.sh
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
 
       - name: sccache stats
         if: always()

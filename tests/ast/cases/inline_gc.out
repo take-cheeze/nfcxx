@@ -1,0 +1,62 @@
+-- results kept alive across later calls
+40	1640	964	<<x40/y40/ab>>	x7/y7
+-- arguments that are fresh objects, and a callee that allocates while they are only on the stack
+9	item1:t1u1	item1:t1u1/item2:t2u2
+9	item2:t2u2	item2:t2u2/item3:t3u3
+9	item3:t3u3	item3:t3u3/item4:t4u4
+9	item4:t4u4	item4:t4u4/item5:t5u5
+9	item5:t5u5	item5:t5u5/item6:t6u6
+9	item6:t6u6	item6:t6u6/item7:t7u7
+9	item7:t7u7	item7:t7u7/item8:t8u8
+9	item8:t8u8	item8:t8u8/item9:t9u9
+9	item9:t9u9	item9:t9u9/item10:t10u10
+10	item10:t10u10	item10:t10u10/item11:t11u11
+10	item11:t11u11	item11:t11u11/item12:t12u12
+10	item12:t12u12	item12:t12u12/item13:t13u13
+10	item13:t13u13	item13:t13u13/item14:t14u14
+10	item14:t14u14	item14:t14u14/item15:t15u15
+10	item15:t15u15	item15:t15u15/item16:t16u16
+10	item16:t16u16	item16:t16u16/item17:t17u17
+10	item17:t17u17	item17:t17u17/item18:t18u18
+10	item18:t18u18	item18:t18u18/item19:t19u19
+10	item19:t19u19	item19:t19u19/item20:t20u20
+10	item20:t20u20	item20:t20u20/item21:t21u21
+10	item21:t21u21	item21:t21u21/item22:t22u22
+10	item22:t22u22	item22:t22u22/item23:t23u23
+10	item23:t23u23	item23:t23u23/item24:t24u24
+10	item24:t24u24	item24:t24u24/item25:t25u25
+10	item25:t25u25	item25:t25u25/item26:t26u26
+10	item26:t26u26	item26:t26u26/item27:t27u27
+10	item27:t27u27	item27:t27u27/item28:t28u28
+10	item28:t28u28	item28:t28u28/item29:t29u29
+10	item29:t29u29	item29:t29u29/item30:t30u30
+10	item30:t30u30	item30:t30u30/item31:t31u31
+-- strings that only a callee's body mentions
+40	a string that only this function mentions, long enough to not be interned at all1	only-here1	a string that only this function mentions, long enough to not be interned at all20	only-here20
+true	true
+-- many short-lived objects through a chain of calls
+46793
+-- a table built in a callee and filled by the caller
+1516
+-- the collector sees through multiple results
+1	m1	1	k/1	4	m1	1
+2	m2	2	k/2	4	m2	2
+3	m3	3	k/3	4	m3	3
+4	m4	4	k/4	4	m4	4
+5	m5	5	k/5	4	m5	5
+6	m6	6	k/6	4	m6	6
+7	m7	7	k/7	4	m7	7
+8	m8	8	k/8	4	m8	8
+9	m9	9	k/9	4	m9	9
+10	m10	10	k/10	4	m10	10
+11	m11	11	k/11	4	m11	11
+12	m12	12	k/12	4	m12	12
+13	m13	13	k/13	4	m13	13
+14	m14	14	k/14	4	m14	14
+15	m15	15	k/15	4	m15	15
+16	m16	16	k/16	4	m16	16
+17	m17	17	k/17	4	m17	17
+18	m18	18	k/18	4	m18	18
+19	m19	19	k/19	4	m19	19
+20	m20	20	k/20	4	m20	20
+true

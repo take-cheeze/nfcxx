@@ -1,0 +1,92 @@
+// nfcast tier, internal declarations (docs/notes/ast.md, "Tiering"): what the translation units share. The tier itself is in
+// nfcast_tier.cpp; nfcast_nodes.cpp includes nfcast_tier_view.inc, which turns a node into a TierView; the engine calls
+// tier_dispatch (a call), tier_backedge (a loop iteration) and tier_free (a Proto going away).
+#pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "nfcast.hpp"
+
+namespace nfcast {
+
+struct Node;
+struct Proto;
+struct Frame;
+struct TierProto;
+struct TierLoop;
+
+// A node, seen through the interface the tier needs: its kind, its operator, and its children. Everything the lowering knows
+// about the node classes of nfcast_nodes.cpp is in this struct; a node of a class it does not list is K_NONE (not a kernel).
+struct TierView {
+  enum Kind {
+    K_NONE,
+    // expressions
+    K_CONST,   // k
+    K_LOCAL,   // slot, flag (boxed in a Cell)
+    K_UPVAL,   // index
+    K_GLOBAL,  // name
+    K_ARITH,   // op (AR_*), kids = {left, right}
+    K_UNARY,   // op (AR_UNM, AR_BNOT, OPX_NOT, OPX_LEN), kids = {operand}
+    K_CMP,     // op (CMP_LT..CMP_GE), kids = {left, right}
+    K_EQ,      // flag (~=), kids = {left, right}
+    K_AND,     // kids = {left, right}
+    K_OR,
+    K_CALL,    // kids = {callee, arguments...}, multi_last
+    // statements
+    K_BLOCK,   // kids = statements
+    K_DECL,    // slots = declared locals, kids = values, captured
+    K_ASSIGN,  // slots = the slot (T_LOCAL, T_CELL) or upvalue index (T_UPVAL) of each target, tkinds, kids = values, captured (set unless
+               // every target is a plain local)
+    K_IF,      // kids = conditions, blocks = their blocks, els = else block or null
+    K_WHILE,   // cond, blocks = {body}
+    K_REPEAT,  // cond, blocks = {body}
+    K_FOR,     // slots = {loop variable}, kids = {start, limit, step or null}, blocks = {body}, captured
+    K_RETURN,  // kids = values, multi_last
+    K_BREAK
+  };
+  Kind kind = K_NONE;
+  int line = 0;
+  int op = 0;
+  bool flag = false;
+  int slot = -1;
+  int index = -1;
+  Value k;
+  String* name = nullptr;
+  std::vector<Node*> kids;
+  std::vector<Node*> blocks;
+  Node* els = nullptr;
+  Node* cond = nullptr;
+  std::vector<int> slots;
+  enum Target { T_LOCAL, T_CELL, T_UPVAL, T_OTHER };  // K_ASSIGN: a local, a local captured by a closure (in a Cell), an upvalue, a global or a field
+  std::vector<int> tkinds;
+  bool captured = false;
+  bool multi_last = false;
+};
+
+// nfcast_tier_view.inc (compiled inside nfcast_nodes.cpp, where the node classes are).
+void tier_view(Node* n, TierView& v);
+
+// The engine's hooks.
+bool tier_dispatch(State& S, Closure* cl, Value* args, int n, Rets& out);  // true: the call was run as native code, results in OUT
+void tier_backedge(Frame& f);                                              // an iteration of a loop of a script function ended
+// On-stack replacement of a loop (docs/notes/ast.md, "Tiering"): the state of a numeric `for`, `while` or `repeat` loop at the top of an
+// iteration (at its entry, or after an iteration ended), which compiled code can take over and run to the end of the loop.
+struct TierLoopState {
+  enum Kind { WHILE = 0, REPEAT = 1, FOR_INT = 2, FOR_FLT = 3 } kind = WHILE;
+  std::int64_t i = 0;      // FOR_INT: the loop variable of the iteration about to run
+  std::uint64_t count = 0; // FOR_INT: the iterations that follow that one
+  std::int64_t step = 0;   // FOR_INT
+  double d = 0, limit = 0, dstep = 0;  // FOR_FLT: the value of the loop variable, the limit and the step
+};
+// 1: native code ran the rest of the loop (the locals it assigns are written back) and the interpreter must go on after the loop.
+// 2: it ran into a `return` of the function the loop is in, and the returned value is in the frame's results (C_RETURN).
+// 0: the loop goes on in the interpreter, nothing was changed. EDGE: an iteration has just ended (the call counts it).
+// HOOK is the loop node's pointer to what the tier knows about it.
+int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bool edge);
+
+void tier_free(TierProto* tp);                                             // the Proto that owned TP is being destroyed
+void tier_init_from_env(State& S);                                         // State::State
+void tier_shutdown(State& S);                                              // State::~State, after the heap is gone
+
+}  // namespace nfcast

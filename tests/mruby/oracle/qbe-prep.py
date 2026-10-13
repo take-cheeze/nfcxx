@@ -9,8 +9,8 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     `int3; ret` stub, so the trap is the same and the program resumes after it. Any other inline asm
     is left in place, and cproc rejects it.
   * Builtins cproc does not know, which doctest uses. `__builtin_memcpy`, `memmove`, `memset`, `memcmp` and
-    `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_isnan` and
-    `__builtin_clzl` become small helpers (`__nfcxx_isnan`, `__nfcxx_clzl`), defined in the prelude.
+    `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_clzl` becomes a small
+    helper (`__nfcxx_clzl`), defined in the prelude.
     `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
     uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
     Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
@@ -289,15 +289,15 @@ LIBC_BUILTINS = {  # builtin -> (libc function, prototype); cproc has the builti
     '__builtin_fabsf': ('fabsf', 'float fabsf(float);'),  # libcu++ (<cuda/cmath>) and the CUDA headers
     '__builtin_fabs': ('fabs', 'double fabs(double);'),
 }
+for _n in 'sqrt exp log sin cos tan floor ceil trunc round exp2 log2 asin acos atan sinh cosh tanh log10'.split():  # libstdc++ <cmath> wrappers
+    LIBC_BUILTINS['__builtin_%sf' % _n] = ('%sf' % _n, 'float %sf(float);' % _n)
+    LIBC_BUILTINS['__builtin_%s' % _n] = (_n, 'double %s(double);' % _n)
+for _n in 'pow fmod atan2 copysign fmin fmax hypot'.split():
+    LIBC_BUILTINS['__builtin_%sf' % _n] = ('%sf' % _n, 'float %sf(float, float);' % _n)
+    LIBC_BUILTINS['__builtin_%s' % _n] = (_n, 'double %s(double, double);' % _n)
 HELPER_BUILTINS = {  # builtin -> (helper name, definition in the prelude)
-    '__builtin_isnan': ('__nfcxx_isnan',
-                        'static int __nfcxx_isnan(double x) { return x != x; }'),
     '__builtin_huge_val': ('__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'),
     '__builtin_nan': ('__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'),
-    '__builtin_isfinite': ('__nfcxx_isfinite', 'static int __nfcxx_isfinite(double x) { return x - x == 0; }'),
-    '__builtin_isinf': ('__nfcxx_isinf',
-                        'static int __nfcxx_isinf(double x) {'
-                        ' return x == __builtin_inff() ? 1 : x == -__builtin_inff() ? -1 : 0; }'),
     '__builtin_bswap16': ('__nfcxx_bswap16',
                           'static unsigned short __nfcxx_bswap16(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }'),
     '__builtin_bswap32': ('__nfcxx_bswap32',

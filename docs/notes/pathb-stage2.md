@@ -3,8 +3,8 @@
 Status: first implementation. `be/nfcxx_ir.c` lowers the lowered EDG IL of `tests/cases/*.cpp` to the IR below and
 prints it, with no unsupported nodes on those programs. Goldens: `tests/pathb-ir/*.ir`, checked by
 `tests/pathb-ir/run.sh`. Stage 3 adds the first consumer, an IR-to-QBE emitter
-(`scripts/pathb-qbe-emit.rb`, see `docs/notes/pathb-stage3.md`). There is still no SPIR-V or WGSL emitter, no
-checker, and no execution of the IR itself. Sections 1-8 are the spec; section 9 says what is implemented, what
+(`scripts/pathb-qbe-emit.rb`, see `docs/notes/pathb-stage3.md`). There are further emitters for PTX (`docs/notes/gpu.md`), WebAssembly (`docs/notes/pathb-wasm.md`) and WGSL
+(`docs/notes/sycl-webgpu.md`), still no SPIR-V emitter, no checker, and no execution of the IR itself. Sections 1-8 are the spec; section 9 says what is implemented, what
 is not, and the coverage numbers.
 
 ## 0. Pipeline position
@@ -132,6 +132,12 @@ Pointer and aggregate addressing has no C-level expression:
   another name of TARGET, which this module defines (stage 3, "Aliases").
 - `(nonnull P)`: emitted before every dereference of a pointer value (`indirect`, `points_to_field`). Addresses of objects
   are not checked.
+
+- `(loc "FILE" LINE)`, `(likely)`, `(unlikely)`: statements that generate no code. `loc` is printed only under
+  `NFCXX_IR_SANITIZE` (`-fsanitize=`): the source position of the statements that follow, which a failing check reports.
+  `(likely)`/`(unlikely)` is the first statement of an `if` arm that has `[[likely]]`/`[[unlikely]]`; a consumer may use it for
+  block layout and must otherwise ignore it. `(unreachable missing-return)` is `(unreachable)` for a function left without a
+  value, printed under the same variable. See `ubsan.md`.
 
 All sizes and offsets come from EDG's layout (`a_field.offset`, `f_size_of_type`), not recomputed.
 

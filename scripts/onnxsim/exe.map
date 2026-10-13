@@ -1,0 +1,6 @@
+/* Link script for a program built by nfcxx that loads libnfconnxsim.so (lib/uop/nfcuop_onnxgrad.cpp):
+   pass -Wl,--version-script=scripts/onnxsim/exe.map. nfcxx emits the C++ ABI's type_info vtables (__cxxabiv1::__class_type_info
+   and the others) into every program as weak, exported definitions that lack the virtual functions; libstdc++ then binds its
+   own exception machinery to them, and any exception thrown inside the library (every unsupported operator is one) crashes in
+   the unwinder. With no symbol of the program exported, libstdc++ keeps its own. */
+{ local: *; };

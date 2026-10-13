@@ -6,14 +6,17 @@
 //
 // Garbage collection: a node that keeps a collectable value in a C++ local while it evaluates another operand roots it first
 // (Pushed puts it on the interpreter's stack). The collector runs only at safe points (a function entry, a loop iteration).
+#include <atomic>
 #include <cmath>
 
 #include "nfcast_impl.hpp"
 
 namespace nfcast {
 
-Proto::Proto() {}
+static std::atomic<std::uint64_t> g_proto_uid{0};
+Proto::Proto() : uid(++g_proto_uid) {}
 Proto::~Proto() {
+  if (tier) tier_free(tier);
   for (Proto* c : children) c->release();
 }
 
@@ -34,10 +37,11 @@ struct Pushed {
   Pushed& operator=(const Pushed&) = delete;
 };
 
-// Replace SELF in its parent by a new node of type N (allocated in the running function's arena).
+// Replace SELF in its parent by a new node of type N (allocated in the arena of the function the node belongs to: for a node in
+// an inlined body, the function it was inlined into).
 template <class N, class... A>
 N* respec(Frame& f, Node* self, A&&... a) {
-  N* n = f.cl->proto->make<N>(static_cast<A&&>(a)...);
+  N* n = owner_proto(f)->make<N>(static_cast<A&&>(a)...);
   self->rewire(n);
   ++f.S->stats.rewrites;
   return n;
@@ -572,6 +576,14 @@ struct IndexBase : Node {
   }
   int target_kind() const override { return 4; }
   int node_kind() const override { return 3; }
+  // What Lua's getobjname says about the value of t[k]: a small integer constant is OP_GETI ("integer index"), any other key is
+  // an operand in a register and the name is "?" (a string constant never gets here, it is a FieldBase).
+  void describe(std::string& out) const override {
+    const ConstNode* c = dynamic_cast<const ConstNode*>(key_);
+    if (c && c->v.t == T_INT && static_cast<std::uint64_t>(c->v.i) <= 255) out = "field 'integer index'";
+    else if (c && c->v.t == T_STR) out = "field '" + std::string(c->v.s()->view()) + "'";
+    else out = "field '?'";
+  }
   Value eval(Frame& f) override {
     Value o = obj_->eval(f), k;
     if (o.is_gc() && !key_->is_simple()) {
@@ -891,6 +903,32 @@ inline int push_args(Frame& f, std::vector<Node*>& args, bool multi_last, Value*
   return n;
 }
 
+// `return f(args)` with f a script function (or an object whose __call is one): instead of calling it, the callee and its N arguments
+// (at AB[1..N], the function at AB[0]) are left in the running frame, whose call_closure runs it in place of the caller. False for
+// anything else (a native function, a value that cannot be called), which is called as usual.
+bool tail_closure(Frame& f, Value* ab, int n) {
+  State& S = *f.S;
+  Value fnv = ab[0];
+  if (!fnv.is_closure()) {
+    if (fnv.t == T_FUN) return false;
+    Value tm = tm_value(S, fnv, TM_CALL);
+    if (!tm.is_closure()) return false;
+    if (ab + n + 130 > S.stack_end) S.rt_error("stack overflow");
+    for (int k = n; k > 0; --k) ab[k + 1] = ab[k];  // the called object becomes the first argument
+    ab[1] = fnv;
+    ab[0] = tm;
+    ++n;
+    fnv = tm;
+  }
+  Value* base = f.base;
+  base[-1] = fnv;  // the slot that roots the running function
+  for (int k = 0; k < n; ++k) base[k] = ab[1 + k];
+  f.tail_cl = fnv.closure();
+  f.tail_n = n;
+  S.top = base + n;
+  return true;
+}
+
 struct CallBase : Node {
   Node* fn_;
   std::vector<Node*> args_;
@@ -922,6 +960,7 @@ struct CallBase : Node {
     S.top = ab + 1;
     int n = push_args(f, args_, multi_last_, ab + 1);
     f.line = line;
+    if (tail && !f.inlined && tail_closure(f, ab, n)) return;
     dispatch(f, ab[0], ab + 1, n, out);
     S.top = ab;
   }
@@ -935,10 +974,18 @@ struct CallGen : CallBase {
   }
 };
 
+// ---- inlining (nfcast_inline.inc, included at the end of this file) ----
+// The number of executions of a call or method site left before it is looked at for inlining; 0 when it is switched off.
+inline unsigned inline_hot(Frame& f) { return f.S->inlining ? f.S->inline_warm : 0; }
+void inline_call_site(Frame& f, CallBase* site, Closure* callee, unsigned retry);
+
 struct CallClosure : CallBase {
+  unsigned hot_ = 0;    // executions left before inline_call_site looks at this site
+  unsigned retry_ = 0;  // how many inlined versions of this site were given up on after a guard failure
   using CallBase::CallBase;
   void dispatch(Frame& f, const Value& fnv, Value* args, int n, Rets& out) override {
     if (fnv.t == T_FUN && fnv.o->gctype == G_CLOSURE) {
+      if (hot_ && --hot_ == 0) inline_call_site(f, this, fnv.closure(), retry_);
       call_closure(*f.S, fnv.closure(), args, n, out, false);
       return;
     }
@@ -964,7 +1011,7 @@ struct CallNative : CallBase {
 struct CallUninit : CallBase {
   using CallBase::CallBase;
   void dispatch(Frame& f, const Value& fnv, Value* args, int n, Rets& out) override {
-    if (fnv.is_closure()) respec<CallClosure>(f, this, fn_, args_);
+    if (fnv.is_closure()) respec<CallClosure>(f, this, fn_, args_)->hot_ = tail ? 0 : inline_hot(f);
     else if (fnv.is_native()) respec<CallNative>(f, this, fn_, args_);
     else respec<CallGen>(f, this, fn_, args_);
     call_value(*f.S, fnv, args, n, out, fn_);
@@ -1007,6 +1054,7 @@ struct MethodBase : Node {
     State& S = *f.S;
     int n = push_args(f, args_, multi_last_, ab + 2);
     f.line = line;
+    if (tail && !f.inlined && tail_closure(f, ab, n + 1)) return;
     call_value(S, ab[0], ab + 1, n + 1, out, &desc_);
     S.top = ab;
   }
@@ -1057,8 +1105,13 @@ struct MethodGen : MethodBase {
   void run_with(Frame& f, Rets& out, const Value& o) override { run_generic(f, out, o); }
 };
 
+struct MethodTab;
+void inline_method_site(Frame& f, MethodTab* site, Closure* callee, unsigned retry);
+
 struct MethodTab : MethodBase {  // the receiver is a table: its field (or an inherited one) is the method
   long cache = -1;
+  unsigned hot_ = 0;    // executions left before inline_method_site looks at this site
+  unsigned retry_ = 0;  // how many inlined versions of this site were given up on after a guard failure
   using MethodBase::MethodBase;
   void run_with(Frame& f, Rets& out, const Value& o) override {
     if (o.t == T_TAB) {
@@ -1071,6 +1124,7 @@ struct MethodTab : MethodBase {  // the receiver is a table: its field (or an in
       }
       if (i >= 0 && !t->nodes[i].val.is_nil()) ab[0] = t->nodes[i].val;
       else ab[0] = lookup_generic(f, o);
+      if (hot_ && !tail && ab[0].is_closure() && --hot_ == 0) inline_method_site(f, this, ab[0].closure(), retry_);
       finish(f, ab, out);
       return;
     }
@@ -1138,8 +1192,11 @@ struct MethodHost : MethodBase {  // the receiver is a host object: the member i
 struct MethodUninit : MethodBase {
   using MethodBase::MethodBase;
   void run_with(Frame& f, Rets& out, const Value& o) override {
-    if (o.t == T_TAB) respec<MethodTab>(f, this, obj_, name_, args_)->run_with(f, out, o);
-    else if (o.t == T_STR) respec<MethodStr>(f, this, obj_, name_, args_)->run_with(f, out, o);
+    if (o.t == T_TAB) {
+      MethodTab* m = respec<MethodTab>(f, this, obj_, name_, args_);
+      m->hot_ = inline_hot(f);
+      m->run_with(f, out, o);
+    } else if (o.t == T_STR) respec<MethodStr>(f, this, obj_, name_, args_)->run_with(f, out, o);
     else if (o.t == T_HOST) respec<MethodHost>(f, this, obj_, name_, args_)->run_with(f, out, o);
     else respec<MethodGen>(f, this, obj_, name_, args_)->run_with(f, out, o);
   }
@@ -1428,12 +1485,19 @@ struct WhileNode : Node {
     exec(f);
     return Value();
   }
+  TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   int exec(Frame& f) override {
+    TierLoopState ts;
+    ts.kind = TierLoopState::WHILE;
+    if (f.S->tier)
+      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
     while (cond_->eval(f).truthy()) {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
-      safepoint(*f.S);
+      loop_edge(f);
+      if (f.S->tier)
+        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
     }
     return C_NORMAL;
   }
@@ -1449,13 +1513,20 @@ struct RepeatNode : Node {
     exec(f);
     return Value();
   }
+  TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   int exec(Frame& f) override {
+    TierLoopState ts;
+    ts.kind = TierLoopState::REPEAT;
+    if (f.S->tier)
+      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;
     for (;;) {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
       if (cond_->eval(f).truthy()) break;
-      safepoint(*f.S);
+      loop_edge(f);
+      if (f.S->tier)
+        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
     }
     return C_NORMAL;
   }
@@ -1489,6 +1560,7 @@ struct IfNode : Node {
 struct NumForNode : Node {
   LocalSlot var_;
   Node *start_, *limit_, *step_, *body_;
+  TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   NumForNode(Proto& P, VarInfo* v, Node* a, Node* b, Node* c, Node* body) : start_(a), limit_(b), step_(c), body_(body) {
     var_.slot = v->slot;
     var_.vi = v;
@@ -1520,47 +1592,24 @@ struct NumForNode : Node {
       if (lim.t == T_INT) {
         limit = lim.i;
       } else if (lim.t == T_FLT) {
-        double fl = lim.d;
-        if (fl != fl) return C_NORMAL;
-        double r = step < 0 ? std::ceil(fl) : std::floor(fl);
-        if (r >= -9223372036854775808.0 && r < 9223372036854775808.0) {
-          limit = static_cast<std::int64_t>(r);
-        } else if (fl > 0) {
-          if (step < 0) return C_NORMAL;
-          limit = INT64_MAX;
-        } else {
-          if (step > 0) return C_NORMAL;
-          limit = INT64_MIN;
-        }
+        if (!nfcr_forlimit(lim.d, step, &limit)) return C_NORMAL;
       } else {
         Value conv;
         if (lim.t != T_STR || !to_number(lim, &conv)) for_error(f, line, "limit", lim);
-        double fl = num_d(conv);
-        if (conv.t == T_INT) {
-          limit = conv.i;
-        } else {
-          if (fl != fl) return C_NORMAL;
-          double r = step < 0 ? std::ceil(fl) : std::floor(fl);
-          if (r >= -9223372036854775808.0 && r < 9223372036854775808.0) limit = static_cast<std::int64_t>(r);
-          else if (fl > 0) {
-            if (step < 0) return C_NORMAL;
-            limit = INT64_MAX;
-          } else {
-            if (step > 0) return C_NORMAL;
-            limit = INT64_MIN;
-          }
-        }
+        if (conv.t == T_INT) limit = conv.i;
+        else if (!nfcr_forlimit(conv.d, step, &limit)) return C_NORMAL;
       }
       if (step > 0 ? i0 > limit : i0 < limit) return C_NORMAL;
-      std::uint64_t count;
-      if (step > 0) {
-        count = static_cast<std::uint64_t>(limit) - static_cast<std::uint64_t>(i0);
-        if (step != 1) count /= static_cast<std::uint64_t>(step);
-      } else {
-        count = static_cast<std::uint64_t>(i0) - static_cast<std::uint64_t>(limit);
-        count /= static_cast<std::uint64_t>(-(step + 1)) + 1u;
-      }
+      std::uint64_t count = nfcr_forcount(i0, limit, step);  // the loop arithmetic is shared with the tier (nfcast_tier_rt.h)
       std::int64_t i = i0;
+      TierLoopState ts;
+      ts.kind = TierLoopState::FOR_INT;
+      ts.step = step;
+      if (S.tier) {
+        ts.i = i;
+        ts.count = count;
+        if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
+      }
       for (;;) {
         declare(f, var_, Value::integer(i));
         int c = body_->exec(f);
@@ -1568,7 +1617,12 @@ struct NumForNode : Node {
         if (c == C_RETURN) return c;
         if (count-- == 0) break;
         i = static_cast<std::int64_t>(static_cast<std::uint64_t>(i) + static_cast<std::uint64_t>(step));
-        safepoint(S);
+        loop_edge(f);
+        if (S.tier) {
+          ts.i = i;
+          ts.count = count;
+          if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+        }
       }
       return C_NORMAL;
     }
@@ -1581,12 +1635,27 @@ struct NumForNode : Node {
       f.line = line;
       S.rt_error("'for' step is zero");
     }
-    for (; step > 0 ? idx <= limit : limit <= idx; idx += step) {
+    TierLoopState ts;
+    ts.kind = TierLoopState::FOR_FLT;
+    ts.limit = limit;
+    ts.dstep = step;
+    // A NaN start or limit still runs the body once here (below); compiled code tests the plain condition, so it takes over only
+    // for numbers, or after an iteration (where the condition is the plain one in both).
+    if (S.tier && idx == idx && limit == limit) {
+      ts.d = idx;
+      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
+    }
+    // Lua's forprep skips the loop only when the start is beyond the limit; a NaN is beyond nothing, so the body runs once
+    for (bool first = true; first ? !(0 < step ? limit < idx : idx < limit) : (0 < step ? idx <= limit : limit <= idx); idx += step, first = false) {
       declare(f, var_, Value::number(idx));
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
-      safepoint(S);
+      loop_edge(f);
+      if (S.tier) {
+        ts.d = idx + step;  // where the loop goes on after this iteration
+        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+      }
     }
     return C_NORMAL;
   }
@@ -1764,6 +1833,7 @@ struct ReturnNode : Node {
   explicit ReturnNode(std::vector<Node*> e) : exprs_(std::move(e)) {
     multi_last_ = !exprs_.empty() && exprs_.back()->is_multi();
     for (Node*& n : exprs_) adopt(n);
+    if (exprs_.size() == 1 && exprs_[0]->is_call()) exprs_[0]->tail = true;  // `return f(x)` is a tail call
   }
   Value eval(Frame& f) override {
     exec(f);
@@ -1801,6 +1871,8 @@ struct BreakNode : Node {
 };
 
 }  // namespace
+
+#include "nfcast_tier_view.inc"  // the tier's read-only view of the node classes above
 
 // ================================================================================================================
 // factories
@@ -1911,5 +1983,11 @@ Node* n_forin(Proto& P, int line, std::vector<VarInfo*> vars, std::vector<Node*>
 Node* n_localfunc(Proto& P, int line, VarInfo* var, Node* fn) { return mk<LocalFuncNode>(P, line, P, var, fn); }
 Node* n_return(Proto& P, int line, std::vector<Node*> exprs) { return mk<ReturnNode>(P, line, std::move(exprs)); }
 Node* n_break(Proto& P, int line) { return mk<BreakNode>(P, line); }
+
+// ================================================================================================================
+// inlining of small script functions
+// ================================================================================================================
+// Textually included: the node classes above live in an anonymous namespace.
+#include "nfcast_inline.inc"
 
 }  // namespace nfcast

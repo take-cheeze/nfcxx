@@ -300,6 +300,7 @@ class Module:
         self.got = {}          # IR name of an external function whose address is taken -> its pointer cell
         self.abi = {}          # struct name -> AbiType: the C calling convention shape of aggregates by value
         self.asmhelpers = {}   # machine-level helpers ("fence", "rdtsc") that append_weak writes into the assembly
+        self.ubfiles = {}      # source file name -> index, for the failure reports of the checks (Fn.abort_label)
 
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -392,6 +393,11 @@ def abi_of(mod, tyform):
     return mod.abi.get(ty[2])
 
 
+# The failures a check reports (runtime: be/nfcxx_ldrt.c, __nfcxx_ubsan_report; the numbers are shared with it).
+UB_KIND = {"trap": 0, "overflow": 1, "divzero": 2, "shift": 3, "bounds": 4, "null": 5, "unreachable": 6,
+           "missing_return": 7, "float_cast": 8, "div_overflow": 9}
+
+
 class Fn:
     """One function body. Statements are emitted into self.body; registers and slots into self.allocs."""
 
@@ -415,6 +421,8 @@ class Fn:
         self.conts = []      # step labels of enclosing loops, for (continue)
         self.case_labels = {}  # id(marker) -> @label, for the switch being emitted
         self.abort_used = False
+        self.loc = None        # (file, line) of the last (loc ...) statement: set only when the checks report themselves
+        self.ubsites = {}      # (kind, file, line) -> label of the block that reports that failure
         self.sret_buf = None   # a function returning an aggregate in the C convention: the buffer whose address it returns
 
     # ---- output
@@ -468,20 +476,37 @@ class Fn:
     def label(self, lab):
         self.start_block(lab)
 
-    def abort_label(self):
-        self.abort_used = True
-        return "@abort"
+    def abort_label(self, kind="trap"):
+        """The block a failed check jumps to: the shared abort block, or with a (loc ...) one block per (kind, file,
+        line) that calls the report function of the runtime library."""
+        if self.loc is None:
+            self.abort_used = True
+            return "@abort"
+        key = (kind, self.loc[0], self.loc[1])
+        if key not in self.ubsites:
+            self.ubsites[key] = "@ub%d" % len(self.ubsites)
+        return self.ubsites[key]
 
-    def trap_if(self, c):
-        """Abort when the w value c is nonzero."""
+    def ub_blocks(self):
+        for (kind, file, line), lab in self.ubsites.items():
+            if file not in self.mod.ubfiles:
+                self.mod.ubfiles[file] = len(self.mod.ubfiles)
+            self.body.append(lab)
+            self._put("call $__nfcxx_ubsan_report(w %d, l $__nfcxx_ubf%d, w %d)" % (UB_KIND[kind], self.mod.ubfiles[file], line))
+            self._put("hlt")
+
+    def trap_if(self, c, kind="trap"):
+        """Abort when the w value c is nonzero. The failing branch is the first successor, so QBE puts it out of line."""
         ok = self.newlab()
-        self.jnz(c, self.abort_label(), ok)
+        self.jnz(c, self.abort_label(kind), ok)
         self.label(ok)
 
-    def trap_unless(self, c):
-        """Abort when the w value c is zero."""
+    def trap_unless(self, c, kind="trap"):
+        """Abort when the w value c is zero. Inverted to trap_if's form for the same reason."""
         ok = self.newlab()
-        self.jnz(c, ok, self.abort_label())
+        nc = self.tmp()
+        self.emit("%s =w ceqw %s, 0" % (nc, c))
+        self.jnz(nc, self.abort_label(kind), ok)
         self.label(ok)
 
     def lab_for(self, name):
@@ -699,9 +724,15 @@ def r_cadd_like(op):
         cls = _arith_cls(ty, x)
         a = fn.opnd(x[2], cls)
         b = fn.opnd(x[3], cls)
+        if ty_size(ty) == 8 and op == "mul":
+            # No 128-bit product in QBE: the runtime library says whether the product overflows (be/nfcxx_ldrt.c).
+            c = fn.tmp()
+            fn.emit("%s =w call $__nfcxx_smul64_ovf(l %s, l %s)" % (c, fn.ext64(a), fn.ext64(b)))
+            fn.trap_if(c, "overflow")
+            r = fn.tmp()
+            fn.emit("%s =l mul %s, %s" % (r, fn.ext64(a), fn.ext64(b)))
+            return Val(r, "l", ty)
         if ty_size(ty) == 8:
-            if op == "mul":
-                raise Refused("checked 64-bit signed multiply (cmul on %s)" % (ty,))
             r = fn.tmp()
             fn.emit("%s =l %s %s, %s" % (r, "add" if op == "add" else "sub", fn.ext64(a), fn.ext64(b)))
             if op == "add":
@@ -716,7 +747,7 @@ def r_cadd_like(op):
                 fn.emit("%s =l and %s, %s" % (x3, x1, x2))
             c = fn.tmp()
             fn.emit("%s =w csltl %s, 0" % (c, x3))
-            fn.trap_if(c)
+            fn.trap_if(c, "overflow")
             return Val(r, "l", ty)
         # 1-, 2- and 4-byte types: 64-bit result, then it must survive truncation to the type
         r = fn.tmp()
@@ -748,7 +779,7 @@ def _fits(self, r, ty):
     self.emit("%s =l extsw %s" % (back, tn))
     c = self.tmp()
     self.emit("%s =w ceql %s, %s" % (c, back, r))
-    self.trap_unless(c)
+    self.trap_unless(c, "overflow")
     return Val(tn, "w", ty)
 
 
@@ -764,14 +795,14 @@ def r_divrem(op):
         b = fn.opnd(x[3], cls)
         c = fn.tmp()
         fn.emit("%s =w ceq%s %s, 0" % (c, cls, b.t))
-        fn.trap_if(c)
+        fn.trap_if(c, "divzero")
         if int_is_signed(ty):
             lo, _ = int_range(ty)
             c2, c3, c4 = fn.tmp(), fn.tmp(), fn.tmp()
             fn.emit("%s =w ceq%s %s, %d" % (c2, cls, a.t, lo))
             fn.emit("%s =w ceq%s %s, -1" % (c3, cls, b.t))
             fn.emit("%s =w and %s, %s" % (c4, c2, c3))
-            fn.trap_if(c4)
+            fn.trap_if(c4, "div_overflow")
             qop = "div" if op == "div" else "rem"
         else:
             qop = "udiv" if op == "div" else "urem"
@@ -792,7 +823,7 @@ def r_shift(left):
         # Trap unless 0 <= count < width. An unsigned compare also rejects negative counts.
         c = fn.tmp()
         fn.emit("%s =w cult%s %s, %d" % (c, bcls, b.t, width))
-        fn.trap_unless(c)
+        fn.trap_unless(c, "shift")
         if left:
             op = "shl"
         else:
@@ -811,7 +842,7 @@ def r_cneg(fn, x):
     lo, _ = int_range(ty)
     c = fn.tmp()
     fn.emit("%s =w ceq%s %s, %d" % (c, cls, a.t, lo))
-    fn.trap_if(c)
+    fn.trap_if(c, "overflow")
     t = fn.tmp()
     fn.emit("%s =%s sub 0, %s" % (t, cls, a.t))
     return fn.narrow(Val(t, cls, ty), ty)
@@ -980,7 +1011,7 @@ def r_cf2i(fn, x):
     fn.emit("%s =w %s %s, %s" % (c1, lo[0], d, lo[1]))
     fn.emit("%s =w %s %s, %s" % (c2, hi[0], d, hi[1]))
     fn.emit("%s =w and %s, %s" % (c3, c1, c2))
-    fn.trap_unless(c3)
+    fn.trap_unless(c3, "float_cast")
     conv = ("dtosi" if int_is_signed(dst) else "dtoui")
     cls = "l" if dst[1] == 8 else "w"
     t = fn.tmp()
@@ -1515,7 +1546,7 @@ def s_bounds(fn, x):
         fn.emit("%s =w cultl %s, %s" % (c, idx.t, nv.t))
     else:
         fn.emit("%s =w cult%s %s, %d" % (c, cls, idx.t, wrap_int(n, cls)))
-    fn.trap_unless(c)
+    fn.trap_unless(c, "bounds")
 
 
 def s_trap(fn, x):
@@ -1568,11 +1599,11 @@ def s_nonnull(fn, x):
     if p.t.startswith("$"):
         return  # the address of an object or a function
     if p.t == "0":
-        fn.jmp(fn.abort_label())
+        fn.jmp(fn.abort_label("null"))
         return
     c = fn.tmp()
     fn.emit("%s =w cnel %s, 0" % (c, p.t))
-    fn.trap_unless(c)
+    fn.trap_unless(c, "null")
 
 
 def s_if(fn, x):
@@ -1592,7 +1623,20 @@ def s_if(fn, x):
     lt = fn.newlab()
     le = fn.newlab() if els is not None else None
     lend = fn.newlab()
-    fn.jnz(c.t, lt, le if le is not None else lend)
+    # QBE lays out the second successor of a jnz right after it and the first one later (cfg.c, porec), so the arm that is
+    # likely to run is made the second one: the test is inverted for a likely then-arm or an unlikely else-arm.
+    other = le if le is not None else lend
+
+    def hint(arm, name):
+        return arm is not None and len(arm) > 0 and head_of(arm[0]) == name
+    then_likely = hint(then, "likely") or hint(els, "unlikely")
+    then_unlikely = hint(then, "unlikely") or hint(els, "likely")
+    if then_likely and not then_unlikely:
+        nc = fn.tmp()
+        fn.emit("%s =w ceqw %s, 0" % (nc, c.t))
+        fn.jnz(nc, other, lt)
+    else:
+        fn.jnz(c.t, lt, other)
     fn.label(lt)
     fn.stmts(then)
     fn.jmp(lend)
@@ -1727,7 +1771,23 @@ def s_return(fn, x):
 
 
 def s_unreachable(fn, x):
-    fn.jmp(fn.abort_label())
+    """(unreachable) or (unreachable missing-return): the second is a function left without a value."""
+    if len(x) > 2 or (len(x) == 2 and x[1] != "missing-return"):
+        raise BadIR("unreachable form")
+    fn.jmp(fn.abort_label("missing_return" if len(x) == 2 else "unreachable"))
+
+
+def s_loc(fn, x):
+    """(loc "FILE" LINE): the source position of the statements that follow; the checks that fail report it."""
+    if len(x) != 3 or as_int(x[2]) is None:
+        raise BadIR("loc form")
+    fn.loc = (str(x[1]), as_int(x[2]))
+
+
+def s_hint(fn, x):
+    """(likely) and (unlikely): the first statement of an if arm says which way the branch goes (s_if reads it)."""
+    if len(x) != 1:
+        raise BadIR("branch hint form")
 
 
 def s_barrier(fn, x):
@@ -1745,6 +1805,7 @@ STMT = {
     "if": s_if, "loop": s_loop, "switch": s_switch,
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
+    "loc": s_loc, "likely": s_hint, "unlikely": s_hint,
     "barrier": s_barrier, "trap": s_trap, "fence": s_fence,
     "decl": s_decl, "scope-end": s_scope_end, "rref-arg": s_rref_arg,
 }
@@ -2207,7 +2268,8 @@ def emit_function(mod, f):
         if ret == VOID:
             fn.ret()
         else:
-            fn.jmp(fn.abort_label())
+            fn.jmp(fn.abort_label("missing_return"))
+    fn.ub_blocks()
     if fn.abort_used:
         fn.body.append("@abort")
         fn._put("call $abort()")
@@ -2471,6 +2533,8 @@ def emit_module(text, do_prune=True, ld_trap=False):
         mod.out.append('data $%s = align 8 { z 8 }' % SINK)
     for lines in mod.vhelpers.values():
         mod.out.extend(lines)
+    for file, i in mod.ubfiles.items():
+        mod.out.append("data $__nfcxx_ubf%d = { %s }" % (i, ", ".join("b %d" % c for c in list(file.encode('latin-1')) + [0])))
     for n in mod.weakrefs:
         mod.out.append(WEAK_MARK + qsym(n))
     for n in mod.asmhelpers:

@@ -47,6 +47,30 @@ inline const dim3 gridDim{1, 1, 1};
 inline void __syncthreads(void) {}
 // The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
 inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
+// Scalar helpers, for the host copy (never run).
+inline unsigned int __float_as_uint(float f) { unsigned int u; __builtin_memcpy(&u, &f, sizeof u); return u; }
+inline int __float2int_rn(float f) { return (int)f; }
+inline float __frcp_rn(float x) { return 1.0f / x; }
+inline unsigned long __cvta_generic_to_shared(const void *p) { (void)p; return 0; }
+inline unsigned int __hgt2_mask(unsigned int a, unsigned int b) { (void)a; (void)b; return 0u; }
+// The trap and the warp votes, for the host copy (never run).
+inline void __trap(void) {}
+inline unsigned int __ballot_sync(unsigned int mask, int pred) { (void)mask; (void)pred; return 0u; }
+inline int __any_sync(unsigned int mask, int pred) { (void)mask; (void)pred; return 0; }
+inline int __all_sync(unsigned int mask, int pred) { (void)mask; (void)pred; return 0; }
+// The CUDA math overloads of min and max (unqualified calls in device code; the host copy never runs them).
+inline int min(int a, int b) { return a < b ? a : b; }
+inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }
+inline long long min(long long a, long long b) { return a < b ? a : b; }
+inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }
+inline float min(float a, float b) { return a < b ? a : b; }
+inline double min(double a, double b) { return a < b ? a : b; }
+inline int max(int a, int b) { return a > b ? a : b; }
+inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }
+inline long long max(long long a, long long b) { return a > b ? a : b; }
+inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }
+inline float max(float a, float b) { return a > b ? a : b; }
+inline double max(double a, double b) { return a > b ? a : b; }
 
 // Device intrinsics, for the host copy of a kernel body (never run; the device code has the real instruction).
 // Signatures follow CUDA's; the values are placeholders.

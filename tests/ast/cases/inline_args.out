@@ -1,0 +1,83 @@
+-- fewer arguments than parameters: the rest are nil
+1	1	2	3	nil	1	nil	2
+2	2	4	6	nil	2	nil	3
+3	3	6	9	nil	3	nil	4
+4	4	8	12	nil	4	nil	5
+5	5	10	15	nil	5	nil	6
+6	6	12	18	nil	6	nil	7
+-- more arguments than parameters: evaluated, in order, then dropped
+1	1	1
+2	2	1
+3	3	1
+4	4	1
+5	5	1
+6	6	1
+order	a1,b1,c1,d1,e1,a2,b2,c2,d2,e2,a3,b3,c3,d3,e3,a4,b4,c4,d4,e4,a5,b5,c5,d5,e5,a6,b6,c6,d6,e6
+-- the callee expression is evaluated before the arguments
+1	1	3
+2	2	3
+3	3	3
+4	4	3
+5	5	3
+6	6	3
+order	f1,x1,y1,g1,p1,q1,f2,x2,y2,g2,p2,q2,f3,x3,y3,g3,p3,q3,f4,x4,y4,g4,p4,q4,f5,x5,y5,g5,p5,q5,f6,x6,y6,g6,p6,q6
+-- a call as the last argument contributes all its values
+6	nil	nil	11	12	2
+9	nil	nil	12	13	3
+12	nil	nil	13	14	4
+15	nil	nil	14	15	5
+18	nil	nil	15	16	6
+21	nil	nil	16	17	7
+-- results of the callee as the caller sees them
+1
+1	2	nil
+3	1	1	2
+2	0	1	2
+1	1	2
+2
+2	4	nil
+3	2	2	2
+2	0	1	2
+2	2	2
+3
+3	6	nil
+3	3	3	2
+2	0	1	2
+3	3	2
+4
+4	8	nil
+3	4	4	2
+2	0	1	2
+4	4	2
+5
+5	10	nil
+3	5	5	2
+2	0	1	2
+5	5	2
+6
+6	12	nil
+3	6	6	2
+2	0	1	2
+6	6	2
+-- arguments with side effects, and calls nested in arguments
+6	10
+15	17
+24	24
+33	31
+42	38
+51	45
+18
+-- the callee changes its parameters; the caller's variables are untouched
+11	10	12	10	10	1
+11	10	12	10	10	2
+11	10	12	10	10	3
+11	10	12	10	10	4
+11	10	12	10	10	5
+11	10	12	10	10	6
+-- the same function from several sites with different argument counts
+1	2	1	3	3
+2	4	2	4	6
+3	6	3	5	9
+4	8	4	6	12
+5	10	5	7	15
+6	12	6	8	18

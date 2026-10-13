@@ -5,8 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-test:
+  # Builds the EDG front end and QBE/cproc once and saves them to the Actions cache (.github/actions/toolchain); the
+  # test jobs below, and the hexagon, pathb and realworld workflows, restore them instead of rebuilding.
+  # build/ holds absolute paths, so every job uses the same checkout path.
+  build:
     runs-on: ubuntu-24.04
     env:
       # sccache stores compiler outputs in the GitHub Actions cache.
@@ -19,78 +27,123 @@ jobs:
         with:
           submodules: true
 
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 python3-dev ruby rake clang
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Build EDG front end
-        run: scripts/setup-edg.sh
-
-      - name: Build QBE and cproc
-        run: scripts/setup-qbe.sh
-
-      - name: Test (QBE backend)
-        run: NFCXX_BACKEND=qbe tests/run.sh
-
-      - name: Test (gcc backend)
-        run: NFCXX_BACKEND=gcc tests/run.sh
-
-      - name: Freestanding library (both backends)
-        run: tests/lib/run.sh
-
-      - name: Compiler builtin probes (both backends)
-        run: tests/builtins/run.sh
-
-      - name: Real-world check (tinyxml2)
-        run: tests/realworld/run.sh
-
-      - name: Real-world check (nlohmann/json, both backends, output compared with host g++)
-        run: tests/realworld/run_json.sh
-
-      - name: Real-world check ({fmt}, gcc backend, header-only and compiled; output compared with host g++)
-        run: tests/realworld/run_fmt.sh
-
-      - name: Trace output (Perfetto JSON, both backends)
-        run: tests/trace/run.sh
-
-      - name: C inputs (both backends)
-        run: tests/c/run.sh
-
-      - name: nfcc drop-in cc mode (both backends)
-        run: tests/c/cc-mode.sh
-
-      - name: Determinism (same objects on every run)
-        run: tests/determinism/run.sh
-
-      - name: Float-to-integer (runtime helpers and folded constants)
-        run: tests/float-to-int/run.sh
-
-      - name: nfcxx accepts the compiler-driver options of CMake and mruby (gcc backend)
-        run: tests/cxx-driver/run.sh
-
-      - name: Several translation units sharing libstdc++ templates (both backends)
-        run: tests/multi-tu/run.sh
-
-      - name: EH shim, exceptions thrown by libstdc++ and std::exception_ptr (output compared with host g++)
-        run: tests/ehshim/run.sh
-
-      - name: nfceval run-time eval library and nfcxx -shared (both backends)
-        run: tests/eval/run.sh
-
-      - name: nfcpoly embedded Ruby, Lua, Python and ast, scripts calling C++ and back, C++ exceptions through mruby, Lua and ast (both backends)
-        run: tests/poly/run.sh
-
-      - name: nfcast self-specializing AST interpreter, output equal to Lua 5.4, collector stress (both backends)
-        run: tests/ast/run.sh
-
-      - name: mruby scripts (byte-identical to the Python originals)
-        run: tests/mruby/run.sh
-
-      - name: GPU kernel lowered to PTX, run on the CPU PTX interpreter (no GPU needed)
-        run: tests/gpu/run_interp.sh
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 python3-dev ruby rake clang
 
       - name: sccache stats
         if: always()
         run: sccache --show-stats
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cases (QBE backend)
+            run: NFCXX_BACKEND=qbe tests/run.sh
+          - name: cases (gcc backend)
+            run: NFCXX_BACKEND=gcc tests/run.sh
+          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
+            run: |
+              tests/lib/run.sh
+              tests/builtins/run.sh
+              tests/trace/run.sh
+              tests/c/run.sh
+              tests/c/cc-mode.sh
+              tests/cxx-driver/run.sh
+          - name: determinism, float-to-integer
+            run: |
+              tests/determinism/run.sh
+              tests/float-to-int/run.sh
+          - name: real-world tinyxml2 and nlohmann/json
+            run: |
+              tests/realworld/run.sh
+              tests/realworld/run_json.sh
+          - name: real-world {fmt}
+            run: tests/realworld/run_fmt.sh
+          - name: multi-TU, EH shim, nfceval
+            run: |
+              tests/multi-tu/run.sh
+              tests/ehshim/run.sh
+              tests/eval/run.sh
+          - name: nfcpoly, nfcast, mruby scripts
+            run: |
+              tests/poly/run.sh
+              tests/poly/asan-go.sh
+              tests/ast/run.sh
+              tests/uop/run.sh
+              tests/mruby/run.sh
+          - name: GPU kernel on the PTX interpreter
+            run: tests/gpu/run_interp.sh
+          - name: AddressSanitizer (gcc and qbe backends)
+            run: |
+              tests/asan/run.sh
+              ASAN_BACKEND=qbe tests/asan/run.sh
+    name: ${{ matrix.name }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 python3-dev ruby rake clang
+
+      # The interpreter of nfcpoly's Go backend (yaegi in a cgo library); without Go >= 1.24 tests/poly/run.sh skips Go.
+      - name: Set up Go
+        if: startsWith(matrix.name, 'nfcpoly')
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: lib/poly/go/go.mod
+          cache-dependency-path: lib/poly/go/go.sum
+
+      # tests/uop/run.sh differentiates with onnxsim and checks models with onnx and onnxruntime (docs/notes/uop-autodiff.md); without
+      # them those tests print SKIP. The C++ library is the primary way (scripts/setup-onnxsim.sh builds onnxsim 0.8.1's sources, pinned
+      # by hash, in about 2 minutes; the cache key holds the script and the shim); the pip packages also serve the Python fallback.
+      - name: Python test dependencies (onnx, onnxruntime, numpy, onnxsim)
+        if: startsWith(matrix.name, 'nfcpoly')
+        run: |
+          sudo apt-get install -y --no-install-recommends python3-pip protobuf-compiler libprotobuf-dev
+          python3 -m pip install --break-system-packages onnx onnxruntime numpy onnxsim==0.8.1
+
+      - name: Restore libnfconnxsim.so
+        id: onnxsim
+        if: startsWith(matrix.name, 'nfcpoly')
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/onnxsim/libnfconnxsim.so
+            build/onnxsim/built-*
+          key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.sh', 'scripts/onnxsim/**') }}
+
+      - name: Build libnfconnxsim.so
+        if: startsWith(matrix.name, 'nfcpoly') && steps.onnxsim.outputs.cache-hit != 'true'
+        run: scripts/setup-onnxsim.sh
+
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
+  # the build and every test group passed. if: always() stops a skipped dependency from skipping this job.
+  build-and-test:
+    if: always()
+    needs: [build, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every build and test job to pass
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ]; then
+            echo "build=${{ needs.build.result }} test=${{ needs.test.result }}"
+            exit 1
+          fi

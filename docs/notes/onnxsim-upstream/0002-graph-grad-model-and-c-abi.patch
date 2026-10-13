@@ -1,0 +1,560 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -222,7 +222,7 @@
+     BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512
+     BLAKE3_USE_NEON=0)
+ 
+-add_library(onnxsim onnxsim/onnxsim.cpp onnxsim/constant_folding.cpp onnxsim/partial_shape_eval.cpp onnxsim/model_prep.cpp onnxsim/contrib_schemas.cpp onnxsim/bev_custom_op_schemas.cpp onnxsim/qonnx_schemas.cpp onnxsim/custom_optimizer_passes.cpp onnxsim/function_rewriter.cpp onnxsim/profiler.cpp onnxsim/model_info.cpp onnxsim/sym_expr.cpp onnxsim/sym_value_eval.cpp onnxsim/sym_shape_infer.cpp onnxsim/model_metrics.cpp onnxsim/memory_planning.cpp onnxsim/xnnpack_codegen.cpp onnxsim/precision_estimator.cpp onnxsim/qat_graph_builder.cpp onnxsim/graph_grad.cpp onnxsim/qat_entry.cpp onnxsim/lora_entry.cpp onnxsim/tensor_pool.cpp onnxsim/tensor_pool_gguf.cpp onnxsim/tensor_pool_hash.cpp onnxsim/gemm_fusion_backend.cpp onnxsim/finetune_entry.cpp ${ONNXSIM_BLAKE3_SOURCES})
++add_library(onnxsim onnxsim/onnxsim.cpp onnxsim/constant_folding.cpp onnxsim/partial_shape_eval.cpp onnxsim/model_prep.cpp onnxsim/contrib_schemas.cpp onnxsim/bev_custom_op_schemas.cpp onnxsim/qonnx_schemas.cpp onnxsim/custom_optimizer_passes.cpp onnxsim/function_rewriter.cpp onnxsim/profiler.cpp onnxsim/model_info.cpp onnxsim/sym_expr.cpp onnxsim/sym_value_eval.cpp onnxsim/sym_shape_infer.cpp onnxsim/model_metrics.cpp onnxsim/memory_planning.cpp onnxsim/xnnpack_codegen.cpp onnxsim/precision_estimator.cpp onnxsim/qat_graph_builder.cpp onnxsim/graph_grad.cpp onnxsim/graph_grad_model.cpp onnxsim/qat_entry.cpp onnxsim/lora_entry.cpp onnxsim/tensor_pool.cpp onnxsim/tensor_pool_gguf.cpp onnxsim/tensor_pool_hash.cpp onnxsim/gemm_fusion_backend.cpp onnxsim/finetune_entry.cpp ${ONNXSIM_BLAKE3_SOURCES})
+ 
+ if (ONNXSIM_BUILTIN_REMOTE_EXECUTOR)
+   target_sources(onnxsim PRIVATE onnxsim/remote_executor.cpp)
+@@ -713,6 +713,15 @@
+   onnxsim_add_ort_rpath(graph_grad_test)
+   add_test(NAME graph_grad_test COMMAND graph_grad_test)
+ 
++  # graph_grad_model.{h,cpp}: the gradient of a whole model (slice, shapes,
++  # seed, zero gradients, inlining, unique names) and its C ABI. Compiled
++  # into the `onnxsim` library like graph_grad.cpp; this test gets it from
++  # there.
++  add_executable(graph_grad_model_test onnxsim/graph_grad_model_test.cpp)
++  target_link_libraries(graph_grad_model_test onnxsim)
++  onnxsim_add_ort_rpath(graph_grad_model_test)
++  add_test(NAME graph_grad_model_test COMMAND graph_grad_model_test)
++
+   # BuildBackwardWithTemplatedRules, graph_grad.cpp's onnxscript-templated
+   # rules (see that file's "Templated rules" section), now wired into
+   # production Rules() for eleven op types. Needs the fully-configured
+--- /dev/null
++++ b/onnxsim/graph_grad_model.h
+@@ -0,0 +1,46 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * The gradient of a whole ONNX model: see graph_grad_model.cpp.
++ */
++#pragma once
++
++#include <onnx/onnx_pb.h>
++
++#include <cstddef>
++#include <string>
++#include <vector>
++
++// The forward nodes `loss` needs plus the nodes that compute d loss / d wrt[k]
++// by graph_grad.h's rules, as a new model. `loss` names a scalar float32 or
++// float64 tensor of `forward` whose shapes are all static; every `wrt[k]` is a
++// float tensor (an input, an initializer or any node output). The model keeps
++// `forward`'s inputs, initializers and opset, has one graph output
++// `<prefix>grad_<k>` per wrt (in order, with the shape and type of wrt[k]) and
++// every new tensor name starts with `prefix`, so it can be merged into a graph
++// that holds `forward` by name. Gradients are built in the element type of the
++// loss (GraphBuilder::SetFloatType). A wrt the loss does not reach gets a zero
++// of its shape; a wrt that is the loss gets the seed 1.
++//
++// Only nodes that depend on a wrt are differentiated, so an operator without a
++// rule elsewhere in the graph is not an error.
++//
++// Throws UnsupportedOpError for a differentiated node without a rule and
++// std::invalid_argument for a bad loss, wrt or model.
++onnx::ModelProto BuildGradientModel(const onnx::ModelProto& forward,
++                                    const std::string& loss,
++                                    const std::vector<std::string>& wrt,
++                                    const std::string& prefix = "grad_");
++
++extern "C" {
++
++// The same through bytes. Returns 0 (*out, *out_size hold the serialized
++// model), 1 (an operator without a rule: *error has the message) or 2 (any
++// other failure: *error). Release *out and *error with onnxsim_free.
++int onnxsim_gradient_model(const char* model, size_t size, const char* loss,
++                           const char* const* wrt, size_t num_wrt,
++                           const char* prefix, char** out, size_t* out_size,
++                           char** error);
++void onnxsim_free(void* p);
++
++}  // extern "C"
+--- /dev/null
++++ b/onnxsim/graph_grad_model.cpp
+@@ -0,0 +1,281 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * graph_grad_model.{h,cpp}: the gradient of a whole ONNX model, and a C ABI for it.
++ *
++ * BuildBackward (graph_grad.h) differentiates a slice of nodes into a
++ * GraphBuilder, and leaves the caller to choose the slice, get the shapes,
++ * seed the loss, give unreached targets a zero, inline the model-local
++ * functions of the templated rules and make the names unique. Every
++ * consumer outside onnxsim's own step-graph code needs all of that, so it is
++ * done here once: BuildGradientModel(forward, loss, wrt) returns the forward
++ * nodes the loss needs plus the gradient nodes, with one graph output
++ * `<prefix>grad_<k>` per wrt, in order.
++ *
++ * The C function is for callers that cannot link C++ (dlopen from another
++ * language, a program with its own C++ runtime): bytes in, bytes out, error
++ * text out, no exception crosses it.
++ */
++#include "graph_grad_model.h"
++
++#include <onnx/inliner/inliner.h>
++#include <onnx/onnx_pb.h>
++#include <onnx/shape_inference/implementation.h>
++
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <memory>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "graph_grad.h"
++#include "qat_graph_builder.h"
++
++using onnx::TensorProto;
++
++onnx::ModelProto BuildGradientModel(const onnx::ModelProto& forward,
++                                    const std::string& loss,
++                                    const std::vector<std::string>& wrt,
++                                    const std::string& prefix) {
++  onnx::ModelProto model = forward;
++  onnx::shape_inference::InferShapes(model);
++  onnx::GraphProto* graph = model.mutable_graph();
++
++  std::map<std::string, std::vector<int64_t>> shapes;
++  std::map<std::string, int> dtypes;
++  auto note = [&](const onnx::ValueInfoProto& vi) {
++    if (!vi.type().has_tensor_type()) return;
++    const auto& tt = vi.type().tensor_type();
++    std::vector<int64_t> dims;
++    for (const auto& d : tt.shape().dim()) {
++      if (!d.has_dim_value()) throw std::invalid_argument("value " + vi.name() + " has no static shape");
++      dims.push_back(d.dim_value());
++    }
++    shapes[vi.name()] = dims;
++    dtypes[vi.name()] = tt.elem_type();
++  };
++  for (const auto& v : graph->input()) note(v);
++  for (const auto& v : graph->value_info()) note(v);
++  for (const auto& v : graph->output()) note(v);
++  for (const TensorProto& t : graph->initializer()) {
++    shapes[t.name()] = std::vector<int64_t>(t.dims().begin(), t.dims().end());
++    dtypes[t.name()] = t.data_type();
++  }
++  if (!shapes.count(loss)) throw std::invalid_argument("the loss " + loss + " is not a value of the model");
++  if (!shapes[loss].empty()) throw std::invalid_argument("the loss " + loss + " must be a scalar, it has rank " + std::to_string(shapes[loss].size()));
++  const int ldt = dtypes[loss];
++  if (ldt != TensorProto::FLOAT && ldt != TensorProto::DOUBLE) throw std::invalid_argument("the loss " + loss + " must be float32 or float64");
++  for (const std::string& w : wrt) {
++    if (!shapes.count(w)) throw std::invalid_argument("cannot differentiate with respect to " + w + ": not a value of the model");
++    if (dtypes[w] != TensorProto::FLOAT && dtypes[w] != TensorProto::DOUBLE) throw std::invalid_argument("cannot differentiate with respect to " + w + ": not a float value");
++  }
++
++  // the nodes the loss needs, and among them the ones that depend on a wrt: those are the slice to differentiate
++  const int nn = graph->node_size();
++  std::set<std::string> needed = {loss};
++  std::vector<bool> need(static_cast<size_t>(nn), false);
++  for (int k = nn; k-- > 0;) {
++    const onnx::NodeProto& nd = graph->node(k);
++    bool used = false;
++    for (const std::string& o : nd.output()) used = used || needed.count(o);
++    if (!used) continue;
++    need[static_cast<size_t>(k)] = true;
++    for (const std::string& i : nd.input()) if (!i.empty()) needed.insert(i);
++  }
++  std::set<std::string> dep(wrt.begin(), wrt.end());
++  std::vector<onnx::NodeProto> slice;
++  for (int k = 0; k < nn; k++) {
++    if (!need[static_cast<size_t>(k)]) continue;
++    const onnx::NodeProto& nd = graph->node(k);
++    bool d = false;
++    for (const std::string& i : nd.input()) d = d || (!i.empty() && dep.count(i));
++    if (!d) continue;
++    for (const std::string& o : nd.output()) dep.insert(o);
++    slice.push_back(nd);
++  }
++
++  // targets the loss does not reach get a zero gradient: BuildBackward throws for them, so retry without
++  std::vector<std::string> targets;
++  for (const std::string& w : wrt) if (needed.count(w)) targets.push_back(w);
++  std::unique_ptr<GraphBuilder> b;
++  std::map<std::string, std::string> got;
++  for (;;) {
++    b.reset(new GraphBuilder(prefix));
++    b->SetFloatType(ldt);
++    std::map<std::string, std::string> seeds;
++    seeds[loss] = b->Const(1.0f, "seed");
++    try {
++      got = BuildBackward(*b, slice, shapes, seeds, targets);
++      break;
++    } catch (const UnsupportedOpError&) {
++      throw;
++    } catch (const std::invalid_argument& e) {
++      std::string m = e.what();
++      const std::string key = "no gradient reaches '";
++      size_t p = m.find(key);
++      if (p == std::string::npos) throw;
++      size_t q = m.find('\'', p + key.size());
++      std::string who = m.substr(p + key.size(), q - p - key.size());
++      std::vector<std::string> keep;
++      for (const std::string& t : targets) if (t != who) keep.push_back(t);
++      if (keep.size() == targets.size()) throw;
++      targets = keep;
++    }
++  }
++
++  // the zero gradients, and one Identity per wrt so that every result has a name of its own
++  std::vector<std::string> results;
++  std::vector<onnx::NodeProto> tail;
++  std::vector<TensorProto> tail_init;
++  for (size_t k = 0; k < wrt.size(); k++) {
++    auto it = got.find(wrt[k]);
++    std::string src;
++    if (it != got.end()) {
++      src = it->second;
++    } else {
++      GraphBuilder z(prefix + "z" + std::to_string(k) + "_");
++      z.SetFloatType(dtypes[wrt[k]]);
++      const std::string zero = z.Const(0.0f, "zero");
++      src = zero;
++      if (!shapes[wrt[k]].empty()) src = z.Op("Expand", {zero, z.ConstInt64(shapes[wrt[k]], "shape")}, "zeros");
++      for (const auto& nd : z.nodes()) tail.push_back(nd);
++      for (const auto& t : z.initializer()) tail_init.push_back(t);
++    }
++    onnx::NodeProto id;
++    id.set_op_type("Identity");
++    id.add_input(src);
++    id.add_output(prefix + "grad_" + std::to_string(k));
++    results.push_back(id.output(0));
++    tail.push_back(id);
++  }
++
++  // The templated rules emit calls of model-local functions, written for opset 17; they are inlined in a model of their own
++  // (opset 17, the forward values it reads declared as inputs), because the inliner does not convert versions here.
++  std::vector<onnx::NodeProto> gnodes(b->nodes().begin(), b->nodes().end());
++  if (!b->functions().empty()) {
++    onnx::ModelProto gm;
++    gm.set_ir_version(model.ir_version());
++    onnx::OperatorSetIdProto* base = gm.add_opset_import();
++    base->set_domain("");
++    base->set_version(17);
++    std::set<std::string> domains;
++    for (const onnx::FunctionProto& fn : b->functions()) {
++      *gm.add_functions() = fn;
++      if (domains.insert(fn.domain()).second) {
++        onnx::OperatorSetIdProto* o = gm.add_opset_import();
++        o->set_domain(fn.domain());
++        o->set_version(1);
++      }
++    }
++    onnx::GraphProto* gg = gm.mutable_graph();
++    gg->set_name("rules");
++    std::set<std::string> made;
++    for (const auto& t : b->initializer()) { made.insert(t.name()); *gg->add_initializer() = t; }
++    for (const auto& nd : b->nodes()) for (const std::string& o : nd.output()) made.insert(o);
++    std::set<std::string> declared;
++    for (const auto& nd : b->nodes())
++      for (const std::string& i : nd.input()) {
++        if (i.empty() || made.count(i) || !declared.insert(i).second) continue;
++        onnx::ValueInfoProto* vi = gg->add_input();
++        vi->set_name(i);
++        onnx::TypeProto_Tensor* tt = vi->mutable_type()->mutable_tensor_type();
++        tt->set_elem_type(dtypes.at(i));
++        tt->mutable_shape();
++        for (int64_t d : shapes.at(i)) tt->mutable_shape()->add_dim()->set_dim_value(d);
++      }
++    for (const auto& nd : b->nodes()) *gg->add_node() = nd;
++    onnx::shape_inference::InferShapes(gm);
++    onnx::inliner::InlineLocalFunctions(gm, false);
++    gnodes.assign(gg->node().begin(), gg->node().end());
++  }
++  // every new name starts with the prefix (inlined bodies bring names like `tmp`, which may be a user's)
++  std::set<std::string> fwd_names;
++  for (const auto& v : graph->input()) fwd_names.insert(v.name());
++  for (const auto& t : graph->initializer()) fwd_names.insert(t.name());
++  for (int k = 0; k < nn; k++) for (const std::string& o : graph->node(k).output()) fwd_names.insert(o);
++  auto fresh = [&](const std::string& nm) { return nm.empty() || fwd_names.count(nm) || nm.compare(0, prefix.size(), prefix) == 0 ? nm : prefix + nm; };
++  for (auto& nd : gnodes) {
++    for (std::string& i : *nd.mutable_input()) i = fresh(i);
++    for (std::string& o : *nd.mutable_output()) o = fresh(o);
++  }
++  for (auto& t : b->initializer()) t.set_name(fresh(t.name()));
++  for (auto& nd : tail) for (std::string& i : *nd.mutable_input()) i = fresh(i);
++
++  onnx::ModelProto out;
++  out.set_ir_version(model.ir_version());
++  out.set_producer_name("onnxsim-graph-grad");
++  *out.mutable_opset_import() = model.opset_import();
++  onnx::GraphProto* og = out.mutable_graph();
++  og->set_name("gradient");
++  for (const auto& v : graph->input()) *og->add_input() = v;
++  for (const TensorProto& t : graph->initializer()) *og->add_initializer() = t;
++  for (int k = 0; k < nn; k++) if (need[static_cast<size_t>(k)]) *og->add_node() = graph->node(k);
++  for (const auto& nd : gnodes) *og->add_node() = nd;
++  for (const auto& t : b->initializer()) *og->add_initializer() = t;
++  for (const auto& nd : tail) *og->add_node() = nd;
++  for (const auto& t : tail_init) *og->add_initializer() = t;
++  // declare the outputs (shape inference gives their type)
++  onnx::shape_inference::InferShapes(out);
++  onnx::GraphProto* cg = out.mutable_graph();
++  std::map<std::string, onnx::ValueInfoProto> vis;
++  for (const auto& v : cg->value_info()) vis[v.name()] = v;
++  for (const std::string& r : results) {
++    onnx::ValueInfoProto* vi = cg->add_output();
++    auto it = vis.find(r);
++    if (it != vis.end()) *vi = it->second;
++    vi->set_name(r);
++  }
++  return out;
++}
++
++namespace {
++
++char* DupString(const std::string& s, size_t* n = nullptr) {
++  char* p = static_cast<char*>(std::malloc(s.size() + 1));
++  std::memcpy(p, s.data(), s.size());
++  p[s.size()] = 0;
++  if (n != nullptr) *n = s.size();
++  return p;
++}
++
++}  // namespace
++
++extern "C" {
++
++int onnxsim_gradient_model(const char* model, size_t size, const char* loss,
++                           const char* const* wrt, size_t num_wrt,
++                           const char* prefix, char** out, size_t* out_size,
++                           char** error) {
++  *out = nullptr;
++  *error = nullptr;
++  try {
++    onnx::ModelProto forward;
++    if (!forward.ParseFromArray(model, static_cast<int>(size))) {
++      throw std::invalid_argument("the forward model is not a valid ONNX ModelProto");
++    }
++    std::string bytes;
++    if (!BuildGradientModel(forward, loss,
++                            std::vector<std::string>(wrt, wrt + num_wrt),
++                            prefix)
++             .SerializeToString(&bytes)) {
++      throw std::runtime_error("cannot serialize the gradient model");
++    }
++    *out = DupString(bytes, out_size);
++    return 0;
++  } catch (const UnsupportedOpError& e) {
++    *error = DupString(e.what());
++    return 1;
++  } catch (const std::exception& e) {
++    *error = DupString(e.what());
++    return 2;
++  } catch (...) {
++    *error = DupString("unknown failure");
++    return 2;
++  }
++}
++
++void onnxsim_free(void* p) { std::free(p); }
++
++}  // extern "C"
+--- /dev/null
++++ b/onnxsim/graph_grad_model_test.cpp
+@@ -0,0 +1,197 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Exercises graph_grad_model.{h,cpp}: the whole-model gradient and its C ABI.
++ * Like graph_grad_test.cpp it checks structure, not numbers (nothing here
++ * evaluates an ONNX graph); the numbers are the rules' own, tested there.
++ */
++#include "graph_grad_model.h"
++
++#include <onnx/onnx_pb.h>
++
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <vector>
++
++#include "graph_grad.h"
++
++namespace {
++
++int g_failures = 0;
++
++void Check(bool condition, const std::string& what) {
++  if (!condition) {
++    std::fprintf(stderr, "FAIL: %s\n", what.c_str());
++    ++g_failures;
++  }
++}
++
++void AddInput(onnx::GraphProto* g, const std::string& name, int type,
++              std::vector<int64_t> dims) {
++  onnx::ValueInfoProto* v = g->add_input();
++  v->set_name(name);
++  onnx::TypeProto_Tensor* t = v->mutable_type()->mutable_tensor_type();
++  t->set_elem_type(type);
++  t->mutable_shape();
++  for (int64_t d : dims) t->mutable_shape()->add_dim()->set_dim_value(d);
++}
++
++onnx::NodeProto* AddNode(onnx::GraphProto* g, const std::string& op,
++                         std::vector<std::string> in, std::string out) {
++  onnx::NodeProto* n = g->add_node();
++  n->set_op_type(op);
++  for (const std::string& i : in) n->add_input(i);
++  n->add_output(out);
++  return n;
++}
++
++// loss S = ReduceSum(Tanh(X @ W)), with an input U the loss does not use.
++onnx::ModelProto Forward(int type) {
++  onnx::ModelProto m;
++  m.set_ir_version(8);
++  onnx::OperatorSetIdProto* opset = m.add_opset_import();
++  opset->set_domain("");
++  opset->set_version(18);
++  onnx::GraphProto* g = m.mutable_graph();
++  g->set_name("t");
++  AddInput(g, "X", type, {2, 3});
++  AddInput(g, "W", type, {3, 4});
++  AddInput(g, "U", type, {5});
++  AddNode(g, "MatMul", {"X", "W"}, "H");
++  AddNode(g, "Tanh", {"H"}, "T");
++  onnx::NodeProto* sum = AddNode(g, "ReduceSum", {"T"}, "S");
++  onnx::AttributeProto* keep = sum->add_attribute();
++  keep->set_name("keepdims");
++  keep->set_type(onnx::AttributeProto::INT);
++  keep->set_i(0);
++  return m;
++}
++
++const onnx::ValueInfoProto* Output(const onnx::ModelProto& m, const std::string& name) {
++  for (const onnx::ValueInfoProto& o : m.graph().output()) {
++    if (o.name() == name) return &o;
++  }
++  return nullptr;
++}
++
++void TheGradientModelHasOneOutputPerWrtWithTheShapeOfTheWrt() {
++  const onnx::ModelProto fwd = Forward(onnx::TensorProto::FLOAT);
++  const onnx::ModelProto g = BuildGradientModel(fwd, "S", {"W", "X", "U"}, "p_");
++  Check(g.graph().output_size() == 3, "an output per wrt");
++  const onnx::ValueInfoProto* dw = Output(g, "p_grad_0");
++  const onnx::ValueInfoProto* dx = Output(g, "p_grad_1");
++  const onnx::ValueInfoProto* du = Output(g, "p_grad_2");
++  Check(dw && dx && du, "the outputs are named <prefix>grad_<k>");
++  if (!(dw && dx && du)) return;
++  Check(dw->type().tensor_type().shape().dim_size() == 2 && dw->type().tensor_type().shape().dim(0).dim_value() == 3, "the gradient of W is (3, 4)");
++  Check(dx->type().tensor_type().shape().dim(1).dim_value() == 3, "the gradient of X is (2, 3)");
++  Check(du->type().tensor_type().shape().dim_size() == 1 && du->type().tensor_type().shape().dim(0).dim_value() == 5, "U, which the loss does not use, gets a zero of its shape");
++  Check(du->type().tensor_type().elem_type() == onnx::TensorProto::FLOAT, "float32 in, float32 out");
++  // the forward nodes are carried along unchanged, the new names start with the prefix
++  Check(g.graph().node(0).op_type() == "MatMul" && g.graph().node(0).output(0) == "H", "the forward nodes come first");
++  for (int k = 3; k < g.graph().node_size(); ++k) {
++    for (const std::string& o : g.graph().node(k).output()) {
++      Check(o.compare(0, 2, "p_") == 0, "a new tensor name starts with the prefix: " + o);
++    }
++  }
++  for (const onnx::TensorProto& t : g.graph().initializer()) {
++    Check(t.name().compare(0, 2, "p_") == 0, "a new initializer starts with the prefix: " + t.name());
++  }
++  Check(g.functions_size() == 0, "the model-local functions of the templated rules are inlined");
++  for (const onnx::OperatorSetIdProto& o : g.opset_import()) {
++    Check(o.domain().empty(), "no private function domain is left in the opset imports");
++  }
++}
++
++void AFloat64LossGetsFloat64Constants() {
++  const onnx::ModelProto g = BuildGradientModel(Forward(onnx::TensorProto::DOUBLE), "S", {"W"}, "d_");
++  for (const onnx::TensorProto& t : g.graph().initializer()) {
++    if (t.name().compare(0, 2, "d_") != 0 || t.data_type() == onnx::TensorProto::INT64) continue;
++    Check(t.data_type() == onnx::TensorProto::DOUBLE, "float64 constant " + t.name());
++  }
++  Check(Output(g, "d_grad_0")->type().tensor_type().elem_type() == onnx::TensorProto::DOUBLE, "float64 gradient");
++}
++
++void ALossThatIsAWrtGetsTheSeed() {
++  const onnx::ModelProto g = BuildGradientModel(Forward(onnx::TensorProto::FLOAT), "S", {"S"}, "s_");
++  Check(g.graph().output_size() == 1 && g.graph().output(0).type().tensor_type().shape().dim_size() == 0, "d S / d S is a scalar");
++}
++
++void AnOperatorOffThePathOfEveryWrtIsNotReached() {
++  onnx::ModelProto fwd = Forward(onnx::TensorProto::FLOAT);
++  // a Sin that does not depend on X or W, feeding nothing the loss needs
++  AddNode(fwd.mutable_graph(), "Sin", {"U"}, "SU");
++  Check(BuildGradientModel(fwd, "S", {"X"}, "q_").graph().output_size() == 1, "an unrelated Sin is ignored");
++}
++
++void AnOperatorWithoutARuleOnThePathIsRefused() {
++  onnx::ModelProto fwd = Forward(onnx::TensorProto::FLOAT);
++  fwd.mutable_graph()->mutable_node(1)->set_op_type("Sin");   // Tanh -> Sin
++  bool threw = false;
++  try {
++    BuildGradientModel(fwd, "S", {"X"}, "q_");
++  } catch (const UnsupportedOpError& e) {
++    threw = std::string(e.what()).find("Sin") != std::string::npos;
++  }
++  Check(threw, "UnsupportedOpError names the operator");
++}
++
++void ABadLossOrWrtIsRefused() {
++  const onnx::ModelProto fwd = Forward(onnx::TensorProto::FLOAT);
++  auto refused = [&](const std::string& loss, const std::vector<std::string>& wrt, const std::string& fragment) {
++    try {
++      BuildGradientModel(fwd, loss, wrt, "q_");
++    } catch (const std::invalid_argument& e) {
++      return std::string(e.what()).find(fragment) != std::string::npos;
++    }
++    return false;
++  };
++  Check(refused("T", {"X"}, "must be a scalar"), "a loss with a shape");
++  Check(refused("nope", {"X"}, "not a value"), "an unknown loss");
++  Check(refused("S", {"nope"}, "not a value"), "an unknown wrt");
++}
++
++void TheCAbiReturnsTheModelOrTheMessage() {
++  const onnx::ModelProto fwd = Forward(onnx::TensorProto::FLOAT);
++  std::string bytes;
++  fwd.SerializeToString(&bytes);
++  const char* wrt[] = {"X", "W"};
++  char* out = nullptr;
++  char* err = nullptr;
++  size_t n = 0;
++  int rc = onnxsim_gradient_model(bytes.data(), bytes.size(), "S", wrt, 2, "c_", &out, &n, &err);
++  Check(rc == 0 && out != nullptr && err == nullptr, "success");
++  onnx::ModelProto back;
++  Check(out != nullptr && back.ParseFromArray(out, static_cast<int>(n)) && back.graph().output_size() == 2, "the bytes are a ModelProto with two outputs");
++  onnxsim_free(out);
++
++  onnx::ModelProto bad = fwd;
++  bad.mutable_graph()->mutable_node(1)->set_op_type("Sin");
++  bad.SerializeToString(&bytes);
++  rc = onnxsim_gradient_model(bytes.data(), bytes.size(), "S", wrt, 2, "c_", &out, &n, &err);
++  Check(rc == 1 && out == nullptr && err != nullptr && std::strstr(err, "Sin") != nullptr, "an operator without a rule is status 1 with the message");
++  onnxsim_free(err);
++
++  rc = onnxsim_gradient_model("junk", 4, "S", wrt, 2, "c_", &out, &n, &err);
++  Check(rc == 2 && err != nullptr, "bytes that are not a model are status 2");
++  onnxsim_free(err);
++}
++
++}  // namespace
++
++int main() {
++  TheGradientModelHasOneOutputPerWrtWithTheShapeOfTheWrt();
++  AFloat64LossGetsFloat64Constants();
++  ALossThatIsAWrtGetsTheSeed();
++  AnOperatorOffThePathOfEveryWrtIsNotReached();
++  AnOperatorWithoutARuleOnThePathIsRefused();
++  ABadLossOrWrtIsRefused();
++  TheCAbiReturnsTheModelOrTheMessage();
++  if (g_failures != 0) {
++    std::fprintf(stderr, "%d check(s) failed\n", g_failures);
++    return 1;
++  }
++  std::fprintf(stderr, "all graph_grad_model checks passed\n");
++  return 0;
++}

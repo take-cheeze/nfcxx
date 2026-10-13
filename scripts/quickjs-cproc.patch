@@ -1,0 +1,73 @@
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -48,7 +48,7 @@
+ #include "libregexp.h"
+ #include "dtoa.h"
+ 
+-#if defined(EMSCRIPTEN) || defined(_MSC_VER)
++#if defined(EMSCRIPTEN) || defined(_MSC_VER) || defined(__CPROC__)
+ #define DIRECT_DISPATCH  0
+ #else
+ #define DIRECT_DISPATCH  1
+@@ -5006,22 +5006,22 @@
+ 
+ void JS_FreeCString(JSContext *ctx, const char *ptr)
+ {
+-    return js_free_cstring(ctx->rt, ptr);
++    js_free_cstring(ctx->rt, ptr);
+ }
+ 
+ void JS_FreeCStringRT(JSRuntime *rt, const char *ptr)
+ {
+-    return js_free_cstring(rt, ptr);
++    js_free_cstring(rt, ptr);
+ }
+ 
+ void JS_FreeCStringUTF16(JSContext *ctx, const uint16_t *ptr)
+ {
+-    return js_free_cstring(ctx->rt, ptr);
++    js_free_cstring(ctx->rt, ptr);
+ }
+ 
+ void JS_FreeCStringRT_UTF16(JSRuntime *rt, const uint16_t *ptr)
+ {
+-    return js_free_cstring(rt, ptr);
++    js_free_cstring(rt, ptr);
+ }
+ 
+ static int memcmp16_8(const uint16_t *src1, const uint8_t *src2, int len)
+@@ -22506,7 +22506,7 @@
+     }
+ }
+ 
+-static void __attribute((unused)) dump_token(JSParseState *s,
++static void __maybe_unused dump_token(JSParseState *s,
+                                              const JSToken *token)
+ {
+     printf("%d:%d ", token->line_num, token->col_num);
+--- a/quickjs-c-atomics.h
++++ b/quickjs-c-atomics.h
+@@ -49,6 +49,23 @@
+ #define atomic_fetch_sub(obj, arg) \
+     __atomic_fetch_sub(obj, arg, __ATOMIC_SEQ_CST)
+ #define _Atomic
++#elif defined(__CPROC__)
++/* cproc has no _Atomic and no generic __atomic_* builtins: the sized libatomic functions of the same operations
++   (qbe-prep.rb declares them), chosen by the size of the pointed-to type. Memory order 5 is seq_cst. */
++#define _Atomic
++#define QJS_ATOMIC_FN(op, obj) \
++    _Generic(*(obj), unsigned char: __atomic_ ## op ## _1, unsigned short: __atomic_ ## op ## _2, \
++             unsigned int: __atomic_ ## op ## _4, unsigned long: __atomic_ ## op ## _8)
++#define atomic_fetch_add(obj, arg) QJS_ATOMIC_FN(fetch_add, obj)((obj), (arg), 5)
++#define atomic_fetch_sub(obj, arg) QJS_ATOMIC_FN(fetch_sub, obj)((obj), (arg), 5)
++#define atomic_fetch_and(obj, arg) QJS_ATOMIC_FN(fetch_and, obj)((obj), (arg), 5)
++#define atomic_fetch_or(obj, arg) QJS_ATOMIC_FN(fetch_or, obj)((obj), (arg), 5)
++#define atomic_fetch_xor(obj, arg) QJS_ATOMIC_FN(fetch_xor, obj)((obj), (arg), 5)
++#define atomic_exchange(obj, desired) QJS_ATOMIC_FN(exchange, obj)((obj), (desired), 5)
++#define atomic_load(obj) QJS_ATOMIC_FN(load, obj)((obj), 5)
++#define atomic_store(obj, desired) QJS_ATOMIC_FN(store, obj)((obj), (desired), 5)
++#define atomic_compare_exchange_strong(obj, expected, desired) \
++    QJS_ATOMIC_FN(compare_exchange, obj)((obj), (expected), (desired), 0, 5, 5)
+ #else
+ #include <stdatomic.h>
+ #endif
