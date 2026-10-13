@@ -2496,11 +2496,79 @@ def function_head?(t)
   h.index("(") && !(h.index("=") && h.index("=") < h.index("("))
 end
 
-def device_tu(text)
-  pieces = top_pieces(text).map do |pc|
+# A host `const` or `constexpr` declaration is a constant that device code may read only when it is a value. A
+# reference or pointer (`const T &r = ...`, `const T *p = ...`) is host state, and so is an initializer that calls a
+# function, takes an address, or dereferences (`*(const Ctx *) p`): carrying it would carry its type too, with the
+# host-only members of that type (FILE *, a host struct), and the unit has no definition for them.
+def device_constant_decl?(t)
+  eq = t.index("=")
+  cut = [eq, t.index("["), t.index(";")].compact.min || t.length
+  head = t[0...cut]
+  return false if head.include?("&") || head.include?("*")
+  return true if eq.nil? || eq >= t.length
+  init = t[(eq + 1)..-1].to_s
+  semi = init.index(";")
+  init = init[0...semi] if semi
+  return false if init.include?("&")
+  return false if init.strip.start_with?("*")
+  return false if init.include?("*") && init.include?("(")
+  i = 0
+  while (i = init.index("(", i))
+    j = i - 1
+    j -= 1 while j >= 0 && white?(init[j])
+    word_end = j
+    j -= 1 while j >= 0 && ident_char?(init[j])
+    word = word_end > j ? init[(j + 1)..word_end] : ""
+    return false if !word.empty? && !%w[sizeof alignof decltype static_cast].include?(word)
+    i += 1
+  end
+  true
+end
+
+# The opener and closer of a linkage or namespace block (`extern "C" {`, `namespace n {`) that starts the piece t, as
+# [open, close] indices of its braces in t; nil when t is not one.
+def linkage_block(t)
+  f = 0
+  f += 1 while f < t.length && white?(t[f])
+  s = t[f..-1].to_s
+  return nil unless s.start_with?('extern "') || s.start_with?("namespace ")
+  b = s.index("{")
+  return nil if b.nil?
+  h = s[0...b]
+  return nil if h.include?("(") || h.include?("=") || h.include?(";")
+  open = f + b
+  close = matching_brace(t, open)
+  close.nil? ? nil : [open, close]
+end
+
+# A linkage or namespace block with device code is cut into its own top-level pieces, so the device unit keeps only
+# the pieces it needs (ggml.h's extern "C" block holds the host API and its types). Each piece keeps the block's opener
+# and closer as its wrap (nested blocks compose), so kernels keep their linkage and namespace. Preprocessor lines are
+# not wrapped: they stay at the top level.
+def flatten_linkage(text, raw)
+  raw.flat_map do |pc|
     st, en, kind, body = pc
     t = text[st...en]
-    info = { text: t, kind: kind, body: body, toks: tokens_of(t), defined: [], keep: false, device: false }
+    blk = kind != :pp && body ? linkage_block(t) : nil
+    next [pc] unless blk
+    open, close = blk
+    inner = t[(open + 1)...close]
+    base = st + open + 1
+    sub = top_pieces(inner).map { |s2, e2, k2, b2| [base + s2, base + e2, k2, b2] }
+    wo = t[0..open]
+    wc = t[close..-1]
+    flatten_linkage(text, sub).map do |inn|
+      iw = inn[4]
+      [inn[0], inn[1], inn[2], inn[3], [wo + (iw ? iw[0] : ""), (iw ? iw[1] : "") + wc]]
+    end
+  end
+end
+
+def device_tu(text)
+  pieces = flatten_linkage(text, top_pieces(text)).map do |pc|
+    st, en, kind, body = pc
+    t = text[st...en]
+    info = { text: t, kind: kind, body: body, toks: tokens_of(t), defined: [], keep: false, device: false, wrap: pc[4] }
     if kind == :pp
       rest = t.sub("#", "").gsub("\n", " ").strip
       d = rest.split(" ")[0] || ""
@@ -2582,8 +2650,9 @@ def device_tu(text)
       pc[:defined] += enum_enumerators(t) if kw == "enum"
     elsif pc[:body]
       next
-    elsif toks.include?("const") || toks.include?("constexpr")
-      # a constant: device code may read it. Other host variables are not reachable from device code.
+    elsif (toks.include?("const") || toks.include?("constexpr")) && device_constant_decl?(t)
+      # a constant: device code may read it. Other host variables are not reachable from device code, and neither are
+      # the const references and pointers that device_constant_decl? leaves out.
       cut = t.index("=") || t.index("[") || t.index(";") || t.length
       pc[:defined] = [tokens_of(t[0...cut]).last].compact
     end
@@ -2647,7 +2716,8 @@ def device_tu(text)
   end
   pieces.each do |pc|
     next unless pc[:keep]
-    out << rewrite_is_same_v(rewrite_builtins(pc[:text])) << "\n"
+    code = rewrite_is_same_v(rewrite_builtins(pc[:text]))
+    out << (pc[:wrap] && pc[:kind] != :pp ? pc[:wrap][0] + code + pc[:wrap][1] : code) << "\n"
   end
   $sites.each do |w, site|
     out << "extern \"C\" void #{w}(#{site[:decl]}) { #{site[:name]}<#{site[:targs]}>(#{site[:call].join(", ")}); }\n"
