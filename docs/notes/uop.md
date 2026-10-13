@@ -6,7 +6,7 @@ rewrites. Above it sits a high-level graph in the shape of ONNX, and above that 
 ```
 np::Tensor  (numpy-style C++ API, lazy)                 nfcuop_np.hpp
    │ builds
-hir::Graph  (ONNX opset 18 operators, static shapes)    nfcuop_hir.hpp ──► to_onnx(): a .onnx file, nothing lowered
+hir::Graph  (ONNX opset 18 operators, symbolic dims)    nfcuop_hir.hpp ──► to_onnx(): a .onnx file, nothing lowered
    │ hir::Lowerer (nfcuop_lower.cpp)
 ut::Tensor  (numpy-style builder directly on UOps)      nfcuop_ut.hpp
    │ builds
@@ -16,7 +16,7 @@ Graph / UOp (hash-consed nodes, shapes, rewrites)       nfcuop.hpp
 ```
 
 The plan is to grow it stage by stage so that a graph can be built from C++ (and later Ruby, Lua, Python, JavaScript and Go
-through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff (stage 6, see the table) and the ONNX layer exist; ONNX import and dynamic shapes are plans.
+through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff (stage 6, see the table) and the ONNX layer exist; ONNX import exists; symbolic dimensions are step 1 of stage 7 (below), symbolic shapes in UOps are not started.
 
 | Stage | Content | State |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
 | 6 | Autodiff on the `hir` graph by onnxsim (`hir::gradients_via_onnxsim`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** (`Graph::from_onnx` / `merge_onnx`) | done (onnxsim's rules cover a subset of the operators; the forward operators `Gemm Gather Erf Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` are in `hir` now (`tests/uop/test_nn.cpp`), and their gradients come from onnxsim's rules, not yet checked in `test_grad`) |
-| 7 | Dynamic shapes (below) | not started |
+| 7 | Dynamic shapes (below) | step 1 done (symbolic dimensions in `hir`, `tests/uop/test_sym.cpp`); step 2 not started |
 
 ## Stage 1: the scalar core
 
@@ -88,7 +88,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 
 ## The ONNX-style graph (`nfcuop_hir.hpp`)
 
-- `hir::Graph` holds `Value`s (name, dtype, static shape) and `Node`s that are ONNX operators with ONNX's names, inputs and
+- `hir::Graph` holds `Value`s (name, dtype, shape: integers or symbols, see stage 7) and `Node`s that are ONNX operators with ONNX's names, inputs and
   attributes: `Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Add Sub Mul Div Mod Max Min And Or Xor BitwiseAnd
   BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Transpose Reshape Squeeze Unsqueeze
   Expand ReduceSum ReduceMean ReduceMax ReduceMin ReduceProd Softmax LogSoftmax Slice Concat Pad Gemm Gather Erf Conv MaxPool
@@ -228,9 +228,17 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
 The static design is deliberate: every shape is a known integer, so shape inference, rewriting and the interpreter are simple and exact. Dynamic
 shapes are added in two steps, without changing what the static path means:
 
-1. **Symbolic dimensions in `hir`** (ONNX `dim_param`, e.g. a batch size `N`): a `Dim` is an integer or a name; broadcasting and reshape rules
-   follow ONNX's (`N` against `N` or 1), and the exporter writes `dim_param`. Evaluation **specializes**: binding the symbols to integers
-   at `eval` time gives a static graph, lowered and cached per binding. This keeps UOps static and is enough for batch-size changes.
+1. **Symbolic dimensions in `hir`** (done). A `hir::Dim` is an integer or a symbol (ONNX `dim_param`, e.g. a batch size `N`); `add_symbolic_input`
+   takes `Dims`, `add_input` is unchanged. Shape inference follows ONNX: a symbol broadcasts against itself or 1, and anything else with a symbol is an
+   `Error`. A reshape's `0` copies a symbol, and a `-1` takes what is left only when that is one symbol with factor 1 (`[N,2,2] -> [-1,4]` is `[N,4]`,
+   `[N,4] -> [-1]` is an `Error`: 4N has no representation). Reductions (also over the symbol's axis), matmul and gemm contractions with equal
+   symbols, the batch axis of Conv and pooling, Transpose, Squeeze, Unsqueeze, Expand and the elementwise operators keep symbols. Slicing,
+   padding, concatenating or gathering along a symbol, a symbol in a channel or spatial axis of Conv and pooling, and a normalization over a
+   symbol (its `Scale` is a constant with integer sizes) are refused. `to_onnx` writes `dim_param`, and `from_onnx`/`merge_onnx` read it; a dimension with neither a value nor a
+   symbol is still refused. The gradients (`gradients_via_onnxsim`) refuse symbolic graphs.
+   Evaluation **specializes**: `Graph::bind({N: 2})` gives a static copy of the graph (every operator inferred again with the sizes), and
+   `hir::Evaluator` binds, lowers and evaluates it, caching the lowering per binding (keyed on the bindings in name order). Lowering a value
+   that has an unbound symbol throws. This keeps UOps static and is enough for batch-size changes; the numpy API has no symbols yet.
 2. **Symbolic shapes in UOps** (tinygrad's `Variable` in shapes): a bounded `Var` as a dimension, needed only when kernels should be compiled
    once for all sizes. It touches shape inference, `Reshape`/`Expand` validation and the C renderer, so it waits for stage 4.
 
@@ -246,6 +254,8 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 - `test_ut.cpp`: shape inference and errors, `evaluate_array` on every movement op and reduction, the rewrite rules for them, a second differential run (300
   random chains of permute, reshape, reduce, expand, shrink, pad, flip, `Where` and integer arithmetic, 900 comparisons), and the checks of the
   UOp-level builder against values worked out by hand.
+- `test_sym.cpp`: symbolic dimensions (stage 7, step 1): an MLP with a batch symbol at two batch sizes against values worked out by hand, the
+  `Evaluator` cache, the shape-inference results and refusals, `bind`, the exported `dim_param` and its reader; two models for `onnx_check.py`.
 - `test_np.cpp`: the same checks through the user-facing API and the graph (values, errors, the default-dtype settings in both configurations, `slice`/`at`/`flip`, `concatenate`/`stack`, constant sharing, the
   ONNX export bytes), and the `hir` error cases. For each new operator (`pow`, `floor`, `ceil`, `isnan`, `isinf`, `cumsum`, `prod`, `argmax`,
   `argmin`, `tile`, `take`) the values are hand-computed or checked against numpy's, and an ONNX round trip (export, read back, export again
