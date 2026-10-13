@@ -8,6 +8,7 @@
 #   pass:    block.cu (__syncthreads_or, __reduce_add_sync, __threadfence_system, __nanosleep, __isnanf, __shfl_up_sync),
 #            hmax.cu (__hmax) and math.cu (the float math and __dp4a, __ldg, __saturatef, __fdividef, within tolerances).
 #   pass:    shared_bf16.cu (a static __shared__ array named like a dynamic one in another kernel; nv_bfloat162 as two lanes).
+#   pass:    asm_ptx_widths.cu (CUB's ld and st inline PTX with 16-, 32- and 64-bit operands, "h" and "l" constraints).
 #   pass:    bf16_forms.cu (__float2bfloat16, __bfloat162float, __float22bfloat162_rn, __bfloat1622float2, __low2/high2bfloat16
 #            against CUDA host results, bit for bit, NaN canonical as the host).
 #   pass:    math_fns.cu (sinf, cosf, tanhf, expm1f within 1 ulp of a double reference up to 1e6; floorf, roundf, trunc
@@ -68,6 +69,7 @@ pass prelude_gaps.cu "prelude gaps: no error, 0 mismatches"
 pass fma_round.cu "half fma: no error, 0 mismatches"
 pass float2int_round.cu "float2int_rn: no error, 0 mismatches"
 pass bf16_forms.cu "bf16 forms: no error, 0 mismatches"
+pass asm_ptx_widths.cu "ptx widths: no error, 0 mismatches"
 pass math_fns.cu "math_fns: no error, 9175155 checks, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
