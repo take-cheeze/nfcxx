@@ -526,6 +526,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     mruby-nomemoryerror-reentrant-alloc.patch
     mruby-gc-type-live-counts.patch
     mruby-rdata-ivar-slots.patch
+    # error.c's `volatile int err` in the C++ exception path: cproc (nfcxx's qbe backend) cannot store to a volatile
+    # object (nfcxx scripts/mruby-cxx-novolatile.patch). The C++ exception path does not longjmp, so the volatile is not needed.
+    mruby-cxx-novolatile.patch
   ].each do |patch|
     path = File.join(ROOT, 'patches', patch)
     system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY, path, exception: true)
