@@ -419,7 +419,32 @@ operations make the processor's NaN; the front end folds `0.0 / 0.0` to a positi
 through a call the compilers cannot see through (checked in `tier.cpp`), but nothing else was done about a C compiler that folds
 a NaN-making operation it can follow through locals (not seen with gcc here). On a target where the C compiler fuses a multiplication
 and an addition (aarch64, `__aarch64__` / `__FP_FAST_FMA`) the last bit of a float result could differ, and the tier does not compile
-float kernels there: that code is untested, there is no such host in the tests.
+float kernels there: that code is untested, there is no such host in the tests. What can be checked without one is below.
+
+**The fused multiply-add guard (`nfcast_tier.cpp`), checked without an aarch64 host.** Here there is no aarch64 gcc and no qemu;
+clang 18 targets aarch64 and writes its assembly. The sample is the generated C of `kone(a,b,c) = ((a) * (b)) + (c)` (from
+`nfcxx --emit-c`), with the product in a local in a second function, through each back end:
+- **QBE** (cproc, then the QBE IL, then `qbe -t arm64` or `-t amd64_sysv`): never fused. cproc emits no fused operation, and QBE's
+  arm64 and amd64 code generators contain none (the sources have no `fmadd`/`fmsub`); the aarch64 output is `fmul` then `fadd`.
+- **gcc** (`gcc -O2 -fwrapv -fno-strict-aliasing`, which is what the gcc back end runs, with no `-std`, so GNU mode and
+  `-ffp-contract=fast`): fused when the target has the instruction, which aarch64 always does. The middle end fuses across
+  statements too. Checked on x86 with `-mfma` as a stand-in (the same middle-end decision): GNU mode gives `vfmadd132sd` and
+  `vfmsub132sd` for all three shapes; `-std=gnu17 -ffp-contract=off` and `-std=c11` give none; without `-mfma` (the driver never
+  passes it) there is no fusion on x86.
+- **clang** `--target=aarch64-linux-gnu -O2`: `fmadd` for the single expression, `fnmsub` for `a*b - c`, and the product in a local
+  is not fused (clang's default is contraction within an expression). This is clang's behaviour, not gcc's.
+- **The shared helpers do not prevent it.** Generated code writes `+ - * /` on doubles as C operators, and the interpreter's
+  float `+ - * /` are its own `ar_nn` in `nfcast_nodes.cpp`. The `nfcr_*` helpers cover comparisons, `fmod`, `floor(a / b)`,
+  `pow` and the arithmetic of a numeric `for`, not the four operators. The interpreter does one operation per node, with the
+  operands reached through virtual `eval` calls, so no compiler can fuse across two of its nodes (a structural argument: the
+  aarch64 object of `nfcast_nodes.cpp` could not be made, as there is no aarch64 sysroot).
+
+Decision: the guard stays as it is. The QBE back end, which is the default, does not contract, so the refusal is stricter than
+needed there; the gcc back end does, and nothing here can show the narrowed guard is right on aarch64. The `__FP_FAST_FMA` and
+`__ARM_FEATURE_FMA` clauses test the flags of the tier's own build, not those of the generated code (no `-mfma` is passed to it),
+so they are conservative. Follow-up when an aarch64 host exists: refuse only for the gcc back end (or give the gcc compile of
+the generated code `-ffp-contract=off`, which would also change the C++ the gcc back end compiles), then run `tests/ast/run.sh`
+there with the float cases.
 
 ### Loops: on-stack replacement
 
