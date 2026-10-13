@@ -64,15 +64,24 @@ never touches memory again. Loops are arranged so this is legal SPIR-V: the loop
 - Each dispatch is submitted and waited for before the next. The queue is in order by construction, which is what SYCL
   promises; the cost is one fence per launch.
 - After each dispatch the flag is read; a non-zero flag exits with status 71 and the reason, as on WebGPU.
-- The device address and the mapping's address are compared once at start-up. On lavapipe they are the same number, so a
-  USM pointer is the same on the host and in a kernel, and kernels may capture it (the `usm` test does). Where they differ,
-  USM allocation throws `feature_not_supported`; SYCL buffers and accessors work everywhere (they need only device addresses).
+- USM pointers are host addresses, as the host sees them. A kernel gets the device address: a pointer is translated when a
+  kernel loads it from memory (host to device) and when it stores it (device to host). The translation is a range test
+  against the heap's host range, with the heap's bounds and device address in the push block, so it is the identity where the
+  two addresses are the same (lavapipe) and a constant offset elsewhere. This covers a pointer captured by a closure, a
+  pointer stored in USM memory, and a reduction into a USM variable. The heap's host and device ranges must not overlap; the
+  runtime checks it at start-up.
+- Limits of the translation: a pointer copied inside a struct (a byte copy, not a pointer load) is not translated, so a
+  kernel that copies a struct containing a pointer into USM memory leaves a device address there. The kernel still works (its
+  own loads translate either form); a host read of such a pointer sees the device form. Integers that are converted to and
+  from pointers are not translated.
+- The device address and the host address of the same byte are the same number on lavapipe, which cannot exercise the other
+  case: the translation code runs there as the identity. `usm_ptr` and `usm` are the tests that exercise it where they differ.
 - Limits are checked against the device's properties before a launch, with the message naming the limit.
 
 ## Tests
 
 `tests/sycl/run.sh` runs each program on both backends. On Vulkan: `vecadd`, `saxpy2d`, `reduce`, `bytes`, `chain`,
-`matmul`, `usm`, `tables`, `libm`, `groups`, `barvar`, `atomics`, `redcustom`, `double`, `copysign`, and `trap_div` (exit 71). The
+`matmul`, `usm`, `usm_ptr`, `tables`, `libm`, `groups`, `barvar`, `atomics`, `redcustom`, `double`, `copysign`, and `trap_div` (exit 71). The
 WGSL-only refusal (`refuse_double`) is a WebGPU check; Vulkan accepts `double`.
 
 Checked by mutation: changing the `OpFAdd` of `vecadd` to `OpFSub` in the emitted module fails the program (`vecadd FAIL
@@ -95,10 +104,9 @@ bytes each. The rest are the samples' own usage errors and deliberate bugs. The 
 
 - **Intel Arc B60.** The same module should run on ANV (Intel's Vulkan driver): it needs `bufferDeviceAddress`, `shaderInt64`,
   `shaderFloat64` and the Vulkan memory model, which Arc supports. On a real GPU the device address will not equal the mapping
-  address, so USM is refused there and the buffer/accessor tests are the ones that apply. To check: `tests/sycl/run.sh` on the
-  B60 box with the Vulkan loader and ANV installed. Expect `double` to be slow (FP64 is emulated on some Arc parts).
+  address, so the USM translation is exercised there for the first time: `usm` and `usm_ptr` are the ones to watch. To check:
+  `tests/sycl/run.sh` on the B60 box with the Vulkan loader and ANV installed. Expect `double` to be slow (FP64 is emulated on
+  some Arc parts).
 - **Level Zero / OpenCL** for Intel XPU: a Kernel-capability variant of the same module (physical addresses are the same
   idea; the memory model and the built-ins differ). Not started.
-- USM on drivers without identity addressing: device pointers would have to be translated when the closure is copied, which
-  needs the closure's pointer fields listed in the manifest. Not started.
 - Work-group sizes above 256 are fine here (lavapipe allows 1024); the WebGPU path keeps its 256 limit.
