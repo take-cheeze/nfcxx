@@ -2294,10 +2294,11 @@ def strip_launch_bounds(s)
 end
 
 # Dynamic shared memory: `extern __shared__ T name[];` has no size at compile time (the launch gives the bytes), so
-# the declaration is removed and each `name[...]` becomes a subscript of a pointer from __nfcxx_dynshared_addr(),
-# the block's dynamic shared memory. The device side lowers that call to the address of a module-level
-# `.extern .shared` symbol (the emitter's job); the host copy has a placeholder (lib/cuda/nfcxx_cuda.h). A pointer
-# subscript has no bounds check, which is right: the size is only known at launch.
+# the declaration is removed and each use of `name` becomes a typed pointer from __nfcxx_dynshared_addr(), the block's
+# dynamic shared memory: subscripted (`name[i]`) or passed on (`name + J`, a call argument). The device side lowers
+# that call to the address of a module-level `.extern .shared` symbol (the emitter's job); the host copy has a
+# placeholder (lib/cuda/nfcxx_cuda.h). A pointer subscript has no bounds check, which is right: the size is only known
+# at launch.
 def dynamic_shared_rewrite(s)
   names = {}
   out = ""
@@ -2325,6 +2326,7 @@ def dynamic_shared_rewrite(s)
         name = head[q...head.length]
         type = head[0...q].strip
         refuse("extern __shared__ #{decl}: no type or name") if name.empty? || type.empty?
+        refuse("extern __shared__ #{name}: declared with types #{names[name]} and #{type}") if names.key?(name) && names[name] != type
         names[name] = type
         out << ("\n" * s[i..semi].count("\n"))
         i = semi + 1
@@ -2338,10 +2340,84 @@ def dynamic_shared_rewrite(s)
   replace_dynamic_uses(out, names)
 end
 
-# Replaces the uses `name[` of the dynamic shared arrays. A member (`.name`, `->name`) is not a use.
+# The innermost `{ ... }` block that contains position pos, as [open, close] indices; nil at file scope.
+def enclosing_block(s, pos)
+  stack = []
+  i = 0
+  while i < pos
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    stack.push(i) if s[i] == "{"
+    stack.pop if s[i] == "}" && !stack.empty?
+    i += 1
+  end
+  return nil if stack.empty?
+  open = stack[-1]
+  depth = 0
+  j = open
+  while j < s.length
+    e = skip_literal(s, j)
+    if e
+      j = e
+      next
+    end
+    depth += 1 if s[j] == "{"
+    depth -= 1 if s[j] == "}"
+    return [open, j] if depth == 0
+    j += 1
+  end
+  [open, s.length]
+end
+
+# Each static `__shared__ T name[...]` in s as [name, position of name]. These are ordinary arrays of their block.
+def static_shared_names(s)
+  found = []
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(s, i, "__shared__")
+      j = i + 10
+      stop = j
+      stop += 1 while stop < s.length && s[stop] != "[" && s[stop] != ";" && s[stop] != "="
+      if stop < s.length && s[stop] == "["
+        k = stop
+        k -= 1 while k > j && white?(s[k - 1])
+        q = k
+        q -= 1 while q > j && ident_char?(s[q - 1])
+        found << [s[q...k], q] if q < k
+      end
+      i = j
+      next
+    end
+    i += 1
+  end
+  found
+end
+
+# True when the use at pos is inside a block that declares a static __shared__ array of the same name.
+def shadowed_by_static?(s, statics, tok, pos)
+  statics.each do |name, decl|
+    next unless name == tok
+    blk = enclosing_block(s, decl)
+    next if blk.nil?
+    return true if pos > blk[0] && pos < blk[1]
+  end
+  false
+end
+
+# Replaces the uses of the dynamic shared arrays (every use, see dynamic_shared_rewrite). A member (`.name`, `->name`) is
+# not a use, and a use inside a block that declares a static __shared__ array of the same name is that array's.
 def replace_dynamic_uses(s, names)
   out = ""
   i = 0
+  statics = static_shared_names(s)
   while i < s.length
     e = skip_literal(s, i)
     if e
@@ -2356,9 +2432,7 @@ def replace_dynamic_uses(s, names)
       q = i - 1
       q -= 1 while q >= 0 && white?(s[q])
       member = q >= 0 && (s[q] == "." || (s[q] == ">" && q > 0 && s[q - 1] == "-"))
-      n = j
-      n += 1 while n < s.length && white?(s[n])
-      if names.key?(tok) && !member && s[n] == "["
+      if names.key?(tok) && !member && !shadowed_by_static?(s, statics, tok, i)
         out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
         i = j
         next
