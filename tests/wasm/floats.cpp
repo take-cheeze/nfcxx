@@ -1,5 +1,8 @@
 // EXPECT: 16
-// double and float arithmetic, conversions between them and to integers, comparisons.
+// EXPECT-ILP32: 15
+// double and float arithmetic, conversions between them and to integers, comparisons. The unsigned long is 32 bits
+// under ILP32 (--emscripten), so 12345678901234 does not fit and the value is 1942892530: big is 0 there. The
+// EXPECT-ILP32 value is g++ -m32 (freestanding, -O0), the EXPECT value is g++ at -O0 on x86-64.
 int main() {
   double x = 2.5;
   float f = 1.25f;

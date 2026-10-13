@@ -19,14 +19,15 @@ runs under `NFCXX_WASM_ASAN=1` and must give N, and is skipped otherwise.
 
 ## Representation
 
-The IR's layout is LP64, and the emitter keeps it. Nothing in the front end changes, so the struct offsets, sizes and
-pointer widths of the IR are the ones the C++ program has.
+The IR's layout is LP64 by default, and the emitter keeps it: the struct offsets, sizes and pointer widths of the IR are
+the ones the C++ program has on x86-64. `--emscripten` emits the ILP32 layout instead (pointers and `long` 4 bytes), from
+the same front end with EDG's `linux_riscv32` target; see "Emscripten" below.
 
 | IR type | wasm |
 | --- | --- |
 | integers up to 4 bytes, `bool` | `i32`, kept canonical: sign- or zero-extended from the width, `bool` 0 or 1 |
-| 8-byte integers | `i64` |
-| pointers | `i64`; a memory access wraps it to the `i32` address (`i32.wrap_i64`) |
+| 8-byte integers | `i64` (`long` and `unsigned long` are 4 bytes, `i32`, under `--emscripten`) |
+| pointers | `i64`; a memory access wraps it to the `i32` address (`i32.wrap_i64`). Under `--emscripten`: `i32`, the address itself |
 | `float`, `double` | `f32`, `f64` |
 
 - A register is a wasm local. The IR is not SSA, so a register may be set more than once, which a wasm local allows.
@@ -148,13 +149,18 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
 
 ## Emscripten (`--emscripten`)
 
-`scripts/mrb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the same module with the exports the
-Emscripten JS runtime reads. `--emscripten-import-memory` (with `--emscripten`) imports the memory as `env.memory`
-instead of exporting it, the layout of Emscripten's `IMPORTED_MEMORY`. The layout and the code are unchanged; without
-the arguments the module is byte-identical to the one before the mode existed. `--asan` and `--emscripten` are refused
-together (the shadow would sit where the heap begins), and `--emscripten-import-memory` without `--emscripten` is an
-error. `NFCXX_WASM_EMSCRIPTEN=1` in `tests/wasm/run.sh` emits every test with `--emscripten`, and
-`NFCXX_WASM_EMSCRIPTEN=import` with `--emscripten-import-memory`; each module is checked by `tests/wasm/emscripten.cjs`.
+`scripts/mrb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the module with the exports the Emscripten
+JS runtime reads, in the ILP32 data model of wasm32: pointers and `long` are i32. Its input is ILP32 IR:
+`scripts/pathb-dump --freestanding --target linux_riscv32 --ir prog.cpp > prog.ir`. The emitter reads the model from the
+IR's `(layout ...)` header. LP64 IR under `--emscripten` is refused, and ILP32 IR without it is refused (LP64 is the
+default and is emitted as before). `--emscripten-import-memory` (with `--emscripten`) imports the memory as `env.memory`
+instead of exporting it, the layout of Emscripten's `IMPORTED_MEMORY`. The layout and the code are the same in both
+models. Without the arguments the module is byte-identical to the one before the mode existed. `--asan` is LP64 only: its
+shadow and runtime take i64 addresses, so it is refused with ILP32 (ILP32 needs `--emscripten`, and `--asan` and
+`--emscripten` are refused together, since the shadow would sit where the heap begins). `--emscripten-import-memory`
+without `--emscripten` is an error. `NFCXX_WASM_EMSCRIPTEN=1` in `tests/wasm/run.sh` emits every test with `--emscripten`
+from the ILP32 IR, and `NFCXX_WASM_EMSCRIPTEN=import` with `--emscripten-import-memory`; each module is checked by
+`tests/wasm/emscripten.cjs`.
 
 | Export | Kind | Value |
 | --- | --- | --- |
@@ -176,12 +182,12 @@ no memory section or `memory` export. Growing it is the host's `memory.grow`; th
 - **Constructors.** The IR has no list of static constructors: a dynamically initialized global is refused (`(unsupported
   init ...)`, see "What is refused"), so there is nothing for `__wasm_call_ctors` to run. It is exported as an empty
   function that returns and leaves the stack pointer alone.
-- **The stack pointer's type is i32, not the pointer type i64.** The IR's pointer values are i64 (LP64 is kept), but the
-  stack pointer only ever holds a linear-memory address, and a memory address is i32 in this module already (a memory
-  access wraps the i64 to i32). So the prologue is unchanged, and the glue's i32 is met. The consequence is that the
-  two kinds of pointer differ in wasm: a `T*` argument of an exported function is an i64, which a JS caller passes as a
-  BigInt, not a Number. Making the stack pointer i64 would have meant an i64 prologue and a wrap at each memory access,
-  and would have broken the i32 the glue reads.
+- **The stack pointer's type is i32.** Under LP64 (the default) the IR's pointer values are i64, but the stack pointer
+  only ever holds a linear-memory address, and a memory address is i32 in this module already (a memory access wraps the
+  i64 to i32). So the prologue is unchanged, and the glue's i32 is met. The consequence under LP64 is that the two kinds
+  of pointer differ in wasm: a `T*` argument of an exported function is an i64, which a JS caller passes as a BigInt, not
+  a Number. Making the stack pointer i64 would have meant an i64 prologue and a wrap at each memory access, and would have
+  broken the i32 the glue reads. Under `--emscripten` the pointers are i32 too, so the two agree.
 - **The heap base.** There is no allocator in the module, and the stack grows down from the top of the memory to the
   static data. So the heap is placed where the stack starts: `__heap_base` is the top of the memory (`pages * 65536`).
   The heap is empty at the start: it has no room until the memory grows, and nothing in the module grows it.
@@ -190,20 +196,35 @@ no memory section or `memory` export. Growing it is the host's `memory.grow`; th
   looked up in `EMSCRIPTEN_IMPORT_NAMES`, a table of IR name to Emscripten name; it is empty (point 5).
 - **Names.** A function of the IR may not take an export name of the mode (`EMSCRIPTEN_EXPORTS`): the module is refused.
 
+**Pointer width: feasibility (step 3).** The data model comes from EDG, not from the emitter. The IR's `(layout ...)`
+header prints EDG's `targ_sizeof_*` for the target that cpfe runs with, and `--target` is a run-time option of the same
+cpfe: `3rd/edg/src/defines.h` has the tables of every target (`TARG_SIZEOF_LONG_linux_riscv32 4`,
+`TARG_SIZEOF_POINTER_linux_riscv32 4`, `TARG_ALIGNOF_LONG_LONG_linux_riscv32 8`), and `bases/docker/dev-env/gcc`'s
+`lib_linux_riscv32` gives the predefined macros. So an ILP32 IR needs no change to the EDG submodule, and no change to the
+front end's default output: `pathb-dump --target linux_riscv32` passes the option, and without it the command is the one
+before. Checked: under the target, `tests/wasm/pointers.cpp` has `(long 4) (pointer 4)` and 4-byte pointer slots, and the
+`sizeof` values of a struct with a `char`, a `long long` and a `double` (`4 4 8 8 24 8 8 1`) match clang's
+`--target=wasm32`. Two EDG settings differ from the host. The riscv32 table has plain `char` unsigned, so the target
+passes `--signed_chars` (the x86-64 host and wasm32 have it signed: `clang --target=wasm32` defines no `__CHAR_UNSIGNED__`).
+Its `long double` is 16 bytes, which the emitter refuses as it does now. `--target` needs `--freestanding`: the host's C and
+C++ library headers are the host target's. Verdict: go, behind `--emscripten`. The default LP64 output is unchanged.
+
 **The list for step 2, and where each point stands.** Checked against the module, not against an Emscripten JS runtime:
 none is installed here, and the Emscripten sources were not reachable from this environment (see "Unverified names").
 
-1. **Pointer width: open, out of scope.** The IR's pointer values are i64 (LP64), where the Emscripten wasm32 glue treats
-   pointers as i32 numbers. A pointer crossing the JS boundary is a BigInt. Only the stack pointer and the globals are i32.
-   Changing it changes the data model.
+1. **Pointer width: closed under `--emscripten`.** The module is ILP32 (the feasibility note below): pointers, `long` and
+   `unsigned long` are i32, so a pointer crossing the JS boundary is a Number, as the wasm32 glue expects. The default LP64
+   module still has i64 pointers (a BigInt at the boundary), as before.
 2. **Memory import: closed.** `--emscripten-import-memory` imports `env.memory` with no maximum, at the module's pages.
    `tests/wasm/emscripten.cjs` checks the import (name, kind, no maximum, and that the memory it is instantiated with is
    the one `__heap_base` ends), and `NFCXX_WASM_EMSCRIPTEN=import` runs every test in this layout. Default is still export.
 3. **The table: documented, unreachable.** No call through the table is emitted, so an empty table is never called. The
    table has no maximum, so a JS-side grow works (the checker grows it). Whether the glue calls `addFunction` is not
    checked here, since no glue is run.
-4. **Linking sections: open, out of scope.** No `dylink.0`, `linking` or `reloc.*` custom section. That is needed for
-   dynamic linking (`MAIN_MODULE`, `SIDE_MODULE`) only.
+4. **Linking sections: decided, not needed.** No `dylink.0`, `linking` or `reloc.*` custom section. `dylink.0` is what
+   dynamic linking (`MAIN_MODULE`, `SIDE_MODULE`) reads. `linking` and `reloc.*` are what a relocatable object carries for
+   the linker. The emitter writes one final module, the result of a link, so a static link needs neither. Not checked
+   here (no `emcc` or `wasm-ld` is installed): this is the Emscripten and wasm-ld convention.
 5. **Runtime imports: open.** `EMSCRIPTEN_IMPORT_NAMES` is empty: no IR name is mapped, because no pair (IR name, Emscripten
    name) could be verified. Emscripten's libc (`printf`, `malloc`, `memcpy`, ...) is linked into the module, so those
    names are not imports under Emscripten at all; a program that calls them, or `__cxa_*`, does not instantiate under an
@@ -265,7 +286,10 @@ too. The tests write such expressions as `? 1 : 0`.
 ## Checks
 
 `tests/wasm/run.sh` (`NFCXX_WASM_EMSCRIPTEN=1` for the `--emscripten` mode, see above) compiles each test with the harness (`scripts/setup-pathb.sh`), emits it, validates and runs it under
-node, and compares the result with the expectation. The tests for the statics (`globals_*.cpp`) cover an array with an
+node, and compares the result with the expectation. A test whose result depends on the width of `long` says
+`// EXPECT-ILP32: N` as well: under the emscripten modes that is its result (`floats.cpp`: 16 on the host, 15 under ILP32).
+The ILP32 expectations were checked with a freestanding `g++ -m32` run (`_start` calls `main` and exits with its result;
+no 32-bit libgcc is needed for these programs), and they agree with the LP64 ones except `floats`. The tests for the statics (`globals_*.cpp`) cover an array with an
 initializer, a struct with a pointer to another global, a string read through a pointer, an address with an addend, a
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
 (`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested

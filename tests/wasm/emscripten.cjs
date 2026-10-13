@@ -99,3 +99,12 @@ if (typeof ex.__wasm_call_ctors !== "function" || ex.__wasm_call_ctors.length !=
 const spBefore = sp.value;
 if (ex.__wasm_call_ctors() !== undefined) fail("__wasm_call_ctors returned a value, want none");
 if (sp.value !== spBefore) fail("__wasm_call_ctors changed the stack pointer");
+
+// Pointers are i32 in the ILP32 module (wasm32). A function that takes an address and returns one (ident in
+// emscripten_pointer.cpp) is called with a Number and returns a Number; an i64 pointer would take a BigInt and throw.
+if ("ident" in kinds) {
+  if (kinds.ident !== "function") fail(`export ident is ${kinds.ident}, want function`);
+  let r;
+  try { r = ex.ident(16); } catch (e) { fail(`ident does not take an address as a Number: ${e.message}`); }
+  if (r !== 16) fail(`ident(16) returned ${typeof r} ${String(r)}, want the Number 16`);
+}
