@@ -1,5 +1,11 @@
 # optcarrot / bc2cpp scoping probe
 
+> Historical measurements and implementation notes follow. Workload-specific
+> CPU/source dispatch, synchronous PPU, and LUT optimizations have been removed.
+> Current builds use upstream Ruby and general IR passes; see
+> [generic IR optimization](../../docs/bc2cpp-generic-ir-optimization.md).
+
+
 A scoping investigation, not a shipped tool: how much of
 [optcarrot](https://github.com/mame/optcarrot) (the pure-Ruby NES emulator
 used as a Ruby-implementation benchmark) runs under this project's own

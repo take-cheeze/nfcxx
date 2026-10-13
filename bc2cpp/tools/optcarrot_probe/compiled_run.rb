@@ -4,19 +4,17 @@
 # Build an isolated mruby binary with bc2cpp's optcarrot methods installed,
 # then run the normal headless checksum benchmark. See README.md for limits.
 
+removed_optimizations = %w[OPTCARROT_STATIC_DISPATCH OPTCARROT_STATIC_PPU
+                           OPTCARROT_IR_LUT BC2CPP_IR_CPU_DISPATCH]
+requested = removed_optimizations.select { |name| ENV[name] == '1' }
+abort "Removed workload-specific optimization: #{requested.join(', ')}; use general IR inlining" unless requested.empty?
+
 require 'fileutils'
 require 'etc'
 require 'open3'
 require 'rbconfig'
 require 'shellwords'
 require 'tmpdir'
-require_relative 'ppu_lut'
-
-if ENV['OPTCARROT_IR_LUT'] == '1'
-  abort 'OPTCARROT_IR_LUT currently requires the ordinary host' if ENV['OPTCARROT_CLOSED_WORLD'] == '1'
-  abort 'OPTCARROT_IR_LUT requires shims and the default LUT mode' if ENV['OPTCARROT_NO_SHIMS'] == '1' || ENV['OPTCARROT_ORIGINAL_LUT'] == '1'
-end
-
 ROOT = File.expand_path('../..', __dir__)
 MRUBY = File.join(ROOT, '3rd/mruby')
 PROBE_MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
@@ -26,9 +24,7 @@ GRAY_STACK_SIZE = Integer(ENV.fetch('OPTCARROT_GRAY_STACK_SIZE', '16384'), 10)
 unless (1024..262_144).cover?(GRAY_STACK_SIZE)
   abort 'OPTCARROT_GRAY_STACK_SIZE must be between 1024 and 262144 pointers'
 end
-if ENV['OPTCARROT_STATIC_PPU'] == '1' && ENV['OPTCARROT_CLOSED_WORLD'] == '1'
-  abort 'OPTCARROT_STATIC_PPU currently requires the ordinary host: sealed-world dynamic option accessors are not modeled'
-end
+
 # Optcarrot::PPU used to be entirely excluded here (a real, 100%-
 # reproducible FiberError -- `PPU#run`'s `@fiber ||= Fiber.new { ... }`
 # compiled its block through the same BLOCK_FALLBACK path every other block
@@ -213,7 +209,7 @@ def owner_class_expr(owner)
   [parent, singleton]
 end
 
-def emit_register(diagnostics, out_dir, ir_lut: nil)
+def emit_register(diagnostics, out_dir)
   # A class in `embeds` gets its whole instance type switched to
   # MRB_TT_DATA (an opaque embedded ivar struct in place of the ordinary
   # ivar table) for EVERY instance, program-wide -- MRB_SET_INSTANCE_TT is
@@ -276,14 +272,6 @@ def emit_register(diagnostics, out_dir, ir_lut: nil)
     file.puts '#include <mruby.h>'
     file.puts '#include "optcarrot_probe_decls.h"'
     file.puts '#include "optcarrot_probe_gen.cpp"'
-    if ir_lut
-      file.puts '#include <mruby/array.h>'
-      file.puts '#include <mruby/irep.h>'
-      file.puts '#include <mruby/class.h>'
-      file.puts '#include <mruby/proc.h>'
-      file.puts '#include <cstring>'
-      file.puts ir_lut.first
-    end
     file.puts 'static mrb_value optcarrot_install(mrb_state* M, mrb_value) {'
     embeds.each do |owner|
       klass, = owner_class_expr(owner)
@@ -304,7 +292,6 @@ def emit_register(diagnostics, out_dir, ir_lut: nil)
     file.puts 'extern "C" void mrb_optcarrot_compiled_gem_init(mrb_state* M) {'
     file.puts '  struct RClass* mod = mrb_define_module(M, "OptcarrotProbe");'
     file.puts '  mrb_define_module_function(M, mod, "install!", optcarrot_install, MRB_ARGS_NONE());'
-    file.puts ir_lut.last if ir_lut
     file.puts '}'
     file.puts 'extern "C" void mrb_optcarrot_compiled_gem_final(mrb_state*) {}'
   end
@@ -324,23 +311,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     benchmark_source, sealed_gems = OptcarrotSealedBuild.prepare(ROOT, temp, File.dirname(output_dir))
     sources = [benchmark_source]
     native_sources, foreign_sources = bc2cpp_closed_world_outside_srcs('optcarrot-probe', sealed_gems, ROOT)
-  elsif ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1'
-    require_relative 'cpu_dispatch'
-    cpu_source = sources.find { |path| path.end_with?('/optcarrot/cpu.rb') }
-    transformed_cpu = File.join(temp, 'cpu.rb')
-    File.write(transformed_cpu, OptcarrotCPUDispatch.transform(File.read(cpu_source)))
-    sources = sources.map { |path| path == cpu_source ? transformed_cpu : path }
-  end
-  if !sealed && ENV['OPTCARROT_STATIC_PPU'] == '1'
-    require_relative 'ppu_core'
-    ppu_source = sources.find { |path| path.end_with?('/optcarrot/ppu.rb') }
-    transformed_ppu = File.join(temp, 'ppu.rb')
-    File.write(transformed_ppu, OptcarrotPPUCore.transform(File.read(ppu_source)))
-    sources = sources.map { |path| path == ppu_source ? transformed_ppu : path }
   end
   base_env = {
     'MRBC' => PROBE_MRBC,
-    'BC2CPP_OPTCARROT_FIXED_CORE' => ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' ? '1' : '0',
     'OUT_SYMBOL' => 'optcarrot_probe',
     'NATIVE_SRCS' => Shellwords.join(native_sources),
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources),
@@ -428,13 +401,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   compiled_cpp, diagnostics = run_bc2cpp(sources, compiled_env)
   File.write(File.join(output_dir, 'optcarrot_probe_gen.cpp'), compiled_cpp)
   FileUtils.cp(File.join(temp, 'optcarrot_probe_decls.h'), output_dir)
-  ir_lut = nil
-  if ENV['OPTCARROT_IR_LUT'] == '1'
-    require_relative 'ir_tile_lut'
-    ppu_source = sources.find { |path| File.basename(path) == 'ppu.rb' }
-    ir_lut = OptcarrotIRTileLUT.prepare(OptcarrotPPULUT.extract(File.read(ppu_source)), temp, mrbc: PROBE_MRBC)
-  end
-  count = emit_register(diagnostics, output_dir, ir_lut: ir_lut)
+  count = emit_register(diagnostics, output_dir)
 
   gem_dir = File.join(temp, 'gem')
   # mruby's Gem::Specification#setup globs `src/*.{c,cc,cpp,cxx}` (gem.rb's own
@@ -466,18 +433,11 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   gray_stack_config = "cc.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'\ncxx.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'"
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
   target_suffix += 'sealed' if sealed
-  target_suffix += 'static' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1'
-  target_suffix += 'ircpu' if ENV['BC2CPP_IR_CPU_DISPATCH'] == '1'
-  target_suffix += 'ppu' if ENV['OPTCARROT_STATIC_PPU'] == '1'
   target_suffix += 'irinline' if ENV['BC2CPP_IR_INLINE'] == '1'
   target_suffix += 'resumableinline' if ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1'
-  target_suffix += 'irlut' if ENV['OPTCARROT_IR_LUT'] == '1'
   compiled_target = "optcarrotcompiled#{target_suffix}"
   puts "Optcarrot build mode: #{build_mode}"
-  cpu_mode = ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' ? 'bytecode IR' : (ENV['OPTCARROT_STATIC_DISPATCH'] == '1' ? 'static' : 'dynamic')
-  puts "Optcarrot CPU dispatch: #{cpu_mode}; sealed world: #{sealed}"
-  puts "Optcarrot tile LUT: #{ir_lut ? 'decoded IR native helper with runtime fallback' : 'bundle generator'}"
-  puts "Optcarrot PPU core: #{ENV['OPTCARROT_STATIC_PPU'] == '1' ? 'generated synchronous' : 'Fiber'}"
+  puts 'Optcarrot core: original CPU dispatch, Fiber PPU, and LUT initializer'
   puts 'Optcarrot bytecode IR method inlining: enabled' if ENV['BC2CPP_IR_INLINE'] == '1'
   if ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1'
     puts "Optcarrot resumable IR helper regions: #{compiled_cpp.scan('BYTECODE_IR_RESUMABLE_INLINE').size}"
@@ -605,9 +565,6 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   system({ 'OPTCARROT_NO_SHIMS' => '1' }, RbConfig.ruby,
          File.join(ROOT, 'tools/optcarrot_probe/build_bundle.rb'), cruby_bundle, exception: true)
   source = File.read(bundle)
-  if ir_lut
-    raise 'tile LUT initializer insertion point changed' unless source.sub!("    TILE_LUT = __bc2cpp_tile_lut", "    OptcarrotProbe.install_tile_lut!(self)\n    TILE_LUT = __bc2cpp_tile_lut")
-  end
   raise 'optcarrot runner insertion point not found' unless source.sub!(/^nes = Optcarrot::NES\.new\(/, "OptcarrotProbe.install!\nnes = Optcarrot::NES.new(")
   File.write(compiled_bundle, source)
 
@@ -630,9 +587,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                                 chdir: (interpreted_profile_dir if profiling))
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
-  modes = [sealed && 'sealed', ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' && 'IR CPU dispatch',
-           ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1' && 'static dispatch',
-           ENV['OPTCARROT_STATIC_PPU'] == '1' && 'synchronous PPU',
+  modes = [sealed && 'sealed',
            ENV['BC2CPP_IR_INLINE'] == '1' && 'IR inlining',
            ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1' && 'resumable IR inlining'].select { |mode| mode }
   core_label += " (#{modes.join(', ')})" unless modes.empty?
@@ -667,8 +622,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
       summary.puts "Installed #{count} compiled methods; CPU#run is #{cpu_run_mode}; PPU#run is #{ppu_run_mode}; PPU#main_loop is #{ppu_loop_mode}. " \
                    'Unsupported and Fiber-unsafe methods stay interpreted.'
-      summary.puts(ENV['OPTCARROT_STATIC_PPU'] == '1' ? 'The generated synchronous PPU#run is the active core.' :
-                   'A compiled PPU#main_loop uses a resumable step function (ADR 0273).')
+      summary.puts 'A compiled PPU#main_loop uses a resumable step function (ADR 0273).'
     end
   end
 
