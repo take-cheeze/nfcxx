@@ -1,5 +1,4 @@
 // EXPECT: 0
-// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only
 // <utility>: move, forward, swap, exchange, pair, make_pair, index_sequence.
 #include <utility>
 #include <type_traits>
@@ -55,3 +54,4 @@ int main() {
   fails += sum_indices(std::index_sequence<>{}) != 0;
   return fails;
 }
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only

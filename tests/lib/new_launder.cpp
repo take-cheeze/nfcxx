@@ -1,5 +1,4 @@
 // EXPECT: 0
-// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only
 // <new>: placement new and destructor calls, std::launder.
 #include <new>
 #include <cstddef>
@@ -34,3 +33,4 @@ int main() {
   fails += Tracked::live != 0;
   return fails;
 }
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only

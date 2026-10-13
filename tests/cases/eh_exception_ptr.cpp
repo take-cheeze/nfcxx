@@ -1,5 +1,4 @@
 // std::exception_ptr, current_exception, rethrow_exception, make_exception_ptr, nested exceptions on EDG's exception
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // runtime (lib/ehshim/nfcxx_eh_shim.cpp, docs/notes/eh-shim.md; the runtime keeps an exception alive while a pointer
 // refers to it). The exit code is the number of wrong results.
 // EXPECT: 0
@@ -279,3 +278,4 @@ int main()
   std::printf("bad=%d\n", bad);
   return bad;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

@@ -1,5 +1,4 @@
 // EXPECT: 0
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // QBE path (scripts/qbe-prep.rb): global constructors. EDG marks each static initializer with the GNU
 // constructor attribute; cproc rejects it, so the QBE output lists the functions in .init_array instead
 // (docs/notes/realworld.md, gap 3).
@@ -17,3 +16,4 @@ int main() {
     if (g_registrar.v != 5) return 2;
     return 0;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

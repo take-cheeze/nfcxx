@@ -1,5 +1,4 @@
 // EXPECT: 0
-// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only
 // <cstddef> and <cstdint>: type sizes, std::byte operators, nullptr_t, offsetof.
 #include <cstddef>
 #include <cstdint>
@@ -43,3 +42,4 @@ int main() {
   fails += offsetof(Rec, d) != 8;
   return fails;
 }
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only

@@ -1,5 +1,4 @@
 // EXPECT: 0
-// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only
 // <limits>: numeric_limits for the integer types.
 #include <limits>
 #include <cstdint>
@@ -35,3 +34,4 @@ int main() {
   fails += std::numeric_limits<char>::digits < 7;
   return fails;
 }
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only

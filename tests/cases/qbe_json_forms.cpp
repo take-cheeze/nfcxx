@@ -1,5 +1,4 @@
 // EXPECT: 0
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // What nlohmann/json and {fmt} (docs/notes/realworld.md) needed from scripts/qbe-prep.rb on the QBE path:
 //  - `T x[N] __attribute__((__aligned__(A)))` on an object (not a struct member): cproc takes the GNU attribute
 //    only on members, so it becomes `_Alignas(A)` (libstdc++'s std::_Sp_make_shared_tag, alignas on globals);
@@ -47,3 +46,4 @@ static int check_misc() {
 }
 
 int main() { return check_align() + check_math() + check_misc(); }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

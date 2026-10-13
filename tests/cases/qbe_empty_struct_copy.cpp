@@ -1,5 +1,4 @@
 // EXPECT: 9
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // Passing an empty class by value on to another function copies it. cproc used to emit one byte of copy for a
 // zero-size struct, into a zero-byte stack slot that QBE places at the frame pointer: the saved %rbp was
 // overwritten and the caller ran with a corrupted frame pointer (scripts/cproc-empty-copy.patch, found with
@@ -25,3 +24,4 @@ int main() {
   int r = outer(4, 5, p);
   return r;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

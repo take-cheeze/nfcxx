@@ -1,5 +1,4 @@
 // EXPECT: 0
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // C++17: in `a = b` and `a op= b` the right operand is evaluated before the left one; in `a << b`, `a >> b` and
 // `a[b]` the left one before the right one. The generated C leaves all of these unspecified. Each probe records the
 // order the operands were evaluated in and compares it.
@@ -65,3 +64,4 @@ int main() {
   printf("%d failures\n", bad);
   return bad;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
