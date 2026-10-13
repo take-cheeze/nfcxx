@@ -16,8 +16,7 @@ raise 'benchmark binaries or ROM missing' unless (binaries + [rom]).all? { |path
 Dir.mktmpdir('optcarrot-resumable-ir-check') do |dir|
   bundle = File.join(dir, 'snapshot.rb')
   builder = File.expand_path('../../tools/optcarrot_probe/build_bundle.rb', __dir__)
-  output, status = Open3.capture2e({ 'OPTCARROT_STATIC_DISPATCH' => '1', 'OPTCARROT_STATIC_PPU' => '0' },
-                                RbConfig.ruby, builder, bundle)
+  output, status = Open3.capture2e(RbConfig.ruby, builder, bundle)
   raise "bundle failed: #{output}" unless status.success?
 
   source = File.read(bundle)
