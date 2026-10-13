@@ -170,6 +170,17 @@ def protected(v):
     return v == 'd' or (v.startswith('c') and v[1:].isdigit())
 
 
+def self_tail_call(f, env):
+    # `return f(d - 1, ...)`: the depth goes down, the other arguments are whatever the function takes
+    args = []
+    for pname, pt in f.params:
+        if pt == 'i' and pname == 'd':
+            args.append('(d - 1)')
+        else:
+            args.append(gen_expr(env, pt, 2, f))
+    return '%s(%s)' % (f.name, ', '.join(args))
+
+
 def void_call(env, pad, out):
     cands = [f for f in funcs if f.ret == 'v' and f.level < CUR_LEVEL[0]]
     if not cands or BUDGET[0] <= 0:
@@ -307,7 +318,10 @@ def gen_func(idx):
         lines.append('  if d <= 0 then return %s end' % gen_expr({k: v for k, v in env.items()}, ret, 2, None))
     lines.append(gen_block(env, ret, 2, 1, False, None, R.choice([2, 3, 4, 5])))
     if ret != 'v':
-        lines.append('  return %s' % gen_expr(env, ret, 3, f if recursive else None))
+        if recursive and R.random() < 0.5:  # a tail call of the function itself: a loop in the tier (docs/notes/ast.md, Tiering)
+            lines.append('  return %s' % self_tail_call(f, env))
+        else:
+            lines.append('  return %s' % gen_expr(env, ret, 3, f if recursive else None))
     lines.append('end')
     return f, '\n'.join(lines)
 

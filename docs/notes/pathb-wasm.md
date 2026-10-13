@@ -14,7 +14,8 @@ node tests/wasm/host.cjs prog.wasm          # runs main, prints its result (or "
 (the `g++ -O0` result, except `calls.cpp`, whose import is a stub), or `// TRAP` (main traps), or `// REFUSE: TEXT`
 (the emitter refuses with TEXT). The suite skips, rather than fails, without node. `NFCXX_WASM_ASAN=1` runs every
 module in the AddressSanitizer mode (below), where a `// ASAN: KIND` test must report KIND; without it those tests are
-skipped.
+skipped. A `// ASAN-EXPECT: N` test is a clean program that needs the mode (its `malloc` is the module's only under it): it
+runs under `NFCXX_WASM_ASAN=1` and must give N, and is skipped otherwise.
 
 ## Representation
 
@@ -52,14 +53,14 @@ outside `bounds` trap through an explicit `unreachable`.
 
 `scripts/mrb scripts/pathb-wasm-emit.rb --asan prog.ir > prog.wasm` emits the module in an AddressSanitizer-style mode.
 The mruby interpreter has no `ENV`, so the mode is an argument; `tests/wasm/run.sh` passes it when `NFCXX_WASM_ASAN=1`.
-Without the argument the module is byte-identical to the one before the mode existed. The mode is the first slice of the
-wasm part of `docs/notes/asan-plan.md`: no libasan runs on wasm, so the runtime is in the module.
+Without the argument the module is byte-identical to the one before the mode existed. The mode is the wasm part of
+`docs/notes/asan-plan.md`: no libasan runs on wasm, so the runtime is in the module. It checks the stack, the static data
+and the heap.
 
 **Shadow.** The shadow of an address `a` is the byte at `shadow_base + a / 8`, one byte per 8-byte granule, as in libasan:
 0 when the granule is addressable, `k` in 1..7 when its first `k` bytes are, and a poison code otherwise. The shadow takes
-the top 1/8 of the memory (`shadow_base = pages * 57344`), and the stack starts at `shadow_base`, growing down. The pages
-keep 64 KB of stack above the static data, as in the default layout. Codes: `0xf1` stack redzone, `0xf9` global redzone,
-`0xf5` the frame of a function that has returned.
+the top 1/8 of the memory (`shadow_base = pages * 57344`), and the stack starts at `shadow_base`, growing down towards the
+heap. The pages keep 64 KB of stack above the heap, as the default layout keeps it above the static data.
 
 **Statics.** Each static object is 8-byte aligned with a 32-byte redzone before it and after the last one. Its redzone and
 partial granules are data segments of the shadow.
@@ -67,37 +68,82 @@ partial granules are data segments of the shadow.
 **Frames.** Each slot is 8-byte aligned with a 32-byte redzone around it; the frame is a multiple of 16 bytes. The prologue
 writes the frame's shadow (one `memory.fill` per run of equal codes). A return writes `0xf5` over the frame's shadow.
 
-**Checks.** Every load, store, and both ranges of a `copy`, calls the module's last function, `check(addr, size)`, before
-the access. The check reads the shadow of each granule the access touches. A granule holding a partial count `k` is
-ok when the access ends within the first `k` bytes. On a violation the check calls `env.__asan_report(addr, size, code)`
-and then `unreachable`: a violation traps, and does not continue. For a partial granule the code is the one of the next
-granule (the redzone after the object), so the kind does not depend on the partial count. The host (`tests/wasm/host.cjs`)
-records the call and prints the access and `asan: KIND` as its last line. A host of an ASan module must provide
-`env.__asan_report`; a plain module does not import it.
+**Heap.** `malloc` and `free` are the module's own functions under `--asan`.
+
+- **The decision.** A host import cannot give the module a heap it checks: the redzones, the shadow and the check are
+  all in the module's memory. So `malloc` and `free` are functions of the module, and the IR's calls go to them. The
+  import list in this mode is `env.__asan_report` only; without `--asan` both are imports, as before. A call takes the
+  allocator's signature, `malloc(i64) -> i64` and `free(i64) -> void` (LP64: `size_t` and a pointer), and a call with
+  another signature is refused (exit status 3, the message names the signature). A function the IR defines under the
+  same name is the IR's own, and no allocator is called for it. Not covered by the allocator: `operator new` and
+  `operator delete`, `calloc` and `realloc`, which stay imports (their memory is not checked, see below).
+- **The layout.** The heap is a fixed region of 64 KB, `[heap_base, heap_base + 65536)`, with `heap_base` the end of the
+  static data rounded up to 16. The stack grows down from the shadow towards it. The heap does not grow: `memory.grow`
+  would have to grow the shadow with it, and a fixed size keeps the shadow and the stack top as they are. The shadow of the
+  heap is poisoned (`0xfa`) from the end of the static data to the end of the heap, so the bytes not yet handed out are
+  reported too. For a small program the memory is three pages.
+- **Blocks.** A block of `n` bytes is a chunk of `cap + 64` bytes: a 32-byte left redzone, the payload of `cap` bytes
+  (`n` rounded up to 16), and a 32-byte right redzone. The first 20 bytes of the left redzone are the header: the size
+  `n`, the capacity, the state (0 in use, 1 quarantined, 2 free), a magic word, and the link of the free list or the
+  quarantine. The header is written by the allocator, which is not instrumented. The shadow of a chunk is `0xfa` over the
+  redzones, 0 over the payload's whole granules and `n % 8` in the next one, so a block of `n` bytes is addressable exactly
+  as a static object is.
+- **Free and reuse.** `free` poisons the payload's granules with `0xfd` and puts the block in the quarantine, a FIFO of
+  freed blocks. While the quarantine holds more than 4 KB of chunks, its oldest block moves to the free list (LIFO).
+  `malloc` takes the first block of the free list whose capacity fits, and otherwise the next chunk at the bump pointer.
+  When the heap has no room, `malloc` returns 0.
+- **Bad frees.** `free(0)` does nothing. A free of an address that is not the payload of a block in use is reported and
+  traps: an address below the first block or at or past the bump pointer, one that is not 16-aligned, and one whose
+  header has no magic word (an address inside a block). A free of a block that is already quarantined or on the free list is
+  a double free.
 
 | Code | Kind reported |
 | --- | --- |
 | `0xf1` | `stack-buffer-overflow` |
 | `0xf9` | `global-buffer-overflow` |
 | `0xf5` | `stack-use-after-return` |
+| `0xfa` | `heap-buffer-overflow` (a heap redzone; libasan has `0xfa` and `0xfb`, and reports both as this kind) |
+| `0xfd` | `heap-use-after-free` |
+| `0x100` | `attempting-double-free` (an allocator report: a free of a block that is not in use, not a shadow code) |
+| `0x101` | `attempting-free-on-address-which-was-not-malloc` (an allocator report, not a shadow code) |
 
-**Covered.** Overflows of stack slots and of static objects, including the partial last granule of an object whose size
-is not a multiple of 8, and an access that starts inside an object and ends past it; a `copy` that writes past its
-destination; a use of a slot's address after its function has returned, while no other call has reused the frame.
-Tests: `tests/wasm/asan_*.cpp` (the `// ASAN: KIND` markers), and `asan_clean.cpp`, which is clean and gives its EXPECT
-value in both modes.
+**Checks.** Every load, store, and both ranges of a `copy`, calls the module's check function, `check(addr, size)`, before
+the access. The check is the function after the defined ones, and the allocator's `malloc` and `free` follow it. The check
+reads the shadow of each granule the access touches. A granule holding a partial count `k` is ok when the access ends
+within the first `k` bytes. On a violation the check calls `env.__asan_report(addr, size, code)` and then `unreachable`:
+a violation traps, and does not continue. For a partial granule the code is the one of the next granule (the redzone
+after the object), so the kind does not depend on the partial count. The allocator reports its bad frees the same way,
+with size 0. The host (`tests/wasm/host.cjs`) records the call and prints the access (or the free) and `asan: KIND` as its
+last line. A host of an ASan module must provide `env.__asan_report`; a plain module does not import it.
+
+**Covered.**
+- Overflows of stack slots, static objects and heap blocks, reads and writes, including the partial last granule of an
+  object or block whose size is not a multiple of 8, and an access that starts inside a block and ends past it.
+- A `copy` that writes past its destination.
+- A use of a slot's address after its function has returned, while no other call has reused the frame.
+- A use of a heap block after its free, while the block is quarantined or on the free list (its granules are `0xfd`).
+- A double free and a free of an address the allocator did not return, for a block that has not been handed out again.
+- Tests: `tests/wasm/asan_*.cpp` (the `// ASAN: KIND` markers). `asan_clean.cpp` and `asan_heap_clean.cpp` are clean and
+  give their EXPECT value under the mode; `asan_heap_clean.cpp` has `// ASAN-EXPECT: N`, which runs under
+  `NFCXX_WASM_ASAN=1` only (without the mode its `malloc` is the host's stub, so the program has no meaning there).
 
 **Not covered.**
-- Heap. `malloc` and `free` are imports, and the host's stub returns its argument plus one, so the harness has no heap.
-  A first slice with an allocator in the module (with redzones, a quarantine and `free` checks) is the next step; it
-  would change the import list in ASan mode only.
-- Redzones are 32 bytes. An index that jumps over one lands in the next object, and is not reported.
+- Reuse. Once the quarantine has evicted a block and `malloc` hands it out again, a stale pointer to it aliases the new
+  block, which is in use, so an access through the stale pointer is not reported (checked: after 51 other frees a stale
+  read returns the new block's value). A double free of such a block is taken as a free of the new owner's block, and is
+  not reported (checked: it returns normally). The quarantine is 4 KB of chunks, so the window is short.
+- Heap exhaustion. `malloc` returns 0 when the 64 KB are used, and the program's use of that null pointer is not reported
+  (the null page is not checked).
+- `memory.grow`, `realloc`, `calloc`, `operator new` and `operator delete`. None of them is in the module: they are
+  imports, and the host's stub returns its argument plus one, so the harness cannot give them a heap. Their memory is not
+  checked.
+- Redzones are 32 bytes, on the heap and on the stack. An index that jumps over one lands in the next object, and is not
+  reported.
 - Use after scope: the emitter has no scope markers (`scope-end`), so a block's locals are not poisoned at its end.
-- Use after return once another call has reused the frame. There is no quarantine: the frame's shadow is rewritten by
-  the next prologue that covers it.
-- Stack exhaustion (the stack reaching the static data is not detected), and the gap between the static data and the
-  stack (unpoisoned).
+- Use after return once another call has reused the frame. There is no quarantine for frames.
+- Stack exhaustion: the stack growing into the heap or the static data is not detected.
 - The null page, addresses below 16. Accesses into the shadow itself (the top 1/8 of the memory) are not checked.
+- The allocator's own code is not instrumented, and the header of a block is written without a check.
 - Uninitialized reads, leaks and the other checks of libasan.
 
 ## Emscripten (`--emscripten`)
