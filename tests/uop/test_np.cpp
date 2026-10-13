@@ -406,6 +406,56 @@ static void cumsum_and_prod() {
   onnx_round_trip(np, {{"cs", fx.cumsum(1)}, {"cp", fx.prod(0, true)}, {"ip", np.arange(6).reshape({2, 3}).cumsum(0)}}, {{"x", fxa}});
 }
 
+static void argmax_and_argmin() {
+  using hir::Attribute;
+  const DType i32 = DType::Int32, i64 = DType::Int64, f32 = DType::Float32, b = DType::Bool;
+  const double nan = NAN;
+  Session np;
+  Tensor a = np.array2d({{1, 5, 3}, {7, 2, 9}});
+  CHECK(a.argmax().str() == "5" && a.argmax().dtype() == i32 && a.argmax().ndim() == 0);
+  CHECK(a.argmax(0).str() == "[1, 0, 1]" && a.argmax(1).str() == "[1, 2]" && a.argmax(-1).str() == "[1, 2]");
+  CHECK(a.argmin(0).str() == "[0, 1, 0]" && a.argmin(1).str() == "[0, 1]" && a.argmin().item() == 0);
+  CHECK(a.argmax(1, true).shape() == (Shape{2, 1}) && a.argmax(None, true).shape() == (Shape{1, 1}));
+  CHECK(a.argmin(0, true).str() == "[[0, 1, 0]]");
+  // ties: the first index; -0.0 and +0.0 are equal
+  CHECK(np.array({3, 7, 7, 1}).argmax().item() == 1 && np.array({1, 4, 1}).argmin().item() == 0);
+  CHECK(np.array({-0.0, 0.0}).argmax().item() == 0 && np.array({0.0, -0.0}).argmin().item() == 0);
+  // NaN wins, the first one: numpy's argmax and argmin
+  CHECK(np.array({1, nan, 3}).argmax().item() == 1 && np.array({1, nan, 3}).argmin().item() == 1);
+  CHECK(np.array({nan, 5, nan}).argmax().item() == 0 && np.array({5, nan, nan}).argmin().item() == 1);
+  // integers and bools: the default int dtype; a session with int64 defaults gives int64
+  CHECK(np.array({3, -1, 5}, i32).argmax().item() == 2 && np.array({3, -1, 5}, i32).argmax().dtype() == i32);
+  CHECK(np.array({0, 1, 1}, b).argmax().item() == 1 && np.array({0, 1, 1}, b).argmin().item() == 0);
+  Session s64;
+  s64.default_int = i64;
+  CHECK(s64.array({3, 1}).argmax().dtype() == i64);
+  // a 3-D case along each axis
+  Tensor c = np.array({1, 9, 3, 4, 5, 6, 7, 2, 8, 0, 11, 12}, {2, 3, 2});
+  CHECK(c.argmax(1).str() == "[[2, 0], [2, 2]]" && c.argmin(2).str() == "[[0, 0, 0], [1, 1, 0]]");   // numpy's values
+  CHECK_THROWS(a.argmax(2));
+  CHECK_THROWS(np.scalar(1).argmax(1));
+  // select_last_index and the errors come from hir; evaluate the graph with the UOp interpreter
+  hir::Graph g;
+  int x = g.add_input("x", f32, {4});
+  int last = g.add_node("ArgMax", {x}, {Attribute::Int("axis", 0), Attribute::Int("keepdims", 0), Attribute::Int("select_last_index", 1)});
+  int first = g.add_node("ArgMax", {x}, {Attribute::Int("axis", 0), Attribute::Int("keepdims", 0)});
+  CHECK(g.value(last).dtype == DType::Int64 && g.value(last).shape == Shape{});
+  ut::Session us;
+  hir::Lowerer low(g, us);
+  Array xa = Array::from_doubles(f32, {4}, {3, 7, 7, 1});
+  CHECK(us.eval(low.get(last), {{"x", xa}}).data[0].i == 2 && us.eval(low.get(first), {{"x", xa}}).data[0].i == 1);
+  CHECK_THROWS(g.add_node("ArgMax", {x}, {Attribute::Int("keepdims", 2)}));
+  CHECK_THROWS(g.add_node("ArgMin", {x}, {Attribute::Int("axis", 1)}));
+  CHECK_THROWS(g.add_node("ArgMax", {x}, {Attribute::Int("select_last_index", 3)}));
+  CHECK(g.value(g.add_node("ArgMin", {x}, {Attribute::Int("keepdims", 0)})).shape == Shape{});
+  int bi = g.add_input("bi", b, {4});
+  CHECK_THROWS(g.add_node("ArgMax", {bi}));
+  // ONNX round trip, and the read-back graph
+  Tensor fx = np.placeholder("x", {2, 3});
+  Array fxa = Array::from_doubles(f32, {2, 3}, {1, nan, -3, 0.5, -0.0, 4});
+  onnx_round_trip(np, {{"am", fx.argmax(1)}, {"an", fx.argmin(0, true)}, {"af", fx.argmax()}}, {{"x", fxa}});
+}
+
 static void graph_and_onnx(const std::string& dir) {
   const DType i32 = DType::Int32;
   Session np;
@@ -538,6 +588,12 @@ static void graph_and_onnx(const std::string& dir) {
       Array ax = Array::from_doubles(DType::Float32, {2, 3}, {1, INFINITY, -2, 0.5, -0.0, 4});
       emit("cumsum_prod", s, {{"cs0", x2.cumsum(0)}, {"cs1", x2.cumsum(1)}, {"csf", x2.cumsum()}, {"p0", x2.prod(0, true)}, {"pall", x2.prod()}}, {{"x", ax}});
     }
+    {  // argmax and argmin along each axis, with ties and without NaN
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3});
+      Array ax = Array::from_doubles(DType::Float32, {2, 3}, {1, 5, 5, 7, 2, -9});
+      emit("argext", s, {{"amax0", x2.argmax(0)}, {"amin1", x2.argmin(1, true)}, {"amax", x2.argmax()}}, {{"x", ax}});
+    }
     {  // matmul variants
       Session s;
       Tensor x2 = s.placeholder("x", {2, 3, 4});
@@ -555,6 +611,7 @@ int main(int argc, char** argv) {
   slicing_and_concat();
   new_operators();
   cumsum_and_prod();
+  argmax_and_argmin();
   graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);

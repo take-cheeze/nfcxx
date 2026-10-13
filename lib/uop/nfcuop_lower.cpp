@@ -242,6 +242,8 @@ ut::Tensor Lowerer::lower_one(int id) {
       out = ut::concatenate(parts, n.attr_int("axis", 0));
     }
     else if (op == "Erf") out = erf_tensor(arg(0));
+    else if (op == "ArgMax" || op == "ArgMin")
+      out = (op == "ArgMax" ? ut::argmax : ut::argmin)(arg(0), n.attr_int("axis", 0), n.attr_int("keepdims", 1) != 0, n.attr_int("select_last_index", 0) != 0);
     else if (op == "CumSum") out = arg(0).cumsum(ints(1).at(0), n.attr_int("exclusive", 0) != 0, n.attr_int("reverse", 0) != 0);
     else if (op == "Pow") out = ut::pow(arg(0), arg(1));
     else if (op == "Floor") out = arg(0).floor();

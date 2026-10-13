@@ -302,6 +302,19 @@ Tensor Tensor::prod(const Axes& axes, bool keepdims) const {
   return reduce("ReduceProd", cast_to(*this, dt), axes, keepdims);
 }
 
+Tensor arg_node(const Tensor& x, const char* op, int64_t axis, bool keepdims) {
+  check(x);
+  Tensor src = axis == None ? x.flatten() : x;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, x.ndim());
+  if (src.dtype() == DType::Bool) src = cast_to(src, src.session().default_int);   // ONNX has no bool ArgMax
+  Tensor r = node(src, op, {src.id()}, {Attribute::Int("axis", ax), Attribute::Int("keepdims", keepdims ? 1 : 0)});
+  if (axis == None && keepdims) r = r.reshape(Shape(static_cast<size_t>(x.ndim()), 1));
+  return cast_to(r, x.session().default_int);
+}
+
+Tensor Tensor::argmax(int64_t axis, bool keepdims) const { return arg_node(*this, "ArgMax", axis, keepdims); }
+Tensor Tensor::argmin(int64_t axis, bool keepdims) const { return arg_node(*this, "ArgMin", axis, keepdims); }
+
 Tensor Tensor::cumsum(int64_t axis) const {
   check(*this);
   Tensor x = axis == None ? flatten() : *this;

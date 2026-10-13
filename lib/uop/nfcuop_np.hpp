@@ -89,6 +89,10 @@ class Tensor {
   Tensor prod(int64_t axis, bool keepdims = false) const { return prod(Axes{axis}, keepdims); }
   // Running sum along `axis` (ONNX CumSum); axis None flattens first, like numpy. bool and narrow ints give default_int.
   Tensor cumsum(int64_t axis = None) const;
+  // Index of the first maximum (minimum) along `axis` (ONNX ArgMax/ArgMin, an int32 by default: numpy's intp is int64 and
+  // default_int is int32). None flattens first. A NaN wins, as in numpy; bool operands are read as ints.
+  Tensor argmax(int64_t axis = None, bool keepdims = false) const;
+  Tensor argmin(int64_t axis = None, bool keepdims = false) const;
 
   // elementwise
   Tensor operator-() const;

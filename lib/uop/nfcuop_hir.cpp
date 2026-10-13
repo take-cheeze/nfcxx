@@ -210,6 +210,23 @@ Value infer(const Graph& g, const Node& n) {
     if (!is_float(V(0).dtype)) fail("float input needed, got " + std::string(name(V(0).dtype)));
     return Value{"", DType::Bool, V(0).shape};
   }
+  if (op == "ArgMax" || op == "ArgMin") {   // int64 indices; axis (default 0), keepdims (1), select_last_index (0)
+    want_inputs(1, 1);
+    const Value& x = V(0);
+    if (x.dtype == DType::Bool) fail("not defined for bool");
+    const int64_t ax = norm(op, n.attr_int("axis", 0), static_cast<int64_t>(x.shape.size()));
+    for (const char* a : {"keepdims", "select_last_index"}) {
+      const int64_t f = n.attr_int(a, a[0] == 'k' ? 1 : 0);
+      if (f != 0 && f != 1) fail(std::string(a) + " must be 0 or 1");
+    }
+    const bool keep = n.attr_int("keepdims", 1) != 0;
+    Shape out;
+    for (size_t k = 0; k < x.shape.size(); k++) {
+      if (static_cast<int64_t>(k) != ax) out.push_back(x.shape[k]);
+      else if (keep) out.push_back(1);
+    }
+    return Value{"", DType::Int64, out};
+  }
   if (op == "CumSum") {   // the axis is a constant: a scalar (or one element) of int32 or int64
     want_inputs(2, 2);
     const Value& x = V(0);
