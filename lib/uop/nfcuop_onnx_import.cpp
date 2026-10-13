@@ -317,7 +317,8 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
   std::map<std::string, int> local;  // name in the model -> value id here
   auto check_existing = [&](int id, DType d, const Dims& shape, const std::string& name) {
     const Value& v = value(id);
-    if (v.dtype != d || dims(id) != shape)
+    // compared as text: a polynomial written as dim_param "4*N" is read back as a symbol of that name, which is the same size
+    if (v.dtype != d || to_string(dims(id)) != to_string(shape))
       throw Error("onnx import: value " + name + " is " + std::string(nfcuop::name(d)) + to_string(shape) + " in the model but " + nfcuop::name(v.dtype) + to_string(dims(id)) + " in the graph (name collision)");
   };
 

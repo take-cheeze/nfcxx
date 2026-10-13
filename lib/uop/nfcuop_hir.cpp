@@ -50,30 +50,46 @@ static bool dtype_from_onnx(int64_t t, DType& d) {
 
 namespace {
 
-// The dimensions of a value and a value of given dimensions (Value::shape holds 0 where a dimension is a symbol).
+// The dimensions of a value and a value of given dimensions.
 Dims dims_of(const Value& v) {
+  if (!v.exprs.empty()) return v.exprs;
   Dims out;
-  for (size_t k = 0; k < v.shape.size(); k++) out.push_back(!v.syms.empty() && !v.syms[k].empty() ? Dim::symbol(v.syms[k]) : Dim(v.shape[k]));
+  for (int64_t s : v.shape) out.push_back(Dim(s));
   return out;
 }
 
+// The symbol of a dimension that is exactly one symbol ("N"), "" for an integer or a polynomial ("4*N").
+std::string pure_symbol(const Dim& d) {
+  const auto& t = d.expr.terms();
+  if (t.size() != 1 || t.begin()->second != 1 || t.begin()->first.size() != 1) return "";
+  return t.begin()->first[0];
+}
+
 Value make_value(const std::string& name, DType d, const Dims& dims) {
-  Value v{name, d, Shape(dims.size(), 0), {}};
+  Value v{name, d, Shape(dims.size(), 0), {}, {}};
   bool symbolic = false;
   for (size_t k = 0; k < dims.size(); k++) {
     if (dims[k].is_symbol()) symbolic = true;
-    else v.shape[k] = dims[k].size;
+    else v.shape[k] = dims[k].size();
   }
   if (symbolic)
-    for (const Dim& x : dims) v.syms.push_back(x.sym);
+    for (const Dim& x : dims) {
+      v.syms.push_back(pure_symbol(x));
+      v.exprs.push_back(x);
+    }
   return v;
 }
 
 }  // namespace
 
+int64_t Dim::size() const {
+  if (is_symbol()) throw Error("hir: the symbolic dimension " + str() + " has no size (bind the graph first)");
+  return expr.to_int();
+}
+
 std::string to_string(const Dims& d) {
   std::string out = "[";
-  for (size_t k = 0; k < d.size(); k++) out += (k ? "," : "") + (d[k].is_symbol() ? d[k].sym : std::to_string(d[k].size));
+  for (size_t k = 0; k < d.size(); k++) out += (k ? "," : "") + d[k].str();
   return out + "]";
 }
 
@@ -90,8 +106,11 @@ int Graph::new_value(const std::string& name_in, DType d, const Dims& shape) {
 
 int Graph::add_symbolic_input(const std::string& name, DType d, const Dims& shape) {
   if (name.empty()) throw Error("hir: an input needs a name");
-  for (const Dim& k : shape)
-    if (!k.is_symbol() && k.size < 1) throw Error("hir: input " + name + " has a dimension below 1");
+  for (const Dim& k : shape) {
+    if (!k.is_symbol() && k.size() < 1) throw Error("hir: input " + name + " has a dimension below 1");
+    if (k.is_symbol() && pure_symbol(k).empty())
+      throw Error("hir: input " + name + " has the dimension " + k.str() + "; an input's dimension is an integer or a symbol");
+  }
   int id = new_value(name, d, shape);
   inputs_.push_back(id);
   return id;
@@ -148,7 +167,7 @@ Graph Graph::bind(const Bindings& b) const {
     } else {
       Dims d = dims_of(v);
       for (Dim& x : d)
-        if (x.is_symbol()) x = Dim(b.at(x.sym));
+        if (x.is_symbol()) x = Dim(b.at(pure_symbol(x)));   // an input's dimension is a symbol (add_symbolic_input)
       nid = g.add_symbolic_input(v.name, v.dtype, d);
     }
     if (nid != static_cast<int>(id)) throw Error("hir: bind: value " + v.name + " got another id");
@@ -168,10 +187,10 @@ std::vector<int64_t> Graph::const_ints(int id) const {
 
 namespace {
 
-bool is_one(const Dim& d) { return !d.is_symbol() && d.size == 1; }
+bool is_one(const Dim& d) { return !d.is_symbol() && d.size() == 1; }
 
-// Numpy broadcasting of two shapes: 1 broadcasts to anything, a symbol to itself or to 1 (an ONNX rule: the symbol must be 1 at
-// evaluation when it is not the same symbol, so it is refused).
+// Numpy broadcasting of two shapes: 1 broadcasts to anything, a symbolic dimension to an equal one or to 1 (an ONNX rule: the
+// dimension must be 1 at evaluation when it is not the same, so it is refused).
 Dims bcast2(const std::string& op, const Dims& a, const Dims& b) {
   size_t n = std::max(a.size(), b.size());
   Dims out(n);
@@ -193,8 +212,8 @@ int64_t norm(const std::string& op, int64_t axis, int64_t rank) {
 Shape static_sizes(const std::string& op, const Dims& d, size_t from, const std::string& what) {
   Shape s;
   for (size_t k = from; k < d.size(); k++) {
-    if (d[k].is_symbol()) throw Error(op + ": " + what + " has the symbolic dimension " + d[k].sym + " at axis " + std::to_string(k) + "; only the batch axis (0) may be symbolic here");
-    s.push_back(d[k].size);
+    if (d[k].is_symbol()) throw Error(op + ": " + what + " has the symbolic dimension " + d[k].str() + " at axis " + std::to_string(k) + "; only the batch axis (0) may be symbolic here");
+    s.push_back(d[k].size());
   }
   return s;
 }
@@ -363,21 +382,17 @@ Value infer(const Graph& g, const Node& n) {
     return make_value("", V(0).dtype, out);
   }
   if (op == "Reshape") {
-    // The target holds integers, 0 (copy the input's dimension at that position: a symbol may be copied) and at most one -1 (the
-    // rest). Sizes are compared as an integer product and a multiset of symbols: the -1 takes the integer rest, and a symbol is
-    // left over only when it is the whole rest (N against 784 with a 784 in the target gives N).
+    // The target holds integers, 0 (copy the input's dimension at that position) and at most one -1 (the rest). Sizes are exact
+    // polynomials: without a -1 the products must be equal (4*N is 2*N*2); with one, the -1 is the input's size divided by the
+    // product of the other dimensions, which must divide exactly (N*4 / 4 is N, N*4 / 3 is refused: 4N is not a multiple of 3).
     want_inputs(2, 2);
     const std::vector<int64_t> target = consts(1);
     const Dims in = D(0);
     const bool allowzero = n.attr_int("allowzero", 0) != 0;
     Dims out(target.size());
     int64_t unknown = -1;
-    int64_t known = 1, in_int = 1;
-    std::vector<std::string> known_syms, in_syms;
-    for (const Dim& d : in) {
-      if (d.is_symbol()) in_syms.push_back(d.sym);
-      else in_int *= d.size;
-    }
+    Dim known(1), total(1);
+    for (const Dim& d : in) total = total * d;
     for (size_t k = 0; k < target.size(); k++) {
       if (target[k] == -1) {
         if (unknown >= 0) fail("only one dimension may be -1");
@@ -392,28 +407,15 @@ Value infer(const Graph& g, const Node& n) {
       } else {
         out[k] = Dim(target[k]);
       }
-      if (out[k].is_symbol()) known_syms.push_back(out[k].sym);
-      else known *= out[k].size;
+      known = known * out[k];
     }
     if (unknown < 0) {
-      if (known != in_int || known_syms.size() != in_syms.size()) fail("cannot reshape " + to_string(in) + " into " + to_string(target));
-      for (const std::string& s : known_syms) {
-        auto it = std::find(in_syms.begin(), in_syms.end(), s);
-        if (it == in_syms.end()) fail("cannot reshape " + to_string(in) + " into " + to_string(target));
-        in_syms.erase(it);
-      }
+      if (known != total) fail("cannot reshape " + to_string(in) + " into " + to_string(target));
       return make_value("", V(0).dtype, out);
     }
-    if (in_int % known) fail("cannot reshape " + to_string(in) + " into " + to_string(target));
-    for (const std::string& s : known_syms) {
-      auto it = std::find(in_syms.begin(), in_syms.end(), s);
-      if (it == in_syms.end()) fail("cannot reshape " + to_string(in) + " into " + to_string(target));
-      in_syms.erase(it);
-    }
-    const int64_t rest = in_int / known;
-    if (in_syms.empty()) out[static_cast<size_t>(unknown)] = Dim(rest);
-    else if (in_syms.size() == 1 && rest == 1) out[static_cast<size_t>(unknown)] = Dim::symbol(in_syms[0]);
-    else fail("cannot reshape " + to_string(in) + " into " + to_string(target) + ": the -1 dimension would be a product of symbols");
+    const std::optional<onnxsim::SymExpr> rest = onnxsim::TryExactDivide(total.expr, known.expr);
+    if (!rest) fail("cannot reshape " + to_string(in) + " into " + to_string(target) + ": " + total.str() + " is not a multiple of " + known.str());
+    out[static_cast<size_t>(unknown)] = Dim(*rest);
     return make_value("", V(0).dtype, out);
   }
   if (op == "Squeeze") {
@@ -484,8 +486,8 @@ Value infer(const Graph& g, const Node& n) {
       int64_t ax = norm(op, axes[k], static_cast<int64_t>(in.size()));
       if (!seen.insert(ax).second) fail("repeated axis");
       if (steps[k] == 0) fail("step cannot be 0");
-      if (in[static_cast<size_t>(ax)].is_symbol()) fail("slicing the symbolic dimension " + in[static_cast<size_t>(ax)].sym + " is not supported (its size is needed)");
-      SliceIdx ix = slice_indices(in[static_cast<size_t>(ax)].size, true, starts[k], true, ends[k], steps[k]);
+      if (in[static_cast<size_t>(ax)].is_symbol()) fail("slicing the symbolic dimension " + in[static_cast<size_t>(ax)].str() + " is not supported (its size is needed)");
+      SliceIdx ix = slice_indices(in[static_cast<size_t>(ax)].size(), true, starts[k], true, ends[k], steps[k]);
       if (ix.count < 1) fail("the slice of axis " + std::to_string(ax) + " is empty (empty tensors are not supported)");
       out[static_cast<size_t>(ax)] = Dim(ix.count);
     }
@@ -505,11 +507,7 @@ Value infer(const Graph& g, const Node& n) {
     Dims out = in;
     for (size_t k = 0; k < in.size(); k++) {
       if (pads[k] < 0 || pads[k + in.size()] < 0) fail("negative pads (cropping) are not supported");
-      if (in[k].is_symbol()) {
-        if (pads[k] != 0 || pads[k + in.size()] != 0) fail("padding the symbolic dimension " + in[k].sym + " is not supported (its size would change)");
-        continue;
-      }
-      out[k] = Dim(in[k].size + pads[k] + pads[k + in.size()]);
+      out[k] = in[k] + Dim(pads[k] + pads[k + in.size()]);   // N + 1 for a symbol N: a polynomial
     }
     return make_value("", V(0).dtype, out);
   }
@@ -519,17 +517,16 @@ Value infer(const Graph& g, const Node& n) {
     const int64_t rank = static_cast<int64_t>(V(0).shape.size());
     const int64_t axis = norm(op, n.attr_int("axis", 0), rank);
     Dims out = D(0);
-    int64_t total = 0;
+    Dim total(0);
     for (size_t k = 0; k < n.inputs.size(); k++) {
       same_dtype(V(0), V(k));
       if (static_cast<int64_t>(V(k).shape.size()) != rank) fail("inputs differ in rank");
       const Dims dk = D(k);
       for (int64_t d = 0; d < rank; d++)
         if (d != axis && dk[static_cast<size_t>(d)] != out[static_cast<size_t>(d)]) fail("shapes " + to_string(D(0)) + " and " + to_string(dk) + " differ off the axis");
-      if (dk[static_cast<size_t>(axis)].is_symbol()) fail("concatenating along the symbolic dimension " + dk[static_cast<size_t>(axis)].sym + " is not supported (the sizes would have to be added)");
-      total += dk[static_cast<size_t>(axis)].size;
+      total = total + dk[static_cast<size_t>(axis)];   // the sizes add up: N + N is 2*N
     }
-    out[static_cast<size_t>(axis)] = Dim(total);
+    out[static_cast<size_t>(axis)] = total;
     return make_value("", V(0).dtype, out);
   }
   if (op == "Gemm") {
@@ -557,10 +554,10 @@ Value infer(const Graph& g, const Node& n) {
     const int64_t r = static_cast<int64_t>(d.size());
     if (r < 1) fail("data must be at least 1-D");
     const int64_t ax = norm(op, n.attr_int("axis", 0), r);
-    if (d[static_cast<size_t>(ax)].is_symbol()) fail("gathering along the symbolic dimension " + d[static_cast<size_t>(ax)].sym + " is not supported (the indices are checked against its size)");
+    if (d[static_cast<size_t>(ax)].is_symbol()) fail("gathering along the symbolic dimension " + d[static_cast<size_t>(ax)].str() + " is not supported (the indices are checked against its size)");
     if (const Array* c = g.initializer(n.inputs[1]))   // constant indices are checked now; runtime ones cannot be
       for (const Scalar& s : c->data)
-        if (s.i < -d[static_cast<size_t>(ax)].size || s.i >= d[static_cast<size_t>(ax)].size) fail("index " + std::to_string(s.i) + " is out of range for axis " + std::to_string(ax) + " of size " + std::to_string(d[static_cast<size_t>(ax)].size));
+        if (s.i < -d[static_cast<size_t>(ax)].size() || s.i >= d[static_cast<size_t>(ax)].size()) fail("index " + std::to_string(s.i) + " is out of range for axis " + std::to_string(ax) + " of size " + std::to_string(d[static_cast<size_t>(ax)].size()));
     const Dims ixd = D(1);
     Dims out(d.begin(), d.begin() + ax);
     out.insert(out.end(), ixd.begin(), ixd.end());
@@ -616,7 +613,7 @@ Value infer(const Graph& g, const Node& n) {
     const Dim C = D(0)[1];
     for (size_t k = 1; k < 5; k++) {   // scale, B, input_mean, input_var: [C]
       same_dtype(x, V(k));
-      if (D(k) != Dims{C}) fail("parameter " + std::to_string(k) + " must have shape [C] = [" + (C.is_symbol() ? C.sym : std::to_string(C.size)) + "], got " + to_string(D(k)));
+      if (D(k) != Dims{C}) fail("parameter " + std::to_string(k) + " must have shape [C] = [" + C.str() + "], got " + to_string(D(k)));
     }
     return make_value("", x.dtype, D(0));
   }
@@ -628,7 +625,7 @@ Value infer(const Graph& g, const Node& n) {
     const Dim C = D(0)[1];
     for (size_t k = 1; k < 3; k++) {   // scale, B: [C]
       same_dtype(x, V(k));
-      if (D(k) != Dims{C}) fail("scale and B must have shape [C] = [" + (C.is_symbol() ? C.sym : std::to_string(C.size)) + "], got " + to_string(D(k)));
+      if (D(k) != Dims{C}) fail("scale and B must have shape [C] = [" + C.str() + "], got " + to_string(D(k)));
     }
     return make_value("", x.dtype, D(0));
   }
@@ -743,8 +740,11 @@ PB value_info(const Value& v) {
   PB dims;
   for (size_t k = 0; k < v.shape.size(); k++) {
     PB dim;
-    if (!v.syms.empty() && !v.syms[k].empty()) dim.bytes(2, v.syms[k]);  // dim_param
-    else dim.i64(1, v.shape[k]);                                         // dim_value
+    if (!v.syms.empty() && !v.syms[k].empty()) dim.bytes(2, v.syms[k]);  // dim_param: a symbol
+    // a polynomial such as 4*N is written as its exact text in dim_param, as onnxsim does for a derived dimension
+    // ("past_sequence_length + sequence_length"): ONNX has no other field for it, and a consumer binds it by that string
+    else if (!v.exprs.empty() && v.exprs[k].is_symbol()) dim.bytes(2, v.exprs[k].str());  // dim_param: a polynomial
+    else dim.i64(1, v.shape[k]);  // dim_value
     dims.msg(1, dim);
   }
   PB tensor;

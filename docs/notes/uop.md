@@ -203,14 +203,19 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
 The static design is deliberate: every shape is a known integer, so shape inference, rewriting and the interpreter are simple and exact. Dynamic
 shapes are added in two steps, without changing what the static path means:
 
-1. **Symbolic dimensions in `hir`** (done). A `hir::Dim` is an integer or a symbol (ONNX `dim_param`, e.g. a batch size `N`); `add_symbolic_input`
-   takes `Dims`, `add_input` is unchanged. Shape inference follows ONNX: a symbol broadcasts against itself or 1, and anything else with a symbol is an
-   `Error`. A reshape's `0` copies a symbol, and a `-1` takes what is left only when that is one symbol with factor 1 (`[N,2,2] -> [-1,4]` is `[N,4]`,
-   `[N,4] -> [-1]` is an `Error`: 4N has no representation). Reductions (also over the symbol's axis), matmul and gemm contractions with equal
-   symbols, the batch axis of Conv and pooling, Transpose, Squeeze, Unsqueeze, Expand and the elementwise operators keep symbols. Slicing,
-   padding, concatenating or gathering along a symbol, a symbol in a channel or spatial axis of Conv and pooling, and a normalization over a
-   symbol (its `Scale` is a constant with integer sizes) are refused. `to_onnx` writes `dim_param`, and `from_onnx`/`merge_onnx` read it; a dimension with neither a value nor a
-   symbol is still refused. The gradients (`gradients_via_onnxsim`) refuse symbolic graphs.
+1. **Symbolic dimensions in `hir`** (done). A `hir::Dim` is an `onnxsim::SymExpr` (`nfcuop_sym_expr.hpp`, copied from onnxsim, Apache-2.0): an
+   integer, or a polynomial in symbols, where a symbol is ONNX `dim_param` (e.g. a batch size `N`). So `4*N` and `N+1` are exact dimensions, and two
+   dimensions are equal when they are the same polynomial. Inputs take integers and symbols only (`add_symbolic_input`); `add_input` is unchanged.
+   Shape inference follows ONNX: a symbolic dimension broadcasts against an equal one or 1, and anything else with a symbol is an `Error`. A
+   reshape's `0` copies a dimension, and a `-1` is the exact quotient of the sizes: `[N,2,2] -> [-1,4]` is `[N,4]`, `[N,4] -> [-1]` is `[4*N]`, and
+   `[N,4] -> [-1,3]` is an `Error` (4N is not a multiple of 3). Concatenating along a symbol adds the sizes (`2*N`, `N+M`), and padding adds to it
+   (`N+1`). Reductions (also over the symbol's axis), matmul and gemm contractions with equal dimensions, the batch axis of Conv and pooling,
+   Transpose, Squeeze, Unsqueeze, Expand and the elementwise operators keep symbols. Slicing or gathering along a symbol, a symbol in a channel or
+   spatial axis of Conv and pooling, and a normalization over a symbol (its `Scale` is a constant with integer sizes) are refused, since their
+   sizes would have to be known. `to_onnx` writes `dim_param` for a symbol, and for a derived polynomial its exact text (`4*N`, as onnxsim
+   writes a derived dimension); ONNX has no other field for it. `from_onnx`/`merge_onnx` read it back, and the text is inferred from the
+   symbols of the graph's inputs, so it binds by N. A dimension with neither a value nor a symbol
+   is still refused by the reader. The gradients (`gradients_via_onnxsim`) refuse symbolic graphs.
    Evaluation **specializes**: `Graph::bind({N: 2})` gives a static copy of the graph (every operator inferred again with the sizes), and
    `hir::Evaluator` binds, lowers and evaluates it, caching the lowering per binding (keyed on the bindings in name order). Lowering a value
    that has an unbound symbol throws. This keeps UOps static and is enough for batch-size changes; the numpy API has no symbols yet.
@@ -230,7 +235,8 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
   random chains of permute, reshape, reduce, expand, shrink, pad, flip, `Where` and integer arithmetic, 900 comparisons), and the checks of the
   UOp-level builder against values worked out by hand.
 - `test_sym.cpp`: symbolic dimensions (stage 7, step 1): an MLP with a batch symbol at two batch sizes against values worked out by hand, the
-  `Evaluator` cache, the shape-inference results and refusals, `bind`, the exported `dim_param` and its reader; two models for `onnx_check.py`.
+  `Evaluator` cache, the shape-inference results and refusals, polynomial dimensions (`N*4`, `N+1`, `2*N`) evaluated at two batch sizes, `bind`,
+  the exported `dim_param` and its reader; two models for `onnx_check.py`.
 - `test_np.cpp`: the same checks through the user-facing API and the graph (values, errors, the default-dtype settings in both configurations, `slice`/`at`/`flip`, `concatenate`/`stack`, constant sharing, the
   ONNX export bytes), and the `hir` error cases. It writes seven models (an MLP, broadcasting arithmetic, reductions and shape ops, integer
   division and modulo, math functions, slicing and concatenation, batched matmul) with the interpreter's results next to them.

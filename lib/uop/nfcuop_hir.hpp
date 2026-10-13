@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "nfcuop.hpp"
+#include "nfcuop_sym_expr.hpp"
 #include "nfcuop_ut.hpp"
 
 namespace nfcuop {
@@ -47,18 +48,25 @@ struct Attribute {
   static Attribute Tensor(const std::string& name, Array v) { Attribute a; a.name = name; a.kind = AttrKind::Tensor; a.t = std::move(v); return a; }
 };
 
-// A dimension of a value: an integer (at least 1), or a symbol (ONNX dim_param, e.g. "N") whose size is given when the graph is
-// evaluated (Graph::bind). Symbols are equal when their names are: N against N is N, N against 1 broadcasts to N, and any other
-// combination of a symbol with a different dimension is an Error (the operators say which combinations they accept).
+// A dimension of a value: its exact size, an onnxsim::SymExpr (nfcuop_sym_expr.hpp), which is an integer (at least 1) or a polynomial
+// in symbols: a symbol is ONNX's dim_param (e.g. "N"), and products and sums of symbols are polynomials ("4*N", "N+1"). The size of a
+// symbol is given when the graph is evaluated (Graph::bind), and with it the size of every polynomial of it. Two dimensions are equal
+// when they are the same polynomial (N against N is N, and N*4 is 4*N); N against 1 broadcasts to N, and any other combination of
+// dimensions that are not equal is an Error (the operators say which combinations they accept). Inputs have integer or symbol
+// dimensions only: a polynomial is derived by an operator (Reshape's -1, Concat, Pad), and ONNX cannot name it when it is exported.
 struct Dim {
-  int64_t size = 1;  // the size of an integer dimension
-  std::string sym;   // the symbol of a symbolic dimension (then size is unused); "" for an integer dimension
-  Dim() {}
-  Dim(int64_t n) : size(n) {}
-  static Dim symbol(const std::string& s) { Dim d; d.size = 0; d.sym = s; return d; }
-  bool is_symbol() const { return !sym.empty(); }
-  bool operator==(const Dim& o) const { return is_symbol() == o.is_symbol() && (is_symbol() ? sym == o.sym : size == o.size); }
+  onnxsim::SymExpr expr;  // the exact size; without a symbol when the dimension is an integer
+  Dim() : expr(1) {}
+  Dim(int64_t n) : expr(n) {}
+  explicit Dim(onnxsim::SymExpr e) : expr(std::move(e)) {}
+  static Dim symbol(const std::string& s) { return Dim(onnxsim::SymExpr::Symbol(s)); }
+  bool is_symbol() const { return expr.is_symbolic(); }  // not an integer: a symbol or a polynomial in symbols
+  int64_t size() const;                                   // the size of an integer dimension; Error for a symbolic one
+  std::string str() const { return expr.str(); }          // "4", "N", "4*N"
+  bool operator==(const Dim& o) const { return expr.terms() == o.expr.terms(); }
   bool operator!=(const Dim& o) const { return !(*this == o); }
+  friend Dim operator+(const Dim& a, const Dim& b) { return Dim(a.expr + b.expr); }
+  friend Dim operator*(const Dim& a, const Dim& b) { return Dim(a.expr * b.expr); }
 };
 using Dims = std::vector<Dim>;
 // The size each symbol takes at evaluation time (every symbol of the graph, each at least 1).
@@ -67,9 +75,11 @@ using Bindings = std::map<std::string, int64_t>;
 struct Value {
   std::string name;  // unique in the graph; the name in the ONNX file
   DType dtype;
-  Shape shape;       // the size of every dimension; 0 where the dimension is a symbol
-  // The symbol of every dimension, when some dimension is symbolic ("" for an integer one); empty when the value is static.
+  Shape shape;       // the size of every dimension that is an integer; 0 where it is symbolic
+  // Where some dimension is symbolic (both empty when the value is static): the symbol of every dimension that is exactly one symbol
+  // ("" for an integer or a polynomial), and the exact size of every dimension.
   std::vector<std::string> syms;
+  Dims exprs;
 };
 
 struct Node {
