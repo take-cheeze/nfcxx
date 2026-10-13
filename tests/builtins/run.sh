@@ -19,6 +19,7 @@ for be in $backends; do
     dialect=$(sed -n 's,^// DIALECT: *\(.*\),\1,p' "$f" | head -1)
     xfail=$(sed -n "s,^// XFAIL-$be: *\(.*\),\1,p" "$f" | head -1)
     x86only=$(sed -n "s,^// X86-ONLY-$be: *\(.*\),\1,p" "$f" | head -1)
+    if [ "$(uname -s)" = Darwin ] && [ -z "$xfail" ]; then xfail=$(sed -n "s,^// MACOS-XFAIL-$be: *\(.*\),\1,p" "$f" | head -1); fi
     if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
       echo "skip  $be $name (x86-64 only: $x86only)"; continue
     fi

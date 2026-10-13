@@ -22,6 +22,8 @@ for b in $backends; do
     [ -n "$want" ] || continue                       # helper source, not a test
     srcs=$(sed -n 's|^// SOURCES: *||p' "$f" | head -1); [ -n "$srcs" ] || srcs=$n
     xf=$(sed -n 's/.*XFAIL-'"$b"': *//p' "$f" | head -1)
+    # MACOS-XFAIL-$b: a documented limit on macOS only (the test passes elsewhere, so it is not an XFAIL there).
+    if [ "$(uname -s)" = Darwin ] && [ -z "$xf" ]; then xf=$(sed -n "s,^// MACOS-XFAIL-$b: *,,p" "$f" | head -1); fi
     x86only=$({ sed -n 's,^// X86-ONLY: *,,p' "$f"; sed -n "s,^// X86-ONLY-$b: *,,p" "$f"; } | head -1)
     if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then echo "skip $b $n (x86-64 only: $x86only)"; continue; fi
     ld16=$(sed -n 's,^// LONG-DOUBLE-16: *,,p' "$f" | head -1)
