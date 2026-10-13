@@ -280,15 +280,6 @@ SUPER_TARGETS = Set[
   'RPG2k::Scene::SaveLoad#initialize',
   'RPG2k3::Scene::Battle#finish_round_animation',
 
-  # tools/optcarrot_probe's separate closed world (see its README.md); inert for
-  # real gem builds. Bare `super` (SUPER R2 n=0) into Optcarrot::APU::Oscillator;
-  # no caller passes a block and no include intervenes. #initialize/#poke_0/
-  # #poke_3 are `SUPER n=*` zsupers, not this shape.
-  'Optcarrot::APU::Pulse#reset',
-  'Optcarrot::APU::Pulse#active?',
-  'Optcarrot::APU::Triangle#reset',
-  'Optcarrot::APU::Triangle#active?',
-  'Optcarrot::APU::Noise#reset',
 ].freeze
 
 # ---------------------------------------------------------------------------
