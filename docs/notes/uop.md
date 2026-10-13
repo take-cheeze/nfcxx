@@ -91,7 +91,8 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 - `hir::Graph` holds `Value`s (name, dtype, static shape) and `Node`s that are ONNX operators with ONNX's names, inputs and
   attributes: `Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Add Sub Mul Div Mod Max Min And Or Xor BitwiseAnd
   BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Transpose Reshape Squeeze Unsqueeze
-  Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat`. Operands that ONNX wants as constants
+  Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad Gemm Gather Erf Conv MaxPool AveragePool
+  BatchNormalization (inference) InstanceNormalization LayerNormalization`. Operands that ONNX wants as constants
   (Reshape's shape, the axes of Squeeze/Unsqueeze/Reduce*, Slice's bounds) are initializers; `add_node` infers dtype and shape
   with ONNX's rules (numpy broadcasting, no implicit dtype conversion, `Div` on ints truncates, `Mod` with `fmod=0` follows the
   divisor's sign) and throws `Error` for anything ONNX would reject.
@@ -165,7 +166,7 @@ Not there (numpy features a numpy user would reach for next): fancy and boolean-
 `expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `argmax`/`argsort`/`sort`/`unique`,
 `cumsum`/`cumprod`, `prod`, `pow` and `**`, `isnan`/`isinf`/`floor`/`ceil`/`round`, `tile`/`repeat`/`pad`/`roll`, `einsum`/`tensordot`/`outer`/`linalg`, complex
 and unsigned/small-int/float16 dtypes, strings and structured arrays, and anything that needs a data-dependent output shape. Most of these are
-a new ONNX operator in `hir` plus its lowering in `ut` (`Pow`, `Floor`, `IsNaN`, `CumSum`, `ArgMax`, `Gather`, `Tile`); data-dependent shapes
+a new ONNX operator in `hir` plus its lowering in `ut` (`Pow`, `Floor`, `IsNaN`, `CumSum`, `ArgMax`, `Tile`; `Gather` is in `hir` but `np` does not expose it yet); data-dependent shapes
 (`unique`, boolean masks) are outside a static-shape design.
 A realistic target is "the subset of numpy that a model needs": array creation, broadcasting arithmetic, reductions, shape ops, slicing, matmul, the
 activation functions. Beyond that numpy is a much larger library, and a port would stay a subset.
