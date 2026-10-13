@@ -698,13 +698,13 @@ module NativeExpressionDevirt
   # (three calls) GCC -O0 left a register uninitialized on the branch that skips
   # the middle computation -- a real SIGSEGV on a live array (Optcarrot::Video#
   # tick, tools/optcarrot_probe/). `#first` is hoisted too; nothing promises the
-  # repeated calls get merged. A GNU statement expression materializes the
-  # pointer once; g++ and Emscripten's clang++ accept it (no -pedantic-errors,
-  # see build_config.rb's conf.cxx.flags).
+  # repeated calls get merged. A lambda materializes the
+  # pointer once. A lambda takes the pointer as a parameter: standard C++, which
+  # the qbe back end (cproc, no GNU statement expressions) also compiles.
   def hoist_repeated_receiver_array_pointer(expression, call: 'mrb_ary_ptr(recv)', local: 'bc2cpp_ary_ptr')
     return expression if expression.scan(call).length <= 1
 
-    "({ struct RArray *#{local} = #{call}; #{expression.gsub(call, local)}; })"
+    "[&](struct RArray *#{local}) { return #{expression.gsub(call, local)}; }(#{call})"
   end
 
   def mruby_core_root(paths)

@@ -138,8 +138,8 @@ check.call('Array#first and #last derive only the zero-argument C branch and kee
              exact_class_expressions['last']&.map { |entry| [entry[:owner][:class_name], entry[:arity]] } ==
                [['Array', 0], ['Range', 0]] &&
              exact_class_expressions['first'].first[:expression] ==
-               '({ struct RArray *bc2cpp_ary_ptr = mrb_ary_ptr(recv); ' \
-               '(ARY_LEN((bc2cpp_ary_ptr)) > 0) ? (ARY_PTR(bc2cpp_ary_ptr)[0]) : (mrb_nil_value()); })' &&
+               '[&](struct RArray *bc2cpp_ary_ptr) { return (ARY_LEN((bc2cpp_ary_ptr)) > 0) ? ' \
+               '(ARY_PTR(bc2cpp_ary_ptr)[0]) : (mrb_nil_value()); }(mrb_ary_ptr(recv))' &&
              exact_class_expressions['last'].first[:expression].include?('ARY_PTR(bc2cpp_ary_ptr)[(ARY_LEN((bc2cpp_ary_ptr))) - 1]') &&
              exact_class_expressions['last'].first[:expression].scan('mrb_ary_ptr(recv)').length == 1 &&
              exact_class_expressions['first'].last[:expression] == 'mrb_range_beg(M, recv)' &&
