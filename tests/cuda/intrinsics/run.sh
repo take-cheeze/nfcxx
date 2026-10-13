@@ -73,4 +73,6 @@ pass asm_ptx_widths.cu "ptx widths: no error, 0 mismatches"
 pass math_fns.cu "math_fns: no error, 9175155 checks, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
+refuse refuse_cub.cu "cub:: at line"
+refuse refuse_grid.cu "grid_group at line"
 exit $fail
