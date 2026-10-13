@@ -19,6 +19,13 @@
 #    assembly, the directives are appended, and the assembly is assembled to the object.
 set -euo pipefail
 cc=${NFCXX_GCC:-cc}
+# 4. clang (macOS cc) drops a static function that only an asm alias names (__tls_init below); gcc keeps it, so the
+#    definition is marked used (harmless for gcc, which keeps it anyway).
+clang=0; if "$cc" --version 2>/dev/null | grep -qi clang; then clang=1; fi
+# On Mach-O every C symbol has one more leading underscore, so the asm alias of the TLS wrapper must name the underscored
+# symbols too (the wrapper's reference, _ZTH2tl, is __ZTH2tl there).
+tls_alias='s/__asm__("\(_ZTH[^ ]*\) = __tls_init")/__asm__("_\1 = ___tls_init")/'
+[ "$(uname -s)" = Darwin ] || tls_alias='s/^$//'
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 args=(); n=0
 csrc=""; obj=""; compile=0
@@ -27,9 +34,11 @@ for a in "$@"; do
     -c) compile=1; args+=("$a") ;;
     *.c)
       csrc=$a
-      if [ -f "$a" ] && { grep -q '^[[:space:]]*#pragma GCC unroll' "$a" || grep -q '^extern __inline__ __attribute__((visibility("default"))) void _ZN.*D1Ev(' "$a"; }; then
+      if [ -f "$a" ] && { grep -q '^[[:space:]]*#pragma GCC unroll' "$a" || { [ $clang = 1 ] && grep -q 'static void __tls_init(void)' "$a"; } || grep -q '^extern __inline__ __attribute__((visibility("default"))) void _ZN.*D1Ev(' "$a"; }; then
         n=$((n + 1)); f=$tmp/src$n.c
         grep -v '^[[:space:]]*#pragma GCC unroll' "$a" \
+          | sed -e 's/static void __tls_init(void)/__attribute__((used)) static void __tls_init(void)/' \
+          | sed -e "$tls_alias" \
           | sed -e 's/^extern __inline__ __attribute__((visibility("default"))) void \(_ZN.*D1Ev\)(/__attribute__((__weak__)) __inline__ __attribute__((visibility("default"))) void \1(/' > "$f"
         args+=("$f")
         csrc=$f

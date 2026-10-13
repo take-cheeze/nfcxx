@@ -408,11 +408,7 @@ for f in ${files[@]+"${files[@]}"}; do
   esac
 done
 t=$(trace_start)
-# On macOS the EDG prelinker cannot read Mach-O's `nm` output ("invalid input format": every symbol has an extra leading
-# underscore). Templates are then instantiated in each translation unit that uses them (-tused) and the duplicates merge
-# as weak symbols, which is how the gcc backend already links them.
-prelink_opts=(); [ "$(uname -s)" = Darwin ] && prelink_opts=(--no_auto_instantiation)
-"$edg/eccp" "$std" --"$dialect" "${extra[@]}" ${userinc[@]+"${userinc[@]}"} "${sys_inc[@]}" "${hosted_libs[@]}" ${prelink_opts[@]+"${prelink_opts[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+"${keep_static[@]}"} --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
+"$edg/eccp" "$std" --"$dialect" "${extra[@]}" ${userinc[@]+"${userinc[@]}"} "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+"${keep_static[@]}"} --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
   ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${vlart[@]+"${vlart[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 if [ -n "$depmode" ]; then
