@@ -13,6 +13,9 @@ Dir.mktmpdir('cpu-dispatch-ir-check') do |tmp|
       class CPU
         def r_op(instr, mode); send(mode, true, false); send(instr); end
         def _brk; @count = 1; end
+        def _bcc; @count = 2; end
+        def store_mem; @count += 100; end
+        def w_op(instr, mode, store); send(mode, false, true); send(instr); send(store); end
         def run
           while @continue
             send(*DISPATCH[@opcode])
@@ -33,7 +36,10 @@ Dir.mktmpdir('cpu-dispatch-ir-check') do |tmp|
   program = BytecodeIR::Program.new(rewritten)
   wrapper = ireps.fetch(registry.fetch('r_op').first.irep)
   check.call('nested wrapper computed sends have literal arms', wrapper.instructions.any? { |insn| insn.op == 'SSEND' && insn.sym == '_brk' })
+  store_wrapper = ireps.fetch(registry.fetch('w_op').first.irep)
+  check.call('plain-name store operation has a literal arm', store_wrapper.instructions.any? { |insn| insn.op == 'SSEND' && insn.sym == 'store_mem' })
   check.call('input IR stays intact', original.instructions.size < rewritten.instructions.size)
+  check.call('one shape comparison per distinct argument count', rewritten.instructions.count { |insn| insn.op == 'LOADI8' } == 3)
   check.call('all original and introduced branch targets resolve', program.resolved?)
   calls = rewritten.instructions.select { |insn| insn.op == 'SSEND' }
   check.call('literal wrapper arm is visible to analyses', calls.any? { |insn| insn.sym == 'r_op' && insn.n_spec == '2' })
@@ -113,10 +119,13 @@ if ENV['BC2CPP_MRUBY_FULL'] || ENV['BC2CPP_CPU_IR_NATIVE'] == '1'
     module Optcarrot
       class CPU
         DISPATCH = [[:r_op, :_brk, :imm], [:_brk], [:unknown],
-                    ['r_op', :_brk, :imm], [:r_op, :_brk], [:r_op, :_brk, :imm, nil]]
+                    ['r_op', :_brk, :imm], [:r_op, :_brk], [:r_op, :_brk, :imm, nil], [:w_op, :_sta, :imm, :store_mem]]
         def initialize(opcode); @opcode = opcode; @count = 0; end
         def r_op(instr, mode); send(mode, true, false); send(instr); end
         def imm(read, write); @count += read ? 10 : 1; end
+        def w_op(instr, mode, store); send(mode, false, true); send(instr); send(store); end
+        def _sta; @count += 2; end
+        def store_mem; @count += 100; end
         def _brk; @count += 1; end
         def run; send(*DISPATCH[@opcode]); @count; end
       end
@@ -126,7 +135,7 @@ if ENV['BC2CPP_MRUBY_FULL'] || ENV['BC2CPP_CPU_IR_NATIVE'] == '1'
     static int scenario(mrb_state* M) {
       struct RClass* mod = mrb_module_get(M, "Optcarrot");
       struct RClass* klass = mrb_class_get_under(M, mod, "CPU");
-      for (int opcode = 0; opcode < 6; ++opcode) {
+      for (int opcode = 0; opcode < 7; ++opcode) {
         mrb_value arg = mrb_fixnum_value(opcode);
         mrb_value obj = mrb_obj_new(M, klass, 1, &arg);
         call(M, "run", obj, "run");
