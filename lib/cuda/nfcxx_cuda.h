@@ -86,6 +86,12 @@ inline int __syncthreads_or(int predicate) { return predicate != 0; }
 inline unsigned int __reduce_add_sync(unsigned int mask, unsigned int value) { (void)mask; return value; }
 inline void __threadfence_system(void) {}
 inline void __nanosleep(unsigned int ns) { (void)ns; }
+// The device code is the atomic (the prelude's atomicAdd and friends); the host copy only has to name them.
+inline int atomicAdd(int *p, int v) { int o = *p; *p = o + v; return o; }
+inline unsigned int atomicAdd(unsigned int *p, unsigned int v) { unsigned int o = *p; *p = o + v; return o; }
+inline float atomicAdd(float *p, float v) { float o = *p; *p = o + v; return o; }
+inline int atomicMax(int *p, int v) { int o = *p; *p = o > v ? o : v; return o; }
+inline int atomicCAS(int *p, int c, int v) { int o = *p; if (o == c) *p = v; return o; }
 inline unsigned short __hmax(unsigned short a, unsigned short b) { return a > b ? a : b; }
 // glibc declares these (C linkage, throw()); the inline definitions match it, so every unit may include this header.
 extern "C" inline float __expf(float x) throw() { return __builtin_expf(x); }

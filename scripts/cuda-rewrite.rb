@@ -1773,6 +1773,27 @@ BUILTIN_DEFS = {
   "tanhf" => "static inline float tanhf(float x) { if (x != x || x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
     "if (ax >= 10.0) return x < 0.0f ? -1.0f : 1.0f; double e = __nfcxx_expm1d(2.0 * ax); double t = e / (e + 2.0); " \
     "return (float)(d < 0.0 ? -t : t); }\n",
+  # log1pf in double: u = 1 + x is exact for |x| >= 2^-29 (x is a float); u is scaled by powers of two into [1/sqrt2, sqrt2)
+  # and log(u) = k ln2 + 2 atanh(s), s = (u - 1) / (u + 1), |s| <= 0.1716, 15 odd terms (below 2^-53). |x| < 2^-30 is x.
+  # NaN and +inf pass through; x == -1 is -inf; x < -1 is NaN.
+  "log1pf" => "static inline float log1pf(float x) { if (x != x || x == 1.0f / 0.0f) return x; if (x == -1.0f) return -1.0f / 0.0f; " \
+    "if (x < -1.0f) return 0.0f / 0.0f; if (x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
+    "if (ax < 1.0 / 1073741824.0) return x; double U = 1.0 + d; int k = 0; " \
+    "while (U >= 65536.0) { U *= 1.0 / 65536.0; k += 16; } while (U < 1.0 / 65536.0) { U *= 65536.0; k -= 16; } " \
+    "while (U >= 1.4142135623730951) { U *= 0.5; k++; } while (U < 0.7071067811865476) { U *= 2.0; k--; } " \
+    "double s = (U - 1.0) / (U + 1.0), s2 = s * s, p = s, acc = 0.0; " \
+    "for (int j = 1; j <= 15; j++) { acc += p / (double)(2 * j - 1); p *= s2; } " \
+    "return (float)((double)k * 0.6931471805599453 + (double)k * 2.3190468138462996e-17 + 2.0 * acc); }\n",
+  # The atomics the emitter lowers (ATOMICS): int add and max, int compare-and-swap, float add. The unsigned add is the
+  # signed one on the same bits (the sum wraps the same way).
+  "atomicAdd" => "extern \"C\" int __nfcxx_atomic_add_i(int *, int);\nextern \"C\" float __nfcxx_atomic_add_f(float *, float);\n" \
+    "static inline int atomicAdd(int *p, int v) { return __nfcxx_atomic_add_i(p, v); }\n" \
+    "static inline unsigned atomicAdd(unsigned *p, unsigned v) { return (unsigned)__nfcxx_atomic_add_i((int *)p, (int)v); }\n" \
+    "static inline float atomicAdd(float *p, float v) { return __nfcxx_atomic_add_f(p, v); }\n",
+  "atomicMax" => "extern \"C\" int __nfcxx_atomic_max_i(int *, int);\n" \
+    "static inline int atomicMax(int *p, int v) { return __nfcxx_atomic_max_i(p, v); }\n",
+  "atomicCAS" => "extern \"C\" int __nfcxx_atomic_cas_i(int *, int, int);\n" \
+    "static inline int atomicCAS(int *p, int c, int v) { return __nfcxx_atomic_cas_i(p, c, v); }\n",
   # memcpy and memset as byte loops (the device unit has no C library; the host copy keeps the real header).
   "memcpy" => "static inline void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = (unsigned char *)d; " \
               "const unsigned char *b = (const unsigned char *)s; for (size_t i = 0; i < n; i++) a[i] = b[i]; return d; }\n",
