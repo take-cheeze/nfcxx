@@ -68,6 +68,11 @@ int64_t norm_axis(int64_t ax, int64_t nd) {
   return ax < 0 ? ax + nd : ax;
 }
 
+Tensor int64_scalar(const Tensor& like, int64_t v) {
+  Array a(DType::Int64, {}, {Scalar::from_int(DType::Int64, v)});
+  return Tensor(&like.session(), like.session().constant(a));
+}
+
 Axes all_axes(int64_t nd) {
   Axes a;
   for (int64_t k = 0; k < nd; k++) a.push_back(k);
@@ -289,6 +294,23 @@ Tensor Tensor::var(const Axes& axes, bool keepdims) const {
 }
 
 Tensor Tensor::stddev(const Axes& axes, bool keepdims) const { return var(axes, keepdims).sqrt(); }
+
+Tensor Tensor::prod(const Axes& axes, bool keepdims) const {
+  check(*this);
+  DType dt = dtype();
+  if (dt == DType::Bool || (is_int(dt) && dt < s_->default_int)) dt = s_->default_int;
+  return reduce("ReduceProd", cast_to(*this, dt), axes, keepdims);
+}
+
+Tensor Tensor::cumsum(int64_t axis) const {
+  check(*this);
+  Tensor x = axis == None ? flatten() : *this;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, ndim());
+  DType dt = x.dtype();
+  if (dt == DType::Bool || (is_int(dt) && dt < s_->default_int)) dt = s_->default_int;
+  x = cast_to(x, dt);
+  return node(x, "CumSum", {x.id(), int64_scalar(x, ax).id()});
+}
 
 // ---- Tensor: elementwise ----
 

@@ -214,11 +214,12 @@ ut::Tensor Lowerer::lower_one(int id) {
     else if (op == "Transpose") out = n.has_attr("perm") ? arg(0).transpose(n.attr("perm")->ints) : arg(0).transpose();
     else if (op == "Reshape" || op == "Squeeze" || op == "Unsqueeze") out = arg(0).reshape(v.shape);
     else if (op == "Expand") out = arg(0).broadcast_to(v.shape);
-    else if (op == "ReduceSum" || op == "ReduceMean" || op == "ReduceMax" || op == "ReduceMin") {
+    else if (op == "ReduceSum" || op == "ReduceMean" || op == "ReduceMax" || op == "ReduceMin" || op == "ReduceProd") {
       ut::Axes axes = has(1) ? ints(1) : ut::Axes{};   // none: all of them
       bool keep = n.attr_int("keepdims", 1) != 0;
       ut::Tensor x = arg(0);
-      out = op == "ReduceSum" ? x.sum(axes, keep) : op == "ReduceMean" ? x.mean(axes, keep) : op == "ReduceMax" ? x.max(axes, keep) : x.min(axes, keep);
+      out = op == "ReduceSum" ? x.sum(axes, keep) : op == "ReduceMean" ? x.mean(axes, keep) : op == "ReduceMax" ? x.max(axes, keep)
+            : op == "ReduceMin" ? x.min(axes, keep) : x.prod(axes, keep);
     }
     else if (op == "Softmax") out = arg(0).softmax(n.attr_int("axis", -1));
     else if (op == "LogSoftmax") out = arg(0).log_softmax(n.attr_int("axis", -1));
@@ -241,6 +242,7 @@ ut::Tensor Lowerer::lower_one(int id) {
       out = ut::concatenate(parts, n.attr_int("axis", 0));
     }
     else if (op == "Erf") out = erf_tensor(arg(0));
+    else if (op == "CumSum") out = arg(0).cumsum(ints(1).at(0), n.attr_int("exclusive", 0) != 0, n.attr_int("reverse", 0) != 0);
     else if (op == "Pow") out = ut::pow(arg(0), arg(1));
     else if (op == "Floor") out = arg(0).floor();
     else if (op == "Ceil") out = arg(0).ceil();

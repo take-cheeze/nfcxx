@@ -85,6 +85,10 @@ class Tensor {
   Tensor min(int64_t axis, bool keepdims = false) const { return min(Axes{axis}, keepdims); }
   Tensor var(const Axes& axes = {}, bool keepdims = false) const;  // population variance (ddof = 0)
   Tensor stddev(const Axes& axes = {}, bool keepdims = false) const;
+  Tensor prod(const Axes& axes = {}, bool keepdims = false) const;   // ReduceProd; bool and narrow ints give default_int, as sum
+  Tensor prod(int64_t axis, bool keepdims = false) const { return prod(Axes{axis}, keepdims); }
+  // Running sum along `axis` (ONNX CumSum); axis None flattens first, like numpy. bool and narrow ints give default_int.
+  Tensor cumsum(int64_t axis = None) const;
 
   // elementwise
   Tensor operator-() const;

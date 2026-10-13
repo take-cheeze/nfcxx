@@ -347,6 +347,65 @@ static void new_operators() {
              {{"x", fxa}, {"i", ixa}});
 }
 
+static void cumsum_and_prod() {
+  using hir::Attribute;
+  const DType i32 = DType::Int32, i64 = DType::Int64, f32 = DType::Float32, b = DType::Bool;
+  const double inf = INFINITY;
+  Session np;
+  Tensor a = np.array2d({{1, 2, 3}, {4, 5, 6}});
+  // cumsum: inclusive running sums along an axis, negative axes, and the flattened array for axis None
+  CHECK(a.cumsum(0).str() == "[[1., 2., 3.], [5., 7., 9.]]");
+  CHECK(a.cumsum(1).str() == "[[1., 3., 6.], [4., 9., 15.]]" && a.cumsum(-1).str() == a.cumsum(1).str());
+  CHECK(a.cumsum().str() == "[1., 3., 6., 10., 15., 21.]" && a.cumsum().shape() == (Shape{6}));
+  CHECK(np.array({1, 2, 3, 4}).cumsum().str() == "[1., 3., 6., 10.]");
+  CHECK(np.arange(4).cumsum().str() == "[0, 1, 3, 6]" && np.arange(4).cumsum().dtype() == i32);
+  CHECK(np.array({1, 0, 1}, b).cumsum().str() == "[1, 1, 2]" && np.array({1, 0, 1}, b).cumsum().dtype() == i32);
+  Session s64;
+  s64.default_int = i64;
+  CHECK(s64.array({1, 2}, i32).cumsum().dtype() == i64);   // narrow ints sum in default_int, like numpy's sum
+  CHECK(np.array({1, 2}, i32).cumsum().dtype() == i32);
+  V inf_sums = np.array({1, inf, -inf, 2}).cumsum().tolist();   // no NaN from the masked zeros, only from inf - inf
+  CHECK(inf_sums.size() == 4 && inf_sums[0] == 1 && inf_sums[1] == inf && std::isnan(inf_sums[2]) && std::isnan(inf_sums[3]));
+  CHECK(std::signbit(np.array({-0.0}).cumsum().item()));                         // a sum of one -0.0 is -0.0
+  CHECK(np.array({1, 2, 3}).cumsum(0).str() == "[1., 3., 6.]");
+  CHECK_THROWS(a.cumsum(2));
+  CHECK_THROWS(np.array({1.0}).cumsum(1));
+  CHECK(np.scalar(3).cumsum().str() == "[3.]");                  // numpy: a one-element array
+  // prod: over all axes, along one axis (keepdims), over several axes; bool and narrow ints give default_int
+  CHECK(a.prod().item() == 720 && a.prod().dtype() == f32);
+  CHECK(a.prod(0).str() == "[4., 10., 18.]" && a.prod(1).str() == "[6., 120.]" && a.prod(-1).str() == "[6., 120.]");
+  CHECK(a.prod(1, true).shape() == (Shape{2, 1}) && a.prod(Axes{0, 1}).item() == 720);
+  CHECK(a.prod(Axes{0, 1}, true).shape() == (Shape{1, 1}));
+  Tensor c = np.array({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, {2, 3, 2});
+  CHECK(c.prod(1).str() == "[[15., 48.], [693., 960.]]");   // c[i][j][k] = 1 + 6 i + 2 j + k
+  CHECK(c.prod(Axes{0, 2}).shape() == (Shape{3}) && c.prod(Axes{0, 2}).tolist() == (V{1 * 2 * 7 * 8, 3 * 4 * 9 * 10, 5 * 6 * 11 * 12}));
+  CHECK(np.array({1, 2, 3}, i32).prod().dtype() == i32 && np.array({2, 3}, b).prod().dtype() == i32);
+  CHECK(np.array({1, 0, 1}, b).prod().item() == 0);
+  CHECK(np.array({2, 1000}, i32).prod().item() == 2000 && np.array({65536, 65536}, i32).prod().item() == 0);   // wraps like int32
+  CHECK(std::isinf(np.array({inf, 2}).prod().item()) && std::isnan(np.array({inf, 0}).prod().item()));
+  CHECK_THROWS(a.prod(Axes{0, 0}));
+  CHECK_THROWS(a.prod(2));
+  // hir errors: CumSum needs a constant axis of int32 or int64 and no bool; ReduceProd no bool
+  hir::Graph hg;
+  int x = hg.add_input("x", f32, {2, 3}), bx = hg.add_input("bx", b, {2, 3});
+  int ax0 = hg.add_initializer("", Array(DType::Int64, {}, {Scalar::from_int(DType::Int64, 0)}));
+  int axf = hg.add_initializer("", Array(f32, {}, {Scalar::from_double(f32, 0)}));
+  int axbig = hg.add_initializer("", Array(DType::Int64, {}, {Scalar::from_int(DType::Int64, 2)}));
+  int axpl = hg.add_input("axp", DType::Int64, {});
+  CHECK(hg.value(hg.add_node("CumSum", {x, ax0})).shape == (Shape{2, 3}));
+  CHECK_THROWS(hg.add_node("CumSum", {bx, ax0}));
+  CHECK_THROWS(hg.add_node("CumSum", {x, axf}));
+  CHECK_THROWS(hg.add_node("CumSum", {x, axbig}));
+  CHECK_THROWS(hg.add_node("CumSum", {x, axpl}));            // the axis must be a constant
+  CHECK_THROWS(hg.add_node("CumSum", {x, ax0}, {Attribute::Int("reverse", 2)}));
+  CHECK_THROWS(hg.add_node("ReduceProd", {bx}));
+  CHECK(hg.value(hg.add_node("ReduceProd", {x}, {Attribute::Int("keepdims", 0)})).shape == Shape{});
+  // ONNX round trip and the lowered read-back graph
+  Tensor fx = np.placeholder("x", {2, 3});
+  Array fxa = Array::from_doubles(f32, {2, 3}, {1, 2, -3, 0.5, -0.0, 4});
+  onnx_round_trip(np, {{"cs", fx.cumsum(1)}, {"cp", fx.prod(0, true)}, {"ip", np.arange(6).reshape({2, 3}).cumsum(0)}}, {{"x", fxa}});
+}
+
 static void graph_and_onnx(const std::string& dir) {
   const DType i32 = DType::Int32;
   Session np;
@@ -473,6 +532,12 @@ static void graph_and_onnx(const std::string& dir) {
       Array ai = Array::from_doubles(i32, {2, 3}, {2, -3, 4, 5, 0, 1});
       emit("floor_pow", s, {{"fl", x2.floor()}, {"ce", x2.ceil()}, {"nan", x2.isnan()}, {"inf", x2.isinf()}, {"pw", pow(x2.abs(), i2)}, {"ip", pow(i2, 3)}, {"pf", pow(x2, 0.5)}}, {{"x", ax}, {"i", ai}});
     }
+    {  // cumsum (inclusive, with an axis, and flattened) and prod, with infinities
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3});
+      Array ax = Array::from_doubles(DType::Float32, {2, 3}, {1, INFINITY, -2, 0.5, -0.0, 4});
+      emit("cumsum_prod", s, {{"cs0", x2.cumsum(0)}, {"cs1", x2.cumsum(1)}, {"csf", x2.cumsum()}, {"p0", x2.prod(0, true)}, {"pall", x2.prod()}}, {{"x", ax}});
+    }
     {  // matmul variants
       Session s;
       Tensor x2 = s.placeholder("x", {2, 3, 4});
@@ -489,6 +554,7 @@ int main(int argc, char** argv) {
   default_dtypes();
   slicing_and_concat();
   new_operators();
+  cumsum_and_prod();
   graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);

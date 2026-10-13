@@ -192,7 +192,7 @@ Value infer(const Graph& g, const Node& n) {
   static const std::set<std::string> logical = {"And", "Or", "Xor"};
   static const std::set<std::string> bitwise = {"BitwiseAnd", "BitwiseOr", "BitwiseXor"};
   static const std::set<std::string> compare = {"Less", "Greater", "LessOrEqual", "GreaterOrEqual"};
-  static const std::set<std::string> reduces = {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"};
+  static const std::set<std::string> reduces = {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin", "ReduceProd"};
 
   if (op == "Identity") { want_inputs(1, 1); return Value{"", V(0).dtype, V(0).shape}; }
   if (op == "Neg" || op == "Abs" || op == "Relu") {
@@ -209,6 +209,19 @@ Value infer(const Graph& g, const Node& n) {
     want_inputs(1, 1);
     if (!is_float(V(0).dtype)) fail("float input needed, got " + std::string(name(V(0).dtype)));
     return Value{"", DType::Bool, V(0).shape};
+  }
+  if (op == "CumSum") {   // the axis is a constant: a scalar (or one element) of int32 or int64
+    want_inputs(2, 2);
+    const Value& x = V(0);
+    if (x.dtype == DType::Bool) fail("not defined for bool");
+    if (V(1).dtype != DType::Int32 && V(1).dtype != DType::Int64) fail("axis must be int32 or int64");
+    if (numel(V(1).shape) != 1 || V(1).shape.size() > 1) fail("axis must be a scalar");
+    norm(op, consts(1).at(0), static_cast<int64_t>(x.shape.size()));   // out of range is an error
+    for (const char* a : {"exclusive", "reverse"}) {
+      const int64_t f = n.attr_int(a, 0);
+      if (f != 0 && f != 1) fail(std::string(a) + " must be 0 or 1");
+    }
+    return Value{"", x.dtype, x.shape};
   }
   if (op == "Pow") {
     want_inputs(2, 2);
