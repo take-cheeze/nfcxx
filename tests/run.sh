@@ -8,7 +8,7 @@ for f in tests/cases/*.cpp; do
   if x86only=$(sed -n 's,^// X86-ONLY: *\(.*\),\1,p' "$f" | head -1); [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
     echo "skip $f (x86-64 only: $x86only)"; continue
   fi
-  want=$(sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$f" | head -1)
+  want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
   if ! ./nfcxx "$f" -o "$tmp/t" 2>"$tmp/err"; then
     echo "FAIL (compile) $f"; head -5 "$tmp/err"; fail=1; continue
   fi

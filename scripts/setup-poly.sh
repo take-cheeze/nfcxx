@@ -27,7 +27,7 @@ else rake=(ruby -rrake -e 'Rake.application.run(ARGV)' --); fi
 [ -x "$root/build/edg/bin/eccp" ] || { echo "setup-poly: EDG not built; run scripts/setup-edg.sh" >&2; exit 1; }
 mkdir -p "$work"
 # One build at a time per tree (rake writes into the source tree's .lock files and the build directory).
-exec 9>"$work/.lock"; flock 9
+exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && fresh && exit 0
 if [ ! -d "$src/.git" ]; then
   mkdir -p "$src" && git -C "$src" init -q &&

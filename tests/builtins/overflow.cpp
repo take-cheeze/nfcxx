@@ -1,3 +1,4 @@
+// GCC-DIALECT-ONLY: __builtin_add_overflow_p is a GCC builtin; clang's front-end mode does not have it
 // EXPECT: 0
 // __builtin_{add,sub,mul}_overflow and the _p predicate forms.
 int main() {

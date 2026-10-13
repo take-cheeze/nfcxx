@@ -11,7 +11,7 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cxx=${NFCXX_CXX:-g++}
 for f in tests/ehshim/*.cpp; do
   name=$(basename "$f" .cpp)
-  want=$(sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$f" | head -1)
+  want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
   backends=$(sed -n 's,^// BACKENDS: *\(.*\),\1,p' "$f" | head -1); backends=${backends:-gcc}
   if ! "$cxx" -std=c++23 -w -pthread "$f" -o "$tmp/$name.host" 2> "$tmp/$name.hosterr"; then
     echo "FAIL $f: host $cxx cannot build it"; head -3 "$tmp/$name.hosterr"; fail=1; continue

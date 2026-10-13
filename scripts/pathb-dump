@@ -21,7 +21,7 @@ for arg in "$@"; do
     --ir) mode=ir ;;
     --freestanding) hosted=0 ;;
     -std=c++*) std=--c++${arg#-std=c++} ;;
-    -I?*) user_opts+=("-I$(realpath -m "${arg#-I}")") ;;   # the front end runs in another directory
+    -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
     *) files+=("$arg") ;;
   esac

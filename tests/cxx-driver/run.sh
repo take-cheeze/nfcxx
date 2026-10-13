@@ -41,8 +41,10 @@ check "-D NAME (separate argument)" \
 # -Wl,* reaches the host link (order-independent options); the order-dependent ones are refused (eccp puts
 # its link options before every object, so --whole-archive would apply to the wrong archive)
 printf 'int add(int, int);\nint main() { return add(1, 2) == 3 ? 0 : 1; }\n' > "$tmp/src/wl.cpp"
-check "-Wl,--gc-sections -Wl,-z,now (C++ link)" \
-  "$nfcxx" -Wl,--gc-sections -Wl,-z,now "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -o "$tmp/wl_ok"
+# ELF linkers take --gc-sections and -z now; Apple's ld takes -dead_strip (and has no -z now).
+if [ "$(uname -s)" = Darwin ]; then wl_flags="-Wl,-dead_strip"; else wl_flags="-Wl,--gc-sections -Wl,-z,now"; fi
+check "linker section GC and eager binding flags (C++ link)" \
+  "$nfcxx" $wl_flags "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -o "$tmp/wl_ok"
 if "$nfcxx" "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -Wl,--whole-archive -o "$tmp/wl_refused" >/dev/null 2>&1; then
   bad "-Wl,--whole-archive is refused" "the link succeeded"
 else

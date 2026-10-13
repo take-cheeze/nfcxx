@@ -24,7 +24,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0; skip=0
 for f in "$root"/tests/cases/*.cpp; do
   n=$(basename "$f" .cpp)
-  want=$(sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$f" | head -1)
+  want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
   if ! "$root/scripts/gen-c-target.sh" -t "$target" -o "$tmp/$n.c" "$f" 2>"$tmp/$n.edg"; then
     # The target configuration has no hosted C++ headers, so a case that includes <cstdint>, <map>,
     # etc. cannot be generated for it. That is a limit of this check, not a failure of the case.
