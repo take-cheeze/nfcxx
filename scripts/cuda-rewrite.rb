@@ -1372,6 +1372,8 @@ BUILTIN_DEFS = {
   "__half2float" => HALF_CORE,
   "half" => HALF_CORE + "typedef __half half;\n",
   "half2" => HALF2_TYPE + "typedef __half2 half2;\n",
+  # make_half2(x, y) as in cuda_fp16: each lane rounded to half from a float (int arguments convert exactly when small).
+  "make_half2" => HALF2_TYPE + HALF_CORE + "static inline __half2 make_half2(float x, float y) { __half2 r; r.x = __float2half(x); r.y = __float2half(y); return r; }\n",
   "int8_t" => "typedef signed char int8_t;\n",
   "uint8_t" => "typedef unsigned char uint8_t;\n",
   "int16_t" => "typedef short int16_t;\n",
@@ -1382,6 +1384,17 @@ BUILTIN_DEFS = {
   "uint64_t" => "typedef unsigned long long uint64_t;\n",
   "ldexpf" => "static inline float ldexpf(float x, int e) { return x * (float)(1 << (e > 30 ? 30 : (e < -30 ? -30 : e))); }\n",
   "fmaxf" => "static inline float fmaxf(float a, float b) { return a != a ? b : (b != b ? a : (a > b ? a : b)); }\n",
+  # powf(x, y) = exp(y * log(x)) on the approximate PTX of expf and logf (see FLOAT_BUILTINS): exact for y == 0 and
+  # x == 0, approximate otherwise (about 1e-5 relative for |y * log2 x| up to 12). A negative base gives NaN (not the
+  # sign CUDA gives for an integer exponent); llama.cpp's powf calls take a positive base.
+  "powf" => "extern \"C\" float __nfcxx_expf(float);\nextern \"C\" float __nfcxx_logf(float);\n" \
+            "static inline float powf(float x, float y) { if (y == 0.0f) return 1.0f; if (x == 0.0f) return y > 0.0f ? 0.0f : 1.0f / 0.0f; " \
+            "if (x < 0.0f) return (x - x) / (x - x); return __nfcxx_expf(y * __nfcxx_logf(x)); }\n",
+  # memcpy and memset as byte loops (the device unit has no C library; the host copy keeps the real header).
+  "memcpy" => "static inline void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = (unsigned char *)d; " \
+              "const unsigned char *b = (const unsigned char *)s; for (size_t i = 0; i < n; i++) a[i] = b[i]; return d; }\n",
+  "memset" => "static inline void *memset(void *d, int c, size_t n) { unsigned char *a = (unsigned char *)d; " \
+              "for (size_t i = 0; i < n; i++) a[i] = (unsigned char)c; return d; }\n",
   "__half2" => HALF2_TYPE,
   "__halves2half2" => HALF2_TYPE + "static inline __half2 __halves2half2(unsigned short a, unsigned short b) { __half2 r; r.x = a; r.y = b; return r; }\n",
   "__low2half" => HALF2_TYPE + "static inline unsigned short __low2half(__half2 h) { return h.x; }\n",
