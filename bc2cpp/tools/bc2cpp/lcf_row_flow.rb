@@ -90,6 +90,12 @@ module LcfRowFlow
       kind && (kind.file_class || kind.owner)
     end
 
+    # The field names the schema at +path+ declares (what sym2idx can resolve for a row or table there);
+    # nil when the model has no fields for that path, so the caller cannot tell and must not judge.
+    def field_names(path)
+      @fields.key?(path) ? @fields[path].keys : nil
+    end
+
     def name(bit)
       k = @by_bit[bit]
       k && "#{k.role.to_s.upcase}:#{k.file_class || k.path}"

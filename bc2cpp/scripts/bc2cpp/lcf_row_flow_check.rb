@@ -405,18 +405,25 @@ refusal.call("module LCF\n  class Array2D\n    def [](i); 1; end\n  end\nend\n",
 refusal.call("module LCF\n  class Array2D\n    def []=(i, v); @data[i] = v; end\n  end\nend\n",
              '`Array2D#[]=` (the invariant) is redefined', 'LCF::Array2D#[]= is not defined exactly once')
 
-# A literal Symbol key on a proven LCF::Array1D that no schema declares is a compile error (raised in
-# the final emission pass), not a read that raises at run time.
-Dir.mktmpdir do |dir|
-  bad = "#{HOST}\nclass LrHost\n  def bad_key(i); @db[:player][i][:no_such_field_zz]; end\nend\n"
-  raised = begin
-    compile.call(bad, %w[LrHost], dir)
-    nil
-  rescue RuntimeError => e
-    e.message
+# A literal Symbol key on a proven LCF::Array1D row is a compile error when the row's own schema does not
+# declare it (raised in the final emission pass), not a read that raises at run time. Per schema: a name
+# another table declares is still an error on a player row.
+player_fields = model.field_names('DATABASE/player')
+other_name = model.kinds.select { |k| k.role == :row && k.path != 'DATABASE/player' }
+                  .flat_map { |k| model.field_names(k.path) || [] }.uniq
+                  .find { |n| n.match?(/\A\w+\z/) && !player_fields.include?(n) }
+[['no_such_field_zz', 'no schema declares it'], [other_name, 'another table declares it']].each do |name, why|
+  Dir.mktmpdir do |dir|
+    bad = "#{HOST}\nclass LrHost\n  def bad_key(i); @db[:player][i][:#{name}]; end\nend\n"
+    raised = begin
+      compile.call(bad, %w[LrHost], dir)
+      nil
+    rescue RuntimeError => e
+      e.message
+    end
+    check.call("a literal key the player schema lacks is a compile error (#{why})",
+               raised.to_s.include?("LCF::Array1D index :#{name} is not a field of the schema at DATABASE/player"))
   end
-  check.call('a literal key no schema declares on an Array1D is a compile error',
-             raised.to_s.include?('LCF::Array1D index :no_such_field_zz names no field in any LCF schema'))
 end
 
 # ---------------------------------------------------------------------------
