@@ -452,6 +452,7 @@ PUSH_MEMBERS = [
   [:gx, 4], [:gy, 4], [:gz, 4], [:nx, 4], [:ny, 4], [:nz, 4],
   [:stack_bytes, 4], [:local_stride, 4], [:local_user, 4],
   [:ox, 4], [:oy, 4], [:oz, 4],   # the first work-group of this submit (a large grid is split into several)
+  [:hlo, 8], [:hsize, 8], [:dbase, 8],   # the heap: its host address, its size, its device address (USM pointers)
 ]
 PUSH_INDEX = {}
 PUSH_OFFSET = []
@@ -936,6 +937,24 @@ class SFn
     PUSH_MEMBERS[PUSH_INDEX.fetch(member)][1] == 8 ? @spv.t_int(64) : @spv.t_int(32)
   end
 
+  # USM pointers. A pointer in memory is the host's address of its target (the host writes and reads them); in a register it is
+  # the device's. A load translates host to device and a store translates device to host. A value already in the other form
+  # is left alone: the host heap and the device heap do not overlap (the runtime checks), so a device address is never in the
+  # host range. On a driver whose device addresses are its host addresses both translations are the identity.
+  def ptr_to_device(v)
+    hlo, hsize, dbase = push_load(:hlo, nil), push_load(:hsize, nil), push_load(:dbase, nil)
+    inside = res(176, @spv.t_bool, res(ISUB, @spv.t_int(64), v, hlo), hsize)
+    moved = res(IADD, @spv.t_int(64), v, res(ISUB, @spv.t_int(64), dbase, hlo))
+    res(169, @spv.t_int(64), inside, moved, v)
+  end
+
+  def ptr_to_host(v)
+    hlo, hsize, dbase = push_load(:hlo, nil), push_load(:hsize, nil), push_load(:dbase, nil)
+    inside = res(176, @spv.t_bool, res(ISUB, @spv.t_int(64), v, dbase), hsize)
+    moved = res(ISUB, @spv.t_int(64), v, res(ISUB, @spv.t_int(64), dbase, hlo))
+    res(169, @spv.t_int(64), inside, moved, v)
+  end
+
   def builtin_component(var, k)
     v = res(61, @spv.t_vec3, var)
     res(81, @spv.t_int(32), v, k)
@@ -1166,7 +1185,8 @@ class SFn
     end
     p = addr_ptr(addr, t)
     align = t[0] == "ptr" ? 8 : t[1]
-    res_load(p, sty(t), align)
+    v = res_load(p, sty(t), align)
+    t[0] == "ptr" ? ptr_to_device(v) : v
   end
 
   def res_load(p, rtype, align)
@@ -1192,6 +1212,7 @@ class SFn
     end
     p = addr_ptr(addr, t)
     align = t[0] == "ptr" ? 8 : t[1]
+    v = ptr_to_host(v) if t[0] == "ptr"
     ins([62, p, v, 2, align])
   end
 

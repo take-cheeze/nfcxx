@@ -610,6 +610,56 @@ class Fn
     raise BadIR, "value of type #{ty[0]} (#{type_size(ty)} bytes) stored in a #{dty[0]} (#{type_size(dty)} bytes)" unless reg_class(dty) == reg_class(ty)
   end
 
+  # (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...): an inline PTX statement (the mma.sync forms of llama.cpp's mma.cuh).
+  # KIND out or inout: ARG is the address of the output (inout is loaded first); in: ARG is the value. Each operand
+  # gets a register of its type's class; the template's %N is operand N in order (outputs first, as gcc numbers
+  # them). Outputs are stored back after the instruction. Only 4-byte integers and floats are lowered.
+  def ptx_asm(s)
+    tmpl = s[1].to_s
+    regs = []
+    stores = []
+    s.drop(2).each do |o|
+      raise BadIR, "asm operand #{form_text(o)}" unless head_of(o) == "opnd"
+      kind = o[1].to_s
+      arg = o[2]
+      ty = parse_type(o[3])
+      raise Refused, "asm operand of type #{ty[0]} #{type_size(ty)} bytes (4-byte integers and floats only)" unless type_size(ty) == 4 && (ty[0] == "int" || ty[0] == "float") && !(ty[0] == "int" && ty[3])
+      if kind == "in"
+        v, _ = operand(arg)
+        r = fresh(reg_class(ty))
+        emit("mov.#{ptx_type(ty)} #{r}, #{v};")
+        regs << r
+      else
+        addr, _ = operand(arg)
+        r = fresh(reg_class(ty))
+        emit("ld.#{ptx_type(ty)} #{r}, [#{addr}];") if kind == "inout"
+        regs << r
+        stores << [addr, r, ty]
+      end
+    end
+    text = ""
+    i = 0
+    while i < tmpl.length
+      c = tmpl[i]
+      if c == "%" && i + 1 < tmpl.length && tmpl[i + 1] >= "0" && tmpl[i + 1] <= "9"
+        j = i + 1
+        j += 1 while j < tmpl.length && tmpl[j] >= "0" && tmpl[j] <= "9"
+        n = tmpl[(i + 1)...j].to_i
+        raise BadIR, "asm operand %#{n} of #{regs.length}" if n >= regs.length
+        text << regs[n]
+        i = j
+      else
+        text << c
+        i += 1
+      end
+    end
+    text.split("\n").each do |line|
+      line = line.strip
+      emit(line) unless line.empty?
+    end
+    stores.each { |addr, r, ty| emit("st.#{ptx_type(ty)} [#{addr}], #{r};") }
+  end
+
   # ---- expressions: store the value of x in register dest, of IR type dty
 
   def rval(x, dest, dty)
@@ -1093,6 +1143,8 @@ class Fn
     when "trap", "unreachable"
       # (trap) and (unreachable): an illegal instruction on the GPU; the IR spec says unreachable traps
       emit("trap;")
+    when "ptx-asm"
+      ptx_asm(s)
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. One unsigned compare does both ends of a signed index.
       v, vty = operand(s[1])
