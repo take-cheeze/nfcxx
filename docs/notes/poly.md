@@ -376,26 +376,43 @@ before anything is sent, and `host_cb` checks `pthread_self()` against the threa
 touches any host state, and answers with a status (two independent checks; the mutation checks show each alone suffices and
 that removing both makes the goroutine test fail). That also covers a goroutine that outlives the evaluation (the host is not
 inside the interpreter then). A goroutine that recovers the panic gets a clean error. **A panic that nothing in the goroutine
-recovers ends the process**: yaegi starts goroutines with a bare `go`, so Go's rule applies, for a `GoroutineError` as for a nil
-pointer or an index out of range. Tested in a child process of the host binary (`go_child` in `tests/poly/host.cpp`): the child
-that starts `go func() { panic("...") }()` dies (status 2, or SIGABRT: a c-shared Go runtime aborts), the child that does the same
-through `nfc.Go` runs on.
+recovers ends the process, unless the bridge guards the `go` statement that started the goroutine** (below). Go's rule applies to
+the goroutines the bridge does not guard, for a `GoroutineError` as for a nil pointer or an index out of range. Tested in child
+processes of the host binary (`go_child` and `go_child_status` in `tests/poly/host.cpp`): the child that starts
+`time.AfterFunc(0, func() { panic(...) })` dies (status 2, or SIGABRT: a c-shared Go runtime aborts), and the children that do
+the same through a `go` statement of the script (a function literal, a named function with arguments, a method value, a
+variadic call, a `go` inside a goroutine) and through `nfc.Go` run on.
 
-Whether the bridge can guard script goroutines was investigated (yaegi v0.16.1, and its master of February 2026 reads the same):
-- `interp.Options` has no hook for goroutines (GoPath, BuildTags, the three streams, Args, Env, SourcecodeFilesystem,
-  Unrestricted); a `go` statement is `go runCfg(...)`, and a call of a function value `go callFn(...)` (`interp/run.go`), and
-  `runCfg`'s deferred function prints the panic to the interpreter's stderr and panics again. Nothing in the embedding API
-  reaches it.
-- Go has no process-wide way to survive an unrecovered panic of a goroutine: `runtime/debug.SetPanicOnFault`, `SetCrashOutput`
-  and signal handlers only change what is written before the process ends.
-- The only other way is to rewrite the script, wrapping the body of every `go f(x)` in a function that recovers. That has to
-  understand `go` in every position (a method value, a call with arguments that are evaluated first, a call inside a closure) and
-  is not done: it is the kind of text surgery that fails on the one program nobody tried. (`recover()` is rewritten, because
-  there the AST says exactly what to wrap; see below.)
-- What is provided instead is the opt-in `nfc.Go(f func()) <-chan error`: it starts `f` in a goroutine and gives a channel that
-  receives `nil` when `f` returned or an `*nfc.Error` (`Class` and `Msg` as the host would see them) for a panic nothing in `f`
-  recovered, so `err := <-nfc.Go(f)` is a guarded join. It does not make a bare `go` safe, and a `go` statement inside `f` is
-  as unguarded as anywhere. Scripts that run untrusted or experimental goroutines should use it; a host cannot make them.
+**The bare `go` statement is guarded by rewriting its callee** (`lib/poly/go/gostmt.go`). yaegi (v0.16.1, and its master of
+February 2026 reads the same) has no hook for it: `interp.Options` has none for goroutines (GoPath, BuildTags, the three streams,
+Args, Env, SourcecodeFilesystem, Unrestricted), and a `go` statement is `go runCfg(...)` (an interpreted function) or
+`go callFn(...)` (a function value) in `interp/run.go`; `runCfg`'s deferred function prints the panic and panics again. Go has no
+process-wide way to survive an unrecovered goroutine panic (`runtime/debug.SetPanicOnFault`, `SetCrashOutput` and signal handlers
+only change what is written before the process ends). So the bridge changes the source where the AST says exactly what to change,
+as `recover()` is rewritten: the callee of each `go CALL` is wrapped at its byte offsets, `go f(a, b)` becoming
+`go nfcGoGuard__(f)(a, b)` (nothing else of the text changes; the line numbers stay). The go statement still evaluates the
+function value and the arguments in the calling goroutine, in Go's order (`x := 1; go func(v int) { ... }(x); x = 2` starts with 1).
+`nfcGoGuard__` is generic, so the value it gives has the callee's own type and the call checks as before; it calls `nfc.GoGuard`,
+which builds that function with `reflect.MakeFunc` and calls the callee, passing the arguments on (a variadic callee gets its slice
+through `CallSlice`). A panic of the call is printed on stderr (`panic in a goroutine of the script, contained by its go statement`)
+and the goroutine ends with zero results, the process goes on. Covered: a `go` statement whose call has a function value as callee,
+so `go f(x)`, `go func() { ... }()`, `go obj.m(x)`, `go pkg.F(x)`, a method expression, a variadic call, and a `go` inside a
+goroutine (tests: the child processes of `go_child_status` exit 0; the in-process checks pin the evaluation at the statement, the
+types and the results).
+- Refused with a `SyntaxError`, before the statement runs: a builtin as the callee (`go close(c)`, `go panic(x)`, `go println(x)`,
+  `go copy(a, b)`, ...) and a type written as the callee. The message says to write `go func() { close(c) }()`, which is guarded.
+  The check looks at the text of one evaluation: a builtin name that an earlier snippet redeclared is refused too. A refusal stops at its
+  statement: the statements before it in the same evaluation have run, as in yaegi's REPL.
+- Not covered, and still bare: `time.AfterFunc` and `context.AfterFunc` (both in the whitelist, and both start their function in a
+  goroutine of the runtime, not with a `go` statement): a panic in that function ends the process (`go_child_status("afterfunc")`
+  pins it; `context.AfterFunc` is the same mechanism and has no test of its own). Any goroutine started by host code outside a
+  script's `go` statement. A nil function value: the call panics in the goroutine and is reported, where Go stops the process with a
+  fatal error. The names `nfcGoGuard__` and `nfc` are not reserved: a script that declares them breaks the rewrite. Text that does not
+  parse is passed on as it is (yaegi reports the error, and no goroutine starts).
+- `nfc.Go(f func()) <-chan error` is unchanged: it starts `f` in a goroutine and gives a channel that receives `nil` when `f`
+  returned or an `*nfc.Error` (`Class` and `Msg` as the host would see them) for a panic nothing in `f` recovered, so
+  `err := <-nfc.Go(f)` is a guarded join that hands the error back to the script. `go f()` is guarded too, but it reports the panic
+  on stderr and does not return it; use `nfc.Go` where the error is needed.
 
 Several `Context`s each have their own interpreter and one thread at a time (`tests/poly/host.cpp` uses one from another thread
 than the one that created it).
@@ -410,8 +427,9 @@ quirks matter to scripts and are covered by tests:
 - `recover()` after a script's own `panic(x)` is a `reflect.Value` in yaegi, which defeats `r.(string)` and `r.(error)`. **Fixed in the
   bridge** (`lib/poly/go/recover.go`): every call of the builtin `recover()` in a script is wrapped as `nfc.Unwrap(recover())`
   (`nfc.Unwrap` gives `x` back; `nfc.ErrClass(r)` and `nfc.ErrMessage(r)` classify as the host does), found with `go/parser`
-  and inserted at the byte offsets of the call, nothing else of the text changes. Not wrapped: `defer recover()` and `go recover()`
-  (the call is not made by a deferred function, and Go's `defer recover()` recovers nothing either), a `recover` that is declared
+  and inserted at the byte offsets of the call, nothing else of the text changes. Not wrapped: `defer recover()` (the call is not
+  made by a deferred function, and Go's `defer recover()` recovers nothing either; `go recover()` is a refused builtin of the go
+  rewrite, "Threads and goroutines"), a `recover` that is declared
   in the same text, and everything once the script declared its own top-level `recover`. A text that does not parse is left to
   yaegi's error. The explicit form `nfc.Unwrap(recover())` keeps working.
 - A script-defined error type loses its methods when it is panicked with (`panic(&MyErr{3})`): the panic builtin is compiled inside
@@ -521,8 +539,9 @@ None of these is covered by a test unless stated.
   they are atomic between threads is untested (nothing here runs a second thread).
 - Path B (`NFCXX_PATH=b`) was not tried. The Python backend needs the development files of CPython and is skipped without them.
 - Go (`tests/poly/host.cpp` covers the supported forms; the rest is stated as untested):
-  - A panic that nothing in a script's own goroutine recovers ends the process (Go's rule; yaegi has no recover around `go` and no
-    hook; `nfc.Go` is the guarded way to start one, "Threads and goroutines"). A host function called from a goroutine panics with
+  - A panic that nothing in a script's goroutine recovers ends the process when the goroutine is not started by a guarded `go`
+    statement: `time.AfterFunc` and `context.AfterFunc` start theirs in the runtime, and a refused builtin `go` is not started
+    (`nfc.Go` is the guarded way to start one that reports to the script, "Threads and goroutines"). A host function called from a goroutine panics with
     a `GoroutineError` the goroutine can recover; it is never run.
   - yaegi is an interpreter and its coverage of Go has gaps (the list in "Speed and coverage gaps"); compile errors of every kind
     are `SyntaxError`; script-defined error types lose their methods across a panic (`recover()` itself gives the plain value since the
@@ -559,7 +578,7 @@ None of these is covered by a test unless stated.
 
 ## Checks run
 
-`tests/poly/run.sh` on both back ends with all six languages (the host prints how many checks it ran: 1206; JavaScript alone 321, Go alone 318),
+`tests/poly/run.sh` on both back ends with all six languages (the host prints how many checks it ran: 1221; JavaScript alone 321, Go alone 333),
 8 repeated runs of each binary, each binary under valgrind (`PYTHONMALLOC=malloc valgrind -q --error-exitcode=9`, no errors
 reported), the setjmp control build described above, and mutation checks on scratch copies of the backends: dropping the
 interpreter pass-through in the Ruby or Lua trampoline, losing script error identity in Python, or leaking the ownership record in
@@ -608,6 +627,7 @@ Each row is a change that was made and what the tests then did:
 | no weak-pointer sweep in `nfc.GC()` (`sweepDead` finds the dead wrappers but queues nothing) | **6 checks fail in every run, 200 of 200** (`tests/poly/stress-go.sh`-style loop against the modified library): the "host objects and the collector" scenario runs a second time with `nfc.FinalizersOff(true)`, so only the sweep can release the objects. Before that pass existed this mutation was not deterministic (the finalizer goroutine usually released the objects in time: it passed in the last run and failed 4 of 20 earlier ones), which is the flakiness this row used to record |
 | `recover()` is not wrapped in `nfc.Unwrap` (`rewriteRecover` returns the text as it is) | the first `recover().(string)` check fails, and the next one ends the test in an uncaught exception (`reflect: Method on nil interface value`) |
 | `nfc.Go` does not recover | the in-process check ends the process with Go's fatal panic (the child-process check of the goroutine test would also fail: it expects the guarded child to run on) |
+| the rewrite of `go` statements is disabled (`rewriteGo` returns the text as it is; `lib/poly/go/gostmt.go`) | the child-process checks of the literal, named, method, variadic and nested go statements end with a fatal panic, and the refusal checks of `go close(...)` and `go println(...)` find no SyntaxError (qbe, a private library built from a scratch copy: `POLY_LANGS=go`, the Go suite fails on exactly those checks) |
 | `go_collect` runs one pass and no sweep when a second collection began (the old `nfc.GC()`: `debug.FreeOSMemory()`, then the sweep) | passes: not distinguishable by the tests, see "The exact collector" |
 
 ### The exact collector

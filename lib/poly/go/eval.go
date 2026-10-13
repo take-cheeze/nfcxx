@@ -147,6 +147,10 @@ func (in *Interp) run(g group) (res reflect.Value, err error) {
 		}
 	}()
 	g.text = in.rewriteRecover(g.text, g.decl)
+	var refused string
+	if g.text, refused = rewriteGo(g.text, g.decl); refused != "" {
+		return reflect.Value{}, &compileError{msg: refused}
+	}
 	if g.decl {
 		g.text = in.dropImported(g.text)
 		if strings.TrimSpace(g.text) == "" {
