@@ -504,7 +504,6 @@ Value infer(const Graph& g, const Node& n) {
     if (present(3)) axes = consts(3); else for (size_t k = 0; k < starts.size(); k++) axes.push_back(static_cast<int64_t>(k));
     if (present(4)) steps = consts(4); else steps.assign(starts.size(), 1);
     if (starts.size() != ends.size() || starts.size() != axes.size() || starts.size() != steps.size()) fail("starts, ends, axes and steps differ in length");
-    Dims out = in;
     std::set<int64_t> seen;
     for (size_t k = 0; k < starts.size(); k++) {
       int64_t ax = norm(op, axes[k], static_cast<int64_t>(in.size()));
@@ -513,9 +512,11 @@ Value infer(const Graph& g, const Node& n) {
       if (in[static_cast<size_t>(ax)].is_symbol()) fail("slicing the symbolic dimension " + in[static_cast<size_t>(ax)].str() + " is not supported (its size is needed)");
       SliceIdx ix = slice_indices(in[static_cast<size_t>(ax)].size(), true, starts[k], true, ends[k], steps[k]);
       if (ix.count < 1) fail("the slice of axis " + std::to_string(ax) + " is empty (empty tensors are not supported)");
-      out[static_cast<size_t>(ax)] = Dim(ix.count);
     }
-    return make_value("", V(0).dtype, out);
+    shaping::FreshDims fresh;
+    const std::optional<shaping::Shape> out = shaping::Slice(to_shape(in), starts, ends, axes, steps, fresh);
+    if (!out) fail("the slice does not fit the shape " + to_string(in));
+    return make_value("", V(0).dtype, from_shape(*out));
   }
   if (op == "Pad") {
     want_inputs(2, 3);
@@ -541,17 +542,18 @@ Value infer(const Graph& g, const Node& n) {
     const int64_t rank = static_cast<int64_t>(V(0).shape.size());
     const int64_t axis = norm(op, n.attr_int("axis", 0), rank);
     Dims out = D(0);
-    Dim total(0);
+    std::vector<shaping::Shape> ins;
     for (size_t k = 0; k < n.inputs.size(); k++) {
       same_dtype(V(0), V(k));
       if (static_cast<int64_t>(V(k).shape.size()) != rank) fail("inputs differ in rank");
       const Dims dk = D(k);
       for (int64_t d = 0; d < rank; d++)
         if (d != axis && dk[static_cast<size_t>(d)] != out[static_cast<size_t>(d)]) fail("shapes " + to_string(D(0)) + " and " + to_string(dk) + " differ off the axis");
-      total = total + dk[static_cast<size_t>(axis)];   // the sizes add up: N + N is 2*N
+      ins.push_back(to_shape(dk));
     }
-    out[static_cast<size_t>(axis)] = total;
-    return make_value("", V(0).dtype, out);
+    const std::optional<shaping::Shape> joined = shaping::Concat(ins, axis);   // the sizes along the axis add up: N + N is 2*N
+    if (!joined) fail("cannot concatenate " + to_string(D(0)) + " along axis " + std::to_string(axis));
+    return make_value("", V(0).dtype, from_shape(*joined));
   }
   if (op == "Gemm") {
     want_inputs(2, 3);
@@ -567,7 +569,9 @@ Value infer(const Graph& g, const Node& n) {
     if (A[1] != B[0]) fail("op(A) " + to_string(A) + " and op(B) " + to_string(B) + " do not align");
     const Dims out{A[0], B[1]};
     if (present(2) && !broadcasts_to(D(2), out)) fail("C " + to_string(D(2)) + " does not broadcast to " + to_string(out));
-    return make_value("", a.dtype, out);
+    const std::optional<shaping::Shape> product = shaping::Gemm(to_shape(D(0)), to_shape(D(1)), tA != 0, tB != 0);
+    if (!product) fail("A and B must be 2-D");
+    return make_value("", a.dtype, from_shape(*product));
   }
   if (op == "Gather") {
     want_inputs(2, 2);
@@ -582,11 +586,9 @@ Value infer(const Graph& g, const Node& n) {
     if (const Array* c = g.initializer(n.inputs[1]))   // constant indices are checked now; runtime ones cannot be
       for (const Scalar& s : c->data)
         if (s.i < -d[static_cast<size_t>(ax)].size() || s.i >= d[static_cast<size_t>(ax)].size()) fail("index " + std::to_string(s.i) + " is out of range for axis " + std::to_string(ax) + " of size " + std::to_string(d[static_cast<size_t>(ax)].size()));
-    const Dims ixd = D(1);
-    Dims out(d.begin(), d.begin() + ax);
-    out.insert(out.end(), ixd.begin(), ixd.end());
-    out.insert(out.end(), d.begin() + ax + 1, d.end());
-    return make_value("", dv.dtype, out);
+    const std::optional<shaping::Shape> out = shaping::Gather(to_shape(d), to_shape(D(1)), ax);
+    if (!out) fail("cannot gather along axis " + std::to_string(ax));
+    return make_value("", dv.dtype, from_shape(*out));
   }
   if (op == "Conv") {
     want_inputs(2, 3);
@@ -605,9 +607,15 @@ Value infer(const Graph& g, const Node& n) {
     if (n.has_attr("kernel_shape") && n.attr_ints("kernel_shape") != kernel) fail("kernel_shape does not match the spatial shape of W " + to_string(D(1)));
     if (present(2) && D(2) != Graph::to_dims(Shape{M})) fail("B must have shape [M] = [" + std::to_string(M) + "]");
     Window win = window(n, Shape(xs.begin() + 1, xs.end()), kernel, false);
-    Dims out{D(0)[0], Dim(M)};
-    for (int64_t s : win.out) out.push_back(Dim(s));
-    return make_value("", x.dtype, out);
+    shaping::WindowAttrs attrs;
+    attrs.strides = win.strides;
+    attrs.dilations = win.dilations;
+    attrs.pads = win.pads_begin;   // the rules take ONNX's layout: all begins, then all ends
+    attrs.pads.insert(attrs.pads.end(), win.pads_end.begin(), win.pads_end.end());
+    shaping::FreshDims fresh;
+    const std::optional<shaping::Shape> out = shaping::Conv(to_shape(D(0)), to_shape(D(1)), attrs, fresh);
+    if (!out) fail("cannot compute the output shape");
+    return make_value("", x.dtype, from_shape(*out));
   }
   if (op == "MaxPool" || op == "AveragePool") {
     want_inputs(1, 1);
@@ -624,9 +632,15 @@ Value infer(const Graph& g, const Node& n) {
     for (size_t k = 0; k < d; k++)   // a window that lies only in the padding has no value: refused
       if (win.pads_begin[k] >= win.dilations[k] * (kernel[k] - 1) + 1 || win.pads_end[k] >= win.dilations[k] * (kernel[k] - 1) + 1)
         fail("pads of axis " + std::to_string(k) + " reach a whole window (pads must be smaller than the kernel extent)");
-    Dims out{xd[0], xd[1]};
-    for (int64_t s : win.out) out.push_back(Dim(s));
-    return make_value("", x.dtype, out);
+    shaping::WindowAttrs attrs;
+    attrs.strides = win.strides;
+    attrs.dilations = win.dilations;
+    attrs.pads = win.pads_begin;
+    attrs.pads.insert(attrs.pads.end(), win.pads_end.begin(), win.pads_end.end());
+    shaping::FreshDims fresh;
+    const std::optional<shaping::Shape> out = shaping::Pool(to_shape(xd), kernel, attrs, fresh);
+    if (!out) fail("cannot compute the output shape");
+    return make_value("", x.dtype, from_shape(*out));
   }
   if (op == "BatchNormalization") {
     want_inputs(5, 5);

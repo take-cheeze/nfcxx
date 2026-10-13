@@ -1,7 +1,6 @@
 // Copied from onnxsim (onnxsim/shaping_rules.{h,cpp}, 'onnxsim::shaping'), licensed under the Apache License 2.0 (see the LICENSE of the onnxsim repository).
-// Source: onnxsim master a98d6fea (the commit that merged the pure shaping rules, PR #2157; the files were last changed in daa8f548 and cdc7d171).
+// Source: onnxsim master c6913888 (after PR #2158, the Conv/pool pads layout fix).
 // Changes from the original: this comment, and the includes (nfcuop_shaping.hpp, nfcuop_sym_expr.hpp). The code is otherwise unchanged.
-// KNOWN DEVIATIONS FROM ONNX are documented in the header (Conv/pool pads layout, auto_pad); nfcxx keeps its own Conv and pool rules.
 // Standalone test (no ONNX, no protobuf):
 //   g++ -std=c++17 shaping_rules.cpp sym_expr.cpp shaping_rules_test.cpp -o t
 //   && ./t
@@ -321,6 +320,16 @@ int main() {
     assert(Str(*Conv(Dims({SymExpr(1), SymExpr(1), SymExpr(10), SymExpr(10)}),
                      Dims({SymExpr(1), SymExpr(1), SymExpr(3), SymExpr(3)}), a,
                      f)) == "[1, 1, 6, 6]");
+  }
+  {
+    // Asymmetric pads in ONNX layout: begins [0, 0], ends [1, 1]. Kernel 3 on
+    // a 5x5 input gives (5 + 0 + 1 - 3) + 1 = 4 on each axis.
+    FreshDims f;
+    WindowAttrs a;
+    a.pads = {0, 0, 1, 1};
+    assert(Str(*Conv(Dims({SymExpr(1), SymExpr(1), SymExpr(5), SymExpr(5)}),
+                     Dims({SymExpr(1), SymExpr(1), SymExpr(3), SymExpr(3)}), a,
+                     f)) == "[1, 1, 4, 4]");
   }
   {
     // Symbolic spatial length: a strided window is not a polynomial -> fresh.

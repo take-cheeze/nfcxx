@@ -1,7 +1,6 @@
 // Copied from onnxsim (onnxsim/shaping_rules.{h,cpp}, 'onnxsim::shaping'), licensed under the Apache License 2.0 (see the LICENSE of the onnxsim repository).
-// Source: onnxsim master a98d6fea (the commit that merged the pure shaping rules, PR #2157; the files were last changed in daa8f548 and cdc7d171).
+// Source: onnxsim master c6913888 (after PR #2158, the Conv/pool pads layout fix).
 // Changes from the original: this comment, and the includes (nfcuop_shaping.hpp, nfcuop_sym_expr.hpp). The code is otherwise unchanged.
-// KNOWN DEVIATIONS FROM ONNX are documented in the header (Conv/pool pads layout, auto_pad); nfcxx keeps its own Conv and pool rules.
 #include "nfcuop_shaping.hpp"
 
 #include <algorithm>
@@ -337,12 +336,12 @@ std::optional<Shape> WindowedOutput(const Shape& x, SymExpr channels_out,
     const std::int64_t d = i < static_cast<std::int64_t>(attrs.dilations.size())
                                ? attrs.dilations[i]
                                : 1;
-    const std::int64_t pb = 2 * i < static_cast<std::int64_t>(attrs.pads.size())
-                                ? attrs.pads[2 * i]
-                                : 0;
+    // ONNX lays pads out as [begin_0, ..., begin_{n-1}, end_0, ..., end_{n-1}].
+    const std::int64_t pb =
+        i < static_cast<std::int64_t>(attrs.pads.size()) ? attrs.pads[i] : 0;
     const std::int64_t pe =
-        2 * i + 1 < static_cast<std::int64_t>(attrs.pads.size())
-            ? attrs.pads[2 * i + 1]
+        spatial + i < static_cast<std::int64_t>(attrs.pads.size())
+            ? attrs.pads[spatial + i]
             : 0;
     // Exact only when the input spatial dim is a concrete int; a strided window
     // over a symbolic length is not a polynomial, so it gets a fresh symbol.
