@@ -39,7 +39,7 @@ command -v "$cc" >/dev/null || skip "no C compiler ($cc) for cgo"
 
 mkdir -p "$work"
 [ -n "${HOME:-}" ] || { export HOME=$work/home; mkdir -p "$HOME"; }   # go needs a place for its build cache
-exec 9>"$work/.lock"; flock 9
+exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && fresh && exit 0
 
 log=$work/build.log; : > "$log"

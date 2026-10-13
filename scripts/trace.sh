@@ -20,10 +20,15 @@ trace_end() {
     "$(trace_escape "$2")" "$3" "$start" $((now - start)) "${BASHPID:-$$}" >> "$NFCXX_TRACE"
 }
 
-# Driver only: start a trace file at $1 and record the whole run when the driver exits.
+# Driver only: start a trace file at $1 and record the whole run when the driver exits. A driver that runs another
+# driver (the EH shim build) shares the file: only the outermost one (NFCXX_TRACE_OWNER) writes the opening "[" and the
+# closing "]"; the nested one adds its own span.
 trace_begin() {
-  NFCXX_TRACE=$(realpath -m "$1"); export NFCXX_TRACE
-  printf '[\n' > "$NFCXX_TRACE"
+  NFCXX_TRACE=$(abs_path "$1"); export NFCXX_TRACE
+  if [ -z "${NFCXX_TRACE_OWNER:-}" ]; then
+    export NFCXX_TRACE_OWNER=$$
+    printf '[\n' > "$NFCXX_TRACE"
+  fi
   NFCXX_TRACE_T0=$(trace_now)
   trap trace_finish EXIT
 }
@@ -33,5 +38,7 @@ trace_finish() {
   local t0=$NFCXX_TRACE_T0
   unset NFCXX_TRACE_T0
   trace_end "$t0" nfcxx driver
-  printf '{"name":"trace_end","ph":"i","s":"g","ts":%s,"pid":%s,"tid":1}\n]\n' "$(trace_now)" "$$" >> "$NFCXX_TRACE"
+  if [ "${NFCXX_TRACE_OWNER:-}" = "$$" ]; then
+    printf '{"name":"trace_end","ph":"i","s":"g","ts":%s,"pid":%s,"tid":1}\n]\n' "$(trace_now)" "$$" >> "$NFCXX_TRACE"
+  fi
 }
