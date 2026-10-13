@@ -167,12 +167,14 @@ EOF
   rejects "unknown -O" "optimisation" -Oz -c util.c -o rej.o
   printf '%s\n' 'int f(int x) { return x * 3; }' > opt.c
   if [ $b = gcc ]; then
+    # The marker -O0 leaves and -O2 drops: the frame pointer rbp on x86-64; on aarch64 the stack frame (sub sp, sp, N).
+    fp=rbp; [ "$(uname -m)" = x86_64 ] || fp='sp, sp,'
     "$nfcc" -S opt.c -o opt_def.s; "$nfcc" -O0 -S opt.c -o opt0.s; "$nfcc" -O2 -S opt.c -o opt2.s; "$nfcc" -S -g opt.c -o optg.s
     "$nfcc" -O0 -O3 -S opt.c -o opt03.s; "$nfcc" -O3 -S opt.c -O0 -o opt30.s
-    if grep -q rbp opt0.s && ! grep -q rbp opt2.s && ! grep -q rbp opt_def.s; then ok "gcc backend: -O0 is unoptimised, -O2 and the default optimise"
-    else bad "gcc backend -O levels" "rbp in -O0: $(grep -c rbp opt0.s) -O2: $(grep -c rbp opt2.s) default: $(grep -c rbp opt_def.s)"; fi
-    if ! grep -q rbp opt03.s && grep -q rbp opt30.s; then ok "gcc backend: the last -O wins"
-    else bad "gcc backend: last -O wins" "-O0 -O3 rbp=$(grep -c rbp opt03.s), -O3 -O0 rbp=$(grep -c rbp opt30.s)"; fi
+    if grep -q $fp opt0.s && ! grep -q $fp opt2.s && ! grep -q $fp opt_def.s; then ok "gcc backend: -O0 is unoptimised, -O2 and the default optimise"
+    else bad "gcc backend -O levels" "$fp in -O0: $(grep -c $fp opt0.s) -O2: $(grep -c $fp opt2.s) default: $(grep -c $fp opt_def.s)"; fi
+    if ! grep -q $fp opt03.s && grep -q $fp opt30.s; then ok "gcc backend: the last -O wins"
+    else bad "gcc backend: last -O wins" "-O0 -O3 $fp=$(grep -c $fp opt03.s), -O3 -O0 $fp=$(grep -c $fp opt30.s)"; fi
     if grep -q '\.loc' optg.s && ! grep -q '\.loc' opt2.s; then ok "gcc backend: -g produces debug info, no -g does not"
     else bad "gcc backend -g" ".loc with -g: $(grep -c '\.loc' optg.s) without: $(grep -c '\.loc' opt2.s)"; fi
   else
@@ -211,7 +213,8 @@ EOC
     elif grep -q overflow_unsupported_operand_types <<<"$out"; then ok "floating operand to __builtin_add_overflow fails at link, naming the symbol"
     else bad "floating operand to __builtin_add_overflow" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
   fi
-  if [ "$b" = gcc ]; then
+  if [ "$b" = gcc ] && [ "$(uname -m)" != x86_64 ]; then echo "skip $b -mavx2 intrinsics (x86-64 only)"; fi
+  if [ "$b" = gcc ] && [ "$(uname -m)" = x86_64 ]; then
     # -mavx2 reaches the C compile, so the intrinsics inline (without it gcc: "target specific option mismatch").
     # gcc backend only: QBE ignores the ISA options and cannot compile these intrinsics.
     cat > avx2.c <<'EOF'

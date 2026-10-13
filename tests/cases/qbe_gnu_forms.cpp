@@ -26,3 +26,4 @@ int main() {
     if (!(std::numbers::pi_v<double> > 3.0)) return 5;
     return tl == 7 ? 0 : 4;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

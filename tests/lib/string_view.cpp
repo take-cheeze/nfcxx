@@ -46,3 +46,4 @@ int main() {
   fails += std::string_view("é").size() != 2;   // UTF-8 bytes, not code points
   return fails;
 }
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only

@@ -1,3 +1,4 @@
+// X86-ONLY-qbe: the qbe long double helpers in be/nfcxx_ldrt.c implement the x87 extended format, x86-64 only
 /* EXPECT: 0
    long double (x87 extended, 16 bytes in memory) through cproc's runtime helpers (docs/notes/float128-qbe.md): arithmetic,
    comparisons, conversions, ++ and --, conditions, initializers, arrays, compound assignment and by-value parameters and

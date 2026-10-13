@@ -22,7 +22,7 @@ trap 'rm -rf "$out"' EXIT
 rw() { "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1"; }
 
 # 1. The rewrite matches the goldens.
-for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage rewrite/member_linkage; do
+for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage rewrite/member_linkage rewrite/device_lambda; do
   if rw "$c.cu" > "$out/$(basename "$c").cpp" && diff -u "$c.expected.cpp" "$out/$(basename "$c").cpp"; then
     echo "rewrite $c: ok"
   else
@@ -37,6 +37,16 @@ if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/template
 else
   echo "device unit template: FAIL"; fail=1
 fi
+# 1c. The device units of a macro named only in a launch's template arguments, and of a launch whose template arguments
+# are block-local constants, keep the macro and name the values in the wrapper.
+for c in macro_wrapper local_targs launch_macro_body; do
+  if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
+     && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
+    echo "device unit $c: ok"
+  else
+    echo "device unit $c: FAIL"; fail=1
+  fi
+done
 
 # 1b3. The device pass takes only the branches of the conditionals it evaluates (#if/#elif/#else/#ifndef), so the
 # kernels of the untaken branches are not in the unit and not in the kernel list.
@@ -63,6 +73,15 @@ if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_s
   echo "device unit shadow_shared: ok"
 else
   echo "device unit shadow_shared: FAIL"; fail=1
+fi
+
+# 1b2c. A parameter and a local named like a dynamic array (llama.cpp fattn.cu) are their own declarations in their
+# scopes; the device unit takes the C++ branch of a `#ifndef __cplusplus` conditional.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_decl.cu > "$out/shadow_decl.device.cpp" \
+   && diff -u rewrite/shadow_decl.device.expected.cpp "$out/shadow_decl.device.cpp"; then
+  echo "device unit shadow_decl: ok"
+else
+  echo "device unit shadow_decl: FAIL"; fail=1
 fi
 
 # 1c. Included headers are expanded once each: a diamond-shaped include tree (each level includes the next one three

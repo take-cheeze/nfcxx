@@ -378,6 +378,8 @@ FLOAT_BUILTINS = {
   "__nfcxx_saturatef" => ["cvt.sat.f32.f32", 1],
   "__nfcxx_expf" => [:exp, 1],
   "__nfcxx_logf" => [:log, 1],
+  "__nfcxx_floorf" => ["cvt.rmi.f32.f32", 1],   # round toward -inf: floorf (exact, NaN and inf pass through)
+  "__nfcxx_truncf" => ["cvt.rzi.f32.f32", 1],   # round toward zero: trunc (exact)
 }
 # Float to 32-bit integer: name => PTX instruction. cvt.rni rounds to nearest even and saturates (NaN gives 0), as CUDA's
 # __float2int_rn.

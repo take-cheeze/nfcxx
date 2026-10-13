@@ -10,3 +10,4 @@ int main(){
   bool signbit_ok = 1.0/neg(0.0) < 0;      // -0.0 keeps its sign
   return (s == 113 && d == 0.0 && negf(1.5f) == -1.5f && signbit_ok) ? 42 : 1;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

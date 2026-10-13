@@ -13,11 +13,14 @@
 // Supported operators: Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Erf Add Sub Mul Div Mod Max Min
 // And Or Xor BitwiseAnd BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Gemm
 // Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad (mode constant)
-// Gather Conv MaxPool AveragePool BatchNormalization (inference) InstanceNormalization LayerNormalization (see the operator notes in
-// nfcuop_lower.cpp for their lowering and cost). All shapes are static; dynamic dimensions come in a later stage. See docs/notes/uop.md.
+// Pow Floor Ceil IsNaN IsInf CumSum ReduceProd ArgMax ArgMin Tile Gather Conv MaxPool AveragePool BatchNormalization (inference)
+// InstanceNormalization LayerNormalization (see the operator notes in nfcuop_lower.cpp for their lowering and cost). A dimension may be
+// a symbol (ONNX dim_param, e.g. "N"): see Dim, Graph::bind and Evaluator below. Everything is static once the symbols are bound.
+// See docs/notes/uop.md.
 #pragma once
 #include <deque>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -45,10 +48,29 @@ struct Attribute {
   static Attribute Tensor(const std::string& name, Array v) { Attribute a; a.name = name; a.kind = AttrKind::Tensor; a.t = std::move(v); return a; }
 };
 
+// A dimension of a value: an integer (at least 1), or a symbol (ONNX dim_param, e.g. "N") whose size is given when the graph is
+// evaluated (Graph::bind). Symbols are equal when their names are: N against N is N, N against 1 broadcasts to N, and any other
+// combination of a symbol with a different dimension is an Error (the operators say which combinations they accept).
+struct Dim {
+  int64_t size = 1;  // the size of an integer dimension
+  std::string sym;   // the symbol of a symbolic dimension (then size is unused); "" for an integer dimension
+  Dim() {}
+  Dim(int64_t n) : size(n) {}
+  static Dim symbol(const std::string& s) { Dim d; d.size = 0; d.sym = s; return d; }
+  bool is_symbol() const { return !sym.empty(); }
+  bool operator==(const Dim& o) const { return is_symbol() == o.is_symbol() && (is_symbol() ? sym == o.sym : size == o.size); }
+  bool operator!=(const Dim& o) const { return !(*this == o); }
+};
+using Dims = std::vector<Dim>;
+// The size each symbol takes at evaluation time (every symbol of the graph, each at least 1).
+using Bindings = std::map<std::string, int64_t>;
+
 struct Value {
   std::string name;  // unique in the graph; the name in the ONNX file
   DType dtype;
-  Shape shape;
+  Shape shape;       // the size of every dimension; 0 where the dimension is a symbol
+  // The symbol of every dimension, when some dimension is symbolic ("" for an integer one); empty when the value is static.
+  std::vector<std::string> syms;
 };
 
 struct Node {
@@ -64,13 +86,19 @@ struct Node {
   bool has_attr(const std::string& n) const { return attr(n) != nullptr; }
 };
 
+using nfcuop::to_string;  // the Shape overload stays visible in hir
+std::string to_string(const Dims& d);  // "[N,4]": a symbol by its name
+
 // ONNX TensorProto.DataType of a dtype (FLOAT 1, INT32 6, INT64 7, BOOL 9, DOUBLE 11).
 int onnx_dtype(DType d);
 
 class Graph {
  public:
   // An input to be fed when the graph runs. Names must be unique among all values.
-  int add_input(const std::string& name, DType d, const Shape& shape);
+  int add_input(const std::string& name, DType d, const Shape& shape) { return add_symbolic_input(name, d, to_dims(shape)); }
+  // An input whose dimensions may be symbols (ONNX dim_param); the same as add_input when none is.
+  int add_symbolic_input(const std::string& name, DType d, const Dims& shape);
+  static Dims to_dims(const Shape& s) { return Dims(s.begin(), s.end()); }
   // A constant tensor; name "" picks one.
   int add_initializer(const std::string& name, const Array& a);
   // Appends a node, infers its output (throws Error for an unknown operator, a bad input, dtype or attribute) and
@@ -90,6 +118,13 @@ class Graph {
   // A new graph with the model's content; `outputs` receives the ids of its graph outputs.
   static Graph from_onnx(const std::string& model_bytes, std::vector<int>* outputs = nullptr);
   int find_value(const std::string& name) const;  // the id of the value of this name, or -1
+  Dims dims(int id) const;                  // the shape of a value, with its symbols
+  bool symbolic(int id) const { return !value(id).syms.empty(); }  // whether a dimension of the value is a symbol
+  std::vector<std::string> symbols() const;  // the symbols of the graph's inputs, sorted, without repetitions
+  // A copy of the graph with every symbol bound to its size: the inputs get the bound shapes and every operator is inferred again
+  // with them (so a Reshape that copied a symbol gets its integer). Value ids are the same in both graphs. Throws Error when a
+  // symbol has no binding, when a binding names no symbol of the graph or is below 1, or when an operator cannot take the sizes.
+  Graph bind(const Bindings& b) const;
 
   size_t num_values() const { return values_.size(); }
   const Value& value(int id) const;
@@ -106,7 +141,7 @@ class Graph {
   std::string str() const;  // one line per node: `%v5 = MatMul(%v1, %v2) : float32[2,4]`
 
  private:
-  int new_value(const std::string& name, DType d, const Shape& shape);
+  int new_value(const std::string& name, DType d, const Dims& shape);
   int add_node_named(const std::string& op, std::vector<int> inputs, std::vector<Attribute> attrs, const std::string& out_name, const std::string& node_name);
   std::deque<Value> values_;  // stable addresses: Tensor::shape() hands out references
   std::vector<Node> nodes_;
@@ -119,7 +154,7 @@ class Graph {
 
 // Lowers values of a hir::Graph to tensors of a ut::Session (memoized), so they can be evaluated with the UOp
 // interpreter or rendered. Inputs become placeholders named like the inputs, initializers become buffers. The graph
-// may grow between calls.
+// may grow between calls. A value with a symbolic dimension cannot be lowered: bind the graph first (Graph::bind).
 class Lowerer {
  public:
   Lowerer(const Graph& g, ut::Session& s) : g_(g), s_(s) {}
@@ -131,6 +166,28 @@ class Lowerer {
   const Graph& g_;
   ut::Session& s_;
   std::map<int, ut::Tensor> memo_;
+};
+
+// Evaluates values of a graph whose inputs may have symbolic dimensions. For each binding of the symbols the graph is bound
+// (Graph::bind), lowered and evaluated by the UOp interpreter; the lowering is cached per binding, keyed on the bindings in
+// symbol-name order, so the same sizes again cost nothing to lower. The graph must outlive the Evaluator and must not change
+// while it is in use (values added later are fine if they are not evaluated from an earlier binding).
+class Evaluator {
+ public:
+  explicit Evaluator(const Graph& g) : g_(g) {}
+  // The values of `outputs` (value ids of the graph) for the feeds (input name -> Array of the bound shape and dtype).
+  std::vector<Array> eval(const Bindings& b, const std::vector<int>& outputs, const std::map<std::string, Array>& feeds = {});
+  size_t bindings_lowered() const { return cache_.size(); }  // the number of distinct bindings lowered so far
+
+ private:
+  struct Entry {
+    explicit Entry(Graph g) : bound(std::move(g)), low(bound, s) {}
+    Graph bound;
+    ut::Session s;
+    Lowerer low;
+  };
+  const Graph& g_;
+  std::map<std::string, std::unique_ptr<Entry>> cache_;
 };
 
 }  // namespace hir
