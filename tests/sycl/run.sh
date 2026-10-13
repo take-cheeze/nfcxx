@@ -17,7 +17,7 @@ have_nfcxx=0
 [ -x "$root/build/edg/bin/eccp" ] && [ -x "$root/build/qbe/qbe" ] && have_nfcxx=1
 
 # ---- host path
-for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom double copysign slices; do
+for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices; do
   want="$t ok"
   if "$root/scripts/sycl-build.sh" --cpu "$t.cpp" -o "$out/$t.g++" > "$out/$t.log" 2>&1 && [ "$("$out/$t.g++" | tail -1)" = "$want" ]; then
     echo "host g++   $t: ok"
@@ -43,7 +43,7 @@ if [ $have_nfcxx = 1 ] && command -v spirv-val >/dev/null && [ -n "$libvk" ]; th
 if [ $vk_ok = 1 ]; then
   vkbuild() { "$root/scripts/sycl-build.sh" --backend=vulkan --cxx="$nfcxx" "$1.cpp" -o "$out/vk_$1" > "$out/vk_$1.log" 2>&1; }
   vkprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom double copysign slices; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices; do
     if ! vkbuild $t; then echo "vulkan     $t: FAIL (build)"; grep -v prelinker "$out/vk_$t.log" | head -3; fail=1; continue; fi
     "$out/vk_$t" > "$out/vk_$t.out" 2> "$out/vk_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "Vulkan runtime" "$out/vk_$t.err"; then vkprobe=0; break; fi

@@ -34,9 +34,10 @@ namespace detail {
 struct vk_push {
   uint64_t closure, statics, stack, local, flag;
   uint32_t gx, gy, gz, nx, ny, nz, stack_bytes, local_stride, local_user, ox, oy, oz;
+  uint64_t hlo, hsize, dbase;   // the heap: host address, size, device address (USM pointers, see PUSH_MEMBERS)
 };
-static_assert(sizeof(vk_push) == 88, "push block layout");
-constexpr uint32_t vk_push_size = 88;
+static_assert(sizeof(vk_push) == 112, "push block layout");
+constexpr uint32_t vk_push_size = 112;
 
 class vk_rt {
  public:
@@ -83,11 +84,12 @@ class vk_rt {
     if (addr < dev_base_ || addr - dev_base_ >= heap_size_) fail("device address outside the heap");
     return host_ + (addr - dev_base_);
   }
+  // a host address in the heap (every USM allocation is one)
   bool in_heap(const void *p) const {
-    uint64_t a = (uint64_t)(uintptr_t)p;
-    return a >= dev_base_ && a - dev_base_ < heap_size_;
+    uintptr_t a = (uintptr_t)p;
+    return a >= (uintptr_t)host_ && a - (uintptr_t)host_ < heap_size_;
   }
-  bool identity() const { return identity_; }
+  uint64_t dev_of(const void *p) const { return dev_base_ + ((uintptr_t)p - (uintptr_t)host_); }
   uint64_t dev_base() const { return dev_base_; }
 
   // ---- dispatch
@@ -129,6 +131,9 @@ class vk_rt {
     p.stack = region;
     p.local = region + stack_total;
     p.flag = dev_base_;
+    p.hlo = (uint64_t)(uintptr_t)host_;
+    p.hsize = heap_size_;
+    p.dbase = dev_base_;
     p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
     p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
     p.stack_bytes = stack_bytes_;
@@ -175,7 +180,6 @@ class vk_rt {
     s->host_valid = true;
   }
 
-  bool usm_ok() const { return identity_; }
 
  private:
   struct kernel_info {
@@ -306,6 +310,12 @@ class vk_rt {
     bi.buffer = heap_buf_;
     dev_base_ = vkGetBufferDeviceAddress(dev_, &bi);
     identity_ = dev_base_ == (uint64_t)(uintptr_t)host_;
+    // A USM pointer is translated between its host and device forms by a range test (see PUSH_MEMBERS in the emitter), which
+    // needs the two heap ranges apart.
+    if (!identity_ && (uint64_t)(uintptr_t)host_ < dev_base_ + heap_size_ && dev_base_ < (uint64_t)(uintptr_t)host_ + heap_size_)
+      fail("the heap's host and device address ranges overlap on this driver; USM cannot be translated");
+    if (limits_.maxPushConstantsSize < vk_push_size)
+      fail("the device takes " + std::to_string(limits_.maxPushConstantsSize) + " bytes of push constants; " + std::to_string(vk_push_size) + " are needed");
     free_[8192] = heap_size_ - 8192;   // [0, 8192): the flag at 0, the closure slot at 256
 
     // the module and the layout
@@ -459,18 +469,17 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
   vk_rt::get().dispatch(key, closure, closure_bytes, g, l, lmem, bufs, n, modes);
 }
 inline void backend_wait() {}
+// A USM pointer is the host address of its allocation; a kernel gets the device address (translated on load, see the emitter).
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
   (void)align;
   (void)kind;
   vk_rt &r = vk_rt::get();
-  if (!r.identity()) {
-    throw exception(errc::feature_not_supported,
-                    "sycl: USM pointers need the device address to equal the host address; this Vulkan device does not give that "
-                    "(SYCL buffers and accessors work)");
-  }
-  return (void *)(uintptr_t)r.alloc(bytes);
+  return (void *)r.at(r.alloc(bytes));
 }
-inline void backend_usm_free(void *p) { vk_rt::get().release((uint64_t)(uintptr_t)p); }
+inline void backend_usm_free(void *p) {
+  vk_rt &r = vk_rt::get();
+  if (r.in_heap(p)) r.release(r.dev_of(p));
+}
 inline void backend_memcpy(void *dst, const void *src, unsigned long n) { std::memmove(dst, src, n); }
 inline void backend_memset(void *p, int v, unsigned long n) { std::memset(p, v, n); }
 inline bool backend_is_usm(const void *p) { return vk_rt::get().in_heap(p); }
