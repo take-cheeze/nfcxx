@@ -77,7 +77,8 @@ end
 mutate = lambda do |(_name, edits, expected)|
   # Inside the repo, so the copy's own ../.. is the repo root.
   Dir.mktmpdir('.eamut', ROOT) do |dir|
-    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
+    # copy_generator also brings the tools/*.rb siblings that compiled_gems.rb requires as ../ (rgss_tts_config).
+    Bc2cppMutantPool.copy_generator(ROOT, dir)
     missing = edits.reject do |file, pattern, replacement|
       path = File.join(dir, 'bc2cpp', file)
       text = File.read(path)
@@ -92,7 +93,7 @@ end
 
 failures = []
 control = Dir.mktmpdir('.eamut', ROOT) do |dir|
-  FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
+  Bc2cppMutantPool.copy_generator(ROOT, dir)
   env, argv = run_check.call(File.join(dir, 'bc2cpp'))
   Bc2cppMutantPool.run(env, argv)
 end

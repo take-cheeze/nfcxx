@@ -10,7 +10,7 @@
 #    parameter, a block parameter, a source no signature can name).
 # 2. The analysis on fixture programs (needs MRBC): a declared type that disagrees with the inference is reported with
 #    the exact message and the file:line of its annotation (a fixnum/symbol argument, a class argument and a class
-#    return), an annotation token bc2cpp ignores and an annotation with the wrong parameter count are warnings, inferred
+#    return), an annotation token bc2cpp ignores and an annotation with the wrong parameter count are errors, inferred
 #    parameter / ivar / return types and their reasons are in the facts, a by-name send ranks its parameter, and the
 #    facts change no generated code (the C++ is byte-identical with BC2CPP_TYPE_FACTS on and off).
 #
@@ -147,7 +147,11 @@ Dir.mktmpdir do |dir|
   q, _e, qs = type_check.call('--facts', facts, '--rows', rows, '-q')
   check.call('-q prints diagnostics only', qs.exitstatus == 1 && q.lines.all? { |l| l.match?(/\A\S+:\d+:\d+: /) })
 
-  clean = FACTS.merge('contradictions' => [], 'signature_diagnostics' => [],
+  # One warning keeps "warnings do not fail" a real case: the annotation diagnostics are errors now, and the
+  # signature warning (TC1006) is the only warning source the render-only facts can carry.
+  clean = FACTS.merge('contradictions' => [],
+                      'signature_diagnostics' => [{ 'file' => 'app/shape.rb', 'line' => 9, 'col' => 1, 'severity' => 'warning',
+                                                    'code' => 'TC1006', 'message' => 'Shape#area parameter 1: the `# bc2cpp:` comment wins over signature type Symbol' }],
                       'annotations' => Array(FACTS['annotations']).map { |a| a.merge('ignored' => [], 'arity_mismatch' => nil) })
   File.write(facts, JSON.generate(clean))
   _o, _e, st2 = type_check.call('--facts', facts, '--rows', rows)
@@ -188,6 +192,11 @@ else
       # bc2cpp: () -> TcOther
       def make
         TcSym.new
+      end
+
+      # bc2cpp: (String) -> String
+      def label(s)
+        s
       end
 
       # bc2cpp: (Nonesuch, fixnum)
@@ -277,6 +286,7 @@ else
     check.call('an annotation with too many parameters is an error',
                lines.include?("contra.rb:#{two}:1: error: TcSym#two: annotation lists 2 parameter(s), method takes 1 [TC1004]"))
     check.call('nothing else is an error', lines.count { |l| l.include?(': error: ') } == 5)
+    check.call('a String token is a known class, not an ignored token', lines.none? { |l| l.include?('`String` is ignored') })
 
     puts '== inferred types, reasons and send ranking (fixture sends.rb)'
     keep = File.join(dir, 'keep')
