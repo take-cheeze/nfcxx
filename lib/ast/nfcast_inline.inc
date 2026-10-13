@@ -79,6 +79,29 @@ struct SubstConst : Node {
   void describe(std::string& out) const override { out = "local '" + name + "'"; }
 };
 
+// The operand kind of a node for an arithmetic or comparison node (nfcast_nodes.cpp, Opnd): a local of this frame that is not
+// boxed, a substituted parameter (an outer local), or a constant. Declared there; it needs the classes above.
+Opnd bind_operand(Node* n) {
+  Opnd o;
+  if (auto* x = dynamic_cast<LocalNode*>(n)) {
+    if (!x->cell) {
+      o.k = Opnd::Slot;
+      o.slot = x->slot;
+    }
+  } else if (auto* x = dynamic_cast<SubstLocal*>(n)) {
+    o.k = Opnd::Outer;
+    o.up = x->up;
+    o.slot = x->slot;
+  } else if (auto* x = dynamic_cast<ConstNode*>(n)) {
+    o.k = Opnd::Const;
+    o.c = x->v;
+  } else if (auto* x = dynamic_cast<SubstConst*>(n)) {
+    o.k = Opnd::Const;
+    o.c = x->v;
+  }
+  return o;
+}
+
 struct ParamSub {  // what a parameter is replaced by (None: it stays in its slot)
   enum K : unsigned char { None, Local, Const } k = None;
   int up = 0, slot = 0;  // Local: the caller's local, UP frames back from the frame of the site

@@ -535,7 +535,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   background (`NFCAST_TIER=async`): 28 programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
   first version and compared equal because *both* implementations refused them: the check also requires that the reference run
   succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr). Thirteen of the 23 programs are `inline_*`.
-- `tests/ast/engine.cpp`: 181 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
+- `tests/ast/engine.cpp`: 194 checks through the C++ API (13 of them for the operators that read their operands in place) (the specialization counters, the collector, host objects, errors, the
   state of the interpreter after errors, pins) and, for the inlining, with `State::stats`: a loop of calls rewrites its site once
   and runs the rest inlined (97 of 100 calls with the default count, 98 with `inline_warm = 1`), a state with inlining off or
   `inline_warm = 0` inlines nothing; the guard fails once when the global is assigned again (to another function: the site is inlined again for it and runs every
@@ -745,13 +745,48 @@ callee expression when it is a local or an upvalue is read directly): -7.2 M ins
 parameters that are locals or constants on top: -7.4 M (to 244.5 M); that is 36 instructions per call out of roughly 600 per
 call including the loop around it (an inlined call still costs about 100 instructions: the frame, the guard, the results, and the nodes of
 the body, which are unchanged: a substituted parameter is a virtual call to `SubstLocal::eval` instead of one to `LocalNode::eval`,
-so the read costs the same and what is saved is the copy and the evaluation at the call). What would save more is outside this
-file: operator nodes that know their operands are locals or constants (no virtual call per operand), and for the method
+so the read costs the same and what is saved is the copy and the evaluation at the call). The operator nodes that take those
+operands are the next step, done in the section below. What would save more: for the method
 benchmark a cache for methods inherited through `__index` (`getters` spends about a quarter of its instructions in
 `find_str` / `index_slow` looking the method up in the instance, missing, and then in the class, which inlining does not touch).
 That is the honest size of the gain for a tree walker that inlines by cloning: about 20% to 25% of the instructions in a loop made of small
 calls, and 1% to 3% for `fib`, where the unrolled level contains the same two calls it replaced. The tier does not use the clones
 (see "What the tier does with it"): it compiles whole kernels, and the inlining helps what stays interpreted.
+
+### Operators that read their operands in place
+
+The arithmetic and comparison nodes (`ArithII`, `ArithNN`, `CmpII`, `CmpFF` in `nfcast_nodes.cpp`) are instantiated for the
+shape of each operand: `kLocal` (a local of the running frame that is not boxed, or a substituted parameter that reads an outer
+frame, `SubstLocal`), `kConst` (a constant or `SubstConst`), or `kGen` (anything else, evaluated through its node as before). A
+binary operation of two leaves therefore reads its operands itself, with no virtual call to them, and makes one virtual call (its
+own `eval`) instead of four. The shape is taken when the node is specialized, after the function is complete (a boxed local is
+then known), by `respec_shape`; the operand nodes stay the parents, so the generic path, the messages of errors (`describe`) and
+the tier's view (`ArithBase`, `CmpBase` with `l_`, `r_`) are unchanged. The type guards and the deopts are the ones the nodes had.
+An `Uninit` node and the generic `ArithGen` / `CmpGen` evaluate their operands through the nodes, as before. The 25 operator
+templates (10 integer, 7 number, 4 integer and 4 float comparisons) times 9 shapes make 225 classes; the build time this adds was
+not measured. `EqNode` (`==`, `~=`) is not specialized.
+
+Tried first and dropped: reading the operand through a run-time switch on its kind inside the existing nodes. That removed the
+leaf calls (the leaf bodies went from about 28 M to 6 M instructions in `helpers`) but the switch cost more than the calls it
+replaced, and the whole went up by 15 M. The shapes are compile-time, which is why the templates.
+
+Instructions (callgrind, host g++ -O2, the same programs and sizes as the table above: `helpers` 100 thousand iterations,
+`getters` 60 thousand, `fib(24)`; "before" is the commit this change was made on, "after" this change; "off" is `NFCAST_INLINE=0`):
+
+| Program | before, inlining | before, off | after, inlining | after, off | change, inlining | change, off |
+| --- | --- | --- | --- | --- | --- | --- |
+| `helpers` | 433.5 M | 614.6 M | 392.6 M | 574.7 M | -9.4% | -6.5% |
+| `getters` | 431.1 M | 545.5 M | 427.2 M | 541.6 M | -0.9% | -0.7% |
+| `fib(24)` | 93.3 M | 97.7 M | 84.4 M | 88.8 M | -9.6% | -9.1% |
+
+The saving of the inlining itself (on against off, same engine) went from 29.5% to 31.7% for `helpers`, from 21.0% to 21.1% for
+`getters`, and from 4.5% to 4.9% for `fib`. `getters` gains nothing: its time is method lookup (`find_str`, `index_slow`), not
+arithmetic. The gain on `helpers` is above the 3% that would have justified the complexity.
+
+The wall times of this change were not measured (nothing asserts on them, and the machine's load moves them by more than the gain).
+The same test programs print the same output with inlining on, early and off (`tests/ast/bench.sh` checks that), and a Lua program
+that exercises every operator over every pair of values (integers, floats, strings, nil, booleans, tables with metamethods) with
+its operands as locals, constants, inlined parameters and boxed locals prints the same as the commit before, and as Lua 5.4.
 
 ### Speed of the tier
 

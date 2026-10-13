@@ -439,6 +439,39 @@ int main() {
       CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr);
     }
 
+    // Operands read in place (ArithII and the other shapes of nfcast_nodes.cpp): a local, an outer local (a parameter substituted
+    // into an inlined body, two frames out here) or a constant on either side gives the values of Lua 5.4 (checked with the
+    // reference interpreter), the messages of errors name the operand as before, and metamethods and boxed locals are unchanged.
+    {
+      std::string e3;
+      CHECK(run_int(on, "local a, b = 7, 2 local t = 0 for i = 1, 3 do t = t + a * b + a // b + a % b + (a + 1) + (1 - b) + "
+                        "(a < b and 1 or 0) + (2 < a and 1 or 0) + a + a end return t") == 120);
+      Value fv = run(on, "local x, y = 1.5, 0.5 local f = 0.0 for i = 1, 2 do f = f + x * y + x + y + x - y + x / y + "
+                         "(x < y and 1 or 0) + (y < x and 1 or 0) end return f");
+      CHECK(fv.t == nfcast::T_FLT && fv.d == 15.5);
+      CHECK(run_int(on, "local mt = {__add = function(p, q) return 100 end, __lt = function(p, q) return true end} "
+                        "local o = setmetatable({}, mt) local t = 0 for i = 1, 3 do local k = i "
+                        "t = t + (o + k) + (k + o) + (o + 1) + (2 + o) + (o < k and 1 or 0) end return t") == 1203);
+      CHECK(run_int(on, "local c = 1 local function bump() c = c + 1 end bump() return c * 2 + c") == 6);   // boxed: not read in place
+      auto s4 = stats_of(on);
+      CHECK(run_int(on, "local function sq(v) return v * v end local function d2(q) return sq(q) + sq(q + 1) end "
+                        "local tt = 0 for i = 1, 20 do tt = tt + d2(i) end return tt") == 6180);
+      CHECK(on.stats.inlined_sites > s4.inlined_sites);
+      run(on, "local a = nil return a + 1", &e3);
+      CHECK(e3 == "test:1: attempt to perform arithmetic on a nil value (local 'a')");
+      run(on, "local b = nil return 1 + b", &e3);
+      CHECK(e3 == "test:1: attempt to perform arithmetic on a nil value (local 'b')");
+      run(on, "for i = 1, 10 do local z = i if i == 8 then z = nil end local r = z * 2 end", &e3);   // specialized before the error
+      CHECK(e3 == "test:1: attempt to perform arithmetic on a nil value (local 'z')");
+      run(on, "local a = {} return a < 1", &e3);
+      CHECK(e3 == "test:1: attempt to compare table with number");
+      run(on, "local s = 'x' return s < 1", &e3);
+      CHECK(e3 == "test:1: attempt to compare string with number");
+      run(on, "local function f1(x) return x + 1 end for i = 1, 10 do local z = i if i == 8 then z = nil end f1(z) end", &e3);
+      CHECK(e3 == "test:1: attempt to perform arithmetic on a nil value (local 'x')");   // the parameter's name, as in the clone
+      CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr);
+    }
+
     // With the tier on, a callee with a loop is left to the tier (a clone would be interpreted for ever); loop-free ones are inlined.
     {
       State t;
