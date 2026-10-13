@@ -194,6 +194,11 @@ else
         TcSym.new
       end
 
+      # bc2cpp: (String) -> String
+      def label(s)
+        s
+      end
+
       # bc2cpp: (Nonesuch, fixnum)
       def two(a)
         a
@@ -281,6 +286,7 @@ else
     check.call('an annotation with too many parameters is an error',
                lines.include?("contra.rb:#{two}:1: error: TcSym#two: annotation lists 2 parameter(s), method takes 1 [TC1004]"))
     check.call('nothing else is an error', lines.count { |l| l.include?(': error: ') } == 5)
+    check.call('a String token is a known class, not an ignored token', lines.none? { |l| l.include?('`String` is ignored') })
 
     puts '== inferred types, reasons and send ranking (fixture sends.rb)'
     keep = File.join(dir, 'keep')
