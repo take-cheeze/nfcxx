@@ -405,6 +405,20 @@ refusal.call("module LCF\n  class Array2D\n    def [](i); 1; end\n  end\nend\n",
 refusal.call("module LCF\n  class Array2D\n    def []=(i, v); @data[i] = v; end\n  end\nend\n",
              '`Array2D#[]=` (the invariant) is redefined', 'LCF::Array2D#[]= is not defined exactly once')
 
+# A literal Symbol key on a proven LCF::Array1D that no schema declares is a compile error (raised in
+# the final emission pass), not a read that raises at run time.
+Dir.mktmpdir do |dir|
+  bad = "#{HOST}\nclass LrHost\n  def bad_key(i); @db[:player][i][:no_such_field_zz]; end\nend\n"
+  raised = begin
+    compile.call(bad, %w[LrHost], dir)
+    nil
+  rescue RuntimeError => e
+    e.message
+  end
+  check.call('a literal key no schema declares on an Array1D is a compile error',
+             raised.to_s.include?('LCF::Array1D index :no_such_field_zz names no field in any LCF schema'))
+end
+
 # ---------------------------------------------------------------------------
 puts '-- fixtures on real mruby, interpreted and compiled'
 # [label, build dir, mrbc, extra flags]
