@@ -624,6 +624,7 @@ class CodeGen
       # takes a fixnum).
       d, s = insn.regs.first(2)
       note_unguarded_index(irep, idx, insn, unshift_proof_reg(d, reg_offset), '[]')
+      check_lcf_array1d_key(irep, idx, insn, unshift_proof_reg(d, reg_offset), owner_def)
       exact = index_exact_class(irep, idx, unshift_proof_reg(d, reg_offset))
       index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class

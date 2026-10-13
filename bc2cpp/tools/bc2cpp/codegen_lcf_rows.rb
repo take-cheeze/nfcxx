@@ -18,6 +18,10 @@ class CodeGen
   LCF_ROW_OWNERS = %w[LCF::Database LCF::Array1D LCF::Array2D].freeze
   LCF_ROW_DEFS = { '[]' => %w[LCF::File LCF::Array1D LCF::Array2D], '[]=' => %w[LCF::Array2D] }.freeze
   LCF_ROW_IVARS = %w[root data decoded schema sym2idx].freeze
+  # Every field name a schema declares (`name: :x` entries in schema.rb). A literal Symbol key on an
+  # LCF::Array1D that none of them names has no sym2idx entry, so its read can only raise.
+  LCF_SCHEMA_FIELD_NAMES = File.read(File.join(LCF_ROW_MRBLIB, 'schema.rb'), encoding: 'UTF-8')
+                               .scan(/\bname: :(\w+)/).flatten.uniq.freeze
 
   attr_reader :lcf_rows_refusal
 
@@ -46,6 +50,21 @@ class CodeGen
 
     key = insn.op == 'GETIDX0' ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
     @lcf_rows.index(recv, key, nil_raises: numeric_nil_raises?('[]'))
+  end
+
+  # Compile error for `array1d[:name]` where +name+ is a literal Symbol that no schema declares, on a
+  # receiver the flow proves is exactly LCF::Array1D. Runs in the final emission pass (not the fixpoint),
+  # where the receiver's proof is settled, so a partial mask can't raise early.
+  def check_lcf_array1d_key(irep, index, insn, reg, owner_def)
+    return unless @lcf_rows && insn.op == 'GETIDX'
+
+    recv = lcf_exact_receiver(irep, index, reg, owner_def, '[]')
+    return unless recv && recv.first == 'LCF::Array1D'
+
+    key = lcf_literal_key(irep, index, insn.reg.to_i + 1)
+    return unless key.is_a?(Symbol) && !LCF_SCHEMA_FIELD_NAMES.include?(key.to_s)
+
+    raise "bc2cpp: LCF::Array1D index :#{key} names no field in any LCF schema (mruby-lcf/mrblib/schema.rb)"
   end
 
   # The mask of `Klass.new(...)` for a file class, nil when the send is not one.
