@@ -927,17 +927,26 @@ int host_dispatch(GoLang* L, const char* in, std::size_t n, char** out, std::siz
   Wr payload;
   try {
     Rd rd(in, n);
+    // A write that fails does not end the message: the release list after the writes is still read (the Go side took those
+    // ids off its queue when it wrote the message, so an unread list would leak the host objects), and the error is raised
+    // after it, as the call's error.
+    std::exception_ptr write_err;
     unsigned nw = rd.u32();  // variables the script wrote since the last crossing
     for (unsigned k = 0; k < nw && !rd.bad; ++k) {
       unsigned idx = rd.u32();
       Var v = L->decode(rd);
-      if (idx >= L->lives.size()) continue;
+      if (idx >= L->lives.size() || write_err) continue;
       Live& lv = L->lives[idx];
-      if (!lv.set) throw ReadOnlyWrite{lv.name};
-      lv.set->invoke(nullptr, &v);
+      try {
+        if (!lv.set) throw ReadOnlyWrite{lv.name};
+        lv.set->invoke(nullptr, &v);
+      } catch (...) {
+        write_err = std::current_exception();
+      }
     }
     unsigned nr = rd.u32();  // objects whose wrappers died
     for (unsigned k = 0; k < nr && !rd.bad; ++k) L->release(rd.u64());
+    if (write_err) std::rethrow_exception(write_err);
     unsigned id = rd.u32();
     if (rd.bad || id == 0 || id > L->callables.size()) throw Error("nfcpoly: go: a call of an unknown host function");
     Callable* c = L->callables[id - 1];

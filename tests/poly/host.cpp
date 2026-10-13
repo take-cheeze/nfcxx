@@ -1869,6 +1869,31 @@ outer:
   }
   ctx.eval_void("go", "nfc.FinalizersOff(false)");
   {
+    // NFC_GO_ECHO=N repeats the last check of the scenario (the echo loop) N times: the stress of the rare failure in
+    // docs/notes/poly.md. NFC_GO_BG=1 adds a script goroutine that allocates, so that collections also run during the loop.
+    int echo_reps = std::getenv("NFC_GO_ECHO") ? std::atoi(std::getenv("NFC_GO_ECHO")) : 0;
+    if (echo_reps > 0 && std::getenv("NFC_GO_BG") && std::atoi(std::getenv("NFC_GO_BG")) > 0)
+      ctx.eval_void("go", "go func() { var sink []byte; for { sink = make([]byte, 4096); _ = sink } }()");
+    for (int k = 0; k < echo_reps; ++k) {
+      go_collect(ctx);
+      int base = Vec3::live;
+      ctx.eval_void("go", "func() { for i := 0; i < 200; i++ { echo(NewVec3(1, 2, 3)) } }()");
+      go_collect(ctx);
+      CHECK(Vec3::live == base);
+    }
+  }
+  {
+    // The releases a collection queues reach the host with the next message even when that message is refused: a write to a
+    // read-only variable fails the call (the host reads the writes first and must still read the releases after them), and a
+    // call from a goroutine is refused by the host, which does not read the message (the Go side puts the releases back).
+    go_collect(ctx);
+    int base = Vec3::live;
+    CHECK(msg_of("func() int { func() { _ = NewVec3(1, 2, 3) }(); nfc.GC(); limit = 4; peek(); return 0 }()").find("read-only") != std::string::npos);
+    CHECK(Vec3::live == base);
+    CHECK(str("func() string { func() { _ = NewVec3(1, 2, 3) }(); nfc.GC(); return hostFromGoroutine() }()") == "GoroutineError");
+    CHECK(Vec3::live == base);
+  }
+  {
     // A closed Context is collected even though its script held host objects (a Go interpreter is about 1 MB, so sixty that
     // were kept alive show in the size of the process; the pages go back to the system at the collection).
     auto rss_kb = [] {
