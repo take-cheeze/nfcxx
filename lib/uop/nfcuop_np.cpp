@@ -1,7 +1,7 @@
 // nfcuop::np: the numpy-like API over the ONNX-style graph. See nfcuop_np.hpp.
 #include "nfcuop_np.hpp"
 
-#include "nfcuop_grad.hpp"
+#include "nfcuop_onnxgrad.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -563,7 +563,7 @@ std::vector<Tensor> grad(const Tensor& loss, const std::vector<Tensor>& wrt) {
     ids.push_back(w.id());
   }
   std::vector<Tensor> out;
-  for (int id : hir::gradients(H(loss), loss.id(), ids)) out.push_back(Tensor(&loss.session(), id));
+  for (int id : hir::gradients_via_onnxsim(H(loss), loss.id(), ids)) out.push_back(Tensor(&loss.session(), id));
   return out;
 }
 

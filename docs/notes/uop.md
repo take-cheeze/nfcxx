@@ -26,7 +26,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 | 3b | `hir::Graph`: ONNX-style operators with shape inference, ONNX export, lowering to UOps; `np::Tensor` over it | done |
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
-| 6 | Autodiff on the `hir` graph (`hir::gradients`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** | autodiff done, import not started |
+| 6 | Autodiff on the `hir` graph by onnxsim (`hir::gradients_via_onnxsim`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** (`Graph::from_onnx` / `merge_onnx`) | done (onnxsim's rules cover a subset of the operators; Conv, pooling, normalization, `Gather`, `Erf` gradients exist there but those forward operators are not in `hir` yet: a follow-up) |
 | 7 | Dynamic shapes (below) | not started |
 
 ## Stage 1: the scalar core
@@ -99,6 +99,9 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
   writer: only the nodes, initializers (raw little-endian data) and inputs the outputs depend on. No ONNX library is linked.
   `tests/uop/onnx_check.py` loads every exported test model with `onnx.checker.check_model(full_check=True)` and runs it in
   onnxruntime; the results equal the UOp interpreter's.
+- `Graph::merge_onnx(bytes)` / `Graph::from_onnx(bytes)` read a ModelProto back (hand-written protobuf reader, `nfcuop_onnx_import.cpp`): the
+  writer's output round-trips to the same bytes, models made by the onnx package import, and a model computed from a sub-graph is merged
+  into the graph it came from by value names (this is how the gradients of onnxsim come back, [uop-autodiff.md](uop-autodiff.md)).
 - `hir::Lowerer` lowers values to `ut::Tensor`s, memoized: inputs become placeholders, initializers buffers (a uniform initializer
   becomes a shaped `Const` so it folds), each operator calls the matching `ut` function. It checks that every lowered tensor has
   the dtype and shape the graph inferred. An ONNX `Cast` float-to-int truncates like the interpreter's cast; for NaN and out-of-range

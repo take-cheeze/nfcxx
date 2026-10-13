@@ -6,9 +6,13 @@
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
 #                               errors, slicing, concatenation, the graph, the ONNX export; it also writes models
-#   - tests/uop/test_grad.cpp   reverse-mode autodiff (nfcuop_grad.hpp): finite differences in float64 for every rule, exact gradients (ties,
-#                               second derivatives), the Pad operator, errors, gradients on the C backend equal to the interpreter bit for
-#                               bit; it also writes models (a loss and its gradients) for onnx_check.py
+#   - tests/uop/test_onnx.cpp   the ONNX reader (hir::Graph::from_onnx / merge_onnx): export -> import -> export bytes equal, models made by
+#                               the onnx package (tests/uop/onnx_import_gen.py) equal to onnxruntime, merging, name collisions, errors, Pad
+#   - tests/uop/test_grad.cpp   reverse-mode autodiff by onnxsim (nfcuop_onnxgrad.hpp, docs/notes/uop-autodiff.md): finite differences in
+#                               float64, exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
+#                               backend equal to the interpreter bit for bit; it also writes models (a loss and its gradients) for
+#                               onnx_check.py. Needs onnxsim (build/onnxsim/libnfconnxsim.so from scripts/setup-onnxsim.sh, else python3
+#                               with onnx and onnxsim==0.8.1) and prints SKIP without it
 #   - tests/uop/test_cgen.cpp   C rendering (nfcuop_cgen.hpp): fusion, and generated C equal bit for bit to the interpreter on random
 #                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.
 #                               On the nfcxx back ends it is run a second time with `nfcxx` itself as the C compiler (the `quick` set)
@@ -24,23 +28,27 @@
 #                           where nfcxx is not built
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_grad.cpp)
-tests=(test test_ut test_np test_grad test_cgen np_compat)
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp)
+tests=(test test_ut test_np test_onnx test_grad test_cgen np_compat)
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
   label=$1; shift
-  mkdir -p "$tmp/$label/onnx"
+  mkdir -p "$tmp/$label/onnx" "$tmp/$label/import"
+  command -v python3 >/dev/null && python3 tests/uop/onnx_import_gen.py "$tmp/$label/import" | sed "s/^/     $label /"
   for t in "${tests[@]}"; do
-    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl 2>&1); then
+    ldx=()   # nfcxx programs export type_info vtables that break the exceptions inside libnfconnxsim.so: export nothing (scripts/onnxsim/exe.map)
+    [ -n "$CC_IS_NFCXX" ] && [ "$t" = test_grad ] && ldx=(-Wl,--version-script=scripts/onnxsim/exe.map)
+    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
     fi
     case $t in
       test_np|test_grad) args=("$tmp/$label/onnx") ;;
+      test_onnx) args=("$tmp/$label/import") ;;
       np_compat) args=("$tmp/$label/compat.json") ;;
       *) args=() ;;
     esac
-    if res=$("$tmp/$label/$t" "${args[@]}" 2>&1); then echo "ok   $label uop/$t: $(tail -1 <<<"$res")"
+    if res=$("$tmp/$label/$t" "${args[@]}" 2>&1); then echo "ok   $label uop/$t: $(tail -1 <<<"$res")"; grep '^SKIP' <<<"$res" | sed "s/^/     $label /"
     else echo "FAIL $label uop/$t"; head -30 <<<"$res"; fail=1; fi
   done
   if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"

@@ -104,6 +104,29 @@ jobs:
           go-version-file: lib/poly/go/go.mod
           cache-dependency-path: lib/poly/go/go.sum
 
+      # tests/uop/run.sh differentiates with onnxsim and checks models with onnx and onnxruntime (docs/notes/uop-autodiff.md); without
+      # them those tests print SKIP. The C++ library is the primary way (scripts/setup-onnxsim.sh builds onnxsim 0.8.1's sources, pinned
+      # by hash, in about 2 minutes; the cache key holds the script and the shim); the pip packages also serve the Python fallback.
+      - name: Python test dependencies (onnx, onnxruntime, numpy, onnxsim)
+        if: startsWith(matrix.name, 'nfcpoly')
+        run: |
+          sudo apt-get install -y --no-install-recommends python3-pip protobuf-compiler libprotobuf-dev
+          python3 -m pip install --break-system-packages onnx onnxruntime numpy onnxsim==0.8.1
+
+      - name: Restore libnfconnxsim.so
+        id: onnxsim
+        if: startsWith(matrix.name, 'nfcpoly')
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/onnxsim/libnfconnxsim.so
+            build/onnxsim/built-*
+          key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.sh', 'scripts/onnxsim/**') }}
+
+      - name: Build libnfconnxsim.so
+        if: startsWith(matrix.name, 'nfcpoly') && steps.onnxsim.outputs.cache-hit != 'true'
+        run: scripts/setup-onnxsim.sh
+
       - name: ${{ matrix.name }}
         run: ${{ matrix.run }}
 
