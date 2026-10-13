@@ -596,7 +596,7 @@ objects that the core never frees on purpose (`nfcpoly.cpp`, `Impl::classes`), n
 
 For Go (before it met JavaScript and `ast` in one binary): `tests/poly/run.sh` with ruby, lua, python and go gave 697 checks, the
 Ruby/Lua/Python binary (`POLY_LANGS="ruby lua python"`) 409, which is the count before Go was added, so the Go edits of the shared checks
-changed nothing for the other three, and the Go-only binary (`POLY_LANGS=go`) 284 at the time (the shared checks written through the `Lg` builders, and `go_tests()`; 318 now, after the hardening below, which added 34 and changed no shared check, so the six-language binary went from 1172 to 1206). Repeated runs of the built host
+changed nothing for the other three, and the Go-only binary (`POLY_LANGS=go`) 284 at the time (the shared checks written through the `Lg` builders, and `go_tests()`; 318 after the hardening below, and 322 with the two lost-release checks of the collector section, which added 34 and changed no shared check, so the six-language binary went from 1172 to 1206, and to 1210 with those checks). Repeated runs of the built host
 binaries (`POLY_OUT=DIR`): 25 of each back end's Go-only binary and 10 of each back end's four-language binary, all passed, on a machine
 that was busy with other builds. The Ruby/Lua/Python binary under valgrind (`PYTHONMALLOC=malloc valgrind -q --error-exitcode=9`) on
 the final code, once per back end, no errors reported (8 repeated runs per back end on an earlier state of the change). The setjmp
@@ -642,20 +642,33 @@ copy of the library without the sweep passed the suite in most runs and failed i
   makes the finalizers release nothing, and by running the whole collector scenario of `go_tests()` a second time with it on
   (`NFC_GO_REPS=N` repeats each pass N times in one process). With it on, the library without the sweep fails 6 checks in every run
   (200 of 200 runs), and the real library passes.
-- A second, much rarer failure of the collector check itself was seen once in about 14,300 in-process repetitions of the scenario
-  (the last `echo` loop: `Vec3::live != base` after `go_collect`) in the old code with both release paths on. It did not recur in the
-  other 14,000, with the finalizers off (600 repetitions, 800 more under a background allocator and `GOGC=5`), or in a
-  pure Go program that makes 150,000 objects with finalizers and weak pointers under three allocating goroutines at `GOGC=5`, so the
-  cause is not proven. Two things can leave a weak pointer set after `runtime.GC()` returns, and
-  `nfc.GC()` now rules both out: `runtime.GC` finishes the sweep only `for work.cycles.Load() == n+1` (`runtime/mgc.go`), so a second
-  cycle that began meanwhile (the heap goal, the memory limit or an allocation can start one) ends the wait for the sweep of the
-  first, and a weak pointer is cleared when its span is swept; and values held in a `sync.Pool` (yaegi and `reflect` use them for call frames) survive one more
-  cycle in the victim cache. So it holds the collector off while it works (`debug.SetGCPercent(-1)`, `SetMemoryLimit(MaxInt64)`,
-  restored afterwards, under a mutex), runs two full passes at least and repeats while a pass still finds dead wrappers, four at most. The
-  cost is a second collection (and the memory scavenge) per `nfc.GC()`.
+- The rarer failure of the collector check (`Vec3::live != base` after the last `echo` loop, seen once in about 14,300 in-process
+  repetitions with both release paths on) is not reproduced, and its cause is not established. Measured on this change, with
+  the echo loop and its `go_collect` repeated in one process (`NFC_GO_ECHO=N`; `NFC_GO_BG=1` adds the allocating script goroutine;
+  the 300 and 3000 iterations ran a copy of the host that loops only that check): 300 and 3000 iterations, 0 failures; 1500 with the
+  goroutine, so that collections run during the loop, 0 failures; 200 with `GOGC=5` and the goroutine, 0 failures (three longer `GOGC=5` runs were stopped by hand after about five
+  minutes each, with no failure line printed, so they are not a completed count). Checked against the Go 1.24
+  runtime and yaegi v0.16.1 sources, the mechanisms that would leave a dead wrapper alive, or release it late, do not hold for
+  `nfc.GC()`: (a) `runtime.GC` returns before the sweep of its cycle is done only when another cycle began meanwhile
+  (`runtime/mgc.go`), and `nfc.GC()` holds the collector off (GC percent -1, no memory limit); a weak handle and the finalizer of the
+  same object are handled in the same sweep step (`freeSpecial`, `runtime/mgcsweep.go`), so after `runtime.GC` returns a dead wrapper
+  has its weak pointer cleared and its id queued by `sweepDead`, or it is still reachable; (b) `sync.Pool`: `reflect` clears a call
+  frame before it puts it back (`reflect/value.go`), and yaegi allocates a frame per call without a pool (`interp/interp.go`); (c) a
+  finalizer is queued in the same sweep step that clears its wrapper's weak pointer, so the sweep sees every wrapper a finalizer
+  queues. One root was found and is harmless here: the finalizer
+  goroutine's `runfinq` passes the object in its register area (`regs`, `runtime/mfinal.go`), so the last object finalized stays in
+  memory until the next finalizer runs; its release was queued by the finalizer, so the host object is released. What is left is a
+  root that keeps a wrapper reachable through the whole collection, and no source above shows one.
+- Two paths that lost release ids were found while checking this (deterministic, and covered by two checks of
+  `tests/poly/host.cpp`, "host objects and the collector"): (1) a call whose message writes a read-only variable failed with
+  ReadOnlyError, and the host returned before reading the release list that follows the writes, so the host kept those objects;
+  (2) a call from a goroutine the script started: the Go side took the release queue into the message, and the host refused the
+  message (`hostThread`) without reading it. Fixed: `host_dispatch` reads the whole message before it raises a write error, and
+  `writeMeta` returns an undo that puts the releases back and unmarks the variables when the host refuses. Neither path is taken by
+  the echo-loop check (it sends no refused message), so they do not explain the rare failure.
 - Stress: `tests/poly/stress-go.sh [N]` builds the Go-only host and runs it N times per back end (default 200, `JOBS=4` at a time).
-  Result on this change: 200 runs of each back end's binary, 3 at a time on 4 cores with other builds and a valgrind run going:
-  0 failed on qbe, 0 failed on gcc. The same 200 runs of the qbe binary against the library without the sweep: 200 failed, 6 checks each.
+  Result on this change: 200 runs of each back end's binary, 4 at a time: 0 failed on qbe, 0 failed on gcc. The mutation result recorded earlier (the same 200
+  runs of the qbe binary against the library without the sweep: 200 failed, 6 checks each) was not repeated for this change.
 
 ### Sanitizers and valgrind
 
@@ -690,7 +703,7 @@ does); the uses of "uninitialised" bytes that Go wrote, in any stack that passes
 two callbacks; the class table of the core; and the thread-local storage of the Go runtime's threads. What is left is a leak
 of a block that C or C++ code, or cgo's `C.malloc`, allocated (Go allocates with `mmap`, so a leak report is never Go's), a bad or
 mismatched free, and an invalid access by any C++ code that is not one of those functions. It cannot see a read past the end of a
-buffer inside the suppressed functions: ASan does. Results: `NFCXX_BACKEND=gcc tests/poly/valgrind-go.sh` and the same with `qbe` run all 318 checks and report
+buffer inside the suppressed functions: ASan does. Results: `NFCXX_BACKEND=gcc tests/poly/valgrind-go.sh` and the same with `qbe` run all 322 checks and report
 0 errors (3.6 to 5.0 million reports matched by the file). The two mutated copies above are both found: no `free` of the reply gives
 `definitely lost: 161,910 bytes in 6,587 blocks` (allocated in `_Cfunc__Cmalloc`, 51 errors, exit 9), and the short reply buffer an
 `Invalid write of size 1` in `memmove` from `host_dispatch` (exit 9).
