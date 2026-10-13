@@ -593,11 +593,111 @@ end
 # The concrete argument lists that instantiate template function `name`: each explicit call of it, with the
 # arguments that name an enclosing template's parameters replaced by that template's own instances (transitively).
 # A call through a cycle of templates is refused with the chain.
+# The unqualified calls `name(args)` of a template function (no explicit <...>): [args, position] pairs. A declaration
+# (its name follows a type keyword, or its parameter list is followed by a body) is not a call.
+DECL_WORDS = %w[void static inline int float double bool size_t unsigned long char short template __device__ __host__
+                __global__ __forceinline__ constexpr auto]
+def plain_call_sites(text, name)
+  out = []
+  pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if pp.any? { |a, b| a <= i && i < b }
+      i = pp.find { |a, b| a <= i && i < b }[1]
+      next
+    end
+    # A qualified call (`cg::reduce(...)`) or a member call (`x.reduce(...)`) names another function.
+    qualified = (i >= 2 && text[i - 2, 2] == "::") || (i >= 1 && text[i - 1] == ".") || (i >= 2 && text[i - 2, 2] == "->")
+    if text[i, name.length] == name && !qualified && !(i > 0 && ident_char?(text[i - 1])) && !ident_char?(text[i + name.length] || " ")
+      k = i + name.length
+      k += 1 while k < text.length && white?(text[k])
+      if text[k] == "("
+        close = matching_paren(text, k)
+        if close
+          after = close + 1
+          after += 1 while after < text.length && white?(text[after])
+          b = i - 1
+          b -= 1 while b >= 0 && white?(text[b])
+          e2 = b
+          b -= 1 while b >= 0 && ident_char?(text[b])
+          prev = text[(b + 1)..e2]
+          is_decl = DECL_WORDS.include?(prev) || text[after] == "{"
+          out << [split_top(text[(k + 1)...close]), i] unless is_decl
+        end
+      end
+    end
+    i += 1
+  end
+  out
+end
+
+# The type of a call argument in the caller: a cast `(T *) x` gives T *, anything else the declared type of x.
+def caller_arg_type(text, pos, arg, name)
+  a = arg.strip
+  if a.start_with?("(")
+    close = matching_paren(a, 0)
+    if close && close + 1 < a.length && ident_char?(a[close + 1..-1].strip[0].to_s)
+      return type_tokens(a[1...close])
+    end
+  end
+  argument_type(text, pos, a, name)
+end
+
+# The template parameters of a template function (its names) and its parameter parts, from its definition.
+def template_head_of(text, name)
+  template_bodies(text).each do |tb|
+    t = tb[:tmpl]
+    header = text[(t[:close] + 1)...tb[:open]]
+    next unless function_name(header) == name
+    lp = header.index("(")
+    next if lp.nil?
+    rp = matching_paren(header, lp)
+    parts = split_top(header[(lp + 1)...rp])
+    names = split_top(text[(t[:lt] + 1)...t[:close]]).map { |pr| tokens_of(pr.split("=")[0].strip).last }
+    return { names: names, parts: parts, pos: tb[:open] }
+  end
+  nil
+end
+
+# The explicit template arguments of a call without them, deduced from the types of its arguments: one per template
+# parameter, in order. Refuses an ambiguous deduction and a parameter no argument gives.
+def deduce_call_targs(text, name, pos, args)
+  head = template_head_of(text, name)
+  return nil if head.nil?
+  found = {}
+  head[:parts].each_with_index do |part, idx|
+    break if idx >= args.length
+    ptoks = type_tokens(part)
+    ptoks.pop if ptoks.last && !ptoks.last.start_with?("*") && !ptoks.last.start_with?("&") && ptoks.length > 1
+    head[:names].each do |p|
+      next unless ptoks.include?(p)
+      at = caller_arg_type(text, pos, args[idx], name)
+      t = match_type(ptoks, at, p)
+      refuse("call of #{name}: #{p} cannot be deduced from the argument #{args[idx]} of type #{at.join(' ')} (at line #{text[0...pos].count("\n") + 1})") if t.nil?
+      refuse("call of #{name}: #{p} is deduced as #{found[p]} and as #{t} (ambiguous, at line #{text[0...pos].count("\n") + 1})") if found[p] && found[p] != t
+      found[p] = t
+    end
+  end
+  head[:names].map do |p|
+    found[p] || refuse("call of #{name} (at line #{text[0...pos].count("\n") + 1}): no argument gives #{p}, so it cannot be deduced")
+  end
+end
+
 def template_instances(name, text, stack)
   refuse("dependent launch: #{(stack + [name]).join(' -> ')} instantiates itself through its template arguments") if stack.include?(name)
   out = []
-  call_sites(text, name).each do |targs, pos|
-    args = split_top(targs)
+  sites = call_sites(text, name).map { |targs, pos| [split_top(targs), pos] }
+  # Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
+  plain_call_sites(text, name).each do |cargs, pos|
+    deduced = deduce_call_targs(text, name, pos, cargs)
+    sites << [deduced, pos] if deduced
+  end
+  sites.each do |args, pos|
     outer = enclosing_template(text, pos)
     # A bare local constant of the enclosing body (fallback in mmq's mul_mat_q_case) is its literal value.
     if outer
@@ -1019,6 +1119,18 @@ def type_before(text, i)
   toks
 end
 
+# The type of an identifier declared as a later declarator of a comma-separated declaration: the statement's first
+# declarator gives the type (its name is the last identifier of that declarator).
+def comma_declaration_type(text, i)
+  start = [text.rindex(";", i - 1), text.rindex("{", i - 1), text.rindex("}", i - 1), text.rindex("(", i - 1)].compact.max
+  seg = text[((start || -1) + 1)...i]
+  parts = split_top(seg)
+  return [] if parts.length < 2
+  toks = type_tokens(parts[0])
+  toks.pop if toks.last && !toks.last.start_with?("*") && !toks.last.start_with?("&") && toks.length > 1
+  toks.any? { |t| ident_char?(t[0]) } ? toks : []
+end
+
 # The type of a launch argument: a literal's, or the declared type of an identifier in the same top-level piece.
 def argument_type(text, pos, arg, nm)
   if arg.length > 0 && arg.chars.all? { |c| (c >= "0" && c <= "9") || c == "u" || c == "U" || c == "l" || c == "L" }
@@ -1048,6 +1160,8 @@ def argument_type(text, pos, arg, nm)
       after += 1 while after < pos && white?(text[after])
       if "=;,)".include?(text[after].to_s)
         t = type_before(text, i)
+        # A later declarator of a comma-separated declaration (`float *df, *dof;`): the type is the first declarator's.
+        t = comma_declaration_type(text, i) if t.empty?
         found = t unless t.empty?
       end
     end
@@ -1091,9 +1205,40 @@ def deduce_types(nm, ta, kt, missing, args, text, pos)
   end
 end
 
+# The launches with no template arguments at all (`kscale<<<...>>>(args)`): [name, end of name, position of <<<].
+def plain_launches(text)
+  out = []
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if text[i, 3] == "<<<"
+      b = i - 1
+      b -= 1 while b >= 0 && white?(text[b])
+      e2 = b
+      b -= 1 while b >= 0 && ident_char?(text[b])
+      name = text[(b + 1)..e2]
+      out << [name, e2 + 1, i] unless name.empty? || (name[0] >= "0" && name[0] <= "9") || text[b] == ">"
+    end
+    i += 1
+  end
+  out
+end
+
 # Every launch with fewer template arguments than the kernel's parameters gets the deduced ones written after its own.
 def deduce_launch_targs(text)
   edits = []
+  plain_launches(text).each do |nm, at, pos|
+    kt = kernel_template(nm)
+    next if kt.nil?
+    args = launch_arguments(text, pos)
+    refuse("template launch of #{nm}: its arguments are not readable (at line #{text[0...pos].count("\n") + 1})") if args.nil?
+    deduced = deduce_types(nm, "", kt, kt[:names], args, text, pos)
+    edits << [at, at, "<#{deduced.join(", ")}>"]
+  end
   template_launches(text).each do |nm, ta, pos|
     kt = kernel_template(nm)
     next if kt.nil?
