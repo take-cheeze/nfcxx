@@ -13,21 +13,26 @@
 # The mode is an AddressSanitizer-style check (docs/notes/pathb-wasm.md, "AddressSanitizer"): a shadow region at the
 # top of the memory, redzones around the static objects, the slots of each frame and the blocks of the heap, and a check
 # before each load, store and copy that reports a violation through the import env.__asan_report and traps. Under the
-# mode malloc and free are the module's own (a heap between the static data and the stack, with a quarantine), not
-# imports. Without --asan the module is the same as before the mode existed, byte for byte.
+# mode malloc and free are the module's own (a heap between the static data and the stack, where no address is handed
+# out twice in a run), not imports. Without --asan the module is the same as before the mode existed, byte for byte.
 #
-# Usage with --emscripten (before the file): the same module with the exports that the Emscripten JS runtime reads:
+# Usage with --emscripten (before the file): the module of the ILP32 IR (pathb-dump --target linux_riscv32) with the
+# exports that the Emscripten JS runtime reads:
 # __indirect_function_table (an empty funcref table), __stack_pointer, __data_end and __heap_base (immutable i32
-# globals). The layout and the code are unchanged. --asan and --emscripten are not combined. Without the argument the
-# module is byte-identical to the one before the mode existed. docs/notes/pathb-wasm.md, "Emscripten".
+# globals), and __wasm_call_ctors (an empty function: the IR has no constructor list). The layout and the code are
+# unchanged. --emscripten-import-memory (with --emscripten) imports env.memory instead of exporting memory.
+# --asan and --emscripten are not combined. Without the arguments the module is byte-identical to the one before the
+# mode existed. docs/notes/pathb-wasm.md, "Emscripten".
 #
-# Layout and representation. The IR's layout is LP64 (pointers 8 bytes), and the emitter keeps it: a pointer value is an
-# i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Integers of 1, 2 and 4 bytes are
-# i32 values kept canonical (sign- or zero-extended from their width), so a comparison or a widening is a plain
-# operation; 8-byte integers and pointers are i64; float and double are f32 and f64. A register is a wasm local (the
-# IR is not SSA, so a register may be set more than once). A slot is a frame in the linear memory: a shadow stack grows
-# down from the top of the memory (global 0). Each function's frame starts at the stack pointer it found on entry, minus
-# its frame size, aligned to 16, and the stack pointer is restored before each return.
+# Layout and representation. The IR's layout is LP64 (pointers 8 bytes) by default, and the emitter keeps it: a pointer
+# value is an i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Under --emscripten the
+# IR is ILP32 (pointers and long 4 bytes, the model of wasm32), and a pointer is an i32 that needs no wrap (see layout_model).
+# Integers of 1, 2 and 4 bytes are i32 values kept canonical (sign- or zero-extended from their width), so a comparison
+# or a widening is a plain operation; 8-byte integers are i64, and pointers are i64 (i32 under ILP32); float and double
+# are f32 and f64. A register is a wasm local (the IR is not SSA, so a register may be set more than once). A slot is a
+# frame in the linear memory: a shadow stack grows down from the top of the memory (global 0). Each function's frame
+# starts at the stack pointer it found on entry, minus its frame size, aligned to 16, and the stack pointer is restored
+# before each return.
 #
 # Checked operations. Division by zero, INT_MIN / -1 and float-to-integer conversions out of range or from NaN trap
 # through wasm's own traps, which match the IR's checked forms. A shift whose count is not below the width of its left
@@ -229,10 +234,35 @@ SCALARS = {
   "double" => ["float", 8],
 }
 
+# The data model. LP64 is the IR's default. ILP32 (the layout of EDG's linux_riscv32 target, which pathb-dump selects with
+# --target) is the model of Emscripten's wasm32: pointers and long are 4 bytes. The IR's (layout ...) header gives the
+# model (layout_model), and emit_module sets these once per run: $ptr_bytes is the pointer size, $scalars the table of
+# the integer sizes. Under LP64 they are the tables above, so the module is the one emitted before they existed.
+SCALARS_ILP32 = SCALARS.merge("long" => ["int", 4, true, false], "unsigned_long" => ["int", 4, false, false])
+LAYOUT_LP64 = { "short" => 2, "int" => 4, "long" => 8, "long_long" => 8, "pointer" => 8, "float" => 4, "double" => 8 }
+LAYOUT_ILP32 = { "short" => 2, "int" => 4, "long" => 4, "long_long" => 8, "pointer" => 4, "float" => 4, "double" => 8 }
+$ptr_bytes = 8
+$scalars = SCALARS
+
+# The model that a layout names: :lp64 or :ilp32. sizes is the header's (layout ...) as a Hash (empty when the IR has
+# none, which is LP64, as the QBE emitter takes it). long_double is not checked: no 16-byte type is emitted.
+def layout_model(sizes)
+  return :lp64 if sizes.empty?
+  s = sizes.reject { |k, _| k == "long_double" }
+  return :lp64 if s == LAYOUT_LP64
+  return :ilp32 if s == LAYOUT_ILP32
+  raise Refused, "layout #{sizes.map { |k, v| "#{k} #{v}" }.join(", ")} is neither LP64 nor ILP32"
+end
+
+# The wasm type of a pointer: i64 under LP64, i32 under ILP32 (the linear memory's address).
+def ptr_wtype
+  $ptr_bytes == 8 ? :i64 : :i32
+end
+
 def parse_type(x)
   if x.is_a?(String)
     return VOID if x == "void"
-    return SCALARS[x] if SCALARS.key?(x)
+    return $scalars[x] if $scalars.key?(x)
     raise Refused, "type #{x}"
   end
   raise BadIR, "bad type form #{form_text(x)}" if !x.is_a?(Array) || x.empty?
@@ -248,7 +278,7 @@ end
 
 # The size and alignment of an object of type t, from the layout of the IR (scalars and arrays of them).
 def type_size(t)
-  return 8 if t[0] == "ptr"
+  return $ptr_bytes if t[0] == "ptr"
   return t[1] if t[0] == "int" || t[0] == "float"
   if t[0] == "array"
     raise Refused, "variable-length array" if t[1].nil?
@@ -279,7 +309,7 @@ def wtype(t)
     return :i64 if t[1] == 8
     raise Refused, "integer of #{t[1]} bytes"
   end
-  return :i64 if t[0] == "ptr"
+  return ptr_wtype if t[0] == "ptr"
   if t[0] == "float"
     return :f32 if t[1] == 4
     return :f64 if t[1] == 8
@@ -336,9 +366,9 @@ class Module_
   attr_reader :types, :imports, :import_index, :defined_index
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
+  attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
   attr_accessor :alloc_index, :alloc_type   # asan: the function index and the type of malloc and free (name => ...)
-  attr_accessor :emscripten   # the Emscripten exports (see encode_module)
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
@@ -432,8 +462,8 @@ ASAN_HEAP_RZ = 0xfa
 ASAN_HEAP_FREED = 0xfd
 ASAN_BAD_FREE = 0x100
 ASAN_INVALID_FREE = 0x101
-HEAP_SIZE = 65536            # the heap: a fixed region of this many bytes, which malloc does not grow (no memory.grow)
-HEAP_QUARANTINE = 4096       # the bytes of freed blocks held before the oldest is reused (their chunk sizes)
+ASAN_OUT_OF_MEMORY = 0x102   # malloc could not hold the request (its size is the report's address; see the host)
+HEAP_SIZE = 262144           # the heap: a fixed region of this many bytes, which malloc does not grow (no memory.grow)
 ALLOC_SIGS = { "malloc" => [[:i64], :i64], "free" => [[:i64], nil] }   # the allocator's signatures (params, result)
 
 # (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT): a defined global with its initializer. The TYPE is not needed:
@@ -567,7 +597,7 @@ def static_contents(mod, o)
       raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
       raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
       raise Refused, "address of the function #{target.name} in a static initializer (a function table is not lowered)" if target.sig == "&"
-      items << [off, 8, false, le_bytes(mod.static_addr(target.name) + add, 8)]
+      items << [off, $ptr_bytes, false, le_bytes(mod.static_addr(target.name) + add, $ptr_bytes)]
     elsif h == "bytes"
       off = as_int(it[1].to_s)
       n = as_int(it[2].to_s)
@@ -847,14 +877,14 @@ class Fn
     if op.is_a?(String) && op[0] == "%"
       e(0x20); leb_u(reg_info(op)[0])
     elsif op.is_a?(IRSym) && op.sig == "@"
-      e(0x42); leb_s(@mod.static_addr(op.name))   # the address of the static object
+      ptr_const(@mod.static_addr(op.name))   # the address of the static object
     elsif op.is_a?(IRSym)
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
       e(0x6a)                              # i32.add
-      e(0xad)                              # i64.extend_i32_u
+      e(0xad) if $ptr_bytes == 8           # i64.extend_i32_u (the address is an i32 under ILP32)
     elsif head_of(op) == "null"
-      e(0x42); leb_s(0)
+      ptr_const(0)
     else
       push_const(parse_type(op[1]), op[2])
     end
@@ -866,10 +896,10 @@ class Fn
     if op.is_a?(IRSym)
       raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
       @mod.static_addr(op.name) if op.sig == "@"
-      return :i64
+      return ptr_wtype
     end
     return reg_info(op)[1] if op.is_a?(String) && op[0] == "%"
-    return :i64 if head_of(op) == "null"
+    return ptr_wtype if head_of(op) == "null"
     return wtype(parse_type(op[1])) if head_of(op) == "const"
     raise Refused, "operand #{form_text(op)}"
   end
@@ -881,8 +911,8 @@ class Fn
       e(0x41); leb_s(slot_offset(op.name))
       e(0x6a)
     else
-      push_op(op, :i64)
-      e(0xa7)                              # i32.wrap_i64
+      push_op(op, ptr_wtype)
+      e(0xa7) if $ptr_bytes == 8           # i32.wrap_i64 (an i32 address needs no wrap)
     end
   end
 
@@ -935,7 +965,34 @@ class Fn
     raise Refused, "non-integer where an integer is needed" unless ty[0] == "int" || ty[0] == "ptr"
     push_op(op)
     return if wtype(ty) == :i64
-    e((sext || (ty[0] == "int" && ty[2])) ? 0xac : 0xad)   # i64.extend_i32_s / _u
+    e((ty[0] == "int" && (sext || ty[2])) ? 0xac : 0xad)   # i64.extend_i32_s / _u (an address is unsigned)
+  end
+
+  # Pushes an index operand (an integer) as the pointer width, sign-extended when it is narrower (as the IR says).
+  # Under LP64 this is push_i64; under ILP32 an i64 index is wrapped and an i32 one is used as it is.
+  def push_index(op)
+    return push_i64(op, true) if $ptr_bytes == 8
+    ty = op_type(op)
+    raise Refused, "non-integer where an integer is needed" unless ty[0] == "int"
+    push_op(op)
+    e(0xa7) if wtype(ty) == :i64         # i32.wrap_i64
+  end
+
+  # An integer constant of the pointer width (the address of an object, an offset, 0 for null).
+  def ptr_const(n)
+    if $ptr_bytes == 8
+      e(0x42); leb_s(n)
+    else
+      n &= 0xffffffff
+      n -= 0x100000000 if n >= 0x80000000
+      e(0x41); leb_s(n)
+    end
+  end
+
+  # Pointer-width arithmetic: i64 under LP64, i32 under ILP32. op is :add, :sub, :mul or :div_s.
+  def ptr_arith(op)
+    e(($ptr_bytes == 8 ? { :add => 0x7c, :sub => 0x7d, :mul => 0x7e, :div_s => 0x7f } :
+                         { :add => 0x6a, :sub => 0x6b, :mul => 0x6c, :div_s => 0x6d })[op])
   end
 
   def push_const(ty, v)
@@ -1133,18 +1190,23 @@ class Fn
       raise Refused, "p2i to a non-integer" unless dst[0] == "int"
       push_op(x[2])
       if wtype(dst) == :i32
-        e(0xa7)
+        e(0xa7) if ptr_wtype == :i64       # i32.wrap_i64 (an i32 address needs no wrap)
         normalize(dst)
         :i32
       else
+        e(0xad) if ptr_wtype == :i32       # i64.extend_i32_u: an address is unsigned
         :i64
       end
     when "i2p"
       src = op_type(x[2])
       raise Refused, "i2p from a non-integer" unless src[0] == "int"
       push_op(x[2])
-      e(src[2] ? 0xac : 0xad) if wtype(src) == :i32
-      :i64
+      if ptr_wtype == :i64
+        e(src[2] ? 0xac : 0xad) if wtype(src) == :i32
+      else
+        e(0xa7) if wtype(src) == :i64      # i32.wrap_i64
+      end
+      ptr_wtype
     when "i2f", "u2f"
       dst = parse_type(x[1])
       raise Refused, "i2f to a non-float" unless float_type?(dst)
@@ -1196,29 +1258,29 @@ class Fn
       push_const(parse_type(x[1]), x[2])
       wtype(parse_type(x[1]))
     when "null"
-      e(0x42); leb_s(0)
-      :i64
+      ptr_const(0)
+      ptr_wtype
     when "offset"
       # (offset ADDR N): no type; the result is a pointer
       push_op(x[1])
-      e(0x42); leb_s(as_int(x[2]))
-      e(0x7c)                              # i64.add
-      :i64
+      ptr_const(as_int(x[2]))
+      ptr_arith(:add)
+      ptr_wtype
     when "index"
       # (index BASE IDX SIZE): no type; the result is a pointer. The index is sign-extended, as the IR says.
       push_op(x[1])
-      push_i64(x[2], true)
-      e(0x42); leb_s(as_int(x[3]))
-      e(0x7e)                              # i64.mul
-      e(0x7c)                              # i64.add
-      :i64
+      push_index(x[2])
+      ptr_const(as_int(x[3]))
+      ptr_arith(:mul)
+      ptr_arith(:add)
+      ptr_wtype
     when "pdiff"
-      # (pdiff A B SIZE): no type; the result is the pointer difference, a long
+      # (pdiff A B SIZE): no type; the result is the pointer difference, a long (the width of a pointer in both models)
       push_op(x[1]); push_op(x[2])
-      e(0x7d)                              # i64.sub
-      e(0x42); leb_s(as_int(x[3]))
-      e(0x7f)                              # i64.div_s
-      :i64
+      ptr_arith(:sub)
+      ptr_const(as_int(x[3]))
+      ptr_arith(:div_s)
+      wtype($scalars["long"])
     when "call"
       call(x)
     when "unsupported"
@@ -1238,7 +1300,7 @@ class Fn
       else raise Refused, "load of #{ty[1]} bytes"
       end
     elsif ty[0] == "ptr"
-      e(0x29)
+      e($ptr_bytes == 8 ? 0x29 : 0x28)     # i64.load / i32.load
     else
       e(ty[1] == 4 ? 0x2a : 0x2b)
     end
@@ -1255,7 +1317,7 @@ class Fn
       else raise Refused, "store of #{ty[1]} bytes"
       end
     elsif ty[0] == "ptr"
-      e(0x37)
+      e($ptr_bytes == 8 ? 0x37 : 0x36)     # i64.store / i32.store
     else
       e(ty[1] == 4 ? 0x38 : 0x39)
     end
@@ -1422,7 +1484,7 @@ class Fn
     when "nonnull"
       # (nonnull P): traps when the pointer is null
       push_op(s[1])
-      e(0x50)                              # i64.eqz
+      e($ptr_bytes == 8 ? 0x50 : 0x45)     # i64.eqz (i32.eqz under ILP32)
       e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. The index is compared as unsigned, so a negative one traps too.
@@ -1692,36 +1754,35 @@ end
 # asan: the allocator, in the module (malloc and free are its functions, and the IR's calls go to them, see Fn#call).
 #
 # A block is a chunk of cap + 64 bytes at c (a multiple of 16): a left redzone [c, c + 32) whose first 16 bytes hold the
-# header (ASAN_H_*: c + 0 the requested size n, c + 4 cap, c + 8 the state, 0 in use, 1 quarantined, 2 free, c + 12 the
-# magic word ASAN_HEAP_MAGIC, c + 16 the next chunk of the free list or the quarantine, 0 for none), then the payload
-# [c + 32, c + 32 + cap) with cap a multiple of 16, then a right redzone of 32 bytes. The shadow of a chunk is 0xfa over the whole chunk, 0 over the n / 8 whole granules
-# of the payload and n % 8 in the next one, so a block of n bytes is addressable exactly as the static objects are. The
-# header is written by the allocator's own code, which is not checked.
+# header (ASAN_H_*: c + 0 the requested size n, c + 4 cap, c + 8 the state, 0 in use or 1 freed, c + 12 the magic word
+# ASAN_HEAP_MAGIC), then the payload [c + 32, c + 32 + cap) with cap a multiple of 16, then a right redzone of 32 bytes.
+# The shadow of a chunk is 0xfa over the whole chunk, 0 over the n / 8 whole granules of the payload and n % 8 in the
+# next one, so a block of n bytes is addressable exactly as the static objects are. The header is written by the
+# allocator's own code, which is not checked.
 #
-# malloc(n): a block of n <= HEAP_SIZE bytes, from the free list (the first block whose cap is enough, taken out of the
-# list) or else from the bump pointer; 0 when the heap has no room. free(p): nothing for 0; a free of an address that is
-# not the payload of a chunk (out of the heap, not 16-aligned, or no magic word in the header before it: an address inside a
-# block) reports ASAN_INVALID_FREE, and a
-# free of a block that is not in use reports ASAN_BAD_FREE; both trap. Otherwise the block's granules are 0xfd, and it
-# joins the quarantine, a FIFO of the freed blocks; while the quarantine holds more than HEAP_QUARANTINE bytes, its oldest
-# block moves to the free list. A quarantined block is not reused, so a use after the free is reported as long as the
-# block is in the quarantine. The allocator's reports carry size 0 and a code of 0x100 or more (see the host).
+# The policy is that no address is handed out twice in a run (see docs/notes/pathb-wasm.md, "AddressSanitizer"): malloc
+# only bumps the pointer, and free never returns memory to it. A freed block stays freed, its granules 0xfd, for the rest
+# of the run, so a stale access is reported and a second free of the same pointer finds the block freed, whatever has
+# been allocated since. The heap is HEAP_SIZE bytes, fixed (no memory.grow): a request that the heap cannot hold is an
+# out-of-memory error, which is reported (ASAN_OUT_OF_MEMORY, with the size requested) and traps, as libasan does when
+# allocator_may_return_null is false. A malloc that returns 0 is therefore never seen under the mode.
 #
-# The globals (see encode_module): 1 the bump pointer, 2 the free list, 3 and 4 the quarantine's head and tail, 5 its
-# bytes. Both functions are the module's last ones, after the check (malloc, then free).
+# free(p): nothing for 0; a free of an address that is not the payload of a chunk (out of the heap, not 16-aligned, or
+# no magic word in the header before it: an address inside a block) reports ASAN_INVALID_FREE, and a free of a block that
+# is not in use (freed) reports ASAN_BAD_FREE; both trap. Otherwise the block's state is freed and its granules are 0xfd.
+# The allocator's reports carry size 0 (malloc's: the size requested) and a code of 0x100 or more (see the host).
+#
+# The globals (see encode_module): 1 the bump pointer, the heap's next free address.
 ASAN_G_BUMP = 1
-ASAN_G_FREE = 2
-ASAN_G_QHEAD = 3
-ASAN_G_QTAIL = 4
-ASAN_G_QBYTES = 5
 
 # The header of a chunk (see the comment above): its fields are at these offsets from the chunk.
 ASAN_H_N = 0          # the requested size
 ASAN_H_CAP = 4        # the payload's capacity, a multiple of 16
-ASAN_H_STATE = 8      # 0 in use, 1 quarantined, 2 free
+ASAN_H_STATE = 8      # 0 in use, 1 freed
 ASAN_H_MAGIC = 12     # ASAN_HEAP_MAGIC: a chunk's header is there (a free of an address inside a block is not)
-ASAN_H_NEXT = 16      # the next chunk of the free list or the quarantine, 0 for none
 ASAN_HEAP_MAGIC = 0x48454150
+ASAN_STATE_IN_USE = 0
+ASAN_STATE_FREED = 1
 
 # The code of a memory access with an align hint of 0 and the offset: the opcode is followed by its memarg.
 def asan_mem(c, op, off)
@@ -1729,60 +1790,50 @@ def asan_mem(c, op, off)
   uleb(off, c)
 end
 
+# asan: the report and trap of the allocator's out-of-memory error: __asan_report(n, 0, ASAN_OUT_OF_MEMORY) with the
+# requested size n (the parameter 0, i64, wrapped), then unreachable.
+def asan_oom(c, rep)
+  c.concat([0x20, 0, 0xa7, 0x41, 0, 0x41]); sleb(ASAN_OUT_OF_MEMORY, c)
+  c << 0x10; uleb(rep, c); c.concat([0x00])
+end
+
 def asan_malloc_body(mod)
   sh = mod.shadow_base
+  rep = mod.import_index.fetch("__asan_report")
   c = []
-  c.concat([0x01, 0x05, VT[:i32]])       # locals: 1 ni, 2 cap, 3 prev, 4 cur, 5 the chunk (after the parameter n)
-  # if n > HEAP_SIZE: return 0
-  c.concat([0x20, 0, 0x42]); sleb(HEAP_SIZE, c); c.concat([0x56, 0x04, 0x40, 0x42, 0x00, 0x0f, 0x0b])
+  c.concat([0x01, 0x03, VT[:i32]])       # locals: 1 ni, 2 cap, 3 the chunk (after the parameter n)
+  # if n > HEAP_SIZE: out of memory
+  c.concat([0x20, 0, 0x42]); sleb(HEAP_SIZE, c); c.concat([0x56, 0x04, 0x40])
+  asan_oom(c, rep); c.concat([0x0b])
   c.concat([0x20, 0, 0xa7, 0x21, 1])                       # ni = wrap(n)
   c.concat([0x20, 1, 0x41, 15, 0x6a, 0x41]); sleb(-16, c); c.concat([0x71, 0x21, 2])   # cap = (ni + 15) & -16
-  c.concat([0x41, 0, 0x21, 3, 0x23, ASAN_G_FREE, 0x21, 4])   # prev = 0; cur = the free list's head
-  # the first-fit search of the free list: the first block whose cap is enough is unlinked, and it is the chunk
-  c.concat([0x02, 0x40, 0x03, 0x40])                       # block; loop
-  c.concat([0x20, 4, 0x45, 0x0d, 1])                       # cur == 0: leave the block (not found)
-  c.concat([0x20, 4]); asan_mem(c, 0x28, ASAN_H_CAP); c.concat([0x20, 2, 0x4f, 0x04, 0x40])   # if cap(cur) >= cap
-  c.concat([0x20, 4, 0x21, 5])                             # chunk = cur
-  c.concat([0x20, 3, 0x45, 0x04, 0x40])                    # if prev == 0: the list's head moves on
-  c.concat([0x20, 4]); asan_mem(c, 0x28, ASAN_H_NEXT); c.concat([0x24, ASAN_G_FREE])
-  c.concat([0x05])                                         # else: next(prev) = next(cur)
-  c.concat([0x20, 3, 0x20, 4]); asan_mem(c, 0x28, ASAN_H_NEXT); asan_mem(c, 0x36, ASAN_H_NEXT)
-  c.concat([0x0b])
-  c.concat([0x0c, 2])                                      # br: leave the block (the chunk is found)
-  c.concat([0x0b])                                         # end (cap enough)
-  c.concat([0x20, 4, 0x21, 3])                             # prev = cur
-  c.concat([0x20, 4]); asan_mem(c, 0x28, ASAN_H_NEXT); c.concat([0x21, 4])   # cur = next(cur)
-  c.concat([0x0c, 0])                                      # br: the loop
-  c.concat([0x0b, 0x0b])                                   # end (loop); end (block)
-  # no block on the free list: the chunk is at the bump pointer, if the heap has room for it
-  c.concat([0x20, 5, 0x45, 0x04, 0x40])
-  c.concat([0x23, ASAN_G_BUMP, 0x21, 5])                   # chunk = bump
-  c.concat([0x20, 5, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x41]); sleb(mod.heap_end, c)
-  c.concat([0x4b, 0x04, 0x40, 0x42, 0x00, 0x0f, 0x0b])     # the chunk does not fit: return 0
-  c.concat([0x20, 5, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x24, ASAN_G_BUMP])   # bump = chunk + cap + 64
-  c.concat([0x20, 5, 0x20, 2]); asan_mem(c, 0x36, ASAN_H_CAP)   # the chunk's cap (a reused chunk keeps its own)
-  c.concat([0x0b])
-  # the header: the size, state 0 (in use), the magic; the cap is the chunk's own, which may exceed the request
-  c.concat([0x20, 5, 0x20, 1]); asan_mem(c, 0x36, ASAN_H_N)
-  c.concat([0x20, 5, 0x41, 0]); asan_mem(c, 0x36, ASAN_H_STATE)
-  c.concat([0x20, 5, 0x41]); sleb(ASAN_HEAP_MAGIC, c); asan_mem(c, 0x36, ASAN_H_MAGIC)
-  c.concat([0x20, 5]); asan_mem(c, 0x28, ASAN_H_CAP); c.concat([0x21, 2])
+  c.concat([0x23, ASAN_G_BUMP, 0x21, 3])                   # chunk = bump
+  # if the chunk does not fit below the heap's end: out of memory
+  c.concat([0x20, 3, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x41]); sleb(mod.heap_end, c)
+  c.concat([0x4b, 0x04, 0x40])
+  asan_oom(c, rep); c.concat([0x0b])
+  c.concat([0x20, 3, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x24, ASAN_G_BUMP])   # bump = chunk + cap + 64
+  # the header: the size, the cap, state 0 (in use), the magic
+  c.concat([0x20, 3, 0x20, 1]); asan_mem(c, 0x36, ASAN_H_N)
+  c.concat([0x20, 3, 0x20, 2]); asan_mem(c, 0x36, ASAN_H_CAP)
+  c.concat([0x20, 3, 0x41, ASAN_STATE_IN_USE]); asan_mem(c, 0x36, ASAN_H_STATE)
+  c.concat([0x20, 3, 0x41]); sleb(ASAN_HEAP_MAGIC, c); asan_mem(c, 0x36, ASAN_H_MAGIC)
   # the shadow: the chunk is a redzone, then the payload's whole granules are 0 and a partial granule holds n % 8
-  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 5, 0x41, 3, 0x76, 0x6a])   # dst = sh + c / 8
+  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 3, 0x41, 3, 0x76, 0x6a])   # dst = sh + c / 8
   c.concat([0x41]); sleb(ASAN_HEAP_RZ, c)
   c.concat([0x20, 2, 0x41, 0xc0, 0x00, 0x6a, 0x41, 3, 0x76])   # len = (cap + 64) / 8
   c.concat([0xfc, 0x0b, 0x00])                             # memory.fill
-  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 5, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])   # dst = sh + (c + 32) / 8
+  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 3, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])   # dst = sh + (c + 32) / 8
   c.concat([0x41, 0])
   c.concat([0x20, 1, 0x41, 3, 0x76])                       # len = n / 8
   c.concat([0xfc, 0x0b, 0x00])
   c.concat([0x20, 1, 0x41, 7, 0x71, 0x04, 0x40])           # if n % 8 != 0
-  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 5, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])
+  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 3, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])
   c.concat([0x20, 1, 0x41, 3, 0x76, 0x6a])                 # dst = sh + (c + 32) / 8 + n / 8
   c.concat([0x20, 1, 0x41, 7, 0x71])                       # value n % 8
   c.concat([0x3a, 0x00, 0x00])                             # i32.store8
   c.concat([0x0b])
-  c.concat([0x20, 5, 0x41, 32, 0x6a, 0xad, 0x0b])          # return c + 32 (i64.extend_i32_u), end
+  c.concat([0x20, 3, 0x41, 32, 0x6a, 0xad, 0x0b])          # return c + 32 (i64.extend_i32_u), end
   c
 end
 
@@ -1790,7 +1841,7 @@ def asan_free_body(mod)
   sh = mod.shadow_base
   rep = mod.import_index.fetch("__asan_report")
   c = []
-  c.concat([0x01, 0x02, VT[:i32]])       # locals: 1 the chunk, 2 the quarantine's oldest block (after the parameter p)
+  c.concat([0x01, 0x01, VT[:i32]])       # local: 1 the chunk (after the parameter p)
   c.concat([0x20, 0, 0x50, 0x04, 0x40, 0x0f, 0x0b])        # if p == 0: return
   # an address below the first block or at or past the bump pointer: invalid
   c.concat([0x20, 0, 0x42]); sleb(mod.heap_base + 32, c); c.concat([0x54])   # p < heap_base + 32
@@ -1807,38 +1858,16 @@ def asan_free_body(mod)
   c.concat([0x47, 0x72, 0x04, 0x40])
   c.concat([0x20, 0, 0xa7, 0x41, 0, 0x41]); sleb(ASAN_INVALID_FREE, c)
   c.concat([0x10]); uleb(rep, c); c.concat([0x00, 0x0b])
-  # a block that is not in use (quarantined or free): a double free
+  # a block that is not in use (freed): a double free, whatever was allocated since (no address is handed out twice)
   c.concat([0x20, 1]); asan_mem(c, 0x28, ASAN_H_STATE); c.concat([0x04, 0x40])
   c.concat([0x20, 0, 0xa7, 0x41, 0, 0x41]); sleb(ASAN_BAD_FREE, c)
   c.concat([0x10]); uleb(rep, c); c.concat([0x00, 0x0b])
-  # in use: the state is quarantined and the payload's granules are poisoned
-  c.concat([0x20, 1, 0x41, 1]); asan_mem(c, 0x36, ASAN_H_STATE)
+  # in use: the state is freed and the payload's granules are poisoned for the rest of the run
+  c.concat([0x20, 1, 0x41, ASAN_STATE_FREED]); asan_mem(c, 0x36, ASAN_H_STATE)
   c.concat([0x41]); sleb(sh, c); c.concat([0x20, 1, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])   # dst = sh + (c + 32) / 8
   c.concat([0x41]); sleb(ASAN_HEAP_FREED, c)
   c.concat([0x20, 1]); asan_mem(c, 0x28, ASAN_H_N); c.concat([0x41, 7, 0x6a, 0x41, 3, 0x76])   # len = (n + 7) / 8
   c.concat([0xfc, 0x0b, 0x00])
-  # the quarantine's tail takes the block: next(tail) = chunk (or the head is the chunk); the block is the tail
-  c.concat([0x23, ASAN_G_QTAIL, 0x04, 0x40])
-  c.concat([0x23, ASAN_G_QTAIL, 0x20, 1]); asan_mem(c, 0x36, ASAN_H_NEXT)
-  c.concat([0x05])
-  c.concat([0x20, 1, 0x24, ASAN_G_QHEAD])
-  c.concat([0x0b])
-  c.concat([0x20, 1, 0x24, ASAN_G_QTAIL])
-  c.concat([0x20, 1]); asan_mem(c, 0x28, ASAN_H_CAP)      # bytes += cap + 64
-  c.concat([0x41, 0xc0, 0x00, 0x6a, 0x23, ASAN_G_QBYTES, 0x6a, 0x24, ASAN_G_QBYTES])
-  c.concat([0x20, 1, 0x41, 0]); asan_mem(c, 0x36, ASAN_H_NEXT)   # next(chunk) = none
-  # evict the oldest blocks while the quarantine holds more than HEAP_QUARANTINE bytes
-  c.concat([0x02, 0x40, 0x03, 0x40])
-  c.concat([0x23, ASAN_G_QBYTES, 0x41]); sleb(HEAP_QUARANTINE, c); c.concat([0x4d, 0x0d, 1])   # bytes <= quarantine
-  c.concat([0x23, ASAN_G_QHEAD, 0x21, 2])                  # the oldest block
-  c.concat([0x20, 2]); asan_mem(c, 0x28, ASAN_H_NEXT); c.concat([0x24, ASAN_G_QHEAD])   # the head moves on
-  c.concat([0x23, ASAN_G_QHEAD, 0x45, 0x04, 0x40, 0x41, 0, 0x24, ASAN_G_QTAIL, 0x0b])  # emptied: no tail
-  c.concat([0x23, ASAN_G_QBYTES])
-  c.concat([0x20, 2]); asan_mem(c, 0x28, ASAN_H_CAP); c.concat([0x41, 0xc0, 0x00, 0x6a, 0x6b, 0x24, ASAN_G_QBYTES])
-  c.concat([0x20, 2, 0x41, 2]); asan_mem(c, 0x36, ASAN_H_STATE)      # state = free
-  c.concat([0x20, 2, 0x23, ASAN_G_FREE]); asan_mem(c, 0x36, ASAN_H_NEXT)   # next(oldest) = the free list's head
-  c.concat([0x20, 2, 0x24, ASAN_G_FREE])                   # the free list's head is the oldest
-  c.concat([0x0c, 0, 0x0b, 0x0b])                          # br: the loop; end (loop); end (block)
   c.concat([0x0b])                                         # end (the function)
   c
 end
@@ -1846,12 +1875,38 @@ end
 # ------------------------------------------------------------------ the module
 
 # --emscripten: the exports the mode adds (encode_module). A function of the module may not take one of these names.
-EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base"]
+EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base",
+                      "__wasm_call_ctors"]
 
-USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten] [FILE.ir | -] > out.wasm\n"
+# --emscripten: the imports the IR calls under a libc or C++ name that Emscripten's runtime provides under another
+# name, as [IR name => Emscripten name]. Empty: no such pair is verified (docs/notes/pathb-wasm.md, "Emscripten",
+# point 5). Emscripten's libc is linked into the module, so the libc names are not imports there at all. An entry
+# is added only with a source that names both sides.
+EMSCRIPTEN_IMPORT_NAMES = {}
 
-def emit_module(src, asan = false, emscripten = false)
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [FILE.ir | -] > out.wasm\n"
+
+def emit_module(src, asan = false, emscripten = false, import_memory = false)
   forms = parse_forms(tokenize(src))
+  # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
+  # takes ILP32 only). The model is set before any type is read.
+  sizes = {}
+  forms.each do |f|
+    next unless head_of(f) == "ir-module"
+    f.drop(2).each do |part|
+      next unless head_of(part) == "layout"
+      part.drop(1).each { |item| sizes[item[0].to_s] = as_int(item[1].to_s) }
+    end
+  end
+  model = layout_model(sizes)
+  if model == :ilp32 && !emscripten
+    raise Refused, "layout: ILP32 (pointer 4) is emitted with --emscripten only"
+  end
+  if model == :lp64 && emscripten
+    raise Refused, "layout: --emscripten needs an ILP32 IR (pathb-dump --freestanding --target linux_riscv32), not LP64"
+  end
+  $ptr_bytes = model == :ilp32 ? 4 : 8
+  $scalars = model == :ilp32 ? SCALARS_ILP32 : SCALARS
   defs = {}
   order = []
   objs = []
@@ -1882,6 +1937,8 @@ def emit_module(src, asan = false, emscripten = false)
   mod = Module_.new(defs)
   mod.asan = asan
   mod.emscripten = emscripten
+  mod.import_memory = import_memory
+  mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
   mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
@@ -1901,6 +1958,7 @@ def emit_module(src, asan = false, emscripten = false)
   # the check is the module's last function, after the defined ones; asan's malloc and free follow it
   mod.check_index = mod.imports.length + order.length if asan
   mod.alloc_index = { "malloc" => mod.check_index + 1, "free" => mod.check_index + 2 } if asan
+  mod.ctors_index = mod.imports.length + order.length + (asan ? 3 : 0) if emscripten
   bodies = order.map do |nm|
     fn = Fn.new(mod, defs[nm])
     fn.compile
@@ -1926,27 +1984,38 @@ def encode_module(mod, bodies)
     end
   end
   section(1, t, out)
-  # imports: functions of the module "env"
-  unless mod.imports.empty?
+  # imports: functions of the module "env", then (emscripten-import-memory) the memory env.memory, which is the last
+  # entry: the function indices do not count it
+  nimports = mod.imports.length + (mod.import_memory ? 1 : 0)
+  unless nimports == 0
     im = []
-    uleb(mod.imports.length, im)
+    uleb(nimports, im)
     mod.imports.each do |name, ti|
+      name = EMSCRIPTEN_IMPORT_NAMES.fetch(name, name) if mod.emscripten
       name_bytes("env", im)
       name_bytes(name, im)
       im << 0x00
       uleb(ti, im)
     end
+    if mod.import_memory
+      name_bytes("env", im)
+      name_bytes("memory", im)
+      im << 0x02                         # memory
+      im << 0x00                         # limits without a maximum: the host's memory may grow
+      uleb(mod.pages, im)                # the initial size: the pages the module's layout is built on
+    end
     section(2, im, out)
   end
-  # functions (asan: the check, then malloc and free, are the last ones)
+  # functions (asan: the check, then malloc and free, are the last ones; emscripten: then __wasm_call_ctors)
   fsec = []
-  uleb(bodies.length + (mod.asan ? 3 : 0), fsec)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   if mod.asan
     uleb(mod.check_type, fsec)
     uleb(mod.alloc_type["malloc"], fsec)
     uleb(mod.alloc_type["free"], fsec)
   end
+  uleb(mod.ctors_type, fsec) if mod.emscripten
   section(3, fsec, out)
   # emscripten: the function table, exported empty. The emitter has no indirect calls and no function values (both are
   # refused, see Fn#call and op_type), so no element segment is needed. It is exported under the name the glue looks for.
@@ -1957,26 +2026,28 @@ def encode_module(mod, bodies)
     uleb(0, tb)                          # minimum 0 elements
     section(4, tb, out)
   end
-  # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow
-  mem = []
-  uleb(1, mem)
-  mem << 0x00
-  uleb(mod.pages, mem)
-  section(5, mem, out)
+  # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow. With
+  # --emscripten-import-memory the memory is the import above, so there is no memory section.
+  unless mod.import_memory
+    mem = []
+    uleb(1, mem)
+    mem << 0x00
+    uleb(mod.pages, mem)
+    section(5, mem, out)
+  end
   # global 0: the stack pointer, mutable i32, starts at the top of the memory (asan: below the shadow). The memory
   # addresses are i32, so the stack pointer is too, in both modes. emscripten: global 1 is __data_end (the end of the
   # static data) and global 2 is __heap_base (the top of the memory: the stack grows down from it, and a heap would
   # begin there and grow the memory with memory.grow), both immutable i32.
   gl = []
-  uleb(mod.emscripten ? 3 : (mod.asan ? 6 : 1), gl)
+  uleb(mod.emscripten ? 3 : (mod.asan ? 2 : 1), gl)
   gl << VT[:i32] << 0x01
   gl << 0x41
   sleb(mod.stack_top, gl)
   gl << 0x0b
   if mod.asan
-    # asan: the allocator's state, mutable i32s (see asan_malloc_body): the bump pointer starts at the heap's base, and the
-    # free list and the quarantine are empty
-    [mod.heap_base, 0, 0, 0, 0].each do |init|
+    # asan: the allocator's state, a mutable i32 (see asan_malloc_body): the bump pointer starts at the heap's base
+    [mod.heap_base].each do |init|
       gl << VT[:i32] << 0x01 << 0x41
       sleb(init, gl)
       gl << 0x0b
@@ -1991,14 +2062,17 @@ def encode_module(mod, bodies)
     gl << 0x0b
   end
   section(6, gl, out)
-  # exports: the memory, (emscripten: the table and the globals), then each function under its IR name
+  # exports: the memory (not with an imported one), (emscripten: the table, the globals and __wasm_call_ctors), then
+  # each function under its IR name
   ex = []
-  nexp = 1 + bodies.length
-  nexp += 4 if mod.emscripten
+  nexp = (mod.import_memory ? 0 : 1) + bodies.length
+  nexp += 5 if mod.emscripten
   uleb(nexp, ex)
-  name_bytes("memory", ex)
-  ex << 0x02
-  uleb(0, ex)
+  unless mod.import_memory
+    name_bytes("memory", ex)
+    ex << 0x02
+    uleb(0, ex)
+  end
   if mod.emscripten
     name_bytes("__indirect_function_table", ex)
     ex << 0x01
@@ -2012,6 +2086,9 @@ def encode_module(mod, bodies)
     name_bytes("__heap_base", ex)
     ex << 0x03
     uleb(2, ex)
+    name_bytes("__wasm_call_ctors", ex)
+    ex << 0x00
+    uleb(mod.ctors_index, ex)
   end
   bodies.each_with_index do |(nm, _), i|
     raise Refused, "function name #{nm.inspect} is not ASCII (an export name must be UTF-8)" if nm.bytes.any? { |b| b >= 0x80 }
@@ -2022,7 +2099,7 @@ def encode_module(mod, bodies)
   section(7, ex, out)
   # code
   code = []
-  uleb(bodies.length + (mod.asan ? 3 : 0), code)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), code)
   bodies.each do |nm, fn|
     b = fn.encode
     uleb(b.length, code)
@@ -2033,6 +2110,11 @@ def encode_module(mod, bodies)
       uleb(b.length, code)
       b.each { |x| code << x }
     end
+  end
+  if mod.emscripten
+    b = [0x00, 0x0b]                     # no locals, end: __wasm_call_ctors does nothing (no constructor list in the IR)
+    uleb(b.length, code)
+    b.each { |x| code << x }
   end
   section(10, code, out)
   # data: the segments of the static objects, each at its address (an active segment in memory 0)
@@ -2060,12 +2142,15 @@ def main(argv)
   args = argv.dup
   asan = false
   emscripten = false
+  import_memory = false
   while !args.empty? && args.first.start_with?("--")
     flag = args.shift
     if flag == "--asan"
       asan = true
     elsif flag == "--emscripten"
       emscripten = true
+    elsif flag == "--emscripten-import-memory"
+      import_memory = true
     else
       $stderr.write(USAGE)
       return 1
@@ -2079,9 +2164,13 @@ def main(argv)
     $stderr.write("error: --asan and --emscripten are not combined (the shadow would sit where the heap begins)\n")
     return 1
   end
+  if import_memory && !emscripten
+    $stderr.write("error: --emscripten-import-memory needs --emscripten\n")
+    return 1
+  end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src, asan, emscripten)
+    bytes = emit_module(src, asan, emscripten, import_memory)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3

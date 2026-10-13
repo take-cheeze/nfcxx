@@ -19,14 +19,15 @@ runs under `NFCXX_WASM_ASAN=1` and must give N, and is skipped otherwise.
 
 ## Representation
 
-The IR's layout is LP64, and the emitter keeps it. Nothing in the front end changes, so the struct offsets, sizes and
-pointer widths of the IR are the ones the C++ program has.
+The IR's layout is LP64 by default, and the emitter keeps it: the struct offsets, sizes and pointer widths of the IR are
+the ones the C++ program has on x86-64. `--emscripten` emits the ILP32 layout instead (pointers and `long` 4 bytes), from
+the same front end with EDG's `linux_riscv32` target; see "Emscripten" below.
 
 | IR type | wasm |
 | --- | --- |
 | integers up to 4 bytes, `bool` | `i32`, kept canonical: sign- or zero-extended from the width, `bool` 0 or 1 |
-| 8-byte integers | `i64` |
-| pointers | `i64`; a memory access wraps it to the `i32` address (`i32.wrap_i64`) |
+| 8-byte integers | `i64` (`long` and `unsigned long` are 4 bytes, `i32`, under `--emscripten`) |
+| pointers | `i64`; a memory access wraps it to the `i32` address (`i32.wrap_i64`). Under `--emscripten`: `i32`, the address itself |
 | `float`, `double` | `f32`, `f64` |
 
 - A register is a wasm local. The IR is not SSA, so a register may be set more than once, which a wasm local allows.
@@ -77,25 +78,36 @@ writes the frame's shadow (one `memory.fill` per run of equal codes). A return w
   another signature is refused (exit status 3, the message names the signature). A function the IR defines under the
   same name is the IR's own, and no allocator is called for it. Not covered by the allocator: `operator new` and
   `operator delete`, `calloc` and `realloc`, which stay imports (their memory is not checked, see below).
-- **The layout.** The heap is a fixed region of 64 KB, `[heap_base, heap_base + 65536)`, with `heap_base` the end of the
-  static data rounded up to 16. The stack grows down from the shadow towards it. The heap does not grow: `memory.grow`
-  would have to grow the shadow with it, and a fixed size keeps the shadow and the stack top as they are. The shadow of the
-  heap is poisoned (`0xfa`) from the end of the static data to the end of the heap, so the bytes not yet handed out are
-  reported too. For a small program the memory is three pages.
+- **The layout.** The heap is a fixed region of 256 KB, `[heap_base, heap_base + 262144)`, with `heap_base` the end of
+  the static data rounded up to 16. The stack grows down from the shadow towards it. The heap does not grow: `memory.grow`
+  would have to grow the shadow with it, and a fixed size keeps the shadow and the stack top as they are. The shadow of
+  the heap is poisoned (`0xfa`) from the end of the static data to the end of the heap, so the bytes not yet handed out
+  are reported too. For a small program the memory is six pages (384 KB).
 - **Blocks.** A block of `n` bytes is a chunk of `cap + 64` bytes: a 32-byte left redzone, the payload of `cap` bytes
-  (`n` rounded up to 16), and a 32-byte right redzone. The first 20 bytes of the left redzone are the header: the size
-  `n`, the capacity, the state (0 in use, 1 quarantined, 2 free), a magic word, and the link of the free list or the
-  quarantine. The header is written by the allocator, which is not instrumented. The shadow of a chunk is `0xfa` over the
-  redzones, 0 over the payload's whole granules and `n % 8` in the next one, so a block of `n` bytes is addressable exactly
-  as a static object is.
-- **Free and reuse.** `free` poisons the payload's granules with `0xfd` and puts the block in the quarantine, a FIFO of
-  freed blocks. While the quarantine holds more than 4 KB of chunks, its oldest block moves to the free list (LIFO).
-  `malloc` takes the first block of the free list whose capacity fits, and otherwise the next chunk at the bump pointer.
-  When the heap has no room, `malloc` returns 0.
+  (`n` rounded up to 16), and a 32-byte right redzone. The first 16 bytes of the left redzone are the header: the size
+  `n`, the capacity, the state (0 in use, 1 freed) and a magic word. The header is written by the allocator, which is not
+  instrumented. The shadow of a chunk is `0xfa` over the redzones, 0 over the payload's whole granules and `n % 8` in the
+  next one, so a block of `n` bytes is addressable exactly as a static object is.
+- **Reuse policy: no address is handed out twice in a run.** `malloc` only bumps the pointer, and `free` never returns
+  memory to it. A freed block stays in the state "freed", with its payload granules `0xfd`, for the rest of the run. So a
+  stale pointer to a freed block is reported on every access, however many blocks have been allocated since, and a second
+  `free` of the same pointer is reported as `attempting-double-free`, because the block it names is still freed.
+  Why this and not a reuse with a check: a wasm address is a plain `i32` with no room for a generation or a tag, so a
+  reused address cannot tell a stale pointer from the new owner's. Checking a per-allocation id would need pointer tags,
+  which change every access. A larger quarantine only shortens the window in which a stale pointer aliases a new block.
+  The cost is memory: the chunks of a run add up to at most 256 KB, so a program that allocates more than that in total,
+  freed or not, is reported as out of memory (below). A program with a 1000-pair malloc/free loop of 80-byte chunks fits.
+- **Exhaustion policy: report and trap.** A request the heap cannot hold (more than 256 KB, or a chunk that does not fit
+  below the heap's end) reports `allocator-out-of-memory` with the requested size as the report's address, and traps
+  (`unreachable`), as libasan does when `allocator_may_return_null` is false, its default. So under `--asan` `malloc` never
+  returns 0: a program that tests the result for NULL does not get the chance to handle it, because the report comes
+  first. This is a decision, not a fix: a program whose contract is that NULL is a normal answer would need an opt-out in
+  the style of `allocator_may_return_null`, which the emitter does not have. Without `--asan` `malloc` is the host's import
+  and the program's NULL check is unchanged.
 - **Bad frees.** `free(0)` does nothing. A free of an address that is not the payload of a block in use is reported and
   traps: an address below the first block or at or past the bump pointer, one that is not 16-aligned, and one whose
-  header has no magic word (an address inside a block). A free of a block that is already quarantined or on the free list is
-  a double free.
+  header has no magic word (an address inside a block). A free of a block that is already freed is a double free, whether
+  or not the address was handed out again: there is no second block at that address.
 
 | Code | Kind reported |
 | --- | --- |
@@ -106,6 +118,7 @@ writes the frame's shadow (one `memory.fill` per run of equal codes). A return w
 | `0xfd` | `heap-use-after-free` |
 | `0x100` | `attempting-double-free` (an allocator report: a free of a block that is not in use, not a shadow code) |
 | `0x101` | `attempting-free-on-address-which-was-not-malloc` (an allocator report, not a shadow code) |
+| `0x102` | `allocator-out-of-memory` (an allocator report: the requested size is the address, size 0) |
 
 **Checks.** Every load, store, and both ranges of a `copy`, calls the module's check function, `check(addr, size)`, before
 the access. The check is the function after the defined ones, and the allocator's `malloc` and `free` follow it. The check
@@ -121,19 +134,24 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
   object or block whose size is not a multiple of 8, and an access that starts inside a block and ends past it.
 - A `copy` that writes past its destination.
 - A use of a slot's address after its function has returned, while no other call has reused the frame.
-- A use of a heap block after its free, while the block is quarantined or on the free list (its granules are `0xfd`).
-- A double free and a free of an address the allocator did not return, for a block that has not been handed out again.
-- Tests: `tests/wasm/asan_*.cpp` (the `// ASAN: KIND` markers). `asan_clean.cpp` and `asan_heap_clean.cpp` are clean and
-  give their EXPECT value under the mode; `asan_heap_clean.cpp` has `// ASAN-EXPECT: N`, which runs under
-  `NFCXX_WASM_ASAN=1` only (without the mode its `malloc` is the host's stub, so the program has no meaning there).
+- A use of a heap block after its free, for the rest of the run, including after the allocator has moved on to other
+  blocks (`asan_heap_reuse_read.cpp`: the freed block is evicted from the old 4 KB quarantine and a new block is allocated,
+  and the stale read is still reported; the old design returned the new block's value).
+- A double free, including of a block freed and then followed by other allocations (`asan_double_free_reuse.cpp`), and
+  a free of an address the allocator did not return.
+- Heap exhaustion: an allocation the heap cannot hold is reported and traps (`asan_heap_exhausted.cpp`).
+- Tests: `tests/wasm/asan_*.cpp` (the `// ASAN: KIND` markers). The clean programs give their EXPECT value under the mode:
+  `asan_clean.cpp`, `asan_heap_clean.cpp` (1000 malloc/free pairs, and the partial granules) and `asan_heap_free_clean.cpp`
+  (blocks freed and allocated again within the heap). `asan_heap_clean.cpp` and `asan_heap_free_clean.cpp` have
+  `// ASAN-EXPECT: N`, which runs under `NFCXX_WASM_ASAN=1` only (without the mode their `malloc` is the host's stub, so the
+  program has no meaning there).
 
 **Not covered.**
-- Reuse. Once the quarantine has evicted a block and `malloc` hands it out again, a stale pointer to it aliases the new
-  block, which is in use, so an access through the stale pointer is not reported (checked: after 51 other frees a stale
-  read returns the new block's value). A double free of such a block is taken as a free of the new owner's block, and is
-  not reported (checked: it returns normally). The quarantine is 4 KB of chunks, so the window is short.
-- Heap exhaustion. `malloc` returns 0 when the 64 KB are used, and the program's use of that null pointer is not reported
-  (the null page is not checked).
+- Total heap use. The heap is 256 KB of chunks per run, not a peak: a program that frees its blocks but allocates more
+  than 256 KB in all traps with `allocator-out-of-memory`. A bigger heap, or a `memory.grow` that also grows the shadow,
+  would lift the limit; neither is done.
+- NULL from `malloc` under the mode. The mode traps instead (see the exhaustion policy). Programs that rely on a NULL
+  return are not run under `--asan`.
 - `memory.grow`, `realloc`, `calloc`, `operator new` and `operator delete`. None of them is in the module: they are
   imports, and the host's stub returns its argument plus one, so the harness cannot give them a heap. Their memory is not
   checked.
@@ -148,63 +166,101 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
 
 ## Emscripten (`--emscripten`)
 
-`scripts/mrb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the same module with the exports the
-Emscripten JS runtime reads. It is the first step of the Emscripten compatibility plan. The layout and the code are
-unchanged; without the argument the module is byte-identical to the one before the mode existed. `--asan` and
-`--emscripten` are refused together (the shadow would sit where the heap begins). `NFCXX_WASM_EMSCRIPTEN=1` in
-`tests/wasm/run.sh` emits every test with the flag and runs `tests/wasm/emscripten.cjs` on each module.
+`scripts/mrb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the module with the exports the Emscripten
+JS runtime reads, in the ILP32 data model of wasm32: pointers and `long` are i32. Its input is ILP32 IR:
+`scripts/pathb-dump --freestanding --target linux_riscv32 --ir prog.cpp > prog.ir`. The emitter reads the model from the
+IR's `(layout ...)` header. LP64 IR under `--emscripten` is refused, and ILP32 IR without it is refused (LP64 is the
+default and is emitted as before). `--emscripten-import-memory` (with `--emscripten`) imports the memory as `env.memory`
+instead of exporting it, the layout of Emscripten's `IMPORTED_MEMORY`. The layout and the code are the same in both
+models. Without the arguments the module is byte-identical to the one before the mode existed. `--asan` is LP64 only: its
+shadow and runtime take i64 addresses, so it is refused with ILP32 (ILP32 needs `--emscripten`, and `--asan` and
+`--emscripten` are refused together, since the shadow would sit where the heap begins). `--emscripten-import-memory`
+without `--emscripten` is an error. `NFCXX_WASM_EMSCRIPTEN=1` in `tests/wasm/run.sh` emits every test with `--emscripten`
+from the ILP32 IR, and `NFCXX_WASM_EMSCRIPTEN=import` with `--emscripten-import-memory`; each module is checked by
+`tests/wasm/emscripten.cjs`.
 
 | Export | Kind | Value |
 | --- | --- | --- |
-| `memory` | memory | the linear memory (exported, not imported) |
+| `memory` | memory | the linear memory, exported (not with `--emscripten-import-memory`) |
 | `__indirect_function_table` | table, funcref | empty: 0 elements, no maximum |
 | `__stack_pointer` | global, mutable i32 | global 0, the stack pointer, at the top of the memory |
 | `__data_end` | global, immutable i32 | the end of the static data (the first address after the last object) |
 | `__heap_base` | global, immutable i32 | the top of the memory, which is also the initial stack pointer |
+| `__wasm_call_ctors` | function, `() -> ()` | empty: runs no static constructors (see below) |
+
+With `--emscripten-import-memory` the module imports `env.memory` (no maximum, initial size the module's pages) and has
+no memory section or `memory` export. Growing it is the host's `memory.grow`; the module does not grow it.
 
 - **The table.** The emitter refuses indirect calls (`Fn#call`) and function addresses (`op_type`, and a static
-  initializer of `&"f"`), so no function is ever stored in a table and the table has no element segment. It is exported
-  empty so that the table accessor the glue uses finds an export under that name. Whether the glue needs it at all is not
-  checked (see the list below).
-- **The stack pointer's type is i32, not the pointer type i64.** The IR's pointer values are i64 (LP64 is kept), but the
-  stack pointer only ever holds a linear-memory address, and a memory address is i32 in this module already (a memory
-  access wraps the i64 to i32). So the prologue is unchanged, and the glue's i32 is met. The consequence is that the
-  two kinds of pointer differ in wasm: a `T*` argument of an exported function is an i64, which a JS caller passes as a
-  BigInt, not a Number. Making the stack pointer i64 would have meant an i64 prologue and a wrap at each memory access,
-  and would have broken the i32 the glue reads.
+  initializer of `&"f"`), and it emits no `call_indirect`. So no module code calls through the table, and no function is
+  stored in it: the table has no element segment, and no call through it can trap. It is exported empty, with no
+  maximum, so the JS side can grow it (`tests/wasm/emscripten.cjs` grows it by one). Whether the Emscripten glue uses
+  the table at all is not checked (point 3 below).
+- **Constructors.** The IR has no list of static constructors: a dynamically initialized global is refused (`(unsupported
+  init ...)`, see "What is refused"), so there is nothing for `__wasm_call_ctors` to run. It is exported as an empty
+  function that returns and leaves the stack pointer alone.
+- **The stack pointer's type is i32.** Under LP64 (the default) the IR's pointer values are i64, but the stack pointer
+  only ever holds a linear-memory address, and a memory address is i32 in this module already (a memory access wraps the
+  i64 to i32). So the prologue is unchanged, and the glue's i32 is met. The consequence under LP64 is that the two kinds
+  of pointer differ in wasm: a `T*` argument of an exported function is an i64, which a JS caller passes as a BigInt, not
+  a Number. Making the stack pointer i64 would have meant an i64 prologue and a wrap at each memory access, and would have
+  broken the i32 the glue reads. Under `--emscripten` the pointers are i32 too, so the two agree.
 - **The heap base.** There is no allocator in the module, and the stack grows down from the top of the memory to the
-  static data. So the heap is placed where the stack starts: `__heap_base` is the top of the memory (`pages * 65536`),
-  and an `sbrk`-style allocator would grow the memory from there (the memory is not grown by the module itself). The
-  heap is empty at the start: it has no room until the memory grows.
-- **The imports** are unchanged: functions of module `env` that the IR calls without defining. No
-  `wasi_snapshot_preview1` import is added.
+  static data. So the heap is placed where the stack starts: `__heap_base` is the top of the memory (`pages * 65536`).
+  The heap is empty at the start: it has no room until the memory grows, and nothing in the module grows it.
+- **The imports** are functions of module `env` that the IR calls without defining (the memory with
+  `--emscripten-import-memory`). No `wasi_snapshot_preview1` import is added. Under `--emscripten` each import name is
+  looked up in `EMSCRIPTEN_IMPORT_NAMES`, a table of IR name to Emscripten name; it is empty (point 5).
 - **Names.** A function of the IR may not take an export name of the mode (`EMSCRIPTEN_EXPORTS`): the module is refused.
 
-**Glue expectations not met** (the list for step 2; checked against the module, not against an Emscripten JS runtime,
-since none is installed here):
+**Pointer width: feasibility (step 3).** The data model comes from EDG, not from the emitter. The IR's `(layout ...)`
+header prints EDG's `targ_sizeof_*` for the target that cpfe runs with, and `--target` is a run-time option of the same
+cpfe: `3rd/edg/src/defines.h` has the tables of every target (`TARG_SIZEOF_LONG_linux_riscv32 4`,
+`TARG_SIZEOF_POINTER_linux_riscv32 4`, `TARG_ALIGNOF_LONG_LONG_linux_riscv32 8`), and `bases/docker/dev-env/gcc`'s
+`lib_linux_riscv32` gives the predefined macros. So an ILP32 IR needs no change to the EDG submodule, and no change to the
+front end's default output: `pathb-dump --target linux_riscv32` passes the option, and without it the command is the one
+before. Checked: under the target, `tests/wasm/pointers.cpp` has `(long 4) (pointer 4)` and 4-byte pointer slots, and the
+`sizeof` values of a struct with a `char`, a `long long` and a `double` (`4 4 8 8 24 8 8 1`) match clang's
+`--target=wasm32`. Two EDG settings differ from the host. The riscv32 table has plain `char` unsigned, so the target
+passes `--signed_chars` (the x86-64 host and wasm32 have it signed: `clang --target=wasm32` defines no `__CHAR_UNSIGNED__`).
+Its `long double` is 16 bytes, which the emitter refuses as it does now. `--target` needs `--freestanding`: the host's C and
+C++ library headers are the host target's. Verdict: go, behind `--emscripten`. The default LP64 output is unchanged.
 
-1. **Pointer width.** The IR's pointer values are i64 (LP64), where the Emscripten wasm32 glue treats pointers as i32
-   numbers. A pointer crossing the JS boundary is a BigInt. Only the stack pointer and the globals are i32.
-2. **Memory import.** The memory is exported. Emscripten's default is to export it too, but `IMPORTED_MEMORY` (or a
-   shared memory) expects `env.memory`; that is not supported.
-3. **The table has no entries.** Function pointers are refused, so a call through the table (`addFunction`, a dynamic
-   call) would trap; the table is present only so that the accessor finds it.
-4. **Linking sections.** No `dylink.0`, `linking` or `reloc.*` custom section. That is needed for dynamic linking
-   (`MAIN_MODULE`, `SIDE_MODULE`) only.
-5. **Runtime imports.** The module imports every function the IR calls and does not define, under its C++ or C name
-   (`printf`, `malloc`, `free`, `__cxa_*`, ...). Emscripten's runtime provides `emscripten_*`, `__syscall_*`, `fd_write`
-   and its libc under other names, so an unmodified Emscripten runtime fails at instantiation with a LinkError for each
-   missing name. The programs in `tests/wasm` import only the host's stubs.
-6. **Exports the glue calls.** Not exported: `__wasm_call_ctors` (the static constructors), `malloc`/`free` (the glue's
-   `_malloc`, `allocate`), and the stack functions the glue uses (`emscripten_stack_get_current` and the other
-   `emscripten_stack_*` functions for `stackSave`). The `main` export is there; the glue calls it with the argument
-   list of the JS host.
-7. **Memory growth.** The heap has no room at the start (point 5 of "The heap base" above), so a `sbrk` that calls
-   `emscripten_resize_heap` (an import, not provided) would fail on the first allocation.
-8. **Stack checks.** The module has no stack limits (`__set_stack_limits`, the stack-overflow checks of the glue).
+**The list for step 2, and where each point stands.** Checked against the module, not against an Emscripten JS runtime:
+none is installed here, and the Emscripten sources were not reachable from this environment (see "Unverified names").
 
-The glue expectations above come from the Emscripten runtime as it is generally documented; no Emscripten checkout or
-`emcc` was available for this step, so they are a list to check in step 2, not a run.
+1. **Pointer width: closed under `--emscripten`.** The module is ILP32 (the feasibility note below): pointers, `long` and
+   `unsigned long` are i32, so a pointer crossing the JS boundary is a Number, as the wasm32 glue expects. The default LP64
+   module still has i64 pointers (a BigInt at the boundary), as before.
+2. **Memory import: closed.** `--emscripten-import-memory` imports `env.memory` with no maximum, at the module's pages.
+   `tests/wasm/emscripten.cjs` checks the import (name, kind, no maximum, and that the memory it is instantiated with is
+   the one `__heap_base` ends), and `NFCXX_WASM_EMSCRIPTEN=import` runs every test in this layout. Default is still export.
+3. **The table: documented, unreachable.** No call through the table is emitted, so an empty table is never called. The
+   table has no maximum, so a JS-side grow works (the checker grows it). Whether the glue calls `addFunction` is not
+   checked here, since no glue is run.
+4. **Linking sections: decided, not needed.** No `dylink.0`, `linking` or `reloc.*` custom section. `dylink.0` is what
+   dynamic linking (`MAIN_MODULE`, `SIDE_MODULE`) reads. `linking` and `reloc.*` are what a relocatable object carries for
+   the linker. The emitter writes one final module, the result of a link, so a static link needs neither. Not checked
+   here (no `emcc` or `wasm-ld` is installed): this is the Emscripten and wasm-ld convention.
+5. **Runtime imports: open.** `EMSCRIPTEN_IMPORT_NAMES` is empty: no IR name is mapped, because no pair (IR name, Emscripten
+   name) could be verified. Emscripten's libc (`printf`, `malloc`, `memcpy`, ...) is linked into the module, so those
+   names are not imports under Emscripten at all; a program that calls them, or `__cxa_*`, does not instantiate under an
+   unmodified runtime and needs the import mapped or provided. The emitter does not claim otherwise.
+6. **Exports the glue calls: partly closed.** `__wasm_call_ctors` is exported (empty, point "Constructors"). Not exported,
+   on purpose: `malloc` and `free` (no allocator here, see point 7), and the `emscripten_stack_*` functions (they need
+   stack limits, point 8). `main` is there.
+7. **Memory growth: open.** The module has no allocator and no call that grows the memory. An `emscripten_resize_heap`
+   import would be unused (nothing in the module calls it), and an export under that name would be an interface the
+   runtime does not define on that side, so neither is added. The memory grows only in the host (with the import). The
+   heap that `__heap_base` marks is empty, so an `sbrk`-style allocator would need the memory grown first.
+8. **Stack limits: open.** `__set_stack_limits` is not exported. The module has no stack-overflow check and no place for
+   limits to be read from: a stored limit that nothing reads would be a fake, so the export is left out.
+
+**Unverified names.** The Emscripten runtime names above (`emscripten_resize_heap`, `__set_stack_limits`,
+`emscripten_stack_get_current`, the `__syscall_*` and `fd_write` imports, and the libc behavior in point 5) are not
+verified here: no `emcc` is installed, `emscripten.org` did not resolve, and the Emscripten source was not reachable
+(the raw GitHub path returned 404, and the GitHub API was not enabled for this session). None of them is added to the
+module or to `EMSCRIPTEN_IMPORT_NAMES`.
 
 ## What is handled
 
@@ -247,7 +303,10 @@ too. The tests write such expressions as `? 1 : 0`.
 ## Checks
 
 `tests/wasm/run.sh` (`NFCXX_WASM_EMSCRIPTEN=1` for the `--emscripten` mode, see above) compiles each test with the harness (`scripts/setup-pathb.sh`), emits it, validates and runs it under
-node, and compares the result with the expectation. The tests for the statics (`globals_*.cpp`) cover an array with an
+node, and compares the result with the expectation. A test whose result depends on the width of `long` says
+`// EXPECT-ILP32: N` as well: under the emscripten modes that is its result (`floats.cpp`: 16 on the host, 15 under ILP32).
+The ILP32 expectations were checked with a freestanding `g++ -m32` run (`_start` calls `main` and exits with its result;
+no 32-bit libgcc is needed for these programs), and they agree with the LP64 ones except `floats`. The tests for the statics (`globals_*.cpp`) cover an array with an
 initializer, a struct with a pointer to another global, a string read through a pointer, an address with an addend, a
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
 (`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested

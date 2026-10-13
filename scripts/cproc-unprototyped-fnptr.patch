@@ -1,0 +1,93 @@
+diff --git a/cc.h b/cc.h
+index c8e5865..b205345 100644
+--- a/cc.h
++++ b/cc.h
+@@ -114,6 +114,7 @@ struct type {
+ 		} array;
+ 		struct {
+ 			bool isvararg;
++			bool unprototyped;  /* written as "()", not "(void)" (6.7.6.3p15) */
+ 			struct decl *params;
+ 			size_t nparam;
+ 		} func;
+diff --git a/decl.c b/decl.c
+index 7a86c73..f4d9028 100644
+--- a/decl.c
++++ b/decl.c
+@@ -645,6 +645,7 @@ declaratortypes(struct scope *s, struct list *result, char **name, int *align, s
+ 			t->u.func.isvararg = false;
+ 			t->u.func.params = NULL;
+ 			t->u.func.nparam = 0;
++			t->u.func.unprototyped = tok.kind == TRPAREN;
+ 			paramend = &t->u.func.params;
+ 			s = mkscope(s);
+ 			d = NULL;
+diff --git a/expr.c b/expr.c
+index cbe0fe6..f67e229 100644
+--- a/expr.c
++++ b/expr.c
+@@ -1247,10 +1247,10 @@ postfixexpr(struct scope *s, struct expr *r)
+ 			while (tok.kind != TRPAREN) {
+ 				if (e->u.call.args)
+ 					expect(TCOMMA, "or ')' after function call argument");
+-				if (!p && !t->u.func.isvararg)
++				if (!p && !t->u.func.isvararg && !t->u.func.unprototyped)
+ 					error(&tok.loc, "too many arguments for function call");
+ 				*end = assignexpr(s);
+-				if (t->u.func.isvararg && !p)
++				if ((t->u.func.isvararg || t->u.func.unprototyped) && !p)
+ 					*end = exprpromote(*end);
+ 				else
+ 					*end = exprassign(*end, p->type);
+@@ -1259,7 +1259,7 @@ postfixexpr(struct scope *s, struct expr *r)
+ 				if (p)
+ 					p = p->next;
+ 			}
+-			if (p && !t->u.func.isvararg)
++			if (p && !t->u.func.isvararg && !t->u.func.unprototyped)
+ 				error(&tok.loc, "not enough arguments for function call");
+ 			e = decay(e);
+ 			next();
+diff --git a/type.c b/type.c
+index c3d1309..a3fcda2 100644
+--- a/type.c
++++ b/type.c
+@@ -161,6 +161,24 @@ typerank(struct type *t)
+ 	return -1;
+ }
+ 
++/* A prototype that an unprototyped function type can stand for: no ellipsis, and no parameter that a
++   default argument promotion changes (integers narrower than int, float). */
++static bool
++unprototypedok(struct type *t)
++{
++	struct decl *d;
++
++	if (t->u.func.isvararg)
++		return false;
++	for (d = t->u.func.params; d; d = d->next) {
++		if ((d->type->prop & PROPINT) && d->type->size < sizeof(int))
++			return false;
++		if ((d->type->prop & PROPFLOAT) && d->type->size < sizeof(double))
++			return false;
++	}
++	return true;
++}
++
+ bool
+ typecompatible(struct type *t1, struct type *t2)
+ {
+@@ -192,6 +210,13 @@ typecompatible(struct type *t1, struct type *t2)
+ 			return false;
+ 		goto derived;
+ 	case TYPEFUNC:
++		if (t1->u.func.unprototyped || t2->u.func.unprototyped) {
++			/* 6.7.6.3p15: a function declared with () is compatible with a prototype
++			   whose parameters the default argument promotions leave unchanged */
++			if (!unprototypedok(t1->u.func.unprototyped ? t2 : t1))
++				return false;
++			goto derived;
++		}
+ 		if (t1->u.func.isvararg != t2->u.func.isvararg)
+ 			return false;
+ 		for (p1 = t1->u.func.params, p2 = t2->u.func.params; p1 && p2; p1 = p1->next, p2 = p2->next) {
