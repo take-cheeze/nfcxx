@@ -83,6 +83,14 @@ narrow unsigned loads were sign-extended (the canonical form of a narrow integer
 a loop's merge block was used as a selection merge, and a continue construct that returned, or branched out of a selection,
 both failed `spirv-val`. The loop step restructuring above is the fix for the last one.
 
+## The oneAPI samples on Vulkan
+
+The same run as `docs/notes/sycl-webgpu.md`'s corpus (252 programs, device side only, 60 s each, lavapipe): 168 run to
+completion with exit 0 (WebGPU: 137), 54 fail, 7 time out, 12 are refused (`std::cout` in a kernel, a library call),
+11 do not link (not programs). Of the 54 failures, 36 are the same memory limit: every invocation has its own stack slice,
+`invocations x stack bytes`, and the heap (1 GB here, `NFCXX_SYCL_HEAP_MB`) does not hold a 13-million-item grid at 96
+bytes each. The rest are the samples' own usage errors and deliberate bugs. The slices are the 65535-group split above.
+
 ## Next
 
 - **Intel Arc B60.** The same module should run on ANV (Intel's Vulkan driver): it needs `bufferDeviceAddress`, `shaderInt64`,
