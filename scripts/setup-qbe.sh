@@ -23,6 +23,9 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
 # QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 make -C "$root/build/qbe" -j"$(nproc)" >/dev/null
+# cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
+# EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
 (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$(nproc)" cproc-qbe >/dev/null)
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of

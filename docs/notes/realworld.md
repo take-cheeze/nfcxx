@@ -337,6 +337,30 @@ Other things the build exposed, not on cproc's side:
 - The QBE backend of `nfcc` ignores `-O*`/`-g`: no optimisation levels and no debug info (assembly from `-S`
   has no `.loc` lines). The gcc backend honours them.
 
+## optcarrot (benchmark on an nfcc-built mruby)
+
+[optcarrot](https://github.com/mame/optcarrot), a pure-Ruby NES emulator used as a Ruby implementation benchmark, was
+migrated here from rpg-maker-clone's `tools/optcarrot_probe` (its interpreted-mruby configuration; the bc2cpp compiled
+configurations stay in that repository). `tests/realworld/run_optcarrot.sh` fetches mruby (the `run_mruby.sh` pin),
+optcarrot (`c215378a`, rpg-maker-clone's `3rd/optcarrot` pin) and mruby-onig-regexp (`4962d7eb`) into `build/realworld`,
+builds mruby with `nfcc` through `tests/realworld/optcarrot/mruby_build_config.rb` (the default gembox, as `run_mruby.sh`,
+plus the Regexp gem; `full-core` adds mruby-cmath, whose C `_Complex` cproc rejects) and runs the unmodified upstream
+source as one script (`tests/realworld/optcarrot/build_bundle.rb`: mruby has no `require_relative`, so the files are
+concatenated in load order with `shims.rb` and `runner_tail.rb`).
+
+Patches used: `tests/realworld/optcarrot/mruby-module-function-scope.patch` (bare `module_function`, a no-op in mruby 4.0.0),
+`tests/realworld/optcarrot/mruby-onig-regexp-no-chdir.patch` (the gem's `Dir.chdir` blocks clash under `rake -j`), and
+`scripts/cproc-unprototyped-fnptr.patch`, applied to cproc by `scripts/setup-qbe.sh`: cproc rejected assigning a prototyped
+function to an unprototyped function pointer, `int (*compare)()`, which C 6.7.6.3p15 allows and which Onigmo's
+`st_hash_type` uses. Of rpg-maker-clone's other mruby patches (`patches/`) only these are needed; the rest are for bc2cpp
+output, the PSP build or bugs optcarrot does not hit.
+
+The check is the video checksum of the 180-frame run on `examples/Lan_Master.nes`, 59662, the same as CRuby's. Results of
+the migration run (nfcxx built from its pins, EDG, QBE and cproc built by `scripts/setup-edg.sh` and `scripts/setup-qbe.sh`):
+the gcc control (host gcc as the mruby compiler) gives 59662 at about 12 fps; the nfcc qbe build gives 59662 at about 5.7 fps.
+The nfcc gcc-backend build is in `run_optcarrot.sh` but has not been run yet. CRuby 3.3.6 gives 59662 at about 37 fps (the interpreter's own figure
+for comparison, not a benchmark of nfcxx).
+
 ## Next candidates
 
 Projects with no dependencies and their own tests, to find the next gaps: a small compression library in C++, or
