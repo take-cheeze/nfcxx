@@ -232,7 +232,7 @@ char* dup_str(const std::string& s, size_t* n = nullptr) {
 
 extern "C" {
 
-__attribute__((visibility("default"))) const char* nfc_onnxsim_version() { return "onnxsim 0.8.1 graph_grad (C++)"; }
+__attribute__((visibility("default"))) const char* nfc_onnxsim_version() { return "onnxsim master c6913888 graph_grad (C++)"; }
 
 // 0 on success (*out/*out_n hold the model), 1 for an operator without a gradient rule (*err has the library's message),
 // 2 for any other failure (*err). Free *out and *err with nfc_onnxsim_free.
