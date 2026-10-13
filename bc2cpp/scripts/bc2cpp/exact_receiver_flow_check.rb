@@ -178,12 +178,14 @@ if ENV['MRBC']
     (CONST_METHODS + ['const_join']).each do |fn|
       check.call("ErHolder##{fn}: a constant holding a (frozen) literal is exact", unguarded.call(code, 'ErHolder', fn))
     end
-    check.call('the diagnostic lists the constant pools',
-               err.include?('CLASSCONST LIST (ARR)') && err.include?('CLASSCONST TABLE (HSH)') && err.include?('CLASSCONST LABEL (STR)'))
+    # Pools are named by their lexical key (ADR 0423): ErHolder::LIST is an Array hint, LABEL a class pool.
+    check.call('the diagnostic lists the constant pools by their lexical key',
+               err.match?(/CONST_HINT +ErHolder::LIST +\(Array\)/) && err.include?('CLASSCONST ErHolder::LABEL (STR)'))
 
     check.call('NEG ErHolder#take_two: call sites pass an Array and a Hash', guarded.call(code, 'ErHolder', 'take_two'))
-    check.call('NEG ErHolder#mixed: the bare name MIXED is an Array in one class and a Hash in another',
-               guarded.call(code, 'ErHolder', 'mixed') && !err.include?('CLASSCONST MIXED (ARR)'))
+    # ADR 0423: a bare read resolves through the lexical chain, so ErHolder's MIXED is the one it reaches,
+    # whatever ErOther binds under the same name.
+    check.call('ErHolder#mixed: the bare name MIXED resolves to ErHolder::MIXED, an exact Array', unguarded.call(code, 'ErHolder', 'mixed'))
     check.call('the constant read by a frozen push keeps the FrozenError path (the push is exact, not elided)',
                body_of.call(code, 'ErHolder', 'const_push').include?('mrb_ary_push'))
 
@@ -193,9 +195,7 @@ if ENV['MRBC']
       'a const_missing' => { extra: "class ErHolder\n  def self.const_missing(n); [1]; end\nend\n" },
       'a foreign Ruby definition of LIST' => { foreign: [['er_foreign.rb', "module ErOut\n  LIST = {}\nend\n"]] },
       'a native definition of LIST' => { native: [['er_native.cxx',
-                                                   "void er_c(mrb_state* M) { mrb_define_const(M, M->object_class, \"LIST\", mrb_nil_value()); }\n"]] },
-      'a second class under the name LIST' => { extra: "class ErBox\n  LIST = { z: 1 }\nend\n" },
-      'a LIST assigned a call result' => { extra: "class ErBox\n  LIST = [1].map { |x| x }\nend\n" }
+                                                   "void er_c(mrb_state* M) { mrb_define_const(M, M->object_class, \"LIST\", mrb_nil_value()); }\n"]] }
     }
     variants.each do |what, spec|
       d = File.join(dir, what.gsub(/\W+/, '_'))
@@ -211,6 +211,17 @@ if ENV['MRBC']
                   guarded.call(vcode, 'ErHolder', 'const_list')
                 end
       check.call("NEG #{what}: withdrawn as the model says", verdict)
+    end
+
+    # ADR 0423: another class's LIST is not reachable from ErHolder, so ErHolder's own LIST stays exact.
+    {
+      'a second class under the name LIST' => { extra: "class ErBox\n  LIST = { z: 1 }\nend\n" },
+      'a LIST assigned a call result' => { extra: "class ErBox\n  LIST = [1].map { |x| x }\nend\n" }
+    }.each do |what, spec|
+      d = File.join(dir, what.gsub(/\W+/, '_'))
+      Dir.mkdir(d)
+      vcode, = generate.call(CLASSES + HOLDER + spec.fetch(:extra, ''), d)
+      check.call("ErHolder#const_list: #{what} does not reach ErHolder::LIST (exact)", unguarded.call(vcode, 'ErHolder', 'const_list'))
     end
 
     singleton = "module ErScreen2\n  def self.freeze; :s; end\nend\n"

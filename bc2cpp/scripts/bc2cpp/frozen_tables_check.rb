@@ -198,7 +198,10 @@ POSITIVE = {
   'empty_first' => 'first of an empty literal is nil, narrowed by `||`',
   'local_alias' => 'a local holding the table',
   'ivar_read' => 'an ivar only ever holding the table',
-  'via_arg' => 'an argument every call site passes the table'
+  'via_arg' => 'an argument every call site passes the table',
+  # A scoped read K::NAME resolves to K's own definition (ADR 0423); EcOther's binding is not reachable from EcTables.
+  'shared_name' => 'a scoped read of a constant another scope also binds (to a table of other slots)',
+  'list_name' => 'a scoped read of a constant another scope also binds (to a mutable Array)'
 }.freeze
 ARG_SITE = { 'arg_read' => 'an argument every call site passes the table' }.freeze
 RETURN_SITE = { 'via_return' => 'a method that returns the table' }.freeze
@@ -207,8 +210,6 @@ NEGATIVE = {
   'oob_plain' => 'a literal index past the end is nil',
   'hash_absent_plain' => 'a literal key the Hash does not hold is nil',
   'mutable_idx' => 'a literal that is not frozen',
-  'shared_name' => 'a constant name another scope binds to a table of other slots',
-  'list_name' => 'a constant name another scope binds to a mutable Array',
   'dup_idx' => 'a copy of the table (mutable)',
   'concat_frozen' => 'a computed Array frozen afterwards',
   'late_freeze' => 'an Array frozen after a call could have changed it',
@@ -352,10 +353,11 @@ if ENV['MRBC'] && (run_world.call(BASE) || VARIANTS.any? { |w, _| run_world.call
       check.call("NEG EcUse##{fn}: #{why} keeps the dynamic arm", kept.call(code, fn))
     end
     check.call('the diagnostic lists the shapes and the constants that hold them',
-               err.include?('FROZENTABLE FROZEN:Array[INT*3] (') && err.include?('NUMCONST IDX (FROZEN:Array[INT*3])') &&
+               err.include?('FROZENTABLE FROZEN:Array[INT*3] (') && err.include?('NUMCONST EcTables::IDX (FROZEN:Array[INT*3])') &&
                  err.include?('FROZEN:Hash[INT*4]') && err.include?('on ('))
-    check.call('a name bound to two tables of different slots is not listed as one shape',
-               !err.include?('NUMCONST SHARED (FROZEN:Array[INT*2])'))
+    check.call('a name bound in two scopes is listed per definition, each with its own shape (ADR 0423)',
+               err.include?('NUMCONST EcTables::SHARED (FROZEN:Array[INT*2])') &&
+                 err.include?('NUMCONST EcOther::SHARED (FROZEN:Array[STR])'))
     end
 
     VARIANTS.each do |what, spec|
