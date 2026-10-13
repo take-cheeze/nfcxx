@@ -241,6 +241,9 @@ class CodeGen
                           NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float' }.freeze
   # Zero-argument sends on a numeric receiver whose result class is fixed.
   NUMERIC_TO_INT_SENDS = %w[to_i to_int floor ceil round truncate].freeze
+  # Integer bit operators: an Integer for INT op INT (BITOP_RESULTS, ADR 0431). `<<` and `>>` are
+  # absent: no range proof bounds a shift, and a negative `>>` count shifts left.
+  NUMERIC_BITOP_SENDS = %w[& | ^].freeze
 
   # Class set a SEND-family result holds, given the flow state at the call. It
   # is a union over the receiver's possible classes, so it is monotone: a class
@@ -304,6 +307,8 @@ class CodeGen
       return NumericFlow::INT if NUMERIC_TO_INT_SENDS.include?(name)
       return NumericFlow::FLT if name == 'to_f'
       return bit if %w[abs -@].include?(name)
+    elsif argc == 1 && NUMERIC_BITOP_SENDS.include?(name) && bitop_results_on?
+      return numeric_bitop_mask(bit, state[insn.reg.to_i + 1])
     elsif argc == 1 && %w[% fdiv].include?(name)
       arg = state[insn.reg.to_i + 1]
       return NumericFlow::OTHER unless arg
@@ -311,5 +316,20 @@ class CodeGen
       return name == 'fdiv' ? NumericFlow::FLT : NumericFlow.arith(bit, arg, numeric_nil_raises?(name))
     end
     NumericFlow::OTHER
+  end
+
+  # BITOP_RESULTS (ADR 0431): INT means Integer (ADR 0279), so `Integer & | ^ Integer` is an
+  # Integer, the class claim `arith` makes for `+`. Only INT op INT is claimed. Float has no
+  # such operator and any other operand class stays OTHER. An unreached operand yields no value.
+  def numeric_bitop_mask(bit, arg)
+    return NumericFlow::OTHER unless arg
+    return 0 if arg.zero?
+
+    bit == NumericFlow::INT && arg == NumericFlow::INT ? NumericFlow::INT : NumericFlow::OTHER
+  end
+
+  # Kill switch for BITOP_RESULTS: BC2CPP_BITOP_RESULTS=0 restores the OTHER answer.
+  def bitop_results_on?
+    ENV['BC2CPP_BITOP_RESULTS'] != '0'
   end
 end
