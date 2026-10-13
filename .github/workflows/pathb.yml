@@ -35,6 +35,8 @@ on:
       - "tests/sycl/**"
       - "lib/sycl/**"
       - "scripts/sycl-build.sh"
+      - "scripts/pathb-wgsl-emit.rb"
+      - "scripts/pathb-spirv-emit.rb"
       - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
@@ -64,6 +66,8 @@ on:
       - "tests/sycl/**"
       - "lib/sycl/**"
       - "scripts/sycl-build.sh"
+      - "scripts/pathb-wgsl-emit.rb"
+      - "scripts/pathb-spirv-emit.rb"
       - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
@@ -156,8 +160,9 @@ jobs:
             run: tests/pathb-qbe/hosted.sh
           - name: EH shim (gcc, qbe and Path B)
             run: tests/ehshim/run.sh
-          - name: SYCL on WebGPU (host path, and Chromium's WebGPU through Playwright)
+          - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
             run: |
+              sudo apt-get install -y -q spirv-tools libvulkan-dev mesa-vulkan-drivers
               npm install --prefix "$RUNNER_TEMP/pw" playwright
               "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
               NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh

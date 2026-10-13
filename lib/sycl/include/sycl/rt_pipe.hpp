@@ -255,7 +255,7 @@ inline void backend_wait_checked() {
   }
   usm_state::get().after_wait();
 }
-inline unsigned backend_dev_offset(buffer_state &s) {
+inline unsigned long backend_dev_offset(buffer_state &s) {
   if (s.dev == 0) {
     s.dev = rt_pipe::get().alloc(s.bytes ? s.bytes : 4);
     if (s.dev == 0) { std::fprintf(stderr, "sycl: out of device memory\n"); std::exit(70); }

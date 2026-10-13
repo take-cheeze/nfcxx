@@ -11,7 +11,7 @@ Only the setup scripts reach the network, through git submodules (and, for mruby
 | --- | --- | --- |
 | `scripts/setup-edg.sh`, `scripts/setup-pathb.sh` | `3rd/edg` (`https://github.com/edgcpp/compiler`, shallow) | the submodule commit |
 | `scripts/setup-mruby.sh` | `mruby/mruby` at tag 4.0.0 (`831da26b`), shallow, into `build/mruby-tool/src` | the commit |
-| `scripts/setup-qbe.sh` | `3rd/qbe` (`take-cheeze/qbe`, a daily mirror of `c9x.me/git/qbe.git`) and `3rd/cproc` (`take-cheeze/cproc`, a fork of `michaelforney/cproc`, branch `nfcxx-patches`) | the submodule commits |
+| `scripts/setup-qbe.sh` | `3rd/qbe` (`take-cheeze/qbe`, a daily mirror of `c9x.me/git/qbe.git`) and `3rd/cproc` (`take-cheeze/cproc`, a fork of `michaelforney/cproc`, branch `nfcxx-asan-combined`, the pin) | the submodule commits |
 
 The EDG CMake files do not fetch anything (no `FetchContent`, `ExternalProject` or downloads). After a
 checkout with submodules initialised, the build runs without network access.
@@ -86,8 +86,9 @@ Everything else is bash, C or C++. `scripts/mruby-tool-config.rb` is the mruby b
    the submodule URLs at it: either change `.gitmodules`, or set `submodule.<name>.url` in the local
    git config. Each pinned commit must exist on the mirror. The pins are the only versions the build
    uses.
-2. **Keep the patches valid.** `cproc-empty-struct` (a commit on take-cheeze/cproc branch nfcxx-patches) and the other `scripts/cproc-*.patch` files apply to the pinned cproc commit
-   (`d1c53dd`). It must be regenerated if cproc moves. `setup-edg.sh` edits the EDG base config
+2. **Keep the patches valid.** The cproc patches (`cproc-empty-struct`, `cproc-vaarg-aggregate`, `cproc-empty-copy`,
+   `cproc-array-qual`) are commits on take-cheeze/cproc branch `nfcxx-asan-combined`, which is the pin; a move of the pin keeps them.
+   `setup-edg.sh` edits the EDG base config
    with `sed`, so a new EDG pin needs that edit checked.
 3. **Pin the host toolchain.** A container image or an apt list with gcc-13, cmake, ninja, make,
    ruby, rake, patch and git (and python3 where the tests that use it should run). The driver's header discovery depends on the GCC version, so the image

@@ -336,10 +336,14 @@ func getLive(r *reader, kind byte) any {
 
 // writeMeta puts what the host must learn at a boundary in front of a message: the live variables the script changed,
 // and the objects whose wrappers were collected.
-func (in *Interp) writeMeta(w *writer) {
+//
+// It returns undo, for a message the host refuses without reading (hostThread): the releases go back on the queue and the
+// variables are unmarked again, so that the next message that the host does read carries them.
+func (in *Interp) writeMeta(w *writer) (undo func()) {
 	type change struct {
-		idx int
-		v   any
+		idx  int
+		v    any
+		prev any
 	}
 	var ch []change
 	for i, lv := range in.live {
@@ -347,7 +351,7 @@ func (in *Interp) writeMeta(w *writer) {
 			continue
 		}
 		if cur := lv.read(); cur != lv.last {
-			ch = append(ch, change{i, cur})
+			ch = append(ch, change{i, cur, lv.last})
 			lv.last = cur
 		}
 	}
@@ -360,6 +364,16 @@ func (in *Interp) writeMeta(w *writer) {
 	w.u32(uint32(len(rel)))
 	for _, id := range rel {
 		w.u64(id)
+	}
+	return func() {
+		for _, c := range ch {
+			in.live[c.idx].last = c.prev
+		}
+		in.mu.Lock()
+		if !in.closed {
+			in.released = append(rel, in.released...)
+		}
+		in.mu.Unlock()
 	}
 }
 
@@ -412,9 +426,12 @@ func (in *Interp) call(id int, args ...any) any {
 		in.encodeAs(&body, reflect.ValueOf(a), ci.params[i])
 	}
 	w := &writer{}
-	in.writeMeta(w)
+	undo := in.writeMeta(w)
 	w.raw(body.b)
 	st, out := in.hostCall(hostOpCall, w.b)
+	if st == hostThread {
+		undo() // the host refused the message without reading it: what it carried is still to be told
+	}
 	r := &reader{b: out}
 	in.readLive(r)
 	switch st {

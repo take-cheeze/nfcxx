@@ -5,7 +5,7 @@
 #
 # 3rd/qbe is take-cheeze/qbe, a daily mirror of https://c9x.me/git/qbe.git (see that
 # repo's sync workflow). 3rd/cproc is take-cheeze/cproc, a fork of michaelforney/cproc: its branch
-# nfcxx-patches is the pinned upstream commit plus nfcxx's cproc patches as commits (empty-struct,
+# nfcxx-asan-combined (the pin, a44a644) is the pinned upstream commit plus nfcxx's cproc patches as commits (empty-struct,
 # vaarg-aggregate, empty-copy, array-qual; see docs/notes/freestanding.md and docs/notes/realworld.md for what
 # each one fixes). Move the pin in .gitmodules and the fork together when rebasing those patches onto a new upstream.
 # scripts/qbe-uninit-slot.patch and scripts/qbe-wflag.patch are applied to the QBE copy. Re-run this script after changing the pin.
@@ -23,6 +23,9 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
 # QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 make -C "$root/build/qbe" -j"$(nproc)" >/dev/null
+# cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
+# EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
 (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$(nproc)" cproc-qbe >/dev/null)
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of

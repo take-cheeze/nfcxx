@@ -593,11 +593,111 @@ end
 # The concrete argument lists that instantiate template function `name`: each explicit call of it, with the
 # arguments that name an enclosing template's parameters replaced by that template's own instances (transitively).
 # A call through a cycle of templates is refused with the chain.
+# The unqualified calls `name(args)` of a template function (no explicit <...>): [args, position] pairs. A declaration
+# (its name follows a type keyword, or its parameter list is followed by a body) is not a call.
+DECL_WORDS = %w[void static inline int float double bool size_t unsigned long char short template __device__ __host__
+                __global__ __forceinline__ constexpr auto]
+def plain_call_sites(text, name)
+  out = []
+  pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if pp.any? { |a, b| a <= i && i < b }
+      i = pp.find { |a, b| a <= i && i < b }[1]
+      next
+    end
+    # A qualified call (`cg::reduce(...)`) or a member call (`x.reduce(...)`) names another function.
+    qualified = (i >= 2 && text[i - 2, 2] == "::") || (i >= 1 && text[i - 1] == ".") || (i >= 2 && text[i - 2, 2] == "->")
+    if text[i, name.length] == name && !qualified && !(i > 0 && ident_char?(text[i - 1])) && !ident_char?(text[i + name.length] || " ")
+      k = i + name.length
+      k += 1 while k < text.length && white?(text[k])
+      if text[k] == "("
+        close = matching_paren(text, k)
+        if close
+          after = close + 1
+          after += 1 while after < text.length && white?(text[after])
+          b = i - 1
+          b -= 1 while b >= 0 && white?(text[b])
+          e2 = b
+          b -= 1 while b >= 0 && ident_char?(text[b])
+          prev = text[(b + 1)..e2]
+          is_decl = DECL_WORDS.include?(prev) || text[after] == "{"
+          out << [split_top(text[(k + 1)...close]), i] unless is_decl
+        end
+      end
+    end
+    i += 1
+  end
+  out
+end
+
+# The type of a call argument in the caller: a cast `(T *) x` gives T *, anything else the declared type of x.
+def caller_arg_type(text, pos, arg, name)
+  a = arg.strip
+  if a.start_with?("(")
+    close = matching_paren(a, 0)
+    if close && close + 1 < a.length && ident_char?(a[close + 1..-1].strip[0].to_s)
+      return type_tokens(a[1...close])
+    end
+  end
+  argument_type(text, pos, a, name)
+end
+
+# The template parameters of a template function (its names) and its parameter parts, from its definition.
+def template_head_of(text, name)
+  template_bodies(text).each do |tb|
+    t = tb[:tmpl]
+    header = text[(t[:close] + 1)...tb[:open]]
+    next unless function_name(header) == name
+    lp = header.index("(")
+    next if lp.nil?
+    rp = matching_paren(header, lp)
+    parts = split_top(header[(lp + 1)...rp])
+    names = split_top(text[(t[:lt] + 1)...t[:close]]).map { |pr| tokens_of(pr.split("=")[0].strip).last }
+    return { names: names, parts: parts, pos: tb[:open] }
+  end
+  nil
+end
+
+# The explicit template arguments of a call without them, deduced from the types of its arguments: one per template
+# parameter, in order. Refuses an ambiguous deduction and a parameter no argument gives.
+def deduce_call_targs(text, name, pos, args)
+  head = template_head_of(text, name)
+  return nil if head.nil?
+  found = {}
+  head[:parts].each_with_index do |part, idx|
+    break if idx >= args.length
+    ptoks = type_tokens(part)
+    ptoks.pop if ptoks.last && !ptoks.last.start_with?("*") && !ptoks.last.start_with?("&") && ptoks.length > 1
+    head[:names].each do |p|
+      next unless ptoks.include?(p)
+      at = caller_arg_type(text, pos, args[idx], name)
+      t = match_type(ptoks, at, p)
+      refuse("call of #{name}: #{p} cannot be deduced from the argument #{args[idx]} of type #{at.join(' ')} (at line #{text[0...pos].count("\n") + 1})") if t.nil?
+      refuse("call of #{name}: #{p} is deduced as #{found[p]} and as #{t} (ambiguous, at line #{text[0...pos].count("\n") + 1})") if found[p] && found[p] != t
+      found[p] = t
+    end
+  end
+  head[:names].map do |p|
+    found[p] || refuse("call of #{name} (at line #{text[0...pos].count("\n") + 1}): no argument gives #{p}, so it cannot be deduced")
+  end
+end
+
 def template_instances(name, text, stack)
   refuse("dependent launch: #{(stack + [name]).join(' -> ')} instantiates itself through its template arguments") if stack.include?(name)
   out = []
-  call_sites(text, name).each do |targs, pos|
-    args = split_top(targs)
+  sites = call_sites(text, name).map { |targs, pos| [split_top(targs), pos] }
+  # Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
+  plain_call_sites(text, name).each do |cargs, pos|
+    deduced = deduce_call_targs(text, name, pos, cargs)
+    sites << [deduced, pos] if deduced
+  end
+  sites.each do |args, pos|
     outer = enclosing_template(text, pos)
     # A bare local constant of the enclosing body (fallback in mmq's mul_mat_q_case) is its literal value.
     if outer
@@ -1019,6 +1119,18 @@ def type_before(text, i)
   toks
 end
 
+# The type of an identifier declared as a later declarator of a comma-separated declaration: the statement's first
+# declarator gives the type (its name is the last identifier of that declarator).
+def comma_declaration_type(text, i)
+  start = [text.rindex(";", i - 1), text.rindex("{", i - 1), text.rindex("}", i - 1), text.rindex("(", i - 1)].compact.max
+  seg = text[((start || -1) + 1)...i]
+  parts = split_top(seg)
+  return [] if parts.length < 2
+  toks = type_tokens(parts[0])
+  toks.pop if toks.last && !toks.last.start_with?("*") && !toks.last.start_with?("&") && toks.length > 1
+  toks.any? { |t| ident_char?(t[0]) } ? toks : []
+end
+
 # The type of a launch argument: a literal's, or the declared type of an identifier in the same top-level piece.
 def argument_type(text, pos, arg, nm)
   if arg.length > 0 && arg.chars.all? { |c| (c >= "0" && c <= "9") || c == "u" || c == "U" || c == "l" || c == "L" }
@@ -1048,6 +1160,8 @@ def argument_type(text, pos, arg, nm)
       after += 1 while after < pos && white?(text[after])
       if "=;,)".include?(text[after].to_s)
         t = type_before(text, i)
+        # A later declarator of a comma-separated declaration (`float *df, *dof;`): the type is the first declarator's.
+        t = comma_declaration_type(text, i) if t.empty?
         found = t unless t.empty?
       end
     end
@@ -1091,9 +1205,40 @@ def deduce_types(nm, ta, kt, missing, args, text, pos)
   end
 end
 
+# The launches with no template arguments at all (`kscale<<<...>>>(args)`): [name, end of name, position of <<<].
+def plain_launches(text)
+  out = []
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if text[i, 3] == "<<<"
+      b = i - 1
+      b -= 1 while b >= 0 && white?(text[b])
+      e2 = b
+      b -= 1 while b >= 0 && ident_char?(text[b])
+      name = text[(b + 1)..e2]
+      out << [name, e2 + 1, i] unless name.empty? || (name[0] >= "0" && name[0] <= "9") || text[b] == ">"
+    end
+    i += 1
+  end
+  out
+end
+
 # Every launch with fewer template arguments than the kernel's parameters gets the deduced ones written after its own.
 def deduce_launch_targs(text)
   edits = []
+  plain_launches(text).each do |nm, at, pos|
+    kt = kernel_template(nm)
+    next if kt.nil?
+    args = launch_arguments(text, pos)
+    refuse("template launch of #{nm}: its arguments are not readable (at line #{text[0...pos].count("\n") + 1})") if args.nil?
+    deduced = deduce_types(nm, "", kt, kt[:names], args, text, pos)
+    edits << [at, at, "<#{deduced.join(", ")}>"]
+  end
   template_launches(text).each do |nm, ta, pos|
     kt = kernel_template(nm)
     next if kt.nil?
@@ -1276,7 +1421,7 @@ HALF_CORE = "#ifndef __NFCXX_HALF_CORE\n#define __NFCXX_HALF_CORE\n" \
 # __half2: two halves packed in an unsigned int, the low half in bits 0..15 (x) and the high half in bits 16..31 (y).
 # The pair functions are plain integer code on that packing; the lanes use the half operations above, through one
 # guarded helper so that several pair functions in a unit define it once.
-HALF2_TYPE = "#ifndef __NFCXX_HALF2_TYPE\n#define __NFCXX_HALF2_TYPE\ntypedef unsigned int __half2;\n#endif\n"
+HALF2_TYPE = "#ifndef __NFCXX_HALF2_TYPE\n#define __NFCXX_HALF2_TYPE\ntypedef struct __nfcxx_half2 { unsigned short x, y; } __half2;\n#endif\n"
 HALF_LANE = HALF_CORE + "#ifndef __NFCXX_HALF_LANE\n#define __NFCXX_HALF_LANE\n" \
   "static inline unsigned short __nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __hadd(a, b) : __hmul(a, b); }\n" \
   "#endif\n"
@@ -1284,17 +1429,33 @@ HALF_LANE = HALF_LANE.sub("__nfcxx_hlane(unsigned short a, unsigned short b, int
   "__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __float2half(__half2float(a) + __half2float(b)) : __float2half(__half2float(a) * __half2float(b)); }")
 HALF2_PAIR = HALF2_TYPE + HALF_LANE
 
+# The C++ operators on __half2 (llama.cpp uses them). Included when the unit names half2 (or __half2); they call the
+# pair functions above, which are included with them.
+HALF2_OPS = HALF2_TYPE + [
+  "static inline __half2 operator+(__half2 a, __half2 b) { return __hadd2(a, b); }\n",
+  "static inline __half2 operator-(__half2 a, __half2 b) { return __hsub2(a, b); }\n",
+  "static inline __half2 operator*(__half2 a, __half2 b) { return __hmul2(a, b); }\n",
+  "static inline __half2 operator/(__half2 a, __half2 b) { return __hdiv2(a, b); }\n",
+  "static inline __half2 operator-(__half2 a) { __half2 r; r.x = a.x ^ 0x8000u; r.y = a.y ^ 0x8000u; return r; }\n",
+  "static inline __half2 &operator+=(__half2 &a, __half2 b) { a = __hadd2(a, b); return a; }\n",
+  "static inline __half2 &operator-=(__half2 &a, __half2 b) { a = __hsub2(a, b); return a; }\n",
+  "static inline __half2 &operator*=(__half2 &a, __half2 b) { a = __hmul2(a, b); return a; }\n",
+  "static inline __half2 &operator/=(__half2 &a, __half2 b) { a = __hdiv2(a, b); return a; }\n",
+  "static inline int operator==(__half2 a, __half2 b) { return __half2float(a.x) == __half2float(b.x) && __half2float(a.y) == __half2float(b.y); }\n",
+].join
+
 # __hmax2: the lane rule of __hmax (NaN loses; a zero tie gives +0 for mixed signs), defined once per unit.
 HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
   "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
   "#endif\n"
-# bf16 as a 16-bit integer (the upper half of a float, round to nearest even); nv_bfloat162 packs two of them as __half2
-# does. Operators on nv_bfloat16 are integer operators here, as for half: a unit that uses them is not handled correctly.
+# bf16 as a 16-bit integer (the upper half of a float, round to nearest even). nv_bfloat162 is a two-lane struct, as
+# __half2 is (CUDA's type has .x and .y, and llama.cpp brace-initializes it as such). Operators on nv_bfloat16 are
+# integer operators here, as for half: a unit that uses them is not handled correctly.
 BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
   "typedef unsigned short nv_bfloat16;\n" \
-  "typedef unsigned int nv_bfloat162;\n" \
+  "typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;\n" \
   "typedef unsigned short __nv_bfloat16;\n" \
-  "typedef unsigned int __nv_bfloat162;\n" \
+  "typedef nv_bfloat162 __nv_bfloat162;\n" \
   "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
   "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return (unsigned short)((x >> 16) | 0x40u); x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
   "#endif\n"
@@ -1357,6 +1518,8 @@ BUILTIN_DEFS = {
   "__half2float" => HALF_CORE,
   "half" => HALF_CORE + "typedef __half half;\n",
   "half2" => HALF2_TYPE + "typedef __half2 half2;\n",
+  # make_half2(x, y) as in cuda_fp16: each lane rounded to half from a float (int arguments convert exactly when small).
+  "make_half2" => HALF2_TYPE + HALF_CORE + "static inline __half2 make_half2(float x, float y) { __half2 r; r.x = __float2half(x); r.y = __float2half(y); return r; }\n",
   "int8_t" => "typedef signed char int8_t;\n",
   "uint8_t" => "typedef unsigned char uint8_t;\n",
   "int16_t" => "typedef short int16_t;\n",
@@ -1367,26 +1530,43 @@ BUILTIN_DEFS = {
   "uint64_t" => "typedef unsigned long long uint64_t;\n",
   "ldexpf" => "static inline float ldexpf(float x, int e) { return x * (float)(1 << (e > 30 ? 30 : (e < -30 ? -30 : e))); }\n",
   "fmaxf" => "static inline float fmaxf(float a, float b) { return a != a ? b : (b != b ? a : (a > b ? a : b)); }\n",
+  # powf(x, y) = exp(y * log(x)) on the approximate PTX of expf and logf (see FLOAT_BUILTINS): exact for y == 0 and
+  # x == 0, approximate otherwise (about 1e-5 relative for |y * log2 x| up to 12). A negative base gives NaN (not the
+  # sign CUDA gives for an integer exponent); llama.cpp's powf calls take a positive base.
+  "powf" => "extern \"C\" float __nfcxx_expf(float);\nextern \"C\" float __nfcxx_logf(float);\n" \
+            "static inline float powf(float x, float y) { if (y == 0.0f) return 1.0f; if (x == 0.0f) return y > 0.0f ? 0.0f : 1.0f / 0.0f; " \
+            "if (x < 0.0f) return (x - x) / (x - x); return __nfcxx_expf(y * __nfcxx_logf(x)); }\n",
+  # memcpy and memset as byte loops (the device unit has no C library; the host copy keeps the real header).
+  "memcpy" => "static inline void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = (unsigned char *)d; " \
+              "const unsigned char *b = (const unsigned char *)s; for (size_t i = 0; i < n; i++) a[i] = b[i]; return d; }\n",
+  "memset" => "static inline void *memset(void *d, int c, size_t n) { unsigned char *a = (unsigned char *)d; " \
+              "for (size_t i = 0; i < n; i++) a[i] = (unsigned char)c; return d; }\n",
   "__half2" => HALF2_TYPE,
-  "__halves2half2" => HALF2_TYPE + "static inline __half2 __halves2half2(unsigned short a, unsigned short b) { return (unsigned)a | ((unsigned)b << 16); }\n",
-  "__low2half" => HALF2_TYPE + "static inline unsigned short __low2half(__half2 h) { return (unsigned short)(h & 0xffffu); }\n",
-  "__high2half" => HALF2_TYPE + "static inline unsigned short __high2half(__half2 h) { return (unsigned short)(h >> 16); }\n",
-  "__half2half2" => HALF2_TYPE + "static inline __half2 __half2half2(unsigned short h) { return (unsigned)h | ((unsigned)h << 16); }\n",
-  "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { return (a & 0xffffu) | ((b & 0xffffu) << 16); }\n",
-  "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { return (a >> 16) | ((b >> 16) << 16); }\n",
-  "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float((unsigned short)(h >> 16)); }\n",
-  "__low2float" => HALF2_TYPE + HALF_CORE + "static inline float __low2float(__half2 h) { return __half2float((unsigned short)(h & 0xffffu)); }\n",
-  "__hmax2" => HALF2_TYPE + HALF_CORE + HMAXL + "static inline __half2 __hmax2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hmaxl((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu)) | ((unsigned)__nfcxx_hmaxl((unsigned short)(a >> 16), (unsigned short)(b >> 16)) << 16); }\n",
+  "__halves2half2" => HALF2_TYPE + "static inline __half2 __halves2half2(unsigned short a, unsigned short b) { __half2 r; r.x = a; r.y = b; return r; }\n",
+  "__low2half" => HALF2_TYPE + "static inline unsigned short __low2half(__half2 h) { return h.x; }\n",
+  "__high2half" => HALF2_TYPE + "static inline unsigned short __high2half(__half2 h) { return h.y; }\n",
+  "__half2half2" => HALF2_TYPE + "static inline __half2 __half2half2(unsigned short h) { __half2 r; r.x = h; r.y = h; return r; }\n",
+  "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { __half2 r; r.x = a.x; r.y = b.x; return r; }\n",
+  "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { __half2 r; r.x = a.y; r.y = b.y; return r; }\n",
+  "__half22float2" => HALF2_TYPE + HALF_CORE + "static inline float2 __half22float2(__half2 h) { return make_float2(__half2float(h.x), __half2float(h.y)); }\n",
+  "__float22half2_rn" => HALF2_TYPE + HALF_CORE + "static inline __half2 __float22half2_rn(float2 f) { __half2 r; r.x = __float2half(f.x); r.y = __float2half(f.y); return r; }\n",
+  "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float(h.y); }\n",
+  "__low2float" => HALF2_TYPE + HALF_CORE + "static inline float __low2float(__half2 h) { return __half2float(h.x); }\n",
+  "__hmax2" => HALF2_TYPE + HALF_CORE + HMAXL + "static inline __half2 __hmax2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hmaxl(a.x, b.x); r.y = __nfcxx_hmaxl(a.y, b.y); return r; }\n",
   "nv_bfloat16" => BF16_CORE,
   "nv_bfloat162" => BF16_CORE,
   "__nv_bfloat16" => BF16_CORE,
   "__nv_bfloat162" => BF16_CORE,
   "__float2bfloat16" => BF16_CORE,
   "__bfloat162float" => BF16_CORE,
-  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return (unsigned short)(h & 0xffffu); }\n",
-  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return (unsigned short)(h >> 16); }\n",
-  "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 1) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 1) << 16); }\n",
-  "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 0) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 0) << 16); }\n",
+  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return h.x; }\n",
+  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return h.y; }\n",
+  "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
+  "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
+  "__hsub2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hsub2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) - __half2float(b.x)); r.y = __float2half(__half2float(a.y) - __half2float(b.y)); return r; }\n",
+  "__hdiv2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hdiv2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) / __half2float(b.x)); r.y = __float2half(__half2float(a.y) / __half2float(b.y)); return r; }\n",
+  # The C++ operators on half2 (llama.cpp uses them). Included when the unit names half2; they use the pair functions above.
+  "__nfcxx_half2_ops" => HALF2_OPS,
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
   "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
   "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",
@@ -2171,6 +2351,8 @@ def device_tu(text)
   out << DEVICE_PRELUDE << device_decls << "\n"
   # A vector type the device code names, and the source does not define: its declaration (once per type).
   done = {}
+  # The float2 conversions below take or return float2: its declaration is needed whenever one of them is.
+  needed["float2"] = true if needed["__half22float2"] || needed["__float22half2_rn"]
   VECTOR_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
@@ -2178,6 +2360,10 @@ def device_tu(text)
     next if done[base]
     done[base] = true
     out << VECTOR_DEFS[base] << "\n"
+  end
+  if needed["half2"] || needed["__half2"]
+    needed["__nfcxx_half2_ops"] = true
+    %w[__hadd2 __hsub2 __hmul2 __hdiv2].each { |n| needed[n] = true }
   end
   needed["is_same"] = true if needed["is_same_v"]   # std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
   BUILTIN_DEFS.each do |name, text|
@@ -2267,10 +2453,11 @@ def strip_launch_bounds(s)
 end
 
 # Dynamic shared memory: `extern __shared__ T name[];` has no size at compile time (the launch gives the bytes), so
-# the declaration is removed and each `name[...]` becomes a subscript of a pointer from __nfcxx_dynshared_addr(),
-# the block's dynamic shared memory. The device side lowers that call to the address of a module-level
-# `.extern .shared` symbol (the emitter's job); the host copy has a placeholder (lib/cuda/nfcxx_cuda.h). A pointer
-# subscript has no bounds check, which is right: the size is only known at launch.
+# the declaration is removed and each use of `name` becomes a typed pointer from __nfcxx_dynshared_addr(), the block's
+# dynamic shared memory: subscripted (`name[i]`) or passed on (`name + J`, a call argument). The device side lowers
+# that call to the address of a module-level `.extern .shared` symbol (the emitter's job); the host copy has a
+# placeholder (lib/cuda/nfcxx_cuda.h). A pointer subscript has no bounds check, which is right: the size is only known
+# at launch.
 def dynamic_shared_rewrite(s)
   names = {}
   out = ""
@@ -2298,6 +2485,7 @@ def dynamic_shared_rewrite(s)
         name = head[q...head.length]
         type = head[0...q].strip
         refuse("extern __shared__ #{decl}: no type or name") if name.empty? || type.empty?
+        refuse("extern __shared__ #{name}: declared with types #{names[name]} and #{type}") if names.key?(name) && names[name] != type
         names[name] = type
         out << ("\n" * s[i..semi].count("\n"))
         i = semi + 1
@@ -2311,10 +2499,84 @@ def dynamic_shared_rewrite(s)
   replace_dynamic_uses(out, names)
 end
 
-# Replaces the uses `name[` of the dynamic shared arrays. A member (`.name`, `->name`) is not a use.
+# The innermost `{ ... }` block that contains position pos, as [open, close] indices; nil at file scope.
+def enclosing_block(s, pos)
+  stack = []
+  i = 0
+  while i < pos
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    stack.push(i) if s[i] == "{"
+    stack.pop if s[i] == "}" && !stack.empty?
+    i += 1
+  end
+  return nil if stack.empty?
+  open = stack[-1]
+  depth = 0
+  j = open
+  while j < s.length
+    e = skip_literal(s, j)
+    if e
+      j = e
+      next
+    end
+    depth += 1 if s[j] == "{"
+    depth -= 1 if s[j] == "}"
+    return [open, j] if depth == 0
+    j += 1
+  end
+  [open, s.length]
+end
+
+# Each static `__shared__ T name[...]` in s as [name, position of name]. These are ordinary arrays of their block.
+def static_shared_names(s)
+  found = []
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(s, i, "__shared__")
+      j = i + 10
+      stop = j
+      stop += 1 while stop < s.length && s[stop] != "[" && s[stop] != ";" && s[stop] != "="
+      if stop < s.length && s[stop] == "["
+        k = stop
+        k -= 1 while k > j && white?(s[k - 1])
+        q = k
+        q -= 1 while q > j && ident_char?(s[q - 1])
+        found << [s[q...k], q] if q < k
+      end
+      i = j
+      next
+    end
+    i += 1
+  end
+  found
+end
+
+# True when the use at pos is inside a block that declares a static __shared__ array of the same name.
+def shadowed_by_static?(s, statics, tok, pos)
+  statics.each do |name, decl|
+    next unless name == tok
+    blk = enclosing_block(s, decl)
+    next if blk.nil?
+    return true if pos > blk[0] && pos < blk[1]
+  end
+  false
+end
+
+# Replaces the uses of the dynamic shared arrays (every use, see dynamic_shared_rewrite). A member (`.name`, `->name`) is
+# not a use, and a use inside a block that declares a static __shared__ array of the same name is that array's.
 def replace_dynamic_uses(s, names)
   out = ""
   i = 0
+  statics = static_shared_names(s)
   while i < s.length
     e = skip_literal(s, i)
     if e
@@ -2329,9 +2591,7 @@ def replace_dynamic_uses(s, names)
       q = i - 1
       q -= 1 while q >= 0 && white?(s[q])
       member = q >= 0 && (s[q] == "." || (s[q] == ">" && q > 0 && s[q - 1] == "-"))
-      n = j
-      n += 1 while n < s.length && white?(s[n])
-      if names.key?(tok) && !member && s[n] == "["
+      if names.key?(tok) && !member && !shadowed_by_static?(s, statics, tok, i)
         out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
         i = j
         next

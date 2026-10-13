@@ -131,7 +131,7 @@ In the order the build hit them. Each is covered by a case in `tests/cases` that
 | `undeclared identifier: __atomic_thread_fence` (libstdc++ `shared_ptr`) | cproc has no atomics or fences | `__atomic_thread_fence` and `__atomic_signal_fence` call a weak `mfence; ret` stub from the assembly tail (a full barrier on x86-64 for every memory order) |
 | `undeclared identifier: __builtin_huge_val` / `nan` / `isfinite` / `isinf` / `signbit` / `ldexp` / `bswap16` / `bswap32` / `bswap64` | same | small `static` helpers in the prelude (`double` only; `nan("")` ignores the payload argument; `isinf` returns `+1`/`-1` like GCC) and `ldexp` from libm |
 | **runtime**: `SIGSEGV` at `movq 0, %rsi` in `std::find_if_not` | QBE: a struct local that is never stored to, passed by value (libstdc++ passes a `_Iter_pred<lambda>` temporary that holds only a dummy `char`). `mem.c` `coalesce()` kills slots with an empty store mask and replaces the `Oargc` operand with a null address on purpose (`/* crash */`). Plain C triggers it: `struct P {char d;}; long f(long a) { struct P p; return g(a, p); }` | `scripts/qbe-uninit-slot.patch`, applied to the QBE copy by `setup-qbe.sh`: such a slot gets a full mask, so it stays allocated and is read as garbage, as with gcc. Case `qbe_uninit_struct_arg.cpp` |
-| **runtime**: `terminate()`/`abort` or a segfault right after `std::all_of(first, last, lambda)` returns | cproc: copying a zero-size struct (the closure, passed by value on) emitted one `loadub`/`storeb`, because `funccopy()` runs its loop at least once. The destination is a zero-byte slot, which QBE places at the frame pointer, so `mov %al,0x0(%rbp)` overwrote the low byte of the caller's saved `%rbp` | `cproc-empty-copy` (a commit on take-cheeze/cproc branch nfcxx-patches) (after the empty-struct patch): a zero-size copy emits nothing. Case `qbe_empty_struct_copy.cpp` (segfaults without it) |
+| **runtime**: `terminate()`/`abort` or a segfault right after `std::all_of(first, last, lambda)` returns | cproc: copying a zero-size struct (the closure, passed by value on) emitted one `loadub`/`storeb`, because `funccopy()` runs its loop at least once. The destination is a zero-byte slot, which QBE places at the frame pointer, so `mov %al,0x0(%rbp)` overwrote the low byte of the caller's saved `%rbp` | `cproc-empty-copy` (a commit on take-cheeze/cproc branch nfcxx-asan-combined, after the empty-struct patch): a zero-size copy emits nothing. Case `qbe_empty_struct_copy.cpp` (segfaults without it) |
 
 Path B (`tests/pathb-qbe`) over-alignment: the IR writer (`be/nfcxx_ir.c`) now reports the object's own alignment
 (`alignment_of_variable`, so `alignas` and `aligned` count) for globals and stack slots; before, only the type's was
@@ -296,7 +296,7 @@ fixes below. These were the first blockers, in the order the build hit them (the
 | first blocker on QBE | cause | fix |
 |---|---|---|
 | `<stdin>:2262:10: error: undeclared identifier: __builtin_add_overflow` (`src/backtrace.c`) | `include/mruby/numeric.h` tests `__has_builtin(__builtin_add_overflow)`, which the host preprocessor answers yes to even with `-undef` | `qbe-prep.rb` lowers `__builtin_{add,sub,mul}_overflow` with nested `_Generic` to small helpers, with `int`/`long`/`long long` (signed or unsigned) operands of one type; every other integer mix (literals, `char`/`short`, mixed signedness or width, narrower or wider result) goes through `__nfcxx_ovx`, which computes the exact result in sign and 128-bit magnitude and converts it to `*r` like GCC; a non-integer operand or result links against an undefined `__nfcxx_overflow_unsupported_operand_types`. Cases `tests/c/builtins_overflow_mixed.c` (expected values taken from gcc) and `tests/builtins/overflow.cpp`. Also `__builtin_popcount*`, `ctz*`, `clz*`. Case `tests/c/builtins_overflow.c` |
-| `<stdin>:...: error: va_arg with non-scalar type is not yet supported` (`src/error.c`: `va_arg(ap, mrb_value)`; also `src/vm.c`) | cproc/QBE `vaarg` is scalar-only (cproc issue 52); `mrb_value` is a 16-byte struct (or 8 bytes with word boxing) | `cproc-vaarg-aggregate` (a commit on take-cheeze/cproc branch nfcxx-patches), applied by `setup-qbe.sh` after the empty-struct patch: va_arg of a struct/union of at most 16 bytes made only of integers/pointers reads the SysV va_list directly (register save area if `gp_offset <= 48 - size`, else the overflow area). Floats in the aggregate, more than 16 bytes, over-alignment and non-x86_64 keep the error. Case `tests/c/va_struct.c`, which also covers the "one register left" corner and was cross-checked against gcc-compiled callers and callees |
+| `<stdin>:...: error: va_arg with non-scalar type is not yet supported` (`src/error.c`: `va_arg(ap, mrb_value)`; also `src/vm.c`) | cproc/QBE `vaarg` is scalar-only (cproc issue 52); `mrb_value` is a 16-byte struct (or 8 bytes with word boxing) | `cproc-vaarg-aggregate` (a commit on take-cheeze/cproc branch nfcxx-asan-combined, after the empty-struct patch; the pin that `setup-qbe.sh` builds): va_arg of a struct/union of at most 16 bytes made only of integers/pointers reads the SysV va_list directly (register save area if `gp_offset <= 48 - size`, else the overflow area). Floats in the aggregate, more than 16 bytes, over-alignment and non-x86_64 keep the error. Case `tests/c/va_struct.c`, which also covers the "one register left" corner and was cross-checked against gcc-compiled callers and callees |
 | `undefined reference to 'alloca'` (link of `mrbc`, bison's `y.tab.c`) | without `__GNUC__`, glibc's `<alloca.h>` declares a function; libc has none | `qbe-prep.rb` (C inputs) rewrites `alloca(n)` calls to `__builtin_alloca`. Case `tests/c/alloca.c` |
 | `qbe:...: invalid instruction type in truncd` (`mruby-numeric-ext`) | `DBL_MIN` is `((double)2.2250738585072014e-308L)`; cproc types the literal as long double and emits an invalid cast | `qbe-prep.rb` drops the `L` of a literal directly cast to `double`/`float`. Case `tests/c/float_limits.c`. (Finding it also fixed `qbe-prep.rb`'s tokenizer, which split `1e-308` at the sign.) |
 
@@ -336,6 +336,30 @@ Other things the build exposed, not on cproc's side:
   its GNU subset).
 - The QBE backend of `nfcc` ignores `-O*`/`-g`: no optimisation levels and no debug info (assembly from `-S`
   has no `.loc` lines). The gcc backend honours them.
+
+## optcarrot (benchmark on an nfcc-built mruby)
+
+[optcarrot](https://github.com/mame/optcarrot), a pure-Ruby NES emulator used as a Ruby implementation benchmark, was
+migrated here from rpg-maker-clone's `tools/optcarrot_probe` (its interpreted-mruby configuration; the bc2cpp compiled
+configurations stay in that repository). `tests/realworld/run_optcarrot.sh` fetches mruby (the `run_mruby.sh` pin),
+optcarrot (`c215378a`, rpg-maker-clone's `3rd/optcarrot` pin) and mruby-onig-regexp (`4962d7eb`) into `build/realworld`,
+builds mruby with `nfcc` through `tests/realworld/optcarrot/mruby_build_config.rb` (the default gembox, as `run_mruby.sh`,
+plus the Regexp gem; `full-core` adds mruby-cmath, whose C `_Complex` cproc rejects) and runs the unmodified upstream
+source as one script (`tests/realworld/optcarrot/build_bundle.rb`: mruby has no `require_relative`, so the files are
+concatenated in load order with `shims.rb` and `runner_tail.rb`).
+
+Patches used: `tests/realworld/optcarrot/mruby-module-function-scope.patch` (bare `module_function`, a no-op in mruby 4.0.0),
+`tests/realworld/optcarrot/mruby-onig-regexp-no-chdir.patch` (the gem's `Dir.chdir` blocks clash under `rake -j`), and
+`scripts/cproc-unprototyped-fnptr.patch`, applied to cproc by `scripts/setup-qbe.sh`: cproc rejected assigning a prototyped
+function to an unprototyped function pointer, `int (*compare)()`, which C 6.7.6.3p15 allows and which Onigmo's
+`st_hash_type` uses. Of rpg-maker-clone's other mruby patches (`patches/`) only these are needed; the rest are for bc2cpp
+output, the PSP build or bugs optcarrot does not hit.
+
+The check is the video checksum of the 180-frame run on `examples/Lan_Master.nes`, 59662, the same as CRuby's. Results of
+the migration run (nfcxx built from its pins, EDG, QBE and cproc built by `scripts/setup-edg.sh` and `scripts/setup-qbe.sh`):
+the gcc control (host gcc as the mruby compiler) gives 59662 at about 12 fps; the nfcc qbe build gives 59662 at about 5.7 fps.
+The nfcc gcc-backend build is in `run_optcarrot.sh` but has not been run yet. CRuby 3.3.6 gives 59662 at about 37 fps (the interpreter's own figure
+for comparison, not a benchmark of nfcxx).
 
 ## Next candidates
 

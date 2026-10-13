@@ -94,7 +94,7 @@ all of which `hir` has. (`Pad`, added earlier for the native `Slice` gradient, s
 | `Transpose Reshape Identity` | yes | yes | yes |
 | `ReduceSum ReduceMean` | yes | yes | yes |
 | `Softmax` | yes | yes | yes |
-| `Erf Gemm Gather Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` | yes | **no** | forward operator missing in `hir` (follow-up: add them, the gradients then exist already) |
+| `Erf Gemm Gather Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` | yes | yes | yes, but only checked once by finite differences (a float64 graph with all nine: 1.8e-9 and 4.6e-8 relative); not in `test_grad` yet |
 | `Abs Sin Cos Max Min Where Slice Concat Pad Expand Squeeze Unsqueeze ReduceMax ReduceMin LogSoftmax Cast` | no (a few exist in the Python package only) | yes | **no**: `Error` "no gradient rule for op type '...'" |
 | comparisons, `Not And Or Xor`, `Mod` | no | yes | no: a mask made from a `wrt` (`x * (x > 0)`) is a path through `Greater` and `Cast`; the same masks off the path of every `wrt` are fine |
 

@@ -6,6 +6,9 @@
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
 #                               errors, slicing, concatenation, the graph, the ONNX export; it also writes models
+#   - tests/uop/test_nn.cpp     the forward operators Gemm, Gather, Erf, Conv, MaxPool, AveragePool, BatchNormalization, InstanceNormalization,
+#                               LayerNormalization (nfcuop_hir.cpp, nfcuop_lower.cpp): shape inference and refusals, values against direct
+#                               references, export/import round trips, the C backend's bits, and models for onnx_check.py
 #   - tests/uop/test_onnx.cpp   the ONNX reader (hir::Graph::from_onnx / merge_onnx): export -> import -> export bytes equal, models made by
 #                               the onnx package (tests/uop/onnx_import_gen.py) equal to onnxruntime, merging, name collisions, errors, Pad
 #   - tests/uop/test_grad.cpp   reverse-mode autodiff by onnxsim (nfcuop_onnxgrad.hpp, docs/notes/uop-autodiff.md): finite differences in
@@ -29,7 +32,7 @@
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp)
-tests=(test test_ut test_np test_onnx test_grad test_cgen np_compat)
+tests=(test test_ut test_np test_nn test_onnx test_grad test_cgen np_compat)
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
@@ -43,7 +46,7 @@ run_all() {
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
     fi
     case $t in
-      test_np|test_grad) args=("$tmp/$label/onnx") ;;
+      test_np|test_grad|test_nn) args=("$tmp/$label/onnx") ;;
       test_onnx) args=("$tmp/$label/import") ;;
       np_compat) args=("$tmp/$label/compat.json") ;;
       *) args=() ;;

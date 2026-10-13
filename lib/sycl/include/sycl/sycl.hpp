@@ -22,6 +22,12 @@
 #ifndef NFCXX_SYCL_HPP
 #define NFCXX_SYCL_HPP
 
+// A device backend is in use: NFCXX_SYCL_GPU (WebGPU: -DNFCXX_SYCL_WEBGPU, rt_pipe.hpp; Vulkan: -DNFCXX_SYCL_VULKAN,
+// rt_vulkan.hpp). Both take the same SPIR-V or WGSL image pair from scripts/sycl-build.sh.
+#if defined(NFCXX_SYCL_WEBGPU) || defined(NFCXX_SYCL_VULKAN)
+#define NFCXX_SYCL_GPU 1
+#endif
+
 #ifdef __NFCXX_SYCL_DEVICE__
 // ---- device intrinsics: the WGSL emitter lowers these calls (scripts/pathb-wgsl-emit.rb)
 extern "C" {
@@ -507,7 +513,7 @@ inline void host_free(void *p) { std::free(p); }
 struct buffer_state {
   void *host = nullptr;
   unsigned bytes = 0;
-  unsigned dev = 0;        // device byte offset, 0 until allocated
+  unsigned long dev = 0;   // device address of the device copy, 0 until allocated
   bool dev_valid = false;  // the device copy holds the newest data
   bool host_valid = true;  // the host copy holds the newest data
   bool owns = false;
@@ -518,8 +524,8 @@ struct buffer_use {
   access_mode mode;
 };
 
-// The backend: a no-op on the host path, the WebGPU runtime (rt_pipe.hpp) otherwise. All inline in rt_pipe.hpp.
-unsigned backend_dev_offset(buffer_state &);                // allocates the device copy on first use
+// The backend: a no-op on the host path, the WebGPU or Vulkan runtime otherwise (rt_pipe.hpp, rt_vulkan.hpp).
+unsigned long backend_dev_offset(buffer_state &);                // allocates the device copy on first use
 void backend_sync_to_host(buffer_state &);                  // waits for the device and reads the data back if it is newer
 void backend_release(buffer_state &);                       // frees the device copy
 void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind);   // kind: 0 device, 1 shared, 2 host
@@ -535,12 +541,14 @@ void backend_wait();
 
 }  // namespace sycl
 
-#if defined(NFCXX_SYCL_WEBGPU) && !defined(__NFCXX_SYCL_DEVICE__)
+#if defined(NFCXX_SYCL_VULKAN) && !defined(__NFCXX_SYCL_DEVICE__)
+#include "rt_vulkan.hpp"
+#elif defined(NFCXX_SYCL_WEBGPU) && !defined(__NFCXX_SYCL_DEVICE__)
 #include "rt_pipe.hpp"
 #else
 namespace sycl {
 namespace detail {
-inline unsigned backend_dev_offset(buffer_state &) { return 0; }
+inline unsigned long backend_dev_offset(buffer_state &) { return 0; }
 inline void backend_sync_to_host(buffer_state &) {}
 inline void backend_release(buffer_state &) {}
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int) {
@@ -882,7 +890,7 @@ class accessor {
   accessor(buffer<T, D> &b, handler &h, mode_tag_t<M>, const property_list &pl) : accessor(b, h, pl) {}
   // a range and an offset: the part of a one-dimensional buffer the accessor covers (indexes start at the offset's element)
   accessor(buffer<T, D> &b, handler &h, const range<D> &r, const id<D> &off = id<D>())
-      : host_(b.host_data() + off[0]), dev_(detail::backend_dev_offset(b.state()) + (unsigned)(off[0] * sizeof(T))), r_(r) {
+      : host_(b.host_data() + off[0]), dev_(detail::backend_dev_offset(b.state()) + (unsigned long)(off[0] * sizeof(T))), r_(r) {
     static_assert(D == 1, "a ranged accessor needs a one-dimensional buffer here");
     h.use(&b.state(), M);
   }
@@ -904,7 +912,7 @@ class accessor {
   T *end() const { return base() + r_.size(); }
 
   T *host_;
-  unsigned dev_;
+  unsigned long dev_;
   range<D> r_;
 
  private:
@@ -1118,7 +1126,7 @@ template <class Name, int D, class F> void handler::parallel_for(range<D> r, F f
 #ifdef __NFCXX_SYCL_DEVICE__
   detail::__nfcxx_sycl_entry_range<D, F>();  // never run: it makes the device pass lower the entry
   (void)r;
-#elif defined(NFCXX_SYCL_WEBGPU)
+#elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
   for (int d = 0; d < D; d++) { g[d] = (unsigned)r[d]; l[d] = detail::default_local<D>(d); }
   detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
@@ -1138,7 +1146,7 @@ template <class Name, int D, class F> void handler::parallel_for(nd_range<D> r, 
 #ifdef __NFCXX_SYCL_DEVICE__
   detail::__nfcxx_sycl_entry_nd<D, F>();
   (void)r;
-#elif defined(NFCXX_SYCL_WEBGPU)
+#elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
   for (int d = 0; d < D; d++) { g[d] = (unsigned)r.get_global_range()[d]; l[d] = (unsigned)r.get_local_range()[d]; }
   detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
@@ -1168,7 +1176,7 @@ template <class Name, int D, class F> void handler::parallel_for(nd_range<D> r, 
 template <class Name, class F> void handler::single_task(F f) {
 #ifdef __NFCXX_SYCL_DEVICE__
   detail::__nfcxx_sycl_entry_single<F>();
-#elif defined(NFCXX_SYCL_WEBGPU)
+#elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
   detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
 #else
@@ -1267,7 +1275,7 @@ class device {
   device() {}
   template <class S> device(const S &) {}
   bool is_gpu() const {
-#ifdef NFCXX_SYCL_WEBGPU
+#ifdef NFCXX_SYCL_GPU
     return true;
 #else
     return false;
@@ -1563,7 +1571,7 @@ template <int D, class F, class T1, class O1, class T2, class O2, class T3, clas
 template <class T, class Op> class reduction_desc {
  public:
   reduction_desc(T *usm, Op, bool init, T identity) : var_(usm), st_(nullptr), init_(init), id_(identity) {}
-  reduction_desc(T *host, detail::buffer_state *st, unsigned dev, Op, bool init, T identity)
+  reduction_desc(T *host, detail::buffer_state *st, unsigned long dev, Op, bool init, T identity)
       : var_(host), st_(st), dev_(dev), init_(init), id_(identity) {}
   void prepare(handler &h) const {
     if (st_) {
@@ -1580,7 +1588,7 @@ template <class T, class Op> class reduction_desc {
   }
   // the pointer the kernel combines into: the device address of a buffer on the WebGPU path, else the variable itself
   T *kernel_var() const {
-#ifdef NFCXX_SYCL_WEBGPU
+#ifdef NFCXX_SYCL_GPU
     if (st_) return (T *)(unsigned long)dev_;
 #endif
     return var_;
@@ -1589,7 +1597,7 @@ template <class T, class Op> class reduction_desc {
  private:
   T *var_;
   detail::buffer_state *st_;
-  unsigned dev_ = 0;
+  unsigned long dev_ = 0;
   bool init_;
   T id_;
 };

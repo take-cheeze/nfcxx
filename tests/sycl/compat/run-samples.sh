@@ -3,7 +3,8 @@
 #   tests/sycl/compat/run-samples.sh DIR LIST OUTDIR
 # DIR is a source tree (untrusted: read the programs before running them), LIST a file of paths relative to DIR (for
 # example the "ok" rows of the sweep.sh results.tsv), each optionally followed by the program's arguments. Writes
-# OUTDIR/samples.tsv. SKIP_HOST=1 leaves out the host path; SAMPLE_TIMEOUT is the seconds each run may take (default 90).
+# OUTDIR/samples.tsv. SKIP_HOST=1 leaves out the host path; SAMPLE_TIMEOUT is the seconds each run may take (default 90);
+# SAMPLE_BACKEND=vulkan runs the device side on Vulkan instead of WebGPU.
 #   file, host g++ (build/run status), host output head, WebGPU (build/run status), WebGPU output head
 # Statuses: ok, fail(code), timeout, build-fail, refused(first reason).
 set -uo pipefail
@@ -29,7 +30,7 @@ while read -r rel args; do
   fi
   # WebGPU path
   rc=0
-  "$root/scripts/sycl-build.sh" --cxx="$root/nfcxx" $(inc "$d") "$f" -o "$out/$n.gpu" > "$out/$n.gpu.log" 2>&1 || rc=$?
+  "$root/scripts/sycl-build.sh" --backend="${SAMPLE_BACKEND:-webgpu}" --cxx="$root/nfcxx" $(inc "$d") "$f" -o "$out/$n.gpu" > "$out/$n.gpu.log" 2>&1 || rc=$?
   if [ $rc = 0 ]; then
     (cd "$out" && timeout "$tmo" "./$n.gpu" $args < /dev/null > "$n.gpu.out" 2> "$n.gpu.err"); rc=$?
     if [ $rc = 124 ]; then w_status=timeout; elif [ $rc = 0 ]; then w_status=ok; else w_status="fail($rc)"; fi

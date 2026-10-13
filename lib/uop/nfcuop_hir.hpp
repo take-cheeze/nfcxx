@@ -10,10 +10,11 @@
 //   int y = g.add_node("MatMul", {x, w});
 //   std::string onnx = g.to_onnx({y});          // bytes of a ModelProto; write them to a .onnx file
 //
-// Supported operators: Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Add Sub Mul Div Mod Max Min
-// And Or Xor BitwiseAnd BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul
-// Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad (mode constant).
-// All shapes are static; dynamic dimensions come in a later stage. See docs/notes/uop.md.
+// Supported operators: Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Erf Add Sub Mul Div Mod Max Min
+// And Or Xor BitwiseAnd BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Gemm
+// Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad (mode constant)
+// Gather Conv MaxPool AveragePool BatchNormalization (inference) InstanceNormalization LayerNormalization (see the operator notes in
+// nfcuop_lower.cpp for their lowering and cost). All shapes are static; dynamic dimensions come in a later stage. See docs/notes/uop.md.
 #pragma once
 #include <deque>
 #include <map>
@@ -58,6 +59,8 @@ struct Node {
   std::vector<Attribute> attrs;
   const Attribute* attr(const std::string& n) const;
   int64_t attr_int(const std::string& n, int64_t dflt) const;
+  double attr_float(const std::string& n, double dflt) const;        // the value of a FLOAT attribute (float32 precision)
+  std::vector<int64_t> attr_ints(const std::string& n) const;        // the INTS attribute, or {} when absent
   bool has_attr(const std::string& n) const { return attr(n) != nullptr; }
 };
 
