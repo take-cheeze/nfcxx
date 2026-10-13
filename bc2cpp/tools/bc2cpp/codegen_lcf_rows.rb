@@ -18,10 +18,6 @@ class CodeGen
   LCF_ROW_OWNERS = %w[LCF::Database LCF::Array1D LCF::Array2D].freeze
   LCF_ROW_DEFS = { '[]' => %w[LCF::File LCF::Array1D LCF::Array2D], '[]=' => %w[LCF::Array2D] }.freeze
   LCF_ROW_IVARS = %w[root data decoded schema sym2idx].freeze
-  # Every field name a schema declares (`name: :x` entries in schema.rb). A literal Symbol key on an
-  # LCF::Array1D that none of them names has no sym2idx entry, so its read can only raise.
-  LCF_SCHEMA_FIELD_NAMES = File.read(File.join(LCF_ROW_MRBLIB, 'schema.rb'), encoding: 'UTF-8')
-                               .scan(/\bname: :(\w+)/).flatten.uniq.freeze
 
   attr_reader :lcf_rows_refusal
 
@@ -52,19 +48,29 @@ class CodeGen
     @lcf_rows.index(recv, key, nil_raises: numeric_nil_raises?('[]'))
   end
 
-  # Compile error for `array1d[:name]` where +name+ is a literal Symbol that no schema declares, on a
-  # receiver the flow proves is exactly LCF::Array1D. Runs in the final emission pass (not the fixpoint),
-  # where the receiver's proof is settled, so a partial mask can't raise early.
+  # Compile error for `row[:name]` where +name+ is a literal Symbol that the schema of the row cannot
+  # resolve. The row's kinds come from the flow (LcfRowFlow ROW(path): each one is an Array1D whose
+  # elements are the table at that path), so the check is per schema, not over every schema at once.
+  # It raises only when every kind the receiver may carry lacks the name, and only when the flow proves
+  # the receiver is nothing but Array1D rows (no OTHER, no Database or table kind). Runs in the final
+  # emission pass, where the proof is settled, so a partial mask in the fixpoint cannot raise early.
   def check_lcf_array1d_key(irep, index, insn, reg, owner_def)
     return unless @lcf_rows && insn.op == 'GETIDX'
 
-    recv = lcf_exact_receiver(irep, index, reg, owner_def, '[]')
-    return unless recv && recv.first == 'LCF::Array1D'
-
     key = lcf_literal_key(irep, index, insn.reg.to_i + 1)
-    return unless key.is_a?(Symbol) && !LCF_SCHEMA_FIELD_NAMES.include?(key.to_s)
+    return unless key.is_a?(Symbol)
 
-    raise "bc2cpp: LCF::Array1D index :#{key} names no field in any LCF schema (mruby-lcf/mrblib/schema.rb)"
+    mask = numeric_raw_mask(irep, index, reg.to_s, owner_def)
+    return unless mask.is_a?(Integer)
+
+    rows = @lcf_rows.kinds.select { |k| (mask & k.bit).nonzero? }
+    return if rows.empty? || rows.any? { |k| k.role != :row }
+    return unless (mask & ~NumericFlow::NIL & ~rows.sum(&:bit)).zero?
+
+    names = rows.map { |k| @lcf_rows.field_names(k.path) }
+    return if names.any?(&:nil?) || names.any? { |n| n.include?(key.to_s) }
+
+    raise "bc2cpp: LCF::Array1D index :#{key} is not a field of the schema at #{rows.map(&:path).join(', ')}"
   end
 
   # The mask of `Klass.new(...)` for a file class, nil when the send is not one.
