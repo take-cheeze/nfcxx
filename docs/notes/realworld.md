@@ -347,7 +347,7 @@ builds mruby with `nfcc` through `tests/realworld/optcarrot/mruby_build_config.r
 source as one script (`tests/realworld/optcarrot/build_bundle.rb`: mruby has no `require_relative`, so the files are
 concatenated in load order with `shims.rb` and `runner_tail.rb`). Two things mruby 4.0.0 lacks for it: Regexp (the onig
 gem, whose bundled Onigmo is built by `./configure` and `make` with `nfcc` as `CC`) and bare `module_function`
-(`tests/realworld/optcarrot/mruby-module-function-scope.patch`, applied to the clone). The check is the video checksum of
+(`tests/realworld/optcarrot/mruby-module-function-scope.patch`, applied to the clone) and, for the gem, `mruby-onig-regexp-no-chdir.patch` (its rakefile's `Dir.chdir` blocks clash under `rake -j`). The other mruby patches of rpg-maker-clone (`patches/`) are for bc2cpp output, the PSP build or bugs optcarrot does not hit, and are not used. The check is the video checksum of
 the 180-frame run on `examples/Lan_Master.nes`, 59662, the same as CRuby's; the script prints the frames per second.
 
 Checked: the gcc control build (`OPTCARROT_CONTROL=1`; host gcc as the mruby compiler) gave checksum 59662 at about

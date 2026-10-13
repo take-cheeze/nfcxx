@@ -9,7 +9,9 @@
 #   OPTCARROT_CONTROL=1     also build mruby with plain host gcc first, as a control
 # Needs ruby, rake, make and a shell for Onigmo's ./configure. Prints the frames per second of each run.
 # mruby needs two things for optcarrot: mruby-onig-regexp (Regexp) and tests/realworld/optcarrot/mruby-module-function-scope.patch
-# (bare `module_function`, which mruby 4.0.0 still treats as a no-op).
+# (bare `module_function`, which mruby 4.0.0 still treats as a no-op). Of rpg-maker-clone's other mruby patches only
+# mruby-onig-regexp-no-chdir.patch (parallel rake) is used: the rest are for bc2cpp output, the PSP build or bugs
+# optcarrot does not hit (checked: checksum 59662 without them).
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld; here=$root/tests/realworld/optcarrot
 mruby_pin=831da26b9021de0369d17b71b5667e2941a1a32d    # mruby/mruby tag 4.0.0, as run_mruby.sh
@@ -43,6 +45,10 @@ done
 src=$work/mruby
 git -C "$src" checkout -q -f "$mruby_pin"
 patch -d "$src" -p1 -N -s < "$here/mruby-module-function-scope.patch" || { echo "FAIL optcarrot: the module_function patch does not apply to mruby $mruby_pin"; exit 1; }
+
+# mruby-onig-regexp's rakefile uses process-wide Dir.chdir blocks, which clash between rake threads under -j.
+git -C "$work/mruby-onig-regexp" checkout -q -f "$onig_pin"
+patch -d "$work/mruby-onig-regexp" -p1 -N -s < "$here/mruby-onig-regexp-no-chdir.patch" || { echo "FAIL optcarrot: the onig-regexp no-chdir patch does not apply"; exit 1; }
 
 backends=${NFCXX_BACKEND:-"gcc qbe"}
 [ -z "${OPTCARROT_CONTROL:-}" ] || backends="control $backends"
