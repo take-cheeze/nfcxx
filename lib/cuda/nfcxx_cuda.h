@@ -47,6 +47,12 @@ inline const dim3 gridDim{1, 1, 1};
 inline void __syncthreads(void) {}
 // The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
 inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
+// Scalar helpers, for the host copy (never run).
+inline unsigned int __float_as_uint(float f) { unsigned int u; __builtin_memcpy(&u, &f, sizeof u); return u; }
+inline int __float2int_rn(float f) { return (int)f; }
+inline float __frcp_rn(float x) { return 1.0f / x; }
+inline unsigned long __cvta_generic_to_shared(const void *p) { (void)p; return 0; }
+inline unsigned int __hgt2_mask(unsigned int a, unsigned int b) { (void)a; (void)b; return 0u; }
 // The trap and the warp votes, for the host copy (never run).
 inline void __trap(void) {}
 inline unsigned int __ballot_sync(unsigned int mask, int pred) { (void)mask; (void)pred; return 0u; }
