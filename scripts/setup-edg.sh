@@ -19,6 +19,34 @@ if [ ! -f "$src/CMakeLists.txt" ]; then
   git -C "$root" submodule update --init --depth 1 3rd/edg
 fi
 
+# macOS (Apple Silicon or Intel): EDG's own clang base and CMake preset. Its long double (8 bytes, binary64 on arm64)
+# and predefined macros are the macOS ones, so none of the Linux workarounds below apply.
+if [ "$(uname -s)" = Darwin ]; then
+  case "$(uname -m)" in
+    arm64)  cfg=macos-arm;    preset=macos-arm-clang-release ;;
+    x86_64) cfg=macos-x86_64; preset=macos-x86-clang-release ;;
+    *) echo "setup-edg: unsupported macOS architecture $(uname -m)" >&2; exit 1 ;;
+  esac
+  rm -rf "$base"; mkdir -p "$(dirname "$base")"
+  cp -r "$src/bases/cmake-native/$cfg/clang" "$base"
+  # _POSIX_SOURCE hides Darwin's clock_gettime, CLOCK_MONOTONIC and mkdtemp; _DARWIN_C_SOURCE exposes the full C API, and
+  # its blocks declarations (__BLOCKS__, Clang's ^ syntax) are not parsed by EDG, so that macro is undefined.
+  sed -i.bak 's|^EDG_DEFAULT_CPP_DEFINES="-D_POSIX_SOURCE"|EDG_DEFAULT_CPP_DEFINES="-D_DARWIN_C_SOURCE -U__BLOCKS__"|' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
+  # Let nfcxx pick the C compiler eccp hands the generated C to (NFCXX_CC); the base defaults to clang.
+  sed -i.bak 's|^EDG_C_TO_OBJ_COMPILER=clang|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-clang}|' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
+  # The base builds universal (arm64 + x86_64) objects by default; clang refuses to emit one assembly for several -arch.
+  sed -i.bak 's| -arch arm64 -arch x86_64||' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
+  # The prelinker reads `nm -og` output. Mach-O values are 16 hex digits, so the nm format is MacOSX64 (-f); without it
+  # the default parser rejects the template-info objects ("invalid input format").
+  sed -i.bak 's|"nm -og 2>/dev/null" |"nm -og 2>/dev/null" -fMacOSX64 |' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
+  cd "$src"
+  EDG_BASE=$base cmake --preset "$preset" -B "$out" >/dev/null
+  cd "$out"
+  ninja bin/cpfe bin/edg_prelink lib/libC.a
+  echo "EDG built: $out/bin/eccp"
+  exit 0
+fi
+
 # EDG_BASE holds edg_eccp_config, predefined macros and headers. Use a copy so the
 # submodule stays clean: the stock config passes -Wno-error=return-mismatch, a
 # GCC 14+ option that older GCCs reject.

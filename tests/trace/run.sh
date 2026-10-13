@@ -25,7 +25,8 @@ print(f"ok   {label}: {len(spans)} spans, all required spans present")
 PY
 }
 
-for backend in qbe gcc; do
+backends=${NFCXX_BACKEND:-"qbe gcc"}
+for backend in $backends; do
   json=$tmp/$backend.json
   if ! NFCXX_BACKEND=$backend ./nfcxx --trace="$json" "$src" -o "$tmp/$backend.bin" > "$tmp/$backend.log" 2>&1; then
     echo "FAIL $backend: build"; cat "$tmp/$backend.log"; fail=1; continue

@@ -54,7 +54,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0
 lines=()
 
-expect_of() { sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$1" | head -1; }
+expect_of() { sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$1" | head -1; }
 # `// STD: c++14` in a probe selects the language standard (default c++23), for pathb-dump and for the gcc backend.
 # C++ exceptions: dynamic exception specifications exist only before C++17.
 std_of() { sed -n 's,^// STD: *\(c++[0-9]*\).*,-std=\1,p' "$1" | head -1; }

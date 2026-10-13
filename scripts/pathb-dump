@@ -29,7 +29,7 @@ while [ $i -lt ${#args[@]} ]; do
     --target=*) target=${arg#--target=} ;;
     --target) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: --target needs a name" >&2; exit 2; }; target=${args[$i]} ;;
     -std=c++*) std=--c++${arg#-std=c++} ;;
-    -I?*) user_opts+=("-I$(realpath -m "${arg#-I}")") ;;   # the front end runs in another directory
+    -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
     *) files+=("$arg") ;;
   esac

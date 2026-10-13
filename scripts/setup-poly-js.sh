@@ -31,7 +31,7 @@ if [ "$be" = qbe ]; then
     { echo "setup-poly-js: QBE not built; run scripts/setup-qbe.sh" >&2; exit 1; }
 fi
 mkdir -p "$work"
-exec 9>"$work/.lock"; flock 9
+exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && fresh && exit 0
 if [ ! -d "$src/.git" ]; then
   mkdir -p "$src" && git -C "$src" init -q &&
