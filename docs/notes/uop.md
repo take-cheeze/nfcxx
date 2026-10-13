@@ -212,9 +212,10 @@ shapes are added in two steps, without changing what the static path means:
    (`N+1`). Reductions (also over the symbol's axis), matmul and gemm contractions with equal dimensions, the batch axis of Conv and pooling,
    Transpose, Squeeze, Unsqueeze, Expand and the elementwise operators keep symbols. Slicing or gathering along a symbol, a symbol in a channel or
    spatial axis of Conv and pooling, and a normalization over a symbol (its `Scale` is a constant with integer sizes) are refused, since their
-   sizes would have to be known. `to_onnx` writes `dim_param` for a symbol, and for a derived polynomial its exact text (`4*N`, as onnxsim
-   writes a derived dimension); ONNX has no other field for it. `from_onnx`/`merge_onnx` read it back, and the text is inferred from the
-   symbols of the graph's inputs, so it binds by N. A dimension with neither a value nor a symbol
+   sizes would have to be known. `to_onnx` writes `dim_param` for a symbol. A derived polynomial gets a fresh `dim_param` name
+   (`poly0`, `poly1`, ... never a symbol of the graph), and its exact text (`4*N`) goes in the model's `metadata_props` under
+   `nfcuop.dim_expr.<name>`. `from_onnx`/`merge_onnx` read the text back, and the value's shape is inferred from the symbols of the
+   graph's inputs, so it binds by N. A dimension with neither a value nor a symbol
    is still refused by the reader. The gradients (`gradients_via_onnxsim`) refuse symbolic graphs.
    Evaluation **specializes**: `Graph::bind({N: 2})` gives a static copy of the graph (every operator inferred again with the sizes), and
    `hir::Evaluator` binds, lowers and evaluates it, caching the lowering per binding (keyed on the bindings in name order). Lowering a value

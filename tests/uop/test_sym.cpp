@@ -253,7 +253,7 @@ static void products() {
   hir::Graph b = g.bind({{"N", 2}});
   CHECK(b.dims(flat) == (hir::Dims{8}) && b.dims(flat_pad) == (hir::Dims{12}) && b.dims(halves) == (hir::Dims{2, 6}) && !b.symbolic(halves));
 
-  // a reshape to N*4 is an output too: it is written as dim_param "4*N" (onnxsim's convention); the reader infers it from the input N
+  // a reshape to N*4 is an output too: it is written as dim_param "poly0" with "4*N" in metadata_props; the reader infers it from the input N
   // again, so the polynomial comes back as itself and binds by N
   std::string bytes = g.to_onnx({flat});
   std::vector<int> outs;

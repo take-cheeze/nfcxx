@@ -188,7 +188,10 @@ struct InfoMsg {
   Dims shape;  // integers (dim_value) and symbols (dim_param)
 };
 
-InfoMsg read_value_info(const Bytes& b) {
+// The polynomial text of each dim_param the exporter renamed ("poly0" -> "4*N"), from the model's metadata_props.
+using DimExprs = std::map<std::string, std::string>;
+
+InfoMsg read_value_info(const Bytes& b, const DimExprs& exprs) {
   InfoMsg vi;
   int64_t elem = 0;
   bool dynamic = false;
@@ -211,7 +214,10 @@ InfoMsg read_value_info(const Bytes& b) {
                 else if (dim.field == 2) { has_param = true; param = dim.data.str(); }
               }
               if (has_value) vi.shape.push_back(Dim(dv));
-              else if (has_param && !param.empty()) vi.shape.push_back(Dim::symbol(param));
+              else if (has_param && !param.empty()) {
+                auto e = exprs.find(param);   // a polynomial written under a fresh name: its text is the dimension's symbol here
+                vi.shape.push_back(Dim::symbol(e == exprs.end() ? param : e->second));
+              }
               else dynamic = true;
             }
           }
@@ -295,12 +301,18 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
   std::vector<Bytes> nodes, inits, inputs, outputs;
   int64_t opset = 0;
   bool has_graph = false;
+  DimExprs exprs;
   for (Rd m(bytes.data(), bytes.size()); m.next();) {
     if (m.field == 8) {
       std::string domain;
       int64_t ver = 0;
       for (Rd o(m.data); o.next();) { if (o.field == 1) domain = o.data.str(); else if (o.field == 2) ver = o.as_int(); }
       if (domain.empty() || domain == "ai.onnx") opset = ver;
+    } else if (m.field == 14) {  // metadata_props: StringStringEntryProto
+      std::string key, value;
+      for (Rd e(m.data); e.next();) { if (e.field == 1) key = e.data.str(); else if (e.field == 2) value = e.data.str(); }
+      const std::string prefix = "nfcuop.dim_expr.";
+      if (key.compare(0, prefix.size(), prefix) == 0) exprs[key.substr(prefix.size())] = value;
     } else if (m.field == 7) {
       has_graph = true;
       for (Rd g(m.data); g.next();) {
@@ -338,7 +350,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
     }
   }
   for (const Bytes& b : inputs) {
-    InfoMsg vi = read_value_info(b);
+    InfoMsg vi = read_value_info(b, exprs);
     if (init_names.count(vi.name)) continue;
     if (!vi.has_type) throw Error("onnx import: input " + vi.name + " has no tensor type");
     int id = find_value(vi.name);
@@ -415,7 +427,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
 
   std::vector<int> result;
   for (const Bytes& b : outputs) {
-    InfoMsg vi = read_value_info(b);
+    InfoMsg vi = read_value_info(b, exprs);
     auto it = local.find(vi.name);
     if (it == local.end()) throw Error("onnx import: graph output " + vi.name + " is not defined");
     if (vi.has_type) check_existing(it->second, vi.dtype, vi.shape, vi.name);

@@ -736,14 +736,29 @@ PB tensor_proto(const std::string& name, const Array& a) {
   return t;
 }
 
-PB value_info(const Value& v) {
+// A polynomial dimension (4*N) has no ONNX field of its own. It is written under a fresh dim_param name ("poly0", "poly1", ...,
+// never a symbol of the graph), and its exact text is kept in the model's metadata_props under "nfcuop.dim_expr.<name>", where the
+// reader finds it. poly maps the text to its name, so every dimension with the same polynomial gets the same name.
+using PolyNames = std::map<std::string, std::string>;
+
+std::string poly_name(PolyNames& poly, const std::string& text, const std::set<std::string>& taken) {
+  auto it = poly.find(text);
+  if (it != poly.end()) return it->second;
+  std::string name;
+  for (size_t k = poly.size();; k++) {
+    name = "poly" + std::to_string(k);
+    if (!taken.count(name)) break;
+  }
+  poly[text] = name;
+  return name;
+}
+
+PB value_info(const Value& v, PolyNames& poly, const std::set<std::string>& taken) {
   PB dims;
   for (size_t k = 0; k < v.shape.size(); k++) {
     PB dim;
     if (!v.syms.empty() && !v.syms[k].empty()) dim.bytes(2, v.syms[k]);  // dim_param: a symbol
-    // a polynomial such as 4*N is written as its exact text in dim_param, as onnxsim does for a derived dimension
-    // ("past_sequence_length + sequence_length"): ONNX has no other field for it, and a consumer binds it by that string
-    else if (!v.exprs.empty() && v.exprs[k].is_symbol()) dim.bytes(2, v.exprs[k].str());  // dim_param: a polynomial
+    else if (!v.exprs.empty() && v.exprs[k].is_symbol()) dim.bytes(2, poly_name(poly, v.exprs[k].str(), taken));  // dim_param: a polynomial
     else dim.i64(1, v.shape[k]);  // dim_value
     dims.msg(1, dim);
   }
@@ -801,8 +816,11 @@ std::string Graph::to_onnx(const std::vector<int>& outputs, const std::string& g
     if (!need_values.count(kv.first)) continue;
     graph.msg(5, tensor_proto(values_[kv.first].name, kv.second));
   }
-  for (int in : inputs_) if (need_values.count(in)) graph.msg(11, value_info(values_[in]));
-  for (int o : outputs) graph.msg(12, value_info(values_[o]));
+  PolyNames poly;
+  const std::vector<std::string> syms = symbols();
+  const std::set<std::string> taken(syms.begin(), syms.end());
+  for (int in : inputs_) if (need_values.count(in)) graph.msg(11, value_info(values_[in], poly, taken));
+  for (int o : outputs) graph.msg(12, value_info(values_[o], poly, taken));
   PB opset;
   opset.bytes(1, "");
   opset.i64(2, 18);
@@ -811,6 +829,12 @@ std::string Graph::to_onnx(const std::vector<int>& outputs, const std::string& g
   model.bytes(2, "nfcuop");
   model.msg(7, graph);
   model.msg(8, opset);
+  for (const auto& kv : poly) {  // metadata_props: the text of each polynomial dim_param
+    PB entry;
+    entry.bytes(1, "nfcuop.dim_expr." + kv.second);
+    entry.bytes(2, kv.first);
+    model.msg(14, entry);
+  }
   return model.b;
 }
 
