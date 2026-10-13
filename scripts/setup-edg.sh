@@ -47,6 +47,17 @@ fi
 if [ "$(uname -m)" != x86_64 ]; then
   sed -i 's/^#define FLOAT80_ENABLING_POSSIBLE 1$/#define FLOAT80_ENABLING_POSSIBLE 0/' "$out/src/includes/cmake_defines.h"
   sed -i 's/-w -Dva_copy=__va_copy/-w -D__float128=_Float128 -Dva_copy=__va_copy/' "$base/edg_eccp_config"
+  # The configured long double is the 128-bit IEEE quad on aarch64 (defines_linux.h). cmake_defines.h still turns on the
+  # x87 80-bit format, and EDG refuses a configuration that has both (floating.h), so turn the x87 one off.
+  sed -i 's/^#define FP_LONG_DOUBLE_IS_80BIT_EXTENDED 1$/#define FP_LONG_DOUBLE_IS_80BIT_EXTENDED 0\n#define FP_LONG_DOUBLE_IS_BINARY128 1/' "$out/src/includes/cmake_defines.h"
+  # The predefined macros are a dump of an x86-64 GCC: they say __x86_64__, which makes libstdc++ use x86 builtins
+  # (__builtin_ia32_pause) that EDG does not have. Drop the x86-only entries and take the host's aarch64 ones instead.
+  pm=$base/lib/predefined_macros.txt
+  x86_names='__FXSR__|__MMX_WITH_SSE__|__MMX__|__SEG_FS|__SEG_GS|__SSE2_MATH__|__SSE2__|__SSE_MATH__|__SSE__|__amd64|__amd64__|__code_model_small__|__k8|__k8__|__x86_64|__x86_64__|__SIZEOF_FLOAT80__|__i386__|__i386'
+  { grep '^#' "$pm"
+    awk -v x="^($x86_names)\$" '!/^#/ && $3 !~ x' "$pm"
+    gcc -dM -E -x c++ /dev/null | grep -E '^#define __(aarch64|ARM_)[A-Za-z0-9_]*( |$)' | sed 's/^#define /gnu no  /'
+  } > "$pm.new" && mv "$pm.new" "$pm"
 fi
 cd "$out"
 ninja bin/cpfe bin/edg_prelink lib/libC.a
