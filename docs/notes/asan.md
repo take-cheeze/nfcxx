@@ -20,9 +20,9 @@ object's 8-byte granule and 32 zero bytes into the same data item, and the unit'
 `.init_array`) poisons them. Both use `__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says
 `stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
-leading redzone (an access before the object is not reported); thread-local globals get none; C++ variable-length arrays
-(EDG's `__vla_alloc` pool) get none. Objects over 16-byte alignment, C-input VLAs and `alloca` have redzones. Use after
-scope and use after return are covered (next two sections). Not yet: volatile (qbe rejects volatile stores, a known limit). Block
+leading redzone (an access before the object is not reported); thread-local globals get none. Objects over 16-byte alignment,
+C-input VLAs, `alloca` and C++ VLAs (own section below) have redzones. Use after scope and use after return are covered (next two
+sections). Not yet: volatile (qbe rejects volatile stores, a known limit). Block
 copies and `va_arg` loads are checked as ordinary accesses.
 
 ## Use after scope (qbe)
@@ -76,7 +76,8 @@ Limits, all false negatives (nothing is reported that is valid, the missing chec
     an exit to it leaves are not poisoned.
   - a `setjmp` on the gcc backend: gcc's scope poison does not run on these paths (`ASAN-ONLY: qbe`).
 - Use after return is the next section. `return` itself poisons nothing here: funcret gives the fake frames back.
-- C++ variable-length arrays are EDG's `__vla_alloc` pool, so they have neither redzones nor a scope poison.
+- C++ variable-length arrays are not poisoned where their scope ends: their block is freed there instead, so a read after
+  the scope is a heap-use-after-free (section below).
 - `alloca` has redzones but no scope poison, on purpose: C keeps its memory until the function returns, so a read after its
   block is valid. C-input VLAs are scope objects (poisoned where their block ends, from entry-block slots).
 
@@ -127,6 +128,25 @@ Limits, all false negatives:
   so reads through pointers into it are not reported, and its slot in the fake stack is not given back.
 - Deep recursion uses the real stack for every frame as well (the real frame is still allocated); the fake frames add
   their own memory, so the real stack limit is the same as without the flag.
+## C++ variable-length arrays
+
+EDG lowers a C++ VLA to `__vla_alloc`, `__vla_dealloc` and `__vla_dealloc_eh` (3rd/edg/lib_src/vla_alloc.c, in libC.a).
+That allocator serves a VLA under 4096 bytes from one shared 32700-byte block, so two such VLAs have no redzone between
+them and an overflow of one writes into the next. With `-fsanitize=address` the driver links `lib/asan/nfcxx_vla_asan.c`
+(built by `scripts/asan-vla`, gcc with `-fsanitize=address`) ahead of libC.a. It defines the same entry points, so
+libC.a's allocator is not linked. Each VLA is a malloc block of exactly the requested size: an overflow is a
+`heap-buffer-overflow` in the block's redzone, and the block is freed where the VLA's scope ends, so a pointer kept past
+the scope is a `heap-use-after-free`. Both backends use it. The frame markers, the record stack and the longjmp cleanup
+(`free_dead`) are EDG's, and the records are per thread (EDG's pool is shared by all threads and not thread-safe).
+
+Tests: `tests/asan/cases/cxx_vla_overflow.cpp`, `cxx_vla_scope_escape.cpp` (reports), `cxx_vla_clean.cpp` (loops left by
+break, continue and return, large VLAs, exceptions out of VLA blocks caught in the same function and in a caller), and the
+live-allocation counts of `tests/pathb-qbe/cases/vla_scope.cpp`, run under the flag by `tests/asan/run.sh`.
+
+Cost and limits: a VLA is a malloc call each (EDG's pool avoided that), in ASan builds only; the object is linked only
+under `-fsanitize=address`, so the default output is unchanged. A block of a VLA that a longjmp left is freed by the
+next `__vla_alloc` that finds its frame dead, not at the jump, so an access through it in between is not reported (the
+same as EDG's pool, which keeps it too).
 
 ## How it works
 
@@ -134,6 +154,8 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 
 - passes `-fsanitize=address -fno-omit-frame-pointer` to every C compile and to the link (`--c_to_obj_option` for
   `eccp`, directly to `gcc` for `.c` inputs and the C-only link), so `-c` objects and the final link agree;
+- links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link,
+  with either backend (section "C++ variable-length arrays");
 - selects the gcc backend when the backend was only the default (`qbe`); with an explicit `--backend=qbe` it is an
   Path B (`NFCXX_PATH=b` or `--backend=pathb`) is an error: its emitter has no instrumentation yet;
 - accepts `-fno-sanitize=address` (turns it off again) and `-fno-omit-frame-pointer`/`-fomit-frame-pointer`;
@@ -146,7 +168,8 @@ qbe: cproc checks every load and store, and stack and global objects get redzone
 
 ## Limits
 
-- EDG's runtime (`libC.a`: `operator new/delete`, the exception runtime) is not instrumented. `operator new` ends in
+- EDG's runtime (`libC.a`: `operator new/delete`, the exception runtime) is not instrumented; its C++ VLA allocator is
+  replaced under the flag (section "C++ variable-length arrays"). `operator new` ends in
   `malloc`, which libasan intercepts, so heap errors are found; stack objects of the runtime are not checked.
 - Exceptions use EDG's setjmp/longjmp ABI; libasan unpoisons the stack on `longjmp`, `tests/asan/cases/clean.cpp`
   throws through frames with `std::string` locals.

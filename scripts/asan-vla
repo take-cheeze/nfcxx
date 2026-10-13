@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Print the path of the C++ VLA runtime for -fsanitize=address (lib/asan/nfcxx_vla_asan.c, docs/notes/asan.md, "C++
+# variable-length arrays"), building it first when it is missing or older than its source. The driver links the object
+# ahead of libC.a, whose VLA allocator packs small VLAs into one block with no redzones.
+# The object is plain C: the host gcc compiles it with -fsanitize=address, and it needs no EDG build.
+#   NFCXX_ASAN_DIR=d   where the object is kept (default build/asan)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+src=$root/lib/asan/nfcxx_vla_asan.c
+dir=${NFCXX_ASAN_DIR:-$root/build/asan}
+out=$dir/nfcxx_vla_asan.o
+if [ ! -f "$out" ] || [ "$src" -nt "$out" ]; then
+  mkdir -p "$dir"
+  tmp=$(mktemp -d "$dir/.build.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+  gcc -c -O2 -Wall -Wextra -fwrapv -fPIC -fsanitize=address -fno-omit-frame-pointer "$src" -o "$tmp/vla.o"
+  mv -f "$tmp/vla.o" "$out"   # atomic: concurrent builds each write their own copy
+fi
+printf '%s\n' "$out"

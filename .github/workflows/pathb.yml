@@ -32,6 +32,10 @@ on:
       - "tests/pathb/**"
       - "tests/pathb-*/**"
       - "tests/wasm/**"
+      - "tests/sycl/**"
+      - "lib/sycl/**"
+      - "scripts/sycl-build.sh"
+      - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
       - "tests/ehshim/**"
@@ -57,6 +61,10 @@ on:
       - "tests/pathb/**"
       - "tests/pathb-*/**"
       - "tests/wasm/**"
+      - "tests/sycl/**"
+      - "lib/sycl/**"
+      - "scripts/sycl-build.sh"
+      - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
       - "tests/ehshim/**"
@@ -148,6 +156,11 @@ jobs:
             run: tests/pathb-qbe/hosted.sh
           - name: EH shim (gcc, qbe and Path B)
             run: tests/ehshim/run.sh
+          - name: SYCL on WebGPU (host path, and Chromium's WebGPU through Playwright)
+            run: |
+              npm install --prefix "$RUNNER_TEMP/pw" playwright
+              "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+              NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
           - name: mruby scripts against their Python oracles (Path B parts enabled)
             run: tests/mruby/run.sh
     name: ${{ matrix.name }}

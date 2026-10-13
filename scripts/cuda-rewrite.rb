@@ -212,19 +212,36 @@ def kernel_template_uncached(name, src)
       break if depth == 0
       k += 1
     end
-    names = split_top(q[(lt + 1)...k]).map { |part| tokens_of(part.split("=")[0]).last }.compact
+    parts = split_top(q[(lt + 1)...k])
+    names = parts.map { |part| tokens_of(part.split("=")[0]).last }.compact
+    pack = parts.index { |part| part.include?("...") }
     open = index_code(q, "(", k)
     close = matching_paren(q, open)
     refuse("unterminated parameter list for #{name}") if close.nil?
-    return { names: names, params: q[(open + 1)...close] }
+    return { names: names, params: q[(open + 1)...close], pack: pack }
   end
   nil
 end
 
 # Replaces the template parameter names in the parameter list by the explicit arguments.
-def substitute(text, names, args)
+# With pack (the index of a parameter pack in names), the pack takes args[pack, size] where size is what the other
+# parameters leave: `Ns...` in the text is the pack's values joined; a bare pack name is refused.
+def substitute(text, names, args, pack = nil)
   map = {}
-  names.each_with_index { |n, idx| map[n] = args[idx] }
+  if pack.nil?
+    names.each_with_index { |n, idx| map[n] = args[idx] }
+  else
+    size = args.length - (names.length - 1)
+    names.each_with_index do |n, idx|
+      if idx < pack
+        map[n] = [args[idx]]
+      elsif idx == pack
+        map[n] = args[pack, size]
+      else
+        map[n] = [args[idx - 1 + size]]
+      end
+    end
+  end
   out = ""
   i = 0
   while i < text.length
@@ -238,7 +255,16 @@ def substitute(text, names, args)
       j = i
       j += 1 while j < text.length && ident_char?(text[j])
       w = text[i...j]
-      out << (map[w] || w)
+      if pack && names[pack] == w && map.key?(w)
+        k = j
+        k += 1 while k < text.length && white?(text[k])
+        refuse("parameter pack #{w} used without ...") unless text[k, 3] == "..."
+        out << map[w].join(", ")
+        i = k + 3
+        next
+      end
+      v = map[w]
+      out << (v.is_a?(Array) ? v[0].to_s : (v || w))
       i = j
     else
       out << text[i]
@@ -254,10 +280,11 @@ def template_site(name, targs)
   kt = kernel_template(name)
   refuse("template kernel #{name}: no __global__ template of that name in the source") if kt.nil?
   args = split_top(targs)
-  if args.length != kt[:names].length
+  # A parameter pack takes the arguments the other parameters leave (at least none); without one, every parameter.
+  if kt[:pack] ? args.length < kt[:names].length - 1 : args.length != kt[:names].length
     refuse("template kernel #{name}<#{targs}>: explicit arguments must give every template parameter")
   end
-  decl = substitute(kt[:params], kt[:names], args)
+  decl = substitute(kt[:params], kt[:names], args, kt[:pack])
   call = split_top(decl).map do |part|
     n = tokens_of(part.split("=")[0]).last
     refuse("template kernel #{name}: unnamed parameter #{part}") if n.nil?
@@ -423,11 +450,14 @@ def enclosing_template(text, pos)
   tb = cand.max_by { |x| x[:open] }
   t = tb[:tmpl]
   params = split_top(text[(t[:lt] + 1)...t[:close]])
-  refuse("template header with a parameter pack (at line #{text[0...pos].count("\n") + 1})") if params.any? { |pr| pr.include?("...") }
+  # One parameter pack is allowed (`int... Ns`): its index is recorded; its values come from the explicit calls.
+  packs = params.each_index.select { |k| params[k].include?("...") }
+  refuse("template with #{packs.length} parameter packs (at line #{text[0...pos].count("\n") + 1}): one is supported") if packs.length > 1
   decls = params.map { |pr| pr.split("=")[0].strip }
   names = decls.map { |pr| tokens_of(pr).last }
   header = text[(t[:close] + 1)...tb[:open]]
-  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header), open: tb[:open] }
+  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header), open: tb[:open],
+    pack: packs.first }
 end
 
 # The value of a local compile-time constant `T name = VALUE;` (for example `constexpr bool fallback = true;`) that
@@ -582,7 +612,8 @@ def template_instances(name, text, stack)
     end
     if outer && args.any? { |a| tokens_of(a).any? { |tk| outer[:names].include?(tk) } }
       template_instances(outer[:fname], text, stack + [name]).each do |inst|
-        out << args.map { |a| substitute(a, outer[:names], inst) }
+        # A pack expands to several arguments: the list is split again after the substitution.
+        out << split_top(args.map { |a| substitute(a, outer[:names], inst, outer[:pack]) }.join(", "))
       end
     else
       out << args
@@ -641,8 +672,10 @@ def dependent_launches(text)
     refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep} of #{outer[:fname]}: the unit has no " \
            "explicit call of it with all its template arguments, so its instances are not known") if insts.empty?
     insts.each do |inst|
+      # Without a pack, one argument per template parameter; with one, the other parameters' count is the minimum.
+      ok = outer[:pack] ? inst.length >= outer[:names].length - 1 : inst.length == outer[:names].length
       refuse("template launch of #{nm}<#{ta}>: a call of #{outer[:fname]} does not give all its template arguments " \
-             "explicitly") if inst.length != outer[:names].length
+             "explicitly") unless ok
     end
     outer[:line] = line_col(text, outer[:st])[0]
     out[line_col(text, pos)] = { name: nm, targs: ta, outer: outer, insts: insts, dname: "__nfcxx_disp_#{sanitize(nm)}_#{idx}" }
@@ -656,7 +689,7 @@ def dependent_decls(dl, orig)
   lines = []
   dl.each_value do |d|
     d[:insts].each do |inst|
-      concrete = split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", ")
+      concrete = split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst, d[:outer][:pack]) }.join(", ")
       d[:wrapper] ||= {}
       d[:wrapper][inst] = template_site(d[:name], concrete)
     end
@@ -785,7 +818,9 @@ def rewrite(text, orig)
       if targs
         d = dl[line_col(text, i)]
         if d
-          kernel = "#{d[:dname]}<#{d[:outer][:names].join(', ')}>::fn"
+          # The pack keeps its ... (disp<Ns...> expands it inside the template body).
+          tn = d[:outer][:names].each_with_index.map { |n, k| k == d[:outer][:pack] ? "#{n}..." : n }
+          kernel = "#{d[:dname]}<#{tn.join(', ')}>::fn"
         else
           refuse("template launch of #{name}<#{targs}> depends on a template parameter, and its enclosing template is not " \
                  "resolved in this unit (at line #{line})") unless dependent_on_template(text, i, targs).nil?
@@ -1249,6 +1284,21 @@ HALF_LANE = HALF_LANE.sub("__nfcxx_hlane(unsigned short a, unsigned short b, int
   "__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __float2half(__half2float(a) + __half2float(b)) : __float2half(__half2float(a) * __half2float(b)); }")
 HALF2_PAIR = HALF2_TYPE + HALF_LANE
 
+# __hmax2: the lane rule of __hmax (NaN loses; a zero tie gives +0 for mixed signs), defined once per unit.
+HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
+  "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
+  "#endif\n"
+# bf16 as a 16-bit integer (the upper half of a float, round to nearest even); nv_bfloat162 packs two of them as __half2
+# does. Operators on nv_bfloat16 are integer operators here, as for half: a unit that uses them is not handled correctly.
+BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
+  "typedef unsigned short nv_bfloat16;\n" \
+  "typedef unsigned int nv_bfloat162;\n" \
+  "typedef unsigned short __nv_bfloat16;\n" \
+  "typedef unsigned int __nv_bfloat162;\n" \
+  "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
+  "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return (unsigned short)((x >> 16) | 0x40u); x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "#endif\n"
+
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
   "__umulhi" => "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n",
@@ -1258,6 +1308,15 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
+  # Scalar helpers of ggml-cuda. __float_as_uint is a union read (the bits); __float2int_rn rounds half to even and
+  # saturates like cvt.rni (NaN gives 0) through exact float steps; __frcp_rn is a correctly rounded division.
+  "__float_as_uint" => "static inline unsigned int __float_as_uint(float f) { union { float f; unsigned int u; } v; v.f = f; return v.u; }\n",
+  "__float2int_rn" => "static inline int __float2int_rn(float f) { if (f != f) return 0; if (f >= 2147483647.0f) return 2147483647; if (f <= -2147483648.0f) return -2147483647 - 1; int i = (int)f; float d = f - (float)i; if (d > 0.5f || (d == 0.5f && (i & 1))) i += 1; else if (d < -0.5f || (d == -0.5f && (i & 1))) i -= 1; return i; }\n",
+  "__frcp_rn" => "static inline float __frcp_rn(float x) { return 1.0f / x; }\n",
+  # Not lowered: the address conversion (a PTX cvta.to.shared the emitter does not have) and the half2 mask (its lanes
+  # are a pair of halves; the emitter has no half2 comparison). Both are declared; a device call is refused by name.
+  "__cvta_generic_to_shared" => "extern \"C\" unsigned long __nfcxx_cvta_generic_to_shared(const void *p);\nstatic inline unsigned long __cvta_generic_to_shared(const void *p) { return __nfcxx_cvta_generic_to_shared(p); }\n",
+  "__hgt2_mask" => "extern \"C\" unsigned int __nfcxx_hgt2_mask(unsigned int a, unsigned int b);\nstatic inline unsigned int __hgt2_mask(unsigned int a, unsigned int b) { return __nfcxx_hgt2_mask(a, b); }\n",
   # CUDA math overloads of min and max for the numeric types (unqualified calls in device code; fattn-common.cuh).
   "min" => "static inline int min(int a, int b) { return a < b ? a : b; }\nstatic inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }\nstatic inline long long min(long long a, long long b) { return a < b ? a : b; }\nstatic inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }\nstatic inline float min(float a, float b) { return a < b ? a : b; }\nstatic inline double min(double a, double b) { return a < b ? a : b; }\n",
   "max" => "static inline int max(int a, int b) { return a > b ? a : b; }\nstatic inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }\nstatic inline long long max(long long a, long long b) { return a > b ? a : b; }\nstatic inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }\nstatic inline float max(float a, float b) { return a > b ? a : b; }\nstatic inline double max(double a, double b) { return a > b ? a : b; }\n",
@@ -1269,7 +1328,6 @@ BUILTIN_DEFS = {
   "assert" => "static inline void assert(int c) { if (!c) __builtin_trap(); }\n",
   # The float math functions and __dp4a: wrappers over the emitter's FLOAT_BUILTINS / SCALAR_U32 intrinsics. The
   # accuracy of the approximate ones (rsqrt, div, exp, log) is in docs/notes/gpu.md.
-  "fmaxf" => "extern \"C\" float __nfcxx_fmaxf(float, float);\nstatic inline float fmaxf(float a, float b) { return __nfcxx_fmaxf(a, b); }\n",
   "fminf" => "extern \"C\" float __nfcxx_fminf(float, float);\nstatic inline float fminf(float a, float b) { return __nfcxx_fminf(a, b); }\n",
   "fabsf" => "extern \"C\" float __nfcxx_fabsf(float);\nstatic inline float fabsf(float a) { return __nfcxx_fabsf(a); }\n",
   "sqrtf" => "extern \"C\" float __nfcxx_sqrtf(float);\nstatic inline float sqrtf(float a) { return __nfcxx_sqrtf(a); }\n",
@@ -1317,6 +1375,16 @@ BUILTIN_DEFS = {
   "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { return (a & 0xffffu) | ((b & 0xffffu) << 16); }\n",
   "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { return (a >> 16) | ((b >> 16) << 16); }\n",
   "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float((unsigned short)(h >> 16)); }\n",
+  "__low2float" => HALF2_TYPE + HALF_CORE + "static inline float __low2float(__half2 h) { return __half2float((unsigned short)(h & 0xffffu)); }\n",
+  "__hmax2" => HALF2_TYPE + HALF_CORE + HMAXL + "static inline __half2 __hmax2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hmaxl((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu)) | ((unsigned)__nfcxx_hmaxl((unsigned short)(a >> 16), (unsigned short)(b >> 16)) << 16); }\n",
+  "nv_bfloat16" => BF16_CORE,
+  "nv_bfloat162" => BF16_CORE,
+  "__nv_bfloat16" => BF16_CORE,
+  "__nv_bfloat162" => BF16_CORE,
+  "__float2bfloat16" => BF16_CORE,
+  "__bfloat162float" => BF16_CORE,
+  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return (unsigned short)(h & 0xffffu); }\n",
+  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return (unsigned short)(h >> 16); }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 1) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 1) << 16); }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 0) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 0) << 16); }\n",
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
@@ -2021,7 +2089,7 @@ def device_tu(text)
   # the dependent launches: the wrapper of each instance of their enclosing template (see dependent_launches)
   dependent_launches(text).each_value do |d|
     d[:insts].each do |inst|
-      template_site(d[:name], split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", "))
+      template_site(d[:name], split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst, d[:outer][:pack]) }.join(", "))
     end
   end
   pieces.each do |pc|

@@ -12,7 +12,7 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 | simpleStreams | streams, async copies, events | builds, runs, exit 0; no result check in the sample (not verified) | — |
 | simpleZeroCopy | mapped host memory | builds, runs, exit 0; computes `errorNorm` but prints nothing (not verified); prelinker prints a name-decoding warning | — |
 | simpleAtomicIntrinsics | atomics (`atomicAdd` and friends), `#define` in the `.cu` | fails to compile | device-only unit lost `#define NUM_THREADS`: `identifier "NUM_THREADS" is undefined` |
-| simpleVoteIntrinsics | warp vote (`__any_sync`) | fails to compile | `identifier "__any_sync" is undefined` (in `simpleVote_kernel.cuh`) |
+| simpleVoteIntrinsics | warp votes | builds, runs, exit 0; the sample prints no result check (not verified) | — |
 | simplePrintf | device printf | builds, runs, exit 0; the sample prints but has no result check (not verified) | — |
 | matrixMul | shared memory, template kernel launch `MatrixMulCUDA<16><<<...>>>` | fails to compile | `linkage specification is not allowed` (rewriter stub, `matrixMul.cu:197`) |
 | asyncAPI | events, streams, profiler API | builds, runs, exit 0; no result check in the sample (not verified) | — |
