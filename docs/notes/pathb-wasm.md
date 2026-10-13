@@ -78,25 +78,36 @@ writes the frame's shadow (one `memory.fill` per run of equal codes). A return w
   another signature is refused (exit status 3, the message names the signature). A function the IR defines under the
   same name is the IR's own, and no allocator is called for it. Not covered by the allocator: `operator new` and
   `operator delete`, `calloc` and `realloc`, which stay imports (their memory is not checked, see below).
-- **The layout.** The heap is a fixed region of 64 KB, `[heap_base, heap_base + 65536)`, with `heap_base` the end of the
-  static data rounded up to 16. The stack grows down from the shadow towards it. The heap does not grow: `memory.grow`
-  would have to grow the shadow with it, and a fixed size keeps the shadow and the stack top as they are. The shadow of the
-  heap is poisoned (`0xfa`) from the end of the static data to the end of the heap, so the bytes not yet handed out are
-  reported too. For a small program the memory is three pages.
+- **The layout.** The heap is a fixed region of 256 KB, `[heap_base, heap_base + 262144)`, with `heap_base` the end of
+  the static data rounded up to 16. The stack grows down from the shadow towards it. The heap does not grow: `memory.grow`
+  would have to grow the shadow with it, and a fixed size keeps the shadow and the stack top as they are. The shadow of
+  the heap is poisoned (`0xfa`) from the end of the static data to the end of the heap, so the bytes not yet handed out
+  are reported too. For a small program the memory is six pages (384 KB).
 - **Blocks.** A block of `n` bytes is a chunk of `cap + 64` bytes: a 32-byte left redzone, the payload of `cap` bytes
-  (`n` rounded up to 16), and a 32-byte right redzone. The first 20 bytes of the left redzone are the header: the size
-  `n`, the capacity, the state (0 in use, 1 quarantined, 2 free), a magic word, and the link of the free list or the
-  quarantine. The header is written by the allocator, which is not instrumented. The shadow of a chunk is `0xfa` over the
-  redzones, 0 over the payload's whole granules and `n % 8` in the next one, so a block of `n` bytes is addressable exactly
-  as a static object is.
-- **Free and reuse.** `free` poisons the payload's granules with `0xfd` and puts the block in the quarantine, a FIFO of
-  freed blocks. While the quarantine holds more than 4 KB of chunks, its oldest block moves to the free list (LIFO).
-  `malloc` takes the first block of the free list whose capacity fits, and otherwise the next chunk at the bump pointer.
-  When the heap has no room, `malloc` returns 0.
+  (`n` rounded up to 16), and a 32-byte right redzone. The first 16 bytes of the left redzone are the header: the size
+  `n`, the capacity, the state (0 in use, 1 freed) and a magic word. The header is written by the allocator, which is not
+  instrumented. The shadow of a chunk is `0xfa` over the redzones, 0 over the payload's whole granules and `n % 8` in the
+  next one, so a block of `n` bytes is addressable exactly as a static object is.
+- **Reuse policy: no address is handed out twice in a run.** `malloc` only bumps the pointer, and `free` never returns
+  memory to it. A freed block stays in the state "freed", with its payload granules `0xfd`, for the rest of the run. So a
+  stale pointer to a freed block is reported on every access, however many blocks have been allocated since, and a second
+  `free` of the same pointer is reported as `attempting-double-free`, because the block it names is still freed.
+  Why this and not a reuse with a check: a wasm address is a plain `i32` with no room for a generation or a tag, so a
+  reused address cannot tell a stale pointer from the new owner's. Checking a per-allocation id would need pointer tags,
+  which change every access. A larger quarantine only shortens the window in which a stale pointer aliases a new block.
+  The cost is memory: the chunks of a run add up to at most 256 KB, so a program that allocates more than that in total,
+  freed or not, is reported as out of memory (below). A program with a 1000-pair malloc/free loop of 80-byte chunks fits.
+- **Exhaustion policy: report and trap.** A request the heap cannot hold (more than 256 KB, or a chunk that does not fit
+  below the heap's end) reports `allocator-out-of-memory` with the requested size as the report's address, and traps
+  (`unreachable`), as libasan does when `allocator_may_return_null` is false, its default. So under `--asan` `malloc` never
+  returns 0: a program that tests the result for NULL does not get the chance to handle it, because the report comes
+  first. This is a decision, not a fix: a program whose contract is that NULL is a normal answer would need an opt-out in
+  the style of `allocator_may_return_null`, which the emitter does not have. Without `--asan` `malloc` is the host's import
+  and the program's NULL check is unchanged.
 - **Bad frees.** `free(0)` does nothing. A free of an address that is not the payload of a block in use is reported and
   traps: an address below the first block or at or past the bump pointer, one that is not 16-aligned, and one whose
-  header has no magic word (an address inside a block). A free of a block that is already quarantined or on the free list is
-  a double free.
+  header has no magic word (an address inside a block). A free of a block that is already freed is a double free, whether
+  or not the address was handed out again: there is no second block at that address.
 
 | Code | Kind reported |
 | --- | --- |
@@ -107,6 +118,7 @@ writes the frame's shadow (one `memory.fill` per run of equal codes). A return w
 | `0xfd` | `heap-use-after-free` |
 | `0x100` | `attempting-double-free` (an allocator report: a free of a block that is not in use, not a shadow code) |
 | `0x101` | `attempting-free-on-address-which-was-not-malloc` (an allocator report, not a shadow code) |
+| `0x102` | `allocator-out-of-memory` (an allocator report: the requested size is the address, size 0) |
 
 **Checks.** Every load, store, and both ranges of a `copy`, calls the module's check function, `check(addr, size)`, before
 the access. The check is the function after the defined ones, and the allocator's `malloc` and `free` follow it. The check
@@ -122,19 +134,24 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
   object or block whose size is not a multiple of 8, and an access that starts inside a block and ends past it.
 - A `copy` that writes past its destination.
 - A use of a slot's address after its function has returned, while no other call has reused the frame.
-- A use of a heap block after its free, while the block is quarantined or on the free list (its granules are `0xfd`).
-- A double free and a free of an address the allocator did not return, for a block that has not been handed out again.
-- Tests: `tests/wasm/asan_*.cpp` (the `// ASAN: KIND` markers). `asan_clean.cpp` and `asan_heap_clean.cpp` are clean and
-  give their EXPECT value under the mode; `asan_heap_clean.cpp` has `// ASAN-EXPECT: N`, which runs under
-  `NFCXX_WASM_ASAN=1` only (without the mode its `malloc` is the host's stub, so the program has no meaning there).
+- A use of a heap block after its free, for the rest of the run, including after the allocator has moved on to other
+  blocks (`asan_heap_reuse_read.cpp`: the freed block is evicted from the old 4 KB quarantine and a new block is allocated,
+  and the stale read is still reported; the old design returned the new block's value).
+- A double free, including of a block freed and then followed by other allocations (`asan_double_free_reuse.cpp`), and
+  a free of an address the allocator did not return.
+- Heap exhaustion: an allocation the heap cannot hold is reported and traps (`asan_heap_exhausted.cpp`).
+- Tests: `tests/wasm/asan_*.cpp` (the `// ASAN: KIND` markers). The clean programs give their EXPECT value under the mode:
+  `asan_clean.cpp`, `asan_heap_clean.cpp` (1000 malloc/free pairs, and the partial granules) and `asan_heap_free_clean.cpp`
+  (blocks freed and allocated again within the heap). `asan_heap_clean.cpp` and `asan_heap_free_clean.cpp` have
+  `// ASAN-EXPECT: N`, which runs under `NFCXX_WASM_ASAN=1` only (without the mode their `malloc` is the host's stub, so the
+  program has no meaning there).
 
 **Not covered.**
-- Reuse. Once the quarantine has evicted a block and `malloc` hands it out again, a stale pointer to it aliases the new
-  block, which is in use, so an access through the stale pointer is not reported (checked: after 51 other frees a stale
-  read returns the new block's value). A double free of such a block is taken as a free of the new owner's block, and is
-  not reported (checked: it returns normally). The quarantine is 4 KB of chunks, so the window is short.
-- Heap exhaustion. `malloc` returns 0 when the 64 KB are used, and the program's use of that null pointer is not reported
-  (the null page is not checked).
+- Total heap use. The heap is 256 KB of chunks per run, not a peak: a program that frees its blocks but allocates more
+  than 256 KB in all traps with `allocator-out-of-memory`. A bigger heap, or a `memory.grow` that also grows the shadow,
+  would lift the limit; neither is done.
+- NULL from `malloc` under the mode. The mode traps instead (see the exhaustion policy). Programs that rely on a NULL
+  return are not run under `--asan`.
 - `memory.grow`, `realloc`, `calloc`, `operator new` and `operator delete`. None of them is in the module: they are
   imports, and the host's stub returns its argument plus one, so the harness cannot give them a heap. Their memory is not
   checked.

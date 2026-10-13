@@ -1,7 +1,7 @@
 // ASAN-EXPECT: 63
 // Clean under the mode: blocks of a partial granule (5 bytes), a whole one, and a struct, accessed in bounds (their last
-// bytes included), then 1000 malloc/free pairs of 16 bytes. Without reuse the pairs would need 1000 blocks of 80 bytes
-// (the heap is 64 KB): the loop only completes when a freed block is reused once the quarantine has evicted it.
+// bytes included), then 1000 malloc/free pairs of 16 bytes: 1000 blocks of 80 bytes, 80000 bytes in all, which fit the
+// 256 KB heap because no address is handed out twice (a freed block is never reused, see docs/notes/pathb-wasm.md).
 extern "C" void* malloc(unsigned long n);
 extern "C" void free(void* p);
 struct S {

@@ -13,8 +13,8 @@
 # The mode is an AddressSanitizer-style check (docs/notes/pathb-wasm.md, "AddressSanitizer"): a shadow region at the
 # top of the memory, redzones around the static objects, the slots of each frame and the blocks of the heap, and a check
 # before each load, store and copy that reports a violation through the import env.__asan_report and traps. Under the
-# mode malloc and free are the module's own (a heap between the static data and the stack, with a quarantine), not
-# imports. Without --asan the module is the same as before the mode existed, byte for byte.
+# mode malloc and free are the module's own (a heap between the static data and the stack, where no address is handed
+# out twice in a run), not imports. Without --asan the module is the same as before the mode existed, byte for byte.
 #
 # Usage with --emscripten (before the file): the module of the ILP32 IR (pathb-dump --target linux_riscv32) with the
 # exports that the Emscripten JS runtime reads:
@@ -462,8 +462,8 @@ ASAN_HEAP_RZ = 0xfa
 ASAN_HEAP_FREED = 0xfd
 ASAN_BAD_FREE = 0x100
 ASAN_INVALID_FREE = 0x101
-HEAP_SIZE = 65536            # the heap: a fixed region of this many bytes, which malloc does not grow (no memory.grow)
-HEAP_QUARANTINE = 4096       # the bytes of freed blocks held before the oldest is reused (their chunk sizes)
+ASAN_OUT_OF_MEMORY = 0x102   # malloc could not hold the request (its size is the report's address; see the host)
+HEAP_SIZE = 262144           # the heap: a fixed region of this many bytes, which malloc does not grow (no memory.grow)
 ALLOC_SIGS = { "malloc" => [[:i64], :i64], "free" => [[:i64], nil] }   # the allocator's signatures (params, result)
 
 # (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT): a defined global with its initializer. The TYPE is not needed:
@@ -1754,36 +1754,35 @@ end
 # asan: the allocator, in the module (malloc and free are its functions, and the IR's calls go to them, see Fn#call).
 #
 # A block is a chunk of cap + 64 bytes at c (a multiple of 16): a left redzone [c, c + 32) whose first 16 bytes hold the
-# header (ASAN_H_*: c + 0 the requested size n, c + 4 cap, c + 8 the state, 0 in use, 1 quarantined, 2 free, c + 12 the
-# magic word ASAN_HEAP_MAGIC, c + 16 the next chunk of the free list or the quarantine, 0 for none), then the payload
-# [c + 32, c + 32 + cap) with cap a multiple of 16, then a right redzone of 32 bytes. The shadow of a chunk is 0xfa over the whole chunk, 0 over the n / 8 whole granules
-# of the payload and n % 8 in the next one, so a block of n bytes is addressable exactly as the static objects are. The
-# header is written by the allocator's own code, which is not checked.
+# header (ASAN_H_*: c + 0 the requested size n, c + 4 cap, c + 8 the state, 0 in use or 1 freed, c + 12 the magic word
+# ASAN_HEAP_MAGIC), then the payload [c + 32, c + 32 + cap) with cap a multiple of 16, then a right redzone of 32 bytes.
+# The shadow of a chunk is 0xfa over the whole chunk, 0 over the n / 8 whole granules of the payload and n % 8 in the
+# next one, so a block of n bytes is addressable exactly as the static objects are. The header is written by the
+# allocator's own code, which is not checked.
 #
-# malloc(n): a block of n <= HEAP_SIZE bytes, from the free list (the first block whose cap is enough, taken out of the
-# list) or else from the bump pointer; 0 when the heap has no room. free(p): nothing for 0; a free of an address that is
-# not the payload of a chunk (out of the heap, not 16-aligned, or no magic word in the header before it: an address inside a
-# block) reports ASAN_INVALID_FREE, and a
-# free of a block that is not in use reports ASAN_BAD_FREE; both trap. Otherwise the block's granules are 0xfd, and it
-# joins the quarantine, a FIFO of the freed blocks; while the quarantine holds more than HEAP_QUARANTINE bytes, its oldest
-# block moves to the free list. A quarantined block is not reused, so a use after the free is reported as long as the
-# block is in the quarantine. The allocator's reports carry size 0 and a code of 0x100 or more (see the host).
+# The policy is that no address is handed out twice in a run (see docs/notes/pathb-wasm.md, "AddressSanitizer"): malloc
+# only bumps the pointer, and free never returns memory to it. A freed block stays freed, its granules 0xfd, for the rest
+# of the run, so a stale access is reported and a second free of the same pointer finds the block freed, whatever has
+# been allocated since. The heap is HEAP_SIZE bytes, fixed (no memory.grow): a request that the heap cannot hold is an
+# out-of-memory error, which is reported (ASAN_OUT_OF_MEMORY, with the size requested) and traps, as libasan does when
+# allocator_may_return_null is false. A malloc that returns 0 is therefore never seen under the mode.
 #
-# The globals (see encode_module): 1 the bump pointer, 2 the free list, 3 and 4 the quarantine's head and tail, 5 its
-# bytes. Both functions are the module's last ones, after the check (malloc, then free).
+# free(p): nothing for 0; a free of an address that is not the payload of a chunk (out of the heap, not 16-aligned, or
+# no magic word in the header before it: an address inside a block) reports ASAN_INVALID_FREE, and a free of a block that
+# is not in use (freed) reports ASAN_BAD_FREE; both trap. Otherwise the block's state is freed and its granules are 0xfd.
+# The allocator's reports carry size 0 (malloc's: the size requested) and a code of 0x100 or more (see the host).
+#
+# The globals (see encode_module): 1 the bump pointer, the heap's next free address.
 ASAN_G_BUMP = 1
-ASAN_G_FREE = 2
-ASAN_G_QHEAD = 3
-ASAN_G_QTAIL = 4
-ASAN_G_QBYTES = 5
 
 # The header of a chunk (see the comment above): its fields are at these offsets from the chunk.
 ASAN_H_N = 0          # the requested size
 ASAN_H_CAP = 4        # the payload's capacity, a multiple of 16
-ASAN_H_STATE = 8      # 0 in use, 1 quarantined, 2 free
+ASAN_H_STATE = 8      # 0 in use, 1 freed
 ASAN_H_MAGIC = 12     # ASAN_HEAP_MAGIC: a chunk's header is there (a free of an address inside a block is not)
-ASAN_H_NEXT = 16      # the next chunk of the free list or the quarantine, 0 for none
 ASAN_HEAP_MAGIC = 0x48454150
+ASAN_STATE_IN_USE = 0
+ASAN_STATE_FREED = 1
 
 # The code of a memory access with an align hint of 0 and the offset: the opcode is followed by its memarg.
 def asan_mem(c, op, off)
@@ -1791,60 +1790,50 @@ def asan_mem(c, op, off)
   uleb(off, c)
 end
 
+# asan: the report and trap of the allocator's out-of-memory error: __asan_report(n, 0, ASAN_OUT_OF_MEMORY) with the
+# requested size n (the parameter 0, i64, wrapped), then unreachable.
+def asan_oom(c, rep)
+  c.concat([0x20, 0, 0xa7, 0x41, 0, 0x41]); sleb(ASAN_OUT_OF_MEMORY, c)
+  c << 0x10; uleb(rep, c); c.concat([0x00])
+end
+
 def asan_malloc_body(mod)
   sh = mod.shadow_base
+  rep = mod.import_index.fetch("__asan_report")
   c = []
-  c.concat([0x01, 0x05, VT[:i32]])       # locals: 1 ni, 2 cap, 3 prev, 4 cur, 5 the chunk (after the parameter n)
-  # if n > HEAP_SIZE: return 0
-  c.concat([0x20, 0, 0x42]); sleb(HEAP_SIZE, c); c.concat([0x56, 0x04, 0x40, 0x42, 0x00, 0x0f, 0x0b])
+  c.concat([0x01, 0x03, VT[:i32]])       # locals: 1 ni, 2 cap, 3 the chunk (after the parameter n)
+  # if n > HEAP_SIZE: out of memory
+  c.concat([0x20, 0, 0x42]); sleb(HEAP_SIZE, c); c.concat([0x56, 0x04, 0x40])
+  asan_oom(c, rep); c.concat([0x0b])
   c.concat([0x20, 0, 0xa7, 0x21, 1])                       # ni = wrap(n)
   c.concat([0x20, 1, 0x41, 15, 0x6a, 0x41]); sleb(-16, c); c.concat([0x71, 0x21, 2])   # cap = (ni + 15) & -16
-  c.concat([0x41, 0, 0x21, 3, 0x23, ASAN_G_FREE, 0x21, 4])   # prev = 0; cur = the free list's head
-  # the first-fit search of the free list: the first block whose cap is enough is unlinked, and it is the chunk
-  c.concat([0x02, 0x40, 0x03, 0x40])                       # block; loop
-  c.concat([0x20, 4, 0x45, 0x0d, 1])                       # cur == 0: leave the block (not found)
-  c.concat([0x20, 4]); asan_mem(c, 0x28, ASAN_H_CAP); c.concat([0x20, 2, 0x4f, 0x04, 0x40])   # if cap(cur) >= cap
-  c.concat([0x20, 4, 0x21, 5])                             # chunk = cur
-  c.concat([0x20, 3, 0x45, 0x04, 0x40])                    # if prev == 0: the list's head moves on
-  c.concat([0x20, 4]); asan_mem(c, 0x28, ASAN_H_NEXT); c.concat([0x24, ASAN_G_FREE])
-  c.concat([0x05])                                         # else: next(prev) = next(cur)
-  c.concat([0x20, 3, 0x20, 4]); asan_mem(c, 0x28, ASAN_H_NEXT); asan_mem(c, 0x36, ASAN_H_NEXT)
-  c.concat([0x0b])
-  c.concat([0x0c, 2])                                      # br: leave the block (the chunk is found)
-  c.concat([0x0b])                                         # end (cap enough)
-  c.concat([0x20, 4, 0x21, 3])                             # prev = cur
-  c.concat([0x20, 4]); asan_mem(c, 0x28, ASAN_H_NEXT); c.concat([0x21, 4])   # cur = next(cur)
-  c.concat([0x0c, 0])                                      # br: the loop
-  c.concat([0x0b, 0x0b])                                   # end (loop); end (block)
-  # no block on the free list: the chunk is at the bump pointer, if the heap has room for it
-  c.concat([0x20, 5, 0x45, 0x04, 0x40])
-  c.concat([0x23, ASAN_G_BUMP, 0x21, 5])                   # chunk = bump
-  c.concat([0x20, 5, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x41]); sleb(mod.heap_end, c)
-  c.concat([0x4b, 0x04, 0x40, 0x42, 0x00, 0x0f, 0x0b])     # the chunk does not fit: return 0
-  c.concat([0x20, 5, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x24, ASAN_G_BUMP])   # bump = chunk + cap + 64
-  c.concat([0x20, 5, 0x20, 2]); asan_mem(c, 0x36, ASAN_H_CAP)   # the chunk's cap (a reused chunk keeps its own)
-  c.concat([0x0b])
-  # the header: the size, state 0 (in use), the magic; the cap is the chunk's own, which may exceed the request
-  c.concat([0x20, 5, 0x20, 1]); asan_mem(c, 0x36, ASAN_H_N)
-  c.concat([0x20, 5, 0x41, 0]); asan_mem(c, 0x36, ASAN_H_STATE)
-  c.concat([0x20, 5, 0x41]); sleb(ASAN_HEAP_MAGIC, c); asan_mem(c, 0x36, ASAN_H_MAGIC)
-  c.concat([0x20, 5]); asan_mem(c, 0x28, ASAN_H_CAP); c.concat([0x21, 2])
+  c.concat([0x23, ASAN_G_BUMP, 0x21, 3])                   # chunk = bump
+  # if the chunk does not fit below the heap's end: out of memory
+  c.concat([0x20, 3, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x41]); sleb(mod.heap_end, c)
+  c.concat([0x4b, 0x04, 0x40])
+  asan_oom(c, rep); c.concat([0x0b])
+  c.concat([0x20, 3, 0x20, 2, 0x6a, 0x41, 0xc0, 0x00, 0x6a, 0x24, ASAN_G_BUMP])   # bump = chunk + cap + 64
+  # the header: the size, the cap, state 0 (in use), the magic
+  c.concat([0x20, 3, 0x20, 1]); asan_mem(c, 0x36, ASAN_H_N)
+  c.concat([0x20, 3, 0x20, 2]); asan_mem(c, 0x36, ASAN_H_CAP)
+  c.concat([0x20, 3, 0x41, ASAN_STATE_IN_USE]); asan_mem(c, 0x36, ASAN_H_STATE)
+  c.concat([0x20, 3, 0x41]); sleb(ASAN_HEAP_MAGIC, c); asan_mem(c, 0x36, ASAN_H_MAGIC)
   # the shadow: the chunk is a redzone, then the payload's whole granules are 0 and a partial granule holds n % 8
-  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 5, 0x41, 3, 0x76, 0x6a])   # dst = sh + c / 8
+  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 3, 0x41, 3, 0x76, 0x6a])   # dst = sh + c / 8
   c.concat([0x41]); sleb(ASAN_HEAP_RZ, c)
   c.concat([0x20, 2, 0x41, 0xc0, 0x00, 0x6a, 0x41, 3, 0x76])   # len = (cap + 64) / 8
   c.concat([0xfc, 0x0b, 0x00])                             # memory.fill
-  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 5, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])   # dst = sh + (c + 32) / 8
+  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 3, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])   # dst = sh + (c + 32) / 8
   c.concat([0x41, 0])
   c.concat([0x20, 1, 0x41, 3, 0x76])                       # len = n / 8
   c.concat([0xfc, 0x0b, 0x00])
   c.concat([0x20, 1, 0x41, 7, 0x71, 0x04, 0x40])           # if n % 8 != 0
-  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 5, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])
+  c.concat([0x41]); sleb(sh, c); c.concat([0x20, 3, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])
   c.concat([0x20, 1, 0x41, 3, 0x76, 0x6a])                 # dst = sh + (c + 32) / 8 + n / 8
   c.concat([0x20, 1, 0x41, 7, 0x71])                       # value n % 8
   c.concat([0x3a, 0x00, 0x00])                             # i32.store8
   c.concat([0x0b])
-  c.concat([0x20, 5, 0x41, 32, 0x6a, 0xad, 0x0b])          # return c + 32 (i64.extend_i32_u), end
+  c.concat([0x20, 3, 0x41, 32, 0x6a, 0xad, 0x0b])          # return c + 32 (i64.extend_i32_u), end
   c
 end
 
@@ -1852,7 +1841,7 @@ def asan_free_body(mod)
   sh = mod.shadow_base
   rep = mod.import_index.fetch("__asan_report")
   c = []
-  c.concat([0x01, 0x02, VT[:i32]])       # locals: 1 the chunk, 2 the quarantine's oldest block (after the parameter p)
+  c.concat([0x01, 0x01, VT[:i32]])       # local: 1 the chunk (after the parameter p)
   c.concat([0x20, 0, 0x50, 0x04, 0x40, 0x0f, 0x0b])        # if p == 0: return
   # an address below the first block or at or past the bump pointer: invalid
   c.concat([0x20, 0, 0x42]); sleb(mod.heap_base + 32, c); c.concat([0x54])   # p < heap_base + 32
@@ -1869,38 +1858,16 @@ def asan_free_body(mod)
   c.concat([0x47, 0x72, 0x04, 0x40])
   c.concat([0x20, 0, 0xa7, 0x41, 0, 0x41]); sleb(ASAN_INVALID_FREE, c)
   c.concat([0x10]); uleb(rep, c); c.concat([0x00, 0x0b])
-  # a block that is not in use (quarantined or free): a double free
+  # a block that is not in use (freed): a double free, whatever was allocated since (no address is handed out twice)
   c.concat([0x20, 1]); asan_mem(c, 0x28, ASAN_H_STATE); c.concat([0x04, 0x40])
   c.concat([0x20, 0, 0xa7, 0x41, 0, 0x41]); sleb(ASAN_BAD_FREE, c)
   c.concat([0x10]); uleb(rep, c); c.concat([0x00, 0x0b])
-  # in use: the state is quarantined and the payload's granules are poisoned
-  c.concat([0x20, 1, 0x41, 1]); asan_mem(c, 0x36, ASAN_H_STATE)
+  # in use: the state is freed and the payload's granules are poisoned for the rest of the run
+  c.concat([0x20, 1, 0x41, ASAN_STATE_FREED]); asan_mem(c, 0x36, ASAN_H_STATE)
   c.concat([0x41]); sleb(sh, c); c.concat([0x20, 1, 0x41, 32, 0x6a, 0x41, 3, 0x76, 0x6a])   # dst = sh + (c + 32) / 8
   c.concat([0x41]); sleb(ASAN_HEAP_FREED, c)
   c.concat([0x20, 1]); asan_mem(c, 0x28, ASAN_H_N); c.concat([0x41, 7, 0x6a, 0x41, 3, 0x76])   # len = (n + 7) / 8
   c.concat([0xfc, 0x0b, 0x00])
-  # the quarantine's tail takes the block: next(tail) = chunk (or the head is the chunk); the block is the tail
-  c.concat([0x23, ASAN_G_QTAIL, 0x04, 0x40])
-  c.concat([0x23, ASAN_G_QTAIL, 0x20, 1]); asan_mem(c, 0x36, ASAN_H_NEXT)
-  c.concat([0x05])
-  c.concat([0x20, 1, 0x24, ASAN_G_QHEAD])
-  c.concat([0x0b])
-  c.concat([0x20, 1, 0x24, ASAN_G_QTAIL])
-  c.concat([0x20, 1]); asan_mem(c, 0x28, ASAN_H_CAP)      # bytes += cap + 64
-  c.concat([0x41, 0xc0, 0x00, 0x6a, 0x23, ASAN_G_QBYTES, 0x6a, 0x24, ASAN_G_QBYTES])
-  c.concat([0x20, 1, 0x41, 0]); asan_mem(c, 0x36, ASAN_H_NEXT)   # next(chunk) = none
-  # evict the oldest blocks while the quarantine holds more than HEAP_QUARANTINE bytes
-  c.concat([0x02, 0x40, 0x03, 0x40])
-  c.concat([0x23, ASAN_G_QBYTES, 0x41]); sleb(HEAP_QUARANTINE, c); c.concat([0x4d, 0x0d, 1])   # bytes <= quarantine
-  c.concat([0x23, ASAN_G_QHEAD, 0x21, 2])                  # the oldest block
-  c.concat([0x20, 2]); asan_mem(c, 0x28, ASAN_H_NEXT); c.concat([0x24, ASAN_G_QHEAD])   # the head moves on
-  c.concat([0x23, ASAN_G_QHEAD, 0x45, 0x04, 0x40, 0x41, 0, 0x24, ASAN_G_QTAIL, 0x0b])  # emptied: no tail
-  c.concat([0x23, ASAN_G_QBYTES])
-  c.concat([0x20, 2]); asan_mem(c, 0x28, ASAN_H_CAP); c.concat([0x41, 0xc0, 0x00, 0x6a, 0x6b, 0x24, ASAN_G_QBYTES])
-  c.concat([0x20, 2, 0x41, 2]); asan_mem(c, 0x36, ASAN_H_STATE)      # state = free
-  c.concat([0x20, 2, 0x23, ASAN_G_FREE]); asan_mem(c, 0x36, ASAN_H_NEXT)   # next(oldest) = the free list's head
-  c.concat([0x20, 2, 0x24, ASAN_G_FREE])                   # the free list's head is the oldest
-  c.concat([0x0c, 0, 0x0b, 0x0b])                          # br: the loop; end (loop); end (block)
   c.concat([0x0b])                                         # end (the function)
   c
 end
@@ -2073,15 +2040,14 @@ def encode_module(mod, bodies)
   # static data) and global 2 is __heap_base (the top of the memory: the stack grows down from it, and a heap would
   # begin there and grow the memory with memory.grow), both immutable i32.
   gl = []
-  uleb(mod.emscripten ? 3 : (mod.asan ? 6 : 1), gl)
+  uleb(mod.emscripten ? 3 : (mod.asan ? 2 : 1), gl)
   gl << VT[:i32] << 0x01
   gl << 0x41
   sleb(mod.stack_top, gl)
   gl << 0x0b
   if mod.asan
-    # asan: the allocator's state, mutable i32s (see asan_malloc_body): the bump pointer starts at the heap's base, and the
-    # free list and the quarantine are empty
-    [mod.heap_base, 0, 0, 0, 0].each do |init|
+    # asan: the allocator's state, a mutable i32 (see asan_malloc_body): the bump pointer starts at the heap's base
+    [mod.heap_base].each do |init|
       gl << VT[:i32] << 0x01 << 0x41
       sleb(init, gl)
       gl << 0x0b
