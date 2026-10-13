@@ -9,7 +9,9 @@
 #   POLY_LANGS="ruby lua python ast js go"   (default: all six; ast is the nfcast engine, lib/ast, which needs nothing built)
 #   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-poly-go.sh)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
+#   TEST_BIN_CACHE=DIR             keep the compiled hosts in DIR and reuse one whose command line is the same (tests/bin-cache.sh; CI)
 cd "$(dirname "$0")/../.."
+. tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled hosts are kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 langs=${POLY_LANGS:-"ruby lua python ast js go"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -46,8 +48,14 @@ for be in $backends; do
   [ $bad = 0 ] || { fail=1; continue; }
   [ ${#built[@]} -gt 0 ] || { echo "SKIP $be poly: no language available"; continue; }
   for t in host ops; do   # host.cpp: the library; ops.cpp: optional arguments, computed properties, operator methods
-    if ! out=$(NFCXX_BACKEND=$be ./nfcxx "${defs[@]}" "${incs[@]}" tests/poly/$t.cpp lib/poly/nfcpoly.cpp "${srcs[@]}" "${libs[@]}" -o "$tmp/$t-$be" 2>&1); then
+    args=("${defs[@]}" "${incs[@]}" tests/poly/$t.cpp lib/poly/nfcpoly.cpp "${srcs[@]}" "${libs[@]}")
+    cached=$(bin_cache_file "$t-$be" "NFCXX_BACKEND=$be" ./nfcxx "${args[@]}")
+    if [ -n "$cached" ] && [ -x "$cached" ]; then
+      cp -p "$cached" "$tmp/$t-$be"; echo "     $be poly/$t: compile skipped, program from $cached"
+    elif ! out=$(NFCXX_BACKEND=$be ./nfcxx "${args[@]}" -o "$tmp/$t-$be" 2>&1); then
       echo "FAIL $be poly/$t (build)"; grep -v 'prelinker' <<<"$out" | head -40; fail=1; continue
+    else
+      [ -z "$cached" ] || bin_cache_store "$tmp/$t-$be" "$cached"
     fi
     [ -z "${POLY_OUT:-}" ] || { mkdir -p "$POLY_OUT" && cp "$tmp/$t-$be" "$POLY_OUT/$t-$be"; }
     if out=$("$tmp/$t-$be" 2>&1); then
