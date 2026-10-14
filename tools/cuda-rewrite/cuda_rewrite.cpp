@@ -190,8 +190,8 @@ std::vector<std::string> split_top(const std::string &s) {
     }
     if (c == '(' || c == '[' || c == '{' || c == '<') {
       depth += 1;
-    } else if (c == ')' || c == ']' || c == '}' || c == '>') {
-      depth -= 1;
+    } else if (c == ')' || c == ']' || c == '}' || (c == '>' && !(i > 0 && ch(s, i - 1) == '-'))) {
+      depth -= 1;  // the > of -> (a member access) closes nothing
     } else if (c == ',' && depth == 0) {
       parts.push_back(strip(s.substr((size_t)start, (size_t)(i - start))));
       start = i + 1;
@@ -328,7 +328,6 @@ bool kernel_template_uncached(const std::string &name, const std::string &src, K
     for (const auto &x : toks) has_global = has_global || x == "__global__";
     if (!(!toks.empty() && toks.front() == "template" && has_global)) continue;
     std::string q = remove_words(t, DEVICE_QUALIFIERS);
-    if (function_name(q) != name) continue;
     long lt = index_code(q, '<', 0);
     long depth = 0;
     long k = lt;
@@ -338,6 +337,8 @@ bool kernel_template_uncached(const std::string &name, const std::string &src, K
       if (depth == 0) break;
       k += 1;
     }
+    // The name follows the template header: a function-pointer parameter's `(` inside the header is not the name's.
+    if (function_name(sl(q, k + 1, (long)q.size())) != name) continue;
     std::vector<std::string> parts = split_top(sl(q, lt + 1, k));
     std::vector<std::string> names;
     bool pack_found = false;
@@ -1503,7 +1504,9 @@ std::vector<std::string> comma_declaration_type(const std::string &text, long i)
   std::vector<std::string> parts = split_top(seg);
   if (parts.size() < 2) return {};
   std::vector<std::string> toks = type_tokens(parts[0]);
-  if (!toks.empty() && !toks.back().empty() && toks.back()[0] != '*' && toks.back()[0] != '&' && toks.size() > 1)
+  // A declaration has a type word and a name: a single word is a call's first argument (pool2d's `ih`), not a type.
+  if (toks.size() < 2) return {};
+  if (!toks.back().empty() && toks.back()[0] != '*' && toks.back()[0] != '&')
     toks.pop_back();
   for (const auto &t : toks)
     if (!t.empty() && ident_c((unsigned char)t[0])) return toks;
@@ -1545,6 +1548,39 @@ static bool device_variable_piece(const P &pc) {
   return str_index(pc.text, "(", 0) < 0;
 }
 
+// A leading all-caps word before a type is a macro that expands to declarations (GGML_TENSOR_BINARY_OP_LOCALS before
+// `const float * src0_d`): drop it, so the declared type is the type that follows.
+// Only a word the text defines with #define counts, so a template parameter named like a macro (D, T) is kept.
+bool defined_macro(const std::string &text, const std::string &name) {
+  const std::string key = "#define " + name;
+  for (size_t p = text.find(key); p != std::string::npos; p = text.find(key, p + 1)) {
+    size_t e = p + key.size();
+    if (e >= text.size() || !ident_c((unsigned char)text[e])) return true;
+  }
+  return false;
+}
+std::vector<std::string> strip_macro_prefix(const std::string &text, std::vector<std::string> toks) {
+  while (toks.size() > 1 && defined_macro(text, toks[0])) toks.erase(toks.begin());
+  return toks;
+}
+
+// The position of the first top-level binary + or - in an expression (outside brackets and literals), or -1.
+long additive_op(const std::string &a) {
+  int depth = 0;
+  for (long i = 0; i < (long)a.size(); i++) {
+    long e = skip_literal(a, i);
+    if (e >= 0) {
+      i = e - 1;
+      continue;
+    }
+    char c = a[(size_t)i];
+    if (c == '(' || c == '[' || c == '{') depth += 1;
+    else if (c == ')' || c == ']' || c == '}') depth -= 1;
+    else if (depth == 0 && i > 0 && (c == '+' || c == '-')) return i;
+  }
+  return -1;
+}
+
 // Ruby argument_type (line 1384): the type of a launch argument: a literal's, or the declared type of an identifier.
 std::vector<std::string> argument_type(const std::string &text, long pos, const std::string &arg, const std::string &nm) {
   bool all_num = !arg.empty();
@@ -1555,6 +1591,29 @@ std::vector<std::string> argument_type(const std::string &text, long pos, const 
   if (!arg.empty() && arg[0] >= '0' && arg[0] <= '9' &&
       (arg.find('.') != std::string::npos || arg.find('e') != std::string::npos || arg.find('E') != std::string::npos))
     return {"double"};
+  // A cast `(T) x` has the type T: diag's and fill's `(float *) dst_d`.
+  std::string a = strip(arg);
+  if (!a.empty() && a[0] == '(') {
+    long close = matching_paren(a, 0);
+    if (close >= 0 && close + 1 < (long)a.size()) {
+      std::string rest = strip(sl(a, close + 1, (long)a.size()));
+      if (!rest.empty() && ident_c(ch(rest, 0))) return strip_macro_prefix(text, type_tokens(sl(a, 1, close)));
+    }
+  }
+  // ggml_cuda_cast<T>(x) returns T (its first template argument): fill's `ggml_cuda_cast<half>(value)`.
+  if (a.compare(0, 15, "ggml_cuda_cast<") == 0) {
+    long close = matching_angle(a, 14);
+    if (close > 0) {
+      std::vector<std::string> targ = split_top(sl(a, 15, close));
+      if (!targ.empty()) return strip_macro_prefix(text, type_tokens(targ[0]));
+    }
+  }
+  // A pointer expression `p + n` has the type of its pointer operand p: concat's `src0_d + i3*(...)`.
+  long op = additive_op(a);
+  if (op > 0) {
+    std::vector<std::string> lt = argument_type(text, pos, strip(sl(a, 0, op)), nm);
+    if (std::find(lt.begin(), lt.end(), "*") != lt.end()) return lt;
+  }
   bool ident_only = !arg.empty();
   for (char c : arg)
     if (!ident_c((unsigned char)c)) ident_only = false;
@@ -1594,7 +1653,7 @@ std::vector<std::string> argument_type(const std::string &text, long pos, const 
     i += 1;
   }
   if (!have) refuse("template launch of " + nm + ": no declaration of " + arg + " before the launch, so its type is not known");
-  return found;
+  return strip_macro_prefix(text, found);
 }
 
 // Ruby match_type (line 1425): the type a kernel parameter of type ptoks gives to the template parameter p.
@@ -1764,6 +1823,8 @@ bool deduce_call_targs(const std::string &text, const std::string &name, long po
                        const std::vector<std::string> &args, std::vector<std::string> &out) {
   TemplateHead head;
   if (!template_head_of(text, name, head)) return false;
+  // A call with another number of arguments is an overload (set_rows_cuda's plain one), not this template's call.
+  if (args.size() != head.parts.size()) return false;
   std::map<std::string, std::string> found;
   for (size_t idx = 0; idx < head.parts.size(); idx++) {
     if (idx >= args.size()) break;
@@ -1792,6 +1853,36 @@ bool deduce_call_targs(const std::string &text, const std::string &name, long po
   return true;
 }
 
+// deduce_call_targs for only the names in missing (the template arguments a call leaves out): name -> its type.
+std::map<std::string, std::string> deduce_missing_targs(const std::string &text, const std::string &name, long pos,
+                                                        const std::vector<std::string> &args,
+                                                        const std::vector<std::string> &missing) {
+  TemplateHead head;
+  if (!template_head_of(text, name, head)) refuse("call of " + name + ": its template is not in the unit");
+  std::map<std::string, std::string> found;
+  for (size_t idx = 0; idx < head.parts.size() && idx < args.size(); idx++) {
+    std::vector<std::string> ptoks = type_tokens(head.parts[idx]);
+    if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
+    for (const auto &p : missing) {
+      if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
+      std::vector<std::string> at = caller_arg_type(text, pos, args[idx], name);
+      std::string t;
+      if (!match_type(ptoks, at, p, t))
+        refuse("call of " + name + ": " + p + " cannot be deduced from the argument " + args[idx] + " of type " +
+               join(at, " ") + " (at line " + std::to_string(line_of(text, pos)) + ")");
+      if (found.count(p) && found[p] != t)
+        refuse("call of " + name + ": " + p + " is deduced as " + found[p] + " and as " + t + " (ambiguous, at line " +
+               std::to_string(line_of(text, pos)) + ")");
+      found[p] = t;
+    }
+  }
+  for (const auto &p : missing)
+    if (!found.count(p))
+      refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
+             ", so it cannot be deduced");
+  return found;
+}
+
 // Ruby template_instances (line 911): the concrete argument lists that instantiate template function name.
 // Memoized per text (identity), like the Ruby script.
 IdentKey g_instances_key;
@@ -1812,7 +1903,31 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   auto memo = g_instances.find(name);
   if (memo != g_instances.end()) return memo->second;
   std::vector<std::pair<std::vector<std::string>, long>> sites;
-  for (const auto &cs : call_sites(text, name)) sites.push_back({split_top(cs.first), cs.second});
+  // A call that names only some template arguments (get_rows_cuda_q<QK, QR, dq>(...) with dst_t left out): the rest are
+  // deduced from the call's own arguments, and the explicit ones are kept.
+  TemplateHead head;
+  bool have_head = template_head_of(text, name, head);
+  for (const auto &cs : call_sites(text, name)) {
+    std::vector<std::string> targs = split_top(cs.first);
+    if (have_head && targs.size() < head.names.size()) {
+      long k = cs.second + (long)name.size();
+      while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
+      long close = matching_angle(text, k);
+      long open = close < 0 ? -1 : close + 1;
+      while (open >= 0 && open < (long)text.size() && white_c(ch(text, open))) open += 1;
+      if (open >= 0 && ch(text, open) == '(') {
+        std::vector<std::string> cargs = split_top(sl(text, open + 1, matching_paren(text, open)));
+        if (cargs.size() != head.parts.size()) {
+          sites.push_back({targs, cs.second});  // another overload of the name
+          continue;
+        }
+        std::vector<std::string> missing(head.names.begin() + (long)targs.size(), head.names.end());
+        std::map<std::string, std::string> got = deduce_missing_targs(text, name, cs.second, cargs, missing);
+        for (const auto &p : missing) targs.push_back(got[p]);
+      }
+    }
+    sites.push_back({targs, cs.second});
+  }
   // Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
   for (const auto &pc : plain_call_sites(text, name)) {
     std::vector<std::string> deduced;
