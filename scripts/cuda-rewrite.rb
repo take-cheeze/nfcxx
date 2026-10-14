@@ -1722,6 +1722,54 @@ BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
   "static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a) { return __nfcxx_bfloat16(-(float)a); }\n" \
   "#endif\n"
 
+# wmma (nvcuda::wmma) for the m8n32k16 shape that sm_70 and later support with f16 A and B and f32 accumulate, as the PTX
+# wmma.load, wmma.mma and wmma.store instructions through inline asm (the register counts are nvcc's: 8 per A and B
+# fragment, 8 floats per accumulator). The fragment's element order is the instruction's, so the fragment is opaque
+# to user code as in CUDA. Only shared-state operands are supported (llama.cpp's uses are in shared memory).
+WMMA_M8N32K16 = <<~'CODE'
+#ifndef __NFCXX_WMMA_M8N32K16
+#define __NFCXX_WMMA_M8N32K16
+namespace nvcuda { namespace wmma {
+struct row_major {}; struct col_major {}; enum layout_t { mem_row_major, mem_col_major };
+struct matrix_a {}; struct matrix_b {}; struct accumulator {};
+template <class Use, int M, int N, int K, class T, class L = void> struct fragment { unsigned x[8]; };
+template <int M, int N, int K, class T> struct fragment<accumulator, M, N, K, T, void> { float x[8]; };
+static inline unsigned __nfcxx_wmma_smem(const void *p) {
+  unsigned long long q; unsigned r;
+  asm("cvta.to.shared.u64 %0, %1;" : "=l"(q) : "l"(p));
+  asm("cvt.u32.u64 %0, %1;" : "=r"(r) : "l"(q));
+  return r;
+}
+static inline void load_matrix_sync(fragment<matrix_a, 8, 32, 16, half, row_major> &f, const half *p, unsigned ldm) {
+  asm volatile("wmma.load.a.sync.aligned.row.m8n32k16.shared.f16 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
+               : "=r"(f.x[0]), "=r"(f.x[1]), "=r"(f.x[2]), "=r"(f.x[3]), "=r"(f.x[4]), "=r"(f.x[5]), "=r"(f.x[6]), "=r"(f.x[7])
+               : "r"(__nfcxx_wmma_smem(p)), "r"(ldm));
+}
+static inline void load_matrix_sync(fragment<matrix_b, 8, 32, 16, half, col_major> &f, const half *p, unsigned ldm) {
+  asm volatile("wmma.load.b.sync.aligned.col.m8n32k16.shared.f16 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
+               : "=r"(f.x[0]), "=r"(f.x[1]), "=r"(f.x[2]), "=r"(f.x[3]), "=r"(f.x[4]), "=r"(f.x[5]), "=r"(f.x[6]), "=r"(f.x[7])
+               : "r"(__nfcxx_wmma_smem(p)), "r"(ldm));
+}
+static inline void fill_fragment(fragment<accumulator, 8, 32, 16, float> &f, float v) {
+  for (int i = 0; i < 8; i++) f.x[i] = v;
+}
+static inline void mma_sync(fragment<accumulator, 8, 32, 16, float> &d, const fragment<matrix_a, 8, 32, 16, half, row_major> &a,
+                            const fragment<matrix_b, 8, 32, 16, half, col_major> &b, const fragment<accumulator, 8, 32, 16, float> &c) {
+  for (int i = 0; i < 8; i++) d.x[i] = c.x[i];
+  asm volatile("wmma.mma.sync.aligned.row.col.m8n32k16.f32.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19,%20,%21,%22,%23}, {%0,%1,%2,%3,%4,%5,%6,%7};"
+               : "+f"(d.x[0]), "+f"(d.x[1]), "+f"(d.x[2]), "+f"(d.x[3]), "+f"(d.x[4]), "+f"(d.x[5]), "+f"(d.x[6]), "+f"(d.x[7])
+               : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]), "r"(a.x[4]), "r"(a.x[5]), "r"(a.x[6]), "r"(a.x[7]),
+                 "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]), "r"(b.x[4]), "r"(b.x[5]), "r"(b.x[6]), "r"(b.x[7]));
+}
+static inline void store_matrix_sync(float *p, const fragment<accumulator, 8, 32, 16, float> &f, unsigned ldm, layout_t) {
+  asm volatile("wmma.store.d.sync.aligned.row.m8n32k16.shared.f32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8}, %9;"
+               :: "r"(__nfcxx_wmma_smem(p)), "f"(f.x[0]), "f"(f.x[1]), "f"(f.x[2]), "f"(f.x[3]), "f"(f.x[4]), "f"(f.x[5]), "f"(f.x[6]), "f"(f.x[7]), "r"(ldm));
+}
+}}
+namespace wmma = nvcuda::wmma;
+#endif
+CODE
+
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
   "__umulhi" => "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n",
@@ -1780,6 +1828,7 @@ BUILTIN_DEFS = {
   "__float2half" => HALF_CORE,
   "__half2float" => HALF_CORE,
   "half" => HALF_CORE + "typedef __half half;\n",
+  "wmma" => WMMA_M8N32K16,
   "half2" => HALF2_TYPE + "typedef __half2 half2;\n",
   # make_half2(x, y) as in cuda_fp16: each lane rounded to half from a float (int arguments convert exactly when small).
   "make_half2" => HALF2_TYPE + HALF_CORE + "static inline __half2 make_half2(float x, float y) { __half2 r; r.x = __float2half(x); r.y = __float2half(y); return r; }\n",

@@ -23,4 +23,18 @@ if [[ "$run" == *"no error, 0 mismatches"* ]]; then echo "pass mma: $run"; else 
 sed 's/{%4, %5}/{%5, %4}/' mma.cu > "$out/mut.cu"
 mrun=$(build_run "$out/mut.cu" mut) || true
 if [[ "$mrun" == *"no error, 0 mismatches"* ]]; then echo "FAIL mutant mma: not caught"; fail=1; else echo "mutant mma: caught ($mrun)"; fi
+# wmma m8n32k16 (the wmma loads, mma and store of lightning-indexer.cu, as PTX): exact against the host product.
+# Mutant: the B fragment is loaded row-major instead of col-major, which must change the result.
+wrun=$(build_run wmma_m8n32k16.cu wmma) || { echo "FAIL wmma: build"; fail=1; wrun=""; }
+if [[ "$wrun" == *"no error, 0 mismatches"* ]]; then echo "pass wmma: $wrun"; else echo "FAIL wmma: $wrun"; fail=1; fi
+sed 's/wmma.load.b.sync.aligned.col/wmma.load.b.sync.aligned.row/' wmma_m8n32k16.cu > "$out/wmma-mut.cu"
+wmrun=$(build_run "$out/wmma-mut.cu" wmma-mut) || true
+if [[ "$wmrun" == *"no error, 0 mismatches"* ]]; then echo "FAIL mutant wmma: not caught"; fail=1; else echo "mutant wmma: caught ($wmrun)"; fi
+# The nvcuda::wmma API for the same shape (fragments in shared memory, load, fill, mma, store), as lightning-indexer.cu
+# uses it. Mutant: the A fragment is loaded from B's buffer, which must change the result.
+arun=$(build_run wmma_api.cu wmma-api) || { echo "FAIL wmma-api: build"; fail=1; arun=""; }
+if [[ "$arun" == *"no error, 0 mismatches"* ]]; then echo "pass wmma-api: $arun"; else echo "FAIL wmma-api: $arun"; fail=1; fi
+sed 's/wmma::load_matrix_sync(fa, sa, 16);/wmma::load_matrix_sync(fa, sb, 16);/' wmma_api.cu > "$out/wmma-api-mut.cu"
+amrun=$(build_run "$out/wmma-api-mut.cu" wmma-api-mut) || true
+if [[ "$amrun" == *"no error, 0 mismatches"* ]]; then echo "FAIL mutant wmma-api: not caught"; fail=1; else echo "mutant wmma-api: caught ($amrun)"; fi
 exit $fail
