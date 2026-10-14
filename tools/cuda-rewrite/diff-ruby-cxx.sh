@@ -10,7 +10,11 @@ cxx=${CXX_REWRITE:-$root/build/cuda-rewrite}
 [ -x "$cxx" ] || { echo "diff: $cxx not built"; exit 1; }
 incs=(); files=()
 while [ $# -gt 0 ]; do
-  case $1 in -I) incs+=("-I$2"); shift 2 ;; *) files+=("$1"); shift ;; esac
+  case $1 in
+    -I) incs+=("-I$2"); shift 2 ;;
+    -I*) incs+=("$1"); shift ;;
+    *) files+=("$1"); shift ;;
+  esac
 done
 if [ ${#files[@]} -eq 0 ]; then
   shopt -s nullglob
