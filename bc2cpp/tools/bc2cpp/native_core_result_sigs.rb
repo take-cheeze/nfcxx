@@ -1,28 +1,51 @@
 # frozen_string_literal: true
 
-# NativeCoreResultSigs: the result class of built-in methods, read from sig/native/core_results.rbs. It replaces the
-# hand-written NativeClassResults::EXACT_CORE_KINDS table with the same { class => { name => class } } shape. The file
-# only names classes; codegen_native_results.rb still gates every answer on the closed-world pins, so a file edit can
-# only widen what is considered, never skip those checks.
+require 'set'
+
+# NativeCoreResultSigs: the result kind of built-in methods, read from RBS files under sig/native/. It replaces the
+# hand-written NativeClassResults::EXACT_CORE_KINDS table with the same { class => { name => kind } } shape. A file
+# only names kinds; codegen_native_results.rb and the NATIVE_RESULT_FACTS audit still gate every answer on the
+# closed-world pins and the source checks, so a file edit can only widen what is considered, never skip those checks.
 module NativeCoreResultSigs
   PATH = File.expand_path('../../sig/native/core_results.rbs', __dir__)
+  FRESH_ARRAY_PATH = File.expand_path('../../sig/native/core_fresh_arrays.rbs', __dir__)
+  RGSS_PATH = File.expand_path('../../sig/native/rgss_results.rbs', __dir__)
   RESULT_CLASSES = %w[Array String].freeze
 
   module_function
 
-  # { 'Array' => { 'to_a' => 'Array', ... }, ... }, frozen, read once per path.
+  # { 'Array' => { 'to_a' => 'Array', ... }, ... }, frozen, read once per path. Only Array and String results.
   def kinds(path = PATH)
     @kinds ||= {}
     @kinds[path] ||= load_kinds(path)
   end
 
-  def load_kinds(path)
+  # The method names that return a fresh Array on some core owner (CORE_ARRAY_RETURN_METHODS). A declaration
+  # returning anything but Array would make the name claim false, so it is rejected here.
+  def fresh_array_names(path = FRESH_ARRAY_PATH)
+    kinds(path).each do |klass, table|
+      table.each do |name, result|
+        raise "bc2cpp: #{path}: #{klass}##{name} must return Array for a fresh-Array claim" unless result == 'Array'
+      end
+    end
+    kinds(path).values.flat_map(&:keys).to_set.freeze
+  end
+
+  # The declarations of a core signature file (the rbs gem parses it; it is bundled with CRuby).
+  def parse_decls(path)
     begin
       require 'rbs'
     rescue LoadError
       raise "bc2cpp: #{path} needs the rbs gem (gem install rbs)"
     end
     _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: File.basename(path), content: File.read(path)))
+    decls
+  end
+
+  # Kinds are :fixnum (Integer, only with +scalars+), :float (Float, only with +scalars+) or a class name listed in
+  # +classes+. Each method takes one overload and returns exactly one of those.
+  def load_kinds(path, scalars: false, classes: RESULT_CLASSES)
+    decls = parse_decls(path)
     out = {}
     decls.each do |decl|
       raise "bc2cpp: #{path}: only `class` reopenings are allowed here, not #{decl.class.name.split('::').last}" unless decl.is_a?(RBS::AST::Declarations::Class)
@@ -34,17 +57,20 @@ module NativeCoreResultSigs
           raise "bc2cpp: #{path}: #{klass} members must be single-overload method definitions"
         end
 
-        table[member.name.to_s] = result_class(member, klass, path)
+        table[member.name.to_s] = result_kind(member, klass, path, scalars: scalars, classes: classes)
       end
     end
     out.transform_values { |table| table.freeze }.freeze
   end
 
-  def result_class(member, klass, path)
+  def result_kind(member, klass, path, scalars:, classes:)
     ret = member.overloads.first.method_type.type.return_type
     name = ret.is_a?(RBS::Types::ClassInstance) ? ret.name.to_s.delete_prefix('::') : nil
-    raise "bc2cpp: #{path}: #{klass}##{member.name} must return one of #{RESULT_CLASSES.join(', ')}" unless RESULT_CLASSES.include?(name)
+    return :fixnum if scalars && name == 'Integer'
+    return :float if scalars && name == 'Float'
+    return name if classes.include?(name)
 
-    name
+    allowed = scalars ? %w[Integer Float] + classes : classes
+    raise "bc2cpp: #{path}: #{klass}##{member.name} must return one of #{allowed.join(', ')}"
   end
 end
