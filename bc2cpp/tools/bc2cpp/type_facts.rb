@@ -128,6 +128,7 @@ module TypeFacts
       'contradictions' => contradiction_rows(ctx, gen, defs, reader),
       'signature_diagnostics' => Array(ctx.signature_diagnostics),
       'ir_feedback' => feedback[:rows],
+      'native_direct_forms' => gen.respond_to?(:bytecode_ir_native_expression_inventory) ? gen.bytecode_ir_native_expression_inventory : [],
       'summary' => nil
     }.tap { |facts| facts['summary'] = summarize(facts) }
   end
@@ -146,13 +147,26 @@ module TypeFacts
     defs_of_name = ctx.registry[d.name] || []
     mono = defs_of_name.size == 1
     params = (1..mand).map { |k| param_row(ctx, gen, d, irep, k, names[k - 1], mono, defs_of_name.size, sites) }
+    optional_params = (1..opt).map do |position|
+      register = (mand + position).to_s
+      types = ctx.signature_contracts&.ir_optional_types&.dig(d.irep, register)
+      { 'pos' => mand + position, 'name' => names[mand + position - 1].to_s,
+        'type' => types && BytecodeIR::Types.type_name(types), 'source' => types ? 'signature' : nil }
+    end
+    optional_keywords = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KEY_P' }.to_set
+    keyword_params = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.uniq.map do |name|
+      types = ctx.signature_contracts&.ir_keyword_types&.dig(d.irep, name)
+      { 'name' => name, 'required' => !optional_keywords.include?(name),
+        'type' => types && BytecodeIR::Types.type_name(types), 'source' => types ? 'signature' : nil }
+    end
     {
       'owner' => d.owner, 'name' => d.name, 'file' => relative(ctx, irep.file), 'line' => line, 'col' => col,
       'scope' => scope_of(irep.file), 'req' => mand, 'opt' => opt, 'rest' => rest.positive?, 'key' => key,
       'kdict' => kdict.positive?,
-      'visibility' => d.visibility&.to_s, 'params' => params, 'return' => return_row(ctx, gen, d, irep, mono),
+      'visibility' => d.visibility&.to_s, 'params' => params, 'optional_params' => optional_params, 'keyword_params' => keyword_params, 'return' => return_row(ctx, gen, d, irep, mono),
       'annotated' => !!(ctx.annotations[d.irep] || ctx.class_annotations[d.irep] || ctx.element_annotations[d.irep] ||
-                       ctx.signature_arg_types&.[](d.irep)&.any?)
+                       ctx.signature_arg_types&.[](d.irep)&.any? || ctx.signature_contracts&.ir_optional_types&.[](d.irep)&.any? ||
+                       ctx.signature_contracts&.ir_keyword_types&.[](d.irep)&.any?)
     }
   end
 
@@ -279,7 +293,11 @@ module TypeFacts
       return row
     end
     ir_fact = ctx.ir_return_facts&.[](d.irep)
-    if inferred
+    prior_classes = inferred && simple_value_classes(inferred)
+    if ir_fact && !ir_fact.declared? && Array(irep.reps).empty? && !BytecodeIR.for(irep).handlers? && prior_classes && ir_fact.classes.proper_subset?(prior_classes)
+      row['type'] = BytecodeIR::Types.type_name(ir_fact.classes)
+      row['source'] = 'inferred:bytecode-ir'
+    elsif inferred
       row['type'] = inferred
       row['source'] = 'inferred:return-analysis'
     elsif ir_fact
@@ -290,6 +308,12 @@ module TypeFacts
       row['reason'] = return_reason(ctx, gen, d, irep)
     end
     row
+  end
+
+  def simple_value_classes(text)
+    return nil unless text.match?(/\A(?:[A-Z]\w*(?:::\w+)*|nil|bool)(?: \| (?:[A-Z]\w*(?:::\w+)*|nil|bool))*\z/)
+
+    text.split(' | ').flat_map { |name| name == 'bool' ? [:TrueClass, :FalseClass] : [name == 'nil' ? :NilClass : name.to_sym] }.to_set
   end
 
   # A body whose every exit is RETSELF / RETNIL / RETTRUE / RETFALSE (no value register to trace).

@@ -3,6 +3,7 @@
 require_relative 'numeric_flow'
 require_relative 'ir_argument_types'
 require_relative 'ir_call_graph_types'
+require_relative 'ir_native_expression_types'
 require_relative 'readonly_call_effects'
 require_relative 'call_context_arguments'
 
@@ -488,7 +489,15 @@ class CodeGen
         end
       end
     end
-    bytecode_ir_mask_classes(mask)
+    classes = bytecode_ir_mask_classes(mask)
+    return classes if classes
+    return nil unless %w[SEND SEND0].include?(insn.op) && (argc = insn.op == 'SEND0' ? 0 : insn.plain_fixed_argc? && insn.argc)
+
+    receivers = bytecode_ir_mask_classes(state[insn.reg.to_i])
+    return nil unless receivers
+
+    results = receivers.map { |klass| bytecode_ir_native_expression_classes(insn.sym, klass.to_s, argc) }
+    results.any?(&:nil?) ? nil : results.reduce(Set.new, :|).freeze
   end
 
   # Exhaustive entry admission is retained; only the single-definition rule
@@ -527,6 +536,19 @@ class CodeGen
 
     @ir_call_graph_arguments ||= IrCallGraphTypes.collect(self, @registry.values.flatten, @ireps)
     @ir_call_graph_arguments.dig(definition.irep, position.to_s)
+  end
+
+  def numeric_oracle_pool_mask(irep, insn)
+    NumericOracle.new(self).pool_mask(irep, insn)
+  end
+
+  def bytecode_ir_context_results
+    return nil if ENV['BC2CPP_IR_CONTEXT_RESULTS'] == '0'
+    return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
+
+    @ir_context_results ||= IrContextResults.new(self, @ireps,
+                                               max_contexts: Integer(ENV.fetch('BC2CPP_IR_CONTEXT_MAX_CONTEXTS', IrContextResults::MAX_CONTEXTS.to_s)),
+                                               max_rounds: Integer(ENV.fetch('BC2CPP_IR_CONTEXT_MAX_ROUNDS', IrContextResults::MAX_ROUNDS.to_s)))
   end
 
   def bytecode_ir_argument_receiver_classes(irep, index, register)
@@ -891,3 +913,5 @@ class CodeGen
     end.sort
   end
 end
+
+require_relative 'ir_context_results'
