@@ -2395,6 +2395,232 @@ std::string blank_comments(const std::string &s);
 std::string dynamic_shared_rewrite(const std::string &s);
 bool g_device_mode = false;  // Ruby $device
 
+// Ruby CondUnsupported (line 2179): a conditional the evaluator does not handle.
+struct CondUnsupported {
+  std::string msg;
+};
+[[noreturn]] void cond_fail(const std::string &msg) { throw CondUnsupported{msg}; }
+
+// Ruby DEVICE_PASS_MACROS (line 2192).
+const std::vector<std::pair<std::string, std::string>> DEVICE_PASS_MACROS = {
+    {"__CUDACC__", "1"}, {"__NVCC__", "1"}, {"__CUDA_ARCH__", "750"}, {"__cplusplus", "201703"}};
+
+// A macro in the conditionals' table: a text, or a function-like macro (Ruby :function).
+struct Def {
+  bool is_function = false;
+  std::string text;
+};
+typedef std::map<std::string, Def> Defs;
+
+// Ruby $cond_strict (see g_cond_strict above): a name the unit does not define is an unsupported conditional.
+
+// Ruby cond token: kind :num (value) or :id / :op (text).
+struct CondTok {
+  int kind;  // 0 = num, 1 = id, 2 = op
+  long long value;
+  std::string text;
+};
+
+// Ruby cond_tokens (line 2194).
+std::vector<CondTok> cond_tokens(const std::string &s, long line) {
+  std::vector<CondTok> toks;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    int c = ch(s, i);
+    if (white_c(c)) {
+      i += 1;
+    } else if (ident_c(c)) {
+      long j = i;
+      while (j < n && ident_c(ch(s, j))) j += 1;
+      std::string w = sl(s, i, j);
+      if (c >= 48 && c <= 57) {
+        while (!w.empty() && std::string("uUlL").find(w.back()) != std::string::npos) w.pop_back();
+        long long v;
+        if (w.size() > 2 && w[0] == '0' && (w[1] == 'x' || w[1] == 'X')) v = std::strtoll(w.c_str() + 2, nullptr, 16);
+        else v = std::strtoll(w.c_str(), nullptr, 10);
+        toks.push_back(CondTok{0, v, ""});
+      } else {
+        toks.push_back(CondTok{1, 0, w});
+      }
+      i = j;
+    } else {
+      std::string two = i + 1 < n ? sl(s, i, i + 2) : std::string();
+      static const std::vector<std::string> twos = {"&&", "||", "==", "!=", "<=", ">=", "<<", ">>"};
+      if (std::find(twos.begin(), twos.end(), two) != twos.end()) {
+        toks.push_back(CondTok{2, 0, two});
+        i += 2;
+      } else if (c != 0 && std::string("!~+-*/%<>&|^()?:,").find((char)c) != std::string::npos) {
+        toks.push_back(CondTok{2, 0, std::string(1, (char)c)});
+        i += 1;
+      } else {
+        cond_fail("unsupported character in #if at line " + std::to_string(line));
+      }
+    }
+  }
+  return toks;
+}
+
+// The state of a #if expression reader (Ruby: st = { toks:, pos: }).
+struct CondState {
+  std::vector<CondTok> toks;
+  size_t pos = 0;
+};
+
+bool cond_peek(const CondState &st, const std::string &x) {
+  if (st.pos >= st.toks.size()) return false;
+  const CondTok &t = st.toks[st.pos];
+  return t.kind == 2 && t.text == x;
+}
+bool cond_peek_any(const CondState &st) { return st.pos < st.toks.size(); }
+
+long long cond_eval(const std::string &s, const Defs &defs, long line, int depth);
+long long cond_expr(CondState &st, const Defs &defs, long line, int depth);
+long long cond_binary(CondState &st, const Defs &defs, long line, int depth, int level);
+long long cond_unary(CondState &st, const Defs &defs, long line, int depth);
+
+// Ruby cond_eval (line 2232): evaluates a #if expression.
+long long cond_eval(const std::string &s, const Defs &defs, long line, int depth) {
+  if (depth > 16) cond_fail("#if nesting too deep at line " + std::to_string(line));
+  CondState st;
+  st.toks = cond_tokens(s, line);
+  long long v = cond_expr(st, defs, line, depth);
+  if (st.pos != st.toks.size()) cond_fail("unsupported #if expression at line " + std::to_string(line));
+  return v;
+}
+
+// Ruby cond_expr (line 2247): the conditional operator.
+long long cond_expr(CondState &st, const Defs &defs, long line, int depth) {
+  long long c = cond_binary(st, defs, line, depth, 0);
+  if (!cond_peek(st, "?")) return c;
+  st.pos += 1;
+  long long a = cond_expr(st, defs, line, depth);
+  if (!cond_peek(st, ":")) cond_fail("expected ':' in #if at line " + std::to_string(line));
+  st.pos += 1;
+  long long b = cond_expr(st, defs, line, depth);
+  return c != 0 ? a : b;
+}
+
+// Ruby COND_LEVELS (line 2259): binary operators by precedence, lowest first.
+const std::vector<std::vector<std::string>> COND_LEVELS = {
+    {"||"}, {"&&"}, {"|"}, {"^"}, {"&"}, {"==", "!="}, {"<", ">", "<=", ">="}, {"<<", ">>"}, {"+", "-"}, {"*", "/", "%"}};
+
+// Ruby cond_binary (line 2261).
+long long cond_binary(CondState &st, const Defs &defs, long line, int depth, int level) {
+  if (level >= (int)COND_LEVELS.size()) return cond_unary(st, defs, line, depth);
+  long long l = cond_binary(st, defs, line, depth, level + 1);
+  while (true) {
+    if (st.pos >= st.toks.size()) break;
+    const CondTok &t = st.toks[st.pos];
+    if (!(t.kind == 2 && std::find(COND_LEVELS[(size_t)level].begin(), COND_LEVELS[(size_t)level].end(), t.text) !=
+                             COND_LEVELS[(size_t)level].end()))
+      break;
+    std::string op = t.text;
+    st.pos += 1;
+    if (op == "||") {
+      long long r = cond_binary(st, defs, line, depth, level + 1);
+      l = (l != 0 || r != 0) ? 1 : 0;
+    } else if (op == "&&") {
+      long long r = cond_binary(st, defs, line, depth, level + 1);
+      l = (l != 0 && r != 0) ? 1 : 0;
+    } else {
+      long long r = cond_binary(st, defs, line, depth, level + 1);
+      if (op == "|") l = l | r;
+      else if (op == "^") l = l ^ r;
+      else if (op == "&") l = l & r;
+      else if (op == "==") l = l == r ? 1 : 0;
+      else if (op == "!=") l = l != r ? 1 : 0;
+      else if (op == "<") l = l < r ? 1 : 0;
+      else if (op == ">") l = l > r ? 1 : 0;
+      else if (op == "<=") l = l <= r ? 1 : 0;
+      else if (op == ">=") l = l >= r ? 1 : 0;
+      else if (op == "<<") l = l << r;
+      else if (op == ">>") l = l >> r;
+      else if (op == "+") l = l + r;
+      else if (op == "-") l = l - r;
+      else if (op == "*") l = l * r;
+      else if (op == "/") {
+        if (r == 0) cond_fail("division by zero in #if at line " + std::to_string(line));
+        l = l / r;
+      } else if (op == "%") {
+        if (r == 0) cond_fail("division by zero in #if at line " + std::to_string(line));
+        l = l % r;
+      }
+    }
+  }
+  return l;
+}
+
+// Ruby cond_unary (line 2300).
+long long cond_unary(CondState &st, const Defs &defs, long line, int depth) {
+  if (!cond_peek_any(st)) cond_fail("unexpected end of #if expression at line " + std::to_string(line));
+  const CondTok t = st.toks[st.pos];
+  if (t.kind == 2 && t.text == "!") {
+    st.pos += 1;
+    return cond_unary(st, defs, line, depth) == 0 ? 1 : 0;
+  }
+  if (t.kind == 2 && t.text == "-") {
+    st.pos += 1;
+    return -cond_unary(st, defs, line, depth);
+  }
+  if (t.kind == 2 && t.text == "+") {
+    st.pos += 1;
+    return cond_unary(st, defs, line, depth);
+  }
+  if (t.kind == 2 && t.text == "~") {
+    st.pos += 1;
+    return ~cond_unary(st, defs, line, depth);
+  }
+  if (t.kind == 2 && t.text == "(") {
+    st.pos += 1;
+    long long v = cond_expr(st, defs, line, depth);
+    if (!cond_peek(st, ")")) cond_fail("expected ')' in #if at line " + std::to_string(line));
+    st.pos += 1;
+    return v;
+  }
+  if (t.kind == 0) {
+    st.pos += 1;
+    return t.value;
+  }
+  if (t.kind == 1 && t.text == "defined") {
+    st.pos += 1;
+    bool paren = cond_peek(st, "(");
+    if (paren) st.pos += 1;
+    if (!(st.pos < st.toks.size() && st.toks[st.pos].kind == 1))
+      cond_fail("defined without a name at line " + std::to_string(line));
+    std::string name = st.toks[st.pos].text;
+    st.pos += 1;
+    if (paren) {
+      if (!cond_peek(st, ")")) cond_fail("expected ')' after defined at line " + std::to_string(line));
+      st.pos += 1;
+    }
+    return defs.count(name) ? 1 : 0;
+  }
+  if (t.kind == 1) {
+    st.pos += 1;
+    if (cond_peek(st, "(")) {
+      // a call of a function-like macro or an unknown function: 0, with its arguments skipped
+      st.pos += 1;
+      long nest = 1;
+      while (nest > 0) {
+        if (!cond_peek_any(st)) cond_fail("unbalanced parentheses in #if at line " + std::to_string(line));
+        const CondTok &u = st.toks[st.pos];
+        if (u.kind == 2 && u.text == "(") nest += 1;
+        if (u.kind == 2 && u.text == ")") nest -= 1;
+        st.pos += 1;
+      }
+      return 0;
+    }
+    auto it = defs.find(t.text);
+    // The host analysis keeps both branches of a condition on a name the unit does not define (it may come from a
+    // system header): the device pass refuses it (see g_cond_strict).
+    if (it == defs.end() && g_cond_strict) cond_fail("#if names " + t.text + ", which the unit does not define (line " + std::to_string(line) + ")");
+    if (it == defs.end() || it->second.is_function) return 0;
+    return cond_eval(it->second.text, defs, line, depth + 1);
+  }
+  cond_fail("unsupported #if expression at line " + std::to_string(line));
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
