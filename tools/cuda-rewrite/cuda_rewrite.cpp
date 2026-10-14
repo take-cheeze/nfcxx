@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 
 namespace {
 
@@ -179,6 +180,14 @@ std::vector<std::string> split_top(const std::string &s) {
       continue;
     }
     int c = ch(s, i);
+    // `->`, `<=` and `>=` are operators, not brackets: `(const float *)x->data` must not close a bracket.
+    bool two_char_op = i + 1 < (long)s.size() &&
+                       ((c == '-' && ch(s, i + 1) == '>') || (c == '<' && ch(s, i + 1) == '=') ||
+                        (c == '>' && ch(s, i + 1) == '='));
+    if (two_char_op) {
+      i += 2;
+      continue;
+    }
     if (c == '(' || c == '[' || c == '{' || c == '<') {
       depth += 1;
     } else if (c == ')' || c == ']' || c == '}' || c == '>') {
@@ -1501,6 +1510,41 @@ std::vector<std::string> comma_declaration_type(const std::string &text, long i)
   return {};
 }
 
+// `__device__ const float a = -0.75f;`: a device constant of scalar type with a plain initializer. The emitter lowers
+// it (a const global with a scalar value); arrays, brace lists and non-scalar types are still refused.
+static bool scalar_device_const(const std::string &text) {
+  size_t eq = text.find('=');
+  if (eq == std::string::npos || text.find('[') != std::string::npos || text.find('{') != std::string::npos) return false;
+  std::string head = text.substr(0, eq);
+  std::vector<std::string> words;
+  std::string w;
+  for (char c : head) {
+    if (ident_c((unsigned char)c)) {
+      w += c;
+    } else if (!w.empty()) {
+      words.push_back(w);
+      w.clear();
+    }
+  }
+  if (!w.empty()) words.push_back(w);
+  static const std::set<std::string> scalars = {"float", "double", "int", "unsigned", "long", "short", "char", "bool",
+                                                "half", "size_t"};
+  bool is_const = false, scalar = false;
+  for (const auto &x : words) {
+    if (x == "const") is_const = true;
+    if (scalars.count(x) || (x.size() > 2 && x.compare(x.size() - 2, 2, "_t") == 0)) scalar = true;
+  }
+  return is_const && scalar;
+}
+
+// A __device__ declaration that is a variable: no body and no parenthesis (a function has one of the two).
+template <class P>
+static bool device_variable_piece(const P &pc) {
+  if (pc.body) return false;
+  if (std::find(pc.toks.begin(), pc.toks.end(), "__device__") == pc.toks.end()) return false;
+  return str_index(pc.text, "(", 0) < 0;
+}
+
 // Ruby argument_type (line 1384): the type of a launch argument: a literal's, or the declared type of an identifier.
 std::vector<std::string> argument_type(const std::string &text, long pos, const std::string &arg, const std::string &nm) {
   bool all_num = !arg.empty();
@@ -1594,7 +1638,8 @@ std::vector<std::string> deduce_types(const std::string &nm, const std::string &
     if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
     for (const auto &p : missing) {
       if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
-      std::vector<std::string> at = argument_type(text, pos, args[idx], nm);
+      // A cast argument `(const float *)x->data` has the type of the cast, as at a call site (caller_arg_type).
+      std::vector<std::string> at = caller_arg_type(text, pos, args[idx], nm);
       std::string t;
       if (!match_type(ptoks, at, p, t))
         refuse("template launch of " + nm + "<" + ta + ">: cannot deduce " + p + " from the argument " + args[idx] +
@@ -3064,7 +3109,8 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   for (auto &pc : pieces) {
     if (pc.kind == "pp") continue;
     if (!pc.device) continue;
-    if (str_index(pc.text, "__device__", 0) >= 0 && !pc.body && str_index(pc.text, "(", 0) < 0)
+    if (str_index(pc.text, "__device__", 0) >= 0 && !pc.body && str_index(pc.text, "(", 0) < 0 &&
+        !scalar_device_const(pc.text))
       refuse("device variable: " + sl(strip(pc.text), 0, 60));
     if (pc.body) {
       bool has_g = std::find(pc.toks.begin(), pc.toks.end(), "__global__") != pc.toks.end();
@@ -3099,9 +3145,10 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   auto has_tok = [](const std::vector<std::string> &v, const std::string &x) {
     return std::find(v.begin(), v.end(), x) != v.end();
   };
-  // Host declarations: defined names, as far as a piece's text tells them.
+  // Host declarations: defined names, as far as a piece's text tells them. A __device__ variable (not a function) is
+  // not a device function: its const branch below names it, so device code can use it (`__device__ const float a = 1.f;`).
   for (auto &pc : pieces) {
-    if (pc.keep || pc.device) continue;
+    if (pc.keep || (pc.device && !device_variable_piece(pc))) continue;
     std::string t = blank_comments(pc.text);
     const auto &toks = pc.toks;
     if (pc.kind == "pp") continue;  // Ruby: both branches are `next`
@@ -3169,7 +3216,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   while (changed) {
     changed = false;
     for (auto &pc : pieces) {
-      if (pc.keep || pc.device) continue;
+      if (pc.keep || (pc.device && !device_variable_piece(pc))) continue;
       if (pc.defined.empty()) continue;
       bool any = false;
       for (const auto &dn : pc.defined)
