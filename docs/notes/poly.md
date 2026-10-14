@@ -128,7 +128,9 @@ suite and the tests that import `qjs:std` or `qjs:os` were not run.
 **Python: the system CPython.** Python reports errors through return values, never by unwinding, so nothing needs building:
 `Python.h` compiles under EDG as it is, and the backend links `python3-config --ldflags --embed` (Python 3.12 here; the
 backend uses `PyErr_GetRaisedException` from 3.12 and `PyErr_Fetch` before). One interpreter per process, started on first use
-and never finalized; each `Context` gets its own globals (a `dict` subclass).
+and never finalized; each `Context` gets its own globals (a `dict` subclass). The uop tinygrad back end (`lib/uop/nfcuop_tinygrad.cpp`) uses
+the same rule: it loads the libpython of its executable with `dlopen` and reuses the interpreter if one is started, and it refuses a second
+libpython in the process (see `docs/notes/uop.md`).
 
 **ast: the nfcast engine.** `lib/ast` is an interpreter for a Lua 5.4 subset written in C++ (`ast.md`: self-specializing AST
 nodes, its own collector, Lua's error messages), so a script error is a C++ exception natively and nothing needs to be built or
