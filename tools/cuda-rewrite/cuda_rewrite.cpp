@@ -2826,6 +2826,165 @@ std::string tag_after(const std::string &t, const std::string &kw) {
   return std::string();
 }
 
+// Ruby enum_enumerators (line 2517): the enumerators of the enum keyword's own braces.
+std::vector<std::string> enum_enumerators(const std::string &t) {
+  long e0 = str_index(t, "enum", 0);
+  long open = str_index(t, "{", e0 < 0 ? 0 : e0);
+  std::vector<std::string> names;
+  if (open < 0) return names;
+  long close = matching_brace(t, open);
+  std::string body = sl(t, open + 1, close < 0 ? (long)t.size() : close);
+  // Ruby body.split(","): empty trailing fields are dropped
+  std::vector<std::string> items;
+  size_t start = 0;
+  while (true) {
+    size_t q = body.find(',', start);
+    if (q == std::string::npos) {
+      items.push_back(body.substr(start));
+      break;
+    }
+    items.push_back(body.substr(start, q - start));
+    start = q + 1;
+  }
+  while (!items.empty() && items.back().empty()) items.pop_back();
+  for (const auto &item : items) {
+    std::vector<std::string> first = tokens_of(ruby_split_eq0(item));
+    if (!first.empty()) names.push_back(first.front());
+  }
+  return names;
+}
+
+// Ruby blank_comments (line 2533): the text with its comments blanked (newlines and literals stay).
+std::string blank_comments(const std::string &s) {
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    if (ch(s, i) == '/' && (ch(s, i + 1) == '/' || ch(s, i + 1) == '*')) {
+      long e = skip_literal(s, i);
+      for (long k = i; k < e; k++) out.push_back(s[(size_t)k] == '\n' ? '\n' : ' ');
+      i = e;
+      continue;
+    }
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      out += sl(s, i, e);
+      i = e;
+      continue;
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby function_head? (line 2557): a head with a `(` before any `=`, before the first brace.
+bool function_head(const std::string &t) {
+  long b = str_index(t, "{", 0);
+  std::string h = b < 0 ? t : sl(t, 0, b);
+  long lp = str_index(h, "(", 0);
+  if (lp < 0) return false;
+  long eq = str_index(h, "=", 0);
+  return !(eq >= 0 && eq < lp);
+}
+
+// Ruby device_constant_decl? (line 2567): a host const or constexpr declaration that device code may read as a value.
+bool device_constant_decl(const std::string &t) {
+  long eq = str_index(t, "=", 0);
+  long cut = (long)t.size();
+  for (long c : {eq, str_index(t, "[", 0), str_index(t, ";", 0)})
+    if (c >= 0 && c < cut) cut = c;
+  std::string head = sl(t, 0, cut);
+  if (head.find('&') != std::string::npos || head.find('*') != std::string::npos) return false;
+  if (eq < 0 || eq >= (long)t.size()) return true;
+  std::string init = sl(t, eq + 1, (long)t.size());
+  long semi = str_index(init, ";", 0);
+  if (semi >= 0) init = sl(init, 0, semi);
+  if (init.find('&') != std::string::npos) return false;
+  if (!strip(init).empty() && strip(init)[0] == '*') return false;
+  if (init.find('*') != std::string::npos && init.find('(') != std::string::npos) return false;
+  long i = 0;
+  while ((i = str_index(init, "(", i)) >= 0) {
+    long j = i - 1;
+    while (j >= 0 && white_c(ch(init, j))) j -= 1;
+    long word_end = j;
+    while (j >= 0 && ident_c(ch(init, j))) j -= 1;
+    std::string word = word_end > j ? sl(init, j + 1, word_end + 1) : std::string();
+    if (!word.empty() && !(word == "sizeof" || word == "alignof" || word == "decltype" || word == "static_cast")) return false;
+    i += 1;
+  }
+  return true;
+}
+
+// Ruby linkage_block (line 2594): the braces of an `extern "C" {` or `namespace n {` piece, or false.
+bool linkage_block(const std::string &t, long &open_out, long &close_out) {
+  long f = 0;
+  while (f < (long)t.size() && white_c(ch(t, f))) f += 1;
+  std::string s = sl(t, f, (long)t.size());
+  if (!(s.compare(0, 8, "extern \"") == 0 || s.compare(0, 10, "namespace ") == 0)) return false;
+  long b = str_index(s, "{", 0);
+  if (b < 0) return false;
+  std::string h = sl(s, 0, b);
+  if (h.find('(') != std::string::npos || h.find('=') != std::string::npos || h.find(';') != std::string::npos) return false;
+  long open = f + b;
+  long close = matching_brace(t, open);
+  if (close < 0) return false;
+  open_out = open;
+  close_out = close;
+  return true;
+}
+
+// Ruby namespace_opened? (line 2609).
+bool namespace_opened(const std::string &opener, const std::string &ns) {
+  std::string key = "namespace " + ns;
+  long i = str_index(opener, key, 0);
+  if (i < 0) return false;
+  std::string rest = sl(opener, i + (long)key.size(), (long)opener.size());
+  size_t j = 0;
+  while (j < rest.size() && white_c((unsigned char)rest[j])) j += 1;
+  return j < rest.size() && rest[j] == '{';
+}
+
+// A unit piece: a top-level piece with its wrap (the opener and closer of the linkage or namespace blocks around it).
+struct UnitPiece {
+  long st, en;
+  std::string kind;
+  bool body;
+  bool has_wrap = false;
+  std::string wo, wc;
+};
+
+// Ruby flatten_linkage (line 2623): the linkage and namespace blocks with device code are cut into their own pieces.
+std::vector<UnitPiece> flatten_linkage(const std::string &text, const std::vector<UnitPiece> &raw) {
+  std::vector<UnitPiece> out;
+  for (const auto &pc : raw) {
+    std::string t = sl(text, pc.st, pc.en);
+    long open = 0, close = 0;
+    bool blk = pc.kind != "pp" && pc.body && linkage_block(t, open, close);
+    if (!blk) {
+      out.push_back(pc);
+      continue;
+    }
+    std::string inner = sl(t, open + 1, close);
+    long base = pc.st + open + 1;
+    std::vector<UnitPiece> sub;
+    for (const auto &q : top_pieces(inner))
+      sub.push_back(UnitPiece{base + q.st, base + q.en, q.kind, q.body, false, std::string(), std::string()});
+    std::string wo = sl(t, 0, open + 1);
+    std::string wc = sl(t, close, (long)t.size());
+    for (const auto &inn : flatten_linkage(text, sub)) {
+      UnitPiece np = inn;
+      std::string iw0 = inn.has_wrap ? inn.wo : std::string();
+      std::string iw1 = inn.has_wrap ? inn.wc : std::string();
+      np.has_wrap = true;
+      np.wo = wo + iw0;
+      np.wc = iw1 + wc;
+      out.push_back(np);
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
