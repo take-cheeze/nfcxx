@@ -1798,6 +1798,28 @@ BUILTIN_DEFS = {
   "trunc" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float trunc(float a) { return __nfcxx_truncf(a); }\n",
   "roundf" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float roundf(float a) { float t = __nfcxx_truncf(a); float d = a - t; " \
               "if (d >= 0.5f) t += 1.0f; else if (d <= -0.5f) t -= 1.0f; return t; }\n",
+  # ceilf and fmaf: one PTX instruction each (cvt.rpi, fma.rn: exact). log2f: lg2.approx (see FLOAT_BUILTINS; exact at
+  # powers of two, error bound in docs/notes/gpu.md).
+  "ceilf" => "extern \"C\" float __nfcxx_ceilf(float);\nstatic inline float ceilf(float a) { return __nfcxx_ceilf(a); }\n",
+  "fmaf" => "extern \"C\" float __nfcxx_fmaf(float, float, float);\nstatic inline float fmaf(float a, float b, float c) { return __nfcxx_fmaf(a, b, c); }\n",
+  # log2f: an exact exponent at a positive power of two (the bits say so; a subnormal one is scaled up by 2^24 first), else
+  # lg2.approx. Its error is not bounded at powers of two, and llama.cpp takes floorf(log2f(n)) of head counts.
+  "log2f" => "extern \"C\" float __nfcxx_log2f(float);\n" \
+             "static inline float log2f(float a) { if (a > 0.0f) { float s = a; int off = 0; unsigned u = __float_as_uint(a); " \
+             "if ((u >> 23) == 0) { s = a * 16777216.0f; off = -24; u = __float_as_uint(s); } " \
+             "if ((u & 0x007fffffu) == 0 && (u >> 23) != 0xffu) return (float)((int)(u >> 23) - 127 + off); } " \
+             "return __nfcxx_log2f(a); }\n",
+  # erff: the Maclaurin series of erf in double (alternating terms, |x| <= 4; beyond that erf rounds to +-1 as a float).
+  # Error: the series' rounding is about 1e-11 at |x| = 4 and far less below it, well under half a float ulp of erf.
+  "erff" => "static inline float erff(float a) { if (a != a) return a; double x = (double)a; double ax = x < 0.0 ? -x : x; " \
+            "if (ax > 4.0) return x < 0.0 ? -1.0f : 1.0f; double t = ax; double sum = 0.0; double x2 = ax * ax; " \
+            "for (int n = 0; n < 200; n++) { double term = t / (double)(2 * n + 1); sum += term; double ad = term < 0.0 ? -term : term; " \
+            "if (ad <= 1e-17 * sum) break; t = -t * x2 / (double)(n + 1); } double v = 1.1283791670955126 * sum; " \
+            "return (float)(x < 0.0 ? -v : v); }\n",
+  # Limits of <limits.h> that the device unit uses.
+  "INT_MAX" => "#define INT_MAX 2147483647\n",
+  "INT_MIN" => "#define INT_MIN (-2147483647 - 1)\n",
+  "UINT_MAX" => "#define UINT_MAX 4294967295U\n",
   # sinf and cosf (the helper is shared, see needed in the rewrite): Cephes-style. The argument is reduced to r in
   # [-pi/4, pi/4] by the nearest multiple n of pi/2 (three-part constant, exact for n < 2^15 or so), and the quadrant
   # n mod 4 picks sin or cos of r and the sign. Polynomials of Cephes' sinf/cosf. Error and bound: docs/notes/gpu.md.
@@ -2839,6 +2861,7 @@ def device_tu(text)
   # Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
   needed["__nfcxx_sincosf"] = true if needed["sinf"] || needed["cosf"]
   needed["__nfcxx_expm1f"] = true if needed["expm1f"] || needed["tanhf"]
+  needed["__float_as_uint"] = true if needed["log2f"]
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
