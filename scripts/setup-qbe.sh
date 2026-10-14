@@ -26,6 +26,9 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 # QBE: scripts/qbe-empty-struct.patch (an empty struct with no alignment left 1 << -1 in parse.c: a garbage alloc size when it
 # is passed by value, e.g. libc++'s std::min comparator)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-struct.patch"
+# QBE: scripts/qbe-apple-addend.patch (arm64 Apple: an address with an offset is sym+off@page, not sym@page+off, which ld64
+# rejects as a relocation)
+patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-apple-addend.patch"
 make -C "$root/build/qbe" -j"$jobs" >/dev/null
 # cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
 # EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".

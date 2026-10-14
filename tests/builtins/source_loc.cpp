@@ -14,4 +14,3 @@ int main() {
   fails += n < 14 || strcmp(f + n - 14, "source_loc.cpp") != 0;
   return fails;
 }
-// MACOS-XFAIL-qbe: ld64 rejects a relocation (type 15, 8-byte pc-relative to an external symbol) in the object QBE emits for where()
