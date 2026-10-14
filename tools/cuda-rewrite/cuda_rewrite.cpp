@@ -1044,9 +1044,16 @@ bool int_expr_value(const std::string &text, long pos, const std::string &s, lon
       while (j < n && ident_c(ch(s, j))) j += 1;
       toks.push_back(Tok{(c >= '0' && c <= '9') ? 0 : 1, sl(s, i, j)});
       i = j;
-    } else if (std::string("+-*/%()").find((char)c) != std::string::npos) {
+    } else if (std::string("+-*/%()?:").find((char)c) != std::string::npos) {
       toks.push_back(Tok{2, std::string(1, (char)c)});
       i += 1;
+    } else if (c == '<' || c == '>' || c == '=' || c == '!') {
+      // Comparisons: < <= > >= == != (a lone '=' is an assignment, not an expression).
+      bool two = i + 1 < n && ch(s, i + 1) == '=';
+      std::string op = two ? s.substr((size_t)i, 2) : std::string(1, (char)c);
+      if (op == "=") return false;
+      toks.push_back(Tok{2, op});
+      i += (long)op.size();
     } else {
       return false;
     }
@@ -1086,6 +1093,43 @@ bool int_expr_value(const std::string &text, long pos, const std::string &s, lon
     out = v;
     return true;
   };
+  std::function<bool(long &)> cmpexpr, ternary;
+  cmpexpr = [&](long &out) -> bool {
+    long v;
+    if (!expr(v)) return false;
+    while (p < toks.size() && toks[p].kind == 2 &&
+           (toks[p].text == "<" || toks[p].text == "<=" || toks[p].text == ">" || toks[p].text == ">=" ||
+            toks[p].text == "==" || toks[p].text == "!=")) {
+      std::string op = toks[p].text;
+      p += 1;
+      long r;
+      if (!expr(r)) return false;
+      if (op == "<") v = v < r;
+      else if (op == "<=") v = v <= r;
+      else if (op == ">") v = v > r;
+      else if (op == ">=") v = v >= r;
+      else if (op == "==") v = v == r;
+      else v = v != r;
+    }
+    out = v;
+    return true;
+  };
+  ternary = [&](long &out) -> bool {
+    long c;
+    if (!cmpexpr(c)) return false;
+    if (!(p < toks.size() && toks[p].kind == 2 && toks[p].text == "?")) {
+      out = c;
+      return true;
+    }
+    p += 1;
+    long a, b;
+    if (!ternary(a)) return false;
+    if (!(p < toks.size() && toks[p].kind == 2 && toks[p].text == ":")) return false;
+    p += 1;
+    if (!ternary(b)) return false;
+    out = c ? a : b;
+    return true;
+  };
   factor = [&](long &out) -> bool {
     if (p >= toks.size()) return false;
     Tok tk = toks[p];
@@ -1104,7 +1148,7 @@ bool int_expr_value(const std::string &text, long pos, const std::string &s, lon
     }
     if (tk.text == "(") {
       long v;
-      if (!expr(v)) return false;
+      if (!ternary(v)) return false;
       if (!(p < toks.size() && toks[p].kind == 2 && toks[p].text == ")")) return false;
       p += 1;
       out = v;
@@ -1119,7 +1163,7 @@ bool int_expr_value(const std::string &text, long pos, const std::string &s, lon
     return false;
   };
   long value_out = 0;
-  ok = expr(value_out);
+  ok = ternary(value_out);
   if (!ok) return false;
   if (p != toks.size()) return false;
   value = value_out;
@@ -4512,6 +4556,56 @@ long matching_close(const std::string &s, long open) {
   return -1;
 }
 
+// The literal values of the pack `pack` (`template <int... pack, ...>`) at the calls of the template function whose
+// header is the nearest one before pos (softmax.cu: `launch_soft_max_kernels<32, 64, ...>(...)`). Every call must pass
+// the same literal values; a non-literal argument, or calls that differ, is refused: the instances are not known.
+std::vector<std::string> pack_values_at(const std::string &text, long pos, const std::string &pack) {
+  long hdr = -1, hdr_end = -1;
+  for (long k = pos; k >= 0 && hdr < 0; k--) {
+    if (!word_at(text, k, "template")) continue;
+    long lt = k + 8;
+    while (lt < (long)text.size() && text[(size_t)lt] == ' ') lt += 1;
+    if (ch(text, lt) != '<') continue;
+    long gt = str_index(text, ">", lt);
+    if (gt < 0) continue;
+    if (str_index(sl(text, lt, gt), "... " + pack, 0) >= 0) {
+      hdr = k;
+      hdr_end = gt;
+    }
+  }
+  if (hdr < 0) refuse("pack " + pack + " at line " + std::to_string(line_of(text, pos)) + " has no enclosing template header");
+  long lp = str_index(text, "(", hdr_end);
+  if (lp < 0) refuse("pack " + pack + ": no function after its template header");
+  long nm_end = lp;
+  while (nm_end > 0 && (text[(size_t)nm_end - 1] == ' ' || text[(size_t)nm_end - 1] == '\n')) nm_end -= 1;
+  long nm_start = nm_end;
+  while (nm_start > 0 && ident_c(ch(text, nm_start - 1))) nm_start -= 1;
+  std::string fn = sl(text, nm_start, nm_end);
+  std::vector<std::vector<std::string>> calls;
+  for (long k = 0; k < (long)text.size(); k++) {
+    if (!word_at(text, k, fn)) continue;
+    long p = k + (long)fn.size();
+    if (ch(text, p) != '<') continue;
+    long gt = str_index(text, ">", p);
+    if (gt < 0) refuse("pack " + pack + ": unterminated template argument list of " + fn);
+    std::vector<std::string> vals;
+    for (auto &a : split_top(sl(text, p + 1, gt))) {
+      std::string v = strip(a);
+      bool digits = !v.empty();
+      for (char c : v)
+        if (c < '0' || c > '9') digits = false;
+      if (!digits) refuse("pack " + pack + ": " + fn + " is called with a non-literal template argument '" + v + "'");
+      vals.push_back(v);
+    }
+    calls.push_back(vals);
+  }
+  if (calls.empty()) refuse("pack " + pack + ": " + fn + " is never called, so its values are not known");
+  for (const auto &c : calls)
+    if (c != calls[0])
+      refuse("pack " + pack + ": " + fn + " is called with different literal values, so one set of instances is not known");
+  return calls[0];
+}
+
 // A generic lambda whose only calls pass literal std::integral_constant values (ssm-conv.cu: `auto launch_kernel =
 // [&](auto NC) { constexpr int kNC = decltype(NC)::value; ... }`, called from a switch with 3, 4, 5, 9, 15). Each call is
 // replaced by the lambda body with the parameter substituted (decltype(NC)::value becomes the literal, NC the
@@ -4556,8 +4650,19 @@ std::string inline_generic_lambdas(const std::string &text) {
       while (!pn.empty() && pn.back() == ' ') pn.pop_back();
       while (!pn.empty() && pn.front() == ' ') pn.erase(pn.begin());
       if (pn.empty()) continue;
+      // An optional trailing return type (`-> bool`) may sit between the parameter list and the body.
       long bo = rp + 1;
       while (bo < n && (ch(out, bo) == ' ' || ch(out, bo) == '\n' || ch(out, bo) == '\t')) bo += 1;
+      if (sl(out, bo, bo + 2) == "->") {
+        bool ret_ok = true;
+        for (long t = bo; t < n && ch(out, t) != '{'; t++) {
+          char c = ch(out, t);
+          if (!(c == '-' || c == '>' || c == ' ' || c == '\t' || ident_c(c))) ret_ok = false;
+        }
+        if (!ret_ok) continue;
+        bo = str_index(out, "{", rp);
+        if (bo < 0) continue;
+      }
       if (ch(out, bo) != '{') continue;
       long bc = matching_close(out, bo);
       if (bc < 0) continue;
@@ -4574,6 +4679,91 @@ std::string inline_generic_lambdas(const std::string &text) {
       param = pn;
     }
     if (def_start < 0) break;
+
+    // A fold over a pack: `(name(std::integral_constant<int, P>{}) || ...)`, where P is a pack of the enclosing template.
+    // Its values are the literal template arguments of that template's one call (pack_values_at). The fold becomes one
+    // instance per value, each an immediately-invoked lambda with the body inlined, joined with ||; the definition goes.
+    {
+      long fold_s = -1, fold_e = -1;
+      std::string pack;
+      std::string key = "std::integral_constant<int, ";
+      for (long k = 0; k < n && fold_s < 0; k++) {
+        if (k >= def_start && k < def_end) {
+          k = def_end - 1;
+          continue;
+        }
+        long e = skip_literal(out, k);
+        if (e >= 0) {
+          k = e - 1;
+          continue;
+        }
+        if (!word_at(out, k, name)) continue;
+        long p = k + (long)name.size();
+        while (p < n && (ch(out, p) == ' ' || ch(out, p) == '\t')) p += 1;
+        if (ch(out, p) != '(') continue;
+        long q = p + 1;
+        while (q < n && (ch(out, q) == ' ' || ch(out, q) == '\t')) q += 1;
+        if (sl(out, q, q + (long)key.size()) != key) continue;
+        q += (long)key.size();
+        long r = q;
+        while (r < n && ident_c(ch(out, r))) r += 1;
+        std::string pk = sl(out, q, r);
+        if (pk.empty() || sl(out, r, r + 3) != ">{}") continue;
+        r += 3;
+        if (ch(out, r) != ')') continue;
+        r += 1;
+        while (r < n && (ch(out, r) == ' ' || ch(out, r) == '\t')) r += 1;
+        if (sl(out, r, r + 6) != "|| ...") continue;
+        long fc = r + 6;
+        while (fc < n && (ch(out, fc) == ' ' || ch(out, fc) == '\t')) fc += 1;
+        if (ch(out, fc) != ')') continue;
+        long fo = k - 1;
+        while (fo >= 0 && (ch(out, fo) == ' ' || ch(out, fo) == '\t' || ch(out, fo) == '\n')) fo -= 1;
+        if (ch(out, fo) != '(') continue;
+        fold_s = fo;
+        fold_e = fc + 1;
+        pack = pk;
+      }
+      if (fold_s >= 0) {
+        std::vector<std::string> vals = pack_values_at(out, fold_s, pack);
+        if (vals.empty()) refuse("pack " + pack + " of generic lambda " + name + " has no values");
+        std::string inner = sl(out, body_open + 1, body_close);
+        std::string dec = "decltype(" + param + ")::value";
+        std::string joined;
+        for (const auto &v : vals) {
+          std::string r;
+          for (size_t i = 0; i < inner.size();) {
+            if (inner.compare(i, dec.size(), dec) == 0) {
+              r += v;
+              i += dec.size();
+              continue;
+            }
+            if (inner.compare(i, param.size(), param) == 0 && (i == 0 || !ident_c((unsigned char)inner[i - 1])) &&
+                (i + param.size() >= inner.size() || !ident_c((unsigned char)inner[i + param.size()]))) {
+              r += "std::integral_constant<int, " + v + ">";
+              i += param.size();
+              continue;
+            }
+            r.push_back(inner[i]);
+            i += 1;
+          }
+          if (!joined.empty()) joined += " || ";
+          joined += "([=]() -> bool {" + r + "})()";
+        }
+        std::string rep = "(" + joined + ")";
+        // Replace the fold and remove the definition; the two ranges are disjoint.
+        std::string next;
+        if (fold_s > def_start) {
+          next = out.substr(0, (size_t)def_start) + out.substr((size_t)def_end, (size_t)(fold_s - def_end)) + rep +
+                 out.substr((size_t)fold_e);
+        } else {
+          next = out.substr(0, (size_t)fold_s) + rep + out.substr((size_t)fold_e, (size_t)(def_start - fold_e)) +
+                 out.substr((size_t)def_end);
+        }
+        out = next;
+        continue;
+      }
+    }
 
     // Every call of the lambda must pass a literal integral_constant; each call is one instance.
     struct Call {
