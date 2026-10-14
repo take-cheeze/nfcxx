@@ -3,6 +3,7 @@
 require 'json'
 require 'set'
 require_relative 'annotations'
+require_relative 'ir_type_feedback'
 
 # TYPE_CHECK (docs/adr/0412): the types bc2cpp's whole-program inference settled on, as data.
 #
@@ -32,7 +33,7 @@ module TypeFacts
                    :ivar_layout, :element_raw, :element_poison_reason, :hash_element_raw, :hash_poison_reason,
                    :container_constants, :gen, :contradictions, :dynamic_names, :call_sites, :root,
                    :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, :constant_sites,
-                   :modules, :superclass_of, :integer_constants, :signature_arg_types, keyword_init: true)
+                   :modules, :superclass_of, :integer_constants, :signature_arg_types, :signature_contracts, :ir_return_facts, :included_modules, :prepended_modules, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
@@ -111,6 +112,8 @@ module TypeFacts
     gen = ctx.gen
     defs = ctx.registry.values.flatten.select(&:irep).uniq(&:irep)
     sites = ctx.call_sites
+    feedback = IrTypeFeedback.collect(ctx)
+    ctx.ir_return_facts = feedback[:returns]
     methods = defs.filter_map { |d| method_row(ctx, gen, d, reader, sites) }
     ivars = ivar_rows(ctx, gen, reader)
     consts = const_rows(ctx)
@@ -123,6 +126,7 @@ module TypeFacts
       'annotations' => annotation_rows(ctx, defs, reader),
       'contradictions' => contradiction_rows(ctx, gen, defs, reader),
       'signature_diagnostics' => Array(ctx.signature_diagnostics),
+      'ir_feedback' => feedback[:rows],
       'summary' => nil
     }.tap { |facts| facts['summary'] = summarize(facts) }
   end
@@ -163,11 +167,7 @@ module TypeFacts
     end
     signature_types = ctx.signature_arg_types&.dig(d.irep, k.to_s)
     if types.empty? && signature_types
-      names = signature_types.map { |name| name == :NilClass ? 'nil' : name.to_s }
-      if names.include?('TrueClass') && names.include?('FalseClass')
-        names = ['bool'] + (names - %w[TrueClass FalseClass])
-      end
-      types << [names.join(' | '), 'signature']
+      types << [BytecodeIR::Types.type_name(signature_types), 'signature']
     end
     declared = types.dup
     inferred = inferred_param_types(ctx, gen, d, irep, k, mono)
@@ -262,14 +262,22 @@ module TypeFacts
         row['source'] = declared_source(ctx, d)
       end
     end
+    if !row['type'] && (signature = ctx.signature_contracts&.ir_return_types&.[](d.irep))
+      row['type'] = BytecodeIR::Types.type_name(signature)
+      row['source'] = 'signature'
+    end
     inferred = inferred_return(ctx, gen, d, irep, mono) || trivial_return(irep)
     if row['type']
       row['inferred'] = inferred if inferred
       return row
     end
+    ir_fact = ctx.ir_return_facts&.[](d.irep)
     if inferred
       row['type'] = inferred
       row['source'] = 'inferred:return-analysis'
+    elsif ir_fact && !ir_fact.declared?
+      row['type'] = BytecodeIR::Types.type_name(ir_fact.classes)
+      row['source'] = 'inferred:bytecode-ir'
     else
       row['reason'] = return_reason(ctx, gen, d, irep)
     end
@@ -431,6 +439,10 @@ module TypeFacts
           row['type'] = seed.type.kind == :class ? seed.type.cls : seed.type.kind.to_s.capitalize
           row['source'] = 'signature'
         end
+        if row['type'].nil? && (seed = ctx.signature_contracts&.ir_ivar_types&.[]([owner, name.to_s]))
+          row['type'] = BytecodeIR::Types.type_name(seed)
+          row['source'] = 'signature'
+        end
         elem = (ctx.element_raw[owner] || {})[name]
         helem = (ctx.hash_element_raw[owner] || {})[name]
         row['element'] = "Array[#{elem}]" if elem && elem != ClassLayout::UNKNOWN && elem.is_a?(String)
@@ -452,6 +464,15 @@ module TypeFacts
         end
         rows << row
       end
+    end
+    (ctx.signature_contracts&.ir_ivar_types || {}).each do |(owner, name), types|
+      next if rows.any? { |row| row['owner'] == owner && row['name'] == "@#{name}" }
+
+      signature = ctx.signature_ivars[[owner, "@#{name}"]]
+      rows << { 'owner' => owner, 'name' => "@#{name}", 'type' => BytecodeIR::Types.type_name(types),
+                'element' => nil, 'source' => 'signature', 'reason' => nil, 'embedded' => nil,
+                'file' => signature.loc.file, 'line' => signature.loc.line, 'col' => signature.loc.col,
+                'scope' => scope_of(signature.loc.file) }
     end
     rows
   end

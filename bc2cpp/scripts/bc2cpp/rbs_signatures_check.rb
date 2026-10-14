@@ -169,6 +169,10 @@ Dir.mktmpdir do |dir|
     true
   end
   check.call('self cannot be seeded as an argument contract', invalid)
+  alias_definition = MethodDef.new(owner: 'OtherOwner', name: 'choose', irep: body.label)
+  shared = RbsSignatures.apply(matched, { body.label => body }, { 'choose' => [definition, alias_definition] }, {}, {}, {})
+  check.call('shared IREPs with ambiguous owners do not acquire one owner contract',
+             RbsSignatures.ir_types(shared, body).fact_at(1, '1').nil?)
 end
 
 # ------------------------------------------------------------------------------------------------ 2. fixtures
@@ -324,6 +328,105 @@ else
                  ['Integer | nil', 'signature'], ['bool', 'signature'], ['String | Symbol', 'signature']
                ])
     check.call('rich contracts do not change generated dispatch', gen.call(rich_source, '') == gen.call(rich_source, File.join(dir, 'sig/rich.rbs')))
+
+    puts '== ivar and return contracts, feedback and RBS suggestions'
+    feedback_source = <<~RUBY
+      class Feedback
+        def read
+          @item
+        end
+        def produce(flag)
+          flag ? 'text' : :tag
+        end
+        def invoke
+          produce(true)
+        end
+        def dynamic(other)
+          other.produce(true)
+        end
+        def bad_store
+          @item = :bad
+        end
+        def bad_return
+          :bad
+        end
+        def numeric
+          3
+        end
+        def enumerable
+          []
+        end
+        def external
+          1
+        end
+        def maybe_wrong(flag)
+          flag ? 1 : :bad
+        end
+      end
+      class FeedbackChild < Feedback
+        def inherited
+          @item
+        end
+      end
+    RUBY
+    feedback_sig = <<~RBS
+      class Feedback
+        @item: Integer?
+        @unassigned: bool?
+        def read: () -> Integer?
+        def produce: (untyped flag) -> (String | Symbol)
+        def invoke: () -> (String | Symbol)
+        def bad_return: () -> Integer?
+        def numeric: () -> Numeric
+        def enumerable: () -> Enumerable
+        def external: () -> ExternalContract
+        def maybe_wrong: (untyped flag) -> Integer?
+      end
+    RBS
+    File.write(File.join(dir, 'feedback.rb'), feedback_source)
+    File.write(File.join(dir, 'sig/feedback.rbs'), feedback_sig)
+    feedback_out, feedback_err, feedback_status = type_check.call(dir, '--files', 'feedback.rb', '--format', 'json',
+                                                                 '--no-sends', '--sig', 'sig/feedback.rbs', '--emit-rbs-suggestions', 'suggested', '--keep', 'feedback-kept')
+    check.call("feedback returns exit 1 for definite contract mismatches #{feedback_err.lines.first&.strip}", feedback_status.exitstatus == 1)
+    report = JSON.parse(feedback_out)
+    feedback_rows = report['ir_feedback']
+    find_return = ->(name) { feedback_rows.find { |row| row['method'] == name && row['kind'] == 'return' } }
+    check.call('nullable ivar reads carry their contract provenance', find_return.call('read')['type'] == 'Integer | nil' &&
+               find_return.call('read')['status'] == 'declared' && find_return.call('read')['contracts'] == ['ivar:@item'])
+    check.call('inherited ivar contracts reach subclass reads', find_return.call('inherited')['type'] == 'Integer | nil' &&
+               find_return.call('inherited')['status'] == 'declared')
+    check.call('implicit self-call returns use the matched method contract', find_return.call('invoke')['type'] == 'String | Symbol' &&
+               find_return.call('invoke')['contracts'] == ['self-call:produce'])
+    check.call('a dynamic same-name call stays unknown with its producer reason', find_return.call('dynamic')['status'] == 'unknown' &&
+               find_return.call('dynamic')['reason'] == 'unknown:SEND')
+    check.call('ivar stores use the value operand, not the leading name', feedback_rows.any? { |row|
+      row['kind'] == 'ivar_store' && row['detail'] == '@item' && row['status'] == 'mismatch' && row['type'] == 'Symbol'
+    })
+    check.call('rich ivar and return mismatches give TC1007 diagnostics', report['diagnostics'].count { |diag| diag['code'] == 'TC1007' } == 2)
+    check.call('Integer fits a Numeric return contract', find_return.call('numeric')['status'] == 'inferred')
+    check.call('Array satisfies its Enumerable mixin contract', find_return.call('enumerable')['status'] == 'inferred' &&
+               find_return.call('enumerable')['compatibility'] == 'checked')
+    check.call('an unresolved external nominal type does not create a false mismatch',
+               find_return.call('external')['status'] == 'inferred' && find_return.call('external')['compatibility'] == 'unknown')
+    check.call('a partially overlapping may-set produces a warning, not a definite mismatch',
+               find_return.call('maybe_wrong')['status'] == 'possible_mismatch' &&
+               report['diagnostics'].count { |diag| diag['code'] == 'TC1008' && diag['severity'] == 'warning' } == 1)
+    check.call('a declaration-only nullable ivar is reported', report['ivars'].any? { |ivar|
+      ivar['name'] == '@unassigned' && ivar['type'] == 'bool | nil' && ivar['source'] == 'signature'
+    })
+    check.call('IR-inferred union returns are available as RBS suggestions', report['rbs_suggestions'].any? { |suggestion|
+      suggestion['method'] == 'produce' && suggestion['type'] == 'String | Symbol' && suggestion['source'] == 'inferred:bytecode-ir'
+    })
+    check.call('contract-dependent reads are not independent inferred suggestions', report['rbs_suggestions'].none? { |suggestion|
+      %w[read inherited invoke dynamic].include?(suggestion['method'])
+    })
+    suggested = File.read(File.join(dir, 'suggested/Feedback.rbs'))
+    check.call('suggestion export replaces a contradicted return with its inferred type',
+               suggested.include?('def bad_return: () ?{ (*untyped) -> untyped } -> Symbol'))
+    check.call('suggestion files parse as ordinary RBS', !RBS::Parser.parse_signature(suggested).nil?)
+    text_out, _text_err, text_status = type_check.call(dir, '--facts', 'feedback-kept/facts.json', '--all', '--no-sends')
+    check.call('text feedback explains unknowns and lists inferred RBS suggestions', text_status.exitstatus == 1 &&
+               text_out.include?('[TC2004]') && text_out.include?('unknown:SEND') && text_out.include?('Feedback#produce -> String | Symbol'))
 
     puts '== the comment wins over a signature'
     File.write(File.join(dir, 'both.rb'), commented)

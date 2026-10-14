@@ -3,6 +3,7 @@
 require 'json'
 require 'set'
 require_relative 'receiver_proof_report_columns'
+require_relative 'type_check_rbs'
 
 # TYPE_CHECK (docs/adr/0412): turns the facts bc2cpp wrote (type_facts.rb) and, optionally, the receiver-proof rows
 # (BC2CPP_RECEIVER_PROOF_REPORT, ADR 0331) into the three outputs of scripts/bc2cpp/type_check.rb:
@@ -17,6 +18,9 @@ require_relative 'receiver_proof_report_columns'
 #   TC1002 error    a signature file the loader could not use (unsupported syntax, parse error)
 #   TC1003 warning  a signature names a method / ivar the program does not define
 #   TC1004 warning  an annotation token bc2cpp ignores, or an annotation whose parameter count is not the method's
+#   TC1007 error    an inferred IR may-set is disjoint from a nominal RBS return/ivar contract
+#   TC1008 warning  an inferred IR may-set partly overlaps the contract
+#   TC2004 info     (--all) an IR query is unknown, with its refusal reason
 #   TC2001 info     (--all) a parameter has no type, with the reason bucket
 #   TC2002 info     (--all) a return has no type, with the reason bucket
 #   TC2003 info     (--all) an ivar has no type, with the reason bucket
@@ -163,6 +167,20 @@ module TypeCheckReport
       out << Diagnostic.new(file: d['file'], line: d['line'], col: d['col'], severity: d['severity'], code: d['code'],
                             message: d['message'])
     end
+    Array(facts['ir_feedback']).each do |row|
+      next unless scope == 'all' || row['scope'] == scope
+      if all && row['status'] == 'unknown'
+        out << Diagnostic.new(file: row['file'], line: row['line'], col: row['col'], severity: 'info', code: 'TC2004',
+                              message: "#{row['owner']}##{row['method']} #{row['kind']} #{row['detail']}: IR type unknown (#{row['reason']})")
+      end
+      next unless %w[mismatch possible_mismatch].include?(row['status'])
+      possible = row['status'] == 'possible_mismatch'
+
+
+      out << Diagnostic.new(file: row['file'], line: row['line'], col: row['col'], severity: possible ? 'warning' : 'error', code: possible ? 'TC1008' : 'TC1007',
+                            message: "#{row['owner']}##{row['method']} #{row['kind'] == 'return' ? 'return' : row['detail']}: inferred #{row['type']} " \
+                                     "#{possible ? 'may exceed' : 'falls outside'} RBS contract #{row['expected']}")
+    end
     suggestions.first(top).each_with_index do |s, rank|
       next unless s['file']
 
@@ -208,6 +226,7 @@ module TypeCheckReport
     consts = facts['constants'].select { |c| scope == 'all' || c['scope'] == scope }
     params = methods.flat_map { |m| m['params'] }
     {
+      'ir_feedback' => tally(Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope }.map { |row| row['status'] }),
       'methods' => methods.size,
       'methods_with_params' => methods.count { |m| !m['params'].empty? },
       'params' => params.size, 'params_typed' => params.count { |p| p['type'] },
@@ -254,6 +273,9 @@ module TypeCheckReport
     out << format("  ivars typed             %6d of %6d  %s  (%d with an element class)\n", s['ivars_typed'], s['ivars'], pct(s['ivars_typed'], s['ivars']), s['ivars_with_element'])
     out << format("  constants typed         %6d of %6d\n", s['constants_typed'], s['constants'])
     out << format("  annotations / signatures %5d   contradictions %d\n", s['annotations'], s['contradictions'])
+    unless Array(s['ir_feedback']).empty?
+      out << "  IR feedback              #{s['ir_feedback'].map { |status, count| "#{status}=#{count}" }.join(' ')}\n"
+    end
     out << "\n"
     section = lambda do |title, pairs, limit|
       out << "-- #{title} --\n"
@@ -267,6 +289,16 @@ module TypeCheckReport
     section.call('untyped returns by producer of the unresolved return sites', s['return_reasons'], 12)
     section.call('typed returns by source', s['return_sources'], 10)
     section.call('untyped ivars by reason (stage:ADR 0382 bucket)', s['ivar_reasons'], 14)
+    feedback = Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope }
+    unless feedback.empty?
+      section.call('IR queries left unknown by reason', tally(feedback.select { |row| row['status'] == 'unknown' }.map { |row| row['reason'] }), 12)
+      out << "-- inferred RBS return suggestions (top #{top}) --\n"
+      TypeCheckRbs.inferred_return_suggestions(facts, scope: scope).first(top).each do |row|
+        out << "  #{row['owner']}##{row['method']} -> #{row['type']}\n"
+      end
+      out << "\n"
+    end
+
     out << "-- signatures that would remove the most by-name sends (top #{top}) --\n"
     if suggestions.empty?
       out << (sends ? "       (none)\n" : "       (not collected: run without --no-sends)\n")
@@ -310,6 +342,8 @@ module TypeCheckReport
     ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }
     JSON.pretty_generate({ 'version' => facts['version'], 'scope' => scope, 'summary' => summary, 'diagnostics' => diags.map(&:to_h),
                            'suggestions' => suggestions, 'methods' => methods, 'ivars' => ivars,
-                           'constants' => facts['constants'], 'annotations' => facts['annotations'] }) << "\n"
+                           'constants' => facts['constants'], 'annotations' => facts['annotations'],
+                           'rbs_suggestions' => TypeCheckRbs.inferred_return_suggestions(facts, scope: scope),
+                           'ir_feedback' => Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope } }) << "\n"
   end
 end
