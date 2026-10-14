@@ -2148,6 +2148,253 @@ std::string rewrite(const std::string &text, const std::string &orig) {
   return out;
 }
 
+// Ruby tokens_of (line 1911): the identifiers of a text, outside literals and comments.
+std::vector<std::string> tokens_of(const std::string &s) {
+  std::vector<std::string> out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    // comments are not code: a word in one (a `__device__` mentioned above a host function) is no token
+    if (ch(s, i) == '/' && ch(s, i + 1) == '/') {
+      long q = str_index(s, "\n", i);
+      i = q < 0 ? n : q;
+      continue;
+    }
+    if (ch(s, i) == '/' && ch(s, i + 1) == '*') {
+      long q = str_index(s, "*/", i + 2);
+      i = q < 0 ? n : q + 2;
+      continue;
+    }
+    int c = ch(s, i);
+    if (c == '_' || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+      long j = i;
+      while (j < n && ident_c(ch(s, j))) j += 1;
+      out.push_back(sl(s, i, j));
+      i = j;
+    } else {
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// Ruby code_text (line 1948): the text with each comment replaced by blanks (its newlines kept).
+std::string code_text(const std::string &s) {
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      if (ch(s, i) == '/') {
+        for (long q = i; q < e; q++) out.push_back(s[(size_t)q] == '\n' ? '\n' : ' ');
+      } else {
+        out += sl(s, i, e);
+      }
+      i = e;
+      continue;
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby code_only? (line 1968): true if s has code outside comments and whitespace.
+bool code_only(const std::string &s) {
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      if (ch(s, i) == '/') {
+        i = e;
+        continue;
+      }
+      return true;
+    }
+    int c = ch(s, i);
+    if (!(c == ' ' || c == '\t' || c == '\n' || c == '\r')) return true;
+    i += 1;
+  }
+  return false;
+}
+
+// Ruby brace_is_initializer? (line 1991): a depth-0 `{` after `=` in its piece is an initializer list, not a body.
+bool brace_is_initializer(const std::string &chunk) {
+  if (str_index(chunk, "(", 0) >= 0) return false;
+  std::vector<std::string> toks = tokens_of(chunk);
+  if (toks.empty()) return false;
+  static const std::vector<std::string> kw = {"struct", "class", "union", "enum", "namespace", "template", "operator"};
+  for (const auto &t : toks)
+    if (std::find(kw.begin(), kw.end(), t) != kw.end()) return false;
+  if (toks.front() == "extern" || toks.front() == "typedef" || toks.front() == "using") return false;
+  return str_index(chunk, "=", 0) >= 0;
+}
+
+// Ruby top_pieces (line 1999): the top-level pieces of a unit. Kind "pp" (a directive) or "code"; body is true when the
+// piece has a brace block at depth 0.
+std::vector<Piece> top_pieces(const std::string &text) {
+  std::vector<Piece> pieces;
+  long n = (long)text.size();
+  long i = 0;
+  long start = 0;
+  long depth = 0;
+  bool paren0 = false;
+  bool body = false;
+  std::string opener;  // text of the depth-0 `{`'s chunk start, to tell namespaces and extern "C" blocks
+  bool has_opener = false;
+  while (i < n) {
+    if (depth == 0 && ch(text, i) == '#' && !code_only(sl(text, start, i))) {
+      // a directive ends at a newline that is not in a comment or literal, or after a backslash
+      long k = i;
+      while (k < n) {
+        long e2 = skip_literal(text, k);
+        if (e2 >= 0) {
+          k = e2;
+          continue;
+        }
+        if (ch(text, k) == '\n' && ch(text, k - 1) != '\\') break;
+        k += 1;
+      }
+      pieces.push_back(Piece{i, k, "pp", false});
+      i = k;
+      start = k;
+      continue;
+    }
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    int c = ch(text, i);
+    if (c == '(') {
+      if (depth == 0) paren0 = true;
+      depth += 1;
+    } else if (c == '[') {
+      depth += 1;
+    } else if (c == ')' || c == ']') {
+      depth -= 1;
+    } else if (c == '{') {
+      if (depth == 0 && !brace_is_initializer(sl(text, start, i))) {
+        body = true;
+        std::vector<std::string> tk = tokens_of(sl(text, start, i));
+        opener = tk.empty() ? std::string() : tk.front();
+        has_opener = !tk.empty();
+      }
+      depth += 1;
+    } else if (c == '}') {
+      depth -= 1;
+      if (depth == 0 && has_opener && (opener == "namespace" || opener == "extern")) {
+        pieces.push_back(Piece{start, i + 1, "code", true});
+        start = i + 1;
+        paren0 = false;
+        body = false;
+        has_opener = false;
+      } else if (depth == 0 && has_opener && !(opener == "struct" || opener == "class" || opener == "union" ||
+                                               opener == "enum" || opener == "typedef" || opener == "using") &&
+                 paren0) {
+        pieces.push_back(Piece{start, i + 1, "code", true});
+        start = i + 1;
+        paren0 = false;
+        body = false;
+        has_opener = false;
+      }
+    } else if (c == ';' && depth == 0) {
+      pieces.push_back(Piece{start, i + 1, "code", body});
+      start = i + 1;
+      paren0 = false;
+      body = false;
+      has_opener = false;
+    }
+    i += 1;
+  }
+  if (!strip(sl(text, start, n)).empty()) pieces.push_back(Piece{start, n, "code", body});
+  return pieces;
+}
+
+// Ruby remove_words (line 2068): removes the whole words of `words` from s, outside literals and comments.
+std::string remove_words(const std::string &s, const std::vector<std::string> &words) {
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      out += sl(s, i, e);
+      i = e;
+      continue;
+    }
+    const std::string *hit = nullptr;
+    for (const auto &w : words)
+      if (word_at(s, i, w)) {
+        hit = &w;
+        break;
+      }
+    if (hit) {
+      i += (long)hit->size();
+      while (i < n && (ch(s, i) == ' ' || ch(s, i) == '\t')) i += 1;
+      continue;
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby function_name (line 2091): the identifier before the first `(` (outside comments and literals); "" when none.
+std::string function_name(const std::string &text) {
+  long paren = -1;
+  long i = 0;
+  long n = (long)text.size();
+  while (i < n) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (ch(text, i) == '(') {
+      paren = i;
+      break;
+    }
+    i += 1;
+  }
+  if (paren < 0) return std::string();  // Ruby nil: callers compare it to a name, which never equals nil
+  std::string head = strip(sl(text, 0, paren));
+  std::string rev;
+  for (size_t k = head.size(); k-- > 0;) {
+    if (!ident_c((unsigned char)head[k])) break;
+    rev.push_back(head[k]);
+  }
+  std::reverse(rev.begin(), rev.end());
+  return rev;
+}
+
+// Ruby $incdirs (line 2120): the -I directories of the driver.
+std::vector<std::string> g_incdirs;
+
+// Ruby system_path? (line 2123): the toolkit and system prefixes are never inlined.
+bool system_path(const std::string &path) {
+  std::string p = path;
+  return p.compare(0, 5, "/usr/") == 0 || p.compare(0, 5, "/opt/") == 0 || p.compare(0, 16, "/usr/local/cuda/") == 0;
+}
+
+// Ruby find_include (line 2128): the file a quoted or angle-bracket include names, when it exists and is not a system path.
+bool find_include(const std::string &dir, const std::string &name, bool quoted, std::string &path_out);
+
+// Ruby expand_includes (line 2135): the quoted local includes of a unit are expanded in place (once per file).
+std::string expand_includes(const std::string &text, const std::string &dir, int depth,
+                            std::map<std::string, bool> &seen);
+std::string strip_launch_bounds(const std::string &s);
+std::string blank_comments(const std::string &s);
+std::string dynamic_shared_rewrite(const std::string &s);
+bool g_device_mode = false;  // Ruby $device
+
 }  // namespace
 
 int main(int argc, char **argv) {
