@@ -849,6 +849,7 @@ struct TemplateHead {
   std::vector<std::string> names;
   std::vector<std::string> parts;
   long pos = 0;
+  long pack = -1;  // the index of the parameter pack among the template parameters (`int... Ns`), or -1
 };
 bool template_head_of(const std::string &text, const std::string &name, TemplateHead &out);
 
@@ -1858,13 +1859,16 @@ bool template_head_of(const std::string &text, const std::string &name, Template
     long rp = matching_paren(header, lp);
     std::vector<std::string> parts = split_top(sl(header, lp + 1, rp));
     std::vector<std::string> names;
+    long pack = -1;
     for (const auto &pr : split_top(sl(text, t.lt + 1, t.close))) {
       std::vector<std::string> pt = tokens_of(strip(ruby_split_eq0(pr)));
+      if (pack < 0 && pr.find("...") != std::string::npos) pack = (long)names.size();
       names.push_back(pt.empty() ? std::string() : pt.back());
     }
     out.names = names;
     out.parts = parts;
     out.pos = tb.open;
+    out.pack = pack;
     return true;
   }
   return false;
@@ -2057,10 +2061,7 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
     // A parameter pack is greedy: the explicit arguments after it all go to the pack, so the names after the pack are not
     // given explicitly. They are deduced from the call's arguments (softmax's launch_soft_max_kernels<32, ..., 4096>(x,
     // mask, ...) leaves T to mask), and the explicit ones stay with the pack.
-    size_t after_pack = 0;
-    if (have_head)
-      for (size_t idx = 0; idx < head.parts.size(); idx++)
-        if (head.parts[idx].find("...") != std::string::npos) after_pack = head.names.size() - idx - 1;
+    size_t after_pack = have_head && head.pack >= 0 ? head.names.size() - (size_t)head.pack - 1 : 0;
     if (have_head && (targs.size() < head.names.size() || after_pack > 0)) {
       long k = cs.second + (long)name.size();
       while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
