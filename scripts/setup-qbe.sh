@@ -8,7 +8,7 @@
 # nfcxx-asan-combined (the pin, a44a644) is the pinned upstream commit plus nfcxx's cproc patches as commits (empty-struct,
 # vaarg-aggregate, empty-copy, array-qual; see docs/notes/freestanding.md and docs/notes/realworld.md for what
 # each one fixes). Move the pin in .gitmodules and the fork together when rebasing those patches onto a new upstream.
-# scripts/qbe-uninit-slot.patch and scripts/qbe-wflag.patch are applied to the QBE copy. Re-run this script after changing the pin.
+# scripts/qbe-uninit-slot.patch, scripts/qbe-wflag.patch and scripts/qbe-empty-align.patch are applied to the QBE copy. Re-run this script after changing the pin.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
@@ -26,6 +26,8 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 # QBE: scripts/qbe-empty-struct.patch (an empty struct with no alignment left 1 << -1 in parse.c: a garbage alloc size when it
 # is passed by value, e.g. libc++'s std::min comparator)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-struct.patch"
+# QBE: scripts/qbe-empty-align.patch (an empty member's alignment is 0, not -1: a nested empty class before a bool fed 1 << -1 padding into the struct size; docs/notes/qbe-empty-align.md)
+patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-align.patch"
 # QBE: scripts/qbe-apple-addend.patch (arm64 Apple: an address with an offset is sym+off@page, not sym@page+off, which ld64
 # rejects as a relocation)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-apple-addend.patch"
