@@ -67,9 +67,11 @@ module TypeCheckRbs
 
   def method_line(m, declared, singleton: false)
     positional = m['params'].map { |p| rbs_type(p['type'], declared) }
-    positional.concat(Array.new(m['opt'].to_i, '?untyped'))
+    positional.concat((0...m['opt'].to_i).map { |index| '?'+rbs_type(Array(m['optional_params'])[index]&.[]('type'), declared) })
     positional << '*untyped' if m['rest']
-    positional << '**untyped' if m['key'].to_i.positive? || m['kdict']
+    keywords = Array(m['keyword_params'])
+    keywords.each { |param| positional << "#{param['required'] ? '' : '?'}#{param['name']}: #{rbs_type(param['type'], declared)}" }
+    positional << '**untyped' if m['kdict'] || keywords.empty? && m['key'].to_i.positive?
     ret = rbs_type(m['return']['type'], declared)
     ret = 'self' if m['return']['type'] == 'self'
     ret = 'void' if m['name'] == 'initialize'

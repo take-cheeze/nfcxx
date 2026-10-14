@@ -30,7 +30,7 @@ module RbsSignatures
   end
   Loc = Struct.new(:file, :line, :col)
   # args: one Type per required positional parameter; ret: Type or nil
-  MethodSig = Struct.new(:owner, :name, :args, :ret, :loc, keyword_init: true)
+  MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
   Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, keyword_init: true)
@@ -149,7 +149,11 @@ module RbsSignatures
     extras << 'keyword parameters' unless fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords
     extras << 'a block type' if mt.block
     diag(out, loc, 'info', 'TC1005', "#{owner}##{m.name}: #{extras.join(', ')} accepted but give no hint") unless extras.empty?
-    out.methods[[owner, m.name.to_s]] = MethodSig.new(owner: owner, name: m.name.to_s, args: args, ret: type_of(fn.return_type), loc: loc)
+    out.methods[[owner, m.name.to_s]] = MethodSig.new(owner: owner, name: m.name.to_s, args: args,
+                                                               optional_args: fn.optional_positionals.map { |param| type_of(param.type) },
+                                                               keywords: (fn.required_keywords.merge(fn.optional_keywords)).to_h { |name, param| [name.to_s, type_of(param.type)] },
+                                                               required_keywords: fn.required_keywords.keys.map(&:to_s).to_set,
+                                                               ret: type_of(fn.return_type), loc: loc)
   end
 
   def type_of(t)
@@ -229,7 +233,7 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_optional_types, :ir_keyword_types, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -238,7 +242,7 @@ module RbsSignatures
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
-                     ivar_sigs: loaded.ivars, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
+                     ivar_sigs: loaded.ivars, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
                      ir_methods: registry.values.flatten.map { |d| [d.owner, d.name.to_s].freeze }.to_set.freeze,
                      ir_owners: registry.values.flatten.select(&:irep).group_by(&:irep).filter_map do |label, defs|
                        owners = defs.map(&:owner).uniq
@@ -273,6 +277,25 @@ module RbsSignatures
           register = (index + 1).to_s
           [register, type.element_classes] if type.element_classes && ap.ir_arg_types[d.irep]&.key?(register)
         end.to_h.freeze
+      end
+      if ap.ir_owners[d.irep] == sig.owner
+        runtime = ireps[d.irep]
+        optional_count = runtime.enter&.enter_fields&.[](1).to_i
+        if Array(sig.optional_args).size == optional_count
+          ap.ir_optional_types[d.irep] = Array(sig.optional_args).each_with_index.filter_map do |type, index|
+            register = (mand + index + 1).to_s
+            commented = annotations[d.irep]&.args&.[](mand + index) || class_annotations[d.irep]&.args&.[](mand + index) ||
+                        element_annotations[d.irep]&.arg_elements&.[](mand + index)
+            next if commented
+
+            [register, type.value_classes] if type.value_classes
+          end.to_h.freeze
+        end
+        runtime_keywords = runtime.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.to_set
+        runtime_optional = runtime.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KEY_P' }.to_set
+        if runtime_keywords == (sig.keywords || {}).keys.to_set && runtime_keywords - runtime_optional == (sig.required_keywords || Set.new)
+          ap.ir_keyword_types[d.irep] = (sig.keywords || {}).filter_map { |name, type| [name, type.value_classes] if type.value_classes }.to_h.freeze
+        end
       end
       comment_return = annotations[d.irep]&.ret || element_annotations[d.irep]&.ret_class || element_annotations[d.irep]&.element
       if (sig.ret&.value_classes || sig.ret&.self_return) && !comment_return
@@ -349,6 +372,7 @@ module RbsSignatures
       BytecodeIR::Types::Fact.new(classes: classes.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
     end
     BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}),
+                         declared_optional_args: applied.ir_optional_types.fetch(irep.label, {}), declared_keywords: applied.ir_keyword_types.fetch(irep.label, {}),
                          declared_arg_elements: applied.ir_arg_elements.fetch(irep.label, {}),
                          declared_ivars: ivars, declared_ivar_elements: ivar_elements, declared_calls: calls, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
   end

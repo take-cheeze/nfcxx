@@ -21,7 +21,7 @@ module BytecodeIR
       def declared? = declared
     end
 
-    def initialize(irep, declared_args: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, source_resolver: nil, call_resolver: nil)
+    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, source_resolver: nil, call_resolver: nil)
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @declared_args = declared_args.to_h do |reg, types|
@@ -31,6 +31,15 @@ module BytecodeIR
         end
         [number.dup.freeze, types.to_set.dup.freeze]
       end.freeze
+      optional = irep.enter&.enter_fields&.[](1).to_i
+      @declared_optional_args = declared_optional_args.to_h do |reg, types|
+        number = reg.to_s
+        unless number.match?(/\A[1-9]\d*\z/) && (required + 1..required + optional).cover?(number.to_i)
+          raise ArgumentError, "bc2cpp: IR optional contract R#{number} is not an optional parameter"
+        end
+        [number.dup.freeze, types.to_set.dup.freeze]
+      end.freeze
+      @declared_keywords = declared_keywords.to_h { |name, types| [name.to_s, types.to_set.dup.freeze] }.freeze
       @declared_ivars = declared_ivars.to_h { |name, types| [name.to_s.delete_prefix('@').freeze, types.to_set.dup.freeze] }.freeze
       @declared_calls = declared_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
       @inferred_calls = inferred_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
@@ -60,6 +69,33 @@ module BytecodeIR
     # A declared fact cannot justify exact dispatch or unchecked native arithmetic.
     def fact_at(index, reg, max_states: DATAFLOW_MAX_STATES, refusal: nil)
       query(index, reg, use_declarations: true, max_states: max_states, refusal: refusal)
+    end
+
+    # A nominal iterator API uses the element bound without the absent-index nil added by [].
+    def element_fact_at(index, reg, max_states: DATAFLOW_MAX_STATES)
+      receiver = fact_at(index, reg, max_states: max_states)
+      return nil unless receiver && receiver.classes == Set[:Array]
+
+      definitions = BytecodeIR.reaching_definitions(@irep, index, reg, origin_transfers: true, max_states: max_states)
+      return nil unless definitions && !definitions.empty?
+
+      elements = Set.new
+      contracts = receiver.contracts.to_set
+      definitions.each do |source|
+        if source.entry? || source.built == :arg
+          bound = @declared_arg_elements[source.reg]
+          contract = "element:argument:R#{source.reg}"
+        else
+          producer = @irep.instructions[source.index]
+          bound = producer.op == 'GETIV' ? @declared_ivar_elements[producer.ivar] : nil
+          contract = "element:ivar:@#{producer.ivar}"
+        end
+        return nil unless bound && !bound.empty?
+
+        elements.merge(bound)
+        contracts << contract
+      end
+      Fact.new(classes: elements.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
     end
 
     private
@@ -96,7 +132,7 @@ module BytecodeIR
 
       source = definitions.any? do |definition|
         definition.entry? || definition.built == :arg ||
-          (%w[GETIV GETCONST GETMCNST].include?(@irep.instructions[definition.index].op) ||
+          (%w[GETIV GETCONST GETMCNST KARG].include?(@irep.instructions[definition.index].op) ||
            ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %w[GETIDX GETIDX0 AREF].include?(@irep.instructions[definition.index].op))
       end
       if source && @source_resolver && (classes = @source_resolver.call(index, reg)) && !classes.empty?
@@ -134,12 +170,13 @@ module BytecodeIR
 
     def declared_definition(definition)
       if definition.entry? || definition.built == :arg
-        return [@declared_args[definition.reg], "argument:R#{definition.reg}"]
+        return [@declared_args[definition.reg] || @declared_optional_args[definition.reg], "argument:R#{definition.reg}"]
       end
       insn = @irep.instructions[definition.index]
       return [nil, nil] unless insn.reg == definition.reg
 
       case insn.op
+      when 'KARG' then [@declared_keywords[insn.sym.to_s], "keyword:#{insn.sym}"]
       when 'GETIV' then [@declared_ivars[insn.ivar], "ivar:@#{insn.ivar}"]
       when 'SSEND', 'SSEND0', 'SSENDB' then [@declared_calls[definition.index], "self-call:#{insn.sym}"]
       else [nil, nil]

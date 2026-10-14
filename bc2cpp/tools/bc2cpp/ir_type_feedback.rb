@@ -53,16 +53,24 @@ module IrTypeFeedback
           next unless BytecodeIR::Types::CALL_OPS.include?(insn.op)
 
           classes = ctx.gen.bytecode_ir_call_result_classes(irep, index)
+          contextual = ctx.gen.bytecode_ir_context_results&.call_classes(irep, index) if ctx.gen.respond_to?(:bytecode_ir_context_results)
+          classes = contextual if contextual && (!classes || contextual.subset?(classes))
           inferred_calls[index] = classes if classes
         end
       end
       source_resolver = if ENV['BC2CPP_IR_SOURCE_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_source_classes)
-                          ->(index, reg) { ctx.gen.bytecode_ir_source_classes(irep, index, reg) }
+                          ->(index, reg) {
+                            classes = ctx.gen.bytecode_ir_source_classes(irep, index, reg)
+                            contextual = ctx.gen.bytecode_ir_context_results&.source_classes(irep, index, reg) if ctx.gen.respond_to?(:bytecode_ir_context_results)
+                            classes = contextual if contextual && (!classes || contextual.subset?(classes))
+                            classes
+                          }
                         end
       inferred_args = {}
       if ENV['BC2CPP_IR_ARGUMENT_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_argument_classes)
         (1..irep.enter&.enter_fields&.first.to_i).each do |position|
           classes = ctx.gen.bytecode_ir_argument_classes(definition, position)
+          classes ||= ctx.gen.bytecode_ir_call_graph_argument_classes(definition, position) if ctx.gen.respond_to?(:bytecode_ir_call_graph_argument_classes)
           inferred_args[position.to_s] = classes if classes
         end
       end
@@ -80,6 +88,23 @@ module IrTypeFeedback
                elsif insn.op == 'SETIV' then 'ivar_store'
                elsif %w[SEND SEND0 SENDB].include?(insn.op) then 'receiver'
                end
+        if insn.op == 'SENDB' && insn.plain_fixed_argc? && insn.argc.zero? && %w[each map collect].include?(insn.sym)
+          elements = analysis.element_fact_at(index, insn.reg)
+          block_register = (insn.reg.to_i + 1).to_s
+          block_definitions = elements && BytecodeIR.reaching_definitions(irep, index, block_register, origin_transfers: true)
+          if block_definitions&.size == 1 && !block_definitions.first.entry?
+            producer = irep.instructions[block_definitions.first.index]
+            child = producer.op == 'BLOCK' && ctx.ireps[Array(irep.reps)[producer.block_index.to_i]]
+            if child&.file && child.enter&.enter_fields == [1, 0, 0, 0, 0, 0, 0, 0]
+              file = ctx.root ? child.file.sub(%r{\A#{Regexp.escape(ctx.root.to_s)}/?}, '') : child.file
+              rows << { 'owner' => definition.owner, 'method' => definition.name, 'kind' => 'block_argument',
+                        'detail' => Array(child.lv).first.to_s, 'file' => file, 'line' => child.enter.lineno, 'col' => 1,
+                        'scope' => file.match?(%r{(\A|/)3rd/}) ? 'core' : 'engine', 'status' => 'declared',
+                        'type' => BytecodeIR::Types.type_name(elements.classes), 'expected' => nil, 'compatibility' => nil,
+                        'contracts' => (elements.contracts + ["iterator:#{insn.sym}"]).sort, 'reason' => nil }
+            end
+          end
+        end
         next unless kind
 
         refusal = {}

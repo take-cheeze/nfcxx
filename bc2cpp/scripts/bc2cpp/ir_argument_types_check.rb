@@ -101,6 +101,43 @@ receiver_harness.self_mask = nil
 check.call('unknown implicit self refuses despite known output register',
            receiver_harness.bytecode_ir_argument_receiver_classes(implicit_body, 0, 2).nil?)
 
+require_relative '../../tools/bc2cpp/irep'
+GraphDefinition = Struct.new(:owner, :name, :irep)
+class GraphHarness
+  def initialize(dependencies, seeds)
+    @dependencies, @seeds = dependencies, seeds
+  end
+  def pure_mandatory_arity?(_body) = true
+  def mandatory_arity(_body) = 1
+  def bytecode_ir_source_classes(*) = nil
+  def bytecode_ir_call_result_classes(*) = nil
+  def bytecode_ir_argument_classes(definition, _position, read: nil)
+    return @seeds[definition.irep] if @seeds.key?(definition.irep)
+
+    dependency = @dependencies[definition.irep]
+    read && dependency ? read.call(dependency, 1, 1) : nil
+  end
+end
+graph_bodies = %w[seed middle leaf].to_h do |label|
+  [label, Irep.new(label: label, nlocals: 2, nregs: 2, instructions: [
+    Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: '1:0:0:0:0:0:0:0 (0x0)'),
+    Insn.new(lineno: 1, addr: 4, op: 'RETURN', args: 'R1')
+  ])]
+end
+graph_definitions = graph_bodies.keys.map { |label| GraphDefinition.new('Graph', label, label) }
+graph_harness = GraphHarness.new({ 'middle' => graph_bodies['seed'], 'leaf' => graph_bodies['middle'] },
+                                 { 'seed' => Set[:Integer].freeze })
+graph_facts = IrCallGraphTypes.collect(graph_harness, graph_definitions, graph_bodies)
+check.call('complete graph facts propagate over multiple rounds', graph_facts.dig('leaf', '1') == Set[:Integer])
+limited = IrCallGraphTypes.collect(graph_harness, graph_definitions, graph_bodies, max_rounds: 1)
+check.call('round limit retains completed facts without publishing pending nodes', limited.dig('middle', '1') == Set[:Integer] && !limited.key?('leaf'))
+cyclic = GraphHarness.new({ 'seed' => graph_bodies['middle'], 'middle' => graph_bodies['seed'] }, {})
+check.call('an unresolved recursive component never becomes an empty inferred type',
+           IrCallGraphTypes.collect(cyclic, graph_definitions.first(2), graph_bodies).empty?)
+aliased = graph_definitions + [GraphDefinition.new('Other', 'alias_seed', 'seed')]
+check.call('shared body identities are not graph seeds', IrCallGraphTypes.collect(graph_harness, aliased, graph_bodies).empty?)
+check.call('graph summary table and completed argument maps are immutable', graph_facts.frozen? && graph_facts['leaf'].frozen?)
+
 if ENV['MRBC']
   require 'json'
   require 'open3'
@@ -145,6 +182,62 @@ if ENV['MRBC']
     check.call('real compiler joins implicit self and explicit receiver callers',
                left_param['type'].split(' | ').sort == %w[Array Integer] && left_param['source'] == 'inferred:receiver-call-sites')
     check.call('real compiler excludes unrelated same-name caller', right_param['type'] == 'String')
+  end
+  Dir.mktmpdir('ir-call-graph-fixture') do |dir|
+    File.write(File.join(dir, 'fixture.rb'), <<~SOURCE)
+      class IrGraphLeft
+        def ir_graph_entry(value)
+          IrGraphSink.new.ir_graph_forward(value)
+        end
+      end
+      class IrGraphRight
+        def ir_graph_entry(value)
+          value
+        end
+      end
+      class IrGraphSink
+        def ir_graph_forward(value)
+          value
+        end
+      end
+      class IrGraphOtherSink
+        def ir_graph_forward(value)
+          value
+        end
+      end
+      class IrGraphMain
+        def ir_graph_run
+          IrGraphLeft.new.ir_graph_entry(1)
+          IrGraphLeft.new.ir_graph_entry([])
+          IrGraphRight.new.ir_graph_entry('unrelated')
+          IrGraphOtherSink.new.ir_graph_forward('other')
+        end
+      end
+    SOURCE
+    run_graph = lambda do |enabled|
+      output, status = Open3.capture2e({ 'MRBC' => File.expand_path(ENV.fetch('MRBC')), 'BC2CPP_SIG_DIRS' => '',
+                                        'BC2CPP_IR_CALL_GRAPH_TYPES' => enabled ? '1' : '0' }, RbConfig.ruby,
+                                      File.join(root, 'scripts/bc2cpp/type_check.rb'), '--files', 'fixture.rb',
+                                      '--format', 'json', '--no-sends', chdir: dir)
+      raise "call graph fixture failed: #{output}" unless status.success?
+
+      JSON.parse(output)
+    end
+    graph_on = run_graph.call(true)
+    graph_off = run_graph.call(false)
+    sink = ->(facts) { facts['methods'].find { |method| method['owner'] == 'IrGraphSink' && method['name'] == 'ir_graph_forward' } }
+    check.call('call graph forwards a complete argument union into another polymorphic name',
+               sink.call(graph_on)['params'][0]['type'].split(' | ').sort == %w[Array Integer] &&
+                 sink.call(graph_on)['params'][0]['source'] == 'inferred:call-graph')
+    check.call('disabled call graph leaves forwarding parameter unknown', sink.call(graph_off)['params'][0]['type'].nil?)
+    check.call('graph argument facts feed independent IR returns', graph_on['ir_feedback'].any? { |row|
+      row['owner'] == 'IrGraphSink' && row['kind'] == 'return' && row['status'] == 'inferred' && row['type'].split(' | ').sort == %w[Array Integer]
+    })
+    File.open(File.join(dir, 'fixture.rb'), 'a') do |file|
+      file.puts "class IrGraphUnknown; def ir_graph_unknown(receiver, value); receiver.ir_graph_forward(value); end; end"
+    end
+    opaque = run_graph.call(true)
+    check.call('an opaque graph caller poisons the complete forwarded parameter', sink.call(opaque)['params'][0]['type'].nil?)
   end
 else
   puts 'SKIP real compiler fixture (set MRBC)'
