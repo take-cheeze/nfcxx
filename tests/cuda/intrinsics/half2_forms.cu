@@ -9,7 +9,7 @@
 #include <string.h>
 
 template <typename T> __host__ __device__ T as(unsigned v) { return *reinterpret_cast<const T *>(&v); }
-template <typename T> __host__ __device__ unsigned bits(T v) { return *reinterpret_cast<const unsigned *>(&v) & 0xffffu; }
+template <typename T> __host__ __device__ unsigned bits(T v) { unsigned r = 0; memcpy(&r, &v, sizeof v); return r & 0xffffu; }
 
 __global__ void k(const unsigned *h, const float *f, float *ff, unsigned *out) {
   auto hv = as<__half2>(h[0]);
