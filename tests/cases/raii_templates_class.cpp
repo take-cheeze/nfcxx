@@ -3,4 +3,4 @@ static int live = 0;
 template<class T> struct Box { T v; Box(T x):v(x){ ++live; } ~Box(){ --live; } };
 int f(){ Box<int> a(3); { Box<long> b(4); if (live != 2) return -1; } return live==1 ? 7 : -2; }
 int main(){ int r = f(); return live==0 ? r : -3; }
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
+// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

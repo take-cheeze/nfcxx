@@ -22,4 +22,4 @@ int main() {
     __asm__("int $3\n" : :);  // the same statement without `volatile`
     return count();
 }
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
+// X86-ONLY: x86-64 inline asm (int3 break); not portable to other targets
