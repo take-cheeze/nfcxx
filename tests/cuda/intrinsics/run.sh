@@ -90,5 +90,4 @@ pass device_const_scalar.cu "device const scalar: no error, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
 refuse refuse_cub.cu "cub::DeviceScan at line"
-refuse refuse_grid.cu "grid_group at line"
 exit $fail

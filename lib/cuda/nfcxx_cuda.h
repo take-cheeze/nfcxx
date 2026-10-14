@@ -253,6 +253,28 @@ inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void *
 #define cudaLaunchKernel(func, grid, block, args, shmem, stream) \
   __nfcxx_cuda_launch_raw((func), (grid), (block), (args), (shmem), (stream))
 
+// A cooperative launch: the driver checks that every block is resident (cudaErrorCooperativeLaunchTooLarge otherwise),
+// which the grid barrier of grid_group::sync (scripts/cuda-rewrite.rb's GRID_DEF in the device unit) relies on.
+template <typename F>
+inline cudaError_t __nfcxx_cuda_launch_cooperative(F func, dim3 grid, dim3 block, void **args, std::size_t shmem,
+                                                   cudaStream_t stream) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid;
+  cfg.blockDim = block;
+  cfg.dynamicSmemBytes = shmem;
+  cfg.stream = stream;
+  cudaLaunchAttribute attr = {};
+  attr.id = cudaLaunchAttributeCooperative;
+  attr.val.cooperative = 1;
+  cfg.attrs = &attr;
+  cfg.numAttrs = 1;
+  return cudaLaunchKernelExC(&cfg, reinterpret_cast<const void *>(kernel), args);
+}
+#define cudaLaunchCooperativeKernel(func, grid, block, args, shmem, stream) \
+  __nfcxx_cuda_launch_cooperative((func), (grid), (block), (args), (shmem), (stream))
+
 // Cooperative groups, host copy: CUDA's own cooperative_groups.h needs its device barriers, which the host placeholders do
 // not provide, so the header is skipped (its guards are defined here) and this shim stands in for it. The host copy never
 // runs device code: a shuffle or a reduction returns its argument, and the device unit has its own (COOP_DEF in
@@ -273,6 +295,11 @@ template <unsigned N> struct thread_block_tile {
   template <typename T> T shfl_xor(T v, unsigned) const { return v; }
 };
 template <unsigned N> thread_block_tile<N> tiled_partition(const thread_block &) { return thread_block_tile<N>(); }
+struct grid_group {
+  void sync(void) const {}
+  unsigned thread_rank(void) const { return 0u; }
+};
+inline grid_group this_grid(void) { return grid_group(); }
 template <typename T> struct plus { T operator()(T a, T b) const { return a + b; } };
 template <typename T> struct less { T operator()(T a, T b) const { return b < a ? b : a; } };
 template <typename T> struct greater { T operator()(T a, T b) const { return a < b ? b : a; } };
