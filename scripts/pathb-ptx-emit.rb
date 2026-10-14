@@ -334,6 +334,63 @@ def bool_const_setp(t, v)
 end
 
 # A constant as a PTX immediate of an IR integer, float or pointer type (the bits of v, read with the signedness of t).
+# The initializer of a global constant with a value: [PTX type, PTX literal] for an IR `(init (scalar 0 T (const T V)))`
+# of a float, a bool (one byte, its value 0 or 1) or a 4- or 8-byte integer, whose size is the global's size. nil for
+# any other initializer (the caller refuses it, naming the global).
+def scalar_const_init(init, name, size)
+  return nil unless init && init.length == 2 && head_of(init[1]) == "scalar"
+  s = init[1]
+  return nil unless s.length == 4 && head_of(s[3]) == "const"
+  t = parse_type(s[2])
+  text = s[3][2].to_s
+  if t[0] == "float"
+    raise Refused, "global #{name}: a #{t[1]}-byte float constant is not lowered" unless t[1] == 4 || t[1] == 8
+    return [ptx_type(t), float_lit(text, t)]
+  end
+  raise Refused, "global #{name}: constant of type #{form_text(s[2])} is not lowered" unless t[0] == "int"
+  raise Refused, "global #{name}: initializer is #{t[1]} bytes, the global is #{size}" unless t[1] == size
+  return ["u8", text.end_with?("1") ? "1" : "0"] if t[3]     # bool: one byte, the IR writes its value as 0x0 or 0x1
+  raise Refused, "global #{name}: a #{t[1]}-byte integer constant is not lowered" unless t[1] == 4 || t[1] == 8
+  [ptx_type(t), as_int(s[3][2]).to_s]
+end
+
+# A const array of scalars with a full initializer list (`static const uint8_t t[8] = {...}`): its element type and the
+# element values as a PTX brace list, [ptype, "{v0,...}", count], or nil when the global is not one. Each element is read
+# as a scalar constant (scalar_const_init), so the same types are covered.
+def scalar_const_array_init(ty, init, name, size)
+  return nil unless init && head_of(ty) == "const" && ty.length == 2 && head_of(ty[1]) == "array"
+  count = as_int(ty[1][1])
+  elem = ty[1][2]
+  return nil unless count && count > 0 && size % count == 0
+  esize = size / count
+  elems = init.drop(1)
+  return nil unless elems.length == count && elems.all? { |e| head_of(e) == "scalar" }
+  vals = []
+  ptype = nil
+  elems.each do |e|
+    return nil unless e.length == 4 && head_of(e[3]) == "const"
+    t = parse_type(e[2])
+    text = e[3][2].to_s
+    if t[0] == "float"
+      raise Refused, "global #{name}: a #{t[1]}-byte float constant is not lowered" unless t[1] == 4 || t[1] == 8
+      c = ["f#{t[1] * 8}", float_lit(text, t)]
+    else
+      raise Refused, "global #{name}: element of type #{form_text(e[2])} is not lowered" unless t[0] == "int"
+      raise Refused, "global #{name}: element is #{t[1]} bytes, the array's are #{esize}" unless t[1] == esize
+      if t[3]
+        c = ["u8", text.end_with?("1") ? "1" : "0"]
+      else
+        # memory types: a 1- or 2-byte element is stored as u8/s8 or u16/s16 (not the register type ptx_type gives)
+        c = [(t[2] ? "s" : "u") + (t[1] * 8).to_s, as_int(e[3][2]).to_s]
+      end
+    end
+    raise Refused, "global #{name}: mixed element types" if ptype && ptype != c[0]
+    ptype = c[0]
+    vals << c[1]
+  end
+  [ptype, "{" + vals.join(",") + "}", count]
+end
+
 def imm(t, v)
   return "0" if t[0] == "ptr"
   raise Refused, "bool constant" if t[3]
@@ -445,7 +502,7 @@ end
 
 class Fn
   attr_reader :name, :params, :ret, :form, :uses_dynshared
-  attr_accessor :kernel, :module_fns, :shared, :globals, :strings, :uses_printf
+  attr_accessor :kernel, :module_fns, :shared, :globals, :consts, :externs, :strings, :uses_printf
 
   def initialize(form, index)
     @form = form
@@ -454,6 +511,7 @@ class Fn
     @module_fns = {}
     @shared = {}
     @globals = {}
+    @consts = {}
     @ret = nil
     @setup_done = false
     @ncall = 0
@@ -588,6 +646,11 @@ class Fn
         emit("cvta.shared.u64 #{t}, #{ptx_sym(x.name)};")
       elsif @globals.key?(x.name)
         emit("cvta.global.u64 #{t}, #{ptx_sym(x.name)};")
+      elsif @consts.key?(x.name)
+        # a constant with a value (see scalar_const_init): read-only memory, its address is generic through .const
+        emit("cvta.const.u64 #{t}, #{ptx_sym(x.name)};")
+      elsif @externs.key?(x.name)
+        raise Refused, "global #{x.name} is extern (no definition in this unit)"
       elsif @strings.key?(x.name)
         emit("cvta.const.u64 #{t}, #{ptx_sym(STRING_PREFIX + x.name)};")
       else
@@ -1567,7 +1630,10 @@ def emit_module(src, sm, kernels = [])
   fns = []
   shared = {}
   globals = {}
+  consts = {}
+  externs = {}
   strings = {}
+  byte_inits = {}
   forms.each do |f|
     h = head_of(f)
     if h == "ir-module"
@@ -1596,8 +1662,33 @@ def emit_module(src, sm, kernels = [])
       align = as_int(f[4])
       # the optional linkage (static, weak, extern) and the initializer come after the size and alignment, in any case
       linkage = f.drop(5).map { |x| head_of(x) }.find { |h| h == "static" || h == "weak" || h == "extern" }
-      raise Refused, "global #{name} is extern (no definition in this unit)" if linkage == "extern"
+      # An extern global has no definition in this unit: refused where code reads it (see the @ operand), not here
+      # (an unused static member of a template instance is declared and never read).
+      if linkage == "extern"
+        externs[name] = true
+        next
+      end
       init = f.drop(5).find { |x| head_of(x) == "init" }
+      # A constant with a value (a static constexpr data member): the front end folds its uses, so the global is read
+      # only where its address is taken, and it is emitted as a typed .const symbol with its value.
+      cinit = head_of(ty) == "const" ? scalar_const_init(init, name, size) : nil
+      if cinit
+        consts[name] = cinit + [align]
+        next
+      end
+      # a const char array initialized from a string constant (`static const char t[N] = "..."`): the string's bytes, once
+      # the module's data is known (the IR lists data after the globals)
+      if head_of(ty) == "const" && init && init.length == 2 && head_of(init[1]) == "bytes" && init[1].length == 4 &&
+         init[1][3].is_a?(IRSym) && init[1][3].sig == "@" && as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
+        byte_inits[name] = [init[1][3].name, align, size]
+        next
+      end
+      # a const array of scalars with its values (a lookup table): a typed .const array with the same values
+      carr = head_of(ty) == "const" ? scalar_const_array_init(ty, init, name, size) : nil
+      if carr
+        consts[name] = [carr[0], carr[1], align, carr[2]]
+        next
+      end
       raise Refused, "global #{name}: only zero initializers are lowered" unless init && init.length == 2 && head_of(init[1]) == "zero"
       raise Refused, "global #{name}: partial zero initializer" unless as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
       if linkage == "static" || (linkage == "weak" && name.start_with?("_ZZ"))
@@ -1654,7 +1745,13 @@ def emit_module(src, sm, kernels = [])
   end
   state = {}
   fns.each { |fn| check_recursion(fn.name, callees, state) }
-  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals; fn.strings = strings }
+  byte_inits.each do |name, (src, align, size)|
+    raise Refused, "global #{name}: its string #{src} is not a data constant of this module" unless strings.key?(src)
+    bytes = strings[src]
+    raise Refused, "global #{name}: string #{src} is #{bytes.length} bytes, the global is #{size}" unless bytes.length == size
+    consts[name] = ["u8", "{" + bytes.join(",") + "}", align, size]
+  end
+  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals; fn.consts = consts; fn.externs = externs; fn.strings = strings }
   fns.each { |fn| fn.compile }
   out = "// Generated by scripts/pathb-ptx-emit.rb from the Path B IR; do not edit.\n"
   out << ".version 8.0\n.target #{sm}\n.address_size 64\n\n"
@@ -1663,6 +1760,10 @@ def emit_module(src, sm, kernels = [])
   out << ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n" if fns.any?(&:uses_printf)
   shared.each { |name, (size, align)| out << ".shared .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
   globals.each { |name, (size, align)| out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
+  consts.each do |name, (ptype, lit, align, count)|
+    dims = count ? "[#{count}]" : ""
+    out << ".const .align #{align} .#{ptype} #{ptx_sym(name)}#{dims} = #{lit};\n"
+  end
   out << "\n" unless shared.empty? && globals.empty?
   # PTX needs a callee declared before its first call: emit the functions callee first (depth-first post-order).
   ordered = []

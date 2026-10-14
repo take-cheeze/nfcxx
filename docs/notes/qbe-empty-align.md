@@ -12,8 +12,10 @@ mask `(1 << -1) - 1 = 0x7fffffff`, so an empty member after data pads the struct
 `std::optional<long>` (storage union, then the engaged flag) comes out at the wrong size. In `amd64/sysv.c`
 `selret()` the second eightbyte is then not returned in RDX, and the caller reads the engaged flag from garbage.
 
-**Fix.** An empty class has alignment 1 (log2 0), the same as gcc's `struct X {}`, so both reads of `ty->align`
-clamp -1 to 0. The sizes of all the other types in the uop suite are unchanged (checked by dumping every
+**Fix.** An empty class has alignment 1 (log2 0), the same as gcc's `struct X {}`. Two reads of `ty->align` in
+`parsefields()` clamp -1 to 0: the starting alignment of a struct (`scripts/qbe-empty-struct.patch`, from main) and the
+alignment of a nested type (`scripts/qbe-empty-align.patch`, this change). The nested read is the one the storage union
+of `std::optional` needs: the IL shape `{ { {E} {l} } b }` is still wrong with only the starting-alignment clamp. The sizes of all the other types in the uop suite are unchanged (checked by dumping every
 aggregate's size and alignment before and after the patch: only the alignments of size-0 types differ).
 
 **Test.** `tests/cases/qbe_empty_align.cpp` (`// EXPECT: 0`): the old build exits 3, the patched one 0.

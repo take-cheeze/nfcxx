@@ -42,6 +42,7 @@ refuse() {  # refuse FILE.cu MESSAGE-SUBSTRING
 pass bounds.cu "launch_bounds: no error, 0 mismatches"
 pass async.cu "async: no error, 0 mismatches"
 pass decl_macro.cu "decl macro: no error, 14"
+pass enum_extern_block.cu "enum extern block: no error, 0 mismatches"
 pass local_const.cu "local const: no error, 41 40"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
 pass linkage_block.cu "linkage block: no error, 0 mismatches"
@@ -63,5 +64,6 @@ refuse deduce_ambiguous.cu "call of run2: T is deduced as float and as int (ambi
 refuse pack_refuse.cu "no argument gives Ns, so it cannot be deduced"
 pass local_targs.cu "local targs: no error, 43 43"
 pass macro_targs.cu "macro targs: no error, 64 64"
+pass using_namespace.cu "using namespace: no error, 28 28"
 refuse refuse_shared_align.cu "device image does not carry shared-object alignment"
 exit $fail

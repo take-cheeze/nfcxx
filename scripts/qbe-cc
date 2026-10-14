@@ -53,8 +53,10 @@ darwin=()
 if [ "$(uname -s)" = Darwin ]; then
   # cproc has no 128-bit integers; the SDK's ARM register state (sys/signal.h) has __uint128_t arrays. A two-word
   # struct of the same size stands in for it (only the layout of those ucontext members is affected).
+  # __int128_t is a 64-bit integer here: libc++'s filesystem clock uses it for nanosecond counts that fit in 64 bits, and
+  # cproc can compare and compute with a long long where it cannot with a struct.
   printf '%s\n' 'typedef struct { unsigned long long __lo, __hi; } __nfcxx_uint128_t;' > "$tmp/darwin.h"
-  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= -D__uint128_t=__nfcxx_uint128_t -include "$tmp/darwin.h")
+  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= -D__uint128_t=__nfcxx_uint128_t -D__int128_t='long long' -include "$tmp/darwin.h")
 fi
 if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
@@ -66,6 +68,11 @@ if [ -n "${NFCXX_C_INPUT:-}" ]; then
   cc -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} -include "$tmp/defs.h" "${cppflags[@]}" "$src" > "$tmp/pp.c"
 else
   cc -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} "${cppflags[@]}" "$src" > "$tmp/pp.c"
+fi
+# macOS: calls to the exported libc++ functions that return a class go through the thunks of scripts/darwin-sret.sh.
+if [ "$(uname -s)" = Darwin ]; then
+  rename=$("$(dirname "$0")/darwin-sret.sh" >/dev/null && echo "$(dirname "$0")/../build/darwin-sret/rename.sed")
+  sed -E -f "$rename" "$tmp/pp.c" > "$tmp/pp.sret.c" && mv "$tmp/pp.sret.c" "$tmp/pp.c"
 fi
 trace_end "$t" "cc -E (preprocess)" qbe-backend
 # cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.rb rewrites
