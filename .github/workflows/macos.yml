@@ -9,14 +9,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Apple Silicon runner: the EDG front end, then the gcc-backend test suites (the same checks the Linux jobs run). The QBE
-# back end gets its own job once its macOS support is on main. build/ holds absolute paths, so the caches are keyed by the runner's OS and architecture.
+# Apple Silicon runner, one job per back end: the EDG front end (and QBE for the qbe leg), then the test suites of that back
+# end, the same checks the Linux jobs run. Documented macOS-only failures are xfail markers in the tests, not skips.
+# build/ holds absolute paths, so the caches are keyed by the runner's OS and architecture.
 jobs:
-  gcc:
-    name: macOS arm64 (gcc backend, Apple clang)
+  suites:
+    name: macOS arm64 (${{ matrix.backend }} backend)
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [gcc, qbe]
     env:
-      NFCXX_BACKEND: gcc
+      NFCXX_BACKEND: ${{ matrix.backend }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +40,10 @@ jobs:
 
       - name: EDG front end
         run: scripts/setup-edg.sh
+
+      - name: QBE and cproc
+        if: matrix.backend == 'qbe'
+        run: scripts/setup-qbe.sh
 
       - name: Test suites
         run: |
