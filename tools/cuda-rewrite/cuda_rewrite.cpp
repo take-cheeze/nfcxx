@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 
 namespace {
 
@@ -2471,7 +2472,9 @@ std::vector<std::string> g_incdirs;
 // Ruby system_path? (line 2123): the toolkit and system prefixes are never inlined.
 bool system_path(const std::string &path) {
   std::string p = path;
-  return p.compare(0, 5, "/usr/") == 0 || p.compare(0, 5, "/opt/") == 0 || p.compare(0, 16, "/usr/local/cuda/") == 0;
+  // lib/cuda/host holds the host shims (cub/cub.cuh): the device unit has their definitions, so they are not inlined.
+  return p.compare(0, 5, "/usr/") == 0 || p.compare(0, 5, "/opt/") == 0 || p.compare(0, 16, "/usr/local/cuda/") == 0 ||
+         p.find("/lib/cuda/host/") != std::string::npos;
 }
 
 // Ruby find_include (line 2128): the file a quoted or angle-bracket include names, when it exists and is not a system path.
@@ -3047,6 +3050,7 @@ std::vector<UnitPiece> flatten_linkage(const std::string &text, const std::vecto
 // ---- embedded tables (defined with the device prelude below; see PORTING.md) ---------------------------------------
 extern const char *const DEVICE_PRELUDE;
 extern const char *const COOP_DEF;
+extern const char *const CUB_DEF;
 std::string device_decls();
 std::string rewrite_builtins(const std::string &t);
 std::string rewrite_is_same_v(const std::string &s);
@@ -3342,6 +3346,11 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   }
   if (needed["is_same_v"]) needed["is_same"] = true;  // std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
   // Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
+  // The text of COOP_DEF and CUB_DEF uses device builtins: their definitions are needed whenever the text is inserted.
+  if (needed["cg"] || needed["cooperative_groups"])
+    for (const auto &x : tokens_of(COOP_DEF)) needed[x] = true;
+  if (needed["cub"])
+    for (const auto &x : tokens_of(CUB_DEF)) needed[x] = true;
   if (needed["sinf"] || needed["cosf"]) needed["__nfcxx_sincosf"] = true;
   if (needed["expm1f"] || needed["tanhf"]) needed["__nfcxx_expm1f"] = true;
   if (needed["log2f"]) needed["__float_as_uint"] = true;
@@ -3356,7 +3365,8 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   bool coop_defined = false;
   for (const auto &pc : pieces)
     if (pc.keep && has_tok(pc.defined, "cooperative_groups")) coop_defined = true;
-  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += COOP_DEF;
+  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += rewrite_builtins(COOP_DEF);
+  if (needed["cub"]) out += rewrite_builtins(CUB_DEF);
   for (const auto &pc : pieces) {
     if (!pc.keep) continue;
     std::string code = rewrite_is_same_v(rewrite_builtins(pc.text));
@@ -3502,6 +3512,63 @@ std::string dynamic_shared_rewrite(const std::string &s) {
 }
 
 // Ruby refuse_unlowered_cccl (line 2961): CUB and grid-wide cooperative groups are refused by name.
+// CUB's block-level members used by ggml-cuda (cumsum.cu's BlockScan, ssm-scan.cu's BlockLoad, BlockStore and BlockScan),
+// in namespace cub. The arrangement is CUB's: thread t holds items t*N .. t*N+N-1 of the block; the warp-transposed
+// algorithms only change how memory is accessed, not that arrangement. Device-wide calls are refused (see the scan).
+const char *const CUB_DEF = R"CUB(namespace cub {
+enum BlockLoadAlgorithm { BLOCK_LOAD_DIRECT, BLOCK_LOAD_WARP_TRANSPOSE };
+enum BlockStoreAlgorithm { BLOCK_STORE_DIRECT, BLOCK_STORE_WARP_TRANSPOSE };
+template <typename T, int BLOCK_THREADS, int ITEMS_PER_THREAD, BlockLoadAlgorithm ALGORITHM = BLOCK_LOAD_DIRECT>
+class BlockLoad {
+public:
+  struct TempStorage { int unused; };
+  __device__ BlockLoad(TempStorage &) {}
+  __device__ void Load(const T *input, T (&items)[ITEMS_PER_THREAD]) const {
+    for (int n = 0; n < ITEMS_PER_THREAD; n++) items[n] = input[threadIdx.x * ITEMS_PER_THREAD + n];
+  }
+};
+template <typename T, int BLOCK_THREADS, int ITEMS_PER_THREAD, BlockStoreAlgorithm ALGORITHM = BLOCK_STORE_DIRECT>
+class BlockStore {
+public:
+  struct TempStorage { int unused; };
+  __device__ BlockStore(TempStorage &) {}
+  __device__ void Store(T *output, const T (&items)[ITEMS_PER_THREAD]) const {
+    for (int n = 0; n < ITEMS_PER_THREAD; n++) output[threadIdx.x * ITEMS_PER_THREAD + n] = items[n];
+  }
+};
+template <typename T, int BLOCK_THREADS>
+class BlockScan {
+public:
+  struct TempStorage { T warp_totals[BLOCK_THREADS / 32]; };
+  __device__ BlockScan(TempStorage &temp) : temp_(temp) {}
+  __device__ void InclusiveSum(T input, T &output) {
+    T aggregate;
+    InclusiveSum(input, output, aggregate);
+  }
+  __device__ void InclusiveSum(T input, T &output, T &block_aggregate) {
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    T v = input;
+    for (int off = 1; off < 32; off <<= 1) {
+      T u = __shfl_up_sync(0xffffffffu, v, off);
+      if (lane >= off) v += u;
+    }
+    if (lane == 31) temp_.warp_totals[warp] = v;
+    __syncthreads();
+    T prefix = T(0);
+    for (int w = 0; w < warp; w++) prefix += temp_.warp_totals[w];
+    T total = T(0);
+    for (int w = 0; w < BLOCK_THREADS / 32; w++) total += temp_.warp_totals[w];
+    output = v + prefix;
+    block_aggregate = total;
+    __syncthreads();
+  }
+private:
+  TempStorage &temp_;
+};
+}
+)CUB";
+
 void refuse_unlowered_cccl(const std::string &s) {
   long i = 0;
   long n = (long)s.size();
@@ -3515,10 +3582,22 @@ void refuse_unlowered_cccl(const std::string &s) {
       long j = i + 3;
       while (j < n && white_c(ch(s, j))) j += 1;
       if (sl_n(s, j, 2) == "::") {
-        long line = 1;
-        for (long q = 0; q < i; q++)
-          if (s[(size_t)q] == '\n') line++;
-        refuse("cub:: at line " + std::to_string(line) + ": CUB is not lowered (the device unit does not carry its headers)");
+        // The block-level members in CUB_DEF are lowered; the device-wide ones (DeviceScan, ...) are refused by name.
+        long k = j + 2;
+        while (k < n && white_c(ch(s, k))) k += 1;
+        long m = k;
+        while (m < n && ident_c((unsigned char)s[(size_t)m])) m += 1;
+        std::string member = s.substr((size_t)k, (size_t)(m - k));
+        static const std::set<std::string> lowered = {"BlockScan", "BlockLoad", "BlockStore", "BLOCK_LOAD_DIRECT",
+                                                      "BLOCK_LOAD_WARP_TRANSPOSE", "BLOCK_STORE_DIRECT",
+                                                      "BLOCK_STORE_WARP_TRANSPOSE"};
+        if (!lowered.count(member)) {
+          long line = 1;
+          for (long q = 0; q < i; q++)
+            if (s[(size_t)q] == '\n') line++;
+          refuse("cub::" + member + " at line " + std::to_string(line) +
+                 ": device-wide CUB is not lowered (it launches its own kernels and needs temporary storage)");
+        }
       }
     }
     for (const char *name : {"this_grid", "grid_group"}) {

@@ -1,10 +1,9 @@
-// cub:: in device code is refused by name: CUB's headers are not in the device unit.
+// A device-wide CUB call in device code is refused by name: it launches its own kernels and needs temporary storage.
 #include <cub/cub.cuh>
 __global__ void k(float *o) {
-  using BS = cub::BlockScan<float, 128>;
-  __shared__ typename BS::TempStorage ts;
+  int ts = 0;
   float v = o[threadIdx.x];
-  BS(ts).InclusiveSum(v, v);
+  cub::DeviceScan::InclusiveSum(&ts, v);
   o[threadIdx.x] = v;
 }
 int main() { return 0; }

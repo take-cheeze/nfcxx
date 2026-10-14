@@ -30,7 +30,7 @@ export TMPDIR=$out
 pass() {  # pass FILE.cu EXPECTED-SUBSTRING
   local src=$1 want=$2 name run
   name=$(basename "$src" .cu)
-  if "$root/nfcxx" -c -I"$cuda/include" "$src" -o "$out/$name.o" > "$out/$name.log" 2>&1 \
+  if "$root/nfcxx" -c -I"$root/lib/cuda/host" -I"$cuda/include" "$src" -o "$out/$name.o" > "$out/$name.log" 2>&1 \
      && "$root/nfcxx" "$out/$name.o" -L"$cuda/lib64" -lcudart -o "$out/$name" >> "$out/$name.log" 2>&1 \
      && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/$name") && [[ "$run" == *"$want"* ]]; then
     echo "pass $name: $run"
@@ -42,7 +42,7 @@ pass() {  # pass FILE.cu EXPECTED-SUBSTRING
 refuse() {  # refuse FILE.cu MESSAGE-SUBSTRING
   local src=$1 want=$2 name rc=0
   name=$(basename "$src" .cu)
-  "$root/nfcxx" -c -I"$cuda/include" "$src" -o "$out/$name.o" > "$out/$name.log" 2>&1 || rc=$?
+  "$root/nfcxx" -c -I"$root/lib/cuda/host" -I"$cuda/include" "$src" -o "$out/$name.o" > "$out/$name.log" 2>&1 || rc=$?
   if [ "$rc" = 3 ] && grep -q "$want" "$out/$name.log"; then
     echo "refused $name: $(grep -m1 "$want" "$out/$name.log" | cut -c1-160)"
   else
@@ -83,9 +83,10 @@ pass define_header_skip.cu "define header skip: no error, 0 mismatches"
 pass host_member_drop.cu "host member drop: no error, 0 mismatches"
 pass const_tables.cu "const tables: no error, 0 mismatches"
 pass cg_tile.cu "cg tile: no error, 0 mismatches"
+pass cub_block.cu "cub block: no error, 0 mismatches"
 pass shared_align.cu "shared align: no error, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
-refuse refuse_cub.cu "cub:: at line"
+refuse refuse_cub.cu "cub::DeviceScan at line"
 refuse refuse_grid.cu "grid_group at line"
 exit $fail
