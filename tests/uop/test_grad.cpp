@@ -167,6 +167,13 @@ static void finite_differences() {
   fd_case("min-binary", {S23}, [](Session&, const Ts& x) { return minimum(x[0], x[0] * 0.5); });
   fd_case("concat", {S23}, [](Session&, const Ts& x) { return concatenate({x[0], x[0] * x[0]}, 0); });
   fd_case("flatten", {S23}, [](Session&, const Ts& x) { return x[0].flatten().tanh(); });
+  // shape operands (starts, ends, axes, steps, shape, axes) are initializers of the export, read by onnxsim's rules
+  fd_case("slice", {S23}, [](Session&, const Ts& x) { return x[0].slice(1, 0, 2).exp(); });
+  fd_case("slice-step", {Shape{2, 5}}, [](Session&, const Ts& x) { return x[0].slice(1, 0, 5, 2).tanh(); });
+  fd_case("expand", {S23}, [](Session&, const Ts& x) { return x[0].broadcast_to({2, 2, 3}).tanh(); });
+  fd_case("expand-scalar-axes", {Shape{2, 1}}, [](Session&, const Ts& x) { return x[0].broadcast_to({2, 4}) * x[0].broadcast_to({2, 4}); });
+  fd_case("squeeze", {S23}, [](Session&, const Ts& x) { return x[0].expand_dims(0).squeeze(0).tanh(); });
+  fd_case("unsqueeze", {S23}, [](Session&, const Ts& x) { return x[0].expand_dims(1).exp(); });
   // reductions
   fd_case("sum-all", {S23}, [](Session&, const Ts& x) { return (x[0] * x[0]).sum(); });
   fd_case("sum-axis0", {S23}, [](Session&, const Ts& x) { return (x[0] * x[0]).sum(0); });
@@ -229,18 +236,14 @@ static void unsupported() {
   // op: the operator named in the refusal; frag: the text the refusal must contain, when it is not "no gradient rule for op type ..."
   struct Case { const char* op; std::function<Tensor(Session&, const Tensor&)> f; const char* frag = nullptr; };
   const char* cast_frag = "Cast to 11 is not differentiated here";
-  const char* init_frag = "must be a constant initializer";
   std::vector<Case> cases = {
       {"Sin", [](Session&, const Tensor& x) { return x.sin(); }},
       {"Cos", [](Session&, const Tensor& x) { return x.cos(); }},
       // the mask of where is a comparison, which has no rule: the refusal names it, not Where
       {"Greater", [](Session&, const Tensor& x) { return where(x > 0.0, x, x * 2.0); }},
       {"Cast", [](Session&, const Tensor& x) { return x * (x > 0.0).astype(f64); }, cast_frag},   // a mask made from x: comparisons and casts have no rule
-      // master has these rules, but our export writes their shape arguments as nodes, not initializers, and the rules want initializers
-      {"Slice", [](Session&, const Tensor& x) { return x.slice(1, 0, 2); }, init_frag},
-      {"Expand", [](Session&, const Tensor& x) { return x.broadcast_to({2, 2, 3}); }, init_frag},
-      {"Squeeze", [](Session&, const Tensor& x) { return x.expand_dims(0).squeeze(0); }, init_frag},
-      {"Unsqueeze", [](Session&, const Tensor& x) { return x.expand_dims(0); }, init_frag},
+      // onnxsim's Slice rule takes positive steps only (its GradSlice); a negative step is a refusal, not a gradient
+      {"Slice", [](Session&, const Tensor& x) { return x.slice(1, 2, 0, -1); }, "Slice requires positive steps"},
       {"Cast", [](Session&, const Tensor& x) { return x.astype(f32).astype(f64); }, cast_frag},
   };
   for (const Case& c : cases) {

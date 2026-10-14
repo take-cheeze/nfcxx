@@ -1,5 +1,5 @@
 // nfcuop::hir::gradients_via_onnxsim: reverse-mode automatic differentiation by onnxsim's ONNX-level autograd
-// (onnxsim 0.8.1, graph_grad), not by rules of our own. The sub-graph of the loss is exported with Graph::to_onnx, onnxsim
+// (onnxsim at the commit of scripts/setup-onnxsim.sh, graph_grad), not by rules of our own. The sub-graph of the loss is exported with Graph::to_onnx, onnxsim
 // appends the gradient as ordinary ONNX nodes, and the result is merged back into the same graph (Graph::merge_onnx): the
 // gradients are values of `g` like any other, lowered and evaluated by both back ends and exported next to the loss.
 //

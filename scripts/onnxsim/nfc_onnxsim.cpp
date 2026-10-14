@@ -83,6 +83,24 @@ std::string run(const char* bytes, size_t n, const std::string& loss, const std:
     slice.push_back(nd);
   }
 
+  // The rules read the operands that are constants (shape, axes, starts, ends, ...) through Constant nodes of the graph
+  // they are given (onnxsim master, graph_grad: AddConstants). The forward initializers the slice needs are passed that way:
+  // a Constant node has no inputs and no rule, so BuildBackward only records its value. Their values are already in the
+  // model, which is why these nodes are not copied into the output.
+  std::vector<onnx::NodeProto> rule_nodes;
+  for (const TensorProto& t : graph->initializer()) {
+    if (!needed.count(t.name())) continue;
+    onnx::NodeProto c;
+    c.set_op_type("Constant");
+    c.add_output(t.name());
+    onnx::AttributeProto* a = c.add_attribute();
+    a->set_name("value");
+    a->set_type(onnx::AttributeProto::TENSOR);
+    *a->mutable_t() = t;
+    rule_nodes.push_back(c);
+  }
+  rule_nodes.insert(rule_nodes.end(), slice.begin(), slice.end());
+
   // targets the loss does not reach get a zero gradient: BuildBackward throws for them, so retry without
   std::vector<std::string> targets;
   for (const std::string& w : wrt) if (needed.count(w)) targets.push_back(w);
@@ -90,11 +108,11 @@ std::string run(const char* bytes, size_t n, const std::string& loss, const std:
   std::map<std::string, std::string> got;
   for (;;) {
     b.reset(new GraphBuilder(prefix));
-    b->SetFloatType(ldt);   // float64 constants and masks for a float64 loss (scripts/onnxsim/patches/0001-*)
+    b->SetFloatType(ldt);   // float64 constants and masks for a float64 loss (upstream 60b3e4e0, in the pin)
     std::map<std::string, std::string> seeds;
     seeds[loss] = b->Const(1.0f, "seed");
     try {
-      got = BuildBackward(*b, slice, shapes, seeds, targets);
+      got = BuildBackward(*b, rule_nodes, shapes, seeds, targets);
       break;
     } catch (const UnsupportedOpError&) {
       throw;
@@ -232,7 +250,7 @@ char* dup_str(const std::string& s, size_t* n = nullptr) {
 
 extern "C" {
 
-__attribute__((visibility("default"))) const char* nfc_onnxsim_version() { return "onnxsim master c6913888 graph_grad (C++)"; }
+__attribute__((visibility("default"))) const char* nfc_onnxsim_version() { return "onnxsim master 21f95fd1 graph_grad (C++)"; }
 
 // 0 on success (*out/*out_n hold the model), 1 for an operator without a gradient rule (*err has the library's message),
 // 2 for any other failure (*err). Free *out and *err with nfc_onnxsim_free.

@@ -8,7 +8,7 @@
 # Prints the path of the library; exits 0 at once when it is already built from these commits.
 set -e
 cd "$(dirname "$0")/.."
-onnxsim_rev=c6913888924feae8baeead6b0635239f23849b48
+onnxsim_rev=21f95fd13fae374827e6cdd836987eeff32ebfea
 onnx_rev=281e5e6accfd6113fd57d819ce47f32a937bb106
 out=build/onnxsim
 mkdir -p $out
