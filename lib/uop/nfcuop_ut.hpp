@@ -142,7 +142,8 @@ class Session {
   bool optimize = true;
   // How eval runs a graph: the reference interpreter, or rendered C (nfcuop_cgen.hpp) compiled with `cc` (empty: $NFCUOP_CC or
   // cc) and cached by source text. Both give the same bits (except that an integer division by zero is 0 in C).
-  enum class Backend { Interpreter, C };
+  // Ort runs the hir graph with ONNX Runtime (nfcuop_ort.hpp); it needs the graph, so only np::Session evaluates with it.
+  enum class Backend { Interpreter, C, Ort };
   Backend backend = Backend::Interpreter;
   std::string cc;
   const CProgram* last_program() const { return has_program_ ? &last_program_ : nullptr; }  // the last C program run

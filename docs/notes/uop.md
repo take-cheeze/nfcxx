@@ -218,10 +218,42 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
   graphs, 150 random integer-tensor graphs (raw and after `symbolic()`), 150 random float32 tensor graphs (inputs include `-0.0`, `1e30`, inf and NaN), hand-written
   graphs for every dtype (int64 extremes, float64 casts, bool logic, int32 edges), 18 numpy-API graphs in one program, and the 100 expressions of `np_compat`.
   Each batch is one compiled program. About 32,000 comparisons.
-- **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes. Memory is one
-  `malloc` per materialized node, freed at the end (no buffer reuse). An output that is a reshape of a reduction is copied.
+- **Memory (one arena)**: the intermediates (not the outputs, which the caller owns) share one `malloc`. Each is live from the loop nest that writes it to the
+  last one that loads it, and `nfcuop_arena.hpp` places it: a port of onnxsim's greedy activation planner (`memory_planning.cpp`, Pass 2), with the same
+  liveness test (two buffers share bytes only when their ranges do not overlap, the ends included) and the same best-fit order (largest first, ties in the
+  order the kernels write them). Sizes are rounded to 16 bytes. Not ported: onnxsim's in-place aliasing, since a fused loop nest reads its inputs at other
+  indices than it writes. `CProgram` reports `arena_bytes`, `naive_bytes` (one buffer each) and `unplanned`. The chain in `test_cgen.cpp` (ten halving steps
+  on 32x128 float32, each with a reduction) needs 32,896 bytes of arena against 148,736 with one buffer each: the peak of the live set.
+- **Dimension ranging** (`RenderOptions`): the UOp graph has concrete shapes, so a symbol such as the batch size `N` of an `hir` graph is named per input
+  dimension (`input_symbols`) and given an upper bound (`symbol_bounds`). Symbols follow the operators by rules that keep one only where the dimension is
+  that symbol's size: elementwise ops, reductions (the reduced axis becomes 1), permute, flip, expand of an integer axis, a reshape that keeps the leading
+  symbolic axes, a shrink or pad that does not cut them. Any other dimension is unknown. An intermediate's maximum size takes the bound for each symbolic
+  dimension, and the arena is sized from these maxima. The renderer checks every intermediate against its slot, so a bound below an input's size is an
+  `Error`, and a symbol without a bound leaves its intermediates with a `malloc` of their own. The loops still have the concrete sizes: the bounds size the
+  arena; they do not let one compiled program run at other sizes, which needs symbolic loop bounds (step 2 of stage 7).
+- **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes in the loops. No
+  in-place reuse of an input by an output (see Memory). An output that is a reshape of a reduction is copied.
 - **nfcxx as the C compiler**: `NFCUOP_CC=./nfcxx` (it passes `-shared -o`, not the gcc flags). `tests/uop/run.sh` runs the `quick` part of `test_cgen` that way on both
   nfcxx back ends; that path (cproc with hexadecimal float literals, `INFINITY`, `static inline`) was not run where this was written, so CI is its first run.
+
+## ONNX Runtime back end (`nfcuop_ort.hpp`)
+
+`nfcuop::ort::run(g, outputs, feeds)` exports the `hir::Graph` with `to_onnx`, runs it with ONNX Runtime and returns the outputs as
+`Array`s (the interpreter's type). It is selected in the numpy API as `np.backend = ut::Session::Backend::Ort` (`np.backend = "ort"` in the
+scripting bindings), like the C backend. `ut::Session` has no graph, so it refuses this back end; `np::Session::eval_all` sends the graph to
+`ort::run` and lowers nothing.
+
+- **No build-time dependency.** The library is opened with `dlopen` at first use: the path is `$NFCUOP_ORT_LIB`, else `libonnxruntime.so.1`,
+  `libonnxruntime.so` or `libonnxruntime.dylib`. A load that fails throws `Error` (and nothing is cached, so the next call retries).
+  `ort::available()` tells whether it loads; the tests print SKIP without it.
+- **The C API declarations** in `nfcuop_ort.cpp` are a vendored subset of ONNX Runtime 1.29.0's `onnxruntime_c_api.h` (MIT licensed, with
+  its notice): the `OrtApi` members that are called, at their indices in the table, and reserved slots for the others. The header itself is not vendored.
+- **Symbolic batch**: ORT takes the `dim_param` of the exported model, so an unbound graph runs directly; `Graph::bind` gives a static copy
+  that runs the same way. Feeds must agree with the graph's dtype and rank, and every use of one symbol must have one size.
+- **Not the same bits**: ORT's own graph optimizations and kernels round floats differently from the interpreter, so
+  `tests/uop/test_ort.cpp` compares floats to a relative 1e-5 (absolute 1e-6 near zero) and integers and bools exactly.
+- **Not done**: no Windows loader (`dlopen`, as the C back end), no ORT execution providers or options, and the sessions are kept until
+  the process ends (keyed by the model bytes).
 
 ## Dynamic shapes (stage 7, after the static stages)
 
@@ -270,6 +302,7 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
   reductions and shape ops, integer division and modulo, math functions, slicing and concatenation, batched matmul, floor/pow with NaN and infinities,
   cumsum and prod, argmax/argmin, tile and take) with the interpreter's results next to them.
 - `onnx_check.py`: every model through `onnx.checker` (with `full_check`, which re-infers all shapes) and onnxruntime, outputs compared with the interpreter's.
+- `test_ort.cpp`: the ONNX Runtime back end (above), against the interpreter; prints SKIP without the library.
 - `test_cgen.cpp`: the C renderer (above).
 - `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above, with 32-bit and with 64-bit defaults.
 

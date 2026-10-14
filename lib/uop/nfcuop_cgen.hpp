@@ -12,6 +12,11 @@
 // than once and is more than an index change of something already stored (so shared subexpressions are computed once
 // and the generated code cannot grow exponentially).
 //
+// The intermediate buffers (not the outputs, which the caller owns) share one malloc'd arena. Each one is live from the
+// loop nest that writes it to the last loop nest that reads it, and the planner (nfcuop_arena.hpp, ported from onnxsim)
+// gives it an offset so that buffers live at the same time do not overlap. An intermediate whose size depends on a symbol
+// without a bound (RenderOptions) keeps a malloc of its own, as before.
+//
 // The generated code computes what the interpreter (evaluate_array) computes, bit for bit: integers wrap
 // (unsigned arithmetic), a Float32 node is rounded to float after every op, exp2/log2/sin run in double and are rounded,
 // float-to-int casts saturate and map NaN to 0, a reduction starts from its first element, and sums run in the same
@@ -37,17 +42,33 @@ struct COutput {
   Shape shape;
 };
 
+// Sizes that a symbol bounds (the "dim ranging" of docs/notes/uop.md). The UOp graph has concrete shapes, so a symbol
+// names a dimension of an input: `input_symbols["x"] = {"N", ""}` says that axis 0 of the input x is the symbol N and axis
+// 1 is an integer (one entry per axis; "" for an integer axis). `symbol_bounds["N"] = 64` says that N is at most 64.
+// The bound gives each intermediate a maximum size: every symbolic dimension of its shape is taken as its bound, the
+// other dimensions as they are (symbols are propagated through the operators; where a rule is not known, the size is
+// not known and the intermediate keeps its own malloc). The arena is sized from these maxima. A bound below the size an
+// input has is an Error. A symbol with no bound leaves its intermediates unplanned.
+struct RenderOptions {
+  std::map<std::string, std::vector<std::string>> input_symbols;
+  std::map<std::string, int64_t> symbol_bounds;
+};
+
 struct CProgram {
   std::string source;           // C99; defines `int nfcuop_run(const void* const* in, void* const* out)` (0 on success)
   std::vector<CInput> inputs;   // the Vars of the graphs, sorted by name; `in` holds their buffers in this order
   std::vector<COutput> outputs; // `out` holds the output buffers in the order of the roots given to render_c
   int kernels = 0;              // loop nests generated
-  int temporaries = 0;          // buffers allocated for materialized intermediates
+  int temporaries = 0;          // intermediate buffers (each one is in the arena or has a malloc of its own)
+  int64_t arena_bytes = 0;      // the size of the one malloc'd arena holding the planned intermediates (0: none)
+  int64_t naive_bytes = 0;      // the planned intermediates' sizes added up: what one buffer each would take
+  int unplanned = 0;            // intermediates with a malloc of their own (their size depends on a symbol with no bound)
 };
 
 // Renders the graph of `roots` (several outputs share their common subgraph). Throws Error if two Vars of one name
-// differ in dtype or shape.
-CProgram render_c(const std::vector<const UOp*>& roots);
+// differ in dtype or shape, or if `options` does not fit the graph (an unknown input, a wrong rank, a bound below 1, an
+// input larger than its bound).
+CProgram render_c(const std::vector<const UOp*>& roots, const RenderOptions& options = RenderOptions());
 
 // A compiled CProgram. The compiler is `cc` (a command line, split on spaces), or the environment variable NFCUOP_CC, or
 // "cc"; the command `nfcxx` is also fine (docs/notes/uop.md). Compilation errors come back as an Error carrying the
