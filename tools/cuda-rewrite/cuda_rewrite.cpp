@@ -12,6 +12,8 @@
 // tools/cuda-rewrite/PORTING.md; until they are ported, main() refuses with exit 2 and the driver keeps the Ruby script.
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <functional>
 #include <cstdio>
 #include <cstdlib>
@@ -2819,29 +2821,6 @@ std::vector<std::string> enum_enumerators(const std::string &t) {
   return names;
 }
 
-// Ruby blank_comments (line 2533): the text with its comments blanked (newlines and literals stay).
-std::string blank_comments(const std::string &s) {
-  std::string out;
-  long i = 0;
-  long n = (long)s.size();
-  while (i < n) {
-    if (ch(s, i) == '/' && (ch(s, i + 1) == '/' || ch(s, i + 1) == '*')) {
-      long e = skip_literal(s, i);
-      for (long k = i; k < e; k++) out.push_back(s[(size_t)k] == '\n' ? '\n' : ' ');
-      i = e;
-      continue;
-    }
-    long e = skip_literal(s, i);
-    if (e >= 0) {
-      out += sl(s, i, e);
-      i = e;
-      continue;
-    }
-    out.push_back(s[(size_t)i]);
-    i += 1;
-  }
-  return out;
-}
 
 // Ruby function_head? (line 2557): a head with a `(` before any `=`, before the first brace.
 bool function_head(const std::string &t) {
@@ -3674,12 +3653,331 @@ std::string replace_dynamic_uses(const std::string &s, const std::map<std::strin
   return out;
 }
 
+// Ruby blank_comments (line 3337; the later of the two definitions, so it is the one in effect): each comment character
+// becomes a space and a newline stays; literals stay. Positions and line numbers do not change.
+std::string blank_comments(const std::string &text) {
+  std::string out;
+  long i = 0;
+  long n = (long)text.size();
+  while (i < n) {
+    int c = ch(text, i);
+    if (c == '/' && ch(text, i + 1) == '/') {
+      while (i < n && ch(text, i) != '\n') {
+        out.push_back(' ');
+        i += 1;
+      }
+      continue;
+    }
+    if (c == '/' && ch(text, i + 1) == '*') {
+      long close = str_index(text, "*/", i + 2);
+      long stop = close < 0 ? n : close + 2;
+      while (i < stop) {
+        out.push_back(ch(text, i) == '\n' ? '\n' : ' ');
+        i += 1;
+      }
+      continue;
+    }
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += sl(text, i, e);
+      i = e;
+      continue;
+    }
+    out.push_back((char)c);
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby String#rindex(sub, pos): the last position <= pos (a negative pos counts from the end); -1 (nil) if none.
+long rindex_from(const std::string &s, char c, long pos) {
+  long len = (long)s.size();
+  if (pos < 0) {
+    pos += len;
+    if (pos < 0) return -1;
+  }
+  if (pos >= len) pos = len - 1;
+  for (long q = pos; q >= 0; q--)
+    if (s[(size_t)q] == c) return q;
+  return -1;
+}
+
+// Ruby host_storage (line 3241): `static`, unless the declaration so far already has a storage keyword.
+std::string host_storage(const std::string &out, const std::string &kw) {
+  long a = rindex_from(out, ';', (long)out.size());
+  long b = rindex_from(out, '{', (long)out.size());
+  long c = rindex_from(out, '}', (long)out.size());
+  long start = -1;
+  for (long v : {a, b, c})
+    if (v >= 0 && v > start) start = v;
+  std::string decl = start >= 0 ? sl(out, start + 1, (long)out.size()) : out;
+  bool already = false;
+  std::string word;
+  for (char c2 : decl + " ") {
+    if (ident_c((unsigned char)c2)) {
+      word.push_back(c2);
+    } else {
+      if (word == "static") already = true;
+      word.clear();
+    }
+  }
+  return already ? std::string() : kw;
+}
+
+// Ruby KEYWORDS_OF_CLASS (line 3289).
+const std::vector<std::string> KEYWORDS_OF_CLASS = {"class", "struct", "union"};
+
+// Ruby in_class_body? (line 3259): the output so far is inside a class, struct or union body.
+bool in_class_body(const std::string &out) {
+  long depth = 0;
+  long j = (long)out.size() - 1;
+  while (j >= 0) {
+    char c = out[(size_t)j];
+    if (c == '}') {
+      depth += 1;
+    } else if (c == '{') {
+      if (depth == 0) {
+        long a = rindex_from(out, ';', j - 1);
+        long b = rindex_from(out, '}', j - 1);
+        long d = rindex_from(out, '{', j - 1);
+        long start = -1;
+        for (long v : {a, b, d})
+          if (v >= 0 && v > start) start = v;
+        std::string head = start >= 0 ? sl(out, start + 1, j) : sl(out, 0, j);
+        std::string word;
+        for (char ch2 : head + " ") {
+          if (ident_c((unsigned char)ch2)) {
+            word.push_back(ch2);
+          } else {
+            if (std::find(KEYWORDS_OF_CLASS.begin(), KEYWORDS_OF_CLASS.end(), word) != KEYWORDS_OF_CLASS.end()) return true;
+            word.clear();
+          }
+        }
+        return false;
+      }
+      depth -= 1;
+    }
+    j -= 1;
+  }
+  return false;
+}
+
+// Ruby host_linkage (line 3291): the host copy of a unit: kernels and __device__ functions get internal linkage.
+std::string host_linkage(const std::string &text) {
+  std::string out;
+  long i = 0;
+  long n = (long)text.size();
+  const std::string word = "__global__";
+  while (i < n) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += sl(text, i, e);
+      i = e;
+      continue;
+    }
+    if (sl_n(text, i, (long)word.size()) == word && !(i > 0 && ident_c(ch(text, i - 1))) &&
+        !ident_c(ch(text, i + (long)word.size()))) {
+      out += host_storage(out, "static");
+      i += (long)word.size();
+      continue;
+    }
+    // A __device__ function (not a variable): its host copy is static too.
+    if (sl_n(text, i, 8) == "__device" && !(i > 0 && ident_c(ch(text, i - 1))) && sl_n(text, i, 10) == "__device__" &&
+        !ident_c(ch(text, i + 10))) {
+      long j = i + 10;
+      while (j < n && (ch(text, j) == ' ' || ch(text, j) == '\n' || ch(text, j) == '\t')) j += 1;
+      long k = j;
+      while (k < n && std::string("(=;{").find((char)ch(text, k)) == std::string::npos) k += 1;
+      if (k < n && ch(text, k) == '(') {
+        // `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
+        bool after_static = sl_n(text, j, 6) == "static" && !ident_c(ch(text, j + 6));
+        // `[&] __device__ (...) {...}`: a device lambda. Its qualifier goes.
+        long p = (long)out.size() - 1;
+        while (p >= 0 && white_c((unsigned char)out[(size_t)p])) p -= 1;
+        bool lambda = p >= 0 && out[(size_t)p] == ']';
+        if (!(after_static || lambda || in_class_body(out))) out += host_storage(out, "static");
+        i += 10;
+        continue;
+      }
+    }
+    out.push_back(text[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby system_path? (line 2123) uses File.expand_path: an absolute, normalized path.
+std::string expand_path(const std::string &path) {
+  std::error_code ec;
+  std::filesystem::path p = std::filesystem::absolute(std::filesystem::path(path), ec);
+  if (ec) return path;
+  return p.lexically_normal().string();
+}
+
+// Ruby File.dirname (for a path given on the command line).
+std::string dirname_of(const std::string &path) {
+  size_t p = path.find_last_of('/');
+  if (p == std::string::npos) return ".";
+  if (p == 0) return "/";
+  return path.substr(0, p);
+}
+
+// Ruby find_include (line 2128): a quoted include is looked up beside the including file first, then in -I.
+bool find_include(const std::string &dir, const std::string &name, bool quoted, std::string &path_out) {
+  std::vector<std::string> cands;
+  if (quoted) cands.push_back(dir + "/" + name);
+  for (const auto &d : g_incdirs) cands.push_back(d + "/" + name);
+  for (const auto &c : cands) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(c, ec) && !system_path(expand_path(c))) {
+      path_out = c;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Ruby read: the whole file as bytes (File.open(path, "rb") { |f| f.read }).
+bool read_file(const std::string &path, std::string &out) {
+  FILE *f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+  out.clear();
+  char buf[65536];
+  size_t got;
+  while ((got = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, got);
+  std::fclose(f);
+  return true;
+}
+
+// Ruby expand_includes (line 2135): the quoted and -I includes of a unit are expanded in place, once per file.
+std::string expand_includes(const std::string &text, const std::string &dir, int depth, std::map<std::string, bool> &seen) {
+  if (depth > 8) return text;
+  std::string out;
+  long last = 0;
+  for (const auto &pc : top_pieces(text)) {
+    if (pc.kind != "pp") continue;
+    std::string rest = strip(sl(text, pc.st, pc.en));
+    size_t hp = rest.find('#');
+    if (hp != std::string::npos) rest.erase(hp, 1);
+    rest = strip(rest);
+    if (rest.compare(0, 7, "include") != 0) continue;
+    std::string q = strip(rest.size() >= 7 ? rest.substr(7) : std::string());
+    bool quoted = !q.empty() && q[0] == '"';
+    if (!(quoted || (!q.empty() && q[0] == '<'))) continue;
+    std::string after = q.size() >= 1 ? q.substr(1) : std::string();
+    size_t dl = after.find(quoted ? '"' : '>');
+    std::string name = dl == std::string::npos ? after : after.substr(0, dl);
+    std::string path;
+    if (!find_include(dir, name, quoted, path)) continue;
+    std::string key = expand_path(path);
+    out += sl(text, last, pc.st);
+    if (seen.count(key)) {
+      out += "\n";
+    } else {
+      seen[key] = true;
+      // The same two rewrites as the main file: a header of the backend has __launch_bounds__ in front of its
+      // template kernels, which kernel_template would not match.
+      std::string inc;
+      if (!read_file(path, inc)) refuse("cannot read " + path);
+      inc = dynamic_shared_rewrite(strip_launch_bounds(g_device_mode ? blank_comments(inc) : inc));
+      out += "\n" + expand_includes(inc, dirname_of(path), depth + 1, seen) + "\n";
+    }
+    last = pc.en;
+  }
+  out += sl(text, last, (long)text.size());
+  return out;
+}
+
+// Ruby split("\n") (no limit): the fields, with trailing empty fields removed.
+std::vector<std::string> ruby_split_nl(const std::string &text) {
+  std::vector<std::string> v = split_lines_keep(text);
+  while (!v.empty() && v.back().empty()) v.pop_back();
+  return v;
+}
+
 }  // namespace
 
-int main(int argc, char **argv) {
-  // The CLI is ported with the passes. Until then the Ruby script is the rewriter (the driver calls it).
-  (void)argc;
-  (void)argv;
-  std::fprintf(stderr, "cuda-rewrite: not ported yet (see tools/cuda-rewrite/PORTING.md); use scripts/cuda-rewrite.rb\n");
+// The command line of the Ruby script (line 3371): -I DIR, --device, --kernels=FILE, --edg-launches, FILE.cu.
+int usage() {
+  std::fprintf(stderr, "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] FILE.cu\n");
   return 2;
+}
+
+int main(int argc, char **argv) {
+  bool device = false;
+  bool has_kernels = false;
+  std::string kernels_path;
+  bool has_path = false;
+  std::string path;
+  for (int a = 1; a < argc; a++) {
+    std::string arg = argv[a];
+    if (arg.compare(0, 2, "-I") == 0) {
+      g_incdirs.push_back(arg.substr(2));
+    } else if (arg == "--device") {
+      device = true;
+      g_device_mode = true;
+    } else if (arg == "--edg-launches") {
+      g_edg_launches = true;
+    } else if (arg.compare(0, 10, "--kernels=") == 0) {
+      has_kernels = true;
+      kernels_path = arg.substr(10);
+    } else if (!has_path) {
+      has_path = true;
+      path = arg;
+    } else {
+      return usage();
+    }
+  }
+  if (!has_path) return usage();
+  std::string text;
+  if (!read_file(path, text)) {
+    std::fprintf(stderr, "cuda-rewrite: cannot read %s\n", path.c_str());
+    return 1;
+  }
+  if (device) text = blank_comments(text);
+  text = dynamic_shared_rewrite(strip_launch_bounds(text));
+  if (device) refuse_shared_align(text);
+  if (device) refuse_unlowered_cccl(text);
+  std::map<std::string, bool> seen;
+  g_expanded = expand_includes(text, dirname_of(path), 0, seen);
+  g_expanded = launch_prepare(g_expanded);
+  std::string result;
+  if (device) {
+    // The device unit is built from the conditionals of the device pass (see resolve_conditionals).
+    Defs defs;
+    for (const auto &kv : DEVICE_PASS_MACROS) {
+      Def df;
+      df.text = kv.second;
+      defs[kv.first] = df;
+    }
+    g_expanded = resolve_conditionals(g_expanded, defs);
+    // #include lines of system headers are not in the device unit (a top-level piece may carry one in front of a
+    // declaration, so they are removed here, not by the piece's keep decision).
+    std::string joined;
+    bool first = true;
+    for (const auto &l : ruby_split_nl(g_expanded)) {
+      std::string ls = lstrip_str(l);
+      std::string after_hash = lstrip_str(ls.size() >= 1 ? ls.substr(1) : std::string());
+      bool drop = ls.compare(0, 8, "#include") == 0 || (!ls.empty() && ls[0] == '#' && after_hash.compare(0, 7, "include") == 0);
+      if (drop) continue;
+      if (!first) joined += "\n";
+      joined += l;
+      first = false;
+    }
+    g_expanded = joined;
+    auto dk = device_tu(g_expanded);
+    if (has_kernels) {
+      FILE *kf = std::fopen(kernels_path.c_str(), "wb");
+      if (kf) {
+        for (const auto &k : dk.second) std::fprintf(kf, "%s\n", k.c_str());
+        std::fclose(kf);
+      }
+    }
+    result = dk.first;
+  } else {
+    // The host copy has the local headers expanded too: their launches are in the host unit as well.
+    result = host_linkage(rewrite(g_expanded, path));
+  }
+  std::fwrite(result.data(), 1, result.size(), stdout);
+  return 0;
 }
