@@ -73,6 +73,15 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
   done
 }
+# The rewriter: the C++ port (build/cuda-rewrite, built from tools/cuda-rewrite on first use) by default; the Ruby
+# reference scripts/cuda-rewrite.rb with NFCXX_CUDA_REWRITER=ruby. Both take the same flags and give the same output.
+rewriter=()
+if [ "${NFCXX_CUDA_REWRITER:-cxx}" = ruby ]; then
+  rewriter=("$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb")
+else
+  [ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit $?
+  rewriter=("$root/build/cuda-rewrite")
+fi
 cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, with the device image appended
   local src=$1 copy=$2
   local base; base=$(basename "$src" .cu)
@@ -88,12 +97,12 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
     # options recorded at compile time, and it must see --cuda there too (see the eccp call below).
     cuda_opts=(--cuda)
   fi
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} ${rw[@]+"${rw[@]}"} "$src" > "$copy" || exit $?
+  "${rewriter[@]}" ${incs[@]+"${incs[@]}"} ${rw[@]+"${rw[@]}"} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  "${rewriter[@]}" ${incs[@]+"${incs[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
-  "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   # The kernels are the names cuda-rewrite.rb listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"

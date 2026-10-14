@@ -1,5 +1,5 @@
 # libnfconnxsim.so: onnxsim's C++ differentiator (graph_grad.cpp, qat_graph_builder.cpp) with the onnx it bundles and a C ABI shim.
-# Configured by scripts/setup-onnxsim.sh with -DONNXSIM_SRC=<the unpacked onnxsim sdist>.
+# Configured by scripts/setup-onnxsim.sh with -DONNXSIM_SRC=<the onnxsim source tree at its pinned commit>.
 cmake_minimum_required(VERSION 3.26)
 project(nfconnxsim CXX)
 set(CMAKE_CXX_STANDARD 17)

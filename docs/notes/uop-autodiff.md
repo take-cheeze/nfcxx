@@ -48,17 +48,21 @@ with a constant 1, calls `BuildBackward`, gives targets the loss does not reach 
 model-local functions of onnxsim's "templated" rules (`onnx::inliner`; they are written for opset 17 and inlined in a model of
 their own), prefixes every new tensor name with `nfcg<N>_` (`N` = number of values of the graph, so repeated calls and second
 derivatives never clash), and returns the forward nodes plus the gradient nodes with one `Identity` output per `wrt`.
-onnxsim builds its constants and masks in float32, so a float64 model needs a fix that is not in 0.8.1:
-`scripts/onnxsim/patches/0001-graph-builder-float-type.patch` (`GraphBuilder::SetFloatType`, proposed upstream, see
-[onnxsim-upstream/README.md](onnxsim-upstream/README.md)) is applied on top of the pinned sdist by the setup script; without it the
-gradients of a float64 model would not even type-check, and a mean's `1/N` would be off by 2e-8. (The Python driver converts the
-emitted constants itself.)
+The rules read the operands that are constants (shape, axes, starts, ends, steps) through `Constant` nodes (onnxsim PR #2162): the
+shim hands them the forward initializers its slice needs as `Constant` nodes, which are not copied into the output (the export
+writes these operands as initializers, which the rules do not look at by themselves).
+onnxsim builds its constants and masks in float32 unless `GraphBuilder::SetFloatType` is set; the shim sets it from the loss' dtype, so a
+float64 model is differentiated in float64. That setter is upstream commit `60b3e4e0` (onnxsim PR history, in the pin); onnxsim 0.8.1 does
+not have it (see [onnxsim-upstream/README.md](onnxsim-upstream/README.md)). Without it the gradients of a float64 model would not even
+type-check, and a mean's `1/N` would be off by 2e-8. (The Python driver converts the emitted constants itself.)
 
-**The build** (`scripts/setup-onnxsim.sh`, about 2 minutes, needs `cmake g++ protobuf-compiler libprotobuf-dev curl`): downloads the
-PyPI sdist of onnxsim 0.8.1, **pinned by SHA-256** (patched only by the files in `scripts/onnxsim/patches/`) (`101c7b3d...b0a4`, it unpacks onnx 1.23.0 under `third_party/`), and builds
-onnx, onnxsim's `graph_grad.cpp` and `qat_graph_builder.cpp` and the shim into one shared library against the system protobuf.
-`ONNXSIM_SDIST=<file>` uses a local copy of the sdist. Exceptions of the library (every unsupported operator is one) are thrown and
-caught inside it.
+**The build** (`scripts/setup-onnxsim.sh`, about 3 minutes, needs `cmake g++ protobuf-compiler libprotobuf-dev git`): fetches onnxsim
+at commit `21f95fd13fae374827e6cdd836987eeff32ebfea` (the merge of onnxsim PR #2162, on onnxsim's master) and its onnx submodule at
+`281e5e6accfd6113fd57d819ce47f32a937bb106`, both by commit hash; each fetched commit is checked by `git rev-parse` against its hash, so
+the hash is the pin. No sdist and no patch is applied. It builds onnx, onnxsim's `graph_grad.cpp` and `qat_graph_builder.cpp` and the shim
+into one shared library against the system protobuf. The script exits at once when the library is already built from these two commits
+(the stamp file in `build/onnxsim/`). To move the pin, change `onnxsim_rev` and, if the submodule moved, `onnx_rev`, together. Exceptions
+of the library (every unsupported operator is one) are thrown and caught inside it.
 
 **nfcxx-built programs.** nfcxx emits weak, exported definitions of the C++ ABI's `type_info` vtables (without their virtual
 functions) into every program; libstdc++ binds its exception machinery to them, so an exception thrown inside the loaded library
@@ -86,7 +90,9 @@ all of which `hir` has. (`Pad`, added earlier for the native `Slice` gradient, s
 
 ## Operator coverage
 
-| Operator | onnxsim 0.8.1 C++ rule | in `hir` | differentiated here |
+The rule column is the rule map of onnxsim at the pin (`21f95fd1`, `Rules()` in `graph_grad.cpp`).
+
+| Operator | onnxsim C++ rule at the pin | in `hir` | differentiated here |
 | --- | --- | --- | --- |
 | `Add Sub Mul Div Neg Exp Log Sqrt Sigmoid Tanh Relu` | yes | yes | yes |
 | `Clip` | yes (strict inside; the bounds get no gradient) | yes | yes |
@@ -94,9 +100,12 @@ all of which `hir` has. (`Pad`, added earlier for the native `Slice` gradient, s
 | `Transpose Reshape Identity` | yes | yes | yes |
 | `ReduceSum ReduceMean` | yes | yes | yes |
 | `Softmax` | yes | yes | yes |
+| `Slice Expand Squeeze Unsqueeze` | yes; `Slice` only with positive steps (a non-positive step is refused: "Slice requires positive steps") | yes | yes (finite differences: `slice`, `slice-step`, `expand`, `expand-scalar-axes`, `squeeze`, `unsqueeze`) |
+| `Abs Max Min Concat LogSoftmax ReduceMax ReduceMin` | yes | yes | yes for `abs`, `max-binary`, `min-binary`, `concat`, `log-softmax`, `reduce-max`, `reduce-min` in `test_grad`; the rule of `Pad` and `Where` is not exercised there |
+| `Cast` | yes, for the casts its rule accepts; others are refused ("Cast to N is not differentiated here") | yes | refusal checked; a cast used as a mask is refused |
+| `Sin Cos` | no | yes | no: `Error` "no gradient rule for op type '...'" |
 | `Erf Gemm Gather Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` | yes | yes | yes, but only checked once by finite differences (a float64 graph with all nine: 1.8e-9 and 4.6e-8 relative); not in `test_grad` yet |
-| `Abs Sin Cos Max Min Where Slice Concat Pad Expand Squeeze Unsqueeze ReduceMax ReduceMin LogSoftmax Cast` | no (a few exist in the Python package only) | yes | **no**: `Error` "no gradient rule for op type '...'" |
-| comparisons, `Not And Or Xor`, `Mod` | no | yes | no: a mask made from a `wrt` (`x * (x > 0)`) is a path through `Greater` and `Cast`; the same masks off the path of every `wrt` are fine |
+| comparisons, `Not And Or Xor`, `Mod` | no | yes | no: a mask made from a `wrt` (`x * (x > 0)`, `where(x > 0, ...)`) is a path through `Greater` and `Cast`; the same masks off the path of every `wrt` are fine |
 
 Layer normalization written with `mean`/`sqrt`/`div` (as in `layernorm` of the tests), attention with `softmax(q k^T) v`, MLPs with
 `tanh`/`relu`/`sigmoid`, softmax cross entropy written as `-(onehot * softmax(z).log()).sum()` all differentiate.
@@ -109,9 +118,9 @@ are exact.
 
 Honestly, a lot of operator coverage, in exchange for not owning the rules:
 
-* No gradient for `Abs`, `Sin`, `Cos`, `Max`/`Min` (binary), `Where`, `Slice`, `Concat` (hence `stack`), `Pad`, `Expand`
-  (hence `broadcast_to`), `Squeeze`, `Unsqueeze`, `ReduceMax`, `ReduceMin`, `LogSoftmax`, `Cast`, and a 1-D `MatMul` operand
-  (`dot` of vectors, matrix-vector products). Of the 100 finite-difference cases of the native test-suite 50 still differentiate.
+* No gradient for `Sin`, `Cos`, comparisons used as masks, `Slice` with a non-positive step, casts the `Cast` rule refuses, and a 1-D
+  `MatMul` operand (`dot` of vectors, matrix-vector products). At the pin, onnxsim also has rules for `Where`, `Pad` and the others in the
+  table, but only the ones listed there have finite-difference cases.
 * No second derivative of any of those (second derivatives of the supported operators work: `second-softmax-log`,
   `second-tanh-matmul` and others in `test_grad.cpp`).
 * No gradient of the bounds of `Clip`, and no `Max`/`Min` tie convention (1/2 each) since there is no rule at all.
@@ -121,7 +130,7 @@ Honestly, a lot of operator coverage, in exchange for not owning the rules:
   no gradient flows.
 * Speed and size: the gradient is not optimized; the 2-layer MLP of the tests (11 forward nodes) gets 38 gradient nodes, the native pass 21. (Merging
   nodes is not done in `hir`; the UOp lowering interns equal nodes.)
-* Float64 needs the upstream-proposed patch above (onnxsim 0.8.1 builds float32 constants); the Python package has no such option.
+* Float64 needs `GraphBuilder::SetFloatType` (above; in the pin, not in 0.8.1); the Python package has no such option.
 * A required run-time dependency: gradient computation runs a pinned third-party library (or Python package).
 
 ## Agreement with the native gradients
@@ -133,10 +142,10 @@ gradients compared in float64: for the 50 models onnxsim can differentiate the l
 
 ## Security and dependency notes
 
-Computing a gradient executes third-party code: `libnfconnxsim.so` (built from the pinned onnxsim 0.8.1 sdist and its bundled
-onnx, against the system protobuf) or the `onnxsim` Python package, with the files of a `mkdtemp` directory (removed afterwards)
-as the only channel in the Python case. Pin it: the library script verifies the SHA-256 of the sdist, CI installs
-`onnxsim==0.8.1`. The model that is handed over is produced by `to_onnx` from the user's own graph; the result is parsed by our
+Computing a gradient executes third-party code: `libnfconnxsim.so` (built from onnxsim at the pinned commit `21f95fd1` and its
+onnx submodule at `281e5e6a`, against the system protobuf) or the `onnxsim` Python package, with the files of a `mkdtemp` directory
+(removed afterwards) as the only channel in the Python case. Pin it: the library script fetches both commits by hash and checks them
+with `git rev-parse`; CI installs `onnxsim==0.8.1` (the Python fallback, not yet moved to the pin). The model that is handed over is produced by `to_onnx` from the user's own graph; the result is parsed by our
 reader, which validates dtypes, shapes, names and operators and throws `Error` on anything else.
 
 ## Tests and why they SKIP
@@ -144,10 +153,10 @@ reader, which validates dtypes, shapes, names and operators and throws `Error` o
 * `tests/uop/test_onnx.cpp` (no Python needed): round trips, merging, collisions, errors, `Pad`, and models made by the `onnx`
   package (`tests/uop/onnx_import_gen.py`: typed initializers, `Constant` nodes, attributes, float64/int32, slices) that are
   imported and evaluated against onnxruntime (those four skip with a SKIP line when python/onnx/onnxruntime are missing).
-* `tests/uop/test_grad.cpp`: 59 finite-difference cases in float64 (866 derivative elements, largest relative error 1.3e-9),
+* `tests/uop/test_grad.cpp`: 72 finite-difference cases in float64 (944 derivative elements, largest relative error 1.25e-9),
   broadcasting in every binary operator, `MatMul` in six rank/batch combinations, reductions, layer norm, attention, two MLPs with
-  softmax cross entropy, shared sub-expressions, second derivatives, hand-derived exact gradients, the 16 unsupported
-  operators each with the library's message, argument errors, the gradient graph on the C backend equal to the interpreter bit for bit
+  softmax cross entropy, shared sub-expressions, second derivatives, hand-derived exact gradients, the operators that stay refused
+  (`Sin`, `Cos`, `Greater` as a mask, `Cast`, `Slice` with a negative step, a 1-D `MatMul`) each with the library's message, argument errors, the gradient graph on the C backend equal to the interpreter bit for bit
   (16 arrays), and a child process for each "missing backend" message. It writes four gradient models
   (`grad_mlp grad_ops grad_matmul grad_second`) that `tests/uop/onnx_check.py` runs through `onnx.checker` (full check) and
   onnxruntime. **Without onnxsim** (neither `build/onnxsim/libnfconnxsim.so` nor python3 with onnx and onnxsim) the file prints

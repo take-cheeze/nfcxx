@@ -39,7 +39,7 @@ else
 fi
 # 1c. The device units of a macro named only in a launch's template arguments, and of a launch whose template arguments
 # are block-local constants, keep the macro and name the values in the wrapper.
-for c in macro_wrapper local_targs launch_macro_body; do
+for c in macro_wrapper local_targs launch_macro_body using_namespace define_header_skip static_kernel_enum host_member_drop bf16_class; do
   if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
      && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
     echo "device unit $c: ok"
@@ -82,6 +82,24 @@ if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_d
   echo "device unit shadow_decl: ok"
 else
   echo "device unit shadow_decl: FAIL"; fail=1
+fi
+
+# 1b3. A host `const` reference is not a constant: the device unit carries neither its initializer nor its struct type
+# (with a FILE * member). A value constant (LIMIT) is still carried.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/const_host_ref.cu > "$out/const_host_ref.device.cpp" \
+   && diff -u rewrite/const_host_ref.device.expected.cpp "$out/const_host_ref.device.cpp"; then
+  echo "device unit const_host_ref: ok"
+else
+  echo "device unit const_host_ref: FAIL"; fail=1
+fi
+
+# 1b4. A linkage block (extern "C" { ... }) is split: only the pieces the device unit needs are carried, each inside the
+# block's linkage. The host struct with a FILE * member is not carried.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/linkage_block.cu > "$out/linkage_block.device.cpp" \
+   && diff -u rewrite/linkage_block.device.expected.cpp "$out/linkage_block.device.cpp"; then
+  echo "device unit linkage_block: ok"
+else
+  echo "device unit linkage_block: FAIL"; fail=1
 fi
 
 # 1c. Included headers are expanded once each: a diamond-shaped include tree (each level includes the next one three

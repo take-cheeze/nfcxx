@@ -14,7 +14,8 @@ permissions:
 
 jobs:
   label:
-    runs-on: ubuntu-24.04
+    # One gh api call: the 1-vCPU ubuntu-slim runner is enough. (Not a required check, so a queued job cannot block a merge.)
+    runs-on: ubuntu-slim
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}

@@ -11,6 +11,8 @@
 # (branch nfcxx/cpp17-eval-order: C++17 evaluation order). See docs/notes/eval-order.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+# ccache when it is installed: CMake's compiler launchers (the EDG build is most of a fresh setup).
+if command -v ccache >/dev/null; then export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache; fi
 src=${EDG_SRC:-$root/3rd/edg}
 out=${EDG_BUILD:-$root/build/edg}
 base=${EDG_BASE:-$root/build/edg-base}
