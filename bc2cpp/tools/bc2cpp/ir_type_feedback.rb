@@ -56,9 +56,12 @@ module IrTypeFeedback
           inferred_calls[index] = classes if classes
         end
       end
+      source_resolver = if ENV['BC2CPP_IR_SOURCE_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_source_classes)
+                          ->(index, reg) { ctx.gen.bytecode_ir_source_classes(irep, index, reg) }
+                        end
       analysis = if applied
-                   RbsSignatures.ir_types(applied, irep, superclass_of: ctx.superclass_of || {}, inferred_calls: inferred_calls)
-                 else BytecodeIR::Types.new(irep, inferred_calls: inferred_calls)
+                   RbsSignatures.ir_types(applied, irep, superclass_of: ctx.superclass_of || {}, inferred_calls: inferred_calls, source_resolver: source_resolver)
+                 else BytecodeIR::Types.new(irep, inferred_calls: inferred_calls, source_resolver: source_resolver)
                  end
       owners = RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {})
       exits = []

@@ -277,10 +277,10 @@ module RbsSignatures
   end
 
   # Applied signatures have already been matched to the definition and its required arity.
-  def ir_types(applied, irep, superclass_of: {}, inferred_calls: {}, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0')
+  def ir_types(applied, irep, superclass_of: {}, inferred_calls: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0')
     require_relative 'bytecode_ir'
     owner = applied.ir_owners[irep.label]
-    return BytecodeIR::Types.new(irep, inferred_calls: inferred_calls) unless owner
+    return BytecodeIR::Types.new(irep, inferred_calls: inferred_calls, source_resolver: source_resolver) unless owner
 
     owners = contract_owners(owner, superclass_of)
     ivars = {}
@@ -319,7 +319,7 @@ module RbsSignatures
       BytecodeIR::Types::Fact.new(classes: classes.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
     end
     BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}),
-                         declared_ivars: ivars, declared_calls: calls, inferred_calls: inferred_calls, call_resolver: call_results ? resolver : nil)
+                         declared_ivars: ivars, declared_calls: calls, inferred_calls: inferred_calls, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
   end
 
   # A cyclic hierarchy supplies no inherited contracts.

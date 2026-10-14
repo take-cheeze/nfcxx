@@ -469,8 +469,11 @@ else
     RBS
     File.write(File.join(dir, 'feedback.rb'), feedback_source)
     File.write(File.join(dir, 'sig/feedback.rbs'), feedback_sig)
+    source_types_before = ENV['BC2CPP_IR_SOURCE_TYPES']
+    ENV['BC2CPP_IR_SOURCE_TYPES'] = '0'
     feedback_out, feedback_err, feedback_status = type_check.call(dir, '--files', 'feedback.rb', '--format', 'json',
                                                                  '--no-sends', '--sig', 'sig/feedback.rbs', '--emit-rbs-suggestions', 'suggested', '--keep', 'feedback-kept')
+    source_types_before ? ENV['BC2CPP_IR_SOURCE_TYPES'] = source_types_before : ENV.delete('BC2CPP_IR_SOURCE_TYPES')
     check.call("feedback returns exit 1 for definite contract mismatches #{feedback_err.lines.first&.strip}", feedback_status.exitstatus == 1)
     report = JSON.parse(feedback_out)
     feedback_rows = report['ir_feedback']
@@ -593,6 +596,37 @@ else
     block_out, _block_err, _block_status = type_check.call(dir, '--files', 'block-call.rb', '--sig', 'sig/block-call.rbs', '--format', 'json', '--no-sends')
     block_result = JSON.parse(block_out)['ir_feedback'].find { |row| row['method'] == 'run' && row['kind'] == 'return' }
     check.call('a breaking block does not inherit its callee normal Array return', block_result['type'] != 'Array')
+
+    puts '== independent receiver source proofs'
+    File.write(File.join(dir, 'source-types.rb'), <<~RUBY)
+      class IrSources
+        VALUE = 'constant'
+        def constant_value
+          VALUE
+        end
+        def store
+          @item = []
+        end
+        def read
+          @item
+        end
+        def ir_source_identity(value)
+          value
+        end
+        def invoke
+          ir_source_identity('incoming')
+        end
+      end
+    RUBY
+    source_out, _source_err, source_status = type_check.call(dir, '--files', 'source-types.rb', '--sig', 'no-signatures', '--format', 'json', '--no-sends')
+    source_rows = JSON.parse(source_out)['ir_feedback']
+    source_return = ->(name) { source_rows.find { |row| row['method'] == name && row['kind'] == 'return' } }
+    check.call('constant source proof is independent', source_status.success? && source_return.call('constant_value')['type'] == 'String' &&
+               source_return.call('constant_value')['status'] == 'inferred')
+    check.call('ivar source proof preserves uninitialized nil', source_return.call('read')['type'].split(' | ').sort == %w[Array nil] &&
+               source_return.call('read')['status'] == 'inferred')
+    check.call('incoming argument pool feeds independent IR facts', source_return.call('ir_source_identity')['type'] == 'String' &&
+               source_return.call('ir_source_identity')['status'] == 'inferred')
 
     puts '== the comment wins over a signature'
     File.write(File.join(dir, 'both.rb'), commented)

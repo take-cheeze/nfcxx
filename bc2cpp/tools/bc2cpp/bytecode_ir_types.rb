@@ -21,7 +21,7 @@ module BytecodeIR
       def declared? = declared
     end
 
-    def initialize(irep, declared_args: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, call_resolver: nil)
+    def initialize(irep, declared_args: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, source_resolver: nil, call_resolver: nil)
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @declared_args = declared_args.to_h do |reg, types|
@@ -34,6 +34,7 @@ module BytecodeIR
       @declared_ivars = declared_ivars.to_h { |name, types| [name.to_s.delete_prefix('@').freeze, types.to_set.dup.freeze] }.freeze
       @declared_calls = declared_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
       @inferred_calls = inferred_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
+      @source_resolver = source_resolver
       @call_resolver = call_resolver
       @active_queries = Set.new
       @query_cache = {}
@@ -89,6 +90,14 @@ module BytecodeIR
                                                     max_states: max_states, refusal: refusal)
       return nil unless definitions
       return unknown(refusal, :no_definition) if definitions.empty?
+
+      source = definitions.any? do |definition|
+        definition.entry? || definition.built == :arg ||
+          %w[GETIV GETCONST GETMCNST].include?(@irep.instructions[definition.index].op)
+      end
+      if source && @source_resolver && (classes = @source_resolver.call(index, reg)) && !classes.empty?
+        return Fact.new(classes: classes.to_set.dup.freeze, declared: false, contracts: [].freeze).freeze
+      end
 
       types = Set.new
       contracts = Set.new
