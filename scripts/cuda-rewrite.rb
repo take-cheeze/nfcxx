@@ -2639,6 +2639,39 @@ def flatten_linkage(text, raw)
   end
 end
 
+# The member functions of a class that are host-only: a definition whose qualifiers name __host__ and not __device__ or
+# __global__ (mmq.cuh's use_mma_data_layout(cc) calls the host dispatch helpers, which the device unit must not keep).
+# Removed with its body, keeping its newlines so line numbers hold. A __host__ that does not start a member (after
+# `;`, `{`, `}`, `:` or the start of the text) is left alone.
+def drop_host_members(t)
+  out = ""
+  i = 0
+  while i < t.length
+    e = skip_literal(t, i)
+    if e
+      out << t[i...e]
+      i = e
+      next
+    end
+    if word_at?(t, i, "__host__")
+      prev = out.rstrip[-1]
+      open = t.index("{", i)
+      semi = t.index(";", i)
+      header = open && (semi.nil? || open < semi) ? t[i...open] : nil
+      close = header && header.include?("(") && !header.include?("__device__") && !header.include?("__global__") &&
+              (prev.nil? || ";{}:".include?(prev)) ? matching_brace(t, open) : nil
+      if close
+        out << ("\n" * t[i..close].count("\n"))
+        i = close + 1
+        next
+      end
+    end
+    out << t[i]
+    i += 1
+  end
+  out
+end
+
 def device_tu(text)
   pieces = flatten_linkage(text, top_pieces(text)).map do |pc|
     st, en, kind, body = pc
@@ -2690,6 +2723,14 @@ def device_tu(text)
           kernels << name
         end
         pc[:keep] = true
+        # a class of the device side keeps its device members only: its host-only members go, and so do their tokens
+        if pc[:toks].include?("struct") || pc[:toks].include?("class")
+          dropped = drop_host_members(pc[:text])
+          if dropped != pc[:text]
+            pc[:text] = dropped
+            pc[:toks] = tokens_of(dropped)
+          end
+        end
         # a kernel has external linkage (it is launched from the host): `static __global__ void k()` is not static in the
         # device unit, or the front end drops it when no device code calls it
         pc[:text] = remove_words(pc[:text], pc[:toks].include?("__global__") ? DEVICE_QUALIFIERS + ["static"] : DEVICE_QUALIFIERS)
