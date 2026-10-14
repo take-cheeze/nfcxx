@@ -452,6 +452,9 @@ FLOAT_BUILTINS = {
   "__nfcxx_logf" => [:log, 1],
   "__nfcxx_floorf" => ["cvt.rmi.f32.f32", 1],   # round toward -inf: floorf (exact, NaN and inf pass through)
   "__nfcxx_truncf" => ["cvt.rzi.f32.f32", 1],   # round toward zero: trunc (exact)
+  "__nfcxx_ceilf" => ["cvt.rpi.f32.f32", 1],    # round toward +inf: ceilf (exact)
+  "__nfcxx_fmaf" => ["fma.rn.f32", 3],          # fused multiply-add, one rounding: fmaf (exact)
+  "__nfcxx_log2f" => ["lg2.approx.f32", 1],     # approximate, see log2f in cuda-rewrite.rb (exact at powers of two)
 }
 # Float to 32-bit integer: name => PTX instruction. cvt.rni rounds to nearest even and saturates (NaN gives 0), as CUDA's
 # __float2int_rn.
