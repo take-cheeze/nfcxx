@@ -844,43 +844,7 @@ bool template_head_of(const std::string &text, const std::string &name, Template
 bool deduce_call_targs(const std::string &text, const std::string &name, long pos,
                        const std::vector<std::string> &args, std::vector<std::string> &out);
 
-// Ruby enclosing_block (line 2988): the innermost `{ ... }` block containing pos, as [open, close]; false at file scope.
-// (The perf version of the Ruby script indexes the braces once; the answer is the same.)
-bool enclosing_block_bounds(const std::string &s, long pos, long &close_out) {
-  std::vector<long> stack;
-  long i = 0;
-  long n = (long)s.size();
-  while (i < pos && i < n) {
-    long e = skip_literal(s, i);
-    if (e >= 0) {
-      i = e;
-      continue;
-    }
-    if (ch(s, i) == '{') stack.push_back(i);
-    if (ch(s, i) == '}' && !stack.empty()) stack.pop_back();
-    i += 1;
-  }
-  if (stack.empty()) return false;
-  long open = stack.back();
-  long depth = 0;
-  long j = open;
-  while (j < n) {
-    long e = skip_literal(s, j);
-    if (e >= 0) {
-      j = e;
-      continue;
-    }
-    if (ch(s, j) == '{') depth += 1;
-    if (ch(s, j) == '}') depth -= 1;
-    if (depth == 0) {
-      close_out = j;
-      return true;
-    }
-    j += 1;
-  }
-  close_out = n;
-  return true;
-}
+bool enclosing_block(const std::string &s, long pos, long &open_out, long &close_out);
 
 // Ruby identity memo (`equal?`): the cache is valid for the same string object (address and size).
 struct IdentKey {
@@ -1163,8 +1127,8 @@ bool local_constant_visible(const std::string &text, long pos, const std::string
     long semi = str_index(seg, ";", a);
     if (semi < 0) continue;
     // Ruby: blk = enclosing_block(text, k); next unless blk.nil? || blk[1] > pos
-    long blk_close = -1;
-    bool has_blk = enclosing_block_bounds(text, k, blk_close);
+    long blk_close = -1, blk_open_unused = -1;
+    bool has_blk = enclosing_block(text, k, blk_open_unused, blk_close);
     if (has_blk && !(blk_close > pos)) continue;
     found = true;
     value = strip(sl(seg, a + 1, semi));
@@ -1179,7 +1143,8 @@ std::string resolve_local_constants(const std::string &text, const std::string &
     if (ident_c((unsigned char)c) && !(c >= '0' && c <= '9')) has_ident = true;
   if (!has_ident) return targs;
   long unused_close = -1;
-  if (!enclosing_block_bounds(text, pos, unused_close)) return targs;
+  long unused_open = -1;
+  if (!enclosing_block(text, pos, unused_open, unused_close)) return targs;
   OuterTemplate outer;
   bool has_outer = enclosing_template(text, pos, outer);
   std::string out;
@@ -3330,6 +3295,7 @@ std::string strip_launch_bounds(const std::string &s) {
 }
 
 std::string replace_dynamic_uses(const std::string &s, const std::map<std::string, std::string> &names);
+bool enclosing_block(const std::string &s, long pos, long &open_out, long &close_out);
 
 // Ruby dynamic_shared_rewrite (line 2894): `extern __shared__ T name[];` is removed and its uses become typed pointers.
 std::string dynamic_shared_rewrite(const std::string &s) {
@@ -3438,6 +3404,274 @@ void refuse_unlowered_cccl(const std::string &s) {
     }
     i += 1;
   }
+}
+
+// Ruby block_index (line 3010): every brace event of a text in one pass.
+struct BlockEvent {
+  long pos;
+  long open;  // the innermost open `{` after the brace, or -1 (nil)
+};
+struct BlockIndex {
+  std::vector<BlockEvent> events;
+  std::map<long, long> closes;  // `{` => its `}` (or the text length when unclosed)
+};
+IdentKey g_block_key;
+BlockIndex g_block_index;
+
+const BlockIndex &block_index(const std::string &s) {
+  if (g_block_key.is(s)) return g_block_index;
+  BlockIndex idx;
+  std::vector<long> stack;
+  long k = 0;
+  long n = (long)s.size();
+  while (k < n) {
+    long e = skip_literal(s, k);
+    if (e >= 0) {
+      k = e;
+      continue;
+    }
+    if (ch(s, k) == '{') {
+      stack.push_back(k);
+      idx.events.push_back(BlockEvent{k, stack.back()});
+    } else if (ch(s, k) == '}' && !stack.empty()) {
+      idx.closes[stack.back()] = k;
+      stack.pop_back();
+      idx.events.push_back(BlockEvent{k, stack.empty() ? -1 : stack.back()});
+    }
+    k += 1;
+  }
+  for (long o : stack) idx.closes[o] = n;
+  g_block_index = idx;
+  g_block_key.set(s);
+  return g_block_index;
+}
+
+// Ruby enclosing_block_scan (line 3037): the innermost block of pos by a scan from the start (short texts).
+bool enclosing_block_scan(const std::string &s, long pos, long &open_out, long &close_out) {
+  std::vector<long> stack;
+  long i = 0;
+  while (i < pos) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (ch(s, i) == '{') stack.push_back(i);
+    if (ch(s, i) == '}' && !stack.empty()) stack.pop_back();
+    i += 1;
+  }
+  if (stack.empty()) return false;
+  long open = stack.back();
+  long depth = 0;
+  long j = open;
+  long n = (long)s.size();
+  while (j < n) {
+    long e = skip_literal(s, j);
+    if (e >= 0) {
+      j = e;
+      continue;
+    }
+    if (ch(s, j) == '{') depth += 1;
+    if (ch(s, j) == '}') depth -= 1;
+    if (depth == 0) {
+      open_out = open;
+      close_out = j;
+      return true;
+    }
+    j += 1;
+  }
+  open_out = open;
+  close_out = n;
+  return true;
+}
+
+// Ruby enclosing_block (line 2988): the innermost `{ ... }` block containing pos, as [open, close]; false at file scope.
+bool enclosing_block(const std::string &s, long pos, long &open_out, long &close_out) {
+  if ((long)s.size() < 4000) return enclosing_block_scan(s, pos, open_out, close_out);
+  const BlockIndex &idx = block_index(s);
+  const auto &events = idx.events;
+  size_t lo = 0, hi = events.size();
+  while (lo < hi) {
+    size_t mid = (lo + hi) / 2;
+    if (events[mid].pos < pos) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo == 0) return false;
+  long open = events[lo - 1].open;
+  if (open < 0) return false;
+  open_out = open;
+  close_out = idx.closes.at(open);
+  return true;
+}
+
+// Ruby static_shared_names (line 3069): each static `__shared__ T name[...]` as [name, position of name].
+std::vector<std::pair<std::string, long>> static_shared_names(const std::string &s) {
+  std::vector<std::pair<std::string, long>> found;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (word_at(s, i, "__shared__")) {
+      long j = i + 10;
+      long stop = j;
+      while (stop < n && ch(s, stop) != '[' && ch(s, stop) != ';' && ch(s, stop) != '=') stop += 1;
+      if (stop < n && ch(s, stop) == '[') {
+        long k = stop;
+        while (k > j && white_c(ch(s, k - 1))) k -= 1;
+        long q = k;
+        while (q > j && ident_c(ch(s, q - 1))) q -= 1;
+        if (q < k) found.push_back({sl(s, q, k), q});
+      }
+      i = j;
+      continue;
+    }
+    i += 1;
+  }
+  return found;
+}
+
+// Ruby shadowed_by_static? (line 3099): the use at pos is inside a range where the name is declared again.
+bool shadowed_by_static(const std::map<std::string, std::vector<std::pair<long, long>>> &blocks, const std::string &tok,
+                        long pos) {
+  auto it = blocks.find(tok);
+  if (it == blocks.end()) return false;
+  for (const auto &blk : it->second)
+    if (pos >= blk.first && pos < blk.second) return true;
+  return false;
+}
+
+// Ruby PAREN_WORDS (line 3104) and USE_WORDS (line 3106).
+const std::vector<std::string> PAREN_WORDS = {"if", "while", "for", "switch", "catch", "return", "sizeof", "decltype", "alignof"};
+const std::vector<std::string> USE_WORDS = {"return", "case", "else", "do", "throw", "delete", "new", "goto", "sizeof",
+                                            "co_return", "co_await", "co_yield"};
+
+// Ruby token_positions (line 3109): the positions of the identifier tok as whole words.
+std::vector<long> token_positions(const std::string &s, const std::string &tok) {
+  std::vector<long> found;
+  long from = 0;
+  while (true) {
+    long k = str_index(s, tok, from);
+    if (k < 0) break;
+    long e = k + (long)tok.size();
+    if ((k == 0 || !ident_c(ch(s, k - 1))) && (e >= (long)s.size() || !ident_c(ch(s, e)))) found.push_back(k);
+    from = e;
+  }
+  return found;
+}
+
+// Ruby declares_name? (line 3122): a type word, `*` or `&` before the identifier, and `,`, `)`, `;`, `=` or `[` after.
+bool declares_name(const std::string &s, long pos, const std::string &tok) {
+  long q = pos - 1;
+  while (q >= 0 && white_c(ch(s, q))) q -= 1;
+  if (q < 0) return false;
+  if (ident_c(ch(s, q))) {
+    long w = q;
+    while (w >= 0 && ident_c(ch(s, w))) w -= 1;
+    std::string prev = sl(s, w + 1, q + 1);
+    if (std::find(USE_WORDS.begin(), USE_WORDS.end(), prev) != USE_WORDS.end()) return false;
+  } else if (ch(s, q) != '*' && ch(s, q) != '&') {
+    return false;
+  }
+  long n = pos + (long)tok.size();
+  while (n < (long)s.size() && white_c(ch(s, n))) n += 1;
+  if (n >= (long)s.size()) return false;
+  return std::string(",);=[").find((char)ch(s, n)) != std::string::npos;
+}
+
+// Ruby declaration_scope (line 3140): the range where a name declared at pos is visible, as [start, end].
+bool declaration_scope(const std::string &s, long pos, std::pair<long, long> &out) {
+  long o = pos - 1;
+  long depth = 0;
+  long open = -1;
+  while (o >= 0) {
+    int c = ch(s, o);
+    if (c == ')') {
+      depth += 1;
+    } else if (c == '(') {
+      if (depth == 0) {
+        open = o;
+        break;
+      }
+      depth -= 1;
+    } else if (c == ';' || c == '{' || c == '}') {
+      break;
+    }
+    o -= 1;
+  }
+  if (open < 0) {
+    long bo = 0, bc = 0;
+    if (!enclosing_block(s, pos, bo, bc)) return false;
+    out = {pos, bc};
+    return true;
+  }
+  long w = open - 1;
+  while (w >= 0 && white_c(ch(s, w))) w -= 1;
+  long w_end = w;
+  while (w >= 0 && ident_c(ch(s, w))) w -= 1;
+  std::string word = sl(s, w + 1, w_end + 1);
+  if (word.empty() || std::find(PAREN_WORDS.begin(), PAREN_WORDS.end(), word) != PAREN_WORDS.end()) return false;
+  long close = matching_paren(s, open);
+  if (close < 0) return false;
+  long b = close + 1;
+  while (b < (long)s.size() && (white_c(ch(s, b)) || ident_c(ch(s, b)))) b += 1;
+  if (!(b < (long)s.size() && ch(s, b) == '{')) return false;
+  long bclose = matching_brace(s, b);
+  if (bclose < 0) return false;
+  out = {pos, bclose};
+  return true;
+}
+
+// Ruby replace_dynamic_uses (line 3180): the uses of the dynamic shared arrays become typed pointers.
+std::string replace_dynamic_uses(const std::string &s, const std::map<std::string, std::string> &names) {
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  // name => the ranges where the name is declared again (a static __shared__ array, a parameter, a local)
+  std::map<std::string, std::vector<std::pair<long, long>>> blocks;
+  for (const auto &sn : static_shared_names(s)) {
+    if (!names.count(sn.first)) continue;
+    long bo = 0, bc = 0;
+    if (enclosing_block(s, sn.second, bo, bc)) blocks[sn.first].push_back({bo, bc});
+  }
+  for (const auto &nm : names) {
+    for (long p : token_positions(s, nm.first)) {
+      if (!declares_name(s, p, nm.first)) continue;
+      std::pair<long, long> sc;
+      if (declaration_scope(s, p, sc)) blocks[nm.first].push_back(sc);
+    }
+  }
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      out += sl(s, i, e);
+      i = e;
+      continue;
+    }
+    if (ident_c(ch(s, i)) && !(ch(s, i) >= '0' && ch(s, i) <= '9')) {
+      long j = i;
+      while (j < n && ident_c(ch(s, j))) j += 1;
+      std::string tok = sl(s, i, j);
+      long q = i - 1;
+      while (q >= 0 && white_c(ch(s, q))) q -= 1;
+      bool member = q >= 0 && (ch(s, q) == '.' || (ch(s, q) == '>' && q > 0 && ch(s, q - 1) == '-'));
+      auto nit = names.find(tok);
+      if (nit != names.end() && !member && !shadowed_by_static(blocks, tok, i)) {
+        out += "((" + nit->second + " *)__nfcxx_dynshared_addr())";
+        i = j;
+        continue;
+      }
+      out += tok;
+      i = j;
+      continue;
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
+  }
+  return out;
 }
 
 }  // namespace
