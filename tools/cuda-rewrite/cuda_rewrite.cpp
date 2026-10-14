@@ -4420,7 +4420,6 @@ int main(int argc, char **argv) {
   }
   if (device) text = blank_comments(text);
   text = dynamic_shared_rewrite(strip_launch_bounds(text));
-  if (device) refuse_unlowered_cccl(text);
   std::map<std::string, bool> seen;
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
   g_expanded = inline_generic_lambdas(g_expanded);
@@ -4450,6 +4449,8 @@ int main(int argc, char **argv) {
     }
     g_expanded = joined;
     auto dk = device_tu(g_expanded);
+    // The refusal looks at the device unit, not the file: a CUB call in a host helper the unit drops is not a problem.
+    refuse_unlowered_cccl(dk.first);
     if (has_kernels) {
       FILE *kf = std::fopen(kernels_path.c_str(), "wb");
       if (kf) {
