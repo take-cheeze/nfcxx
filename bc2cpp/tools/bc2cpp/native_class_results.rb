@@ -68,8 +68,6 @@ module NativeClassResults
   STRUCT_ALIAS_PATH = '3rd/mruby/mrbgems/mruby-struct/mrblib/struct.rb'
   STRUCT_ALIAS_SHA = '6d651f44caf2f46e15ee6569426cdaabe8721c1405fdcfa6592a767aca1cb5e1'
 
-  EXACT_CORE_KINDS = { 'Array' => { 'to_a' => 'Array', 'compact' => 'Array', 'join' => 'String' }, 'String' => { 'bytes' => 'Array' } }.freeze
-
   module_function
 
   def source_matches?(path, relative, digest = FILES[relative])

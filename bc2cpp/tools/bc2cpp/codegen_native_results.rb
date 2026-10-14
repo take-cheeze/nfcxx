@@ -2,6 +2,7 @@
 
 require_relative 'native_result_facts'
 require_relative 'native_class_results'
+require_relative 'native_core_result_sigs'
 require_relative 'numeric_flow'
 
 # CodeGen: NATIVE_RESULT_FACTS (ADR 0302). A fact is used only for a receiver the exact-class flow
@@ -34,7 +35,7 @@ class CodeGen
   def native_core_declared_result(name, klass)
     return nil if ENV['BC2CPP_NATIVE_COLLECTION_RESULTS'] == '0' && %w[compact join].include?(name)
 
-    NativeClassResults::EXACT_CORE_KINDS.dig(klass, name)
+    NativeCoreResultSigs.kinds.dig(klass, name)
   end
 
   # Only the exact-class oracle supplies this receiver: numeric masks alone
