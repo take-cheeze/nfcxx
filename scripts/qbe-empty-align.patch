@@ -1,0 +1,31 @@
+Local patch for 3rd/qbe (c9x.me/git/qbe.git mirror), applied to the build copy by scripts/setup-qbe.sh.
+
+parsefields() starts the alignment of a struct, and takes the alignment of each nested type, from ty->align. A type
+with no members (cproc emits "struct X {}" with no align directive, as EDG emits empty classes) keeps -1 there. The
+mask "(1 << -1) - 1" of an empty member is then 0x7fffffff, so after any data an empty member pads the struct by
+2 GiB, and a struct whose only other member is a bool (std::optional<long>: a union whose first alternative is
+_Empty_byte, then the engaged flag) ends up with size 0 or 8 instead of 16. The return of such a struct then keeps
+only RAX, and the caller reads the engaged flag from whatever RDX holds: std::optional<long> from a function with
+two returns (nullopt, then a value) reports has_value() garbage. The C rule (docs/notes/freestanding.md, "Layout of
+empty classes"): an empty class has size 0 and alignment 1, the same as gcc. Both reads of ty->align now use 0 for
+an empty class. Test: tests/cases/qbe_empty_align.cpp. Report: docs/notes/qbe-empty-align.md.
+--- a/parse.c
++++ b/parse.c
+@@ -970,7 +970,7 @@
+ 
+ 	n = 0;
+ 	sz = 0;
+-	al = ty->align;
++	al = ty->align < 0 ? 0 : ty->align;
+ 	while (t != Trbrace) {
+ 		ty1 = 0;
+ 		switch (t) {
+@@ -985,7 +985,7 @@
+ 			type = FTyp;
+ 			ty1 = &typ[findtyp(ntyp-1)];
+ 			s = ty1->size;
+-			a = ty1->align;
++			a = ty1->align < 0 ? 0 : ty1->align;
+ 			break;
+ 		}
+ 		if (a > al)
