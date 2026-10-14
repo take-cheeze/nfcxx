@@ -13,6 +13,9 @@
 #   -fsanitize=undefined|CHECK[,CHECK...]: the undefined behavior sanitizer (docs/notes/ubsan.md). Implies Path B, whose IR has the
 #                  checks; a failing check prints "file:line: runtime error: ..." and aborts. -fno-sanitize=all turns it off.
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
+#   NFCXX_KEEP_INTERMEDIATES=1: a compile and link keeps its intermediates (the .o files, <stem>.ii, <stem>.ti) in the
+#                  temporary directory the driver names on stderr, instead of removing it on exit. A -c compile keeps
+#                  <stem>.ii and <stem>.ti beside its object in any case: the link that follows reads them there.
 #   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
 #                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
@@ -101,6 +104,40 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   "$ptxas" -arch=sm_$sm "$dev.ptx" -o "$dev.cubin" || exit $?
   "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.cubin" "$dev.ir" "$dev.kernels" >> "$copy" || exit $?
 }
+# A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
+# <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the
+# records of one build could be read by the next build in the same directory. The arguments of such a run are made
+# absolute first (ecp_arg), because its working directory changes. A -c compile is not moved: the link that follows reads
+# its <stem>.ii and <stem>.ti beside the object (see "-c" before the eccp call).
+moves=0; eccp_dir=""
+ecp_arg() {  # ecp_arg ARG: ARG as eccp receives it (its paths absolute when eccp runs in the temporary directory)
+  if [ $moves = 0 ]; then printf '%s\n' "$1"; return 0; fi
+  case $1 in
+    -I?*) printf -- '-I%s\n' "$(abs_path "${1#-I}")" ;;
+    -L?*) printf -- '-L%s\n' "$(abs_path "${1#-L}")" ;;
+    -Wl,*)   # a file named in a link option (-Wl,--version-script=FILE, -Wl,-T,FILE) is made absolute when it exists here
+      local res=-Wl p parts=()
+      IFS=, read -r -a parts <<< "${1#-Wl,}"
+      for p in ${parts[@]+"${parts[@]}"}; do
+        case $p in
+          *=*) if [ -e "${p#*=}" ]; then p="${p%%=*}=$(abs_path "${p#*=}")"; fi ;;
+          *) if [ -e "$p" ]; then p=$(abs_path "$p"); fi ;;
+        esac
+        res+=",$p"
+      done
+      printf '%s\n' "$res" ;;
+    -*) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "$(abs_path "$1")" ;;
+  esac
+}
+eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
+  local rc=$?
+  if [ -n "$eccp_dir" ] && [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ]; then rm -rf "$eccp_dir"; fi
+  if [ -n "${cudatmp:-}" ]; then rm -rf "$cudatmp"; fi
+  if [ -n "${ctmp:-}" ]; then rm -rf "$ctmp"; fi
+  trace_finish
+  return $rc
+}
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
@@ -163,6 +200,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+[ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see ecp_arg)
 cu_prepare
 if [ $preprocess = 1 ]; then
   # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way).
@@ -235,8 +273,12 @@ else
   fi
 fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
-for d in ${sysdirs[@]+"${sysdirs[@]}"}; do sys_inc+=("--sys_include=$d"); done
-pre_opts=(); for f in ${preinc[@]+"${preinc[@]}"}; do pre_opts+=(--preinclude "$f"); done
+for d in ${sysdirs[@]+"${sysdirs[@]}"}; do sys_inc+=("--sys_include=$(ecp_arg "$d")"); done
+# -include FILE is found through the include directories as well as here, so it is made absolute only when it exists here.
+pre_opts=(); for f in ${preinc[@]+"${preinc[@]}"}; do
+  if [ $moves = 1 ] && [ -e "$f" ]; then f=$(abs_path "$f"); fi
+  pre_opts+=(--preinclude "$f")
+done
 gnu_opts=()
 if [ "$dialect" = clang ]; then
   cv=$(host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
@@ -407,7 +449,7 @@ for f in ${files[@]+"${files[@]}"}; do
     # User -I dirs go before the host's --sys_include dirs: eccp searches them in command-line order, and GCC
     # searches -I before the system directories, so "error.h" from a file outside EDG's src/ must not pick
     # glibc's <error.h> (ifc_modules_templ.c, docs/notes/cxx-driver.md).
-    -I?*) userinc+=("$f") ;;
+    -I?*) userinc+=("$(ecp_arg "$f")") ;;
     -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;;
     # eccp puts its --c_to_obj_option items before every object and archive, so a link option that acts on the
     # arguments after it would act on the wrong ones. Refused rather than moved (docs/notes/cxx-driver.md).
@@ -416,13 +458,34 @@ for f in ${files[@]+"${files[@]}"}; do
 -Wl,--no-as-needed|-Wl,--no-as-needed,*|-Wl,-Bstatic|-Wl,-Bstatic,*|-Wl,-Bdynamic|-Wl,-Bdynamic,*)
       echo "nfcxx: $f: an order-dependent link option cannot be kept with C++ inputs (docs/notes/cxx-driver.md)" >&2
       exit 2 ;;
-    -Wl,*) eflist+=(--c_to_obj_option "$f") ;;   # -Wl,-rpath,DIR, -Wl,-E, ...: the host link (eccp's C compile options)
-    *) eflist+=("$f") ;;
+    -Wl,*) eflist+=(--c_to_obj_option "$(ecp_arg "$f")") ;;   # -Wl,-rpath,DIR, -Wl,-E, ...: the host link (eccp's C compile options)
+    *) eflist+=("$(ecp_arg "$f")") ;;
   esac
 done
+# -c: eccp writes the records of each source (<stem>.ii, <stem>.ti) beside its object, and the link reads them there. A pair
+# left by the link that last used this object lists instances that the link assigned to it; the next link then finds an
+# instance assigned to two objects ("assigned to more than one file"). The records of the sources being compiled are removed
+# first, so the compile starts clean. The first source takes the name of -o, as eccp names it.
+if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+  first=1
+  for s in ${srcs[@]+"${srcs[@]}"}; do
+    b=$(basename "$s"); b=${b%.*}
+    if [ $first = 1 ] && [ "$out" != "${out%.*}" ]; then b=${out%.*}; fi
+    rm -f "$b.ii" "$b.ti"; first=0
+  done
+fi
+# The one-step build: eccp runs in a temporary directory (see ecp_arg), so its paths are made absolute before the cd.
+eccp_bin=$(ecp_arg "$edg/eccp"); eccp_out=$(ecp_arg "$out")
+if [ $moves = 1 ]; then
+  eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
+  [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || echo "nfcxx: intermediates kept in $eccp_dir (NFCXX_KEEP_INTERMEDIATES=1)" >&2
+fi
 t=$(trace_start)
-"$edg/eccp" "$std" --"$dialect" "${extra[@]}" ${userinc[@]+"${userinc[@]}"} "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+"${keep_static[@]}"} --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
-  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${vlart[@]+"${vlart[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
+(
+  [ -z "$eccp_dir" ] || cd "$eccp_dir"
+  "$eccp_bin" "$std" --"$dialect" "${extra[@]}" ${userinc[@]+"${userinc[@]}"} "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+"${keep_static[@]}"} --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
+    ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${vlart[@]+"${vlart[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$eccp_out"
+)
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
