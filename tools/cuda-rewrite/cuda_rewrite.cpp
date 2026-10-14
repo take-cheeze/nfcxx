@@ -4205,6 +4205,186 @@ int usage() {
   return 2;
 }
 
+// The close of the bracket at s[open] (`(`, `[` or `{`), skipping literals; -1 if none.
+long matching_close(const std::string &s, long open) {
+  char o = ch(s, open);
+  char c = o == '(' ? ')' : o == '[' ? ']' : '}';
+  long depth = 0;
+  long n = (long)s.size();
+  for (long i = open; i < n;) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (ch(s, i) == o) depth += 1;
+    if (ch(s, i) == c) {
+      depth -= 1;
+      if (depth == 0) return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+// A generic lambda whose only calls pass literal std::integral_constant values (ssm-conv.cu: `auto launch_kernel =
+// [&](auto NC) { constexpr int kNC = decltype(NC)::value; ... }`, called from a switch with 3, 4, 5, 9, 15). Each call is
+// replaced by the lambda body with the parameter substituted (decltype(NC)::value becomes the literal, NC the
+// integral_constant), so every launch in it is an ordinary launch with a local constant, one instance per value. The
+// definition is removed. A call that does not pass a literal, or a lambda with no calls, is refused by name.
+std::string inline_generic_lambdas(const std::string &text) {
+  std::string out = text;
+  for (;;) {
+    long n = (long)out.size();
+    long def_start = -1, def_end = -1, body_open = -1, body_close = -1;
+    std::string name, param;
+    for (long k = 0; k < n && def_start < 0; k++) {
+      long e = skip_literal(out, k);
+      if (e >= 0) {
+        k = e - 1;
+        continue;
+      }
+      if (!word_at(out, k, "auto")) continue;
+      long p = k + 4;
+      while (p < n && (ch(out, p) == ' ' || ch(out, p) == '\t')) p += 1;
+      long q = p;
+      while (q < n && ident_c(ch(out, q))) q += 1;
+      if (q == p) continue;
+      std::string nm = sl(out, p, q);
+      long r = q;
+      while (r < n && (ch(out, r) == ' ' || ch(out, r) == '\t')) r += 1;
+      if (ch(out, r) != '=') continue;
+      r += 1;
+      while (r < n && (ch(out, r) == ' ' || ch(out, r) == '\t')) r += 1;
+      if (ch(out, r) != '[') continue;
+      long cap_close = matching_close(out, r);
+      if (cap_close < 0) continue;
+      long lp = cap_close + 1;
+      while (lp < n && (ch(out, lp) == ' ' || ch(out, lp) == '\t')) lp += 1;
+      if (ch(out, lp) != '(') continue;
+      long rp = matching_close(out, lp);
+      if (rp < 0) continue;
+      std::string inside = sl(out, lp + 1, rp);
+      // The parameter list is exactly `auto P`.
+      if (inside.compare(0, 5, "auto ") != 0) continue;
+      std::string pn = inside.substr(5);
+      while (!pn.empty() && pn.back() == ' ') pn.pop_back();
+      while (!pn.empty() && pn.front() == ' ') pn.erase(pn.begin());
+      if (pn.empty()) continue;
+      long bo = rp + 1;
+      while (bo < n && (ch(out, bo) == ' ' || ch(out, bo) == '\n' || ch(out, bo) == '\t')) bo += 1;
+      if (ch(out, bo) != '{') continue;
+      long bc = matching_close(out, bo);
+      if (bc < 0) continue;
+      std::string body = sl(out, bo, bc + 1);
+      if (body.find("decltype(" + pn + ")::value") == std::string::npos) continue;
+      long de = bc + 1;
+      while (de < n && (ch(out, de) == ' ' || ch(out, de) == '\t')) de += 1;
+      if (ch(out, de) != ';') continue;
+      def_start = k;
+      def_end = de + 1;
+      body_open = bo;
+      body_close = bc;
+      name = nm;
+      param = pn;
+    }
+    if (def_start < 0) break;
+
+    // Every call of the lambda must pass a literal integral_constant; each call is one instance.
+    struct Call {
+      long start, end;
+      std::string value;
+    };
+    std::vector<Call> calls;
+    for (long k = 0; k < n; k++) {
+      if (k >= def_start && k < def_end) {
+        k = def_end - 1;
+        continue;
+      }
+      long e = skip_literal(out, k);
+      if (e >= 0) {
+        k = e - 1;
+        continue;
+      }
+      if (!word_at(out, k, name)) continue;
+      long p = k + (long)name.size();
+      while (p < n && (ch(out, p) == ' ' || ch(out, p) == '\t')) p += 1;
+      if (ch(out, p) != '(') continue;
+      long close = matching_close(out, p);
+      if (close < 0) continue;
+      std::string arg = sl(out, p + 1, close);
+      std::string key = "std::integral_constant<int,";
+      std::string flat;
+      for (char c : arg)
+        if (c != ' ' && c != '\t' && c != '\n') flat.push_back(c);
+      bool ok = flat.compare(0, key.size(), key) == 0;
+      std::string val;
+      if (ok) {
+        size_t gt = flat.find('>', key.size());
+        if (gt == std::string::npos) ok = false;
+        else {
+          val = flat.substr(key.size(), gt - key.size());
+          std::string tail = flat.substr(gt + 1);
+          ok = !val.empty();
+          for (char c : val)
+            if (c < '0' || c > '9') ok = false;
+          if (tail != "{}" && tail != "()") ok = false;
+        }
+      }
+      if (!ok)
+        refuse("generic lambda " + name + " at line " + std::to_string(line_of(out, k)) +
+               " is called with an argument that is not a literal std::integral_constant<int, V>{}");
+      calls.push_back({k, close + 1, val});
+      k = close;
+    }
+    if (calls.empty())
+      refuse("generic lambda " + name + " is never called with a literal value, so its instances are not known");
+
+    // The body without its braces, with the parameter substituted for one value.
+    auto instance = [&](const std::string &v) {
+      std::string inner = sl(out, body_open + 1, body_close);
+      std::string r;
+      std::string dec = "decltype(" + param + ")::value";
+      for (size_t i = 0; i < inner.size();) {
+        if (inner.compare(i, dec.size(), dec) == 0) {
+          r += v;
+          i += dec.size();
+          continue;
+        }
+        if (inner.compare(i, param.size(), param) == 0 && (i == 0 || !ident_c((unsigned char)inner[i - 1])) &&
+            (i + param.size() >= inner.size() || !ident_c((unsigned char)inner[i + param.size()]))) {
+          r += "std::integral_constant<int, " + v + ">";
+          i += param.size();
+          continue;
+        }
+        r.push_back(inner[i]);
+        i += 1;
+      }
+      return "{" + r + "}";
+    };
+
+    // One sorted list of edits: each call becomes its instance, the definition is removed.
+    struct Edit {
+      long start, end;
+      std::string repl;
+    };
+    std::vector<Edit> edits;
+    for (const auto &c : calls) edits.push_back({c.start, c.end, instance(c.value)});
+    edits.push_back({def_start, def_end, ""});
+    std::sort(edits.begin(), edits.end(), [](const Edit &a, const Edit &b) { return a.start < b.start; });
+    std::string res;
+    long pos = 0;
+    for (const auto &e : edits) {
+      res += sl(out, pos, e.start);
+      res += e.repl;
+      pos = e.end;
+    }
+    res += sl(out, pos, n);
+    out = res;
+  }
+  return out;
+}
+
 int main(int argc, char **argv) {
   bool device = false;
   bool has_kernels = false;
@@ -4241,6 +4421,7 @@ int main(int argc, char **argv) {
   if (device) refuse_unlowered_cccl(text);
   std::map<std::string, bool> seen;
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
+  g_expanded = inline_generic_lambdas(g_expanded);
   g_expanded = launch_prepare(g_expanded);
   std::string result;
   if (device) {
