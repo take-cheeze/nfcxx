@@ -464,6 +464,49 @@ class CodeGen
     klass && !RETURN_BITLESS_CLASSES.include?(klass) ? numeric_class_bit(klass) : NumericFlow::OTHER
   end
 
+  # IR callers consume only complete, unguarded facts from the settled oracles (ADR 0443).
+  def bytecode_ir_call_result_classes(irep, index)
+    return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
+
+    insn = irep.instructions[index]
+    return nil unless %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].include?(insn.op)
+
+    state = return_class_states(irep)&.[](index)
+    return nil unless state
+
+    oracle = return_class_table_oracle(irep)
+    mask = insn.op.end_with?('B') ? oracle.block_send_mask(irep, index, insn, state) : oracle.send_mask(irep, index, insn, state)
+    if (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::OTHER)) && %w[SEND SEND0].include?(insn.op)
+      receiver = state[insn.reg.to_i]
+      known = NUMERIC_SEND_OWNERS.keys.sum
+      if receiver.is_a?(Integer) && receiver.positive? && (receiver & ~known).zero?
+        argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+        mask = NUMERIC_SEND_OWNERS.keys.reduce(0) do |joined, bit|
+          receiver.anybits?(bit) ? joined | numeric_send_on_class(bit, insn.sym, argc, insn, state) : joined
+        end
+      end
+    end
+    return nil unless mask.is_a?(Integer) && mask.positive?
+    return nil if mask.anybits?(NumericFlow::OTHER | NumericFlow::EXC | NumericFlow::CHECKED)
+
+    primitive = { NumericFlow::INT => :Integer, NumericFlow::FLT => :Float, NumericFlow::ARR => :Array,
+                  NumericFlow::HSH => :Hash, NumericFlow::STR => :String, NumericFlow::NIL => :NilClass, NumericFlow::RNG => :Range }
+    allowed = primitive.keys.reduce(NumericFlow::CLASS_BITS, :|)
+    return nil unless (mask & ~allowed).zero?
+
+    classes = primitive.filter_map { |bit, klass| klass if mask.anybits?(bit) }.to_set
+    remaining = mask & NumericFlow::CLASS_BITS
+    until remaining.zero?
+      bit = remaining & -remaining
+      klass = return_class_name_of_bit(bit)
+      return nil unless klass
+
+      classes << klass.to_sym
+      remaining &= ~bit
+    end
+    classes.freeze
+  end
+
   # A name-wide summary can be ambiguous even when this exact receiver selects one
   # body. Analyze that body with the CFG-aware flow; the element tracer's linear
   # writer scan is only suitable for guarded hints.

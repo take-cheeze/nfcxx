@@ -275,9 +275,10 @@ module TypeFacts
     if inferred
       row['type'] = inferred
       row['source'] = 'inferred:return-analysis'
-    elsif ir_fact && !ir_fact.declared?
+    elsif ir_fact
       row['type'] = BytecodeIR::Types.type_name(ir_fact.classes)
-      row['source'] = 'inferred:bytecode-ir'
+      row['source'] = ir_fact.declared? ? 'derived:contracts' : 'inferred:bytecode-ir'
+      row['contracts'] = ir_fact.contracts if ir_fact.declared?
     else
       row['reason'] = return_reason(ctx, gen, d, irep)
     end

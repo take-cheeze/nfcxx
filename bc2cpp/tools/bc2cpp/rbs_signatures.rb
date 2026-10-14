@@ -277,10 +277,10 @@ module RbsSignatures
   end
 
   # Applied signatures have already been matched to the definition and its required arity.
-  def ir_types(applied, irep, superclass_of: {})
+  def ir_types(applied, irep, superclass_of: {}, inferred_calls: {}, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0')
     require_relative 'bytecode_ir'
     owner = applied.ir_owners[irep.label]
-    return BytecodeIR::Types.new(irep) unless owner
+    return BytecodeIR::Types.new(irep, inferred_calls: inferred_calls) unless owner
 
     owners = contract_owners(owner, superclass_of)
     ivars = {}
@@ -289,13 +289,37 @@ module RbsSignatures
     end
     calls = {}
     irep.instructions.each_with_index do |insn, index|
-      next unless %w[SSEND SSEND0 SSENDB].include?(insn.op)
+      # A breaking block can replace the normal return type (ADR 0443).
+      next unless %w[SSEND SSEND0].include?(insn.op)
 
       types = owners.filter_map { |owner| applied.ir_named_returns[[owner, insn.sym.to_s]] }.first
       calls[index] = types if types
     end
+    named_returns = applied.ir_named_returns.transform_keys { |klass, name| [klass.dup.freeze, name.dup.freeze].freeze }.freeze
+    resolver = lambda do |insn, receiver, refusal|
+      if receiver.classes.size > 16
+        refusal[:cause] ||= :call_receiver_union_cap
+        next nil
+      end
+      classes = Set.new
+      contracts = receiver.contracts.to_set
+      failed = false
+      receiver.classes.each do |klass|
+        target = contract_owners(klass.to_s, superclass_of).find { |candidate| named_returns.key?([candidate, insn.sym.to_s]) }
+        unless target
+          refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
+          failed = true
+          break
+        end
+        classes.merge(named_returns.fetch([target, insn.sym.to_s]))
+        contracts << "call-result:#{target}##{insn.sym}".freeze
+      end
+      next nil if failed
+
+      BytecodeIR::Types::Fact.new(classes: classes.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
+    end
     BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}),
-                         declared_ivars: ivars, declared_calls: calls)
+                         declared_ivars: ivars, declared_calls: calls, inferred_calls: inferred_calls, call_resolver: call_results ? resolver : nil)
   end
 
   # A cyclic hierarchy supplies no inherited contracts.

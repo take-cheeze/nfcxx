@@ -47,7 +47,19 @@ module IrTypeFeedback
       irep = ctx.ireps[definition.irep]
       next unless irep&.file
 
-      analysis = applied ? RbsSignatures.ir_types(applied, irep, superclass_of: ctx.superclass_of || {}) : BytecodeIR::Types.new(irep)
+      inferred_calls = {}
+      if ENV['BC2CPP_IR_CALL_RESULTS'] != '0' && ctx.gen.respond_to?(:bytecode_ir_call_result_classes)
+        irep.instructions.each_with_index do |insn, index|
+          next unless BytecodeIR::Types::CALL_OPS.include?(insn.op)
+
+          classes = ctx.gen.bytecode_ir_call_result_classes(irep, index)
+          inferred_calls[index] = classes if classes
+        end
+      end
+      analysis = if applied
+                   RbsSignatures.ir_types(applied, irep, superclass_of: ctx.superclass_of || {}, inferred_calls: inferred_calls)
+                 else BytecodeIR::Types.new(irep, inferred_calls: inferred_calls)
+                 end
       owners = RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {})
       exits = []
       irep.instructions.each_with_index do |insn, index|

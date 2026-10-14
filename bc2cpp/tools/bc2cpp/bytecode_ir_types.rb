@@ -12,11 +12,16 @@ module BytecodeIR
     POOL_TYPES = { int32: :Integer, int64: :Integer, bigint: :Integer, float: :Float }.freeze
     ENTER_TYPES = { rest: [:Array], hash: [:Hash], block: [:Proc, :NilClass], local: [:NilClass] }.transform_values(&:freeze).freeze
 
+    CALL_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
+    CALL_DEPTH_CAP = 24
+    QUERY_CACHE_CAP = 2048
+    CALL_QUERY_CAP = 2048
+
     Fact = Struct.new(:classes, :declared, :contracts, keyword_init: true) do
       def declared? = declared
     end
 
-    def initialize(irep, declared_args: {}, declared_ivars: {}, declared_calls: {})
+    def initialize(irep, declared_args: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, call_resolver: nil)
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @declared_args = declared_args.to_h do |reg, types|
@@ -28,6 +33,10 @@ module BytecodeIR
       end.freeze
       @declared_ivars = declared_ivars.to_h { |name, types| [name.to_s.delete_prefix('@').freeze, types.to_set.dup.freeze] }.freeze
       @declared_calls = declared_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
+      @inferred_calls = inferred_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
+      @call_resolver = call_resolver
+      @active_queries = Set.new
+      @query_cache = {}
     end
 
     def self.type_name(classes)
@@ -52,6 +61,30 @@ module BytecodeIR
     private
 
     def query(index, reg, use_declarations:, max_states:, refusal:)
+      key = [index, reg.to_s.dup.freeze, use_declarations, max_states]
+      if (cached = @query_cache[key])
+        unknown(refusal, cached[1]) if cached[1]
+        return cached[0]
+      end
+      return unknown(refusal, :call_cycle) if @active_queries.include?(key)
+      return unknown(refusal, :call_depth_cap) if @active_queries.size >= CALL_DEPTH_CAP
+      @query_expansions = 0 if @active_queries.empty?
+      @query_expansions += 1
+      return unknown(refusal, :call_query_cap) if @query_expansions > CALL_QUERY_CAP
+
+      @active_queries << key
+      acquired = true
+      cause = {}
+      fact = compute_query(index, reg, use_declarations: use_declarations, max_states: max_states, refusal: cause)
+      contextual_refusal = %i[call_cycle call_depth_cap call_query_cap].include?(cause[:cause])
+      @query_cache[key] = [fact, cause[:cause]].freeze if !contextual_refusal && @query_cache.size < QUERY_CACHE_CAP
+      unknown(refusal, cause[:cause]) if cause[:cause]
+      fact
+    ensure
+      @active_queries.delete(key) if acquired
+    end
+
+    def compute_query(index, reg, use_declarations:, max_states:, refusal:)
       definitions = BytecodeIR.reaching_definitions(@irep, index, reg, origin_transfers: true,
                                                     max_states: max_states, refusal: refusal)
       return nil unless definitions
@@ -64,6 +97,15 @@ module BytecodeIR
         if !values && use_declarations
           values, contract = declared_definition(definition)
           contracts << contract.freeze if values
+          if !values && @call_resolver && !definition.entry?
+            insn = @irep.instructions[definition.index]
+            if %w[SEND SEND0].include?(insn.op) && insn.reg == definition.reg
+              receiver = query(definition.index, insn.reg, use_declarations: true, max_states: max_states, refusal: refusal)
+              result = receiver && @call_resolver.call(insn, receiver, refusal)
+              values = result&.classes
+              contracts.merge(result.contracts) if result
+            end
+          end
         end
         return unknown(refusal, definition.entry? ? :entry_value : "unknown:#{@irep.instructions[definition.index].op}") unless values && !values.empty?
 
@@ -92,6 +134,7 @@ module BytecodeIR
 
       insn = @irep.instructions[definition.index]
       return nil unless insn.reg == definition.reg
+      return @inferred_calls[definition.index] if CALL_OPS.include?(insn.op)
       return [:Integer] if insn.op.match?(/\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/)
       return [LITERAL_TYPES[insn.op]] if LITERAL_TYPES.key?(insn.op)
       return nil unless insn.op == 'LOADL'
