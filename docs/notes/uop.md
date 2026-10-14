@@ -255,6 +255,30 @@ scripting bindings), like the C backend. `ut::Session` has no graph, so it refus
 - **Not done**: no Windows loader (`dlopen`, as the C back end), no ORT execution providers or options, and the sessions are kept until
   the process ends (keyed by the model bytes).
 
+## tinygrad back end (`nfcuop_tinygrad.hpp`)
+
+`nfcuop::tinygrad::run(g, outputs, feeds)` exports the `hir::Graph` with `to_onnx`, runs it with tinygrad (`tinygrad.nn.onnx.OnnxRunner`) and
+returns the outputs as `Array`s. tinygrad is Python only, so the work is done by a Python process: `scripts/tinygrad_run.py`. It is selected as
+`np.backend = ut::Session::Backend::Tinygrad` (`np.backend = "tinygrad"` in the scripting bindings), and like the ORT back end it is refused by
+`ut::Session` and lowers nothing in `np::Session`.
+
+- **The Python process.** The executable is `$NFCUOP_TINYGRAD_PYTHON` (else `python3`), the helper is `$NFCUOP_TINYGRAD_SCRIPT` (else
+  `scripts/tinygrad_run.py`, relative to the working directory). It is started with `fork` and `execvp` (no shell, so no name or path is quoted),
+  and every call starts one process: nothing is cached, so a failure is not kept and the next call runs it again.
+- **The files.** A scratch directory (`$TMPDIR` or `/tmp`) holds `model.onnx` (the `to_onnx` bytes), one raw file per input (row-major, little
+  endian, `bool` one byte), `request.txt` (one line per input and output: the file, the dtype, the shape and the tensor name as hex, so no name
+  needs quoting) and, written by the helper, one raw file per output and `result.txt` (the file, dtype and shape tinygrad computed; written last,
+  so its presence with exit status 0 is the success signal). The directory is removed when the call ends. Raw files were chosen over `.npy`
+  because the C++ side needs no format reader: the layout is the dtype's, which is also how the ORT back end passes tensors.
+- **Errors.** The helper's stderr is the text of the `Error` (for example a missing tinygrad, a dtype tinygrad returned that the graph does not
+  have, or an exception inside tinygrad). An executable that does not start is reported with `exited 127`. `tinygrad::available()` runs the
+  helper with `--check`; the tests print SKIP without it.
+- **Symbolic dimensions** run unbound: `OnnxRunner` takes each symbol's size from the feed of its input. The output shapes are the ones tinygrad
+  computed (read back from `result.txt`), not the graph's, which is what makes a symbolic output shape work without binding.
+- **Not done**: no Windows (the process and pipes are POSIX), no caching of the compiled models or of the Python process, and dtypes are the five
+  nfcuop has; any dtype tinygrad returns differently is an error, not a conversion. Float results are compared to a relative 1e-5 in
+  `tests/uop/test_tinygrad.cpp`, like the ORT test.
+
 ## Dynamic shapes (stage 7, after the static stages)
 
 The static design is deliberate: every shape is a known integer, so shape inference, rewriting and the interpreter are simple and exact. Dynamic

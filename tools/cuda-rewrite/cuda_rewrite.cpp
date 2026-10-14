@@ -664,6 +664,7 @@ struct OuterTemplate {
   MemberQualifier qual;
   bool has_pack = false;
   long pack = 0;
+  long parts = -1;  // the number of function parameters of this overload (-1: unknown)
 };
 
 std::vector<std::vector<std::string>> member_instances(const OuterTemplate &outer, const std::string &text) {
@@ -967,6 +968,10 @@ bool enclosing_template(const std::string &text, long pos, OuterTemplate &out) {
   if (!best) return false;
   TmplHeader t = best->tmpl;
   std::vector<std::string> params = split_top(sl(text, t.lt + 1, t.close));
+  // `template<>` is an explicit specialization: a concrete function, not a template whose instances are computed. Its
+  // calls are ordinary call sites (set-rows' specializations call the primary template with concrete types); treating
+  // it as an outer template loops back to the same name and refuses a dependent launch that is not a cycle.
+  if (params.empty() || (params.size() == 1 && strip(params[0]).empty())) return false;
   // One parameter pack is allowed (`int... Ns`): its index is recorded; its values come from the explicit calls.
   std::vector<long> packs;
   for (size_t k = 0; k < params.size(); k++)
@@ -991,6 +996,9 @@ bool enclosing_template(const std::string &text, long pos, OuterTemplate &out) {
   out.open = best->open;
   out.has_pack = !packs.empty();
   out.pack = packs.empty() ? 0 : packs.front();
+  long hp = str_index(header, "(", 0);
+  long he = hp < 0 ? -1 : matching_paren(header, hp);
+  if (he > hp) out.parts = (long)split_top(sl(header, hp + 1, he)).size();
   return true;
 }
 
@@ -1883,24 +1891,106 @@ std::map<std::string, std::string> deduce_missing_targs(const std::string &text,
   return found;
 }
 
+
+// The parameter texts of the function pointer type that the function enclosing pos returns, resolved through a
+// typedef and a template alias: `to_fp16_cuda_t ggml_get_to_fp16_cuda(...)` with `typedef to_t_cuda_t<half>
+// to_fp16_cuda_t;` and `template <typename T> using to_t_cuda_t = void (*)(const void * x, T * y, ...);`. False when
+// the chain is not of that form (the caller then refuses the site).
+bool fnptr_return_params(const std::string &text, long pos, std::vector<std::string> &out) {
+  long ls = pos;
+  while (ls > 0) {
+    if (text[(size_t)(ls - 1)] == '\n' && ls < (long)text.size() && (isalpha((unsigned char)text[(size_t)ls]) || text[(size_t)ls] == '_')) break;
+    ls -= 1;
+  }
+  long le = str_index(text, "\n", ls);
+  if (le < 0) le = (long)text.size();
+  std::vector<std::string> head = tokens_of(sl(text, ls, le));
+  if (head.size() < 2) return false;
+  size_t r = head[0] == "static" || head[0] == "inline" ? 1 : 0;
+  if (r >= head.size()) return false;
+  const std::string ret = head[r];
+  // typedef TARGET ret;
+  long td = str_index(text, " " + ret + ";", 0);
+  if (td < 0) return false;
+  long ts = td;
+  while (ts > 0 && text[(size_t)(ts - 1)] != ';' && text[(size_t)(ts - 1)] != '\n' && text[(size_t)(ts - 1)] != '}') ts -= 1;
+  std::vector<std::string> tt = tokens_of(sl(text, ts, td));
+  if (tt.empty() || tt[0] != "typedef") return false;
+  std::string target = strip(sl(text, ts + 7, td));  // after "typedef"
+  std::string alias = target, targs;
+  long lt = str_index(target, "<", 0);
+  if (lt >= 0) {
+    long gt = matching_angle(target, lt);
+    if (gt < 0) return false;
+    alias = strip(sl(target, 0, lt));
+    targs = sl(target, lt + 1, gt);
+  }
+  std::string fn;
+  if (lt < 0) return false;  // the typedef must name a template alias
+  // template <...> using alias = FNPTR;
+  long us = str_index(text, "using " + alias + " =", 0);
+  if (us < 0) return false;
+  long hdr = -1;  // the nearest `template` before the alias
+  for (long q = str_index(text, "template", 0); q >= 0 && q < us; q = str_index(text, "template", q + 1)) hdr = q;
+  if (hdr < 0) return false;
+  long hlt = str_index(text, "<", hdr), hgt = hlt < 0 ? -1 : matching_angle(text, hlt);
+  if (hgt < 0 || hgt > us) return false;
+  std::vector<std::string> names;
+  for (const auto &d : split_top(sl(text, hlt + 1, hgt))) {
+    std::vector<std::string> dt = tokens_of(d);
+    if (dt.empty()) return false;
+    names.push_back(dt.back());
+  }
+  long eq = us + (long)("using " + alias + " =").size();
+  long semi = str_index(text, ";", eq);
+  if (semi < 0) return false;
+  fn = strip(sl(text, eq, semi));
+  std::vector<std::string> args = split_top(targs);
+  if (args.size() != names.size()) return false;
+  fn = substitute(fn, names, args, false, 0);
+  // void (*)(params)
+  long pp = str_index(fn, ")(", 0);
+  if (pp < 0) return false;
+  long open = pp + 1, close = matching_paren(fn, open);
+  if (close < 0) return false;
+  out = split_top(sl(fn, open + 1, close));
+  return true;
+}
+
 // Ruby template_instances (line 911): the concrete argument lists that instantiate template function name.
 // Memoized per text (identity), like the Ruby script.
 IdentKey g_instances_key;
 std::map<std::string, std::vector<std::vector<std::string>>> g_instances;
 
+// An overload is identified by its name, its number of template parameters and its number of function parameters
+// ("name#N/P"): two overloads of one name are different functions, so a call into the other one is not a cycle
+// (set-rows has a three-parameter primary and a two-parameter overload of set_rows_cuda that calls it).
+// A key without "#" is the name alone (the top-level call, whose overload is not known here).
+std::string overload_key(const std::string &name, long ntparams, long nparams) {
+  return name + "#" + std::to_string(ntparams) + "/" + std::to_string(nparams);
+}
+std::string key_name(const std::string &key) { return key.substr(0, key.find('#')); }
+long key_parts(const std::string &key) {
+  size_t slash = key.rfind('/');
+  return slash == std::string::npos || key.find('#') == std::string::npos ? -1 : std::stol(key.substr(slash + 1));
+}
+
 std::vector<std::vector<std::string>> template_instances(const std::string &name, const std::string &text,
-                                                       const std::vector<std::string> &stack) {
-  std::vector<std::string> chain = stack;
-  if (std::find(stack.begin(), stack.end(), name) != stack.end()) {
-    std::vector<std::string> path = stack;
-    path.push_back(name);
+                                                       const std::vector<std::string> &stack,
+                                                       const std::string &key_arg = std::string()) {
+  const std::string key = key_arg.empty() ? name : key_arg;
+  const long parts = key_parts(key);
+  if (std::find(stack.begin(), stack.end(), key) != stack.end()) {
+    std::vector<std::string> path;
+    for (const auto &k : stack) path.push_back(key_name(k));
+    path.push_back(key_name(key));
     refuse("dependent launch: " + join(path, " -> ") + " instantiates itself through its template arguments");
   }
   if (!g_instances_key.is(text)) {
     g_instances_key.set(text);
     g_instances.clear();
   }
-  auto memo = g_instances.find(name);
+  auto memo = g_instances.find(key);
   if (memo != g_instances.end()) return memo->second;
   std::vector<std::pair<std::vector<std::string>, long>> sites;
   // A call that names only some template arguments (get_rows_cuda_q<QK, QR, dq>(...) with dst_t left out): the rest are
@@ -1909,12 +1999,41 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   bool have_head = template_head_of(text, name, head);
   for (const auto &cs : call_sites(text, name)) {
     std::vector<std::string> targs = split_top(cs.first);
+    if (parts >= 0) {  // a call of another overload of the name has another number of function parameters
+      long k = cs.second + (long)name.size();
+      while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
+      long close = matching_angle(text, k);
+      long open = close < 0 ? -1 : close + 1;
+      while (open >= 0 && open < (long)text.size() && white_c(ch(text, open))) open += 1;
+      if (open >= 0 && open < (long)text.size() && ch(text, open) == '(') {
+        long cend = matching_paren(text, open);
+        if (cend > open && (long)split_top(sl(text, open + 1, cend)).size() != parts) continue;
+      }
+    }
     if (have_head && targs.size() < head.names.size()) {
       long k = cs.second + (long)name.size();
       while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
       long close = matching_angle(text, k);
       long open = close < 0 ? -1 : close + 1;
       while (open >= 0 && open < (long)text.size() && white_c(ch(text, open))) open += 1;
+      if (open >= 0 && ch(text, open) != '(') {
+        // `return name<...>;` (a function pointer, not a call): the missing arguments come from the type the enclosing
+        // function returns, matched against the template's parameters.
+        std::vector<std::string> fp;
+        if (fnptr_return_params(text, cs.second, fp) && fp.size() == head.parts.size()) {
+          std::vector<std::string> missing(head.names.begin() + (long)targs.size(), head.names.end());
+          for (const auto &p : missing) {
+            std::string t;
+            for (size_t idx = 0; idx < head.parts.size() && t.empty(); idx++) {
+              std::vector<std::string> ptoks = type_tokens(head.parts[idx]);
+              if (std::find(ptoks.begin(), ptoks.end(), p) != ptoks.end()) match_type(ptoks, type_tokens(fp[idx]), p, t);
+            }
+            if (t.empty()) refuse("call of " + name + ": " + p + " cannot be taken from the function pointer that line " +
+                                  std::to_string(line_of(text, cs.second)) + " returns");
+            targs.push_back(t);
+          }
+        }
+      }
       if (open >= 0 && ch(text, open) == '(') {
         std::vector<std::string> cargs = split_top(sl(text, open + 1, matching_paren(text, open)));
         if (cargs.size() != head.parts.size()) {
@@ -1928,14 +2047,64 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
     }
     sites.push_back({targs, cs.second});
   }
+  // `return name<...>;`: a function pointer, not a call. The missing template arguments are the parameter types of the
+  // function pointer the enclosing function returns (convert.cu's ggml_get_to_fp16_cuda: dst_t from to_fp16_cuda_t).
+  TemplateHead rhead;
+  if (template_head_of(text, name, rhead)) {
+    for (long p = str_index(text, name, 0); p >= 0; p = str_index(text, name, p + 1)) {
+      bool word = (p == 0 || !ident_c((unsigned char)text[(size_t)(p - 1)])) &&
+                  (p + (long)name.size() >= (long)text.size() || !ident_c((unsigned char)text[(size_t)(p + (long)name.size())]));
+      if (!word) continue;
+      {  // a match in a // comment (on its line, before the match) is not code
+        long ls = p;
+        while (ls > 0 && text[(size_t)(ls - 1)] != '\n') ls -= 1;
+        if (str_index(text, "//", ls) >= 0 && str_index(text, "//", ls) < p) continue;
+      }
+      long lt = p + (long)name.size();
+      while (lt < (long)text.size() && white_c(ch(text, lt))) lt += 1;
+      long wend = p - 1;
+      while (wend >= 0 && white_c(ch(text, wend))) wend -= 1;
+      long wstart = wend;
+      while (wstart >= 0 && ident_c((unsigned char)text[(size_t)wstart])) wstart -= 1;
+      if (sl(text, wstart + 1, wend + 1) != "return") continue;
+      // `return name;` (no arguments): every template argument comes from the returned function pointer's type.
+      std::vector<std::string> targs;
+      long gt = -1;
+      if (lt < (long)text.size() && ch(text, lt) == '<') {
+        gt = matching_angle(text, lt);
+        if (gt < 0) continue;
+        targs = split_top(sl(text, lt + 1, gt));
+      } else if (!(lt < (long)text.size() && ch(text, lt) == ';')) {
+        continue;
+      }
+      if (targs.size() >= rhead.names.size()) {
+        sites.push_back({targs, p});
+        continue;
+      }
+      std::vector<std::string> fp;
+      if (!fnptr_return_params(text, p, fp) || fp.size() != rhead.parts.size())
+        refuse("call of " + name + " (at line " + std::to_string(line_of(text, p)) + "): the function pointer returned there does not give its template arguments");
+      for (size_t k = targs.size(); k < rhead.names.size(); k++) {
+        std::string t;
+        for (size_t idx = 0; idx < rhead.parts.size() && t.empty(); idx++) {
+          std::vector<std::string> ptoks = type_tokens(rhead.parts[idx]);
+          if (std::find(ptoks.begin(), ptoks.end(), rhead.names[k]) != ptoks.end()) match_type(ptoks, type_tokens(fp[idx]), rhead.names[k], t);
+        }
+        if (t.empty()) refuse("call of " + name + ": " + rhead.names[k] + " cannot be taken from the function pointer at line " + std::to_string(line_of(text, p)));
+        targs.push_back(t);
+      }
+      sites.push_back({targs, p});
+    }
+  }
   // Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
   for (const auto &pc : plain_call_sites(text, name)) {
+    if (parts >= 0 && (long)pc.first.size() != parts) continue;  // another overload of the name
     std::vector<std::string> deduced;
     if (deduce_call_targs(text, name, pc.second, pc.first, deduced)) sites.push_back({deduced, pc.second});
   }
   std::vector<std::vector<std::string>> out;
   std::vector<std::string> next_stack = stack;
-  next_stack.push_back(name);
+  next_stack.push_back(key);
   for (auto &site : sites) {
     std::vector<std::string> args = site.first;
     long pos = site.second;
@@ -1961,7 +2130,8 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
           if (std::find(outer.names.begin(), outer.names.end(), tk) != outer.names.end()) mentions = true;
     }
     if (has_outer && mentions) {
-      for (const auto &inst : template_instances(outer.fname, text, next_stack)) {
+      const std::string outer_key = overload_key(outer.fname, (long)outer.names.size(), outer.parts);
+      for (const auto &inst : template_instances(outer.fname, text, next_stack, outer_key)) {
         // A pack expands to several arguments: the list is split again after the substitution.
         std::vector<std::string> subbed;
         for (const auto &a : args) subbed.push_back(substitute(a, outer.names, inst, outer.has_pack, outer.pack));
@@ -1975,7 +2145,7 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   std::vector<std::vector<std::string>> uniq;
   for (const auto &x : out)
     if (std::find(uniq.begin(), uniq.end(), x) == uniq.end()) uniq.push_back(x);
-  g_instances[name] = uniq;
+  g_instances[key] = uniq;
   return uniq;
 }
 
@@ -2032,7 +2202,7 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
              std::to_string(line_of(text, tl.pos)) + ")");
     std::vector<std::vector<std::string>> insts;
     if (outer.has_qual) insts = member_instances(outer, text);
-    else insts = template_instances(outer.fname, text, {});
+    else insts = template_instances(outer.fname, text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts));
     if (insts.empty())
       refuse("template launch of " + tl.name + "<" + tl.targs + "> depends on the template parameter " + dep + " of " +
              outer.fname + ": the unit has no explicit call of it with all its template arguments, so its instances are "
@@ -2516,7 +2686,9 @@ std::vector<std::string> g_incdirs;
 // Ruby system_path? (line 2123): the toolkit and system prefixes are never inlined.
 bool system_path(const std::string &path) {
   std::string p = path;
-  return p.compare(0, 5, "/usr/") == 0 || p.compare(0, 5, "/opt/") == 0 || p.compare(0, 16, "/usr/local/cuda/") == 0;
+  // lib/cuda/host holds the host shims (cub/cub.cuh): the device unit has their definitions, so they are not inlined.
+  return p.compare(0, 5, "/usr/") == 0 || p.compare(0, 5, "/opt/") == 0 || p.compare(0, 16, "/usr/local/cuda/") == 0 ||
+         p.find("/lib/cuda/host/") != std::string::npos;
 }
 
 // Ruby find_include (line 2128): the file a quoted or angle-bracket include names, when it exists and is not a system path.
@@ -3120,6 +3292,7 @@ static const char *const GRID_DEF =
     "};\n"
     "inline grid_group this_grid(void) { return grid_group(); }\n"
     "}\n";
+extern const char *const CUB_DEF;
 std::string device_decls();
 std::string rewrite_builtins(const std::string &t);
 std::string rewrite_is_same_v(const std::string &s);
@@ -3431,6 +3604,11 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   }
   if (needed["is_same_v"]) needed["is_same"] = true;  // std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
   // Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
+  // The text of COOP_DEF and CUB_DEF uses device builtins: their definitions are needed whenever the text is inserted.
+  if (needed["cg"] || needed["cooperative_groups"])
+    for (const auto &x : tokens_of(COOP_DEF)) needed[x] = true;
+  if (needed["cub"])
+    for (const auto &x : tokens_of(CUB_DEF)) needed[x] = true;
   if (needed["sinf"] || needed["cosf"]) needed["__nfcxx_sincosf"] = true;
   if (needed["expm1f"] || needed["tanhf"]) needed["__nfcxx_expm1f"] = true;
   if (needed["log2f"]) needed["__float_as_uint"] = true;
@@ -3449,6 +3627,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
     if (pc.keep && has_tok(pc.defined, "cooperative_groups")) coop_defined = true;
   if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += rewrite_builtins(COOP_DEF);
   if (needed["this_grid"] || needed["grid_group"]) out += rewrite_builtins(GRID_DEF);
+  if (needed["cub"]) out += rewrite_builtins(CUB_DEF);
   for (const auto &pc : pieces) {
     if (!pc.keep) continue;
     std::string code = rewrite_is_same_v(rewrite_builtins(pc.text));
@@ -3594,6 +3773,63 @@ std::string dynamic_shared_rewrite(const std::string &s) {
 }
 
 // Ruby refuse_unlowered_cccl (line 2961): CUB and grid-wide cooperative groups are refused by name.
+// CUB's block-level members used by ggml-cuda (cumsum.cu's BlockScan, ssm-scan.cu's BlockLoad, BlockStore and BlockScan),
+// in namespace cub. The arrangement is CUB's: thread t holds items t*N .. t*N+N-1 of the block; the warp-transposed
+// algorithms only change how memory is accessed, not that arrangement. Device-wide calls are refused (see the scan).
+const char *const CUB_DEF = R"CUB(namespace cub {
+enum BlockLoadAlgorithm { BLOCK_LOAD_DIRECT, BLOCK_LOAD_WARP_TRANSPOSE };
+enum BlockStoreAlgorithm { BLOCK_STORE_DIRECT, BLOCK_STORE_WARP_TRANSPOSE };
+template <typename T, int BLOCK_THREADS, int ITEMS_PER_THREAD, BlockLoadAlgorithm ALGORITHM = BLOCK_LOAD_DIRECT>
+class BlockLoad {
+public:
+  struct TempStorage { int unused; };
+  __device__ BlockLoad(TempStorage &) {}
+  __device__ void Load(const T *input, T (&items)[ITEMS_PER_THREAD]) const {
+    for (int n = 0; n < ITEMS_PER_THREAD; n++) items[n] = input[threadIdx.x * ITEMS_PER_THREAD + n];
+  }
+};
+template <typename T, int BLOCK_THREADS, int ITEMS_PER_THREAD, BlockStoreAlgorithm ALGORITHM = BLOCK_STORE_DIRECT>
+class BlockStore {
+public:
+  struct TempStorage { int unused; };
+  __device__ BlockStore(TempStorage &) {}
+  __device__ void Store(T *output, const T (&items)[ITEMS_PER_THREAD]) const {
+    for (int n = 0; n < ITEMS_PER_THREAD; n++) output[threadIdx.x * ITEMS_PER_THREAD + n] = items[n];
+  }
+};
+template <typename T, int BLOCK_THREADS>
+class BlockScan {
+public:
+  struct TempStorage { T warp_totals[BLOCK_THREADS / 32]; };
+  __device__ BlockScan(TempStorage &temp) : temp_(temp) {}
+  __device__ void InclusiveSum(T input, T &output) {
+    T aggregate;
+    InclusiveSum(input, output, aggregate);
+  }
+  __device__ void InclusiveSum(T input, T &output, T &block_aggregate) {
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    T v = input;
+    for (int off = 1; off < 32; off <<= 1) {
+      T u = __shfl_up_sync(0xffffffffu, v, off);
+      if (lane >= off) v += u;
+    }
+    if (lane == 31) temp_.warp_totals[warp] = v;
+    __syncthreads();
+    T prefix = T(0);
+    for (int w = 0; w < warp; w++) prefix += temp_.warp_totals[w];
+    T total = T(0);
+    for (int w = 0; w < BLOCK_THREADS / 32; w++) total += temp_.warp_totals[w];
+    output = v + prefix;
+    block_aggregate = total;
+    __syncthreads();
+  }
+private:
+  TempStorage &temp_;
+};
+}
+)CUB";
+
 void refuse_unlowered_cccl(const std::string &s) {
   long i = 0;
   long n = (long)s.size();
@@ -3607,10 +3843,22 @@ void refuse_unlowered_cccl(const std::string &s) {
       long j = i + 3;
       while (j < n && white_c(ch(s, j))) j += 1;
       if (sl_n(s, j, 2) == "::") {
-        long line = 1;
-        for (long q = 0; q < i; q++)
-          if (s[(size_t)q] == '\n') line++;
-        refuse("cub:: at line " + std::to_string(line) + ": CUB is not lowered (the device unit does not carry its headers)");
+        // The block-level members in CUB_DEF are lowered; the device-wide ones (DeviceScan, ...) are refused by name.
+        long k = j + 2;
+        while (k < n && white_c(ch(s, k))) k += 1;
+        long m = k;
+        while (m < n && ident_c((unsigned char)s[(size_t)m])) m += 1;
+        std::string member = s.substr((size_t)k, (size_t)(m - k));
+        static const std::set<std::string> lowered = {"BlockScan", "BlockLoad", "BlockStore", "BLOCK_LOAD_DIRECT",
+                                                      "BLOCK_LOAD_WARP_TRANSPOSE", "BLOCK_STORE_DIRECT",
+                                                      "BLOCK_STORE_WARP_TRANSPOSE"};
+        if (!lowered.count(member)) {
+          long line = 1;
+          for (long q = 0; q < i; q++)
+            if (s[(size_t)q] == '\n') line++;
+          refuse("cub::" + member + " at line " + std::to_string(line) +
+                 ": device-wide CUB is not lowered (it launches its own kernels and needs temporary storage)");
+        }
       }
     }
     i += 1;
@@ -4455,7 +4703,6 @@ int main(int argc, char **argv) {
   }
   if (device) text = blank_comments(text);
   text = dynamic_shared_rewrite(strip_launch_bounds(text));
-  if (device) refuse_unlowered_cccl(text);
   std::map<std::string, bool> seen;
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
   g_expanded = inline_generic_lambdas(g_expanded);
@@ -4485,6 +4732,8 @@ int main(int argc, char **argv) {
     }
     g_expanded = joined;
     auto dk = device_tu(g_expanded);
+    // The refusal looks at the device unit, not the file: a CUB call in a host helper the unit drops is not a problem.
+    refuse_unlowered_cccl(dk.first);
     if (has_kernels) {
       FILE *kf = std::fopen(kernels_path.c_str(), "wb");
       if (kf) {

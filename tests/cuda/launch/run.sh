@@ -45,6 +45,7 @@ pass decl_macro.cu "decl macro: no error, 14"
 pass enum_extern_block.cu "enum extern block: no error, 0 mismatches"
 pass local_const.cu "local const: no error, 41 40"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
+pass host_cub_helper.cu "host cub helper: no error, 0 mismatches"
 pass linkage_block.cu "linkage block: no error, 0 mismatches"
 pass macro_launch.cu "macro launch: no error, value 3"
 pass deduced_launch.cu "deduced launch: no error, value 3.0"
@@ -79,4 +80,6 @@ if "$root/nfcxx" -c -I"$cuda/include" grid_sync_nobarrier.cu -o "$out/nb.o" > "$
 else
   echo "FAIL grid_sync_nobarrier: the mutant was not caught"; fail=1
 fi
+pass overload_pair.cu "overload pair: exact"
+pass fnptr_return.cu "fnptr return: exact"
 exit $fail
