@@ -108,7 +108,7 @@ std::string run(const char* bytes, size_t n, const std::string& loss, const std:
   std::map<std::string, std::string> got;
   for (;;) {
     b.reset(new GraphBuilder(prefix));
-    b->SetFloatType(ldt);   // float64 constants and masks for a float64 loss (scripts/onnxsim/patches/0001-*)
+    b->SetFloatType(ldt);   // float64 constants and masks for a float64 loss (upstream 60b3e4e0, in the pin)
     std::map<std::string, std::string> seeds;
     seeds[loss] = b->Const(1.0f, "seed");
     try {
