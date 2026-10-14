@@ -97,6 +97,80 @@ Dir.mktmpdir do |dir|
   ENV.delete('BC2CPP_SIG_DIRS')
 end
 
+puts '== richer RBS contracts in bytecode IR'
+require 'irep'
+require 'bytecode_ir'
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 'types.rbs'), <<~RBS)
+    class IrContracts
+      def choose: (Integer? n, bool b, String | Symbol s) -> String?
+      def opaque: (Integer | untyped x) -> void
+      def literals: (true t, false f, 42 n, :tag s, "text" text) -> nil
+      def containers: (Array[String] a, Hash[Symbol, Integer] h) -> Array[String]
+      def unknown: (self x) -> untyped
+      def generic: (Enumerator[String] x) -> untyped
+    end
+  RBS
+  loaded = RbsSignatures.load([dir])
+  choose = loaded.methods[['IrContracts', 'choose']]
+  check.call('nullable, bool and union classes are retained', choose.args.map(&:value_classes) == [
+    Set[:Integer, :NilClass], Set[:TrueClass, :FalseClass], Set[:String, :Symbol]
+  ])
+  check.call('nullable return classes are retained', choose.ret.value_classes == Set[:String, :NilClass])
+  check.call('a union with untyped stays unknown', loaded.methods[['IrContracts', 'opaque']].args.first.value_classes.nil?)
+  check.call('literal classes are retained without inventing finite-value proofs',
+             loaded.methods[['IrContracts', 'literals']].args.map(&:value_classes) == [
+               Set[:TrueClass], Set[:FalseClass], Set[:Integer], Set[:Symbol], Set[:String]
+             ])
+  check.call('container generics give only their outer classes',
+             loaded.methods[['IrContracts', 'containers']].args.map(&:value_classes) == [Set[:Array], Set[:Hash]])
+  check.call('self and unsupported generic types stay unknown',
+             %w[unknown generic].all? { |name| loaded.methods[['IrContracts', name]].args.first.value_classes.nil? })
+  make_insn = ->(addr, op, args) { Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}") }
+  body = Irep.new(label: 'choose', nlocals: 6, instructions: [
+    make_insn.call(0, 'ENTER', '3:0:0:0:0:0:0:0 (0x0)'),
+    make_insn.call(4, 'JMPIF', "R2\t16"), make_insn.call(8, 'MOVE', "R4\tR1"),
+    make_insn.call(12, 'JMP', '20'), make_insn.call(16, 'LOADSYM', "R4\t:tag"),
+    make_insn.call(20, 'RETURN', 'R4')
+  ])
+  definition = MethodDef.new(owner: 'IrContracts', name: 'choose', irep: body.label)
+  # Applying only the fixture's matched declaration avoids unrelated missing-method diagnostics.
+  matched = RbsSignatures::Loaded.new(methods: { ['IrContracts', 'choose'] => choose }, ivars: {}, diagnostics: [], files: [])
+  apply = ->(ann = {}) { RbsSignatures.apply(matched, { body.label => body }, { 'choose' => [definition] }, ann, {}, {}) }
+  applied = apply.call
+  analysis = RbsSignatures.ir_types(applied, body)
+  fact = analysis.fact_at(5, '4')
+  check.call('IR unions declared argument and inferred literal through MOVE',
+             fact && fact.classes == Set[:Integer, :NilClass, :Symbol] && fact.declared? && fact.frozen? && fact.classes.frozen?)
+  check.call('proof-only query stays unknown with a signature', analysis.at(5, '4').nil?)
+  check.call('ENTER R1 gets its parameter contract', analysis.fact_at(1, '1')&.classes == Set[:Integer, :NilClass])
+  check.call('other required slots get their entry contracts', analysis.fact_at(1, '2')&.classes == Set[:TrueClass, :FalseClass])
+  literal = analysis.fact_at(5, '4', max_states: 1)
+  check.call('contracts preserve the dataflow budget', literal.nil?)
+  inferred = analysis.fact_at(5, '5')
+  check.call('an inferred definition is still marked inferred', inferred && inferred.classes == Set[:NilClass] && !inferred.declared?)
+  commented = apply.call({ body.label => Annotations::Annotation.new(args: [:symbol], ret: nil) })
+  check.call('a comment owns its parameter contract', !commented.ir_arg_types[body.label].key?('1') &&
+             RbsSignatures.ir_types(commented, body).fact_at(1, '1').nil?)
+  wrong = Irep.new(label: body.label, instructions: [
+    make_insn.call(0, 'ENTER', '2:0:0:0:0:0:0:0 (0x0)'), make_insn.call(4, 'RETURN', 'R1')
+  ])
+  rejected = RbsSignatures.apply(matched, { body.label => wrong }, { 'choose' => [definition] }, {}, {}, {})
+  check.call('arity mismatch seeds no IR contracts', rejected.ir_arg_types.empty? && rejected.diagnostics.any? { |d| d.code == 'TC1004' })
+  overwritten = Irep.new(label: body.label, nlocals: 3, instructions: [
+    make_insn.call(0, 'ENTER', '3:0:0:0:0:0:0:0 (0x0)'),
+    make_insn.call(4, 'GETIV', "R1\t:value"), make_insn.call(8, 'RETURN', 'R1')
+  ])
+  check.call('a parameter contract does not type a later unknown write', RbsSignatures.ir_types(applied, overwritten).fact_at(2, '1').nil?)
+  invalid = begin
+    BytecodeIR::Types.new(body, declared_args: { '0' => Set[:IrContracts] })
+    false
+  rescue ArgumentError
+    true
+  end
+  check.call('self cannot be seeded as an argument contract', invalid)
+end
+
 # ------------------------------------------------------------------------------------------------ 2. fixtures
 if ARGV.include?('--unit-only') || !ENV['MRBC']
   puts(ARGV.include?('--unit-only') ? '-- fixture half skipped (--unit-only)' : '-- SKIP fixture half: set MRBC')
@@ -231,6 +305,25 @@ else
     up = after['methods'].find { |m| m['name'] == 'use' }
     check.call('after: typed from the signature and no longer ranked', up['params'][0]['type'] == 'TcA' && up['params'][0]['source'] == 'signature' &&
                after['suggestions'].none? { |s| s['target'].start_with?('TcUse#use parameter 1') })
+
+    puts '== rich argument declarations appear in type facts'
+    rich_source = <<~RUBY
+      class IrContracts
+        def choose(n, b, s)
+          n
+        end
+      end
+    RUBY
+    File.write(File.join(dir, 'rich.rb'), rich_source)
+    File.write(File.join(dir, 'sig/rich.rbs'), "class IrContracts\n  def choose: (Integer? n, bool b, String | Symbol s) -> untyped\nend\n")
+    rich_out, rich_err, rich_status = type_check.call(dir, '--files', 'rich.rb', '--format', 'json', '--sig', 'sig/rich.rbs')
+    check.call("rich contract type check succeeds #{rich_err.lines.first&.strip}", rich_status.success?)
+    rich_params = JSON.parse(rich_out)['methods'].find { |method| method['name'] == 'choose' }['params']
+    check.call('nullable, bool and union arguments are reported as signature declarations',
+               rich_params.map { |param| [param['type'], param['source']] } == [
+                 ['Integer | nil', 'signature'], ['bool', 'signature'], ['String | Symbol', 'signature']
+               ])
+    check.call('rich contracts do not change generated dispatch', gen.call(rich_source, '') == gen.call(rich_source, File.join(dir, 'sig/rich.rbs')))
 
     puts '== the comment wins over a signature'
     File.write(File.join(dir, 'both.rb'), commented)

@@ -1029,6 +1029,7 @@ if $PROGRAM_NAME == __FILE__
       contradictions: contradictions, dynamic_names: DynamicNames.universe(ireps), call_sites: call_sites,
       root: ENV['BC2CPP_TYPE_FACTS_ROOT'], signature_origins: sig_applied&.origins, signature_locs: sig_applied&.locs,
       signature_diagnostics: sig_applied&.diagnostics&.map(&:to_h), signature_ivars: sig_applied&.ivar_sigs,
+      signature_arg_types: sig_applied&.ir_arg_types,
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
       integer_constants: integer_constants
     )))

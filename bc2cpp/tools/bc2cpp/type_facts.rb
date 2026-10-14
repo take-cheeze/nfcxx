@@ -32,7 +32,7 @@ module TypeFacts
                    :ivar_layout, :element_raw, :element_poison_reason, :hash_element_raw, :hash_poison_reason,
                    :container_constants, :gen, :contradictions, :dynamic_names, :call_sites, :root,
                    :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, :constant_sites,
-                   :modules, :superclass_of, :integer_constants, keyword_init: true)
+                   :modules, :superclass_of, :integer_constants, :signature_arg_types, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
@@ -146,7 +146,8 @@ module TypeFacts
       'scope' => scope_of(irep.file), 'req' => mand, 'opt' => opt, 'rest' => rest.positive?, 'key' => key,
       'kdict' => kdict.positive?,
       'visibility' => d.visibility&.to_s, 'params' => params, 'return' => return_row(ctx, gen, d, irep, mono),
-      'annotated' => !!(ctx.annotations[d.irep] || ctx.class_annotations[d.irep] || ctx.element_annotations[d.irep])
+      'annotated' => !!(ctx.annotations[d.irep] || ctx.class_annotations[d.irep] || ctx.element_annotations[d.irep] ||
+                       ctx.signature_arg_types&.[](d.irep)&.any?)
     }
   end
 
@@ -159,6 +160,14 @@ module TypeFacts
     end
     if (c = ctx.class_annotations[d.irep]) && (t = c.args[k - 1])
       types << [t.to_s, declared_source(ctx, d)]
+    end
+    signature_types = ctx.signature_arg_types&.dig(d.irep, k.to_s)
+    if types.empty? && signature_types
+      names = signature_types.map { |name| name == :NilClass ? 'nil' : name.to_s }
+      if names.include?('TrueClass') && names.include?('FalseClass')
+        names = ['bool'] + (names - %w[TrueClass FalseClass])
+      end
+      types << [names.join(' | '), 'signature']
     end
     declared = types.dup
     inferred = inferred_param_types(ctx, gen, d, irep, k, mono)
