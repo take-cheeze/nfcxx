@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "nfcuop_arena.hpp"
 #include "nfcuop_np.hpp"
 
 using namespace nfcuop;
@@ -45,8 +46,9 @@ static bool same(const Array& a, const Array& b) {
 using Env = std::map<std::string, Array>;
 
 // The program for `roots`, compiled once, run on every env, compared with the interpreter.
-static void compare_run(const std::vector<const UOp*>& roots, const std::vector<Env>& envs, const char* label) {
-  CProgram p = render_c(roots);
+static void compare_run(const std::vector<const UOp*>& roots, const std::vector<Env>& envs, const char* label,
+                        const RenderOptions& options = RenderOptions()) {
+  CProgram p = render_c(roots, options);
   std::shared_ptr<CModule> m = CModule::compile(p);
   int bad = 0;
   for (const Env& env : envs) {
@@ -118,6 +120,159 @@ static void structure() {
   broken.source = "int nfcuop_run( this is not C";
   try { CModule::compile(broken); CHECK(false); } catch (const Error& er) { CHECK(std::string(er.what()).find("error") != std::string::npos); }
   CHECK_THROWS(CModule::compile(p, "no-such-compiler-nfcuop"));
+}
+
+// ---- the arena: intermediates share one malloc'd arena, planned by liveness (nfcuop_arena.hpp) ----
+
+// a[k+1] = (a[k] + expand(sum of the rows of a[k])) / 2: each step reads the previous tensor and its reduction, so a tensor
+// is live only over the next step or two.
+static std::vector<const UOp*> halving_chain(Graph& g, const UOp* x, int steps) {
+  std::vector<const UOp*> a{x};
+  const Shape s = x->shape;
+  for (int k = 0; k < steps; k++) {
+    const UOp* r = g.reduce_sum(a.back(), {1});   // [R, 1]
+    a.push_back(g.mul(g.add(a.back(), g.expand(r, s)), g.fconst(f32, 0.5, s)));
+  }
+  return a;
+}
+
+static ArenaTensor tensor(const std::string& name, int64_t size, int start, int end) {
+  ArenaTensor t;
+  t.name = name;
+  t.size = size;
+  t.start = start;
+  t.end = end;
+  return t;
+}
+
+static void arena() {
+  // the planner: a tensor may reuse the bytes of one that is dead before it starts, never of one live at the same step
+  ArenaPlan q = plan_arena({tensor("a", 100, 0, 1), tensor("b", 100, 2, 3)}, 16);
+  CHECK(q.offsets.at("a") == 0 && q.offsets.at("b") == 0 && q.arena_bytes == 112);
+  ArenaPlan o = plan_arena({tensor("a", 100, 0, 2), tensor("b", 100, 2, 3)}, 16);   // step 2 is in both intervals
+  CHECK(o.offsets.at("a") == 0 && o.offsets.at("b") == 112 && o.arena_bytes == 224);
+  CHECK(plan_arena({}, 16).arena_bytes == 0);
+  CHECK_THROWS(plan_arena({tensor("a", 1, 0, 0), tensor("a", 1, 0, 0)}, 16));   // two names
+  CHECK_THROWS(plan_arena({tensor("a", 0, 0, 0)}, 16));                         // an empty size
+  CHECK_THROWS(plan_arena({tensor("a", 1, 2, 1)}, 16));                         // an empty interval
+  CHECK_THROWS(plan_arena({tensor("a", 1, 0, 0)}, 0));                          // an alignment of 0
+  // random intervals: overlapping tensors never share bytes, offsets are aligned, the arena holds everything live at once
+  // and is at most one slot per tensor
+  unsigned long long seed = 4242;
+  auto rnd = [&seed](unsigned n) {
+    seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+    return static_cast<unsigned>((seed >> 33) % n);
+  };
+  for (int trial = 0; trial < 200; trial++) {
+    std::vector<ArenaTensor> ts;
+    const int n = 1 + static_cast<int>(rnd(40));
+    for (int i = 0; i < n; i++) {
+      const int start = static_cast<int>(rnd(30));
+      ts.push_back(tensor("t" + std::to_string(i), 1 + static_cast<int64_t>(rnd(300)), start, start + static_cast<int>(rnd(6))));
+    }
+    const ArenaPlan pl = plan_arena(ts, 16);
+    bool ok = true;
+    int64_t sum = 0;
+    for (size_t i = 0; i < ts.size(); i++) {
+      const int64_t off = pl.offsets.at(ts[i].name), sz = (ts[i].size + 15) / 16 * 16;
+      ok = ok && off % 16 == 0 && off + sz <= pl.arena_bytes;
+      sum += sz;
+      for (size_t j = 0; j < i; j++) {
+        const int64_t off2 = pl.offsets.at(ts[j].name), sz2 = (ts[j].size + 15) / 16 * 16;
+        const bool live_together = !(ts[i].end < ts[j].start || ts[j].end < ts[i].start);
+        if (live_together) ok = ok && (off + sz <= off2 || off2 + sz2 <= off);
+      }
+    }
+    ok = ok && pl.arena_bytes <= sum;
+    for (int s = 0; s < 36; s++) {
+      int64_t live = 0;
+      for (const ArenaTensor& t : ts) if (t.start <= s && s <= t.end) live += (t.size + 15) / 16 * 16;
+      ok = ok && pl.arena_bytes >= live;
+    }
+    CHECK(ok);
+  }
+
+  // the chain on the C backend: 10 steps of 32 x 128 float32 tensors (16 KB each) and 10 reductions (128 bytes each)
+  Graph g;
+  const Shape xs{32, 128};
+  const UOp* x = g.var("x", f32, xs);
+  const std::vector<const UOp*> a = halving_chain(g, x, 10);
+  std::vector<double> vals;
+  for (int i = 0; i < 32 * 128; i++) vals.push_back((i * 37) % 101 - 50 + 0.25 * (i % 4));
+  const Env env{{"x", Array::from_doubles(f32, xs, vals)}};
+  const CProgram p = render_c({a[10]});
+  CHECK(p.temporaries == 19 && p.unplanned == 0 && p.naive_bytes == 9 * 16384 + 10 * 128);
+  // two of the 16 KB tensors and one reduction are live at once (the peak); the planner reaches it
+  CHECK(p.arena_bytes == 2 * 16384 + 128 && p.arena_bytes * 4 < p.naive_bytes);
+  CHECK(p.source.find("malloc(") != std::string::npos && p.source.find("malloc(") == p.source.rfind("malloc("));   // one malloc: the arena
+  compare_run({a[10]}, {env}, "arena chain");
+  // an output that is also read by the next step is not in the arena, and stays correct
+  compare_run({a[10], a[5]}, {env}, "arena chain with an intermediate output");
+
+  // a symbol on the rows, with bounds: the arena is sized from the bound, and it is exact when the bound is the size
+  RenderOptions sym;
+  sym.input_symbols["x"] = {"N", ""};
+  sym.symbol_bounds["N"] = 32;
+  const CProgram ps = render_c({a[10]}, sym);
+  CHECK(ps.arena_bytes == p.arena_bytes && ps.naive_bytes == p.naive_bytes && ps.unplanned == 0);
+  sym.symbol_bounds["N"] = 64;   // every intermediate has the symbol as its first dimension, so the arena doubles
+  const CProgram pb = render_c({a[10]}, sym);
+  CHECK(pb.arena_bytes == 2 * p.arena_bytes && pb.naive_bytes == 2 * p.naive_bytes && pb.unplanned == 0);
+  compare_run({a[10]}, {env}, "arena bounded", sym);
+  sym.symbol_bounds["N"] = 16;   // x has 32 rows: the bound is below the input
+  CHECK_THROWS(render_c({a[10]}, sym));
+  sym.symbol_bounds["N"] = 0;
+  CHECK_THROWS(render_c({a[10]}, sym));
+  RenderOptions bad;
+  bad.input_symbols["x"] = {"N"};   // one entry for two dimensions
+  CHECK_THROWS(render_c({a[10]}, bad));
+  bad.input_symbols.clear();                // no input q
+  bad.input_symbols["q"] = {"N", ""};
+  CHECK_THROWS(render_c({a[10]}, bad));
+  // a symbol without a bound: each intermediate that depends on it keeps a malloc of its own, and the program is the same
+  RenderOptions unbound;
+  unbound.input_symbols["x"] = {"N", ""};
+  const CProgram pu = render_c({a[10]}, unbound);
+  CHECK(pu.arena_bytes == 0 && pu.unplanned == pu.temporaries && pu.temporaries == 19);
+  compare_run({a[10]}, {env}, "arena unbounded", unbound);
+
+  // A reshape that moves the symbol out of the leading dimension is not known, so its reduction keeps a malloc. The reduction
+  // over the symbol's axis after a permute has no symbol left (an integer [128, 1]), so it is planned: 512 bytes.
+  Graph h;
+  const UOp* y = h.var("y", f32, {32, 128});
+  const UOp* rr = h.reduce_sum(h.reshape(y, {128, 32}), {1});   // [128, 1]: the reshape moves N, so the size is not known
+  const UOp* pr = h.reduce_sum(h.permute(y, {1, 0}), {1});      // [128, 1]: the reduction takes N away
+  const UOp* both = h.add(h.mul(rr, h.fconst(f32, 2.0, {128, 1})), h.mul(pr, h.fconst(f32, 3.0, {128, 1})));
+  RenderOptions ys;
+  ys.input_symbols["y"] = {"N", ""};
+  ys.symbol_bounds["N"] = 32;
+  const CProgram py = render_c({both}, ys);
+  CHECK(py.unplanned == 1 && py.temporaries == 2 && py.arena_bytes == 512);
+  Env yenv{{"y", Array::from_doubles(f32, {32, 128}, vals)}};
+  compare_run({both}, {yenv}, "arena reshape", ys);
+
+  // two symbols on two axes: an intermediate's maximum is the product of the bounds. w = z * z is [N, M] (120 bytes, bounds
+  // 5 and 7: 140, rounded to 144); r1 keeps N ([N, 1]: 32); r0 keeps M ([1, M]: 32). Live at once: all three at the last step.
+  Graph k;
+  const UOp* z = k.var("z", f32, {2, 3});
+  const UOp* w = k.mul(z, z);                // used twice, so a buffer
+  const UOp* r1 = k.reduce_sum(w, {1});      // [2, 1]
+  const UOp* r0 = k.reduce_sum(w, {0});      // [1, 3]
+  const UOp* sum2 = k.add(k.expand(r1, {2, 3}), k.expand(r0, {2, 3}));
+  RenderOptions two;
+  two.input_symbols["z"] = {"N", "M"};
+  two.symbol_bounds["N"] = 5;
+  two.symbol_bounds["M"] = 7;
+  const CProgram pz = render_c({sum2}, two);
+  CHECK(pz.temporaries == 3 && pz.unplanned == 0 && pz.naive_bytes == 144 + 32 + 32 && pz.arena_bytes == 208);
+  Env zenv{{"z", Array::from_doubles(f32, {2, 3}, {1, -2, 3, 0.5, -0.25, 6})}};
+  compare_run({sum2}, {zenv}, "arena two symbols", two);
+  two.symbol_bounds["M"] = 2;                // z has 3 columns
+  CHECK_THROWS(render_c({sum2}, two));
+  two.symbol_bounds["M"] = 7;
+  two.symbol_bounds.erase("N");              // N unbound: w and r1 keep a malloc of their own, r0 is planned
+  const CProgram pm = render_c({sum2}, two);
+  CHECK(pm.unplanned == 2 && pm.arena_bytes == 32);
 }
 
 // ---- random graphs ----
@@ -278,6 +433,56 @@ static void random_float_tensors() {
   compare_run(roots, envs, "random float tensors");
 }
 
+// Random chains of operators on an input whose first axis is the symbol N. The bound of N is the input's own size, so an
+// intermediate whose symbolic size is claimed wrongly would fail the render's check; the outputs must equal the interpreter's.
+static void random_symbolic() {
+  Rng rnd{777};
+  for (int trial = 0; trial < 60; trial++) {
+    Graph g;
+    const int64_t rows = 1 + rnd(4);
+    const UOp* x = g.var("x", f32, {rows, 6});
+    std::vector<const UOp*> pool{x};
+    const int steps = 3 + static_cast<int>(rnd(6));
+    for (int s = 0; s < steps; s++) {
+      const UOp* a = pool[rnd(static_cast<unsigned>(pool.size()))];
+      const int64_t rank = static_cast<int64_t>(a->shape.size());
+      const UOp* out = nullptr;
+      switch (rnd(8)) {
+        case 0: out = g.add(a, g.mul(a, g.fconst(f32, 0.5, a->shape))); break;
+        case 1: out = g.reduce_sum(a, {static_cast<int64_t>(rnd(static_cast<unsigned>(rank)))}); break;
+        case 2:
+          if (rank == 2) out = g.permute(a, {1, 0});
+          break;
+        case 3:
+          if (rank == 2 && a->shape[1] > 1) out = g.shrink(a, {0, 0}, {a->shape[0], a->shape[1] - 1});
+          break;
+        case 4:
+          if (rank == 2) out = g.pad(a, {0, 0}, {0, 1});
+          break;
+        case 5:
+          if (rank == 2) out = g.reshape(a, {a->shape[0], 1, a->shape[1]});   // keeps the leading axis
+          break;
+        case 6:
+          if (rank == 2) out = g.reshape(a, {a->shape[1], a->shape[0]});      // moves it: not known
+          break;
+        default: out = g.flip(a, {rank - 1}); break;
+      }
+      if (out) pool.push_back(out);
+    }
+    const std::vector<const UOp*> roots{pool.back(), pool[rnd(static_cast<unsigned>(pool.size()))]};
+    RenderOptions opts;
+    opts.input_symbols["x"] = {"N", ""};
+    opts.symbol_bounds["N"] = rows;
+    std::vector<double> vals;
+    for (int64_t i = 0; i < rows * 6; i++) vals.push_back(static_cast<double>((i * 7) % 11) - 5.0 + 0.125 * static_cast<double>(i % 3));
+    const Env env{{"x", Array::from_doubles(f32, {rows, 6}, vals)}};
+    compare_run(roots, {env}, "random symbolic", opts);
+    // a bound above the size is fine as well: the arena is only larger
+    opts.symbol_bounds["N"] = rows + 3;
+    CHECK(render_c(roots, opts).arena_bytes >= 0);
+  }
+}
+
 static void dtypes() {
   Graph g;
   // 64-bit integers: wrap, extremes, casts
@@ -389,10 +594,12 @@ int main(int argc, char** argv) {
       std::printf("  %-22s %.1f s\n", what, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   };
   timed("structure", structure);
+  timed("arena", arena);
   if (!quick) {
     timed("random scalars", random_scalars);
     timed("random int tensors", random_int_tensors);
     timed("random float tensors", random_float_tensors);
+    timed("random symbolic", random_symbolic);
   }
   timed("dtypes", dtypes);
   timed("numpy api", numpy_api);

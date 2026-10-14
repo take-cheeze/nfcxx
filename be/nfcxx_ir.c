@@ -5114,23 +5114,25 @@ static int ir_asm_scalar(a_type_ptr t)
   return t != NULL && !ir_is_aggregate(t) && !ir_is_void(t);
 }
 
-#define IR_ASM_OPS_MAX 10
+/* 24 operands: the wmma.mma of m8n32k16 (8 inout accumulators, 8 A and 8 B registers). */
+#define IR_ASM_OPS_MAX 24
 
 /* ---- PTX inline assembly. A template that starts with "mma.sync.aligned." (the tensor-core instructions of
-   llama.cpp's mma.cuh) or with "ld." or "st." (CUB's loads and stores) is not an x86 template: it is printed as
+   llama.cpp's mma.cuh), "wmma." (the wmma loads, stores and mma of lightning-indexer.cu), "ld." or "st." (CUB's loads
+   and stores), or "cvta." and "cvt." (shared-state addresses) is not an x86 template: it is printed as
    (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...), and the emitter (scripts/pathb-ptx-emit.rb, ptx_asm) lowers it to PTX.
    KIND is out (a store-only output, ARG its address), inout ("+" constraint: ARG is its address, read first) or in
    (ARG its value). Operands are 2-, 4- or 8-byte integers, 4- or 8-byte floats, or pointers, in gcc's order (outputs
    first). Returns 1 when it printed the statement. */
 static int ir_asm_ptx(an_asm_entry_ptr ae, int d)
 {
-  static const char *const prefixes[] = { "mma.sync.aligned.", "ld.", "st." };
+  static const char *const prefixes[] = { "mma.sync.aligned.", "wmma.", "ld.", "st.", "cvta.", "cvt." };
   const char *tx;
   size_t n, k, plen = 0;
   int pi;
   an_asm_operand_ptr op;
   int nops = 0, bad = 0;
-  char buf[1536];
+  char buf[8192];
   size_t m = 0;
   if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string) return 0;
   tx = ae->asm_string->variant.string.value;

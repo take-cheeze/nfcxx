@@ -73,6 +73,9 @@ fi
 if [ "$(uname -s)" = Darwin ]; then
   rename=$("$(dirname "$0")/darwin-sret.sh" >/dev/null && echo "$(dirname "$0")/../build/darwin-sret/rename.sed")
   sed -E -f "$rename" "$tmp/pp.c" > "$tmp/pp.sret.c" && mv "$tmp/pp.sret.c" "$tmp/pp.c"
+  # cproc has no _Atomic. libc++'s atomic operations are calls into libc++ (not inline), so the qualifier only matters
+  # for the layout of the member it declares (__atomic_base's __a_value); the atomicity comes from the library.
+  python3 "$(dirname "$0")/strip-atomic.py" < "$tmp/pp.c" > "$tmp/pp.at.c" && mv "$tmp/pp.at.c" "$tmp/pp.c"
 fi
 trace_end "$t" "cc -E (preprocess)" qbe-backend
 # cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.rb rewrites
