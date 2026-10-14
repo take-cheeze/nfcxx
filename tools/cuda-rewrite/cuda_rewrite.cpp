@@ -12,6 +12,7 @@
 // tools/cuda-rewrite/PORTING.md; until they are ported, main() refuses with exit 2 and the driver keeps the Ruby script.
 
 #include <algorithm>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -464,8 +465,6 @@ std::string template_site(const std::string &name, const std::string &targs) {
   return w;
 }
 
-// Ruby dependent_on_template (line 311): the parameter name a launch's template arguments use, or "" (nil).
-std::string dependent_on_template(const std::string &text, long i, const std::string &targs, bool &found);
 
 // Ruby angle_index (line 323): every code `<` of the text, with its matching `>` (or -1), indexed once per text.
 std::map<long, long> g_angle_index;
@@ -843,6 +842,433 @@ bool template_head_of(const std::string &text, const std::string &name, Template
 // Returns false when the template is unknown (Ruby nil).
 bool deduce_call_targs(const std::string &text, const std::string &name, long pos,
                        const std::vector<std::string> &args, std::vector<std::string> &out);
+
+// Ruby enclosing_block (line 2988): the innermost `{ ... }` block containing pos, as [open, close]; false at file scope.
+// (The perf version of the Ruby script indexes the braces once; the answer is the same.)
+bool enclosing_block_bounds(const std::string &s, long pos, long &close_out) {
+  std::vector<long> stack;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < pos && i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (ch(s, i) == '{') stack.push_back(i);
+    if (ch(s, i) == '}' && !stack.empty()) stack.pop_back();
+    i += 1;
+  }
+  if (stack.empty()) return false;
+  long open = stack.back();
+  long depth = 0;
+  long j = open;
+  while (j < n) {
+    long e = skip_literal(s, j);
+    if (e >= 0) {
+      j = e;
+      continue;
+    }
+    if (ch(s, j) == '{') depth += 1;
+    if (ch(s, j) == '}') depth -= 1;
+    if (depth == 0) {
+      close_out = j;
+      return true;
+    }
+    j += 1;
+  }
+  close_out = n;
+  return true;
+}
+
+// Ruby identity memo (`equal?`): the cache is valid for the same string object (address and size).
+struct IdentKey {
+  const std::string *obj = nullptr;
+  size_t size = 0;
+  bool is(const std::string &s) const { return obj == &s && size == s.size(); }
+  void set(const std::string &s) { obj = &s; size = s.size(); }
+};
+
+// Ruby template_bodies (line 617) entries: { open, close, tmpl } where tmpl is the template header.
+struct TmplHeader {
+  long st = 0, lt = 0, close = 0;
+};
+struct TemplateBody {
+  long open = 0, close = 0;
+  TmplHeader tmpl;
+};
+IdentKey g_template_bodies_key;
+std::vector<TemplateBody> g_template_bodies;
+
+// Ruby matching_brace (line 595).
+long matching_brace(const std::string &s, long open) {
+  long depth = 0;
+  long i = open;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (ch(s, i) == '{') depth += 1;
+    if (ch(s, i) == '}') {
+      depth -= 1;
+      if (depth == 0) return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+// Ruby template_bodies (line 617): each `{` whose header starts with `template <...>`, with its body's braces.
+const std::vector<TemplateBody> &template_bodies(const std::string &text) {
+  if (g_template_bodies_key.is(text)) return g_template_bodies;
+  std::vector<TemplateBody> out;
+  struct Frame {
+    long hs;
+    long open;
+    bool has_tmpl;
+    TmplHeader tmpl;
+  };
+  std::vector<Frame> stack;
+  stack.push_back(Frame{0, 0, false, TmplHeader()});
+  long i = 0;
+  long n = (long)text.size();
+  while (i < n) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    int c = ch(text, i);
+    if (c == '{') {
+      // the header's last `template <`: a comment, a preprocessor line or a declaration may come before it
+      bool has_tmpl = false;
+      TmplHeader tmpl;
+      long k = stack.back().hs;
+      while (k < i) {
+        long e2 = skip_literal(text, k);
+        if (e2 >= 0) {
+          k = e2;
+          continue;
+        }
+        if (word_at(text, k, "template")) {
+          long lt = index_code(text, '<', k + 8);
+          if (lt >= 0 && lt < i && strip(sl(text, k + 8, lt)).empty()) {
+            long close = matching_angle(text, lt);
+            if (close >= 0 && close < i) {
+              has_tmpl = true;
+              tmpl = TmplHeader{k, lt, close};
+            }
+          }
+        }
+        k += 1;
+      }
+      stack.push_back(Frame{i + 1, i, has_tmpl, tmpl});
+    } else if (c == '}') {
+      Frame frame = stack.size() > 1 ? stack.back() : stack.back();
+      if (stack.size() > 1) stack.pop_back();
+      if (frame.has_tmpl) out.push_back(TemplateBody{frame.open, i, frame.tmpl});
+      stack.back().hs = i + 1;
+    } else if (c == ';') {
+      stack.back().hs = i + 1;
+    }
+    i += 1;
+  }
+  g_template_bodies = out;
+  g_template_bodies_key.set(text);
+  return g_template_bodies;
+}
+
+// Ruby enclosing_template (line 665): the innermost template body holding pos, as the function template's facts.
+bool enclosing_template(const std::string &text, long pos, OuterTemplate &out) {
+  const auto &all = template_bodies(text);
+  const TemplateBody *best = nullptr;
+  for (const auto &tb : all)
+    if (tb.open < pos && pos < tb.close && (!best || tb.open > best->open)) best = &tb;  // max_by: first max wins
+  if (!best) return false;
+  TmplHeader t = best->tmpl;
+  std::vector<std::string> params = split_top(sl(text, t.lt + 1, t.close));
+  // One parameter pack is allowed (`int... Ns`): its index is recorded; its values come from the explicit calls.
+  std::vector<long> packs;
+  for (size_t k = 0; k < params.size(); k++)
+    if (params[k].find("...") != std::string::npos) packs.push_back((long)k);
+  if (packs.size() > 1)
+    refuse("template with " + std::to_string(packs.size()) + " parameter packs (at line " +
+           std::to_string(line_of(text, pos)) + "): one is supported");
+  std::vector<std::string> decls, names;
+  for (const auto &pr : params) {
+    std::string d = strip(ruby_split_eq0(pr));
+    decls.push_back(d);
+    std::vector<std::string> pt = tokens_of(d);
+    names.push_back(pt.empty() ? std::string() : pt.back());
+  }
+  std::string header = sl(text, t.close + 1, best->open);
+  out = OuterTemplate();
+  out.st = t.st;
+  out.names = names;
+  out.decls = decls;
+  out.fname = function_name(header);
+  out.has_qual = member_qualifier(header, out.qual);
+  out.open = best->open;
+  out.has_pack = !packs.empty();
+  out.pack = packs.empty() ? 0 : packs.front();
+  return true;
+}
+
+// Ruby dependent_on_template (line 311): the parameter name the template arguments use, when the launch is inside a
+// template body; false (Ruby nil) otherwise.
+bool dependent_on_template(const std::string &text, long i, const std::string &targs, std::string &name) {
+  const TemplateBody *best = nullptr;
+  for (const auto &tb : template_bodies(text))
+    if (tb.open < i && i < tb.close && (!best || tb.open > best->open)) best = &tb;
+  if (!best) return false;
+  TmplHeader t = best->tmpl;
+  std::vector<std::string> names;
+  for (const auto &pr : split_top(sl(text, t.lt + 1, t.close))) {
+    std::vector<std::string> pt = tokens_of(ruby_split_eq0(pr));
+    if (!pt.empty()) names.push_back(pt.back());
+  }
+  std::vector<std::string> used = tokens_of(targs);
+  for (const auto &nm : names)
+    if (std::find(used.begin(), used.end(), nm) != used.end()) {
+      name = nm;
+      return true;
+    }
+  return false;
+}
+
+// Ruby int_expr_value (line 440): an integer expression of literals, `+ - * / %`, parentheses and visible local
+// constants. Recursive descent over the tokens (no eval). Returns false when it is not one (Ruby nil).
+bool int_expr_value(const std::string &text, long pos, const std::string &s, long &value, int depth) {
+  if (depth > 8) return false;
+  struct Tok {
+    int kind;  // 0 = num, 1 = id, 2 = op
+    std::string text;
+  };
+  std::vector<Tok> toks;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    int c = ch(s, i);
+    if (white_c(c)) {
+      i += 1;
+    } else if ((c >= '0' && c <= '9') || ident_c(c)) {
+      long j = i;
+      while (j < n && ident_c(ch(s, j))) j += 1;
+      toks.push_back(Tok{(c >= '0' && c <= '9') ? 0 : 1, sl(s, i, j)});
+      i = j;
+    } else if (std::string("+-*/%()").find((char)c) != std::string::npos) {
+      toks.push_back(Tok{2, std::string(1, (char)c)});
+      i += 1;
+    } else {
+      return false;
+    }
+  }
+  if (toks.empty()) return false;
+  size_t p = 0;
+  bool ok = true;
+  // Recursive descent: expr = term (('+'|'-') term)*; term = factor (('*'|'/'|'%') factor)*; factor as in Ruby.
+  std::function<bool(long &)> expr, factor;
+  std::function<bool(long &)> term;
+  term = [&](long &out) -> bool {
+    long v;
+    if (!factor(v)) return false;
+    while (p < toks.size() && toks[p].kind == 2 && std::string("*/%").find(toks[p].text) != std::string::npos) {
+      std::string op = toks[p].text;
+      p += 1;
+      long r;
+      if (!factor(r)) return false;
+      if (op != "*" && r == 0) return false;
+      if (op == "*") v = v * r;
+      else if (op == "/") v = v / r;
+      else v = v % r;
+    }
+    out = v;
+    return true;
+  };
+  expr = [&](long &out) -> bool {
+    long v;
+    if (!term(v)) return false;
+    while (p < toks.size() && toks[p].kind == 2 && (toks[p].text == "+" || toks[p].text == "-")) {
+      std::string op = toks[p].text;
+      p += 1;
+      long r;
+      if (!term(r)) return false;
+      v = op == "+" ? v + r : v - r;
+    }
+    out = v;
+    return true;
+  };
+  factor = [&](long &out) -> bool {
+    if (p >= toks.size()) return false;
+    Tok tk = toks[p];
+    p += 1;
+    if (tk.kind == 0) {
+      std::string digits = tk.text;
+      while (!digits.empty() && std::string("uUlL").find(digits.back()) != std::string::npos) digits.pop_back();
+      if (digits.size() >= 2 && digits.compare(0, 2, "0x") == 0) out = std::strtol(digits.c_str() + 2, nullptr, 16);
+      else out = std::strtol(digits.c_str(), nullptr, 10);
+      return true;
+    }
+    if (tk.kind == 1) {
+      std::string val;
+      if (!local_constant_visible(text, pos, tk.text, val)) return false;
+      return int_expr_value(text, pos, val, out, depth + 1);
+    }
+    if (tk.text == "(") {
+      long v;
+      if (!expr(v)) return false;
+      if (!(p < toks.size() && toks[p].kind == 2 && toks[p].text == ")")) return false;
+      p += 1;
+      out = v;
+      return true;
+    }
+    if (tk.text == "-") {
+      long v;
+      if (!factor(v)) return false;
+      out = -v;
+      return true;
+    }
+    return false;
+  };
+  long value_out = 0;
+  ok = expr(value_out);
+  if (!ok) return false;
+  if (p != toks.size()) return false;
+  value = value_out;
+  return true;
+}
+
+// Ruby local_constant_visible (line 415): the value of the nearest local constant `name = VALUE` before pos whose block
+// is still open at pos.
+bool local_constant_visible(const std::string &text, long pos, const std::string &name, std::string &value) {
+  std::string seg = sl(text, 0, pos);
+  bool found = false;
+  long i = 0;
+  while (true) {
+    long k = str_index(seg, name, i);
+    if (k < 0) break;
+    long e = k + (long)name.size();
+    i = e;
+    if ((k > 0 && ident_c(ch(seg, k - 1))) || (e < (long)seg.size() && ident_c(ch(seg, e)))) continue;
+    long b = k - 1;
+    while (b >= 0 && white_c(ch(seg, b))) b -= 1;
+    if (!(b >= 0 && ident_c(ch(seg, b)))) continue;
+    long a = e;
+    while (a < (long)seg.size() && white_c(ch(seg, a))) a += 1;
+    if (!(ch(seg, a) == '=' && ch(seg, a + 1) != '=')) continue;
+    long semi = str_index(seg, ";", a);
+    if (semi < 0) continue;
+    // Ruby: blk = enclosing_block(text, k); next unless blk.nil? || blk[1] > pos
+    long blk_close = -1;
+    bool has_blk = enclosing_block_bounds(text, k, blk_close);
+    if (has_blk && !(blk_close > pos)) continue;
+    found = true;
+    value = strip(sl(seg, a + 1, semi));
+  }
+  return found;
+}
+
+// Ruby resolve_local_constants (line 517): the template arguments of a launch with its local constants' values.
+std::string resolve_local_constants(const std::string &text, const std::string &targs, long pos) {
+  bool has_ident = false;
+  for (char c : targs)
+    if (ident_c((unsigned char)c) && !(c >= '0' && c <= '9')) has_ident = true;
+  if (!has_ident) return targs;
+  long unused_close = -1;
+  if (!enclosing_block_bounds(text, pos, unused_close)) return targs;
+  OuterTemplate outer;
+  bool has_outer = enclosing_template(text, pos, outer);
+  std::string out;
+  long i = 0;
+  long n = (long)targs.size();
+  while (i < n) {
+    int c = ch(targs, i);
+    if (ident_c(c) && !(c >= '0' && c <= '9')) {
+      long j = i;
+      while (j < n && ident_c(ch(targs, j))) j += 1;
+      std::string v = sl(targs, i, j);
+      // A parameter of the enclosing template is that template's, not a local: its launch is dependent.
+      bool is_param = has_outer && std::find(outer.names.begin(), outer.names.end(), v) != outer.names.end();
+      std::string val;
+      bool have = !is_param && local_constant_visible(text, pos, v, val);
+      if (have) {
+        // An integer expression of constants is its value. A single name (a macro, or a type alias) is carried as the
+        // name. Anything else (a generic lambda's decltype(I)::value) is not carried.
+        long nv;
+        if (int_expr_value(text, pos, val, nv, 0)) {
+          out += std::to_string(nv);
+          i = j;
+          continue;
+        }
+        bool single = !val.empty();
+        for (char cc : val)
+          if (!ident_c((unsigned char)cc)) single = false;
+        if (!single)
+          refuse("template argument " + v + " of the launch at line " + std::to_string(line_of(text, pos)) + " is " + val +
+                 ": only an integer constant or a name is carried");
+        out += val;
+      } else {
+        out += v;
+      }
+      i = j;
+    } else {
+      out.push_back(targs[(size_t)i]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// Ruby template_launches (line 556): [name, targs, position] of each `<<<` after a template argument list.
+struct TemplateLaunch {
+  std::string name, targs;
+  long pos;
+};
+std::vector<TemplateLaunch> template_launches(const std::string &text) {
+  std::vector<TemplateLaunch> found;
+  long i = 0;
+  long n = (long)text.size();
+  std::map<long, long> dirs = directive_ends(text);
+  while (i < n) {
+    auto dit = dirs.find(i);
+    if (dit != dirs.end()) {
+      i = dit->second;
+      continue;
+    }
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (sl_n(text, i, 3) == "<<<" && text_before(text, i) == ">") {
+      // the `>` closing the template arguments: the nearest one before `<<<` (a line break may come between)
+      long gt = i - 1;
+      while (gt >= 0 && white_c(ch(text, gt))) gt -= 1;
+      long j = gt;
+      long depth = 0;
+      while (j >= 0) {
+        if (ch(text, j) == '>') depth += 1;
+        if (ch(text, j) == '<') depth -= 1;
+        if (depth == 0) break;
+        j -= 1;
+      }
+      long k = j - 1;
+      while (k >= 0 && white_c(ch(text, k))) k -= 1;
+      long e2 = k + 1;
+      while (k >= 0 && ident_c(ch(text, k))) k -= 1;
+      std::string name = sl(text, k + 1, e2);
+      if (!name.empty()) {
+        std::string targs = strip(sl(text, j + 1, gt));
+        found.push_back(TemplateLaunch{name, resolve_local_constants(text, targs, i), i});
+      }
+    }
+    i += 1;
+  }
+  return found;
+}
 
 }  // namespace
 
