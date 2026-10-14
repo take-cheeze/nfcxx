@@ -563,6 +563,10 @@ module NumericFlow
         out[pb + a] = slot_count + 1 + src
         copy_class_test(out, state, a, src, ctx) if ctx[:test_base]
       end
+    when 'KARG'
+      set.call(a, oracle.respond_to?(:keyword_mask) ? oracle.keyword_mask(insn) : OTHER)
+    when 'KEY_P'
+      set.call(a, oracle.respond_to?(:keyword_presence) ? oracle.keyword_presence(insn) : OTHER)
     when 'GETCONST', 'GETMCNST'
       set.call(a, oracle.const_mask(insn))
     when 'GETUPVAR'
@@ -580,9 +584,9 @@ module NumericFlow
     when 'RANGE_INC', 'RANGE_EXC'
       set.call(a, RNG)
     when 'ARRAY', 'ARRAY2'
-      set.call(a, ARR)
+      set.call(a, oracle.respond_to?(:array_mask) ? oracle.array_mask(irep, index, insn, state) : ARR)
     when 'HASH'
-      set.call(a, HSH)
+      set.call(a, oracle.respond_to?(:hash_mask) ? oracle.hash_mask(irep, index, insn, state) : HSH)
     when 'STRING'
       set.call(a, STR)
     when 'ARYPUSH', 'ARYCAT', 'HASHADD', 'HASHCAT', 'STRCAT'

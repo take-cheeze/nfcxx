@@ -343,6 +343,7 @@ module TypeCheckReport
     JSON.pretty_generate({ 'version' => facts['version'], 'scope' => scope, 'summary' => summary, 'diagnostics' => diags.map(&:to_h),
                            'suggestions' => suggestions, 'methods' => methods, 'ivars' => ivars,
                            'constants' => facts['constants'], 'annotations' => facts['annotations'],
+                           'native_direct_forms' => Array(facts['native_direct_forms']),
                            'rbs_suggestions' => TypeCheckRbs.inferred_return_suggestions(facts, scope: scope),
                            'ir_feedback' => Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope } }) << "\n"
   end

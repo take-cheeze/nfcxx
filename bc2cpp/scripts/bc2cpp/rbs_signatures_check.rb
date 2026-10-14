@@ -539,9 +539,12 @@ else
     File.write(File.join(dir, 'feedback.rb'), feedback_source)
     File.write(File.join(dir, 'sig/feedback.rbs'), feedback_sig)
     source_types_before = ENV['BC2CPP_IR_SOURCE_TYPES']
+    context_before = ENV['BC2CPP_IR_CONTEXT_RESULTS']
+    ENV['BC2CPP_IR_CONTEXT_RESULTS'] = '0'
     ENV['BC2CPP_IR_SOURCE_TYPES'] = '0'
     feedback_out, feedback_err, feedback_status = type_check.call(dir, '--files', 'feedback.rb', '--format', 'json',
                                                                  '--no-sends', '--sig', 'sig/feedback.rbs', '--emit-rbs-suggestions', 'suggested', '--keep', 'feedback-kept')
+    context_before ? ENV['BC2CPP_IR_CONTEXT_RESULTS'] = context_before : ENV.delete('BC2CPP_IR_CONTEXT_RESULTS')
     source_types_before ? ENV['BC2CPP_IR_SOURCE_TYPES'] = source_types_before : ENV.delete('BC2CPP_IR_SOURCE_TYPES')
     check.call("feedback returns exit 1 for definite contract mismatches #{feedback_err.lines.first&.strip}", feedback_status.exitstatus == 1)
     report = JSON.parse(feedback_out)
@@ -696,6 +699,45 @@ else
                source_return.call('read')['status'] == 'inferred')
     check.call('incoming argument pool feeds independent IR facts', source_return.call('ir_source_identity')['type'] == 'String' &&
                source_return.call('ir_source_identity')['status'] == 'inferred')
+
+    puts '== nominal optional and keyword bounds'
+    File.write(File.join(dir, 'optional-keyword.rb'), <<~RUBY)
+      class SignatureShapes
+        def optional(value = 1); value; end
+        def keyword(value:); value; end
+        def optional_keyword(value: :default); value; end
+        def iterate(values); values.each { |value| value.size }; end
+      end
+    RUBY
+    File.write(File.join(dir, 'sig/optional-keyword.rbs'), <<~RBS)
+      class SignatureShapes
+        def optional: (?Integer value) -> untyped
+        def keyword: (value: String) -> untyped
+        def optional_keyword: (?value: Symbol) -> untyped
+        def iterate: (Array[String] values) -> untyped
+      end
+    RBS
+    shape_out, shape_err, shape_status = type_check.call(dir, '--files', 'optional-keyword.rb', '--sig', 'sig/optional-keyword.rbs', '--format', 'json', '--no-sends', '--emit-rbs-suggestions', 'shape-suggestions')
+    check.call("optional and keyword signatures check #{shape_err.lines.first&.strip}", shape_status.success?)
+    shape_report = JSON.parse(shape_out)
+    shape_method = ->(name) { shape_report['methods'].find { |method| method['name'] == name } }
+    check.call('optional positional bounds are exposed separately from required parameters',
+               shape_method.call('optional')['optional_params'][0]['type'] == 'Integer')
+    check.call('required keyword bounds are exposed with their required shape',
+               shape_method.call('keyword')['keyword_params'][0]['type'] == 'String' && shape_method.call('keyword')['keyword_params'][0]['required'])
+    check.call('optional keyword bounds include the default path',
+               shape_method.call('optional_keyword')['keyword_params'][0]['type'] == 'Symbol' && !shape_method.call('optional_keyword')['keyword_params'][0]['required'])
+    check.call('signature-derived optional and keyword returns retain contract provenance',
+               shape_report['ir_feedback'].select { |row| row['kind'] == 'return' && row['method'] != 'iterate' }.all? { |row| row['status'] == 'declared' && !row['contracts'].empty? })
+    check.call('Array iterator variables retain conditional element bounds', shape_report['ir_feedback'].any? { |row|
+      row['kind'] == 'block_argument' && row['type'] == 'String' && row['status'] == 'declared' && row['contracts'].include?('iterator:each')
+    })
+    exported_shapes = File.read(File.join(dir, 'shape-suggestions/SignatureShapes.rbs'))
+    check.call('RBS export retains typed optional and named keyword shapes',
+               exported_shapes.include?('?Integer') && exported_shapes.include?('value: String') && exported_shapes.include?('?value: Symbol'))
+    check.call('exported optional and keyword signatures parse', !RBS::Parser.parse_signature(exported_shapes).nil?)
+    check.call('nominal optional and keyword bounds do not change generated code',
+               gen.call(File.read(File.join(dir, 'optional-keyword.rb')), '') == gen.call(File.read(File.join(dir, 'optional-keyword.rb')), File.join(dir, 'sig/optional-keyword.rbs')))
 
     puts '== the comment wins over a signature'
     File.write(File.join(dir, 'both.rb'), commented)
