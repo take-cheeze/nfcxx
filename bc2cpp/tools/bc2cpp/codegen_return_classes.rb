@@ -2,6 +2,7 @@
 
 require_relative 'numeric_flow'
 require_relative 'ir_argument_types'
+require_relative 'ir_call_graph_types'
 require_relative 'readonly_call_effects'
 require_relative 'call_context_arguments'
 
@@ -492,7 +493,7 @@ class CodeGen
 
   # Exhaustive entry admission is retained; only the single-definition rule
   # is replaced by stable receiver-specific lookup. These facts never seed codegen.
-  def bytecode_ir_argument_classes(definition, position)
+  def bytecode_ir_argument_classes(definition, position, read: nil)
     return nil if ENV['BC2CPP_IR_ARGUMENT_TYPES'] == '0'
     return nil unless @foreign_method_names && @outside_tokens && @closed_world&.exact_instances_singleton_free?
     return nil unless @native_results_ready && @rc_scoped_ready
@@ -512,9 +513,20 @@ class CodeGen
     return nil if poisoned.include?(name) || sites[name].empty?
 
     IrArgumentTypes.classes(definition, position, sites[name], arity: arity,
-                            receiver: ->(body, index, register) { bytecode_ir_argument_receiver_classes(body, index, register) },
-                            argument: ->(body, index, register) { bytecode_ir_source_classes(body, index, register) },
+                            receiver: ->(body, index, register) {
+                              implicit = read && %w[SSEND SSEND0 SSENDB].include?(body.instructions[index].op)
+                              read && !implicit ? read.call(body, index, register) : bytecode_ir_argument_receiver_classes(body, index, register)
+                            },
+                            argument: ->(body, index, register) { read ? read.call(body, index, register) : bytecode_ir_source_classes(body, index, register) },
                             target: ->(method, klass) { closed_world_exact_target(method, klass) })
+  end
+
+  def bytecode_ir_call_graph_argument_classes(definition, position)
+    return nil if ENV['BC2CPP_IR_CALL_GRAPH_TYPES'] == '0' || ENV['BC2CPP_IR_ARGUMENT_TYPES'] == '0'
+    return nil unless @native_results_ready && @rc_scoped_ready
+
+    @ir_call_graph_arguments ||= IrCallGraphTypes.collect(self, @registry.values.flatten, @ireps)
+    @ir_call_graph_arguments.dig(definition.irep, position.to_s)
   end
 
   def bytecode_ir_argument_receiver_classes(irep, index, register)

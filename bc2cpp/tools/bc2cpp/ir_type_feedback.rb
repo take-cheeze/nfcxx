@@ -63,6 +63,7 @@ module IrTypeFeedback
       if ENV['BC2CPP_IR_ARGUMENT_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_argument_classes)
         (1..irep.enter&.enter_fields&.first.to_i).each do |position|
           classes = ctx.gen.bytecode_ir_argument_classes(definition, position)
+          classes ||= ctx.gen.bytecode_ir_call_graph_argument_classes(definition, position) if ctx.gen.respond_to?(:bytecode_ir_call_graph_argument_classes)
           inferred_args[position.to_s] = classes if classes
         end
       end

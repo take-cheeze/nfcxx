@@ -214,6 +214,10 @@ module TypeFacts
       classes = gen.bytecode_ir_argument_classes(d, k)
       out << [BytecodeIR::Types.type_name(classes), 'inferred:receiver-call-sites'] if classes
     end
+    if out.empty? && gen.respond_to?(:bytecode_ir_call_graph_argument_classes)
+      classes = gen.bytecode_ir_call_graph_argument_classes(d, k)
+      out << [BytecodeIR::Types.type_name(classes), 'inferred:call-graph'] if classes
+    end
     out.uniq
   end
 
