@@ -36,6 +36,6 @@ extern "C" unsigned __nfcxx_nctaid_z(void);
                                                                                                                            
                                                                             
 template <typename T_dst, typename T_wire>
-static void ar_kernel(const T_dst *a, T_wire *b) { b[__nfcxx_tid_x()] = (T_wire) a[__nfcxx_tid_x()]; }
+void ar_kernel(const T_dst *a, T_wire *b) { b[__nfcxx_tid_x()] = (T_wire) a[__nfcxx_tid_x()]; }
 extern "C" void __nfcxx_k_ar_kernel_float_float(const float *a, float *b) { ar_kernel<float, float>(a, b); }
 extern "C" void __nfcxx_k_ar_kernel_float_double(const float *a, double *b) { ar_kernel<float, double>(a, b); }

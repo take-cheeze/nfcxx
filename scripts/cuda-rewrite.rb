@@ -1985,6 +1985,17 @@ end
 # Top-level pieces of a translation unit: preprocessor lines, and declarations or definitions ending at a `;` or at
 # the `}` of a function or namespace. Each piece is [start, stop, kind], kind :pp or :code, and :body if it has a
 # brace block at depth 0.
+# A depth-0 `{` that follows `=` in its piece is an initializer list (`static const uint8_t t[8] = {...};`), not a body:
+# the piece ends at its `;`. A function, class, namespace or template header has a parameter list, a tag or a template
+# header before its `{`, so it is never an initializer.
+def brace_is_initializer?(chunk)
+  return false if chunk.index("(")
+  toks = tokens_of(chunk)
+  return false if toks.empty? || (toks & %w[struct class union enum namespace template operator]).any?
+  return false if toks.first == "extern" || toks.first == "typedef" || toks.first == "using"
+  !chunk.index("=").nil?
+end
+
 def top_pieces(text)
   pieces = []
   n = text.length
@@ -2026,7 +2037,7 @@ def top_pieces(text)
     elsif c == ")" || c == "]"
       depth -= 1
     elsif c == "{"
-      if depth == 0
+      if depth == 0 && !brace_is_initializer?(text[start...i])
         body = true
         opener = tokens_of(text[start...i]).first
       end
@@ -2679,7 +2690,9 @@ def device_tu(text)
           kernels << name
         end
         pc[:keep] = true
-        pc[:text] = remove_words(pc[:text], DEVICE_QUALIFIERS)
+        # a kernel has external linkage (it is launched from the host): `static __global__ void k()` is not static in the
+        # device unit, or the front end drops it when no device code calls it
+        pc[:text] = remove_words(pc[:text], pc[:toks].include?("__global__") ? DEVICE_QUALIFIERS + ["static"] : DEVICE_QUALIFIERS)
         seeds.concat(pc[:toks])
       elsif pc[:text].include?("(")
         pc[:keep] = true

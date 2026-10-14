@@ -42,6 +42,7 @@ refuse() {  # refuse FILE.cu MESSAGE-SUBSTRING
 pass bounds.cu "launch_bounds: no error, 0 mismatches"
 pass async.cu "async: no error, 0 mismatches"
 pass decl_macro.cu "decl macro: no error, 14"
+pass enum_extern_block.cu "enum extern block: no error, 0 mismatches"
 pass local_const.cu "local const: no error, 41 40"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
 pass linkage_block.cu "linkage block: no error, 0 mismatches"
