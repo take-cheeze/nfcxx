@@ -31,13 +31,19 @@ module NativeCoreResultSigs
     kinds(path).values.flat_map(&:keys).to_set.freeze
   end
 
-  def load_kinds(path)
+  # The declarations of a core signature file (the rbs gem parses it; it is bundled with CRuby).
+  def parse_decls(path)
     begin
       require 'rbs'
     rescue LoadError
       raise "bc2cpp: #{path} needs the rbs gem (gem install rbs)"
     end
     _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: File.basename(path), content: File.read(path)))
+    decls
+  end
+
+  def load_kinds(path)
+    decls = parse_decls(path)
     out = {}
     decls.each do |decl|
       raise "bc2cpp: #{path}: only `class` reopenings are allowed here, not #{decl.class.name.split('::').last}" unless decl.is_a?(RBS::AST::Declarations::Class)
