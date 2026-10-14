@@ -2010,7 +2010,14 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
         if (cend > open && (long)split_top(sl(text, open + 1, cend)).size() != parts) continue;
       }
     }
-    if (have_head && targs.size() < head.names.size()) {
+    // A parameter pack is greedy: the explicit arguments after it all go to the pack, so the names after the pack are not
+    // given explicitly. They are deduced from the call's arguments (softmax's launch_soft_max_kernels<32, ..., 4096>(x,
+    // mask, ...) leaves T to mask), and the explicit ones stay with the pack.
+    size_t after_pack = 0;
+    if (have_head)
+      for (size_t idx = 0; idx < head.parts.size(); idx++)
+        if (head.parts[idx].find("...") != std::string::npos) after_pack = head.names.size() - idx - 1;
+    if (have_head && (targs.size() < head.names.size() || after_pack > 0)) {
       long k = cs.second + (long)name.size();
       while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
       long close = matching_angle(text, k);
@@ -2040,7 +2047,8 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
           sites.push_back({targs, cs.second});  // another overload of the name
           continue;
         }
-        std::vector<std::string> missing(head.names.begin() + (long)targs.size(), head.names.end());
+        size_t first_missing = after_pack > 0 ? head.names.size() - after_pack : targs.size();
+        std::vector<std::string> missing(head.names.begin() + (long)first_missing, head.names.end());
         std::map<std::string, std::string> got = deduce_missing_targs(text, name, cs.second, cargs, missing);
         for (const auto &p : missing) targs.push_back(got[p]);
       }
