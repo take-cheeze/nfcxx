@@ -6,6 +6,7 @@
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_core_result_sigs'
+require_relative '../../tools/bc2cpp/core_hierarchy_sigs'
 
 failures = []
 check = lambda do |name, ok|
@@ -47,6 +48,36 @@ check.call('rejects a module declaration', rejects("module Kernel\n  def foo: ()
 check.call('fresh-array names equal the audited list',
            NativeCoreResultSigs.fresh_array_names == Set[*%w[keys values compact flatten split uniq]])
 check.call('fresh-array file rejects a non-Array return', rejects_fresh("class Hash\n  def keys: () -> String\nend\n"))
+
+AUDITED_SUPER = {
+  'BasicObject' => nil, 'Object' => 'BasicObject', 'Module' => 'Object', 'Class' => 'Module',
+  'NilClass' => 'Object', 'TrueClass' => 'Object', 'FalseClass' => 'Object', 'Numeric' => 'Object',
+  'Integer' => 'Numeric', 'Float' => 'Numeric', 'String' => 'Object', 'Symbol' => 'Object',
+  'Array' => 'Object', 'Hash' => 'Object', 'Range' => 'Object', 'Proc' => 'Object',
+  'Exception' => 'Object', 'StandardError' => 'Exception', 'Struct' => 'Object'
+}.freeze
+AUDITED_MIXINS = {
+  'Object' => %w[Kernel], 'Numeric' => %w[Comparable], 'String' => %w[Comparable],
+  'Symbol' => %w[Comparable], 'Array' => %w[Enumerable], 'Hash' => %w[Enumerable],
+  'Range' => %w[Enumerable], 'Struct' => %w[Enumerable]
+}.freeze
+
+def rejects_hierarchy(text)
+  Dir.mktmpdir do |dir|
+    path = File.join(dir, 'h.rbs')
+    File.write(path, text)
+    CoreHierarchySigs.load(path)
+    false
+  rescue RuntimeError
+    true
+  end
+end
+
+hierarchy_super, hierarchy_mixins = CoreHierarchySigs.load
+check.call('hierarchy superclasses equal the audited map, in order', hierarchy_super == AUDITED_SUPER && hierarchy_super.keys == AUDITED_SUPER.keys)
+check.call('hierarchy mixins equal the audited map', hierarchy_mixins == AUDITED_MIXINS)
+check.call('rejects a class without a superclass line', rejects_hierarchy("class Foo\nend\n"))
+check.call('rejects a class declared twice', rejects_hierarchy("class Foo < Object\nend\nclass Foo < Object\nend\n"))
 
 puts failures.empty? ? 'native core result sigs: all checks passed' : "native core result sigs: #{failures.size} failure(s)"
 exit(failures.empty? ? 0 : 1)

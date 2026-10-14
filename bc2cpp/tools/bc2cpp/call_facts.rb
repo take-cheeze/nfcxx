@@ -4,6 +4,7 @@ require 'set'
 require_relative 'numeric_flow'
 require_relative 'bytecode_ir'
 require_relative 'foreign_definers'
+require_relative 'core_hierarchy_sigs'
 
 # CALL_FACTS (ADR 0317): what a call that returned normally says about its receiver.
 #
@@ -11,15 +12,9 @@ require_relative 'foreign_definers'
 # the register, a local) can only be an instance of a class that answers `m`. Flow is the forward "must"
 # analysis of those facts; Answers is the closed-world question "which classes answer `m`".
 module CallFacts
-  # mruby core classes the closed world does not declare, and the modules the core mixes into them.
-  CORE_SUPER = { 'BasicObject' => nil, 'Object' => 'BasicObject', 'Module' => 'Object', 'Class' => 'Module',
-                 'NilClass' => 'Object', 'TrueClass' => 'Object', 'FalseClass' => 'Object', 'Numeric' => 'Object',
-                 'Integer' => 'Numeric', 'Float' => 'Numeric', 'String' => 'Object', 'Symbol' => 'Object',
-                 'Array' => 'Object', 'Hash' => 'Object', 'Range' => 'Object', 'Proc' => 'Object',
-                 'Exception' => 'Object', 'StandardError' => 'Exception', 'Struct' => 'Object' }.freeze
-  CORE_MIXINS = { 'Object' => %w[Kernel], 'Numeric' => %w[Comparable], 'String' => %w[Comparable],
-                  'Symbol' => %w[Comparable], 'Array' => %w[Enumerable], 'Hash' => %w[Enumerable],
-                  'Range' => %w[Enumerable], 'Struct' => %w[Enumerable] }.freeze
+  # mruby core classes the closed world does not declare (superclass) and the modules the core mixes into them,
+  # from sig/native/core_hierarchy.rbs.
+  CORE_SUPER, CORE_MIXINS = CoreHierarchySigs.load
   # A definer on one of these answers every object.
   EVERYTHING = %w[Object Kernel BasicObject].to_set.freeze
   CORE_MODULES = %w[Kernel Comparable Enumerable Math GC ObjectSpace Process Signal Marshal FileTest Errno].freeze
