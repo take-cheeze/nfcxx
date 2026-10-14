@@ -12,6 +12,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
+# ccache when it is installed: the QBE and cproc objects are rebuilt from the same sources in every fresh checkout.
+cc_wrap=cc; command -v ccache >/dev/null && cc_wrap="ccache cc"
 git -C "$root" submodule update --init 3rd/qbe 3rd/cproc
 
 for p in qbe cproc; do
@@ -31,7 +33,7 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-align.patch"
 # QBE: scripts/qbe-apple-addend.patch (arm64 Apple: an address with an offset is sym+off@page, not sym@page+off, which ld64
 # rejects as a relocation)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-apple-addend.patch"
-make -C "$root/build/qbe" -j"$jobs" >/dev/null
+make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
 # EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
@@ -43,9 +45,9 @@ patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-atomic-builtins.
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
 if [ "$(uname -s)" = Darwin ]; then
   case "$(uname -m)" in arm64) cproc_triple=aarch64-apple-darwin ;; x86_64) cproc_triple=x86_64-apple-darwin ;; esac
-  (cd "$root/build/cproc" && ./configure --host=$cproc_triple --target=$cproc_triple >/dev/null && make -j"$jobs" cproc-qbe >/dev/null)
+  (cd "$root/build/cproc" && ./configure --host=$cproc_triple --target=$cproc_triple >/dev/null && make -j"$jobs" CC="$cc_wrap" cproc-qbe >/dev/null)
 else
-  (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$jobs" cproc-qbe >/dev/null)
+  (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$jobs" CC="$cc_wrap" cproc-qbe >/dev/null)
 fi
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of
