@@ -253,4 +253,31 @@ inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void *
 #define cudaLaunchKernel(func, grid, block, args, shmem, stream) \
   __nfcxx_cuda_launch_raw((func), (grid), (block), (args), (shmem), (stream))
 
+// Cooperative groups, host copy: CUDA's own cooperative_groups.h needs its device barriers, which the host placeholders do
+// not provide, so the header is skipped (its guards are defined here) and this shim stands in for it. The host copy never
+// runs device code: a shuffle or a reduction returns its argument, and the device unit has its own (COOP_DEF in
+// scripts/cuda-rewrite.rb), which carries the lane arithmetic.
+#define _COOPERATIVE_GROUPS_H_
+#define _COOPERATIVE_GROUPS_REDUCE_H
+namespace cooperative_groups {
+typedef unsigned int thread_block;
+inline thread_block this_thread_block(void) { return 0u; }
+inline void sync(thread_block) {}
+template <unsigned N> struct thread_block_tile {
+  unsigned size(void) const { return N; }
+  unsigned thread_rank(void) const { return 0u; }
+  void sync(void) const {}
+  template <typename T> T shfl(T v, unsigned) const { return v; }
+  template <typename T> T shfl_down(T v, unsigned) const { return v; }
+  template <typename T> T shfl_up(T v, unsigned) const { return v; }
+  template <typename T> T shfl_xor(T v, unsigned) const { return v; }
+};
+template <unsigned N> thread_block_tile<N> tiled_partition(const thread_block &) { return thread_block_tile<N>(); }
+template <typename T> struct plus { T operator()(T a, T b) const { return a + b; } };
+template <typename T> struct less { T operator()(T a, T b) const { return b < a ? b : a; } };
+template <typename T> struct greater { T operator()(T a, T b) const { return a < b ? b : a; } };
+template <unsigned N, typename T, typename Op> T reduce(const thread_block_tile<N> &, T val, Op) { return val; }
+}
+namespace cg = cooperative_groups;
+
 #endif  // NFCXX_CUDA_H

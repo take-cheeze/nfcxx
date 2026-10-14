@@ -1916,15 +1916,55 @@ BUILTIN_DEFS = {
   "__all_sync" => "extern \"C\" int __nfcxx_all_sync(unsigned, int);\nstatic inline int __all_sync(unsigned m, int p) { (void)m; return __nfcxx_all_sync(0xffffffffu, p); }\n",
 }
 
-# The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
-# group (cg::thread_block), cg::this_thread_block() and cg::sync(group). The group is a plain unsigned value here
-# (it carries nothing), so no struct is passed by value. Methods on the group and tiled partitions are not
-# provided: a unit that calls them still fails (simpleCooperativeGroups; tests/cuda/samples/README.md).
+# The cooperative-groups names that the device code uses: a thread block group (cg::thread_block), cg::this_thread_block()
+# and cg::sync(group); and warp tiles, cg::thread_block_tile<N> from cg::tiled_partition<N>(group) for N a power of two
+# up to 32, with size, thread_rank, sync, shfl, shfl_down, shfl_up and shfl_xor, and cg::reduce over a tile with
+# cg::plus, cg::less and cg::greater. The group is a plain unsigned value (it carries nothing); a tile carries nothing
+# either: its lanes come from threadIdx. A tile's shuffles are the full-warp index shuffle with the source lane computed
+# here, so no width is needed (the shuffle wrappers ignore the width). Grid groups and the other tile members are not
+# provided (see the refusals in the device pass).
 COOP_DEF = <<'COOP'
 namespace cooperative_groups {
 typedef unsigned int thread_block;
 thread_block this_thread_block(void) { return 0u; }
 void sync(thread_block) { __nfcxx_syncthreads(); }
+static inline int __nfcxx_tile_shfl(unsigned src, int v) { return __shfl_sync(0xffffffffu, v, (int)src); }
+static inline unsigned __nfcxx_tile_shfl(unsigned src, unsigned v) { return (unsigned)__shfl_sync(0xffffffffu, (int)v, (int)src); }
+static inline float __nfcxx_tile_shfl(unsigned src, float v) { return __shfl_sync(0xffffffffu, v, (int)src); }
+static inline double __nfcxx_tile_shfl(unsigned src, double v) {
+  union { double d; int i[2]; } a, b;
+  a.d = v;
+  b.i[0] = __shfl_sync(0xffffffffu, a.i[0], (int)src);
+  b.i[1] = __shfl_sync(0xffffffffu, a.i[1], (int)src);
+  return b.d;
+}
+template <unsigned N> struct thread_block_tile {
+  unsigned size(void) const { return N; }
+  unsigned thread_rank(void) const { return threadIdx.x & (N - 1); }
+  void sync(void) const { __nfcxx_syncwarp(0xffffffffu); }
+  template <typename T> T shfl(T v, unsigned src) const { return __nfcxx_tile_shfl(base() + (src & (N - 1)), v); }
+  // Every lane runs the shuffle (a shuffle under a branch is not executed by the whole warp); the result is selected after.
+  template <typename T> T shfl_down(T v, unsigned d) const {
+    unsigned r = thread_rank();
+    T s = __nfcxx_tile_shfl(base() + ((r + d) & 31u), v);
+    return r + d < N ? s : v;
+  }
+  template <typename T> T shfl_up(T v, unsigned d) const {
+    unsigned r = thread_rank();
+    T s = __nfcxx_tile_shfl(base() + ((r - d) & 31u), v);
+    return r >= d ? s : v;
+  }
+  template <typename T> T shfl_xor(T v, unsigned m) const { return __nfcxx_tile_shfl(base() + ((thread_rank() ^ m) & (N - 1)), v); }
+  unsigned base(void) const { return (threadIdx.x & 31u) & ~(N - 1); }
+};
+template <unsigned N> thread_block_tile<N> tiled_partition(const thread_block &) { return thread_block_tile<N>(); }
+template <typename T> struct plus { T operator()(T a, T b) const { return a + b; } };
+template <typename T> struct less { T operator()(T a, T b) const { return b < a ? b : a; } };
+template <typename T> struct greater { T operator()(T a, T b) const { return a < b ? b : a; } };
+template <unsigned N, typename T, typename Op> T reduce(const thread_block_tile<N> &g, T val, Op op) {
+  for (unsigned o = N / 2; o > 0; o >>= 1) val = op(val, g.shfl_xor(val, o));
+  return val;
+}
 }
 namespace cg = cooperative_groups;
 COOP
@@ -2862,13 +2902,15 @@ def device_tu(text)
   needed["__nfcxx_sincosf"] = true if needed["sinf"] || needed["cosf"]
   needed["__nfcxx_expm1f"] = true if needed["expm1f"] || needed["tanhf"]
   needed["__float_as_uint"] = true if needed["log2f"]
+  # The tiles of cooperative groups shuffle with the idx form (COOP_DEF uses __shfl_sync).
+  needed["__shfl_sync"] = true if needed["cg"] || needed["cooperative_groups"]
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
     out << text
   end
   if (needed["cg"] || needed["cooperative_groups"]) && pieces.none? { |pc| pc[:keep] && pc[:defined].include?("cooperative_groups") }
-    out << COOP_DEF
+    out << rewrite_builtins(COOP_DEF)
   end
   pieces.each do |pc|
     next unless pc[:keep]
