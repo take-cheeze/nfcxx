@@ -218,8 +218,21 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
   graphs, 150 random integer-tensor graphs (raw and after `symbolic()`), 150 random float32 tensor graphs (inputs include `-0.0`, `1e30`, inf and NaN), hand-written
   graphs for every dtype (int64 extremes, float64 casts, bool logic, int32 edges), 18 numpy-API graphs in one program, and the 100 expressions of `np_compat`.
   Each batch is one compiled program. About 32,000 comparisons.
-- **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes. Memory is one
-  `malloc` per materialized node, freed at the end (no buffer reuse). An output that is a reshape of a reduction is copied.
+- **Memory (one arena)**: the intermediates (not the outputs, which the caller owns) share one `malloc`. Each is live from the loop nest that writes it to the
+  last one that loads it, and `nfcuop_arena.hpp` places it: a port of onnxsim's greedy activation planner (`memory_planning.cpp`, Pass 2), with the same
+  liveness test (two buffers share bytes only when their ranges do not overlap, the ends included) and the same best-fit order (largest first, ties in the
+  order the kernels write them). Sizes are rounded to 16 bytes. Not ported: onnxsim's in-place aliasing, since a fused loop nest reads its inputs at other
+  indices than it writes. `CProgram` reports `arena_bytes`, `naive_bytes` (one buffer each) and `unplanned`. The chain in `test_cgen.cpp` (ten halving steps
+  on 32x128 float32, each with a reduction) needs 32,896 bytes of arena against 148,736 with one buffer each: the peak of the live set.
+- **Dimension ranging** (`RenderOptions`): the UOp graph has concrete shapes, so a symbol such as the batch size `N` of an `hir` graph is named per input
+  dimension (`input_symbols`) and given an upper bound (`symbol_bounds`). Symbols follow the operators by rules that keep one only where the dimension is
+  that symbol's size: elementwise ops, reductions (the reduced axis becomes 1), permute, flip, expand of an integer axis, a reshape that keeps the leading
+  symbolic axes, a shrink or pad that does not cut them. Any other dimension is unknown. An intermediate's maximum size takes the bound for each symbolic
+  dimension, and the arena is sized from these maxima. The renderer checks every intermediate against its slot, so a bound below an input's size is an
+  `Error`, and a symbol without a bound leaves its intermediates with a `malloc` of their own. The loops still have the concrete sizes: the bounds size the
+  arena; they do not let one compiled program run at other sizes, which needs symbolic loop bounds (step 2 of stage 7).
+- **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes in the loops. No
+  in-place reuse of an input by an output (see Memory). An output that is a reshape of a reduction is copied.
 - **nfcxx as the C compiler**: `NFCUOP_CC=./nfcxx` (it passes `-shared -o`, not the gcc flags). `tests/uop/run.sh` runs the `quick` part of `test_cgen` that way on both
   nfcxx back ends; that path (cproc with hexadecimal float literals, `INFINITY`, `static inline`) was not run where this was written, so CI is its first run.
 
