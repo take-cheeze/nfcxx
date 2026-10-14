@@ -10,8 +10,12 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   for f in tests/lib/*.cpp; do
     name=$(basename "$f" .cpp)
-    want=$(sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$f" | head -1)
+    want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
     xfail=$(sed -n "s,^// XFAIL-$be: *\(.*\),\1,p" "$f" | head -1)
+    x86only=$(sed -n "s,^// X86-ONLY-$be: *\(.*\),\1,p" "$f" | head -1)
+    if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
+      echo "skip  $be $name (x86-64 only: $x86only)"; continue
+    fi
     if ./nfcxx --freestanding --backend="$be" "$f" -o "$tmp/t" 2>"$tmp/err"; then
       "$tmp/t" >/dev/null 2>"$tmp/run.err"; got=$?
       if [ $((got & 255)) -eq $((want & 255)) ]; then st=ok; else st=FAIL; fi

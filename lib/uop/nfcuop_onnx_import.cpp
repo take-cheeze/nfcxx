@@ -407,10 +407,10 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
     }
     std::vector<int> ins;
     for (const std::string& s : n.in) ins.push_back(resolve(s, n.op));
-    // opset 13..17: ReduceMean/ReduceMax/ReduceMin take `axes` as an attribute (ReduceSum has the input since 13)
+    // opset 13..17: ReduceMean/ReduceMax/ReduceMin take `axes` as an attribute (ReduceSum has the input since 13, ReduceProd since 18)
     std::vector<Attribute> attrs;
     for (const Attribute& a : n.attrs) {
-      if ((n.op == "ReduceMean" || n.op == "ReduceMax" || n.op == "ReduceMin") && a.name == "axes" && a.kind == AttrKind::Ints) {
+      if ((n.op == "ReduceMean" || n.op == "ReduceMax" || n.op == "ReduceMin" || n.op == "ReduceProd") && a.name == "axes" && a.kind == AttrKind::Ints) {
         if (ins.size() > 1) throw Error("onnx import: " + n.op + " has axes as an attribute and as an input");
         std::vector<Scalar> v;
         for (int64_t x : a.ints) v.push_back(Scalar::from_int(DType::Int64, x));

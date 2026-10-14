@@ -39,7 +39,7 @@ runs:
         path: |
           build/edg
           build/edg-base
-        key: edg-${{ runner.os }}-${{ steps.key.outputs.edg }}
+        key: edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.edg }}
 
     - name: Build EDG front end
       if: steps.edg.outputs.cache-hit != 'true'
@@ -55,7 +55,7 @@ runs:
           build/qbe
           build/cproc
           build/pathb-ldrt
-        key: qbe-${{ runner.os }}-${{ steps.key.outputs.qbe }}
+        key: qbe-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.qbe }}
 
     - name: Build QBE and cproc
       if: inputs.qbe == 'true' && steps.qbe.outputs.cache-hit != 'true'

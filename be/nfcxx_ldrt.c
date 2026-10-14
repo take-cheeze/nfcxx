@@ -11,6 +11,8 @@
    float and double travel in xmm registers. None of this is visible to other code.
 
    Build: scripts/pathb-ldrt (gcc -O2 -c, archived as libnfcxxld.a, linked by every Path B link step). */
+/* Only x86-64 has the x87 layout these helpers implement; elsewhere the archive is built empty (scripts/pathb-ldrt). */
+#if defined(__x86_64__)
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -601,3 +603,4 @@ void __nfcxx_ubsan_report(int kind, const char *file, int line)
   fprintf(stderr, "%s:%d: runtime error: %s\n", file, line, msg[kind]);
   abort();
 }
+#endif /* defined(__x86_64__) */

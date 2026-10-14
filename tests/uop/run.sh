@@ -5,7 +5,8 @@
 #   - tests/uop/test_ut.cpp     shapes, movement ops (reshape, permute, expand, shrink, pad, flip), reductions, tensor rewrites
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
-#                               errors, slicing, concatenation, the graph, the ONNX export; it also writes models
+#                               errors, slicing, concatenation, pow/floor/ceil/isnan/isinf, cumsum/prod, argmax/argmin, tile/take (with an ONNX
+#                               round trip for each), the graph, the ONNX export; it also writes models
 #   - tests/uop/test_nn.cpp     the forward operators Gemm, Gather, Erf, Conv, MaxPool, AveragePool, BatchNormalization, InstanceNormalization,
 #                               LayerNormalization (nfcuop_hir.cpp, nfcuop_lower.cpp): shape inference and refusals, values against direct
 #                               references, export/import round trips, the C backend's bits, and models for onnx_check.py
@@ -23,8 +24,8 @@
 #                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.
 #                               On the nfcxx back ends it is run a second time with `nfcxx` itself as the C compiler (the `quick` set)
 #   - tests/uop/onnx_check.py   those models through onnx.checker and onnxruntime, against the UOp interpreter's results
-#   - tests/uop/np_compat.cpp/.py   100 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
-#                               with the 32-bit default dtypes (10 documented dtype differences) and once with float64/int64 (none)
+#   - tests/uop/np_compat.cpp/.py   121 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
+#                               with the 32-bit default dtypes (15 documented dtype differences) and once with float64/int64 (none)
 #   - tests/uop/run_poly.sh     the API from scripts (lib/uop/nfcuop_poly.cpp, docs/notes/uop-poly.md): one model in Ruby, Lua, Python,
 #                               JavaScript and Go, equal to the C++ API in values and in the bytes of the ONNX file; operators, errors,
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
@@ -33,6 +34,7 @@
 #   UOP_HOST=1              build with the host g++ (-fsanitize=address,undefined) and nothing else; for a machine
 #                           where nfcxx is not built
 cd "$(dirname "$0")/../.."
+. tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled programs are kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp)
 tests=(test test_ut test_np test_nn test_onnx test_sym test_shaping test_grad test_cgen np_compat)
@@ -45,8 +47,14 @@ run_all() {
   for t in "${tests[@]}"; do
     ldx=()   # nfcxx programs export type_info vtables that break the exceptions inside libnfconnxsim.so: export nothing (scripts/onnxsim/exe.map)
     [ -n "$CC_IS_NFCXX" ] && [ "$t" = test_grad ] && ldx=(-Wl,--version-script=scripts/onnxsim/exe.map)
-    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
+    cargs=(-I lib/uop tests/uop/$t.cpp "${lib[@]}" -ldl "${ldx[@]}")
+    cached=""; [ -n "$UOP_HOST" ] || cached=$(bin_cache_file "$t-$label" "NFCXX_BACKEND=${NFCXX_BACKEND:-}" "$@" "${cargs[@]}")
+    if [ -n "$cached" ] && [ -x "$cached" ]; then
+      cp -p "$cached" "$tmp/$label/$t"; echo "     $label uop/$t: compile skipped, program from $cached"
+    elif ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
+    else
+      [ -z "$cached" ] || bin_cache_store "$tmp/$label/$t" "$cached"
     fi
     case $t in
       test_np|test_grad|test_nn|test_sym) args=("$tmp/$label/onnx") ;;

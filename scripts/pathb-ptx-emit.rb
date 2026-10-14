@@ -254,6 +254,21 @@ def reg_class(t)
   raise Refused, "value of type #{t[0]} #{t[1]} bytes"
 end
 
+# The operand types of an inline PTX statement (ptx_asm): 2-, 4- and 8-byte integers (not bool), 4- and 8-byte floats,
+# and pointers.
+def asm_operand_ok(t)
+  return true if t[0] == "ptr"
+  return [2, 4, 8].include?(type_size(t)) if t[0] == "int" && !t[3]
+  return [4, 8].include?(type_size(t)) if t[0] == "float"
+  false
+end
+
+# The register of an inline PTX operand: a 2-byte integer takes a 16-bit register (.b16, the PTX constraint "h"), any
+# other operand its reg_class.
+def asm_class(t)
+  t[0] == "int" && t[1] == 2 ? "h" : reg_class(t)
+end
+
 # The PTX type suffix for a value or a memory access of an IR type: s32, u32, s64, u64 (a pointer is u64), f32, f64.
 def ptx_type(t)
   return "u64" if t[0] == "ptr"
@@ -378,6 +393,18 @@ FLOAT_BUILTINS = {
   "__nfcxx_saturatef" => ["cvt.sat.f32.f32", 1],
   "__nfcxx_expf" => [:exp, 1],
   "__nfcxx_logf" => [:log, 1],
+  "__nfcxx_floorf" => ["cvt.rmi.f32.f32", 1],   # round toward -inf: floorf (exact, NaN and inf pass through)
+  "__nfcxx_truncf" => ["cvt.rzi.f32.f32", 1],   # round toward zero: trunc (exact)
+}
+# Float to 32-bit integer: name => PTX instruction. cvt.rni rounds to nearest even and saturates (NaN gives 0), as CUDA's
+# __float2int_rn.
+FLOAT_TO_INT_BUILTINS = {
+  "__nfcxx_rni_s32" => "cvt.rni.s32.f32",
+}
+# Half-precision fused multiply-add of 16-bit values (the device prelude's unsigned short): one fma.rn.f16 on .b16
+# registers, rounded once from the exact product and sum, as CUDA's __hfma (not a float result rounded to half again).
+HALF_BUILTINS = {
+  "__nfcxx_hfma_rn" => ["fma.rn.f16", 3],
 }
 # name => [PTX atom op, PTX type]: the pointer is a generic address (global or shared), the result is the old value
 ATOMICS = {
@@ -432,7 +459,7 @@ class Fn
     @ncall = 0
     @name = form[1].to_s
     @regs = {}              # IR register "%N" => [PTX register, IR type]
-    @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0 }
+    @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0, "h" => 0 }
     @loops = []             # [continue label, break label] of the enclosing loops, innermost last
     @slots = {}             # slot name => byte offset in the frame
     @frame = 0
@@ -493,9 +520,17 @@ class Fn
       elsif h == "params"
         f.drop(1).each_with_index do |p, k|
           raise Refused, "variadic function" if head_of(p) == "ellipsis"
+          if head_of(p) == "sret"
+            # the hidden result parameter of a function returning a struct: the address of the result object
+            raise Refused, "sret form #{form_text(p)}" unless p.length == 3
+            raise BadIR, "sret register must be %#{k}" unless p[1] == "%#{k}"
+            @params << ["ptr", nil]
+            next
+          end
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param" && p.length == 4
           raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
-          ty = parse_type(p[3])
+          # a byval parameter: the address of the caller's copy (the value is read through it)
+          ty = head_of(p[3]) == "byval" ? ["ptr", nil] : parse_type(p[3])
           raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
@@ -590,6 +625,62 @@ class Fn
 
   def expect(dty, ty)
     raise BadIR, "value of type #{ty[0]} (#{type_size(ty)} bytes) stored in a #{dty[0]} (#{type_size(dty)} bytes)" unless reg_class(dty) == reg_class(ty)
+  end
+
+  # (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...): an inline PTX statement (the mma.sync forms of llama.cpp's mma.cuh,
+  # and CUB's ld and st forms).
+  # KIND out or inout: ARG is the address of the output (inout is loaded first); in: ARG is the value. Each operand
+  # gets a register of its type's class; the template's %N is operand N in order (outputs first, as gcc numbers
+  # them). Outputs are stored back after the instruction. Operands are 2-, 4- or 8-byte integers, 4- or 8-byte floats,
+  # or pointers (see asm_operand_ok).
+  def ptx_asm(s)
+    tmpl = s[1].to_s
+    regs = []
+    stores = []
+    s.drop(2).each do |o|
+      raise BadIR, "asm operand #{form_text(o)}" unless head_of(o) == "opnd"
+      kind = o[1].to_s
+      arg = o[2]
+      ty = parse_type(o[3])
+      raise Refused, "asm operand of type #{ty[0]} #{type_size(ty)} bytes (2-, 4- and 8-byte integers, 4- and 8-byte floats, pointers)" unless asm_operand_ok(ty)
+      if kind == "in"
+        v, _ = operand(arg)
+        r = fresh(asm_class(ty))
+        if asm_class(ty) == "h"
+          emit("cvt.#{mem_type(ty)}.#{ptx_type(ty)} #{r}, #{v};")
+        else
+          emit("mov.#{ptx_type(ty)} #{r}, #{v};")
+        end
+        regs << r
+      else
+        addr, _ = operand(arg)
+        r = fresh(asm_class(ty))
+        emit("ld.#{mem_type(ty)} #{r}, [#{addr}];") if kind == "inout"
+        regs << r
+        stores << [addr, r, ty]
+      end
+    end
+    text = ""
+    i = 0
+    while i < tmpl.length
+      c = tmpl[i]
+      if c == "%" && i + 1 < tmpl.length && tmpl[i + 1] >= "0" && tmpl[i + 1] <= "9"
+        j = i + 1
+        j += 1 while j < tmpl.length && tmpl[j] >= "0" && tmpl[j] <= "9"
+        n = tmpl[(i + 1)...j].to_i
+        raise BadIR, "asm operand %#{n} of #{regs.length}" if n >= regs.length
+        text << regs[n]
+        i = j
+      else
+        text << c
+        i += 1
+      end
+    end
+    text.split("\n").each do |line|
+      line = line.strip
+      emit(line) unless line.empty?
+    end
+    stores.each { |addr, r, ty| emit("st.#{mem_type(ty)} [#{addr}], #{r};") }
   end
 
   # ---- expressions: store the value of x in register dest, of IR type dty
@@ -753,6 +844,10 @@ class Fn
         scalar_u32(name, x, dest, ty)
       elsif FLOAT_BUILTINS.key?(name)
         float_builtin(name, x, dest, ty)
+      elsif FLOAT_TO_INT_BUILTINS.key?(name)
+        float_to_int_builtin(name, x, dest, ty)
+      elsif HALF_BUILTINS.key?(name)
+        half_builtin(name, x, dest, ty)
       else
         call_site(x, dest, ty)
       end
@@ -946,6 +1041,20 @@ class Fn
       expect(r[1], ty)
       # a bool register is a predicate: its value is copied as a predicate (operand gives one for a bool)
       emit(reg_class(r[1]) == "p" ? "mov.pred #{r[0]}, #{text};" : "mov.#{ptx_type(r[1])} #{r[0]}, #{text};")
+    when "copy"
+      # (copy BYTES DST SRC): the bytes of an aggregate, moved through generic addresses
+      n = as_int(s[1])
+      dv, dty = operand(s[2])
+      sv, sty = operand(s[3])
+      dr = reg_of(dv, dty)
+      sr = reg_of(sv, sty)
+      # Byte moves: the IR's copy does not give the alignment of the objects, and a wider access of a struct with
+      # alignment 2 (a half2) is a misaligned address on the device. (Slower than the aligned widths would be.)
+      (0...n).each do |off|
+        t = fresh("r")
+        emit("ld.u8 #{t}, [#{sr}+#{off}];")
+        emit("st.u8 [#{dr}+#{off}], #{t};")
+      end
     when "store"
       ty = parse_type(s[1])
       addr, aty = operand(s[2])
@@ -1057,6 +1166,8 @@ class Fn
     when "trap", "unreachable"
       # (trap) and (unreachable): an illegal instruction on the GPU; the IR spec says unreachable traps
       emit("trap;")
+    when "ptx-asm"
+      ptx_asm(s)
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. One unsigned compare does both ends of a signed index.
       v, vty = operand(s[1])
@@ -1124,6 +1235,37 @@ class Fn
       reg_of(v, vty)
     end
     emit("#{op} #{dest}, #{regs.join(', ')};")
+  end
+
+  # A float-to-int intrinsic of FLOAT_TO_INT_BUILTINS: a 32-bit float operand, a 32-bit signed integer result.
+  def float_to_int_builtin(name, x, dest, ty)
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes 1 argument(s)" unless args.length == 1
+    raise Refused, "#{name} returns #{ty[0]}, not a 32-bit signed integer" unless ty[0] == "int" && ty[2] && type_size(ty) == 4
+    v, vty = operand(args[0])
+    raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "float" && vty[1] == 4
+    emit("#{FLOAT_TO_INT_BUILTINS[name]} #{dest}, #{reg_of(v, vty)};")
+  end
+
+  # A 16-bit fused multiply-add of HALF_BUILTINS: the three unsigned-short operands (32-bit registers holding the 16-bit
+  # values) move to .b16 registers, one fma.rn.f16 gives the 16-bit result, and it is zero-extended back.
+  def half_builtin(name, x, dest, ty)
+    op, arity = HALF_BUILTINS[name]
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes #{arity} argument(s)" unless args.length == arity
+    raise Refused, "#{name} returns #{ty[0]}, not a 16-bit unsigned integer" unless ty[0] == "int" && !ty[2] && type_size(ty) == 2
+    regs = args.map do |a|
+      v, vty = operand(a)
+      raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "int" && vty[1] == 2
+      t = fresh("h")
+      emit("cvt.u16.u32 #{t}, #{reg_of(v, vty)};")
+      t
+    end
+    r = fresh("h")
+    emit("#{op} #{r}, #{regs.join(', ')};")
+    emit("cvt.u32.u16 #{dest}, #{r};")
   end
 
   # A float intrinsic of FLOAT_BUILTINS: operands and result are 32-bit floats. exp and log are two instructions:
@@ -1344,6 +1486,8 @@ class Fn
     emit("{")
     regs = []
     args.each_with_index do |a, k|
+      # (byval (struct ...) OBJ) and (sret (struct ...) OBJ): the object's address is the argument
+      a = a[2] if head_of(a) == "byval" || head_of(a) == "sret"
       v, aty = operand(a)
       expect(callee.params[k], aty)
       regs << reg_of(v, aty)
@@ -1396,6 +1540,7 @@ class Fn
     out << "  .reg .b32 %r<#{@count['r']}>;" if @count["r"] > 0
     out << "  .reg .b64 %rd<#{@count['rd']}>;" if @count["rd"] > 0
     out << "  .reg .f32 %f<#{@count['f']}>;" if @count["f"] > 0
+    out << "  .reg .b16 %h<#{@count['h']}>;" if @count["h"] > 0
     out << "  .reg .f64 %fd<#{@count['fd']}>;" if @count["fd"] > 0
     out << "  .local .align 8 .b8 __local_depot#{@index}[#{@frame}];" if @frame > 0
     @prologue.each { |s| out << "  #{s}" }
@@ -1436,6 +1581,10 @@ def emit_module(src, sm, kernels = [])
       raise Refused, "data #{name} (only string constants are lowered)" unless head_of(payload) == "string" && payload.length == 2
       raise Refused, "data #{name} is defined twice" if strings.key?(name)
       strings[name] = payload[1].to_s.bytes
+    elsif h == "abi-type"
+      # the ABI class of a struct (for the host calling convention): the device code passes such values by address
+      # (byval and sret, below), so the record needs no code
+      next
     elsif h == "global"
       # A file-scope static array of the device unit is block-shared memory (CUDA's __shared__): its name and
       # size come from the IR, and it must be zero-initialized. Any other global is refused.

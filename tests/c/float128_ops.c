@@ -1,3 +1,4 @@
+// X86-ONLY: __float128 is not a GCC type on aarch64, and the qbe helpers (be/nfcxx_ldrt.c) are x86-64 only
 /* EXPECT: 0
    __float128 (IEEE binary128) through cproc's runtime helpers: typedef, Q literals, arithmetic, comparisons, conversions to and
    from integers, float, double and long double, ++ and --, conditions, initializers and compound assignment. Only exactly

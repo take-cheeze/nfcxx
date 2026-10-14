@@ -12,6 +12,7 @@
 # The model that test writes (model.onnx and model.json, built by the first language) is checked by tests/uop/onnx_check.py when numpy, onnx and
 # onnxruntime are installed (SKIP otherwise).
 cd "$(dirname "$0")/../.."
+. tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled program is kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 langs=${POLY_LANGS:-"ruby lua python js go"}
 lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp
@@ -76,8 +77,14 @@ run_with() {
   [ ${#built[@]} -gt 0 ] || { echo "SKIP $label uop/poly: no language available"; return; }
   mkdir -p "$tmp/$label/onnx"
   if [ "$be" = host ]; then cc=(g++ -std=c++17 -O1 -Wall -Wextra); extra=(-ldl -lpthread -lm); else cc=(./nfcxx -O2); extra=(-ldl); fi
-  if ! out=$(NFCXX_BACKEND=$be "${cc[@]}" "${defs[@]}" "${incs[@]}" tests/uop/test_poly.cpp "${lib[@]}" "${srcs[@]}" "${libs[@]}" "${extra[@]}" -o "$tmp/$label/test_poly" 2>&1); then
+  args=("${defs[@]}" "${incs[@]}" tests/uop/test_poly.cpp "${lib[@]}" "${srcs[@]}" "${libs[@]}" "${extra[@]}")
+  cached=""; [ "$be" = host ] || cached=$(bin_cache_file "test_poly-$label" "NFCXX_BACKEND=$be" "${cc[@]}" "${args[@]}")
+  if [ -n "$cached" ] && [ -x "$cached" ]; then
+    cp -p "$cached" "$tmp/$label/test_poly"; echo "     $label uop/test_poly: compile skipped, program from $cached"
+  elif ! out=$(NFCXX_BACKEND=$be "${cc[@]}" "${args[@]}" -o "$tmp/$label/test_poly" 2>&1); then
     echo "FAIL $label uop/test_poly (build)"; grep -v 'prelinker' <<<"$out" | head -40; fail=1; return
+  else
+    [ -z "$cached" ] || bin_cache_store "$tmp/$label/test_poly" "$cached"
   fi
   [ -z "${UOP_POLY_OUT:-}" ] || { mkdir -p "$UOP_POLY_OUT" && cp "$tmp/$label/test_poly" "$UOP_POLY_OUT/test_poly-$label"; }
   if res=$("$tmp/$label/test_poly" "$tmp/$label/onnx" 2>&1); then

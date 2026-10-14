@@ -278,3 +278,4 @@ int main()
   std::printf("bad=%d\n", bad);
   return bad;
 }
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

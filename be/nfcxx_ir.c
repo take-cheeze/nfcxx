@@ -5116,8 +5116,69 @@ static int ir_asm_scalar(a_type_ptr t)
 
 #define IR_ASM_OPS_MAX 10
 
+/* ---- PTX inline assembly. A template that starts with "mma.sync.aligned." (the tensor-core instructions of
+   llama.cpp's mma.cuh) or with "ld." or "st." (CUB's loads and stores) is not an x86 template: it is printed as
+   (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...), and the emitter (scripts/pathb-ptx-emit.rb, ptx_asm) lowers it to PTX.
+   KIND is out (a store-only output, ARG its address), inout ("+" constraint: ARG is its address, read first) or in
+   (ARG its value). Operands are 2-, 4- or 8-byte integers, 4- or 8-byte floats, or pointers, in gcc's order (outputs
+   first). Returns 1 when it printed the statement. */
+static int ir_asm_ptx(an_asm_entry_ptr ae, int d)
+{
+  static const char *const prefixes[] = { "mma.sync.aligned.", "ld.", "st." };
+  const char *tx;
+  size_t n, k, plen = 0;
+  int pi;
+  an_asm_operand_ptr op;
+  int nops = 0, bad = 0;
+  char buf[1536];
+  size_t m = 0;
+  if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string) return 0;
+  tx = ae->asm_string->variant.string.value;
+  n = (size_t)ae->asm_string->variant.string.length;
+  for (pi = 0; pi < (int)(sizeof prefixes / sizeof prefixes[0]); pi++) {
+    size_t l = strlen(prefixes[pi]);
+    if (n >= l && strncmp(tx, prefixes[pi], l) == 0) plen = l;
+  }
+  if (plen == 0) return 0;
+  while (n > 0 && tx[n - 1] == '\0') n--; /* the length counts the terminator */
+  for (k = 0; k < n; k++) if (tx[k] == '"' || tx[k] == '\\' || (unsigned char)tx[k] < 32) bad = 1;
+  for (op = ae->operands; op != NULL && !bad; op = op->next, nops++) {
+    a_type_ptr ot = op->expression != NULL ? op->expression->type : NULL;
+    int sz = ot != NULL ? ir_size_of(ot) : 0;
+    if (nops >= IR_ASM_OPS_MAX || ot == NULL || !ir_asm_scalar(ot) || ir_is_bool(ot) ||
+        (sz != 2 && sz != 4 && sz != 8)) bad = 1;
+    if ((op->modifiers & aom_output) != 0 && !op->expression->is_lvalue) bad = 1;
+  }
+  if (bad) {
+    ir_line(d, "(unsupported stmt asm-operands)");
+    return 1;
+  }
+  /* Evaluate the operands first: their statements are printed before the (ptx-asm) form. */
+  buf[0] = '\0';
+  m = (size_t)snprintf(buf, sizeof buf, "(ptx-asm \"%s\"", tx);
+  for (op = ae->operands; op != NULL; op = op->next) {
+    if (op->modifiers == aom_modify || op->modifiers == aom_output) {
+      ir_val lv = ir_lval(op->expression);
+      const char *kind = op->modifiers == aom_modify ? "inout" : "out";
+      m += (size_t)snprintf(buf + m, sizeof buf - m, " (opnd %s %s %s)", kind, lv.s, ir_valtext(lv.t));
+    } else {
+      ir_val v = ir_rval(op->expression);
+      m += (size_t)snprintf(buf + m, sizeof buf - m, " (opnd in %s %s)", v.s, ir_valtext(v.t));
+    }
+    if (m >= sizeof buf - 64) {
+      ir_line(d, "(unsupported stmt asm-operands)");
+      return 1;
+    }
+  }
+  m += (size_t)snprintf(buf + m, sizeof buf - m, ")");
+  ir_note(1, stmk_asm, 1);
+  ir_line(d, buf);
+  return 1;
+}
+
 static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
 {
+  if (ir_asm_ptx(ae, d)) return;
   const char *why = NULL;
   int cls = IR_ASM_NONE, mem = 0, nout = 0, nin = 0, idx = 0, got_a = 0, got_d = 0;
   a_named_register_list_ptr cl;

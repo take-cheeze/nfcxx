@@ -27,7 +27,7 @@ else rake=(ruby -rrake -e 'Rake.application.run(ARGV)' --); fi
 "${rake[@]}" --version >/dev/null 2>&1 || { echo "setup-mruby: the rake gem is needed (apt-get install rake)" >&2; exit 1; }
 mkdir -p "$work"
 # One build at a time (parallel compiles can all find the interpreter missing); re-check once locked.
-exec 9>"$work/.lock"; flock 9
+exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && [ -x "$exe" ] && exit 0
 if [ ! -d "$src/.git" ]; then
   mkdir -p "$src" && git -C "$src" init -q &&

@@ -150,6 +150,38 @@ int main() {
     CHECK(consistent(S));
   }
 
+  std::printf("-- a self tail call is a loop: a deep tail recursion runs as native code in one entry, with no depth counted\n");
+  {
+    State S;
+    S.open_libs();
+    tier_on(S, TierOptions::Sync, 1, cache);
+    CHECK(eval(S, "local function loop(n, acc) if n == 0 then return acc end return loop(n - 1, acc + 1) end return loop(1000000, 0)") == "1000000");
+    CHECK(S.stats.tier_aborts == 0 && S.stats.tier_bailouts == 0 && S.stats.tier_compiled >= 1);
+    CHECK(eval(S, "local function swap(a, b, n) if n == 0 then return a * 10 + b end return swap(b, a, n - 1) end return swap(1, 2, 301)") == "21");
+    CHECK(S.stats.tier_aborts == 0 && S.stats.tier_bailouts == 0);
+    CHECK(eval(S, "local function f(n, acc) if n == 0 then return acc end return f(n - 1, acc // (n - 3)) end return f(10, 1)")
+              .compare(0, 4, "ERR:") == 0);                  // the division fails in the loop: abandoned, the interpreter's error
+    CHECK(S.stats.tier_aborts >= 1);
+    CHECK(consistent(S));
+    std::uint64_t aborts = S.stats.tier_aborts;
+    CHECK(eval(S, "local function g(n, x) if n == 0 then return x end return g(n - 1, x * 1.5) end return g(40, 1)") == eval_plain(
+              "local function g(n, x) if n == 0 then return x end return g(n - 1, x * 1.5) end return g(40, 1)"));
+    CHECK(S.stats.tier_aborts == aborts);
+    CHECK(consistent(S));
+  }
+  {
+    // (f(n)) is not a tail call (the interpreter counts its depth): both the interpreter and the tier say `stack overflow`
+    State P, S;
+    P.open_libs();
+    S.open_libs();
+    tier_on(S, TierOptions::Sync, 1, cache);
+    const char* deep_paren = "local function d(n) if n == 0 then return 0 end return (d(n - 1)) end return d(3000)";
+    same(P, S, deep_paren, "a parenthesized call is not a tail call");
+    CHECK(eval(S, deep_paren).compare(0, 4, "ERR:") == 0);
+    same(P, S, "local function d(n) if n == 0 then return 0 end return d(n - 1) end return d(3000)", "a tail call is not counted");
+    CHECK(consistent(S));
+  }
+
   std::printf("-- a float to an integer kernel\n");
   {
     State S;
@@ -243,6 +275,50 @@ int main() {
     CHECK(eval(S, "BASE = 0.5 return g(1)") == "1.5");      // ... but its type is part of what the code assumed
     CHECK(S.stats.tier_bailouts == bail + 1);
     CHECK(eval(S, "BASE = nil return pcall(g, 1)").compare(0, 5, "false") == 0);
+    CHECK(consistent(S));
+  }
+
+  std::printf("-- mutual tail calls between kernels are jumps: a deep chain runs as native code in one entry, with no depth counted\n");
+  {
+    State S, P;
+    S.open_libs();
+    P.open_libs();
+    tier_on(S, TierOptions::Sync, 1, cache);
+    const char* evenodd = "local is_even, is_odd\n"
+                          "function is_even(n) if n == 0 then return true end return is_odd(n - 1) end\n"
+                          "function is_odd(n) if n == 0 then return false end return is_even(n - 1) end\n";
+    CHECK(eval(S, std::string(evenodd) + "return is_even(1000000), is_odd(1000001), is_even(7)") == "true,true,false");
+    CHECK(S.stats.tier_aborts == 0 && S.stats.tier_bailouts == 0 && S.stats.tier_calls == 3);
+    CHECK(consistent(S));
+    // an accumulator that is a number of either kind (an integer until a float is added to it), passed along the chain
+    const char* acc = "local ka, kb\n"
+                      "function ka(n, acc) if n == 0 then return acc end if n % 2 == 0 then acc = acc + 0.5 end return kb(n - 1, acc) end\n"
+                      "function kb(n, acc) if n == 0 then return acc end return ka(n - 1, acc + 1) end\n";
+    std::uint64_t aborts = S.stats.tier_aborts, calls = S.stats.tier_calls;
+    CHECK(eval(S, std::string(acc) + "return ka(300000, 0), ka(300001, 0), ka(4, 0), ka(3, 1.0)") ==
+          eval_plain(std::string(acc) + "return ka(300000, 0), ka(300001, 0), ka(4, 0), ka(3, 1.0)"));
+    CHECK(S.stats.tier_aborts == aborts && S.stats.tier_calls > calls);
+    // float-only arguments all the way: the same chain, every step a jump
+    const char* fl = "local fa, fb\n"
+                     "function fa(n, x) if n == 0 then return x end return fb(n - 1, x * 1.0000001 + 0.25) end\n"
+                     "function fb(n, x) if n == 0 then return x end return fa(n - 1, x - 0.125) end\n";
+    CHECK(eval(S, std::string(fl) + "return fa(200000, 1.5)") == eval_plain(std::string(fl) + "return fa(200000, 1.5)"));
+    CHECK(S.stats.tier_aborts == aborts);
+    CHECK(consistent(S));
+    // a chain whose step raises an error: the interpreter's error, message and position, at the end of the chain
+    const char* bad = "local ha, hb\n"
+                      "function ha(n, z) if n == 0 then return n // z end return hb(n - 1, z) end\n"
+                      "function hb(n, z) if n == 0 then return n // z end return ha(n - 1, z) end\n";
+    same(P, S, std::string(bad) + "return ha(200001, 0)", "a mutual tail chain that divides by zero at its end");
+    same(P, S, std::string(bad) + "return ha(200000, 2)", "a mutual tail chain that ends without an error");
+    CHECK(S.stats.tier_aborts >= 1);
+    CHECK(consistent(S));
+    // a non-tail call inside the chain counts depth as it always did: the same answer, and the same `stack overflow`
+    const char* mixed = "local ca, cb\n"
+                        "function ca(n) if n == 0 then return 0 end return cb(n - 1) end\n"
+                        "function cb(n) if n == 0 then return 0 end return 1 + ca(n - 1) end\n";
+    same(P, S, std::string(mixed) + "return ca(1000)", "a chain with calls that count depth, within the limit");
+    same(P, S, std::string(mixed) + "return ca(3000)", "a chain with calls that count depth, past the limit");
     CHECK(consistent(S));
   }
 

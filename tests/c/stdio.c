@@ -1,3 +1,4 @@
+// MACOS-XFAIL-qbe: on macOS the SDK's stdio.h declares va_list as void*, which clashes with cproc's __builtin_va_list (stdarg.h); va_start needs the builtin type
 /* EXPECT: 11 */
 /* stdio, string.h, ctype.h, stdlib.h, errno.h and limits.h from the host headers. */
 #include <stdio.h>
