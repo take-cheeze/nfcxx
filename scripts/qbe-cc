@@ -6,6 +6,8 @@
 # don't exploit C undefined behavior, so signed overflow wraps and strict
 # aliasing isn't assumed.
 set -euo pipefail
+# ccache when it is installed (NFCXX_CCACHE=0 turns it off): the C compiles of the same preprocessed C repeat across runs.
+CCBIN=(cc); if [ "${NFCXX_CCACHE:-1}" != 0 ] && command -v ccache >/dev/null; then CCBIN=(ccache cc); fi
 root=$(cd "$(dirname "$0")/.." && pwd)
 cproc=${CPROC_QBE:-$root/build/cproc/cproc-qbe}
 qbe=${QBE:-$root/build/qbe/qbe}
@@ -37,10 +39,10 @@ if [ $compile = 0 ]; then
   asan=(); [ -z "${NFCXX_ASAN:-}" ] || asan=(-fsanitize=address)
   # macOS: libc++ instead of libstdc++, and no libatomic (the sized atomics come from clang's runtime).
   if [ "$(uname -s)" = Darwin ]; then libs=(-lc++ -lm); else libs=(-latomic -lstdc++ -lm); fi
-  exec cc "$@" ${asan[@]+${asan[@]+"${asan[@]}"}} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"}
+  exec ${CCBIN[@]+"${CCBIN[@]}"} "$@" ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"}
 fi
 if [ -z "$src" ]; then
-  exec cc "$@"
+  exec ${CCBIN[@]+"${CCBIN[@]}"} "$@"
 fi
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -55,8 +57,8 @@ if [ "$(uname -s)" = Darwin ]; then
   # struct of the same size stands in for it (only the layout of those ucontext members is affected).
   # __int128_t is a 64-bit integer here: libc++'s filesystem clock uses it for nanosecond counts that fit in 64 bits, and
   # cproc can compare and compute with a long long where it cannot with a struct.
-  printf '%s\n' 'typedef struct { unsigned long long __lo, __hi; } __nfcxx_uint128_t;' > "$tmp/darwin.h"
-  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= -D__uint128_t=__nfcxx_uint128_t -D__int128_t='long long' -include "$tmp/darwin.h")
+  # __int128_t and __uint128_t are clang builtins (no header typedef): name cproc's 128-bit integer types
+  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= '-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
 fi
 if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
@@ -64,10 +66,10 @@ if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # __SIZE_TYPE__, limits.h needs __INT_MAX__. So pre-define the host target's macros, but not the
   # GCC-identity ones (__GNUC__, __VERSION__, ...): without __GNUC__ the headers use no GNU extensions,
   # which cproc cannot parse. (EDG's generated C is already preprocessed and skips this.)
-  cc -dM -E -x c /dev/null | grep -Ev '^#define (__GNUC|__GNUG|__GXX|__VERSION__|__OPTIMIZE|__GCC_|__SSE|__MMX|__AVX|__FLT(16|32|64|128)|__SIZEOF_(INT128|FLOAT)|__STDC_|__STRICT_ANSI__|__pic__|__PIC__|__pie__|__PIE__|__CET__|__HAVE_SPECULATION|__BFLT16|__DEC|__BLOCKS__|__USER_LABEL_PREFIX__|__REGISTER_PREFIX__|__NO_INLINE__|__tune|__code_model|__k8|__znver|__amd64|__MMX|__SEG|__FXSR|__SSP|__GXX|__LDBL_|__SIZEOF_LONG_DOUBLE__)' > "$tmp/defs.h"
-  cc -E ${pflag[@]+${pflag[@]+"${pflag[@]}"}} -undef -D__CPROC__ ${darwin[@]+${darwin[@]+"${darwin[@]}"}} -include "$tmp/defs.h" ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
+  ${CCBIN[@]+"${CCBIN[@]}"} -dM -E -x c /dev/null | grep -Ev '^#define (__GNUC|__GNUG|__GXX|__VERSION__|__OPTIMIZE|__GCC_|__SSE|__MMX|__AVX|__FLT(16|32|64|128)|__SIZEOF_(INT128|FLOAT)|__STDC_|__STRICT_ANSI__|__pic__|__PIC__|__pie__|__PIE__|__CET__|__HAVE_SPECULATION|__BFLT16|__DEC|__BLOCKS__|__USER_LABEL_PREFIX__|__REGISTER_PREFIX__|__NO_INLINE__|__tune|__code_model|__k8|__znver|__amd64|__MMX|__SEG|__FXSR|__SSP|__GXX|__LDBL_|__SIZEOF_LONG_DOUBLE__)' > "$tmp/defs.h"
+  ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} -include "$tmp/defs.h" ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
 else
-  cc -E ${pflag[@]+${pflag[@]+"${pflag[@]}"}} -undef -D__CPROC__ ${darwin[@]+${darwin[@]+"${darwin[@]}"}} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
+  ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
 fi
 # macOS: calls to the exported libc++ functions that return a class go through the thunks of scripts/darwin-sret.sh.
 if [ "$(uname -s)" = Darwin ]; then
@@ -95,7 +97,9 @@ else
 fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
-"$cproc" < "$tmp/prep.c" > "$tmp/out.ssa"
+# macOS arm64: the aarch64-apple target (Apple's va_list, see scripts/cproc-apple-valist.patch); elsewhere the default.
+cprocarg=(); [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] && cprocarg=(-t aarch64-apple)
+"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 t=$(trace_start)
 "$qbe" "$tmp/out.ssa" > "$tmp/out.s"
@@ -110,6 +114,6 @@ t=$(trace_start)
 if [ $asm = 1 ]; then
   if [ "$out" = - ]; then cat "$tmp/out.s"; else cp "$tmp/out.s" "${out:-${src%.c}.s}"; fi
 else
-  cc -c "${asflags[@]+${asflags[@]+"${asflags[@]}"}}" -o "${out:-${src%.c}.o}" "$tmp/out.s"
+  ${CCBIN[@]+"${CCBIN[@]}"} -c "${asflags[@]+"${asflags[@]}"}" -o "${out:-${src%.c}.o}" "$tmp/out.s"
 fi
 trace_end "$t" "cc -c (assemble)" qbe-backend

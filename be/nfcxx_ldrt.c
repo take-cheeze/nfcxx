@@ -102,6 +102,72 @@ void __nfcxx_i128_bfset(unsigned char *base, unsigned long off, int width, const
 
 #endif /* defined(__SIZEOF_INT128__) */
 
+#if defined(__SIZEOF_INT128__)
+/* Conversions between the 128-bit integers and the floating types, and copies: on every host with a 128-bit integer
+   type (x86-64, arm64 Linux, Apple arm64, where long double is a double). A long double is its host's own: the x87
+   extended value in the low 10 bytes of a 16-byte object on x86-64, else the whole long double. */
+#include <math.h>
+#include <string.h>
+typedef long double ld;
+#if defined(__x86_64__)
+#define NFCXX_LD_BYTES 10
+#else
+#define NFCXX_LD_BYTES sizeof(ld)
+#endif
+
+/* conversions to floating types: the libgcc ones (__floattidf, __floatuntidf, __floattixf, __floatuntixf, ...) */
+float __nfcxx_i128_to_f32_s(const void *a) { return (float)(s128)i128_rd(a); }
+float __nfcxx_i128_to_f32_u(const void *a) { return (float)i128_rd(a); }
+double __nfcxx_i128_to_f64_s(const void *a) { return (double)(s128)i128_rd(a); }
+double __nfcxx_i128_to_f64_u(const void *a) { return (double)i128_rd(a); }
+void __nfcxx_i128_to_ld_s(void *d, const void *a)
+{
+  ld v = (ld)(s128)i128_rd(a);
+  memset(d, 0, 16);
+  memcpy(d, &v, NFCXX_LD_BYTES);
+}
+void __nfcxx_i128_to_ld_u(void *d, const void *a)
+{
+  ld v = (ld)i128_rd(a);
+  memset(d, 0, 16);
+  memcpy(d, &v, NFCXX_LD_BYTES);
+}
+
+/* conversions from floating types, truncating toward zero; a NaN or a value outside the type aborts. The bounds are
+   the powers of two 2^127 (signed) and 2^128 (unsigned), exact in long double. */
+static void i128_from_ld(void *d, ld x, int sgn)
+{
+  ld t = truncl(x);
+  ld lim = ldexpl(1.0L, sgn ? 127 : 128);
+  if (sgn) {
+    if (!(t >= -lim && t < lim)) abort();
+    i128_wr(d, (u128)(s128)t);
+  } else {
+    if (!(t >= 0 && t < lim)) abort();
+    i128_wr(d, (u128)t);
+  }
+}
+void __nfcxx_i128_from_f32_s(void *d, float x) { i128_from_ld(d, (ld)x, 1); }
+void __nfcxx_i128_from_f32_u(void *d, float x) { i128_from_ld(d, (ld)x, 0); }
+void __nfcxx_i128_from_f64_s(void *d, double x) { i128_from_ld(d, (ld)x, 1); }
+void __nfcxx_i128_from_f64_u(void *d, double x) { i128_from_ld(d, (ld)x, 0); }
+void __nfcxx_i128_from_ld_s(void *d, const void *a)
+{
+  ld x = 0;
+  memcpy(&x, a, NFCXX_LD_BYTES);
+  i128_from_ld(d, x, 1);
+}
+void __nfcxx_i128_from_ld_u(void *d, const void *a)
+{
+  ld x = 0;
+  memcpy(&x, a, NFCXX_LD_BYTES);
+  i128_from_ld(d, x, 0);
+}
+
+void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
+
+#endif /* defined(__SIZEOF_INT128__) */
+
 #if defined(__x86_64__)
 #include <math.h>
 #include <stdarg.h>
@@ -196,55 +262,6 @@ void __nfcxx_ld_vaarg(ld *d, va_list ap) { PUT(d, va_arg(ap, ld)); }
 int __nfcxx_ld_fpclassify(const ld *a) { return fpclassify(*a); }
 int __nfcxx_ld_isnormal(const ld *a) { return isnormal(*a); }
 int __nfcxx_ld_isunordered(const ld *a, const ld *b) { return isunordered(*a, *b); }
-
-/* conversions to floating types: the libgcc ones (__floattidf, __floatuntidf, __floattixf, __floatuntixf, ...) */
-float __nfcxx_i128_to_f32_s(const void *a) { return (float)(s128)i128_rd(a); }
-float __nfcxx_i128_to_f32_u(const void *a) { return (float)i128_rd(a); }
-double __nfcxx_i128_to_f64_s(const void *a) { return (double)(s128)i128_rd(a); }
-double __nfcxx_i128_to_f64_u(const void *a) { return (double)i128_rd(a); }
-void __nfcxx_i128_to_ld_s(void *d, const void *a)
-{
-  ld v = (ld)(s128)i128_rd(a);
-  memset(d, 0, 16);
-  memcpy(d, &v, 10);
-}
-void __nfcxx_i128_to_ld_u(void *d, const void *a)
-{
-  ld v = (ld)i128_rd(a);
-  memset(d, 0, 16);
-  memcpy(d, &v, 10);
-}
-
-/* conversions from floating types, truncating toward zero; a NaN or a value outside the type aborts. The bounds are
-   the powers of two 2^127 (signed) and 2^128 (unsigned), exact in long double. */
-static void i128_from_ld(void *d, ld x, int sgn)
-{
-  ld t = truncl(x);
-  ld lim = ldexpl(1.0L, sgn ? 127 : 128);
-  if (sgn) {
-    if (!(t >= -lim && t < lim)) abort();
-    i128_wr(d, (u128)(s128)t);
-  } else {
-    if (!(t >= 0 && t < lim)) abort();
-    i128_wr(d, (u128)t);
-  }
-}
-void __nfcxx_i128_from_f32_s(void *d, float x) { i128_from_ld(d, (ld)x, 1); }
-void __nfcxx_i128_from_f32_u(void *d, float x) { i128_from_ld(d, (ld)x, 0); }
-void __nfcxx_i128_from_f64_s(void *d, double x) { i128_from_ld(d, (ld)x, 1); }
-void __nfcxx_i128_from_f64_u(void *d, double x) { i128_from_ld(d, (ld)x, 0); }
-void __nfcxx_i128_from_ld_s(void *d, const void *a)
-{
-  ld x = 0;
-  memcpy(&x, a, 10);
-  i128_from_ld(d, x, 1);
-}
-void __nfcxx_i128_from_ld_u(void *d, const void *a)
-{
-  ld x = 0;
-  memcpy(&x, a, 10);
-  i128_from_ld(d, x, 0);
-}
 
 /* ---- _Float128 (docs/notes/pathb-float128.md) ----
 
@@ -375,7 +392,6 @@ void __nfcxx_i128_from_f128_u(void *d, const void *a)
 void __nfcxx_i128_to_f128_s(void *d, const void *a) { f128_wr(d, (f128)(s128)i128_rd(a)); }
 void __nfcxx_i128_to_f128_u(void *d, const void *a) { f128_wr(d, (f128)i128_rd(a)); }
 /* a change of signedness: the same 128 bits */
-void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 /* __builtin_fpclassify, isnormal, isnan, ... on an object (the IR's classification built-ins) */
 int __nfcxx_f128_fpclassify(const void *a)

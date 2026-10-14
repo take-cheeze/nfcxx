@@ -12,6 +12,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
+# ccache when it is installed: the QBE and cproc objects are rebuilt from the same sources in every fresh checkout.
+cc_wrap=cc; command -v ccache >/dev/null && cc_wrap="ccache cc"
 git -C "$root" submodule update --init 3rd/qbe 3rd/cproc
 
 for p in qbe cproc; do
@@ -26,24 +28,33 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 # QBE: scripts/qbe-empty-struct.patch (an empty struct with no alignment left 1 << -1 in parse.c: a garbage alloc size when it
 # is passed by value, e.g. libc++'s std::min comparator)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-struct.patch"
+# QBE: scripts/qbe-arm64-align16.patch (AAPCS64 16-byte aggregates: an even register, and the alignment limit is 16; __int128 and __float128 are 16-aligned)
+patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-arm64-align16.patch"
 # QBE: scripts/qbe-empty-align.patch (an empty member's alignment is 0, not -1: a nested empty class before a bool fed 1 << -1 padding into the struct size; docs/notes/qbe-empty-align.md)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-align.patch"
 # QBE: scripts/qbe-apple-addend.patch (arm64 Apple: an address with an offset is sym+off@page, not sym@page+off, which ld64
 # rejects as a relocation)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-apple-addend.patch"
-make -C "$root/build/qbe" -j"$jobs" >/dev/null
+make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
 # EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
 # cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
+# cproc: scripts/cproc-darwin-ldouble.patch (Apple arm64: long double is a double, as in clang's ABI; the patch is inert elsewhere)
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-darwin-ldouble.patch"
+# cproc: scripts/cproc-apple-valist.patch (the aarch64-apple target: a pointer va_list, and va_start and va_arg take its address;
+# QBE's Apple variadic convention, so stdarg.h and the SDK's stdio.h agree on va_list).
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-valist.patch"
+# cproc: scripts/cproc-atomic-builtins.patch (the __c11_atomic_* builtins and the __atomic_*_n forms: sized libatomic calls by pointee size)
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-atomic-builtins.patch"
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
 if [ "$(uname -s)" = Darwin ]; then
   case "$(uname -m)" in arm64) cproc_triple=aarch64-apple-darwin ;; x86_64) cproc_triple=x86_64-apple-darwin ;; esac
-  (cd "$root/build/cproc" && ./configure --host=$cproc_triple --target=$cproc_triple >/dev/null && make -j"$jobs" cproc-qbe >/dev/null)
+  (cd "$root/build/cproc" && ./configure --host=$cproc_triple --target=$cproc_triple >/dev/null && make -j"$jobs" CC="$cc_wrap" cproc-qbe >/dev/null)
 else
-  (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$jobs" cproc-qbe >/dev/null)
+  (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$jobs" CC="$cc_wrap" cproc-qbe >/dev/null)
 fi
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of

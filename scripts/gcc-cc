@@ -20,6 +20,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cc=${NFCXX_GCC:-cc}
+CCBIN=("$cc"); if [ "${NFCXX_CCACHE:-1}" != 0 ] && command -v ccache >/dev/null; then CCBIN=(ccache "$cc"); fi
 # 4. clang (macOS cc) drops a static function that only an asm alias names (__tls_init below); gcc keeps it, so the
 #    definition is marked used (harmless for gcc, which keeps it anyway).
 clang=0; if "$cc" --version 2>/dev/null | grep -qi clang; then clang=1; fi
@@ -71,8 +72,8 @@ if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
       *) build+=("$a") ;;
     esac
   done
-  "$cc" ${build[@]+"${build[@]}"}
+  ${CCBIN[@]+"${CCBIN[@]}"} ${build[@]+"${build[@]}"}
   "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" "$csrc" "$asmf"
   exec as -o "$obj" "$asmf"
 fi
-exec "$cc" ${args[@]+"${args[@]}"}
+exec ${CCBIN[@]+"${CCBIN[@]}"} ${args[@]+"${args[@]}"}

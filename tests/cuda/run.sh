@@ -47,6 +47,18 @@ for c in macro_wrapper local_targs launch_macro_body using_namespace define_head
     echo "device unit $c: FAIL"; fail=1
   fi
 done
+# The C++ rewriter (the default driver tool) on the two cases of the launch-argument and device-constant change: the
+# Ruby reference refuses them (its launch argument split has the same `->` bug, and it refuses __device__ constants).
+cxx="$root/build/cuda-rewrite"
+[ -x "$cxx" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
+for c in launch_arrow_args device_const_scalar host_cub_helper; do
+  if "$cxx" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
+     && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
+    echo "device unit $c: ok"
+  else
+    echo "device unit $c: FAIL"; fail=1
+  fi
+done
 
 # 1b3. The device pass takes only the branches of the conditionals it evaluates (#if/#elif/#else/#ifndef), so the
 # kernels of the untaken branches are not in the unit and not in the kernel list.

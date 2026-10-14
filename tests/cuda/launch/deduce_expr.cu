@@ -1,4 +1,4 @@
-// A template kernel whose last template argument is deduced from the call's arguments (softmax.cu of llama.cpp):
+// A template kernel whose last template argument is deduced from a pointer expression argument (p + 0 is a float *):
 // soft_max_f32<true, 3><<<...>>>(p) gives T = float, from the declaration of p.
 #include <cuda_runtime.h>
 #include <stdio.h>
