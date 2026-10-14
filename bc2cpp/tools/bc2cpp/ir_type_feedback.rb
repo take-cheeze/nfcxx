@@ -17,6 +17,69 @@ module IrTypeFeedback
 
   module_function
 
+  # Yield contracts are nominal; they never seed exact dispatch or enclosing returns.
+  def iterator_block_rows(ctx, definition, parent, index, analysis)
+    return [] if ENV['BC2CPP_IR_BLOCK_TYPES'] == '0'
+
+    insn = parent.instructions[index]
+    return [] unless insn.op == 'SENDB' && insn.plain_fixed_argc? && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
+
+    elements = analysis.element_fact_at(index, insn.reg)
+    return [] unless elements
+
+    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + 1).to_s, origin_transfers: true)
+    return [] unless definitions&.size == 1 && !definitions.first.entry?
+
+    producer = parent.instructions[definitions.first.index]
+    child = producer.op == 'BLOCK' && ctx.ireps[Array(parent.reps)[producer.block_index.to_i]]
+    count = insn.sym == 'each_with_index' ? 2 : 1
+    return [] unless child&.file && child.enter&.enter_fields == [count, 0, 0, 0, 0, 0, 0, 0]
+
+    bounds = { '1' => elements.classes }
+    bounds['2'] = Set[:Integer] if count == 2
+    contracts = (elements.contracts + ["iterator:#{insn.sym}"]).sort.freeze
+    file = ctx.root ? child.file.sub(%r{\A#{Regexp.escape(ctx.root.to_s)}/?}, '') : child.file
+    base = { 'owner' => definition.owner, 'method' => definition.name, 'file' => file, 'col' => 1,
+             'scope' => file.match?(%r{(\A|/)3rd/}) ? 'core' : 'engine', 'expected' => nil, 'compatibility' => nil }
+    rows = bounds.map do |reg, classes|
+      base.merge('kind' => 'block_argument', 'detail' => Array(child.lv)[reg.to_i - 1].to_s,
+                 'line' => child.enter.lineno, 'status' => 'declared',
+                 'type' => BytecodeIR::Types.type_name(classes), 'contracts' => contracts, 'reason' => nil)
+    end
+    block_analysis = BytecodeIR::Types.new(child, declared_args: bounds)
+    exits = []
+    child.instructions.each_with_index do |instruction, position|
+      kind = if RETURN_OPS.include?(instruction.op) then 'block_return'
+             elsif instruction.op == 'SETIV' then 'block_ivar_store'
+             elsif %w[SEND SEND0 SENDB].include?(instruction.op) then 'block_receiver'
+             end
+      next unless kind
+
+      refusal = {}
+      fact = if LITERAL_RETURNS.key?(instruction.op)
+               BytecodeIR::Types::Fact.new(classes: Set[LITERAL_RETURNS[instruction.op]], declared: false, contracts: [])
+             elsif %w[RETURN_BLK BREAK RETSELF].include?(instruction.op) || !Array(child.catch_handlers).empty?
+               refusal[:cause] = "unsupported:block-exit-or-handler"
+               nil
+             else
+               block_analysis.fact_at(position, kind == 'block_ivar_store' ? instruction.reg_operand : instruction.reg, refusal: refusal)
+             end
+      rows << base.merge('kind' => kind, 'detail' => kind == 'block_ivar_store' ? "@#{instruction.ivar}" : kind == 'block_receiver' ? instruction.sym.to_s : 'return',
+                         'line' => instruction.lineno, 'status' => !fact ? 'unknown' : fact.declared? ? 'declared' : 'inferred',
+                         'type' => fact && BytecodeIR::Types.type_name(fact.classes),
+                         'contracts' => fact&.declared? ? (fact.contracts + contracts).uniq.sort : [], 'reason' => refusal[:cause]&.to_s)
+      exits << fact if kind == 'block_return'
+    end
+    if !exits.empty? && exits.none?(&:nil?) && Array(child.catch_handlers).empty? &&
+       child.instructions.none? { |instruction| %w[RETURN_BLK BREAK].include?(instruction.op) }
+      values = %w[map collect].include?(insn.sym) ? exits.reduce(Set.new) { |set, fact| set | fact.classes } : elements.classes
+      rows << base.merge('kind' => 'iterator_result', 'detail' => insn.sym, 'line' => insn.lineno,
+                         'status' => 'declared', 'type' => "Array[#{BytecodeIR::Types.type_name(values)}]",
+                         'contracts' => (contracts + exits.flat_map(&:contracts)).uniq.sort, 'reason' => nil)
+    end
+    rows
+  end
+
   # A disjoint inferred may-set disproves a contract. An extra member alone may come from an infeasible path.
   def fits?(actual, expected, ctx)
     seen = Set.new
@@ -88,23 +151,7 @@ module IrTypeFeedback
                elsif insn.op == 'SETIV' then 'ivar_store'
                elsif %w[SEND SEND0 SENDB].include?(insn.op) then 'receiver'
                end
-        if insn.op == 'SENDB' && insn.plain_fixed_argc? && insn.argc.zero? && %w[each map collect].include?(insn.sym)
-          elements = analysis.element_fact_at(index, insn.reg)
-          block_register = (insn.reg.to_i + 1).to_s
-          block_definitions = elements && BytecodeIR.reaching_definitions(irep, index, block_register, origin_transfers: true)
-          if block_definitions&.size == 1 && !block_definitions.first.entry?
-            producer = irep.instructions[block_definitions.first.index]
-            child = producer.op == 'BLOCK' && ctx.ireps[Array(irep.reps)[producer.block_index.to_i]]
-            if child&.file && child.enter&.enter_fields == [1, 0, 0, 0, 0, 0, 0, 0]
-              file = ctx.root ? child.file.sub(%r{\A#{Regexp.escape(ctx.root.to_s)}/?}, '') : child.file
-              rows << { 'owner' => definition.owner, 'method' => definition.name, 'kind' => 'block_argument',
-                        'detail' => Array(child.lv).first.to_s, 'file' => file, 'line' => child.enter.lineno, 'col' => 1,
-                        'scope' => file.match?(%r{(\A|/)3rd/}) ? 'core' : 'engine', 'status' => 'declared',
-                        'type' => BytecodeIR::Types.type_name(elements.classes), 'expected' => nil, 'compatibility' => nil,
-                        'contracts' => (elements.contracts + ["iterator:#{insn.sym}"]).sort, 'reason' => nil }
-            end
-          end
-        end
+        rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis)) if insn.op == 'SENDB'
         next unless kind
 
         refusal = {}
