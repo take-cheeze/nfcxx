@@ -2985,6 +2985,280 @@ std::vector<UnitPiece> flatten_linkage(const std::string &text, const std::vecto
   return out;
 }
 
+// ---- embedded tables (defined with the device prelude below; see PORTING.md) ---------------------------------------
+extern const char *const DEVICE_PRELUDE;
+extern const char *const COOP_DEF;
+std::string device_decls();
+std::string rewrite_builtins(const std::string &t);
+std::string rewrite_is_same_v(const std::string &s);
+const std::vector<std::pair<std::string, std::string>> &vector_defs_table();   // Ruby VECTOR_DEFS (ordered)
+const std::vector<std::pair<std::string, std::string>> &builtin_defs_table();  // Ruby BUILTIN_DEFS (ordered)
+bool lookup_def(const std::vector<std::pair<std::string, std::string>> &tbl, const std::string &key, std::string &out);
+
+// A piece of the device unit (Ruby: the info hash of device_tu).
+struct DevPiece {
+  UnitPiece u;
+  std::string text;
+  std::string kind;  // "pp" or "code"
+  bool body = false;
+  std::vector<std::string> toks;
+  std::vector<std::string> defined;
+  bool keep = false, device = false, macro = false;
+};
+
+// Ruby device_tu (line 2642): the device translation unit of a unit: [text, kernel names].
+std::pair<std::string, std::vector<std::string>> device_tu(const std::string &text) {
+  std::vector<DevPiece> pieces;
+  for (const auto &u : flatten_linkage(text, [&]() {
+         std::vector<UnitPiece> raw;
+         for (const auto &pc : top_pieces(text))
+           raw.push_back(UnitPiece{pc.st, pc.en, pc.kind, pc.body, false, std::string(), std::string()});
+         return raw;
+       }())) {
+    DevPiece d;
+    d.u = u;
+    d.text = sl(text, u.st, u.en);
+    d.kind = u.kind;
+    d.body = u.body;
+    d.toks = tokens_of(d.text);
+    if (d.kind == "pp") {
+      // Ruby: t.sub("#", "").gsub("\n", " ").strip
+      std::string raw = d.text;
+      size_t hp = raw.find('#');
+      if (hp != std::string::npos) raw.erase(hp, 1);
+      for (char &c : raw)
+        if (c == '\n') c = ' ';
+      std::string rest = strip(raw);
+      std::string dw = first_word(rest);
+      if (dw == "define") {
+        std::string after = strip(rest.size() >= 6 ? rest.substr(6) : std::string());
+        std::string first = first_word(after);
+        long lp = str_index(first, "(", 0);
+        std::string name = lp >= 0 ? first.substr(0, (size_t)lp) : first;
+        d.defined = {name};
+        d.toks = tokens_of(sl(after, (long)name.size(), (long)after.size()));
+        d.macro = true;
+      } else if (dw == "undef") {
+        d.keep = true;
+      } else if (dw == "if" || dw == "ifdef" || dw == "ifndef" || dw == "elif" || dw == "else" || dw == "endif") {
+        d.keep = true;
+      }
+    } else {
+      bool g = std::find(d.toks.begin(), d.toks.end(), "__global__") != d.toks.end();
+      bool dv = std::find(d.toks.begin(), d.toks.end(), "__device__") != d.toks.end();
+      d.device = g || dv;
+    }
+    pieces.push_back(d);
+  }
+
+  std::vector<std::string> kernels;
+  std::vector<std::string> seeds;
+  // The template launches of the source: each instance is a wrapper kernel (see template_site).
+  for (const auto &tl : template_launches(text)) {
+    std::string dep;
+    if (!dependent_on_template(text, tl.pos, tl.targs, dep)) template_site(tl.name, tl.targs);
+  }
+  // the dependent launches: the wrapper of each instance of their enclosing template (see dependent_launches)
+  for (auto &kv : dependent_launches(text)) {
+    const DependentLaunch &dl = kv.second;
+    for (const auto &inst : dl.insts) {
+      std::vector<std::string> concrete;
+      for (const auto &a : split_top(dl.targs))
+        concrete.push_back(substitute(a, dl.outer.names, inst, dl.outer.has_pack, dl.outer.pack));
+      template_site(dl.name, join(concrete, ", "));
+    }
+  }
+  static const std::vector<std::string> dq(DEVICE_QUALIFIERS.begin(), DEVICE_QUALIFIERS.end());
+  for (auto &pc : pieces) {
+    if (pc.kind == "pp") continue;
+    if (!pc.device) continue;
+    if (str_index(pc.text, "__device__", 0) >= 0 && !pc.body && str_index(pc.text, "(", 0) < 0)
+      refuse("device variable: " + sl(strip(pc.text), 0, 60));
+    if (pc.body) {
+      bool has_g = std::find(pc.toks.begin(), pc.toks.end(), "__global__") != pc.toks.end();
+      if (has_g && (pc.toks.empty() || pc.toks.front() != "template")) {
+        std::string name = function_name(remove_words(pc.text, DEVICE_QUALIFIERS));
+        if (name.empty()) refuse("kernel without a name: " + sl(strip(pc.text), 0, 60));
+        kernels.push_back(name);
+      }
+      pc.keep = true;
+      // a kernel has external linkage (it is launched from the host): `static __global__ void k()` is not static in the
+      // device unit, or the front end drops it when no device code calls it
+      std::vector<std::string> words = dq;
+      if (has_g) words.push_back("static");
+      pc.text = remove_words(pc.text, words);
+      seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+    } else if (str_index(pc.text, "(", 0) >= 0) {
+      pc.keep = true;
+      pc.text = remove_words(pc.text, DEVICE_QUALIFIERS);
+      seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+    }
+  }
+
+  auto has_tok = [](const std::vector<std::string> &v, const std::string &x) {
+    return std::find(v.begin(), v.end(), x) != v.end();
+  };
+  // Host declarations: defined names, as far as a piece's text tells them.
+  for (auto &pc : pieces) {
+    if (pc.keep || pc.device) continue;
+    std::string t = blank_comments(pc.text);
+    const auto &toks = pc.toks;
+    if (pc.kind == "pp") continue;  // Ruby: both branches are `next`
+    if (toks.empty()) continue;
+    if (pc.body && str_index(t, "(", 0) >= 0 && !has_tok(toks, "struct") && !has_tok(toks, "class") &&
+        !has_tok(toks, "union") && !has_tok(toks, "enum"))
+      continue;
+    if (!pc.body && str_index(t, "(", 0) >= 0 && str_index(t, "=", 0) < 0 && toks.front() != "typedef") continue;
+    if (toks.front() == "typedef") {
+      // `typedef R (*name)(args)` names `name`, which follows the `(*`; otherwise the name is the last identifier.
+      long fp = str_index(t, "(*", 0);
+      pc.defined.clear();
+      if (fp >= 0) {
+        std::vector<std::string> tt = tokens_of(sl(t, fp + 2, (long)t.size()));
+        if (!tt.empty()) pc.defined.push_back(tt.front());
+      } else {
+        pc.defined.push_back(toks.back());
+      }
+    } else if (toks.front() == "using") {
+      pc.defined.clear();
+      if (toks.size() > 1) pc.defined.push_back(toks[1]);
+    } else {
+      std::string kw;
+      for (const auto &tk : toks)
+        if (tk == "struct" || tk == "class" || tk == "union" || tk == "enum") {
+          kw = tk;
+          break;
+        }
+      if (!kw.empty() && !function_head(t)) {
+        // The tag is the identifier written right after the keyword; an anonymous one names nothing.
+        // `enum class E` and `enum struct E` name E: the tag follows the scoped-enum keyword.
+        std::string tag = tag_after(t, kw);
+        if (kw == "enum" && (tag == "class" || tag == "struct")) tag = tag_after(t, tag);
+        pc.defined.clear();
+        if (!tag.empty()) pc.defined.push_back(tag);
+        if (kw == "enum")
+          for (const auto &en : enum_enumerators(t)) pc.defined.push_back(en);
+      } else if (pc.body) {
+        continue;
+      } else if ((has_tok(toks, "const") || has_tok(toks, "constexpr")) && device_constant_decl(t)) {
+        // a constant: device code may read it; other host variables are not reachable from device code.
+        long eq = str_index(t, "=", 0), lb = str_index(t, "[", 0), sc = str_index(t, ";", 0);
+        long cut = (long)t.size();
+        if (eq >= 0) cut = eq;
+        else if (lb >= 0) cut = lb;
+        else if (sc >= 0) cut = sc;
+        std::vector<std::string> tt = tokens_of(sl(t, 0, cut));
+        pc.defined.clear();
+        if (!tt.empty()) pc.defined.push_back(tt.back());
+      }
+    }
+  }
+
+  // Fixed point: a host declaration is carried over when the unit refers to a name it defines.
+  // The wrappers (see template_site) name their template arguments and parameters: a macro or constant among them is
+  // a name the unit needs even when no kept kernel body mentions it (ggml-cuda's mmf: MMF_ROWS_PER_BLOCK_CDNA).
+  for (const auto &site : g_sites) {
+    for (const auto &x : tokens_of(site.targs)) seeds.push_back(x);
+    for (const auto &x : tokens_of(site.decl)) seeds.push_back(x);
+  }
+  std::map<std::string, bool> needed;
+  for (const auto &x : seeds) needed[x] = true;
+  for (const auto &x : tokens_of(DEVICE_PRELUDE)) needed[x] = true;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto &pc : pieces) {
+      if (pc.keep || pc.device) continue;
+      if (pc.defined.empty()) continue;
+      bool any = false;
+      for (const auto &dn : pc.defined)
+        if (needed.count(dn)) any = true;
+      if (!any) continue;
+      pc.keep = true;
+      changed = true;
+      for (const auto &x : pc.toks) needed[x] = true;
+    }
+  }
+  for (auto &pc : pieces) {
+    if (!(pc.kind == "pp" && pc.macro)) continue;
+    bool any = false;
+    for (const auto &dn : pc.defined)
+      if (needed.count(dn)) any = true;
+    if (any) pc.keep = true;
+  }
+  // A `using namespace n;` is kept when the unit keeps a piece of n (ggml-cuda's mmq-vec-dot.cuh uses tile that way).
+  for (auto &pc : pieces) {
+    if (pc.keep || pc.kind == "pp") continue;
+    if (pc.toks.size() < 2 || pc.toks[0] != "using" || pc.toks[1] != "namespace") continue;
+    if (pc.toks.size() < 3) continue;
+    const std::string ns = pc.toks[2];
+    bool kept = false;
+    for (const auto &k : pieces)
+      if (k.keep && k.kind != "pp" && k.u.has_wrap && namespace_opened(k.u.wo, ns)) kept = true;
+    if (kept) pc.keep = true;
+  }
+
+  std::string out = "// Device side of a .cu file, generated by scripts/cuda-rewrite.rb --device. Do not edit.\n";
+  out += DEVICE_PRELUDE;
+  out += device_decls();
+  out += "\n";
+  // A vector type the device code names, and the source does not define: its declaration (once per type).
+  std::map<std::string, bool> done;
+  // The float2 conversions below take or return float2: its declaration is needed whenever one of them is.
+  if (needed["__half22float2"] || needed["__float22half2_rn"]) needed["float2"] = true;
+  for (const auto &kv : vector_defs_table()) {
+    const std::string &name = kv.first;
+    if (!needed[name]) continue;
+    bool defined_here = false;
+    for (const auto &pc : pieces)
+      if (pc.keep && has_tok(pc.defined, name)) defined_here = true;
+    if (defined_here) continue;
+    std::string base = name.compare(0, 5, "make_") == 0 ? name.substr(5) : name;
+    if (done[base]) continue;
+    done[base] = true;
+    std::string text_base;
+    lookup_def(vector_defs_table(), base, text_base);
+    out += text_base + "\n";
+  }
+  if (needed["half2"] || needed["__half2"]) {
+    needed["__nfcxx_half2_ops"] = true;
+    for (const char *n : {"__hadd2", "__hsub2", "__hmul2", "__hdiv2"}) needed[n] = true;
+  }
+  if (needed["is_same_v"]) needed["is_same"] = true;  // std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
+  // Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
+  if (needed["sinf"] || needed["cosf"]) needed["__nfcxx_sincosf"] = true;
+  if (needed["expm1f"] || needed["tanhf"]) needed["__nfcxx_expm1f"] = true;
+  for (const auto &kv : builtin_defs_table()) {
+    if (!needed[kv.first]) continue;
+    bool defined_here = false;
+    for (const auto &pc : pieces)
+      if (pc.keep && has_tok(pc.defined, kv.first)) defined_here = true;
+    if (defined_here) continue;
+    out += kv.second;
+  }
+  bool coop_defined = false;
+  for (const auto &pc : pieces)
+    if (pc.keep && has_tok(pc.defined, "cooperative_groups")) coop_defined = true;
+  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += COOP_DEF;
+  for (const auto &pc : pieces) {
+    if (!pc.keep) continue;
+    std::string code = rewrite_is_same_v(rewrite_builtins(pc.text));
+    if (pc.u.has_wrap && pc.kind != "pp") out += pc.u.wo + code + pc.u.wc;
+    else out += code;
+    out += "\n";
+  }
+  for (const auto &site : g_sites) {
+    out += "extern \"C\" void " + site.wrapper + "(" + site.decl + ") { " + site.name + "<" + site.targs + ">(" +
+           join(site.call, ", ") + "); }\n";
+    kernels.push_back(site.wrapper);
+  }
+  // Ruby kernels.uniq (first occurrences kept)
+  std::vector<std::string> uniq;
+  for (const auto &k : kernels)
+    if (std::find(uniq.begin(), uniq.end(), k) == uniq.end()) uniq.push_back(k);
+  return {out, uniq};
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
