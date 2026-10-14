@@ -75,7 +75,7 @@ module IrYieldTypes
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = parent.instructions[definitions.first.index]
-    producer.op == 'BLOCK' && ireps[Array(parent.reps)[producer.block_index.to_i]]
+    producer.op == 'BLOCK' ? ireps[Array(parent.reps)[producer.block_index.to_i]] : nil
   end
 
   def protocol_body?(body, argc)

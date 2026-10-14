@@ -51,7 +51,7 @@ module IrTypeFeedback
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = parent.instructions[definitions.first.index]
-    child = producer.op == 'BLOCK' && ctx.ireps[Array(parent.reps)[producer.block_index.to_i]]
+    child = ctx.ireps[Array(parent.reps)[producer.block_index.to_i]] if producer.op == 'BLOCK'
     fields = child&.enter&.enter_fields
     return [] unless child&.file && fields && fields.drop(1).all?(&:zero?) && fields.first.between?(0, 8)
 

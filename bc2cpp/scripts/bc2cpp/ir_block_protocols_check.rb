@@ -51,6 +51,8 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
       def numeric_caller; numeric_callback { 1 }; end
       def wrong_callback; yield; end
       def wrong_caller; wrong_callback { 1 }; end
+      def proc_argument(callback); once(1, &callback); end
+      def lambda_argument; callback = ->(item) { item }; once(1, &callback); end
     end
   RUBY
   File.write(File.join(dir, 'fixture.rbs'), <<~RBS)
@@ -91,6 +93,8 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
   check.call('an RBS callback contract alone cannot prove capture lifetime', row.call('opaque_capture', 'block_return')['status'] == 'unknown')
   check.call('Integer callback returns satisfy Numeric through the known hierarchy', row.call('numeric_caller', 'block_contract')['status'] == 'inferred')
   check.call('independent callback result contradictions produce TC1007', report['diagnostics'].any? { |diagnostic| diagnostic['code'] == 'TC1007' })
+  check.call('transported Proc and lambda arguments are refused without crashing',
+             report['ir_feedback'].none? { |item| %w[proc_argument lambda_argument].include?(item['method']) && item['kind'].start_with?('block_') })
 
   without = run.call('BC2CPP_IR_BLOCK_TYPES' => '0')
   check.call('the block opt-out withdraws all block and callback rows', without['ir_feedback'].none? { |item| item['kind'].start_with?('block_') || %w[callback_result iterator_result].include?(item['kind']) })
