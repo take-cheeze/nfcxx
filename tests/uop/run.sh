@@ -6,7 +6,8 @@
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
 #                               errors, slicing, concatenation, pow/floor/ceil/isnan/isinf, cumsum/prod, argmax/argmin, tile/take (with an ONNX
-#                               round trip for each), the graph, the ONNX export; it also writes models
+#                               round trip for each), the Array API functions (sort, searchsorted, einsum, tensordot, roll, tril, ... with values
+#                               worked out by hand), the graph, the ONNX export; it also writes models
 #   - tests/uop/test_nn.cpp     the forward operators Gemm, Gather, Erf, Conv, MaxPool, AveragePool, BatchNormalization, InstanceNormalization,
 #                               LayerNormalization (nfcuop_hir.cpp, nfcuop_lower.cpp): shape inference and refusals, values against direct
 #                               references, export/import round trips, the C backend's bits, and models for onnx_check.py
@@ -33,8 +34,8 @@
 #                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.
 #                               On the nfcxx back ends it is run a second time with `nfcxx` itself as the C compiler (the `quick` set)
 #   - tests/uop/onnx_check.py   those models through onnx.checker and onnxruntime, against the UOp interpreter's results
-#   - tests/uop/np_compat.cpp/.py   121 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
-#                               with the 32-bit default dtypes (15 documented dtype differences) and once with float64/int64 (none)
+#   - tests/uop/np_compat.cpp/.py   166 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
+#                               with the 32-bit default dtypes (22 documented dtype differences) and once with float64/int64 (none)
 #   - tests/uop/run_poly.sh     the API from scripts (lib/uop/nfcuop_poly.cpp, docs/notes/uop-poly.md): one model in Ruby, Lua, Python,
 #                               JavaScript and Go, equal to the C++ API in values and in the bytes of the ONNX file; operators, errors,
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
