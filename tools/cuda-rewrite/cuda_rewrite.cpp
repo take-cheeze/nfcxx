@@ -2950,6 +2950,54 @@ struct DevPiece {
   bool keep = false, device = false, macro = false;
 };
 
+// Ruby drop_host_members: a __host__ member definition (no __device__ or __global__) is removed with its body, keeping its
+// newlines. A __host__ that does not start a member (after ; { } : or the start of the text) is left alone.
+std::string drop_host_members(const std::string &t) {
+  std::string out;
+  long i = 0;
+  long n = (long)t.size();
+  const std::string w = "__host__";
+  while (i < n) {
+    long e = skip_literal(t, i);
+    if (e >= 0) {
+      out += sl(t, i, e);
+      i = e;
+      continue;
+    }
+    if (word_at(t, i, w)) {
+      // Ruby out.rstrip[-1]: the last non-whitespace character of out (nil if none)
+      int prev = -1;
+      for (long q = (long)out.size() - 1; q >= 0; q--) {
+        char c = out[(size_t)q];
+        if (!(c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' || c == '\0')) {
+          prev = (unsigned char)c;
+          break;
+        }
+      }
+      long open = str_index(t, "{", i);
+      long semi = str_index(t, ";", i);
+      bool has_header = open >= 0 && (semi < 0 || open < semi);
+      std::string header = has_header ? sl(t, i, open) : std::string();
+      long close = -1;
+      bool prev_ok = prev < 0 || std::string(";{}:").find((char)prev) != std::string::npos;
+      if (has_header && header.find('(') != std::string::npos && header.find("__device__") == std::string::npos &&
+          header.find("__global__") == std::string::npos && prev_ok)
+        close = matching_brace(t, open);
+      if (close >= 0) {
+        long nls = 0;
+        for (long q = i; q <= close; q++)
+          if (ch(t, q) == '\n') nls += 1;
+        out += std::string((size_t)nls, '\n');
+        i = close + 1;
+        continue;
+      }
+    }
+    out.push_back(t[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
 // Ruby device_tu (line 2642): the device translation unit of a unit: [text, kernel names].
 std::pair<std::string, std::vector<std::string>> device_tu(const std::string &text) {
   std::vector<DevPiece> pieces;
@@ -3026,6 +3074,15 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
         kernels.push_back(name);
       }
       pc.keep = true;
+      // a class of the device side keeps its device members only: its host-only members go, and so do their tokens
+      if (std::find(pc.toks.begin(), pc.toks.end(), "struct") != pc.toks.end() ||
+          std::find(pc.toks.begin(), pc.toks.end(), "class") != pc.toks.end()) {
+        std::string dropped = drop_host_members(pc.text);
+        if (dropped != pc.text) {
+          pc.text = dropped;
+          pc.toks = tokens_of(dropped);
+        }
+      }
       // a kernel has external linkage (it is launched from the host): `static __global__ void k()` is not static in the
       // device unit, or the front end drops it when no device code calls it
       std::vector<std::string> words = dq;
@@ -3172,6 +3229,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   // Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
   if (needed["sinf"] || needed["cosf"]) needed["__nfcxx_sincosf"] = true;
   if (needed["expm1f"] || needed["tanhf"]) needed["__nfcxx_expm1f"] = true;
+  if (needed["log2f"]) needed["__float_as_uint"] = true;
   for (const auto &kv : builtin_defs_table()) {
     if (!needed[kv.first]) continue;
     bool defined_here = false;
@@ -3326,31 +3384,6 @@ std::string dynamic_shared_rewrite(const std::string &s) {
   }
   if (names.empty()) return out;
   return replace_dynamic_uses(out, names);
-}
-
-// Ruby refuse_shared_align (line 2938).
-void refuse_shared_align(const std::string &s) {
-  long i = 0;
-  long n = (long)s.size();
-  while (i < n) {
-    long e = skip_literal(s, i);
-    if (e >= 0) {
-      i = e;
-      continue;
-    }
-    if (word_at(s, i, "__shared__")) {
-      long j = i + 10;
-      while (j < n && white_c(ch(s, j))) j += 1;
-      if (word_at(s, j, "__align__")) {
-        long line = 1;
-        for (long q = 0; q < i; q++)
-          if (s[(size_t)q] == '\n') line++;
-        refuse("__shared__ __align__ at line " + std::to_string(line) +
-               ": the device image does not carry shared-object alignment");
-      }
-    }
-    i += 1;
-  }
 }
 
 // Ruby refuse_unlowered_cccl (line 2961): CUB and grid-wide cooperative groups are refused by name.
@@ -4043,7 +4076,6 @@ int main(int argc, char **argv) {
   }
   if (device) text = blank_comments(text);
   text = dynamic_shared_rewrite(strip_launch_bounds(text));
-  if (device) refuse_shared_align(text);
   if (device) refuse_unlowered_cccl(text);
   std::map<std::string, bool> seen;
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);

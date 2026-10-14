@@ -3,6 +3,6 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 root := $(abspath ../..)
 
-$(root)/build/cuda-rewrite: cuda_rewrite.cpp
+$(root)/build/cuda-rewrite: cuda_rewrite.cpp tables.inc
 	@mkdir -p $(root)/build
 	$(CXX) $(CXXFLAGS) -o $@ $<
