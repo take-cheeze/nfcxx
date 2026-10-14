@@ -1969,7 +1969,7 @@ std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<lon
 // Ruby globals of the rewrite: $cond_strict, $edg_launches (the --edg-launches flag).
 bool g_cond_strict = false;
 bool g_edg_launches = false;
-std::string resolve_conditionals(const std::string &text, const std::map<std::string, std::string> &defs);
+std::string resolve_conditionals(const std::string &text, Defs &defs);
 
 // Ruby rewrite (line 1037): the launch rewrite of a host unit. The output keeps the line count of the input.
 std::string rewrite(const std::string &text, const std::string &orig) {
@@ -1985,7 +1985,8 @@ std::string rewrite(const std::string &text, const std::string &orig) {
     if (std::find(v.begin(), v.end(), line) == v.end()) v.push_back(line);
   };
   g_cond_strict = true;
-  std::string resolved = resolve_conditionals(text, {});
+  Defs no_defs;
+  std::string resolved = resolve_conditionals(text, no_defs);
   g_cond_strict = false;
   g_has_kernel_text = true;
   g_kernel_text = resolved;
@@ -2619,6 +2620,209 @@ long long cond_unary(CondState &st, const Defs &defs, long line, int depth) {
     return cond_eval(it->second.text, defs, line, depth + 1);
   }
   cond_fail("unsupported #if expression at line " + std::to_string(line));
+}
+
+// Ruby split("\n", -1): every line, including empty ones at the end.
+std::vector<std::string> split_lines_keep(const std::string &text) {
+  std::vector<std::string> out;
+  size_t start = 0;
+  while (true) {
+    size_t p = text.find('\n', start);
+    if (p == std::string::npos) {
+      out.push_back(text.substr(start));
+      break;
+    }
+    out.push_back(text.substr(start, p - start));
+    start = p + 1;
+  }
+  return out;
+}
+
+// Ruby lstrip (ASCII whitespace), rstrip.
+std::string lstrip_str(const std::string &s) {
+  size_t a = 0;
+  while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\v' || s[a] == '\f' || s[a] == '\r' || s[a] == '\0')) a += 1;
+  return s.substr(a);
+}
+
+// Ruby split(" ")[0].to_s: the first whitespace-separated word, "" when there is none.
+std::string first_word(const std::string &s) {
+  size_t a = 0;
+  while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\v' || s[a] == '\f' || s[a] == '\r')) a += 1;
+  size_t b = a;
+  while (b < s.size() && !(s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\v' || s[b] == '\f' || s[b] == '\r')) b += 1;
+  return s.substr(a, b - a);
+}
+
+// Ruby strip_comments_line (line 2365): a line without its comments.
+std::string strip_comments_line(const std::string &v) {
+  std::string out;
+  long i = 0;
+  long n = (long)v.size();
+  while (i < n) {
+    if (ch(v, i) == '/' && ch(v, i + 1) == '/') {
+      break;
+    } else if (ch(v, i) == '/' && ch(v, i + 1) == '*') {
+      long e = str_index(v, "*/", i + 2);
+      if (e < 0) break;
+      out += " ";
+      i = e + 2;
+    } else {
+      out.push_back(v[(size_t)i]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// Ruby resolve_conditionals (line 2384): the conditionals of a unit. A conditional that cannot be evaluated is kept
+// with its branches; the other conditional lines are blanked, so the line count does not change.
+std::string resolve_conditionals(const std::string &text, Defs &defs) {
+  std::vector<std::string> out;
+  struct Frame {
+    bool parent, taken, kept;
+  };
+  std::vector<Frame> stack;
+  bool active = true;
+  bool has_pending = false;
+  std::string pending;
+  long lineno = 0;
+  for (const std::string &raw : split_lines_keep(text)) {
+    lineno += 1;
+    std::string line = raw;
+    if (has_pending) {
+      // the joined line is one output line: a newline here would shift every later line (launches are keyed by line)
+      line = pending + " " + raw;
+      has_pending = false;
+    }
+    if (!line.empty() && line.back() == '\\') {
+      pending = line.substr(0, line.size() - 1);
+      has_pending = true;
+      out.push_back("");
+      continue;
+    }
+    std::string s = lstrip_str(line);
+    if (s.empty() || s[0] != '#') {
+      out.push_back(active ? line : "");
+      continue;
+    }
+    std::string d = lstrip_str(s.substr(1));
+    std::string name;
+    size_t k = 0;
+    while (k < d.size() && ident_c((unsigned char)d[k])) {
+      name += d[k];
+      k += 1;
+    }
+    std::string rest = strip(k <= d.size() ? d.substr(k) : std::string());
+    if (name == "if" || name == "ifdef" || name == "ifndef") {
+      bool parent = active;
+      try {
+        bool cond;
+        if (name == "if") {
+          cond = parent ? cond_eval(rest, defs, lineno, 0) != 0 : false;
+        } else {
+          std::string nm = first_word(rest);
+          cond = parent ? (defs.count(nm) > 0) == (name == "ifdef") : false;
+        }
+        stack.push_back(Frame{parent, cond, false});
+        active = parent && cond;
+        out.push_back("");
+      } catch (CondUnsupported &) {
+        stack.push_back(Frame{parent, true, true});
+        active = parent;
+        out.push_back(parent ? line : "");
+      }
+    } else if (name == "elif") {
+      if (stack.empty()) refuse("#elif without #if at line " + std::to_string(lineno));
+      Frame &fr = stack.back();
+      if (fr.kept) {
+        out.push_back(fr.parent ? line : "");
+      } else if (fr.taken) {
+        active = false;
+        out.push_back("");
+      } else {
+        try {
+          bool cond = fr.parent ? cond_eval(rest, defs, lineno, 0) != 0 : false;
+          fr.taken = cond;
+          active = fr.parent && cond;
+          out.push_back("");
+        } catch (CondUnsupported &) {
+          fr.kept = true;
+          fr.taken = true;
+          active = fr.parent;
+          out.push_back(fr.parent ? line : "");
+        }
+      }
+    } else if (name == "else") {
+      if (stack.empty()) refuse("#else without #if at line " + std::to_string(lineno));
+      Frame &fr = stack.back();
+      if (fr.kept) {
+        out.push_back(fr.parent ? line : "");
+      } else {
+        active = fr.parent && !fr.taken;
+        fr.taken = true;
+        out.push_back("");
+      }
+    } else if (name == "endif") {
+      if (stack.empty()) refuse("#endif without #if at line " + std::to_string(lineno));
+      Frame fr = stack.back();
+      stack.pop_back();
+      active = fr.parent;
+      out.push_back(fr.kept && fr.parent ? line : "");
+    } else if (name == "define") {
+      if (active) {
+        std::string mname;
+        size_t j = 0;
+        while (j < rest.size() && ident_c((unsigned char)rest[j])) {
+          mname += rest[j];
+          j += 1;
+        }
+        if (j < rest.size() && rest[j] == '(') {
+          Def df;
+          df.is_function = true;
+          defs[mname] = df;
+        } else {
+          // the value without its comment: `#define CUDART_HMAX 11070 // CUDA 11.7` is 11070
+          Def df;
+          df.text = strip(strip_comments_line(j <= rest.size() ? rest.substr(j) : std::string()));
+          defs[mname] = df;
+        }
+      }
+      out.push_back(active ? line : "");
+    } else if (name == "undef") {
+      if (active) defs.erase(first_word(rest));
+      out.push_back(active ? line : "");
+    } else {
+      out.push_back(active ? line : "");
+    }
+  }
+  if (!stack.empty()) refuse("#if without #endif");
+  std::string joined;
+  for (size_t x = 0; x < out.size(); x++) {
+    if (x) joined += "\n";
+    joined += out[x];
+  }
+  return joined;
+}
+
+// Ruby tag_after (line 2498): the identifier written right after the first whole-word occurrence of kw, or "" (nil).
+std::string tag_after(const std::string &t, const std::string &kw) {
+  long i = 0;
+  while (true) {
+    long j = str_index(t, kw, i);
+    if (j < 0) break;
+    long k = j + (long)kw.size();
+    bool whole = (j == 0 || !ident_c(ch(t, j - 1))) && (k >= (long)t.size() || !ident_c(ch(t, k)));
+    if (whole) {
+      while (k < (long)t.size() && white_c(ch(t, k))) k += 1;
+      if (!(k < (long)t.size() && ident_c(ch(t, k)) && !(ch(t, k) >= 48 && ch(t, k) <= 57))) return std::string();
+      long e = k;
+      while (e < (long)t.size() && ident_c(ch(t, e))) e += 1;
+      return sl(t, k, e);
+    }
+    i = k;
+  }
+  return std::string();
 }
 
 }  // namespace
