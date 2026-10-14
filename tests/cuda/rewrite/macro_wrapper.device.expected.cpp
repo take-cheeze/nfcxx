@@ -36,5 +36,5 @@ extern "C" unsigned __nfcxx_nctaid_z(void);
 #define ROWS_CDNA 64
 
 template <int R>
-static void rows(float *p) { p[__nfcxx_tid_x()] = (float)R; }
+void rows(float *p) { p[__nfcxx_tid_x()] = (float)R; }
 extern "C" void __nfcxx_k_rows_ROWS_CDNA(float *p) { rows<ROWS_CDNA>(p); }

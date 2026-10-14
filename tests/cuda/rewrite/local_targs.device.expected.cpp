@@ -35,5 +35,5 @@ extern "C" unsigned __nfcxx_nctaid_y(void);
 extern "C" unsigned __nfcxx_nctaid_z(void);
                                                                                                                           
 template <int W, int K>
-static void scale(float *p) { p[__nfcxx_tid_x()] = (float)(W * 10 + K); }
+void scale(float *p) { p[__nfcxx_tid_x()] = (float)(W * 10 + K); }
 extern "C" void __nfcxx_k_scale_4_3(float *p) { scale<4, 3>(p); }
