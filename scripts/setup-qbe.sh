@@ -39,6 +39,9 @@ make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
 # cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
+# cproc: scripts/cproc-apple-valist.patch (the aarch64-apple target: a pointer va_list, and va_start and va_arg take its address;
+# QBE's Apple variadic convention, so stdarg.h and the SDK's stdio.h agree on va_list).
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-valist.patch"
 # cproc: scripts/cproc-atomic-builtins.patch (the __c11_atomic_* builtins and the __atomic_*_n forms: sized libatomic calls by pointee size)
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-atomic-builtins.patch"
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
