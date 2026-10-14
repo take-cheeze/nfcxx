@@ -175,6 +175,85 @@ Dir.mktmpdir do |dir|
              RbsSignatures.ir_types(shared, body).fact_at(1, '1').nil?)
 end
 
+puts '== explicit receiver contracts and call-result chains'
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 'calls.rbs'), <<~RBS)
+    class CallRoot
+      def child: () -> CallLeaf
+      def next: () -> CallRoot
+    end
+    class CallLeaf
+      def finish: () -> Symbol
+    end
+    class CallOther
+      def child: () -> CallOtherLeaf
+    end
+    class CallOtherLeaf
+      def finish: () -> Integer
+    end
+    class CallUse
+      def chain: (CallRoot value) -> untyped
+      def union: (CallRoot | CallOther value) -> untyped
+      def missing: (CallRoot | String value) -> untyped
+      def cyclic: (CallRoot value) -> untyped
+      def deep: (CallRoot value) -> untyped
+    end
+  RBS
+  loaded = RbsSignatures.load([dir])
+  make_insn = ->(addr, op, args) { Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}") }
+  definitions = []
+  ireps = {}
+  loaded.methods.each_value do |sig|
+    label = "#{sig.owner}_#{sig.name}"
+    instructions = [make_insn.call(0, 'ENTER', "#{sig.args.size}:0:0:0:0:0:0:0 (0x0)")]
+    if sig.owner == 'CallUse'
+      instructions += [make_insn.call(4, 'MOVE', "R2\tR1"), make_insn.call(8, 'SEND0', "R2\t:child"),
+                       make_insn.call(12, 'SEND0', "R2\t:finish"), make_insn.call(16, 'RETURN', 'R2')]
+    else
+      instructions += [make_insn.call(4, 'LOADNIL', 'R1 (nil)'), make_insn.call(8, 'RETURN', 'R1')]
+    end
+    ireps[label] = Irep.new(label: label, nlocals: 3, instructions: instructions)
+    definitions << MethodDef.new(owner: sig.owner, name: sig.name, irep: label)
+  end
+  cyclic = ireps['CallUse_cyclic']
+  cyclic.instructions = [make_insn.call(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), make_insn.call(4, 'MOVE', "R2\tR1"),
+                         make_insn.call(8, 'JMPIF', "R3\t20"), make_insn.call(12, 'SEND0', "R2\t:next"),
+                         make_insn.call(16, 'JMP', '8'), make_insn.call(20, 'RETURN', 'R2')]
+  deep = ireps['CallUse_deep']
+  deep.instructions = [make_insn.call(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), make_insn.call(4, 'MOVE', "R2\tR1")]
+  30.times { |index| deep.instructions << make_insn.call(8 + index * 4, 'SEND0', "R2\t:next") }
+  deep.instructions << make_insn.call(128, 'RETURN', 'R2')
+  registry = definitions.group_by(&:name)
+  applied = RbsSignatures.apply(loaded, ireps, registry, {}, {}, {})
+  chain = RbsSignatures.ir_types(applied, ireps['CallUse_chain'])
+  fact = chain.fact_at(4, '2')
+  check.call('explicit receiver call chains retain every contract dependency', fact&.classes == Set[:Symbol] && fact.declared? &&
+             fact.contracts == ['argument:R1', 'call-result:CallLeaf#finish', 'call-result:CallRoot#child'])
+  check.call('contract call results do not enter the inference-only query', chain.at(4, '2').nil?)
+  blocked = Irep.new(label: 'CallUse_chain', nlocals: 3, instructions: [
+    make_insn.call(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), make_insn.call(4, 'MOVE', "R2\tR1"),
+    make_insn.call(8, 'SENDB', "R2\t:child\tn=0"), make_insn.call(12, 'RETURN', 'R2')
+  ])
+  check.call('a block call cannot borrow the normal RBS return contract',
+             RbsSignatures.ir_types(applied, blocked).fact_at(3, '2').nil?)
+  union = RbsSignatures.ir_types(applied, ireps['CallUse_union']).fact_at(4, '2')
+  check.call('every receiver union member contributes its return type', union&.classes == Set[:Symbol, :Integer])
+  missing_reason = {}
+  missing = RbsSignatures.ir_types(applied, ireps['CallUse_missing']).fact_at(4, '2', refusal: missing_reason)
+  check.call('one missing receiver contract poisons the complete result', missing.nil? && missing_reason[:cause] == 'call_contract_missing:String#child')
+  cycle_reason = {}
+  check.call('a loop-carried receiver cycle refuses without guessing a fixed point',
+             RbsSignatures.ir_types(applied, cyclic).fact_at(5, '2', refusal: cycle_reason).nil? && cycle_reason[:cause] == :call_cycle)
+  depth_reason = {}
+  deep_analysis = RbsSignatures.ir_types(applied, deep)
+  check.call('long call chains respect a bounded query depth',
+             deep_analysis.fact_at(deep.instructions.size - 1, '2', refusal: depth_reason).nil? &&
+             depth_reason[:cause] == :call_depth_cap)
+  check.call('a depth refusal does not poison a shorter root query', deep_analysis.fact_at(10, '2')&.classes == Set[:CallRoot])
+  check.call('the call-results switch restores explicit-receiver unknowns',
+             RbsSignatures.ir_types(applied, ireps['CallUse_chain'], call_results: false).fact_at(4, '2').nil?)
+end
+
 # ------------------------------------------------------------------------------------------------ 2. fixtures
 if ARGV.include?('--unit-only') || !ENV['MRBC']
   puts(ARGV.include?('--unit-only') ? '-- fixture half skipped (--unit-only)' : '-- SKIP fixture half: set MRBC')
@@ -368,6 +447,11 @@ else
           @item
         end
       end
+      class FeedbackOther
+        def produce(flag)
+          flag.unknown_value
+        end
+      end
     RUBY
     feedback_sig = <<~RBS
       class Feedback
@@ -397,8 +481,8 @@ else
                find_return.call('inherited')['status'] == 'declared')
     check.call('implicit self-call returns use the matched method contract', find_return.call('invoke')['type'] == 'String | Symbol' &&
                find_return.call('invoke')['contracts'] == ['self-call:produce'])
-    check.call('a dynamic same-name call stays unknown with its producer reason', find_return.call('dynamic')['status'] == 'unknown' &&
-               find_return.call('dynamic')['reason'] == 'unknown:SEND')
+    check.call('an unknown receiver cannot inherit one same-name RBS return contract', find_return.call('dynamic')['status'] == 'unknown' &&
+               find_return.call('dynamic')['reason'] == 'unknown:ENTER')
     check.call('ivar stores use the value operand, not the leading name', feedback_rows.any? { |row|
       row['kind'] == 'ivar_store' && row['detail'] == '@item' && row['status'] == 'mismatch' && row['type'] == 'Symbol'
     })
@@ -426,7 +510,89 @@ else
     check.call('suggestion files parse as ordinary RBS', !RBS::Parser.parse_signature(suggested).nil?)
     text_out, _text_err, text_status = type_check.call(dir, '--facts', 'feedback-kept/facts.json', '--all', '--no-sends')
     check.call('text feedback explains unknowns and lists inferred RBS suggestions', text_status.exitstatus == 1 &&
-               text_out.include?('[TC2004]') && text_out.include?('unknown:SEND') && text_out.include?('Feedback#produce -> String | Symbol'))
+               text_out.include?('[TC2004]') && text_out.include?('unknown:ENTER') && text_out.include?('Feedback#produce -> String | Symbol'))
+
+    puts '== report propagation of explicit receiver contracts'
+    File.write(File.join(dir, 'call-chain.rb'), <<~RUBY)
+      class SigRoot
+        def child
+          @child
+        end
+        def store_child(value)
+          @child = value
+        end
+      end
+      class SigLeaf
+        def finish
+          @result
+        end
+        def store_result(value)
+          @result = value
+        end
+      end
+      class SigUse
+        def chain(root)
+          root.child.finish
+        end
+      end
+    RUBY
+    File.write(File.join(dir, 'sig/call-chain.rbs'), <<~RBS)
+      class SigRoot
+        def child: () -> SigLeaf
+      end
+      class SigLeaf
+        def finish: () -> Symbol
+      end
+      class SigUse
+        def chain: (SigRoot root) -> untyped
+      end
+    RBS
+    chain_out, chain_err, chain_status = type_check.call(dir, '--files', 'call-chain.rb', '--sig', 'sig/call-chain.rbs', '--format', 'json', '--no-sends')
+    check.call("explicit receiver fixture checks successfully #{chain_err.lines.first&.strip}", chain_status.success?)
+    chain_report = JSON.parse(chain_out)
+    chain_return = chain_report['methods'].find { |method| method['name'] == 'chain' }['return']
+    check.call('complete contract-assisted returns are reported with derived provenance', chain_return['type'] == 'Symbol' &&
+               chain_return['source'] == 'derived:contracts' && chain_return['contracts'].include?('call-result:SigLeaf#finish'))
+    check.call('derived returns are excluded from independent RBS suggestions',
+               chain_report['rbs_suggestions'].none? { |suggestion| suggestion['method'] == 'chain' })
+
+    puts '== audited builtin call result and override withdrawal'
+    builtin_source = "class IrBuiltinCall\n  def run\n    [].size\n  end\nend\n"
+    File.write(File.join(dir, 'builtin-call.rb'), builtin_source)
+    builtin_out, _builtin_err, builtin_status = type_check.call(dir, '--files', 'builtin-call.rb', '--sig', 'no-signatures', '--format', 'json', '--no-sends')
+    builtin_report = JSON.parse(builtin_out)
+    builtin_result = builtin_report['ir_feedback'].find { |row| row['method'] == 'run' && row['kind'] == 'return' }
+    check.call('a pinned Array size result is independently inferred by IR', builtin_status.success? &&
+               builtin_result['status'] == 'inferred' && builtin_result['type'] == 'Integer')
+    File.write(File.join(dir, 'builtin-call.rb'), builtin_source + "class Array\n  def size\n    :changed\n  end\nend\n")
+    override_out, _override_err, _override_status = type_check.call(dir, '--files', 'builtin-call.rb', '--sig', 'no-signatures', '--format', 'json', '--no-sends')
+    override_result = JSON.parse(override_out)['ir_feedback'].find { |row| row['method'] == 'run' && row['kind'] == 'return' }
+    check.call('an overridden builtin withdraws the Integer call-result proof', override_result['type'] != 'Integer')
+    File.write(File.join(dir, 'builtin-call.rb'), builtin_source + <<~RUBY)
+      def install_singleton(obj)
+        def obj.size
+          :changed
+        end
+      end
+    RUBY
+    singleton_out, _singleton_err, _singleton_status = type_check.call(dir, '--files', 'builtin-call.rb', '--sig', 'no-signatures', '--format', 'json', '--no-sends')
+    singleton_result = JSON.parse(singleton_out)['ir_feedback'].find { |row| row['method'] == 'run' && row['kind'] == 'return' }
+    check.call('singleton method installation withdraws independent call-result facts', singleton_result['status'] == 'unknown')
+    File.write(File.join(dir, 'block-call.rb'), <<~RUBY)
+      class IrBlockCall
+        def values
+          yield
+          []
+        end
+        def run
+          values { break :changed }
+        end
+      end
+    RUBY
+    File.write(File.join(dir, 'sig/block-call.rbs'), "class IrBlockCall\n  def values: () { () -> void } -> Array[untyped]\nend\n")
+    block_out, _block_err, _block_status = type_check.call(dir, '--files', 'block-call.rb', '--sig', 'sig/block-call.rbs', '--format', 'json', '--no-sends')
+    block_result = JSON.parse(block_out)['ir_feedback'].find { |row| row['method'] == 'run' && row['kind'] == 'return' }
+    check.call('a breaking block does not inherit its callee normal Array return', block_result['type'] != 'Array')
 
     puts '== the comment wins over a signature'
     File.write(File.join(dir, 'both.rb'), commented)

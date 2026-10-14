@@ -271,5 +271,17 @@ if ENV['MRBC']
   end
 end
 
+call_body = Irep.new(label: 'call-result', instructions: [
+  insn(0, 'SEND0', "R1\t:size"), insn(4, 'MOVE', "R2\tR1"), insn(8, 'RETURN', 'R2')
+])
+call_types = BytecodeIR::Types.new(call_body, inferred_calls: { 0 => Set[:Integer] })
+check.call('audited call facts propagate through MOVE without a contract',
+           call_types.at(2, '2') == Set[:Integer] && !call_types.fact_at(2, '2').declared?)
+clobbered_call = Irep.new(label: 'call-clobber', instructions: [
+  insn(0, 'SEND0', "R2\t:size"), insn(4, 'SEND0', "R1\t:other"), insn(8, 'RETURN', 'R2')
+])
+check.call('audited result facts do not bypass a later callee-frame clobber',
+           BytecodeIR::Types.new(clobbered_call, inferred_calls: { 0 => Set[:Integer] }).at(2, '2').nil?)
+
 abort("bc2cpp_bytecode_ir_check FAILED: #{failures.join(', ')}") unless failures.empty?
 puts 'bc2cpp_bytecode_ir_check OK'
