@@ -37,7 +37,7 @@ if [ $compile = 0 ]; then
   asan=(); [ -z "${NFCXX_ASAN:-}" ] || asan=(-fsanitize=address)
   # macOS: libc++ instead of libstdc++, and no libatomic (the sized atomics come from clang's runtime).
   if [ "$(uname -s)" = Darwin ]; then libs=(-lc++ -lm); else libs=(-latomic -lstdc++ -lm); fi
-  exec cc "$@" ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" "${libs[@]}"
+  exec cc "$@" ${asan[@]+${asan[@]+"${asan[@]}"}} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"}
 fi
 if [ -z "$src" ]; then
   exec cc "$@"
@@ -65,9 +65,9 @@ if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # GCC-identity ones (__GNUC__, __VERSION__, ...): without __GNUC__ the headers use no GNU extensions,
   # which cproc cannot parse. (EDG's generated C is already preprocessed and skips this.)
   cc -dM -E -x c /dev/null | grep -Ev '^#define (__GNUC|__GNUG|__GXX|__VERSION__|__OPTIMIZE|__GCC_|__SSE|__MMX|__AVX|__FLT(16|32|64|128)|__SIZEOF_(INT128|FLOAT)|__STDC_|__STRICT_ANSI__|__pic__|__PIC__|__pie__|__PIE__|__CET__|__HAVE_SPECULATION|__BFLT16|__DEC|__BLOCKS__|__USER_LABEL_PREFIX__|__REGISTER_PREFIX__|__NO_INLINE__|__tune|__code_model|__k8|__znver|__amd64|__MMX|__SEG|__FXSR|__SSP|__GXX|__LDBL_|__SIZEOF_LONG_DOUBLE__)' > "$tmp/defs.h"
-  cc -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} -include "$tmp/defs.h" "${cppflags[@]}" "$src" > "$tmp/pp.c"
+  cc -E ${pflag[@]+${pflag[@]+"${pflag[@]}"}} -undef -D__CPROC__ ${darwin[@]+${darwin[@]+"${darwin[@]}"}} -include "$tmp/defs.h" ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
 else
-  cc -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} "${cppflags[@]}" "$src" > "$tmp/pp.c"
+  cc -E ${pflag[@]+${pflag[@]+"${pflag[@]}"}} -undef -D__CPROC__ ${darwin[@]+${darwin[@]+"${darwin[@]}"}} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
 fi
 # macOS: calls to the exported libc++ functions that return a class go through the thunks of scripts/darwin-sret.sh.
 if [ "$(uname -s)" = Darwin ]; then
@@ -91,7 +91,7 @@ if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -
    ! grep -q "$(printf '\r')" "$tmp/pp.c"; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
-  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+"${prepflags[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
 fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
@@ -103,13 +103,13 @@ trace_end "$t" "qbe (IL to assembly)" qbe-backend
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
 # assembly too, so the link merges the per-object copies as gcc does.
 t=$(trace_start)
-"$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${prepflags[@]+"${prepflags[@]}"} "$tmp/prep.c" "$tmp/out.s"
+"$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
 cat "$tmp/tail.s" >> "$tmp/out.s"
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)
 if [ $asm = 1 ]; then
   if [ "$out" = - ]; then cat "$tmp/out.s"; else cp "$tmp/out.s" "${out:-${src%.c}.s}"; fi
 else
-  cc -c "${asflags[@]+"${asflags[@]}"}" -o "${out:-${src%.c}.o}" "$tmp/out.s"
+  cc -c "${asflags[@]+${asflags[@]+"${asflags[@]}"}}" -o "${out:-${src%.c}.o}" "$tmp/out.s"
 fi
 trace_end "$t" "cc -c (assemble)" qbe-backend

@@ -63,7 +63,7 @@ if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
   asmf=$tmp/out.s
   build=()
   skip=0
-  for a in "${args[@]}"; do
+  for a in ${args[@]+"${args[@]}"}; do
     if [ $skip = 1 ]; then skip=0; continue; fi
     case $a in
       -c) build+=(-S) ;;
@@ -71,8 +71,8 @@ if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
       *) build+=("$a") ;;
     esac
   done
-  "$cc" "${build[@]}"
+  "$cc" ${build[@]+"${build[@]}"}
   "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" "$csrc" "$asmf"
   exec as -o "$obj" "$asmf"
 fi
-exec "$cc" "${args[@]}"
+exec "$cc" ${args[@]+"${args[@]}"}
