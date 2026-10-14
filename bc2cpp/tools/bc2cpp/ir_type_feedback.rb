@@ -2,6 +2,9 @@
 
 require_relative 'bytecode_ir'
 require_relative 'rbs_signatures'
+require_relative 'ir_yield_types'
+require_relative 'ir_block_captures'
+require_relative 'ir_rbs_block_types'
 
 module IrTypeFeedback
   RETURN_OPS = %w[RETURN RETURN_BLK BREAK RETSELF RETNIL RETTRUE RETFALSE].freeze
@@ -17,36 +20,91 @@ module IrTypeFeedback
 
   module_function
 
-  # Yield contracts are nominal; they never seed exact dispatch or enclosing returns.
+  def callback_binding(ctx, definition, parent, index, analysis)
+    return nil if ENV['BC2CPP_IR_RBS_BLOCK_TYPES'] == '0' || !ctx.signature_contracts
+
+    insn = parent.instructions[index]
+    receiver = insn.op == 'SSENDB' ? Set[definition.owner.to_sym] : analysis.fact_at(index, insn.reg)&.classes
+    return nil unless receiver&.size == 1
+
+    applied = ctx.signature_contracts
+    owners = RbsSignatures.contract_owners(receiver.first.to_s, ctx.superclass_of || {},
+                                          included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
+                                          unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
+    target = owners.find { |owner| applied.ir_methods.include?([owner, insn.sym.to_s]) }
+    signature = target && IrRbsBlockTypes.signature_for(applied, target, insn.sym)
+    return nil unless signature
+
+    arguments = (1..insn.argc).map { |slot| analysis.fact_at(index, (insn.reg.to_i + slot).to_s) }
+    elements = (1..insn.argc).map { |slot| analysis.element_fact_at(index, (insn.reg.to_i + slot).to_s) }
+    IrRbsBlockTypes.bind(signature, arguments: arguments, argument_elements: elements)
+  end
+
+  # Protocol contracts never seed exact dispatch or enclosing returns.
   def iterator_block_rows(ctx, definition, parent, index, analysis)
     return [] if ENV['BC2CPP_IR_BLOCK_TYPES'] == '0'
 
     insn = parent.instructions[index]
-    return [] unless insn.op == 'SENDB' && insn.plain_fixed_argc? && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
+    return [] unless %w[SENDB SSENDB].include?(insn.op) && insn.plain_fixed_argc?
 
-    elements = analysis.element_fact_at(index, insn.reg)
-    return [] unless elements
-
-    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + 1).to_s, origin_transfers: true)
+    definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true)
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
     producer = parent.instructions[definitions.first.index]
-    child = producer.op == 'BLOCK' && ctx.ireps[Array(parent.reps)[producer.block_index.to_i]]
-    count = insn.sym == 'each_with_index' ? 2 : 1
-    return [] unless child&.file && child.enter&.enter_fields == [count, 0, 0, 0, 0, 0, 0, 0]
+    child = ctx.ireps[Array(parent.reps)[producer.block_index.to_i]] if producer.op == 'BLOCK'
+    fields = child&.enter&.enter_fields
+    return [] unless child&.file && fields && fields.drop(1).all?(&:zero?) && fields.first.between?(0, 8)
 
-    bounds = { '1' => elements.classes }
-    bounds['2'] = Set[:Integer] if count == 2
-    contracts = (elements.contracts + ["iterator:#{insn.sym}"]).sort.freeze
+    iterator = insn.op == 'SENDB' && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
+    elements = analysis.element_fact_at(index, insn.reg) if iterator
+    binding = callback_binding(ctx, definition, parent, index, analysis)
+    summary = IrYieldTypes.summarize(ctx, parent, index, analysis)
+    if summary && summary.child.equal?(child)
+      bounds = summary.arguments
+      contracts = bounds.values.flat_map(&:contracts).uniq.sort.freeze
+      invocation_safe = summary.invocation_safe
+    elsif binding && binding.argument_facts.size == fields.first
+      bounds = binding.argument_facts.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] }
+      contracts = binding.contracts
+      invocation_safe = false
+    elsif elements && fields.first == (insn.sym == 'each_with_index' ? 2 : 1)
+      contracts = (elements.contracts + ["iterator:#{insn.sym}"]).sort.freeze
+      bounds = { '1' => BytecodeIR::Types::Fact.new(classes: elements.classes, declared: true, contracts: contracts) }
+      bounds['2'] = BytecodeIR::Types::Fact.new(classes: Set[:Integer], declared: true, contracts: contracts) if fields.first == 2
+      invocation_safe = false
+    else
+      return []
+    end
     file = ctx.root ? child.file.sub(%r{\A#{Regexp.escape(ctx.root.to_s)}/?}, '') : child.file
     base = { 'owner' => definition.owner, 'method' => definition.name, 'file' => file, 'col' => 1,
              'scope' => file.match?(%r{(\A|/)3rd/}) ? 'core' : 'engine', 'expected' => nil, 'compatibility' => nil }
-    rows = bounds.map do |reg, classes|
+    rows = bounds.map do |reg, fact|
       base.merge('kind' => 'block_argument', 'detail' => Array(child.lv)[reg.to_i - 1].to_s,
-                 'line' => child.enter.lineno, 'status' => 'declared',
-                 'type' => BytecodeIR::Types.type_name(classes), 'contracts' => contracts, 'reason' => nil)
+                 'line' => child.enter.lineno, 'status' => fact.declared? ? 'declared' : 'inferred',
+                 'type' => BytecodeIR::Types.type_name(fact.classes), 'contracts' => fact.contracts, 'reason' => nil)
     end
-    block_analysis = BytecodeIR::Types.new(child, declared_args: bounds)
+    callback_inputs_fit = true
+    if binding && summary
+      callback_inputs_fit = binding.argument_facts.size == bounds.size
+      bounds.each do |reg, fact|
+        expected = binding.argument_facts[reg.to_i - 1]
+        next unless expected
+
+        comparisons = fact.classes.map { |value| fits?(value, expected.classes, ctx) }
+        callback_inputs_fit &&= comparisons.all?(true)
+        next if fact.declared?
+
+        row = rows[reg.to_i - 1]
+        row['expected'] = BytecodeIR::Types.type_name(expected.classes)
+        row['compatibility'] = comparisons.any?(&:nil?) ? 'unknown' : 'checked'
+        row['status'] = 'unknown' if comparisons.any?(&:nil?)
+        row['status'] = 'mismatch' if comparisons.all?(false)
+        row['status'] = 'possible_mismatch' if comparisons.include?(false) && comparisons.include?(true)
+      end
+    end
+    captures = IrBlockCaptures.new(parent: parent, child: child, call_index: index, producer_index: definitions.first.index,
+                                  parent_analysis: analysis, ireps: ctx.ireps, invocation_safe: invocation_safe)
+    block_analysis = BytecodeIR::Types.new(child, argument_facts: bounds, source_resolver: captures.method(:fact_at))
     exits = []
     child.instructions.each_with_index do |instruction, position|
       kind = if RETURN_OPS.include?(instruction.op) then 'block_return'
@@ -72,10 +130,33 @@ module IrTypeFeedback
     end
     if !exits.empty? && exits.none?(&:nil?) && Array(child.catch_handlers).empty? &&
        child.instructions.none? { |instruction| %w[RETURN_BLK BREAK].include?(instruction.op) }
-      values = %w[map collect].include?(insn.sym) ? exits.reduce(Set.new) { |set, fact| set | fact.classes } : elements.classes
-      rows << base.merge('kind' => 'iterator_result', 'detail' => insn.sym, 'line' => insn.lineno,
-                         'status' => 'declared', 'type' => "Array[#{BytecodeIR::Types.type_name(values)}]",
-                         'contracts' => (contracts + exits.flat_map(&:contracts)).uniq.sort, 'reason' => nil)
+      returned = BytecodeIR::Types::Fact.new(classes: exits.reduce(Set.new) { |set, fact| set | fact.classes },
+                                          declared: exits.any?(&:declared?), contracts: exits.flat_map(&:contracts).uniq.sort)
+      if binding && callback_inputs_fit
+        result = binding.complete(returned, compatible: ->(actual, expected) {
+          comparisons = actual.map { |value| fits?(value, expected, ctx) }
+          comparisons.any?(&:nil?) ? nil : comparisons.all?
+        })
+        if result.return_fact
+          type = BytecodeIR::Types.type_name(result.return_fact.classes)
+          type = "Array[#{BytecodeIR::Types.type_name(result.return_elements.classes)}]" if result.return_fact.classes == Set[:Array] && result.return_elements
+          rows << base.merge('kind' => 'callback_result', 'detail' => insn.sym, 'line' => insn.lineno,
+                             'status' => 'declared', 'type' => type, 'contracts' => result.return_fact.contracts, 'reason' => nil)
+        end
+        if result.callback_expected && !returned.declared?
+          comparisons = returned.classes.map { |value| fits?(value, result.callback_expected.classes, ctx) }
+          status = comparisons.any?(&:nil?) ? 'unknown' : comparisons.all?(false) ? 'mismatch' : comparisons.include?(false) ? 'possible_mismatch' : 'inferred'
+          rows << base.merge('kind' => 'block_contract', 'detail' => insn.sym, 'line' => insn.lineno,
+                             'status' => status, 'type' => BytecodeIR::Types.type_name(returned.classes),
+                             'expected' => BytecodeIR::Types.type_name(result.callback_expected.classes),
+                             'compatibility' => comparisons.any?(&:nil?) ? 'unknown' : 'checked', 'contracts' => binding.contracts, 'reason' => nil)
+        end
+      elsif !binding && elements
+        values = %w[map collect].include?(insn.sym) ? returned.classes : elements.classes
+        rows << base.merge('kind' => 'iterator_result', 'detail' => insn.sym, 'line' => insn.lineno,
+                           'status' => 'declared', 'type' => "Array[#{BytecodeIR::Types.type_name(values)}]",
+                           'contracts' => (contracts + returned.contracts).uniq.sort, 'reason' => nil)
+      end
     end
     rows
   end
@@ -151,7 +232,7 @@ module IrTypeFeedback
                elsif insn.op == 'SETIV' then 'ivar_store'
                elsif %w[SEND SEND0 SENDB].include?(insn.op) then 'receiver'
                end
-        rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis)) if insn.op == 'SENDB'
+        rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis)) if %w[SENDB SSENDB].include?(insn.op)
         next unless kind
 
         refusal = {}

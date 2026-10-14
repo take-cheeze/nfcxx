@@ -21,9 +21,17 @@ module BytecodeIR
       def declared? = declared
     end
 
-    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, source_resolver: nil, call_resolver: nil)
+    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, source_resolver: nil, call_resolver: nil, argument_facts: {})
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
+      @argument_facts = argument_facts.to_h do |reg, fact|
+        number = reg.to_s
+        unless number.match?(/\A[1-9]\d*\z/) && number.to_i <= required && fact.is_a?(Fact) && !fact.classes.empty?
+          raise ArgumentError, "bc2cpp: invalid IR argument fact R#{number}"
+        end
+        contracts = fact.contracts.empty? && fact.declared? ? ["argument:R#{number}"] : fact.contracts.dup
+        [number, Fact.new(classes: fact.classes.to_set.dup.freeze, declared: fact.declared?, contracts: contracts.freeze).freeze]
+      end.freeze
       @declared_args = declared_args.to_h do |reg, types|
         number = reg.to_s
         unless number.match?(/\A[1-9]\d*\z/) && number.to_i <= required
@@ -132,17 +140,26 @@ module BytecodeIR
 
       source = definitions.any? do |definition|
         definition.entry? || definition.built == :arg ||
-          (%w[GETIV GETCONST GETMCNST KARG].include?(@irep.instructions[definition.index].op) ||
+          (%w[GETIV GETCONST GETMCNST KARG GETUPVAR].include?(@irep.instructions[definition.index].op) ||
            ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %w[GETIDX GETIDX0 AREF].include?(@irep.instructions[definition.index].op))
       end
-      if source && @source_resolver && (classes = @source_resolver.call(index, reg)) && !classes.empty?
-        return Fact.new(classes: classes.to_set.dup.freeze, declared: false, contracts: [].freeze).freeze
+      if source && @source_resolver && (resolved = @source_resolver.call(index, reg))
+        if resolved.is_a?(Fact)
+          return resolved if !resolved.classes.empty? && (use_declarations || !resolved.declared?)
+        elsif !resolved.empty?
+          return Fact.new(classes: resolved.to_set.dup.freeze, declared: false, contracts: [].freeze).freeze
+        end
       end
 
       types = Set.new
       contracts = Set.new
       definitions.each do |definition|
-        values = definition_types(definition)
+        argument = (definition.entry? || definition.built == :arg) ? @argument_facts[definition.reg] : nil
+        values = if argument && (use_declarations || !argument.declared?)
+                   contracts.merge(argument.contracts) if argument.declared?
+                   argument.classes
+                 else definition_types(definition)
+                 end
         if !values && use_declarations
           values, contract = declared_definition(definition)
           contracts << contract.freeze if values
