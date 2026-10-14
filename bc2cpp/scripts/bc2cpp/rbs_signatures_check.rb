@@ -707,6 +707,11 @@ else
         def keyword(value:); value; end
         def optional_keyword(value: :default); value; end
         def iterate(values); values.each { |value| value.size }; end
+        def mapped(values); values.map { |value| value }; end
+        def mapped_integer(values); values.collect { |value| 1 }; end
+        def indexed(values); values.each_with_index { |value, index| index }; end
+        def breaking(values); values.map { |value| break :stop }; end
+        def captured(values, other); values.map { |value| other }; end
       end
     RUBY
     File.write(File.join(dir, 'sig/optional-keyword.rbs'), <<~RBS)
@@ -715,6 +720,11 @@ else
         def keyword: (value: String) -> untyped
         def optional_keyword: (?value: Symbol) -> untyped
         def iterate: (Array[String] values) -> untyped
+        def mapped: (Array[String | nil] values) -> untyped
+        def mapped_integer: (Array[String] values) -> untyped
+        def indexed: (Array[String] values) -> untyped
+        def breaking: (Array[String] values) -> untyped
+        def captured: (Array[String] values, untyped other) -> untyped
       end
     RBS
     shape_out, shape_err, shape_status = type_check.call(dir, '--files', 'optional-keyword.rb', '--sig', 'sig/optional-keyword.rbs', '--format', 'json', '--no-sends', '--emit-rbs-suggestions', 'shape-suggestions')
@@ -728,10 +738,22 @@ else
     check.call('optional keyword bounds include the default path',
                shape_method.call('optional_keyword')['keyword_params'][0]['type'] == 'Symbol' && !shape_method.call('optional_keyword')['keyword_params'][0]['required'])
     check.call('signature-derived optional and keyword returns retain contract provenance',
-               shape_report['ir_feedback'].select { |row| row['kind'] == 'return' && row['method'] != 'iterate' }.all? { |row| row['status'] == 'declared' && !row['contracts'].empty? })
+               shape_report['ir_feedback'].select { |row| row['kind'] == 'return' && %w[optional keyword optional_keyword].include?(row['method']) }.all? { |row| row['status'] == 'declared' && !row['contracts'].empty? })
     check.call('Array iterator variables retain conditional element bounds', shape_report['ir_feedback'].any? { |row|
       row['kind'] == 'block_argument' && row['type'] == 'String' && row['status'] == 'declared' && row['contracts'].include?('iterator:each')
     })
+    block_row = ->(method, kind) { shape_report['ir_feedback'].find { |row| row['method'] == method && row['kind'] == kind } }
+    check.call('generic block input flows into its return with nullable union provenance',
+               block_row.call('mapped', 'block_return')['type'] == 'String | nil' && block_row.call('mapped', 'block_return')['status'] == 'declared')
+    check.call('map substitutes block output into the conditional container result',
+               block_row.call('mapped', 'iterator_result')['type'] == 'Array[String | nil]')
+    check.call('literal block output is independent of its declared input',
+               block_row.call('mapped_integer', 'block_return')['type'] == 'Integer' && block_row.call('mapped_integer', 'block_return')['status'] == 'inferred' &&
+               block_row.call('mapped_integer', 'iterator_result')['type'] == 'Array[Integer]')
+    check.call('indexed iteration binds the second block argument as Integer',
+               block_row.call('indexed', 'block_return')['type'] == 'Integer')
+    check.call('breaking blocks never publish the normal iterator result', block_row.call('breaking', 'iterator_result').nil?)
+    check.call('unmodelled captured variables stay unknown', block_row.call('captured', 'block_return')['status'] == 'unknown' && block_row.call('captured', 'iterator_result').nil?)
     exported_shapes = File.read(File.join(dir, 'shape-suggestions/SignatureShapes.rbs'))
     check.call('RBS export retains typed optional and named keyword shapes',
                exported_shapes.include?('?Integer') && exported_shapes.include?('value: String') && exported_shapes.include?('?value: Symbol'))
