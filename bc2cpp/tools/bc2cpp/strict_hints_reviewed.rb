@@ -8,13 +8,18 @@ require 'set'
 
 STRICT_HINTS_REVIEWED = Set[
   "Game::Battle#initialize -> row (ELEMENT)",
+  "Game::Interpreter#do_change_face -> string (IVAR_ACCESSOR)",
   "Game::Interpreter#do_flash_screen -> flash (TYPED)",
+  "Game::Interpreter#do_move_event -> string (IVAR_ACCESSOR)",
+  "Game::Interpreter#do_show_message -> string (IVAR_ACCESSOR)",
   "Game::Interpreter#do_tile_substitution -> map (IVAR_ACCESSOR)",
   "Game::Interpreter#event_operand -> direction (IVAR_ACCESSOR)",
   "Game::Interpreter#event_operand -> map_id (IVAR_ACCESSOR)",
   "Game::Interpreter#event_operand -> party (IVAR_ACCESSOR)",
   "Game::Interpreter#party -> party (IVAR_ACCESSOR)",
   "Game::Interpreter#party_term -> term (TYPED)",
+  "Game::Interpreter#picture_name -> string (IVAR_ACCESSOR)",
+  "Game::Interpreter#play_audio -> string (IVAR_ACCESSOR)",
   "Game::Interpreter#switches -> switches (IVAR_ACCESSOR)",
   "Game::Interpreter#variables -> variables (IVAR_ACCESSOR)",
   "RPG2k::Scene::Base#initialize -> db (IVAR_ACCESSOR)",
