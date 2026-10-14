@@ -283,5 +283,20 @@ clobbered_call = Irep.new(label: 'call-clobber', instructions: [
 check.call('audited result facts do not bypass a later callee-frame clobber',
            BytecodeIR::Types.new(clobbered_call, inferred_calls: { 0 => Set[:Integer] }).at(2, '2').nil?)
 
+source_body = Irep.new(label: 'source-read', nlocals: 2, instructions: [
+  insn(0, 'GETIV', "R1\t:item"), insn(4, 'MOVE', "R2\tR1"), insn(8, 'RETURN', 'R2')
+])
+source_types = BytecodeIR::Types.new(source_body, source_resolver: ->(index, reg) {
+  Set[:String, :NilClass] if index == 2 && reg == '2'
+})
+check.call('read-point source facts retain nil and propagate independently through MOVE',
+           source_types.at(2, '2') == Set[:String, :NilClass] && !source_types.fact_at(2, '2').declared?)
+check.call('missing source proof remains unknown', source_types.at(1, '1').nil?)
+source_body.instructions.insert(2, insn(6, 'SEND0', "R1\t:mutate"))
+check.call('source proof cannot bypass reaching-definition frame clobber',
+           BytecodeIR::Types.new(source_body, source_resolver: ->(*) { Set[:String] }).at(3, '2').nil?)
+check.call('source proof cannot bypass handler guards',
+           BytecodeIR::Types.new(handler_types.instance_variable_get(:@irep), source_resolver: ->(*) { Set[:Integer] }).at(1, '2').nil?)
+
 abort("bc2cpp_bytecode_ir_check FAILED: #{failures.join(', ')}") unless failures.empty?
 puts 'bc2cpp_bytecode_ir_check OK'

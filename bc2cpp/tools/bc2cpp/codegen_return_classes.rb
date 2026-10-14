@@ -486,6 +486,18 @@ class CodeGen
         end
       end
     end
+    bytecode_ir_mask_classes(mask)
+  end
+
+  # Read-point facts retain slot invalidation and incoming-argument proofs (ADR 0444).
+  def bytecode_ir_source_classes(irep, index, reg)
+    return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
+    return nil unless reg.to_s.match?(/\A\d+\z/) && reg.to_i < irep.nregs
+
+    bytecode_ir_mask_classes(return_class_states(irep)&.[](index)&.[](reg.to_i))
+  end
+
+  def bytecode_ir_mask_classes(mask)
     return nil unless mask.is_a?(Integer) && mask.positive?
     return nil if mask.anybits?(NumericFlow::OTHER | NumericFlow::EXC | NumericFlow::CHECKED)
 
