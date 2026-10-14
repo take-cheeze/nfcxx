@@ -26,6 +26,8 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 # QBE: scripts/qbe-empty-struct.patch (an empty struct with no alignment left 1 << -1 in parse.c: a garbage alloc size when it
 # is passed by value, e.g. libc++'s std::min comparator)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-struct.patch"
+# QBE: scripts/qbe-arm64-align16.patch (AAPCS64 16-byte aggregates: an even register, and the alignment limit is 16; __int128 and __float128 are 16-aligned)
+patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-arm64-align16.patch"
 # QBE: scripts/qbe-apple-addend.patch (arm64 Apple: an address with an offset is sym+off@page, not sym@page+off, which ld64
 # rejects as a relocation)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-apple-addend.patch"
@@ -35,6 +37,8 @@ make -C "$root/build/qbe" -j"$jobs" >/dev/null
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
 # cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
+# cproc: scripts/cproc-darwin-ldouble.patch (Apple arm64: long double is a double, as in clang's ABI; the patch is inert elsewhere)
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-darwin-ldouble.patch"
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
 if [ "$(uname -s)" = Darwin ]; then

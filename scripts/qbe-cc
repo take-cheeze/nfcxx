@@ -55,8 +55,8 @@ if [ "$(uname -s)" = Darwin ]; then
   # struct of the same size stands in for it (only the layout of those ucontext members is affected).
   # __int128_t is a 64-bit integer here: libc++'s filesystem clock uses it for nanosecond counts that fit in 64 bits, and
   # cproc can compare and compute with a long long where it cannot with a struct.
-  printf '%s\n' 'typedef struct { unsigned long long __lo, __hi; } __nfcxx_uint128_t;' > "$tmp/darwin.h"
-  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= -D__uint128_t=__nfcxx_uint128_t -D__int128_t='long long' -include "$tmp/darwin.h")
+  # __int128_t and __uint128_t are clang builtins (no header typedef): name cproc's 128-bit integer types
+  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= '-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
 fi
 if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
