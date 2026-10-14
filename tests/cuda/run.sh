@@ -39,7 +39,7 @@ else
 fi
 # 1c. The device units of a macro named only in a launch's template arguments, and of a launch whose template arguments
 # are block-local constants, keep the macro and name the values in the wrapper.
-for c in macro_wrapper local_targs launch_macro_body using_namespace define_header_skip static_kernel_enum host_member_drop; do
+for c in macro_wrapper local_targs launch_macro_body using_namespace define_header_skip static_kernel_enum host_member_drop bf16_class; do
   if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
      && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
     echo "device unit $c: ok"

@@ -1698,17 +1698,28 @@ HALF2_OPS = HALF2_TYPE + [
 HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
   "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
   "#endif\n"
-# bf16 as a 16-bit integer (the upper half of a float, round to nearest even). nv_bfloat162 is a two-lane struct, as
-# __half2 is (CUDA's type has .x and .y, and llama.cpp brace-initializes it as such). Operators on nv_bfloat16 are
-# integer operators here, as for half: a unit that uses them is not handled correctly. float(x) of an nv_bfloat16 is
-# the bits, not the value (a class with a converting constructor is refused by the front end in a device unit).
+# bf16: a 2-byte class holding the upper half of a float (round to nearest even, NaN canonical as CUDA's host header).
+# Its converting constructor and operator float give the value, as CUDA's __nv_bfloat16 does. Arithmetic computes in
+# float and rounds back to bf16 (CUDA's header does the same). nv_bfloat162 stays a two-lane struct of the bits, as
+# __half2 is (llama.cpp brace-initializes it from floats, and assigns its lanes as bits). The class is a local in device
+# code only because the device pass compiles with --no_exceptions (scripts/pathb-dump): its destructor-free layout
+# otherwise gets EH cleanup globals the emitter refuses.
 BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
-  "typedef unsigned short nv_bfloat16;\n" \
   "typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;\n" \
-  "typedef unsigned short __nv_bfloat16;\n" \
+  "static inline unsigned short __nfcxx_float2bf16_bits(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "static inline float __nfcxx_bf16_bits2float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
+  "struct __nfcxx_bfloat16 { unsigned short x; __host__ __device__ __nfcxx_bfloat16() {} __host__ __device__ __nfcxx_bfloat16(float f) { x = __nfcxx_float2bf16_bits(f); } __host__ __device__ operator float() const { return __nfcxx_bf16_bits2float(x); } };\n" \
+  "typedef __nfcxx_bfloat16 nv_bfloat16;\n" \
+  "typedef __nfcxx_bfloat16 __nv_bfloat16;\n" \
   "typedef nv_bfloat162 __nv_bfloat162;\n" \
-  "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
-  "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "static inline __nfcxx_bfloat16 __nfcxx_bf16_from_bits(unsigned short b) { __nfcxx_bfloat16 r; r.x = b; return r; }\n" \
+  "static inline float __bfloat162float(__nfcxx_bfloat16 b) { return (float)b; }\n" \
+  "static inline __nfcxx_bfloat16 __float2bfloat16(float f) { return __nfcxx_bfloat16(f); }\n" \
+  "static inline __nfcxx_bfloat16 operator+(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a + (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a - (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator*(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a * (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator/(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a / (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a) { return __nfcxx_bfloat16(-(float)a); }\n" \
   "#endif\n"
 
 BUILTIN_DEFS = {
@@ -1891,10 +1902,10 @@ BUILTIN_DEFS = {
   "__nv_bfloat162" => BF16_CORE,
   "__float2bfloat16" => BF16_CORE,
   "__bfloat162float" => BF16_CORE,
-  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return h.x; }\n",
-  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return h.y; }\n",
-  "__bfloat1622float2" => BF16_CORE + "static inline float2 __bfloat1622float2(nv_bfloat162 h) { return make_float2(__bfloat162float(h.x), __bfloat162float(h.y)); }\n",
-  "__float22bfloat162_rn" => BF16_CORE + "static inline nv_bfloat162 __float22bfloat162_rn(float2 f) { nv_bfloat162 r; r.x = __float2bfloat16(f.x); r.y = __float2bfloat16(f.y); return r; }\n",
+  "__low2bfloat16" => BF16_CORE + "static inline __nfcxx_bfloat16 __low2bfloat16(nv_bfloat162 h) { return __nfcxx_bf16_from_bits(h.x); }\n",
+  "__high2bfloat16" => BF16_CORE + "static inline __nfcxx_bfloat16 __high2bfloat16(nv_bfloat162 h) { return __nfcxx_bf16_from_bits(h.y); }\n",
+  "__bfloat1622float2" => BF16_CORE + "static inline float2 __bfloat1622float2(nv_bfloat162 h) { return make_float2(__nfcxx_bf16_bits2float(h.x), __nfcxx_bf16_bits2float(h.y)); }\n",
+  "__float22bfloat162_rn" => BF16_CORE + "static inline nv_bfloat162 __float22bfloat162_rn(float2 f) { nv_bfloat162 r; r.x = __nfcxx_float2bf16_bits(f.x); r.y = __nfcxx_float2bf16_bits(f.y); return r; }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
   "__hsub2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hsub2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) - __half2float(b.x)); r.y = __float2half(__half2float(a.y) - __half2float(b.y)); return r; }\n",
