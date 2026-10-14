@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'set'
+
 # NativeCoreResultSigs: the result class of built-in methods, read from sig/native/core_results.rbs. It replaces the
 # hand-written NativeClassResults::EXACT_CORE_KINDS table with the same { class => { name => class } } shape. The file
 # only names classes; codegen_native_results.rb still gates every answer on the closed-world pins, so a file edit can
@@ -10,10 +12,23 @@ module NativeCoreResultSigs
 
   module_function
 
+  FRESH_ARRAY_PATH = File.expand_path('../../sig/native/core_fresh_arrays.rbs', __dir__)
+
   # { 'Array' => { 'to_a' => 'Array', ... }, ... }, frozen, read once per path.
   def kinds(path = PATH)
     @kinds ||= {}
     @kinds[path] ||= load_kinds(path)
+  end
+
+  # The method names that return a fresh Array on some core owner (CORE_ARRAY_RETURN_METHODS). A declaration
+  # returning anything but Array would make the name claim false, so it is rejected here.
+  def fresh_array_names(path = FRESH_ARRAY_PATH)
+    kinds(path).each do |klass, table|
+      table.each do |name, result|
+        raise "bc2cpp: #{path}: #{klass}##{name} must return Array for a fresh-Array claim" unless result == 'Array'
+      end
+    end
+    kinds(path).values.flat_map(&:keys).to_set.freeze
   end
 
   def load_kinds(path)

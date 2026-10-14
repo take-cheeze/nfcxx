@@ -2,6 +2,7 @@
 
 require_relative 'record_hash'
 require_relative 'ivar_poison_causes'
+require_relative 'native_core_result_sigs'
 
 # Steps 6f-bis and 6g: proven fresh Arrays and ivar classes.
 
@@ -31,18 +32,10 @@ CHAINED_ARRAY_METHODS = %w[select reject map].freeze
 # CORE_ARRAY_CHAIN: core methods that return a fresh Array whenever they
 # return. Admitted only after core_array_return? confirms nothing in this
 # program redefines the name (so a future `def keys` withdraws the claim).
-# Verified against 3rd/mruby:
-#   - keys/values: mrb_hash_keys/mrb_hash_values (src/hash.c);
-#   - compact: ary_compact (mruby-array-ext), a dup;
-#   - flatten: ary_flatten -> flatten_internal, a new Array;
-#   - split: String#split (src/string.c);
-#   - uniq: Array#uniq (dup / __uniq) and Enumerable#uniq (hash.values).
-# A receiver without the method raises before returning, and every site
-# still passes the emitter's mrb_array_p tripwire.
+# The names and their 3rd/mruby verification live in sig/native/core_fresh_arrays.rbs.
 # Not here: to_a/dup (receiver-dependent), to_h (Hash), blockless sort_by
-# (CORE_ARRAY_CHAIN_NEEDS_BLOCK), argless first/last
-# (CORE_ARRAY_CHAIN_NEEDS_ARG).
-CORE_ARRAY_RETURN_METHODS = %w[keys values compact flatten split uniq].freeze
+# (CORE_ARRAY_CHAIN_NEEDS_BLOCK), argless first/last (CORE_ARRAY_CHAIN_NEEDS_ARG).
+CORE_ARRAY_RETURN_METHODS = NativeCoreResultSigs.fresh_array_names
 
 # CORE_ARRAY_CHAIN: a fresh Array only with an explicit argument (n >= 1):
 # src/array.c mrb_ary_first/mrb_ary_last return an ELEMENT with no argument
