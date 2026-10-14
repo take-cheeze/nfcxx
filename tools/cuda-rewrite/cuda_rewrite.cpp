@@ -1966,6 +1966,13 @@ std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<lon
   return lines;
 }
 
+// A macro in the conditionals' table: a text, or a function-like macro (Ruby :function).
+struct Def {
+  bool is_function = false;
+  std::string text;
+};
+typedef std::map<std::string, Def> Defs;
+
 // Ruby globals of the rewrite: $cond_strict, $edg_launches (the --edg-launches flag).
 bool g_cond_strict = false;
 bool g_edg_launches = false;
@@ -2406,12 +2413,6 @@ struct CondUnsupported {
 const std::vector<std::pair<std::string, std::string>> DEVICE_PASS_MACROS = {
     {"__CUDACC__", "1"}, {"__NVCC__", "1"}, {"__CUDA_ARCH__", "750"}, {"__cplusplus", "201703"}};
 
-// A macro in the conditionals' table: a text, or a function-like macro (Ruby :function).
-struct Def {
-  bool is_function = false;
-  std::string text;
-};
-typedef std::map<std::string, Def> Defs;
 
 // Ruby $cond_strict (see g_cond_strict above): a name the unit does not define is an unsupported conditional.
 
