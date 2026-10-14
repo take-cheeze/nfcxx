@@ -46,6 +46,16 @@ pass enum_extern_block.cu "enum extern block: no error, 0 mismatches"
 pass local_const.cu "local const: no error, 41 40"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
 pass host_cub_helper.cu "host cub helper: no error, 0 mismatches"
+pass fnptr_addr.cu "fnptr addr: 0 mismatches"
+# Mutant: the flag compares against the wrong function, so the check must see a mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" fnptr_addr_mutant.cu -o "$out/fam.o" > "$out/fam.log" 2>&1 \
+   && "$root/nfcxx" "$out/fam.o" -L"$cuda/lib64" -lcudart -o "$out/fam" >> "$out/fam.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/fam" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant fnptr_addr_mutant: caught: $run"
+else
+  echo "FAIL fnptr_addr_mutant: the mutant was not caught"; fail=1
+fi
 pass linkage_block.cu "linkage block: no error, 0 mismatches"
 pass macro_launch.cu "macro launch: no error, value 3"
 pass deduced_launch.cu "deduced launch: no error, value 3.0"
