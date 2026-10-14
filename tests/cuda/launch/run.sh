@@ -69,4 +69,6 @@ pass local_targs.cu "local targs: no error, 43 43"
 pass macro_targs.cu "macro targs: no error, 64 64"
 pass using_namespace.cu "using namespace: no error, 28 28"
 pass shared_align.cu "shared align launch: no error, 0 mismatches"
+pass overload_pair.cu "overload pair: exact"
+pass fnptr_return.cu "fnptr return: exact"
 exit $fail
