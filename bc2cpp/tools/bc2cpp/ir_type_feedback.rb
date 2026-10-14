@@ -59,11 +59,21 @@ module IrTypeFeedback
       source_resolver = if ENV['BC2CPP_IR_SOURCE_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_source_classes)
                           ->(index, reg) { ctx.gen.bytecode_ir_source_classes(irep, index, reg) }
                         end
+      inferred_args = {}
+      if ENV['BC2CPP_IR_ARGUMENT_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_argument_classes)
+        (1..irep.enter&.enter_fields&.first.to_i).each do |position|
+          classes = ctx.gen.bytecode_ir_argument_classes(definition, position)
+          inferred_args[position.to_s] = classes if classes
+        end
+      end
       analysis = if applied
-                   RbsSignatures.ir_types(applied, irep, superclass_of: ctx.superclass_of || {}, inferred_calls: inferred_calls, source_resolver: source_resolver)
-                 else BytecodeIR::Types.new(irep, inferred_calls: inferred_calls, source_resolver: source_resolver)
+                   RbsSignatures.ir_types(applied, irep, superclass_of: ctx.superclass_of || {}, included_modules: ctx.included_modules || {},
+                                          prepended_modules: ctx.prepended_modules || {}, unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver)
+                 else BytecodeIR::Types.new(irep, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver)
                  end
-      owners = RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {})
+      owners = RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {},
+                                            included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
+                                            unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
       exits = []
       irep.instructions.each_with_index do |insn, index|
         kind = if RETURN_OPS.include?(insn.op) then 'return'

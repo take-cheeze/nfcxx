@@ -298,5 +298,28 @@ check.call('source proof cannot bypass reaching-definition frame clobber',
 check.call('source proof cannot bypass handler guards',
            BytecodeIR::Types.new(handler_types.instance_variable_get(:@irep), source_resolver: ->(*) { Set[:Integer] }).at(1, '2').nil?)
 
+element_body = Irep.new(label: 'element-read', nlocals: 2, instructions: [
+  insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), insn(4, 'MOVE', "R2\tR1"),
+  insn(8, 'LOADI_1', 'R3 (1)'), insn(12, 'GETIDX', 'R2 (R3)'), insn(16, 'RETURN', 'R2')
+])
+element_types = BytecodeIR::Types.new(element_body, declared_args: { '1' => Set[:Array] },
+                                     declared_arg_elements: { '1' => Set[:String] })
+element_fact = element_types.fact_at(4, '2')
+check.call('RBS array elements include absent-index nil and retain contract provenance',
+           element_fact.classes == Set[:String, :NilClass] && element_fact.declared? &&
+             element_fact.contracts.include?('element:argument:R1'))
+check.call('RBS element bounds never become independent inference', element_types.at(4, '2').nil?)
+unknown_key_body = Irep.new(label: 'unknown-index', nlocals: 3, instructions: [
+  insn(0, 'ENTER', '2:0:0:0:0:0:0:0 (0x0)'), insn(4, 'GETIDX', 'R1 (R2)'), insn(8, 'RETURN', 'R1')
+])
+unknown_key_types = BytecodeIR::Types.new(unknown_key_body, declared_args: { '1' => Set[:Array] },
+                                         declared_arg_elements: { '1' => Set[:String] })
+check.call('an unknown Array index refuses element projection', unknown_key_types.fact_at(2, '1').nil?)
+hash_types = BytecodeIR::Types.new(unknown_key_body, declared_args: { '1' => Set[:Hash] },
+                                  declared_arg_elements: { '1' => Set[:Integer] })
+check.call('Hash value bounds include absent-key nil', hash_types.fact_at(2, '1').classes == Set[:Integer, :NilClass])
+check.call('independent caller unions feed required argument definitions',
+           BytecodeIR::Types.new(unknown_key_body, inferred_args: { '1' => Set[:Integer, :Float] }).at(1, '1') == Set[:Integer, :Float])
+
 abort("bc2cpp_bytecode_ir_check FAILED: #{failures.join(', ')}") unless failures.empty?
 puts 'bc2cpp_bytecode_ir_check OK'

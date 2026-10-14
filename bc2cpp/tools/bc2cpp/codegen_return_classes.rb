@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'ir_argument_types'
 require_relative 'readonly_call_effects'
 require_relative 'call_context_arguments'
 
@@ -487,6 +488,41 @@ class CodeGen
       end
     end
     bytecode_ir_mask_classes(mask)
+  end
+
+  # Exhaustive entry admission is retained; only the single-definition rule
+  # is replaced by stable receiver-specific lookup. These facts never seed codegen.
+  def bytecode_ir_argument_classes(definition, position)
+    return nil if ENV['BC2CPP_IR_ARGUMENT_TYPES'] == '0'
+    return nil unless @foreign_method_names && @outside_tokens && @closed_world&.exact_instances_singleton_free?
+    return nil unless @native_results_ready && @rc_scoped_ready
+
+    name = definition.name
+    return nil if @foreign_method_names.include?(name) || @outside_tokens.include?(name)
+    return nil unless name.match?(/\A[A-Za-z_]/) && name != 'initialize'
+    return nil if numeric_dynamically_named?(name)
+
+    irep = @ireps[definition.irep]
+    return nil unless irep && pure_mandatory_arity?(irep)
+
+    arity = mandatory_arity(irep)
+    return nil unless position.between?(1, arity)
+
+    sites, poisoned = entry_arg_call_index
+    return nil if poisoned.include?(name) || sites[name].empty?
+
+    IrArgumentTypes.classes(definition, position, sites[name], arity: arity,
+                            receiver: ->(body, index, register) { bytecode_ir_argument_receiver_classes(body, index, register) },
+                            argument: ->(body, index, register) { bytecode_ir_source_classes(body, index, register) },
+                            target: ->(method, klass) { closed_world_exact_target(method, klass) })
+  end
+
+  def bytecode_ir_argument_receiver_classes(irep, index, register)
+    if %w[SSEND SSEND0 SSENDB].include?(irep.instructions[index].op)
+      bytecode_ir_mask_classes(return_class_self_receiver(irep))
+    else
+      bytecode_ir_source_classes(irep, index, register)
+    end
   end
 
   # Read-point facts retain slot invalidation and incoming-argument proofs (ADR 0444).

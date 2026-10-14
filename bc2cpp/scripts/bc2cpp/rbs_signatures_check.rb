@@ -109,6 +109,9 @@ Dir.mktmpdir do |dir|
       def containers: (Array[String] a, Hash[Symbol, Integer] h) -> Array[String]
       def unknown: (self x) -> untyped
       def generic: (Enumerator[String] x) -> untyped
+      def opaque_elements: (Array[Integer | untyped] x, Array[String]? nullable) -> untyped
+      @items: Array[String | Symbol]
+      @opaque: Array[untyped]
     end
   RBS
   loaded = RbsSignatures.load([dir])
@@ -124,6 +127,28 @@ Dir.mktmpdir do |dir|
              ])
   check.call('container generics give only their outer classes',
              loaded.methods[['IrContracts', 'containers']].args.map(&:value_classes) == [Set[:Array], Set[:Hash]])
+  check.call('container generic element bounds are retained separately',
+             loaded.methods[['IrContracts', 'containers']].args.map(&:element_classes) == [Set[:String], Set[:Integer]])
+  check.call('unknown elements and nullable containers supply no element metadata',
+             loaded.methods[['IrContracts', 'opaque_elements']].args.all? { |type| type.element_classes.nil? })
+  container_sig = loaded.methods[['IrContracts', 'containers']]
+  container_body = Irep.new(label: 'containers', nlocals: 4, instructions: [
+    Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: '2:0:0:0:0:0:0:0 (0x0)', raw: 'ENTER'),
+    Insn.new(lineno: 1, addr: 4, op: 'GETIDX0', args: "R3\tR1[0]", raw: 'GETIDX0'),
+    Insn.new(lineno: 1, addr: 8, op: 'RETURN', args: 'R3', raw: 'RETURN')
+  ])
+  container_loaded = RbsSignatures::Loaded.new(methods: { ['IrContracts', 'containers'] => container_sig },
+                                             ivars: loaded.ivars, diagnostics: [], files: [])
+  container_applied = RbsSignatures.apply(container_loaded, { container_body.label => container_body },
+                                        { 'containers' => [MethodDef.new(owner: 'IrContracts', name: 'containers', irep: 'containers')] }, {}, {}, {})
+  check.call('matched generic argument metadata reaches the IR factory',
+             container_applied.ir_arg_elements['containers'] == { '1' => Set[:String], '2' => Set[:Integer] })
+  element_fact = RbsSignatures.ir_types(container_applied, container_body).fact_at(2, '3')
+  check.call('generic array index reads retain nil and conditional argument provenance',
+             element_fact&.classes == Set[:String, :NilClass] && element_fact.declared? && element_fact.contracts.include?('argument:R1'))
+  check.call('generic ivar element metadata retains unions and excludes untyped',
+             container_applied.ir_ivar_elements == { ['IrContracts', 'items'] => Set[:String, :Symbol] })
+
   check.call('self and unsupported generic types stay unknown',
              %w[unknown generic].all? { |name| loaded.methods[['IrContracts', name]].args.first.value_classes.nil? })
   make_insn = ->(addr, op, args) { Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}") }
@@ -180,13 +205,14 @@ Dir.mktmpdir do |dir|
   File.write(File.join(dir, 'calls.rbs'), <<~RBS)
     class CallRoot
       def child: () -> CallLeaf
-      def next: () -> CallRoot
+      def next: () -> self
     end
     class CallLeaf
       def finish: () -> Symbol
     end
     class CallOther
       def child: () -> CallOtherLeaf
+      def next: () -> self
     end
     class CallOtherLeaf
       def finish: () -> Integer
@@ -230,6 +256,46 @@ Dir.mktmpdir do |dir|
   check.call('explicit receiver call chains retain every contract dependency', fact&.classes == Set[:Symbol] && fact.declared? &&
              fact.contracts == ['argument:R1', 'call-result:CallLeaf#finish', 'call-result:CallRoot#child'])
   check.call('contract call results do not enter the inference-only query', chain.at(4, '2').nil?)
+  self_call = Irep.new(label: 'CallUse_chain', nlocals: 3, instructions: [
+    make_insn.call(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), make_insn.call(4, 'MOVE', "R2\tR1"),
+    make_insn.call(8, 'SEND0', "R2\t:next"), make_insn.call(12, 'RETURN', 'R2')
+  ])
+  self_fact = RbsSignatures.ir_types(applied, self_call).fact_at(3, '2')
+  check.call('self returns substitute the receiver bound with conditional provenance',
+             self_fact&.classes == Set[:CallRoot] && self_fact.declared? && self_fact.contracts.include?('call-result:CallRoot#next'))
+  check.call('self returns never become independent facts', RbsSignatures.ir_types(applied, self_call).at(3, '2').nil?)
+  check.call('self return contracts give an owner bound for feedback', applied.ir_return_types['CallRoot_next'] == Set[:CallRoot])
+  self_union = Irep.new(label: 'CallUse_union', nlocals: 3, instructions: self_call.instructions)
+  check.call('self return substitution retains every receiver union member',
+             RbsSignatures.ir_types(applied, self_union).fact_at(3, '2')&.classes == Set[:CallRoot, :CallOther])
+  included = { 'CallRoot' => ['CallOther'] }
+  prepended = { 'CallRoot' => ['CallOther'] }
+  check.call('prepended contracts precede the owner contract',
+             RbsSignatures.ir_types(applied, ireps['CallUse_chain'], prepended_modules: prepended).fact_at(4, '2')&.classes == Set[:Integer])
+  check.call('an owner contract precedes included contracts',
+             RbsSignatures.ir_types(applied, ireps['CallUse_chain'], included_modules: included).fact_at(4, '2')&.classes == Set[:Symbol])
+  check.call('unknown mixins refuse inherited call contracts',
+             RbsSignatures.ir_types(applied, ireps['CallUse_chain'], unknown_mixins: Set['CallRoot']).fact_at(4, '2').nil?)
+  check.call('runtime mixin paths match prepend, owner, reverse includes and superclass order',
+             RbsSignatures.contract_owners('Child', { 'Child' => 'Parent' }, included_modules: { 'Child' => %w[First Last] },
+                                          prepended_modules: { 'Child' => ['Before'] }) == %w[Before Child Last First Parent])
+  check.call('mixin traversal does not insert a module superclass before the owner',
+             RbsSignatures.contract_owners('Child', { 'Before' => :none, 'Child' => 'Parent' },
+                                          prepended_modules: { 'Child' => ['Before'] }) == %w[Before Child Parent])
+  check.call('cyclic mixin paths refuse all contracts',
+             RbsSignatures.contract_owners('Child', {}, included_modules: { 'Child' => ['Mix'], 'Mix' => ['Child'] }).empty?)
+  # An actual override without a usable signature must stop inherited lookup.
+  override = MethodDef.new(owner: 'CallRoot', name: 'finish', irep: 'unsigned_finish')
+  guarded = RbsSignatures.apply(loaded, ireps, (definitions + [override]).group_by(&:name), {}, {}, {})
+  unsigned = Irep.new(label: 'CallUse_chain', nlocals: 3, instructions: [
+    make_insn.call(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), make_insn.call(4, 'MOVE', "R2\tR1"),
+    make_insn.call(8, 'SEND0', "R2\t:finish"), make_insn.call(12, 'RETURN', 'R2')
+  ])
+  check.call('unsigned overrides do not borrow included contracts',
+             RbsSignatures.ir_types(guarded, unsigned, included_modules: { 'CallRoot' => ['CallLeaf'] }).fact_at(3, '2').nil?)
+  inherited = RbsSignatures.ir_types(applied, unsigned, included_modules: { 'CallRoot' => ['CallLeaf'] }).fact_at(3, '2')
+  check.call('included method contracts type an otherwise missing method', inherited&.classes == Set[:Symbol])
+
   blocked = Irep.new(label: 'CallUse_chain', nlocals: 3, instructions: [
     make_insn.call(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), make_insn.call(4, 'MOVE', "R2\tR1"),
     make_insn.call(8, 'SENDB', "R2\t:child\tn=0"), make_insn.call(12, 'RETURN', 'R2')
@@ -253,6 +319,9 @@ Dir.mktmpdir do |dir|
   check.call('the call-results switch restores explicit-receiver unknowns',
              RbsSignatures.ir_types(applied, ireps['CallUse_chain'], call_results: false).fact_at(4, '2').nil?)
 end
+
+check.call('BasicObject does not borrow Object contracts',
+           RbsSignatures.contract_owners('BasicObject', { 'BasicObject' => :none }) == ['BasicObject'])
 
 # ------------------------------------------------------------------------------------------------ 2. fixtures
 if ARGV.include?('--unit-only') || !ENV['MRBC']
