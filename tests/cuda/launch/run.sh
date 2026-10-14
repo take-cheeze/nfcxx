@@ -58,6 +58,7 @@ pass tmpl_dep.cu "template dependent: no error, 0 mismatches"
 pass dep_type.cu "dep type: no error, 0 mismatches"
 pass dep_value.cu "dep value: no error, 0 mismatches"
 pass generic_lambda.cu "generic lambda: no error, 102 105 107"
+pass fold_pack.cu "fold pack: no error, 1 1 1 0 314"
 refuse refuse_dep_nocall.cu "instances are not known"
 refuse refuse_dep_cycle.cu "instantiates itself through its template arguments"
 refuse refuse_generic_lambda.cu "is called with an argument that is not a literal"
@@ -70,6 +71,16 @@ pass local_targs.cu "local targs: no error, 43 43"
 pass macro_targs.cu "macro targs: no error, 64 64"
 pass using_namespace.cu "using namespace: no error, 28 28"
 pass shared_align.cu "shared align launch: no error, 0 mismatches"
+pass grid_sync.cu "grid sync: no error, 0 mismatches"
+# Mutant: the same two-phase kernel without the grid barrier must read stale data, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" grid_sync_nobarrier.cu -o "$out/nb.o" > "$out/nb.log" 2>&1 \
+   && "$root/nfcxx" "$out/nb.o" -L"$cuda/lib64" -lcudart -o "$out/nb" >> "$out/nb.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/nb" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant grid_sync_nobarrier: caught: $run"
+else
+  echo "FAIL grid_sync_nobarrier: the mutant was not caught"; fail=1
+fi
 pass overload_pair.cu "overload pair: exact"
 pass fnptr_return.cu "fnptr return: exact"
 exit $fail
