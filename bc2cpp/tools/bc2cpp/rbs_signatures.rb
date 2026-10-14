@@ -21,7 +21,7 @@ require_relative 'annotations'
 #            whose parameter count is not the definition's.
 #   error    (TC1002) a parse error, an overloaded `def`, any declaration or member kind not listed above.
 # IR contracts separately retain nominal value classes for nullable, union, bool, nil and literal types;
-# only matched required arguments seed BytecodeIR::Types#fact_at (ADR 0441). Existing hint kinds stay unchanged.
+# matched arguments, ivars and implicit self-call returns seed IR queries (ADR 0442), without changing hint kinds.
 # A signature never overrides a `# bc2cpp:` comment: where both name a slot the comment wins and the difference is TC1006.
 module RbsSignatures
   Diag = Struct.new(:file, :line, :col, :severity, :code, :message, keyword_init: true) do
@@ -220,7 +220,7 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -229,7 +229,11 @@ module RbsSignatures
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
-                     ivar_sigs: loaded.ivars, ir_arg_types: {})
+                     ivar_sigs: loaded.ivars, ir_arg_types: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
+                     ir_owners: registry.values.flatten.select(&:irep).group_by(&:irep).filter_map do |label, defs|
+                       owners = defs.map(&:owner).uniq
+                       [label, owners.first] if owners.size == 1
+                     end.to_h.freeze)
     defs_by = {}
     registry.each_value { |defs| defs.each { |d| defs_by[[d.owner, d.name.to_s]] = d if d.irep } }
     loaded.methods.each_value do |sig|
@@ -253,7 +257,12 @@ module RbsSignatures
         commented = annotations[d.irep]&.args&.[](index) || class_annotations[d.irep]&.args&.[](index) ||
                     element_annotations[d.irep]&.arg_elements&.[](index)
         [((index + 1).to_s), type.value_classes] if type.value_classes && !commented
-      end.to_h.freeze
+      end.to_h.freeze if ap.ir_owners[d.irep] == sig.owner
+      comment_return = annotations[d.irep]&.ret || element_annotations[d.irep]&.ret_class || element_annotations[d.irep]&.element
+      if sig.ret&.value_classes && !comment_return
+        ap.ir_return_types[d.irep] = sig.ret.value_classes if ap.ir_owners[d.irep] == sig.owner
+        ap.ir_named_returns[[sig.owner, sig.name]] = sig.ret.value_classes
+      end
       merge_method(ap, sig, d, annotations, class_annotations, element_annotations, known_owners)
     end
     loaded.ivars.each_value do |iv|
@@ -261,15 +270,44 @@ module RbsSignatures
         note(ap, iv.loc, 'error', 'TC1003', "#{iv.owner}: no such class in the program (#{iv.name})")
         next
       end
+      ap.ir_ivar_types[[iv.owner, iv.name.delete_prefix('@')]] = iv.type.value_classes if iv.type.value_classes
       seed_ivar(ap, iv, known_owners)
     end
     ap
   end
 
   # Applied signatures have already been matched to the definition and its required arity.
-  def ir_types(applied, irep)
+  def ir_types(applied, irep, superclass_of: {})
     require_relative 'bytecode_ir'
-    BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}))
+    owner = applied.ir_owners[irep.label]
+    return BytecodeIR::Types.new(irep) unless owner
+
+    owners = contract_owners(owner, superclass_of)
+    ivars = {}
+    owners.reverse_each do |owner|
+      applied.ir_ivar_types.each { |(decl_owner, name), types| ivars[name] = types if decl_owner == owner }
+    end
+    calls = {}
+    irep.instructions.each_with_index do |insn, index|
+      next unless %w[SSEND SSEND0 SSENDB].include?(insn.op)
+
+      types = owners.filter_map { |owner| applied.ir_named_returns[[owner, insn.sym.to_s]] }.first
+      calls[index] = types if types
+    end
+    BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}),
+                         declared_ivars: ivars, declared_calls: calls)
+  end
+
+  # A cyclic hierarchy supplies no inherited contracts.
+  def contract_owners(owner, superclass_of)
+    owners = []
+    while owner.is_a?(String)
+      return [] if owners.include?(owner)
+
+      owners << owner
+      owner = superclass_of[owner]
+    end
+    owners
   end
 
   def note(ap, loc, severity, code, message)

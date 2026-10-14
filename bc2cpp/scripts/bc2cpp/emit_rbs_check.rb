@@ -165,6 +165,29 @@ else
     out, _e, st = tc.call(dir, '--files', 'rt.rb', '--sig', 'out', '--no-sends', '-q')
     check.call('a wrong edit is TC1001 at that line of the emitted file',
                st.exitstatus == 1 && out.include?("out/RtPoint.rbs:#{line + 1}:3: error: RtPoint#scaled parameter 1: declared Symbol, inferred Integer (signature) [TC1001]"))
+
+    puts '== IR suggestions round trip through RBS'
+    File.write(File.join(dir, 'union.rb'), <<~RUBY)
+      class IrSuggestion
+        def choose(flag)
+          flag ? 1.5 : :tag
+        end
+      end
+    RUBY
+    out, err, st = tc.call(dir, '--files', 'union.rb', '--sig', 'no-signatures', '--emit-rbs-suggestions', 'suggested', '--no-sends', '--format', 'json')
+    check.call("IR suggestion export succeeds #{err.lines.first&.strip}", st.success?)
+    report = JSON.parse(out)
+    check.call('an independently inferred union return improves the facts', report['methods'].first['return']['type'] == 'Float | Symbol' &&
+               report['methods'].first['return']['source'] == 'inferred:bytecode-ir')
+    text = File.read(File.join(dir, 'suggested/IrSuggestion.rbs'))
+    check.call('candidate RBS includes the inferred union', text.include?('-> (Float | Symbol)'))
+    out, err, st = tc.call(dir, '--files', 'union.rb', '--sig', 'suggested', '--no-sends', '--format', 'json')
+    check.call("IR candidate read back succeeds #{err.lines.first&.strip}", st.success?)
+    report = JSON.parse(out)
+    check.call('reading the candidate back reports a signature with independent inferred feedback',
+               report['methods'].first['return']['source'] == 'signature' && report['ir_feedback'].any? { |row|
+                 row['kind'] == 'return' && row['status'] == 'inferred' && row['expected'] == 'Float | Symbol'
+               })
   end
 end
 

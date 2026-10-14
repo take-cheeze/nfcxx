@@ -28,6 +28,7 @@
 #   --what-if                estimate, per suggestion, how many by-name lines a signature removes (recompiles each
 #                            send once; several minutes on the engine)
 #   --emit-rbs DIR           write the inferred types as RBS files below DIR (docs/bc2cpp-type-check.md)
+#   --emit-rbs-suggestions DIR  write reviewable candidates with independently inferred IR returns
 #   -q                       no summary: diagnostics only
 #
 # Exit status: 0 clean, 1 when a declared type contradicts the inference or a signature cannot be used, 2 when the
@@ -59,6 +60,7 @@ parser = OptionParser.new do |o|
   o.on('--no-sends') { opts[:sends] = false }
   o.on('--what-if') { opts[:what_if] = true }
   o.on('--emit-rbs DIR') { |v| opts[:emit_rbs] = v }
+  o.on('--emit-rbs-suggestions DIR') { |v| opts[:emit_rbs_suggestions] = v }
   o.on('-q') { opts[:quiet] = true }
 end
 rest = parser.parse(ARGV)
@@ -95,6 +97,13 @@ if opts[:emit_rbs]
   emitted = TypeCheckRbs.emit(facts, opts[:emit_rbs], scope: opts[:scope])
   warn "type_check: wrote #{emitted[:files].size} RBS file(s), #{emitted[:methods]} method signature(s) to #{opts[:emit_rbs]}" \
        "#{emitted[:skipped].empty? ? '' : " (#{emitted[:skipped].size} skipped: #{emitted[:skipped].first(3).map(&:last).join(', ')})"}"
+end
+
+if opts[:emit_rbs_suggestions]
+  require 'type_check_rbs'
+  emitted = TypeCheckRbs.emit(TypeCheckRbs.suggestion_facts(facts, scope: opts[:scope]), opts[:emit_rbs_suggestions], scope: opts[:scope])
+  warn "type_check: wrote #{emitted[:files].size} RBS suggestion file(s) to #{opts[:emit_rbs_suggestions]} (review before using as contracts)"
+  emitted[:skipped].each { |reason, target| warn "type_check: skipped #{target}: #{reason}" }
 end
 
 body = case opts[:format]

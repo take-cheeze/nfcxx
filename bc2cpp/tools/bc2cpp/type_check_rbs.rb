@@ -85,6 +85,25 @@ module TypeCheckRbs
     false
   end
 
+  # A suggested return needs an inferred answer at every exit, independent of its declared contract.
+  def inferred_return_suggestions(facts, scope: 'engine')
+    rows = Array(facts['ir_feedback']).select { |row| row['kind'] == 'return' && (scope == 'all' || row['scope'] == scope) }
+    rows.group_by { |row| [row['owner'], row['method']] }.filter_map do |(owner, method), exits|
+      next unless exits.all? { |row| %w[inferred mismatch possible_mismatch].include?(row['status']) && row['type'] }
+
+      types = exits.flat_map { |row| row['type'].split(' | ') }.uniq.sort
+      { 'owner' => owner, 'method' => method, 'type' => types.join(' | '), 'source' => 'inferred:bytecode-ir' }
+    end
+  end
+
+  def suggestion_facts(facts, scope: 'engine')
+    suggestions = inferred_return_suggestions(facts, scope: scope).to_h { |row| [[row['owner'], row['method']], row] }
+    facts.merge('methods' => facts['methods'].map do |method|
+      suggestion = suggestions[[method['owner'], method['name']]]
+      suggestion ? method.merge('return' => { 'type' => suggestion['type'], 'source' => suggestion['source'], 'reason' => nil }) : method
+    end)
+  end
+
   # Writes the files; returns { files:, methods:, skipped: [[reason, what]] }.
   def emit(facts, dir, scope: 'engine')
     core_names, core_has = core_env
