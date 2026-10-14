@@ -1966,6 +1966,188 @@ std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<lon
   return lines;
 }
 
+// Ruby globals of the rewrite: $cond_strict, $edg_launches (the --edg-launches flag).
+bool g_cond_strict = false;
+bool g_edg_launches = false;
+std::string resolve_conditionals(const std::string &text, const std::map<std::string, std::string> &defs);
+
+// Ruby rewrite (line 1037): the launch rewrite of a host unit. The output keeps the line count of the input.
+std::string rewrite(const std::string &text, const std::string &orig) {
+  std::string out = "#line 1 \"" + orig + "\"\n";
+  long n = (long)text.size();
+  long i = 0;
+  // The wrapper declarations of the template launches, at file scope just before the top-level piece that holds
+  // each launch: EDG rejects a linkage specification in block scope. Keyed by the piece's start index.
+  std::vector<Piece> pieces = top_pieces(text);
+  std::map<long, std::vector<std::string>> decls_at;
+  auto add_decl = [&](long at, const std::string &line) {
+    auto &v = decls_at[at];
+    if (std::find(v.begin(), v.end(), line) == v.end()) v.push_back(line);
+  };
+  g_cond_strict = true;
+  std::string resolved = resolve_conditionals(text, {});
+  g_cond_strict = false;
+  g_has_kernel_text = true;
+  g_kernel_text = resolved;
+  auto dl = dependent_launches(resolved);
+  for (const auto &tl : template_launches(text)) {
+    std::string dep;
+    if (dependent_on_template(text, tl.pos, tl.targs, dep)) continue;
+    std::string w = template_site(tl.name, tl.targs);
+    long key = 0;
+    for (const auto &pc : pieces)
+      if (pc.st <= tl.pos && tl.pos < pc.en) {
+        key = pc.st;
+        break;
+      }
+    std::string decl;
+    for (const auto &site : g_sites)
+      if (site.wrapper == w) decl = site.decl;
+    add_decl(key, "static void " + w + "(" + decl + ");\n");
+  }
+  for (const auto &at_line : dependent_decls(dl, text)) add_decl(at_line.first, at_line.second);
+  std::map<long, long> dirs = directive_ends(text);
+  while (i < n) {
+    auto dit = decls_at.find(i);
+    if (dit != decls_at.end()) {
+      for (const auto &line : dit->second) out += line;
+      decls_at.erase(dit);
+    }
+    auto dr = dirs.find(i);
+    if (dr != dirs.end()) {
+      // a directive ends before its newline: the newline (and the declarations of the piece after it) follow it
+      long k = dr->second;
+      out += sl(text, i, k);
+      i = k;
+      if (k < n && ch(text, k) == '\n') {
+        out += "\n";
+        i = k + 1;
+        auto kit = decls_at.find(k);
+        if (kit != decls_at.end()) {
+          for (const auto &line : kit->second) out += line;
+          decls_at.erase(kit);
+        }
+      }
+      continue;
+    }
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += sl(text, i, e);
+      i = e;
+      continue;
+    }
+    if (sl_n(text, i, 3) == "<<<" && !(i + 3 < n && ch(text, i + 3) == '<')) {
+      long line = line_col(text, i).first;
+      // The kernel name is the identifier before `<<<`, or before its template argument list.
+      long j = i - 1;
+      while (j >= 0 && white_c(ch(text, j))) j -= 1;
+      bool has_targs = false;
+      std::string targs;
+      long gt_at = j;
+      if (ch(text, j) == '>') {
+        long depth = 0;
+        while (j >= 0) {
+          if (ch(text, j) == '>') depth += 1;
+          if (ch(text, j) == '<') depth -= 1;
+          if (depth == 0) break;
+          j -= 1;
+        }
+        targs = strip(sl(text, j + 1, gt_at));
+        has_targs = true;
+        j -= 1;
+        while (j >= 0 && white_c(ch(text, j))) j -= 1;
+      }
+      long name_end = j + 1;
+      long name_start = name_end;
+      while (name_start > 0 && ident_c(ch(text, name_start - 1))) name_start -= 1;
+      std::string name = sl(text, name_start, name_end);
+      if (name.empty()) refuse("launch without a kernel name at line " + std::to_string(line));
+      if (g_edg_launches && !has_targs) {
+        // A launch without template arguments is left to the front end (--cuda parses it, see docs/notes/gpu.md).
+        out.push_back(text[(size_t)i]);
+        i += 1;
+        continue;
+      }
+      // The same resolution as template_launches: the wrapper of this launch is named by the values of its constants.
+      if (has_targs) targs = resolve_local_constants(text, targs, i);
+      // The call copied so far ends with the name and its arguments: take them back out.
+      long cut = (long)out.size() - (i - name_start);
+      out = sl(out, 0, cut < 0 ? 0 : cut);
+
+      // The configuration runs to the first `>>>` outside brackets.
+      long k = i + 3;
+      long depth = 0;
+      long close_cfg = -1;
+      while (k < n) {
+        long e2 = skip_literal(text, k);
+        if (e2 >= 0) {
+          k = e2;
+          continue;
+        }
+        int c = ch(text, k);
+        if (c == '(' || c == '[' || c == '{') {
+          depth += 1;
+        } else if (c == ')' || c == ']' || c == '}') {
+          depth -= 1;
+        } else if (depth == 0 && sl_n(text, k, 3) == ">>>") {
+          close_cfg = k;
+          break;
+        }
+        k += 1;
+      }
+      if (close_cfg < 0) refuse("unterminated launch configuration for " + name);
+      std::vector<std::string> cfg = split_config(text, i + 3, close_cfg);
+      if (cfg.size() < 2 || cfg.size() > 4) refuse("launch of " + name + " needs 2 to 4 configuration items");
+      while (cfg.size() < 4) cfg.push_back("0");
+      if (cfg[2].empty()) cfg[2] = "0";
+      if (cfg[3].empty()) cfg[3] = "0";
+
+      long p = close_cfg + 3;
+      while (p < n && white_c(ch(text, p))) p += 1;
+      if (ch(text, p) != '(') refuse("launch of " + name + " without an argument list");
+      long close_args = matching_paren(text, p);
+      if (close_args < 0) refuse("unterminated argument list for " + name);
+      std::string args = strip(sl(text, p + 1, close_args));
+
+      long nls = 0;
+      for (long q = i; q <= close_args && q < n; q++)
+        if (ch(text, q) == '\n') nls += 1;
+      std::string kernel = name;
+      if (has_targs) {
+        auto dit2 = dl.find(line_col(text, i));
+        if (dit2 != dl.end()) {
+          // The pack keeps its ... (disp<Ns...> expands it inside the template body).
+          const DependentLaunch &d = dit2->second;
+          std::vector<std::string> tn;
+          for (size_t q = 0; q < d.outer.names.size(); q++)
+            tn.push_back(d.outer.has_pack && (long)q == d.outer.pack ? d.outer.names[q] + "..." : d.outer.names[q]);
+          kernel = d.dname + "<" + join(tn, ", ") + ">::fn";
+        } else {
+          std::string dep;
+          if (dependent_on_template(text, i, targs, dep))
+            refuse("template launch of " + name + "<" + targs + "> depends on a template parameter, and its enclosing "
+                   "template is not resolved in this unit (at line " + std::to_string(line) + ")");
+          kernel = template_site(name, targs);
+        }
+      }
+      out += "__nfcxx_cuda_launch(" + kernel + ", " + cfg[0] + ", " + cfg[1] + ", " + cfg[2] + ", " + cfg[3];
+      if (!args.empty()) out += ", " + args;
+      out += ")";
+      out += std::string((size_t)nls, '\n');
+      i = close_args + 1;
+      continue;
+    }
+    out.push_back(text[(size_t)i]);
+    i += 1;
+  }
+  // The wrappers are defined here, after the calls; each call has the declaration in its block.
+  if (!g_sites.empty()) {
+    out += "\n";
+    for (const auto &site : g_sites) out += "static void " + site.wrapper + "(" + site.decl + ") {}\n";
+  }
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
