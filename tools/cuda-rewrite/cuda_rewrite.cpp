@@ -644,6 +644,7 @@ bool member_qualifier(const std::string &header, MemberQualifier &out) {
 // template's names (one list per instance, in the member's parameter order).
 struct OuterTemplate {
   long st = 0, open = 0;
+  long line = 0;  // Ruby: outer[:line] (set by dependent_launches)
   std::vector<std::string> names;
   std::vector<std::string> decls;
   std::string fname;
@@ -1721,6 +1722,248 @@ std::string launch_prepare(const std::string &text) {
   std::string t = expand_launch_macros(text, 0);
   g_expanded = t;
   return deduce_launch_targs(t);
+}
+
+// Ruby template_head_of (line 872): the parameter names and parts of a template function's definition.
+bool template_head_of(const std::string &text, const std::string &name, TemplateHead &out) {
+  for (const auto &tb : template_bodies(text)) {
+    TmplHeader t = tb.tmpl;
+    std::string header = sl(text, t.close + 1, tb.open);
+    if (function_name(header) != name) continue;
+    long lp = str_index(header, "(", 0);
+    if (lp < 0) continue;
+    long rp = matching_paren(header, lp);
+    std::vector<std::string> parts = split_top(sl(header, lp + 1, rp));
+    std::vector<std::string> names;
+    for (const auto &pr : split_top(sl(text, t.lt + 1, t.close))) {
+      std::vector<std::string> pt = tokens_of(strip(ruby_split_eq0(pr)));
+      names.push_back(pt.empty() ? std::string() : pt.back());
+    }
+    out.names = names;
+    out.parts = parts;
+    out.pos = tb.open;
+    return true;
+  }
+  return false;
+}
+
+// Ruby deduce_call_targs (line 889): the explicit template arguments of a call, deduced from the argument types.
+bool deduce_call_targs(const std::string &text, const std::string &name, long pos,
+                       const std::vector<std::string> &args, std::vector<std::string> &out) {
+  TemplateHead head;
+  if (!template_head_of(text, name, head)) return false;
+  std::map<std::string, std::string> found;
+  for (size_t idx = 0; idx < head.parts.size(); idx++) {
+    if (idx >= args.size()) break;
+    std::vector<std::string> ptoks = type_tokens(head.parts[idx]);
+    if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
+    for (const auto &p : head.names) {
+      if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
+      std::vector<std::string> at = caller_arg_type(text, pos, args[idx], name);
+      std::string t;
+      if (!match_type(ptoks, at, p, t))
+        refuse("call of " + name + ": " + p + " cannot be deduced from the argument " + args[idx] + " of type " +
+               join(at, " ") + " (at line " + std::to_string(line_of(text, pos)) + ")");
+      if (found.count(p) && found[p] != t)
+        refuse("call of " + name + ": " + p + " is deduced as " + found[p] + " and as " + t + " (ambiguous, at line " +
+               std::to_string(line_of(text, pos)) + ")");
+      found[p] = t;
+    }
+  }
+  out.clear();
+  for (const auto &p : head.names) {
+    if (!found.count(p))
+      refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
+             ", so it cannot be deduced");
+    out.push_back(found[p]);
+  }
+  return true;
+}
+
+// Ruby template_instances (line 911): the concrete argument lists that instantiate template function name.
+// Memoized per text (identity), like the Ruby script.
+IdentKey g_instances_key;
+std::map<std::string, std::vector<std::vector<std::string>>> g_instances;
+
+std::vector<std::vector<std::string>> template_instances(const std::string &name, const std::string &text,
+                                                       const std::vector<std::string> &stack) {
+  std::vector<std::string> chain = stack;
+  if (std::find(stack.begin(), stack.end(), name) != stack.end()) {
+    std::vector<std::string> path = stack;
+    path.push_back(name);
+    refuse("dependent launch: " + join(path, " -> ") + " instantiates itself through its template arguments");
+  }
+  if (!g_instances_key.is(text)) {
+    g_instances_key.set(text);
+    g_instances.clear();
+  }
+  auto memo = g_instances.find(name);
+  if (memo != g_instances.end()) return memo->second;
+  std::vector<std::pair<std::vector<std::string>, long>> sites;
+  for (const auto &cs : call_sites(text, name)) sites.push_back({split_top(cs.first), cs.second});
+  // Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
+  for (const auto &pc : plain_call_sites(text, name)) {
+    std::vector<std::string> deduced;
+    if (deduce_call_targs(text, name, pc.second, pc.first, deduced)) sites.push_back({deduced, pc.second});
+  }
+  std::vector<std::vector<std::string>> out;
+  std::vector<std::string> next_stack = stack;
+  next_stack.push_back(name);
+  for (auto &site : sites) {
+    std::vector<std::string> args = site.first;
+    long pos = site.second;
+    OuterTemplate outer;
+    bool has_outer = enclosing_template(text, pos, outer);
+    // A bare local constant of the enclosing body (fallback in mmq's mul_mat_q_case) is its literal value.
+    if (has_outer) {
+      for (auto &a : args) {
+        std::string v = strip(a);
+        bool plain = !v.empty();
+        for (char c : v)
+          if (!ident_c((unsigned char)c)) plain = false;
+        if (plain && std::find(outer.names.begin(), outer.names.end(), v) == outer.names.end()) {
+          std::string val;
+          if (local_constant(text, outer.open, pos, v, val)) a = val;
+        }
+      }
+    }
+    bool mentions = false;
+    if (has_outer) {
+      for (const auto &a : args)
+        for (const auto &tk : tokens_of(a))
+          if (std::find(outer.names.begin(), outer.names.end(), tk) != outer.names.end()) mentions = true;
+    }
+    if (has_outer && mentions) {
+      for (const auto &inst : template_instances(outer.fname, text, next_stack)) {
+        // A pack expands to several arguments: the list is split again after the substitution.
+        std::vector<std::string> subbed;
+        for (const auto &a : args) subbed.push_back(substitute(a, outer.names, inst, outer.has_pack, outer.pack));
+        out.push_back(split_top(join(subbed, ", ")));
+      }
+    } else {
+      out.push_back(args);
+    }
+  }
+  // Ruby: out.uniq (first occurrences kept, in order).
+  std::vector<std::vector<std::string>> uniq;
+  for (const auto &x : out)
+    if (std::find(uniq.begin(), uniq.end(), x) == uniq.end()) uniq.push_back(x);
+  g_instances[name] = uniq;
+  return uniq;
+}
+
+// Ruby line_col (line 955): [line (1-based), column] of pos. The newline positions are indexed once per text.
+IdentKey g_newlines_key;
+std::vector<long> g_newlines;
+std::pair<long, long> line_col(const std::string &s, long pos) {
+  if (!g_newlines_key.is(s)) {
+    g_newlines.clear();
+    for (long k = 0; k < (long)s.size(); k++)
+      if (s[(size_t)k] == '\n') g_newlines.push_back(k);
+    g_newlines_key.set(s);
+  }
+  long lo = 0, hi = (long)g_newlines.size();
+  while (lo < hi) {
+    long mid = (lo + hi) / 2;
+    if (g_newlines[(size_t)mid] < pos) lo = mid + 1;
+    else hi = mid;
+  }
+  long start = lo == 0 ? 0 : g_newlines[(size_t)(lo - 1)] + 1;
+  return {lo + 1, pos - start};
+}
+
+// Ruby line_start (line 980): the position of the first character of a 1-based line.
+long line_start(const std::string &s, long line) {
+  long i = 0;
+  for (long k = 0; k < line - 1; k++) {
+    long nl = str_index(s, "\n", i);
+    i = nl + 1;
+  }
+  return i;
+}
+
+// Ruby dependent_launches (line 991): the launches whose template arguments depend on an enclosing template parameter.
+struct DependentLaunch {
+  std::string name, targs, dname;
+  OuterTemplate outer;
+  std::vector<std::vector<std::string>> insts;
+  // Ruby: d[:wrapper] (instance key => wrapper name), filled by dependent_decls
+  std::vector<std::pair<std::vector<std::string>, std::string>> wrapper;
+};
+std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::string &text) {
+  std::map<std::pair<long, long>, DependentLaunch> out;
+  long idx = 0;
+  for (const auto &tl : template_launches(text)) {
+    long at = idx++;
+    if (tl.targs.empty()) continue;
+    std::string dep;
+    if (!dependent_on_template(text, tl.pos, tl.targs, dep)) continue;
+    OuterTemplate outer;
+    if (!enclosing_template(text, tl.pos, outer))
+      refuse("template launch of " + tl.name + "<" + tl.targs + "> depends on the template parameter " + dep +
+             ", which is not a parameter of a top-level template function (at line " +
+             std::to_string(line_of(text, tl.pos)) + ")");
+    std::vector<std::vector<std::string>> insts;
+    if (outer.has_qual) insts = member_instances(outer, text);
+    else insts = template_instances(outer.fname, text, {});
+    if (insts.empty())
+      refuse("template launch of " + tl.name + "<" + tl.targs + "> depends on the template parameter " + dep + " of " +
+             outer.fname + ": the unit has no explicit call of it with all its template arguments, so its instances are "
+             "not known");
+    for (const auto &inst : insts) {
+      bool ok = outer.has_pack ? (long)inst.size() >= (long)outer.names.size() - 1 : inst.size() == outer.names.size();
+      if (!ok)
+        refuse("template launch of " + tl.name + "<" + tl.targs + ">: a call of " + outer.fname +
+               " does not give all its template arguments explicitly");
+    }
+    outer.line = line_col(text, outer.st).first;
+    DependentLaunch d;
+    d.name = tl.name;
+    d.targs = tl.targs;
+    d.outer = outer;
+    d.insts = insts;
+    d.dname = "__nfcxx_disp_" + sanitize(tl.name) + "_" + std::to_string(at);
+    out[line_col(text, tl.pos)] = d;
+  }
+  return out;
+}
+
+// Ruby dependent_decls (line 1017): the dispatch declarations of the dependent launches, at their enclosing templates.
+std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<long, long>, DependentLaunch> &dl,
+                                                          const std::string &orig) {
+  std::vector<std::pair<long, std::string>> lines;
+  for (auto &kv : dl) {
+    DependentLaunch &d = kv.second;
+    for (const auto &inst : d.insts) {
+      std::vector<std::string> concrete;
+      for (const auto &a : split_top(d.targs))
+        concrete.push_back(substitute(a, d.outer.names, inst, d.outer.has_pack, d.outer.pack));
+      d.wrapper.push_back({inst, template_site(d.name, join(concrete, ", "))});
+    }
+  }
+  for (auto &kv : dl) {
+    DependentLaunch &d = kv.second;
+    long at = line_start(orig, d.outer.line);
+    // Ruby: d[:wrapper].values.uniq (first occurrences kept)
+    std::vector<std::string> uniq_w;
+    for (const auto &pr : d.wrapper)
+      if (std::find(uniq_w.begin(), uniq_w.end(), pr.second) == uniq_w.end()) uniq_w.push_back(pr.second);
+    for (const auto &w : uniq_w) {
+      std::string decl;
+      for (const auto &site : g_sites)
+        if (site.wrapper == w) decl = site.decl;
+      lines.push_back({at, "static void " + w + "(" + decl + ");\n"});
+    }
+    lines.push_back({at, "template <" + join(d.outer.decls, ", ") + "> struct " + d.dname + ";\n"});
+    for (const auto &inst : d.insts) {
+      std::string w;
+      for (const auto &pr : d.wrapper)
+        if (pr.first == inst) w = pr.second;
+      lines.push_back({at, "template <> struct " + d.dname + "<" + join(inst, ", ") + "> { static constexpr auto fn = &" + w +
+                               "; };\n"});
+    }
+  }
+  return lines;
 }
 
 }  // namespace
