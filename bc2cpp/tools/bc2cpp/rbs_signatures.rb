@@ -21,7 +21,8 @@ require_relative 'annotations'
 #            whose parameter count is not the definition's.
 #   error    (TC1002) a parse error, an overloaded `def`, any declaration or member kind not listed above.
 # IR contracts separately retain nominal value classes for nullable, union, bool, nil and literal types;
-# matched arguments, ivars and implicit self-call returns seed IR queries (ADR 0442), without changing hint kinds.
+# matched arguments, ivars and call returns seed IR queries (ADR 0442), without changing hint kinds.
+# Receiver-relative self returns and runtime mixin lookup remain conditional reporting contracts.
 # A signature never overrides a `# bc2cpp:` comment: where both name a slot the comment wins and the difference is TC1006.
 module RbsSignatures
   Diag = Struct.new(:file, :line, :col, :severity, :code, :message, keyword_init: true) do
@@ -32,7 +33,7 @@ module RbsSignatures
   MethodSig = Struct.new(:owner, :name, :args, :ret, :loc, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
-  Type = Struct.new(:kind, :cls, :element, :text, :value_classes, keyword_init: true)
+  Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, keyword_init: true)
   Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, keyword_init: true)
 
   MEMBER_OK = %w[MethodDefinition InstanceVariable AttrReader AttrAccessor].freeze
@@ -154,6 +155,14 @@ module RbsSignatures
   def type_of(t)
     type = hint_type_of(t)
     type.value_classes = value_classes_of(t)
+    type.self_return = t.is_a?(RBS::Types::Bases::Self)
+    if t.is_a?(RBS::Types::ClassInstance)
+      name = t.name.to_s.delete_prefix('::')
+      element = if name == 'Array' && t.args.size == 1 then t.args.first
+                elsif name == 'Hash' && t.args.size == 2 then t.args.last
+                end
+      type.element_classes = value_classes_of(element) if element
+    end
     type
   end
 
@@ -220,7 +229,7 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -229,7 +238,8 @@ module RbsSignatures
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
-                     ivar_sigs: loaded.ivars, ir_arg_types: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
+                     ivar_sigs: loaded.ivars, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
+                     ir_methods: registry.values.flatten.map { |d| [d.owner, d.name.to_s].freeze }.to_set.freeze,
                      ir_owners: registry.values.flatten.select(&:irep).group_by(&:irep).filter_map do |label, defs|
                        owners = defs.map(&:owner).uniq
                        [label, owners.first] if owners.size == 1
@@ -258,10 +268,16 @@ module RbsSignatures
                     element_annotations[d.irep]&.arg_elements&.[](index)
         [((index + 1).to_s), type.value_classes] if type.value_classes && !commented
       end.to_h.freeze if ap.ir_owners[d.irep] == sig.owner
+      if ap.ir_owners[d.irep] == sig.owner
+        ap.ir_arg_elements[d.irep] = sig.args.each_with_index.filter_map do |type, index|
+          register = (index + 1).to_s
+          [register, type.element_classes] if type.element_classes && ap.ir_arg_types[d.irep]&.key?(register)
+        end.to_h.freeze
+      end
       comment_return = annotations[d.irep]&.ret || element_annotations[d.irep]&.ret_class || element_annotations[d.irep]&.element
-      if sig.ret&.value_classes && !comment_return
-        ap.ir_return_types[d.irep] = sig.ret.value_classes if ap.ir_owners[d.irep] == sig.owner
-        ap.ir_named_returns[[sig.owner, sig.name]] = sig.ret.value_classes
+      if (sig.ret&.value_classes || sig.ret&.self_return) && !comment_return
+        ap.ir_return_types[d.irep] = sig.ret.self_return ? Set[sig.owner.to_sym].freeze : sig.ret.value_classes if ap.ir_owners[d.irep] == sig.owner
+        ap.ir_named_returns[[sig.owner, sig.name]] = sig.ret.self_return ? :self : sig.ret.value_classes
       end
       merge_method(ap, sig, d, annotations, class_annotations, element_annotations, known_owners)
     end
@@ -271,29 +287,42 @@ module RbsSignatures
         next
       end
       ap.ir_ivar_types[[iv.owner, iv.name.delete_prefix('@')]] = iv.type.value_classes if iv.type.value_classes
+      ap.ir_ivar_elements[[iv.owner, iv.name.delete_prefix('@')]] = iv.type.element_classes if iv.type.element_classes
       seed_ivar(ap, iv, known_owners)
     end
     ap
   end
 
   # Applied signatures have already been matched to the definition and its required arity.
-  def ir_types(applied, irep, superclass_of: {}, inferred_calls: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0')
+  def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0')
     require_relative 'bytecode_ir'
     owner = applied.ir_owners[irep.label]
-    return BytecodeIR::Types.new(irep, inferred_calls: inferred_calls, source_resolver: source_resolver) unless owner
+    return BytecodeIR::Types.new(irep, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver) unless owner
 
-    owners = contract_owners(owner, superclass_of)
+    lookup = ->(klass) { contract_owners(klass, superclass_of, included_modules: included_modules, prepended_modules: prepended_modules, unknown_mixins: unknown_mixins) }
+    owners = lookup.call(owner)
     ivars = {}
     owners.reverse_each do |owner|
       applied.ir_ivar_types.each { |(decl_owner, name), types| ivars[name] = types if decl_owner == owner }
+    end
+    ivar_elements = {}
+    owners.reverse_each do |contract_owner|
+      applied.ir_ivar_types.each do |(decl_owner, name), _types|
+        next unless decl_owner == contract_owner
+
+        ivar_elements.delete(name)
+        elements = applied.ir_ivar_elements[[decl_owner, name]]
+        ivar_elements[name] = elements if elements
+      end
     end
     calls = {}
     irep.instructions.each_with_index do |insn, index|
       # A breaking block can replace the normal return type (ADR 0443).
       next unless %w[SSEND SSEND0].include?(insn.op)
 
-      types = owners.filter_map { |owner| applied.ir_named_returns[[owner, insn.sym.to_s]] }.first
-      calls[index] = types if types
+      target = owners.find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
+      types = applied.ir_named_returns[[target, insn.sym.to_s]] if target
+      calls[index] = types == :self ? Set[owner.to_sym].freeze : types if types
     end
     named_returns = applied.ir_named_returns.transform_keys { |klass, name| [klass.dup.freeze, name.dup.freeze].freeze }.freeze
     resolver = lambda do |insn, receiver, refusal|
@@ -305,13 +334,14 @@ module RbsSignatures
       contracts = receiver.contracts.to_set
       failed = false
       receiver.classes.each do |klass|
-        target = contract_owners(klass.to_s, superclass_of).find { |candidate| named_returns.key?([candidate, insn.sym.to_s]) }
-        unless target
+        target = lookup.call(klass.to_s).find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
+        unless target && named_returns.key?([target, insn.sym.to_s])
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
           break
         end
-        classes.merge(named_returns.fetch([target, insn.sym.to_s]))
+        types = named_returns.fetch([target, insn.sym.to_s])
+        classes.merge(types == :self ? Set[klass] : types)
         contracts << "call-result:#{target}##{insn.sym}".freeze
       end
       next nil if failed
@@ -319,19 +349,28 @@ module RbsSignatures
       BytecodeIR::Types::Fact.new(classes: classes.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
     end
     BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}),
-                         declared_ivars: ivars, declared_calls: calls, inferred_calls: inferred_calls, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
+                         declared_arg_elements: applied.ir_arg_elements.fetch(irep.label, {}),
+                         declared_ivars: ivars, declared_ivar_elements: ivar_elements, declared_calls: calls, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
   end
 
-  # A cyclic hierarchy supplies no inherited contracts.
-  def contract_owners(owner, superclass_of)
+  # Match mruby lookup order; unknown/cyclic paths supply no inherited contracts.
+  def contract_owners(owner, superclass_of, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new)
     owners = []
-    while owner.is_a?(String)
-      return [] if owners.include?(owner)
+    visit = lambda do |current, active, inherit|
+      return true unless current.is_a?(String)
+      return false if active.include?(current) || unknown_mixins.include?(current)
 
-      owners << owner
-      owner = superclass_of[owner]
+      active = active.dup.add(current)
+      Array(prepended_modules[current]).reverse_each { |mod| return false unless visit.call(mod, active, false) }
+      owners << current unless owners.include?(current)
+      Array(included_modules[current]).reverse_each { |mod| return false unless visit.call(mod, active, false) }
+      return true unless inherit
+
+      parent = superclass_of[current]
+      parent = 'Object' if parent == :none && !%w[Object BasicObject].include?(current)
+      visit.call(parent, active, true)
     end
-    owners
+    visit.call(owner, Set.new, true) ? owners : []
   end
 
   def note(ap, loc, severity, code, message)

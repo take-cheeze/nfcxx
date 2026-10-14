@@ -4,6 +4,7 @@ require 'json'
 require 'set'
 require_relative 'annotations'
 require_relative 'ir_type_feedback'
+require_relative 'ir_ivar_types'
 
 # TYPE_CHECK (docs/adr/0412): the types bc2cpp's whole-program inference settled on, as data.
 #
@@ -209,9 +210,11 @@ module TypeFacts
       n = mask_classes_of_numeric(gen, mask)
       out << [n.join(' | '), 'inferred:numeric-flow'] unless n.empty? || n.include?('OTHER')
     end
+    if out.empty? && gen.respond_to?(:bytecode_ir_argument_classes)
+      classes = gen.bytecode_ir_argument_classes(d, k)
+      out << [BytecodeIR::Types.type_name(classes), 'inferred:receiver-call-sites'] if classes
+    end
     out.uniq
-  rescue StandardError
-    []
   end
 
   def mask_classes_of_numeric(gen, mask)
@@ -443,6 +446,10 @@ module TypeFacts
         if row['type'].nil? && (seed = ctx.signature_contracts&.ir_ivar_types&.[]([owner, name.to_s]))
           row['type'] = BytecodeIR::Types.type_name(seed)
           row['source'] = 'signature'
+        end
+        if row['type'].nil? && (classes = IrIvarTypes.classes(gen, owner, name))
+          row['type'] = BytecodeIR::Types.type_name(classes)
+          row['source'] = 'inferred:ivar-class-pool'
         end
         elem = (ctx.element_raw[owner] || {})[name]
         helem = (ctx.hash_element_raw[owner] || {})[name]

@@ -21,7 +21,7 @@ module BytecodeIR
       def declared? = declared
     end
 
-    def initialize(irep, declared_args: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, source_resolver: nil, call_resolver: nil)
+    def initialize(irep, declared_args: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, source_resolver: nil, call_resolver: nil)
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @declared_args = declared_args.to_h do |reg, types|
@@ -34,6 +34,9 @@ module BytecodeIR
       @declared_ivars = declared_ivars.to_h { |name, types| [name.to_s.delete_prefix('@').freeze, types.to_set.dup.freeze] }.freeze
       @declared_calls = declared_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
       @inferred_calls = inferred_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
+      @inferred_args = inferred_args.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @declared_ivar_elements = declared_ivar_elements.to_h { |name, types| [name.to_s.delete_prefix('@'), types.to_set.dup.freeze] }.freeze
       @source_resolver = source_resolver
       @call_resolver = call_resolver
       @active_queries = Set.new
@@ -93,7 +96,8 @@ module BytecodeIR
 
       source = definitions.any? do |definition|
         definition.entry? || definition.built == :arg ||
-          %w[GETIV GETCONST GETMCNST].include?(@irep.instructions[definition.index].op)
+          (%w[GETIV GETCONST GETMCNST].include?(@irep.instructions[definition.index].op) ||
+           ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %w[GETIDX GETIDX0 AREF].include?(@irep.instructions[definition.index].op))
       end
       if source && @source_resolver && (classes = @source_resolver.call(index, reg)) && !classes.empty?
         return Fact.new(classes: classes.to_set.dup.freeze, declared: false, contracts: [].freeze).freeze
@@ -106,6 +110,11 @@ module BytecodeIR
         if !values && use_declarations
           values, contract = declared_definition(definition)
           contracts << contract.freeze if values
+          if !values && !definition.entry?
+            result = indexed_definition(definition, max_states: max_states, refusal: refusal)
+            values = result&.classes
+            contracts.merge(result.contracts) if result
+          end
           if !values && @call_resolver && !definition.entry?
             insn = @irep.instructions[definition.index]
             if %w[SEND SEND0].include?(insn.op) && insn.reg == definition.reg
@@ -137,8 +146,48 @@ module BytecodeIR
       end
     end
 
+    # Container element bounds remain conditional on their RBS contract, including nil for absent keys.
+    def indexed_definition(definition, max_states:, refusal:)
+      return nil if ENV['BC2CPP_IR_ELEMENT_TYPES'] == '0'
+
+      insn = @irep.instructions[definition.index]
+      return nil unless %w[GETIDX GETIDX0].include?(insn.op) && insn.reg == definition.reg
+
+      register = insn.op == 'GETIDX0' ? insn.regs[1] : insn.reg
+      receiver = query(definition.index, register, use_declarations: true, max_states: max_states, refusal: refusal)
+      return nil unless receiver && receiver.classes.size == 1 && [:Array, :Hash].include?(receiver.classes.first)
+
+      contracts = receiver.contracts.to_set
+      if receiver.classes == Set[:Array] && insn.op != 'GETIDX0'
+        key = query(definition.index, (insn.reg.to_i + 1).to_s, use_declarations: true, max_states: max_states, refusal: refusal)
+        return nil unless key && key.classes == Set[:Integer]
+
+        contracts.merge(key.contracts)
+      end
+      definitions = BytecodeIR.reaching_definitions(@irep, definition.index, register, origin_transfers: true,
+                                                    max_states: max_states, refusal: refusal)
+      return nil unless definitions && !definitions.empty?
+
+      elements = Set[:NilClass]
+      definitions.each do |source|
+        if source.entry? || source.built == :arg
+          bound = @declared_arg_elements[source.reg]
+          contract = "element:argument:R#{source.reg}"
+        else
+          producer = @irep.instructions[source.index]
+          bound = producer.op == 'GETIV' ? @declared_ivar_elements[producer.ivar] : nil
+          contract = "element:ivar:@#{producer.ivar}"
+        end
+        return nil unless bound && !bound.empty?
+
+        elements.merge(bound)
+        contracts << contract.freeze
+      end
+      Fact.new(classes: elements.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
+    end
+
     def definition_types(definition)
-      return nil if definition.entry?
+      return @inferred_args[definition.reg] if definition.entry? || definition.built == :arg
       return ENTER_TYPES[definition.built] if definition.built
 
       insn = @irep.instructions[definition.index]
