@@ -3,6 +3,7 @@
 
 #include "nfcuop_onnxgrad.hpp"
 #include "nfcuop_ort.hpp"
+#include "nfcuop_tinygrad.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -525,14 +526,15 @@ Tensor Session::placeholder(const std::string& name, const Shape& shape, std::op
 Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) { return eval_all({t}, feeds)[0]; }
 
 std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds) {
-  if (backend == ut::Session::Backend::Ort) {  // the graph itself goes to ONNX Runtime; nothing is lowered
+  if (backend == ut::Session::Backend::Ort || backend == ut::Session::Backend::Tinygrad) {  // the graph itself goes to the library; nothing is lowered
     std::vector<int> ids;
     for (const Tensor& t : ts) {
       check(t);
       if (&t.session() != this) throw Error("np: tensor of another session");
       ids.push_back(t.id());
     }
-    return ort::run(hir_, ids, feeds);
+    if (backend == ut::Session::Backend::Ort) return ort::run(hir_, ids, feeds);
+    return tinygrad::run(hir_, ids, feeds);
   }
   std::vector<ut::Tensor> lowered;
   for (const Tensor& t : ts) {

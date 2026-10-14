@@ -169,7 +169,8 @@ class Session {
   std::vector<Array> eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds = {});
   bool optimize = true;
   // The reference interpreter, compiled C (nfcuop_cgen.hpp; `cc` is the compiler command, empty: $NFCUOP_CC, else cc), or
-  // ONNX Runtime on the graph (Backend::Ort, nfcuop_ort.hpp; the library comes from $NFCUOP_ORT_LIB).
+  // ONNX Runtime on the graph (Backend::Ort, nfcuop_ort.hpp; the library comes from $NFCUOP_ORT_LIB), or tinygrad (Backend::Tinygrad,
+  // nfcuop_tinygrad.hpp; the Python executable from $NFCUOP_TINYGRAD_PYTHON).
   ut::Session::Backend backend = ut::Session::Backend::Interpreter;
   std::string cc;
 
