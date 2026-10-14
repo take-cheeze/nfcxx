@@ -30,7 +30,7 @@ module RbsSignatures
   end
   Loc = Struct.new(:file, :line, :col)
   # args: one Type per required positional parameter; ret: Type or nil
-  MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, keyword_init: true)
+  MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
   Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, keyword_init: true)
@@ -153,7 +153,12 @@ module RbsSignatures
                                                                optional_args: fn.optional_positionals.map { |param| type_of(param.type) },
                                                                keywords: (fn.required_keywords.merge(fn.optional_keywords)).to_h { |name, param| [name.to_s, type_of(param.type)] },
                                                                required_keywords: fn.required_keywords.keys.map(&:to_s).to_set,
-                                                               ret: type_of(fn.return_type), loc: loc)
+                                                               ret: type_of(fn.return_type), loc: loc,
+                                                               type_params: mt.type_params.map { |param| param.name.to_s }.freeze,
+                                                               argument_types: fn.required_positionals.map(&:type).freeze,
+                                                               return_type: fn.return_type, block_type: mt.block,
+                                                               type_param_bounds: mt.type_params.to_h { |param| [param.name.to_s, param.upper_bound_type || param.default_type] }.freeze,
+                                                               callback_supported: fn.optional_positionals.empty? && !fn.rest_positionals && fn.trailing_positionals.empty? && fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords)
   end
 
   def type_of(t)
@@ -233,7 +238,7 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_optional_types, :ir_keyword_types, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_optional_types, :ir_keyword_types, :ir_block_signatures, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -242,7 +247,7 @@ module RbsSignatures
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
-                     ivar_sigs: loaded.ivars, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
+                     ivar_sigs: loaded.ivars, ir_block_signatures: {}, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
                      ir_methods: registry.values.flatten.map { |d| [d.owner, d.name.to_s].freeze }.to_set.freeze,
                      ir_owners: registry.values.flatten.select(&:irep).group_by(&:irep).filter_map do |label, defs|
                        owners = defs.map(&:owner).uniq
@@ -302,6 +307,7 @@ module RbsSignatures
         ap.ir_return_types[d.irep] = sig.ret.self_return ? Set[sig.owner.to_sym].freeze : sig.ret.value_classes if ap.ir_owners[d.irep] == sig.owner
         ap.ir_named_returns[[sig.owner, sig.name]] = sig.ret.self_return ? :self : sig.ret.value_classes
       end
+      ap.ir_block_signatures[[sig.owner, sig.name]] = sig if sig.block_type
       merge_method(ap, sig, d, annotations, class_annotations, element_annotations, known_owners)
     end
     loaded.ivars.each_value do |iv|
