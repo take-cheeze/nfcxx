@@ -97,7 +97,9 @@ else
 fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
-"$cproc" < "$tmp/prep.c" > "$tmp/out.ssa"
+# macOS arm64: the aarch64-apple target (Apple's va_list, see scripts/cproc-apple-valist.patch); elsewhere the default.
+cprocarg=(); [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] && cprocarg=(-t aarch64-apple)
+"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 t=$(trace_start)
 "$qbe" "$tmp/out.ssa" > "$tmp/out.s"

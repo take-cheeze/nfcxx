@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 
 namespace {
 
@@ -179,6 +180,14 @@ std::vector<std::string> split_top(const std::string &s) {
       continue;
     }
     int c = ch(s, i);
+    // `->`, `<=` and `>=` are operators, not brackets: `(const float *)x->data` must not close a bracket.
+    bool two_char_op = i + 1 < (long)s.size() &&
+                       ((c == '-' && ch(s, i + 1) == '>') || (c == '<' && ch(s, i + 1) == '=') ||
+                        (c == '>' && ch(s, i + 1) == '='));
+    if (two_char_op) {
+      i += 2;
+      continue;
+    }
     if (c == '(' || c == '[' || c == '{' || c == '<') {
       depth += 1;
     } else if (c == ')' || c == ']' || c == '}' || (c == '>' && !(i > 0 && ch(s, i - 1) == '-'))) {
@@ -1504,6 +1513,41 @@ std::vector<std::string> comma_declaration_type(const std::string &text, long i)
   return {};
 }
 
+// `__device__ const float a = -0.75f;`: a device constant of scalar type with a plain initializer. The emitter lowers
+// it (a const global with a scalar value); arrays, brace lists and non-scalar types are still refused.
+static bool scalar_device_const(const std::string &text) {
+  size_t eq = text.find('=');
+  if (eq == std::string::npos || text.find('[') != std::string::npos || text.find('{') != std::string::npos) return false;
+  std::string head = text.substr(0, eq);
+  std::vector<std::string> words;
+  std::string w;
+  for (char c : head) {
+    if (ident_c((unsigned char)c)) {
+      w += c;
+    } else if (!w.empty()) {
+      words.push_back(w);
+      w.clear();
+    }
+  }
+  if (!w.empty()) words.push_back(w);
+  static const std::set<std::string> scalars = {"float", "double", "int", "unsigned", "long", "short", "char", "bool",
+                                                "half", "size_t"};
+  bool is_const = false, scalar = false;
+  for (const auto &x : words) {
+    if (x == "const") is_const = true;
+    if (scalars.count(x) || (x.size() > 2 && x.compare(x.size() - 2, 2, "_t") == 0)) scalar = true;
+  }
+  return is_const && scalar;
+}
+
+// A __device__ declaration that is a variable: no body and no parenthesis (a function has one of the two).
+template <class P>
+static bool device_variable_piece(const P &pc) {
+  if (pc.body) return false;
+  if (std::find(pc.toks.begin(), pc.toks.end(), "__device__") == pc.toks.end()) return false;
+  return str_index(pc.text, "(", 0) < 0;
+}
+
 // A leading all-caps word before a type is a macro that expands to declarations (GGML_TENSOR_BINARY_OP_LOCALS before
 // `const float * src0_d`): drop it, so the declared type is the type that follows.
 // Only a word the text defines with #define counts, so a template parameter named like a macro (D, T) is kept.
@@ -1653,7 +1697,8 @@ std::vector<std::string> deduce_types(const std::string &nm, const std::string &
     if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
     for (const auto &p : missing) {
       if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
-      std::vector<std::string> at = argument_type(text, pos, args[idx], nm);
+      // A cast argument `(const float *)x->data` has the type of the cast, as at a call site (caller_arg_type).
+      std::vector<std::string> at = caller_arg_type(text, pos, args[idx], nm);
       std::string t;
       if (!match_type(ptoks, at, p, t))
         refuse("template launch of " + nm + "<" + ta + ">: cannot deduce " + p + " from the argument " + args[idx] +
@@ -3179,7 +3224,8 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   for (auto &pc : pieces) {
     if (pc.kind == "pp") continue;
     if (!pc.device) continue;
-    if (str_index(pc.text, "__device__", 0) >= 0 && !pc.body && str_index(pc.text, "(", 0) < 0)
+    if (str_index(pc.text, "__device__", 0) >= 0 && !pc.body && str_index(pc.text, "(", 0) < 0 &&
+        !scalar_device_const(pc.text))
       refuse("device variable: " + sl(strip(pc.text), 0, 60));
     if (pc.body) {
       bool has_g = std::find(pc.toks.begin(), pc.toks.end(), "__global__") != pc.toks.end();
@@ -3214,9 +3260,10 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   auto has_tok = [](const std::vector<std::string> &v, const std::string &x) {
     return std::find(v.begin(), v.end(), x) != v.end();
   };
-  // Host declarations: defined names, as far as a piece's text tells them.
+  // Host declarations: defined names, as far as a piece's text tells them. A __device__ variable (not a function) is
+  // not a device function: its const branch below names it, so device code can use it (`__device__ const float a = 1.f;`).
   for (auto &pc : pieces) {
-    if (pc.keep || pc.device) continue;
+    if (pc.keep || (pc.device && !device_variable_piece(pc))) continue;
     std::string t = blank_comments(pc.text);
     const auto &toks = pc.toks;
     if (pc.kind == "pp") continue;  // Ruby: both branches are `next`
@@ -3284,7 +3331,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   while (changed) {
     changed = false;
     for (auto &pc : pieces) {
-      if (pc.keep || pc.device) continue;
+      if (pc.keep || (pc.device && !device_variable_piece(pc))) continue;
       if (pc.defined.empty()) continue;
       bool any = false;
       for (const auto &dn : pc.defined)
@@ -3345,6 +3392,8 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   if (needed["sinf"] || needed["cosf"]) needed["__nfcxx_sincosf"] = true;
   if (needed["expm1f"] || needed["tanhf"]) needed["__nfcxx_expm1f"] = true;
   if (needed["log2f"]) needed["__float_as_uint"] = true;
+  // The tiles of cooperative groups shuffle with the idx form (COOP_DEF uses __shfl_sync).
+  if (needed["cg"] || needed["cooperative_groups"]) needed["__shfl_sync"] = true;
   for (const auto &kv : builtin_defs_table()) {
     if (!needed[kv.first]) continue;
     bool defined_here = false;
@@ -3356,7 +3405,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   bool coop_defined = false;
   for (const auto &pc : pieces)
     if (pc.keep && has_tok(pc.defined, "cooperative_groups")) coop_defined = true;
-  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += COOP_DEF;
+  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += rewrite_builtins(COOP_DEF);
   for (const auto &pc : pieces) {
     if (!pc.keep) continue;
     std::string code = rewrite_is_same_v(rewrite_builtins(pc.text));
@@ -4158,6 +4207,186 @@ int usage() {
   return 2;
 }
 
+// The close of the bracket at s[open] (`(`, `[` or `{`), skipping literals; -1 if none.
+long matching_close(const std::string &s, long open) {
+  char o = ch(s, open);
+  char c = o == '(' ? ')' : o == '[' ? ']' : '}';
+  long depth = 0;
+  long n = (long)s.size();
+  for (long i = open; i < n;) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (ch(s, i) == o) depth += 1;
+    if (ch(s, i) == c) {
+      depth -= 1;
+      if (depth == 0) return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+// A generic lambda whose only calls pass literal std::integral_constant values (ssm-conv.cu: `auto launch_kernel =
+// [&](auto NC) { constexpr int kNC = decltype(NC)::value; ... }`, called from a switch with 3, 4, 5, 9, 15). Each call is
+// replaced by the lambda body with the parameter substituted (decltype(NC)::value becomes the literal, NC the
+// integral_constant), so every launch in it is an ordinary launch with a local constant, one instance per value. The
+// definition is removed. A call that does not pass a literal, or a lambda with no calls, is refused by name.
+std::string inline_generic_lambdas(const std::string &text) {
+  std::string out = text;
+  for (;;) {
+    long n = (long)out.size();
+    long def_start = -1, def_end = -1, body_open = -1, body_close = -1;
+    std::string name, param;
+    for (long k = 0; k < n && def_start < 0; k++) {
+      long e = skip_literal(out, k);
+      if (e >= 0) {
+        k = e - 1;
+        continue;
+      }
+      if (!word_at(out, k, "auto")) continue;
+      long p = k + 4;
+      while (p < n && (ch(out, p) == ' ' || ch(out, p) == '\t')) p += 1;
+      long q = p;
+      while (q < n && ident_c(ch(out, q))) q += 1;
+      if (q == p) continue;
+      std::string nm = sl(out, p, q);
+      long r = q;
+      while (r < n && (ch(out, r) == ' ' || ch(out, r) == '\t')) r += 1;
+      if (ch(out, r) != '=') continue;
+      r += 1;
+      while (r < n && (ch(out, r) == ' ' || ch(out, r) == '\t')) r += 1;
+      if (ch(out, r) != '[') continue;
+      long cap_close = matching_close(out, r);
+      if (cap_close < 0) continue;
+      long lp = cap_close + 1;
+      while (lp < n && (ch(out, lp) == ' ' || ch(out, lp) == '\t')) lp += 1;
+      if (ch(out, lp) != '(') continue;
+      long rp = matching_close(out, lp);
+      if (rp < 0) continue;
+      std::string inside = sl(out, lp + 1, rp);
+      // The parameter list is exactly `auto P`.
+      if (inside.compare(0, 5, "auto ") != 0) continue;
+      std::string pn = inside.substr(5);
+      while (!pn.empty() && pn.back() == ' ') pn.pop_back();
+      while (!pn.empty() && pn.front() == ' ') pn.erase(pn.begin());
+      if (pn.empty()) continue;
+      long bo = rp + 1;
+      while (bo < n && (ch(out, bo) == ' ' || ch(out, bo) == '\n' || ch(out, bo) == '\t')) bo += 1;
+      if (ch(out, bo) != '{') continue;
+      long bc = matching_close(out, bo);
+      if (bc < 0) continue;
+      std::string body = sl(out, bo, bc + 1);
+      if (body.find("decltype(" + pn + ")::value") == std::string::npos) continue;
+      long de = bc + 1;
+      while (de < n && (ch(out, de) == ' ' || ch(out, de) == '\t')) de += 1;
+      if (ch(out, de) != ';') continue;
+      def_start = k;
+      def_end = de + 1;
+      body_open = bo;
+      body_close = bc;
+      name = nm;
+      param = pn;
+    }
+    if (def_start < 0) break;
+
+    // Every call of the lambda must pass a literal integral_constant; each call is one instance.
+    struct Call {
+      long start, end;
+      std::string value;
+    };
+    std::vector<Call> calls;
+    for (long k = 0; k < n; k++) {
+      if (k >= def_start && k < def_end) {
+        k = def_end - 1;
+        continue;
+      }
+      long e = skip_literal(out, k);
+      if (e >= 0) {
+        k = e - 1;
+        continue;
+      }
+      if (!word_at(out, k, name)) continue;
+      long p = k + (long)name.size();
+      while (p < n && (ch(out, p) == ' ' || ch(out, p) == '\t')) p += 1;
+      if (ch(out, p) != '(') continue;
+      long close = matching_close(out, p);
+      if (close < 0) continue;
+      std::string arg = sl(out, p + 1, close);
+      std::string key = "std::integral_constant<int,";
+      std::string flat;
+      for (char c : arg)
+        if (c != ' ' && c != '\t' && c != '\n') flat.push_back(c);
+      bool ok = flat.compare(0, key.size(), key) == 0;
+      std::string val;
+      if (ok) {
+        size_t gt = flat.find('>', key.size());
+        if (gt == std::string::npos) ok = false;
+        else {
+          val = flat.substr(key.size(), gt - key.size());
+          std::string tail = flat.substr(gt + 1);
+          ok = !val.empty();
+          for (char c : val)
+            if (c < '0' || c > '9') ok = false;
+          if (tail != "{}" && tail != "()") ok = false;
+        }
+      }
+      if (!ok)
+        refuse("generic lambda " + name + " at line " + std::to_string(line_of(out, k)) +
+               " is called with an argument that is not a literal std::integral_constant<int, V>{}");
+      calls.push_back({k, close + 1, val});
+      k = close;
+    }
+    if (calls.empty())
+      refuse("generic lambda " + name + " is never called with a literal value, so its instances are not known");
+
+    // The body without its braces, with the parameter substituted for one value.
+    auto instance = [&](const std::string &v) {
+      std::string inner = sl(out, body_open + 1, body_close);
+      std::string r;
+      std::string dec = "decltype(" + param + ")::value";
+      for (size_t i = 0; i < inner.size();) {
+        if (inner.compare(i, dec.size(), dec) == 0) {
+          r += v;
+          i += dec.size();
+          continue;
+        }
+        if (inner.compare(i, param.size(), param) == 0 && (i == 0 || !ident_c((unsigned char)inner[i - 1])) &&
+            (i + param.size() >= inner.size() || !ident_c((unsigned char)inner[i + param.size()]))) {
+          r += "std::integral_constant<int, " + v + ">";
+          i += param.size();
+          continue;
+        }
+        r.push_back(inner[i]);
+        i += 1;
+      }
+      return "{" + r + "}";
+    };
+
+    // One sorted list of edits: each call becomes its instance, the definition is removed.
+    struct Edit {
+      long start, end;
+      std::string repl;
+    };
+    std::vector<Edit> edits;
+    for (const auto &c : calls) edits.push_back({c.start, c.end, instance(c.value)});
+    edits.push_back({def_start, def_end, ""});
+    std::sort(edits.begin(), edits.end(), [](const Edit &a, const Edit &b) { return a.start < b.start; });
+    std::string res;
+    long pos = 0;
+    for (const auto &e : edits) {
+      res += sl(out, pos, e.start);
+      res += e.repl;
+      pos = e.end;
+    }
+    res += sl(out, pos, n);
+    out = res;
+  }
+  return out;
+}
+
 int main(int argc, char **argv) {
   bool device = false;
   bool has_kernels = false;
@@ -4194,6 +4423,7 @@ int main(int argc, char **argv) {
   if (device) refuse_unlowered_cccl(text);
   std::map<std::string, bool> seen;
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
+  g_expanded = inline_generic_lambdas(g_expanded);
   g_expanded = launch_prepare(g_expanded);
   std::string result;
   if (device) {
