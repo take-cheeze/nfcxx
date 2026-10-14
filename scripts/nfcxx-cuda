@@ -53,7 +53,7 @@ done
 
 # --- compile: map the nvcc command line to nfcxx
 # nvcc puts the toolkit's headers on the include path itself; CMake does not pass them for CUDA sources.
-args=(-I"$cuda/include"); [ -d "$cuda/include/cccl" ] && args+=(-I"$cuda/include/cccl")
+args=(-I"$root/lib/cuda/host" -I"$cuda/include"); [ -d "$cuda/include/cccl" ] && args+=(-I"$cuda/include/cccl")
 deps=(); inputs=(); out=""; compile=0; warned_fast=0; warned_openmp=0
 add_host() {  # one host flag from -Xcompiler
   case $1 in
