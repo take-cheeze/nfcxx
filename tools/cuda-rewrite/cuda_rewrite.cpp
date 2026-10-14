@@ -3392,6 +3392,8 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   if (needed["sinf"] || needed["cosf"]) needed["__nfcxx_sincosf"] = true;
   if (needed["expm1f"] || needed["tanhf"]) needed["__nfcxx_expm1f"] = true;
   if (needed["log2f"]) needed["__float_as_uint"] = true;
+  // The tiles of cooperative groups shuffle with the idx form (COOP_DEF uses __shfl_sync).
+  if (needed["cg"] || needed["cooperative_groups"]) needed["__shfl_sync"] = true;
   for (const auto &kv : builtin_defs_table()) {
     if (!needed[kv.first]) continue;
     bool defined_here = false;
@@ -3403,7 +3405,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   bool coop_defined = false;
   for (const auto &pc : pieces)
     if (pc.keep && has_tok(pc.defined, "cooperative_groups")) coop_defined = true;
-  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += COOP_DEF;
+  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += rewrite_builtins(COOP_DEF);
   for (const auto &pc : pieces) {
     if (!pc.keep) continue;
     std::string code = rewrite_is_same_v(rewrite_builtins(pc.text));
