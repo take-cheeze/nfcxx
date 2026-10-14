@@ -3895,6 +3895,113 @@ std::vector<std::string> ruby_split_nl(const std::string &text) {
   return v;
 }
 
+// ---- embedded tables (generated from the Ruby text by tools/cuda-rewrite/gen-tables.sh) ------------------------------
+struct TblEntry {
+  const char *key;
+  const char *val;
+};
+#include "tables.inc"
+
+// Ruby VECTOR_DEFS, BUILTIN_DEFS and DEVICE_BUILTINS as insertion-ordered lists (a Ruby Hash keeps its order).
+const std::vector<std::pair<std::string, std::string>> &table_vec(const TblEntry *t, size_t n) {
+  static std::map<const TblEntry *, std::vector<std::pair<std::string, std::string>>> cache;
+  auto it = cache.find(t);
+  if (it != cache.end()) return it->second;
+  std::vector<std::pair<std::string, std::string>> v;
+  for (size_t i = 0; i < n; i++) v.push_back({t[i].key, t[i].val});
+  return cache[t] = v;
+}
+const std::vector<std::pair<std::string, std::string>> &vector_defs_table() {
+  static const std::vector<std::pair<std::string, std::string>> &v =
+      table_vec(VECTOR_DEFS_TBL, sizeof(VECTOR_DEFS_TBL) / sizeof(VECTOR_DEFS_TBL[0]));
+  return v;
+}
+const std::vector<std::pair<std::string, std::string>> &builtin_defs_table() {
+  static const std::vector<std::pair<std::string, std::string>> &v =
+      table_vec(BUILTIN_DEFS_TBL, sizeof(BUILTIN_DEFS_TBL) / sizeof(BUILTIN_DEFS_TBL[0]));
+  return v;
+}
+const std::vector<std::pair<std::string, std::string>> &device_builtins_table() {
+  static const std::vector<std::pair<std::string, std::string>> &v =
+      table_vec(DEVICE_BUILTINS_TBL, sizeof(DEVICE_BUILTINS_TBL) / sizeof(DEVICE_BUILTINS_TBL[0]));
+  return v;
+}
+
+// Ruby hash lookup: the value of key, or false (Ruby nil).
+bool lookup_def(const std::vector<std::pair<std::string, std::string>> &tbl, const std::string &key, std::string &out) {
+  for (const auto &kv : tbl)
+    if (kv.first == key) {
+      out = kv.second;
+      return true;
+    }
+  return false;
+}
+
+// Ruby DEVICE_AXES (line 1520).
+const std::vector<std::string> DEVICE_AXES = {"x", "y", "z"};
+
+// Ruby rewrite_builtins (line 1528): threadIdx.x and the others become calls of the intrinsics, and the syncthreads and
+// syncwarp spellings become the nfcxx names.
+std::string rewrite_builtins(const std::string &t) {
+  std::string out;
+  long i = 0;
+  long n = (long)t.size();
+  while (i < n) {
+    long e = skip_literal(t, i);
+    if (e >= 0) {
+      out += sl(t, i, e);
+      i = e;
+      continue;
+    }
+    // `extern __shared__ T x[];` is a shared-memory declaration: the prelude's static replaces both words
+    if (word_at(t, i, "extern")) {
+      long j = i + 6;
+      while (j < n && (ch(t, j) == ' ' || ch(t, j) == '\t' || ch(t, j) == '\n')) j += 1;
+      if (word_at(t, j, "__shared__")) {
+        i = j;
+        continue;
+      }
+    }
+    if (word_at(t, i, "__syncthreads") && ch(t, i + 13) == '(') {
+      out += "__nfcxx_syncthreads";
+      i += 13;
+      continue;
+    }
+    // __syncwarp(mask) is the warp barrier of the mask; __syncwarp() is the full warp (CUDA's default mask)
+    if (word_at(t, i, "__syncwarp") && ch(t, i + 10) == '(') {
+      out += "__nfcxx_syncwarp(";
+      long j = i + 11;
+      while (j < n && white_c(ch(t, j))) j += 1;
+      if (ch(t, j) == ')') out += "0xffffffffu";
+      i += 11;
+      continue;
+    }
+    bool hit = false;
+    for (const auto &kv : device_builtins_table()) {
+      if (hit || !word_at(t, i, kv.first)) continue;
+      long j = i + (long)kv.first.size();
+      if (!(ch(t, j) == '.' && (ch(t, j + 1) == 'x' || ch(t, j + 1) == 'y' || ch(t, j + 1) == 'z') && !ident_c(ch(t, j + 2))))
+        continue;
+      out += "__nfcxx_" + kv.second + "_" + std::string(1, (char)ch(t, j + 1)) + "()";
+      i = j + 2;
+      hit = true;
+    }
+    if (hit) continue;
+    out.push_back(t[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby device_decls (line 1577): the extern declarations of the builtins' intrinsics.
+std::string device_decls() {
+  std::vector<std::string> decls;
+  for (const auto &kv : device_builtins_table())
+    for (const char *a : {"x", "y", "z"})
+      decls.push_back("extern \"C\" unsigned __nfcxx_" + kv.second + "_" + a + "(void);");
+  return join(decls, "\n");
+}
+
 }  // namespace
 
 // The command line of the Ruby script (line 3371): -I DIR, --device, --kernels=FILE, --edg-launches, FILE.cu.
