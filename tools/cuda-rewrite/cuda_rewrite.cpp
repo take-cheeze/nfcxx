@@ -3047,6 +3047,34 @@ std::vector<UnitPiece> flatten_linkage(const std::string &text, const std::vecto
 // ---- embedded tables (defined with the device prelude below; see PORTING.md) ---------------------------------------
 extern const char *const DEVICE_PRELUDE;
 extern const char *const COOP_DEF;
+// grid_group::sync: a sense-reversing grid barrier on two zero-initialized device words (the emitter places them in
+// device memory). Each block's thread 0 arrives; the last arrival releases the generation and the others spin on it.
+// The launch is cooperative (cudaLaunchCooperativeKernel), so every block is resident and the spin cannot deadlock.
+static const char *const GRID_DEF =
+    "__device__ unsigned __nfcxx_grid_arrived;\n"
+    "__device__ unsigned __nfcxx_grid_gen;\n"
+    "namespace cooperative_groups {\n"
+    "struct grid_group {\n"
+    "  void sync(void) const {\n"
+    "    __nfcxx_syncthreads();\n"
+    "    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {\n"
+    "      unsigned n = gridDim.x * gridDim.y * gridDim.z;\n"
+    "      unsigned gen = atomicAdd(&__nfcxx_grid_gen, 0u);\n"
+    "      __threadfence_system();\n"
+    "      if (atomicAdd(&__nfcxx_grid_arrived, 1u) == n - 1u) {\n"
+    "        atomicAdd(&__nfcxx_grid_arrived, 0u - n);\n"
+    "        __threadfence_system();\n"
+    "        atomicAdd(&__nfcxx_grid_gen, 1u);\n"
+    "      } else {\n"
+    "        while (atomicAdd(&__nfcxx_grid_gen, 0u) == gen) {}\n"
+    "      }\n"
+    "      __threadfence_system();\n"
+    "    }\n"
+    "    __nfcxx_syncthreads();\n"
+    "  }\n"
+    "};\n"
+    "inline grid_group this_grid(void) { return grid_group(); }\n"
+    "}\n";
 std::string device_decls();
 std::string rewrite_builtins(const std::string &t);
 std::string rewrite_is_same_v(const std::string &s);
@@ -3295,6 +3323,20 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       for (const auto &x : pc.toks) needed[x] = true;
     }
   }
+  // Injected text (COOP_DEF, GRID_DEF) names builtins that the device unit does not scan, so they are needed here.
+  if (needed["cg"] || needed["cooperative_groups"])
+    for (const auto &x : tokens_of(COOP_DEF)) needed[x] = true;
+  if (needed["this_grid"] || needed["grid_group"])
+    for (const auto &x : tokens_of(GRID_DEF)) needed[x] = true;
+  // A builtin that is emitted names the builtins its own text uses (the cooperative-groups tile uses threadIdx).
+  for (bool grew = true; grew;) {
+    grew = false;
+    for (const auto &kv : builtin_defs_table()) {
+      if (!needed[kv.first]) continue;
+      for (const auto &x : tokens_of(kv.second))
+        if (!needed[x]) { needed[x] = true; grew = true; }
+    }
+  }
   for (auto &pc : pieces) {
     if (!(pc.kind == "pp" && pc.macro)) continue;
     bool any = false;
@@ -3356,7 +3398,8 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   bool coop_defined = false;
   for (const auto &pc : pieces)
     if (pc.keep && has_tok(pc.defined, "cooperative_groups")) coop_defined = true;
-  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += COOP_DEF;
+  if ((needed["cg"] || needed["cooperative_groups"]) && !coop_defined) out += rewrite_builtins(COOP_DEF);
+  if (needed["this_grid"] || needed["grid_group"]) out += rewrite_builtins(GRID_DEF);
   for (const auto &pc : pieces) {
     if (!pc.keep) continue;
     std::string code = rewrite_is_same_v(rewrite_builtins(pc.text));
@@ -3520,14 +3563,6 @@ void refuse_unlowered_cccl(const std::string &s) {
           if (s[(size_t)q] == '\n') line++;
         refuse("cub:: at line " + std::to_string(line) + ": CUB is not lowered (the device unit does not carry its headers)");
       }
-    }
-    for (const char *name : {"this_grid", "grid_group"}) {
-      if (!word_at(s, i, name)) continue;
-      long line = 1;
-      for (long q = 0; q < i; q++)
-        if (s[(size_t)q] == '\n') line++;
-      refuse(std::string(name) + " at line " + std::to_string(line) +
-             ": grid-wide cooperative groups are not lowered (a grid barrier needs a cooperative launch)");
     }
     i += 1;
   }
