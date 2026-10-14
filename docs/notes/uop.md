@@ -223,6 +223,25 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
 - **nfcxx as the C compiler**: `NFCUOP_CC=./nfcxx` (it passes `-shared -o`, not the gcc flags). `tests/uop/run.sh` runs the `quick` part of `test_cgen` that way on both
   nfcxx back ends; that path (cproc with hexadecimal float literals, `INFINITY`, `static inline`) was not run where this was written, so CI is its first run.
 
+## ONNX Runtime back end (`nfcuop_ort.hpp`)
+
+`nfcuop::ort::run(g, outputs, feeds)` exports the `hir::Graph` with `to_onnx`, runs it with ONNX Runtime and returns the outputs as
+`Array`s (the interpreter's type). It is selected in the numpy API as `np.backend = ut::Session::Backend::Ort` (`np.backend = "ort"` in the
+scripting bindings), like the C backend. `ut::Session` has no graph, so it refuses this back end; `np::Session::eval_all` sends the graph to
+`ort::run` and lowers nothing.
+
+- **No build-time dependency.** The library is opened with `dlopen` at first use: the path is `$NFCUOP_ORT_LIB`, else `libonnxruntime.so.1`,
+  `libonnxruntime.so` or `libonnxruntime.dylib`. A load that fails throws `Error` (and nothing is cached, so the next call retries).
+  `ort::available()` tells whether it loads; the tests print SKIP without it.
+- **The C API declarations** in `nfcuop_ort.cpp` are a vendored subset of ONNX Runtime 1.29.0's `onnxruntime_c_api.h` (MIT licensed, with
+  its notice): the `OrtApi` members that are called, at their indices in the table, and reserved slots for the others. The header itself is not vendored.
+- **Symbolic batch**: ORT takes the `dim_param` of the exported model, so an unbound graph runs directly; `Graph::bind` gives a static copy
+  that runs the same way. Feeds must agree with the graph's dtype and rank, and every use of one symbol must have one size.
+- **Not the same bits**: ORT's own graph optimizations and kernels round floats differently from the interpreter, so
+  `tests/uop/test_ort.cpp` compares floats to a relative 1e-5 (absolute 1e-6 near zero) and integers and bools exactly.
+- **Not done**: no Windows loader (`dlopen`, as the C back end), no ORT execution providers or options, and the sessions are kept until
+  the process ends (keyed by the model bytes).
+
 ## Dynamic shapes (stage 7, after the static stages)
 
 The static design is deliberate: every shape is a known integer, so shape inference, rewriting and the interpreter are simple and exact. Dynamic
@@ -270,6 +289,7 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
   reductions and shape ops, integer division and modulo, math functions, slicing and concatenation, batched matmul, floor/pow with NaN and infinities,
   cumsum and prod, argmax/argmin, tile and take) with the interpreter's results next to them.
 - `onnx_check.py`: every model through `onnx.checker` (with `full_check`, which re-infers all shapes) and onnxruntime, outputs compared with the interpreter's.
+- `test_ort.cpp`: the ONNX Runtime back end (above), against the interpreter; prints SKIP without the library.
 - `test_cgen.cpp`: the C renderer (above).
 - `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above, with 32-bit and with 64-bit defaults.
 
