@@ -7,6 +7,7 @@ require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_core_result_sigs'
 require_relative '../../tools/bc2cpp/core_hierarchy_sigs'
+require_relative '../../tools/bc2cpp/native_result_facts'
 
 failures = []
 check = lambda do |name, ok|
@@ -78,6 +79,14 @@ check.call('hierarchy superclasses equal the audited map, in order', hierarchy_s
 check.call('hierarchy mixins equal the audited map', hierarchy_mixins == AUDITED_MIXINS)
 check.call('rejects a class without a superclass line', rejects_hierarchy("class Foo\nend\n"))
 check.call('rejects a class declared twice', rejects_hierarchy("class Foo < Object\nend\nclass Foo < Object\nend\n"))
+
+AUDITED_RGSS = {
+  'RGSS::Bitmap' => { 'width' => :fixnum, 'height' => :fixnum, 'rect' => 'RGSS::Rect', 'text_size' => 'RGSS::Rect' },
+  'RGSS::Rect' => { 'x' => :fixnum, 'y' => :fixnum, 'width' => :fixnum, 'height' => :fixnum },
+  'RGSS::Color' => { 'red' => :float, 'green' => :float, 'blue' => :float, 'alpha' => :float },
+  'RGSS::Tone' => { 'red' => :float, 'green' => :float, 'blue' => :float, 'gray' => :float }
+}.freeze
+check.call('RGSS result kinds equal the audited map', NativeResultFacts::KINDS == AUDITED_RGSS)
 
 puts failures.empty? ? 'native core result sigs: all checks passed' : "native core result sigs: #{failures.size} failure(s)"
 exit(failures.empty? ? 0 : 1)

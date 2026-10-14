@@ -124,7 +124,7 @@ audit = lambda do |texts, facts|
   results = []
   facts.each do |owner, names|
     names.each do |name, fact|
-      label = "#{owner}##{name} (#{fact.kind.inspect})"
+      label = "#{owner}##{name} (#{NativeResultFacts.kind(name, owner).inspect})"
       results << ["#{label}: registered once, as the pinned callee", registrations[[owner, name]] == [squash.call(fact.callee)]]
 
       chain = fact.chain
@@ -144,7 +144,7 @@ audit = lambda do |texts, facts|
       root_body = body_of.call(chain.last)
       root_returns = root_body ? returns_of.call(root_body) : []
       results << ["#{label}: #{chain.last} has one definition and every return has the kind's shape",
-                  !root_returns.empty? && root_returns.all? { |expr| expr.match?(shape.call(fact.kind)) }]
+                  !root_returns.empty? && root_returns.all? { |expr| expr.match?(shape.call(NativeResultFacts.kind(name, owner))) }]
     end
   end
   results
