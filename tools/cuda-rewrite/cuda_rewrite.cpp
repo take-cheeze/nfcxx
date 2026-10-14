@@ -3259,6 +3259,187 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   return {out, uniq};
 }
 
+// Ruby rewrite_is_same_v (line 2824): std::is_same_v<A, B> is read through the struct form std::is_same<A, B>::value.
+std::string rewrite_is_same_v(const std::string &s) {
+  const std::string key = "std::is_same_v<";
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      out += sl(s, i, e);
+      i = e;
+      continue;
+    }
+    if (sl_n(s, i, (long)key.size()) == key && !(i > 0 && ident_c(ch(s, i - 1)))) {
+      long j = i + (long)key.size();
+      long depth = 1;
+      while (j < n && depth > 0) {
+        long e2 = skip_literal(s, j);
+        if (e2 >= 0) {
+          j = e2;
+          continue;
+        }
+        if (ch(s, j) == '<') depth += 1;
+        if (ch(s, j) == '>') depth -= 1;
+        j += 1;
+      }
+      out += "std::is_same<" + sl(s, i + (long)key.size(), j - 1) + ">::value";
+      i = j;
+      continue;
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby strip_launch_bounds (line 2860): __launch_bounds__(...) is removed with its argument list (newlines kept).
+std::string strip_launch_bounds(const std::string &s) {
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  const std::string lb = "__launch_bounds__";
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      out += sl(s, i, e);
+      i = e;
+      continue;
+    }
+    if (word_at(s, i, lb)) {
+      long j = i + (long)lb.size();
+      while (j < n && white_c(ch(s, j))) j += 1;
+      if (j < n && ch(s, j) == '(') {
+        long close = matching_paren(s, j);
+        if (close < 0) refuse("unterminated __launch_bounds__");
+        // keep the newlines inside the argument list, so line numbers do not move
+        long nls = 0;
+        for (long q = i; q <= close; q++)
+          if (ch(s, q) == '\n') nls += 1;
+        out += std::string((size_t)nls, '\n');
+        i = close + 1;
+        continue;
+      }
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
+  }
+  return out;
+}
+
+std::string replace_dynamic_uses(const std::string &s, const std::map<std::string, std::string> &names);
+
+// Ruby dynamic_shared_rewrite (line 2894): `extern __shared__ T name[];` is removed and its uses become typed pointers.
+std::string dynamic_shared_rewrite(const std::string &s) {
+  std::map<std::string, std::string> names;
+  std::vector<std::string> order;  // Ruby Hash keeps insertion order (names are looked up by key only)
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      out += sl(s, i, e);
+      i = e;
+      continue;
+    }
+    if (word_at(s, i, "extern")) {
+      long j = i + 6;
+      while (j < n && white_c(ch(s, j))) j += 1;
+      if (word_at(s, j, "__shared__")) {
+        long k = j + 10;
+        long semi = str_index(s, ";", k);
+        if (semi < 0) refuse("extern __shared__ declaration without ';'");
+        std::string decl = strip(sl(s, k, semi));
+        long m = -1;
+        for (long q = (long)decl.size() - 1; q >= 0; q--)
+          if (decl[(size_t)q] == '[') {
+            m = q;
+            break;
+          }
+        bool bracket_ok = m >= 0 && !decl.empty() && decl.back() == ']' && strip(sl(decl, m + 1, (long)decl.size() - 1)).empty();
+        if (!bracket_ok) refuse("extern __shared__ " + decl + ": only an unsized array (T name[]) is dynamic shared memory");
+        std::string head = strip(sl(decl, 0, m));
+        long q = (long)head.size();
+        while (q > 0 && ident_c(ch(head, q - 1))) q -= 1;
+        std::string name = sl(head, q, (long)head.size());
+        std::string type = strip(sl(head, 0, q));
+        if (name.empty() || type.empty()) refuse("extern __shared__ " + decl + ": no type or name");
+        if (names.count(name) && names[name] != type)
+          refuse("extern __shared__ " + name + ": declared with types " + names[name] + " and " + type);
+        names[name] = type;
+        for (long q2 = i; q2 <= semi; q2++)
+          if (ch(s, q2) == '\n') out += "\n";
+        i = semi + 1;
+        continue;
+      }
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
+  }
+  if (names.empty()) return out;
+  return replace_dynamic_uses(out, names);
+}
+
+// Ruby refuse_shared_align (line 2938).
+void refuse_shared_align(const std::string &s) {
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (word_at(s, i, "__shared__")) {
+      long j = i + 10;
+      while (j < n && white_c(ch(s, j))) j += 1;
+      if (word_at(s, j, "__align__")) {
+        long line = 1;
+        for (long q = 0; q < i; q++)
+          if (s[(size_t)q] == '\n') line++;
+        refuse("__shared__ __align__ at line " + std::to_string(line) +
+               ": the device image does not carry shared-object alignment");
+      }
+    }
+    i += 1;
+  }
+}
+
+// Ruby refuse_unlowered_cccl (line 2961): CUB and grid-wide cooperative groups are refused by name.
+void refuse_unlowered_cccl(const std::string &s) {
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (word_at(s, i, "cub")) {
+      long j = i + 3;
+      while (j < n && white_c(ch(s, j))) j += 1;
+      if (sl_n(s, j, 2) == "::") {
+        long line = 1;
+        for (long q = 0; q < i; q++)
+          if (s[(size_t)q] == '\n') line++;
+        refuse("cub:: at line " + std::to_string(line) + ": CUB is not lowered (the device unit does not carry its headers)");
+      }
+    }
+    for (const char *name : {"this_grid", "grid_group"}) {
+      if (!word_at(s, i, name)) continue;
+      long line = 1;
+      for (long q = 0; q < i; q++)
+        if (s[(size_t)q] == '\n') line++;
+      refuse(std::string(name) + " at line " + std::to_string(line) +
+             ": grid-wide cooperative groups are not lowered (a grid barrier needs a cooperative launch)");
+    }
+    i += 1;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
