@@ -20,6 +20,8 @@ require_relative 'annotations'
 #            the program does not define, `def self.x`, constants, aliases, interfaces, mixins, visibility, a method
 #            whose parameter count is not the definition's.
 #   error    (TC1002) a parse error, an overloaded `def`, any declaration or member kind not listed above.
+# IR contracts separately retain nominal value classes for nullable, union, bool, nil and literal types;
+# only matched required arguments seed BytecodeIR::Types#fact_at (ADR 0441). Existing hint kinds stay unchanged.
 # A signature never overrides a `# bc2cpp:` comment: where both name a slot the comment wins and the difference is TC1006.
 module RbsSignatures
   Diag = Struct.new(:file, :line, :col, :severity, :code, :message, keyword_init: true) do
@@ -30,7 +32,7 @@ module RbsSignatures
   MethodSig = Struct.new(:owner, :name, :args, :ret, :loc, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
-  Type = Struct.new(:kind, :cls, :element, :text, keyword_init: true)
+  Type = Struct.new(:kind, :cls, :element, :text, :value_classes, keyword_init: true)
   Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, keyword_init: true)
 
   MEMBER_OK = %w[MethodDefinition InstanceVariable AttrReader AttrAccessor].freeze
@@ -150,6 +152,12 @@ module RbsSignatures
   end
 
   def type_of(t)
+    type = hint_type_of(t)
+    type.value_classes = value_classes_of(t)
+    type
+  end
+
+  def hint_type_of(t)
     text = t.to_s
     case t
     when RBS::Types::ClassInstance
@@ -172,6 +180,37 @@ module RbsSignatures
     end
   end
 
+  # Nominal bounds for IR contracts, never exact-class or embedding proofs (ADR 0441).
+  def value_classes_of(t)
+    values = case t
+             when RBS::Types::ClassInstance
+               return nil unless t.args.empty? || %w[Array Hash].include?(t.name.to_s.delete_prefix('::'))
+
+               [t.name.to_s.delete_prefix('::').to_sym]
+             when RBS::Types::Optional
+               inner = value_classes_of(t.type) or return nil
+               inner.to_a + [:NilClass]
+             when RBS::Types::Union
+               members = t.types.map { |member| value_classes_of(member) }
+               return nil if members.any?(&:nil?)
+
+               members.flat_map(&:to_a)
+             when RBS::Types::Bases::Bool then [:TrueClass, :FalseClass]
+             when RBS::Types::Bases::Nil then [:NilClass]
+             when RBS::Types::Literal
+               case t.literal
+               when Integer then [:Integer]
+               when String then [:String]
+               when Symbol then [:Symbol]
+               when true then [:TrueClass]
+               when false then [:FalseClass]
+               else return nil
+               end
+             else return nil
+             end
+    values.to_set.freeze
+  end
+
   def class_name_of(t)
     return nil unless t.is_a?(RBS::Types::ClassInstance) && t.args.empty?
 
@@ -181,7 +220,7 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -190,7 +229,7 @@ module RbsSignatures
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
-                     ivar_sigs: loaded.ivars)
+                     ivar_sigs: loaded.ivars, ir_arg_types: {})
     defs_by = {}
     registry.each_value { |defs| defs.each { |d| defs_by[[d.owner, d.name.to_s]] = d if d.irep } }
     loaded.methods.each_value do |sig|
@@ -209,6 +248,12 @@ module RbsSignatures
         ap.origins[d.irep] = 'signature'
         ap.locs[d.irep] = sig.loc
       end
+      # Comment declarations own their slots; do not seed a second, conflicting IR contract.
+      ap.ir_arg_types[d.irep] = sig.args.each_with_index.filter_map do |type, index|
+        commented = annotations[d.irep]&.args&.[](index) || class_annotations[d.irep]&.args&.[](index) ||
+                    element_annotations[d.irep]&.arg_elements&.[](index)
+        [((index + 1).to_s), type.value_classes] if type.value_classes && !commented
+      end.to_h.freeze
       merge_method(ap, sig, d, annotations, class_annotations, element_annotations, known_owners)
     end
     loaded.ivars.each_value do |iv|
@@ -219,6 +264,12 @@ module RbsSignatures
       seed_ivar(ap, iv, known_owners)
     end
     ap
+  end
+
+  # Applied signatures have already been matched to the definition and its required arity.
+  def ir_types(applied, irep)
+    require_relative 'bytecode_ir'
+    BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}))
   end
 
   def note(ap, loc, severity, code, message)
