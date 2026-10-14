@@ -1,0 +1,271 @@
+diff --git a/cc.h b/cc.h
+index c8e5865..d681d1f 100644
+--- a/cc.h
++++ b/cc.h
+@@ -171,6 +171,16 @@ enum builtinkind {
+ 	BUILTINVAEND,
+ 	BUILTINVALIST,
+ 	BUILTINVASTART,
++	BUILTINC11INIT,
++	BUILTINC11LOAD,
++	BUILTINC11STORE,
++	BUILTINC11XCHG,
++	BUILTINC11CAS,
++	BUILTINC11FETCHADD,
++	BUILTINC11FETCHSUB,
++	BUILTINC11FETCHAND,
++	BUILTINC11FETCHOR,
++	BUILTINC11FETCHXOR,
+ };
+ 
+ struct decl {
+diff --git a/expr.c b/expr.c
+index cbe0fe6..d663bcb 100644
+--- a/expr.c
++++ b/expr.c
+@@ -1048,6 +1048,69 @@ fpbuiltin(struct scope *s, enum builtinkind kind)
+ 	return mkexpr(EXPRCOMMA, &typeint, b.head);
+ }
+ 
++/* __c11_atomic_* and the GCC __atomic_*_n / __atomic_fetch_* forms (libc++ calls the first kind from its inline wrappers).
++ * The operand size comes from the pointee type, 1, 2, 4 or 8 bytes; qbe.c lowers each call to libatomic's sized
++ * function (__atomic_load_8 and so on), which libSystem exports on macOS. The arguments are the pointer, then the
++ * values, then the memory order: compare-exchange takes the expected pointer, the desired value and two orders, and
++ * the GCC form's weak flag (the fourth argument) is dropped. */
++static struct expr *
++atomicbuiltin(struct scope *s, enum builtinkind kind)
++{
++	struct expr *e, *first, *arg, *prev;
++	struct type *pointee;
++	unsigned n = 0, want;
++
++	first = assignexpr(s);
++	if (first->type->kind != TYPEPOINTER)
++		error(&tok.loc, "atomic operation needs a pointer");
++	pointee = first->type->base;
++	if (!(pointee->prop & PROPSCALAR) || (pointee->size != 1 && pointee->size != 2 && pointee->size != 4 && pointee->size != 8))
++		error(&tok.loc, "atomic operation on an unsupported type");
++	prev = first;
++	while (consume(TCOMMA)) {
++		arg = assignexpr(s);
++		prev->next = arg;
++		prev = arg;
++		++n;
++	}
++	switch (kind) {
++	case BUILTINC11INIT:
++		want = 1;
++		break;
++	case BUILTINC11LOAD:
++		want = 1;
++		break;
++	case BUILTINC11CAS:
++		want = 4;
++		break;
++	default:
++		want = 2;
++		break;
++	}
++	if (kind == BUILTINC11CAS && n == 5) {
++		/* the GCC form: drop the weak flag (the third argument after the pointer) */
++		struct expr *desired = first->next->next;
++		desired->next = desired->next->next;
++		n = 4;
++	}
++	if (n != want)
++		error(&tok.loc, "wrong number of arguments to an atomic builtin");
++	switch (kind) {
++	case BUILTINC11INIT:
++	case BUILTINC11STORE:
++		e = mkexpr(EXPRBUILTIN, &typevoid, first);
++		break;
++	case BUILTINC11CAS:
++		e = mkexpr(EXPRBUILTIN, &typebool, first);
++		break;
++	default:
++		e = mkexpr(EXPRBUILTIN, pointee, first);
++		break;
++	}
++	e->u.builtin.kind = kind;
++	return e;
++}
++
+ static struct expr *
+ builtinfunc(struct scope *s, enum builtinkind kind)
+ {
+@@ -1174,6 +1237,18 @@ builtinfunc(struct scope *s, enum builtinkind kind)
+ 		if (consume(TCOMMA))
+ 			delexpr(assignexpr(s));
+ 		break;
++	case BUILTINC11INIT:
++	case BUILTINC11LOAD:
++	case BUILTINC11STORE:
++	case BUILTINC11XCHG:
++	case BUILTINC11CAS:
++	case BUILTINC11FETCHADD:
++	case BUILTINC11FETCHSUB:
++	case BUILTINC11FETCHAND:
++	case BUILTINC11FETCHOR:
++	case BUILTINC11FETCHXOR:
++		e = atomicbuiltin(s, kind);
++		break;
+ 	default:
+ 		fatal("internal error; unknown builtin");
+ 	}
+diff --git a/qbe.c b/qbe.c
+index 195c60e..889c3de 100644
+--- a/qbe.c
++++ b/qbe.c
+@@ -464,6 +464,103 @@ softtemp(struct func *f)
+ 	return v;
+ }
+ 
++static struct value *softcall(struct func *f, int class, struct value *fn, unsigned n, struct softarg *arg);
++
++/* an atomic builtin (expr.c, atomicbuiltin) as a call of libatomic's sized function __atomic_OP_N for the size N of the
++ * pointee: the pointer, the value(s) and the memory order, in the sized functions' own convention (compare-exchange
++ * takes the expected pointer and returns a bool). libSystem exports them on macOS. */
++static struct value *
++funcatomic(struct func *f, struct expr *e)
++{
++	struct expr *a[5];
++	struct softarg sa[5];
++	struct type *pt;
++	struct value *r;
++	const char *op;
++	char name[32];
++	unsigned n = 0, i, size;
++	int vclass, rclass;
++
++	for (struct expr *x = e->base; x; x = x->next)
++		a[n++] = x;
++	pt = a[0]->type->base;
++	size = pt->size;
++	vclass = qbetype(pt).base;
++	rclass = 0;
++	switch (e->u.builtin.kind) {
++	case BUILTINC11INIT:
++	case BUILTINC11STORE:
++		op = "store";
++		break;
++	case BUILTINC11LOAD:
++		op = "load";
++		rclass = vclass;
++		break;
++	case BUILTINC11XCHG:
++		op = "exchange";
++		rclass = vclass;
++		break;
++	case BUILTINC11CAS:
++		op = "compare_exchange";
++		rclass = 'w';
++		break;
++	case BUILTINC11FETCHADD:
++		op = "fetch_add";
++		rclass = vclass;
++		break;
++	case BUILTINC11FETCHSUB:
++		op = "fetch_sub";
++		rclass = vclass;
++		break;
++	case BUILTINC11FETCHAND:
++		op = "fetch_and";
++		rclass = vclass;
++		break;
++	case BUILTINC11FETCHOR:
++		op = "fetch_or";
++		rclass = vclass;
++		break;
++	case BUILTINC11FETCHXOR:
++		op = "fetch_xor";
++		rclass = vclass;
++		break;
++	default:
++		fatal("internal error; not an atomic builtin");
++	}
++	snprintf(name, sizeof(name), "__atomic_%s_%u", op, size);
++	/* the sized functions: (ptr, value, order), (ptr, order) for load, (ptr, expected, desired, success, failure) for
++	 * compare-exchange; INIT is a relaxed store (order 0) */
++	switch (e->u.builtin.kind) {
++	case BUILTINC11LOAD:
++		n = 2;
++		sa[0] = (struct softarg){ptrclass, funcexpr(f, a[0])};
++		sa[1] = (struct softarg){'w', funcexpr(f, a[1])};
++		break;
++	case BUILTINC11CAS:
++		sa[0] = (struct softarg){ptrclass, funcexpr(f, a[0])};
++		sa[1] = (struct softarg){ptrclass, funcexpr(f, a[1])};
++		sa[2] = (struct softarg){vclass, funcexpr(f, a[2])};
++		sa[3] = (struct softarg){'w', funcexpr(f, a[3])};
++		sa[4] = (struct softarg){'w', funcexpr(f, a[4])};
++		n = 5;
++		break;
++	case BUILTINC11INIT:
++		sa[0] = (struct softarg){ptrclass, funcexpr(f, a[0])};
++		sa[1] = (struct softarg){vclass, funcexpr(f, a[1])};
++		sa[2] = (struct softarg){'w', mkintconst(0)};
++		n = 3;
++		break;
++	default:
++		sa[0] = (struct softarg){ptrclass, funcexpr(f, a[0])};
++		sa[1] = (struct softarg){vclass, funcexpr(f, a[1])};
++		sa[2] = (struct softarg){'w', funcexpr(f, a[2])};
++		n = 3;
++		break;
++	}
++	r = softcall(f, rclass, asanfn(name), n, sa);
++	return rclass ? r : NULL;
++}
++
+ /* a call of fn (class is the class of its result, 0 for none) with n arguments */
+ static struct value *
+ softcall(struct func *f, int class, struct value *fn, unsigned n, struct softarg *arg)
+@@ -2318,6 +2415,17 @@ funcexpr(struct func *f, struct expr *e)
+ 			if (asanon)
+ 				return asandynalloc(f, l, false);
+ 			return funcinst(f, IALLOC16, ptrclass, l, NULL);
++		case BUILTINC11INIT:
++		case BUILTINC11LOAD:
++		case BUILTINC11STORE:
++		case BUILTINC11XCHG:
++		case BUILTINC11CAS:
++		case BUILTINC11FETCHADD:
++		case BUILTINC11FETCHSUB:
++		case BUILTINC11FETCHAND:
++		case BUILTINC11FETCHOR:
++		case BUILTINC11FETCHXOR:
++			return funcatomic(f, e);
+ 		case BUILTINUNREACHABLE:
+ 			funchlt(f);
+ 			return NULL;
+diff --git a/scope.c b/scope.c
+index cb4cad2..aeb8239 100644
+--- a/scope.c
++++ b/scope.c
+@@ -36,6 +36,26 @@ scopeinit(void)
+ 		{.name = "__builtin_va_end",      .kind = DECLBUILTIN, .u.builtin = BUILTINVAEND},
+ 		{.name = "__builtin_va_start",    .kind = DECLBUILTIN, .u.builtin = BUILTINVASTART},
+ 		{.name = "__builtin_c23_va_start", .kind = DECLBUILTIN, .u.builtin = BUILTINVASTART},
++		{.name = "__c11_atomic_init", .kind = DECLBUILTIN, .u.builtin = BUILTINC11INIT},
++		{.name = "__c11_atomic_load", .kind = DECLBUILTIN, .u.builtin = BUILTINC11LOAD},
++		{.name = "__atomic_load_n", .kind = DECLBUILTIN, .u.builtin = BUILTINC11LOAD},
++		{.name = "__c11_atomic_store", .kind = DECLBUILTIN, .u.builtin = BUILTINC11STORE},
++		{.name = "__atomic_store_n", .kind = DECLBUILTIN, .u.builtin = BUILTINC11STORE},
++		{.name = "__c11_atomic_exchange", .kind = DECLBUILTIN, .u.builtin = BUILTINC11XCHG},
++		{.name = "__atomic_exchange_n", .kind = DECLBUILTIN, .u.builtin = BUILTINC11XCHG},
++		{.name = "__c11_atomic_compare_exchange_strong", .kind = DECLBUILTIN, .u.builtin = BUILTINC11CAS},
++		{.name = "__c11_atomic_compare_exchange_weak", .kind = DECLBUILTIN, .u.builtin = BUILTINC11CAS},
++		{.name = "__atomic_compare_exchange_n", .kind = DECLBUILTIN, .u.builtin = BUILTINC11CAS},
++		{.name = "__c11_atomic_fetch_add", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHADD},
++		{.name = "__atomic_fetch_add", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHADD},
++		{.name = "__c11_atomic_fetch_sub", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHSUB},
++		{.name = "__atomic_fetch_sub", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHSUB},
++		{.name = "__c11_atomic_fetch_and", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHAND},
++		{.name = "__atomic_fetch_and", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHAND},
++		{.name = "__c11_atomic_fetch_or", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHOR},
++		{.name = "__atomic_fetch_or", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHOR},
++		{.name = "__c11_atomic_fetch_xor", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHXOR},
++		{.name = "__atomic_fetch_xor", .kind = DECLBUILTIN, .u.builtin = BUILTINC11FETCHXOR},
+ 	};
+ 	static struct decl valist;
+ 	struct decl *d;

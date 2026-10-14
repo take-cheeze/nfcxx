@@ -162,7 +162,18 @@ static void finite_differences() {
   fd_case("transpose", {S23}, [](Session&, const Ts& x) { return x[0].T() * x[0].T(); });
   fd_case("transpose-perm", {Shape{2, 3, 4}}, [](Session&, const Ts& x) { return x[0].transpose({2, 0, 1}).tanh(); });
   fd_case("reshape", {S23}, [](Session&, const Ts& x) { return x[0].reshape({3, 2}).exp(); });
+  fd_case("abs", {S23}, [](Session&, const Ts& x) { return x[0].abs(); });   // onnxsim's Abs rule (master): away from 0 with random inputs
+  fd_case("max-binary", {S23}, [](Session&, const Ts& x) { return maximum(x[0], x[0] * 0.5); });
+  fd_case("min-binary", {S23}, [](Session&, const Ts& x) { return minimum(x[0], x[0] * 0.5); });
+  fd_case("concat", {S23}, [](Session&, const Ts& x) { return concatenate({x[0], x[0] * x[0]}, 0); });
   fd_case("flatten", {S23}, [](Session&, const Ts& x) { return x[0].flatten().tanh(); });
+  // shape operands (starts, ends, axes, steps, shape, axes) are initializers of the export, read by onnxsim's rules
+  fd_case("slice", {S23}, [](Session&, const Ts& x) { return x[0].slice(1, 0, 2).exp(); });
+  fd_case("slice-step", {Shape{2, 5}}, [](Session&, const Ts& x) { return x[0].slice(1, 0, 5, 2).tanh(); });
+  fd_case("expand", {S23}, [](Session&, const Ts& x) { return x[0].broadcast_to({2, 2, 3}).tanh(); });
+  fd_case("expand-scalar-axes", {Shape{2, 1}}, [](Session&, const Ts& x) { return x[0].broadcast_to({2, 4}) * x[0].broadcast_to({2, 4}); });
+  fd_case("squeeze", {S23}, [](Session&, const Ts& x) { return x[0].expand_dims(0).squeeze(0).tanh(); });
+  fd_case("unsqueeze", {S23}, [](Session&, const Ts& x) { return x[0].expand_dims(1).exp(); });
   // reductions
   fd_case("sum-all", {S23}, [](Session&, const Ts& x) { return (x[0] * x[0]).sum(); });
   fd_case("sum-axis0", {S23}, [](Session&, const Ts& x) { return (x[0] * x[0]).sum(0); });
@@ -173,6 +184,9 @@ static void finite_differences() {
   fd_case("mean-keep", {S23}, [](Session&, const Ts& x) { return x[0] - x[0].mean(1, true); });
   fd_case("var", {S23}, [](Session&, const Ts& x) { return x[0].var(Axes{1}); });
   fd_case("stddev", {S23}, [](Session&, const Ts& x) { return x[0].stddev(); });
+  fd_case("reduce-max", {S23}, [](Session&, const Ts& x) { return x[0].max(1); });
+  fd_case("reduce-min", {S23}, [](Session&, const Ts& x) { return x[0].min(1); });
+  fd_case("log-softmax", {S23}, [](Session&, const Ts& x) { return x[0].log_softmax(1); });
   fd_case("softmax-last", {S23}, [](Session&, const Ts& x) { return x[0].softmax(); });
   fd_case("softmax-axis0", {Shape{3, 4}}, [](Session&, const Ts& x) { return x[0].softmax(0); });
   fd_case("softmax-axis1-3d", {Shape{2, 3, 4}}, [](Session&, const Ts& x) { return x[0].softmax(1); });
@@ -219,31 +233,25 @@ static void finite_differences() {
 
 static void unsupported() {
   static const Shape S23{2, 3};
-  struct Case { const char* op; std::function<Tensor(Session&, const Tensor&)> f; };
+  // op: the operator named in the refusal; frag: the text the refusal must contain, when it is not "no gradient rule for op type ..."
+  struct Case { const char* op; std::function<Tensor(Session&, const Tensor&)> f; const char* frag = nullptr; };
+  const char* cast_frag = "Cast to 11 is not differentiated here";
   std::vector<Case> cases = {
-      {"Abs", [](Session&, const Tensor& x) { return x.abs(); }},
       {"Sin", [](Session&, const Tensor& x) { return x.sin(); }},
       {"Cos", [](Session&, const Tensor& x) { return x.cos(); }},
-      {"Max", [](Session&, const Tensor& x) { return maximum(x, x * 0.5); }},
-      {"Min", [](Session&, const Tensor& x) { return minimum(x, x * 0.5); }},
-      {"Where", [](Session&, const Tensor& x) { return where(x > 0.0, x, x * 2.0); }},
-      {"Cast", [](Session&, const Tensor& x) { return x * (x > 0.0).astype(f64); }},   // a mask made from x: comparisons and casts have no rule
-      {"Slice", [](Session&, const Tensor& x) { return x.slice(1, 0, 2); }},
-      {"Concat", [](Session&, const Tensor& x) { return concatenate({x, x}, 0); }},
-      {"Expand", [](Session&, const Tensor& x) { return x.broadcast_to({2, 2, 3}); }},
-      {"Squeeze", [](Session&, const Tensor& x) { return x.expand_dims(0).squeeze(0); }},
-      {"Unsqueeze", [](Session&, const Tensor& x) { return x.expand_dims(0); }},
-      {"ReduceMax", [](Session&, const Tensor& x) { return x.max(1); }},
-      {"ReduceMin", [](Session&, const Tensor& x) { return x.min(1); }},
-      {"LogSoftmax", [](Session&, const Tensor& x) { return x.log_softmax(1); }},
-      {"Cast", [](Session&, const Tensor& x) { return x.astype(f32).astype(f64); }},
+      // the mask of where is a comparison, which has no rule: the refusal names it, not Where
+      {"Greater", [](Session&, const Tensor& x) { return where(x > 0.0, x, x * 2.0); }},
+      {"Cast", [](Session&, const Tensor& x) { return x * (x > 0.0).astype(f64); }, cast_frag},   // a mask made from x: comparisons and casts have no rule
+      // onnxsim's Slice rule takes positive steps only (its GradSlice); a negative step is a refusal, not a gradient
+      {"Slice", [](Session&, const Tensor& x) { return x.slice(1, 2, 0, -1); }, "Slice requires positive steps"},
+      {"Cast", [](Session&, const Tensor& x) { return x.astype(f32).astype(f64); }, cast_frag},
   };
   for (const Case& c : cases) {
     Session s;
     s.default_float = f64;
     Tensor x = s.placeholder("x", S23);
     Tensor loss = wsum(s, c.f(s, x));
-    std::string frag = std::string("no gradient rule for op type '") + c.op + "'";
+    const std::string frag = c.frag ? std::string(c.frag) : std::string("no gradient rule for op type '") + c.op + "'";
     CHECK_ERR(grad(loss, x), frag.c_str());
   }
   {  // matmul with a 1-D operand: covered op, refused configuration

@@ -1698,18 +1698,77 @@ HALF2_OPS = HALF2_TYPE + [
 HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
   "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
   "#endif\n"
-# bf16 as a 16-bit integer (the upper half of a float, round to nearest even). nv_bfloat162 is a two-lane struct, as
-# __half2 is (CUDA's type has .x and .y, and llama.cpp brace-initializes it as such). Operators on nv_bfloat16 are
-# integer operators here, as for half: a unit that uses them is not handled correctly. float(x) of an nv_bfloat16 is
-# the bits, not the value (a class with a converting constructor is refused by the front end in a device unit).
+# bf16: a 2-byte class holding the upper half of a float (round to nearest even, NaN canonical as CUDA's host header).
+# Its converting constructor and operator float give the value, as CUDA's __nv_bfloat16 does. Arithmetic computes in
+# float and rounds back to bf16 (CUDA's header does the same). nv_bfloat162 stays a two-lane struct of the bits, as
+# __half2 is (llama.cpp brace-initializes it from floats, and assigns its lanes as bits). The class is a local in device
+# code only because the device pass compiles with --no_exceptions (scripts/pathb-dump): its destructor-free layout
+# otherwise gets EH cleanup globals the emitter refuses.
 BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
-  "typedef unsigned short nv_bfloat16;\n" \
   "typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;\n" \
-  "typedef unsigned short __nv_bfloat16;\n" \
+  "static inline unsigned short __nfcxx_float2bf16_bits(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "static inline float __nfcxx_bf16_bits2float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
+  "struct __nfcxx_bfloat16 { unsigned short x; __host__ __device__ __nfcxx_bfloat16() {} __host__ __device__ __nfcxx_bfloat16(float f) { x = __nfcxx_float2bf16_bits(f); } __host__ __device__ operator float() const { return __nfcxx_bf16_bits2float(x); } };\n" \
+  "typedef __nfcxx_bfloat16 nv_bfloat16;\n" \
+  "typedef __nfcxx_bfloat16 __nv_bfloat16;\n" \
   "typedef nv_bfloat162 __nv_bfloat162;\n" \
-  "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
-  "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "static inline __nfcxx_bfloat16 __nfcxx_bf16_from_bits(unsigned short b) { __nfcxx_bfloat16 r; r.x = b; return r; }\n" \
+  "static inline float __bfloat162float(__nfcxx_bfloat16 b) { return (float)b; }\n" \
+  "static inline __nfcxx_bfloat16 __float2bfloat16(float f) { return __nfcxx_bfloat16(f); }\n" \
+  "static inline __nfcxx_bfloat16 operator+(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a + (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a - (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator*(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a * (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator/(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a / (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a) { return __nfcxx_bfloat16(-(float)a); }\n" \
   "#endif\n"
+
+# wmma (nvcuda::wmma) for the m8n32k16 shape that sm_70 and later support with f16 A and B and f32 accumulate, as the PTX
+# wmma.load, wmma.mma and wmma.store instructions through inline asm (the register counts are nvcc's: 8 per A and B
+# fragment, 8 floats per accumulator). The fragment's element order is the instruction's, so the fragment is opaque
+# to user code as in CUDA. Only shared-state operands are supported (llama.cpp's uses are in shared memory).
+WMMA_M8N32K16 = <<~'CODE'
+#ifndef __NFCXX_WMMA_M8N32K16
+#define __NFCXX_WMMA_M8N32K16
+namespace nvcuda { namespace wmma {
+struct row_major {}; struct col_major {}; enum layout_t { mem_row_major, mem_col_major };
+struct matrix_a {}; struct matrix_b {}; struct accumulator {};
+template <class Use, int M, int N, int K, class T, class L = void> struct fragment { unsigned x[8]; };
+template <int M, int N, int K, class T> struct fragment<accumulator, M, N, K, T, void> { float x[8]; };
+static inline unsigned __nfcxx_wmma_smem(const void *p) {
+  unsigned long long q; unsigned r;
+  asm("cvta.to.shared.u64 %0, %1;" : "=l"(q) : "l"(p));
+  asm("cvt.u32.u64 %0, %1;" : "=r"(r) : "l"(q));
+  return r;
+}
+static inline void load_matrix_sync(fragment<matrix_a, 8, 32, 16, half, row_major> &f, const half *p, unsigned ldm) {
+  asm volatile("wmma.load.a.sync.aligned.row.m8n32k16.shared.f16 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
+               : "=r"(f.x[0]), "=r"(f.x[1]), "=r"(f.x[2]), "=r"(f.x[3]), "=r"(f.x[4]), "=r"(f.x[5]), "=r"(f.x[6]), "=r"(f.x[7])
+               : "r"(__nfcxx_wmma_smem(p)), "r"(ldm));
+}
+static inline void load_matrix_sync(fragment<matrix_b, 8, 32, 16, half, col_major> &f, const half *p, unsigned ldm) {
+  asm volatile("wmma.load.b.sync.aligned.col.m8n32k16.shared.f16 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
+               : "=r"(f.x[0]), "=r"(f.x[1]), "=r"(f.x[2]), "=r"(f.x[3]), "=r"(f.x[4]), "=r"(f.x[5]), "=r"(f.x[6]), "=r"(f.x[7])
+               : "r"(__nfcxx_wmma_smem(p)), "r"(ldm));
+}
+static inline void fill_fragment(fragment<accumulator, 8, 32, 16, float> &f, float v) {
+  for (int i = 0; i < 8; i++) f.x[i] = v;
+}
+static inline void mma_sync(fragment<accumulator, 8, 32, 16, float> &d, const fragment<matrix_a, 8, 32, 16, half, row_major> &a,
+                            const fragment<matrix_b, 8, 32, 16, half, col_major> &b, const fragment<accumulator, 8, 32, 16, float> &c) {
+  for (int i = 0; i < 8; i++) d.x[i] = c.x[i];
+  asm volatile("wmma.mma.sync.aligned.row.col.m8n32k16.f32.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19,%20,%21,%22,%23}, {%0,%1,%2,%3,%4,%5,%6,%7};"
+               : "+f"(d.x[0]), "+f"(d.x[1]), "+f"(d.x[2]), "+f"(d.x[3]), "+f"(d.x[4]), "+f"(d.x[5]), "+f"(d.x[6]), "+f"(d.x[7])
+               : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]), "r"(a.x[4]), "r"(a.x[5]), "r"(a.x[6]), "r"(a.x[7]),
+                 "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]), "r"(b.x[4]), "r"(b.x[5]), "r"(b.x[6]), "r"(b.x[7]));
+}
+static inline void store_matrix_sync(float *p, const fragment<accumulator, 8, 32, 16, float> &f, unsigned ldm, layout_t) {
+  asm volatile("wmma.store.d.sync.aligned.row.m8n32k16.shared.f32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8}, %9;"
+               :: "r"(__nfcxx_wmma_smem(p)), "f"(f.x[0]), "f"(f.x[1]), "f"(f.x[2]), "f"(f.x[3]), "f"(f.x[4]), "f"(f.x[5]), "f"(f.x[6]), "f"(f.x[7]), "r"(ldm));
+}
+}}
+namespace wmma = nvcuda::wmma;
+#endif
+CODE
 
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
@@ -1769,6 +1828,7 @@ BUILTIN_DEFS = {
   "__float2half" => HALF_CORE,
   "__half2float" => HALF_CORE,
   "half" => HALF_CORE + "typedef __half half;\n",
+  "wmma" => WMMA_M8N32K16,
   "half2" => HALF2_TYPE + "typedef __half2 half2;\n",
   # make_half2(x, y) as in cuda_fp16: each lane rounded to half from a float (int arguments convert exactly when small).
   "make_half2" => HALF2_TYPE + HALF_CORE + "static inline __half2 make_half2(float x, float y) { __half2 r; r.x = __float2half(x); r.y = __float2half(y); return r; }\n",
@@ -1798,6 +1858,28 @@ BUILTIN_DEFS = {
   "trunc" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float trunc(float a) { return __nfcxx_truncf(a); }\n",
   "roundf" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float roundf(float a) { float t = __nfcxx_truncf(a); float d = a - t; " \
               "if (d >= 0.5f) t += 1.0f; else if (d <= -0.5f) t -= 1.0f; return t; }\n",
+  # ceilf and fmaf: one PTX instruction each (cvt.rpi, fma.rn: exact). log2f: lg2.approx (see FLOAT_BUILTINS; exact at
+  # powers of two, error bound in docs/notes/gpu.md).
+  "ceilf" => "extern \"C\" float __nfcxx_ceilf(float);\nstatic inline float ceilf(float a) { return __nfcxx_ceilf(a); }\n",
+  "fmaf" => "extern \"C\" float __nfcxx_fmaf(float, float, float);\nstatic inline float fmaf(float a, float b, float c) { return __nfcxx_fmaf(a, b, c); }\n",
+  # log2f: an exact exponent at a positive power of two (the bits say so; a subnormal one is scaled up by 2^24 first), else
+  # lg2.approx. Its error is not bounded at powers of two, and llama.cpp takes floorf(log2f(n)) of head counts.
+  "log2f" => "extern \"C\" float __nfcxx_log2f(float);\n" \
+             "static inline float log2f(float a) { if (a > 0.0f) { float s = a; int off = 0; unsigned u = __float_as_uint(a); " \
+             "if ((u >> 23) == 0) { s = a * 16777216.0f; off = -24; u = __float_as_uint(s); } " \
+             "if ((u & 0x007fffffu) == 0 && (u >> 23) != 0xffu) return (float)((int)(u >> 23) - 127 + off); } " \
+             "return __nfcxx_log2f(a); }\n",
+  # erff: the Maclaurin series of erf in double (alternating terms, |x| <= 4; beyond that erf rounds to +-1 as a float).
+  # Error: the series' rounding is about 1e-11 at |x| = 4 and far less below it, well under half a float ulp of erf.
+  "erff" => "static inline float erff(float a) { if (a != a) return a; double x = (double)a; double ax = x < 0.0 ? -x : x; " \
+            "if (ax > 4.0) return x < 0.0 ? -1.0f : 1.0f; double t = ax; double sum = 0.0; double x2 = ax * ax; " \
+            "for (int n = 0; n < 200; n++) { double term = t / (double)(2 * n + 1); sum += term; double ad = term < 0.0 ? -term : term; " \
+            "if (ad <= 1e-17 * sum) break; t = -t * x2 / (double)(n + 1); } double v = 1.1283791670955126 * sum; " \
+            "return (float)(x < 0.0 ? -v : v); }\n",
+  # Limits of <limits.h> that the device unit uses.
+  "INT_MAX" => "#define INT_MAX 2147483647\n",
+  "INT_MIN" => "#define INT_MIN (-2147483647 - 1)\n",
+  "UINT_MAX" => "#define UINT_MAX 4294967295U\n",
   # sinf and cosf (the helper is shared, see needed in the rewrite): Cephes-style. The argument is reduced to r in
   # [-pi/4, pi/4] by the nearest multiple n of pi/2 (three-part constant, exact for n < 2^15 or so), and the quadrant
   # n mod 4 picks sin or cos of r and the sign. Polynomials of Cephes' sinf/cosf. Error and bound: docs/notes/gpu.md.
@@ -1869,10 +1951,10 @@ BUILTIN_DEFS = {
   "__nv_bfloat162" => BF16_CORE,
   "__float2bfloat16" => BF16_CORE,
   "__bfloat162float" => BF16_CORE,
-  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return h.x; }\n",
-  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return h.y; }\n",
-  "__bfloat1622float2" => BF16_CORE + "static inline float2 __bfloat1622float2(nv_bfloat162 h) { return make_float2(__bfloat162float(h.x), __bfloat162float(h.y)); }\n",
-  "__float22bfloat162_rn" => BF16_CORE + "static inline nv_bfloat162 __float22bfloat162_rn(float2 f) { nv_bfloat162 r; r.x = __float2bfloat16(f.x); r.y = __float2bfloat16(f.y); return r; }\n",
+  "__low2bfloat16" => BF16_CORE + "static inline __nfcxx_bfloat16 __low2bfloat16(nv_bfloat162 h) { return __nfcxx_bf16_from_bits(h.x); }\n",
+  "__high2bfloat16" => BF16_CORE + "static inline __nfcxx_bfloat16 __high2bfloat16(nv_bfloat162 h) { return __nfcxx_bf16_from_bits(h.y); }\n",
+  "__bfloat1622float2" => BF16_CORE + "static inline float2 __bfloat1622float2(nv_bfloat162 h) { return make_float2(__nfcxx_bf16_bits2float(h.x), __nfcxx_bf16_bits2float(h.y)); }\n",
+  "__float22bfloat162_rn" => BF16_CORE + "static inline nv_bfloat162 __float22bfloat162_rn(float2 f) { nv_bfloat162 r; r.x = __nfcxx_float2bf16_bits(f.x); r.y = __nfcxx_float2bf16_bits(f.y); return r; }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
   "__hsub2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hsub2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) - __half2float(b.x)); r.y = __float2half(__half2float(a.y) - __half2float(b.y)); return r; }\n",
@@ -1894,15 +1976,55 @@ BUILTIN_DEFS = {
   "__all_sync" => "extern \"C\" int __nfcxx_all_sync(unsigned, int);\nstatic inline int __all_sync(unsigned m, int p) { (void)m; return __nfcxx_all_sync(0xffffffffu, p); }\n",
 }
 
-# The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
-# group (cg::thread_block), cg::this_thread_block() and cg::sync(group). The group is a plain unsigned value here
-# (it carries nothing), so no struct is passed by value. Methods on the group and tiled partitions are not
-# provided: a unit that calls them still fails (simpleCooperativeGroups; tests/cuda/samples/README.md).
+# The cooperative-groups names that the device code uses: a thread block group (cg::thread_block), cg::this_thread_block()
+# and cg::sync(group); and warp tiles, cg::thread_block_tile<N> from cg::tiled_partition<N>(group) for N a power of two
+# up to 32, with size, thread_rank, sync, shfl, shfl_down, shfl_up and shfl_xor, and cg::reduce over a tile with
+# cg::plus, cg::less and cg::greater. The group is a plain unsigned value (it carries nothing); a tile carries nothing
+# either: its lanes come from threadIdx. A tile's shuffles are the full-warp index shuffle with the source lane computed
+# here, so no width is needed (the shuffle wrappers ignore the width). Grid groups and the other tile members are not
+# provided (see the refusals in the device pass).
 COOP_DEF = <<'COOP'
 namespace cooperative_groups {
 typedef unsigned int thread_block;
 thread_block this_thread_block(void) { return 0u; }
 void sync(thread_block) { __nfcxx_syncthreads(); }
+static inline int __nfcxx_tile_shfl(unsigned src, int v) { return __shfl_sync(0xffffffffu, v, (int)src); }
+static inline unsigned __nfcxx_tile_shfl(unsigned src, unsigned v) { return (unsigned)__shfl_sync(0xffffffffu, (int)v, (int)src); }
+static inline float __nfcxx_tile_shfl(unsigned src, float v) { return __shfl_sync(0xffffffffu, v, (int)src); }
+static inline double __nfcxx_tile_shfl(unsigned src, double v) {
+  union { double d; int i[2]; } a, b;
+  a.d = v;
+  b.i[0] = __shfl_sync(0xffffffffu, a.i[0], (int)src);
+  b.i[1] = __shfl_sync(0xffffffffu, a.i[1], (int)src);
+  return b.d;
+}
+template <unsigned N> struct thread_block_tile {
+  unsigned size(void) const { return N; }
+  unsigned thread_rank(void) const { return threadIdx.x & (N - 1); }
+  void sync(void) const { __nfcxx_syncwarp(0xffffffffu); }
+  template <typename T> T shfl(T v, unsigned src) const { return __nfcxx_tile_shfl(base() + (src & (N - 1)), v); }
+  // Every lane runs the shuffle (a shuffle under a branch is not executed by the whole warp); the result is selected after.
+  template <typename T> T shfl_down(T v, unsigned d) const {
+    unsigned r = thread_rank();
+    T s = __nfcxx_tile_shfl(base() + ((r + d) & 31u), v);
+    return r + d < N ? s : v;
+  }
+  template <typename T> T shfl_up(T v, unsigned d) const {
+    unsigned r = thread_rank();
+    T s = __nfcxx_tile_shfl(base() + ((r - d) & 31u), v);
+    return r >= d ? s : v;
+  }
+  template <typename T> T shfl_xor(T v, unsigned m) const { return __nfcxx_tile_shfl(base() + ((thread_rank() ^ m) & (N - 1)), v); }
+  unsigned base(void) const { return (threadIdx.x & 31u) & ~(N - 1); }
+};
+template <unsigned N> thread_block_tile<N> tiled_partition(const thread_block &) { return thread_block_tile<N>(); }
+template <typename T> struct plus { T operator()(T a, T b) const { return a + b; } };
+template <typename T> struct less { T operator()(T a, T b) const { return b < a ? b : a; } };
+template <typename T> struct greater { T operator()(T a, T b) const { return a < b ? b : a; } };
+template <unsigned N, typename T, typename Op> T reduce(const thread_block_tile<N> &g, T val, Op op) {
+  for (unsigned o = N / 2; o > 0; o >>= 1) val = op(val, g.shfl_xor(val, o));
+  return val;
+}
 }
 namespace cg = cooperative_groups;
 COOP
@@ -1985,6 +2107,17 @@ end
 # Top-level pieces of a translation unit: preprocessor lines, and declarations or definitions ending at a `;` or at
 # the `}` of a function or namespace. Each piece is [start, stop, kind], kind :pp or :code, and :body if it has a
 # brace block at depth 0.
+# A depth-0 `{` that follows `=` in its piece is an initializer list (`static const uint8_t t[8] = {...};`), not a body:
+# the piece ends at its `;`. A function, class, namespace or template header has a parameter list, a tag or a template
+# header before its `{`, so it is never an initializer.
+def brace_is_initializer?(chunk)
+  return false if chunk.index("(")
+  toks = tokens_of(chunk)
+  return false if toks.empty? || (toks & %w[struct class union enum namespace template operator]).any?
+  return false if toks.first == "extern" || toks.first == "typedef" || toks.first == "using"
+  !chunk.index("=").nil?
+end
+
 def top_pieces(text)
   pieces = []
   n = text.length
@@ -2026,7 +2159,7 @@ def top_pieces(text)
     elsif c == ")" || c == "]"
       depth -= 1
     elsif c == "{"
-      if depth == 0
+      if depth == 0 && !brace_is_initializer?(text[start...i])
         body = true
         opener = tokens_of(text[start...i]).first
       end
@@ -2628,6 +2761,39 @@ def flatten_linkage(text, raw)
   end
 end
 
+# The member functions of a class that are host-only: a definition whose qualifiers name __host__ and not __device__ or
+# __global__ (mmq.cuh's use_mma_data_layout(cc) calls the host dispatch helpers, which the device unit must not keep).
+# Removed with its body, keeping its newlines so line numbers hold. A __host__ that does not start a member (after
+# `;`, `{`, `}`, `:` or the start of the text) is left alone.
+def drop_host_members(t)
+  out = ""
+  i = 0
+  while i < t.length
+    e = skip_literal(t, i)
+    if e
+      out << t[i...e]
+      i = e
+      next
+    end
+    if word_at?(t, i, "__host__")
+      prev = out.rstrip[-1]
+      open = t.index("{", i)
+      semi = t.index(";", i)
+      header = open && (semi.nil? || open < semi) ? t[i...open] : nil
+      close = header && header.include?("(") && !header.include?("__device__") && !header.include?("__global__") &&
+              (prev.nil? || ";{}:".include?(prev)) ? matching_brace(t, open) : nil
+      if close
+        out << ("\n" * t[i..close].count("\n"))
+        i = close + 1
+        next
+      end
+    end
+    out << t[i]
+    i += 1
+  end
+  out
+end
+
 def device_tu(text)
   pieces = flatten_linkage(text, top_pieces(text)).map do |pc|
     st, en, kind, body = pc
@@ -2679,7 +2845,17 @@ def device_tu(text)
           kernels << name
         end
         pc[:keep] = true
-        pc[:text] = remove_words(pc[:text], DEVICE_QUALIFIERS)
+        # a class of the device side keeps its device members only: its host-only members go, and so do their tokens
+        if pc[:toks].include?("struct") || pc[:toks].include?("class")
+          dropped = drop_host_members(pc[:text])
+          if dropped != pc[:text]
+            pc[:text] = dropped
+            pc[:toks] = tokens_of(dropped)
+          end
+        end
+        # a kernel has external linkage (it is launched from the host): `static __global__ void k()` is not static in the
+        # device unit, or the front end drops it when no device code calls it
+        pc[:text] = remove_words(pc[:text], pc[:toks].include?("__global__") ? DEVICE_QUALIFIERS + ["static"] : DEVICE_QUALIFIERS)
         seeds.concat(pc[:toks])
       elsif pc[:text].include?("(")
         pc[:keep] = true
@@ -2785,13 +2961,16 @@ def device_tu(text)
   # Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
   needed["__nfcxx_sincosf"] = true if needed["sinf"] || needed["cosf"]
   needed["__nfcxx_expm1f"] = true if needed["expm1f"] || needed["tanhf"]
+  needed["__float_as_uint"] = true if needed["log2f"]
+  # The tiles of cooperative groups shuffle with the idx form (COOP_DEF uses __shfl_sync).
+  needed["__shfl_sync"] = true if needed["cg"] || needed["cooperative_groups"]
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
     out << text
   end
   if (needed["cg"] || needed["cooperative_groups"]) && pieces.none? { |pc| pc[:keep] && pc[:defined].include?("cooperative_groups") }
-    out << COOP_DEF
+    out << rewrite_builtins(COOP_DEF)
   end
   pieces.each do |pc|
     next unless pc[:keep]
@@ -2917,29 +3096,6 @@ def dynamic_shared_rewrite(s)
   end
   return out if names.empty?
   replace_dynamic_uses(out, names)
-end
-
-# The device image does not carry the alignment of a __shared__ object (the emitter sizes and aligns shared arrays from
-# their type), and a `__align__(N)` on one would be dropped silently: a kernel that reads it as a wider vector (conv2d's
-# int4 stores into a half2 array) would then misalign on the device. Refused by name instead.
-def refuse_shared_align(s)
-  i = 0
-  while i < s.length
-    e = skip_literal(s, i)
-    if e
-      i = e
-      next
-    end
-    if word_at?(s, i, "__shared__")
-      j = i + 10
-      j += 1 while j < s.length && white?(s[j])
-      if word_at?(s, j, "__align__")
-        line = s[0...i].count("\n") + 1
-        refuse("__shared__ __align__ at line #{line}: the device image does not carry shared-object alignment")
-      end
-    end
-    i += 1
-  end
 end
 
 # CUDA library names the device image does not lower, refused by name in the device pass: CUB (`cub::`, its headers
@@ -3375,7 +3531,6 @@ usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
 text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
-refuse_shared_align(text) if device
 refuse_unlowered_cccl(text) if device
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)

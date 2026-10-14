@@ -1,5 +1,6 @@
 // Symbolic dimensions in the ONNX-style graph (hir::Graph, nfcuop_hir.hpp): an input's dimension may be a symbol (ONNX dim_param,
-// e.g. "N"). Shape inference follows ONNX's broadcasting and reshape rules and refuses what it cannot represent; the exporter writes
+// e.g. "N"), and an operator may derive a polynomial in symbols (4*N, N+1: onnxsim's SymExpr, nfcuop_sym_expr.hpp). Shape inference
+// follows ONNX's broadcasting and reshape rules and refuses what it cannot represent; the exporter writes
 // dim_param and the reader takes it back; hir::Evaluator binds the symbols to sizes, lowers the bound graph once per binding and
 // evaluates it. The MLP's expected values are worked out by hand (the comments show the sums). With a directory as argv[1] the
 // models are also written for tests/uop/onnx_check.py (onnx.checker and onnxruntime, at each batch size).
@@ -144,15 +145,16 @@ static void shape_inference() {
   CHECK(e.dims(e.add_node("Mul", {a, a})) == (hir::Dims{S("N"), 4}));
   CHECK(e.dims(e.add_node("Where", {e.add_node("Less", {a, row}), a, row})) == (hir::Dims{S("N"), 4}));
 
-  // reshape: 0 copies the symbol, -1 takes what is left (a single symbol when the rest is 1 times it)
+  // reshape: 0 copies the symbol, -1 is the exact quotient of the sizes (N*4 / 4 is N; a quotient that is not a polynomial is refused)
   CHECK(e.dims(e.add_node("Reshape", {x3, ints({2}, {0, 4})})) == (hir::Dims{S("N"), 4}));
   CHECK(e.dims(e.add_node("Reshape", {x3, ints({2}, {-1, 4})})) == (hir::Dims{S("N"), 4}));
   CHECK(e.dims(e.add_node("Reshape", {x3, ints({3}, {-1, 2, 2})})) == (hir::Dims{S("N"), 2, 2}));
   CHECK(e.dims(e.add_node("Reshape", {e.add_symbolic_input("v", f32, hir::Dims{S("N")}), ints({1}, {-1})})) == (hir::Dims{S("N")}));
-  CHECK_ERR(e.add_node("Reshape", {a, ints({1}, {-1})}), "product of symbols");   // [N,4] -> [-1] would be 4N
-  CHECK_ERR(e.add_node("Reshape", {x3, ints({2}, {-1, 3})}), "cannot reshape");
-  CHECK_ERR(e.add_node("Reshape", {x3, ints({2}, {2, -1})}), "product of symbols");
+  CHECK(e.dims(e.add_node("Reshape", {a, ints({1}, {-1})})) == (hir::Dims{S("N") * 4}));   // [N,4] -> [N*4]
+  CHECK(e.dims(e.add_node("Reshape", {x3, ints({2}, {2, -1})})) == (hir::Dims{2, S("N") * 2}));
+  CHECK_ERR(e.add_node("Reshape", {x3, ints({2}, {-1, 3})}), "cannot reshape");   // 4N is not a multiple of 3
   CHECK_ERR(e.add_node("Reshape", {x3, ints({2}, {4, 4})}), "cannot reshape");
+  CHECK_ERR(e.add_node("Reshape", {a, ints({2}, {3, 4})}), "cannot reshape");     // [N,4] -> [3,4]: 4N is not 12 for every N
 
   // matmul and gemm: the contraction axes must be equal; the rows (and the batch) pass through
   int w42 = e.add_initializer("", arr(f32, {4, 2}, zeros(8)));
@@ -166,14 +168,16 @@ static void shape_inference() {
   CHECK(e.dims(e.add_node("ReduceSum", {a, ints({1}, {0})}, {hir::Attribute::Int("keepdims", 0)})) == (hir::Dims{4}));
   CHECK(e.dims(e.add_node("ReduceMean", {a, ints({1}, {1})}, {hir::Attribute::Int("keepdims", 1)})) == (hir::Dims{S("N"), 1}));
 
-  // concat along the symbol is refused (its size would be a sum); along another axis it passes
-  CHECK_ERR(e.add_node("Concat", {a, a}, {hir::Attribute::Int("axis", 0)}), "concatenating along the symbolic dimension N");
+  // concat along the symbol adds the sizes (N + N is 2*N, N + M and N + 1 are polynomials); along another axis it passes
+  CHECK(e.dims(e.add_node("Concat", {a, a}, {hir::Attribute::Int("axis", 0)})) == (hir::Dims{S("N") * 2, 4}));
+  CHECK(e.dims(e.add_node("Concat", {a, b}, {hir::Attribute::Int("axis", 0)})) == (hir::Dims{S("N") + S("M"), 4}));
+  CHECK(e.dims(e.add_node("Concat", {a, row}, {hir::Attribute::Int("axis", 0)})) == (hir::Dims{S("N") + 1, 4}));
   CHECK(e.dims(e.add_node("Concat", {a, a}, {hir::Attribute::Int("axis", 1)})) == (hir::Dims{S("N"), 8}));
 
-  // slicing and padding the symbol are refused; another axis is fine
+  // slicing the symbol is refused (its size would be needed); another axis is fine. Padding adds to the symbol: N + 1
   CHECK_ERR(e.add_node("Slice", {a, ints({1}, {0}), ints({1}, {1}), ints({1}, {0})}), "slicing the symbolic dimension N");
   CHECK(e.dims(e.add_node("Slice", {a, ints({1}, {1}), ints({1}, {3}), ints({1}, {1})})) == (hir::Dims{S("N"), 2}));
-  CHECK_ERR(e.add_node("Pad", {a, ints({4}, {1, 0, 0, 0})}), "padding the symbolic dimension N");
+  CHECK(e.dims(e.add_node("Pad", {a, ints({4}, {1, 0, 0, 0})})) == (hir::Dims{S("N") + 1, 4}));
   CHECK(e.dims(e.add_node("Pad", {a, ints({4}, {0, 0, 0, 1})})) == (hir::Dims{S("N"), 5}));
 
   // transpose, squeeze and unsqueeze
@@ -201,6 +205,63 @@ static void shape_inference() {
   CHECK_ERR(e.add_node("LayerNormalization", {a, e.add_initializer("", arr(f32, {4}, zeros(4))), -1}, {hir::Attribute::Int("axis", 0)}), "Scale must have the normalized shape");
 }
 
+// Products and sums of symbols are exact polynomials (onnxsim's SymExpr): a reshape that folds N*4 into one dimension, a pad and a
+// concatenation along the symbol. The values are checked at two batch sizes against the numbers worked out by hand.
+static void products() {
+  // equality is equality of the polynomials: 4*N is 2*N + 2*N and not 4*N + 1
+  CHECK(S("N") * 4 == S("N") * 2 + S("N") * 2);
+  CHECK(S("N") * 4 != S("N") * 4 + 1);
+  CHECK(S("N") * 4 != S("M") * 4);
+
+  hir::Graph g;
+  int x = g.add_symbolic_input("x", f32, hir::Dims{S("N"), 2, 2});
+  int minus1 = g.add_initializer("", arr(i64, {1}, {-1}));
+  int flat = g.add_node("Reshape", {x, minus1}, {}, "flat");                  // [N,2,2] -> [N*4]
+  int padded = g.add_node("Pad", {x, g.add_initializer("", arr(i64, {6}, {1, 0, 0, 0, 0, 0}))}, {}, "padded");   // [N+1,2,2]
+  int joined = g.add_node("Concat", {x, x}, {hir::Attribute::Int("axis", 0)}, "joined");                          // [2*N,2,2]
+  int flat_pad = g.add_node("Reshape", {padded, minus1}, {}, "flat_pad");     // [(N+1)*4] = [N*4 + 4]
+  int halves = g.add_node("Reshape", {flat_pad, g.add_initializer("", arr(i64, {2}, {2, -1}))}, {}, "halves");   // [2, 2*N+2]
+  CHECK(g.dims(flat) == (hir::Dims{S("N") * 4}) && g.symbolic(flat));
+  CHECK(g.dims(padded) == (hir::Dims{S("N") + 1, 2, 2}) && g.dims(joined) == (hir::Dims{S("N") * 2, 2, 2}));
+  CHECK(g.dims(flat_pad) == (hir::Dims{S("N") * 4 + 4}) && g.dims(halves) == (hir::Dims{2, S("N") * 2 + 2}));
+  CHECK_ERR(g.add_node("Reshape", {flat_pad, g.add_initializer("", arr(i64, {2}, {-1, 3}))}), "cannot reshape");   // 4N+4 is no multiple of 3
+  // an input's dimension is an integer or a symbol, never a polynomial
+  CHECK_ERR(g.add_symbolic_input("p", f32, hir::Dims{S("N") * 2}), "an input's dimension is an integer or a symbol");
+
+  // the values at N = 2 and N = 3 (the feed for N = 3 is the rows of batch_input(3), the zero row last)
+  hir::Evaluator ev(g);
+  const V flat2 = {1, 2, 3, 4, 5, 6, 7, 8}, flat3 = {1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0};
+  const V pad2 = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8}, pad3 = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0};
+  const V join2 = {1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8};
+  const V join3 = {1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0};
+  std::map<std::string, Array> feeds2 = {{"x", batch_input(2)}}, feeds3 = {{"x", batch_input(3)}};
+  std::vector<Array> r2 = ev.eval({{"N", 2}}, {flat, padded, joined, flat_pad, halves}, feeds2);
+  CHECK(r2.size() == 5 && r2[0].shape == (Shape{8}) && vals(r2[0]) == flat2);
+  CHECK(r2[2].shape == (Shape{4, 2, 2}) && vals(r2[2]) == join2);
+  CHECK(r2[3].shape == (Shape{12}) && vals(r2[3]) == pad2);
+  CHECK(r2[4].shape == (Shape{2, 6}) && vals(r2[4]) == pad2);
+  // flat_pad as [4N+4] and padded as [N+1,2,2] are the same numbers
+  CHECK(vals(r2[1]) == pad2);
+  std::vector<Array> r3 = ev.eval({{"N", 3}}, {flat, padded, joined, flat_pad, halves}, feeds3);
+  CHECK(r3.size() == 5 && r3[0].shape == (Shape{12}) && vals(r3[0]) == flat3);
+  CHECK(r3[2].shape == (Shape{6, 2, 2}) && vals(r3[2]) == join3);
+  CHECK(r3[3].shape == (Shape{16}) && vals(r3[3]) == pad3);
+  CHECK(r3[4].shape == (Shape{2, 8}) && vals(r3[4]) == pad3);
+  CHECK(ev.bindings_lowered() == 2);
+
+  // bound: the sizes are integers from the start, and the same as the evaluation
+  hir::Graph b = g.bind({{"N", 2}});
+  CHECK(b.dims(flat) == (hir::Dims{8}) && b.dims(flat_pad) == (hir::Dims{12}) && b.dims(halves) == (hir::Dims{2, 6}) && !b.symbolic(halves));
+
+  // a reshape to N*4 is an output too: it is written as dim_param "poly0" with "4*N" in metadata_props; the reader infers it from the input N
+  // again, so the polynomial comes back as itself and binds by N
+  std::string bytes = g.to_onnx({flat});
+  std::vector<int> outs;
+  hir::Graph back = hir::Graph::from_onnx(bytes, &outs);
+  CHECK(back.dims(outs[0]) == (hir::Dims{S("N") * 4}));
+  CHECK(back.bind({{"N", 2}}).dims(outs[0]) == (hir::Dims{8}));
+}
+
 // The exporter and the reader on a graph that has symbols where the operators keep them (no value is computed here).
 static void export_symbols() {
   hir::Graph g;
@@ -221,6 +282,7 @@ int main(int argc, char** argv) {
   std::string dir = argc > 1 ? argv[1] : "";
   symbolic_mlp(dir);
   shape_inference();
+  products();
   export_symbols();
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);

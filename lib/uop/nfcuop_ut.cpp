@@ -610,6 +610,7 @@ Tensor Session::placeholder(const std::string& name, const Shape& shape, DType d
 Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) { return eval_all({t}, feeds)[0]; }
 
 std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds) {
+  if (backend == Backend::Ort) throw Error("ut: the ort back end runs an hir graph; evaluate through np::Session");
   if (ts.empty()) throw Error("np: eval_all needs at least one tensor");
   std::vector<const UOp*> roots;
   for (const Tensor& t : ts) {

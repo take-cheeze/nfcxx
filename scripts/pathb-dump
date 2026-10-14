@@ -61,7 +61,7 @@ for file in "${files[@]}"; do
   # -tused: instantiate the templates this file uses, as eccp does for a single file that is compiled and linked
   # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR.
   # NFCXX_PATHB_CUDA=1 (the driver's device pass): the front end reads the unit as CUDA (cpfe --cuda)
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ ${gnu_opts[@]+"${gnu_opts[@]}"} -tused ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${NFCXX_PATHB_CUDA:+--cuda} --sys_include="$base/include" "$f") || status=$?
+  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ ${gnu_opts[@]+"${gnu_opts[@]}"} -tused ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${NFCXX_PATHB_CUDA:+--cuda --no_exceptions} --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status
