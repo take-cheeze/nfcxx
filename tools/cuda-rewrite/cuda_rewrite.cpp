@@ -1270,6 +1270,459 @@ std::vector<TemplateLaunch> template_launches(const std::string &text) {
   return found;
 }
 
+// Ruby QUAL_WORDS (line 1191).
+const std::vector<std::string> QUAL_WORDS = {"const", "volatile", "__restrict__", "__restrict", "restrict"};
+
+// Ruby: text.index-based helpers used by the deduction code.
+std::vector<std::string> remove_qual(const std::vector<std::string> &v) {
+  std::vector<std::string> out;
+  for (const auto &x : v)
+    if (std::find(QUAL_WORDS.begin(), QUAL_WORDS.end(), x) == QUAL_WORDS.end()) out.push_back(x);
+  return out;
+}
+
+// Ruby launch_macros (line 1194): name => { params, body } for the function-like macros whose body holds a launch.
+struct LaunchMacro {
+  std::string name;
+  std::vector<std::string> params;
+  std::string body;
+};
+std::vector<LaunchMacro> launch_macros(const std::string &text) {
+  std::vector<LaunchMacro> out;
+  for (const auto &sp : directive_spans(text)) {
+    // Ruby: text[st...en].sub("#", "").gsub("\\\n", " ").strip
+    std::string raw = sl(text, sp.first, sp.second);
+    size_t hp = raw.find('#');
+    if (hp != std::string::npos) raw.erase(hp, 1);
+    std::string t;
+    for (size_t x = 0; x < raw.size(); x++) {
+      if (raw[x] == '\\' && x + 1 < raw.size() && raw[x + 1] == '\n') {
+        t += ' ';
+        x += 1;
+      } else {
+        t += raw[x];
+      }
+    }
+    t = strip(t);
+    if (t.compare(0, 6, "define") != 0 || t.size() < 6) continue;
+    std::string rest = t.substr(6);
+    size_t a = 0;
+    while (a < rest.size() && (rest[a] == ' ' || rest[a] == '\t' || rest[a] == '\n' || rest[a] == '\r' || rest[a] == '\v' || rest[a] == '\f')) a += 1;
+    rest = rest.substr(a);
+    long k = 0;
+    while (k < (long)rest.size() && ident_c(ch(rest, k))) k += 1;
+    std::string name = sl(rest, 0, k);
+    std::string after = sl(rest, k, (long)rest.size());
+    if (name.empty() || after.empty() || after[0] != '(') continue;
+    long close = str_index(after, ")", 0);
+    if (close < 0) continue;
+    std::string body = strip(sl(after, close + 1, (long)after.size()));
+    bool keep = body.find("<<<") != std::string::npos || body.compare(0, 9, "template ") == 0 ||
+                body.compare(0, 16, "extern template ") == 0;
+    if (!keep) continue;
+    LaunchMacro m;
+    m.name = name;
+    m.params = split_top(sl(after, 1, close));
+    m.body = body;
+    bool replaced = false;
+    for (auto &x : out)
+      if (x.name == name) {
+        x = m;
+        replaced = true;
+      }
+    if (!replaced) out.push_back(m);  // Ruby Hash: a later definition of a name replaces the value
+  }
+  return out;
+}
+
+// Ruby define_name_at? (line 1217).
+bool define_name_at(const std::string &text, long i) {
+  long ls = i;
+  while (ls > 0 && ch(text, ls - 1) != '\n') ls -= 1;
+  std::string pre = strip(sl(text, ls, i));
+  if (pre.empty() || pre[0] != '#') return false;
+  std::string rest = strip(pre.substr(1));
+  if (rest.compare(0, 6, "define") != 0) return false;
+  return strip(rest.size() >= 6 ? rest.substr(6) : std::string()).empty();
+}
+
+// Ruby expand_launch_macros (line 1227): expands the calls of the launch macros in code, nested calls included.
+std::string expand_launch_macros(const std::string &text, int depth) {
+  auto macros = launch_macros(text);
+  if (macros.empty()) return text;
+  if (depth > 4) refuse("launch macros nest more than 4 deep");
+  std::vector<Range> code;
+  for (const auto &pc : top_pieces(text))
+    if (pc.kind == "code") code.push_back(Range{pc.st, pc.en});
+  size_t code_cursor = 0;
+  long n = (long)text.size();
+  std::string out;
+  bool changed = false;
+  long i = 0;
+  while (i < n) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += sl(text, i, e);
+      i = e;
+      continue;
+    }
+    if (ident_c(ch(text, i)) && !(i > 0 && ident_c(ch(text, i - 1))) && piece_at(code, code_cursor, i)) {
+      long j = i;
+      while (j < n && ident_c(ch(text, j))) j += 1;
+      std::string name = sl(text, i, j);
+      const LaunchMacro *m = nullptr;
+      for (const auto &x : macros)
+        if (x.name == name) m = &x;
+      long k = j;
+      while (k < n && white_c(ch(text, k))) k += 1;
+      // The name in a macro's own #define header is not a call (see DECL_FATTN_TILE_CASE in the Ruby script).
+      if (m && k < n && ch(text, k) == '(' && !define_name_at(text, i)) {
+        long close = matching_paren(text, k);
+        if (close < 0) refuse("unterminated call of launch macro " + name);
+        std::vector<std::string> args = split_top(sl(text, k + 1, close));
+        if (args.size() != m->params.size())
+          refuse("launch macro " + name + " takes " + std::to_string(m->params.size()) + " arguments, its call gives " +
+                 std::to_string(args.size()));
+        std::string body = substitute(m->body, m->params, args, false, 0);
+        for (char &c : body)
+          if (c == '\n') c = ' ';
+        out += body;
+        long nls = 0;
+        for (long q = i; q <= close; q++)
+          if (ch(text, q) == '\n') nls += 1;
+        out += std::string((size_t)nls, '\n');
+        i = close + 1;
+        changed = true;
+        continue;
+      }
+      out += name;
+      i = j;
+      continue;
+    }
+    out.push_back(text[(size_t)i]);
+    i += 1;
+  }
+  return changed ? expand_launch_macros(out, depth + 1) : out;
+}
+
+// Ruby launch_arguments (line 1275): the argument expressions of the launch whose <<< is at i; false when not readable.
+bool launch_arguments(const std::string &text, long i, std::vector<std::string> &out) {
+  long k = i + 3;
+  long depth = 0;
+  long n = (long)text.size();
+  while (k < n) {
+    long e = skip_literal(text, k);
+    if (e >= 0) {
+      k = e;
+      continue;
+    }
+    int c = ch(text, k);
+    if (c == '(' || c == '[' || c == '{') {
+      depth += 1;
+    } else if (c == ')' || c == ']' || c == '}') {
+      depth -= 1;
+    } else if (depth == 0 && sl_n(text, k, 3) == ">>>") {
+      break;
+    }
+    k += 1;
+  }
+  if (k >= n) return false;
+  long p = k + 3;
+  while (p < n && white_c(ch(text, p))) p += 1;
+  if (ch(text, p) != '(') return false;
+  long close = matching_paren(text, p);
+  if (close < 0) return false;
+  out = split_top(sl(text, p + 1, close));
+  return true;
+}
+
+// Ruby targs_span (line 1304): [start, end) of the template arguments of the launch whose <<< is at i.
+std::pair<long, long> targs_span(const std::string &text, long i) {
+  long gt = i - 1;
+  while (gt >= 0 && white_c(ch(text, gt))) gt -= 1;
+  long j = gt;
+  long depth = 0;
+  while (j >= 0) {
+    if (ch(text, j) == '>') depth += 1;
+    if (ch(text, j) == '<') depth -= 1;
+    if (depth == 0) break;
+    j -= 1;
+  }
+  return {j + 1, gt};
+}
+
+// Ruby type_tokens (line 1319): the identifiers, `*` and `&` of a parameter's text, in order.
+std::vector<std::string> type_tokens(const std::string &s) {
+  std::vector<std::string> out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    long e = skip_literal(s, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    int c = ch(s, i);
+    if (c == '*' || c == '&') {
+      out.push_back(std::string(1, (char)c));
+      i += 1;
+    } else if (ident_c(c) && !(c >= '0' && c <= '9')) {
+      long j = i;
+      while (j < n && ident_c(ch(s, j))) j += 1;
+      out.push_back(sl(s, i, j));
+      i = j;
+    } else {
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// Ruby type_before (line 1346): the declared type written before the identifier at i; empty when it is not a declaration.
+std::vector<std::string> type_before(const std::string &text, long i) {
+  std::vector<std::string> toks;
+  long j = i - 1;
+  while (true) {
+    while (j >= 0 && white_c(ch(text, j))) j -= 1;
+    if (j < 0) break;
+    int c = ch(text, j);
+    if (c == '*' || c == '&') {
+      toks.insert(toks.begin(), std::string(1, (char)c));
+      j -= 1;
+    } else if (ident_c(c)) {
+      long k = j;
+      while (k >= 0 && ident_c(ch(text, k))) k -= 1;
+      toks.insert(toks.begin(), sl(text, k + 1, j + 1));
+      j = k;
+    } else {
+      break;
+    }
+  }
+  static const std::vector<std::string> stop = {"return", "else", "case", "new", "delete", "throw", "do"};
+  if (toks.empty() || std::find(stop.begin(), stop.end(), toks.front()) != stop.end()) return {};
+  bool has_ident = false;
+  for (const auto &t : toks)
+    if (!t.empty() && ident_c((unsigned char)t[0]) && !(t[0] >= '0' && t[0] <= '9')) has_ident = true;
+  if (!has_ident) return {};
+  return toks;
+}
+
+// Ruby comma_declaration_type (line 1373): the type of a later declarator of a comma-separated declaration.
+std::vector<std::string> comma_declaration_type(const std::string &text, long i) {
+  // Ruby: [rindex(";", i - 1), rindex("{", i - 1), rindex("}", i - 1), rindex("(", i - 1)].compact.max
+  auto rindex_at = [&](char c) -> long {
+    long from = i - 1;
+    if (from >= (long)text.size()) from = (long)text.size() - 1;
+    for (long q = from; q >= 0; q--)
+      if (text[(size_t)q] == c) return q;
+    return -1;
+  };
+  long start = -1;
+  for (char c : std::string(";{}(")) {
+    long r = rindex_at(c);
+    if (r >= 0 && r > start) start = r;
+  }
+  std::string seg = sl(text, start + 1, i);
+  std::vector<std::string> parts = split_top(seg);
+  if (parts.size() < 2) return {};
+  std::vector<std::string> toks = type_tokens(parts[0]);
+  if (!toks.empty() && !toks.back().empty() && toks.back()[0] != '*' && toks.back()[0] != '&' && toks.size() > 1)
+    toks.pop_back();
+  for (const auto &t : toks)
+    if (!t.empty() && ident_c((unsigned char)t[0])) return toks;
+  return {};
+}
+
+// Ruby argument_type (line 1384): the type of a launch argument: a literal's, or the declared type of an identifier.
+std::vector<std::string> argument_type(const std::string &text, long pos, const std::string &arg, const std::string &nm) {
+  bool all_num = !arg.empty();
+  for (char c : arg)
+    if (!((c >= '0' && c <= '9') || c == 'u' || c == 'U' || c == 'l' || c == 'L')) all_num = false;
+  if (all_num) return {"int"};
+  if (arg.size() > 1 && arg[0] >= '0' && arg[0] <= '9' && (arg.back() == 'f' || arg.back() == 'F')) return {"float"};
+  if (!arg.empty() && arg[0] >= '0' && arg[0] <= '9' &&
+      (arg.find('.') != std::string::npos || arg.find('e') != std::string::npos || arg.find('E') != std::string::npos))
+    return {"double"};
+  bool ident_only = !arg.empty();
+  for (char c : arg)
+    if (!ident_c((unsigned char)c)) ident_only = false;
+  if (!(ident_only && !(arg[0] >= '0' && arg[0] <= '9')))
+    refuse("template launch of " + nm + ": cannot deduce a template argument from the argument " + arg +
+           " (only identifiers and literals)");
+  // Ruby: piece = top_pieces(text).find { kind == :code && st <= pos < en }
+  long lo = 0;
+  for (const auto &pc : top_pieces(text))
+    if (pc.kind == "code" && pc.st <= pos && pos < pc.en) {
+      lo = pc.st;
+      break;
+    }
+  bool have = false;
+  std::vector<std::string> found;
+  long i = lo;
+  while (i < pos) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (sl_n(text, i, (long)arg.size()) == arg && !(i > 0 && ident_c(ch(text, i - 1))) && i + (long)arg.size() < pos &&
+        !ident_c(ch(text, i + (long)arg.size()))) {
+      long after = i + (long)arg.size();
+      while (after < pos && white_c(ch(text, after))) after += 1;
+      int ac = ch(text, after);
+      if (ac >= 0 && std::string("=;,)").find((char)ac) != std::string::npos) {
+        std::vector<std::string> t = type_before(text, i);
+        if (t.empty()) t = comma_declaration_type(text, i);
+        if (!t.empty()) {
+          found = t;
+          have = true;
+        }
+      }
+    }
+    i += 1;
+  }
+  if (!have) refuse("template launch of " + nm + ": no declaration of " + arg + " before the launch, so its type is not known");
+  return found;
+}
+
+// Ruby match_type (line 1425): the type a kernel parameter of type ptoks gives to the template parameter p.
+bool match_type(const std::vector<std::string> &ptoks, const std::vector<std::string> &atoks, const std::string &p,
+                std::string &out) {
+  std::vector<std::string> pt = remove_qual(ptoks);
+  std::vector<std::string> at = remove_qual(atoks);
+  if (pt.size() == 1 && pt[0] == p) {
+    out = join(at, " ");
+    return true;
+  }
+  if (pt.size() != at.size()) return false;
+  long k = -1;
+  for (size_t x = 0; x < pt.size(); x++)
+    if (pt[x] == p) {
+      k = (long)x;
+      break;
+    }
+  if (k < 0) return false;
+  out = at[(size_t)k];
+  return true;
+}
+
+// Ruby deduce_types (line 1436): the explicit arguments for the missing template parameters, from the launch arguments.
+struct KernelTemplateRef {
+  std::string params;
+  std::vector<std::string> names;
+  bool has_pack = false;
+  long pack = 0;
+};
+std::vector<std::string> deduce_types(const std::string &nm, const std::string &ta, const KernelTemplateRef &kt,
+                                      const std::vector<std::string> &missing, const std::vector<std::string> &args,
+                                      const std::string &text, long pos) {
+  std::vector<std::string> parts = split_top(kt.params);
+  if (args.size() != parts.size())
+    refuse("launch of " + nm + ": " + std::to_string(args.size()) + " arguments for " + std::to_string(parts.size()) +
+           " kernel parameters");
+  std::map<std::string, std::string> found;
+  for (size_t idx = 0; idx < parts.size(); idx++) {
+    std::vector<std::string> ptoks = type_tokens(parts[idx]);
+    if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
+    for (const auto &p : missing) {
+      if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
+      std::vector<std::string> at = argument_type(text, pos, args[idx], nm);
+      std::string t;
+      if (!match_type(ptoks, at, p, t))
+        refuse("template launch of " + nm + "<" + ta + ">: cannot deduce " + p + " from the argument " + args[idx] +
+               " of type " + join(at, " "));
+      if (found.count(p) && found[p] != t)
+        refuse("template launch of " + nm + "<" + ta + ">: " + p + " is deduced as " + found[p] + " and as " + t +
+               " (ambiguous)");
+      found[p] = t;
+    }
+  }
+  std::vector<std::string> out;
+  for (const auto &p : missing) {
+    if (!found.count(p)) refuse("template launch of " + nm + "<" + ta + ">: no argument gives " + p + ", so it cannot be deduced");
+    out.push_back(found[p]);
+  }
+  return out;
+}
+
+// Ruby plain_launches (line 1458): [name, end of name, position of <<<] for the launches with no template arguments.
+struct PlainLaunch {
+  std::string name;
+  long at, pos;
+};
+std::vector<PlainLaunch> plain_launches(const std::string &text) {
+  std::vector<PlainLaunch> out;
+  long i = 0;
+  long n = (long)text.size();
+  while (i < n) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (sl_n(text, i, 3) == "<<<") {
+      long b = i - 1;
+      while (b >= 0 && white_c(ch(text, b))) b -= 1;
+      long e2 = b;
+      while (b >= 0 && ident_c(ch(text, b))) b -= 1;
+      std::string name = sl(text, b + 1, e2 + 1);
+      bool digit_first = !name.empty() && name[0] >= '0' && name[0] <= '9';
+      if (!(name.empty() || digit_first || ch(text, b) == '>')) out.push_back(PlainLaunch{name, e2 + 1, i});
+    }
+    i += 1;
+  }
+  return out;
+}
+
+// Ruby deduce_launch_targs (line 1481): the deduced template arguments are written into the launches.
+std::string deduce_launch_targs(const std::string &text_in) {
+  std::string text = text_in;
+  struct Edit {
+    long a, b;
+    std::string nw;
+  };
+  std::vector<Edit> edits;
+  for (const auto &pl : plain_launches(text)) {
+    KernelTemplate kt;
+    if (!kernel_template(pl.name, kt)) continue;
+    std::vector<std::string> args;
+    if (!launch_arguments(text, pl.pos, args))
+      refuse("template launch of " + pl.name + ": its arguments are not readable (at line " +
+             std::to_string(line_of(text, pl.pos)) + ")");
+    KernelTemplateRef ref{kt.params, kt.names, kt.has_pack, kt.pack};
+    std::vector<std::string> deduced = deduce_types(pl.name, "", ref, kt.names, args, text, pl.pos);
+    edits.push_back(Edit{pl.at, pl.at, "<" + join(deduced, ", ") + ">"});
+  }
+  for (const auto &tl : template_launches(text)) {
+    KernelTemplate kt;
+    if (!kernel_template(tl.name, kt)) continue;
+    std::vector<std::string> given = split_top(tl.targs);
+    if (given.size() >= kt.names.size()) continue;
+    std::vector<std::string> args;
+    if (!launch_arguments(text, tl.pos, args))
+      refuse("template launch of " + tl.name + "<" + tl.targs + ">: its arguments are not readable (at line " +
+             std::to_string(line_of(text, tl.pos)) + ")");
+    std::vector<std::string> missing(kt.names.begin() + (long)given.size(), kt.names.end());
+    KernelTemplateRef ref{kt.params, kt.names, kt.has_pack, kt.pack};
+    std::vector<std::string> deduced = deduce_types(tl.name, tl.targs, ref, missing, args, text, tl.pos);
+    auto span = targs_span(text, tl.pos);
+    std::vector<std::string> all = given;
+    all.insert(all.end(), deduced.begin(), deduced.end());
+    edits.push_back(Edit{span.first, span.second, join(all, ", ")});
+  }
+  // Ruby: edits.sort_by { -a }, applied in that order (each edit is applied to the text as it is then).
+  std::stable_sort(edits.begin(), edits.end(), [](const Edit &x, const Edit &y) { return x.a > y.a; });
+  for (const auto &ed : edits) text = sl(text, 0, ed.a) + ed.nw + sl(text, ed.b, (long)text.size());
+  return text;
+}
+
+// Ruby launch_prepare (line 1509): the launch forms before the scan.
+std::string launch_prepare(const std::string &text) {
+  std::string t = expand_launch_macros(text, 0);
+  g_expanded = t;
+  return deduce_launch_targs(t);
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
