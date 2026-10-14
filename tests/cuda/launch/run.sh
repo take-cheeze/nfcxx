@@ -65,5 +65,5 @@ refuse pack_refuse.cu "no argument gives Ns, so it cannot be deduced"
 pass local_targs.cu "local targs: no error, 43 43"
 pass macro_targs.cu "macro targs: no error, 64 64"
 pass using_namespace.cu "using namespace: no error, 28 28"
-refuse refuse_shared_align.cu "device image does not carry shared-object alignment"
+pass shared_align.cu "shared align launch: no error, 0 mismatches"
 exit $fail

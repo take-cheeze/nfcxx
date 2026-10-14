@@ -2996,29 +2996,6 @@ def dynamic_shared_rewrite(s)
   replace_dynamic_uses(out, names)
 end
 
-# The device image does not carry the alignment of a __shared__ object (the emitter sizes and aligns shared arrays from
-# their type), and a `__align__(N)` on one would be dropped silently: a kernel that reads it as a wider vector (conv2d's
-# int4 stores into a half2 array) would then misalign on the device. Refused by name instead.
-def refuse_shared_align(s)
-  i = 0
-  while i < s.length
-    e = skip_literal(s, i)
-    if e
-      i = e
-      next
-    end
-    if word_at?(s, i, "__shared__")
-      j = i + 10
-      j += 1 while j < s.length && white?(s[j])
-      if word_at?(s, j, "__align__")
-        line = s[0...i].count("\n") + 1
-        refuse("__shared__ __align__ at line #{line}: the device image does not carry shared-object alignment")
-      end
-    end
-    i += 1
-  end
-end
-
 # CUDA library names the device image does not lower, refused by name in the device pass: CUB (`cub::`, its headers
 # are not in the device unit) and grid-wide cooperative groups (`this_grid`, `grid_group`: a grid barrier needs a
 # cooperative launch, which the image does not have). Without this, the front end reports the name as undefined.
@@ -3452,7 +3429,6 @@ usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
 text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
-refuse_shared_align(text) if device
 refuse_unlowered_cccl(text) if device
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
