@@ -77,6 +77,7 @@ pass log1pf.cu "log1pf: no error, max 0 ulps over 1048576 points, 0 over the bou
 pass static_constexpr.cu "static constexpr: no error, 0 mismatches"
 pass min_mixed_enum_class.cu "min mixed: no error, 0 mismatches"
 pass define_header_skip.cu "define header skip: no error, 0 mismatches"
+pass host_member_drop.cu "host member drop: no error, 0 mismatches"
 pass const_tables.cu "const tables: no error, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
