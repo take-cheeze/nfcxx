@@ -181,5 +181,95 @@ lay = ->(list) { BytecodeIR::Program.new(Irep.new(label: 'n', instructions: [], 
 check.call('nested handlers do not partially overlap', !lay.call([outer, inner]).handler_partially_overlaps?(inner))
 check.call('crossing handlers partially overlap', lay.call([outer, cross]).handler_partially_overlaps?(outer))
 
+# IR type queries use the shared reaching definitions, including joins and loops.
+types_for = ->(list, **fields) { BytecodeIR::Types.new(Irep.new(label: 'types', instructions: list, **fields)) }
+joined = types_for.call([
+  insn(0, 'JMPIF', "R1\t12"), insn(4, 'LOADI_1', 'R2 (1)'), insn(8, 'JMP', '16'),
+  insn(12, 'LOADNIL', 'R2 (nil)'), insn(16, 'MOVE', "R3\tR2"), insn(20, 'RETURN', 'R3')
+])
+check.call('types union branches through MOVE', joined.at(5, '3') == Set[:Integer, :NilClass])
+check.call('types are immutable', joined.at(5, '3').frozen?)
+loop_types = types_for.call([
+  insn(0, 'LOADI_1', 'R2 (1)'), insn(4, 'JMPIF', "R1\t16"), insn(8, 'LOADI_2', 'R2 (2)'),
+  insn(12, 'JMP', '4'), insn(16, 'RETURN', 'R2')
+])
+check.call('types join loop definitions', loop_types.at(4, '2') == Set[:Integer])
+check.call('types state cap refuses', loop_types.at(4, '2', max_states: 1).nil?)
+unknown_types = types_for.call([
+  insn(0, 'JMPIF', "R1\t12"), insn(4, 'LOADI_1', 'R2 (1)'), insn(8, 'JMP', '16'),
+  insn(12, 'GETIV', "R2\t:x"), insn(16, 'RETURN', 'R2')
+])
+reason = {}
+check.call('unknown branch poisons type union', unknown_types.at(4, '2', refusal: reason).nil? && reason[:cause] == 'unknown:GETIV')
+check.call('entry types stay unknown', joined.at(0, '1').nil?)
+check.call('unresolved types refuse', types_for.call([insn(0, 'JMP', '99'), insn(4, 'RETURN', 'R1')]).at(1, '1').nil?)
+check.call('callee clobber refuses types', types_for.call([
+  insn(0, 'LOADI_1', 'R3 (1)'), insn(4, 'SEND0', "R1\t:foo"), insn(8, 'RETURN', 'R3')
+]).at(2, '3').nil?)
+check.call('overloaded arithmetic result stays unknown', types_for.call([
+  insn(0, 'LOADI_1', 'R2 (1)'), insn(4, 'ADDI', "R2\t1"), insn(8, 'RETURN', 'R2')
+]).at(2, '2').nil?)
+[
+  ['LOADTRUE', 'R2 (true)', :TrueClass], ['LOADFALSE', 'R2 (false)', :FalseClass],
+  ['LOADSYM', "R2\t:foo", :Symbol], ['STRING', "R2\tL[0]", :String],
+  ['ARRAY', "R2\t0", :Array], ['HASH', "R2\t0", :Hash],
+  ['RANGE_INC', 'R2', :Range], ['BLOCK', "R2\tI[0]", :Proc]
+].each do |op, args, type|
+  check.call("literal types #{op}", types_for.call([insn(0, op, args), insn(4, 'RETURN', 'R2')]).at(1, '2') == Set[type])
+end
+{ int32: :Integer, int64: :Integer, bigint: :Integer, float: :Float }.each do |kind, type|
+  pool = [{ type: kind, raw: '' }]
+  check.call("pool types #{kind}", types_for.call([
+    insn(0, 'LOADL', "R2\tL[0]"), insn(4, 'RETURN', 'R2')
+  ], pool: pool).at(1, '2') == Set[type])
+end
+check.call('LOADL string pool refuses', types_for.call([
+  insn(0, 'LOADL', "R2\tL[0]"), insn(4, 'RETURN', 'R2')
+], pool: ['foo']).at(1, '2').nil?)
+check.call('missing pool types refuse', types_for.call([
+  insn(0, 'LOADL', "R2\tL[0]"), insn(4, 'RETURN', 'R2')
+]).at(1, '2').nil?)
+enter_types = types_for.call([
+  insn(0, 'ENTER', '1:0:1:0:0:1:0:0 (0x0)'), insn(4, 'RETURN', 'R1')
+], nlocals: 6)
+{ '1' => nil, '2' => Set[:Array], '3' => Set[:Hash], '4' => Set[:Proc, :NilClass], '5' => Set[:NilClass] }.each do |reg, expected|
+  check.call("ENTER types R#{reg}", enter_types.at(1, reg) == expected)
+end
+handler_types = types_for.call([
+  insn(0, 'LOADI_1', 'R2 (1)'), insn(4, 'RETURN', 'R2'), insn(8, 'RETURN', 'R2')
+], catch_handlers: [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 4, target: 8)])
+check.call('protected types refuse', handler_types.at(1, '2').nil?)
+
+mutated = Irep.new(label: 'mutated', nlocals: 4, reps: ['writer'], instructions: [
+  insn(0, 'LOADI_1', 'R2 (1)'), insn(4, 'BLOCK', "R3\tI[0]"), insn(8, 'RETURN', 'R2')
+])
+writer = Irep.new(label: 'writer', instructions: [insn(0, 'SETUPVAR', "R1\t2\t0")])
+mutated.tree = { 'mutated' => mutated, 'writer' => writer }
+check.call('closure writes refuse types', BytecodeIR::Types.new(mutated).at(2, '2').nil?)
+check.call('unreachable use refuses types', types_for.call([
+  insn(0, 'RETURN', 'R1'), insn(4, 'LOADI_1', 'R2 (1)'), insn(8, 'RETURN', 'R2')
+]).at(2, '2').nil?)
+check.call('unknown call result refuses types', types_for.call([
+  insn(0, 'SEND0', "R2\t:foo"), insn(4, 'RETURN', 'R2')
+]).at(1, '2').nil?)
+
+if ENV['MRBC']
+  require 'tmpdir'
+  Dir.mktmpdir('bc2cpp-ir-types-') do |dir|
+    path = File.join(dir, 'types.rb')
+    File.write(path, <<~'SOURCE')
+      def ir_types(flag)
+        value = flag ? 1.5 : 0x1_0000_0000
+        value
+      end
+    SOURCE
+    ireps, = compile_ireps(path, 'ir_types', dir)
+    body = ireps.values.find { |irep| irep.enter }
+    return_index = body.instructions.index { |instruction| instruction.op == 'RETURN' }
+    check.call('decoded numeric pools union classes',
+               BytecodeIR::Types.new(body).at(return_index, body.instructions[return_index].reg) == Set[:Float, :Integer])
+  end
+end
+
 abort("bc2cpp_bytecode_ir_check FAILED: #{failures.join(', ')}") unless failures.empty?
 puts 'bc2cpp_bytecode_ir_check OK'
