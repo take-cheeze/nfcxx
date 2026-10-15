@@ -174,6 +174,19 @@ FIXTURE = <<~'RUBY'
       sum
     end
 
+    # CORE_BLOCK_ELEMENT_HINT: a map block (kept out of line by its rescue) whose element is typed by the
+    # signature shape; that hint is soft, so its else arm keeps the by-name send.
+    def soft_lengths
+      [ShWidget.new].map do |i|
+        n = i.length
+        begin
+          n / 0
+        rescue ZeroDivisionError
+          n
+        end
+      end
+    end
+
     def read_value
       @w.length
     end
@@ -288,6 +301,11 @@ if ENV['MRBC']
         to_a = chunk.call(pcode, 'ShHolder#read_tag')
         check.call('NEG: with BC2CPP_STRICT_HINTS_PROVEN=1 a name nil answers (sh_tag) keeps its dispatch',
                    !to_a.match?(VIOLATION) && to_a.match?(/mrb_funcall|bc2cpp_send|bc2cpp_nomethod/))
+        # The block's out-of-line body is emitted ahead of its method's chunk.
+        soft = code[/^static mrb_value ShHolder_soft_lengths_block_fallback_\d+_impl\(mrb_state.*?(?=^\/\/ \S+#\S+ \(compiled from)/m].to_s
+        check.call('NEG: a core-iterator block element hint (CORE_BLOCK_ELEMENT_HINT) is typed but never forced',
+                   soft.include?('ELEMENT :length -> ShWidget#length') && !soft.match?(VIOLATION) &&
+                     !soft.include?('STRICT_HINT') && soft.match?(DISPATCH))
         add = chunk.call(code, 'ShNumeric#add')
         check.call('NEG: a numeric arm keeps its dispatch (Float/Bignum/overflow are valid)',
                    !add.match?(VIOLATION) && chunk.call(base_code, 'ShNumeric#add') == add)
