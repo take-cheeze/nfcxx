@@ -46,7 +46,7 @@ module RbsSignatures
     value = ENV['BC2CPP_SIG_DIRS']
     return value.empty? ? [] : value.split(File::PATH_SEPARATOR) if value
 
-    default = File.join(root, 'sig/bc2cpp')
+    default = File.join(root, 'sig')
     File.directory?(default) ? [default] : []
   end
 
@@ -131,6 +131,11 @@ module RbsSignatures
 
   def method_definition(out, m, owner, loc)
     if m.overloads.size != 1
+      # A native declaration may list several overloads (join with and without a separator); it is not a hint.
+      if loc.file.include?('sig/native/')
+        diag(out, loc, 'info', 'TC1005', "#{owner}##{m.name}: #{m.overloads.size} native overloads; no program hint")
+        return
+      end
       diag(out, loc, 'error', 'TC1002',
            "unsupported RBS syntax: #{m.name} has #{m.overloads.size} overloads (one signature per method; write the union as untyped)")
       return
@@ -271,7 +276,13 @@ module RbsSignatures
     loaded.methods.each_value do |sig|
       d = defs_by[[sig.owner, sig.name]]
       unless d
-        note(ap, sig.loc, 'error', 'TC1003', "#{sig.owner}##{sig.name}: no such method in the program")
+        # sig/native declares built-in and RGSS methods the program does not define; their tables are checked by the
+        # generators (scripts/bc2cpp/native_sigs_check.rb), so they are declarations here, not errors.
+        if sig.loc.file.include?('sig/native/')
+          note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name}: native method declaration; no program hint")
+        else
+          note(ap, sig.loc, 'error', 'TC1003', "#{sig.owner}##{sig.name}: no such method in the program")
+        end
         next
       end
       irep = ireps[d.irep]

@@ -81,7 +81,7 @@ Dir.mktmpdir do |dir|
     merged = RbsSignatures.load([dir]).methods[['Dup', 'm']]
     check.call('a later untyped declaration keeps the earlier typed slots', merged&.args&.first&.kind == :int && merged.ret&.kind == :array)
   end
-  check.call('a singleton def is noted', notes.any? { |m| m.include?('singleton method make') })
+  check.call('a singleton def is loaded under its singleton owner', loaded.methods.key?(['Game::Actor.singleton', 'make']))
   check.call('a constant is noted', notes.any? { |m| m.include?('A_CONSTANT') })
   check.call('alias / visibility are noted', notes.count { |m| m.start_with?('Alias') || m.start_with?('Private') } == 2)
   check.call('Integer? gives a type of kind other', loaded.methods[['Game::Actor', 'maybe']].args[0].kind == :other)
