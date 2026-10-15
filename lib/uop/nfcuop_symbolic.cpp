@@ -95,9 +95,9 @@ PatternMatcher build() {
       return m["x"]->shape == m["self"]->shape ? m["x"] : nullptr;
     }, "same shape");
   pm.add(P::op(Op::Reshape, {P::op(Op::Reshape, {X()})}, "self"),
-         [](Graph& g, const Match& m) { return g.reshape(m["x"], m["self"]->shape); }, "reshape reshape");
+         [](Graph& g, const Match& m) { return g.rebuild(m["self"], {m["x"]}); }, "reshape reshape");
   pm.add(P::op(Op::Expand, {P::op(Op::Expand, {X()})}, "self"),
-         [](Graph& g, const Match& m) { return g.expand(m["x"], m["self"]->shape); }, "expand expand");
+         [](Graph& g, const Match& m) { return g.rebuild(m["self"], {m["x"]}); }, "expand expand");
   pm.add(P::op(Op::Permute, {X()}, "self"), [](Graph&, const Match& m) -> const UOp* {  // the identity permutation
     const Shape& p = m["self"]->arg;
     for (size_t k = 0; k < p.size(); k++) if (p[k] != static_cast<int64_t>(k)) return nullptr;
