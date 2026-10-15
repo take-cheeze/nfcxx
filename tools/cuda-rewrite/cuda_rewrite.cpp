@@ -1840,6 +1840,69 @@ std::vector<PlainLaunch> plain_launches(const std::string &text) {
   return out;
 }
 
+static std::string trim(const std::string &s);
+
+// The value of a file-level constant `constexpr int NAME = <digits>;` (or `const`), or false.
+static bool file_constant_value(const std::string &text, const std::string &name, std::string &out) {
+  for (long p = str_index(text, name, 0); p >= 0; p = str_index(text, name, p + 1)) {
+    if ((p > 0 && ident_c(text[p - 1])) || (p + (long)name.size() < (long)text.size() && ident_c(text[p + name.size()])))
+      continue;
+    long ls = p;
+    while (ls > 0 && text[ls - 1] != '\n') ls--;
+    std::string line = sl(text, ls, p);
+    if (line.find("constexpr") == std::string::npos && line.find("const ") == std::string::npos) continue;
+    long q = p + (long)name.size();
+    while (q < (long)text.size() && white_c(text[q])) q++;
+    if (q >= (long)text.size() || text[q] != '=' || (q + 1 < (long)text.size() && text[q + 1] == '=')) continue;
+    long semi = str_index(text, ";", q);
+    if (semi < 0) continue;
+    std::string v = trim(sl(text, q + 1, semi));
+    bool digits = !v.empty();
+    for (char c : v)
+      if (!(c >= '0' && c <= '9')) digits = false;
+    if (digits) {
+      out = v;
+      return true;
+    }
+  }
+  return false;
+}
+
+// The default value of template parameter `pname` of the function template `kname`: a literal, or a file-level
+// constant with a literal value (`int cols_per_warp = gdn_cols_per_warp`). False when it has no default or the
+// default is not one of these.
+static bool template_default_value(const std::string &text, const std::string &kname, const std::string &pname,
+                                   std::string &out) {
+  std::vector<std::string> tparts;
+  for (const auto &tb : template_bodies(text)) {
+    TmplHeader t = tb.tmpl;
+    std::string header = sl(text, t.close + 1, tb.open);
+    if (function_name(header) != kname) continue;
+    tparts = split_top(sl(text, t.lt + 1, t.close));
+    break;
+  }
+  for (const auto &part : tparts) {
+    long eq = str_index(part, "=", 0);
+    if (eq < 0) continue;
+    std::string left = trim(sl(part, 0, eq));
+    long e = (long)left.size();
+    long b = e;
+    while (b > 0 && ident_c(left[b - 1])) b--;
+    if (left.substr(b, e - b) != pname) continue;
+    std::string v = trim(sl(part, eq + 1, (long)part.size()));
+    bool digits = !v.empty();
+    for (char c : v)
+      if (!(c >= '0' && c <= '9')) digits = false;
+    if (digits) {
+      out = v;
+      return true;
+    }
+    if (!v.empty() && ident_c((unsigned char)v[0])) return file_constant_value(text, v, out);
+    return false;
+  }
+  return false;
+}
+
 // Ruby deduce_launch_targs (line 1481): the deduced template arguments are written into the launches.
 std::string deduce_launch_targs(const std::string &text_in) {
   std::string text = text_in;
@@ -1869,11 +1932,29 @@ std::string deduce_launch_targs(const std::string &text_in) {
       refuse("template launch of " + tl.name + "<" + tl.targs + ">: its arguments are not readable (at line " +
              std::to_string(line_of(text, tl.pos)) + ")");
     std::vector<std::string> missing(kt.names.begin() + (long)given.size(), kt.names.end());
+    // A missing parameter with a default (a literal, or a file-level constant with a literal value) takes the default;
+    // the others are deduced from the arguments.
+    std::vector<std::string> deducible;
+    std::map<std::string, std::string> defaults;
+    for (const auto &p : missing) {
+      std::string dv;
+      if (template_default_value(text, tl.name, p, dv)) defaults[p] = dv;
+      else deducible.push_back(p);
+    }
     KernelTemplateRef ref{kt.params, kt.names, kt.has_pack, kt.pack};
-    std::vector<std::string> deduced = deduce_types(tl.name, tl.targs, ref, missing, args, text, tl.pos);
+    std::vector<std::string> deduced = deduce_types(tl.name, tl.targs, ref, deducible, args, text, tl.pos);
+    std::vector<std::string> filled;
+    for (const auto &p : missing) {
+      if (defaults.count(p)) {
+        filled.push_back(defaults[p]);
+      } else {
+        filled.push_back(deduced[0]);
+        deduced.erase(deduced.begin());
+      }
+    }
     auto span = targs_span(text, tl.pos);
     std::vector<std::string> all = given;
-    all.insert(all.end(), deduced.begin(), deduced.end());
+    all.insert(all.end(), filled.begin(), filled.end());
     edits.push_back(Edit{span.first, span.second, join(all, ", ")});
   }
   // Ruby: edits.sort_by { -a }, applied in that order (each edit is applied to the text as it is then).
@@ -1882,9 +1963,87 @@ std::string deduce_launch_targs(const std::string &text_in) {
   return text;
 }
 
+static std::string trim(const std::string &s) {
+  size_t a = 0, b = s.size();
+  while (a < b && white_c(s[a])) a++;
+  while (b > a && white_c(s[b - 1])) b--;
+  return s.substr(a, b - a);
+}
+
+// The word before position i, skipping whitespace (empty at the start of the text).
+static std::string word_before(const std::string &text, long i) {
+  long j = i - 1;
+  while (j >= 0 && white_c(text[j])) j--;
+  long e = j;
+  while (j >= 0 && ident_c(text[j])) j--;
+  return text.substr(j + 1, e - j);
+}
+
+// ggml_cuda_kernel_launch(K, LP, args...) (ggml-cuda common.cuh) without PDL is
+//   K<<<LP.block_nums, LP.block_dims, LP.shmem, LP.stream>>>(args...); CUDA_CHECK(cudaGetLastError());
+// which is what this rewrite emits (llama.cpp builds without GGML_CUDA_USE_PDL; with PDL the helper launches through
+// cudaLaunchKernelEx and this form would drop that). The helper's own definition (preceded by `void`) is kept.
+static std::string helper_launch_rewrite(const std::string &text) {
+  static const std::string key = "ggml_cuda_kernel_launch";
+  const long n = (long)text.size();
+  std::string out;
+  long i = 0;
+  while (i < n) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += sl(text, i, e);
+      i = e;
+      continue;
+    }
+    bool at_name = text.compare(i, key.size(), key) == 0 && (i == 0 || !ident_c(text[i - 1])) &&
+                   i + (long)key.size() < n && !ident_c(text[i + key.size()]);
+    if (at_name) {
+      long p = i + (long)key.size();
+      while (p < n && white_c(text[p])) p++;
+      long close = (p < n && text[p] == '(') ? matching_paren(text, p) : -1;
+      if (close > p && word_before(text, i) != "void") {
+        // the first top-level comma ends K (its template arguments are not split), the second ends LP
+        std::vector<long> commas;
+        long depth = 0, angles = 0;
+        for (long j = p + 1; j < close; j++) {
+          long je = skip_literal(text, j);
+          if (je >= 0) {
+            j = je - 1;
+            continue;
+          }
+          char c = text[j];
+          if (c == '(' || c == '[' || c == '{') depth++;
+          else if (c == ')' || c == ']' || c == '}') depth--;
+          else if (c == '<' && ident_c(text[j - 1]) && depth == 0) angles++;
+          else if (c == '>' && angles > 0 && depth == 0) angles--;
+          else if (c == ',' && depth == 0 && angles == 0) commas.push_back(j);
+        }
+        if (commas.size() >= 1) {
+          long c1 = commas[0];
+          long c2 = commas.size() >= 2 ? commas[1] : close;
+          std::string kernel = trim(sl(text, p + 1, c1));
+          std::string lp = trim(sl(text, c1 + 1, c2));
+          std::string args = c2 < close ? trim(sl(text, c2 + 1, close)) : std::string();
+          bool name_ok = !kernel.empty() && ident_c((unsigned char)kernel[0]) && lp.size() > 0 &&
+                         ident_c((unsigned char)lp[0]) && lp.find(' ') == std::string::npos;
+          if (name_ok) {
+            out += kernel + "<<<" + lp + ".block_nums, " + lp + ".block_dims, " + lp + ".shmem, " + lp + ".stream>>>(" +
+                   args + "); CUDA_CHECK(cudaGetLastError())";
+            i = close + 1;
+            continue;
+          }
+        }
+      }
+    }
+    out += text[i];
+    i++;
+  }
+  return out;
+}
+
 // Ruby launch_prepare (line 1509): the launch forms before the scan.
 std::string launch_prepare(const std::string &text) {
-  std::string t = expand_launch_macros(text, 0);
+  std::string t = expand_launch_macros(helper_launch_rewrite(text), 0);
   g_expanded = t;
   return deduce_launch_targs(t);
 }
