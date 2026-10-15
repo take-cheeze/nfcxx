@@ -352,7 +352,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     # actually embed, instead of silently falling back to the ordinary
     # dynamic ivar table the way every Optcarrot::CPU/PPU field has,
     # unconditionally, since this file was first written.
-    'BC2CPP_SELF_REGISTERING' => '1'
+    'BC2CPP_SELF_REGISTERING' => '1',
+    # sig/bc2cpp describes RPG engine classes that the optcarrot program does not define (RBS_SIGNATURES would abort).
+    'BC2CPP_SIG_DIRS' => ''
   }
   base_env.merge!(OptcarrotSealedBuild.environment(sealed_gems)) if sealed
   # NILABLE_EMBED_EXPERIMENT: OPTIN set only for the A/B run, so the default
