@@ -109,6 +109,30 @@ names the type.
 Not done: the emitter beyond the kernels in `tests/gpu/kernels` (it refuses other nodes with exit 3), the front
 end's CUDA input (EDG here has no CUDA mode, so `__global__` and `<<<>>>` do not parse), and an nvcc-compatible driver.
 
+## Kernel name obfuscation
+
+`--obfuscate-kernels` on the nfcxx driver, or `NFCXX_OBFUSCATE_KERNELS=1` in the environment, renames every kernel of
+each `.cu` input to `__nfcxx_kn_<hash>` (the hash is FNV-1a 64 of a per-file seed and the kernel's name). It applies to
+existing sources unchanged: a CMake build such as llama.cpp's (`CMAKE_CUDA_COMPILER=nfcxx-cuda`) takes the environment
+variable, with no change to its command line. `NFCXX_OBFUSCATE_SEED` sets the seed (for reproducible objects; by default
+each `.cu` gets a random one, so two builds of the same source differ).
+
+The rename is on the expanded source in `scripts/cuda-rewrite.rb --obfuscate=SEED`, before the host copy and the
+device unit are made. So the new name is in the static kernel, its launch, the kernel table, the device IR and PTX
+entries and the cubin. Template kernels take it through their wrappers (`__nfcxx_k__nfcxx_kn_<hash>_<types>`). String
+and character literals are not changed (a string that names a kernel is program data); comments are, so the cached
+copy keeps no old name. A kernel in a `.cuh` that several `.cu` files include gets its name per file: with the
+default random seed each unit has its own names, which is fine because each unit's host copy and its device image
+are self-contained. With `NFCXX_OBFUSCATE_SEED` set, the same kernel gets the same name in every unit.
+
+What it does not do: it hides the names, not the code. The cubin still holds the kernel's SASS and parameter layout, and
+`cuobjdump` or a profiler shows the code. Nsight and `cudaFuncGetName` show the new names. The hash is not
+cryptographic: with the default random seed the names do not reveal the kernels to anyone without the seed, but a
+known seed (`NFCXX_OBFUSCATE_SEED`) and a list of candidate names give the originals back.
+`tests/cuda/obfuscate/run.sh` checks the rewrite (no old name in the host copy or the device unit, the launches and
+the list use the new names, same seed gives the same output), and the IR, PTX and embedded table when the Path B front
+end is built. The host compile and the run need the CUDA toolkit and a GPU, and were not run for this change.
+
 ## Math and dp4a intrinsics (ggml-cuda)
 
 Lowered by the emitter (`FLOAT_BUILTINS`, `SCALAR_U32`) and wrapped in the device prelude (`BUILTIN_DEFS`):
