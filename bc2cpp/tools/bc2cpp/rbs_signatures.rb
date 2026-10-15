@@ -147,7 +147,7 @@ module RbsSignatures
     diag(out, loc, 'info', 'TC1005', "#{owner}##{m.name}: #{extras.join(', ')} accepted but give no hint") unless extras.empty?
     # `def self.x` is keyed by the owner the IR names singleton methods with (`Klass.singleton`).
     owner = "#{owner}.singleton" unless m.kind == :instance
-    out.methods[[owner, m.name.to_s]] = MethodSig.new(owner: owner, name: m.name.to_s, args: args,
+    fresh = MethodSig.new(owner: owner, name: m.name.to_s, args: args,
                                                                optional_args: fn.optional_positionals.map { |param| type_of(param.type) },
                                                                keywords: (fn.required_keywords.merge(fn.optional_keywords)).to_h { |name, param| [name.to_s, type_of(param.type)] },
                                                                required_keywords: fn.required_keywords.keys.map(&:to_s).to_set,
@@ -157,6 +157,21 @@ module RbsSignatures
                                                                return_type: fn.return_type, block_type: mt.block,
                                                                type_param_bounds: mt.type_params.to_h { |param| [param.name.to_s, param.upper_bound_type || param.default_type] }.freeze,
                                                                callback_supported: fn.optional_positionals.empty? && !fn.rest_positionals && fn.trailing_positionals.empty? && fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords)
+    key = [owner, m.name.to_s]
+    out.methods[key] = out.methods.key?(key) ? merge_method_sig(out.methods[key], fresh) : fresh
+  end
+
+  # A second declaration of one method (another file, or the same method in two signature files) fills the slots the
+  # first left untyped; where both are typed, the later declaration wins, as before.
+  def merge_method_sig(prev, fresh)
+    untyped = ->(t) { t.nil? || (t.kind == :other && t.text == 'untyped') }
+    merged = fresh.dup
+    merged.args = fresh.args.each_with_index.map { |t, i| untyped.(t) && prev.args[i] && !untyped.(prev.args[i]) ? prev.args[i] : t }
+    if untyped.(fresh.ret) && prev.ret && !untyped.(prev.ret)
+      merged.ret = prev.ret
+      merged.return_type = prev.return_type
+    end
+    merged
   end
 
   def type_of(t)
