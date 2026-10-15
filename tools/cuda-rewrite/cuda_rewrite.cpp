@@ -2658,7 +2658,16 @@ std::vector<Piece> top_pieces(const std::string &text) {
     } else if (c == '{') {
       if (depth == 0 && !brace_is_initializer(sl(text, start, i))) {
         body = true;
-        std::vector<std::string> tk = tokens_of(sl(text, start, i));
+        // The opener is the keyword after a leading `template <...>` header: `template <typename T> struct S {...};`
+        // is a struct, which ends at its `;`, not at its `}`.
+        std::string head = sl(text, start, i);
+        std::vector<std::string> pre = tokens_of(head);
+        if (!pre.empty() && pre.front() == "template") {
+          long lt = str_index(head, "<", 0);
+          long gt = lt >= 0 ? matching_angle(head, lt) : -1;
+          if (gt >= 0) head = sl(head, gt + 1, (long)head.size());
+        }
+        std::vector<std::string> tk = tokens_of(head);
         opener = tk.empty() ? std::string() : tk.front();
         has_opener = !tk.empty();
       }
@@ -2756,6 +2765,19 @@ std::vector<std::string> g_incdirs;
 // Ruby system_path? (line 2123): the toolkit and system prefixes are never inlined.
 bool system_path(const std::string &path) {
   std::string p = path;
+  // NFCXX_SYSTEM_PATHS: extra prefixes that are system directories (the driver sets it to a CUDA_HOME-shaped directory
+  // unpacked from PyPI wheels, scripts/fetch-cudart-wheel.sh), separated by ':'.
+  if (const char *extra = std::getenv("NFCXX_SYSTEM_PATHS")) {
+    std::string list = extra;
+    size_t start = 0;
+    while (start <= list.size()) {
+      size_t end = list.find(':', start);
+      if (end == std::string::npos) end = list.size();
+      std::string prefix = list.substr(start, end - start);
+      if (!prefix.empty() && p.compare(0, prefix.size(), prefix) == 0) return true;
+      start = end + 1;
+    }
+  }
   // lib/cuda/host holds the host shims (cub/cub.cuh): the device unit has their definitions, so they are not inlined.
   return p.compare(0, 5, "/usr/") == 0 || p.compare(0, 5, "/opt/") == 0 || p.compare(0, 16, "/usr/local/cuda/") == 0 ||
          p.find("/lib/cuda/host/") != std::string::npos;
@@ -3185,6 +3207,21 @@ std::string tag_after(const std::string &t, const std::string &kw) {
     bool whole = (j == 0 || !ident_c(ch(t, j - 1))) && (k >= (long)t.size() || !ident_c(ch(t, k)));
     if (whole) {
       while (k < (long)t.size() && white_c(ch(t, k))) k += 1;
+      // Attribute specifiers between the keyword and the tag do not name anything: alignas(N), __align__(N) and
+      // __attribute__((...)) are skipped with their argument lists (`struct alignas(sizeof(T)*4) vec4 {...}`).
+      for (;;) {
+        long a = k;
+        while (a < (long)t.size() && ident_c(ch(t, a))) a += 1;
+        std::string w = sl(t, k, a);
+        if (w != "alignas" && w != "__align__" && w != "__attribute__" && w != "__declspec") break;
+        k = a;
+        while (k < (long)t.size() && white_c(ch(t, k))) k += 1;
+        if (!(k < (long)t.size() && ch(t, k) == '(')) return std::string();
+        long close = matching_paren(t, k);
+        if (close < 0) return std::string();
+        k = close + 1;
+        while (k < (long)t.size() && white_c(ch(t, k))) k += 1;
+      }
       if (!(k < (long)t.size() && ident_c(ch(t, k)) && !(ch(t, k) >= 48 && ch(t, k) <= 57))) return std::string();
       long e = k;
       while (e < (long)t.size() && ident_c(ch(t, e))) e += 1;
@@ -3227,7 +3264,31 @@ std::vector<std::string> enum_enumerators(const std::string &t) {
 // Ruby function_head? (line 2557): a head with a `(` before any `=`, before the first brace.
 bool function_head(const std::string &t) {
   long b = str_index(t, "{", 0);
-  std::string h = b < 0 ? t : sl(t, 0, b);
+  std::string src = b < 0 ? t : sl(t, 0, b);
+  // Attribute specifiers (alignas(N), __align__(N), __attribute__((...)), __declspec(...)) are not parameter lists:
+  // `template <typename T> struct alignas(sizeof(T)*4) vec4 {...}` is a struct, not a function.
+  std::string h;
+  for (long i = 0; i < (long)src.size();) {
+    if (ident_c(ch(src, i)) && (i == 0 || !ident_c(ch(src, i - 1)))) {
+      long e = i;
+      while (e < (long)src.size() && ident_c(ch(src, e))) e += 1;
+      std::string w = sl(src, i, e);
+      long p = e;
+      while (p < (long)src.size() && white_c(ch(src, p))) p += 1;
+      if ((w == "alignas" || w == "__align__" || w == "__attribute__" || w == "__declspec") && p < (long)src.size() &&
+          ch(src, p) == '(') {
+        long close = matching_paren(src, p);
+        if (close < 0) return true;
+        i = close + 1;
+        continue;
+      }
+      h += sl(src, i, e);
+      i = e;
+      continue;
+    }
+    h += ch(src, i);
+    i += 1;
+  }
   long lp = str_index(h, "(", 0);
   if (lp < 0) return false;
   long eq = str_index(h, "=", 0);
@@ -3542,7 +3603,10 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
     if (pc.body && str_index(t, "(", 0) >= 0 && !has_tok(toks, "struct") && !has_tok(toks, "class") &&
         !has_tok(toks, "union") && !has_tok(toks, "enum"))
       continue;
-    if (!pc.body && str_index(t, "(", 0) >= 0 && str_index(t, "=", 0) < 0 && toks.front() != "typedef") continue;
+    // A tag with an attribute specifier (`struct alignas(N) name {...}`) has a `(` but is not a function.
+    if (!pc.body && str_index(t, "(", 0) >= 0 && str_index(t, "=", 0) < 0 && toks.front() != "typedef" &&
+        !has_tok(toks, "struct") && !has_tok(toks, "class") && !has_tok(toks, "union") && !has_tok(toks, "enum"))
+      continue;
     if (toks.front() == "typedef") {
       // `typedef R (*name)(args)` names `name`, which follows the `(*`; otherwise the name is the last identifier.
       long fp = str_index(t, "(*", 0);
