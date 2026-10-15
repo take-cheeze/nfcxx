@@ -103,6 +103,16 @@ else
 fi
 pass overload_pair.cu "overload pair: exact"
 pass fnptr_return.cu "fnptr return: exact"
+pass nested_fnptr.cu "nested fnptr: 0 mismatches"
+# Mutant: the quantizer triples, so the check against the doubled values must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" nested_fnptr_mutant.cu -o "$out/nfm.o" > "$out/nfm.log" 2>&1 \
+   && "$root/nfcxx" "$out/nfm.o" -L"$cuda/lib64" -lcudart -o "$out/nfm" >> "$out/nfm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/nfm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant nested_fnptr_mutant: caught: $run"
+else
+  echo "FAIL nested_fnptr_mutant: the mutant was not caught"; fail=1
+fi
 pass bare_dim.cu "bare dim: exact"
 # Mutant: the kernel adds 8 where the host expects 7, so the check must see a mismatch.
 if "$root/nfcxx" -c -I"$cuda/include" bare_dim_mutant.cu -o "$out/bdm.o" > "$out/bdm.log" 2>&1 \
