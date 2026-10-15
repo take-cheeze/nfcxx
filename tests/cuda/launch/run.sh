@@ -154,4 +154,26 @@ if "$root/nfcxx" -c -I"$cuda/include" emit_misc_mutant.cu -o "$out/emm.o" > "$ou
 else
   echo "FAIL emit_misc mutant: not caught"; fail=1
 fi
+# Kernel instances whose addresses are taken (a ternary, and a dependent one in a template), launched by address.
+pass addr_taken.cu "addr taken: 0 mismatches"
+# Mutant: the ternary selects the same instance twice, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" addr_taken_mutant.cu -o "$out/atm.o" > "$out/atm.log" 2>&1 \
+   && "$root/nfcxx" "$out/atm.o" -L"$cuda/lib64" -lcudart -o "$out/atm" >> "$out/atm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/atm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant addr_taken: caught: $run"
+else
+  echo "FAIL addr_taken mutant: not caught"; fail=1
+fi
+# Address sites under `if constexpr (cond)`: a constexpr function of the unit decides each instance's site.
+pass constexpr_guard.cu "constexpr guard: 0 mismatches"
+# Mutant: the condition is negated, so the instances take the other sites, and the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" constexpr_guard_mutant.cu -o "$out/cgm.o" > "$out/cgm.log" 2>&1 \
+   && "$root/nfcxx" "$out/cgm.o" -L"$cuda/lib64" -lcudart -o "$out/cgm" >> "$out/cgm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/cgm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant constexpr_guard: caught: $run"
+else
+  echo "FAIL constexpr_guard mutant: not caught"; fail=1
+fi
 exit $fail
