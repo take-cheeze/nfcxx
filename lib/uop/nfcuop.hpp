@@ -190,8 +190,9 @@ class Graph {
   //   expand(x, shape, syms): a dimension of x that is its symbol stays; a size-1 dimension (or a constant) grows to the symbol
   //     given, and a literal target is an integer. expand(x, shape): a size-1 dimension that grows is Wild (its size is that of its
   //     consumer, as before); a symbolic dimension is Unknown.
-  //   The same explicit forms take polynomials (reshape_poly, expand_poly, shrink_poly, var_poly: `Dims`, see below); a Syms argument
-  //   is the same as the Dims of its symbols.
+  //   pad(x, before, after): a padded symbolic dimension N is N + before + after (derived, as the integers are); a Wild or Unknown one
+  //   is Unknown. The same explicit forms take polynomials (reshape_poly, expand_poly, shrink_poly, pad_poly, var_poly: `Dims`, see
+  //   below); a Syms argument is the same as the Dims of its symbols.
   const UOp* reshape(const UOp* x, const Shape& shape);
   const UOp* reshape(const UOp* x, const Shape& shape, const Syms& syms);
   // The explicit form with polynomials: the element count of the target must be that of x as a polynomial (for every size of the
@@ -215,7 +216,13 @@ class Graph {
   // entry must equal ends[k]. A polynomial end E keeps the source's dimension when it is the whole of it (start 0, E the dimension);
   // otherwise the result is E - starts[k] (N-1 for x[1:N]), and at run time the renderer checks that E is within the source's size.
   const UOp* shrink_poly(const UOp* x, const Shape& starts, const Shape& ends, const Dims& ends_poly);
+  // The shape-only pad derives the polynomial of a padded symbolic dimension (N + before + after), which is exact for every size of the
+  // symbols; a Wild or Unknown dimension that is padded is Unknown.
   const UOp* pad(const UOp* x, const Shape& before, const Shape& after);
+  // The explicit form with polynomials (stage 7, step 3): `dims` is the polynomial of each dimension of the result, which must be the
+  // polynomial of x's dimension plus before and after, for every size of the symbols (`[N,4]` padded by one row before is `[N+1,4]`,
+  // and `[N,4]` with dims `N, 4` is an Error). A Wild or Unknown dimension of x is Unknown in the result, as for the shape-only form.
+  const UOp* pad_poly(const UOp* x, const Shape& before, const Shape& after, const Dims& dims);
   const UOp* flip(const UOp* x, const Shape& axes);
   // The node `u` with other sources (u->op, u->dtype and its symbolic dimensions are kept; Const and Var are returned as they are).
   const UOp* rebuild(const UOp* u, std::vector<const UOp*> src);
