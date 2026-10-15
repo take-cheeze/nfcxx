@@ -216,4 +216,14 @@ if "$root/nfcxx" -c -I"$cuda/include" init_list_range_mutant.cu -o "$out/ilm.o" 
 else
   echo "FAIL init_list_range_mutant: the mutant was not caught"; fail=1
 fi
+# The emitter lowers only the functions the kernel reaches (`dead` is never called and is not lowered).
+pass reach_helper.cu "reach helper: 0 mismatches"
+if "$root/nfcxx" -c -I"$cuda/include" reach_helper_mutant.cu -o "$out/rhm.o" > "$out/rhm.log" 2>&1 \
+   && "$root/nfcxx" "$out/rhm.o" -L"$cuda/lib64" -lcudart -o "$out/rhm" >> "$out/rhm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/rhm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant reach_helper: caught: $run"
+else
+  echo "FAIL reach_helper: the mutant was not caught"; fail=1
+fi
 exit $fail
