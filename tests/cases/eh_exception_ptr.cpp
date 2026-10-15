@@ -94,7 +94,9 @@ int main()
     try { std::rethrow_exception(b); CHECK(false); }
     catch (const Counted &c) { CHECK(c.v == 11); }
     CHECK(Counted::live == live0 + 1);   // still held by b
-    std::exception_ptr m = std::move(b);
+    // Hand the reference over by copy and reset b: libc++'s exception_ptr has no move constructor, so std::move would copy.
+    std::exception_ptr m = b;
+    b = nullptr;
     CHECK(!b && m);
     m = nullptr;
     CHECK(Counted::live == live0);
