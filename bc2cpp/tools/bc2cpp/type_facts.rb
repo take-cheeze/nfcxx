@@ -35,7 +35,9 @@ module TypeFacts
                    :ivar_layout, :element_raw, :element_poison_reason, :hash_element_raw, :hash_poison_reason,
                    :container_constants, :gen, :contradictions, :dynamic_names, :call_sites, :root,
                    :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, :constant_sites,
-                   :modules, :superclass_of, :integer_constants, :signature_arg_types, :signature_contracts, :ir_return_facts, :included_modules, :prepended_modules, keyword_init: true)
+                   :modules, :superclass_of, :integer_constants, :signature_arg_types, :signature_contracts,
+                   :ir_return_facts, :included_modules, :prepended_modules,
+                   :element_site_classes, :hash_element_site_classes, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
@@ -660,10 +662,14 @@ module TypeFacts
   end
 
   # A declared ivar class (or Integer / Symbol) against what the analysis proved for the same ivar. The rule is
-  # AnnotationContradictions.ivar_conflicts, which the build also enforces.
+  # AnnotationContradictions.ivar_conflicts, which the build also enforces; ELEMENT_SIGNATURE_CHECK adds a declared
+  # `Array[C]` / `Hash[K, C]` against the classes traced element sites wrote (ivar_element_conflicts).
   def ivar_contradictions(ctx, out)
-    AnnotationContradictions.ivar_conflicts(ctx.signature_ivars, ctx.class_layout_raw, ctx.ivar_layout,
-                                            ClassLayout::UNKNOWN).each do |sig, want, got|
+    rows = AnnotationContradictions.ivar_conflicts(ctx.signature_ivars, ctx.class_layout_raw, ctx.ivar_layout,
+                                                   ClassLayout::UNKNOWN)
+    rows += AnnotationContradictions.ivar_element_conflicts(ctx.signature_ivars, ctx.element_site_classes || {},
+                                                            ctx.hash_element_site_classes || {})
+    rows.each do |sig, want, got|
       out << { 'owner' => sig.owner, 'name' => sig.name, 'slot' => 'ivar', 'declared' => want, 'inferred' => got,
                'file' => sig.loc.file, 'line' => sig.loc.line, 'col' => sig.loc.col, 'source' => 'signature',
                'message' => "#{sig.owner}#{sig.name} ivar: declared #{want}, inferred #{got}" }
