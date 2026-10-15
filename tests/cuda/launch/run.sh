@@ -113,4 +113,14 @@ if "$root/nfcxx" -c -I"$cuda/include" pack_trailing_mutant.cu -o "$out/pt.o" > "
 else
   echo "FAIL pack_trailing mutant: not caught"; fail=1
 fi
+pass alias_fnptr.cu "alias fnptr: no error, 0 mismatches"
+# Mutant: the kernel scales by 3 instead of 2, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" alias_fnptr_mutant.cu -o "$out/af.o" > "$out/af.log" 2>&1 \
+   && "$root/nfcxx" "$out/af.o" -L"$cuda/lib64" -lcudart -o "$out/af" >> "$out/af.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/af" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant alias_fnptr: caught: $run"
+else
+  echo "FAIL alias_fnptr mutant: not caught"; fail=1
+fi
 exit $fail

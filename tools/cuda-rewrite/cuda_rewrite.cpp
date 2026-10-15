@@ -3490,6 +3490,16 @@ std::string drop_host_members(const std::string &t) {
   return out;
 }
 
+// The index of the declaration keyword after a leading `template <...>` header: the first `using` of a template
+// alias (`template <typename T> using name = ...;`). The tokens do not carry the angle brackets, so the header ends
+// where the first `using` starts. 0 when the piece has no template header; -1 when no `using` follows it.
+static long alias_head_index(const std::vector<std::string> &toks) {
+  if (toks.empty() || toks.front() != "template") return 0;
+  for (size_t i = 1; i < toks.size(); i++)
+    if (toks[i] == "using") return (long)i;
+  return -1;
+}
+
 // Ruby device_tu (line 2642): the device translation unit of a unit: [text, kernel names].
 std::pair<std::string, std::vector<std::string>> device_tu(const std::string &text) {
   std::vector<DevPiece> pieces;
@@ -3617,9 +3627,11 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       } else {
         pc.defined.push_back(toks.back());
       }
-    } else if (toks.front() == "using") {
+    } else if (alias_head_index(toks) >= 0 && toks[alias_head_index(toks)] == "using") {
+      // `template <...> using name = T;` names `name` after the template header, as `using name = T;` does.
+      long u = alias_head_index(toks);
       pc.defined.clear();
-      if (toks.size() > 1) pc.defined.push_back(toks[1]);
+      if ((size_t)u + 1 < toks.size()) pc.defined.push_back(toks[(size_t)u + 1]);
     } else {
       std::string kw;
       for (const auto &tk : toks)

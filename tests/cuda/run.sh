@@ -51,7 +51,7 @@ done
 # Ruby reference refuses them (its launch argument split has the same `->` bug, and it refuses __device__ constants).
 cxx="$root/build/cuda-rewrite"
 [ -x "$cxx" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
-for c in launch_arrow_args device_const_scalar host_cub_helper vec4_alignas; do
+for c in launch_arrow_args device_const_scalar host_cub_helper template_alias_fnptr vec4_alignas; do
   if "$cxx" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
      && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
     echo "device unit $c: ok"
