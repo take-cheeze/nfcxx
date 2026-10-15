@@ -117,10 +117,10 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" --sm=$sm ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" > "$dev.ptx" || exit $?
   # NFCXX_CUDA_JIT=1: the image is the PTX text, loaded by the runtime's JIT (cudaLibraryLoadData); ptxas is not run.
   if [ "${NFCXX_CUDA_JIT:-0}" = 1 ]; then
-    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.ptx" "$dev.ir" "$dev.kernels" >> "$copy" || exit $?
+    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.ptx" "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
   else
     "$ptxas" -arch=sm_$sm "$dev.ptx" -o "$dev.cubin" || exit $?
-    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.cubin" "$dev.ir" "$dev.kernels" >> "$copy" || exit $?
+    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.cubin" "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
   fi
 }
 while [ $# -gt 0 ]; do

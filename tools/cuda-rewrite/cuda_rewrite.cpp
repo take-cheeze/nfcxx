@@ -255,6 +255,8 @@ struct Site {
 };
 std::vector<Site> g_sites;
 std::map<std::string, size_t> g_site_index;
+// Address-taken template kernel instances: (host expression, wrapper). Written to the addr file with the kernel list.
+std::vector<std::pair<std::string, std::string>> g_addr_table;
 
 // Ruby slicing text[a...b] / text[a, n] with the bounds clipped to the string (a past the end gives "").
 std::string sl(const std::string &s, long a, long b) {
@@ -3701,6 +3703,384 @@ static long alias_head_index(const std::vector<std::string> &toks) {
 }
 
 // Ruby device_tu (line 2642): the device translation unit of a unit: [text, kernel names].
+// True when the word `w` ends at index `end` of s (and starts at a word boundary).
+bool word_ends_at(const std::string &s, long end, const std::string &w) {
+  long start = end - (long)w.size() + 1;
+  if (start < 0 || s.compare((size_t)start, w.size(), w) != 0) return false;
+  return start == 0 || !ident_c((unsigned char)s[start - 1]);
+}
+
+// An `if constexpr` branch enclosing a position: its condition text, and whether the position is in its else.
+struct CxBranch {
+  std::string cond;
+  bool negated;
+};
+
+// The `if constexpr` branches between the template body's open brace and pos, outermost first. The braced else of an
+// `if constexpr` block is the negated condition. A runtime if takes no instance out of the program, so it is not listed.
+// An `else if constexpr` chain is refused by name: its conditions are not all read here.
+std::vector<CxBranch> enclosing_constexpr_branches(const std::string &code, long body_open, long pos) {
+  struct Frame {
+    bool cx;
+    CxBranch br;
+  };
+  std::vector<Frame> stack;
+  bool have_last = false;
+  Frame last{false, CxBranch{"", false}};
+  long last_close = -1;
+  for (long i = body_open + 1; i < pos && i < (long)code.size(); i++) {
+    long e = skip_literal(code, i);
+    if (e >= 0) { i = e - 1; continue; }
+    if (code[i] == '{') {
+      long p = i - 1;
+      while (p > body_open && isspace((unsigned char)code[p])) p--;
+      Frame f{false, CxBranch{"", false}};
+      if (p > body_open && code[p] == ')') {
+        long d = 0, q = p;
+        for (; q > body_open; q--) {
+          if (code[q] == ')') d++;
+          else if (code[q] == '(') { d--; if (d == 0) break; }
+        }
+        long r = q - 1;
+        while (r > body_open && isspace((unsigned char)code[r])) r--;
+        long s = r;
+        while (s > body_open && ident_c((unsigned char)code[s - 1])) s--;
+        // `if constexpr (cond) {`: the word before the parenthesis is `constexpr`, and the word before that is `if`.
+        if (code.substr(s, r - s + 1) == "constexpr") {
+          long c = s - 1;
+          while (c > body_open && isspace((unsigned char)code[c])) c--;
+          long cs = c;
+          while (cs > body_open && ident_c((unsigned char)code[cs - 1])) cs--;
+          if (code.substr(cs, c - cs + 1) == "if") {
+            long before = cs - 1;
+            while (before > body_open && isspace((unsigned char)code[before])) before--;
+            if (word_ends_at(code, before, "else"))
+              refuse("else if constexpr at line " + std::to_string(line_of(code, i)) +
+                     ": the chain of its conditions is not evaluated");
+            f.cx = true;
+            f.br = CxBranch{code.substr(q + 1, p - q - 1), false};
+          }
+        }
+      } else if (p > body_open && word_ends_at(code, p, "else") && have_last && last.cx) {
+        // the braced else of an `if constexpr` block: only whitespace between its closing brace and the `else`
+        long w = p - 3 - 1;
+        while (w > body_open && isspace((unsigned char)code[w])) w--;
+        if (w == last_close) f = Frame{true, CxBranch{last.br.cond, true}};
+      }
+      stack.push_back(f);
+    } else if (code[i] == '}') {
+      if (!stack.empty()) {
+        have_last = true;
+        last = stack.back();
+        last_close = i;
+        stack.pop_back();
+      }
+    }
+  }
+  std::vector<CxBranch> out;
+  for (const Frame &f : stack)
+    if (f.cx) out.push_back(f.br);
+  return out;
+}
+
+// Evaluates a constexpr condition for one instance. Names: the instance's template parameters, block-local integer or
+// bool constants (local_constant_visible), and calls of a constexpr function of the unit whose body is one `return`.
+// Operators: decimal literals, true and false, + - * / %, == != < <= > >=, ! && || (unary + and -), and parentheses.
+// Anything else fails with a reason: the caller refuses by name.
+struct CxCtx {
+  const std::string &text;
+  long pos;
+  std::map<std::string, long> vars;
+  std::string why;
+  int depth;
+};
+
+bool cx_eval(CxCtx &cx, const std::string &expr, long &value);
+
+// The body of the single-return constexpr definition of `name` in the unit: its parameter names and return expression.
+// False when there is none, or when two definitions with a body exist (an overload set is not read here).
+bool find_cx_function(const std::string &text, const std::string &name, std::vector<std::string> &params,
+                      std::string &body) {
+  bool found = false;
+  for (long i = 0; i < (long)text.size();) {
+    long e = skip_literal(text, i);
+    if (e >= 0) { i = e; continue; }
+    if (!(ident_c((unsigned char)text[i]) && !(i > 0 && ident_c((unsigned char)text[i - 1])))) { i++; continue; }
+    long j = i;
+    while (j < (long)text.size() && ident_c((unsigned char)text[j])) j++;
+    if (text.compare((size_t)i, (size_t)(j - i), name) != 0) { i = j; continue; }
+    long k = j;
+    while (k < (long)text.size() && isspace((unsigned char)text[k])) k++;
+    if (k >= (long)text.size() || text[k] != '(') { i = j; continue; }
+    long d = 0, close = k;
+    for (; close < (long)text.size(); close++) {
+      if (text[close] == '(') d++;
+      else if (text[close] == ')') { d--; if (d == 0) break; }
+    }
+    if (close >= (long)text.size()) return false;
+    long b = close + 1;
+    while (b < (long)text.size() && isspace((unsigned char)text[b])) b++;
+    if (b >= (long)text.size() || text[b] != '{') { i = close + 1; continue; }
+    long eb = matching_brace(text, b);
+    if (eb < 0) return false;
+    std::string inner = strip(text.substr(b + 1, eb - b - 1));
+    if (inner.compare(0, 6, "return") != 0 || inner.size() < 8 || ident_c((unsigned char)inner[6])) return false;
+    std::string ret = strip(inner.substr(6));
+    if (ret.empty() || ret.back() != ';') return false;
+    ret.pop_back();
+    if (ret.find(';') != std::string::npos || ret.find('{') != std::string::npos) return false;
+    if (found) return false;
+    found = true;
+    params.clear();
+    std::string list = text.substr(k + 1, close - k - 1);
+    if (!strip(list).empty() && strip(list) != "void") {
+      long start = 0;
+      for (long c = 0; c <= (long)list.size(); c++) {
+        if (c < (long)list.size() && list[c] != ',') continue;
+        std::string part = strip(list.substr(start, c - start));
+        long pe = (long)part.size();
+        long ps = pe;
+        while (ps > 0 && ident_c((unsigned char)part[ps - 1])) ps--;
+        if (ps == pe) return false;
+        params.push_back(part.substr(ps, pe - ps));
+        start = c + 1;
+      }
+    }
+    body = ret;
+    i = eb + 1;
+  }
+  return found;
+}
+
+bool cx_tokenize(const std::string &s, std::vector<std::string> &toks, std::string &why) {
+  static const char *two[] = {"==", "!=", "<=", ">=", "&&", "||"};
+  for (size_t i = 0; i < s.size();) {
+    unsigned char c = (unsigned char)s[i];
+    if (isspace(c)) { i++; continue; }
+    if (isdigit(c)) {
+      size_t j = i;
+      while (j < s.size() && isdigit((unsigned char)s[j])) j++;
+      if (j < s.size() && ident_c((unsigned char)s[j])) { why = "literal with a suffix"; return false; }
+      toks.push_back(s.substr(i, j - i));
+      i = j;
+      continue;
+    }
+    if (ident_c(c)) {
+      size_t j = i;
+      while (j < s.size() && ident_c((unsigned char)s[j])) j++;
+      toks.push_back(s.substr(i, j - i));
+      i = j;
+      continue;
+    }
+    bool done = false;
+    for (const char *op : two)
+      if (s.compare(i, 2, op) == 0) { toks.push_back(op); i += 2; done = true; break; }
+    if (done) continue;
+    if (std::string("()+-*/%<>!,").find((char)c) != std::string::npos) { toks.push_back(std::string(1, (char)c)); i++; continue; }
+    why = std::string("operator ") + (char)c;
+    return false;
+  }
+  return true;
+}
+
+// Recursive descent over the tokens of one expression, with the precedence of C for the operators above.
+struct CxParser {
+  CxCtx &cx;
+  std::vector<std::string> t;
+  size_t p = 0;
+
+  bool fail(const std::string &w) {
+    if (cx.why.empty()) cx.why = w;
+    return false;
+  }
+  bool peek(const char *s) const { return p < t.size() && t[p] == s; }
+
+  bool all(long &v) {
+    if (!or_(v)) return false;
+    if (p != t.size()) return fail("trailing tokens in the expression");
+    return true;
+  }
+  bool or_(long &v) {
+    if (!and_(v)) return false;
+    while (peek("||")) { p++; long r; if (!and_(r)) return false; v = (v || r) ? 1 : 0; }
+    return true;
+  }
+  bool and_(long &v) {
+    if (!eq(v)) return false;
+    while (peek("&&")) { p++; long r; if (!eq(r)) return false; v = (v && r) ? 1 : 0; }
+    return true;
+  }
+  bool eq(long &v) {
+    if (!rel(v)) return false;
+    while (peek("==") || peek("!=")) {
+      bool is_eq = peek("=="); p++;
+      long r; if (!rel(r)) return false;
+      v = (is_eq ? (v == r) : (v != r)) ? 1 : 0;
+    }
+    return true;
+  }
+  bool rel(long &v) {
+    if (!add(v)) return false;
+    while (peek("<") || peek("<=") || peek(">") || peek(">=")) {
+      std::string op = t[p]; p++;
+      long r; if (!add(r)) return false;
+      bool b = op == "<" ? v < r : op == "<=" ? v <= r : op == ">" ? v > r : v >= r;
+      v = b ? 1 : 0;
+    }
+    return true;
+  }
+  bool add(long &v) {
+    if (!mul(v)) return false;
+    while (peek("+") || peek("-")) {
+      bool plus = peek("+"); p++;
+      long r; if (!mul(r)) return false;
+      v = plus ? v + r : v - r;
+    }
+    return true;
+  }
+  bool mul(long &v) {
+    if (!unary(v)) return false;
+    while (peek("*") || peek("/") || peek("%")) {
+      std::string op = t[p]; p++;
+      long r; if (!unary(r)) return false;
+      if (op != "*" && r == 0) return fail("division by zero in the expression");
+      v = op == "*" ? v * r : op == "/" ? v / r : v % r;
+    }
+    return true;
+  }
+  bool unary(long &v) {
+    if (peek("!")) { p++; if (!unary(v)) return false; v = v ? 0 : 1; return true; }
+    if (peek("-")) { p++; if (!unary(v)) return false; v = -v; return true; }
+    if (peek("+")) { p++; return unary(v); }
+    return primary(v);
+  }
+  bool primary(long &v) {
+    if (peek("(")) {
+      p++;
+      if (!or_(v)) return false;
+      if (!peek(")")) return fail("missing ) in the expression");
+      p++;
+      return true;
+    }
+    if (p >= t.size()) return fail("the expression ends early");
+    std::string tok = t[p];
+    if (isdigit((unsigned char)tok[0])) {
+      if (tok.size() > 18) return fail("a literal too large for the evaluator");
+      v = std::stol(tok);
+      p++;
+      return true;
+    }
+    if (tok == "true" || tok == "false") { v = tok == "true" ? 1 : 0; p++; return true; }
+    if (!ident_c((unsigned char)tok[0])) return fail("unexpected token " + tok);
+    p++;
+    if (peek("(")) {
+      p++;
+      std::vector<long> args;
+      if (!peek(")")) {
+        for (;;) {
+          long a;
+          if (!or_(a)) return false;
+          args.push_back(a);
+          if (peek(",")) { p++; continue; }
+          break;
+        }
+      }
+      if (!peek(")")) return fail("missing ) in a call of " + tok);
+      p++;
+      std::vector<std::string> params;
+      std::string body;
+      if (!find_cx_function(cx.text, tok, params, body))
+        return fail("call of " + tok + ": no constexpr function with a single return in the unit");
+      if (params.size() != args.size()) return fail("call of " + tok + " with the wrong number of arguments");
+      if (cx.depth >= 8) return fail("constexpr calls nest deeper than 8");
+      CxCtx sub{cx.text, cx.pos, {}, "", cx.depth + 1};
+      for (size_t k = 0; k < params.size(); k++) sub.vars[params[k]] = args[k];
+      if (!cx_eval(sub, body, v)) { if (cx.why.empty()) cx.why = sub.why; return false; }
+      return true;
+    }
+    auto it = cx.vars.find(tok);
+    if (it != cx.vars.end()) { v = it->second; return true; }
+    std::string val;
+    if (local_constant_visible(cx.text, cx.pos, tok, val)) {
+      CxCtx sub{cx.text, cx.pos, cx.vars, "", cx.depth + 1};
+      if (cx.depth >= 8) return fail("constexpr constants nest deeper than 8");
+      if (!cx_eval(sub, val, v)) { if (cx.why.empty()) cx.why = sub.why; return false; }
+      return true;
+    }
+    return fail("name " + tok + " is not a template parameter, a block-local constant or a constexpr function");
+  }
+};
+
+bool cx_eval(CxCtx &cx, const std::string &expr, long &value) {
+  std::vector<std::string> toks;
+  std::string why;
+  if (!cx_tokenize(expr, toks, why)) { cx.why = why; return false; }
+  CxParser ps{cx, toks, 0};
+  return ps.all(value);
+}
+
+// For one instance of the enclosing template at pos: 1 when every enclosing constexpr branch is taken, 0 when one is not
+// (the front end drops the address site, so the instance has no entry), -1 when a condition cannot be evaluated (why).
+int guards_taken(const std::string &text, long pos, const OuterTemplate &outer, const std::vector<std::string> &inst,
+                 const std::vector<CxBranch> &guards, std::string &why) {
+  if (guards.empty()) return 1;
+  if (outer.has_pack) { why = "the enclosing template has a parameter pack"; return -1; }
+  if (inst.size() != outer.names.size()) { why = "the instance does not give every template parameter"; return -1; }
+  CxCtx cx{text, pos, {}, "", 0};
+  for (size_t k = 0; k < inst.size(); k++) {
+    // an instance argument is an expression over literals (8/8, 64/8, true); it has no names of its own
+    CxCtx arg{text, pos, {}, "", 0};
+    long v;
+    if (!cx_eval(arg, inst[k], v)) { why = "template argument " + inst[k] + " (" + arg.why + ")"; return -1; }
+    cx.vars[outer.names[k]] = v;
+  }
+  for (const CxBranch &g : guards) {
+    long v;
+    cx.why.clear();
+    if (!cx_eval(cx, g.cond, v)) { why = "the condition " + g.cond + " (" + cx.why + ")"; return -1; }
+    if ((v != 0) == g.negated) return 0;
+  }
+  return 1;
+}
+
+// The template arguments of an address-taken instance at pos, for one instance of the enclosing template: a block-local
+// constant in them takes its value with the instance's parameters substituted (V_is_K_view = (DKQ == 576) gives 1 for
+// DKQ = 576), then the parameters are substituted. A local that is not an integer value is refused by name.
+std::string instance_targs(const std::string &text, long pos, const std::string &raw, const OuterTemplate &outer,
+                           const std::vector<std::string> &inst) {
+  std::string out;
+  long n = (long)raw.size();
+  for (long i = 0; i < n;) {
+    bool starts = ident_c((unsigned char)raw[i]) && !(raw[i] >= '0' && raw[i] <= '9') &&
+                  !(i > 0 && ident_c((unsigned char)raw[i - 1]));
+    if (!starts) { out += raw[i]; i++; continue; }
+    long j = i;
+    while (j < n && ident_c((unsigned char)raw[j])) j++;
+    std::string v = raw.substr(i, j - i);
+    std::string val;
+    bool is_param = std::find(outer.names.begin(), outer.names.end(), v) != outer.names.end();
+    if (!is_param && local_constant_visible(text, pos, v, val)) {
+      std::string val2 = substitute(val, outer.names, inst, outer.has_pack, outer.pack);
+      long nv;
+      if (int_expr_value(text, pos, val2, nv, 0)) {
+        out += std::to_string(nv);
+      } else {
+        bool single = !val2.empty();
+        for (char cc : val2)
+          if (!ident_c((unsigned char)cc)) single = false;
+        if (!single)
+          refuse("block-local constant " + v + " = " + val + " of an address-taken instance of " + outer.fname +
+                 " (at line " + std::to_string(line_of(text, pos)) + ") is not an integer value");
+        out += val2;
+      }
+    } else {
+      out += v;
+    }
+    i = j;
+  }
+  return substitute(out, outer.names, inst, outer.has_pack, outer.pack);
+}
+
 std::pair<std::string, std::vector<std::string>> device_tu(const std::string &text) {
   std::vector<DevPiece> pieces;
   for (const auto &u : flatten_linkage(text, [&]() {
@@ -3761,6 +4141,77 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
         concrete.push_back(substitute(a, dl.outer.names, inst, dl.outer.has_pack, dl.outer.pack));
       template_site(dl.name, join(concrete, ", "));
     }
+  }
+  // Address-taken template kernel instances: a kernel instance named as a value (not called, not launched with <<<>>>),
+  // for example selected by a ternary and handed to a helper. Each gets its wrapper (template_site), and the host table
+  // maps the host instance's address to that wrapper (the addr file, read by scripts/cuda-embed.rb).
+  g_addr_table.clear();
+  // a directive (a #define body too) is not code: its uses are seen where the macro is expanded
+  const std::map<long, long> addr_dirs = directive_ends(text);
+  // the text without directives (same length): the explicit calls of a template are read from code only
+  std::string code_text = text;
+  for (const auto &d : addr_dirs)
+    for (long k = d.first; k < d.second && k < (long)code_text.size(); k++)
+      if (code_text[k] != '\n') code_text[k] = ' ';
+  for (long i = 0; i < (long)text.size();) {
+    auto dit = addr_dirs.find(i);
+    if (dit != addr_dirs.end()) { i = dit->second; continue; }
+    long e = skip_literal(text, i);
+    if (e >= 0) { i = e; continue; }
+    bool starts = ident_c((unsigned char)text[i]) && !(i > 0 && ident_c((unsigned char)text[i - 1]));
+    if (!starts) { i++; continue; }
+    long j = i;
+    while (j < (long)text.size() && ident_c((unsigned char)text[j])) j++;
+    std::string name = text.substr(i, j - i);
+    long lt = j;
+    while (lt < (long)text.size() && (text[lt] == ' ' || text[lt] == '\t')) lt++;
+    KernelTemplate kt;
+    if (lt < (long)text.size() && text[lt] == '<' && kernel_template(name, kt)) {
+      long gt = matching_angle(text, lt);
+      if (gt < 0) refuse("address of template kernel " + name + ": unbalanced template arguments");
+      long k = gt + 1;
+      while (k < (long)text.size() && isspace((unsigned char)text[k])) k++;
+      bool call = k < (long)text.size() && (text[k] == '(' || text.compare(k, 3, "<<<") == 0);
+      if (!call) {
+        std::string raw = strip(text.substr(lt + 1, gt - lt - 1));
+        std::string dep;
+        if (!dependent_on_template(text, i, raw, dep)) {
+          // block-local constants (constexpr bool in the body) take their values, as the launch path does
+          std::string targs = resolve_local_constants(text, raw, i);
+          std::string w = template_site(name, targs);
+          g_addr_table.push_back({name + "<" + targs + ">", w});
+        } else {
+          // depends on an enclosing template's parameter: one instance per explicit call of that template (as the
+          // dependent launches do), each with its own wrapper and host address
+          OuterTemplate outer;
+          if (!enclosing_template(text, i, outer))
+            refuse("address of template kernel " + name + "<" + raw + "> depends on the template parameter " + dep +
+                   ", which is not a parameter of a top-level template function (at line " +
+                   std::to_string(line_of(text, i)) + ")");
+          std::vector<CxBranch> guards = enclosing_constexpr_branches(code_text, outer.open, i);
+          std::vector<std::vector<std::string>> insts;
+          if (outer.has_qual) insts = member_instances(outer, code_text);
+          else insts = template_instances(outer.fname, code_text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts));
+          if (insts.empty())
+            refuse("address of template kernel " + name + "<" + raw + "> depends on the template parameter " + dep +
+                   " of " + outer.fname + ": the unit has no explicit call of it with all its template arguments");
+          for (const auto &inst : insts) {
+            std::string why;
+            int taken = guards_taken(text, i, outer, inst, guards, why);
+            if (taken < 0)
+              refuse("address of template kernel " + name + "<" + raw + "> is taken in a branch of " + outer.fname +
+                     " (at line " + std::to_string(line_of(text, i)) + ") whose condition cannot be evaluated: " + why);
+            if (taken == 0) continue;
+            std::string cargs = instance_targs(text, i, raw, outer, inst);
+            std::string w = template_site(name, cargs);
+            g_addr_table.push_back({name + "<" + cargs + ">", w});
+          }
+        }
+      }
+      i = gt + 1;
+      continue;
+    }
+    i = j;
   }
   static const std::vector<std::string> dq(DEVICE_QUALIFIERS.begin(), DEVICE_QUALIFIERS.end());
   for (auto &pc : pieces) {
@@ -5461,6 +5912,15 @@ int main(int argc, char **argv) {
       if (kf) {
         for (const auto &k : dk.second) std::fprintf(kf, "%s\n", k.c_str());
         std::fclose(kf);
+      }
+      // the address table: one "host expression<TAB>wrapper" line per address-taken instance (empty if none)
+      std::string af = kernels_path + ".addr";
+      FILE *af_file = std::fopen(af.c_str(), "wb");
+      if (af_file) {
+        std::set<std::string> seen_host;
+        for (const auto &p : g_addr_table)
+          if (seen_host.insert(p.first).second) std::fprintf(af_file, "%s\t%s\n", p.first.c_str(), p.second.c_str());
+        std::fclose(af_file);
       }
     }
     result = dk.first;

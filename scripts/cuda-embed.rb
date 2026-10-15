@@ -16,9 +16,9 @@ def refuse(msg)
   exit(3)
 end
 
-cubin_path, ir_path, kernels_path = ARGV
+cubin_path, ir_path, kernels_path, addr_path = ARGV
 if kernels_path.nil?
-  $stderr.puts "usage: cuda-embed.rb FILE.cubin FILE.ir FILE.kernels"
+  $stderr.puts "usage: cuda-embed.rb FILE.cubin FILE.ir FILE.kernels [FILE.kernels.addr]"
   exit(2)
 end
 
@@ -32,13 +32,28 @@ read_bytes(ir_path).split("\n").each do |line|
 end
 
 kernels = read_bytes(kernels_path).split("\n").reject { |k| k.empty? }
+# Address-taken instances (addr file, from cuda-rewrite): "HOST-EXPRESSION<TAB>WRAPPER" lines. Their wrappers are kernels
+# too (the emitter lowers them), but the host has no name for a wrapper: the table entry is the instance's address.
+addr_lines = (addr_path.nil? || !File.exist?(addr_path)) ? [] : read_bytes(addr_path).split("\n").reject { |l| l.empty? }
+addr_wrappers = addr_lines.map { |l| l.split("\t", 2)[1] }
 entries = []
 kernels.each do |k|
   mangled = "_Z#{k.length}#{k}"
   hits = names.select { |n| n == k || n.start_with?(mangled) }
   refuse("kernel #{k}: no device function named #{k} (IR has #{names.join(', ')})") if hits.empty?
   refuse("kernel #{k}: #{hits.length} device functions match") if hits.length > 1
-  entries << [k, hits[0]]
+  entries << [k, hits[0]] unless addr_wrappers.include?(k)
+end
+
+# Address-taken instances (addr file, from cuda-rewrite): "HOST-EXPRESSION<TAB>WRAPPER" lines. The table maps the host
+# instance's address (&HOST-EXPRESSION) to the wrapper's entry, so a function pointer the program was handed finds it.
+addr_lines.each do |line|
+  host, wrapper = line.split("\t", 2)
+  refuse("address table line without a wrapper: #{line}") if wrapper.nil?
+  hits = names.select { |n| n == wrapper }
+  refuse("address of #{host}: no device function named #{wrapper}") if hits.empty?
+  refuse("address of #{host}: #{hits.length} device functions match") if hits.length > 1
+  entries << [host, hits[0]]
 end
 
 image = read_bytes(cubin_path).unpack("C*")
