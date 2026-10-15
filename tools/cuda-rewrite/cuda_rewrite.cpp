@@ -21,6 +21,9 @@
 #include <string>
 #include <vector>
 #include <map>
+
+// Separates the values of a deduced parameter pack in deduce_missing_targs's result (a value never contains it).
+static const char kPackSep = '\x1f';
 #include <set>
 
 namespace {
@@ -1598,6 +1601,46 @@ std::vector<std::string> type_tokens(const std::string &s) {
   return out;
 }
 
+// The type tokens of a parameter declaration, without its declarator name. The name is the last identifier when it sits
+// outside template brackets (`const T *x` drops x); an unnamed parameter keeps its last identifier, which may be a
+// pack inside brackets (`std::index_sequence<I...>` keeps I, so I can be deduced from it).
+std::vector<std::string> param_type_tokens(const std::string &part) {
+  std::vector<std::string> out;
+  std::vector<int> depth;
+  long i = 0;
+  long n = (long)part.size();
+  int angle = 0;
+  while (i < n) {
+    long e = skip_literal(part, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    int c = ch(part, i);
+    if (c == '<') {
+      angle += 1;
+      i += 1;
+    } else if (c == '>') {
+      angle -= 1;
+      i += 1;
+    } else if (c == '*' || c == '&') {
+      out.push_back(std::string(1, (char)c));
+      depth.push_back(angle);
+      i += 1;
+    } else if (ident_c(c) && !(c >= '0' && c <= '9')) {
+      long j = i;
+      while (j < n && ident_c(ch(part, j))) j += 1;
+      out.push_back(sl(part, i, j));
+      depth.push_back(angle);
+      i = j;
+    } else {
+      i += 1;
+    }
+  }
+  if (out.size() > 1 && out.back()[0] != '*' && out.back()[0] != '&' && depth.back() == 0) out.pop_back();
+  return out;
+}
+
 // Ruby type_before (line 1346): the declared type written before the identifier at i; empty when it is not a declaration.
 std::vector<std::string> type_before(const std::string &text, long i) {
   std::vector<std::string> toks;
@@ -1819,6 +1862,8 @@ bool match_type(const std::vector<std::string> &ptoks, const std::vector<std::st
   return true;
 }
 
+std::string make_index_sequence_count(const std::string &arg);
+
 // Ruby deduce_types (line 1436): the explicit arguments for the missing template parameters, from the launch arguments.
 struct KernelTemplateRef {
   std::string params;
@@ -1834,9 +1879,21 @@ std::vector<std::string> deduce_types(const std::string &nm, const std::string &
     refuse("launch of " + nm + ": " + std::to_string(args.size()) + " arguments for " + std::to_string(parts.size()) +
            " kernel parameters");
   std::map<std::string, std::string> found;
+  // The pack deduced from a std::index_sequence argument (kt.pack names it): its values, one per sequence element.
+  std::string pack_name = kt.has_pack && kt.pack >= 0 && (size_t)kt.pack < kt.names.size() ? kt.names[(size_t)kt.pack] : "";
+  std::vector<std::string> pack_values;
   for (size_t idx = 0; idx < parts.size(); idx++) {
-    std::vector<std::string> ptoks = type_tokens(parts[idx]);
-    if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
+    std::vector<std::string> ptoks = param_type_tokens(parts[idx]);
+    if (!pack_name.empty() && std::find(ptoks.begin(), ptoks.end(), "index_sequence") != ptoks.end() &&
+        std::find(ptoks.begin(), ptoks.end(), pack_name) != ptoks.end()) {
+      std::string count = make_index_sequence_count(args[idx]);
+      if (!count.empty()) {
+        if (found.count(pack_name)) refuse("template launch of " + nm + "<" + ta + ">: " + pack_name + " is deduced twice");
+        for (long k = 0; k < std::stol(count); k++) pack_values.push_back(std::to_string(k));
+        found[pack_name] = "";  // present; its values are pack_values
+        continue;
+      }
+    }
     for (const auto &p : missing) {
       if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
       // A cast argument `(const float *)x->data` has the type of the cast, as at a call site (caller_arg_type).
@@ -1854,6 +1911,10 @@ std::vector<std::string> deduce_types(const std::string &nm, const std::string &
   std::vector<std::string> out;
   for (const auto &p : missing) {
     if (!found.count(p)) refuse("template launch of " + nm + "<" + ta + ">: no argument gives " + p + ", so it cannot be deduced");
+    if (p == pack_name) {
+      for (const auto &v : pack_values) out.push_back(v);
+      continue;
+    }
     out.push_back(found[p]);
   }
   return out;
@@ -2126,6 +2187,24 @@ bool template_head_of(const std::string &text, const std::string &name, Template
   return false;
 }
 
+// The element count N of a `std::make_index_sequence<N>{}` argument (N a literal), or "" for any other argument. A count
+// that names something else (an enclosing template parameter) is refused: its instances are not known here.
+std::string make_index_sequence_count(const std::string &arg) {
+  std::string a = strip(arg);
+  long at = str_index(a, "make_index_sequence<", 0);
+  if (at < 0) return "";
+  long open = at + (long)std::string("make_index_sequence").size();
+  long close = matching_angle(a, open);
+  if (close < 0) return "";
+  std::string count = strip(sl(a, open + 1, close));
+  bool digits = !count.empty();
+  for (char c : count)
+    if (c < '0' || c > '9') digits = false;
+  if (!digits)
+    refuse("std::make_index_sequence<" + count + ">: the count is not a literal, so the pack's length is not known here");
+  return count;
+}
+
 // Ruby deduce_call_targs (line 889): the explicit template arguments of a call, deduced from the argument types.
 bool deduce_call_targs(const std::string &text, const std::string &name, long pos,
                        const std::vector<std::string> &args, std::vector<std::string> &out) {
@@ -2134,10 +2213,25 @@ bool deduce_call_targs(const std::string &text, const std::string &name, long po
   // A call with another number of arguments is an overload (set_rows_cuda's plain one), not this template's call.
   if (args.size() != head.parts.size()) return false;
   std::map<std::string, std::string> found;
+  // A parameter pack deduced from a std::index_sequence argument: its values, one per element of the sequence.
+  std::vector<std::string> pack_values;
+  std::string pack_name = head.pack >= 0 ? head.names[(size_t)head.pack] : std::string();
   for (size_t idx = 0; idx < head.parts.size(); idx++) {
     if (idx >= args.size()) break;
-    std::vector<std::string> ptoks = type_tokens(head.parts[idx]);
-    if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
+    std::vector<std::string> ptoks = param_type_tokens(head.parts[idx]);
+    if (!pack_name.empty() && std::find(ptoks.begin(), ptoks.end(), "index_sequence") != ptoks.end() &&
+        std::find(ptoks.begin(), ptoks.end(), pack_name) != ptoks.end()) {
+      std::string count = make_index_sequence_count(args[idx]);
+      if (!count.empty()) {
+        if (!pack_values.empty() || found.count(pack_name))
+          refuse("call of " + name + ": " + pack_name + " is deduced twice (at line " +
+                 std::to_string(line_of(text, pos)) + ")");
+        long n = std::stol(count);
+        for (long k = 0; k < n; k++) pack_values.push_back(std::to_string(k));
+        found[pack_name] = "";  // present; its values are pack_values
+        continue;
+      }
+    }
     for (const auto &p : head.names) {
       if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
       std::vector<std::string> at = caller_arg_type(text, pos, args[idx], name);
@@ -2161,6 +2255,10 @@ bool deduce_call_targs(const std::string &text, const std::string &name, long po
                ", so it cannot be deduced");
       found[p] = dv;
     }
+    if (p == pack_name) {
+      for (const auto &v : pack_values) out.push_back(v);
+      continue;
+    }
     out.push_back(found[p]);
   }
   return true;
@@ -2173,9 +2271,21 @@ std::map<std::string, std::string> deduce_missing_targs(const std::string &text,
   TemplateHead head;
   if (!template_head_of(text, name, head)) refuse("call of " + name + ": its template is not in the unit");
   std::map<std::string, std::string> found;
+  std::string pack_name = head.pack >= 0 ? head.names[(size_t)head.pack] : std::string();
   for (size_t idx = 0; idx < head.parts.size() && idx < args.size(); idx++) {
-    std::vector<std::string> ptoks = type_tokens(head.parts[idx]);
-    if (!ptoks.empty() && ptoks.back()[0] != '*' && ptoks.back()[0] != '&' && ptoks.size() > 1) ptoks.pop_back();
+    std::vector<std::string> ptoks = param_type_tokens(head.parts[idx]);
+    // A pack deduced from a std::index_sequence argument: its values joined with kPackSep (the caller splits them).
+    if (!pack_name.empty() && std::find(ptoks.begin(), ptoks.end(), "index_sequence") != ptoks.end() &&
+        std::find(ptoks.begin(), ptoks.end(), pack_name) != ptoks.end() &&
+        std::find(missing.begin(), missing.end(), pack_name) != missing.end()) {
+      std::string count = make_index_sequence_count(args[idx]);
+      if (!count.empty()) {
+        std::string joined;
+        for (long k = 0; k < std::stol(count); k++) joined += (k ? std::string(1, kPackSep) : std::string()) + std::to_string(k);
+        found[pack_name] = joined;
+        continue;
+      }
+    }
     for (const auto &p : missing) {
       if (std::find(ptoks.begin(), ptoks.end(), p) == ptoks.end()) continue;
       std::vector<std::string> at = caller_arg_type(text, pos, args[idx], name);
@@ -2374,7 +2484,16 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
         size_t first_missing = after_pack > 0 ? head.names.size() - after_pack : targs.size();
         std::vector<std::string> missing(head.names.begin() + (long)first_missing, head.names.end());
         std::map<std::string, std::string> got = deduce_missing_targs(text, name, cs.second, cargs, missing);
-        for (const auto &p : missing) targs.push_back(got[p]);
+        for (const auto &p : missing) {
+          // A deduced pack comes back as its values, one per element (deduce_missing_targs).
+          std::string v = got[p];
+          size_t from = 0;
+          for (size_t cut = v.find(kPackSep); cut != std::string::npos; cut = v.find(kPackSep, from)) {
+            targs.push_back(v.substr(from, cut - from));
+            from = cut + 1;
+          }
+          targs.push_back(v.substr(from));
+        }
       }
     }
     sites.push_back({targs, cs.second});
@@ -2516,6 +2635,8 @@ struct DependentLaunch {
   std::string name, targs, dname;
   OuterTemplate outer;
   std::vector<std::vector<std::string>> insts;
+  // The enclosing template is never called in the unit, so there are no instances (see dependent_launches).
+  bool uninstantiated = false;
   // Ruby: d[:wrapper] (instance key => wrapper name), filled by dependent_decls
   std::vector<std::pair<std::vector<std::string>, std::string>> wrapper;
 };
@@ -2553,10 +2674,25 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
     std::vector<std::vector<std::string>> insts;
     if (outer.has_qual) insts = member_instances(outer, text);
     else insts = template_instances(outer.fname, text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts));
-    if (insts.empty())
+    // A free template that the unit never calls (the explicit calls live in other units, as launch_fattn's do for
+    // lightning-indexer.cu) is not instantiated here: nvcc would not compile its body, so the launch stays a dependent
+    // call of the kernel (__nfcxx_cuda_launch with the kernel's template arguments), which the front end does not
+    // instantiate. A template that is called (with dependent or deduced arguments) still needs its instances.
+    bool uninstantiated = insts.empty() && !outer.has_qual && plain_call_sites(text, outer.fname).empty();
+    if (insts.empty() && !uninstantiated)
       refuse("template launch of " + tl.name + "<" + tl.targs + "> depends on the template parameter " + dep + " of " +
              outer.fname + ": the unit has no explicit call of it with all its template arguments, so its instances are "
              "not known");
+    if (uninstantiated) {
+      DependentLaunch d;
+      d.name = tl.name;
+      d.targs = tl.targs;
+      d.outer = outer;
+      d.uninstantiated = true;
+      d.dname = "__nfcxx_disp_" + sanitize(tl.name) + "_" + std::to_string(at);
+      out[line_col(text, tl.pos)] = d;
+      continue;
+    }
     for (const auto &inst : insts) {
       bool ok = outer.has_pack ? (long)inst.size() >= (long)outer.names.size() - 1 : inst.size() == outer.names.size();
       if (!ok)
@@ -2794,7 +2930,10 @@ std::string rewrite(const std::string &text, const std::string &orig) {
       std::string kernel = name;
       if (has_targs) {
         auto dit2 = dl.find(line_col(text, i));
-        if (dit2 != dl.end()) {
+        if (dit2 != dl.end() && dit2->second.uninstantiated) {
+          // Never instantiated in this unit: the kernel stays the dependent template-id (see dependent_launches).
+          kernel = name + "<" + targs + ">";
+        } else if (dit2 != dl.end()) {
           // The pack keeps its ... (disp<Ns...> expands it inside the template body).
           const DependentLaunch &d = dit2->second;
           std::vector<std::string> tn;
