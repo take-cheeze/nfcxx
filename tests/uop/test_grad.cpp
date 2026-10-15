@@ -433,6 +433,158 @@ static void hir_level() {
   }
 }
 
+// ---- (a2) the forward operators of hir (Gemm Gather Erf Conv MaxPool AveragePool BatchNormalization InstanceNormalization
+// LayerNormalization): finite differences in float64 of hir::gradients_via_onnxsim, lowered and evaluated by the interpreter.
+// onnxsim has a rule for every one of them (docs/notes/uop-autodiff.md). The one configuration without a rule, Gather with
+// rank-2 indices, is a case with an expected refusal: the message must name it, and a gradient there would be a FAIL.
+
+// build(g, xs) returns the output of the operator under test; the loss is sum(output * weights) with fixed unequal weights
+using HirFn = std::function<int(hir::Graph&, const std::vector<int>&)>;
+
+// refusal: the fragment of the Error that gradients_via_onnxsim must throw (an operator without a rule); without it, the
+// gradient must be computed and equal the finite differences
+static void hir_fd_case(const std::string& name, const std::vector<Shape>& shapes, const HirFn& build, unsigned seed = 1, const char* refusal = nullptr) {
+  using hir::Attribute;
+  hir::Graph g;
+  std::vector<int> xs;
+  std::vector<std::pair<std::string, Array>> named;
+  for (size_t k = 0; k < shapes.size(); k++) {
+    std::string nm = "x" + std::to_string(k);
+    xs.push_back(g.add_input(nm, f64, shapes[k]));
+    named.emplace_back(nm, arr(f64, shapes[k], rand_vec(numel(shapes[k]), seed * 7 + static_cast<unsigned>(k))));
+  }
+  const std::map<std::string, Array> feeds(named.begin(), named.end());
+  int y = build(g, xs);
+  const Shape ys = g.value(y).shape;
+  V w;
+  for (int64_t k = 0; k < numel(ys); k++) w.push_back(0.6 + 0.37 * std::sin(1.7 * static_cast<double>(k) + 0.3));
+  int wv = g.add_initializer("", arr(f64, ys, w));
+  int loss = g.add_node("ReduceSum", {g.add_node("Mul", {y, wv})}, {Attribute::Int("keepdims", 0)});
+  std::vector<int> ds;
+  try {
+    ds = hir::gradients_via_onnxsim(g, loss, xs);
+  } catch (const Error& e) {
+    checks++;
+    if (refusal && std::string(e.what()).find(refusal) != std::string::npos) return;
+    failed++;
+    std::printf("FAIL hir FD case %s: gradients_via_onnxsim refused: %s\n", name.c_str(), e.what());
+    return;
+  }
+  if (refusal) {
+    checks++; failed++;
+    std::printf("FAIL hir FD case %s: expected the refusal \"%s\"\n", name.c_str(), refusal);
+    return;
+  }
+  ut::Session u;
+  hir::Lowerer low(g, u);
+  bool ok = true;
+  std::vector<V> an;
+  for (size_t k = 0; k < xs.size(); k++) {
+    ok = ok && g.value(ds[k]).shape == shapes[k] && g.value(ds[k]).dtype == f64;
+    if (!ok) break;
+    an.push_back(vals(u.eval(low.get(ds[k]), feeds)));
+  }
+  const double h = 1e-6;
+  double worst = 0;
+  for (size_t k = 0; ok && k < xs.size(); k++) {
+    const std::string nm = "x" + std::to_string(k);
+    const Array& base = feeds.find(nm)->second;
+    for (size_t j = 0; j < base.data.size(); j++) {
+      std::map<std::string, Array> f = feeds;
+      f.find(nm)->second.data[j] = Scalar::from_double(f64, base.data[j].f + h);
+      double up = scalar_of(u.eval(low.get(loss), f));
+      f.find(nm)->second.data[j] = Scalar::from_double(f64, base.data[j].f - h);
+      double dn = scalar_of(u.eval(low.get(loss), f));
+      double num = (up - dn) / (2 * h), ana = an[k].at(j);
+      worst = std::max(worst, std::fabs(ana - num) / (1 + std::fabs(num)));
+      fd_elements++;
+    }
+  }
+  max_fd_err = std::max(max_fd_err, worst);
+  fd_cases++;
+  checks++;
+  if (!ok || worst > 1e-6) { failed++; std::printf("FAIL hir FD case %s: max relative error %g\n", name.c_str(), worst); }
+}
+
+static void hir_forward_fd() {
+  using hir::Attribute;
+  const Shape S23{2, 3};
+  // Gemm: alpha, beta, transA, transB; C broadcast (a row, a column, none)
+  hir_fd_case("gemm-abc", {S23, Shape{3, 4}, Shape{4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Gemm", {x[0], x[1], x[2]}, {Attribute::Float("alpha", 1.3), Attribute::Float("beta", 0.7)});
+  });
+  hir_fd_case("gemm-trans-col-c", {Shape{3, 2}, Shape{4, 3}, Shape{2, 1}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Gemm", {x[0], x[1], x[2]}, {Attribute::Float("alpha", 0.5), Attribute::Float("beta", -1.2), Attribute::Int("transA", 1), Attribute::Int("transB", 1)});
+  });
+  hir_fd_case("gemm-no-c", {S23, Shape{3, 2}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Gemm", {x[0], x[1]}, {Attribute::Float("alpha", 2.0)});
+  });
+  // Gather: the indices are an initializer (not differentiated); the data is wrt. Negative indices count from the end.
+  // onnxsim's Gather rule takes a scalar or a rank-1 index vector; rank-2 indices are refused (gather-rank2-indices-refused).
+  hir_fd_case("gather-axis0", {Shape{4, 3}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Gather", {x[0], g.add_initializer("", arr(i64, {3}, V{2, 0, 2}))});
+  });
+  hir_fd_case("gather-axis1-negative", {Shape{2, 4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Gather", {x[0], g.add_initializer("", arr(i64, {2}, V{-1, 2}))}, {Attribute::Int("axis", 1)});
+  });
+  hir_fd_case("gather-rank2-indices-refused", {Shape{2, 4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Gather", {x[0], g.add_initializer("", arr(i64, {2, 2}, V{-1, 2, 0, -3}))}, {Attribute::Int("axis", 1)});
+  }, 1, "Gather with rank-2 indices is not differentiated here");
+  hir_fd_case("gather-scalar-index", {Shape{2, 4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Gather", {x[0], g.add_initializer("", arr(i64, {}, V{-3}))}, {Attribute::Int("axis", 1)});
+  });
+  // Erf, and GELU written with it
+  hir_fd_case("erf", {S23}, [](hir::Graph& g, const std::vector<int>& x) { return g.add_node("Erf", {x[0]}); });
+  hir_fd_case("gelu-erf", {S23}, [](hir::Graph& g, const std::vector<int>& x) {
+    int inner = g.add_node("Mul", {x[0], g.add_initializer("", arr(f64, {}, V{1 / std::sqrt(2.0)}))});
+    int e = g.add_node("Add", {g.add_node("Erf", {inner}), g.add_initializer("", arr(f64, {}, V{1.0}))});
+    return g.add_node("Mul", {g.add_node("Mul", {x[0], e}), g.add_initializer("", arr(f64, {}, V{0.5}))});
+  });
+  // Conv: 2-D with groups, strides, dilations, asymmetric pads and a bias; 1-D without a bias; 3-D
+  hir_fd_case("conv-2d-groups", {Shape{2, 4, 5, 6}, Shape{6, 2, 3, 2}, Shape{6}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Conv", {x[0], x[1], x[2]}, {Attribute::Ints("strides", {2, 1}), Attribute::Ints("dilations", {1, 2}),
+                                                   Attribute::Ints("pads", {1, 0, 2, 1}), Attribute::Int("group", 2)});
+  });
+  hir_fd_case("conv-1d", {Shape{1, 2, 7}, Shape{2, 2, 3}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Conv", {x[0], x[1]}, {Attribute::Ints("strides", {2}), Attribute::Ints("pads", {1, 1})});
+  });
+  hir_fd_case("conv-3d", {Shape{1, 3, 4, 3, 2}, Shape{4, 3, 2, 2, 1}, Shape{4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("Conv", {x[0], x[1], x[2]}, {Attribute::Ints("strides", {1, 2, 1}), Attribute::Ints("pads", {0, 1, 0, 1, 0, 1})});
+  });
+  // MaxPool (padding is -inf: the window maximum is an input value), AveragePool with and without counting the padding
+  hir_fd_case("maxpool-2x2", {Shape{1, 2, 4, 4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("MaxPool", {x[0]}, {Attribute::Ints("kernel_shape", {2, 2}), Attribute::Ints("strides", {2, 2})});
+  });
+  hir_fd_case("maxpool-pad-stride", {Shape{1, 2, 5, 4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("MaxPool", {x[0]}, {Attribute::Ints("kernel_shape", {3, 2}), Attribute::Ints("strides", {2, 1}), Attribute::Ints("pads", {1, 1, 1, 0})});
+  });
+  hir_fd_case("avgpool-pad-not-counted", {Shape{1, 2, 5, 5}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("AveragePool", {x[0]}, {Attribute::Ints("kernel_shape", {3, 3}), Attribute::Ints("strides", {2, 2}), Attribute::Ints("pads", {1, 1, 1, 1}), Attribute::Int("count_include_pad", 0)});
+  });
+  hir_fd_case("avgpool-pad-counted", {Shape{1, 2, 5, 5}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("AveragePool", {x[0]}, {Attribute::Ints("kernel_shape", {3, 3}), Attribute::Ints("strides", {2, 2}), Attribute::Ints("pads", {1, 1, 1, 1}), Attribute::Int("count_include_pad", 1)});
+  });
+  // BatchNormalization (inference): the scale, bias, mean and variance are inputs too; the variance is made positive
+  hir_fd_case("batchnorm-all-inputs", {Shape{2, 3, 2, 2}, Shape{3}, Shape{3}, Shape{3}, Shape{3}}, [](hir::Graph& g, const std::vector<int>& x) {
+    int var = g.add_node("Add", {g.add_node("Mul", {x[4], x[4]}), g.add_initializer("", arr(f64, {}, V{0.5}))});
+    return g.add_node("BatchNormalization", {x[0], x[1], x[2], x[3], var}, {Attribute::Float("epsilon", 1e-3)});
+  });
+  // InstanceNormalization: over the spatial axes of each (n, c), with 1 and 2 spatial axes
+  hir_fd_case("instancenorm-1d", {Shape{2, 3, 5}, Shape{3}, Shape{3}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("InstanceNormalization", {x[0], x[1], x[2]});
+  });
+  hir_fd_case("instancenorm-2d", {Shape{2, 3, 2, 3}, Shape{3}, Shape{3}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("InstanceNormalization", {x[0], x[1], x[2]}, {Attribute::Float("epsilon", 1e-4)});
+  });
+  // LayerNormalization: the default axis (the last) with a bias, and an axis that is not the last
+  hir_fd_case("layernorm-last", {Shape{2, 3, 4}, Shape{4}, Shape{4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("LayerNormalization", {x[0], x[1], x[2]});
+  });
+  hir_fd_case("layernorm-axis1", {Shape{2, 3, 4}, Shape{3, 4}, Shape{3, 4}}, [](hir::Graph& g, const std::vector<int>& x) {
+    return g.add_node("LayerNormalization", {x[0], x[1], x[2]}, {Attribute::Int("axis", 1)});
+  });
+}
+
 // ---- (d) errors that need no backend ----
 
 static void errors() {
@@ -631,6 +783,7 @@ int main(int argc, char** argv) {
   unsupported();
   exact();
   hir_level();
+  hir_forward_fd();
   c_vs_interpreter(f64);
   c_vs_interpreter(f32);
   models(argc > 1 ? argv[1] : "");
