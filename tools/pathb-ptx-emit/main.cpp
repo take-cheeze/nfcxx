@@ -9,6 +9,8 @@
 #include <string>
 
 #include "ir.hpp"
+#include "lower_types.hpp"
+#include "module_decls.hpp"
 
 namespace {
 
@@ -31,6 +33,7 @@ int run_eval_cases(const std::string &src);
 
 int main(int argc, char **argv) {
   bool dump = false;
+  bool decls = false;
   bool eval = false;
   std::string file = "-";
   bool have_file = false;
@@ -38,6 +41,8 @@ int main(int argc, char **argv) {
     std::string a = argv[i];
     if (a == "--dump-forms") {
       dump = true;
+    } else if (a == "--decls") {
+      decls = true;
     } else if (a == "--eval-cases" && i + 1 < argc) {
       eval = true;
       file = argv[++i];
@@ -59,6 +64,19 @@ int main(int argc, char **argv) {
   }
   if (eval) {
     return run_eval_cases(src);
+  }
+  if (decls) {
+    try {
+      std::string out = emit_module_decls(src, false, false);
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } catch (const Refused &e) {
+      std::fprintf(stderr, "refused: %s\n", e.what());
+      return 3;
+    } catch (const BadIR &e) {
+      std::fprintf(stderr, "error: %s\n", e.what());
+      return 1;
+    }
+    return 0;
   }
   if (!dump) {
     std::fprintf(stderr, "refused: the C++ emitter is phase 1 (reader only); the Ruby scripts/pathb-ptx-emit.rb emits\n");

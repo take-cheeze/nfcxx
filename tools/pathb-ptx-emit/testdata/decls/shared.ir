@@ -1,0 +1,3 @@
+(ir-module "t.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "_ZZ3fooE1s" (array 64 float) 256 16 (static) (init (zero 0 256)))
+(global "_ZZ3barE1t" (array 8 int) 32 4 (weak) (init (zero 0 32)))
