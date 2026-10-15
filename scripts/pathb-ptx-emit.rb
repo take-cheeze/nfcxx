@@ -1064,7 +1064,9 @@ class Fn
   # not fit the target. The test is ordered (NaN makes both comparisons false), so NaN traps too. Each bound is exact
   # in the source type: the lower one is strict (lo - 1) when that is a float of the source type, else lo itself.
   def float_to_int(dest, ty, a, aty)
-    raise Refused, "cf2i to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    # 1- and 2-byte targets (signed_char, unsigned_short) convert in 32 bits and are narrowed by canon, as the other
+    # operations on them are; the trap bounds use the target's own width.
+    raise Refused, "cf2i to #{ty[0]} of #{ty[1]} bytes" unless ty[0] == "int" && !ty[3] && [1, 2, 4, 8].include?(ty[1])
     raise BadIR, "cf2i of a #{aty[0]}" unless aty[0] == "float"
     bits = ty[1] * 8
     fsz = aty[1]
@@ -1086,6 +1088,7 @@ class Fn
     emit("and.pred #{p1}, #{p1}, #{p2};")
     emit("@!#{p1} trap;")
     emit("cvt.rzi.#{ptx_type(ty)}.#{ft} #{dest}, #{a};")
+    canon(dest, ty)
   end
 
   # ---- statements
