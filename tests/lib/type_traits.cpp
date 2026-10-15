@@ -78,4 +78,3 @@ int main() {
   fails += std::bool_constant<false>::value;
   return fails;
 }
-// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only

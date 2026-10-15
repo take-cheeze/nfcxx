@@ -1,4 +1,4 @@
-// X86-ONLY: __float128 is not a GCC type on aarch64, and the qbe helpers (be/nfcxx_ldrt.c) are x86-64 only
+// X86-ONLY: __float128 is not a GCC type on aarch64; qbe aborts in spill.c on aarch64 Linux, and its helpers in be/nfcxx_ldrt.c are x86-64 only
 /* EXPECT: 0
    __float128 and long double passed and returned by value: between functions of this program (the calls are made by
    cproc's own code, so the convention is the one cproc uses: the aggregate of two integer eightbytes), through a function
