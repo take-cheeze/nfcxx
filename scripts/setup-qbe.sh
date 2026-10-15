@@ -5,7 +5,7 @@
 #
 # 3rd/qbe is take-cheeze/qbe, a daily mirror of https://c9x.me/git/qbe.git (see that
 # repo's sync workflow). 3rd/cproc is take-cheeze/cproc, a fork of michaelforney/cproc: its branch
-# nfcxx-qbe-darwin (the pin, eee66b8) is the pinned upstream commit a44a644 plus nfcxx's cproc patches as commits
+# nfcxx-qbe-darwin (the pin, df998c0) is the pinned upstream commit a44a644 plus nfcxx's cproc patches as commits
 # (unprototyped-fnptr, dollar-ident, aligned-attr, darwin-ldouble, apple-valist, apple-driver, apple-predefines,
 # atomic-builtins), which this script applied before, and the __builtin_strstr builtin (libc++'s <cstring>). Earlier nfcxx patches (empty-struct, vaarg-aggregate, empty-copy,
 # array-qual) are commits of a44a644 itself; see
