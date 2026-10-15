@@ -746,6 +746,7 @@ struct OuterTemplate {
   bool has_pack = false;
   long pack = 0;
   long parts = -1;  // the number of function parameters of this overload (-1: unknown)
+  long min_parts = -1;  // the parameters without a default value: the fewest arguments a call passes
 };
 
 std::vector<std::vector<std::string>> member_instances(const OuterTemplate &outer, const std::string &text) {
@@ -1080,7 +1081,14 @@ bool enclosing_template(const std::string &text, long pos, OuterTemplate &out) {
   out.pack = packs.empty() ? 0 : packs.front();
   long hp = str_index(header, "(", 0);
   long he = hp < 0 ? -1 : matching_paren(header, hp);
-  if (he > hp) out.parts = (long)split_top(sl(header, hp + 1, he)).size();
+  if (he > hp) {
+    std::vector<std::string> params = split_top(sl(header, hp + 1, he));
+    out.parts = (long)params.size();
+    // A parameter with a default value has a top-level '=' after its name (the defaults here are literals and names).
+    out.min_parts = 0;
+    for (const auto &p : params)
+      if (str_index(p, "=", 0) < 0) out.min_parts += 1;
+  }
   return true;
 }
 
@@ -2253,13 +2261,22 @@ std::map<std::string, std::vector<std::vector<std::string>>> g_instances;
 // ("name#N/P"): two overloads of one name are different functions, so a call into the other one is not a cycle
 // (set-rows has a three-parameter primary and a two-parameter overload of set_rows_cuda that calls it).
 // A key without "#" is the name alone (the top-level call, whose overload is not known here).
-std::string overload_key(const std::string &name, long ntparams, long nparams) {
-  return name + "#" + std::to_string(ntparams) + "/" + std::to_string(nparams);
+// The key also carries the fewest arguments a call may pass ("name#N/P/M"): a parameter with a default value may be
+// left out (launch_fattn's async_kv_preload), so a call with fewer arguments than P is still a call of this overload.
+std::string overload_key(const std::string &name, long ntparams, long nparams, long nmin = -1) {
+  if (nmin < 0) nmin = nparams;
+  return name + "#" + std::to_string(ntparams) + "/" + std::to_string(nparams) + "/" + std::to_string(nmin);
 }
 std::string key_name(const std::string &key) { return key.substr(0, key.find('#')); }
-long key_parts(const std::string &key) {
-  size_t slash = key.rfind('/');
-  return slash == std::string::npos || key.find('#') == std::string::npos ? -1 : std::stol(key.substr(slash + 1));
+long key_parts(const std::string &key) {  // P: the number of function parameters
+  size_t last = key.rfind('/');
+  if (last == std::string::npos || key.find('#') == std::string::npos) return -1;
+  size_t prev = key.rfind('/', last - 1);
+  return prev == std::string::npos ? -1 : std::stol(key.substr(prev + 1, last - prev - 1));
+}
+long key_min(const std::string &key) {  // M: the fewest arguments a call of this overload passes
+  size_t last = key.rfind('/');
+  return last == std::string::npos || key.find('#') == std::string::npos ? -1 : std::stol(key.substr(last + 1));
 }
 
 std::vector<std::vector<std::string>> template_instances(const std::string &name, const std::string &text,
@@ -2286,7 +2303,11 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   bool have_head = template_head_of(text, name, head);
   for (const auto &cs : call_sites(text, name)) {
     std::vector<std::string> targs = split_top(cs.first);
+    // A block-local constant of the call's body (cols_per_block in `launch_fattn<DV, cols_per_block/ncols2, ncols2>`) is
+    // its value at this call, so the instance argument does not name it.
+    for (auto &t : targs) t = resolve_local_constants(text, t, cs.second);
     if (parts >= 0) {  // a call of another overload of the name has another number of function parameters
+      const long fewest = key_min(key) < 0 ? parts : key_min(key);
       long k = cs.second + (long)name.size();
       while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
       long close = matching_angle(text, k);
@@ -2294,7 +2315,11 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
       while (open >= 0 && open < (long)text.size() && white_c(ch(text, open))) open += 1;
       if (open >= 0 && open < (long)text.size() && ch(text, open) == '(') {
         long cend = matching_paren(text, open);
-        if (cend > open && (long)split_top(sl(text, open + 1, cend)).size() != parts) continue;
+        // Between the required and all parameters: the defaulted ones may be left out.
+        if (cend > open) {
+          const long argc = (long)split_top(sl(text, open + 1, cend)).size();
+          if (argc > parts || argc < fewest) continue;
+        }
       }
     }
     // A parameter pack is greedy: the explicit arguments after it all go to the pack, so the names after the pack are not
@@ -2422,7 +2447,7 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
           if (std::find(outer.names.begin(), outer.names.end(), tk) != outer.names.end()) mentions = true;
     }
     if (has_outer && mentions) {
-      const std::string outer_key = overload_key(outer.fname, (long)outer.names.size(), outer.parts);
+      const std::string outer_key = overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts);
       for (const auto &inst : template_instances(outer.fname, text, next_stack, outer_key)) {
         // A pack expands to several arguments: the list is split again after the substitution.
         std::vector<std::string> subbed;
@@ -2479,6 +2504,24 @@ struct DependentLaunch {
   // Ruby: d[:wrapper] (instance key => wrapper name), filled by dependent_decls
   std::vector<std::pair<std::vector<std::string>, std::string>> wrapper;
 };
+// The names of the template parameters of every template header in the text (`template <...>`: the last identifier of
+// each parameter, without its default). An instance argument that still names one of them was not substituted.
+std::set<std::string> template_param_names(const std::string &text) {
+  std::set<std::string> names;
+  for (long p = str_index(text, "template", 0); p >= 0; p = str_index(text, "template", p + 1)) {
+    long k = p + 8;
+    while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
+    if (k >= (long)text.size() || ch(text, k) != '<') continue;
+    long close = matching_angle(text, k);
+    if (close < 0) continue;
+    for (const auto &part : split_top(sl(text, k + 1, close))) {
+      std::vector<std::string> toks = tokens_of(ruby_split_eq0(part));
+      if (!toks.empty() && !toks.back().empty() && ident_c((unsigned char)toks.back()[0])) names.insert(toks.back());
+    }
+  }
+  return names;
+}
+
 std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::string &text) {
   std::map<std::pair<long, long>, DependentLaunch> out;
   long idx = 0;
@@ -2494,7 +2537,7 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
              std::to_string(line_of(text, tl.pos)) + ")");
     std::vector<std::vector<std::string>> insts;
     if (outer.has_qual) insts = member_instances(outer, text);
-    else insts = template_instances(outer.fname, text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts));
+    else insts = template_instances(outer.fname, text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts));
     if (insts.empty())
       refuse("template launch of " + tl.name + "<" + tl.targs + "> depends on the template parameter " + dep + " of " +
              outer.fname + ": the unit has no explicit call of it with all its template arguments, so its instances are "
@@ -2505,6 +2548,15 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
         refuse("template launch of " + tl.name + "<" + tl.targs + ">: a call of " + outer.fname +
                " does not give all its template arguments explicitly");
     }
+    // An instance argument that still names a template parameter (cols_per_block of an enclosing switch, when the
+    // call is nested in it) is not substituted: refuse it by name rather than emit a wrapper that does not compile.
+    const std::set<std::string> tparams = template_param_names(text);
+    for (const auto &inst : insts)
+      for (const auto &arg : inst)
+        for (const auto &tk : tokens_of(arg))
+          if (tparams.count(tk))
+            refuse("template launch of " + tl.name + "<" + tl.targs + ">: instance argument '" + arg + "' of " + outer.fname +
+                   " names the template parameter " + tk + ", which is not substituted");
     outer.line = line_col(text, outer.st).first;
     DependentLaunch d;
     d.name = tl.name;
@@ -4228,7 +4280,7 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
           std::vector<CxBranch> guards = enclosing_constexpr_branches(code_text, outer.open, i);
           std::vector<std::vector<std::string>> insts;
           if (outer.has_qual) insts = member_instances(outer, code_text);
-          else insts = template_instances(outer.fname, code_text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts));
+          else insts = template_instances(outer.fname, code_text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts));
           if (insts.empty())
             refuse("address of template kernel " + name + "<" + raw + "> depends on the template parameter " + dep +
                    " of " + outer.fname + ": the unit has no explicit call of it with all its template arguments");
