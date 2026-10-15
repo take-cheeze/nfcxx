@@ -10,3 +10,4 @@ int main() {
   __atomic_thread_fence(__ATOMIC_RELEASE);
   return g_val == 6 ? 0 : 1;
 }
+// X86-ONLY-qbe: the qbe-prep fence stub is an x86-64 mfence

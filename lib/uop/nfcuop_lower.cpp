@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -158,6 +159,11 @@ ut::Tensor Lowerer::get(int id) {
 
 ut::Tensor Lowerer::lower_one(int id) {
   const Value& v = g_.value(id);
+  if (!v.syms.empty()) {
+    std::string syms;
+    for (const std::string& x : v.syms) if (!x.empty()) syms += (syms.empty() ? "" : ", ") + x;
+    throw Error("hir: lowering " + v.name + " needs its symbolic dimensions bound (" + syms + "): bind the graph first (Graph::bind, or hir::Evaluator)");
+  }
   ut::Tensor out;
   if (const Array* a = g_.initializer(id)) {
     bool uniform = !a->data.empty();
@@ -214,11 +220,12 @@ ut::Tensor Lowerer::lower_one(int id) {
     else if (op == "Transpose") out = n.has_attr("perm") ? arg(0).transpose(n.attr("perm")->ints) : arg(0).transpose();
     else if (op == "Reshape" || op == "Squeeze" || op == "Unsqueeze") out = arg(0).reshape(v.shape);
     else if (op == "Expand") out = arg(0).broadcast_to(v.shape);
-    else if (op == "ReduceSum" || op == "ReduceMean" || op == "ReduceMax" || op == "ReduceMin") {
+    else if (op == "ReduceSum" || op == "ReduceMean" || op == "ReduceMax" || op == "ReduceMin" || op == "ReduceProd") {
       ut::Axes axes = has(1) ? ints(1) : ut::Axes{};   // none: all of them
       bool keep = n.attr_int("keepdims", 1) != 0;
       ut::Tensor x = arg(0);
-      out = op == "ReduceSum" ? x.sum(axes, keep) : op == "ReduceMean" ? x.mean(axes, keep) : op == "ReduceMax" ? x.max(axes, keep) : x.min(axes, keep);
+      out = op == "ReduceSum" ? x.sum(axes, keep) : op == "ReduceMean" ? x.mean(axes, keep) : op == "ReduceMax" ? x.max(axes, keep)
+            : op == "ReduceMin" ? x.min(axes, keep) : x.prod(axes, keep);
     }
     else if (op == "Softmax") out = arg(0).softmax(n.attr_int("axis", -1));
     else if (op == "LogSoftmax") out = arg(0).log_softmax(n.attr_int("axis", -1));
@@ -241,6 +248,31 @@ ut::Tensor Lowerer::lower_one(int id) {
       out = ut::concatenate(parts, n.attr_int("axis", 0));
     }
     else if (op == "Erf") out = erf_tensor(arg(0));
+    else if (op == "ArgMax" || op == "ArgMin")
+      out = (op == "ArgMax" ? ut::argmax : ut::argmin)(arg(0), n.attr_int("axis", 0), n.attr_int("keepdims", 1) != 0, n.attr_int("select_last_index", 0) != 0);
+    else if (op == "Tile") {   // (d0, d1, ..) -> (1, d0, 1, d1, ..) -> (r0, d0, r1, d1, ..) by Expand -> (r0 d0, r1 d1, ..)
+      ut::Tensor x = arg(0);
+      const std::vector<int64_t> reps = ints(1);
+      Shape inter, big;
+      for (size_t k = 0; k < x.shape().size(); k++) {
+        inter.insert(inter.end(), {1, x.shape()[k]});
+        big.insert(big.end(), {reps[k], x.shape()[k]});
+      }
+      out = x.reshape(inter).broadcast_to(big).reshape(v.shape);
+    }
+    else if (op == "CumSum") out = arg(0).cumsum(ints(1).at(0), n.attr_int("exclusive", 0) != 0, n.attr_int("reverse", 0) != 0);
+    else if (op == "Pow") out = ut::pow(arg(0), arg(1));
+    else if (op == "Floor") out = arg(0).floor();
+    else if (op == "Ceil") out = arg(0).ceil();
+    else if (op == "IsNaN") out = arg(0).isnan();
+    else if (op == "IsInf") {   // +inf and/or -inf, by the attributes (both by default); neither: all false
+      const ut::Tensor x = arg(0);
+      const bool pos = n.attr_int("detect_positive", 1) != 0, neg = n.attr_int("detect_negative", 1) != 0;
+      ut::Tensor hit;
+      if (pos) hit = x == std::numeric_limits<double>::infinity();
+      if (neg) hit = hit.valid() ? hit | (x == -std::numeric_limits<double>::infinity()) : x == -std::numeric_limits<double>::infinity();
+      out = hit.valid() ? hit : s_.full(v.shape, 0, DType::Bool);
+    }
     else if (op == "Gather") {
       int64_t ax = n.attr_int("axis", 0);
       ut::Tensor data = arg(0);
@@ -345,6 +377,23 @@ ut::Tensor Lowerer::lower_one(int id) {
     throw Error("lowering of " + v.name + " gave " + name(out.dtype()) + to_string(out.shape()) + ", expected " + name(v.dtype) + to_string(v.shape));
   memo_[id] = out;
   return out;
+}
+
+std::vector<Array> Evaluator::eval(const Bindings& b, const std::vector<int>& outputs, const std::map<std::string, Array>& feeds) {
+  std::string key;  // the bindings in name order, each name length-prefixed so that no two keys are alike
+  for (const auto& kv : b) key += std::to_string(kv.first.size()) + ":" + kv.first + "=" + std::to_string(kv.second) + ";";
+  auto it = cache_.find(key);
+  if (it == cache_.end()) it = cache_.emplace(key, std::unique_ptr<Entry>(new Entry(g_.bind(b)))).first;
+  Entry& e = *it->second;
+  for (int in : e.bound.inputs()) {
+    const Value& v = e.bound.value(in);
+    auto f = feeds.find(v.name);
+    if (f != feeds.end() && (f->second.shape != v.shape || f->second.dtype != v.dtype))
+      throw Error("hir: the feed for " + v.name + " is " + name(f->second.dtype) + to_string(f->second.shape) + ", the bound graph needs " + name(v.dtype) + to_string(v.shape));
+  }
+  std::vector<ut::Tensor> ts;
+  for (int o : outputs) ts.push_back(e.low.get(o));
+  return e.s.eval_all(ts, feeds);
 }
 
 }  // namespace hir

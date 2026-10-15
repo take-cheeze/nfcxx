@@ -6,7 +6,7 @@ rewrites. Above it sits a high-level graph in the shape of ONNX, and above that 
 ```
 np::Tensor  (numpy-style C++ API, lazy)                 nfcuop_np.hpp
    │ builds
-hir::Graph  (ONNX opset 18 operators, static shapes)    nfcuop_hir.hpp ──► to_onnx(): a .onnx file, nothing lowered
+hir::Graph  (ONNX opset 18 operators, symbolic dims)    nfcuop_hir.hpp ──► to_onnx(): a .onnx file, nothing lowered
    │ hir::Lowerer (nfcuop_lower.cpp)
 ut::Tensor  (numpy-style builder directly on UOps)      nfcuop_ut.hpp
    │ builds
@@ -16,7 +16,7 @@ Graph / UOp (hash-consed nodes, shapes, rewrites)       nfcuop.hpp
 ```
 
 The plan is to grow it stage by stage so that a graph can be built from C++ (and later Ruby, Lua, Python, JavaScript and Go
-through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff (stage 6, see the table) and the ONNX layer exist; ONNX import and dynamic shapes are plans.
+through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff (stage 6, see the table) and the ONNX layer exist; ONNX import exists; symbolic dimensions are step 1 of stage 7 (below), symbolic shapes in UOps are not started.
 
 | Stage | Content | State |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
 | 6 | Autodiff on the `hir` graph by onnxsim (`hir::gradients_via_onnxsim`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** (`Graph::from_onnx` / `merge_onnx`) | done (onnxsim's rules cover a subset of the operators; the forward operators `Gemm Gather Erf Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` are in `hir` now (`tests/uop/test_nn.cpp`), and their gradients come from onnxsim's rules, not yet checked in `test_grad`) |
-| 7 | Dynamic shapes (below) | not started |
+| 7 | Dynamic shapes (below) | step 1 done (symbolic dimensions in `hir`, `tests/uop/test_sym.cpp`); step 2 done (symbolic loops in the C renderer, `tests/uop/test_cgen.cpp`) |
 
 ## Stage 1: the scalar core
 
@@ -88,11 +88,12 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 
 ## The ONNX-style graph (`nfcuop_hir.hpp`)
 
-- `hir::Graph` holds `Value`s (name, dtype, static shape) and `Node`s that are ONNX operators with ONNX's names, inputs and
+- `hir::Graph` holds `Value`s (name, dtype, shape: integers or symbols, see stage 7) and `Node`s that are ONNX operators with ONNX's names, inputs and
   attributes: `Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Add Sub Mul Div Mod Max Min And Or Xor BitwiseAnd
   BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Transpose Reshape Squeeze Unsqueeze
-  Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad Gemm Gather Erf Conv MaxPool AveragePool
-  BatchNormalization (inference) InstanceNormalization LayerNormalization`. Operands that ONNX wants as constants
+  Expand ReduceSum ReduceMean ReduceMax ReduceMin ReduceProd Softmax LogSoftmax Slice Concat Pad Gemm Gather Erf Conv MaxPool
+  AveragePool BatchNormalization (inference) InstanceNormalization LayerNormalization Tile CumSum ArgMax ArgMin Pow Floor
+  Ceil IsNaN IsInf`, and the forward operators listed in `nfcuop_hir.hpp`. Operands that ONNX wants as constants
   (Reshape's shape, the axes of Squeeze/Unsqueeze/Reduce*, Slice's bounds) are initializers; `add_node` infers dtype and shape
   with ONNX's rules (numpy broadcasting, no implicit dtype conversion, `Div` on ints truncates, `Mod` with `fmod=0` follows the
   divisor's sign) and throws `Error` for anything ONNX would reject.
@@ -125,21 +126,31 @@ Constructors: `array`, `array2d`, `from`, `scalar`, `zeros`, `ones`, `full`, `ar
 `-1`), `transpose`, `T`, `swapaxes`, `flatten`, `squeeze`, `expand_dims`, `broadcast_to`, `astype`, `slice(axis, start, stop, step)` (`None`
 omits a bound), `at(index, axis)`, `flip`, `concatenate`, `stack`. Reductions `sum mean max min var stddev` (axes, negative axes, `keepdims`).
 Operators `+ - * / % < > <= >= == != & | ^` with numpy broadcasting and scalars on either side, `where maximum minimum clip abs sqrt exp log sin cos
-tanh sigmoid relu square reciprocal softmax log_softmax floor_divide matmul/dot logical_not`. Realization: `numpy() tolist() item() str()`;
+tanh sigmoid relu square reciprocal softmax log_softmax floor_divide matmul/dot logical_not`; `pow(a, b)` (C++ has no `**`; scalars on either side),
+`floor ceil isnan isinf` (members), `prod cumsum argmax argmin` (members, axis None flattens), `tile(a, reps)` and `take(a, indices, axis)`.
+Realization: `numpy() tolist() item() str()`;
 `dump()` shows the ONNX-style graph, `dump_uops()` the UOps it lowers to. Small constants (scalars, shapes, axes) are shared, and a cast of a
 small constant is folded into the constant, so `a * 2` is one `Mul` and one scalar initializer in the model.
 Mapping to ONNX: `sum` is `ReduceSum` with an axes input, `T` is `Transpose`, `a[::-1]` is `Slice` with step -1 (end `INT64_MIN`),
 `floor_divide` is `Div`, `Mod(fmod=1)`, a sign test and a `Sub`, `%` is `Mod(fmod=0)`, `!=` is `Not(Equal)`, `zeros((2,2))` is an `Expand` of a scalar.
+`cumsum` is `CumSum` (the axis is an initializer), `prod` is `ReduceProd`, `argmax` is `ArgMax` with keepdims 1 and a cast to the default int,
+`tile` is `Tile`, `take` is `Gather`, `pow` is `Pow` with both operands of one dtype.
+
+How the new operators are lowered (`nfcuop_lower.cpp`, `ut`): `Pow` on floats is `exp(y log|x|)` in float64 with the C99 special values set by
+`where` (below); on ints it is repeated squaring over the bits of the exponent. `Floor`/`Ceil` truncate through int64 (exact below 2^52) and keep
+`-0.0`. `CumSum` is a masked sum: element `i` sums `x[j]` for `j <= i`, an O(n·S) operator. `ReduceProd` multiplies the factors in order.
+`ArgMax`/`ArgMin` are the index of the first extreme value (the last with `select_last_index`) from a max/min reduction and an index mask; a NaN
+wins as in numpy. `Tile` is one reshape, an `Expand` and a reshape (exact). `Gather` is the one-hot select of the notes above.
 
 ## numpy compatibility
 
-How much of the real numpy library is covered, measured: `tests/uop/np_compat.cpp` evaluates 100 expressions with nfcuop (interpreter and C backend, which must
-agree bit for bit) and `tests/uop/np_compat.py` the same 100 with numpy 2.5 (same inputs: float32 and int32 arrays). Two runs:
+How much of the real numpy library is covered, measured: `tests/uop/np_compat.cpp` evaluates 121 expressions with nfcuop (interpreter and C backend, which must
+agree bit for bit) and `tests/uop/np_compat.py` the same 166 with numpy 2.5 (same inputs: float32 and int32 arrays). Two runs:
 
-- **32-bit defaults (the default)**: all 100 agree with numpy in shape and values (rtol 1e-5); 90 agree in dtype too; the other 10 differ only in dtype, and the
-  script lists them: numpy's int64/float64 defaults (`arange(5)`, `linspace`, `eye`, `zeros`, `full(.., 7)`, int `sum`/`mean`, `bool.sum()`, `int / int`) against
-  nfcuop's int32/float32.
-- **numpy's defaults** (`np.default_float = Float64; np.default_int = Int64;`): all 100 agree in shape, values **and dtype**.
+- **32-bit defaults (the default)**: all 166 agree with numpy in shape and values (rtol 1e-5); 144 agree in dtype too; the other 22 differ only in dtype, and the
+  script lists them: numpy's int64/float64 defaults (`arange(5)`, `linspace`, `eye`, `zeros`, `full(.., 7)`, int `sum`/`mean`/`cumsum`/`prod`, `bool.sum()`,
+  `int / int`, the int `argmax`/`argmin`, the int `argsort`/`searchsorted`/`count_nonzero`) against nfcuop's int32/float32.
+- **numpy's defaults** (`np.default_float = Float64; np.default_int = Int64;`): all 166 agree in shape, values **and dtype**.
 
 The script fails if a dtype difference appears that is not on its list, so the claim cannot drift.
 
@@ -161,13 +172,26 @@ Where it differs, on purpose:
   (numpy: float64). The defaults are int32/float32 where numpy has int64/float64, unless the session is configured otherwise (above).
 - **no empty tensors**: every dimension is at least 1, so an empty slice, `arange(0)` or `zeros((0,))` is an error.
 - `==` and `!=` are elementwise and return a `Tensor` (as in numpy); `min`/`max` ignore NaN (numpy propagates it); `%` and `floor_divide` are for ints only.
+- **`pow` on floats is not correctly rounded.** It is `exp(y log|x|)` in float64, so before the rounding to the dtype it is within a few float64
+  ulps of the exact value: `pow(3.0, 2.0)` in float64 is `8.999999999999998` where numpy gives `9.0`. Rounded to float32 (the default) the results
+  agree with numpy's except where the exact result lies almost exactly halfway between two float32 values. The special values are C99's, as in numpy.
+- **`pow` on ints with a negative exponent** gives 0, and 1 or -1 for the bases 1 and -1 (by the parity of the exponent); numpy raises `ValueError`. A
+  graph has no way to raise, and the exponent is often not a constant, so this is not checked.
+- **`take` out of range at run time** selects nothing (-0.0 for floats, 0 for ints) where numpy raises `IndexError`. Constant indices are checked when the
+  graph is built, which is the same error.
+- **`argmax`/`argmin` return the default int** (int32; numpy's `intp` is int64), like the other index-like results; the `ArgMax` operator itself is int64, as in ONNX.
+- **`cumsum` is quadratic in the axis size** (a masked sum per output element). It is exact, and the masked elements do not change any sum, -0.0 included.
+- **`prod` over several axes** multiplies the factors in row-major order of the reduced axes. numpy's order for one axis is the same; for several axes
+  its order is the memory order, which can differ, so floats can round differently in the last bit.
+- **`tile` refuses a repetition of 0** (numpy gives an empty tensor, which nfcuop does not have).
+- **`floor` and `ceil` of a bool** give `default_float` (numpy: float16, which nfcuop does not have); of an int they are the int, as in numpy.
 
 Not there (numpy features a numpy user would reach for next): fancy and boolean-mask indexing, `...` and `None` in an index (use `slice`, `at`,
-`expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `argmax`/`argsort`/`sort`/`unique`,
-`cumsum`/`cumprod`, `prod`, `pow` and `**`, `isnan`/`isinf`/`floor`/`ceil`/`round`, `tile`/`repeat`/`pad`/`roll`, `einsum`/`tensordot`/`outer`/`linalg`, complex
-and unsigned/small-int/float16 dtypes, strings and structured arrays, and anything that needs a data-dependent output shape. Most of these are
-a new ONNX operator in `hir` plus its lowering in `ut` (`Pow`, `Floor`, `IsNaN`, `CumSum`, `ArgMax`, `Tile`; `Gather` is in `hir` but `np` does not expose it yet); data-dependent shapes
-(`unique`, boolean masks) are outside a static-shape design.
+`expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `unique`, `nonzero`, `round`, `pad`,
+`outer`/`linalg`, complex and unsigned/small-int/float16 dtypes, strings and structured arrays, and anything that needs a data-dependent output shape.
+The Array API functions (`sort`, `argsort`, `einsum`, `tensordot`, `roll`, `tril`, `searchsorted`, ...) are in the table of `docs/notes/array-api.md`. Most of these are a new ONNX operator in `hir` plus its lowering in `ut`; data-dependent shapes
+(`unique`, boolean masks) are outside a static-shape design. (Done since: `pow`, `floor`, `ceil`, `isnan`, `isinf`, `cumsum`, `prod`, `argmax`,
+`argmin`, `tile`, `take`.)
 A realistic target is "the subset of numpy that a model needs": array creation, broadcasting arithmetic, reductions, shape ops, slicing, matmul, the
 activation functions. Beyond that numpy is a much larger library, and a port would stay a subset.
 
@@ -194,21 +218,145 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
   graphs, 150 random integer-tensor graphs (raw and after `symbolic()`), 150 random float32 tensor graphs (inputs include `-0.0`, `1e30`, inf and NaN), hand-written
   graphs for every dtype (int64 extremes, float64 casts, bool logic, int32 edges), 18 numpy-API graphs in one program, and the 100 expressions of `np_compat`.
   Each batch is one compiled program. About 32,000 comparisons.
-- **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes. Memory is one
-  `malloc` per materialized node, freed at the end (no buffer reuse). An output that is a reshape of a reduction is copied.
+- **Memory (one arena)**: the intermediates (not the outputs, which the caller owns) share one `malloc`. Each is live from the loop nest that writes it to the
+  last one that loads it, and `nfcuop_arena.hpp` places it: a port of onnxsim's greedy activation planner (`memory_planning.cpp`, Pass 2), with the same
+  liveness test (two buffers share bytes only when their ranges do not overlap, the ends included) and the same best-fit order (largest first, ties in the
+  order the kernels write them). Sizes are rounded to 16 bytes. Not ported: onnxsim's in-place aliasing, since a fused loop nest reads its inputs at other
+  indices than it writes. `CProgram` reports `arena_bytes`, `naive_bytes` (one buffer each) and `unplanned`. The chain in `test_cgen.cpp` (ten halving steps
+  on 32x128 float32, each with a reduction) needs 32,896 bytes of arena against 148,736 with one buffer each: the peak of the live set.
+- **Dimension ranging** (`RenderOptions`): the UOp graph has concrete shapes, so a symbol such as the batch size `N` of an `hir` graph is named per input
+  dimension (`input_symbols`) and given an upper bound (`symbol_bounds`). Symbols follow the operators by rules that keep one only where the dimension is
+  that symbol's size: elementwise ops, reductions (the reduced axis becomes 1), permute, flip, expand of an integer axis, a reshape that keeps the leading
+  symbolic axes, a shrink or pad that does not cut them. Any other dimension is unknown. An intermediate's maximum size takes the bound for each symbolic
+  dimension, and the arena is sized from these maxima. The renderer checks every intermediate against its slot, so a bound below an input's size is an
+  `Error`, and a symbol without a bound leaves its intermediates with a `malloc` of their own. When the loops can be written in the symbols, the program
+  takes the sizes at run time and runs at any size up to the bound (stage 7, step 2, below); otherwise the loops have the concrete sizes.
+- **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes in the loops. No
+  in-place reuse of an input by an output (see Memory). An output that is a reshape of a reduction is copied.
 - **nfcxx as the C compiler**: `NFCUOP_CC=./nfcxx` (it passes `-shared -o`, not the gcc flags). `tests/uop/run.sh` runs the `quick` part of `test_cgen` that way on both
   nfcxx back ends; that path (cproc with hexadecimal float literals, `INFINITY`, `static inline`) was not run where this was written, so CI is its first run.
+
+## ONNX Runtime back end (`nfcuop_ort.hpp`)
+
+`nfcuop::ort::run(g, outputs, feeds)` exports the `hir::Graph` with `to_onnx`, runs it with ONNX Runtime and returns the outputs as
+`Array`s (the interpreter's type). It is selected in the numpy API as `np.backend = ut::Session::Backend::Ort` (`np.backend = "ort"` in the
+scripting bindings), like the C backend. `ut::Session` has no graph, so it refuses this back end; `np::Session::eval_all` sends the graph to
+`ort::run` and lowers nothing.
+
+- **No build-time dependency.** The library is opened with `dlopen` at first use: the path is `$NFCUOP_ORT_LIB`, else `libonnxruntime.so.1`,
+  `libonnxruntime.so` or `libonnxruntime.dylib`. A load that fails throws `Error` (and nothing is cached, so the next call retries).
+  `ort::available()` tells whether it loads; the tests print SKIP without it.
+- **The C API declarations** in `nfcuop_ort.cpp` are a vendored subset of ONNX Runtime 1.29.0's `onnxruntime_c_api.h` (MIT licensed, with
+  its notice): the `OrtApi` members that are called, at their indices in the table, and reserved slots for the others. The header itself is not vendored.
+- **Symbolic batch**: ORT takes the `dim_param` of the exported model, so an unbound graph runs directly; `Graph::bind` gives a static copy
+  that runs the same way. Feeds must agree with the graph's dtype and rank, and every use of one symbol must have one size.
+- **Not the same bits**: ORT's own graph optimizations and kernels round floats differently from the interpreter, so
+  `tests/uop/test_ort.cpp` compares floats to a relative 1e-5 (absolute 1e-6 near zero) and integers and bools exactly.
+- **Not done**: no Windows loader (`dlopen`, as the C back end), no ORT execution providers or options, and the sessions are kept until
+  the process ends (keyed by the model bytes).
+
+## tinygrad back end (`nfcuop_tinygrad.hpp`)
+
+`nfcuop::tinygrad::run(g, outputs, feeds)` exports the `hir::Graph` with `to_onnx`, runs it with tinygrad (`tinygrad.nn.onnx.OnnxRunner`) and
+returns the outputs as `Array`s. tinygrad is Python only, and nothing links against it or CPython. It is selected as
+`np.backend = ut::Session::Backend::Tinygrad` (`np.backend = "tinygrad"` in the scripting bindings), and like the ORT back end it is refused by
+`ut::Session` and lowers nothing in `np::Session`.
+
+- **The embedded interpreter (the default).** CPython is loaded with `dlopen` from the libpython of `$NFCUOP_TINYGRAD_PYTHON` (else
+  `python3`): its sysconfig `INSTSONAME`, else `LDLIBRARY`, in `LIBDIR`; `$NFCUOP_TINYGRAD_LIBPYTHON` names the file instead. The entry points
+  are looked up with `dlsym` (no headers, no link-time dependency), and the library is opened `RTLD_GLOBAL`, because numpy's extension modules
+  bind to the `Py*` symbols of the process. The program name is the executable's, so CPython finds the venv's prefix as the executable does. The
+  first call that can start it starts the interpreter (never finalized), imports numpy and tinygrad once, and keeps one `OnnxRunner` per model
+  and per binding of its symbols (tinygrad's runner fixes each symbol at the first feed's size). Tensors cross as bytes: `numpy.frombuffer` in,
+  `ndarray.tobytes` out, and the model as a uint8 `Tensor` (`OnnxPBParser` reads it), so no file is written. A Python exception is an `Error`
+  whose text is the traceback. Each call takes the GIL with `PyGILState_Ensure`. The interpreter is never finalized, so at exit the backend runs
+  the atexit callbacks that `Py_Finalize` would run (only for an interpreter it started): tinygrad's worker pool and the multiprocessing
+  finalizers that release its semaphores are among them, and without them the resource tracker reports the semaphores at exit.
+- **One interpreter per process.** A libpython that is already loaded and is not the executable's libpython is refused. If nfcpoly's Python
+  backend started the interpreter first, it is reused when the prefixes agree. The GIL stays with the thread that started the interpreter (as in
+  nfcpoly, which never releases it), so a call from any other thread takes the subprocess path; `tinygrad::embedded_status()` says why.
+  `NFCUOP_TINYGRAD_EMBED=0` selects the subprocess path.
+- **The fallback.** When the embedded path cannot be used (no shared libpython, `Py_InitializeEx` did not start the interpreter, another
+  libpython is loaded, the executable differs from the one that started the interpreter, tinygrad does not import, or the call is on another
+  thread), the call runs the subprocess path, and an error from it ends with "the embedded interpreter was not used: ...". Nothing that failed
+  is cached: the next call tries the embedded path again.
+- **The Python process (the fallback).** The helper is `$NFCUOP_TINYGRAD_SCRIPT` (else `scripts/tinygrad_run.py`, relative to the working
+  directory). It is started with `fork` and `execvp` (no shell, so no name or path is quoted), and every call starts one process.
+- **The files.** A scratch directory (`$TMPDIR` or `/tmp`) holds `model.onnx` (the `to_onnx` bytes), one raw file per input (row-major, little
+  endian, `bool` one byte), `request.txt` (one line per input and output: the file, the dtype, the shape and the tensor name as hex, so no name
+  needs quoting) and, written by the helper, one raw file per output and `result.txt` (the file, dtype and shape tinygrad computed; written last,
+  so its presence with exit status 0 is the success signal). The directory is removed when the call ends. Raw files were chosen over `.npy`
+  because the C++ side needs no format reader: the layout is the dtype's, which is also how the ORT back end passes tensors.
+- **Errors.** The helper's stderr is the text of the `Error` (for example a missing tinygrad, a dtype tinygrad returned that the graph does not
+  have, or an exception inside tinygrad). An executable that does not start is reported with `exited 127`. `tinygrad::available()` runs the
+  helper with `--check`; the tests print SKIP without it.
+- **Symbolic dimensions** run unbound: `OnnxRunner` takes each symbol's size from the feed of its input. The output shapes are the ones tinygrad
+  computed (read back from `result.txt`), not the graph's, which is what makes a symbolic output shape work without binding.
+- **Not done**: no Windows (the process, pipes and `dlopen` are POSIX), no bound on the runner cache (one entry per model and symbol binding,
+  kept for the process), no threads on the embedded path, and dtypes are the five nfcuop has; any dtype tinygrad returns differently is an error,
+  not a conversion. Float results are compared to a relative 1e-5 in `tests/uop/test_tinygrad.cpp`, like the ORT test. The test also checks that
+  a repeated call reuses the interpreter and the runner (counts), that it is several times faster than the subprocess path, that a call from
+  another thread takes the subprocess path, and that an import failure in a fresh process gives the Python traceback.
 
 ## Dynamic shapes (stage 7, after the static stages)
 
 The static design is deliberate: every shape is a known integer, so shape inference, rewriting and the interpreter are simple and exact. Dynamic
 shapes are added in two steps, without changing what the static path means:
 
-1. **Symbolic dimensions in `hir`** (ONNX `dim_param`, e.g. a batch size `N`): a `Dim` is an integer or a name; broadcasting and reshape rules
-   follow ONNX's (`N` against `N` or 1), and the exporter writes `dim_param`. Evaluation **specializes**: binding the symbols to integers
-   at `eval` time gives a static graph, lowered and cached per binding. This keeps UOps static and is enough for batch-size changes.
-2. **Symbolic shapes in UOps** (tinygrad's `Variable` in shapes): a bounded `Var` as a dimension, needed only when kernels should be compiled
-   once for all sizes. It touches shape inference, `Reshape`/`Expand` validation and the C renderer, so it waits for stage 4.
+1. **Symbolic dimensions in `hir`** (done). A `hir::Dim` is an `onnxsim::SymExpr` (`nfcuop_sym_expr.hpp`, copied from onnxsim, Apache-2.0): an
+   integer, or a polynomial in symbols, where a symbol is ONNX `dim_param` (e.g. a batch size `N`). So `4*N` and `N+1` are exact dimensions, and two
+   dimensions are equal when they are the same polynomial. Inputs take integers and symbols only (`add_symbolic_input`); `add_input` is unchanged.
+   Shape inference follows ONNX: a symbolic dimension broadcasts against an equal one or 1, and anything else with a symbol is an `Error`. A
+   reshape's `0` copies a dimension, and a `-1` is the exact quotient of the sizes: `[N,2,2] -> [-1,4]` is `[N,4]`, `[N,4] -> [-1]` is `[4*N]`, and
+   `[N,4] -> [-1,3]` is an `Error` (4N is not a multiple of 3). Concatenating along a symbol adds the sizes (`2*N`, `N+M`), and padding adds to it
+   (`N+1`). Reductions (also over the symbol's axis), matmul and gemm contractions with equal dimensions, the batch axis of Conv and pooling,
+   Transpose, Squeeze, Unsqueeze, Expand and the elementwise operators keep symbols. Slicing or gathering along a symbol, a symbol in a channel or
+   spatial axis of Conv and pooling, and a normalization over a symbol (its `Scale` is a constant with integer sizes) are refused, since their
+   sizes would have to be known. `to_onnx` writes `dim_param` for a symbol. A derived polynomial gets a fresh `dim_param` name
+   (`poly0`, `poly1`, ... never a symbol of the graph), and its exact text (`4*N`) goes in the model's `metadata_props` under
+   `nfcuop.dim_expr.<name>`. `from_onnx`/`merge_onnx` read the text back, and the value's shape is inferred from the symbols of the
+   graph's inputs, so it binds by N. A dimension with neither a value nor a symbol
+   is still refused by the reader. The gradients (`gradients_via_onnxsim`) refuse symbolic graphs.
+   Evaluation **specializes**: `Graph::bind({N: 2})` gives a static copy of the graph (every operator inferred again with the sizes), and
+   `hir::Evaluator` binds, lowers and evaluates it, caching the lowering per binding (keyed on the bindings in name order). Lowering a value
+   that has an unbound symbol throws. This keeps UOps static and is enough for batch-size changes; the numpy API has no symbols yet.
+2. **Symbolic loops in the C renderer** (done). A compiled program runs at any size of its symbols up to their bounds, not only at the
+   sizes it was rendered for. The renderer is the only place that changes; the UOp IR and the interpreter are untouched.
+   - **Representation.** UOp shapes stay concrete integers: the graph is built at a *representative* size per symbol (the size of the
+     input that names it). The symbolic form is one `SymDim` per dimension of every node, computed by `sym_rule` from the rules of the
+     operators: an integer, a symbol, `Wild` (a constant, or a size-1 dimension that a consumer broadcasts, so its size is the
+     consumer's), or `Unknown`. A dimension whose size is 1 and that no symbol names is the integer 1.
+   - **Contract (not checked).** Concrete shapes lose which dimension is which symbol, so the renderer reads a dimension or an argument
+     (a shrink end, a pad amount) equal to a symbol's representative size as that symbol. The graph must therefore be built with each
+     symbol written where its size is, and **no other dimension or argument of the graph may equal the representative size**. A reshape
+     that moves a symbol to a dimension of the same size would otherwise look unchanged. `tests/uop/test_cgen.cpp` checks the programs
+     at other sizes against the interpreter, which catches a violation; its random chains use representative sizes above every
+     dimension they can reach. Removing the contract needs the symbol in the UOp shape (below).
+   - **Dynamic programs.** `nfcuop_run` takes a third argument, `const int64_t* sizes`, one size per symbol (`CProgram::symbols`, in
+     name order). `CModule::run` reads them from the feeds: every use of a symbol must agree, each size is at least 1 and at most its
+     bound (`nfcuop::Error` otherwise, before any code runs), and the outputs take their shapes from the sizes. Loop bounds, the strides
+     of flat indices, the reduction loops, the `Pad` bounds and the `Flip` offsets, the copies of duplicate outputs and the mallocs of
+     unplanned intermediates are C expressions in the sizes; integers stay literals.
+   - **Arena.** The planner is unchanged and sized from the bounds, so a dynamic program keeps the saving of PR #219. An intermediate
+     without a bound keeps a malloc of its run-time size. A symbol with a bound is checked against it at run time, so the arena is safe.
+   - **Fallback.** When codegen needs a dimension that is `Wild` or `Unknown` (a reshape that moves a symbol, a cut of a symbolic
+     dimension, an expand of a size-1 dimension whose consumer is not an elementwise op, a materialized constant, an output that is one of
+     these), `render_c` renders the graph again with integer loops: `CProgram::dynamic` is false, the program has no size argument and
+     runs only at its representative sizes (other sizes throw). Its C is the one of the static renderer, so a graph with no symbol is
+     unchanged byte for byte. The fallback also plans its arena as before (wildcards are planned at their concrete size).
+   - **Verification.** `tests/uop/test_cgen.cpp` (`dynamic_sizes`, `random_symbolic_sizes`): a batch chain (elementwise ops with a
+     constant, a reduction over the non-batch axis, an expand of it) rendered once at batch 3 with bound 8 runs at 1, 2, 3, 5 and 8 rows and
+     equals the interpreter bit for bit, and 9 rows throws; without a bound it runs at 1, 5 and 40; the halving chain of 32 x 128 gives the
+     static arena (32,896 bytes against 148,736) at every size up to 32; two inputs sharing a symbol agree or throw; a reshape that moves the
+     symbol falls back and runs at its own size only; 32 of 60 random chains are dynamic and all agree at their sizes. Static graphs: the
+     generated C of ten graphs (plain, reductions, shared intermediates, int64, a materialized expand and constant, and two symbolic
+     fallbacks) is identical to the one before this change.
+   - **Remains.** (a) Symbol identity in UOp shapes (a `Var` as a dimension, tinygrad's `Variable`): it removes the contract above and
+     lets a reshape that moves a symbol, a cut of one, or a broadcast with no symbolic consumer stay dynamic; it touches shape inference,
+     `Reshape` and `Expand` validation and the rules of the renderer, and it is the step to take next. (b) A constant or a size-1 broadcast
+     that is an output is not dynamic yet (fallback). (c) The bound is a check and the size of the arena, never a loop bound: a
+     dynamic loop runs over the run-time size. (d) The ONNX, tinygrad and ONNX Runtime back ends keep their own symbol handling (`Graph::bind`, dim
+     params); this change does not touch them.
 
 Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 
@@ -222,11 +370,18 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 - `test_ut.cpp`: shape inference and errors, `evaluate_array` on every movement op and reduction, the rewrite rules for them, a second differential run (300
   random chains of permute, reshape, reduce, expand, shrink, pad, flip, `Where` and integer arithmetic, 900 comparisons), and the checks of the
   UOp-level builder against values worked out by hand.
+- `test_sym.cpp`: symbolic dimensions (stage 7, step 1): an MLP with a batch symbol at two batch sizes against values worked out by hand, the
+  `Evaluator` cache, the shape-inference results and refusals, polynomial dimensions (`N*4`, `N+1`, `2*N`) evaluated at two batch sizes, `bind`,
+  the exported `dim_param` and its reader; two models for `onnx_check.py`.
 - `test_np.cpp`: the same checks through the user-facing API and the graph (values, errors, the default-dtype settings in both configurations, `slice`/`at`/`flip`, `concatenate`/`stack`, constant sharing, the
-  ONNX export bytes), and the `hir` error cases. It writes seven models (an MLP, broadcasting arithmetic, reductions and shape ops, integer
-  division and modulo, math functions, slicing and concatenation, batched matmul) with the interpreter's results next to them.
+  ONNX export bytes), and the `hir` error cases. For each new operator (`pow`, `floor`, `ceil`, `isnan`, `isinf`, `cumsum`, `prod`, `argmax`,
+  `argmin`, `tile`, `take`) the values are hand-computed or checked against numpy's, and an ONNX round trip (export, read back, export again
+  byte-identical, the read-back graph lowered and interpreted equal to the API's values). It writes eleven models (an MLP, broadcasting arithmetic,
+  reductions and shape ops, integer division and modulo, math functions, slicing and concatenation, batched matmul, floor/pow with NaN and infinities,
+  cumsum and prod, argmax/argmin, tile and take) with the interpreter's results next to them.
 - `onnx_check.py`: every model through `onnx.checker` (with `full_check`, which re-infers all shapes) and onnxruntime, outputs compared with the interpreter's.
-- `test_cgen.cpp`: the C renderer (above).
+- `test_ort.cpp`: the ONNX Runtime back end (above), against the interpreter; prints SKIP without the library.
+- `test_cgen.cpp`: the C renderer (above), including the programs that run at several sizes (stage 7, step 2).
 - `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above, with 32-bit and with 64-bit defaults.
 
 Replacing a rule by a wrong one (checked by hand with `x%1 -> x` and with the float reassociation) makes the runs fail.

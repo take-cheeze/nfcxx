@@ -200,3 +200,146 @@ namespace std
 }  // namespace std
 
 #endif  // __GLIBCXX__
+
+// --- libc++ (macOS) -----------------------------------------------------------------------------------------------
+//
+// libc++'s exception_ptr is one pointer that libc++abi reference-counts, and its copy, assignment, destructor,
+// current_exception and rethrow_exception are exported from libc++.dylib. An exception made by EDG has an EDG handle
+// instead (the entry address of the EDG runtime), so those members are defined here, in the program, and the
+// program's calls bind to them (the dylib keeps its own internal calls). The handle is pinned and released with the EDG
+// hooks. This file is compiled by nfcxx, so the definitions use the EDG calling convention, and the thunk list of
+// scripts/darwin-sret-symbols.txt does not name them.
+#ifdef _LIBCPP_VERSION
+
+extern "C"
+{
+  void* __eh_pin_current(void) __attribute__((weak));
+  void* __eh_make_detached(const std::type_info*, void (*)(void*), int, int*, void*, void (*)(void*))
+      __attribute__((weak));
+  void __eh_pin(void*) __attribute__((weak));
+  void __eh_unpin(void*) __attribute__((weak));
+  void __eh_rethrow_pinned(void*) __attribute__((weak));
+}
+
+// make_exception_ptr (libc++'s header) allocates the object with __cxa_allocate_exception, initializes it with
+// __cxa_init_primary_exception and wraps it with __from_native_exception_pointer. Those are libc++abi's, and the header
+// marks the first two overridable, so they are defined here: the object gets a prefix that keeps its type and cleanup,
+// and the wrap makes an EDG detached entry (the same rules as the libstdc++ path above: a pointer is described by its
+// pointee and its qualifiers).
+namespace
+{
+  struct nfcxx_cxa_prefix {
+    const std::type_info* type;
+    void (*cleanup)(void*);
+    long reserved[2];
+  };
+  const size_t nfcxx_prefix_size = sizeof(nfcxx_cxa_prefix);
+
+  nfcxx_cxa_prefix* nfcxx_prefix_of(void* obj) { return reinterpret_cast<nfcxx_cxa_prefix*>(static_cast<char*>(obj) - nfcxx_prefix_size); }
+
+  // The EDG entry's destructor and free function: destroy the object, then release its block.
+  void nfcxx_destroy_and_free(void* obj)
+  {
+    nfcxx_cxa_prefix* p = nfcxx_prefix_of(obj);
+    void (*cleanup)(void*) = p->cleanup;
+    void* base = static_cast<char*>(obj) - nfcxx_prefix_size;
+    if (cleanup != nullptr) cleanup(obj);
+    std::free(base);
+  }
+}  // namespace
+
+extern "C"
+{
+  void* __cxa_allocate_exception(size_t size) throw()
+  {
+    void* base = std::malloc(nfcxx_prefix_size + size);
+    if (base == nullptr) std::terminate();
+    return static_cast<char*>(base) + nfcxx_prefix_size;
+  }
+
+  void __cxa_free_exception(void* obj) throw()
+  {
+    std::free(static_cast<char*>(obj) - nfcxx_prefix_size);
+  }
+
+  ::__cxxabiv1::__cxa_exception* __cxa_init_primary_exception(void* obj, std::type_info* type, void (*cleanup)(void*)) throw()
+  {
+    nfcxx_cxa_prefix* p = nfcxx_prefix_of(obj);
+    p->type = type;
+    p->cleanup = cleanup;
+    return nullptr;
+  }
+}
+
+namespace std
+{
+  exception_ptr exception_ptr::__from_native_exception_pointer(void* obj) noexcept
+  {
+    exception_ptr r;
+    if (obj == nullptr || __eh_make_detached == nullptr) return r;
+    const type_info* t = nfcxx_prefix_of(obj)->type;
+    if (t == nullptr) return r;
+    int flags = 0;
+    if (t->name()[0] == 'P') {
+      // Itanium __pbase_type_info (not declared by libc++abi's header): the flags and the pointee follow std::type_info.
+      struct pbase { unsigned int flags; const std::type_info* pointee; };
+      const pbase* pb = reinterpret_cast<const pbase*>(reinterpret_cast<const char*>(t) + sizeof(std::type_info));
+      const char c = pb->pointee->name()[0];
+      if (c == 'P' || c == 'M') return r;
+      flags = 0x01;  // ETS_IS_POINTER
+      if (pb->flags & 0x1) flags |= 0x02;  // __const_mask
+      if (pb->flags & 0x2) flags |= 0x04;  // __volatile_mask
+      r.__ptr_ = __eh_make_detached(pb->pointee, nullptr, flags, nullptr, obj, nfcxx_destroy_and_free);
+    } else if (t->name()[0] == 'M') {
+      return r;
+    } else {
+      r.__ptr_ = __eh_make_detached(t, nfcxx_destroy_and_free, flags, nullptr, obj, nullptr);
+    }
+    return r;
+  }
+
+  exception_ptr::exception_ptr(const exception_ptr& other) noexcept : __ptr_(other.__ptr_)
+  {
+    if (__ptr_ != nullptr && __eh_pin != nullptr) __eh_pin(__ptr_);
+  }
+
+  exception_ptr& exception_ptr::operator=(const exception_ptr& other) noexcept
+  {
+    if (other.__ptr_ != nullptr && __eh_pin != nullptr) __eh_pin(other.__ptr_);
+    void* old = __ptr_;
+    __ptr_ = other.__ptr_;
+    if (old != nullptr && __eh_unpin != nullptr) __eh_unpin(old);
+    return *this;
+  }
+
+  exception_ptr::~exception_ptr() noexcept
+  {
+    if (__ptr_ != nullptr && __eh_unpin != nullptr) __eh_unpin(__ptr_);
+  }
+
+  exception_ptr current_exception() noexcept
+  {
+    exception_ptr r;
+    if (__eh_pin_current != nullptr) r.__ptr_ = __eh_pin_current();
+    return r;
+  }
+
+  // nested_exception (exported from libc++.dylib): its members copy and destroy the exception_ptr and rethrow it, so they
+  // are defined here too; a call inside the dylib would otherwise reach libc++abi's functions with an EDG handle.
+  nested_exception::nested_exception() noexcept : __ptr_(current_exception()) {}
+  nested_exception::~nested_exception() noexcept {}
+  void nested_exception::rethrow_nested() const
+  {
+    if (!__ptr_) terminate();
+    rethrow_exception(__ptr_);
+  }
+
+  void rethrow_exception(exception_ptr p)
+  {
+    if (p.__ptr_ == nullptr || __eh_rethrow_pinned == nullptr) terminate();
+    __eh_rethrow_pinned(p.__ptr_);
+    terminate();
+  }
+}  // namespace std
+
+#endif  // _LIBCPP_VERSION

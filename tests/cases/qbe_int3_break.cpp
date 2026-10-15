@@ -22,3 +22,4 @@ int main() {
     __asm__("int $3\n" : :);  // the same statement without `volatile`
     return count();
 }
+// X86-ONLY: x86-64 inline asm (int3 break); not portable to other targets

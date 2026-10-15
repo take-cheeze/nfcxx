@@ -12,3 +12,4 @@ int main() {
   for (int i = 0; i < 96; ++i) acc = acc * 31u + (unsigned short)d[i];
   return (int)(acc & 255u);
 }
+// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

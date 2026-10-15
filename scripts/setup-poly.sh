@@ -27,7 +27,7 @@ else rake=(ruby -rrake -e 'Rake.application.run(ARGV)' --); fi
 [ -x "$root/build/edg/bin/eccp" ] || { echo "setup-poly: EDG not built; run scripts/setup-edg.sh" >&2; exit 1; }
 mkdir -p "$work"
 # One build at a time per tree (rake writes into the source tree's .lock files and the build directory).
-exec 9>"$work/.lock"; flock 9
+exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && fresh && exit 0
 if [ ! -d "$src/.git" ]; then
   mkdir -p "$src" && git -C "$src" init -q &&
@@ -44,7 +44,7 @@ patch -s -p1 -d "$src" --batch < scripts/mruby-cxx-novolatile.patch || { echo "s
 cp scripts/mruby-rt-config.rb "$work/build_config-$be.rb"
 log=$work/build-$be.log
 if ! (cd "$src" && NFCXX_BACKEND=$be MRUBY_CC=$root/nfcc MRUBY_CXX=$root/nfcxx \
-        MRUBY_CONFIG=$work/build_config-$be.rb MRUBY_BUILD_DIR=$out "${rake[@]}" -j"$(nproc)" all) >"$log" 2>&1; then
+        MRUBY_CONFIG=$work/build_config-$be.rb MRUBY_BUILD_DIR=$out "${rake[@]}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" all) >"$log" 2>&1; then
   tail -30 "$log" >&2; echo "setup-poly: build failed (full log: $log)" >&2; exit 1
 fi
 lib=$out/host/lib/libmruby.a

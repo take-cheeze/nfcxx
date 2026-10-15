@@ -254,6 +254,21 @@ def reg_class(t)
   raise Refused, "value of type #{t[0]} #{t[1]} bytes"
 end
 
+# The operand types of an inline PTX statement (ptx_asm): 2-, 4- and 8-byte integers (not bool), 4- and 8-byte floats,
+# and pointers.
+def asm_operand_ok(t)
+  return true if t[0] == "ptr"
+  return [2, 4, 8].include?(type_size(t)) if t[0] == "int" && !t[3]
+  return [4, 8].include?(type_size(t)) if t[0] == "float"
+  false
+end
+
+# The register of an inline PTX operand: a 2-byte integer takes a 16-bit register (.b16, the PTX constraint "h"), any
+# other operand its reg_class.
+def asm_class(t)
+  t[0] == "int" && t[1] == 2 ? "h" : reg_class(t)
+end
+
 # The PTX type suffix for a value or a memory access of an IR type: s32, u32, s64, u64 (a pointer is u64), f32, f64.
 def ptx_type(t)
   return "u64" if t[0] == "ptr"
@@ -319,6 +334,169 @@ def bool_const_setp(t, v)
 end
 
 # A constant as a PTX immediate of an IR integer, float or pointer type (the bits of v, read with the signedness of t).
+# The initializer of a global constant with a value: [PTX type, PTX literal] for an IR `(init (scalar 0 T (const T V)))`
+# of a float, a bool (one byte, its value 0 or 1) or a 4- or 8-byte integer, whose size is the global's size. nil for
+# any other initializer (the caller refuses it, naming the global).
+def scalar_const_init(init, name, size)
+  return nil unless init && init.length == 2 && head_of(init[1]) == "scalar"
+  s = init[1]
+  return nil unless s.length == 4 && head_of(s[3]) == "const"
+  t = parse_type(s[2])
+  text = s[3][2].to_s
+  if t[0] == "float"
+    raise Refused, "global #{name}: a #{t[1]}-byte float constant is not lowered" unless t[1] == 4 || t[1] == 8
+    return [ptx_type(t), float_lit(text, t)]
+  end
+  raise Refused, "global #{name}: constant of type #{form_text(s[2])} is not lowered" unless t[0] == "int"
+  raise Refused, "global #{name}: initializer is #{t[1]} bytes, the global is #{size}" unless t[1] == size
+  return ["u8", text.end_with?("1") ? "1" : "0"] if t[3]     # bool: one byte, the IR writes its value as 0x0 or 0x1
+  raise Refused, "global #{name}: a #{t[1]}-byte integer constant is not lowered" unless t[1] == 4 || t[1] == 8
+  [ptx_type(t), as_int(s[3][2]).to_s]
+end
+
+# A const array of scalars with a full initializer list (`static const uint8_t t[8] = {...}`): its element type and the
+# element values as a PTX brace list, [ptype, "{v0,...}", count], or nil when the global is not one. Each element is read
+# as a scalar constant (scalar_const_init), so the same types are covered.
+def scalar_const_array_init(ty, init, name, size)
+  return nil unless init && head_of(ty) == "const" && ty.length == 2 && head_of(ty[1]) == "array"
+  count = as_int(ty[1][1])
+  elem = ty[1][2]
+  return nil unless count && count > 0 && size % count == 0
+  esize = size / count
+  elems = init.drop(1)
+  return nil unless elems.length == count && elems.all? { |e| head_of(e) == "scalar" }
+  vals = []
+  ptype = nil
+  elems.each do |e|
+    return nil unless e.length == 4 && head_of(e[3]) == "const"
+    t = parse_type(e[2])
+    text = e[3][2].to_s
+    if t[0] == "float"
+      raise Refused, "global #{name}: a #{t[1]}-byte float constant is not lowered" unless t[1] == 4 || t[1] == 8
+      c = ["f#{t[1] * 8}", float_lit(text, t)]
+    else
+      raise Refused, "global #{name}: element of type #{form_text(e[2])} is not lowered" unless t[0] == "int"
+      raise Refused, "global #{name}: element is #{t[1]} bytes, the array's are #{esize}" unless t[1] == esize
+      if t[3]
+        c = ["u8", text.end_with?("1") ? "1" : "0"]
+      else
+        # memory types: a 1- or 2-byte element is stored as u8/s8 or u16/s16 (not the register type ptx_type gives)
+        c = [(t[2] ? "s" : "u") + (t[1] * 8).to_s, as_int(e[3][2]).to_s]
+      end
+    end
+    raise Refused, "global #{name}: mixed element types" if ptype && ptype != c[0]
+    ptype = c[0]
+    vals << c[1]
+  end
+  [ptype, "{" + vals.join(",") + "}", count]
+end
+
+# A constant global whose initializer is a byte layout: integer scalars at their offsets and zero runs covering the
+# whole object (the IR of an array of 4-byte structs of two u16 values, for example tmp.1153: `(scalar 0 unsigned_short
+# (const unsigned_short 0))`, `(scalar 2 ...)`, `(zero 4 4)`). Returns [".b8", "{b0,...}", size] as a byte array, or nil
+# when the initializer is not that shape. Floats are not encoded here (their bit patterns are not written out), so a
+# float scalar makes the caller refuse the global by name.
+# The IEEE binary32 bit pattern of a decimal float constant of the IR (text such as 0.5, -0.0, 1.0), or nil when the value
+# is not exactly a binary32 (for example 0.1, whose nearest binary32 is not 0.1). Exact: the value is scaled by powers of
+# two, which doubles hold without rounding, and the mantissa must be an integer in [2^23, 2^24). No rounding is done.
+def float32_bits(text)
+  x = text.to_f
+  return nil if x.nan? || x.infinite?
+  sign = (x < 0 || (x == 0 && text.start_with?("-"))) ? 0x80000000 : 0
+  x = x.abs
+  return sign if x == 0
+  e = 0
+  while x >= 2.0
+    x = x / 2.0
+    e += 1
+    return nil if e > 200
+  end
+  while x < 1.0
+    x = x * 2.0
+    e -= 1
+    return nil if e < -200
+  end
+  frac = (x - 1.0) * 8388608.0
+  return nil unless frac == frac.floor
+  exp = e + 127
+  return nil unless exp >= 1 && exp <= 254
+  sign | (exp << 23) | frac.to_i
+end
+
+def byte_const_init(init, name, size)
+  return nil unless init && init.length >= 2 && size && size > 0
+  bytes = Array.new(size, 0)
+  covered = Array.new(size, false)
+  scalars = 0
+  init.drop(1).each do |f|
+    case head_of(f)
+    when "scalar"
+      return nil unless f.length == 4 && head_of(f[3]) == "const"
+      scalars += 1
+      off = as_int(f[1])
+      t = parse_type(f[2])
+      return nil unless t && (t[0] == "int" || t[0] == "float")
+      n = t[1]
+      return nil unless off && n && n > 0 && off + n <= size
+      if t[0] == "float"
+        raise Refused, "global #{name}: a #{n}-byte float constant is not lowered" unless n == 4
+        v = float32_bits(f[3][2].to_s)
+        raise Refused, "global #{name}: float constant #{f[3][2]} is not exactly a 32-bit float" unless v
+      else
+        v = t[3] ? (f[3][2].to_s.end_with?("1") ? 1 : 0) : as_int(f[3][2])
+      end
+      return nil unless v
+      n.times do |i|
+        raise Refused, "global #{name}: initializer overlaps at byte #{off + i}" if covered[off + i]
+        bytes[off + i] = (v >> (8 * i)) & 0xff
+        covered[off + i] = true
+      end
+    when "zero"
+      off = as_int(f[1])
+      len = as_int(f[2])
+      return nil unless off && len && off >= 0 && len >= 0 && off + len <= size
+      len.times do |i|
+        raise Refused, "global #{name}: initializer overlaps at byte #{off + i}" if covered[off + i]
+        covered[off + i] = true
+      end
+    else
+      return nil
+    end
+  end
+  return nil unless covered.all?
+  # all-zero data is the zero path's (block shared memory for a static), not a byte constant
+  return nil if bytes.all? { |b| b == 0 }
+  [".b8", "{" + bytes.join(",") + "}", size]
+end
+
+# True when the initializer is explicit zero data covering the whole object: integer or float scalars that are all zero,
+# and zero runs (the front end writes `{0}`-style lists this way). Such data is the zero path's.
+def all_zero_init?(init, size)
+  return false unless init && init.length >= 2 && size && size > 0
+  covered = Array.new(size, false)
+  init.drop(1).each do |f|
+    case head_of(f)
+    when "scalar"
+      return false unless f.length == 4 && head_of(f[3]) == "const"
+      t = parse_type(f[2])
+      return false unless t && (t[0] == "int" || t[0] == "float")
+      off = as_int(f[1])
+      n = t[1]
+      return false unless off && n && n > 0 && off + n <= size
+      return false unless f[3][2].to_s.gsub("0", "").gsub(".", "").gsub("-", "").gsub("+", "").gsub("e", "").gsub("E", "").empty?
+      n.times { |i| covered[off + i] = true }
+    when "zero"
+      off = as_int(f[1])
+      len = as_int(f[2])
+      return false unless off && len && off >= 0 && len >= 0 && off + len <= size
+      len.times { |i| covered[off + i] = true }
+    else
+      return false
+    end
+  end
+  covered.all?
+end
+
 def imm(t, v)
   return "0" if t[0] == "ptr"
   raise Refused, "bool constant" if t[3]
@@ -378,6 +556,21 @@ FLOAT_BUILTINS = {
   "__nfcxx_saturatef" => ["cvt.sat.f32.f32", 1],
   "__nfcxx_expf" => [:exp, 1],
   "__nfcxx_logf" => [:log, 1],
+  "__nfcxx_floorf" => ["cvt.rmi.f32.f32", 1],   # round toward -inf: floorf (exact, NaN and inf pass through)
+  "__nfcxx_truncf" => ["cvt.rzi.f32.f32", 1],   # round toward zero: trunc (exact)
+  "__nfcxx_ceilf" => ["cvt.rpi.f32.f32", 1],    # round toward +inf: ceilf (exact)
+  "__nfcxx_fmaf" => ["fma.rn.f32", 3],          # fused multiply-add, one rounding: fmaf (exact)
+  "__nfcxx_log2f" => ["lg2.approx.f32", 1],     # approximate, see log2f in cuda-rewrite.rb (exact at powers of two)
+}
+# Float to 32-bit integer: name => PTX instruction. cvt.rni rounds to nearest even and saturates (NaN gives 0), as CUDA's
+# __float2int_rn.
+FLOAT_TO_INT_BUILTINS = {
+  "__nfcxx_rni_s32" => "cvt.rni.s32.f32",
+}
+# Half-precision fused multiply-add of 16-bit values (the device prelude's unsigned short): one fma.rn.f16 on .b16
+# registers, rounded once from the exact product and sum, as CUDA's __hfma (not a float result rounded to half again).
+HALF_BUILTINS = {
+  "__nfcxx_hfma_rn" => ["fma.rn.f16", 3],
 }
 # name => [PTX atom op, PTX type]: the pointer is a generic address (global or shared), the result is the old value
 ATOMICS = {
@@ -399,6 +592,11 @@ end
 
 # The names of the functions a form calls directly (the `&"name"` callee of every `call`), in order.
 def collect_calls(x, acc)
+  # a function whose address is taken (a function pointer value) is reachable too: it must be emitted
+  if x.is_a?(IRSym) && x.sig == "&"
+    acc << x.name
+    return acc
+  end
   return acc unless x.is_a?(Array)
   if head_of(x) == "call" && x.length > 2 && x[2].is_a?(IRSym) && x[2].sig == "&"
     acc << x[2].name
@@ -418,7 +616,7 @@ end
 
 class Fn
   attr_reader :name, :params, :ret, :form, :uses_dynshared
-  attr_accessor :kernel, :module_fns, :shared, :globals, :strings, :uses_printf
+  attr_accessor :kernel, :module_fns, :shared, :globals, :consts, :externs, :strings, :uses_printf
 
   def initialize(form, index)
     @form = form
@@ -427,12 +625,13 @@ class Fn
     @module_fns = {}
     @shared = {}
     @globals = {}
+    @consts = {}
     @ret = nil
     @setup_done = false
     @ncall = 0
     @name = form[1].to_s
     @regs = {}              # IR register "%N" => [PTX register, IR type]
-    @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0 }
+    @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0, "h" => 0 }
     @loops = []             # [continue label, break label] of the enclosing loops, innermost last
     @slots = {}             # slot name => byte offset in the frame
     @frame = 0
@@ -504,7 +703,7 @@ class Fn
           raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
           # a byval parameter: the address of the caller's copy (the value is read through it)
           ty = head_of(p[3]) == "byval" ? ["ptr", nil] : parse_type(p[3])
-          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
+          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "int" && ty[3]) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
       elsif h == "static" || h == "weak"
@@ -561,11 +760,25 @@ class Fn
         emit("cvta.shared.u64 #{t}, #{ptx_sym(x.name)};")
       elsif @globals.key?(x.name)
         emit("cvta.global.u64 #{t}, #{ptx_sym(x.name)};")
+      elsif @consts.key?(x.name)
+        # a constant with a value (see scalar_const_init): read-only memory, its address is generic through .const
+        emit("cvta.const.u64 #{t}, #{ptx_sym(x.name)};")
+      elsif @externs.key?(x.name)
+        raise Refused, "global #{x.name} is extern (no definition in this unit)"
       elsif @strings.key?(x.name)
         emit("cvta.const.u64 #{t}, #{ptx_sym(STRING_PREFIX + x.name)};")
       else
         raise Refused, "static object @\"#{x.name}\" (only block-shared and device globals are lowered)"
       end
+      return [t, ["ptr", nil]]
+    end
+    if x.is_a?(IRSym) && x.sig == "&" && @module_fns.key?(x.name)
+      # the address of a device function of this module (a function pointer value): the PTX name of the .func
+      callee = @module_fns[x.name]
+      raise Refused, "address of kernel #{x.name} (a kernel is not a function pointer)" if callee.kernel
+      callee.setup
+      t = fresh("rd")
+      emit("mov.u64 #{t}, #{x.name};")
       return [t, ["ptr", nil]]
     end
     if x.is_a?(IRSym) && x.sig == "$"
@@ -600,10 +813,12 @@ class Fn
     raise BadIR, "value of type #{ty[0]} (#{type_size(ty)} bytes) stored in a #{dty[0]} (#{type_size(dty)} bytes)" unless reg_class(dty) == reg_class(ty)
   end
 
-  # (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...): an inline PTX statement (the mma.sync forms of llama.cpp's mma.cuh).
+  # (ptx-asm "TEMPLATE" (opnd KIND ARG TYPE)...): an inline PTX statement (the mma.sync forms of llama.cpp's mma.cuh,
+  # and CUB's ld and st forms).
   # KIND out or inout: ARG is the address of the output (inout is loaded first); in: ARG is the value. Each operand
   # gets a register of its type's class; the template's %N is operand N in order (outputs first, as gcc numbers
-  # them). Outputs are stored back after the instruction. Only 4-byte integers and floats are lowered.
+  # them). Outputs are stored back after the instruction. Operands are 2-, 4- or 8-byte integers, 4- or 8-byte floats,
+  # or pointers (see asm_operand_ok).
   def ptx_asm(s)
     tmpl = s[1].to_s
     regs = []
@@ -613,16 +828,20 @@ class Fn
       kind = o[1].to_s
       arg = o[2]
       ty = parse_type(o[3])
-      raise Refused, "asm operand of type #{ty[0]} #{type_size(ty)} bytes (4-byte integers and floats only)" unless type_size(ty) == 4 && (ty[0] == "int" || ty[0] == "float") && !(ty[0] == "int" && ty[3])
+      raise Refused, "asm operand of type #{ty[0]} #{type_size(ty)} bytes (2-, 4- and 8-byte integers, 4- and 8-byte floats, pointers)" unless asm_operand_ok(ty)
       if kind == "in"
         v, _ = operand(arg)
-        r = fresh(reg_class(ty))
-        emit("mov.#{ptx_type(ty)} #{r}, #{v};")
+        r = fresh(asm_class(ty))
+        if asm_class(ty) == "h"
+          emit("cvt.#{mem_type(ty)}.#{ptx_type(ty)} #{r}, #{v};")
+        else
+          emit("mov.#{ptx_type(ty)} #{r}, #{v};")
+        end
         regs << r
       else
         addr, _ = operand(arg)
-        r = fresh(reg_class(ty))
-        emit("ld.#{ptx_type(ty)} #{r}, [#{addr}];") if kind == "inout"
+        r = fresh(asm_class(ty))
+        emit("ld.#{mem_type(ty)} #{r}, [#{addr}];") if kind == "inout"
         regs << r
         stores << [addr, r, ty]
       end
@@ -647,7 +866,7 @@ class Fn
       line = line.strip
       emit(line) unless line.empty?
     end
-    stores.each { |addr, r, ty| emit("st.#{ptx_type(ty)} [#{addr}], #{r};") }
+    stores.each { |addr, r, ty| emit("st.#{mem_type(ty)} [#{addr}], #{r};") }
   end
 
   # ---- expressions: store the value of x in register dest, of IR type dty
@@ -666,6 +885,13 @@ class Fn
       else
         emit("ld.#{mem_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
       end
+    when "load.v"
+      # (load.v TYPE PTR): a volatile load of a 4- or 8-byte integer or a float (the mirror of store.v)
+      ty = parse_type(x[1])
+      raise Refused, "volatile load of #{ty[0]}" unless (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float")
+      expect(dty, ty)
+      addr, aty = operand(x[2])
+      emit("ld.volatile.#{mem_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
     when "bitcast"
       ty = parse_type(x[1])
       expect(dty, ty)
@@ -772,8 +998,13 @@ class Fn
       raise Refused, "#{h} to #{ty[0]}" unless ty[0] == "float"
       expect(dty, ty)
       a, aty = operand(x[2])
-      raise Refused, "#{h} of bool" if aty[0] == "int" && aty[3]
-      emit("cvt.rn.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
+      if aty[0] == "int" && aty[3]
+        # a bool is 0 or 1: the predicate selects 1.0 or 0.0 (the float immediates of the destination's width)
+        one, zero = ty[1] == 8 ? ["0d3FF0000000000000", "0d0000000000000000"] : ["1.0", "0.0"]
+        emit("selp.#{ptx_type(ty)} #{dest}, #{one}, #{zero}, #{reg_of(a, aty)};")
+      else
+        emit("cvt.rn.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
+      end
     when "cf2i"
       ty = parse_type(x[1])
       expect(dty, ty)
@@ -811,6 +1042,10 @@ class Fn
         scalar_u32(name, x, dest, ty)
       elsif FLOAT_BUILTINS.key?(name)
         float_builtin(name, x, dest, ty)
+      elsif FLOAT_TO_INT_BUILTINS.key?(name)
+        float_to_int_builtin(name, x, dest, ty)
+      elsif HALF_BUILTINS.key?(name)
+        half_builtin(name, x, dest, ty)
       else
         call_site(x, dest, ty)
       end
@@ -947,7 +1182,9 @@ class Fn
   # not fit the target. The test is ordered (NaN makes both comparisons false), so NaN traps too. Each bound is exact
   # in the source type: the lower one is strict (lo - 1) when that is a float of the source type, else lo itself.
   def float_to_int(dest, ty, a, aty)
-    raise Refused, "cf2i to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    # 1- and 2-byte targets (signed_char, unsigned_short) convert in 32 bits and are narrowed by canon, as the other
+    # operations on them are; the trap bounds use the target's own width.
+    raise Refused, "cf2i to #{ty[0]} of #{ty[1]} bytes" unless ty[0] == "int" && !ty[3] && [1, 2, 4, 8].include?(ty[1])
     raise BadIR, "cf2i of a #{aty[0]}" unless aty[0] == "float"
     bits = ty[1] * 8
     fsz = aty[1]
@@ -969,6 +1206,7 @@ class Fn
     emit("and.pred #{p1}, #{p1}, #{p2};")
     emit("@!#{p1} trap;")
     emit("cvt.rzi.#{ptx_type(ty)}.#{ft} #{dest}, #{a};")
+    canon(dest, ty)
   end
 
   # ---- statements
@@ -1031,6 +1269,14 @@ class Fn
       else
         emit("st.#{mem_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
       end
+    when "store.v"
+      # (store.v TYPE PTR VALUE): a volatile store of a 4- or 8-byte integer or a float, through a generic pointer
+      ty = parse_type(s[1])
+      raise Refused, "volatile store of #{ty[0]}" unless (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float")
+      addr, aty = operand(s[2])
+      val, vty = operand(s[3])
+      expect(ty, vty)
+      emit("st.volatile.#{mem_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
     when "if"
       cond, cty = operand(s[1])
       raise BadIR, "if condition is not a bool register" unless reg_class(cty) == "p" && cond.start_with?("%")
@@ -1198,6 +1444,37 @@ class Fn
       reg_of(v, vty)
     end
     emit("#{op} #{dest}, #{regs.join(', ')};")
+  end
+
+  # A float-to-int intrinsic of FLOAT_TO_INT_BUILTINS: a 32-bit float operand, a 32-bit signed integer result.
+  def float_to_int_builtin(name, x, dest, ty)
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes 1 argument(s)" unless args.length == 1
+    raise Refused, "#{name} returns #{ty[0]}, not a 32-bit signed integer" unless ty[0] == "int" && ty[2] && type_size(ty) == 4
+    v, vty = operand(args[0])
+    raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "float" && vty[1] == 4
+    emit("#{FLOAT_TO_INT_BUILTINS[name]} #{dest}, #{reg_of(v, vty)};")
+  end
+
+  # A 16-bit fused multiply-add of HALF_BUILTINS: the three unsigned-short operands (32-bit registers holding the 16-bit
+  # values) move to .b16 registers, one fma.rn.f16 gives the 16-bit result, and it is zero-extended back.
+  def half_builtin(name, x, dest, ty)
+    op, arity = HALF_BUILTINS[name]
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes #{arity} argument(s)" unless args.length == arity
+    raise Refused, "#{name} returns #{ty[0]}, not a 16-bit unsigned integer" unless ty[0] == "int" && !ty[2] && type_size(ty) == 2
+    regs = args.map do |a|
+      v, vty = operand(a)
+      raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "int" && vty[1] == 2
+      t = fresh("h")
+      emit("cvt.u16.u32 #{t}, #{reg_of(v, vty)};")
+      t
+    end
+    r = fresh("h")
+    emit("#{op} #{r}, #{regs.join(', ')};")
+    emit("cvt.u32.u16 #{dest}, #{r};")
   end
 
   # A float intrinsic of FLOAT_BUILTINS: operands and result are 32-bit floats. exp and log are two instructions:
@@ -1425,8 +1702,18 @@ class Fn
       regs << reg_of(v, aty)
     end
     regs.each_with_index do |r, k|
-      emit("  .param .#{ptx_type(callee.params[k])} #{c}_p#{k};")
-      emit("  st.param.#{ptx_type(callee.params[k])} [#{c}_p#{k}], #{r};")
+      pty = callee.params[k]
+      if pty[0] == "int" && pty[3]
+        # a bool argument is one byte, 0 or 1 (the callee's bool parameter convention, see Fn#prologue)
+        b = fresh("r")
+        emit("selp.u32 #{b}, 1, 0, #{r};")
+        # ptxas does not take 8-bit parameters of device functions: a bool argument is 32 bits (kernels keep one byte)
+        emit("  .param .u32 #{c}_p#{k};")
+        emit("  st.param.u32 [#{c}_p#{k}], #{b};")
+      else
+        emit("  .param .#{ptx_type(pty)} #{c}_p#{k};")
+        emit("  st.param.#{ptx_type(pty)} [#{c}_p#{k}], #{r};")
+      end
     end
     list = (0...regs.length).map { |k| "#{c}_p#{k}" }.join(", ")
     if dest
@@ -1447,7 +1734,14 @@ class Fn
     @params.each_with_index do |ty, k|
       r = fresh(reg_class(ty))
       @regs["%#{k}"] = [r, ty]
-      @prologue << "ld.param.#{ptx_type(ty)} #{r}, [#{@name}_param_#{k}];"
+      if ty[0] == "int" && ty[3]
+        # a bool parameter is one byte (PTX has no predicate parameters): load it, then the predicate is value != 0
+        b = fresh("r")
+        @prologue << "ld.param.#{@kernel ? "u8" : "u32"} #{b}, [#{@name}_param_#{k}];"
+        @prologue << "setp.ne.u32 #{r}, #{b}, 0;"
+      else
+        @prologue << "ld.param.#{ptx_type(ty)} #{r}, [#{@name}_param_#{k}];"
+      end
     end
     @body.each { |s| stmt(s) }
     emit("ret;") unless head_of(@body.last) == "return"
@@ -1464,7 +1758,8 @@ class Fn
     end
     @params.each_with_index do |ty, k|
       comma = k + 1 < @params.length ? "," : ""
-      out << "  .param .#{ptx_type(ty)} #{@name}_param_#{k}#{comma}"
+      bool_type = @kernel ? "u8" : "u32"   # a kernel's bool parameter is the host's one byte; a device function's is 32 bits
+      out << "  .param .#{ty[0] == "int" && ty[3] ? bool_type : ptx_type(ty)} #{@name}_param_#{k}#{comma}"
     end
     out << ")"
     out << "{"
@@ -1472,6 +1767,7 @@ class Fn
     out << "  .reg .b32 %r<#{@count['r']}>;" if @count["r"] > 0
     out << "  .reg .b64 %rd<#{@count['rd']}>;" if @count["rd"] > 0
     out << "  .reg .f32 %f<#{@count['f']}>;" if @count["f"] > 0
+    out << "  .reg .b16 %h<#{@count['h']}>;" if @count["h"] > 0
     out << "  .reg .f64 %fd<#{@count['fd']}>;" if @count["fd"] > 0
     out << "  .local .align 8 .b8 __local_depot#{@index}[#{@frame}];" if @frame > 0
     @prologue.each { |s| out << "  #{s}" }
@@ -1493,12 +1789,42 @@ def strip_comments(src)
   keep.join("\n")
 end
 
+# The forms of the IR text, parsed one top-level form at a time. A top-level form starts on a line that begins with `(`
+# in column 0 (the body lines of a form are indented), so each chunk is tokenized and parsed alone: the token table stays
+# small, where parsing the whole text at once took time that grows faster than the text. A chunk that does not balance
+# falls back to parsing the whole text, which gives the same result or the same error.
+def parse_forms_chunked(src)
+  chunks = []
+  cur = []
+  src.split("\n").each do |line|
+    next if line.lstrip.start_with?(";")
+    if line.start_with?("(") && !cur.empty?
+      chunks << cur.join("\n")
+      cur = []
+    end
+    cur << line
+  end
+  chunks << cur.join("\n") unless cur.empty?
+  forms = []
+  chunks.each do |c|
+    begin
+      parse_forms(tokenize(c)).each { |f| forms << f }
+    rescue BadIR
+      return parse_forms(tokenize(strip_comments(src)))
+    end
+  end
+  forms
+end
+
 def emit_module(src, sm, kernels = [])
-  forms = parse_forms(tokenize(strip_comments(src)))
+  forms = parse_forms_chunked(src)
   fns = []
   shared = {}
   globals = {}
+  consts = {}
+  externs = {}
   strings = {}
+  byte_inits = {}
   forms.each do |f|
     h = head_of(f)
     if h == "ir-module"
@@ -1527,10 +1853,49 @@ def emit_module(src, sm, kernels = [])
       align = as_int(f[4])
       # the optional linkage (static, weak, extern) and the initializer come after the size and alignment, in any case
       linkage = f.drop(5).map { |x| head_of(x) }.find { |h| h == "static" || h == "weak" || h == "extern" }
-      raise Refused, "global #{name} is extern (no definition in this unit)" if linkage == "extern"
+      # An extern global has no definition in this unit: refused where code reads it (see the @ operand), not here
+      # (an unused static member of a template instance is declared and never read).
+      if linkage == "extern"
+        externs[name] = true
+        next
+      end
       init = f.drop(5).find { |x| head_of(x) == "init" }
-      raise Refused, "global #{name}: only zero initializers are lowered" unless init && init.length == 2 && head_of(init[1]) == "zero"
-      raise Refused, "global #{name}: partial zero initializer" unless as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
+      # A constant with a value (a static constexpr data member): the front end folds its uses, so the global is read
+      # only where its address is taken, and it is emitted as a typed .const symbol with its value.
+      cinit = head_of(ty) == "const" ? scalar_const_init(init, name, size) : nil
+      if cinit
+        consts[name] = cinit + [align]
+        next
+      end
+      # a const char array initialized from a string constant (`static const char t[N] = "..."`): the string's bytes, once
+      # the module's data is known (the IR lists data after the globals)
+      if head_of(ty) == "const" && init && init.length == 2 && head_of(init[1]) == "bytes" && init[1].length == 4 &&
+         init[1][3].is_a?(IRSym) && init[1][3].sig == "@" && as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
+        byte_inits[name] = [init[1][3].name, align, size]
+        next
+      end
+      # a const array of scalars with its values (a lookup table): a typed .const array with the same values
+      carr = head_of(ty) == "const" ? scalar_const_array_init(ty, init, name, size) : nil
+      if carr
+        consts[name] = [carr[0], carr[1], align, carr[2]]
+        next
+      end
+      # integer scalars and zero runs at byte offsets (see byte_const_init). A static one is block-private in this emitter
+      # (a zero static is block-shared memory, and shared memory has no initializer), so its bytes are a read-only .const:
+      # a store to it is rejected by ptxas rather than corrupting other blocks. A global one is a writable .global with
+      # its bytes as the initializer, so each program sees one object with the initial values.
+      binit = byte_const_init(init, name, size)
+      if binit && linkage == "static"
+        consts[name] = ["b8", binit[1], align, size]
+        next
+      elsif binit
+        globals[name] = [size, align, binit[1]]
+        next
+      end
+      # a zero initializer: the zero form, or explicit zero scalars covering the object (all zero data is zero)
+      zero_form = init && init.length == 2 && head_of(init[1]) == "zero"
+      raise Refused, "global #{name}: only zero initializers are lowered" unless zero_form || all_zero_init?(init, size)
+      raise Refused, "global #{name}: partial zero initializer" if zero_form && !(as_int(init[1][1]) == 0 && as_int(init[1][2]) == size)
       if linkage == "static" || (linkage == "weak" && name.start_with?("_ZZ"))
         shared[name] = [size, align]
       else
@@ -1585,7 +1950,13 @@ def emit_module(src, sm, kernels = [])
   end
   state = {}
   fns.each { |fn| check_recursion(fn.name, callees, state) }
-  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals; fn.strings = strings }
+  byte_inits.each do |name, (src, align, size)|
+    raise Refused, "global #{name}: its string #{src} is not a data constant of this module" unless strings.key?(src)
+    bytes = strings[src]
+    raise Refused, "global #{name}: string #{src} is #{bytes.length} bytes, the global is #{size}" unless bytes.length == size
+    consts[name] = ["u8", "{" + bytes.join(",") + "}", align, size]
+  end
+  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals; fn.consts = consts; fn.externs = externs; fn.strings = strings }
   fns.each { |fn| fn.compile }
   out = "// Generated by scripts/pathb-ptx-emit.rb from the Path B IR; do not edit.\n"
   out << ".version 8.0\n.target #{sm}\n.address_size 64\n\n"
@@ -1593,7 +1964,14 @@ def emit_module(src, sm, kernels = [])
   strings.each { |name, bytes| out << ".const .align 1 .b8 #{ptx_sym(STRING_PREFIX + name)}[#{bytes.length}] = {#{bytes.join(',')}};\n" }
   out << ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n" if fns.any?(&:uses_printf)
   shared.each { |name, (size, align)| out << ".shared .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
-  globals.each { |name, (size, align)| out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
+  globals.each do |name, (size, align, lit)|
+    init = lit ? " = #{lit}" : ""
+    out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}]#{init};\n"
+  end
+  consts.each do |name, (ptype, lit, align, count)|
+    dims = count ? "[#{count}]" : ""
+    out << ".const .align #{align} .#{ptype} #{ptx_sym(name)}#{dims} = #{lit};\n"
+  end
   out << "\n" unless shared.empty? && globals.empty?
   # PTX needs a callee declared before its first call: emit the functions callee first (depth-first post-order).
   ordered = []

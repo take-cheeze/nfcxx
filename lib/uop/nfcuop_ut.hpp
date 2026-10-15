@@ -72,6 +72,11 @@ class Tensor {
   Tensor min(int64_t axis, bool keepdims = false) const { return min(Axes{axis}, keepdims); }
   Tensor var(const Axes& axes = {}, bool keepdims = false) const;  // population variance (ddof = 0)
   Tensor stddev(const Axes& axes = {}, bool keepdims = false) const;
+  // product along the axes (the factors in row-major order, so one axis is numpy's order); ints wrap like numpy
+  Tensor prod(const Axes& axes = {}, bool keepdims = false) const;
+  // inclusive running sum along `axis` (exclusive: element i sums the elements before i; reverse: from the end). Quadratic in
+  // the axis size (a masked sum per output element), exact: each element is the sequential sum, -0.0 included
+  Tensor cumsum(int64_t axis = 0, bool exclusive = false, bool reverse = false) const;
 
   // elementwise
   Tensor operator-() const;
@@ -89,6 +94,12 @@ class Tensor {
   Tensor softmax(int64_t axis = -1) const;
   Tensor log_softmax(int64_t axis = -1) const;
   Tensor clip(double lo, double hi) const;
+  // float tensors (an integer tensor is returned unchanged): floor and ceil keep -0.0, and values of magnitude 2^52 or more,
+  // infinities and NaN are returned as they are
+  Tensor floor() const;
+  Tensor ceil() const;
+  Tensor isnan() const;  // Bool
+  Tensor isinf() const;  // Bool, true for +inf and -inf
 
   // realization (evaluates the graph)
   Array numpy() const;
@@ -131,7 +142,9 @@ class Session {
   bool optimize = true;
   // How eval runs a graph: the reference interpreter, or rendered C (nfcuop_cgen.hpp) compiled with `cc` (empty: $NFCUOP_CC or
   // cc) and cached by source text. Both give the same bits (except that an integer division by zero is 0 in C).
-  enum class Backend { Interpreter, C };
+  // Ort and Tinygrad run the hir graph with ONNX Runtime (nfcuop_ort.hpp) or tinygrad (nfcuop_tinygrad.hpp); they need the graph,
+  // so only np::Session evaluates with them.
+  enum class Backend { Interpreter, C, Ort, Tinygrad };
   Backend backend = Backend::Interpreter;
   std::string cc;
   const CProgram* last_program() const { return has_program_ ? &last_program_ : nullptr; }  // the last C program run
@@ -157,6 +170,15 @@ Tensor logical_not(const Tensor& a);
 Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis = 0);
 Tensor trunc_divide(const Tensor& a, const Tensor& b);  // ints only; rounds toward zero like C (ONNX Div on ints)
 Tensor c_remainder(const Tensor& a, const Tensor& b);   // ints only; the sign of the dividend like C (ONNX Mod, fmod=1)
+// a ** b with broadcasting; the dtype is the promoted one (Bool becomes Int32). Floats: |a|^b = exp(b log|a|) in float64, rounded
+// once to the dtype, with the special values of C99 pow (what numpy uses: pow(1, y) = 1, pow(x, 0) = 1, a negative base to a
+// non-integer power is NaN, signed zeros and infinities). Ints: repeated squaring, wrapping like numpy; a negative exponent gives
+// 0, or 1 and -1 for bases 1 and -1 (numpy raises an error there).
+Tensor pow(const Tensor& a, const Tensor& b);
+// Index of the first maximum (minimum) along `axis`, int64 like ONNX ArgMax/ArgMin; `last` takes the last one instead (ONNX
+// select_last_index). As in numpy, a NaN wins: the index of the first NaN (or the last one with `last`).
+Tensor argmax(const Tensor& x, int64_t axis = 0, bool keepdims = false, bool last = false);
+Tensor argmin(const Tensor& x, int64_t axis = 0, bool keepdims = false, bool last = false);
 inline Tensor relu(const Tensor& a) { return a.relu(); }
 inline Tensor exp(const Tensor& a) { return a.exp(); }
 inline Tensor log(const Tensor& a) { return a.log(); }

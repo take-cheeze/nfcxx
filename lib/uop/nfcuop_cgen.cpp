@@ -15,9 +15,31 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "nfcuop_arena.hpp"
+
 namespace nfcuop {
 
 namespace {
+
+// Every intermediate starts at a multiple of this many bytes in the arena (the widest scalar is 8 bytes).
+const int64_t kAlign = 16;
+
+// The name of intermediate `t` in the planner. Zero-padded, so that the planner's tie-break by name orders equal sizes in the
+// order the kernels write them (an unpadded "10" would sort before "2").
+std::string planner_name(size_t t) {
+  char buf[24];
+  std::snprintf(buf, sizeof buf, "%08zu", t);
+  return buf;
+}
+
+int64_t dtype_bytes(DType d) {
+  switch (d) {
+    case DType::Bool: return 1;
+    case DType::Int32: case DType::Float32: return 4;
+    case DType::Int64: case DType::Float64: return 8;
+  }
+  return 8;
+}
 
 const char* ctype(DType d) {
   switch (d) {
@@ -69,11 +91,35 @@ bool atomic(const std::string& e) {
   return true;
 }
 
+// A dimension in the generated code: an integer (`lit`), or a C expression in the run-time sizes of a dynamic program.
+struct Dim {
+  bool lit = true;
+  int64_t val = 1;     // the size, when lit
+  std::string expr;    // the C expression (the decimal when lit)
+  bool one() const { return lit && val == 1; }
+};
+
+Dim lit_dim(int64_t v) { return Dim{true, v, std::to_string(v)}; }
+
+Dim mul_dim(const Dim& a, const Dim& b) {
+  if (a.lit && b.lit) return lit_dim(a.val * b.val);
+  if (a.one()) return b;
+  if (b.one()) return a;
+  return Dim{false, 0, "(" + a.expr + ") * (" + b.expr + ")"};
+}
+
 // The row-major strides of a shape.
-std::vector<int64_t> strides_of(const Shape& s) {
-  std::vector<int64_t> st(s.size(), 1);
-  for (size_t k = s.size(); k-- > 1;) st[k - 1] = st[k] * s[k];
+std::vector<Dim> strides_of(const std::vector<Dim>& d) {
+  std::vector<Dim> st(d.size(), lit_dim(1));
+  for (size_t k = d.size(); k-- > 1;) st[k - 1] = mul_dim(st[k], d[k]);
   return st;
+}
+
+// The number of elements, as a C expression (parenthesized when it is not a literal).
+std::string numel_expr(const std::vector<Dim>& d) {
+  Dim p = lit_dim(1);
+  for (const Dim& x : d) p = mul_dim(p, x);
+  return p.lit ? p.expr : "(" + p.expr + ")";
 }
 
 // The statements a kernel needs before it stores (index temporaries).
@@ -90,12 +136,12 @@ struct KGen {
 
 using Idx = std::vector<std::string>;  // one C expression per dimension; "0" for a dimension of size 1
 
-std::string flat(const Idx& idx, const Shape& shape) {
-  std::vector<int64_t> st = strides_of(shape);
+std::string flat(const Idx& idx, const std::vector<Dim>& dims) {
+  std::vector<Dim> st = strides_of(dims);
   std::string out;
-  for (size_t k = 0; k < shape.size(); k++) {
-    if (shape[k] == 1 || idx[k] == "0") continue;
-    std::string term = st[k] == 1 ? idx[k] : "(" + idx[k] + ") * " + std::to_string(st[k]);
+  for (size_t k = 0; k < dims.size(); k++) {
+    if (dims[k].one() || idx[k] == "0") continue;
+    std::string term = st[k].lit && st[k].val == 1 ? idx[k] : "(" + idx[k] + ") * " + (st[k].lit ? st[k].expr : "(" + st[k].expr + ")");
     out += (out.empty() ? "" : " + ") + term;
   }
   return out.empty() ? "0" : out;
@@ -125,9 +171,138 @@ std::string alu2(Op op, DType dt, const std::string& a, const std::string& b) {
   throw Error(std::string("render_c: no C for ") + name(op));
 }
 
+// Symbolic sizes. Each dimension of a node is one of:
+//   Int      an integer (the concrete size is exact);
+//   Sym      the size of symbol `sym` (the representative size is the one of the graph);
+//   Wild     a constant, or a dimension of size 1 that a consumer broadcasts: its size is the consumer's;
+//   Unknown  not known: a dynamic program cannot be written, and the renderer falls back to integer loops.
+struct SymDim {
+  enum Kind { Int, Sym, Wild, Unknown };
+  Kind kind = Int;
+  std::string sym;
+};
+using SymShape = std::vector<SymDim>;
+
+// The symbolic shape of a node that is not an input, from the shapes of its sources. Each rule keeps a symbol only where the
+// size of the dimension is exactly the symbol's size, so the bound of the symbol is the bound of the dimension.
+SymShape sym_rule(const UOp* u, const std::vector<const SymShape*>& src) {
+  const size_t r = u->shape.size();
+  SymShape out(r);
+  // A dimension whose size is 1 and that no symbol names is the integer 1: a constant or a broadcast of size 1 is not a symbol.
+  if (u->op == Op::Const) {
+    for (size_t k = 0; k < r; k++) out[k] = SymDim{u->shape[k] == 1 ? SymDim::Int : SymDim::Wild, ""};
+    return out;
+  }
+  if (is_alu(u->op) || u->op == Op::Cast) {   // all sources have the output's shape, or a size-1 dimension
+    for (size_t k = 0; k < r; k++) {
+      bool unknown = false, wild = false, big = false;
+      std::string sym;
+      for (size_t j = 0; j < src.size(); j++) {
+        const SymDim& e = (*src[j])[k];
+        switch (e.kind) {
+          case SymDim::Unknown: unknown = true; break;
+          case SymDim::Wild: wild = true; break;
+          case SymDim::Sym:
+            if (sym.empty()) sym = e.sym;
+            else if (sym != e.sym) unknown = true;
+            break;
+          case SymDim::Int:
+            if (u->src[j]->shape[k] != 1) big = true;
+            break;
+        }
+      }
+      if (unknown || (big && !sym.empty())) out[k] = SymDim{SymDim::Unknown, ""};
+      else if (!sym.empty()) out[k] = SymDim{SymDim::Sym, sym};
+      else if (big || u->shape[k] == 1) out[k] = SymDim{SymDim::Int, ""};
+      else out[k] = SymDim{wild ? SymDim::Wild : SymDim::Int, ""};
+    }
+    return out;
+  }
+  const SymShape& a = *src[0];
+  const UOp* x = u->src[0];
+  for (const SymDim& d : a) {
+    if (d.kind == SymDim::Unknown) return SymShape(r, SymDim{SymDim::Unknown, ""});
+  }
+  if (is_reduce(u->op)) {   // the reduced axes stay with size 1
+    for (size_t k = 0; k < r; k++) {
+      const bool reduced = std::find(u->arg.begin(), u->arg.end(), static_cast<int64_t>(k)) != u->arg.end();
+      out[k] = reduced ? SymDim{SymDim::Int, ""} : a[k];
+    }
+    return out;
+  }
+  switch (u->op) {
+    case Op::Permute:   // result dimension k is source dimension arg[k]
+      for (size_t k = 0; k < r; k++) out[k] = a[static_cast<size_t>(u->arg[k])];
+      return out;
+    case Op::Flip:
+      return a;
+    case Op::Expand:    // a dimension of size 1 grows: its size is the consumer's, and a symbol cannot grow
+      for (size_t k = 0; k < r; k++) {
+        if (x->shape[k] == u->shape[k]) out[k] = a[k];
+        else out[k] = a[k].kind == SymDim::Sym || a[k].kind == SymDim::Unknown ? SymDim{SymDim::Unknown, ""} : SymDim{SymDim::Wild, ""};
+      }
+      return out;
+    case Op::Shrink:    // arg = starts ++ ends; a symbolic dimension keeps its symbol only when it is not cut
+      for (size_t k = 0; k < r; k++) {
+        const bool whole = u->arg[k] == 0 && u->arg[r + k] == x->shape[k];
+        out[k] = whole ? a[k] : a[k].kind == SymDim::Int ? a[k] : SymDim{SymDim::Unknown, ""};
+      }
+      return out;
+    case Op::Pad:       // arg = before ++ after
+      for (size_t k = 0; k < r; k++) {
+        const bool none = u->arg[k] == 0 && u->arg[r + k] == 0;
+        out[k] = none ? a[k] : a[k].kind == SymDim::Int ? a[k] : SymDim{SymDim::Unknown, ""};
+      }
+      return out;
+    case Op::Reshape: {
+      // Only the leading dimensions up to the last symbolic one may be symbolic: they must keep their sizes, and the rest
+      // (which holds no symbol) is integers. Any other reshape of a symbolic shape is not known.
+      for (const SymDim& d : a) {
+        if (d.kind == SymDim::Wild || d.kind == SymDim::Unknown) return SymShape(r, SymDim{SymDim::Unknown, ""});
+      }
+      int last = -1;
+      for (size_t k = 0; k < a.size(); k++) if (a[k].kind == SymDim::Sym) last = static_cast<int>(k);
+      if (last < 0) return out;   // all integers
+      bool same = u->shape.size() > static_cast<size_t>(last) && x->shape.size() > static_cast<size_t>(last);
+      for (int k = 0; same && k <= last; k++) same = u->shape[k] == x->shape[k];
+      if (!same) return SymShape(r, SymDim{SymDim::Unknown, ""});
+      for (int k = 0; k <= last; k++) out[k] = a[k];
+      return out;
+    }
+    default: break;
+  }
+  return SymShape(r, SymDim{SymDim::Unknown, ""});
+}
+
+// The largest size in bytes of an intermediate, given the bounds of its symbols; false when that is not known (a dimension of
+// unknown meaning, or a symbol without a bound). A Wild dimension is its concrete size when `concrete_wild` (a program with
+// integer loops, where every size is exact), else it is not known.
+bool max_bytes(const UOp* u, const SymShape& s, const std::map<std::string, int64_t>& bounds, bool concrete_wild, int64_t* out) {
+  int64_t n = 1;
+  for (size_t k = 0; k < s.size(); k++) {
+    if (s[k].kind == SymDim::Unknown) return false;
+    if (s[k].kind == SymDim::Wild && !concrete_wild) return false;
+    int64_t d = u->shape[k];
+    if (s[k].kind == SymDim::Sym) {
+      auto it = bounds.find(s[k].sym);
+      if (it == bounds.end()) return false;
+      d = it->second;
+    }
+    if (n > (INT64_MAX / 8) / d) throw Error("render_c: an intermediate would be larger than 2^60 bytes");
+    n *= d;
+  }
+  *out = n * dtype_bytes(u->dtype);
+  return true;
+}
+
+// Thrown by the code generator when a dynamic program needs a dimension that is not known; render_c then renders the graph with
+// integer loops.
+struct Fallback {};
+
 class Renderer {
  public:
-  CProgram run(const std::vector<const UOp*>& roots);
+  explicit Renderer(bool dynamic_allowed) : dyn_requested_(dynamic_allowed) {}
+  CProgram run(const std::vector<const UOp*>& roots, const RenderOptions& options);
 
  private:
   std::vector<const UOp*> order_;
@@ -138,18 +313,54 @@ class Renderer {
   std::vector<CInput> inputs_;
   std::ostringstream body_;
   CProgram prog_;
+  RenderOptions opts_;
+  std::unordered_map<const UOp*, SymShape> syms_;     // symbolic shape of every node
+  bool dyn_requested_;
+  bool dyn_ = false;                                  // the loops are written in the run-time sizes
+  std::map<std::string, int> sym_index_;              // symbol -> its index in `sizes` (dynamic programs)
+  // The kernels (loop nests) are numbered in the order they are generated: def_ is the kernel that writes a realized node,
+  // last_read_ the last kernel that loads it.
+  int cur_kernel_ = 0;
+  std::unordered_map<const UOp*, int> def_, last_read_;
 
   bool cheap(const UOp* n) const {
     if (n->op == Op::Const || n->op == Op::Var) return true;
     if (is_movement(n->op)) return real_.count(n->src[0]) || cheap(n->src[0]);
     return false;
   }
+  // The size of axis k of a node: an integer, or the run-time size of its symbol. Throws Fallback when it is not known.
+  Dim dim(const UOp* n, size_t k) const;
+  std::vector<Dim> dims(const UOp* n) const;
+  std::vector<std::string> sym_names(const UOp* n) const;
   std::string elem(const UOp* n, const Idx& idx, KGen& g);
   std::string elem_op(const UOp* n, const Idx& idx, KGen& g);
   std::string movement(const UOp* n, const Idx& idx, KGen& g);
   std::string cast(const UOp* n, const std::string& a);
   void kernel(const UOp* n, const std::string& out, const char* ctype_name);
 };
+
+Dim Renderer::dim(const UOp* n, size_t k) const {
+  if (!dyn_) return lit_dim(n->shape[k]);
+  const SymDim& d = syms_.at(n)[k];
+  switch (d.kind) {
+    case SymDim::Int: return lit_dim(n->shape[k]);
+    case SymDim::Sym: return Dim{false, 0, "nfc_sz" + std::to_string(sym_index_.at(d.sym))};
+    default: throw Fallback{};
+  }
+}
+
+std::vector<Dim> Renderer::dims(const UOp* n) const {
+  std::vector<Dim> d;
+  for (size_t k = 0; k < n->shape.size(); k++) d.push_back(dim(n, k));
+  return d;
+}
+
+std::vector<std::string> Renderer::sym_names(const UOp* n) const {
+  (void)dims(n);   // throws Fallback when a dimension is not known
+  std::vector<std::string> names;
+  for (const SymDim& s : syms_.at(n)) names.push_back(s.kind == SymDim::Sym ? s.sym : "");
+  return names;
+}
 
 std::string Renderer::cast(const UOp* n, const std::string& a) {
   const DType to = n->dtype, from = n->src[0]->dtype;
@@ -166,7 +377,10 @@ std::string Renderer::cast(const UOp* n, const std::string& a) {
 }
 
 std::string Renderer::elem(const UOp* n, const Idx& idx, KGen& g) {
-  if (real_.count(n)) return buf_.at(n) + "[" + flat(idx, n->shape) + "]";
+  if (real_.count(n)) {
+    last_read_[n] = cur_kernel_;   // kernels are generated in order, so this is the last one that reads n
+    return buf_.at(n) + "[" + flat(idx, dims(n)) + "]";
+  }
   return elem_op(n, idx, g);
 }
 
@@ -176,20 +390,24 @@ std::string Renderer::movement(const UOp* n, const Idx& idx, KGen& g) {
   Idx s(r, "0");
   switch (n->op) {
     case Op::Reshape: {
+      const std::vector<Dim> dn = dims(n), ds = dims(src);
+      bool same = true;
+      for (const Dim& d : dn) same = same && d.lit;
+      for (const Dim& d : ds) same = same && d.lit;
       std::vector<std::pair<size_t, int64_t>> a, b;  // the dimensions above 1, in order
       for (size_t k = 0; k < n->shape.size(); k++) if (n->shape[k] > 1) a.push_back({k, n->shape[k]});
       for (size_t k = 0; k < r; k++) if (src->shape[k] > 1) b.push_back({k, src->shape[k]});
-      bool same = a.size() == b.size();
+      same = same && a.size() == b.size();
       for (size_t k = 0; same && k < a.size(); k++) same = a[k].second == b[k].second;
       if (same) {  // only size-1 dimensions came or went: indices carry over
         for (size_t k = 0; k < a.size(); k++) s[b[k].first] = idx[a[k].first];
       } else {
-        std::string f = g.bind(flat(idx, n->shape));
-        std::vector<int64_t> st = strides_of(src->shape);
+        std::string f = g.bind(flat(idx, dn));
+        std::vector<Dim> st = strides_of(ds);
         for (size_t k = 0; k < r; k++) {
-          if (src->shape[k] == 1) continue;
-          std::string e = "(" + f + " / " + std::to_string(st[k]) + ")";
-          if (k > 0) e = "(" + e + " % " + std::to_string(src->shape[k]) + ")";
+          if (ds[k].one()) continue;
+          std::string e = "(" + f + " / " + st[k].expr + ")";
+          if (k > 0) e = "(" + e + " % " + ds[k].expr + ")";
           s[k] = g.bind(e);
         }
       }
@@ -199,22 +417,27 @@ std::string Renderer::movement(const UOp* n, const Idx& idx, KGen& g) {
       for (size_t k = 0; k < r; k++) s[static_cast<size_t>(n->arg[k])] = idx[k];
       break;
     case Op::Expand:
-      for (size_t k = 0; k < r; k++) s[k] = src->shape[k] == 1 ? "0" : idx[k];
+      for (size_t k = 0; k < r; k++) s[k] = dim(src, k).one() ? "0" : idx[k];
       break;
     case Op::Shrink:
       for (size_t k = 0; k < r; k++) s[k] = n->arg[k] == 0 ? idx[k] : g.bind("(" + idx[k] + " + " + std::to_string(n->arg[k]) + ")");
       break;
     case Op::Flip:
       s = idx;
-      for (int64_t ax : n->arg)
-        if (src->shape[ax] > 1) s[static_cast<size_t>(ax)] = g.bind("(" + std::to_string(src->shape[ax] - 1) + " - " + idx[ax] + ")");
+      for (int64_t ax : n->arg) {
+        const Dim d = dim(src, static_cast<size_t>(ax));
+        if (!(d.lit && d.val <= 1))   // a size-1 dimension is not reversed
+          s[static_cast<size_t>(ax)] = g.bind("(" + (d.lit ? std::to_string(d.val - 1) : "(" + d.expr + " - 1)") + " - " + idx[ax] + ")");
+      }
       break;
     case Op::Pad: {
       std::string cond;
       for (size_t k = 0; k < r; k++) {
         int64_t before = n->arg[k], after = n->arg[r + k];
         if (before == 0 && after == 0) { s[k] = idx[k]; continue; }
-        std::string c = "(" + idx[k] + " >= " + std::to_string(before) + " && " + idx[k] + " < " + std::to_string(before + src->shape[k]) + ")";
+        const Dim d = dim(src, k);
+        const std::string upper = d.lit ? std::to_string(before + d.val) : "(" + d.expr + " + " + std::to_string(before) + ")";
+        std::string c = "(" + idx[k] + " >= " + std::to_string(before) + " && " + idx[k] + " < " + upper + ")";
         cond += (cond.empty() ? "" : " && ") + c;
         s[k] = before == 0 ? idx[k] : g.bind("(" + idx[k] + " - " + std::to_string(before) + ")");
       }
@@ -229,7 +452,7 @@ std::string Renderer::elem_op(const UOp* n, const Idx& idx, KGen& g) {
   const DType dt = n->dtype;
   const std::string T = ctype(dt);
   if (n->op == Op::Const) return lit(n->value);
-  if (n->op == Op::Var) return "in_" + std::to_string(in_index_.at(n->name)) + "[" + flat(idx, n->shape) + "]";
+  if (n->op == Op::Var) return "in_" + std::to_string(in_index_.at(n->name)) + "[" + flat(idx, dims(n)) + "]";
   if (is_movement(n->op)) return movement(n, idx, g);
   if (is_reduce(n->op)) throw Error("render_c: a reduction must be materialized");
   auto S = [&](size_t k) { return elem(n->src[k], idx, g); };
@@ -251,17 +474,20 @@ std::string Renderer::elem_op(const UOp* n, const Idx& idx, KGen& g) {
 
 void Renderer::kernel(const UOp* n, const std::string& out, const char*) {
   const Shape& shape = n->shape;
+  const std::vector<Dim> dn = dims(n);
   std::ostringstream& o = body_;
+  cur_kernel_ = prog_.kernels;
+  def_[n] = cur_kernel_;
   o << "  { /* " << name(n->op) << " " << name(n->dtype) << to_string(shape) << " */\n";
   Idx idx(shape.size(), "0");
   int depth = 2;
   auto pad = [&](int d) { return std::string(static_cast<size_t>(d) * 2, ' '); };
   for (size_t k = 0; k < shape.size(); k++) {
-    if (shape[k] == 1) continue;
+    if (dn[k].one()) continue;
     idx[k] = "i" + std::to_string(k);
-    o << pad(depth++) << "for (int64_t " << idx[k] << " = 0; " << idx[k] << " < " << shape[k] << "; " << idx[k] << "++) {\n";
+    o << pad(depth++) << "for (int64_t " << idx[k] << " = 0; " << idx[k] << " < " << dn[k].expr << "; " << idx[k] << "++) {\n";
   }
-  const std::string store = out + "[" + flat(idx, shape) + "]";
+  const std::string store = out + "[" + flat(idx, dn) + "]";
   if (!is_reduce(n->op)) {
     KGen g;
     std::string v = elem_op(n, idx, g);
@@ -269,18 +495,20 @@ void Renderer::kernel(const UOp* n, const std::string& out, const char*) {
     o << pad(depth) << store << " = " << v << ";\n";
   } else {
     const UOp* src = n->src[0];
+    const std::vector<Dim> ds = dims(src);
     const std::string T = ctype(n->dtype);
     Idx sidx = idx;
     std::vector<size_t> loops;
     for (int64_t ax : n->arg) {
-      sidx[static_cast<size_t>(ax)] = src->shape[ax] > 1 ? "r" + std::to_string(ax) : "0";
-      if (src->shape[ax] > 1) loops.push_back(static_cast<size_t>(ax));
+      const size_t a = static_cast<size_t>(ax);
+      sidx[a] = ds[a].lit && ds[a].val <= 1 ? "0" : "r" + std::to_string(ax);
+      if (!(ds[a].lit && ds[a].val <= 1)) loops.push_back(a);
     }
     KGen g;
     std::string v = elem(src, sidx, g);
     o << pad(depth) << "{ " << T << " acc = 0; int first = 1;\n";
     int d2 = depth + 1;
-    for (size_t ax : loops) o << pad(d2++) << "for (int64_t r" << ax << " = 0; r" << ax << " < " << src->shape[ax] << "; r" << ax << "++) {\n";
+    for (size_t ax : loops) o << pad(d2++) << "for (int64_t r" << ax << " = 0; r" << ax << " < " << ds[ax].expr << "; r" << ax << "++) {\n";
     for (const std::string& s : g.stmts) o << pad(d2) << s << "\n";
     o << pad(d2) << T << " v = " << v << ";\n";
     o << pad(d2) << "if (first) { acc = v; first = 0; } else acc = "
@@ -288,13 +516,14 @@ void Renderer::kernel(const UOp* n, const std::string& out, const char*) {
     for (size_t k = 0; k < loops.size(); k++) o << pad(--d2) << "}\n";
     o << pad(depth) << store << " = acc; }\n";
   }
-  for (size_t k = 0; k < shape.size(); k++) if (shape[k] != 1) o << pad(--depth) << "}\n";
+  for (size_t k = 0; k < shape.size(); k++) if (!dn[k].one()) o << pad(--depth) << "}\n";
   o << "  }\n";
   prog_.kernels++;
 }
 
-CProgram Renderer::run(const std::vector<const UOp*>& roots) {
+CProgram Renderer::run(const std::vector<const UOp*>& roots, const RenderOptions& options) {
   if (roots.empty()) throw Error("render_c: no outputs");
+  opts_ = options;
   // the nodes, sources first, each once
   std::unordered_set<const UOp*> seen;
   for (const UOp* r : roots)
@@ -313,7 +542,64 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
     }
   for (const auto& kv : vars) {
     in_index_[kv.first] = static_cast<int>(inputs_.size());
-    inputs_.push_back(CInput{kv.first, kv.second->dtype, kv.second->shape});
+    inputs_.push_back(CInput{kv.first, kv.second->dtype, kv.second->shape, {}});
+  }
+  // symbolic shapes: the inputs carry the symbols of RenderOptions, the others follow from their sources
+  for (const auto& b : opts_.symbol_bounds) {
+    if (b.second < 1) throw Error("render_c: the bound of " + b.first + " is " + std::to_string(b.second) + ", below 1");
+  }
+  for (const auto& kv : opts_.input_symbols) {
+    if (!vars.count(kv.first)) throw Error("render_c: input_symbols names " + kv.first + ", which is not an input of the graph");
+  }
+  for (const UOp* u : order_) {
+    if (u->op == Op::Var) {
+      SymShape s(u->shape.size());
+      auto it = opts_.input_symbols.find(u->name);
+      if (it != opts_.input_symbols.end()) {
+        if (it->second.size() != u->shape.size()) {
+          throw Error("render_c: input_symbols of " + u->name + " has " + std::to_string(it->second.size()) + " entries for " +
+                      std::to_string(u->shape.size()) + " dimensions");
+        }
+        for (size_t k = 0; k < s.size(); k++) {
+          if (it->second[k].empty()) continue;
+          s[k] = SymDim{SymDim::Sym, it->second[k]};
+          auto b = opts_.symbol_bounds.find(it->second[k]);
+          if (b != opts_.symbol_bounds.end() && u->shape[k] > b->second) {
+            throw Error("render_c: input " + u->name + " has size " + std::to_string(u->shape[k]) + " in dimension " +
+                        std::to_string(k) + ", above the bound " + std::to_string(b->second) + " of " + it->second[k]);
+          }
+        }
+      }
+      syms_[u] = s;
+    } else {
+      std::vector<const SymShape*> src;
+      for (const UOp* s : u->src) src.push_back(&syms_.at(s));
+      syms_[u] = sym_rule(u, src);
+    }
+  }
+  // The symbols of the inputs, each with its representative size: they must agree wherever they are named.
+  std::map<std::string, int64_t> rep;
+  for (const auto& kv : vars) {
+    const SymShape& s = syms_.at(kv.second);
+    for (size_t k = 0; k < s.size(); k++) {
+      if (s[k].kind != SymDim::Sym) continue;
+      auto ins = rep.insert({s[k].sym, kv.second->shape[k]});
+      if (!ins.second && ins.first->second != kv.second->shape[k]) {
+        throw Error("render_c: the symbol " + s[k].sym + " names dimensions of sizes " + std::to_string(ins.first->second) + " and " +
+                    std::to_string(kv.second->shape[k]));
+      }
+    }
+  }
+  // The dynamic form: the loops are written in the symbols' run-time sizes (if there are symbols at all).
+  dyn_ = dyn_requested_ && !rep.empty();
+  prog_.dynamic = dyn_;
+  if (dyn_) {
+    for (const auto& kv : rep) {
+      sym_index_[kv.first] = static_cast<int>(prog_.symbols.size());
+      auto b = opts_.symbol_bounds.find(kv.first);
+      prog_.symbols.push_back(CProgram::Symbol{kv.first, kv.second, b == opts_.symbol_bounds.end() ? 0 : b->second});
+    }
+    for (const auto& kv : vars) inputs_[static_cast<size_t>(in_index_.at(kv.first))].syms = sym_names(kv.second);
   }
   // what is stored in a buffer
   for (const UOp* u : order_) {
@@ -327,27 +613,23 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
   std::unordered_map<const UOp*, int> out_slot;
   std::vector<std::pair<const UOp*, int>> dup;  // (root, output index) that copy another output
   for (size_t k = 0; k < roots.size(); k++) {
-    prog_.outputs.push_back(COutput{roots[k]->dtype, roots[k]->shape});
+    prog_.outputs.push_back(COutput{roots[k]->dtype, roots[k]->shape, dyn_ ? sym_names(roots[k]) : std::vector<std::string>{}});
     if (!out_slot.count(roots[k])) out_slot[roots[k]] = static_cast<int>(k);
     else dup.push_back({roots[k], static_cast<int>(k)});
   }
-  std::ostringstream decl, release;
-  int tmps = 0;
+  // every intermediate is named by its index here; where it lives is decided after the kernels, when they are all known
+  std::vector<const UOp*> temps;
   for (const UOp* u : order_) {
     if (!real_.count(u)) continue;
-    if (u->op == Op::Const || u->op == Op::Var) { /* output copies only */ }
     auto os = out_slot.find(u);
     if (os != out_slot.end()) {
       buf_[u] = "o" + std::to_string(os->second);
     } else {
-      buf_[u] = "tmp" + std::to_string(tmps);
-      decl << "  " << ctype(u->dtype) << "* tmp" << tmps << " = (" << ctype(u->dtype) << "*)malloc(sizeof(" << ctype(u->dtype) << ") * "
-           << numel(u->shape) << "); if (!tmp" << tmps << ") rc = 1;\n";
-      release << "  free(tmp" << tmps << ");\n";
-      tmps++;
+      buf_[u] = "tmp" + std::to_string(temps.size());
+      temps.push_back(u);
     }
   }
-  prog_.temporaries = tmps;
+  prog_.temporaries = static_cast<int>(temps.size());
   // kernels in order; a leaf output is a copy
   for (const UOp* u : order_) {
     if (!real_.count(u)) continue;
@@ -358,10 +640,66 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
   }
   for (const auto& d : dup) {  // an output given twice
     const std::string from = buf_.at(d.first), to = "o" + std::to_string(d.second);
-    body_ << "  memcpy(" << to << ", " << from << ", sizeof(" << ctype(d.first->dtype) << ") * " << numel(d.first->shape) << ");\n";
+    body_ << "  memcpy(" << to << ", " << from << ", sizeof(" << ctype(d.first->dtype) << ") * " << numel_expr(dims(d.first)) << ");\n";
+  }
+  // Placement. An intermediate is planned when its largest size is known. It is live from the kernel that writes it to the
+  // last kernel that loads it, and the planner gives it a slot in one arena so that live-at-the-same-time intermediates do not
+  // overlap. The others keep a malloc of their own, as before.
+  std::vector<int64_t> slot(temps.size(), 0);  // bytes reserved in the arena (rounded up to kAlign), for the planned ones
+  std::vector<bool> planned(temps.size(), false);
+  std::vector<ArenaTensor> tensors;
+  for (size_t t = 0; t < temps.size(); t++) {
+    const UOp* u = temps[t];
+    int64_t bytes = 0;
+    if (!max_bytes(u, syms_.at(u), opts_.symbol_bounds, !dyn_, &bytes)) {
+      prog_.unplanned++;
+      continue;
+    }
+    const int start = def_.at(u);
+    auto lr = last_read_.find(u);
+    ArenaTensor at;
+    at.name = planner_name(t);
+    at.size = (bytes + kAlign - 1) / kAlign * kAlign;
+    at.start = start;
+    at.end = lr == last_read_.end() ? start : std::max(start, lr->second);
+    slot[t] = at.size;
+    planned[t] = true;
+    tensors.push_back(at);
+    prog_.naive_bytes += at.size;
+  }
+  const ArenaPlan plan = plan_arena(tensors, kAlign);
+  prog_.arena_bytes = plan.arena_bytes;
+  // The check that makes a bound safe: each planned intermediate must fit the slot its bound gave it.
+  for (size_t t = 0; t < temps.size(); t++) {
+    if (!planned[t]) continue;
+    const int64_t need = numel(temps[t]->shape) * dtype_bytes(temps[t]->dtype);
+    if (need > slot[t]) {
+      throw Error("render_c: an intermediate of " + to_string(temps[t]->shape) + " needs " + std::to_string(need) + " bytes, its arena slot has " +
+                  std::to_string(slot[t]) + " (a symbol bound is below its size, or a symbolic size was inferred wrongly)");
+    }
+  }
+  // The declarations: one arena (if any), the mallocs of the unplanned intermediates, then the typed pointers into the arena.
+  std::ostringstream decl, release;
+  if (prog_.arena_bytes > 0) {
+    decl << "  uint8_t* arena = (uint8_t*)malloc(" << prog_.arena_bytes << ");\n  if (!arena) rc = 1;\n";
+    release << "  free(arena);\n";
+  }
+  for (size_t t = 0; t < temps.size(); t++) {
+    if (planned[t]) continue;
+    const UOp* u = temps[t];
+    decl << "  " << ctype(u->dtype) << "* tmp" << t << " = (" << ctype(u->dtype) << "*)malloc(sizeof(" << ctype(u->dtype) << ") * "
+         << numel_expr(dims(u)) << "); if (!tmp" << t << ") rc = 1;\n";
+    release << "  free(tmp" << t << ");\n";
+  }
+  decl << "  if (rc) goto done;\n";
+  for (size_t t = 0; t < temps.size(); t++) {
+    if (!planned[t]) continue;
+    const UOp* u = temps[t];
+    decl << "  " << ctype(u->dtype) << "* tmp" << t << " = (" << ctype(u->dtype) << "*)(arena + " << plan.offsets.at(planner_name(t)) << ");\n";
   }
   std::ostringstream src;
-  src << "/* generated by nfcuop (render_c): " << prog_.kernels << " loop nest(s), " << tmps << " temporary buffer(s) */\n"
+  src << "/* generated by nfcuop (render_c): " << prog_.kernels << " loop nest(s), " << temps.size() << " intermediate buffer(s) ("
+      << prog_.arena_bytes << " arena byte(s), " << prog_.unplanned << " malloc'd) */\n"
       << "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n\n"
       << "static inline int32_t nfc_max_i32(int32_t a, int32_t b) { return a > b ? a : b; }\n"
       << "static inline int64_t nfc_max_i64(int64_t a, int64_t b) { return a > b ? a : b; }\n"
@@ -374,12 +712,18 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
       << "static inline int64_t nfc_mod_i64(int64_t a, int64_t b) { return (b == 0 || b == -1) ? 0 : a % b; }\n"
       << "static inline int32_t nfc_wrap32(int64_t v) { return (int32_t)(uint32_t)(uint64_t)v; }\n"
       << "static inline int32_t nfc_f2i32(double v) { if (v != v) return 0; if (v >= 2147483647.0) return INT32_MAX; if (v <= -2147483648.0) return INT32_MIN; return (int32_t)v; }\n"
-      << "static inline int64_t nfc_f2i64(double v) { if (v != v) return 0; if (v >= 9223372036854775808.0) return INT64_MAX; if (v <= -9223372036854775808.0) return INT64_MIN; return (int64_t)v; }\n\n"
-      << "int nfcuop_run(const void* const* in, void* const* out) {\n  int rc = 0;\n";
+      << "static inline int64_t nfc_f2i64(double v) { if (v != v) return 0; if (v >= 9223372036854775808.0) return INT64_MAX; if (v <= -9223372036854775808.0) return INT64_MIN; return (int64_t)v; }\n\n";
+  if (dyn_) {
+    src << "int nfcuop_run(const void* const* in, void* const* out, const int64_t* sizes) {\n  int rc = 0;\n";
+    for (size_t j = 0; j < prog_.symbols.size(); j++)
+      src << "  const int64_t nfc_sz" << j << " = sizes[" << j << "];  /* " << prog_.symbols[j].name << " */\n";
+  } else {
+    src << "int nfcuop_run(const void* const* in, void* const* out) {\n  int rc = 0;\n";
+  }
   for (size_t k = 0; k < inputs_.size(); k++)
     src << "  const " << ctype(inputs_[k].dtype) << "* in_" << k << " = (const " << ctype(inputs_[k].dtype) << "*)in[" << k << "];  /* " << inputs_[k].name << " */\n";
   for (size_t k = 0; k < roots.size(); k++) src << "  " << ctype(roots[k]->dtype) << "* o" << k << " = (" << ctype(roots[k]->dtype) << "*)out[" << k << "];\n";
-  src << decl.str() << "  if (rc) goto done;\n" << body_.str() << "done:\n" << release.str() << "  return rc;\n}\n";
+  src << decl.str() << body_.str() << "done:\n" << release.str() << "  return rc;\n}\n";
   prog_.source = src.str();
   prog_.inputs = inputs_;
   return prog_;
@@ -387,9 +731,15 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
 
 }  // namespace
 
-CProgram render_c(const std::vector<const UOp*>& roots) {
-  Renderer r;
-  return r.run(roots);
+CProgram render_c(const std::vector<const UOp*>& roots, const RenderOptions& options) {
+  try {
+    Renderer r(true);
+    return r.run(roots, options);
+  } catch (const Fallback&) {
+    // a dimension that the run-time sizes cannot be written in: the integer loops of the graph as built
+    Renderer r(false);
+    return r.run(roots, options);
+  }
 }
 
 // ---- compiling and running ----
@@ -431,12 +781,16 @@ std::shared_ptr<CModule> CModule::compile(const CProgram& p, const std::string& 
   std::string err = h ? "" : dlerror();
   cleanup();
   if (!h) throw Error("CModule: dlopen failed: " + err);
-  auto fn = reinterpret_cast<int (*)(const void* const*, void* const*)>(dlsym(h, "nfcuop_run"));
-  if (!fn) { dlclose(h); throw Error("CModule: nfcuop_run not found"); }
   std::shared_ptr<CModule> m(new CModule());
+  if (p.dynamic) {
+    m->dyn_fn_ = reinterpret_cast<int (*)(const void* const*, void* const*, const int64_t*)>(dlsym(h, "nfcuop_run"));
+    if (!m->dyn_fn_) { dlclose(h); throw Error("CModule: nfcuop_run not found"); }
+  } else {
+    m->fn_ = reinterpret_cast<int (*)(const void* const*, void* const*)>(dlsym(h, "nfcuop_run"));
+    if (!m->fn_) { dlclose(h); throw Error("CModule: nfcuop_run not found"); }
+  }
   m->prog_ = p;
   m->handle_ = h;
-  m->fn_ = fn;
   return m;
 }
 
@@ -485,25 +839,60 @@ Array from_raw(DType d, const Shape& shape, const unsigned char* raw) {
 }  // namespace
 
 std::vector<Array> CModule::run(const std::map<std::string, Array>& feeds) const {
+  // the run-time size of each symbol, from the feeds (dynamic programs)
+  std::map<std::string, int64_t> value;
   std::vector<std::vector<unsigned char>> in_raw, out_raw;
   std::vector<const void*> in_ptr;
   for (const CInput& in : prog_.inputs) {
     auto it = feeds.find(in.name);
     if (it == feeds.end()) throw Error("CModule: no value for input " + in.name);
-    if (it->second.dtype != in.dtype || it->second.shape != in.shape)
-      throw Error("CModule: input " + in.name + " is " + name(in.dtype) + to_string(in.shape) + ", given " + name(it->second.dtype) + to_string(it->second.shape));
-    in_raw.push_back(to_raw(it->second));
+    const Array& a = it->second;
+    if (a.dtype != in.dtype)
+      throw Error("CModule: input " + in.name + " is " + name(in.dtype) + to_string(in.shape) + ", given " + name(a.dtype) + to_string(a.shape));
+    if (!prog_.dynamic) {
+      if (a.shape != in.shape)
+        throw Error("CModule: input " + in.name + " is " + name(in.dtype) + to_string(in.shape) + ", given " + name(a.dtype) + to_string(a.shape));
+    } else {
+      if (a.shape.size() != in.shape.size())
+        throw Error("CModule: input " + in.name + " has rank " + std::to_string(in.shape.size()) + ", given " + std::to_string(a.shape.size()));
+      for (size_t k = 0; k < in.shape.size(); k++) {
+        if (in.syms[k].empty()) {
+          if (a.shape[k] != in.shape[k])
+            throw Error("CModule: input " + in.name + " has size " + std::to_string(in.shape[k]) + " in dimension " + std::to_string(k) + ", given " +
+                        std::to_string(a.shape[k]));
+          continue;
+        }
+        if (a.shape[k] < 1) throw Error("CModule: input " + in.name + " has size " + std::to_string(a.shape[k]) + " in dimension " + std::to_string(k));
+        auto ins = value.insert({in.syms[k], a.shape[k]});
+        if (!ins.second && ins.first->second != a.shape[k])
+          throw Error("CModule: the symbol " + in.syms[k] + " is " + std::to_string(ins.first->second) + " and " + std::to_string(a.shape[k]) + " in the feeds");
+      }
+    }
+    in_raw.push_back(to_raw(a));
     in_ptr.push_back(in_raw.back().data());
   }
+  std::vector<int64_t> sizes;
+  for (const CProgram::Symbol& s : prog_.symbols) {
+    const int64_t v = value.at(s.name);
+    if (s.bound != 0 && v > s.bound)
+      throw Error("CModule: the symbol " + s.name + " is " + std::to_string(v) + ", above its bound " + std::to_string(s.bound));
+    sizes.push_back(v);
+  }
+  std::vector<Shape> out_shape;
   std::vector<void*> out_ptr;
   for (const COutput& o : prog_.outputs) {
+    Shape shape = o.shape;
+    if (prog_.dynamic)
+      for (size_t k = 0; k < shape.size(); k++) if (!o.syms[k].empty()) shape[k] = value.at(o.syms[k]);
     size_t sz = o.dtype == DType::Bool ? 1 : (o.dtype == DType::Int32 || o.dtype == DType::Float32) ? 4 : 8;
-    out_raw.emplace_back(sz * static_cast<size_t>(numel(o.shape)) + 8);
+    out_raw.emplace_back(sz * static_cast<size_t>(numel(shape)) + 8);
     out_ptr.push_back(out_raw.back().data());
+    out_shape.push_back(shape);
   }
-  if (fn_(in_ptr.data(), out_ptr.data()) != 0) throw Error("CModule: the generated code failed to allocate memory");
+  const int rc = prog_.dynamic ? dyn_fn_(in_ptr.data(), out_ptr.data(), sizes.data()) : fn_(in_ptr.data(), out_ptr.data());
+  if (rc != 0) throw Error("CModule: the generated code failed to allocate memory");
   std::vector<Array> out;
-  for (size_t k = 0; k < prog_.outputs.size(); k++) out.push_back(from_raw(prog_.outputs[k].dtype, prog_.outputs[k].shape, out_raw[k].data()));
+  for (size_t k = 0; k < prog_.outputs.size(); k++) out.push_back(from_raw(prog_.outputs[k].dtype, out_shape[k], out_raw[k].data()));
   return out;
 }
 

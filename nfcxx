@@ -26,18 +26,19 @@ root=$(cd "$(dirname "$0")" && pwd)
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 
+source "$root/scripts/host-sys.sh"   # host_dialect, host_clang_version, host_sys_includes, host_gnu_version
 sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=()
-dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
+dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
 obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
-sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); isa=()
+sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); isa=(); cuda_opts=()
 # A .cu input is rewritten to C++ before the front end (scripts/cuda-rewrite.rb: launches become calls of
 # __nfcxx_cuda_launch), and the runtime helper lib/cuda/nfcxx_cuda.h is included first. The copy goes in a temp
 # directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
@@ -63,7 +64,7 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     mkdir -p "$dir"
   fi
   local src copy i sdir
-  for src in "${cu_inputs[@]}"; do
+  for src in ${cu_inputs[@]+"${cu_inputs[@]}"}; do
     # The copy is not next to the source, so quoted includes that are relative to the source (`#include "../x.cuh"`
     # in a .cu, and in the headers it includes) are found through the source's own directory, as a user -I.
     sdir=$(realpath -- "$(dirname -- "$src")")
@@ -75,25 +76,52 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
   done
 }
+# A CUDA_HOME outside /usr is still a system directory for the rewriter (its headers are not inlined into the device unit),
+# so a CUDA_HOME-shaped directory from PyPI wheels (scripts/fetch-cudart-wheel.sh) behaves like the toolkit's.
+[ -n "${CUDA_HOME:-}" ] && export NFCXX_SYSTEM_PATHS="$CUDA_HOME${NFCXX_SYSTEM_PATHS:+:$NFCXX_SYSTEM_PATHS}"
+# The rewriter: the C++ port (build/cuda-rewrite, built from tools/cuda-rewrite on first use) by default; the Ruby
+# reference scripts/cuda-rewrite.rb with NFCXX_CUDA_REWRITER=ruby. Both take the same flags and give the same output.
+rewriter=()
+if [ "${NFCXX_CUDA_REWRITER:-cxx}" = ruby ]; then
+  rewriter=("$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb")
+else
+  [ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit $?
+  rewriter=("$root/build/cuda-rewrite")
+fi
 cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, with the device image appended
   local src=$1 copy=$2
   local base; base=$(basename "$src" .cu)
   # The -I directories: the rewriter inlines the project headers they name (quoted and angle-bracket includes).
-  local incs=(); local f; for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*) incs+=("$f");; esac; done
+  local incs=(); local f; for f in ${cflags[@]+${cflags[@]+"${cflags[@]}"}}; do case $f in -I*) incs+=("$f");; esac; done
   # Kernel name obfuscation: one seed for both copies of the file (the host copy and the device unit must agree).
   local obf=(); if [ "$obfuscate" = 1 ]; then obf=(--obfuscate="${NFCXX_OBFUSCATE_SEED:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"); fi
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} ${obf[@]+"${obf[@]}"} "$src" > "$copy" || exit $?
+  # The front end parses the plain kernel launches (EDG --cuda, 3rd/edg); the rewriter leaves them. Launches with
+  # template arguments are still rewritten here, and the device unit is unchanged. On by default, for .cu inputs only
+  # (this function); NFCXX_CUDA_EDG_LAUNCH=0 restores the rewriter's own launch rewrite.
+  local rw=()
+  if [ "${NFCXX_CUDA_EDG_LAUNCH:-1}" = 1 ]; then
+    rw+=(--edg-launches)
+    # An eccp argument, not the environment: the prelinker re-runs the front end on this copy at link time with the
+    # options recorded at compile time, and it must see --cuda there too (see the eccp call below).
+    cuda_opts=(--cuda)
+  fi
+  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
-  "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   # The kernels are the names cuda-rewrite.rb listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
-  "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" --sm=$sm ${kopts[@]+"${kopts[@]}"} "$dev.ir" > "$dev.ptx" || exit $?
-  "$ptxas" -arch=sm_$sm "$dev.ptx" -o "$dev.cubin" || exit $?
-  "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.cubin" "$dev.ir" "$dev.kernels" >> "$copy" || exit $?
+  "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" --sm=$sm ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" > "$dev.ptx" || exit $?
+  # NFCXX_CUDA_JIT=1: the image is the PTX text, loaded by the runtime's JIT (cudaLibraryLoadData); ptxas is not run.
+  if [ "${NFCXX_CUDA_JIT:-0}" = 1 ]; then
+    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.ptx" "$dev.ir" "$dev.kernels" >> "$copy" || exit $?
+  else
+    "$ptxas" -arch=sm_$sm "$dev.ptx" -o "$dev.cubin" || exit $?
+    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.cubin" "$dev.ir" "$dev.kernels" >> "$copy" || exit $?
+  fi
 }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -165,9 +193,9 @@ if [ $preprocess = 1 ]; then
   pp_out=(); [ $outset = 0 ] || pp_out=(-o "$out")
   pp_x=(); [ -z "$xlang" ] || pp_x=(-x "$xlang")
   pp_in=(); [ $stdin_src = 0 ] || pp_in=(-)
-  pp_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pp_pre+=(-include "$f"); done
-  exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+"${pp_x[@]}"} ${ppflags[@]+"${ppflags[@]}"} ${cflags[@]+"${cflags[@]}"} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+"${pp_pre[@]}"} ${srcs[@]+"${srcs[@]}"} ${pp_in[@]+"${pp_in[@]}"} "${pp_out[@]}"
+  pp_pre=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do pp_pre+=(-include "$f"); done
+  exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+${pp_x[@]+"${pp_x[@]}"}} ${ppflags[@]+${ppflags[@]+"${ppflags[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
+    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+${pp_pre[@]+"${pp_pre[@]}"}} ${srcs[@]+${srcs[@]+"${srcs[@]}"}} ${pp_in[@]+${pp_in[@]+"${pp_in[@]}"}} ${pp_out[@]+"${pp_out[@]}"}
 fi
 if [ $stdin_src = 1 ]; then
   echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
@@ -192,7 +220,7 @@ if [ $asan = 1 ]; then
     qbe) export NFCXX_ASAN=1 ;;
     *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
   esac
-  asan_c=(-fsanitize=address -fno-omit-frame-pointer ${asanopts[@]+"${asanopts[@]}"})
+  asan_c=(-fsanitize=address -fno-omit-frame-pointer ${asanopts[@]+${asanopts[@]+"${asanopts[@]}"}})
 else
   asanopts=()
 fi
@@ -223,15 +251,21 @@ else
   # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
   # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
   hosted_libs=(--c_to_obj_lib=m)
+  # macOS has libc++, not libstdc++: the link needs it explicitly (eccp's Linux default is libstdc++).
+  [ "$(uname -s)" = Darwin ] && hosted_libs+=(--c_to_obj_lib=c++)
   if [ -z "$gnu" ]; then
     gnu=$(host_gnu_version)
   fi
 fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
-for d in ${sysdirs[@]+"${sysdirs[@]}"}; do sys_inc+=("--sys_include=$d"); done
-pre_opts=(); for f in ${preinc[@]+"${preinc[@]}"}; do pre_opts+=(--preinclude "$f"); done
+for d in ${sysdirs[@]+${sysdirs[@]+"${sysdirs[@]}"}}; do sys_inc+=("--sys_include=$d"); done
+pre_opts=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do pre_opts+=(--preinclude "$f"); done
 gnu_opts=()
-[ -n "$gnu" ] && gnu_opts=(--gnu_version="$gnu")
+if [ "$dialect" = clang ]; then
+  cv=$(host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
+elif [ -n "$gnu" ]; then
+  gnu_opts=(--gnu_version="$gnu")
+fi
 [ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
 
 if [ $emit_c = 1 ] && [ ${#cfiles[@]} -gt 0 ]; then
@@ -243,13 +277,14 @@ if [ $emit_c = 1 ]; then
   tmp=$(mktemp -d); trap 'rm -rf "$tmp" "$cudatmp"; trace_finish' EXIT
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
-  inc=(${sys_inc[@]+"${sys_inc[@]}"} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
+  inc=(${sys_inc[@]+${sys_inc[@]+"${sys_inc[@]}"}} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
   # The user's -I directories (kept in files, with the other options) go in front, as eccp puts them.
   # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
-  for x in ${files[@]+"${files[@]}"}; do case $x in -I?*) inc=("-I$(realpath -m "${x#-I}")" ${inc[@]+"${inc[@]}"}) ;; esac; done
+  for x in ${files[@]+${files[@]+"${files[@]}"}}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+${inc[@]+"${inc[@]}"}}) ;; esac; done
   t=$(trace_start)
-  (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
-      "${inc[@]}" --gen_c_file_name="$tmp/out.c" "$f")
+  posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)   # as the macOS base
+  (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${gnu_opts[@]+"${gnu_opts[@]}"} \
+      ${inc[@]+"${inc[@]}"} --gen_c_file_name="$tmp/out.c" "$f")
   trace_end "$t" "cpfe --emit-c (front end)" frontend
   cat "$tmp/out.c"
   exit 0
@@ -258,7 +293,7 @@ fi
 if [ -n "$sanitize" ]; then
   # The checks live in the Path B IR (docs/notes/ubsan.md); the names are gcc's, and not every one is implemented.
   IFS=, read -ra sz <<< "$sanitize"
-  for c in "${sz[@]}"; do
+  for c in ${sz[@]+"${sz[@]}"}; do
     case $c in
       undefined|signed-integer-overflow|integer-divide-by-zero|shift|bounds|null|unreachable|return|float-cast-overflow) ;;
       *) echo "nfcxx: -fsanitize=$c is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)" >&2; exit 2 ;;
@@ -292,6 +327,8 @@ if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncp
   s=$("$root/scripts/ehshim") || s=""
   trace_end "$t" "EH shim" driver
   [ -z "$s" ] || shim=("$s")
+  # macOS: the thunks that pass the result of libc++'s class-returning functions in x8 (scripts/darwin-sret.sh)
+  if [ "$(uname -s)" = Darwin ]; then shim+=("$("$root/scripts/darwin-sret.sh")"); fi
   rtlib=(-lC)
   if [ $asan = 1 ]; then
     t=$(trace_start)
@@ -308,16 +345,16 @@ picopts=(); ldopts=()
 # (gcc -mavx2 defines __AVX2__, which the intrinsic headers test). Each macro goes in files, as a -D option does, so
 # eccp passes it to both the front end and the C compile. Macros with arguments are not passed.
 if [ ${#isa[@]} -gt 0 ]; then
-  for o in "${isa[@]}"; do picopts+=(--c_to_obj_option "$o"); done
+  for o in ${isa[@]+"${isa[@]}"}; do picopts+=(--c_to_obj_option "$o"); done
   while IFS= read -r d; do files+=("$d"); done < <(
-    comm -13 <(gcc -dM -E -x c /dev/null | sort) <(gcc "${isa[@]}" -dM -E -x c /dev/null | sort) \
+    comm -13 <(gcc -dM -E -x c /dev/null | sort) <(gcc ${isa[@]+"${isa[@]}"} -dM -E -x c /dev/null | sort) \
       | sed -n 's/^#define \([^ (]*\) */-D\1=/p')
 fi
 [ $pic = 0 ] || { picopts=(--c_to_obj_option -fPIC); cflags_pic=(-fPIC); }
 [ $rdynamic = 0 ] || picopts+=(--c_to_obj_option -rdynamic)
 [ $pthread = 0 ] || picopts+=(--c_to_obj_option -pthread)
-picopts+=(${pie_opts[@]+"${pie_opts[@]}"})
-for o in ${asan_c[@]+"${asan_c[@]}"}; do picopts+=(--c_to_obj_option "$o"); done
+picopts+=(${pie_opts[@]+${pie_opts[@]+"${pie_opts[@]}"}})
+for o in ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}}; do picopts+=(--c_to_obj_option "$o"); done
 [ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
 
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
@@ -325,13 +362,13 @@ cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
   ctmp=$(mktemp -d); trap 'rm -rf "$ctmp" "$cudatmp"; trace_finish' EXIT
   n=0
-  for c in "${cfiles[@]}"; do
+  for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
     t=$(trace_start)
     if [ $backend != gcc ]; then
-      NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
+      NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     else
-      gcc -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+"${asan_c[@]}"} ${cflags_pic[@]+"${cflags_pic[@]}"} ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
+      gcc -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     fi
     trace_end "$t" "C input: $c" cinput
     cobjs+=("$o")
@@ -348,8 +385,8 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   if [ $ncpp = 0 ] && { [ $nobj = 0 ] || [ ! -x "$edg/eccp" ]; }; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
-    if [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
-    else gcc ${asan_c[@]+"${asan_c[@]}"} ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"; fi
+    if [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
+    else gcc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
   fi
@@ -360,13 +397,13 @@ fi
 if [ $backend = pathb ]; then
   ptmp=$(mktemp -d); trap 'rm -rf "$ptmp" "$cudatmp"; trace_finish' EXIT
   pobjs=(); plink=(); n=0
-  for f in "${files[@]}"; do
+  for f in ${files[@]+"${files[@]}"}; do
     case $f in
       -I*|-D*|-U*) ;;                       # reach pathb-cc through cflags
       -*|*.o|*.a|*.so) plink+=("$f") ;;
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
-         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+"${cflags[@]}"} "$f" -o "$o"
+         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$o"
          trace_end "$t" "Path B: $f" pathb
          pobjs+=("$o") ;;
     esac
@@ -374,7 +411,7 @@ if [ $backend = pathb ]; then
   t=$(trace_start)
   # libnfcxxld.a: the long double helpers and nothing else (scripts/pathb-ldrt, docs/notes/pathb-longdouble.md)
   ldrt=$("$root/scripts/pathb-ldrt")
-  cc ${ldopts[@]+"${ldopts[@]}"} -o "$out" ${cobjs[@]+"${cobjs[@]}"} "${pobjs[@]}" ${plink[@]+"${plink[@]}"} "$ldrt" ${shim[@]+"${shim[@]}"} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  cc ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   trace_end "$t" "link" pathb
   exit 0
 fi
@@ -385,12 +422,20 @@ fi
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 eflist=(); userinc=()
-for f in ${files[@]+"${files[@]}"}; do
+# -fkeep-static-functions is a GCC option; clang (the C compiler on macOS) rejects it.
+keep_static=(--c_to_obj_option -fkeep-static-functions)
+"${NFCXX_GCC:-cc}" --version 2>/dev/null | head -1 | grep -qi clang && keep_static=()
+for f in ${files[@]+${files[@]+"${files[@]}"}}; do
   case $f in
     # User -I dirs go before the host's --sys_include dirs: eccp searches them in command-line order, and GCC
     # searches -I before the system directories, so "error.h" from a file outside EDG's src/ must not pick
     # glibc's <error.h> (ifc_modules_templ.c, docs/notes/cxx-driver.md).
     -I?*) userinc+=("$f") ;;
+    # -lcudart from a CUDA_HOME (the toolkit's or a PyPI-wheel directory): the binary records that directory's lib64 as
+    # its runpath, so it loads the same libcudart it was linked against (not whichever one the loader finds first).
+    -lcudart)
+      [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME/lib64" ] && eflist+=(--c_to_obj_option "-Wl,-rpath,$CUDA_HOME/lib64")
+      eflist+=("--c_to_obj_lib=cudart") ;;
     -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;;
     # eccp puts its --c_to_obj_option items before every object and archive, so a link option that acts on the
     # arguments after it would act on the wrong ones. Refused rather than moved (docs/notes/cxx-driver.md).
@@ -404,13 +449,13 @@ for f in ${files[@]+"${files[@]}"}; do
   esac
 done
 t=$(trace_start)
-"$edg/eccp" "$std" --"$dialect" "${extra[@]}" ${userinc[@]+"${userinc[@]}"} "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
-  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${vlart[@]+"${vlart[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
+"$edg/eccp" "$std" --"$dialect" ${extra[@]+"${extra[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
+  ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pre_opts[@]+${pre_opts[@]+"${pre_opts[@]}"}} ${cuda_opts[@]+${cuda_opts[@]+"${cuda_opts[@]}"}} ${eflist[@]+${eflist[@]+"${eflist[@]}"}} ${shim[@]+${shim[@]+"${shim[@]}"}} ${vlart[@]+${vlart[@]+"${vlart[@]}"}} ${rtlib[@]+${rtlib[@]+"${rtlib[@]}"}} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
   df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
   mflag=-M; [ "$depmode" = -MMD ] && mflag=-MM
-  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+"${cflags[@]}"} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+"${srcs[@]}"}
+  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} \
+    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+${srcs[@]+"${srcs[@]}"}}
 fi

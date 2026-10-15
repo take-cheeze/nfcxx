@@ -481,11 +481,21 @@ void def_numpy(nfcpoly::ClassBuilder<NumPy> b) {
                   if (!is_int(d)) fail("default_int must be int32 or int64");
                   n.s->default_int = d;
                 });
-  b.property_fn("backend", [](const NumPy& n) -> std::string { return n.s->backend == ut::Session::Backend::C ? "c" : "interpreter"; },
+  b.property_fn("backend", [](const NumPy& n) -> std::string {
+                  switch (n.s->backend) {
+                    case ut::Session::Backend::C: return "c";
+                    case ut::Session::Backend::Ort: return "ort";
+                    case ut::Session::Backend::Tinygrad: return "tinygrad";
+                    case ut::Session::Backend::Interpreter: break;
+                  }
+                  return "interpreter";
+                },
                 [](NumPy& n, const std::string& v) {
                   if (v == "c") n.s->backend = ut::Session::Backend::C;
+                  else if (v == "ort") n.s->backend = ut::Session::Backend::Ort;
+                  else if (v == "tinygrad") n.s->backend = ut::Session::Backend::Tinygrad;
                   else if (v == "interpreter") n.s->backend = ut::Session::Backend::Interpreter;
-                  else fail("backend is \"interpreter\" or \"c\", got '" + v + "'");
+                  else fail("backend is \"interpreter\" or \"c\" or \"ort\" or \"tinygrad\", got '" + v + "'");
                 });
   b.property_fn("cc", [](const NumPy& n) -> std::string { return n.s->cc; }, [](NumPy& n, const std::string& v) { n.s->cc = v; });
   b.property_fn("optimize", [](const NumPy& n) -> bool { return n.s->optimize; }, [](NumPy& n, bool v) { n.s->optimize = v; });

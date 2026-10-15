@@ -27,6 +27,11 @@ int main(int argc, char** argv) {
   Tensor m = np.arange(24, DType::Float32).reshape({2, 3, 4});
   Tensor v = np.array({-2, -0.5, 0, 0.5, 2}, f32);
   Tensor bo = np.array({1, 0, 1, 0, 0, 1}, {2, 3}, DType::Bool);
+  Tensor sv = np.array({3, -1, 2, 2, 0.5, -7}, {2, 3}, f32);   // with a tie (the two 2s)
+  Tensor ii = np.array({2, 0, 1, 1, 2, 0}, {2, 3}, i32);       // indices along axis 1
+  Tensor ss = np.array({-2, 0, 1, 1, 4}, f32);                 // sorted, with a repeat
+  Tensor sq = np.array({1, 1.5, -3, 4}, f32);
+  Tensor w2 = np.array({5, 6}, f32);
   std::vector<std::pair<std::string, Tensor>> c;
 #define CASE(name, expr) c.push_back({name, expr})
   CASE("add", a + b); CASE("sub", a - b); CASE("mul", a * b); CASE("div", a / b);
@@ -65,6 +70,32 @@ int main(int argc, char** argv) {
   CASE("matmul_vv", matmul(b, b)); CASE("matmul_int", matmul(ia, ia.T()));
   CASE("arange", np.arange(5)); CASE("arange_step", np.arange(1.0, 2.0, 0.25)); CASE("linspace", np.linspace(0, 1, 5));
   CASE("eye", np.eye(3)); CASE("zeros", np.zeros({2, 2})); CASE("ones_i", np.ones({2}, i32)); CASE("full", np.full({2}, 7));
+  CASE("floor", v.floor()); CASE("ceil", v.ceil()); CASE("isnan", v.log().isnan()); CASE("isinf", v.reciprocal().isinf());
+  CASE("ifloor", ia.floor()); CASE("pow_f", pow(v.abs() + 1, v)); CASE("pow_s", pow(a, 2)); CASE("ipow", pow(ia, 2));
+  CASE("cumsum0", a.cumsum(0)); CASE("cumsum_all", m.cumsum(2)); CASE("icumsum", ia.cumsum(1));
+  CASE("prod0", a.prod(0)); CASE("prod_all", a.prod()); CASE("iprod", ia.prod(0));
+  CASE("argmax0", a.argmax(0)); CASE("argmin1", a.argmin(1)); CASE("argmax_all", ia.argmax());
+  CASE("tile", tile(a, {2, 1})); CASE("tile1", tile(b, 2));
+  CASE("take", take(a, np.array({2, 0}, i32), 1)); CASE("take_flat", take(ia, np.array({5, -1}, i32)));
+  // the Array API functions (and the numpy ones next to them): sorting, searching, triangles, grids, rolls, einsum, ...
+  CASE("sort1", sort(sv, 1)); CASE("sort0_desc", sort(sv, 0, true)); CASE("argsort1", argsort(sv, 1));
+  CASE("argsort_desc", argsort(sv, 1, true)); CASE("take_along", take_along_axis(sv, ii, 1));
+  CASE("searchsorted_l", searchsorted(ss, sq)); CASE("searchsorted_r", searchsorted(ss, sq, true));
+  CASE("tril", tril(m, -1)); CASE("triu", triu(a, 1)); CASE("meshgrid_xy", meshgrid({b, w2})[0]);
+  CASE("meshgrid_ij", meshgrid({b, w2}, false)[1]); CASE("roll_ax", roll(a, 1, 1)); CASE("roll_flat", roll(m, -3));
+  CASE("repeat_ax", repeat(a, 2, 1)); CASE("repeat_flat", repeat(b, 2)); CASE("moveaxis", moveaxis(m, 0, -1));
+  CASE("concat", concat({a, a + 1}, 0)); CASE("cumprod0", cumprod(a, 0)); CASE("cumprod_flat", cumprod(a));
+  CASE("cumsum_init", cumulative_sum(a, 1, true)); CASE("cumprod_init", cumulative_prod(b, 0, true));
+  CASE("einsum_mm", einsum("ij,jk->ik", {a, a.T()})); CASE("einsum_implicit", einsum("ij,jk", {a, a.T()}));
+  CASE("einsum_tr", einsum("ij->ji", {a})); CASE("einsum_batch", einsum("bij,bjk->bik", {m, m.transpose({0, 2, 1})}));
+  CASE("einsum_outer", einsum("i,j->ij", {b, b})); CASE("tensordot1", tensordot(a, a.T(), 1));
+  CASE("vecdot", vecdot(a, a)); CASE("matrix_transpose", matrix_transpose(m));
+  CASE("count_nz", count_nonzero(sv, Axes{1})); CASE("sign", sign(sv)); CASE("trunc", trunc(sv * 0.7));
+  CASE("isfinite", isfinite(sv.log())); CASE("logical_xor", logical_xor(bo, a > 2)); CASE("bitwise_inv", bitwise_invert(ia));
+  CASE("all_axis", all(bo, Axes{0})); CASE("any_all", any(a > 5)); CASE("copy", copy(a));
+  CASE("zeros_like_i", zeros_like(a, i32)); CASE("full_like", full_like(a, 7)); CASE("ones_like_i", ones_like(ia));
+  CASE("linspace_noend", np.linspace(0, 1, 4, {}, false)); CASE("eye_k", np.eye(2, 3, 1));
+  CASE("std_corr", a.stddev(Axes{1}, false, 1)); CASE("var_corr", a.var(Axes{0}, true, 1));
 #undef CASE
   std::vector<Tensor> all;
   for (const auto& e : c) all.push_back(e.second);

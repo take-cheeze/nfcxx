@@ -185,10 +185,13 @@ struct InfoMsg {
   std::string name;
   bool has_type = false;
   DType dtype = DType::Float32;
-  Shape shape;
+  Dims shape;  // integers (dim_value) and symbols (dim_param)
 };
 
-InfoMsg read_value_info(const Bytes& b) {
+// The polynomial text of each dim_param the exporter renamed ("poly0" -> "4*N"), from the model's metadata_props.
+using DimExprs = std::map<std::string, std::string>;
+
+InfoMsg read_value_info(const Bytes& b, const DimExprs& exprs) {
   InfoMsg vi;
   int64_t elem = 0;
   bool dynamic = false;
@@ -202,12 +205,20 @@ InfoMsg read_value_info(const Bytes& b) {
           if (tt.field == 1) elem = tt.as_int();
           else if (tt.field == 2) {                // TensorShapeProto
             for (Rd sh(tt.data); sh.next();) {
-              if (sh.field != 1) continue;         // Dimension
-              bool has_value = false;
+              if (sh.field != 1) continue;         // Dimension: one of dim_value, dim_param
+              bool has_value = false, has_param = false;
               int64_t dv = 0;
-              for (Rd dim(sh.data); dim.next();) if (dim.field == 1) { has_value = true; dv = dim.as_int(); }
-              if (!has_value) dynamic = true;
-              vi.shape.push_back(dv);
+              std::string param;
+              for (Rd dim(sh.data); dim.next();) {
+                if (dim.field == 1) { has_value = true; dv = dim.as_int(); }
+                else if (dim.field == 2) { has_param = true; param = dim.data.str(); }
+              }
+              if (has_value) vi.shape.push_back(Dim(dv));
+              else if (has_param && !param.empty()) {
+                auto e = exprs.find(param);   // a polynomial written under a fresh name: its text is the dimension's symbol here
+                vi.shape.push_back(Dim::symbol(e == exprs.end() ? param : e->second));
+              }
+              else dynamic = true;
             }
           }
         }
@@ -215,7 +226,7 @@ InfoMsg read_value_info(const Bytes& b) {
     }
   }
   if (vi.has_type) {
-    if (dynamic) throw Error("onnx import: " + vi.name + " has a dynamic dimension (shapes are static)");
+    if (dynamic) throw Error("onnx import: " + vi.name + " has a dynamic dimension (neither dim_value nor dim_param)");
     vi.dtype = need_dtype(elem, "value " + vi.name);
   }
   return vi;
@@ -290,12 +301,18 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
   std::vector<Bytes> nodes, inits, inputs, outputs;
   int64_t opset = 0;
   bool has_graph = false;
+  DimExprs exprs;
   for (Rd m(bytes.data(), bytes.size()); m.next();) {
     if (m.field == 8) {
       std::string domain;
       int64_t ver = 0;
       for (Rd o(m.data); o.next();) { if (o.field == 1) domain = o.data.str(); else if (o.field == 2) ver = o.as_int(); }
       if (domain.empty() || domain == "ai.onnx") opset = ver;
+    } else if (m.field == 14) {  // metadata_props: StringStringEntryProto
+      std::string key, value;
+      for (Rd e(m.data); e.next();) { if (e.field == 1) key = e.data.str(); else if (e.field == 2) value = e.data.str(); }
+      const std::string prefix = "nfcuop.dim_expr.";
+      if (key.compare(0, prefix.size(), prefix) == 0) exprs[key.substr(prefix.size())] = value;
     } else if (m.field == 7) {
       has_graph = true;
       for (Rd g(m.data); g.next();) {
@@ -310,10 +327,11 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
   if (opset < 13) throw Error("onnx import: the default-domain opset is " + std::to_string(opset) + "; opset 13 or newer is needed");
 
   std::map<std::string, int> local;  // name in the model -> value id here
-  auto check_existing = [&](int id, DType d, const Shape& shape, const std::string& name) {
+  auto check_existing = [&](int id, DType d, const Dims& shape, const std::string& name) {
     const Value& v = value(id);
-    if (v.dtype != d || v.shape != shape)
-      throw Error("onnx import: value " + name + " is " + std::string(nfcuop::name(d)) + to_string(shape) + " in the model but " + nfcuop::name(v.dtype) + to_string(v.shape) + " in the graph (name collision)");
+    // compared as text: a polynomial written as dim_param "4*N" is read back as a symbol of that name, which is the same size
+    if (v.dtype != d || to_string(dims(id)) != to_string(shape))
+      throw Error("onnx import: value " + name + " is " + std::string(nfcuop::name(d)) + to_string(shape) + " in the model but " + nfcuop::name(v.dtype) + to_string(dims(id)) + " in the graph (name collision)");
   };
 
   // initializers first: an input of the same name is the initializer
@@ -332,7 +350,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
     }
   }
   for (const Bytes& b : inputs) {
-    InfoMsg vi = read_value_info(b);
+    InfoMsg vi = read_value_info(b, exprs);
     if (init_names.count(vi.name)) continue;
     if (!vi.has_type) throw Error("onnx import: input " + vi.name + " has no tensor type");
     int id = find_value(vi.name);
@@ -341,7 +359,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
       check_existing(id, vi.dtype, vi.shape, vi.name);
       local[vi.name] = id;
     } else {
-      local[vi.name] = add_input(vi.name, vi.dtype, vi.shape);
+      local[vi.name] = add_symbolic_input(vi.name, vi.dtype, vi.shape);
     }
   }
 
@@ -389,10 +407,10 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
     }
     std::vector<int> ins;
     for (const std::string& s : n.in) ins.push_back(resolve(s, n.op));
-    // opset 13..17: ReduceMean/ReduceMax/ReduceMin take `axes` as an attribute (ReduceSum has the input since 13)
+    // opset 13..17: ReduceMean/ReduceMax/ReduceMin take `axes` as an attribute (ReduceSum has the input since 13, ReduceProd since 18)
     std::vector<Attribute> attrs;
     for (const Attribute& a : n.attrs) {
-      if ((n.op == "ReduceMean" || n.op == "ReduceMax" || n.op == "ReduceMin") && a.name == "axes" && a.kind == AttrKind::Ints) {
+      if ((n.op == "ReduceMean" || n.op == "ReduceMax" || n.op == "ReduceMin" || n.op == "ReduceProd") && a.name == "axes" && a.kind == AttrKind::Ints) {
         if (ins.size() > 1) throw Error("onnx import: " + n.op + " has axes as an attribute and as an input");
         std::vector<Scalar> v;
         for (int64_t x : a.ints) v.push_back(Scalar::from_int(DType::Int64, x));
@@ -409,7 +427,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
 
   std::vector<int> result;
   for (const Bytes& b : outputs) {
-    InfoMsg vi = read_value_info(b);
+    InfoMsg vi = read_value_info(b, exprs);
     auto it = local.find(vi.name);
     if (it == local.end()) throw Error("onnx import: graph output " + vi.name + " is not defined");
     if (vi.has_type) check_existing(it->second, vi.dtype, vi.shape, vi.name);

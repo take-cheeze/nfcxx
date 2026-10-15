@@ -83,8 +83,17 @@ class Tensor {
   Tensor max(int64_t axis, bool keepdims = false) const { return max(Axes{axis}, keepdims); }
   Tensor min(const Axes& axes = {}, bool keepdims = false) const;
   Tensor min(int64_t axis, bool keepdims = false) const { return min(Axes{axis}, keepdims); }
-  Tensor var(const Axes& axes = {}, bool keepdims = false) const;  // population variance (ddof = 0)
-  Tensor stddev(const Axes& axes = {}, bool keepdims = false) const;
+  // population variance (correction 0); otherwise the sum of squared deviations divided by (n - correction), as the standard's `correction`
+  Tensor var(const Axes& axes = {}, bool keepdims = false, double correction = 0) const;
+  Tensor stddev(const Axes& axes = {}, bool keepdims = false, double correction = 0) const;
+  Tensor prod(const Axes& axes = {}, bool keepdims = false) const;   // ReduceProd; bool and narrow ints give default_int, as sum
+  Tensor prod(int64_t axis, bool keepdims = false) const { return prod(Axes{axis}, keepdims); }
+  // Running sum along `axis` (ONNX CumSum); axis None flattens first, like numpy. bool and narrow ints give default_int.
+  Tensor cumsum(int64_t axis = None) const;
+  // Index of the first maximum (minimum) along `axis` (ONNX ArgMax/ArgMin, an int32 by default: numpy's intp is int64 and
+  // default_int is int32). None flattens first. A NaN wins, as in numpy; bool operands are read as ints.
+  Tensor argmax(int64_t axis = None, bool keepdims = false) const;
+  Tensor argmin(int64_t axis = None, bool keepdims = false) const;
 
   // elementwise
   Tensor operator-() const;
@@ -102,6 +111,10 @@ class Tensor {
   Tensor softmax(int64_t axis = -1) const;
   Tensor log_softmax(int64_t axis = -1) const;
   Tensor clip(double lo, double hi) const;
+  Tensor floor() const;   // ONNX Floor; an integer tensor is returned as it is (numpy keeps the integer dtype); bool gives default_float
+  Tensor ceil() const;    // ONNX Ceil; likewise
+  Tensor isnan() const;   // Bool; all false for integers and bools
+  Tensor isinf() const;   // Bool; all false for integers and bools
 
   // realization (lowers the graph to UOps and evaluates it)
   Array numpy() const;
@@ -147,8 +160,11 @@ class Session {
     const bool ints = std::is_integral<A>::value && std::is_integral<B>::value && std::is_integral<C>::value;
     return arange_impl(static_cast<double>(start), static_cast<double>(stop), static_cast<double>(step), d ? *d : (ints ? default_int : default_float));
   }
-  Tensor linspace(double start, double stop, int64_t num, std::optional<DType> d = {});  // both ends included
+  Tensor linspace(double start, double stop, int64_t num, std::optional<DType> d = {}, bool endpoint = true);  // both ends included unless !endpoint
   Tensor eye(int64_t n, std::optional<DType> d = {});
+  Tensor eye(int64_t rows, int64_t cols, int64_t k = 0, std::optional<DType> d = {});  // ones on the k-th diagonal (k > 0 above the main one)
+  // the values are unspecified in the standard; here they are zeros
+  Tensor empty(const Shape& shape, std::optional<DType> d = {}) { return zeros(shape, d); }
   Tensor placeholder(const std::string& name, const Shape& shape, std::optional<DType> d = {});
 
   // The value of `t`; `feeds` binds the placeholders it depends on. Runs symbolic() on the UOps first when optimize is true.
@@ -156,7 +172,9 @@ class Session {
   // Several values at once: one lowering, and with the C backend one compiled program.
   std::vector<Array> eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds = {});
   bool optimize = true;
-  // The reference interpreter or compiled C (nfcuop_cgen.hpp); `cc` is the compiler command (empty: $NFCUOP_CC, else cc).
+  // The reference interpreter, compiled C (nfcuop_cgen.hpp; `cc` is the compiler command, empty: $NFCUOP_CC, else cc), or
+  // ONNX Runtime on the graph (Backend::Ort, nfcuop_ort.hpp; the library comes from $NFCUOP_ORT_LIB), or tinygrad (Backend::Tinygrad,
+  // nfcuop_tinygrad.hpp; the Python executable from $NFCUOP_TINYGRAD_PYTHON).
   ut::Session::Backend backend = ut::Session::Backend::Interpreter;
   std::string cc;
 
@@ -191,8 +209,19 @@ Tensor remainder(const Tensor& a, const Tensor& b);     // ints only; the sign o
 Tensor matmul(const Tensor& a, const Tensor& b);        // 1-D and N-D like numpy, batch dimensions broadcast
 inline Tensor dot(const Tensor& a, const Tensor& b) { return matmul(a, b); }  // for 1-D and 2-D operands
 Tensor logical_not(const Tensor& a);
+// a ** b (C++ has no ** operator). The dtype is the promoted one, and a Python-style scalar is weak as in the operators. Floats follow
+// C99 pow, the values numpy gives; integers wrap, and a negative integer exponent is not an error (see docs/notes/uop.md).
+Tensor pow(const Tensor& a, const Tensor& b);
 Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis = 0);
 Tensor stack(const std::vector<Tensor>& ts, int64_t axis = 0);
+// numpy's tile: `reps` has one entry per dimension; a shorter reps gets leading 1s, and a shorter shape gets leading 1s (the
+// result has max(ndim, reps) dimensions). Every repetition is at least 1 (numpy's 0 would give an empty tensor).
+Tensor tile(const Tensor& a, const Shape& reps);
+inline Tensor tile(const Tensor& a, int64_t reps) { return tile(a, Shape{reps}); }
+// numpy's take: the elements of `a` at `indices` along `axis` (ONNX Gather); axis None takes from the flattened array, like numpy.
+// The indices must be integers (a Tensor of them, e.g. np.array({0, 2}, DType::Int32)); negative ones count from the end.
+// Constant indices are checked against the axis (an error if out of range); runtime ones are not (they select nothing, a -0.0).
+Tensor take(const Tensor& a, const Tensor& indices, int64_t axis = None);
 inline Tensor relu(const Tensor& a) { return a.relu(); }
 inline Tensor exp(const Tensor& a) { return a.exp(); }
 inline Tensor log(const Tensor& a) { return a.log(); }
@@ -200,6 +229,100 @@ inline Tensor sqrt(const Tensor& a) { return a.sqrt(); }
 inline Tensor tanh(const Tensor& a) { return a.tanh(); }
 inline Tensor abs(const Tensor& a) { return a.abs(); }
 inline Tensor softmax(const Tensor& a, int64_t axis = -1) { return a.softmax(axis); }
+
+// ---- the Python Array API standard, and the numpy functions it is compared with (docs/notes/array-api.md has the full table) ----
+// Each is built from the operators above, so it is in the ONNX file as ordinary nodes. Data-dependent shapes (nonzero, unique)
+// are not supported. The sorting functions are quadratic in the length of the sorted axis, as cumsum is.
+Tensor operator+(const Tensor& a);  // unary plus (positive): not for bool
+Tensor operator~(const Tensor& a);  // bitwise invert: logical not for bool, -x - 1 for integers
+Tensor positive(const Tensor& a);
+Tensor add(const Tensor& a, const Tensor& b);
+Tensor subtract(const Tensor& a, const Tensor& b);
+Tensor multiply(const Tensor& a, const Tensor& b);
+Tensor divide(const Tensor& a, const Tensor& b);  // true division
+Tensor negative(const Tensor& a);
+Tensor equal(const Tensor& a, const Tensor& b);
+Tensor not_equal(const Tensor& a, const Tensor& b);
+Tensor greater(const Tensor& a, const Tensor& b);
+Tensor greater_equal(const Tensor& a, const Tensor& b);
+Tensor less(const Tensor& a, const Tensor& b);
+Tensor less_equal(const Tensor& a, const Tensor& b);
+Tensor logical_and(const Tensor& a, const Tensor& b);  // bool operands only, as in the standard
+Tensor logical_or(const Tensor& a, const Tensor& b);
+Tensor logical_xor(const Tensor& a, const Tensor& b);
+Tensor bitwise_and(const Tensor& a, const Tensor& b);  // integers and bool
+Tensor bitwise_or(const Tensor& a, const Tensor& b);
+Tensor bitwise_xor(const Tensor& a, const Tensor& b);
+Tensor bitwise_invert(const Tensor& a);
+Tensor isfinite(const Tensor& a);  // bool and integers: all true; floats: not NaN and not infinite
+Tensor trunc(const Tensor& a);     // towards zero; integers as they are; not for bool
+Tensor sign(const Tensor& a);      // -1, 0 or 1; NaN stays NaN; -0 gives +0; not for bool
+
+// creation
+Tensor asarray(const Tensor& a, std::optional<DType> d = {});       // the tensor itself, or astype(d)
+Tensor asarray(Session& s, const Array& a, std::optional<DType> d = {});
+Tensor zeros_like(const Tensor& a, std::optional<DType> d = {});
+Tensor ones_like(const Tensor& a, std::optional<DType> d = {});
+Tensor empty_like(const Tensor& a, std::optional<DType> d = {});   // zeros, as Session::empty
+Tensor full_like(const Tensor& a, double v, std::optional<DType> d = {});
+Tensor tril(const Tensor& a, int64_t k = 0);  // the last two axes: the entries with j - i <= k kept, the others zero
+Tensor triu(const Tensor& a, int64_t k = 0);  // j - i >= k kept
+std::vector<Tensor> meshgrid(const std::vector<Tensor>& xs, bool xy = true);  // one-dimensional inputs; indexing "xy" (default) or "ij"
+Tensor copy(const Tensor& a);  // numpy's copy: the same tensor, since tensors are never changed in place
+
+// data types
+DType result_type(DType a, DType b);                  // the promotion of the operators
+DType result_type(const std::vector<Tensor>& ts);
+// numpy's safe casting over the five dtypes (bool to anything; int32 to int64 or float64; int64 to float64; float32 to float64)
+bool can_cast(DType from, DType to);
+struct FInfo { DType dtype; int bits; double eps, max, min, smallest_normal; };
+struct IInfo { DType dtype; int bits; int64_t min, max; };
+FInfo finfo(DType d);  // float32 or float64
+IInfo iinfo(DType d);  // int32 or int64
+// kinds: "bool", "signed integer", "integral", "real floating", "numeric"; "unsigned integer" and "complex floating" are never true here
+bool isdtype(DType d, const std::string& kind);
+bool isdtype(DType d, const std::vector<std::string>& kinds);
+std::vector<Tensor> broadcast_arrays(const std::vector<Tensor>& ts);
+
+// searching, sorting, sets
+// searchsorted: the insertion index of each value into the sorted 1-D `sorted`; side left (default) or right; NaN sorts last
+Tensor searchsorted(const Tensor& sorted, const Tensor& v, bool right = false);
+Tensor count_nonzero(const Tensor& a, const Axes& axes = {}, bool keepdims = false);  // numpy (not in the standard)
+// Stable sort along `axis`; descending keeps equal elements in their order too. NaN is last (first when descending).
+// -0 and +0 are equal here. The standard's `stable=False` is not needed: this is always stable.
+Tensor sort(const Tensor& a, int64_t axis = -1, bool descending = false);
+Tensor argsort(const Tensor& a, int64_t axis = -1, bool descending = false);  // the default int indices
+// numpy's take_along_axis: indices of the same rank; the non-axis dimensions broadcast; negative indices count from the end
+Tensor take_along_axis(const Tensor& a, const Tensor& indices, int64_t axis);
+
+// statistics and utility
+// axis None flattens first (numpy); include_initial prepends the identity (0 or 1) along the axis, as the standard
+Tensor cumulative_sum(const Tensor& a, int64_t axis = None, bool include_initial = false);
+Tensor cumulative_prod(const Tensor& a, int64_t axis = None, bool include_initial = false);
+Tensor cumprod(const Tensor& a, int64_t axis = None);
+Tensor all(const Tensor& a, const Axes& axes = {}, bool keepdims = false);  // bool result
+Tensor any(const Tensor& a, const Axes& axes = {}, bool keepdims = false);
+
+// manipulation
+Tensor concat(const std::vector<Tensor>& ts, int64_t axis = 0);
+Tensor moveaxis(const Tensor& a, int64_t source, int64_t destination);
+Tensor permute_dims(const Tensor& a, const Axes& perm);
+// each element repeated `repeats` times along `axis`; axis None flattens first
+Tensor repeat(const Tensor& a, int64_t repeats, int64_t axis = None);
+// circular shift; axis None rolls the flattened array and restores the shape
+Tensor roll(const Tensor& a, int64_t shift, int64_t axis = None);
+Tensor roll(const Tensor& a, const Axes& shifts, const Axes& axes);
+std::vector<Tensor> unstack(const Tensor& a, int64_t axis = 0);
+
+// linear algebra
+Tensor matrix_transpose(const Tensor& a);  // the last two axes
+Tensor vecdot(const Tensor& a, const Tensor& b, int64_t axis = -1);  // sum of a * b along `axis` (real values: no conjugate)
+Tensor tensordot(const Tensor& a, const Tensor& b, int64_t n = 2);  // the last n axes of a with the first n of b
+Tensor tensordot(const Tensor& a, const Tensor& b, const Axes& axes_a, const Axes& axes_b);
+// numpy's einsum: "ij,jk->ik", or without "->" the indices that occur once, in alphabetical order. No ellipsis, and no index
+// repeated within one operand (a diagonal). The product of the operands is formed in full before the sums, so its size is
+// the product of all the index sizes.
+Tensor einsum(const std::string& subscripts, const std::vector<Tensor>& ops);
 
 // Reverse-mode derivatives (nfcuop_grad.hpp, docs/notes/uop-autodiff.md): d loss / d wrt[k], one tensor per `wrt`, with its shape
 // and dtype. `loss` is a float scalar (e.g. `.sum()` or `.mean()` of something); each `wrt` is a float placeholder, a constant made
@@ -246,6 +369,10 @@ NFCUOP_NP_SCALAR_OP(>=)
 NFCUOP_NP_SCALAR_OP(==)
 NFCUOP_NP_SCALAR_OP(!=)
 #undef NFCUOP_NP_SCALAR_OP
+template <class T, detail::IsNum<T> = 0>
+Tensor pow(const Tensor& a, T v) { return pow(a, detail::lift(a, static_cast<double>(v), std::is_integral<T>::value)); }
+template <class T, detail::IsNum<T> = 0>
+Tensor pow(T v, const Tensor& b) { return pow(detail::lift(b, static_cast<double>(v), std::is_integral<T>::value), b); }
 
 }  // namespace np
 }  // namespace nfcuop

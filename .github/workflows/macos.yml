@@ -1,0 +1,66 @@
+name: CI (macOS)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Apple Silicon runner, one job per back end: the EDG front end (and QBE for the qbe leg), then the test suites of that back
+# end, the same checks the Linux jobs run. Documented macOS-only failures are xfail markers in the tests, not skips.
+# build/ holds absolute paths, so the caches are keyed by the runner's OS and architecture.
+jobs:
+  suites:
+    name: macOS arm64 (${{ matrix.backend }} backend)
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [gcc, qbe]
+    env:
+      NFCXX_BACKEND: ${{ matrix.backend }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Tools
+        run: brew install ccache ninja cmake
+
+      - name: Ruby and rake (mruby's bootstrap)
+        run: |
+          ruby --version
+          rake --version || gem install rake
+          rake --version
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-macos-arm64-${{ hashFiles('scripts/setup-edg.sh', 'scripts/setup-qbe.sh', 'scripts/*.patch') }}-${{ github.run_id }}
+          restore-keys: ccache-macos-arm64-
+
+      - name: EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: QBE and cproc
+        if: matrix.backend == 'qbe'
+        run: scripts/setup-qbe.sh
+
+      - name: Test suites
+        run: |
+          tests/run.sh
+          tests/lib/run.sh
+          tests/builtins/run.sh
+          tests/trace/run.sh
+          tests/c/run.sh
+          tests/c/cc-mode.sh
+          tests/cxx-driver/run.sh
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s || true

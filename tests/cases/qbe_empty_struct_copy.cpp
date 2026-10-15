@@ -24,3 +24,4 @@ int main() {
   int r = outer(4, 5, p);
   return r;
 }
+// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

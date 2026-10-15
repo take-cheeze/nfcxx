@@ -39,3 +39,4 @@ int main() {
     fails += __builtin_mul_overflow(zz, 72UL, &zz) != 0 || zz != 0;
     return fails;
 }
+// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

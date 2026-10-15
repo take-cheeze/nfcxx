@@ -46,3 +46,4 @@ static int check_misc() {
 }
 
 int main() { return check_align() + check_math() + check_misc(); }
+// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

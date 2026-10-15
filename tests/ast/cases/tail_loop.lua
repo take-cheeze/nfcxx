@@ -51,11 +51,20 @@ local function factory(k)
 end
 print(factory(3)(30000, 0), factory(0.5)(10, 0))
 
--- mutual tail recursion is not a loop (documented): the depth runs out and the interpreter goes on
+-- mutual tail recursion between kernels: a jump in the compiled code too, so a deep chain takes neither stack nor depth
 local is_even, is_odd
 function is_even(n) if n == 0 then return true end return is_odd(n - 1) end
 function is_odd(n) if n == 0 then return false end return is_even(n - 1) end
 print(is_even(100001), is_odd(100001))
+local ping, pong
+function ping(n, acc) if n == 0 then return acc end return pong(n - 1, acc + 1) end
+function pong(n, acc) if n == 0 then return acc end return ping(n - 1, acc + 2) end
+print(ping(1000000, 0), pong(999999, 0))
+local ma, mb
+function ma(n, z) if n == 0 then return n // z end return mb(n - 1, z) end
+function mb(n, z) if n == 0 then return n // z end return ma(n - 1, z) end
+print(pcall(ma, 30001, 0))
+print(ma(30000, 7))
 
 -- a loop of the main chunk that calls a tail recursion at every iteration (the loop may be taken over with the callee inside it)
 local total = 0

@@ -21,6 +21,15 @@ def white?(c)
   c == " " || c == "\t" || c == "\n" || c == "\r"
 end
 
+# The [start, end) range of a sorted, non-overlapping list (top_pieces' pieces of one kind) that holds position i, or
+# nil. A scan asks it at increasing positions, so cursor (a one-element array) only moves forward: the scan costs the
+# text length plus the number of ranges, not that product.
+def piece_at(ranges, cursor, i)
+  cursor[0] += 1 while cursor[0] < ranges.length && ranges[cursor[0]][1] <= i
+  r = ranges[cursor[0]]
+  r && r[0] <= i ? r : nil
+end
+
 def ident_char?(c)
   return false if c.nil?
   o = c.ord
@@ -309,7 +318,37 @@ def dependent_on_template(text, i, targs)
 end
 
 # Index of the `>` closing the `<` at s[open] (nesting counted), or nil.
+# A text is indexed once for all its code `<` (see angle_index): the scan from each `<` is one pass with a stack, and
+# a `<` that is a comparison would otherwise scan to the end of the text, which is quadratic on a large unit.
+def angle_index(s)
+  return $angle_index if $angle_index_for.equal?(s)
+  idx = {}
+  stack = []
+  k = 0
+  while k < s.length
+    e = skip_literal(s, k)
+    if e
+      k = e
+      next
+    end
+    if s[k] == "<"
+      idx[k] = nil
+      stack.push(k)
+    elsif s[k] == ">" && !stack.empty?
+      idx[stack.pop] = k
+    end
+    k += 1
+  end
+  $angle_index_for = s
+  $angle_index = idx
+  idx
+end
+
 def matching_angle(s, open)
+  if s.length >= 4000
+    idx = angle_index(s)
+    return idx[open] if idx.key?(open)
+  end
   depth = 0
   k = open
   while k < s.length
@@ -328,10 +367,189 @@ def matching_angle(s, open)
   nil
 end
 
-# The directives of a text: start index => end index (a launch in a #define is not a launch in code).
+# The directives of a text, at any depth (a #define inside a function body too): [start, end) pairs, the end at the
+# newline that closes the directive (continuation lines included). A `#` that starts a line is a directive.
+def directive_spans(text)
+  spans = []
+  n = text.length
+  i = 0
+  bol = true
+  while i < n
+    if bol
+      j = i
+      j += 1 while j < n && (text[j] == " " || text[j] == "\t")
+      if j < n && text[j] == "#"
+        k = j
+        while true
+          nl = text.index("\n", k) || n
+          if nl < n && nl > 0 && text[nl - 1] == "\\"
+            k = nl + 1
+          else
+            k = nl
+            break
+          end
+        end
+        spans << [i, k]
+        i = k
+        bol = false
+        next
+      end
+    end
+    bol = (text[i] == "\n")
+    i += 1
+  end
+  spans
+end
+
+# The directives of a text: start index => end index (a launch in a #define is not a launch in code). The start is the
+# line's first character, so an indented directive is keyed at its line start.
 def directive_ends(text)
   out = {}
-  top_pieces(text).each { |st, en, kind, _b| out[st] = en if kind == :pp }
+  directive_spans(text).each { |st, en| out[st] = en }
+  out
+end
+
+# The value of the nearest `constexpr`-style declaration of name before pos whose block is still open at pos (a
+# declaration in a sibling `if` that has closed is not in scope); nil when none. local_constant gives the value of one
+# declaration, so each candidate is checked here.
+def local_constant_visible(text, pos, name)
+  seg = text[0...pos]
+  found = nil
+  i = 0
+  while (k = seg.index(name, i))
+    e = k + name.length
+    i = e
+    next if (k > 0 && ident_char?(seg[k - 1])) || (e < seg.length && ident_char?(seg[e]))
+    b = k - 1
+    b -= 1 while b >= 0 && white?(seg[b])
+    next unless b >= 0 && ident_char?(seg[b])
+    a = e
+    a += 1 while a < seg.length && white?(seg[a])
+    next unless seg[a] == "=" && seg[a + 1] != "="
+    semi = seg.index(";", a)
+    next if semi.nil?
+    blk = enclosing_block(text, k)
+    next unless blk.nil? || blk[1] > pos
+    found = seg[(a + 1)...semi].strip
+  end
+  found
+end
+
+# The value of an integer expression written with literals, `+ - * / %`, parentheses and names of visible local
+# constants (`K_VECS_PER_WARP * WARPS_PER_BLOCK`), or nil when it is not one. A recursive-descent reader, not eval.
+def int_expr_value(text, pos, s, depth = 0)
+  return nil if depth > 8
+  toks = []
+  i = 0
+  while i < s.length
+    c = s[i]
+    if white?(c)
+      i += 1
+    elsif c >= "0" && c <= "9" || ident_char?(c)
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      toks << [c >= "0" && c <= "9" ? :num : :id, s[i...j]]
+      i = j
+    elsif "+-*/%()".include?(c)
+      toks << [:op, c]
+      i += 1
+    else
+      return nil
+    end
+  end
+  return nil if toks.empty?
+  p = 0
+  factor = nil
+  term = nil
+  expr = lambda do
+    v = term.call
+    return nil if v.nil?
+    while p < toks.length && toks[p][0] == :op && (toks[p][1] == "+" || toks[p][1] == "-")
+      op = toks[p][1]
+      p += 1
+      r = term.call
+      return nil if r.nil?
+      v = op == "+" ? v + r : v - r
+    end
+    v
+  end
+  term = lambda do
+    v = factor.call
+    return nil if v.nil?
+    while p < toks.length && toks[p][0] == :op && "*/%".include?(toks[p][1])
+      op = toks[p][1]
+      p += 1
+      r = factor.call
+      return nil if r.nil? || (op != "*" && r == 0)
+      v = op == "*" ? v * r : (op == "/" ? v / r : v % r)
+    end
+    v
+  end
+  factor = lambda do
+    return nil if p >= toks.length
+    kind, tx = toks[p]
+    p += 1
+    if kind == :num
+      digits = tx
+      digits = digits[0...-1] while digits.length > 0 && "uUlL".include?(digits[-1])
+      digits.start_with?("0x") ? digits[2..-1].to_i(16) : digits.to_i
+    elsif kind == :id
+      val = local_constant_visible(text, pos, tx)
+      val.nil? ? nil : int_expr_value(text, pos, val, depth + 1)
+    elsif tx == "("
+      v = expr.call
+      return nil unless v && p < toks.length && toks[p] == [:op, ")"]
+      p += 1
+      v
+    elsif tx == "-"
+      v = factor.call
+      v && -v
+    end
+  end
+  value = expr.call
+  p == toks.length ? value : nil
+end
+
+# The template arguments of a launch at pos with each bare name that is a `constexpr` local of an enclosing block
+# replaced by its value (`LAUNCH(kernel, ...)` in ggml-cuda's lightning-indexer.cu passes its block's K_VECS_PER_BLOCK
+# and WARPS_PER_BLOCK). The wrapper names the values, so the device unit does not need the locals. A name with no such
+# declaration stays as it is.
+def resolve_local_constants(text, targs, pos)
+  return targs unless targs.chars.any? { |c| ident_char?(c) && !(c >= "0" && c <= "9") }
+  return targs if enclosing_block(text, pos).nil?
+  outer = enclosing_template(text, pos)
+  out = ""
+  i = 0
+  while i < targs.length
+    if ident_char?(targs[i]) && !(targs[i] >= "0" && targs[i] <= "9")
+      j = i
+      j += 1 while j < targs.length && ident_char?(targs[j])
+      v = targs[i...j]
+      # A parameter of the enclosing template is that template's, not a local: its launch is dependent (see dependent_launches).
+      val = outer && outer[:names].include?(v) ? nil : local_constant_visible(text, pos, v)
+      if val
+        # An integer expression of constants is its value. A single name (a macro, or a type alias such as
+        # `using T = half`) is carried as the name. Anything else (a generic lambda's `decltype(I)::value`) is not
+        # carried: the wrapper would name a local the device unit lacks.
+        n = int_expr_value(text, pos, val)
+        if n
+          out << n.to_s
+          i = j
+          next
+        end
+        line = text[0...pos].count("\n") + 1
+        single = val.length > 0 && val.chars.all? { |c| ident_char?(c) }
+        refuse("template argument #{v} of the launch at line #{line} is #{val}: only an integer constant or a name is carried") unless single
+        out << val
+      else
+        out << v
+      end
+      i = j
+    else
+      out << targs[i]
+      i += 1
+    end
+  end
   out
 end
 
@@ -366,7 +584,7 @@ def template_launches(text)
       e2 = k + 1
       k -= 1 while k >= 0 && ident_char?(text[k])
       name = text[(k + 1)...e2]
-      found << [name, text[(j + 1)...gt].strip, i] unless name.empty?
+      found << [name, resolve_local_constants(text, text[(j + 1)...gt].strip, i), i] unless name.empty?
     end
     i += 1
   end
@@ -554,6 +772,7 @@ def call_sites(text, name)
     index = Hash.new { |h, k| h[k] = [] }
     # Directives are not code: a #define's body names its parameters (DECL_MMQ_CASE(type)), which are not calls.
     pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
+    pp_cursor = [0]
     i = 0
     while i < text.length
       e = skip_literal(text, i)
@@ -561,8 +780,8 @@ def call_sites(text, name)
         i = e
         next
       end
-      if pp.any? { |a, b| a <= i && i < b }
-        i = pp.find { |a, b| a <= i && i < b }[1]
+      if (hit = piece_at(pp, pp_cursor, i))
+        i = hit[1]
         next
       end
       if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && !(text[i] >= "0" && text[i] <= "9")
@@ -600,6 +819,7 @@ DECL_WORDS = %w[void static inline int float double bool size_t unsigned long ch
 def plain_call_sites(text, name)
   out = []
   pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
+  pp_cursor = [0]
   i = 0
   while i < text.length
     e = skip_literal(text, i)
@@ -607,8 +827,8 @@ def plain_call_sites(text, name)
       i = e
       next
     end
-    if pp.any? { |a, b| a <= i && i < b }
-      i = pp.find { |a, b| a <= i && i < b }[1]
+    if (hit = piece_at(pp, pp_cursor, i))
+      i = hit[1]
       next
     end
     # A qualified call (`cg::reduce(...)`) or a member call (`x.reduce(...)`) names another function.
@@ -690,6 +910,14 @@ end
 
 def template_instances(name, text, stack)
   refuse("dependent launch: #{(stack + [name]).join(' -> ')} instantiates itself through its template arguments") if stack.include?(name)
+  # The instances of a name depend on the text only (the stack decides only the refusal above, and a name reached
+  # again on a cycle is refused before its instances are used). Memoized per text: the mutual recursion of
+  # mul_mat_f_cuda and mul_mat_f_switch_ids otherwise explores every path again.
+  unless $template_instances_for.equal?(text)
+    $template_instances_for = text
+    $template_instances = {}
+  end
+  return $template_instances[name].dup if $template_instances.key?(name)
   out = []
   sites = call_sites(text, name).map { |targs, pos| [split_top(targs), pos] }
   # Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
@@ -719,7 +947,8 @@ def template_instances(name, text, stack)
       out << args
     end
   end
-  out.uniq
+  $template_instances[name] = out.uniq
+  $template_instances[name].dup
 end
 
 # Line (1-based) and column (0-based) of position pos in s. The newline positions of s are indexed once.
@@ -875,6 +1104,14 @@ def rewrite(text, orig)
       name_start -= 1 while name_start > 0 && ident_char?(text[name_start - 1])
       name = text[name_start...name_end]
       refuse("launch without a kernel name at line #{line}") if name.empty?
+      if $edg_launches && targs.nil?
+        # A launch without template arguments is left to the front end (--cuda parses it, see docs/notes/gpu.md).
+        out << text[i]
+        i += 1
+        next
+      end
+      # The same resolution as template_launches: the wrapper of this launch is named by the values of its constants.
+      targs = resolve_local_constants(text, targs, i) if targs
       # The call copied so far ends with the name and its arguments: take them back out.
       out = out[0...(out.length - (i - name_start))]
 
@@ -956,8 +1193,7 @@ QUAL_WORDS = ["const", "volatile", "__restrict__", "__restrict", "restrict"]
 # The function-like macros whose body holds a launch: name => { params:, body: } (continuation lines joined).
 def launch_macros(text)
   out = {}
-  top_pieces(text).each do |st, en, kind, _body|
-    next unless kind == :pp
+  directive_spans(text).each do |st, en|
     t = text[st...en].sub("#", "").gsub("\\\n", " ").strip
     next unless t.start_with?("define")
     rest = t[6..-1].lstrip
@@ -977,12 +1213,23 @@ def launch_macros(text)
   out
 end
 
+# True when the name at i is the name of a #define on its line (only `#`, `define` and blanks before it).
+def define_name_at?(text, i)
+  ls = i
+  ls -= 1 while ls > 0 && text[ls - 1] != "\n"
+  pre = text[ls...i].strip
+  return false unless pre.start_with?("#")
+  rest = pre[1..-1].strip
+  rest.start_with?("define") && rest[6..-1].to_s.strip.empty?
+end
+
 # Expands the calls of those macros in code (not in directives, comments or literals), nested calls included.
 def expand_launch_macros(text, depth = 0)
   macros = launch_macros(text)
   return text if macros.empty?
   refuse("launch macros nest more than 4 deep") if depth > 4
   code = top_pieces(text).select { |pc| pc[2] == :code }.map { |pc| [pc[0], pc[1]] }
+  code_cursor = [0]
   n = text.length
   out = ""
   changed = false
@@ -994,14 +1241,16 @@ def expand_launch_macros(text, depth = 0)
       i = e
       next
     end
-    if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && code.any? { |a, b| a <= i && i < b }
+    if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && piece_at(code, code_cursor, i)
       j = i
       j += 1 while j < n && ident_char?(text[j])
       name = text[i...j]
       m = macros[name]
       k = j
       k += 1 while k < n && white?(text[k])
-      if m && k < n && text[k] == "("
+      # The name in a macro's own #define header is not a call (a macro whose body is a template declaration names
+      # itself in its header: rewriting it turned `#define DECL_FATTN_TILE_CASE(DKQ, DV)` into `#define template ...`).
+      if m && k < n && text[k] == "(" && !define_name_at?(text, i)
         close = matching_paren(text, k)
         refuse("unterminated call of launch macro #{name}") if close.nil?
         args = split_top(text[(k + 1)...close])
@@ -1352,6 +1601,7 @@ typedef unsigned long size_t;
 #define __global__
 #define __host__
 #define __forceinline__
+#define __align__(n) __attribute__((aligned(n)))
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
@@ -1415,9 +1665,9 @@ HALF_CORE = "#ifndef __NFCXX_HALF_CORE\n#define __NFCXX_HALF_CORE\n" \
 # The integer intrinsics of llama.cpp's ggml-cuda. __umulhi, __popc and __byte_perm wrap the scalar intrinsics of the
 # emitter (SCALAR_U32 in pathb-ptx-emit.rb, one PTX instruction each); the others are plain integer code. The half type
 # is an unsigned short here (16-bit integers are lowered by the emitter), and the conversions do the IEEE work in 32-bit
-# integers and float arithmetic: round to nearest, even, as CUDA's __float2half. __hadd, __hsub, __hmul and __hfma compute
-# in float and round once more to half: for these operands the float result is exact or rounds the same way, except for
-# rare double-rounding cases of __hfma (the sum of an exact product with c).
+# integers and float arithmetic: round to nearest, even, as CUDA's __float2half. __hadd, __hsub and __hmul compute in
+# float and round once more to half: a float add or multiply of two halves is exact or rounds the same way. __hfma is
+# fma.rn.f16 (the emitter's HALF_BUILTINS): a float product plus c would round twice.
 # __half2: two halves packed in an unsigned int, the low half in bits 0..15 (x) and the high half in bits 16..31 (y).
 # The pair functions are plain integer code on that packing; the lanes use the half operations above, through one
 # guarded helper so that several pair functions in a unit define it once.
@@ -1448,18 +1698,77 @@ HALF2_OPS = HALF2_TYPE + [
 HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
   "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
   "#endif\n"
-# bf16 as a 16-bit integer (the upper half of a float, round to nearest even). nv_bfloat162 is a two-lane struct, as
-# __half2 is (CUDA's type has .x and .y, and llama.cpp brace-initializes it as such). Operators on nv_bfloat16 are
-# integer operators here, as for half: a unit that uses them is not handled correctly. float(x) of an nv_bfloat16 is
-# the bits, not the value (a class with a converting constructor is refused by the front end in a device unit).
+# bf16: a 2-byte class holding the upper half of a float (round to nearest even, NaN canonical as CUDA's host header).
+# Its converting constructor and operator float give the value, as CUDA's __nv_bfloat16 does. Arithmetic computes in
+# float and rounds back to bf16 (CUDA's header does the same). nv_bfloat162 stays a two-lane struct of the bits, as
+# __half2 is (llama.cpp brace-initializes it from floats, and assigns its lanes as bits). The class is a local in device
+# code only because the device pass compiles with --no_exceptions (scripts/pathb-dump): its destructor-free layout
+# otherwise gets EH cleanup globals the emitter refuses.
 BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
-  "typedef unsigned short nv_bfloat16;\n" \
   "typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;\n" \
-  "typedef unsigned short __nv_bfloat16;\n" \
+  "static inline unsigned short __nfcxx_float2bf16_bits(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "static inline float __nfcxx_bf16_bits2float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
+  "struct __nfcxx_bfloat16 { unsigned short x; __host__ __device__ __nfcxx_bfloat16() {} __host__ __device__ __nfcxx_bfloat16(float f) { x = __nfcxx_float2bf16_bits(f); } __host__ __device__ operator float() const { return __nfcxx_bf16_bits2float(x); } };\n" \
+  "typedef __nfcxx_bfloat16 nv_bfloat16;\n" \
+  "typedef __nfcxx_bfloat16 __nv_bfloat16;\n" \
   "typedef nv_bfloat162 __nv_bfloat162;\n" \
-  "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
-  "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "static inline __nfcxx_bfloat16 __nfcxx_bf16_from_bits(unsigned short b) { __nfcxx_bfloat16 r; r.x = b; return r; }\n" \
+  "static inline float __bfloat162float(__nfcxx_bfloat16 b) { return (float)b; }\n" \
+  "static inline __nfcxx_bfloat16 __float2bfloat16(float f) { return __nfcxx_bfloat16(f); }\n" \
+  "static inline __nfcxx_bfloat16 operator+(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a + (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a - (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator*(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a * (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator/(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a / (float)b); }\n" \
+  "static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a) { return __nfcxx_bfloat16(-(float)a); }\n" \
   "#endif\n"
+
+# wmma (nvcuda::wmma) for the m8n32k16 shape that sm_70 and later support with f16 A and B and f32 accumulate, as the PTX
+# wmma.load, wmma.mma and wmma.store instructions through inline asm (the register counts are nvcc's: 8 per A and B
+# fragment, 8 floats per accumulator). The fragment's element order is the instruction's, so the fragment is opaque
+# to user code as in CUDA. Only shared-state operands are supported (llama.cpp's uses are in shared memory).
+WMMA_M8N32K16 = <<~'CODE'
+#ifndef __NFCXX_WMMA_M8N32K16
+#define __NFCXX_WMMA_M8N32K16
+namespace nvcuda { namespace wmma {
+struct row_major {}; struct col_major {}; enum layout_t { mem_row_major, mem_col_major };
+struct matrix_a {}; struct matrix_b {}; struct accumulator {};
+template <class Use, int M, int N, int K, class T, class L = void> struct fragment { unsigned x[8]; };
+template <int M, int N, int K, class T> struct fragment<accumulator, M, N, K, T, void> { float x[8]; };
+static inline unsigned __nfcxx_wmma_smem(const void *p) {
+  unsigned long long q; unsigned r;
+  asm("cvta.to.shared.u64 %0, %1;" : "=l"(q) : "l"(p));
+  asm("cvt.u32.u64 %0, %1;" : "=r"(r) : "l"(q));
+  return r;
+}
+static inline void load_matrix_sync(fragment<matrix_a, 8, 32, 16, half, row_major> &f, const half *p, unsigned ldm) {
+  asm volatile("wmma.load.a.sync.aligned.row.m8n32k16.shared.f16 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
+               : "=r"(f.x[0]), "=r"(f.x[1]), "=r"(f.x[2]), "=r"(f.x[3]), "=r"(f.x[4]), "=r"(f.x[5]), "=r"(f.x[6]), "=r"(f.x[7])
+               : "r"(__nfcxx_wmma_smem(p)), "r"(ldm));
+}
+static inline void load_matrix_sync(fragment<matrix_b, 8, 32, 16, half, col_major> &f, const half *p, unsigned ldm) {
+  asm volatile("wmma.load.b.sync.aligned.col.m8n32k16.shared.f16 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
+               : "=r"(f.x[0]), "=r"(f.x[1]), "=r"(f.x[2]), "=r"(f.x[3]), "=r"(f.x[4]), "=r"(f.x[5]), "=r"(f.x[6]), "=r"(f.x[7])
+               : "r"(__nfcxx_wmma_smem(p)), "r"(ldm));
+}
+static inline void fill_fragment(fragment<accumulator, 8, 32, 16, float> &f, float v) {
+  for (int i = 0; i < 8; i++) f.x[i] = v;
+}
+static inline void mma_sync(fragment<accumulator, 8, 32, 16, float> &d, const fragment<matrix_a, 8, 32, 16, half, row_major> &a,
+                            const fragment<matrix_b, 8, 32, 16, half, col_major> &b, const fragment<accumulator, 8, 32, 16, float> &c) {
+  for (int i = 0; i < 8; i++) d.x[i] = c.x[i];
+  asm volatile("wmma.mma.sync.aligned.row.col.m8n32k16.f32.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19,%20,%21,%22,%23}, {%0,%1,%2,%3,%4,%5,%6,%7};"
+               : "+f"(d.x[0]), "+f"(d.x[1]), "+f"(d.x[2]), "+f"(d.x[3]), "+f"(d.x[4]), "+f"(d.x[5]), "+f"(d.x[6]), "+f"(d.x[7])
+               : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]), "r"(a.x[4]), "r"(a.x[5]), "r"(a.x[6]), "r"(a.x[7]),
+                 "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]), "r"(b.x[4]), "r"(b.x[5]), "r"(b.x[6]), "r"(b.x[7]));
+}
+static inline void store_matrix_sync(float *p, const fragment<accumulator, 8, 32, 16, float> &f, unsigned ldm, layout_t) {
+  asm volatile("wmma.store.d.sync.aligned.row.m8n32k16.shared.f32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8}, %9;"
+               :: "r"(__nfcxx_wmma_smem(p)), "f"(f.x[0]), "f"(f.x[1]), "f"(f.x[2]), "f"(f.x[3]), "f"(f.x[4]), "f"(f.x[5]), "f"(f.x[6]), "f"(f.x[7]), "r"(ldm));
+}
+}}
+namespace wmma = nvcuda::wmma;
+#endif
+CODE
 
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
@@ -1470,17 +1779,18 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
-  # Scalar helpers of ggml-cuda. __float_as_uint is a union read (the bits); __float2int_rn rounds half to even and
-  # saturates like cvt.rni (NaN gives 0) through exact float steps; __frcp_rn is a correctly rounded division.
+  # Scalar helpers of ggml-cuda. __float_as_uint is a union read (the bits); __float2int_rn is cvt.rni (round to nearest
+  # even, saturating, NaN gives 0: the emitter's FLOAT_TO_INT_BUILTINS); __frcp_rn is a correctly rounded division.
   "__float_as_uint" => "static inline unsigned int __float_as_uint(float f) { union { float f; unsigned int u; } v; v.f = f; return v.u; }\n",
-  "__float2int_rn" => "static inline int __float2int_rn(float f) { if (f != f) return 0; if (f >= 2147483647.0f) return 2147483647; if (f <= -2147483648.0f) return -2147483647 - 1; int i = (int)f; float d = f - (float)i; if (d > 0.5f || (d == 0.5f && (i & 1))) i += 1; else if (d < -0.5f || (d == -0.5f && (i & 1))) i -= 1; return i; }\n",
+  "__float2int_rn" => "extern \"C\" int __nfcxx_rni_s32(float);\nstatic inline int __float2int_rn(float f) { return __nfcxx_rni_s32(f); }\n",
   "__frcp_rn" => "static inline float __frcp_rn(float x) { return 1.0f / x; }\n",
   # Not lowered: the address conversion (a PTX cvta.to.shared the emitter does not have) and the half2 mask (its lanes
   # are a pair of halves; the emitter has no half2 comparison). Both are declared; a device call is refused by name.
   "__cvta_generic_to_shared" => "extern \"C\" unsigned long __nfcxx_cvta_generic_to_shared(const void *p);\nstatic inline unsigned long __cvta_generic_to_shared(const void *p) { return __nfcxx_cvta_generic_to_shared(p); }\n",
   "__hgt2_mask" => "extern \"C\" unsigned int __nfcxx_hgt2_mask(unsigned int a, unsigned int b);\nstatic inline unsigned int __hgt2_mask(unsigned int a, unsigned int b) { return __nfcxx_hgt2_mask(a, b); }\n",
   # CUDA math overloads of min and max for the numeric types (unqualified calls in device code; fattn-common.cuh).
-  "min" => "static inline int min(int a, int b) { return a < b ? a : b; }\nstatic inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }\nstatic inline long long min(long long a, long long b) { return a < b ? a : b; }\nstatic inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }\nstatic inline float min(float a, float b) { return a < b ? a : b; }\nstatic inline double min(double a, double b) { return a < b ? a : b; }\n",
+  "min" => "static inline int min(int a, int b) { return a < b ? a : b; }\nstatic inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }\nstatic inline long long min(long long a, long long b) { return a < b ? a : b; }\nstatic inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }\nstatic inline float min(float a, float b) { return a < b ? a : b; }\nstatic inline double min(double a, double b) { return a < b ? a : b; }\n" \
+            "template<typename A, typename B> static inline auto min(A a, B b) -> decltype(a + b) { return a < b ? a : b; }\n",
   "max" => "static inline int max(int a, int b) { return a > b ? a : b; }\nstatic inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }\nstatic inline long long max(long long a, long long b) { return a > b ? a : b; }\nstatic inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }\nstatic inline float max(float a, float b) { return a > b ? a : b; }\nstatic inline double max(double a, double b) { return a > b ? a : b; }\n",
   # std::is_same and std::is_same_v for device code (ggml-cuda's templates): the device unit has no host <type_traits>,
   # so the two are defined here over plain types only.
@@ -1518,6 +1828,7 @@ BUILTIN_DEFS = {
   "__float2half" => HALF_CORE,
   "__half2float" => HALF_CORE,
   "half" => HALF_CORE + "typedef __half half;\n",
+  "wmma" => WMMA_M8N32K16,
   "half2" => HALF2_TYPE + "typedef __half2 half2;\n",
   # make_half2(x, y) as in cuda_fp16: each lane rounded to half from a float (int arguments convert exactly when small).
   "make_half2" => HALF2_TYPE + HALF_CORE + "static inline __half2 make_half2(float x, float y) { __half2 r; r.x = __float2half(x); r.y = __float2half(y); return r; }\n",
@@ -1537,6 +1848,86 @@ BUILTIN_DEFS = {
   "powf" => "extern \"C\" float __nfcxx_expf(float);\nextern \"C\" float __nfcxx_logf(float);\n" \
             "static inline float powf(float x, float y) { if (y == 0.0f) return 1.0f; if (x == 0.0f) return y > 0.0f ? 0.0f : 1.0f / 0.0f; " \
             "if (x < 0.0f) return (x - x) / (x - x); return __nfcxx_expf(y * __nfcxx_logf(x)); }\n",
+  # Constants of <math.h> and <float.h> that the device unit uses.
+  "INFINITY" => "#define INFINITY __builtin_inff()\n",
+  "FLT_MAX" => "#define FLT_MAX 3.40282346638528859812e+38F\n",
+  "uintptr_t" => "typedef unsigned long uintptr_t;\n",
+  # floorf and trunc: one PTX instruction each (cvt.rmi, cvt.rzi: exact). roundf is halfway away from zero, which is
+  # trunc plus one when the fraction is at least one half (the fraction x - trunc(x) is exact for every float).
+  "floorf" => "extern \"C\" float __nfcxx_floorf(float);\nstatic inline float floorf(float a) { return __nfcxx_floorf(a); }\n",
+  "trunc" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float trunc(float a) { return __nfcxx_truncf(a); }\n",
+  "roundf" => "extern \"C\" float __nfcxx_truncf(float);\nstatic inline float roundf(float a) { float t = __nfcxx_truncf(a); float d = a - t; " \
+              "if (d >= 0.5f) t += 1.0f; else if (d <= -0.5f) t -= 1.0f; return t; }\n",
+  # ceilf and fmaf: one PTX instruction each (cvt.rpi, fma.rn: exact). log2f: lg2.approx (see FLOAT_BUILTINS; exact at
+  # powers of two, error bound in docs/notes/gpu.md).
+  "ceilf" => "extern \"C\" float __nfcxx_ceilf(float);\nstatic inline float ceilf(float a) { return __nfcxx_ceilf(a); }\n",
+  "fmaf" => "extern \"C\" float __nfcxx_fmaf(float, float, float);\nstatic inline float fmaf(float a, float b, float c) { return __nfcxx_fmaf(a, b, c); }\n",
+  # log2f: an exact exponent at a positive power of two (the bits say so; a subnormal one is scaled up by 2^24 first), else
+  # lg2.approx. Its error is not bounded at powers of two, and llama.cpp takes floorf(log2f(n)) of head counts.
+  "log2f" => "extern \"C\" float __nfcxx_log2f(float);\n" \
+             "static inline float log2f(float a) { if (a > 0.0f) { float s = a; int off = 0; unsigned u = __float_as_uint(a); " \
+             "if ((u >> 23) == 0) { s = a * 16777216.0f; off = -24; u = __float_as_uint(s); } " \
+             "if ((u & 0x007fffffu) == 0 && (u >> 23) != 0xffu) return (float)((int)(u >> 23) - 127 + off); } " \
+             "return __nfcxx_log2f(a); }\n",
+  # erff: the Maclaurin series of erf in double (alternating terms, |x| <= 4; beyond that erf rounds to +-1 as a float).
+  # Error: the series' rounding is about 1e-11 at |x| = 4 and far less below it, well under half a float ulp of erf.
+  "erff" => "static inline float erff(float a) { if (a != a) return a; double x = (double)a; double ax = x < 0.0 ? -x : x; " \
+            "if (ax > 4.0) return x < 0.0 ? -1.0f : 1.0f; double t = ax; double sum = 0.0; double x2 = ax * ax; " \
+            "for (int n = 0; n < 200; n++) { double term = t / (double)(2 * n + 1); sum += term; double ad = term < 0.0 ? -term : term; " \
+            "if (ad <= 1e-17 * sum) break; t = -t * x2 / (double)(n + 1); } double v = 1.1283791670955126 * sum; " \
+            "return (float)(x < 0.0 ? -v : v); }\n",
+  # Limits of <limits.h> that the device unit uses.
+  "INT_MAX" => "#define INT_MAX 2147483647\n",
+  "INT_MIN" => "#define INT_MIN (-2147483647 - 1)\n",
+  "UINT_MAX" => "#define UINT_MAX 4294967295U\n",
+  # sinf and cosf (the helper is shared, see needed in the rewrite): Cephes-style. The argument is reduced to r in
+  # [-pi/4, pi/4] by the nearest multiple n of pi/2 (three-part constant, exact for n < 2^15 or so), and the quadrant
+  # n mod 4 picks sin or cos of r and the sign. Polynomials of Cephes' sinf/cosf. Error and bound: docs/notes/gpu.md.
+  "__nfcxx_sincosf" => "extern \"C\" int __nfcxx_rni_s32(float);\n" \
+    "static inline float __nfcxx_sincosf(float x, int cosine) { if (x != x) return x; if (x - x != 0.0f) return x - x; " \
+    "double d = (double)x; double a = d < 0.0 ? -d : d; int n = (int)(a * 0.63661977236758134 + 0.5); double fn = (double)n; " \
+    "double r = (a - fn * 1.57079632673412561417) - fn * 6.07710050650619224932e-11; double r2 = r * r; " \
+    "int q = (cosine ? n + 1 : n) & 3; double s = r, t = r, c = 1.0, u = 1.0; " \
+    "for (int i = 1; i <= 8; i++) { t = -t * r2 / (double)((2 * i) * (2 * i + 1)); s += t; } " \
+    "for (int i = 1; i <= 8; i++) { u = -u * r2 / (double)((2 * i - 1) * (2 * i)); c += u; } " \
+    "double v = (q & 1) ? c : s; if (q >= 2) v = -v; if (!cosine && 1.0 / d < 0.0) v = -v; return (float)v; }\n",
+  "sinf" => "static inline float sinf(float x) { return __nfcxx_sincosf(x, 0); }\n",
+  "cosf" => "static inline float cosf(float x) { return __nfcxx_sincosf(x, 1); }\n",
+  # expm1 in double: a Taylor series for |x| < 1/32 (no cancellation), else exp(x) - 1 with exp(x) = 2^k * exp(r), r = x - k ln2
+  # (|r| <= ln2 / 2, Taylor to r^14). tanhf(x) = e / (e + 2) with e = expm1(2|x|); |x| >= 10 is 1 in float.
+  "__nfcxx_expm1f" => "static inline double __nfcxx_expm1d(double x) { if (x < 0.03125 && x > -0.03125) { double s = x, t = x; " \
+    "for (int i = 2; i <= 12; i++) { t = t * x / (double)i; s += t; } return s; } " \
+    "int k = (int)(x * 1.4426950408889634 + (x < 0.0 ? -0.5 : 0.5)); double r = (x - (double)k * 0.6931471805599453) - (double)k * 2.3190468138462996e-17; " \
+    "double s = 1.0, t = 1.0; for (int i = 1; i <= 14; i++) { t = t * r / (double)i; s += t; } " \
+    "double p = 1.0, b = k < 0 ? 0.5 : 2.0; int m = k < 0 ? -k : k; while (m) { if (m & 1) p *= b; b *= b; m >>= 1; } " \
+    "return s * p - 1.0; }\n" \
+    "static inline float __nfcxx_expm1f(float x) { if (x != x || x == 0.0f) return x; if (x > 100.0f) return 1.0f / 0.0f; if (x < -100.0f) return -1.0f; " \
+    "return (float)__nfcxx_expm1d((double)x); }\n",
+  "expm1f" => "static inline float expm1f(float x) { return __nfcxx_expm1f(x); }\n",
+  "tanhf" => "static inline float tanhf(float x) { if (x != x || x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
+    "if (ax >= 10.0) return x < 0.0f ? -1.0f : 1.0f; double e = __nfcxx_expm1d(2.0 * ax); double t = e / (e + 2.0); " \
+    "return (float)(d < 0.0 ? -t : t); }\n",
+  # log1pf in double: u = 1 + x is exact for |x| >= 2^-29 (x is a float); u is scaled by powers of two into [1/sqrt2, sqrt2)
+  # and log(u) = k ln2 + 2 atanh(s), s = (u - 1) / (u + 1), |s| <= 0.1716, 15 odd terms (below 2^-53). |x| < 2^-30 is x.
+  # NaN and +inf pass through; x == -1 is -inf; x < -1 is NaN.
+  "log1pf" => "static inline float log1pf(float x) { if (x != x || x == 1.0f / 0.0f) return x; if (x == -1.0f) return -1.0f / 0.0f; " \
+    "if (x < -1.0f) return 0.0f / 0.0f; if (x == 0.0f) return x; double d = (double)x; double ax = d < 0.0 ? -d : d; " \
+    "if (ax < 1.0 / 1073741824.0) return x; double U = 1.0 + d; int k = 0; " \
+    "while (U >= 65536.0) { U *= 1.0 / 65536.0; k += 16; } while (U < 1.0 / 65536.0) { U *= 65536.0; k -= 16; } " \
+    "while (U >= 1.4142135623730951) { U *= 0.5; k++; } while (U < 0.7071067811865476) { U *= 2.0; k--; } " \
+    "double s = (U - 1.0) / (U + 1.0), s2 = s * s, p = s, acc = 0.0; " \
+    "for (int j = 1; j <= 15; j++) { acc += p / (double)(2 * j - 1); p *= s2; } " \
+    "return (float)((double)k * 0.6931471805599453 + (double)k * 2.3190468138462996e-17 + 2.0 * acc); }\n",
+  # The atomics the emitter lowers (ATOMICS): int add and max, int compare-and-swap, float add. The unsigned add is the
+  # signed one on the same bits (the sum wraps the same way).
+  "atomicAdd" => "extern \"C\" int __nfcxx_atomic_add_i(int *, int);\nextern \"C\" float __nfcxx_atomic_add_f(float *, float);\n" \
+    "static inline int atomicAdd(int *p, int v) { return __nfcxx_atomic_add_i(p, v); }\n" \
+    "static inline unsigned atomicAdd(unsigned *p, unsigned v) { return (unsigned)__nfcxx_atomic_add_i((int *)p, (int)v); }\n" \
+    "static inline float atomicAdd(float *p, float v) { return __nfcxx_atomic_add_f(p, v); }\n",
+  "atomicMax" => "extern \"C\" int __nfcxx_atomic_max_i(int *, int);\n" \
+    "static inline int atomicMax(int *p, int v) { return __nfcxx_atomic_max_i(p, v); }\n",
+  "atomicCAS" => "extern \"C\" int __nfcxx_atomic_cas_i(int *, int, int);\n" \
+    "static inline int atomicCAS(int *p, int c, int v) { return __nfcxx_atomic_cas_i(p, c, v); }\n",
   # memcpy and memset as byte loops (the device unit has no C library; the host copy keeps the real header).
   "memcpy" => "static inline void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = (unsigned char *)d; " \
               "const unsigned char *b = (const unsigned char *)s; for (size_t i = 0; i < n; i++) a[i] = b[i]; return d; }\n",
@@ -1560,10 +1951,10 @@ BUILTIN_DEFS = {
   "__nv_bfloat162" => BF16_CORE,
   "__float2bfloat16" => BF16_CORE,
   "__bfloat162float" => BF16_CORE,
-  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return h.x; }\n",
-  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return h.y; }\n",
-  "__bfloat1622float2" => BF16_CORE + "static inline float2 __bfloat1622float2(nv_bfloat162 h) { return make_float2(__bfloat162float(h.x), __bfloat162float(h.y)); }\n",
-  "__float22bfloat162_rn" => BF16_CORE + "static inline nv_bfloat162 __float22bfloat162_rn(float2 f) { nv_bfloat162 r; r.x = __float2bfloat16(f.x); r.y = __float2bfloat16(f.y); return r; }\n",
+  "__low2bfloat16" => BF16_CORE + "static inline __nfcxx_bfloat16 __low2bfloat16(nv_bfloat162 h) { return __nfcxx_bf16_from_bits(h.x); }\n",
+  "__high2bfloat16" => BF16_CORE + "static inline __nfcxx_bfloat16 __high2bfloat16(nv_bfloat162 h) { return __nfcxx_bf16_from_bits(h.y); }\n",
+  "__bfloat1622float2" => BF16_CORE + "static inline float2 __bfloat1622float2(nv_bfloat162 h) { return make_float2(__nfcxx_bf16_bits2float(h.x), __nfcxx_bf16_bits2float(h.y)); }\n",
+  "__float22bfloat162_rn" => BF16_CORE + "static inline nv_bfloat162 __float22bfloat162_rn(float2 f) { nv_bfloat162 r; r.x = __nfcxx_float2bf16_bits(f.x); r.y = __nfcxx_float2bf16_bits(f.y); return r; }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
   "__hsub2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hsub2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) - __half2float(b.x)); r.y = __float2half(__half2float(a.y) - __half2float(b.y)); return r; }\n",
@@ -1573,7 +1964,8 @@ BUILTIN_DEFS = {
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
   "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
   "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",
-  "__hfma" => HALF_CORE + "static inline unsigned short __hfma(unsigned short a, unsigned short b, unsigned short c) { return __float2half(__half2float(a) * __half2float(b) + __half2float(c)); }\n",
+  "__hfma" => HALF_CORE + "extern \"C\" unsigned short __nfcxx_hfma_rn(unsigned short, unsigned short, unsigned short);\n" \
+    "static inline unsigned short __hfma(unsigned short a, unsigned short b, unsigned short c) { return __nfcxx_hfma_rn(a, b, c); }\n",
   "__shfl_xor_sync" => SHFL_DEFS["bfly"],
   "__shfl_down_sync" => SHFL_DEFS["down"],
   "__shfl_up_sync" => SHFL_DEFS["up"],
@@ -1584,15 +1976,55 @@ BUILTIN_DEFS = {
   "__all_sync" => "extern \"C\" int __nfcxx_all_sync(unsigned, int);\nstatic inline int __all_sync(unsigned m, int p) { (void)m; return __nfcxx_all_sync(0xffffffffu, p); }\n",
 }
 
-# The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
-# group (cg::thread_block), cg::this_thread_block() and cg::sync(group). The group is a plain unsigned value here
-# (it carries nothing), so no struct is passed by value. Methods on the group and tiled partitions are not
-# provided: a unit that calls them still fails (simpleCooperativeGroups; tests/cuda/samples/README.md).
+# The cooperative-groups names that the device code uses: a thread block group (cg::thread_block), cg::this_thread_block()
+# and cg::sync(group); and warp tiles, cg::thread_block_tile<N> from cg::tiled_partition<N>(group) for N a power of two
+# up to 32, with size, thread_rank, sync, shfl, shfl_down, shfl_up and shfl_xor, and cg::reduce over a tile with
+# cg::plus, cg::less and cg::greater. The group is a plain unsigned value (it carries nothing); a tile carries nothing
+# either: its lanes come from threadIdx. A tile's shuffles are the full-warp index shuffle with the source lane computed
+# here, so no width is needed (the shuffle wrappers ignore the width). Grid groups and the other tile members are not
+# provided (see the refusals in the device pass).
 COOP_DEF = <<'COOP'
 namespace cooperative_groups {
 typedef unsigned int thread_block;
 thread_block this_thread_block(void) { return 0u; }
 void sync(thread_block) { __nfcxx_syncthreads(); }
+static inline int __nfcxx_tile_shfl(unsigned src, int v) { return __shfl_sync(0xffffffffu, v, (int)src); }
+static inline unsigned __nfcxx_tile_shfl(unsigned src, unsigned v) { return (unsigned)__shfl_sync(0xffffffffu, (int)v, (int)src); }
+static inline float __nfcxx_tile_shfl(unsigned src, float v) { return __shfl_sync(0xffffffffu, v, (int)src); }
+static inline double __nfcxx_tile_shfl(unsigned src, double v) {
+  union { double d; int i[2]; } a, b;
+  a.d = v;
+  b.i[0] = __shfl_sync(0xffffffffu, a.i[0], (int)src);
+  b.i[1] = __shfl_sync(0xffffffffu, a.i[1], (int)src);
+  return b.d;
+}
+template <unsigned N> struct thread_block_tile {
+  unsigned size(void) const { return N; }
+  unsigned thread_rank(void) const { return threadIdx.x & (N - 1); }
+  void sync(void) const { __nfcxx_syncwarp(0xffffffffu); }
+  template <typename T> T shfl(T v, unsigned src) const { return __nfcxx_tile_shfl(base() + (src & (N - 1)), v); }
+  // Every lane runs the shuffle (a shuffle under a branch is not executed by the whole warp); the result is selected after.
+  template <typename T> T shfl_down(T v, unsigned d) const {
+    unsigned r = thread_rank();
+    T s = __nfcxx_tile_shfl(base() + ((r + d) & 31u), v);
+    return r + d < N ? s : v;
+  }
+  template <typename T> T shfl_up(T v, unsigned d) const {
+    unsigned r = thread_rank();
+    T s = __nfcxx_tile_shfl(base() + ((r - d) & 31u), v);
+    return r >= d ? s : v;
+  }
+  template <typename T> T shfl_xor(T v, unsigned m) const { return __nfcxx_tile_shfl(base() + ((thread_rank() ^ m) & (N - 1)), v); }
+  unsigned base(void) const { return (threadIdx.x & 31u) & ~(N - 1); }
+};
+template <unsigned N> thread_block_tile<N> tiled_partition(const thread_block &) { return thread_block_tile<N>(); }
+template <typename T> struct plus { T operator()(T a, T b) const { return a + b; } };
+template <typename T> struct less { T operator()(T a, T b) const { return b < a ? b : a; } };
+template <typename T> struct greater { T operator()(T a, T b) const { return a < b ? b : a; } };
+template <unsigned N, typename T, typename Op> T reduce(const thread_block_tile<N> &g, T val, Op op) {
+  for (unsigned o = N / 2; o > 0; o >>= 1) val = op(val, g.shfl_xor(val, o));
+  return val;
+}
 }
 namespace cg = cooperative_groups;
 COOP
@@ -1675,6 +2107,17 @@ end
 # Top-level pieces of a translation unit: preprocessor lines, and declarations or definitions ending at a `;` or at
 # the `}` of a function or namespace. Each piece is [start, stop, kind], kind :pp or :code, and :body if it has a
 # brace block at depth 0.
+# A depth-0 `{` that follows `=` in its piece is an initializer list (`static const uint8_t t[8] = {...};`), not a body:
+# the piece ends at its `;`. A function, class, namespace or template header has a parameter list, a tag or a template
+# header before its `{`, so it is never an initializer.
+def brace_is_initializer?(chunk)
+  return false if chunk.index("(")
+  toks = tokens_of(chunk)
+  return false if toks.empty? || (toks & %w[struct class union enum namespace template operator]).any?
+  return false if toks.first == "extern" || toks.first == "typedef" || toks.first == "using"
+  !chunk.index("=").nil?
+end
+
 def top_pieces(text)
   pieces = []
   n = text.length
@@ -1716,7 +2159,7 @@ def top_pieces(text)
     elsif c == ")" || c == "]"
       depth -= 1
     elsif c == "{"
-      if depth == 0
+      if depth == 0 && !brace_is_initializer?(text[start...i])
         body = true
         opener = tokens_of(text[start...i]).first
       end
@@ -1867,7 +2310,8 @@ end
 # device pass therefore evaluates the conditionals first: the branches not taken are blanked (the line count is
 # kept), the #if/#ifdef/#else/#endif lines are removed, and #define and #undef of the taken branches stay.
 # The device pass defines CUDA's device-compile macros; the host pass is not affected.
-DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750" }
+# __cplusplus: the device unit is C++, so a `#ifndef __cplusplus` branch (ggml-common.h's C-only static_assert) is not taken.
+DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750", "__cplusplus" => "201703" }
 
 def cond_tokens(s, line)
   toks = []
@@ -2193,7 +2637,8 @@ end
 # The names an enum defines: its enumerators (the identifier at the start of each comma-separated item of its body).
 # Only these: every other identifier of the enum (a type it mentions) is not defined by it.
 def enum_enumerators(t)
-  open = t.index("{")
+  # The body of the enum keyword's own braces: a piece can hold statements before the enum, and their braces are not its.
+  open = t.index("{", t.index("enum") || 0)
   return [] if open.nil?
   close = matching_brace(t, open)
   body = t[(open + 1)...(close || t.length)]
@@ -2237,11 +2682,123 @@ def function_head?(t)
   h.index("(") && !(h.index("=") && h.index("=") < h.index("("))
 end
 
-def device_tu(text)
-  pieces = top_pieces(text).map do |pc|
+# A host `const` or `constexpr` declaration is a constant that device code may read only when it is a value. A
+# reference or pointer (`const T &r = ...`, `const T *p = ...`) is host state, and so is an initializer that calls a
+# function, takes an address, or dereferences (`*(const Ctx *) p`): carrying it would carry its type too, with the
+# host-only members of that type (FILE *, a host struct), and the unit has no definition for them.
+def device_constant_decl?(t)
+  eq = t.index("=")
+  cut = [eq, t.index("["), t.index(";")].compact.min || t.length
+  head = t[0...cut]
+  return false if head.include?("&") || head.include?("*")
+  return true if eq.nil? || eq >= t.length
+  init = t[(eq + 1)..-1].to_s
+  semi = init.index(";")
+  init = init[0...semi] if semi
+  return false if init.include?("&")
+  return false if init.strip.start_with?("*")
+  return false if init.include?("*") && init.include?("(")
+  i = 0
+  while (i = init.index("(", i))
+    j = i - 1
+    j -= 1 while j >= 0 && white?(init[j])
+    word_end = j
+    j -= 1 while j >= 0 && ident_char?(init[j])
+    word = word_end > j ? init[(j + 1)..word_end] : ""
+    return false if !word.empty? && !%w[sizeof alignof decltype static_cast].include?(word)
+    i += 1
+  end
+  true
+end
+
+# The opener and closer of a linkage or namespace block (`extern "C" {`, `namespace n {`) that starts the piece t, as
+# [open, close] indices of its braces in t; nil when t is not one.
+def linkage_block(t)
+  f = 0
+  f += 1 while f < t.length && white?(t[f])
+  s = t[f..-1].to_s
+  return nil unless s.start_with?('extern "') || s.start_with?("namespace ")
+  b = s.index("{")
+  return nil if b.nil?
+  h = s[0...b]
+  return nil if h.include?("(") || h.include?("=") || h.include?(";")
+  open = f + b
+  close = matching_brace(t, open)
+  close.nil? ? nil : [open, close]
+end
+
+# True when the opener text opens namespace ns (`namespace ns {`, with any spacing before the brace).
+def namespace_opened?(opener, ns)
+  key = "namespace " + ns
+  i = opener.index(key)
+  return false if i.nil?
+  rest = opener[(i + key.length)..-1].to_s
+  j = 0
+  j += 1 while j < rest.length && white?(rest[j])
+  rest[j] == "{"
+end
+
+# A linkage or namespace block with device code is cut into its own top-level pieces, so the device unit keeps only
+# the pieces it needs (ggml.h's extern "C" block holds the host API and its types). Each piece keeps the block's opener
+# and closer as its wrap (nested blocks compose), so kernels keep their linkage and namespace. Preprocessor lines are
+# not wrapped: they stay at the top level.
+def flatten_linkage(text, raw)
+  raw.flat_map do |pc|
     st, en, kind, body = pc
     t = text[st...en]
-    info = { text: t, kind: kind, body: body, toks: tokens_of(t), defined: [], keep: false, device: false }
+    blk = kind != :pp && body ? linkage_block(t) : nil
+    next [pc] unless blk
+    open, close = blk
+    inner = t[(open + 1)...close]
+    base = st + open + 1
+    sub = top_pieces(inner).map { |s2, e2, k2, b2| [base + s2, base + e2, k2, b2] }
+    wo = t[0..open]
+    wc = t[close..-1]
+    flatten_linkage(text, sub).map do |inn|
+      iw = inn[4]
+      [inn[0], inn[1], inn[2], inn[3], [wo + (iw ? iw[0] : ""), (iw ? iw[1] : "") + wc]]
+    end
+  end
+end
+
+# The member functions of a class that are host-only: a definition whose qualifiers name __host__ and not __device__ or
+# __global__ (mmq.cuh's use_mma_data_layout(cc) calls the host dispatch helpers, which the device unit must not keep).
+# Removed with its body, keeping its newlines so line numbers hold. A __host__ that does not start a member (after
+# `;`, `{`, `}`, `:` or the start of the text) is left alone.
+def drop_host_members(t)
+  out = ""
+  i = 0
+  while i < t.length
+    e = skip_literal(t, i)
+    if e
+      out << t[i...e]
+      i = e
+      next
+    end
+    if word_at?(t, i, "__host__")
+      prev = out.rstrip[-1]
+      open = t.index("{", i)
+      semi = t.index(";", i)
+      header = open && (semi.nil? || open < semi) ? t[i...open] : nil
+      close = header && header.include?("(") && !header.include?("__device__") && !header.include?("__global__") &&
+              (prev.nil? || ";{}:".include?(prev)) ? matching_brace(t, open) : nil
+      if close
+        out << ("\n" * t[i..close].count("\n"))
+        i = close + 1
+        next
+      end
+    end
+    out << t[i]
+    i += 1
+  end
+  out
+end
+
+def device_tu(text)
+  pieces = flatten_linkage(text, top_pieces(text)).map do |pc|
+    st, en, kind, body = pc
+    t = text[st...en]
+    info = { text: t, kind: kind, body: body, toks: tokens_of(t), defined: [], keep: false, device: false, wrap: pc[4] }
     if kind == :pp
       rest = t.sub("#", "").gsub("\n", " ").strip
       d = rest.split(" ")[0] || ""
@@ -2288,7 +2845,17 @@ def device_tu(text)
           kernels << name
         end
         pc[:keep] = true
-        pc[:text] = remove_words(pc[:text], DEVICE_QUALIFIERS)
+        # a class of the device side keeps its device members only: its host-only members go, and so do their tokens
+        if pc[:toks].include?("struct") || pc[:toks].include?("class")
+          dropped = drop_host_members(pc[:text])
+          if dropped != pc[:text]
+            pc[:text] = dropped
+            pc[:toks] = tokens_of(dropped)
+          end
+        end
+        # a kernel has external linkage (it is launched from the host): `static __global__ void k()` is not static in the
+        # device unit, or the front end drops it when no device code calls it
+        pc[:text] = remove_words(pc[:text], pc[:toks].include?("__global__") ? DEVICE_QUALIFIERS + ["static"] : DEVICE_QUALIFIERS)
         seeds.concat(pc[:toks])
       elsif pc[:text].include?("(")
         pc[:keep] = true
@@ -2319,18 +2886,28 @@ def device_tu(text)
     elsif (kw = (toks & %w[struct class union enum]).first) && !function_head?(t)
       # The tag is the identifier written right after the keyword; an anonymous one (`union { ... }` inside a function)
       # names nothing. (The next token in tokens_of skips the brace, so it must not be taken from there.)
-      pc[:defined] = [tag_after(t, kw)].compact
+      # `enum class E` and `enum struct E` name E: the tag follows the scoped-enum keyword.
+      tag = tag_after(t, kw)
+      tag = tag_after(t, tag) if kw == "enum" && %w[class struct].include?(tag)
+      pc[:defined] = [tag].compact
       pc[:defined] += enum_enumerators(t) if kw == "enum"
     elsif pc[:body]
       next
-    elsif toks.include?("const") || toks.include?("constexpr")
-      # a constant: device code may read it. Other host variables are not reachable from device code.
+    elsif (toks.include?("const") || toks.include?("constexpr")) && device_constant_decl?(t)
+      # a constant: device code may read it. Other host variables are not reachable from device code, and neither are
+      # the const references and pointers that device_constant_decl? leaves out.
       cut = t.index("=") || t.index("[") || t.index(";") || t.length
       pc[:defined] = [tokens_of(t[0...cut]).last].compact
     end
   end
 
   # Fixed point: a host declaration is carried over when the unit refers to a name it defines.
+  # The wrappers (see template_site) name their template arguments and parameters: a macro or constant among them is
+  # a name the unit needs even when no kept kernel body mentions it (ggml-cuda's mmf: MMF_ROWS_PER_BLOCK_CDNA).
+  $sites.each_value do |site|
+    seeds.concat(tokens_of(site[:targs].to_s))
+    seeds.concat(tokens_of(site[:decl].to_s))
+  end
   needed = {}
   (seeds + tokens_of(DEVICE_PRELUDE)).each { |x| needed[x] = true }
   changed = true
@@ -2348,6 +2925,18 @@ def device_tu(text)
   pieces.each do |pc|
     next unless pc[:kind] == :pp && pc[:macro] && pc[:defined].any? { |d| needed[d] }
     pc[:keep] = true
+  end
+  # A `using namespace n;` is kept when the unit keeps a piece of n: device code names n's members unqualified
+  # (ggml-cuda's mmq-vec-dot.cuh uses ggml_cuda_mma's tile that way). Its name is not a definition, so the fixed point
+  # above never reaches it.
+  pieces.each do |pc|
+    next if pc[:keep] || pc[:kind] == :pp || pc[:toks][0] != "using" || pc[:toks][1] != "namespace"
+    ns = pc[:toks][2]
+    next if ns.nil?
+    kept = pieces.any? do |k|
+      k[:keep] && k[:kind] != :pp && k[:wrap] && namespace_opened?(k[:wrap][0], ns)
+    end
+    pc[:keep] = true if kept
   end
 
   out = "// Device side of a .cu file, generated by scripts/cuda-rewrite.rb --device. Do not edit.\n"
@@ -2369,17 +2958,24 @@ def device_tu(text)
     %w[__hadd2 __hsub2 __hmul2 __hdiv2].each { |n| needed[n] = true }
   end
   needed["is_same"] = true if needed["is_same_v"]   # std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
+  # Shared helpers of the math wrappers: each is emitted once, whichever of its users the unit names.
+  needed["__nfcxx_sincosf"] = true if needed["sinf"] || needed["cosf"]
+  needed["__nfcxx_expm1f"] = true if needed["expm1f"] || needed["tanhf"]
+  needed["__float_as_uint"] = true if needed["log2f"]
+  # The tiles of cooperative groups shuffle with the idx form (COOP_DEF uses __shfl_sync).
+  needed["__shfl_sync"] = true if needed["cg"] || needed["cooperative_groups"]
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
     out << text
   end
   if (needed["cg"] || needed["cooperative_groups"]) && pieces.none? { |pc| pc[:keep] && pc[:defined].include?("cooperative_groups") }
-    out << COOP_DEF
+    out << rewrite_builtins(COOP_DEF)
   end
   pieces.each do |pc|
     next unless pc[:keep]
-    out << rewrite_is_same_v(rewrite_builtins(pc[:text])) << "\n"
+    code = rewrite_is_same_v(rewrite_builtins(pc[:text]))
+    out << (pc[:wrap] && pc[:kind] != :pp ? pc[:wrap][0] + code + pc[:wrap][1] : code) << "\n"
   end
   $sites.each do |w, site|
     out << "extern \"C\" void #{w}(#{site[:decl]}) { #{site[:name]}<#{site[:targs]}>(#{site[:call].join(", ")}); }\n"
@@ -2502,8 +3098,86 @@ def dynamic_shared_rewrite(s)
   replace_dynamic_uses(out, names)
 end
 
+# CUDA library names the device image does not lower, refused by name in the device pass: CUB (`cub::`, its headers
+# are not in the device unit) and grid-wide cooperative groups (`this_grid`, `grid_group`: a grid barrier needs a
+# cooperative launch, which the image does not have). Without this, the front end reports the name as undefined.
+def refuse_unlowered_cccl(s)
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(s, i, "cub")
+      j = i + 3
+      j += 1 while j < s.length && white?(s[j])
+      if s[j, 2] == "::"
+        line = s[0...i].count("\n") + 1
+        refuse("cub:: at line #{line}: CUB is not lowered (the device unit does not carry its headers)")
+      end
+    end
+    %w[this_grid grid_group].each do |name|
+      next unless word_at?(s, i, name)
+      line = s[0...i].count("\n") + 1
+      refuse("#{name} at line #{line}: grid-wide cooperative groups are not lowered (a grid barrier needs a cooperative launch)")
+    end
+    i += 1
+  end
+end
+
 # The innermost `{ ... }` block that contains position pos, as [open, close] indices; nil at file scope.
+# A large text is indexed once (see block_index): the same answers, without a scan from the start per query.
 def enclosing_block(s, pos)
+  return enclosing_block_scan(s, pos) if s.length < 4000
+  idx = block_index(s)
+  events = idx[:events]
+  lo = 0
+  hi = events.length
+  while lo < hi
+    mid = (lo + hi) / 2
+    if events[mid][0] < pos
+      lo = mid + 1
+    else
+      hi = mid
+    end
+  end
+  return nil if lo == 0
+  open = events[lo - 1][1]
+  return nil if open.nil?
+  [open, idx[:closes][open]]
+end
+
+# Every `{` and `}` of a text in one pass, as the scan of enclosing_block_scan sees them: events are [position, the
+# innermost open `{` after the brace] in order, and closes maps each `{` to the `}` that closes it (s.length if none).
+def block_index(s)
+  return $block_index if $block_index_for.equal?(s)
+  events = []
+  closes = {}
+  stack = []
+  k = 0
+  while k < s.length
+    e = skip_literal(s, k)
+    if e
+      k = e
+      next
+    end
+    if s[k] == "{"
+      stack.push(k)
+      events << [k, stack[-1]]
+    elsif s[k] == "}" && !stack.empty?
+      closes[stack.pop] = k
+      events << [k, stack[-1]]
+    end
+    k += 1
+  end
+  stack.each { |o| closes[o] = s.length }
+  $block_index_for = s
+  $block_index = { events: events, closes: closes }
+  $block_index
+end
+
+def enclosing_block_scan(s, pos)
   stack = []
   i = 0
   while i < pos
@@ -2563,15 +3237,85 @@ def static_shared_names(s)
   found
 end
 
-# True when the use at pos is inside a block that declares a static __shared__ array of the same name.
-def shadowed_by_static?(s, statics, tok, pos)
-  statics.each do |name, decl|
-    next unless name == tok
-    blk = enclosing_block(s, decl)
-    next if blk.nil?
-    return true if pos > blk[0] && pos < blk[1]
+# True when the use at pos is inside a range where tok is declared again (blocks: name => [start, end] ranges, see
+# replace_dynamic_uses).
+def shadowed_by_static?(blocks, tok, pos)
+  (blocks[tok] || []).any? { |blk| pos >= blk[0] && pos < blk[1] }
+end
+
+# Words before a `(` that make it a statement or an expression, not a function's parameter list.
+PAREN_WORDS = %w[if while for switch catch return sizeof decltype alignof].freeze
+# Words before a name that make it a use, not a declaration.
+USE_WORDS = %w[return case else do throw delete new goto sizeof co_return co_await co_yield].freeze
+
+# Positions of the identifier tok in s, as whole words.
+def token_positions(s, tok)
+  found = []
+  from = 0
+  while (k = s.index(tok, from))
+    e = k + tok.length
+    found << k if (k == 0 || !ident_char?(s[k - 1])) && (e >= s.length || !ident_char?(s[e]))
+    from = e
   end
-  false
+  found
+end
+
+# True when the identifier at pos declares a variable or parameter: a type word, `*` or `&` before it, and `,`, `)`,
+# `;`, `=` or `[` after it. A use (`return name;`, `f(a * name)`) does not.
+def declares_name?(s, pos, tok)
+  q = pos - 1
+  q -= 1 while q >= 0 && white?(s[q])
+  return false if q < 0
+  if ident_char?(s[q])
+    w = q
+    w -= 1 while w >= 0 && ident_char?(s[w])
+    return false if USE_WORDS.include?(s[(w + 1)..q])
+  elsif s[q] != "*" && s[q] != "&"
+    return false
+  end
+  n = pos + tok.length
+  n += 1 while n < s.length && white?(s[n])
+  n < s.length && ",);=[".include?(s[n])
+end
+
+# The range where a name declared at pos is visible, as [start, end]: a parameter of a function definition lasts
+# through its body, a local through its block. nil when there is none (a prototype, or a call's argument).
+def declaration_scope(s, pos)
+  o = pos - 1
+  depth = 0
+  open = nil
+  while o >= 0
+    c = s[o]
+    if c == ")"
+      depth += 1
+    elsif c == "("
+      if depth == 0
+        open = o
+        break
+      end
+      depth -= 1
+    elsif c == ";" || c == "{" || c == "}"
+      break
+    end
+    o -= 1
+  end
+  unless open
+    blk = enclosing_block(s, pos)
+    return blk.nil? ? nil : [pos, blk[1]]
+  end
+  w = open - 1
+  w -= 1 while w >= 0 && white?(s[w])
+  w_end = w
+  w -= 1 while w >= 0 && ident_char?(s[w])
+  word = s[(w + 1)..w_end].to_s
+  return nil if word.empty? || PAREN_WORDS.include?(word)
+  close = matching_paren(s, open)
+  return nil if close.nil?
+  b = close + 1
+  b += 1 while b < s.length && (white?(s[b]) || ident_char?(s[b]))
+  return nil unless b < s.length && s[b] == "{"
+  bclose = matching_brace(s, b)
+  bclose.nil? ? nil : [pos, bclose]
 end
 
 # Replaces the uses of the dynamic shared arrays (every use, see dynamic_shared_rewrite). A member (`.name`, `->name`) is
@@ -2579,7 +3323,21 @@ end
 def replace_dynamic_uses(s, names)
   out = ""
   i = 0
-  statics = static_shared_names(s)
+  # name => the ranges where the name is declared again (a static __shared__ array, a parameter, a local): such a name
+  # there is that declaration, not the dynamic array. Computed once here, not per use.
+  blocks = {}
+  static_shared_names(s).each do |name, decl|
+    next unless names.key?(name)
+    blk = enclosing_block(s, decl)
+    (blocks[name] ||= []) << blk unless blk.nil?
+  end
+  names.each_key do |name|
+    token_positions(s, name).each do |p|
+      next unless declares_name?(s, p, name)
+      sc = declaration_scope(s, p)
+      (blocks[name] ||= []) << sc unless sc.nil?
+    end
+  end
   while i < s.length
     e = skip_literal(s, i)
     if e
@@ -2594,7 +3352,7 @@ def replace_dynamic_uses(s, names)
       q = i - 1
       q -= 1 while q >= 0 && white?(s[q])
       member = q >= 0 && (s[q] == "." || (s[q] == ">" && q > 0 && s[q - 1] == "-"))
-      if names.key?(tok) && !member && !shadowed_by_static?(s, statics, tok, i)
+      if names.key?(tok) && !member && !shadowed_by_static?(blocks, tok, i)
         out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
         i = j
         next
@@ -2610,7 +3368,7 @@ def replace_dynamic_uses(s, names)
 end
 
 def usage
-  $stderr.puts "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--obfuscate=SEED] FILE.cu"
+  $stderr.puts "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu"
   exit(2)
 end
 
@@ -2702,7 +3460,11 @@ def host_linkage(text)
         # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
         # A class member keeps its linkage (static is not allowed on a member function, const member or constructor).
         after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
-        out << (after_static || in_class_body?(out) ? "" : host_storage(out, "static"))
+        # `[&] __device__ (...) {...}`: a device lambda. Its qualifier goes; `static` after a capture list is not C++.
+        p = out.length - 1
+        p -= 1 while p >= 0 && white?(out[p])
+        lambda = p >= 0 && out[p] == "]"
+        out << (after_static || lambda || in_class_body?(out) ? "" : host_storage(out, "static"))
         i += 10
         next
       end
@@ -2859,6 +3621,8 @@ ARGV.each do |a|
   elsif a == "--device"
     device = true
     $device = true
+  elsif a == "--edg-launches"
+    $edg_launches = true
   elsif a.start_with?("--kernels=")
     kernels_path = a[10..-1]
   elsif a.start_with?("--obfuscate=")
@@ -2873,6 +3637,7 @@ usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
 text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
+refuse_unlowered_cccl(text) if device
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
 $expanded = obfuscate_kernels($expanded, obfuscate_seed) unless obfuscate_seed.nil?

@@ -51,6 +51,10 @@ This path does not yet connect to the `.cu` driver: the rewrite in `scripts/cuda
 - **Template launch depending on an enclosing template parameter** (reduction, MC_EstimatePiP, and most ggml-cuda
   templated launches): refused with exit 3 (`dependent_on_template`). The device image would need that instance, and the
   rewriter does not know which instances a program uses. Needs the instantiation set from the front end.
+- **Plain launches in the front end** (on by default for `.cu` inputs; `NFCXX_CUDA_EDG_LAUNCH=0` turns it off): the driver passes `--cuda` to EDG
+  (3rd/edg), which parses `kernel<<<grid, block[, shmem[, stream]]>>>(args)` itself, and the rewriter leaves those
+  launches (`--edg-launches`). The launch lowers to the same `__nfcxx_cuda_launch` call. Launches with template
+  arguments are still rewritten here, and EDG refuses them if one reaches it.
 
 ## CUDA source (`.cu`)
 
@@ -147,6 +151,17 @@ Approximate, with their PTX instructions:
 The error is `|got - ref| / (1 + |ref|)` against a double-precision reference, over 4096 inputs in [-8, 8) with
 the special values (a NaN operand, a zero divisor). The approximate instructions are not correctly rounded, so
 the bounds hold for the tested range only; the PTX ISA is the reference for the general case.
+
+The rounding functions are exact: `floorf` (`cvt.rmi.f32.f32`) and `trunc` (`cvt.rzi.f32.f32`) are one instruction each,
+and `roundf` (halfway away from zero) is `trunc` plus one when the fraction is at least one half. `sinf`, `cosf`,
+`tanhf` and `expm1f` are computed in double and rounded once: `sinf` and `cosf` reduce by the nearest multiple of
+pi/2 (fdlibm's two-part constant) and take the quadrant's Taylor series; `expm1f` is a Taylor series for |x| < 1/32 and
+otherwise exp(x) - 1 with exp(x) = 2^k exp(r); `tanhf(x) = e / (e + 2)` with e = expm1(2|x|), and 1 for |x| >= 10. On
+2^20 arguments in [-20000, 20000] and 2^18 up to 1e6 (plus the edge values) the error is 0 ulp against the double
+reference, so the bound checked is 1 ulp (CUDA's own `sinf` is within 2 ulp). The argument of `sinf` and `cosf` is
+limited to |x| < 2^31 * pi / 2 (about 3.4e9): the nearest multiple is an `int`. `INFINITY` and `FLT_MAX` are the
+`<math.h>` and `<float.h>` values. The double arithmetic costs throughput on the device (FP64 is slow on consumer
+GPUs); a float-only form would need a Payne-Hanek reduction for large arguments.
 
 `tests/cuda/intrinsics/math.cu` checks these on the GPU against the host: exact functions bit for bit, the
 approximate ones within the tolerance above. It is not yet in `tests/cuda/intrinsics/run.sh`: its host copy needs

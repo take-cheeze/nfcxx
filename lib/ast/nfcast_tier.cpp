@@ -25,6 +25,7 @@
 // starts and then either waits for (sync) or polls from the calls it serves (async). The reason is that EDG's exception runtime
 // keeps one global stack of try blocks (lib_src/throw.c of the front end), so a second thread running C++ code with destructors
 // while the interpreter runs would corrupt it.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1220,6 +1221,7 @@ struct Gen {
   int ntmp = 0;
   int inst_idx = 0;
   bool top_used = false;  // a self tail call was written: the body has the label it jumps to
+  bool jumps = false;     // a tail call of another instance was written as a jump (tail_jump): the calls go through the wrappers
 
   Gen(Unit& u, Infer& i) : U(u), in(i) {}
 
@@ -1436,7 +1438,7 @@ struct Gen {
         const Dep& d = proto().deps[static_cast<std::size_t>(e->dep)];
         (void)d;
         std::vector<std::string> o = operands(e->kids);
-        std::string s = "nfct_f" + num(inst().cinst[static_cast<std::size_t>(e->id)]) + "(cx";
+        std::string s = "nfct_c" + num(inst().cinst[static_cast<std::size_t>(e->id)]) + "(cx";
         for (const std::string& a : o) s += ", " + a;
         return s + ")";
       }
@@ -1557,6 +1559,10 @@ struct Gen {
           self_tail(s->exprs[0]);
           break;
         }
+        if (s->tail && jump_ok(s->exprs[0])) {
+          tail_jump(s->exprs[0]);
+          break;
+        }
         if (s->exprs.empty()) {
           cur += "--cx->depth;\nreturn;\n";
         } else {
@@ -1600,6 +1606,91 @@ struct Gen {
     }
     cur += "goto nfct_top;\n";
     top_used = true;
+  }
+
+  // A tail call of another instance of the unit with the same result (`return g(x)` in f, g not f; a unit that is an OSR loop has
+  // none). The interpreter reuses the frame for such a call and counts no depth, so it is not a C call that stays on the stack: the
+  // arguments go into the context (words, as the entry trampoline reads them), the target is set and the depth is given back, and the
+  // function returns. The wrapper of the call that entered the chain (nfct_cN, see source()) runs the target, with the same depth.
+  bool jump_ok(const IExpr* e) {
+    if (is_osr() || e->k != IExpr::Call) return false;
+    int j = inst().cinst[static_cast<std::size_t>(e->id)];
+    const Inst& J = in.insts[static_cast<std::size_t>(j)];
+    return j != inst_idx && J.ret == inst().ret && J.ret != Y_V && e->kids.size() == J.sig.size();
+  }
+
+  void tail_jump(const IExpr* e) {
+    int j = inst().cinst[static_cast<std::size_t>(e->id)];
+    const Inst& J = in.insts[static_cast<std::size_t>(j)];
+    std::vector<std::string> o = operands(e->kids);
+    std::vector<std::string> t;
+    for (std::size_t k = 0; k < o.size(); ++k) {
+      t.push_back(tmp());
+      cur += std::string(ty_c(J.sig[k])) + " " + t[k] + " = " + o[k] + ";\n";
+    }
+    int off = 0;
+    for (std::size_t k = 0; k < o.size(); ++k) {
+      Ty ty_k = J.sig[k];
+      if (ty_k == Y_N) {
+        cur += "cx->targ[" + num(off) + "] = " + t[k] + ".w;\ncx->targ[" + num(off + 1) + "].i = " + t[k] + ".f;\n";
+        off += 2;
+      } else if (ty_k == Y_F) {
+        cur += "cx->targ[" + num(off) + "].d = " + t[k] + ";\n";
+        off += 1;
+      } else {
+        cur += "cx->targ[" + num(off) + "].i = (nfcr_i64)" + t[k] + ";\n";
+        off += 1;
+      }
+    }
+    jumps = true;
+    cur += "cx->tgt = " + num(j + 1) + ";\n--cx->depth;\nreturn " + zero(inst().ret) + ";\n";
+  }
+
+  // The declarations of the wrappers and of the dispatchers of a unit with tail jumps. A wrapper runs instance IDX and then the
+  // targets its tail jumps name, one after another, so that the C stack does not grow with the chain; a dispatcher of result type R
+  // runs the instance named by its index with the arguments in the context.
+  std::string wrapper_head(int idx) {
+    Inst& I = in.insts[static_cast<std::size_t>(idx)];
+    ProtoIR& P = *U.protos[static_cast<std::size_t>(I.proto)];
+    std::string h = std::string("static ") + ty_c(I.ret) + " nfct_c" + num(idx) + "(nfcr_Ctx* cx";
+    for (int k = 0; k < P.nparams; ++k) h += std::string(", ") + ty_c(I.sig[static_cast<std::size_t>(k)]) + " p" + num(k);
+    return h + ")";
+  }
+
+  std::string call_args(int idx) {  // the parameters of instance IDX, passed on
+    ProtoIR& P = *U.protos[static_cast<std::size_t>(in.insts[static_cast<std::size_t>(idx)].proto)];
+    std::string a = "cx";
+    for (int k = 0; k < P.nparams; ++k) a += ", p" + num(k);
+    return a;
+  }
+
+  std::string dispatch_head(Ty r) { return std::string("static ") + ty_c(r) + " nfct_d" + num(static_cast<int>(r)) + "(nfcr_Ctx* cx, int t)"; }
+
+  std::string wrapper_def(int idx) {
+    Inst& I = in.insts[static_cast<std::size_t>(idx)];
+    std::string s = wrapper_head(idx) + " {\n";
+    if (I.ret == Y_V) return s + "nfct_f" + num(idx) + "(" + call_args(idx) + ");\n}\n";
+    s += std::string(ty_c(I.ret)) + " r = nfct_f" + num(idx) + "(" + call_args(idx) + ");\n";
+    s += "while (cx->tgt) {\nint t = (int)cx->tgt - 1;\ncx->tgt = 0;\nr = nfct_d" + num(static_cast<int>(I.ret)) + "(cx, t);\n}\nreturn r;\n}\n";
+    return s;
+  }
+
+  std::string dispatch_def(Ty r) {
+    std::string s = dispatch_head(r) + " {\nswitch (t) {\n";
+    for (std::size_t i = 0; i < in.insts.size(); ++i) {
+      if (!in.live[i] || in.insts[i].ret != r) continue;
+      Inst& I = in.insts[i];
+      std::string args = "cx";
+      int off = 0;
+      for (Ty k : I.sig) {
+        if (k == Y_N) args += ", nfct_fvn(&cx->targ[" + num(off) + "])", off += 2;
+        else if (k == Y_F) args += ", cx->targ[" + num(off) + "].d", off += 1;
+        else if (k == Y_B) args += ", (int)cx->targ[" + num(off) + "].i", off += 1;
+        else args += ", cx->targ[" + num(off) + "].i", off += 1;
+      }
+      s += "case " + num(static_cast<int>(i)) + ": return nfct_f" + num(static_cast<int>(i)) + "(" + args + ");\n";
+    }
+    return s + "}\nnfct_bail(cx);\nreturn " + zero(r) + ";\n}\n";
   }
 
   void for_loop(const IStmt* s) {
@@ -1759,7 +1850,7 @@ struct Gen {
     if (is_osr()) return trampoline_osr();
     Inst& I = in.insts[0];
     ProtoIR& P = *U.protos[static_cast<std::size_t>(I.proto)];
-    std::string call = "nfct_f0(cx";
+    std::string call = "nfct_c0(cx";
     for (int k = 0; k < P.nparams; ++k) {
       Ty t = I.sig[static_cast<std::size_t>(k)];
       call += ", " + std::string(t == Y_F ? "a[" + num(k) + "].d" : t == Y_B ? "(int)a[" + num(k) + "].i" : "a[" + num(k) + "].i");
@@ -1778,10 +1869,31 @@ struct Gen {
     out += rt_text;
     out += "\n";
     out += kPostRt;
+    std::string bodies;
+    for (std::size_t i = 0; i < in.insts.size(); ++i)
+      if (in.live[i]) bodies += function(static_cast<int>(i));
     for (std::size_t i = 0; i < in.insts.size(); ++i)
       if (in.live[i]) out += head(static_cast<int>(i)) + ";\n";
-    for (std::size_t i = 0; i < in.insts.size(); ++i)
-      if (in.live[i]) out += function(static_cast<int>(i));
+    // the calls are made through nfct_cN: the wrappers of a unit with tail jumps, else the instances themselves
+    std::vector<Ty> rets;
+    for (std::size_t i = 0; i < in.insts.size(); ++i) {
+      if (!in.live[i]) continue;
+      Ty r = in.insts[i].ret;
+      if (r != Y_V && std::find(rets.begin(), rets.end(), r) == rets.end()) rets.push_back(r);
+    }
+    for (std::size_t i = 0; i < in.insts.size(); ++i) {
+      if (!in.live[i]) continue;
+      if (jumps) out += wrapper_head(static_cast<int>(i)) + ";\n";
+      else out += "#define nfct_c" + num(static_cast<int>(i)) + " nfct_f" + num(static_cast<int>(i)) + "\n";
+    }
+    if (jumps)
+      for (Ty r : rets) out += dispatch_head(r) + ";\n";
+    out += bodies;
+    if (jumps) {
+      for (std::size_t i = 0; i < in.insts.size(); ++i)
+        if (in.live[i]) out += wrapper_def(static_cast<int>(i));
+      for (Ty r : rets) out += dispatch_def(r);
+    }
     out += trampoline();
     return out;
   }
@@ -2161,6 +2273,7 @@ bool run_version(State& S, Version* v, Closure* cl, const nfcr_W* argv, Rets& ou
   cx.depth = S.depth;
   cx.maxd = S.max_depth;
   cx.fv = T->fvbuf.data();
+  cx.tgt = 0;
   nfcr_W r;
   r.i = 0;
   int rc = v->run(&cx, argv, &r);
@@ -2184,11 +2297,23 @@ bool run_version(State& S, Version* v, Closure* cl, const nfcr_W* argv, Rets& ou
   return true;
 }
 
-// Runs a ready version whose argument types match. Sets *MATCHED when there was one (even if it fell back).
-bool try_versions(State& S, TierProto* tp, Closure* cl, Value* args, int n, Rets& out, bool* any_ready, bool* matched) {
+// Whether the arguments have the types of version V.
+bool fits(const Version* v, const Value* args, int n) {
+  if (n < static_cast<int>(v->sig.size())) return false;
+  for (std::size_t k = 0; k < v->sig.size(); ++k)
+    if (ty_of_tag(args[k].t) != v->sig[k]) return false;
+  return true;
+}
+
+// Runs a ready version whose argument types match. Sets *MATCHED when there was one (even if it fell back). *GIVEN_UP is set when a
+// version for these argument types was given up: nothing is asked for them again (find_version would find it).
+bool try_versions(State& S, TierProto* tp, Closure* cl, Value* args, int n, Rets& out, bool* any_ready, bool* matched, bool* given_up) {
   for (std::size_t i = 0; i < tp->vers.size(); ++i) {
     Version* v = tp->vers[i].get();
-    if (v->st != Version::Ready) continue;
+    if (v->st != Version::Ready) {
+      if (v->st == Version::Dead && fits(v, args, n)) *given_up = true;
+      continue;
+    }
     *any_ready = true;
     if (n < static_cast<int>(v->sig.size())) continue;
     nfcr_W argv[kMaxParams];
@@ -2341,6 +2466,7 @@ int osr_run(State& S, Frame& f, Version* v, const TierLoopState& st) {
   cx.depth = S.depth;
   cx.maxd = S.max_depth;
   cx.fv = T->fvbuf.data();
+  cx.tgt = 0;
   int rc = v->run(&cx, argv, out);  // 0: the loop ended, 1: the run was abandoned, 2: the function returned
   ++v->runs;
   if (rc == 1) {
@@ -2389,15 +2515,15 @@ bool tier_dispatch(State& S, Closure* cl, Value* args, int n, Rets& out) {
   if (!T->pending.empty() && (++T->tick & 15) == 0) poll_pending(S);
   TierProto* tp = p->tier ? p->tier : new_tier_proto(S, p);
   if (tp->dead) return false;
-  bool any_ready = false, matched = false;
-  if (try_versions(S, tp, cl, args, n, out, &any_ready, &matched)) return true;
+  bool any_ready = false, matched = false, given_up = false;
+  if (try_versions(S, tp, cl, args, n, out, &any_ready, &matched, &given_up)) return true;
   if (matched) return false;  // it ran and fell back (already counted)
   ++tp->calls;
   std::vector<Ty> sig;
-  if (want_compile(T, tp, tp->calls, T->opt.threshold) && signature(args, n, p->nparams, sig) && !find_version(tp, sig)) {
+  if (!given_up && want_compile(T, tp, tp->calls, T->opt.threshold) && signature(args, n, p->nparams, sig) && !find_version(tp, sig)) {
     request(S, tp, cl, sig);
-    bool ready2 = false;
-    if (try_versions(S, tp, cl, args, n, out, &ready2, &matched)) return true;  // a synchronous compile is ready now
+    bool ready2 = false, given2 = false;
+    if (try_versions(S, tp, cl, args, n, out, &ready2, &matched, &given2)) return true;  // a synchronous compile is ready now
     if (matched) return false;
     any_ready = any_ready || ready2;
   }

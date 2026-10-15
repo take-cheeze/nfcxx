@@ -27,7 +27,7 @@ else rake=(ruby -rrake -e 'Rake.application.run(ARGV)' --); fi
 "${rake[@]}" --version >/dev/null 2>&1 || { echo "setup-mruby: the rake gem is needed (apt-get install rake)" >&2; exit 1; }
 mkdir -p "$work"
 # One build at a time (parallel compiles can all find the interpreter missing); re-check once locked.
-exec 9>"$work/.lock"; flock 9
+exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && [ -x "$exe" ] && exit 0
 if [ ! -d "$src/.git" ]; then
   mkdir -p "$src" && git -C "$src" init -q &&
@@ -41,7 +41,7 @@ git -C "$src" checkout -q "$pin" || exit 1
 cp scripts/mruby-tool-config.rb "$work/build_config$tag.rb"
 log=$work/build$tag.log
 if ! (cd "$src" && MRUBY_CC=$cc MRUBY_CONFIG=$work/build_config$tag.rb MRUBY_BUILD_DIR=$work/out$tag \
-        "${rake[@]}" -j"$(nproc)" all) >"$log" 2>&1; then
+        "${rake[@]}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" all) >"$log" 2>&1; then
   tail -20 "$log" >&2; echo "setup-mruby: build failed (full log: $log)" >&2; exit 1
 fi
 mkdir -p "$work/bin"

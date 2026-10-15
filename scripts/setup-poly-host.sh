@@ -18,7 +18,7 @@ case $lang in ruby|lua|js) ;; *) echo "usage: $0 ruby|lua|js" >&2; exit 1 ;; esa
 for t in curl tar gcc g++ ar; do command -v $t >/dev/null || skip "$t not found"; done
 dest=$work/$lang
 [ -z "${FORCE:-}" ] && [ -f "$dest/.built" ] && exit 0
-mkdir -p "$work"; exec 9>"$work/.lock"; flock 9
+mkdir -p "$work"; exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
 [ -z "${FORCE:-}" ] && [ -f "$dest/.built" ] && exit 0
 log=$work/build-$lang.log; : > "$log"
 fail() { tail -20 "$log" >&2; echo "setup-poly-host: $lang build failed (log: $log)" >&2; exit 1; }
@@ -49,7 +49,7 @@ ruby)
   tar xzf "$work/mruby.tgz" -C "$src" --strip-components=1 || fail
   # mruby's own rake build, with scripts/mruby-rt-config.rb (C++ exceptions) and the host compilers
   cp scripts/mruby-rt-config.rb "$work/build_config-host.rb"
-  if ! (cd "$src" && MRUBY_CC=gcc MRUBY_CXX=g++ MRUBY_CONFIG=$work/build_config-host.rb MRUBY_BUILD_DIR=$work/mruby-out "${rake[@]}" -j"$(nproc)" all) >>"$log" 2>&1; then fail; fi
+  if ! (cd "$src" && MRUBY_CC=gcc MRUBY_CXX=g++ MRUBY_CONFIG=$work/build_config-host.rb MRUBY_BUILD_DIR=$work/mruby-out "${rake[@]}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" all) >>"$log" 2>&1; then fail; fi
   lib=$work/mruby-out/host/lib/libmruby.a
   [ -f "$lib" ] || fail
   rm -rf "$dest"; mkdir -p "$dest/lib" "$dest/include"

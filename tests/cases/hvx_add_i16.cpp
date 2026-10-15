@@ -12,3 +12,4 @@ int main() {
   for (int i = 0; i < 128; ++i) sum += d[i];
   return (sum >> 8) & 255;
 }
+// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

@@ -37,6 +37,12 @@ check "kernel list is the two new names" bash -c \
 check "same seed, same output" bash -c 'cmp -s "$1" "$2" && cmp -s "$3" "$4"' _ \
   "$out/host_a.cpp" "$out/host_a2.cpp" "$out/dev_a.cpp" "$out/dev_a2.cpp"
 check "other seed, other names" bash -c '! cmp -s "$1" "$2"' _ "$out/a.kernels" "$out/b.kernels"
+# 3b. The C++ rewriter (the default, tools/cuda-rewrite) gives the same output as the Ruby reference, host and device.
+[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite"
+"$root/build/cuda-rewrite" --obfuscate=seedA kern.cu > "$out/cxx_host_a.cpp"
+"$root/build/cuda-rewrite" --obfuscate=seedA --device --kernels="$out/cxx_a.kernels" kern.cu > "$out/cxx_dev_a.cpp"
+check "C++ rewriter matches the Ruby reference" bash -c 'cmp -s "$1" "$2" && cmp -s "$3" "$4" && cmp -s "$5" "$6"' _ \
+  "$out/host_a.cpp" "$out/cxx_host_a.cpp" "$out/dev_a.cpp" "$out/cxx_dev_a.cpp" "$out/a.kernels" "$out/cxx_a.kernels"
 # 4. Without the option the copies keep the names.
 check "off by default" bash -c 'grep -q ob_scale_kernel "$1" && ! grep -q __nfcxx_kn_ "$2"' _ "$out/plain.kernels" "$out/dev_plain.cpp"
 

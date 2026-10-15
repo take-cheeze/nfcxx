@@ -320,7 +320,7 @@ struct W {
 };
 W value_info(const std::string& name, int dt, const std::vector<int64_t>& dims, bool dynamic = false) {
   W shape;
-  for (int64_t d : dims) { W dim; if (dynamic) dim.s(2, "N"); else dim.i(1, d); shape.m(1, dim); }
+  for (int64_t d : dims) { W dim; if (!dynamic) dim.i(1, d); shape.m(1, dim); }  // dynamic: neither dim_value nor dim_param (a symbol is accepted)
   W tensor; tensor.i(1, dt); tensor.m(2, shape);
   W type; type.m(1, tensor);
   W vi; vi.s(1, name); vi.m(2, type);

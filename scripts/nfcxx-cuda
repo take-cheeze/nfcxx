@@ -24,8 +24,12 @@
 # Anything else is an error with the flag named, so an unhandled flag does not change the build silently.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-cuda=${CUDA_HOME:-/usr/local/cuda}
-nvcc=$cuda/bin/nvcc
+# NFCXX_CUDA_WHEEL: the headers come from a CUDA_HOME-shaped directory of PyPI wheels (scripts/fetch-cudart-wheel.sh).
+# nvcc is the toolkit's and is only used for CMake's probes, so it stays under CUDA_HOME.
+cuda=${NFCXX_CUDA_WHEEL:-${CUDA_HOME:-/usr/local/cuda}}
+nvcc=${CUDA_HOME:-/usr/local/cuda}/bin/nvcc
+# The wheel's headers are system headers for the rewriter (not inlined into the device unit), as the toolkit's are.
+[ -n "${NFCXX_CUDA_WHEEL:-}" ] && export NFCXX_SYSTEM_PATHS="$NFCXX_CUDA_WHEEL${NFCXX_SYSTEM_PATHS:+:$NFCXX_SYSTEM_PATHS}"
 
 # CMake passes the include directories and the flags in response files: `--options-file FILE` (nvcc's option file,
 # shell-quoted words). Expand them in place, before anything is parsed.
@@ -53,7 +57,7 @@ done
 
 # --- compile: map the nvcc command line to nfcxx
 # nvcc puts the toolkit's headers on the include path itself; CMake does not pass them for CUDA sources.
-args=(-I"$cuda/include"); [ -d "$cuda/include/cccl" ] && args+=(-I"$cuda/include/cccl")
+args=(-I"$root/lib/cuda/host" -I"$cuda/include"); [ -d "$cuda/include/cccl" ] && args+=(-I"$cuda/include/cccl")
 deps=(); inputs=(); out=""; compile=0; warned_fast=0; warned_openmp=0
 add_host() {  # one host flag from -Xcompiler
   case $1 in

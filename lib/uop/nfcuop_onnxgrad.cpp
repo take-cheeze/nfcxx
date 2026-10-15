@@ -243,6 +243,12 @@ std::vector<int> gradients_via_onnxsim(Graph& g, int loss, const std::vector<int
       if (in >= 0 && !in_loss[static_cast<size_t>(in)]) { in_loss[static_cast<size_t>(in)] = true; stack.push_back(in); }
   }
 
+  // the gradients are computed by onnxsim for static shapes (the zeros for values outside the loss take the shapes): symbols are refused
+  for (size_t v = 0; v < in_loss.size(); v++)
+    if (in_loss[v] && g.symbolic(static_cast<int>(v))) throw Error("gradients: " + g.value(static_cast<int>(v)).name + " has a symbolic dimension; gradients of a symbolic graph are not supported (bind it first)");
+  for (int w : wrt)
+    if (g.symbolic(w)) throw Error("gradients: " + g.value(w).name + " has a symbolic dimension; gradients of a symbolic graph are not supported (bind it first)");
+
   std::vector<int> result(wrt.size(), -1);
   std::vector<std::string> names;
   std::vector<size_t> where;  // index in `wrt` of each name sent to onnxsim

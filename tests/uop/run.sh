@@ -5,12 +5,28 @@
 #   - tests/uop/test_ut.cpp     shapes, movement ops (reshape, permute, expand, shrink, pad, flip), reductions, tensor rewrites
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
-#                               errors, slicing, concatenation, the graph, the ONNX export; it also writes models
+#                               errors, slicing, concatenation, pow/floor/ceil/isnan/isinf, cumsum/prod, argmax/argmin, tile/take (with an ONNX
+#                               round trip for each), the Array API functions (sort, searchsorted, einsum, tensordot, roll, tril, ... with values
+#                               worked out by hand), the graph, the ONNX export; it also writes models
 #   - tests/uop/test_nn.cpp     the forward operators Gemm, Gather, Erf, Conv, MaxPool, AveragePool, BatchNormalization, InstanceNormalization,
 #                               LayerNormalization (nfcuop_hir.cpp, nfcuop_lower.cpp): shape inference and refusals, values against direct
 #                               references, export/import round trips, the C backend's bits, and models for onnx_check.py
 #   - tests/uop/test_onnx.cpp   the ONNX reader (hir::Graph::from_onnx / merge_onnx): export -> import -> export bytes equal, models made by
 #                               the onnx package (tests/uop/onnx_import_gen.py) equal to onnxruntime, merging, name collisions, errors, Pad
+#   - tests/uop/test_sym.cpp    symbolic dimensions in hir (ONNX dim_param): an MLP with a batch symbol evaluated at two batch sizes against
+#                               values worked out by hand (hir::Evaluator, cached per binding), shape inference and its refusals,
+#                               Graph::bind, the exported dim_param and its reader; it writes two models for onnx_check.py
+#   - tests/uop/test_ort.cpp    the ONNX Runtime back end (nfcuop_ort.hpp): hir graphs exported with to_onnx and run by onnxruntime, loaded
+#                               with dlopen from $NFCUOP_ORT_LIB (or libonnxruntime.so.1 and the other common names), against the
+#                               interpreter (floats to a relative 1e-5, integers exact); a symbolic batch run unbound and bound; the numpy
+#                               API with np.backend = Ort. Prints SKIP when the library cannot be loaded
+#   - tests/uop/test_tinygrad.cpp  the tinygrad back end (nfcuop_tinygrad.hpp): hir graphs exported with to_onnx, run by tinygrad (embedded
+#                               in this process, or in a Python process: scripts/tinygrad_run.py; the executable is $NFCUOP_TINYGRAD_PYTHON,
+#                               else python3) against the interpreter (floats to a relative 1e-5, integers exact): float64, int32, bool, a
+#                               symbolic batch unbound and bound, the numpy API with np.backend = Tinygrad, the failures of the helper, the
+#                               embedded path (repeated calls reuse tinygrad and the runner and are faster than a subprocess call; another
+#                               thread takes the subprocess path; an import failure gives the Python traceback). Prints SKIP when tinygrad
+#                               cannot be imported
 #   - tests/uop/test_grad.cpp   reverse-mode autodiff by onnxsim (nfcuop_onnxgrad.hpp, docs/notes/uop-autodiff.md): finite differences in
 #                               float64, exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
 #                               backend equal to the interpreter bit for bit; it also writes models (a loss and its gradients) for
@@ -20,8 +36,8 @@
 #                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.
 #                               On the nfcxx back ends it is run a second time with `nfcxx` itself as the C compiler (the `quick` set)
 #   - tests/uop/onnx_check.py   those models through onnx.checker and onnxruntime, against the UOp interpreter's results
-#   - tests/uop/np_compat.cpp/.py   100 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
-#                               with the 32-bit default dtypes (10 documented dtype differences) and once with float64/int64 (none)
+#   - tests/uop/np_compat.cpp/.py   166 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
+#                               with the 32-bit default dtypes (22 documented dtype differences) and once with float64/int64 (none)
 #   - tests/uop/run_poly.sh     the API from scripts (lib/uop/nfcuop_poly.cpp, docs/notes/uop-poly.md): one model in Ruby, Lua, Python,
 #                               JavaScript and Go, equal to the C++ API in values and in the bytes of the ONNX file; operators, errors,
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
@@ -30,9 +46,10 @@
 #   UOP_HOST=1              build with the host g++ (-fsanitize=address,undefined) and nothing else; for a machine
 #                           where nfcxx is not built
 cd "$(dirname "$0")/../.."
+. tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled programs are kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp)
-tests=(test test_ut test_np test_nn test_onnx test_grad test_cgen np_compat)
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_arena.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_ort.cpp lib/uop/nfcuop_tinygrad.cpp)
+tests=(test test_ut test_np test_nn test_onnx test_sym test_ort test_tinygrad test_shaping test_grad test_cgen np_compat)
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
@@ -42,11 +59,17 @@ run_all() {
   for t in "${tests[@]}"; do
     ldx=()   # nfcxx programs export type_info vtables that break the exceptions inside libnfconnxsim.so: export nothing (scripts/onnxsim/exe.map)
     [ -n "$CC_IS_NFCXX" ] && [ "$t" = test_grad ] && ldx=(-Wl,--version-script=scripts/onnxsim/exe.map)
-    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
+    cargs=(-I lib/uop tests/uop/$t.cpp "${lib[@]}" -ldl "${ldx[@]}")
+    cached=""; [ -n "$UOP_HOST" ] || cached=$(bin_cache_file "$t-$label" "NFCXX_BACKEND=${NFCXX_BACKEND:-}" "$@" "${cargs[@]}")
+    if [ -n "$cached" ] && [ -x "$cached" ]; then
+      cp -p "$cached" "$tmp/$label/$t"; echo "     $label uop/$t: compile skipped, program from $cached"
+    elif ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
+    else
+      [ -z "$cached" ] || bin_cache_store "$tmp/$label/$t" "$cached"
     fi
     case $t in
-      test_np|test_grad|test_nn) args=("$tmp/$label/onnx") ;;
+      test_np|test_grad|test_nn|test_sym) args=("$tmp/$label/onnx") ;;
       test_onnx) args=("$tmp/$label/import") ;;
       np_compat) args=("$tmp/$label/compat.json") ;;
       *) args=() ;;
