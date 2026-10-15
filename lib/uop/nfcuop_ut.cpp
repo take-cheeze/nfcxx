@@ -207,6 +207,26 @@ void print(const Array& a, size_t dim, size_t& pos, std::string& out) {
 
 }  // namespace
 
+Tensor atan2(const Tensor& y, const Tensor& x) {
+  DType dt = promote(y.dtype(), x.dtype());
+  if (!is_float(dt)) dt = DType::Float32;
+  Tensor a = y, b = x;
+  prepare(a, b, dt);
+  return wrap(a, G(a).atan2(a.uop(), b.uop()));
+}
+
+Tensor shift_left(const Tensor& x, const Tensor& n) {   // Graph::shl checks the dtype (integers only)
+  Tensor a = x, b = n;
+  prepare(a, b, promote(x.dtype(), n.dtype()));
+  return wrap(a, G(a).shl(a.uop(), b.uop()));
+}
+
+Tensor shift_right(const Tensor& x, const Tensor& n) {
+  Tensor a = x, b = n;
+  prepare(a, b, promote(x.dtype(), n.dtype()));
+  return wrap(a, G(a).shr(a.uop(), b.uop()));
+}
+
 namespace detail {
 Tensor lift(const Tensor& like, double v, bool integral) {
   check(like);
@@ -463,6 +483,24 @@ Tensor Tensor::tanh() const {  // 1 - 2 / (exp(2x) + 1): exact limits +-1 where 
 Tensor Tensor::sigmoid() const {
   Tensor x = to_float(*this);
   return cst_t(x, 1) / ((-x).exp() + cst_t(x, 1));
+}
+Tensor Tensor::log2() const { Tensor x = to_float(*this); return wrap(x, G(x).log2(x.uop())); }
+Tensor Tensor::acos() const { Tensor x = to_float(*this); return wrap(x, G(x).acos(x.uop())); }
+Tensor Tensor::acosh() const { Tensor x = to_float(*this); return wrap(x, G(x).acosh(x.uop())); }
+Tensor Tensor::asin() const { Tensor x = to_float(*this); return wrap(x, G(x).asin(x.uop())); }
+Tensor Tensor::asinh() const { Tensor x = to_float(*this); return wrap(x, G(x).asinh(x.uop())); }
+Tensor Tensor::atan() const { Tensor x = to_float(*this); return wrap(x, G(x).atan(x.uop())); }
+Tensor Tensor::atanh() const { Tensor x = to_float(*this); return wrap(x, G(x).atanh(x.uop())); }
+Tensor Tensor::cosh() const { Tensor x = to_float(*this); return wrap(x, G(x).cosh(x.uop())); }
+Tensor Tensor::sinh() const { Tensor x = to_float(*this); return wrap(x, G(x).sinh(x.uop())); }
+Tensor Tensor::tan() const { Tensor x = to_float(*this); return wrap(x, G(x).tan(x.uop())); }
+Tensor Tensor::expm1() const { Tensor x = to_float(*this); return wrap(x, G(x).expm1(x.uop())); }
+Tensor Tensor::log1p() const { Tensor x = to_float(*this); return wrap(x, G(x).log1p(x.uop())); }
+Tensor Tensor::log10() const { Tensor x = to_float(*this); return wrap(x, G(x).log10(x.uop())); }
+Tensor Tensor::round() const {
+  if (is_int(dtype())) return *this;
+  Tensor x = to_float(*this);
+  return wrap(x, G(x).round(x.uop()));
 }
 Tensor Tensor::relu() const {
   check(*this);

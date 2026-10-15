@@ -224,13 +224,11 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
   order the kernels write them). Sizes are rounded to 16 bytes. Not ported: onnxsim's in-place aliasing, since a fused loop nest reads its inputs at other
   indices than it writes. `CProgram` reports `arena_bytes`, `naive_bytes` (one buffer each) and `unplanned`. The chain in `test_cgen.cpp` (ten halving steps
   on 32x128 float32, each with a reduction) needs 32,896 bytes of arena against 148,736 with one buffer each: the peak of the live set.
-- **Dimension ranging** (`RenderOptions`): the UOp graph has concrete shapes, so a symbol such as the batch size `N` of an `hir` graph is named per input
-  dimension (`input_symbols`) and given an upper bound (`symbol_bounds`). Symbols follow the operators by rules that keep one only where the dimension is
-  that symbol's size: elementwise ops, reductions (the reduced axis becomes 1), permute, flip, expand of an integer axis, a reshape that keeps the leading
-  symbolic axes, a shrink or pad that does not cut them. Any other dimension is unknown. An intermediate's maximum size takes the bound for each symbolic
-  dimension, and the arena is sized from these maxima. The renderer checks every intermediate against its slot, so a bound below an input's size is an
-  `Error`, and a symbol without a bound leaves its intermediates with a `malloc` of their own. When the loops can be written in the symbols, the program
-  takes the sizes at run time and runs at any size up to the bound (stage 7, step 2, below); otherwise the loops have the concrete sizes.
+- **Dimension ranging** (stage 7, below): a symbol such as the batch size `N` of an `hir` graph is a `Symbol` of the UOp graph (`Graph::symbol`), and
+  each dimension it sizes says so (`SymDim`). An intermediate's maximum size takes the bound of each symbolic dimension, and the arena is sized from these
+  maxima. The renderer checks every intermediate against its slot, so a bound below an input's size is refused when the graph is built, and a symbol without
+  a bound leaves its intermediates with a `malloc` of their own. When the loops can be written in the symbols, the program takes the sizes at run time and
+  runs at any size up to the bound (stage 7, step 2, below); otherwise the loops have the concrete sizes.
 - **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes in the loops. No
   in-place reuse of an input by an output (see Memory). An output that is a reshape of a reduction is copied.
 - **nfcxx as the C compiler**: `NFCUOP_CC=./nfcxx` (it passes `-shared -o`, not the gcc flags). `tests/uop/run.sh` runs the `quick` part of `test_cgen` that way on both
@@ -320,43 +318,57 @@ shapes are added in two steps, without changing what the static path means:
    Evaluation **specializes**: `Graph::bind({N: 2})` gives a static copy of the graph (every operator inferred again with the sizes), and
    `hir::Evaluator` binds, lowers and evaluates it, caching the lowering per binding (keyed on the bindings in name order). Lowering a value
    that has an unbound symbol throws. This keeps UOps static and is enough for batch-size changes; the numpy API has no symbols yet.
-2. **Symbolic loops in the C renderer** (done). A compiled program runs at any size of its symbols up to their bounds, not only at the
-   sizes it was rendered for. The renderer is the only place that changes; the UOp IR and the interpreter are untouched.
-   - **Representation.** UOp shapes stay concrete integers: the graph is built at a *representative* size per symbol (the size of the
-     input that names it). The symbolic form is one `SymDim` per dimension of every node, computed by `sym_rule` from the rules of the
-     operators: an integer, a symbol, `Wild` (a constant, or a size-1 dimension that a consumer broadcasts, so its size is the
-     consumer's), or `Unknown`. A dimension whose size is 1 and that no symbol names is the integer 1.
-   - **Contract (not checked).** Concrete shapes lose which dimension is which symbol, so the renderer reads a dimension or an argument
-     (a shrink end, a pad amount) equal to a symbol's representative size as that symbol. The graph must therefore be built with each
-     symbol written where its size is, and **no other dimension or argument of the graph may equal the representative size**. A reshape
-     that moves a symbol to a dimension of the same size would otherwise look unchanged. `tests/uop/test_cgen.cpp` checks the programs
-     at other sizes against the interpreter, which catches a violation; its random chains use representative sizes above every
-     dimension they can reach. Removing the contract needs the symbol in the UOp shape (below).
-   - **Dynamic programs.** `nfcuop_run` takes a third argument, `const int64_t* sizes`, one size per symbol (`CProgram::symbols`, in
-     name order). `CModule::run` reads them from the feeds: every use of a symbol must agree, each size is at least 1 and at most its
-     bound (`nfcuop::Error` otherwise, before any code runs), and the outputs take their shapes from the sizes. Loop bounds, the strides
-     of flat indices, the reduction loops, the `Pad` bounds and the `Flip` offsets, the copies of duplicate outputs and the mallocs of
-     unplanned intermediates are C expressions in the sizes; integers stay literals.
-   - **Arena.** The planner is unchanged and sized from the bounds, so a dynamic program keeps the saving of PR #219. An intermediate
-     without a bound keeps a malloc of its run-time size. A symbol with a bound is checked against it at run time, so the arena is safe.
-   - **Fallback.** When codegen needs a dimension that is `Wild` or `Unknown` (a reshape that moves a symbol, a cut of a symbolic
-     dimension, an expand of a size-1 dimension whose consumer is not an elementwise op, a materialized constant, an output that is one of
-     these), `render_c` renders the graph again with integer loops: `CProgram::dynamic` is false, the program has no size argument and
-     runs only at its representative sizes (other sizes throw). Its C is the one of the static renderer, so a graph with no symbol is
-     unchanged byte for byte. The fallback also plans its arena as before (wildcards are planned at their concrete size).
-   - **Verification.** `tests/uop/test_cgen.cpp` (`dynamic_sizes`, `random_symbolic_sizes`): a batch chain (elementwise ops with a
-     constant, a reduction over the non-batch axis, an expand of it) rendered once at batch 3 with bound 8 runs at 1, 2, 3, 5 and 8 rows and
-     equals the interpreter bit for bit, and 9 rows throws; without a bound it runs at 1, 5 and 40; the halving chain of 32 x 128 gives the
-     static arena (32,896 bytes against 148,736) at every size up to 32; two inputs sharing a symbol agree or throw; a reshape that moves the
-     symbol falls back and runs at its own size only; 32 of 60 random chains are dynamic and all agree at their sizes. Static graphs: the
-     generated C of ten graphs (plain, reductions, shared intermediates, int64, a materialized expand and constant, and two symbolic
-     fallbacks) is identical to the one before this change.
-   - **Remains.** (a) Symbol identity in UOp shapes (a `Var` as a dimension, tinygrad's `Variable`): it removes the contract above and
-     lets a reshape that moves a symbol, a cut of one, or a broadcast with no symbolic consumer stay dynamic; it touches shape inference,
-     `Reshape` and `Expand` validation and the rules of the renderer, and it is the step to take next. (b) A constant or a size-1 broadcast
-     that is an output is not dynamic yet (fallback). (c) The bound is a check and the size of the arena, never a loop bound: a
-     dynamic loop runs over the run-time size. (d) The ONNX, tinygrad and ONNX Runtime back ends keep their own symbol handling (`Graph::bind`, dim
-     params); this change does not touch them.
+2. **Symbolic loops in the C renderer, with symbol identity in the shapes** (done). A compiled program runs at any size of its symbols up to
+   their bounds, not only at the sizes it was rendered for. The renderer is the only place that changes; the interpreter is untouched.
+   - **Symbols in UOps.** A `nfcuop::Symbol` (tinygrad's `Variable`) is a name and a bound (0: none). `Graph::symbol(name, bound)` interns it, so
+     a name is one pointer, and asking for a name with another bound throws. Every UOp has a `SymShape sym`, one `SymDim` per dimension of its
+     `shape`: `Int` (an integer), `Sym` (the size of a symbol), `Wild` (a constant, or a size-1 dimension that a consumer broadcasts: its size is the
+     consumer's), or `Unknown` (not expressible). The `shape` is still the size in the graph. The builders compute the symbolic form (`alu_sym`,
+     `reshape_sym`, `expand_sym`, `shrink_sym`, `pad_sym`, `reduce`, `permute`, `flip` in `nfcuop.cpp`): an elementwise op keeps a symbol that its
+     sources agree on; a reduction makes its axes integers; a permute, flip or cast moves the symbols; any other op of an `Unknown` dimension is
+     `Unknown` as a whole.
+   - **The explicit forms name the symbols.** `var(name, d, shape, syms)`, `reshape(x, shape, syms)`, `expand(x, shape, syms)` and
+     `shrink(x, starts, ends, end_syms)` take the symbol of each dimension (`symbols_of(u)` reads them from a node). A reshape moves symbols: the
+     symbols of the target must be those of the input (as a multiset), each of the same size, and the rest are integers. An expand keeps a symbol
+     of its input, and grows a size-1 dimension (or a constant) to the symbol given; a literal target is an integer, so the broadcast stays
+     dynamic. A shrink that ends at its symbol keeps the whole dimension; any other cut of a symbolic dimension is a literal cut, which is an
+     integer of the cut's size, and the symbol must be at least its end: `CProgram::Symbol::minimum`, checked at run time.
+   - **The shape-only forms are the old rules.** `reshape(x, shape)`, `expand(x, shape)` and `shrink(x, starts, ends)` name no symbol. A reshape keeps
+     the leading symbolic dimensions when their sizes are unchanged, and is `Unknown` otherwise; an expand or pad of a symbolic dimension is `Unknown`;
+     a size-1 dimension that a shape-only expand grows is `Wild`, as before. A cut of a symbolic dimension is a literal cut (before, a cut that kept
+     the representative size was taken as the whole dimension). The planning of a graph with no symbol is the one of the old rules, so its C is
+     unchanged (see Verification).
+   - **No representative-size contract.** The renderer reads each dimension's symbol from the UOp and never matches a value against a size, so a
+     literal equal to a symbol's size is just a literal. The one check left: a symbol has one size in a graph (`Error` otherwise), and every
+     dynamic program's symbol names a dimension of an input. A symbol that names no input has no size at run time, so the graph is rendered with
+     integer loops (see Fallback).
+   - **Dynamic programs.** `nfcuop_run` takes a third argument, `const int64_t* sizes`, one size per symbol (`CProgram::symbols`, in name order).
+     `CModule::run` reads them from the feeds: every use of a symbol must agree, each size is at least its minimum and at most its bound (`Error`
+     otherwise, before any code runs), and the outputs take their shapes from the sizes. Loop bounds, the strides of flat indices, the reduction
+     loops, the `Pad` bounds and the `Flip` offsets, the copies of duplicate outputs and the mallocs of unplanned intermediates are C expressions in
+     the sizes; integers stay literals.
+   - **Arena.** The planner is unchanged and sized from the bounds, so a dynamic program keeps the saving of PR #219. An intermediate without a
+     bound keeps a malloc of its run-time size. A symbol with a bound is checked against it at run time, so the arena is safe.
+   - **Fallback.** When codegen needs a dimension that is `Wild` or `Unknown` (a graph output that is a constant or a size-1 broadcast, a
+     shape-only reshape, pad or expand of a symbolic dimension, an output that is one of these), or a symbol names no input, `render_c` renders the
+     graph again with integer loops: `CProgram::dynamic` is false, the program has no size argument and runs only at its representative sizes (other
+     sizes throw). Its C is the one of the static renderer.
+   - **Verification.** `tests/uop/test_cgen.cpp`: `dynamic_sizes` (a batch chain with a constant, a reduction and an expand, at sizes 1, 2, 3, 5 and 8 with bound 8, and 9 is refused,
+     without a bound, with bound 3; the halving chain of 32 x 128 with an arena of 32,896 bytes at sizes 1, 7 and 32; a reshape that moves
+     the symbol with integer sizes falls back, and the same reshape with the symbol named stays dynamic; a graph whose literal 3 and whose cut to 3
+     rows equal the representative size 3 (no contract any more) at sizes 3, 5 and 8, and 2 is refused (below the minimum, `Error`); two inputs that name one
+     symbol; a symbol that two inputs size differently; a bound below an input's size, refused at build time), the arena section (symbols on the
+     rows, the reshape that moves a symbol, two symbols on two axes), and `random_symbolic_sizes` (60 random chains whose reshapes and cuts name their
+     symbols, at sizes from 1 up to a bound: N of them are dynamic and all agree with the interpreter bit for bit). Static graphs: every program that
+     `test_cgen.cpp` renders from a graph with no symbol has the same generated C as before this change (checked by a harness that dumps those
+     programs before and after: 24 of them, all identical).
+   - **Remains.** (a) What this does not do: a dimension is an integer or a bare symbol, so `N-1`, `2*N` or a cut `x[1:N]` cannot be written. The
+     explicit forms refuse a reshape whose symbols differ (`Error`), but a literal target dimension that stands for an expression of a symbol is an
+     integer for the renderer, so the caller must not write one. The shape-only forms of a symbolic tensor still give `Unknown` (the fallback) unless
+     the rule above keeps the symbol. (b) A constant or a shape-only size-1 broadcast that is a graph output is not dynamic yet (fallback). (c) The
+     bound is a check and the size of the arena, never a loop bound: a dynamic loop runs over the run-time size. (d) The ONNX, tinygrad and ONNX Runtime
+     back ends keep their own symbol handling (`Graph::bind`, dim params); this change does not touch them. (e) The numpy-like API (`nfcuop_np.hpp`)
+     and the ONNX graph (`nfcuop_hir.hpp`) build integer shapes, so their graphs are static; a symbol reaches the renderer only through the UOp API.
 
 Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 

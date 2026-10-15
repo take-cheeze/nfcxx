@@ -147,6 +147,31 @@ std::string flat(const Idx& idx, const std::vector<Dim>& dims) {
   return out.empty() ? "0" : out;
 }
 
+// the math.h function of a float unary ALU op (the operand is passed as double, the result rounded to the node's dtype)
+const char* libm_name(Op op) {
+  switch (op) {
+    case Op::Sqrt: return "sqrt";
+    case Op::Exp2: return "exp2";
+    case Op::Log2: return "log2";
+    case Op::Sin: return "sin";
+    case Op::Acos: return "acos";
+    case Op::Acosh: return "acosh";
+    case Op::Asin: return "asin";
+    case Op::Asinh: return "asinh";
+    case Op::Atan: return "atan";
+    case Op::Atanh: return "atanh";
+    case Op::Cosh: return "cosh";
+    case Op::Sinh: return "sinh";
+    case Op::Tan: return "tan";
+    case Op::Expm1: return "expm1";
+    case Op::Log1p: return "log1p";
+    case Op::Log10: return "log10";
+    case Op::Round: return "nearbyint";
+    default: break;
+  }
+  throw Error(std::string("render_c: no libm function for ") + name(op));
+}
+
 // the C expression of a binary ALU op on already rendered operands
 std::string alu2(Op op, DType dt, const std::string& a, const std::string& b) {
   const std::string T = ctype(dt);
@@ -163,6 +188,9 @@ std::string alu2(Op op, DType dt, const std::string& a, const std::string& b) {
     case Op::FDiv: return "((" + T + ")(" + a + " / " + b + "))";
     case Op::IDiv: return std::string("nfc_idiv_") + sfx(dt) + "(" + a + ", " + b + ")";
     case Op::Mod: return std::string("nfc_mod_") + sfx(dt) + "(" + a + ", " + b + ")";
+    case Op::Shl: return std::string("nfc_shl_") + sfx(dt) + "(" + a + ", " + b + ")";
+    case Op::Shr: return std::string("nfc_shr_") + sfx(dt) + "(" + a + ", " + b + ")";
+    case Op::Atan2: return "((" + T + ")atan2((double)(" + a + "), (double)(" + b + ")))";   // in double, rounded, like the interpreter
     case Op::And: return "((" + T + ")((" + a + ") & (" + b + ")))";
     case Op::Or: return "((" + T + ")((" + a + ") | (" + b + ")))";
     case Op::Xor: return "((" + T + ")((" + a + ") ^ (" + b + ")))";
@@ -171,120 +199,18 @@ std::string alu2(Op op, DType dt, const std::string& a, const std::string& b) {
   throw Error(std::string("render_c: no C for ") + name(op));
 }
 
-// Symbolic sizes. Each dimension of a node is one of:
-//   Int      an integer (the concrete size is exact);
-//   Sym      the size of symbol `sym` (the representative size is the one of the graph);
-//   Wild     a constant, or a dimension of size 1 that a consumer broadcasts: its size is the consumer's;
-//   Unknown  not known: a dynamic program cannot be written, and the renderer falls back to integer loops.
-struct SymDim {
-  enum Kind { Int, Sym, Wild, Unknown };
-  Kind kind = Int;
-  std::string sym;
-};
-using SymShape = std::vector<SymDim>;
-
-// The symbolic shape of a node that is not an input, from the shapes of its sources. Each rule keeps a symbol only where the
-// size of the dimension is exactly the symbol's size, so the bound of the symbol is the bound of the dimension.
-SymShape sym_rule(const UOp* u, const std::vector<const SymShape*>& src) {
-  const size_t r = u->shape.size();
-  SymShape out(r);
-  // A dimension whose size is 1 and that no symbol names is the integer 1: a constant or a broadcast of size 1 is not a symbol.
-  if (u->op == Op::Const) {
-    for (size_t k = 0; k < r; k++) out[k] = SymDim{u->shape[k] == 1 ? SymDim::Int : SymDim::Wild, ""};
-    return out;
-  }
-  if (is_alu(u->op) || u->op == Op::Cast) {   // all sources have the output's shape, or a size-1 dimension
-    for (size_t k = 0; k < r; k++) {
-      bool unknown = false, wild = false, big = false;
-      std::string sym;
-      for (size_t j = 0; j < src.size(); j++) {
-        const SymDim& e = (*src[j])[k];
-        switch (e.kind) {
-          case SymDim::Unknown: unknown = true; break;
-          case SymDim::Wild: wild = true; break;
-          case SymDim::Sym:
-            if (sym.empty()) sym = e.sym;
-            else if (sym != e.sym) unknown = true;
-            break;
-          case SymDim::Int:
-            if (u->src[j]->shape[k] != 1) big = true;
-            break;
-        }
-      }
-      if (unknown || (big && !sym.empty())) out[k] = SymDim{SymDim::Unknown, ""};
-      else if (!sym.empty()) out[k] = SymDim{SymDim::Sym, sym};
-      else if (big || u->shape[k] == 1) out[k] = SymDim{SymDim::Int, ""};
-      else out[k] = SymDim{wild ? SymDim::Wild : SymDim::Int, ""};
-    }
-    return out;
-  }
-  const SymShape& a = *src[0];
-  const UOp* x = u->src[0];
-  for (const SymDim& d : a) {
-    if (d.kind == SymDim::Unknown) return SymShape(r, SymDim{SymDim::Unknown, ""});
-  }
-  if (is_reduce(u->op)) {   // the reduced axes stay with size 1
-    for (size_t k = 0; k < r; k++) {
-      const bool reduced = std::find(u->arg.begin(), u->arg.end(), static_cast<int64_t>(k)) != u->arg.end();
-      out[k] = reduced ? SymDim{SymDim::Int, ""} : a[k];
-    }
-    return out;
-  }
-  switch (u->op) {
-    case Op::Permute:   // result dimension k is source dimension arg[k]
-      for (size_t k = 0; k < r; k++) out[k] = a[static_cast<size_t>(u->arg[k])];
-      return out;
-    case Op::Flip:
-      return a;
-    case Op::Expand:    // a dimension of size 1 grows: its size is the consumer's, and a symbol cannot grow
-      for (size_t k = 0; k < r; k++) {
-        if (x->shape[k] == u->shape[k]) out[k] = a[k];
-        else out[k] = a[k].kind == SymDim::Sym || a[k].kind == SymDim::Unknown ? SymDim{SymDim::Unknown, ""} : SymDim{SymDim::Wild, ""};
-      }
-      return out;
-    case Op::Shrink:    // arg = starts ++ ends; a symbolic dimension keeps its symbol only when it is not cut
-      for (size_t k = 0; k < r; k++) {
-        const bool whole = u->arg[k] == 0 && u->arg[r + k] == x->shape[k];
-        out[k] = whole ? a[k] : a[k].kind == SymDim::Int ? a[k] : SymDim{SymDim::Unknown, ""};
-      }
-      return out;
-    case Op::Pad:       // arg = before ++ after
-      for (size_t k = 0; k < r; k++) {
-        const bool none = u->arg[k] == 0 && u->arg[r + k] == 0;
-        out[k] = none ? a[k] : a[k].kind == SymDim::Int ? a[k] : SymDim{SymDim::Unknown, ""};
-      }
-      return out;
-    case Op::Reshape: {
-      // Only the leading dimensions up to the last symbolic one may be symbolic: they must keep their sizes, and the rest
-      // (which holds no symbol) is integers. Any other reshape of a symbolic shape is not known.
-      for (const SymDim& d : a) {
-        if (d.kind == SymDim::Wild || d.kind == SymDim::Unknown) return SymShape(r, SymDim{SymDim::Unknown, ""});
-      }
-      int last = -1;
-      for (size_t k = 0; k < a.size(); k++) if (a[k].kind == SymDim::Sym) last = static_cast<int>(k);
-      if (last < 0) return out;   // all integers
-      bool same = u->shape.size() > static_cast<size_t>(last) && x->shape.size() > static_cast<size_t>(last);
-      for (int k = 0; same && k <= last; k++) same = u->shape[k] == x->shape[k];
-      if (!same) return SymShape(r, SymDim{SymDim::Unknown, ""});
-      for (int k = 0; k <= last; k++) out[k] = a[k];
-      return out;
-    }
-    default: break;
-  }
-  return SymShape(r, SymDim{SymDim::Unknown, ""});
-}
-
 // The largest size in bytes of an intermediate, given the bounds of its symbols; false when that is not known (a dimension of
 // unknown meaning, or a symbol without a bound). A Wild dimension is its concrete size when `concrete_wild` (a program with
 // integer loops, where every size is exact), else it is not known.
-bool max_bytes(const UOp* u, const SymShape& s, const std::map<std::string, int64_t>& bounds, bool concrete_wild, int64_t* out) {
+bool max_bytes(const UOp* u, const std::map<std::string, int64_t>& bounds, bool concrete_wild, int64_t* out) {
   int64_t n = 1;
-  for (size_t k = 0; k < s.size(); k++) {
-    if (s[k].kind == SymDim::Unknown) return false;
-    if (s[k].kind == SymDim::Wild && !concrete_wild) return false;
+  for (size_t k = 0; k < u->sym.size(); k++) {
+    const SymDim& s = u->sym[k];
+    if (s.kind == SymDim::Unknown) return false;
+    if (s.kind == SymDim::Wild && !concrete_wild) return false;
     int64_t d = u->shape[k];
-    if (s[k].kind == SymDim::Sym) {
-      auto it = bounds.find(s[k].sym);
+    if (s.kind == SymDim::Sym) {
+      auto it = bounds.find(s.sym->name);
       if (it == bounds.end()) return false;
       d = it->second;
     }
@@ -302,7 +228,7 @@ struct Fallback {};
 class Renderer {
  public:
   explicit Renderer(bool dynamic_allowed) : dyn_requested_(dynamic_allowed) {}
-  CProgram run(const std::vector<const UOp*>& roots, const RenderOptions& options);
+  CProgram run(const std::vector<const UOp*>& roots);
 
  private:
   std::vector<const UOp*> order_;
@@ -313,8 +239,6 @@ class Renderer {
   std::vector<CInput> inputs_;
   std::ostringstream body_;
   CProgram prog_;
-  RenderOptions opts_;
-  std::unordered_map<const UOp*, SymShape> syms_;     // symbolic shape of every node
   bool dyn_requested_;
   bool dyn_ = false;                                  // the loops are written in the run-time sizes
   std::map<std::string, int> sym_index_;              // symbol -> its index in `sizes` (dynamic programs)
@@ -341,10 +265,10 @@ class Renderer {
 
 Dim Renderer::dim(const UOp* n, size_t k) const {
   if (!dyn_) return lit_dim(n->shape[k]);
-  const SymDim& d = syms_.at(n)[k];
+  const SymDim& d = n->sym[k];
   switch (d.kind) {
     case SymDim::Int: return lit_dim(n->shape[k]);
-    case SymDim::Sym: return Dim{false, 0, "nfc_sz" + std::to_string(sym_index_.at(d.sym))};
+    case SymDim::Sym: return Dim{false, 0, "nfc_sz" + std::to_string(sym_index_.at(d.sym->name))};
     default: throw Fallback{};
   }
 }
@@ -358,7 +282,7 @@ std::vector<Dim> Renderer::dims(const UOp* n) const {
 std::vector<std::string> Renderer::sym_names(const UOp* n) const {
   (void)dims(n);   // throws Fallback when a dimension is not known
   std::vector<std::string> names;
-  for (const SymDim& s : syms_.at(n)) names.push_back(s.kind == SymDim::Sym ? s.sym : "");
+  for (const SymDim& s : n->sym) names.push_back(s.kind == SymDim::Sym ? s.sym->name : "");
   return names;
 }
 
@@ -460,8 +384,10 @@ std::string Renderer::elem_op(const UOp* n, const Idx& idx, KGen& g) {
     case Op::Neg:
       if (is_float(dt)) return "((" + T + ")(-" + S(0) + "))";
       return "((" + T + ")((" + utype(dt) + ")0 - (" + utype(dt) + ")(" + S(0) + ")))";
-    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: {
-      const char* f = n->op == Op::Sqrt ? "sqrt" : n->op == Op::Exp2 ? "exp2" : n->op == Op::Log2 ? "log2" : "sin";
+    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin:
+    case Op::Acos: case Op::Acosh: case Op::Asin: case Op::Asinh: case Op::Atan: case Op::Atanh: case Op::Cosh: case Op::Sinh:
+    case Op::Tan: case Op::Expm1: case Op::Log1p: case Op::Log10: case Op::Round: {
+      const char* f = libm_name(n->op);
       return "((" + T + ")" + f + "((double)(" + S(0) + ")))";  // in double, rounded, like the interpreter
     }
     case Op::CmpLt: { std::string a = S(0), b = S(1); return "((uint8_t)((" + a + ") < (" + b + ")))"; }
@@ -521,9 +447,8 @@ void Renderer::kernel(const UOp* n, const std::string& out, const char*) {
   prog_.kernels++;
 }
 
-CProgram Renderer::run(const std::vector<const UOp*>& roots, const RenderOptions& options) {
+CProgram Renderer::run(const std::vector<const UOp*>& roots) {
   if (roots.empty()) throw Error("render_c: no outputs");
-  opts_ = options;
   // the nodes, sources first, each once
   std::unordered_set<const UOp*> seen;
   for (const UOp* r : roots)
@@ -544,60 +469,43 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots, const RenderOptions
     in_index_[kv.first] = static_cast<int>(inputs_.size());
     inputs_.push_back(CInput{kv.first, kv.second->dtype, kv.second->shape, {}});
   }
-  // symbolic shapes: the inputs carry the symbols of RenderOptions, the others follow from their sources
-  for (const auto& b : opts_.symbol_bounds) {
-    if (b.second < 1) throw Error("render_c: the bound of " + b.first + " is " + std::to_string(b.second) + ", below 1");
-  }
-  for (const auto& kv : opts_.input_symbols) {
-    if (!vars.count(kv.first)) throw Error("render_c: input_symbols names " + kv.first + ", which is not an input of the graph");
-  }
+  // The symbols of the graph (stage 7): the size of each wherever it names a dimension, which must agree, and its bound.
+  std::map<std::string, int64_t> size, bound;
+  std::set<std::string> fed;   // the symbols that an input names: their sizes come from the feeds
   for (const UOp* u : order_) {
-    if (u->op == Op::Var) {
-      SymShape s(u->shape.size());
-      auto it = opts_.input_symbols.find(u->name);
-      if (it != opts_.input_symbols.end()) {
-        if (it->second.size() != u->shape.size()) {
-          throw Error("render_c: input_symbols of " + u->name + " has " + std::to_string(it->second.size()) + " entries for " +
-                      std::to_string(u->shape.size()) + " dimensions");
-        }
-        for (size_t k = 0; k < s.size(); k++) {
-          if (it->second[k].empty()) continue;
-          s[k] = SymDim{SymDim::Sym, it->second[k]};
-          auto b = opts_.symbol_bounds.find(it->second[k]);
-          if (b != opts_.symbol_bounds.end() && u->shape[k] > b->second) {
-            throw Error("render_c: input " + u->name + " has size " + std::to_string(u->shape[k]) + " in dimension " +
-                        std::to_string(k) + ", above the bound " + std::to_string(b->second) + " of " + it->second[k]);
-          }
-        }
-      }
-      syms_[u] = s;
-    } else {
-      std::vector<const SymShape*> src;
-      for (const UOp* s : u->src) src.push_back(&syms_.at(s));
-      syms_[u] = sym_rule(u, src);
+    for (size_t k = 0; k < u->sym.size(); k++) {
+      if (u->sym[k].kind != SymDim::Sym) continue;
+      const std::string& name = u->sym[k].sym->name;
+      auto ins = size.insert({name, u->shape[k]});
+      if (!ins.second && ins.first->second != u->shape[k])
+        throw Error("render_c: the symbol " + name + " names dimensions of sizes " + std::to_string(ins.first->second) + " and " +
+                    std::to_string(u->shape[k]));
+      if (u->sym[k].sym->bound > 0) bound[name] = u->sym[k].sym->bound;
+      if (u->op == Op::Var) fed.insert(name);
     }
   }
-  // The symbols of the inputs, each with its representative size: they must agree wherever they are named.
-  std::map<std::string, int64_t> rep;
-  for (const auto& kv : vars) {
-    const SymShape& s = syms_.at(kv.second);
-    for (size_t k = 0; k < s.size(); k++) {
-      if (s[k].kind != SymDim::Sym) continue;
-      auto ins = rep.insert({s[k].sym, kv.second->shape[k]});
-      if (!ins.second && ins.first->second != kv.second->shape[k]) {
-        throw Error("render_c: the symbol " + s[k].sym + " names dimensions of sizes " + std::to_string(ins.first->second) + " and " +
-                    std::to_string(kv.second->shape[k]));
-      }
-    }
-  }
+  // A symbol that no input names has no size at run time: a dynamic program cannot be written, and the graph is rendered with integer
+  // loops (the fallback below).
+  if (dyn_requested_ && fed.size() != size.size()) throw Fallback{};
   // The dynamic form: the loops are written in the symbols' run-time sizes (if there are symbols at all).
-  dyn_ = dyn_requested_ && !rep.empty();
+  dyn_ = dyn_requested_ && !size.empty();
   prog_.dynamic = dyn_;
   if (dyn_) {
-    for (const auto& kv : rep) {
+    // The smallest size of each symbol: a literal cut of a symbolic dimension reads up to its end, so the symbol is at least that.
+    std::map<std::string, int64_t> minimum;
+    for (const UOp* u : order_) {
+      if (u->op != Op::Shrink) continue;
+      const size_t r = u->shape.size();
+      for (size_t k = 0; k < r; k++) {
+        if (u->src[0]->sym[k].kind != SymDim::Sym || u->sym[k].kind != SymDim::Int) continue;
+        int64_t& m = minimum[u->src[0]->sym[k].sym->name];
+        m = std::max(m, u->arg[r + k]);
+      }
+    }
+    for (const auto& kv : size) {
       sym_index_[kv.first] = static_cast<int>(prog_.symbols.size());
-      auto b = opts_.symbol_bounds.find(kv.first);
-      prog_.symbols.push_back(CProgram::Symbol{kv.first, kv.second, b == opts_.symbol_bounds.end() ? 0 : b->second});
+      auto b = bound.find(kv.first), m = minimum.find(kv.first);
+      prog_.symbols.push_back(CProgram::Symbol{kv.first, kv.second, b == bound.end() ? 0 : b->second, m == minimum.end() ? 1 : m->second});
     }
     for (const auto& kv : vars) inputs_[static_cast<size_t>(in_index_.at(kv.first))].syms = sym_names(kv.second);
   }
@@ -651,7 +559,7 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots, const RenderOptions
   for (size_t t = 0; t < temps.size(); t++) {
     const UOp* u = temps[t];
     int64_t bytes = 0;
-    if (!max_bytes(u, syms_.at(u), opts_.symbol_bounds, !dyn_, &bytes)) {
+    if (!max_bytes(u, bound, !dyn_, &bytes)) {
       prog_.unplanned++;
       continue;
     }
@@ -708,6 +616,10 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots, const RenderOptions
       << "static inline uint8_t nfc_max_u8(uint8_t a, uint8_t b) { return a > b ? a : b; }\n"
       << "static inline int32_t nfc_idiv_i32(int32_t a, int32_t b) { return b == 0 ? 0 : b == -1 ? (int32_t)((uint32_t)0 - (uint32_t)a) : a / b; }\n"
       << "static inline int64_t nfc_idiv_i64(int64_t a, int64_t b) { return b == 0 ? 0 : b == -1 ? (int64_t)((uint64_t)0 - (uint64_t)a) : a / b; }\n"
+      << "static inline int32_t nfc_shl_i32(int32_t a, int32_t c) { return (c < 0 || c >= 32) ? 0 : (int32_t)((uint32_t)a << c); }\n"
+      << "static inline int32_t nfc_shr_i32(int32_t a, int32_t c) { return (c < 0 || c >= 32) ? (a < 0 ? -1 : 0) : (a < 0 ? ~(~a >> c) : a >> c); }\n"
+      << "static inline int64_t nfc_shl_i64(int64_t a, int64_t c) { return (c < 0 || c >= 64) ? 0 : (int64_t)((uint64_t)a << c); }\n"
+      << "static inline int64_t nfc_shr_i64(int64_t a, int64_t c) { return (c < 0 || c >= 64) ? (a < 0 ? -1 : 0) : (a < 0 ? ~(~a >> c) : a >> c); }\n"
       << "static inline int32_t nfc_mod_i32(int32_t a, int32_t b) { return (b == 0 || b == -1) ? 0 : a % b; }\n"
       << "static inline int64_t nfc_mod_i64(int64_t a, int64_t b) { return (b == 0 || b == -1) ? 0 : a % b; }\n"
       << "static inline int32_t nfc_wrap32(int64_t v) { return (int32_t)(uint32_t)(uint64_t)v; }\n"
@@ -731,14 +643,14 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots, const RenderOptions
 
 }  // namespace
 
-CProgram render_c(const std::vector<const UOp*>& roots, const RenderOptions& options) {
+CProgram render_c(const std::vector<const UOp*>& roots) {
   try {
     Renderer r(true);
-    return r.run(roots, options);
+    return r.run(roots);
   } catch (const Fallback&) {
     // a dimension that the run-time sizes cannot be written in: the integer loops of the graph as built
     Renderer r(false);
-    return r.run(roots, options);
+    return r.run(roots);
   }
 }
 
@@ -876,6 +788,9 @@ std::vector<Array> CModule::run(const std::map<std::string, Array>& feeds) const
     const int64_t v = value.at(s.name);
     if (s.bound != 0 && v > s.bound)
       throw Error("CModule: the symbol " + s.name + " is " + std::to_string(v) + ", above its bound " + std::to_string(s.bound));
+    if (v < s.minimum)
+      throw Error("CModule: the symbol " + s.name + " is " + std::to_string(v) + ", below " + std::to_string(s.minimum) +
+                  ", the size a cut of it needs");
     sizes.push_back(v);
   }
   std::vector<Shape> out_shape;

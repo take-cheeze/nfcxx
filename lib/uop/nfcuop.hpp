@@ -39,7 +39,12 @@ bool is_int(DType d);  // Int32 or Int64 (Bool is neither)
 enum class Op : uint8_t {
   Const, Var,                                          // leaves
   Neg, Sqrt, Exp2, Log2, Sin,                          // unary; all but Neg are float only
+  Acos, Acosh, Asin, Asinh, Atan, Atanh, Cosh, Sinh, Tan,  // unary, float only: libm's functions in double, rounded to the dtype
+  Expm1, Log1p, Log10,                                 // unary, float only (libm)
+  Round,                                               // unary, float only: round half to even (nearbyint in the default mode)
   Add, Sub, Mul, IDiv, FDiv, Mod, Max,                 // binary, both sources and the result of one dtype
+  Atan2,                                               // binary, float only: atan2(src0, src1) (y, x)
+  Shl, Shr,                                            // binary, integers only: src0 shifted by src1; Shr is arithmetic (see eval_op)
   CmpLt, CmpNe,                                        // binary, result Bool
   And, Or, Xor,                                        // binary, ints and Bool
   Where,                                               // (Bool, a, b) -> a or b
@@ -79,6 +84,32 @@ struct Scalar {
 };
 std::string to_string(const Scalar& s);
 
+// Symbolic dimensions (stage 7, docs/notes/uop.md). A Symbol is tinygrad's Variable: the name of a size that is only known at run
+// time, and the largest size it takes. A Graph interns its symbols, so a name is one pointer and the identity of a dimension is a
+// pointer comparison. The size of a node is still its `shape` (the size in the graph); the symbols say which dimensions move with
+// which size, so the C renderer needs no representative size to find them.
+struct Symbol {
+  std::string name;  // the name the feeds use
+  int64_t bound;     // the largest size, or 0 for none
+};
+
+// What one dimension of a node is:
+//   Int      an integer: its size is the shape's, whatever the feeds are;
+//   Sym      the size of `sym`: at run time it is the symbol's size;
+//   Wild     a constant, or a size-1 dimension that a consumer broadcasts: its size is the consumer's;
+//   Unknown  not expressible: a dynamic program cannot be written, and the C renderer falls back to integer loops.
+struct SymDim {
+  enum Kind : uint8_t { Int, Sym, Wild, Unknown };
+  Kind kind = Int;
+  const Symbol* sym = nullptr;  // Sym only
+  bool operator==(const SymDim& o) const { return kind == o.kind && sym == o.sym; }
+  bool operator!=(const SymDim& o) const { return !(*this == o); }
+};
+using SymShape = std::vector<SymDim>;  // one entry per dimension of the shape
+
+// The symbols of builder arguments: syms[k] is the symbol of dimension k, nullptr for an integer. Empty means all integers.
+using Syms = std::vector<const Symbol*>;
+
 struct UOp {
   Op op;
   DType dtype;
@@ -87,9 +118,13 @@ struct UOp {
   std::string name;  // Var only
   uint32_t id;       // creation order in its Graph; a source always has a smaller id
   Shape shape;       // of the value this node computes; the empty shape is a scalar
+  SymShape sym;      // the symbolic form of `shape`: what each dimension is (stage 7)
   Shape arg;         // Permute: the permutation; reductions and Flip: the axes, ascending; Shrink: starts then ends; Pad: before then after
   bool is_const() const { return op == Op::Const; }
 };
+
+// The symbol of each dimension of `u` (nullptr for an integer, and for a Wild or Unknown dimension): the Syms that rebuild its shape.
+Syms symbols_of(const UOp* u);
 
 // Owns every node. Nodes are immutable and live as long as the Graph; building the same node twice returns
 // the same pointer, so `a == b` on UOp pointers is structural equality. A Graph is not thread safe, and
@@ -107,6 +142,12 @@ class Graph {
   const UOp* fconst(DType d, double v, const Shape& shape = {}) { return constant(Scalar::from_double(d, v), shape); }
   // A named input; evaluate() binds it to a value of this dtype and shape.
   const UOp* var(const std::string& name, DType d, const Shape& shape = {});
+  // A symbol: the same name is the same Symbol. `bound` is the largest size it takes (0: none, the default); asking for the name
+  // again with another bound throws Error.
+  const Symbol* symbol(const std::string& name, int64_t bound = 0);
+  // A named input whose dimension k is the symbol syms[k] (nullptr: an integer; empty: all integers). Its size in the graph is
+  // `shape`, and a symbol's size must not exceed its bound.
+  const UOp* var(const std::string& name, DType d, const Shape& shape, const Syms& syms);
 
   // Builds an ALU node (anything but Const, Var and Cast), inferring the dtype and checking the sources,
   // which must have the same shape (broadcasting is explicit: expand, or the Tensor API).
@@ -115,17 +156,31 @@ class Graph {
   // Movement and reductions (stage 3). reshape: same number of elements. permute: result dim i is source
   // dim perm[i]. expand: same rank, a dimension stays or grows from 1. reduce_*: `axes` need not be sorted;
   // the reduced axes remain with size 1 (keepdims), reshape drops them.
+  // The symbolic forms (stage 7) take the symbol of each dimension of `shape` (Syms; empty: all integers). The shape-only forms
+  // keep a symbol only where the operation leaves its dimension alone, and make every other symbolic dimension Unknown:
+  //   reshape(x, shape, syms): the symbols of `shape` must be those of x (the same multiset), each of the size it has in x; the other
+  //     dimensions are integers. reshape(x, shape): a symbolic x keeps the symbols of the leading dimensions up to the last one
+  //     when their sizes are unchanged, and nothing else.
+  //   expand(x, shape, syms): a dimension of x that is its symbol stays; a size-1 dimension (or a constant) grows to the symbol
+  //     given, and a literal target is an integer. expand(x, shape): a size-1 dimension that grows is Wild (its size is that of its
+  //     consumer, as before); a symbolic dimension is Unknown.
   const UOp* reshape(const UOp* x, const Shape& shape);
+  const UOp* reshape(const UOp* x, const Shape& shape, const Syms& syms);
   const UOp* permute(const UOp* x, const Shape& perm);
   const UOp* expand(const UOp* x, const Shape& shape);
+  const UOp* expand(const UOp* x, const Shape& shape, const Syms& syms);
   const UOp* reduce_sum(const UOp* x, const Shape& axes);
   const UOp* reduce_max(const UOp* x, const Shape& axes);
   // shrink: keep [starts[i], ends[i]) of each dimension (non-empty). pad: add before[i] and after[i] zeros (false for
   // bool) to each dimension. flip: reverse the given axes.
+  // With `end_syms`, a dimension whose end is its symbol (starts 0, end_syms[k] the symbol of x's dimension k) keeps the symbol:
+  // it is the whole dimension. Any other cut of a symbolic dimension is an integer of the cut's size, and the symbol must then be
+  // at least the cut's end at run time (the renderer checks it). Without end_syms, every cut is one of these.
   const UOp* shrink(const UOp* x, const Shape& starts, const Shape& ends);
+  const UOp* shrink(const UOp* x, const Shape& starts, const Shape& ends, const Syms& end_syms);
   const UOp* pad(const UOp* x, const Shape& before, const Shape& after);
   const UOp* flip(const UOp* x, const Shape& axes);
-  // The node `u` with other sources (u->op and u->dtype are kept; Const and Var are returned as they are).
+  // The node `u` with other sources (u->op, u->dtype and its symbolic dimensions are kept; Const and Var are returned as they are).
   const UOp* rebuild(const UOp* u, std::vector<const UOp*> src);
 
   const UOp* neg(const UOp* a) { return alu(Op::Neg, {a}); }
@@ -133,6 +188,22 @@ class Graph {
   const UOp* exp2(const UOp* a) { return alu(Op::Exp2, {a}); }
   const UOp* log2(const UOp* a) { return alu(Op::Log2, {a}); }
   const UOp* sin(const UOp* a) { return alu(Op::Sin, {a}); }
+  const UOp* acos(const UOp* a) { return alu(Op::Acos, {a}); }
+  const UOp* acosh(const UOp* a) { return alu(Op::Acosh, {a}); }
+  const UOp* asin(const UOp* a) { return alu(Op::Asin, {a}); }
+  const UOp* asinh(const UOp* a) { return alu(Op::Asinh, {a}); }
+  const UOp* atan(const UOp* a) { return alu(Op::Atan, {a}); }
+  const UOp* atanh(const UOp* a) { return alu(Op::Atanh, {a}); }
+  const UOp* cosh(const UOp* a) { return alu(Op::Cosh, {a}); }
+  const UOp* sinh(const UOp* a) { return alu(Op::Sinh, {a}); }
+  const UOp* tan(const UOp* a) { return alu(Op::Tan, {a}); }
+  const UOp* expm1(const UOp* a) { return alu(Op::Expm1, {a}); }
+  const UOp* log1p(const UOp* a) { return alu(Op::Log1p, {a}); }
+  const UOp* log10(const UOp* a) { return alu(Op::Log10, {a}); }
+  const UOp* round(const UOp* a) { return alu(Op::Round, {a}); }
+  const UOp* atan2(const UOp* y, const UOp* x) { return alu(Op::Atan2, {y, x}); }
+  const UOp* shl(const UOp* a, const UOp* b) { return alu(Op::Shl, {a, b}); }
+  const UOp* shr(const UOp* a, const UOp* b) { return alu(Op::Shr, {a, b}); }
   const UOp* add(const UOp* a, const UOp* b) { return alu(Op::Add, {a, b}); }
   const UOp* sub(const UOp* a, const UOp* b) { return alu(Op::Sub, {a, b}); }
   const UOp* mul(const UOp* a, const UOp* b) { return alu(Op::Mul, {a, b}); }
@@ -151,10 +222,12 @@ class Graph {
 
  private:
   const UOp* intern(Op op, DType dt, std::vector<const UOp*> src, const Scalar& value, const std::string& name,
-                    const Shape& shape, const Shape& arg);
+                    const Shape& shape, const Shape& arg, const SymShape& sym);
   const UOp* reduce(Op op, const UOp* x, Shape axes);
   std::deque<UOp> nodes_;                                        // stable addresses
   std::unordered_map<size_t, std::vector<const UOp*>> table_;    // hash -> nodes
+  std::deque<Symbol> symbols_;                                   // stable addresses
+  std::map<std::string, const Symbol*> symtab_;                  // name -> symbol
 };
 
 // The nodes `root` depends on, sources before users, `root` last; each once.

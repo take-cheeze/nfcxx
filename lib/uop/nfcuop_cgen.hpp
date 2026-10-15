@@ -15,12 +15,13 @@
 // The intermediate buffers (not the outputs, which the caller owns) share one malloc'd arena. Each one is live from the
 // loop nest that writes it to the last loop nest that reads it, and the planner (nfcuop_arena.hpp, ported from onnxsim)
 // gives it an offset so that buffers live at the same time do not overlap. An intermediate whose size depends on a symbol
-// without a bound (RenderOptions) keeps a malloc of its own.
+// without a bound (Symbol::bound) keeps a malloc of its own.
 //
-// Symbols (RenderOptions) make the loops dynamic when the renderer can write them: the loop bounds, the strides and the
-// sizes of the buffers are then expressions in the run-time sizes of the symbols, which CModule::run reads from the feeds
-// and checks against the bounds, so one program runs at any size up to them. A graph that needs a dimension the renderer
-// does not know keeps integer loops (CProgram::dynamic is false). See docs/notes/uop.md, stage 7 step 2.
+// Symbols (stage 7, docs/notes/uop.md) make the loops dynamic when the renderer can write them: the loop bounds, the strides and
+// the sizes of the buffers are then expressions in the run-time sizes of the symbols, which CModule::run reads from the feeds and
+// checks against their bounds, so one program runs at any size up to them. Each dimension of a node says what it is (its SymDim
+// in the UOp), so the renderer needs no representative size to find a symbol. A graph that needs a dimension the renderer does not
+// know keeps integer loops (CProgram::dynamic is false).
 //
 // The generated code computes what the interpreter (evaluate_array) computes, bit for bit: integers wrap
 // (unsigned arithmetic), a Float32 node is rounded to float after every op, exp2/log2/sin run in double and are rounded,
@@ -49,21 +50,6 @@ struct COutput {
   std::vector<std::string> syms;   // dynamic programs: the symbol of each dimension, as for CInput
 };
 
-// Symbolic sizes (docs/notes/uop.md, stage 7 step 2). The UOp graph has concrete shapes, built at a representative size:
-// `input_symbols["x"] = {"N", ""}` says that axis 0 of the input x is the symbol N and axis 1 is an integer (one entry per
-// axis; "" for an integer axis). The representative size of N is the size x has in the graph. When the graph's loops can
-// be written in the symbols (CProgram::dynamic), the program takes each symbol's size from the feeds of a run and runs at any
-// size up to the bound. `symbol_bounds["N"] = 64` says that N is at most 64: the arena is sized from the bound (each
-// intermediate's maximum size takes the bound for each symbolic dimension), and a run with a larger N throws Error. A symbol
-// with no bound leaves its intermediates with a malloc of their own, of their run-time size. A graph whose loops need a
-// dimension the renderer cannot place (see the notes) keeps integer loops: it runs only at its representative sizes. The
-// graph must be built with each symbol written where its size is: a literal equal to a representative size is read as the
-// symbol (the contract in the notes).
-struct RenderOptions {
-  std::map<std::string, std::vector<std::string>> input_symbols;
-  std::map<std::string, int64_t> symbol_bounds;
-};
-
 struct CProgram {
   std::string source;           // C99; defines `int nfcuop_run(in, out)` (0 on success), or when dynamic
                                 // `int nfcuop_run(in, out, const int64_t* sizes)`, one size per entry of `symbols`
@@ -73,6 +59,7 @@ struct CProgram {
     std::string name;
     int64_t size = 0;           // the representative size (the size in the graph)
     int64_t bound = 0;          // the bound, or 0 when there is none
+    int64_t minimum = 1;        // the least size a run may give it (a cut of a symbolic dimension reads up to its end)
   };
   bool dynamic = false;         // the loops take the symbols' sizes at run time
   std::vector<Symbol> symbols;  // dynamic: in name order; `sizes[k]` of nfcuop_run is the size of symbols[k]
@@ -84,9 +71,9 @@ struct CProgram {
 };
 
 // Renders the graph of `roots` (several outputs share their common subgraph). Throws Error if two Vars of one name
-// differ in dtype or shape, or if `options` does not fit the graph (an unknown input, a wrong rank, a bound below 1, an
-// input larger than its bound).
-CProgram render_c(const std::vector<const UOp*>& roots, const RenderOptions& options = RenderOptions());
+// differ in dtype or shape. A dynamic program needs every symbol of the graph to name a dimension of an input (else the
+// graph is rendered with integer loops).
+CProgram render_c(const std::vector<const UOp*>& roots);
 
 // A compiled CProgram. The compiler is `cc` (a command line, split on spaces), or the environment variable NFCUOP_CC, or
 // "cc"; the command `nfcxx` is also fine (docs/notes/uop.md). Compilation errors come back as an Error carrying the
@@ -95,8 +82,8 @@ class CModule {
  public:
   static std::shared_ptr<CModule> compile(const CProgram& program, const std::string& cc = "");
   // The values of the outputs; `feeds` must have every input of the program, with its dtype. A static program needs the
-  // representative shapes. A dynamic one takes each symbol's size from the feeds: the sizes must agree, each is at least 1
-  // and at most its bound (Error otherwise), and the outputs take the sizes too.
+  // representative shapes. A dynamic one takes each symbol's size from the feeds: the sizes must agree, each is at least its
+  // minimum and at most its bound (Error otherwise), and the outputs take the sizes too.
   std::vector<Array> run(const std::map<std::string, Array>& feeds) const;
   const CProgram& program() const { return prog_; }
   ~CModule();

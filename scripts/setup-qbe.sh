@@ -5,9 +5,10 @@
 #
 # 3rd/qbe is take-cheeze/qbe, a daily mirror of https://c9x.me/git/qbe.git (see that
 # repo's sync workflow). 3rd/cproc is take-cheeze/cproc, a fork of michaelforney/cproc: its branch
-# nfcxx-qbe-darwin (the pin, 66ceeba) is the pinned upstream commit a44a644 plus nfcxx's cproc patches as commits
-# (unprototyped-fnptr, dollar-ident, darwin-ldouble, apple-valist, atomic-builtins), which were applied by this script
-# before. Earlier nfcxx patches (empty-struct, vaarg-aggregate, empty-copy, array-qual) are commits of a44a644 itself; see
+# nfcxx-qbe-darwin (the pin, 909f18e) is the pinned upstream commit a44a644 plus nfcxx's cproc patches as commits
+# (unprototyped-fnptr, dollar-ident, aligned-attr, darwin-ldouble, apple-valist, apple-driver, apple-predefines,
+# atomic-builtins), which this script applied before. Earlier nfcxx patches (empty-struct, vaarg-aggregate, empty-copy,
+# array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
 # scripts/qbe-uninit-slot.patch, scripts/qbe-wflag.patch and scripts/qbe-empty-align.patch are applied to the QBE copy. Re-run this script after changing the pin.

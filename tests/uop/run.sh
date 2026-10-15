@@ -43,13 +43,17 @@
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
 #   The two Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   UOP_ONLY="test_np np_compat"  run only these programs (CI runs the suite as parallel groups, see .github/workflows/ci.yml);
+#                           the ONNX models and the Python checks run on the models the selected programs wrote, and the
+#                           poly languages (tests/uop/run_poly.sh) are skipped: CI runs them as their own job
 #   UOP_HOST=1              build with the host g++ (-fsanitize=address,undefined) and nothing else; for a machine
-#                           where nfcxx is not built
+#                           where nfcxx is not built (CI does not use it)
 cd "$(dirname "$0")/../.."
 . tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled programs are kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_arena.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_ort.cpp lib/uop/nfcuop_tinygrad.cpp)
 tests=(test test_ut test_np test_nn test_onnx test_sym test_ort test_tinygrad test_shaping test_grad test_cgen np_compat)
+[ -n "${UOP_ONLY:-}" ] && read -ra tests <<<"$UOP_ONLY"
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
@@ -77,14 +81,16 @@ run_all() {
     if res=$("$tmp/$label/$t" "${args[@]}" 2>&1); then echo "ok   $label uop/$t: $(tail -1 <<<"$res")"; grep '^SKIP' <<<"$res" | sed "s/^/     $label /"
     else echo "FAIL $label uop/$t"; head -30 <<<"$res"; fail=1; fi
   done
-  if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"
-  else echo "FAIL $label uop/np_compat 64"; head -30 <<<"$res"; fail=1; fi
-  if [ -n "$CC_IS_NFCXX" ]; then   # the generated C through the nfcxx driver
+  if [ -x "$tmp/$label/np_compat" ]; then
+    if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"
+    else echo "FAIL $label uop/np_compat 64"; head -30 <<<"$res"; fail=1; fi
+  fi
+  if [ -n "$CC_IS_NFCXX" ] && [ -x "$tmp/$label/test_cgen" ]; then   # the generated C through the nfcxx driver
     if res=$(NFCUOP_CC="$PWD/nfcxx" "$tmp/$label/test_cgen" quick 2>&1); then echo "ok   $label uop/test_cgen with nfcxx as the C compiler: $(tail -1 <<<"$res")"
     else echo "FAIL $label uop/test_cgen with nfcxx as the C compiler"; head -30 <<<"$res"; fail=1; fi
   fi
   if command -v python3 >/dev/null; then
-    python3 tests/uop/onnx_check.py "$tmp/$label/onnx" | sed "s/^/     $label /" ; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label onnx_check"; fail=1; }
+    ls "$tmp/$label/onnx"/*.onnx >/dev/null 2>&1 && { python3 tests/uop/onnx_check.py "$tmp/$label/onnx" | sed "s/^/     $label /" ; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label onnx_check"; fail=1; }; }
     [ -f "$tmp/$label/compat.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat.json" | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat"; fail=1; }; }
     [ -f "$tmp/$label/compat64.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat64.json" 64 | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat 64"; fail=1; }; }
   fi
@@ -97,5 +103,5 @@ fi
 for be in $backends; do
   CC_IS_NFCXX=1 NFCXX_BACKEND=$be run_all "$be" ./nfcxx -O2
 done
-tests/uop/run_poly.sh || fail=1   # the same API from Ruby, Lua, Python, JavaScript and Go (nfcpoly)
+[ -n "${UOP_ONLY:-}" ] || tests/uop/run_poly.sh || fail=1   # the same API from Ruby, Lua, Python, JavaScript and Go (nfcpoly)
 exit $fail

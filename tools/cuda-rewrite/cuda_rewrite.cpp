@@ -3,7 +3,7 @@
 // CUDA launch rewrite for nfcxx: turns the kernel launch syntax of a .cu file into a call of __nfcxx_cuda_launch
 // (lib/cuda/nfcxx_cuda.h), so the EDG front end sees only C++.
 //   name<<<grid, block[, shmem[, stream]]>>>(args)  ->  __nfcxx_cuda_launch(name, grid, block, shmem, stream, args)
-// Usage: build/cuda-rewrite [-I DIR]... [--device [--kernels=FILE]] [--edg-launches] FILE.cu > FILE.cpp
+// Usage: build/cuda-rewrite [-I DIR]... [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu > FILE.cpp
 //
 // Strings are byte strings, as in Ruby on mruby: indexes are byte offsets and a position past the end reads as
 // "absent" (ch() returns -1), where Ruby's s[i] returns nil.
@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <system_error>
 #include <functional>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -4885,7 +4886,7 @@ std::string device_decls() {
 
 // The command line of the Ruby script (line 3371): -I DIR, --device, --kernels=FILE, --edg-launches, FILE.cu.
 int usage() {
-  std::fprintf(stderr, "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] FILE.cu\n");
+  std::fprintf(stderr, "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
   return 2;
 }
 
@@ -5277,10 +5278,120 @@ std::string name_commented_params(const std::string &s) {
   return out;
 }
 
+// ---- kernel name obfuscation (--obfuscate=SEED; Ruby: kernel_names_of, rename_words, rename_identifiers,
+// obfuscate_kernels). Each __global__ name becomes __nfcxx_kn_<FNV-1a 64 of SEED, NUL, name>.
+
+// The names of the __global__ functions in text: the identifier before the first ( of each declaration.
+std::vector<std::string> kernel_names_of(const std::string &text) {
+  std::vector<std::string> names;
+  std::string blanked = blank_comments(text);
+  long i = 0;
+  long n = (long)blanked.size();
+  while (i < n) {
+    long e = skip_literal(blanked, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (blanked.compare((size_t)i, 10, "__global__") == 0 && !(i > 0 && ident_c(ch(blanked, i - 1))) &&
+        !ident_c(ch(blanked, i + 10))) {
+      long open_at = str_index(blanked, "(", i + 10);
+      if (open_at >= 0) {
+        long j = open_at;
+        while (j > 0 && !ident_c(ch(blanked, j - 1))) j -= 1;
+        long k = j;
+        while (k > 0 && ident_c(ch(blanked, k - 1))) k -= 1;
+        if (j > k) names.push_back(blanked.substr((size_t)k, (size_t)(j - k)));
+      }
+      i += 10;
+      continue;
+    }
+    i += 1;
+  }
+  return names;
+}
+
+// s with each whole identifier that is a key of map replaced by its value (no literal or comment handling).
+std::string rename_words(const std::string &s, const std::map<std::string, std::string> &map) {
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    if (ident_c(ch(s, i)) && !(i > 0 && ident_c(ch(s, i - 1)))) {
+      long j = i;
+      while (j < n && ident_c(ch(s, j))) j += 1;
+      std::string w = s.substr((size_t)i, (size_t)(j - i));
+      auto it = map.find(w);
+      out += it == map.end() ? w : it->second;
+      i = j;
+    } else {
+      out += s[(size_t)i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// text with each whole identifier that is a key of map replaced. String and character literals and #include lines are
+// kept; comments are renamed too.
+std::string rename_identifiers(const std::string &text, const std::map<std::string, std::string> &map) {
+  std::string out;
+  long i = 0;
+  long n = (long)text.size();
+  while (i < n) {
+    if (ch(text, i) == '/' && (ch(text, i + 1) == '/' || ch(text, i + 1) == '*')) {
+      long e = skip_literal(text, i);
+      out += rename_words(text.substr((size_t)i, (size_t)(e - i)), map);
+      i = e;
+      continue;
+    }
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += text.substr((size_t)i, (size_t)(e - i));
+      i = e;
+      continue;
+    }
+    if (text.compare((size_t)i, 8, "#include") == 0) {
+      long nl = str_index(text, "\n", i);
+      long end = nl < 0 ? n : nl;
+      out += text.substr((size_t)i, (size_t)(end - i));
+      i = end;
+      continue;
+    }
+    if (ident_c(ch(text, i)) && !(i > 0 && ident_c(ch(text, i - 1)))) {
+      long j = i;
+      while (j < n && ident_c(ch(text, j))) j += 1;
+      std::string w = text.substr((size_t)i, (size_t)(j - i));
+      auto it = map.find(w);
+      out += it == map.end() ? w : it->second;
+      i = j;
+      continue;
+    }
+    out += text[(size_t)i];
+    i += 1;
+  }
+  return out;
+}
+
+std::string obfuscate_kernels(const std::string &text, const std::string &seed) {
+  std::map<std::string, std::string> map;
+  for (const auto &k : kernel_names_of(text)) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    std::string in = seed + std::string(1, '\0') + k;
+    for (unsigned char b : in) h = (h ^ b) * 0x100000001b3ULL;
+    char hex[32];
+    std::snprintf(hex, sizeof hex, "%016llx", (unsigned long long)h);
+    map[k] = std::string("__nfcxx_kn_") + hex;
+  }
+  return rename_identifiers(text, map);
+}
+
 int main(int argc, char **argv) {
   bool device = false;
   bool has_kernels = false;
   std::string kernels_path;
+  bool has_obfuscate = false;
+  std::string obfuscate_seed;
   bool has_path = false;
   std::string path;
   for (int a = 1; a < argc; a++) {
@@ -5295,6 +5406,9 @@ int main(int argc, char **argv) {
     } else if (arg.compare(0, 10, "--kernels=") == 0) {
       has_kernels = true;
       kernels_path = arg.substr(10);
+    } else if (arg.compare(0, 12, "--obfuscate=") == 0) {
+      has_obfuscate = true;
+      obfuscate_seed = arg.substr(12);
     } else if (!has_path) {
       has_path = true;
       path = arg;
@@ -5314,6 +5428,7 @@ int main(int argc, char **argv) {
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
   g_expanded = inline_generic_lambdas(g_expanded);
   g_expanded = launch_prepare(g_expanded);
+  if (has_obfuscate) g_expanded = obfuscate_kernels(g_expanded, obfuscate_seed);
   std::string result;
   if (device) {
     // The device unit is built from the conditionals of the device pass (see resolve_conditionals).

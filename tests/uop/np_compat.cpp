@@ -32,6 +32,9 @@ int main(int argc, char** argv) {
   Tensor ss = np.array({-2, 0, 1, 1, 4}, f32);                 // sorted, with a repeat
   Tensor sq = np.array({1, 1.5, -3, 4}, f32);
   Tensor w2 = np.array({5, 6}, f32);
+  Tensor u = np.array({-1, -0.5, 0, 0.5, 1, 2}, {2, 3}, f32);   // outside [-1, 1] at 2 (acos, asin); atanh gives +-inf at +-1
+  Tensor p1 = np.array({1, 1.5, 2, 8, 1000, 0.25}, f32);        // acosh needs >= 1; log2, log10 and log1p(p1 - 1) of positives
+  Tensor rv = np.array({0.5, 1.5, 2.5, -0.5, -1.5, -2.5, 2.4, 2.6}, f32);   // round: the ties go to the even neighbour
   std::vector<std::pair<std::string, Tensor>> c;
 #define CASE(name, expr) c.push_back({name, expr})
   CASE("add", a + b); CASE("sub", a - b); CASE("mul", a * b); CASE("div", a / b);
@@ -96,6 +99,11 @@ int main(int argc, char** argv) {
   CASE("zeros_like_i", zeros_like(a, i32)); CASE("full_like", full_like(a, 7)); CASE("ones_like_i", ones_like(ia));
   CASE("linspace_noend", np.linspace(0, 1, 4, {}, false)); CASE("eye_k", np.eye(2, 3, 1));
   CASE("std_corr", a.stddev(Axes{1}, false, 1)); CASE("var_corr", a.var(Axes{0}, true, 1));
+  CASE("acos", acos(u)); CASE("asin", asin(u)); CASE("atan", atan(v)); CASE("atanh", atanh(u));
+  CASE("acosh", acosh(p1)); CASE("asinh", asinh(v)); CASE("sinh", sinh(v)); CASE("cosh", cosh(v)); CASE("tan", tan(v));
+  CASE("atan2", atan2(a, b)); CASE("expm1", expm1(v)); CASE("log1p", log1p(p1 - 1)); CASE("log2", log2(p1)); CASE("log10", log10(p1));
+  CASE("round_ties", round(rv)); CASE("round_int", round(ia)); CASE("logaddexp", logaddexp(a, b)); CASE("logaddexp_v", logaddexp(v, -v));
+  CASE("lshift", bitwise_left_shift(ia, ib)); CASE("rshift", bitwise_right_shift(ia, ib));
 #undef CASE
   std::vector<Tensor> all;
   for (const auto& e : c) all.push_back(e.second);

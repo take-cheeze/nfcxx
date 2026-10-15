@@ -3368,12 +3368,13 @@ def replace_dynamic_uses(s, names)
 end
 
 def usage
-  $stderr.puts "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] FILE.cu"
+  $stderr.puts "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu"
   exit(2)
 end
 
 device = false
 kernels_path = nil
+obfuscate_seed = nil
 path = nil
 # The host copy of a unit gives each kernel internal linkage (static), as nvcc does: two translation units that
 # include the same header with a kernel must not define the same host symbol. The embedded registration of each
@@ -3511,6 +3512,109 @@ def blank_comments(text)
   out
 end
 
+# Kernel name obfuscation (--obfuscate=SEED). Each kernel of the unit is renamed to __nfcxx_kn_<hash>, where the hash
+# is FNV-1a 64 of SEED and the kernel's name. The rename is on the expanded source, before the host copy and the device
+# unit are made, so both carry the new name: the static kernel, its launch, the kernel table, the IR and PTX entries
+# and the cubin. Template kernels get it too (their wrapper names are made from the renamed kernel). Literals are kept
+# (a string that names a kernel is program data). The hash is not a cryptographic one: without the seed the new names do
+# not say which kernel they are; with a known seed and a list of candidate names they can be reversed.
+
+# The names of the __global__ functions in text: the identifier before the first ( of each declaration.
+def kernel_names_of(text)
+  names = []
+  blanked = blank_comments(text)
+  i = 0
+  while i < blanked.length
+    e = skip_literal(blanked, i)
+    if e
+      i = e
+      next
+    end
+    if blanked[i, 10] == "__global__" && !(i > 0 && ident_char?(blanked[i - 1])) && !ident_char?(blanked[i + 10].to_s)
+      open_at = blanked.index("(", i + 10)
+      unless open_at.nil?
+        j = open_at
+        j -= 1 while j > 0 && !ident_char?(blanked[j - 1])
+        k = j
+        k -= 1 while k > 0 && ident_char?(blanked[k - 1])
+        names << blanked[k...j] if j > k
+      end
+      i += 10
+      next
+    end
+    i += 1
+  end
+  names.uniq
+end
+
+# s with each whole identifier that is a key of map replaced by its value (no literal or comment handling: the caller
+# passes only code or only a comment).
+def rename_words(s, map)
+  out = ""
+  i = 0
+  while i < s.length
+    if ident_char?(s[i]) && !(i > 0 && ident_char?(s[i - 1]))
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      w = s[i...j]
+      out << (map[w] || w)
+      i = j
+    else
+      out << s[i]
+      i += 1
+    end
+  end
+  out
+end
+
+# text with each whole identifier that is a key of map replaced by its value. String and character literals and #include
+# lines are kept; comments are renamed too, so the copy does not keep a kernel's old name anywhere.
+def rename_identifiers(text, map)
+  out = ""
+  i = 0
+  while i < text.length
+    if text[i] == "/" && (text[i + 1] == "/" || text[i + 1] == "*")
+      e = skip_literal(text, i)
+      out << rename_words(text[i...e], map)
+      i = e
+      next
+    end
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    if text[i, 8] == "#include"
+      e = text.index("\n", i) || text.length
+      out << text[i...e]
+      i = e
+      next
+    end
+    if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1]))
+      j = i
+      j += 1 while j < text.length && ident_char?(text[j])
+      w = text[i...j]
+      out << (map[w] || w)
+      i = j
+      next
+    end
+    out << text[i]
+    i += 1
+  end
+  out
+end
+
+def obfuscate_kernels(text, seed)
+  map = {}
+  kernel_names_of(text).each do |k|
+    h = 0xcbf29ce484222325
+    (seed + "\0" + k).each_byte { |b| h = ((h ^ b) * 0x100000001b3) & 0xffffffffffffffff }
+    map[k] = "__nfcxx_kn_" + ("%016x" % h)
+  end
+  rename_identifiers(text, map)
+end
+
 ARGV.each do |a|
   if a.start_with?("-I")
     $incdirs << a[2..-1]
@@ -3521,6 +3625,8 @@ ARGV.each do |a|
     $edg_launches = true
   elsif a.start_with?("--kernels=")
     kernels_path = a[10..-1]
+  elsif a.start_with?("--obfuscate=")
+    obfuscate_seed = a[12..-1]
   elsif path.nil?
     path = a
   else
@@ -3534,6 +3640,7 @@ text = dynamic_shared_rewrite(strip_launch_bounds(text))
 refuse_unlowered_cccl(text) if device
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
+$expanded = obfuscate_kernels($expanded, obfuscate_seed) unless obfuscate_seed.nil?
 if device
   # The device unit is built from the conditionals of the device pass (see resolve_conditionals).
   defs = {}

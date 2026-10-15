@@ -88,6 +88,21 @@ class Tensor {
   Tensor cos() const;
   Tensor tanh() const;
   Tensor sigmoid() const;
+  // libm functions of a float tensor (an integer tensor is converted to float32 first, as for sin); each is one UOp
+  Tensor log2() const;
+  Tensor acos() const;
+  Tensor acosh() const;
+  Tensor asin() const;
+  Tensor asinh() const;
+  Tensor atan() const;
+  Tensor atanh() const;
+  Tensor cosh() const;
+  Tensor sinh() const;
+  Tensor tan() const;
+  Tensor expm1() const;
+  Tensor log1p() const;
+  Tensor log10() const;
+  Tensor round() const;  // ties to even; an integer tensor is returned unchanged, a bool tensor computes in float32
   Tensor relu() const;
   Tensor square() const;
   Tensor reciprocal() const;
@@ -185,6 +200,12 @@ inline Tensor log(const Tensor& a) { return a.log(); }
 inline Tensor sqrt(const Tensor& a) { return a.sqrt(); }
 inline Tensor tanh(const Tensor& a) { return a.tanh(); }
 inline Tensor abs(const Tensor& a) { return a.abs(); }
+// atan2(y, x) of floats (the promoted dtype; integers compute in float32); the operands broadcast
+Tensor atan2(const Tensor& y, const Tensor& x);
+// a << b and a >> b (arithmetic) of integers, broadcast and promoted; a count below 0 or at least the width gives 0 (a right
+// shift of a negative value gives -1), as numpy does. Bool and floats are an error.
+Tensor shift_left(const Tensor& a, const Tensor& b);
+Tensor shift_right(const Tensor& a, const Tensor& b);
 
 Tensor operator+(const Tensor& a, const Tensor& b);
 Tensor operator-(const Tensor& a, const Tensor& b);

@@ -90,20 +90,70 @@ jobs:
             run: NFCXX_BACKEND=qbe tests/ast/run.sh
           - name: nfcast engine and tier (gcc backend)
             run: NFCXX_BACKEND=gcc tests/ast/run.sh
-          - name: uop (QBE backend)
-            go: true
+          - name: uop core (QBE backend)
             onnx: true
-            interp: true
             suite: uop
+            group: core
             backend: qbe
-            run: NFCXX_BACKEND=qbe tests/uop/run.sh
-          - name: uop (gcc backend)
+            run: UOP_ONLY="test test_ut test_shaping" NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop numpy (QBE backend)
+            onnx: true
+            suite: uop
+            group: numpy
+            backend: qbe
+            run: UOP_ONLY="test_np np_compat" NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop onnx (QBE backend)
+            onnx: true
+            suite: uop
+            group: onnx
+            backend: qbe
+            run: UOP_ONLY="test_nn test_onnx test_sym test_grad" NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop runtimes (QBE backend)
+            onnx: true
+            suite: uop
+            group: runtimes
+            backend: qbe
+            run: UOP_ONLY="test_ort test_tinygrad test_cgen" NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop poly languages (QBE backend)
             go: true
             onnx: true
             interp: true
             suite: uop
+            group: poly
+            backend: qbe
+            run: NFCXX_BACKEND=qbe tests/uop/run_poly.sh
+          - name: uop core (gcc backend)
+            onnx: true
+            suite: uop
+            group: core
             backend: gcc
-            run: NFCXX_BACKEND=gcc tests/uop/run.sh
+            run: UOP_ONLY="test test_ut test_shaping" NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: uop numpy (gcc backend)
+            onnx: true
+            suite: uop
+            group: numpy
+            backend: gcc
+            run: UOP_ONLY="test_np np_compat" NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: uop onnx (gcc backend)
+            onnx: true
+            suite: uop
+            group: onnx
+            backend: gcc
+            run: UOP_ONLY="test_nn test_onnx test_sym test_grad" NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: uop runtimes (gcc backend)
+            onnx: true
+            suite: uop
+            group: runtimes
+            backend: gcc
+            run: UOP_ONLY="test_ort test_tinygrad test_cgen" NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: uop poly languages (gcc backend)
+            go: true
+            onnx: true
+            interp: true
+            suite: uop
+            group: poly
+            backend: gcc
+            run: NFCXX_BACKEND=gcc tests/uop/run_poly.sh
           - name: mruby scripts
             run: tests/mruby/run.sh
           - name: GPU kernel on the PTX interpreter
@@ -214,7 +264,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/test-bin
-          key: test-bin-${{ matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
 
       - name: ${{ matrix.name }}
         env:
