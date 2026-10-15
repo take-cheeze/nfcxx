@@ -1,0 +1,93 @@
+name: CUDA
+
+# CUDA library checks (docs/notes/gpu.md): a .cu file that includes cuBLAS and cuDNN is compiled through nfcxx and
+# nfcxx-cuda and linked with -lcublas -lcudnn -lcudart (tests/cuda/libs/run.sh). The libraries come from NVIDIA's
+# PyPI wheels (scripts/fetch-cuda-libs.sh); nothing runs on a GPU. Runs only when a change can affect the CUDA path:
+# the CUDA sources, the rewriters, the device pass and its harness, the driver, or the workflow itself.
+# Runs on demand too (workflow_dispatch).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lib/cuda/**"
+      - "tests/cuda/**"
+      - "tools/cuda-rewrite/**"
+      - "scripts/nfcxx-cuda"
+      - "scripts/cuda-rewrite.rb"
+      - "scripts/cuda-embed.rb"
+      - "scripts/pathb-*"
+      - "scripts/setup-pathb.sh"
+      - "scripts/fetch-cuda-libs.sh"
+      - "scripts/fetch-cudart-wheel.sh"
+      - "scripts/mrb"
+      - "scripts/setup-mruby.sh"
+      - "scripts/mruby-tool-config.rb"
+      - "nfcxx"
+      - "be/**"
+      - "3rd/edg"
+      - "scripts/setup-edg.sh"
+      - ".github/workflows/cuda.yml"
+  pull_request:
+    paths:
+      - "lib/cuda/**"
+      - "tests/cuda/**"
+      - "tools/cuda-rewrite/**"
+      - "scripts/nfcxx-cuda"
+      - "scripts/cuda-rewrite.rb"
+      - "scripts/cuda-embed.rb"
+      - "scripts/pathb-*"
+      - "scripts/setup-pathb.sh"
+      - "scripts/fetch-cuda-libs.sh"
+      - "scripts/fetch-cudart-wheel.sh"
+      - "scripts/mrb"
+      - "scripts/setup-mruby.sh"
+      - "scripts/mruby-tool-config.rb"
+      - "nfcxx"
+      - "be/**"
+      - "3rd/edg"
+      - "scripts/setup-edg.sh"
+      - ".github/workflows/cuda.yml"
+  workflow_dispatch:
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  libs:
+    runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # ruby and rake bootstrap the mruby build (the rewriter's reference and the helper scripts); python3-pip fetches
+      # the NVIDIA wheels. QBE is the default back end the driver compiles with.
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: ruby rake python3-pip
+
+      - name: Build the mruby interpreter
+        run: scripts/setup-mruby.sh
+
+      # The device pass of a .cu file goes through the Path B front end (scripts/pathb-dump).
+      - name: Build the Path B front end
+        run: scripts/setup-pathb.sh
+
+      - name: Fetch the CUDA libraries (cudart, cccl, nvcc's ptxas and headers, cuBLAS, cuDNN)
+        run: |
+          home=$(scripts/fetch-cuda-libs.sh "$RUNNER_TEMP/cuda-libs" | sed -n 's/^cuda-home: //p')
+          echo "CUDA_HOME=$home" >> "$GITHUB_ENV"
+          echo "NFCXX_PTXAS=$home/bin/ptxas" >> "$GITHUB_ENV"
+
+      - name: CUDA library link (cuBLAS, cuDNN, cudart through nfcxx and nfcxx-cuda)
+        run: tests/cuda/libs/run.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

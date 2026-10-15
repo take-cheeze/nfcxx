@@ -176,4 +176,14 @@ if "$root/nfcxx" -c -I"$cuda/include" constexpr_guard_mutant.cu -o "$out/cgm.o" 
 else
   echo "FAIL constexpr_guard mutant: not caught"; fail=1
 fi
+pass helper_launch.cu "helper launch: no error, 0 mismatches"
+# Mutant: the helper launches the wrong template instance, so every element must mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" helper_launch_mutant.cu -o "$out/hlm.o" > "$out/hlm.log" 2>&1 \
+   && "$root/nfcxx" "$out/hlm.o" -L"$cuda/lib64" -lcudart -o "$out/hlm" >> "$out/hlm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/hlm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant helper_launch_mutant: caught: $run"
+else
+  echo "FAIL helper_launch_mutant: the mutant was not caught"; fail=1
+fi
 exit $fail

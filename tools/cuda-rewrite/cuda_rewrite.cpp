@@ -3,7 +3,7 @@
 // CUDA launch rewrite for nfcxx: turns the kernel launch syntax of a .cu file into a call of __nfcxx_cuda_launch
 // (lib/cuda/nfcxx_cuda.h), so the EDG front end sees only C++.
 //   name<<<grid, block[, shmem[, stream]]>>>(args)  ->  __nfcxx_cuda_launch(name, grid, block, shmem, stream, args)
-// Usage: build/cuda-rewrite [-I DIR]... [--device [--kernels=FILE]] [--edg-launches] FILE.cu > FILE.cpp
+// Usage: build/cuda-rewrite [-I DIR]... [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu > FILE.cpp
 //
 // Strings are byte strings, as in Ruby on mruby: indexes are byte offsets and a position past the end reads as
 // "absent" (ch() returns -1), where Ruby's s[i] returns nil.
@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <system_error>
 #include <functional>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -1842,6 +1843,69 @@ std::vector<PlainLaunch> plain_launches(const std::string &text) {
   return out;
 }
 
+static std::string trim(const std::string &s);
+
+// The value of a file-level constant `constexpr int NAME = <digits>;` (or `const`), or false.
+static bool file_constant_value(const std::string &text, const std::string &name, std::string &out) {
+  for (long p = str_index(text, name, 0); p >= 0; p = str_index(text, name, p + 1)) {
+    if ((p > 0 && ident_c(text[p - 1])) || (p + (long)name.size() < (long)text.size() && ident_c(text[p + name.size()])))
+      continue;
+    long ls = p;
+    while (ls > 0 && text[ls - 1] != '\n') ls--;
+    std::string line = sl(text, ls, p);
+    if (line.find("constexpr") == std::string::npos && line.find("const ") == std::string::npos) continue;
+    long q = p + (long)name.size();
+    while (q < (long)text.size() && white_c(text[q])) q++;
+    if (q >= (long)text.size() || text[q] != '=' || (q + 1 < (long)text.size() && text[q + 1] == '=')) continue;
+    long semi = str_index(text, ";", q);
+    if (semi < 0) continue;
+    std::string v = trim(sl(text, q + 1, semi));
+    bool digits = !v.empty();
+    for (char c : v)
+      if (!(c >= '0' && c <= '9')) digits = false;
+    if (digits) {
+      out = v;
+      return true;
+    }
+  }
+  return false;
+}
+
+// The default value of template parameter `pname` of the function template `kname`: a literal, or a file-level
+// constant with a literal value (`int cols_per_warp = gdn_cols_per_warp`). False when it has no default or the
+// default is not one of these.
+static bool template_default_value(const std::string &text, const std::string &kname, const std::string &pname,
+                                   std::string &out) {
+  std::vector<std::string> tparts;
+  for (const auto &tb : template_bodies(text)) {
+    TmplHeader t = tb.tmpl;
+    std::string header = sl(text, t.close + 1, tb.open);
+    if (function_name(header) != kname) continue;
+    tparts = split_top(sl(text, t.lt + 1, t.close));
+    break;
+  }
+  for (const auto &part : tparts) {
+    long eq = str_index(part, "=", 0);
+    if (eq < 0) continue;
+    std::string left = trim(sl(part, 0, eq));
+    long e = (long)left.size();
+    long b = e;
+    while (b > 0 && ident_c(left[b - 1])) b--;
+    if (left.substr(b, e - b) != pname) continue;
+    std::string v = trim(sl(part, eq + 1, (long)part.size()));
+    bool digits = !v.empty();
+    for (char c : v)
+      if (!(c >= '0' && c <= '9')) digits = false;
+    if (digits) {
+      out = v;
+      return true;
+    }
+    if (!v.empty() && ident_c((unsigned char)v[0])) return file_constant_value(text, v, out);
+    return false;
+  }
+  return false;
+}
+
 // Ruby deduce_launch_targs (line 1481): the deduced template arguments are written into the launches.
 std::string deduce_launch_targs(const std::string &text_in) {
   std::string text = text_in;
@@ -1871,11 +1935,29 @@ std::string deduce_launch_targs(const std::string &text_in) {
       refuse("template launch of " + tl.name + "<" + tl.targs + ">: its arguments are not readable (at line " +
              std::to_string(line_of(text, tl.pos)) + ")");
     std::vector<std::string> missing(kt.names.begin() + (long)given.size(), kt.names.end());
+    // A missing parameter with a default (a literal, or a file-level constant with a literal value) takes the default;
+    // the others are deduced from the arguments.
+    std::vector<std::string> deducible;
+    std::map<std::string, std::string> defaults;
+    for (const auto &p : missing) {
+      std::string dv;
+      if (template_default_value(text, tl.name, p, dv)) defaults[p] = dv;
+      else deducible.push_back(p);
+    }
     KernelTemplateRef ref{kt.params, kt.names, kt.has_pack, kt.pack};
-    std::vector<std::string> deduced = deduce_types(tl.name, tl.targs, ref, missing, args, text, tl.pos);
+    std::vector<std::string> deduced = deduce_types(tl.name, tl.targs, ref, deducible, args, text, tl.pos);
+    std::vector<std::string> filled;
+    for (const auto &p : missing) {
+      if (defaults.count(p)) {
+        filled.push_back(defaults[p]);
+      } else {
+        filled.push_back(deduced[0]);
+        deduced.erase(deduced.begin());
+      }
+    }
     auto span = targs_span(text, tl.pos);
     std::vector<std::string> all = given;
-    all.insert(all.end(), deduced.begin(), deduced.end());
+    all.insert(all.end(), filled.begin(), filled.end());
     edits.push_back(Edit{span.first, span.second, join(all, ", ")});
   }
   // Ruby: edits.sort_by { -a }, applied in that order (each edit is applied to the text as it is then).
@@ -1884,9 +1966,87 @@ std::string deduce_launch_targs(const std::string &text_in) {
   return text;
 }
 
+static std::string trim(const std::string &s) {
+  size_t a = 0, b = s.size();
+  while (a < b && white_c(s[a])) a++;
+  while (b > a && white_c(s[b - 1])) b--;
+  return s.substr(a, b - a);
+}
+
+// The word before position i, skipping whitespace (empty at the start of the text).
+static std::string word_before(const std::string &text, long i) {
+  long j = i - 1;
+  while (j >= 0 && white_c(text[j])) j--;
+  long e = j;
+  while (j >= 0 && ident_c(text[j])) j--;
+  return text.substr(j + 1, e - j);
+}
+
+// ggml_cuda_kernel_launch(K, LP, args...) (ggml-cuda common.cuh) without PDL is
+//   K<<<LP.block_nums, LP.block_dims, LP.shmem, LP.stream>>>(args...); CUDA_CHECK(cudaGetLastError());
+// which is what this rewrite emits (llama.cpp builds without GGML_CUDA_USE_PDL; with PDL the helper launches through
+// cudaLaunchKernelEx and this form would drop that). The helper's own definition (preceded by `void`) is kept.
+static std::string helper_launch_rewrite(const std::string &text) {
+  static const std::string key = "ggml_cuda_kernel_launch";
+  const long n = (long)text.size();
+  std::string out;
+  long i = 0;
+  while (i < n) {
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += sl(text, i, e);
+      i = e;
+      continue;
+    }
+    bool at_name = text.compare(i, key.size(), key) == 0 && (i == 0 || !ident_c(text[i - 1])) &&
+                   i + (long)key.size() < n && !ident_c(text[i + key.size()]);
+    if (at_name) {
+      long p = i + (long)key.size();
+      while (p < n && white_c(text[p])) p++;
+      long close = (p < n && text[p] == '(') ? matching_paren(text, p) : -1;
+      if (close > p && word_before(text, i) != "void") {
+        // the first top-level comma ends K (its template arguments are not split), the second ends LP
+        std::vector<long> commas;
+        long depth = 0, angles = 0;
+        for (long j = p + 1; j < close; j++) {
+          long je = skip_literal(text, j);
+          if (je >= 0) {
+            j = je - 1;
+            continue;
+          }
+          char c = text[j];
+          if (c == '(' || c == '[' || c == '{') depth++;
+          else if (c == ')' || c == ']' || c == '}') depth--;
+          else if (c == '<' && ident_c(text[j - 1]) && depth == 0) angles++;
+          else if (c == '>' && angles > 0 && depth == 0) angles--;
+          else if (c == ',' && depth == 0 && angles == 0) commas.push_back(j);
+        }
+        if (commas.size() >= 1) {
+          long c1 = commas[0];
+          long c2 = commas.size() >= 2 ? commas[1] : close;
+          std::string kernel = trim(sl(text, p + 1, c1));
+          std::string lp = trim(sl(text, c1 + 1, c2));
+          std::string args = c2 < close ? trim(sl(text, c2 + 1, close)) : std::string();
+          bool name_ok = !kernel.empty() && ident_c((unsigned char)kernel[0]) && lp.size() > 0 &&
+                         ident_c((unsigned char)lp[0]) && lp.find(' ') == std::string::npos;
+          if (name_ok) {
+            out += kernel + "<<<" + lp + ".block_nums, " + lp + ".block_dims, " + lp + ".shmem, " + lp + ".stream>>>(" +
+                   args + "); CUDA_CHECK(cudaGetLastError())";
+            i = close + 1;
+            continue;
+          }
+        }
+      }
+    }
+    out += text[i];
+    i++;
+  }
+  return out;
+}
+
 // Ruby launch_prepare (line 1509): the launch forms before the scan.
 std::string launch_prepare(const std::string &text) {
-  std::string t = expand_launch_macros(text, 0);
+  std::string t = expand_launch_macros(helper_launch_rewrite(text), 0);
   g_expanded = t;
   return deduce_launch_targs(t);
 }
@@ -4213,6 +4373,48 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
     if (kept) pc.keep = true;
   }
 
+  // A plain (non-const) file-scope host variable that a kept device piece reads: nvcc rejects it ("identifier is undefined
+  // in device code"), so the device unit refuses it by name instead of dropping the declaration and failing later. const
+  // and constexpr globals are left to the constant rule above (nvcc accepts the scalar ones).
+  {
+    std::set<std::string> host_vars;
+    for (const auto &pc : pieces) {
+      if (pc.keep || pc.device || pc.body || pc.kind == "pp" || pc.toks.empty()) continue;
+      const std::string &f = pc.toks.front();
+      if (f == "typedef" || f == "using" || f == "struct" || f == "class" || f == "union" || f == "enum" ||
+          f == "namespace" || f == "template" || f == "extern" || f == "static_assert")
+        continue;
+      if (has_tok(pc.toks, "const") || has_tok(pc.toks, "constexpr")) continue;
+      std::string t = blank_comments(pc.text);
+      long eq = str_index(t, "=", 0), lb = str_index(t, "[", 0), sc = str_index(t, ";", 0);
+      if (eq < 0 && sc < 0) continue;
+      if (eq < 0 && str_index(t, "(", 0) >= 0) continue;  // a prototype
+      long cut = (long)t.size();
+      if (eq >= 0) cut = eq;
+      if (lb >= 0 && lb < cut) cut = lb;
+      if (eq < 0 && sc >= 0 && sc < cut) cut = sc;
+      std::vector<std::string> tt = tokens_of(sl(t, 0, cut));
+      if (!tt.empty() && !tt.back().empty() && ident_c((unsigned char)tt.back()[0])) host_vars.insert(tt.back());
+    }
+    for (const auto &pc : pieces) {
+      if (!pc.keep || !pc.device) continue;
+      const auto &tk = pc.toks;
+      for (size_t i = 0; i < tk.size(); i++) {
+        if (!host_vars.count(tk[i])) continue;
+        // A declaration of the name in the piece (`float table`, `float *table`) is not a use of the host variable. A word
+        // that starts an expression (`return table[i]`) is not a type name.
+        static const std::set<std::string> expr_words = {"return", "case", "else", "do", "throw", "co_return", "sizeof",
+                                                         "new", "delete", "goto", "if", "while", "for", "switch"};
+        auto type_word = [&](size_t k) {
+          return !tk[k].empty() && ident_c((unsigned char)tk[k][0]) && !expr_words.count(tk[k]);
+        };
+        if (i >= 1 && type_word(i - 1)) continue;
+        if (i >= 2 && (tk[i - 1] == "*" || tk[i - 1] == "&") && type_word(i - 2)) continue;
+        refuse("host variable " + tk[i] + " read in device code: nvcc does not allow it (identifier is undefined in device code)");
+      }
+    }
+  }
+
   std::string out = "// Device side of a .cu file, generated by scripts/cuda-rewrite.rb --device. Do not edit.\n";
   out += DEVICE_PRELUDE;
   out += device_decls();
@@ -5135,7 +5337,7 @@ std::string device_decls() {
 
 // The command line of the Ruby script (line 3371): -I DIR, --device, --kernels=FILE, --edg-launches, FILE.cu.
 int usage() {
-  std::fprintf(stderr, "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] FILE.cu\n");
+  std::fprintf(stderr, "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
   return 2;
 }
 
@@ -5527,10 +5729,120 @@ std::string name_commented_params(const std::string &s) {
   return out;
 }
 
+// ---- kernel name obfuscation (--obfuscate=SEED; Ruby: kernel_names_of, rename_words, rename_identifiers,
+// obfuscate_kernels). Each __global__ name becomes __nfcxx_kn_<FNV-1a 64 of SEED, NUL, name>.
+
+// The names of the __global__ functions in text: the identifier before the first ( of each declaration.
+std::vector<std::string> kernel_names_of(const std::string &text) {
+  std::vector<std::string> names;
+  std::string blanked = blank_comments(text);
+  long i = 0;
+  long n = (long)blanked.size();
+  while (i < n) {
+    long e = skip_literal(blanked, i);
+    if (e >= 0) {
+      i = e;
+      continue;
+    }
+    if (blanked.compare((size_t)i, 10, "__global__") == 0 && !(i > 0 && ident_c(ch(blanked, i - 1))) &&
+        !ident_c(ch(blanked, i + 10))) {
+      long open_at = str_index(blanked, "(", i + 10);
+      if (open_at >= 0) {
+        long j = open_at;
+        while (j > 0 && !ident_c(ch(blanked, j - 1))) j -= 1;
+        long k = j;
+        while (k > 0 && ident_c(ch(blanked, k - 1))) k -= 1;
+        if (j > k) names.push_back(blanked.substr((size_t)k, (size_t)(j - k)));
+      }
+      i += 10;
+      continue;
+    }
+    i += 1;
+  }
+  return names;
+}
+
+// s with each whole identifier that is a key of map replaced by its value (no literal or comment handling).
+std::string rename_words(const std::string &s, const std::map<std::string, std::string> &map) {
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    if (ident_c(ch(s, i)) && !(i > 0 && ident_c(ch(s, i - 1)))) {
+      long j = i;
+      while (j < n && ident_c(ch(s, j))) j += 1;
+      std::string w = s.substr((size_t)i, (size_t)(j - i));
+      auto it = map.find(w);
+      out += it == map.end() ? w : it->second;
+      i = j;
+    } else {
+      out += s[(size_t)i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// text with each whole identifier that is a key of map replaced. String and character literals and #include lines are
+// kept; comments are renamed too.
+std::string rename_identifiers(const std::string &text, const std::map<std::string, std::string> &map) {
+  std::string out;
+  long i = 0;
+  long n = (long)text.size();
+  while (i < n) {
+    if (ch(text, i) == '/' && (ch(text, i + 1) == '/' || ch(text, i + 1) == '*')) {
+      long e = skip_literal(text, i);
+      out += rename_words(text.substr((size_t)i, (size_t)(e - i)), map);
+      i = e;
+      continue;
+    }
+    long e = skip_literal(text, i);
+    if (e >= 0) {
+      out += text.substr((size_t)i, (size_t)(e - i));
+      i = e;
+      continue;
+    }
+    if (text.compare((size_t)i, 8, "#include") == 0) {
+      long nl = str_index(text, "\n", i);
+      long end = nl < 0 ? n : nl;
+      out += text.substr((size_t)i, (size_t)(end - i));
+      i = end;
+      continue;
+    }
+    if (ident_c(ch(text, i)) && !(i > 0 && ident_c(ch(text, i - 1)))) {
+      long j = i;
+      while (j < n && ident_c(ch(text, j))) j += 1;
+      std::string w = text.substr((size_t)i, (size_t)(j - i));
+      auto it = map.find(w);
+      out += it == map.end() ? w : it->second;
+      i = j;
+      continue;
+    }
+    out += text[(size_t)i];
+    i += 1;
+  }
+  return out;
+}
+
+std::string obfuscate_kernels(const std::string &text, const std::string &seed) {
+  std::map<std::string, std::string> map;
+  for (const auto &k : kernel_names_of(text)) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    std::string in = seed + std::string(1, '\0') + k;
+    for (unsigned char b : in) h = (h ^ b) * 0x100000001b3ULL;
+    char hex[32];
+    std::snprintf(hex, sizeof hex, "%016llx", (unsigned long long)h);
+    map[k] = std::string("__nfcxx_kn_") + hex;
+  }
+  return rename_identifiers(text, map);
+}
+
 int main(int argc, char **argv) {
   bool device = false;
   bool has_kernels = false;
   std::string kernels_path;
+  bool has_obfuscate = false;
+  std::string obfuscate_seed;
   bool has_path = false;
   std::string path;
   for (int a = 1; a < argc; a++) {
@@ -5545,6 +5857,9 @@ int main(int argc, char **argv) {
     } else if (arg.compare(0, 10, "--kernels=") == 0) {
       has_kernels = true;
       kernels_path = arg.substr(10);
+    } else if (arg.compare(0, 12, "--obfuscate=") == 0) {
+      has_obfuscate = true;
+      obfuscate_seed = arg.substr(12);
     } else if (!has_path) {
       has_path = true;
       path = arg;
@@ -5564,6 +5879,7 @@ int main(int argc, char **argv) {
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
   g_expanded = inline_generic_lambdas(g_expanded);
   g_expanded = launch_prepare(g_expanded);
+  if (has_obfuscate) g_expanded = obfuscate_kernels(g_expanded, obfuscate_seed);
   std::string result;
   if (device) {
     // The device unit is built from the conditionals of the device pass (see resolve_conditionals).
