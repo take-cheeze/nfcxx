@@ -206,7 +206,9 @@ env = lambda do |dir, name|
   { 'MRBC' => MRBC_PATH, 'OUT_SYMBOL' => name, 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
     'NATIVE_SRCS' => Shellwords.join(native_srcs), 'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT)),
     'ONLY_OWNERS' => owners.join(','), 'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio',
-    'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }), NomethodReviewed::ALLOW_ENV => 'allow' }
+    'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }), NomethodReviewed::ALLOW_ENV => 'allow',
+    # The repo's sig/bc2cpp signatures describe RPG engine classes; this fixture program has none of them.
+    'BC2CPP_SIG_DIRS' => '' }
 end
 
 work = ENV['BC2CPP_YIELD_FREE_DIR'] || Dir.mktmpdir('bc2cpp_yield_free')
