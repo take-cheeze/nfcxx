@@ -233,7 +233,7 @@ module RbsSignatures
     return nil unless t.is_a?(RBS::Types::ClassInstance) && t.args.empty?
 
     n = t.name.to_s.delete_prefix('::')
-    %w[Integer Symbol String Float Array Hash].include?(n) ? nil : n
+    %w[Integer Symbol String Float Hash].include?(n) ? nil : n
   end
 
   # --------------------------------------------------------------------------------------------- applying
@@ -447,8 +447,8 @@ module RbsSignatures
         note(ap, sig.loc, 'warning', 'TC1006', "#{sig.owner}##{sig.name} parameter #{i + 1}: the `# bc2cpp:` comment wins over signature type #{t.text}")
         next
       end
-      ann_args[i] ||= fix
-      cann_args[i] ||= cls if cls && !fix
+      ann_args[i] ||= fix unless fix == :array && el # Array[C] elements are ElementAnnotations, not a :array arg
+      cann_args[i] ||= cls if cls && (!fix || fix == :array)
       arg_elements[i] ||= el
       arg_containers[i] ||= cont if el
     end
