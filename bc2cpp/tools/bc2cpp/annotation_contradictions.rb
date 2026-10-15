@@ -128,6 +128,35 @@ module AnnotationContradictions
     end
   end
 
+  # IVAR_SIGNATURE_CONTRADICTION: an RBS ivar declaration (`@x: Integer`, `@y: Game::Actor`) against the class
+  # ClassLayout settled for that ivar, or failing that the slot IvarLayout embedded it as. An absent fact (no
+  # class, an UNKNOWN class, a boxed slot) never contradicts, and an `Integer?` slot (fixnum or nil) agrees with a
+  # declared Integer. Returns [sig, declared, inferred] per disagreement; TypeFacts reports the same rows as TC1001.
+  IVAR_EMBED_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?' }.freeze
+
+  def self.ivar_conflicts(signature_ivars, class_layout_raw, ivar_layout, unknown)
+    (signature_ivars || {}).each_value.filter_map do |sig|
+      name = sig.name.delete_prefix('@')
+      t = sig.type
+      inferred = (class_layout_raw[sig.owner] || {})[name]
+      embed = (ivar_layout[sig.owner] || {})[name]
+      got = if inferred && inferred != unknown then inferred.to_s
+            elsif IVAR_EMBED_TYPES.key?(embed) then IVAR_EMBED_TYPES[embed]
+            end
+      want = case t.kind
+             when :class then t.cls
+             when :int then 'Integer'
+             when :sym then 'Symbol'
+             when :array then 'Array'
+             when :hash then 'Hash'
+             end
+      next unless want && got
+      next if got == want || (got == 'Integer?' && want == 'Integer')
+
+      [sig, want, got]
+    end
+  end
+
   def self.ret_conflicts(d, name, ann, inferred_rets)
     return [] unless inferred_rets && ann.ret
 
