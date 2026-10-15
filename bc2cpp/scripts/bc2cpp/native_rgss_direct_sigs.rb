@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Writes sig/native/rgss_direct.rbs from NativeDirect::GENERATED, the RGSS direct entry points (ADR 0263). The table
+# Writes generated/bc2cpp/rgss_direct.rbs from NativeDirect::GENERATED, the RGSS direct entry points (ADR 0263). The table
 # stays the source of truth for each binding's argument kinds; this file is derived from it. Run with --check to fail
 # when the committed file is stale.
 #
@@ -9,7 +9,7 @@
 require_relative '../../tools/bc2cpp/native_direct_table'
 
 module NativeRgssDirectSigs
-  PATH = File.expand_path('../../sig/native/rgss_direct.rbs', __dir__)
+  PATH = File.expand_path('../../generated/bc2cpp/rgss_direct.rbs', __dir__)
 
   # RBS type for each argument kind in NativeDirect::GENERATED. :value is an mrb_value whose class the table does not
   # record, so it stays untyped.
