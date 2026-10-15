@@ -3,6 +3,7 @@
 require 'json'
 require 'set'
 require_relative 'annotations'
+require_relative 'annotation_contradictions'
 require_relative 'ir_type_feedback'
 require_relative 'ir_ivar_types'
 
@@ -658,26 +659,11 @@ module TypeFacts
     out
   end
 
-  # A declared ivar class (or Integer / Symbol) against what the analysis proved for the same ivar.
+  # A declared ivar class (or Integer / Symbol) against what the analysis proved for the same ivar. The rule is
+  # AnnotationContradictions.ivar_conflicts, which the build also enforces.
   def ivar_contradictions(ctx, out)
-    (ctx.signature_ivars || {}).each_value do |sig|
-      name = sig.name.delete_prefix('@')
-      t = sig.type
-      inferred = (ctx.class_layout_raw[sig.owner] || {})[name]
-      embed = (ctx.ivar_layout[sig.owner] || {})[name]
-      got = if inferred && inferred != ClassLayout::UNKNOWN then inferred.to_s
-            elsif INT_TYPES.key?(embed) && embed != :array then INT_TYPES[embed]
-            end
-      want = case t.kind
-             when :class then t.cls
-             when :int then 'Integer'
-             when :sym then 'Symbol'
-             when :array then 'Array'
-             when :hash then 'Hash'
-             end
-      next unless want && got
-      next if got == want || (got == 'Integer?' && want == 'Integer')
-
+    AnnotationContradictions.ivar_conflicts(ctx.signature_ivars, ctx.class_layout_raw, ctx.ivar_layout,
+                                            ClassLayout::UNKNOWN).each do |sig, want, got|
       out << { 'owner' => sig.owner, 'name' => sig.name, 'slot' => 'ivar', 'declared' => want, 'inferred' => got,
                'file' => sig.loc.file, 'line' => sig.loc.line, 'col' => sig.loc.col, 'source' => 'signature',
                'message' => "#{sig.owner}#{sig.name} ivar: declared #{want}, inferred #{got}" }

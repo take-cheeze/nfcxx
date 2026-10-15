@@ -40,6 +40,25 @@ class AnnotationContradictionsTest < Minitest::Test
     assert C.contradicting?(:symbol, :fixnum)
   end
 
+  IvarSig = Struct.new(:owner, :name, :type, keyword_init: true)
+  IvarType = Struct.new(:kind, :cls, keyword_init: true)
+
+  def test_ivar_declaration_against_a_settled_slot
+    sigs = {
+      %w[K @n] => IvarSig.new(owner: 'K', name: '@n', type: IvarType.new(kind: :int)),
+      %w[K @s] => IvarSig.new(owner: 'K', name: '@s', type: IvarType.new(kind: :sym)),
+      %w[K @m] => IvarSig.new(owner: 'K', name: '@m', type: IvarType.new(kind: :int)),
+      %w[K @a] => IvarSig.new(owner: 'K', name: '@a', type: IvarType.new(kind: :class, cls: 'Game::Actor')),
+      %w[K @u] => IvarSig.new(owner: 'K', name: '@u', type: IvarType.new(kind: :int))
+    }
+    classes = { 'K' => { 'a' => 'Game::Party', 'u' => :unknown } }
+    slots = { 'K' => { 'n' => :fixnum, 's' => :fixnum, 'm' => :fixnum_nil, 'u' => :value } }
+    found = C.ivar_conflicts(sigs, classes, slots, :unknown).map { |sig, want, got| [sig.name, want, got] }
+    # A Symbol declaration on a fixnum slot and a class that disagrees are errors; an Integer? slot agrees with a
+    # declared Integer, and an UNKNOWN class or boxed slot is an absent fact.
+    assert_equal [['@s', 'Symbol', 'Integer'], ['@a', 'Game::Actor', 'Game::Party']], found
+  end
+
   def test_agreement_is_not_a_contradiction
     refute C.contradicting?(:fixnum, :fixnum)
     refute C.contradicting?(:symbol, :symbol)

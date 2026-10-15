@@ -1014,6 +1014,14 @@ if $PROGRAM_NAME == __FILE__
   contradictions = AnnotationContradictions.find(ireps, registry, annotations, arg_types,
                                                 gen.fixnum_return_names, class_annotations,
                                                 class_arg_types)
+  # IVAR_SIGNATURE_CONTRADICTION: an RBS ivar declaration that disagrees with the class or slot the analysis
+  # settled is the same build error (TypeFacts reports these rows itself, so they stay out of `contradictions`).
+  ivar_contradictions = if sig_applied
+                          AnnotationContradictions.ivar_conflicts(sig_applied.ivar_sigs, class_layout_raw,
+                                                                  ivar_layout, ClassLayout::UNKNOWN)
+                        else
+                          []
+                        end
   # TYPE_CHECK (docs/adr/0412): the report front-end reads the settled types as data; a build never sets this.
   type_facts_path = ENV['BC2CPP_TYPE_FACTS']
   type_facts_path = nil if type_facts_path&.empty?
@@ -1036,7 +1044,7 @@ if $PROGRAM_NAME == __FILE__
     )))
   end
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='
-  if contradictions.empty?
+  if contradictions.empty? && ivar_contradictions.empty?
     warn '  (none)'
   else
     contradictions.each do |owner, name, pos, declared, got|
@@ -1044,9 +1052,14 @@ if $PROGRAM_NAME == __FILE__
       warn "  CONTRADICTION #{owner}##{name} #{where}: annotation says #{declared.inspect}, " \
            "inference proved #{got.inspect}"
     end
+    ivar_contradictions.each do |sig, declared, got|
+      warn "  CONTRADICTION #{sig.owner}#{sig.name} ivar (#{sig.loc.file}:#{sig.loc.line}): signature says " \
+           "#{declared}, inference proved #{got}"
+    end
     # The type check reports them (with file:line) instead of stopping the run that collects them.
-    abort "\n[bc2pp] RBS_SEED_CONTRADICTION: #{contradictions.size} annotation(s) disagree with a " \
-          "proved type (see above). Fix the annotation, or the code it claims to describe." unless type_facts_path
+    total = contradictions.size + ivar_contradictions.size
+    abort "\n[bc2pp] RBS_SEED_CONTRADICTION: #{total} declaration(s) disagree with a " \
+          "proved type (see above). Fix the declaration, or the code it claims to describe." unless type_facts_path
   end
   warn ''
   # ARRAY_RETURN_PROOF listing, one line per name like the one above, so the
