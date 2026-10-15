@@ -147,6 +147,31 @@ std::string flat(const Idx& idx, const std::vector<Dim>& dims) {
   return out.empty() ? "0" : out;
 }
 
+// the math.h function of a float unary ALU op (the operand is passed as double, the result rounded to the node's dtype)
+const char* libm_name(Op op) {
+  switch (op) {
+    case Op::Sqrt: return "sqrt";
+    case Op::Exp2: return "exp2";
+    case Op::Log2: return "log2";
+    case Op::Sin: return "sin";
+    case Op::Acos: return "acos";
+    case Op::Acosh: return "acosh";
+    case Op::Asin: return "asin";
+    case Op::Asinh: return "asinh";
+    case Op::Atan: return "atan";
+    case Op::Atanh: return "atanh";
+    case Op::Cosh: return "cosh";
+    case Op::Sinh: return "sinh";
+    case Op::Tan: return "tan";
+    case Op::Expm1: return "expm1";
+    case Op::Log1p: return "log1p";
+    case Op::Log10: return "log10";
+    case Op::Round: return "nearbyint";
+    default: break;
+  }
+  throw Error(std::string("render_c: no libm function for ") + name(op));
+}
+
 // the C expression of a binary ALU op on already rendered operands
 std::string alu2(Op op, DType dt, const std::string& a, const std::string& b) {
   const std::string T = ctype(dt);
@@ -163,6 +188,9 @@ std::string alu2(Op op, DType dt, const std::string& a, const std::string& b) {
     case Op::FDiv: return "((" + T + ")(" + a + " / " + b + "))";
     case Op::IDiv: return std::string("nfc_idiv_") + sfx(dt) + "(" + a + ", " + b + ")";
     case Op::Mod: return std::string("nfc_mod_") + sfx(dt) + "(" + a + ", " + b + ")";
+    case Op::Shl: return std::string("nfc_shl_") + sfx(dt) + "(" + a + ", " + b + ")";
+    case Op::Shr: return std::string("nfc_shr_") + sfx(dt) + "(" + a + ", " + b + ")";
+    case Op::Atan2: return "((" + T + ")atan2((double)(" + a + "), (double)(" + b + ")))";   // in double, rounded, like the interpreter
     case Op::And: return "((" + T + ")((" + a + ") & (" + b + ")))";
     case Op::Or: return "((" + T + ")((" + a + ") | (" + b + ")))";
     case Op::Xor: return "((" + T + ")((" + a + ") ^ (" + b + ")))";
@@ -460,8 +488,10 @@ std::string Renderer::elem_op(const UOp* n, const Idx& idx, KGen& g) {
     case Op::Neg:
       if (is_float(dt)) return "((" + T + ")(-" + S(0) + "))";
       return "((" + T + ")((" + utype(dt) + ")0 - (" + utype(dt) + ")(" + S(0) + ")))";
-    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: {
-      const char* f = n->op == Op::Sqrt ? "sqrt" : n->op == Op::Exp2 ? "exp2" : n->op == Op::Log2 ? "log2" : "sin";
+    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin:
+    case Op::Acos: case Op::Acosh: case Op::Asin: case Op::Asinh: case Op::Atan: case Op::Atanh: case Op::Cosh: case Op::Sinh:
+    case Op::Tan: case Op::Expm1: case Op::Log1p: case Op::Log10: case Op::Round: {
+      const char* f = libm_name(n->op);
       return "((" + T + ")" + f + "((double)(" + S(0) + ")))";  // in double, rounded, like the interpreter
     }
     case Op::CmpLt: { std::string a = S(0), b = S(1); return "((uint8_t)((" + a + ") < (" + b + ")))"; }
@@ -708,6 +738,10 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots, const RenderOptions
       << "static inline uint8_t nfc_max_u8(uint8_t a, uint8_t b) { return a > b ? a : b; }\n"
       << "static inline int32_t nfc_idiv_i32(int32_t a, int32_t b) { return b == 0 ? 0 : b == -1 ? (int32_t)((uint32_t)0 - (uint32_t)a) : a / b; }\n"
       << "static inline int64_t nfc_idiv_i64(int64_t a, int64_t b) { return b == 0 ? 0 : b == -1 ? (int64_t)((uint64_t)0 - (uint64_t)a) : a / b; }\n"
+      << "static inline int32_t nfc_shl_i32(int32_t a, int32_t c) { return (c < 0 || c >= 32) ? 0 : (int32_t)((uint32_t)a << c); }\n"
+      << "static inline int32_t nfc_shr_i32(int32_t a, int32_t c) { return (c < 0 || c >= 32) ? (a < 0 ? -1 : 0) : (a < 0 ? ~(~a >> c) : a >> c); }\n"
+      << "static inline int64_t nfc_shl_i64(int64_t a, int64_t c) { return (c < 0 || c >= 64) ? 0 : (int64_t)((uint64_t)a << c); }\n"
+      << "static inline int64_t nfc_shr_i64(int64_t a, int64_t c) { return (c < 0 || c >= 64) ? (a < 0 ? -1 : 0) : (a < 0 ? ~(~a >> c) : a >> c); }\n"
       << "static inline int32_t nfc_mod_i32(int32_t a, int32_t b) { return (b == 0 || b == -1) ? 0 : a % b; }\n"
       << "static inline int64_t nfc_mod_i64(int64_t a, int64_t b) { return (b == 0 || b == -1) ? 0 : a % b; }\n"
       << "static inline int32_t nfc_wrap32(int64_t v) { return (int32_t)(uint32_t)(uint64_t)v; }\n"

@@ -26,6 +26,9 @@ ii = np.array([[2, 0, 1], [1, 2, 0]], i32)
 ss = np.array([-2, 0, 1, 1, 4], f32)
 sq = np.array([1, 1.5, -3, 4], f32)
 w2 = np.array([5, 6], f32)
+u = np.array([[-1, -.5, 0], [.5, 1, 2]], f32)
+p1 = np.array([1, 1.5, 2, 8, 1000, .25], f32)
+rv = np.array([.5, 1.5, 2.5, -.5, -1.5, -2.5, 2.4, 2.6], f32)
 
 def softmax(x): e = np.exp(x - x.max(-1, keepdims=True)); return e / e.sum(-1, keepdims=True)
 def logsoftmax(x): z = x - x.max(-1, keepdims=True); return z - np.log(np.exp(z).sum(-1, keepdims=True))
@@ -91,6 +94,13 @@ CASES = {
     "zeros_like_i": lambda: np.zeros_like(a, dtype=i32), "full_like": lambda: np.full_like(a, 7), "ones_like_i": lambda: np.ones_like(ia),
     "linspace_noend": lambda: np.linspace(0, 1, 4, endpoint=False), "eye_k": lambda: np.eye(2, 3, 1),
     "std_corr": lambda: np.std(a, axis=1, ddof=1), "var_corr": lambda: np.var(a, axis=0, ddof=1, keepdims=True),
+    # the elementwise functions of the Array API that were missing (docs/notes/array-api.md)
+    "acos": lambda: np.arccos(u), "asin": lambda: np.arcsin(u), "atan": lambda: np.arctan(v), "atanh": lambda: np.arctanh(u),
+    "acosh": lambda: np.arccosh(p1), "asinh": lambda: np.arcsinh(v), "sinh": lambda: np.sinh(v), "cosh": lambda: np.cosh(v),
+    "tan": lambda: np.tan(v), "atan2": lambda: np.arctan2(a, b), "expm1": lambda: np.expm1(v), "log1p": lambda: np.log1p(p1 - 1),
+    "log2": lambda: np.log2(p1), "log10": lambda: np.log10(p1), "round_ties": lambda: np.round(rv), "round_int": lambda: np.round(ia),
+    "logaddexp": lambda: np.logaddexp(a, b), "logaddexp_v": lambda: np.logaddexp(v, -v),
+    "lshift": lambda: np.left_shift(ia, ib), "rshift": lambda: np.right_shift(ia, ib),
 }
 
 # nfcuop's dtype differs from numpy's on purpose: ints are int32 and floats float32 unless asked otherwise, so numpy's

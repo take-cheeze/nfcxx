@@ -868,6 +868,107 @@ static void array_api_functions() {
   CHECK_THROWS(einsum("ij,kj->ik", {a, np.array({1, 2, 3, 4}, {2, 2})}));   // j is 3 and 2
 }
 
+// The Array API's elementwise functions that need their own IR operators: the inverse trigonometric and the hyperbolic functions,
+// expm1, log1p, log2, log10, round, atan2, logaddexp and the bitwise shifts. The values are the closed forms, and the special values
+// are C99's (which numpy follows): a domain error is NaN, log of zero is -inf, round goes to the even neighbour, and -0 keeps its sign.
+static void elementwise_functions() {
+  Session np;
+  const DType i32 = DType::Int32, i64 = DType::Int64, f32 = DType::Float32, f64 = DType::Float64, bl = DType::Bool;
+  const double inf = std::numeric_limits<double>::infinity(), nan = std::numeric_limits<double>::quiet_NaN();
+  const double pi = std::acos(-1.0), ln2 = std::log(2.0), e = std::exp(1.0);
+  // inverse trigonometric and hyperbolic (float64, so the tolerance is tight)
+  CHECK(near(acos(np.array({-1.0, 0.0, 1.0}, f64)).tolist(), {pi, pi / 2, 0}, 1e-12));
+  CHECK(acos(np.array({2.0, -1.5}, f64)).isnan().sum().item() == 2);   // outside [-1, 1]
+  CHECK(near(asin(np.array({0.0, 1.0, -1.0}, f64)).tolist(), {0, pi / 2, -pi / 2}, 1e-12));
+  CHECK(asin(np.array({1.5}, f64)).isnan().item() == 1);
+  CHECK(near(atan(np.array({0.0, 1.0, -1.0}, f64)).tolist(), {0, pi / 4, -pi / 4}, 1e-12));
+  CHECK(near(atanh(np.array({0.0, 0.5}, f64)).tolist(), {0, 0.5 * std::log(3.0)}, 1e-12));
+  CHECK(atanh(np.array({1.0, -1.0}, f64)).tolist() == (V{inf, -inf}));
+  CHECK(atanh(np.array({2.0}, f64)).isnan().item() == 1);
+  CHECK(near(acosh(np.array({1.0, 2.0}, f64)).tolist(), {0, std::log(2 + std::sqrt(3.0))}, 1e-12));
+  CHECK(acosh(np.array({0.5}, f64)).isnan().item() == 1);
+  CHECK(near(asinh(np.array({0.0, 1.0}, f64)).tolist(), {0, std::log(1 + std::sqrt(2.0))}, 1e-12));
+  CHECK(near(sinh(np.array({0.0, 1.0}, f64)).tolist(), {0, (e - 1 / e) / 2}, 1e-12));
+  CHECK(near(cosh(np.array({0.0, 1.0}, f64)).tolist(), {1, (e + 1 / e) / 2}, 1e-12));
+  CHECK(near(tan(np.array({0.0, pi / 4}, f64)).tolist(), {0, 1}, 1e-12));
+  // expm1 and log1p are not exp(x) - 1 and log(1 + x): for 1e-10 the naive forms lose about 6 digits, the tolerance here is 1e-12
+  const double tiny = 1e-10;
+  CHECK(expm1(np.array({0.0}, f64)).item() == 0);
+  CHECK(std::fabs(expm1(np.array({tiny}, f64)).item() - (tiny + tiny * tiny / 2)) <= 1e-12 * tiny);
+  CHECK(std::fabs(log1p(np.array({tiny}, f64)).item() - (tiny - tiny * tiny / 2)) <= 1e-12 * tiny);
+  CHECK(log1p(np.array({0.0, -1.0}, f64)).tolist() == (V{0, -inf}));
+  CHECK(log1p(np.array({-2.0}, f64)).isnan().item() == 1);
+  // log2 and log10: exact at the powers, -inf at zero, NaN for negatives
+  CHECK(near(log2(np.array({8.0, 0.5, 1.0}, f64)).tolist(), {3, -1, 0}, 1e-12));
+  CHECK(log2(np.array({0.0}, f64)).item() == -inf && log2(np.array({-1.0}, f64)).isnan().item() == 1);
+  CHECK(near(log10(np.array({1000.0, 0.1}, f64)).tolist(), {3, -1}, 1e-12));
+  CHECK(log10(np.array({0.0}, f64)).item() == -inf);
+  // atan2 takes the quadrant from the signs, and the sign of a zero counts: atan2(-0, -1) is -pi, atan2(0, -1) is pi
+  Tensor yy = np.array({1.0, 0.0, -0.0, -1.0, 1.0}, f64), xx = np.array({1.0, -1.0, -1.0, -1.0, 0.0}, f64);
+  CHECK(near(atan2(yy, xx).tolist(), {pi / 4, pi, -pi, -3 * pi / 4, pi / 2}, 1e-12));
+  CHECK(std::signbit(atan2(np.array({-0.0}, f64), np.array({-1.0}, f64)).item()));
+  CHECK(atan2(np.array({0.0}, f64), np.array({0.0}, f64)).item() == 0);
+  // broadcasting, and an integer pair gives the default float
+  Tensor col = np.array({0, 1}, i32).reshape({2, 1}), row = np.array({1, 0, -1}, i32);
+  CHECK(atan2(col, row).shape() == (Shape{2, 3}) && atan2(col, row).dtype() == f32);
+  CHECK(near(atan2(col, row).tolist(), {0, 0, pi, pi / 4, pi / 2, 3 * pi / 4}, 1e-6));
+  CHECK_THROWS(atan2(np.array({1.0, 2.0}, f64), np.array({1.0, 2.0, 3.0}, f64)));
+  // dtypes: ints compute in the default float (as sin does), round keeps an integer, and float64 stays float64
+  CHECK(sinh(np.array({1, 2}, i32)).dtype() == f32 && acos(np.array({0, 1}, i32)).dtype() == f32);
+  CHECK(round(np.array({1, -2}, i32)).dtype() == i32 && round(np.array({1, -2}, i32)).str() == "[1, -2]");
+  CHECK(round(np.array({1.5}, f64)).dtype() == f64 && log2(np.array({1.0}, f64)).dtype() == f64);
+  // round is half to even, and -0.5 rounds to a negative zero (numpy keeps the sign)
+  Tensor rr = np.array({0.5, 1.5, 2.5, -0.5, -1.5, -2.5, 2.4, 2.6, 3.0}, f64);
+  CHECK(round(rr).tolist() == (V{0, 2, 2, 0, -2, -2, 2, 3, 3}));
+  CHECK(std::signbit(round(np.array({-0.5}, f64)).item()) && !std::signbit(round(np.array({0.5}, f64)).item()));
+  CHECK(round(np.array({0.5, 1.5, 2.5}, f32)).str() == "[0., 2., 2.]");
+  CHECK(round(np.array({inf, -inf}, f64)).tolist() == (V{inf, -inf}));
+  // logaddexp: log(exp(a) + exp(b)) with no overflow, and the infinite and NaN cases
+  CHECK(near(logaddexp(np.array({0.0, 1.0, 1000.0, -1000.0}, f64), np.array({0.0, 2.0, 1000.0, 0.0}, f64)).tolist(),
+             {ln2, 2 + std::log1p(std::exp(-1.0)), 1000 + ln2, 0}, 1e-12));
+  V la = logaddexp(np.array({inf, -inf, -inf, inf, nan}, f64), np.array({1.0, -inf, inf, -inf, 1.0}, f64)).tolist();
+  CHECK(la[0] == inf && la[1] == -inf && la[2] == inf && la[3] == inf && std::isnan(la[4]));
+  Tensor li = logaddexp(np.array({0}, i32), np.array({0}, i32));
+  CHECK(li.dtype() == f32 && near(li.tolist(), {ln2}, 1e-6));
+  // the bitwise shifts (numpy's rule): a count below 0 or at least the width gives 0, and a right shift of a negative value gives -1
+  Tensor sa = np.array({1, -1, 1, 1, 5, 3}, i32), sb = np.array({3, 2, 31, 32, -1, 0}, i32);
+  CHECK(bitwise_left_shift(sa, sb).tolist() == (V{8, -4, -2147483648.0, 0, 0, 3}));
+  Tensor ra = np.array({-8, -1, 8, 8, -8, 8}, i32), rb = np.array({1, 5, 5, -1, 40, 40}, i32);
+  CHECK(bitwise_right_shift(ra, rb).tolist() == (V{-4, -1, 0, 0, -1, 0}));
+  CHECK(bitwise_left_shift(np.array({1}, i64), np.array({40}, i64)).item() == 1099511627776.0);
+  CHECK(bitwise_left_shift(np.array({1}, i64), np.array({63}, i64)).item() == -9223372036854775808.0);
+  CHECK(bitwise_right_shift(np.array({-1}, i64), np.array({63}, i64)).item() == -1);
+  CHECK(bitwise_left_shift(np.array({1}, i32), np.array({4}, i64)).dtype() == i64);
+  CHECK(bitwise_left_shift(np.array({1, 2}, i32).reshape({2, 1}), np.array({0, 1, 2}, i32)).str() == "[[1, 2, 4], [2, 4, 8]]");
+  CHECK_THROWS(bitwise_left_shift(np.array({1}, bl), np.array({1}, bl)));    // bool is not an integer here
+  CHECK_THROWS(bitwise_right_shift(np.array({1.0}, f32), np.array({1}, i32)));
+  CHECK_THROWS(bitwise_right_shift(np.array({1}, i32), np.array({1.0}, f32)));
+
+  // the ONNX operators round trip (the values are read back and lowered again, as the other functions are); the others have no ONNX
+  // operator, so the graph cannot be exported, and the reader refuses a node of those names
+  Tensor ex = np.placeholder("x", {2, 3}), ix = np.placeholder("i", {2, 3}, i32);
+  Array exa = Array::from_doubles(f32, {2, 3}, {-1.0, -0.5, 0.25, 0.5, 1.0, 2.5});
+  Array ixa = Array::from_doubles(i32, {2, 3}, {2, -3, 4, 5, 0, 1});
+  onnx_round_trip(np, {{"ac", acos(ex)}, {"as", asinh(ex)}, {"at", atan(ex)}, {"rd", round(ex)}, {"tn", tan(ex)}, {"ch", cosh(ex)}},
+                  {{"x", exa}});
+  CHECK_THROWS(np.to_onnx({{"l1p", log1p(ex)}}));
+  CHECK_THROWS(np.to_onnx({{"lg2", log2(ex)}}));
+  CHECK_THROWS(np.to_onnx({{"at2", atan2(ex, ex)}}));
+  CHECK_THROWS(np.to_onnx({{"shl", bitwise_left_shift(ix, ix)}}));
+  CHECK_THROWS(np.to_onnx({{"lae", logaddexp(ex, ex)}}));   // through Log1p
+  std::string bytes = np.to_onnx({{"acos_only", acos(ex)}});
+  const size_t at = bytes.find("Acos");
+  CHECK(at != std::string::npos);
+  if (at != std::string::npos) {   // the same length as Log2, so the protobuf lengths stay valid
+    bytes.replace(at, 4, "Log2");
+    CHECK_THROWS(hir::Graph::from_onnx(bytes));
+  }
+  hir::Graph hg;
+  int hx = hg.add_input("x", f32, {2});
+  CHECK(hg.value(hg.add_node("Log1p", {hx})).dtype == f32);   // the hir computes it; only the ONNX file cannot hold it
+  CHECK(!hir::is_onnx_operator("Log1p") && hir::is_onnx_operator("Acos") && hir::is_onnx_operator("Round"));
+}
+
 int main(int argc, char** argv) {
   numpy_api();
   default_dtypes();
@@ -877,6 +978,7 @@ int main(int argc, char** argv) {
   argmax_and_argmin();
   tile_and_take();
   array_api_functions();
+  elementwise_functions();
   graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);

@@ -104,6 +104,22 @@ class Tensor {
   Tensor sin() const;
   Tensor cos() const;
   Tensor tanh() const;
+  // The Array API's elementwise functions (docs/notes/array-api.md): floats out. An integer input is converted to the default float,
+  // as for sin; round keeps an integer tensor as it is (numpy does), and rounds half to even otherwise.
+  Tensor acos() const;
+  Tensor acosh() const;
+  Tensor asin() const;
+  Tensor asinh() const;
+  Tensor atan() const;
+  Tensor atanh() const;
+  Tensor cosh() const;
+  Tensor sinh() const;
+  Tensor tan() const;
+  Tensor expm1() const;
+  Tensor log1p() const;
+  Tensor log2() const;
+  Tensor log10() const;
+  Tensor round() const;
   Tensor sigmoid() const;
   Tensor relu() const;
   Tensor square() const;
@@ -209,6 +225,15 @@ Tensor remainder(const Tensor& a, const Tensor& b);     // ints only; the sign o
 Tensor matmul(const Tensor& a, const Tensor& b);        // 1-D and N-D like numpy, batch dimensions broadcast
 inline Tensor dot(const Tensor& a, const Tensor& b) { return matmul(a, b); }  // for 1-D and 2-D operands
 Tensor logical_not(const Tensor& a);
+// atan2(y, x) for floats (the promoted dtype; an integer pair gives the default float). Operands broadcast, as the operators do.
+Tensor atan2(const Tensor& y, const Tensor& x);
+// log(exp(a) + exp(b)) without overflow: computed as max + log1p(exp(-|a - b|)), with the infinite cases handled (-inf and -inf give
+// -inf, +inf and anything give +inf). Floats. Built from Log1p, so a graph that has it cannot be exported to ONNX.
+Tensor logaddexp(const Tensor& a, const Tensor& b);
+// a << b and a >> b for integers (numpy's bitwise_left_shift and bitwise_right_shift): a count below 0 or at least the width gives 0,
+// and a right shift of a negative value gives -1. Bool and floats are an error. Not operators: C++'s << and >> are the stream ones.
+Tensor bitwise_left_shift(const Tensor& a, const Tensor& b);
+Tensor bitwise_right_shift(const Tensor& a, const Tensor& b);
 // a ** b (C++ has no ** operator). The dtype is the promoted one, and a Python-style scalar is weak as in the operators. Floats follow
 // C99 pow, the values numpy gives; integers wrap, and a negative integer exponent is not an error (see docs/notes/uop.md).
 Tensor pow(const Tensor& a, const Tensor& b);
@@ -228,6 +253,20 @@ inline Tensor log(const Tensor& a) { return a.log(); }
 inline Tensor sqrt(const Tensor& a) { return a.sqrt(); }
 inline Tensor tanh(const Tensor& a) { return a.tanh(); }
 inline Tensor abs(const Tensor& a) { return a.abs(); }
+inline Tensor acos(const Tensor& a) { return a.acos(); }
+inline Tensor acosh(const Tensor& a) { return a.acosh(); }
+inline Tensor asin(const Tensor& a) { return a.asin(); }
+inline Tensor asinh(const Tensor& a) { return a.asinh(); }
+inline Tensor atan(const Tensor& a) { return a.atan(); }
+inline Tensor atanh(const Tensor& a) { return a.atanh(); }
+inline Tensor cosh(const Tensor& a) { return a.cosh(); }
+inline Tensor sinh(const Tensor& a) { return a.sinh(); }
+inline Tensor tan(const Tensor& a) { return a.tan(); }
+inline Tensor expm1(const Tensor& a) { return a.expm1(); }
+inline Tensor log1p(const Tensor& a) { return a.log1p(); }
+inline Tensor log2(const Tensor& a) { return a.log2(); }
+inline Tensor log10(const Tensor& a) { return a.log10(); }
+inline Tensor round(const Tensor& a) { return a.round(); }
 inline Tensor softmax(const Tensor& a, int64_t axis = -1) { return a.softmax(axis); }
 
 // ---- the Python Array API standard, and the numpy functions it is compared with (docs/notes/array-api.md has the full table) ----

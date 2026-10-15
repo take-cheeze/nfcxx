@@ -23,8 +23,9 @@ const char* name(DType d) {
 bool is_float(DType d) { return d == DType::Float32 || d == DType::Float64; }
 bool is_int(DType d) { return d == DType::Int32 || d == DType::Int64; }
 
-static const char* const kOpNames[] = {"CONST", "VAR", "NEG", "SQRT", "EXP2", "LOG2", "SIN", "ADD", "SUB",
-                                       "MUL",   "IDIV", "FDIV", "MOD", "MAX", "CMPLT", "CMPNE", "AND", "OR",
+static const char* const kOpNames[] = {"CONST", "VAR", "NEG", "SQRT", "EXP2", "LOG2", "SIN", "ACOS", "ACOSH", "ASIN",
+                                       "ASINH", "ATAN", "ATANH", "COSH", "SINH", "TAN", "EXPM1", "LOG1P", "LOG10", "ROUND",
+                                       "ADD", "SUB", "MUL",   "IDIV", "FDIV", "MOD", "MAX", "ATAN2", "SHL", "SHR", "CMPLT", "CMPNE", "AND", "OR",
                                        "XOR",   "WHERE", "CAST",  "RESHAPE", "PERMUTE", "EXPAND", "REDUCE_SUM", "REDUCE_MAX", "SHRINK", "PAD", "FLIP"};
 static_assert(sizeof(kOpNames) / sizeof(kOpNames[0]) == static_cast<size_t>(Op::Count_), "op name table");
 const char* name(Op op) { return kOpNames[static_cast<int>(op)]; }
@@ -33,6 +34,8 @@ int arity(Op op) {
   switch (op) {
     case Op::Const: case Op::Var: return 0;
     case Op::Neg: case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: case Op::Cast:
+    case Op::Acos: case Op::Acosh: case Op::Asin: case Op::Asinh: case Op::Atan: case Op::Atanh: case Op::Cosh: case Op::Sinh:
+    case Op::Tan: case Op::Expm1: case Op::Log1p: case Op::Log10: case Op::Round:
     case Op::Reshape: case Op::Permute: case Op::Expand: case Op::ReduceSum: case Op::ReduceMax:
     case Op::Shrink: case Op::Pad: case Op::Flip: return 1;
     case Op::Where: return 3;
@@ -191,7 +194,11 @@ static DType infer(Op op, const std::vector<const UOp*>& src) {
   DType d = src[0]->dtype;
   switch (op) {
     case Op::Neg: if (d == DType::Bool) bad("not defined for bool"); return d;
-    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: if (!is_float(d)) bad("float only"); return d;
+    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin:
+    case Op::Acos: case Op::Acosh: case Op::Asin: case Op::Asinh: case Op::Atan: case Op::Atanh: case Op::Cosh: case Op::Sinh:
+    case Op::Tan: case Op::Expm1: case Op::Log1p: case Op::Log10: case Op::Round:
+      if (!is_float(d)) bad("float only");
+      return d;
     case Op::Where:
       if (d != DType::Bool) bad("the condition must be bool");
       if (src[1]->dtype != src[2]->dtype) bad("the arms differ in dtype");
@@ -201,8 +208,8 @@ static DType infer(Op op, const std::vector<const UOp*>& src) {
   if (src[1]->dtype != d) bad("sources differ in dtype");
   switch (op) {
     case Op::Add: case Op::Sub: case Op::Mul: case Op::Max: if (d == DType::Bool) bad("not defined for bool"); return d;
-    case Op::IDiv: case Op::Mod: if (!is_int(d)) bad("integers only"); return d;
-    case Op::FDiv: if (!is_float(d)) bad("floats only"); return d;
+    case Op::IDiv: case Op::Mod: case Op::Shl: case Op::Shr: if (!is_int(d)) bad("integers only"); return d;
+    case Op::FDiv: case Op::Atan2: if (!is_float(d)) bad("floats only"); return d;
     case Op::CmpLt: case Op::CmpNe: return DType::Bool;
     case Op::And: case Op::Or: case Op::Xor: if (is_float(d)) bad("not defined for floats"); return d;
     default: break;
@@ -406,6 +413,28 @@ Scalar eval_op(Op op, DType out, const std::vector<Scalar>& a) {
     case Op::Exp2: return Scalar::from_double(out, std::exp2(a[0].f));
     case Op::Log2: return Scalar::from_double(out, std::log2(a[0].f));
     case Op::Sin: return Scalar::from_double(out, std::sin(a[0].f));
+    case Op::Acos: return Scalar::from_double(out, std::acos(a[0].f));
+    case Op::Acosh: return Scalar::from_double(out, std::acosh(a[0].f));
+    case Op::Asin: return Scalar::from_double(out, std::asin(a[0].f));
+    case Op::Asinh: return Scalar::from_double(out, std::asinh(a[0].f));
+    case Op::Atan: return Scalar::from_double(out, std::atan(a[0].f));
+    case Op::Atanh: return Scalar::from_double(out, std::atanh(a[0].f));
+    case Op::Cosh: return Scalar::from_double(out, std::cosh(a[0].f));
+    case Op::Sinh: return Scalar::from_double(out, std::sinh(a[0].f));
+    case Op::Tan: return Scalar::from_double(out, std::tan(a[0].f));
+    case Op::Expm1: return Scalar::from_double(out, std::expm1(a[0].f));
+    case Op::Log1p: return Scalar::from_double(out, std::log1p(a[0].f));
+    case Op::Log10: return Scalar::from_double(out, std::log10(a[0].f));
+    case Op::Round: return Scalar::from_double(out, std::nearbyint(a[0].f));   // ties to even under the default rounding mode
+    case Op::Atan2: return Scalar::from_double(out, std::atan2(a[0].f, a[1].f));
+    case Op::Shl: case Op::Shr: {
+      // numpy's rule: a count below 0 or at least the width gives 0 for a left shift, and for a right shift the sign fill (0 or -1).
+      // Shr is arithmetic: the values are sign extended, and C++20 defines >> on negative values as arithmetic.
+      const int64_t width = out == DType::Int32 ? 32 : 64, count = a[1].i;
+      if (op == Op::Shl)
+        return Scalar::from_int(out, count < 0 || count >= width ? 0 : static_cast<int64_t>(static_cast<uint64_t>(a[0].i) << count));
+      return Scalar::from_int(out, count < 0 || count >= width ? (a[0].i < 0 ? -1 : 0) : a[0].i >> count);
+    }
     case Op::Add: return fl ? Scalar::from_double(out, a[0].f + a[1].f) : Scalar::from_int(out, wrap_add(a[0].i, a[1].i));
     case Op::Sub: return fl ? Scalar::from_double(out, a[0].f - a[1].f) : Scalar::from_int(out, wrap_sub(a[0].i, a[1].i));
     case Op::Mul: return fl ? Scalar::from_double(out, a[0].f * a[1].f) : Scalar::from_int(out, wrap_mul(a[0].i, a[1].i));

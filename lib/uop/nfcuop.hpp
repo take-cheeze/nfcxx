@@ -39,7 +39,12 @@ bool is_int(DType d);  // Int32 or Int64 (Bool is neither)
 enum class Op : uint8_t {
   Const, Var,                                          // leaves
   Neg, Sqrt, Exp2, Log2, Sin,                          // unary; all but Neg are float only
+  Acos, Acosh, Asin, Asinh, Atan, Atanh, Cosh, Sinh, Tan,  // unary, float only: libm's functions in double, rounded to the dtype
+  Expm1, Log1p, Log10,                                 // unary, float only (libm)
+  Round,                                               // unary, float only: round half to even (nearbyint in the default mode)
   Add, Sub, Mul, IDiv, FDiv, Mod, Max,                 // binary, both sources and the result of one dtype
+  Atan2,                                               // binary, float only: atan2(src0, src1) (y, x)
+  Shl, Shr,                                            // binary, integers only: src0 shifted by src1; Shr is arithmetic (see eval_op)
   CmpLt, CmpNe,                                        // binary, result Bool
   And, Or, Xor,                                        // binary, ints and Bool
   Where,                                               // (Bool, a, b) -> a or b
@@ -133,6 +138,22 @@ class Graph {
   const UOp* exp2(const UOp* a) { return alu(Op::Exp2, {a}); }
   const UOp* log2(const UOp* a) { return alu(Op::Log2, {a}); }
   const UOp* sin(const UOp* a) { return alu(Op::Sin, {a}); }
+  const UOp* acos(const UOp* a) { return alu(Op::Acos, {a}); }
+  const UOp* acosh(const UOp* a) { return alu(Op::Acosh, {a}); }
+  const UOp* asin(const UOp* a) { return alu(Op::Asin, {a}); }
+  const UOp* asinh(const UOp* a) { return alu(Op::Asinh, {a}); }
+  const UOp* atan(const UOp* a) { return alu(Op::Atan, {a}); }
+  const UOp* atanh(const UOp* a) { return alu(Op::Atanh, {a}); }
+  const UOp* cosh(const UOp* a) { return alu(Op::Cosh, {a}); }
+  const UOp* sinh(const UOp* a) { return alu(Op::Sinh, {a}); }
+  const UOp* tan(const UOp* a) { return alu(Op::Tan, {a}); }
+  const UOp* expm1(const UOp* a) { return alu(Op::Expm1, {a}); }
+  const UOp* log1p(const UOp* a) { return alu(Op::Log1p, {a}); }
+  const UOp* log10(const UOp* a) { return alu(Op::Log10, {a}); }
+  const UOp* round(const UOp* a) { return alu(Op::Round, {a}); }
+  const UOp* atan2(const UOp* y, const UOp* x) { return alu(Op::Atan2, {y, x}); }
+  const UOp* shl(const UOp* a, const UOp* b) { return alu(Op::Shl, {a, b}); }
+  const UOp* shr(const UOp* a, const UOp* b) { return alu(Op::Shr, {a, b}); }
   const UOp* add(const UOp* a, const UOp* b) { return alu(Op::Add, {a, b}); }
   const UOp* sub(const UOp* a, const UOp* b) { return alu(Op::Sub, {a, b}); }
   const UOp* mul(const UOp* a, const UOp* b) { return alu(Op::Mul, {a, b}); }

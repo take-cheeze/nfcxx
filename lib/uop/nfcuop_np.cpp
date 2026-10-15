@@ -352,6 +352,26 @@ Tensor Tensor::sin() const { Tensor x = to_float(*this); return node(x, "Sin", {
 Tensor Tensor::cos() const { Tensor x = to_float(*this); return node(x, "Cos", {x.id()}); }
 Tensor Tensor::tanh() const { Tensor x = to_float(*this); return node(x, "Tanh", {x.id()}); }
 Tensor Tensor::sigmoid() const { Tensor x = to_float(*this); return node(x, "Sigmoid", {x.id()}); }
+Tensor Tensor::acos() const { Tensor x = to_float(*this); return node(x, "Acos", {x.id()}); }
+Tensor Tensor::acosh() const { Tensor x = to_float(*this); return node(x, "Acosh", {x.id()}); }
+Tensor Tensor::asin() const { Tensor x = to_float(*this); return node(x, "Asin", {x.id()}); }
+Tensor Tensor::asinh() const { Tensor x = to_float(*this); return node(x, "Asinh", {x.id()}); }
+Tensor Tensor::atan() const { Tensor x = to_float(*this); return node(x, "Atan", {x.id()}); }
+Tensor Tensor::atanh() const { Tensor x = to_float(*this); return node(x, "Atanh", {x.id()}); }
+Tensor Tensor::cosh() const { Tensor x = to_float(*this); return node(x, "Cosh", {x.id()}); }
+Tensor Tensor::sinh() const { Tensor x = to_float(*this); return node(x, "Sinh", {x.id()}); }
+Tensor Tensor::tan() const { Tensor x = to_float(*this); return node(x, "Tan", {x.id()}); }
+Tensor Tensor::expm1() const { Tensor x = to_float(*this); return node(x, "Expm1", {x.id()}); }
+Tensor Tensor::log1p() const { Tensor x = to_float(*this); return node(x, "Log1p", {x.id()}); }
+Tensor Tensor::log2() const { Tensor x = to_float(*this); return node(x, "Log2", {x.id()}); }
+Tensor Tensor::log10() const { Tensor x = to_float(*this); return node(x, "Log10", {x.id()}); }
+// numpy keeps an integer's dtype here (round(int) is the same integer); a bool gives default_float, as floor does
+Tensor Tensor::round() const {
+  check(*this);
+  if (is_int(dtype())) return *this;
+  Tensor x = to_float(*this);
+  return node(x, "Round", {x.id()});
+}
 
 Tensor Tensor::relu() const {
   check(*this);
@@ -615,6 +635,36 @@ Tensor logical_not(const Tensor& a) {
   check(a);
   return a.dtype() == DType::Bool ? bool_not(a) : node("Equal", {a, sconst(a, 0)});
 }
+
+// Floats of the promoted dtype (an integer pair gives the default float); the ONNX-style operator broadcasts.
+Tensor atan2(const Tensor& y, const Tensor& x) {
+  same_session(y, x);
+  DType dt = promote(y.dtype(), x.dtype());
+  if (!is_float(dt)) dt = y.session().default_float;
+  return node("Atan2", {cast_to(y, dt), cast_to(x, dt)});
+}
+
+Tensor logaddexp(const Tensor& a, const Tensor& b) {
+  same_session(a, b);
+  Tensor x = to_float(a), y = to_float(b);
+  DType dt = promote(x.dtype(), y.dtype());
+  x = cast_to(x, dt);
+  y = cast_to(y, dt);
+  // max + log1p(exp(-|x - y|)) is exact in the finite cases; where the max is infinite it is returned as it is, because x - y is
+  // then NaN (for -inf and -inf, and +inf and +inf). A NaN operand reaches the result through x - y.
+  Tensor m = maximum(x, y);
+  Tensor r = m + (-(x - y).abs()).exp().log1p();
+  return where(m.isinf(), m, r);
+}
+
+// numpy's bitwise_left_shift and bitwise_right_shift: integers only, promoted like the operators
+static Tensor int_shift(const char* op, const char* what, const Tensor& a, const Tensor& b) {
+  same_session(a, b);
+  if (!is_int(a.dtype()) || !is_int(b.dtype())) throw Error(std::string("np: ") + what + " takes integer operands only");
+  return node(op, {cast_to(a, promote(a.dtype(), b.dtype())), cast_to(b, promote(a.dtype(), b.dtype()))});
+}
+Tensor bitwise_left_shift(const Tensor& a, const Tensor& b) { return int_shift("BitwiseLeftShift", "bitwise_left_shift", a, b); }
+Tensor bitwise_right_shift(const Tensor& a, const Tensor& b) { return int_shift("BitwiseRightShift", "bitwise_right_shift", a, b); }
 
 Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis) {
   if (ts.empty()) throw Error("np: concatenate needs at least one tensor");
