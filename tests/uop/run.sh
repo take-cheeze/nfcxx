@@ -28,7 +28,7 @@
 #                               thread takes the subprocess path; an import failure gives the Python traceback). Prints SKIP when tinygrad
 #                               cannot be imported
 #   - tests/uop/test_grad.cpp   reverse-mode autodiff by onnxsim (nfcuop_onnxgrad.hpp, docs/notes/uop-autodiff.md): finite differences in
-#                               float64, exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
+#                               float64 (also of the forward operators Gemm, Gather, Erf, Conv, pooling and the normalizations of hir), exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
 #                               backend equal to the interpreter bit for bit; it also writes models (a loss and its gradients) for
 #                               onnx_check.py. Needs onnxsim (build/onnxsim/libnfconnxsim.so from scripts/setup-onnxsim.sh, else python3
 #                               with onnx and onnxsim==0.8.1) and prints SKIP without it
