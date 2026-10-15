@@ -180,18 +180,29 @@ def defined_labels(asm)
 end
 
 extern_inline = true
+# --sym-prefix=P: the target's prefix on every label (QBE's Apple targets prefix "_", so a Mach-O label is __Z5f for the C name
+# _Z5f). The directive line names the label the assembly defines, so the names are looked up with the prefix. Empty elsewhere.
+SYM_PREFIX_OPT = "--sym-prefix="
+prefix = ""
+# Mach-O (the prefixed mode): the Apple assembler rejects ".weak", and a weak definition is ".weak_definition".
+weak_directive = ".weak "
 args = ARGV.dup
-if args.first == "--c-input"
-  extern_inline = false
-  args.shift
+while args.first && args.first[0, 2] == "--"
+  opt = args.shift
+  if opt == "--c-input"
+    extern_inline = false
+  elsif opt[0, SYM_PREFIX_OPT.size] == SYM_PREFIX_OPT
+    prefix = opt[SYM_PREFIX_OPT.size, opt.size - SYM_PREFIX_OPT.size]
+    weak_directive = ".weak_definition "
+  end
 end
 c_path, asm_path = args
 text = File.open(c_path, "rb") { |f| f.read }
 asm = File.open(asm_path, "rb") { |f| f.read }
 defs = defined_labels(asm)
-weak = weak_names(text, extern_inline).select { |n| defs[n] }.sort
+weak = weak_names(text, extern_inline).map { |n| prefix + n }.select { |n| defs[n] }.sort
 unless weak.empty?
   File.open(asm_path, "ab") do |f|
-    f.write("\n" + weak.map { |n| ".weak #{n}\n" }.join)
+    f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join)
   end
 end
