@@ -1361,6 +1361,8 @@ Tensor operator!=(const Tensor& a, const Tensor& b) { return bool_not(compare("E
 Tensor operator&(const Tensor& a, const Tensor& b) { return logic("And", "BitwiseAnd", a, b); }
 Tensor operator|(const Tensor& a, const Tensor& b) { return logic("Or", "BitwiseOr", a, b); }
 Tensor operator^(const Tensor& a, const Tensor& b) { return logic("Xor", "BitwiseXor", a, b); }
+Tensor operator<<(const Tensor& a, const Tensor& b) { return bitwise_left_shift(a, b); }
+Tensor operator>>(const Tensor& a, const Tensor& b) { return bitwise_right_shift(a, b); }
 
 }  // namespace np
 }  // namespace nfcuop

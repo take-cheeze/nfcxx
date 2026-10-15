@@ -230,8 +230,8 @@ Tensor atan2(const Tensor& y, const Tensor& x);
 // log(exp(a) + exp(b)) without overflow: computed as max + log1p(exp(-|a - b|)), with the infinite cases handled (-inf and -inf give
 // -inf, +inf and anything give +inf). Floats. Built from Log1p, so a graph that has it cannot be exported to ONNX.
 Tensor logaddexp(const Tensor& a, const Tensor& b);
-// a << b and a >> b for integers (numpy's bitwise_left_shift and bitwise_right_shift): a count below 0 or at least the width gives 0,
-// and a right shift of a negative value gives -1. Bool and floats are an error. Not operators: C++'s << and >> are the stream ones.
+// a << b and a >> b for integers (numpy's bitwise_left_shift and bitwise_right_shift; the operators below are the same functions): a count
+// below 0 or at least the width gives 0, and a right shift of a negative value gives -1. Bool and floats are an error.
 Tensor bitwise_left_shift(const Tensor& a, const Tensor& b);
 Tensor bitwise_right_shift(const Tensor& a, const Tensor& b);
 // a ** b (C++ has no ** operator). The dtype is the promoted one, and a Python-style scalar is weak as in the operators. Floats follow
@@ -384,6 +384,8 @@ Tensor operator!=(const Tensor& a, const Tensor& b);
 Tensor operator&(const Tensor& a, const Tensor& b);
 Tensor operator|(const Tensor& a, const Tensor& b);
 Tensor operator^(const Tensor& a, const Tensor& b);
+Tensor operator<<(const Tensor& a, const Tensor& b);  // integers only, as bitwise_left_shift
+Tensor operator>>(const Tensor& a, const Tensor& b);  // integers only, as bitwise_right_shift
 
 namespace detail {
 Tensor lift(const Tensor& like, double v, bool integral);  // a scalar tensor for `v` next to `like`

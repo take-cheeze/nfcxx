@@ -943,6 +943,17 @@ static void elementwise_functions() {
   CHECK_THROWS(bitwise_left_shift(np.array({1}, bl), np.array({1}, bl)));    // bool is not an integer here
   CHECK_THROWS(bitwise_right_shift(np.array({1.0}, f32), np.array({1}, i32)));
   CHECK_THROWS(bitwise_right_shift(np.array({1}, i32), np.array({1.0}, f32)));
+  // the operators << and >> are the same functions
+  CHECK(((sa << sb).tolist() == (V{8, -4, -2147483648.0, 0, 0, 3})));
+  CHECK(((ra >> rb).tolist() == (V{-4, -1, 0, 0, -1, 0})));
+  CHECK(((np.array({1}, i64) << np.array({40}, i64)).item() == 1099511627776.0));
+  CHECK(((np.array({-1}, i64) >> np.array({63}, i64)).item() == -1));
+  CHECK(((np.array({1}, i32) << np.array({4}, i64)).dtype() == i64));
+  CHECK(((np.array({1, 2}, i32).reshape({2, 1}) << np.array({0, 1, 2}, i32)).str() == "[[1, 2, 4], [2, 4, 8]]"));
+  CHECK(((ra >> rb).str() == bitwise_right_shift(ra, rb).str()));
+  CHECK_THROWS((void)(np.array({1}, bl) << np.array({1}, bl)));   // bool is not an integer here, as the function
+  CHECK_THROWS((void)(np.array({1.0}, f32) >> np.array({1}, i32)));
+  CHECK_THROWS((void)(np.array({1}, i32) << np.array({1.0}, f32)));
 
   // the ONNX operators round trip (the values are read back and lowered again, as the other functions are); the others have no ONNX
   // operator, so the graph cannot be exported, and the reader refuses a node of those names

@@ -125,9 +125,9 @@ Array r = np.eval(y, {{"x", some_array}});         // lowers to UOps, symbolic()
 Constructors: `array`, `array2d`, `from`, `scalar`, `zeros`, `ones`, `full`, `arange`, `linspace`, `eye`, `placeholder`. Shape: `reshape` (with
 `-1`), `transpose`, `T`, `swapaxes`, `flatten`, `squeeze`, `expand_dims`, `broadcast_to`, `astype`, `slice(axis, start, stop, step)` (`None`
 omits a bound), `at(index, axis)`, `flip`, `concatenate`, `stack`. Reductions `sum mean max min var stddev` (axes, negative axes, `keepdims`).
-Operators `+ - * / % < > <= >= == != & | ^` with numpy broadcasting and scalars on either side, `where maximum minimum clip abs sqrt exp log sin cos
+Operators `+ - * / % < > <= >= == != & | ^ << >>` with numpy broadcasting and scalars on either side (`<<` and `>>` are the shifts, integers only, as `bitwise_left_shift` and `bitwise_right_shift`; no scalar form yet), `where maximum minimum clip abs sqrt exp log sin cos
 tanh sigmoid relu square reciprocal softmax log_softmax floor_divide matmul/dot logical_not`; `pow(a, b)` (C++ has no `**`; scalars on either side),
-`floor ceil isnan isinf` (members), `prod cumsum argmax argmin` (members, axis None flattens), `tile(a, reps)` and `take(a, indices, axis)`.
+`floor ceil isnan isinf` (members), the Array API elementwise functions `acos acosh asin asinh atan atanh cosh sinh tan expm1 log1p log2 log10 round` (members and free functions) and `atan2`, `logaddexp` (free functions); `expm1 log1p log2 log10 atan2 logaddexp` and the shifts are not ONNX operators, so `to_onnx` refuses a graph that uses them, `prod cumsum argmax argmin` (members, axis None flattens), `tile(a, reps)` and `take(a, indices, axis)`.
 Realization: `numpy() tolist() item() str()`;
 `dump()` shows the ONNX-style graph, `dump_uops()` the UOps it lowers to. Small constants (scalars, shapes, axes) are shared, and a cast of a
 small constant is folded into the constant, so `a * 2` is one `Mul` and one scalar initializer in the model.
@@ -187,11 +187,11 @@ Where it differs, on purpose:
 - **`floor` and `ceil` of a bool** give `default_float` (numpy: float16, which nfcuop does not have); of an int they are the int, as in numpy.
 
 Not there (numpy features a numpy user would reach for next): fancy and boolean-mask indexing, `...` and `None` in an index (use `slice`, `at`,
-`expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `unique`, `nonzero`, `round`, `pad`,
+`expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `unique`, `nonzero`, `pad`,
 `outer`/`linalg`, complex and unsigned/small-int/float16 dtypes, strings and structured arrays, and anything that needs a data-dependent output shape.
 The Array API functions (`sort`, `argsort`, `einsum`, `tensordot`, `roll`, `tril`, `searchsorted`, ...) are in the table of `docs/notes/array-api.md`. Most of these are a new ONNX operator in `hir` plus its lowering in `ut`; data-dependent shapes
 (`unique`, boolean masks) are outside a static-shape design. (Done since: `pow`, `floor`, `ceil`, `isnan`, `isinf`, `cumsum`, `prod`, `argmax`,
-`argmin`, `tile`, `take`.)
+`argmin`, `tile`, `take`, the elementwise functions listed above, and the `<<` and `>>` shifts.)
 A realistic target is "the subset of numpy that a model needs": array creation, broadcasting arithmetic, reductions, shape ops, slicing, matmul, the
 activation functions. Beyond that numpy is a much larger library, and a port would stay a subset.
 
