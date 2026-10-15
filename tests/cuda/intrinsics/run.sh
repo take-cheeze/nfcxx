@@ -101,4 +101,15 @@ pass device_const_scalar.cu "device const scalar: no error, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
 refuse refuse_cub.cu "cub::DeviceScan at line"
+refuse refuse_host_static.cu "host variable table read in device code"
+pass static_const_scalar.cu "static const scalar: no error, 0 mismatches"
+# Mutant: the device sees K = 4 while the host expects 3, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$root/lib/cuda/host" -I"$cuda/include" static_const_scalar_mutant.cu -o "$out/scm.o" > "$out/scm.log" 2>&1 \
+   && "$root/nfcxx" "$out/scm.o" -L"$cuda/lib64" -lcudart -o "$out/scm" >> "$out/scm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/scm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant static_const_scalar: caught: $run"
+else
+  echo "FAIL static_const_scalar: the mutant was not caught"; fail=1
+fi
 exit $fail
