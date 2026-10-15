@@ -1945,6 +1945,11 @@ static bool template_default_value(const std::string &text, const std::string &k
       out = v;
       return true;
     }
+    // The bool literals (`bool transposed = false`) are their own values.
+    if (v == "true" || v == "false") {
+      out = v;
+      return true;
+    }
     if (!v.empty() && ident_c((unsigned char)v[0])) return file_constant_value(text, v, out);
     return false;
   }
@@ -2148,9 +2153,14 @@ bool deduce_call_targs(const std::string &text, const std::string &name, long po
   }
   out.clear();
   for (const auto &p : head.names) {
-    if (!found.count(p))
-      refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
-             ", so it cannot be deduced");
+    if (!found.count(p)) {
+      // A parameter no argument gives takes its default, as C++ does (`bool transposed = false`).
+      std::string dv;
+      if (!template_default_value(text, name, p, dv))
+        refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
+               ", so it cannot be deduced");
+      found[p] = dv;
+    }
     out.push_back(found[p]);
   }
   return true;
@@ -2180,9 +2190,14 @@ std::map<std::string, std::string> deduce_missing_targs(const std::string &text,
     }
   }
   for (const auto &p : missing)
-    if (!found.count(p))
-      refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
-             ", so it cannot be deduced");
+    if (!found.count(p)) {
+      // As deduce_call_targs: a parameter no argument gives takes its default.
+      std::string dv;
+      if (!template_default_value(text, name, p, dv))
+        refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
+               ", so it cannot be deduced");
+      found[p] = dv;
+    }
   return found;
 }
 
