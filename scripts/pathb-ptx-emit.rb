@@ -597,7 +597,7 @@ class Fn
           raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
           # a byval parameter: the address of the caller's copy (the value is read through it)
           ty = head_of(p[3]) == "byval" ? ["ptr", nil] : parse_type(p[3])
-          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
+          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "int" && ty[3]) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
       elsif h == "static" || h == "weak"
@@ -779,6 +779,13 @@ class Fn
       else
         emit("ld.#{mem_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
       end
+    when "load.v"
+      # (load.v TYPE PTR): a volatile load of a 4- or 8-byte integer or a float (the mirror of store.v)
+      ty = parse_type(x[1])
+      raise Refused, "volatile load of #{ty[0]}" unless (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float")
+      expect(dty, ty)
+      addr, aty = operand(x[2])
+      emit("ld.volatile.#{mem_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
     when "bitcast"
       ty = parse_type(x[1])
       expect(dty, ty)
@@ -885,8 +892,13 @@ class Fn
       raise Refused, "#{h} to #{ty[0]}" unless ty[0] == "float"
       expect(dty, ty)
       a, aty = operand(x[2])
-      raise Refused, "#{h} of bool" if aty[0] == "int" && aty[3]
-      emit("cvt.rn.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
+      if aty[0] == "int" && aty[3]
+        # a bool is 0 or 1: the predicate selects 1.0 or 0.0 (the float immediates of the destination's width)
+        one, zero = ty[1] == 8 ? ["0d3FF0000000000000", "0d0000000000000000"] : ["1.0", "0.0"]
+        emit("selp.#{ptx_type(ty)} #{dest}, #{one}, #{zero}, #{reg_of(a, aty)};")
+      else
+        emit("cvt.rn.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
+      end
     when "cf2i"
       ty = parse_type(x[1])
       expect(dty, ty)
@@ -1151,6 +1163,14 @@ class Fn
       else
         emit("st.#{mem_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
       end
+    when "store.v"
+      # (store.v TYPE PTR VALUE): a volatile store of a 4- or 8-byte integer or a float, through a generic pointer
+      ty = parse_type(s[1])
+      raise Refused, "volatile store of #{ty[0]}" unless (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float")
+      addr, aty = operand(s[2])
+      val, vty = operand(s[3])
+      expect(ty, vty)
+      emit("st.volatile.#{mem_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
     when "if"
       cond, cty = operand(s[1])
       raise BadIR, "if condition is not a bool register" unless reg_class(cty) == "p" && cond.start_with?("%")
@@ -1576,8 +1596,18 @@ class Fn
       regs << reg_of(v, aty)
     end
     regs.each_with_index do |r, k|
-      emit("  .param .#{ptx_type(callee.params[k])} #{c}_p#{k};")
-      emit("  st.param.#{ptx_type(callee.params[k])} [#{c}_p#{k}], #{r};")
+      pty = callee.params[k]
+      if pty[0] == "int" && pty[3]
+        # a bool argument is one byte, 0 or 1 (the callee's bool parameter convention, see Fn#prologue)
+        b = fresh("r")
+        emit("selp.u32 #{b}, 1, 0, #{r};")
+        # ptxas does not take 8-bit parameters of device functions: a bool argument is 32 bits (kernels keep one byte)
+        emit("  .param .u32 #{c}_p#{k};")
+        emit("  st.param.u32 [#{c}_p#{k}], #{b};")
+      else
+        emit("  .param .#{ptx_type(pty)} #{c}_p#{k};")
+        emit("  st.param.#{ptx_type(pty)} [#{c}_p#{k}], #{r};")
+      end
     end
     list = (0...regs.length).map { |k| "#{c}_p#{k}" }.join(", ")
     if dest
@@ -1598,7 +1628,14 @@ class Fn
     @params.each_with_index do |ty, k|
       r = fresh(reg_class(ty))
       @regs["%#{k}"] = [r, ty]
-      @prologue << "ld.param.#{ptx_type(ty)} #{r}, [#{@name}_param_#{k}];"
+      if ty[0] == "int" && ty[3]
+        # a bool parameter is one byte (PTX has no predicate parameters): load it, then the predicate is value != 0
+        b = fresh("r")
+        @prologue << "ld.param.#{@kernel ? "u8" : "u32"} #{b}, [#{@name}_param_#{k}];"
+        @prologue << "setp.ne.u32 #{r}, #{b}, 0;"
+      else
+        @prologue << "ld.param.#{ptx_type(ty)} #{r}, [#{@name}_param_#{k}];"
+      end
     end
     @body.each { |s| stmt(s) }
     emit("ret;") unless head_of(@body.last) == "return"
@@ -1615,7 +1652,8 @@ class Fn
     end
     @params.each_with_index do |ty, k|
       comma = k + 1 < @params.length ? "," : ""
-      out << "  .param .#{ptx_type(ty)} #{@name}_param_#{k}#{comma}"
+      bool_type = @kernel ? "u8" : "u32"   # a kernel's bool parameter is the host's one byte; a device function's is 32 bits
+      out << "  .param .#{ty[0] == "int" && ty[3] ? bool_type : ptx_type(ty)} #{@name}_param_#{k}#{comma}"
     end
     out << ")"
     out << "{"
