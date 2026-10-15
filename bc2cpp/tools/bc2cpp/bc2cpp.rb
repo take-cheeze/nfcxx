@@ -29,6 +29,7 @@ require_relative 'registry'
 require_relative 'lint_crosscheck'
 require_relative 'native_names'
 require_relative 'native_ivar_scopes'
+require_relative 'outside_ruby_ivar_scopes'
 
 require_relative 'native_expression_devirt'
 require_relative 'symbol_cache'
@@ -896,6 +897,14 @@ if $PROGRAM_NAME == __FILE__
     end
     native_ivar_scopes, refusal = NativeIvarScopes.analyze(native_paths + outside_native, linked_ruby + outside_ruby)
     warn "== native ivar scopes (ADR 0332): #{refusal || native_ivar_scopes.inspect} =="
+    # OUTSIDE_RUBY_IVAR_SCOPES: a name only foreign Ruby spells, and only inside instance methods of known classes,
+    # poisons just those classes' families rather than every class (outside_ruby_ivar_scopes.rb).
+    _, ruby_scoped = OutsideRubyIvarScopes.analyze(foreign_ruby_srcs)
+    native_spelled = outside_ivar_names(native_paths)
+    ruby_scopes = ruby_scoped.reject { |name, _| native_spelled.include?(name) || native_ivar_scopes.key?(name) }
+                             .select { |name, _| outside_ivars.include?(name) }.transform_values(&:sort)
+    native_ivar_scopes = native_ivar_scopes.merge(ruby_scopes)
+    warn "== outside Ruby ivar scopes: #{ruby_scopes.sort.to_h.inspect} =="
   end
   nil_operators = (nil_class_operator_names(native_paths) if native_paths && foreign_ruby_srcs)
   outside_consts = if native_paths && foreign_ruby_srcs

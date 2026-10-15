@@ -346,6 +346,7 @@ class CodeGen
     typed.each do |owner, name|
       reason = if reflective then "computed write: #{reflective}"
                elsif names.include?(name) then 'name spelled outside the typed analysis'
+               elsif scoped_outside_writer?(owner, name) then 'name written outside the typed analysis on this family'
                else setter_foreign_value_reason(owner, name, layout[owner][name])
                end
       @typed_demotions[[owner, name]] = reason if reason
@@ -410,6 +411,14 @@ class CodeGen
                                               @integer_constants, nil))
     end
     'attr_writer called with an untyped value' if untyped
+  end
+
+  # A scoped outside name (native_ivar_scopes: audited natives, or foreign Ruby instance methods) is written
+  # outside the typed analysis on instances of its scope classes, so their families' slots stay boxed; other
+  # classes keep theirs.
+  def scoped_outside_writer?(owner, name)
+    scopes = @native_ivar_scopes[name]
+    scopes && @outside_ivar_names.include?(name) && scopes.any? { |scope| embed_family_owner?(scope, owner) }
   end
 
   def embed_family_owner?(candidate, owner)
