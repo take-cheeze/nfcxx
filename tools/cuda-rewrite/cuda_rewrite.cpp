@@ -3067,6 +3067,10 @@ std::string function_name(const std::string &text) {
 
 // Ruby $incdirs (line 2120): the -I directories of the driver.
 std::vector<std::string> g_incdirs;
+// The -D and -U options of the driver: the host compile gets them, so the device pass must see them too (its
+// conditionals resolve against them; an undefined name would be taken as false).
+std::vector<std::string> g_user_defines;
+std::vector<std::string> g_user_undefs;
 
 // Ruby system_path? (line 2123): the toolkit and system prefixes are never inlined.
 bool system_path(const std::string &path) {
@@ -5996,6 +6000,10 @@ int main(int argc, char **argv) {
     std::string arg = argv[a];
     if (arg.compare(0, 2, "-I") == 0) {
       g_incdirs.push_back(arg.substr(2));
+    } else if (arg.compare(0, 2, "-D") == 0) {
+      g_user_defines.push_back(arg.substr(2));
+    } else if (arg.compare(0, 2, "-U") == 0) {
+      g_user_undefs.push_back(arg.substr(2));
     } else if (arg == "--device") {
       device = true;
       g_device_mode = true;
@@ -6031,6 +6039,18 @@ int main(int argc, char **argv) {
   if (device) {
     // The device unit is built from the conditionals of the device pass (see resolve_conditionals).
     Defs defs;
+    // The driver's -D options first (the host compile has them, so the device pass must too), then -U, then the
+    // device pass's own macros, which win.
+    for (const auto &d : g_user_defines) {
+      size_t eq = d.find('=');
+      std::string name = eq == std::string::npos ? d : d.substr(0, eq);
+      if (name.empty()) refuse("-D with no macro name");
+      if (name.find('(') != std::string::npos) refuse("-D " + name + ": a function-like macro is not carried into the device unit");
+      Def df;
+      df.text = eq == std::string::npos ? std::string("1") : d.substr(eq + 1);
+      defs[name] = df;
+    }
+    for (const auto &u : g_user_undefs) defs.erase(u);
     for (const auto &kv : DEVICE_PASS_MACROS) {
       Def df;
       df.text = kv.second;

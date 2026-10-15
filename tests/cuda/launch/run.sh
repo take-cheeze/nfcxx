@@ -226,4 +226,22 @@ if "$root/nfcxx" -c -I"$cuda/include" init_list_range_mutant.cu -o "$out/ilm.o" 
 else
   echo "FAIL init_list_range_mutant: the mutant was not caught"; fail=1
 fi
+# A -D define that decides a device-only #if: the device pass must see it (the driver passes -D to the rewriter and the
+# device front end, as it does to the host compile).
+if "$root/nfcxx" -c -I"$cuda/include" -DFEATURE_X=1 device_define.cu -o "$out/dd.o" > "$out/dd.log" 2>&1 \
+   && "$root/nfcxx" "$out/dd.o" -L"$cuda/lib64" -lcudart -o "$out/dd" >> "$out/dd.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dd") && [[ "$run" == *" 0 mismatches"* ]]; then
+  echo "pass device_define: $run"
+else
+  echo "FAIL device_define"; fail=1
+fi
+# Mutant: the same file without the define: the device unit takes the other branch, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" device_define.cu -o "$out/ddm.o" > "$out/ddm.log" 2>&1 \
+   && "$root/nfcxx" "$out/ddm.o" -L"$cuda/lib64" -lcudart -o "$out/ddm" >> "$out/ddm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/ddm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant device_define: caught: $run"
+else
+  echo "FAIL device_define mutant: not caught"; fail=1
+fi
 exit $fail
