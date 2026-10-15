@@ -1025,8 +1025,8 @@ bool enclosing_template(const std::string &text, long pos, OuterTemplate &out) {
   for (const auto &pr : params) {
     std::string d = strip(ruby_split_eq0(pr));
     decls.push_back(d);
-    std::vector<std::string> pt = tokens_of(d);
-    names.push_back(pt.empty() ? std::string() : pt.back());
+    // A function-pointer parameter `void (*name)(...)` is named by its `(*name)`, not by its last token.
+    names.push_back(declared_name(d));
   }
   std::string header = sl(text, t.close + 1, best->open);
   out = OuterTemplate();
