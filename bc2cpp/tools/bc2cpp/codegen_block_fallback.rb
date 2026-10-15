@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'ir_rbs_block_types'
+
 # CodeGen: blocks that stay procs, and fiber safety.
 
 class CodeGen
@@ -420,13 +422,10 @@ class CodeGen
     insn = irep.instructions[idx]
     return nil unless insn.op == 'SENDB'
 
+    recv_class = block_fallback_receiver_class(irep, idx, region, owner_name)
     mand = mandatory_arity(irep)
     ivar_classes = @class_layout[owner_name] || {}
     arg_classes = @class_annotations[irep.label]&.args
-    recv_class = trace_new_target(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes,
-                                  owner: owner_name, class_layout: @class_layout, registry: @registry,
-                                  container_constants: @container_constants,
-                                  element_annotations: @element_annotations)
     if shape[0] == :array
       recv_class = proven_array_source(irep, idx, region[:dest_reg]) unless recv_class == 'Array'
       return nil unless recv_class == 'Array'
@@ -437,6 +436,50 @@ class CodeGen
 
       proven_hash_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
     end
+  end
+
+  # The exact receiver class of the SENDB at `idx` (trace_new_target), shared by the element and RBS hints.
+  def block_fallback_receiver_class(irep, idx, region, owner_name)
+    mand = mandatory_arity(irep)
+    ivar_classes = @class_layout[owner_name] || {}
+    arg_classes = @class_annotations[irep.label]&.args
+    trace_new_target(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes,
+                     owner: owner_name, class_layout: @class_layout, registry: @registry,
+                     container_constants: @container_constants,
+                     element_annotations: @element_annotations)
+  end
+
+  # RBS_BLOCK_PARAM_HINT: the class of a block's first parameter when the method it is passed to declares
+  # that block type (`def each: () { (Game::Actor) -> void } -> void` in a signature file). Only an exact,
+  # self-free receiver class whose own declaration names the method, and a plain block whose required
+  # positionals match the declaration, qualify; anything else gets nil and stays untyped. The class is
+  # returned as an element hint, so the direct call it enables still checks mrb_obj_class at run time.
+  def block_fallback_rbs_param_class(irep, region, owner_name)
+    signatures = self.class.rbs_block_signatures
+    return nil unless signatures && irep && !region[:self_implicit]
+
+    block_irep = region[:block_irep]
+    fields = block_irep.enter&.enter_fields
+    return nil unless fields && fields.drop(1).all?(&:zero?) && !rest_only_block?(block_irep)
+
+    idx = irep.index_of_addr(region[:sendb_addr])
+    insn = idx && irep.instructions[idx]
+    return nil unless insn&.op == 'SENDB'
+
+    recv_class = block_fallback_receiver_class(irep, idx, region, owner_name)
+    return nil unless recv_class.is_a?(String)
+
+    signature = signatures[[recv_class, insn.sym.to_s]]
+    function = signature&.block_type&.type
+    return nil unless function && function.optional_positionals.empty? && !function.rest_positionals &&
+                      function.trailing_positionals.empty? && function.required_keywords.empty? &&
+                      function.optional_keywords.empty? && !function.rest_keywords
+    return nil unless function.required_positionals.size == fields.first && fields.first.positive?
+
+    classes = IrRbsBlockTypes.resolve(function.required_positionals.first.type, {})
+    return nil unless classes&.size == 1
+
+    classes.first.to_s
   end
 
   # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the body's standalone
@@ -625,7 +668,8 @@ class CodeGen
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: the JUMP_TARGET_GLUE_FIX label rule.
     targets = BytecodeIR.for(block_irep).branch_target_addrs - (nested_suppressed - nested_glue_at.keys)
-    elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner)
+    elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner) ||
+                 block_fallback_rbs_param_class(region[:parent_irep], region, d.owner)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)

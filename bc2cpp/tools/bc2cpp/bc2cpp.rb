@@ -407,6 +407,8 @@ if $PROGRAM_NAME == __FILE__
     sig_class_annotations = ClassAnnotations.extract(ireps, registry, sig_owners)
     sig_element_annotations = ElementAnnotations.extract(ireps, registry, sig_owners)
     sig_applied = RbsSignatures.apply(sig_loaded, ireps, registry, annotations, sig_class_annotations, sig_element_annotations)
+    # RBS_BLOCK_PARAM_HINT: the declared block types, read by block_fallback_rbs_param_class.
+    CodeGen.rbs_block_signatures = sig_applied.ir_block_signatures
     warn '== signature files (RBS_SIGNATURES) =='
     sig_loaded.files.each { |f| warn "  SIG_FILE #{f}" }
     sig_applied.diagnostics.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
