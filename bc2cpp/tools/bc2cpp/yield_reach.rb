@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'symbol_flow'
 
 # YIELD_REACH (ADR 0283): a whole-program, by-name "may this code suspend the current Fiber?"
 # analysis over the ireps of a closed world. A compiled frame that sits between a Fiber's entry
@@ -476,11 +477,36 @@ class YieldReach
       @reasons[:callable_send] += 1
       return nil
     end
+    if (universe = dispatch_send_universe(node, idx, dest))
+      # `send(*TABLE[i])` of a constant table whose stored values are all literal (SymbolFlow): the send
+      # reaches exactly the names of that table.
+      universe.each { |name| node.calls << name }
+      @reasons[:dispatch_table] += 1
+      return nil
+    end
     node.unknown_call = true
     node.fwd_any = true if forward
     node.any_lit << lit_block if lit_block
     @reasons[:dynamic_send] += 1
     nil
+  end
+
+  # The finite name set of a splat send built from a verified dispatch table, or nil.
+  def dispatch_send_universe(node, idx, dest)
+    return nil unless @sound && dest
+
+    irep = node.irep
+    @preds ||= {}
+    preds = (@preds[irep.label] ||= SymbolFlow.predecessors(irep))
+    table = SymbolFlow.splat_table(irep, preds, idx, (dest.to_i + 1).to_s)
+    table && dispatch_universes[table]
+  end
+
+  # { constant => names } for the program's dispatch tables whose premises SymbolFlow checks.
+  def dispatch_universes
+    @dispatch_universes ||= SymbolFlow.dispatch_universes(
+      @ireps, @nodes.values.select { |n| n.kind == :method }.to_h { |n| [n.label, n.name] }
+    )
   end
 
   def scan_special_call(node, program, idx, dest, name, explicit, lit_block, recv_const, insn)
