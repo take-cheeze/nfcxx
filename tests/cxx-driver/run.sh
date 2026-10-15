@@ -192,10 +192,10 @@ check "cache: a restored object links with its records" sh -c "
   '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && test -f '$c15/o/tpl.ti' &&
   env -u NFCXX_CACHE '$nfcxx' -c '$c15/main.cpp' -o '$c15/o/main.o' &&'$nfcxx' '$c15/o/main.o' '$c15/o/tpl.o' -o '$c15/prog' && '$c15/prog'"
 [ "$(c15_entries)" = 1 ] && ok "cache: one entry for one compile" || bad "cache: one entry for one compile" "$(c15_entries) entries"
-sed -i 's/BIAS 1/BIAS 2/' "$c15/tpl.h"
+printf '#define BIAS 2\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
 check "cache: a changed header is compiled again" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
 [ "$(c15_entries)" = 2 ] && ok "cache: changed header gives a second entry" || bad "cache: changed header gives a second entry" "$(c15_entries) entries"
-sed -i 's/BIAS 2/BIAS 1/' "$c15/tpl.h"
+printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
 check "cache: reverting the header takes the first copy" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
 [ "$(c15_entries)" = 2 ] && ok "cache: reverted header adds no entry" || bad "cache: reverted header adds no entry" "$(c15_entries) entries"
 unset NFCXX_CACHE
