@@ -486,6 +486,11 @@ end
 
 # The names of the functions a form calls directly (the `&"name"` callee of every `call`), in order.
 def collect_calls(x, acc)
+  # a function whose address is taken (a function pointer value) is reachable too: it must be emitted
+  if x.is_a?(IRSym) && x.sig == "&"
+    acc << x.name
+    return acc
+  end
   return acc unless x.is_a?(Array)
   if head_of(x) == "call" && x.length > 2 && x[2].is_a?(IRSym) && x[2].sig == "&"
     acc << x[2].name
@@ -659,6 +664,15 @@ class Fn
       else
         raise Refused, "static object @\"#{x.name}\" (only block-shared and device globals are lowered)"
       end
+      return [t, ["ptr", nil]]
+    end
+    if x.is_a?(IRSym) && x.sig == "&" && @module_fns.key?(x.name)
+      # the address of a device function of this module (a function pointer value): the PTX name of the .func
+      callee = @module_fns[x.name]
+      raise Refused, "address of kernel #{x.name} (a kernel is not a function pointer)" if callee.kernel
+      callee.setup
+      t = fresh("rd")
+      emit("mov.u64 #{t}, #{x.name};")
       return [t, ["ptr", nil]]
     end
     if x.is_a?(IRSym) && x.sig == "$"
