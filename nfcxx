@@ -20,6 +20,7 @@
 #                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
 #   NFCXX_CACHE=DIR: keeps each -c compile in DIR and takes it back when nothing it depends on changed (docs/notes/cxx-driver.md).
+#   NFCXX_CACHE_LOG=FILE: with NFCXX_CACHE, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). The gcc and qbe
 #                  backends instrument the code; Path B is refused. docs/notes/asan.md. -fno-sanitize=address undoes it;
 #                  other -fsanitize= values are refused.
@@ -521,33 +522,40 @@ link_records_rm
 # <stem>.ti and <stem>.ii, which the link reads beside it. Not cached: .cu, C and -E inputs, -MD (its dependency file), several
 # sources in one command, and an -o without an extension. A file name with spaces in the header list is not handled.
 cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+cache_log() {  # cache_log TEXT: appends a line to NFCXX_CACHE_LOG when it is set (a diagnostic; no effect on the key)
+  [ -z "${NFCXX_CACHE_LOG:-}" ] || printf '%s\n' "$*" >> "$NFCXX_CACHE_LOG"
+}
 cache_key() {  # cache_key SRC OUT: prints the key, or nothing (and fails) when the headers cannot be listed
   local src=$1 out=$2 deps f pre=()
   for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
   deps=$("${NFCXX_CXX:-g++}" -M "-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} "$src" 2>/dev/null) || return 1
   deps=$(sed 's/\\$//' <<<"$deps" | tr ' ' '\n' | sed '/^$/d' | tail -n +2)
+  cache_log "== $out ($src)"   # NFCXX_CACHE_LOG: each compile's key inputs follow, then the key and hit or miss
   {
     printf 'nfcxx-cache-1\nargv:'; printf ' %q' "${nfcxx_argv[@]}"; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
-    env | grep '^NFCXX_' | LC_ALL=C sort
+    (env | grep '^NFCXX_' | grep -v '^NFCXX_CACHE_LOG=' || true) | LC_ALL=C sort   # the log is a diagnostic: it must not change the key
     cache_sha < "$root/nfcxx"
     find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     for f in "$root/build/qbe/qbe" "$root/build/cproc/cproc"; do [ ! -f "$f" ] || cache_sha < "$f"; done
     "${NFCXX_CXX:-g++}" --version | head -1; cc --version | head -1
     for f in $deps; do printf '%s ' "$f"; if [ -f "$f" ]; then cache_sha < "$f"; else echo missing; fi; done
-  } | cache_sha | cut -c1-40
+  } | tee ${NFCXX_CACHE_LOG:+-a "$NFCXX_CACHE_LOG"} | cache_sha | cut -c1-40
 }
 cache_entry=""
 if [ -n "${NFCXX_CACHE:-}" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] \
    && [ ${#cu_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
   if key=$(cache_key "${srcs[0]}" "$out") && [ -n "$key" ]; then
     cache_entry=$NFCXX_CACHE/objects/$key
+    cache_log "key $key"
     if [ -f "$cache_entry/obj" ]; then
+      cache_log "hit"
       rm -f "${out%.*}.ti" "${out%.*}.ii"
       cp "$cache_entry/obj" "$out"
       for x in ti ii; do [ ! -f "$cache_entry/$x" ] || cp "$cache_entry/$x" "${out%.*}.$x"; done
       exit 0
     fi
+    cache_log "miss"
   fi
 fi
 # The one-step build: eccp runs in a temporary directory (see ecp_arg), so its paths are made absolute before the cd.
