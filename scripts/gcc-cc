@@ -24,8 +24,9 @@ CCBIN=("$cc"); if [ "${NFCXX_CCACHE:-1}" != 0 ] && command -v ccache >/dev/null;
 # 4. clang (macOS cc) drops a static function that only an asm alias names (__tls_init below); gcc keeps it, so the
 #    definition is marked used (harmless for gcc, which keeps it anyway).
 clang=0; if "$cc" --version 2>/dev/null | grep -qi clang; then clang=1; fi
-# macOS: calls to the exported libc++ functions that return a class go through the thunks of scripts/darwin-sret.sh.
-darwin=0; sret_sed=/dev/null; if [ "$(uname -s)" = Darwin ]; then darwin=1; sret_sed=$("$root/scripts/darwin-sret.sh" >/dev/null && echo "$root/build/darwin-sret/rename.sed"); fi
+# macOS and Linux aarch64: calls to the exported library functions that return a class go through the thunks of scripts/sret.sh.
+sret_sed=/dev/null; sret_on=0; sret_file=$("$root/scripts/sret.sh") || sret_file=""
+[ -z "$sret_file" ] || { sret_on=1; sret_sed=$root/build/sret/rename.sed; }
 # On Mach-O every C symbol has one more leading underscore, so the asm alias of the TLS wrapper must name the underscored
 # symbols too (the wrapper's reference, _ZTH2tl, is __ZTH2tl there).
 tls_alias='s/__asm__("\(_ZTH[^ ]*\) = __tls_init")/__asm__("_\1 = ___tls_init")/'
@@ -38,7 +39,7 @@ for a in "$@"; do
     -c) compile=1; args+=("$a") ;;
     *.c)
       csrc=$a
-      if [ -f "$a" ] && { [ $darwin = 1 ] || grep -q '^[[:space:]]*#pragma GCC unroll' "$a" || { [ $clang = 1 ] && grep -q 'static void __tls_init(void)' "$a"; } || grep -q '^extern __inline__ __attribute__((visibility("default"))) void _ZN.*D1Ev(' "$a"; }; then
+      if [ -f "$a" ] && { [ $sret_on = 1 ] || grep -q '^[[:space:]]*#pragma GCC unroll' "$a" || { [ $clang = 1 ] && grep -q 'static void __tls_init(void)' "$a"; } || grep -q '^extern __inline__ __attribute__((visibility("default"))) void _ZN.*D1Ev(' "$a"; }; then
         n=$((n + 1)); f=$tmp/src$n.c
         grep -v '^[[:space:]]*#pragma GCC unroll' "$a" \
           | sed -e 's/static void __tls_init(void)/__attribute__((used)) static void __tls_init(void)/' \
