@@ -27,7 +27,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
 | 6 | Autodiff on the `hir` graph by onnxsim (`hir::gradients_via_onnxsim`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** (`Graph::from_onnx` / `merge_onnx`) | done (onnxsim's rules cover a subset of the operators; the forward operators `Gemm Gather Erf Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` are in `hir` now (`tests/uop/test_nn.cpp`), and their gradients come from onnxsim's rules, not yet checked in `test_grad`) |
-| 7 | Dynamic shapes (below) | step 1 done (symbolic dimensions in `hir`, `tests/uop/test_sym.cpp`); step 2 not started |
+| 7 | Dynamic shapes (below) | step 1 done (symbolic dimensions in `hir`, `tests/uop/test_sym.cpp`); step 2 done (symbolic loops in the C renderer, `tests/uop/test_cgen.cpp`) |
 
 ## Stage 1: the scalar core
 
@@ -229,8 +229,8 @@ name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::S
   that symbol's size: elementwise ops, reductions (the reduced axis becomes 1), permute, flip, expand of an integer axis, a reshape that keeps the leading
   symbolic axes, a shrink or pad that does not cut them. Any other dimension is unknown. An intermediate's maximum size takes the bound for each symbolic
   dimension, and the arena is sized from these maxima. The renderer checks every intermediate against its slot, so a bound below an input's size is an
-  `Error`, and a symbol without a bound leaves its intermediates with a `malloc` of their own. The loops still have the concrete sizes: the bounds size the
-  arena; they do not let one compiled program run at other sizes, which needs symbolic loop bounds (step 2 of stage 7).
+  `Error`, and a symbol without a bound leaves its intermediates with a `malloc` of their own. When the loops can be written in the symbols, the program
+  takes the sizes at run time and runs at any size up to the bound (stage 7, step 2, below); otherwise the loops have the concrete sizes.
 - **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes in the loops. No
   in-place reuse of an input by an output (see Memory). An output that is a reshape of a reduction is copied.
 - **nfcxx as the C compiler**: `NFCUOP_CC=./nfcxx` (it passes `-shared -o`, not the gcc flags). `tests/uop/run.sh` runs the `quick` part of `test_cgen` that way on both
@@ -301,8 +301,43 @@ shapes are added in two steps, without changing what the static path means:
    Evaluation **specializes**: `Graph::bind({N: 2})` gives a static copy of the graph (every operator inferred again with the sizes), and
    `hir::Evaluator` binds, lowers and evaluates it, caching the lowering per binding (keyed on the bindings in name order). Lowering a value
    that has an unbound symbol throws. This keeps UOps static and is enough for batch-size changes; the numpy API has no symbols yet.
-2. **Symbolic shapes in UOps** (tinygrad's `Variable` in shapes): a bounded `Var` as a dimension, needed only when kernels should be compiled
-   once for all sizes. It touches shape inference, `Reshape`/`Expand` validation and the C renderer, so it waits for stage 4.
+2. **Symbolic loops in the C renderer** (done). A compiled program runs at any size of its symbols up to their bounds, not only at the
+   sizes it was rendered for. The renderer is the only place that changes; the UOp IR and the interpreter are untouched.
+   - **Representation.** UOp shapes stay concrete integers: the graph is built at a *representative* size per symbol (the size of the
+     input that names it). The symbolic form is one `SymDim` per dimension of every node, computed by `sym_rule` from the rules of the
+     operators: an integer, a symbol, `Wild` (a constant, or a size-1 dimension that a consumer broadcasts, so its size is the
+     consumer's), or `Unknown`. A dimension whose size is 1 and that no symbol names is the integer 1.
+   - **Contract (not checked).** Concrete shapes lose which dimension is which symbol, so the renderer reads a dimension or an argument
+     (a shrink end, a pad amount) equal to a symbol's representative size as that symbol. The graph must therefore be built with each
+     symbol written where its size is, and **no other dimension or argument of the graph may equal the representative size**. A reshape
+     that moves a symbol to a dimension of the same size would otherwise look unchanged. `tests/uop/test_cgen.cpp` checks the programs
+     at other sizes against the interpreter, which catches a violation; its random chains use representative sizes above every
+     dimension they can reach. Removing the contract needs the symbol in the UOp shape (below).
+   - **Dynamic programs.** `nfcuop_run` takes a third argument, `const int64_t* sizes`, one size per symbol (`CProgram::symbols`, in
+     name order). `CModule::run` reads them from the feeds: every use of a symbol must agree, each size is at least 1 and at most its
+     bound (`nfcuop::Error` otherwise, before any code runs), and the outputs take their shapes from the sizes. Loop bounds, the strides
+     of flat indices, the reduction loops, the `Pad` bounds and the `Flip` offsets, the copies of duplicate outputs and the mallocs of
+     unplanned intermediates are C expressions in the sizes; integers stay literals.
+   - **Arena.** The planner is unchanged and sized from the bounds, so a dynamic program keeps the saving of PR #219. An intermediate
+     without a bound keeps a malloc of its run-time size. A symbol with a bound is checked against it at run time, so the arena is safe.
+   - **Fallback.** When codegen needs a dimension that is `Wild` or `Unknown` (a reshape that moves a symbol, a cut of a symbolic
+     dimension, an expand of a size-1 dimension whose consumer is not an elementwise op, a materialized constant, an output that is one of
+     these), `render_c` renders the graph again with integer loops: `CProgram::dynamic` is false, the program has no size argument and
+     runs only at its representative sizes (other sizes throw). Its C is the one of the static renderer, so a graph with no symbol is
+     unchanged byte for byte. The fallback also plans its arena as before (wildcards are planned at their concrete size).
+   - **Verification.** `tests/uop/test_cgen.cpp` (`dynamic_sizes`, `random_symbolic_sizes`): a batch chain (elementwise ops with a
+     constant, a reduction over the non-batch axis, an expand of it) rendered once at batch 3 with bound 8 runs at 1, 2, 3, 5 and 8 rows and
+     equals the interpreter bit for bit, and 9 rows throws; without a bound it runs at 1, 5 and 40; the halving chain of 32 x 128 gives the
+     static arena (32,896 bytes against 148,736) at every size up to 32; two inputs sharing a symbol agree or throw; a reshape that moves the
+     symbol falls back and runs at its own size only; 32 of 60 random chains are dynamic and all agree at their sizes. Static graphs: the
+     generated C of ten graphs (plain, reductions, shared intermediates, int64, a materialized expand and constant, and two symbolic
+     fallbacks) is identical to the one before this change.
+   - **Remains.** (a) Symbol identity in UOp shapes (a `Var` as a dimension, tinygrad's `Variable`): it removes the contract above and
+     lets a reshape that moves a symbol, a cut of one, or a broadcast with no symbolic consumer stay dynamic; it touches shape inference,
+     `Reshape` and `Expand` validation and the rules of the renderer, and it is the step to take next. (b) A constant or a size-1 broadcast
+     that is an output is not dynamic yet (fallback). (c) The bound is a check and the size of the arena, never a loop bound: a
+     dynamic loop runs over the run-time size. (d) The ONNX, tinygrad and ONNX Runtime back ends keep their own symbol handling (`Graph::bind`, dim
+     params); this change does not touch them.
 
 Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 
@@ -327,7 +362,7 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
   cumsum and prod, argmax/argmin, tile and take) with the interpreter's results next to them.
 - `onnx_check.py`: every model through `onnx.checker` (with `full_check`, which re-infers all shapes) and onnxruntime, outputs compared with the interpreter's.
 - `test_ort.cpp`: the ONNX Runtime back end (above), against the interpreter; prints SKIP without the library.
-- `test_cgen.cpp`: the C renderer (above).
+- `test_cgen.cpp`: the C renderer (above), including the programs that run at several sizes (stage 7, step 2).
 - `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above, with 32-bit and with 64-bit defaults.
 
 Replacing a rule by a wrong one (checked by hand with `x%1 -> x` and with the float reassociation) makes the runs fail.
