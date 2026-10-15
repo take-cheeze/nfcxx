@@ -105,7 +105,7 @@ Dim mul_dim(const Dim& a, const Dim& b) {
   if (a.lit && b.lit) return lit_dim(a.val * b.val);
   if (a.one()) return b;
   if (b.one()) return a;
-  return Dim{false, 0, "(" + a.expr + ") * (" + b.expr + ")"};
+  return Dim{false, 0, "((" + a.expr + ") * (" + b.expr + "))"};
 }
 
 // The row-major strides of a shape.
@@ -200,8 +200,8 @@ std::string alu2(Op op, DType dt, const std::string& a, const std::string& b) {
 }
 
 // The largest size in bytes of an intermediate, given the bounds of its symbols; false when that is not known (a dimension of
-// unknown meaning, or a symbol without a bound). A Wild dimension is its concrete size when `concrete_wild` (a program with
-// integer loops, where every size is exact), else it is not known.
+// unknown meaning, a symbol without a bound, or a polynomial whose largest value is not known or is below 1). A Wild dimension is its
+// concrete size when `concrete_wild` (a program with integer loops, where every size is exact), else it is not known.
 bool max_bytes(const UOp* u, const std::map<std::string, int64_t>& bounds, bool concrete_wild, int64_t* out) {
   int64_t n = 1;
   for (size_t k = 0; k < u->sym.size(); k++) {
@@ -213,12 +213,70 @@ bool max_bytes(const UOp* u, const std::map<std::string, int64_t>& bounds, bool 
       auto it = bounds.find(s.sym->name);
       if (it == bounds.end()) return false;
       d = it->second;
+    } else if (s.kind == SymDim::Poly) {
+      std::optional<int64_t> ub = s.poly.upper_bound(bounds);
+      if (!ub || *ub < 1) return false;
+      d = *ub;
     }
     if (n > (INT64_MAX / 8) / d) throw Error("render_c: an intermediate would be larger than 2^60 bytes");
     n *= d;
   }
   *out = n * dtype_bytes(u->dtype);
   return true;
+}
+
+// The symbol of each dimension of a node for CInput::syms and COutput::syms ("" for an integer or a polynomial).
+std::vector<std::string> bare_symbols(const UOp* n) {
+  std::vector<std::string> out;
+  for (const SymDim& d : n->sym) out.push_back(d.kind == SymDim::Sym ? d.sym->name : std::string());
+  return out;
+}
+
+// The size of a dimension as a polynomial (a symbol, a polynomial or an integer); nullopt for a Wild or Unknown one.
+std::optional<Poly> dim_poly(const SymDim& d, int64_t size) {
+  switch (d.kind) {
+    case SymDim::Int: return Poly(size);
+    case SymDim::Sym: return Poly::Symbol(d.sym->name);
+    case SymDim::Poly: return d.poly;
+    default: return std::nullopt;
+  }
+}
+
+// The run-time conditions of a dynamic program (CProgram::checks): every polynomial dimension of the graph is at least 1 and within its
+// bound (when its symbols have bounds), and a cut that ends at a polynomial (or at an integer, when its input is one) ends within its
+// input dimension. Each condition is named by its text, so a condition shared by several nodes is checked once.
+std::vector<CProgram::Check> run_checks(const std::vector<const UOp*>& order, const std::map<std::string, int64_t>& bound) {
+  std::vector<CProgram::Check> out;
+  std::set<std::string> seen;
+  auto add = [&](const Poly& value, const std::string& what) {
+    if (seen.insert(what).second) out.push_back(CProgram::Check{value, what});
+  };
+  for (const UOp* u : order) {
+    for (size_t k = 0; k < u->shape.size(); k++) {
+      if (u->sym[k].kind != SymDim::Poly) continue;
+      const Poly& p = u->sym[k].poly;
+      add(p - Poly(1), "dimension " + p.str() + " must be at least 1");
+      if (std::optional<int64_t> ub = p.upper_bound(bound))
+        add(Poly(*ub) - p, "dimension " + p.str() + " must be at most " + std::to_string(*ub) + ", its bound");
+    }
+    if (u->op != Op::Shrink) continue;
+    const size_t r = u->shape.size();
+    for (size_t k = 0; k < r; k++) {
+      const SymDim& in = u->src[0]->sym[k];
+      const SymDim& res = u->sym[k];
+      const int64_t start = u->arg[k], end = u->arg[r + k];
+      if (res.kind == SymDim::Int) {   // a literal end: an input that is a polynomial must reach it
+        if (in.kind == SymDim::Poly) add(in.poly - Poly(end), "the input dimension " + in.poly.str() + " must reach " + std::to_string(end));
+        continue;
+      }
+      std::optional<Poly> rp = dim_poly(res, u->shape[k]), ip = dim_poly(in, u->src[0]->shape[k]);
+      if (!rp || !ip) continue;
+      if (start == 0 && *rp == *ip) continue;   // the whole dimension
+      const Poly e = *rp + Poly(start);
+      add(*ip - e, "the cut ends at " + e.str() + ", past the input dimension " + ip->str());
+    }
+  }
+  return out;
 }
 
 // Thrown by the code generator when a dynamic program needs a dimension that is not known; render_c then renders the graph with
@@ -255,7 +313,8 @@ class Renderer {
   // The size of axis k of a node: an integer, or the run-time size of its symbol. Throws Fallback when it is not known.
   Dim dim(const UOp* n, size_t k) const;
   std::vector<Dim> dims(const UOp* n) const;
-  std::vector<std::string> sym_names(const UOp* n) const;
+  std::vector<Poly> dims_exprs(const UOp* n) const;   // each dimension as a polynomial (dynamic programs)
+  std::string poly_c(const Poly& p) const;            // a polynomial in the sizes, as a C expression
   std::string elem(const UOp* n, const Idx& idx, KGen& g);
   std::string elem_op(const UOp* n, const Idx& idx, KGen& g);
   std::string movement(const UOp* n, const Idx& idx, KGen& g);
@@ -269,8 +328,28 @@ Dim Renderer::dim(const UOp* n, size_t k) const {
   switch (d.kind) {
     case SymDim::Int: return lit_dim(n->shape[k]);
     case SymDim::Sym: return Dim{false, 0, "nfc_sz" + std::to_string(sym_index_.at(d.sym->name))};
+    case SymDim::Poly: return Dim{false, 0, poly_c(d.poly)};
     default: throw Fallback{};
   }
+}
+
+std::string Renderer::poly_c(const Poly& p) const {
+  // the terms with symbols first, then the constant: "(2 * nfc_sz0 - 1)"
+  std::vector<const std::pair<const std::vector<std::string>, int64_t>*> terms;
+  for (const auto& term : p.terms()) if (!term.first.empty()) terms.push_back(&term);
+  for (const auto& term : p.terms()) if (term.first.empty()) terms.push_back(&term);
+  std::string out;
+  for (const auto* term : terms) {
+    const int64_t c = term->second;
+    std::string t;
+    for (const std::string& name : term->first) t += (t.empty() ? "" : " * ") + std::string("nfc_sz") + std::to_string(sym_index_.at(name));
+    const int64_t mag = c < 0 ? -c : c;
+    if (t.empty()) t = std::to_string(mag);
+    else if (mag != 1) t = std::to_string(mag) + " * " + t;
+    if (out.empty()) out = (c < 0 ? "-" : "") + t;
+    else out += (c < 0 ? " - " : " + ") + t;
+  }
+  return "(" + out + ")";
 }
 
 std::vector<Dim> Renderer::dims(const UOp* n) const {
@@ -279,11 +358,14 @@ std::vector<Dim> Renderer::dims(const UOp* n) const {
   return d;
 }
 
-std::vector<std::string> Renderer::sym_names(const UOp* n) const {
+std::vector<Poly> Renderer::dims_exprs(const UOp* n) const {
   (void)dims(n);   // throws Fallback when a dimension is not known
-  std::vector<std::string> names;
-  for (const SymDim& s : n->sym) names.push_back(s.kind == SymDim::Sym ? s.sym->name : "");
-  return names;
+  std::vector<Poly> out;
+  for (size_t k = 0; k < n->shape.size(); k++) {
+    const SymDim& d = n->sym[k];
+    out.push_back(d.kind == SymDim::Sym ? Poly::Symbol(d.sym->name) : d.kind == SymDim::Poly ? d.poly : Poly(n->shape[k]));
+  }
+  return out;
 }
 
 std::string Renderer::cast(const UOp* n, const std::string& a) {
@@ -467,15 +549,20 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
     }
   for (const auto& kv : vars) {
     in_index_[kv.first] = static_cast<int>(inputs_.size());
-    inputs_.push_back(CInput{kv.first, kv.second->dtype, kv.second->shape, {}});
+    inputs_.push_back(CInput{kv.first, kv.second->dtype, kv.second->shape, {}, {}});
   }
-  // The symbols of the graph (stage 7): the size of each wherever it names a dimension, which must agree, and its bound.
+  // The symbols of the graph (stage 7): the size of each wherever it names a dimension (a symbol, or a symbol of a polynomial), which must
+  // agree, and its bound.
   std::map<std::string, int64_t> size, bound;
-  std::set<std::string> fed;   // the symbols that an input names: their sizes come from the feeds
+  std::set<std::string> fed;    // the symbols that an input names as a dimension: their sizes come from the feeds
+  std::set<std::string> used;   // every symbol that a dimension of the graph names
   for (const UOp* u : order_) {
     for (size_t k = 0; k < u->sym.size(); k++) {
+      if (u->sym[k].kind == SymDim::Poly)
+        for (const std::string& name : u->sym[k].poly.symbols()) used.insert(name);
       if (u->sym[k].kind != SymDim::Sym) continue;
       const std::string& name = u->sym[k].sym->name;
+      used.insert(name);
       auto ins = size.insert({name, u->shape[k]});
       if (!ins.second && ins.first->second != u->shape[k])
         throw Error("render_c: the symbol " + name + " names dimensions of sizes " + std::to_string(ins.first->second) + " and " +
@@ -486,7 +573,20 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
   }
   // A symbol that no input names has no size at run time: a dynamic program cannot be written, and the graph is rendered with integer
   // loops (the fallback below).
-  if (dyn_requested_ && fed.size() != size.size()) throw Fallback{};
+  if (dyn_requested_)
+    for (const std::string& name : used)
+      if (!fed.count(name)) throw Fallback{};
+  // A polynomial dimension must be the size the graph gives it, at the sizes of its symbols (the representative sizes of the inputs).
+  if (dyn_requested_)
+    for (const UOp* u : order_)
+      for (size_t k = 0; k < u->sym.size(); k++) {
+        if (u->sym[k].kind != SymDim::Poly) continue;
+        const std::optional<int64_t> v = u->sym[k].poly.evaluate(size);
+        if (!v || *v != u->shape[k])
+          throw Error("render_c: dimension " + std::to_string(k) + " of a " + std::string(name(u->op)) + " " + to_string(u->shape) + " is " +
+                      u->sym[k].poly.str() + ", which is " + (v ? std::to_string(*v) : std::string("not known")) + " at the symbols' sizes, not " +
+                      std::to_string(u->shape[k]));
+      }
   // The dynamic form: the loops are written in the symbols' run-time sizes (if there are symbols at all).
   dyn_ = dyn_requested_ && !size.empty();
   prog_.dynamic = dyn_;
@@ -507,7 +607,12 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
       auto b = bound.find(kv.first), m = minimum.find(kv.first);
       prog_.symbols.push_back(CProgram::Symbol{kv.first, kv.second, b == bound.end() ? 0 : b->second, m == minimum.end() ? 1 : m->second});
     }
-    for (const auto& kv : vars) inputs_[static_cast<size_t>(in_index_.at(kv.first))].syms = sym_names(kv.second);
+    for (const auto& kv : vars) {
+      CInput& in = inputs_[static_cast<size_t>(in_index_.at(kv.first))];
+      in.syms = bare_symbols(kv.second);
+      in.dims = dims_exprs(kv.second);
+    }
+    prog_.checks = run_checks(order_, bound);
   }
   // what is stored in a buffer
   for (const UOp* u : order_) {
@@ -521,7 +626,8 @@ CProgram Renderer::run(const std::vector<const UOp*>& roots) {
   std::unordered_map<const UOp*, int> out_slot;
   std::vector<std::pair<const UOp*, int>> dup;  // (root, output index) that copy another output
   for (size_t k = 0; k < roots.size(); k++) {
-    prog_.outputs.push_back(COutput{roots[k]->dtype, roots[k]->shape, dyn_ ? sym_names(roots[k]) : std::vector<std::string>{}});
+    prog_.outputs.push_back(COutput{roots[k]->dtype, roots[k]->shape, dyn_ ? bare_symbols(roots[k]) : std::vector<std::string>{},
+                                    dyn_ ? dims_exprs(roots[k]) : std::vector<Poly>{}});
     if (!out_slot.count(roots[k])) out_slot[roots[k]] = static_cast<int>(k);
     else dup.push_back({roots[k], static_cast<int>(k)});
   }
@@ -750,6 +856,13 @@ Array from_raw(DType d, const Shape& shape, const unsigned char* raw) {
 
 }  // namespace
 
+// "N=2, M=5": the sizes a run was given, for the messages of the run-time conditions.
+static std::string sizes_text(const std::map<std::string, int64_t>& value) {
+  std::string out;
+  for (const auto& kv : value) out += (out.empty() ? "" : ", ") + kv.first + "=" + std::to_string(kv.second);
+  return out.empty() ? std::string("no symbols") : out;
+}
+
 std::vector<Array> CModule::run(const std::map<std::string, Array>& feeds) const {
   // the run-time size of each symbol, from the feeds (dynamic programs)
   std::map<std::string, int64_t> value;
@@ -768,16 +881,17 @@ std::vector<Array> CModule::run(const std::map<std::string, Array>& feeds) const
       if (a.shape.size() != in.shape.size())
         throw Error("CModule: input " + in.name + " has rank " + std::to_string(in.shape.size()) + ", given " + std::to_string(a.shape.size()));
       for (size_t k = 0; k < in.shape.size(); k++) {
-        if (in.syms[k].empty()) {
-          if (a.shape[k] != in.shape[k])
+        const std::optional<std::string> name = in.dims[k].single_symbol();
+        if (!name) {   // an integer, checked here; a polynomial is checked once the sizes are known
+          if (!in.dims[k].is_symbolic() && a.shape[k] != in.shape[k])
             throw Error("CModule: input " + in.name + " has size " + std::to_string(in.shape[k]) + " in dimension " + std::to_string(k) + ", given " +
                         std::to_string(a.shape[k]));
           continue;
         }
         if (a.shape[k] < 1) throw Error("CModule: input " + in.name + " has size " + std::to_string(a.shape[k]) + " in dimension " + std::to_string(k));
-        auto ins = value.insert({in.syms[k], a.shape[k]});
+        auto ins = value.insert({*name, a.shape[k]});
         if (!ins.second && ins.first->second != a.shape[k])
-          throw Error("CModule: the symbol " + in.syms[k] + " is " + std::to_string(ins.first->second) + " and " + std::to_string(a.shape[k]) + " in the feeds");
+          throw Error("CModule: the symbol " + *name + " is " + std::to_string(ins.first->second) + " and " + std::to_string(a.shape[k]) + " in the feeds");
       }
     }
     in_raw.push_back(to_raw(a));
@@ -793,12 +907,35 @@ std::vector<Array> CModule::run(const std::map<std::string, Array>& feeds) const
                   ", the size a cut of it needs");
     sizes.push_back(v);
   }
+  // the conditions of the graph's polynomial dimensions and cuts, at these sizes
+  for (const CProgram::Check& c : prog_.checks) {
+    const std::optional<int64_t> v = c.value.evaluate(value);
+    if (!v) throw Error("CModule: cannot evaluate the run-time condition (" + c.what + ") at " + sizes_text(value));
+    if (*v < 0) throw Error("CModule: " + c.what + " fails at " + sizes_text(value));
+  }
+  // a polynomial input dimension is the size its feed has
+  if (prog_.dynamic)
+    for (const CInput& in : prog_.inputs) {
+      const Array& a = feeds.at(in.name);
+      for (size_t k = 0; k < in.shape.size(); k++) {
+        if (in.dims[k].single_symbol() || !in.dims[k].is_symbolic()) continue;
+        const std::optional<int64_t> v = in.dims[k].evaluate(value);
+        if (!v || *v != a.shape[k])
+          throw Error("CModule: input " + in.name + " has size " + std::to_string(a.shape[k]) + " in dimension " + std::to_string(k) +
+                      ", and its dimension " + in.dims[k].str() + " is " + (v ? std::to_string(*v) : std::string("not known")) + " at " +
+                      sizes_text(value));
+      }
+    }
   std::vector<Shape> out_shape;
   std::vector<void*> out_ptr;
   for (const COutput& o : prog_.outputs) {
     Shape shape = o.shape;
     if (prog_.dynamic)
-      for (size_t k = 0; k < shape.size(); k++) if (!o.syms[k].empty()) shape[k] = value.at(o.syms[k]);
+      for (size_t k = 0; k < shape.size(); k++) {
+        const std::optional<int64_t> v = o.dims[k].evaluate(value);
+        if (!v) throw Error("CModule: cannot evaluate the shape of an output at " + sizes_text(value));
+        shape[k] = *v;
+      }
     size_t sz = o.dtype == DType::Bool ? 1 : (o.dtype == DType::Int32 || o.dtype == DType::Float32) ? 4 : 8;
     out_raw.emplace_back(sz * static_cast<size_t>(numel(shape)) + 8);
     out_ptr.push_back(out_raw.back().data());

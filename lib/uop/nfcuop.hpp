@@ -23,6 +23,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "nfcuop_sym_expr.hpp"
+
 namespace nfcuop {
 
 // Every error the library reports: ill-typed nodes, unbound variables, division by zero when evaluating,
@@ -93,16 +95,33 @@ struct Symbol {
   int64_t bound;     // the largest size, or 0 for none
 };
 
+// A polynomial in symbols (stage 7): onnxsim's SymExpr, whose monomials name the symbols of the graph (Graph::symbol). `N` is the
+// symbol itself, `2*N - 1` a polynomial, `7` an integer (a polynomial with no symbol).
+using Poly = onnxsim::SymExpr;
+// The dimensions given to a builder, one polynomial per dimension (an empty Dims means all integers, where the builder takes one).
+using Dims = std::vector<Poly>;
+
 // What one dimension of a node is:
 //   Int      an integer: its size is the shape's, whatever the feeds are;
 //   Sym      the size of `sym`: at run time it is the symbol's size;
+//   Poly     a polynomial in symbols that is neither an integer nor one symbol (`N-1`, `2*N`): at run time it is the value of `poly`
+//            at the symbols' sizes, which the renderer checks to be at least 1 and within its bound (when every symbol has one);
 //   Wild     a constant, or a size-1 dimension that a consumer broadcasts: its size is the consumer's;
 //   Unknown  not expressible: a dynamic program cannot be written, and the C renderer falls back to integer loops.
 struct SymDim {
-  enum Kind : uint8_t { Int, Sym, Wild, Unknown };
+  enum Kind : uint8_t { Int, Sym, Wild, Unknown, Poly };
   Kind kind = Int;
   const Symbol* sym = nullptr;  // Sym only
-  bool operator==(const SymDim& o) const { return kind == o.kind && sym == o.sym; }
+  nfcuop::Poly poly;            // Poly only (qualified: the enumerator Poly hides the alias inside SymDim)
+  static SymDim of(Kind k, const Symbol* s = nullptr) {
+    SymDim d;
+    d.kind = k;
+    d.sym = s;
+    return d;
+  }
+  bool operator==(const SymDim& o) const {
+    return kind == o.kind && sym == o.sym && (kind != Poly || poly == o.poly);
+  }
   bool operator!=(const SymDim& o) const { return !(*this == o); }
 };
 using SymShape = std::vector<SymDim>;  // one entry per dimension of the shape
@@ -123,8 +142,11 @@ struct UOp {
   bool is_const() const { return op == Op::Const; }
 };
 
-// The symbol of each dimension of `u` (nullptr for an integer, and for a Wild or Unknown dimension): the Syms that rebuild its shape.
+// The symbol of each dimension of `u` (nullptr for an integer, and for a Wild, Unknown or Poly dimension): the Syms that rebuild its shape.
 Syms symbols_of(const UOp* u);
+// The polynomial of each dimension of `u`: its symbol, its polynomial, or its size as an integer (Wild and Unknown dimensions too).
+// The Dims that rebuild its shape with the explicit builders.
+Dims dims_of(const UOp* u);
 
 // Owns every node. Nodes are immutable and live as long as the Graph; building the same node twice returns
 // the same pointer, so `a == b` on UOp pointers is structural equality. A Graph is not thread safe, and
@@ -148,6 +170,10 @@ class Graph {
   // A named input whose dimension k is the symbol syms[k] (nullptr: an integer; empty: all integers). Its size in the graph is
   // `shape`, and a symbol's size must not exceed its bound.
   const UOp* var(const std::string& name, DType d, const Shape& shape, const Syms& syms);
+  // The polynomial forms (stage 7, step 3). Dims has one polynomial per dimension (`Poly`: the symbol, a polynomial such as 2*N - 1, or
+  // an integer); each symbol in it must be a symbol of this graph (Graph::symbol). An integer entry must be the dimension's size, and a
+  // polynomial whose symbols all have bounds must not exceed its largest value at `shape`. The renderer checks the run-time sizes.
+  const UOp* var_poly(const std::string& name, DType d, const Shape& shape, const Dims& dims);
 
   // Builds an ALU node (anything but Const, Var and Cast), inferring the dtype and checking the sources,
   // which must have the same shape (broadcasting is explicit: expand, or the Tensor API).
@@ -158,26 +184,37 @@ class Graph {
   // the reduced axes remain with size 1 (keepdims), reshape drops them.
   // The symbolic forms (stage 7) take the symbol of each dimension of `shape` (Syms; empty: all integers). The shape-only forms
   // keep a symbol only where the operation leaves its dimension alone, and make every other symbolic dimension Unknown:
-  //   reshape(x, shape, syms): the symbols of `shape` must be those of x (the same multiset), each of the size it has in x; the other
-  //     dimensions are integers. reshape(x, shape): a symbolic x keeps the symbols of the leading dimensions up to the last one
-  //     when their sizes are unchanged, and nothing else.
+  //   reshape(x, shape, syms): the target's element count must be that of x as a polynomial (for every size of the symbols), and a
+  //     symbol that both name a dimension must have the same size in both; the target keeps its symbols. reshape(x, shape): a symbolic
+  //     x keeps the symbols of the leading dimensions up to the last one when their sizes are unchanged, and nothing else.
   //   expand(x, shape, syms): a dimension of x that is its symbol stays; a size-1 dimension (or a constant) grows to the symbol
   //     given, and a literal target is an integer. expand(x, shape): a size-1 dimension that grows is Wild (its size is that of its
   //     consumer, as before); a symbolic dimension is Unknown.
+  //   The same explicit forms take polynomials (reshape_poly, expand_poly, shrink_poly, var_poly: `Dims`, see below); a Syms argument
+  //   is the same as the Dims of its symbols.
   const UOp* reshape(const UOp* x, const Shape& shape);
   const UOp* reshape(const UOp* x, const Shape& shape, const Syms& syms);
+  // The explicit form with polynomials: the element count of the target must be that of x as a polynomial (for every size of the
+  // symbols), so `[N,4]` reshapes to `[2*N,2]`, and `[N,4]` to `[4,3]` is an Error.
+  const UOp* reshape_poly(const UOp* x, const Shape& shape, const Dims& dims);
   const UOp* permute(const UOp* x, const Shape& perm);
   const UOp* expand(const UOp* x, const Shape& shape);
   const UOp* expand(const UOp* x, const Shape& shape, const Syms& syms);
+  const UOp* expand_poly(const UOp* x, const Shape& shape, const Dims& dims);
   const UOp* reduce_sum(const UOp* x, const Shape& axes);
   const UOp* reduce_max(const UOp* x, const Shape& axes);
   // shrink: keep [starts[i], ends[i]) of each dimension (non-empty). pad: add before[i] and after[i] zeros (false for
   // bool) to each dimension. flip: reverse the given axes.
-  // With `end_syms`, a dimension whose end is its symbol (starts 0, end_syms[k] the symbol of x's dimension k) keeps the symbol:
-  // it is the whole dimension. Any other cut of a symbolic dimension is an integer of the cut's size, and the symbol must then be
-  // at least the cut's end at run time (the renderer checks it). Without end_syms, every cut is one of these.
+  // With `end_syms`, the end of dimension k is its symbol (its polynomial is the symbol): the whole dimension (start 0) keeps the
+  // symbol, and any other end of a symbolic dimension is the polynomial minus the start (x[1:N] of [N] is N-1). A literal end of a
+  // symbolic dimension is an integer of the cut's size, and the renderer checks at run time that the symbol reaches it. Without
+  // end_syms, every cut is literal.
   const UOp* shrink(const UOp* x, const Shape& starts, const Shape& ends);
   const UOp* shrink(const UOp* x, const Shape& starts, const Shape& ends, const Syms& end_syms);
+  // With the end of each dimension as a polynomial (`ends_poly`, one entry per dimension; empty: the literal `ends`). An integer
+  // entry must equal ends[k]. A polynomial end E keeps the source's dimension when it is the whole of it (start 0, E the dimension);
+  // otherwise the result is E - starts[k] (N-1 for x[1:N]), and at run time the renderer checks that E is within the source's size.
+  const UOp* shrink_poly(const UOp* x, const Shape& starts, const Shape& ends, const Dims& ends_poly);
   const UOp* pad(const UOp* x, const Shape& before, const Shape& after);
   const UOp* flip(const UOp* x, const Shape& axes);
   // The node `u` with other sources (u->op, u->dtype and its symbolic dimensions are kept; Const and Var are returned as they are).
