@@ -1,0 +1,5 @@
+; header
+(a
+  ; inner comment
+  (b "x"))
+; tail
