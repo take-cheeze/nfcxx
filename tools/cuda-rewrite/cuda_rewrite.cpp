@@ -2278,6 +2278,19 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
   return out;
 }
 
+// C++ allows a parameter pack only last in a class template's parameter list, so the dispatch struct takes the
+// non-pack parameters first and the pack after them (`template <typename T, int... Ns>`). `v` holds one entry per
+// parameter, or, for an instance, the pack's values in place of its entry (`width` of them, from index `pack`).
+template <class E>
+static std::vector<E> disp_order(const std::vector<E> &v, long pack, size_t width) {
+  if (pack < 0) return v;
+  std::vector<E> out;
+  for (size_t i = 0; i < (size_t)pack; i++) out.push_back(v[i]);
+  for (size_t i = (size_t)pack + width; i < v.size(); i++) out.push_back(v[i]);
+  for (size_t i = (size_t)pack; i < (size_t)pack + width; i++) out.push_back(v[i]);
+  return out;
+}
+
 // Ruby dependent_decls (line 1017): the dispatch declarations of the dependent launches, at their enclosing templates.
 std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<long, long>, DependentLaunch> &dl,
                                                           const std::string &orig) {
@@ -2304,12 +2317,14 @@ std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<lon
         if (site.wrapper == w) decl = site.decl;
       lines.push_back({at, "static void " + w + "(" + decl + ");\n"});
     }
-    lines.push_back({at, "template <" + join(d.outer.decls, ", ") + "> struct " + d.dname + ";\n"});
+    long pk = d.outer.has_pack ? d.outer.pack : -1;
+    lines.push_back({at, "template <" + join(disp_order(d.outer.decls, pk, 1), ", ") + "> struct " + d.dname + ";\n"});
     for (const auto &inst : d.insts) {
       std::string w;
       for (const auto &pr : d.wrapper)
         if (pr.first == inst) w = pr.second;
-      lines.push_back({at, "template <> struct " + d.dname + "<" + join(inst, ", ") + "> { static constexpr auto fn = &" + w +
+      size_t width = inst.size() + 1 - d.outer.names.size();
+      lines.push_back({at, "template <> struct " + d.dname + "<" + join(disp_order(inst, pk, width), ", ") + "> { static constexpr auto fn = &" + w +
                                "; };\n"});
     }
   }
@@ -2479,6 +2494,8 @@ std::string rewrite(const std::string &text, const std::string &orig) {
           std::vector<std::string> tn;
           for (size_t q = 0; q < d.outer.names.size(); q++)
             tn.push_back(d.outer.has_pack && (long)q == d.outer.pack ? d.outer.names[q] + "..." : d.outer.names[q]);
+          // The dispatch struct takes the pack last (see disp_order): the same order as its declaration.
+          tn = disp_order(tn, d.outer.has_pack ? d.outer.pack : -1, 1);
           kernel = d.dname + "<" + join(tn, ", ") + ">::fn";
         } else {
           std::string dep;
@@ -4328,7 +4345,19 @@ std::string host_linkage(const std::string &text) {
         long p = (long)out.size() - 1;
         while (p >= 0 && white_c((unsigned char)out[(size_t)p])) p -= 1;
         bool lambda = p >= 0 && out[(size_t)p] == ']';
-        if (!(after_static || lambda || in_class_body(out))) out += host_storage(out, "static");
+        // `template <> __device__ float f<half>(...)`: an explicit specialization takes no storage class (C++ rejects it).
+        bool explicit_spec = false;
+        {
+          size_t end = out.size();
+          while (end > 0 && white_c((unsigned char)out[end - 1])) end -= 1;
+          size_t from = end > 16 ? end - 16 : 0;
+          std::string tail = out.substr(from, end - from);
+          for (const char *hdr : {"template <>", "template<>"}) {
+            size_t h = std::string(hdr).size();
+            if (tail.size() >= h && tail.compare(tail.size() - h, h, hdr) == 0) explicit_spec = true;
+          }
+        }
+        if (!(after_static || lambda || explicit_spec || in_class_body(out))) out += host_storage(out, "static");
         i += 10;
         continue;
       }
