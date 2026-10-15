@@ -16,7 +16,7 @@ Graph / UOp (hash-consed nodes, shapes, rewrites)       nfcuop.hpp
 ```
 
 The plan is to grow it stage by stage so that a graph can be built from C++ (and later Ruby, Lua, Python, JavaScript and Go
-through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff (stage 6, see the table) and the ONNX layer exist; ONNX import exists; symbolic dimensions are step 1 of stage 7 (below), symbolic shapes in UOps are not started.
+through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff (stage 6, see the table) and the ONNX layer exist; ONNX import exists; symbolic dimensions are stage 7 (below): steps 1 to 3 are done, the hir layer still binds its symbols before it lowers.
 
 | Stage | Content | State |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
 | 6 | Autodiff on the `hir` graph by onnxsim (`hir::gradients_via_onnxsim`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** (`Graph::from_onnx` / `merge_onnx`) | done (onnxsim's rules cover a subset of the operators; the forward operators `Gemm Gather Erf Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` are in `hir` now (`tests/uop/test_nn.cpp`), and their gradients come from onnxsim's rules, not yet checked in `test_grad`) |
-| 7 | Dynamic shapes (below) | step 1 done (symbolic dimensions in `hir`, `tests/uop/test_sym.cpp`); step 2 done (symbolic loops in the C renderer, `tests/uop/test_cgen.cpp`) |
+| 7 | Dynamic shapes (below) | step 1 done (symbolic dimensions in `hir`, `tests/uop/test_sym.cpp`); step 2 done (symbolic loops in the C renderer, `tests/uop/test_cgen.cpp`); step 3 done (polynomial dimensions in the UOp layer, `N-1`, `2*N`, `x[1:N]`, `tests/uop/test_cgen.cpp`) |
 
 ## Stage 1: the scalar core
 
@@ -361,14 +361,32 @@ shapes are added in two steps, without changing what the static path means:
      rows, the reshape that moves a symbol, two symbols on two axes), and `random_symbolic_sizes` (60 random chains whose reshapes and cuts name their
      symbols, at sizes from 1 up to a bound: N of them are dynamic and all agree with the interpreter bit for bit). Static graphs: every program that
      `test_cgen.cpp` renders from a graph with no symbol has the same generated C as before this change (checked by a harness that dumps those
-     programs before and after: 24 of them, all identical).
-   - **Remains.** (a) What this does not do: a dimension is an integer or a bare symbol, so `N-1`, `2*N` or a cut `x[1:N]` cannot be written. The
-     explicit forms refuse a reshape whose symbols differ (`Error`), but a literal target dimension that stands for an expression of a symbol is an
-     integer for the renderer, so the caller must not write one. The shape-only forms of a symbolic tensor still give `Unknown` (the fallback) unless
-     the rule above keeps the symbol. (b) A constant or a shape-only size-1 broadcast that is a graph output is not dynamic yet (fallback). (c) The
-     bound is a check and the size of the arena, never a loop bound: a dynamic loop runs over the run-time size. (d) The ONNX, tinygrad and ONNX Runtime
-     back ends keep their own symbol handling (`Graph::bind`, dim params); this change does not touch them. (e) The numpy-like API (`nfcuop_np.hpp`)
-     and the ONNX graph (`nfcuop_hir.hpp`) build integer shapes, so their graphs are static; a symbol reaches the renderer only through the UOp API.
+     programs before and after: 24 of them, all identical). The polynomial programs of step 3 below are in the same file (`poly_sizes`).
+   - **Remains (after step 3, below).** (a) A literal dimension that stands for a polynomial of a symbol (4 for
+     `2*N` at N = 2) is an integer for the renderer and is never re-checked at other sizes, so the caller must pass the polynomial. The
+     explicit forms refuse a reshape whose element counts differ as polynomials, but not a literal that is right only at one size. (b) A constant or a shape-only size-1 broadcast that is a graph
+     output is not dynamic yet (fallback). (c) The bound is a check and the size of the arena, never a loop bound: a dynamic loop runs over
+     the run-time size. (d) The ONNX, tinygrad and ONNX Runtime back ends keep their own symbol handling (`Graph::bind`, dim params); this
+     change does not touch them. (e) The numpy-like API (`nfcuop_np.hpp`) and the ONNX graph (`nfcuop_hir.hpp`) build integer shapes, so their
+     graphs are static; a symbol and a polynomial reach the renderer only through the UOp API (`ut::Session` has no symbols).
+3. **Polynomial dimensions in the UOp layer** (done). A dimension of a UOp can be a polynomial in the graph's symbols (`N-1`, `2*N`,
+   `N*M`): `SymDim::Poly` carries the polynomial (`nfcuop::Poly`, onnxsim's `SymExpr`, extended for this step by `==`, `symbols`,
+   `single_symbol`, `evaluate` and `upper_bound` in `nfcuop_sym_expr.*`). The explicit builders take a polynomial per dimension
+   (`var_poly`, `reshape_poly`, `expand_poly`, `shrink_poly`, `Dims`; `Syms` is the same with symbols only, and `dims_of(u)` reads a node's
+   dimensions back). The rules, all exact for every size of the symbols:
+   - a reshape's target must have the same element count as the input as a polynomial (`[N,4]` to `[2*N,2]` yes, to `[3,4]` no); this
+     replaces the old rule that the symbols must be the same multiset;
+   - a shrink whose end is a polynomial `E` is the size `E - start` (`x[1:N]` of `[N]` is `N-1`); the whole dimension keeps its form;
+   - an elementwise op keeps a polynomial when its sources agree on it; an integer of size above 1 next to a symbolic dimension is now
+     Unknown (it does not follow the symbol at other sizes; before, the symbol was kept, which was only right at the representative size);
+   - an integer entry must be the dimension's size, and a polynomial whose symbols have bounds must not exceed its bound at build time.
+   The renderer writes a polynomial dimension as a C expression in the run-time sizes (`(2 * nfc_sz0)`, `(nfc_sz0 - 1)`) for the loop
+   bounds, the strides, the buffer sizes and the `Pad` and `Flip` offsets. Its largest value (for the arena) is `SymExpr::upper_bound`
+   of the symbols' bounds. `CProgram::checks` are run-time conditions that `CModule::run` evaluates before any code runs: every
+   polynomial dimension of the graph is at least 1 and at most its bound, a cut that ends at a polynomial (or an integer, when its input
+   is a polynomial) ends within its input, and an input or output's polynomial dimension is the size of its feed. A polynomial that does
+   not agree with the representative shapes is an `Error` at `render_c`. The static programs are unchanged: the generated C of the 51
+   static programs of `test_cgen.cpp` is byte-identical before and after this step (checked with a dump of every rendered program).
 
 Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 
@@ -382,7 +400,7 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 - `test_ut.cpp`: shape inference and errors, `evaluate_array` on every movement op and reduction, the rewrite rules for them, a second differential run (300
   random chains of permute, reshape, reduce, expand, shrink, pad, flip, `Where` and integer arithmetic, 900 comparisons), and the checks of the
   UOp-level builder against values worked out by hand.
-- `test_sym.cpp`: symbolic dimensions (stage 7, step 1): an MLP with a batch symbol at two batch sizes against values worked out by hand, the
+- `test_sym.cpp` (also `sym_expr_ops`: the `SymExpr` operations of step 3, equality, symbols, evaluation, the upper bound): symbolic dimensions (stage 7, step 1): an MLP with a batch symbol at two batch sizes against values worked out by hand, the
   `Evaluator` cache, the shape-inference results and refusals, polynomial dimensions (`N*4`, `N+1`, `2*N`) evaluated at two batch sizes, `bind`,
   the exported `dim_param` and its reader; two models for `onnx_check.py`.
 - `test_np.cpp`: the same checks through the user-facing API and the graph (values, errors, the default-dtype settings in both configurations, `slice`/`at`/`flip`, `concatenate`/`stack`, constant sharing, the
@@ -393,7 +411,10 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
   cumsum and prod, argmax/argmin, tile and take) with the interpreter's results next to them.
 - `onnx_check.py`: every model through `onnx.checker` (with `full_check`, which re-infers all shapes) and onnxruntime, outputs compared with the interpreter's.
 - `test_ort.cpp`: the ONNX Runtime back end (above), against the interpreter; prints SKIP without the library.
-- `test_cgen.cpp`: the C renderer (above), including the programs that run at several sizes (stage 7, step 2).
+- `test_cgen.cpp`: the C renderer (above), including the programs that run at several sizes (stage 7, step 2), and the polynomial dimensions
+  (`poly_sizes`, step 3): `N-1` from `x[1:N]` and `2*N` from a reshape, a chain of both, a symbol in the middle of a reshape, two symbols
+  in one dimension, a polynomial input checked against its feed, the fallbacks (a shape-only reshape, a symbol that no input names) and the
+  refusals; each run at several sizes, equal to the interpreter bit for bit.
 - `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above, with 32-bit and with 64-bit defaults.
 
 Replacing a rule by a wrong one (checked by hand with `x%1 -> x` and with the float reassociation) makes the runs fail.
