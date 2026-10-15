@@ -1,15 +1,26 @@
-// The tinygrad back end (lib/uop/nfcuop_tinygrad.hpp): hir graphs exported with to_onnx, written to a scratch directory and run by
-// tinygrad in a Python process (scripts/tinygrad_run.py), compared with the interpreter (hir::Evaluator). Float results must agree
-// to a relative 1e-5 (an absolute 1e-6 near zero; NaN with NaN); integer and bool results exactly; shapes and dtypes exactly.
-// Covered: a static graph with elementwise ops, reductions, Reshape/Transpose, Gemm/MatMul, integer Div/Mod, Greater/Where, a
-// scalar output, an input as an output; float64, int32 and bool tensors; a symbolic batch run unbound and bound (Graph::bind) at
-// two sizes; the numpy API with np.backend = Tinygrad; the errors (a missing feed, a wrong shape, a symbol with two sizes, a
-// Python executable that does not start, a helper that does not exist, and a retry after such a failure).
+// The tinygrad back end (lib/uop/nfcuop_tinygrad.hpp): hir graphs exported with to_onnx and run by tinygrad, compared with the
+// interpreter (hir::Evaluator). Float results must agree to a relative 1e-5 (an absolute 1e-6 near zero; NaN with NaN); integer and
+// bool results exactly; shapes and dtypes exactly. Covered: a static graph with elementwise ops, reductions, Reshape/Transpose,
+// Gemm/MatMul, integer Div/Mod, Greater/Where, a scalar output, an input as an output; float64, int32 and bool tensors; a symbolic
+// batch run unbound and bound (Graph::bind) at two sizes; the numpy API with np.backend = Tinygrad; the errors (a missing feed, a
+// wrong shape, a symbol with two sizes, a Python executable that does not start, a helper that does not exist, and a retry after
+// such a failure).
+// The embedded path (in-process CPython) is checked too: the path taken is the embedded one; a repeated call imports nothing and
+// builds no runner (tinygrad::counts), and it is much faster than the subprocess path for the same graph; a call from another thread
+// takes the subprocess path with the same values; an import that fails in a fresh process gives the Python traceback as the error.
 // The Python executable is $NFCUOP_TINYGRAD_PYTHON (else python3). When tinygrad cannot be imported the test prints one line
 // starting with SKIP and exits 0. The helper is found at $NFCUOP_TINYGRAD_SCRIPT, else scripts/tinygrad_run.py (run from the root).
+// `test_tinygrad --import-probe` is the child process of the import check: it prints UNAVAILABLE and the reasons, or AVAILABLE.
+#include <pthread.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
@@ -269,16 +280,155 @@ static void failures(const hir::Graph& g, int out, const std::map<std::string, A
   CHECK(why.find("cannot start") != std::string::npos);
   if (py0.empty()) unsetenv("NFCUOP_TINYGRAD_PYTHON");
   else setenv("NFCUOP_TINYGRAD_PYTHON", py0.c_str(), 1);
+  // The helper is run only by the subprocess path, so its failure is tested with that path forced (NFCUOP_TINYGRAD_EMBED=0).
+  const char* em = std::getenv("NFCUOP_TINYGRAD_EMBED");
+  std::string em0 = em ? em : "";
+  setenv("NFCUOP_TINYGRAD_EMBED", "0", 1);
   setenv("NFCUOP_TINYGRAD_SCRIPT", "/nonexistent/nfcuop-tinygrad/helper.py", 1);
   CHECK_ERR(tinygrad::run(g, {out}, feeds), "the helper failed");
   if (sc0.empty()) unsetenv("NFCUOP_TINYGRAD_SCRIPT");
   else setenv("NFCUOP_TINYGRAD_SCRIPT", sc0.c_str(), 1);
+  if (em0.empty()) unsetenv("NFCUOP_TINYGRAD_EMBED");
+  else setenv("NFCUOP_TINYGRAD_EMBED", em0.c_str(), 1);
   // restored: the same call runs (no failure was cached)
   std::vector<Array> again = tinygrad::run(g, {out}, feeds);
   CHECK(again.size() == 1);
 }
 
-int main() {
+// ---- the embedded path ----
+
+static std::chrono::steady_clock::time_point now() { return std::chrono::steady_clock::now(); }
+static double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(now() - t0).count();
+}
+
+// A repeated call takes the embedded path and reuses what the first one made: no tinygrad import and no OnnxRunner is built (the
+// counts of this backend), and the values are the same. Its time is compared with the same call in a subprocess
+// (NFCUOP_TINYGRAD_EMBED=0), which starts Python and imports tinygrad every time: the repeated embedded call must take less than a
+// quarter of that. The counts are the backend's own bookkeeping; the time is the independent evidence that nothing is re-imported.
+static void embedded_path(const hir::Graph& g, int out, const std::map<std::string, Array>& feeds) {
+  std::vector<Array> first = tinygrad::run(g, {out}, feeds);
+  if (tinygrad::last_path() != tinygrad::Path::Embedded) {
+    std::printf("SKIP embedded path: %s\n", tinygrad::embedded_status().c_str());
+    return;
+  }
+  CHECK(first.size() == 1);
+  tinygrad::Counts before = tinygrad::counts();
+  CHECK(before.imports == 1);
+  auto t0 = now();
+  std::vector<Array> again = tinygrad::run(g, {out}, feeds);
+  double repeated = seconds_since(t0);
+  tinygrad::Counts after = tinygrad::counts();
+  CHECK(tinygrad::last_path() == tinygrad::Path::Embedded);
+  CHECK(after.imports == before.imports);
+  CHECK(after.runners == before.runners);
+  CHECK(after.embedded_runs == before.embedded_runs + 1);
+  if (first.size() == 1 && again.size() == 1) expect_same("embedded repeated call", again[0], first[0]);
+
+  const char* em = std::getenv("NFCUOP_TINYGRAD_EMBED");
+  std::string em0 = em ? em : "";
+  setenv("NFCUOP_TINYGRAD_EMBED", "0", 1);
+  t0 = now();
+  std::vector<Array> sub = tinygrad::run(g, {out}, feeds);
+  double subprocess = seconds_since(t0);
+  if (em0.empty()) unsetenv("NFCUOP_TINYGRAD_EMBED");
+  else setenv("NFCUOP_TINYGRAD_EMBED", em0.c_str(), 1);
+  CHECK(tinygrad::last_path() == tinygrad::Path::Subprocess);
+  CHECK(tinygrad::embedded_status().find("NFCUOP_TINYGRAD_EMBED=0") != std::string::npos);
+  if (sub.size() == 1 && first.size() == 1) expect_same("subprocess call", sub[0], first[0]);
+  CHECK(repeated * 4 < subprocess);
+  std::printf("timing: repeated embedded call %.3f s; subprocess call of the same graph %.3f s\n", repeated, subprocess);
+  // and the next call is embedded again
+  tinygrad::run(g, {out}, feeds);
+  CHECK(tinygrad::last_path() == tinygrad::Path::Embedded);
+}
+
+struct ThreadJob {
+  const hir::Graph* g;
+  int out;
+  const std::map<std::string, Array>* feeds;
+  std::vector<Array> got;
+  std::string error;
+};
+
+static void* thread_call(void* p) {
+  ThreadJob* j = static_cast<ThreadJob*>(p);
+  try {
+    j->got = tinygrad::run(*j->g, {j->out}, *j->feeds);
+  } catch (const Error& e) {
+    j->error = e.what();
+  }
+  return nullptr;
+}
+
+// The interpreter belongs to the thread that started it: a call from another thread takes the subprocess path, with the same values.
+static void other_thread(const hir::Graph& g, int out, const std::map<std::string, Array>& feeds, const Array& want) {
+  ThreadJob job{&g, out, &feeds, {}, ""};
+  pthread_t th;
+  if (pthread_create(&th, nullptr, thread_call, &job) != 0) {
+    CHECK(false);
+    return;
+  }
+  pthread_join(th, nullptr);
+  CHECK(job.error.empty());
+  CHECK(tinygrad::last_path() == tinygrad::Path::Subprocess);
+  if (job.got.size() == 1) expect_same("other thread", job.got[0], want);
+  else CHECK(false);
+}
+
+// argv[0] of this program, for the child process of import_failure
+static std::string g_argv0;
+
+// The import of tinygrad fails in a fresh process whose PYTHONPATH holds a tinygrad.py that raises ImportError. The embedded path's
+// error is the traceback (an Error, not an abort), and the subprocess path follows it in the text. The child is this program with
+// --import-probe, run from the same directory, in a shell (the test program only; the library starts no shell).
+static void import_failure() {
+  const char* em = std::getenv("NFCUOP_TINYGRAD_EMBED");
+  if (em && std::strcmp(em, "0") == 0) {
+    std::printf("SKIP import_failure: the embedded path is disabled (NFCUOP_TINYGRAD_EMBED=0)\n");
+    return;
+  }
+  const char* t = std::getenv("TMPDIR");
+  std::string base = std::string(t && *t ? t : "/tmp") + "/nfcuop-tinygrad-probe-XXXXXX";
+  std::vector<char> buf(base.begin(), base.end());
+  buf.push_back('\0');
+  if (!mkdtemp(buf.data())) {
+    CHECK(false);
+    return;
+  }
+  std::string dir = buf.data();
+  {
+    std::ofstream mod(dir + "/tinygrad.py");
+    mod << "raise ImportError('probe: no tinygrad here')\n";
+  }
+  const char* py = std::getenv("NFCUOP_TINYGRAD_PYTHON");
+  std::string cmd = "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='" + dir + "' NFCUOP_TINYGRAD_PYTHON='" + std::string(py ? py : "python3") + "' '" + g_argv0 +
+                    "' --import-probe > '" + dir + "/probe.txt' 2>&1";
+  int rc = std::system(cmd.c_str());
+  std::string text;
+  {
+    std::ifstream in(dir + "/probe.txt");
+    std::string line;
+    while (std::getline(in, line)) text += line + "\n";
+  }
+  CHECK(rc == 0);
+  CHECK(text.find("UNAVAILABLE") != std::string::npos);
+  CHECK(text.find("Traceback (most recent call last)") != std::string::npos);
+  CHECK(text.find("ImportError: probe: no tinygrad here") != std::string::npos);
+  CHECK(text.find("the embedded interpreter was not used") != std::string::npos);
+  unlink((dir + "/tinygrad.py").c_str());
+  unlink((dir + "/probe.txt").c_str());
+  rmdir(dir.c_str());
+}
+
+int main(int argc, char** argv) {
+  g_argv0 = argv[0];
+  if (argc > 1 && std::strcmp(argv[1], "--import-probe") == 0) {
+    std::string why;
+    bool ok = tinygrad::available(&why);
+    std::printf("%s\n%s\n", ok ? "AVAILABLE" : "UNAVAILABLE", why.c_str());
+    return 0;
+  }
   std::string why;
   if (!tinygrad::available(&why)) {
     std::printf("SKIP test_tinygrad: %s\n", why.c_str());
@@ -298,6 +448,18 @@ int main() {
     hir::Graph g = forward_graph(&outs);
     failures(g, outs[0], forward_feeds());
   });
+  section("embedded_path", [] {
+    std::vector<int> outs;
+    hir::Graph g = forward_graph(&outs);
+    embedded_path(g, outs[4], forward_feeds());
+  });
+  section("other_thread", [] {
+    std::vector<int> outs;
+    hir::Graph g = forward_graph(&outs);
+    std::map<std::string, Array> feeds = forward_feeds();
+    other_thread(g, outs[4], feeds, interp(g, {outs[4]}, feeds)[0]);
+  });
+  section("import_failure", import_failure);
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);
   return 0;

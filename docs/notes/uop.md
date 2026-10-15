@@ -258,13 +258,30 @@ scripting bindings), like the C backend. `ut::Session` has no graph, so it refus
 ## tinygrad back end (`nfcuop_tinygrad.hpp`)
 
 `nfcuop::tinygrad::run(g, outputs, feeds)` exports the `hir::Graph` with `to_onnx`, runs it with tinygrad (`tinygrad.nn.onnx.OnnxRunner`) and
-returns the outputs as `Array`s. tinygrad is Python only, so the work is done by a Python process: `scripts/tinygrad_run.py`. It is selected as
+returns the outputs as `Array`s. tinygrad is Python only, and nothing links against it or CPython. It is selected as
 `np.backend = ut::Session::Backend::Tinygrad` (`np.backend = "tinygrad"` in the scripting bindings), and like the ORT back end it is refused by
 `ut::Session` and lowers nothing in `np::Session`.
 
-- **The Python process.** The executable is `$NFCUOP_TINYGRAD_PYTHON` (else `python3`), the helper is `$NFCUOP_TINYGRAD_SCRIPT` (else
-  `scripts/tinygrad_run.py`, relative to the working directory). It is started with `fork` and `execvp` (no shell, so no name or path is quoted),
-  and every call starts one process: nothing is cached, so a failure is not kept and the next call runs it again.
+- **The embedded interpreter (the default).** CPython is loaded with `dlopen` from the libpython of `$NFCUOP_TINYGRAD_PYTHON` (else
+  `python3`): its sysconfig `INSTSONAME`, else `LDLIBRARY`, in `LIBDIR`; `$NFCUOP_TINYGRAD_LIBPYTHON` names the file instead. The entry points
+  are looked up with `dlsym` (no headers, no link-time dependency), and the library is opened `RTLD_GLOBAL`, because numpy's extension modules
+  bind to the `Py*` symbols of the process. The program name is the executable's, so CPython finds the venv's prefix as the executable does. The
+  first call that can start it starts the interpreter (never finalized), imports numpy and tinygrad once, and keeps one `OnnxRunner` per model
+  and per binding of its symbols (tinygrad's runner fixes each symbol at the first feed's size). Tensors cross as bytes: `numpy.frombuffer` in,
+  `ndarray.tobytes` out, and the model as a uint8 `Tensor` (`OnnxPBParser` reads it), so no file is written. A Python exception is an `Error`
+  whose text is the traceback. Each call takes the GIL with `PyGILState_Ensure`. The interpreter is never finalized, so at exit the backend runs
+  the atexit callbacks that `Py_Finalize` would run (only for an interpreter it started): tinygrad's worker pool and the multiprocessing
+  finalizers that release its semaphores are among them, and without them the resource tracker reports the semaphores at exit.
+- **One interpreter per process.** A libpython that is already loaded and is not the executable's libpython is refused. If nfcpoly's Python
+  backend started the interpreter first, it is reused when the prefixes agree. The GIL stays with the thread that started the interpreter (as in
+  nfcpoly, which never releases it), so a call from any other thread takes the subprocess path; `tinygrad::embedded_status()` says why.
+  `NFCUOP_TINYGRAD_EMBED=0` selects the subprocess path.
+- **The fallback.** When the embedded path cannot be used (no shared libpython, `Py_InitializeEx` did not start the interpreter, another
+  libpython is loaded, the executable differs from the one that started the interpreter, tinygrad does not import, or the call is on another
+  thread), the call runs the subprocess path, and an error from it ends with "the embedded interpreter was not used: ...". Nothing that failed
+  is cached: the next call tries the embedded path again.
+- **The Python process (the fallback).** The helper is `$NFCUOP_TINYGRAD_SCRIPT` (else `scripts/tinygrad_run.py`, relative to the working
+  directory). It is started with `fork` and `execvp` (no shell, so no name or path is quoted), and every call starts one process.
 - **The files.** A scratch directory (`$TMPDIR` or `/tmp`) holds `model.onnx` (the `to_onnx` bytes), one raw file per input (row-major, little
   endian, `bool` one byte), `request.txt` (one line per input and output: the file, the dtype, the shape and the tensor name as hex, so no name
   needs quoting) and, written by the helper, one raw file per output and `result.txt` (the file, dtype and shape tinygrad computed; written last,
@@ -275,9 +292,11 @@ returns the outputs as `Array`s. tinygrad is Python only, so the work is done by
   helper with `--check`; the tests print SKIP without it.
 - **Symbolic dimensions** run unbound: `OnnxRunner` takes each symbol's size from the feed of its input. The output shapes are the ones tinygrad
   computed (read back from `result.txt`), not the graph's, which is what makes a symbolic output shape work without binding.
-- **Not done**: no Windows (the process and pipes are POSIX), no caching of the compiled models or of the Python process, and dtypes are the five
-  nfcuop has; any dtype tinygrad returns differently is an error, not a conversion. Float results are compared to a relative 1e-5 in
-  `tests/uop/test_tinygrad.cpp`, like the ORT test.
+- **Not done**: no Windows (the process, pipes and `dlopen` are POSIX), no bound on the runner cache (one entry per model and symbol binding,
+  kept for the process), no threads on the embedded path, and dtypes are the five nfcuop has; any dtype tinygrad returns differently is an error,
+  not a conversion. Float results are compared to a relative 1e-5 in `tests/uop/test_tinygrad.cpp`, like the ORT test. The test also checks that
+  a repeated call reuses the interpreter and the runner (counts), that it is several times faster than the subprocess path, that a call from
+  another thread takes the subprocess path, and that an import failure in a fresh process gives the Python traceback.
 
 ## Dynamic shapes (stage 7, after the static stages)
 

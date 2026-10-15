@@ -20,11 +20,13 @@
 #                               with dlopen from $NFCUOP_ORT_LIB (or libonnxruntime.so.1 and the other common names), against the
 #                               interpreter (floats to a relative 1e-5, integers exact); a symbolic batch run unbound and bound; the numpy
 #                               API with np.backend = Ort. Prints SKIP when the library cannot be loaded
-#   - tests/uop/test_tinygrad.cpp  the tinygrad back end (nfcuop_tinygrad.hpp): hir graphs exported with to_onnx, run by tinygrad in a
-#                               Python process (scripts/tinygrad_run.py; the executable is $NFCUOP_TINYGRAD_PYTHON, else python3) against
-#                               the interpreter (floats to a relative 1e-5, integers exact): float64, int32, bool, a symbolic batch
-#                               unbound and bound, the numpy API with np.backend = Tinygrad, and the failures of the helper. Prints SKIP
-#                               when tinygrad cannot be imported
+#   - tests/uop/test_tinygrad.cpp  the tinygrad back end (nfcuop_tinygrad.hpp): hir graphs exported with to_onnx, run by tinygrad (embedded
+#                               in this process, or in a Python process: scripts/tinygrad_run.py; the executable is $NFCUOP_TINYGRAD_PYTHON,
+#                               else python3) against the interpreter (floats to a relative 1e-5, integers exact): float64, int32, bool, a
+#                               symbolic batch unbound and bound, the numpy API with np.backend = Tinygrad, the failures of the helper, the
+#                               embedded path (repeated calls reuse tinygrad and the runner and are faster than a subprocess call; another
+#                               thread takes the subprocess path; an import failure gives the Python traceback). Prints SKIP when tinygrad
+#                               cannot be imported
 #   - tests/uop/test_grad.cpp   reverse-mode autodiff by onnxsim (nfcuop_onnxgrad.hpp, docs/notes/uop-autodiff.md): finite differences in
 #                               float64, exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
 #                               backend equal to the interpreter bit for bit; it also writes models (a loss and its gradients) for
