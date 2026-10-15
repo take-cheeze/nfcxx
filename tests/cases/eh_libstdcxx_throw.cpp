@@ -122,4 +122,4 @@ int main()
 }
 // X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it
 // MACOS-XFAIL-gcc: the EH shim covers libstdc++'s std::__throw_*, not libc++'s (macOS links libc++)
-// MACOS-XFAIL-qbe: the EH shim is libstdc++-only and QBE rejects __builtin_strstr in libc++ headers
+// MACOS-XFAIL-qbe: the EH shim is libstdc++-only; libc++'s throws inside libc++.1.dylib are not caught (scripts/qbe-cc maps __builtin_strstr)
