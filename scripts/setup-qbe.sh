@@ -41,11 +41,19 @@ make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
 # cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
+# cproc: scripts/cproc-aligned-attr.patch (a trailing __attribute__((aligned(N))) after a struct or union body raises its alignment, as GNU does: the SDK's mach/arm/_structs.h uses it; only inputs that were errors change)
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-aligned-attr.patch"
 # cproc: scripts/cproc-darwin-ldouble.patch (Apple arm64: long double is a double, as in clang's ABI; the patch is inert elsewhere)
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-darwin-ldouble.patch"
 # cproc: scripts/cproc-apple-valist.patch (the aarch64-apple target: a pointer va_list, and va_start and va_arg take its address;
 # QBE's Apple variadic convention, so stdarg.h and the SDK's stdio.h agree on va_list).
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-valist.patch"
+# cproc: scripts/cproc-apple-driver.patch (aarch64-apple-* selects the aarch64-apple target and QBE's arm64_apple backend;
+# every other aarch64 triple is unchanged)
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-driver.patch"
+# cproc: scripts/cproc-apple-predefines.patch (Apple targets predefine __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__, which the
+# SDK's availability macros need once -undef is passed, and aarch64 Apple targets predefine __arm64__, as clang does)
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-predefines.patch"
 # cproc: scripts/cproc-atomic-builtins.patch (the __c11_atomic_* builtins and the __atomic_*_n forms: sized libatomic calls by pointee size)
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-atomic-builtins.patch"
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
