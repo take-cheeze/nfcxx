@@ -303,6 +303,21 @@ std::string member_qualifier_placeholder();  // replaced by the real member_qual
 // Ruby: DEVICE_QUALIFIERS (line 1521).
 const std::vector<std::string> DEVICE_QUALIFIERS = {"__global__", "__device__", "__host__", "__forceinline__"};
 
+// The name a parameter declares: for a function pointer `void (*qf)(const float *, T *)` it is the name in `(*qf)`, not the
+// last identifier of the declaration (T). Otherwise the last identifier of the declaration, as before. "" if there is none.
+std::string declared_name(const std::string &part) {
+  long star = str_index(part, "(*", 0);
+  if (star >= 0) {
+    long k = star + 2;
+    while (k < (long)part.size() && white_c(ch(part, k))) k += 1;
+    long e = k;
+    while (e < (long)part.size() && ident_c((unsigned char)ch(part, e))) e += 1;
+    if (e > k) return sl(part, k, e);
+  }
+  std::vector<std::string> pt = tokens_of(ruby_split_eq0(part));
+  return pt.empty() ? std::string() : pt.back();
+}
+
 // Ruby kernel_template_uncached (line 202): the template header of the __global__ template named name.
 struct KernelTemplate {
   std::vector<std::string> names;
@@ -345,7 +360,8 @@ bool kernel_template_uncached(const std::string &name, const std::string &src, K
     long pack = 0;
     for (size_t idx = 0; idx < parts.size(); idx++) {
       std::vector<std::string> pt = tokens_of(ruby_split_eq0(parts[idx]));
-      if (!pt.empty()) names.push_back(pt.back());
+      std::string dn = declared_name(parts[idx]);
+      if (!dn.empty()) names.push_back(dn);
       if (!pack_found && parts[idx].find("...") != std::string::npos) {
         pack_found = true;
         pack = (long)idx;
@@ -455,6 +471,31 @@ std::string substitute(const std::string &text, const std::vector<std::string> &
   return out;
 }
 
+// A parameter whose name is only a comment (`int64_t /*ne10*/`, concat.cu) takes the comment's identifier as its name,
+// so the wrapper can pass it on. A comment that is not a single identifier is left as it is.
+std::string name_comment_params(const std::string &s) {
+  std::string out;
+  for (size_t i = 0; i < s.size();) {
+    if (s.compare(i, 2, "/*") == 0) {
+      size_t e = s.find("*/", i + 2);
+      if (e != std::string::npos) {
+        std::string inner = s.substr(i + 2, e - i - 2);
+        bool ident = !inner.empty() && !(inner[0] >= '0' && inner[0] <= '9');
+        for (char c : inner)
+          if (!ident_c((unsigned char)c)) ident = false;
+        if (ident) {
+          out += " " + inner;
+          i = e + 2;
+          continue;
+        }
+      }
+    }
+    out.push_back(s[i]);
+    i += 1;
+  }
+  return out;
+}
+
 // Ruby template_site (line 288): the wrapper of a template launch. Registers it in g_sites.
 std::string template_site(const std::string &name, const std::string &targs) {
   KernelTemplate kt;
@@ -462,12 +503,12 @@ std::string template_site(const std::string &name, const std::string &targs) {
   std::vector<std::string> args = split_top(targs);
   bool bad = kt.has_pack ? (long)args.size() < (long)kt.names.size() - 1 : args.size() != kt.names.size();
   if (bad) refuse("template kernel " + name + "<" + targs + ">: explicit arguments must give every template parameter");
-  std::string decl = substitute(kt.params, kt.names, args, kt.has_pack, kt.pack);
+  std::string decl = name_comment_params(substitute(kt.params, kt.names, args, kt.has_pack, kt.pack));
   std::vector<std::string> call;
   for (const auto &part : split_top(decl)) {
     std::vector<std::string> pt = tokens_of(ruby_split_eq0(part));
     if (pt.empty()) refuse("template kernel " + name + ": unnamed parameter " + part);
-    call.push_back(pt.back());
+    call.push_back(declared_name(part));
   }
   std::string w = wrapper_name(name, targs);
   if (!g_site_index.count(w)) {
@@ -984,8 +1025,8 @@ bool enclosing_template(const std::string &text, long pos, OuterTemplate &out) {
   for (const auto &pr : params) {
     std::string d = strip(ruby_split_eq0(pr));
     decls.push_back(d);
-    std::vector<std::string> pt = tokens_of(d);
-    names.push_back(pt.empty() ? std::string() : pt.back());
+    // A function-pointer parameter `void (*name)(...)` is named by its `(*name)`, not by its last token.
+    names.push_back(declared_name(d));
   }
   std::string header = sl(text, t.close + 1, best->open);
   out = OuterTemplate();
@@ -1013,8 +1054,8 @@ bool dependent_on_template(const std::string &text, long i, const std::string &t
   TmplHeader t = best->tmpl;
   std::vector<std::string> names;
   for (const auto &pr : split_top(sl(text, t.lt + 1, t.close))) {
-    std::vector<std::string> pt = tokens_of(ruby_split_eq0(pr));
-    if (!pt.empty()) names.push_back(pt.back());
+    std::string dn = declared_name(pr);
+    if (!dn.empty()) names.push_back(dn);
   }
   std::vector<std::string> used = tokens_of(targs);
   for (const auto &nm : names)
@@ -1861,9 +1902,8 @@ bool template_head_of(const std::string &text, const std::string &name, Template
     std::vector<std::string> names;
     long pack = -1;
     for (const auto &pr : split_top(sl(text, t.lt + 1, t.close))) {
-      std::vector<std::string> pt = tokens_of(strip(ruby_split_eq0(pr)));
       if (pack < 0 && pr.find("...") != std::string::npos) pack = (long)names.size();
-      names.push_back(pt.empty() ? std::string() : pt.back());
+      names.push_back(declared_name(strip(ruby_split_eq0(pr))));
     }
     out.names = names;
     out.parts = parts;
@@ -4781,7 +4821,14 @@ std::string inline_generic_lambdas(const std::string &text) {
       long bc = matching_close(out, bo);
       if (bc < 0) continue;
       std::string body = sl(out, bo, bc + 1);
-      if (body.find("decltype(" + pn + ")::value") == std::string::npos) continue;
+      // The parameter is used either as decltype(P)::value or as a bare name (concat.cu: `concat_non_cont<T, dim>`, where
+      // the integral_constant converts to its value in a constant expression).
+      bool bare_use = false;
+      for (size_t i = body.find(pn); i != std::string::npos && !bare_use; i = body.find(pn, i + 1))
+        if ((i == 0 || !ident_c((unsigned char)body[i - 1])) &&
+            (i + pn.size() >= body.size() || !ident_c((unsigned char)body[i + pn.size()])))
+          bare_use = true;
+      if (body.find("decltype(" + pn + ")::value") == std::string::npos && !bare_use) continue;
       long de = bc + 1;
       while (de < n && (ch(out, de) == ' ' || ch(out, de) == '\t')) de += 1;
       if (ch(out, de) != ';') continue;
@@ -4942,7 +4989,13 @@ std::string inline_generic_lambdas(const std::string &text) {
         }
         if (inner.compare(i, param.size(), param) == 0 && (i == 0 || !ident_c((unsigned char)inner[i - 1])) &&
             (i + param.size() >= inner.size() || !ident_c((unsigned char)inner[i + param.size()]))) {
-          r += "std::integral_constant<int, " + v + ">";
+          // A bare use is the constant itself: the literal in any constant expression (`concat_non_cont<T, dim>`).
+          // A use as an object (called, or a member accessed) is not a constant, so it is refused by name.
+          size_t after = i + param.size();
+          while (after < inner.size() && (inner[after] == ' ' || inner[after] == '\t')) after += 1;
+          if (after < inner.size() && (inner[after] == '(' || inner[after] == '.'))
+            refuse("generic lambda " + name + " uses its parameter " + param + " as an object (call or member), not a constant");
+          r += v;
           i += param.size();
           continue;
         }
@@ -4970,6 +5023,55 @@ std::string inline_generic_lambdas(const std::string &text) {
     }
     res += sl(out, pos, n);
     out = res;
+  }
+  return out;
+}
+
+// A kernel parameter whose name is only a comment (`int64_t /*ne10*/,`, concat.cu) is named by it, so the kernel's wrapper
+// can pass it on. Only a comment after a type word and before `,` or `)` counts; it becomes its identifier. Other
+// comments, and comments in literals, are left alone.
+std::string name_commented_params(const std::string &s) {
+  static const char *const types[] = {"int", "int64_t", "uint64_t", "int32_t", "uint32_t", "int16_t", "uint16_t", "int8_t",
+                                      "uint8_t", "size_t", "float", "double", "unsigned", "long", "short", "bool", "char",
+                                      "half"};
+  std::string out;
+  long i = 0;
+  long n = (long)s.size();
+  while (i < n) {
+    if (s.compare((size_t)i, 2, "/*") == 0) {
+      long e = (long)s.find("*/", (size_t)i + 2);
+      if (e >= 0) {
+        std::string inner = s.substr((size_t)i + 2, (size_t)(e - i - 2));
+        bool ident = !inner.empty() && !(inner[0] >= '0' && inner[0] <= '9');
+        for (char c : inner)
+          if (!ident_c((unsigned char)c)) ident = false;
+        // The word before the comment (in out, skipping spaces) and the character after it (skipping spaces).
+        long w = (long)out.size();
+        while (w > 0 && (out[(size_t)w - 1] == ' ' || out[(size_t)w - 1] == '\t' || out[(size_t)w - 1] == '\n')) w -= 1;
+        long ws = w;
+        while (ws > 0 && ident_c((unsigned char)out[(size_t)ws - 1])) ws -= 1;
+        std::string prev = out.substr((size_t)ws, (size_t)(w - ws));
+        long k = e + 2;
+        while (k < n && (s[(size_t)k] == ' ' || s[(size_t)k] == '\t' || s[(size_t)k] == '\n')) k += 1;
+        bool type_before = false;
+        for (const char *t : types)
+          if (prev == t) type_before = true;
+        bool param_end = k < n && (s[(size_t)k] == ',' || s[(size_t)k] == ')');
+        if (ident && type_before && param_end) {
+          out += " " + inner;
+          i = e + 2;
+          continue;
+        }
+      }
+    }
+    long lit = skip_literal(s, i);
+    if (lit >= 0) {
+      out += s.substr((size_t)i, (size_t)(lit - i));
+      i = lit;
+      continue;
+    }
+    out.push_back(s[(size_t)i]);
+    i += 1;
   }
   return out;
 }
@@ -5005,7 +5107,7 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "cuda-rewrite: cannot read %s\n", path.c_str());
     return 1;
   }
-  if (device) text = blank_comments(text);
+  if (device) text = blank_comments(name_commented_params(text));
   text = dynamic_shared_rewrite(strip_launch_bounds(text));
   std::map<std::string, bool> seen;
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
