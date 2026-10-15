@@ -83,6 +83,16 @@ pass min_mixed_enum_class.cu "min mixed: no error, 0 mismatches"
 pass define_header_skip.cu "define header skip: no error, 0 mismatches"
 pass host_member_drop.cu "host member drop: no error, 0 mismatches"
 pass const_tables.cu "const tables: no error, 0 mismatches"
+pass global_init_bytes.cu "global init bytes: no error, 0 mismatches"
+# Mutant: one device table entry changed (2 for 1): the host reference is literal, so the run must report mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" global_init_bytes_mutant.cu -o "$out/gim.o" > "$out/gim.log" 2>&1 \
+   && "$root/nfcxx" "$out/gim.o" -L"$cuda/lib64" -lcudart -o "$out/gim" >> "$out/gim.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/gim" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant global_init_bytes_mutant: caught: $run"
+else
+  echo "FAIL global_init_bytes_mutant: the mutant was not caught"; fail=1
+fi
 pass cg_tile.cu "cg tile: no error, 0 mismatches"
 pass cub_block.cu "cub block: no error, 0 mismatches"
 pass shared_align.cu "shared align: no error, 0 mismatches"
