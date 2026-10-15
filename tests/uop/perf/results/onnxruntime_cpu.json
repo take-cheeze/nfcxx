@@ -1,0 +1,92 @@
+[
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "add",
+  "size": 65536,
+  "ms": 0.018
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "mul",
+  "size": 65536,
+  "ms": 0.0242
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "sqrt",
+  "size": 65536,
+  "ms": 0.0119
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "sum",
+  "size": 65536,
+  "ms": 0.008
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "add",
+  "size": 1048576,
+  "ms": 0.17
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "mul",
+  "size": 1048576,
+  "ms": 0.1307
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "sqrt",
+  "size": 1048576,
+  "ms": 0.3805
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "sum",
+  "size": 1048576,
+  "ms": 0.1169
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "add",
+  "size": 16777216,
+  "ms": 2.5688
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "mul",
+  "size": 16777216,
+  "ms": 2.5517
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "sqrt",
+  "size": 16777216,
+  "ms": 1.8189
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "sum",
+  "size": 16777216,
+  "ms": 1.9639
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "matmul",
+  "size": 256,
+  "ms": 0.0329
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "matmul",
+  "size": 512,
+  "ms": 0.2565
+ },
+ {
+  "backend": "onnxruntime-cpu",
+  "op": "matmul",
+  "size": 1024,
+  "ms": 2.0986
+ }
+]

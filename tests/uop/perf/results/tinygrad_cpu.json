@@ -1,0 +1,92 @@
+[
+ {
+  "backend": "tinygrad-CPU",
+  "op": "add",
+  "size": 65536,
+  "ms": 7.0647
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "mul",
+  "size": 65536,
+  "ms": 5.7482
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "sqrt",
+  "size": 65536,
+  "ms": 6.1667
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "sum",
+  "size": 65536,
+  "ms": 3.587
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "add",
+  "size": 1048576,
+  "ms": 6.422
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "mul",
+  "size": 1048576,
+  "ms": 5.5804
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "sqrt",
+  "size": 1048576,
+  "ms": 6.8831
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "sum",
+  "size": 1048576,
+  "ms": 3.3823
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "add",
+  "size": 16777216,
+  "ms": 5.7725
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "mul",
+  "size": 16777216,
+  "ms": 5.8474
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "sqrt",
+  "size": 16777216,
+  "ms": 5.754
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "sum",
+  "size": 16777216,
+  "ms": 3.8466
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "matmul",
+  "size": 256,
+  "ms": 5.8234
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "matmul",
+  "size": 512,
+  "ms": 16.3093
+ },
+ {
+  "backend": "tinygrad-CPU",
+  "op": "matmul",
+  "size": 1024,
+  "ms": 172.2865
+ }
+]

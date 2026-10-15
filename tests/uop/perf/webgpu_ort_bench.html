@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- Times onnxruntime-web's WebGPU execution provider (version pinned in run_webgpu_ort.sh) on the models in
+     ort_models.js (gen_ort_models.py). Inputs are GPU tensors made from our own buffers and the output stays on the GPU
+     (preferredOutputLocation gpu-buffer), so the timed run has no host copy. Each timing covers session.run and a
+     one-float copy of the output, mapped to the host, which waits for the queue; 3 warm-up runs, then 10 timed runs.
+     Results are logged as PERF lines; PERF_DONE marks the end. -->
+<html>
+<head><meta charset="utf-8"><title>onnxruntime-web WebGPU bench</title></head>
+<body>
+<pre id="log">running</pre>
+<script src="ORT_SCRIPT_URL"></script>
+<script src="ort_models.js"></script>
+<script>
+(async () => {
+  const log = (s) => console.log(s);
+  const fail = (s) => { log('PERF_ERROR ' + s); log('PERF_DONE'); };
+  try {
+    if (!navigator.gpu) return fail('no navigator.gpu');
+    const adapter = await navigator.gpu.requestAdapter();
+    const info = adapter && adapter.info ? adapter.info.vendor + '/' + adapter.info.architecture : 'unknown';
+    const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
+    const RUNS = 10, WARM = 3;
+    const ortVersion = ort.env.versions ? ort.env.versions.web : 'unknown';
+    log('PERF_ADAPTER ' + info + ' ort=' + ortVersion);
+    const U = GPUBufferUsage;
+    for (const key of Object.keys(ORT_MODELS)) {
+      const m = ORT_MODELS[key];
+      const op = key.split(':')[0];
+      const session = await ort.InferenceSession.create(base64ToBytes(m.model),
+        { executionProviders: ['webgpu'], preferredOutputLocation: 'gpu-buffer' });
+      // onnxruntime-web's WebGPU device is the one of the session; the buffers below must belong to it
+      const device = ort.env.webgpu.device;
+      const readback = device.createBuffer({ size: 4, usage: U.MAP_READ | U.COPY_DST });
+      const feeds = {};
+      m.inputs.forEach((count, i) => {
+        const buf = device.createBuffer({ size: count * 4, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
+        const data = new Float32Array(count);
+        for (let j = 0; j < count; j++) data[j] = 0.5 + ((j * 2654435761) >>> 0) / 4294967296;
+        device.queue.writeBuffer(buf, 0, data);
+        feeds['x' + i] = ort.Tensor.fromGpuBuffer(buf, { dataType: 'float32', dims: inputDims(key, i) });
+      });
+      const runOnce = async () => {
+        const t0 = performance.now();
+        const out = await session.run(feeds);
+        const y = out.y.gpuBuffer;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(y, 0, readback, 0, 4);
+        device.queue.submit([enc.finish()]);
+        await readback.mapAsync(GPUMapMode.READ);
+        readback.getMappedRange(); readback.unmap();
+        const dt = performance.now() - t0;
+        out.y.dispose();
+        return dt;
+      };
+      try {
+        for (let i = 0; i < WARM; i++) await runOnce();
+        const ts = [];
+        for (let i = 0; i < RUNS; i++) ts.push(await runOnce());
+        const [, size] = key.split(':');
+        log('PERF ' + JSON.stringify({ backend: 'onnxruntime-web-webgpu', op, size: Number(size), ms: Math.round(median(ts) * 1000) / 1000,
+          min: Math.round(Math.min(...ts) * 1000) / 1000, adapter: info, ort: ortVersion }));
+      } catch (e) {
+        log('PERF_ERROR ' + key + ': ' + (e && e.message ? e.message : e));
+      }
+      await session.release();
+    }
+  } catch (e) {
+    log('PERF_ERROR ' + (e && e.message ? e.message : e));
+  }
+  log('PERF_DONE');
+  function base64ToBytes(b64) { const s = atob(b64); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+  // the input shapes, from the model key: matmul takes square matrices, the rest take vectors
+  function inputDims(key, i) {
+    const [op, n] = key.split(':');
+    if (op === 'matmul') return [Number(n), Number(n)];
+    return [Number(n)];
+  }
+})();
+</script>
+</body>
+</html>
