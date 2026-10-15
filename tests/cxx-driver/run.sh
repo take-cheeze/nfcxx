@@ -171,6 +171,10 @@ if [ $? -eq 0 ]; then
 else
   bad "link of objects that earlier links used (no recompile)" "$(grep -m2 'prelinker: error' "$tmp/rel.log")"
   echo "--- test 14 log (tail of all three builds' stdout and stderr) ---"; tail -40 "$tmp/rel.log"; echo "---"
+  # the twice<int> symbol in each object of the final link (nm -m on Mach-O shows weak and strong marks too)
+  nm_cmd="nm"; [ "$(uname -s)" != Darwin ] || nm_cmd="nm -m"
+  for o in x.o y.o; do echo "--- test 14 $o:"; (cd "$tmp/rel" && $nm_cmd "$o" 2>&1 | grep -i twice); done
+  echo "--- test 14 files in $tmp/rel:"; ls -la "$tmp/rel"
 fi
 
 echo "pass $pass fail $fail"
