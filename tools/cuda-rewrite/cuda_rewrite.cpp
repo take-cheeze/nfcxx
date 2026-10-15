@@ -303,6 +303,43 @@ struct Piece {
 std::vector<Piece> top_pieces(const std::string &text);
 std::string member_qualifier_placeholder();  // replaced by the real member_qualifier below
 
+// The minimal std::initializer_list the device unit needs for a range-for over a braced list (see the needed block).
+static const char *const INIT_LIST_DEF =
+    "namespace std {\n"
+    "template <class T> class initializer_list {\n"
+    "  const T *_p; unsigned long _n;\n"
+    "public:\n"
+    "  constexpr initializer_list(const T *p, unsigned long n) : _p(p), _n(n) {}\n"
+    "  constexpr const T *begin() const { return _p; }\n"
+    "  constexpr const T *end() const { return _p + _n; }\n"
+    "  constexpr unsigned long size() const { return _n; }\n"
+    "};\n"
+    "}\n";
+
+// True when the text has a range-based for whose range is a braced list: `for (` ... `:` (at its own level) followed by
+// `{`. A `::` is not the range colon.
+static bool has_braced_range_for(const std::string &s) {
+  for (size_t p = s.find("for"); p != std::string::npos; p = s.find("for", p + 3)) {
+    size_t q = p + 3;
+    if (p > 0 && ident_c((unsigned char)s[p - 1])) continue;
+    if (q < s.size() && ident_c((unsigned char)s[q])) continue;
+    while (q < s.size() && (s[q] == ' ' || s[q] == '\t')) q++;
+    if (q >= s.size() || s[q] != '(') continue;
+    int depth = 0;
+    for (size_t i = q; i < s.size(); i++) {
+      char c = s[i];
+      if (c == '(' || c == '[' || c == '{') depth++;
+      else if (c == ')' || c == ']' || c == '}') { depth--; if (depth == 0) break; }
+      else if (c == ':' && depth == 1 && !(i + 1 < s.size() && s[i + 1] == ':') && !(i > 0 && s[i - 1] == ':')) {
+        size_t j = i + 1;
+        while (j < s.size() && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n')) j++;
+        if (j < s.size() && s[j] == '{') return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Ruby: DEVICE_QUALIFIERS (line 1521).
 const std::vector<std::string> DEVICE_QUALIFIERS = {"__global__", "__device__", "__host__", "__forceinline__"};
 
@@ -4451,6 +4488,17 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
     std::string text_base;
     lookup_def(vector_defs_table(), base, text_base);
     out += text_base + "\n";
+  }
+  // A range-for over a braced list (`for (int s : {a, b})`) needs std::initializer_list, and the device unit does not
+  // carry <initializer_list>. Defined here (once) when a kept piece has such a loop and does not define the type itself.
+  {
+    bool braced_for = false, defined_il = false;
+    for (const auto &pc : pieces) {
+      if (!pc.keep) continue;
+      if (has_tok(pc.defined, "initializer_list")) defined_il = true;
+      if (!braced_for && has_braced_range_for(pc.text)) braced_for = true;
+    }
+    if (braced_for && !defined_il) out += INIT_LIST_DEF;
   }
   if (needed["half2"] || needed["__half2"]) {
     needed["__nfcxx_half2_ops"] = true;

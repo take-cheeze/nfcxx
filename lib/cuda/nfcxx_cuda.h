@@ -47,6 +47,10 @@ inline const dim3 gridDim{1, 1, 1};
 inline void __syncthreads(void) {}
 // The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
 inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
+// The optimizer hint __builtin_assume(x): the host compiler has none; the hint does not change the result.
+#ifndef __builtin_assume
+#define __builtin_assume(x) ((void)0)
+#endif
 // Scalar helpers, for the host copy (never run).
 inline unsigned int __float_as_uint(float f) { unsigned int u; __builtin_memcpy(&u, &f, sizeof u); return u; }
 inline int __float2int_rn(float f) { return (int)f; }

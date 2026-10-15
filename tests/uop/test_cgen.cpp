@@ -440,6 +440,7 @@ static std::vector<const UOp*> random_chain(Graph& g, int64_t rows, Rng& rnd, in
     const UOp* a = pool[rnd(static_cast<unsigned>(pool.size()))];
     const int64_t rank = static_cast<int64_t>(a->shape.size());
     const Syms as = symbols_of(a);
+    const Dims ds = dims_of(a);   // the polynomials too: a padded symbol is N+1, which symbols_of does not name
     const UOp* out = nullptr;
     switch (rnd(8)) {
       case 0: out = g.add(a, g.mul(a, g.fconst(f32, 0.5, a->shape))); break;
@@ -454,10 +455,10 @@ static std::vector<const UOp*> random_chain(Graph& g, int64_t rows, Rng& rnd, in
         if (rank == 2) out = g.pad(a, {0, 0}, {0, 1});
         break;
       case 5:
-        if (rank == 2) out = g.reshape(a, {a->shape[0], 1, a->shape[1]}, {as[0], nullptr, as[1]});   // keeps both symbols
+        if (rank == 2) out = g.reshape_poly(a, {a->shape[0], 1, a->shape[1]}, {ds[0], Poly(1), ds[1]});   // keeps both polynomials
         break;
       case 6:
-        if (rank == 2) out = g.reshape(a, {a->shape[1], a->shape[0]}, {as[1], as[0]});   // moves them
+        if (rank == 2) out = g.reshape_poly(a, {a->shape[1], a->shape[0]}, {ds[1], ds[0]});   // moves them
         break;
       default: out = g.flip(a, {rank - 1}); break;
     }
@@ -729,6 +730,44 @@ static void poly_sizes() {
   CHECK_THROWS(my->run({{"x", Array::from_doubles(f32, {3, 2}, std::vector<double>(6, 1.0))}, {"y", Array::from_doubles(f32, {5, 2}, std::vector<double>(10, 1.0))}}));
   CHECK_THROWS(my->run({{"x", Array::from_doubles(f32, {2, 2}, std::vector<double>(4, 1.0))}, {"y", Array::from_doubles(f32, {6, 2}, std::vector<double>(12, 1.0))}}));
 
+  // pad (stage 7, step 1 of the polynomial forms): padding N by 1 before the rows is N+1, explicitly (pad_poly) or derived (pad); the
+  // padded program is dynamic and runs at every size up to the bound, with no fallback
+  const Build padded = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {N, Poly(4)});                              // [N, 4]
+    const UOp* h = g.add(x, g.mul(x, g.fconst(f32, 0.5, x->shape)));                       // [N, 4], used by two pads
+    const UOp* p = g.pad_poly(h, {1, 0}, {0, 2}, {N + Poly(1), Poly(6)});                  // [N+1, 6]
+    const UOp* q = g.pad(h, {0, 1}, {1, 0});                                               // derived: [N+1, 5]
+    return std::vector<const UOp*>{g.mul(p, g.fconst(f32, 0.5, p->shape)), g.reduce_sum(q, {1}), g.neg(q)};
+  };
+  const CProgram pp = compare_sizes("pad: [N+1, 6] and [N+1, 5]", padded, 3, 8, {1, 2, 3, 5, 8}, 4);
+  CHECK(pp.dynamic && pp.source.find("(nfc_sz0 + 1)") != std::string::npos && pp.unplanned == 0);
+  CHECK(pp.temporaries >= 1 && pp.arena_bytes > 0);   // the padded intermediates are bounded: N+1 is at most 9
+
+  // a chain: x[1:N] (N-1 rows) padded by 2 before and 1 after is N+2 rows, reduced over them; N is at least 2 (N-1 >= 1)
+  const Build padcut = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {N, Poly(4)});                              // [N, 4]
+    const UOp* c = g.shrink_poly(x, {1, 0}, {n, 4}, {N, Poly(4)});                          // [N-1, 4]
+    const UOp* p = g.pad(c, {2, 0}, {1, 0});                                               // [N+2, 4]
+    return std::vector<const UOp*>{g.reduce_sum(p, {0}), g.mul(p, g.fconst(f32, 2.0, p->shape))};
+  };
+  const CProgram ppc = compare_sizes("pad of a cut: x[1:N] padded to N+2", padcut, 3, 8, {1, 2, 3, 5, 8}, 4, 2);
+  CHECK(ppc.dynamic && ppc.source.find("(nfc_sz0 + 2)") != std::string::npos);
+
+  // what must still fall back: a pad of a constant's Wild dimension (its size is no polynomial). The graph runs at its representative size
+  // only, like any graph that falls back
+  const Build padwild = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {Poly::Symbol("N"), Poly(4)});
+    const UOp* c = g.fconst(f32, 1.5, {1, 4});                                              // [1, 4]: the second dimension is Wild
+    return std::vector<const UOp*>{g.pad(c, {0, 1}, {0, 0}), g.reduce_sum(x, {1})};         // [1, 5]
+  };
+  const CProgram ppw = compare_sizes("pad of a Wild dimension: falls back", padwild, 3, 8, {3, 2, 5}, 4);
+  CHECK(!ppw.dynamic && ppw.symbols.empty());
+
   // what must still fall back: a shape-only reshape of a symbolic dimension (2N is not named, so it is Unknown), and a polynomial
   // dimension whose symbol M names no input (M is never fed): both keep integer loops and run at their own sizes only
   const Build shape_only = [](Graph& g, int64_t n, int64_t bound) {
@@ -763,6 +802,19 @@ static void poly_sizes() {
   gbnd.symbol("N", 4);
   CHECK_THROWS(gbnd.var_poly("z", f32, {9}, {Poly(2) * Poly::Symbol("N")}));        // 2N is at most 8 with N at most 4
   CHECK(gbnd.var_poly("z", f32, {8}, {Poly(2) * Poly::Symbol("N")})->shape == (Shape{8}));
+  // pad: the explicit form takes the padded polynomial, which must be the input's plus the amounts, and the integers must agree
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N"), Poly(4)}));              // N is not N+1
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N") + Poly(1), Poly(5)}));    // the second dimension is 4
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly(4), Poly(4)}));                        // an integer 4 is not N+1
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N") + Poly(1)}));             // one polynomial for two dimensions
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("Q") + Poly(1), Poly(4)}));    // Q+1 is not N+1 (and Q is no symbol)
+  const UOp* pe = ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N") + Poly(1), Poly(4)});
+  CHECK(pe->shape == (Shape{4, 4}) && pe->sym[0].kind == SymDim::Poly && pe->sym[0].poly == Poly::Symbol("N") + Poly(1));
+  CHECK(pe->sym[1].kind == SymDim::Int && dims_of(pe)[0] == Poly::Symbol("N") + Poly(1));
+  const UOp* pd = ge.pad(xe, {1, 0}, {0, 0});   // the shape-only form derives the same polynomial
+  CHECK(pd == pe);   // the same node: interning
+  CHECK(ge.pad(xe, {0, 0}, {0, 0})->sym[0].kind == SymDim::Sym);   // an unpadded symbol stays the symbol
+
   // the polynomial the explicit forms keep (and that the shape-only forms do not)
   const UOp* xs = ge.var_poly("x", f32, {3, 4}, {Poly::Symbol("N"), Poly(4)});
   CHECK(dims_of(xs)[0] == Poly::Symbol("N") && dims_of(xs)[1] == Poly(4));
