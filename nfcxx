@@ -542,6 +542,11 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
     find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     for f in "$root/build/qbe/qbe" "$root/build/cproc/cproc"; do [ ! -f "$f" ] || cache_sha < "$f"; done
+    # The EDG driver: the eccp script and environment that the wrapper (bin/eccp) runs and sources, and the configuration it reads
+    for f in "$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" "$(sed -n 's/^\. "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" \
+             "${EDG_BASE:-$root/build/edg-base}/edg_eccp_config"; do
+      if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
+    done
     "${NFCXX_CXX:-g++}" --version | head -1; cc --version | head -1
     for f in $deps; do printf '%s ' "$f"; if [ -f "$f" ]; then cache_sha < "$f"; else echo missing; fi; done
   })
