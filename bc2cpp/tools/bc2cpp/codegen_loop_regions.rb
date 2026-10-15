@@ -5,6 +5,10 @@
 require_relative 'bytecode_ir_regions'
 
 class CodeGen
+  # CORE_BLOCK_ELEMENT_HINT: an element hint (with_element_hint) that STRICT_HINTS
+  # never forces: compile_send unwraps `klass` and keeps the by-name else arm.
+  SoftElementHint = Struct.new(:klass)
+
   # Shared skeleton of every recognize_*_regions below: a block-carrying send
   # linearly preceded by the instruction that fills its block register
   # (`BLOCK`, or `LOADSYM` for `&:sym`). +layout+ maps the send to how many
@@ -689,6 +693,15 @@ class CodeGen
     yield
   ensure
     @elem_class_hint = prev
+  end
+
+  # CORE_BLOCK_ELEMENT_HINT: with_element_hint for a block with several element
+  # parameters ({ register => hint }, block_fallback_element_hints): the
+  # instruction's receiver gets the hint of the parameter it still holds.
+  def with_element_hints(block_irep, insn, i, hints, &block)
+    reg, hint = hints.find { |elem_reg, _| element_receiver?(block_irep, i, insn.reg, elem_reg) } if
+      !hints.empty? && %w[SEND SEND0].include?(insn.op)
+    with_element_hint(block_irep, insn, i, reg, hint, &block)
   end
 
   # ELEMENT_CLASS_SUPPORT: does `reg` still hold the loop element at `idx`? mrbc

@@ -20,6 +20,8 @@ EQ_TARGET_EQ_IMPL = "#{CPP_NAME.call('Game::EqTarget', '==')}_impl"
 SRC = <<~'RUBY'
   class Array
     def bc2cpp_test_array_owner; end
+    # A program definition of a core iterator: its block gets no element hint.
+    def partition; [[], []]; end
   end
   class Hash
     def bc2cpp_test_hash_owner; end
@@ -120,9 +122,67 @@ SRC = <<~'RUBY'
           end
         end
       end
+      def sprite_pairs_fallback
+        @sprites.each do |id, sprite|
+          sprite.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
+      def unknown_pairs_fallback
+        @unknown.each do |id, sprite|
+          sprite.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
       def unknown_names_fallback
         @unknown.each_value do |sprite|
           sprite.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
+    end
+    class MixedOwner
+      def initialize
+        @mixed = [Game::Actor.new, Game::Other.new]
+        @grown = [Game::Actor.new]
+        @pure = [Game::Actor.new]
+      end
+      def grow; @grown << Game::Other.new; end
+      def mixed_names_fallback
+        @mixed.select do |x|
+          x.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
+      def grown_names_fallback
+        @grown.select do |x|
+          x.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
+      def pure_names_fallback
+        @pure.select do |x|
+          x.name
           begin
             1 / 0
           rescue ZeroDivisionError
@@ -246,6 +306,77 @@ SRC = <<~'RUBY'
           end
         end
       end
+      def target_names_map_fallback
+        targets.map do |actor|
+          actor.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
+      def target_names_inject_fallback
+        targets.inject(0) do |count, actor|
+          actor.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            count
+          end
+        end
+      end
+      def target_names_sort_fallback
+        targets.sort do |a, b|
+          a.name
+          b.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            0
+          end
+        end
+      end
+      def target_names_find_fallback
+        targets.find do |actor|
+          actor.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
+      def target_pairs_map_fallback
+        targets.map do |actor, extra|
+          actor.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            extra
+          end
+        end
+      end
+      def target_names_partition_fallback
+        targets.partition do |actor|
+          actor.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
+      def untyped_names_map_fallback
+        @untyped.map do |actor|
+          actor.name
+          begin
+            1 / 0
+          rescue ZeroDivisionError
+            nil
+          end
+        end
+      end
       def existing_name; @roster.existing(1).name; end
       def combatant_alive; @combatants.each { |combatant| combatant.alive? }; end
     end
@@ -273,7 +404,8 @@ Dir.mktmpdir do |dir|
   class_layout = { 'Game::Party' => { 'roster' => 'Actors', 'actors' => 'Array', 'untyped' => 'Array',
                                      'combatants' => 'Array' },
                   'Game::HashValueOwner' => { 'sprites' => 'Hash', 'unknown' => 'Hash' },
-                  'Game::FilterMapOwner' => { 'filtered' => 'Array', 'heterogeneous' => 'Array' } }
+                  'Game::FilterMapOwner' => { 'filtered' => 'Array', 'heterogeneous' => 'Array' },
+                  'Game::MixedOwner' => { 'mixed' => 'Array', 'grown' => 'Array', 'pure' => 'Array' } }
   class_annotations = ClassAnnotations.extract(ireps, registry, owners)
   party_init = registry['initialize'].find { |md| md.owner == 'Game::Party' }
   check.call('Array<Klass> argument keeps the Array receiver type',
@@ -436,6 +568,42 @@ Dir.mktmpdir do |dir|
   check.call('fallback Array#each_with_object leaves unknown elements dynamic',
              untyped_each_with_object_code.include?('BLOCK_FALLBACK :each_with_object') &&
              !untyped_each_with_object_code.include?('ELEMENT :name -> Game::Actor#name'), true)
+  # CORE_BLOCK_ELEMENT_HINT: the shapes of sig/native/core_block_params.rbs, for an element proven by the same
+  # scans as each/each_with_index above; unknown, mixed or foreign-written elements and mismatched shapes get none.
+  element_name = 'ELEMENT :name -> Game::Actor#name'
+  fallback_code_of = lambda do |method_name, owner|
+    gen.compile_method(registry[method_name].find { |md| md.owner == owner }.irep).fetch(:code)
+  end
+  { 'map' => 'target_names_map_fallback', 'inject' => 'target_names_inject_fallback',
+    'find' => 'target_names_find_fallback' }.each do |iterator, method_name|
+    code = fallback_code_of.call(method_name, 'Game::Party')
+    check.call("fallback Array##{iterator} devirtualizes the element parameter with guard/fallback",
+               code.include?("BLOCK_FALLBACK :#{iterator}") && code.include?(element_name) &&
+                 code.include?('mrb_obj_class(M, r') && code.match?(/(?:mrb_funcall|bc2cpp_funcall_explicit)\(M,/), true)
+  end
+  sort_code = fallback_code_of.call('target_names_sort_fallback', 'Game::Party')
+  check.call('fallback Array#sort types both element parameters',
+             sort_code.include?('BLOCK_FALLBACK :sort') && sort_code.scan(element_name).size >= 2, true)
+  { 'a destructuring two-parameter map block' => ['target_pairs_map_fallback', 'Game::Party', 'map'],
+    'a program definition of Array#partition' => ['target_names_partition_fallback', 'Game::Party', 'partition'],
+    'an unknown element class' => ['untyped_names_map_fallback', 'Game::Party', 'map'],
+    'a mixed-class Array literal' => ['mixed_names_fallback', 'Game::MixedOwner', 'select'],
+    'an Array a foreign class is pushed into' => ['grown_names_fallback', 'Game::MixedOwner', 'select'] }
+    .each do |why, (method_name, owner, iterator)|
+    code = fallback_code_of.call(method_name, owner)
+    check.call("NEG: fallback Array##{iterator} gets no element hint for #{why}",
+               code.include?("BLOCK_FALLBACK :#{iterator}") && !code.include?(element_name), true)
+  end
+  pure_code = fallback_code_of.call('pure_names_fallback', 'Game::MixedOwner')
+  check.call('fallback Array#select devirtualizes an ivar whose every write is one class',
+             pure_code.include?('BLOCK_FALLBACK :select') && pure_code.include?(element_name), true)
+  pairs_code = fallback_code_of.call('sprite_pairs_fallback', 'Game::HashValueOwner')
+  check.call('fallback Hash#each types the value parameter of a |key, value| block',
+             pairs_code.include?('BLOCK_FALLBACK :each') && pairs_code.include?(element_name) &&
+               pairs_code.match?(/(?:mrb_funcall|bc2cpp_funcall_explicit)\(M,/), true)
+  unknown_pairs_code = fallback_code_of.call('unknown_pairs_fallback', 'Game::HashValueOwner')
+  check.call('NEG: fallback Hash#each leaves unknown values dynamic',
+             unknown_pairs_code.include?('BLOCK_FALLBACK :each') && !unknown_pairs_code.include?(element_name), true)
   # The real build's mruby core registry contributes this native marker.
   # Keep it local to these checks so the known receiver exercises the same
   # empty? intrinsic ordering as a shipped build.
