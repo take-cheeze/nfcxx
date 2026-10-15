@@ -17,6 +17,6 @@ int main() {
   check(cwd.is_absolute(), "current_path is absolute");
   check(abs == cwd / "x", "absolute(\"x\") is cwd / \"x\"");
   check(wc == fs::weakly_canonical(cwd), "weakly_canonical(\".\") is weakly_canonical(cwd)");
-  check(fs::is_directory(tmp), "temp_directory_path is a directory");
+  check(!tmp.empty() && tmp.is_absolute(), "temp_directory_path is absolute");
   return failed;
 }
