@@ -334,7 +334,8 @@ shapes are added in two steps, without changing what the static path means:
      dynamic. A shrink that ends at its symbol keeps the whole dimension; any other cut of a symbolic dimension is a literal cut, which is an
      integer of the cut's size, and the symbol must be at least its end: `CProgram::Symbol::minimum`, checked at run time.
    - **The shape-only forms are the old rules.** `reshape(x, shape)`, `expand(x, shape)` and `shrink(x, starts, ends)` name no symbol. A reshape keeps
-     the leading symbolic dimensions when their sizes are unchanged, and is `Unknown` otherwise; an expand or pad of a symbolic dimension is `Unknown`;
+     the leading symbolic dimensions when their sizes are unchanged, and is `Unknown` otherwise; an expand of a symbolic dimension is `Unknown`;
+     a pad of one is derived (`N+1`, see step 3);
      a size-1 dimension that a shape-only expand grows is `Wild`, as before. A cut of a symbolic dimension is a literal cut (before, a cut that kept
      the representative size was taken as the whole dimension). The planning of a graph with no symbol is the one of the old rules, so its C is
      unchanged (see Verification).
@@ -350,7 +351,7 @@ shapes are added in two steps, without changing what the static path means:
    - **Arena.** The planner is unchanged and sized from the bounds, so a dynamic program keeps the saving of PR #219. An intermediate without a
      bound keeps a malloc of its run-time size. A symbol with a bound is checked against it at run time, so the arena is safe.
    - **Fallback.** When codegen needs a dimension that is `Wild` or `Unknown` (a graph output that is a constant or a size-1 broadcast, a
-     shape-only reshape, pad or expand of a symbolic dimension, an output that is one of these), or a symbol names no input, `render_c` renders the
+     shape-only reshape or expand of a symbolic dimension, a pad of a Wild or Unknown dimension, an output that is one of these), or a symbol names no input, `render_c` renders the
      graph again with integer loops: `CProgram::dynamic` is false, the program has no size argument and runs only at its representative sizes (other
      sizes throw). Its C is the one of the static renderer.
    - **Verification.** `tests/uop/test_cgen.cpp`: `dynamic_sizes` (a batch chain with a constant, a reduction and an expand, at sizes 1, 2, 3, 5 and 8 with bound 8, and 9 is refused,
@@ -380,15 +381,27 @@ shapes are added in two steps, without changing what the static path means:
    - an elementwise op keeps a polynomial when its sources agree on it; an integer of size above 1 next to a symbolic dimension is now
      Unknown (it does not follow the symbol at other sizes; before, the symbol was kept, which was only right at the representative size);
    - an integer entry must be the dimension's size, and a polynomial whose symbols have bounds must not exceed its bound at build time.
+   `pad_poly(x, before, after, dims)` takes the polynomial of each dimension of the result, which must be the input's plus the amounts (`N` padded by
+   one row before is `N+1`; `N` for `N+1` is an `Error`), and the shape-only `pad(x, before, after)` derives the same polynomial, so a padded
+   symbolic dimension is exact at every size and never falls back. A Wild (constant) or Unknown dimension that is padded is `Unknown`, as before.
    The renderer writes a polynomial dimension as a C expression in the run-time sizes (`(2 * nfc_sz0)`, `(nfc_sz0 - 1)`) for the loop
    bounds, the strides, the buffer sizes and the `Pad` and `Flip` offsets. Its largest value (for the arena) is `SymExpr::upper_bound`
    of the symbols' bounds. `CProgram::checks` are run-time conditions that `CModule::run` evaluates before any code runs: every
    polynomial dimension of the graph is at least 1 and at most its bound, a cut that ends at a polynomial (or an integer, when its input
    is a polynomial) ends within its input, and an input or output's polynomial dimension is the size of its feed. A polynomial that does
    not agree with the representative shapes is an `Error` at `render_c`. The static programs are unchanged: the generated C of the 51
-   static programs of `test_cgen.cpp` is byte-identical before and after this step (checked with a dump of every rendered program).
-
-Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
+   static programs of `test_cgen.cpp` is byte-identical before and after this step (checked with a dump of every rendered program). The pad change of step 3's
+   polynomial forms (below) keeps those: the 30 renders of graphs with no symbol are unchanged, and only symbolic programs changed.
+4. **Still not dynamic** (what remains after steps 1 to 3). A program falls back to integer loops (its C is the static one, and it runs at its
+   representative sizes only) when:
+   - a shape-only `reshape` or `expand` of a symbolic dimension: the integer target does not say which of its sizes is a symbol or a
+     polynomial, and deriving the new dimension (as `-1` does in `hir`) would need that information. The explicit forms `reshape_poly` and
+     `expand_poly` take it, and are dynamic. A shape-only reshape that keeps the leading symbols is still exact and dynamic;
+   - a pad of a Wild (constant) or Unknown dimension, or an output that is one of those (a constant or a size-1 broadcast, item (b) above);
+   - a symbol names no input, so no feed gives its size.
+   Not in the UOp layer at all: a literal cut of a symbolic dimension is an integer of the cut's size (`x[0:3]` of `[N, 4]` is 3 rows for
+   every `N >= 3`, by the builder's meaning of a literal end), and `hir` binds its symbols before it lowers (item (d)). Data-dependent shapes
+   (`NonZero`, boolean masks) stay unsupported.
 
 ## Tests
 
@@ -413,8 +426,9 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 - `test_ort.cpp`: the ONNX Runtime back end (above), against the interpreter; prints SKIP without the library.
 - `test_cgen.cpp`: the C renderer (above), including the programs that run at several sizes (stage 7, step 2), and the polynomial dimensions
   (`poly_sizes`, step 3): `N-1` from `x[1:N]` and `2*N` from a reshape, a chain of both, a symbol in the middle of a reshape, two symbols
-  in one dimension, a polynomial input checked against its feed, the fallbacks (a shape-only reshape, a symbol that no input names) and the
-  refusals; each run at several sizes, equal to the interpreter bit for bit.
+  in one dimension, a polynomial input checked against its feed, `N+1` from a pad (`pad_poly` and the derived `pad`) and `N+2` from a pad
+  of a cut, the fallbacks (a shape-only reshape, a pad of a Wild dimension, a symbol that no input names) and the refusals (including the
+  `pad_poly` dimensions that are not the input's plus the amounts); each run at several sizes, equal to the interpreter bit for bit.
 - `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above, with 32-bit and with 64-bit defaults.
 
 Replacing a rule by a wrong one (checked by hand with `x%1 -> x` and with the float reassociation) makes the runs fail.
