@@ -396,20 +396,55 @@ end
 # (const unsigned_short 0))`, `(scalar 2 ...)`, `(zero 4 4)`). Returns [".b8", "{b0,...}", size] as a byte array, or nil
 # when the initializer is not that shape. Floats are not encoded here (their bit patterns are not written out), so a
 # float scalar makes the caller refuse the global by name.
+# The IEEE binary32 bit pattern of a decimal float constant of the IR (text such as 0.5, -0.0, 1.0), or nil when the value
+# is not exactly a binary32 (for example 0.1, whose nearest binary32 is not 0.1). Exact: the value is scaled by powers of
+# two, which doubles hold without rounding, and the mantissa must be an integer in [2^23, 2^24). No rounding is done.
+def float32_bits(text)
+  x = text.to_f
+  return nil if x.nan? || x.infinite?
+  sign = (x < 0 || (x == 0 && text.start_with?("-"))) ? 0x80000000 : 0
+  x = x.abs
+  return sign if x == 0
+  e = 0
+  while x >= 2.0
+    x = x / 2.0
+    e += 1
+    return nil if e > 200
+  end
+  while x < 1.0
+    x = x * 2.0
+    e -= 1
+    return nil if e < -200
+  end
+  frac = (x - 1.0) * 8388608.0
+  return nil unless frac == frac.floor
+  exp = e + 127
+  return nil unless exp >= 1 && exp <= 254
+  sign | (exp << 23) | frac.to_i
+end
+
 def byte_const_init(init, name, size)
   return nil unless init && init.length >= 2 && size && size > 0
   bytes = Array.new(size, 0)
   covered = Array.new(size, false)
+  scalars = 0
   init.drop(1).each do |f|
     case head_of(f)
     when "scalar"
       return nil unless f.length == 4 && head_of(f[3]) == "const"
+      scalars += 1
       off = as_int(f[1])
       t = parse_type(f[2])
-      return nil unless t && t[0] == "int"
+      return nil unless t && (t[0] == "int" || t[0] == "float")
       n = t[1]
       return nil unless off && n && n > 0 && off + n <= size
-      v = t[3] ? (f[3][2].to_s.end_with?("1") ? 1 : 0) : as_int(f[3][2])
+      if t[0] == "float"
+        raise Refused, "global #{name}: a #{n}-byte float constant is not lowered" unless n == 4
+        v = float32_bits(f[3][2].to_s)
+        raise Refused, "global #{name}: float constant #{f[3][2]} is not exactly a 32-bit float" unless v
+      else
+        v = t[3] ? (f[3][2].to_s.end_with?("1") ? 1 : 0) : as_int(f[3][2])
+      end
       return nil unless v
       n.times do |i|
         raise Refused, "global #{name}: initializer overlaps at byte #{off + i}" if covered[off + i]
@@ -429,7 +464,37 @@ def byte_const_init(init, name, size)
     end
   end
   return nil unless covered.all?
+  # all-zero data is the zero path's (block shared memory for a static), not a byte constant
+  return nil if bytes.all? { |b| b == 0 }
   [".b8", "{" + bytes.join(",") + "}", size]
+end
+
+# True when the initializer is explicit zero data covering the whole object: integer or float scalars that are all zero,
+# and zero runs (the front end writes `{0}`-style lists this way). Such data is the zero path's.
+def all_zero_init?(init, size)
+  return false unless init && init.length >= 2 && size && size > 0
+  covered = Array.new(size, false)
+  init.drop(1).each do |f|
+    case head_of(f)
+    when "scalar"
+      return false unless f.length == 4 && head_of(f[3]) == "const"
+      t = parse_type(f[2])
+      return false unless t && (t[0] == "int" || t[0] == "float")
+      off = as_int(f[1])
+      n = t[1]
+      return false unless off && n && n > 0 && off + n <= size
+      return false unless f[3][2].to_s.gsub("0", "").gsub(".", "").gsub("-", "").gsub("+", "").gsub("e", "").gsub("E", "").empty?
+      n.times { |i| covered[off + i] = true }
+    when "zero"
+      off = as_int(f[1])
+      len = as_int(f[2])
+      return false unless off && len && off >= 0 && len >= 0 && off + len <= size
+      len.times { |i| covered[off + i] = true }
+    else
+      return false
+    end
+  end
+  covered.all?
 end
 
 def imm(t, v)
@@ -1774,15 +1839,22 @@ def emit_module(src, sm, kernels = [])
         consts[name] = [carr[0], carr[1], align, carr[2]]
         next
       end
-      # integer scalars and zero runs at byte offsets (see byte_const_init): a writable global with its bytes as the
-      # initializer (a .global, so a store to it stays valid)
+      # integer scalars and zero runs at byte offsets (see byte_const_init). A static one is block-private in this emitter
+      # (a zero static is block-shared memory, and shared memory has no initializer), so its bytes are a read-only .const:
+      # a store to it is rejected by ptxas rather than corrupting other blocks. A global one is a writable .global with
+      # its bytes as the initializer, so each program sees one object with the initial values.
       binit = byte_const_init(init, name, size)
-      if binit
+      if binit && linkage == "static"
+        consts[name] = ["b8", binit[1], align, size]
+        next
+      elsif binit
         globals[name] = [size, align, binit[1]]
         next
       end
-      raise Refused, "global #{name}: only zero initializers are lowered" unless init && init.length == 2 && head_of(init[1]) == "zero"
-      raise Refused, "global #{name}: partial zero initializer" unless as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
+      # a zero initializer: the zero form, or explicit zero scalars covering the object (all zero data is zero)
+      zero_form = init && init.length == 2 && head_of(init[1]) == "zero"
+      raise Refused, "global #{name}: only zero initializers are lowered" unless zero_form || all_zero_init?(init, size)
+      raise Refused, "global #{name}: partial zero initializer" if zero_form && !(as_int(init[1][1]) == 0 && as_int(init[1][2]) == size)
       if linkage == "static" || (linkage == "weak" && name.start_with?("_ZZ"))
         shared[name] = [size, align]
       else
