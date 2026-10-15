@@ -4,7 +4,7 @@
 EDG puts COMDAT functions (inline and template instantiations) in every translation unit that
 uses them, marked __weak__. GCC honours the attribute so the link merges the copies; cproc drops
 attributes, so QBE emits them as strong symbols and the link fails with "multiple definition".
-Usage: weak-symbols.py [--c-input] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
+Usage: weak-symbols.py [--c-input] [--sym-prefix=P] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
 """
 import re
 import sys
@@ -59,14 +59,18 @@ def weak_names(text, extern_inline):
 def main():
     args = sys.argv[1:]
     extern_inline = True
-    if args and args[0] == '--c-input':
-        extern_inline = False
-        args = args[1:]
+    prefix = ''   # --sym-prefix=P: the target's label prefix (Mach-O: '_'), as scripts/weak-symbols.rb
+    while args and args[0].startswith('--'):
+        opt, args = args[0], args[1:]
+        if opt == '--c-input':
+            extern_inline = False
+        elif opt.startswith('--sym-prefix='):
+            prefix = opt[len('--sym-prefix='):]
     c_path, asm_path = args[:2]
     text = open(c_path).read()
     asm = open(asm_path).read()
     defined = set(re.findall(r'^([A-Za-z_.$][\w.$]*):', asm, re.M))
-    weak = sorted(n for n in weak_names(text, extern_inline) if n in defined)
+    weak = sorted(prefix + n for n in weak_names(text, extern_inline) if prefix + n in defined)
     if weak:
         with open(asm_path, 'a') as f:
             f.write('\n' + ''.join(f'.weak {n}\n' for n in weak))
