@@ -93,6 +93,16 @@ else
 fi
 pass overload_pair.cu "overload pair: exact"
 pass fnptr_return.cu "fnptr return: exact"
+pass bare_dim.cu "bare dim: exact"
+# Mutant: the kernel adds 8 where the host expects 7, so the check must see a mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" bare_dim_mutant.cu -o "$out/bdm.o" > "$out/bdm.log" 2>&1 \
+   && "$root/nfcxx" "$out/bdm.o" -L"$cuda/lib64" -lcudart -o "$out/bdm" >> "$out/bdm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/bdm" || true) \
+   && [[ "$run" == *"mismatch"* ]]; then
+  echo "mutant bare_dim: caught: $run"
+else
+  echo "FAIL bare_dim: the mutant was not caught"; fail=1
+fi
 pass pack_trailing.cu "pack trailing: no error, 0 mismatches"
 # Mutant: the kernel adds 1 to every output, so the check must see one mismatch.
 if "$root/nfcxx" -c -I"$cuda/include" pack_trailing_mutant.cu -o "$out/pt.o" > "$out/pt.log" 2>&1 \
