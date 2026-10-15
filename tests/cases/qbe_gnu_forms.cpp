@@ -26,5 +26,5 @@ int main() {
     if (!(std::numbers::pi_v<double> > 3.0)) return 5;
     return tl == 7 ? 0 : 4;
 }
-// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it
+// X86-ONLY-LINUX: the qbe arm64 backend has no extern thread (TLS) support (gcc passes; the gate covers the whole file); macOS arm64 runs it
 // MACOS-XFAIL-qbe: the QBE path emits a directive ld64/cproc does not accept on Mach-O (__tls_init alias)

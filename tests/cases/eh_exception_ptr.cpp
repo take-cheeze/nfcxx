@@ -280,4 +280,4 @@ int main()
   std::printf("bad=%d\n", bad);
   return bad;
 }
-// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it
+// X86-ONLY-LINUX: exits with SIGSEGV (139) on Linux aarch64 with both backends; macOS arm64 runs it
