@@ -71,9 +71,9 @@ if [ -n "${NFCXX_C_INPUT:-}" ]; then
 else
   ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
 fi
-# macOS: calls to the exported libc++ functions that return a class go through the thunks of scripts/darwin-sret.sh.
-if [ "$(uname -s)" = Darwin ]; then
-  rename=$("$(dirname "$0")/darwin-sret.sh" >/dev/null && echo "$(dirname "$0")/../build/darwin-sret/rename.sed")
+# macOS and Linux aarch64: calls to the exported library functions that return a class go through the thunks of scripts/sret.sh.
+if [ -n "$("$(dirname "$0")/sret.sh")" ]; then
+  rename="$(dirname "$0")/../build/sret/rename.sed"
   sed -E -f "$rename" "$tmp/pp.c" > "$tmp/pp.sret.c" && mv "$tmp/pp.sret.c" "$tmp/pp.c"
   # cproc has no _Atomic. libc++'s atomic operations are calls into libc++ (not inline), so the qualifier only matters
   # for the layout of the member it declares (__atomic_base's __a_value); the atomicity comes from the library.
