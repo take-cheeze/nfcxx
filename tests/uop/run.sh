@@ -43,6 +43,7 @@
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
 #   The two Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   UOP_JOBS=N              the library objects are compiled N at a time (default: the CPU count)
 #   UOP_ONLY="test_np np_compat"  run only these programs (CI runs the suite as parallel groups, see .github/workflows/ci.yml);
 #                           the ONNX models and the Python checks run on the models the selected programs wrote, and the
 #                           poly languages (tests/uop/run_poly.sh) are skipped: CI runs them as their own job
@@ -55,21 +56,58 @@ lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp l
 tests=(test test_ut test_np test_nn test_onnx test_sym test_ort test_tinygrad test_shaping test_grad test_cgen np_compat)
 [ -n "${UOP_ONLY:-}" ] && read -ra tests <<<"$UOP_ONLY"
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# The library is compiled once per back end: each lib source becomes an object, and every test program of the back end links
+# those objects instead of compiling the same sources again. Compiled in parallel ($UOP_JOBS, default the CPU count), only
+# when a test has to be built. The prelinker records each object's path in its .ti template record, so when TEST_BIN_CACHE
+# is set the objects are built in a directory there named by a key of the back end, the command and the sources (lib,
+# scripts, nfcxx): a later run with the same sources finds them complete (the marker) and uses them where they are.
+# Sets objs (the object paths) and objs_state (ok or failed).
+lib_objects() {
+  local label=$1; shift
+  local dir logs=$tmp/$label/lib-logs key njobs=${UOP_JOBS:-$(nproc)} f b n=0
+  key=$({ printf '%s\n' "$label" "$@"; find lib scripts nfcxx -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; } | sha256sum | cut -c1-24)
+  if [ -n "${TEST_BIN_CACHE:-}" ] && [ -z "$UOP_HOST" ]; then
+    dir=$(mkdir -p "$TEST_BIN_CACHE" && cd "$TEST_BIN_CACHE" && pwd)/lib-$key
+    if [ -e "$dir/complete" ]; then
+      objs=("$dir"/*.o); objs_state=ok; echo "     $label: library objects from $dir"; return 0
+    fi
+    rm -rf "$dir"
+  else
+    dir=$tmp/$label/lib
+  fi
+  mkdir -p "$dir" "$logs"
+  for f in "${lib[@]}"; do
+    b=$(basename "$f" .cpp)
+    { "$@" -c -I lib/uop "$f" -o "$dir/$b.o" > "$logs/$b.log" 2>&1 || echo "$b" >> "$logs/failed"; } &
+    n=$((n + 1)); [ $((n % njobs)) -ne 0 ] || wait   # batches (wait -n needs bash 4.3, and macOS ships 3.2)
+  done
+  wait
+  if [ -e "$logs/failed" ]; then
+    for b in $(cat "$logs/failed"); do echo "FAIL $label uop/lib $b (build)"; head -30 "$logs/$b.log"; done
+    rm -rf "$dir"; objs_state=failed; return 1
+  fi
+  objs=("$dir"/*.o); objs_state=ok
+  case $dir in "$tmp"/*) ;; *) touch "$dir/complete" ;; esac   # the marker: only a finished build is kept in TEST_BIN_CACHE
+}
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
   label=$1; shift
+  objs=(); objs_state=
   mkdir -p "$tmp/$label/onnx" "$tmp/$label/import"
   command -v python3 >/dev/null && python3 tests/uop/onnx_import_gen.py "$tmp/$label/import" | sed "s/^/     $label /"
   for t in "${tests[@]}"; do
     ldx=()   # nfcxx programs export type_info vtables that break the exceptions inside libnfconnxsim.so: export nothing (scripts/onnxsim/exe.map)
     [ -n "$CC_IS_NFCXX" ] && [ "$t" = test_grad ] && ldx=(-Wl,--version-script=scripts/onnxsim/exe.map)
-    cargs=(-I lib/uop tests/uop/$t.cpp "${lib[@]}" -ldl "${ldx[@]}")
+    cargs=(-I lib/uop tests/uop/$t.cpp "${lib[@]}" -ldl "${ldx[@]}")   # the cache key names the sources, not the objects
     cached=""; [ -n "$UOP_HOST" ] || cached=$(bin_cache_file "$t-$label" "NFCXX_BACKEND=${NFCXX_BACKEND:-}" "$@" "${cargs[@]}")
     if [ -n "$cached" ] && [ -x "$cached" ]; then
       cp -p "$cached" "$tmp/$label/$t"; echo "     $label uop/$t: compile skipped, program from $cached"
-    elif ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
-      echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
     else
+      [ -n "$objs_state" ] || lib_objects "$label" "$@"
+      [ "$objs_state" = ok ] || { fail=1; continue; }
+      if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${objs[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
+        echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
+      fi
       [ -z "$cached" ] || bin_cache_store "$tmp/$label/$t" "$cached"
     fi
     case $t in

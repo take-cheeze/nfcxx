@@ -2006,6 +2006,11 @@ static bool template_default_value(const std::string &text, const std::string &k
       out = v;
       return true;
     }
+    // The bool literals (`bool transposed = false`) are their own values.
+    if (v == "true" || v == "false") {
+      out = v;
+      return true;
+    }
     if (!v.empty() && ident_c((unsigned char)v[0])) return file_constant_value(text, v, out);
     return false;
   }
@@ -2242,9 +2247,14 @@ bool deduce_call_targs(const std::string &text, const std::string &name, long po
   }
   out.clear();
   for (const auto &p : head.names) {
-    if (!found.count(p))
-      refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
-             ", so it cannot be deduced");
+    if (!found.count(p)) {
+      // A parameter no argument gives takes its default, as C++ does (`bool transposed = false`).
+      std::string dv;
+      if (!template_default_value(text, name, p, dv))
+        refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
+               ", so it cannot be deduced");
+      found[p] = dv;
+    }
     if (p == pack_name) {
       for (const auto &v : pack_values) out.push_back(v);
       continue;
@@ -2290,9 +2300,14 @@ std::map<std::string, std::string> deduce_missing_targs(const std::string &text,
     }
   }
   for (const auto &p : missing)
-    if (!found.count(p))
-      refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
-             ", so it cannot be deduced");
+    if (!found.count(p)) {
+      // As deduce_call_targs: a parameter no argument gives takes its default.
+      std::string dv;
+      if (!template_default_value(text, name, p, dv))
+        refuse("call of " + name + " (at line " + std::to_string(line_of(text, pos)) + "): no argument gives " + p +
+               ", so it cannot be deduced");
+      found[p] = dv;
+    }
   return found;
 }
 
@@ -3191,6 +3206,10 @@ std::string function_name(const std::string &text) {
 
 // Ruby $incdirs (line 2120): the -I directories of the driver.
 std::vector<std::string> g_incdirs;
+// The -D and -U options of the driver: the host compile gets them, so the device pass must see them too (its
+// conditionals resolve against them; an undefined name would be taken as false).
+std::vector<std::string> g_user_defines;
+std::vector<std::string> g_user_undefs;
 
 // Ruby system_path? (line 2123): the toolkit and system prefixes are never inlined.
 bool system_path(const std::string &path) {
@@ -6120,6 +6139,10 @@ int main(int argc, char **argv) {
     std::string arg = argv[a];
     if (arg.compare(0, 2, "-I") == 0) {
       g_incdirs.push_back(arg.substr(2));
+    } else if (arg.compare(0, 2, "-D") == 0) {
+      g_user_defines.push_back(arg.substr(2));
+    } else if (arg.compare(0, 2, "-U") == 0) {
+      g_user_undefs.push_back(arg.substr(2));
     } else if (arg == "--device") {
       device = true;
       g_device_mode = true;
@@ -6155,6 +6178,18 @@ int main(int argc, char **argv) {
   if (device) {
     // The device unit is built from the conditionals of the device pass (see resolve_conditionals).
     Defs defs;
+    // The driver's -D options first (the host compile has them, so the device pass must too), then -U, then the
+    // device pass's own macros, which win.
+    for (const auto &d : g_user_defines) {
+      size_t eq = d.find('=');
+      std::string name = eq == std::string::npos ? d : d.substr(0, eq);
+      if (name.empty()) refuse("-D with no macro name");
+      if (name.find('(') != std::string::npos) refuse("-D " + name + ": a function-like macro is not carried into the device unit");
+      Def df;
+      df.text = eq == std::string::npos ? std::string("1") : d.substr(eq + 1);
+      defs[name] = df;
+    }
+    for (const auto &u : g_user_undefs) defs.erase(u);
     for (const auto &kv : DEVICE_PASS_MACROS) {
       Def df;
       df.text = kv.second;
