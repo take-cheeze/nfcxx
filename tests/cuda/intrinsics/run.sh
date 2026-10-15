@@ -93,6 +93,16 @@ if "$root/nfcxx" -c -I"$cuda/include" global_init_bytes_mutant.cu -o "$out/gim.o
 else
   echo "FAIL global_init_bytes_mutant: the mutant was not caught"; fail=1
 fi
+pass isinf_assume.cu "isinf: no error, 0 mismatches"
+# Mutant: the expected value of isinf for NaN is set to 1 (the device says 0): the run must report mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" isinf_assume_mutant.cu -o "$out/ia.o" > "$out/ia.log" 2>&1 \
+   && "$root/nfcxx" "$out/ia.o" -L"$cuda/lib64" -lcudart -o "$out/ia" >> "$out/ia.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/ia" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant isinf_assume_mutant: caught: $run"
+else
+  echo "FAIL isinf_assume_mutant: the mutant was not caught"; fail=1
+fi
 pass cg_tile.cu "cg tile: no error, 0 mismatches"
 pass cub_block.cu "cub block: no error, 0 mismatches"
 pass shared_align.cu "shared align: no error, 0 mismatches"

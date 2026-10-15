@@ -47,6 +47,7 @@ pass local_const.cu "local const: no error, 41 40"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
 pass host_cub_helper.cu "host cub helper: no error, 0 mismatches"
 pass fnptr_addr.cu "fnptr addr: 0 mismatches"
+pass init_list_range.cu "init list: no error, 0 mismatches"
 # Mutant: the flag compares against the wrong function, so the check must see a mismatch.
 if "$root/nfcxx" -c -I"$cuda/include" fnptr_addr_mutant.cu -o "$out/fam.o" > "$out/fam.log" 2>&1 \
    && "$root/nfcxx" "$out/fam.o" -L"$cuda/lib64" -lcudart -o "$out/fam" >> "$out/fam.log" 2>&1 \
@@ -195,5 +196,14 @@ if "$root/nfcxx" -c -I"$cuda/include" dynshared_operator_mutant.cu -o "$out/dom.
   echo "mutant dynshared_operator: caught: $run"
 else
   echo "FAIL dynshared_operator mutant: not caught"; fail=1
+fi
+# Mutant: one stride is wrong (w/8 for w/4), so the kernel's sums differ and the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" init_list_range_mutant.cu -o "$out/ilm.o" > "$out/ilm.log" 2>&1 \
+   && "$root/nfcxx" "$out/ilm.o" -L"$cuda/lib64" -lcudart -o "$out/ilm" >> "$out/ilm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/ilm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant init_list_range_mutant: caught: $run"
+else
+  echo "FAIL init_list_range_mutant: the mutant was not caught"; fail=1
 fi
 exit $fail

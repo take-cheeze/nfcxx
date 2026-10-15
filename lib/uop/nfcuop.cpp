@@ -371,14 +371,23 @@ SymShape shrink_sym(const UOp* x, const Shape& starts, const Shape& ends, const 
   return out;
 }
 
-// Pad: a dimension that is padded is an integer if it was one; a symbolic one is Unknown (its size would be N + a constant, which the
-// shape-only form cannot name).
-SymShape pad_sym(const UOp* x, const Shape& before, const Shape& after) {
+// Pad: a dimension that is not padded keeps its form. A padded one of size s is the polynomial of the input's dimension plus before and
+// after (N + 1 for N, an integer for an integer); it is exact for every size of the symbols, so it is never Unknown. A Wild or Unknown
+// dimension that is padded is Unknown (its size is not a polynomial).
+SymShape pad_sym(const UOp* x, const Shape& before, const Shape& after, const SymTab& symtab) {
   if (!all_unknown(x).empty()) return SymShape(x->shape.size(), unknown_dim());
   SymShape out(x->shape.size());
   for (size_t k = 0; k < out.size(); k++) {
-    const bool none = before[k] == 0 && after[k] == 0;
-    out[k] = none ? x->sym[k] : x->sym[k].kind == SymDim::Int ? SymDim{} : unknown_dim();
+    if (before[k] == 0 && after[k] == 0) {
+      out[k] = x->sym[k];
+      continue;
+    }
+    std::optional<Poly> p = poly_of(x->sym[k], x->shape[k]);
+    if (!p) {
+      out[k] = unknown_dim();
+      continue;
+    }
+    out[k] = dim_of(*p + Poly(before[k] + after[k]), x->shape[k] + before[k] + after[k], symtab, "PAD");
   }
   return out;
 }
@@ -657,7 +666,21 @@ const UOp* Graph::pad(const UOp* x, const Shape& before, const Shape& after) {
     out.push_back(x->shape[k] + before[k] + after[k]);
   }
   check_shape(out, "PAD");
-  return intern(Op::Pad, x->dtype, {x}, Scalar{}, "", out, arg, pad_sym(x, before, after));
+  return intern(Op::Pad, x->dtype, {x}, Scalar{}, "", out, arg, pad_sym(x, before, after, symtab_));
+}
+const UOp* Graph::pad_poly(const UOp* x, const Shape& before, const Shape& after, const Dims& dims) {
+  need(x, "PAD");
+  const size_t r = x->shape.size();
+  if (dims.size() != r) throw Error("PAD: " + std::to_string(dims.size()) + " dimensions given for " + std::to_string(r));
+  const UOp* out = pad(x, before, after);   // checks the amounts and the sizes; the symbolic form is the one derived
+  for (size_t k = 0; k < r; k++) {
+    std::optional<Poly> p = poly_of(x->sym[k], x->shape[k]);
+    if (!p) continue;   // a Wild or Unknown dimension: the result is Unknown there
+    const Poly want = *p + Poly(before[k] + after[k]);
+    if (!(dims[k] == want))
+      throw Error("PAD: dimension " + std::to_string(k) + " is " + want.str() + " for every size of the symbols, not " + dims[k].str());
+  }
+  return out;
 }
 
 const UOp* Graph::flip(const UOp* x, const Shape& axes_in) {
