@@ -51,7 +51,7 @@ compile() {   # compile NAME: src/NAME.c with nfcc
 }
 export -f compile; export root be src out
 # quickjs.c is the long pole (about 25 s on the gcc back end), so it starts first.
-if ! printf '%s\n' quickjs dtoa libregexp libunicode | xargs -P "$(nproc)" -I{} bash -c 'compile {}' >>"$log" 2>&1; then
+if ! printf '%s\n' quickjs dtoa libregexp libunicode | xargs -P "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" -I{} bash -c 'compile {}' >>"$log" 2>&1; then
   tail -30 "$log" >&2; echo "setup-poly-js: build failed (full log: $log)" >&2; exit 1
 fi
 rm -f "$out/libquickjs.a"; ar rcs "$out/libquickjs.a" "$out"/quickjs.o "$out"/dtoa.o "$out"/libregexp.o "$out"/libunicode.o

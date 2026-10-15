@@ -44,7 +44,7 @@ patch -s -p1 -d "$src" --batch < scripts/mruby-cxx-novolatile.patch || { echo "s
 cp scripts/mruby-rt-config.rb "$work/build_config-$be.rb"
 log=$work/build-$be.log
 if ! (cd "$src" && NFCXX_BACKEND=$be MRUBY_CC=$root/nfcc MRUBY_CXX=$root/nfcxx \
-        MRUBY_CONFIG=$work/build_config-$be.rb MRUBY_BUILD_DIR=$out "${rake[@]}" -j"$(nproc)" all) >"$log" 2>&1; then
+        MRUBY_CONFIG=$work/build_config-$be.rb MRUBY_BUILD_DIR=$out "${rake[@]}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" all) >"$log" 2>&1; then
   tail -30 "$log" >&2; echo "setup-poly: build failed (full log: $log)" >&2; exit 1
 fi
 lib=$out/host/lib/libmruby.a
