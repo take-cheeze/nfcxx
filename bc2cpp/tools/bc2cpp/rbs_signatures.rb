@@ -135,10 +135,6 @@ module RbsSignatures
            "unsupported RBS syntax: #{m.name} has #{m.overloads.size} overloads (one signature per method; write the union as untyped)")
       return
     end
-    if m.kind != :instance
-      diag(out, loc, 'info', 'TC1005', "singleton method #{m.name} is accepted but gives no hint")
-      return
-    end
     mt = m.overloads.first.method_type
     fn = mt.type
     args = fn.required_positionals.map { |p| type_of(p.type) }
@@ -149,6 +145,8 @@ module RbsSignatures
     extras << 'keyword parameters' unless fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords
     extras << 'a block type' if mt.block
     diag(out, loc, 'info', 'TC1005', "#{owner}##{m.name}: #{extras.join(', ')} accepted but give no hint") unless extras.empty?
+    # `def self.x` is keyed by the owner the IR names singleton methods with (`Klass.singleton`).
+    owner = "#{owner}.singleton" unless m.kind == :instance
     out.methods[[owner, m.name.to_s]] = MethodSig.new(owner: owner, name: m.name.to_s, args: args,
                                                                optional_args: fn.optional_positionals.map { |param| type_of(param.type) },
                                                                keywords: (fn.required_keywords.merge(fn.optional_keywords)).to_h { |name, param| [name.to_s, type_of(param.type)] },
