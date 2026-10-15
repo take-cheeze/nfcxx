@@ -145,12 +145,12 @@ wins as in numpy. `Tile` is one reshape, an `Expand` and a reshape (exact). `Gat
 ## numpy compatibility
 
 How much of the real numpy library is covered, measured: `tests/uop/np_compat.cpp` evaluates 121 expressions with nfcuop (interpreter and C backend, which must
-agree bit for bit) and `tests/uop/np_compat.py` the same 121 with numpy 2.5 (same inputs: float32 and int32 arrays). Two runs:
+agree bit for bit) and `tests/uop/np_compat.py` the same 166 with numpy 2.5 (same inputs: float32 and int32 arrays). Two runs:
 
-- **32-bit defaults (the default)**: all 121 agree with numpy in shape and values (rtol 1e-5); 106 agree in dtype too; the other 15 differ only in dtype, and the
+- **32-bit defaults (the default)**: all 166 agree with numpy in shape and values (rtol 1e-5); 144 agree in dtype too; the other 22 differ only in dtype, and the
   script lists them: numpy's int64/float64 defaults (`arange(5)`, `linspace`, `eye`, `zeros`, `full(.., 7)`, int `sum`/`mean`/`cumsum`/`prod`, `bool.sum()`,
-  `int / int`, the int `argmax`/`argmin`) against nfcuop's int32/float32.
-- **numpy's defaults** (`np.default_float = Float64; np.default_int = Int64;`): all 121 agree in shape, values **and dtype**.
+  `int / int`, the int `argmax`/`argmin`, the int `argsort`/`searchsorted`/`count_nonzero`) against nfcuop's int32/float32.
+- **numpy's defaults** (`np.default_float = Float64; np.default_int = Int64;`): all 166 agree in shape, values **and dtype**.
 
 The script fails if a dtype difference appears that is not on its list, so the claim cannot drift.
 
@@ -187,9 +187,9 @@ Where it differs, on purpose:
 - **`floor` and `ceil` of a bool** give `default_float` (numpy: float16, which nfcuop does not have); of an int they are the int, as in numpy.
 
 Not there (numpy features a numpy user would reach for next): fancy and boolean-mask indexing, `...` and `None` in an index (use `slice`, `at`,
-`expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `argsort`/`sort`/`unique`, `cumprod`,
-`round`, `repeat`/`pad`/`roll`, `einsum`/`tensordot`/`outer`/`linalg`, complex and unsigned/small-int/float16 dtypes, strings and structured arrays,
-and anything that needs a data-dependent output shape. Most of these are a new ONNX operator in `hir` plus its lowering in `ut`; data-dependent shapes
+`expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `unique`, `nonzero`, `round`, `pad`,
+`outer`/`linalg`, complex and unsigned/small-int/float16 dtypes, strings and structured arrays, and anything that needs a data-dependent output shape.
+The Array API functions (`sort`, `argsort`, `einsum`, `tensordot`, `roll`, `tril`, `searchsorted`, ...) are in the table of `docs/notes/array-api.md`. Most of these are a new ONNX operator in `hir` plus its lowering in `ut`; data-dependent shapes
 (`unique`, boolean masks) are outside a static-shape design. (Done since: `pow`, `floor`, `ceil`, `isnan`, `isinf`, `cumsum`, `prod`, `argmax`,
 `argmin`, `tile`, `take`.)
 A realistic target is "the subset of numpy that a model needs": array creation, broadcasting arithmetic, reductions, shape ops, slicing, matmul, the

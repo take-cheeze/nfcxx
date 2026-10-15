@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -661,6 +662,212 @@ static void graph_and_onnx(const std::string& dir) {
   }
 }
 
+// The Python Array API standard's functions and the numpy ones it is compared with (nfcuop_np.hpp, docs/notes/array-api.md).
+// The expected values are worked out by hand from the inputs; the errors are the ones the header documents.
+static void array_api_functions() {
+  Session np;
+  const DType i32 = DType::Int32, i64 = DType::Int64, f32 = DType::Float32, f64 = DType::Float64, bl = DType::Bool;
+  const double inf = std::numeric_limits<double>::infinity(), nan = std::numeric_limits<double>::quiet_NaN();
+  Tensor a = np.array({1, 2, 3, 4, 5, 6}, {2, 3});   // [[1, 2, 3], [4, 5, 6]]
+  Tensor ia = np.array({3, -1, 2, -4}, i32);
+  Tensor xs = np.array({1, 2, 3});
+  Tensor ys = np.array({10, 20});
+
+  // elementwise: named forms of the operators, and the functions with no operator
+  CHECK(add(a, a).str() == "[[2., 4., 6.], [8., 10., 12.]]");
+  CHECK(subtract(a, a).str() == "[[0., 0., 0.], [0., 0., 0.]]");
+  CHECK(multiply(a, a).str() == "[[1., 4., 9.], [16., 25., 36.]]");
+  CHECK(divide(a, np.scalar(2)).str() == "[[0.5, 1., 1.5], [2., 2.5, 3.]]");
+  CHECK(negative(a).str() == "[[-1., -2., -3.], [-4., -5., -6.]]" && positive(a).str() == a.str());
+  CHECK((+a).str() == a.str() && (-a).str() == negative(a).str());
+  CHECK(equal(a, a).str() == "[[True, True, True], [True, True, True]]");
+  CHECK(not_equal(a, a + 1).str() == "[[True, True, True], [True, True, True]]");
+  CHECK(greater(a, np.scalar(3)).str() == "[[False, False, False], [True, True, True]]");
+  CHECK(greater_equal(a, np.scalar(3)).str() == "[[False, False, True], [True, True, True]]");
+  CHECK(less(a, np.scalar(3)).str() == "[[True, True, False], [False, False, False]]");
+  CHECK(less_equal(a, np.scalar(3)).str() == "[[True, True, True], [False, False, False]]");
+  Tensor pb = a > 2, qb = a < 5;   // [[F, F, T], [T, T, T]] and [[T, T, T], [T, F, F]]
+  CHECK(logical_and(pb, qb).str() == "[[False, False, True], [True, False, False]]");
+  CHECK(logical_or(pb, qb).str() == "[[True, True, True], [True, True, True]]");
+  CHECK(logical_xor(pb, qb).str() == "[[True, True, False], [False, True, True]]");
+  CHECK(bitwise_and(np.array({6, 5}, i32), np.array({3, 4}, i32)).str() == "[2, 4]");
+  CHECK(bitwise_or(np.array({6, 5}, i32), np.array({3, 4}, i32)).str() == "[7, 5]");
+  CHECK(bitwise_xor(np.array({5, 3}, i32), np.array({1, 1}, i32)).str() == "[4, 2]");
+  CHECK(bitwise_invert(ia).str() == "[-4, 0, -3, 3]" && (~ia).str() == bitwise_invert(ia).str());   // ~x == -x - 1
+  CHECK(bitwise_invert(np.array({1, 0}, bl)).str() == "[False, True]");
+  CHECK(isfinite(np.array({1, inf, nan})).str() == "[True, False, False]");
+  CHECK(isfinite(ia).str() == "[True, True, True, True]");
+  CHECK_VALS(trunc(np.array({-2.5, -0.5, 0.5, 2.7})), {-2, 0, 0, 2});
+  CHECK(trunc(ia).str() == ia.str());
+  CHECK_VALS(sign(np.array({-3, 0, 2})), {-1, 0, 1});
+  CHECK(sign(ia).str() == "[1, -1, 1, -1]");
+  CHECK(std::isnan(sign(np.array({nan})).item()));   // NaN stays NaN
+  CHECK_THROWS(trunc(np.array({1, 0}, bl)));
+  CHECK_THROWS(sign(np.array({1, 0}, bl)));
+  CHECK_THROWS(bitwise_invert(a));
+  CHECK_THROWS(positive(np.array({1, 0}, bl)));
+  CHECK_THROWS(logical_and(a, a));   // bool only
+  CHECK_THROWS(logical_or(pb, ia));
+
+  // creation
+  CHECK(asarray(a).str() == a.str() && asarray(a, i32).str() == "[[1, 2, 3], [4, 5, 6]]");
+  CHECK(asarray(np, Array::from_doubles(i32, {2}, {7, 8})).str() == "[7, 8]");
+  CHECK(zeros_like(a).str() == "[[0., 0., 0.], [0., 0., 0.]]" && zeros_like(a, i32).dtype() == i32);
+  CHECK(ones_like(ia).str() == "[1, 1, 1, 1]" && ones_like(a).dtype() == f32);
+  CHECK(full_like(a, 7).str() == "[[7., 7., 7.], [7., 7., 7.]]");
+  CHECK(full_like(ia, 2).str() == "[2, 2, 2, 2]" && full_like(a, 2, i32).dtype() == i32);
+  CHECK(empty_like(a).shape() == (Shape{2, 3}) && empty_like(a).tolist() == V(6, 0.0));
+  CHECK(np.empty({2}).str() == "[0., 0.]");
+  Tensor m3 = np.arange(9, f32).reshape({3, 3});   // [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+  CHECK(tril(m3).str() == "[[0., 0., 0.], [3., 4., 0.], [6., 7., 8.]]");
+  CHECK(tril(m3, -1).str() == "[[0., 0., 0.], [3., 0., 0.], [6., 7., 0.]]");
+  CHECK(triu(m3, 1).str() == "[[0., 1., 2.], [0., 0., 5.], [0., 0., 0.]]");
+  CHECK(triu(m3).str() == "[[0., 1., 2.], [0., 4., 5.], [0., 0., 8.]]");
+  CHECK(triu(np.arange(8, f32).reshape({2, 2, 2})).str() == "[[[0., 1.], [0., 3.]], [[4., 5.], [0., 7.]]]");   // the last two axes
+  CHECK_THROWS(tril(xs));
+  std::vector<Tensor> g = meshgrid({xs, ys});   // "xy": the first input varies along axis 1
+  CHECK(g[0].shape() == (Shape{2, 3}) && g[0].str() == "[[1., 2., 3.], [1., 2., 3.]]");
+  CHECK(g[1].str() == "[[10., 10., 10.], [20., 20., 20.]]");
+  std::vector<Tensor> h = meshgrid({xs, ys}, false);   // "ij"
+  CHECK(h[0].shape() == (Shape{3, 2}) && h[0].str() == "[[1., 1.], [2., 2.], [3., 3.]]");
+  CHECK(h[1].str() == "[[10., 20.], [10., 20.], [10., 20.]]");
+  CHECK_THROWS(meshgrid({a}));
+  CHECK(np.eye(2, 3, 1).str() == "[[0., 1., 0.], [0., 0., 1.]]");
+  CHECK(np.eye(3, 2, -1).str() == "[[0., 0.], [1., 0.], [0., 1.]]");
+  CHECK(np.linspace(0, 1, 4, {}, false).str() == "[0., 0.25, 0.5, 0.75]");
+  CHECK_THROWS(np.eye(0, 2));
+
+  // data types
+  CHECK(result_type(i32, f32) == f32 && result_type(bl, i32) == i32);
+  CHECK(result_type(std::vector<Tensor>{ia, a}) == f32);
+  CHECK(can_cast(i32, f32) == false && can_cast(i32, f64) && can_cast(i64, f64) && can_cast(bl, i32));
+  CHECK(!can_cast(i64, f32) && !can_cast(f64, f32) && can_cast(f32, f32));
+  CHECK(finfo(f32).bits == 32 && finfo(f32).eps == std::ldexp(1.0, -23));
+  CHECK(finfo(f32).max == std::ldexp(2.0 - std::ldexp(1.0, -23), 127));   // (2 - 2^-23) * 2^127
+  CHECK(finfo(f64).eps == std::ldexp(1.0, -52) && finfo(f64).smallest_normal == std::ldexp(1.0, -1022));
+  CHECK(iinfo(i32).min == -2147483648LL && iinfo(i32).max == 2147483647LL);
+  CHECK(iinfo(i64).max == 9223372036854775807LL && iinfo(i64).bits == 64);
+  CHECK_THROWS(finfo(i32));
+  CHECK_THROWS(iinfo(f32));
+  CHECK_THROWS(iinfo(bl));
+  CHECK(isdtype(f32, "real floating") && isdtype(i32, "integral") && isdtype(bl, "bool") && isdtype(i64, "numeric"));
+  CHECK(!isdtype(i32, "real floating") && !isdtype(bl, "numeric") && !isdtype(f32, "unsigned integer") && !isdtype(f32, "integral"));
+  CHECK(isdtype(i32, std::vector<std::string>{"bool", "signed integer"}) && !isdtype(f64, std::vector<std::string>{"bool", "integral"}));
+  CHECK_THROWS(isdtype(i32, "float"));
+  std::vector<Tensor> bc = broadcast_arrays({xs, np.array({10, 20}, {2, 1})});
+  CHECK(bc[0].shape() == (Shape{2, 3}) && bc[0].str() == "[[1., 2., 3.], [1., 2., 3.]]");
+  CHECK(bc[1].str() == "[[10., 10., 10.], [20., 20., 20.]]");
+  CHECK_THROWS(broadcast_arrays({a, np.array({1, 2, 3, 4})}));
+
+  // searching
+  Tensor sorted = np.array({1, 3, 5, 7});
+  CHECK(searchsorted(sorted, np.array({0, 3, 4, 8})).str() == "[0, 1, 2, 4]");
+  CHECK(searchsorted(sorted, np.array({0, 3, 4, 8}), true).str() == "[0, 2, 2, 4]");
+  CHECK(searchsorted(sorted, np.array2d({{0, 3}, {4, 8}})).str() == "[[0, 1], [2, 4]]");
+  CHECK(searchsorted(sorted, np.scalar(5), true).item() == 3 && searchsorted(sorted, np.scalar(5)).item() == 2);
+  CHECK(searchsorted(sorted, np.array({0})).dtype() == i32);
+  Tensor sorted_nan = np.array({1, 3, nan});   // NaN last
+  CHECK_VALS(searchsorted(sorted_nan, np.array({nan, 2})), {2, 1});
+  CHECK_VALS(searchsorted(sorted_nan, np.array({nan, 2}), true), {3, 1});
+  CHECK_THROWS(searchsorted(a, sorted));
+  CHECK(count_nonzero(np.array({0, 1, -2, 0, 3})).item() == 3);
+  CHECK(count_nonzero(np.array({1, 0, 0, 4, 5, 0}, {2, 3}), Axes{0}).str() == "[2, 1, 0]");
+  CHECK(count_nonzero(a > 3).item() == 3);
+
+  // sorting: stable, NaN last ascending and first descending
+  Tensor v3 = np.array({3, 1, 2});
+  CHECK(sort(v3).str() == "[1., 2., 3.]" && sort(v3, 0, true).str() == "[3., 2., 1.]");
+  CHECK(argsort(np.array({3, 1, 2, 1})).str() == "[1, 3, 2, 0]");   // the two 1s keep their order
+  CHECK(argsort(np.array({3, 1, 2, 1}), 0, true).str() == "[0, 2, 1, 3]");
+  Tensor M = np.array({3, 1, 1, 4}, {2, 2});   // [[3, 1], [1, 4]]
+  CHECK(sort(M, 0).str() == "[[1., 1.], [3., 4.]]");
+  CHECK(sort(M, 1).str() == "[[1., 3.], [1., 4.]]");
+  CHECK(sort(M, 0, true).str() == "[[3., 4.], [1., 1.]]");
+  CHECK(argsort(M, 0).str() == "[[1, 0], [0, 1]]");
+  CHECK(sort(np.array({5, 1, 4, 2, 6, 3}, {1, 3, 2}), 1).str() == "[[[4., 1.], [5., 2.], [6., 3.]]]");   // along a middle axis
+  CHECK(argsort(np.array({5, 1, 4, 2, 6, 3}, {1, 3, 2}), 1).str() == "[[[1, 0], [0, 1], [2, 2]]]");
+  std::vector<double> sn = sort(np.array({2, nan, 1})).tolist();
+  CHECK(sn[0] == 1 && sn[1] == 2 && std::isnan(sn[2]));
+  std::vector<double> sd = sort(np.array({2, nan, 1}), 0, true).tolist();
+  CHECK(std::isnan(sd[0]) && sd[1] == 2 && sd[2] == 1);
+  CHECK_THROWS(sort(np.scalar(1)));
+  Tensor x23 = np.array({10, 20, 30, 40, 50, 60}, {2, 3});
+  CHECK(take_along_axis(x23, np.array({2, 0, 1, 1}, {2, 2}, i32), 1).str() == "[[30., 10.], [50., 50.]]");
+  CHECK(take_along_axis(x23, np.array({-1, 0, 0, -3}, {2, 2}, i32), 1).str() == "[[30., 10.], [40., 40.]]");   // negative from the end
+  CHECK(take_along_axis(x23, np.array({1, 0, 1}, {1, 3}, i32), 0).str() == "[[40., 20., 60.]]");
+  CHECK(take_along_axis(np.array({7, 8, 9}, {1, 3}), np.array({0, 2, 1, 2, 2, 0}, {2, 3}, i32), 1).str() == "[[7., 9., 8.], [9., 9., 7.]]");
+  CHECK_THROWS(take_along_axis(x23, np.array({0, 1}, i32), 1));          // rank differs
+  CHECK_THROWS(take_along_axis(x23, np.array({0, 1, 0, 1, 2, 0}, {3, 2}, i32), 1));   // 2 and 3 along axis 0
+  CHECK_THROWS(take_along_axis(x23, a, 1));                               // float indices
+
+  // cumulative, utility
+  CHECK(cumprod(np.array({1, 2, 3, 4})).str() == "[1., 2., 6., 24.]");
+  CHECK(cumprod(a, 0).str() == "[[1., 2., 3.], [4., 10., 18.]]");
+  CHECK(cumprod(a, 1).str() == "[[1., 2., 6.], [4., 20., 120.]]");
+  CHECK(cumulative_sum(xs, None, true).str() == "[0., 1., 3., 6.]");
+  CHECK(cumulative_prod(np.array({2, 3}), 0, true).str() == "[1., 2., 6.]");
+  CHECK(cumulative_sum(a, 1, true).str() == "[[0., 1., 3., 6.], [0., 4., 9., 15.]]");
+  CHECK(cumulative_sum(a, 0).str() == "[[1., 2., 3.], [5., 7., 9.]]");
+  Tensor bo2 = np.array({1, 0, 1, 1}, {2, 2}, bl);   // [[T, F], [T, T]]
+  CHECK(all(bo2, Axes{1}).str() == "[False, True]");
+  CHECK(any(bo2, Axes{0}).str() == "[True, True]");
+  CHECK(all(bo2).item() == 0 && any(bo2).item() == 1);
+  CHECK(all(bo2, {}, true).shape() == (Shape{1, 1}));
+  CHECK(all(np.array({1.0, nan})).item() == 1 && any(np.array({0, 0, 0})).item() == 0);
+  CHECK(copy(a).str() == a.str());
+
+  // manipulation
+  CHECK(concat({a, a}).shape() == (Shape{4, 3}) && concat({a, a}).str() == concatenate({a, a}).str());
+  Tensor m = np.arange(24, f32).reshape({2, 3, 4});   // m[i, j, k] = 12 i + 4 j + k
+  CHECK(moveaxis(m, 0, 2).shape() == (Shape{3, 4, 2}));
+  CHECK(moveaxis(m, 0, 2).tolist()[13] == 18);   // out[1, 2, 1] = m[1, 1, 2]
+  CHECK(permute_dims(m, Axes{1, 0, 2}).shape() == (Shape{3, 2, 4}) && permute_dims(m, Axes{1, 0, 2}).tolist()[4] == 12);   // out[0, 1, 0] = m[1, 0, 0]
+  CHECK(repeat(np.array({1, 2, 3}), 2).str() == "[1., 1., 2., 2., 3., 3.]");
+  CHECK(repeat(a, 2, 1).str() == "[[1., 1., 2., 2., 3., 3.], [4., 4., 5., 5., 6., 6.]]");
+  CHECK(repeat(a, 2, 0).str() == "[[1., 2., 3.], [1., 2., 3.], [4., 5., 6.], [4., 5., 6.]]");
+  CHECK(repeat(a, 2).str() == "[1., 1., 2., 2., 3., 3., 4., 4., 5., 5., 6., 6.]");
+  CHECK_THROWS(repeat(a, 0));
+  Tensor r5 = np.array({1, 2, 3, 4, 5});
+  CHECK(roll(r5, 2).str() == "[4., 5., 1., 2., 3.]");
+  CHECK(roll(r5, -1).str() == "[2., 3., 4., 5., 1.]");
+  CHECK(roll(r5, 7).str() == "[4., 5., 1., 2., 3.]" && roll(r5, 5).str() == r5.str());   // 7 is 2 mod 5
+  CHECK(roll(a, 1, 1).str() == "[[3., 1., 2.], [6., 4., 5.]]");
+  CHECK(roll(a, 1).str() == "[[6., 1., 2.], [3., 4., 5.]]");   // the flattened array, then the shape again
+  CHECK(roll(a, Axes{1, 1}, Axes{0, 1}).str() == "[[6., 4., 5.], [3., 1., 2.]]");
+  CHECK_THROWS(roll(a, Axes{1}, Axes{0, 1}));
+  std::vector<Tensor> u = unstack(a, 1);
+  CHECK(u.size() == 3 && u[1].str() == "[2., 5.]" && u[0].shape() == (Shape{2}));
+  CHECK(matrix_transpose(m).shape() == (Shape{2, 4, 3}) && matrix_transpose(a).str() == a.T().str());
+  CHECK_THROWS(matrix_transpose(r5));
+
+  // linear algebra
+  CHECK(vecdot(a, a).str() == "[14., 77.]");
+  CHECK(vecdot(a, a, 0).str() == "[17., 29., 45.]");
+  CHECK_THROWS(vecdot(bo2, bo2));
+  CHECK(tensordot(a, a.T(), 1).str() == "[[14., 32.], [32., 77.]]");
+  CHECK(tensordot(a, a).item() == 91);   // the sum of the squares of 1..6
+  CHECK(tensordot(a, a.T(), Axes{1}, Axes{0}).str() == "[[14., 32.], [32., 77.]]");
+  CHECK_THROWS(tensordot(a, a, 3));
+  Tensor bm = np.array({1, 0, 0, 1, 1, 1}, {3, 2});   // [[1, 0], [0, 1], [1, 1]]
+  CHECK(einsum("ij,jk->ik", {a, bm}).str() == "[[4., 5.], [10., 11.]]");
+  CHECK(einsum("ij,jk", {a, bm}).str() == "[[4., 5.], [10., 11.]]");   // implicit output: i and k
+  CHECK(einsum("ij,jk->ki", {a, bm}).str() == "[[4., 10.], [5., 11.]]");
+  CHECK(einsum("ij,jk->ik", {a, a.T()}).str() == "[[14., 32.], [32., 77.]]");
+  CHECK(einsum("ij->j", {a}).str() == "[5., 7., 9.]");
+  CHECK(einsum("ij->ji", {a}).str() == a.T().str());
+  CHECK(einsum("ij,ij->", {a, a}).item() == 91);
+  CHECK(einsum("i,i->", {xs, xs}).item() == 14);
+  CHECK(einsum("i,j->ij", {np.array({1, 2}), np.array({3, 4, 5})}).str() == "[[3., 4., 5.], [6., 8., 10.]]");
+  CHECK(einsum("bij,bjk->bik", {m, m.transpose({0, 2, 1})}).tolist()[0] == 14);   // row 0 of batch 0 dotted with itself
+  CHECK(einsum("bij,bjk->bik", {m, m.transpose({0, 2, 1})}).str() == matmul(m, m.transpose({0, 2, 1})).str());
+  CHECK_THROWS(einsum("ii->i", {a}));   // a diagonal
+  CHECK_THROWS(einsum("ij,jk->ik", {a}));
+  CHECK_THROWS(einsum("ij", {m}));
+  CHECK_THROWS(einsum("ij,jk->il", {a, bm}));
+  CHECK_THROWS(einsum("...ij", {a}));
+  CHECK_THROWS(einsum("ij,kj->ik", {a, np.array({1, 2, 3, 4}, {2, 2})}));   // j is 3 and 2
+}
+
 int main(int argc, char** argv) {
   numpy_api();
   default_dtypes();
@@ -669,6 +876,7 @@ int main(int argc, char** argv) {
   cumsum_and_prod();
   argmax_and_argmin();
   tile_and_take();
+  array_api_functions();
   graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);

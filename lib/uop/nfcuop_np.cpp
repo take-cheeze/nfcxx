@@ -6,9 +6,12 @@
 #include "nfcuop_tinygrad.hpp"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <map>
 
 namespace nfcuop {
 namespace np {
@@ -288,14 +291,17 @@ Tensor Tensor::min(const Axes& axes, bool keepdims) const {
   return cast_to(reduce("ReduceMin", cast_to(*this, DType::Int32), axes, keepdims), DType::Bool);
 }
 
-Tensor Tensor::var(const Axes& axes, bool keepdims) const {
+Tensor Tensor::var(const Axes& axes, bool keepdims, double correction) const {
   check(*this);
   Tensor x = to_float(*this);
   Tensor d = x - x.mean(axes, true);
-  return (d * d).mean(axes, keepdims);
+  if (correction == 0) return (d * d).mean(axes, keepdims);
+  double n = 1;
+  for (int64_t a : norm_axes(axes, ndim())) n *= static_cast<double>(shape()[static_cast<size_t>(a)]);
+  return (d * d).sum(axes, keepdims) / (n - correction);
 }
 
-Tensor Tensor::stddev(const Axes& axes, bool keepdims) const { return var(axes, keepdims).sqrt(); }
+Tensor Tensor::stddev(const Axes& axes, bool keepdims, double correction) const { return var(axes, keepdims, correction).sqrt(); }
 
 Tensor Tensor::prod(const Axes& axes, bool keepdims) const {
   check(*this);
@@ -503,11 +509,13 @@ Tensor Session::arange_impl(double start, double stop, double step, DType d) {
   return array(v, d);
 }
 
-Tensor Session::linspace(double start, double stop, int64_t num, std::optional<DType> d) {
+Tensor Session::linspace(double start, double stop, int64_t num, std::optional<DType> d, bool endpoint) {
   if (num < 1) throw Error("np: linspace needs at least one point");
   std::vector<double> v;
-  for (int64_t k = 0; k < num; k++)
-    v.push_back(num == 1 ? start : k == num - 1 ? stop : start + static_cast<double>(k) * (stop - start) / static_cast<double>(num - 1));
+  for (int64_t k = 0; k < num; k++) {
+    if (!endpoint) v.push_back(start + static_cast<double>(k) * (stop - start) / static_cast<double>(num));
+    else v.push_back(num == 1 ? start : k == num - 1 ? stop : start + static_cast<double>(k) * (stop - start) / static_cast<double>(num - 1));
+  }
   return array(v, d);
 }
 
@@ -516,6 +524,16 @@ Tensor Session::eye(int64_t n, std::optional<DType> d) {
   std::vector<double> v(static_cast<size_t>(n * n), 0.0);
   for (int64_t k = 0; k < n; k++) v[static_cast<size_t>(k * n + k)] = 1;
   return array(v, Shape{n, n}, d);
+}
+
+Tensor Session::eye(int64_t rows, int64_t cols, int64_t k, std::optional<DType> d) {
+  if (rows < 1 || cols < 1) throw Error("np: eye needs rows and columns of at least 1");
+  std::vector<double> v(static_cast<size_t>(rows * cols), 0.0);
+  for (int64_t i = 0; i < rows; i++) {
+    const int64_t j = i + k;
+    if (j >= 0 && j < cols) v[static_cast<size_t>(i * cols + j)] = 1;
+  }
+  return array(v, Shape{rows, cols}, d);
 }
 
 Tensor Session::placeholder(const std::string& name, const Shape& shape, std::optional<DType> d) {
@@ -659,6 +677,605 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
   same_session(a, b);
   DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));
   return node("MatMul", {cast_to(a, dt), cast_to(b, dt)});
+}
+
+// ---- the Array API standard (see nfcuop_np.hpp, docs/notes/array-api.md) ----
+
+namespace {
+
+Shape broadcast_shapes(const std::vector<Shape>& ss) {
+  size_t nd = 0;
+  for (const Shape& s : ss) nd = std::max(nd, s.size());
+  Shape out(nd, 1);
+  for (const Shape& s : ss) {
+    for (size_t k = 0; k < s.size(); k++) {   // aligned on the right
+      const int64_t d = s[k];
+      int64_t& o = out[nd - s.size() + k];
+      if (d == 1) continue;
+      if (o == 1) o = d;
+      else if (o != d) throw Error("np: shapes " + to_string(ss[0]) + " and others cannot be broadcast together");
+    }
+  }
+  return out;
+}
+
+// a Bool constant of `shape`, one entry per element in row-major order
+Tensor bool_const(const Tensor& like, const Shape& shape, const std::vector<bool>& v) {
+  Array a;
+  a.dtype = DType::Bool;
+  a.shape = shape;
+  for (bool b : v) a.data.push_back(Scalar::from_int(DType::Bool, b ? 1 : 0));
+  return Tensor(&like.session(), like.session().constant(a));
+}
+
+// the permutation that moves axis `a` to the end (the others keep their order)
+Axes last_axis_perm(int64_t nd, int64_t a) {
+  Axes perm;
+  for (int64_t k = 0; k < nd; k++)
+    if (k != a) perm.push_back(k);
+  perm.push_back(a);
+  return perm;
+}
+
+Axes inverse_perm(const Axes& perm) {
+  Axes inv(perm.size());
+  for (size_t j = 0; j < perm.size(); j++) inv[static_cast<size_t>(perm[j])] = static_cast<int64_t>(j);
+  return inv;
+}
+
+bool is_identity(const Axes& perm) {
+  for (size_t k = 0; k < perm.size(); k++)
+    if (perm[k] != static_cast<int64_t>(k)) return false;
+  return true;
+}
+
+// `v` with one entry along `axis` in front, equal to `value` (the initial element of a cumulative sum or product)
+Tensor with_initial(const Tensor& v, int64_t axis, double value) {
+  Shape s = v.shape();
+  s[static_cast<size_t>(axis)] = 1;
+  return concatenate({v.session().full_impl(s, value, v.dtype()), v}, axis);
+}
+
+// For the rows of y (..., n), the sort order along the last axis: P[..., i, k] is true when element k comes before element i
+// (ascending, or descending). NaN comes last ascending and first descending. Equal elements keep their index order.
+Tensor precedes(const Tensor& y, bool descending) {
+  const int64_t n = y.shape().back();
+  Tensor yi = y.expand_dims(-1);   // (..., n, 1): element i, the row
+  Tensor yk = y.expand_dims(-2);   // (..., 1, n): element k, the column
+  Tensor before = descending ? (yi < yk) : (yk < yi);
+  Tensor same = yk == yi;
+  if (is_float(y.dtype())) {
+    Tensor ni = yi.isnan(), nk = yk.isnan();
+    before = before | (descending ? (nk & bool_not(ni)) : (ni & bool_not(nk)));
+    same = same | (ni & nk);
+  }
+  std::vector<bool> lower;   // [i][k] = k < i
+  for (int64_t i = 0; i < n; i++)
+    for (int64_t k = 0; k < n; k++) lower.push_back(k < i);
+  return before | (same & bool_const(y, {n, n}, lower));
+}
+
+// argsort of the last axis of y (..., n): the position of each element in the sort order is its rank (the number of elements
+// that come before it); the element of rank j is the one that the sorted array holds at j.
+Tensor argsort_last(const Tensor& y, bool descending) {
+  Session& s = y.session();
+  const int64_t n = y.shape().back();
+  Tensor rank = precedes(y, descending).sum(-1);                  // (..., n)
+  Tensor hit = rank.expand_dims(-2) == s.arange(n).reshape({n, 1});  // [j][i] = rank of i is j
+  Tensor index_row = s.arange(n).reshape({1, n});
+  return where(hit, index_row, sconst(index_row, 0)).sum(-1);
+}
+
+Tensor sort_or_argsort(const Tensor& x, int64_t axis, bool descending, bool values) {
+  check(x);
+  const int64_t nd = x.ndim();
+  if (nd == 0) throw Error("np: sort needs at least one dimension");
+  const int64_t a = norm_axis(axis, nd);
+  const Axes perm = last_axis_perm(nd, a);
+  Tensor y = a == nd - 1 ? x : x.transpose(perm);
+  Tensor idx = argsort_last(y, descending);
+  Tensor out = values ? take_along_axis(y, idx, nd - 1) : idx;
+  return a == nd - 1 ? out : out.transpose(inverse_perm(perm));
+}
+
+// cumulative product along axis `a` (normalized, the tensor not flattened): output i is the product of the first i + 1 elements
+Tensor cumprod_axis(const Tensor& x, int64_t a) {
+  const int64_t nd = x.ndim();
+  const Axes perm = last_axis_perm(nd, a);
+  Tensor y = a == nd - 1 ? x : x.transpose(perm);
+  const int64_t n = y.shape().back();
+  std::vector<bool> keep;   // [i][k] = k <= i
+  for (int64_t i = 0; i < n; i++)
+    for (int64_t k = 0; k < n; k++) keep.push_back(k <= i);
+  Tensor factors = where(bool_const(y, {n, n}, keep), y.expand_dims(-2), sconst(y, 1));
+  Tensor out = factors.prod(-1);
+  return a == nd - 1 ? out : out.transpose(inverse_perm(perm));
+}
+
+Tensor truth(const Tensor& a) {
+  check(a);
+  return a.dtype() == DType::Bool ? a : a != 0;
+}
+
+Tensor require_bool(const Tensor& a, const Tensor& b, const char* what) {
+  same_session(a, b);
+  if (a.dtype() != DType::Bool || b.dtype() != DType::Bool) throw Error(std::string("np: ") + what + " needs bool operands");
+  return a;
+}
+
+}  // namespace
+
+// ---- elementwise ----
+
+Tensor operator+(const Tensor& a) { return positive(a); }
+
+Tensor positive(const Tensor& a) {
+  check(a);
+  if (a.dtype() == DType::Bool) throw Error("np: positive is not defined for bool");
+  return a;
+}
+
+Tensor operator~(const Tensor& a) {
+  check(a);
+  if (a.dtype() == DType::Bool) return bool_not(a);
+  if (!is_int(a.dtype())) throw Error("np: bitwise_invert needs integers or bool");
+  return -a - sconst(a, 1);   // two's complement: ~x == -x - 1
+}
+
+Tensor add(const Tensor& a, const Tensor& b) { return a + b; }
+Tensor subtract(const Tensor& a, const Tensor& b) { return a - b; }
+Tensor multiply(const Tensor& a, const Tensor& b) { return a * b; }
+Tensor divide(const Tensor& a, const Tensor& b) { return a / b; }
+Tensor negative(const Tensor& a) { return -a; }
+Tensor equal(const Tensor& a, const Tensor& b) { return a == b; }
+Tensor not_equal(const Tensor& a, const Tensor& b) { return a != b; }
+Tensor greater(const Tensor& a, const Tensor& b) { return a > b; }
+Tensor greater_equal(const Tensor& a, const Tensor& b) { return a >= b; }
+Tensor less(const Tensor& a, const Tensor& b) { return a < b; }
+Tensor less_equal(const Tensor& a, const Tensor& b) { return a <= b; }
+Tensor logical_and(const Tensor& a, const Tensor& b) { return require_bool(a, b, "logical_and") & b; }
+Tensor logical_or(const Tensor& a, const Tensor& b) { return require_bool(a, b, "logical_or") | b; }
+Tensor logical_xor(const Tensor& a, const Tensor& b) { return require_bool(a, b, "logical_xor") ^ b; }
+Tensor bitwise_and(const Tensor& a, const Tensor& b) { return a & b; }
+Tensor bitwise_or(const Tensor& a, const Tensor& b) { return a | b; }
+Tensor bitwise_xor(const Tensor& a, const Tensor& b) { return a ^ b; }
+Tensor bitwise_invert(const Tensor& a) { return ~a; }
+
+Tensor isfinite(const Tensor& a) {
+  check(a);
+  if (!is_float(a.dtype())) return a.session().ones(a.shape(), DType::Bool);
+  return bool_not(a.isnan() | a.isinf());
+}
+
+Tensor trunc(const Tensor& a) {
+  check(a);
+  if (a.dtype() == DType::Bool) throw Error("np: trunc is not defined for bool");
+  if (is_int(a.dtype())) return a;
+  return where(a < 0, a.ceil(), a.floor());
+}
+
+Tensor sign(const Tensor& a) {
+  check(a);
+  if (a.dtype() == DType::Bool) throw Error("np: sign is not defined for bool");
+  Tensor s = where(a > 0, sconst(a, 1), where(a < 0, sconst(a, -1), sconst(a, 0)));
+  return is_float(a.dtype()) ? where(a.isnan(), a, s) : s;
+}
+
+// ---- creation ----
+
+Tensor asarray(const Tensor& a, std::optional<DType> d) {
+  check(a);
+  return d && *d != a.dtype() ? a.astype(*d) : a;
+}
+
+Tensor asarray(Session& s, const Array& a, std::optional<DType> d) {
+  Tensor t = s.from(a);
+  return d ? t.astype(*d) : t;
+}
+
+Tensor zeros_like(const Tensor& a, std::optional<DType> d) {
+  check(a);
+  return a.session().zeros(a.shape(), d ? *d : a.dtype());
+}
+
+Tensor ones_like(const Tensor& a, std::optional<DType> d) {
+  check(a);
+  return a.session().ones(a.shape(), d ? *d : a.dtype());
+}
+
+Tensor empty_like(const Tensor& a, std::optional<DType> d) { return zeros_like(a, d); }
+
+Tensor full_like(const Tensor& a, double v, std::optional<DType> d) {
+  check(a);
+  return a.session().full_impl(a.shape(), v, d ? *d : a.dtype());
+}
+
+namespace {
+Tensor triangle(const Tensor& a, int64_t k, bool lower) {
+  check(a);
+  if (a.ndim() < 2) throw Error("np: tril and triu need at least two dimensions");
+  const Shape s = a.shape();
+  const int64_t r = s[s.size() - 2], c = s.back();
+  std::vector<bool> keep;
+  for (int64_t i = 0; i < r; i++)
+    for (int64_t j = 0; j < c; j++) keep.push_back(lower ? j - i <= k : j - i >= k);
+  return where(bool_const(a, {r, c}, keep), a, sconst(a, 0));
+}
+}  // namespace
+
+Tensor tril(const Tensor& a, int64_t k) { return triangle(a, k, true); }
+Tensor triu(const Tensor& a, int64_t k) { return triangle(a, k, false); }
+
+std::vector<Tensor> meshgrid(const std::vector<Tensor>& xs, bool xy) {
+  if (xs.empty()) throw Error("np: meshgrid needs at least one array");
+  const size_t n = xs.size();
+  Shape out(n);
+  for (size_t i = 0; i < n; i++) {
+    if (xs[i].ndim() != 1) throw Error("np: meshgrid needs one-dimensional arrays");
+    out[i] = xs[i].shape()[0];
+  }
+  const bool swap = xy && n >= 2;   // "xy": the first two inputs vary along the second and first axes
+  if (swap) std::swap(out[0], out[1]);
+  std::vector<Tensor> res;
+  for (size_t i = 0; i < n; i++) {
+    size_t pos = i;
+    if (swap && i < 2) pos = 1 - i;
+    Shape s(n, 1);
+    s[pos] = xs[i].shape()[0];
+    res.push_back(xs[i].reshape(s).broadcast_to(out));
+  }
+  return res;
+}
+
+Tensor copy(const Tensor& a) {
+  check(a);
+  return a;
+}
+
+// ---- data types ----
+
+DType result_type(DType a, DType b) { return promote(a, b); }
+
+DType result_type(const std::vector<Tensor>& ts) {
+  if (ts.empty()) throw Error("np: result_type needs at least one tensor");
+  DType d = ts[0].dtype();
+  for (const Tensor& t : ts) d = promote(d, t.dtype());
+  return d;
+}
+
+bool can_cast(DType from, DType to) {
+  if (from == to || from == DType::Bool) return true;
+  switch (from) {
+    case DType::Int32: return to == DType::Int64 || to == DType::Float64;
+    case DType::Int64: return to == DType::Float64;
+    case DType::Float32: return to == DType::Float64;
+    default: return false;
+  }
+}
+
+FInfo finfo(DType d) {
+  switch (d) {
+    case DType::Float32: return {d, 32, FLT_EPSILON, FLT_MAX, -FLT_MAX, FLT_MIN};
+    case DType::Float64: return {d, 64, DBL_EPSILON, DBL_MAX, -DBL_MAX, DBL_MIN};
+    default: throw Error(std::string("np: finfo needs a floating dtype, got ") + name(d));
+  }
+}
+
+IInfo iinfo(DType d) {
+  switch (d) {
+    case DType::Int32: return {d, 32, INT32_MIN, INT32_MAX};
+    case DType::Int64: return {d, 64, INT64_MIN, INT64_MAX};
+    default: throw Error(std::string("np: iinfo needs an integer dtype, got ") + name(d));
+  }
+}
+
+bool isdtype(DType d, const std::string& kind) {
+  const bool sint = d == DType::Int32 || d == DType::Int64;
+  const bool rfloat = d == DType::Float32 || d == DType::Float64;
+  if (kind == "bool") return d == DType::Bool;
+  if (kind == "signed integer" || kind == "integral") return sint;
+  if (kind == "real floating") return rfloat;
+  if (kind == "numeric") return sint || rfloat;
+  if (kind == "unsigned integer" || kind == "complex floating") return false;
+  throw Error("np: isdtype: unknown kind \"" + kind + "\"");
+}
+
+bool isdtype(DType d, const std::vector<std::string>& kinds) {
+  for (const std::string& k : kinds)
+    if (isdtype(d, k)) return true;
+  return false;
+}
+
+std::vector<Tensor> broadcast_arrays(const std::vector<Tensor>& ts) {
+  if (ts.empty()) throw Error("np: broadcast_arrays needs at least one tensor");
+  std::vector<Shape> ss;
+  for (const Tensor& t : ts) {
+    check(t);
+    ss.push_back(t.shape());
+  }
+  const Shape out = broadcast_shapes(ss);
+  std::vector<Tensor> res;
+  for (const Tensor& t : ts) res.push_back(t.shape() == out ? t : t.broadcast_to(out));
+  return res;
+}
+
+// ---- searching, sorting ----
+
+Tensor searchsorted(const Tensor& sorted, const Tensor& v, bool right) {
+  same_session(sorted, v);
+  if (sorted.ndim() != 1) throw Error("np: searchsorted needs a one-dimensional sorted array");
+  Tensor col = v.expand_dims(-1);                       // (..., 1) against the n sorted values
+  Tensor hit = right ? sorted <= col : sorted < col;    // (..., n): sorted[k] before the value
+  if (is_float(promote(sorted.dtype(), v.dtype()))) {  // NaN sorts last: before a NaN come the non-NaN values
+    Tensor nv = col.isnan(), ns = sorted.isnan();
+    hit = right ? hit | nv : hit | (nv & bool_not(ns));
+  }
+  return hit.sum(-1);   // the number of values before, the default int (sorted must be sorted: otherwise numpy's binary search differs)
+}
+
+Tensor count_nonzero(const Tensor& a, const Axes& axes, bool keepdims) {
+  check(a);
+  return (a != 0).sum(axes, keepdims);
+}
+
+Tensor sort(const Tensor& a, int64_t axis, bool descending) { return sort_or_argsort(a, axis, descending, true); }
+Tensor argsort(const Tensor& a, int64_t axis, bool descending) { return sort_or_argsort(a, axis, descending, false); }
+
+Tensor take_along_axis(const Tensor& x, const Tensor& indices, int64_t axis) {
+  same_session(x, indices);
+  if (!is_int(indices.dtype())) throw Error("np: take_along_axis needs integer indices, got " + std::string(name(indices.dtype())));
+  const int64_t nd = x.ndim();
+  if (indices.ndim() != nd) throw Error("np: take_along_axis needs indices of the same rank as the array");
+  const int64_t a = norm_axis(axis, nd);
+  const Shape xs = x.shape(), is = indices.shape();
+  Shape out(static_cast<size_t>(nd));
+  for (int64_t k = 0; k < nd; k++) {
+    const size_t u = static_cast<size_t>(k);
+    if (k == a) out[u] = is[u];
+    else if (is[u] == 1 || xs[u] == is[u]) out[u] = xs[u];
+    else if (xs[u] == 1) out[u] = is[u];
+    else throw Error("np: take_along_axis: shapes " + to_string(xs) + " and " + to_string(is) + " do not broadcast along axis " + std::to_string(k));
+  }
+  // the flat position in x of each element: the index along the axis times its stride, plus the position along the other axes
+  const int64_t n = xs[static_cast<size_t>(a)];
+  Tensor idx = where(indices < 0, indices + n, indices);   // negative indices count from the end, as in numpy
+  std::vector<int64_t> st(static_cast<size_t>(nd));
+  int64_t stride = 1;
+  for (int64_t k = nd - 1; k >= 0; k--) {
+    st[static_cast<size_t>(k)] = stride;
+    stride *= xs[static_cast<size_t>(k)];
+  }
+  Tensor offset = idx.broadcast_to(out) * st[static_cast<size_t>(a)];
+  for (int64_t k = 0; k < nd; k++) {
+    const size_t u = static_cast<size_t>(k);
+    if (k == a || xs[u] == 1 || out[u] == 1) continue;   // a broadcast axis of x contributes position 0
+    Shape s(static_cast<size_t>(nd), 1);
+    s[u] = out[u];
+    offset = offset + x.session().arange(out[u], indices.dtype()).reshape(s) * st[u];
+  }
+  return take(x.reshape({x.size()}), offset);
+}
+
+// ---- statistics, utility ----
+
+Tensor cumulative_sum(const Tensor& a, int64_t axis, bool include_initial) {
+  check(a);
+  Tensor c = a.cumsum(axis);
+  if (!include_initial) return c;
+  return with_initial(c, axis == None ? 0 : norm_axis(axis, a.ndim()), 0);
+}
+
+Tensor cumulative_prod(const Tensor& a, int64_t axis, bool include_initial) {
+  check(a);
+  Tensor x = axis == None ? a.flatten() : a;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, a.ndim());
+  DType dt = x.dtype();
+  if (dt == DType::Bool || (is_int(dt) && dt < a.session().default_int)) dt = a.session().default_int;
+  Tensor p = cumprod_axis(cast_to(x, dt), ax);
+  return include_initial ? with_initial(p, ax, 1) : p;
+}
+
+Tensor cumprod(const Tensor& a, int64_t axis) { return cumulative_prod(a, axis, false); }
+
+Tensor all(const Tensor& a, const Axes& axes, bool keepdims) { return truth(a).min(axes, keepdims); }
+Tensor any(const Tensor& a, const Axes& axes, bool keepdims) { return truth(a).max(axes, keepdims); }
+
+// ---- manipulation ----
+
+Tensor concat(const std::vector<Tensor>& ts, int64_t axis) { return concatenate(ts, axis); }
+
+Tensor moveaxis(const Tensor& a, int64_t source, int64_t destination) {
+  check(a);
+  const int64_t nd = a.ndim();
+  const int64_t s = norm_axis(source, nd), d = norm_axis(destination, nd);
+  Axes order;
+  for (int64_t k = 0; k < nd; k++)
+    if (k != s) order.push_back(k);
+  order.insert(order.begin() + d, s);
+  return a.transpose(order);
+}
+
+Tensor permute_dims(const Tensor& a, const Axes& perm) {
+  check(a);
+  return a.transpose(perm);
+}
+
+Tensor repeat(const Tensor& a0, int64_t r, int64_t axis) {
+  check(a0);
+  if (r < 1) throw Error("np: repeat needs a count of at least 1, got " + std::to_string(r));
+  Tensor a = axis == None ? a0.flatten() : a0;
+  const int64_t ax = axis == None ? 0 : norm_axis(axis, a.ndim());
+  const Shape s = a.shape();
+  Shape wide = s;   // the new axis of size r right after axis ax, which holds the copies
+  wide.insert(wide.begin() + ax + 1, r);
+  Shape out = s;
+  out[static_cast<size_t>(ax)] *= r;
+  return a.expand_dims(ax + 1).broadcast_to(wide).reshape(out);
+}
+
+Tensor roll(const Tensor& a0, int64_t shift, int64_t axis) {
+  check(a0);
+  if (axis == None) return roll(a0.flatten(), shift, 0).reshape(a0.shape());
+  const int64_t ax = norm_axis(axis, a0.ndim());
+  const int64_t n = a0.shape()[static_cast<size_t>(ax)];
+  const int64_t k = ((shift % n) + n) % n;
+  if (k == 0) return a0;
+  return concatenate({a0.slice(ax, n - k, n), a0.slice(ax, 0, n - k)}, ax);
+}
+
+Tensor roll(const Tensor& a, const Axes& shifts, const Axes& axes) {
+  if (shifts.size() != axes.size()) throw Error("np: roll needs as many shifts as axes");
+  Tensor x = a;
+  for (size_t k = 0; k < shifts.size(); k++) x = roll(x, shifts[k], axes[k]);
+  return x;
+}
+
+std::vector<Tensor> unstack(const Tensor& a, int64_t axis) {
+  check(a);
+  const int64_t ax = norm_axis(axis, a.ndim());
+  std::vector<Tensor> out;
+  for (int64_t i = 0; i < a.shape()[static_cast<size_t>(ax)]; i++) out.push_back(a.at(i, ax));
+  return out;
+}
+
+// ---- linear algebra ----
+
+Tensor matrix_transpose(const Tensor& a) {
+  check(a);
+  if (a.ndim() < 2) throw Error("np: matrix_transpose needs at least two dimensions");
+  return a.swapaxes(-2, -1);
+}
+
+Tensor vecdot(const Tensor& a, const Tensor& b, int64_t axis) {
+  same_session(a, b);
+  if (a.dtype() == DType::Bool || b.dtype() == DType::Bool) throw Error("np: vecdot is not defined for bool");
+  return (a * b).sum(axis);
+}
+
+Tensor einsum(const std::string& subscripts, const std::vector<Tensor>& ops) {
+  if (ops.empty()) throw Error("np: einsum needs at least one operand");
+  std::string spec;
+  for (char c : subscripts)
+    if (c != ' ') spec += c;
+  if (spec.find("...") != std::string::npos) throw Error("np: einsum: ellipsis is not supported");
+  const size_t arrow = spec.find("->");
+  const bool explicit_out = arrow != std::string::npos;
+  if (explicit_out && spec.find("->", arrow + 2) != std::string::npos) throw Error("np: einsum: more than one '->'");
+  const std::string lhs = explicit_out ? spec.substr(0, arrow) : spec;
+  std::vector<std::string> terms(1);
+  for (char c : lhs) {
+    if (c == ',') terms.emplace_back();
+    else terms.back() += c;
+  }
+  if (terms.size() != ops.size())
+    throw Error("np: einsum: " + std::to_string(terms.size()) + " operand subscripts for " + std::to_string(ops.size()) + " operands");
+  auto is_letter = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+  std::string all_idx;                 // every index once, in order of first appearance
+  std::map<char, int> count;           // in how many operands each index occurs
+  for (size_t k = 0; k < ops.size(); k++) {
+    const std::string& t = terms[k];
+    check(ops[k]);
+    if (static_cast<int64_t>(t.size()) != ops[k].ndim())
+      throw Error("np: einsum: operand " + std::to_string(k) + " has " + std::to_string(ops[k].ndim()) + " dimensions, its subscripts \"" + t + "\" have " + std::to_string(t.size()));
+    for (size_t p = 0; p < t.size(); p++) {
+      const char c = t[p];
+      if (!is_letter(c)) throw Error(std::string("np: einsum: bad index '") + c + "'");
+      if (t.find(c) != p) throw Error("np: einsum: index '" + std::string(1, c) + "' repeated in one operand (a diagonal) is not supported");
+      if (count[c]++ == 0) all_idx += c;
+    }
+  }
+  std::string out;
+  if (explicit_out) {
+    out = spec.substr(arrow + 2);
+    for (size_t p = 0; p < out.size(); p++) {
+      const char c = out[p];
+      if (!is_letter(c) || all_idx.find(c) == std::string::npos) throw Error(std::string("np: einsum: output index '") + c + "' is not an input index");
+      if (out.find(c) != p) throw Error(std::string("np: einsum: output index '") + c + "' repeated");
+    }
+  } else {
+    for (char c : all_idx)
+      if (count[c] == 1) out += c;
+    std::sort(out.begin(), out.end());
+  }
+  std::map<char, int64_t> size;
+  for (size_t k = 0; k < ops.size(); k++)
+    for (size_t p = 0; p < terms[k].size(); p++) {
+      const char c = terms[k][p];
+      const int64_t d = ops[k].shape()[p];
+      auto it = size.find(c);
+      if (it == size.end()) size[c] = d;
+      else if (it->second != d) throw Error("np: einsum: index '" + std::string(1, c) + "' has sizes " + std::to_string(it->second) + " and " + std::to_string(d));
+    }
+  // each operand as a tensor with every index of all_idx in its place (size 1 where it has no such index), then their product
+  Tensor prod;
+  for (size_t k = 0; k < ops.size(); k++) {
+    const std::string& t = terms[k];
+    Axes perm;
+    for (char c : all_idx) {
+      const size_t p = t.find(c);
+      if (p != std::string::npos) perm.push_back(static_cast<int64_t>(p));
+    }
+    Tensor x = is_identity(perm) ? ops[k] : ops[k].transpose(perm);
+    Shape aligned(all_idx.size(), 1);
+    for (size_t p = 0; p < all_idx.size(); p++)
+      if (t.find(all_idx[p]) != std::string::npos) aligned[p] = size[all_idx[p]];
+    x = x.reshape(aligned);
+    prod = k == 0 ? x : prod * x;
+  }
+  Axes summed;
+  std::string kept;
+  for (size_t p = 0; p < all_idx.size(); p++) {
+    if (out.find(all_idx[p]) == std::string::npos) summed.push_back(static_cast<int64_t>(p));
+    else kept += all_idx[p];
+  }
+  if (!summed.empty()) prod = prod.sum(summed);
+  if (kept != out) {   // the remaining indices are in the order of all_idx; the output asks for its own order
+    Axes pm;
+    for (char c : out) pm.push_back(static_cast<int64_t>(kept.find(c)));
+    prod = prod.transpose(pm);
+  }
+  return prod;
+}
+
+Tensor tensordot(const Tensor& a, const Tensor& b, const Axes& axes_a, const Axes& axes_b) {
+  same_session(a, b);
+  if (axes_a.size() != axes_b.size()) throw Error("np: tensordot needs as many axes of each operand");
+  const int64_t na = a.ndim(), nb = b.ndim();
+  static const std::string pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  std::string la(static_cast<size_t>(na), ' '), lb(static_cast<size_t>(nb), ' ');
+  size_t next = 0;
+  auto fresh = [&]() {
+    if (next >= pool.size()) throw Error("np: tensordot: too many axes");
+    return pool[next++];
+  };
+  for (int64_t k = 0; k < na; k++) la[static_cast<size_t>(k)] = fresh();
+  std::vector<bool> paired(static_cast<size_t>(nb), false);
+  for (size_t p = 0; p < axes_a.size(); p++) {
+    const int64_t ka = norm_axis(axes_a[p], na), kb = norm_axis(axes_b[p], nb);
+    lb[static_cast<size_t>(kb)] = la[static_cast<size_t>(ka)];   // the contracted index of b is the one of a
+    paired[static_cast<size_t>(kb)] = true;
+  }
+  for (int64_t k = 0; k < nb; k++)
+    if (!paired[static_cast<size_t>(k)]) lb[static_cast<size_t>(k)] = fresh();
+  std::string out;
+  for (int64_t k = 0; k < na; k++) {
+    bool contracted = false;
+    for (size_t p = 0; p < axes_a.size(); p++) contracted = contracted || norm_axis(axes_a[p], na) == k;
+    if (!contracted) out += la[static_cast<size_t>(k)];
+  }
+  for (int64_t k = 0; k < nb; k++)
+    if (!paired[static_cast<size_t>(k)]) out += lb[static_cast<size_t>(k)];
+  return einsum(la + "," + lb + "->" + out, {a, b});
+}
+
+Tensor tensordot(const Tensor& a, const Tensor& b, int64_t n) {
+  if (n < 0 || n > a.ndim() || n > b.ndim()) throw Error("np: tensordot: " + std::to_string(n) + " axes do not exist in both operands");
+  Axes xa, xb;
+  for (int64_t k = 0; k < n; k++) {
+    xa.push_back(a.ndim() - n + k);
+    xb.push_back(k);
+  }
+  return tensordot(a, b, xa, xb);
 }
 
 std::vector<Tensor> grad(const Tensor& loss, const std::vector<Tensor>& wrt) {
