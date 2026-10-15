@@ -391,6 +391,47 @@ def scalar_const_array_init(ty, init, name, size)
   [ptype, "{" + vals.join(",") + "}", count]
 end
 
+# A constant global whose initializer is a byte layout: integer scalars at their offsets and zero runs covering the
+# whole object (the IR of an array of 4-byte structs of two u16 values, for example tmp.1153: `(scalar 0 unsigned_short
+# (const unsigned_short 0))`, `(scalar 2 ...)`, `(zero 4 4)`). Returns [".b8", "{b0,...}", size] as a byte array, or nil
+# when the initializer is not that shape. Floats are not encoded here (their bit patterns are not written out), so a
+# float scalar makes the caller refuse the global by name.
+def byte_const_init(init, name, size)
+  return nil unless init && init.length >= 2 && size && size > 0
+  bytes = Array.new(size, 0)
+  covered = Array.new(size, false)
+  init.drop(1).each do |f|
+    case head_of(f)
+    when "scalar"
+      return nil unless f.length == 4 && head_of(f[3]) == "const"
+      off = as_int(f[1])
+      t = parse_type(f[2])
+      return nil unless t && t[0] == "int"
+      n = t[1]
+      return nil unless off && n && n > 0 && off + n <= size
+      v = t[3] ? (f[3][2].to_s.end_with?("1") ? 1 : 0) : as_int(f[3][2])
+      return nil unless v
+      n.times do |i|
+        raise Refused, "global #{name}: initializer overlaps at byte #{off + i}" if covered[off + i]
+        bytes[off + i] = (v >> (8 * i)) & 0xff
+        covered[off + i] = true
+      end
+    when "zero"
+      off = as_int(f[1])
+      len = as_int(f[2])
+      return nil unless off && len && off >= 0 && len >= 0 && off + len <= size
+      len.times do |i|
+        raise Refused, "global #{name}: initializer overlaps at byte #{off + i}" if covered[off + i]
+        covered[off + i] = true
+      end
+    else
+      return nil
+    end
+  end
+  return nil unless covered.all?
+  [".b8", "{" + bytes.join(",") + "}", size]
+end
+
 def imm(t, v)
   return "0" if t[0] == "ptr"
   raise Refused, "bool constant" if t[3]
@@ -1706,6 +1747,13 @@ def emit_module(src, sm, kernels = [])
         consts[name] = [carr[0], carr[1], align, carr[2]]
         next
       end
+      # integer scalars and zero runs at byte offsets (see byte_const_init): a writable global with its bytes as the
+      # initializer (a .global, so a store to it stays valid)
+      binit = byte_const_init(init, name, size)
+      if binit
+        globals[name] = [size, align, binit[1]]
+        next
+      end
       raise Refused, "global #{name}: only zero initializers are lowered" unless init && init.length == 2 && head_of(init[1]) == "zero"
       raise Refused, "global #{name}: partial zero initializer" unless as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
       if linkage == "static" || (linkage == "weak" && name.start_with?("_ZZ"))
@@ -1776,7 +1824,10 @@ def emit_module(src, sm, kernels = [])
   strings.each { |name, bytes| out << ".const .align 1 .b8 #{ptx_sym(STRING_PREFIX + name)}[#{bytes.length}] = {#{bytes.join(',')}};\n" }
   out << ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n" if fns.any?(&:uses_printf)
   shared.each { |name, (size, align)| out << ".shared .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
-  globals.each { |name, (size, align)| out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
+  globals.each do |name, (size, align, lit)|
+    init = lit ? " = #{lit}" : ""
+    out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}]#{init};\n"
+  end
   consts.each do |name, (ptype, lit, align, count)|
     dims = count ? "[#{count}]" : ""
     out << ".const .align #{align} .#{ptype} #{ptx_sym(name)}#{dims} = #{lit};\n"
