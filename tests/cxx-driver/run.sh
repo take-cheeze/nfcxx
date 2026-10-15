@@ -198,7 +198,21 @@ check "cache: a changed header is compiled again" "$nfcxx" -c -I "$c15" "$c15/tp
 printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
 check "cache: reverting the header takes the first copy" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
 [ "$(c15_entries)" = 2 ] && ok "cache: reverted header adds no entry" || bad "cache: reverted header adds no entry" "$(c15_entries) entries"
-unset NFCXX_CACHE
+# NFCXX_CACHE_LOG: each lookup appends its key and hit or miss. The log is no part of the key, so a logged hit keeps its entry.
+export NFCXX_CACHE_LOG=$c15/log; : > "$c15/log"
+check "cache log: a hit is logged with its key" sh -c "
+  '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && grep -q '^key ' '$c15/log' && grep -qx hit '$c15/log' && ! grep -qx miss '$c15/log'"
+printf '#define BIAS 3\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
+check "cache log: a changed header is logged as a miss" sh -c "
+  '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && grep -qx miss '$c15/log'"
+# Parallel compiles share the log: each lookup is one whole block, so four lookups give four blocks, keys and states.
+rm -f "$c15/plog"
+for i in 1 2 3 4; do NFCXX_CACHE_LOG=$c15/plog "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/p$i.o" >/dev/null 2>&1 & done
+wait
+n=$(grep -c '^== ' "$c15/plog"); k=$(grep -c '^key ' "$c15/plog"); s=$(grep -cx -e hit -e miss "$c15/plog")
+[ "$n" = 4 ] && [ "$k" = 4 ] && [ "$s" = 4 ] && ok "cache log: parallel compiles keep whole blocks" \
+  || bad "cache log: parallel compiles keep whole blocks" "$n blocks, $k keys, $s states"
+unset NFCXX_CACHE_LOG NFCXX_CACHE
 
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]

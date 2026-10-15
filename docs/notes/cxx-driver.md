@@ -34,6 +34,8 @@ and the host compilers' versions. Not cached: `.cu` and C inputs, `-E`, `-MD`, s
 an extension. A header whose path has a space is not tracked, so its change would not invalidate the key. Test 15 of
 `tests/cxx-driver/run.sh` covers a hit that links, and a changed header.
 
+With `NFCXX_CACHE_LOG=FILE` set as well, each lookup appends its key inputs (the bytes that are hashed, one block per compile headed by `== OUT (SRC)`), then `key KEY`, then `hit` or `miss`. Diff the input blocks of a miss against the last hit for the same output to see which input changed. The log variable is left out of the key, so logging never causes a miss.
+
 Refused (eccp says `unknown option`): `-fno-rtti`, `-fno-exceptions`, and every other option not in the table, since
 each of them would change the meaning of the code or is not implemented.
 
