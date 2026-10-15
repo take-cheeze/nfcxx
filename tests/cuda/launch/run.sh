@@ -93,4 +93,14 @@ else
 fi
 pass overload_pair.cu "overload pair: exact"
 pass fnptr_return.cu "fnptr return: exact"
+pass pack_trailing.cu "pack trailing: no error, 0 mismatches"
+# Mutant: the kernel adds 1 to every output, so the check must see one mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" pack_trailing_mutant.cu -o "$out/pt.o" > "$out/pt.log" 2>&1 \
+   && "$root/nfcxx" "$out/pt.o" -L"$cuda/lib64" -lcudart -o "$out/pt" >> "$out/pt.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/pt" || true) \
+   && [[ "$run" == *"1 mismatches"* ]]; then
+  echo "mutant pack_trailing: caught: $run"
+else
+  echo "FAIL pack_trailing mutant: not caught"; fail=1
+fi
 exit $fail

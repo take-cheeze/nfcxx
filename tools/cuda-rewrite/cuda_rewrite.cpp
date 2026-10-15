@@ -849,6 +849,7 @@ struct TemplateHead {
   std::vector<std::string> names;
   std::vector<std::string> parts;
   long pos = 0;
+  long pack = -1;  // the index of the parameter pack among the template parameters (`int... Ns`), or -1
 };
 bool template_head_of(const std::string &text, const std::string &name, TemplateHead &out);
 
@@ -1858,13 +1859,16 @@ bool template_head_of(const std::string &text, const std::string &name, Template
     long rp = matching_paren(header, lp);
     std::vector<std::string> parts = split_top(sl(header, lp + 1, rp));
     std::vector<std::string> names;
+    long pack = -1;
     for (const auto &pr : split_top(sl(text, t.lt + 1, t.close))) {
       std::vector<std::string> pt = tokens_of(strip(ruby_split_eq0(pr)));
+      if (pack < 0 && pr.find("...") != std::string::npos) pack = (long)names.size();
       names.push_back(pt.empty() ? std::string() : pt.back());
     }
     out.names = names;
     out.parts = parts;
     out.pos = tb.open;
+    out.pack = pack;
     return true;
   }
   return false;
@@ -2054,7 +2058,11 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
         if (cend > open && (long)split_top(sl(text, open + 1, cend)).size() != parts) continue;
       }
     }
-    if (have_head && targs.size() < head.names.size()) {
+    // A parameter pack is greedy: the explicit arguments after it all go to the pack, so the names after the pack are not
+    // given explicitly. They are deduced from the call's arguments (softmax's launch_soft_max_kernels<32, ..., 4096>(x,
+    // mask, ...) leaves T to mask), and the explicit ones stay with the pack.
+    size_t after_pack = have_head && head.pack >= 0 ? head.names.size() - (size_t)head.pack - 1 : 0;
+    if (have_head && (targs.size() < head.names.size() || after_pack > 0)) {
       long k = cs.second + (long)name.size();
       while (k < (long)text.size() && white_c(ch(text, k))) k += 1;
       long close = matching_angle(text, k);
@@ -2084,7 +2092,8 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
           sites.push_back({targs, cs.second});  // another overload of the name
           continue;
         }
-        std::vector<std::string> missing(head.names.begin() + (long)targs.size(), head.names.end());
+        size_t first_missing = after_pack > 0 ? head.names.size() - after_pack : targs.size();
+        std::vector<std::string> missing(head.names.begin() + (long)first_missing, head.names.end());
         std::map<std::string, std::string> got = deduce_missing_targs(text, name, cs.second, cargs, missing);
         for (const auto &p : missing) targs.push_back(got[p]);
       }
@@ -2269,6 +2278,19 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
   return out;
 }
 
+// C++ allows a parameter pack only last in a class template's parameter list, so the dispatch struct takes the
+// non-pack parameters first and the pack after them (`template <typename T, int... Ns>`). `v` holds one entry per
+// parameter, or, for an instance, the pack's values in place of its entry (`width` of them, from index `pack`).
+template <class E>
+static std::vector<E> disp_order(const std::vector<E> &v, long pack, size_t width) {
+  if (pack < 0) return v;
+  std::vector<E> out;
+  for (size_t i = 0; i < (size_t)pack; i++) out.push_back(v[i]);
+  for (size_t i = (size_t)pack + width; i < v.size(); i++) out.push_back(v[i]);
+  for (size_t i = (size_t)pack; i < (size_t)pack + width; i++) out.push_back(v[i]);
+  return out;
+}
+
 // Ruby dependent_decls (line 1017): the dispatch declarations of the dependent launches, at their enclosing templates.
 std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<long, long>, DependentLaunch> &dl,
                                                           const std::string &orig) {
@@ -2295,12 +2317,14 @@ std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<lon
         if (site.wrapper == w) decl = site.decl;
       lines.push_back({at, "static void " + w + "(" + decl + ");\n"});
     }
-    lines.push_back({at, "template <" + join(d.outer.decls, ", ") + "> struct " + d.dname + ";\n"});
+    long pk = d.outer.has_pack ? d.outer.pack : -1;
+    lines.push_back({at, "template <" + join(disp_order(d.outer.decls, pk, 1), ", ") + "> struct " + d.dname + ";\n"});
     for (const auto &inst : d.insts) {
       std::string w;
       for (const auto &pr : d.wrapper)
         if (pr.first == inst) w = pr.second;
-      lines.push_back({at, "template <> struct " + d.dname + "<" + join(inst, ", ") + "> { static constexpr auto fn = &" + w +
+      size_t width = inst.size() + 1 - d.outer.names.size();
+      lines.push_back({at, "template <> struct " + d.dname + "<" + join(disp_order(inst, pk, width), ", ") + "> { static constexpr auto fn = &" + w +
                                "; };\n"});
     }
   }
@@ -2470,6 +2494,8 @@ std::string rewrite(const std::string &text, const std::string &orig) {
           std::vector<std::string> tn;
           for (size_t q = 0; q < d.outer.names.size(); q++)
             tn.push_back(d.outer.has_pack && (long)q == d.outer.pack ? d.outer.names[q] + "..." : d.outer.names[q]);
+          // The dispatch struct takes the pack last (see disp_order): the same order as its declaration.
+          tn = disp_order(tn, d.outer.has_pack ? d.outer.pack : -1, 1);
           kernel = d.dname + "<" + join(tn, ", ") + ">::fn";
         } else {
           std::string dep;
@@ -4319,7 +4345,19 @@ std::string host_linkage(const std::string &text) {
         long p = (long)out.size() - 1;
         while (p >= 0 && white_c((unsigned char)out[(size_t)p])) p -= 1;
         bool lambda = p >= 0 && out[(size_t)p] == ']';
-        if (!(after_static || lambda || in_class_body(out))) out += host_storage(out, "static");
+        // `template <> __device__ float f<half>(...)`: an explicit specialization takes no storage class (C++ rejects it).
+        bool explicit_spec = false;
+        {
+          size_t end = out.size();
+          while (end > 0 && white_c((unsigned char)out[end - 1])) end -= 1;
+          size_t from = end > 16 ? end - 16 : 0;
+          std::string tail = out.substr(from, end - from);
+          for (const char *hdr : {"template <>", "template<>"}) {
+            size_t h = std::string(hdr).size();
+            if (tail.size() >= h && tail.compare(tail.size() - h, h, hdr) == 0) explicit_spec = true;
+          }
+        }
+        if (!(after_static || lambda || explicit_spec || in_class_body(out))) out += host_storage(out, "static");
         i += 10;
         continue;
       }
