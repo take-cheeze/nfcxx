@@ -74,7 +74,7 @@ Dir.mktmpdir do |dir|
   check.call('attr_reader declares its ivar', iv[['Game::Actor', '@name']]&.type&.kind == :sym)
   notes = loaded.diagnostics.select { |d| d.code == 'TC1005' }.map(&:message)
   check.call('optional / rest / block parameters are noted, not dropped silently', notes.any? { |m| m.include?('maybe') && m.include?('optional') && m.include?('block type') })
-  check.call('a singleton def is noted', notes.any? { |m| m.include?('singleton method make') })
+  check.call('a singleton def is loaded under its singleton owner', loaded.methods.key?(['Game::Actor.singleton', 'make']))
   check.call('a constant is noted', notes.any? { |m| m.include?('A_CONSTANT') })
   check.call('alias / visibility are noted', notes.count { |m| m.start_with?('Alias') || m.start_with?('Private') } == 2)
   check.call('Integer? gives a type of kind other', loaded.methods[['Game::Actor', 'maybe']].args[0].kind == :other)
