@@ -41,7 +41,7 @@ git -C "$src" checkout -q "$pin" || exit 1
 cp scripts/mruby-tool-config.rb "$work/build_config$tag.rb"
 log=$work/build$tag.log
 if ! (cd "$src" && MRUBY_CC=$cc MRUBY_CONFIG=$work/build_config$tag.rb MRUBY_BUILD_DIR=$work/out$tag \
-        "${rake[@]}" -j"$(nproc)" all) >"$log" 2>&1; then
+        "${rake[@]}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" all) >"$log" 2>&1; then
   tail -20 "$log" >&2; echo "setup-mruby: build failed (full log: $log)" >&2; exit 1
 fi
 mkdir -p "$work/bin"
