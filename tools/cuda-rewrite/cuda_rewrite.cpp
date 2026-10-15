@@ -4977,6 +4977,36 @@ std::vector<long> token_positions(const std::string &s, const std::string &tok) 
 }
 
 // Ruby declares_name? (line 3122): a type word, `*` or `&` before the identifier, and `,`, `)`, `;`, `=` or `[` after.
+// True when the `*` or `&` at q declares a pointer or reference (`T * name`), not an operator (`a * name[i]`): the
+// type word before it must follow the start of a statement, a brace, or an opening parenthesis, possibly through
+// qualifiers (const, unsigned, struct, ...). An operator (=, +=, return, ...) before the type word means an expression.
+bool star_declares(const std::string &s, long q) {
+  long r = q - 1;
+  while (r >= 0 && white_c(ch(s, r))) r -= 1;
+  if (r < 0 || !ident_c(ch(s, r))) return r >= 0 && (ch(s, r) == '*' || ch(s, r) == '&') && star_declares(s, r);
+  long w = r;
+  while (w >= 0 && ident_c(ch(s, w))) w -= 1;
+  std::string type = sl(s, w + 1, r + 1);
+  if (std::find(USE_WORDS.begin(), USE_WORDS.end(), type) != USE_WORDS.end()) return false;
+  static const std::vector<std::string> QUALIFIERS = {"const", "volatile", "unsigned", "signed", "struct", "class",
+                                                      "typename", "static", "extern", "__shared__", "__device__",
+                                                      "__constant__", "long", "short", "int", "char", "float",
+                                                      "double", "bool", "half", "half2", "float2"};
+  long x = w;
+  while (x >= 0 && white_c(ch(s, x))) x -= 1;
+  // Qualifier words in front of the type word (`const float2 * meta`).
+  while (x >= 0 && ident_c(ch(s, x))) {
+    long v = x;
+    while (v >= 0 && ident_c(ch(s, v))) v -= 1;
+    std::string word = sl(s, v + 1, x + 1);
+    if (std::find(QUALIFIERS.begin(), QUALIFIERS.end(), word) == QUALIFIERS.end()) return false;
+    x = v;
+    while (x >= 0 && white_c(ch(s, x))) x -= 1;
+  }
+  if (x < 0) return true;
+  return std::string(";{}(").find((char)ch(s, x)) != std::string::npos;
+}
+
 bool declares_name(const std::string &s, long pos, const std::string &tok) {
   long q = pos - 1;
   while (q >= 0 && white_c(ch(s, q))) q -= 1;
@@ -4986,7 +5016,9 @@ bool declares_name(const std::string &s, long pos, const std::string &tok) {
     while (w >= 0 && ident_c(ch(s, w))) w -= 1;
     std::string prev = sl(s, w + 1, q + 1);
     if (std::find(USE_WORDS.begin(), USE_WORDS.end(), prev) != USE_WORDS.end()) return false;
-  } else if (ch(s, q) != '*' && ch(s, q) != '&') {
+  } else if (ch(s, q) == '*' || ch(s, q) == '&') {
+    if (!star_declares(s, q)) return false;
+  } else {
     return false;
   }
   long n = pos + (long)tok.size();
