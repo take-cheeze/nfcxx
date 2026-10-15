@@ -4491,6 +4491,30 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
            multidimensional leaf count, which is not lowered) */
         a_constant_ptr rc = ce->variant.init_repeat.constant;
         unsigned long cnt = (unsigned long)ce->variant.init_repeat.count, j;
+        if (cnt != 0 && rc != NULL && skip_typerefs(elem)->kind == tk_array) {
+          /* A repeat over a multidimensional array counts innermost elements: `C[2][3] = {c}` repeats c six times
+             (default member initializers of class elements, such as tile's `T x[ne] = {0}`). The leaves are stored
+             in order from element i on; the count must cover whole elements. */
+          a_type_ptr leaf = skip_typerefs(elem);
+          unsigned long lsz, per, covered, f;
+          while (leaf->kind == tk_array) leaf = skip_typerefs(leaf->variant.array.element_type);
+          lsz = ir_size_of(leaf);
+          per = lsz != 0 ? ir_size_of(elem) / lsz : 0;
+          if (per != 0 && cnt % per == 0 && cnt / per <= n - i) {
+            covered = cnt / per;
+            for (f = 0; f < cnt; f++) {
+              ir_val sf = ir_subobject(dst.s, i * esz + f * lsz, leaf, 0);
+              if (rc->kind == ck_aggregate || ir_is_aggregate(leaf)) {
+                ir_init_constant(sf, rc, leaf);
+              } else {
+                ir_val v = ir_constant(rc, leaf);
+                ir_store(leaf, sf.s, v.s, 0);
+              }
+            }
+            i += covered - 1;
+            continue;
+          }
+        }
         if (cnt == 0 || rc == NULL || skip_typerefs(elem)->kind == tk_array) {
           ir_note(4, dik_constant, 0);
           ir_emit("(unsupported init repeat)");

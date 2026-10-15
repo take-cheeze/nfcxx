@@ -96,6 +96,7 @@ fi
 pass cg_tile.cu "cg tile: no error, 0 mismatches"
 pass cub_block.cu "cub block: no error, 0 mismatches"
 pass shared_align.cu "shared align: no error, 0 mismatches"
+pass nsdmi_leaf.cu "nsdmi leaf: no error, 0 mismatches"
 pass launch_arrow_args.cu "launch arrow args: no error, 0 mismatches"
 pass device_const_scalar.cu "device const scalar: no error, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
