@@ -883,7 +883,15 @@ if $PROGRAM_NAME == __FILE__
   outside_ivars = (outside_ivar_names(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs)
   native_ivar_scopes = {}
   if closed_world && native_paths && foreign_ruby_srcs
-    native_ivar_scopes, refusal = NativeIvarScopes.analyze(native_paths + outside_native, foreign_ruby_srcs + outside_ruby)
+    # A core mrbgem the build does not link never runs, so its Ruby cannot spell a scoped name: FOREIGN_RUBY_SRCS globs
+    # every 3rd/mruby/mrbgems mrblib (mruby-benchmark's Report spells @width), and that spelling would drop a scope
+    # for nothing. Every other foreign file still counts.
+    gems_dir = File.join(File.expand_path('../..', __dir__), '3rd/mruby/mrbgems/')
+    linked_ruby = foreign_ruby_srcs.reject do |path|
+      full = File.expand_path(path)
+      full.start_with?(gems_dir) && !build_gems.key?(full.delete_prefix(gems_dir).split('/').first)
+    end
+    native_ivar_scopes, refusal = NativeIvarScopes.analyze(native_paths + outside_native, linked_ruby + outside_ruby)
     warn "== native ivar scopes (ADR 0332): #{refusal || native_ivar_scopes.inspect} =="
   end
   nil_operators = (nil_class_operator_names(native_paths) if native_paths && foreign_ruby_srcs)
