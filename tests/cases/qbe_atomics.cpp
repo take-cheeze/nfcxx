@@ -32,4 +32,3 @@ int main() {
 
     return fails;
 }
-// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

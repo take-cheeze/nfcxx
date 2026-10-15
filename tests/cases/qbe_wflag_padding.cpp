@@ -49,4 +49,3 @@ int main() {
   if (z.f != 1 || z.w.d != 6.0) bad |= 4;
   return bad;
 }
-// X86-ONLY-LINUX: x86-64 long double layout, which the aarch64 Linux front end does not take; macOS arm64 runs it

@@ -124,5 +124,58 @@ else
   bad "quoted include: nfcxx links and runs" "compile or link failed"
 fi
 
+# 12. Intermediates: a compile and link leaves no .ii, .ti or .o in its directory; NFCXX_KEEP_INTERMEDIATES=1 keeps the
+# records in the directory the driver names on stderr. The sources use a template, so the prelinker writes records.
+mkdir -p "$tmp/cwd" && printf 'template <class T> T twice(T x) { return x + x; }\n' > "$tmp/cwd/common.h"
+printf '#include "common.h"\nint fx(int v) { return twice(v); }\n' > "$tmp/cwd/x.cpp"
+printf 'int fx(int);\nint main() { return fx(2) == 4 ? 0 : 1; }\n' > "$tmp/cwd/main.cpp"
+(cd "$tmp/cwd" && "$nfcxx" -o prog x.cpp main.cpp >/dev/null 2>&1 && ./prog); got=$?
+if [ "$got" -eq 0 ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; then
+  ok "compile and link leave no .ii, .ti or .o in the directory"
+else
+  bad "compile and link leave no .ii, .ti or .o in the directory" "exit $got, $(ls -A "$tmp/cwd" | tr '\n' ' ')"
+fi
+keep_msg=$(cd "$tmp/cwd" && NFCXX_KEEP_INTERMEDIATES=1 "$nfcxx" -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
+if [ -n "$keep_msg" ] && [ -f "$keep_msg/x.ti" ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; then
+  ok "NFCXX_KEEP_INTERMEDIATES=1 keeps the records in the named directory"
+else
+  bad "NFCXX_KEEP_INTERMEDIATES=1 keeps the records" "named '$keep_msg'"
+fi
+[ -n "$keep_msg" ] && rm -rf "$keep_msg"
+
+# 13. -c recompile clears the records of the object it compiles. Link x.o alone (writes x.ii), compile y.o and link it
+# alone (writes y.ii), recompile x.o, then link both: the stale x.ii must not make an instance assigned to two objects.
+mkdir -p "$tmp/rec" && cp "$tmp/cwd/common.h" "$tmp/rec/"
+printf '#include "common.h"\nint fy(int v) { return twice(v); }\n' > "$tmp/rec/y.cpp"
+printf 'int fx(int);\nint main() { return fx(1) == 2 ? 0 : 1; }\n' > "$tmp/rec/mx.cpp"
+printf 'int fy(int);\nint main() { return fy(2) == 4 ? 0 : 1; }\n' > "$tmp/rec/my.cpp"
+cp "$tmp/cwd/x.cpp" "$tmp/cwd/main.cpp" "$tmp/rec/"
+(cd "$tmp/rec" && "$nfcxx" -c x.cpp -o x.o && "$nfcxx" -o p1 x.o mx.cpp \
+  && "$nfcxx" -c y.cpp -o y.o && "$nfcxx" -o p2 y.o my.cpp \
+  && "$nfcxx" -c x.cpp -o x.o && "$nfcxx" -o p3 x.o y.o main.cpp) >"$tmp/rec.log" 2>&1
+if [ $? -eq 0 ] && (cd "$tmp/rec" && ./p3); then
+  ok "-c recompile clears the object's records (no instance assigned to two objects)"
+else
+  bad "-c recompile clears the object's records" "$(grep -m2 'prelinker: error' "$tmp/rec.log")"
+fi
+
+# 14. A link leaves no records beside its objects. Link x.o alone and y.o alone (each assigns twice<int> to its object),
+# then link both without recompiling either: the earlier links' assignments must not make an instance assigned to two objects.
+mkdir -p "$tmp/rel" && cp "$tmp/rec/common.h" "$tmp/rec/y.cpp" "$tmp/rec/x.cpp" "$tmp/rec/mx.cpp" "$tmp/rec/my.cpp" "$tmp/rel/"
+printf 'int fx(int);\nint fy(int);\nint main() { return fx(2) == 4 && fy(2) == 4 ? 0 : 1; }\n' > "$tmp/rel/main.cpp"
+(cd "$tmp/rel" && "$nfcxx" -c x.cpp -o x.o && "$nfcxx" -o p1 x.o mx.cpp && ./p1 \
+  && "$nfcxx" -c y.cpp -o y.o && "$nfcxx" -o p2 y.o my.cpp && ./p2 \
+  && "$nfcxx" -o p3 x.o y.o main.cpp && ./p3) >"$tmp/rel.log" 2>&1
+if [ $? -eq 0 ]; then
+  ok "link of objects that earlier links used (no recompile) has no instance assigned to two objects"
+else
+  bad "link of objects that earlier links used (no recompile)" "$(grep -m2 'prelinker: error' "$tmp/rel.log")"
+  echo "--- test 14 log (tail of all three builds' stdout and stderr) ---"; tail -40 "$tmp/rel.log"; echo "---"
+  # the twice<int> symbol in each object of the final link (nm -m on Mach-O shows weak and strong marks too)
+  nm_cmd="nm"; [ "$(uname -s)" != Darwin ] || nm_cmd="nm -m"
+  for o in x.o y.o; do echo "--- test 14 $o:"; (cd "$tmp/rel" && $nm_cmd "$o" 2>&1 | grep -i twice); done
+  echo "--- test 14 files in $tmp/rel:"; ls -la "$tmp/rel"
+fi
+
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]
