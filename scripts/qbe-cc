@@ -58,10 +58,7 @@ if [ "$(uname -s)" = Darwin ]; then
   # __int128_t is a 64-bit integer here: libc++'s filesystem clock uses it for nanosecond counts that fit in 64 bits, and
   # cproc can compare and compute with a long long where it cannot with a struct.
   # __int128_t and __uint128_t are clang builtins (no header typedef): name cproc's 128-bit integer types
-  # libc++'s <cstring> (string.h) calls __builtin_strstr, which cproc does not know; the call becomes the library strstr,
-  # declared by the included prototype (EDG's C does not declare it where libc++ calls it).
-  printf 'char *strstr(const char *, const char *);\n' > "$tmp/darwin-strstr.h"
-  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= '-D__uint128_t=unsigned __int128' '-D__int128_t=__int128' -D__builtin_strstr=strstr -include "$tmp/darwin-strstr.h")
+  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= '-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
 fi
 if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
