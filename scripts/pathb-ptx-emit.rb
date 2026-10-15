@@ -1642,8 +1642,35 @@ def strip_comments(src)
   keep.join("\n")
 end
 
+# The forms of the IR text, parsed one top-level form at a time. A top-level form starts on a line that begins with `(`
+# in column 0 (the body lines of a form are indented), so each chunk is tokenized and parsed alone: the token table stays
+# small, where parsing the whole text at once took time that grows faster than the text. A chunk that does not balance
+# falls back to parsing the whole text, which gives the same result or the same error.
+def parse_forms_chunked(src)
+  chunks = []
+  cur = []
+  src.split("\n").each do |line|
+    next if line.lstrip.start_with?(";")
+    if line.start_with?("(") && !cur.empty?
+      chunks << cur.join("\n")
+      cur = []
+    end
+    cur << line
+  end
+  chunks << cur.join("\n") unless cur.empty?
+  forms = []
+  chunks.each do |c|
+    begin
+      parse_forms(tokenize(c)).each { |f| forms << f }
+    rescue BadIR
+      return parse_forms(tokenize(strip_comments(src)))
+    end
+  end
+  forms
+end
+
 def emit_module(src, sm, kernels = [])
-  forms = parse_forms(tokenize(strip_comments(src)))
+  forms = parse_forms_chunked(src)
   fns = []
   shared = {}
   globals = {}
