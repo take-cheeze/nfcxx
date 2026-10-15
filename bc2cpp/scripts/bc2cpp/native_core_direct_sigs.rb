@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Writes sig/native/core_direct.rbs from the NativeCoreDirect tables (ENTRIES and KERNEL_ENTRIES), which stay the source
+# Writes generated/bc2cpp/core_direct.rbs from the NativeCoreDirect tables (ENTRIES and KERNEL_ENTRIES), which stay the source
 # of truth for each row's arity and argument shape. Run with --check to fail when the committed file is stale.
 #
 #   ruby scripts/bc2cpp/native_core_direct_sigs.rb          # rewrite the file
@@ -8,7 +8,7 @@
 require_relative '../../tools/bc2cpp/native_core_direct'
 
 module NativeCoreDirectSigs
-  PATH = File.expand_path('../../sig/native/core_direct.rbs', __dir__)
+  PATH = File.expand_path('../../generated/bc2cpp/core_direct.rbs', __dir__)
 
   # The RBS type of the argument at position 0 for each non-trivial argument shape; every other position is untyped.
   ARG_TYPES = { nil_or_string: 'String?' }.freeze

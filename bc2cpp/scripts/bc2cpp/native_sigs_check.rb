@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Fails when sig/native/core_direct.rbs or sig/native/rgss_direct.rbs is stale against the native tables they are
+# Fails when generated/bc2cpp/core_direct.rbs or generated/bc2cpp/rgss_direct.rbs is stale against the native tables they are
 # generated from, or does not parse as RBS. Run in CI next to the other bc2cpp checks.
 require 'rbs'
 require_relative 'native_core_direct_sigs'
