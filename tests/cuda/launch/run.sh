@@ -143,4 +143,15 @@ if "$root/nfcxx" -c -I"$cuda/include" alias_fnptr_mutant.cu -o "$out/af.o" > "$o
 else
   echo "FAIL alias_fnptr mutant: not caught"; fail=1
 fi
+# Emitter lowerings: bool kernel parameter, bool device-function argument, bool to float, volatile store and load.
+pass emit_misc.cu "emit misc: no error, 0 mismatches"
+# Mutant: the device function's bool test is flipped, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" emit_misc_mutant.cu -o "$out/emm.o" > "$out/emm.log" 2>&1 \
+   && "$root/nfcxx" "$out/emm.o" -L"$cuda/lib64" -lcudart -o "$out/emm" >> "$out/emm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/emm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant emit_misc: caught: $run"
+else
+  echo "FAIL emit_misc mutant: not caught"; fail=1
+fi
 exit $fail
