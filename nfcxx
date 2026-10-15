@@ -96,6 +96,9 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   local base; base=$(basename "$src" .cu)
   # The -I directories: the rewriter inlines the project headers they name (quoted and angle-bracket includes).
   local incs=(); local f; for f in ${cflags[@]+${cflags[@]+"${cflags[@]}"}}; do case $f in -I*) incs+=("$f");; esac; done
+  # The -D and -U options: the host compile gets them, and the device pass resolves its conditionals with them, so both
+  # copies agree on every #if the defines decide.
+  local defs_opts=(); for f in ${cflags[@]+${cflags[@]+"${cflags[@]}"}}; do case $f in -D*|-U*) defs_opts+=("$f");; esac; done
   # Kernel name obfuscation: one seed for both copies of the file (the host copy and the device unit must agree).
   local obf=(); if [ "$obfuscate" = 1 ]; then obf=(--obfuscate="${NFCXX_OBFUSCATE_SEED:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"); fi
   # The front end parses the plain kernel launches (EDG --cuda, 3rd/edg); the rewriter leaves them. Launches with
@@ -108,12 +111,12 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
     # options recorded at compile time, and it must see --cuda there too (see the eccp call below).
     cuda_opts=(--cuda)
   fi
-  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
+  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
-  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   # The kernels are the names cuda-rewrite.rb listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
