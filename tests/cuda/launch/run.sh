@@ -81,6 +81,16 @@ pass local_targs.cu "local targs: no error, 43 43"
 pass macro_targs.cu "macro targs: no error, 64 64"
 pass using_namespace.cu "using namespace: no error, 28 28"
 pass shared_align.cu "shared align launch: no error, 0 mismatches"
+pass vec4_alignas.cu "vec4 alignas: no error, 0 mismatches"
+# Mutant: the sum drops its last element, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" vec4_alignas_mutant.cu -o "$out/vm.o" > "$out/vm.log" 2>&1 \
+   && "$root/nfcxx" "$out/vm.o" -L"$cuda/lib64" -lcudart -o "$out/vm" >> "$out/vm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/vm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant vec4_alignas: caught: $run"
+else
+  echo "FAIL vec4_alignas: the mutant was not caught"; fail=1
+fi
 pass grid_sync.cu "grid sync: no error, 0 mismatches"
 # Mutant: the same two-phase kernel without the grid barrier must read stale data, so the check must see mismatches.
 if "$root/nfcxx" -c -I"$cuda/include" grid_sync_nobarrier.cu -o "$out/nb.o" > "$out/nb.log" 2>&1 \
