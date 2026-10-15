@@ -5,9 +5,12 @@
 #
 # 3rd/qbe is take-cheeze/qbe, a daily mirror of https://c9x.me/git/qbe.git (see that
 # repo's sync workflow). 3rd/cproc is take-cheeze/cproc, a fork of michaelforney/cproc: its branch
-# nfcxx-asan-combined (the pin, a44a644) is the pinned upstream commit plus nfcxx's cproc patches as commits (empty-struct,
-# vaarg-aggregate, empty-copy, array-qual; see docs/notes/freestanding.md and docs/notes/realworld.md for what
-# each one fixes). Move the pin in .gitmodules and the fork together when rebasing those patches onto a new upstream.
+# nfcxx-qbe-darwin (the pin, 909f18e) is the pinned upstream commit a44a644 plus nfcxx's cproc patches as commits
+# (unprototyped-fnptr, dollar-ident, aligned-attr, darwin-ldouble, apple-valist, apple-driver, apple-predefines,
+# atomic-builtins), which this script applied before. Earlier nfcxx patches (empty-struct, vaarg-aggregate, empty-copy,
+# array-qual) are commits of a44a644 itself; see
+# docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
+# this comment together when rebasing those patches onto a new upstream.
 # scripts/qbe-uninit-slot.patch, scripts/qbe-wflag.patch and scripts/qbe-empty-align.patch are applied to the QBE copy. Re-run this script after changing the pin.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,26 +39,6 @@ patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-align.patch"
 # rejects as a relocation)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-apple-addend.patch"
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
-# cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
-# EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
-# cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
-# cproc: scripts/cproc-aligned-attr.patch (a trailing __attribute__((aligned(N))) after a struct or union body raises its alignment, as GNU does: the SDK's mach/arm/_structs.h uses it; only inputs that were errors change)
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-aligned-attr.patch"
-# cproc: scripts/cproc-darwin-ldouble.patch (Apple arm64: long double is a double, as in clang's ABI; the patch is inert elsewhere)
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-darwin-ldouble.patch"
-# cproc: scripts/cproc-apple-valist.patch (the aarch64-apple target: a pointer va_list, and va_start and va_arg take its address;
-# QBE's Apple variadic convention, so stdarg.h and the SDK's stdio.h agree on va_list).
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-valist.patch"
-# cproc: scripts/cproc-apple-driver.patch (aarch64-apple-* selects the aarch64-apple target and QBE's arm64_apple backend;
-# every other aarch64 triple is unchanged)
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-driver.patch"
-# cproc: scripts/cproc-apple-predefines.patch (Apple targets predefine __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__, which the
-# SDK's availability macros need once -undef is passed, and aarch64 Apple targets predefine __arm64__, as clang does)
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-apple-predefines.patch"
-# cproc: scripts/cproc-atomic-builtins.patch (the __c11_atomic_* builtins and the __atomic_*_n forms: sized libatomic calls by pointee size)
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-atomic-builtins.patch"
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
 if [ "$(uname -s)" = Darwin ]; then
