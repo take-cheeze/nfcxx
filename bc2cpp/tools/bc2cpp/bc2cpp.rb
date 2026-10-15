@@ -736,10 +736,12 @@ if $PROGRAM_NAME == __FILE__
 
   # ANY_OPAQUE_SUPPORT: as class_poison_reason.
   element_poison_reason = {}
+  # ELEMENT_SIGNATURE_CHECK: the classes traced sites wrote, checked against `@x: Array[C]` seeds below.
+  element_site_classes = {}
   element_raw = profile_call.call('ArrayElementLayout.analyze') do
     ArrayElementLayout.analyze(ireps, registry, class_layout, class_annotations,
                                element_annotations, superclass_of,
-                               poison_reason: element_poison_reason,
+                               poison_reason: element_poison_reason, site_classes: element_site_classes,
                                closed_world: closed_world, included_modules: included_modules,
                                prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
   end
@@ -800,10 +802,11 @@ if $PROGRAM_NAME == __FILE__
   # known-element array resolve (see HashElementLayout.analyze).
   # ANY_OPAQUE_SUPPORT: as class_poison_reason.
   hash_poison_reason = {}
+  hash_element_site_classes = {}
   hash_element_raw = profile_call.call('HashElementLayout.analyze') do
     HashElementLayout.analyze(ireps, registry, class_layout, class_annotations,
                               element_annotations, element_raw, superclass_of,
-                              poison_reason: hash_poison_reason,
+                              poison_reason: hash_poison_reason, site_classes: hash_element_site_classes,
                               closed_world: closed_world, included_modules: included_modules,
                               prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
   end
@@ -1037,7 +1040,9 @@ if $PROGRAM_NAME == __FILE__
   # settled is the same build error (TypeFacts reports these rows itself, so they stay out of `contradictions`).
   ivar_contradictions = if sig_applied
                           AnnotationContradictions.ivar_conflicts(sig_applied.ivar_sigs, class_layout_raw,
-                                                                  ivar_layout, ClassLayout::UNKNOWN)
+                                                                  ivar_layout, ClassLayout::UNKNOWN) +
+                            AnnotationContradictions.ivar_element_conflicts(sig_applied.ivar_sigs, element_site_classes,
+                                                                            hash_element_site_classes)
                         else
                           []
                         end
@@ -1059,7 +1064,8 @@ if $PROGRAM_NAME == __FILE__
       signature_arg_types: sig_applied&.ir_arg_types, signature_contracts: sig_applied,
       included_modules: included_modules, prepended_modules: prepended_modules,
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
-      integer_constants: integer_constants
+      integer_constants: integer_constants, element_site_classes: element_site_classes,
+      hash_element_site_classes: hash_element_site_classes
     )))
   end
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='

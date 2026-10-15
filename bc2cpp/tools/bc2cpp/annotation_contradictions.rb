@@ -157,6 +157,24 @@ module AnnotationContradictions
     end
   end
 
+  # ELEMENT_SIGNATURE_CHECK: an RBS `@x: Array[C]` / `@x: Hash[K, C]` seeds the element table without proof
+  # (RbsSignatures.seed_table), so it must at least agree with every site the element analysis traced: a site that
+  # wrote another class (a primitive literal included) is a contradiction. Untraced sites are what the seed covers.
+  # `array_sites` / `hash_sites` are ArrayElementLayout / HashElementLayout `site_classes`. Rows as ivar_conflicts.
+  def self.ivar_element_conflicts(signature_ivars, array_sites, hash_sites)
+    (signature_ivars || {}).each_value.filter_map do |sig|
+      t = sig.type
+      sites = { array: array_sites, hash: hash_sites }[t.kind]
+      next unless sites && t.element
+
+      got = ((sites[sig.owner] || {})[sig.name.delete_prefix('@')] || []).to_a.map(&:to_s).sort - [t.element]
+      next if got.empty?
+
+      container = t.kind == :array ? 'Array' : 'Hash'
+      [sig, "#{container}[#{t.element}]", "a #{container} element of class #{got.join(', ')}"]
+    end
+  end
+
   def self.ret_conflicts(d, name, ann, inferred_rets)
     return [] unless inferred_rets && ann.ret
 
