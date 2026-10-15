@@ -43,7 +43,7 @@ make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
 if [ "$(uname -s)" = Darwin ]; then
   case "$(uname -m)" in arm64) cproc_triple=aarch64-apple-darwin ;; x86_64) cproc_triple=x86_64-apple-darwin ;; esac
-  (cd "$root/build/cproc" && ./configure --host=$cproc_triple --target=$cproc_triple >/dev/null && make -j"$jobs" CC="$cc_wrap" cproc-qbe >/dev/null)
+  (cd "$root/build/cproc" && ./configure --host=$cproc_triple --target=$cproc_triple >/dev/null && make -j"$jobs" CC="$cc_wrap" cproc cproc-qbe >/dev/null)
 else
   (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$jobs" CC="$cc_wrap" cproc-qbe >/dev/null)
 fi
@@ -51,13 +51,22 @@ fi
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of
 # libnfcxxld.a (be/nfcxx_ldrt.c), which must be on the link line. The archive has one object, so -u on one of its helpers
 # pulls all of them; -lgcc/-lgcc_s give __multf3 and friends, -lstdc++ the __float128 to_chars wrappers.
-# be/nfcxx_ldrt.c is x87 code (x86-64 only), so the stage-2 build runs only on x86-64 hosts.
+# be/nfcxx_ldrt.c is x87 code (x86-64 only), so the x86-64 stage-2 build links those helpers; it does not run on arm64.
 if [ "$(uname -m)" = x86_64 ]; then
   ldrt=$("$root/scripts/pathb-ldrt")
   (cd "$root/build/cproc" && PATH="$root/build/qbe:$PATH" make -j"$jobs" stage2 \
     LDFLAGS="-Wl,-u,__nfcxx_ld_add $ldrt -lgcc -lgcc_s -lstdc++" >/dev/null)
 fi
-if [ "$(uname -m)" = x86_64 ]; then
+# Apple arm64 stage 2 (no helper archive: long double is a double there, scripts/cproc-darwin-ldouble.patch). The SDK's
+# ARM register state (mach/arm/_structs.h) has __uint128_t arrays that cproc cannot parse, and the stage-2 driver compiles
+# its sources with the SDK headers without qbe-cc's defines. So __uint128_t is unsigned for this build only; cproc's
+# sources do not use the 128-bit type, and the IR of cproc-qbe from stage 2 is identical to stage 1's on tests/c inputs.
+# The stage-2 make needs CFLAGS and CC passed on its own command line here.
+if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
+  (cd "$root/build/cproc" && mkdir -p stage2 && PATH="$root/build/qbe:$PATH" make -j"$jobs" objdir=stage2 \
+    stagedeps='cproc cproc-qbe' CC=./cproc CFLAGS='-D__uint128_t=unsigned' LDFLAGS=' -s' stage2/cproc stage2/cproc-qbe >/dev/null)
+fi
+if [ -x "$root/build/cproc/stage2/cproc-qbe" ]; then
   echo "built: $root/build/qbe/qbe $root/build/cproc/cproc-qbe $root/build/cproc/stage2/cproc-qbe"
 else
   echo "built: $root/build/qbe/qbe $root/build/cproc/cproc-qbe"
