@@ -1,4 +1,4 @@
-# Exported libc++ functions that return a class by value (scripts/darwin-sret.sh). Names are the C identifiers of the
+# Exported libc++ functions that return a class by value (scripts/sret.sh). Names are the C identifiers of the
 # Itanium-mangled symbols, without the Mach-O underscore. Each is listed in the SDK's libc++.1.tbd export list.
 _ZNSt3__19to_stringEd
 _ZNSt3__19to_stringEe

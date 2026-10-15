@@ -369,8 +369,8 @@ if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncp
   s=$("$root/scripts/ehshim") || s=""
   trace_end "$t" "EH shim" driver
   [ -z "$s" ] || shim=("$s")
-  # macOS: the thunks that pass the result of libc++'s class-returning functions in x8 (scripts/darwin-sret.sh)
-  if [ "$(uname -s)" = Darwin ]; then shim+=("$("$root/scripts/darwin-sret.sh")"); fi
+  # macOS and Linux aarch64: the thunks that pass the result of the library's class-returning functions in x8 (scripts/sret.sh)
+  sret_obj=$("$root/scripts/sret.sh"); [ -z "$sret_obj" ] || shim+=("$sret_obj")
   rtlib=(-lC)
   if [ $asan = 1 ]; then
     t=$(trace_start)

@@ -208,7 +208,7 @@ namespace std
 // instead (the entry address of the EDG runtime), so those members are defined here, in the program, and the
 // program's calls bind to them (the dylib keeps its own internal calls). The handle is pinned and released with the EDG
 // hooks. This file is compiled by nfcxx, so the definitions use the EDG calling convention, and the thunk list of
-// scripts/darwin-sret-symbols.txt does not name them.
+// scripts/sret-darwin-symbols.txt does not name them.
 #ifdef _LIBCPP_VERSION
 
 extern "C"
