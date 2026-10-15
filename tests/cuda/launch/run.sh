@@ -197,6 +197,16 @@ if "$root/nfcxx" -c -I"$cuda/include" helper_launch_mutant.cu -o "$out/hlm.o" > 
 else
   echo "FAIL helper_launch_mutant: the mutant was not caught"; fail=1
 fi
+pass dep_enumerate.cu "dep enumerate: no error, 0 mismatches"
+# Mutant: the same launch with the other instance (cols / 4) must miss the expected entries, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" dep_enumerate_mutant.cu -o "$out/dm.o" > "$out/dm.log" 2>&1 \
+   && "$root/nfcxx" "$out/dm.o" -L"$cuda/lib64" -lcudart -o "$out/dm" >> "$out/dm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant dep_enumerate: caught: $run"
+else
+  echo "FAIL dep_enumerate: the mutant was not caught"; fail=1
+fi
 # Mutant: one stride is wrong (w/8 for w/4), so the kernel's sums differ and the check must see mismatches.
 if "$root/nfcxx" -c -I"$cuda/include" init_list_range_mutant.cu -o "$out/ilm.o" > "$out/ilm.log" 2>&1 \
    && "$root/nfcxx" "$out/ilm.o" -L"$cuda/lib64" -lcudart -o "$out/ilm" >> "$out/ilm.log" 2>&1 \
