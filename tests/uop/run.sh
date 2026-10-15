@@ -131,6 +131,7 @@ run_all() {
     ls "$tmp/$label/onnx"/*.onnx >/dev/null 2>&1 && { python3 tests/uop/onnx_check.py "$tmp/$label/onnx" | sed "s/^/     $label /" ; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label onnx_check"; fail=1; }; }
     [ -f "$tmp/$label/compat.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat.json" | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat"; fail=1; }; }
     [ -f "$tmp/$label/compat64.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat64.json" 64 | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat 64"; fail=1; }; }
+    tests/uop/perf/trace_test.sh | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label bench trace"; fail=1; }
   fi
 }
 if [ -n "$UOP_HOST" ]; then
