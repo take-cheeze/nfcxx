@@ -1862,6 +1862,11 @@ BUILTIN_DEFS = {
   # powers of two, error bound in docs/notes/gpu.md).
   "ceilf" => "extern \"C\" float __nfcxx_ceilf(float);\nstatic inline float ceilf(float a) { return __nfcxx_ceilf(a); }\n",
   "fmaf" => "extern \"C\" float __nfcxx_fmaf(float, float, float);\nstatic inline float fmaf(float a, float b, float c) { return __nfcxx_fmaf(a, b, c); }\n",
+  # isinf: the value's bits: an infinity has an all-ones exponent and a zero mantissa (CUDA's device isinf, int result).
+  "isinf" => "static inline int isinf(float a) { union { float f; unsigned int u; } v; v.f = a; return (v.u & 0x7fffffffu) == 0x7f800000u; }\n" \
+             "static inline int isinf(double a) { union { double d; unsigned long long u; } v; v.d = a; return (v.u & 0x7fffffffffffffffULL) == 0x7ff0000000000000ULL; }\n",
+  # __builtin_assume(x) is an optimizer hint: the device code drops it, and its expression is not evaluated.
+  "__builtin_assume" => "#define __builtin_assume(x) ((void)0)\n",
   # log2f: an exact exponent at a positive power of two (the bits say so; a subnormal one is scaled up by 2^24 first), else
   # lg2.approx. Its error is not bounded at powers of two, and llama.cpp takes floorf(log2f(n)) of head counts.
   "log2f" => "extern \"C\" float __nfcxx_log2f(float);\n" \
