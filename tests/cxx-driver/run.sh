@@ -170,6 +170,7 @@ if [ $? -eq 0 ]; then
   ok "link of objects that earlier links used (no recompile) has no instance assigned to two objects"
 else
   bad "link of objects that earlier links used (no recompile)" "$(grep -m2 'prelinker: error' "$tmp/rel.log")"
+  echo "--- test 14 log (tail of all three builds' stdout and stderr) ---"; tail -40 "$tmp/rel.log"; echo "---"
 fi
 
 echo "pass $pass fail $fail"
