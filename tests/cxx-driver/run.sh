@@ -177,5 +177,28 @@ else
   echo "--- test 14 files in $tmp/rel:"; ls -la "$tmp/rel"
 fi
 
+# 15. NFCXX_CACHE (docs/notes/cxx-driver.md): a -c compile is kept, and a later identical compile takes the copy. The template
+# instance comes from the prelinker's records, so the restored .ti must come back with the object for the link to find it;
+# a changed header is compiled again, and reverting it takes the first copy.
+c15=$tmp/cache15; mkdir -p "$c15/o"
+printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
+printf '#include "tpl.h"\nint run_tpl(void) { return twice(20) + BIAS; }\n' > "$c15/tpl.cpp"
+printf 'int run_tpl(void);\nint main(void) { return run_tpl() - 41; }\n' > "$c15/main.cpp"
+export NFCXX_CACHE=$c15/cache
+c15_entries() { ls "$c15/cache/objects" 2>/dev/null | wc -l | tr -d ' '; }
+check "cache: a compile is stored" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
+check "cache: a restored object links with its records" sh -c "
+  rm -f '$c15/o/tpl.o' '$c15/o/tpl.ti' '$c15/o/tpl.ii' &&
+  '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && test -f '$c15/o/tpl.ti' &&
+  env -u NFCXX_CACHE '$nfcxx' -c '$c15/main.cpp' -o '$c15/o/main.o' &&'$nfcxx' '$c15/o/main.o' '$c15/o/tpl.o' -o '$c15/prog' && '$c15/prog'"
+[ "$(c15_entries)" = 1 ] && ok "cache: one entry for one compile" || bad "cache: one entry for one compile" "$(c15_entries) entries"
+sed -i 's/BIAS 1/BIAS 2/' "$c15/tpl.h"
+check "cache: a changed header is compiled again" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
+[ "$(c15_entries)" = 2 ] && ok "cache: changed header gives a second entry" || bad "cache: changed header gives a second entry" "$(c15_entries) entries"
+sed -i 's/BIAS 2/BIAS 1/' "$c15/tpl.h"
+check "cache: reverting the header takes the first copy" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
+[ "$(c15_entries)" = 2 ] && ok "cache: reverted header adds no entry" || bad "cache: reverted header adds no entry" "$(c15_entries) entries"
+unset NFCXX_CACHE
+
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]
