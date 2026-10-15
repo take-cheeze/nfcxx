@@ -71,7 +71,7 @@ base=$out/edg-base
 rm -rf "$base"; cp -r "$src/bases/docker/dev-env/gcc" "$base"
 # The base's include/ is a relative symlink into the submodule; cp -r copies the link text, which would dangle
 # from build/pathb. Point it at the submodule absolutely.
-rm -f "$base/include"; ln -s "$src/include_c++" "$base/include"
+rm -rf "$base/include"; ln -s "$src/include_c++" "$base/include"
 
 cd "$tree"
 EDG_BASE=$base cmake -G Ninja -S "$tree" -B "$out/cmake" -DCMAKE_BUILD_TYPE=Release \
