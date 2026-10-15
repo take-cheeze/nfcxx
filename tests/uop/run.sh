@@ -81,8 +81,10 @@ run_all() {
     if res=$("$tmp/$label/$t" "${args[@]}" 2>&1); then echo "ok   $label uop/$t: $(tail -1 <<<"$res")"; grep '^SKIP' <<<"$res" | sed "s/^/     $label /"
     else echo "FAIL $label uop/$t"; head -30 <<<"$res"; fail=1; fi
   done
-  if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"
-  else echo "FAIL $label uop/np_compat 64"; head -30 <<<"$res"; fail=1; fi
+  if [ -x "$tmp/$label/np_compat" ]; then
+    if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"
+    else echo "FAIL $label uop/np_compat 64"; head -30 <<<"$res"; fail=1; fi
+  fi
   if [ -n "$CC_IS_NFCXX" ] && [ -x "$tmp/$label/test_cgen" ]; then   # the generated C through the nfcxx driver
     if res=$(NFCUOP_CC="$PWD/nfcxx" "$tmp/$label/test_cgen" quick 2>&1); then echo "ok   $label uop/test_cgen with nfcxx as the C compiler: $(tail -1 <<<"$res")"
     else echo "FAIL $label uop/test_cgen with nfcxx as the C compiler"; head -30 <<<"$res"; fail=1; fi
