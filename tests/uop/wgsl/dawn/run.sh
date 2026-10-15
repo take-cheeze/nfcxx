@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Spike: the uop WGSL cases (tests/uop/wgsl/run.sh's runner in Chrome) on Google's Dawn instead, native (Metal on macOS).
-# Not in CI. Needs a Dawn build from a shallow checkout:
+# The uop WGSL cases (tests/uop/wgsl/run.sh's runner in Chrome) on Google's Dawn instead, native (Metal on macOS).
+# Optional: not in CI, and tests/uop/wgsl/run.sh stays the default. Needs node and a Dawn build from a shallow checkout:
 #   git clone --depth 1 https://dawn.googlesource.com/dawn $DAWN_SRC
 #   python3 $DAWN_SRC/tools/fetch_dawn_dependencies.py -s -t      (run inside $DAWN_SRC)
 #   cmake -S $DAWN_SRC -B $DAWN_BUILD -G Ninja -DCMAKE_BUILD_TYPE=Release -DDAWN_FETCH_DEPENDENCIES=ON \
@@ -16,12 +16,12 @@ b=$(mktemp -d); trap 'rm -rf "$b"' EXIT
 
 # The cases, as tests/uop/wgsl/run.sh writes them for the browser.
 L=$(sed -n 's/^L=(\(.*\))$/\1/p' tests/uop/wgsl/run.sh)
-c++ -std=c++17 -O1 -Ilib/uop $L tests/uop/test_wgsl.cpp -o "$b/test_wgsl" 2>/dev/null
+c++ -std=c++17 -O1 -Ilib/uop $L tests/uop/test_wgsl.cpp -o "$b/test_wgsl"
 "$b/test_wgsl" "$b" >/dev/null
 
 # The runner links every archive of the build once and again (the archives reference each other); the frameworks are Metal's.
 libs=$(find "$build" -name '*.a' ! -name 'libwebgpu_dawn.a' | sort | tr '\n' ' ')
-clang++ -std=c++20 -O1 -w -I "$src/include" -I "$build/gen/include" tests/uop/wgsl/dawn/run_dawn.cc -o "$b/run_dawn" \
+clang++ -std=c++20 -O1 -w -I "$src/src/include" -I "$build/gen/include" tests/uop/wgsl/dawn/run_dawn.cc -o "$b/run_dawn" \
   $libs $libs -framework Metal -framework Foundation -framework IOKit -framework IOSurface -framework QuartzCore \
   -framework CoreGraphics -framework Cocoa -lc++
 
