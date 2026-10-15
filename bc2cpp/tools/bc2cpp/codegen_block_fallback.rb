@@ -450,36 +450,94 @@ class CodeGen
   end
 
   # RBS_BLOCK_PARAM_HINT: the class of a block's first parameter when the method it is passed to declares
-  # that block type (`def each: () { (Game::Actor) -> void } -> void` in a signature file). Only an exact,
-  # self-free receiver class whose own declaration names the method, and a plain block whose required
-  # positionals match the declaration, qualify; anything else gets nil and stays untyped. The class is
-  # returned as an element hint, so the direct call it enables still checks mrb_obj_class at run time.
+  # that block type (`def each: () { (Game::Actor) -> void } -> void` in a signature file). A plain block
+  # whose required positionals match the declaration qualifies when every definition the send can reach is
+  # known and declares the same first class (rbs_block_definers); anything else gets nil and stays untyped.
+  # The class is returned as an element hint, so the direct call it enables still checks mrb_obj_class at
+  # run time.
   def block_fallback_rbs_param_class(irep, region, owner_name)
     signatures = self.class.rbs_block_signatures
-    return nil unless signatures && irep && !region[:self_implicit]
+    return nil unless signatures && irep
 
     block_irep = region[:block_irep]
     fields = block_irep.enter&.enter_fields
     return nil unless fields && fields.drop(1).all?(&:zero?) && !rest_only_block?(block_irep)
+    return nil unless fields.first.positive?
 
     idx = irep.index_of_addr(region[:sendb_addr])
     insn = idx && irep.instructions[idx]
-    return nil unless insn&.op == 'SENDB'
+    return nil unless insn&.op == (region[:self_implicit] ? 'SSENDB' : 'SENDB')
 
-    recv_class = block_fallback_receiver_class(irep, idx, region, owner_name)
-    return nil unless recv_class.is_a?(String)
+    name = insn.sym.to_s
+    definers = if region[:self_implicit]
+                 rbs_block_self_definers(name, @self_class_unknown ? nil : owner_name)
+               else
+                 recv_class = block_fallback_receiver_class(irep, idx, region, owner_name)
+                 rbs_block_exact_definers(name, recv_class) if recv_class.is_a?(String)
+               end
+    return nil if definers.nil? || definers.empty?
 
-    signature = signatures[[recv_class, insn.sym.to_s]]
+    classes = definers.map { |owner| rbs_block_first_param_class(signatures[[owner, name]], fields.first) }
+    classes.uniq.size == 1 ? classes.first : nil
+  end
+
+  # The one class a declared block's first parameter is, or nil: the declaration must take exactly `arity`
+  # required positionals and nothing else, and its first type must resolve to a single class.
+  def rbs_block_first_param_class(signature, arity)
     function = signature&.block_type&.type
     return nil unless function && function.optional_positionals.empty? && !function.rest_positionals &&
                       function.trailing_positionals.empty? && function.required_keywords.empty? &&
                       function.optional_keywords.empty? && !function.rest_keywords
-    return nil unless function.required_positionals.size == fields.first && fields.first.positive?
+    return nil unless function.required_positionals.size == arity
 
     classes = IrRbsBlockTypes.resolve(function.required_positionals.first.type, {})
-    return nil unless classes&.size == 1
+    classes&.size == 1 ? classes.first.to_s : nil
+  end
 
-    classes.first.to_s
+  # The owners whose definition of +name+ an exact +recv_class+ receiver reaches: the class's own declaration
+  # as before, or, in a closed world, the one definition its lookup finds (an inherited declaration).
+  def rbs_block_exact_definers(name, recv_class)
+    return [recv_class] if self.class.rbs_block_signatures.key?([recv_class, name])
+    return nil unless rbs_block_lookup_safe?(name, recv_class)
+
+    target, = closed_world_lookup_target(name, recv_class, Set.new)
+    target&.irep ? [target.owner] : nil
+  end
+
+  # RBS_BLOCK_PARAM_HINT for an implicit-self send in +self_owner+'s code: self is an instance of self_owner
+  # or of any descendant, so the owners are the definition self_owner's own lookup finds plus every
+  # descendant's override (the CHA_SELF enumeration, cha_self_plan). nil when the closed world cannot list
+  # them all, so an override with another block contract is either listed (and must declare the same class)
+  # or makes the hint impossible.
+  def rbs_block_self_definers(name, self_owner)
+    return nil unless self_owner && rbs_block_lookup_safe?(name, self_owner)
+
+    hierarchy = @closed_world.class_hierarchy(self_owner)
+    return nil unless hierarchy && @closed_world.self_method_missing_free?(self_owner)
+
+    default, = closed_world_lookup_target(name, self_owner, Set.new, self_call: true)
+    return nil unless default&.irep
+
+    descendants = hierarchy[:descendants]
+    return nil if descendants.any? { |klass| cha_mixin_may_define?(name, klass) }
+
+    overriders = @registry.fetch(name, []).select { |d| descendants.include?(d.owner) }
+    return nil unless overriders.empty? || hierarchy[:wild].empty?
+
+    ([default] + overriders).map(&:owner).uniq
+  end
+
+  # The closed-world facts both lookups need: a declared class whose method table no runtime installer,
+  # native definition or opaque name can change behind the lookup.
+  def rbs_block_lookup_safe?(name, klass)
+    return false unless @closed_world
+    return false if klass.end_with?('.singleton') || !@closed_world.class_declared?(klass)
+    return false if devirt_blocked_name?(name) || !@closed_world.inherited_lookup_safe?(name, klass)
+
+    installed = symbol_installed_names
+    return false if installed.nil? || installed.include?(name)
+
+    @registry.fetch(name, []).none? { |d| d.owner == '<native>' }
   end
 
   # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the body's standalone
@@ -668,8 +726,10 @@ class CodeGen
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: the JUMP_TARGET_GLUE_FIX label rule.
     targets = BytecodeIR.for(block_irep).branch_target_addrs - (nested_suppressed - nested_glue_at.keys)
-    elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner) ||
-                 block_fallback_rbs_param_class(region[:parent_irep], region, d.owner)
+    elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner)
+    rbs_class = elem_class ? nil : block_fallback_rbs_param_class(region[:parent_irep], region, d.owner)
+    elem_class ||= rbs_class
+    body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)

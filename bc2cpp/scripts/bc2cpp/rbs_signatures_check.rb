@@ -768,6 +768,71 @@ else
     check.call('nominal optional and keyword bounds do not change generated code',
                gen.call(File.read(File.join(dir, 'optional-keyword.rb')), '') == gen.call(File.read(File.join(dir, 'optional-keyword.rb')), File.join(dir, 'sig/optional-keyword.rbs')))
 
+    puts '== RBS_BLOCK_PARAM_HINT: self and inherited yielders'
+    yielder = <<~RUBY
+      class BkItem
+        def power
+          3
+        end
+      end
+      class BkOther
+        def power
+          4
+        end
+      end
+      class BkBag
+        def initialize
+          @items = [BkItem.new]
+        end
+        def each_item
+          @items.each { |i| yield i }
+          nil
+        end
+        def total
+          @sum = 0
+          each_item { |i| @sum += i.power }
+          @sum
+        end
+      end
+      class BkKid < BkBag
+      end
+      class BkUse
+        def run
+          @sum = 0
+          BkKid.new.each_item { |i| @sum += i.power }
+          @sum
+        end
+      end
+      p BkBag.new.total, BkUse.new.run, BkOther.new.power
+    RUBY
+    overriding = yielder + <<~RUBY
+      class BkSub < BkBag
+        def each_item
+          yield BkOther.new
+          nil
+        end
+      end
+      p BkSub.new.total
+    RUBY
+    File.write(File.join(dir, 'sig/block-param.rbs'), "class BkBag\n  def each_item: () { (BkItem) -> void } -> untyped\nend\n")
+    hint_fn = lambda do |code, fn|
+      body = code[/^static mrb_value #{fn}_block_fallback_\d+_impl\(.*?^}/m].to_s
+      [body.include?('// RBS_BLOCK_PARAM_HINT :each_item parameter 1 -> BkItem'), body.include?('// ELEMENT :power -> BkItem#power')]
+    end
+    typed = gen.call(yielder, File.join(dir, 'sig/block-param.rbs'))
+    check.call('an implicit-self send in the declaring class types the block parameter', hint_fn.call(typed, 'BkBag_total') == [true, true])
+    check.call('an exact receiver inheriting the declaration types the block parameter', hint_fn.call(typed, 'BkUse_run') == [true, true])
+    check.call('without the signature neither block parameter is typed',
+               gen.call(yielder, '').then { |c| hint_fn.call(c, 'BkBag_total') + hint_fn.call(c, 'BkUse_run') }.none?)
+    overridden = gen.call(overriding, File.join(dir, 'sig/block-param.rbs'))
+    check.call('a subclass override with another block contract withdraws the self hint', hint_fn.call(overridden, 'BkBag_total') == [false, false])
+    check.call('the exact non-overriding subclass keeps its hint', hint_fn.call(overridden, 'BkUse_run') == [true, true])
+    File.write(File.join(dir, 'sig/block-param-both.rbs'),
+               "class BkBag\n  def each_item: () { (BkItem) -> void } -> untyped\nend\n" \
+               "class BkSub\n  def each_item: () { (BkOther) -> void } -> untyped\nend\n")
+    check.call('an override declaring a different class also withdraws it',
+               hint_fn.call(gen.call(overriding, File.join(dir, 'sig/block-param-both.rbs')), 'BkBag_total') == [false, false])
+
     puts '== the comment wins over a signature'
     File.write(File.join(dir, 'both.rb'), commented)
     File.write(File.join(dir, 'sig/both.rbs'), "class TcUse\n  def use: (TcB o) -> untyped\nend\n")
