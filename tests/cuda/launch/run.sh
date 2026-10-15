@@ -186,4 +186,14 @@ if "$root/nfcxx" -c -I"$cuda/include" helper_launch_mutant.cu -o "$out/hlm.o" > 
 else
   echo "FAIL helper_launch_mutant: the mutant was not caught"; fail=1
 fi
+# Dynamic shared array as an operand of a multiplication (`s * meta[l].y`): not a pointer declaration.
+pass dynshared_operator.cu "dynshared operator: no error, 0 mismatches"
+if "$root/nfcxx" -c -I"$cuda/include" dynshared_operator_mutant.cu -o "$out/dom.o" > "$out/dom.log" 2>&1 \
+   && "$root/nfcxx" "$out/dom.o" -L"$cuda/lib64" -lcudart -o "$out/dom" >> "$out/dom.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dom" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant dynshared_operator: caught: $run"
+else
+  echo "FAIL dynshared_operator mutant: not caught"; fail=1
+fi
 exit $fail
