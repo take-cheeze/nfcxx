@@ -73,6 +73,9 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
   done
 }
+# A CUDA_HOME outside /usr is still a system directory for the rewriter (its headers are not inlined into the device unit),
+# so a CUDA_HOME-shaped directory from PyPI wheels (scripts/fetch-cudart-wheel.sh) behaves like the toolkit's.
+[ -n "${CUDA_HOME:-}" ] && export NFCXX_SYSTEM_PATHS="$CUDA_HOME${NFCXX_SYSTEM_PATHS:+:$NFCXX_SYSTEM_PATHS}"
 # The rewriter: the C++ port (build/cuda-rewrite, built from tools/cuda-rewrite on first use) by default; the Ruby
 # reference scripts/cuda-rewrite.rb with NFCXX_CUDA_REWRITER=ruby. Both take the same flags and give the same output.
 rewriter=()
@@ -417,6 +420,11 @@ for f in ${files[@]+"${files[@]}"}; do
     # searches -I before the system directories, so "error.h" from a file outside EDG's src/ must not pick
     # glibc's <error.h> (ifc_modules_templ.c, docs/notes/cxx-driver.md).
     -I?*) userinc+=("$f") ;;
+    # -lcudart from a CUDA_HOME (the toolkit's or a PyPI-wheel directory): the binary records that directory's lib64 as
+    # its runpath, so it loads the same libcudart it was linked against (not whichever one the loader finds first).
+    -lcudart)
+      [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME/lib64" ] && eflist+=(--c_to_obj_option "-Wl,-rpath,$CUDA_HOME/lib64")
+      eflist+=("--c_to_obj_lib=cudart") ;;
     -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;;
     # eccp puts its --c_to_obj_option items before every object and archive, so a link option that acts on the
     # arguments after it would act on the wrong ones. Refused rather than moved (docs/notes/cxx-driver.md).

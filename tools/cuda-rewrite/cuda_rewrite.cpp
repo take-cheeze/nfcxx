@@ -2756,6 +2756,19 @@ std::vector<std::string> g_incdirs;
 // Ruby system_path? (line 2123): the toolkit and system prefixes are never inlined.
 bool system_path(const std::string &path) {
   std::string p = path;
+  // NFCXX_SYSTEM_PATHS: extra prefixes that are system directories (the driver sets it to a CUDA_HOME-shaped directory
+  // unpacked from PyPI wheels, scripts/fetch-cudart-wheel.sh), separated by ':'.
+  if (const char *extra = std::getenv("NFCXX_SYSTEM_PATHS")) {
+    std::string list = extra;
+    size_t start = 0;
+    while (start <= list.size()) {
+      size_t end = list.find(':', start);
+      if (end == std::string::npos) end = list.size();
+      std::string prefix = list.substr(start, end - start);
+      if (!prefix.empty() && p.compare(0, prefix.size(), prefix) == 0) return true;
+      start = end + 1;
+    }
+  }
   // lib/cuda/host holds the host shims (cub/cub.cuh): the device unit has their definitions, so they are not inlined.
   return p.compare(0, 5, "/usr/") == 0 || p.compare(0, 5, "/opt/") == 0 || p.compare(0, 16, "/usr/local/cuda/") == 0 ||
          p.find("/lib/cuda/host/") != std::string::npos;
