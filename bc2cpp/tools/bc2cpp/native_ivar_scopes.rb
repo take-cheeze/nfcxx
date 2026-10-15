@@ -15,7 +15,11 @@ module NativeIvarScopes
     'contents' => ['RGSS::Window'],
     'bitmap' => %w[RGSS::Sprite RGSS::Plane],
     'cursor_rect' => ['RGSS::Window'],
-    'viewport' => %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window]
+    'viewport' => %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window],
+    # window_init, window_refresh and window_width_set_direct/window_height_set_direct read and write these on a
+    # Window self only; other classes' @width / @height keep their typed slots.
+    'width' => ['RGSS::Window'],
+    'height' => ['RGSS::Window']
   }.freeze
   NAMES = SCOPES.keys.freeze
   # ADR 0370: what the audited natives (FILES, pinned by digest) put in a scoped slot. `setters` are the registered
