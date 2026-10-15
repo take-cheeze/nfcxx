@@ -82,12 +82,12 @@ EOF
   if cmp -s "$tmp/edge.py.s" "$tmp/edge.rb.s" && [ "$(grep -c '^\.weak ' "$tmp/edge.py.s")" -ge 3 ]; then
     report ok "weak-symbols edge cases (nested attributes, declarations)"
   else report fail "weak-symbols edge cases differ"; diff "$tmp/edge.py.s" "$tmp/edge.rb.s" | head -5; fi
-  # Mach-O labels carry the target's "_" prefix (--sym-prefix=_, passed by qbe-cc on Darwin): the .weak lines name them.
+  # Mach-O labels carry the target's "_" prefix (--sym-prefix=_, passed by qbe-cc on Darwin): .weak_definition lines name them.
   printf '_alpha:\n\tret\n_beta:\n\tret\n_delta:\n\tret\n' > "$tmp/macho.py.s"; cp "$tmp/macho.py.s" "$tmp/macho.rb.s"
   python3 "$oracle/weak-symbols.py" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.py.s"
   "$mrb" "$root/scripts/weak-symbols.rb" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.rb.s"
-  if cmp -s "$tmp/macho.py.s" "$tmp/macho.rb.s" && grep -q '^\.weak _alpha$' "$tmp/macho.rb.s" && ! grep -q '^\.weak alpha$' "$tmp/macho.rb.s"; then
-    report ok "weak-symbols --sym-prefix=_ (Mach-O labels) matches the oracle"
+  if cmp -s "$tmp/macho.py.s" "$tmp/macho.rb.s" && grep -q '^\.weak_definition _alpha$' "$tmp/macho.rb.s" && ! grep -q '^\.weak ' "$tmp/macho.rb.s"; then
+    report ok "weak-symbols --sym-prefix=_ (Mach-O labels, .weak_definition) matches the oracle"
   else report fail "weak-symbols --sym-prefix=_ differs or misses _alpha"; diff "$tmp/macho.py.s" "$tmp/macho.rb.s" | head -5; fi
   # No-op case: the assembly is left untouched when nothing is weak.
   cp "$tmp/edge.s" "$tmp/none.s"; "$mrb" "$root/scripts/weak-symbols.rb" /dev/null "$tmp/none.s"
