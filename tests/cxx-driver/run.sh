@@ -205,6 +205,13 @@ check "cache log: a hit is logged with its key" sh -c "
 printf '#define BIAS 3\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
 check "cache log: a changed header is logged as a miss" sh -c "
   '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && grep -qx miss '$c15/log'"
+# Parallel compiles share the log: each lookup is one whole block, so four lookups give four blocks, keys and states.
+rm -f "$c15/plog"
+for i in 1 2 3 4; do NFCXX_CACHE_LOG=$c15/plog "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/p$i.o" >/dev/null 2>&1 & done
+wait
+n=$(grep -c '^== ' "$c15/plog"); k=$(grep -c '^key ' "$c15/plog"); s=$(grep -cx -e hit -e miss "$c15/plog")
+[ "$n" = 4 ] && [ "$k" = 4 ] && [ "$s" = 4 ] && ok "cache log: parallel compiles keep whole blocks" \
+  || bad "cache log: parallel compiles keep whole blocks" "$n blocks, $k keys, $s states"
 unset NFCXX_CACHE_LOG NFCXX_CACHE
 
 echo "pass $pass fail $fail"
