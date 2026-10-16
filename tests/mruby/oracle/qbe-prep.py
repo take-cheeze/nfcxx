@@ -616,12 +616,83 @@ def weak_function_names(toks):
     return names
 
 
+FN_DECL_SKIP = ('static', 'extern', 'inline', '__inline', '__inline__')
+
+
+def function_return_type(toks, decl, brace):
+    """Return type text of the function whose body opens at toks[brace] (a file-scope '{' after a parameter list
+    of a declaration starting at toks[decl]), or None when that '{' opens no function body."""
+    if not is_punct(tok_at(toks, brace - 1), ')'):
+        return None
+    lp = match_back(toks, brace - 1, '(', ')')
+    if lp < 1 or toks[lp - 1].kind != 'id':
+        return None
+    name = lp - 1
+    words = []
+    k = decl
+    while k < name:
+        if toks[k].kind == 'id' and toks[k].text == '__attribute__' and is_punct(tok_at(toks, k + 1), '('):
+            k = match_fwd(toks, k + 1, '(', ')') + 1
+            continue
+        if not (toks[k].kind == 'id' and toks[k].text in FN_DECL_SKIP):
+            words.append(toks[k].text)
+        k += 1
+    return ' '.join(words) if words else None
+
+
+def void_typedefs(toks):
+    """Names of the typedefs of void (`typedef void T;`, or of another such name)."""
+    names = set()
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(toks) - 3):
+            if not (toks[i].kind == 'id' and toks[i].text == 'typedef' and is_punct(toks[i + 3], ';')
+                    and toks[i + 2].kind == 'id'):
+                continue
+            if toks[i + 2].text in names:
+                continue
+            base = toks[i + 1].text
+            if base != 'void' and base not in names:
+                continue
+            names.add(toks[i + 2].text)
+            changed = True
+    return names
+
+
+def bare_return_edits(toks):
+    """A bare `return;` in a function whose return type is not void becomes `return (T){};` (see qbe-prep.rb)."""
+    edits = []
+    voids = void_typedefs(toks)
+    decl = 0
+    i = 0
+    n = len(toks)
+    while i < n:
+        t = toks[i]
+        if is_punct(t, ';') and t.depth == 0:
+            decl = i + 1
+        elif is_punct(t, '{') and t.depth == 0:
+            close = match_fwd(toks, i, '{', '}')
+            if close < 0:
+                break
+            ret = function_return_type(toks, decl, i)
+            if ret and ret != 'void' and ret not in voids:
+                for k in range(i + 1, close):
+                    if toks[k].kind == 'id' and toks[k].text == 'return' and is_punct(tok_at(toks, k + 1), ';'):
+                        edits.append((toks[k].start, toks[k].end, 'return (' + ret + '){}'))
+            i = close
+            decl = close + 1
+        i += 1
+    return edits
+
+
 def main():
     src_path, out_path, tail_path = sys.argv[1:4]
     src = open(src_path).read()
     toks = tokenize(src)
     edits = []  # (start, end, replacement)
     tail = []   # assembly directives, in source order
+    edits.extend(bare_return_edits(toks))
     weak = weak_function_names(toks)
     weak_marked = set()
     ctors = []  # constructor functions, in source order
