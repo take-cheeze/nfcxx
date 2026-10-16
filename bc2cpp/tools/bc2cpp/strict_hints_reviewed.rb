@@ -27,6 +27,7 @@ STRICT_HINTS_REVIEWED = Set[
   "RPG2k3::Scene::Battle#finish_round_animation -> result (IVAR_ACCESSOR)",
   "RPG2k::Scene::Base#initialize -> db (IVAR_ACCESSOR)",
   "RPG2k::Scene::Base#initialize -> map_tree (IVAR_ACCESSOR)",
+  "RPG2k::Scene::Battle#battle_encounter_lines -> name (IVAR_ACCESSOR)",
   "RPG2k::Scene::Battle#battle_grid_params -> terrain_id (TYPED)",
   "RPG2k::Scene::Battle#battler_z -> members (IVAR_ACCESSOR)",
   "RPG2k::Scene::Battle#build_battle_sprites -> members (IVAR_ACCESSOR)",

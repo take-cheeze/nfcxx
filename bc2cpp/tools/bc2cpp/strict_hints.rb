@@ -30,10 +30,10 @@
 # (`STRICT_HINT_SITE Owner#method -> name (FAMILY)`) and must be in STRICT_HINTS_REVIEWED
 # (tools/bc2cpp/strict_hints_reviewed.rb), the way NOMETHOD_REVIEWED holds dead fallbacks.
 require 'set'
+require_relative 'review_scope'
 
 module StrictHints
   ENV_NAME = 'BC2CPP_STRICT_HINTS'
-  ALLOW_ENV = 'BC2CPP_STRICT_HINTS_UNREVIEWED'
   FAMILIES = %w[typed element ivar_accessor mono_embed poly_small_n poly_table interface_table subtree].freeze
   # `1` forces the families that read a receiver hint (layout, annotation, element); `all` adds the
   # candidate-set chains and tables, whose receivers are not traced (docs/adr/0419).
@@ -95,10 +95,12 @@ module StrictHints
   end
 
   # Why this run's sites break STRICT_HINTS_REVIEWED; empty when they do not. As NomethodReviewed:
-  # stale entries only for methods this run compiled, and not at all for a hot-only run.
-  def violations(sites, compiled, reviewed: reviewed_set, stale: true)
-    found = sites.map { |s| s[:key] }.to_set
-    compiled_methods = compiled.reject { |m| m[:unsupported] }.map { |m| "#{m[:owner]}##{m[:name]}" }.to_set
+  # stale entries only for methods this run compiled, and not at all for a hot-only run. `scope`:
+  # ReviewScope.for_build of the run (tools/bc2cpp/review_scope.rb).
+  def violations(sites, compiled, scope:, reviewed: reviewed_set, stale: true)
+    found = ReviewScope.select(scope, sites).map { |s| s[:key] }.to_set
+    compiled_methods = compiled.reject { |m| m[:unsupported] || !ReviewScope.cover?(scope, m[:owner]) }
+                               .map { |m| "#{m[:owner]}##{m[:name]}" }.to_set
     unreviewed = (found - reviewed).sort.map { |k| "unreviewed forced hint: #{k}" }
     return unreviewed unless stale
 

@@ -25,6 +25,7 @@ require 'tmpdir'
 require 'fileutils'
 require_relative 'compiled_gems'
 require_relative 'shared_generation'
+require_relative 'wio_world_env'
 
 module NeverCalledRegistrations
   SAFE_UNREGISTER_OWNER_RE = /\A(?:Game|RPG2k3?|LCF)(?:::|\z)/
@@ -63,12 +64,17 @@ module NeverCalledRegistrations
     # target's "never called" verdict unsound for the others.
     native_srcs = Dir["#{repo_root}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{repo_root}/3rd/mruby") +
                   external_gem_native_srcs(repo_root)
+    # The Ruby half of the same outside world, as every *-compiled mrbgem.rake passes it (foreign_mrblib_srcs is
+    # target-independent too). Without it the analyses that need both halves (INTEGER_CONSTANT_PROOF, the
+    # RBS_CHECKED_PARAMS caller scan, ADR 0456) see a different program than the build compiles.
+    foreign_ruby_srcs = foreign_mrblib_srcs(repo_root)
 
     bc2cpp = File.expand_path('bc2cpp.rb', __dir__)
     Dir.mktmpdir('bc2cpp_never_called_probe') do |tmp|
       common = {
         'MRBC' => mrbc,
         'NATIVE_SRCS' => Shellwords.join(native_srcs),
+        'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
         'SKIP_UNSUPPORTED' => '1',
         'BC2CPP_HOT_METHODS' => hot_methods,
       }
@@ -81,7 +87,7 @@ module NeverCalledRegistrations
           'OTHER_OWNERS' => BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }.values.flat_map { |g| g[:owners] }.join(','),
         }
       end
-      results = SharedGeneration.run(tool: bc2cpp, srcs: closed_world_srcs, common_env: common, unit_envs: units,
+      results = SharedGeneration.run(tool: bc2cpp, srcs: closed_world_srcs, common_env: bc2cpp_wio_world_env(common, repo_root), unit_envs: units,
                                       extra_args: ['--annotated'])
       gem_names.zip(results).to_h do |gem_name, (out, err, status)|
         unless status.success?

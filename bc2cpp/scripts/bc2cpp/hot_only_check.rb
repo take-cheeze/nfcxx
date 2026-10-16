@@ -27,6 +27,7 @@ require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/hot_methods'
 require_relative '../../tools/bc2cpp/wio_registered_methods'
 require_relative 'cxx'
+require_relative '../../tools/bc2cpp/wio_world_env'
 
 root = File.expand_path('../..', __dir__)
 failures = []
@@ -39,7 +40,7 @@ end
 
 config = File.read(File.join(root, 'build_config.rb'), encoding: 'UTF-8')
 check.call('build_config.rb enables hot-only for the single-format builds only',
-           config.match?(/closed_world = proc do\n\s+if single_format_only\n\s+enable_bc2cpp_closed_world\n\s+enable_bc2cpp_hot_only\n/) &&
+           config.include?('closed_world = proc { enable_bc2cpp_hot_only }') &&
              BC2CPP_COMPILED_GEMS.keys.all? { |g| config.include?("#{g}\", &closed_world if bc2cpp") })
 check.call('every compiled gem passes the list through the checked env and rebuilds when it changes',
            BC2CPP_COMPILED_GEMS.keys.all? do |g|
@@ -187,7 +188,7 @@ generate = lambda do |list_keys, only: nil, other: nil|
       env['BC2CPP_HOT_METHODS'] = File.join(dir, 'hot.txt')
       File.write(env['BC2CPP_HOT_METHODS'], list_keys.join("\n") + "\n")
     end
-    out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+    out, err, status = Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
     abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
     [out, err, File.read(File.join(dir, 'hot_world_decls.h'))]
   end

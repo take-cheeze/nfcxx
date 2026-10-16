@@ -153,7 +153,7 @@ if ENV['MRBC']
     end
     begin
       Dir.mktmpdir('bitop') do |dir|
-        code, _err = Bc2cppFixtureRuntime.generate(FIXTURE, dir, closed: true)
+        code, _err = Bc2cppFixtureRuntime.generate(FIXTURE, dir)
         code[%r{// BitopProbe::Bits#arithmetic .*?fell off the end of its body"\);\n\}\n}m].to_s
       end
     ensure

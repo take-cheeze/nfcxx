@@ -352,7 +352,7 @@ if ENV['MRBC']
     saved = env.keys.to_h { |k| [k, ENV.fetch(k, nil)] }
     env.each { |k, v| ENV[k] = v }
     begin
-      Dir.mktmpdir { |dir| runtime.generate(source, dir, closed: true) }
+      Dir.mktmpdir { |dir| runtime.generate(source, dir) }
     ensure
       saved.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
     end
@@ -458,7 +458,7 @@ if ENV['MRBC']
       ENV['BC2CPP_CXXFLAGS'] = flags
       begin
         Dir.mktmpdir do |dir|
-          _c, gen_err = runtime.generate(FIXTURE, dir, closed: true, only_owners: owners)
+          _c, gen_err = runtime.generate(FIXTURE, dir, only_owners: owners)
           built, output = runtime.run(dir, gen_err, owners, body, build: build, full: with_gems)
           check.call("#{label}: the fixture compiles and runs against real mruby", built)
           puts output unless built

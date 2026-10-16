@@ -51,13 +51,80 @@ class CodeGen
     @constructor_pool_candidates
   end
 
+  # RBS_CHECKED_PARAMS (ADR 0456): every site that can enter the initialize body +label+, as
+  # [[irep, index, receiver register, positional argc, owner], ...] (argument k is register receiver + k), or
+  # [nil, why] when something the closed world cannot enumerate may enter it. :no_sites is the empty list: no
+  # `new` or `super` reaches the body. Only positions 1..mandatory are entry-site facts (see the header).
+  def constructor_entry_sites(label)
+    constructor_pool_candidates
+    return [nil, @constructor_pool_refusal] if @constructor_pool_refusal
+
+    status = @constructor_pool_status[label]
+    return [[], nil] if status == :no_sites
+    return [nil, status || 'not an initialize of a declared class'] unless status == :ok
+
+    [@constructor_pool_candidates.fetch([label, 1]).first, nil]
+  end
+
+  # RBS_CHECKED_PARAMS (ADR 0456): the SETIV sites of `@name` as read in the body +label+ (blocks included), as
+  # [[irep, index, value register], ...], or [nil, why] when they are not all of its writers or a read may see the
+  # slot unassigned. NUMERIC_IVAR_PROOF's group (ADR 0276) holds every SETIV of the name in the reader's class family
+  # and fails when anything else may write it: an outside source spelling it, a Symbol or String naming it, a
+  # self-rebinding block, an attr_writer, a wild family, reflection. numeric_ivar_assured? (INIT_ASSIGNED, ADR 0261)
+  # proves every constructor of the reader's class and its descendants assigns it before the slot can be read,
+  # `self` escapes or the frame exits, and that nothing calls `allocate`.
+  def ivar_write_sites(label, name)
+    ivar_write_sites_of(ivar_reader_owner(label), name)
+  end
+
+  # The class whose instance `self` is in the body +label+ (blocks included), or nil.
+  def ivar_reader_owner(label)
+    numeric_irep_owner[label]&.owner
+  end
+
+  # The same for a read in an instance method of +owner+ (an attr_reader's slot).
+  def ivar_write_sites_of(owner, name)
+    sites, why = ivar_store_sites_of(owner, name)
+    return [nil, why] if why
+    return [nil, "@#{name} may be read before a constructor of #{owner} assigns it"] unless numeric_ivar_assured?(owner, name)
+
+    [sites, nil]
+  end
+
+  # ivar_write_sites_of without INIT_ASSIGNED: every SETIV that can write `@name` of an +owner+ instance, for a
+  # consumer to which an unassigned (nil) read is harmless (SEALED_HASH_IVAR: `nil[k]` raises NoMethodError).
+  def ivar_store_sites_of(owner, name)
+    setup_numeric_ivar_groups unless @numeric_ivar_groups
+    return [nil, "ivar proofs are off (#{@numeric_ivar_disabled})"] if @numeric_ivar_disabled
+    return [nil, 'read outside a method of a declared class'] unless owner && @closed_world.class_declared?(owner)
+
+    group = @numeric_ivar_groups[[numeric_family(owner), name]]
+    return [nil, "@#{name} has a writer outside its SETIV sites (NUMERIC_IVAR_PROOF)"] if group.nil? || group.structural
+
+    # A store in a method of W writes an instance of W or a descendant, a read in a method of +owner+ reads one of
+    # +owner+ or a descendant: in a tree of classes both can be one object only when one class is the other's
+    # ancestor. A store in a module's method may write any includer's instance and is always kept.
+    [group.sites.select { |site_irep, _idx, _reg| ivar_classes_overlap?(ivar_reader_owner(site_irep.label), owner) }, nil]
+  end
+
+  def ivar_classes_overlap?(writer, reader)
+    return true unless writer && @closed_world.class_declared?(writer)
+
+    constructor_chain(writer).include?(reader) || constructor_chain(reader).include?(writer)
+  end
+
   # Why the whole analysis is off, or nil.
   def constructor_pools_refusal
     return 'BC2CPP_CONSTRUCTOR_POOLS=0' if ENV.fetch('BC2CPP_CONSTRUCTOR_POOLS', '1') == '0'
 
     world = @closed_world
     return 'no outside-source scan' unless @foreign_method_names && @outside_tokens
-    return 'no closed world' unless world && world.global_refusal.nil? && world.exact_instances_singleton_free?
+    return 'no closed world' unless world
+    return "closed world refusal: #{world.global_refusal}" if world.global_refusal
+    unless world.exact_instances_singleton_free?
+      makers = world.singleton_makers.first(5).map { |label, op| "#{label} #{op}" }
+      return "an object gets a singleton class (#{makers.join(', ')}#{', ...' if world.singleton_makers.size > 5})"
+    end
     return 'non-standard new/allocate lookup' unless world.standard_constructor_lookup?
     return 'Class has a mixin' unless Array(@included_modules['Class']).empty? && Array(@prepended_modules['Class']).empty? &&
                                       !@unknown_mixins.include?('Class')

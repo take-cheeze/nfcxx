@@ -9,8 +9,11 @@
 #   - the gate: an unlisted site and a listed site gone from a method this run
 #     compiled are violations; a listed site in a method the run did not
 #     compile (another gem) is not, and a hot-only run checks unlisted only;
-#   - bc2cpp.rb itself aborts a closed-world run on an unreviewed site, and
-#     marks nothing without the switch;
+#   - the scope (tools/bc2cpp/review_scope.rb): the lists judge the engine's
+#     owners, matched exactly, and every owner they name is one;
+#   - bc2cpp.rb itself aborts a closed-world run on an unreviewed site in an
+#     engine-owner method, lists a fixture program's sites without judging
+#     them, and marks nothing without the switch;
 #   - the real wio closed world: its hot-only codegen (what the build runs)
 #     passes the gate, and with every method compiled it has exactly the
 #     listed sites, no more and no fewer.
@@ -21,6 +24,7 @@ require 'open3'
 require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
+require_relative '../../tools/bc2cpp/wio_world_env'
 
 root = File.expand_path('../..', __dir__)
 mrbc = ENV['MRBC'] || 'mrbc'
@@ -38,18 +42,45 @@ plain = { owner: 'B', name: 'n', code: "r1 = y;\n" }
 skipped = { owner: 'C', name: 'k', code: "#error\n", unsupported: true }
 compiled = [marked, plain, skipped]
 sites = NomethodReviewed.sites(compiled)
+all = ReviewScope::ALL
 check.call('a marked site becomes its "Owner#method -> name" key',
            sites == [{ key: 'A#m -> foo', owner: 'A', method: 'm', called: 'foo', self_receiver: true }])
-check.call('a listed site passes', NomethodReviewed.violations(sites, compiled, reviewed: Set['A#m -> foo']).empty?)
-v = NomethodReviewed.violations(sites, compiled, reviewed: Set[])
+check.call('a listed site passes', NomethodReviewed.violations(sites, compiled, scope: all, reviewed: Set['A#m -> foo']).empty?)
+v = NomethodReviewed.violations(sites, compiled, scope: all, reviewed: Set[])
 check.call('an unlisted site fails', v == ['unreviewed dead fallback: A#m -> foo'])
-v = NomethodReviewed.violations(sites, compiled, reviewed: Set['A#m -> foo', 'B#n -> gone'])
+v = NomethodReviewed.violations(sites, compiled, scope: all, reviewed: Set['A#m -> foo', 'B#n -> gone'])
 check.call('a listed site gone from a compiled method fails as stale', v.size == 1 && v.first.start_with?('stale'))
 check.call('a listed site in a method this run did not compile is not stale',
-           NomethodReviewed.violations(sites, compiled, reviewed: Set['A#m -> foo', 'Z#q -> x', 'C#k -> x']).empty?)
+           NomethodReviewed.violations(sites, compiled, scope: all, reviewed: Set['A#m -> foo', 'Z#q -> x', 'C#k -> x']).empty?)
 check.call('a hot-only run (stale: false) checks unreviewed sites only',
-           NomethodReviewed.violations(sites, compiled, reviewed: Set['B#n -> gone'], stale: false) ==
+           NomethodReviewed.violations(sites, compiled, scope: all, reviewed: Set['B#n -> gone'], stale: false) ==
              ['unreviewed dead fallback: A#m -> foo'])
+check.call('a site outside the scope is not judged, and neither is a listed entry of a method outside it',
+           NomethodReviewed.violations(sites, compiled, scope: Set['B'], reviewed: Set[]).empty? &&
+             NomethodReviewed.violations(sites, compiled, scope: Set['C'], reviewed: Set['B#n -> gone']).empty?)
+check.call('a site inside the scope is judged',
+           NomethodReviewed.violations(sites, compiled, scope: Set['A'], reviewed: Set[]) ==
+             ['unreviewed dead fallback: A#m -> foo'])
+
+puts '== ReviewScope'
+check.call('every engine build is held to the engine owners; any other closed-world build to every owner',
+           %w[psp wio maix closed].all? { |b| ReviewScope.for_build(b) == ReviewScope::ENGINE_OWNERS } &&
+             ReviewScope.for_build('optcarrot-probe') == ReviewScope::ALL && ReviewScope.for_build('') == ReviewScope::ALL)
+gem_owners = BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }
+check.call('the engine owners are every compiled gem owner (core included) and each X.singleton module X',
+           gem_owners.all? { |o| ReviewScope::ENGINE_OWNERS.include?(o) } &&
+             ReviewScope::ENGINE_OWNERS.include?('LCF') && ReviewScope::ENGINE_OWNERS.include?('Array') &&
+             (ReviewScope::ENGINE_OWNERS.to_a - gem_owners).all? { |o| gem_owners.include?("#{o}.singleton") })
+list_owners = (NOMETHOD_REVIEWED.to_a + PROVEN_MISS_REVIEWED.to_a + StrictHints.reviewed_set.to_a)
+              .map { |k| ReviewScope.key_owner(k) }.uniq
+outside = list_owners.reject { |o| ReviewScope::ENGINE_OWNERS.include?(o) }
+check.call("every owner the reviewed lists name (#{list_owners.size}) is in the engine scope#{" (not: #{outside.join(', ')})" unless outside.empty?}",
+           outside.empty?)
+check.call('an engine-owner run that compiles an owner outside the scope is a leak; a fixture run is not',
+           ReviewScope.leaks(ReviewScope::ENGINE_OWNERS, %w[LCF.singleton], [{ owner: 'LCF' }, { owner: 'Zz' }]) == ['Zz'] &&
+             ReviewScope.leaks(ReviewScope::ENGINE_OWNERS, %w[CwCaller], [{ owner: 'CwCaller' }]).empty? &&
+             ReviewScope.leaks(ReviewScope::ENGINE_OWNERS, nil, [{ owner: 'CwCaller' }]).empty?)
+
 listing = "  NOMETHOD A#m -> foo [self]\n  NOMETHOD Z.singleton#q -> bar?\n"
 check.call('the stderr listing parses back',
            NomethodReviewed.parse_listing(listing) == [{ key: 'A#m -> foo', self_receiver: true },
@@ -58,7 +89,8 @@ check.call('the stderr listing parses back',
 # -- bc2cpp.rb fails the build ------------------------------------------------------
 
 puts '== bc2cpp.rb on a fixture closed world'
-# No method_missing class, so CwCaller#talk's chain lists every definer.
+# No method_missing class, so the caller's chain lists every definer. The same dead fallback sits in a
+# fixture-owned method (CwCaller) and in an engine-owner method (Game::Shop, an owner of the compiled gems).
 WORLD = <<~'RUBY'
   class CwPet
     def cw_speak; 1; end
@@ -70,27 +102,48 @@ WORLD = <<~'RUBY'
     def talk(x); x.cw_speak; end
   end
 RUBY
+ENGINE_WORLD = <<~'RUBY'
+  class CwPet
+    def cw_speak; 1; end
+  end
+  class CwRobot
+    def cw_speak; 2; end
+  end
+  module Game
+    class Shop
+      def cw_talk(x); x.cw_speak; end
+    end
+  end
+RUBY
 gems_env = Shellwords.join(NomethodReviewedProbe.wio_gems(root).map { |n, d| "#{n}=#{d}" })
-generate = lambda do |closed, allow|
+generate = lambda do |world|
   Dir.mktmpdir do |dir|
     path = File.join(dir, 'cw_gate.rb')
-    File.write(path, WORLD)
-    env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'cw_gate', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1' }
-    if closed
-      env.merge!('BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env,
-                 NomethodReviewed::ALLOW_ENV => (allow ? 'allow' : nil))
-    end
-    Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+    File.write(path, world)
+    # The repo's sig/bc2cpp signatures describe the engine's classes; this fixture program has none of them.
+    env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'cw_gate', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1', 'BC2CPP_SIG_DIRS' => '' }
+    env.merge!('BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env)
+    Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
   end
 end
-_out, err, status = generate.call(true, false)
-check.call('an unreviewed dead fallback aborts the closed-world run and names the site',
-           !status.success? && err.include?('unreviewed dead fallback: CwCaller#talk -> cw_speak'))
-out, err, status = generate.call(true, true)
-check.call("#{NomethodReviewed::ALLOW_ENV}=allow (fixtures only) reports it and still generates",
-           status.success? && err.include?('ignoring') && out.include?('/* CLOSED_WORLD nomethod: recv.cw_speak */'))
-out, _err, status = generate.call(false, false)
-check.call('without the switch nothing is marked', status.success? && !out.include?('CLOSED_WORLD nomethod'))
+_out, err, status = generate.call(ENGINE_WORLD)
+check.call('an unreviewed dead fallback in an engine-owner method aborts the closed-world run and names the site',
+           !status.success? && err.include?('unreviewed dead fallback: Game::Shop#cw_talk -> cw_speak'))
+check.call('that run failed only on the reviewed lists, after every listing (NomethodReviewedProbe.review_abort?)',
+           NomethodReviewedProbe.review_abort?(status, err) &&
+             NomethodReviewed.parse_listing(err).map { |s| s[:key] } == ['Game::Shop#cw_talk -> cw_speak'])
+check.call('review_abort? refuses any other failure',
+           !NomethodReviewedProbe.review_abort?(status, "#{err}bc2cpp: something else\n") &&
+             !NomethodReviewedProbe.review_abort?(status, err.sub(/^== closed world proven-class miss sites: .*$/, '')))
+out, err, status = generate.call(WORLD)
+fixture_sites = NomethodReviewed.parse_listing(err)
+check.call('a fixture-owned site is generated and listed but outside the reviewed program',
+           status.success? && out.include?('/* CLOSED_WORLD nomethod: recv.cw_speak */') &&
+             fixture_sites.map { |s| s[:key] } == ['CwCaller#talk -> cw_speak'] &&
+             err.include?('1 listed site(s) outside the reviewed program'))
+check.call('the gate judges that listing through a scope that includes the fixture owner',
+           NomethodReviewed.violations(fixture_sites, [], scope: Set['CwCaller'], reviewed: Set[]) ==
+             ['unreviewed dead fallback: CwCaller#talk -> cw_speak'])
 
 # -- the real wio closed world ------------------------------------------------------
 

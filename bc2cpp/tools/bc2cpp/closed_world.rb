@@ -11,7 +11,7 @@ require_relative 'dynamic_names'
 require_relative 'loop_installers'
 require_relative 'scan_cache'
 
-# CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
+# CLOSED_WORLD (docs/adr/0210, 0466): bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
 # native sources of the build's own gems (compiled_gems.rb enforces that). A
 # guard chain's by-name fallback can then call bc2cpp_nomethod, which raises
@@ -693,6 +693,27 @@ class ClosedWorld
       (global_only || @class_decls.keys.none? { |key| key != name && simple(key) == name })
   end
 
+  # IS_A_GUARD (ADR 0456): the constant path +written+ (`K` or `Root::K`, a GETCONST and at most one GETMCNST)
+  # names exactly the declared class K wherever it is evaluated, and every instance of K is exactly a K:
+  #   * the root names one constant for the whole run: the closed world declares exactly one class or module of
+  #     that simple name, at top level; no bytecode SETCONST writes the name and no dynamic constant mutation
+  #     exists; no foreign Ruby source spells it; no native binds it except a top-level mrb_define_class /
+  #     mrb_define_module (which reopens that same top-level constant). GETCONST then finds that binding from any
+  #     scope (Object holds it), so const_missing is never asked;
+  #   * `Root::K` is found in Root's own constant table, where its declaration put it, before any ancestor;
+  #   * K is a declared, non-opaque class (no rebinding, no dynamic subclass, no outside file reopening it) with no
+  #     declared, unresolved (`wild`) or foreign Ruby subclass, so `x.is_a?(K)` holds only for an exact K.
+  def is_a_guard_constant?(written)
+    return false if @global_refusal || @dynamic_constant_mutation || !written.is_a?(String)
+
+    segments = written.split('::')
+    return false unless segments.size.between?(1, 2) && segments.all? { |s| s.match?(/\A[A-Z]\w*\z/) }
+    return false unless top_level_constant_unique?(segments.first)
+
+    !opaque?(written) && descendants(written).empty? && !@outside_ruby_supers.include?(simple(written)) &&
+      @constant_write_counts[simple(written)].zero? && !@deferred_constant_writes.include?(simple(written))
+  end
+
   # No bytecode of the world spells the constant BasicObject, the one way to an object that lacks Kernel's methods
   # without a class declaration (kernel_native_dispatch_safe? covers the declared subclasses).
   def basic_object_unreferenced?
@@ -700,6 +721,30 @@ class ClosedWorld
   end
 
   private
+
+  # is_a_guard_constant?'s root rule: +name+ is bound once, by the closed world's own top-level declaration.
+  def top_level_constant_unique?(name)
+    declared = (@class_decls.keys + @module_names.to_a).select { |path| simple(path) == name }.uniq
+    return false unless declared == [name]
+    return false if @constant_write_counts[name].positive? || @deferred_constant_writes.include?(name)
+    return false if @ruby_tokens.each_value.any? { |tokens| tokens.include?(name) }
+
+    @native_code_tokens.none? { |path, tokens| tokens.include?(name) && native_binds_nested?(path, name) }
+  end
+
+  NATIVE_CONSTANT_BINDERS = /\bmrb_(?:define_(?:class|module)_under(?:_id)?|define_(?:global_)?const|const_set|const_remove|
+                             define_(?:class|module)_id)\s*\(([^;]*)/mx
+
+  # A native source binds +name+ other than through a top-level mrb_define_class / mrb_define_module with the name
+  # spelled out (a nested define, a const_set or const_remove, a global or class const, or an `_id` define whose
+  # name is a symbol the scan does not resolve). An unreadable source answers true.
+  def native_binds_nested?(path, name)
+    text = File.binread(path).gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ')
+    spelled = /"#{Regexp.escape(name)}"|\bMRB_(?:SYM|CVSYM|IVSYM)\(#{Regexp.escape(name)}\)/
+    text.scan(NATIVE_CONSTANT_BINDERS).any? { |(body)| body.match?(spelled) || !body.match?(/"[A-Za-z_]\w*"|MRB_\w*SYM\(/) }
+  rescue SystemCallError
+    true
+  end
 
   def native_arms_lift?(name)
     @native_arms_name == name && native_only_in?(name, '/mruby-rgss/src/')
