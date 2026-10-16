@@ -28,6 +28,10 @@ DUMP = <<~TSV
   RETURN_CLASS\tfx\t0\tInteger\t1
   RETURN_SITE\tfx\t1\t1\t0\tBox#flag\tBox_flag_impl\tmethod\treturn\t0\treturn#1\tret=none
   RETURN_CLASS\tfx\t1\tTrueClass\t1
+  PARAM_SITE\tfx\t5\t1\t0\tBox#initialize\tBox_init_impl\tmethod\treq\t1\tsize\tnone:mono
+  PARAM_CLASS\tfx\t5\tInteger\t1
+  RETURN_SITE\tfx\t5\t1\t0\tBox#initialize\tBox_init_impl\tmethod\treturn\t0\treturn#1\tret=none
+  RETURN_CLASS\tfx\t5\tBox\t1
 TSV
 
 failures = []
@@ -45,6 +49,8 @@ Tempfile.create(['trace_sig', '.txt']) do |dump|
   check.call('an overflowed parameter is left out of the candidates', !text.include?('def over'))
   check.call('a never-reached method with no returns is left out', !text.include?('def unused'))
   check.call('an operator name is not written into RBS', !text.include?('def <'))
+  check.call('initialize keeps its parameter types and its return is untyped (Ruby discards it)',
+              text.include?('def initialize: (Integer) -> untyped'))
   check.call('the output parses as RBS', begin
     RBS::Parser.parse_signature(text)
     true

@@ -54,6 +54,8 @@ def candidates(params, rets)
     by_method[p[:method]][:params][p[:index]] = [p[:name], p[:classes]]
   end
   rets.each do |r|
+    # Ruby discards the value `initialize` returns, so no caller reads it.
+    next if r[:method].end_with?('#initialize')
     next unless r[:calls].positive? && r[:overflow].zero?
 
     m = by_method[r[:method]]
