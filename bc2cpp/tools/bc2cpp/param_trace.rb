@@ -243,7 +243,10 @@ module ParamTrace
       #include <mruby.h>
       #include <mruby/class.h>
       #include <mruby/value.h>
+      #include <mruby/array.h>
+      #include <mruby/hash.h>
       #define BC2CPP_PARAM_TRACE_MAX_CLASSES #{MAX_CLASSES}
+      #define BC2CPP_ELEM_SAMPLE 8
       struct bc2cpp_param_cls_#{id} { struct RClass* real; char* name; unsigned long long count; };
       struct bc2cpp_param_site_#{id} { unsigned long long calls; unsigned long long overflow; unsigned ncls; struct bc2cpp_param_cls_#{id} cls[BC2CPP_PARAM_TRACE_MAX_CLASSES]; };
       static struct bc2cpp_param_site_#{id} bc2cpp_param_sites_#{id}[#{nsites}];
@@ -255,6 +258,9 @@ module ParamTrace
         #{fnmeta}
       };
       static struct bc2cpp_param_site_#{id} bc2cpp_ret_sites_#{id}[#{nrets}];
+      // Three slots per site: [0] array elements, [1] hash keys, [2] hash values.
+      static struct bc2cpp_param_site_#{id} bc2cpp_param_elem_#{id}[#{nsites * 3}];
+      static struct bc2cpp_param_site_#{id} bc2cpp_ret_elem_#{id}[#{nrets * 3}];
       static const char* const bc2cpp_ret_meta_#{id}[#{nrets}] = {
         #{retmeta}
       };
@@ -274,12 +280,40 @@ module ParamTrace
         }
         s->cls[i].count++;
       }
+      // Samples the elements of an Array or the keys/values of a Hash one level deep, so a
+      // container's element type is visible without walking it whole.
+      static void bc2cpp_elem_record_#{id}(struct bc2cpp_param_site_#{id}* t, mrb_state* M, mrb_value v) {
+        if (mrb_array_p(v)) {
+          mrb_int n = RARRAY_LEN(v);
+          for (mrb_int i = 0; i < n && i < BC2CPP_ELEM_SAMPLE; i++) bc2cpp_site_record_#{id}(&t[0], M, mrb_ary_ref(M, v, i));
+        } else if (mrb_hash_p(v)) {
+          mrb_value keys = mrb_hash_keys(M, v);
+          mrb_int n = RARRAY_LEN(keys);
+          for (mrb_int i = 0; i < n && i < BC2CPP_ELEM_SAMPLE; i++) {
+            mrb_value k = mrb_ary_ref(M, keys, i);
+            bc2cpp_site_record_#{id}(&t[1], M, k);
+            bc2cpp_site_record_#{id}(&t[2], M, mrb_hash_get(M, v, k));
+          }
+        }
+      }
+      static void bc2cpp_elem_dump_#{id}(FILE* f, const char* site_tag, const char* class_tag, const char* symbol, unsigned site, struct bc2cpp_param_site_#{id}* t) {
+        static const char* const roles[3] = {"array", "key", "value"};
+        for (unsigned r = 0; r < 3; r++) {
+          struct bc2cpp_param_site_#{id}* s = &t[r];
+          if (!s->calls && !s->overflow) continue;
+          fprintf(f, "%s\\t%s\\t%u\\t%s\\t%llu\\t%llu\\n", site_tag, symbol, site, roles[r], s->calls, s->overflow);
+          for (unsigned j = 0; j < s->ncls; j++)
+            fprintf(f, "%s\\t%s\\t%u\\t%s\\t%s\\t%llu\\n", class_tag, symbol, site, roles[r], s->cls[j].name, s->cls[j].count);
+        }
+      }
       static inline void bc2cpp_param_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
         bc2cpp_site_record_#{id}(&bc2cpp_param_sites_#{id}[site], M, v);
+        bc2cpp_elem_record_#{id}(&bc2cpp_param_elem_#{id}[site * 3], M, v);
       }
       // Records the value a traced `return` hands back and passes it through unchanged.
       static inline mrb_value bc2cpp_ret_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
         bc2cpp_site_record_#{id}(&bc2cpp_ret_sites_#{id}[site], M, v);
+        bc2cpp_elem_record_#{id}(&bc2cpp_ret_elem_#{id}[site * 3], M, v);
         return v;
       }
       static void bc2cpp_param_dump_#{id}(void) {
@@ -305,6 +339,8 @@ module ParamTrace
           for (unsigned j = 0; j < s->ncls; j++)
             fprintf(f, "RETURN_CLASS\\t%s\\t%u\\t%s\\t%llu\\n", "#{symbol}", i, s->cls[j].name, s->cls[j].count);
         }
+        for (unsigned i = 0; i < #{sites.size}; i++) bc2cpp_elem_dump_#{id}(f, "PARAM_ELEM_SITE", "PARAM_ELEM_CLASS", "#{symbol}", i, &bc2cpp_param_elem_#{id}[i * 3]);
+        for (unsigned i = 0; i < #{rets.size}; i++) bc2cpp_elem_dump_#{id}(f, "RETURN_ELEM_SITE", "RETURN_ELEM_CLASS", "#{symbol}", i, &bc2cpp_ret_elem_#{id}[i * 3]);
         if (f != stderr) fclose(f);
       }
       static const int bc2cpp_param_registered_#{id} = atexit(bc2cpp_param_dump_#{id});
