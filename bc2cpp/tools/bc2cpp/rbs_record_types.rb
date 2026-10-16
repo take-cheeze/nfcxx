@@ -144,6 +144,14 @@ module RbsRecordTypes
     known_owners = registry.values.flatten.map(&:owner).to_set
     by_name = loaded.decls.group_by(&:ivar)
     refusal = world_refusal(closed_world, native_paths, foreign_paths, outside_ivars)
+    # A compile without the closed world / outside-source picture cannot check anything, and RECORD_HASH_PROOF
+    # itself proves nothing there: the declarations stay unverified (a warning, no facts) instead of failing.
+    if refusal
+      loaded.decls.uniq(&:ivar).each do |d|
+        diag(result.diagnostics, d.loc, 'warning', CODE, "#{d.owner}#@#{d.ivar}: not checked: #{refusal}")
+      end
+      return result
+    end
     poison = (RecordHash::Poison.new(ireps, registry, closed_world, native_paths, foreign_paths) unless refusal)
     refusal ||= poison.global && "reflection in the program (#{poison.global})"
     sites = refusal ? {} : collect_sites(ireps, by_name.keys, poison.readers)
