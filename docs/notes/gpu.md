@@ -186,3 +186,32 @@ Refused (exit 3): trap, checked division and shifts, cf2i, bool in memory, 1- an
 `trap` is refused. The loop kernel (`loop.ir`: `break`, a `set` accumulator) sums 0..9 to 45 on the GPU, and its bound-test mutant is caught.
 
 Not done: the checked operations and calls between functions, and running through SYCL's own kernel bundles (OpenCL is used).
+
+## WebGPU (Dawn) vs OpenCL on the Arc B60
+
+`tests/gpu/webgpu/` runs the same vector add through WebGPU and checks it. `vecadd.cpp` picks the Intel Vulkan adapter
+(the B60 under ANV; the NVIDIA card enumerates first and is skipped), dispatches 50000 elements, and compares the readback
+with `a + b`. `run.sh` also builds the mutant (`a - b`), which must fail. `bench.cpp` and `opencl_bench.c` time the three
+measurements below. Each is the median of 5 runs after one warm-up run. The OpenCL kernels are the same shapes as the WGSL
+ones: one 64-thread workgroup that touches one word, and the 50000-element add.
+
+| measurement | Dawn (Vulkan, ANV) | OpenCL (NEO) |
+|---|---|---|
+| (a) vecadd 50000, end to end (encode/enqueue, execute, read back) | 0.321 ms | 0.072 ms |
+| (b) 10000 one-workgroup dispatches, one command buffer / one clFinish, per dispatch | 1.30 us | 2.88 us |
+| (c) 10000 dispatches, each submitted on its own (Dawn: N submits; OpenCL: clFlush after each enqueue), per dispatch | 30.8 us | 2.90 us |
+
+Environment: Dawn at commit 2193f65 (the build in `/home/takecheeze/dev/third/dawn/build`), Mesa ANV 26.0.8 for Vulkan
+(Arc Pro B60, BMG G21), Intel NEO 26.31 for OpenCL (the same B60). Both runs were on the same machine, one after the other.
+Every run of the vector add checked out (0 mismatches over 50000 elements), and the mutant was caught.
+
+What the numbers show: the cost of one small dispatch depends heavily on how it is submitted. Inside one batch Dawn costs
+about 1.3 us per dispatch, below OpenCL's 2.9 us, but a submit per dispatch costs Dawn about 31 us, about ten times OpenCL's
+flushed enqueue. For the one-shot 50000-element add, OpenCL's blocking enqueue and read is about four times faster than Dawn's
+map-and-readback path.
+
+What they do not show: these are per-dispatch launch overhead and throughput for a kernel that does almost nothing (one
+workgroup, one thread writes one word), and for one vector add of fixed size. They are not a claim about real workloads,
+which have more work per dispatch, other buffer traffic, and their own submit patterns. The Dawn (b) and (c) runs also
+do not check the sink value the kernel writes, so the numbers say the dispatches were submitted and completed, not
+that each one ran the body. The vector add is verified; the small kernel is not.
