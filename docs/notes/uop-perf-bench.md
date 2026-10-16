@@ -63,6 +63,21 @@ Sizes are vector lengths for add, mul, sqrt and sum (2^16, 2^20, 2^24 float32 el
 - The tinygrad WebGPU results are for the kernels as tinygrad renders them today (0.14.0); tinygrad's schedule can change
   between versions.
 
+## The nfcxx numpy-API version of add, mul, sqrt and sum
+
+`tests/uop/perf/gen_nfcxx_webgpu.cpp` builds the four ops with `nfcuop::np` (the numpy-like API), lowers them with
+`Session::lower`, and renders WGSL with `render_wgsl` (`nfcuop_wgsl.hpp`). It writes the same `bench_cases.js` that
+`webgpu_bench.html` times, tagged `backend: nfcxx-numpy-webgpu`, and one check case per op at 2^10 for `tests/uop/wgsl/run.html`,
+which compares the GPU result with the numpy API's own values (`Session::eval`). `tests/uop/perf/run_webgpu_nfcxx.sh` runs both
+in headless Chrome. Matmul stays with `gen_webgpu.py`, because the WGSL renderer refuses movement ops.
+
+- `sum` is `keepdims`: the full reduction without it squeezes the result to a scalar, a Reshape the renderer refuses. The value is
+  the same; the result has shape `{1}`.
+- The renderer runs one ReduceSum kernel with one invocation for each output element. A sum over 2^24 elements is one thread
+  walking all of them, so its time is not comparable with tinygrad's multi-kernel reduction (see the table above).
+- The checks on Linux used Chromium's software adapter (`google/swiftshader`), which passes all four exactly. The timings
+  from that adapter are CPU emulation and say nothing about a GPU; compare the numbers in the table only on the same chip.
+
 ## Reproduce
 
 ```

@@ -66,7 +66,7 @@
       for (let i = 0; i < WARM; i++) await runOnce();
       const ts = [];
       for (let i = 0; i < RUNS; i++) ts.push(await runOnce());
-      log('PERF ' + JSON.stringify({ backend: 'tinygrad-webgpu', op: c.op, size: c.size, kernels: c.kernels.length,
+      log('PERF ' + JSON.stringify({ backend: c.backend || 'tinygrad-webgpu', op: c.op, size: c.size, kernels: c.kernels.length,
         ms: Math.round(median(ts) * 1000) / 1000, min: Math.round(Math.min(...ts) * 1000) / 1000, adapter: info }));
     }
   } catch (e) {
