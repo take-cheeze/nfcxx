@@ -2,6 +2,7 @@
 
 require 'tmpdir'
 require_relative 'block_returns'
+require_relative 'codegen_return_classes'
 require_relative 'foreign_definers'
 require_relative 'numeric_flow'
 
