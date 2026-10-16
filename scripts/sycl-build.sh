@@ -79,9 +79,10 @@ if [ $backend = level-zero ]; then
 fi
 if [ $backend = opencl ]; then
   # the OpenCL headers: OPENCL_INCLUDE (default: the oneAPI compiler's); libOpenCL.so.1 is the ICD loader
-  # the runtime's own headers first: the OpenCL include directory of the oneAPI tree also holds a sycl/ directory
-  exec $cxx -std=$std $optflag -DNFCXX_SYCL_OPENCL -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" \
-    -I"${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}" "${opts[@]}" "$src" -o "$out" -l:libOpenCL.so.1 "${link[@]}"
+  # the search order: the user's -I/-D first, then the runtime's own headers, OPENCL_INCLUDE last. The oneAPI OpenCL
+  # include directory also holds a sycl/ directory, so it must not shadow a user header of the same name.
+  exec $cxx -std=$std $optflag -DNFCXX_SYCL_OPENCL -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" "${opts[@]}" -I"$inc" \
+    -I"${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}" "$src" -o "$out" -l:libOpenCL.so.1 "${link[@]}"
 fi
 exec $cxx -std=$std $optflag -DNFCXX_SYCL_WEBGPU -DNFCXX_SYCL_SERVER_JS="\"$root/tests/sycl/server.cjs\"" \
   -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" "${link[@]}"
