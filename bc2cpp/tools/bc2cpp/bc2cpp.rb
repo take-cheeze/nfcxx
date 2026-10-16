@@ -432,6 +432,10 @@ if $PROGRAM_NAME == __FILE__
     # DECLARED_RETURN_CHECK (ADR 0455): return declarations every body is checked against.
     CodeGen.declared_returns = DeclaredReturns.from_signatures(sig_loaded, ireps, registry)
     CodeGen.declared_return_root = sig_root
+    # DECLARED_RETURN_GUARD: a runtime-checked declaration (%a{bc2cpp:hint}) is a fact only because its compiled body
+    # checks every return, so its body compiles in a hot-only build too, and one no body can carry is an error.
+    CodeGen.declared_return_hint_refusals = DeclaredReturns.hint_refusals(sig_loaded, ireps, registry)
+    CodeGen.declared_returns.select(&:hint).each { |e| CodeGen.hot_only_excluded&.delete(e.label) }
     warn '== signature files (RBS_SIGNATURES) =='
     sig_loaded.files.each { |f| warn "  SIG_FILE #{f}" }
     sig_applied.diagnostics.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
@@ -1230,6 +1234,13 @@ if $PROGRAM_NAME == __FILE__
   end
   compiled += gen.emit_synthesized_accessors(only_owners: only_owners)
   profile_phase.call('compile all methods')
+  # DECLARED_RETURN_GUARD (ADR 0455): the analysis trusted every runtime-checked declaration; abort unless this
+  # run compiled each one it owns with its guard (before SKIP_UNSUPPORTED could leave one interpreted and unchecked).
+  guard_failures = DeclaredReturns.guard_failures(gen.declared_return_hints, compiled, only_owners, other_owners)
+  unless guard_failures.empty?
+    abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
+          "without their compiled check:\n  #{guard_failures.join("\n  ")}"
+  end
   # TC1005 (ADR 0439): index ops on a receiver no nil check dominates, collected while the methods compiled.
   if type_facts_path
     require_relative 'type_facts'
@@ -1438,6 +1449,27 @@ if $PROGRAM_NAME == __FILE__
     static inline void bc2cpp_check_argc(mrb_state* M, mrb_int min, mrb_int max) {
       mrb_int argc = mrb_get_argc(M);
       if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);
+    }
+    // DECLARED_RETURN_GUARD (ADR 0455): a method with a runtime-checked return declaration (%a{bc2cpp:hint})
+    // returned a value of another type. The analysis trusted the declaration as a fact, so this is a hard error:
+    // log, then raise BC2cppHintViolation < NoMethodError, as a strict-hint violation does. Never dispatches.
+    // -DBC2CPP_NOMETHOD_VERIFY aborts instead, so the verify build stops at the first one.
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #include <stdio.h>
+    #include <stdlib.h>
+    #endif
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_return_violation(mrb_state* M, mrb_value value, const char* method, const char* declared) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared return violated: %s returned %s, declared -> %s\n", method, mrb_obj_classname(M, value), declared);
+      fflush(stderr);
+      abort();
+    #endif
+      mrb_value msg = mrb_format(M, "hint violation: %s returned %T, declared -> %s (%%a{bc2cpp:hint})", method, value, declared);
+      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_sym puts_id = mrb_intern_lit(M, "puts");
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      struct RClass* klass = mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
+      mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
     // Kernel#lambda flags a copy of the RProc strict after the block was built.
     static inline bool bc2cpp_proc_strict_p(mrb_state* M) {
@@ -1734,6 +1766,11 @@ if $PROGRAM_NAME == __FILE__
     hint_sites.map { |s| s[:key] }.uniq.sort.each { |k| warn "  STRICT_HINT_SITE #{k}" }
     warn ''
   end
+  # DECLARED_RETURN_GUARD (ADR 0455): one forced check per exit wrapper of a runtime-checked return declaration.
+  guard_sites = DeclaredReturns.guard_sites(compiled)
+  warn "== declared return guards (DECLARED_RETURN_GUARD): #{guard_sites.size} bc2cpp_declared_return_violation =="
+  guard_sites.uniq.sort.each { |k| warn "  DECLARED_RETURN_GUARD_SITE #{k}" }
+  warn ''
   miss_sites = ProvenMiss.sites(compiled)
   warn "== closed world proven-class miss sites: #{miss_sites.size} =="
   miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }
@@ -1759,6 +1796,13 @@ if $PROGRAM_NAME == __FILE__
                        "#{hint_violations.join("\n  ")}\n" \
                        'Run the verify build over the real workloads, then list the sites in ' \
                        'tools/bc2cpp/strict_hints_reviewed.rb (scripts/bc2cpp/strict_hints_update.rb).'
+  end
+  guard_violations = DeclaredReturns.review_failures(guard_sites, compiled, scope: review_scope)
+  unless guard_violations.empty?
+    review_failures << "bc2cpp: #{guard_violations.size} DECLARED_RETURN_GUARDS_REVIEWED violation(s) (docs/adr/0455):\n  " \
+                       "#{guard_violations.join("\n  ")}\n" \
+                       'Read each declaration and the body it guards, then list it in ' \
+                       'tools/bc2cpp/declared_return_guards_reviewed.rb.'
   end
   miss_violations = ProvenMiss.violations(miss_sites, compiled, scope: review_scope,
                                                                 stale: !ENV['BC2CPP_HOT_METHODS'])
