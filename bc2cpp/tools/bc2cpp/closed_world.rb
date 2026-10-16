@@ -603,7 +603,13 @@ class ClosedWorld
 
   def outside_ruby_paths_defining(name)
     @outside_return_def_paths ||= {}
-    @outside_return_def_paths[name] ||= @ruby_paths.select { |path| foreign_method_names([path]).include?(name) }
+    @outside_return_def_paths[name] ||= @ruby_paths.select { |path| outside_ruby_path_method_names(path).include?(name) }
+  end
+
+  # The names one outside Ruby file defines, read and scanned once per run rather than once per asked name.
+  def outside_ruby_path_method_names(path)
+    @outside_path_method_names ||= {}
+    @outside_path_method_names[path] ||= foreign_method_names([path])
   end
 
   # Inherited dispatch additionally needs every possible method installer for
