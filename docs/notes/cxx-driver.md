@@ -24,6 +24,18 @@ below, on the gcc backend.
 | `-include FILE` | EDG's `--preinclude`: the header is found through the include paths and its macros are visible (Effekseer's `-include EGL/egl.h`) |
 | `-c` with `-MD`/`-MMD` and `-MF`/`-MT`/`-MQ`/`-MP` | the host preprocessor writes the dependency file (`-M`/`-MM`), as `nfcc` does; a dependency option without `-c` is refused |
 
+### Compile cache (`NFCXX_CACHE`)
+
+Opt-in: with `NFCXX_CACHE=DIR`, a `-c` compile of one C++ source with `-o OBJ` is kept under `DIR/objects/<key>`, and an identical
+compile later copies the object back with its `<stem>.ti` and `<stem>.ii` (the link reads those records beside the object). The key
+covers the command as given, the absolute output path (the prelinker records it in the `.ti`), the working directory, the source
+and each header the host preprocessor lists (hashed), every `NFCXX_*` variable, the driver and `scripts/`, the EDG and QBE binaries,
+and the host compilers' versions. Not cached: `.cu` and C inputs, `-E`, `-MD`, several sources in one command, and an `-o` without
+an extension. A header whose path has a space is not tracked, so its change would not invalidate the key. Test 15 of
+`tests/cxx-driver/run.sh` covers a hit that links, and a changed header.
+
+With `NFCXX_CACHE_LOG=FILE` set as well, each lookup appends its key inputs (the bytes that are hashed, one block per compile headed by `== OUT (SRC)`), then `key KEY`, then `hit` or `miss`. Diff the input blocks of a miss against the last hit for the same output to see which input changed. The log variable is left out of the key, so logging never causes a miss.
+
 Refused (eccp says `unknown option`): `-fno-rtti`, `-fno-exceptions`, and every other option not in the table, since
 each of them would change the meaning of the code or is not implemented.
 
