@@ -77,21 +77,23 @@ if [ "${1:-}" = "--link" ]; then
   cxxstub="$root/tests/macos-sysroot/lib"
   cxxnames=$(sed -n '/symbols:/,/weak-symbols/p' "$cxxstub/libc++.tbd" | tr -d '[],' | tr -s ' ' '\n' | grep -E '^_' || true)
   xlpass=0; xltotal=0
+  # NFCXX_LINK_OUT keeps the executables (the temporary directory is removed on exit)
+  exeout=${NFCXX_LINK_OUT:-$tmp/cxx}; mkdir -p "$exeout"
   for b in $(cat "$tmp/cxxpass.txt" 2>/dev/null); do
     xltotal=$((xltotal + 1))
     if ! llvm-mc -triple=arm64-apple-darwin -filetype=obj "$tmp/cxx/$b.s" -o "$tmp/cxx/$b.o" 2>"$tmp/l.err"; then
       echo "C++ link fail $b: assembly: $(head -1 "$tmp/l.err")"; continue
     fi
-    if ! ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$tmp/cxx/$b.exe" "$tmp/cxx/$b.o" "$tmp/ldrt.o" \
+    if ! ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$exeout/$b.exe" "$tmp/cxx/$b.o" "$tmp/ldrt.o" \
          -L "$stub" -lSystem -L "$cxxstub" -lc++ 2>"$tmp/l.err"; then
       echo "C++ link fail $b: $(grep -m1 error "$tmp/l.err" || head -1 "$tmp/l.err")"; continue
     fi
-    hdr=$(llvm-objdump --macho --private-headers "$tmp/cxx/$b.exe" 2>/dev/null)
+    hdr=$(llvm-objdump --macho --private-headers "$exeout/$b.exe" 2>/dev/null)
     if ! { echo "$hdr" | grep -q EXECUTE && echo "$hdr" | grep -q ARM64; }; then
       echo "C++ link fail $b: not a Mach-O arm64 executable"; continue
     fi
     allowed=$(printf '%s\n' "$(cat "$tmp/stub-syms.txt")" "$cxxnames" | LC_ALL=C sort -u)
-    extra=$(llvm-nm -u "$tmp/cxx/$b.exe" | awk '{print $NF}' | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(printf '%s\n' "$allowed") | tr '\n' ' ')
+    extra=$(llvm-nm -u "$exeout/$b.exe" | awk '{print $NF}' | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(printf '%s\n' "$allowed") | tr '\n' ' ')
     if [ -n "$extra" ]; then
       echo "C++ link fail $b: imports not in the stubs: $extra"; continue
     fi
