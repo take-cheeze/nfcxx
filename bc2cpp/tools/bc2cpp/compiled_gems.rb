@@ -499,11 +499,12 @@ module Bc2cppHotOnlyOption
   end
 end
 
-# BC2CPP_HOT_ONLY=1/0 forces the mode either way. Otherwise all compiled gems must
-# agree: they call each other's `_impl`s (OTHER_OWNERS), so mixing modes would
-# reference functions never emitted.
+# Only a build that opted in (build_config.rb) is hot-only. BC2CPP_HOT_ONLY=0 turns
+# a flash build's mode off for a whole run (the census and nomethod-verify tools);
+# nothing turns a desktop build hot-only. Otherwise all compiled gems must agree:
+# they call each other's `_impl`s (OTHER_OWNERS), so mixing modes would reference
+# functions never emitted.
 def bc2cpp_hot_only_build?(build, env: ENV)
-  return true if env['BC2CPP_HOT_ONLY'] == '1'
   return false if env['BC2CPP_HOT_ONLY'] == '0'
 
   compiled = build.gems.select { |g| BC2CPP_COMPILED_GEMS.key?(g.name) }

@@ -5,7 +5,7 @@
 # compiled.
 #
 #   - wiring: build_config.rb opts the single-format builds in; every compiled
-#     gem passes the list through the checked env; BC2CPP_HOT_ONLY overrides;
+#     gem passes the list through the checked env; BC2CPP_HOT_ONLY=0 turns it off;
 #     compiled gems that disagree are refused; the wio bytecode strip never
 #     lists an excluded method, and in a hot-only build only a real
 #     registration lets it strip; the checked-in list parses and names only
@@ -62,8 +62,8 @@ mixed = build.new('wio', specs.call([true, false] + Array.new(gem_count - 2, tru
 check.call('a build that did not opt in is not hot-only', !bc2cpp_hot_only_build?(open_build, env: {}))
 check.call('an opted-in build is, and passes the list', bc2cpp_hot_only_build?(hot_build, env: {}) &&
            bc2cpp_hot_only_env(spec.new('x', hot_build), env: {}) == { 'BC2CPP_HOT_METHODS' => BC2CPP_HOT_METHODS_PATH })
-check.call('BC2CPP_HOT_ONLY=1 turns a desktop build hot-only, =0 turns a flash build off',
-           bc2cpp_hot_only_build?(open_build, env: { 'BC2CPP_HOT_ONLY' => '1' }) &&
+check.call('BC2CPP_HOT_ONLY=1 does not turn a desktop build hot-only, =0 turns a flash build off',
+           !bc2cpp_hot_only_build?(open_build, env: { 'BC2CPP_HOT_ONLY' => '1' }) &&
              !bc2cpp_hot_only_build?(hot_build, env: { 'BC2CPP_HOT_ONLY' => '0' }))
 refused = begin
   bc2cpp_hot_only_build?(mixed, env: {})
