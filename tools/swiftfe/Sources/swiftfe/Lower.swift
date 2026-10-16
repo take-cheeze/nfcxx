@@ -54,6 +54,7 @@ final class Lowerer {
   private var allFuncs: [FuncInfo] = []
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
+  private var globals: [Global] = []
   private var scopes: [Scope] = []
   private var returnType: Ty? = nil
   private var counter = 0
@@ -98,7 +99,12 @@ final class Lowerer {
       }
     }
 
-    // Pass 2: stored properties, enum payloads and deinitializers.
+    // Pass 2: enum payloads first, because whether an enum holds a class decides
+    // how struct properties may be typed. Then stored properties and deinitializers.
+    for (decl, info) in enumDecls {
+      info.cases = try lowerEnumCases(decl)
+    }
+    markReferenceEnums(enumDecls.map { $0.1 })
     var deinitDecls: [(DeinitializerDeclSyntax, ClassInfo)] = []
     for (decl, info) in structDecls {
       info.fields = try lowerMembers(decl.memberBlock, isClass: false).fields
@@ -109,9 +115,6 @@ final class Lowerer {
       if let d = members.deinitializer {
         deinitDecls.append((d, info))
       }
-    }
-    for (decl, info) in enumDecls {
-      info.cases = try lowerEnumCases(decl)
     }
     var recursionNodes: [(name: String, node: Syntax, types: [Ty])] = []
     for (decl, info) in structDecls {
@@ -182,6 +185,7 @@ final class Lowerer {
       classes: classDecls.map { $0.1 },
       enums: enumDecls.map { $0.1 },
       funcs: allFuncs,
+      globals: globals,
       main: main,
       optionals: optionals,
       functionTypes: functionTypes
@@ -217,7 +221,7 @@ final class Lowerer {
             throw error("invalid redeclaration of '\(name)'", binding)
           }
           let ty = try resolveType(annotation.type)
-          if !isClass && ty.containsClass {
+          if !isClass && ty.isClassLike {
             throw error("structs with class-typed properties are not supported yet", binding)
           }
           fields.append(Field(name: name, cName: "m_" + name, ty: ty, mutable: mutable))
@@ -257,9 +261,6 @@ final class Lowerer {
               throw error("labeled enum payloads are not supported yet", p)
             }
             let ty = try resolveType(p.type)
-            if ty.containsClass {
-              throw error("enums with class-typed payloads are not supported yet", p)
-            }
             payload.append(Field(name: "_\(payload.count)", cName: "c\(tag)_\(payload.count)", ty: ty, mutable: true))
           }
         }
@@ -267,6 +268,21 @@ final class Lowerer {
       }
     }
     return cases
+  }
+
+  /// Marks each enum whose payloads hold a class reference. An enum can hold
+  /// another enum that holds a class, so this repeats until nothing changes.
+  private func markReferenceEnums(_ infos: [EnumInfo]) {
+    var changed = true
+    while changed {
+      changed = false
+      for info in infos where !info.holdsRef {
+        if info.cases.contains(where: { $0.payload.contains { $0.ty.isClassLike } }) {
+          info.holdsRef = true
+          changed = true
+        }
+      }
+    }
   }
 
   /// Rejects a value type that contains itself by value, which Swift also rejects.
@@ -297,8 +313,10 @@ final class Lowerer {
 
   private func valueName(_ ty: Ty) -> String? {
     switch ty {
-    case .structure(let name), .enumeration(let name), .optional(.structure(let name)), .optional(.enumeration(let name)):
+    case .structure(let name), .optional(.structure(let name)):
       return name
+    case .enumeration(let info), .optional(.enumeration(let info)):
+      return info.name
     default:
       return nil
     }
@@ -375,7 +393,14 @@ final class Lowerer {
       let name = id.identifier.text
       let cName = "l\(nextID())_" + name
       try declare(name, cName: cName, ty: ty, mutable: mutable, owned: ty.isClassLike, binding)
-      out.append(.decl(cName, ty, value))
+      if scopes.count == 1 {
+        // Top-level code: the variable is a global, assigned where its declaration
+        // runs. The global is still zero here, so the assignment releases nothing.
+        globals.append(Global(cName: cName, ty: ty))
+        out.append(.assign(.local(cName), value, ty))
+      } else {
+        out.append(.decl(cName, ty, value))
+      }
     }
     return out
   }
@@ -441,6 +466,10 @@ final class Lowerer {
       return releasesForReturn() + [.ret(nil)]
     }
     if let loop = stmt.as(WhileStmtSyntax.self) {
+      if loop.conditions.count == 1, let first = loop.conditions.first,
+         case .optionalBinding(let binding) = first.condition {
+        return try lowerWhileLet(binding, loop)
+      }
       let cond = try lowerCondition(loop.conditions, loop)
       return [.whiles(cond, try lowerBlock(loop.body.statements))]
     }
@@ -528,15 +557,52 @@ final class Lowerer {
     return prelude + [.ifs(cond, then, otherwise)]
   }
 
+  /// `while let x = opt { body }`. The optional is read again on every iteration:
+  /// each iteration copies it into a temporary, breaks when it is nil, and binds
+  /// the payload in a scope that is released like an `if let` binding.
+  private func lowerWhileLet(_ binding: OptionalBindingConditionSyntax, _ loop: WhileStmtSyntax) throws -> [Stmt] {
+    guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let initializer = binding.initializer?.value else {
+      throw error("unsupported conditional binding", binding)
+    }
+    let opt = try lowerExpr(initializer)
+    guard case .optional(let inner) = opt.ty else {
+      throw error("initializer for conditional binding must have Optional type, not '\(opt.ty.swiftName)'", initializer)
+    }
+    if opt.owned && opt.ty.isClassLike {
+      throw error("binding a temporary class value is not supported yet", initializer)
+    }
+
+    let tmp = "t\(nextID())"
+    let tmpRef = Expr(kind: .local(tmp), ty: opt.ty)
+    scopes.append(Scope())
+    let name = id.identifier.text
+    let cName = "l\(nextID())_" + name
+    try declare(name, cName: cName, ty: inner, mutable: false, owned: inner.isClassLike, binding)
+    let body = try lowerBlock(loop.body.statements)
+    let bound = own(Expr(kind: .unwrap(tmpRef), ty: inner))
+    let isNil = Expr(kind: .prefix("!", Expr(kind: .isSome(tmpRef), ty: .bool)), ty: .bool)
+    let iteration: [Stmt] =
+      [.decl(tmp, opt.ty, opt), .ifs(isNil, [.brk], []), .decl(cName, inner, bound)]
+      + body
+      + releases(of: scopes.removeLast())
+    return [.whiles(Expr(kind: .bool(true), ty: .bool), iteration)]
+  }
+
   /// `switch` over an enum. Each case tests the tag and binds payload values.
   /// Cases are lowered to a chain of tests; every case must be covered unless
   /// there is a `default`.
   private func lowerSwitch(_ node: SwitchExprSyntax) throws -> [Stmt] {
     let subject = try lowerExpr(node.subject)
-    guard case .enumeration(let enumName) = subject.ty, let info = enums[enumName] else {
+    guard case .enumeration(let info) = subject.ty else {
       throw error("switch is supported only over enums in M2, not '\(subject.ty.swiftName)'", node.subject)
     }
     let tmp = "t\(nextID())"
+    // A temporary subject owns its references, so the switch scope releases it after
+    // the switch (and on any return from an arm). A place is only copied.
+    scopes.append(Scope())
+    if subject.owned && subject.ty.isClassLike {
+      scopes[scopes.count - 1].owned.append((cName: tmp, ty: subject.ty))
+    }
     let prelude: [Stmt] = [.decl(tmp, subject.ty, subject)]
     let subj = Expr(kind: .local(tmp), ty: subject.ty)
 
@@ -566,12 +632,14 @@ final class Lowerer {
           guard let name else { continue }
           let field = c.payload[index]
           let cName = "l\(nextID())_" + name
-          try declare(name, cName: cName, ty: field.ty, mutable: false, owned: false, caseItem)
-          decls.append(.decl(cName, field.ty, Expr(kind: .field(subj, field.cName), ty: field.ty)))
+          // A class payload is retained by its binding, which the arm releases.
+          try declare(name, cName: cName, ty: field.ty, mutable: false, owned: field.ty.isClassLike, caseItem)
+          let read = Expr(kind: .field(subj, field.cName), ty: field.ty)
+          decls.append(.decl(cName, field.ty, own(read)))
         }
         let body = try lowerBlock(sc.statements)
-        scopes.removeLast()
-        arms.append((Expr(kind: .isCase(subj, c.tag), ty: .bool), decls + body))
+        let armReleases = releases(of: scopes.removeLast())
+        arms.append((Expr(kind: .isCase(subj, c.tag), ty: .bool), decls + body + armReleases))
       }
     }
 
@@ -586,7 +654,7 @@ final class Lowerer {
     for arm in arms.reversed() {
       tail = [.ifs(arm.cond, arm.body, tail)]
     }
-    return prelude + tail
+    return prelude + tail + releases(of: scopes.removeLast())
   }
 
   /// Reads a `.case(let a, _)` pattern. Returns the case and one binding name per
@@ -894,7 +962,7 @@ final class Lowerer {
       }
       return nil
     }
-    if case .enumeration(let name)? = expected, let info = enums[name] {
+    if case .enumeration(let info)? = expected {
       return info
     }
     return nil
@@ -912,7 +980,8 @@ final class Lowerer {
     } else if !c.payload.isEmpty {
       throw error("enum case '\(caseName)' requires \(c.payload.count) associated values", node)
     }
-    return Expr(kind: .enumCase(info, c.tag, values), ty: .enumeration(info.name))
+    // The payload values were made owned above, so a value with class payloads is owned too.
+    return Expr(kind: .enumCase(info, c.tag, values), ty: .enumeration(info), owned: info.holdsRef)
   }
 
   // MARK: - Closures
@@ -1054,7 +1123,7 @@ final class Lowerer {
     default:
       if structs[name] != nil { return .structure(name) }
       if classes[name] != nil { return .cls(name) }
-      if enums[name] != nil { return .enumeration(name) }
+      if let info = enums[name] { return .enumeration(info) }
       throw error("cannot find type '\(name)' in scope", type)
     }
   }

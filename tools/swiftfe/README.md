@@ -25,7 +25,10 @@ Adds to M1:
   `x!` (traps on nil), `if let`, and `== nil` / `!= nil`
 - enums with associated values (`case rect(Int, Int)`), constructed as `Shape.rect(3, 4)`
   or `.rect(3, 4)` when the type is known, and matched with `switch` (exhaustive
-  unless there is a `default`)
+  unless there is a `default`). A payload may be a class, Optional class or another such
+  enum (`case full(Node)`). Such an enum is reference-counted like a class value: copies
+  retain, owned locals and `switch` subjects release, and a payload bound by `case .full(let n)`
+  is retained for the arm.
 - function types `(Int) -> Int`, named functions as values, and non-capturing closures
   (`{ $0 * 3 }`, `{ (n: Int) -> Int in n + 1 }`). A closure needs a known function type
   from its context: a declared type, a parameter type, or an assignment target.
@@ -37,17 +40,32 @@ Ownership model (documented in `Lower.swift`):
 - Top-level variables are never released, so their `deinit` does not run before exit.
 - Assignment retains the new value before releasing the old one.
 
-Closures do not capture: an outer local used inside a closure is reported as not in scope.
-
 Not yet supported in M2 (each gives a diagnostic):
+- closures that capture an outer local: the outer local is reported as not in scope.
+  Capturing needs a context value, which makes function types class-like; that conflicts
+  with the current rule that structs may not hold class-like values, and is not done
 - member access, `!`, or `== nil` on a temporary class value, e.g. `make().x`
-- structs with class-typed properties, and enums with class-typed payloads
-- labeled enum payloads, raw values, `while let`, class inheritance and methods
+- structs with class-typed properties, or with enum properties that hold a class
+- Optional enums that hold a class are supported only as `E?` values; their `if let` works,
+  but temporary values of them cannot be bound or compared with `nil` (as for classes)
+- an implicit member such as `.full(n)` cannot be written where the context is `E?`
+  (write `E.full(n)`)
+- `_` as a payload pattern, e.g. `case .pair(_, let n)`
+- labeled enum payloads, raw values, class inheritance and methods
 - switching over a value other than an enum, and multiple patterns in one case
+- `while let` over a temporary class value, e.g. `while let n = next(of: m)` where
+  `next` returns a class (the binding would have to take the temporary's reference)
 
-Verified with AddressSanitizer and LeakSanitizer on the ARC cases: no leaks and no
-undefined behaviour. The enum and closure cases are also clean under AddressSanitizer
-and UBSan.
+`while let x = opt { ... }` is supported for any Optional expression that is not a
+temporary class value: locals, parameters, fields, and calls returning `Int?` or the
+like. The optional is read again on each iteration, and the binding follows the same
+release rules as `if let`.
+
+Top-level variables are C statics, so they stay reachable until exit. Their objects
+are never freed, and LeakSanitizer does not report them.
+
+The sanitizer pass in `tests/run.sh` checks every runnable case with AddressSanitizer,
+LeakSanitizer and UBSan.
 
 ## M0: parsing
 
@@ -93,6 +111,10 @@ Swift compiler, but the wording is not guaranteed to be identical.
 - `NAME.expected`: stdout must match exactly
 - `NAME.trap`: the program must exit nonzero after the expected output
 - `NAME.error`: compilation must fail with this diagnostic line
+
+After the functional cases, every case that is not an `.error` case is also built
+from its emitted C with `-fsanitize=address,leak,undefined`. The sanitized binary must
+print the same output and exit the same way (0, or nonzero for a trap case).
 
 ## M0 status
 
