@@ -115,8 +115,11 @@ def write_json(path, backend, ts, extra=None):
 
 
 def cases(d):
+    only = os.environ.get("TG_CASE")   # one case, for a profile of one model (tinygrad_profile_dump.py)
     for model in MODELS:
         for batch in BATCHES:
+            if only and case_name(model, batch) != only:
+                continue
             yield case_name(model, batch)
 
 
