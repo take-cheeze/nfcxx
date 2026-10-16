@@ -372,13 +372,17 @@ check.call('an inheriting subclass the chain lists (INHERITED_GUARD) completes i
              howl.include?('INHERITED_GUARD :cw_howl -- also CwWolfPup < CwWolf') &&
                howl.match?(/\} else \{\n\s+r\d+ = bc2cpp_nomethod\(M, r\d+, \d+\);/) && !howl.include?('bc2cpp_send(')
            end)
-check.call('a name mruby core defines keeps the dispatch',
-           body_of.call(closed_code, 'CwCaller_measure').include?('CLOSED_WORLD kept: core_or_native'))
+check.call('a name mruby core defines ends in the call checked against its core owners (ADR 0468), not a dispatch',
+           body_of.call(closed_code, 'CwCaller_measure').then do |measure|
+             measure.include?('CLOSED_WORLD owner-call: size') && measure.match?(/BC2CPP_OWNERS\([^)]*"Array"[^)]*"String"/) &&
+               !measure.include?('bc2cpp_send(') && !measure.include?('CLOSED_WORLD kept:')
+           end)
 check.call('the guard names exactly the registry class (no lookup through ancestry)',
            closed_code.include?('if (!mrb_const_defined_at(M, v, s)) return nullptr;'))
 check.call('the summary counts what was converted and why the rest was kept',
-           closed_err.include?('== closed world fallbacks: 0 guards dropped, 3 bc2cpp_nomethod, 1 kept dispatching ==') &&
-             !closed_err.include?('KEPT unlisted_class') && closed_err.include?('KEPT core_or_native: 1'))
+           closed_err.include?('== closed world fallbacks: 0 guards dropped, 3 bc2cpp_nomethod, 0 kept dispatching ==') &&
+             !closed_err.include?('KEPT unlisted_class') && !closed_err.include?('KEPT core_or_native') &&
+             closed_err.include?('OWNER_CALL: 1'))
 check.call('a receiver that may be a method_missing instance keeps the dispatch',
            ghost_err.include?('method_missing classes: CwGhost') &&
              body_of.call(ghost_code, 'CwCaller_talk').include?('CLOSED_WORLD kept: method_missing_receiver'))
@@ -792,7 +796,10 @@ else
     cw_case(7)
     $rescued = begin; CwCaller.new.talk(nil); :missed; rescue StandardError; :rescued; end
     $values = [CwCaller.new.talk(CwPet.new), CwCaller.new.talk(CwRobot.new), CwCaller.new.fetch(CwPet.new),
-               CwCaller.new.bark(CwPuppy.new), CwCaller.new.measure(CwRobot.new)]
+               CwCaller.new.bark(CwPuppy.new), CwCaller.new.measure(CwRobot.new),
+               CwCaller.new.measure([1, 2, 3]), CwCaller.new.measure("ab")]
+    $measure_nil = [(begin; CwCaller.new.measure(nil); rescue NoMethodError => e; e.message; end),
+                    (begin; nil.size; rescue NoMethodError => e; e.message; end)]
   RUBY
   probes = <<~'CPP'
     mrb_value cases = mrb_gv_get(M, mrb_intern_lit(M, "$cases"));
@@ -812,6 +819,7 @@ else
     std::printf("raised %d of %d, identical %d\n", raised, (int)RARRAY_LEN(cases), same);
     std::printf("rescued %s\n", str(M, mrb_gv_get(M, mrb_intern_lit(M, "$rescued"))));
     std::printf("values %s\n", str(M, mrb_gv_get(M, mrb_intern_lit(M, "$values"))));
+    std::printf("measure nil %s\n", str(M, mrb_gv_get(M, mrb_intern_lit(M, "$measure_nil"))));
   CPP
   defines = [define.call('CwCaller', 'talk', 1), define.call('CwCaller', 'fetch', 1), define.call('CwCaller', 'bark', 1),
              define.call('CwCaller', 'measure', 1)].join("\n")
@@ -822,7 +830,9 @@ else
     check.call('nil, a wrong-class object and an Integer raise the identical NoMethodError (class, message, name, args)',
                output.include?('raised 6 of 6, identical 6'))
     check.call('rescue catches it', output.include?('rescued :rescued'))
-    check.call('listed receivers, an inherited method and a core name still answer', output.include?('values [1, 2, 3, 20, 6]'))
+    check.call('listed receivers, an inherited method and a core name still answer', output.include?('values [1, 2, 3, 20, 6, 3, 2]'))
+    check.call('the owner call raises dispatch\'s NoMethodError for nil (ADR 0468)',
+               output[/^measure nil \[(".*?"), \1\]$/] && output.include?("undefined method 'size'"))
   end
 
   module_function_probe = <<~CPP

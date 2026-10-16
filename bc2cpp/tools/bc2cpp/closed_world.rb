@@ -68,7 +68,7 @@ class ClosedWorld
   # Sends that run a block with another `self`, which breaks "self is its lexical owner".
   SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
 
-  attr_reader :global_refusal, :native_paths
+  attr_reader :global_refusal, :native_paths, :ruby_paths
 
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
@@ -87,6 +87,7 @@ class ClosedWorld
     @native_code_tokens = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
+    @outside_owner_name = nil
     @ruby_paths = ruby_paths
     # Per outside file: the constants it can create, reopen, subclass or rebind
     # (TouchScan, ADR 0256).
@@ -156,7 +157,8 @@ class ClosedWorld
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
-    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) && !(scoped && native_free)
+    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) &&
+                              @outside_owner_name != name && !(scoped && native_free)
 
     reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?, singleton_arms)
     return reason if reason
@@ -326,6 +328,17 @@ class ClosedWorld
     yield
   ensure
     @native_arms_name = previous
+  end
+
+  # OUTSIDE_OWNER_CALL (ADR 0468): while a caller ends the chain's else in a call checked against every
+  # outside (core, native or outside Ruby) class that defines `name` (CodeGen#guarded_fallback_line), those
+  # definitions no longer make the fallback's receiver unknowable; the Ruby-side gates still apply.
+  def with_outside_owner_call(name)
+    previous = @outside_owner_name
+    @outside_owner_name = name
+    yield
+  ensure
+    @outside_owner_name = previous
   end
 
   # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby

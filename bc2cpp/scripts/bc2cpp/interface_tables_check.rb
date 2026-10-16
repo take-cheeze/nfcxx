@@ -71,7 +71,9 @@ begin
     check.call('uniform adapters carry optional argument defaults and supplied counts',
                code.match?(/return It0_join_impl\(M, recv, mrb_nil_value\(\), 0\);/) &&
                code.match?(/return It0_join_impl\(M, recv, arg0, 1\);/))
-    check.call('table misses retain the checked fallback', go.include?('CLOSED_WORLD kept: core_or_native'))
+    # The miss is the call checked against join's outside owners (ADR 0468): Array#join and the rest stay reachable.
+    check.call('table misses retain the checked fallback',
+               go.include?('CLOSED_WORLD owner-call: join') && go.match?(/BC2CPP_OWNERS\([^)]*"Array"/))
     open_code, = generate.call(SOURCE, false)
     check.call('an open world does not use interface tables', !open_code.include?('INTERFACE_TABLE'))
     singleton, = generate.call("#{SOURCE}\nclass ItProbe; def single(o); def o.join; 88; end; end; end\n")

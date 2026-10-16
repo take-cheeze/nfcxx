@@ -66,6 +66,7 @@ require_relative 'codegen'
 require_relative 'codegen_ivar_poly'
 require_relative 'codegen_native_send'
 require_relative 'codegen_exact_receiver'
+require_relative 'codegen_outside_owner_call'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
 require_relative 'codegen_native_singleton'
@@ -1666,6 +1667,8 @@ if $PROGRAM_NAME == __FILE__
     violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
     NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
     kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
+    # OUTSIDE_OWNER_CALL (ADR 0468): elses closed by a call checked against every outside owner of the name.
+    warn "  OWNER_CALL: #{compiled.sum { |m| m[:code].scan('/* CLOSED_WORLD owner-call: ').size }}"
     warn ''
     # NIL_RECEIVER (ADR 0296): nil arms of receivers proven nil-or-one-class.
     nil_sites = NomethodReviewed.nil_receiver_sites(compiled)

@@ -317,9 +317,12 @@ check.call('with no guard chain there is no closed-world proof, so the dispatch 
              !body_of.call(closed_code, 'NdCaller_set_contents').include?('bc2cpp_nomethod'))
 check.call('a call whose arity no native class has stays kept as before',
            !body_of.call(closed_code, 'NdCaller_flash_short').include?('rgss::'))
-check.call('a program subclass of a native class keeps the dispatch (arms stay)',
+# The lift needs every instance of a native class to be its exact class; a program subclass reaches the else, whose
+# lookup finds the native z= the subclass inherits, so it ends in the owner call (ADR 0468), not in a dead nomethod.
+check.call('a program subclass of a native class keeps a live else (arms stay, the owner call reaches the native)',
            body_of.call(sub_code, 'NdCaller_set_z').then do |z|
-             z.include?('rgss::object_z_set_direct(') && z.include?('kept: core_or_native') && !z.include?('bc2cpp_nomethod')
+             z.include?('rgss::object_z_set_direct(') && z.include?('CLOSED_WORLD owner-call: z=') &&
+               z.match?(/BC2CPP_OWNERS\([^)]*"RGSS::Sprite"/) && !z.include?('bc2cpp_nomethod')
            end)
 override = body_of.call(override_code, 'NdCaller_set_x')
 check.call('a Ruby override on a native class replaces that class\'s arm and rides the chain',

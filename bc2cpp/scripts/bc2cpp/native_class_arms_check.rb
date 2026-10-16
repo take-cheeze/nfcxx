@@ -219,14 +219,21 @@ end
 body_all = lambda do |code, fn|
   code.scan(/^(?:static )?mrb_value NaFx_#{fn}_impl\w*\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m).join
 end
-# How the chain of the site's name in `fn` ends: a proven-dead nomethod (:dead), a kept by-name send (:kept).
+# How the chain of the site's name in `fn` ends: a proven-dead nomethod (:dead), a kept by-name send (:kept), or the
+# call checked against every outside owner of the name (:owner_call, OUTSIDE_OWNER_CALL, ADR 0468).
 name_else = lambda do |code, fn|
   checked = Regexp.escape(SITE_NAME.fetch(fn))
-  kind = body_all.call(code, fn)[%r{POLY_SMALL_N :#{checked} .*?(?:(CLOSED_WORLD kept: \w+)|(CLOSED_WORLD nomethod: recv\.#{checked}))}m, 0]
-  kind.nil? ? nil : (kind.include?('CLOSED_WORLD kept:') ? :kept : :dead)
+  kind = body_all.call(code, fn)[%r{POLY_SMALL_N :#{checked} .*?(?:(CLOSED_WORLD kept: \w+)|(CLOSED_WORLD nomethod: recv\.#{checked})|(CLOSED_WORLD owner-call: #{checked} ))}m, 0]
+  if kind.nil? then nil
+  elsif kind.include?('CLOSED_WORLD kept:') then :kept
+  elsif kind.include?('CLOSED_WORLD owner-call:') then :owner_call
+  else :dead
+  end
 end
 dead_else = ->(code, fn) { name_else.call(code, fn) == :dead }
-kept_else = ->(code, fn) { name_else.call(code, fn) == :kept }
+# The else stays reachable: a receiver outside the chain still reaches a definition, by a by-name send or by the
+# owner call, which runs exactly the outside definitions (ADR 0468). Only a dead else would be the wrong proof.
+kept_else = ->(code, fn) { %i[kept owner_call].include?(name_else.call(code, fn)) }
 core_direct = ->(code, fn) { body_all.call(code, fn).include?('// CORE_EXACT_DIRECT :delete') }
 core_chain = ->(code, fn) { body_all.call(code, fn).match?(/POLY_SMALL_N :delete/) || body_all.call(code, fn).include?('POLY :delete') }
 
@@ -250,6 +257,8 @@ if ENV['MRBC']
       check.call("#{fn}: the proven receiver set gives x.#{SITE_NAME[fn]} no by-name else", dead_else.call(code, fn))
     end
     NEGATIVE.each { |fn| check.call("NEG #{fn}: the else stays", kept_else.call(code, fn)) }
+    check.call('neg_core_native: the core owners of count are reached by the owner call (ADR 0468)',
+               name_else.call(code, 'neg_core_native') == :owner_call)
     check.call('pos_nilable_zork: nothing answers na_zork on nil, so the else is dead', dead_else.call(code, 'pos_nilable_zork'))
     Dir.mktmpdir do |nd|
       # A native that gives NilClass the name: a nil the flow cannot exclude may reach the else, which must dispatch.
