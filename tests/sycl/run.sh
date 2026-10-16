@@ -2,6 +2,7 @@
 # SYCL tests (lib/sycl, docs/notes/sycl-webgpu.md).
 #   host path     each program builds with g++ and with nfcxx (--cpu) and prints its "ok" line.
 #   OpenCL path   scripts/sycl-build.sh --backend=opencl: the Kernel-capability SPIR-V on an Intel GPU (rt_opencl.hpp).
+#   Level Zero    scripts/sycl-build.sh --backend=level-zero: the same SPIR-V through the Level Zero API (rt_level_zero.hpp).
 #   WebGPU path   scripts/sycl-build.sh compiles the device pass (WGSL) and the host side with nfcxx; the program runs the
 #                 kernels through tests/sycl/server.cjs (Chromium's WebGPU: a GPU, or SwiftShader without one).
 #                 Needs the Path B harness (scripts/setup-pathb.sh), the nfcxx build (setup-edg.sh, setup-qbe.sh), node,
@@ -86,6 +87,31 @@ if [ $cl_ok = 1 ]; then
   else echo "opencl    trap_div: FAIL (build)"; fail=1; fi
 else
   echo "SKIP: opencl: needs spirv-val, the OpenCL headers (OPENCL_INCLUDE) and libOpenCL.so.1"
+fi
+
+# ---- Level Zero path (scripts/pathb-spirv-emit.rb --kernel-cl, lib/sycl/include/sycl/rt_level_zero.hpp): the same module as the
+# OpenCL path, run on an Intel GPU through the Level Zero API (the heap in shared USM with atomics, the local size in
+# specialization constants, one immediate command list). Skips when the Level Zero headers, the loader, spirv-val or a usable
+# device is missing. The host is the default compiler (the runtime is plain C++ over ze_api.h).
+lz_ok=0
+if command -v spirv-val >/dev/null && [ -f /usr/include/level_zero/ze_api.h ] && [ -e /usr/lib/x86_64-linux-gnu/libze_loader.so.1 ]; then lz_ok=1; fi
+if [ $lz_ok = 1 ]; then
+  lzbuild() { "$root/scripts/sycl-build.sh" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
+  lzprobe=1
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices; do
+    if ! lzbuild $t; then echo "level-zero $t: FAIL (build)"; grep -v prelinker "$out/lz_$t.log" | head -3; fail=1; continue; fi
+    "$out/lz_$t" > "$out/lz_$t.out" 2> "$out/lz_$t.err"; rc=$?
+    if [ $rc = 70 ] && grep -q "Level Zero runtime" "$out/lz_$t.err"; then lzprobe=0; break; fi
+    if [ "$(tail -1 "$out/lz_$t.out")" = "$t ok" ]; then echo "level-zero $t: ok"; else echo "level-zero $t: FAIL (exit $rc)"; cat "$out/lz_$t.err" "$out/lz_$t.out" | tail -3; fail=1; fi
+  done
+  if [ $lzprobe = 0 ]; then
+    echo "SKIP: level-zero: no usable Level Zero device ($(head -c 120 "$out/lz_vecadd.err" 2>/dev/null))"
+  elif lzbuild trap_div; then
+    "$out/lz_trap_div" > /dev/null 2> "$out/lz_trap_div.err"; rc=$?
+    if [ $rc = 71 ] && grep -q "division by zero" "$out/lz_trap_div.err"; then echo "level-zero trap_div: trapped (exit 71)"; else echo "level-zero trap_div: FAIL (exit $rc)"; cat "$out/lz_trap_div.err"; fail=1; fi
+  else echo "level-zero trap_div: FAIL (build)"; fail=1; fi
+else
+  echo "SKIP: level-zero: needs spirv-val, the Level Zero headers (/usr/include/level_zero) and libze_loader.so.1"
 fi
 
 # ---- WebGPU path
