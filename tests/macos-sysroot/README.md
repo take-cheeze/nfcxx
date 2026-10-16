@@ -44,6 +44,17 @@ Not covered (a file that includes one of these fails to compile): `unistd.h`, `d
 (including the ARM register state used by `sys/signal.h`), `locale.h`, `signal.h`. The exported symbols are not listed
 here, so there is nothing to link against.
 
+## Compiling C++ (`scripts/macos-cxx-check.sh`)
+
+    scripts/macos-cxx-check.sh SRC.cpp OUT.s
+
+clang preprocesses SRC for `arm64-apple-darwin` against these headers and `cxx/` (blocks off), nfcxx's front end reads that
+text in clang's dialect with only these directories as system includes, and `scripts/qbe-cc` compiles the generated C for
+Darwin. It stops at assembly. The EDG front end still defines Linux macros and lays out types for its build host (for
+example `long double`), so a pass means the source reached Darwin assembly, not ABI parity. Over `tests/cases`, 20 of 24
+sources reach assembly; the 4 others are `eval_order_calls` (localization is off), `qbe_atomics` (EDG rejects `_Atomic`
+in C++), `qbe_gnu_forms` (GNU forms EDG rejects) and `qbe_int3_break` (x86 inline asm).
+
 ## Using it
 
     NFCXX_MACOS_SYSROOT=$PWD/tests/macos-sysroot/include scripts/qbe-cc -S file.c -o file.s

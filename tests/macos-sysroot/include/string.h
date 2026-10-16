@@ -1,6 +1,10 @@
 /* Clean-room minimal <string.h> for macOS arm64 compile checks (C11 7.24, POSIX). Compile checks only. */
 #ifndef CLEANROOM_STRING_H
 #define CLEANROOM_STRING_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* C++ has no restrict keyword: map it to __restrict here (compile checks only). */
 #if defined(__cplusplus)
 #define restrict __restrict
@@ -32,4 +36,8 @@ size_t strlen(const char *);
 char *strdup(const char *);
 char *strndup(const char *, size_t);
 size_t strnlen(const char *, size_t);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

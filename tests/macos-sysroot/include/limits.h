@@ -1,6 +1,10 @@
 /* Clean-room minimal <limits.h> for macOS arm64 compile checks (C11 5.2.4.2, LP64). Compile checks only. */
 #ifndef CLEANROOM_LIMITS_H
 #define CLEANROOM_LIMITS_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define CHAR_BIT 8
 #define SCHAR_MIN (-128)
 #define SCHAR_MAX 127
@@ -20,4 +24,8 @@
 #define LLONG_MIN (-9223372036854775807LL-1)
 #define LLONG_MAX 9223372036854775807LL
 #define ULLONG_MAX 18446744073709551615ULL
+#ifdef __cplusplus
+}
+#endif
+
 #endif

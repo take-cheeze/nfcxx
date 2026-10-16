@@ -2,6 +2,10 @@
  * remaining macros. Compile checks only. */
 #ifndef CLEANROOM_STDINT_H
 #define CLEANROOM_STDINT_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef signed char int8_t;
 typedef short int16_t;
 typedef int int32_t;
@@ -61,4 +65,8 @@ typedef uint64_t uint_fast64_t;
 #define UINT64_C(x) x ## UL
 #define INTMAX_C(x) x ## L
 #define UINTMAX_C(x) x ## UL
+#ifdef __cplusplus
+}
+#endif
+
 #endif

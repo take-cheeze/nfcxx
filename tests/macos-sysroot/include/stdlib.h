@@ -2,6 +2,10 @@
  * Compile checks only. */
 #ifndef CLEANROOM_STDLIB_H
 #define CLEANROOM_STDLIB_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* C++ has no restrict keyword: map it to __restrict here (compile checks only). */
 #if defined(__cplusplus)
 #define restrict __restrict
@@ -53,4 +57,8 @@ lldiv_t lldiv(long long, long long);
 int mblen(const char *, size_t);
 size_t mbstowcs(wchar_t *restrict, const char *restrict, size_t);
 size_t wcstombs(char *restrict, const wchar_t *restrict, size_t);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

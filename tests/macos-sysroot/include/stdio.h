@@ -2,6 +2,10 @@
  * the stream objects use Darwin's public libc convention (__stdinp and friends). Compile checks only. */
 #ifndef CLEANROOM_STDIO_H
 #define CLEANROOM_STDIO_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* C++ has no restrict keyword: map it to __restrict here (compile checks only). */
 #if defined(__cplusplus)
 #define restrict __restrict
@@ -80,4 +84,8 @@ void perror(const char *);
 int getc_unlocked(FILE *);
 int putc_unlocked(int, FILE *);
 int fileno(FILE *);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

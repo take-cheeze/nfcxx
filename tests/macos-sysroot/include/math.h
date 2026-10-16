@@ -2,6 +2,10 @@
  * Compile checks only: the functions are declared, not provided, and nothing is linked. */
 #ifndef CLEANROOM_MATH_H
 #define CLEANROOM_MATH_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 #define HUGE_VAL (__builtin_huge_val())
 #define HUGE_VALF (__builtin_huge_valf())
@@ -169,5 +173,9 @@ long double floorl(long double);
 long double ceill(long double);
 long double fmodl(long double, long double);
 long double fmal(long double, long double, long double);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -2,6 +2,10 @@
  * mbstate_t is a struct chosen here (C11 only requires an object type); its size and layout are not Darwin's. */
 #ifndef CLEANROOM_WCHAR_H
 #define CLEANROOM_WCHAR_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* C++ has no restrict keyword: map it to __restrict here (compile checks only). */
 #if defined(__cplusplus)
 #define restrict __restrict
@@ -90,5 +94,9 @@ size_t wcslen(const wchar_t *);
 wchar_t *wmemset(wchar_t *, wchar_t, size_t);
 
 size_t wcsftime(wchar_t *restrict, size_t, const wchar_t *restrict, const struct tm *restrict);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

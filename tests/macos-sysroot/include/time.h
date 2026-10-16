@@ -1,6 +1,10 @@
 /* Clean-room time.h: declarations from C11 7.27 (Date and time). Written from the standard, not from any SDK. */
 #ifndef CLEANROOM_TIME_H
 #define CLEANROOM_TIME_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* C++ has no restrict keyword: map it to __restrict here (compile checks only). */
 #if defined(__cplusplus)
 #define restrict __restrict
@@ -45,5 +49,9 @@ size_t strftime(char *restrict, size_t, const char *restrict, const struct tm *r
 
 /* POSIX (time.h): the sleep that libc++'s threading layer uses */
 int nanosleep(const struct timespec *, struct timespec *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
