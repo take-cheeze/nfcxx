@@ -1,0 +1,21 @@
+Local patch for 3rd/qbe, applied after scripts/qbe-uninit-slot.patch by scripts/setup-qbe.sh.
+
+C copies a never-initialized object of a 1-byte class (an empty lambda's storage, e.g. the _Iter_pred<lambda> that
+libstdc++'s std::find_if gets in nlohmann-style code) with a direct load of its stack slot. The slot has loads and no
+store, so promote() (mem.c) had no value to promote to and failed: "slot %.8 is read but never stored to". Keep the
+slot instead; the loads read whatever is on the stack, as gcc's copy does. coalesce() keeps the slot through
+scripts/qbe-uninit-slot.patch. Test: tests/cases/qbe_uninit_load.cpp.
+--- a/mem.c
++++ b/mem.c
+@@ -45,6 +45,11 @@
+ 			}
+ 			goto Skip;
+ 		}
++		/* nfcxx: loads and no store (C copies a never-initialized struct, e.g. an empty
++		 * lambda's 1-byte storage): there is no value to promote to. Keep the slot;
++		 * the loads read garbage, as with gcc (scripts/qbe-uninit-load.patch). */
++		if (k == -1)
++			goto Skip;
+ 		/* get rid of the alloc and replace uses */
+ 		*i = (Ins){.op = Onop};
+ 		t->ndef--;

@@ -26,6 +26,8 @@ for p in qbe cproc; do
 done
 # QBE: scripts/qbe-uninit-slot.patch (a never-stored struct slot passed by value must not become a null load)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
+# QBE: scripts/qbe-uninit-load.patch (a slot that is loaded but never stored is kept, not an error in promote())
+patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-load.patch"
 # QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 # QBE: scripts/qbe-empty-struct.patch (an empty struct with no alignment left 1 << -1 in parse.c: a garbage alloc size when it
