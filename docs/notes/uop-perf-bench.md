@@ -61,6 +61,43 @@ interpreter result (see below), so its reference is the C backend.
   at the same point, so the problem is the machine's headless WebGPU, not the page. The WebGPU results of earlier runs (#261)
   pass. This needs a rerun on a working Chrome before the WebGPU column can be filled in.
 
+## Dawn (native WebGPU on Metal, local)
+
+Run by `tests/uop/perf/dawn_bench.sh` (needs `DAWN_SRC` and `DAWN_BUILD`, see `tests/uop/wgsl/dawn/run.sh`). Chrome is not used.
+Environment: Dawn source at `af01c4ef6` (a shallow clone, built with Metal only), adapter `apple/metal-3`, the same Mac as the
+table above. Only add, mul and sqrt have WGSL modules (see above), so sum and matmul are not in this table.
+
+The timing rule is the one in `run_webgpu.html`: the pipelines and bind groups are built once and the inputs uploaded before
+the timer; each timed run encodes every kernel, copies one output value to a probe buffer, submits, and waits for the probe to
+map. Two warm-up runs, then the median of 10 (min in the last column). Each case's output is checked against the interpreter
+first: PASS means every value is within 1e-6 (absolute below 1, relative above 1), and `exact` counts the bit-exact values.
+
+| op | n | Dawn median ms (min) | exact | interpreter ms | C backend ms | ONNX Runtime ms |
+|---|---|---|---|---|---|---|
+| add | 65536 | 0.206 (0.199) | 65536 / 65536 | 0.959 | 0.530 | 0.218 |
+| add | 1048576 | 0.447 (0.385) | 1048576 / 1048576 | 6.138 | 4.728 | 3.383 |
+| add | 16777216 | not run (DISPATCH_LIMIT) | | 98.7 | 62.3 | 53.8 |
+| mul | 65536 | 0.213 (0.202) | 65536 / 65536 | 0.360 | 0.528 | 0.438 |
+| mul | 1048576 | 0.440 (0.428) | 1048576 / 1048576 | 6.203 | 4.700 | 3.415 |
+| mul | 16777216 | not run (DISPATCH_LIMIT) | | 99.0 | 62.2 | 53.8 |
+| sqrt | 65536 | 0.463 (0.250) | 48644 / 65536 | 0.260 | 0.418 | 0.340 |
+| sqrt | 1048576 | 0.383 (0.305) | 779046 / 1048576 | 4.468 | 3.745 | 2.778 |
+| sqrt | 16777216 | not run (DISPATCH_LIMIT) | | 72.5 | 53.4 | 45.9 |
+
+- **The 2^24 cases are not run.** Dawn accepts at most 65535 workgroups along one dimension. `render_wgsl` emits 64-wide
+  workgroups and the dispatch is one-dimensional, so 2^24 elements need 262144 groups, and validation refuses the dispatch.
+  Chrome's WebGPU would refuse the same dispatch, since the module is the same. Fixing it means changing the emitter (a 2-D
+  dispatch, or a larger workgroup), which is not done here. The other columns are from the table above, not re-run in this
+  session.
+- **sqrt is not bit-exact** on Metal: about 74% of values match the interpreter exactly, and the rest are within the 1e-6
+  relative tolerance. add and mul are bit-exact.
+- **Timing noise:** the sqrt 65536 median (0.463 ms) is above its 1048576 median, while its minimum is 0.250 ms. Small-size
+  timings are noisy on this machine; read the minimum next to the median.
+- **Not like-for-like with the C backend.** The Dawn timed run reads back one value, while the C backend's run includes the
+  conversion of every input and output (see above). The Dawn number is the kernel dispatch plus the submit and the wait, not
+  a full-output transfer.
+- **Chrome WebGPU column for the numpy API:** still not timed (see above), so this table has no Chrome row to compare with.
+
 ## Reproducing
 
     c++ -std=c++17 -O2 -Ilib/uop <the lib/uop sources listed in tests/uop/perf/trace_test_np.sh> \

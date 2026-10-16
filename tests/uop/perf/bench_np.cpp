@@ -210,6 +210,42 @@ static void write_webgpu_case(const std::string& path, const WgslProgram& p, con
   f << "}\n};\n";
 }
 
+// The same case as write_webgpu_case, for tests/uop/wgsl/dawn/run_dawn: the WGSL source, and the line spec that
+// to_spec.js writes from the .js file (its own output, the buffers, the feeds, the kernels, the expected values).
+// Written from C++ because a 2^24 case is larger than Node's maximum string length.
+static void write_webgpu_spec(const std::string& prefix, const WgslProgram& p, const Case& c, const Array& expected) {
+  std::ofstream w(prefix + ".wgsl", std::ios::binary);
+  w << p.source;
+  std::ofstream f(prefix + ".spec");
+  f << "output " << p.output << "\n";
+  for (size_t b = 0; b < p.buffers.size(); b++)
+    f << "buf " << b << " " << p.buffers[b].count << " " << (p.buffers[b].input ? 1 : 0) << "\n";
+  for (const auto& kv : c.feeds) {
+    size_t idx = 0;
+    while (idx < p.buffers.size() && p.buffers[idx].name != kv.first) idx++;
+    if (idx == p.buffers.size()) continue;   // a placeholder the lowered graph does not read (no buffer)
+    f << "input " << idx;
+    for (const auto& v : kv.second.data) {
+      char buf[64];
+      std::snprintf(buf, sizeof buf, "%.9g", v.f);
+      f << " " << buf;
+    }
+    f << "\n";
+  }
+  for (const WgslKernel& kr : p.kernels) {
+    f << "kernel " << kr.entry << " " << kr.count;
+    for (const auto& b : kr.bindings) f << " " << b;
+    f << "\n";
+  }
+  f << "expect";
+  for (const auto& v : expected.data) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.9g", v.f);
+    f << " " << buf;
+  }
+  f << "\n";
+}
+
 int main(int argc, char** argv) {
   int64_t max_n = 1 << 24;
   std::string case_dir, only;
@@ -299,7 +335,11 @@ int main(int argc, char** argv) {
       ut::Tensor lowered = np.lower(c.out);
       try {
         WgslProgram wp = render_wgsl(lowered.uop());
-        if (!case_dir.empty()) write_webgpu_case(case_dir + "/" + c.op + "_" + std::to_string(c.n) + ".js", wp, c, ref[0]);
+        if (!case_dir.empty()) {
+          std::string prefix = case_dir + "/" + c.op + "_" + std::to_string(c.n);
+          write_webgpu_case(prefix + ".js", wp, c, ref[0]);
+          write_webgpu_spec(prefix, wp, c, ref[0]);
+        }
         std::printf("{\"backend\": \"webgpu\", \"op\": \"%s\", \"n\": %lld, \"case\": \"written\"}\n", c.op.c_str(),
                     static_cast<long long>(c.n));
       } catch (const Error& e) {
