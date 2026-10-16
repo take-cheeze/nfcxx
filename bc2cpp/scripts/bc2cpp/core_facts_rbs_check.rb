@@ -9,7 +9,8 @@
 # 4. RbsSignatures does not read the fact files as program signatures;
 # 5. the hierarchy helpers the generator's ancestor tables come from.
 #
-# Usage: ruby scripts/bc2cpp/core_facts_rbs_check.rb
+# Usage: ruby scripts/bc2cpp/core_facts_rbs_check.rb [--require-mruby]
+#   --require-mruby: a missing 3rd/mruby fails instead of skipping (the bc2cpp-build job, which checks it out).
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/core_fact_sigs'
@@ -139,6 +140,8 @@ if File.file?(File.join(MRUBY, 'src/kernel.c'))
     ruby = proc_ext_class.match?(/^  def #{Regexp.escape(name)}\(\*args\)\n    call\(\*args\)\n  end\n/)
     check.call("Proc calls: Proc##{name} is call_proc (src/proc.c) or `call(*args)` (mruby-proc-ext)", raw ^ ruby)
   end
+elsif ARGV.include?('--require-mruby')
+  check.call('3rd/mruby is checked out (--require-mruby)', false)
 else
   puts '  SKIP the real 3rd/mruby is not checked out'
 end
