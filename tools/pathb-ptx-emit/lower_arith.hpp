@@ -1,8 +1,8 @@
 // The per-function emission state of scripts/pathb-ptx-emit.rb's class Fn (the body lines, the register and label
 // counters, the IR register map, the slots) and the arithmetic, comparison and conversion lowering that runs against
 // it: the Ruby's rval branches for wadd..cf2i and the lt..ne comparisons, and their helpers (checked_div,
-// checked_shift, compare, int_convert, float_to_int, canon). Phase 3 of the port; the memory, call, asm, atomic and
-// module lowering are not here yet and refuse by name.
+// checked_shift, compare, int_convert, float_to_int, canon); the memory forms (lower_mem.cpp) and the @name operands
+// (module_operand). Phase 3 of the port; the call, asm, atomic and warp lowering are not here yet and refuse by name.
 #pragma once
 
 #include <map>
@@ -11,6 +11,7 @@
 
 #include "ir.hpp"
 #include "lower_types.hpp"
+#include "module_decls.hpp"
 
 // An operand: its PTX text (a register, or an immediate) and its IR type (the Ruby's [text, ty]).
 struct Operand {
@@ -35,6 +36,7 @@ class FnCtx {
   int nlab = 0;
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
   std::string sp = "%sp";                       // the PTX register holding the frame's generic address
+  const ModuleSymbols *mod = nullptr;           // the module's data symbols (the @name operands), null when none
 
   void emit(const std::string &s);
   std::string fresh(const std::string &cls);
@@ -55,4 +57,12 @@ class FnCtx {
   void int_convert(const std::string &dest, const Ty &ty, const std::string &a, const Ty &aty);
   void float_to_int(const std::string &dest, const Ty &ty, const std::string &a, const Ty &aty);
   void canon(const std::string &dest, const Ty &t);
+
+  // The Ruby's rval branches for the memory forms: load, load.v, bitcast (to a pointer), offset and index. Returns false
+  // when h is not one of them.
+  bool memory(const std::string &h, const Node &x, const std::string &dest, const Ty &dty);
+  // The Ruby's stmt branches for store and store.v. Returns false when h is not one of them.
+  bool store_stmt(const std::string &h, const Node &s);
+  // The @name operand: its address through cvta (the Ruby's operand for the module's data symbols).
+  Operand module_operand(const Node &x);
 };
