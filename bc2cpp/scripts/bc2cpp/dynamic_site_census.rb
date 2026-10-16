@@ -12,27 +12,13 @@
 # helpers, and classifies every `bc2cpp_send` site by its neighbouring
 # diagnostics.
 #
-# Rank mode (ranks the same sites by how often a run executes them):
-#   ruby scripts/bc2cpp/dynamic_site_census.rb --rank SITES_DIR \
-#        --workload NAME=HITS_DIR [--workload ...] [--top 30] [--tsv ranked.tsv]
-#   SITES_DIR holds the <symbol>.sites.tsv files bc2cpp wrote under
-#   BC2CPP_SITE_PROFILE=SITES_DIR; HITS_DIR the <symbol>.<pid>.hits files a
-#   binary built from that output wrote under BC2CPP_SITE_PROFILE_OUT.
-#
 # See docs/bc2cpp-dynamic-site-census.md for the method and its limits. Output
 # is stats only.
 
 $LOAD_PATH.unshift(File.expand_path('../../tools/bc2cpp', __dir__))
 require 'site_census'
-require 'site_rank'
 
-if ARGV.first == '--rank'
-  ARGV.shift
-  SiteRank.main(ARGV)
-  exit
-end
-
-path = ARGV.shift or abort "usage: #{$PROGRAM_NAME} shipped.cxx [--origins TABLE] [--tsv FILE] | --rank SITES_DIR --workload NAME=HITS_DIR"
+path = ARGV.shift or abort "usage: #{$PROGRAM_NAME} shipped.cxx [--origins TABLE] [--tsv FILE]"
 tsv = nil
 origins = nil
 until ARGV.empty?

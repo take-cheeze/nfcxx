@@ -160,12 +160,9 @@ require_relative 'send_root_report' if ENV['BC2CPP_SEND_ROOT_REPORT'] || ENV['BC
 require_relative 'site_origin_table' if ENV['BC2CPP_SITE_ORIGIN_TABLE']
 require_relative 'refine_report' if ENV['BC2CPP_REFINE_REPORT']
 require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
-require_relative 'block_send_report' if ENV['BC2CPP_BLOCK_SEND_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
-require_relative 'dead_arm_report' if ENV['BC2CPP_DEAD_ARM_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
-require_relative 'native_setter_report' if ENV['BC2CPP_NATIVE_SETTER_REPORT']
 
 if $PROGRAM_NAME == __FILE__
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
@@ -1328,12 +1325,6 @@ if $PROGRAM_NAME == __FILE__
 
   CompactOutput.capture_stdout unless annotated
 
-  # SITE_PROFILE (ADR 0298): opt-in counters on by-name dispatch; unset leaves stdout untouched.
-  if (site_profile_dir = ENV['BC2CPP_SITE_PROFILE']) && !site_profile_dir.empty?
-    require_relative 'site_profile'
-    SiteProfile.capture_stdout(site_profile_dir, symbol)
-  end
-
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
   # else trace instruments the plain text first (at_exit runs last-in first-out).
@@ -1349,9 +1340,6 @@ if $PROGRAM_NAME == __FILE__
   # ELSE_TRACE (tools/bc2cpp/else_trace.rb): opt-in counters on the else arm of a core class-tag chain;
   # unset (or any value but 1) leaves stdout untouched.
   if ENV['BC2CPP_TRACE_ELSE'] == '1'
-    if ENV['BC2CPP_SITE_PROFILE'] && !ENV['BC2CPP_SITE_PROFILE'].empty?
-      abort 'bc2cpp: BC2CPP_TRACE_ELSE and BC2CPP_SITE_PROFILE both rewrite bc2cpp_send; set one of them'
-    end
     require_relative 'else_trace'
     ElseTrace.capture_stdout(symbol, compiled.to_h { |m| [m[:impl], "#{m[:owner]}##{m[:name]}"] })
   end
@@ -2025,6 +2013,5 @@ if $PROGRAM_NAME == __FILE__
   else
     never_called.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
   end
-  gen.write_native_setter_report(ENV.fetch('BC2CPP_NATIVE_SETTER_REPORT')) if ENV['BC2CPP_NATIVE_SETTER_REPORT']
   profile_phase.call('diagnostics + sidecar writes')
 end

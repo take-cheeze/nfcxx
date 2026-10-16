@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
 # Classifies the by-name dispatch left in bc2cpp's generated C++. Shared by
-# scripts/bc2cpp/dynamic_site_census.rb (static counts, executed-count ranking)
-# and site_profile.rb (the opt-in counter instrumentation), so both name a site
-# and its reason identically. See docs/bc2cpp-dynamic-site-census.md.
+# scripts/bc2cpp/dynamic_site_census.rb (static counts) and the else trace
+# (else_trace.rb), so both name a site and its reason identically. See
+# docs/bc2cpp-dynamic-site-census.md.
 module SiteCensus
   Scan = Struct.new(:lines, :names, :first_method, :sites, :helper_sends, keyword_init: true)
 
