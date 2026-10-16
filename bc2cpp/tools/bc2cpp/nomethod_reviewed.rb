@@ -2228,6 +2228,7 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#hero_screen_y -> height",
   "RPG2k::Scene::Map#hold_animation_screen_flash -> screen",
   "RPG2k::Scene::Map#init_map_animation -> battle_animation",
+  "RPG2k::Scene::Map#initialize -> map",
   "RPG2k::Scene::Map#initialize -> x",
   "RPG2k::Scene::Map#initialize -> y",
   "RPG2k::Scene::Map#inn_bgm -> system_bgm",
