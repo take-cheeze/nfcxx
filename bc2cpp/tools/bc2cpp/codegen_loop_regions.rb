@@ -79,17 +79,18 @@ class CodeGen
   # no captured environment, while blocks close over outer locals; inlined, the
   # block body shares the method's `r0..rN`, so level-0 GETUPVAR/SETUPVAR are the
   # same variables and RETURN_BLK is a plain C++ return.
-  # `#times` has no bytecode definition anywhere in the registry, so a
-  # non-Integer receiver already raises NoMethodError when interpreted; the
-  # emitted mrb_integer_p guard (raising on mismatch) is equivalent to real
-  # dispatch for every receiver.
+  # The loop counts in an mrb_int, so it is only Integer#times for a Fixnum receiver. A bignum runs Integer#times and
+  # anything else raises NoMethodError (or answers `times` itself), so an unproven receiver is not inlined bare
+  # (ADR 0472): a receiver FIXNUM_OPERAND_PROOF proves is the plain loop; any other is a GUARDED_BLOCK_INLINE site
+  # (ADR 0420) whose loop runs behind mrb_integer_p, the send with its BLOCK_CORE_DIRECT arms as the else; without the
+  # guarded pass (a rescue try body, a resumable method) the send stays as it is.
   # Shape: `SENDB Ra :times n=0` right after `BLOCK R(a+1) I[k]` (the block
   # argument goes in the register after the destination for n=0), with I[k]
   # taking exactly one mandatory argument.
   def recognize_times_regions(irep)
     regions = []
     layout = ->(insn) { 1 if insn.sym == 'times' && insn.argc_text == 'n=0' }
-    each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, _idx, block_insn, dest_reg, block_irep|
+    each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       # TIMES_NO_PARAM_SUPPORT: `n.times { ... }` (no block parameter) is the same
       # loop; only the counter binding is dropped (emit_times_inline).
       next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
@@ -101,11 +102,29 @@ class CodeGen
         next
       end
 
+      fixnum = times_fixnum_receiver?(irep, idx, dest_reg)
+      next unless fixnum || guarded_inline_receiver?(insn, 'Integer')
+
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
                    block_irep: block_irep, needs_blk: needs_blk == [1],
                    bind_counter: mandatory_arity(block_irep) == 1 }
     end
     regions
+  end
+
+  # ADR 0472: is the receiver of the `times` send at `idx` a Fixnum on every path (an Integer literal, or
+  # FIXNUM_OPERAND_PROOF for the method's own registers)?
+  def times_fixnum_receiver?(irep, idx, dest_reg)
+    literal = irep.walk_dominating_writers(idx - 1, dest_reg.to_s, use: idx) do |insn, _i, _cur|
+      case insn.op
+      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
+      else BlockCoreDirectFallback::INTEGER_LITERAL_OPS.include?(insn.op) ? :fixnum : nil
+      end
+    end
+    return true if literal == :fixnum
+
+    owner_def = @owner_of[irep.label]
+    !owner_def.nil? && proven_fixnum_operand?(irep, idx, dest_reg, owner_def)
   end
 
   # EACH_BLOCK_SUPPORT (ADR 0152): inline `ary.each { |x| ... }`. Same BLOCK +
