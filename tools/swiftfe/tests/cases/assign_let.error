@@ -1,0 +1,1 @@
+assign_let.swift:2:1: error: cannot assign to value: 'c' is a 'let' constant

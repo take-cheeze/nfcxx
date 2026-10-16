@@ -12,6 +12,7 @@ let package = Package(
     .executableTarget(
       name: "swiftfe",
       dependencies: [
+        .product(name: "SwiftOperators", package: "swift-syntax"),
         .product(name: "SwiftParser", package: "swift-syntax"),
         .product(name: "SwiftParserDiagnostics", package: "swift-syntax"),
         .product(name: "SwiftSyntax", package: "swift-syntax"),
