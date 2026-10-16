@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build a SYCL program (lib/sycl, docs/notes/sycl-webgpu.md) for the host CPU or for WebGPU.
 #
-#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan|opencl|level-zero] [--keep-ir] [-I dir] [-D mac] [--cxx=CMD] prog.cpp -o prog
+#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan|opencl|level-zero] [--keep-ir] [-I dir] [-D mac] [--cxx=CMD]
+#                         [-L dir] [-l lib] [-Wl,...] [-rpath dir] prog.cpp -o prog
 #
 # WebGPU (the default): a device pass compiles prog.cpp with -D__NFCXX_SYCL_DEVICE__ through the Path B front end
 # (scripts/pathb-dump --ir), scripts/pathb-wgsl-emit.rb lowers every kernel to WGSL, and the host pass compiles the
@@ -9,13 +10,15 @@
 # prog.man; at run time the program finds them through NFCXX_SYCL_IMAGE (default: the output path, baked in). The
 # server that executes them is tests/sycl/server.cjs (Node + Playwright's Chromium; see rt_pipe.hpp).
 # --cpu: the host path only, no WGSL (the kernels are C++ loops).
+# Link flags (-L, -l, -Wl,..., -rpath dir; -rpath becomes -Wl,-rpath,dir) go to the host compile only, after the source and
+# -o; the device pass never sees them.
 # --cxx=CMD: the host compiler (default: $CXX; else nfcxx for WebGPU when built, else g++). The closure types' mangling and
 # layout must match the device pass's (this front end; g++ mostly agrees), because the host finds a kernel by
 # typeid(F).name() and copies the closure bytes. The server refuses a closure whose size differs.
 # Exit status 3 when the emitter refuses a kernel (the reason is on stderr).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; opts=(); std=c++17
+cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; opts=(); link=(); std=c++17
 while [ $# -gt 0 ]; do
   case $1 in
     --cpu) mode=cpu ;;
@@ -25,7 +28,10 @@ while [ $# -gt 0 ]; do
     -std=*) std=${1#-std=} ;;
     -o) out=$2; shift ;;
     -I|-D) opts+=("$1$2"); shift ;;
-    -I*|-D*|-U*|-O*|-g|-W*|-l*|-L*) opts+=("$1") ;;
+    -L|-l) [ $# -ge 2 ] || { echo "sycl-build: $1 needs an argument" >&2; exit 2; }; link+=("$1" "$2"); shift ;;
+    -rpath) [ $# -ge 2 ] || { echo "sycl-build: -rpath needs an argument" >&2; exit 2; }; link+=("-Wl,-rpath,$2"); shift ;;
+    -L*|-l*|-Wl,*) link+=("$1") ;;
+    -I*|-D*|-U*|-O*|-g|-W*) opts+=("$1") ;;
     -*) echo "sycl-build: unknown option $1" >&2; exit 2 ;;
     *) src=$1 ;;
   esac
@@ -40,7 +46,7 @@ fi
 inc=$root/lib/sycl/include
 case $(basename "${cxx%% *}") in nfcxx) optflag="" ;; *) optflag="-O2" ;; esac   # nfcxx optimizes by itself; a plain compiler needs it for the host loops
 if [ "$mode" = cpu ]; then
-  exec $cxx -std=$std $optflag -I"$inc" "${opts[@]}" "$src" -o "$out"
+  exec $cxx -std=$std $optflag -I"$inc" "${opts[@]}" "$src" -o "$out" "${link[@]}"
 fi
 absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 "$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ -I"$inc" "${opts[@]}" "$src" > "$absout.dev.ir"
@@ -59,7 +65,7 @@ if [ $backend = vulkan ]; then
   if [ -s "$absout.spv" ] && ! spirv-val --target-env vulkan1.2 "$absout.spv" > "$absout.val.log" 2>&1; then
     cat "$absout.val.log" >&2; echo "sycl-build: the SPIR-V of $src does not validate" >&2; exit 1
   fi
-  exec $cxx -std=$std $optflag -DNFCXX_SYCL_VULKAN -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" -lvulkan
+  exec $cxx -std=$std $optflag -DNFCXX_SYCL_VULKAN -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" -lvulkan "${link[@]}"
 fi
 if [ $backend = opencl ] || [ $backend = level-zero ]; then
   if [ -s "$absout.cl.spv" ] && ! spirv-val --target-env opencl2.2 "$absout.cl.spv" > "$absout.val.log" 2>&1; then
@@ -69,13 +75,13 @@ fi
 if [ $backend = level-zero ]; then
   # the Level Zero headers (/usr/include/level_zero) and loader (libze_loader.so.1; no dev symlink, so it is named by its file)
   exec $cxx -std=$std $optflag -DNFCXX_SYCL_LEVEL_ZERO -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" \
-    -l:libze_loader.so.1
+    -l:libze_loader.so.1 "${link[@]}"
 fi
 if [ $backend = opencl ]; then
   # the OpenCL headers: OPENCL_INCLUDE (default: the oneAPI compiler's); libOpenCL.so.1 is the ICD loader
   # the runtime's own headers first: the OpenCL include directory of the oneAPI tree also holds a sycl/ directory
   exec $cxx -std=$std $optflag -DNFCXX_SYCL_OPENCL -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" \
-    -I"${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}" "${opts[@]}" "$src" -o "$out" -l:libOpenCL.so.1
+    -I"${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}" "${opts[@]}" "$src" -o "$out" -l:libOpenCL.so.1 "${link[@]}"
 fi
 exec $cxx -std=$std $optflag -DNFCXX_SYCL_WEBGPU -DNFCXX_SYCL_SERVER_JS="\"$root/tests/sycl/server.cjs\"" \
-  -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out"
+  -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" "${link[@]}"
