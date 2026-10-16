@@ -72,9 +72,9 @@ enum CEmit {
 
     // Forward declarations first, so that any type can name any other. Function
     // typedefs may use incomplete types; complete definitions come after them.
-    for c in program.classes { out += "typedef struct s_\(c.name) s_\(c.name);\n" }
-    for s in program.structs { out += "typedef struct s_\(s.name) s_\(s.name);\n" }
-    for e in program.enums { out += "typedef struct s_\(e.name) s_\(e.name);\n" }
+    for c in program.classes { out += "typedef struct s_\(cIdent(c.name)) s_\(cIdent(c.name));\n" }
+    for s in program.structs { out += "typedef struct s_\(cIdent(s.name)) s_\(cIdent(s.name));\n" }
+    for e in program.enums { out += "typedef struct s_\(cIdent(e.name)) s_\(cIdent(e.name));\n" }
     for o in program.optionals { out += "typedef struct \(o.cName) \(o.cName);\n" }
     out += "\n"
     for fn in program.functionTypes {
@@ -100,7 +100,7 @@ enum CEmit {
       case .structure(let name):
         guard let info = program.structs.first(where: { $0.name == name }) else { return }
         for field in info.fields where needsDefinition(field.ty) { defineValue(field.ty) }
-        values += "struct s_\(name) {\n"
+        values += "struct s_\(cIdent(name)) {\n"
         for field in info.fields {
           values += "  \(field.ty.cName) \(field.cName);\n"
         }
@@ -110,7 +110,7 @@ enum CEmit {
         for c in info.cases {
           for field in c.payload where needsDefinition(field.ty) { defineValue(field.ty) }
         }
-        values += "struct s_\(name) {\n  int64_t tag;\n"
+        values += "struct s_\(cIdent(name)) {\n  int64_t tag;\n"
         for c in info.cases {
           for field in c.payload {
             values += "  \(field.ty.cName) \(field.cName);\n"
@@ -140,7 +140,7 @@ enum CEmit {
 
     // Class layout: the header first, then the stored properties.
     for c in program.classes {
-      out += "struct s_\(c.name) {\n  sw_obj hdr;\n"
+      out += "struct s_\(cIdent(c.name)) {\n  sw_obj hdr;\n"
       for f in c.fields {
         out += "  \(f.ty.cName) \(f.cName);\n"
       }
@@ -155,7 +155,7 @@ enum CEmit {
     // Destroy and constructor for each class. Destroy runs the deinitializer,
     // then releases the stored references, then frees the object.
     for c in program.classes {
-      let name = c.name
+      let name = cIdent(c.name)
       out += "static void d_\(name)(void *p) {\n  s_\(name) *self = p;\n"
       if let d = c.deinitializer {
         out += "  \(d.cName)(self);\n"
@@ -263,9 +263,9 @@ enum CEmit {
       return (v.ty == .bool ? "sw_print_bool(" : "sw_print_int(") + expr(v) + ")"
     case .structLit(let s, let args):
       let inits = zip(s.fields, args).map { ".\($0.0.cName) = \(expr($0.1))" }
-      return "((s_\(s.name)){ " + inits.joined(separator: ", ") + " })"
+      return "((s_\(cIdent(s.name))){ " + inits.joined(separator: ", ") + " })"
     case .construct(let c, let args):
-      return "n_\(c.name)(\(args.map(expr).joined(separator: ", ")))"
+      return "n_\(cIdent(c.name))(\(args.map(expr).joined(separator: ", ")))"
     case .prefix("-", let v):
       return "sw_sub(INT64_C(0), \(expr(v)))"
     case .prefix(_, let v):

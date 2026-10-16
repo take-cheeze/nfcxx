@@ -45,6 +45,26 @@ private struct ArgInput {
   let node: LabeledExprSyntax
 }
 
+/// A generic declaration and its type parameter names, kept until a use supplies arguments.
+private struct GenericDecl<Decl> {
+  let decl: Decl
+  let names: [String]
+}
+
+/// A parameter of a generic declaration as written: its label and its type syntax.
+private struct GenericParam {
+  let label: String?
+  let type: TypeSyntax
+}
+
+/// A deinitializer of a generic class instance. It is lowered after the pass that
+/// created the instance, so that the functions it calls have been declared.
+private struct PendingDeinit {
+  let info: FuncInfo
+  let decl: DeinitializerDeclSyntax
+  let env: [String: Ty]
+}
+
 final class Lowerer {
   private let converter: SourceLocationConverter
   private var structs: [String: StructInfo] = [:]
@@ -57,6 +77,25 @@ final class Lowerer {
   private var scopes: [Scope] = []
   private var returnType: Ty? = nil
   private var counter = 0
+
+  // Generics (M3, by monomorphization). A generic declaration is kept until a use
+  // supplies type arguments. Each distinct list of arguments is lowered once, into
+  // an instance named like the Swift type (`Box<Int>`). `typeEnv` binds the type
+  // parameters while an instance is lowered.
+  private var genericFuncs: [String: GenericDecl<FunctionDeclSyntax>] = [:]
+  private var genericStructs: [String: GenericDecl<StructDeclSyntax>] = [:]
+  private var genericClasses: [String: GenericDecl<ClassDeclSyntax>] = [:]
+  private var genericEnums: [String: GenericDecl<EnumDeclSyntax>] = [:]
+  private var instanceFuncs: [String: FuncInfo] = [:]
+  /// The generic declaration and arguments that each type instance came from.
+  private var instanceArgs: [String: (base: String, args: [Ty])] = [:]
+  private var instanceNodes: [String: Syntax] = [:]
+  private var instStructs: [StructInfo] = []
+  private var instClasses: [ClassInfo] = []
+  private var instEnums: [EnumInfo] = []
+  private var pendingDeinits: [PendingDeinit] = []
+  private var typeEnv: [String: Ty] = [:]
+  private var instantiationDepth = 0
 
   init(converter: SourceLocationConverter) {
     self.converter = converter
@@ -74,6 +113,10 @@ final class Lowerer {
       if let s = decl.as(StructDeclSyntax.self) {
         let name = s.name.text
         try checkNewType(name, s)
+        if let clause = s.genericParameterClause {
+          genericStructs[name] = GenericDecl<StructDeclSyntax>(decl: s, names: try genericNames(clause, s.genericWhereClause))
+          continue
+        }
         let info = StructInfo(name: name)
         structs[name] = info
         structDecls.append((s, info))
@@ -83,6 +126,10 @@ final class Lowerer {
           throw error("class inheritance is not supported yet", c)
         }
         try checkNewType(name, c)
+        if let clause = c.genericParameterClause {
+          genericClasses[name] = GenericDecl<ClassDeclSyntax>(decl: c, names: try genericNames(clause, c.genericWhereClause))
+          continue
+        }
         let info = ClassInfo(name: name)
         classes[name] = info
         classDecls.append((c, info))
@@ -92,6 +139,10 @@ final class Lowerer {
           throw error("enum inheritance and raw values are not supported yet", e)
         }
         try checkNewType(name, e)
+        if let clause = e.genericParameterClause {
+          genericEnums[name] = GenericDecl<EnumDeclSyntax>(decl: e, names: try genericNames(clause, e.genericWhereClause))
+          continue
+        }
         let info = EnumInfo(name: name)
         enums[name] = info
         enumDecls.append((e, info))
@@ -127,7 +178,11 @@ final class Lowerer {
     for item in items {
       guard case .decl(let decl) = item.item, let f = decl.as(FunctionDeclSyntax.self) else { continue }
       let name = f.name.text
-      if funcs[name] != nil { throw error("invalid redeclaration of '\(name)'", f) }
+      if funcs[name] != nil || genericFuncs[name] != nil { throw error("invalid redeclaration of '\(name)'", f) }
+      if let clause = f.genericParameterClause {
+        genericFuncs[name] = GenericDecl<FunctionDeclSyntax>(decl: f, names: try genericNames(clause, f.genericWhereClause))
+        continue
+      }
       let info = try declareFunction(f)
       funcs[name] = info
       allFuncs.append(info)
@@ -156,6 +211,7 @@ final class Lowerer {
       guard let body = d.body else { throw error("deinit without a body", d) }
       info.body = try lowerBody(info, body, d)
     }
+    try lowerPendingDeinits()
 
     // Pass 5: top-level statements. Their variables are visible only here, and
     // they are never released.
@@ -177,10 +233,21 @@ final class Lowerer {
       }
     }
 
+    // Instances can make a value type contain itself, so check the sizes again.
+    try lowerPendingDeinits()
+    var sizeNodes = recursionNodes
+    for s in instStructs {
+      sizeNodes.append((s.name, instanceNodes[s.name]!, s.fields.map { $0.ty }))
+    }
+    for e in instEnums {
+      sizeNodes.append((e.name, instanceNodes[e.name]!, e.cases.flatMap { $0.payload.map { $0.ty } }))
+    }
+    try checkRecursion(sizeNodes)
+
     return Program(
-      structs: structDecls.map { $0.1 },
-      classes: classDecls.map { $0.1 },
-      enums: enumDecls.map { $0.1 },
+      structs: structDecls.map { $0.1 } + instStructs,
+      classes: classDecls.map { $0.1 } + instClasses,
+      enums: enumDecls.map { $0.1 } + instEnums,
       funcs: allFuncs,
       main: main,
       optionals: optionals,
@@ -191,7 +258,7 @@ final class Lowerer {
   // MARK: - Declarations
 
   private func checkNewType(_ name: String, _ node: some SyntaxProtocol) throws {
-    if structs[name] != nil || classes[name] != nil || enums[name] != nil {
+    if structs[name] != nil || classes[name] != nil || enums[name] != nil || isGenericName(name) {
       throw error("invalid redeclaration of '\(name)'", node)
     }
   }
@@ -304,8 +371,8 @@ final class Lowerer {
     }
   }
 
-  private func declareFunction(_ f: FunctionDeclSyntax) throws -> FuncInfo {
-    let name = f.name.text
+  private func declareFunction(_ f: FunctionDeclSyntax, instanceName: String? = nil) throws -> FuncInfo {
+    let name = instanceName ?? f.name.text
     var params: [Param] = []
     for p in f.signature.parameterClause.parameters {
       // `func f(_ x: Int)` has no label; `func f(x: Int)` uses x as both.
@@ -321,7 +388,7 @@ final class Lowerer {
     } else {
       ret = .void
     }
-    return FuncInfo(name: name, cName: "f_" + name, params: params, ret: ret)
+    return FuncInfo(name: name, cName: "f_" + cIdent(name), params: params, ret: ret)
   }
 
   private func lowerBody(_ info: FuncInfo, _ body: CodeBlockSyntax, _ node: some SyntaxProtocol) throws -> [Stmt] {
@@ -690,6 +757,9 @@ final class Lowerer {
       if let f = funcs[name] {
         return Expr(kind: .funcRef(f), ty: functionType(f))
       }
+      if genericFuncs[name] != nil {
+        return try genericFunctionValue(name, explicit: [], expected: expected, ref)
+      }
       throw error("cannot find '\(name)' in scope", ref)
     }
     if let tuple = expr.as(TupleExprSyntax.self), tuple.elements.count == 1, let only = tuple.elements.first, only.label == nil {
@@ -703,6 +773,7 @@ final class Lowerer {
       if let info = try enumForMember(member, expected) {
         return try enumCase(info, member.declName.baseName.text, nil, member)
       }
+      if let e = try genericEnumCase(member, nil, expected) { return e }
       guard let base = member.base else {
         throw error("implicit member access is not supported in M2", member)
       }
@@ -748,6 +819,9 @@ final class Lowerer {
     }
     if let call = expr.as(FunctionCallExprSyntax.self) {
       return try lowerCall(call, expected: expected)
+    }
+    if let spec = expr.as(GenericSpecializationExprSyntax.self) {
+      return try specializedValue(spec, expected)
     }
     throw error("this expression is not supported in M2", expr)
   }
@@ -798,6 +872,14 @@ final class Lowerer {
     }
     let callee = call.calledExpression
 
+    if let spec = callee.as(GenericSpecializationExprSyntax.self) {
+      guard let ref = spec.expression.as(DeclReferenceExprSyntax.self), lookup(ref.baseName.text) == nil else {
+        throw error("this call is not supported in M3", call)
+      }
+      let explicit = try genericArguments(spec.genericArgumentClause)
+      return try lowerGenericCall(ref.baseName.text, explicit: explicit, call, expected, ref)
+    }
+
     if let ref = callee.as(DeclReferenceExprSyntax.self) {
       let name = ref.baseName.text
       if let local = lookup(name) {
@@ -805,6 +887,9 @@ final class Lowerer {
           throw error("cannot call value of non-function type '\(local.ty.swiftName)'", ref)
         }
         return try callValue(Expr(kind: .local(local.cName), ty: local.ty), params, ret, call)
+      }
+      if isGenericName(name) {
+        return try lowerGenericCall(name, explicit: [], call, expected, ref)
       }
       if let f = funcs[name] {
         let args = try lowerArgs(call, f.params.map { $0.ty })
@@ -837,6 +922,9 @@ final class Lowerer {
 
     if let member = callee.as(MemberAccessExprSyntax.self), let info = try enumForMember(member, expected) {
       return try enumCase(info, member.declName.baseName.text, call, member)
+    }
+    if let member = callee.as(MemberAccessExprSyntax.self), let e = try genericEnumCase(member, call, expected) {
+      return e
     }
 
     let value = try lowerExpr(callee)
@@ -1047,6 +1135,10 @@ final class Lowerer {
       throw error("this type is not supported in M2", type)
     }
     let name = id.name.text
+    if let bound = typeEnv[name], id.genericArgumentClause == nil { return bound }
+    if let clause = id.genericArgumentClause {
+      return try instanceType(name, try genericArguments(clause), type)
+    }
     switch name {
     case "Int": return .int
     case "Bool": return .bool
@@ -1055,8 +1147,431 @@ final class Lowerer {
       if structs[name] != nil { return .structure(name) }
       if classes[name] != nil { return .cls(name) }
       if enums[name] != nil { return .enumeration(name) }
+      if isGenericName(name) {
+        throw error("reference to generic type '\(name)' requires arguments in <...>", type)
+      }
       throw error("cannot find type '\(name)' in scope", type)
     }
+  }
+
+  // MARK: - Generics
+
+  /// Type parameter names of a generic declaration. Constraints and `where`
+  /// clauses are not supported in M3.
+  private func genericNames(_ clause: GenericParameterClauseSyntax, _ whereClause: GenericWhereClauseSyntax?) throws -> [String] {
+    if let whereClause {
+      throw error("where clauses on generic declarations are not supported yet", whereClause)
+    }
+    var names: [String] = []
+    for p in clause.parameters {
+      if p.inheritedType != nil {
+        throw error("generic parameter constraints are not supported yet", p)
+      }
+      let name = p.name.text
+      if names.contains(name) { throw error("invalid redeclaration of '\(name)'", p) }
+      names.append(name)
+    }
+    return names
+  }
+
+  private func genericArguments(_ clause: GenericArgumentClauseSyntax) throws -> [Ty] {
+    try clause.arguments.map { (arg: GenericArgumentSyntax) throws -> Ty in
+      guard case .type(let t) = arg.argument else {
+        throw error("value generic arguments are not supported yet", arg)
+      }
+      return try resolveType(t)
+    }
+  }
+
+  private func isGenericName(_ name: String) -> Bool {
+    genericFuncs[name] != nil || genericStructs[name] != nil || genericClasses[name] != nil || genericEnums[name] != nil
+  }
+
+  /// The type `base<args>`, instantiating it when it is first used.
+  private func instanceType(_ base: String, _ args: [Ty], _ node: some SyntaxProtocol) throws -> Ty {
+    if genericStructs[base] != nil {
+      let info = try instantiateStruct(base, args, node)
+      return .structure(info.name)
+    }
+    if genericClasses[base] != nil {
+      let info = try instantiateClass(base, args, node)
+      return .cls(info.name)
+    }
+    if genericEnums[base] != nil {
+      let info = try instantiateEnum(base, args, node)
+      return .enumeration(info.name)
+    }
+    if structs[base] != nil || classes[base] != nil || enums[base] != nil {
+      throw error("type '\(base)' is not generic", node)
+    }
+    throw error("cannot find type '\(base)' in scope", node)
+  }
+
+  /// The name of an instance, as Swift would write it, such as `Box<Int>`.
+  private func instanceName(_ base: String, _ args: [Ty]) -> String {
+    base + "<" + args.map { $0.swiftName }.joined(separator: ", ") + ">"
+  }
+
+  private func checkArity(_ base: String, _ names: [String], _ args: [Ty], _ node: some SyntaxProtocol) throws {
+    if args.count > names.count {
+      throw error("generic '\(base)' specialized with too many type parameters (got \(args.count), but expected \(names.count))", node)
+    }
+    if args.count < names.count {
+      throw error("generic '\(base)' specialized with too few type parameters (got \(args.count), but expected \(names.count))", node)
+    }
+    if args.contains(.void) {
+      throw error("'Void' as a generic argument is not supported yet", node)
+    }
+  }
+
+  private func envFor(_ names: [String], _ args: [Ty]) -> [String: Ty] {
+    Dictionary(uniqueKeysWithValues: zip(names, args))
+  }
+
+  /// Runs `body` with `env` as the type parameter bindings. An instance can be
+  /// lowered while another body is being lowered, so the caller's scopes and
+  /// return type are saved and restored.
+  private func inEnv<T>(_ env: [String: Ty], _ body: () throws -> T) rethrows -> T {
+    let saved = (typeEnv, scopes, returnType)
+    typeEnv = env
+    defer { (typeEnv, scopes, returnType) = saved }
+    return try body()
+  }
+
+  /// Bounds the depth of nested instantiation, so that a generic that keeps
+  /// instantiating itself with a larger argument is rejected instead of looping.
+  private func nested<T>(_ node: some SyntaxProtocol, _ body: () throws -> T) throws -> T {
+    instantiationDepth += 1
+    defer { instantiationDepth -= 1 }
+    if instantiationDepth > 64 {
+      throw error("generic instantiation is nested too deeply", node)
+    }
+    return try body()
+  }
+
+  private func recordInstance(_ name: String, _ base: String, _ args: [Ty], _ decl: some SyntaxProtocol) {
+    instanceArgs[name] = (base, args)
+    instanceNodes[name] = Syntax(decl)
+  }
+
+  private func instantiateStruct(_ base: String, _ args: [Ty], _ node: some SyntaxProtocol) throws -> StructInfo {
+    let name = instanceName(base, args)
+    if let existing = structs[name] { return existing }
+    guard let g = genericStructs[base] else { throw error("cannot find type '\(base)' in scope", node) }
+    try checkArity(base, g.names, args, node)
+    return try nested(node) {
+      let info = StructInfo(name: name)
+      structs[name] = info  // registered before the fields, so they can refer to it
+      recordInstance(name, base, args, g.decl)
+      instStructs.append(info)
+      let env = envFor(g.names, args)
+      info.fields = try inEnv(env) { try lowerMembers(g.decl.memberBlock, isClass: false).fields }
+      return info
+    }
+  }
+
+  private func instantiateClass(_ base: String, _ args: [Ty], _ node: some SyntaxProtocol) throws -> ClassInfo {
+    let name = instanceName(base, args)
+    if let existing = classes[name] { return existing }
+    guard let g = genericClasses[base] else { throw error("cannot find type '\(base)' in scope", node) }
+    try checkArity(base, g.names, args, node)
+    return try nested(node) {
+      let info = ClassInfo(name: name)
+      classes[name] = info
+      recordInstance(name, base, args, g.decl)
+      instClasses.append(info)
+      let env = envFor(g.names, args)
+      let members = try inEnv(env) { try lowerMembers(g.decl.memberBlock, isClass: true) }
+      info.fields = members.fields
+      if let d = members.deinitializer {
+        let f = FuncInfo(
+          name: "deinit_" + name,
+          cName: "deinit_" + cIdent(name),
+          params: [Param(label: nil, name: "self", cName: "self", ty: .cls(name))],
+          ret: .void,
+          ownsParams: false
+        )
+        info.deinitializer = f
+        allFuncs.append(f)
+        pendingDeinits.append(PendingDeinit(info: f, decl: d, env: env))
+      }
+      return info
+    }
+  }
+
+  private func instantiateEnum(_ base: String, _ args: [Ty], _ node: some SyntaxProtocol) throws -> EnumInfo {
+    let name = instanceName(base, args)
+    if let existing = enums[name] { return existing }
+    guard let g = genericEnums[base] else { throw error("cannot find type '\(base)' in scope", node) }
+    try checkArity(base, g.names, args, node)
+    return try nested(node) {
+      let info = EnumInfo(name: name)
+      enums[name] = info
+      recordInstance(name, base, args, g.decl)
+      instEnums.append(info)
+      let env = envFor(g.names, args)
+      info.cases = try inEnv(env) { try lowerEnumCases(g.decl) }
+      return info
+    }
+  }
+
+  /// Lowers one instance of a generic function. The instance is cached before its
+  /// body is lowered, so a recursive call finds it.
+  private func instantiateFunction(_ base: String, _ args: [Ty], _ node: some SyntaxProtocol) throws -> FuncInfo {
+    let name = instanceName(base, args)
+    if let existing = instanceFuncs[name] { return existing }
+    guard let g = genericFuncs[base] else { throw error("cannot find '\(base)' in scope", node) }
+    try checkArity(base, g.names, args, node)
+    return try nested(node) {
+      let env = envFor(g.names, args)
+      let info = try inEnv(env) { try declareFunction(g.decl, instanceName: name) }
+      instanceFuncs[name] = info
+      allFuncs.append(info)
+      guard let body = g.decl.body else { throw error("function without a body", g.decl) }
+      info.body = try inEnv(env) { try lowerBody(info, body, g.decl) }
+      return info
+    }
+  }
+
+  private func lowerPendingDeinits() throws {
+    while !pendingDeinits.isEmpty {
+      let p = pendingDeinits.removeFirst()
+      guard let body = p.decl.body else { throw error("deinit without a body", p.decl) }
+      p.info.body = try inEnv(p.env) { try lowerBody(p.info, body, p.decl) }
+    }
+  }
+
+  /// Binds the parameters in `names` by matching a parameter type, as written, against
+  /// the type of an argument. Matched shapes are `T`, `T?`, `(...) -> T` and `Box<T>`.
+  private func unify(
+    _ type: TypeSyntax,
+    _ actual: Ty,
+    _ names: [String],
+    _ bindings: inout [String: Ty],
+    _ node: some SyntaxProtocol
+  ) throws {
+    if actual == .nilLiteral { return }
+    if let id = type.as(IdentifierTypeSyntax.self) {
+      let name = id.name.text
+      if id.genericArgumentClause == nil, names.contains(name) {
+        if let bound = bindings[name] {
+          if bound != actual {
+            throw error("conflicting types for generic parameter '\(name)' ('\(bound.swiftName)' vs. '\(actual.swiftName)')", node)
+          }
+        } else {
+          bindings[name] = actual
+        }
+      } else if let clause = id.genericArgumentClause, let origin = instanceOrigin(actual), origin.base == name {
+        for (argSyntax, argType) in zip(clause.arguments, origin.args) {
+          guard case .type(let t) = argSyntax.argument else { continue }
+          try unify(t, argType, names, &bindings, node)
+        }
+      }
+      return
+    }
+    if let opt = type.as(OptionalTypeSyntax.self) {
+      if case .optional(let inner) = actual {
+        try unify(opt.wrappedType, inner, names, &bindings, node)
+      }
+      return
+    }
+    if let fn = type.as(FunctionTypeSyntax.self), case .function(let params, let ret) = actual, params.count == fn.parameters.count {
+      for (p, t) in zip(fn.parameters, params) {
+        try unify(p.type, t, names, &bindings, node)
+      }
+      try unify(fn.returnClause.type, ret, names, &bindings, node)
+    }
+  }
+
+  private func instanceOrigin(_ ty: Ty) -> (base: String, args: [Ty])? {
+    switch ty {
+    case .structure(let n), .cls(let n), .enumeration(let n): return instanceArgs[n]
+    default: return nil
+    }
+  }
+
+  /// The stored properties of a generic struct or class, as memberwise initializer parameters.
+  private func storedParams(_ block: MemberBlockSyntax) -> [GenericParam] {
+    var out: [GenericParam] = []
+    for member in block.members {
+      guard let v = member.decl.as(VariableDeclSyntax.self) else { continue }
+      for binding in v.bindings {
+        guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let annotation = binding.typeAnnotation else { continue }
+        out.append(GenericParam(label: id.identifier.text, type: annotation.type))
+      }
+    }
+    return out
+  }
+
+  /// The payload of a case of a generic enum, as parameters.
+  private func casePayloadParams(_ decl: EnumDeclSyntax, _ caseName: String) -> [GenericParam]? {
+    for member in decl.memberBlock.members {
+      guard let caseDecl = member.decl.as(EnumCaseDeclSyntax.self) else { continue }
+      for element in caseDecl.elements where element.name.text == caseName {
+        guard let params = element.parameterClause?.parameters else { return [] }
+        return params.map { GenericParam(label: nil, type: $0.type) }
+      }
+    }
+    return nil
+  }
+
+  /// Arguments that need their parameter type to be lowered: closures and implicit
+  /// members such as `.some(1)`.
+  private func needsContext(_ e: ExprSyntax) -> Bool {
+    if e.is(ClosureExprSyntax.self) { return true }
+    if let member = e.as(MemberAccessExprSyntax.self) { return member.base == nil }
+    if let call = e.as(FunctionCallExprSyntax.self), let member = call.calledExpression.as(MemberAccessExprSyntax.self) {
+      return member.base == nil
+    }
+    return false
+  }
+
+  /// Lowers the arguments of a call to a generic declaration and binds its type
+  /// parameters `names`, from `explicit`, from the argument types, or from the
+  /// expected result. Arguments that need a type are lowered last, once it is known.
+  private func bindGeneric(
+    _ names: [String],
+    explicit: [Ty],
+    params: [GenericParam],
+    result: TypeSyntax?,
+    expected: Ty?,
+    _ call: FunctionCallExprSyntax
+  ) throws -> (types: [Ty], args: [ArgInput]) {
+    guard call.arguments.count == params.count else {
+      throw error("wrong number of arguments: expected \(params.count), got \(call.arguments.count)", call)
+    }
+    var bindings: [String: Ty] = [:]
+    for (name, ty) in zip(names, explicit) { bindings[name] = ty }
+    let argNodes = Array(call.arguments)
+    var inputs: [ArgInput?] = Array(repeating: nil, count: argNodes.count)
+    var deferred: [Int] = []
+    for (i, arg) in argNodes.enumerated() {
+      if needsContext(arg.expression) {
+        deferred.append(i)
+        continue
+      }
+      let value = try lowerExpr(arg.expression)
+      try unify(params[i].type, value.ty, names, &bindings, arg.expression)
+      inputs[i] = ArgInput(label: arg.label?.text, value: value, node: arg)
+    }
+    if let result, let expected, names.contains(where: { bindings[$0] == nil }) {
+      try unify(result, expected, names, &bindings, call)
+    }
+    for name in names where bindings[name] == nil {
+      throw error("generic parameter '\(name)' could not be inferred", call)
+    }
+    for i in deferred {
+      let ty = try inEnv(bindings) { try resolveType(params[i].type) }
+      let value = try lowerExpr(argNodes[i].expression, expected: ty)
+      inputs[i] = ArgInput(label: argNodes[i].label?.text, value: value, node: argNodes[i])
+    }
+    return (names.map { bindings[$0]! }, inputs.compactMap { $0 })
+  }
+
+  /// A call through a generic name: a generic function, or the memberwise
+  /// initializer of a generic struct or class.
+  private func lowerGenericCall(
+    _ name: String,
+    explicit: [Ty],
+    _ call: FunctionCallExprSyntax,
+    _ expected: Ty?,
+    _ node: some SyntaxProtocol
+  ) throws -> Expr {
+    if let g = genericFuncs[name] {
+      if !explicit.isEmpty { try checkArity(name, g.names, explicit, node) }
+      let params = g.decl.signature.parameterClause.parameters.map { GenericParam(label: nil, type: $0.type) }
+      let (types, args) = try bindGeneric(
+        g.names, explicit: explicit, params: params, result: g.decl.signature.returnClause?.type, expected: expected, call)
+      let f = try instantiateFunction(name, types, node)
+      let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
+      return Expr(kind: .call(f, values), ty: f.ret, owned: true)
+    }
+    if let g = genericStructs[name] {
+      let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
+      let s = try instantiateStruct(name, types, node)
+      let values = try matchArguments(s.name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
+      return Expr(kind: .structLit(s, values), ty: .structure(s.name))
+    }
+    if let g = genericClasses[name] {
+      let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
+      let c = try instantiateClass(name, types, node)
+      let values = try matchArguments(c.name, c.fields.map { (Optional($0.name), $0.ty) }, args, call)
+      return Expr(kind: .construct(c, values), ty: .cls(c.name), owned: true)
+    }
+    throw error("'\(name)' cannot be called in M3", node)
+  }
+
+  /// A generic function used as a value, with type arguments from `explicit` or
+  /// from the expected function type.
+  private func genericFunctionValue(_ name: String, explicit: [Ty], expected: Ty?, _ node: some SyntaxProtocol) throws -> Expr {
+    guard let g = genericFuncs[name] else { throw error("cannot find '\(name)' in scope", node) }
+    if !explicit.isEmpty { try checkArity(name, g.names, explicit, node) }
+    var bindings: [String: Ty] = [:]
+    for (n, t) in zip(g.names, explicit) { bindings[n] = t }
+    let params = g.decl.signature.parameterClause.parameters
+    if let expected, case .function(let paramTypes, let ret) = expected, paramTypes.count == params.count {
+      for (p, t) in zip(params, paramTypes) {
+        try unify(p.type, t, g.names, &bindings, node)
+      }
+      if let clause = g.decl.signature.returnClause {
+        try unify(clause.type, ret, g.names, &bindings, node)
+      }
+    }
+    for n in g.names where bindings[n] == nil {
+      throw error("generic parameter '\(n)' could not be inferred", node)
+    }
+    let f = try instantiateFunction(name, g.names.map { bindings[$0]! }, node)
+    return Expr(kind: .funcRef(f), ty: functionType(f))
+  }
+
+  /// `first<Int>` used as a value.
+  private func specializedValue(_ spec: GenericSpecializationExprSyntax, _ expected: Ty?) throws -> Expr {
+    guard let ref = spec.expression.as(DeclReferenceExprSyntax.self), genericFuncs[ref.baseName.text] != nil else {
+      throw error("this generic expression is not supported in M3", spec)
+    }
+    let explicit = try genericArguments(spec.genericArgumentClause)
+    return try genericFunctionValue(ref.baseName.text, explicit: explicit, expected: expected, spec)
+  }
+
+  /// `Maybe<Int>.some(3)`, `Maybe.some(3)` (arguments inferred from the expected
+  /// type or the payload) and `Maybe<Int>.none`. Returns nil when `member` is not
+  /// a case of a generic enum.
+  private func genericEnumCase(_ member: MemberAccessExprSyntax, _ call: FunctionCallExprSyntax?, _ expected: Ty?) throws -> Expr? {
+    guard let base = member.base else { return nil }
+    let name: String
+    var explicit: [Ty]? = nil
+    if let spec = base.as(GenericSpecializationExprSyntax.self), let ref = spec.expression.as(DeclReferenceExprSyntax.self),
+       genericEnums[ref.baseName.text] != nil {
+      name = ref.baseName.text
+      explicit = try genericArguments(spec.genericArgumentClause)
+    } else if let ref = base.as(DeclReferenceExprSyntax.self), lookup(ref.baseName.text) == nil,
+              genericEnums[ref.baseName.text] != nil {
+      name = ref.baseName.text
+    } else {
+      return nil
+    }
+    guard let g = genericEnums[name] else { return nil }
+    let caseName = member.declName.baseName.text
+    if explicit == nil, case .enumeration(let n)? = expected, let origin = instanceOrigin(.enumeration(n)), origin.base == name {
+      explicit = origin.args
+    }
+    guard let payload = casePayloadParams(g.decl, caseName) else {
+      throw error("type '\(name)' has no member '\(caseName)'", member)
+    }
+    if let call {
+      let (types, args) = try bindGeneric(g.names, explicit: explicit ?? [], params: payload, result: nil, expected: nil, call)
+      let info = try instantiateEnum(name, types, member)
+      guard let c = info.cases.first(where: { $0.name == caseName }) else {
+        throw error("type '\(info.name)' has no member '\(caseName)'", member)
+      }
+      let values = try matchArguments(caseName, c.payload.map { (nil, $0.ty) }, args, call)
+      return Expr(kind: .enumCase(info, c.tag, values), ty: .enumeration(info.name))
+    }
+    guard let explicit else {
+      throw error("generic parameter '\(g.names[0])' could not be inferred", member)
+    }
+    let info = try instantiateEnum(name, explicit, member)
+    return try enumCase(info, caseName, nil, member)
   }
 
   // MARK: - Scopes and releases
