@@ -1154,7 +1154,7 @@ if $PROGRAM_NAME == __FILE__
     end
     # The type check reports them (with file:line) instead of stopping the run that collects them.
     total = contradictions.size + ivar_contradictions.size
-    abort "\n[bc2pp] RBS_SEED_CONTRADICTION: #{total} declaration(s) disagree with a " \
+    abort "\n[bc2cpp] RBS_SEED_CONTRADICTION: #{total} declaration(s) disagree with a " \
           "proved type (see above). Fix the declaration, or the code it claims to describe." unless type_facts_path
   end
   warn ''
