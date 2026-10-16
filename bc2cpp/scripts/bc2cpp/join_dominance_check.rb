@@ -27,6 +27,7 @@ require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/ivar_layout'
 require_relative '../../tools/bc2cpp/irep_scans'
+require_relative '../../tools/bc2cpp/nil_narrowing'
 
 failures = []
 check = lambda do |what, condition|
@@ -169,6 +170,40 @@ opaque = [insn(0, 'LOADI_0', "R3\t(0)"), insn(2, 'JMPNOT', "R1\t10"), insn(6, 'S
 check.call('a loop that also writes an opaque call result is not Fixnum', type_of.call(opaque, 4, '3') == IvarLayout::UNKNOWN)
 check.call('a write straight before the SETIV is unchanged',
            type_of.call([insn(0, 'LOADI_7', "R3\t(7)"), insn(2, 'SETIV', "@x\tR3")], 1, '3') == :fixnum)
+
+puts '-- NIL_NARROWING (host, ADR 0456)'
+# `nil.placed?` raises NoMethodError: the callable says nil cannot answer it. `nil?` nil does answer.
+nil_free = ->(name) { name == 'placed?' }
+non_nil = ->(list, idx, reg, handlers = []) { NilNarrowing.non_nil?(irep_of(list, handlers), idx, reg, nil_free) }
+# v = f; if v then use(v) end
+if_v = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPNOT', "R2\t12"), insn(7, 'MOVE', "R3\tR2"), insn(10, 'RETURN', 'R3'),
+        insn(12, 'RETNIL', '')]
+check.call('`if v`: v is non-nil on the taken arm', non_nil.call(if_v, 2, '2'))
+check.call('`if v`: a MOVE copies the fact', non_nil.call(if_v, 3, '3'))
+check.call('`if v`: not on the else arm (negative)', !non_nil.call(if_v, 4, '2'))
+check.call('`if v`: not before the test (negative)', !non_nil.call(if_v, 1, '2'))
+# v = f; return unless v; use(v)
+unless_v = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPIF', "R2\t9"), insn(7, 'RETNIL', ''), insn(9, 'MOVE', "R3\tR2"),
+            insn(12, 'RETURN', 'R3')]
+check.call('`return unless v`: v is non-nil after the guard', non_nil.call(unless_v, 3, '2'))
+# v = f; v.placed?; use(v)
+called = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'MOVE', "R3\tR2"), insn(6, 'SEND0', "R3\t:placed?"),
+          insn(9, 'MOVE', "R4\tR2"), insn(12, 'RETURN', 'R4')]
+check.call('a call nil cannot answer proves its receiver non-nil after it returns', non_nil.call(called, 3, '2'))
+check.call('the receiver register itself holds the result, not the receiver (negative)', !non_nil.call(called, 3, '3'))
+check.call('a call nil may answer proves nothing (negative)',
+           !NilNarrowing.non_nil?(irep_of(called), 3, '2', ->(_name) { false }))
+check.call('a rescue edge out of the call reaches the use without the proof (negative)',
+           !non_nil.call(called, 3, '2', [CatchHandler.new(type: :rescue, begin_addr: 6, end_addr: 9, target: 9)]))
+rewritten = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPNOT', "R2\t15"), insn(7, 'SEND0', "R2\t:g"),
+             insn(10, 'MOVE', "R3\tR2"), insn(13, 'RETURN', 'R3'), insn(15, 'RETNIL', '')]
+check.call('a write between the test and the use drops the fact (negative)', !non_nil.call(rewritten, 3, '2'))
+joined = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPNOT', "R1\t11"), insn(7, 'JMPNOT', "R2\t16"),
+          insn(11, 'MOVE', "R3\tR2"), insn(14, 'RETURN', 'R3'), insn(16, 'RETNIL', '')]
+check.call('a join with an untested path drops the fact (negative)', !non_nil.call(joined, 3, '2'))
+clobbered = [insn(0, 'SEND0', "R4\t:f"), insn(3, 'JMPNOT', "R4\t12"), insn(7, 'SEND0', "R3\t:g"),
+             insn(10, 'RETURN', 'R4'), insn(12, 'RETNIL', '')]
+check.call('a callee frame below the register clobbers it (negative)', !non_nil.call(clobbered, 3, '4'))
 
 if ENV['MRBC']
   require_relative 'fixture_runtime'

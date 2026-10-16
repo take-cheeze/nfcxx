@@ -5,6 +5,7 @@ require_relative 'call_site_index'
 require_relative 'dynamic_names'
 require_relative 'native_names'
 require_relative 'closed_world'
+require_relative 'nil_narrowing'
 
 # RBS_CHECKED_PARAMS (docs/adr/0456): a class parameter type in an RBS signature is a checked fact, not a seed.
 #
@@ -19,9 +20,12 @@ require_relative 'closed_world'
 #     when the pool refuses it;
 #   * every argument at such a site must trace to the declared class through the reaching definitions of its
 #     register (exception edges included): `Klass.new` (an unoverridden constructor of exactly that class), a call
-#     whose every definition declares that class as its non-optional return or is an attr_reader of a proven
-#     slot, a parameter of the enclosing method whose signature declares that class, `self` in a method of a class
-#     nothing inherits from, or an ivar every store of which is proven and which no read sees unassigned.
+#     whose every definition has a checked `-> C` declaration (DECLARED_RETURN_CHECK, ADR 0455; a %a{bc2cpp:hint}
+#     one is not checked and proves nothing) or is an attr_reader of a proven slot, a parameter of the enclosing
+#     method whose signature declares that class, the same parameter read from a block through GETUPVAR when the
+#     method never reassigns it, `self` in a method of a class nothing inherits from, or an ivar every store of
+#     which is proven and which no read sees unassigned. A call declared `-> C?` gives "C or nil": the argument
+#     then also needs NIL_NARROWING (nil_narrowing.rb) to prove the register non-nil at the call site.
 #     Anything else is TC1013 at the call site's file:line.
 #
 # A refused or unverified parameter is removed from the annotation tables, so a type check run (which does not
@@ -29,6 +33,9 @@ require_relative 'closed_world'
 # consumers re-check the value (ADR 0413's embedded-SETIV TypeError and mrb_array_p tripwires).
 module RbsParamCheck
   MAX_DEPTH = 8
+
+  # A reaching definition proven "C or nil" (a `-> C?` call): the use must also be proven non-nil.
+  Nilable = Struct.new(:why)
 
   module_function
 
@@ -38,10 +45,14 @@ module RbsParamCheck
   # outside_names: outside_call_names' result (nil: no outside scan, every declaration is refused);
   # constructor_entries: a CodeGen built with `analysis_only: :constructor_sites` (constructor_entry_sites,
   # constructor_init_target); nil refuses every initialize declaration.
+  # declared_returns: DeclaredReturns.from_signatures' entries (CodeGen.declared_returns); only the checked ones
+  # (not %a{bc2cpp:hint}) prove a call's result.
   def check(loaded, ireps, registry, class_annotations, comment_class_args:, call_sites:, outside_names:,
-            superclass_of:, display_root: nil, applied: nil, constructor_entries: nil)
+            superclass_of:, display_root: nil, applied: nil, constructor_entries: nil, declared_returns: nil)
     ctx = context(loaded, ireps, registry, superclass_of)
-    ctx.merge!(ivar_cache: {}, ivar_active: Set.new)
+    ctx.merge!(ivar_cache: {}, ivar_active: Set.new, nil_cache: {},
+               declared: (declared_returns || []).reject(&:hint).to_h { |e| [e.label, e] },
+               nil_unanswerable: ->(name) { constructor_entries.nil_unanswerable?(name) })
     ctx.merge!(outside: outside_names, display_root: display_root, call_sites: call_sites, applied: applied,
                class_annotations: class_annotations, comment_class_args: comment_class_args,
                constructor_entries: constructor_entries)
@@ -93,7 +104,7 @@ module RbsParamCheck
   def context(loaded, ireps, registry, superclass_of)
     ctx = { ireps: ireps, registry: registry, subclassed: superclass_of.values.grep(String).to_set,
             dynamic: DynamicNames.universe(ireps), self_of: {}, method_name: {}, owner_of: {}, sig_of: {}, def_of: {},
-            aliased: alias_names(ireps) }
+            aliased: alias_names(ireps), parent: {} }
     defs_by = {}
     registry.each_value do |defs|
       defs.each do |d|
@@ -105,7 +116,7 @@ module RbsParamCheck
       end
     end
     ctx[:owner_of].merge!(ctx[:self_of])
-    parent = {}
+    parent = ctx[:parent]
     ireps.each_value { |irep| (irep.reps || []).each { |child| parent[child] = irep.label } }
     ireps.each_key do |label|
       up = label
@@ -294,13 +305,22 @@ module RbsParamCheck
       return "the reaching definitions are not computable here (#{refusal[:cause] || 'no definition'})"
     end
 
+    nilable = nil
     defs.each do |definition|
       why = if definition.entry? then entry_why(ctx, irep, definition.reg, cls)
             else writer_why(ctx, irep, definition, cls, depth)
             end
+      if why.is_a?(Nilable)
+        nilable ||= why
+        next
+      end
       return why if why
     end
-    nil
+    return nil unless nilable
+    return nil if NilNarrowing.non_nil?(irep, idx, reg, ctx[:nil_unanswerable], ctx[:nil_cache])
+
+    "#{nilable.why}, and no test or call nil cannot answer proves R#{reg} non-nil at " \
+      "#{display(ctx, irep.file)}:#{irep.instructions[idx].lineno} (NIL_NARROWING)"
   end
 
   # Every definition that can reach `reg` at `idx`, exception edges included (a call inside a `begin`/`rescue`
@@ -340,6 +360,8 @@ module RbsParamCheck
       "self (#{owner || 'in a block'})"
     when 'GETIV'
       ivar_why(ctx, irep, insn.ivar, cls, depth)
+    when 'GETUPVAR'
+      upvar_why(ctx, irep, insn, cls)
     when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
       name = insn.sym
       return new_why(ctx, irep, definition.index, cls) if name == 'new' && insn.op.start_with?('SEND')
@@ -379,6 +401,37 @@ module RbsParamCheck
     result
   end
 
+  # A block's GETUPVAR of a slot of the method that created it (`cmd` in `r.each { operand_value(cmd) }`) is that
+  # method's parameter when the method never writes the register after entry (Program#may_write?, the model
+  # entry_why's reaching definitions use), no nested block SETUPVARs it, and nothing in the build can write a local
+  # by name (CodeGen#captured_local_writers_absent?: binding, local_variable_set, eval). The block may run after the
+  # method returned; the captured slot still holds the entry value. The parameter must then be a kept declaration.
+  def upvar_why(ctx, irep, insn, cls)
+    where = "GETUPVAR at #{display(ctx, irep.file)}:#{insn.lineno}"
+    index, level = insn.upvar_ref
+    return "#{where}: no captured slot" unless index
+
+    label = irep.label
+    (level + 1).times do
+      label = ctx[:parent][label]
+      return "#{where}: the capturing frame is unknown" unless label
+    end
+    frame = ctx[:ireps][label]
+    return "#{where}: a captured slot of a block, not of a method" unless ctx[:self_of].key?(label) && frame
+
+    unless ctx[:constructor_entries].captured_local_writers_absent?
+      return "#{where}: a local may be written by name (binding, local_variable_set or eval reachable)"
+    end
+
+    reg = index.to_s
+    prog = BytecodeIR.for(frame)
+    if BytecodeIR.own_upvar_written_regs(frame).include?(reg) || frame.instructions.any? { |i| prog.may_write?(i, reg) }
+      return "#{where}: R#{reg} of #{ctx[:self_of][label]}##{ctx[:method_name][label]} is reassigned"
+    end
+
+    entry_why(ctx, frame, reg, cls)
+  end
+
   # `Klass.new(...)` of exactly `cls`, whose `new` nothing in the program overrides.
   def new_why(ctx, irep, idx, cls)
     overrides = ctx[:registry].fetch('new', []).reject { |d| d.owner == '<native>' }
@@ -389,12 +442,16 @@ module RbsParamCheck
     found == cls ? nil : "`new` of #{found || 'an unresolved constant'}"
   end
 
-  # A call is `cls` when every definition of its name either declares `-> cls` or is an attr_reader whose slot
-  # the ivar rule proves `cls` (a call that runs none of them raises NoMethodError and returns nothing).
+  # A call is `cls` when every definition of its name either has a checked `-> cls` declaration or is an
+  # attr_reader whose slot the ivar rule proves `cls` (a call that runs none of them raises NoMethodError and
+  # returns nothing). A declaration counts only when DECLARED_RETURN_CHECK (ADR 0455) verifies it: an entry of
+  # +declared_returns+ that is not %a{bc2cpp:hint}; that check aborts the build when a body does not prove it. A
+  # checked `-> cls?` gives a Nilable (the caller then needs NIL_NARROWING at the use).
   def returns_why(ctx, name, cls, depth)
     defs = ctx[:registry].fetch(name, [])
     return "a call to #{name}, which the program does not define" if defs.empty?
 
+    nilable = nil
     defs.each do |d|
       if d.kind == :ivar_accessor && d.irep.nil? && !name.end_with?('=')
         why = ivar_why(ctx, nil, name, cls, depth, owner: d.owner)
@@ -402,12 +459,19 @@ module RbsParamCheck
 
         next
       end
-      sig = d.irep && ctx[:sig_of][d.irep]
-      ret = sig&.ret
-      next if ret && ret.kind == :class && ret.cls == cls
+      entry = d.irep && ctx[:declared][d.irep]
+      if entry && entry.kind == :class && entry.cls == cls
+        nilable ||= Nilable.new("#{d.owner}##{name} declares -> #{cls}?") if entry.nilable
+        next
+      end
 
+      ret = d.irep && ctx[:sig_of][d.irep]&.ret
+      if ret && (ret.kind == :class ? ret.cls : ret.optional&.cls) == cls
+        return "#{d.owner}##{name}'s -> #{ret.text} is not a checked declaration (%a{bc2cpp:hint}, or no " \
+               'DECLARED_RETURN_CHECK)'
+      end
       return "#{d.owner}##{name} does not declare -> #{cls}"
     end
-    nil
+    nilable
   end
 end

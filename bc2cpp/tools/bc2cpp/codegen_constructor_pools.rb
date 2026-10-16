@@ -84,13 +84,22 @@ class CodeGen
 
   # The same for a read in an instance method of +owner+ (an attr_reader's slot).
   def ivar_write_sites_of(owner, name)
+    sites, why = ivar_store_sites_of(owner, name)
+    return [nil, why] if why
+    return [nil, "@#{name} may be read before a constructor of #{owner} assigns it"] unless numeric_ivar_assured?(owner, name)
+
+    [sites, nil]
+  end
+
+  # ivar_write_sites_of without INIT_ASSIGNED: every SETIV that can write `@name` of an +owner+ instance, for a
+  # consumer to which an unassigned (nil) read is harmless (SEALED_HASH_IVAR: `nil[k]` raises NoMethodError).
+  def ivar_store_sites_of(owner, name)
     setup_numeric_ivar_groups unless @numeric_ivar_groups
     return [nil, "ivar proofs are off (#{@numeric_ivar_disabled})"] if @numeric_ivar_disabled
     return [nil, 'read outside a method of a declared class'] unless owner && @closed_world.class_declared?(owner)
 
     group = @numeric_ivar_groups[[numeric_family(owner), name]]
     return [nil, "@#{name} has a writer outside its SETIV sites (NUMERIC_IVAR_PROOF)"] if group.nil? || group.structural
-    return [nil, "@#{name} may be read before a constructor of #{owner} assigns it"] unless numeric_ivar_assured?(owner, name)
 
     # A store in a method of W writes an instance of W or a descendant, a read in a method of +owner+ reads one of
     # +owner+ or a descendant: in a tree of classes both can be one object only when one class is the other's

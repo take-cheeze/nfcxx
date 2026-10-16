@@ -467,7 +467,8 @@ if $PROGRAM_NAME == __FILE__
     param_diags, = RbsParamCheck.check(sig_loaded, ireps, registry, sig_class_annotations,
                                        comment_class_args: sig_comment_class_args, call_sites: call_sites,
                                        outside_names: param_outside, constructor_entries: param_constructors,
-                                       superclass_of: superclass_of, display_root: sig_root, applied: sig_applied)
+                                       superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
+                                       declared_returns: CodeGen.declared_returns)
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
     if param_diags.any? { |d| d.severity == 'error' } && ENV['BC2CPP_TYPE_FACTS'].to_s.empty?

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'declared_returns'
+require_relative 'codegen_sealed_containers'
 
 # CodeGen: DECLARED_RETURN_CHECK (docs/adr/0455).
 #
@@ -21,8 +22,9 @@ require_relative 'declared_returns'
 #   * a `break` in a nested block: it replaces the value of the call that took the block, so a path whose value is a
 #     block-carrying send's result is refused when the subtree breaks.
 # Every path must prove: :fixnum by fixnum_proof_source? / proven_fixnum_operand?, :array by trace_new_target ==
-# Array or proven_array_source, :class by trace_new_target == C (the exact class; `C?` also takes nil paths). A path
-# the checker cannot prove is a TC1010 error at its Ruby file:line.
+# Array or proven_array_source, :class by trace_new_target == C (the exact class; `C?` also takes nil paths, and an
+# `@h[k]` read of a sealed Hash ivar whose stored values are all exactly C, SEALED_HASH_IVAR in
+# codegen_sealed_containers.rb, ADR 0456). A path the checker cannot prove is a TC1010 error at its Ruby file:line.
 #
 # The closed-world preconditions of the proofs hold for the name-level fact (declared_return_facts): every registry
 # definition of the name has a bytecode body and the same declaration; no native or foreign Ruby defines it; no alias,
@@ -277,8 +279,27 @@ class CodeGen
     when :class
       traced = declared_traced_class(entry, d, ir, w + 1, r, declared_hop_dominance(ir, w))
       return nil if traced == entry.cls
+      return "#{what} is a #{traced}, not exactly #{entry.cls}" if traced
 
-      traced ? "#{what} is a #{traced}, not exactly #{entry.cls}" : "#{what} is not a proven #{entry.cls}"
+      # SEALED_HASH_IVAR: `@h[k]` answers a stored value or nil, so only a `C?` declaration may take it.
+      if entry.nilable && writer.op == 'GETIDX' && writer.reg == r
+        why = sealed_hash_read_failure(ir, w, entry.cls, declared_sealed_value_prover(entry))
+        return why ? "#{what} is not a proven #{entry.cls} (#{why})" : nil
+      end
+      "#{what} is not a proven #{entry.cls}"
+    end
+  end
+
+  # Proves one value a sealed Hash literal stores is exactly the declared class: the same class trace, in the
+  # storing method's frame.
+  def declared_sealed_value_prover(entry)
+    lambda do |site, idx, reg|
+      sd = numeric_irep_owner[site.label]
+      next 'a store outside a method' unless sd
+
+      dominated = ->(w_idx, use_idx, hop) { return_write_dominates?(site, w_idx, use_idx, hop) }
+      traced = declared_traced_class(entry, sd, site, idx, reg, dominated)
+      traced == entry.cls ? nil : "#{traced ? "a #{traced}" : 'a value'}, not a proven #{entry.cls}"
     end
   end
 
