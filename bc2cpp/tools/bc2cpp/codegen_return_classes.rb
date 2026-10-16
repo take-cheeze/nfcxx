@@ -472,7 +472,23 @@ class CodeGen
     key = [irep.label, index]
     @rc_new_class[key] = exact_new_class_at(irep, index + 1, insn.reg, numeric_owner_of(irep)) unless @rc_new_class.key?(key)
     klass = @rc_new_class[key]
-    klass && !RETURN_BITLESS_CLASSES.include?(klass) ? numeric_class_bit(klass) : NumericFlow::OTHER
+    return numeric_class_bit(klass) if klass && !RETURN_BITLESS_CLASSES.include?(klass)
+
+    # CORE_NEW_EXACT: `Array.new(n)`, `Hash.new(0)`, `String.new(s)` on the proven core class object is a fresh
+    # instance of exactly that class (Class#new allocates from its receiver, whatever #initialize does), so it is
+    # the class's own bit, as a literal is.
+    core_bit = klass && RETURN_CORE_CLASS.key(klass)
+    core_bit && core_new_exact?(klass) ? core_bit : NumericFlow::OTHER
+  end
+
+  # The construction of +klass+ (a core class with its own bit) is Class#new on exactly that class: the constant
+  # cannot be rebound, and the lookup of `new` and `allocate` up its chain is the standard one
+  # (stable_standard_constructor_class?, the proof GENERIC_OBJECT_CONSTRUCTION builds by).
+  def core_new_exact?(klass)
+    @core_new_exact ||= {}
+    return @core_new_exact[klass] if @core_new_exact.key?(klass)
+
+    @core_new_exact[klass] = stable_standard_constructor_class?(klass) ? true : false
   end
 
   # IR callers consume only complete, unguarded facts from the settled oracles (ADR 0443).
