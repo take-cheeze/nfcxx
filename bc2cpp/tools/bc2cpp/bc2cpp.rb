@@ -69,6 +69,7 @@ require_relative 'codegen'
 require_relative 'codegen_ivar_poly'
 require_relative 'codegen_native_send'
 require_relative 'codegen_exact_receiver'
+require_relative 'codegen_outside_owner_call'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
 require_relative 'codegen_native_singleton'
@@ -109,6 +110,8 @@ require_relative 'codegen_class_narrowing'
 require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
 require_relative 'codegen_setter_pools'
+require_relative 'codegen_self_new'
+require_relative 'codegen_overloaded_construct'
 require_relative 'codegen_checked_send'
 require_relative 'lexical_consts'
 require_relative 'codegen_numeric_consts'
@@ -1735,11 +1738,13 @@ if $PROGRAM_NAME == __FILE__
        "#{kept.values.sum} kept dispatching =="
   # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
   violation_families = Hash.new(0)
-  compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|CLASS_NARROWING|COMPUTED_SEND|CORE_BODY_EXACT|CHECKED_POOL_EXACT)\)"/) { |(f)| violation_families[f] += 1 } }
+  compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|CLASS_NARROWING|COMPUTED_SEND|CORE_BODY_EXACT|CHECKED_POOL_EXACT|SELF_NEW_LEAF)\)"/) { |(f)| violation_families[f] += 1 } }
   warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
   violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
   NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
   kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
+  # OUTSIDE_OWNER_CALL (ADR 0468): by-name sends replaced by the call checked against the name's owners.
+  warn "  OWNER_CALL: #{compiled.sum { |m| m[:code].scan('/* CLOSED_WORLD owner-call: ').size }}"
   warn ''
   # NIL_RECEIVER (ADR 0296): nil arms of receivers proven nil-or-one-class.
   nil_sites = NomethodReviewed.nil_receiver_sites(compiled)
