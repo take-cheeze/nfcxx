@@ -43,9 +43,9 @@ indirect enum Ty: Equatable {
     case .bool: return "Bool"
     case .void: return "Void"
     case .nilLiteral: return "Nil"
-    case .structure(let name): return "S_" + name
-    case .cls(let name): return "C_" + name
-    case .enumeration(let info): return "E_" + info.name
+    case .structure(let name): return "S_" + cIdent(name)
+    case .cls(let name): return "C_" + cIdent(name)
+    case .enumeration(let info): return "E_" + cIdent(info.name)
     case .optional(let inner): return "O_" + inner.mangled
     case .function(let params, let ret):
       return "F_" + params.map { $0.mangled }.joined(separator: "_") + "_R_" + ret.mangled
@@ -59,9 +59,9 @@ indirect enum Ty: Equatable {
     case .int: return "int64_t"
     case .bool: return "bool"
     case .void, .nilLiteral: return "void"
-    case .structure(let name): return "s_" + name
-    case .cls(let name): return "s_" + name + " *"
-    case .enumeration(let info): return "s_" + info.name
+    case .structure(let name): return "s_" + cIdent(name)
+    case .cls(let name): return "s_" + cIdent(name) + " *"
+    case .enumeration(let info): return "s_" + cIdent(info.name)
     case .optional(let inner): return "opt_" + inner.mangled
     case .function: return "fn_" + mangled
     }
@@ -230,4 +230,26 @@ struct Program {
   let optionals: [Ty]
   /// Every function type that appears in the program, so CEmit can typedef it.
   let functionTypes: [Ty]
+}
+
+/// C spelling of a type or function name. Identifier characters are kept, so the
+/// names of ordinary declarations do not change. Other characters, as in an
+/// instance such as `Box<Int>`, become escapes that keep distinct names apart.
+func cIdent(_ name: String) -> String {
+  var out = ""
+  for ch in name {
+    switch ch {
+    case "<": out += "_L_"
+    case ">": out += "_G_"
+    case ",": out += "_C_"
+    case "?": out += "_Q_"
+    case "(": out += "_P_"
+    case ")": out += "_R_"
+    case "-": out += "_M_"
+    case " ": break
+    case "_", "a"..."z", "A"..."Z", "0"..."9": out.append(ch)
+    default: out += "_u\(ch.unicodeScalars.first!.value)_"
+    }
+  }
+  return out
 }
