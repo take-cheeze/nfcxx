@@ -5,6 +5,7 @@ require_relative 'foreign_definers'
 require_relative 'frozen_tables'
 require_relative 'integer_constants'
 require_relative 'native_expression_devirt'
+require_relative 'core_hierarchy_sigs'
 
 # CodeGen: FROZEN_TABLES (docs/adr/0306). Feeds FrozenTables' kinds into the NumericFlow fixpoint:
 # `LITERAL.freeze` gets the kind of its literal, `table[i]` / `first` / `last` / `sample` / `size`
@@ -17,7 +18,11 @@ require_relative 'native_expression_devirt'
 #     (frozen_table_name_refusal).
 # The literal's slots are read from the bytecode through reaching definitions, never from the flow.
 class CodeGen
-  FROZEN_TABLE_ANCESTORS = %w[Enumerable Object Kernel BasicObject Basic_object].freeze
+  # What an Array (and a Hash: the same chain) inherits, with the ROM scan's spellings (core_hierarchy.rbs).
+  FROZEN_TABLE_ANCESTORS = CoreHierarchySigs.with_scan_spellings(CoreHierarchySigs.ancestors('Array').drop(1))
+  unless CoreHierarchySigs.ancestors('Hash').drop(1) == CoreHierarchySigs.ancestors('Array').drop(1)
+    raise 'bc2cpp: FROZEN_TABLE_ANCESTORS: Array and Hash no longer share their ancestors (sig/native/core_hierarchy.rbs)'
+  end
   FROZEN_TABLE_CORE_PATH = %r{/3rd/mruby/(?:src|mrbgems)/}
   FROZEN_TABLE_NAMES = %w[freeze [] first last sample size length].freeze
 

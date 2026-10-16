@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'annotations'
+require_relative 'core_fact_sigs'
 
 # RBS_SIGNATURES (docs/adr/0413): RBS files as a source of the same hints the `# bc2cpp:` comments give.
 #
@@ -52,8 +53,11 @@ module RbsSignatures
     File.directory?(default) ? [default] : []
   end
 
+  # The fact tables under sig/native (CoreFactSigs::FILES) are read by their own loaders and are not program
+  # signatures: some name methods with mrblib bodies (Kernel#to_enum, Proc#yield), which a signature would hint.
   def files_in(dirs)
-    dirs.flat_map { |d| File.file?(d) ? [d] : Dir[File.join(d, '**/*.rbs')] }.sort
+    facts = CoreFactSigs::FILES.to_set
+    dirs.flat_map { |d| File.file?(d) ? [d] : Dir[File.join(d, '**/*.rbs')] }.reject { |f| facts.include?(File.expand_path(f)) }.sort
   end
 
   # nil when there is nothing to load (the byte-identical path).

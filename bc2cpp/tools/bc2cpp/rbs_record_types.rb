@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'record_hash'
 require_relative 'rbs_signatures'
+require_relative 'core_hierarchy_sigs'
 
 # RBS_RECORD_TYPES (docs/adr/0454): an RBS record type on an ivar (`@ui: { battle: Game::Battle, ?win: Window }`)
 # is a CHECKED declaration that feeds the facts RECORD_HASH_PROOF (ADR 0285) produces.
@@ -33,7 +34,8 @@ module RbsRecordTypes
   Result = Struct.new(:verified, :diagnostics, :hints, :readers, keyword_init: true)
   # Hash methods that mutate nothing and hand out no reference to the Hash: a call is a read.
   READ_SENDS = %w[key? has_key? include? member? size length empty? fetch dig].freeze
-  HASH_OWNERS = %w[Hash Object Kernel BasicObject Enumerable].freeze
+  # Hash's lookup chain (core_hierarchy.rbs); only membership is read.
+  HASH_OWNERS = CoreHierarchySigs.ancestors('Hash')
   BASE_CLASSES = %w[Integer Float String Symbol Array Hash NilClass TrueClass FalseClass Range Proc].freeze
 
   class << self

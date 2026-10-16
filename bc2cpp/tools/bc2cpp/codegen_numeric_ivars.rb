@@ -2,6 +2,7 @@
 
 require_relative 'native_ivar_scopes'
 require_relative 'numeric_flow'
+require_relative 'core_hierarchy_sigs'
 
 # CodeGen: NUMERIC_IVAR_PROOF (ADR 0276).
 #
@@ -45,7 +46,8 @@ class CodeGen
   # Sends whose block runs with another object as `self`.
   NUMERIC_SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec
                               define_method define_singleton_method eval].freeze
-  NUMERIC_IVAR_UNIVERSAL_OWNERS = %w[Object Kernel BasicObject Module Class].freeze
+  # Owners every object, class objects included, inherits from: Class's ancestors (core_hierarchy.rbs).
+  NUMERIC_IVAR_UNIVERSAL_OWNERS = CoreHierarchySigs.ancestors('Class')
 
   def setup_numeric_ivar_groups
     @numeric_ivar_groups = {}
