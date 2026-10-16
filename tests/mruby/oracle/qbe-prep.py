@@ -74,7 +74,7 @@ TOKEN_RE = re.compile(r'''
 | (?P<str>(?:u8|[LuU])?"(?:[^"\\\n]|\\.)*")
 | (?P<chr>(?:[LuU])?'(?:[^'\\\n]|\\.)*')
 | (?P<num>\.?\d(?:[eEpP][+-]|[\w.])*)
-| (?P<id>[A-Za-z_$]\w*)
+| (?P<id>[A-Za-z_$][\w$]*)
 | (?P<punct>.)
 ''', re.S | re.X)
 
