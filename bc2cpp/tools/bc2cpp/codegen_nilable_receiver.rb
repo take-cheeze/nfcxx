@@ -41,7 +41,9 @@ module NilableReceiverSend
 
   # By-name dispatches in a piece of generated C++.
   def dispatch_count(code)
-    code.scan(/\bmrb_funcall(?:_id|_with_block|_argv)?\(M,|\bbc2cpp_send\(M,|\bbc2cpp_funcall_argv\(/).size
+    # OUTSIDE_OWNER_CALL (ADR 0468): the owner call still looks the method up at run time, so a variant that removes it
+    # is preferred exactly as one that removes a by-name send.
+    code.scan(/\bmrb_funcall(?:_id|_with_block|_argv)?\(M,|\bbc2cpp_send\(M,|\bbc2cpp_funcall_argv\(|\bbc2cpp_owner_call(?:_named)?\(M,/).size
   end
 
   # The nil-or-K proof of this send's receiver: { key:, klass:, name:, argv: }, else nil.
