@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'fixpoint'
 require_relative 'record_hash'
 require_relative 'ivar_poison_causes'
 require_relative 'native_core_result_sigs'
@@ -149,7 +150,7 @@ class ClassLayout
     label_name = {}
     registry.each_value { |defs| defs.each { |d| label_name[d.irep] = d.name if d.irep } } if store_log
 
-    10.times do
+    Fixpoint.iterate('ClassLayout.analyze', Fixpoint::SWEEP_LIMIT) do
       changed = false
       methods_of.each do |owner, irep_labels|
         irep_labels.each do |label|
@@ -223,7 +224,7 @@ class ClassLayout
           end
         end
       end
-      break unless changed
+      changed
     end
 
     classes

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'fixpoint'
 require_relative 'numeric_flow'
 
 # CodeGen: NUMERIC_OPERAND_PROOF (ADR 0276).
@@ -155,13 +156,13 @@ class CodeGen
     # none of the numeric pools, so it is final before the first numeric pass.
     compute_return_classes
     reset_numeric_flow!
-    loop do
+    Fixpoint.iterate('CodeGen numeric facts (entry args, ivar groups, returns, tuples, constants)', Fixpoint::GROWTH_LIMIT) do
       changed = grow_entry_arg_numeric
       changed |= grow_numeric_ivar_groups
       changed |= grow_numeric_returns
       changed |= grow_tuple_returns
       changed |= grow_numeric_consts
-      break unless changed
+      changed
     end
   end
 

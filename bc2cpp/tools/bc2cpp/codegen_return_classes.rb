@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'fixpoint'
 require_relative 'numeric_flow'
 require_relative 'ir_argument_types'
 require_relative 'ir_call_graph_types'
@@ -186,11 +187,11 @@ class CodeGen
     end
     @rc_checked_alias_names = checked_alias_name_candidates
     @rc_admitted_alias_names = Set.new
-    loop do
+    Fixpoint.iterate('CodeGen return classes and class pools', Fixpoint::GROWTH_LIMIT) do
       changed = grow_return_classes
       changed |= grow_class_pools
       changed |= admit_checked_alias_names
-      break unless changed
+      changed
     end
     # Receiver-specific summaries read the settled name-wide and class-pool facts.
     @rc_scoped_ready = true

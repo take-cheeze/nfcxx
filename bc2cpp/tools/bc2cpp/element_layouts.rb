@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'fixpoint'
+
 # Step 6g-bis: element classes of Array and Hash ivars.
 
 # ---------------------------------------------------------------------------
@@ -614,7 +616,7 @@ class ArrayElementLayout
 
     elements = Hash.new { |h, k| h[k] = {} }
 
-    10.times do
+    Fixpoint.iterate('ArrayElementLayout.analyze', Fixpoint::SWEEP_LIMIT) do
       changed = false
       methods_of.each do |owner, labels|
         array_ivars = (class_layout[owner] || {}).select { |_, c| c == 'Array' }.keys
@@ -713,7 +715,7 @@ class ArrayElementLayout
           end
         end
       end
-      break unless changed
+      changed
     end
 
     elements
@@ -849,7 +851,7 @@ class HashElementLayout
 
     hash_elements = Hash.new { |h, k| h[k] = {} }
 
-    10.times do
+    Fixpoint.iterate('HashElementLayout.analyze', Fixpoint::SWEEP_LIMIT) do
       changed = false
       methods_of.each do |owner, labels|
         hash_ivars = (class_layout[owner] || {}).select { |_, c| c == 'Hash' }.keys
@@ -938,7 +940,7 @@ class HashElementLayout
           end
         end
       end
-      break unless changed
+      changed
     end
 
     hash_elements
