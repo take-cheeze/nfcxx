@@ -28,7 +28,7 @@ module BlockCoreDirectFallback
     'Range' => { guard: 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class', chain: %w[Range Enumerable] },
     'Integer' => { guard: 'mrb_integer_p(%<r>s)', chain: %w[Integer Numeric Comparable] }
   }.freeze
-  # BLOCK_ITERATOR_DIRECT (docs/adr/0470): the receivers a literal-block send gets arms for. String is a block
+  # BLOCK_ITERATOR_DIRECT (docs/adr/0472): the receivers a literal-block send gets arms for. String is a block
   # receiver only (each_char, each_line, each_byte, ...): RECEIVERS also feeds the block-less exact-receiver and
   # result proofs, which this ADR leaves as they are.
   BLOCK_RECEIVERS = RECEIVERS.merge(
@@ -72,7 +72,7 @@ module BlockCoreDirectFallback
     # else stays: a Fiber's frames need a real callinfo to reach the bytecode (ADR 0269).
     site = exact_core_site_for(recv, name)
     exact = site ? arms.select { |arm| arm[:class] == site[:klass] } : []
-    # BLOCK_ITERATOR_DIRECT (ADR 0470): an Integer literal receiver (`3.times { }`) is an Integer in every world.
+    # BLOCK_ITERATOR_DIRECT (ADR 0472): an Integer literal receiver (`3.times { }`) is an Integer in every world.
     literal = exact.empty? && arms.any? { |arm| arm[:class] == 'Integer' } && block_core_integer_literal?
     exact = arms.select { |arm| arm[:class] == 'Integer' } if literal
     exact_class = !exact.empty?
@@ -110,7 +110,7 @@ module BlockCoreDirectFallback
       "  }\n"
   end
 
-  # BLOCK_ITERATOR_DIRECT (ADR 0470): is the receiver of the literal-block send being compiled an Integer literal?
+  # BLOCK_ITERATOR_DIRECT (ADR 0472): is the receiver of the literal-block send being compiled an Integer literal?
   # Every dominating writer of its register, through MOVEs, is a LOADI* of the send's own irep (the parent irep of
   # a block nested in an inlined loop body, whose registers the walk reads unshifted).
   def block_core_integer_literal?
@@ -130,7 +130,7 @@ module BlockCoreDirectFallback
     found == :integer
   end
 
-  # BLOCK_ITERATOR_DIRECT (ADR 0470): an implicit-self literal-block send (`loop { }`) whose only definition in the
+  # BLOCK_ITERATOR_DIRECT (ADR 0472): an implicit-self literal-block send (`loop { }`) whose only definition in the
   # program is mruby's own Kernel body calls that compiled body. The proof is the whole world's, not the receiver's:
   # no Ruby, native or outside definition of the name anywhere and no installer (so no class answers it before
   # Kernel), and no BasicObject subclass (so every self includes Kernel). A yield-free block over a relaxable body

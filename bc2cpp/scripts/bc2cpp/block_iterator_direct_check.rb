@@ -2,7 +2,7 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-# BLOCK_ITERATOR_DIRECT (docs/adr/0470): literal-block iterator sends call the compiled block-taking body directly.
+# BLOCK_ITERATOR_DIRECT (docs/adr/0472): literal-block iterator sends call the compiled block-taking body directly.
 #
 #   generated code (needs a host mrbc; one closed-world generation per world variant, seconds)
 #     - an implicit-self `loop { }` calls Kernel#loop's compiled body, behind the root-context test unless the block
@@ -56,6 +56,8 @@ SRC = <<~'RUBY'
     def eidx(a); r = []; a.each_index { |i| r << i }; r; end
     def tm(n); r = 0; n.times { |i| r += i }; r; end
     def tm_literal(k); r = []; 3.times { |i| r << i * k }; r; end
+    def tm_first(n); n.times { |i| break [:first, i] }; end
+    def tm_count(n); c = 0; n.times { c += 1 }; [c, n.times { }]; end
     def tm_nested(n); r = []; n.times { |i| 2.times { |j| r << i * 10 + j } }; r; end
     def tm_nested_break(n); r = []; n.times { |i| r << 2.times { |j| break [:inner, i, j] if j == 1 } }; r; end
     def h_each(h); r = []; h.each { |k, v| r << "#{k}=#{v}" }; r; end
@@ -73,6 +75,10 @@ SRC = <<~'RUBY'
     def lp_raise(n); i = 0; loop { i += 1; raise ArgumentError, "at #{i}" if i == n }; rescue ArgumentError => e; e.message; end
     def user_each(o); r = []; o.each { |x| r << x }; r; end
     def nil_each(o); o.each { |x| x }; rescue NoMethodError => e; e.class; end
+  end
+
+  class BiTimes
+    def times; yield 7; :mine; end
   end
 
   class BiColl
@@ -119,9 +125,18 @@ check.call('chars: an unproven each_char receiver gets an exact-String arm with 
            chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n\s+r\d+ = mrb_funcall_with_block\(/m))
 check.call('str_lines: each_line gets the String arm', code_of(code, 'str_lines').include?('String_each_line_impl(M, '))
 nested = code_with_blocks(code, 'tm_nested')
+# The only dynamic send left is the outer `n.times`'s own else (its receiver is unproven); the inner `2.times` keeps
+# none, in the inlined loop and in the block function the outer else passes.
 check.call('tm_nested: the Integer literal receiver of the inner times keeps no dynamic else',
-           nested.include?('literal Integer receiver') && nested.include?('Integer_times_impl(M, ') && !nested.include?(DYNAMIC))
-check.call('tm: an unproven Integer is still the inlined loop of ADR 0147', !code_of(code, 'tm').include?(DYNAMIC))
+           nested.include?('literal Integer receiver') && nested.include?('Integer_times_impl(M, ') &&
+           nested.scan(DYNAMIC).size == 1 && code_of(code, 'tm_nested').scan(DYNAMIC).size == 1)
+tm = code_of(code, 'tm')
+check.call('tm: an unproven receiver runs the inlined loop behind a Fixnum test, the send with its Integer arm as the else',
+           tm.match?(/GUARDED_BLOCK_INLINE :times .*\n\s+if \(M->c == M->root_c && mrb_integer_p\(r\d+\)\) \{\n/) &&
+           tm.include?('Integer_times_impl(M, ') && tm.include?(DYNAMIC))
+check.call('tm_literal: an Integer literal receiver is the plain loop of ADR 0147',
+           code_of(code, 'tm_literal').include?('bc2cpp_times_i_') && !code_of(code, 'tm_literal').include?('GUARDED_BLOCK_INLINE') &&
+           !code_of(code, 'tm_literal').include?(DYNAMIC))
 user = code_of(code, 'user_each')
 check.call('user_each: an unproven receiver keeps the exact-class arms and the dynamic send as the else',
            user.include?('Array_each_impl(M, ') && user.include?(DYNAMIC))
@@ -170,6 +185,15 @@ DRIVER = <<~'RUBY'
     show.call("tm_nested_break/#{n}") { fx.tm_nested_break(n) }
   end
   show.call('tm_literal') { fx.tm_literal(5) }
+  # Not a Fixnum: a bignum runs Integer#times, anything without `times` raises NoMethodError, a user `times` runs.
+  # A positive bignum would count for ever, so it only runs to the first iteration's break.
+  show.call('tm_first/big') { fx.tm_first(2**70) }
+  [-(2**70), 2.5, nil, 'x', :s, BiTimes.new].each_with_index do |n, i|
+    show.call("tm_first/x#{i}") { fx.tm_first(n) }
+    show.call("tm_count/x#{i}") { fx.tm_count(n) }
+    show.call("tm/x#{i}") { fx.tm(n) }
+  end
+  [0, 3, -1].each { |n| show.call("tm_count/#{n}") { fx.tm_count(n) } }
   [{ a: 1, b: 2, c: 3 }, {}, { 'x' => 0 }].each_with_index do |h, i|
     show.call("h_each/#{i}") { fx.h_each(h) }
     show.call("h_keys/#{i}") { fx.h_keys(h) }

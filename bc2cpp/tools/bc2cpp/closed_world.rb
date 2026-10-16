@@ -398,7 +398,7 @@ class ClosedWorld
     ownerless_native_dispatch_safe?(name) && basic_object_subclass_free?
   end
 
-  # BLOCK_ITERATOR_DIRECT (ADR 0470): an implicit-self send of `name` reaches mruby's own Kernel Ruby body (defined
+  # BLOCK_ITERATOR_DIRECT (ADR 0472): an implicit-self send of `name` reaches mruby's own Kernel Ruby body (defined
   # in `kernel_file`) for every receiver: no computed definer can install the name, the only outside Ruby source that
   # spells a definition of it (by name, wherever it sits) is `kernel_file`, which defines it on Kernel alone and
   # reopens nothing dynamically, and every receiver includes Kernel. Native registrations and the program's own
