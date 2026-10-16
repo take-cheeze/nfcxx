@@ -72,9 +72,7 @@ if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/
 if [ $cl_ok = 1 ]; then
   clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
   clprobe=1
-  # double is left out: on the Arc B60 its 300-item kernel does not finish (the device stays busy past the timeout; see
-  # docs/notes/sycl-vulkan.md), so it is not a usable check on this device yet
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom copysign slices; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices; do
     if ! clbuild $t; then echo "opencl    $t: FAIL (build)"; grep -v prelinker "$out/cl_$t.log" | head -3; fail=1; continue; fi
     "$out/cl_$t" > "$out/cl_$t.out" 2> "$out/cl_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "OpenCL runtime" "$out/cl_$t.err"; then clprobe=0; break; fi
