@@ -376,9 +376,17 @@ module RbsParamCheck
     case insn.op
     when 'LOADSELF'
       owner = ctx[:self_of][irep.label]
+      unless owner
+        # BLOCK_SELF (codegen_block_self.rb): a block only ever called keeps its method's self.
+        gen = ctx[:constructor_entries]
+        d, why = gen ? gen.block_self_owner(irep.label) : [nil, 'no closed world']
+        return "self (in a block: #{why})" unless d
+
+        owner = d.owner
+      end
       return nil if owner == cls && !ctx[:subclassed].include?(cls)
 
-      "self (#{owner || 'in a block'})"
+      "self (#{owner})"
     when 'GETIV'
       ivar_why(ctx, irep, insn.ivar, cls, depth)
     when 'GETUPVAR'
@@ -386,6 +394,9 @@ module RbsParamCheck
     when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
       name = insn.sym
       return new_why(ctx, irep, definition.index, cls) if name == 'new' && insn.op.start_with?('SEND')
+
+      body = ctx[:constructor_entries]&.profiler_result_body(irep, definition.index, insn)
+      return block_value_why(ctx, body, name, cls, depth) if body
 
       returns_why(ctx, name, cls, depth)
     else
@@ -451,6 +462,19 @@ module RbsParamCheck
     end
 
     entry_why(ctx, frame, reg, cls)
+  end
+
+  # `RGSS::Profiler.section(...) { ... }` returns its block's value (PROFILER_RESULTS: profiler_result_body pins the
+  # native and the literal block, whose exits are plain returns): every RETURN of the block must be proven `cls`.
+  def block_value_why(ctx, body, name, cls, depth)
+    body.instructions.each_with_index do |insn, idx|
+      next unless insn.op.start_with?('RET') || %w[BREAK STOP].include?(insn.op)
+      return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless insn.op == 'RETURN'
+
+      why = trace(ctx, body, idx, insn.reg, cls, depth + 1)
+      return "the block of #{name} returns (#{why})" if why
+    end
+    nil
   end
 
   # `Klass.new(...)` of exactly `cls`, whose `new` nothing in the program overrides.

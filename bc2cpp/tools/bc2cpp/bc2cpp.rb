@@ -102,6 +102,7 @@ require_relative 'codegen_core_ruby_results'
 require_relative 'codegen_return_accessors'
 require_relative 'codegen_exact_core_arms'
 require_relative 'codegen_captured_locals'
+require_relative 'codegen_block_self'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_class_narrowing'
@@ -210,6 +211,9 @@ if $PROGRAM_NAME == __FILE__
   # ESCAPE_ANALYSIS (ADR 0316): callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
+  # BLOCK_SELF (ADR 0456): every bytecode definition of a name, the interpreted core ones the filtering below drops
+  # included, since a block handed to one of them runs under whatever self that body chooses.
+  CodeGen.block_self_bodies = registry.transform_values { |defs| defs.select(&:irep) }
   # CORE_DEFS (ADR 0264): a core-source definition a later one replaces is not the
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
@@ -455,6 +459,30 @@ if $PROGRAM_NAME == __FILE__
   # sections by header text, not position.
   foreign_ruby_srcs = Shellwords.split(ENV['FOREIGN_RUBY_SRCS'])
   foreign_methods = profile_call.call('foreign_method_names') { foreign_method_names(foreign_ruby_srcs) }
+  # BLOCK_SELF: names an outside Ruby source this build does not compile may define (a body it cannot read).
+  compiled_files = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
+  CodeGen.block_self_unread_names =
+    foreign_method_names(foreign_ruby_srcs.reject { |path| compiled_files.include?(File.expand_path(path)) })
+  # UNIQUE_CLASS_NAME: set before RBS_CHECKED_PARAMS and the first ClassLayout pass, since every
+  # trace_new_target caller reads it (and ClosedWorld#stable_constant_identity?, which PROFILER_RESULTS needs).
+  UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
+    UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
+  end
+  UniqueClassNames.object_mixins = Array(included_modules['Object'])
+  warn '== bare class names with one definition (UNIQUE_CLASS_NAME) =='
+  UniqueClassNames.table.sort.each { |name, full| warn "  UNIQUE_CLASS  #{name}  (#{full})" }
+
+  # LEXICAL_CONSTRUCT_RESOLUTION: the class/module names the closed world
+  # DEFINES, so `lexically_resolve_construct_target` can resolve a bare
+  # `Window.new` inside `class RPG2k` to RPG2k::Window (a fact about the
+  # program) without that resolving to an admission (which stays with
+  # compile_send's four live gates). Set next to UniqueClassNames because both
+  # read the same CLASS/MODULE walk and must agree on what the bytecode defines.
+  ConstructClassNames.table = profile_call.call('ConstructClassNames.analyze') do
+    ConstructClassNames.analyze(ireps, root_label, UniqueClassNames.table.values)
+  end
+  warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
+
   # RBS_CHECKED_PARAMS (docs/adr/0456): a class parameter type is kept only when every caller is proven to pass it.
   if sig_applied
     param_outside = RbsParamCheck.outside_call_names(native_paths, foreign_ruby_srcs, ireps.values.to_set(&:file))
@@ -475,26 +503,6 @@ if $PROGRAM_NAME == __FILE__
       abort "\n[bc2cpp] RBS_CHECKED_PARAMS: #{param_diags.size} unproven parameter type(s) (see above)."
     end
   end
-
-  # UNIQUE_CLASS_NAME: set before the first ClassLayout pass, since every
-  # trace_new_target caller reads it.
-  UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
-    UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
-  end
-  UniqueClassNames.object_mixins = Array(included_modules['Object'])
-  warn '== bare class names with one definition (UNIQUE_CLASS_NAME) =='
-  UniqueClassNames.table.sort.each { |name, full| warn "  UNIQUE_CLASS  #{name}  (#{full})" }
-
-  # LEXICAL_CONSTRUCT_RESOLUTION: the class/module names the closed world
-  # DEFINES, so `lexically_resolve_construct_target` can resolve a bare
-  # `Window.new` inside `class RPG2k` to RPG2k::Window (a fact about the
-  # program) without that resolving to an admission (which stays with
-  # compile_send's four live gates). Set next to UniqueClassNames because both
-  # read the same CLASS/MODULE walk and must agree on what the bytecode defines.
-  ConstructClassNames.table = profile_call.call('ConstructClassNames.analyze') do
-    ConstructClassNames.analyze(ireps, root_label, UniqueClassNames.table.values)
-  end
-  warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
 
   # CLOSED_WORLD_VALUE_CONSTANT: a single class-constructor assignment is a
   # guarded receiver hint, not an unconditional claim about the constant value.
