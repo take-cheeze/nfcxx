@@ -1,26 +1,15 @@
 // The real ggml-sycl fill.cpp (ggml/src/ggml-sycl/fill.cpp, unchanged), compiled as this program's own TU through the
 // nfcxx SYCL flow. The include resolves through -I: the ggml-sycl source dir (run.sh puts a mutant copy's dir first).
-// The ggml helpers come from libggml-base. The three symbols of ggml-sycl's common.cpp that fill.cpp reaches (the
-// debug flag, the device id and the device info) are defined here: the rest of the backend is not linked.
+// The ggml helpers and the backend's ggml_sycl_info() / get_current_device_id() / g_ggml_sycl_debug come from
+// libggml-sycl.so (linked with -lggml-sycl).
 //
-// SHIMS (temporary, BLOCKED): the three definitions below stand in for libggml-sycl.so. Linking that library
-// builds, but ggml_sycl_info() segfaults on the B60 inside libggml-sycl's dpct::get_device_info (sycl::device::
-// get_info<name>), and llama.cpp's own SYCL build reports "No device of requested type available" here. Remove
-// these once the real ggml_sycl_info() runs; the link line is then -lggml-sycl.
+// The link must hide this TU's own definitions of the dpct helpers (run.sh passes a version script that makes every
+// symbol of the executable local). The TU is built with the compat headers (lib/sycl, the nfcxx SYCL subset), so its
+// copies of dpct::dev_mgr, dpct::device_ext and their std:: instantiations differ in layout from libggml-sycl's; left
+// exported, they interpose the library's copies at run time and ggml_sycl_info() crashes in dpct::get_device_info.
 #include "fill.cpp"
 #include <cstdio>
 #include <cstring>
-
-// SHIM (temporary, see above)
-int g_ggml_sycl_debug = 0;
-// SHIM (temporary, see above)
-int get_current_device_id() { return 0; }
-// SHIM (temporary, see above)
-const ggml_sycl_device_info & ggml_sycl_info() {
-    static ggml_sycl_device_info info;
-    info.device_count = 1;
-    return info;
-}
 
 int main() {
     sycl::queue q{sycl::gpu_selector_v};
