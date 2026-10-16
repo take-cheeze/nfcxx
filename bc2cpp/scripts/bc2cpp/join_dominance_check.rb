@@ -204,6 +204,22 @@ check.call('a join with an untested path drops the fact (negative)', !non_nil.ca
 clobbered = [insn(0, 'SEND0', "R4\t:f"), insn(3, 'JMPNOT', "R4\t12"), insn(7, 'SEND0', "R3\t:g"),
              insn(10, 'RETURN', 'R4'), insn(12, 'RETNIL', '')]
 check.call('a callee frame below the register clobbers it (negative)', !non_nil.call(clobbered, 3, '4'))
+# v = f; c = (v.placed? && v.map_id == x) ? g(v) : nil; h(v)  -- mrbc's code for Scene::Map#draw_vehicles: the
+# receiver of each call and each argument are separate MOVE copies of the local R4, the `&&` jumps straight to the
+# ternary's test, and the test's JMPNOT then splits into the call and the LOADNIL.
+ternary = [insn(0, 'SEND0', "R6\t:f"), insn(3, 'MOVE', "R4\tR6"), insn(6, 'MOVE', "R6\tR4"),
+           insn(9, 'SEND0', "R6\t:placed?"), insn(12, 'JMPNOT', "R6\t30"), insn(16, 'MOVE', "R6\tR4"),
+           insn(19, 'SEND0', "R6\t:map_id"), insn(22, 'GETIV', "R7\t@x"), insn(25, 'SEND0', "R7\t:map_id"),
+           insn(28, 'EQ', "R6\t(R7)"), insn(30, 'JMPNOT', "R6\t44"), insn(34, 'MOVE', "R7\tR4"),
+           insn(37, 'SSEND', "R6\t:g\tn=1"), insn(41, 'JMP', '46'), insn(44, 'LOADNIL', "R6\t(nil)"),
+           insn(46, 'MOVE', "R5\tR6"), insn(49, 'MOVE', "R8\tR4"), insn(52, 'SSEND', "R7\t:h\tn=1"),
+           insn(56, 'RETURN', 'R7')]
+check.call('`(v.m? && x) ? g(v) : nil`: the argument copy of v is non-nil at g', non_nil.call(ternary, 12, '7'))
+check.call('`(v.m? && x) ? g(v) : nil`: v stays non-nil past the `&&` and ternary joins', non_nil.call(ternary, 15, '4'))
+check.call('`(v.m? && x) ? g(v) : nil`: a later argument copy of v is non-nil at h', non_nil.call(ternary, 17, '8'))
+check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_nil.call(ternary, 3, '4'))
+check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
+           !NilNarrowing.non_nil?(irep_of(ternary), 12, '7', ->(_name) { false }))
 
 if ENV['MRBC']
   require_relative 'fixture_runtime'
