@@ -66,7 +66,7 @@ env = {
   'NATIVE_SRCS' => Shellwords.join(native_srcs),
   'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
 }
-cmd = [RbConfig.ruby, BC2CPP, *srcs].shelljoin
+cmd = [RbConfig.ruby, BC2CPP, '--annotated', *srcs].shelljoin
 Dir.mktmpdir do |dir|
   env['OUT_DIR'] = dir
   @stdout, @stderr, status = Open3.capture3(env, cmd)

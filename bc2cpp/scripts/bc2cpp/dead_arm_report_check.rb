@@ -75,7 +75,7 @@ generate = lambda do |dir, extra_env = {}|
           'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio',
           'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).map { |n, d| "#{n}=#{d}" }),
           NomethodReviewed::ALLOW_ENV => 'allow' }.merge(extra_env)
-  out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'),
+  out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated',
                                     *core_compiled_mrblib_srcs(ROOT), path)
   abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
 

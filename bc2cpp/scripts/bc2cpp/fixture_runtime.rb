@@ -150,7 +150,9 @@ module Bc2cppFixtureRuntime
 
   # One bc2cpp.rb run over `argv` with `env`: a subprocess, or with BC2CPP_WARM_GENERATOR=1 a fork of a warm server
   # that has the tool loaded and its scans warmed (ADR 0416). Both return [stdout, stderr, status].
+  # Fixture checks read the generated C++'s proof comments, so every run asks for them (--annotated, ADR 0463).
   def generator_run(env, argv)
+    argv = ['--annotated', *argv]
     return Open3.capture3(env, RbConfig.ruby, BC2CPP, *argv) unless WarmGenerator.enabled?
 
     WarmGenerator.client(tool: BC2CPP, native: closed_world_native_srcs, foreign: foreign_mrblib_srcs(ROOT))

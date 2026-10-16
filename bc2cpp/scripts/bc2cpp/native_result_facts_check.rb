@@ -262,7 +262,7 @@ if ENV['MRBC']
               'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio',
               'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }),
               NomethodReviewed::ALLOW_ENV => 'allow' }
-      out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), path)
+      out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
       abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
       out
     end

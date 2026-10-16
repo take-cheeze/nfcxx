@@ -187,7 +187,7 @@ generate = lambda do |list_keys, only: nil, other: nil|
       env['BC2CPP_HOT_METHODS'] = File.join(dir, 'hot.txt')
       File.write(env['BC2CPP_HOT_METHODS'], list_keys.join("\n") + "\n")
     end
-    out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), path)
+    out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
     abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
     [out, err, File.read(File.join(dir, 'hot_world_decls.h'))]
   end

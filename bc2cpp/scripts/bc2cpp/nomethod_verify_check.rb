@@ -50,7 +50,7 @@ Dir.mktmpdir do |dir|
   env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'vf', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
           'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env,
           NomethodReviewed::ALLOW_ENV => 'allow' }
-  out, _err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), path)
+  out, _err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
   check.call('the fixture generates and its dead fallback is a bc2cpp_nomethod site',
              status.success? && out.match?(/bc2cpp_nomethod\(M, r\d+, \d+\); \/\* CLOSED_WORLD nomethod: recv\.vf_speak \*\//))
   check.call('the emitted helper carries the verify switch, off unless defined',

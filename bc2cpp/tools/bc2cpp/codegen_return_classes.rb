@@ -197,6 +197,9 @@ class CodeGen
     @rc_scoped_states = {}
     @rc_scoped_writes = {}
     @rc_scoped_active_labels = Set.new
+    # Every answer cut short by a query already on the stack (a recursive cycle) bumps this. A scoped answer that
+    # saw no cut while it was computed is a function of the settled tables alone, so its negative is kept too.
+    @rc_scoped_cuts = 0
     # The numeric flow and the Fixnum proof ask for a register's class set; mid-fixpoint that would
     # recurse into the flow still being built (NATIVE_RESULT_FACTS, ADR 0302).
     @native_results_ready = true
@@ -321,7 +324,10 @@ class CodeGen
   def return_class_scoped_states(irep)
     return nil unless @rc_scoped_ready
     return @rc_scoped_states[irep.label] if @rc_scoped_states.key?(irep.label)
-    return nil if @rc_scoped_active_labels.include?(irep.label)
+    if @rc_scoped_active_labels.include?(irep.label)
+      @rc_scoped_cuts += 1
+      return nil
+    end
 
     writes = {}
     @rc_scoped_writes[irep.label] = writes
@@ -605,18 +611,29 @@ class CodeGen
     contextual = arguments && ENV['BC2CPP_CALL_CONTEXT_RESULTS'] != '0'
     key = [receiver_class, name, contextual ? arguments : nil]
     return @rc_scoped_return_cache[key] if @rc_scoped_return_cache.key?(key)
-    return nil if @rc_scoped_return_active.include?(key)
+    if @rc_scoped_return_active.include?(key)
+      @rc_scoped_cuts += 1
+      return nil
+    end
 
     definition = closed_world_exact_target(name, receiver_class, accessor: argc == 0)
     return return_class_scoped_accessor_mask(definition, key) if definition && definition.irep.nil?
     return nil unless definition&.irep
-    return nil if @rc_scoped_active_labels.include?(definition.irep)
+    if @rc_scoped_active_labels.include?(definition.irep)
+      @rc_scoped_cuts += 1
+      return nil
+    end
 
     @rc_scoped_return_active << key
     acquired = true
+    cuts = @rc_scoped_cuts
     mask = contextual && return_class_context_def_mask(definition, state[insn.reg.to_i], arguments)
     mask ||= return_class_scoped_def_mask(definition)
-    return nil unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
+    unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
+      # SCOPED_NEGATIVE_MEMO: no cycle was cut while this was computed, so asking again gives the same nil.
+      @rc_scoped_return_cache[key] = nil if @rc_scoped_cuts == cuts
+      return nil
+    end
 
     klass = return_class_of_mask(mask)
     valid = klass && (contextual || !RETURN_CORE_CLASS.value?(klass))

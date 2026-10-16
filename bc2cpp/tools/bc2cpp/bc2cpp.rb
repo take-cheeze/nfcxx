@@ -160,10 +160,13 @@ require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 require_relative 'native_setter_report' if ENV['BC2CPP_NATIVE_SETTER_REPORT']
 
 if $PROGRAM_NAME == __FILE__
+  # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
+  # without it they are stripped from stdout (CompactOutput, ADR 0463), the only default.
+  annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
   # SHARED_GENERATION (ADR 0464): `--units PLAN` runs the analysis once and forks one generation per unit.
   shared_units, srcs = SharedGeneration.parse_argv(ARGV)
   if srcs.empty?
-    raise "usage: bc2cpp.rb [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
+    raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
           '(env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)'
   end
 
@@ -1233,7 +1236,7 @@ if $PROGRAM_NAME == __FILE__
     lost.map { |d| HotMethods.key(d) }.uniq.sort.each { |k| warn "  NOT_COMPILED #{k}" }
   end
 
-  CompactOutput.capture_stdout if ENV['BC2CPP_COMPACT_OUTPUT'] == '1'
+  CompactOutput.capture_stdout unless annotated
 
   # SITE_PROFILE (ADR 0298): opt-in counters on by-name dispatch; unset leaves stdout untouched.
   if (site_profile_dir = ENV['BC2CPP_SITE_PROFILE']) && !site_profile_dir.empty?

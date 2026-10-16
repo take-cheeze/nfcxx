@@ -340,7 +340,7 @@ Dir.mktmpdir do |dir|
     env = { 'MRBC' => MRBC_BIN, 'SKIP_UNSUPPORTED' => '1', 'OUT_SYMBOL' => 'rf', 'OUT_DIR' => dir,
             'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_REGISTER_FLOW' => switch,
             'BC2CPP_REGISTER_FLOW_WINDOWS' => windows }
-    out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, src)
+    out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', src)
     abort "bc2cpp.rb failed:\n#{err[-3000..]}" unless status.success?
     [out, err]
   end

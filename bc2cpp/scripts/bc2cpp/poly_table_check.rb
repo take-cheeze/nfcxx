@@ -82,7 +82,7 @@ def generate(source, dir, native: false, rgss: false)
   env = { 'MRBC' => MRBC, 'SKIP_UNSUPPORTED' => '1', 'OUT_SYMBOL' => 'fixture', 'OUT_DIR' => dir,
           'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_HOT_METHODS' => nil }
   env['NATIVE_SRCS'] = Shellwords.join(core_native_srcs("#{ROOT}/3rd/mruby") + (rgss ? Dir["#{ROOT}/mruby-rgss/src/*.cxx"] : [])) if native
-  _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} " \
+  _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} --annotated " \
                                           "#{src.shellescape} > #{gen.shellescape}")
   abort "bc2cpp.rb failed:\n#{err[-2000..] || err}" unless status.success?
   [File.read(gen), err]

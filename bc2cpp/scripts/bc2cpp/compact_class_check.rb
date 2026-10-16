@@ -75,7 +75,7 @@ def compile(root, mrbc, gems_env, source)
     File.write(path, source)
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'cc_fixture', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
             'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env }
-    out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), path)
+    out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
     [out, err, status]
   end
 end

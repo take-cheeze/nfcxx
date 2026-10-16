@@ -157,7 +157,7 @@ def section_lines(text, header)
 end
 
 def run_bc2cpp(sources, env)
-  command = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), *sources]
+  command = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *sources]
   stdout, stderr, status = Open3.capture3(env, *command)
   raise "bc2cpp failed (#{status.exitstatus}):\n#{stderr[-4000..] || stderr}" unless status.success?
 

@@ -81,7 +81,8 @@ module NeverCalledRegistrations
           'OTHER_OWNERS' => BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }.values.flat_map { |g| g[:owners] }.join(','),
         }
       end
-      results = SharedGeneration.run(tool: bc2cpp, srcs: closed_world_srcs, common_env: common, unit_envs: units)
+      results = SharedGeneration.run(tool: bc2cpp, srcs: closed_world_srcs, common_env: common, unit_envs: units,
+                                      extra_args: ['--annotated'])
       gem_names.zip(results).to_h do |gem_name, (out, err, status)|
         unless status.success?
           warn err

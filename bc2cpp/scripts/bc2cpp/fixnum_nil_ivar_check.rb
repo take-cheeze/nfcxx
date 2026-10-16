@@ -39,7 +39,7 @@ end
 
 def run_bc2cpp(env, srcs)
   out, err, status = Open3.capture3(env.merge('MRBC' => MRBC, 'SKIP_UNSUPPORTED' => '1'),
-                                     RbConfig.ruby, BC2CPP, *srcs)
+                                     RbConfig.ruby, BC2CPP, '--annotated', *srcs)
   abort "bc2cpp.rb failed:\n#{err[-2000..]}" unless status.success?
 
   [out, err]

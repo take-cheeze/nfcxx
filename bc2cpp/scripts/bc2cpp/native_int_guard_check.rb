@@ -138,7 +138,7 @@ generate = lambda do |source, name, closed|
                  'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }),
                  NomethodReviewed::ALLOW_ENV => 'allow')
     end
-    out, err, status = Open3.capture3(env, RbConfig.ruby, bc2cpp_tool, path)
+    out, err, status = Open3.capture3(env, RbConfig.ruby, bc2cpp_tool, '--annotated', path)
     abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
 
     out
