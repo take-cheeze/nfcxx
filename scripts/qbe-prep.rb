@@ -99,6 +99,9 @@ IDSTART_B = class_table do |t|
   t[95] = true
   t[36] = true  # $
 end
+# Identifier characters after the first: the word characters and `$` (cproc accepts `$` in identifiers, and mrustc's
+# mangled names use it, see scripts/mrustc-prep.rb).
+IDCONT_B = class_table { |t| (0...256).each { |b| t[b] = true if WORD_B[b] }; t[36] = true }
 
 def digit_b?(b)
   !b.nil? && b >= 48 && b <= 57
@@ -441,7 +444,7 @@ def tokenize(src)
     end
     if IDSTART_B[c]
       j = i + 1
-      j += 1 while j < n && WORD_B[src.getbyte(j)]
+      j += 1 while j < n && IDCONT_B[src.getbyte(j)]
       name = src.byteslice(i, j - i)
       sym = syms[name]
       if sym.nil?
