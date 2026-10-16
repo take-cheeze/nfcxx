@@ -104,6 +104,11 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
       # CHAINED_IVAR_RECEIVER: ClassLayout passes the class it has proven so far, so `@q = @q.reject { }` on an ivar
       # that every other store makes an Array is an Array store too (a plain trace cannot read the ivar).
       traced = receiver_class ? receiver_class.call(pin_idx, pin) : trace_new_target(irep, pin_idx, pin.reg, registry: registry)
+      # CHAINED_ARRAY_RECURSION: the receiver may itself be a fresh Array by this rule (`all.reject { }.select { }`,
+      # `annotated_array_method.select { }`), which no class trace sees. The scan starts at the chained send's own
+      # index, strictly before this one, so the recursion ends.
+      traced ||= proven_array_source_scan(irep, pin_idx, pin.reg, registry, annotated, ret_proof,
+                                          receiver_class: receiver_class)
       next 'Array' if called == 'map' || traced == 'Array'
     end
     next 'Array' if annotated&.call(called)

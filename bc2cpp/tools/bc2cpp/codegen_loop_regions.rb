@@ -250,9 +250,12 @@ class CodeGen
   # ARRAY_RETURN_PROOF: the return fixpoint is passed as the second oracle here
   # but not from ClassLayout.analyze's call (it needs @class_layout, which
   # ClassLayout is still building), so ClassLayout's facts are unaffected.
-  def proven_array_source(irep, idx, dest_reg)
+  # SELF_ACCESSOR_RECEIVER: with `owner:` (the method's owner), a chained select/reject receiver is traced with
+  # that method's facts (block_fallback_receiver_class) instead of the registry alone.
+  def proven_array_source(irep, idx, dest_reg, owner: nil)
+    receiver_class = (->(pin_idx, pin) { block_fallback_receiver_class(irep, pin_idx, pin.reg, owner) } if owner)
     proven_array_source_scan(irep, idx, dest_reg, @registry, ->(n) { annotated_array_return(n) },
-                             ->(n) { @array_return_names.include?(n) })
+                             ->(n) { @array_return_names.include?(n) }, receiver_class: receiver_class)
   end
 
   # GETIDX_STATIC_RECEIVER_SUPPORT: is this GETIDX/GETIDX0/SETIDX receiver

@@ -439,13 +439,14 @@ class CodeGen
     end
     return {} if shapes.empty?
 
-    recv_class = block_fallback_receiver_class(irep, idx, region, owner_name)
+    recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
     mand = mandatory_arity(irep)
     ivar_classes = @class_layout[owner_name] || {}
     arg_classes = @class_annotations[irep.label]&.args
     shapes.each do |(klass, name), shape|
       element = if klass == 'Array'
-                  array = recv_class == 'Array' ? recv_class : proven_array_source(irep, idx, region[:dest_reg])
+                  array = recv_class
+                  array = proven_array_source(irep, idx, region[:dest_reg], owner: owner_name) unless array == 'Array'
                   array == 'Array' &&
                     proven_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
                 elsif recv_class == 'Hash'
@@ -471,17 +472,6 @@ class CodeGen
     end
   end
 
-  # The exact receiver class of the SENDB at `idx` (trace_new_target), shared by the element and RBS hints.
-  def block_fallback_receiver_class(irep, idx, region, owner_name)
-    mand = mandatory_arity(irep)
-    ivar_classes = @class_layout[owner_name] || {}
-    arg_classes = @class_annotations[irep.label]&.args
-    trace_new_target(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes,
-                     owner: owner_name, class_layout: @class_layout, registry: @registry,
-                     container_constants: @container_constants,
-                     element_annotations: @element_annotations)
-  end
-
   # RBS_BLOCK_PARAM_HINT: the class of a block's first parameter when the method it is passed to declares
   # that block type (`def each: () { (Game::Actor) -> void } -> void` in a signature file). A plain block
   # whose required positionals match the declaration qualifies when every definition the send can reach is
@@ -505,7 +495,7 @@ class CodeGen
     definers = if region[:self_implicit]
                  rbs_block_self_definers(name, @self_class_unknown ? nil : owner_name)
                else
-                 recv_class = block_fallback_receiver_class(irep, idx, region, owner_name)
+                 recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
                  rbs_block_exact_definers(name, recv_class) if recv_class.is_a?(String)
                end
     return nil if definers.nil? || definers.empty?
@@ -596,13 +586,121 @@ class CodeGen
     recv = nil
     arr = nil
     if idx && !region[:self_implicit]
-      recv = block_fallback_receiver_class(irep, idx, region, owner_name)
-      arr = proven_array_source(irep, idx, region[:dest_reg])
+      recv = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
+      arr = proven_array_source(irep, idx, region[:dest_reg], owner: owner_name)
     end
     hints = elem_hints.map { |reg, hint| "#{reg}:#{hint.is_a?(SoftElementHint) ? "~#{hint.klass}" : hint}" }
     warn "  BLOCK_PARAM_SURVEY #{owner_name} #{irep.label} :#{region[:name]} n=#{region[:n]} arity=#{arity} " \
          "self=#{region[:self_implicit] ? 1 : 0} recv=#{recv || '-'} arr=#{arr || '-'} " \
          "elem=#{hints.empty? ? '-' : hints.join(',')} uses=#{uses.join(',')}"
+  end
+
+  # BC2CPP_BLOCK_RECV_SURVEY=1: one stderr line per literal-block fallback site with the receiver facts
+  # (trace_new_target, proven_array_source), how many sends each block parameter is the receiver of, and the
+  # expression the receiver register comes from, to see why block receivers stay unproven. Diagnostics only.
+  def survey_block_receiver(region, elem_hints, owner_name)
+    irep = region[:parent_irep]
+    return unless irep && region[:name]
+
+    elem_class = elem_hints['1']
+    elem_class = "~#{elem_class.klass}" if elem_class.is_a?(SoftElementHint)
+    @survey_seen ||= {}
+    # Keyed by the return-proof state too: drop_unsafe_embeddings compiles before ARRAY_RETURN_PROOF runs.
+    key = [irep.label, region[:sendb_addr], @array_return_names.size]
+    return if @survey_seen[key]
+
+    @survey_seen[key] = true
+    block_irep = region[:block_irep]
+    uses = (1..mandatory_arity(block_irep)).map do |param|
+      block_irep.instructions.each_with_index.count do |insn, i|
+        %w[SEND SEND0].include?(insn.op) && element_receiver?(block_irep, i, insn.reg, param.to_s)
+      end
+    end
+    idx = irep.index_of_addr(region[:sendb_addr])
+    recv = arr = source = extra = nil
+    if idx && !region[:self_implicit]
+      mand = mandatory_arity(irep)
+      recv = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
+      arr = proven_array_source(irep, idx, region[:dest_reg], owner: owner_name)
+      source = survey_receiver_source(irep, idx, region[:dest_reg])
+      ivars = @class_layout[owner_name] || {}
+      args = @class_annotations[irep.label]&.args
+      wide = trace_new_target(irep, idx, region[:dest_reg], ivars, mand, args, owner: owner_name,
+                              class_layout: @class_layout, registry: @registry,
+                              container_constants: @container_constants, element_annotations: @element_annotations,
+                              known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+                              ret_class_proof: ->(n, o) { class_return_for_self_call(n, o) },
+                              method_return_class: ->(n) { class_return_for_dispatch(n) })
+      aelem = proven_element_class(irep, idx, region[:dest_reg], ivars, mand, args, owner_name)
+      helem = proven_hash_element_class(irep, idx, region[:dest_reg], ivars, mand, args, owner_name)
+      extra = " wide=#{wide || '-'} aelem=#{aelem || '-'} helem=#{helem || '-'}"
+    end
+    warn "  BLOCK_RECV_SURVEY #{owner_name} #{irep.label} @#{region[:sendb_addr]} :#{region[:name]} n=#{region[:n]} " \
+         "self=#{region[:self_implicit] ? 1 : 0} recv=#{recv || '-'} arr=#{arr || '-'} elem=#{elem_class || '-'} " \
+         "uses=#{uses.join(',')} src=#{source || '-'} aret=#{@array_return_names.size} " \
+         "at=#{File.basename(irep.file.to_s)}:#{idx && irep.instructions[idx].lineno}#{extra}"
+  end
+
+  def survey_receiver_source(irep, idx, reg)
+    describe = proc do |pin, pin_idx|
+      case pin.op
+      when 'GETIV' then "ivar:#{pin.ivar}"
+      when 'GETCONST', 'GETMCNST' then "const:#{pin.args.to_s.split.last}"
+      when 'GETUPVAR' then 'upvar'
+      when 'GETIDX', 'GETIDX0' then 'getidx'
+      when 'LOADSELF' then 'self'
+      when 'SSEND', 'SSEND0', 'SSENDB' then "selfcall:#{pin.sym}"
+      when 'SEND', 'SEND0', 'SENDB'
+        inner = irep.walk_writers(pin_idx - 1, pin.reg, skip_ops: %w[BLOCK], follow_moves: true) do |p2, _|
+          %w[SENDB SSENDB].include?(p2.op) || (%w[SEND SEND0].include?(p2.op) && p2.sym != '[]') ? p2.sym.to_s : p2.op
+        end
+        kind = pin.sym == '[]' ? 'idx' : 'call'
+        "#{kind}:#{pin.sym}#{pin.op == 'SENDB' ? '{}' : ''}<-#{inner || 'entry'}"
+      else "op:#{pin.op}"
+      end
+    end
+    found = irep.walk_dominating_writers(idx - 1, reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true,
+                                         exhausted: ->(r) { "param:r#{r}" }, &describe)
+    found || "join:#{irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true, &describe)}"
+  end
+
+  # The class of the block send's receiver: trace_new_target with this method's ivar and argument facts.
+  # SELF_ACCESSOR_RECEIVER: an implicit-self attr_reader call (`allies.each`) answers like the GETIV it reads
+  # (self_accessor_class).
+  def block_fallback_receiver_class(irep, idx, reg, owner_name)
+    trace_new_target(irep, idx, reg, @class_layout[owner_name] || {}, mandatory_arity(irep),
+                     @class_annotations[irep.label]&.args, owner: owner_name, class_layout: @class_layout,
+                     registry: @registry, container_constants: @container_constants,
+                     element_annotations: @element_annotations,
+                     ret_class_proof: ->(name, owner) { self_accessor_class(name, owner) })
+  end
+
+  # SELF_ACCESSOR_RECEIVER: the class of `name` called on implicit self in a method of `owner` when that call
+  # can only reach `owner`'s own attr_reader, so it returns exactly what `@name` holds. The answer is then the
+  # ClassLayout fact a GETIV of the ivar in the same method gets (the same `K or nil` whole-program agreement,
+  # consumed by the same runtime-checked hints).
+  def self_accessor_class(name, owner)
+    return nil unless self_accessor_owner?(name, owner)
+
+    hint = @class_layout[owner][name] if @class_layout.key?(owner)
+    hint unless hint.nil? || hint == ClassLayout::UNKNOWN
+  end
+
+  # Does an implicit-self `name` (no arguments) in a method of `owner` reach `owner`'s own attr_reader? Not in a
+  # runtime-def body (self is whatever mruby passes) or a singleton owner; `owner` must register the reader, and
+  # either have no subclass at all or pass CHA_SELF's hierarchy analysis with no overriding arm (no descendant or
+  # mixin defines the name, no method_missing, no installed or native definition), the rule CLOSED_WORLD_SELF
+  # already uses to call the target directly.
+  def self_accessor_owner?(name, owner)
+    return false if @self_class_unknown
+    return false unless owner.is_a?(String) && !owner.end_with?('.singleton') && known_owner_set.include?(owner)
+
+    reader = (@registry[name] || []).find { |md| md.owner == owner && md.kind == :ivar_accessor }
+    return false unless reader
+    return true if exact_receiver_class?(owner)
+
+    plan, = cha_self_plan(name, 0, owner, explicit: false)
+    plan ? plan[:arms].empty? && plan[:default].equal?(reader) : false
   end
 
   # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the body's standalone
@@ -798,6 +896,7 @@ class CodeGen
     end
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     survey_block_param_hint(region, elem_hints, d.owner) if ENV['BC2CPP_BLOCK_PARAM_SURVEY'] == '1'
+    survey_block_receiver(region, elem_hints, d.owner) if ENV['BC2CPP_BLOCK_RECV_SURVEY'] == '1'
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
