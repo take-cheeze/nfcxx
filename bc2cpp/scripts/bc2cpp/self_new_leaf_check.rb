@@ -5,7 +5,8 @@
 # instance method of C, construct directly. The receiver is one of the classes the method can be called on: C and its
 # subclasses, which the closed world lists. A leaf C makes the receiver exactly C (no guard); a C with known
 # subclasses gets one exact-class arm per class, each a direct allocation plus the initialize that class resolves to,
-# and a closed-world violation for any other receiver; an unknown subclass (Class.new(C)) keeps the dispatch.
+# and a closed-world violation for any other receiver; with an anonymous subclass (Class.new(C)) exactly C constructs
+# directly and any other class takes the owner call over Class#new (an unlisted `new` definer raises).
 #
 #   1. generated code: the leaf's sites are unguarded direct constructions, the inherited singleton method and
 #      `self.class.new` of the base have one arm per class of {base, kid}, and Class.new keeps the by-name send;
@@ -70,9 +71,11 @@ Dir.mktmpdir('self-new-leaf') do |dir|
                  b.include?('bc2cpp_guard_violation(') && !b.include?('bc2cpp_send('))
   end
   open_make = body.call(code, 'SnOpen_singleton_make')
-  check.call('Class.new(C) makes C non-leaf: only exactly C constructs directly, any other class dispatches',
-             !open_make.match?(/\A(?:(?!if \().)*bc2cpp_direct_alloc/m) && open_make.include?('bc2cpp_send(') &&
-               !open_make.include?('bc2cpp_guard_violation('))
+  check.call('Class.new(C) makes C non-leaf: exactly C constructs directly, any other class takes the owner call ' \
+             'over Class#new (no by-name new, no guard violation)',
+             open_make.include?('SELF_NEW_LEAF') && open_make.include?('SnOpen_initialize_impl(M, ') &&
+               open_make.include?('bc2cpp_owner_call(') && open_make.match?(/BC2CPP_OWNERS\("Class"\)/) &&
+               !open_make.include?('bc2cpp_send(') && !open_make.include?('bc2cpp_guard_violation('))
 
   unless ENV['CC_GENERATED_ONLY'] == '1'
     harness = <<~'CPP'

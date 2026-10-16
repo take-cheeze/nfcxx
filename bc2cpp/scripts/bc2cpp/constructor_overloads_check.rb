@@ -45,7 +45,9 @@ mutations = {
   'Rect loses its else' => ['%a{bc2cpp:direct rgss::rect_new_direct int int int int} %a{bc2cpp:else}', '%a{bc2cpp:direct rgss::rect_new_direct int int int int}'],
   'Color defaults alpha to 0' => ['float=0 float=0 float=0 float=255', 'float=0 float=0 float=0 float=0'],
   'the empty Rect passes a 1' => ['rect_new_direct 0 0 0 0', 'rect_new_direct 0 0 0 1'],
-  'Bitmap size form converts one positional' => ['rgss::bitmap_new_direct int int', 'rgss::bitmap_new_direct int 0']
+  'Bitmap size form converts one positional' => ['rgss::bitmap_new_direct int int', 'rgss::bitmap_new_direct int 0'],
+  'Bitmap transparent declared String, not boolish' => ['?boolish transparent', '?String transparent'],
+  'Bitmap transparent declared untyped' => ['?boolish transparent', '?untyped transparent']
 }
 Dir.mktmpdir('ctor-overloads') do |dir|
   mutations.each_with_index do |(what, (from, to)), i|
@@ -57,7 +59,8 @@ Dir.mktmpdir('ctor-overloads') do |dir|
       NativeConstructorSigs.table(path)
       false
     rescue RuntimeError => e
-      e.message.include?('constructor overloads disagree') || e.message.include?('annotation')
+      e.message.include?('constructor overloads disagree') || e.message.include?('annotation') ||
+        e.message.include?('unsupported parameter type')
     end
     check.call("refused: #{what}", refused)
   end

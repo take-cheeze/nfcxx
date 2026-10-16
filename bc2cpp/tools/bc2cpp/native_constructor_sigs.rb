@@ -9,8 +9,8 @@ require_relative 'native_core_result_sigs'
 # docs/adr/0468), each audited against the source of the initialize it describes.
 #
 # An overload is { req: [type...], opt: [type...], path: [:direct, fn, [arg...]] | [:compiled], else: bool } with
-# type :num (Integer | Float, what mrb_get_args "i"/"f" convert), :str (String, "z"/"s"/"S") or :any (untyped,
-# "o"/"b"). `audit` derives the same list from the sources: a C initialize registered in mruby-rgss/src (one overload
+# type :num (Integer | Float, what mrb_get_args "i"/"f" convert), :str (String, "z"/"s"/"S") or :boolish (boolish,
+# "b": truthiness only). `audit` derives the same list from the sources: a C initialize registered in mruby-rgss/src (one overload
 # per mrb_get_args format, the format reached when no argc branch is taken being the `else`, plus an empty one for an
 # `if (mrb_get_argc(M) == 0)` branch that reads no argument), or a Ruby initialize that splits on
 # `<first param>.kind_of? String` between two native helpers (each helper's format is an overload, the non-String one
@@ -18,7 +18,8 @@ require_relative 'native_core_result_sigs'
 module NativeConstructorSigs
   PATH = File.expand_path('../../sig/native/rgss_constructors.rbs', __dir__)
   ROOT = File.expand_path('../..', __dir__)
-  FORMAT_TYPES = { 'i' => :num, 'f' => :num, 'z' => :str, 's' => :str, 'S' => :str, 'o' => :any, 'b' => :any }.freeze
+  # "o" (any object, untouched) has no declarable type here: an overload taking one is not modelled.
+  FORMAT_TYPES = { 'i' => :num, 'f' => :num, 'z' => :str, 's' => :str, 'S' => :str, 'b' => :boolish }.freeze
 
   module_function
 
@@ -78,7 +79,7 @@ module NativeConstructorSigs
     case type.to_s
     when 'Integer | Float', 'Float | Integer' then :num
     when 'String' then :str
-    when 'untyped' then :any
+    when 'boolish' then :boolish
     else raise "bc2cpp: #{path}: #{klass}#initialize: unsupported parameter type #{type}"
     end
   end

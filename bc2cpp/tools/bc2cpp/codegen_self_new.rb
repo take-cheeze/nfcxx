@@ -39,40 +39,21 @@ module SelfNewConstruct
 
     recv = self_implicit ? 'self' : "r#{d}"
     argv = (1..n).map { |k| "r#{d.to_i + k}" }
+    # Every `new` and `allocate` definer is visible and none sits on C's singleton chain or on Class: Class#new is
+    # what a class of the set runs unless a `def self.new` of its own (a named `.singleton` owner) replaces it.
+    return nil unless @closed_world.standard_constructor_lookup? && exact_constructor_chain?(klass)
+
     set = @closed_world.known_subclasses(klass)
-    arms = set&.map { |k| [k, self_new_initialize_call(k, argv)] }
-    if arms.nil? || arms.any? { |_, call| call.nil? } || !@closed_world.standard_constructor_lookup?
-      # A leaf whose construction is not direct keeps the ordinary paths; an inheritable receiver must not reach
-      # the unguarded constant construction of codegen_send.rb.
-      return nil if set&.size == 1
-      # Unknown subclasses: the guarded constructions of codegen_send.rb compare the receiver with C first, which is
-      # sound; only the unguarded one (a stable constant, taken for an inheritable `self`) is not.
-      return nil if set.nil? && !(kind.start_with?('self of') && stable_standard_constructor_class?(klass))
-
-      own = set.nil? && self_new_initialize_call(klass, argv)
-      # Unknown subclasses with a direct construction of C itself: the codegen_send.rb path would take it unguarded,
-      # so C gets its own exact arm here and any other class the by-name send.
-      return nil if set.nil? && !own
-      if own
-        @direct_alloc_used = true
-        return "  // SELF_NEW_LEAF :new -- #{kind} of #{klass}: other classes may inherit it (closed world cannot list " \
-               "them), so only exactly #{klass} constructs directly\n" \
-               "  if (mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(klass)}) {\n" \
-               "    mrb_value bc2cpp_sn = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-               "    #{format(own, obj: 'bc2cpp_sn')}\n" \
-               "    r#{d} = bc2cpp_sn;\n" \
-               "  } else {\n" \
-               "    #{dynamic_dispatch_line(d, recv, 'new', argv)}" \
-               "  }\n"
-      end
-
-      return "  // SELF_NEW_LEAF :new -- #{kind} of #{klass}: the classes it may be (#{set ? set.join(', ') : 'unknown'}) " \
-             "do not all construct directly; Class#new by name\n  #{dynamic_dispatch_line(d, recv, 'new', argv)}"
-    end
+    classes = set || [klass]
+    arms = classes.map { |k| [k, exact_constructor_chain?(k) ? self_new_initialize_call(k, argv) : :own_new] }
+    # A leaf whose initialize is not a direct call keeps the paths of codegen_send.rb (they are exact for a leaf).
+    return nil if set&.size == 1 && !arms.first[1].is_a?(String)
 
     @direct_alloc_used = true
-    note = "  // SELF_NEW_LEAF :new -- #{kind} of #{klass}: the receiver is one of #{set.join(', ')} (closed world, ADR 0468)\n"
-    if arms.size == 1
+    listed = set ? "the receiver is one of #{set.join(', ')}" :
+                   "other classes may inherit it (Class.new(#{klass}) or an unseen subclass), so only exactly #{klass} is listed"
+    note = "  // SELF_NEW_LEAF :new -- #{kind} of #{klass}: #{listed} (closed world, ADR 0468)\n"
+    if set&.size == 1
       return "#{note}  {\n" \
              "    mrb_value bc2cpp_sn = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
              "    #{format(arms.first[1], obj: 'bc2cpp_sn')}\n" \
@@ -80,20 +61,42 @@ module SelfNewConstruct
              "  }\n"
     end
 
+    args = argv.empty? ? '0, NULL' : "#{argv.size}, bc2cpp_sna"
     branches = arms.map do |k, call|
-      "if (bc2cpp_snc == #{owner_class_ptr_expr(k)}) {\n" \
-        "      bc2cpp_sn = bc2cpp_direct_alloc(M, bc2cpp_snc);\n" \
-        "      #{format(call, obj: 'bc2cpp_sn')}\n" \
-        "    } else "
+      # A class whose initialize is not one direct call is still built by Class#new itself: allocation plus the
+      # dispatched initialize (mrb_obj_new), on the class the arm proved.
+      # A class with a `def self.new` of its own (named, so listed) takes it through the owner call.
+      build = case call
+              when String then "bc2cpp_sn = bc2cpp_direct_alloc(M, bc2cpp_snc);\n      #{format(call, obj: 'bc2cpp_sn')}"
+              when :own_new
+                "bc2cpp_sn = #{outside_owner_call_line(d, recv, 'new', argv, self_new_class_new_owners).sub(/\Ar#{d} = /, '')}"
+              else "bc2cpp_sn = mrb_obj_new(M, bc2cpp_snc, #{args});"
+              end
+      "if (bc2cpp_snc == #{owner_class_ptr_expr(k)}) {\n      #{build}\n    } else "
     end.join
+    # The rest: a listed set ends in a violation; an open one (Class.new(C) and the like) in the owner call over the
+    # definers of `new` (Class#new and every named `def self.new`), so an unlisted definer raises, never dispatches.
+    rest = if set
+             guard_violation_line(d, recv, 'new', argv, 'SELF_NEW_LEAF')
+           else
+             outside_owner_call_line(d, recv, 'new', argv, self_new_class_new_owners)
+           end
     "#{note}  {\n" \
       "    struct RClass* bc2cpp_snc = mrb_class_ptr(#{recv});\n" \
       "    mrb_value bc2cpp_sn;\n" \
+      "#{argv.empty? ? '' : "    mrb_value bc2cpp_sna[] = { #{argv.join(', ')} };\n"}" \
       "    #{branches}{\n" \
-      "      bc2cpp_sn = #{guard_violation_line(d, recv, 'new', argv, 'SELF_NEW_LEAF').sub(/\Ar#{d} = /, '').chomp}\n" \
+      "      bc2cpp_sn = #{rest.sub(/\Ar#{d} = /, '').chomp}\n" \
       "    }\n" \
       "    r#{d} = bc2cpp_sn;\n" \
       "  }\n"
+  end
+
+  # The owners a lookup of `new` on a class object can find: Class#new, and every class object's own `def self.new`
+  # (registry `.singleton` owners). standard_constructor_lookup? has excluded unknown and outside Ruby definers.
+  def self_new_class_new_owners
+    singles = (@registry['new'] || []).map(&:owner).select { |owner| owner.end_with?('.singleton') }
+    (['Class'] + singles).uniq.sort
   end
 
   # [C, kind] when the receiver register of this `new` is `self` of a singleton method of class C, or `self.class` of

@@ -89,7 +89,8 @@ class CodeGen
 
   # true / false when the proofs decide that argument `i` has `type`, nil when only a runtime test can.
   def overloaded_arg_verdict(type, argv, i, int_site, irep, proof_site)
-    return true if type == :any
+    # A truthiness-only positional takes any object.
+    return true if type == :boolish
 
     int = native_int_arg_proven?(*int_site, argv, i)
     reg = argv[i].to_s[/\Ar(\d+)\z/, 1]
