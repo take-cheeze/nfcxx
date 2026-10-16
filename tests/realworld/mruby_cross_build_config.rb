@@ -1,0 +1,18 @@
+# mruby's cross build for macOS arm64 (cross_macos.sh mruby). The target objects come from mruby_cross_cc.sh (qbe-cc to
+# Darwin assembly, llvm-mc, ld64.lld against the clean-room libSystem stub). mruby's host build, with the host gcc, supplies
+# mrbc, the tool that compiles the Ruby parts of the gems.
+#
+# The gem set is narrower than run_mruby.sh's default gembox on purpose: the io, dir, socket, time and sleep gems, and the
+# hal-posix gems, use struct stat, termios, sockaddr and similar layouts, which POSIX does not define and which the clean-room
+# headers therefore cannot provide honestly. mruby_test.rb needs only core, format (sprintf), catch/throw, and the array,
+# hash, string, kernel, enum and numeric extensions, and none of them use those layouts.
+MRuby::CrossBuild.new('arm64-macos') do |conf|
+  %w[mruby-bin-mruby mruby-sprintf mruby-catch mruby-error mruby-array-ext mruby-hash-ext mruby-string-ext
+     mruby-kernel-ext mruby-enum-ext mruby-numeric-ext].each { |g| conf.gem core: g }
+  # mruby's read-only-data check on Apple targets reads the Mach-O segment layout (mach-o/getsect.h). Turning it off is
+  # mruby's documented option: literal data is then not recognised as read-only, which only costs an optimisation.
+  conf.cc.defines << 'MRB_NO_DEFAULT_RO_DATA_P'
+  conf.cc.command = ENV.fetch('MRUBY_CROSS_CC')
+  conf.linker.command = ENV.fetch('MRUBY_CROSS_LD')
+  conf.archiver.command = ENV.fetch('MRUBY_AR', 'llvm-ar')
+end
