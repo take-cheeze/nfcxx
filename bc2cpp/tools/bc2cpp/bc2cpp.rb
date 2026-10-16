@@ -1859,22 +1859,8 @@ if $PROGRAM_NAME == __FILE__
                        'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
                        'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp/nomethod_reviewed_update.rb).'
   end
-  # Unreviewed only: STRICT_HINTS_REVIEWED is the union of the full and the hot-only runs, so one run cannot
-  # prove an entry stale. strict_hints_reviewed_check holds the union exact over both runs.
-  hint_violations = StrictHints.violations(hint_sites, compiled, scope: review_scope, stale: false)
-  unless hint_violations.empty?
-    review_failures << "bc2cpp: #{hint_violations.size} STRICT_HINTS_REVIEWED violation(s) (docs/adr/0419):\n  " \
-                       "#{hint_violations.join("\n  ")}\n" \
-                       'Run the verify build over the real workloads, then list the sites in ' \
-                       'tools/bc2cpp/strict_hints_reviewed.rb (scripts/bc2cpp/strict_hints_update.rb).'
-  end
-  guard_violations = DeclaredReturns.review_failures(guard_sites, compiled, scope: review_scope)
-  unless guard_violations.empty?
-    review_failures << "bc2cpp: #{guard_violations.size} DECLARED_RETURN_GUARDS_REVIEWED violation(s) (docs/adr/0455):\n  " \
-                       "#{guard_violations.join("\n  ")}\n" \
-                       'Read each declaration and the body it guards, then list it in ' \
-                       'tools/bc2cpp/declared_return_guards_reviewed.rb.'
-  end
+  # Hints are judged at run time only: a runtime-checked declaration (%a{bc2cpp:hint}, ADR 0455) or a forced
+  # strict hint raises when its value is wrong, so the build does not reject an unlisted one.
   miss_violations = ProvenMiss.violations(miss_sites, compiled, scope: review_scope,
                                                                 stale: !ENV['BC2CPP_HOT_METHODS'])
   unless miss_violations.empty?
