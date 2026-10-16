@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'core_defs'
+require_relative 'define_method_sites'
 
 # LOOP_INSTALLERS (docs/adr/0304): a class-body loop over a literal container whose body installs
 # attr_reader/attr_writer/attr_accessor names (`NAMES.each { |n| attr_accessor n }`, optcarrot's
@@ -19,6 +20,18 @@ require_relative 'core_defs'
 # - the loop runs once per execution of the body (Walker#straight_line_limit).
 # - the iterators, lookups and installers are mruby's own (#core_methods_untouched?).
 # - the interpreter refuses every opcode, receiver and branch it does not model (Interp).
+#
+# DEFINE_METHOD_LOOPS (docs/adr/0469): `define_method(n) { ... }` in such a loop is an installer the
+# interpreter models too. Each name it installs becomes a MethodDef(installer: :define_method) whose body is
+# a copy of the block (DefineMethodSites.expand) in which the loop variables the block reads are the Symbols
+# that iteration bound. Conditions on top of the ones above:
+# - the loop runs in a class or module body of the engine's own Ruby (not a singleton class, a Struct
+#   block or mruby's core Ruby), where Module#define_method installs a public method on that class;
+# - the name is a Symbol the walk built, and the body is method-shaped (DefineMethodSites.loop_body_captures);
+# - every loop-block register the body reads holds a Symbol when the iteration's frame ends, which is the
+#   value the block's env keeps from then on (the frame cannot run the body earlier: the interpreter models no
+#   call that could).
+# DefineMethodSites.settle then keeps all of a send's expansions or none.
 module LoopInstallers
   ITERATORS = %w[each each_pair each_value each_key].freeze
   ATTR_SENDS = %w[attr_reader attr_writer attr_accessor].freeze
@@ -31,6 +44,8 @@ module LoopInstallers
   ARITH_OPS = %w[ADD SUB MUL DIV EQ LT LE GT GE ADDI SUBI].freeze
   LOAD_TRUTHY = /\A(?:LOADI|LOADL|STRING)/
   ATTR_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
+  # A name define_method installs, or a Symbol an expansion loads: an identifier, optionally ending in ?, ! or =.
+  METHOD_NAME = /\A[A-Za-z_][A-Za-z0-9_]*[?!=]?\z/
   STEP_LIMIT = 200_000
 
   Sym = Struct.new(:name)
@@ -48,7 +63,7 @@ module LoopInstallers
 
   module_function
 
-  # True when the SENDB at insns[idx] is a loop whose block tree sends an attr_* installer.
+  # True when the SENDB at insns[idx] is a loop whose block tree sends an attr_* installer or define_method.
   def candidate?(irep, idx, ireps)
     insn = irep.instructions[idx]
     return false unless insn.op == 'SENDB' && ITERATORS.include?(insn.sym)
@@ -59,7 +74,17 @@ module LoopInstallers
     return false unless block.op == 'BLOCK' && block.block_index
 
     label = irep.reps[block.block_index]
-    label ? !attr_sends(label, ireps).empty? : false
+    label ? !(attr_sends(label, ireps).empty? && define_method_sends(label, ireps).empty?) : false
+  end
+
+  # Every `define_method` SSENDB of the block tree rooted at +label+, as [irep label, index].
+  def define_method_sends(label, ireps, found = [])
+    irep = ireps[label] or return found
+    irep.instructions.each_with_index do |insn, i|
+      found << [label, i] if insn.op == 'SSENDB' && insn.sym == 'define_method'
+    end
+    irep.reps.compact.each { |child| define_method_sends(child, ireps, found) }
+    found
   end
 
   # Every attr_* send of the block tree rooted at +label+, as [irep label, index].
@@ -84,17 +109,26 @@ module LoopInstallers
           refused[site] += 1
         else
           recognized += 1
-          register(registry, site)
+          register(registry, site, ireps)
         end
       end
     end
     [recognized, refused]
   end
 
-  def register(registry, result)
+  def register(registry, result, ireps)
     owner = result.namespace || 'Object'
     seen = Set.new
-    result.installs.each do |kind, name|
+    expansions = Hash.new(0)
+    result.installs.each do |kind, name, body, captures, send_site|
+      if kind == :define_method
+        label = DefineMethodSites.expand(ireps, body, captures, expansions[body])
+        expansions[body] += 1
+        registry[name] << MethodDef.new(name: name, owner: owner, irep: label, visibility: :public,
+                                        installer: :define_method, site: [send_site])
+        next
+      end
+
       names = []
       names << name if %i[reader accessor].include?(kind)
       names << "#{name}=" if %i[writer accessor].include?(kind)
@@ -209,7 +243,7 @@ module LoopInstallers
       return generic_refusal(insn, 'a container that code may have reached') if reached.each_key.any?(&:poisoned)
       return generic_refusal(insn, 'a block that is not a literal block') unless block.is_a?(BlockVal)
 
-      interp = Interp.new(@ireps, @consts, reached)
+      interp = Interp.new(@ireps, @consts, reached, definer: definer?(namespace))
       interp.iterate(insn.sym, recv, block)
       @regs[insn.reg.to_i] = recv
       @regs.delete(insn.reg.to_i + 1)
@@ -217,6 +251,13 @@ module LoopInstallers
                  namespace: namespace)
     rescue Refused => e
       generic_refusal(insn, e.message)
+    end
+
+    # DEFINE_METHOD_LOOPS: `define_method` in this body installs a public method on +namespace+, a class or
+    # module the registry names (a singleton class body is "X.singleton", a Struct block "<struct:...>").
+    def definer?(namespace)
+      !namespace.nil? && !namespace.include?('.singleton') && !namespace.start_with?('<') &&
+        !CoreDefs.core_source?(@irep.file)
     end
 
     # A loop the interpreter cannot follow is an ordinary call: its block may run anything.
@@ -345,10 +386,11 @@ module LoopInstallers
   class Interp
     attr_reader :installs
 
-    def initialize(ireps, consts, protected_conts)
+    def initialize(ireps, consts, protected_conts, definer: false)
       @ireps = ireps
       @consts = consts
       @protected = protected_conts
+      @definer = definer
       @installs = []
       @steps = 0
     end
@@ -378,18 +420,35 @@ module LoopInstallers
                                                         first.enter_fields[1..].all?(&:zero?)
       regs = {}
       args.each_with_index { |v, i| regs[i + 1] = v }
+      defines = []
       pc = 1
       while pc < insns.size
         refuse('too many steps') if (@steps += 1) > STEP_LIMIT
         insn = insns[pc]
-        pc = exec(irep, insn, pc, regs)
-        return if pc.nil?
+        pc = exec(irep, insn, pc, regs, defines)
+        return close_frame(regs, defines) if pc.nil?
       end
       refuse('a block that falls off its end')
     end
 
+    # DEFINE_METHOD_LOOPS: the frame ends, so each register a define_method body of this frame reads keeps
+    # the value it has now for good.
+    def close_frame(regs, defines)
+      defines.each do |name, body, registers, send_site|
+        captures = registers.to_h do |r|
+          value = regs.fetch(r, OPAQUE)
+          refuse('a define_method body reading a loop variable that is not a Symbol') unless value.is_a?(Sym)
+          refuse("the captured Symbol #{value.name.inspect}") unless value.name.match?(METHOD_NAME)
+
+          [r, value.name]
+        end
+        @installs << [:define_method, name, body, captures, send_site]
+      end
+      nil
+    end
+
     # Index of the next instruction, nil to leave the block.
-    def exec(irep, insn, pc, regs)
+    def exec(irep, insn, pc, regs, defines)
       get = ->(r) { regs.fetch(r.to_i, OPAQUE) }
       case insn.op
       when 'MOVE' then regs[insn.regs[0].to_i] = get.call(insn.regs[1])
@@ -414,6 +473,7 @@ module LoopInstallers
       when 'BLOCK' then regs[insn.reg.to_i] = BlockVal.new(irep.reps[insn.block_index])
       when 'SEND' then regs[insn.reg.to_i] = send_op(insn, get)
       when 'SSEND', 'SSEND0' then install(insn, get)
+      when 'SSENDB' then regs[insn.reg.to_i] = define_site(irep, insn, pc, get, defines)
       when 'SENDB' then nested(insn, get, regs)
       else refuse("the unmodeled opcode #{insn.op}")
       end
@@ -481,6 +541,24 @@ module LoopInstallers
 
         @installs << [kind, arg.name]
       end
+    end
+
+    # DEFINE_METHOD_LOOPS: `define_method(name) { ... }`, recorded for the frame's end (close_frame). It
+    # answers the name, as Module#define_method does.
+    def define_site(irep, insn, pc, get, defines)
+      refuse("the call #{insn.sym}") unless insn.sym == 'define_method' && insn.plain_fixed_argc? && insn.argc == 1
+      refuse('define_method outside a class or module body of the engine') unless @definer
+      name = get.call(insn.reg.to_i + 1)
+      block = get.call(insn.reg.to_i + 2)
+      refuse('a method name that is not a Symbol literal') unless name.is_a?(Sym)
+      refuse("the method name #{name.name.inspect}") unless name.name.match?(METHOD_NAME)
+      refuse('a define_method body that is not a literal block') unless block.is_a?(BlockVal)
+      body = @ireps[block.label] or refuse('a missing define_method body')
+      registers = DefineMethodSites.loop_body_captures(body, @ireps)
+      refuse('a define_method body a method cannot spell') unless registers
+
+      defines << [name.name, block.label, registers.to_a.sort, [irep.label, pc]]
+      name
     end
 
     def nested(insn, get, regs)
