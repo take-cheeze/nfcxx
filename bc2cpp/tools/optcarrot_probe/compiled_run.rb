@@ -124,28 +124,6 @@ abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless Fil
 require File.join(ROOT, 'tools/bc2cpp/compiled_gems')
 require_relative 'sealed_build'
 
-# The bundle prepends this shim, so bc2cpp must see it: it is the only `[]` definer on the numbers optcarrot
-# indexes, and the GETIDX helper's exact-class arm needs it (ADR 0305). shims.rb stays out: its classes embed.
-SHIMS = File.join(ROOT, 'tools/optcarrot_probe/shim_integer_aref.rb')
-sources = %w[
-  optcarrot.rb
-  optcarrot/nes.rb
-  optcarrot/rom.rb
-  optcarrot/pad.rb
-  optcarrot/opt.rb
-  optcarrot/cpu.rb
-  optcarrot/apu.rb
-  optcarrot/ppu.rb
-  optcarrot/palette.rb
-  optcarrot/driver.rb
-  optcarrot/config.rb
-].map { |path| File.join(ROOT, '3rd/optcarrot/lib', path) }.unshift(SHIMS)
-
-native_sources = core_native_srcs(MRUBY) + Dir[File.join(ROOT, '3rd/mruby-onig-regexp/src/*.c')]
-foreign_sources = Dir[File.join(MRUBY, 'mrblib/**/*.rb')] +
-                  Dir[File.join(MRUBY, 'mrbgems/*/mrblib/**/*.rb')] +
-                  Dir[File.join(ROOT, '3rd/mruby-onig-regexp/mrblib/**/*.rb')]
-
 def section_lines(text, header)
   start = text.index("== #{header} ==")
   raise "missing bc2cpp diagnostic section: #{header}" unless start
@@ -306,12 +284,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   output_dir = File.join(temp, 'gem', 'src')
   FileUtils.mkdir_p(scan_dir)
   FileUtils.mkdir_p(output_dir)
-  sealed = ENV['OPTCARROT_CLOSED_WORLD'] == '1'
-  if sealed
-    benchmark_source, sealed_gems = OptcarrotSealedBuild.prepare(ROOT, temp, File.dirname(output_dir))
-    sources = [benchmark_source]
-    native_sources, foreign_sources = bc2cpp_closed_world_outside_srcs('optcarrot-probe', sealed_gems, ROOT)
-  end
+  # docs/adr/0466: bc2cpp compiles closed-world programs only, so the benchmark always runs sealed (ADR 0400).
+  benchmark_source, sealed_gems = OptcarrotSealedBuild.prepare(ROOT, temp, File.dirname(output_dir))
+  sources = [benchmark_source]
+  native_sources, foreign_sources = bc2cpp_closed_world_outside_srcs('optcarrot-probe', sealed_gems, ROOT)
   base_env = {
     'MRBC' => PROBE_MRBC,
     'OUT_SYMBOL' => 'optcarrot_probe',
@@ -356,7 +332,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     # sig/bc2cpp describes RPG engine classes that the optcarrot program does not define (RBS_SIGNATURES would abort).
     'BC2CPP_SIG_DIRS' => ''
   }
-  base_env.merge!(OptcarrotSealedBuild.environment(sealed_gems)) if sealed
+  base_env.merge!(OptcarrotSealedBuild.environment(sealed_gems))
   # NILABLE_EMBED_EXPERIMENT: OPTIN set only for the A/B run, so the default
   # three-mode benchmark and the CI job below are untouched. It adds a SECOND
   # compiled target from the same sources, differing only in one thing: bc2cpp is
@@ -372,12 +348,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   nullable_ivars = ENV['OPTCARROT_FIXNUM_NIL_IVARS'].to_s
   scan_env = nullable ? base_env.merge('FIXNUM_NIL_IVARS' => nullable_ivars) : base_env
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, scan_env.merge('OUT_DIR' => scan_dir))
-  if sealed
-    lines = scan_diagnostics.lines
-    world_header = lines.index { |line| line.start_with?('== closed world (') }
-    puts lines[world_header, 2] if world_header
-    puts lines.grep(/\A== closed world (fallbacks|guard violations|nil receivers|nomethod sites|proven-class miss sites)/)
-  end
+  lines = scan_diagnostics.lines
+  world_header = lines.index { |line| line.start_with?('== closed world (') }
+  puts lines[world_header, 2] if world_header
+  puts lines.grep(/\A== closed world (fallbacks|guard violations|nil receivers|nomethod sites|proven-class miss sites)/)
   # Optcarrot::PPU used to be excluded here entirely -- a devirtualized call
   # (a direct C++ call from one compiled method's body into another's)
   # reaches a compiled `_impl` function regardless of whether that method is
@@ -434,7 +408,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   build_mode += ", gray stack=#{GRAY_STACK_SIZE}"
   gray_stack_config = "cc.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'\ncxx.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'"
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
-  target_suffix += 'sealed' if sealed
+  target_suffix += 'sealed'
   target_suffix += 'irinline' if ENV['BC2CPP_IR_INLINE'] == '1'
   target_suffix += 'resumableinline' if ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1'
   compiled_target = "optcarrotcompiled#{target_suffix}"
@@ -445,13 +419,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     puts "Optcarrot resumable IR helper regions: #{compiled_cpp.scan('BYTECODE_IR_RESUMABLE_INLINE').size}"
   end
   config = File.join(temp, 'mruby_build_config.rb')
-  compiled_base = if sealed
-                    ["toolchain", "self.mrbcfile = #{File.expand_path(PROBE_MRBC).dump}",
-                     (debug ? 'enable_debug' : nil),
-                     *sealed_gems.reject { |name, _| name.start_with?('optcarrot-') }.values.map { |dir| "gem #{dir.dump}" }].compact.join("\n      ")
-                  else
-                    'instance_eval(&base)'
-                  end
+  compiled_base = ["toolchain", "self.mrbcfile = #{File.expand_path(PROBE_MRBC).dump}",
+                   (debug ? 'enable_debug' : nil),
+                   *sealed_gems.reject { |name, _| name.start_with?('optcarrot-') }.values.map { |dir| "gem #{dir.dump}" }].compact.join("\n      ")
   File.write(config, <<~RUBY)
     base = proc do
       toolchain
@@ -496,14 +466,14 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       # .../optcarrot-compiled/src/register.o".
       enable_cxx_exception
       gem #{gem_dir.dump}
-      #{sealed ? "gem #{sealed_gems.fetch('optcarrot-benchmark').dump}" : ''}
+      gem #{sealed_gems.fetch('optcarrot-benchmark').dump}
       if #{profiling}
         cc.flags << '-pg'
         cxx.flags << %w(-pg -fno-inline)
         linker.flags << '-pg'
       end
     end
-    #{sealed ? <<~VERIFY : ''}
+    #{<<~VERIFY}
       task :verify_optcarrot_world do
         actual = MRuby.targets.fetch(#{compiled_target.dump}).gems.to_h { |g| [g.name, File.expand_path(g.dir)] }
         expected = #{sealed_gems.inspect}
@@ -561,34 +531,25 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # Temporary gem paths can leave stale objects in a kept build directory.
   # Always rebuild generated code so timings and counters describe this run.
   FileUtils.rm_rf(File.join(MRUBY, "build/#{compiled_target}/mrbgems/optcarrot-compiled"))
-  if sealed
-    gems_dir = File.join(MRUBY, "build/#{compiled_target}/mrbgems")
-    FileUtils.rm_rf(File.join(gems_dir, 'optcarrot-benchmark'))
-    FileUtils.rm_rf(File.join(gems_dir, 'mruby-onig-regexp/src'))
-    FileUtils.rm_f(Dir[File.join(gems_dir, 'mruby-onig-regexp/gem_init.{c,pi,o}')])
-  end
+  gems_dir = File.join(MRUBY, "build/#{compiled_target}/mrbgems")
+  FileUtils.rm_rf(File.join(gems_dir, 'optcarrot-benchmark'))
+  FileUtils.rm_rf(File.join(gems_dir, 'mruby-onig-regexp/src'))
+  FileUtils.rm_f(Dir[File.join(gems_dir, 'mruby-onig-regexp/gem_init.{c,pi,o}')])
   rake_env = ENV.to_h.merge('MRUBY_CONFIG' => config)
   rake_env['LD'] = rake_env['CC'] || 'cc'
-  tasks = sealed ? %w[verify_optcarrot_world link_optcarrot] : []
+  tasks = %w[verify_optcarrot_world link_optcarrot]
   output, status = Open3.capture2e(rake_env, 'rake', *tasks, "-j#{Etc.nprocessors}", chdir: MRUBY)
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..] || output}" unless status.success?
 
-  if sealed
-    compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/optcarrot")
-  end
+  compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/optcarrot")
 
   bundle = File.join(temp, 'optcarrot.rb')
   cruby_bundle = File.join(temp, 'optcarrot_cruby.rb')
-  compiled_bundle = File.join(temp, 'optcarrot_compiled.rb')
   system(RbConfig.ruby, File.join(ROOT, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
   system({ 'OPTCARROT_NO_SHIMS' => '1' }, RbConfig.ruby,
          File.join(ROOT, 'tools/optcarrot_probe/build_bundle.rb'), cruby_bundle, exception: true)
-  source = File.read(bundle)
-  raise 'optcarrot runner insertion point not found' unless source.sub!(/^nes = Optcarrot::NES\.new\(/, "OptcarrotProbe.install!\nnes = Optcarrot::NES.new(")
-  File.write(compiled_bundle, source)
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
-  compiled_binary ||= File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
   compiled_entries = section_lines(diagnostics, 'compiled entry points').join("\n")
   cpu_run_mode = compiled_entries.include?('(Optcarrot::CPU#run,') ? 'compiled' : 'interpreted'
   ppu_loop_mode = compiled_entries.include?('(Optcarrot::PPU#main_loop,') ? 'compiled' : 'interpreted'
@@ -606,11 +567,11 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                                 chdir: (interpreted_profile_dir if profiling))
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
-  modes = [sealed && 'sealed',
+  modes = ['sealed',
            ENV['BC2CPP_IR_INLINE'] == '1' && 'IR inlining',
            ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1' && 'resumable IR inlining'].select { |mode| mode }
   core_label += " (#{modes.join(', ')})" unless modes.empty?
-  compiled_command = sealed ? [compiled_binary, ROM, FRAMES.to_s] : [compiled_binary, compiled_bundle, ROM, FRAMES.to_s]
+  compiled_command = [compiled_binary, ROM, FRAMES.to_s]
   compiled_result = run_benchmark(core_label, compiled_command,
                                   chdir: (compiled_profile_dir if profiling))
   benchmarks << compiled_result

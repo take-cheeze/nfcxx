@@ -6,7 +6,7 @@
 # docs/bc2cpp-dynamic-site-census.md). Each transfer has a positive case
 # (the walk answers through the op) and a negative case (the answer stays a
 # refusal). Codegen never passes origin_transfers:, so the default walk must
-# still refuse at these ops.
+# still refuse at these ops, except a plain JMPUW and a dead predecessor (ADR 0476).
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 
@@ -153,6 +153,41 @@ check.call('ENTER typed slots are origin-only: the default walk still answers th
            %w[1 3 4 5 6].all? { |r| defs_of.call(enter.call(full), 1, r) == [:entry] })
 check.call('ENTER typed slots are origin-only: the default walk still answers the entry value for a local',
            defs_of.call(enter.call(full, nlocals: 9), 1, '7') == [:entry])
+
+# ADR 0476: two facts the default walk shares with the origin walk.
+# A predecessor no execution reaches supplies nothing to a live state.
+#   0: LOADI_1 R1   1: JMP -> 8   2: JMP -> 8 (dead)   3: LOADI_2 R1 (dead)   4: RETURN R1 (@8, the join)
+dead_join = program.call([
+  insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'JMP', '8'), insn(4, 'JMP', '8'), insn(6, 'LOADI_2', 'R1 (2)'),
+  insn(8, 'RETURN', 'R1')
+])
+check.call('a dead predecessor of a live join is skipped by the default walk', defs_of.call(dead_join, 4, '1') == [0])
+check.call('a dead predecessor of a live join is skipped by the origin walk',
+           defs_of.call(dead_join, 4, '1', origin_transfers: true) == [0])
+# A dead query keeps its dead predecessors: skipping them would answer [] (no definition), vacuously true.
+#   0: LOADI_1 R1   1: RETURN R1   2: LOADI_2 R1 (dead)   3: RETURN R1 (dead, the query)
+dead_tail = program.call([insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'RETURN', 'R1'), insn(4, 'LOADI_2', 'R1 (2)'),
+                          insn(6, 'RETURN', 'R1')])
+check.call('a dead query keeps its dead predecessors (never an empty answer)', defs_of.call(dead_tail, 3, '1') == [2])
+# Live through a handler edge is live: code a rescue reaches is not skipped, the walk refuses at the handler target.
+#   0: LOADNIL R1   1: SEND0 R2 (protected)   2: JMP -> 10   3: LOADI_1 R1 (handler @8)   4: RETURN R1 (@10)
+handler_live = program.call([
+  insn(0, 'LOADNIL', 'R1 (nil)'), insn(2, 'SEND0', "R2\t:f"), insn(4, 'JMP', '10'), insn(8, 'LOADI_1', 'R1 (1)'),
+  insn(10, 'RETURN', 'R1')
+], [CatchHandler.new(type: :rescue, begin_addr: 2, end_addr: 4, target: 8)])
+check.call('a handler body is live: the join after it refuses', handler_live.reaching_definitions(4, '1').nil?)
+check.call('without the handler the same body is dead and skipped',
+           defs_of.call(program.call(handler_live.instructions.map(&:source)), 4, '1') == [0])
+
+# The Fixnum proof's audited lists are BytecodeIR's, not copies kept equal by a check.
+proof = File.read(File.expand_path('../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
+check.call('FIXNUM_PROOF_STEP_OVER_OPS is WRITES_LEADING_REG_OPS itself',
+           proof.include?("FIXNUM_PROOF_STEP_OVER_OPS = BytecodeIR::WRITES_LEADING_REG_OPS\n"))
+check.call('FIXNUM_PROOF_READONLY_REG_OPS is derived from READS_LEADING_REG_OPS',
+           proof.include?('FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::READS_LEADING_REG_OPS & FIXNUM_PROOF_STEP_OVER_OPS)') &&
+             (BytecodeIR::READS_LEADING_REG_OPS & BytecodeIR::WRITES_LEADING_REG_OPS) == Set['JMPIF', 'JMPNOT', 'JMPNIL'])
+check.call('the Fixnum proof keeps no reaching-definitions walk of its own',
+           !proof.include?('def fixnum_proof_reaching_defs?') && proof.include?('every_reaching_definition('))
 
 abort("bc2cpp_origin_transfers_check FAILED: #{failures.join(', ')}") unless failures.empty?
 puts 'bc2cpp_origin_transfers_check OK'

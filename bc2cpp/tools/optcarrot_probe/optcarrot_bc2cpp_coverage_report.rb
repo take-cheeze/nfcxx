@@ -25,6 +25,8 @@ require 'set'
 
 ROOT = File.expand_path('../..', __dir__)
 require_relative '../bc2cpp/compiled_gems'
+require_relative 'sealed_build'
+require 'fileutils'
 
 BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
 MRBC = ENV['MRBC'] || 'mrbc'
@@ -40,32 +42,12 @@ end
 
 system(APPLY_SCRIPT, MRUBY_DIR, PARSER_DUMP_PATCH, exception: true) if Dir.exist?(MRUBY_DIR)
 
-# Same require_relative order build_bundle.rb/bc2cpp_probe.rb use.
-srcs = %w[
-  optcarrot.rb
-  optcarrot/nes.rb
-  optcarrot/rom.rb
-  optcarrot/pad.rb
-  optcarrot/opt.rb
-  optcarrot/cpu.rb
-  optcarrot/apu.rb
-  optcarrot/ppu.rb
-  optcarrot/palette.rb
-  optcarrot/driver.rb
-  optcarrot/config.rb
-].map { |f| File.join(OPTCARROT_LIB, f) }
-
-native_srcs = core_native_srcs(MRUBY_DIR) + Dir[File.join(ROOT, '3rd/mruby-onig-regexp/src/*.c')]
-foreign_ruby_srcs = Dir[File.join(ROOT, '3rd/mruby/mrblib/**/*.rb')] +
-                    Dir[File.join(ROOT, '3rd/mruby/mrbgems/*/mrblib/**/*.rb')] +
-                    Dir[File.join(ROOT, '3rd/mruby-onig-regexp/mrblib/**/*.rb')]
-
-env = {
-  'MRBC' => MRBC,
-  'OUT_SYMBOL' => 'optcarrot_coverage_report',
-  'NATIVE_SRCS' => Shellwords.join(native_srcs),
-  'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
-}
+# docs/adr/0466: bc2cpp compiles closed-world programs only: the probe compiles the sealed benchmark world
+# (tools/optcarrot_probe/sealed_build.rb, ADR 0400), whose outside sources are its build's mruby core and gems.
+world_dir = Dir.mktmpdir('optcarrot-world-')
+at_exit { FileUtils.rm_rf(world_dir) }
+srcs, world_env = OptcarrotSealedBuild.bc2cpp_world(ROOT, world_dir)
+env = world_env.merge('MRBC' => MRBC, 'OUT_SYMBOL' => 'optcarrot_coverage_report')
 cmd = [RbConfig.ruby, BC2CPP, '--annotated', *srcs].shelljoin
 Dir.mktmpdir do |dir|
   env['OUT_DIR'] = dir

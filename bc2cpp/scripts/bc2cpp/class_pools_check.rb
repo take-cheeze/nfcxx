@@ -8,7 +8,7 @@
 # 1. Generated code (needs MRBC): positive shapes lose their guard and their dispatch; every
 #    withdrawal condition (a writer the scan cannot type, reflection, a foreign source, a singleton
 #    maker, an unassigned constructor path, a second class, an argument site of another class, a
-#    computed or aliased name, the kill switch, the open world) keeps the guard.
+#    computed or aliased name, the kill switch) keeps the guard.
 # 2. Behaviour on real mruby: compiled answers equal interpreted ones, nil receivers raise the
 #    interpreter's NoMethodError, and a world with a writer behind the analysis' back is the
 #    documented failure the kill switch removes.
@@ -145,11 +145,11 @@ guarded = lambda do |code, owner, fn|
   !body.empty? && !body.match?(EXACT_TAG) && !body.include?('NILABLE_RECEIVER :tag')
 end
 
-generate = lambda do |source, dir, closed: true, env: {}, **options|
+generate = lambda do |source, dir, env: {}, **options|
   saved = env.to_h { |k, _| [k, ENV.fetch(k, nil)] }
   env.each { |k, v| ENV[k] = v }
   begin
-    runtime.generate(source, dir, closed: closed, only_owners: OWNERS, **options)
+    runtime.generate(source, dir, only_owners: OWNERS, **options)
   ensure
     saved.each { |k, v| v ? ENV[k] = v : ENV.delete(k) }
   end
@@ -257,11 +257,6 @@ if ENV['MRBC']
       end
     end
 
-    Dir.mktmpdir do |open_dir|
-      open_code, = generate.call(CLASSES + HOST, open_dir, closed: false)
-      check.call('the open world proves nothing: no exact read, no nil arm',
-                 !exact.call(open_code, 'PlHost', 'read_box') && !open_code.include?('NILABLE_RECEIVER'))
-    end
   end
 else
   puts '-- SKIP generated code: set MRBC'

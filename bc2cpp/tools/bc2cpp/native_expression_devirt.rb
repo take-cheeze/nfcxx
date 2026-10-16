@@ -278,6 +278,26 @@ module NativeExpressionDevirt
     end
   end
 
+  # NATIVE_PATH_REGISTRATIONS (ADR 0470): scan_class_registrations([path]) of one native source, scanned once per
+  # source text rather than once per asked name (CodeGen#nil_unanswerable_refusal asks name by name, and the names
+  # share their sources). The scan reads nothing but the path and its text, so the key is complete: the path and the
+  # read_source String, which is a new object whenever the file's mtime or size changes. The two maps and their
+  # entry lists come back frozen; the callers only read them.
+  PATH_REGISTRATIONS = {}
+
+  def path_registrations(path)
+    return scan_class_registrations([path]) unless File.file?(path)
+
+    source = read_source(path)
+    cached = PATH_REGISTRATIONS[path]
+    return cached[1] if cached && cached[0].equal?(source)
+
+    maps = scan_class_registrations([path])
+    maps.each { |map| map.each_value(&:freeze).freeze }
+    PATH_REGISTRATIONS[path] = [source, maps.freeze]
+    maps
+  end
+
   # ADR 0415: the two maps of scan_class_registrations as plain Hashes, which is what ScanCache stores; the
   # callers get them back with the access-creates-empty defaults the scan itself uses (registrations_from_plain).
   def plain_registrations(registrations, opaque_owners)

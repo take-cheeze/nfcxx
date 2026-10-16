@@ -318,6 +318,13 @@ module BytecodeIR
       defs.all? { |d| yield d }
     end
 
+    # Can +insn+ change +reg+ (digits)? The reaching-definitions model: anything but :pass (a write, a callee frame
+    # below the register, an unmodelled op) counts. NIL_NARROWING and the captured-parameter rule read it
+    # (rbs_param_check.rb, nil_narrowing.rb).
+    def may_write?(insn, reg)
+      dataflow_effect(insn, reg.to_s) != :pass
+    end
+
     private
 
     # On the audited list of ops that write at most their leading register.

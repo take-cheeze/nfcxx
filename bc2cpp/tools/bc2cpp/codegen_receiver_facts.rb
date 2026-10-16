@@ -350,6 +350,34 @@ class CodeGen
     klass
   end
 
+  # INHERITED_DIRECT_CONSTRUCT (ADR 0456): the Ruby `initialize` MethodDef an instance of +klass+ runs, or nil.
+  # +klass+'s own single definition is the original direct-construct rule. Without one, the lookup walks the
+  # superclass chain and answers the first class's definition when, for every class it passes:
+  #   * the class is a declared class (not a module) with no unresolved mixin, and no included module defines
+  #     initialize and nothing is prepended (numeric_init_definition answers :unknown otherwise);
+  #   * no outside (native or foreign Ruby) source spells it, so no native registers an initialize on it;
+  # and no DEF the registry does not hold (define_method, a computed name) installs an initialize anywhere.
+  # A chain that reaches Object without a Ruby initialize answers nil: Object's and BasicObject's initialize is
+  # native, and a native body is not called directly (mrb_obj_new keeps that lookup).
+  def direct_construct_init_def(klass)
+    own = (@registry['initialize'] || []).select { |md| md.owner == klass }
+    return own.one? ? own.first : nil unless own.empty?
+    return nil unless @closed_world && !@closed_world.unknown_def?('initialize')
+
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      return nil unless @closed_world.class_declared?(klass) && !@unknown_mixins.include?(klass)
+      return nil if @closed_world.outside_spells_class?(klass)
+
+      definition = numeric_init_definition(klass)
+      return nil if definition == :unknown
+      return definition if definition
+
+      klass = @superclass_of[klass]
+    end
+    nil
+  end
+
   def exact_constructor_chain?(klass)
     # Every class object's singleton lookup reaches Class after its own
     # singleton superclass chain. A module mixed into Class can replace new or
@@ -799,7 +827,7 @@ class CodeGen
   #
   # The scan is over every compiled irep's instructions, so a caller added later
   # is covered without touching a list. Anything it cannot read stays a refusal:
-  # an open world, a dynamic send whose receiver class is unproven, or a name
+  # a body compiled without the world (ADR 0264), a dynamic send whose receiver class is unproven, or a name
   # something installs at runtime all leave the question open, and an open
   # question must keep the `#error` rather than assume the safe answer.
   def super_direct_call_allowed?(owner_def)

@@ -141,14 +141,14 @@ CPP
 saved = ENV['BC2CPP_OPT_BLOCK_FRAME']
 begin
   ENV['BC2CPP_OPT_BLOCK_FRAME'] = '0'
-  off_code, = runtime.generate(BASE, Dir.mktmpdir, closed: false, only_owners: OWNERS)
+  off_code, = runtime.generate(BASE, Dir.mktmpdir, only_owners: OWNERS)
   check.call('the kill switch leaves the region uncompilable (the method is dropped whole)',
              body.call(off_code, 'Perm_permutation').empty? ||
                body.call(off_code, 'Perm_permutation').include?('#error'))
   ENV['BC2CPP_OPT_BLOCK_FRAME'] = nil
 
   Dir.mktmpdir do |dir|
-    code, err = runtime.generate(BASE, dir, closed: false, only_owners: OWNERS)
+    code, err = runtime.generate(BASE, dir, only_owners: OWNERS)
     perm = body.call(code, 'Perm_permutation')
     check.call('the optional-arg-and-block method compiles its nested region',
                !perm.empty? && !perm.include?('#error'))
