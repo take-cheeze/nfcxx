@@ -18,7 +18,7 @@ oneapi_lib=${ONEAPI_LIB:-/opt/intel/oneapi/compiler/2026.1/lib:/opt/intel/oneapi
 clinc=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
 if ! command -v spirv-val >/dev/null || [ ! -f "$clinc/CL/cl.h" ] || [ ! -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ] \
   || [ ! -f "$ggml_build/libggml-base.so" ] || [ ! -f "$ggml_build/libggml-sycl.so" ] || [ ! -f "$ggml_src/fill.cpp" ] \
-  || [ ! -e "$oneapi_lib/libiomp5.so" ]; then
+  || ! ls "${oneapi_lib%%:*}"/libiomp5.so >/dev/null 2>&1; then
   echo "SKIP: gpu ggml fill_real: needs spirv-val, the OpenCL headers (OPENCL_INCLUDE), libOpenCL.so.1, GGML_BUILD/libggml-{base,sycl}.so, GGML_SRC/fill.cpp and ONEAPI_LIB/libiomp5.so"; exit 0
 fi
 out=$(mktemp -d)
