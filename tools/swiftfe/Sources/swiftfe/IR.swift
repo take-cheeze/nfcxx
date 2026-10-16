@@ -207,8 +207,17 @@ indirect enum Stmt {
   case ret(Expr?)
   case ifs(Expr, [Stmt], [Stmt])
   case whiles(Expr, [Stmt])
+  /// Leaves the innermost loop. Only `while let` lowering emits it.
+  case brk
   /// Drops the reference held by an owned local at scope exit.
   case release(String, Ty)
+}
+
+/// A top-level variable. It is a zero-initialized C static, so it stays reachable
+/// until exit, as a Swift global does.
+struct Global {
+  let cName: String
+  let ty: Ty
 }
 
 struct Program {
@@ -216,6 +225,7 @@ struct Program {
   let classes: [ClassInfo]
   let enums: [EnumInfo]
   let funcs: [FuncInfo]
+  let globals: [Global]
   let main: [Stmt]
   /// Every Optional type that appears in the program, so CEmit can define it.
   let optionals: [Ty]

@@ -54,6 +54,7 @@ final class Lowerer {
   private var allFuncs: [FuncInfo] = []
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
+  private var globals: [Global] = []
   private var scopes: [Scope] = []
   private var returnType: Ty? = nil
   private var counter = 0
@@ -182,6 +183,7 @@ final class Lowerer {
       classes: classDecls.map { $0.1 },
       enums: enumDecls.map { $0.1 },
       funcs: allFuncs,
+      globals: globals,
       main: main,
       optionals: optionals,
       functionTypes: functionTypes
@@ -375,7 +377,14 @@ final class Lowerer {
       let name = id.identifier.text
       let cName = "l\(nextID())_" + name
       try declare(name, cName: cName, ty: ty, mutable: mutable, owned: ty.isClassLike, binding)
-      out.append(.decl(cName, ty, value))
+      if scopes.count == 1 {
+        // Top-level code: the variable is a global, assigned where its declaration
+        // runs. The global is still zero here, so the assignment releases nothing.
+        globals.append(Global(cName: cName, ty: ty))
+        out.append(.assign(.local(cName), value, ty))
+      } else {
+        out.append(.decl(cName, ty, value))
+      }
     }
     return out
   }
@@ -441,6 +450,10 @@ final class Lowerer {
       return releasesForReturn() + [.ret(nil)]
     }
     if let loop = stmt.as(WhileStmtSyntax.self) {
+      if loop.conditions.count == 1, let first = loop.conditions.first,
+         case .optionalBinding(let binding) = first.condition {
+        return try lowerWhileLet(binding, loop)
+      }
       let cond = try lowerCondition(loop.conditions, loop)
       return [.whiles(cond, try lowerBlock(loop.body.statements))]
     }
@@ -526,6 +539,37 @@ final class Lowerer {
       }
     }
     return prelude + [.ifs(cond, then, otherwise)]
+  }
+
+  /// `while let x = opt { body }`. The optional is read again on every iteration:
+  /// each iteration copies it into a temporary, breaks when it is nil, and binds
+  /// the payload in a scope that is released like an `if let` binding.
+  private func lowerWhileLet(_ binding: OptionalBindingConditionSyntax, _ loop: WhileStmtSyntax) throws -> [Stmt] {
+    guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let initializer = binding.initializer?.value else {
+      throw error("unsupported conditional binding", binding)
+    }
+    let opt = try lowerExpr(initializer)
+    guard case .optional(let inner) = opt.ty else {
+      throw error("initializer for conditional binding must have Optional type, not '\(opt.ty.swiftName)'", initializer)
+    }
+    if opt.owned && opt.ty.isClassLike {
+      throw error("binding a temporary class value is not supported yet", initializer)
+    }
+
+    let tmp = "t\(nextID())"
+    let tmpRef = Expr(kind: .local(tmp), ty: opt.ty)
+    scopes.append(Scope())
+    let name = id.identifier.text
+    let cName = "l\(nextID())_" + name
+    try declare(name, cName: cName, ty: inner, mutable: false, owned: inner.isClassLike, binding)
+    let body = try lowerBlock(loop.body.statements)
+    let bound = own(Expr(kind: .unwrap(tmpRef), ty: inner))
+    let isNil = Expr(kind: .prefix("!", Expr(kind: .isSome(tmpRef), ty: .bool)), ty: .bool)
+    let iteration: [Stmt] =
+      [.decl(tmp, opt.ty, opt), .ifs(isNil, [.brk], []), .decl(cName, inner, bound)]
+      + body
+      + releases(of: scopes.removeLast())
+    return [.whiles(Expr(kind: .bool(true), ty: .bool), iteration)]
   }
 
   /// `switch` over an enum. Each case tests the tag and binds payload values.

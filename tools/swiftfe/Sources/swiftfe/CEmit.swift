@@ -147,6 +147,11 @@ enum CEmit {
       out += "};\n\n"
     }
 
+    for g in program.globals {
+      out += "static \(g.ty.cName) \(g.cName);\n"
+    }
+    if !program.globals.isEmpty { out += "\n" }
+
     for f in program.funcs {
       out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params)));\n"
     }
@@ -226,6 +231,8 @@ enum CEmit {
       return text + "\n"
     case .whiles(let cond, let body):
       return "\(indent)while (\(expr(cond))) {\n" + block(body, indent + "  ") + "\(indent)}\n"
+    case .brk:
+      return "\(indent)break;\n"
     case .release(let name, let ty):
       return "\(indent)\(releaseCode(name, ty))\n"
     }

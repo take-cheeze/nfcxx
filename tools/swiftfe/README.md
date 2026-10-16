@@ -42,12 +42,20 @@ Closures do not capture: an outer local used inside a closure is reported as not
 Not yet supported in M2 (each gives a diagnostic):
 - member access, `!`, or `== nil` on a temporary class value, e.g. `make().x`
 - structs with class-typed properties, and enums with class-typed payloads
-- labeled enum payloads, raw values, `while let`, class inheritance and methods
+- labeled enum payloads, raw values, class inheritance and methods
 - switching over a value other than an enum, and multiple patterns in one case
+- `while let` over a temporary class value, e.g. `while let n = next(of: m)` where
+  `next` returns a class (the binding would have to take the temporary's reference)
 
-Verified with AddressSanitizer and LeakSanitizer on the ARC cases: no leaks and no
-undefined behaviour. The enum and closure cases are also clean under AddressSanitizer
-and UBSan.
+`while let x = opt { ... }` is supported for Optional locals, parameters, fields and
+call results. The optional is read again on each iteration, and the binding follows
+the same release rules as `if let`.
+
+Top-level variables are C statics, so they stay reachable until exit. Their objects
+are never freed, and LeakSanitizer does not report them.
+
+The sanitizer pass in `tests/run.sh` checks every runnable case with AddressSanitizer,
+LeakSanitizer and UBSan.
 
 ## M0: parsing
 
@@ -93,6 +101,10 @@ Swift compiler, but the wording is not guaranteed to be identical.
 - `NAME.expected`: stdout must match exactly
 - `NAME.trap`: the program must exit nonzero after the expected output
 - `NAME.error`: compilation must fail with this diagnostic line
+
+After the functional cases, every case that is not an `.error` case is also built
+from its emitted C with `-fsanitize=address,leak,undefined`. The sanitized binary must
+print the same output and exit the same way (0, or nonzero for a trap case).
 
 ## M0 status
 
