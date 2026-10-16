@@ -19,6 +19,12 @@ module BlockSelf
                        'EXCEPT', 'STRING', 'MOVE', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   FORWARDING_OPS = Set['SUPER', 'ARGARY'].freeze
   SENDS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'].freeze
+  # Operators whose read set is R(a)..R(a+width-1) (vm.c OP_ADD..OP_GE: R(a) op R(a+1); OP_GETIDX: R(a)[R(a+1)];
+  # OP_SETIDX: R(a)[R(a+1)] = R(a+2); OP_ADDI/OP_SUBI and the patched OP_ADDILV/OP_SUBILV: R(a) op an immediate, whose
+  # fallback writes the immediate before sending), including their method-send fallback, which passes exactly those.
+  FIXED_WINDOW_OPS = { 'ADD' => 2, 'SUB' => 2, 'MUL' => 2, 'DIV' => 2, 'EQ' => 2, 'LT' => 2, 'LE' => 2, 'GT' => 2,
+                       'GE' => 2, 'GETIDX' => 2, 'SETIDX' => 3, 'ADDI' => 1, 'SUBI' => 1, 'ADDILV' => 1,
+                       'SUBILV' => 1 }.freeze
 
   module_function
 
@@ -116,6 +122,11 @@ module BlockSelf
     case op
     when 'RETURN', 'RETURN_BLK', 'BREAK', 'SETIV', 'SETGV', 'SETSV', 'SETCV', 'SETCONST', 'SETUPVAR', 'GETMCNST'
       regs.map { |r| [r, :argument] }
+    when *FIXED_WINDOW_OPS.keys
+      # vm.c: these read R(a) and the next width-1 registers only, also when they fall back to a send.
+      return nil unless insn.reg
+
+      FIXED_WINDOW_OPS[op].times.map { |k| [(insn.reg.to_i + k).to_s, :argument] }
     else
       # An operator window (ADD, ARRAY, HASH, STRCAT, ...) reads past its listed registers: every register from the
       # lowest listed one up to the frame's last.

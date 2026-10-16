@@ -97,7 +97,7 @@ require_relative 'codegen_entry_specialize'
 require_relative 'codegen_constructor_pools'
 require_relative 'codegen_class_object_args'
 require_relative 'codegen_return_classes'
-require_relative 'codegen_profiler_results'
+require_relative 'codegen_block_returns'
 require_relative 'codegen_core_ruby_results'
 require_relative 'codegen_return_accessors'
 require_relative 'codegen_exact_core_arms'
@@ -436,6 +436,8 @@ if $PROGRAM_NAME == __FILE__
     # checks every return, so its body compiles in a hot-only build too, and one no body can carry is an error.
     CodeGen.declared_return_hint_refusals = DeclaredReturns.hint_refusals(sig_loaded, ireps, registry)
     CodeGen.declared_returns.select(&:hint).each { |e| CodeGen.hot_only_excluded&.delete(e.label) }
+    # BLOCK_RETURNS (ADR 0475): `[T] ... { ... -> T } -> T` and `{ ... } -> self` declarations, checked with them.
+    CodeGen.block_returns = BlockReturns.from_signatures(sig_loaded)
     warn '== signature files (RBS_SIGNATURES) =='
     sig_loaded.files.each { |f| warn "  SIG_FILE #{f}" }
     sig_applied.diagnostics.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
@@ -468,7 +470,7 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.block_self_unread_names =
     foreign_method_names(foreign_ruby_srcs.reject { |path| compiled_files.include?(File.expand_path(path)) })
   # UNIQUE_CLASS_NAME: set before RBS_CHECKED_PARAMS and the first ClassLayout pass, since every
-  # trace_new_target caller reads it (and ClosedWorld#stable_constant_identity?, which PROFILER_RESULTS needs).
+  # trace_new_target caller reads it (and ClosedWorld#stable_constant_identity?, which BLOCK_RETURNS needs).
   UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
     UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
   end

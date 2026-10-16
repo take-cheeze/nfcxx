@@ -397,8 +397,9 @@ module RbsParamCheck
       name = insn.sym
       return new_why(ctx, irep, definition.index, cls) if name == 'new' && insn.op.start_with?('SEND')
 
-      body = ctx[:constructor_entries]&.profiler_result_body(irep, definition.index, insn)
-      return block_value_why(ctx, body, name, cls, depth) if body
+      entry, body = ctx[:constructor_entries]&.block_return_site(irep, definition.index, insn)
+      return block_value_why(ctx, body, name, cls, depth) if entry&.kind == :block_value
+      return trace(ctx, irep, definition.index, insn.reg, cls, depth + 1) if entry&.kind == :self
 
       returns_why(ctx, name, cls, depth)
     else
@@ -466,8 +467,8 @@ module RbsParamCheck
     entry_why(ctx, frame, reg, cls)
   end
 
-  # `RGSS::Profiler.section(...) { ... }` returns its block's value (PROFILER_RESULTS: profiler_result_body pins the
-  # native and the literal block, whose exits are plain returns): every RETURN of the block must be proven `cls`.
+  # A checked `[T] ... { ... -> T } -> T` declaration (BLOCK_RETURNS, ADR 0475: `RGSS::Profiler.section(...) { ... }`)
+  # returns its literal block's value, and the block's exits are plain returns: every RETURN must be proven `cls`.
   def block_value_why(ctx, body, name, cls, depth)
     body.instructions.each_with_index do |insn, idx|
       next unless insn.op.start_with?('RET') || %w[BREAK STOP].include?(insn.op)
