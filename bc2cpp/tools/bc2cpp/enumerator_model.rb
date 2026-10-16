@@ -45,7 +45,10 @@ module EnumeratorModel
     return Result.new(false, 'to_enum is not from mruby-enumerator') unless body && body.file.to_s.end_with?(FILE_SUFFIX)
     return Result.new(false, 'Kernel#to_enum has an unexpected body') unless to_enum_body?(body, ireps)
 
-    enum_for = registry['enum_for'] || []
+    # ALIAS_SITES (ADR 0474): the registry also holds an engine-side `alias enum_for to_enum` as a definition;
+    # the alias itself is judged by the site check below.
+    own_alias = ->(d) { d.installer == :alias && ireps[d.site.first.first]&.file.to_s.end_with?(FILE_SUFFIX) }
+    enum_for = (registry['enum_for'] || []).reject(&own_alias)
     return Result.new(false, 'enum_for is defined by a method') unless enum_for.empty?
 
     sites = alias_sites.select { |s| NAMES.include?(s[:new]) || NAMES.include?(s[:old]) }
@@ -57,7 +60,7 @@ module EnumeratorModel
     # The constructor chain: Enumerator.new -> Class#new -> Enumerator#initialize.
     CONSTRUCTION_NAMES.each do |name|
       (registry[name] || []).each do |other|
-        next if other.equal?(definition)
+        next if other.equal?(definition) || own_alias.call(other)
         next unless CONSTRUCTION_OWNERS.include?(other.owner)
         next if other.irep.nil? && other.owner == '<native>'
 

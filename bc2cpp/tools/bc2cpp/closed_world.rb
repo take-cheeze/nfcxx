@@ -69,7 +69,7 @@ class ClosedWorld
   # Sends that run a block with another `self`, which breaks "self is its lexical owner".
   SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
 
-  attr_reader :global_refusal, :native_paths
+  attr_reader :global_refusal, :native_paths, :ruby_paths
 
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
@@ -88,6 +88,7 @@ class ClosedWorld
     @native_code_tokens = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
+    @outside_owner_name = nil
     @ruby_paths = ruby_paths
     # Per outside file: the constants it can create, reopen, subclass or rebind
     # (TouchScan, ADR 0256).
@@ -157,7 +158,8 @@ class ClosedWorld
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
-    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) && !(scoped && native_free)
+    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) &&
+                              @outside_owner_name != name && !(scoped && native_free)
 
     reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?, singleton_arms)
     return reason if reason
@@ -329,6 +331,35 @@ class ClosedWorld
     @native_arms_name = previous
   end
 
+  # OUTSIDE_OWNER_CALL (ADR 0468): while a caller ends the chain's else in a call checked against every
+  # outside (core, native or outside Ruby) class that defines `name` (CodeGen#guarded_fallback_line), those
+  # definitions no longer make the fallback's receiver unknowable; the Ruby-side gates still apply.
+  def with_outside_owner_call(name)
+    previous = @outside_owner_name
+    @outside_owner_name = name
+    yield
+  ensure
+    @outside_owner_name = previous
+  end
+
+  # SELF_NEW_LEAF (ADR 0468): `klass` and every class below it, when the closed world sees every one: the declared
+  # subclasses (matched by last path segment, as the hierarchy is), and none made by `Class.new(klass)`, an outside
+  # Ruby `class X < klass`, or an outside native source that spells the name (an `mrb_define_class` could subclass
+  # it). nil when any of those may exist. A singleton method of `klass` runs with one of these as `self`, an instance
+  # method of `klass` with an instance of one of them.
+  def known_subclasses(klass)
+    return nil if @global_refusal || !@wild.empty? || !@class_decls.key?(klass) || @rebound.include?(simple(klass))
+
+    set = Set[klass] | descendants(klass)
+    return nil unless set.all? { |k| @class_decls.key?(k) }
+
+    names = set.map { |k| simple(k) }.to_set
+    return nil if names.any? { |n| @dynamic_subclassed.include?(n) || @outside_ruby_supers.include?(n) }
+    return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
+
+    set.to_a.sort
+  end
+
   # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby
   # definition, alias, visibility change or prepend on `owner`, a dynamic
   # installer) can replace core `owner`'s native `name`.
@@ -396,7 +427,35 @@ class ClosedWorld
   # ownerless_native_dispatch_safe? plus a receiver that includes Kernel, which only a
   # BasicObject subclass lacks (the class may be declared, created or subclassed anywhere).
   def kernel_native_dispatch_safe?(name)
-    return false unless ownerless_native_dispatch_safe?(name)
+    ownerless_native_dispatch_safe?(name) && basic_object_subclass_free?
+  end
+
+  # BLOCK_ITERATOR_DIRECT (ADR 0472): an implicit-self send of `name` reaches mruby's own Kernel Ruby body (defined
+  # in `kernel_file`) for every receiver: no computed definer can install the name, the only outside Ruby source that
+  # spells a definition of it (by name, wherever it sits) is `kernel_file`, which defines it on Kernel alone and
+  # reopens nothing dynamically, and every receiver includes Kernel. Native registrations and the program's own
+  # definitions are the caller's to check.
+  def kernel_ruby_dispatch_safe?(name, kernel_file)
+    return false if @global_refusal || @unknown_defs.include?(name)
+
+    paths = outside_ruby_definer_paths(name)
+    return false unless paths.all? { |path| File.expand_path(path) == File.expand_path(kernel_file.to_s) }
+    unless paths.empty?
+      definers = ForeignDefiners.scan(paths)
+      return false unless definers.wild.empty? && definers.names.all? { |owner, names| owner == 'Kernel' || !names.include?(name) }
+    end
+
+    basic_object_subclass_free?
+  end
+
+  # The outside Ruby sources whose text spells a definition of `name` (foreign_method_names, over-collected).
+  def outside_ruby_definer_paths(name)
+    @outside_ruby_definer_paths ||= {}
+    @outside_ruby_definer_paths[name] ||= Array(@ruby_paths).select { |path| foreign_method_names([path]).include?(name) }
+  end
+
+  # No class of the program, created or subclassed anywhere, lacks Kernel.
+  def basic_object_subclass_free?
     return false if @dynamic_subclassed.include?('BasicObject') || @outside_ruby_supers.include?('BasicObject')
 
     supers = @class_decls.values.flatten.map { |decl| decl[:super] }
@@ -420,7 +479,7 @@ class ClosedWorld
     return false if @global_refusal || @mm_classes.include?('NilClass')
     return false if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
 
-    owners.none? { |owner| ForeignDefiners.defines?(@ruby_paths, owner, name) }
+    !ForeignDefiners.defines_any?(@ruby_paths, owners, name)
   end
 
   # Every native source of the build that spells +name+ (a definition, an alias or a funcall).
@@ -974,7 +1033,15 @@ class ClosedWorld
   def define_method_sites_trusted?
     return @define_method_trusted if defined?(@define_method_trusted)
 
-    @define_method_trusted = !@global_refusal && !define_method_intercepted?
+    @define_method_trusted = !@global_refusal && !installer_intercepted?('define_method')
+  end
+
+  # ALIAS_SITES (ADR 0474): the same question for `alias_method`, whose class-body sites the registry
+  # defines as copies of the method they name.
+  def alias_method_trusted?
+    return @alias_method_trusted if defined?(@alias_method_trusted)
+
+    @alias_method_trusted = !@global_refusal && !installer_intercepted?('alias_method')
   end
 
   def outside_call_names(except_files)
@@ -987,8 +1054,7 @@ class ClosedWorld
 
   # -- the closed world's own dynamic definitions ------------------------------
 
-  def define_method_intercepted?
-    name = 'define_method'
+  def installer_intercepted?(name)
     return true if @registry.key?(name) || @unknown_defs.include?(name)
     return true if @outside_def_names.include?(name) || @outside_ruby_names.include?(name)
     return true if @outside_name_paths.fetch(name, []).any? { |path| !path.match?(NATIVE_CORE) }

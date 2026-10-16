@@ -3,6 +3,7 @@
 # CodeGen: Fixnum, Array and class return proofs.
 
 require_relative 'define_method_sites'
+require_relative 'alias_sites'
 require_relative 'codegen_declared_returns'
 
 class CodeGen
@@ -404,6 +405,9 @@ class CodeGen
       irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'ALIAS', 'UNDEF'
+          # ALIAS_SITES (ADR 0474): a settled class-body alias is a registry definition of its new name.
+          next if insn.op == 'ALIAS' && AliasSites.settled?(@registry, label, idx)
+
           names << insn.sym unless scoped
         when 'LOADSYM'
           return nil if NAME_INSTALLER_SENDS.include?(insn.sym)
@@ -411,6 +415,8 @@ class CodeGen
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
           # DEFINE_METHOD_SITES (ADR 0288): the registry defines this one, so it names nothing unknown.
           next if insn.sym == 'define_method' && DefineMethodSites.settled?(@registry, irep, idx, @ireps)
+          # ALIAS_SITES (ADR 0474): so is a settled class-body alias_method, and it leaves `old` as it was.
+          next if insn.sym == 'alias_method' && AliasSites.settled?(@registry, label, idx)
 
           syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
           return nil unless syms && !syms.empty?

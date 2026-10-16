@@ -519,7 +519,7 @@ class CodeGen
     end
     build = @index_closed_build
     chain ||= index_closed_fallback(0, 'recv', name, argv, []) if plan.resolution.none? { |_, (kind2, _)| kind2 == :ruby }
-    unless chain && build[:used] && !build[:overflow] && !chain.match?(/\bmrb_funcall\w*\(|\bbc2cpp_send\(/)
+    unless chain && build[:used] && !build[:overflow] && !chain.match?(/\bmrb_funcall\w*\(|\bbc2cpp_send\(|\bbc2cpp_owner_call(?:_named)?\(/)
       index_closed_reasons[name] = :chain_uncovered
       @index_closed_plan[name] = nil
       return nil

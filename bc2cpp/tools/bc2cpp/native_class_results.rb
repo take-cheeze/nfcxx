@@ -26,7 +26,8 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-bigint/core/bigint.c' => 'dcc607215eb53346f5a2e5b760314f06afa9f629ad3c2f14e18f56059a29117f',
     '3rd/mruby-onig-regexp/src/mruby_onig_regexp.c' => '2c2bf2d5a96850e22b791b7e191e37867d1a3f2892e0ae5be632d71cc97d1884',
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
-    'mruby-rgss/src/lib.cxx' => %w[664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e 24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c]
+    'mruby-rgss/src/lib.cxx' => %w[664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e 24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c
+                                 0dc8534bc7cabd36a10818deedd7559a61691dee1bf23d5e05febf11e3ca202e]
   }.freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
   FACTS = {

@@ -208,6 +208,21 @@ class CodeGen
       native_owner = native && (native[:class_owner] || known)
       native_constructor_safe = native && @closed_world&.standard_constructor_lookup? &&
                                 exact_constructor_chain?(native_owner)
+      # OVERLOADED_CONSTRUCT (ADR 0468): a class with declared constructor overloads picks one at the call site,
+      # where the path below would leave a by-name `new`: a count its entry point does not take, or an argument
+      # tag test (Bitmap's file-load form) the Fixnum proof does not settle.
+      fixed_arity = native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
+      tag_tested = native && fixed_arity && native[:type_guard] == :int &&
+                   (native_param_unbox_name?('_init_size') ? [0] : argv.each_index.to_a).any? do |i|
+                     !native_int_arg_proven?(irep, new_proof_idx, owner_def, trace_reg_offset, argv, i)
+                   end
+      overloaded = native_constructor_safe && (!fixed_arity || tag_tested) &&
+                   overloaded_construct_code(native_owner, native, d, recv, argv, irep, guard_proof_site, owner_def,
+                                             [irep, new_proof_idx, owner_def, trace_reg_offset])
+      if overloaded
+        @native_construct_used << known
+        return overloaded
+      end
       # Exact arity only (an Array lists several accepted counts); other counts fall
       # through to dynamic dispatch.
       if native_constructor_safe &&
@@ -303,9 +318,17 @@ class CodeGen
         call = native_param_unbox_block(unbox_stmts, "r#{d} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n")
         return "#{note}  #{call}" unless guard
 
+        # NATIVE_CONSTRUCT_SHAPE: an argument shape `fn` does not take (Bitmap's file-load form) is still
+        # `Klass.new` on the proven class, and native_constructor_safe proves `new` is Class#new there:
+        # mrb_obj_new is that allocate + dispatched #initialize (no block on a positional SEND).
+        shape_fallback = lambda do |klass_expr|
+          args = argv.empty? ? '0, NULL' : "#{n}, bc2cpp_new_args"
+          decl = argv.empty? ? '' : "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} }; "
+          "{ #{decl}r#{d} = mrb_obj_new(M, #{klass_expr}, #{args}); }\n"
+        end
         # GUARD_VIOLATION: the class test cannot fail; only the argument tags still can.
         if class_guard && new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
-          inner = arg_checks ? "if (#{arg_checks}) {\n      #{call}    } else {\n      #{dynamic_dispatch_line(d, recv, name, argv)}    }\n" : call
+          inner = arg_checks ? "if (#{arg_checks}) {\n      #{call}    } else {\n      #{shape_fallback.call("mrb_class_ptr(#{recv})")}    }\n" : call
           return "#{note}  // GUARD_VIOLATION: #{recv} is the stable constant #{known}; a failed class test is an error\n" \
                  "  if (#{class_guard}) {\n" \
                  "    #{inner}" \
@@ -314,11 +337,17 @@ class CodeGen
                  "  }\n"
         end
 
+        fallback = if class_guard.nil? && arg_checks
+                     "  // NATIVE_CONSTRUCT_SHAPE: another argument shape is Class#new on #{class_value}.\n    " +
+                       shape_fallback.call(class_value)
+                   else
+                     dynamic_dispatch_line(d, recv, name, argv)
+                   end
         return "#{note}" \
                "  if (#{guard}) {\n" \
                "    #{call}" \
                "  } else {\n" \
-               "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+               "    #{fallback}" \
                "  }\n"
       end
     end
@@ -1787,6 +1816,10 @@ class CodeGen
       return "  #{line}" if line.start_with?(CORE_EXACT_DIRECT_NOTE)
       # TO_ENUM_DIRECT (ADR 0418): the Enumerator is built in place, the checked arm's else is a guard violation.
       return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
+
+      # OUTSIDE_OWNER_CALL (ADR 0468): a bare send whose every answering class the closed world names.
+      bare = outside_owner_bare_line(d, recv, name, argv, cw_site)
+      return "#{miss}  #{bare}" if bare
 
       "#{diag}#{note}#{miss}  #{line}"
     end

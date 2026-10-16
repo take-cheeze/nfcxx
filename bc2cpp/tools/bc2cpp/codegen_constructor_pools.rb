@@ -459,7 +459,13 @@ class CodeGen
     end
     return nil unless names.all? && names.all? { |name| @closed_world.class_valued_constant?(name) }
 
-    names.uniq.flat_map { |name| @closed_world.classes_named(name) }
+    candidates = names.uniq.flat_map { |name| @closed_world.classes_named(name) }
+    # CONSTRUCTOR_EXACT_CONSTANT: a receiver the compiler already proves to be one stable class constant
+    # (constant_object_owner, what CLOSED_WORLD_CONSTANT_OBJECT calls by) builds that class alone, not every class
+    # sharing its last segment (`Game::Map.new` is no entry of RPG2k::Scene::Map#initialize).
+    owner = entry_arg_body_owner[irep.label]&.owner
+    exact = owner && constant_object_owner(irep, idx, insn.reg, owner)
+    candidates.include?(exact) ? [exact] : candidates
   end
 
   # `super` in an initialize reaches the superclass's initialize with the arguments it passes.
