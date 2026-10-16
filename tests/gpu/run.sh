@@ -22,3 +22,16 @@ trap 'rm -rf "$out"' EXIT
 "$ptxas" -arch="$arch" "$out/mul2.ptx" -o "$out/mul2.cubin"
 gcc -O2 -Wall -I"$inc" -L"$cuda/lib64" launch.c -o "$out/launch" -lcudart
 "$out/launch" "$out/mul2.cubin"
+
+# Reachability: only the functions the kernel reaches are lowered. The helper _Z5twicei is emitted, the dead function
+# _Z6dead_fni (whose body the emitter refuses) is not, and the kernel's result is exact. The mutant (no helper) must be
+# refused: a live function that is dropped cannot be called.
+"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" --kernel=mul2 reach.ir > "$out/reach.ptx"
+grep -q "_Z5twicei" "$out/reach.ptx"
+if grep -q "_Z6dead_fni" "$out/reach.ptx"; then echo "FAIL reach: the dead function was emitted"; exit 1; fi
+"$ptxas" -arch="$arch" "$out/reach.ptx" -o "$out/reach.cubin"
+"$out/launch" "$out/reach.cubin"
+if "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" --kernel=mul2 reach_mutant.ir > /dev/null 2>&1; then
+  echo "FAIL reach_mutant: the kernel without its helper was emitted"; exit 1
+fi
+echo "reach: helper emitted, dead function not, mutant refused"

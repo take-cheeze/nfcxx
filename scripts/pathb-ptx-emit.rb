@@ -1816,8 +1816,86 @@ def parse_forms_chunked(src)
   forms
 end
 
+# The symbols of a chunk's text that the parse would make `&"name"` (IRSym with sig "&"), in order. A `"` outside a string
+# starts a string (read_string skips it, escapes included), so the scan follows the tokenizer's string boundaries; a `&`
+# starts a symbol only at a token start, as the tokenizer's bare-token rule has it.
+def text_sym_refs(c)
+  refs = []
+  pos = 0
+  while (q = c.index('"', pos))
+    s, pos = read_string(c, q)
+    if q >= 1 && c.getbyte(q - 1) == 38 && (q == 1 || [9, 10, 13, 32, 34, 40, 41].include?(c.getbyte(q - 2)))
+      refs << IRStr.new(s).to_s
+    end
+  end
+  refs
+end
+
+# Parses only the functions that the kernels reach, and the forms that are not functions (see emit_module). A text scan
+# finds each function's name and the symbols it takes, the reachable set is computed from those names, and only the
+# reachable functions are tokenized and parsed. Returns [forms, function indices, kernel names], or nil when the full
+# parse must be used (a comment inside a line, a function name twice, or a chunk that does not parse).
+def reachable_forms(src, kernels)
+  return nil if src.split("\n").any? { |l| !l.lstrip.start_with?(";") && l.include?(";") }
+  chunks = []
+  cur = []
+  src.split("\n").each do |line|
+    next if line.lstrip.start_with?(";")
+    if line.start_with?("(") && !cur.empty?
+      chunks << cur.join("\n")
+      cur = []
+    end
+    cur << line
+  end
+  chunks << cur.join("\n") unless cur.empty?
+  names = []
+  callees = {}
+  chunks.each do |c|
+    next unless c.start_with?("(function ")
+    s, _ = read_string(c, c.index('"'))
+    name = IRStr.new(s).to_s
+    return nil if callees.key?(name)
+    names << name
+    callees[name] = text_sym_refs(c)
+  end
+  return nil if names.empty?
+  resolved = kernels.map do |k|
+    hits = names.select { |n| n == k || n.start_with?("_Z#{k.length}#{k}") }
+    raise BadIR, "no function named #{k} in the IR" if hits.empty?
+    raise BadIR, "#{hits.length} functions named #{k} in the IR" if hits.length > 1
+    hits[0]
+  end
+  live = {}
+  stack = resolved.dup
+  until stack.empty?
+    n = stack.pop
+    next if live[n] || !callees.key?(n)
+    live[n] = true
+    stack.concat(callees[n])
+  end
+  forms = []
+  indices = []
+  ord = -1
+  chunks.each do |c|
+    if c.start_with?("(function ")
+      ord += 1
+      next unless live[names[ord]]
+      indices << ord
+    end
+    begin
+      parse_forms(tokenize(c)).each { |f| forms << f }
+    rescue BadIR
+      return nil
+    end
+  end
+  [forms, indices, resolved]
+end
+
 def emit_module(src, sm, kernels = [])
-  forms = parse_forms_chunked(src)
+  reach = kernels.empty? ? nil : reachable_forms(src, kernels)
+  forms = reach ? reach[0] : parse_forms_chunked(src)
+  fn_indices = reach ? reach[1] : nil
+  kernels = reach[2] if reach
   fns = []
   shared = {}
   globals = {}
@@ -1830,7 +1908,7 @@ def emit_module(src, sm, kernels = [])
     if h == "ir-module"
       next
     elsif h == "function"
-      fns << Fn.new(f, fns.length)
+      fns << Fn.new(f, fn_indices ? fn_indices.shift : fns.length)
     elsif h == "data"
       # a string constant (a printf format): its bytes, as a .const array in the module
       name = f[1].to_s
@@ -1910,11 +1988,13 @@ def emit_module(src, sm, kernels = [])
   raise BadIR, "no function in the IR" if fns.empty?
   # A listed kernel is named as the source names it (cuda-rewrite.rb --kernels writes plain names). A C++ function's IR
   # name is its Itanium mangled name, so a plain name matches by the rule scripts/cuda-embed.rb uses.
-  kernels = kernels.map do |k|
-    hits = fns.map(&:name).select { |n| n == k || n.start_with?("_Z#{k.length}#{k}") }
-    raise BadIR, "no function named #{k} in the IR" if hits.empty?
-    raise BadIR, "#{hits.length} functions named #{k} in the IR" if hits.length > 1
-    hits[0]
+  unless reach
+    kernels = kernels.map do |k|
+      hits = fns.map(&:name).select { |n| n == k || n.start_with?("_Z#{k.length}#{k}") }
+      raise BadIR, "no function named #{k} in the IR" if hits.empty?
+      raise BadIR, "#{hits.length} functions named #{k} in the IR" if hits.length > 1
+      hits[0]
+    end
   end
   # Keep the functions reachable from the kernels: the listed kernels, or else the functions that are not static and
   # not called. A static function that nothing reaches is dead code (a C++ header's unused inline helper): it is not

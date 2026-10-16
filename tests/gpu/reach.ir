@@ -1,0 +1,49 @@
+; Reachability test (scripts/pathb-ptx-emit.rb with --kernel=mul2): the kernel mul2 calls the live helper twice, which the
+; emitter must lower; the dead function dead_fn is not reachable from the kernel, so it is not lowered (its body has a
+; form the emitter refuses, so a lowering of it would fail the run).
+(ir-module "reach.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "_Z5twicei"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wmul int %1 (const int 2)))
+  (return %2))
+
+(function "_Z6dead_fni"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (bogus_form int $"x"))
+  (return %1))
+
+(function "mul2"
+  (ret void)
+  (params (param %0 "a" (ptr int)) (param %1 "b" (ptr int)) (param %2 "n" int))
+  (slot "a" (ptr int) 8 8)
+  (slot "b" (ptr int) 8 8)
+  (slot "n" int 4 4)
+  (store (ptr int) $"a" %0)
+  (store (ptr int) $"b" %1)
+  (store int $"n" %2)
+  (let %3 int (gpu int "ctaid.x"))
+  (let %4 int (gpu int "ntid.x"))
+  (let %5 int (gpu int "tid.x"))
+  (let %15 int (wmul int %3 %4))
+  (let %6 int (wadd int %15 %5))
+  (let %7 int (load int $"n"))
+  (let %8 bool (lt int %6 %7))
+  (if %8
+    (then
+      (let %9 (ptr int) (load (ptr int) $"a"))
+      (let %10 (ptr int) (index %9 %6 4))
+      (let %11 int (load int %10))
+      (let %12 int (call int &"_Z5twicei" %11))
+      (let %13 (ptr int) (load (ptr int) $"b"))
+      (let %14 (ptr int) (index %13 %6 4))
+      (store int %14 %12))
+    (else))
+  (return))
