@@ -7,9 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
-# The PTX emitter: the Ruby script (the default), or the C++ port with NFCXX_PTX_EMITTER=cxx (same text, same exit status).
+# The PTX emitter: the C++ port (the default), or the Ruby script with NFCXX_PTX_EMITTER=ruby (same text, same exit status).
 emit_ptx() {
-  if [ "${NFCXX_PTX_EMITTER:-ruby}" = cxx ]; then
+  if [ "${NFCXX_PTX_EMITTER:-cxx}" = cxx ]; then
     [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
     "$root/build/pathb-ptx-emit" --emit "$@"
   else

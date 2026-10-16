@@ -122,8 +122,8 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   # The kernels are the names cuda-rewrite.rb listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
-  # NFCXX_PTX_EMITTER=cxx: the C++ emitter (tools/pathb-ptx-emit, same text as the Ruby; the Ruby stays the default)
-  if [ "${NFCXX_PTX_EMITTER:-ruby}" = cxx ]; then
+  # NFCXX_PTX_EMITTER=cxx: the C++ emitter (tools/pathb-ptx-emit, same text as the Ruby; the default; NFCXX_PTX_EMITTER=ruby selects the Ruby script)
+  if [ "${NFCXX_PTX_EMITTER:-cxx}" = cxx ]; then
     [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
     "$root/build/pathb-ptx-emit" --emit --sm=$sm ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" > "$dev.ptx" || exit $?
   else
