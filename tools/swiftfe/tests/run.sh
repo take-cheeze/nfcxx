@@ -13,8 +13,13 @@ trap 'rm -rf "$tmp"' EXIT
 
 pass=0
 fail=0
+clean=0
 report() {
   if [ "$1" = ok ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $2: $3"; fi
+}
+# Same as report, for the sanitizer pass, which is counted separately.
+sreport() {
+  if [ "$1" = ok ]; then clean=$((clean + 1)); else fail=$((fail + 1)); echo "FAIL sanitizer $2: $3"; fi
 }
 
 for src in "$dir"/cases/*.swift; do
@@ -54,5 +59,40 @@ for src in "$dir"/cases/*.swift; do
   fi
 done
 
-echo "$pass passed, $fail failed"
+# Sanitizer pass. The C that swiftfe emits for each program that should run is
+# built with AddressSanitizer, LeakSanitizer and UBSan. It must print the
+# expected output and exit the same way as the ordinary build: 0, or nonzero
+# for a trap case. Any leak or undefined behaviour makes the run fail.
+for src in "$dir"/cases/*.swift; do
+  name=$(basename "$src" .swift)
+  cases="$dir/cases"
+  [ -f "$cases/$name.error" ] && continue
+
+  if ! "$bin" emit-c "$src" > "$tmp/$name.c"; then
+    sreport bad "$name" "emit-c failed under the sanitizer pass"
+    continue
+  fi
+  if ! cc -std=c11 -fsanitize=address,leak,undefined -fno-sanitize-recover=all -o "$tmp/$name.san" "$tmp/$name.c" 2>"$tmp/$name.cc"; then
+    sreport bad "$name" "sanitized build failed: $(cat "$tmp/$name.cc")"
+    continue
+  fi
+  actual=$(sh -c "\"$tmp/$name.san\"" 2>"$tmp/$name.san.err")
+  status=$?
+  if [ -f "$cases/$name.trap" ]; then
+    want_status=nonzero
+  else
+    want_status=zero
+  fi
+  if [ "$actual" != "$(cat "$cases/$name.expected")" ]; then
+    sreport bad "$name" "sanitized output mismatch: $(cat "$tmp/$name.san.err")"
+  elif [ "$want_status" = zero ] && [ $status -ne 0 ]; then
+    sreport bad "$name" "sanitized run failed with status $status: $(cat "$tmp/$name.san.err")"
+  elif [ "$want_status" = nonzero ] && [ $status -eq 0 ]; then
+    sreport bad "$name" "sanitized run should trap but exited 0"
+  else
+    sreport ok "$name" ""
+  fi
+done
+
+echo "$pass passed, $fail failed (sanitizer: $clean clean)"
 [ $fail -eq 0 ]

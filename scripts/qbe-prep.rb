@@ -62,12 +62,18 @@
 #     map to those. libstdc++'s std::numbers variables (pulled in by <map>) use all of them. Their literals
 #     (`2.71875f16`) are rewritten to the binary16 value, as a cast of an exact hex float, or to a plain
 #     `float`/`double` literal (`f32`, `f64`); `f128` to the bit pattern.
-#   * Hand-written C (--c-input, passed by scripts/qbe-cc when nfcxx sets NFCXX_C_INPUT=1 for .c inputs;
-#     glibc headers and user code): `volatile` is dropped (cproc errors on any store to a volatile object; it
-#     already emits volatile loads as plain loads; a volatile block-scope local gets `__nfcxx_keep(&x);` after
-#     its declaration so QBE keeps it in memory across setjmp/longjmp), and `typedef T _Float32;`-style
-#     typedefs of the floating types above are removed (the names are mapped instead), as glibc's
-#     <bits/floatn.h> declares them.
+#   * `volatile` is dropped everywhere (cproc errors on any store to a volatile object; it already emits
+#     volatile loads as plain loads; a volatile block-scope local gets `__nfcxx_keep(&x);` after its
+#     declaration so QBE keeps it in memory across setjmp/longjmp). The stores that remain are plain, in
+#     program order, on x86-64 (TSO): the same code gcc emits for a volatile store there, which is what CoreCLR's
+#     GC needs (src/coreclr/gc/env/volatile.h). Not for other targets: a plain store has no release ordering on
+#     arm64, and the fence stub below is x86 mfence. Hand-written C (--c-input) gets the same rule.
+#   * Hand-written C (--c-input; glibc headers and user code): `typedef T _Float32;`-style typedefs of the
+#     floating types above are removed (the names are mapped instead), as glibc's <bits/floatn.h> declares them.
+#   * GCC's `__sync_{add,sub,and,or,xor}_and_fetch_{4,8}` and `__sync_val_compare_and_swap_{4,8}` (the Interlocked
+#     operations of CoreCLR's gcenv.interlocked.inl) become helpers over cproc's `__atomic_fetch_OP` and
+#     `__atomic_compare_exchange_n`, seq_cst, with GCC's results. `__builtin_prefetch` and `__builtin_ia32_pause`
+#     are hints and become empty helpers; `__builtin_ffs` a small helper.
 #
 # Usage: scripts/mrb scripts/qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL
 # ASM_TAIL is appended to the QBE assembly by qbe-cc.
@@ -730,6 +736,26 @@ def add_bit_helpers
 end
 add_bit_helpers
 
+# GCC's __sync read-modify-write builtins over cproc's __atomic_fetch_OP (which returns the old value, so the new one
+# is old OP v) and __atomic_compare_exchange_n (on failure it writes the current value into the expected one, so the
+# result is the old value either way). Sizes 4 and 8 are the ones CoreCLR uses.
+[4, 8].each do |bytes|
+  t = bytes == 4 ? 'unsigned int' : 'unsigned long'
+  { 'add' => '+', 'sub' => '-', 'and' => '&', 'or' => '|', 'xor' => '^' }.each do |op, sym|
+    name = "__sync_#{op}_and_fetch_#{bytes}"
+    HELPER_BUILTINS[name] = ["__nfcxx_#{name}",
+      "static #{t} __nfcxx_#{name}(void *p, #{t} v) { return __atomic_fetch_#{op}((#{t} *)p, v, 5) #{sym} v; }"]
+  end
+  name = "__sync_val_compare_and_swap_#{bytes}"
+  HELPER_BUILTINS[name] = ["__nfcxx_#{name}",
+    "static #{t} __nfcxx_#{name}(void *p, #{t} o, #{t} n) { __atomic_compare_exchange_n((#{t} *)p, &o, n, 0, 5, 5); return o; }"]
+end
+HELPER_BUILTINS['__builtin_ia32_pause'] = ['__nfcxx_pause', 'static void __nfcxx_pause(void) { }']
+HELPER_BUILTINS['__builtin_prefetch'] = ['__nfcxx_prefetch', 'static void __nfcxx_prefetch(const void *p, ...) { (void)p; }']
+HELPER_BUILTINS['__builtin_ffs'] = ['__nfcxx_ffs',
+  'static int __nfcxx_ffs(int x) { unsigned int u = (unsigned int)x; int n = 0; if (u == 0) return 0;' \
+  ' while (!(u & 1)) { u >>= 1; ++n; } return n + 1; }']
+
 # Type-generic overflow builtins: [C type, helper suffix, unsigned counterpart of a signed type].
 OV_TYPES = [['int', 'i', 'unsigned int'], ['unsigned int', 'u', nil], ['long', 'l', 'unsigned long'],
             ['unsigned long', 'ul', nil], ['long long', 'll', 'unsigned long long'],
@@ -1247,12 +1273,10 @@ def main(argv)
   need_int3 = false
   need_fence = false
   prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
-  if c_input
-    keep = volatile_locals(tk)
-    unless keep.empty?
-      edits.concat(keep)
-      prelude[KEEP_NAME] = KEEP_DEF
-    end
+  keep = volatile_locals(tk)
+  unless keep.empty?
+    edits.concat(keep)
+    prelude[KEEP_NAME] = KEEP_DEF
   end
   # Identifiers some rewrite looks at (by sym: a name in SPECIAL_ID, or __atomic_*). Every other token
   # falls through all the rewrites below and is skipped at once.
@@ -1280,12 +1304,12 @@ def main(argv)
     end
     nm = c == ID_CODE ? tk.text(i) : nil
 
-    # 0b. Hand-written C only (--c-input): cproc rejects every store to a volatile object ("volatile store is
-    # not yet supported"), yet it already emits volatile loads as plain loads and QBE does not reorder or remove
-    # memory accesses of an object whose address escapes (struct members, globals). So the qualifier is
-    # dropped, except on inline asm. A volatile local whose address is never taken is promoted to a register
-    # by QBE, so volatile_locals() makes its address escape.
-    if c_input && nm && VOLATILE_QUALS.include?(nm) &&
+    # 0b. cproc rejects every store to a volatile object ("volatile store is not yet supported"), yet it already
+    # emits volatile loads as plain loads and QBE does not reorder or remove memory accesses of an object whose
+    # address escapes (struct members, globals). So the qualifier is dropped, except on inline asm (see the file
+    # comment). A volatile local whose address is never taken is promoted to a register by QBE, so
+    # volatile_locals() makes its address escape.
+    if nm && VOLATILE_QUALS.include?(nm) &&
        !(tk.code(i - 1) == ID_CODE && ['__asm__', '__asm', 'asm'].include?(tk.text(i - 1)))
       edits << [tk.start(i), tk.stop(i), '']
       i += 1
