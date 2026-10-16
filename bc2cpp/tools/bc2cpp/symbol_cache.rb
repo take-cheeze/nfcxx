@@ -346,7 +346,7 @@ module SymbolCache
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
     #ifdef BC2CPP_NOMETHOD_VERIFY
       fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
-      fprintf(stderr, "#%s: %s\n", mrb_sym_name(M, mid), what);
+      fprintf(stderr, "#%s: %s\\n", mrb_sym_name(M, mid), what);
       fflush(stderr);
       abort();
     #endif
