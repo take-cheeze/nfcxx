@@ -8,6 +8,7 @@
 // The real sycl headers include these; the ggml sources rely on them (std::lock_guard in dpct/helper.hpp).
 #include <memory>
 #include <mutex>
+#include <complex>
 #include <cstddef>
 #include <ostream>
 
@@ -101,9 +102,37 @@ inline double pown(double x, int n) {
 class half2 {
  public:
   half2() = default;
-  half2(half a, half b) : x(a), y(b) {}
-  half x, y;
+  half2(half a, half b) : v_{a, b} {}
+  half &x() { return v_[0]; }
+  half &y() { return v_[1]; }
+  const half &x() const { return v_[0]; }
+  const half &y() const { return v_[1]; }
+  half &operator[](int i) { return v_[i]; }
+  const half &operator[](int i) const { return v_[i]; }
+
+ private:
+  half v_[2];
 };
+
+// Free functions the ggml sources call on device values (the real headers provide them; these are the host-side forms).
+template <class To, class From> To bit_cast(const From &f) {
+  static_assert(sizeof(To) == sizeof(From), "bit_cast size");
+  To t;
+  std::memcpy(&t, &f, sizeof(To));
+  return t;
+}
+inline bool isnan(float f) { return f != f; }
+inline bool isnan(half h) { return (float)h != (float)h; }
+template <class T> T mul_hi(T a, T b) { return (T)(((uint64_t)a * (uint64_t)b) >> 32); }
+inline half fmax(half a, half b) { return half((float)a > (float)b ? (float)a : (float)b); }
+
+namespace ext {
+namespace oneapi {
+namespace experimental {
+enum class architecture { unknown };
+}  // namespace experimental
+}  // namespace oneapi
+}  // namespace ext
 
 }  // namespace sycl
 

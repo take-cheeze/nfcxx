@@ -113,6 +113,8 @@ typedef float cl_float;
 typedef double cl_double;
 
 namespace sycl {
+enum class rounding_mode { automatic, rte, rtz, rtp, rtn };
+
 enum class backend { host, opencl, level_zero, cuda, hip, vulkan, webgpu, ext_oneapi_level_zero };
 
 using size_t = unsigned long;
@@ -217,6 +219,7 @@ template <int D = 1, bool WithOffset = true> class item : public detail::size_co
 
 template <int D = 1> class nd_range {
  public:
+  nd_range() {}
   nd_range(const range<D> &g, const range<D> &l) : g_(g), l_(l) {}
   range<D> get_global_range() const { return g_; }
   range<D> get_local_range() const { return l_; }
@@ -1937,6 +1940,10 @@ template <class T, int N> class vec {
     for (int i = 0; i < N; i++) r[i] = (U)v_[i];
     return r;
   }
+  // as<U>(): the same bytes read as another vector or scalar type.
+  template <class U> U as() const { U u; std::memcpy(&u, v_, sizeof(U)); return u; }
+  // convert<U, rounding_mode>(): the rounding is the conversion's own (round to nearest), so the mode is accepted and ignored.
+  template <class U, rounding_mode> vec<U, N> convert() const { return convert<U>(); }
   friend vec operator+(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] + b.v_[i]; return r; }
   friend vec operator-(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] - b.v_[i]; return r; }
   friend vec operator*(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] * b.v_[i]; return r; }
