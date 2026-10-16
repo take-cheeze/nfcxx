@@ -339,6 +339,9 @@ class CodeGen
       block_label = irep.reps[block_irep_idx.to_i]
       block_irep = block_label && @ireps[block_label]
       next unless block_irep && block_fallback_safe?(block_irep)
+      # BLOCK_SELF_WORLD (ADR 0477): a rebinder runs this block under another self; the compiled body would read
+      # its creator's. It stays interpreted (with the method holding it).
+      next if block_self_rebound?(block_label)
 
       upvars = block_upvar_needs(block_irep)
       next if upvars.nil?
@@ -725,6 +728,9 @@ class CodeGen
 
   def emit_proc_fallback_fn_body(region, d, fn_prefix)
     block_irep = region[:block_irep]
+    # BLOCK_SELF_WORLD (ADR 0477): every block or lambda body compiled here reads its creator's self; a rebound one
+    # never runs under it. The recognizers already skip these; this keeps any other caller from compiling one.
+    return nil if !runtime_def_fallback_kind?(region[:kind]) && block_self_rebound?(block_irep.label)
     mand = mandatory_arity(block_irep)
     rest_block = (region[:kind] || 'block_fallback') == 'block_fallback' && rest_only_block?(block_irep)
     arg_names = (1..(rest_block ? 1 : mand)).map { |i| "bc2cpp_barg#{i}" }
@@ -961,8 +967,10 @@ class CodeGen
       out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_recv_self) {\n"
       out << "  mrb_value bc2cpp_captured_self = bc2cpp_recv_self;\n"
     else
-      out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_unused_self) {\n"
-      out << "  (void)bc2cpp_unused_self;\n"
+      out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_passed_self) {\n"
+      # BLOCK_SELF_WORLD (ADR 0477): the body runs under the captured self; a rebinder passing another one is a
+      # closed-world violation (bc2cpp_block_self_check) unless the world proves no rebinder gets this block.
+      out << (block_self_check? ? "  bc2cpp_block_self_check(M, bc2cpp_passed_self, \"#{fn_name}\");\n" : "  (void)bc2cpp_passed_self;\n")
       out << "  mrb_value bc2cpp_captured_self = mrb_proc_cfunc_env_get(M, 0);\n"
     end
     # UPVAR_CAPTURE_SUPPORT: env slot 0 is self; upvar i is at slot i + 1, the same
@@ -1129,7 +1137,8 @@ class CodeGen
     env_entries << brk_token if brk_token
     if direct_entry
       env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))"
-      env_entries << "mrb_int_value(M, #{yield_free ? 1 : 0})"
+      # The flag slot: YIELD_FREE (bit 0) and the BLOCK_SELF_WORLD check (bit 1), read by bc2cpp_block_thunk.
+      env_entries << "mrb_int_value(M, #{(yield_free ? 1 : 0) | (block_self_check? ? 2 : 0)})"
     end
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
     out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \

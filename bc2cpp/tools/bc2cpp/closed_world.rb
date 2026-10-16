@@ -66,10 +66,10 @@ class ClosedWorld
   PROBE_SENDS = %w[respond_to? respond_to_missing? method_defined? public_method_defined?
                    private_method_defined? instance_method public_instance_method method public_method
                    instance_methods public_methods].freeze
-  # Sends that run a block with another `self`, which breaks "self is its lexical owner".
-  SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
-
   attr_reader :global_refusal, :native_paths, :ruby_paths
+  # BLOCK_SELF_WORLD (ADR 0477): BlockSelfWorld's result, set by bc2cpp.rb once every Ruby source is read. Until
+  # then (and without it) every block counts as rebound.
+  attr_accessor :block_self_world
 
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
@@ -110,7 +110,6 @@ class ClosedWorld
     @dynamic_subclassed = Set.new
     @probed_names = Set.new
     @outside_def_names = Set.new
-    @self_rebound = false
     @freeze_possible = false
     @frozen_constants = Set.new
     @memo = {}
@@ -225,7 +224,10 @@ class ClosedWorld
   # it can only raise NoMethodError. `installed` is CodeGen#symbol_installed_names.
   # Every question defaults to "not a miss": the answer only ever adds a build error.
   # A module's or class object's `self` is never modelled here (instance_self?).
-  def proven_miss?(name, klass, installed, kind)
+  # +label+ is the irep the send sits in: `self` there is its lexical owner unless a rebinder may run it under
+  # another object (BLOCK_SELF_WORLD, ADR 0477: a rebound block). Any other compiled block keeps its creator's self,
+  # by the world fact or, where that fails, by the entry check every compiled block body then carries.
+  def proven_miss?(name, klass, installed, kind, label: nil)
     return false if @global_refusal || installed.nil? || installed.include?(name)
     return false if @unknown_defs.include?(name) || @outside_names.include?(name) ||
                     @outside_def_names.include?(name) || @probed_names.include?(name)
@@ -236,12 +238,16 @@ class ClosedWorld
 
     # A class object also answers singleton definers and Class/Module/Object/Kernel ones,
     # which required_classes refuses (`reason`) for the non-instance lookup.
-    return false if kind == :lexical_self && (@self_rebound || !instance_self?(klass))
+    return false if kind == :lexical_self && (lexical_self_rebound?(label) || !instance_self?(klass))
     return false if required.include?(klass) || descendants(klass).intersect?(required)
 
     # An exact receiver is klass itself, which no hook reaches unless klass is a listed
     # method_missing class; only `self` may also be a descendant.
     kind == :lexical_self ? method_missing_free?(klass) : !@mm_classes.include?(klass)
+  end
+
+  def lexical_self_rebound?(label)
+    @block_self_world.nil? || label.nil? || @block_self_world.rebound.include?(label)
   end
 
   # A `class` (never a module) declared in the closed world: the only owners an
@@ -1118,6 +1124,8 @@ class ClosedWorld
       [irep.label, insn.op] unless class_object_register?(irep, idx, insn.reg.to_s)
     end
   end
+  # constructor_pools_refusal (codegen_constructor_pools.rb) names the makers it refuses over.
+  public :singleton_makers
 
   def scan_singleton_maker(irep, insns, idx, insn)
     case insn.op
@@ -1176,7 +1184,6 @@ class ClosedWorld
     @clone_sent = true if name == 'clone'
     scan_freeze_send(irep, idx, insn) if name == 'freeze'
     scan_visibility_send(insns, idx, insn) if VISIBILITY_SENDS.include?(name)
-    @self_rebound = true if SELF_REBINDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
       global!(:dynamic_install)
