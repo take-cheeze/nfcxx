@@ -76,6 +76,9 @@ int fgetpos(FILE *restrict, fpos_t *restrict);
 int fseek(FILE *, long, int);
 int fsetpos(FILE *, const fpos_t *);
 long ftell(FILE *);
+/* POSIX.1: the off_t forms of fseek and ftell (off_t is declared above) */
+int fseeko(FILE *, off_t, int);
+off_t ftello(FILE *);
 void rewind(FILE *);
 void clearerr(FILE *);
 int feof(FILE *);
