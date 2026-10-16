@@ -2,7 +2,8 @@
 // counters, the IR register map, the slots) and the arithmetic, comparison and conversion lowering that runs against
 // it: the Ruby's rval branches for wadd..cf2i and the lt..ne comparisons, and their helpers (checked_div,
 // checked_shift, compare, int_convert, float_to_int, canon); the memory forms (lower_mem.cpp) and the @name operands
-// (module_operand). Phase 3 of the port; the call, asm, atomic and warp lowering are not here yet and refuse by name.
+// (module_operand); and (lower_call.cpp) the device-intrinsic, warp and atomic calls and the ptx-asm statement. Phase 3
+// of the port; the module-function call and printf lowering are not here yet and refuse by name.
 #pragma once
 
 #include <map>
@@ -65,4 +66,15 @@ class FnCtx {
   bool store_stmt(const std::string &h, const Node &s);
   // The @name operand: its address through cvta (the Ruby's operand for the module's data symbols).
   Operand module_operand(const Node &x);
+
+  // The Ruby's rval "call" branch for the device intrinsics (special-register reads), the warp shuffles, votes and
+  // reduce, and the atomics (device_builtin). Returns false for any other callee (the module's call_site, printf and
+  // the dynamic shared address are not ported): the caller then falls through, as the Ruby does.
+  bool call(const Node &x, const std::string &dest, const Ty &dty);
+  // The Ruby's stmt branch for ptx-asm (ptx_asm): an inline PTX statement.
+  void asm_stmt(const Node &s);
+
+ private:
+  void device_builtin(const std::string &name, const Node &x, const std::string &dest, const Ty &ty);
+  void full_mask(const Node &op, const std::string &name);
 };

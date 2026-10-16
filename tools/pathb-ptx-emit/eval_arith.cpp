@@ -1,7 +1,8 @@
-// --eval-arith: runs each case of a file through the lowering (FnCtx::arith, memory, store_stmt) and prints what it emits,
-// one line per case. A case is (arith DEST_TYPE ((%N PTX_REG TYPE) ...) INSTR), (mem DEST_TYPE PRESETS SYMBOLS INSTR) or
-// (stmt PRESETS SYMBOLS STMT): the preset registers, the module symbols and frame slots, then the form. diff-arith.sh runs
-// the same cases through the Ruby reference (class Fn, copied verbatim) and compares the two outputs.
+// --eval-arith: runs each case of a file through the lowering (FnCtx::arith, call, asm_stmt, memory, store_stmt) and prints
+// what it emits, one line per case. A case is (arith DEST_TYPE ((%N PTX_REG TYPE) ...) INSTR), (call DEST_TYPE PRESETS
+// INSTR), (asm PRESETS INSTR), (mem DEST_TYPE PRESETS SYMBOLS INSTR) or (stmt PRESETS SYMBOLS STMT): the preset registers,
+// the module symbols and frame slots, then the form. diff-arith.sh runs the same cases through the Ruby reference (class Fn,
+// copied verbatim) and compares the two outputs.
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -59,19 +60,34 @@ void symbols_into(FnCtx &ctx, ModuleSymbols &syms, const Node &list) {
   ctx.mod = &syms;
 }
 
-// Runs one case: (arith DEST PRESETS INSTR), (mem DEST PRESETS SYMBOLS INSTR) or (stmt PRESETS SYMBOLS STMT).
+// Runs one case: (arith DEST PRESETS INSTR), (call DEST PRESETS INSTR), (asm PRESETS INSTR), (mem DEST PRESETS SYMBOLS INSTR)
+// or (stmt PRESETS SYMBOLS STMT).
 std::string run_case(const Node &c) {
   if (c.kind != Node::List || c.items.empty() || c.items[0].kind != Node::Atom) throw BadCase("case");
   const std::string &kind = c.items[0].text;
   FnCtx ctx;
   ModuleSymbols syms;
-  if (kind == "arith") {
+  if (kind == "arith" || kind == "call") {
     if (c.items.size() != 4) throw BadCase("case");
     presets_into(ctx, c.items[2]);
     Ty dty = parse_type(&c.items[1]);
     const Node &x = c.items[3];
     if (x.kind != Node::List || x.items.empty() || x.items[0].kind != Node::Atom) throw BadCase("instr");
-    if (!ctx.arith(x.items[0].text, x, "%d", dty)) return "NOTARITH";
+    if (kind == "arith") {
+      if (!ctx.arith(x.items[0].text, x, "%d", dty)) return "NOTARITH";
+    } else {
+      if (x.items[0].text != "call") throw BadCase("instr");
+      if (!ctx.call(x, "%d", dty)) return "NOTCALL";
+    }
+    return joined(ctx);
+  }
+  if (kind == "asm") {
+    if (c.items.size() != 3) throw BadCase("case");
+    presets_into(ctx, c.items[1]);
+    const Node &x = c.items[2];
+    if (x.kind != Node::List || x.items.empty() || x.items[0].kind != Node::Atom || x.items[0].text != "ptx-asm")
+      throw BadCase("instr");
+    ctx.asm_stmt(x);
     return joined(ctx);
   }
   if (kind == "mem") {
