@@ -18,12 +18,16 @@ fail=0; notrun=0
 # the source shapes ne0 ne1 ne2 ne3 (ne1 = 1); the output is {ne0, ne0, ne2, ne3}
 shapes=("10 1 4 3" "79 1 19 13" "256 1 8 16")
 
+# the runtime heap (NFCXX_SYCL_HEAP_MB, default 1024) holds the stacks of one dispatch: invocations x stack bytes. The
+# 256 shape has 8.4M invocations and needs a bigger heap than the default; the others keep the default.
+heap_for() { case "$1" in "256 1 8 16") echo 4096 ;; *) echo 1024 ;; esac; }
+
 # check BACKEND BIN: runs BIN on every shape and prints one verdict per shape.
 # returns 0 when all pass, 2 when the runtime reports no device, 1 otherwise.
 check() {
   local b=$1 bin=$2 s res rc ok=0
   for s in "${shapes[@]}"; do
-    res=$(timeout 120 "$bin" $s 2>&1); rc=$?
+    res=$(NFCXX_SYCL_HEAP_MB=$(heap_for "$s") timeout 120 "$bin" $s 2>&1); rc=$?
     if [ $rc = 70 ] && ! grep -q "out of device memory" <<< "$res"; then echo "SKIP: diag $b: no device"; return 2; fi
     if [ $rc = 70 ]; then
       # the runtime's heap cannot hold this dispatch (invocations x stack bytes): the shape did not run, which is reported, not passed
@@ -52,7 +56,7 @@ for b in opencl level-zero; do
   fi
   mrc=0
   for s in "${shapes[@]}"; do
-    res=$(timeout 120 "$out/$b.mut" $s 2>&1); r=$?
+    res=$(NFCXX_SYCL_HEAP_MB=$(heap_for "$s") timeout 120 "$out/$b.mut" $s 2>&1); r=$?
     if [ $r = 70 ] && grep -q "out of device memory" <<< "$res"; then
       echo "mutant diag $b [${s// /x}]: NOT RUN (out of device memory in the runtime heap)"; notrun=$((notrun+1)); continue
     fi
@@ -62,5 +66,5 @@ for b in opencl level-zero; do
   done
   if [ $mrc = 0 ]; then echo "mutant diag $b: caught on every shape that ran"; else fail=1; fi
 done
-[ $notrun = 0 ] || echo "NOT RUN: $notrun shape run(s) hit the runtime heap limit (see above)"
+[ $notrun = 0 ] || { echo "NOT RUN: $notrun shape run(s) did not run (see above); this is a failure, not a pass"; fail=1; }
 exit $fail
