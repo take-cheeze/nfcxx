@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require_relative 'ir_rbs_block_types'
+require_relative 'core_block_param_sigs'
+
 # CodeGen: blocks that stay procs, and fiber safety.
 
 class CodeGen
@@ -402,47 +405,205 @@ class CodeGen
   # BLOCK_FALLBACK_ELEMENT_SUPPORT: pass an exact element class into the cfunc
   # only for a known Array or Hash iterator with a proven yield shape; otherwise
   # dynamic dispatch.
-  def block_fallback_element_class(irep, region, owner_name)
-    return nil unless irep && !region[:self_implicit]
+  # CORE_BLOCK_ELEMENT_HINT: the yield shapes are sig/native/core_block_params.rbs
+  # (CoreBlockParamSigs). Returns { block parameter register => hint }, where a
+  # hint is the class name (a STRICT_HINTS element hint, as before) for the shapes
+  # this pass always had, and a SoftElementHint for the rest: those keep their
+  # by-name else arm until a verify build reviews them (docs/adr/0419).
+  # The element class comes from the same scans as before (proven_element_class /
+  # proven_hash_element_class, i.e. ArrayElementLayout's ivar facts, `Array[C]`
+  # ivar and return signatures, and locals traced to them), so no new purity
+  # assumption is made about any Array.
+  STRICT_BLOCK_ELEMENT_SHAPES = [%w[Array each], %w[Array each_with_index], %w[Array each_with_object],
+                                 %w[Hash each_value]].freeze
+  # The lookup chain of an exact Array / Hash instance up to the modules core iterators live in.
+  BLOCK_ELEMENT_CHAINS = { 'Array' => %w[Array Enumerable Object Kernel BasicObject],
+                           'Hash' => %w[Hash Enumerable Object Kernel BasicObject] }.freeze
 
-    shape = case region[:name]
-            when 'each' then [:array, 0, 1]
-            when 'each_with_index' then [:array, 0, 2]
-            when 'each_with_object' then [:array, 1, 2]
-            when 'each_value' then [:hash, 0, 1]
-            end
-    return nil unless shape && region[:n] == shape[1]
-    return nil unless mandatory_arity(region[:block_irep]) == shape[2]
+  def block_fallback_element_hints(irep, region, owner_name)
+    return {} unless irep && !region[:self_implicit]
+
+    block_irep = region[:block_irep]
+    fields = block_irep.enter&.enter_fields
+    # Pure required positionals only: an optional or rest parameter changes how a
+    # yielded Array is spread over the parameters.
+    return {} unless fields && fields.drop(1).all?(&:zero?)
 
     idx = irep.index_of_addr(region[:sendb_addr])
-    return nil unless idx
+    insn = idx && irep.instructions[idx]
+    return {} unless insn&.op == 'SENDB'
 
-    insn = irep.instructions[idx]
-    return nil unless insn.op == 'SENDB'
+    shapes = CoreBlockParamSigs.shapes.select do |(klass, name), shape|
+      name == region[:name] && shape.argc.cover?(region[:n]) && shape.arity == fields.first && !shape.elements.empty? &&
+        block_element_chain_core?(klass, name)
+    end
+    return {} if shapes.empty?
 
+    recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
     mand = mandatory_arity(irep)
     ivar_classes = @class_layout[owner_name] || {}
     arg_classes = @class_annotations[irep.label]&.args
-    recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
-    if shape[0] == :array
-      recv_class = proven_array_source(irep, idx, region[:dest_reg], owner: owner_name) unless recv_class == 'Array'
-      return nil unless recv_class == 'Array'
+    shapes.each do |(klass, name), shape|
+      element = if klass == 'Array'
+                  array = recv_class
+                  array = proven_array_source(irep, idx, region[:dest_reg], owner: owner_name) unless array == 'Array'
+                  array == 'Array' &&
+                    proven_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
+                elsif recv_class == 'Hash'
+                  proven_hash_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
+                end
+      # Only a class of this program: the scans also return primitive tags and VACUOUS, which
+      # PRIMITIVE_ELEMENT_SUPPORT keeps away from the element-hint consumers.
+      next unless element.is_a?(String) && known_owner_set.include?(element) &&
+                  !PRIMITIVE_ELEMENT_CLASSES.include?(element)
 
-      proven_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
-    else
-      return nil unless recv_class == 'Hash'
-
-      proven_hash_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
+      strict = STRICT_BLOCK_ELEMENT_SHAPES.include?([klass, name]) && shape.elements == [0]
+      return shape.elements.to_h { |pos| [(pos + 1).to_s, strict ? element : SoftElementHint.new(element)] }
     end
+    {}
+  end
+
+  # Does an exact `klass` instance answer `name` with the core method? A program
+  # definition on its chain (outside 3rd/mruby) could yield anything.
+  def block_element_chain_core?(klass, name)
+    chain = BLOCK_ELEMENT_CHAINS.fetch(klass)
+    (@registry[name] || []).none? do |definition|
+      chain.include?(definition.owner) && !@ireps[definition.irep]&.file.to_s.include?('/3rd/mruby/')
+    end
+  end
+
+  # RBS_BLOCK_PARAM_HINT: the class of a block's first parameter when the method it is passed to declares
+  # that block type (`def each: () { (Game::Actor) -> void } -> void` in a signature file). A plain block
+  # whose required positionals match the declaration qualifies when every definition the send can reach is
+  # known and declares the same first class (rbs_block_definers); anything else gets nil and stays untyped.
+  # The class is returned as an element hint, so the direct call it enables still checks mrb_obj_class at
+  # run time.
+  def block_fallback_rbs_param_class(irep, region, owner_name)
+    signatures = self.class.rbs_block_signatures
+    return nil unless signatures && irep
+
+    block_irep = region[:block_irep]
+    fields = block_irep.enter&.enter_fields
+    return nil unless fields && fields.drop(1).all?(&:zero?) && !rest_only_block?(block_irep)
+    return nil unless fields.first.positive?
+
+    idx = irep.index_of_addr(region[:sendb_addr])
+    insn = idx && irep.instructions[idx]
+    return nil unless insn&.op == (region[:self_implicit] ? 'SSENDB' : 'SENDB')
+
+    name = insn.sym.to_s
+    definers = if region[:self_implicit]
+                 rbs_block_self_definers(name, @self_class_unknown ? nil : owner_name)
+               else
+                 recv_class = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
+                 rbs_block_exact_definers(name, recv_class) if recv_class.is_a?(String)
+               end
+    return nil if definers.nil? || definers.empty?
+
+    classes = definers.map { |owner| rbs_block_first_param_class(signatures[[owner, name]], fields.first) }
+    classes.uniq.size == 1 ? classes.first : nil
+  end
+
+  # The one class a declared block's first parameter is, or nil: the declaration must take exactly `arity`
+  # required positionals and nothing else, and its first type must resolve to a single class.
+  def rbs_block_first_param_class(signature, arity)
+    function = signature&.block_type&.type
+    return nil unless function && function.optional_positionals.empty? && !function.rest_positionals &&
+                      function.trailing_positionals.empty? && function.required_keywords.empty? &&
+                      function.optional_keywords.empty? && !function.rest_keywords
+    return nil unless function.required_positionals.size == arity
+
+    classes = IrRbsBlockTypes.resolve(function.required_positionals.first.type, {})
+    classes&.size == 1 ? classes.first.to_s : nil
+  end
+
+  # The owners whose definition of +name+ an exact +recv_class+ receiver reaches: the class's own declaration
+  # as before, or, in a closed world, the one definition its lookup finds (an inherited declaration).
+  def rbs_block_exact_definers(name, recv_class)
+    return [recv_class] if self.class.rbs_block_signatures.key?([recv_class, name])
+    return nil unless rbs_block_lookup_safe?(name, recv_class)
+
+    target, = closed_world_lookup_target(name, recv_class, Set.new)
+    target&.irep ? [target.owner] : nil
+  end
+
+  # RBS_BLOCK_PARAM_HINT for an implicit-self send in +self_owner+'s code: self is an instance of self_owner
+  # or of any descendant, so the owners are the definition self_owner's own lookup finds plus every
+  # descendant's override (the CHA_SELF enumeration, cha_self_plan). nil when the closed world cannot list
+  # them all, so an override with another block contract is either listed (and must declare the same class)
+  # or makes the hint impossible.
+  def rbs_block_self_definers(name, self_owner)
+    return nil unless self_owner && rbs_block_lookup_safe?(name, self_owner)
+
+    hierarchy = @closed_world.class_hierarchy(self_owner)
+    return nil unless hierarchy && @closed_world.self_method_missing_free?(self_owner)
+
+    default, = closed_world_lookup_target(name, self_owner, Set.new, self_call: true)
+    return nil unless default&.irep
+
+    descendants = hierarchy[:descendants]
+    return nil if descendants.any? { |klass| cha_mixin_may_define?(name, klass) }
+
+    overriders = @registry.fetch(name, []).select { |d| descendants.include?(d.owner) }
+    return nil unless overriders.empty? || hierarchy[:wild].empty?
+
+    ([default] + overriders).map(&:owner).uniq
+  end
+
+  # The closed-world facts both lookups need: a declared class whose method table no runtime installer,
+  # native definition or opaque name can change behind the lookup.
+  def rbs_block_lookup_safe?(name, klass)
+    return false unless @closed_world
+    return false if klass.end_with?('.singleton') || !@closed_world.class_declared?(klass)
+    return false if devirt_blocked_name?(name) || !@closed_world.inherited_lookup_safe?(name, klass)
+
+    installed = symbol_installed_names
+    return false if installed.nil? || installed.include?(name)
+
+    @registry.fetch(name, []).none? { |d| d.owner == '<native>' }
+  end
+
+  # BC2CPP_BLOCK_PARAM_SURVEY=1: one stderr line per literal-block fallback site with the receiver facts, the
+  # element hints given (`~` marks a soft one) and how many sends each block parameter is the receiver of, to see
+  # where element typing of block parameters drops (no shape, unproven receiver, or no element fact).
+  def survey_block_param_hint(region, elem_hints, owner_name)
+    irep = region[:parent_irep]
+    return unless irep && region[:name]
+
+    @survey_seen ||= {}
+    key = [irep.label, region[:sendb_addr]]
+    return if @survey_seen[key]
+
+    @survey_seen[key] = true
+    block_irep = region[:block_irep]
+    arity = mandatory_arity(block_irep)
+    uses = (1..arity).map do |param|
+      block_irep.instructions.each_with_index.count do |insn, i|
+        %w[SEND SEND0].include?(insn.op) && element_receiver?(block_irep, i, insn.reg, param.to_s)
+      end
+    end
+    idx = irep.index_of_addr(region[:sendb_addr])
+    recv = nil
+    arr = nil
+    if idx && !region[:self_implicit]
+      recv = block_fallback_receiver_class(irep, idx, region[:dest_reg], owner_name)
+      arr = proven_array_source(irep, idx, region[:dest_reg], owner: owner_name)
+    end
+    hints = elem_hints.map { |reg, hint| "#{reg}:#{hint.is_a?(SoftElementHint) ? "~#{hint.klass}" : hint}" }
+    warn "  BLOCK_PARAM_SURVEY #{owner_name} #{irep.label} :#{region[:name]} n=#{region[:n]} arity=#{arity} " \
+         "self=#{region[:self_implicit] ? 1 : 0} recv=#{recv || '-'} arr=#{arr || '-'} " \
+         "elem=#{hints.empty? ? '-' : hints.join(',')} uses=#{uses.join(',')}"
   end
 
   # BC2CPP_BLOCK_RECV_SURVEY=1: one stderr line per literal-block fallback site with the receiver facts
   # (trace_new_target, proven_array_source), how many sends each block parameter is the receiver of, and the
   # expression the receiver register comes from, to see why block receivers stay unproven. Diagnostics only.
-  def survey_block_receiver(region, elem_class, owner_name)
+  def survey_block_receiver(region, elem_hints, owner_name)
     irep = region[:parent_irep]
     return unless irep && region[:name]
 
+    elem_class = elem_hints['1']
+    elem_class = "~#{elem_class.klass}" if elem_class.is_a?(SoftElementHint)
     @survey_seen ||= {}
     # Keyed by the return-proof state too: drop_unsafe_embeddings compiles before ARRAY_RETURN_PROOF runs.
     key = [irep.label, region[:sendb_addr], @array_return_names.size]
@@ -728,8 +889,14 @@ class CodeGen
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: the JUMP_TARGET_GLUE_FIX label rule.
     targets = BytecodeIR.for(block_irep).branch_target_addrs - (nested_suppressed - nested_glue_at.keys)
-    elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner)
-    survey_block_receiver(region, elem_class, d.owner) if ENV['BC2CPP_BLOCK_RECV_SURVEY'] == '1'
+    elem_hints = block_fallback_element_hints(region[:parent_irep], region, d.owner)
+    if elem_hints.empty?
+      rbs_class = block_fallback_rbs_param_class(region[:parent_irep], region, d.owner)
+      elem_hints = { '1' => rbs_class } if rbs_class
+    end
+    body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
+    survey_block_param_hint(region, elem_hints, d.owner) if ENV['BC2CPP_BLOCK_PARAM_SURVEY'] == '1'
+    survey_block_receiver(region, elem_hints, d.owner) if ENV['BC2CPP_BLOCK_RECV_SURVEY'] == '1'
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
@@ -738,7 +905,7 @@ class CodeGen
       if nested_glue_at.key?(insn.addr)
         body << nested_glue_at[insn.addr]
       else
-        with_element_hint(block_irep, insn, idx, '1', elem_class) do
+        with_element_hints(block_irep, insn, idx, elem_hints) do
           body << compile_insn(insn, block_irep, d, idx)
         end
       end

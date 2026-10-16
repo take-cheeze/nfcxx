@@ -60,6 +60,10 @@ PRIMITIVE_ELEMENT_CLASSES = %w[Integer Hash String Symbol].freeze
 # ELEMENT_CLASS_SUPPORT: element class of the Array in `reg` at `idx`, built
 # like proven_array_source_scan (nearest write, MOVEs followed, nil on anything
 # unmodelled). nil is always safe: the caller poisons the ivar.
+# JOIN_DOMINANCE (ADR 0261), element dimension: every walk in this file takes a
+# writer only when it dominates the read it feeds, so `@a = c ? [A.new] : [B.new]`
+# and `@a = other || []` no longer read just the textually nearest arm. The strict
+# hint tier forces ELEMENT hints (ADR 0419), so a guard no longer covers that.
 def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   # Two ivars can reference each other (`@a = @b.compact`, `@b = @a.compact`),
   # so the depth cap makes termination local to this function.
@@ -72,7 +76,8 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
     ctx[:arg_elements][pos - 1] if ctx[:arg_elements] && pos.between?(1, ctx[:mand])
   end
   # BLOCK is skipped: it writes the block proc register (see proven_array_source_scan).
-  irep.walk_writers(idx - 1, dest_reg, skip_ops: %w[BLOCK], follow_moves: true, exhausted: at_entry) do |insn, i, reg|
+  irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true,
+                                                 exhausted: at_entry) do |insn, i, reg|
     case insn.op
     when 'ARRAY', 'ARRAY2'
       # "ARRAY R3 2": N consecutive registers from Rd.
@@ -104,7 +109,7 @@ end
 def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   return nil if depth > 8
 
-  irep.walk_writers(idx - 1, dest_reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, reg|
+  irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, reg|
     case insn.op
     when 'HASH'
       # "HASH R2 2": N key/value PAIRS from Rd (vm.c OP_HASH sets regs[i] =>
@@ -263,7 +268,9 @@ def filter_map_block_return_class(block_irep, ctx, depth, input_class)
     when 'RETURN'
       reg = insn.no_operands? ? '0' : insn.reg
       previous = i.positive? ? block_irep.instructions[i - 1] : nil
-      if previous && %w[LOADNIL LOADFALSE].include?(previous.op) && previous.reg == reg
+      # JOIN_DOMINANCE: the literal must be the only value a jump onto the RETURN can bring.
+      if previous && %w[LOADNIL LOADFALSE].include?(previous.op) && previous.reg == reg &&
+         BytecodeIR.write_dominates?(block_irep, i - 1, i, reg)
         next
       end
 
@@ -289,7 +296,8 @@ def block_mandatory_param_source?(irep, idx, reg)
   return false if mandatory.zero?
 
   # Only MOVEs may sit between the read and the incoming register.
-  irep.walk_writers(idx - 1, reg, follow_moves: true, exhausted: ->(last) { last.to_i.between?(1, mandatory) }) do
+  irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true,
+                                            exhausted: ->(last) { last.to_i.between?(1, mandatory) }) do
     false
   end || false
 end
@@ -491,7 +499,7 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
   direct = traced_owner(irep, idx, reg, ctx)
   return direct if direct
 
-  irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, cur|
+  irep.walk_dominating_writers(idx - 1, reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, cur|
     # PRIMITIVE_ELEMENT_SUPPORT: a literal Integer/Hash/String/Symbol element.
     # Diagnostic only (`.known` strips these; see PRIMITIVE_ELEMENT_CLASSES): it
     # separates "provably Integer" from "untraceable" in the ANY/OPAQUE report.
@@ -556,10 +564,10 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
     next scoped if scoped
 
     # Last resort: a MONO name whose body returns one exact class on every path.
-    # The answer has always been dropped and the walk continued (a statement,
-    # not a `return`); kept as is so this pass stays output-neutral.
+    # The SEND is the value's only writer: walking on past it (as this did, to stay
+    # output-neutral) read an older, overwritten value of the register, so
+    # `@a << @b[0].to_s` took @b's element class for @a.
     mono_fresh_return_class(name, ctx, depth)
-    IrepScans::KEEP
   end
 end
 
@@ -577,9 +585,12 @@ class ArrayElementLayout
   #              annotation can help.
   #   :opaque -- some site could not be traced: a candidate for an annotation.
   # nil (the default) changes nothing.
+  # ELEMENT_SIGNATURE_CHECK: when given a Hash, `site_classes` collects owner -> ivar -> Set of every class a
+  # traced site wrote, so an RBS `@x: Array[C]` seed can be checked against them (AnnotationContradictions.
+  # ivar_element_conflicts). nil (the default) changes nothing.
   def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, superclass_of = {},
                     poison_reason: nil, closed_world: nil, included_modules: {}, prepended_modules: {},
-                    unknown_mixins: {})
+                    unknown_mixins: {}, site_classes: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     # Registry classes, used by resolve_owner_name for bare GETCONST tokens.
@@ -634,10 +645,12 @@ class ArrayElementLayout
 
             irep.instructions.each_with_index do |insn, idx|
               found = nil
-              ivar = nil
+              targets = nil
               if insn.op == 'SETIV'
                 ivar = insn.ivar
                 next unless array_ivars.include?(ivar)
+
+                targets = [ivar]
 
                 src_reg = insn.regs.first
                 found = array_element_source_scan(irep, idx, src_reg, ctx)
@@ -651,8 +664,8 @@ class ArrayElementLayout
                 next unless name && ARRAY_ELEMENT_WRITERS.include?(name)
 
                 recv = insn.reg
-                ivar = mutated_ivar_target(irep, idx, recv)
-                next unless ivar && array_ivars.include?(ivar)
+                targets = mutated_ivar_targets(irep, idx, recv) & array_ivars
+                next if targets.empty?
 
                 found = written_element_class(irep, idx, insn, recv, name, ctx)
               elsif insn.op == 'SETIDX'
@@ -661,8 +674,8 @@ class ArrayElementLayout
                 recv, _i_reg, val = insn.regs
                 next unless recv && val
 
-                ivar = mutated_ivar_target(irep, idx, recv)
-                next unless ivar && array_ivars.include?(ivar)
+                targets = mutated_ivar_targets(irep, idx, recv) & array_ivars
+                next if targets.empty?
 
                 found = element_value_class(irep, idx, val, ctx, 1)
               else
@@ -673,24 +686,28 @@ class ArrayElementLayout
               next if found == VACUOUS
 
               found ||= UNKNOWN
-              before = elements[owner][ivar]
-              # Sticky join as in ClassLayout: disagreement or an unreadable site poisons
-              # permanently. Never a majority vote.
-              merged = if before.nil?
-                         found
-                       elsif before == UNKNOWN || found == UNKNOWN || before != found
-                         UNKNOWN
-                       else
-                         before
-                       end
-              if merged != before
-                elements[owner][ivar] = merged
-                if merged == UNKNOWN && poison_reason
-                  # First poisoning: `found == UNKNOWN` means some site was never traced
-                  # (:opaque); otherwise two traced sites conflict (:any).
-                  (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+              # A mutation through a register that may hold several ivars counts for each.
+              targets.each do |ivar|
+                (((site_classes[owner] ||= {})[ivar] ||= Set.new) << found) if site_classes && found != UNKNOWN
+                before = elements[owner][ivar]
+                # Sticky join as in ClassLayout: disagreement or an unreadable site poisons
+                # permanently. Never a majority vote.
+                merged = if before.nil?
+                           found
+                         elsif before == UNKNOWN || found == UNKNOWN || before != found
+                           UNKNOWN
+                         else
+                           before
+                         end
+                if merged != before
+                  elements[owner][ivar] = merged
+                  if merged == UNKNOWN && poison_reason
+                    # First poisoning: `found == UNKNOWN` means some site was never traced
+                    # (:opaque); otherwise two traced sites conflict (:any).
+                    (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+                  end
+                  changed = true
                 end
-                changed = true
               end
             end
           end
@@ -736,16 +753,27 @@ class ArrayElementLayout
   end
 end
 
-# ELEMENT_CLASS_SUPPORT: the ivar a mutation's receiver names: back-scan to a
-# `GETIV @x` in this body (following MOVEs), else nil. nil means "not
-# attributed" (the aliasing residual in this section's header), not "no
+# ELEMENT_CLASS_SUPPORT: the ivars a mutation's receiver may name: the GETIV
+# `@x` the nearest write of the register (MOVEs followed) is, plus the GETIV of
+# every reaching definition (BytecodeIR.reaching_definitions), so
+# `(@x ||= []) << v`, whose receiver is `@x` or the fresh `[]` just stored into
+# it, still counts as a write to @x. Extra targets only add checks. Empty means
+# "not attributed" (the aliasing residual in this section's header), not "no
 # mutation".
-def mutated_ivar_target(irep, idx, reg)
-  return nil unless reg
+def mutated_ivar_targets(irep, idx, reg)
+  return [] unless reg
 
-  irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn|
+  nearest = irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn|
     insn.ivar if insn.op == 'GETIV'
   end
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg) || []
+  reached = defs.filter_map do |d|
+    next nil if d.index.negative?
+
+    insn = irep.instructions[d.index]
+    insn.ivar if insn.op == 'GETIV'
+  end
+  ([nearest] + reached).compact.uniq
 end
 
 # ELEMENT_CLASS_SUPPORT: element class one in-place mutation writes, or nil
@@ -798,10 +826,11 @@ class HashElementLayout
   # owner -> {ivar => value class}, only for ivars ClassLayout proved are Hashes.
   # `array_elements` (ArrayElementLayout's finished raw table, so this must run
   # after it) lets `@h[k] = @roster[i]` resolve; empty means such chains poison.
-  # ANY_OPAQUE_SUPPORT: `poison_reason` as in ArrayElementLayout.analyze.
+  # ANY_OPAQUE_SUPPORT: `poison_reason` as in ArrayElementLayout.analyze; ELEMENT_SIGNATURE_CHECK: `site_classes`
+  # likewise.
   def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, array_elements = {},
                     superclass_of = {}, poison_reason: nil, closed_world: nil, included_modules: {},
-                    prepended_modules: {}, unknown_mixins: {})
+                    prepended_modules: {}, unknown_mixins: {}, site_classes: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     known_owners = Set.new(registry.values.flatten.map(&:owner))
@@ -845,10 +874,12 @@ class HashElementLayout
 
             irep.instructions.each_with_index do |insn, idx|
               found = nil
-              ivar = nil
+              targets = nil
               if insn.op == 'SETIV'
                 ivar = insn.ivar
                 next unless hash_ivars.include?(ivar)
+
+                targets = [ivar]
 
                 src_reg = insn.regs.first
                 found = hash_element_source_scan(irep, idx, src_reg, ctx)
@@ -860,8 +891,8 @@ class HashElementLayout
                 next unless name && HASH_ELEMENT_WRITERS.include?(name)
 
                 recv = insn.reg
-                ivar = mutated_ivar_target(irep, idx, recv)
-                next unless ivar && hash_ivars.include?(ivar)
+                targets = mutated_ivar_targets(irep, idx, recv) & hash_ivars
+                next if targets.empty?
 
                 found = written_hash_element_class(irep, idx, insn, recv, ctx)
               elsif insn.op == 'SETIDX'
@@ -870,8 +901,8 @@ class HashElementLayout
                 recv, _i_reg, val = insn.regs
                 next unless recv && val
 
-                ivar = mutated_ivar_target(irep, idx, recv)
-                next unless ivar && hash_ivars.include?(ivar)
+                targets = mutated_ivar_targets(irep, idx, recv) & hash_ivars
+                next if targets.empty?
 
                 found = element_value_class(irep, idx, val, ctx, 1)
               else
@@ -882,22 +913,26 @@ class HashElementLayout
               next if found == VACUOUS
 
               found ||= UNKNOWN
-              before = hash_elements[owner][ivar]
-              # Sticky join, as in ArrayElementLayout.analyze.
-              merged = if before.nil?
-                         found
-                       elsif before == UNKNOWN || found == UNKNOWN || before != found
-                         UNKNOWN
-                       else
-                         before
-                       end
-              if merged != before
-                hash_elements[owner][ivar] = merged
-                if merged == UNKNOWN && poison_reason
-                  # See ArrayElementLayout.analyze's `poison_reason`.
-                  (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+              # A mutation through a register that may hold several ivars counts for each.
+              targets.each do |ivar|
+                (((site_classes[owner] ||= {})[ivar] ||= Set.new) << found) if site_classes && found != UNKNOWN
+                before = hash_elements[owner][ivar]
+                # Sticky join, as in ArrayElementLayout.analyze.
+                merged = if before.nil?
+                           found
+                         elsif before == UNKNOWN || found == UNKNOWN || before != found
+                           UNKNOWN
+                         else
+                           before
+                         end
+                if merged != before
+                  hash_elements[owner][ivar] = merged
+                  if merged == UNKNOWN && poison_reason
+                    # See ArrayElementLayout.analyze's `poison_reason`.
+                    (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+                  end
+                  changed = true
                 end
-                changed = true
               end
             end
           end

@@ -29,6 +29,7 @@ require_relative 'registry'
 require_relative 'lint_crosscheck'
 require_relative 'native_names'
 require_relative 'native_ivar_scopes'
+require_relative 'outside_ruby_ivar_scopes'
 
 require_relative 'native_expression_devirt'
 require_relative 'symbol_cache'
@@ -407,6 +408,8 @@ if $PROGRAM_NAME == __FILE__
     sig_class_annotations = ClassAnnotations.extract(ireps, registry, sig_owners)
     sig_element_annotations = ElementAnnotations.extract(ireps, registry, sig_owners)
     sig_applied = RbsSignatures.apply(sig_loaded, ireps, registry, annotations, sig_class_annotations, sig_element_annotations)
+    # RBS_BLOCK_PARAM_HINT: the declared block types, read by block_fallback_rbs_param_class.
+    CodeGen.rbs_block_signatures = sig_applied.ir_block_signatures
     warn '== signature files (RBS_SIGNATURES) =='
     sig_loaded.files.each { |f| warn "  SIG_FILE #{f}" }
     sig_applied.diagnostics.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
@@ -733,10 +736,12 @@ if $PROGRAM_NAME == __FILE__
 
   # ANY_OPAQUE_SUPPORT: as class_poison_reason.
   element_poison_reason = {}
+  # ELEMENT_SIGNATURE_CHECK: the classes traced sites wrote, checked against `@x: Array[C]` seeds below.
+  element_site_classes = {}
   element_raw = profile_call.call('ArrayElementLayout.analyze') do
     ArrayElementLayout.analyze(ireps, registry, class_layout, class_annotations,
                                element_annotations, superclass_of,
-                               poison_reason: element_poison_reason,
+                               poison_reason: element_poison_reason, site_classes: element_site_classes,
                                closed_world: closed_world, included_modules: included_modules,
                                prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
   end
@@ -797,10 +802,11 @@ if $PROGRAM_NAME == __FILE__
   # known-element array resolve (see HashElementLayout.analyze).
   # ANY_OPAQUE_SUPPORT: as class_poison_reason.
   hash_poison_reason = {}
+  hash_element_site_classes = {}
   hash_element_raw = profile_call.call('HashElementLayout.analyze') do
     HashElementLayout.analyze(ireps, registry, class_layout, class_annotations,
                               element_annotations, element_raw, superclass_of,
-                              poison_reason: hash_poison_reason,
+                              poison_reason: hash_poison_reason, site_classes: hash_element_site_classes,
                               closed_world: closed_world, included_modules: included_modules,
                               prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
   end
@@ -893,6 +899,14 @@ if $PROGRAM_NAME == __FILE__
     end
     native_ivar_scopes, refusal = NativeIvarScopes.analyze(native_paths + outside_native, linked_ruby + outside_ruby)
     warn "== native ivar scopes (ADR 0332): #{refusal || native_ivar_scopes.inspect} =="
+    # OUTSIDE_RUBY_IVAR_SCOPES: a name only foreign Ruby spells, and only inside instance methods of known classes,
+    # poisons just those classes' families rather than every class (outside_ruby_ivar_scopes.rb).
+    _, ruby_scoped = OutsideRubyIvarScopes.analyze(foreign_ruby_srcs)
+    native_spelled = outside_ivar_names(native_paths)
+    ruby_scopes = ruby_scoped.reject { |name, _| native_spelled.include?(name) || native_ivar_scopes.key?(name) }
+                             .select { |name, _| outside_ivars.include?(name) }.transform_values(&:sort)
+    native_ivar_scopes = native_ivar_scopes.merge(ruby_scopes)
+    warn "== outside Ruby ivar scopes: #{ruby_scopes.sort.to_h.inspect} =="
   end
   nil_operators = (nil_class_operator_names(native_paths) if native_paths && foreign_ruby_srcs)
   outside_consts = if native_paths && foreign_ruby_srcs
@@ -1026,7 +1040,9 @@ if $PROGRAM_NAME == __FILE__
   # settled is the same build error (TypeFacts reports these rows itself, so they stay out of `contradictions`).
   ivar_contradictions = if sig_applied
                           AnnotationContradictions.ivar_conflicts(sig_applied.ivar_sigs, class_layout_raw,
-                                                                  ivar_layout, ClassLayout::UNKNOWN)
+                                                                  ivar_layout, ClassLayout::UNKNOWN) +
+                            AnnotationContradictions.ivar_element_conflicts(sig_applied.ivar_sigs, element_site_classes,
+                                                                            hash_element_site_classes)
                         else
                           []
                         end
@@ -1048,7 +1064,8 @@ if $PROGRAM_NAME == __FILE__
       signature_arg_types: sig_applied&.ir_arg_types, signature_contracts: sig_applied,
       included_modules: included_modules, prepended_modules: prepended_modules,
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
-      integer_constants: integer_constants
+      integer_constants: integer_constants, element_site_classes: element_site_classes,
+      hash_element_site_classes: hash_element_site_classes
     )))
   end
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='

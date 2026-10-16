@@ -28,7 +28,8 @@ class CodeGen
     attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
                   :integer_constant_values, :integer_constant_ranges, :hot_only_excluded, :module_names, :core_hidden_defs,
                   :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
-                  :enumerator_model, :native_singleton_inputs
+                  :enumerator_model, :native_singleton_inputs,
+                  :rbs_block_signatures
 
     # INLINED_UNLISTED_SITE (docs/adr/0386): kill switch BC2CPP_INLINED_UNLISTED=0.
     def inlined_unlisted_site?
@@ -346,6 +347,7 @@ class CodeGen
     typed.each do |owner, name|
       reason = if reflective then "computed write: #{reflective}"
                elsif names.include?(name) then 'name spelled outside the typed analysis'
+               elsif scoped_outside_writer?(owner, name) then 'name written outside the typed analysis on this family'
                else setter_foreign_value_reason(owner, name, layout[owner][name])
                end
       @typed_demotions[[owner, name]] = reason if reason
@@ -410,6 +412,14 @@ class CodeGen
                                               @integer_constants, nil))
     end
     'attr_writer called with an untyped value' if untyped
+  end
+
+  # A scoped outside name (native_ivar_scopes: audited natives, or foreign Ruby instance methods) is written
+  # outside the typed analysis on instances of its scope classes, so their families' slots stay boxed; other
+  # classes keep theirs.
+  def scoped_outside_writer?(owner, name)
+    scopes = @native_ivar_scopes[name]
+    scopes && @outside_ivar_names.include?(name) && scopes.any? { |scope| embed_family_owner?(scope, owner) }
   end
 
   def embed_family_owner?(candidate, owner)

@@ -12,6 +12,10 @@ class CodeGen
     # call site can read it.
     elem_class_hint = @elem_class_hint
     @elem_class_hint = nil
+    # CORE_BLOCK_ELEMENT_HINT: a SoftElementHint is used like any element hint but
+    # never forced by STRICT_HINTS (its else arm keeps the by-name send).
+    elem_hint_soft = elem_class_hint.is_a?(SoftElementHint)
+    elem_class_hint = elem_class_hint.klass if elem_hint_soft
     d = insn.reg
     # The method-name charset must include `?`, `!` and every operator character
     # (`&`, `|`, `^`, `~`, `%`, `@` for `-@`/`+@`). A missing character truncates
@@ -1505,7 +1509,8 @@ class CodeGen
         note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
         fallback = typed_fallback ||
-                   strict_hint_wrap(via_element ? 'element' : 'typed', d, recv, name, argv, check_owner) do
+                   strict_hint_wrap(via_element ? 'element' : 'typed', d, recv, name, argv, check_owner,
+                                    hinted: !(via_element && elem_hint_soft)) do
                      guarded_fallback_line(d, recv, name, argv, [check_owner],
                                            closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                                              trace_insn: insn, trace_reg_offset: trace_reg_offset))
@@ -1574,7 +1579,7 @@ class CodeGen
         # STRICT_HINTS: a ClassLayout / annotation / element hint naming this owner makes the else arm an error.
         hinted = strict_hint_enabled?('mono_embed') &&
                  strict_hint_names?(target.owner, irep, idx || trace_idx, trace_receiver_reg || d, trace_reg_offset,
-                                    owner_def, elem_class_hint)
+                                    owner_def, elem_hint_soft ? nil : elem_class_hint)
         fallback = strict_hint_wrap('mono_embed', d, recv, name, argv, target.owner, hinted: hinted) do
           guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
         end
@@ -1633,7 +1638,7 @@ class CodeGen
                "#{ivar_accessor_call_code(owner, recv, name, d, argv)}\n"
       end
 
-      fallback = strict_hint_wrap('ivar_accessor', d, recv, name, argv, owner) do
+      fallback = strict_hint_wrap('ivar_accessor', d, recv, name, argv, owner, hinted: !(via_element && elem_hint_soft)) do
         guarded_fallback_line(d, recv, name, argv, [owner],
                               closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                                 trace_insn: insn, trace_reg_offset: trace_reg_offset))
