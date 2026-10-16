@@ -104,6 +104,7 @@ require_relative 'codegen_return_accessors'
 require_relative 'codegen_exact_core_arms'
 require_relative 'codegen_captured_locals'
 require_relative 'codegen_block_self'
+require_relative 'block_self_world'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_class_narrowing'
@@ -480,6 +481,30 @@ if $PROGRAM_NAME == __FILE__
   compiled_files = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
   CodeGen.block_self_unread_names =
     foreign_method_names(foreign_ruby_srcs.reject { |path| compiled_files.include?(File.expand_path(path)) })
+  # BLOCK_SELF_WORLD (ADR 0477): which blocks a rebinder may run under another self, and whether the world lets any
+  # other Proc reach a rebinder. Every Ruby source of the closed world is read as bytecode: the outside ones this
+  # build does not compile are compiled here for the analysis alone.
+  CodeGen.block_self_world = profile_call.call('BlockSelfWorld.analyze') do
+    unread = (foreign_ruby_srcs + outside_ruby).map { |path| File.expand_path(path) }.uniq.sort
+                                              .reject { |path| compiled_files.include?(path) }
+    outside_ireps = {}
+    refusal = nil
+    unless unread.empty?
+      begin
+        outside_ireps, = compile_ireps(unread, "#{symbol}_block_self_world", out_dir)
+      rescue StandardError => e
+        refusal = "an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
+      end
+    end
+    method_labels = {}
+    CodeGen.block_self_bodies.each { |name, defs| defs.each { |d| method_labels[d.irep] = [d.owner, name] } }
+    BlockSelfWorld.analyze(ireps: ireps, outside_ireps: outside_ireps, native_paths: (native_paths + outside_native).uniq,
+                           method_labels: method_labels, superclass_of: superclass_of, root: repo_root, refusal: refusal)
+  end
+  closed_world.block_self_world = CodeGen.block_self_world
+  warn "== block self world (ADR 0477): #{CodeGen.block_self_world.holds? ? 'holds' : "may rebind: #{CodeGen.block_self_world.why}"}; " \
+       "#{CodeGen.block_self_world.sites.size} literal rebinder site(s), #{CodeGen.block_self_world.rebound.size} rebound block(s) =="
+  CodeGen.block_self_world.failures.drop(1).each { |why| warn "  also: #{why}" }
   # UNIQUE_CLASS_NAME: set before RBS_CHECKED_PARAMS and the first ClassLayout pass, since every
   # trace_new_target caller reads it (and ClosedWorld#stable_constant_identity?, which BLOCK_RETURNS needs).
   UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
@@ -1498,11 +1523,58 @@ if $PROGRAM_NAME == __FILE__
     static inline Bc2cppBlockEntry bc2cpp_block_entry(struct REnv* e) {
       return reinterpret_cast<Bc2cppBlockEntry>(static_cast<uintptr_t>(mrb_integer(e->stack[MRB_ENV_LEN(e) - 2])));
     }
-    inline mrb_value bc2cpp_block_thunk(mrb_state* M, mrb_value) {
+    // BLOCK_SELF_WORLD (ADR 0477): a compiled block body reads `self` from its env (slot 0, the self of the frame
+    // that built it), whatever self the VM passes the cfunc. The VM passes, for a cfunc proc:
+    //   * a yield (mrb_yield/mrb_yield_argv via mrb_proc_get_self): nil, with Object as the target class;
+    //   * Proc#call (OP_CALL) and OP_BLKCALL: the proc itself, with the proc's own target class;
+    //   * a rebinder (mrb_yield_with_class: instance_eval/exec, class_eval/exec, Class.new, Struct.new, ...): the new
+    //     self, with its singleton class or the module (nil's is NilClass, never Object);
+    //   * a method dispatch of a define_method body: the receiver, with the method's owner; the body is a strict
+    //     copy of the proc, which only the method table holds.
+    // The last two run the body under another object, which the compiled body cannot honour: a closed-world
+    // violation, raised before the body runs. A nil receiver of a method defined on Object looks like a yield, so a
+    // strict proc there is told apart by the method table. Emitted only where the world does not prove that no
+    // rebinder ever receives a compiled block (BlockSelfWorld).
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_block_self_violation(mrb_state* M, mrb_value self, const struct RProc* p, const char* block) {
+      const struct REnv* e = MRB_PROC_ENV(p);
+      const char* where = block ? block : mrb_sym_name(M, e->mid);
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: compiled block of %s run under another self (%s)\n", where ? where : "?", mrb_obj_classname(M, self));
+      fflush(stderr);
+      abort();
+    #endif
+      mrb_value msg = mrb_format(M, "closed-world guard violation: compiled block of %s run under %T instead of its creator's self (BLOCK_SELF_WORLD)", where ? where : "?", self);
+      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_sym puts_id = mrb_intern_lit(M, "puts");
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
+      mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
+    }
+    static inline bool bc2cpp_proc_method_body_p(mrb_state* M, mrb_value self, mrb_sym mid, const struct RProc* p) {
+      struct RClass* c = mrb_class(M, self);
+      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      return !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_PROC_P(m) && MRB_METHOD_PROC(m) == p;
+    }
+    static inline void bc2cpp_block_self_check(mrb_state* M, mrb_value self, const char* block) {
+      const mrb_callinfo* ci = M->c->ci;
+      const struct RProc* p = ci->proc;
+      if (mrb_obj_eq(M, self, MRB_PROC_ENV(p)->stack[0])) return;
+      struct RClass* tc = mrb_vm_ci_target_class(ci);
+      if (mrb_nil_p(self) && tc == M->object_class &&
+          (!MRB_PROC_STRICT_P(p) || !bc2cpp_proc_method_body_p(M, self, ci->mid, p))) return;
+      if (mrb_proc_p(self) && mrb_proc_ptr(self) == p && tc == MRB_PROC_TARGET_CLASS(p)) return;
+      bc2cpp_block_self_violation(M, self, p, block);
+    }
+    // The last env slot of a direct-entry block: bit 0 YIELD_FREE (ADR 0283), bit 1 the BLOCK_SELF_WORLD check.
+    static const mrb_int BC2CPP_BLOCK_YIELD_FREE = 1;
+    static const mrb_int BC2CPP_BLOCK_SELF_CHECK = 2;
+    inline mrb_value bc2cpp_block_thunk(mrb_state* M, mrb_value self) {
+      const struct RProc* p = M->c->ci->proc;
+      const struct REnv* e = MRB_PROC_ENV(p);
+      if (mrb_integer(e->stack[MRB_ENV_LEN(e) - 1]) & BC2CPP_BLOCK_SELF_CHECK) bc2cpp_block_self_check(M, self, nullptr);
       mrb_value* argv;
       mrb_int argc;
       mrb_get_args(M, "*", &argv, &argc);
-      const struct RProc* p = M->c->ci->proc;
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
     }
     // YIELD_REACH (ADR 0283): the last env slot of a direct-entry block says its body, and everything
@@ -1513,7 +1585,7 @@ if $PROGRAM_NAME == __FILE__
       const struct RProc* p = mrb_proc_ptr(blk);
       if (!MRB_PROC_CFUNC_P(p) || MRB_PROC_CFUNC(p) != bc2cpp_block_thunk) return false;
       const struct REnv* e = MRB_PROC_ENV(p);
-      return mrb_integer(e->stack[MRB_ENV_LEN(e) - 1]) != 0;
+      return (mrb_integer(e->stack[MRB_ENV_LEN(e) - 1]) & BC2CPP_BLOCK_YIELD_FREE) != 0;
     }
     // SETUPVAR writes into the enclosing compiled frame, which the GC cannot see; the arena that
     // held the value is restored when the block returns (ADR 0272). Roots stay per slot address.

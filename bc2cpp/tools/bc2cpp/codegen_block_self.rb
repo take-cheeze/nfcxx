@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'block_self'
+require_relative 'block_self_world'
 
 # CodeGen: BLOCK_SELF (ADR 0456).
 #
@@ -29,6 +30,27 @@ class CodeGen
   class << self
     # name -> every bytecode MethodDef (interpreted core bodies included); names an uncompiled outside Ruby defines.
     attr_accessor :block_self_bodies, :block_self_unread_names
+    # BLOCK_SELF_WORLD (ADR 0477): BlockSelfWorld's result for this build's closed world (bc2cpp.rb).
+    attr_accessor :block_self_world
+  end
+
+  # The build's BlockSelfWorld result. A CodeGen built without one (a unit check) reads its own ireps only: the
+  # rebound blocks are still known, and the world fact is refused.
+  def block_self_world
+    self.class.block_self_world ||
+      (@block_self_world_local ||= BlockSelfWorld.analyze(ireps: @ireps, superclass_of: @superclass_of || {},
+                                                          refusal: 'no closed-world scan (BLOCK_SELF_WORLD)'))
+  end
+
+  # A block a rebinder may run under another self (a literal block at a rebinder site, or nested in one).
+  def block_self_rebound?(label)
+    block_self_world.rebound.include?(label)
+  end
+
+  # Does a compiled block body check, at entry, that it runs under the self it captured? Only where the world
+  # fact does not already prove it.
+  def block_self_check?
+    !block_self_world.holds?
   end
 
   # [owner MethodDef, nil] when the self of block +label+ is the self of the method that (transitively) creates it,
@@ -44,16 +66,21 @@ class CodeGen
     why = block_self_proc_call_why
     return [nil, why] if why
 
+    world = block_self_world.holds?
     cur = label
     loop do
       d = @owner_of[cur]
       return [d, nil] if d
+      return [nil, "a rebinder may run block #{cur} under another self (BLOCK_SELF_WORLD)"] if block_self_rebound?(cur)
 
       parent, creation = numeric_block_parents[cur]
       return [nil, 'no creating BLOCK'] unless parent
 
-      why = block_self_site_why(parent, creation, cur)
-      return [nil, why] if why
+      # BLOCK_SELF_WORLD (ADR 0477): when the world fact holds, only a rebound block leaves its creator's self.
+      unless world
+        why = block_self_site_why(parent, creation, cur)
+        return [nil, why] if why
+      end
 
       cur = parent.label
     end

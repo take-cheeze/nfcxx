@@ -175,7 +175,7 @@ class CodeGen
     end
     kind, klass = proven_receiver_class(irep, site_idx, reg, closed_world_site(recv, irep, idx, owner_def),
                                         exact_class, constant_owner, self_implicit)
-    return '' unless klass && @closed_world.proven_miss?(name, klass, symbol_installed_names, kind)
+    return '' unless klass && @closed_world.proven_miss?(name, klass, symbol_installed_names, kind, label: irep.label)
 
     "  #{ProvenMiss.marker(name, kind, klass)}\n"
   end
