@@ -340,6 +340,18 @@ OV_TYPES = (('int', 'i', 'unsigned int'), ('unsigned int', 'u', None), ('long', 
 OV_BAD = '__nfcxx_overflow_unsupported_operand_types'
 OV_OPS = {'__builtin_add_overflow': 'add', '__builtin_sub_overflow': 'sub', '__builtin_mul_overflow': 'mul'}
 
+# GCC 14 type-generic bit builtins: name => operation. The helper takes (unsigned long long x, int bits, int d): x is
+# masked to `bits` (the width of the argument's type), and d is the result for a zero input.
+G_OPS = {'__builtin_clzg': 'clz', '__builtin_ctzg': 'ctz', '__builtin_popcountg': 'popcount',
+         '__builtin_parityg': 'parity'}
+G_MASK = 'unsigned long long m = bits == 64 ? (unsigned long long)-1 : (1ULL << bits) - 1; x &= m;'
+G_BODY = {
+    'clz': 'if (x == 0) return d; int n = 0; while (!(x >> 63)) { x <<= 1; ++n; } return n - (64 - bits);',
+    'ctz': 'if (x == 0) return d; int n = 0; while (!(x & 1)) { x >>= 1; ++n; } return n;',
+    'popcount': 'int n = 0; while (x) { x &= x - 1; ++n; } return n;',
+    'parity': 'int n = 0; while (x) { x &= x - 1; ++n; } return n & 1;',
+}
+
 
 def ov_helper(op, t, suf, u):
     """(name, definition) of the overflow helper for OP on type T; U is the unsigned counterpart of a signed T."""
@@ -878,6 +890,19 @@ def main():
         elif t.kind == 'id' and t.text == '__builtin_mul_overflow' and mulov_const_shape(toks, i + 1):
             edits.append((t.start, t.end, MULOV_NAME))
             prelude[MULOV_NAME] = MULOV_DEF
+        elif t.kind == 'id' and t.text in G_OPS and is_punct(tok_at(toks, i + 1), '('):
+            ranges, rp = split_args(toks, i + 1)
+            want = [1, 2] if G_OPS[t.text] in ('clz', 'ctz') else [1]
+            if ranges is None or len(ranges) not in want:
+                sys.exit(f"qbe-prep: {t.text} expects {' or '.join(map(str, want))} argument(s)")
+            text = [src[toks[a].start:toks[b - 1].end] for a, b in ranges]
+            x = text[0]
+            d = text[1] if len(text) > 1 else f'sizeof({x}) * 8'
+            name = '__nfcxx_' + t.text.removeprefix('__builtin_')
+            prelude[name] = f'static int {name}(unsigned long long x, int bits, int d) {{ {G_MASK} {G_BODY[G_OPS[t.text]]} }}'
+            edits.append((t.start, toks[rp].end, f'{name}((unsigned long long)({x}), sizeof({x}) * 8, {d})'))
+            i = rp + 1
+            continue
         elif t.kind == 'id' and t.text in OV_OPS and is_punct(tok_at(toks, i + 1), '('):
             ranges, rp = split_args(toks, i + 1)
             if ranges is None or len(ranges) != 3:
