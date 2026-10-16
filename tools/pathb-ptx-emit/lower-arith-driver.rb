@@ -14,6 +14,78 @@ class Fn
   def lines_out
     @lines
   end
+
+  # The module's data symbols and the frame slots of a memory case (the Ruby's @shared .. @strings and @slots).
+  def set_mem(shared, globals, consts, externs, strings, slots)
+    @shared = shared
+    @globals = globals
+    @consts = consts
+    @externs = externs
+    @strings = strings
+    @slots = slots
+    @sp = "%sp"
+  end
+end
+
+# The memory heads of rval and the statement heads of stmt this port covers (diff-arith.sh's memory cases).
+MEM_HEADS = %w[load load.v bitcast offset index]
+STMT_HEADS = %w[store store.v]
+
+# The symbols of a memory case: (shared NAME), (global NAME), (const NAME), (extern NAME), (string NAME), (slot NAME OFF).
+def mem_symbols(list)
+  h = { shared: {}, globals: {}, consts: {}, externs: {}, strings: {}, slots: {} }
+  list.each do |e|
+    raise BadCase, "symbol" unless e.is_a?(Array) && e.length >= 2 && e[0].is_a?(String) && e[1].is_a?(String)
+    case e[0]
+    when "shared" then h[:shared][e[1]] = true
+    when "global" then h[:globals][e[1]] = true
+    when "const" then h[:consts][e[1]] = true
+    when "extern" then h[:externs][e[1]] = true
+    when "string" then h[:strings][e[1]] = true
+    when "slot"
+      raise BadCase, "symbol" unless e.length == 3 && e[2].is_a?(String)
+      h[:slots][e[1]] = as_int(e[2])
+    else raise BadCase, "symbol"
+    end
+  end
+  h
+end
+
+def mem_regs(presets)
+  raise BadCase, "presets" unless presets.is_a?(Array)
+  regs = {}
+  presets.each do |p|
+    raise BadCase, "preset" unless p.is_a?(Array) && p.length == 3 && p[0].is_a?(String) && p[1].is_a?(String)
+    regs[p[0]] = [p[1], parse_type(p[2])]
+  end
+  regs
+end
+
+def ev_mem(c)
+  raise BadCase, "case" unless c.is_a?(Array) && c.length == 5 && c[0] == "mem"
+  fn = Fn.new(["fn", "t"], 0)
+  fn.set_regs(mem_regs(c[2]))
+  h = mem_symbols(c[3])
+  fn.set_mem(h[:shared], h[:globals], h[:consts], h[:externs], h[:strings], h[:slots])
+  dty = parse_type(c[1])
+  x = c[4]
+  raise BadCase, "instr" unless x.is_a?(Array) && !x.empty? && x[0].is_a?(String)
+  return "NOTMEM" unless MEM_HEADS.include?(x[0])
+  fn.rval(x, "%d", dty)
+  fn.lines_out.map { |l| l.to_s }.join(" ~ ")
+end
+
+def ev_stmt(c)
+  raise BadCase, "case" unless c.is_a?(Array) && c.length == 4 && c[0] == "stmt"
+  fn = Fn.new(["fn", "t"], 0)
+  fn.set_regs(mem_regs(c[1]))
+  h = mem_symbols(c[2])
+  fn.set_mem(h[:shared], h[:globals], h[:consts], h[:externs], h[:strings], h[:slots])
+  x = c[3]
+  raise BadCase, "stmt" unless x.is_a?(Array) && !x.empty? && x[0].is_a?(String)
+  return "NOTSTMT" unless STMT_HEADS.include?(x[0])
+  fn.stmt(x)
+  fn.lines_out.map { |l| l.to_s }.join(" ~ ")
 end
 
 # The instruction heads of the rval branches this port covers (wadd..cf2i and the comparisons). The call and asm
@@ -76,6 +148,8 @@ def ev_case(c)
   when "arith" then ev_arith(c)
   when "call" then ev_call(c)
   when "asm" then ev_asm(c)
+  when "mem" then ev_mem(c)
+  when "stmt" then ev_stmt(c)
   else raise BadCase, "case"
   end
 end

@@ -180,6 +180,8 @@ std::string ptx_sym(const std::string &name) {
   return out;
 }
 
+std::string string_const_sym(const std::string &name) { return ptx_sym(STRING_PREFIX + name); }
+
 std::string float_lit(const std::string &text, const Ty &t) {
   if (text == "+Infinity" || text == "Infinity") return t.size == 4 ? "0f7F800000" : "0d7FF0000000000000";
   if (text == "-Infinity") return t.size == 4 ? "0fFF800000" : "0dFFF0000000000000";

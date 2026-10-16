@@ -57,6 +57,8 @@ std::string ptx_type(const Ty &t);
 std::string mem_type(const Ty &t);
 std::string bits_type(const Ty &t);
 std::string ptx_sym(const std::string &name);
+// The PTX symbol of the string constant name (the Ruby's ptx_sym(STRING_PREFIX + name)).
+std::string string_const_sym(const std::string &name);
 std::string float_lit(const std::string &text, const Ty &t);
 std::string bool_const_setp(const std::string &t, const std::string &v);
 std::optional<uint64_t> float32_bits(const std::string &text);
