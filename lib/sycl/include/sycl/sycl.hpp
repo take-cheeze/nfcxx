@@ -23,8 +23,9 @@
 #define NFCXX_SYCL_HPP
 
 // A device backend is in use: NFCXX_SYCL_GPU (WebGPU: -DNFCXX_SYCL_WEBGPU, rt_pipe.hpp; Vulkan: -DNFCXX_SYCL_VULKAN,
-// rt_vulkan.hpp; OpenCL: -DNFCXX_SYCL_OPENCL, rt_opencl.hpp). The SPIR-V or WGSL image comes from scripts/sycl-build.sh.
-#if defined(NFCXX_SYCL_WEBGPU) || defined(NFCXX_SYCL_VULKAN) || defined(NFCXX_SYCL_OPENCL)
+// rt_vulkan.hpp; OpenCL: -DNFCXX_SYCL_OPENCL, rt_opencl.hpp; Level Zero: -DNFCXX_SYCL_LEVEL_ZERO, rt_level_zero.hpp).
+// The SPIR-V or WGSL image comes from scripts/sycl-build.sh.
+#if defined(NFCXX_SYCL_WEBGPU) || defined(NFCXX_SYCL_VULKAN) || defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)
 #define NFCXX_SYCL_GPU 1
 #endif
 
@@ -545,6 +546,8 @@ void backend_wait();
 #include "rt_vulkan.hpp"
 #elif defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
 #include "rt_opencl.hpp"
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+#include "rt_level_zero.hpp"
 #elif defined(NFCXX_SYCL_WEBGPU) && !defined(__NFCXX_SYCL_DEVICE__)
 #include "rt_pipe.hpp"
 #else
@@ -1303,7 +1306,18 @@ class device {
   template <class P> auto get_info() const { return info_of(static_cast<P *>(nullptr)); }
 
  private:
-  std::string info_of(info::device::name *) const { return is_gpu() ? "nfcxx WebGPU" : "nfcxx host"; }
+  std::string info_of(info::device::name *) const {
+    if (!is_gpu()) return "nfcxx host";
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::cl_rt::get().device_name();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::ze_rt::get().device_name();
+#elif defined(NFCXX_SYCL_VULKAN) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::vk_rt::get().device_name();
+#else
+    return "nfcxx WebGPU";
+#endif
+  }
   std::string info_of(info::device::vendor *) const { return "nfcxx"; }
   std::string info_of(info::device::driver_version *) const { return "0"; }
   std::string info_of(info::device::version *) const { return "SYCL 2020 subset"; }

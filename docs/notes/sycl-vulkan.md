@@ -111,5 +111,9 @@ bytes each. The rest are the samples' own usage errors and deliberate bugs. The 
   OpenCL 2.2, OpenCL.std for the math: Intel's compiler rejects GLSL.std.450 in a kernel) runs all 19 `tests/sycl`
   programs on the Arc B60 through `rt_opencl.hpp` (the heap is shared USM with atomics: the B60's SVM is coarse-grained
   with no atomics). The local size is set by specialization constants. `double` runs too (under a second, three runs; an
-  earlier run that looked hung did not reproduce). Level Zero is not started.
+  earlier run that looked hung did not reproduce).
+- **Level Zero for Intel XPU: done** (`--backend=level-zero`, `rt_level_zero.hpp`). The same Kernel-capability module as
+  OpenCL, through `ze_api.h` and `libze_loader.so.1`: the first Intel GPU, a module per local size (`ze_module_constants_t`
+  for ids 0, 1, 2), the heap in one `zeMemAllocShared` allocation (atomic access checked), one immediate command list.
+  `tests/gpu/level-zero/run.sh` runs the vecAdd kernel standalone on the B60 (50000 elements, a mutant is caught).
 - Work-group sizes above 256 are fine here (lavapipe allows 1024); the WebGPU path keeps its 256 limit.
