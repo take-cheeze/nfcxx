@@ -74,7 +74,7 @@ def live_candidates
   begin
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'profile_annotations_scan', 'OUT_DIR' => out_dir,
             'NATIVE_SRCS' => native_srcs }
-    _stdout, stderr, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, *closed_world)
+    _stdout, stderr, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', *closed_world)
     unless status.success?
       warn stderr
       raise "bc2cpp.rb exited #{status.exitstatus} -- is MRBC (#{mrbc.inspect}) a real, working mrbc?"

@@ -59,7 +59,7 @@ GEM_RAKE = <<~'RAKE'
       env = { 'MRBC' => spec.build.mrbcfile.to_s, 'OUT_SYMBOL' => 'core_test', 'OUT_DIR' => build_dir,
               'ONLY_OWNERS' => BC2CPP_CORE_OWNERS.join(','), 'NATIVE_SRCS' => Shellwords.join(native),
               'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT)), 'SKIP_UNSUPPORTED' => '1' }
-      cmd = "#{RbConfig.ruby.shellescape} #{ROOT}/tools/bc2cpp/bc2cpp.rb #{srcs.map(&:shellescape).join(' ')} " \
+      cmd = "#{RbConfig.ruby.shellescape} #{ROOT}/tools/bc2cpp/bc2cpp.rb --annotated #{srcs.map(&:shellescape).join(' ')} " \
             "> #{generated.shellescape} 2> #{build_dir}/core_test.diag"
       sh env, cmd
     end

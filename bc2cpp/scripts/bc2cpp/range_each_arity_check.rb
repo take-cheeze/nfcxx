@@ -46,7 +46,7 @@ Dir.mktmpdir do |dir|
   File.write(source, SOURCE)
   env = { 'MRBC' => MRBC_ENV, 'OUT_SYMBOL' => 'range_each_arity', 'OUT_DIR' => dir,
           'SKIP_UNSUPPORTED' => '1', 'BC2CPP_SELF_REGISTERING' => '1' }
-  out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, source, chdir: ROOT)
+  out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', source, chdir: ROOT)
   abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
 
   zero = body_of(out, 'RangeZeroOwner_run')

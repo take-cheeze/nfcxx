@@ -42,7 +42,7 @@ env = {
   'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).map { |n, d| "#{n}=#{d}" }),
   NomethodReviewed::ALLOW_ENV => 'allow'
 }
-cmd = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), *srcs].shelljoin
+cmd = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *srcs].shelljoin
 
 generate = lambda do |dir|
   Dir.mktmpdir do |d|

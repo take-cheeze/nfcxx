@@ -54,7 +54,7 @@ module NomethodReviewedProbe
         StrictHints::ALLOW_ENV => (allow ? 'allow' : nil)
       }
       world = closed_world_mrblib_srcs(root, core_gems: hot_methods ? nil : :canonical)
-      Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), *world)
+      Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), '--annotated', *world)
     end
   end
 

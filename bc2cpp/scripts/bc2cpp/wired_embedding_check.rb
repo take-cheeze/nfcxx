@@ -64,7 +64,7 @@ BC2CPP_COMPILED_GEMS.each do |name, gem|
       'SKIP_UNSUPPORTED' => '1'
     }
     generated_path = File.join(dir, "#{gem[:out_symbol]}_gen.cpp")
-    cmd = "#{RbConfig.ruby.shellescape} #{File.join(root, 'tools/bc2cpp/bc2cpp.rb').shellescape} " \
+    cmd = "#{RbConfig.ruby.shellescape} #{File.join(root, 'tools/bc2cpp/bc2cpp.rb').shellescape} --annotated " \
           "#{srcs.map(&:shellescape).join(' ')} > #{generated_path.shellescape}"
     _out, err, status = Open3.capture3(env, cmd)
     abort "bc2cpp.rb failed for #{name}:\n#{err[-2000..]}" unless status.success?

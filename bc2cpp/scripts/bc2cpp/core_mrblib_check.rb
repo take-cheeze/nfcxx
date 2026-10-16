@@ -445,7 +445,7 @@ else
     native_srcs = core_native_srcs("#{ROOT}/3rd/mruby") + external_gem_native_srcs(ROOT)
     env = { 'MRBC' => MRBC_ENV, 'OUT_SYMBOL' => 'core_probe', 'OUT_DIR' => dir, 'ONLY_OWNERS' => only,
             'NATIVE_SRCS' => Shellwords.join(native_srcs), 'SKIP_UNSUPPORTED' => '1' }
-    _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} " \
+    _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} --annotated " \
                                             "#{[*core_files, probe].map(&:shellescape).join(' ')} > #{generated.shellescape}")
     abort "bc2cpp.rb failed:\n#{err[-3000..]}" unless status.success?
     compiled = err[/== core-source compiled entry points \((\d+)\)/, 1].to_i

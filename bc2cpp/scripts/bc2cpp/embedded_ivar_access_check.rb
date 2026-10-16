@@ -32,7 +32,7 @@ check = lambda do |what, condition|
 end
 
 def run_bc2cpp(env, srcs, out_path)
-  cmd = "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} #{srcs.map(&:shellescape).join(' ')} > #{out_path.shellescape}"
+  cmd = "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} --annotated #{srcs.map(&:shellescape).join(' ')} > #{out_path.shellescape}"
   _out, err, status = Open3.capture3(env.merge('MRBC' => MRBC, 'SKIP_UNSUPPORTED' => '1'), cmd)
   abort "bc2cpp.rb failed:\n#{err[-2000..]}" unless status.success?
   err

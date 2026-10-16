@@ -74,7 +74,7 @@ puts 'real closed-world build'
 Dir.mktmpdir do |dir|
   env['OUT_DIR'] = dir
   env['BC2CPP_BARRIER_SHADOW_REPORT'] = File.join(dir, 'report')
-  cmd = [RbConfig.ruby, "-r#{ROOT}/tools/bc2cpp/fixnum_barrier_shadow.rb", "#{ROOT}/tools/bc2cpp/bc2cpp.rb", *srcs]
+  cmd = [RbConfig.ruby, "-r#{ROOT}/tools/bc2cpp/fixnum_barrier_shadow.rb", "#{ROOT}/tools/bc2cpp/bc2cpp.rb", '--annotated', *srcs]
   _out, err, status = Open3.capture3(env, *cmd)
   abort "bc2cpp.rb failed (exit #{status.exitstatus}):\n#{err[-4000..]}" unless status.success?
 

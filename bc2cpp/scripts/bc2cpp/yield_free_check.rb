@@ -216,7 +216,7 @@ FileUtils.mkdir_p(work)
 fixture_path = File.join(work, 'fixture.rb')
 File.write(fixture_path, FIXTURE)
 File.write(File.join(work, 'driver.rb'), DRIVER)
-out, err, status = Open3.capture3(env.call(work, 'yf'), RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), *core_srcs, fixture_path)
+out, err, status = Open3.capture3(env.call(work, 'yf'), RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *core_srcs, fixture_path)
 abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
 File.write(File.join(work, 'yf_gen.cpp'), out)
 File.write(File.join(work, 'yf.err'), err)

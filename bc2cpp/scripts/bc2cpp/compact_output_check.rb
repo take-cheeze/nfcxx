@@ -51,4 +51,18 @@ abort 'compaction ran before instrumentation consumed its marker' unless output 
 output, error, status = Open3.capture3(RbConfig.ruby, '-r', helper, '-e',
                                      'CompactOutput.capture_stdout; puts "partial code"; raise "decode failed"')
 abort 'failed generation emitted partial compact output or hid its error' unless !status.success? && output.empty? && error.include?('decode failed')
+kept = <<~'CPP'
+  // Game::Actor#hp (compiled from irep 12, 30 insns)
+  mrb_value Game_Actor_hp_impl(mrb_state* M, mrb_value self) {
+    // MONO :level -> Game::Actor#level, direct C++ call (no mrb_funcall)
+    // MONO :setup -> Game::Actor#setup (keyword call), direct C++ call (no mrb_funcall)
+  }
+  // Game::Actor#hp -- synthesized attr_reader override (@hp is embedded)
+CPP
+rewritten = CompactOutput.rewrite(kept).lines
+abort 'compact output dropped a structural comment hot_profile.rb reads' unless
+  rewritten[0].start_with?('// Game::Actor#hp (compiled from irep') && rewritten[3].include?('(keyword call)') &&
+  rewritten[5].include?('-- synthesized attr_reader override')
+abort 'compact output kept a per-site reason comment' unless rewritten[2].strip.empty?
+abort 'the annotated flag is not --annotated' unless ANNOTATED_FLAG == '--annotated'
 puts 'compact output check: PASS'

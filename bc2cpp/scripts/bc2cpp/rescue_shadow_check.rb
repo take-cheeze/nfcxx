@@ -191,7 +191,7 @@ else
       NomethodReviewed::ALLOW_ENV => 'allow',
       'BC2CPP_RESCUE_SHADOW_CHILD' => '1', 'BC2CPP_RESCUE_SHADOW_REPORT' => report
     }
-    cmd = [RbConfig.ruby, "-r#{File.expand_path(__FILE__)}", File.join(root, 'tools/bc2cpp/bc2cpp.rb'), *srcs]
+    cmd = [RbConfig.ruby, "-r#{File.expand_path(__FILE__)}", File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *srcs]
     _out, err, status = Open3.capture3(env, *cmd)
     abort("bc2cpp failed (exit #{status.exitstatus}):\n#{err[-4000..]}") unless status.success?
 

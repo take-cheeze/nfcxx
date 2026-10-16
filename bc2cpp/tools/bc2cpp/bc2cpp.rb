@@ -159,8 +159,11 @@ require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 require_relative 'native_setter_report' if ENV['BC2CPP_NATIVE_SETTER_REPORT']
 
 if $PROGRAM_NAME == __FILE__
+  # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
+  # without it they are stripped from stdout (CompactOutput, ADR 0463), the only default.
+  annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
   srcs = ARGV
-  raise 'usage: bc2cpp.rb file1.rb [file2.rb ...]  (env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)' if srcs.empty?
+  raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] file1.rb [file2.rb ...]  (env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)" if srcs.empty?
 
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
@@ -1220,7 +1223,7 @@ if $PROGRAM_NAME == __FILE__
     lost.map { |d| HotMethods.key(d) }.uniq.sort.each { |k| warn "  NOT_COMPILED #{k}" }
   end
 
-  CompactOutput.capture_stdout if ENV['BC2CPP_COMPACT_OUTPUT'] == '1'
+  CompactOutput.capture_stdout unless annotated
 
   # SITE_PROFILE (ADR 0298): opt-in counters on by-name dispatch; unset leaves stdout untouched.
   if (site_profile_dir = ENV['BC2CPP_SITE_PROFILE']) && !site_profile_dir.empty?

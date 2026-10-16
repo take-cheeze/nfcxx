@@ -380,7 +380,7 @@ if system(mrbc, '--version', out: File::NULL, err: File::NULL) || system(mrbc, '
 
       env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'bc2cpp_fb', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
               'BC2CPP_SELF_REGISTERING' => '1' }
-      out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), src,
+      out, err, status = Open3.capture3(env, RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', src,
                                         chdir: ROOT)
       abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
       File.write(File.join(dir, 'fb_gen.cpp'), out)
