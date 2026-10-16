@@ -212,7 +212,7 @@ REFUSED_SCENARIO = <<~CPP
   }
 CPP
 
-full = runtime.full
+full = runtime.full || (runtime.core ? nil : runtime.full_or_build)
 build = full || runtime.core
 if build.nil? || !runtime.compiler?
   puts '  SKIP run: needs g++ and a mruby build (BC2CPP_MRUBY_FULL, BC2CPP_MRUBY_CORE or build*/mruby/host/mrbc)'
