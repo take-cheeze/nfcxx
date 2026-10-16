@@ -33,6 +33,7 @@ class CodeGen
     def ivar_entry_mask(irep, name) = @cg.class_pool_ivar_entry_mask(irep, name)
     def ivar_fact_mask(irep, name) = @cg.class_pool_ivar_fact_mask(irep, name)
     def upvar_mask(irep, insn) = @cg.class_upvar_mask(irep, insn)
+    def index_mask(irep, index, insn, state) = @cg.exact_lcf_index_mask(irep, index, insn, state)
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
     # The class bit of a true, false or Symbol literal (exactly TrueClass, FalseClass or Symbol: each has one instance
     # or is a Symbol, and its mrb_class is that class, see the mrb_class immediate cases in mruby's class.h).
@@ -187,6 +188,7 @@ class CodeGen
     end
     @rc_checked_alias_names = checked_alias_name_candidates
     @rc_admitted_alias_names = Set.new
+    @rc_narrowing = true
     Fixpoint.iterate('CodeGen return classes and class pools', Fixpoint::GROWTH_LIMIT) do
       changed = grow_return_classes
       changed |= grow_class_pools
@@ -471,7 +473,23 @@ class CodeGen
     key = [irep.label, index]
     @rc_new_class[key] = exact_new_class_at(irep, index + 1, insn.reg, numeric_owner_of(irep)) unless @rc_new_class.key?(key)
     klass = @rc_new_class[key]
-    klass && !RETURN_BITLESS_CLASSES.include?(klass) ? numeric_class_bit(klass) : NumericFlow::OTHER
+    return numeric_class_bit(klass) if klass && !RETURN_BITLESS_CLASSES.include?(klass)
+
+    # CORE_NEW_EXACT: `Array.new(n)`, `Hash.new(0)`, `String.new(s)` on the proven core class object is a fresh
+    # instance of exactly that class (Class#new allocates from its receiver, whatever #initialize does), so it is
+    # the class's own bit, as a literal is.
+    core_bit = klass && RETURN_CORE_CLASS.key(klass)
+    core_bit && core_new_exact?(klass) ? core_bit : NumericFlow::OTHER
+  end
+
+  # The construction of +klass+ (a core class with its own bit) is Class#new on exactly that class: the constant
+  # cannot be rebound, and the lookup of `new` and `allocate` up its chain is the standard one
+  # (stable_standard_constructor_class?, the proof GENERIC_OBJECT_CONSTRUCTION builds by).
+  def core_new_exact?(klass)
+    @core_new_exact ||= {}
+    return @core_new_exact[klass] if @core_new_exact.key?(klass)
+
+    @core_new_exact[klass] = stable_standard_constructor_class?(klass) ? true : false
   end
 
   # IR callers consume only complete, unguarded facts from the settled oracles (ADR 0443).
