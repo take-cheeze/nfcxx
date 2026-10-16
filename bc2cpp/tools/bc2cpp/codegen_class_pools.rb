@@ -216,6 +216,8 @@ class CodeGen
     parts << 'CHECKED' if mask.anybits?(NumericFlow::CHECKED)
     parts << numeric_mask_name(mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)) if (mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)).nonzero?
     (@numeric_class_bits || {}).each { |klass, bit| parts << klass if mask.anybits?(bit) }
+    # LCF kinds (EXACT_LCF_ROWS) ride in this flow too.
+    @lcf_rows&.kinds&.each { |k| parts << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
     parts.empty? ? 'NONE' : parts.join('|')
   end
 end

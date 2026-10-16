@@ -276,6 +276,9 @@ HOST = <<~'RUBY'
     end
 
     def name_of(i); @db[:player][i][:name]; end
+    def name_blank?(i); @db[:player][i][:name].empty?; end
+    def keep_name(i); @kept = @db[:player][i][:name]; nil; end
+    def kept_size; @kept.size; end
     def level_plus(i); @db[:player][i][:initial_level] + 1; end
     def hole; @db[:player][99]; end
     def hole_name; @db[:player][99][:name]; end
@@ -355,6 +358,12 @@ Dir.mktmpdir do |dir|
              !name.include?('mrb_nil_p(r3)') || name.index('mrb_nil_p') > name.index('LCF__File'))
   check.call('a table hole is tested for nil, and raises what dispatch would',
              name.scan(/if \(mrb_nil_p\(r3\)\) \{\s*r3 = bc2cpp_nomethod\(/).size == 2)
+  blank = code.call('name_blank?')
+  check.call('EXACT_LCF_ROWS: a :string field read is exactly a String in the exact-class flow (no dispatch on empty?)',
+             blank.include?('RSTR_LEN') && !blank.include?('bc2cpp_send('))
+  kept = code.call('kept_size')
+  check.call('EXACT_LCF_ROWS: an ivar every store of which is a :string field read pools String|nil, not a dispatch',
+             !kept.include?('bc2cpp_send('))
   plus = code.call('level_plus')
   check.call('an :int field with a default proves the `+` operand Integer (no dynamic send)',
              plus.include?('NUMERIC_OPERAND_PROOF :+') && dispatches.call(plus).zero?)

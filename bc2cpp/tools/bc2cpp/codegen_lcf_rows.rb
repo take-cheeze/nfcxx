@@ -48,6 +48,57 @@ class CodeGen
     @lcf_rows.index(recv, key, nil_raises: numeric_nil_raises?('[]'))
   end
 
+  # EXACT_LCF_ROWS: the same transfer in the exact-class flow (RETURN_CLASS_TABLE's ExactOracle). That flow names
+  # a file object by its class bit (`LCF::Database.new`, a class pool, a class test), so a receiver bit of an
+  # LCF file class K reads as FILE(K) here. Both say "exactly an instance of K", and every instance went through
+  # K#initialize: nothing in the program calls `allocate` (numeric_allocate_free?), K has no subclass and no
+  # outside file touches it, and the setup_lcf_rows gate holds for the bodies `[]` runs. The kinds the reads
+  # produce (tables, rows) then ride through the flow and its class pools like any other bit. A mask whose
+  # completeness is only checked at run time (CHECKED) proves nothing here.
+  def exact_lcf_index_mask(irep, index, insn, state)
+    return NumericFlow::OTHER unless @lcf_rows
+
+    recv = state[insn.op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i]
+    return NumericFlow::OTHER unless recv
+    # No value yet (the fixpoint grows from empty): the result must not be OTHER, which never shrinks.
+    return 0 if recv.zero?
+    return NumericFlow::OTHER if recv.anybits?(NumericFlow::CHECKED)
+
+    kinds = exact_lcf_file_kinds(recv)
+    return NumericFlow::OTHER unless @lcf_rows.lcf_bits(kinds).nonzero?
+
+    key = insn.op == 'GETIDX0' ? 0 : lcf_literal_key(irep, index, insn.reg.to_i + 1)
+    @lcf_rows.index(kinds, key, nil_raises: numeric_nil_raises?('[]'))
+  end
+
+  # +mask+ with the class bit of each eligible LCF file class replaced by that class's FILE kind.
+  def exact_lcf_file_kinds(mask)
+    bits = @numeric_class_bits || {}
+    exact_lcf_file_classes.each do |klass, kind_bit|
+      class_bit = bits[klass]
+      mask = (mask & ~class_bit) | kind_bit if class_bit && mask.anybits?(class_bit)
+    end
+    mask
+  end
+
+  # [[class name, FILE kind bit]] of the file classes whose exact instances are FILE objects.
+  def exact_lcf_file_classes
+    @exact_lcf_file_classes ||= begin
+      cw = @closed_world
+      if numeric_allocate_free?
+        @lcf_rows.kinds.filter_map do |k|
+          next unless k.role == :file && k.file_class
+          next unless cw.exact_class?(k.file_class) && cw.untouched_class?(k.file_class) &&
+                      cw.stable_class_constant?(k.file_class)
+
+          [k.file_class, k.bit]
+        end
+      else
+        []
+      end
+    end
+  end
+
   # Compile error for `row[:name]` where +name+ is a literal Symbol that the schema of the row cannot
   # resolve. The row's kinds come from the flow (LcfRowFlow ROW(path): each one is an Array1D whose
   # elements are the table at that path), so the check is per schema, not over every schema at once.
