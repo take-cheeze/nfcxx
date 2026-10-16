@@ -3,6 +3,7 @@
 # and compare the exit code with `// EXPECT: N`. Runs both backends unless NFCXX_BACKEND is set.
 # Header lines (first lines of a test):
 #   // DIALECT: clang           compile in the clang front-end mode (default g++).
+#   // GNU-VERSION: 140000      --gnu-version for the probe (default 130000); GCC 14 builtins (clzg) need 140000.
 #   // XFAIL-qbe: <reason>      known failure on the qbe backend; reported as xfail.
 #   // XFAIL-gcc: <reason>      same for the gcc backend. An XFAIL that passes is a failure (remove the marker).
 #   // X86-ONLY-<backend>: <reason>  skip that backend on hosts other than x86-64.
@@ -27,7 +28,8 @@ for be in $backends; do
     if [ -n "$gccdialect" ] && [ $host_is_clang = 1 ]; then
       echo "skip  $be $name (host C++ compiler is clang: $gccdialect)"; continue
     fi
-    if ./nfcxx --gnu-version=130000 ${dialect:+--dialect=$dialect} --backend="$be" "$f" -o "$tmp/t" 2>"$tmp/err"; then
+    gnuver=$(sed -n 's,^// GNU-VERSION: *\([0-9]*\).*,\1,p' "$f" | head -1)  # GCC 14 builtins (clzg): 140000
+    if ./nfcxx --gnu-version=${gnuver:-130000} ${dialect:+--dialect=$dialect} --backend="$be" "$f" -o "$tmp/t" 2>"$tmp/err"; then
       "$tmp/t" >/dev/null 2>&1; got=$?
       if [ $((got & 255)) -eq $((want & 255)) ]; then st=ok; else st=FAIL; fi
     else
