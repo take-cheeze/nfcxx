@@ -555,7 +555,7 @@ class CodeGen
   end
 
   # The native the call reaches is profiler.cxx's own function, checked to return its block's value (BLOCK_RETURNS,
-  # ADR 0472: the sig/native declaration of RGSS::Profiler.section/frame, its source scan and the closed-world
+  # ADR 0475: the sig/native declaration of RGSS::Profiler.section/frame, its source scan and the closed-world
   # lookup conditions). The emitter replaces that function with profiler.cxx's primitives, so the one native source
   # must be that file.
   def profiler_native_lookup_safe?(meth)

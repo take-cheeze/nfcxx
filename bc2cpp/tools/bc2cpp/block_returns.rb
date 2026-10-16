@@ -6,7 +6,7 @@ require_relative 'bytecode_ir'
 require_relative 'block_self'
 require_relative 'native_block_returns_reviewed'
 
-# BLOCK_RETURNS (docs/adr/0472): RBS declarations of methods whose result is their block's value, or their receiver,
+# BLOCK_RETURNS (docs/adr/0475): RBS declarations of methods whose result is their block's value, or their receiver,
 # checked against the method body and then used at call sites with a literal block.
 #
 # Two shapes are block-return declarations (a block type and a return type of one of these forms):

@@ -436,7 +436,7 @@ if $PROGRAM_NAME == __FILE__
     # checks every return, so its body compiles in a hot-only build too, and one no body can carry is an error.
     CodeGen.declared_return_hint_refusals = DeclaredReturns.hint_refusals(sig_loaded, ireps, registry)
     CodeGen.declared_returns.select(&:hint).each { |e| CodeGen.hot_only_excluded&.delete(e.label) }
-    # BLOCK_RETURNS (ADR 0472): `[T] ... { ... -> T } -> T` and `{ ... } -> self` declarations, checked with them.
+    # BLOCK_RETURNS (ADR 0475): `[T] ... { ... -> T } -> T` and `{ ... } -> self` declarations, checked with them.
     CodeGen.block_returns = BlockReturns.from_signatures(sig_loaded)
     warn '== signature files (RBS_SIGNATURES) =='
     sig_loaded.files.each { |f| warn "  SIG_FILE #{f}" }

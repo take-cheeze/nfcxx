@@ -13,7 +13,7 @@ require_relative 'block_self'
 #   * a literal block argument: the BLOCK that makes it is the instruction right before the SENDB/SSENDB that
 #     takes it (plain fixed argc, block register dest + n + 1), so that call is the only code the Proc reaches;
 #   * taken by a call whose every possible callee only calls the Proc:
-#       - a call whose every callee is a checked block-return declaration (BLOCK_RETURNS, ADR 0472,
+#       - a call whose every callee is a checked block-return declaration (BLOCK_RETURNS, ADR 0475,
 #         codegen_block_returns.rb: a Ruby plain yielder, or a native whose scan shows mrb_yield/mrb_yield_argv,
 #         which keep the Proc's self), such as `RGSS::Profiler.section/frame { }`;
 #       - otherwise every definition of the name (the registry's, and the interpreted core bodies the registry

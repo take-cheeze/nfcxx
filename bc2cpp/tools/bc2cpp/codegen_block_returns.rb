@@ -21,7 +21,7 @@ module BlockReturns
   RubyDef = Struct.new(:owner, :irep, :ireps, :source, keyword_init: true)
 end
 
-# CodeGen: BLOCK_RETURNS (docs/adr/0472), the use of the declarations block_returns.rb reads and checks.
+# CodeGen: BLOCK_RETURNS (docs/adr/0475), the use of the declarations block_returns.rb reads and checks.
 #
 # A call site `recv.m(args) { ... }` (SENDB/SSENDB, plain fixed argc, the block a dominating literal BLOCK) gets the
 # declaration's result when every method the call can run is a checked declaration of the same shape:

@@ -467,7 +467,7 @@ module RbsParamCheck
     entry_why(ctx, frame, reg, cls)
   end
 
-  # A checked `[T] ... { ... -> T } -> T` declaration (BLOCK_RETURNS, ADR 0472: `RGSS::Profiler.section(...) { ... }`)
+  # A checked `[T] ... { ... -> T } -> T` declaration (BLOCK_RETURNS, ADR 0475: `RGSS::Profiler.section(...) { ... }`)
   # returns its literal block's value, and the block's exits are plain returns: every RETURN must be proven `cls`.
   def block_value_why(ctx, body, name, cls, depth)
     body.instructions.each_with_index do |insn, idx|
