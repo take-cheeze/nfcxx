@@ -435,6 +435,8 @@ f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_formati(char *f, char 
   return f128_tc4(f, l, f128_rd(v), fmt, prec);
 }
 
+#endif /* defined(__x86_64__): the _Float128 helpers above */
+
 /* ---- _Float16 (cproc qbe.c, f16binary and convertf16) ----
 
    A _Float16 is its IEEE binary16 pattern in an unsigned int (the low 16 bits; the upper bits are zero, and the helpers
@@ -553,8 +555,8 @@ int __nfcxx_f16_le(unsigned a, unsigned b) { return f16_to_float(a) <= f16_to_fl
 int __nfcxx_f16_gt(unsigned a, unsigned b) { return f16_to_float(a) > f16_to_float(b); }
 int __nfcxx_f16_ge(unsigned a, unsigned b) { return f16_to_float(a) >= f16_to_float(b); }
 
-/* long double and __float128 to binary16, rounded once from the exact value (the object is read as in the other helpers
-   of this file: 10 x87 bytes, or the 16 bytes of binary128) */
+/* long double to binary16, rounded once from the exact value (x86-64: the 10 x87 bytes, as the other helpers of this file) */
+#if defined(__x86_64__)
 unsigned __nfcxx_f16_from_ld(const void *a)
 {
   unsigned long long m;
@@ -572,6 +574,19 @@ unsigned __nfcxx_f16_from_ld(const void *a)
   return f16_round(sign, m, (e ? (int)e : 1) - 16383 - 63);
 }
 
+#elif __LDBL_MANT_DIG__ == 53
+/* long double is a double (Apple arm64): the double conversion, which rounds the exact value once. A quad long double
+   (aarch64 Linux) would round twice through double, so it gets no definition here, as before. */
+unsigned __nfcxx_f16_from_ld(const void *a)
+{
+  long double v;
+  memcpy(&v, a, sizeof v);
+  return __nfcxx_f16_from_f64((double)v);
+}
+#endif
+
+#if defined(__x86_64__)
+/* __float128 to binary16: the binary128 bits (the x86-64 and gcc layout) */
 unsigned __nfcxx_f16_from_f128(const void *a)
 {
   unsigned long long lo, hi, frac, m;
