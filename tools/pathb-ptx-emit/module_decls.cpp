@@ -11,7 +11,6 @@
 namespace {
 
 const char *const DYNSHARED_SYM_DECL = "__nfcxx_dynshared";
-const char *const STRING_PREFIX_DECL = "__nfcxx_str_";
 
 // Ruby's head_of: the head atom of a non-empty list, or null.
 const std::string *head(const Node *x) {
@@ -82,7 +81,7 @@ struct ByteInitSrc {
 
 }  // namespace
 
-std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool uses_printf) {
+std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool uses_printf, ModuleSymbols *syms) {
   std::vector<Node> forms = parse_forms_chunked(src);
   OMap<Shared> shared;
   OMap<Global> globals;
@@ -195,6 +194,14 @@ std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool 
     consts.set(name, Const{"u8", body, b.align, b.size});
   }
 
+  if (syms) {
+    for (const auto &s : shared.items) syms->shared.insert(s.first);
+    for (const auto &g : globals.items) syms->globals.insert(g.first);
+    for (const auto &c : consts.items) syms->consts.insert(c.first);
+    for (const auto &e : externs.items) syms->externs.insert(e.first);
+    for (const auto &s : strings.items) syms->strings.insert(s.first);
+  }
+
   std::string out;
   if (uses_dynshared) out += std::string(".extern .shared .align 16 .b8 ") + DYNSHARED_SYM_DECL + "[];\n";
   for (const auto &s : strings.items) {
@@ -203,7 +210,7 @@ std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool 
       if (i) body += ",";
       body += std::to_string(s.second[i]);
     }
-    out += ".const .align 1 .b8 " + ptx_sym(STRING_PREFIX_DECL + s.first) + "[" + std::to_string(s.second.size()) +
+    out += ".const .align 1 .b8 " + string_const_sym(s.first) + "[" + std::to_string(s.second.size()) +
            "] = {" + body + "};\n";
   }
   if (uses_printf)
