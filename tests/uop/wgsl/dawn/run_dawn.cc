@@ -40,8 +40,13 @@ static double now_ms(void) {
   return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+static int cmp_double(const void* a, const void* b) {
+  double x = *(const double*)a, y = *(const double*)b;
+  return (x > y) - (x < y);
+}
+
 int main(int argc, char** argv) {
-  if (argc != 3) { fprintf(stderr, "usage: run_dawn case.wgsl case.spec\n"); return 2; }
+  if (argc != 3 && argc != 4) { fprintf(stderr, "usage: run_dawn case.wgsl case.spec [timed-runs]\n"); return 2; }
   double t0 = now_ms();
   dawnProcSetProcs(&dawn::native::GetProcs());
 
@@ -55,8 +60,10 @@ int main(int argc, char** argv) {
   const char* ename[16]; int ecount[16], ebind[16][4], enb[16]; int nk = 0;
   float* expect = NULL; int nexp = 0;
   f = fopen(argv[2], "r"); if (!f) { perror(argv[2]); return 2; }
-  static char line[1 << 16];
-  while (fgets(line, sizeof line, f)) {
+  // Lines of any length: the input and expect lines hold every value of a case (2^24 floats is over 100 MB of text).
+  char* line = NULL; size_t cap = 0;
+  while (getline(&line, &cap, f) != -1) {
+    size_t ll = strlen(line);   // before strtok writes into the line
     char* tok = strtok(line, " \n");
     if (!tok) continue;
     if (!strcmp(tok, "output")) out = atoi(strtok(NULL, " \n"));
@@ -66,6 +73,7 @@ int main(int argc, char** argv) {
       if (i + 1 > nbuf) nbuf = i + 1;
     } else if (!strcmp(tok, "input")) {
       int i = atoi(strtok(NULL, " \n"));
+      if (i < 0 || i >= nbuf) { fprintf(stderr, "input %d: no such buffer\n", i); return 2; }
       inputs[i] = (float*)malloc(sizeof(float) * bcount[i]); icount[i] = 0;
       char* v; while ((v = strtok(NULL, " \n"))) inputs[i][icount[i]++] = strtof(v, NULL);
     } else if (!strcmp(tok, "kernel")) {
@@ -75,7 +83,8 @@ int main(int argc, char** argv) {
       while ((b = strtok(NULL, " \n"))) ebind[nk][enb[nk]++] = atoi(b);
       nk++;
     } else if (!strcmp(tok, "expect")) {
-      expect = (float*)malloc(sizeof(float) * 1024); char* v;
+      // Every value takes at least two characters ("0 "), so the line length bounds the count.
+      expect = (float*)malloc(sizeof(float) * (ll / 2 + 1)); char* v;
       while ((v = strtok(NULL, " \n"))) expect[nexp++] = strtof(v, NULL);
     }
   }
@@ -170,5 +179,59 @@ int main(int argc, char** argv) {
          bad ? "FAIL" : "PASS", nexp, exact, maxerr, nk,
          (int)info.vendor.length, info.vendor.data, (int)info.architecture.length, info.architecture.data,
          (int)info.backendType, t_dev - t0, t_end - t_submit, t_end - t0);
+
+  // Timing (optional third argument: the number of timed runs). The pipelines and bind groups are built once and the inputs
+  // were uploaded above. Each run encodes every kernel, copies one output value to a probe buffer, submits, and waits for
+  // the probe to map. The first two runs are warm-up, as in tests/uop/perf/run_webgpu.html.
+  if (argc == 4) {
+    int runs = atoi(argv[3]);
+    if (runs < 1 || runs > 256) { fprintf(stderr, "runs must be 1..256\n"); return 2; }
+    WGPUComputePipeline pipes[16]; WGPUBindGroup bgs[16];
+    for (int k = 0; k < nk; k++) {
+      WGPUComputePipelineDescriptor pd = {0};
+      pd.compute.module = module;
+      pd.compute.entryPoint = (WGPUStringView){ename[k], (size_t)strlen(ename[k])};
+      pipes[k] = wgpuDeviceCreateComputePipeline(dev, &pd);
+      WGPUBindGroupLayout bgl = wgpuComputePipelineGetBindGroupLayout(pipes[k], 0);
+      WGPUBindGroupEntry ents[MAXB] = {0};
+      for (int j = 0; j < enb[k]; j++) {
+        ents[j].binding = ebind[k][j];
+        ents[j].buffer = bufs[ebind[k][j]];
+        ents[j].size = bcount[ebind[k][j]] * 4;
+      }
+      WGPUBindGroupDescriptor bgd = {0};
+      bgd.layout = bgl;
+      bgd.entryCount = enb[k];
+      bgd.entries = ents;
+      bgs[k] = wgpuDeviceCreateBindGroup(dev, &bgd);
+    }
+    WGPUBufferDescriptor pbd = {0};
+    pbd.size = 4; pbd.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+    WGPUBuffer probe = wgpuDeviceCreateBuffer(dev, &pbd);
+    static double ms[256];
+    for (int it = 0; it < 2 + runs; it++) {
+      double s = now_ms();
+      WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(dev, NULL);
+      for (int k = 0; k < nk; k++) {
+        WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(e, NULL);
+        wgpuComputePassEncoderSetPipeline(pass, pipes[k]);
+        wgpuComputePassEncoderSetBindGroup(pass, 0, bgs[k], 0, NULL);
+        wgpuComputePassEncoderDispatchWorkgroups(pass, (ecount[k] + 63) / 64, 1, 1);
+        wgpuComputePassEncoderEnd(pass);
+      }
+      wgpuCommandEncoderCopyBufferToBuffer(e, bufs[out], 0, probe, 0, 4);
+      WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(e, NULL);
+      wgpuQueueSubmit(queue, 1, &cmd);
+      map_done = 0;
+      wait_on(wgpuBufferMapAsync(probe, WGPUMapMode_Read, 0, 4, (WGPUBufferMapCallbackInfo){
+          .mode = WGPUCallbackMode_WaitAnyOnly, .callback = on_map}));
+      if (map_done != 1) { printf("FAIL timing probe map\n"); return 1; }
+      double en = now_ms();
+      wgpuBufferUnmap(probe);
+      if (it >= 2) ms[it - 2] = en - s;
+    }
+    qsort(ms, runs, sizeof(double), cmp_double);
+    printf("TIMING median_ms=%.4f min_ms=%.4f runs=%d\n", ms[runs / 2], ms[0], runs);
+  }
   return bad ? 1 : 0;
 }
