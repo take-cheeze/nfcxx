@@ -1,5 +1,8 @@
 // Reader for the Path B IR text. Each function here is the C++ form of the Ruby function of the same name in
 // scripts/pathb-ptx-emit.rb; the byte rules (space, octal, escapes, lstrip, split) follow mruby's, which runs the Ruby.
+#include <map>
+#include <set>
+
 #include "ir.hpp"
 
 namespace {
@@ -182,9 +185,9 @@ std::string strip_comments(const std::string &src) {
   return out;
 }
 
-}  // namespace
-
-std::vector<Node> parse_forms_chunked(const std::string &src) {
+// The Ruby's module_chunks: the chunks of the text, each starting at a line that begins with '(' (full-line comments
+// dropped).
+std::vector<std::string> module_chunks(const std::string &src) {
   std::vector<std::string> chunks;
   std::string cur;
   bool cur_empty = true;
@@ -200,9 +203,45 @@ std::vector<Node> parse_forms_chunked(const std::string &src) {
     cur_empty = false;
   }
   if (!cur_empty) chunks.push_back(cur);
+  return chunks;
+}
 
+bool starts_with(const std::string &s, const std::string &prefix) { return s.compare(0, prefix.size(), prefix) == 0; }
+
+// The Ruby's function_chunk_name: the name in the header `(function "NAME"`, or false when the header is not of that form.
+bool function_chunk_name(const std::string &chunk, std::string &name) {
+  const std::string head = "(function \"";
+  if (!starts_with(chunk, head)) return false;
+  size_t q = chunk.find('"', head.size());
+  if (q == std::string::npos) return false;
+  name = chunk.substr(head.size(), q - head.size());
+  return name.find('\\') == std::string::npos;
+}
+
+// The Ruby's text_symbol_names: the names of the `sig"name"` symbols in a function chunk's text. A chunk with an escape
+// or a string form is not read this way (false).
+bool text_symbol_names(const std::string &text, char sig, std::vector<std::string> &out) {
+  if (text.find('\\') != std::string::npos || text.find("(string") != std::string::npos ||
+      text.find("(bytes") != std::string::npos) {
+    return false;
+  }
+  const std::string key = std::string(1, sig) + "\"";
+  out.clear();
+  size_t i = text.find(key);
+  while (i != std::string::npos) {
+    size_t j = text.find('"', i + key.size());
+    if (j == std::string::npos) return false;
+    out.push_back(text.substr(i + key.size(), j - (i + key.size())));
+    i = text.find(key, j + 1);
+  }
+  return true;
+}
+
+}  // namespace
+
+std::vector<Node> parse_forms_chunked(const std::string &src) {
   std::vector<Node> forms;
-  for (const std::string &c : chunks) {
+  for (const std::string &c : module_chunks(src)) {
     try {
       for (Node &f : parse_forms(tokenize(c))) forms.push_back(std::move(f));
     } catch (const BadIR &) {
@@ -232,4 +271,81 @@ std::string form_text(const Node &n) {
       return n.text;
   }
   return "";
+}
+
+namespace {
+
+// The Ruby's head_of(x) == name for a form.
+bool head_is(const Node &x, const char *name) {
+  return x.kind == Node::List && !x.items.empty() && x.items[0].kind == Node::Atom && x.items[0].text == name;
+}
+
+}  // namespace
+
+bool parse_module_forms(const std::string &src, const std::vector<std::string> &kernels, ModuleForms &out) {
+  if (kernels.empty()) return false;
+  const std::vector<std::string> chunks = module_chunks(src);
+  std::map<std::string, size_t> fn_chunks;  // function name => chunk index
+  std::map<size_t, size_t> fn_pos;          // chunk index => position among the module's functions
+  size_t nfn = 0;
+  for (size_t i = 0; i < chunks.size(); i++) {
+    if (!starts_with(chunks[i], "(function")) continue;
+    std::string name;
+    if (!function_chunk_name(chunks[i], name) || fn_chunks.count(name)) return false;
+    fn_chunks[name] = i;
+    fn_pos[i] = nfn++;
+  }
+  if (fn_chunks.empty()) return false;
+
+  // Each kernel names exactly one function: its own name, or its mangled name (_Z<len><name>...).
+  std::vector<std::string> roots;
+  for (const std::string &k : kernels) {
+    const std::string mangled = "_Z" + std::to_string(k.size()) + k;
+    std::vector<std::string> hits;
+    for (const auto &fc : fn_chunks) {
+      if (fc.first == k || starts_with(fc.first, mangled)) hits.push_back(fc.first);
+    }
+    if (hits.size() != 1) return false;
+    roots.push_back(hits[0]);
+  }
+
+  // The functions reachable from the kernels, through the function symbols (&"name") in their text.
+  std::map<std::string, std::vector<std::string>> callees;
+  for (const auto &fc : fn_chunks) {
+    std::vector<std::string> cs;
+    if (!text_symbol_names(chunks[fc.second], '&', cs)) return false;
+    callees[fc.first] = cs;
+  }
+  std::set<std::string> live;
+  std::vector<std::string> stack = roots;
+  while (!stack.empty()) {
+    std::string n = stack.back();
+    stack.pop_back();
+    if (live.count(n)) continue;
+    live.insert(n);
+    for (const std::string &c : callees[n]) {
+      if (fn_chunks.count(c)) stack.push_back(c);
+    }
+  }
+
+  out.forms.clear();
+  out.fn_indices.clear();
+  for (size_t i = 0; i < chunks.size(); i++) {
+    const bool is_fn = starts_with(chunks[i], "(function");
+    if (is_fn) {
+      std::string name;
+      function_chunk_name(chunks[i], name);
+      if (!live.count(name)) continue;
+      out.fn_indices.push_back(fn_pos[i]);
+    }
+    std::vector<Node> parsed;
+    try {
+      parsed = parse_forms(tokenize(chunks[i]));
+    } catch (const BadIR &) {
+      return false;
+    }
+    if (is_fn && (parsed.size() != 1 || !head_is(parsed[0], "function"))) return false;
+    for (Node &f : parsed) out.forms.push_back(std::move(f));
+  }
+  return true;
 }
