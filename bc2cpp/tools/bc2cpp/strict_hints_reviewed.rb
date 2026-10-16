@@ -31,6 +31,7 @@ STRICT_HINTS_REVIEWED = Set[
   "RPG2k::Scene::DebugMenu#open_map_viewer -> map (IVAR_ACCESSOR)",
   "RPG2k::Scene::DebugMenu#refresh_chipset_page -> map (IVAR_ACCESSOR)",
   "RPG2k::Scene::DebugMenu#refresh_map_page -> map (IVAR_ACCESSOR)",
+  "RPG2k::Scene::ItemMenu#build_target_window -> name (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#build_parallels -> commands (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#build_parallels -> id (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#build_parallels -> trigger (IVAR_ACCESSOR)",
@@ -68,4 +69,6 @@ STRICT_HINTS_REVIEWED = Set[
   "RPG2k::Scene::Map#update -> screen (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#update_screen_overlay -> screen (IVAR_ACCESSOR)",
   "RPG2k::Scene::MapViewer#initialize -> map (IVAR_ACCESSOR)",
+  "RPG2k::Scene::Order#initialize -> name (IVAR_ACCESSOR)",
+  "RPG2k::Scene::SkillMenu#build_target_window -> name (IVAR_ACCESSOR)",
 ].freeze
