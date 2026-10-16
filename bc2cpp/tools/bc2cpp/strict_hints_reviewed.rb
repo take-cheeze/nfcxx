@@ -22,6 +22,7 @@ STRICT_HINTS_REVIEWED = Set[
   "Game::Interpreter#play_audio -> string (IVAR_ACCESSOR)",
   "Game::Interpreter#switches -> switches (IVAR_ACCESSOR)",
   "Game::Interpreter#variables -> variables (IVAR_ACCESSOR)",
+  "RPG2k#maybe_battle_play_test -> enemies (IVAR_ACCESSOR)",
   "RPG2k3::Scene::Battle#drive_battle_atb -> result (IVAR_ACCESSOR)",
   "RPG2k3::Scene::Battle#finish_round_animation -> result (IVAR_ACCESSOR)",
   "RPG2k::Scene::Base#initialize -> db (IVAR_ACCESSOR)",
