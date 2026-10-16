@@ -136,7 +136,12 @@ run_all() {
   fi
 }
 if [ -n "$UOP_HOST" ]; then
-  run_all host g++ -std=c++17 -Wall -Wextra -O1 -fsanitize=address,undefined
+  # The embedded interpreter of the tinygrad back end is never finalized, so LeakSanitizer reports its live state (tests/uop/lsan.supp).
+  # The suppressions match frames of the allocation stack, which ASan records to 30 frames by default; CPython and numpy's imports
+  # are deeper than that, so the depth is raised to 255, the most ASan allows (then the stacks are complete and the suppressions match).
+  export ASAN_OPTIONS="malloc_context_size=255${ASAN_OPTIONS:+:$ASAN_OPTIONS}"
+  export LSAN_OPTIONS="suppressions=$PWD/tests/uop/lsan.supp${LSAN_OPTIONS:+:$LSAN_OPTIONS}"
+  run_all host g++ -std=c++17 -Wall -Wextra -O1 -g -fsanitize=address,undefined
   tests/uop/run_poly.sh || fail=1
   exit $fail
 fi
