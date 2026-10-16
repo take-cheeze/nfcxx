@@ -13,7 +13,7 @@ compatibility-version: 1
 exports:
   - targets:         [ arm64-macos ]
     symbols:         [ _abort, _fabsf, _fprintf, _ldexp, _longjmp, _memcpy, _memset, _printf, _puts, _qsort,
-                       _setjmp, _strcmp, _strtol, _toupper, _vsnprintf, ___error, ___stderrp, dyld_stub_binder,
+                       _memmove, _setjmp, _strcmp, _strlen, _strstr, _strtol, __setjmp, _toupper, _vsnprintf, ___error, ___stderrp, dyld_stub_binder,
                        ___divti3, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti, ___floattidf, ___floattisf,
                        ___floatuntidf, ___floatuntisf, ___modti3, ___udivti3, ___umodti3 ]
     weak-symbols:    [ ]
