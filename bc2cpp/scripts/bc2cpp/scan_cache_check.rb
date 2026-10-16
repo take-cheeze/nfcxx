@@ -1,10 +1,11 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check ScanCache (tools/bc2cpp/scan_cache.rb, ADR 0415): the disk memo of the scans that read only the
+# Check ScanCache (tools/bc2cpp/scan_cache.rb, ADRs 0415 and 0462): the disk memo of the scans that read only the
 # outside-world sources. A stored result must be returned only for the exact inputs and scanner sources it was
-# computed from, must never change what the scan returns, and must not be written at all unless
-# BC2CPP_SCAN_CACHE_DIR is set. Run by the `ruby-checks` job; needs no mruby build.
+# computed from, must never change what the scan returns, and every cache fault (an unreadable entry, an entry stored
+# under another key, a value or directory that cannot be stored) must stop the run. It is always on; the checks turn
+# it off with ScanCache.bypass. Run by the `ruby-checks` job; needs no mruby build.
 
 require 'tmpdir'
 require 'fileutils'
@@ -42,15 +43,17 @@ Dir.mktmpdir do |tmp|
   two = File.join(tmp, 'two.c')
   File.write(one, 'mrb_define_method(a);')
   File.write(two, 'mrb_define_method(b);')
-  old_env = ENV.fetch(ScanCache::ENV_NAME, nil)
 
-  puts '-- off by default'
-  ENV.delete(ScanCache::ENV_NAME)
-  check.call('without the variable the block runs every time', [run_scan([one]).first, run_scan([one]).first] == [1, 1])
-  check.call('without the variable nothing is written', !File.exist?(cache))
+  puts '-- on by default, bypassed only from Ruby'
+  ScanCache.directory_override = nil
+  check.call('the cache is the repository build directory unless a check overrides it from Ruby', ScanCache.directory == ScanCache::DEFAULT_DIR)
+  ScanCache.directory_override = cache
+  bypassed = ScanCache.bypass { [run_scan([one]).first, run_scan([one]).first] }
+  check.call('inside ScanCache.bypass the block runs every time', bypassed == [1, 1])
+  check.call('inside ScanCache.bypass nothing is written', !File.exist?(cache))
 
   puts '-- on'
-  ENV[ScanCache::ENV_NAME] = cache
+  ScanCache.directory_override = cache
   calls, first = run_scan([one, two])
   check.call('the first call computes and stores', calls == 1 && Dir.children(cache).size == 1)
   calls, again = run_scan([one, two])
@@ -82,20 +85,36 @@ Dir.mktmpdir do |tmp|
               run_scan([one, missing], name: 'reports', cache_absent: false).first] == [1, 1])
   check.call('a directory input is never stored', [run_scan([tmp], name: 'dir').first, run_scan([tmp], name: 'dir').first] == [1, 1])
 
-  puts '-- failures are reported, never hidden'
+  puts '-- faults stop the run, never recompute'
+  fails = lambda do |&block|
+    block.call
+    false
+  rescue ScanCache::Error
+    true
+  end
   entry = File.join(cache, "scan-#{ScanCache.key_for('scan', [one, two], true)}.bin")
+  good = File.binread(entry)
   File.binwrite(entry, 'not a marshal dump')
-  warned = capture_stderr { @corrupt = run_scan([one, two]) }
-  check.call('a corrupt entry is reported and recomputed', warned.include?('unreadable') && @corrupt.first == 1)
-  check.call('the recomputed entry replaces the corrupt one', run_scan([one, two]).first.zero?)
-  warned = capture_stderr { @unstorable = run_scan([one], name: 'proc', value: -> { Hash.new { |h, k| h[k] = 1 } }) }
-  check.call('a value that cannot be dumped is returned and reported', warned.include?('was not stored') && @unstorable.first == 1)
+  check.call('a corrupt entry is an error', fails.call { run_scan([one, two]) })
+  run_scan([two, one])
+  other = File.join(cache, "scan-#{ScanCache.key_for('scan', [two, one], true)}.bin")
+  File.binwrite(entry, File.binread(other))
+  check.call('an entry stored under another key is an error', fails.call { run_scan([one, two]) })
+  File.binwrite(entry, Marshal.dump({ 'a' => [1, 2] }))
+  check.call('an entry without the cache header (an older format) is an error', fails.call { run_scan([one, two]) })
+  File.binwrite(entry, good)
+  check.call('the restored entry loads', run_scan([one, two]).first.zero?)
+  check.call('a value that cannot be dumped is an error',
+             fails.call { run_scan([one], name: 'proc', value: -> { Hash.new { |h, k| h[k] = 1 } }) })
   blocked = File.join(tmp, 'blocked')
   File.write(blocked, 'a file where the cache directory should be')
-  ENV[ScanCache::ENV_NAME] = File.join(blocked, 'sub')
-  warned = capture_stderr { @blocked = run_scan([one], name: 'blocked') }
-  check.call('an unwritable cache directory is reported and the value still returned', warned.include?('was not stored') && @blocked.last == { 'a' => [1, 2] })
-  ENV[ScanCache::ENV_NAME] = cache
+  ScanCache.directory_override = File.join(blocked, 'sub')
+  check.call('an unwritable cache directory is an error', fails.call { run_scan([one], name: 'blocked') })
+  ScanCache.directory_override = cache
+  check.call('a cached scan that reads ENV is an error (the key holds no environment)',
+             fails.call { ScanCache.fetch('reads_env', [one]) { ENV.fetch('HOME', nil) } })
+  check.call('and nothing is stored for it', Dir[File.join(cache, 'reads_env-*')].empty?)
+  check.call('ENV is readable again once no scan computes', ENV.key?('PATH'))
 
   puts '-- concurrent writers'
   pids = Array.new(4) { fork { run_scan([one, two], name: 'race', value: -> { { 'b' => 3 } }); exit!(0) } }
@@ -109,10 +128,11 @@ Dir.mktmpdir do |tmp|
   if natives.empty?
     puts '  SKIP 3rd/mruby is not checked out'
   else
-    ENV.delete(ScanCache::ENV_NAME)
-    plain = [NativeExpressionDevirt.analyze(natives), NativeExpressionDevirt.analyze_exact_class_expressions(natives),
-             outside_world_tokens(natives)]
-    ENV[ScanCache::ENV_NAME] = File.join(tmp, 'real')
+    plain = ScanCache.bypass do
+      [NativeExpressionDevirt.analyze(natives), NativeExpressionDevirt.analyze_exact_class_expressions(natives),
+       outside_world_tokens(natives)]
+    end
+    ScanCache.directory_override = File.join(tmp, 'real')
     cold = [NativeExpressionDevirt.analyze(natives), NativeExpressionDevirt.analyze_exact_class_expressions(natives),
             outside_world_tokens(natives)]
     warm = [NativeExpressionDevirt.analyze(natives), NativeExpressionDevirt.analyze_exact_class_expressions(natives),
@@ -140,7 +160,7 @@ Dir.mktmpdir do |tmp|
     # The result of the three stateful scans under `dir` (nil: cache off), the scan's calls and what it printed.
     phase = lambda do |dir, decls: %w[Array Hash RGSS::Bitmap]|
       fresh_process.call
-      ENV[ScanCache::ENV_NAME] = dir
+      ScanCache.directory_override = dir || cache
       calls = Hash.new(0)
       wrapped = lambda do |owner, name|
         original = owner.method(name)
@@ -152,10 +172,13 @@ Dir.mktmpdir do |tmp|
       end
       originals = [[ClosedWorld, :native_facts], [NativeExpressionDevirt, :scan_class_registrations],
                    [NativeDirect, :scan_file_registrations]].map { |owner, name| [owner, name, wrapped.call(owner, name)] }
-      warned = capture_stderr do
-        @phase_value = [world_state.call(decls), NativeExpressionDevirt.class_registrations(natives),
-                        natives.map { |path| NativeDirect.file_registrations(path) }]
+      scan = lambda do
+        capture_stderr do
+          @phase_value = [world_state.call(decls), NativeExpressionDevirt.class_registrations(natives),
+                          natives.map { |path| NativeDirect.file_registrations(path) }]
+        end
       end
+      warned = dir ? scan.call : ScanCache.bypass(&scan)
       originals.each { |owner, name, original| owner.define_singleton_method(name, original) }
       [@phase_value, calls, warned]
     end
@@ -181,7 +204,7 @@ Dir.mktmpdir do |tmp|
                other_decls[0] == phase.call(nil, decls: %w[Array Integer Rect])[0] && other_decls[0] != warm[0])
   end
 
-  old_env ? ENV[ScanCache::ENV_NAME] = old_env : ENV.delete(ScanCache::ENV_NAME)
+  ScanCache.directory_override = nil
 end
 
 if failures.empty?
