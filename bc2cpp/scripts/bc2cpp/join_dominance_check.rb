@@ -28,6 +28,7 @@ require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/ivar_layout'
 require_relative '../../tools/bc2cpp/irep_scans'
 require_relative '../../tools/bc2cpp/nil_narrowing'
+require_relative '../../tools/bc2cpp/block_self'
 
 failures = []
 check = lambda do |what, condition|
@@ -220,6 +221,56 @@ check.call('`(v.m? && x) ? g(v) : nil`: a later argument copy of v is non-nil at
 check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_nil.call(ternary, 3, '4'))
 check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
            !NilNarrowing.non_nil?(irep_of(ternary), 12, '7', ->(_name) { false }))
+
+puts '-- BLOCK_SELF plain yielders (host, ADR 0456)'
+yielder = lambda do |list, nested = nil|
+  outer = Irep.new(label: 'bs_out', instructions: list, reps: nested ? ['bs_in'] : [], nregs: 8, catch_handlers: [])
+  ireps = { 'bs_out' => outer }
+  ireps['bs_in'] = Irep.new(label: 'bs_in', instructions: nested, reps: [], nregs: 8, catch_handlers: []) if nested
+  BlockSelf.plain_yielder_why(outer, ireps)
+end
+# mruby-enum-ext's `def each_with_object(obj, &block); return to_enum(...) unless block; self.each {|*val|
+# block.call(val.__svalue, obj) }; obj; end`, as mrbc compiles it: the block slot R2 is copied to the local R3 and
+# tested, the nested block reads it back through GETUPVAR and only calls it.
+ewo_inner = [insn(0, 'ENTER', "0:0:1:0:0:0:0:0 (0x1000)"), insn(4, 'GETUPVAR', "R3\t3\t0"), insn(8, 'MOVE', "R4\tR1"),
+             insn(11, 'SEND0', "R4\t:__svalue"), insn(14, 'GETUPVAR', "R5\t1\t0"), insn(18, 'SEND', "R3\t:call\tn=2"),
+             insn(22, 'RETURN', 'R3')]
+ewo = [insn(0, 'ENTER', "1:0:0:0:0:0:1:0 (0x40001)"), insn(4, 'MOVE', "R3\tR2"), insn(7, 'MOVE', "R4\tR3"),
+       insn(10, 'JMPIF', "R4\t26"), insn(14, 'LOADSYM', "R5\t:each_with_object"), insn(17, 'MOVE', "R6\tR1"),
+       insn(20, 'SSEND', "R4\t:to_enum\tn=2"), insn(24, 'RETURN', 'R4'), insn(26, 'BLOCK', "R5\tI[0]"),
+       insn(29, 'SSENDB', "R4\t:each\tn=0"), insn(33, 'RETURN', 'R1')]
+check.call('each_with_object only calls its block (a copy tested, then called from a nested block)',
+           yielder.call(ewo, ewo_inner).nil?)
+# def f(x); yield x; end  -- BLKPUSH, then BLKCALL.
+yield_x = [insn(0, 'ENTER', "1:0:0:0:0:0:0:0 (0x40000)"), insn(4, 'MOVE', "R4\tR1"), insn(7, 'BLKPUSH', "R3\t1:0:0:0 (0)"),
+           insn(11, 'BLKCALL', "R3\t1"), insn(14, 'RETURN', 'R3')]
+check.call('`yield x` is a plain call of the block', yielder.call(yield_x).nil?)
+# def f(&b); b; end
+returns_it = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'RETURN', 'R1')]
+check.call('returning the block lets it escape (negative)', !yielder.call(returns_it).nil?)
+# def f(&b); instance_exec(&b); end
+rebinds = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'MOVE', "R4\tR2"),
+           insn(10, 'SSENDB', "R3\t:instance_exec\tn=0"), insn(14, 'RETURN', 'R3')]
+check.call('passing the block on (`instance_exec(&b)`) lets it escape (negative)', !yielder.call(rebinds).nil?)
+# def f(&b); @b = b; end
+stores = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'SETIV', "@b\tR1"), insn(7, 'RETURN', 'R1')]
+check.call('storing the block lets it escape (negative)', !yielder.call(stores).nil?)
+# def f(&b); g(b.call, b); end  -- the receiver of `call` is fine, the same Proc as an argument is not.
+as_arg = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R3\tR1"), insn(7, 'SEND0', "R3\t:call"),
+          insn(10, 'MOVE', "R4\tR1"), insn(13, 'SSEND', "R2\t:g\tn=2"), insn(17, 'RETURN', 'R2')]
+check.call('the block as an argument lets it escape (negative)', !yielder.call(as_arg).nil?)
+# def f(&b); [1].each { @b = b }; end  -- a nested block stores the captured slot.
+nested_store = [insn(0, 'ENTER', "0:0:0:0:0:0:0:0 (0x0)"), insn(4, 'GETUPVAR', "R2\t2\t0"), insn(8, 'SETIV', "@b\tR2"),
+                insn(11, 'RETURN', 'R2')]
+outer_store = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'LOADI_1', "R3\t(1)"),
+               insn(9, 'ARRAY', "R3\t1"), insn(12, 'BLOCK', "R4\tI[0]"), insn(15, 'SENDB', "R3\t:each\tn=0"),
+               insn(19, 'RETURN', 'R3')]
+check.call('a nested block storing the captured block lets it escape (negative)',
+           !yielder.call(outer_store, nested_store).nil?)
+# def f(&b); super; end  -- a zsuper passes the frame's block on.
+zsuper = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'ARGARY', "R4\t0:0:0:0 (0)"),
+          insn(11, 'SUPER', "R3\tn=*"), insn(14, 'RETURN', 'R3')]
+check.call('`super` forwards the block (negative)', !yielder.call(zsuper).nil?)
 
 if ENV['MRBC']
   require_relative 'fixture_runtime'
