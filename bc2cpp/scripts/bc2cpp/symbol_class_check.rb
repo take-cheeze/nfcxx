@@ -84,7 +84,7 @@ if ENV['MRBC']
     saved = env.to_h { |k, _| [k, ENV.fetch(k, nil)] }
     env.each { |k, v| ENV[k] = v }
     begin
-      Bc2cppFixtureRuntime.generate(src, dir, closed: true, only_owners: OWNERS)
+      Bc2cppFixtureRuntime.generate(src, dir, only_owners: OWNERS)
     ensure
       saved.each { |k, v| v ? ENV[k] = v : ENV.delete(k) }
     end

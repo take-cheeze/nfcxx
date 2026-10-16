@@ -74,7 +74,7 @@ if ENV['MRBC']
 
   puts '-- generated descriptor'
   Dir.mktmpdir do |dir|
-    code, = runtime.generate(FIXTURE, dir, closed: false)
+    code, = runtime.generate(FIXTURE, dir)
     slots = code[/TrMixed_ivar_slots\[\] = \{\n(.*?)\n\};/m, 1].to_s
     {
       'count' => 'MRB_DATA_IVAR_INT', 'tag' => 'MRB_DATA_IVAR_SYMBOL', 'on' => 'MRB_DATA_IVAR_BOOL',
@@ -96,7 +96,7 @@ if ENV['MRBC']
   else
     puts '-- reflection through the ivar API, interpreted and compiled'
     Dir.mktmpdir do |dir|
-      _code, err = runtime.generate(FIXTURE, dir, closed: false)
+      _code, err = runtime.generate(FIXTURE, dir)
       body = <<~CPP
         static mrb_sym iv(mrb_state* M, const char* n) { return mrb_intern_cstr(M, n); }
         static int collect_name(mrb_state* M, mrb_sym sym, mrb_value, void* p) {

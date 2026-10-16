@@ -40,7 +40,10 @@ class CodeGen
     return @profiler_result_lookup[name] if @profiler_result_lookup.key?(name)
 
     @profiler_result_lookup[name] = begin
-      paths = (@closed_world.native_paths_spelling(name) + Array(@native_name_sources&.fetch(name, nil))).uniq
+      # The closed world lists expanded paths; NATIVE_SRCS spells them as the build does
+      # (`mruby-rgss-compiled/../mruby-rgss/src/profiler.cxx`). Both name files, so compare the files.
+      paths = (@closed_world.native_paths_spelling(name) + Array(@native_name_sources&.fetch(name, nil)))
+              .map { |path| File.expand_path(path) }.uniq
       installed = symbol_installed_names
       core_installed = self.class.core_result_installed_names
       opaque = self.class.core_result_opaque_defs

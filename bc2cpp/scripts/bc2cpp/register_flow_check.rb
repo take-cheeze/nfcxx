@@ -18,6 +18,7 @@ require_relative '../../tools/bc2cpp/irep_arity'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/register_flow'
 require_relative 'cxx'
+require_relative '../../tools/bc2cpp/wio_world_env'
 
 ROOT = File.expand_path('../..', __dir__)
 BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
@@ -340,7 +341,7 @@ Dir.mktmpdir do |dir|
     env = { 'MRBC' => MRBC_BIN, 'SKIP_UNSUPPORTED' => '1', 'OUT_SYMBOL' => 'rf', 'OUT_DIR' => dir,
             'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_REGISTER_FLOW' => switch,
             'BC2CPP_REGISTER_FLOW_WINDOWS' => windows }
-    out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', src)
+    out, err, status = Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, BC2CPP, '--annotated', src)
     abort "bc2cpp.rb failed:\n#{err[-3000..]}" unless status.success?
     [out, err]
   end

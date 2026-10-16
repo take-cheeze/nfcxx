@@ -331,7 +331,7 @@ runtime = Bc2cppFixtureRuntime
 
 # Compiles +source+ with the real mruby-lcf mrblib; returns [cpp, stderr].
 compile = lambda do |source, owners, dir|
-  runtime.generate(PRELUDE + source, dir, closed: true, only_owners: owners + LCF_OWNERS, extra: extra)
+  runtime.generate(PRELUDE + source, dir, only_owners: owners + LCF_OWNERS, extra: extra)
 end
 
 # The text of one compiled method.

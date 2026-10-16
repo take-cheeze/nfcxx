@@ -18,6 +18,7 @@ require 'tmpdir'
 require 'set'
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
+require_relative '../../tools/bc2cpp/wio_world_env'
 
 ROOT = File.expand_path('../..', __dir__)
 failures = []
@@ -37,17 +38,15 @@ env = {
   'ONLY_OWNERS' => all_owners.join(','),
   'NATIVE_SRCS' => Shellwords.join(native_srcs),
   'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT)),
-  'BC2CPP_CLOSED_WORLD' => '1',
   'BC2CPP_BUILD_NAME' => 'wio',
-  'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).map { |n, d| "#{n}=#{d}" }),
-  NomethodReviewed::ALLOW_ENV => 'allow'
+  'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).map { |n, d| "#{n}=#{d}" })
 }
 cmd = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', *srcs].shelljoin
 
 generate = lambda do |dir|
   Dir.mktmpdir do |d|
     e = env.merge('OUT_DIR' => d)
-    out, err, status = Open3.capture3(e, cmd)
+    out, err, status = Open3.capture3(bc2cpp_wio_world_env(e), cmd)
     raise "bc2cpp.rb failed: #{err.lines.first(8).join}" unless status.success?
 
     [out, err]
