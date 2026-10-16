@@ -20,6 +20,7 @@
 require 'shellwords'
 require 'set'
 require_relative 'compact_output'
+require_relative 'shared_generation'
 
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
@@ -162,11 +163,17 @@ if $PROGRAM_NAME == __FILE__
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
   # without it they are stripped from stdout (CompactOutput, ADR 0463), the only default.
   annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
-  srcs = ARGV
-  raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] file1.rb [file2.rb ...]  (env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)" if srcs.empty?
+  # SHARED_GENERATION (ADR 0464): `--units PLAN` runs the analysis once and forks one generation per unit.
+  shared_units, srcs = SharedGeneration.parse_argv(ARGV)
+  if srcs.empty?
+    raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
+          '(env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)'
+  end
 
+  shared_prefix, shared_stderr = SharedGeneration.start(shared_units) if shared_units
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
+  SharedGeneration.arm_guard if shared_units
   profile_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   profile_last = profile_started
   profile_phase = lambda do |name|
@@ -1165,6 +1172,12 @@ if $PROGRAM_NAME == __FILE__
   warn '== constructor pools (CONSTRUCTOR_POOLS) =='
   gen.constructor_pool_report.each { |l| warn l }
   warn ''
+  # SHARED_GENERATION: everything above is the same for every unit; each continues from here in its own fork.
+  if shared_units
+    SharedGeneration.fork_units(shared_units, shared_prefix, shared_stderr, [symbol, out_dir])
+    symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
+    out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
+  end
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).
   only_owners = ENV['ONLY_OWNERS']&.split(',')

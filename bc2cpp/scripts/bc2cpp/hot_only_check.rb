@@ -44,9 +44,10 @@ check.call('build_config.rb enables hot-only for the single-format builds only',
 check.call('every compiled gem passes the list through the checked env and rebuilds when it changes',
            BC2CPP_COMPILED_GEMS.keys.all? do |g|
              rake = File.read(File.join(root, g, 'mrbgem.rake'))
-             rake.include?('extend Bc2cppHotOnlyOption') && rake.include?('.merge(bc2cpp_hot_only_env(spec))') &&
+             rake.include?('extend Bc2cppHotOnlyOption') && rake.include?('Bc2cppCompiledGemGeneration.generate(spec, ') &&
                rake.match?(/BC2CPP_HOT_METHODS_PATH[,\]][^\n]*(?:\n[^\n]*)?do \|t\|/)
-           end)
+           end && File.read(File.join(root, 'tools/bc2cpp/compiled_gems.rb'))[/^def bc2cpp_compiled_gem_job.*?^end$/m]
+                      .to_s.include?('.merge(bc2cpp_hot_only_env(spec))'))
 check.call("the wio strip's probe runs with the build's list",
            config.include?("env = { 'BC2CPP_HOT_METHODS' => (hot_methods if bc2cpp_hot_only_build?(spec.build)) }"))
 
