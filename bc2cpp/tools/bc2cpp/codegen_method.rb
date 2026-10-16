@@ -83,7 +83,6 @@ class CodeGen
         region[:elem_class] = nil if guarded_klass
         inlined = send(pass.emit, region, irep, d)
         unless inlined
-          guarded_inline_why(irep, irep.instructions[irep.index_of_addr(region[:sendb_addr])], guarded_klass, 'the block body is not clean') if guarded_klass
           next
         end
 
@@ -397,7 +396,6 @@ class CodeGen
     block_fallback_pre = emit_block_fallback_glue_pass(block_fallback_regions, recognize_explicit_block_arg_regions(irep),
                                                         d, suppressed, glue_at)
     guarded_inline_finish(irep, guarded_inline)
-    guarded_inline_unclaimed(irep, block_fallback_regions, guarded_inline, proven_inlined)
 
     # LAMBDA_FALLBACK_SUPPORT: like BLOCK_CFUNC_FALLBACK_SUPPORT, but the RProc is
     # stored into the destination register with no dispatch

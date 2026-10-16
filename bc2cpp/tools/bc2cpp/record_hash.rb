@@ -423,19 +423,7 @@ module RecordHash
 
     def escape(why)
       @failure ||= "#{@name}: #{why}#{@site}"
-      dump_context(why)
       nil
-    end
-
-    # BC2CPP_RECORD_HASH_DEBUG=1 prints the instructions around the first escape of each name.
-    def dump_context(why)
-      return unless ENV['BC2CPP_RECORD_HASH_DEBUG'] == '1' && @where && !@dumped
-
-      @dumped = true
-      irep, k = @where
-      warn "RECORD_HASH_DEBUG @#{@name} #{why} #{@site}"
-      from = [k - 14, 0].max
-      irep.instructions[from..(k + 3)].each_with_index { |i, n| warn "    #{from + n}: #{i.op} #{i.args}" }
     end
 
     def store_ok?(irep, i)
@@ -490,7 +478,6 @@ module RecordHash
 
         insn = prog.instruction_at(k).source
         @site = " [#{irep.file.to_s.sub(%r{.*/(mruby-)}, '\\1')} irep #{irep.label} insn #{k}]"
-        @where = [irep, k]
         nxt = step(irep, k, insn, state)
         return false if nxt.nil?
 

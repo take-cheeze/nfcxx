@@ -1491,7 +1491,6 @@ class CodeGen
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
       call_argv, native_note = direct_call_args(target, argv, impl)
-      ir_inline = bytecode_ir_inline_code(target, d, argv, owner_def, self_implicit, irep) unless typed || module_function_self
       if typed
         if user_receiver_union
           note = "  // USER_RECEIVER_UNION :#{name} -> #{target.owner}##{target.name}, every exact receiver selects this body, " \
@@ -1562,7 +1561,7 @@ class CodeGen
         note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
                "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
                "no runtime check)#{native_note}\n"
-        note + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
+        note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       elsif @ivar_layout.key?(target.owner)
         # MONO_EMBED_GUARD: MONO says nothing about method_missing: a class answering a
         # name via method_missing (LCF::Array1D/Array2D) adds no registry entry, so
@@ -1581,7 +1580,7 @@ class CodeGen
         if cw_site && cw_site[:self_owner] == target.owner && @closed_world.exact_class?(target.owner)
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self, exactly " \
                  "#{target.owner}: no subclass in the closed world), direct C++ call#{native_note}\n"
-          return note + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
+          return note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         # CHA_SELF: the same for a class with subclasses, when none of them can
@@ -1593,7 +1592,7 @@ class CodeGen
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self in " \
                  "#{cw_site[:self_owner]}; class hierarchy analysis: no descendant defines or mixes in " \
                  "the name), direct C++ call#{native_note}\n"
-          return note + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
+          return note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
         # RECORD_HASH_PROOF (ADR 0285): the receiver is a record key that only holds fresh instances of
@@ -1616,7 +1615,7 @@ class CodeGen
         fallback = strict_hint_wrap('mono_embed', d, recv, name, argv, target.owner, hinted: hinted) do
           guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
         end
-        body = ir_inline ? ir_inline.lines.map { |line| "  #{line}" }.join : "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        body = "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         "#{note}  if (#{check}) {\n" \
           "#{body}" \
           "  } else {\n" \
@@ -1632,7 +1631,7 @@ class CodeGen
         # would run this owner's body instead of raising.
         miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
                                   trace_reg_offset)
-        note + miss + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
+        note + miss + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       end
     elsif lexical_self_ivar_accessor
       # LEXICAL_SELF_IVAR_ACCESSOR codegen: no guard, no fallback; IVAR_ACCESS picks
@@ -2257,8 +2256,7 @@ class CodeGen
   end
 
   # The strict else line when `family` is on. Policy (ADR 0419): a hint is not a proof and a violation
-  # is a wrong hint to fix, so no proof gates it; BC2CPP_STRICT_HINTS_PROVEN=1 restricts it to owners
-  # with no descendant and a name nil does not answer. Core owners, singletons, literal-block sites and
+  # is a wrong hint to fix, so no proof gates it. Core owners, singletons, literal-block sites and
   # argument lists the helper cannot carry keep the dispatch. `owner` is nil for a chain (POLY, table).
   def strict_hint_fallback(family, d, recv, name, argv, owner)
     return nil unless strict_hint_enabled?(family) && @closed_world && argv.size <= FUNCALL_ARGC_MAX
@@ -2266,9 +2264,6 @@ class CodeGen
 
     if owner
       return nil if StrictHints::CORE_OWNERS.include?(owner) || owner.end_with?('.singleton') || owner.start_with?('<')
-      return nil if StrictHints.proven_only? && !(@closed_world.exact_class?(owner) && nil_unanswerable?(name))
-    elsif StrictHints.proven_only?
-      return nil
     end
 
     strict_hint_line(d, recv, name, argv, family)

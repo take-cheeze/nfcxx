@@ -113,14 +113,14 @@ module BlockSendReport
   # Why each exact core class has no arm for `name`: collected on a scratch table so the build's own is untouched.
   def block_send_why(name, argc)
     saved = @block_core_reasons
-    saved_env = ENV['BC2CPP_BLOCK_CORE_WHY']
+    saved_on = @block_core_why_on
     @block_core_reasons = Hash.new { |h, k| h[k] = [] }
-    ENV['BC2CPP_BLOCK_CORE_WHY'] = '1'
+    @block_core_why_on = true
     BlockCoreDirectFallback::BLOCK_RECEIVERS.each { |klass, spec| block_core_target(klass, spec[:chain], name, argc) }
     @block_core_reasons[[name, argc]].uniq.join('; ')
   ensure
     @block_core_reasons = saved
-    ENV['BC2CPP_BLOCK_CORE_WHY'] = saved_env
+    @block_core_why_on = saved_on
   end
 
   # The nearest textual writer of the receiver register: `ivar:@x`, `send:name`, `incoming_arg`, `const:X`, ...

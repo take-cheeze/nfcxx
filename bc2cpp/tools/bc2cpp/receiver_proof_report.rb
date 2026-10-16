@@ -60,7 +60,7 @@ module ReceiverProofReport
 
     irep = kwargs[:irep]
     site = kwargs[:idx] || kwargs[:trace_idx]
-    gem = irep && (ReceiverProofReport.gem_of(irep) || (ENV['BC2CPP_RECEIVER_PROOF_ANY'] == '1' ? 'other' : nil))
+    gem = irep && ReceiverProofReport.gem_of(irep)
     return code unless site && gem && ReceiverProofReport.by_name(code).positive?
 
     ROWS[[irep.label, site]] = rp_row(insn, kwargs, irep, site, gem, code)
@@ -87,7 +87,7 @@ module ReceiverProofReport
 
   # Only the shipped pass (SKIP_UNSUPPORTED=1) is reported: the diagnostic pass compiles every method again.
   def self.active?
-    ENV['SKIP_UNSUPPORTED'] == '1' || ENV['BC2CPP_RECEIVER_PROOF_ANY'] == '1'
+    ENV['SKIP_UNSUPPORTED'] == '1'
   end
 
   def self.gem_of(irep)
