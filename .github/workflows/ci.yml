@@ -49,6 +49,7 @@ jobs:
           - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
             run: |
               tests/lib/run.sh
+              tests/target/run.sh
               tests/builtins/run.sh
               tests/trace/run.sh
               tests/c/run.sh
@@ -315,6 +316,7 @@ jobs:
           - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
             run: |
               tests/lib/run.sh
+              tests/target/run.sh
               tests/builtins/run.sh
               tests/trace/run.sh
               tests/c/run.sh
@@ -387,6 +389,7 @@ jobs:
         run: |
           tests/run.sh
           tests/lib/run.sh
+          tests/target/run.sh
           tests/builtins/run.sh
           tests/trace/run.sh
           tests/c/run.sh

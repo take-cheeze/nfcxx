@@ -27,6 +27,37 @@ that resolves to `/home/include_c++` from the prebuilt tree, so default g++ mode
 Freestanding mode does not use it. The C++ headers EDG ships (`3rd/edg/include_c++`) contain no `<cstdio>`
 anyway, so default mode has no hosted library headers either.
 
+## Targets (`--target=NAME`)
+
+`--target=NAME` lays the program out for an EDG target instead of the build host: `linux_aarch64`, `linux_armv7`,
+`linux_riscv64`, `linux_riscv32`, `linux_i686`, `win64`, `win32` (the `lib_*` tables of the EDG base; `linux_x86_64` is
+the host's). It is valid with `--freestanding --emit-c` only, and the other combinations are refused:
+
+```
+./nfcxx --freestanding --emit-c --target=linux_aarch64 prog.cpp > prog.c
+clang --target=aarch64-linux-gnu -ffreestanding -c prog.c -o prog.o     # the generated C is for the target
+```
+
+- **What the target sets.** The sizes and alignments of EDG's tables, and the predefined macros of `lib_<target>`
+  (`__aarch64__`, `__riscv`, `__arm__`). Plain `char` is unsigned on `linux_aarch64`, `linux_armv7`, `linux_riscv32`
+  and `linux_riscv64`: the driver passes `--unsigned_chars` for those four. EDG's `defines.h` says signed for aarch64 and
+  armv7 (`TARG_HAS_SIGNED_CHARS_*`), which is wrong for their Linux ABIs; `clang -dM` for each triple gives
+  `__CHAR_UNSIGNED__`. The EDG base is not patched for this.
+- **What it does not do.** The generated C is not compiled, linked or run by nfcxx: with a target the compile and
+  link paths are refused, because the host's C compiler and libraries are the host's. Compile the C with a cross
+  compiler for the target. There are no hosted headers for a target (`--freestanding` only).
+- **Checked by `tests/target/run.sh`:** for `linux_aarch64`, `linux_riscv64` and `linux_armv7`, a probe with
+  `static_assert`s for pointer, `long` and `long double` sizes, `char` signedness and the target's macro is accepted by
+  EDG, and the host refuses the same file; each of the 11 `tests/lib` programs is emitted for the target and compiled by
+  `clang --target=<triple>`. The refusals (no `--freestanding`, no `--emit-c`, unknown name) are checked too.
+- **Not checked:** the generated code is never run on these ABIs (no qemu in the environment; the `ubuntu-24.04-arm`
+  runner would run it natively, and the test does not do that yet). Only clang compiled the C; gcc cross compilers were
+  not used.
+- **Known gap: floating-point constants.** EDG computes `long double` with the host's type (`setup-edg.sh` says so for an aarch64 host). On an x86-64 host that is
+  the 80-bit x87 type, but the aarch64 and riscv64 `long double` is 128-bit IEEE quad, so a folded constant can differ in
+  its last bits from what the target computes. Not tested here; the fix is EDG's host floating-point configuration
+  (`src/includes/cmake_defines.h`, as `scripts/setup-edg.sh` sets it on an aarch64 host).
+
 ## Headers
 
 | header | provides | notes |
