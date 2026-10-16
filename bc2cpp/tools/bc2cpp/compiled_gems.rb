@@ -363,7 +363,8 @@ end
 # The standalone Optcarrot benchmark seals its host separately (ADR 0400).
 # bc2cpp compiles these builds only (docs/adr/0466); every other build, and any
 # build with a gem below, is the plain mruby build.
-BC2CPP_CLOSED_WORLD_BUILDS = %w[psp wio maix optcarrot-probe].freeze
+# `closed` is maix's closed world built natively for CI (build_config.rb).
+BC2CPP_CLOSED_WORLD_BUILDS = %w[psp wio maix closed optcarrot-probe].freeze
 # Gems that load or define Ruby at runtime; any of them opens the world.
 BC2CPP_OPEN_WORLD_GEMS = %w[
   mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs mruby-eval mruby-binding mruby-proc-binding
@@ -372,7 +373,8 @@ BC2CPP_OPEN_WORLD_GEMS = %w[
 # The gems whose mrblib is the closed world itself.
 BC2CPP_CLOSED_WORLD_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
 # Each closed-world target's own native host sources (the firmware/executable).
-BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'psp' => 'app/psp' }.freeze
+BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'closed' => 'app/wio/src',
+                                  'psp' => 'app/psp' }.freeze
 # mruby-compiler entry points that turn a string or file into running Ruby.
 BC2CPP_SOURCE_LOADER_CALL = /\b(?:mrb_load_n?string(?:_cxt)?|mrb_load_file(?:_cxt)?|mrb_load_exec|
                                mrb_parse_n?string|mrb_parse_file|mrb_load_detect_file_cxt)\s*\(([^;]*)/mx

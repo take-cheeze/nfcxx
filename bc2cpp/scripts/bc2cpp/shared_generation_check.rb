@@ -13,6 +13,7 @@ require 'fileutils'
 require 'json'
 require 'open3'
 require 'rbconfig'
+require 'stringio'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/shared_generation'
 require_relative '../../tools/bc2cpp/compiled_gems'
@@ -38,6 +39,29 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
   File.write(plan, JSON.generate([{ 'env' => { 'ONLY_OWNERS' => 'A', 'SKIP_UNSUPPORTED' => '1' }, 'out' => 'o', 'err' => 'e' }]))
   check.call('a plan whose units differ in a non-unit key is refused',
              raises.call(SharedGeneration::Error) { SharedGeneration.load_plan(plan) })
+
+  # A failed unit's error lines are repeated after every unit's report, so the tail of a CI log shows them.
+  ok_err = File.join(tmp, 'ok.err')
+  bad_err = File.join(tmp, 'bad.err')
+  File.write(ok_err, "== report ==\n[bc2cpp] fine\n")
+  File.write(bad_err, "== report ==\nx.rb:3:1: error: not proven [TC1013]\n  noise\n[bc2cpp] RBS_CHECKED_PARAMS: 1 unproven\n")
+  status = Struct.new(:success?, :exitstatus)
+  trailer = lambda do |statuses|
+    saved = $stderr
+    $stderr = StringIO.new
+    SharedGeneration.write_failure_trailer(
+      [SharedGeneration::Unit.new(env: { 'OUT_SYMBOL' => 'u_ok' }, out: 'o1', err: ok_err),
+       SharedGeneration::Unit.new(env: { 'OUT_SYMBOL' => 'u_bad' }, out: 'o2', err: bad_err)], statuses)
+    $stderr.string
+  ensure
+    $stderr = saved
+  end
+  failed_text = trailer.call([status.new(true, 0), status.new(false, 1)])
+  check.call('a failed unit\'s error lines and last lines are repeated at the end, named and with its status',
+             failed_text == "\n== --units: unit u_bad failed (exit 1): 1 of 1 error line(s), then its last 4 line(s) ==\n" \
+                            "x.rb:3:1: error: not proven [TC1013]\n--\n== report ==\n" \
+                            "x.rb:3:1: error: not proven [TC1013]\n  noise\n[bc2cpp] RBS_CHECKED_PARAMS: 1 unproven\n")
+  check.call('no trailer when every unit succeeds', trailer.call([status.new(true, 0), status.new(true, 0)]).empty?)
   SharedGeneration.arm_guard
   guarded = raises.call(SharedGeneration::Error) { ENV['ONLY_OWNERS'] }
   whole = raises.call(SharedGeneration::Error) { ENV.to_h }

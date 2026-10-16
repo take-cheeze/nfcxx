@@ -125,10 +125,34 @@ module SharedGeneration
     File.delete(prefix)
     $stderr.reopen(saved_stderr)
     units.each { |unit| $stderr.write(File.binread(unit.err)) if File.exist?(unit.err) }
+    write_failure_trailer(units, statuses)
     $stderr.flush
     failed = statuses.find { |status| !status.success? }
     # exit!: the parent's at_exit hooks (the report writers registered at load) belong to the children, which ran them.
     exit!(failed ? (failed.exitstatus || 1) : 0)
+  end
+
+  # A failed unit's errors can sit tens of thousands of lines above the end of the combined stderr (the other units'
+  # reports follow it), out of reach of a log viewer that shows only the tail. Repeat them after everything else,
+  # with the unit's name and status: its located diagnostics (`file:line:col: error: ...`, printed where found, the
+  # abort's "(see above)") and its last lines (where an abort or an uncaught error ends). Printed only on failure, so
+  # a passing run's stderr is unchanged.
+  TRAILER_ERROR = /: error: /
+  TRAILER_ERRORS = 200
+  TRAILER_TAIL = 80
+
+  def write_failure_trailer(units, statuses)
+    units.zip(statuses).each do |unit, status|
+      next if status.success?
+
+      lines = File.exist?(unit.err) ? File.binread(unit.err).scrub.lines.map(&:chomp) : []
+      errors = lines.grep(TRAILER_ERROR)
+      how = status.exitstatus ? "exit #{status.exitstatus}" : status.to_s
+      $stderr.write("\n== --units: unit #{unit.env['OUT_SYMBOL'] || unit.out} failed (#{how}): " \
+                    "#{[errors.size, TRAILER_ERRORS].min} of #{errors.size} error line(s), then its last " \
+                    "#{[lines.size, TRAILER_TAIL].min} line(s) ==\n")
+      (errors.first(TRAILER_ERRORS) + ['--', *lines.last(TRAILER_TAIL)]).each { |line| $stderr.write("#{line}\n") }
+    end
   end
 
   def enter_unit(unit, prefix, mrb)

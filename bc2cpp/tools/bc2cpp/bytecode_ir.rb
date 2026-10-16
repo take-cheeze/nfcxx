@@ -32,6 +32,25 @@ module BytecodeIR
   TERMINATORS = (NO_FALLTHROUGH + CONDITIONAL_BRANCHES).freeze
   # Predecessor id of the method-entry edge into instruction 0.
   ENTRY = -1
+  BRANCH_OPS = %w[JMP JMPUW JMPIF JMPNOT JMPNIL].freeze
+  # Conditional-branch kinds (Decoded#cond): which test of R(a) sends control to the branch target.
+  COND_IF = 1 # JMPIF: R(a) truthy
+  COND_NOT = 2 # JMPNOT: R(a) falsy
+  COND_NIL = 3 # JMPNIL: R(a) nil
+  COND_KINDS = { 'JMPIF' => COND_IF, 'JMPNOT' => COND_NOT, 'JMPNIL' => COND_NIL }.freeze
+
+  # One instruction's analysis-independent operands (Program#decoded): +op+, +cond+ (a COND_* kind, nil unless a
+  # conditional branch), +reg+ (the leading register as an Integer, nil when the leading operand is not a register)
+  # and +goto+ (the instruction index an explicit branch targets; nil for any other op, or an unresolved target).
+  Decoded = Struct.new(:op, :cond, :reg, :goto)
+
+  # Decode +insn+ as Program#decoded does. Reads only op, reg and, for a branch op, branch_target, so an
+  # instruction-like object from a check needs to answer nothing else. Without +address_to_index+ +goto+ stays nil.
+  def self.decode(insn, address_to_index = nil)
+    op = insn.op
+    goto = address_to_index[insn.branch_target] if address_to_index && BRANCH_OPS.include?(op)
+    Decoded.new(op, COND_KINDS[op], insn.reg&.to_i, goto)
+  end
 
   class Program
     attr_reader :instructions, :blocks, :address_to_index
@@ -39,6 +58,8 @@ module BytecodeIR
     attr_reader :nlocals
 
     def initialize(irep)
+      @source_list = irep.instructions
+      @source_size = Array(@source_list).length
       @nlocals = irep.nlocals&.to_i
       @catch_handlers = Array(irep.catch_handlers).freeze
       @instructions = Array(irep.instructions).each_with_index.map do |source, index|
@@ -52,6 +73,31 @@ module BytecodeIR
     def instruction_at(index)
       @instructions[index]
     end
+
+    # True while +irep+ still has the instruction list (the same Array, the same length) this Program was built from.
+    # The bytecode never changes after loading, so a cached Program that fails this is a broken cache.
+    def built_from?(irep)
+      @source_list.equal?(irep.instructions) && @source_size == Array(@source_list).length
+    end
+
+    # BYTECODE_IR_FACTS (ADR 0467): the per-instruction successor lists, frozen, index-aligned with #instructions:
+    # normal flow, which already carries OP_ENTER's edges into its optional-argument JMP table (#build_edges).
+    # Analyses that walk the graph share this one Array instead of rebuilding it.
+    def successor_lists
+      @successor_lists ||= @instructions.map(&:successors).freeze
+    end
+
+    # BYTECODE_IR_FACTS: every instruction decoded once (see BytecodeIR.decode), frozen and index-aligned.
+    def decoded
+      @decoded ||= @instructions.map do |instruction|
+        BytecodeIR.decode(instruction.source, @address_to_index).freeze
+      end.freeze
+    end
+
+    # The one slot an analysis may use to keep a table it derives from this Program's facts: NumericFlow's
+    # per-instruction Step table (NumericFlow.table, ADR 0467). Nothing else is cached here, and nothing an oracle
+    # answers ever is.
+    attr_accessor :numeric_flow_table
 
     # The decoded Insn at +addr+, or nil when no instruction starts there.
     def insn_at_addr(addr)

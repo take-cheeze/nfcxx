@@ -137,6 +137,12 @@ module NumericFlow
   # nregs real registers, in ivar_slots order. +writes+, when given, receives for
   # each register the union of every value any instruction stores into it (what
   # a block created earlier may see when it runs later).
+  #
+  # NUMERIC_FLOW_SPEED (ADR 0467): the flow reads the irep's bytecode facts from its BytecodeIR::Program (successor
+  # lists, raise targets, rescue-only targets, the instruction decode) and derives its own Step table from them once
+  # (NumericFlow.table), keeps the run's facts in a Ctx with the oracle's optional methods looked up once, and joins
+  # without allocating when nothing grows. It asks the
+  # oracle the same questions, with the same arguments, in the same order as before; only its own bookkeeping changed.
   def states(irep, oracle, opaque_regs, writes = nil)
     program = BytecodeIR.for(irep)
     return nil unless program.resolved?
@@ -144,163 +150,383 @@ module NumericFlow
 
     insns = irep.instructions
     return nil if insns.empty?
-    return nil unless insns.all? { |i| SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
 
-    nregs = [irep.nregs.to_i, 1].max
-    slots = oracle.ivar_slots(irep)
-    ctx = { irep: irep, oracle: oracle, opaque: opaque_regs, nregs: nregs, slots: slots,
-            slot_of: slots.each_with_index.to_h { |name, k| [name, nregs + k] },
-            facts: slots.map { |name| oracle.ivar_fact_mask(irep, name) },
-            prov_base: nregs + slots.size, writes: writes }
-    # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
-    # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
-    if oracle.respond_to?(:class_narrowing_active?) && oracle.class_narrowing_active?
-      ctx[:test_base] = ctx[:prov_base] + nregs
-      ctx[:tests] = []
-      ctx[:test_ids] = {}
-      # A constant lookup runs Ruby only through const_missing; without one, `is_a?(Foo)` does not forget the ivars.
-      ctx[:const_quiet] = oracle.respond_to?(:const_lookup_quiet?) && oracle.const_lookup_quiet?
+    unless program.built_from?(irep)
+      raise "NumericFlow: the decoded plan of #{irep.label} no longer matches its instructions"
     end
-    extra = enter_edges(irep)
-    raises = program.handler_edges.group_by(&:src).transform_values { |edges| edges.map(&:target).uniq }
-    # A rescue target is entered only by a raise, so its EXCEPT always reads an exception; an ensure
-    # target is also reached by falling in, where there is none.
-    by_kind = program.handler_edges.group_by(&:kind).transform_values { |edges| edges.map(&:target).to_set }
-    ctx[:rescue_only] = by_kind.fetch(:rescue, Set.new) - by_kind.fetch(:ensure, Set.new)
+
+    table = NumericFlow.table(program)
+    return nil unless table.supported
+
+    c = Ctx.for_run(irep, oracle, opaque_regs, writes, program.rescue_only_targets)
+    steps = table.steps
+    nregs = c.nregs
     entry = Array.new(nregs, OTHER)
-    entry[0] = oracle.self_mask if oracle.respond_to?(:self_mask)
-    (1..nregs - 1).each do |r|
+    entry[0] = oracle.self_mask if c.self_mask
+    r = 1
+    while r < nregs
       m = oracle.entry_mask(irep, r)
-      entry[r] = m if m && !opaque_regs.include?(r.to_s)
+      entry[r] = m if m && !c.opq[r]
+      r += 1
     end
-    slots.each { |name| entry << oracle.ivar_entry_mask(irep, name) }
-    nregs.times { entry << 0 } # provenance: which slot (+1) each register was loaded from
-    nregs.times { entry << 0 } if ctx[:test_base] # class tests: which test each register's boolean holds
+    c.slots.each { |name| entry << oracle.ivar_entry_mask(irep, name) }
+    entry.fill(0, entry.size, nregs) # provenance: which slot (+1) each register was loaded from
+    entry.fill(0, entry.size, nregs) if c.tb # class tests: which test each register's boolean holds
 
-    ins = Array.new(insns.length)
-    outs = Array.new(insns.length)
+    n = insns.length
+    pb = c.pb
+    raises = program.raise_targets
+    succ = program.successor_lists
+    context_edges = c.context_edges
+    ins = Array.new(n)
+    outs = Array.new(n)
     ins[0] = entry
     work = [0]
-    queued = Set[0]
+    queued = Array.new(n, false)
+    queued[0] = true
     until work.empty?
       i = work.shift
-      queued.delete(i)
+      queued[i] = false
       st = ins[i]
       next unless st
 
-      out = transfer(i, insns[i], st, ctx)
+      insn = insns[i]
+      step = steps[i]
+      out = step_transfer(i, insn, step, st, c)
       # Every instruction of a protected range may raise into its handler, where the registers
       # are as they were at the raise (ADR 0289): the state before the op, widened by what a
       # callee can do, or after it.
-      raises.fetch(i, []).each do |target|
-        edge = raise_state(insns[i], st, out, ctx)
-        merged = join_state(ins[target], edge, ctx[:prov_base])
-        next if merged == ins[target]
+      if (handlers = raises[i])
+        edge = step_raise_state(step, st, out, c)
+        handlers.each do |target|
+          old = ins[target]
+          merged = join_state(old, edge, pb)
+          next if merged.equal?(old)
 
-        ins[target] = merged
-        work << target if queued.add?(target)
+          ins[target] = merged
+          next if queued[target]
+
+          queued[target] = true
+          work << target
+        end
       end
       next if outs[i] == out
 
       outs[i] = out
-      targets = if oracle.respond_to?(:context_enter_edges) && oracle.context_enter_edges.key?(i)
-                  oracle.context_enter_edges.fetch(i)
-                else
-                  successors(program, extra, i)
-                end
+      targets = context_edges&.key?(i) ? context_edges.fetch(i) : succ[i]
       # A call that never returns (`raise`) has no normal successor; its handler edges are above.
-      targets = [] if oracle.respond_to?(:noreturn_call?) && oracle.noreturn_call?(irep, i, insns[i])
+      targets = EMPTY if c.noreturn && oracle.noreturn_call?(irep, i, insn)
       targets.each do |s|
-        edge = refine_edge(program, insns[i], i, s, out, ctx)
+        edge = step_refine_edge(step, i, s, out, c)
         next unless edge
 
-        s = thread_class_test(program, insns, insns[i], i, s, edge, ctx) if ctx[:test_base]
-        merged = join_state(ins[s], edge, ctx[:prov_base])
-        next if merged == ins[s]
+        s = step_thread_class_test(steps, step, i, s, edge, c) if c.tb
+        old = ins[s]
+        merged = join_state(old, edge, pb)
+        next if merged.equal?(old)
 
         ins[s] = merged
-        work << s if queued.add?(s)
+        next if queued[s]
+
+        queued[s] = true
+        work << s
       end
     end
     ins
   end
 
+  EMPTY = [].freeze
+
+  # Step kinds: what #step_transfer does with an instruction, decided once per op.
+  K_NO_WRITE = 0
+  K_SETIDX = 1
+  K_SETIV = 2
+  K_CALL = 3
+  K_LOADI = 4
+  K_LOADL = 5
+  K_LOADSELF = 6
+  K_LOADNIL = 7
+  K_LITERAL = 8
+  K_MOVE = 9
+  K_KARG = 10
+  K_KEY_P = 11
+  K_CONST = 12
+  K_GETUPVAR = 13
+  K_GETIV = 14
+  K_EXCEPT = 15
+  K_RESCUE = 16
+  K_RANGE = 17
+  K_ARRAY = 18
+  K_HASH = 19
+  K_STRING = 20
+  K_KEEPS = 21
+  K_ARITH = 22
+  K_IMM = 23
+  K_IMM_LV = 24
+  K_DIV = 25
+  K_GETIDX = 26
+  K_AREF = 27
+  K_EQ = 28
+  K_OTHER = 29
+  STEP_KINDS = {
+    'SETIV' => K_SETIV, 'LOADL' => K_LOADL, 'LOADSELF' => K_LOADSELF, 'LOADNIL' => K_LOADNIL,
+    'LOADTRUE' => K_LITERAL, 'LOADFALSE' => K_LITERAL, 'LOADSYM' => K_LITERAL, 'MOVE' => K_MOVE, 'KARG' => K_KARG,
+    'KEY_P' => K_KEY_P, 'GETCONST' => K_CONST, 'GETMCNST' => K_CONST, 'GETUPVAR' => K_GETUPVAR, 'GETIV' => K_GETIV,
+    'EXCEPT' => K_EXCEPT, 'RESCUE' => K_RESCUE, 'RANGE_INC' => K_RANGE, 'RANGE_EXC' => K_RANGE, 'ARRAY' => K_ARRAY,
+    'ARRAY2' => K_ARRAY, 'HASH' => K_HASH, 'STRING' => K_STRING, 'ARYPUSH' => K_KEEPS, 'ARYCAT' => K_KEEPS,
+    'HASHADD' => K_KEEPS, 'HASHCAT' => K_KEEPS, 'STRCAT' => K_KEEPS, 'ADD' => K_ARITH, 'SUB' => K_ARITH,
+    'MUL' => K_ARITH, 'ADDI' => K_IMM, 'SUBI' => K_IMM, 'ADDILV' => K_IMM_LV, 'SUBILV' => K_IMM_LV, 'DIV' => K_DIV,
+    'GETIDX' => K_GETIDX, 'GETIDX0' => K_GETIDX, 'AREF' => K_AREF, 'EQ' => K_EQ
+  }.freeze
+  # Call kinds: which oracle question answers the result.
+  C_SEND = 1 # SEND SEND0 SSEND SSEND0
+  C_BLOCK = 2 # SENDB SSENDB
+  C_SUPER = 3
+  C_NONE = 4 # EXEC BLKCALL
+  CALL_KINDS = { 'SEND' => C_SEND, 'SEND0' => C_SEND, 'SSEND' => C_SEND, 'SSEND0' => C_SEND, 'SENDB' => C_BLOCK,
+                 'SSENDB' => C_BLOCK, 'SUPER' => C_SUPER, 'EXEC' => C_NONE, 'BLKCALL' => C_NONE }.freeze
+  # Silent kinds (see #silent_call?): how the op decides whether it dispatches to Ruby.
+  S_NONE = 0
+  S_NUMERIC = 1 # ADD SUB MUL DIV EQ LT LE GT GE
+  S_INDEX = 2 # GETIDX SETIDX
+  S_INDEX0 = 3
+  S_STRCAT = 4
+  S_ALWAYS = 5
+  S_CONST = 6 # GETCONST GETMCNST
+  SILENT_KINDS = { 'ADD' => S_NUMERIC, 'SUB' => S_NUMERIC, 'MUL' => S_NUMERIC, 'DIV' => S_NUMERIC, 'EQ' => S_NUMERIC,
+                   'LT' => S_NUMERIC, 'LE' => S_NUMERIC, 'GT' => S_NUMERIC, 'GE' => S_NUMERIC, 'GETIDX' => S_INDEX,
+                   'SETIDX' => S_INDEX, 'GETIDX0' => S_INDEX0, 'STRCAT' => S_STRCAT, 'GETCONST' => S_CONST,
+                   'GETMCNST' => S_CONST }.freeze
+  # Branch kinds of a conditional jump: BytecodeIR's (Decoded#cond).
+  B_IF = BytecodeIR::COND_IF
+  B_NOT = BytecodeIR::COND_NOT
+  B_NIL = BytecodeIR::COND_NIL
+  BRANCH_KINDS = BytecodeIR::COND_KINDS
+
+  # One instruction as the flow reads it. +op+, +branch+ and +goto+ are copied from the BytecodeIR decode
+  # (BytecodeIR::Decoded: op, cond, goto) so the worklist reads one struct; the rest is the flow's own reading.
+  # +a+ is the leading register where the op's rule reads it (nil otherwise), +b+ the second register the op reads
+  # (MOVE's source, the parenthesised operand, SETIV's value).
+  Step = Struct.new(:op, :kind, :call, :silent, :branch, :a, :b, :ivar, :goto, :sym)
+
+  # The flow's per-Program table: whether every op is modelled, and the Step of each instruction (nil when not).
+  Table = Struct.new(:supported, :steps)
+
+  # NumericFlow's Step table for +program+, derived once from the program's facts and kept in the program's one
+  # analysis slot (BytecodeIR::Program#numeric_flow_table). It holds bytecode facts only, never an oracle answer.
+  def table(program)
+    program.numeric_flow_table ||= begin
+      instructions = program.instructions
+      supported = instructions.all? { |i| SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
+      decoded = program.decoded if supported
+      steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index]).freeze }.freeze if supported)
+      Table.new(supported, steps).freeze
+    end
+  end
+
+  # Decode +insn+ for the flow from its BytecodeIR decode +decoded+, reading of the insn itself only the operands the
+  # op's rule reads (an instruction-like object from a check may answer nothing else). Without a Program's decode,
+  # +goto+ stays nil.
+  def decode_step(insn, decoded = BytecodeIR.decode(insn))
+    op = decoded.op
+    silent = SILENT_KINDS.fetch(op) { SILENT_CALL_OPS.include?(op) ? S_ALWAYS : S_NONE }
+    step = Step.new(op, nil, nil, silent, decoded.cond)
+    if NO_WRITE_OPS.include?(op)
+      step.kind = op == 'SETIDX' ? K_SETIDX : K_NO_WRITE
+      step.a = decoded.reg.to_i if op == 'SETIDX' || op == 'RAISEIF' || step.branch
+      step.goto = decoded.goto if step.branch
+      return step
+    end
+    if op == 'SETIV'
+      step.kind = K_SETIV
+      step.ivar = insn.ivar
+      step.b = insn.regs.first.to_i
+      return step
+    end
+
+    step.a = decoded.reg
+    step.call = CALL_KINDS[op]
+    step.kind = if step.call then K_CALL
+                elsif op.start_with?('LOADI') then K_LOADI
+                else STEP_KINDS.fetch(op, K_OTHER)
+                end
+    case step.kind
+    when K_MOVE, K_RESCUE, K_IMM_LV then step.b = insn.regs[1].to_i
+    when K_ARITH, K_DIV, K_EQ then step.b = insn.paren_reg.to_i
+    when K_GETIV then step.ivar = insn.ivar
+    end
+    step.sym = ARITH_OPS[op] || IMM_ARITH_OPS[op]
+    step.b = insn.paren_reg.to_i if silent == S_NUMERIC && step.b.nil?
+    step.b = insn.regs[1].to_i if silent == S_INDEX0
+    step
+  end
+
+  # The facts of one run: the oracle, the register file's layout and the class tests recorded so far. The oracle's
+  # optional methods are looked up once (respond_to? is all they cost).
+  class Ctx
+    attr_reader :irep, :oracle, :opaque, :opq, :nregs, :slots, :nslots, :slot_of, :facts, :pb, :tb, :writes,
+                :tests, :test_ids, :const_quiet, :rescue_only, :context_edges, :self_mask, :block_send, :super_mask,
+                :preserves, :loadself, :keyword_mask, :keyword_presence, :array_mask, :hash_mask, :index_mask,
+                :aref_mask, :literal_class, :false_class, :class_eq_test, :note_class_test, :noreturn
+
+    # The run of NumericFlow.states, asking the oracle what the old setup asked, in the same order.
+    def self.for_run(irep, oracle, opaque, writes, rescue_only)
+      nregs = [irep.nregs.to_i, 1].max
+      slots = oracle.ivar_slots(irep)
+      slot_of = slots.each_with_index.to_h { |name, k| [name, nregs + k] }
+      facts = slots.map { |name| oracle.ivar_fact_mask(irep, name) }
+      c = new(irep, oracle, opaque, nregs, slots, slot_of, facts, nregs + slots.size, writes)
+      # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
+      # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
+      if oracle.respond_to?(:class_narrowing_active?) && oracle.class_narrowing_active?
+        # A constant lookup runs Ruby only through const_missing; without one, `is_a?(Foo)` does not forget the ivars.
+        c.narrowing(c.pb + nregs, [], {}, oracle.respond_to?(:const_lookup_quiet?) && oracle.const_lookup_quiet?)
+      end
+      c.rescue_only = rescue_only
+      c
+    end
+
+    # A ctx Hash as the flow's callers built it before (a check drives #transfer and #raise_state with one).
+    def self.from_hash(h)
+      c = new(h[:irep], h[:oracle], h[:opaque], h[:nregs], h[:slots], h[:slot_of], h[:facts], h[:prov_base], h[:writes])
+      c.narrowing(h[:test_base], h[:tests], h[:test_ids], h[:const_quiet]) if h[:test_base]
+      c.rescue_only = h[:rescue_only] || Set.new
+      c
+    end
+
+    attr_writer :rescue_only
+
+    def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
+      @irep = irep
+      @oracle = oracle
+      @opaque = opaque
+      @opq = Array.new(nregs) { |r| opaque.include?(r.to_s) }.freeze
+      @nregs = nregs
+      @slots = slots
+      @nslots = slots.size
+      @slot_of = slot_of
+      @facts = facts
+      @pb = prov_base
+      @writes = writes
+      @tb = nil
+      @tests = nil
+      @const_quiet = nil
+      @context_edges = oracle.respond_to?(:context_enter_edges) ? oracle.context_enter_edges : nil
+      @self_mask = oracle.respond_to?(:self_mask)
+      @block_send = oracle.respond_to?(:block_send_mask)
+      @super_mask = oracle.respond_to?(:super_mask)
+      @preserves = oracle.respond_to?(:preserves_ivar_slots?)
+      @loadself = oracle.respond_to?(:loadself_mask)
+      @keyword_mask = oracle.respond_to?(:keyword_mask)
+      @keyword_presence = oracle.respond_to?(:keyword_presence)
+      @array_mask = oracle.respond_to?(:array_mask)
+      @hash_mask = oracle.respond_to?(:hash_mask)
+      @index_mask = oracle.respond_to?(:index_mask)
+      @aref_mask = oracle.respond_to?(:aref_mask)
+      @literal_class = oracle.respond_to?(:literal_class_mask)
+      @false_class = oracle.respond_to?(:false_class_bit)
+      @class_eq_test = oracle.respond_to?(:class_eq_test)
+      @note_class_test = oracle.respond_to?(:note_class_test)
+      @noreturn = oracle.respond_to?(:noreturn_call?)
+    end
+
+    def narrowing(test_base, tests, test_ids, const_quiet)
+      @tb = test_base
+      @tests = tests
+      @test_ids = test_ids
+      @const_quiet = const_quiet
+      @test_slot = []
+      @test_reach = []
+    end
+
+    # The id of test +key+ ([codes, predicate]), registered on first sight.
+    def test_id(key)
+      @test_ids[key] ||= (@tests << key).size
+    end
+
+    # True when test +id+ is aimed at an ivar slot (provenance code 1..nslots).
+    def test_aims_slot?(id)
+      fill_test_facts(id) if @test_slot.size < id
+      @test_slot[id - 1]
+    end
+
+    # The highest register test +id+ is aimed at, or -1 for none.
+    def test_reach(id)
+      fill_test_facts(id) if @test_reach.size < id
+      @test_reach[id - 1]
+    end
+
+    def fill_test_facts(id)
+      slots = @nslots
+      (@test_slot.size...id).each do |k|
+        codes = @tests.fetch(k)[0]
+        @test_slot << codes.any? { |code| code <= slots }
+        @test_reach << codes.reduce(-1) { |reach, code| code > slots && code - slots - 1 > reach ? code - slots - 1 : reach }
+      end
+    end
+  end
+
   # The state a handler starts from when +insn+ raises. A callee frame starts at R(a) and may
   # reuse every register from there up; any Ruby the op runs may have stored into an ivar.
   def raise_state(insn, before, after, ctx)
+    step_raise_state(decode_step(insn), before, after, ctx.is_a?(Ctx) ? ctx : Ctx.from_hash(ctx))
+  end
+
+  def step_raise_state(step, before, after, c)
     state = before
-    if CALL_OPS.include?(insn.op)
+    if step.kind == K_CALL
       state = before.dup
-      (insn.reg.to_i...ctx[:nregs]).each { |r| state[r] = OTHER }
-      refresh_slots(state, ctx)
-    elsif silent_call?(insn, before, ctx)
+      state.fill(OTHER, step.a.to_i, c.nregs - step.a.to_i) if step.a.to_i < c.nregs
+      refresh_slots(state, c)
+    elsif step_silent_call?(step, before, c)
       state = before.dup
-      refresh_slots(state, ctx)
+      refresh_slots(state, c)
     end
-    join_state(state, after, ctx[:prov_base])
-  end
-
-  def successors(program, extra, index)
-    base = program.instruction_at(index).successors
-    more = extra[index]
-    more ? (base | more) : base
-  end
-
-  # OP_ENTER with optional arguments jumps into a table of JMPs that follows
-  # it; the disassembly shows no edge, so every table slot is a successor.
-  def enter_edges(irep)
-    edges = {}
-    irep.instructions.each_with_index do |insn, i|
-      next unless insn.op == 'ENTER'
-
-      opt = insn.enter_fields[1].to_i
-      next if opt.zero?
-
-      edges[i] = (1..(opt + 1)).map { |k| i + k }.select { |k| k < irep.instructions.length }
-    end
-    edges
+    join_state(state, after, c.pb)
   end
 
   # The state flowing along edge insn -> target: a conditional branch narrows the
   # tested register (and whatever it was loaded or copied from) by truthiness; nil
   # and false are the only falsy values. nil when the edge is infeasible.
-  def refine_edge(program, insn, index, target, state, ctx)
-    return refine_raiseif(insn, state) if insn.op == 'RAISEIF'
-    return state unless COND_BRANCHES.include?(insn.op)
+  def step_refine_edge(step, index, target, state, c)
+    return refine_raiseif(step.a, state) if step.op == 'RAISEIF'
 
-    goto = program.address_to_index[insn.branch_target]
+    branch = step.branch
+    return state unless branch
+
+    goto = step.goto
     fall = index + 1
     return state if goto == fall || (target != goto && target != fall)
 
     taken = target == goto
-    edge = narrow_chain(state, insn.reg.to_i, insn.op, taken, ctx, Set.new)
-    return edge unless edge && ctx[:test_base] && insn.op != 'JMPNIL'
+    edge = narrow_chain(state, step.a, branch, taken, c, [])
+    return edge unless edge && c.tb && branch != B_NIL
 
-    narrow_by_class_test(edge, insn.reg.to_i, (insn.op == 'JMPIF') == taken, ctx)
+    narrow_by_class_test(edge, step.a, (branch == B_IF) == taken, c)
   end
 
   # The edge out of `JMPIF R` / `JMPNOT R` into another branch on the same register R, which holds a class test's
   # boolean, already decides that branch (`a || b` and `a && b` in a condition compile to two of them): continue at
   # its successor, so the narrowing the edge carries is not joined away with the path that tests again.
-  def thread_class_test(program, insns, src, index, target, edge, ctx)
-    return target unless src.op == 'JMPIF' || src.op == 'JMPNOT'
+  def step_thread_class_test(steps, src, index, target, edge, c)
+    return target unless src.branch == B_IF || src.branch == B_NOT
 
-    reg = src.reg.to_i
-    id = edge[ctx[:test_base] + reg].to_i
-    return target if id.zero? || !ctx[:tests].fetch(id - 1)[1].respond_to?(:narrow)
+    reg = src.a
+    id = edge[c.tb + reg].to_i
+    return target if id.zero? || !c.tests.fetch(id - 1)[1].respond_to?(:narrow)
 
-    goto = program.address_to_index[src.branch_target]
+    goto = src.goto
     return target if goto == index + 1 || (target != goto && target != index + 1)
 
-    truth = (src.op == 'JMPIF') == (target == goto)
+    truth = (src.branch == B_IF) == (target == goto)
     CLASS_TEST_THREAD_MAX.times do
-      branch = insns[target]
-      break unless branch && (branch.op == 'JMPIF' || branch.op == 'JMPNOT') && branch.reg.to_i == reg
+      branch = steps[target]
+      break unless branch && (branch.branch == B_IF || branch.branch == B_NOT) && branch.a == reg
 
-      jump = program.address_to_index[branch.branch_target]
+      jump = branch.goto
       break if jump == target + 1
 
-      target = (branch.op == 'JMPIF') == truth ? jump : target + 1
+      target = (branch.branch == B_IF) == truth ? jump : target + 1
     end
     target
   end
@@ -308,17 +534,17 @@ module NumericFlow
   # CLASS_NARROWING (ADR 0375): the register tested by the branch holds the boolean of a class test, so on the edge
   # where it is +truth+ the tested value and every variable it was copied from (the chain, recorded when the test
   # ran) is narrowed by the test's predicate. nil when no value can take the edge.
-  def narrow_by_class_test(state, reg, truth, ctx)
-    id = state[ctx[:test_base] + reg].to_i
+  def narrow_by_class_test(state, reg, truth, c)
+    id = state[c.tb + reg].to_i
     return state if id.zero?
 
-    codes, pred = ctx[:tests].fetch(id - 1)
+    codes, pred = c.tests.fetch(id - 1)
     return state unless pred.respond_to?(:narrow)
 
-    slots = ctx[:slots].size
+    slots = c.nslots
     out = state
     codes.each do |code|
-      at = code <= slots ? ctx[:nregs] + code - 1 : code - slots - 1
+      at = code <= slots ? c.nregs + code - 1 : code - slots - 1
       mask = state[at]
       next if mask.nil? || mask.zero?
 
@@ -332,25 +558,25 @@ module NumericFlow
     out
   end
 
-  # Remember that +reg+ holds the boolean of the class test +test+ ([subject offset, predicate]) of the SEND at
-  # +index+, aimed at every variable the subject register was a copy of when the call started. A call clears the
-  # provenance, so the chain (`case x`: the argument copies the case temporary, which copies x) is read here.
-  def record_class_test(out, state, insn, test, ctx)
-    a = insn.reg.to_i
+  # Remember that +a+ holds the boolean of the class test +test+ ([subject offset, predicate]) of the SEND whose
+  # leading register is +a+, aimed at every variable the subject register was a copy of when the call started. A call
+  # clears the provenance, so the chain (`case x`: the argument copies the case temporary, which copies x) is read here.
+  def record_class_test(out, state, a, test, c)
     subject = a + test[0]
-    return if subject >= ctx[:nregs]
+    return if subject >= c.nregs
 
-    slots = ctx[:slots].size
+    slots = c.nslots
+    pb = c.pb
     codes = []
-    code = state[ctx[:prov_base] + subject].to_i
+    code = state[pb + subject].to_i
     while code.positive? && codes.size < CLASS_TEST_CHAIN_MAX
       if code > slots
         reg = code - slots - 1
         # At or above the callee frame, or captured: no longer (or never) the tested variable.
-        break if reg >= a || ctx[:opaque].include?(reg.to_s) || codes.include?(code)
+        break if reg >= a || c.opq[reg] || codes.include?(code)
 
         codes << code
-        code = state[ctx[:prov_base] + reg].to_i
+        code = state[pb + reg].to_i
       else
         codes << code
         break
@@ -358,39 +584,42 @@ module NumericFlow
     end
     return if codes.empty?
 
-    key = [codes.freeze, test[1]]
-    id = (ctx[:test_ids][key] ||= (ctx[:tests] << key).size)
-    out[ctx[:test_base] + a] = id
+    out[c.tb + a] = c.test_id([codes.freeze, test[1]])
   end
 
-  def record_class_eq(out, insn, index, id, ctx)
-    codes, marker = ctx[:tests].fetch(id - 1)
-    a = insn.reg.to_i
-    b = insn.paren_reg.to_i
-    oracle = ctx[:oracle]
-    return if b >= ctx[:nregs] || codes.include?(ctx[:slots].size + 1 + a) || !oracle.respond_to?(:class_eq_test)
+  def record_class_eq(out, insn, step, index, id, c)
+    codes, marker = c.tests.fetch(id - 1)
+    a = step.a
+    b = step.b
+    oracle = c.oracle
+    return if b >= c.nregs || codes.include?(c.nslots + 1 + a) || !c.class_eq_test
     # The guard of an EQ reads the subject from a register: an ivar-only chain is not narrowed.
-    return if codes.none? { |code| code > ctx[:slots].size }
+    return if codes.none? { |code| code > c.nslots }
 
-    pred = oracle.class_eq_test(ctx[:irep], index, insn, marker)
+    pred = oracle.class_eq_test(c.irep, index, insn, marker)
     return unless pred
 
-    key = [codes, pred]
-    out[ctx[:test_base] + a] = (ctx[:test_ids][key] ||= (ctx[:tests] << key).size)
-    oracle.note_class_test(ctx[:irep], index, codes, ctx[:slots].size, pred) if oracle.respond_to?(:note_class_test)
+    out[c.tb + a] = c.test_id([codes, pred])
+    oracle.note_class_test(c.irep, index, codes, c.nslots, pred) if c.note_class_test
   end
 
   # Forget every test aimed at provenance +code+ (the variable it narrows was rewritten).
-  def clear_class_tests(out, ctx, code)
-    ctx[:nregs].times do |q|
-      id = out[ctx[:test_base] + q]
-      out[ctx[:test_base] + q] = 0 if id.positive? && ctx[:tests].fetch(id - 1)[0].include?(code)
+  def clear_class_tests(out, c, code)
+    tests = c.tests
+    return if tests.empty?
+
+    tb = c.tb
+    q = tb
+    last = tb + c.nregs
+    while q < last
+      id = out[q]
+      out[q] = 0 if id.positive? && tests.fetch(id - 1)[0].include?(code)
+      q += 1
     end
   end
 
   # `RAISEIF Ra` raises unless Ra is nil, so the fall-through edge holds only a nil (or unknown) Ra.
-  def refine_raiseif(insn, state)
-    reg = insn.reg.to_i
+  def refine_raiseif(reg, state)
     mask = state[reg]
     return state if mask.nil? || mask.zero?
 
@@ -404,15 +633,16 @@ module NumericFlow
     out
   end
 
-  # Provenance values: 0 none, 1..K slot k-1, K+1+r register r.
-  def narrow_chain(state, reg, op, taken, ctx, seen)
-    return state unless seen.add?(reg)
+  # Provenance values: 0 none, 1..K slot k-1, K+1+r register r. +seen+ holds the registers already narrowed.
+  def narrow_chain(state, reg, branch, taken, c, seen)
+    return state if seen.include?(reg)
 
+    seen << reg
     mask = state[reg]
     return state if mask.nil? || mask.zero?
 
-    sure, maybe = falsy_class_bits(ctx)
-    narrowed = narrow_by_truth(op, taken, mask, sure, maybe)
+    sure, maybe = falsy_class_bits(c)
+    narrowed = narrow_branch(branch, taken, mask, sure, maybe)
     return nil if narrowed.zero?
 
     out = state
@@ -420,11 +650,11 @@ module NumericFlow
       out = state.dup
       out[reg] = narrowed
     end
-    prov = state[ctx[:prov_base] + reg].to_i
-    slots = ctx[:slots].size
+    prov = state[c.pb + reg].to_i
+    slots = c.nslots
     if prov.positive? && prov <= slots
-      slot = ctx[:nregs] + prov - 1
-      slot_narrowed = narrow_by_truth(op, taken, state[slot], sure, maybe)
+      slot = c.nregs + prov - 1
+      slot_narrowed = narrow_branch(branch, taken, state[slot], sure, maybe)
       return nil if slot_narrowed.zero? && !state[slot].zero?
 
       if slot_narrowed != state[slot]
@@ -432,199 +662,238 @@ module NumericFlow
         out[slot] = slot_narrowed
       end
     elsif prov > slots
-      out = narrow_chain(out, prov - slots - 1, op, taken, ctx, seen)
+      out = narrow_chain(out, prov - slots - 1, branch, taken, c, seen)
     end
     out
   end
 
   # [definitely falsy, possibly falsy] class bits. FalseClass is the only class bit that is falsy, and it is falsy for
   # sure. An oracle that does not name it leaves every class bit possibly falsy and none definitely falsy.
-  def falsy_class_bits(ctx)
-    oracle = ctx[:oracle]
-    return [0, CLASS_BITS] unless oracle.respond_to?(:false_class_bit)
+  def falsy_class_bits(c)
+    return [0, CLASS_BITS] unless c.false_class
 
-    bit = oracle.false_class_bit.to_i
+    bit = c.oracle.false_class_bit.to_i
     [bit, bit]
   end
 
   # The class bit of a true, false or Symbol literal, or OTHER when the oracle names none.
-  def literal_class_mask(insn, ctx)
-    oracle = ctx[:oracle]
-    (oracle.respond_to?(:literal_class_mask) && oracle.literal_class_mask(insn)) || OTHER
+  def literal_class_mask(insn, c)
+    (c.literal_class && c.oracle.literal_class_mask(insn)) || OTHER
   end
 
   # A truthy edge drops nil and the definitely falsy class bits; a falsy edge keeps nil, OTHER and the possibly falsy
   # class bits. JMPNIL needs no class bits: only nil is nil.
   def narrow_by_truth(op, taken, mask, sure, maybe)
-    case op
-    when 'JMPIF' then taken ? mask & ~(NIL | sure) : mask & (FALSY | maybe)
-    when 'JMPNOT' then taken ? mask & (FALSY | maybe) : mask & ~(NIL | sure)
-    else taken ? (mask & FALSY).zero? ? 0 : NIL : mask & ~NIL # JMPNIL: nil exactly on the taken edge
+    narrow_branch(BRANCH_KINDS[op] || B_NIL, taken, mask, sure, maybe)
+  end
+
+  def narrow_branch(branch, taken, mask, sure, maybe)
+    if branch == B_IF
+      taken ? mask & ~(NIL | sure) : mask & (FALSY | maybe)
+    elsif branch == B_NOT
+      taken ? mask & (FALSY | maybe) : mask & ~(NIL | sure)
+    else
+      taken ? (mask & FALSY).zero? ? 0 : NIL : mask & ~NIL # JMPNIL: nil exactly on the taken edge
     end
   end
 
-  # Masks join by union; a provenance survives only when both sides agree.
+  # Masks join by union; a provenance survives only when both sides agree. +old+ itself when nothing changes, so a
+  # caller tells growth by identity; nothing is allocated until the first entry that changes.
   def join_state(old, new, prov_base)
     return new.dup if old.nil?
+    # Equal states join to the old one (a union of equal masks, provenances that agree); Array#== finds that in C. A
+    # nil entry is the exception: `nil | nil` is false, which the loop below reproduces.
+    return old if old == new && !old.include?(nil)
 
-    joined = old.each_with_index.map do |m, r|
-      r < prov_base ? m | new[r] : (m == new[r] ? m : 0)
+    joined = nil
+    size = old.size
+    r = 0
+    while r < size
+      m = old[r]
+      x = new[r]
+      unless x.equal?(m) && m.is_a?(Integer)
+        j = r < prov_base ? m | x : (m == x ? m : 0)
+        unless j == m
+          joined ||= old.dup
+          joined[r] = j
+        end
+      end
+      r += 1
     end
-    joined == old ? old : joined
+    joined || old
   end
 
   def transfer(index, insn, state, ctx)
-    op = insn.op
-    if NO_WRITE_OPS.include?(op)
+    step_transfer(index, insn, decode_step(insn), state, ctx.is_a?(Ctx) ? ctx : Ctx.from_hash(ctx))
+  end
+
+  def step_transfer(index, insn, step, state, c)
+    kind = step.kind
+    if kind == K_NO_WRITE
+      return state
+    elsif kind == K_SETIDX
       # SETIDX writes no register but may call a user #[]=.
-      return state unless op == 'SETIDX' && silent_call?(insn, state, ctx)
+      return state unless step_silent_call?(step, state, c)
 
       out = state.dup
-      refresh_slots(out, ctx)
+      refresh_slots(out, c)
       return out
     end
 
-    oracle = ctx[:oracle]
-    irep = ctx[:irep]
-    nregs = ctx[:nregs]
-    pb = ctx[:prov_base]
-    if op == 'SETIV'
-      slot = ctx[:slot_of][insn.ivar]
+    nregs = c.nregs
+    pb = c.pb
+    if kind == K_SETIV
+      slot = c.slot_of[step.ivar]
       return state unless slot
 
       out = state.dup
-      out[slot] = state[insn.regs.first.to_i]
+      out[slot] = state[step.b]
       # Registers loaded from the old value no longer mirror the slot.
-      nregs.times { |r| out[pb + r] = 0 if out[pb + r] == slot - nregs + 1 }
-      clear_class_tests(out, ctx, slot - nregs + 1) if ctx[:test_base]
+      clear_provenance(out, pb, nregs, slot - nregs + 1)
+      clear_class_tests(out, c, slot - nregs + 1) if c.tb
       return out
     end
 
-    reg = insn.reg
-    a = reg&.to_i
+    a = step.a
     return state if a.nil? || a >= nregs
 
     out = state.dup
-    slot_count = ctx[:slots].size
-    writes = ctx[:writes]
-    set = lambda do |r, mask|
-      out[r] = ctx[:opaque].include?(r.to_s) ? OTHER : mask
-      writes[r] = (writes[r] || 0) | out[r] if writes
-      out[pb + r] = 0
-      # Registers that mirrored the old value of r no longer do.
-      nregs.times { |q| out[pb + q] = 0 if out[pb + q] == slot_count + 1 + r }
-      if ctx[:test_base]
-        out[ctx[:test_base] + r] = 0
-        clear_class_tests(out, ctx, slot_count + 1 + r)
-      end
-    end
-
-    if CALL_OPS.include?(op)
+    oracle = c.oracle
+    irep = c.irep
+    if kind == K_CALL
       # A block result needs its own proof: `break` replaces the callee's answer.
-      mask = if %w[SEND SEND0 SSEND SSEND0].include?(op)
+      call = step.call
+      mask = if call == C_SEND
                oracle.send_mask(irep, index, insn, state)
-             elsif %w[SENDB SSENDB].include?(op) && oracle.respond_to?(:block_send_mask)
+             elsif call == C_BLOCK && c.block_send
                oracle.block_send_mask(irep, index, insn, state)
-             elsif op == 'SUPER' && oracle.respond_to?(:super_mask)
+             elsif call == C_SUPER && c.super_mask
                oracle.super_mask(irep, index, insn, state)
              else OTHER
              end
-      test = ctx[:test_base] && %w[SEND SEND0].include?(op) ? oracle.class_test(irep, index, insn, state) : nil
-      ((a + 1)...nregs).each { |r| out[r] = OTHER }
-      preserve = oracle.respond_to?(:preserves_ivar_slots?) && oracle.preserves_ivar_slots?(irep, index, insn, state)
+      test = c.tb && (step.op == 'SEND' || step.op == 'SEND0') ? oracle.class_test(irep, index, insn, state) : nil
+      out.fill(OTHER, a + 1, nregs - a - 1) if a + 1 < nregs
+      preserve = c.preserves && oracle.preserves_ivar_slots?(irep, index, insn, state)
       if preserve
-        nregs.times { |r| out[pb + r] = 0 } unless ctx[:test_base]
+        out.fill(0, pb, nregs) unless c.tb
       else
-        refresh_slots(out, ctx)
+        refresh_slots(out, c)
       end
-      clobber_class_test_copies(out, ctx, a) if ctx[:test_base]
-      set.call(a, mask)
-      record_class_test(out, state, insn, test, ctx) if test
+      clobber_class_test_copies(out, c, a) if c.tb
+      set_reg(out, a, mask, c)
+      record_class_test(out, state, a, test, c) if test
       return out
     end
 
-    nil_raises = ->(sym) { oracle.nil_raises?(sym) }
-    case op
-    when /\ALOADI/
-      set.call(a, INT)
-    when 'LOADL'
-      set.call(a, oracle.pool_mask(irep, insn))
-    when 'LOADSELF'
-      set.call(a, oracle.respond_to?(:loadself_mask) ? oracle.loadself_mask : OTHER)
-    when 'LOADNIL'
-      set.call(a, NIL)
-    when 'LOADTRUE', 'LOADFALSE', 'LOADSYM'
-      set.call(a, literal_class_mask(insn, ctx))
-    when 'MOVE'
-      src = insn.regs[1].to_i
-      set.call(a, src < nregs ? state[src] : OTHER)
+    case kind
+    when K_LOADI
+      set_reg(out, a, INT, c)
+    when K_LOADL
+      set_reg(out, a, oracle.pool_mask(irep, insn), c)
+    when K_LOADSELF
+      set_reg(out, a, c.loadself ? oracle.loadself_mask : OTHER, c)
+    when K_LOADNIL
+      set_reg(out, a, NIL, c)
+    when K_LITERAL
+      set_reg(out, a, literal_class_mask(insn, c), c)
+    when K_MOVE
+      src = step.b
+      set_reg(out, a, src < nregs ? state[src] : OTHER, c)
       # `a` now mirrors `src` (and whatever `src` mirrored is reached through it).
-      if src < nregs && src != a && !ctx[:opaque].include?(a.to_s) && !ctx[:opaque].include?(src.to_s)
-        out[pb + a] = slot_count + 1 + src
-        copy_class_test(out, state, a, src, ctx) if ctx[:test_base]
+      if src < nregs && src != a && !c.opq[a] && !c.opq[src]
+        out[pb + a] = c.nslots + 1 + src
+        copy_class_test(out, state, a, src, c) if c.tb
       end
-    when 'KARG'
-      set.call(a, oracle.respond_to?(:keyword_mask) ? oracle.keyword_mask(insn) : OTHER)
-    when 'KEY_P'
-      set.call(a, oracle.respond_to?(:keyword_presence) ? oracle.keyword_presence(insn) : OTHER)
-    when 'GETCONST', 'GETMCNST'
-      set.call(a, oracle.const_mask(insn))
-    when 'GETUPVAR'
-      set.call(a, oracle.upvar_mask(irep, insn))
-    when 'GETIV'
-      slot = ctx[:slot_of][insn.ivar]
-      set.call(a, slot ? state[slot] : OTHER)
-      out[pb + a] = slot - nregs + 1 if slot && !ctx[:opaque].include?(a.to_s)
-    when 'EXCEPT'
-      set.call(a, ctx[:rescue_only].include?(index) ? EXC : EXC | NIL)
-    when 'RESCUE'
+    when K_KARG
+      set_reg(out, a, c.keyword_mask ? oracle.keyword_mask(insn) : OTHER, c)
+    when K_KEY_P
+      set_reg(out, a, c.keyword_presence ? oracle.keyword_presence(insn) : OTHER, c)
+    when K_CONST
+      set_reg(out, a, oracle.const_mask(insn), c)
+    when K_GETUPVAR
+      set_reg(out, a, oracle.upvar_mask(irep, insn), c)
+    when K_GETIV
+      slot = c.slot_of[step.ivar]
+      set_reg(out, a, slot ? state[slot] : OTHER, c)
+      out[pb + a] = slot - nregs + 1 if slot && !c.opq[a]
+    when K_EXCEPT
+      set_reg(out, a, c.rescue_only.include?(index) ? EXC : EXC | NIL, c)
+    when K_RESCUE
       # Reads the exception in its first register, writes the match flag to its second.
-      b = insn.regs[1].to_i
-      set.call(b, OTHER) if b < nregs
-    when 'RANGE_INC', 'RANGE_EXC'
-      set.call(a, RNG)
-    when 'ARRAY', 'ARRAY2'
-      set.call(a, oracle.respond_to?(:array_mask) ? oracle.array_mask(irep, index, insn, state) : ARR)
-    when 'HASH'
-      set.call(a, oracle.respond_to?(:hash_mask) ? oracle.hash_mask(irep, index, insn, state) : HSH)
-    when 'STRING'
-      set.call(a, STR)
-    when 'ARYPUSH', 'ARYCAT', 'HASHADD', 'HASHCAT', 'STRCAT'
-      keep = KEEPS_CLASS.fetch(op)
-      set.call(a, state[a] == keep ? keep : OTHER)
-    when 'ADD', 'SUB', 'MUL'
-      b = insn.paren_reg.to_i
-      sym = ARITH_OPS.fetch(op)
+      b = step.b
+      set_reg(out, b, OTHER, c) if b < nregs
+    when K_RANGE
+      set_reg(out, a, RNG, c)
+    when K_ARRAY
+      set_reg(out, a, c.array_mask ? oracle.array_mask(irep, index, insn, state) : ARR, c)
+    when K_HASH
+      set_reg(out, a, c.hash_mask ? oracle.hash_mask(irep, index, insn, state) : HSH, c)
+    when K_STRING
+      set_reg(out, a, STR, c)
+    when K_KEEPS
+      keep = KEEPS_CLASS.fetch(step.op)
+      set_reg(out, a, state[a] == keep ? keep : OTHER, c)
+    when K_ARITH
+      b = step.b
+      sym = step.sym
       ok = oracle.op_native?(sym) && b < nregs
-      set.call(a, ok ? arith(state[a], state[b], nil_raises.call(sym)) : OTHER)
-    when 'ADDI', 'SUBI'
-      sym = IMM_ARITH_OPS.fetch(op)
-      set.call(a, oracle.op_native?(sym) ? arith(state[a], INT, nil_raises.call(sym)) : OTHER)
-    when 'ADDILV', 'SUBILV'
-      sym = IMM_ARITH_OPS.fetch(op)
+      set_reg(out, a, ok ? arith(state[a], state[b], oracle.nil_raises?(sym)) : OTHER, c)
+    when K_IMM
+      sym = step.sym
+      set_reg(out, a, oracle.op_native?(sym) ? arith(state[a], INT, oracle.nil_raises?(sym)) : OTHER, c)
+    when K_IMM_LV
+      sym = step.sym
       # R[b], R[b+1] are working space for the fallback method call.
-      b = insn.regs[1].to_i
-      [b, b + 1].each { |r| set.call(r, OTHER) if r < nregs }
-      set.call(a, oracle.op_native?(sym) ? arith(state[a], INT, nil_raises.call(sym)) : OTHER)
-    when 'DIV'
-      b = insn.paren_reg.to_i
+      b = step.b
+      set_reg(out, b, OTHER, c) if b < nregs
+      set_reg(out, b + 1, OTHER, c) if b + 1 < nregs
+      set_reg(out, a, oracle.op_native?(sym) ? arith(state[a], INT, oracle.nil_raises?(sym)) : OTHER, c)
+    when K_DIV
+      b = step.b
       ok = oracle.op_native?('/') && b < nregs
-      set.call(a, ok ? arith(state[a], state[b], nil_raises.call('/')) : OTHER)
-    when 'GETIDX', 'GETIDX0'
-      literal = LiteralElementProof.mask(irep, index, ctx[:opaque])
-      set.call(a, literal || (oracle.respond_to?(:index_mask) ? oracle.index_mask(irep, index, insn, state) : OTHER))
-    when 'AREF'
-      set.call(a, oracle.respond_to?(:aref_mask) ? oracle.aref_mask(irep, index, insn, state) : OTHER)
-    when 'EQ'
+      set_reg(out, a, ok ? arith(state[a], state[b], oracle.nil_raises?('/')) : OTHER, c)
+    when K_GETIDX
+      literal = LiteralElementProof.mask(irep, index, c.opaque)
+      set_reg(out, a, literal || (c.index_mask ? oracle.index_mask(irep, index, insn, state) : OTHER), c)
+    when K_AREF
+      set_reg(out, a, c.aref_mask ? oracle.aref_mask(irep, index, insn, state) : OTHER, c)
+    when K_EQ
       # `x.class == C`: the class-of boolean meets a class constant, which makes it the instance_of test of x.
-      id = ctx[:test_base] ? state[ctx[:test_base] + a].to_i : 0
-      set.call(a, OTHER)
-      record_class_eq(out, insn, index, id, ctx) if id.positive?
+      id = c.tb ? state[c.tb + a].to_i : 0
+      set_reg(out, a, OTHER, c)
+      record_class_eq(out, insn, step, index, id, c) if id.positive?
     else
-      set.call(a, OTHER)
+      set_reg(out, a, OTHER, c)
     end
-    refresh_slots(out, ctx) if silent_call?(insn, state, ctx)
+    refresh_slots(out, c) if step_silent_call?(step, state, c)
     out
+  end
+
+  # Register +r+ (below nregs) now holds +mask+ (OTHER when a block captures it): nothing mirrors its old value any more.
+  def set_reg(out, r, mask, c)
+    value = c.opq[r] ? OTHER : mask
+    out[r] = value
+    writes = c.writes
+    writes[r] = (writes[r] || 0) | value if writes
+    pb = c.pb
+    out[pb + r] = 0
+    # Registers that mirrored the old value of r no longer do.
+    code = c.nslots + 1 + r
+    clear_provenance(out, pb, c.nregs, code)
+    return unless c.tb
+
+    out[c.tb + r] = 0
+    clear_class_tests(out, c, code)
+  end
+
+  # Every register whose provenance is +code+ loses it.
+  def clear_provenance(out, pb, nregs, code)
+    q = pb
+    last = pb + nregs
+    while q < last
+      out[q] = 0 if out[q] == code
+      q += 1
+    end
   end
 
   # Non-call ops that dispatch to Ruby the flow does not follow, with the same `self`
@@ -636,60 +905,93 @@ module NumericFlow
 
   # Judged on the state before the op, whose operands are still intact.
   def silent_call?(insn, state, ctx)
-    return false unless SILENT_CALL_OPS.include?(insn.op)
-    return false if ctx[:slots].empty?
-    return false if ctx[:const_quiet] && (insn.op == 'GETCONST' || insn.op == 'GETMCNST')
+    step_silent_call?(decode_step(insn), state, ctx.is_a?(Ctx) ? ctx : Ctx.from_hash(ctx))
+  end
 
-    a = insn.reg.to_i
-    at = ->(r) { r < ctx[:nregs] ? state[r] : nil }
-    plain = ->(m) { m.is_a?(Integer) && m.positive? && (m & ~NUM).zero? }
-    case insn.op
-    when 'ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE'
-      !(plain.call(at.call(a)) && plain.call(at.call(insn.paren_reg.to_i)))
-    when 'GETIDX', 'SETIDX' then !(at.call(a) == ARR && at.call(a + 1) == INT)
-    when 'GETIDX0' then at.call(insn.regs[1].to_i) != ARR
-    when 'STRCAT' then at.call(a + 1) != STR
+  def step_silent_call?(step, state, c)
+    silent = step.silent
+    return false if silent == S_NONE
+    return false if c.nslots.zero?
+    return false if silent == S_CONST && c.const_quiet
+
+    a = step.a.to_i
+    nregs = c.nregs
+    case silent
+    when S_NUMERIC
+      b = step.b
+      !(plain_number?(a < nregs ? state[a] : nil) && plain_number?(b < nregs ? state[b] : nil))
+    when S_INDEX
+      !((a < nregs ? state[a] : nil) == ARR && (a + 1 < nregs ? state[a + 1] : nil) == INT)
+    when S_INDEX0
+      b = step.b
+      (b < nregs ? state[b] : nil) != ARR
+    when S_STRCAT
+      (a + 1 < nregs ? state[a + 1] : nil) != STR
     else true
     end
   end
 
+  def plain_number?(mask)
+    mask.is_a?(Integer) && mask.positive? && (mask & ~NUM).zero?
+  end
+
   # Every slot may now hold what any callee could have stored, and no register still
   # mirrors a slot.
-  def refresh_slots(out, ctx)
-    nregs = ctx[:nregs]
-    ctx[:facts].each_with_index { |fact, k| out[nregs + k] |= fact }
-    if ctx[:test_base]
-      # CLASS_NARROWING: a call cannot write a local no block captures, so two registers that held the same value
-      # still do; only the copies of a slot are forgotten (and, in the call, the callee's frame).
-      slots = ctx[:slots].size
-      nregs.times { |r| out[ctx[:prov_base] + r] = 0 if out[ctx[:prov_base] + r] <= slots }
-      slots.times { |k| clear_class_tests(out, ctx, k + 1) }
-    else
-      nregs.times { |r| out[ctx[:prov_base] + r] = 0 }
+  def refresh_slots(out, c)
+    nregs = c.nregs
+    k = 0
+    facts = c.facts
+    while k < facts.size
+      out[nregs + k] |= facts[k]
+      k += 1
+    end
+    pb = c.pb
+    tb = c.tb
+    unless tb
+      out.fill(0, pb, nregs)
+      return
+    end
+
+    # CLASS_NARROWING: a call cannot write a local no block captures, so two registers that held the same value
+    # still do; only the copies of a slot are forgotten (and, in the call, the callee's frame).
+    slots = c.nslots
+    q = 0
+    while q < nregs
+      out[pb + q] = 0 if out[pb + q] <= slots
+      q += 1
+    end
+    return if slots.zero? || c.tests.empty?
+
+    # Every test aimed at a slot is forgotten.
+    q = 0
+    while q < nregs
+      id = out[tb + q]
+      out[tb + q] = 0 if id.positive? && c.test_aims_slot?(id)
+      q += 1
     end
   end
 
   # The callee frame starts at R(a): whatever mirrored a register from there up, or was tested through one, is gone.
-  def clobber_class_test_copies(out, ctx, a)
-    slots = ctx[:slots].size
-    pb = ctx[:prov_base]
-    tb = ctx[:test_base]
-    ctx[:nregs].times do |q|
+  def clobber_class_test_copies(out, c, a)
+    slots = c.nslots
+    pb = c.pb
+    tb = c.tb
+    q = 0
+    nregs = c.nregs
+    while q < nregs
       code = out[pb + q]
       out[pb + q] = 0 if q >= a || (code > slots && code - slots - 1 >= a)
       id = out[tb + q]
-      next unless id.positive?
-
-      codes = ctx[:tests].fetch(id - 1)[0]
-      out[tb + q] = 0 if q > a || codes.any? { |c| c > slots && c - slots - 1 >= a }
+      out[tb + q] = 0 if id.positive? && (q > a || c.test_reach(id) >= a)
+      q += 1
     end
   end
 
   # `v = x.is_a?(C)`: the copy holds the same boolean, unless the test was aimed at the register being overwritten.
-  def copy_class_test(out, state, dst, src, ctx)
-    id = state[ctx[:test_base] + src].to_i
-    return if id.zero? || ctx[:tests].fetch(id - 1)[0].include?(ctx[:slots].size + 1 + dst)
+  def copy_class_test(out, state, dst, src, c)
+    id = state[c.tb + src].to_i
+    return if id.zero? || c.tests.fetch(id - 1)[0].include?(c.nslots + 1 + dst)
 
-    out[ctx[:test_base] + dst] = id
+    out[c.tb + dst] = id
   end
 end
