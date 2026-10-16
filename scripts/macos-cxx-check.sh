@@ -13,7 +13,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 src=$1; out=$2
-sysroot=${NFCXX_MACOS_SYSROOT:-$root/tests/macos-sysroot}
+# NFCXX_MACOS_CLEANROOM is the sysroot root (cxx/ and include/); NFCXX_MACOS_SYSROOT is the include directory qbe-cc reads
+sysroot=${NFCXX_MACOS_CLEANROOM:-$root/tests/macos-sysroot}
 libcxx=${NFCXX_LIBCXX:-/usr/lib/llvm-18/include/c++/v1}
 [ -d "$libcxx" ] || { echo "macos-cxx-check: libc++ headers not found at $libcxx (set NFCXX_LIBCXX; the container has libc++-18-dev)" >&2; exit 2; }
 clangres=$(clang -print-resource-dir)/include
