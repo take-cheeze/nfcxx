@@ -161,7 +161,9 @@ module ParamTrace
         skipped[:not_a_method_or_block] += 1
         next
       end
-      j = (i + 1..[i + REG0_WINDOW, lines.size - 1].min).find { |x| lines[x].match?(REG0_RE) }
+      # The window stops at this function's closing brace: a short body must not reach the next function's `r0`.
+      close = (i + 1...lines.size).find { |x| lines[x].match?(/\A\}\s*\z/) } || lines.size
+      j = (i + 1..[i + REG0_WINDOW, close - 1].min).find { |x| lines[x].match?(REG0_RE) }
       unless j
         skipped[:no_register_block] += 1
         next

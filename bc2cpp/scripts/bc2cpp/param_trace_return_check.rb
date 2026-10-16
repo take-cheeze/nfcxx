@@ -42,6 +42,24 @@ check.call('return of Foo#baz wrapped with its static fact', rets.any? { |r| r[:
 check.call('return ordinals are distinct per function', rets.map { |r| r[:meta] }.uniq.size == rets.size)
 check.call('the recorder is declared before the first use', text.index('bc2cpp_ret_hit_fixture(mrb_state') < text.index('return bc2cpp_ret_hit_fixture(M, 0'))
 
+# A short body must not reach into the next function: the register line search stops at the closing brace.
+short = <<~CPP
+  mrb_value Foo_short_impl(mrb_state* M, mrb_value self, mrb_value it) {
+    return it;
+  }
+  mrb_value Foo_next_impl(mrb_state* M, mrb_value self) {
+    mrb_value r0 = self;
+    return r0;
+  }
+CPP
+short_infos = {
+  'Foo_short_impl' => { method: 'Foo#short', mand: 1, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call, ret: 'none' },
+  'Foo_next_impl' => { method: 'Foo#next', mand: 0, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call, ret: 'none' }
+}
+short_text, _short_summary = ParamTrace.instrument(short, 'fixture', short_infos)
+check.call('a function with no register line of its own gets no parameter hit',
+           !short_text.include?('bc2cpp_param_hit_fixture(M, 0, it)'))
+
 if failures.empty?
   puts 'param trace return check: PASS'
 else
