@@ -1340,6 +1340,15 @@ if $PROGRAM_NAME == __FILE__
     ElseTrace.capture_stdout(symbol, compiled.to_h { |m| [m[:impl], "#{m[:owner]}##{m[:name]}"] })
   end
 
+  # RECV_TRACE (tools/bc2cpp/recv_trace.rb): opt-in receiver counters on every by-name send and block call of
+  # the generated methods; unset (or any value but 1) leaves stdout untouched. Registered after ELSE_TRACE so it
+  # instruments the plain text first (at_exit runs last-in first-out). Both rewrite bc2cpp_send, so not together.
+  if ENV['BC2CPP_TRACE_RECV'] == '1'
+    abort 'bc2cpp: BC2CPP_TRACE_RECV and BC2CPP_TRACE_ELSE both rewrite bc2cpp_send; set one' if ENV['BC2CPP_TRACE_ELSE'] == '1'
+    require_relative 'recv_trace'
+    RecvTrace.capture_stdout(symbol, compiled.to_h { |m| [m[:impl], "#{m[:owner]}##{m[:name]}"] })
+  end
+
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
   puts '#include <string.h>'
