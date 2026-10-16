@@ -31,21 +31,37 @@ require_relative 'codegen_sealed_containers'
 # define_method, undef or computed-name send can install or rename it (an error: such a declaration cannot hold);
 # a POLY name also needs ClosedWorld#name_fully_visible?. A declaration whose name fails a non-error precondition
 # is still checked per definition and adds no fact.
+#
+# DECLARED_RETURN_GUARD: a %a{bc2cpp:hint} declaration is checked at run time instead. Its compiled body is wrapped
+# (declared_return_guard_wrap): every value the method returns, by any path (a `return`, the last expression, a
+# block's `return` caught at the frame, the entry specialization, the Fiber hand-off to the interpreter), passes one
+# check of the declared kind before the caller sees it, and a mismatch raises BC2cppHintViolation naming the method
+# and the type. There is no by-name fallback. The declaration then enters the same fact sets as a statically checked
+# one, under the same closed-world preconditions; bc2cpp.rb aborts a run that trusted it without compiling the guard
+# (DeclaredReturns.guard_failures).
 class CodeGen
   class << self
     # [DeclaredReturns::Entry] for this build (nil: none), and the root diagnostics are relative to.
-    attr_accessor :declared_returns, :declared_return_root
+    # declared_return_hint_refusals: DeclaredReturns.hint_refusals, the hinted declarations no body can carry.
+    attr_accessor :declared_returns, :declared_return_root, :declared_return_hint_refusals
   end
 
   DECLARED_RETURN_TERMINALS = %w[RETNIL RETSELF RETTRUE RETFALSE STOP].freeze
 
-  # The checked declarations; %a{bc2cpp:hint} ones are only listed (declared_return_hints).
+  # The checked declarations: statically checked ones and the runtime-checked %a{bc2cpp:hint} ones.
   def declared_return_entries
-    @declared_return_entries ||= (self.class.declared_returns || []).select { |e| @ireps[e.label] && !e.hint }
+    @declared_return_entries ||= (self.class.declared_returns || []).select { |e| @ireps[e.label] }
   end
 
+  # The runtime-checked declarations (DECLARED_RETURN_GUARD).
   def declared_return_hints
-    (self.class.declared_returns || []).select(&:hint)
+    declared_return_entries.select(&:hint)
+  end
+
+  # The runtime-checked declaration of the body `label` compiles, or nil.
+  def declared_return_guard(label)
+    @declared_return_guards ||= declared_return_hints.to_h { |e| [e.label, e] }
+    @declared_return_guards[label]
   end
 
   # name -> [entries] of the definitions declared with `kind`.
@@ -72,11 +88,18 @@ class CodeGen
     return ['info', "outside Ruby or native code also defines `#{name}`"] if @foreign_method_names.include?(name)
 
     defs = return_table_definitions(name) # ADR 0333: a registry placeholder the closed world rules out is no body
+    entries = declared_return_by_name[name] || []
+    # DECLARED_RETURN_GUARD: a core body is compiled without the closed world and may run interpreted (CORE_BLOCK
+    # guards), so no guard can be relied on there.
+    core = entries.select(&:hint).filter_map { |e| @owner_of[e.label] }.select(&:core)
+    unless core.empty?
+      return ['error', "#{core.map(&:owner).sort.join(', ')}##{name} is a core method, which a run-time check " \
+                       'in its compiled body cannot cover (it may run interpreted)']
+    end
     unless defs.all? { |d| d.irep && @ireps[d.irep] }
       return ['info', "`#{name}` also has a native or accessor definition"]
     end
 
-    entries = declared_return_by_name[name] || []
     undeclared = defs.reject { |d| entries.any? { |e| e.owner == d.owner && e.label == d.irep } }
     unless undeclared.empty?
       missing = undeclared.map(&:owner).sort.join(', ')
@@ -116,13 +139,17 @@ class CodeGen
     if @foreign_method_names.nil? && !declared_return_entries.empty?
       raise 'DECLARED_RETURN_CHECK: no outside-source scan; bc2cpp compiles closed-world programs only (ADR 0466)'
     end
-    declared_return_hints.each do |entry|
-      @declared_return_report << "  DECLARED_RET #{entry.key} -> #{entry.text}: " \
-                                 'unchecked hint (%a{bc2cpp:hint}), no fact'
+    # A hinted declaration no compiled body can carry: an error, never an unchecked hint.
+    (self.class.declared_return_hint_refusals || []).each do |r|
+      @declared_return_diagnostics << declared_return_diag(r[:loc].file, r[:loc].line, r[:loc].col, 'error',
+                                                           "#{r[:key]} -> #{r[:text]}: %a{bc2cpp:hint} cannot be " \
+                                                           "checked at run time: #{r[:why]}")
+      @declared_return_report << "  DECLARED_RET #{r[:key]} -> #{r[:text]}: FAILED (runtime check refused)"
     end
     declared_return_entries.each do |entry|
       refusal = declared_return_refusal(entry.name)
-      failures = declared_return_failures(entry)
+      # DECLARED_RETURN_GUARD: the compiled body checks every returned value; nothing is proven statically.
+      failures = entry.hint ? [] : declared_return_failures(entry)
       failures.each { |f| @declared_return_diagnostics << f }
       if refusal
         message = refusal.first == 'error' ? "cannot be checked: #{refusal.last}" : "#{refusal.last}; no return fact"
@@ -130,12 +157,14 @@ class CodeGen
         @declared_return_diagnostics << declared_return_diag(loc.file, loc.line, loc.col, refusal.first,
                                                              "#{entry.key} -> #{entry.text}: #{message}")
       end
-      status = if failures.empty? && refusal.nil? then "checked, fact #{entry.kind}"
-               elsif failures.empty? && refusal.first == 'info' then 'checked, no fact'
+      how = entry.hint ? 'runtime-checked (%a{bc2cpp:hint})' : 'checked'
+      status = if failures.empty? && refusal.nil? then "#{how}, fact #{entry.kind}"
+               elsif failures.empty? && refusal.first == 'info' then "#{how}, no fact"
                else 'FAILED'
                end
       @declared_return_report << "  DECLARED_RET #{entry.key} -> #{entry.text}: #{status}"
     end
+    check_block_returns
     @declared_return_diagnostics
   end
 
@@ -348,5 +377,52 @@ class CodeGen
                      class_layout: @class_layout, registry: @registry, container_constants: @container_constants,
                      ret_class_proof: ->(n, o) { class_return_for_self_call(n, o) },
                      method_return_class: ->(n) { class_return_for_dispatch(n) }, dominated: dominated)
+  end
+
+  # DECLARED_RETURN_GUARD: the C++ statement that checks `var` against the runtime-checked declaration `entry` and
+  # raises on a mismatch. The kinds test exactly what their facts let a consumer assume: a Fixnum (an unchecked
+  # mrb_fixnum is allowed on a FIXNUM_RETURN_PROOF result, so Integer is not enough), an Array (mrb_array_p, the
+  # ARRAY_RETURN_PROOF tripwire's own test), an instance of exactly C (the class return fixpoint's exact class, by
+  # the class-equality test the receiver guards use) or, for `C?`, nil.
+  def declared_return_guard_statement(entry, var)
+    cond = case entry.kind
+           when :fixnum then "mrb_fixnum_p(#{var})"
+           when :array then "mrb_array_p(#{var})"
+           when :class
+             exact = "mrb_obj_class(M, #{var}) == #{owner_class_ptr_expr(entry.cls)}"
+             entry.nilable ? "mrb_nil_p(#{var}) || #{exact}" : exact
+           else raise "DECLARED_RETURN_GUARD: #{entry.key}: no runtime check for kind #{entry.kind.inspect}"
+           end
+    quote = ->(text) { text.gsub(/["\\]/) { |c| "\\#{c}" } }
+    "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_return_violation(M, #{var}, \"#{quote.call(entry.key)}\", " \
+      "\"#{quote.call(entry.text)}\"); #{DeclaredReturns.guard_marker(entry)}\n"
+  end
+
+  # DECLARED_RETURN_GUARD: `code` (one compile_method result) with every exit of `impl_name` checked against the
+  # runtime-checked declaration of `label`, or `code` unchanged when it has none. The body's definition becomes
+  # `static inline <impl>_unguarded`, and `<impl>` itself (the one name every caller, direct call or entry wrapper,
+  # reaches) calls it and checks the value, so each exit of the body is covered without rewriting its returns. The
+  # entry wrapper's Fiber hand-off to the interpreter (FIBER_BODY_GUARD) returns past `<impl>` and is checked
+  # where it returns. A body with no definition to wrap (an `#error` stub) is left alone: bc2cpp.rb refuses it.
+  def declared_return_guard_wrap(label, code, impl_name)
+    entry = declared_return_guard(label)
+    return code unless entry && !code.include?('#error')
+
+    head = /^mrb_value #{Regexp.escape(impl_name)}\(([^)]*)\) \{$/
+    heads = code.scan(head)
+    raise "DECLARED_RETURN_GUARD: #{entry.key}: #{heads.size} definitions of #{impl_name}, expected one" unless heads.size == 1
+
+    params = heads.first.first
+    names = params.split(',').map { |p| p.strip[/(\w+)\z/, 1] }
+    guarded = "#{impl_name}_unguarded"
+    out = code.sub(head) { "static inline mrb_value #{guarded}(#{params}) {" }
+    out = out.gsub(/return (bc2cpp_core_interpreted\(M, self, \d+\));/) do
+      "{ mrb_value bc2cpp_declared_ret = #{Regexp.last_match(1)};\n" \
+        "#{declared_return_guard_statement(entry, 'bc2cpp_declared_ret')}  return bc2cpp_declared_ret; }"
+    end
+    out << "mrb_value #{impl_name}(#{params}) {\n" \
+           "  mrb_value bc2cpp_declared_ret = #{guarded}(#{names.join(', ')});\n" \
+           "#{declared_return_guard_statement(entry, 'bc2cpp_declared_ret')}" \
+           "  return bc2cpp_declared_ret;\n}\n\n"
   end
 end

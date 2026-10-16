@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'core_fact_sigs'
 
 # CLASS_NARROWING (ADR 0375): occurrence typing for the exact-class flow. A branch on the boolean of a class test
 # (`x.is_a?(C)`, `kind_of?`, `instance_of?`, `C === x` and so `case x when C`, `x.nil?` and `!x` as a value,
@@ -52,10 +53,11 @@ class CodeGen
   # The mrb_state field holding each core class, for the run-time membership check.
   CLASS_TEST_CORE_FIELDS = { 'Integer' => 'integer_class', 'Float' => 'float_class', 'Array' => 'array_class',
                              'Hash' => 'hash_class', 'String' => 'string_class', 'Range' => 'range_class' }.freeze
-  # Superclass chains of the core classes a bit stands for (Object and above are never the tested class).
-  CLASS_TEST_CORE_CHAIN = { 'Integer' => %w[Integer Numeric], 'Float' => %w[Float Numeric], 'Array' => %w[Array],
-                            'Hash' => %w[Hash], 'String' => %w[String], 'Range' => %w[Range],
-                            'NilClass' => %w[NilClass] }.freeze
+  # Superclass chains of the core classes a bit stands for (Object and above are never the tested class), from
+  # sig/native/core_hierarchy.rbs.
+  CLASS_TEST_CORE_CHAIN = CLASS_TEST_CORE_BITS.values.to_h do |klass|
+    [klass, CoreHierarchySigs.superclasses_below(klass, 'Object')]
+  end.freeze
   # A core class a test can name, and the bits of its instances (when no subclass exists, see
   # compute_class_test_positive). Numeric has no instance of its own: it is the union of its subclasses.
   CLASS_TEST_CORE_POSITIVE = { 'Integer' => NumericFlow::INT, 'Float' => NumericFlow::FLT, 'Array' => NumericFlow::ARR,
@@ -67,10 +69,9 @@ class CodeGen
   CLASS_OF = Object.new.freeze
   # More than this many classes and the set stops being a useful proof (ADR 0352 stops at eight for a receiver).
   CLASS_TEST_MAX_CLASSES = 16
-  # The classes mruby's own natives register each tested name on (kernel.c, object.c, class.c).
-  CLASS_TEST_NATIVE_OWNERS = { 'is_a?' => %w[Kernel], 'kind_of?' => %w[Kernel], 'instance_of?' => %w[Kernel],
-                               'nil?' => %w[Kernel NilClass], '!' => %w[BasicObject], 'raise' => %w[Kernel],
-                               'respond_to?' => %w[Kernel], 'class' => %w[Kernel] }.freeze
+  # The classes mruby's own natives register each tested name on (kernel.c, object.c, class.c), from
+  # sig/native/core_class_tests.rbs.
+  CLASS_TEST_NATIVE_OWNERS = CoreFactSigs.class_test_owners
 
   # The return-class / class-pool fixpoint narrows too (@rc_narrowing, POOL_NARROWING): a store dominated by
   # `raise ... unless x.is_a?(C)` joins C into its ivar or argument pool, as it joins C into the flow of its own
@@ -148,7 +149,8 @@ class CodeGen
     klass && class_test_object(:instance_of, klass)
   end
 
-  CLASS_OBJECT_OWNERS = %w[Module Class Object Kernel BasicObject].freeze
+  # A class object's lookup: Class and its ancestors (core_hierarchy.rbs). Only membership is read.
+  CLASS_OBJECT_OWNERS = CoreHierarchySigs.ancestors('Class')
 
   def class_object_eq_safe?
     return @class_object_eq_safe if defined?(@class_object_eq_safe)
@@ -384,7 +386,8 @@ class CodeGen
     end
   end
 
-  CLASS_TEST_NUMERIC_FAMILY = %w[Numeric Integer Float].freeze
+  # Numeric and its core subclasses (core_hierarchy.rbs).
+  CLASS_TEST_NUMERIC_FAMILY = (['Numeric'] + CoreHierarchySigs.subclasses('Numeric')).freeze
 
   # Every instance of +klass+ is exactly that class: the closed world declares no subclass (ClosedWorld#
   # native_subclass_free?) and no native source of the build creates one (mrb_define_class... with the class as

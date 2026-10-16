@@ -208,6 +208,21 @@ class CodeGen
       native_owner = native && (native[:class_owner] || known)
       native_constructor_safe = native && @closed_world&.standard_constructor_lookup? &&
                                 exact_constructor_chain?(native_owner)
+      # OVERLOADED_CONSTRUCT (ADR 0468): a class with declared constructor overloads picks one at the call site,
+      # where the path below would leave a by-name `new`: a count its entry point does not take, or an argument
+      # tag test (Bitmap's file-load form) the Fixnum proof does not settle.
+      fixed_arity = native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
+      tag_tested = native && fixed_arity && native[:type_guard] == :int &&
+                   (native_param_unbox_name?('_init_size') ? [0] : argv.each_index.to_a).any? do |i|
+                     !native_int_arg_proven?(irep, new_proof_idx, owner_def, trace_reg_offset, argv, i)
+                   end
+      overloaded = native_constructor_safe && (!fixed_arity || tag_tested) &&
+                   overloaded_construct_code(native_owner, native, d, recv, argv, irep, guard_proof_site, owner_def,
+                                             [irep, new_proof_idx, owner_def, trace_reg_offset])
+      if overloaded
+        @native_construct_used << known
+        return overloaded
+      end
       # Exact arity only (an Array lists several accepted counts); other counts fall
       # through to dynamic dispatch.
       if native_constructor_safe &&
@@ -1801,6 +1816,10 @@ class CodeGen
       return "  #{line}" if line.start_with?(CORE_EXACT_DIRECT_NOTE)
       # TO_ENUM_DIRECT (ADR 0418): the Enumerator is built in place, the checked arm's else is a guard violation.
       return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
+
+      # OUTSIDE_OWNER_CALL (ADR 0468): a bare send whose every answering class the closed world names.
+      bare = outside_owner_bare_line(d, recv, name, argv, cw_site)
+      return "#{miss}  #{bare}" if bare
 
       "#{diag}#{note}#{miss}  #{line}"
     end

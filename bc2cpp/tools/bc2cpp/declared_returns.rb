@@ -14,16 +14,25 @@ require 'set'
 #   :fixnum   `Integer`             every path is a proven Fixnum (the proof is Fixnum-exact; Integer is not enough)
 #   :array    `Array`, `Array[T]`   every path is an Array; an element class stays the guarded seed it was
 #   :class    `C`, `C?`             every path is an instance of exactly C (`C?`: or nil)
+#
+# `%a{bc2cpp:hint}` marks a RUNTIME-CHECKED declaration (DECLARED_RETURN_GUARD, ADR 0455): a body the static check
+# cannot prove (a Hash read, an attr_reader, a database row) is compiled with a check of the returned value
+# (codegen_declared_returns.rb, declared_return_guard_wrap) that raises BC2cppHintViolation on a mismatch. The
+# declaration is then a fact like a statically checked one. A hinted declaration no compiled body can carry is a
+# located TC1010 error (hint_refusals), never an unchecked hint.
 module DeclaredReturns
   Entry = Struct.new(:owner, :name, :label, :kind, :cls, :nilable, :text, :loc, :hint, keyword_init: true) do
     def key = "#{owner}##{name}"
   end
 
   KILL_ENV = 'BC2CPP_DECLARED_RETURNS'
-  # `%a{bc2cpp:hint} def m: ...`: a reviewed return type the checker cannot prove. It keeps the role every return
-  # declaration had before ADR 0455 (a guarded seed: annotated_array_return, the element and `-> C` tables, an IR
-  # contract), is listed as unchecked, and never joins a proof's facts.
+  # `%a{bc2cpp:hint} def m: ...`: a reviewed return type the static checker cannot prove. The compiled body checks
+  # every value it returns against it (DECLARED_RETURN_GUARD) and raises on a mismatch, so it is a fact for the
+  # analysis and the other checkers, exactly as a statically checked declaration is.
   HINT_ANNOTATION = 'bc2cpp:hint'
+  # The C++ marker on each guard, and the listing line of each guarded method (DECLARED_RETURN_GUARDS_REVIEWED).
+  GUARD_MARKER = %r{/\* DECLARED_RETURN_GUARD (\S+ -> \S+) \*/}
+  GUARD_LISTING = /^  DECLARED_RETURN_GUARD_SITE (\S+ -> \S+)$/
   CODE = 'TC1010'
 
   module_function
@@ -79,6 +88,40 @@ module DeclaredReturns
     end
   end
 
+  # Why each %a{bc2cpp:hint} declaration that from_signatures turns into no entry cannot be runtime-checked:
+  # [{key:, text:, loc:, why:}]. Each is a TC1010 error: the declaration is not a fact and nothing checks it.
+  # A hinted declaration needs a bytecode body the build compiles (not a native, an accessor or an undefined
+  # method; no native fact proves a program return), the body's mandatory arity, and a checked kind.
+  def hint_refusals(loaded, ireps, registry)
+    return [] unless loaded && enabled?
+
+    hinted = hinted_methods(loaded.files)
+    return [] if hinted.empty?
+
+    entered = from_signatures(loaded, ireps, registry).to_set { |e| [e.owner, e.name] }
+    defs_by = {}
+    registry.each_value { |defs| defs.each { |d| (defs_by[[d.owner, d.name.to_s]] ||= []) << d } }
+    loaded.methods.each_value.filter_map do |sig|
+      key = [sig.owner, sig.name]
+      next unless hinted.include?(key) && !entered.include?(key)
+
+      d = defs_by[key]&.find(&:irep)
+      irep = d && ireps[d.irep]
+      mand = irep&.enter ? irep.enter.enter_fields.first.to_i : 0
+      why = if sig.loc.file.include?('sig/native/') then 'a native signature: no compiled body carries the check'
+            elsif defs_by[key].nil? then 'the program defines no such method, so no compiled body carries the check'
+            elsif d.nil? || irep.nil?
+              'a native or accessor method: no compiled body carries the check, and no native fact proves it'
+            elsif sig.return_type.nil? then 'no return type'
+            elsif sig.args.size != mand
+              "declares #{sig.args.size} required parameter(s), the body takes #{mand}"
+            else
+              "-> #{sig.return_type} is no checked kind (Integer, Array, Array[T], C or C? of a program class)"
+            end
+      { key: "#{sig.owner}##{sig.name}", text: sig.return_type.to_s, loc: sig.loc, why: why }
+    end
+  end
+
   # [owner, name] of the method declarations annotated %a{bc2cpp:hint} (owners as RbsSignatures keys them).
   def hinted_methods(files)
     require 'rbs'
@@ -104,6 +147,58 @@ module DeclaredReturns
       next # RbsSignatures.load reports it (TC1002)
     end
     out
+  end
+
+  # The C++ marker of one guard: names the method and the declared type, so a listing can count and review it.
+  def guard_marker(entry)
+    "/* DECLARED_RETURN_GUARD #{entry.key} -> #{entry.text} */"
+  end
+
+  # "Owner#name -> T" of every guard in this run's compiled code, one per check site.
+  def guard_sites(compiled)
+    compiled.flat_map { |m| m[:code].to_s.scan(GUARD_MARKER).flatten }
+  end
+
+  # Why this run breaks the guard contract (empty when it does not), after compile_all and before SKIP_UNSUPPORTED
+  # drops a body. The analysis trusted every runtime-checked declaration (`hints`) as a fact, which is sound only if
+  # the body that answers the name is the compiled one carrying the guard. So each one whose owner this run compiles
+  # must come out compiled, free of `#error` (which would leave it interpreted and unchecked), with its guard; one
+  # whose owner no compiled gem of the build compiles cannot be checked at all. `only_owners` / `other_owners`:
+  # this run's ONLY_OWNERS and OTHER_OWNERS (nil: a run that compiles every owner).
+  def guard_failures(hints, compiled, only_owners, other_owners)
+    by_label = compiled.each_with_object({}) { |m, h| h[m[:label]] ||= m if m[:label] }
+    hints.filter_map do |e|
+      where = "#{e.loc.file}:#{e.loc.line}:#{e.loc.col}: error: #{e.key} -> #{e.text} is runtime-checked " \
+              '(%a{bc2cpp:hint}) in its compiled body, but'
+      if only_owners && !only_owners.include?(e.owner)
+        next if other_owners&.include?(e.owner)
+
+        next "#{where} no compiled gem of this build compiles #{e.owner} [#{CODE}]"
+      end
+      m = by_label[e.label]
+      next "#{where} this run does not compile it [#{CODE}]" unless m
+      if m[:unsupported] || m[:code].include?('#error')
+        next "#{where} its body does not compile, so it would run interpreted and unchecked [#{CODE}]"
+      end
+      next "#{where} the compiled body carries no guard [#{CODE}]" unless m[:code].include?(guard_marker(e))
+    end
+  end
+
+  # DECLARED_RETURN_GUARDS_REVIEWED: every guard is a forced runtime check, reviewed like a strict hint (ADR 0419).
+  # Unreviewed guards of the reviewed program, and entries whose method this run compiled with no such guard.
+  # The guarded methods compile in every run (hot-only included), so an entry is judged wherever its method compiles.
+  def review_failures(sites, compiled, scope:, reviewed: reviewed_set)
+    found = ReviewScope.select(scope, sites.uniq.map { |k| { key: k } }).to_set { |s| s[:key] }
+    compiled_methods = compiled.reject { |m| m[:unsupported] || !ReviewScope.cover?(scope, m[:owner]) }
+                               .to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    unreviewed = (found - reviewed).sort.map { |k| "unreviewed runtime-checked declaration: #{k}" }
+    gone = reviewed.select { |k| compiled_methods.include?(k.split(' -> ', 2).first) && !found.include?(k) }
+    unreviewed + gone.sort.map { |k| "stale DECLARED_RETURN_GUARDS_REVIEWED entry (no such guard any more): #{k}" }
+  end
+
+  def reviewed_set
+    require_relative 'declared_return_guards_reviewed'
+    DECLARED_RETURN_GUARDS_REVIEWED
   end
 
   # Prints the outcome of CodeGen#check_declared_returns, adds its diagnostics to the signature diagnostics (the type

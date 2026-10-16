@@ -21,8 +21,12 @@ module CheckedSend
 
     recv = kwargs[:self_implicit] ? 'self' : "r#{insn.reg}"
     marker = level == :explicit ? 'bc2cpp_funcall_explicit' : 'bc2cpp_funcall_noarg'
-    code.gsub(/\bmrb_funcall\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(insn.sym)}",/) do
+    code = code.gsub(/\bmrb_funcall\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(insn.sym)}",/) do
       "#{marker}(M, #{recv}, \"#{insn.sym}\","
+    end
+    # OUTSIDE_OWNER_CALL (ADR 0468): the checked owner call takes the same level as an argument.
+    code.gsub(/\bbc2cpp_owner_call_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(insn.sym)}", 0,/) do
+      "bc2cpp_owner_call_named(M, #{recv}, \"#{insn.sym}\", #{level == :explicit ? 2 : 1},"
     end
   end
 
