@@ -1,8 +1,8 @@
 # Cross-compiling macOS arm64 on Linux (compile checks)
 
-This configuration lets a Linux host compile C and C++ for macOS arm64 through nfcxx's Darwin paths and stop at
-assembly. Nothing is linked and nothing is run. It is for checking the code generator, not for producing macOS
-binaries.
+This configuration lets a Linux host compile C and C++ for macOS arm64 through nfcxx's Darwin paths, stop at assembly,
+and (for C) link Mach-O arm64 executables against a clean-room stub. Nothing is run. It checks the code generator and
+the link line; it does not produce binaries that have been run on macOS.
 
 ## Requirements
 
@@ -17,6 +17,7 @@ Linux only (`uname -s` must say Linux). On Ubuntu 24.04 arm64 these packages cov
 
     scripts/setup-cross-macos.sh     # builds EDG, QBE and cproc if missing; writes build/cross-macos.env
     scripts/cross-macos-check.sh     # prints the C and C++ counts, and each failure's first error line
+    scripts/cross-macos-check.sh --link   # the same, then links the C files that compile (see "Linking")
 
 The second `setup-cross-macos.sh` run builds nothing (it reports "already built") and rewrites the same env file.
 `cross-macos-check.sh` sources `build/cross-macos.env`, which sets:
@@ -35,9 +36,46 @@ The default Linux build does not read this file, so nothing changes unless the f
 - **C++** (`tests/cases/*.cpp`): `scripts/macos-cxx-check.sh`. clang preprocesses for the Darwin target, nfcxx's
   front end (`--emit-c`) reads that text, and `qbe-cc` emits assembly. See the next section for why clang runs first.
 
+## Linking (C, `--link`)
+
+For each C file that passes the C check, the script assembles the QBE output with `llvm-mc -triple=arm64-apple-darwin`
+and links it with `ld64.lld -arch arm64 -platform_version macos 11.0 11.0`, against:
+
+- the object `be/nfcxx_ldrt.c` compiled for arm64 Darwin with the clean-room headers (nfcxx's own runtime: `__int128`
+  and float16 helpers and their compiler-rt names), and
+- the link stub `tests/macos-sysroot/lib/libSystem.tbd`, passed as `-L ... -lSystem`.
+
+The stub is a text-based (TBD v4) file with the export names listed below. It is written from public names (the C
+standard, POSIX, and the Darwin names for `errno` and `stderr`, `___error` and `___stderrp`). It has no code and no
+behaviour: it lets the linker resolve a name, nothing more.
+
+Each executable is then checked: `llvm-objdump --macho --private-headers` must show `EXECUTE` and `ARM64`, and
+`llvm-nm -u` must list only names the stub exports. Nothing is run. Result on this host: 12 of the 19 C files that
+compile link to such executables (`alloca`, `arith`, `array_qual`, `builtins_overflow`, `builtins_overflow_mixed`,
+`fabsf_builtin`, `float_limits`, `funcptr`, `stdio`, `struct_trailing_aligned`, `structs`, `volatile_setjmp`).
+
+Stubbed names (each is imported by at least one linked program):
+`_abort _fabsf _fprintf _ldexp _longjmp _memcpy _memset _printf _puts _qsort _setjmp _strcmp _strtol _toupper
+_vsnprintf ___error ___stderrp dyld_stub_binder` and the compiler-rt names `___divti3 ___fixdfti ___fixsfti
+___fixunsdfti ___fixunssfti ___floattidf ___floattisf ___floatuntidf ___floatuntisf ___modti3 ___udivti3 ___umodti3`.
+
+The 7 C files that compile but do not link:
+
+- `float128_ops.c`, `float16_gen.c`, `float16_ops.c`, `float16_wide.c`: they need `___nfcxx_f128_*` or `___nfcxx_f16_*`
+  helpers that `be/nfcxx_ldrt.c` does not provide on arm64 (its float128 and `long double` parts are x87 code, x86-64
+  only). Not a stub gap: the helpers do not exist for this target yet.
+- `float16_abi_gcc.c`: needs `_g_dirty_to_qbe` and the other `_g_*` names from `float16_abi_peer.c`, which does not
+  compile for arm64 (inline assembly). Its peer is missing.
+- `va_struct.c`: needs `_take` from `va_struct_take.c`, which does not compile for arm64 (see Known failures).
+- `mixed_c.c`: has no `main`; it is a unit linked with a C++ driver.
+
 ## What it does not cover
 
-- **Linking and running.** No Mach-O binary is produced by these checks, and none is run.
+- **Running.** No executable is run. Linux cannot run Mach-O, and the run step needs a Mac with the real system.
+- **Linking against Apple's libSystem.** The stub is not Apple's, so a link here shows that the names resolve and the
+  Mach-O shape is right. It does not show that the symbols behave like Apple's, or that the program's ABI matches.
+- **The C++ check does not link.** `--link` covers the C files only; the C++ sources would also need the open libc++
+  and libc++abi names, which the stub does not yet export.
 - **ABI.** The clean-room headers (`tests/macos-sysroot`) are written from the C11 standard, POSIX and LLVM's open
   libc++. They are not Apple's, and they make no ABI claim: `jmp_buf`'s size is a placeholder, the libc++ config turns
   localization off, and Apple's ABI tags (for example `B9nqe210106`) are absent. A pass means the source reached
