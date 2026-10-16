@@ -9,7 +9,7 @@ class CodeGen
     return nil if devirt_blocked_name?(name)
 
     chain = unlisted_lookup_chain(klass)
-    return nil unless chain && @closed_world.exact_chain_lookup_safe?(name, klass, chain)
+    return nil unless chain && unlisted_chain_lookup_safe?(name, klass, chain)
 
     target, known = closed_world_lookup_target(name, klass, Set.new, any_visibility: true)
     return nil unless known
@@ -30,6 +30,22 @@ class CodeGen
   end
 
   private
+
+  # The chain of `klass` is walked only through registry definitions when nothing else on it can answer `name`:
+  # exact_chain_lookup_safe? (ClosedWorld) accepts the names only RGSS natives define, and this also accepts a
+  # name whose every outside Ruby and native definer is named (outside_owner_call_owners, ADR 0468) and none of
+  # them is on the chain. Then the lookup from klass resolves to a Ruby definition the registry already places,
+  # so closed_world_lookup_target answers it exactly. Any unnamed definer, unknown definition or unstable class
+  # refuses, as before.
+  def unlisted_chain_lookup_safe?(name, klass, chain)
+    return true if @closed_world.exact_chain_lookup_safe?(name, klass, chain)
+    return false unless @closed_world.stable_class_constant?(klass) && !@closed_world.unknown_def?(name)
+
+    definers = outside_owner_call_owners(name, allow_empty: true)
+    return false unless definers
+
+    definers.none? { |owner| chain.include?(owner) }
+  end
 
   # Every class and module the lookup from `klass` can visit, or nil when a mixin
   # cannot be named.
