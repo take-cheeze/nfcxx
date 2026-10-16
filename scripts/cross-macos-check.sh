@@ -27,10 +27,11 @@ for f in "$root"/tests/c/*.c; do
 done
 
 xpass=0; xtotal=0
+mkdir -p "$tmp/cxx"
 for f in "$root"/tests/cases/*.cpp; do
   xtotal=$((xtotal + 1))
-  if "$root/scripts/macos-cxx-check.sh" "$f" "$tmp/x.s" >/dev/null 2>"$tmp/x.err"; then
-    xpass=$((xpass + 1))
+  if "$root/scripts/macos-cxx-check.sh" "$f" "$tmp/cxx/$(basename "$f" .cpp).s" >/dev/null 2>"$tmp/x.err"; then
+    xpass=$((xpass + 1)); basename "$f" .cpp >> "$tmp/cxxpass.txt"
   else
     echo "C++ fail $(basename "$f"): $(grep -m1 -E 'error|Error|fatal|assert' "$tmp/x.err" || head -1 "$tmp/x.err")"
   fi
@@ -70,4 +71,33 @@ if [ "${1:-}" = "--link" ]; then
     lpass=$((lpass + 1))
   done < "$tmp/cpass.txt"
   echo "link (clean-room stub, Mach-O arm64 executables, not run): $lpass of $ltotal of the C files that compile link"
+
+  # C++: each source that reaches assembly, linked against the libSystem stub and the pinned libc++ stub (names the test
+  # objects import, from public libc++ and Itanium names; no behaviour). A new import outside both stubs fails the link.
+  cxxstub="$root/tests/macos-sysroot/lib"
+  cxxnames=$(sed -n '/symbols:/,/weak-symbols/p' "$cxxstub/libc++.tbd" | tr -d '[],' | tr -s ' ' '\n' | grep -E '^_' || true)
+  xlpass=0; xltotal=0
+  # NFCXX_LINK_OUT keeps the executables (the temporary directory is removed on exit)
+  exeout=${NFCXX_LINK_OUT:-$tmp/cxx}; mkdir -p "$exeout"
+  for b in $(cat "$tmp/cxxpass.txt" 2>/dev/null); do
+    xltotal=$((xltotal + 1))
+    if ! llvm-mc -triple=arm64-apple-darwin -filetype=obj "$tmp/cxx/$b.s" -o "$tmp/cxx/$b.o" 2>"$tmp/l.err"; then
+      echo "C++ link fail $b: assembly: $(head -1 "$tmp/l.err")"; continue
+    fi
+    if ! ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$exeout/$b.exe" "$tmp/cxx/$b.o" "$tmp/ldrt.o" \
+         -L "$stub" -lSystem -L "$cxxstub" -lc++ 2>"$tmp/l.err"; then
+      echo "C++ link fail $b: $(grep -m1 error "$tmp/l.err" || head -1 "$tmp/l.err")"; continue
+    fi
+    hdr=$(llvm-objdump --macho --private-headers "$exeout/$b.exe" 2>/dev/null)
+    if ! { echo "$hdr" | grep -q EXECUTE && echo "$hdr" | grep -q ARM64; }; then
+      echo "C++ link fail $b: not a Mach-O arm64 executable"; continue
+    fi
+    allowed=$(printf '%s\n' "$(cat "$tmp/stub-syms.txt")" "$cxxnames" | LC_ALL=C sort -u)
+    extra=$(llvm-nm -u "$exeout/$b.exe" | awk '{print $NF}' | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(printf '%s\n' "$allowed") | tr '\n' ' ')
+    if [ -n "$extra" ]; then
+      echo "C++ link fail $b: imports not in the stubs: $extra"; continue
+    fi
+    xlpass=$((xlpass + 1))
+  done
+  echo "C++ link (clean-room stubs, Mach-O arm64 executables, not run): $xlpass of $xltotal of the C++ sources that reach assembly link"
 fi

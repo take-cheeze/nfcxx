@@ -1,0 +1,1 @@
+generic 'Box' specialized with too many type parameters (got 2, but expected 1)

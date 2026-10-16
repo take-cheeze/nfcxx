@@ -1,0 +1,6 @@
+print(1 + 2 * 3)
+print(10 - 4 / 2)
+print(17 % 5)
+print(-7 < 3)
+print(2 <= 2 && 3 >= 4 || true)
+print(true != false)
