@@ -70,7 +70,8 @@ pass dep_type.cu "dep type: no error, 0 mismatches"
 pass dep_value.cu "dep value: no error, 0 mismatches"
 pass generic_lambda.cu "generic lambda: no error, 102 105 107"
 pass fold_pack.cu "fold pack: no error, 1 1 1 0 314"
-refuse refuse_dep_nocall.cu "instances are not known"
+pass dep_uninstantiated.cu "dep uninstantiated: no error"
+pass index_seq.cu "index seq: 3 (expect 3)"
 refuse refuse_dep_cycle.cu "instantiates itself through its template arguments"
 refuse refuse_generic_lambda.cu "is called with an argument that is not a literal"
 pass deduce_single.cu "deduce single: no error, value 1"
@@ -225,5 +226,23 @@ if "$root/nfcxx" -c -I"$cuda/include" init_list_range_mutant.cu -o "$out/ilm.o" 
   echo "mutant init_list_range_mutant: caught: $run"
 else
   echo "FAIL init_list_range_mutant: the mutant was not caught"; fail=1
+fi
+# A -D define that decides a device-only #if: the device pass must see it (the driver passes -D to the rewriter and the
+# device front end, as it does to the host compile).
+if "$root/nfcxx" -c -I"$cuda/include" -DFEATURE_X=1 device_define.cu -o "$out/dd.o" > "$out/dd.log" 2>&1 \
+   && "$root/nfcxx" "$out/dd.o" -L"$cuda/lib64" -lcudart -o "$out/dd" >> "$out/dd.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dd") && [[ "$run" == *" 0 mismatches"* ]]; then
+  echo "pass device_define: $run"
+else
+  echo "FAIL device_define"; fail=1
+fi
+# Mutant: the same file without the define: the device unit takes the other branch, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" device_define.cu -o "$out/ddm.o" > "$out/ddm.log" 2>&1 \
+   && "$root/nfcxx" "$out/ddm.o" -L"$cuda/lib64" -lcudart -o "$out/ddm" >> "$out/ddm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/ddm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant device_define: caught: $run"
+else
+  echo "FAIL device_define mutant: not caught"; fail=1
 fi
 exit $fail
