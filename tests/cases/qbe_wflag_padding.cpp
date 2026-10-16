@@ -3,7 +3,7 @@
 // and then tested through the 4-byte member. QBE's load elimination makes the 4-byte load a "w copy" of the 8-byte copy of the same
 // slot, copy elimination hands the jnz that long temporary, and amd64 isel fused the long "and" (which keeps the padding half)
 // into a 64-bit testq: the branch looked at the padding bytes, so an integer came back as if it were a float and a float as its
-// integer part (found with nfcast's nfcr_N; scripts/qbe-wflag.patch, docs/notes/qbe-wflag.md). The stack is filled with 0xff first
+// integer part (found with nfcast's nfcr_N; the fork commit 'nfcxx patch: wflag', docs/notes/qbe-wflag.md). The stack is filled with 0xff first
 // so that the padding of the uninitialized slots is nonzero.
 #include <string.h>
 

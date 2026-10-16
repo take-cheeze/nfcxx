@@ -11,7 +11,7 @@
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
-# scripts/qbe-uninit-slot.patch, scripts/qbe-wflag.patch and scripts/qbe-empty-align.patch are applied to the QBE copy. Re-run this script after changing the pin.
+# The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe): no patch files are applied.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
@@ -24,22 +24,6 @@ for p in qbe cproc; do
   cp -r "$root/3rd/$p" "$root/build/$p"
   rm -rf "$root/build/$p/.git"
 done
-# QBE: scripts/qbe-uninit-slot.patch (a never-stored struct slot passed by value must not become a null load)
-patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
-# QBE: scripts/qbe-uninit-load.patch (a slot that is loaded but never stored is kept, not an error in promote())
-patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-load.patch"
-# QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
-patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
-# QBE: scripts/qbe-empty-struct.patch (an empty struct with no alignment left 1 << -1 in parse.c: a garbage alloc size when it
-# is passed by value, e.g. libc++'s std::min comparator)
-patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-struct.patch"
-# QBE: scripts/qbe-arm64-align16.patch (AAPCS64 16-byte aggregates: an even register, and the alignment limit is 16; __int128 and __float128 are 16-aligned)
-patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-arm64-align16.patch"
-# QBE: scripts/qbe-empty-align.patch (an empty member's alignment is 0, not -1: a nested empty class before a bool fed 1 << -1 padding into the struct size; docs/notes/qbe-empty-align.md)
-patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-empty-align.patch"
-# QBE: scripts/qbe-apple-addend.patch (arm64 Apple: an address with an offset is sym+off@page, not sym@page+off, which ld64
-# rejects as a relocation)
-patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-apple-addend.patch"
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
