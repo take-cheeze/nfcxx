@@ -89,7 +89,7 @@ prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
 # none present (and no CR, which it would normalize), its output is its input and the tail is empty, so the
 # file goes through unchanged. Under mruby the scan costs minutes on a multi-MB file (unicode_name_fsm: 11 MB).
 # NFCXX_PREP_ALWAYS=1 runs qbe-prep.rb on every input (tests/mruby/qbe-prep.sh counts them through the tap).
-if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|_Float|__bf16|f(16|32|64|128)' "$tmp/pp.c" &&
+if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
    ! grep -q "$(printf '\r')" "$tmp/pp.c"; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
