@@ -9,10 +9,14 @@
 cd "$(dirname "$0")/../.."
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 command -v clang >/dev/null || { echo "skip: clang not found (needed to compile the generated C for the target)"; exit 0; }
+# The EDG base has the tables of its own host only: the Linux base has linux_* and win*, the macOS base has macos_arm64.
+# A target without its table is skipped, not failed (nfcxx would refuse it: "no EDG target").
+have_target() { [ -d "${EDG_BASE:-build/edg-base}/lib_$1" ]; }
 for f in tests/target/*.cpp; do
   name=$(basename "$f" .cpp)
   read -r _ target triple < <(sed -n 's,^// TARGET: *,TARGET ,p' "$f" | head -1)
   if [ -z "${target:-}" ]; then echo "FAIL  $name: no '// TARGET:' line"; fail=1; continue; fi
+  if ! have_target "$target"; then echo "skip  $name: no $target table in this EDG base"; continue; fi
   if grep -q '^// NEEDS: mingw' "$f" && ! command -v x86_64-w64-mingw32-gcc >/dev/null; then
     echo "skip  $name: needs MinGW-w64 (x86_64-w64-mingw32-gcc) at EDG setup for the win64 table"; continue
   fi
@@ -57,6 +61,7 @@ done
 # This is the library's own coverage on the other ABIs, not only the layout probes above.
 for tt in "linux_aarch64 aarch64-linux-gnu" "linux_riscv64 riscv64-linux-gnu" "linux_armv7 arm-linux-gnueabihf"; do
   read -r target triple <<< "$tt"; n=0; bad=""
+  if ! have_target "$target"; then echo "skip  tests/lib through $target: no $target table in this EDG base"; continue; fi
   for f in tests/lib/*.cpp; do
     name=$(basename "$f" .cpp)
     if ./nfcxx --freestanding --emit-c --target="$target" "$f" > "$tmp/lib-$target-$name.c" 2> "$tmp/lib-$target-$name.err" &&
