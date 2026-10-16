@@ -135,7 +135,11 @@ static Result time_backend(const std::string& backend, const Case& c, const std:
   add_span("build " + c.label(), backend, c.op, c.n, "build", t0, us_now());
   compare(ref, got, r.bit_exact, r.max_rel, r.max_scaled);
   if (truth) { bool be; double mr; compare(*truth, got, be, mr, r.truth_scaled); }
-  for (int w = 0; w < WARM; w++) run();
+  for (int w = 0; w < WARM; w++) {
+    double s = us_now();
+    run();
+    add_span("warmup " + c.label(), backend, c.op, c.n, "warmup", s, us_now());
+  }
   std::vector<double> ms;
   for (int i = 0; i < runs; i++) {
     double s = us_now();

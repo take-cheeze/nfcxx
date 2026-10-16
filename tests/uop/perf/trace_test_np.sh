@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bench_np with NFCUOP_TRACE: the trace file is a valid Chrome trace-event array, and for each back end that ran, it has the
-# build spans and exactly RUNS run spans, named for the back end, op and size, with the back end in the args. Runs one small
+# build spans, exactly WARM warmup spans and RUNS run spans, named for the back end, op and size, with the back end in the args. Runs one small
 # case (add at 2^16 elements) on every back end the Session has. A back end that is unavailable here (ONNX Runtime or tinygrad)
 # is reported as SKIP, from the program's own note.
 cd "$(dirname "$0")/../../.."
@@ -27,6 +27,7 @@ for e in spans:
 results = [json.loads(line) for line in open(out_path) if line.startswith("{")]
 ran = {r["backend"] for r in results if "median_ms" in r and r.get("median_ms", 0) > 0}
 RUNS = 10
+WARM = 2
 for backend in ["interpreter", "c", "onnxruntime", "tinygrad"]:
     row = next(r for r in results if r.get("backend") == backend and r.get("op") == "add")
     if backend not in ran:
@@ -36,8 +37,10 @@ for backend in ["interpreter", "c", "onnxruntime", "tinygrad"]:
     assert len(runs) == RUNS, f"{backend}: {len(runs)} run spans, want {RUNS}"
     assert all(e["args"]["op"] == "add" and e["args"]["n"] == 65536 and e["name"] == "run add n=65536" for e in runs), backend
     builds = [e for e in spans if e["args"].get("backend") == backend and e["args"].get("phase") == "build"]
+    warms = [e for e in spans if e["args"].get("backend") == backend and e["args"].get("phase") == "warmup"]
+    assert len(warms) == WARM, f"{backend}: {len(warms)} warmup spans, want {WARM}"
     assert builds, f"{backend}: no build span"
-    print(f"ok   bench_np trace ({backend}): {len(runs)} run spans, {len(builds)} build span(s)")
+    print(f"ok   bench_np trace ({backend}): {len(runs)} run spans, {len(warms)} warmup, {len(builds)} build span(s)")
 PY
 status=$?
 [ $status = 0 ] && exit 0 || { echo "FAIL bench_np trace"; exit 1; }
