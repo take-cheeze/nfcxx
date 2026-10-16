@@ -108,7 +108,7 @@ WORLDS = {
     ruby: "class CfPlain\n  [:bump].each { |n| define_method(n) { self } }\nend\n", kept: true
   },
   'an alias of the fact name' => {
-    ruby: "class CfPlain\n  alias_method :bump, :kind\nend\n", kept: true
+    ruby: "class CfPlain\n  def self.cf_alias; alias_method :bump, :kind; end\nend\n", kept: true
   },
   'an instance with a singleton method' => {
     ruby: "class CfFx\n  def single; o = CfPlain.new; def o.bump; self; end; o; end\nend\n", kept: true

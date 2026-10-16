@@ -176,7 +176,7 @@ WORLDS = {
   'a definition from a computed list' => {
     ruby: "class CnOther\n  [:is_a?].each { |n| define_method(n) { |k| true } }\nend\n", kept: POSITIVE
   },
-  'an alias of facet' => { ruby: "class CnOther\n  alias_method :facet, :kind\nend\n", kept: RESPOND },
+  'an alias of facet' => { ruby: "class CnOther\n  def self.cn_alias; alias_method :facet, :kind; end\nend\n", kept: RESPOND },
   'an instance with a singleton method' => {
     ruby: "class CnFx\n  def single; o = CnCircle.new; def o.name; 99; end; o; end\nend\n", kept: POSITIVE
   },

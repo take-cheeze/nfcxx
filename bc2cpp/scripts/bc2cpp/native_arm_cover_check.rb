@@ -37,12 +37,17 @@ CLASSES = <<~RUBY
   class NcKid < RGSS::Viewport; end
   # A Ruby definer of `update` next to the natives makes it a POLY chain with a by-name else.
   class NcThing; def update; :thing; end; end
-  # The shape of mruby-rgss's `class << Graphics` probe: `update` becomes an installed name, which keeps
-  # EXACT_NATIVE_WRAPPER (it needs an installer-free name) off and leaves the chain to the scoped gates.
-  module NcTool; def self.update; :tool; end; end
-  class << NcTool
-    alias_method :_nc_update, :update
-    def update; _nc_update; end
+  # A method-body `class << NcTool` alias (the shape mruby-rgss's effect probe had before ADR 0474): `update`
+  # becomes an installed name, which keeps EXACT_NATIVE_WRAPPER (it needs an installer-free name) off and leaves
+  # the chain to the scoped gates.
+  module NcTool
+    def self.update; :tool; end
+    def self.nc_patch
+      class << NcTool
+        alias_method :_nc_update, :update
+        def update; _nc_update; end
+      end
+    end
   end
 RUBY
 

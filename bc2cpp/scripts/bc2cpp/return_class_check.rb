@@ -273,8 +273,10 @@ Dir.mktmpdir do |dir|
     Dir.mkdir(d)
     vcode, verr = generate.call(CLASSES + FX_OPEN + extra, d)
     check.call("#{what} withdraws the table's proof for the name", !verr.include?('RETCLASS make_box '))
+    # A class-body alias is a definition of its new name (ADR 0474): `make_box` itself is unchanged.
     scoped_safe = ENV['BC2CPP_CALL_CONTEXT_RESULTS'] != '0' &&
-                  ['a second definition of the name in another class', 'a method_missing class', 'a singleton make_box on a class'].include?(what)
+                  ['a second definition of the name in another class', 'a method_missing class', 'a singleton make_box on a class',
+                   'alias_method on the name'].include?(what)
     check.call("#{what}: lexical receiver follows its own lookup",
                %w[e_call e_chain e_forward].all? { |fn| exact.call(vcode, fn) == scoped_safe })
     check.call("#{what} leaves the fresh `Klass.new` shape exact", exact.call(vcode, 'e_local'))

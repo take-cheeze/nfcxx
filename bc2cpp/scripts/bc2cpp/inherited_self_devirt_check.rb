@@ -130,7 +130,7 @@ fixture(INHERITED, 'inherited') do |code_of|
   check.call('an inherited accessor joins the same branch, and any mixin on the way declines',
              code_of.call('Probe', 'run_db').include?("INHERITED_GUARD :db -- also Leaf < Base, Mid < Base, Override < Base\n"))
 end
-fixture(INHERITED + "class Leaf\n  alias_method :label, :to_s\nend\n", 'inherited_alias') do |code_of|
+fixture(INHERITED + "class Leaf\n  def self.install; alias_method :label, :to_s; end\nend\n", 'inherited_alias') do |code_of|
   check.call('an alias_method of the name anywhere keeps subclasses on the fallback',
              !code_of.call('Probe', 'run_label').include?('INHERITED_GUARD'))
 end
@@ -183,7 +183,7 @@ CHA_GUARDED_CASES = {
   'a subclass that mixes in a module defining the name' => ['run_tagged', 'tagged', nil],
   'an alias_method installing the name in a subclass' =>
     ['run_base_only', 'base_only',
-     "class ChaAliased < ChaBase\n  def other; 'aliased'; end\n  alias_method :base_only, :other\nend\n"],
+     "class ChaAliased < ChaBase\n  def other; 'aliased'; end\n  def self.install; alias_method :base_only, :other; end\nend\n"],
   'a subclass whose superclass expression is unresolved' =>
     ['run_hook', 'hook', "class ChaWild < (ChaBase.itself)\nend\n"],
   'a method_missing subclass' =>
@@ -237,7 +237,7 @@ cha_fixture(CHA, 'cha_embed', embed: 'ChaBase') do |code_of|
              solo.include?('CLOSED_WORLD_SELF :solo -> ChaBase#solo') && !solo.include?('MONO_EMBED_GUARD') &&
                !solo.include?('mrb_obj_class') && !solo.include?('mrb_funcall'))
 end
-cha_fixture("#{CHA}class ChaAliased < ChaBase\n  def other; 'x'; end\n  alias_method :solo, :other\nend\n",
+cha_fixture("#{CHA}class ChaAliased < ChaBase\n  def other; 'x'; end\n  def self.install; alias_method :solo, :other; end\nend\n",
             'cha_embed_alias', embed: 'ChaBase') do |code_of|
   solo = code_of.call('ChaBase', 'run_solo')
   check.call('an alias_method installing the name in a subclass keeps the MONO_EMBED_GUARD',

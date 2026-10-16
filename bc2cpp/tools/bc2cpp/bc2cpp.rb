@@ -266,6 +266,12 @@ if $PROGRAM_NAME == __FILE__
     warn "== define_method sites (#{define_method_kept} registered as definitions, " \
          "#{define_method_dropped} left as installers) =="
   end
+  # ALIAS_SITES (ADR 0474): class-body aliases with literal names, as definitions of the new name.
+  alias_kept, alias_dropped = AliasSites.settle(registry, ireps, closed: !closed_world.nil?,
+                                                          method_trusted: closed_world&.alias_method_trusted? || false)
+  if alias_kept + alias_dropped > 0
+    warn "== alias sites (#{alias_kept} registered as definitions, #{alias_dropped} left as installers) =="
+  end
 
   # NATIVE_SRCS: C/C++ sources to scan for mrb_define_method-family calls (see
   # extract_native_method_names). Without it the registry cannot see native

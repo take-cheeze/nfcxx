@@ -682,7 +682,7 @@ RUBY
 native, ruby = bc2cpp_closed_world_outside_srcs('wio', wio_gems, root)
 [['no subclass', COUNTER, true], ['a plain subclass', "#{COUNTER}class CwCounterKid < CwCounter; end\n", true],
  ['a subclass aliasing the name', "#{COUNTER}class CwCounterKid < CwCounter\n  def other; 1; end\n  " \
-                                  "alias_method :bump, :other\nend\n", false]].each do |what, src, dropped|
+                                  "def self.install; alias_method :bump, :other; end\nend\n", false]].each do |what, src, dropped|
   Dir.mktmpdir do |dir|
     path = File.join(dir, 'counter.rb')
     File.write(path, src)

@@ -3,6 +3,7 @@
 require_relative 'core_mixins'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
+require_relative 'alias_sites'
 require_relative 'loop_installers'
 
 # Step 6: the whole-program class/method registry.
@@ -121,6 +122,21 @@ def build_registry(ireps, root_label)
   # LOOP_INSTALLERS (ADR 0304): [irep label, index, namespace, visibility] of each container loop
   # in a body whose block sends attr_*; settled once the walk has seen every definition.
   loop_sites = []
+  # ALIAS_SITES (ADR 0474): how many alias copies the walk made (names their ireps), and the def labels a
+  # branch can skip, computed on the first alias that asks.
+  alias_seq = 0
+  conditional_labels = nil
+  conditional = -> { conditional_labels ||= CoreDefs.conditional_def_labels(ireps) }
+  register_alias = lambda do |label, irep, idx, namespace|
+    next if namespace.nil? || namespace.start_with?('<') || CoreDefs.core_source?(irep.file)
+
+    found = AliasSites.site(irep, idx)
+    next unless found
+
+    prior = registry.fetch(found.old_name, []).select { |d| d.owner == namespace }
+    registry[found.new_name] << AliasSites.definition(found, namespace, prior, ireps, label, idx, conditional, alias_seq)
+    alias_seq += 1
+  end
 
   walk = lambda do |label, namespace|
     walked << label
@@ -241,6 +257,7 @@ def build_registry(ireps, root_label)
       when 'ALIAS'
         old_name = insn.first_of(:name)&.value
         alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label } if insn.sym && old_name
+        register_alias.call(label, irep, idx, namespace)
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
         child_label = irep.reps[insn.block_index]
@@ -337,6 +354,7 @@ def build_registry(ireps, root_label)
           found = detect_struct_new_members(irep, idx, insn, namespace)
           struct_member_lists[found[0]] = found[1] if found
         end
+        register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == 'SSEND'
         if %w[include prepend].include?(name)
           # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M` in this
           # body (walk only recurses into CLASS/MODULE/SCLASS bodies, so `namespace` is
@@ -527,6 +545,18 @@ def build_registry(ireps, root_label)
       (included_modules[site[:owner]] ||= []) << ref[:name]
     else
       unknown_mixins << site[:owner]
+    end
+  end
+  # ALIAS_SITES: a prepended (or unresolved) module answers `old` before the owner's own definition, so the
+  # copy taken from that definition may not be what the alias copied; the alias keeps no body.
+  registry.each_value do |defs|
+    defs.each do |d|
+      next unless d.installer == :alias && d.irep
+      next unless prepended_modules.key?(d.owner) || unknown_mixins.include?(d.owner)
+
+      suffix = d.irep[/~al\d+\z/]
+      ireps.delete_if { |l, _| l.end_with?(suffix) }
+      d.irep = nil
     end
   end
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,

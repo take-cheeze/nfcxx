@@ -92,7 +92,7 @@ CC_WORLDS = [
   ['a user `==` that may yield a Fiber', "class CcY\n  def ==(o) = Fiber.yield(1)\nend\n", NONE],
   ['a module prepended to Hash that defines an unrelated name', "module CcQ\n  def cc_other = 1\nend\nHash.prepend(CcQ)\n", NONE],
   ['a computed installer on Hash', "Hash.send(:define_method, ARGV[0].to_sym) { |o| true }\n", NONE],
-  ['an alias of Hash#<', "class Hash\n  alias_method :cc_lt, :<\nend\n", REST]
+  ['an alias installing Hash#<', "class Hash\n  def cc_other(o) = true\n  alias_method :<, :cc_other\nend\n", REST]
 ].freeze
 CC_WORLDS.each do |what, extra, expected|
   c, = generate(runtime, extra: extra)

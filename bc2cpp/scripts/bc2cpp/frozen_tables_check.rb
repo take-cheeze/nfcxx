@@ -285,7 +285,8 @@ VARIANTS = {
     { extra: "class EcFoo\n  def freeze; 1; end\nend\n", kept: %w[lit_idx hash_lit ends] },
   'a const_missing (a failed constant lookup can answer)' =>
     { extra: "class EcUse\n  def self.const_missing(n); 1; end\nend\n", kept: %w[lit_idx hash_lit ends] },
-  'alias_method :[] on Array' => { extra: "class Array\n  alias_method :[], :first\nend\n", kept: %w[lit_idx hash_lit var_calc] },
+  # A class-body alias is a definition of Array#[] (ADR 0474): Hash#[] is untouched.
+  'alias_method :[] on Array' => { extra: "class Array\n  alias_method :[], :first\nend\n", kept: %w[lit_idx var_calc] },
   'define_method(:first) on Array' => { extra: "class Array\n  define_method(:first) { 1 }\nend\n", kept: %w[ends] },
   'a method installer with a computed name' => { extra: "class EcUse\n  def inst(n); self.class.send(:define_method, n) { 1 }; end\nend\n",
                                                  kept: %w[lit_idx hash_lit ends] },

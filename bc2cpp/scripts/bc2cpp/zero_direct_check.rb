@@ -108,7 +108,7 @@ NEG_WORLDS = [
   ['a class method zero? on a user class', "class ZdCls\n  def self.zero? = 1\nend\n"],
   ['a singleton zero? on an object', "class ZdS\n  def self.run\n    o = Object.new\n    def o.zero? = true\n    o\n  end\nend\n"],
   ['a computed installer', "Numeric.send(:define_method, ARGV[0].to_sym) { true }\n"],
-  ['an alias of zero?', "class Numeric\n  alias_method :zd_zero, :zero?\nend\n"],
+  ['an alias installing zero?', "class Numeric\n  alias_method :zero?, :nonzero?\nend\n"],
   ['method_missing on a user class', "class ZdMm\n  def method_missing(n, *a) = 1\nend\n"],
   ['a Numeric `==` that may yield a Fiber', "class ZdY < Numeric\n  def ==(o) = Fiber.yield(1)\nend\n"]
 ].freeze

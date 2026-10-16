@@ -928,7 +928,15 @@ class ClosedWorld
   def define_method_sites_trusted?
     return @define_method_trusted if defined?(@define_method_trusted)
 
-    @define_method_trusted = !@global_refusal && !define_method_intercepted?
+    @define_method_trusted = !@global_refusal && !installer_intercepted?('define_method')
+  end
+
+  # ALIAS_SITES (ADR 0474): the same question for `alias_method`, whose class-body sites the registry
+  # defines as copies of the method they name.
+  def alias_method_trusted?
+    return @alias_method_trusted if defined?(@alias_method_trusted)
+
+    @alias_method_trusted = !@global_refusal && !installer_intercepted?('alias_method')
   end
 
   def outside_call_names(except_files)
@@ -941,8 +949,7 @@ class ClosedWorld
 
   # -- the closed world's own dynamic definitions ------------------------------
 
-  def define_method_intercepted?
-    name = 'define_method'
+  def installer_intercepted?(name)
     return true if @registry.key?(name) || @unknown_defs.include?(name)
     return true if @outside_def_names.include?(name) || @outside_ruby_names.include?(name)
     return true if @outside_name_paths.fetch(name, []).any? { |path| !path.match?(NATIVE_CORE) }

@@ -281,9 +281,10 @@ WORLDS = {
       def refl; h = CrHolder.new; h.instance_variable_set(:@thing, CrOther.new); h.thing.tag; end
     end
   RUBY
+  # Run-time aliases install names (a class-body one is a definition of the new name, ADR 0474).
   'an alias of the reader' => <<~RUBY
     class CrHolder
-      alias_method :thing_alias, :thing
+      def self.cr_alias; alias_method :thing_alias, :thing; end
     end
   RUBY
 }.freeze

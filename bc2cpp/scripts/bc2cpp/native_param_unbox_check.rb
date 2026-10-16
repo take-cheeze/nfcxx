@@ -411,8 +411,10 @@ if ENV['MRBC']
         ['a reopened Rect with a Ruby x=', reopen.call('def x=(v); @x = v; end'), :withdrawn],
         ['a module prepended to Rect', "module PuPre\n  def x=(v); super(v + 1); end\nend\n#{reopen.call('prepend PuPre')}", :withdrawn],
         ['a define_method of x= on Rect', reopen.call('define_method(:x=) { |v| @x = v }'), :withdrawn],
-        ['an alias_method of x=', reopen.call('alias_method :x=, :inspect'), :gate],
-        ['an alias keyword of x=', reopen.call('alias x= inspect'), :gate],
+        # A class-body alias is a Ruby definition of x= on Rect (ADR 0474), as the reopening above is.
+        ['an alias_method of x=', reopen.call('alias_method :x=, :inspect'), :withdrawn],
+        ['an alias keyword of x=', reopen.call('alias x= inspect'), :withdrawn],
+        ['an alias_method of x= at run time', "class PuCaller\n  def al; RGSS::Rect.alias_method :x=, :inspect; end\nend\n", :gate],
         ['a runtime installer with a computed name', "class PuCaller\n  def install(k, n); k.send(:define_method, n) { |v| v }; end\nend\n", :gate],
         ['a singleton method on an object', "class PuCaller\n  def single(r); def r.x=(v); :s; end; r; end\nend\n", :gate],
         ['define_singleton_method', "class PuCaller\n  def single(r); r.define_singleton_method(:x=) { |v| :s }; r; end\nend\n", :gate],

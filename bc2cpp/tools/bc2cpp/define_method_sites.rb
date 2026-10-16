@@ -85,9 +85,9 @@ module DefineMethodSites
     kept = dropped = 0
     registry.each_value do |defs|
       doomed = defs.select do |d|
-        d.installer && (!trusted || defs.any? { |other| !other.equal?(d) && other.owner == d.owner })
+        d.installer == :define_method && (!trusted || defs.any? { |other| !other.equal?(d) && other.owner == d.owner })
       end
-      kept += defs.count(&:installer) - doomed.size
+      kept += defs.count { |d| d.installer == :define_method } - doomed.size
       dropped += doomed.size
       defs.reject! { |d| doomed.any? { |x| x.equal?(d) } }
     end
@@ -98,6 +98,6 @@ module DefineMethodSites
   # True when a `define_method` SSENDB at +idx+ is one the settled registry defines.
   def settled?(registry, irep, idx, ireps)
     found = site(irep, idx, ireps)
-    found && registry.fetch(found.name, []).any? { |d| d.installer && d.irep == found.child }
+    found && registry.fetch(found.name, []).any? { |d| d.installer == :define_method && d.irep == found.child }
   end
 end
