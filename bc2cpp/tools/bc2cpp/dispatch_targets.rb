@@ -1055,4 +1055,3 @@ def trace_eqq_literal_receiver(irep, idx, reg)
   # Anything else, or never written (an argument or block-entry register), is
   # not a literal: no "argument is always literal N" fact exists to fall back on.
 end
-
