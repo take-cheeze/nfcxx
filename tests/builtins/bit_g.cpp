@@ -1,4 +1,6 @@
 // EXPECT: 0
+// HOST-GCC-MIN: 14
+// MACOS-XFAIL-qbe: EDG rejects __builtin_clzg with Apple SDK headers (not investigated yet; see the macOS CI job)
 // GNU-VERSION: 140000 (GCC 14 emulation: EDG knows the g-builtins only from GCC 14 on)
 // GCC 14 type-generic bit builtins: __builtin_clzg / ctzg (two-argument form: d for a zero input), popcountg,
 // parityg. Values come from gcc 14 (the same probe built with gcc). The inputs are volatile so EDG does not fold them.

@@ -485,7 +485,8 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
   tap_dir builtins; n=0
   for f in "$root"/tests/builtins/*.cpp; do
     dialect=$(sed -n 's,^// DIALECT: *\(.*\),\1,p' "$f" | head -1)
-    par build "$root/nfcxx" --gnu-version=130000 ${dialect:+--dialect=$dialect} "$f" -o "$tmp/bin/b$n"; n=$((n + 1))
+    gnuver=$(sed -n 's,^// GNU-VERSION: *\([0-9]*\).*,\1,p' "$f" | head -1)
+    par build "$root/nfcxx" --gnu-version=${gnuver:-130000} ${dialect:+--dialect=$dialect} "$f" -o "$tmp/bin/b$n"; n=$((n + 1))
   done; wait
   corpus builtins "$n"
   tap_dir lib; n=0
