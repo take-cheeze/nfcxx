@@ -180,7 +180,8 @@ def send_element_class(irep, i, reg, insn, ctx, depth)
   # receiver resolves to class R, R defines the name as an :ivar_accessor, and
   # R's entry in this table names an element class. Same check as
   # trace_new_target's chained-accessor branch.
-  return nil if self_recv || argc.positive? || block_carrying
+  return nil if argc.positive? || block_carrying
+  return self_accessor_element(name, ctx) if self_recv
 
   recv_class = traced_owner(irep, i, reg, ctx)
   return nil unless recv_class
@@ -189,6 +190,22 @@ def send_element_class(irep, i, reg, insn, ctx, depth)
   return nil unless accessor
 
   ivar_element_hint(recv_class, name, ctx)
+end
+
+# SELF_ACCESSOR_RECEIVER: `allies` on implicit self reads `@allies` when the call can only reach
+# `ctx[:owner]`'s own attr_reader, so the ivar's element hint applies as it would to a GETIV.
+# CodeGen answers that with CodeGen#self_accessor_owner? (`ctx[:self_accessor]`, which also covers
+# a subclassed owner by hierarchy analysis); without it, self's class must be exact
+# (self_receiver_class) and register the reader itself.
+def self_accessor_element(name, ctx)
+  owner = ctx[:owner]
+  reached = if ctx[:self_accessor]
+              ctx[:self_accessor].call(name)
+            else
+              self_receiver_class(ctx) &&
+                ctx[:registry][name]&.any? { |md| md.owner == owner && md.kind == :ivar_accessor }
+            end
+  reached ? ivar_element_hint(owner, name, ctx) : nil
 end
 
 # ELEMENT_CLASS_SUPPORT: read the in-progress table without returning UNKNOWN.

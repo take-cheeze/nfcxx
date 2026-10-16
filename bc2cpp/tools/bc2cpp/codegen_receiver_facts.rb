@@ -508,7 +508,8 @@ class CodeGen
       ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
       elements: @element_layout,
       annotated_element: ->(n) { annotated_element_return(n) },
-      annotated_ret_class: ->(n) { annotated_ret_class(n) } }
+      annotated_ret_class: ->(n) { annotated_ret_class(n) },
+      self_accessor: ->(n) { self_accessor_owner?(n, owner_name) } }
   end
 
   # HASH_ELEMENT_SUPPORT: proven_element_class for Hash values.
@@ -523,7 +524,8 @@ class CodeGen
       ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
       elements: @element_layout, hash_elements: @hash_element_layout,
       annotated_element: ->(n) { annotated_element_return(n) },
-      annotated_ret_class: ->(n) { annotated_ret_class(n) } }
+      annotated_ret_class: ->(n) { annotated_ret_class(n) },
+      self_accessor: ->(n) { self_accessor_owner?(n, owner_name) } }
   end
 
   # SYM_DEVIRT: resolve a `&:sym` target inside emit_sym_inline. Returns
