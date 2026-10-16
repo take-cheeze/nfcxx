@@ -45,7 +45,8 @@ check.call('0 selects no family; unset and empty select the default receiver-hin
 check.call('1 selects the receiver-hint families, all every family',
            StrictHints.families('1') == StrictHints::DEFAULT_FAMILIES &&
              StrictHints.families('all') == StrictHints::FAMILIES &&
-             (StrictHints::FAMILIES - StrictHints::DEFAULT_FAMILIES).sort == %w[interface_table poly_small_n poly_table])
+             (StrictHints::FAMILIES - StrictHints::DEFAULT_FAMILIES).sort ==
+               %w[interface_table poly_small_n poly_table subtree])
 check.call('a comma list selects those families', StrictHints.families('typed, ivar_accessor') == %w[typed ivar_accessor])
 check.call('an unknown family is an error, not silently off',
            (begin

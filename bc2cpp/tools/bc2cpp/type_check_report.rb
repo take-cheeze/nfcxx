@@ -20,6 +20,7 @@ require_relative 'type_check_rbs'
 #   TC1004 warning  an annotation token bc2cpp ignores, or an annotation whose parameter count is not the method's
 #   TC1007 error    an inferred IR may-set is disjoint from a nominal RBS return/ivar contract
 #   TC1008 warning  an inferred IR may-set partly overlaps the contract
+#   TC1016 error    an RBS `class C < S` whose S is not the program's superclass of C (ADR 0453)
 #   TC2004 info     (--all) an IR query is unknown, with its refusal reason
 #   TC2001 info     (--all) a parameter has no type, with the reason bucket
 #   TC2002 info     (--all) a return has no type, with the reason bucket

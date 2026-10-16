@@ -17,6 +17,8 @@
 #   poly_small_n      the else arm of a POLY_SMALL_N / INHERITED_GUARD chain (the candidate set is the hint)
 #   poly_table        the else arm of an outlined POLY_TABLE
 #   interface_table   the else arm of an interface-table dispatch
+#   subtree           the else arm of a SUBTREE_TABLE / SUBTREE_DIRECT site (docs/adr/0453); only when listed by
+#                     name or by `all`, never by `1`
 # Not forced: numeric arms (Float, Bignum and overflow promotion are legitimate flows on their
 # slow-path helpers) and the families docs/adr/0419 lists with their evidence.
 #
@@ -32,7 +34,7 @@ require 'set'
 module StrictHints
   ENV_NAME = 'BC2CPP_STRICT_HINTS'
   ALLOW_ENV = 'BC2CPP_STRICT_HINTS_UNREVIEWED'
-  FAMILIES = %w[typed element ivar_accessor mono_embed poly_small_n poly_table interface_table].freeze
+  FAMILIES = %w[typed element ivar_accessor mono_embed poly_small_n poly_table interface_table subtree].freeze
   # `1` forces the families that read a receiver hint (layout, annotation, element); `all` adds the
   # candidate-set chains and tables, whose receivers are not traced (docs/adr/0419).
   DEFAULT_FAMILIES = %w[typed element ivar_accessor mono_embed].freeze
