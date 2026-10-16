@@ -488,6 +488,17 @@ class ClosedWorld
     candidates.one? && (parent == supers.first || parent.end_with?("::#{supers.first}")) ? parent : nil
   end
 
+  # SUBTREE_DISPATCH (ADR 0453): class_parent, plus a superclass written as the full path of a declared class
+  # (`class Battle < RPG2k::Scene::Battle`), which class_parent refuses when several classes share its last segment.
+  def declared_parent(klass)
+    parent = class_parent(klass)
+    return parent unless parent.nil?
+    return nil if @global_refusal || opaque?(klass)
+
+    supers = @class_decls.fetch(klass).map { |decl| decl[:super] }.uniq - [:none]
+    supers.one? && supers.first.is_a?(String) && @class_decls.key?(supers.first) ? supers.first : nil
+  end
+
   # Can an instance of `owner` or of a descendant answer through method_missing?
   def self_method_missing_free?(owner)
     method_missing_free?(owner)
