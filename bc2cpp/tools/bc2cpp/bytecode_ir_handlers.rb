@@ -45,6 +45,22 @@ module BytecodeIR
       end
     end
 
+    # BYTECODE_IR_FACTS (ADR 0467): instruction index => the frozen, distinct handler targets it may raise into, in
+    # handler declaration order; an index outside every range has no key. Frozen.
+    def raise_targets
+      @raise_targets ||= handler_edges.group_by(&:src)
+                                      .transform_values { |edges| edges.map(&:target).uniq.freeze }.freeze
+    end
+
+    # BYTECODE_IR_FACTS: the handler targets entered only by a raise: a rescue target that is not also some ensure's
+    # target (an ensure target is also reached by falling in). Frozen Set of instruction indices.
+    def rescue_only_targets
+      @rescue_only_targets ||= begin
+        by_kind = handler_edges.group_by(&:kind).transform_values { |edges| edges.map(&:target).to_set }
+        (by_kind.fetch(:rescue, Set.new) - by_kind.fetch(:ensure, Set.new)).freeze
+      end
+    end
+
     def handlers?
       !@catch_handlers.empty?
     end
@@ -86,8 +102,7 @@ module BytecodeIR
       normal = @instructions[index].successors
       return normal unless include_handlers
 
-      @handler_successors ||= handler_edges.group_by(&:src).transform_values { |edges| edges.map(&:target) }
-      extra = @handler_successors[index]
+      extra = raise_targets[index]
       extra ? (normal + extra).uniq : normal
     end
 

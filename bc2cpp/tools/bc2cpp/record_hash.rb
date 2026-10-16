@@ -496,7 +496,7 @@ module RecordHash
         nxt = step(irep, k, insn, state)
         return false if nxt.nil?
 
-        edge_states(prog, k, insn, nxt).each { |s, st| work << [s, st] unless st.empty? }
+        edge_states(prog, k, nxt).each { |s, st| work << [s, st] unless st.empty? }
         # A raise happens before or after this instruction's own write.
         handler_targets[k].each { |s| work << [s, state | nxt] }
       end
@@ -505,13 +505,14 @@ module RecordHash
 
     # Successor => alias set. A Hash is truthy, so the edge of a branch that needs the tested register
     # to be nil/false cannot carry that register as an alias.
-    def edge_states(prog, k, insn, state)
+    def edge_states(prog, k, state)
       succs = prog.instruction_at(k).successors
-      return succs.to_h { |s| [s, state] } unless %w[JMPIF JMPNOT JMPNIL].include?(insn.op) && succs.size == 2
+      decoded = prog.decoded[k]
+      return succs.to_h { |s| [s, state] } unless decoded.cond && succs.size == 2
 
-      tested = insn.reg.to_i
-      target = prog.address_to_index[insn.jump_target]
-      falsy_edge = insn.op == 'JMPIF' ? :fall : :jump
+      tested = decoded.reg.to_i
+      target = decoded.goto
+      falsy_edge = decoded.cond == BytecodeIR::COND_IF ? :fall : :jump
       succs.to_h do |s|
         jump = s == target
         falsy = falsy_edge == :jump ? jump : !jump

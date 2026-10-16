@@ -138,8 +138,10 @@ module NumericFlow
   # each register the union of every value any instruction stores into it (what
   # a block created earlier may see when it runs later).
   #
-  # NUMERIC_FLOW_SPEED (ADR 0467): the flow decodes an irep's instructions once (Plan), keeps the run's facts in a Ctx
-  # with the oracle's optional methods looked up once, and joins without allocating when nothing grows. It asks the
+  # NUMERIC_FLOW_SPEED (ADR 0467): the flow reads the irep's bytecode facts from its BytecodeIR::Program (successor
+  # lists, raise targets, rescue-only targets, the instruction decode) and derives its own Step table from them once
+  # (NumericFlow.table), keeps the run's facts in a Ctx with the oracle's optional methods looked up once, and joins
+  # without allocating when nothing grows. It asks the
   # oracle the same questions, with the same arguments, in the same order as before; only its own bookkeeping changed.
   def states(irep, oracle, opaque_regs, writes = nil)
     program = BytecodeIR.for(irep)
@@ -149,11 +151,15 @@ module NumericFlow
     insns = irep.instructions
     return nil if insns.empty?
 
-    plan = Plan.for(irep, program)
-    return nil unless plan.supported
+    unless program.built_from?(irep)
+      raise "NumericFlow: the decoded plan of #{irep.label} no longer matches its instructions"
+    end
 
-    c = Ctx.for_run(irep, oracle, opaque_regs, writes, plan.rescue_only)
-    steps = plan.steps
+    table = NumericFlow.table(program)
+    return nil unless table.supported
+
+    c = Ctx.for_run(irep, oracle, opaque_regs, writes, program.rescue_only_targets)
+    steps = table.steps
     nregs = c.nregs
     entry = Array.new(nregs, OTHER)
     entry[0] = oracle.self_mask if c.self_mask
@@ -169,8 +175,8 @@ module NumericFlow
 
     n = insns.length
     pb = c.pb
-    raises = plan.raises
-    succ = plan.successors
+    raises = program.raise_targets
+    succ = program.successor_lists
     context_edges = c.context_edges
     ins = Array.new(n)
     outs = Array.new(n)
@@ -291,26 +297,44 @@ module NumericFlow
                    'LT' => S_NUMERIC, 'LE' => S_NUMERIC, 'GT' => S_NUMERIC, 'GE' => S_NUMERIC, 'GETIDX' => S_INDEX,
                    'SETIDX' => S_INDEX, 'GETIDX0' => S_INDEX0, 'STRCAT' => S_STRCAT, 'GETCONST' => S_CONST,
                    'GETMCNST' => S_CONST }.freeze
-  # Branch kinds of a conditional jump.
-  B_IF = 1
-  B_NOT = 2
-  B_NIL = 3
-  BRANCH_KINDS = { 'JMPIF' => B_IF, 'JMPNOT' => B_NOT, 'JMPNIL' => B_NIL }.freeze
+  # Branch kinds of a conditional jump: BytecodeIR's (Decoded#cond).
+  B_IF = BytecodeIR::COND_IF
+  B_NOT = BytecodeIR::COND_NOT
+  B_NIL = BytecodeIR::COND_NIL
+  BRANCH_KINDS = BytecodeIR::COND_KINDS
 
-  # One instruction as the flow reads it. +a+ is the leading register (nil when it has none), +b+ the second register
-  # the op reads (MOVE's source, the parenthesised operand, SETIV's value), +goto+ a conditional branch's target index.
+  # One instruction as the flow reads it. +op+, +branch+ and +goto+ are copied from the BytecodeIR decode
+  # (BytecodeIR::Decoded: op, cond, goto) so the worklist reads one struct; the rest is the flow's own reading.
+  # +a+ is the leading register where the op's rule reads it (nil otherwise), +b+ the second register the op reads
+  # (MOVE's source, the parenthesised operand, SETIV's value).
   Step = Struct.new(:op, :kind, :call, :silent, :branch, :a, :b, :ivar, :goto, :sym)
 
-  # Decode +insn+, reading only the operands the op's rule reads (an instruction-like object from a check may answer
-  # nothing else). +program+ resolves a branch target; without one +goto+ stays nil.
-  def decode_step(insn, program = nil)
-    op = insn.op
+  # The flow's per-Program table: whether every op is modelled, and the Step of each instruction (nil when not).
+  Table = Struct.new(:supported, :steps)
+
+  # NumericFlow's Step table for +program+, derived once from the program's facts and kept in the program's one
+  # analysis slot (BytecodeIR::Program#numeric_flow_table). It holds bytecode facts only, never an oracle answer.
+  def table(program)
+    program.numeric_flow_table ||= begin
+      instructions = program.instructions
+      supported = instructions.all? { |i| SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
+      decoded = program.decoded if supported
+      steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index]).freeze }.freeze if supported)
+      Table.new(supported, steps).freeze
+    end
+  end
+
+  # Decode +insn+ for the flow from its BytecodeIR decode +decoded+, reading of the insn itself only the operands the
+  # op's rule reads (an instruction-like object from a check may answer nothing else). Without a Program's decode,
+  # +goto+ stays nil.
+  def decode_step(insn, decoded = BytecodeIR.decode(insn))
+    op = decoded.op
     silent = SILENT_KINDS.fetch(op) { SILENT_CALL_OPS.include?(op) ? S_ALWAYS : S_NONE }
-    step = Step.new(op, nil, nil, silent, BRANCH_KINDS[op])
+    step = Step.new(op, nil, nil, silent, decoded.cond)
     if NO_WRITE_OPS.include?(op)
       step.kind = op == 'SETIDX' ? K_SETIDX : K_NO_WRITE
-      step.a = insn.reg.to_i if op == 'SETIDX' || op == 'RAISEIF' || step.branch
-      step.goto = program.address_to_index[insn.branch_target] if step.branch && program
+      step.a = decoded.reg.to_i if op == 'SETIDX' || op == 'RAISEIF' || step.branch
+      step.goto = decoded.goto if step.branch
       return step
     end
     if op == 'SETIV'
@@ -320,7 +344,7 @@ module NumericFlow
       return step
     end
 
-    step.a = insn.reg&.to_i
+    step.a = decoded.reg
     step.call = CALL_KINDS[op]
     step.kind = if step.call then K_CALL
                 elsif op.start_with?('LOADI') then K_LOADI
@@ -335,46 +359,6 @@ module NumericFlow
     step.b = insn.paren_reg.to_i if silent == S_NUMERIC && step.b.nil?
     step.b = insn.regs[1].to_i if silent == S_INDEX0
     step
-  end
-
-  # What the flow reads of one irep on every run, decoded once. The bytecode never changes after loading; a plan whose
-  # instruction list is no longer the irep's is a broken cache and raises.
-  class Plan
-    attr_reader :supported, :steps, :successors, :raises, :rescue_only
-
-    def self.for(irep, program)
-      plan = irep.instance_variable_get(:@numeric_flow_plan)
-      unless plan
-        plan = new(irep, program)
-        irep.instance_variable_set(:@numeric_flow_plan, plan)
-      end
-      plan.check(irep, program)
-      plan
-    end
-
-    def initialize(irep, program)
-      @insns = irep.instructions
-      @size = @insns.length
-      @program = program
-      @supported = @insns.all? { |i| SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
-      return unless @supported
-
-      @steps = @insns.map { |insn| NumericFlow.decode_step(insn, program).freeze }.freeze
-      extra = NumericFlow.enter_edges(irep)
-      # The program's own successor lists, shared as #successors returns them; the flow only reads them.
-      @successors = Array.new(@size) { |index| NumericFlow.successors(program, extra, index) }.freeze
-      @raises = program.handler_edges.group_by(&:src).transform_values { |edges| edges.map(&:target).uniq.freeze }.freeze
-      # A rescue target is entered only by a raise, so its EXCEPT always reads an exception; an ensure
-      # target is also reached by falling in, where there is none.
-      by_kind = program.handler_edges.group_by(&:kind).transform_values { |edges| edges.map(&:target).to_set }
-      @rescue_only = (by_kind.fetch(:rescue, Set.new) - by_kind.fetch(:ensure, Set.new)).freeze
-    end
-
-    def check(irep, program)
-      return if @insns.equal?(irep.instructions) && @size == @insns.length && @program.equal?(program)
-
-      raise "NumericFlow: the decoded plan of #{irep.label} no longer matches its instructions"
-    end
   end
 
   # The facts of one run: the oracle, the register file's layout and the class tests recorded so far. The oracle's
@@ -499,27 +483,6 @@ module NumericFlow
       refresh_slots(state, c)
     end
     join_state(state, after, c.pb)
-  end
-
-  def successors(program, extra, index)
-    base = program.instruction_at(index).successors
-    more = extra[index]
-    more ? (base | more) : base
-  end
-
-  # OP_ENTER with optional arguments jumps into a table of JMPs that follows
-  # it; the disassembly shows no edge, so every table slot is a successor.
-  def enter_edges(irep)
-    edges = {}
-    irep.instructions.each_with_index do |insn, i|
-      next unless insn.op == 'ENTER'
-
-      opt = insn.enter_fields[1].to_i
-      next if opt.zero?
-
-      edges[i] = (1..(opt + 1)).map { |k| i + k }.select { |k| k < irep.instructions.length }
-    end
-    edges
   end
 
   # The state flowing along edge insn -> target: a conditional branch narrows the

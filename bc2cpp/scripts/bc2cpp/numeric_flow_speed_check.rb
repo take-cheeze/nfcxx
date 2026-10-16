@@ -1,12 +1,16 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NUMERIC_FLOW_SPEED (docs/adr/0467): NumericFlow decodes an irep once (NumericFlow::Plan) and caches nothing an
+# NUMERIC_FLOW_SPEED (docs/adr/0467): NumericFlow reads an irep's bytecode facts from its BytecodeIR::Program and
+# derives its Step table from them once (NumericFlow.table, kept in Program#numeric_flow_table); it caches nothing an
 # oracle answers. Host only, under a second:
-#   - the plan is built once per irep and reused by every later run (the cache is hit);
+#   - the table is built once per Program and reused by every later run (the cache is hit), and there is no second
+#     irep-level cache;
+#   - the successor lists are the Program's own, with OP_ENTER's optional-argument table edges in them, and the
+#     raise and rescue-only targets come from the Program's handler edges;
 #   - it holds bytecode facts only: a run under another oracle (an input that changed) gets that oracle's answers,
 #     and every run asks every question again, in the same order;
-#   - a plan whose irep no longer has the instruction list it decoded raises instead of answering;
+#   - a Program whose irep no longer has the instruction list it decoded raises instead of answering;
 #   - join_state hands back the old state itself when nothing grows (the identity the worklist tests), and
 #     reproduces `nil | nil` for a nil entry;
 #   - the Hash ctx of #transfer and #raise_state still works.
@@ -62,15 +66,23 @@ loop_body = [insn(0, 'LOADI_0', "R2\t(0)"), insn(2, 'JMPNOT', "R1\t15"), insn(6,
              insn(8, 'SEND0', "R4\t:f"), insn(11, 'GETIV', "R5\t@n"), insn(13, 'JMP', '2'), insn(15, 'RETURN', 'R2')]
 irep = Irep.new(label: 'speed', nregs: 6, instructions: loop_body, catch_handlers: [], reps: [], pool: [])
 
-puts '-- plan cache (host)'
+puts '-- step table (host)'
 first = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
 states = NF.states(irep, first, Set.new)
-plan = irep.instance_variable_get(:@numeric_flow_plan)
-check.call('the first run decodes the irep once', plan.is_a?(NF::Plan) && plan.supported)
+program = BytecodeIR.for(irep)
+plan = program.numeric_flow_table
+check.call('the first run derives the table once, on the Program', plan.is_a?(NF::Table) && plan.supported &&
+           plan.steps.size == loop_body.size)
+check.call('no second irep-level cache',
+           irep.instance_variables.sort == (Irep.new.instance_variables + [:@bytecode_ir]).sort)
+check.call('steps take op, branch kind and target from the BytecodeIR decode',
+           plan.steps[1].op == 'JMPNOT' && plan.steps[1].branch == BytecodeIR::COND_NOT && plan.steps[1].goto == 6 &&
+           program.decoded[1].goto == 6 && program.decoded[1].reg == 1 && program.decoded[5].goto == 1 &&
+           program.decoded[2].cond.nil? && program.decoded[2].goto.nil?)
 check.call('the flow answers as before: an Integer counter at the loop head', states[1][2] == INT && states[6][2] == INT)
 again = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
 states_again = NF.states(irep, again, Set.new)
-check.call('a second run reuses the plan (cache hit)', irep.instance_variable_get(:@numeric_flow_plan).equal?(plan))
+check.call('a second run reuses the table (cache hit)', BytecodeIR.for(irep).numeric_flow_table.equal?(plan))
 check.call('and asks the oracle every question again, in the same order', again.log == first.log && !first.log.empty?)
 check.call('equal answers give equal states', states_again == states)
 
@@ -86,7 +98,7 @@ check.call('writes collect every store', writes[2] == INT && writes[4] == INT &&
 
 clone = irep.dup
 clone.label = 'speed~spec'
-check.call('a shallow copy of the irep (same instructions) shares the plan',
+check.call('a shallow copy of the irep (same instructions) shares the Program and its table',
            NF.states(clone, LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT), Set.new) == states)
 
 stale = irep.dup
@@ -97,7 +109,26 @@ raised = begin
 rescue RuntimeError => e
   e.message.include?('no longer matches')
 end
-check.call('a plan whose irep has another instruction list raises', raised)
+check.call('a Program whose irep has another instruction list raises', raised)
+
+puts '-- shared bytecode facts (host)'
+# def f(a, b = 1, c = 2); r = 0; begin; r = a; rescue; r = 1; ensure; r = 2; end; r; end, flattened: ENTER with two
+# optional arguments jumps into a three-entry JMP table; one rescue and one ensure handler share a range.
+enter_body = [insn(0, 'ENTER', "1:2:0:0:0:0:0:0\t(0x0)"), insn(4, 'JMP', '13'), insn(7, 'JMP', '10'),
+              insn(10, 'LOADI_1', "R2\t(1)"), insn(13, 'LOADI_2', "R3\t(2)"), insn(16, 'MOVE', "R4\tR1"),
+              insn(19, 'EXCEPT', 'R5'), insn(21, 'LOADI_1', "R4\t(1)"), insn(23, 'RETURN', 'R4')]
+handlers = [CatchHandler.new(type: :rescue, begin_addr: 16, end_addr: 19, target: 19),
+            CatchHandler.new(type: :ensure, begin_addr: 16, end_addr: 19, target: 21)]
+enter_irep = Irep.new(label: 'enter', nregs: 6, instructions: enter_body, catch_handlers: handlers, reps: [], pool: [])
+ep = BytecodeIR.for(enter_irep)
+check.call('ENTER reaches every optional-argument table entry', ep.successor_lists[0] == [1, 2, 3])
+check.call('successor lists are the instructions\' own',
+           ep.successor_lists.each_with_index.all? { |s, k| s.equal?(ep.instruction_at(k).successors) })
+check.call('raise targets: per protected instruction, in handler order', ep.raise_targets == { 5 => [6, 7] })
+check.call('rescue-only: a rescue target that no ensure shares', ep.rescue_only_targets == Set[6])
+check.call('successors_of merges the raise targets', ep.successors_of(5, include_handlers: true) == [6, 7])
+NF.states(enter_irep, LogOracle.new({ 1 => INT }, INT), Set.new)
+check.call('the flow runs on the shared facts', ep.numeric_flow_table&.supported)
 
 puts '-- join_state (host)'
 old = [INT, FLT, 0, 3]
