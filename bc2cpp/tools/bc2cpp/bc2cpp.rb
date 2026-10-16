@@ -57,6 +57,7 @@ require_relative 'rbs_signatures'
 require_relative 'class_layout'
 require_relative 'element_layouts'
 require_relative 'record_hash'
+require_relative 'rbs_record_types'
 require_relative 'diagnostics'
 require_relative 'dispatch_targets'
 require_relative 'irep_arity'
@@ -515,6 +516,12 @@ if $PROGRAM_NAME == __FILE__
   end
   record_hash.refused.sort.each { |name, why| warn "  RECORD_HASH_REFUSED  @#{name}  (#{why})" }
   warn ''
+  # RBS_RECORD_TYPES (docs/adr/0454): checked record declarations join the RECORD_HASH_PROOF table.
+  if sig_loaded
+    RbsRecordTypes.drive(sig_loaded.files, sig_applied.diagnostics, ireps, registry, display_root: sig_root,
+                         closed_world: closed_world, native_paths: native_paths, foreign_paths: foreign_ruby_srcs,
+                         superclass_of: superclass_of, container_constants: container_constants)
+  end
 
   # FIXNUM_NIL_DECLARATION: a reviewed "Owner#@ivar" list for the nullable
   # embedding (NILABLE_EMBED_SUPPORT). Opt-in per field, never inferred --
