@@ -73,8 +73,12 @@ class CodeGen
   # sig/native/core_class_tests.rbs.
   CLASS_TEST_NATIVE_OWNERS = CoreFactSigs.class_test_owners
 
+  # The return-class / class-pool fixpoint narrows too (@rc_narrowing, POOL_NARROWING): a store dominated by
+  # `raise ... unless x.is_a?(C)` joins C into its ivar or argument pool, as it joins C into the flow of its own
+  # method. Every answer here reads only closed-world tables, never a flow, so the fixpoint cannot recurse into it.
   def class_narrowing_enabled?
-    ENV['BC2CPP_CLASS_NARROWING'] != '0' && @native_results_ready && !@closed_world.nil? && !@native_name_sources.nil? &&
+    ENV['BC2CPP_CLASS_NARROWING'] != '0' && (@native_results_ready || @rc_narrowing) && !@closed_world.nil? &&
+      !@native_name_sources.nil? &&
       @closed_world.global_refusal.nil? && @closed_world.exact_instances_singleton_free? && guard_violation_enabled?
   end
 
