@@ -269,7 +269,7 @@ module RbsSignatures
   # Annotations / ClassAnnotations / ElementAnnotations.extract returned; comment slots win.
   # `class_decls` (build_registry's): the program's class hierarchy, for SUBTREE_DISPATCH (docs/adr/0453). A class type
   # naming a class with descendants is a subtree hint (subtree_ivars / subtree_args / subtree_returns), never the exact
-  # one a class with none gives; an RBS `class C < S` must agree with the program's superclass of C (TC1009).
+  # one a class with none gives; an RBS `class C < S` must agree with the program's superclass of C (TC1016).
   def apply(loaded, ireps, registry, annotations, class_annotations, element_annotations, class_decls: nil)
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
@@ -459,7 +459,7 @@ module RbsSignatures
     ap.based&.include?(cls)
   end
 
-  # TC1009: an RBS `class C < S` whose S is not the program's superclass of C. A class the program does not declare,
+  # TC1016: an RBS `class C < S` whose S is not the program's superclass of C. A class the program does not declare,
   # a core class it only reopens, and a superclass the program does not name with certainty are not checked.
   def check_supers(ap, loaded, class_decls)
     Array(loaded.supers).each do |decl|
@@ -474,7 +474,7 @@ module RbsSignatures
              end
       next if same
 
-      note(ap, decl.loc, 'error', 'TC1009',
+      note(ap, decl.loc, 'error', 'TC1016',
            "#{decl.name}: signature declares superclass #{declared}, the program's is #{program}")
     end
   end

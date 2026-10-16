@@ -11,7 +11,7 @@
 #    negative  a hierarchy the closed world cannot enumerate (Class.new subclass), stores whose only common ancestor is
 #              Object, the kill switch (no SUBTREE code; byte-identical to BC2CPP_SUBTREE_BASE_TOOL's output when
 #              that names the baseline bc2cpp.rb), the `subtree` strict family staying out of the default set.
-#    error     an RBS `class C < S` naming a superclass the program does not give C is TC1009 and aborts the build.
+#    error     an RBS `class C < S` naming a superclass the program does not give C is TC1016 and aborts the build.
 # 2. Behaviour on real mruby (BC2CPP_MRUBY_FULL, or one built by fixture_runtime): interpreted and compiled answer
 #    alike, a Sub receiver included, and the subtree sites make no dynamic dispatch. SD_GENERATED_ONLY=1 skips it.
 #
@@ -252,10 +252,10 @@ Dir.mktmpdir('bc2cpp_subtree') do |dir|
 
   begin
     generate_with(runtime, File.join(dir, 'bad'), sig: BAD_SIG)
-    check.call('an RBS superclass the program does not give the class aborts the build (TC1009)', false)
+    check.call('an RBS superclass the program does not give the class aborts the build (TC1016)', false)
   rescue RuntimeError => e
-    check.call('an RBS superclass the program does not give the class aborts the build (TC1009)',
-               e.message.include?('[TC1009]') && e.message.include?('declares superclass SdOther'))
+    check.call('an RBS superclass the program does not give the class aborts the build (TC1016)',
+               e.message.include?('[TC1016]') && e.message.include?('declares superclass SdOther'))
   end
 end
 
