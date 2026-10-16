@@ -17,7 +17,7 @@ indirect enum Ty: Equatable {
   case nilLiteral
   case structure(String)
   case cls(String)
-  case enumeration(String)
+  case enumeration(EnumInfo)
   case optional(Ty)
   /// A non-capturing function (closure or named function), as a C function pointer.
   case function([Ty], Ty)
@@ -28,7 +28,8 @@ indirect enum Ty: Equatable {
     case .bool: return "Bool"
     case .void: return "Void"
     case .nilLiteral: return "nil"
-    case .structure(let name), .cls(let name), .enumeration(let name): return name
+    case .structure(let name), .cls(let name): return name
+    case .enumeration(let info): return info.name
     case .optional(let inner): return inner.swiftName + "?"
     case .function(let params, let ret):
       return "(" + params.map { $0.swiftName }.joined(separator: ", ") + ") -> " + ret.swiftName
@@ -44,7 +45,7 @@ indirect enum Ty: Equatable {
     case .nilLiteral: return "Nil"
     case .structure(let name): return "S_" + name
     case .cls(let name): return "C_" + name
-    case .enumeration(let name): return "E_" + name
+    case .enumeration(let info): return "E_" + info.name
     case .optional(let inner): return "O_" + inner.mangled
     case .function(let params, let ret):
       return "F_" + params.map { $0.mangled }.joined(separator: "_") + "_R_" + ret.mangled
@@ -60,7 +61,7 @@ indirect enum Ty: Equatable {
     case .void, .nilLiteral: return "void"
     case .structure(let name): return "s_" + name
     case .cls(let name): return "s_" + name + " *"
-    case .enumeration(let name): return "s_" + name
+    case .enumeration(let info): return "s_" + info.name
     case .optional(let inner): return "opt_" + inner.mangled
     case .function: return "fn_" + mangled
     }
@@ -71,22 +72,15 @@ indirect enum Ty: Equatable {
     return false
   }
 
-  /// True for types whose values hold a reference count: a class, or an
-  /// Optional wrapping one.
+  /// True for types whose values hold a reference count: a class, an enum with
+  /// a class in a payload, or an Optional wrapping one of these. Such values are
+  /// retained when copied from a place and released by their owner. Structs may
+  /// not hold them, because copying a struct would need its own retains.
   var isClassLike: Bool {
     switch self {
     case .cls: return true
-    case .optional(let inner): return inner.isClass
-    default: return false
-    }
-  }
-
-  /// True when the type is, or directly wraps, a class. Structs may not hold
-  /// these in M2 because copying a struct would need its own retains.
-  var containsClass: Bool {
-    switch self {
-    case .cls: return true
-    case .optional(let inner): return inner.containsClass
+    case .enumeration(let info): return info.holdsRef
+    case .optional(let inner): return inner.isClassLike
     default: return false
     }
   }
@@ -120,11 +114,16 @@ struct EnumCase {
   let payload: [Field]
 }
 
-final class EnumInfo {
+final class EnumInfo: Equatable {
   let name: String
   var cases: [EnumCase] = []
+  /// True when some payload holds a class reference. Set by Lowerer once every
+  /// enum's payloads are known, before any type is checked against it.
+  var holdsRef = false
 
   init(name: String) { self.name = name }
+
+  static func == (a: EnumInfo, b: EnumInfo) -> Bool { a === b }
 }
 
 struct Param {

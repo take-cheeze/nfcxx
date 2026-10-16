@@ -105,18 +105,39 @@ enum CEmit {
           values += "  \(field.ty.cName) \(field.cName);\n"
         }
         values += "};\n\n"
-      case .enumeration(let name):
-        guard let info = program.enums.first(where: { $0.name == name }) else { return }
+      case .enumeration(let info):
         for c in info.cases {
           for field in c.payload where needsDefinition(field.ty) { defineValue(field.ty) }
         }
-        values += "struct s_\(name) {\n  int64_t tag;\n"
+        let cn = ty.cName
+        values += "struct \(cn) {\n  int64_t tag;\n"
         for c in info.cases {
           for field in c.payload {
             values += "  \(field.ty.cName) \(field.cName);\n"
           }
         }
-        values += "};\n\n"
+        values += "};\n"
+        if info.holdsRef {
+          // Copies retain, and drops release, every class-like payload field. A value
+          // leaves the fields of its other cases zero (a compound literal zeroes the
+          // fields it does not name), and retaining or releasing a null pointer or an
+          // empty Optional does nothing, so no switch on the tag is needed.
+          values += "static \(cn) ret_\(cn)(\(cn) v) {\n"
+          for c in info.cases {
+            for field in c.payload where field.ty.isClassLike {
+              values += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+            }
+          }
+          values += "  return v;\n}\n"
+          values += "static void rel_\(cn)(\(cn) v) {\n"
+          for c in info.cases {
+            for field in c.payload where field.ty.isClassLike {
+              values += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
+            }
+          }
+          values += "}\n"
+        }
+        values += "\n"
       case .optional(let inner):
         if needsDefinition(inner) { defineValue(inner) }
         let opt = ty.cName
@@ -124,9 +145,9 @@ enum CEmit {
         values += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
         values += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
         values += "  return v.value;\n}\n"
-        if inner.isClass {
-          values += "static \(opt) ret_\(opt)(\(opt) v) {\n  if (v.some) sw_retain(v.value);\n  return v;\n}\n"
-          values += "static void rel_\(opt)(\(opt) v) {\n  if (v.some) sw_release(v.value);\n}\n"
+        if inner.isClassLike {
+          values += "static \(opt) ret_\(opt)(\(opt) v) {\n  if (v.some) \(retainCode("v.value", inner))\n  return v;\n}\n"
+          values += "static void rel_\(opt)(\(opt) v) {\n  if (v.some) \(releaseCode("v.value", inner))\n}\n"
         }
         values += "\n"
       default:
@@ -134,7 +155,7 @@ enum CEmit {
       }
     }
     for s in program.structs { defineValue(.structure(s.name)) }
-    for e in program.enums { defineValue(.enumeration(e.name)) }
+    for e in program.enums { defineValue(.enumeration(e)) }
     for o in program.optionals { defineValue(o) }
     out += values
 
@@ -242,6 +263,12 @@ enum CEmit {
   private static func releaseCode(_ expr: String, _ ty: Ty) -> String {
     if ty.isClass { return "sw_release(\(expr));" }
     return "rel_\(ty.cName)(\(expr));"
+  }
+
+  /// Adds one reference to a class-like value held in `expr`.
+  private static func retainCode(_ expr: String, _ ty: Ty) -> String {
+    if ty.isClass { return "sw_retain(\(expr));" }
+    return "ret_\(ty.cName)(\(expr));"
   }
 
   private static func lvalue(_ target: LValue) -> String {

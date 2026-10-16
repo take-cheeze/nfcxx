@@ -1,1 +1,0 @@
-enum_class_payload.swift:4:10: error: enums with class-typed payloads are not supported yet

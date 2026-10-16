@@ -25,7 +25,10 @@ Adds to M1:
   `x!` (traps on nil), `if let`, and `== nil` / `!= nil`
 - enums with associated values (`case rect(Int, Int)`), constructed as `Shape.rect(3, 4)`
   or `.rect(3, 4)` when the type is known, and matched with `switch` (exhaustive
-  unless there is a `default`)
+  unless there is a `default`). A payload may be a class, Optional class or another such
+  enum (`case full(Node)`). Such an enum is reference-counted like a class value: copies
+  retain, owned locals and `switch` subjects release, and a payload bound by `case .full(let n)`
+  is retained for the arm.
 - function types `(Int) -> Int`, named functions as values, and non-capturing closures
   (`{ $0 * 3 }`, `{ (n: Int) -> Int in n + 1 }`). A closure needs a known function type
   from its context: a declared type, a parameter type, or an assignment target.
@@ -41,7 +44,12 @@ Closures do not capture: an outer local used inside a closure is reported as not
 
 Not yet supported in M2 (each gives a diagnostic):
 - member access, `!`, or `== nil` on a temporary class value, e.g. `make().x`
-- structs with class-typed properties, and enums with class-typed payloads
+- structs with class-typed properties, or with enum properties that hold a class
+- Optional enums that hold a class are supported only as `E?` values; their `if let` works,
+  but temporary values of them cannot be bound or compared with `nil` (as for classes)
+- an implicit member such as `.full(n)` cannot be written where the context is `E?`
+  (write `E.full(n)`)
+- `_` as a payload pattern, e.g. `case .pair(_, let n)`
 - labeled enum payloads, raw values, class inheritance and methods
 - switching over a value other than an enum, and multiple patterns in one case
 - `while let` over a temporary class value, e.g. `while let n = next(of: m)` where
