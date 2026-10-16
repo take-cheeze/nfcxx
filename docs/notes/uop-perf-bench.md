@@ -88,3 +88,14 @@ TG_PY=<venv>/bin/python tests/uop/perf/run_webgpu_ort.sh    # onnxruntime-web We
 ```
 
 Raw results are in `tests/uop/perf/results/`.
+
+## Profiling the CPU runs
+
+`NFCUOP_TRACE=FILE` makes `bench.py` write a Chrome trace-event JSON file (open in https://ui.perfetto.dev), in the format
+of nfcxx's `--trace`. Spans are named `<backend> <op> n=<size> <phase>`: `build` (tinygrad's input tensors, named `inputs`;
+onnxruntime's session creation), `warmup`, `run` (one timed call) and, for tinygrad, `readback` (the scalar read). Lowering
+and code generation for tinygrad happen on its first call, so they appear inside the first `warmup` span; they are not
+separate spans. The WebGPU runs (Chrome, `run_webgpu*.sh`) are not instrumented.
+
+`tests/uop/perf/trace_test.sh` checks the file on a small configuration (`ORT_PY`, `TG_PY` choose the interpreters) and is run
+by `tests/uop/run.sh`.
