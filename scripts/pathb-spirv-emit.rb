@@ -439,6 +439,7 @@ SCOPE_DEVICE = 1
 SCOPE_WORKGROUP = 2
 SEM_RELAXED = 0
 SEM_BARRIER = 0x8 | 0x40 | 0x100 | 0x200   # AcquireRelease | UniformMemory | WorkgroupMemory | CrossWorkgroupMemory
+SEM_BARRIER_KERNEL = 0x8 | 0x100 | 0x200   # the same without UniformMemory (which needs the Shader capability)
 BUILTIN_WORKGROUP_ID = 26
 BUILTIN_LOCAL_INVOCATION_ID = 27
 BUILTIN_GLOBAL_INVOCATION_ID = 28
@@ -470,6 +471,14 @@ GLSL_OF_MATH = {
   1 => 31, 2 => 27, 3 => 28, 4 => 13, 5 => 14, 6 => 15, 7 => 4, 8 => 8, 9 => 9, 10 => 3, 11 => 1, 12 => 32,
   13 => 29, 14 => 30, 15 => 16, 16 => 17, 17 => 18, 18 => 19, 19 => 20, 20 => 21,
   32 => 26, 33 => 37, 34 => 40, 35 => 25, 48 => 50, 49 => 43, 50 => 46,
+}
+# The OpenCL.std opcode of each GLSL.std.450 instruction the emitter uses (Kernel mode: OpenCL.std is the extended
+# instruction set of OpenCL kernels, and Intel's compiler rejects GLSL.std.450 in a Kernel module). Same operation by
+# name: round, trunc, fabs, ..., rsqrt (InverseSqrt), clamp (FClamp), mix (FMix), fma.
+OPENCL_OF_GLSL = {
+  1 => 55, 3 => 66, 4 => 23, 8 => 25, 9 => 12, 13 => 57, 14 => 14, 15 => 62, 16 => 3, 17 => 0, 18 => 6, 19 => 59,
+  20 => 15, 21 => 63, 25 => 7, 26 => 48, 27 => 19, 28 => 37, 29 => 20, 30 => 38, 31 => 61, 32 => 56, 37 => 28,
+  40 => 27, 43 => 95, 46 => 99, 50 => 26,
 }
 # libm builtins that libstdc++ calls for float arguments (the names of pathb-wgsl-emit.rb's LIBM_F32)
 LIBM_GLSL = {
@@ -516,8 +525,19 @@ class Spv
     v
   end
 
+  attr_accessor :kernel_cl
+
   def glsl_id
     @glsl ||= id
+  end
+
+  # the extended instruction set's name, and the opcode of GLSL instruction g in it
+  def ext_set_name
+    @kernel_cl ? "OpenCL.std" : "GLSL.std.450"
+  end
+
+  def ext_num(g)
+    @kernel_cl ? OPENCL_OF_GLSL.fetch(g) : g
   end
 
   def decl(inst)
@@ -553,6 +573,13 @@ class Spv
     memo([:vec3]) { i = id; decl([23, i, t_int(32), 3]); i }
   end
 
+  # the type of a work-item builtin: a vector of uint in Vulkan; of size_t in OpenCL (a uint vector crashes Intel's
+  # compiler, which takes the builtins as size_t: see docs/notes/gpu.md)
+  def builtin_vec_t
+    return t_vec3 unless @kernel_cl
+    memo([:vec3_64]) { i = id; decl([23, i, t_int(64), 3]); i }
+  end
+
   def t_ptr(sc, elem)
     memo([:ptr, sc, elem]) { i = id; decl([32, i, sc, elem]); i }
   end
@@ -561,12 +588,16 @@ class Spv
     memo([:fn, ret, params]) { i = id; decl([33, i, ret, *params]); i }
   end
 
+  # Kernel mode: no Block and no Offset decorations (they need the Shader capability); the members follow natural alignment,
+  # which is the layout the push block has (PUSH_OFFSET), so the host's struct is the same.
   def t_struct(members, offsets, name)
     memo([:struct, name]) do
       i = id
       decl([30, i, *members])
-      ann([OP_NAME_DECORATE, i, DEC_BLOCK])
-      members.each_with_index { |_, k| ann([OP_MEMBER_DECORATE, i, k, DEC_OFFSET, offsets[k]]) }
+      unless @kernel_cl
+        ann([OP_NAME_DECORATE, i, DEC_BLOCK])
+        members.each_with_index { |_, k| ann([OP_MEMBER_DECORATE, i, k, DEC_OFFSET, offsets[k]]) }
+      end
       i
     end
   end
@@ -650,7 +681,7 @@ class Spv
   # a global variable with a builtin decoration
   def builtin_input(builtin)
     memo([:builtin, builtin]) do
-      v = var(SC_INPUT, t_ptr(SC_INPUT, t_vec3))
+      v = var(SC_INPUT, t_ptr(SC_INPUT, builtin_vec_t))
       ann([71, v, DEC_BUILTIN, builtin])
       v
     end
@@ -680,8 +711,8 @@ class Spv
     body = []
     @caps.each { |c| body << [17, c] }
     @exts.each { |e| body << [10, *str_words(e)] }
-    body << [11, glsl_id, *str_words("GLSL.std.450")]
-    body << [14, 5348, 3]   # OpMemoryModel PhysicalStorageBuffer64 Vulkan
+    body << [11, glsl_id, *str_words(ext_set_name)]
+    body << (@kernel_cl ? [14, 2, 2] : [14, 5348, 3])   # OpMemoryModel Physical64 OpenCL, or PhysicalStorageBuffer64 Vulkan
     @entries.each do |model, fid, name, iface, _|
       body << [15, model, fid, *str_words(name), *iface]
     end
@@ -726,7 +757,9 @@ class SpvModule
     @sp = kernel_cl ? nil : spv.private_var(spv.t_int(64))
     @dead = kernel_cl ? nil : spv.private_var(spv.t_int(32))
     @spec = [spv.spec_u32(0, 1), spv.spec_u32(1, 1), spv.spec_u32(2, 1)]
-    spv.workgroup_size(@spec)
+    # Kernel mode: the local size is the spec constants (set by the host), and WorkgroupSize as a builtin constant is
+    # not valid in an OpenCL module (the validator wants a variable)
+    spv.workgroup_size(@spec) unless kernel_cl
     @fns = {}
     @defs = {}
     @stack_bytes = 0
@@ -783,6 +816,11 @@ class SFn
     @param_ids = []
     @callees = []
     setup if form
+  end
+
+  # The storage class of a memory access through a pointer made from an address: SC_PSB (Vulkan), SC_CROSSWG (Kernel).
+  def psb_sc
+    @mod.kernel_cl ? SC_CROSSWG : SC_PSB
   end
 
   # The per-invocation state a function reads: :push, :sp, :dead. Vulkan (no @state): the module globals. Kernel: the
@@ -991,6 +1029,11 @@ class SFn
   end
 
   def builtin_component(var, k)
+    if @mod.kernel_cl
+      v = res(61, @spv.builtin_vec_t, var)
+      c = res(81, @spv.t_int(64), v, k)
+      return res(113, @spv.t_int(32), c)   # OpUConvert: the IR's 32-bit index
+    end
     v = res(61, @spv.t_vec3, var)
     res(81, @spv.t_int(32), v, k)
   end
@@ -1117,7 +1160,7 @@ class SFn
 
   # the trap helper: set the flag to code, mark the invocation dead, return zero
   def trap(code)
-    flag_ptr = res(120, @spv.t_ptr(SC_PSB, @spv.t_int(32)), push_load(:flag, nil))
+    flag_ptr = res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), push_load(:flag, nil))
     ins([239, @spv.t_int(32), @spv.id, flag_ptr, @spv.c_u32(SCOPE_DEVICE), @spv.c_u32(SEM_RELAXED), @spv.c_u32(code)]) # OpAtomicUMax
     store_var(state(:dead), @spv.c_u32(1), @spv.t_int(32))
     emit_return(nil) unless @cont_exit
@@ -1184,7 +1227,7 @@ class SFn
   # ---- memory
 
   def psb_ptr(t)
-    @spv.t_ptr(SC_PSB, sty(t))
+    @spv.t_ptr(psb_sc, sty(t))
   end
 
   def addr_ptr(addr, t)
@@ -1204,7 +1247,7 @@ class SFn
 
   # the word that holds the byte at addr, and the shift of the byte in it
   def load_word(addr)
-    wp = res(120, @spv.t_ptr(SC_PSB, @spv.t_int(32)), aligned_word_addr(addr))
+    wp = res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), aligned_word_addr(addr))
     res(61, @spv.t_int(32), wp, 2, 4) # Aligned 4
   end
 
@@ -1237,7 +1280,7 @@ class SFn
       vv = t[3] ? bool_to_u32(v) : u32_of(v, t)
       vv = res(199, @spv.t_int(32), vv, @spv.c_u32(mask))
       sh = byte_shift(addr)
-      wp = res(120, @spv.t_ptr(SC_PSB, @spv.t_int(32)), aligned_word_addr(addr))
+      wp = res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), aligned_word_addr(addr))
       clear = res(196, @spv.t_int(32), @spv.c_u32(mask), sh)
       clear = res(200, @spv.t_int(32), clear)
       ins([240, @spv.t_int(32), @spv.id, wp, @spv.c_u32(SCOPE_DEVICE), @spv.c_u32(SEM_RELAXED), clear]) # OpAtomicAnd
@@ -1254,7 +1297,7 @@ class SFn
   # ---- the atomic compare-and-swap loop of a float atomic (WebGPU and Vulkan lack a float min/max)
   def float_atomic(p_addr, t, v, op)
     expected = var_decl(@spv.t_int(32))
-    wp = res(120, @spv.t_ptr(SC_PSB, @spv.t_int(32)), p_addr)
+    wp = res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), p_addr)
     ins([62, expected, res(61, @spv.t_int(32), wp, 2, 4)])
     hdr = new_label
     body = new_label
@@ -1269,7 +1312,7 @@ class SFn
     label(body)
     old = res(61, @spv.t_int(32), expected)
     f = res(124, @spv.t_float(32), old)
-    nf = op == :add ? res(129, @spv.t_float(32), f, v) : res(12, @spv.t_float(32), @spv.glsl_id, op == :min ? 37 : 40, f, v)
+    nf = op == :add ? res(129, @spv.t_float(32), f, v) : res(12, @spv.t_float(32), @spv.glsl_id, @spv.ext_num(op == :min ? 37 : 40), f, v)
     nb = res(124, @spv.t_int(32), nf)
     r = res_cas(wp, expected, nb)
     ok = res(170, @spv.t_bool, r, old)
@@ -1557,7 +1600,7 @@ class SFn
       lu = res(IADD, @spv.t_int(64), local_base, to_u64(push_load(:local_user, nil), ["int", 4, false, false]))
       return [lu, ["ptr"]]
     when "__nfcxx_sycl_barrier"
-      ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SEM_BARRIER)])
+      ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(@mod.kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)])
       return nil
     when "__nfcxx_sycl_fn1", "__nfcxx_sycl_fn2", "__nfcxx_sycl_fn3"
       op = args[0]
@@ -1575,7 +1618,7 @@ class SFn
       if g.nil? && k == 36
         # fmod: x - y * trunc(x / y)
         q = res(136, ft, xs[0], xs[1])
-        t = res(12, ft, @spv.glsl_id, 3, q)
+        t = res(12, ft, @spv.glsl_id, @spv.ext_num(3), q)
         return [res(131, ft, xs[0], res(133, ft, xs[1], t)), fty]
       end
       raise Refused, "#{name} operation #{k}" if g.nil?
@@ -1620,7 +1663,7 @@ class SFn
       xs = args.map { |a| operand(a)[0] }
       ft = @spv.t_float(32)
       q = res(136, ft, xs[0], xs[1])
-      t = res(12, ft, @spv.glsl_id, 3, q)
+      t = res(12, ft, @spv.glsl_id, @spv.ext_num(3), q)
       return [res(131, ft, xs[0], res(133, ft, xs[1], t)), ["float", 4]]
     end
     if %w[memcpy memmove __builtin_memcpy __builtin_memmove].include?(name) && args.length == 3 && head_of(args[2]) == "const"
@@ -1663,7 +1706,7 @@ class SFn
 
   def atomic_ptr(x)
     a, _ = operand(x)
-    res(120, @spv.t_ptr(SC_PSB, @spv.t_int(32)), a)
+    res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), a)
   end
 
   def res_cas_value(p, e, d)
@@ -1691,7 +1734,7 @@ class SFn
 
   def glsl_op(g, xs, ft)
     i = @spv.id
-    ins([12, ft, i, @spv.glsl_id, g, *xs])
+    ins([12, ft, i, @spv.glsl_id, @spv.ext_num(g), *xs])
     i
   end
 
@@ -2062,12 +2105,19 @@ def emit_module(src, kernel_cl = false)
   entries.each { |e| visit.call(e) }
 
   spv = Spv.new
-  spv.cap(1)
-  spv.cap(11)     # Int64
-  spv.cap(5347)   # PhysicalStorageBufferAddresses
-  spv.cap(5345)   # VulkanMemoryModel
-  spv.cap(5346)   # VulkanMemoryModelDeviceScope (device-scope atomics)
-  spv.ext("SPV_KHR_physical_storage_buffer")
+  spv.kernel_cl = kernel_cl
+  if kernel_cl
+    spv.cap(4)    # Addresses (the pointers are CrossWorkgroup, made from the 64-bit addresses)
+    spv.cap(6)    # Kernel
+    spv.cap(11)   # Int64
+  else
+    spv.cap(1)
+    spv.cap(11)     # Int64
+    spv.cap(5347)   # PhysicalStorageBufferAddresses
+    spv.cap(5345)   # VulkanMemoryModel
+    spv.cap(5346)   # VulkanMemoryModelDeviceScope (device-scope atomics)
+    spv.ext("SPV_KHR_physical_storage_buffer")
+  end
   spv.glsl_id
   smod = SpvModule.new(spv, kernel_cl)
   smod.irmod = mod
@@ -2109,7 +2159,7 @@ def emit_module(src, kernel_cl = false)
     wr.vars.each { |inst| spv.func(inst) }
     wr.code.each { |inst| spv.func(inst) }
     spv.func([56])
-    spv.add_entry(5, wr.fid, "k#{k}", iface, smod.spec_ids)
+    spv.add_entry(kernel_cl ? 6 : 5, wr.fid, "k#{k}", iface, smod.spec_ids)
     manifest << "k#{k}\t#{key}\t#{sizes[struct] || 0}"
   end
   static_bytes = 0
@@ -2119,7 +2169,7 @@ def emit_module(src, kernel_cl = false)
     relocs.each { |o, t| manifest << "R\t#{o}\t#{t}" }
   end
   manifest << "T\t#{stack_bytes}"
-  [spv.finish, manifest, nil]
+  [spv.finish(kernel_cl ? 0x00010200 : 0x00010500), manifest, nil]   # OpenCL 2.2 takes SPIR-V 1.2
 end
 
 def main(argv)
