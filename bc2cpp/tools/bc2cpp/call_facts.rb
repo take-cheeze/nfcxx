@@ -14,12 +14,13 @@ require_relative 'core_hierarchy_sigs'
 module CallFacts
   # mruby core classes the closed world does not declare (superclass) and the modules the core mixes into them,
   # from sig/native/core_hierarchy.rbs.
-  CORE_SUPER, CORE_MIXINS = CoreHierarchySigs.load
-  # A definer on one of these answers every object.
-  EVERYTHING = %w[Object Kernel BasicObject].to_set.freeze
+  CORE_SUPER, CORE_MIXINS = CoreHierarchySigs.hierarchy
+  # A definer on one of these answers every object: Object's ancestors (Object, Kernel, BasicObject).
+  EVERYTHING = CoreHierarchySigs.ancestors('Object').to_set.freeze
   CORE_MODULES = %w[Kernel Comparable Enumerable Math GC ObjectSpace Process Signal Marshal FileTest Errno].freeze
   CLASS_OBJECT = '<ClassObject>'
-  CLASS_OR_MODULE = %w[Class Module].to_set.freeze
+  # Class and its superclasses below Object (Class, Module).
+  CLASS_OR_MODULE = CoreHierarchySigs.superclasses_below('Class', 'Object').to_set.freeze
   # Names whose answer depends on a hook, not on a definition.
   HOOK_NAMES = %w[method_missing respond_to_missing? initialize].freeze
 

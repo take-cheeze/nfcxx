@@ -1,13 +1,15 @@
 # frozen_string_literal: true
 
+require_relative 'core_fact_sigs'
+
 # Shared index for analyses that need to visit every call to one method name.
 # Build once per bc2cpp invocation rather than rescanning all instructions for
 # every monomorphic name.
 class CallSiteIndex
   SEND_OPS = %w[SEND0 SEND SENDB SSEND0 SSEND SSENDB].freeze
-  # Kernel#to_enum / enum_for (mrblib): `to_enum(:meth, *args)` later runs `meth(*args)` on the receiver, so the
-  # site is a caller of `meth` although no SEND spells it.
-  ENUM_SENDS = %w[to_enum enum_for].freeze
+  # Kernel#to_enum / enum_for (sig/native/core_enumerators.rbs): `to_enum(:meth, *args)` later runs `meth(*args)` on
+  # the receiver, so the site is a caller of `meth` although no SEND spells it.
+  ENUM_SENDS = CoreFactSigs.enumerator_makers
   # Key of the sites whose method name is not a literal: any name could be their target. It is no
   # method name, so no registry entry collides with it. Read every list through .sites.
   UNKNOWN_TARGET = '(to_enum with a computed name)'
