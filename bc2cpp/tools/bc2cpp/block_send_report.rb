@@ -45,7 +45,7 @@ module BlockSendReport
     live = out.lines.reject { |l| l.lstrip.start_with?('//') }.join
     marker = out[%r{// BLOCK_CORE_DIRECT :\S+ -- (.*)}, 1].to_s
     shape = if marker.include?('no dynamic send') then 'removed'
-            elsif marker.start_with?('proven') then 'proven_guarded'
+            elsif marker.start_with?('proven', 'literal', 'implicit-self') then 'proven_guarded'
             elsif marker.start_with?('exact') then 'exact_arms'
             elsif live.match?(/\b\w+_impl\(M/) then 'mono_direct'
             else 'dynamic'
@@ -116,7 +116,7 @@ module BlockSendReport
     saved_env = ENV['BC2CPP_BLOCK_CORE_WHY']
     @block_core_reasons = Hash.new { |h, k| h[k] = [] }
     ENV['BC2CPP_BLOCK_CORE_WHY'] = '1'
-    BlockCoreDirectFallback::RECEIVERS.each { |klass, spec| block_core_target(klass, spec[:chain], name, argc) }
+    BlockCoreDirectFallback::BLOCK_RECEIVERS.each { |klass, spec| block_core_target(klass, spec[:chain], name, argc) }
     @block_core_reasons[[name, argc]].uniq.join('; ')
   ensure
     @block_core_reasons = saved

@@ -28,6 +28,15 @@ module BlockCoreDirectFallback
     'Range' => { guard: 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class', chain: %w[Range Enumerable] },
     'Integer' => { guard: 'mrb_integer_p(%<r>s)', chain: %w[Integer Numeric Comparable] }
   }.freeze
+  # BLOCK_ITERATOR_DIRECT (docs/adr/0470): the receivers a literal-block send gets arms for. String is a block
+  # receiver only (each_char, each_line, each_byte, ...): RECEIVERS also feeds the block-less exact-receiver and
+  # result proofs, which this ADR leaves as they are.
+  BLOCK_RECEIVERS = RECEIVERS.merge(
+    'String' => { guard: 'mrb_string_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->string_class', chain: %w[String Comparable] }
+  ).freeze
+  # The ops that load an Integer literal: their value is an Integer whatever the world is.
+  INTEGER_LITERAL_OPS = %w[LOADI LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7
+                           LOADI8 LOADI16 LOADI32 LOADINEG].freeze
 
   def native_direct_dynamic_line(d, recv, name, argv)
     block_core_direct_wrap(d, recv, name, argv, super)
@@ -50,6 +59,9 @@ module BlockCoreDirectFallback
 
     arms = block_core_arms(name, argv.size)
     if arms.empty?
+      kernel = block_core_kernel_line(d, recv, name, argv, tail)
+      return kernel if kernel
+
       reasons = @block_core_reasons && @block_core_reasons[[name, argv.size]]
       return tail unless reasons&.any?
 
@@ -60,6 +72,9 @@ module BlockCoreDirectFallback
     # else stays: a Fiber's frames need a real callinfo to reach the bytecode (ADR 0269).
     site = exact_core_site_for(recv, name)
     exact = site ? arms.select { |arm| arm[:class] == site[:klass] } : []
+    # BLOCK_ITERATOR_DIRECT (ADR 0470): an Integer literal receiver (`3.times { }`) is an Integer in every world.
+    literal = exact.empty? && arms.any? { |arm| arm[:class] == 'Integer' } && block_core_integer_literal?
+    exact = arms.select { |arm| arm[:class] == 'Integer' } if literal
     exact_class = !exact.empty?
     arms = exact if exact_class
     sole_call = nil
@@ -80,15 +95,91 @@ module BlockCoreDirectFallback
     # BLOCK_ARM_REACH (ADR 0310): a proven class and a block that cannot reach a yield leave nothing
     # for the dynamic else to answer.
     if sole_call
-      return "// BLOCK_CORE_DIRECT :#{name} -- proven #{arms.first[:class]} receiver, yield-free block: " \
+      return "// BLOCK_CORE_DIRECT :#{name} -- #{literal ? 'literal' : 'proven'} #{arms.first[:class]} receiver, yield-free block: " \
              "calls the compiled core body, no dynamic send\n  #{sole_call}\n"
     end
 
-    "// BLOCK_CORE_DIRECT :#{name} -- #{exact_class ? 'proven' : 'exact'} #{arms.map { |arm| arm[:class] }.join('/')} receiver at the root " \
+    proof = if literal then 'literal'
+            elsif exact_class then 'proven'
+            else 'exact'
+            end
+    "// BLOCK_CORE_DIRECT :#{name} -- #{proof} #{arms.map { |arm| arm[:class] }.join('/')} receiver at the root " \
       "context calls the compiled core body with the block\n" \
       "  #{branches}{\n" \
       "    #{tail.chomp}\n" \
       "  }\n"
+  end
+
+  # BLOCK_ITERATOR_DIRECT (ADR 0470): is the receiver of the literal-block send being compiled an Integer literal?
+  # Every dominating writer of its register, through MOVEs, is a LOADI* of the send's own irep (the parent irep of
+  # a block nested in an inlined loop body, whose registers the walk reads unshifted).
+  def block_core_integer_literal?
+    region = @call_block_region
+    irep = region && region[:parent_irep]
+    return false unless irep && region[:dest_reg] && !region[:self_implicit]
+
+    idx = irep.index_of_addr(region[:sendb_addr])
+    return false unless idx&.positive?
+
+    found = irep.walk_dominating_writers(idx - 1, region[:dest_reg].to_s, use: idx) do |insn, _i, _cur|
+      case insn.op
+      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
+      else INTEGER_LITERAL_OPS.include?(insn.op) ? :integer : nil
+      end
+    end
+    found == :integer
+  end
+
+  # BLOCK_ITERATOR_DIRECT (ADR 0470): an implicit-self literal-block send (`loop { }`) whose only definition in the
+  # program is mruby's own Kernel body calls that compiled body. The proof is the whole world's, not the receiver's:
+  # no Ruby, native or outside definition of the name anywhere and no installer (so no class answers it before
+  # Kernel), and no BasicObject subclass (so every self includes Kernel). A yield-free block over a relaxable body
+  # leaves no else; otherwise the root-context test of ADR 0269 keeps the dynamic send for a Fiber's frames.
+  def block_core_kernel_line(d, recv, name, argv, tail)
+    return nil unless recv == 'self' && @call_block_region&.dig(:self_implicit) && !@self_class_unknown
+
+    arm = block_core_kernel_arm(name, argv.size)
+    return nil unless arm
+
+    args, = direct_call_args(arm[:target], argv, arm[:impl])
+    call = "r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});"
+    note = "// BLOCK_CORE_DIRECT :#{name} -- implicit-self Kernel##{name} is the program's only definition"
+    if block_core_arm_unguarded?(arm) && block_arm_reach?
+      return "#{note}, yield-free block: calls the compiled core body, no dynamic send\n  #{call}\n"
+    end
+
+    "#{note}: at the root context calls the compiled core body with the block\n" \
+      "  if (M->c == M->root_c) {\n    #{call}\n  } else {\n    #{tail.chomp}\n  }\n"
+  end
+
+  def block_core_kernel_arm(name, arity)
+    @block_core_kernel_arms ||= {}
+    @block_core_kernel_arms.fetch([name, arity]) do
+      target = block_core_kernel_target(name, arity)
+      @block_core_kernel_arms[[name, arity]] =
+        target && { class: 'Kernel', target: target, impl: "#{cpp_name(target.owner, target.name)}_impl" }
+    end
+  end
+
+  def block_core_kernel_target(name, arity)
+    why = ->(reason) { block_core_refuse('Kernel', name, arity, reason) }
+    return why.call('a dynamic installer names it') if symbol_installed_names.nil? || symbol_installed_names.include?(name)
+    return why.call('a program definition of the name') unless (@registry[name] || []).empty?
+
+    registrations, opaque = block_core_registrations
+    return why.call('a native registration of the name') if registrations.key?(name) || opaque.key?(name)
+    return why.call('Kernel is not plain (prepend, mixin or outside definer)') unless block_core_owner_plain?('Kernel', name)
+
+    defs = block_core_index[['Kernel', name]]
+    return why.call('no compiled core definition on Kernel') unless defs&.one?
+    if block_core_index.any? { |(owner, other), list| other == name && owner != 'Kernel' && !list.empty? }
+      return why.call('a core definition on another owner')
+    end
+    unless block_core_world.kernel_ruby_dispatch_safe?(name, @ireps.fetch(defs.first.irep).file)
+      return why.call('an outside definer, or a BasicObject subclass')
+    end
+
+    block_core_callable(defs.first, arity, 'Kernel', name)
   end
 
   # Is the site's literal block proved yield-free and the arm's body relaxable? Recorded for the
@@ -122,7 +213,7 @@ module BlockCoreDirectFallback
     @block_core_arms ||= {}
     @block_core_arms.fetch([name, arity]) do
       @block_core_arms[[name, arity]] =
-        RECEIVERS.filter_map do |klass, spec|
+        BLOCK_RECEIVERS.filter_map do |klass, spec|
           target = block_core_target(klass, spec[:chain], name, arity)
           next unless target
 
