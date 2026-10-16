@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'core_hierarchy_sigs'
+
 # CodeGen: NUMERIC_SLOW_PATH (ADR 0292). The else of a guarded numeric arm is one typed helper per
 # operator that runs the C function the Integer/Float method (or vm.c's inline pair) runs for the
 # operand tags, and dispatches by name only for a class it does not own. What it cannot match
@@ -119,7 +121,8 @@ class CodeGen
   NUMERIC_SLOW_CMP_OWNERS = %w[Integer Float Numeric String Symbol Hash].freeze
   # Where `<=>` of a String, a Symbol or another Numeric is looked up; no Ruby may define it there, which keeps it
   # an Integer or nil answer (`cmp < 0`), and String's and Symbol's are the natives mrb_cmp reads directly.
-  NUMERIC_SLOW_CMP_LOOKUP = %w[String Symbol Numeric Comparable Object Kernel BasicObject].freeze
+  # The three receivers, then what they inherit (core_hierarchy.rbs).
+  NUMERIC_SLOW_CMP_LOOKUP = %w[String Symbol Numeric].then { |own| own | own.flat_map { |k| CoreHierarchySigs.ancestors(k) } }.freeze
   NUMERIC_SLOW_SPACESHIP = { 'String' => 'mrb_str_cmp_m', 'Symbol' => 'sym_cmp' }.freeze
 
   def numeric_slow_closed_cmp?(name)

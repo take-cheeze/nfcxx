@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'irep'
 require_relative 'bytecode_ir'
+require_relative 'core_hierarchy_sigs'
 require_relative 'core_defs'
 
 # ESCAPE_ANALYSIS (ADR 0316): one value-flow module for "does the value this instruction creates leave
@@ -144,11 +145,7 @@ module EscapeAnalysis
       'ZeroDivisionError' => 'StandardError', 'LocalJumpError' => 'StandardError',
       'FloatDomainError' => 'RangeError'
     }.freeze
-    BUILTIN_INCLUDES = {
-      'Object' => %w[Kernel], 'Numeric' => %w[Comparable], 'String' => %w[Comparable],
-      'Symbol' => %w[Comparable], 'Array' => %w[Enumerable], 'Hash' => %w[Enumerable],
-      'Range' => %w[Enumerable], 'Struct' => %w[Enumerable]
-    }.freeze
+    BUILTIN_INCLUDES = CoreHierarchySigs.hierarchy.last
 
     # Sends and constants that read a frame's locals or the whole heap by name, so no value is confined.
     REFLECTIVE_SENDS = %w[binding eval local_variable_get local_variable_set local_variables

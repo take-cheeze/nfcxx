@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'core_hierarchy_sigs'
 
 # CodeGen: CLASS_POOLS (ADR 0295).
 #
@@ -222,9 +223,9 @@ end
 
 # CodeGen: the nil half of a pooled class set (ADR 0296).
 class CodeGen
-  # Classes whose methods nil answers: itself and what it inherits. The ROM scan names a class
-  # after its `mrb->nil_class` field ("Nil"), its boot variable ("Basic_object") or its constant.
-  NIL_OWNER_NAMES = %w[NilClass Nil Object Kernel BasicObject Basic_object].freeze
+  # Classes whose methods nil answers: itself and what it inherits (core_hierarchy.rbs), each with the names the ROM
+  # scan gives it (CoreHierarchySigs::SCAN_SPELLINGS: "Nil", "Basic_object").
+  NIL_OWNER_NAMES = CoreHierarchySigs.with_scan_spellings(CoreHierarchySigs.ancestors('NilClass'))
 
   # Modules that reach nil through an include or prepend on one of its ancestors.
   def nil_ancestor_modules
@@ -277,7 +278,7 @@ class CodeGen
     return :registry if (@registry[name] || []).any? { |definition| nil_ancestor_modules.include?(definition.owner) }
 
     world.native_paths_spelling(name).each do |path|
-      registrations, opaque = NativeExpressionDevirt.scan_class_registrations([path])
+      registrations, opaque = NativeExpressionDevirt.path_registrations(path)
       owners = registrations.fetch(name, []).map { |entry| entry[:owner]&.fetch(:class_name, nil) } + opaque.fetch(name, [])
       return :unresolved_native_owner if owners.any?(&:nil?)
       return :native_on_nil if owners.any? { |owner| nil_ancestor_modules.include?(owner) }

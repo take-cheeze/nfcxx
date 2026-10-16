@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'touch_scan'
+require_relative 'core_hierarchy_sigs'
 require_relative 'foreign_definers'
 require_relative 'core_defs'
 require_relative 'native_names'
@@ -21,7 +22,7 @@ require_relative 'scan_cache'
 # Every question defaults to "refuse"; `refusal` returns the reason as a Symbol.
 class ClosedWorld
   # method_missing/respond_to_missing? here reach every receiver.
-  GLOBAL_HOOK_OWNERS = %w[BasicObject Object Kernel].freeze
+  GLOBAL_HOOK_OWNERS = CoreHierarchySigs.ancestors('Object')
   BOOT_CLASSES = %w[BasicObject Object Module Class Kernel].freeze
   # Sends that define methods the registry walk may not attribute to an owner.
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
@@ -450,7 +451,7 @@ class ClosedWorld
     return false if @global_refusal || @mm_classes.include?('NilClass')
     return false if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
 
-    owners.none? { |owner| ForeignDefiners.defines?(@ruby_paths, owner, name) }
+    !ForeignDefiners.defines_any?(@ruby_paths, owners, name)
   end
 
   # Every native source of the build that spells +name+ (a definition, an alias or a funcall).

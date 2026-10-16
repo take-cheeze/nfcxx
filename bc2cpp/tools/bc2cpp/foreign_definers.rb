@@ -21,18 +21,24 @@ module ForeignDefiners
 
   Result = Struct.new(:names, :wild)
 
+  # FOREIGN_DEFINERS_PER_LIST (ADR 0471): file list => [its stat key, Result]. One entry per list of files, so callers
+  # that alternate between lists (the closed world's outside Ruby, the same list without core sources, the frozen
+  # tables' foreign list) no longer evict each other and rewalk every syntax tree on each switch.
   @cache = {}
 
   module_function
 
-  # Memoized on file identity: a check that rewrites a fixture never sees stale text.
+  # Memoized on file identity: a check that rewrites a fixture never sees stale text. The stat key
+  # ([path, mtime, size] of every file) is compared with eql?, as the Hash key it replaces was.
   def scan(paths)
     files = Array(paths).select { |path| File.file?(path) }
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
-    @cache.fetch(key) do
-      @cache.clear
-      @cache[key] = scan_files(files)
-    end
+    hit = @cache[files]
+    return hit[1] if hit && hit[0].eql?(key)
+
+    result = scan_files(files)
+    @cache[files.freeze] = [key, result]
+    result
   end
 
   def scan_files(files)
@@ -50,6 +56,15 @@ module ForeignDefiners
   def defines?(paths, owner, name)
     result = scan(paths)
     result.wild.include?(owner) || result.names.fetch(owner, Set.new).include?(name)
+  end
+
+  # defines? for any of +owners+, from one scan: a caller asking about several owners checks the stat key once.
+  # No owners asks nothing, so it scans nothing (a foreign file that does not parse raises only when asked).
+  def defines_any?(paths, owners, name)
+    return false if owners.empty?
+
+    result = scan(paths)
+    owners.any? { |owner| result.wild.include?(owner) || result.names.fetch(owner, Set.new).include?(name) }
   end
 
   class Collector < Prism::Visitor

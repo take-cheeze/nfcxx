@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'core_fact_sigs'
+
 # ARG_SHAPES (docs/adr/0265): direct calls for the argument shapes the
 # mandatory/optional-only gates leave to dispatch. Callee side: a rest
 # parameter (`def f(a, *r)`) and a block parameter (`&blk`, or a `yield`). Caller
@@ -18,8 +20,9 @@ module ArgShapeCalls
   # `block_given?` and its alias `iterator?` (one cfunc in kernel.c) are modelled
   # (BLOCK_SEMANTICS, ADR 0266): they read the `bc2cpp_blk` parameter, see
   # compile_block_given.
-  BLOCK_GIVEN_NAMES = %w[block_given? iterator?].freeze
-  FRAME_READING_NAMES = %w[binding].freeze
+  # Kernel methods reading the caller's block or whole frame (sig/native/core_frame_readers.rbs).
+  BLOCK_GIVEN_NAMES = CoreFactSigs.block_given_names
+  FRAME_READING_NAMES = CoreFactSigs.frame_reading_names
 
   # `block_given?` / `iterator?` as a bare self call, at any block depth. Over-approximates
   # for a nested def, which only costs an unused block parameter.
