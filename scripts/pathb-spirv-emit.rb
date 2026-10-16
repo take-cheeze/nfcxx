@@ -433,6 +433,7 @@ SC_WORKGROUP = 4
 SC_PRIVATE = 6
 SC_FUNCTION = 7
 SC_PUSH_CONSTANT = 9
+SC_CROSSWG = 5
 SC_PSB = 5349
 SCOPE_DEVICE = 1
 SCOPE_WORKGROUP = 2
@@ -710,17 +711,20 @@ end
 # ------------------------------------------------------------------ the module's shared state
 
 class SpvModule
-  attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead
+  attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
   attr_accessor :stack_bytes, :fns, :defs
 
-  def initialize(spv)
+  # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
+  # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
+  def initialize(spv, kernel_cl = false)
     @spv = spv
-    @push = spv.push_var
+    @kernel_cl = kernel_cl
+    @push = kernel_cl ? nil : spv.push_var
     @gid = spv.builtin_input(BUILTIN_GLOBAL_INVOCATION_ID)
     @lid = spv.builtin_input(BUILTIN_LOCAL_INVOCATION_ID)
     @wid = spv.builtin_input(BUILTIN_WORKGROUP_ID)
-    @sp = spv.private_var(spv.t_int(64))
-    @dead = spv.private_var(spv.t_int(32))
+    @sp = kernel_cl ? nil : spv.private_var(spv.t_int(64))
+    @dead = kernel_cl ? nil : spv.private_var(spv.t_int(32))
     @spec = [spv.spec_u32(0, 1), spv.spec_u32(1, 1), spv.spec_u32(2, 1)]
     spv.workgroup_size(@spec)
     @fns = {}
@@ -730,6 +734,17 @@ class SpvModule
 
   def spec_size(i)
     @spec[i]
+  end
+
+  # The struct of the push block (the same type whether it is a PushConstant variable or a pointer parameter).
+  def push_struct_type
+    members = PUSH_MEMBERS.map { |(_, size)| size == 8 ? @spv.t_int(64) : @spv.t_int(32) }
+    @spv.t_struct(members, PUSH_OFFSET, :push)
+  end
+
+  # Kernel mode: the push block is a CrossWorkgroup pointer; Vulkan: a PushConstant variable.
+  def push_class
+    @kernel_cl ? SC_CROSSWG : SC_PUSH_CONSTANT
   end
 
   def spec_ids
@@ -744,7 +759,7 @@ end
 # ------------------------------------------------------------------ the IR types in SPIR-V
 
 class SFn
-  attr_reader :name, :fid, :ptypes, :ret, :frame, :callees, :ftype, :param_ids, :code
+  attr_reader :name, :fid, :ptypes, :ret, :frame, :callees, :ftype, :param_ids, :code, :vars, :param_lines
 
   def initialize(form, fid, mod)
     @form = form
@@ -770,10 +785,29 @@ class SFn
     setup if form
   end
 
+  # The per-invocation state a function reads: :push, :sp, :dead. Vulkan (no @state): the module globals. Kernel: the
+  # function's parameters (compile), or the wrapper's locals (compile_wrapper).
+  def state(name)
+    return @state[name] if @state && @state.key?(name)
+    return @mod.push if name == :push
+    return @mod.sp if name == :sp
+    @mod.dead
+  end
+
   # The entry of a kernel: sets this invocation's stack (its slot in the stack region, by global linear index) and the
   # dead flag, then calls the kernel's IR function.
   def compile_wrapper(ir_fn)
-    @ftype = @spv.t_fn(@spv.t_void, [])
+    @param_lines = []
+    if @mod.kernel_cl
+      push_p = @spv.id
+      @ftype = @spv.t_fn(@spv.t_void, [@spv.t_ptr(SC_CROSSWG, @mod.push_struct_type)])
+      @param_lines << [55, @spv.t_ptr(SC_CROSSWG, @mod.push_struct_type), push_p]
+      sp_v = var_decl(@spv.t_int(64))
+      dead_v = var_decl(@spv.t_int(32))
+      @state = { push: push_p, sp: sp_v, dead: dead_v }
+    else
+      @ftype = @spv.t_fn(@spv.t_void, [])
+    end
     @ret_t = @spv.t_void
     gx = global_comp(0)
     gy = global_comp(1)
@@ -788,9 +822,10 @@ class SFn
     base = push_load(:stack, nil)
     off = res(IMUL, t64, to_u64(lin, ["int", 4, false, false]), sbytes)
     top = res(IADD, t64, base, res(IADD, t64, off, sbytes))
-    ins([62, @mod.dead, @spv.c_u32(0)])
-    ins([62, @mod.sp, top])
-    ins([57, @spv.t_void, @spv.id, ir_fn])
+    ins([62, state(:dead), @spv.c_u32(0)])
+    ins([62, state(:sp), top])
+    call_args = @state ? [state(:push), state(:sp), state(:dead)] : []
+    ins([57, @spv.t_void, @spv.id, ir_fn, *call_args])
     term([253])
     self
   end
@@ -928,8 +963,8 @@ class SFn
 
   def push_load(member, t)
     idx = PUSH_INDEX.fetch(member)
-    ptr_t = @spv.t_ptr(SC_PUSH_CONSTANT, sty_of_push(member))
-    p = res(65, ptr_t, @mod.push, @spv.c_u32(idx))
+    ptr_t = @spv.t_ptr(@mod.push_class, sty_of_push(member))
+    p = res(65, ptr_t, state(:push), @spv.c_u32(idx))
     res(61, sty_of_push(member), p)
   end
 
@@ -1084,7 +1119,7 @@ class SFn
   def trap(code)
     flag_ptr = res(120, @spv.t_ptr(SC_PSB, @spv.t_int(32)), push_load(:flag, nil))
     ins([239, @spv.t_int(32), @spv.id, flag_ptr, @spv.c_u32(SCOPE_DEVICE), @spv.c_u32(SEM_RELAXED), @spv.c_u32(code)]) # OpAtomicUMax
-    store_var(@mod.dead, @spv.c_u32(1), @spv.t_int(32))
+    store_var(state(:dead), @spv.c_u32(1), @spv.t_int(32))
     emit_return(nil) unless @cont_exit
   end
 
@@ -1092,7 +1127,7 @@ class SFn
   # the back-edge block to post-dominate the continue target, and branches out of a selection only to its merge. So the
   # step's checks fall through, and after each one a branch (outside any selection) goes to the back-edge block.
   def dead_exit_to_back
-    d = res(61, @spv.t_int(32), @mod.dead)
+    d = res(61, @spv.t_int(32), state(:dead))
     c = res(171, @spv.t_bool, d, @spv.c_u32(0))
     nxt = new_label
     cond_branch(c, @cont_exit, nxt)
@@ -1106,7 +1141,7 @@ class SFn
   def emit_return(val)
     if @frame > 0
       old = res(61, @spv.t_int(64), @oldsp_var)
-      ins([62, @mod.sp, old])
+      ins([62, state(:sp), old])
     end
     if @ret.nil?
       term([253])
@@ -1130,7 +1165,7 @@ class SFn
 
   def check_dead_after_call
     return dead_exit_to_back if @cont_exit
-    d = res(61, @spv.t_int(32), @mod.dead)
+    d = res(61, @spv.t_int(32), state(:dead))
     c = res(171, @spv.t_bool, d, @spv.c_u32(0))
     t = new_label
     m = new_label
@@ -1614,6 +1649,7 @@ class SFn
     raise Refused, "call of #{name}, which has no body in the device unit (a host function, or a declaration)" if callee_fn.nil?
     raise Refused, "call of #{name} with #{args.length} arguments, it takes #{callee_fn.ptypes.length}" if args.length != callee_fn.ptypes.length
     xs = args.map { |a| operand(a)[0] }
+    xs += [state(:push), state(:sp), state(:dead)] if @mod.kernel_cl
     rt = callee_fn.ret ? sty(callee_fn.ret) : @spv.t_void
     if callee_fn.ret.nil?
       ins([57, rt, @spv.id, callee_fn.fid, *xs])
@@ -1939,17 +1975,25 @@ class SFn
     ret_t = @ret ? sty(@ret) : @spv.t_void
     @ptypes.each { |t| @param_ids << @spv.id }
     @ptypes.each_with_index { |t, k| @regs["%#{k}"] = [:val, @param_ids[k], t] }
-    @ftype = @spv.t_fn(ret_t, @ptypes.map { |t| sty(t) })
+    state_types = []
+    if @mod.kernel_cl
+      state_types = [@spv.t_ptr(SC_CROSSWG, @mod.push_struct_type), @spv.t_ptr(SC_FUNCTION, @spv.t_int(64)),
+                     @spv.t_ptr(SC_FUNCTION, @spv.t_int(32))]
+      @state_param_ids = state_types.map { @spv.id }
+      @state = { push: @state_param_ids[0], sp: @state_param_ids[1], dead: @state_param_ids[2] }
+    end
+    @state_types = state_types
+    @ftype = @spv.t_fn(ret_t, @ptypes.map { |t| sty(t) } + state_types)
     @ret_t = ret_t
     if @frame > 0
       @oldsp_var = var_decl(@spv.t_int(64))
       @frame_var = var_decl(@spv.t_int(64))
-      old = res(61, @spv.t_int(64), @mod.sp)
+      old = res(61, @spv.t_int(64), state(:sp))
       ins([62, @oldsp_var, old])
       fr = res(IADD, @spv.t_int(64), old, @spv.c_u64(-@frame))
       fr = res(199, @spv.t_int(64), fr, @spv.c_u64(0xfffffffffffffff0))
       ins([62, @frame_var, fr])
-      ins([62, @mod.sp, fr])
+      ins([62, state(:sp), fr])
     end
     @locals.each_value { |lv| lv[0] ||= var_decl(sty(lv[1])) }
     stmts(@body)
@@ -1967,6 +2011,7 @@ class SFn
     out = []
     out << [54, @ret_t, @fid, 0, @ftype]
     @ptypes.each_with_index { |t, k| out << [55, sty(t), @param_ids[k]] }
+    @state_types.each_with_index { |t, k| out << [55, t, @state_param_ids[k]] }
     lab = @spv.id
     out << [248, lab]
     @vars.each { |v| out << v }
@@ -1985,7 +2030,7 @@ class SpvModule
   end
 end
 
-def emit_module(src)
+def emit_module(src, kernel_cl = false)
   forms = parse_forms(tokenize(strip_comments(src)))
   mod = Mod.new
   sizes = {}
@@ -2024,7 +2069,7 @@ def emit_module(src)
   spv.cap(5346)   # VulkanMemoryModelDeviceScope (device-scope atomics)
   spv.ext("SPV_KHR_physical_storage_buffer")
   spv.glsl_id
-  smod = SpvModule.new(spv)
+  smod = SpvModule.new(spv, kernel_cl)
   smod.irmod = mod
   smod.defs = mod.defs
   fns = {}
@@ -2050,7 +2095,7 @@ def emit_module(src)
     fn = fns[n]
     fn.function_text.each { |inst| spv.func(inst) }
   end
-  iface = [smod.gid, smod.lid, smod.wid, smod.sp, smod.dead, smod.push]
+  iface = kernel_cl ? [smod.gid, smod.lid, smod.wid] : [smod.gid, smod.lid, smod.wid, smod.sp, smod.dead, smod.push]
   manifest = []
   entries.each_with_index do |e, k|
     f = fns[e]
@@ -2059,7 +2104,9 @@ def emit_module(src)
     raise Refused, "kernel #{e}: cannot find the closure type (no cast of __nfcxx_sycl_closure())" if key.nil?
     wr = SFn.new(nil, spv.id, smod).compile_wrapper(f.fid)
     spv.func([54, spv.t_void, wr.fid, 0, wr.ftype])
+    wr.param_lines.each { |inst| spv.func(inst) }
     spv.func([248, spv.id])
+    wr.vars.each { |inst| spv.func(inst) }
     wr.code.each { |inst| spv.func(inst) }
     spv.func([56])
     spv.add_entry(5, wr.fid, "k#{k}", iface, smod.spec_ids)
@@ -2078,18 +2125,21 @@ end
 def main(argv)
   args = argv.dup
   manifest_path = nil
+  kernel_cl = false
   while args.length > 0 && args[0].start_with?("--")
     opt = args.shift
     if opt.start_with?("--manifest=")
       manifest_path = opt[11..-1]
+    elsif opt == "--kernel-cl"
+      kernel_cl = true
     else
-      $stderr.write("usage: pathb-spirv-emit.rb [--manifest=FILE] [FILE.ir | -] > out.spv\n")
+      $stderr.write("usage: pathb-spirv-emit.rb [--kernel-cl] [--manifest=FILE] [FILE.ir | -] > out.spv\n")
       return 1
     end
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    words, manifest, _ = emit_module(src)
+    words, manifest, _ = emit_module(src, kernel_cl)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3
