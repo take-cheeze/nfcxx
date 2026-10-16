@@ -12,8 +12,8 @@
 #     Runs every scenario below under `valgrind --tool=callgrind` (headless:
 #     xvfb-run, SDL_AUDIODRIVER=dummy), one callgrind.<scenario>.out each. The
 #     first --game is the main game (every scenario); every further one only
-#     boots into its first map. The binary must be a full-compile build (no
-#     BC2CPP_HOT_ONLY) so every compiled method can show up.
+#     boots into its first map. The binary must be a full-compile build (run
+#     with BC2CPP_HOT_ONLY=0) so every compiled method can show up.
 #
 #   ruby scripts/bc2cpp/hot_profile.rb select --gen-dir build/mruby/host/mrbgems \
 #        [--threshold 0.98] /tmp/hot/callgrind.*.out > tools/bc2cpp/hot_methods.txt
