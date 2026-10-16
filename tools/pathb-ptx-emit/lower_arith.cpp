@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 
 namespace {
 
@@ -83,8 +84,30 @@ Operand FnCtx::operand(const Node &x) {
     emit("add.u64 " + t + ", " + sp + ", " + std::to_string(it->second) + ";");
     return {t, Ty{"ptr", -1, false, false}};
   }
-  if (x.kind == Node::Sym) throw Refused("operand " + form_text(x) + " (memory and call operands are not ported yet)");
+  if (x.kind == Node::Sym && x.sig == '@') return module_operand(x);
+  if (x.kind == Node::Sym) throw Refused("operand " + form_text(x) + " (call operands are not ported yet)");
   throw Refused("operand " + form_text(x));
+}
+
+Operand FnCtx::module_operand(const Node &x) {
+  const std::string &name = x.text;
+  auto in = [&](const std::set<std::string> ModuleSymbols::*set) { return mod && (mod->*set).count(name) > 0; };
+  std::string t = fresh("rd");
+  if (in(&ModuleSymbols::shared)) {
+    emit("cvta.shared.u64 " + t + ", " + ptx_sym(name) + ";");
+  } else if (in(&ModuleSymbols::globals)) {
+    emit("cvta.global.u64 " + t + ", " + ptx_sym(name) + ";");
+  } else if (in(&ModuleSymbols::consts)) {
+    // a constant with a value (see scalar_const_init): read-only memory, its address is generic through .const
+    emit("cvta.const.u64 " + t + ", " + ptx_sym(name) + ";");
+  } else if (in(&ModuleSymbols::externs)) {
+    throw Refused("global " + name + " is extern (no definition in this unit)");
+  } else if (in(&ModuleSymbols::strings)) {
+    emit("cvta.const.u64 " + t + ", " + string_const_sym(name) + ";");
+  } else {
+    throw Refused("static object @\"" + name + "\" (only block-shared and device globals are lowered)");
+  }
+  return {t, Ty{"ptr", -1, false, false}};
 }
 
 std::string FnCtx::reg_of(const std::string &op, const Ty &ty) {
