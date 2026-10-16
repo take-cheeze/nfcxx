@@ -66,17 +66,6 @@ class CodeGen
     [@constructor_pool_candidates.fetch([label, 1]).first, nil]
   end
 
-  # RBS_CHECKED_PARAMS (ADR 0456): the SETIV sites of `@name` as read in the body +label+ (blocks included), as
-  # [[irep, index, value register], ...], or [nil, why] when they are not all of its writers or a read may see the
-  # slot unassigned. NUMERIC_IVAR_PROOF's group (ADR 0276) holds every SETIV of the name in the reader's class family
-  # and fails when anything else may write it: an outside source spelling it, a Symbol or String naming it, a
-  # self-rebinding block, an attr_writer, a wild family, reflection. numeric_ivar_assured? (INIT_ASSIGNED, ADR 0261)
-  # proves every constructor of the reader's class and its descendants assigns it before the slot can be read,
-  # `self` escapes or the frame exits, and that nothing calls `allocate`.
-  def ivar_write_sites(label, name)
-    ivar_write_sites_of(ivar_reader_owner(label), name)
-  end
-
   # The class whose instance `self` is in the body +label+ (blocks included), or nil.
   def ivar_reader_owner(label)
     numeric_irep_owner[label]&.owner

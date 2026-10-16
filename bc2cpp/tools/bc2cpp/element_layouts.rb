@@ -573,8 +573,49 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
   end
 end
 
-class ArrayElementLayout
+# The queries over an element table (owner => { ivar => class }, UNKNOWN for an ivar
+# with no proven class), shared by ArrayElementLayout and HashElementLayout.
+module ElementTableQueries
   UNKNOWN = :unknown
+
+  # analyze's result minus UNKNOWN and empty owners. Kept separate so poisoned
+  # entries can be reported (`== array-element candidates ==`).
+  def known(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      # PRIMITIVE_ELEMENT_SUPPORT: primitive tags are dropped too; CodeGen consumers
+      # only guard with mrb_obj_class against registry classes.
+      known = ivars.reject { |_, c| c == UNKNOWN || PRIMITIVE_ELEMENT_CLASSES.include?(c) }
+      out[owner] = known unless known.empty?
+    end
+  end
+
+  # PRIMITIVE_ELEMENT_SUPPORT: diagnostic-only counterpart of `.known`, so
+  # provably-primitive ivars are not listed with the OPAQUE ones.
+  def primitives(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      prim = ivars.select { |_, c| PRIMITIVE_ELEMENT_CLASSES.include?(c) }
+      out[owner] = prim unless prim.empty?
+    end
+  end
+
+  def unknowns(table)
+    table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
+  end
+
+  # ANY_OPAQUE_SUPPORT: `.unknowns` split by `poison_reason`; a filter over
+  # `.unknowns` so the two cannot disagree.
+  def unknowns_by_reason(table, poison_reason, reason)
+    unknowns(table).select do |name|
+      owner, ivar = name.split('#@', 2)
+      poison_reason.dig(owner, ivar) == reason
+    end
+  end
+end
+
+class ArrayElementLayout
+  UNKNOWN = ElementTableQueries::UNKNOWN
+  extend ElementTableQueries
+
   # "This site provably introduces no elements"; kept apart from unreadable (see
   # array_element_source_scan's ARRAY arm).
   VACUOUS = :vacuous
@@ -720,39 +761,6 @@ class ArrayElementLayout
 
     elements
   end
-
-  # analyze's result minus UNKNOWN and empty owners. Kept separate so poisoned
-  # entries can be reported (`== array-element candidates ==`).
-  def self.known(table)
-    table.each_with_object({}) do |(owner, ivars), out|
-      # PRIMITIVE_ELEMENT_SUPPORT: primitive tags are dropped too; CodeGen consumers
-      # only guard with mrb_obj_class against registry classes.
-      known = ivars.reject { |_, c| c == UNKNOWN || PRIMITIVE_ELEMENT_CLASSES.include?(c) }
-      out[owner] = known unless known.empty?
-    end
-  end
-
-  # PRIMITIVE_ELEMENT_SUPPORT: diagnostic-only counterpart of `.known`, so
-  # provably-primitive ivars are not listed with the OPAQUE ones.
-  def self.primitives(table)
-    table.each_with_object({}) do |(owner, ivars), out|
-      prim = ivars.select { |_, c| PRIMITIVE_ELEMENT_CLASSES.include?(c) }
-      out[owner] = prim unless prim.empty?
-    end
-  end
-
-  def self.unknowns(table)
-    table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
-  end
-
-  # ANY_OPAQUE_SUPPORT: `.unknowns` split by `poison_reason`; a filter over
-  # `.unknowns` so the two cannot disagree.
-  def self.unknowns_by_reason(table, poison_reason, reason)
-    unknowns(table).select do |name|
-      owner, ivar = name.split('#@', 2)
-      poison_reason.dig(owner, ivar) == reason
-    end
-  end
 end
 
 # ELEMENT_CLASS_SUPPORT: the ivars a mutation's receiver may name: the GETIV
@@ -822,7 +830,9 @@ end
 # preserving-chain rule; unmodeled writers poison. Mirrors ArrayElementLayout's
 # analyze/known/unknowns, kept as its own class rather than parameterized.
 class HashElementLayout
-  UNKNOWN = :unknown
+  UNKNOWN = ElementTableQueries::UNKNOWN
+  extend ElementTableQueries
+
   VACUOUS = :vacuous
 
   # owner -> {ivar => value class}, only for ivars ClassLayout proved are Hashes.
@@ -944,33 +954,5 @@ class HashElementLayout
     end
 
     hash_elements
-  end
-
-  # As ArrayElementLayout.known, including the primitive-tag exclusion.
-  def self.known(table)
-    table.each_with_object({}) do |(owner, ivars), out|
-      known = ivars.reject { |_, c| c == UNKNOWN || PRIMITIVE_ELEMENT_CLASSES.include?(c) }
-      out[owner] = known unless known.empty?
-    end
-  end
-
-  # As ArrayElementLayout.primitives.
-  def self.primitives(table)
-    table.each_with_object({}) do |(owner, ivars), out|
-      prim = ivars.select { |_, c| PRIMITIVE_ELEMENT_CLASSES.include?(c) }
-      out[owner] = prim unless prim.empty?
-    end
-  end
-
-  def self.unknowns(table)
-    table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
-  end
-
-  # As ArrayElementLayout.unknowns_by_reason.
-  def self.unknowns_by_reason(table, poison_reason, reason)
-    unknowns(table).select do |name|
-      owner, ivar = name.split('#@', 2)
-      poison_reason.dig(owner, ivar) == reason
-    end
   end
 end

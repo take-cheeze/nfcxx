@@ -45,9 +45,6 @@ module RbsSignatures
   # SUBTREE_DISPATCH (docs/adr/0453): a `class C < S` declaration, checked against the program's own superclass.
   SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
 
-  MEMBER_OK = %w[MethodDefinition InstanceVariable AttrReader AttrAccessor].freeze
-  MEMBER_NOTED = %w[Public Private Alias Include Extend Prepend ClassInstanceVariable ClassVariable InstanceVariable
-                    AttrWriter].freeze
 
   module_function
 

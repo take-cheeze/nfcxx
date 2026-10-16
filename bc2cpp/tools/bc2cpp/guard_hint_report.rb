@@ -34,19 +34,10 @@ module GuardHintReport
         class_set = mask.nil? ? 'unmodelled' : class_mask_name(mask)
         class_set += ' [nilable arm]' if code.include?('// NILABLE_RECEIVER')
         ROWS[[irep.label, site]] = [irep.label, site, insn.sym, family, else_arm, origin, kwargs[:owner_def]&.irep,
-                                    origin_ivar(irep, site, reg, kwargs[:owner_def]), class_set].join("\t")
+                                    IrepScans.origin_ivar(irep, site, reg, kwargs[:owner_def]), class_set].join("\t")
       end
     end
     code
-  end
-
-  # `Owner#@ivar` when the nearest defining instruction is a GETIV, else empty.
-  def origin_ivar(irep, site, reg, owner_def)
-    irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP]) do |ins|
-      next IrepScans.follow(ins.regs[1]) if ins.op == 'MOVE' && ins.regs[1]
-
-      break "#{owner_def&.owner}#@#{ins.ivar}" if ins.op == 'GETIV'
-    end.to_s
   end
 
   def self.write(path)

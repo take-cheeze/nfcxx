@@ -13,7 +13,6 @@ module SiteCensus
   SEND_RE = /bc2cpp_send\(M, [^,]+, (\d+), (\d+)/
   FAM_RE = %r{^\s*//\s*([A-Z][A-Z0-9_]+)\b}
   # Non-bc2cpp_send by-name calls; the lookbehind keeps `mrb_funcall_id` from matching as `mrb_funcall`.
-  FUNCALL_RE = /(?<![\w.])(mrb_funcall_with_block|mrb_funcall_argv|mrb_funcall_id|mrb_funcall)\(/
   # The `#if` that opens the by-name copy of a closed helper (codegen_numeric_slow.rb); the copy ends at `#else`.
   NUMERIC_OPEN_FORM_GUARD = '#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)'
 

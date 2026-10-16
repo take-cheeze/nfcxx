@@ -70,8 +70,7 @@ end
 #
 # UPVAR_CAPTURE_SUPPORT: GETUPVAR/SETUPVAR capture a POINTER to the enclosing
 # function's register local (mrb_cptr_value(M, &rN)). uvenv(mrb, up) walks `up`
-# proc->upper hops (vm.c), so each captured level needs a matching frame (see
-# collect_block_upvars). E.g. `GETUPVAR R3 4 0` in `list.each { |x| total +=
+# proc->upper hops (vm.c), so each captured level needs a matching frame. E.g. `GETUPVAR R3 4 0` in `list.each { |x| total +=
 # x }` is the method's R4 at depth 0.
 # Pointer capture is sound only if the callee runs the block synchronously and
 # never stores it (LCF.lazy stores its block). That gate is
@@ -100,22 +99,6 @@ end
 # the block irep too. RESCUE/RAISEIF are always-correct translations; EXCEPT
 # needs a recognized region, so unrecognized shapes still produce `#error`.
 BLOCK_FALLBACK_UNSAFE_OPS = [].freeze
-
-# UPVAR_CAPTURE_SUPPORT: sorted, de-duplicated outer registers the block's
-# GETUPVAR/SETUPVAR reference. nil means "unsafe to capture" (distinct from []
-# "nothing to capture").
-def collect_block_upvars(block_irep)
-  upvars = []
-  block_irep.instructions.each do |insn|
-    next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
-
-    upvar_idx, depth = insn.upvar_ref
-    return nil unless depth.zero?
-
-    upvars << upvar_idx
-  end
-  upvars.uniq.sort
-end
 
 # DEEP_UPVAR_CAPTURE_SUPPORT: a captured pointer is named by (level, index),
 # not index alone: the same index at two levels names two variables, e.g. in
@@ -268,16 +251,13 @@ end
 # "; R<reg>:<name>" when the register is a named local. Anchor after the
 # register: an end-anchored `/(\d+)\s*$/` returns nil there, and `nil.to_i` is
 # a silent `goto L0`.
-def jmp_target_after_reg(args)
-  args[/^R\d+\s+(\d+)/, 1].to_i
-end
 
 def optional_arg_table(irep)
   enter = irep.enter
   return [0, nil, nil] unless enter
 
   fields = enter.enter_fields
-  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  _mand, opt, rest, mand2, _kw, kwrest, block = fields
   # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `kw` may be non-zero (`def f(a, b = 1, k:
   # nil)`): the default-value code falls through into the KEY_P/KARG/KEYEND
   # sequence keyword_arg_table recognizes independently.
@@ -328,7 +308,7 @@ def keyword_arg_table(irep)
   return nil unless enter
 
   fields = enter.enter_fields
-  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  _mand, _opt, rest, mand2, kw, kwrest, block = fields
   # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `opt` may be non-zero (see
   # optional_arg_table); this scan already covers the whole irep.
   return nil unless kw.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
@@ -361,7 +341,7 @@ def rest_only_arity?(irep)
   return false unless enter
 
   fields = enter.enter_fields
-  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  _mand, opt, rest, mand2, kw, kwrest, _block = fields
   # REST_BLOCK_COMBINED_SUPPORT: `block` may be non-zero (`def m(name, *args,
   # &block)`, ENTER 1:0:1:0:0:0:1:0): the block arrives at register
   # mand+rest+1. Both are pure ENTER-field facts, so no bytecode recognition is
@@ -377,7 +357,7 @@ def block_param_arity?(irep)
   return false unless enter
 
   fields = enter.enter_fields
-  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  _mand, opt, _rest, mand2, kw, kwrest, block = fields
   # REST_BLOCK_COMBINED_SUPPORT: `rest` may be non-zero (see rest_only_arity?).
   block.positive? && opt.zero? && mand2.zero? && kw.zero? && kwrest.zero?
 end

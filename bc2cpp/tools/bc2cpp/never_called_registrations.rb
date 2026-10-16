@@ -167,13 +167,6 @@ module NeverCalledRegistrations
     /^[ \t]*mrb_define_(?:private_)?method\(\s*M\s*,\s*\w+\s*,\s*"[^"]*"\s*,\s*#{Regexp.escape(entry)}\s*,[^;]*\);\n/
   end
 
-  # Whether `entry` still has a registration line in `register_src` -- the
-  # ground truth the prune script and check use, since `prunable_entries` only
-  # says "compiles and nothing calls it".
-  def registered_in_source?(register_src, entry)
-    register_src.match?(registration_line_pattern(entry))
-  end
-
   # The C++ entry-point identifiers any `mrb_define_(private_|class_)?method`
   # or generated `bc2cpp_define_private_class_method` call installs, across
   # the gem's hand register.cxx and bc2cpp.rb's own generated

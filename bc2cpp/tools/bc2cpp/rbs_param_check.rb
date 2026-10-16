@@ -407,7 +407,7 @@ module RbsParamCheck
     end
   end
 
-  # `@name` read in +irep+ is `cls` when every SETIV that can write the slot (CodeGen#ivar_write_sites) stores a
+  # `@name` read in +irep+ is `cls` when every SETIV that can write the slot (CodeGen#ivar_write_sites_of) stores a
   # value proven `cls` and no read can see it unassigned. A store that reads the slot back (`@a = @a`) is assumed
   # `cls` while it is being proven: by induction over the stores executed, no store is the first to write another
   # class. Top-level answers are kept for one round of the fixed point, since they rest on parameters still kept.
