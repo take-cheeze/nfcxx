@@ -73,8 +73,9 @@ check.call('build_config.rb enables the mode for single-format builds only',
 check.call('every compiled gem passes the mode through the checked env',
            BC2CPP_COMPILED_GEMS.keys.all? do |g|
              rake = File.read(File.join(root, g, 'mrbgem.rake'))
-             rake.include?('extend Bc2cppClosedWorldOption') && rake.include?('.merge(bc2cpp_closed_world_env(spec, ')
-           end)
+             rake.include?('extend Bc2cppClosedWorldOption') && rake.include?('Bc2cppCompiledGemGeneration.generate(spec, ')
+           end && File.read(File.join(root, 'tools/bc2cpp/compiled_gems.rb'))[/^def bc2cpp_compiled_gem_job.*?^end$/m]
+                      .to_s.include?('.merge(bc2cpp_closed_world_env(spec, '))
 spec = Struct.new(:name, :build) { include Bc2cppClosedWorldOption }
 build = Struct.new(:name, :gems)
 gem_list = ->(gems) { gems.map { |n, d| Struct.new(:name, :dir).new(n, d) } }

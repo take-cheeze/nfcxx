@@ -22,7 +22,9 @@ require 'open3'
 require 'set'
 require 'shellwords'
 require 'tmpdir'
+require 'fileutils'
 require_relative 'compiled_gems'
+require_relative 'shared_generation'
 
 module NeverCalledRegistrations
   SAFE_UNREGISTER_OWNER_RE = /\A(?:Game|RPG2k3?|LCF)(?:::|\z)/
@@ -40,11 +42,19 @@ module NeverCalledRegistrations
   # `hot_methods`: a hot-only build's list (ADR 0214). nil runs the full compile
   # and clears any inherited BC2CPP_HOT_METHODS, so these analyses never see one.
   def run_bc2cpp_full(gem_name, repo_root, mrbc, hot_methods: nil)
-    this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name) do
-      raise "never_called_registrations: no such compiled gem #{gem_name.inspect} in " \
-            'tools/bc2cpp/compiled_gems.rb'
+    run_bc2cpp_full_many([gem_name], repo_root, mrbc, hot_methods: hot_methods).fetch(gem_name)
+  end
+
+  # run_bc2cpp_full for several gems: { gem_name => [stdout, stderr] }. The runs differ only in which owners they
+  # emit, so they share one analysis (SHARED_GENERATION, ADR 0464): what each returns is what its own run returns.
+  def run_bc2cpp_full_many(gem_names, repo_root, mrbc, hot_methods: nil)
+    return {} if gem_names.empty?
+
+    gem_names.each do |gem_name|
+      next if BC2CPP_COMPILED_GEMS.key?(gem_name)
+
+      raise "never_called_registrations: no such compiled gem #{gem_name.inspect} in tools/bc2cpp/compiled_gems.rb"
     end
-    other_gems = BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }
     # A hot-only build's world holds no core Ruby (compiled_gems.rb bc2cpp_closed_world_srcs).
     closed_world_srcs = closed_world_mrblib_srcs(repo_root, core_gems: hot_methods ? nil : :canonical)
     # The canonical, target-independent native source set (as in
@@ -56,23 +66,29 @@ module NeverCalledRegistrations
 
     bc2cpp = File.expand_path('bc2cpp.rb', __dir__)
     Dir.mktmpdir('bc2cpp_never_called_probe') do |tmp|
-      env = {
+      common = {
         'MRBC' => mrbc,
-        'OUT_SYMBOL' => 'never_called_probe',
-        'OUT_DIR' => tmp,
-        'ONLY_OWNERS' => this_gem[:owners].join(','),
-        'OTHER_OWNERS' => other_gems.values.flat_map { |g| g[:owners] }.join(','),
         'NATIVE_SRCS' => Shellwords.join(native_srcs),
         'SKIP_UNSUPPORTED' => '1',
         'BC2CPP_HOT_METHODS' => hot_methods,
       }
-      cmd = [RbConfig.ruby, bc2cpp, *closed_world_srcs]
-      out, err, status = Open3.capture3(env, *cmd)
-      unless status.success?
-        warn err
-        raise "never_called_registrations: #{gem_name}'s own bc2cpp.rb run failed (see stderr above)"
+      units = gem_names.map do |gem_name|
+        dir = FileUtils.mkdir_p(File.join(tmp, gem_name)).first
+        {
+          'OUT_SYMBOL' => 'never_called_probe',
+          'OUT_DIR' => dir,
+          'ONLY_OWNERS' => BC2CPP_COMPILED_GEMS.fetch(gem_name)[:owners].join(','),
+          'OTHER_OWNERS' => BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }.values.flat_map { |g| g[:owners] }.join(','),
+        }
       end
-      [out, err]
+      results = SharedGeneration.run(tool: bc2cpp, srcs: closed_world_srcs, common_env: common, unit_envs: units)
+      gem_names.zip(results).to_h do |gem_name, (out, err, status)|
+        unless status.success?
+          warn err
+          raise "never_called_registrations: #{gem_name}'s own bc2cpp.rb run failed (see stderr above)"
+        end
+        [gem_name, [out, err]]
+      end
     end
   end
 
@@ -126,7 +142,11 @@ module NeverCalledRegistrations
   # scripts/bc2cpp/never_called_registrations_check.rb cross-check it against
   # the real register.cxx.
   def prunable_entries(gem_name, repo_root, mrbc)
-    stderr = run_bc2cpp(gem_name, repo_root, mrbc)
+    prunable_entries_in(run_bc2cpp(gem_name, repo_root, mrbc))
+  end
+
+  # prunable_entries from a run's stderr (run_bc2cpp_full_many gives several gems' at once).
+  def prunable_entries_in(stderr)
     compiled = parse_compiled_entries(stderr)
     never_called = parse_never_called_names(stderr)
     compiled.select { |m| never_called.include?("#{m[:owner]}##{m[:name]}") && safe_to_unregister?(m[:owner]) }

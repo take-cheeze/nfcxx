@@ -233,12 +233,15 @@ module StaticDispatchRegistrations
   # everything eligibility needs.
   def analyze(repo_root, mrbc, unregistered: STATIC_DISPATCH_UNREGISTERED)
     cache = ENV['STATIC_DISPATCH_CACHE'] # dev-only: reuse bc2cpp.rb output across runs
+    cached = ->(gem) { cache && %w[out err].map { |k| File.join(cache, "#{gem}.#{k}") }.all? { |p| File.exist?(p) } }
+    # Every gem still to run, from one shared analysis (SHARED_GENERATION, ADR 0464).
+    fresh = NeverCalledRegistrations.run_bc2cpp_full_many(GEMS.reject { |gem| cached.call(gem) }, repo_root, mrbc)
     runs = GEMS.to_h do |gem|
       paths = cache && %w[out err].map { |k| File.join(cache, "#{gem}.#{k}") }
       if paths&.all? { |p| File.exist?(p) }
         out, err = paths.map { |p| File.read(p, encoding: 'UTF-8') }
       else
-        out, err = NeverCalledRegistrations.run_bc2cpp_full(gem, repo_root, mrbc)
+        out, err = fresh.fetch(gem)
         if paths
           FileUtils.mkdir_p(cache)
           paths.zip([out, err]).each { |p, s| File.write(p, s) }

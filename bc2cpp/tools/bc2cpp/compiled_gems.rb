@@ -537,3 +537,83 @@ end
 def bc2cpp_hot_only_env(spec, env: ENV)
   bc2cpp_hot_only_build?(spec.build, env: env) ? { 'BC2CPP_HOT_METHODS' => BC2CPP_HOT_METHODS_PATH } : {}
 end
+
+# SHARED_GENERATION (ADR 0464): the bc2cpp.rb run of compiled gem `spec` -- [environment, sources, generated file],
+# exactly what each *-compiled/mrbgem.rake used to build inline. Called from a codegen task, once the gem list is
+# complete.
+def bc2cpp_compiled_gem_job(spec, gems_root)
+  require 'shellwords'
+  this_gem = BC2CPP_COMPILED_GEMS.fetch(spec.name)
+  other_gems = BC2CPP_COMPILED_GEMS.reject { |name, _| name == spec.name }
+  native_srcs = bc2cpp_rgss_native_srcs(gems_root, spec.build.name) + core_native_srcs("#{gems_root}/3rd/mruby") +
+                external_gem_native_srcs(gems_root)
+  env = {
+    'MRBC' => spec.build.mrbcfile.to_s,
+    'OUT_SYMBOL' => this_gem[:out_symbol],
+    'OUT_DIR' => spec.build_dir,
+    'ONLY_OWNERS' => this_gem[:owners].join(','),
+    # Every other compiled gem's owners and declarations: a direct call here may reference their `_impl`s.
+    'OTHER_OWNERS' => other_gems.values.flat_map { |g| g[:owners] }.join(','),
+    'OTHER_DECLS_HEADER' => Shellwords.join(other_gems.map { |name, g| "#{spec.build.build_dir}/mrbgems/#{name}/#{g[:out_symbol]}_decls.h" }),
+    'NATIVE_SRCS' => Shellwords.join(native_srcs),
+    'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(gems_root)),
+    # A `#error` the toolchain compiles halts the build: a method bc2cpp cannot compile is not emitted and keeps
+    # running interpreted.
+    'SKIP_UNSUPPORTED' => '1'
+  }.merge(bc2cpp_closed_world_env(spec, gems_root)).merge(bc2cpp_hot_only_env(spec))
+  [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
+end
+
+# Generates `spec`'s file together with every other compiled gem of the same build whose file is out of date, in one
+# bc2cpp.rb process per group of gems that analyse the same program (same sources, same environment but for
+# SharedGeneration::UNIT_KEYS). Rake -m runs the gems' codegen tasks concurrently: the first to arrive generates the
+# group, the others find their file done.
+module Bc2cppCompiledGemGeneration
+  @mutex = Mutex.new
+  @done = {}
+
+  module_function
+
+  def generate(spec, gems_root)
+    require 'rake'
+    require 'json'
+    require_relative 'shared_generation'
+    extend Rake::FileUtilsExt unless singleton_class.include?(Rake::FileUtilsExt)
+    _, _, generated = bc2cpp_compiled_gem_job(spec, gems_root)
+    @mutex.synchronize do
+      next if @done[generated]
+
+      specs = spec.build.gems.select do |g|
+        next true if g.equal?(spec)
+        next false unless BC2CPP_COMPILED_GEMS.key?(g.name)
+
+        task = Rake::Task.task_defined?(bc2cpp_compiled_gem_job(g, gems_root)[2]) &&
+               Rake::Task[bc2cpp_compiled_gem_job(g, gems_root)[2]]
+        task && task.needed? && !@done[task.name]
+      end
+      jobs = specs.map { |g| bc2cpp_compiled_gem_job(g, gems_root) }
+      jobs.group_by { |env, srcs, _| [env.reject { |k, _| SharedGeneration::UNIT_KEYS.include?(k) }, srcs] }
+          .each { |(common, srcs), group| run_group(common, srcs, group, gems_root) }
+    end
+  end
+
+  def run_group(common, srcs, group, gems_root)
+    bc2cpp = File.join(gems_root, 'tools/bc2cpp/bc2cpp.rb')
+    group.each { |env, _, _| FileUtils.mkdir_p(env.fetch('OUT_DIR')) }
+    if group.size == 1
+      env, _, generated = group.first
+      sh env, "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{srcs.map(&:shellescape).join(' ')} > #{generated.shellescape}"
+    else
+      plan = "#{group.first[2]}.units.json"
+      units = group.map do |env, _, generated|
+        { 'env' => env.slice(*SharedGeneration::UNIT_KEYS), 'out' => generated, 'err' => "#{generated}.stderr" }
+      end
+      File.write(plan, JSON.generate(units))
+      sh common.merge(SharedGeneration::UNIT_KEYS.to_h { |k| [k, nil] }),
+         "#{RbConfig.ruby.shellescape} #{bc2cpp.shellescape} #{SharedGeneration::FLAG} #{plan.shellescape} " \
+         "#{srcs.map(&:shellescape).join(' ')}"
+      FileUtils.rm_f([plan, *units.map { |unit| unit['err'] }])
+    end
+    group.each { |_, _, generated| @done[generated] = true }
+  end
+end
