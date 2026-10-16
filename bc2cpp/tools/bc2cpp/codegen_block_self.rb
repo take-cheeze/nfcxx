@@ -13,8 +13,9 @@ require_relative 'block_self'
 #   * a literal block argument: the BLOCK that makes it is the instruction right before the SENDB/SSENDB that
 #     takes it (plain fixed argc, block register dest + n + 1), so that call is the only code the Proc reaches;
 #   * taken by a call whose every possible callee only calls the Proc:
-#       - `RGSS::Profiler.section/frame { }`, the native PROFILER_RESULTS pins (profiler_result_body: profiler.cxx,
-#         SHA-pinned, mrb_yield_argv, which keeps the Proc's self);
+#       - a call whose every callee is a checked block-return declaration (BLOCK_RETURNS, ADR 0472,
+#         codegen_block_returns.rb: a Ruby plain yielder, or a native whose scan shows mrb_yield/mrb_yield_argv,
+#         which keep the Proc's self), such as `RGSS::Profiler.section/frame { }`;
 #       - otherwise every definition of the name (the registry's, and the interpreted core bodies the registry
 #         drops, CodeGen.block_self_bodies) must be a Ruby body that is a plain yielder, or an attr accessor (which
 #         ignores a block); a native refuses. The name must have no definition out of sight: none the closed world
@@ -80,7 +81,7 @@ class CodeGen
            block.reg.to_i == send.reg.to_i + send.argc.to_i + 1
       return "the block at #{where} is not a literal block argument"
     end
-    return nil if profiler_result_body(parent, creation + 1, send)&.label == child
+    return nil if block_return_site(parent, creation + 1, send)&.last&.label == child
 
     block_self_callee_why(send.sym.to_s)
   end

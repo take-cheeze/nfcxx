@@ -527,7 +527,7 @@ class CodeGen
     each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       next unless mandatory_arity(block_irep).zero? && pure_mandatory_arity?(block_irep)
-      next if @closed_world && !profiler_result_lookup_safe?(meth)
+      next if @closed_world && !profiler_native_lookup_safe?(meth)
       # A standalone helper cannot return from the enclosing Ruby method.
       next unless core_ruby_result_exits_safe?(block_irep)
 
@@ -552,6 +552,18 @@ class CodeGen
                    block_irep: block_irep, method_name: meth, section_name: section_name }
     end
     regions
+  end
+
+  # The native the call reaches is profiler.cxx's own function, checked to return its block's value (BLOCK_RETURNS,
+  # ADR 0472: the sig/native declaration of RGSS::Profiler.section/frame, its source scan and the closed-world
+  # lookup conditions). The emitter replaces that function with profiler.cxx's primitives, so the one native source
+  # must be that file.
+  def profiler_native_lookup_safe?(meth)
+    entry = block_return_entry('RGSS::Profiler.singleton', meth)
+    return false unless entry && entry.native && entry.kind == :block_value && entry.args == PROFILER_SECTION_NAMES[meth]
+
+    paths = block_return_native_paths(meth)
+    paths.one? && paths.first.end_with?('/mruby-rgss/src/profiler.cxx') && block_return_native_lookup_safe?(entry)
   end
 
   # Is `reg` the literal constant path RGSS::Profiler at this call? `idx` is the

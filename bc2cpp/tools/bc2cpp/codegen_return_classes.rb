@@ -60,7 +60,7 @@ class CodeGen
     end
 
     def block_send_mask(irep, index, insn, state)
-      @cg.profiler_class_result(irep, index, insn) || @cg.core_ruby_class_result(irep, index, insn, state) ||
+      @cg.block_return_class_result(irep, index, insn, state) || @cg.core_ruby_class_result(irep, index, insn, state) ||
         @cg.bottom_block_receiver_mask(insn, state) || NumericFlow::OTHER
     end
 
@@ -177,7 +177,7 @@ class CodeGen
     @rc_oracle = ExactOracle.new(self)
     return unless @foreign_method_names && @closed_world&.exact_instances_singleton_free?
 
-    setup_profiler_result_dependencies
+    setup_block_return_dependencies
     setup_class_pools
     numeric_return_candidates.each { |name| @rc_return[name] = 0 }
     @ireps.each_value do |irep|
@@ -261,7 +261,7 @@ class CodeGen
       @rc_states.delete(cur)
       @rc_writes.delete(cur)
       stack.concat(Array(@ireps[cur]&.reps))
-      stack.concat(Array(@profiler_result_parents&.fetch(cur, nil)))
+      stack.concat(Array(@block_return_parents&.fetch(cur, nil)))
     end
   end
 
