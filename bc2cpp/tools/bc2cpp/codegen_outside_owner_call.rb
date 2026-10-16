@@ -34,6 +34,19 @@ module OutsideOwnerCall
     lifted.sub(error) { outside_owner_call_line(d, recv, name, argv, owners) }
   end
 
+  # A send with no guard chain (POLY's bare dispatch): the same closed-world question with no Ruby arm listed. The
+  # chain the refusal still allows (UNLISTED_CLASS_CALL arms for Ruby definers, native arms) is kept in front of the
+  # owner call; any other answer (a kept dispatch, a dead nomethod) leaves the bare send as it was.
+  def outside_owner_bare_line(d, recv, name, argv, site)
+    return nil unless @closed_world && site && outside_owner_call_owners(name)
+
+    line = guarded_fallback_line(d, recv, name, argv, [], site)
+    return nil unless line.include?("/* CLOSED_WORLD owner-call: #{name} */") && !line.include?('bc2cpp_nomethod')
+
+    "// OUTSIDE_OWNER_CALL :#{name} -- no guard chain; every class answering it is a named outside owner (ADR 0468)\n" \
+      "  #{line}"
+  end
+
   # `r = bc2cpp_owner_call_named(M, recv, "name", LEVEL, BC2CPP_OWNERS(...), blk, argc, args...)`. LEVEL is the
   # OP_SEND check level CheckedSend fills in for a real SEND instruction (0 for any other site); SymbolCache turns
   # the name into its slot.

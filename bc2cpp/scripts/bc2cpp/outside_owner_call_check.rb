@@ -46,6 +46,7 @@ SOURCE = <<~RUBY
     def nm(o); o.name; end
     def at(o); o.at; end
     def pr(o, x); o.print(x); end
+    def pk(o, f); o.pack(f); end
   end
 RUBY
 OWNERS = %w[Bag Probe].freeze
@@ -65,6 +66,10 @@ Dir.mktmpdir('outside-owner-call') do |dir|
   check.call('name: owners include Symbol and NameError', (%w[NameError Symbol] - owners_of.call(body.call(code, 'nm'))).empty?)
   check.call('at: owners include Array', owners_of.call(body.call(code, 'at')).include?('Array'))
   check.call('print: owners include Kernel', owners_of.call(body.call(code, 'pr')).include?('Kernel'))
+  pk = body.call(code, 'pk')
+  check.call('bare pack (no guard chain): the send is the owner call with Array as its owner',
+             pk.include?('OUTSIDE_OWNER_CALL :pack') && pk.include?('bc2cpp_owner_call(M, ') &&
+               owners_of.call(pk).include?('Array') && !pk.include?('bc2cpp_send('))
   check.call('helper emitted once', code.scan('static mrb_value bc2cpp_owner_call(').size == 1)
   check.call('closed-world summary keeps no core_or_native', !err.include?('KEPT core_or_native'))
 
@@ -107,6 +112,9 @@ Dir.mktmpdir('outside-owner-call') do |dir|
         row(M, "array.at (aspec)", "at", eval(M, "[1]"), 0, mrb_nil_value());
         row(M, "object.print (private)", "pr", eval(M, "Object.new"), 1, two);
         row(M, "stringio.print", "pr", eval(M, "StringIO.new"), 1, two);
+        row(M, "array.pack", "pk", eval(M, "[65, 66]"), 1, mrb_str_new_lit(M, "C*"));
+        row(M, "string.pack", "pk", eval(M, "'ab'"), 1, mrb_str_new_lit(M, "C*"));
+        row(M, "nil.pack", "pk", mrb_nil_value(), 1, mrb_str_new_lit(M, "C*"));
         mrb_define_method(M, M->integer_class, "delete", rogue_delete, MRB_ARGS_REQ(1));
         row(M, "rogue Integer#delete", "del", mrb_int_value(M, 5), 1, two);
         return 0;
