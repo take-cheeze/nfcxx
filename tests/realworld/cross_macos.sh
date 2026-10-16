@@ -65,8 +65,12 @@ doctest)
   # The Darwin branch of doctest's debugger check reads the kinfo_proc layout (sys/sysctl.h). doctest's own
   # DOCTEST_IS_DEBUGGER_ACTIVE() override replaces that whole check; it is defined here as "not under a debugger", for
   # the cross build only.
-  NFCXX_CXX_FLAGS="-I$src -DDOCTEST_IS_DEBUGGER_ACTIVE()=false" \
-    scripts/macos-cxx-check.sh tests/realworld/doctest_main.cpp "$W/doctest.s" >/dev/null
+  if ! NFCXX_CXX_FLAGS="-I$src -DDOCTEST_IS_DEBUGGER_ACTIVE()=false" \
+       scripts/macos-cxx-check.sh tests/realworld/doctest_main.cpp "$W/doctest.s" >/dev/null; then
+    echo "cross_macos: doctest is blocked, not built: its headers need libc++ localization (<fstream>, <sstream>, <locale>)," >&2
+    echo "  which the clean-room libc++ config turns off, and tests/macos-sysroot has no xlocale.h or locale functions." >&2
+    exit 3
+  fi
   llvm-mc -triple=arm64-apple-darwin -filetype=obj "$W/doctest.s" -o "$W/doctest.o"
   LINK_EXTRA=(-L tests/macos-sysroot/lib -lc++); link "$out" "$W/doctest.o"
   echo "expected on the Mac: exit code 2 (two deliberate CHECK failures); doctest prints its summary"
