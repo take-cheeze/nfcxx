@@ -192,6 +192,10 @@ enum CEmit {
       out += "  free(p);\n}\n\n"
 
       let params = c.fields.isEmpty ? "void" : c.fields.map { "\($0.ty.cName) \($0.cName)" }.joined(separator: ", ")
+      out += "static s_\(name) * a_\(name)(void) {\n"
+      out += "  s_\(name) *o = calloc(1, sizeof *o);\n"
+      out += "  if (!o) sw_trap(\"out of memory\");\n"
+      out += "  o->hdr.rc = 1;\n  o->hdr.destroy = d_\(name);\n  return o;\n}\n\n"
       out += "static s_\(name) * n_\(name)(\(params)) {\n"
       out += "  s_\(name) *o = calloc(1, sizeof *o);\n"
       out += "  if (!o) sw_trap(\"out of memory\");\n"
@@ -298,6 +302,10 @@ enum CEmit {
     case .structLit(let s, let args):
       let inits = zip(s.fields, args).map { ".\($0.0.cName) = \(expr($0.1))" }
       return "((s_\(cIdent(s.name))){ " + inits.joined(separator: ", ") + " })"
+    case .allocObject(let c):
+      return "a_\(cIdent(c.name))()"
+    case .zeroValue:
+      return "((\(e.ty.cName)){0})"
     case .construct(let c, let args):
       return "n_\(cIdent(c.name))(\(args.map(expr).joined(separator: ", ")))"
     case .prefix("-", let v):

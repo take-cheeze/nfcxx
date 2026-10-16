@@ -59,6 +59,21 @@ private struct GenericParam {
 
 /// A deinitializer of a generic class instance. It is lowered after the pass that
 /// created the instance, so that the functions it calls have been declared.
+/// An initializer whose body is lowered after the rest of the program, under the
+/// type environment of the instance it belongs to.
+private struct PendingInit {
+  let info: FuncInfo
+  let decl: InitializerDeclSyntax
+  let env: [String: Ty]
+  let owner: Ty
+}
+
+private struct PendingMethod {
+  let info: FuncInfo
+  let decl: FunctionDeclSyntax
+  let env: [String: Ty]
+}
+
 private struct PendingDeinit {
   let info: FuncInfo
   let decl: DeinitializerDeclSyntax
@@ -75,6 +90,8 @@ final class Lowerer {
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
   private var globals: [Global] = []
+  /// Top-level variables. Function bodies and closures see them as globals.
+  private var globalVars: [String: Local] = [:]
   private var scopes: [Scope] = []
   private var returnType: Ty? = nil
   private var counter = 0
@@ -95,6 +112,10 @@ final class Lowerer {
   private var instClasses: [ClassInfo] = []
   private var instEnums: [EnumInfo] = []
   private var pendingDeinits: [PendingDeinit] = []
+  private var pendingInits: [PendingInit] = []
+  private var pendingMethods: [PendingMethod] = []
+  /// True while lowering an initializer body, where `self` may be assigned.
+  private var initializingSelf = false
   private var typeEnv: [String: Ty] = [:]
   private var instantiationDepth = 0
 
@@ -158,11 +179,16 @@ final class Lowerer {
     markReferenceEnums(enumDecls.map { $0.1 })
     var deinitDecls: [(DeinitializerDeclSyntax, ClassInfo)] = []
     for (decl, info) in structDecls {
-      info.fields = try lowerMembers(decl.memberBlock, isClass: false).fields
+      let members = try lowerMembers(decl.memberBlock, isClass: false)
+      info.fields = members.fields
+      info.initializers = try declareInitializers(members.initializers, owner: .structure(info.name), env: [:], name: info.name)
+      info.methods = try declareMethods(members.methods, owner: .structure(info.name), env: [:], name: info.name)
     }
     for (decl, info) in classDecls {
       let members = try lowerMembers(decl.memberBlock, isClass: true)
       info.fields = members.fields
+      info.initializers = try declareInitializers(members.initializers, owner: .cls(info.name), env: [:], name: info.name)
+      info.methods = try declareMethods(members.methods, owner: .cls(info.name), env: [:], name: info.name)
       if let d = members.deinitializer {
         deinitDecls.append((d, info))
       }
@@ -205,18 +231,8 @@ final class Lowerer {
       deinitBodies.append((d, info))
     }
 
-    // Pass 4: bodies.
-    for (decl, info) in funcDecls {
-      guard let body = decl.body else { throw error("function without a body", decl) }
-      info.body = try lowerBody(info, body, decl)
-    }
-    for (d, info) in deinitBodies {
-      guard let body = d.body else { throw error("deinit without a body", d) }
-      info.body = try lowerBody(info, body, d)
-    }
-    try lowerPendingDeinits()
-
-    // Pass 5: top-level statements. Their variables are visible only here, and
+    // Pass 4: top-level statements. They run before function bodies so that the
+    // global variables they declare are visible to functions. Their variables are visible only here, and
     // they are never released.
     scopes = [Scope()]
     returnType = nil
@@ -247,6 +263,18 @@ final class Lowerer {
     }
     try checkRecursion(sizeNodes)
 
+    // Pass 5: bodies.
+    for (decl, info) in funcDecls {
+      guard let body = decl.body else { throw error("function without a body", decl) }
+      info.body = try lowerBody(info, body, decl)
+    }
+    for (d, info) in deinitBodies {
+      guard let body = d.body else { throw error("deinit without a body", d) }
+      info.body = try lowerBody(info, body, d)
+    }
+
+    try lowerPendingDeinits()
+
     return Program(
       structs: structDecls.map { $0.1 } + instStructs,
       classes: classDecls.map { $0.1 } + instClasses,
@@ -270,9 +298,11 @@ final class Lowerer {
   private func lowerMembers(
     _ block: MemberBlockSyntax,
     isClass: Bool
-  ) throws -> (fields: [Field], deinitializer: DeinitializerDeclSyntax?) {
+  ) throws -> (fields: [Field], deinitializer: DeinitializerDeclSyntax?, initializers: [InitializerDeclSyntax], methods: [FunctionDeclSyntax]) {
     var fields: [Field] = []
     var deinitializer: DeinitializerDeclSyntax? = nil
+    var initializers: [InitializerDeclSyntax] = []
+    var methods: [FunctionDeclSyntax] = []
     for member in block.members {
       if let v = member.decl.as(VariableDeclSyntax.self) {
         let mutable = v.bindingSpecifier.tokenKind == .keyword(.var)
@@ -296,6 +326,10 @@ final class Lowerer {
       } else if isClass, let d = member.decl.as(DeinitializerDeclSyntax.self) {
         if deinitializer != nil { throw error("invalid redeclaration of 'deinit'", d) }
         deinitializer = d
+      } else if let i = member.decl.as(InitializerDeclSyntax.self) {
+        initializers.append(i)
+      } else if let m = member.decl.as(FunctionDeclSyntax.self) {
+        methods.append(m)
       } else {
         throw error("this member is not supported in M2", member)
       }
@@ -303,7 +337,7 @@ final class Lowerer {
     if !isClass && fields.isEmpty {
       throw error("structs without stored properties are not supported yet", block)
     }
-    return (fields, deinitializer)
+    return (fields, deinitializer, initializers, methods)
   }
 
   private func lowerEnumCases(_ decl: EnumDeclSyntax) throws -> [EnumCase] {
@@ -389,10 +423,9 @@ final class Lowerer {
     }
   }
 
-  private func declareFunction(_ f: FunctionDeclSyntax, instanceName: String? = nil) throws -> FuncInfo {
-    let name = instanceName ?? f.name.text
+  private func declareParams(_ parameters: FunctionParameterListSyntax) throws -> [Param] {
     var params: [Param] = []
-    for p in f.signature.parameterClause.parameters {
+    for p in parameters {
       // `func f(_ x: Int)` has no label; `func f(x: Int)` uses x as both.
       let first = p.firstName.text
       let label: String? = first == "_" ? nil : first
@@ -400,6 +433,12 @@ final class Lowerer {
       let cName = "p\(nextID())_" + internalName
       params.append(Param(label: label, name: internalName, cName: cName, ty: try resolveType(p.type)))
     }
+    return params
+  }
+
+  private func declareFunction(_ f: FunctionDeclSyntax, instanceName: String? = nil) throws -> FuncInfo {
+    let name = instanceName ?? f.name.text
+    let params = try declareParams(f.signature.parameterClause.parameters)
     let ret: Ty
     if let clause = f.signature.returnClause {
       ret = try resolveType(clause.type)
@@ -413,7 +452,7 @@ final class Lowerer {
     var root = Scope()
     for p in info.params {
       root.vars[p.name] = Local(cName: p.cName, ty: p.ty, mutable: false)
-      if info.ownsParams && p.ty.isClassLike {
+      if info.ownsParams && p.ty.isClassLike && p.name != "self" {
         root.owned.append((cName: p.cName, ty: p.ty))
       }
     }
@@ -464,6 +503,7 @@ final class Lowerer {
         // Top-level code: the variable is a global, assigned where its declaration
         // runs. The global is still zero here, so the assignment releases nothing.
         globals.append(Global(cName: cName, ty: ty))
+        globalVars[name] = Local(cName: cName, ty: ty, mutable: mutable)
         out.append(.assign(.local(cName), value, ty))
       } else {
         out.append(.decl(cName, ty, value))
@@ -517,6 +557,9 @@ final class Lowerer {
 
   private func lowerStmt(_ stmt: StmtSyntax) throws -> [Stmt] {
     if let ret = stmt.as(ReturnStmtSyntax.self) {
+      if initializingSelf {
+        throw error("'return' in an initializer is not supported yet", ret)
+      }
       guard let want = returnType else {
         throw error("'return' is not supported at top level in M2", ret)
       }
@@ -574,44 +617,10 @@ final class Lowerer {
   }
 
   private func lowerIf(_ node: IfExprSyntax) throws -> [Stmt] {
-    let list = node.conditions
-    guard list.count == 1, let first = list.first else {
-      throw error("only a single condition is supported in M2", node)
+    let conds = Array(node.conditions)
+    guard !conds.isEmpty else {
+      throw error("a condition is required in M2", node)
     }
-
-    var prelude: [Stmt] = []
-    let cond: Expr
-    let then: [Stmt]
-    if case .optionalBinding(let binding) = first.condition {
-      guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let initializer = binding.initializer?.value else {
-        throw error("unsupported conditional binding", binding)
-      }
-      var opt = try lowerExpr(initializer)
-      guard case .optional(let inner) = opt.ty else {
-        throw error("initializer for conditional binding must have Optional type, not '\(opt.ty.swiftName)'", initializer)
-      }
-      if opt.owned && opt.ty.isClassLike {
-        throw error("binding a temporary class value is not supported yet", initializer)
-      }
-      if opt.owned {
-        // The condition and the binding both read the value, so evaluate it once.
-        let tmp = "t\(nextID())"
-        prelude.append(.decl(tmp, opt.ty, opt))
-        opt = Expr(kind: .local(tmp), ty: opt.ty)
-      }
-      cond = Expr(kind: .isSome(opt), ty: .bool)
-      scopes.append(Scope())
-      let name = id.identifier.text
-      let cName = "l\(nextID())_" + name
-      try declare(name, cName: cName, ty: inner, mutable: false, owned: inner.isClassLike, binding)
-      let body = try lowerBlock(node.body.statements)
-      let bound = own(Expr(kind: .unwrap(opt), ty: inner))
-      then = [.decl(cName, inner, bound)] + body + releases(of: scopes.removeLast())
-    } else {
-      cond = try lowerCondition(list, node)
-      then = try lowerBlock(node.body.statements)
-    }
-
     var otherwise: [Stmt] = []
     if let elseBody = node.elseBody {
       switch elseBody {
@@ -621,12 +630,60 @@ final class Lowerer {
         otherwise = try lowerIf(nested)
       }
     }
-    return prelude + [.ifs(cond, then, otherwise)]
+    return try lowerIfChain(conds, 0, node.body, otherwise, node)
   }
 
-  /// `while let x = opt { body }`. The optional is read again on every iteration:
-  /// each iteration copies it into a temporary, breaks when it is nil, and binds
-  /// the payload in a scope that is released like an `if let` binding.
+  /// Lowers the conditions of an `if` from `index` on, nesting one test per
+  /// condition. A failed test runs `otherwise`; the body runs when all pass.
+  private func lowerIfChain(
+    _ conds: [ConditionElementSyntax],
+    _ index: Int,
+    _ body: CodeBlockSyntax,
+    _ otherwise: [Stmt],
+    _ node: some SyntaxProtocol
+  ) throws -> [Stmt] {
+    if index == conds.count {
+      return try lowerBlock(body.statements)
+    }
+    switch conds[index].condition {
+    case .expression(let expr):
+      let cond = try lowerBoolExpr(expr)
+      let then = try lowerIfChain(conds, index + 1, body, otherwise, node)
+      return [.ifs(cond, then, otherwise)]
+
+    case .optionalBinding(let binding):
+      guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let initializer = binding.initializer?.value else {
+        throw error("unsupported conditional binding", binding)
+      }
+      var prelude: [Stmt] = []
+      var opt = try lowerExpr(initializer)
+      guard case .optional(let inner) = opt.ty else {
+        throw error("initializer for conditional binding must have Optional type, not '\(opt.ty.swiftName)'", initializer)
+      }
+      if opt.owned && opt.ty.isClassLike {
+        throw error("binding a temporary class value is not supported yet", initializer)
+      }
+      if opt.owned {
+        // The test and the binding both read the value, so evaluate it once.
+        let tmp = "t\(nextID())"
+        prelude.append(.decl(tmp, opt.ty, opt))
+        opt = Expr(kind: .local(tmp), ty: opt.ty)
+      }
+      let cond = Expr(kind: .isSome(opt), ty: .bool)
+      scopes.append(Scope())
+      let name = id.identifier.text
+      let cName = "l\(nextID())_" + name
+      try declare(name, cName: cName, ty: inner, mutable: false, owned: inner.isClassLike, binding)
+      let inside = try lowerIfChain(conds, index + 1, body, otherwise, node)
+      let bound = own(Expr(kind: .unwrap(opt), ty: inner))
+      let then = [Stmt.decl(cName, inner, bound)] + inside + releases(of: scopes.removeLast())
+      return prelude + [.ifs(cond, then, otherwise)]
+
+    default:
+      throw error("this condition is not supported in M2", node)
+    }
+  }
+
   private func lowerWhileLet(_ binding: OptionalBindingConditionSyntax, _ loop: WhileStmtSyntax) throws -> [Stmt] {
     guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let initializer = binding.initializer?.value else {
       throw error("unsupported conditional binding", binding)
@@ -749,6 +806,11 @@ final class Lowerer {
     }
     var names: [String?] = []
     for arg in args {
+      // `_` parses as a discard expression inside a case pattern.
+      if arg.expression.is(DiscardAssignmentExprSyntax.self) {
+        names.append(nil)
+        continue
+      }
       guard let pe = arg.expression.as(PatternExprSyntax.self) else {
         throw error("only bindings and '_' are supported in case patterns in M2", arg)
       }
@@ -768,6 +830,10 @@ final class Lowerer {
     guard list.count == 1, let first = list.first, case .expression(let expr) = first.condition else {
       throw error("only a single boolean condition is supported in M2", node)
     }
+    return try lowerBoolExpr(expr)
+  }
+
+  private func lowerBoolExpr(_ expr: ExprSyntax) throws -> Expr {
     let v = try lowerExpr(expr)
     guard v.ty == .bool else {
       throw error("condition must be of type 'Bool', but is of type '\(v.ty.swiftName)'", expr)
@@ -779,21 +845,34 @@ final class Lowerer {
   private func lowerTarget(_ expr: ExprSyntax) throws -> (LValue, Ty, Bool) {
     if let ref = expr.as(DeclReferenceExprSyntax.self) {
       let name = ref.baseName.text
-      guard let local = lookup(name) else { throw error("cannot find '\(name)' in scope", ref) }
-      return (.local(local.cName), local.ty, local.mutable)
+      if let local = lookup(name) {
+        return (.local(local.cName), local.ty, local.mutable)
+      }
+      // A bare property name inside an initializer or deinitializer means self.name.
+      if let member = implicitSelfMember(name, ref) {
+        guard member.field.mutable || initializingSelf else {
+          throw error("cannot assign to 'let' property '\(name)'", ref)
+        }
+        return (.field(.local("self"), member.field.cName, arrow: member.base.ty.isClass), member.field.ty, true)
+      }
+      throw error("cannot find '\(name)' in scope", ref)
     }
     if let member = expr.as(MemberAccessExprSyntax.self), let base = member.base {
       let (baseTarget, baseTy, baseMutable) = try lowerTarget(base)
       let field = try fieldOf(baseTy, member.declName.baseName.text, member)
       if baseTy.isClass {
         // Assigning through a class reference does not need the reference itself to be `var`.
-        guard field.mutable else { throw error("cannot assign to 'let' property '\(field.name)'", member) }
+        guard field.mutable || isSelfInInitializer(base) else {
+          throw error("cannot assign to 'let' property '\(field.name)'", member)
+        }
         return (.field(baseTarget, field.cName, arrow: true), field.ty, true)
       }
       guard baseMutable else {
         throw error("cannot assign to property '\(field.name)': '\(base.trimmedDescription)' is a 'let' constant", member)
       }
-      guard field.mutable else { throw error("cannot assign to 'let' property '\(field.name)'", member) }
+      guard field.mutable || isSelfInInitializer(base) else {
+        throw error("cannot assign to 'let' property '\(field.name)'", member)
+      }
       return (.field(baseTarget, field.cName, arrow: false), field.ty, true)
     }
     throw error("expression is not assignable", expr)
@@ -827,6 +906,9 @@ final class Lowerer {
       }
       if genericFuncs[name] != nil {
         return try genericFunctionValue(name, explicit: [], expected: expected, ref)
+      }
+      if let member = implicitSelfMember(name, ref) {
+        return Expr(kind: .field(member.base, member.field.cName), ty: member.field.ty)
       }
       throw error("cannot find '\(name)' in scope", ref)
     }
@@ -959,6 +1041,9 @@ final class Lowerer {
       if isGenericName(name) {
         return try lowerGenericCall(name, explicit: [], call, expected, ref)
       }
+      if let selfLocal = lookup("self"), let method = methodOf(selfLocal.ty, name) {
+        return try callMethod(method, Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), name, call)
+      }
       if let f = funcs[name] {
         let args = try lowerArgs(call, f.params.map { $0.ty })
         let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
@@ -976,11 +1061,17 @@ final class Lowerer {
         return Expr(kind: .print(v), ty: .void)
       }
       if let s = structs[name] {
+        if !s.initializers.isEmpty {
+          return try callInitializer(name, s.initializers, .structure(name), owned: false, call)
+        }
         let args = try lowerArgs(call, s.fields.map { $0.ty })
         let values = try matchArguments(name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
         return Expr(kind: .structLit(s, values), ty: .structure(name))
       }
       if let c = classes[name] {
+        if !c.initializers.isEmpty {
+          return try callInitializer(name, c.initializers, .cls(name), owned: true, call)
+        }
         let args = try lowerArgs(call, c.fields.map { $0.ty })
         let values = try matchArguments(name, c.fields.map { (Optional($0.name), $0.ty) }, args, call)
         return Expr(kind: .construct(c, values), ty: .cls(name), owned: true)
@@ -993,6 +1084,19 @@ final class Lowerer {
     }
     if let member = callee.as(MemberAccessExprSyntax.self), let e = try genericEnumCase(member, call, expected) {
       return e
+    }
+
+    if let member = callee.as(MemberAccessExprSyntax.self), let base = member.base {
+      let receiver = try lowerExpr(base)
+      let name = member.declName.baseName.text
+      if let method = methodOf(receiver.ty, name) {
+        return try callMethod(method, receiver, name, call)
+      }
+      let field = try fieldOf(receiver.ty, name, member)
+      guard case .function(let params, let ret) = field.ty else {
+        throw error("value of type '\(receiver.ty.swiftName)' has no method '\(name)'", member)
+      }
+      return try callValue(Expr(kind: .field(receiver, field.cName), ty: field.ty), params, ret, call)
     }
 
     let value = try lowerExpr(callee)
@@ -1334,7 +1438,10 @@ final class Lowerer {
       recordInstance(name, base, args, g.decl)
       instStructs.append(info)
       let env = envFor(g.names, args)
-      info.fields = try inEnv(env) { try lowerMembers(g.decl.memberBlock, isClass: false).fields }
+      let members = try inEnv(env) { try lowerMembers(g.decl.memberBlock, isClass: false) }
+      info.fields = members.fields
+      info.initializers = try declareInitializers(members.initializers, owner: .structure(name), env: env, name: name)
+      info.methods = try declareMethods(members.methods, owner: .structure(name), env: env, name: name)
       return info
     }
   }
@@ -1352,6 +1459,8 @@ final class Lowerer {
       let env = envFor(g.names, args)
       let members = try inEnv(env) { try lowerMembers(g.decl.memberBlock, isClass: true) }
       info.fields = members.fields
+      info.initializers = try declareInitializers(members.initializers, owner: .cls(name), env: env, name: name)
+      info.methods = try declareMethods(members.methods, owner: .cls(name), env: env, name: name)
       if let d = members.deinitializer {
         let f = FuncInfo(
           name: "deinit_" + name,
@@ -1403,11 +1512,140 @@ final class Lowerer {
   }
 
   private func lowerPendingDeinits() throws {
-    while !pendingDeinits.isEmpty {
+    while !pendingDeinits.isEmpty || !pendingInits.isEmpty || !pendingMethods.isEmpty {
+      if !pendingInits.isEmpty {
+        try lowerInitializer(pendingInits.removeFirst())
+        continue
+      }
+      if !pendingMethods.isEmpty {
+        let m = pendingMethods.removeFirst()
+        guard let body = m.decl.body else { throw error("method without a body", m.decl) }
+        m.info.body = try inEnv(m.env) { try lowerBody(m.info, body, m.decl) }
+        continue
+      }
       let p = pendingDeinits.removeFirst()
       guard let body = p.decl.body else { throw error("deinit without a body", p.decl) }
       p.info.body = try inEnv(p.env) { try lowerBody(p.info, body, p.decl) }
     }
+  }
+
+  /// Declares the methods of a type. The receiver is passed as the first parameter.
+  private func declareMethods(
+    _ decls: [FunctionDeclSyntax],
+    owner: Ty,
+    env: [String: Ty],
+    name: String
+  ) throws -> [String: FuncInfo] {
+    var out: [String: FuncInfo] = [:]
+    for d in decls {
+      let method = d.name.text
+      if out[method] != nil {
+        throw error("overloaded methods are not supported yet", d)
+      }
+      let params = try inEnv(env) { try declareParams(d.signature.parameterClause.parameters) }
+      let ret: Ty = try inEnv(env) {
+        if let clause = d.signature.returnClause { return try resolveType(clause.type) }
+        return .void
+      }
+      let receiver = Param(label: nil, name: "self", cName: "self", ty: owner)
+      let info = FuncInfo(name: name + "." + method, cName: "m_\(cIdent(name))_\(method)", params: [receiver] + params, ret: ret)
+      allFuncs.append(info)
+      pendingMethods.append(PendingMethod(info: info, decl: d, env: env))
+      out[method] = info
+    }
+    return out
+  }
+
+  /// Declares each explicit initializer as a function that returns the new value.
+  private func declareInitializers(
+    _ decls: [InitializerDeclSyntax],
+    owner: Ty,
+    env: [String: Ty],
+    name: String
+  ) throws -> [FuncInfo] {
+    var out: [FuncInfo] = []
+    for (index, d) in decls.enumerated() {
+      let params = try inEnv(env) { try declareParams(d.signature.parameterClause.parameters) }
+      let info = FuncInfo(name: "init_" + name, cName: "init_\(cIdent(name))_\(index)", params: params, ret: owner)
+      allFuncs.append(info)
+      pendingInits.append(PendingInit(info: info, decl: d, env: env, owner: owner))
+      out.append(info)
+    }
+    return out
+  }
+
+  /// Lowers an initializer. The new object is allocated first, so `self` is
+  /// usable from the first statement, and it is returned after the body runs.
+  private func lowerInitializer(_ p: PendingInit) throws {
+    guard let body = p.decl.body else { throw error("initializer without a body", p.decl) }
+    let selfTy = p.owner
+    let savedFlag = initializingSelf
+    initializingSelf = true
+    defer { initializingSelf = savedFlag }
+    p.info.body = try inEnv(p.env) {
+      var root = Scope()
+      for param in p.info.params {
+        root.vars[param.name] = Local(cName: param.cName, ty: param.ty, mutable: false)
+        if param.ty.isClassLike {
+          root.owned.append((cName: param.cName, ty: param.ty))
+        }
+      }
+      root.vars["self"] = Local(cName: "self", ty: selfTy, mutable: true)
+      scopes = [root]
+      returnType = nil
+      let allocation: Stmt
+      switch selfTy {
+      case .cls(let n):
+        guard let c = classes[n] else { throw error("cannot find type '\(n)' in scope", p.decl) }
+        allocation = .decl("self", selfTy, Expr(kind: .allocObject(c), ty: selfTy, owned: true))
+      case .structure:
+        allocation = .decl("self", selfTy, Expr(kind: .zeroValue, ty: selfTy))
+      default:
+        throw error("initializers are only supported on classes and structs", p.decl)
+      }
+      var stmts = [allocation]
+      stmts += try lowerBlock(body.statements)
+      stmts += releases(of: root)
+      stmts.append(.ret(Expr(kind: .local("self"), ty: selfTy)))
+      return stmts
+    }
+  }
+
+  private func methodOf(_ ty: Ty, _ name: String) -> FuncInfo? {
+    switch ty {
+    case .structure(let n): return structs[n]?.methods[name]
+    case .cls(let n): return classes[n]?.methods[name]
+    default: return nil
+    }
+  }
+
+  /// Calls a method with `receiver` as self. The receiver is borrowed, so a
+  /// temporary class value would leak; it is rejected for now.
+  private func callMethod(_ method: FuncInfo, _ receiver: Expr, _ name: String, _ call: FunctionCallExprSyntax) throws -> Expr {
+    if receiver.owned && receiver.ty.isClassLike {
+      throw error("calling a method on a temporary class value is not supported yet", call)
+    }
+    let params = Array(method.params.dropFirst())
+    let args = try lowerArgs(call, params.map { $0.ty })
+    let values = try matchArguments(name, params.map { ($0.label, $0.ty) }, args, call)
+    return Expr(kind: .call(method, [receiver] + values), ty: method.ret, owned: true)
+  }
+
+  /// Calls the initializer whose argument labels match the call.
+  private func callInitializer(
+    _ name: String,
+    _ candidates: [FuncInfo],
+    _ ty: Ty,
+    owned: Bool,
+    _ call: FunctionCallExprSyntax
+  ) throws -> Expr {
+    let labels = call.arguments.map { $0.label?.text }
+    guard let chosen = candidates.first(where: { $0.params.map { $0.label } == labels }) else {
+      throw error("no initializer of '\(name)' takes these argument labels", call)
+    }
+    let args = try lowerArgs(call, chosen.params.map { $0.ty })
+    let values = try matchArguments(name, chosen.params.map { ($0.label, $0.ty) }, args, call)
+    return Expr(kind: .call(chosen, values), ty: ty, owned: owned)
   }
 
   /// Binds the parameters in `names` by matching a parameter type, as written, against
@@ -1471,6 +1709,47 @@ final class Lowerer {
       }
     }
     return out
+  }
+
+  /// The explicit initializer of a generic type whose argument labels match the call.
+  private func genericInitializer(_ block: MemberBlockSyntax, _ call: FunctionCallExprSyntax) -> InitializerDeclSyntax? {
+    let labels = call.arguments.map { $0.label?.text }
+    for member in block.members {
+      guard let i = member.decl.as(InitializerDeclSyntax.self) else { continue }
+      if initializerLabels(i) == labels { return i }
+    }
+    return nil
+  }
+
+  private func initializerLabels(_ i: InitializerDeclSyntax) -> [String?] {
+    i.signature.parameterClause.parameters.map { p -> String? in
+      let first = p.firstName.text
+      return first == "_" ? nil : first
+    }
+  }
+
+  private func initializerParams(_ i: InitializerDeclSyntax) -> [GenericParam] {
+    i.signature.parameterClause.parameters.map { p in
+      let first = p.firstName.text
+      return GenericParam(label: first == "_" ? nil : first, type: p.type)
+    }
+  }
+
+  /// Calls the initializer of an instantiated type, with arguments already lowered.
+  private func callInstanceInitializer(
+    _ name: String,
+    _ candidates: [FuncInfo],
+    _ ty: Ty,
+    owned: Bool,
+    _ args: [ArgInput],
+    _ call: FunctionCallExprSyntax
+  ) throws -> Expr {
+    let labels = args.map { $0.label }
+    guard let chosen = candidates.first(where: { $0.params.map { $0.label } == labels }) else {
+      throw error("no initializer of '\(name)' takes these argument labels", call)
+    }
+    let values = try matchArguments(name, chosen.params.map { ($0.label, $0.ty) }, args, call)
+    return Expr(kind: .call(chosen, values), ty: ty, owned: owned)
   }
 
   /// The payload of a case of a generic enum, as parameters.
@@ -1557,12 +1836,24 @@ final class Lowerer {
       return Expr(kind: .call(f, values), ty: f.ret, owned: true)
     }
     if let g = genericStructs[name] {
+      if let i = genericInitializer(g.decl.memberBlock, call) {
+        let params = initializerParams(i)
+        let (types, args) = try bindGeneric(g.names, explicit: explicit, params: params, result: nil, expected: nil, call)
+        let s = try instantiateStruct(name, types, node)
+        return try callInstanceInitializer(s.name, s.initializers, .structure(s.name), owned: false, args, call)
+      }
       let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
       let s = try instantiateStruct(name, types, node)
       let values = try matchArguments(s.name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
       return Expr(kind: .structLit(s, values), ty: .structure(s.name))
     }
     if let g = genericClasses[name] {
+      if let i = genericInitializer(g.decl.memberBlock, call) {
+        let params = initializerParams(i)
+        let (types, args) = try bindGeneric(g.names, explicit: explicit, params: params, result: nil, expected: nil, call)
+        let c = try instantiateClass(name, types, node)
+        return try callInstanceInitializer(c.name, c.initializers, .cls(c.name), owned: true, args, call)
+      }
       let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
       let c = try instantiateClass(name, types, node)
       let values = try matchArguments(c.name, c.fields.map { (Optional($0.name), $0.ty) }, args, call)
@@ -1646,11 +1937,22 @@ final class Lowerer {
 
   // MARK: - Scopes and releases
 
+  /// The property `name` of the enclosing `self`, if there is one.
+  private func implicitSelfMember(_ name: String, _ node: some SyntaxProtocol) -> (base: Expr, field: Field)? {
+    guard let selfLocal = lookup("self"), let field = try? fieldOf(selfLocal.ty, name, node) else { return nil }
+    return (Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), field)
+  }
+
+  private func isSelfInInitializer(_ base: ExprSyntax) -> Bool {
+    guard initializingSelf, let ref = base.as(DeclReferenceExprSyntax.self) else { return false }
+    return ref.baseName.text == "self"
+  }
+
   private func lookup(_ name: String) -> Local? {
     for scope in scopes.reversed() {
       if let local = scope.vars[name] { return local }
     }
-    return nil
+    return globalVars[name]
   }
 
   private func releases(of scope: Scope) -> [Stmt] {

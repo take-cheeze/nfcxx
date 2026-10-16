@@ -96,6 +96,8 @@ struct Field {
 final class StructInfo {
   let name: String
   var fields: [Field] = []
+  var methods: [String: FuncInfo] = [:]
+  var initializers: [FuncInfo] = []
 
   init(name: String) { self.name = name }
 }
@@ -104,6 +106,10 @@ final class ClassInfo {
   let name: String
   var fields: [Field] = []
   var deinitializer: FuncInfo?
+  /// Methods by name. The receiver is the first parameter, named self.
+  var methods: [String: FuncInfo] = [:]
+  /// Explicit initializers. When there are any, the memberwise one is not available.
+  var initializers: [FuncInfo] = []
 
   init(name: String) { self.name = name }
 }
@@ -178,6 +184,10 @@ indirect enum ExprKind {
   /// A named function or closure used as a value.
   case funcRef(FuncInfo)
   case callPtr(Expr, [Expr])
+  /// A new class instance with every stored property zeroed, owned by the caller.
+  case allocObject(ClassInfo)
+  /// The zero value of a struct, used as `self` before an initializer assigns it.
+  case zeroValue
 }
 
 struct Expr {
