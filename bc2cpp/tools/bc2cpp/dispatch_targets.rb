@@ -675,7 +675,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
                                        known_owners: known_owners, capture_hints: capture_hints,
                                        ret_class_proof: ret_class_proof, method_return_class: method_return_class,
                                        dominated: dominated, canonical: canonical)
-        return nil unless recv_class
+        return singleton_declared_return(registry, element_annotations, name) unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
         if element_annotations
@@ -935,7 +935,6 @@ end
 # resulting receiver fact remains guarded at dispatch; a custom constructor
 # returning another class therefore takes the ordinary fallback.
 def infer_constructed_constant_classes(ireps, assignment_sites, registry, container_constants, closed_world)
-  return {} unless closed_world
 
   known_owners = Set.new(registry.values.flatten.map(&:owner))
   inferred = {}
@@ -986,6 +985,19 @@ def container_phi_merge(irep, at, reg)
     end
   end
   lit_class if agree
+end
+
+# RBS_SINGLETON_RETURN (docs/adr/0456): `Klass.m(...)` has a constant receiver, which the walk does not trace to a
+# class. When `m` has exactly one definition in the whole program (natives included) and that definition is a
+# `def self.m` with a declared `-> C`, every call that does not raise NoMethodError runs that body, whatever the
+# receiver, so the result is C or nil (the ret_class contract). `key?`: the registry may insert on a miss.
+def singleton_declared_return(registry, element_annotations, name)
+  return nil unless element_annotations && registry&.key?(name)
+
+  defs = registry[name]
+  return nil unless defs.size == 1 && defs.first.irep && defs.first.owner.end_with?('.singleton')
+
+  element_annotations[defs.first.irep]&.ret_class
 end
 
 # NIL_TOLERANT_JOIN predicate: true only when `reg` at `idx` was just loaded by

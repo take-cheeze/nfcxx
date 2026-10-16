@@ -30,11 +30,16 @@ module NomethodReviewedProbe
     gems.transform_values { |d| File.expand_path(d) }
   end
 
+  # The first line of each reviewed-list abort bc2cpp.rb prints (after every listing).
+  REVIEW_ABORT = /\Abc2cpp: \d+ (?:closed-world NOMETHOD_REVIEWED|STRICT_HINTS_REVIEWED|closed-world PROVEN_MISS_REVIEWED) violation\(s\) /
+  # The line each such abort ends with.
+  REVIEW_ABORT_END = /\A(?:Read each site: |Run the verify build over the real workloads, )/
+
   # [stdout, stderr, status] of one compiled gem's closed-world run.
   # `hot_methods`: the list a real (hot-only) wio build passes; nil compiles
-  # every method, the superset the exact check needs. `allow` sets
-  # NomethodReviewed::ALLOW_ENV so the listing survives violations.
-  def run(gem_name, root, mrbc, hot_methods: nil, allow: true)
+  # every method, the superset the exact check needs. An unreviewed site fails
+  # the run like a build; listing_run reads the listings of such a run.
+  def run(gem_name, root, mrbc, hot_methods: nil)
     this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name)
     others = BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }
     native_srcs = bc2cpp_rgss_native_srcs(root, 'wio') + core_native_srcs("#{root}/3rd/mruby") +
@@ -47,15 +52,63 @@ module NomethodReviewedProbe
         'NATIVE_SRCS' => Shellwords.join(native_srcs),
         'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(root)),
         'SKIP_UNSUPPORTED' => '1',
-        'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_COLLECTION_EXPORTS' => '1',
+        'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_COLLECTION_EXPORTS' => '1',
         'BC2CPP_BUILD_GEMS' => Shellwords.join(wio_gems(root).map { |n, d| "#{n}=#{d}" }),
-        'BC2CPP_HOT_METHODS' => hot_methods,
-        NomethodReviewed::ALLOW_ENV => (allow ? 'allow' : nil),
-        StrictHints::ALLOW_ENV => (allow ? 'allow' : nil)
+        'BC2CPP_HOT_METHODS' => hot_methods
       }
       world = closed_world_mrblib_srcs(root, core_gems: hot_methods ? nil : :canonical)
       Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), '--annotated', *world)
     end
+  end
+
+  # True when `status`/`stderr` is a run that failed only on the reviewed lists: exit 1, every
+  # listing printed (the PROVEN_MISS listing is the last of them), and nothing after it but the
+  # reviewed-list abort blocks.
+  def review_abort?(status, stderr)
+    return false unless status.exitstatus == 1
+
+    lines = stderr.lines.map(&:chomp)
+    listed = lines.rindex { |l| l.start_with?('== closed world proven-class miss sites: ') } or return false
+    first = lines.index { |l| REVIEW_ABORT.match?(l) } or return false
+    return false if first < listed
+
+    tail = lines[first..]
+    blocks = 0
+    in_block = false
+    tail.each do |l|
+      if REVIEW_ABORT.match?(l) && !in_block
+        in_block = true
+        blocks += 1
+      elsif in_block && l.start_with?('  ')
+        next
+      elsif in_block && REVIEW_ABORT_END.match?(l)
+        in_block = false
+      else
+        return false
+      end
+    end
+    blocks.positive? && !in_block
+  end
+
+  # [stdout, stderr, status] of `run`, raising unless it succeeded or failed only on the reviewed
+  # lists (review_abort?): the listings of such a run are complete.
+  def listing_run(gem_name, root, mrbc, hot_methods: nil)
+    out, err, status = run(gem_name, root, mrbc, hot_methods: hot_methods)
+    unless status.success? || review_abort?(status, err)
+      raise "#{gem_name}: bc2cpp.rb failed (not on a reviewed list):\n#{failure_tail(err)}"
+    end
+
+    [out, err, status]
+  end
+
+  # The part of a failed run's stderr that says why: from its abort message (a line starting `bc2cpp:` or
+  # `[bc2cpp]`, e.g. an unreviewed site on a reviewed list, which fails any closed-world run as it fails a build) to the end,
+  # or the last 25 lines when there is none (an exception's backtrace).
+  def failure_tail(stderr)
+    lines = stderr.lines
+    reviewed = lines.index { |l| REVIEW_ABORT.match?(l) }
+    start = reviewed || lines.rindex { |l| l.match?(/\A(?:bc2cpp: |\[bc2cpp\] |\[bc2pp\] )/) }
+    start ? lines[start..].join : lines.last(25).join
   end
 
   # Every site (one per bc2cpp_nomethod call) of a full wio run of all three
@@ -69,7 +122,7 @@ module NomethodReviewedProbe
     runs(root, mrbc, hot: false).fetch(:proven_miss)
   end
 
-  # The full runs (listing kept past violations), plus with `hot:` the real
+  # The full runs (listing read past a reviewed-list abort), plus with `hot:` the real
   # build's hot-only runs held to NOMETHOD_REVIEWED: {full: sites, hot: {gem =>
   # [status, stderr]}}. Runs in parallel; each is one single-threaded Ruby.
   def runs(root, mrbc, hot: true)
@@ -78,13 +131,11 @@ module NomethodReviewedProbe
     results = jobs.map do |gem_name, kind|
       Thread.new do
         hot_methods = kind == :hot ? BC2CPP_HOT_METHODS_PATH : nil
-        _out, err, status = run(gem_name, root, mrbc, hot_methods: hot_methods, allow: kind == :full)
+        _out, err, status = kind == :full ? listing_run(gem_name, root, mrbc) : run(gem_name, root, mrbc, hot_methods: hot_methods)
         [gem_name, kind, err, status]
       end
     end.map(&:value)
-    full = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, status|
-      raise "#{gem_name}: bc2cpp.rb failed:\n#{err[-4000..] || err}" unless status.success?
-
+    full = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|
       NomethodReviewed.parse_listing(err).map { |s| s.merge(gem: gem_name) }
     end
     proven = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|

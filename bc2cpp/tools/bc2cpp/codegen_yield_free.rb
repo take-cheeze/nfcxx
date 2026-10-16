@@ -29,7 +29,7 @@ class CodeGen
     end
   end
 
-  # YIELD_REACH facts the emitters ask for. A world that is not closed proves nothing.
+  # YIELD_REACH facts the emitters ask for. A world the proof does not cover (a global refusal) proves nothing.
   def yield_free_block?(block_irep)
     !!@yield_reach&.yield_free?(block_irep.label)
   end

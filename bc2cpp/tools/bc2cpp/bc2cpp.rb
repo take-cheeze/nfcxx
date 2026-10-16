@@ -55,6 +55,9 @@ require_relative 'dynamic_names'
 require_relative 'ivar_layout'
 require_relative 'annotations'
 require_relative 'rbs_signatures'
+require_relative 'declared_returns'
+require_relative 'declared_constants'
+require_relative 'rbs_param_check'
 require_relative 'class_layout'
 require_relative 'element_layouts'
 require_relative 'record_hash'
@@ -99,6 +102,7 @@ require_relative 'codegen_core_ruby_results'
 require_relative 'codegen_return_accessors'
 require_relative 'codegen_exact_core_arms'
 require_relative 'codegen_captured_locals'
+require_relative 'codegen_block_self'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_class_narrowing'
@@ -169,6 +173,12 @@ if $PROGRAM_NAME == __FILE__
     raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
           '(env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)'
   end
+  # Closed world only (docs/adr/0466): checked before any work.
+  missing_inputs = %w[BC2CPP_BUILD_NAME BC2CPP_BUILD_GEMS NATIVE_SRCS FOREIGN_RUBY_SRCS].reject { |key| ENV[key] }
+  unless missing_inputs.empty?
+    abort "bc2cpp: missing #{missing_inputs.join(', ')}: bc2cpp compiles closed-world programs only " \
+          '(docs/adr/0466) and needs the build name, its gem list and every outside native and Ruby source'
+  end
 
   shared_prefix, shared_stderr = SharedGeneration.start(shared_units) if shared_units
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
@@ -201,6 +211,9 @@ if $PROGRAM_NAME == __FILE__
   # ESCAPE_ANALYSIS (ADR 0316): callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
+  # BLOCK_SELF (ADR 0456): every bytecode definition of a name, the interpreted core ones the filtering below drops
+  # included, since a block handed to one of them runs under whatever self that body chooses.
+  CodeGen.block_self_bodies = registry.transform_values { |defs| defs.select(&:irep) }
   # CORE_DEFS (ADR 0264): a core-source definition a later one replaces is not the
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
@@ -229,16 +242,16 @@ if $PROGRAM_NAME == __FILE__
   registry.delete_if { |_, defs| defs.empty? }
   profile_phase.call('mrbc + parse + registry')
 
-  # CLOSED_WORLD (docs/adr/0210): construct this before return/element
-  # analysis, which uses its method-lookup proof for inherited return classes.
-  closed_world = nil
-  if ENV['BC2CPP_CLOSED_WORLD'] == '1'
+  # CLOSED_WORLD (docs/adr/0210, docs/adr/0466): bc2cpp compiles closed-world programs only. A build that loads
+  # or defines Ruby at runtime uses the plain mruby build instead. The build's name, its gem list and the
+  # outside native and Ruby sources are required inputs (checked above); without them there is no closed world.
+  # Constructed before return/element analysis, which uses its method-lookup proof for inherited return classes.
     repo_root = File.expand_path('../..', __dir__)
-    build_name = ENV['BC2CPP_BUILD_NAME'].to_s
-    build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS'].to_s).to_h { |kv| kv.split('=', 2) }
+  build_name = ENV['BC2CPP_BUILD_NAME']
+  build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS']).to_h { |kv| kv.split('=', 2) }
     CodeGen.build_gem_names = build_gems.keys.to_set
     errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root, compiled_srcs: srcs)
-    abort "bc2cpp: BC2CPP_CLOSED_WORLD refused for build '#{build_name}':\n  #{errors.join("\n  ")}" unless errors.empty?
+  abort "bc2cpp: build '#{build_name}' is not a closed world:\n  #{errors.join("\n  ")}" unless errors.empty?
 
     outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
     # Core Ruby is compiled input here but stays an OUTSIDE source for these proofs: the
@@ -256,25 +269,18 @@ if $PROGRAM_NAME == __FILE__
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
-  end
 
   # DEFINE_METHOD_SITES (ADR 0288): the class-body `define_method(:x) { }` candidates the registry
   # collected stay definitions only in a closed world that trusts `define_method` itself.
   define_method_kept, define_method_dropped =
-    DefineMethodSites.settle(registry, trusted: closed_world&.define_method_sites_trusted? || false)
+    DefineMethodSites.settle(registry, trusted: closed_world.define_method_sites_trusted?)
   if define_method_kept + define_method_dropped > 0
     warn "== define_method sites (#{define_method_kept} registered as definitions, " \
          "#{define_method_dropped} left as installers) =="
   end
 
   # NATIVE_SRCS: C/C++ sources to scan for mrb_define_method-family calls (see
-  # extract_native_method_names). Without it the registry cannot see native
-  # definitions.
-  native_name_sources = nil
-  native_names = Set.new
-  native_expression_devirt = {}
-  native_registered_expressions = {}
-  if ENV['NATIVE_SRCS']
+  # extract_native_method_names). A required input (CLOSED_WORLD).
     native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
     # NATIVE_OWNER_MAP (ADR 0397): every native source, not only those with a literal name registration.
     CodeGen.native_source_paths = native_paths
@@ -300,20 +306,19 @@ if $PROGRAM_NAME == __FILE__
     warn "== native method names (#{native_names.size} from NATIVE_SRCS, #{flipped.size} flipped a MONO name to POLY) =="
     flipped.sort.each { |n| warn "  FLIP :#{n}" }
     warn ''
-    # NATIVE_CONSTRUCT_SCHEMA_AUDIT: audit only; skipped without NATIVE_SRCS.
+  # NATIVE_CONSTRUCT_SCHEMA_AUDIT: audit only.
     warn '== native construct schema audit (row vs scraped mrb_get_args) =='
     NATIVE_CONSTRUCT_TARGETS.sort.each do |klass, row|
       verdict, detail = NativeConstructSchema.audit(native_paths, klass, row)
       warn "  #{verdict.to_s.upcase}  #{klass}  (#{detail})"
     end
     warn ''
-  end
   profile_phase.call('closed world + native scans')
 
-  # Only a closed world can enumerate callees: with an open one the analysis stays uninstalled and every
-  # consumer keeps its earlier gate. Ruby the build interprets (an outside source this run did not
-  # compile) may define any name it spells; the compiled core Ruby is in the ireps.
-  if escape_registry && closed_world && closed_world.global_refusal.nil? && closed_world.method_missing_classes.empty?
+  # The closed world enumerates callees; a global refusal or a method_missing class leaves the analysis
+  # uninstalled and every consumer keeps its earlier gate. Ruby the build interprets (an outside source this
+  # run did not compile) may define any name it spells; the compiled core Ruby is in the ireps.
+  if escape_registry && closed_world.global_refusal.nil? && closed_world.method_missing_classes.empty?
     escape_aliases = Hash.new { |h, k| h[k] = [] }
     alias_sites.each { |site| escape_aliases[site[:new]] << site[:old] }
     compiled_files = ireps.each_value.to_set(&:file)
@@ -321,7 +326,7 @@ if $PROGRAM_NAME == __FILE__
     warn "== escape analysis (ADR 0316): #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
          "Ruby this run does not compile =="
     EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
-                                                     native_names: ENV['NATIVE_SRCS'] ? native_names : nil,
+                                                     native_names: native_names,
                                                      superclass_of: superclass_of, included: included_modules,
                                                      prepended: prepended_modules, unknown_mixins: unknown_mixins,
                                                      modules: declared_modules, struct_classes: struct_member_lists.keys,
@@ -419,10 +424,14 @@ if $PROGRAM_NAME == __FILE__
     sig_owners = registry.values.flatten.map(&:owner).uniq
     sig_class_annotations = ClassAnnotations.extract(ireps, registry, sig_owners)
     sig_element_annotations = ElementAnnotations.extract(ireps, registry, sig_owners)
+    sig_comment_class_args = sig_class_annotations.transform_values { |ann| ann.args.dup } # RBS_CHECKED_PARAMS
     sig_applied = RbsSignatures.apply(sig_loaded, ireps, registry, annotations, sig_class_annotations,
                                       sig_element_annotations, class_decls: class_decls)
     # RBS_BLOCK_PARAM_HINT: the declared block types, read by block_fallback_rbs_param_class.
     CodeGen.rbs_block_signatures = sig_applied.ir_block_signatures
+    # DECLARED_RETURN_CHECK (ADR 0455): return declarations every body is checked against.
+    CodeGen.declared_returns = DeclaredReturns.from_signatures(sig_loaded, ireps, registry)
+    CodeGen.declared_return_root = sig_root
     warn '== signature files (RBS_SIGNATURES) =='
     sig_loaded.files.each { |f| warn "  SIG_FILE #{f}" }
     sig_applied.diagnostics.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
@@ -445,17 +454,17 @@ if $PROGRAM_NAME == __FILE__
   # INTEGER_CONST_EMBED_SUPPORT / ARRAY_RETURN_IVAR_HINT: foreign sources,
   # foreign method names and integer constants are computed before
   # IvarLayout.analyze (which embeds `@x = SOME_INT_CONST`) and ClassLayout's
-  # probing pass (ARRAY_RETURN_PROOF needs foreign_methods). Without
-  # NATIVE_SRCS or FOREIGN_RUBY_SRCS both analyses skip and prove nothing extra,
-  # rather than run on a knowingly incomplete picture. Diagnostic consumers find
+  # probing pass (ARRAY_RETURN_PROOF needs foreign_methods). NATIVE_SRCS and
+  # FOREIGN_RUBY_SRCS are required inputs (CLOSED_WORLD). Diagnostic consumers find
   # sections by header text, not position.
-  foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
-  foreign_methods = if foreign_ruby_srcs
-                      profile_call.call('foreign_method_names') { foreign_method_names(foreign_ruby_srcs) }
-                    end
-
-  # UNIQUE_CLASS_NAME: set before the first ClassLayout pass, since every
-  # trace_new_target caller reads it.
+  foreign_ruby_srcs = Shellwords.split(ENV['FOREIGN_RUBY_SRCS'])
+  foreign_methods = profile_call.call('foreign_method_names') { foreign_method_names(foreign_ruby_srcs) }
+  # BLOCK_SELF: names an outside Ruby source this build does not compile may define (a body it cannot read).
+  compiled_files = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
+  CodeGen.block_self_unread_names =
+    foreign_method_names(foreign_ruby_srcs.reject { |path| compiled_files.include?(File.expand_path(path)) })
+  # UNIQUE_CLASS_NAME: set before RBS_CHECKED_PARAMS and the first ClassLayout pass, since every
+  # trace_new_target caller reads it (and ClosedWorld#stable_constant_identity?, which PROFILER_RESULTS needs).
   UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
     UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
   end
@@ -474,6 +483,27 @@ if $PROGRAM_NAME == __FILE__
   end
   warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
 
+  # RBS_CHECKED_PARAMS (docs/adr/0456): a class parameter type is kept only when every caller is proven to pass it.
+  if sig_applied
+    param_outside = RbsParamCheck.outside_call_names(native_paths, foreign_ruby_srcs, ireps.values.to_set(&:file))
+    # The `new` / `super` sites of each initialize (CONSTRUCTOR_POOLS, ADR 0313), from a CodeGen built only that far.
+    param_constructors = CodeGen.new(ireps, registry, {}, {}, {}, {}, superclass_of, {}, {}, {}, {}, Set.new,
+                                     foreign_methods, outside_world_tokens(native_paths + foreign_ruby_srcs),
+                                     native_name_sources, included_modules, prepended_modules, unknown_mixins,
+                                     analysis_only: :constructor_sites, closed_world: closed_world,
+                                     outside_ivar_names: outside_ivar_names(native_paths + foreign_ruby_srcs))
+    param_diags, = RbsParamCheck.check(sig_loaded, ireps, registry, sig_class_annotations,
+                                       comment_class_args: sig_comment_class_args, call_sites: call_sites,
+                                       outside_names: param_outside, constructor_entries: param_constructors,
+                                       superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
+                                       declared_returns: CodeGen.declared_returns)
+    sig_applied.diagnostics.concat(param_diags)
+    param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
+    if param_diags.any? { |d| d.severity == 'error' } && ENV['BC2CPP_TYPE_FACTS'].to_s.empty?
+      abort "\n[bc2cpp] RBS_CHECKED_PARAMS: #{param_diags.size} unproven parameter type(s) (see above)."
+    end
+  end
+
   # CLOSED_WORLD_VALUE_CONSTANT: a single class-constructor assignment is a
   # guarded receiver hint, not an unconditional claim about the constant value.
   inferred_constant_classes = profile_call.call('single-assignment value constants') do
@@ -483,12 +513,32 @@ if $PROGRAM_NAME == __FILE__
   warn "== single-assignment constructed constants (CLOSED_WORLD_VALUE_CONSTANT): #{inferred_constant_classes.size} =="
   inferred_constant_classes.sort.each { |name, klass| warn "  CONST_CLASS  #{name}  (#{klass})" }
 
+  # INTEGER_CONSTANT_PROOF (ADR 0466): a proven name lets GETCONST feed an unchecked mrb_fixnum, so the proof holds
+  # only where the closed world shows every constant binding static, and its poison scan covers the closed world's
+  # outside sources (the target's host, every linked gem) as well as NATIVE_SRCS and FOREIGN_RUBY_SRCS.
   integer_constants =
-    if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
-      profile_call.call('IntegerConstants.analyze') { IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs) }
+    if closed_world.constants_static?
+      profile_call.call('IntegerConstants.analyze') do
+        IntegerConstants.analyze(ireps, (native_paths + outside_native).uniq, (foreign_ruby_srcs + outside_ruby).uniq)
+      end
     else
+      warn "== INTEGER_CONSTANT_PROOF off: constant bindings are not static (#{closed_world.global_refusal || 'dynamic constant mutation'}) =="
       Set.new
     end
+  # DECLARED_CONSTANT_CHECK (ADR 0455): RBS constant declarations, checked at every assignment, add the facts the two
+  # constant proofs give (INTEGER_CONSTANT_PROOF, CONST_CONTAINER).
+  if sig_loaded
+    outside_bound = IntegerConstants.native_defined_const_names(native_paths) |
+                        IntegerConstants.foreign_const_names(foreign_ruby_srcs)
+    declared_constants = DeclaredConstants.check(
+      DeclaredConstants.load(sig_loaded.files, sig_root, registry.values.flatten.map(&:owner).to_set),
+      ireps, registry, constant_assignment_sites, integer_constants, outside_bound, container_constants, sig_root
+    )
+    integer_constants |= declared_constants.integer_names
+    declared_constants.containers.each { |name, klass| container_constants[name] ||= klass }
+    DeclaredConstants.report(declared_constants, sig_applied,
+                             abort_on_error: !ENV['BC2CPP_TYPE_FACTS'].to_s.then { |v| !v.empty? })
+  end
   warn "== integer-valued constants proven (INTEGER_CONSTANT_PROOF) =="
   if integer_constants.empty?
     warn '  (none)'
@@ -504,13 +554,13 @@ if $PROGRAM_NAME == __FILE__
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
 
   # RECORD_HASH_PROOF (docs/adr/0285): needs the same outside-source picture as
-  # IntegerConstants, and a closed world (no open-world caller can see every writer).
+  # IntegerConstants and the closed world, which sees every writer.
   # The trusted tier classifies a writer with the tripwire-backed Array scan
   # the block recognizers already rely on; the default consumer tier is strict.
   record_hash = profile_call.call('RecordHash.analyze') do
     RecordHash.analyze(ireps, registry, native_paths: native_paths, foreign_paths: foreign_ruby_srcs,
                                         closed_world: closed_world,
-                                        outside_tokens: (outside_world_tokens(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs),
+                                        outside_tokens: outside_world_tokens(native_paths + foreign_ruby_srcs),
                                         trusted: ->(irep, idx, reg) { proven_array_source_scan(irep, idx, reg.to_s, registry) == 'Array' })
   end
   RecordHash.table = record_hash.table
@@ -590,8 +640,7 @@ if $PROGRAM_NAME == __FILE__
   # ClassLayout.analyze (see `poison_reason`) and reported as extra breakdowns of
   # the same candidate list.
   # FIXNUM_RETURN_PROOF / ARRAY_RETURN_PROOF: the foreign poison set, computed
-  # here because the probing pass below needs ARRAY_RETURN_PROOF, which proves
-  # nothing without it (nil without FOREIGN_RUBY_SRCS).
+  # here because the probing pass below needs ARRAY_RETURN_PROOF.
 
   # ---------------------------------------------------------------------------
   # ARRAY_RETURN_IVAR_HINT: ClassLayout and ARRAY_RETURN_PROOF depend on each
@@ -662,7 +711,7 @@ if $PROGRAM_NAME == __FILE__
   RbsSignatures.seed_table(class_layout, sig_applied.ivar_classes) if sig_applied
   # SUBTREE_DISPATCH (docs/adr/0453): "C or a descendant" receiver facts, read only by the send devirtualization.
   CodeGen.subtree_facts = nil
-  if closed_world && SubtreeFacts.enabled?
+  if SubtreeFacts.enabled?
     subtree_labels = {}
     registry.each_value { |defs| defs.each { |d| subtree_labels[d.irep] = "#{d.owner}##{d.name}" if d.irep } }
     CodeGen.subtree_facts = SubtreeFacts.build(raw: class_layout_raw, store_log: ivar_store_log, world: closed_world,
@@ -905,20 +954,12 @@ if $PROGRAM_NAME == __FILE__
   end
 
   # `annotations` also drives NATIVE_ARG_TARGETS.
-  # FIXNUM_RETURN_PROOF: without FOREIGN_RUBY_SRCS this is nil (never an empty
-  # set), which compute_fixnum_return_names reads as "no scan" and proves
-  # nothing.
-  # ENTRY_ARG_CALLSITE_PROOF: every identifier token from the same two inputs
-  # (see outside_world_tokens); nil when either is absent.
-  outside_tokens =
-    if native_paths && foreign_ruby_srcs
-      outside_world_tokens(native_paths + foreign_ruby_srcs)
-    end
+  # FIXNUM_RETURN_PROOF / ENTRY_ARG_CALLSITE_PROOF: every identifier token of the
+  # outside native and Ruby sources (see outside_world_tokens).
+  outside_tokens = outside_world_tokens(native_paths + foreign_ruby_srcs)
   # NUMERIC_OPERAND_PROOF: the same two outside inputs, as ivar names they spell
-  # and operators they define on NilClass; nil when either input is absent.
-  outside_ivars = (outside_ivar_names(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs)
-  native_ivar_scopes = {}
-  if closed_world && native_paths && foreign_ruby_srcs
+  # and operators they define on NilClass.
+  outside_ivars = outside_ivar_names(native_paths + foreign_ruby_srcs)
     # A core mrbgem the build does not link never runs, so its Ruby cannot spell a scoped name: FOREIGN_RUBY_SRCS globs
     # every 3rd/mruby/mrbgems mrblib (mruby-benchmark's Report spells @width), and that spelling would drop a scope
     # for nothing. Every other foreign file still counts.
@@ -937,12 +978,9 @@ if $PROGRAM_NAME == __FILE__
                              .select { |name, _| outside_ivars.include?(name) }.transform_values(&:sort)
     native_ivar_scopes = native_ivar_scopes.merge(ruby_scopes)
     warn "== outside Ruby ivar scopes: #{ruby_scopes.sort.to_h.inspect} =="
-  end
-  nil_operators = (nil_class_operator_names(native_paths) if native_paths && foreign_ruby_srcs)
-  outside_consts = if native_paths && foreign_ruby_srcs
-                     IntegerConstants.native_defined_const_names(native_paths) |
+  nil_operators = nil_class_operator_names(native_paths)
+  outside_consts = IntegerConstants.native_defined_const_names(native_paths) |
                        IntegerConstants.foreign_const_names(foreign_ruby_srcs)
-                   end
   warn ''
   # BC2CPP_SELF_REGISTERING: same guard as for the probing CodeGen above.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
@@ -962,7 +1000,7 @@ if $PROGRAM_NAME == __FILE__
        "#{CodeGen.enumerator_model&.reason ? " (#{CodeGen.enumerator_model.reason})" : ''}, Enumerator constant " \
        "#{CodeGen.enumerator_model&.constant_stable ? 'stable' : 'not stable'} =="
   # NATIVE_SINGLETON_CALL (ADR 0416): the native and outside-Ruby sources the proof must account for.
-  CodeGen.native_singleton_inputs = native_paths && foreign_ruby_srcs ? { native: native_paths, ruby: foreign_ruby_srcs } : nil
+  CodeGen.native_singleton_inputs = { native: native_paths, ruby: foreign_ruby_srcs }
   # COMPUTED_SEND_EXPANSION (ADR 0303): frozen Symbol tables a computed-name send may index.
   CodeGen.computed_send_tables = profile_call.call('ComputedSendNames::SymbolTables.analyze') do
     ComputedSendNames::SymbolTables.analyze(ireps, native_paths, foreign_ruby_srcs)
@@ -974,7 +1012,7 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.integer_constant_values = integer_constant_values
   # NUMERIC_CONSTANT_RANGES (ADR 0318); BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
   CodeGen.integer_constant_ranges =
-    if IntegerConstantRanges.enabled? && native_paths && foreign_ruby_srcs
+    if IntegerConstantRanges.enabled?
       range_report = ENV['BC2CPP_NUMERIC_CONSTANTS_REPORT'] ? [] : nil
       ranges = profile_call.call('IntegerConstantRanges.analyze') do
         IntegerConstantRanges.analyze(ireps, native_paths, foreign_ruby_srcs, report: range_report)
@@ -1042,6 +1080,9 @@ if $PROGRAM_NAME == __FILE__
                     closed_world: closed_world, outside_ivar_names: outside_ivars,
                     native_ivar_scopes: native_ivar_scopes,
                     nil_operator_names: nil_operators, outside_const_names: outside_consts)
+  # DECLARED_RETURN_CHECK (ADR 0455): a declaration with an unproven path aborts like RBS_SEED_CONTRADICTION; the
+  # type check reports it (TC1010) with the signature diagnostics.
+  DeclaredReturns.report(gen, sig_applied, abort_on_error: !ENV['BC2CPP_TYPE_FACTS'].to_s.then { |v| !v.empty? })
   warn '== typed slots demoted to boxed slots (foreign writers, ADR 0279) =='
   if gen.typed_demotions.empty?
     warn '  (none)'
@@ -1113,7 +1154,7 @@ if $PROGRAM_NAME == __FILE__
     end
     # The type check reports them (with file:line) instead of stopping the run that collects them.
     total = contradictions.size + ivar_contradictions.size
-    abort "\n[bc2pp] RBS_SEED_CONTRADICTION: #{total} declaration(s) disagree with a " \
+    abort "\n[bc2cpp] RBS_SEED_CONTRADICTION: #{total} declaration(s) disagree with a " \
           "proved type (see above). Fix the declaration, or the code it claims to describe." unless type_facts_path
   end
   warn ''
@@ -1652,79 +1693,82 @@ if $PROGRAM_NAME == __FILE__
   # DIRECT_RAISE (ADR 0226): a reviewed dead fallback raises without dispatching (before the rewrite renames its callee).
   compiled.each { |m| m[:code] = NomethodReviewed.direct_raise(m[:code], m[:owner], m[:name]) }
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
-  if closed_world
-    kept = Hash.new(0)
-    compiled.each { |m| m[:code].scan(%r{/\* CLOSED_WORLD kept: (\w+) \*/}) { |(r)| kept[r] += 1 } }
-    converted = compiled.sum { |m| m[:code].scan(/\bbc2cpp_nomethod\(M,/).size }
-    dropped = compiled.sum { |m| m[:code].scan(%r{^\s*// CLOSED_WORLD_SELF :}).size }
-    warn "== closed world fallbacks: #{dropped} guards dropped, #{converted} bc2cpp_nomethod, " \
-         "#{kept.values.sum} kept dispatching =="
-    # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
-    violation_families = Hash.new(0)
-    compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|CLASS_NARROWING|COMPUTED_SEND|CORE_BODY_EXACT|CHECKED_POOL_EXACT)\)"/) { |(f)| violation_families[f] += 1 } }
-    warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
-    violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
-    NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
-    kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
-    warn ''
-    # NIL_RECEIVER (ADR 0296): nil arms of receivers proven nil-or-one-class.
-    nil_sites = NomethodReviewed.nil_receiver_sites(compiled)
-    warn "== closed world nil receivers: #{nil_sites.size} bc2cpp_nil_receiver =="
-    warn "  NILABLE_RECEIVER sites: #{compiled.sum { |m| m[:code].scan(%r{^\s*// NILABLE_RECEIVER :}).size }}"
-    nil_sites.uniq.sort.each { |k| warn "  NIL_RECEIVER_SITE #{k}" }
-    warn ''
-    # NOMETHOD_REVIEWED (docs/adr/0226): a dead fallback nobody reviewed fails
-    # the gem build here, not in a later check.
-    nomethod_sites = NomethodReviewed.sites(compiled)
-    warn "== closed world nomethod sites: #{nomethod_sites.size} =="
-    nomethod_sites.each { |s| warn "  NOMETHOD #{s[:key]}#{' [self]' if s[:self_receiver]}" }
-    warn ''
-    violations = NomethodReviewed.violations(nomethod_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
-    unless violations.empty?
-      msg = "bc2cpp: #{violations.size} closed-world NOMETHOD_REVIEWED violation(s) (docs/adr/0226):\n  " \
-            "#{violations.join("\n  ")}\n" \
-            'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
-            'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp/nomethod_reviewed_update.rb).'
-      abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
-
-      warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
-    end
-    # STRICT_HINTS (docs/adr/0419): the forced hint sites, listed and held to STRICT_HINTS_REVIEWED.
-    unless StrictHints.families.empty?
-      hint_sites = StrictHints.sites(compiled)
-      warn "== strict hints (#{StrictHints.families.join(',')}): #{hint_sites.size} bc2cpp_hint_violation =="
-      StrictHints.family_counts(compiled).sort.each { |f, n| warn "  STRICT_HINT #{f}: #{n}" }
-      hint_sites.map { |s| s[:key] }.uniq.sort.each { |k| warn "  STRICT_HINT_SITE #{k}" }
-      warn ''
-      # Unreviewed only: STRICT_HINTS_REVIEWED is the union of the full and the hot-only runs, so one run cannot
-      # prove an entry stale. strict_hints_reviewed_check holds the union exact over both runs.
-      hint_violations = StrictHints.violations(hint_sites, compiled, stale: false)
-      unless hint_violations.empty?
-        msg = "bc2cpp: #{hint_violations.size} STRICT_HINTS_REVIEWED violation(s) (docs/adr/0419):\n  " \
-              "#{hint_violations.join("\n  ")}\n" \
-              'Run the verify build over the real workloads, then list the sites in ' \
-              'tools/bc2cpp/strict_hints_reviewed.rb (scripts/bc2cpp/strict_hints_update.rb).'
-        abort msg unless ENV[StrictHints::ALLOW_ENV] == 'allow'
-
-        warn msg.sub('bc2cpp:', "bc2cpp: #{StrictHints::ALLOW_ENV}=allow, ignoring")
-      end
-    end
-    # PROVEN_MISS_REVIEWED (docs/adr/0275): a send to a proven class that nothing answers.
-    miss_sites = ProvenMiss.sites(compiled)
-    warn "== closed world proven-class miss sites: #{miss_sites.size} =="
-    miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }
-    warn ''
-    miss_violations = ProvenMiss.violations(miss_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
-    unless miss_violations.empty?
-      msg = "bc2cpp: #{miss_violations.size} closed-world PROVEN_MISS_REVIEWED violation(s) (docs/adr/0275):\n  " \
-            "#{miss_violations.join("\n  ")}\n" \
-            'Read each site: fix the missing method, or list defensive code in ' \
-            'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp/proven_miss_update.rb).'
-      abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
-
-      warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
-    end
+  kept = Hash.new(0)
+  compiled.each { |m| m[:code].scan(%r{/\* CLOSED_WORLD kept: (\w+) \*/}) { |(r)| kept[r] += 1 } }
+  converted = compiled.sum { |m| m[:code].scan(/\bbc2cpp_nomethod\(M,/).size }
+  dropped = compiled.sum { |m| m[:code].scan(%r{^\s*// CLOSED_WORLD_SELF :}).size }
+  warn "== closed world fallbacks: #{dropped} guards dropped, #{converted} bc2cpp_nomethod, " \
+       "#{kept.values.sum} kept dispatching =="
+  # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
+  violation_families = Hash.new(0)
+  compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|CLASS_NARROWING|COMPUTED_SEND|CORE_BODY_EXACT|CHECKED_POOL_EXACT)\)"/) { |(f)| violation_families[f] += 1 } }
+  warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
+  violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
+  NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
+  kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
+  warn ''
+  # NIL_RECEIVER (ADR 0296): nil arms of receivers proven nil-or-one-class.
+  nil_sites = NomethodReviewed.nil_receiver_sites(compiled)
+  warn "== closed world nil receivers: #{nil_sites.size} bc2cpp_nil_receiver =="
+  warn "  NILABLE_RECEIVER sites: #{compiled.sum { |m| m[:code].scan(%r{^\s*// NILABLE_RECEIVER :}).size }}"
+  nil_sites.uniq.sort.each { |k| warn "  NIL_RECEIVER_SITE #{k}" }
+  warn ''
+  # NOMETHOD_REVIEWED (docs/adr/0226), STRICT_HINTS_REVIEWED (docs/adr/0419), PROVEN_MISS_REVIEWED (docs/adr/0275):
+  # every listing is printed first, then any unreviewed site fails the build. The update scripts read the listings
+  # of a run that fails only here (NomethodReviewedProbe.review_abort?).
+  review_scope = ReviewScope.for_build(ENV['BC2CPP_BUILD_NAME'].to_s)
+  leaked = ReviewScope.leaks(review_scope, only_owners, compiled)
+  unless leaked.empty?
+    abort "bc2cpp: an engine-owner run compiled owner(s) outside the reviewed scope (tools/bc2cpp/review_scope.rb): " \
+          "#{leaked.join(', ')}"
   end
+  nomethod_sites = NomethodReviewed.sites(compiled)
+  warn "== closed world nomethod sites: #{nomethod_sites.size} =="
+  nomethod_sites.each { |s| warn "  NOMETHOD #{s[:key]}#{' [self]' if s[:self_receiver]}" }
+  warn ''
+  hint_sites = []
+  unless StrictHints.families.empty?
+    hint_sites = StrictHints.sites(compiled)
+    warn "== strict hints (#{StrictHints.families.join(',')}): #{hint_sites.size} bc2cpp_hint_violation =="
+    StrictHints.family_counts(compiled).sort.each { |f, n| warn "  STRICT_HINT #{f}: #{n}" }
+    hint_sites.map { |s| s[:key] }.uniq.sort.each { |k| warn "  STRICT_HINT_SITE #{k}" }
+    warn ''
+  end
+  miss_sites = ProvenMiss.sites(compiled)
+  warn "== closed world proven-class miss sites: #{miss_sites.size} =="
+  miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }
+  warn ''
+  unless review_scope == ReviewScope::ALL
+    outside = [nomethod_sites, hint_sites, miss_sites].sum { |l| l.size - ReviewScope.select(review_scope, l).size }
+    warn "== review scope: engine owners; #{outside} listed site(s) outside the reviewed program ==" if outside.positive?
+  end
+  review_failures = []
+  violations = NomethodReviewed.violations(nomethod_sites, compiled, scope: review_scope,
+                                                                     stale: !ENV['BC2CPP_HOT_METHODS'])
+  unless violations.empty?
+    review_failures << "bc2cpp: #{violations.size} closed-world NOMETHOD_REVIEWED violation(s) (docs/adr/0226):\n  " \
+                       "#{violations.join("\n  ")}\n" \
+                       'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
+                       'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp/nomethod_reviewed_update.rb).'
+  end
+  # Unreviewed only: STRICT_HINTS_REVIEWED is the union of the full and the hot-only runs, so one run cannot
+  # prove an entry stale. strict_hints_reviewed_check holds the union exact over both runs.
+  hint_violations = StrictHints.violations(hint_sites, compiled, scope: review_scope, stale: false)
+  unless hint_violations.empty?
+    review_failures << "bc2cpp: #{hint_violations.size} STRICT_HINTS_REVIEWED violation(s) (docs/adr/0419):\n  " \
+                       "#{hint_violations.join("\n  ")}\n" \
+                       'Run the verify build over the real workloads, then list the sites in ' \
+                       'tools/bc2cpp/strict_hints_reviewed.rb (scripts/bc2cpp/strict_hints_update.rb).'
+  end
+  miss_violations = ProvenMiss.violations(miss_sites, compiled, scope: review_scope,
+                                                                stale: !ENV['BC2CPP_HOT_METHODS'])
+  unless miss_violations.empty?
+    review_failures << "bc2cpp: #{miss_violations.size} closed-world PROVEN_MISS_REVIEWED violation(s) " \
+                       "(docs/adr/0275):\n  #{miss_violations.join("\n  ")}\n" \
+                       'Read each site: fix the missing method, or list defensive code in ' \
+                       'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp/proven_miss_update.rb).'
+  end
+  abort review_failures.join("\n") unless review_failures.empty?
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers, symbol_table)
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
@@ -1824,7 +1868,7 @@ if $PROGRAM_NAME == __FILE__
   # mruby-rpg2k/mruby-lcf have no external script layer, so their names are
   # stronger evidence.
   static_call_names = collect_static_call_target_names(ireps)
-  native_call_names = ENV['NATIVE_SRCS'] ? extract_native_call_names(native_paths) : Set.new
+  native_call_names = extract_native_call_names(native_paths)
   # Methods mruby's C core calls through a `mrb_sym mid = MRB_SYM(...)` local
   # rather than a literal, invisible to extract_native_call_names' forward
   # lookahead, each with a verified call site in 3rd/mruby/src: initialize /

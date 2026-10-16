@@ -34,6 +34,7 @@ require 'shellwords'
 require 'tmpdir'
 require 'fileutils'
 require 'open3'
+require_relative 'wio_world_env'
 
 ROOT = File.expand_path('../..', __dir__)
 BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
@@ -74,7 +75,7 @@ def live_candidates
   begin
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'profile_annotations_scan', 'OUT_DIR' => out_dir,
             'NATIVE_SRCS' => native_srcs }
-    _stdout, stderr, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', *closed_world)
+    _stdout, stderr, status = Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, BC2CPP, '--annotated', *closed_world)
     unless status.success?
       warn stderr
       raise "bc2cpp.rb exited #{status.exitstatus} -- is MRBC (#{mrbc.inspect}) a real, working mrbc?"

@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'annotations'
+require_relative 'rbs_optional_hint'
 
 # RBS_SIGNATURES (docs/adr/0413): RBS files as a source of the same hints the `# bc2cpp:` comments give.
 #
@@ -17,8 +18,11 @@ require_relative 'annotations'
 #            (element class C), and any class name the program defines (class hint).
 #   noted    (TC1005 info: accepted, gives no hint) optional / rest / keyword / block parameters and block types, `T?`,
 #            unions, `untyped`, `void`, `bool`, `nil`, `self`, literal types, generics other than Array[]/Hash[], a class
-#            the program does not define, `def self.x`, constants, aliases, interfaces, mixins, visibility, a method
+#            the program does not define, constants, aliases, interfaces, mixins, visibility, a method
 #            whose parameter count is not the definition's.
+#   ADR 0456 `def self.x` returns type constant-receiver calls (RBS_SINGLETON_RETURN); an ivar `T?` and a return
+#            `C?` feed the nil-tolerant facts (rbs_optional_hint.rb); a class parameter is checked at every caller
+#            (rbs_param_check.rb).
 #   error    (TC1002) a parse error, an overloaded `def`, any declaration or member kind not listed above.
 # IR contracts separately retain nominal value classes for nullable, union, bool, nil and literal types;
 # matched arguments, ivars and call returns seed IR queries (ADR 0442), without changing hint kinds.
@@ -33,7 +37,9 @@ module RbsSignatures
   MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
-  Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, keyword_init: true)
+  # optional: for `T?`, T's own Type (RBS_OPTIONAL_HINT, docs/adr/0456); the `T?` Type itself stays kind :other.
+  Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, :optional,
+                    keyword_init: true)
   Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, :supers, keyword_init: true)
   # SUBTREE_DISPATCH (docs/adr/0453): a `class C < S` declaration, checked against the program's own superclass.
   SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
@@ -189,6 +195,7 @@ module RbsSignatures
     type = hint_type_of(t)
     type.value_classes = value_classes_of(t)
     type.self_return = t.is_a?(RBS::Types::Bases::Self)
+    type.optional = type_of(t.type) if t.is_a?(RBS::Types::Optional)
     if t.is_a?(RBS::Types::ClassInstance)
       name = t.name.to_s.delete_prefix('::')
       element = if name == 'Array' && t.args.size == 1 then t.args.first
@@ -602,6 +609,8 @@ module RbsSignatures
         ret_class ||= cls
       elsif r.kind == :class
         note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name} return: class #{r.cls} is not defined by the program; no hint")
+      elsif (inner = RbsOptionalHint.return_class(r, known_owners))
+        ret_class ||= inner
       end
     end
     annotations[label] = Annotations::Annotation.new(args: ann_args, ret: ann_ret) if ann_args.any? || ann_ret
@@ -642,6 +651,7 @@ module RbsSignatures
     else
       # A record type is RbsRecordTypes' (ADR 0454), which checks it and reports its own diagnostics.
       return if t.text.start_with?('{')
+      return if RbsOptionalHint.seed_ivar(ap, iv, name, known_owners)
 
       note(ap, iv.loc, 'info', 'TC1005', "#{iv.owner}##{iv.name}: type #{t.text} gives no hint")
     end

@@ -65,9 +65,17 @@ module OptcarrotSealedBuild
     [bundle, gems]
   end
 
+  # docs/adr/0466: bc2cpp compiles closed-world programs only, so a probe of the benchmark compiles this sealed
+  # world too. Returns [sources, env]: the bundle and the closed-world inputs (the outside sources of the build).
+  def self.bc2cpp_world(root, temp)
+    bundle, gems = prepare(root, temp, File.join(temp, 'gem'))
+    native, ruby = bc2cpp_closed_world_outside_srcs('optcarrot-probe', gems, root)
+    [[bundle], environment(gems).merge('NATIVE_SRCS' => Shellwords.join(native), 'FOREIGN_RUBY_SRCS' => Shellwords.join(ruby),
+                                       'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '')]
+  end
+
   def self.environment(gems)
     {
-      'BC2CPP_CLOSED_WORLD' => '1',
       'BC2CPP_BUILD_NAME' => 'optcarrot-probe',
       'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" })
     }

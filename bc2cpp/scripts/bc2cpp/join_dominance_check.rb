@@ -27,6 +27,8 @@ require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/ivar_layout'
 require_relative '../../tools/bc2cpp/irep_scans'
+require_relative '../../tools/bc2cpp/nil_narrowing'
+require_relative '../../tools/bc2cpp/block_self'
 
 failures = []
 check = lambda do |what, condition|
@@ -170,6 +172,168 @@ check.call('a loop that also writes an opaque call result is not Fixnum', type_o
 check.call('a write straight before the SETIV is unchanged',
            type_of.call([insn(0, 'LOADI_7', "R3\t(7)"), insn(2, 'SETIV', "@x\tR3")], 1, '3') == :fixnum)
 
+puts '-- NIL_NARROWING (host, ADR 0456)'
+# `nil.placed?` raises NoMethodError: the callable says nil cannot answer it. `nil?` nil does answer.
+nil_free = ->(name) { name == 'placed?' }
+non_nil = ->(list, idx, reg, handlers = []) { NilNarrowing.non_nil?(irep_of(list, handlers), idx, reg, nil_free) }
+# v = f; if v then use(v) end
+if_v = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPNOT', "R2\t12"), insn(7, 'MOVE', "R3\tR2"), insn(10, 'RETURN', 'R3'),
+        insn(12, 'RETNIL', '')]
+check.call('`if v`: v is non-nil on the taken arm', non_nil.call(if_v, 2, '2'))
+check.call('`if v`: a MOVE copies the fact', non_nil.call(if_v, 3, '3'))
+check.call('`if v`: not on the else arm (negative)', !non_nil.call(if_v, 4, '2'))
+check.call('`if v`: not before the test (negative)', !non_nil.call(if_v, 1, '2'))
+# v = f; return unless v; use(v)
+unless_v = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPIF', "R2\t9"), insn(7, 'RETNIL', ''), insn(9, 'MOVE', "R3\tR2"),
+            insn(12, 'RETURN', 'R3')]
+check.call('`return unless v`: v is non-nil after the guard', non_nil.call(unless_v, 3, '2'))
+# v = f; v.placed?; use(v)
+called = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'MOVE', "R3\tR2"), insn(6, 'SEND0', "R3\t:placed?"),
+          insn(9, 'MOVE', "R4\tR2"), insn(12, 'RETURN', 'R4')]
+check.call('a call nil cannot answer proves its receiver non-nil after it returns', non_nil.call(called, 3, '2'))
+check.call('the receiver register itself holds the result, not the receiver (negative)', !non_nil.call(called, 3, '3'))
+check.call('a call nil may answer proves nothing (negative)',
+           !NilNarrowing.non_nil?(irep_of(called), 3, '2', ->(_name) { false }))
+check.call('a rescue edge out of the call reaches the use without the proof (negative)',
+           !non_nil.call(called, 3, '2', [CatchHandler.new(type: :rescue, begin_addr: 6, end_addr: 9, target: 9)]))
+rewritten = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPNOT', "R2\t15"), insn(7, 'SEND0', "R2\t:g"),
+             insn(10, 'MOVE', "R3\tR2"), insn(13, 'RETURN', 'R3'), insn(15, 'RETNIL', '')]
+check.call('a write between the test and the use drops the fact (negative)', !non_nil.call(rewritten, 3, '2'))
+joined = [insn(0, 'SEND0', "R2\t:f"), insn(3, 'JMPNOT', "R1\t11"), insn(7, 'JMPNOT', "R2\t16"),
+          insn(11, 'MOVE', "R3\tR2"), insn(14, 'RETURN', 'R3'), insn(16, 'RETNIL', '')]
+check.call('a join with an untested path drops the fact (negative)', !non_nil.call(joined, 3, '2'))
+clobbered = [insn(0, 'SEND0', "R4\t:f"), insn(3, 'JMPNOT', "R4\t12"), insn(7, 'SEND0', "R3\t:g"),
+             insn(10, 'RETURN', 'R4'), insn(12, 'RETNIL', '')]
+check.call('a callee frame below the register clobbers it (negative)', !non_nil.call(clobbered, 3, '4'))
+# v = f; c = (v.placed? && v.map_id == x) ? g(v) : nil; h(v)  -- mrbc's code for Scene::Map#draw_vehicles: the
+# receiver of each call and each argument are separate MOVE copies of the local R4, the `&&` jumps straight to the
+# ternary's test, and the test's JMPNOT then splits into the call and the LOADNIL.
+ternary = [insn(0, 'SEND0', "R6\t:f"), insn(3, 'MOVE', "R4\tR6"), insn(6, 'MOVE', "R6\tR4"),
+           insn(9, 'SEND0', "R6\t:placed?"), insn(12, 'JMPNOT', "R6\t30"), insn(16, 'MOVE', "R6\tR4"),
+           insn(19, 'SEND0', "R6\t:map_id"), insn(22, 'GETIV', "R7\t@x"), insn(25, 'SEND0', "R7\t:map_id"),
+           insn(28, 'EQ', "R6\t(R7)"), insn(30, 'JMPNOT', "R6\t44"), insn(34, 'MOVE', "R7\tR4"),
+           insn(37, 'SSEND', "R6\t:g\tn=1"), insn(41, 'JMP', '46'), insn(44, 'LOADNIL', "R6\t(nil)"),
+           insn(46, 'MOVE', "R5\tR6"), insn(49, 'MOVE', "R8\tR4"), insn(52, 'SSEND', "R7\t:h\tn=1"),
+           insn(56, 'RETURN', 'R7')]
+check.call('`(v.m? && x) ? g(v) : nil`: the argument copy of v is non-nil at g', non_nil.call(ternary, 12, '7'))
+check.call('`(v.m? && x) ? g(v) : nil`: v stays non-nil past the `&&` and ternary joins', non_nil.call(ternary, 15, '4'))
+check.call('`(v.m? && x) ? g(v) : nil`: a later argument copy of v is non-nil at h', non_nil.call(ternary, 17, '8'))
+check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_nil.call(ternary, 3, '4'))
+check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
+           !NilNarrowing.non_nil?(irep_of(ternary), 12, '7', ->(_name) { false }))
+
+puts '-- IS_A_GUARD (host, ADR 0456)'
+# The closed world's answers come from a real ClosedWorld over a declared class K (and a subclass, or a Ruby
+# definition, where a case needs one) and CodeGen#is_a_guard_class / #raise_never_returns? on it. Only the native
+# registration scan (class_test_native_owners?: is_a? and raise are registered on Kernel alone, kernel.c) is
+# stubbed, since it reads a build's native sources.
+require_relative '../../tools/bc2cpp/codegen'
+%w[codegen_receiver_facts codegen_class_narrowing codegen_eqq codegen_return_analysis codegen_block_core_direct
+   rbs_param_check].each { |file| require_relative "../../tools/bc2cpp/#{file}" }
+guard_def = Struct.new(:owner, :name, :irep, :kind)
+guard_for = lambda do |registry: {}, classes: { 'K' => [{ super: :none, outer_nil: true }] }|
+  world = ClosedWorld.new(ireps: {}, registry: registry, class_decls: classes, walked: Set.new, native_paths: [],
+                          ruby_paths: [])
+  gen = CodeGen.allocate
+  gen.instance_variable_set(:@closed_world, world)
+  gen.instance_variable_set(:@registry, registry)
+  gen.instance_variable_set(:@ireps, {})
+  gen.define_singleton_method(:class_test_native_owners?) { |_name| true }
+  RbsParamCheck::IsAGuard.new(gen)
+end
+guard = guard_for.call
+# cmd = f; raise TypeError, "..." unless cmd.is_a?(K); execute(cmd)  -- mrbc's code for the Interpreter's run loop.
+guarded_list = lambda do |klass_load = insn(9, 'GETCONST', "R4\tK"), arg = 'R2'|
+  [insn(0, 'SEND0', "R3\t:f"), insn(3, 'MOVE', "R2\tR3"), insn(6, 'MOVE', "R3\tR2"), klass_load,
+   insn(12, 'SEND', "R3\t:is_a?\tn=1"), insn(16, 'JMPIF', "R3\t29"), insn(20, 'GETCONST', "R4\tTypeError"),
+   insn(23, 'STRING', "R5\tL[0]"), insn(26, 'SSEND', "R3\t:raise\tn=2"), insn(29, 'MOVE', "R4\t#{arg}"),
+   insn(32, 'SSEND', "R3\t:execute\tn=1"), insn(36, 'RETURN', 'R3')]
+end
+instance_k = lambda do |list, idx, reg, with = guard|
+  NilNarrowing.instance_of?(irep_of(list), idx, reg, 'K', nil_free, {}, class_guard: with)
+end
+check.call('`raise ... unless x.is_a?(K)`: the argument copy of x is an instance of K at the call',
+           instance_k.call(guarded_list.call, 10, '4'))
+check.call('`raise ... unless x.is_a?(K)`: the local is an instance of K, and non-nil, after the guard',
+           instance_k.call(guarded_list.call, 9, '2') &&
+             NilNarrowing.non_nil?(irep_of(guarded_list.call), 9, '2', nil_free, {}, class_guard: guard))
+check.call('`raise ... unless x.is_a?(K)`: nothing before the test (negative)', !instance_k.call(guarded_list.call, 4, '2'))
+check.call('a guard on another register proves nothing about the argument (negative)',
+           !instance_k.call(guarded_list.call(insn(9, 'GETCONST', "R4\tK"), 'R1'), 10, '4'))
+check.call('a program that defines is_a? in Ruby refuses (negative)',
+           !instance_k.call(guarded_list.call, 10, '4',
+                            guard_for.call(registry: { 'is_a?' => [guard_def.new('K', 'is_a?', 'k_is_a', :method)] })))
+check.call('a K that is a call result, not a constant, refuses (negative)',
+           !instance_k.call(guarded_list.call(insn(9, 'SEND0', "R4\t:k")), 10, '4'))
+check.call('a K something inherits from refuses (negative)',
+           !instance_k.call(guarded_list.call, 10, '4',
+                            guard_for.call(classes: { 'K' => [{ super: :none, outer_nil: true }],
+                                                      'S' => [{ super: 'K', outer_nil: true }] })))
+check.call('a raise that may return (a Ruby `raise`) leaves the fall-through unproven (negative)',
+           !instance_k.call(guarded_list.call, 10, '4',
+                            guard_for.call(registry: { 'raise' => [guard_def.new('K', 'raise', 'k_raise', :method)] })))
+# if x.is_a?(K) then h(x) end
+if_is_a = [insn(0, 'MOVE', "R3\tR1"), insn(3, 'GETCONST', "R4\tK"), insn(6, 'SEND', "R3\t:is_a?\tn=1"),
+           insn(10, 'JMPNOT', "R3\t20"), insn(14, 'MOVE', "R4\tR1"), insn(17, 'SSEND', "R3\t:h\tn=1"),
+           insn(20, 'RETURN', 'R3')]
+check.call('`if x.is_a?(K)`: the taken arm proves the argument', instance_k.call(if_is_a, 5, '4'))
+check.call('`if x.is_a?(K)`: not after the join (negative)', !instance_k.call(if_is_a, 6, '1'))
+# A jump into the test from elsewhere: the branch no longer reads only the is_a? result.
+joined_is_a = [insn(0, 'JMPNOT', "R2\t13"), insn(4, 'MOVE', "R3\tR1"), insn(7, 'GETCONST', "R4\tK"),
+               insn(10, 'SEND', "R3\t:is_a?\tn=1"), insn(13, 'JMPNOT', "R3\t23"), insn(17, 'MOVE', "R4\tR1"),
+               insn(20, 'SSEND', "R3\t:h\tn=1"), insn(23, 'RETURN', 'R3')]
+check.call('a test another edge also reaches proves nothing (negative)', !instance_k.call(joined_is_a, 6, '4'))
+
+puts '-- BLOCK_SELF plain yielders (host, ADR 0456)'
+yielder = lambda do |list, nested = nil|
+  outer = Irep.new(label: 'bs_out', instructions: list, reps: nested ? ['bs_in'] : [], nregs: 8, catch_handlers: [])
+  ireps = { 'bs_out' => outer }
+  ireps['bs_in'] = Irep.new(label: 'bs_in', instructions: nested, reps: [], nregs: 8, catch_handlers: []) if nested
+  BlockSelf.plain_yielder_why(outer, ireps)
+end
+# mruby-enum-ext's `def each_with_object(obj, &block); return to_enum(...) unless block; self.each {|*val|
+# block.call(val.__svalue, obj) }; obj; end`, as mrbc compiles it: the block slot R2 is copied to the local R3 and
+# tested, the nested block reads it back through GETUPVAR and only calls it.
+ewo_inner = [insn(0, 'ENTER', "0:0:1:0:0:0:0:0 (0x1000)"), insn(4, 'GETUPVAR', "R3\t3\t0"), insn(8, 'MOVE', "R4\tR1"),
+             insn(11, 'SEND0', "R4\t:__svalue"), insn(14, 'GETUPVAR', "R5\t1\t0"), insn(18, 'SEND', "R3\t:call\tn=2"),
+             insn(22, 'RETURN', 'R3')]
+ewo = [insn(0, 'ENTER', "1:0:0:0:0:0:1:0 (0x40001)"), insn(4, 'MOVE', "R3\tR2"), insn(7, 'MOVE', "R4\tR3"),
+       insn(10, 'JMPIF', "R4\t26"), insn(14, 'LOADSYM', "R5\t:each_with_object"), insn(17, 'MOVE', "R6\tR1"),
+       insn(20, 'SSEND', "R4\t:to_enum\tn=2"), insn(24, 'RETURN', 'R4'), insn(26, 'BLOCK', "R5\tI[0]"),
+       insn(29, 'SSENDB', "R4\t:each\tn=0"), insn(33, 'RETURN', 'R1')]
+check.call('each_with_object only calls its block (a copy tested, then called from a nested block)',
+           yielder.call(ewo, ewo_inner).nil?)
+# def f(x); yield x; end  -- BLKPUSH, then BLKCALL.
+yield_x = [insn(0, 'ENTER', "1:0:0:0:0:0:0:0 (0x40000)"), insn(4, 'MOVE', "R4\tR1"), insn(7, 'BLKPUSH', "R3\t1:0:0:0 (0)"),
+           insn(11, 'BLKCALL', "R3\t1"), insn(14, 'RETURN', 'R3')]
+check.call('`yield x` is a plain call of the block', yielder.call(yield_x).nil?)
+# def f(&b); b; end
+returns_it = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'RETURN', 'R1')]
+check.call('returning the block lets it escape (negative)', !yielder.call(returns_it).nil?)
+# def f(&b); instance_exec(&b); end
+rebinds = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'MOVE', "R4\tR2"),
+           insn(10, 'SSENDB', "R3\t:instance_exec\tn=0"), insn(14, 'RETURN', 'R3')]
+check.call('passing the block on (`instance_exec(&b)`) lets it escape (negative)', !yielder.call(rebinds).nil?)
+# def f(&b); @b = b; end
+stores = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'SETIV', "@b\tR1"), insn(7, 'RETURN', 'R1')]
+check.call('storing the block lets it escape (negative)', !yielder.call(stores).nil?)
+# def f(&b); g(b.call, b); end  -- the receiver of `call` is fine, the same Proc as an argument is not.
+as_arg = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R3\tR1"), insn(7, 'SEND0', "R3\t:call"),
+          insn(10, 'MOVE', "R4\tR1"), insn(13, 'SSEND', "R2\t:g\tn=2"), insn(17, 'RETURN', 'R2')]
+check.call('the block as an argument lets it escape (negative)', !yielder.call(as_arg).nil?)
+# def f(&b); [1].each { @b = b }; end  -- a nested block stores the captured slot.
+nested_store = [insn(0, 'ENTER', "0:0:0:0:0:0:0:0 (0x0)"), insn(4, 'GETUPVAR', "R2\t2\t0"), insn(8, 'SETIV', "@b\tR2"),
+                insn(11, 'RETURN', 'R2')]
+outer_store = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'LOADI_1', "R3\t(1)"),
+               insn(9, 'ARRAY', "R3\t1"), insn(12, 'BLOCK', "R4\tI[0]"), insn(15, 'SENDB', "R3\t:each\tn=0"),
+               insn(19, 'RETURN', 'R3')]
+check.call('a nested block storing the captured block lets it escape (negative)',
+           !yielder.call(outer_store, nested_store).nil?)
+# def f(&b); super; end  -- a zsuper passes the frame's block on.
+zsuper = [insn(0, 'ENTER', "0:0:0:0:0:0:1:0 (0x1)"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'ARGARY', "R4\t0:0:0:0 (0)"),
+          insn(11, 'SUPER', "R3\tn=*"), insn(14, 'RETURN', 'R3')]
+check.call('`super` forwards the block (negative)', !yielder.call(zsuper).nil?)
+
 if ENV['MRBC']
   require_relative 'fixture_runtime'
   runtime = Bc2cppFixtureRuntime
@@ -308,7 +472,7 @@ if ENV['MRBC']
           def initialize; @a = 1; end
         end
       RUBY
-      _code, err = runtime.generate(source, dir, closed: true, only_owners: %w[JdProbe JdHolder JdLate JdFoo JdBaz])
+      _code, err = runtime.generate(source, dir, only_owners: %w[JdProbe JdHolder JdLate JdFoo JdBaz])
       body = <<~CPP
         static int scenario(mrb_state* M) {
           mrb_value probe = mrb_obj_new(M, mrb_class_get(M, "JdProbe"), 0, nullptr);
