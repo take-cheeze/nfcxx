@@ -14,7 +14,9 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cpass=0; ctotal=0
 for f in "$root"/tests/c/*.c; do
   ctotal=$((ctotal + 1))
-  if "$root/scripts/qbe-cc" -S "$f" -o "$tmp/c.s" >/dev/null 2>"$tmp/c.err"; then
+  # NFCXX_C_INPUT=1: these are hand-written C files that include the standard headers. Without it, qbe-cc's -undef strips
+  # the target's __SIZE_TYPE__ and friends, and every file that includes stddef.h fails.
+  if NFCXX_C_INPUT=1 "$root/scripts/qbe-cc" -S "$f" -o "$tmp/c.s" >/dev/null 2>"$tmp/c.err"; then
     cpass=$((cpass + 1))
   else
     echo "C fail $(basename "$f"): $(grep -m1 -E 'error|assert|Error' "$tmp/c.err" || head -1 "$tmp/c.err")"
