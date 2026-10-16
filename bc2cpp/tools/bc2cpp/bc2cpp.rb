@@ -231,7 +231,7 @@ if $PROGRAM_NAME == __FILE__
   end
   CodeGen.core_aliases = CoreDefs.alias_map(alias_sites, registry, ireps, core_shadowed_pairs)
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
-  core_refused = CoreMethods.load_refused(ENV['BC2CPP_CORE_REFUSED'] || CoreMethods::DEFAULT_PATH)
+  core_refused = CoreMethods.load_refused(CoreMethods::DEFAULT_PATH)
   core_ineligible = CoreMethods.excluded_labels(registry, ireps, core_refused)
   # ADR 0338: an interpreted core replacement still intercepts inherited lookup.
   CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
