@@ -29,7 +29,7 @@ require_relative 'else_trace'
 # real class, so a singleton class counts as its class), and appends to the file named by
 # BC2CPP_TRACE_TYPES_OUT (stderr when unset) at exit. Every row carries the statically proven fact
 # for the parameter that this bc2cpp run computed, so the dump is self-contained.
-# scripts/bc2cpp/param_trace_report.rb reads it, together with an ElseTrace dump.
+# scripts/bc2cpp/trace_types.rb report reads it, together with an ElseTrace dump.
 module ParamTrace
   MAX_CLASSES = 8
   # The impl header: `mrb_value Foo_bar_impl(mrb_state* M, mrb_value self, <params>) {`.

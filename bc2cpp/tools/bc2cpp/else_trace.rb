@@ -63,7 +63,7 @@ module ElseTrace
       recv = lines[i][SEND_CALL, 1]
       id = rows.size
       method = impls.fetch(s[:fn], nil) || "(#{s[:fn] || 'file scope'})"
-      # The parameter(s) the receiver copies (scripts/bc2cpp/param_trace_report.rb joins on it): `name` when
+      # The parameter(s) the receiver copies (scripts/bc2cpp/trace_types.rb report joins on it): `name` when
       # exact, `~a|b` when a control-flow join made the origin a may-set, `-` when none.
       names, exact = %w[parameter join].include?(s[:origin]) ? SiteCensus.feeding_parameters(lines, s[:line], recv) : [[], true]
       param = names.empty? ? '-' : "#{exact ? '' : '~'}#{names.join('|')}"
