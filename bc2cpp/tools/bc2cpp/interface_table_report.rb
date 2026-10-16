@@ -63,7 +63,7 @@ module InterfaceTableReport
     owner_def = kwargs[:owner_def]
     [owner_def ? "#{owner_def.owner}##{owner_def.name}" : irep.label, irep.label, site, name, fb[:argc],
      insn.op.end_with?('B') ? 'block' : '-', family, else_kind, gates(name, fb, instances).join(','),
-     set + nilable, receiver_trace_origin(irep, site, reg), origin_ivar(irep, site, reg, owner_def),
+     set + nilable, receiver_trace_origin(irep, site, reg), IrepScans.origin_ivar(irep, site, reg, owner_def),
      fb[:listed].join('|'), cells(name, fb, instances), native_detail(name)].join("\t")
   end
 
@@ -133,14 +133,6 @@ module InterfaceTableReport
     ruby = @registry.fetch(name, []).reject { |def_| def_.owner == '<native>' }.map(&:owner)
     parts << "ruby_owners=#{ruby.size}"
     parts.join(';')
-  end
-
-  def origin_ivar(irep, site, reg, owner_def)
-    irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP]) do |ins|
-      next IrepScans.follow(ins.regs[1]) if ins.op == 'MOVE' && ins.regs[1]
-
-      break "#{owner_def&.owner}#@#{ins.ivar}" if ins.op == 'GETIV'
-    end.to_s
   end
 
   def self.write(path)

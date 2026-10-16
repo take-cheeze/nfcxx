@@ -21,10 +21,6 @@ class CodeGen
       sound = !cw.nil? && cw.global_refusal.nil?
       native = @registry.values.flatten.select { |d| d.owner == '<native>' }.to_set(&:name)
       native.merge(cw.outside_names) if cw
-      if (dump = ENV['BC2CPP_YIELD_DUMP'])
-        opaque = cw&.outside_call_names(@ireps.values.to_set(&:file))
-        File.binwrite(dump, Marshal.dump([@ireps, sound, opaque, native]))
-      end
       YieldReach.new(ireps: @ireps, sound: sound, opaque_names: cw&.outside_call_names(@ireps.values.to_set(&:file)), native_names: native)
     end
   end

@@ -150,7 +150,7 @@ class CodeGen
   #   1. exactly one MethodDef, with a bytecode body;
   #   2. not in foreign_method_names (this refuses values/sort/first/... from
   #      3rd/mruby/mrblib);
-  #   3. array_return_analyzable? (= fixnum_return_analyzable?);
+  #   3. fixnum_return_analyzable? (the same rule serves an Array return);
   #   4. every `RETURN R[a]` proves; any other exit opcode refuses.
   # Rules 1+2 mean the name has one body in the whole program, so no receiver
   # can reach another definition, and one that lacks the method raises before
@@ -177,7 +177,7 @@ class CodeGen
       next unless d.irep
 
       irep = @ireps[d.irep]
-      next unless irep && array_return_analyzable?(irep)
+      next unless irep && fixnum_return_analyzable?(irep)
 
       cand[name] = d
     end
@@ -199,14 +199,6 @@ class CodeGen
   # ARRAY_RETURN_PROOF result, for the diagnostic.
   def array_return_names
     @array_return_names || Set.new
-  end
-
-  # fixnum_return_analyzable?'s rule, reused (the question is type-independent).
-  def array_return_analyzable?(irep)
-    return false unless (irep.catch_handlers || []).empty?
-    return false if subtree_has_nonlocal_exit?(irep)
-
-    irep.instructions.any? { |i| i.op == 'RETURN' }
   end
 
   # Every return path holds an Array; same opcode split as
@@ -355,7 +347,7 @@ class CodeGen
     out
   end
 
-  # array_return_analyzable?, but a rescue handler is allowed: its entry is a
+  # fixnum_return_analyzable?, but a rescue handler is allowed: its entry is a
   # barrier return_value_sources never crosses. `ensure` stays refused.
   def class_return_analyzable?(irep)
     return false unless (irep.catch_handlers || []).all? { |h| h.type == :rescue }

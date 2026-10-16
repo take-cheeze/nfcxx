@@ -29,9 +29,8 @@ class CodeGen
 
   private
 
-  # BC2CPP_ZERO_WHY=1 reports, on stderr, why the helper stays by name.
-  def numeric_slow_zero_refuse(reason)
-    warn "[bc2cpp] zero? helper by name: #{reason}" if ENV['BC2CPP_ZERO_WHY'] == '1'
+  # The helper stays by name: the reason is not reported.
+  def numeric_slow_zero_refuse(_reason)
     nil
   end
 

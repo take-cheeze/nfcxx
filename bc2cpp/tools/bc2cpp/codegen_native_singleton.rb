@@ -258,10 +258,6 @@ class ClosedWorld
   def native_singleton_redefined?(name, singleton_owner)
     @registry.fetch(name, []).any? { |definition| definition.owner == singleton_owner }
   end
-
-  def native_singleton_name_safe?(name)
-    native_singleton_name_refusal(name).nil?
-  end
 end
 
 CodeGen.include(NativeSingletonCall)

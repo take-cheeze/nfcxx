@@ -105,12 +105,6 @@ module CallFacts
       d[:foreign] & @w.compiled_core.call(name).keys
     end
 
-    # Every foreign Ruby definer of +name+ is a compiled core method of this run.
-    def foreign_fully_compiled?(name)
-      d = definers(name)
-      !d.nil? && (d[:foreign] - compiled_foreign_owners(name)).empty?
-    end
-
     def method_missing_classes = @cw.method_missing_classes
 
     # May an instance of +klass+ answer +name+? true for an unbounded name.

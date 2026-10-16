@@ -32,7 +32,6 @@ module DeclaredReturns
   HINT_ANNOTATION = 'bc2cpp:hint'
   # The C++ marker on each guard, and the listing line of each guarded method (DECLARED_RETURN_GUARDS_REVIEWED).
   GUARD_MARKER = %r{/\* DECLARED_RETURN_GUARD (\S+ -> \S+) \*/}
-  GUARD_LISTING = /^  DECLARED_RETURN_GUARD_SITE (\S+ -> \S+)$/
   CODE = 'TC1010'
 
   module_function

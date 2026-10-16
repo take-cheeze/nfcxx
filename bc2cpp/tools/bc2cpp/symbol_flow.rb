@@ -166,35 +166,6 @@ module SymbolFlow
       irep.instructions[found.first].const_name == const
   end
 
-  # The constant a splat argument register holds at idx, when it is built only as LOADNIL and
-  # ARYCAT of GETIDX of GETCONST (`*TABLE[i]`). nil otherwise.
-  def splat_table(irep, preds, idx, reg)
-    writers, entry = reaching_writes(irep, preds, idx, reg)
-    return nil if entry || writers.empty?
-
-    tables = writers.map do |n|
-      insn = irep.instructions[n]
-      next :nil if insn.op == 'LOADNIL'
-      next nil unless insn.op == 'ARYCAT' && insn.regs.first == reg
-
-      src, src_entry = reaching_writes(irep, preds, n, insn.regs[1])
-      next nil if src_entry || src.size != 1
-
-      get = irep.instructions[src.first]
-      next nil unless get.op == 'GETIDX'
-
-      base, base_entry = reaching_writes(irep, preds, src.first, get.regs.first)
-      next nil if base_entry || base.size != 1
-
-      getc = irep.instructions[base.first]
-      getc.op == 'GETCONST' ? getc.const_name : nil
-    end
-    return nil if tables.any?(&:nil?)
-
-    consts = tables.reject { |t| t == :nil }.uniq
-    consts.size == 1 ? consts.first : nil
-  end
-
   # The GETCONST at idx is used only as the base of GETIDX or SETIDX, on every path from it. Any other
   # read of the register is an escape; a write to it ends the path, unless the write reads it too.
   def only_table_base?(irep, idx)
@@ -224,35 +195,6 @@ module SymbolFlow
       stack.concat(bir.successors_of(n, include_handlers: true))
     end
     true
-  end
-
-  # The constant a splat argument register holds at idx, when it is built only as LOADNIL and
-  # ARYCAT of GETIDX of GETCONST (`*TABLE[i]`). nil otherwise.
-  def splat_table(irep, preds, idx, reg)
-    writers, entry = reaching_writes(irep, preds, idx, reg)
-    return nil if entry || writers.empty?
-
-    tables = writers.map do |n|
-      insn = irep.instructions[n]
-      next :nil if insn.op == 'LOADNIL'
-      next nil unless insn.op == 'ARYCAT' && insn.regs.first == reg
-
-      src, src_entry = reaching_writes(irep, preds, n, insn.regs[1])
-      next nil if src_entry || src.size != 1
-
-      get = irep.instructions[src.first]
-      next nil unless get.op == 'GETIDX'
-
-      base, base_entry = reaching_writes(irep, preds, src.first, get.regs.first)
-      next nil if base_entry || base.size != 1
-
-      getc = irep.instructions[base.first]
-      getc.op == 'GETCONST' ? getc.const_name : nil
-    end
-    return nil if tables.any?(&:nil?)
-
-    consts = tables.reject { |t| t == :nil }.uniq
-    consts.size == 1 ? consts.first : nil
   end
 
   # The GETCONST at idx is used only as the base of GETIDX or SETIDX, on every path. A later read of

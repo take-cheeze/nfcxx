@@ -23,8 +23,7 @@
 # slow-path helpers) and the families docs/adr/0419 lists with their evidence.
 #
 # Policy: a hint is not a proof, so no proof gates the forcing; every violation the verify build finds
-# is a wrong or incomplete hint, fixed at its source. BC2CPP_STRICT_HINTS_PROVEN=1 restricts the tier to
-# owners with no descendant and a name nil does not answer (the conservative setting).
+# is a wrong or incomplete hint, fixed at its source.
 #
 # Every forced site carries `/* STRICT_HINT FAMILY: name */`, is listed on stderr
 # (`STRICT_HINT_SITE Owner#method -> name (FAMILY)`) and must be in STRICT_HINTS_REVIEWED
@@ -60,12 +59,6 @@ module StrictHints
     raise ArgumentError, "#{ENV_NAME}: unknown famil#{unknown.size > 1 ? 'ies' : 'y'} #{unknown.join(', ')} (known: #{FAMILIES.join(', ')})" unless unknown.empty?
 
     list
-  end
-
-  # BC2CPP_STRICT_HINTS_PROVEN=1: force only sites the closed world proves cannot see a legitimate
-  # receiver of another class (no descendant of the hint class, a name nil does not answer).
-  def proven_only?
-    ENV['BC2CPP_STRICT_HINTS_PROVEN'] == '1'
   end
 
   def enabled?(family)

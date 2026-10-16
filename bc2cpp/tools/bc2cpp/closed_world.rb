@@ -120,29 +120,6 @@ class ClosedWorld
     scan_closed_world
     build_hierarchy
     build_method_missing
-    warn touch_report.join("\n") if ENV['BC2CPP_TOUCH_REPORT'] == '1'
-    warn "== singleton makers ==\n#{singleton_makers.map(&:inspect).join("\n")}" if ENV['BC2CPP_SINGLETON_REPORT'] == '1'
-  end
-
-  # BC2CPP_TOUCH_REPORT=1: every class the touch analysis makes opaque, the
-  # outside files that touched it and the construct that put it in the file's
-  # touch set, so a touch can be traced to its source.
-  def touch_report
-    lines = ['== class touch report (opaque because an outside file touches it) ==']
-    @class_decls.keys.sort.each do |owner|
-      next if owner.include?('.') || owner.include?('<') || @rebound.include?(simple(owner))
-
-      spelled = [owner.split('::').first, simple(owner)].uniq
-      files = touches_for(spelled, source: false)
-      next if files.empty?
-
-      lines << "  #{owner}: #{files.size} file(s)"
-      files.each do |t|
-        evidence = spelled.filter_map { |name| t.why[name] }.uniq.first(2)
-        lines << "    #{t.path}: #{evidence.empty? ? t.note : evidence.join(' | ')}"
-      end
-    end
-    lines
   end
 
   # nil when a fallback for `name` on a chain listing `listed` can only raise

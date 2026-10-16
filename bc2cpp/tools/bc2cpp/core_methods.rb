@@ -37,9 +37,8 @@ module CoreMethods
       !CoreDefs.touches_block?(body, ireps) && !CoreDefs.references_fiber?(body, ireps)
   end
 
-  # BC2CPP_CORE_REFUSED=none: refuse nothing, to see what the compiler takes.
   def load_refused(path = DEFAULT_PATH)
-    path == 'none' ? Set.new : HotMethods.load(path)
+    HotMethods.load(path)
   end
 
   # Irep labels of the core-source definitions in `registry` that must not be

@@ -51,30 +51,6 @@ class CodeGen
     true
   end
 
-  # BC2CPP_GUARDED_INLINE_WHY=1 reports on stderr why a send that asked for a guarded loop did not get one.
-  def guarded_inline_why(irep, insn, klass, reason)
-    return unless ENV['BC2CPP_GUARDED_INLINE_WHY'] == '1'
-
-    warn "guarded_inline_why: #{irep.label}@#{insn.addr} :#{insn.sym} #{klass} -- #{reason}"
-  end
-
-  # The same report for the sends no recognizer claimed at all: the block's shape is what refuses them.
-  def guarded_inline_unclaimed(irep, regions, guarded, inlined)
-    return unless ENV['BC2CPP_GUARDED_INLINE_WHY'] == '1'
-
-    claimed = guarded[:pending].map { |pending| pending[:region][:sendb_addr] }
-    regions.each do |region|
-      next if claimed.include?(region[:sendb_addr]) || inlined.include?(region[:sendb_addr]) || region[:name].nil?
-
-      block = region[:block_irep]
-      arity = block ? mandatory_arity(block) : '?'
-      pure = block ? pure_mandatory_arity?(block) : '?'
-      shape = block ? (block.instructions.find { |i| i.op == 'ENTER' }&.then { |i| i.enter_fields.join(':') } || 'noenter') : '?'
-      guarded_inline_why(irep, irep.instructions[irep.index_of_addr(region[:sendb_addr])], '-',
-                         "unclaimed arity=#{arity} pure=#{pure} enter=#{shape} brk=#{region[:needs_brk] ? 1 : 0} ret=#{region[:needs_ret] ? 1 : 0}")
-    end
-  end
-
   # The arm gate, read where the send's own BLOCK_CORE_DIRECT arms are decided: block_core_arms(name, argc) names the
   # class when the compiled core body of that name is what the class answers with (no Ruby definition, prepend,
   # unattributed mixin, outside definer, native registration or dynamic installer on the chain, ADR 0270). It is only
@@ -97,7 +73,6 @@ class CodeGen
       if glue
         guarded[:at][pending[:anchor]] = "#{guarded[:at][pending[:anchor]]}#{glue}"
       else
-        guarded_inline_why(irep, insn, pending[:klass], argc ? 'no BLOCK_CORE_DIRECT arm for the name' : 'argument shape')
         @inline_nested_pre.sub!(pending[:pre]) { '' } unless pending[:pre].empty?
       end
     end

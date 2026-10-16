@@ -137,7 +137,6 @@ require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
-require_relative 'codegen_method_inline'
 require_relative 'codegen_eqq'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
@@ -228,7 +227,7 @@ if $PROGRAM_NAME == __FILE__
   end
   CodeGen.core_aliases = CoreDefs.alias_map(alias_sites, registry, ireps, core_shadowed_pairs)
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
-  core_refused = CoreMethods.load_refused(ENV['BC2CPP_CORE_REFUSED'] || CoreMethods::DEFAULT_PATH)
+  core_refused = CoreMethods.load_refused(CoreMethods::DEFAULT_PATH)
   core_ineligible = CoreMethods.excluded_labels(registry, ireps, core_refused)
   # ADR 0338: an interpreted core replacement still intercepts inherited lookup.
   CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
@@ -611,9 +610,6 @@ if $PROGRAM_NAME == __FILE__
     trusted = slot.keys.count { |_, t| t[:trusted] == Set['Array'] }
     warn "  RECORD_HASH  @#{name}  (#{slot.literals} literal#{'s' unless slot.literals == 1}, #{slot.keys.size} keys, " \
          "#{slot.reads} reads, #{slot.stores} stores; non-nil Array keys: #{arrays} strict, #{trusted} trusted)"
-    next unless ENV['BC2CPP_RECORD_HASH_KEYS'] == '1'
-
-    slot.keys.sort.each { |key, t| warn "    :#{key} strict=#{t[:strict].map(&:to_s).sort.join('|')} trusted=#{t[:trusted].map(&:to_s).sort.join('|')}" }
   end
   record_hash.refused.sort.each { |name, why| warn "  RECORD_HASH_REFUSED  @#{name}  (#{why})" }
   warn ''

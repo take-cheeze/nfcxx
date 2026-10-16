@@ -96,10 +96,6 @@ module NativeBindingSplit
       directives.any? { |pos, _kind, _cond| pos > extent[0] && pos < extent[1] }
     end
 
-    def line_of(offset)
-      @bytes.byteslice(0, offset).count("\n") + 1
-    end
-
     private
 
     def negate(cond)

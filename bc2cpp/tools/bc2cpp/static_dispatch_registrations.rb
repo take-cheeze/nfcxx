@@ -43,7 +43,6 @@
 # Nothing does that for an RPG2000/2003-internal class today, and
 # scripts/bc2cpp/static_dispatch_check.rb re-proves every listed name on every
 # run, so a new dynamic reference fails CI instead of shipping a NoMethodError.
-require 'fileutils'
 require 'set'
 require 'tmpdir'
 require_relative 'compiled_gems'
@@ -232,21 +231,10 @@ module StaticDispatchRegistrations
   # Runs bc2cpp.rb for each compiled gem and the closed-world parse; returns
   # everything eligibility needs.
   def analyze(repo_root, mrbc, unregistered: STATIC_DISPATCH_UNREGISTERED)
-    cache = ENV['STATIC_DISPATCH_CACHE'] # dev-only: reuse bc2cpp.rb output across runs
-    cached = ->(gem) { cache && %w[out err].map { |k| File.join(cache, "#{gem}.#{k}") }.all? { |p| File.exist?(p) } }
-    # Every gem still to run, from one shared analysis (SHARED_GENERATION, ADR 0464).
-    fresh = NeverCalledRegistrations.run_bc2cpp_full_many(GEMS.reject { |gem| cached.call(gem) }, repo_root, mrbc)
+    # Every gem, from one shared analysis (SHARED_GENERATION, ADR 0464).
+    fresh = NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc)
     runs = GEMS.to_h do |gem|
-      paths = cache && %w[out err].map { |k| File.join(cache, "#{gem}.#{k}") }
-      if paths&.all? { |p| File.exist?(p) }
-        out, err = paths.map { |p| File.read(p, encoding: 'UTF-8') }
-      else
-        out, err = fresh.fetch(gem)
-        if paths
-          FileUtils.mkdir_p(cache)
-          paths.zip([out, err]).each { |p, s| File.write(p, s) }
-        end
-      end
+      out, err = fresh.fetch(gem)
       [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err),
               hand: File.read(File.join(repo_root, gem, 'src', 'register.cxx'), encoding: 'UTF-8') }]
     end
@@ -485,8 +473,6 @@ module StaticDispatchRegistrations
         if INSTANTIATING.include?(name) &&
            (recv == :unknown || recv == :instance || (recv.is_a?(Array) && instance_owners.include?(recv[1])))
           engine_live = true
-          warn "load_phase: engine instance possible at load: #{recv.inspect}.#{name} " \
-               "#{irep.file}:#{insn.lineno}" if ENV['STATIC_DISPATCH_DEBUG']
         end
         targets = by_name[name].select do |_l, owner|
           case recv

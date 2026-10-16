@@ -409,15 +409,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   gray_stack_config = "cc.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'\ncxx.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'"
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
   target_suffix += 'sealed'
-  target_suffix += 'irinline' if ENV['BC2CPP_IR_INLINE'] == '1'
-  target_suffix += 'resumableinline' if ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1'
   compiled_target = "optcarrotcompiled#{target_suffix}"
   puts "Optcarrot build mode: #{build_mode}"
   puts 'Optcarrot core: original CPU dispatch, Fiber PPU, and LUT initializer'
-  puts 'Optcarrot bytecode IR method inlining: enabled' if ENV['BC2CPP_IR_INLINE'] == '1'
-  if ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1'
-    puts "Optcarrot resumable IR helper regions: #{compiled_cpp.scan('BYTECODE_IR_RESUMABLE_INLINE').size}"
-  end
   config = File.join(temp, 'mruby_build_config.rb')
   compiled_base = ["toolchain", "self.mrbcfile = #{File.expand_path(PROBE_MRBC).dump}",
                    (debug ? 'enable_debug' : nil),
@@ -567,9 +561,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                                 chdir: (interpreted_profile_dir if profiling))
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
-  modes = ['sealed',
-           ENV['BC2CPP_IR_INLINE'] == '1' && 'IR inlining',
-           ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1' && 'resumable IR inlining'].select { |mode| mode }
+  modes = ['sealed']
   core_label += " (#{modes.join(', ')})" unless modes.empty?
   compiled_command = [compiled_binary, ROM, FRAMES.to_s]
   compiled_result = run_benchmark(core_label, compiled_command,

@@ -17,7 +17,6 @@ module RiteBinary
   RawCatch = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: true)
 
   HEADER_SIZE = 20
-  CATCH_SIZE = 13
   NULL_LEN = 0xffff
   TT_STR = 0
   TT_INT32 = 1
