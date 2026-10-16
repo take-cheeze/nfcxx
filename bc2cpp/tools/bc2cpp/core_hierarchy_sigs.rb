@@ -29,4 +29,56 @@ module CoreHierarchySigs
     end
     [super_of.freeze, mixins.freeze]
   end
+
+  # load(PATH), read once.
+  def hierarchy
+    @hierarchy ||= load.freeze
+  end
+
+  # Ruby's lookup order for an instance of +name+: the class, the modules it includes (the last include first), then
+  # the same for its superclass. `ancestors('Object')` is Object, Kernel, BasicObject.
+  def ancestors(name)
+    super_of, mixins = hierarchy
+    raise "bc2cpp: #{PATH}: #{name} is not declared" unless super_of.key?(name)
+
+    out = []
+    while name
+      out << name
+      out.concat(Array(mixins[name]).reverse)
+      name = super_of[name]
+    end
+    out.freeze
+  end
+
+  # The superclass chain from +name+ up to, not including, +stop+ (which must be on it).
+  def superclasses_below(name, stop)
+    super_of, = hierarchy
+    raise "bc2cpp: #{PATH}: #{name} is not declared" unless super_of.key?(name)
+
+    out = []
+    until name == stop
+      raise "bc2cpp: #{PATH}: #{stop} is not a superclass of #{out.first || name}" if name.nil?
+
+      out << name
+      name = super_of[name]
+    end
+    out.freeze
+  end
+
+  # The classes declared with +name+ as their superclass, in file order.
+  def subclasses(name)
+    super_of, = hierarchy
+    raise "bc2cpp: #{PATH}: #{name} is not declared" unless super_of.key?(name)
+
+    super_of.select { |_, sup| sup == name }.keys.freeze
+  end
+
+  # The native scans name some core classes after their boot variable or mrb_state field, not their constant (the
+  # ROM scan: `mrb->nil_class` gives "Nil", the boot variable `basic_object` gives "Basic_object"). Each listed class
+  # is followed by those spellings, so an owner set built from +names+ also matches the scanned owners.
+  SCAN_SPELLINGS = { 'NilClass' => %w[Nil], 'BasicObject' => %w[Basic_object] }.freeze
+
+  def with_scan_spellings(names)
+    names.flat_map { |name| [name, *SCAN_SPELLINGS.fetch(name, [])] }.freeze
+  end
 end

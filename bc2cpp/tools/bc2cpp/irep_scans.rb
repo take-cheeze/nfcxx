@@ -150,10 +150,12 @@ module IrepScans
   # way) naming that same constant. Unlike #constant_path this does not stop at
   # a branch, so it also answers when unrelated branches sit between the load
   # and the use.
-  def agreed_constant_name(use, reg, depth = 0)
+  # through_handlers: the query may sit inside a protected (rescue/ensure) range, whose handler edges the walk then
+  # follows instead of refusing (BytecodeIR's handler-aware mode, as CONSTRUCTOR_POOLS uses it).
+  def agreed_constant_name(use, reg, depth = 0, through_handlers: false)
     return nil if depth > CONSTANT_SCOPE_DEPTH
 
-    defs = BytecodeIR.reaching_definitions(self, use, reg)
+    defs = BytecodeIR.reaching_definitions(self, use, reg, through_handlers: through_handlers)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     names = defs.map do |definition|
@@ -161,7 +163,7 @@ module IrepScans
       case insn.op
       when 'GETCONST' then insn.const_name
       when 'GETMCNST'
-        scope = agreed_constant_name(definition.index, insn.reg, depth + 1)
+        scope = agreed_constant_name(definition.index, insn.reg, depth + 1, through_handlers: through_handlers)
         scope && insn.mcnst_name && "#{scope}::#{insn.mcnst_name}"
       end
     end
