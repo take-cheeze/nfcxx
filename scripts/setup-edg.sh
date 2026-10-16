@@ -57,6 +57,9 @@ cp -r "$src/bases/docker/dev-env/gcc" "$base"
 # The base dir's include/ is a relative symlink into the submodule, which dangles once
 # the directory is copied; point it at the real headers.
 ln -sfn "$src/include_c++" "$base/include"
+# win64 (--target=win64): EDG's table is Microsoft's and lacks the gcc type macros lib/cstdint needs. With MinGW-w64's gcc
+# installed, its predefined macros replace it (scripts/win-predef.sh; docs/notes/freestanding.md, "Windows").
+if command -v x86_64-w64-mingw32-gcc >/dev/null; then "$root/scripts/win-predef.sh" "$base/lib_win64/predefined_macros.txt"; fi
 if ! echo 'int main(void){return 0;}' | gcc -Werror=return-mismatch -x c -fsyntax-only - 2>/dev/null; then
   sed -i '/-Wno-error=return-mismatch/d' "$base/edg_eccp_config"
 fi

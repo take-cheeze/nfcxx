@@ -27,6 +27,64 @@ that resolves to `/home/include_c++` from the prebuilt tree, so default g++ mode
 Freestanding mode does not use it. The C++ headers EDG ships (`3rd/edg/include_c++`) contain no `<cstdio>`
 anyway, so default mode has no hosted library headers either.
 
+## Targets (`--target=NAME`)
+
+`--target=NAME` lays the program out for an EDG target instead of the build host: `linux_aarch64`, `linux_armv7`,
+`linux_riscv64`, `linux_riscv32`, `linux_i686`, `win64`, `win32` (the `lib_*` tables of the EDG base; `linux_x86_64` is
+the host's). It is valid with `--freestanding --emit-c` only, and the other combinations are refused:
+
+```
+./nfcxx --freestanding --emit-c --target=linux_aarch64 prog.cpp > prog.c
+clang --target=aarch64-linux-gnu -ffreestanding -c prog.c -o prog.o     # the generated C is for the target
+```
+
+- **What the target sets.** The sizes and alignments of EDG's tables, and the predefined macros of `lib_<target>`
+  (`__aarch64__`, `__riscv`, `__arm__`). Plain `char` is unsigned on `linux_aarch64`, `linux_armv7`, `linux_riscv32`
+  and `linux_riscv64`: the driver passes `--unsigned_chars` for those four. EDG's `defines.h` says signed for aarch64 and
+  armv7 (`TARG_HAS_SIGNED_CHARS_*`), which is wrong for their Linux ABIs; `clang -dM` for each triple gives
+  `__CHAR_UNSIGNED__`. The EDG base is not patched for this.
+- **What it does not do.** The generated C is not compiled, linked or run by nfcxx: with a target the compile and
+  link paths are refused, because the host's C compiler and libraries are the host's. Compile the C with a cross
+  compiler for the target. There are no hosted headers for a target (`--freestanding` only).
+- **Checked by `tests/target/run.sh`:** for `linux_aarch64`, `linux_riscv64` and `linux_armv7`, a probe with
+  `static_assert`s for pointer, `long` and `long double` sizes, `char` signedness and the target's macro is accepted by
+  EDG, and the host refuses the same file; each of the 11 `tests/lib` programs is emitted for the target and compiled by
+  `clang --target=<triple>`. The refusals (no `--freestanding`, no `--emit-c`, unknown name) are checked too.
+- **Not checked:** the generated code is never run on these ABIs (no qemu in the environment; the `ubuntu-24.04-arm`
+  runner would run it natively, and the test does not do that yet). Only clang compiled the C; gcc cross compilers were
+  not used.
+- **Known gap: floating-point constants.** EDG computes `long double` with the host's type (`setup-edg.sh` says so for an aarch64 host). On an x86-64 host that is
+  the 80-bit x87 type, but the aarch64 and riscv64 `long double` is 128-bit IEEE quad, so a folded constant can differ in
+  its last bits from what the target computes. Not tested here; the fix is EDG's host floating-point configuration
+  (`src/includes/cmake_defines.h`, as `scripts/setup-edg.sh` sets it on an aarch64 host).
+
+## Windows (`--target=win64`, MinGW-w64 and wine)
+
+`win64` is EDG's Windows configuration (LLP64). Its own predefined-macro table is Microsoft's and lacks the gcc type macros
+`lib/cstdint` uses, so with MinGW-w64 installed `scripts/setup-edg.sh` replaces that table with MinGW's own `gcc -dM`
+output (`scripts/win-predef.sh`). Without MinGW the table is EDG's, and the generated C does not compile with MinGW.
+
+```
+./nfcxx --freestanding --emit-c --target=win64 prog.cpp > prog.c
+x86_64-w64-mingw32-gcc -O2 -fwrapv -fno-strict-aliasing prog.c -o prog.exe
+wine prog.exe
+```
+
+- **Checked:** `tests/target/win64_probe.cpp` (static asserts for `long` = 4, `void*` = 8, signed `char`, and the
+  `lib/cstdint` types, then a computed result) is built this way and run under wine: exit 42. `tests/target/run.sh` runs it
+  when MinGW and wine are installed and skips otherwise. Of the `tests/lib` programs, `limits` links and runs too; it fails
+  with exit 1 because it asserts a 64-bit `long`, which LLP64 does not have. That is a test that is LP64-only, not a bug.
+- **Not working yet: linking.** Most `tests/lib` programs need EDG's C++ runtime (`__curr_eh_stack_entry`,
+  `__internal_rethrow`, `__eh_curr_region`), which Linux takes from the host-built `libC.a`. A MinGW build of it means
+  compiling `3rd/edg/lib_src` with MinGW's headers, and EDG's default mode rejects those headers (`__debugbreak` and
+  other MinGW declarations). Also `--emit-c` does not run the prelinker, so a template the program uses (for example
+  `sum_indices` in `tests/lib/utility.cpp`) is an unresolved extern at link time. The Linux path gets both from `eccp`.
+- **Wrong in EDG's `win64` table: `long double`.** EDG has it as 8 bytes (`TARG_SIZEOF_LONG_DOUBLE_win64` in `defines.h`, a
+  compiled-in constant, so the driver cannot change it). MinGW's gcc uses 16 bytes (x87). Code whose layout or `sizeof`
+  depends on `long double` is wrong for MinGW. `win64_probe.cpp` avoids `long double`. The fix is in EDG's source, not here.
+- **Not checked:** the wine run covers exit codes only; `write` and the panic path are not exercised under wine, and no
+  hosted (libstdc++, MSVCRT-free) program is built for Windows.
+
 ## Headers
 
 | header | provides | notes |

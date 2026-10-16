@@ -26,6 +26,10 @@
 #                  other -fsanitize= values are refused.
 #   --freestanding: headers come only from lib/ (no EDG std headers, no hosted libc++/libstdc++),
 #                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
+#   --target=NAME: with --freestanding and --emit-c only. The front end lays out the program for an EDG target (sizes,
+#                  predefined macros) instead of the build host: linux_aarch64, linux_armv7, linux_riscv64, linux_riscv32,
+#                  linux_i686, win64 (MinGW's macros when MinGW is installed at setup; docs/notes/freestanding.md, "Windows"), win32. The generated C is for that target, so the
+#                  host cc must not compile it: give it to a cross compiler. docs/notes/freestanding.md, "Targets".
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
 source "$root/scripts/trace.sh"
@@ -37,7 +41,7 @@ std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=()
-dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
+dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
 obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
@@ -184,6 +188,7 @@ while [ $# -gt 0 ]; do
     --dialect=*) dialect=${1#--dialect=} ;;
     --gnu-version=*) gnu=${1#--gnu-version=} ;;
     --freestanding) freestanding=1 ;;
+    --target=*) target=${1#--target=} ;;
     --trace=*) trace=${1#--trace=} ;;
     -shared) shared=1; pic=1 ;;
     -fPIC|-fpic) pic=1 ;;
@@ -319,6 +324,18 @@ if [ "$dialect" = clang ]; then
   cv=$(host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
 elif [ -n "$gnu" ]; then
   gnu_opts=(--gnu_version="$gnu")
+fi
+# --target: the EDG configuration of the generated C (only with --freestanding --emit-c, see the usage above). The host
+# library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
+if [ -n "$target" ]; then
+  [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
+  [ $emit_c = 1 ] || { echo "nfcxx: --target needs --emit-c (the generated C is for the target; compile it with a cross compiler)" >&2; exit 2; }
+  tbase=${EDG_BASE:-$root/build/edg-base}
+  [ -d "$tbase/lib_$target" ] || { echo "nfcxx: no EDG target '$target' in $tbase (lib_* tables: $(cd "$tbase" && ls -d lib_* | sed 's/^lib_//' | tr '\n' ' '))" >&2; exit 2; }
+  gnu_opts+=(--target "$target")
+  # Plain char is unsigned on these ABIs (clang -dM: __CHAR_UNSIGNED__ for each triple). EDG's table says signed for
+  # linux_aarch64 and linux_armv7 (src/defines.h, TARG_HAS_SIGNED_CHARS_*), so the driver sets it: the EDG base is not patched.
+  case $target in linux_aarch64|linux_armv7|linux_riscv32|linux_riscv64) gnu_opts+=(--unsigned_chars) ;; esac
 fi
 [ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
 
