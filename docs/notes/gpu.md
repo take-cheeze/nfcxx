@@ -168,3 +168,21 @@ approximate ones within the tolerance above. It is not yet in `tests/cuda/intrin
 host placeholders for `__fdividef`, `__saturatef`, `__ldg` and `__dp4a` in `lib/cuda/nfcxx_cuda.h`. Until those land,
 the device side was checked by lowering the kernel to PTX, assembling it, and running it with a harness that
 loads the cubin (0 mismatches over 57,344 checks; the mutant max -> min gives 4094 mismatches).
+
+## SPIR-V kernel emitter for OpenCL (Intel XPU)
+
+The "Level Zero / OpenCL" item of `docs/notes/sycl-vulkan.md` (a Kernel-capability variant of the SPIR-V module): `scripts/pathb-spirv-kernel-emit.rb`
+lowers the Path B IR to SPIR-V assembly text (the input of `spirv-as`), the counterpart of `pathb-ptx-emit.rb` for the Intel
+XPU. Kernels are `OpEntryPoint Kernel` with `Physical64` and the OpenCL memory model; pointers are typed CrossWorkgroup
+pointers; slots and `set` registers are Function variables; `if` and `loop` are structured (`OpSelectionMerge`, `OpLoopMerge`).
+The work-item indices are Input builtins as `size_t` vectors: Intel's IGC segfaults on a `uint` vector for `LocalInvocationId`.
+It is separate from the Vulkan emitter (`pathb-spirv-emit.rb`): different memory model and built-ins.
+
+Refused (exit 3): trap, checked division and shifts, cf2i, bool in memory, 1- and 2-byte integers, and calls between functions.
+
+`tests/gpu/spirv/run.sh` lowers `tests/gpu/device/vecadd.ir`, checks the golden, assembles and validates it (`spirv-as`,
+`spirv-val`; nixpkgs: `nix-build '<nixpkgs>' -A spirv-tools`), and runs it on the Arc B60 through OpenCL (`launch.c`,
+`clCreateProgramWithIL`): 0 mismatches over 50000 elements, 0 guard writes. A mutant (`OpFAdd` -> `OpFSub`) is caught, and
+`trap` is refused. The loop kernel (`loop.ir`: `break`, a `set` accumulator) sums 0..9 to 45 on the GPU, and its bound-test mutant is caught.
+
+Not done: the checked operations and calls between functions, and running through SYCL's own kernel bundles (OpenCL is used).
