@@ -19,8 +19,55 @@ require_relative 'outside_ruby_owners'
 # The Ruby-side gates of ClosedWorld#refusal (installers, singleton and opaque definers, unlisted classes,
 # method_missing) still decide whether the site may close; this lifts only the outside-definer refusal.
 module OutsideOwnerCall
+  # NAME_OWNER_SET: at most this many classes may answer a name for its by-name sends to become the owner call.
+  # `to_s`, `[]`, `==` and the like have dozens; a list that long is no receiver fact.
+  NAME_OWNER_SET_MAX = 8
+
+  # NAME_OWNER_SET (ADR 0468): the receiver of a send of `name` can only be an instance of a class that answers it
+  # (anything else raises NoMethodError), and in the closed world every such class is named: the program's own Ruby
+  # definitions (the registry, core Ruby included) and every outside one. So any by-name send of such a name becomes
+  # the owner call over that whole set, wherever it is emitted (a chain's else, a bare send, the else of the
+  # registered-expression and NATIVE_OWNER_MAP arms). A block send keeps its by-name call.
+  def dynamic_dispatch_line(d, recv, name, argv)
+    owners = !@call_block_expr && argv.size <= CodeGen::FUNCALL_ARGC_MAX && name_owner_set(name)
+    return super unless owners
+
+    "#{outside_owner_call_line(d, recv, name, argv, owners)}\n"
+  end
+
+  # Every class or module (`.singleton` for a class object) whose definition of `name` a lookup can find, or nil when
+  # one cannot be named, a definer is unknown or dynamic, a method_missing hook could answer instead, an object may
+  # carry a singleton class, or the set is larger than NAME_OWNER_SET_MAX.
+  def name_owner_set(name)
+    return nil unless @closed_world
+
+    @name_owner_sets ||= {}
+    return @name_owner_sets[name] if @name_owner_sets.key?(name)
+
+    @name_owner_sets[name] = name_owner_set_decide(name)
+  end
+
+  def name_owner_set_decide(name)
+    return nil if %w[method_missing respond_to_missing? initialize].include?(name)
+    return nil unless @closed_world.method_missing_classes.empty?
+    return nil if @closed_world.exact_arm_refusal(name, symbol_installed_names).then { |r| r && r != :outside_ruby }
+
+    outside = outside_owner_call_owners(name, allow_empty: true)
+    return nil unless outside
+
+    ruby = (@registry[name] || []).reject { |definition| definition.owner == '<native>' }.map(&:owner)
+    return nil unless ruby.all? { |owner| owner.match?(OWNER_PATH) }
+
+    owners = (outside | ruby).uniq.sort
+    owners.empty? || owners.size > NAME_OWNER_SET_MAX ? nil : owners
+  end
+
+  OWNER_PATH = /\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/
+
   def guarded_fallback_line(d, recv, name, argv, listed, site)
     base = super
+    # The by-name else became the owner call over the whole name owner set: not a kept dispatch.
+    return base.sub(%r{ /\* CLOSED_WORLD kept: \w+ \*/}, '') if base.include?('bc2cpp_owner_call_named(')
     return base unless @closed_world && site && base.include?('/* CLOSED_WORLD kept: core_or_native */')
 
     owners = outside_owner_call_owners(name)
@@ -58,11 +105,14 @@ module OutsideOwnerCall
   end
 
   # The sorted owners of every outside definition of `name`, or nil when one cannot be named.
-  def outside_owner_call_owners(name)
+  def outside_owner_call_owners(name, allow_empty: false)
     @outside_owner_call_owners ||= {}
-    return @outside_owner_call_owners[name] if @outside_owner_call_owners.key?(name)
+    owners = @outside_owner_call_owners.fetch(name) { @outside_owner_call_owners[name] = outside_owner_call_decide(name) }
+    return owners if owners
+    return nil unless allow_empty
 
-    @outside_owner_call_owners[name] = outside_owner_call_decide(name)
+    # No outside owner at all is a known (empty) outside set only when nothing outside spells the name.
+    @closed_world.outside_names.include?(name) ? nil : []
   end
 
   def outside_owner_call_decide(name)
@@ -84,7 +134,7 @@ module OutsideOwnerCall
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
 
     owners = native | (map.computed - [NativeOwnerMap::UNKNOWN]) | ruby.names.fetch(name, Set.new) | ruby.wild
-    return nil if owners.empty? || owners.any? { |owner| !owner.match?(/\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/) }
+    return nil if owners.empty? || owners.any? { |owner| !owner.match?(OWNER_PATH) }
 
     owners.to_a.sort
   end

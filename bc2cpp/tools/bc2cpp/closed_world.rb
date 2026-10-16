@@ -341,6 +341,24 @@ class ClosedWorld
     @outside_owner_name = previous
   end
 
+  # SELF_NEW_LEAF (ADR 0468): `klass` and every class below it, when the closed world sees every one: the declared
+  # subclasses (matched by last path segment, as the hierarchy is), and none made by `Class.new(klass)`, an outside
+  # Ruby `class X < klass`, or an outside native source that spells the name (an `mrb_define_class` could subclass
+  # it). nil when any of those may exist. A singleton method of `klass` runs with one of these as `self`, an instance
+  # method of `klass` with an instance of one of them.
+  def known_subclasses(klass)
+    return nil if @global_refusal || !@wild.empty? || !@class_decls.key?(klass) || @rebound.include?(simple(klass))
+
+    set = Set[klass] | descendants(klass)
+    return nil unless set.all? { |k| @class_decls.key?(k) }
+
+    names = set.map { |k| simple(k) }.to_set
+    return nil if names.any? { |n| @dynamic_subclassed.include?(n) || @outside_ruby_supers.include?(n) }
+    return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
+
+    set.to_a.sort
+  end
+
   # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby
   # definition, alias, visibility change or prepend on `owner`, a dynamic
   # installer) can replace core `owner`'s native `name`.

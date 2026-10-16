@@ -202,11 +202,12 @@ class CodeGen
 
   # Resolve a constant expression used as a class/module object, not an
   # instance. A branch edge that can bypass the constant write invalidates it.
-  def constant_object_owner(irep, idx, dest_reg, lexical_owner)
+  def constant_object_owner(irep, idx, dest_reg, lexical_owner, through_handlers: false)
     return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
                       idx < irep.instructions.length && dest_reg
 
-    written = straight_line_constant_name(irep, idx, dest_reg) || irep.agreed_constant_name(idx, dest_reg.to_s)
+    written = straight_line_constant_name(irep, idx, dest_reg) ||
+              irep.agreed_constant_name(idx, dest_reg.to_s, through_handlers: through_handlers)
     return nil unless written
 
     owner = resolve_class_constant_name(written, lexical_owner)
@@ -220,15 +221,15 @@ class CodeGen
   # the name denote one class object for the VM's life, so a guard that only tests
   # "is this class/module (that class)" cannot fail. Closed world only: the open
   # world keeps its fallbacks.
-  def stable_constant_register(irep, idx, reg, lexical_owner)
+  def stable_constant_register(irep, idx, reg, lexical_owner, through_handlers: false)
     return nil unless @closed_world && @closed_world.global_refusal.nil? && guard_violation_enabled? &&
                       @call_block_expr.nil? && irep && idx && reg && idx < irep.instructions.length
 
-    name = irep.agreed_constant_name(idx, reg.to_s)
+    name = irep.agreed_constant_name(idx, reg.to_s, through_handlers: through_handlers)
     return name if name && !name.include?('::') && CodeGen.stable_class_constants&.include?(name)
 
     # A qualified or declared-class constant: the proof behind CLOSED_WORLD_CONSTANT_OBJECT.
-    constant_object_owner(irep, idx, reg, lexical_owner)
+    constant_object_owner(irep, idx, reg, lexical_owner, through_handlers: through_handlers)
   end
 
   # The explicit-receiver SEND at `idx` of `irep` when it is the call `name` being compiled,
@@ -243,6 +244,9 @@ class CodeGen
   def new_receiver_constant_proven?(irep, idx, name, klass, lexical_owner)
     insn = klass && proof_send_insn(irep, idx, name)
     constant = insn && stable_constant_register(irep, idx, insn.reg, lexical_owner)
+    # NEW_IDENTITY_HANDLERS (ADR 0468): a `Klass.new` inside a begin/rescue body; the plain walk refuses a protected
+    # range, the handler-aware one follows its edges and still finds the one constant load.
+    constant ||= insn && stable_constant_register(irep, idx, insn.reg, lexical_owner, through_handlers: true)
     !constant.nil? && (klass == constant || klass.to_s.end_with?("::#{constant}"))
   end
 

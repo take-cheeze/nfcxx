@@ -358,7 +358,11 @@ class CodeGen
                  "mrb_symbol_value(mrb_intern_cstr(M, \"#{kn}\")), #{kw_val_exprs[k]});\n"
     end
     # GUARD_VIOLATION: a stable class constant cannot have been reassigned, so the miss is an error.
-    else_arm = if argv.size < FUNCALL_ARGC_MAX && new_receiver_constant_proven?(irep, idx, name, known, owner_def&.owner)
+    # SELF_NEW_LEAF (ADR 0468): `self` of a singleton method of a class the closed world proves a leaf is that class
+    # object itself, whatever its constant names now, so the miss is an error too.
+    leaf_self = self_implicit && @closed_world&.known_subclasses(known) == [known]
+    else_arm = if argv.size < FUNCALL_ARGC_MAX &&
+                  (leaf_self || new_receiver_constant_proven?(irep, idx, name, known, owner_def&.owner))
                  guard_violation_line(d, recv, name, argv + ['bc2cpp_kwh'], 'NEW_IDENTITY')
                else
                  dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])

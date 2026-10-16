@@ -40,6 +40,8 @@ SOURCE = <<~RUBY
     def name; "bag"; end
     def at; :bag_at; end
     def print(x); x; end
+    def push(x); [:bag_push, x]; end
+    def empty?; false; end
   end
   class Probe
     def del(o, x); o.delete(x); end
@@ -47,11 +49,13 @@ SOURCE = <<~RUBY
     def at(o); o.at; end
     def pr(o, x); o.print(x); end
     def pk(o, f); o.pack(f); end
+    def ps(o, x); o.push(x); end
+    def em(o); o.empty?; end
   end
 RUBY
 OWNERS = %w[Bag Probe].freeze
 
-body = ->(code, name) { code[/mrb_value Probe_#{name}_impl\([^\n]*\) \{(.*?)^\}/m, 1].to_s }
+body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*\{\n.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
 owners_of = ->(text) { text[/BC2CPP_OWNERS\(([^)]*)\)/, 1].to_s.scan(/"([^"]+)"/).flatten }
 
 Dir.mktmpdir('outside-owner-call') do |dir|
@@ -70,6 +74,13 @@ Dir.mktmpdir('outside-owner-call') do |dir|
   check.call('bare pack (no guard chain): the send is the owner call with Array as its owner',
              pk.include?('OUTSIDE_OWNER_CALL :pack') && pk.include?('bc2cpp_owner_call(M, ') &&
                owners_of.call(pk).include?('Array') && !pk.include?('bc2cpp_send('))
+  ps = body.call(code, 'ps')
+  check.call('push, two owners (Array and the project Bag): owner call over exactly {Array, Bag}, no by-name send',
+             ps.include?('bc2cpp_owner_call(M, ') && owners_of.call(ps) == %w[Array Bag] && !ps.include?('bc2cpp_send('))
+  em = body.call(code, 'em')
+  check.call('empty?: the registered-expression arms end in the owner call, not a by-name send',
+             em.include?('bc2cpp_owner_call(M, ') && (%w[Array Bag Hash String] - owners_of.call(em)).empty? &&
+               !em.include?('bc2cpp_send('))
   check.call('helper emitted once', code.scan('static mrb_value bc2cpp_owner_call(').size == 1)
   check.call('closed-world summary keeps no core_or_native', !err.include?('KEPT core_or_native'))
 
@@ -115,6 +126,13 @@ Dir.mktmpdir('outside-owner-call') do |dir|
         row(M, "array.pack", "pk", eval(M, "[65, 66]"), 1, mrb_str_new_lit(M, "C*"));
         row(M, "string.pack", "pk", eval(M, "'ab'"), 1, mrb_str_new_lit(M, "C*"));
         row(M, "nil.pack", "pk", mrb_nil_value(), 1, mrb_str_new_lit(M, "C*"));
+        row(M, "array.push", "ps", eval(M, "[1]"), 1, two);
+        row(M, "bag.push", "ps", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 1, two);
+        row(M, "nil.push", "ps", mrb_nil_value(), 1, two);
+        row(M, "array.empty?", "em", eval(M, "[]"), 0, mrb_nil_value());
+        row(M, "bag.empty?", "em", mrb_obj_new(M, mrb_class_get(M, "Bag"), 0, nullptr), 0, mrb_nil_value());
+        row(M, "array subclass.empty?", "em", eval(M, "class SubArr < Array; end; SubArr.new"), 0, mrb_nil_value());
+        row(M, "integer.empty?", "em", mrb_int_value(M, 3), 0, mrb_nil_value());
         mrb_define_method(M, M->integer_class, "delete", rogue_delete, MRB_ARGS_REQ(1));
         row(M, "rogue Integer#delete", "del", mrb_int_value(M, 5), 1, two);
         return 0;
@@ -160,6 +178,13 @@ withdraw.call('native owner not nameable', 'src/rogue_owner.c' => <<~C)
   }
 C
 withdraw.call('outside Ruby owner not nameable', 'mrblib/rogue_owner.rb' => "HOLDER = Object.new\ndef HOLDER.delete(x) = x\n")
+Dir.mktmpdir('outside-owner-call-mm') do |dir|
+  code, = runtime.generate("#{SOURCE}\nclass Ghost\n  def method_missing(n, *a) = n\n  def respond_to_missing?(n, p = false) = true\nend\n",
+                           dir, only_owners: OWNERS)
+  pk = body.call(code, 'pk')
+  check.call('a method_missing class makes every owner set unknown: pack keeps its by-name send',
+             pk.include?('bc2cpp_send(') && !pk.include?('bc2cpp_owner_call('))
+end
 begin
   ENV['BC2CPP_NATIVE_OWNER_MAP'] = '0'
   withdraw.call('owner map off')
