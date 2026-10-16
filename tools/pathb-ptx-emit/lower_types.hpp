@@ -13,7 +13,8 @@
 
 // A node this emitter does not handle (the Ruby's Refused, exit status 3).
 struct Refused : std::runtime_error {
-  using std::runtime_error::runtime_error;
+  explicit Refused(const std::string &m) : std::runtime_error(m), text(m) {}
+  std::string text;   // the whole message (see BadIR)
 };
 
 using i128 = __int128;

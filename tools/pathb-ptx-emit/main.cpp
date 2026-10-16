@@ -1,14 +1,19 @@
-// pathb-ptx-emit (C++): phase 1 of the port of scripts/pathb-ptx-emit.rb. Only the reader is ported: --dump-forms prints
-// the parsed forms in the canonical text (one per line), for the differential check (diff-forms.sh). Emitting PTX is
-// still done by the Ruby script; this binary refuses it (exit status 3) until the lowering phases are ported.
+// pathb-ptx-emit (C++): the port of scripts/pathb-ptx-emit.rb, phase by phase. Ported: the reader (--dump-forms prints
+// the parsed forms in the canonical text, for diff-forms.sh), the type and constant helpers, the arithmetic, and the
+// module level (--plan prints the module without its function bodies, for diff-plan.sh: the classification, the kernel
+// selection, the functions kept and their order, the recursion check, the declarations). Not ported: the function bodies
+// (Fn#compile), so emitting PTX is refused (exit status 3) after the module checks, and the Ruby script emits.
 #include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "ir.hpp"
+#include "module.hpp"
+#include "lower_types.hpp"
 
 namespace {
 
@@ -25,6 +30,12 @@ bool read_all(const std::string &path, std::string &out) {
   return true;
 }
 
+// Writes a diagnostic with its whole text: a message may hold a NUL byte (a name from the IR), which %s would cut.
+void write_err(const char *prefix, const std::string &msg) {
+  std::string text = std::string(prefix) + msg + "\n";
+  std::fwrite(text.data(), 1, text.size(), stderr);
+}
+
 }  // namespace
 
 int run_eval_cases(const std::string &src);
@@ -34,12 +45,21 @@ int main(int argc, char **argv) {
   bool dump = false;
   bool eval = false;
   bool arith = false;
+  bool plan = false;
+  std::string sm = "sm_75";
+  std::vector<std::string> kernels;
   std::string file = "-";
   bool have_file = false;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--dump-forms") {
       dump = true;
+    } else if (a == "--plan") {
+      plan = true;
+    } else if (a.rfind("--sm=", 0) == 0) {
+      sm = "sm_" + a.substr(5);
+    } else if (a.rfind("--kernel=", 0) == 0) {
+      kernels.push_back(a.substr(9));
     } else if (a == "--eval-cases" && i + 1 < argc) {
       eval = true;
       file = argv[++i];
@@ -48,8 +68,9 @@ int main(int argc, char **argv) {
       arith = true;
       file = argv[++i];
       have_file = true;
-    } else if (a.rfind("--sm=", 0) == 0 || a.rfind("--kernel=", 0) == 0) {
-      // Accepted for the same command line as the Ruby; not used by the reader.
+    } else if (a.size() > 1 && a[0] == '-' && a[1] == '-') {
+      std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
+      return 1;
     } else if (!have_file) {
       file = a;
       have_file = true;
@@ -69,8 +90,32 @@ int main(int argc, char **argv) {
   if (eval) {
     return run_eval_cases(src);
   }
+  if (plan) {
+    try {
+      std::string text = plan_module(src, sm, kernels);
+      std::fwrite(text.data(), 1, text.size(), stdout);
+    } catch (const Refused &e) {
+      write_err("refused: ", e.text);
+      return 3;
+    } catch (const BadIR &e) {
+      write_err("error: ", e.text);
+      return 1;
+    }
+    return 0;
+  }
   if (!dump) {
-    std::fprintf(stderr, "refused: the C++ emitter is phase 1 (reader only); the Ruby scripts/pathb-ptx-emit.rb emits\n");
+    // The module checks above pass, so the Ruby would now lower the function bodies (Fn#compile), which this emitter
+    // does not do yet. The refusal keeps the status of a module the emitter cannot emit.
+    try {
+      plan_module(src, sm, kernels);
+    } catch (const Refused &e) {
+      write_err("refused: ", e.text);
+      return 3;
+    } catch (const BadIR &e) {
+      write_err("error: ", e.text);
+      return 1;
+    }
+    std::fprintf(stderr, "refused: the C++ emitter does not lower function bodies yet (Fn#compile); the Ruby scripts/pathb-ptx-emit.rb emits\n");
     return 3;
   }
   try {
@@ -80,7 +125,7 @@ int main(int argc, char **argv) {
       std::fwrite(line.data(), 1, line.size(), stdout);
     }
   } catch (const BadIR &e) {
-    std::string msg = std::string("error: ") + e.what() + "\n";
+    std::string msg = std::string("error: ") + e.text + "\n";
     std::fwrite(msg.data(), 1, msg.size(), stdout);
     return 1;
   }

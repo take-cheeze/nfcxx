@@ -2,7 +2,7 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 root := $(abspath ../..)
-srcs := ir.cpp main.cpp lower_types.cpp eval_cases.cpp lower_arith.cpp eval_arith.cpp
+srcs := ir.cpp main.cpp lower_types.cpp eval_cases.cpp lower_arith.cpp eval_arith.cpp module.cpp
 
 $(root)/build/pathb-ptx-emit: $(srcs) ir.hpp
 	@mkdir -p $(root)/build
