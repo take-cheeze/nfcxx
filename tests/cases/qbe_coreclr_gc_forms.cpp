@@ -1,4 +1,6 @@
 // EXPECT: 0
+// MACOS-XFAIL-gcc: Apple clang rejects the volatile-qualified address that EDG passes to __sync_*_4 ("address argument to
+// atomic builtin must be a pointer to integer or pointer"); gcc on Linux accepts it. The QBE path has no such check.
 // QBE path (scripts/qbe-prep.rb, docs/notes/coreclr-gc.md): cproc has no volatile stores, so the qualifier is dropped
 // (on a cast and on an object, including a block-scope local), and GCC's __sync read-modify-write builtins become
 // helpers over cproc's __atomic_* builtins. CoreCLR's GC uses all of these (src/coreclr/gc/env/volatile.h and

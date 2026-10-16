@@ -56,3 +56,9 @@ The unresolved C++ symbols after the 34 objects are the `GCToOSInterface` and `G
 `IsSupportedInstructionSet` pair (`isa_detection.cpp`), the two vxsort entry points, `GCContractDescriptorWKS`, and
 some `operator new`/`delete` and `__cxa_*` helpers. The C side needs minipal's mutex, time and memory-barrier functions,
 `g_pageSizeUnixInl`, and libc. The sized `__atomic_*` calls come from libatomic at link time.
+
+## Known gaps
+
+- The gcc backend on macOS (Apple clang, which compiles EDG's C there) rejects the `__sync_*` calls in
+  `tests/cases/qbe_coreclr_gc_forms.cpp`: EDG passes a `volatile void *` to them. Linux gcc accepts it. The test is marked
+  `MACOS-XFAIL-gcc`. The QBE path is unaffected, because `qbe-prep.rb` rewrites those calls.
