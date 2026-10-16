@@ -36,7 +36,16 @@ for f in tests/target/*.cpp; do
   else
     echo "FAIL  $name: EDG refused it for $target"; head -4 "$tmp/$name.err"; fail=1
   fi
-  if grep -q '^// HOST-REJECTS: yes' "$f"; then
+  # A host that already is the target's architecture (an aarch64 runner for linux_aarch64) accepts the facts by design:
+  # the refusal check only says something about a different host.
+  host_arch=$(uname -m)
+  case "$target:$host_arch" in
+    linux_aarch64:aarch64|linux_aarch64:arm64|linux_armv7:armv7l|linux_armv7:armv8l|linux_riscv64:riscv64) same_host=1 ;;
+    *) same_host=0 ;;
+  esac
+  if grep -q '^// HOST-REJECTS: yes' "$f" && [ "$same_host" = 1 ]; then
+    echo "skip  $name: the host is the $target architecture, the refusal check does not apply"
+  elif grep -q '^// HOST-REJECTS: yes' "$f"; then
     if ./nfcxx --freestanding --emit-c "$f" > /dev/null 2> "$tmp/$name.host"; then
       echo "FAIL  $name: the host target accepted the $target facts (the test proves nothing)"; fail=1
     else
