@@ -36,7 +36,7 @@ gcc -O2 -Wall -o "$out/launch" launch.c -l:libze_loader.so.1
 set +e
 run=$("$out/launch" "$out/vecadd.spv" _Z6vecAddPfS_S_i 2>&1); rc=$?
 set -e
-if [ $rc = 2 ] && grep -q "no Level Zero GPU" <<< "$run"; then
+if [ $rc = 2 ] && grep -qE "no Level Zero GPU|zeInit" <<< "$run"; then
   echo "SKIP: gpu level-zero: no Level Zero GPU device"; exit 0
 fi
 if [ $rc = 2 ] && grep -q "no shared USM with atomic" <<< "$run"; then
