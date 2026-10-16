@@ -9,7 +9,7 @@ swift build -c release
 .build/release/swiftfe check [--stats] <file.swift | dir>...   # parse only (M0)
 .build/release/swiftfe emit-c <file.swift>                     # print C (M1)
 .build/release/swiftfe build <file.swift> -o <exe>             # compile with cc (M1)
-tests/run.sh                                                   # end-to-end tests (M1 and M2)
+tests/run.sh                                                   # end-to-end tests (M1 to M3)
 ```
 
 Diagnostics are printed as `file:line:col: error: message`. Exit status is 0 on
@@ -48,6 +48,48 @@ Not yet supported in M2 (each gives a diagnostic):
 Verified with AddressSanitizer and LeakSanitizer on the ARC cases: no leaks and no
 undefined behaviour. The enum and closure cases are also clean under AddressSanitizer
 and UBSan.
+
+## M3: generics
+
+Adds to M2. Generics are compiled by monomorphization: each distinct list of type
+arguments is lowered once, with the type parameters bound to those arguments, and
+emitted like any other declaration. An instance is named as Swift would write it
+(`Box<Int>`), and its C name escapes the punctuation (`s_Box_L_Int_G_`,
+`f_first_L_Int_G_`).
+
+Supported:
+- generic functions, `func first<T>(_ a: T, _ b: T) -> T`. Type arguments are inferred
+  from the argument types (parameter types `T`, `T?`, `(...) -> T` and `Box<T>` are
+  matched), from the expected result type, or written out: `first<Int>(1, 2)`.
+  A generic function can also be used as a value: `let f: (Bool, Bool) -> Bool = first`.
+- generic structs and classes: `Box<Int>`, `Box<T>` in signatures, `Box(value: 1)` with
+  the type inferred from the stored properties, and nesting such as `Box<Box<Int>>`.
+  Classes keep the ARC rules of M2, so a generic class can hold class references.
+- generic enums with payloads: `Maybe<Int>.some(3)`, `Maybe.some(4)` (inferred from the
+  payload) and `.some(true)` where the type is declared.
+- an operation on a type parameter is checked after substitution, for the type it was
+  instantiated with: `a + b` compiles for `Int` and is rejected for `Bool`.
+
+Limits:
+- Only instances are checked. A generic body is checked when it is instantiated, not
+  when it is declared, so an unused generic is not checked at all. Swift would reject
+  `a + b` for an unconstrained `T` in the declaration itself.
+- No constraints, protocols or `where` clauses. `T: Equatable` and `where T == Int` give
+  a diagnostic.
+- No generic methods, initializers, extensions or value generics. A generic struct or
+  class has stored properties only, with a memberwise initializer.
+- A struct with a class-typed property is still rejected, so `Box<Obj>` (a struct) is
+  an error, while `Holder<Obj>` (a class) works.
+- Explicit type arguments must be complete (`first<Int>`, not a partial list), and
+  `Void` cannot be a type argument.
+- Closure and implicit-member arguments are typed after the other arguments. A type
+  parameter that appears only in a closure's result cannot be inferred.
+- Nested instantiation is limited to 64 levels, so a generic that keeps instantiating
+  itself with a larger type is rejected.
+- A value type may not contain itself through an instance (`struct Loop { var w: Wrap<Loop> }`).
+
+Verified with AddressSanitizer, UBSan and LeakSanitizer (`cc -fsanitize=address,undefined,leak`
+on `swiftfe emit-c` output) on the generic class case, which holds class references.
 
 ## M0: parsing
 
