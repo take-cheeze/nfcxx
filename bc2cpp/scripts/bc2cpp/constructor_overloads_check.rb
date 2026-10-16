@@ -112,6 +112,14 @@ if ENV['MRBC']
     check.call('cl0: Color.new fills 0, 0, 0, 255', after.call('cl0').match?(/color_new_direct\(M, [^,]+, 0, 0, 0, 255\)/))
     check.call('rc2: a count no Rect overload takes keeps the older path', !body.call('rc2').include?('OVERLOADED_CONSTRUCT'))
   end
+  # A program that gives Rect a Ruby initialize replaces the audited C one: its declarations no longer describe it.
+  Dir.mktmpdir('ctor-overloads-reopen') do |dir|
+    reopened = "#{source}\nmodule RGSS\n  class Rect\n    def initialize(*a); end\n  end\nend\n"
+    code, = Bc2cppFixtureRuntime.generate(reopened, dir, only_owners: %w[OvProbe RGSS::Bitmap RGSS::Rect],
+                                                         extra: [['mruby-rgss/mrblib/lib.rb', lib]])
+    rc0 = code[/^mrb_value OvProbe_rc0_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
+    check.call('a Ruby initialize on Rect withdraws its overloads', !rc0.empty? && !rc0.include?('OVERLOADED_CONSTRUCT'))
+  end
 else
   puts '-- SKIP generated code: set MRBC'
 end

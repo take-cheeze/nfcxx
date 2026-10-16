@@ -21,7 +21,7 @@ require_relative 'outside_ruby_owners'
 module OutsideOwnerCall
   # NAME_OWNER_SET: at most this many classes may answer a name for its by-name sends to become the owner call.
   # `to_s`, `[]`, `==` and the like have dozens; a list that long is no receiver fact.
-  NAME_OWNER_SET_MAX = 8
+  NAME_OWNER_SET_MAX = 16
 
   # NAME_OWNER_SET (ADR 0468): the receiver of a send of `name` can only be an instance of a class that answers it
   # (anything else raises NoMethodError), and in the closed world every such class is named: the program's own Ruby
