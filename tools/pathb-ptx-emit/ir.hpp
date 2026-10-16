@@ -28,3 +28,13 @@ std::vector<Node> parse_forms_chunked(const std::string &src);
 
 // The canonical text of a form, as the Ruby's form_text.
 std::string form_text(const Node &n);
+
+// The module's forms for emission when the kernels are given, as the Ruby's parse_module_forms: only the functions
+// the kernels reach are parsed (their names and the symbols they take are read from the text), every non-function
+// form is parsed, and fn_indices holds the position of each parsed function among all the module's functions. Returns
+// false where the Ruby returns nil (the caller then parses the whole text with parse_forms_chunked).
+struct ModuleForms {
+  std::vector<Node> forms;
+  std::vector<size_t> fn_indices;
+};
+bool parse_module_forms(const std::string &src, const std::vector<std::string> &kernels, ModuleForms &out);

@@ -1793,7 +1793,9 @@ end
 # in column 0 (the body lines of a form are indented), so each chunk is tokenized and parsed alone: the token table stays
 # small, where parsing the whole text at once took time that grows faster than the text. A chunk that does not balance
 # falls back to parsing the whole text, which gives the same result or the same error.
-def parse_forms_chunked(src)
+# The top-level chunks of the module text: a chunk starts at a line that begins with "(" in column 0 (the body lines of
+# a form are indented), and comment lines are dropped.
+def module_chunks(src)
   chunks = []
   cur = []
   src.split("\n").each do |line|
@@ -1805,8 +1807,12 @@ def parse_forms_chunked(src)
     cur << line
   end
   chunks << cur.join("\n") unless cur.empty?
+  chunks
+end
+
+def parse_forms_chunked(src)
   forms = []
-  chunks.each do |c|
+  module_chunks(src).each do |c|
     begin
       parse_forms(tokenize(c)).each { |f| forms << f }
     rescue BadIR
@@ -1816,8 +1822,93 @@ def parse_forms_chunked(src)
   forms
 end
 
+# The name of a function chunk, from its header `(function "NAME"`, or nil when the header is not of that form.
+def function_chunk_name(chunk)
+  return nil unless chunk.start_with?("(function \"")
+  q = chunk.index("\"", 11)
+  return nil if q.nil?
+  name = chunk[11...q]
+  return nil if name.include?("\\")
+  name
+end
+
+# The names of the `sig"name"` symbols in a function chunk's text (sig "&" for a function). Function bodies carry no
+# string literals (the strings are data forms), so the text holds exactly the symbols the parser would find; a chunk
+# with an escape or a string form is not read this way (nil).
+def text_symbol_names(text, sig)
+  return nil if text.include?("\\") || text.include?("(string") || text.include?("(bytes")
+  key = sig + "\""
+  out = []
+  i = text.index(key)
+  while i
+    j = text.index("\"", i + key.length)
+    return nil if j.nil?
+    out << text[(i + key.length)...j]
+    i = text.index(key, j + 1)
+  end
+  out
+end
+
+# The module's forms for emit_module, when the kernels are given: the forms that the kernels can reach are parsed,
+# and the other function forms are not (their names and callees are read from the text). Every non-function form is
+# parsed, as before. Returns [forms, fn_indices], where fn_indices holds the position of each function form among all the
+# module's functions (the index Fn.new takes), or nil when the text does not allow this (the caller parses it all).
+def parse_module_forms(src, kernels)
+  return nil if kernels.empty?
+  chunks = module_chunks(src)
+  fn_chunks = {}       # function name => chunk index
+  fn_pos = {}          # chunk index => position among the module's functions
+  chunks.each_with_index do |c, i|
+    next unless c.start_with?("(function")
+    name = function_chunk_name(c)
+    return nil if name.nil? || fn_chunks.key?(name)
+    fn_chunks[name] = i
+    fn_pos[i] = fn_pos.length
+  end
+  return nil if fn_chunks.empty?
+  roots = []
+  kernels.each do |k|
+    hits = fn_chunks.keys.select { |n| n == k || n.start_with?("_Z#{k.length}#{k}") }
+    return nil unless hits.length == 1
+    roots << hits[0]
+  end
+  text_callees = {}
+  fn_chunks.each do |name, i|
+    cs = text_symbol_names(chunks[i], "&")
+    return nil if cs.nil?
+    text_callees[name] = cs.uniq
+  end
+  live = {}
+  stack = roots.dup
+  until stack.empty?
+    n = stack.pop
+    next if live[n]
+    live[n] = true
+    (text_callees[n] || []).each { |c| stack << c if fn_chunks.key?(c) }
+  end
+  forms = []
+  fn_indices = []
+  chunks.each_with_index do |c, i|
+    is_fn = c.start_with?("(function")
+    if is_fn
+      next unless live[function_chunk_name(c)]
+      fn_indices << fn_pos[i]
+    end
+    begin
+      parsed = parse_forms(tokenize(c))
+    rescue BadIR
+      return nil
+    end
+    return nil if is_fn && (parsed.length != 1 || head_of(parsed[0]) != "function")
+    parsed.each { |f| forms << f }
+  end
+  [forms, fn_indices]
+end
+
 def emit_module(src, sm, kernels = [])
-  forms = parse_forms_chunked(src)
+  split = parse_module_forms(src, kernels)
+  forms, fn_indices = split || [parse_forms_chunked(src), nil]
+  fn_next = 0
   fns = []
   shared = {}
   globals = {}
@@ -1830,7 +1921,8 @@ def emit_module(src, sm, kernels = [])
     if h == "ir-module"
       next
     elsif h == "function"
-      fns << Fn.new(f, fns.length)
+      fns << Fn.new(f, fn_indices ? fn_indices[fn_next] : fns.length)
+      fn_next += 1
     elsif h == "data"
       # a string constant (a printf format): its bytes, as a .const array in the module
       name = f[1].to_s

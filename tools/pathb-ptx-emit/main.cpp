@@ -12,8 +12,9 @@
 #include <vector>
 
 #include "ir.hpp"
-#include "module.hpp"
 #include "lower_types.hpp"
+#include "module.hpp"
+#include "module_decls.hpp"
 
 namespace {
 
@@ -43,6 +44,7 @@ int run_eval_arith(const std::string &src);
 
 int main(int argc, char **argv) {
   bool dump = false;
+  bool decls = false;
   bool eval = false;
   bool arith = false;
   bool plan = false;
@@ -56,6 +58,8 @@ int main(int argc, char **argv) {
       dump = true;
     } else if (a == "--plan") {
       plan = true;
+    } else if (a == "--decls") {
+      decls = true;
     } else if (a.rfind("--sm=", 0) == 0) {
       sm = "sm_" + a.substr(5);
     } else if (a.rfind("--kernel=", 0) == 0) {
@@ -103,6 +107,19 @@ int main(int argc, char **argv) {
     }
     return 0;
   }
+  if (decls) {
+    try {
+      std::string out = emit_module_decls(src, false, false);
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } catch (const Refused &e) {
+      write_err("refused: ", e.text);
+      return 3;
+    } catch (const BadIR &e) {
+      write_err("error: ", e.text);
+      return 1;
+    }
+    return 0;
+  }
   if (!dump) {
     // The module checks above pass, so the Ruby would now lower the function bodies (Fn#compile), which this emitter
     // does not do yet. The refusal keeps the status of a module the emitter cannot emit.
@@ -119,10 +136,27 @@ int main(int argc, char **argv) {
     return 3;
   }
   try {
-    for (const Node &f : parse_forms_chunked(src)) {
+    // With kernels, only the functions they reach are parsed (parse_module_forms); the fn-indices line gives the
+    // position of each parsed function among the module's functions, or "all" where the whole text is parsed.
+    std::vector<Node> forms;
+    std::string indices;
+    ModuleForms mf;
+    if (!kernels.empty() && parse_module_forms(src, kernels, mf)) {
+      forms = std::move(mf.forms);
+      indices = "# fn-indices:";
+      for (size_t idx : mf.fn_indices) indices += " " + std::to_string(idx);
+    } else {
+      forms = parse_forms_chunked(src);
+      if (!kernels.empty()) indices = "# fn-indices: all";
+    }
+    for (const Node &f : forms) {
       std::string line = form_text(f);
       line += '\n';
       std::fwrite(line.data(), 1, line.size(), stdout);
+    }
+    if (!indices.empty()) {
+      indices += '\n';
+      std::fwrite(indices.data(), 1, indices.size(), stdout);
     }
   } catch (const BadIR &e) {
     std::string msg = std::string("error: ") + e.text + "\n";
