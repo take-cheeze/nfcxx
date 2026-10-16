@@ -110,7 +110,7 @@ generate_all = lambda do |source, owners|
     File.write(src, source)
     env = { 'MRBC' => runtime.mrbc, 'OUT_SYMBOL' => 'fixture', 'OUT_DIR' => dir,
             'ONLY_OWNERS' => owners.join(',') }
-    cmd = [RbConfig.ruby, File.join(File.expand_path('../..', __dir__), 'tools/bc2cpp/bc2cpp.rb'), src].shelljoin
+    cmd = [RbConfig.ruby, File.join(File.expand_path('../..', __dir__), 'tools/bc2cpp/bc2cpp.rb'), '--annotated', src].shelljoin
     out, err, status = Open3.capture3(env, cmd)
     raise "bc2cpp.rb failed: #{err[-2000..]}" unless status.success?
 

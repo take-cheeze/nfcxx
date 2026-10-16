@@ -502,7 +502,7 @@ def generate_cpp(source, name)
     path = File.join(dir, "#{name}.rb")
     File.write(path, source)
     env = { 'MRBC' => ENV.fetch('MRBC'), 'OUT_SYMBOL' => name, 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1' }
-    out, err, status = Open3.capture3(env, RbConfig.ruby, File.expand_path('../../tools/bc2cpp/bc2cpp.rb', __dir__), path)
+    out, err, status = Open3.capture3(env, RbConfig.ruby, File.expand_path('../../tools/bc2cpp/bc2cpp.rb', __dir__), '--annotated', path)
     abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
     out
   end

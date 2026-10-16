@@ -381,7 +381,7 @@ Dir.mktmpdir do |dir|
           'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio',
           'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).map { |n, d| "#{n}=#{d}" }),
           NomethodReviewed::ALLOW_ENV => 'allow' }
-  _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} " \
+  _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} --annotated " \
                                           "#{src.shellescape} > #{gen.shellescape}")
   abort "bc2cpp.rb failed:\n#{err[-3000..]}" unless status.success?
   code = File.read(gen)

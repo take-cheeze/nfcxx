@@ -229,7 +229,7 @@ else
             'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio',
             'BC2CPP_BUILD_GEMS' => Shellwords.join(WIO_GEMS.map { |n, d| "#{n}=#{d}" }),
             NomethodReviewed::ALLOW_ENV => 'allow' }
-    _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} " \
+    _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} --annotated " \
                                             "#{src.shellescape} > #{gen.shellescape}")
     abort "bc2cpp.rb failed:\n#{err[-2000..]}" unless status.success?
 

@@ -78,7 +78,7 @@ env = {
   NomethodReviewed::ALLOW_ENV => 'allow',
 }
 env['BC2CPP_PROFILE_TIMINGS'] = '1' if ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
-cmd = [RbConfig.ruby, BC2CPP, *srcs].shelljoin
+cmd = [RbConfig.ruby, BC2CPP, '--annotated', *srcs].shelljoin
 Dir.mktmpdir do |dir|
   env['OUT_DIR'] = dir
   @stdout, @stderr, status = Open3.capture3(env, cmd)

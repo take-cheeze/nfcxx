@@ -273,7 +273,7 @@ def source_audit_checks(check, runtime)
                 'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(root)), 'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio',
                 'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(root).map { |n, d| "#{n}=#{d}" }),
                 NomethodReviewed::ALLOW_ENV => 'allow' }
-        out, e, status = Open3.capture3(env, RbConfig.ruby, Bc2cppFixtureRuntime::BC2CPP, source)
+        out, e, status = Open3.capture3(env, RbConfig.ruby, Bc2cppFixtureRuntime::BC2CPP, '--annotated', source)
         raise "bc2cpp.rb failed:\n#{e[-2000..]}" unless status.success?
 
         [out, e]

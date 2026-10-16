@@ -62,7 +62,7 @@ Dir.mktmpdir do |dir|
   env = { 'MRBC' => MRBC_ENV, 'OUT_SYMBOL' => 'module_body_ivar', 'OUT_DIR' => dir,
           'ONLY_OWNERS' => 'Body.singleton,Holder.singleton', 'SKIP_UNSUPPORTED' => '1',
           'BC2CPP_SELF_REGISTERING' => '1' }
-  out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, source, chdir: ROOT)
+  out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', source, chdir: ROOT)
   abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
 
   module_body = body_of(out, 'Body_singleton_clear')

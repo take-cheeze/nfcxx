@@ -80,7 +80,7 @@ Dir.mktmpdir do |dir|
   File.write(source, SOURCE)
   env = { 'MRBC' => MRBC_ENV, 'OUT_SYMBOL' => 'profiler_section', 'OUT_DIR' => dir,
           'SKIP_UNSUPPORTED' => '1' }
-  out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, source, chdir: ROOT)
+  out, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', source, chdir: ROOT)
   abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
 
   literal = body_of(out, 'ProfOwner_literal')

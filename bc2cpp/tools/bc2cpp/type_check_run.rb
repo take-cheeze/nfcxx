@@ -49,7 +49,7 @@ module TypeCheckRun
     srcs = sources ? sources.map { |s| File.expand_path(s) } : closed_world_mrblib_srcs(root)
     err_path = File.join(workdir, 'bc2cpp.stderr')
     bc2cpp = File.join(tools_dir, 'bc2cpp.rb')
-    ok = system(e, RbConfig.ruby, bc2cpp, *srcs, out: File::NULL, err: err_path)
+    ok = system(e, RbConfig.ruby, bc2cpp, '--annotated', *srcs, out: File::NULL, err: err_path)
     unless ok
       raise "bc2cpp.rb failed (analysis for the type check):\n#{File.read(err_path).lines.last(25).join}"
     end

@@ -2,6 +2,10 @@
 
 require 'stringio'
 
+# The generated C++ without its `//` diagnostic comments: bc2cpp.rb's default stdout. A caller that reads the
+# comments (the proof and dispatch markers the checks match) passes ANNOTATED_FLAG.
+ANNOTATED_FLAG = '--annotated'
+
 module CompactOutput
   # Keep literal tokens and block comments opaque; diagnostic line comments
   # can contain arbitrary Ruby source, including C++ quote/comment markers.
@@ -19,9 +23,16 @@ module CompactOutput
     end
   end
 
+  # The comments kept in compact output: one structural line per generated function, which
+  # scripts/bc2cpp/hot_profile.rb reads from a build's *_gen.cpp to map callgrind functions to Ruby methods
+  # and their required (keyword-call) callees.
+  KEEP = %r{\A//(?: \S+#\S+ \(compiled from irep | \S+#\S+ -- synthesized attr_(?:reader|writer) override| \S+ :\S+ -> \S+#\S+ \(keyword call)}.freeze
+
   def self.rewrite(code)
     code.gsub(TOKENS) do |token|
-      token.start_with?('//') ? "\n" * token.count("\n") : token
+      next token unless token.start_with?('//')
+
+      token.match?(KEEP) ? token : "\n" * token.count("\n")
     end
   end
 end

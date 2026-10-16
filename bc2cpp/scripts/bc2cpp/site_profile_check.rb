@@ -139,7 +139,7 @@ else
     File.write(path, WORLD)
     run = lambda do |extra|
       env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'sp', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1' }.merge(extra)
-      Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), path)
+      Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
     end
     plain, _e, st = run.call({})
     check.call('bc2cpp runs without the switch and emits no SITE_PROFILE code', st.success? && !plain.include?('SITE_PROFILE'))

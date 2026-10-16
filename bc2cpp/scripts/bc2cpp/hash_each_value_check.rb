@@ -62,7 +62,7 @@ Dir.mktmpdir do |dir|
   File.write(source, SOURCE)
   env = { 'MRBC' => MRBC_ENV, 'OUT_SYMBOL' => 'hash_each_value', 'OUT_DIR' => dir,
           'SKIP_UNSUPPORTED' => '1', 'BC2CPP_SELF_REGISTERING' => '1' }
-  _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} " \
+  _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} --annotated " \
                                           "#{source.shellescape} > #{generated.shellescape}")
   abort "bc2cpp.rb failed:\n#{err[-3000..]}" unless status.success?
 
@@ -96,7 +96,7 @@ else
     File.write(source, SOURCE)
     env = { 'MRBC' => MRBC_ENV, 'OUT_SYMBOL' => 'hash_each_value', 'OUT_DIR' => dir,
             'SKIP_UNSUPPORTED' => '1', 'BC2CPP_SELF_REGISTERING' => '1' }
-    _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} " \
+    _out, err, status = Open3.capture3(env, "#{RbConfig.ruby.shellescape} #{BC2CPP.shellescape} --annotated " \
                                             "#{source.shellescape} > #{generated.shellescape}")
     abort "bc2cpp.rb failed:\n#{err[-3000..]}" unless status.success?
     File.write(File.join(dir, 'main.cpp'), <<~CPP)

@@ -80,7 +80,7 @@ generate = lambda do |closed, allow|
       env.merge!('BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env,
                  NomethodReviewed::ALLOW_ENV => (allow ? 'allow' : nil))
     end
-    Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), path)
+    Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
   end
 end
 _out, err, status = generate.call(true, false)

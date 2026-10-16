@@ -66,7 +66,7 @@ module NeverCalledRegistrations
         'SKIP_UNSUPPORTED' => '1',
         'BC2CPP_HOT_METHODS' => hot_methods,
       }
-      cmd = [RbConfig.ruby, bc2cpp, *closed_world_srcs]
+      cmd = [RbConfig.ruby, bc2cpp, '--annotated', *closed_world_srcs]
       out, err, status = Open3.capture3(env, *cmd)
       unless status.success?
         warn err
