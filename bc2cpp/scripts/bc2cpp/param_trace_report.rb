@@ -52,7 +52,7 @@ def allowed_classes(fact)
     tokens = value.split('|')
     return nil if tokens.any? { |t| %w[OTHER CHECKED NONE].include?(t) }
 
-    tokens.map { |t| TOKEN_CLASS[t] || t }
+    tokens.map { |t| TOKEN_CLASS[t] || t.delete_prefix('FILE:') }  # numeric=FILE:CLASS names a class too
   end
 end
 

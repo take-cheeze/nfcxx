@@ -59,6 +59,20 @@ Tempfile.create(['trace_sig', '.txt']) do |dump|
   end)
 end
 
+# Two runs of one method with different classes merge into one union (the sites are numbered per run).
+run_a = "PARAM_SITE\tfx\t0\t1\t0\tBox#read\tBox_read_impl\tmethod\treq\t1\ts\tnone:mono\nPARAM_CLASS\tfx\t0\tFile\t1\n"
+run_b = "PARAM_SITE\tfx\t7\t1\t0\tBox#read\tBox_read_impl\tmethod\treq\t1\ts\tnone:mono\nPARAM_CLASS\tfx\t7\tStringIO\t1\n"
+Tempfile.create(['run_a', '.txt']) do |a|
+  Tempfile.create(['run_b', '.txt']) do |b|
+    a.write(run_a)
+    a.flush
+    b.write(run_b)
+    b.flush
+    merged = render(candidates(*read_dumps([a.path, b.path])))
+    check.call('two runs of one method merge into a union', merged.include?('def read: (File | StringIO) -> untyped'))
+  end
+end
+
 if failures.empty?
   puts 'trace sig check: PASS'
 else

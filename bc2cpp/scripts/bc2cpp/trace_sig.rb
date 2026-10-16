@@ -23,42 +23,52 @@ def rbs_type(classes)
   classes.keys.map { |c| RBS_CLASS.fetch(c, c) }.uniq.sort.join(' | ')
 end
 
-# A site whose class table overflowed has classes nobody recorded, so it has no complete observed type.
+# Merges the dumps by what a site is (method, parameter or return, name), not by the per-binary site id, so runs
+# of one build add up and runs of different builds are compared on the same key. A site whose class table
+# overflowed has classes nobody recorded, so it has no complete observed type.
 def read_dumps(paths)
-  params = {}   # [sym, id] => { method:, kind:, index:, name:, calls:, overflow:, classes: Hash }
-  rets = {}     # [sym, id] => { method:, calls:, overflow:, classes: Hash }
+  params = {}   # [method, kind, index, name] => { calls:, overflow:, classes: Hash }
+  rets = {}     # method => { calls:, overflow:, classes: Hash }
   paths.each do |path|
+    ids = {}    # this dump's [sym, id] => key
+    rid = {}    # this dump's [sym, id] => method
     File.foreach(path) do |raw|
       f = raw.chomp.split("\t", -1)
       case f[0]
       when 'PARAM_SITE'
-        params[[f[1], f[2].to_i]] = { method: f[5], kind: f[8], index: f[9].to_i, name: f[10],
-                                      calls: f[3].to_i, overflow: f[4].to_i, classes: Hash.new(0) }
+        key = [f[5], f[8], f[9].to_i, f[10]]
+        ids[[f[1], f[2].to_i]] = key
+        site = params[key] ||= { calls: 0, overflow: 0, classes: Hash.new(0) }
+        site[:calls] += f[3].to_i
+        site[:overflow] += f[4].to_i
       when 'PARAM_CLASS'
-        params.fetch([f[1], f[2].to_i], nil)&.then { |site| site[:classes][f[3]] += f[4].to_i }
+        ids.fetch([f[1], f[2].to_i], nil)&.then { |key| params[key][:classes][f[3]] += f[4].to_i }
       when 'RETURN_SITE'
-        rets[[f[1], f[2].to_i]] = { method: f[5], calls: f[3].to_i, overflow: f[4].to_i, classes: Hash.new(0) }
+        rid[[f[1], f[2].to_i]] = f[5]
+        site = rets[f[5]] ||= { calls: 0, overflow: 0, classes: Hash.new(0) }
+        site[:calls] += f[3].to_i
+        site[:overflow] += f[4].to_i
       when 'RETURN_CLASS'
-        rets.fetch([f[1], f[2].to_i], nil)&.then { |site| site[:classes][f[3]] += f[4].to_i }
+        rid.fetch([f[1], f[2].to_i], nil)&.then { |method| rets[method][:classes][f[3]] += f[4].to_i }
       end
     end
   end
-  [params.values, rets.values]
+  [params, rets]
 end
 
 def candidates(params, rets)
   by_method = Hash.new { |h, k| h[k] = { params: {}, ret: Hash.new(0), ret_calls: 0 } }
-  params.each do |p|
-    next unless p[:kind] == 'req' && p[:calls].positive? && p[:overflow].zero?
+  params.each do |(method, kind, index, name), p|
+    next unless kind == 'req' && p[:calls].positive? && p[:overflow].zero?
 
-    by_method[p[:method]][:params][p[:index]] = [p[:name], p[:classes]]
+    by_method[method][:params][index] = [name, p[:classes]]
   end
-  rets.each do |r|
+  rets.each do |method, r|
     # Ruby discards the value `initialize` returns, so no caller reads it.
-    next if r[:method].end_with?('#initialize')
+    next if method.end_with?('#initialize')
     next unless r[:calls].positive? && r[:overflow].zero?
 
-    m = by_method[r[:method]]
+    m = by_method[method]
     r[:classes].each { |c, n| m[:ret][c] += n }
     m[:ret_calls] += r[:calls]
   end
