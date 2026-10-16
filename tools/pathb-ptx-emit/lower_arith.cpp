@@ -85,7 +85,14 @@ Operand FnCtx::operand(const Node &x) {
     return {t, Ty{"ptr", -1, false, false}};
   }
   if (x.kind == Node::Sym && x.sig == '@') return module_operand(x);
-  if (x.kind == Node::Sym) throw Refused("operand " + form_text(x) + " (call operands are not ported yet)");
+  if (x.kind == Node::Sym && x.sig == '&' && functions && functions->count(x.text)) {
+    // the address of a device function of this module (a function pointer value): the PTX name of the .func
+    if (functions->at(x.text)) throw Refused("address of kernel " + x.text + " (a kernel is not a function pointer)");
+    std::string t = fresh("rd");
+    emit("mov.u64 " + t + ", " + x.text + ";");
+    return {t, Ty{"ptr", -1, false, false}};
+  }
+  if (x.kind == Node::Sym) throw Refused("operand " + form_text(x));
   throw Refused("operand " + form_text(x));
 }
 

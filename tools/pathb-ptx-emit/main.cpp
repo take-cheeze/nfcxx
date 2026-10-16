@@ -1,8 +1,7 @@
-// pathb-ptx-emit (C++): the port of scripts/pathb-ptx-emit.rb, phase by phase. Ported: the reader (--dump-forms prints
-// the parsed forms in the canonical text, for diff-forms.sh), the type and constant helpers, the arithmetic, and the
-// module level (--plan prints the module without its function bodies, for diff-plan.sh: the classification, the kernel
-// selection, the functions kept and their order, the recursion check, the declarations). Not ported: the function bodies
-// (Fn#compile), so emitting PTX is refused (exit status 3) after the module checks, and the Ruby script emits.
+// pathb-ptx-emit (C++): the port of scripts/pathb-ptx-emit.rb, phase by phase. --emit writes the module's PTX
+// (emit_module.cpp), the same text as the Ruby script (NFCXX_PTX_EMITTER=cxx selects this one in the driver). --dump-forms
+// prints the parsed forms in the canonical text (diff-forms.sh); --plan prints the module without its function bodies
+// (diff-plan.sh); --decls prints the declarations (diff-module-decls.sh).
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -11,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "emit_module.hpp"
 #include "ir.hpp"
 #include "lower_types.hpp"
 #include "module.hpp"
@@ -48,6 +48,7 @@ int main(int argc, char **argv) {
   bool eval = false;
   bool arith = false;
   bool plan = false;
+  bool emit = false;
   std::string sm = "sm_75";
   std::vector<std::string> kernels;
   std::string file = "-";
@@ -72,6 +73,8 @@ int main(int argc, char **argv) {
       arith = true;
       file = argv[++i];
       have_file = true;
+    } else if (a == "--emit") {
+      emit = true;
     } else if (a.size() > 1 && a[0] == '-' && a[1] == '-') {
       std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
       return 1;
@@ -116,6 +119,21 @@ int main(int argc, char **argv) {
       return 3;
     } catch (const BadIR &e) {
       write_err("error: ", e.text);
+      return 1;
+    }
+    return 0;
+  }
+  if (emit) {
+    // The PTX of the module (the same text as scripts/pathb-ptx-emit.rb, which stays the default until the C++ emitter is
+    // switched in). Exit 3 on a refusal, 1 on malformed IR.
+    try {
+      std::string ptx = emit_module(src, sm, kernels);
+      std::fwrite(ptx.data(), 1, ptx.size(), stdout);
+    } catch (const Refused &e) {
+      std::fprintf(stderr, "refused: %s\n", e.what());
+      return 3;
+    } catch (const BadIR &e) {
+      std::fprintf(stderr, "error: %s\n", e.what());
       return 1;
     }
     return 0;

@@ -38,6 +38,8 @@ class FnCtx {
   std::map<std::string, int> slots;             // slot name => byte offset in the frame
   std::string sp = "%sp";                       // the PTX register holding the frame's generic address
   const ModuleSymbols *mod = nullptr;           // the module's data symbols (the @name operands), null when none
+  // The module's functions by PTX name: true for a kernel (the `&name` operands are the functions' addresses), null when none.
+  const std::map<std::string, bool> *functions = nullptr;
 
   void emit(const std::string &s);
   std::string fresh(const std::string &cls);
