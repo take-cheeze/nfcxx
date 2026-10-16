@@ -105,7 +105,7 @@ WORLDS = {
     ruby: "class CfGhost\n  def method_missing(n, *a); :ghost; end\n  def respond_to_missing?(n, p = false); true; end\nend\n", kept: true
   },
   'a name defined from a computed list' => {
-    ruby: "class CfPlain\n  [:bump].each { |n| define_method(n) { self } }\nend\n", kept: true
+    ruby: "class CfPlain\n  %w[bump].each { |n| define_method(n) { self } }\nend\n", kept: true
   },
   'an alias of the fact name' => {
     ruby: "class CfPlain\n  alias_method :bump, :kind\nend\n", kept: true

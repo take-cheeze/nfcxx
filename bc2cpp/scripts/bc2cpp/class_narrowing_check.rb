@@ -174,7 +174,7 @@ WORLDS = {
   'an alias of is_a?' => { ruby: "class CnOther\n  alias_method :is_a?, :kind\nend\n", kept: IS_A },
   # A name installed from a computed list may be any name: every gate that reads the installed names withdraws.
   'a definition from a computed list' => {
-    ruby: "class CnOther\n  [:is_a?].each { |n| define_method(n) { |k| true } }\nend\n", kept: POSITIVE
+    ruby: "class CnOther\n  %w[is_a?].each { |n| define_method(n) { |k| true } }\nend\n", kept: POSITIVE
   },
   'an alias of facet' => { ruby: "class CnOther\n  alias_method :facet, :kind\nend\n", kept: RESPOND },
   'an instance with a singleton method' => {

@@ -57,7 +57,7 @@ NEGATIVES = {
   'a String name' => "  define_method('dm_add') { |a, b| a + b + @n }\n",
   'a computed name' => "  n = :dm_add\n  define_method(n) { |a, b| a + b + @n }\n",
   'a block reading a class-body local' => "  k = 3\n  define_method(:dm_add) { |a, b| a + b + k }\n",
-  'a block that returns' => "  define_method(:dm_add) { |a, b| return a if b; a + b }\n",
+  'a block that returns from a nested block' => "  define_method(:dm_add) { |a, b| [a].each { |v| return v }; b }\n",
   'an optional parameter' => "  define_method(:dm_add) { |a, b = 1| a + b }\n",
   'a rest parameter' => "  define_method(:dm_add) { |a, *b| a }\n",
   'block_given?' => "  define_method(:dm_add) { |a, b| block_given? }\n",
