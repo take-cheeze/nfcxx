@@ -32,7 +32,8 @@ jmpuw = program.call([
 ])
 check.call('JMPUW: the write before it reaches the join (origin walk)',
            defs_of.call(jmpuw, 4, '1', origin_transfers: true) == [0])
-check.call('JMPUW: the default walk still refuses at it', jmpuw.reaching_definitions(4, '1').nil?)
+check.call('JMPUW outside every protected range is a plain jump: the default walk answers too (ADR 0476)',
+           defs_of.call(jmpuw, 4, '1') == [0])
 
 # JMPUW inside a protected range: its ensure unwinding is not modelled, so the origin walk still refuses.
 jmpuw_guarded = program.call([
@@ -41,6 +42,10 @@ jmpuw_guarded = program.call([
 ], [CatchHandler.new(type: :ensure, begin_addr: 4, end_addr: 6, target: 12)])
 check.call('JMPUW inside a protected range refuses under the origin walk',
            jmpuw_guarded.reaching_definitions(4, '1', origin_transfers: true).nil?)
+check.call('JMPUW inside a protected range refuses under the default walk',
+           jmpuw_guarded.reaching_definitions(4, '1').nil?)
+check.call('JMPUW inside a protected range refuses under through_handlers',
+           jmpuw_guarded.reaching_definitions(4, '1', through_handlers: true).nil?)
 
 # RESCUE a b: writes only R[b] (the match result). A query on R[b] is answered by the RESCUE.
 #   0: LOADNIL R2   1: LOADNIL R3   2: RESCUE R2 R3   3: JMPNOT R3 -> 10   4: RETURN R1 (@8)   5: RETURN R3 (@10)

@@ -21,49 +21,37 @@ class CodeGen
   #   (6. FIXNUM_RETURN_PROOF and 7. ENTRY_ARG_CALLSITE_PROOF, below.)
   # MOVE chains are followed (`regs[a] = regs[b]`).
   #
-  # The backward "most recent write" is only meaningful if control cannot enter
-  # between the write and the use. Entry points, all honoured:
-  #   - goto targets (jump_targets). REGION_DOMINANCE (fixnum_proof_region_ok?,
-  #     with the edge map from fixnum_proof_edge_sources) lets the walk step
-  #     past a label when every branch to it lies inside the write..use region.
-  #     JOIN_REACHING_DEFS: when no single write dominates (`x = c ? 5 : 7`),
-  #     fixnum_proof_reaching_defs? requires every reaching definition to prove.
-  #   - exception handlers: each catch handler's target is an entry, and its
-  #     whole begin_addr..end_addr range refuses outright, at the use and at
-  #     every step. RESCUE_SUPPORT extracts that range into a separate function
-  #     whose registers are re-initialized, yet compile_insn is called there
-  #     with the enclosing irep, so the walk must not step back out of it.
+  # The proof asks BytecodeIR's reaching definitions (ADR 0476): the SET of
+  # writes that can supply the register at the use, through joins and loops,
+  # over the normal-flow CFG. Every one must prove. Entry points, all honoured:
+  #   - goto targets: the CFG's predecessor lists (a join contributes each arm's
+  #     write, `x = c ? 5 : 7` proves when both literals do). A predecessor no
+  #     execution reaches supplies nothing; an unplain JMPUW refuses.
+  #   - exception handlers: each catch handler's target and its whole protected
+  #     range (end included) refuse outright, at the use and at every step.
+  #     RESCUE_SUPPORT extracts that range into a separate function whose
+  #     registers are re-initialized, yet compile_insn is called there with the
+  #     enclosing irep, so the walk must not step back out of it.
   #   - nested blocks writing an enclosing local: SETUPVAR compiles to a write
   #     of r<b> (inlined bodies) or *bc2cpp_upvar_<b> (BLOCK_FALLBACK), outside
   #     this instruction list. Every SETUPVAR destination in the child subtree
-  #     (any level) is refused.
-  # Anything else declines and keeps the dual-path codegen.
+  #     (any level) is refused (opaque_regs).
+  #   - a callee frame or a vm.c fallback send based below the register may
+  #     overwrite it: refused (BytecodeIR::CALLEE_FRAME_OPS, ORIGIN_FRAME_OPS).
+  # Anything else declines and keeps the dual-path codegen. REGION_DOMINANCE
+  # (fixnum_proof_region_ok?) remains the single-path test of fixnum_interval,
+  # guarded_game_integer_range and return_write_dominates?.
   # ---------------------------------------------------------------------------
 
-  # Opcodes the backward scan may STEP OVER: verified (ops.h, vm.c) to write at
+  # Opcodes a backward scan may STEP OVER: verified (ops.h, vm.c) to write at
   # most the register named by their first `R<n>` operand and to create no entry
   # point. Everything else ends the scan with a refusal, e.g. RESCUE (writes its
   # second operand), APOST (a range), ARGARY (a and a+1), ASET, SETUPVAR (an
   # enclosing frame), EXCEPT/RAISEIF/MATCHERR/JMPUW (exception edges), EXT*,
   # CALL, ERR, and any future opcode. A whitelist: an over-approximated write
-  # only costs a proof, an under-approximated one is a wrong answer.
-  FIXNUM_PROOF_STEP_OVER_OPS = Set[
-    'NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE',
-    'GETGV', 'SETGV', 'GETSV', 'SETSV', 'GETIV', 'SETIV', 'GETCV', 'SETCV',
-    'GETCONST', 'SETCONST', 'GETMCNST', 'SETMCNST', 'GETUPVAR',
-    'GETIDX', 'GETIDX0', 'SETIDX',
-    'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL',
-    'SSEND', 'SSEND0', 'SSENDB', 'SEND', 'SEND0', 'SENDB', 'SUPER', 'BLKCALL', 'BLKPUSH',
-    'ENTER', 'KEY_P', 'KEYEND', 'KARG',
-    'RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK',
-    'ADD', 'ADDI', 'SUB', 'SUBI', 'ADDILV', 'SUBILV', 'MUL', 'DIV',
-    'EQ', 'LT', 'LE', 'GT', 'GE',
-    'ARRAY', 'ARRAY2', 'ARYCAT', 'ARYPUSH', 'ARYSPLAT', 'AREF',
-    'INTERN', 'SYMBOL', 'STRING', 'STRCAT', 'HASH', 'HASHADD', 'HASHCAT',
-    'LAMBDA', 'BLOCK', 'METHOD', 'RANGE_INC', 'RANGE_EXC',
-    'OCLASS', 'CLASS', 'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'ALIAS', 'UNDEF',
-    'SCLASS', 'TCLASS', 'DEBUG', 'STOP'
-  ].freeze
+  # only costs a proof, an under-approximated one is a wrong answer. It is
+  # BytecodeIR's audited list itself (ADR 0476), not a copy kept equal to it.
+  FIXNUM_PROOF_STEP_OVER_OPS = BytecodeIR::WRITES_LEADING_REG_OPS
 
   # Members of FIXNUM_PROOF_STEP_OVER_OPS whose leading register is READ, not
   # written: ops.h gives JMPIF/JMPNOT/JMPNIL the BS format (register first), and
@@ -72,10 +60,11 @@ class CodeGen
   # `a || 7`, `h&.size || 3`, where the condition register is the result. This
   # affects only the write test; they stay steppable and remain branch sources
   # for the dominance and reaching-definition machinery.
-  FIXNUM_PROOF_READONLY_REG_OPS = Set['JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  # They are exactly the steppable members of BytecodeIR::READS_LEADING_REG_OPS.
+  FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::READS_LEADING_REG_OPS & FIXNUM_PROOF_STEP_OVER_OPS).freeze
 
-  # Does `insn` write register `reg`? Shared by the single-path walk and the
-  # JOIN_REACHING_DEFS worklist. For every whitelisted op except the three
+  # Does `insn` write register `reg`? Used by return_value_sources' worklist.
+  # For every whitelisted op except the three
   # read-only ones, the leading `R<n>` is the destination (the audited
   # property). Under-reporting a write would be a wrong answer, so this is an
   # explicit exception list, nothing inferred.
@@ -106,7 +95,7 @@ class CodeGen
     edges = fixnum_proof_edge_sources(irep)
     entries.merge(edges.keys)
     @fixnum_proof_ctx[irep.label] =
-      { entries: entries, protected: protected_addrs, upvars: subtree_upvar_written_regs(irep),
+      { entries: entries, protected: protected_addrs, upvars: subtree_upvar_written_regs(irep).freeze,
         edge_sources: edges, catch_targets: catch_targets }
   end
 
@@ -188,6 +177,16 @@ class CodeGen
   # FIXNUM_OPERAND_PROOF entry point (see the header). `reg` is a register
   # number string. true only for an exact proof; false means "not provable",
   # not "not a Fixnum".
+  #
+  # JOIN_REACHING_DEFS (ADR 0476): every definition of `reg` reaching the read
+  # at `idx` must prove, through joins and loops (BytecodeIR's
+  # reaching_definitions, which follows MOVE chains). Its barriers are this
+  # proof's: an op outside the audited write list, a catch target or protected
+  # instruction (the inclusive range end included) on the way, a register a
+  # nested block writes (the whole child subtree, opaque_regs), a callee frame
+  # or vm.c fallback that may overwrite the register, and the state cap. A
+  # write that dominates the read is the one-definition case, so the old
+  # single-path walk and its REGION_DOMINANCE test are subsumed.
   def proven_fixnum_operand?(irep, idx, reg, owner_def, depth = 0)
     return false unless irep && idx && reg && owner_def
     return false if depth > FIXNUM_PROOF_MAX_DEPTH
@@ -198,59 +197,33 @@ class CodeGen
     cur = reg.to_s
     return false if ctx[:upvars].include?(cur)
 
-    # Inside a protected range: compiled into a separate function with
-    # re-initialized registers, so neither using nor stepping here means anything.
-    # An unaudited opcode could write `cur` from an operand this test does not
-    # read: refuse.
-    unaudited = lambda do |insn, _cur|
-      ctx[:protected].include?(insn.addr) ||
-        !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI'))
-    end
-    # The use itself is checked like every instruction crossed, but writes nothing.
-    if idx >= 0
-      use_insn = irep.instructions[idx]
-      return false unless use_insn
-      return false if unaudited.call(use_insn, cur)
-    end
+    # The use itself must be an audited op outside a protected range: that range
+    # compiles into a separate function with re-initialized registers.
+    use_insn = idx >= 0 && irep.instructions[idx]
+    return false unless use_insn
+    return false if ctx[:protected].include?(use_insn.addr) ||
+                    !(FIXNUM_PROOF_STEP_OVER_OPS.include?(use_insn.op) || use_insn.op.start_with?('LOADI'))
 
-    # JOIN_REACHING_DEFS: where `cur` is actually READ. It moves back to each MOVE
-    # crossed, since `MOVE Ra Rb` reads Rb at its own address; asking at the
-    # original use would ask about a register later code may overwrite.
-    need_idx = idx
-    at_entry = lambda do |entry_reg|
-      # Fell off the top: `cur` holds the preamble's value. REGION_DOMINANCE with -1
-      # still rejects a back-edge from below the use.
-      unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
-        next fixnum_proof_reaching_defs?(irep, ctx, need_idx, entry_reg, owner_def, depth)
+    BytecodeIR.for(irep).every_reaching_definition(idx, cur, opaque_regs: ctx[:upvars],
+                                                        max_states: fixnum_proof_max_states(irep)) do |definition|
+      if definition.entry?
+        fixnum_proof_entry_arg?(irep, definition.reg, owner_def)
+      else
+        fixnum_proof_source?(irep, definition.index, irep.instructions[definition.index], definition.reg, owner_def,
+                             depth)
       end
-
-      fixnum_proof_entry_arg?(irep, entry_reg, owner_def)
-    end
-    irep.walk_writers(idx - 1, cur, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, barrier: unaudited,
-                                    barrier_result: false, exhausted: at_entry) do |insn, j, wreg|
-      if insn.op == 'MOVE'
-        # `regs[a] = regs[b]`: continue with the source register.
-        src = insn.regs[1]
-        next false unless src
-        next false if ctx[:upvars].include?(src)
-
-        need_idx = j
-        next IrepScans.follow(src)
-      end
-
-      # REGION_DOMINANCE: the write is found; check nothing enters the region except
-      # through it.
-      next fixnum_proof_source?(irep, j, insn, wreg, owner_def, depth) if fixnum_proof_region_ok?(irep, ctx, j, idx)
-
-      # JOIN_REACHING_DEFS: the write does not dominate, so ask the multi-path
-      # question: every reaching definition must prove.
-      fixnum_proof_reaching_defs?(irep, ctx, need_idx, wreg, owner_def, depth)
-    end
+    end || false
   end
 
-  # JOIN_REACHING_DEFS -------------------------------------------------------
-  # Cap on (index, register) states the multi-path walk expands. Refusing on
-  # exhaustion is safe and keeps codegen linear.
+  # The single-path walk this proof used to run first was unbounded (one step
+  # per instruction); the cap grows with the body so a long straight-line
+  # method keeps its proofs, and stays linear in it.
+  def fixnum_proof_max_states(irep)
+    [BytecodeIR::DATAFLOW_MAX_STATES, 2 * irep.instructions.length].max
+  end
+
+  # Cap on the (index, register) states return_value_sources expands. Refusing
+  # on exhaustion is safe and keeps codegen linear.
   FIXNUM_PROOF_REACHING_MAX_STATES = 400
 
   # Predecessor map: index -> indices control can come from (-1 = method entry),
@@ -258,83 +231,6 @@ class CodeGen
   # predecessors only cost a proof; see BytecodeIR::NO_FALLTHROUGH.
   def fixnum_proof_preds(irep)
     BytecodeIR.for(irep).instruction_predecessors
-  end
-
-  # JOIN_REACHING_DEFS: does EVERY definition of `reg` reaching the read at
-  # `need_idx` prove Fixnum? Handles joins no single write dominates, e.g.
-  # `x = c ? 5 : 7; x + 1`:
-  #
-  #     007 JMPNOT  R4  016
-  #     011 LOADI_5 R4  (5)
-  #     013 JMP     018
-  #     016 LOADI_7 R4  (7)
-  #     018 MOVE    R3  R4        <- the join
-  #
-  # A backward worklist of (index, register) states meaning "the value flowing
-  # into index i must be a Fixnum". For each predecessor p: if p writes r it is
-  # a reaching definition (MOVE continues with the source register, anything
-  # else must satisfy fixnum_proof_source?); otherwise ask (p, r). Method entry
-  # uses the entry-argument test.
-  # Each state is expanded once and true is only returned once the worklist is
-  # empty, so re-reaching a state over a loop back-edge is memoization, not an
-  # optimistic assumption. The single-path barriers all apply: protected ranges,
-  # catch targets, unaudited opcodes, SETUPVAR destinations.
-  def fixnum_proof_reaching_defs?(irep, ctx, need_idx, reg, owner_def, depth)
-    return false if depth > FIXNUM_PROOF_MAX_DEPTH
-
-    preds = fixnum_proof_preds(irep)
-    return false if preds.nil?
-
-    seen = Set.new
-    work = [[need_idx, reg.to_s]]
-    until work.empty?
-      state = work.pop
-      next if seen.include?(state)
-
-      seen << state
-      return false if seen.size > FIXNUM_PROOF_REACHING_MAX_STATES
-
-      i, r = state
-      return false if ctx[:upvars].include?(r)
-
-      here = irep.instructions[i]
-      return false unless here
-      return false if ctx[:catch_targets].include?(here.addr)
-      return false if ctx[:protected].include?(here.addr)
-
-      ps = preds[i]
-      return false if ps.nil? || ps.empty?
-
-      ps.each do |p|
-        if p < 0
-          # Method entry: the preamble's value; use the entry-argument proof.
-          return false unless fixnum_proof_entry_arg?(irep, r, owner_def)
-
-          next
-        end
-
-        insn = irep.instructions[p]
-        return false unless insn
-        return false if ctx[:protected].include?(insn.addr)
-        return false unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
-
-        if fixnum_proof_writes_reg?(insn, r)
-          if insn.op == 'MOVE'
-            src = insn.regs[1]
-            return false unless src
-            return false if ctx[:upvars].include?(src)
-
-            work << [p, src]
-          else
-            return false unless fixnum_proof_source?(irep, p, insn, r, owner_def, depth)
-          end
-        else
-          work << [p, r]
-        end
-      end
-    end
-
-    true
   end
 
   # LOADI_FIXNUM_RANGE: the narrowest Fixnum range of any shipped target (the

@@ -168,8 +168,8 @@ guarded = program.call(guarded_list, handler)
 check.call('the handler target refuses', guarded.reaching_definitions(3, '1').nil?)
 check.call('a use in the protected range refuses', guarded.reaching_definitions(1, '1').nil?)
 check.call('the join after the range refuses through the protected instruction', guarded.reaching_definitions(4, '1').nil?)
-check.call('the same code without a handler still refuses at the dead handler body',
-           program.call(guarded_list).reaching_definitions(4, '1').nil?)
+check.call('the same code without a handler skips the dead body: the live definition answers (ADR 0476)',
+           program.call(guarded_list).reaching_definitions(4, '1')&.map(&:index) == [0])
 
 # through_handlers (RECORD_HASH_PROOF, docs/adr/0285) crosses handler edges instead of refusing at them.
 check.call('through_handlers answers a use in the handler body from before the raise',
@@ -196,10 +196,15 @@ check.call('a childless irep writes no upvar', BytecodeIR.own_upvar_written_regs
 orphan = Irep.new(label: 'o', nlocals: 3, reps: ['x'], instructions: [insn(0, 'RETURN', 'R1')])
 check.call('without a tree every local of a block-creating irep is opaque', BytecodeIR.own_upvar_written_regs(orphan) == Set['1', '2'])
 
-# The write whitelist stays the Fixnum proof's audited list.
+# The Fixnum proof's audited lists are BytecodeIR's (ADR 0476): derived, never a second copy to keep equal.
 source = File.read(File.expand_path('../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
-listed = source[/FIXNUM_PROOF_STEP_OVER_OPS = Set\[(.*?)\]\.freeze/m, 1].scan(/'([A-Z0-9_]+)'/).flatten.to_set
-check.call('WRITES_LEADING_REG_OPS equals FIXNUM_PROOF_STEP_OVER_OPS', listed == BytecodeIR::WRITES_LEADING_REG_OPS)
+check.call('FIXNUM_PROOF_STEP_OVER_OPS is WRITES_LEADING_REG_OPS itself',
+           source.include?("FIXNUM_PROOF_STEP_OVER_OPS = BytecodeIR::WRITES_LEADING_REG_OPS\n"))
+check.call('FIXNUM_PROOF_READONLY_REG_OPS is derived from READS_LEADING_REG_OPS',
+           source.include?('FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::READS_LEADING_REG_OPS & FIXNUM_PROOF_STEP_OVER_OPS)') &&
+             (BytecodeIR::READS_LEADING_REG_OPS & BytecodeIR::WRITES_LEADING_REG_OPS) == Set['JMPIF', 'JMPNOT', 'JMPNIL'])
+check.call('the Fixnum proof keeps no reaching-definitions walk of its own',
+           !source.include?('def fixnum_proof_reaching_defs?') && source.include?('every_reaching_definition('))
 
 # ENTER's rest, keyword-hash, block, R1, post and local slots are typed definitions of the ENTER in the origin walk
 # (Definition#built); a temporary above nlocals refuses; self, required and optional parameters (R2 and up, or R1 with

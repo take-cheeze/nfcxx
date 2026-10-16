@@ -31,8 +31,13 @@ dead_join = program.call([
 ])
 check.call('a dead predecessor of a live join is skipped (origin walk answers the live definition)',
            defs_of.call(dead_join, 4, '1', origin_transfers: true) == [0])
-check.call('without the origin option the same join is refused at the dead predecessor',
-           dead_join.reaching_definitions(4, '1').nil?)
+check.call('the default walk skips the dead predecessor too (ADR 0476)', defs_of.call(dead_join, 4, '1') == [0])
+# A dead query keeps its dead predecessors: skipping them would answer [] (no definition), vacuously true.
+#   0: LOADI_1 R1   1: RETURN R1   2: LOADI_2 R1 (dead)   3: RETURN R1 (dead, the query)
+dead_tail = program.call([insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'RETURN', 'R1'), insn(4, 'LOADI_2', 'R1 (2)'),
+                          insn(6, 'RETURN', 'R1')])
+check.call('a dead query keeps its dead predecessors under the default walk (never an empty answer)',
+           defs_of.call(dead_tail, 3, '1') == [2])
 check.call('a query no execution reaches stays refused (no value to report)',
            dead_join.reaching_definitions(3, '1', origin_transfers: true).nil?)
 
