@@ -36,6 +36,7 @@ int main(int argc, char **argv) {
   bool arith = false;
   std::string file = "-";
   bool have_file = false;
+  std::vector<std::string> kernels;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--dump-forms") {
@@ -48,7 +49,9 @@ int main(int argc, char **argv) {
       arith = true;
       file = argv[++i];
       have_file = true;
-    } else if (a.rfind("--sm=", 0) == 0 || a.rfind("--kernel=", 0) == 0) {
+    } else if (a.rfind("--kernel=", 0) == 0) {
+      kernels.push_back(a.substr(9));
+    } else if (a.rfind("--sm=", 0) == 0) {
       // Accepted for the same command line as the Ruby; not used by the reader.
     } else if (!have_file) {
       file = a;
@@ -74,10 +77,27 @@ int main(int argc, char **argv) {
     return 3;
   }
   try {
-    for (const Node &f : parse_forms_chunked(src)) {
+    // With kernels, only the functions they reach are parsed (parse_module_forms); the fn-indices line gives the
+    // position of each parsed function among the module's functions, or "all" where the whole text is parsed.
+    std::vector<Node> forms;
+    std::string indices;
+    ModuleForms mf;
+    if (!kernels.empty() && parse_module_forms(src, kernels, mf)) {
+      forms = std::move(mf.forms);
+      indices = "# fn-indices:";
+      for (size_t idx : mf.fn_indices) indices += " " + std::to_string(idx);
+    } else {
+      forms = parse_forms_chunked(src);
+      if (!kernels.empty()) indices = "# fn-indices: all";
+    }
+    for (const Node &f : forms) {
       std::string line = form_text(f);
       line += '\n';
       std::fwrite(line.data(), 1, line.size(), stdout);
+    }
+    if (!indices.empty()) {
+      indices += '\n';
+      std::fwrite(indices.data(), 1, indices.size(), stdout);
     }
   } catch (const BadIR &e) {
     std::string msg = std::string("error: ") + e.what() + "\n";
