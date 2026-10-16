@@ -1,15 +1,15 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Checks scripts/bc2cpp/trace_sig.rb on a synthetic dump: observed unions, true/false as bool, an overflowed
+# Checks scripts/bc2cpp/trace_types.rb (candidates) on a synthetic dump: observed unions, true/false as bool, an overflowed
 # site left out, a never-reached parameter left as untyped, names that are not plain Ruby identifiers skipped,
 # and the output parses as RBS.
 #
-#   ruby scripts/bc2cpp/trace_sig_check.rb
+#   ruby scripts/bc2cpp/trace_types_check.rb
 
 require 'tempfile'
 require 'rbs'
-require_relative 'trace_sig'
+require_relative 'trace_types'
 
 DUMP = <<~TSV
   PARAM_SITE\tfx\t0\t3\t0\tBox#put\tBox_put_impl\tmethod\treq\t1\tv\tnone:mono
@@ -37,11 +37,11 @@ TSV
 failures = []
 check = ->(name, ok) { failures << name unless ok }
 
-Tempfile.create(['trace_sig', '.txt']) do |dump|
+Tempfile.create(['trace_types', '.txt']) do |dump|
   dump.write(DUMP)
   dump.flush
-  params, rets = read_dumps([dump.path])
-  text = render(candidates(params, rets))
+  params, rets = TraceTypes::Candidates.read_dumps([dump.path])
+  text = TraceTypes::Candidates.render(TraceTypes::Candidates.candidates(params, rets))
 
   check.call('a parameter seen as Integer and String is their union, a return of Integer and nil is parenthesized',
               text.include?('def put: (Integer | String) -> (Integer | nil)'))
@@ -68,14 +68,14 @@ Tempfile.create(['run_a', '.txt']) do |a|
     a.flush
     b.write(run_b)
     b.flush
-    merged = render(candidates(*read_dumps([a.path, b.path])))
+    merged = TraceTypes::Candidates.render(TraceTypes::Candidates.candidates(*TraceTypes::Candidates.read_dumps([a.path, b.path])))
     check.call('two runs of one method merge into a union', merged.include?('def read: (File | StringIO) -> untyped'))
   end
 end
 
 if failures.empty?
-  puts 'trace sig check: PASS'
+  puts 'trace types check: PASS'
 else
-  warn "trace sig check: FAIL\n  #{failures.join("\n  ")}"
+  warn "trace types check: FAIL\n  #{failures.join("\n  ")}"
   exit 1
 end
