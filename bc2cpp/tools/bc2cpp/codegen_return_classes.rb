@@ -188,6 +188,7 @@ class CodeGen
     end
     @rc_checked_alias_names = checked_alias_name_candidates
     @rc_admitted_alias_names = Set.new
+    @rc_narrowing = true
     Fixpoint.iterate('CodeGen return classes and class pools', Fixpoint::GROWTH_LIMIT) do
       changed = grow_return_classes
       changed |= grow_class_pools
