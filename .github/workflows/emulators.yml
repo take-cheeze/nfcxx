@@ -1,0 +1,71 @@
+name: Emulators
+
+# Cross-target checks that run generated code under an emulator: qemu-user for linux_aarch64, linux_armv7 and
+# linux_riscv64, and MinGW-w64 with wine for win64 (tests/target/run.sh, docs/notes/freestanding.md). Runs nightly, on
+# demand, and when a change can affect them. The EDG front end is built here, not restored from the toolchain cache:
+# its win64 predefined-macro table depends on whether MinGW-w64 is installed when scripts/setup-edg.sh runs, and that
+# is not part of the cache key.
+on:
+  schedule:
+    - cron: "23 4 * * *"   # nightly, UTC
+  push:
+    branches: [main]
+    paths:
+      - "nfcxx"
+      - "be/**"
+      - "lib/**"
+      - "3rd/edg"
+      - "scripts/setup-edg.sh"
+      - "scripts/win-predef.sh"
+      - "scripts/gen-c-target.sh"
+      - "tests/target/**"
+      - "tests/lib/**"
+      - "docs/notes/freestanding.md"
+      - ".github/workflows/emulators.yml"
+  pull_request:
+    paths:
+      - "nfcxx"
+      - "be/**"
+      - "lib/**"
+      - "3rd/edg"
+      - "scripts/setup-edg.sh"
+      - "scripts/win-predef.sh"
+      - "scripts/gen-c-target.sh"
+      - "tests/target/**"
+      - "tests/lib/**"
+      - "docs/notes/freestanding.md"
+      - ".github/workflows/emulators.yml"
+  workflow_dispatch:
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulators:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install the build tools, MinGW-w64, wine and the cross toolchains with qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ clang \
+            mingw-w64 wine64 \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross \
+            qemu-user
+
+      # MinGW-w64 is installed first: scripts/setup-edg.sh writes the win64 predefined-macro table from it.
+      - name: Build the EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: Cross-target layout probes under qemu-user and wine
+        run: tests/target/run.sh
+        env:
+          WINEDEBUG: "-all"
+          WINEPREFIX: ${{ runner.temp }}/wine

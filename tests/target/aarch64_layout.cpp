@@ -1,5 +1,6 @@
 // TARGET: linux_aarch64 aarch64-linux-gnu
 // HOST-REJECTS: yes
+// RUN-QEMU: 0
 // Layout facts of AAPCS64 Linux, checked by EDG's own tables for the target (nfcxx --freestanding --target=linux_aarch64).
 // The host (x86-64) fails the char and long double lines, so the same file is refused without --target.
 #include <cstddef>

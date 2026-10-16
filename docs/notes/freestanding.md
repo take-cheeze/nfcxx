@@ -50,9 +50,11 @@ clang --target=aarch64-linux-gnu -ffreestanding -c prog.c -o prog.o     # the ge
   `static_assert`s for pointer, `long` and `long double` sizes, `char` signedness and the target's macro is accepted by
   EDG, and the host refuses the same file; each of the 11 `tests/lib` programs is emitted for the target and compiled by
   `clang --target=<triple>`. The refusals (no `--freestanding`, no `--emit-c`, unknown name) are checked too.
-- **Not checked:** the generated code is never run on these ABIs (no qemu in the environment; the `ubuntu-24.04-arm`
-  runner would run it natively, and the test does not do that yet). Only clang compiled the C; gcc cross compilers were
-  not used.
+- **Run under emulators:** each layout probe is built by the target's cross gcc (static) and run under qemu-user
+  (`qemu-aarch64`, `qemu-arm`, `qemu-riscv64`, exit 0 expected: `// RUN-QEMU: 0`). The probes are EH- and template-free,
+  so they link. `.github/workflows/emulators.yml` runs them nightly and on changes to the related files. The Hexagon
+  checks (`hexagon.yml`) also run nightly. Only these probes are run, not the `tests/lib` programs (they need the EH
+  runtime, see Windows below).
 - **Known gap: floating-point constants.** EDG computes `long double` with the host's type (`setup-edg.sh` says so for an aarch64 host). On an x86-64 host that is
   the 80-bit x87 type, but the aarch64 and riscv64 `long double` is 128-bit IEEE quad, so a folded constant can differ in
   its last bits from what the target computes. Not tested here; the fix is EDG's host floating-point configuration

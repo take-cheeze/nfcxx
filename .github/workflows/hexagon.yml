@@ -3,8 +3,10 @@ name: Hexagon
 # Hexagon checks (docs/notes/hexagon.md). Kept out of the main CI job, and run only when a change
 # can affect them: the EDG front end that generates the C, the Hexagon harness (tests/hexagon/flatlink.rb
 # runs on the mruby interpreter, scripts/mrb), the test cases it runs, or the workflow itself.
-# Runs on demand too (workflow_dispatch).
+# Runs nightly (schedule) and on demand too (workflow_dispatch).
 on:
+  schedule:
+    - cron: "41 3 * * *"   # nightly, UTC (qemu-hexagon checks, see the header above)
   push:
     branches: [main]
     paths:

@@ -1,5 +1,6 @@
 // TARGET: linux_armv7 arm-linux-gnueabihf
 // HOST-REJECTS: yes
+// RUN-QEMU: 0
 // Layout facts of the 32-bit ARM EABI, checked by EDG's tables for linux_armv7: ILP32, long double is double.
 #include <cstddef>
 #include <cstdint>

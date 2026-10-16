@@ -1,5 +1,6 @@
 // TARGET: linux_riscv64 riscv64-linux-gnu
 // HOST-REJECTS: yes
+// RUN-QEMU: 0
 // Layout facts of the RISC-V 64-bit Linux ABI (LP64D), checked by EDG's tables for linux_riscv64.
 #include <cstddef>
 #include <cstdint>
