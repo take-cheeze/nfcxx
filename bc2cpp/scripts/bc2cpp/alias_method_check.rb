@@ -10,10 +10,10 @@
 #    refusal and settle withdrawal, and CodeGen#symbol_installed_names.
 # 2. Generated code (MRBC): calls to an alias of a Ruby method are direct; a method-body alias keeps the
 #    call dynamic (CLOSED_WORLD kept: dynamic_install).
-# 3. Behaviour on real mruby (MRBC, g++, and BC2CPP_MRUBY_FULL or a core-only build, BC2CPP_MRUBY_CORE or
-#    the tree's build*/mruby/host/mrbc): interpreted and compiled answer alike for an alias of a Ruby method,
-#    an inherited method redefined after the alias, a core method, a private alias, a call through `__send__`,
-#    strict arity, and a refused method-body alias that stays dynamic.
+# 3. Behaviour on real mruby (MRBC, g++, and BC2CPP_MRUBY_FULL, a core-only build (BC2CPP_MRUBY_CORE or the
+#    tree's build*/mruby/host/mrbc), or a full-core one built once into BC2CPP_FULL_BUILD_DIR): interpreted and
+#    compiled answer alike for an alias of a Ruby method, an inherited method redefined after the alias, a core
+#    method, a private alias, a call through `__send__`, strict arity, and a refused method-body alias.
 #
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_MRUBY_CORE=dir] ruby scripts/bc2cpp/alias_method_check.rb
 
@@ -173,6 +173,8 @@ Dir.mktmpdir do |dir|
   check.call('run calls greet and both aliases of it directly',
              %w[greet old_greet kw_greet].all? { |m| run.include?("AlFx_#{m}_impl(M, self") })
   check.call('the aliases are compiled', %w[old_greet kw_greet _al_init].all? { |m| code.include?("AlFx_#{m}_impl(mrb_state* M") })
+  check.call('a call to an alias without a body is an owner call, not a by-name send',
+             body_of.call(code, 'AlFx_hello').include?('CLOSED_WORLD owner-call: old_hello'))
   check.call('no call is kept dynamic for an installed name', !code.include?('kept: dynamic_install'))
 end
 Dir.mktmpdir do |dir|
@@ -225,7 +227,7 @@ REFUSED_SCENARIO = <<~CPP
   }
 CPP
 
-full = runtime.full
+full = runtime.full || (runtime.core ? nil : runtime.full_or_build)
 build = full || runtime.core
 if build.nil? || !runtime.compiler?
   puts '  SKIP run: needs g++ and a mruby build (BC2CPP_MRUBY_FULL, BC2CPP_MRUBY_CORE or build*/mruby/host/mrbc)'
@@ -261,7 +263,8 @@ else
                    text.include?('probe.og0 => raised ArgumentError') && text.match?(/probe\.priv => raised (NoMethodError|Exception)/) &&
                      text.include?('__send__(:_al_init) => 10'))
         dispatches = sections.fetch('compiled', []).each_cons(2).select { |c, n| c.start_with?('run(4)') && n.include?('dispatches=') }
-        check.call('a compiled run makes only the inherited alias dispatch', dispatches.size == 1 && dispatches.first[1].strip == 'dispatches=1')
+        check.call('a compiled run makes no dynamic dispatch (the bodyless alias is an owner call, ADR 0468)',
+                   dispatches.size == 1 && dispatches.first[1].strip == 'dispatches=0')
       else
         check.call('the refused alias still installs at run time',
                    text.match?(/kept\.run\(4\) before => raised (NoMethodError|Exception)/) && text.include?('kept.run(4) after => 5'))
