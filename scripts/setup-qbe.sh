@@ -37,11 +37,13 @@ fi
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of
 # libnfcxxld.a (be/nfcxx_ldrt.c), which must be on the link line. The archive has one object, so -u on one of its helpers
 # pulls all of them; -lgcc/-lgcc_s give __multf3 and friends, -lstdc++ the __float128 to_chars wrappers.
+# -lm: the stage-1 driver links with ld directly, and libm is needed by cproc's math (without it ld fails with
+# "DSO missing from command line" on hosts with --as-needed).
 # be/nfcxx_ldrt.c is x87 code (x86-64 only), so the x86-64 stage-2 build links those helpers; it does not run on arm64.
 if [ "$(uname -m)" = x86_64 ]; then
   ldrt=$("$root/scripts/pathb-ldrt")
   (cd "$root/build/cproc" && PATH="$root/build/qbe:$PATH" make -j"$jobs" stage2 \
-    LDFLAGS="-Wl,-u,__nfcxx_ld_add $ldrt -lgcc -lgcc_s -lstdc++" >/dev/null)
+    LDFLAGS="-Wl,-u,__nfcxx_ld_add $ldrt -lgcc -lgcc_s -lstdc++ -lm" >/dev/null)
 fi
 # Apple arm64 stage 2 (no helper archive: long double is a double there, scripts/cproc-darwin-ldouble.patch). The SDK's
 # ARM register state (mach/arm/_structs.h) has __uint128_t arrays that cproc cannot parse, and the stage-2 driver compiles
