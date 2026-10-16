@@ -69,33 +69,58 @@ enum CEmit {
 
   static func emit(_ program: Program) -> String {
     var out = prelude + "\n\n"
-    for c in program.classes {
-      out += "typedef struct s_\(c.name) s_\(c.name);\n"
+
+    // Forward declarations first, so that any type can name any other. Function
+    // typedefs may use incomplete types; complete definitions come after them.
+    for c in program.classes { out += "typedef struct s_\(c.name) s_\(c.name);\n" }
+    for s in program.structs { out += "typedef struct s_\(s.name) s_\(s.name);\n" }
+    for e in program.enums { out += "typedef struct s_\(e.name) s_\(e.name);\n" }
+    for o in program.optionals { out += "typedef struct \(o.cName) \(o.cName);\n" }
+    out += "\n"
+    for fn in program.functionTypes {
+      guard case .function(let params, let ret) = fn else { continue }
+      let list = params.isEmpty ? "void" : params.map { $0.cName }.joined(separator: ", ")
+      out += "typedef \(ret.cName) (*\(fn.cName))(\(list));\n"
     }
     out += "\n"
 
-    // Value types (structs and optionals) come next, dependencies first.
+    // Value types (structs, enums and optionals), dependencies first.
     var defined = Set<String>()
     var values = ""
+    func needsDefinition(_ ty: Ty) -> Bool {
+      switch ty {
+      case .structure, .enumeration, .optional: return true
+      default: return false
+      }
+    }
     func defineValue(_ ty: Ty) {
       guard !defined.contains(ty.mangled) else { return }
       defined.insert(ty.mangled)
       switch ty {
       case .structure(let name):
         guard let info = program.structs.first(where: { $0.name == name }) else { return }
-        for field in info.fields {
-          if case .structure = field.ty { defineValue(field.ty) }
-          if case .optional = field.ty { defineValue(field.ty) }
-        }
-        values += "typedef struct s_\(name) {\n"
+        for field in info.fields where needsDefinition(field.ty) { defineValue(field.ty) }
+        values += "struct s_\(name) {\n"
         for field in info.fields {
           values += "  \(field.ty.cName) \(field.cName);\n"
         }
-        values += "} s_\(name);\n\n"
+        values += "};\n\n"
+      case .enumeration(let name):
+        guard let info = program.enums.first(where: { $0.name == name }) else { return }
+        for c in info.cases {
+          for field in c.payload where needsDefinition(field.ty) { defineValue(field.ty) }
+        }
+        values += "struct s_\(name) {\n  int64_t tag;\n"
+        for c in info.cases {
+          for field in c.payload {
+            values += "  \(field.ty.cName) \(field.cName);\n"
+          }
+        }
+        values += "};\n\n"
       case .optional(let inner):
-        if case .structure = inner { defineValue(inner) }
+        if needsDefinition(inner) { defineValue(inner) }
         let opt = ty.cName
-        values += "typedef struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n} \(opt);\n"
+        values += "struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n};\n"
         values += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
         values += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
         values += "  return v.value;\n}\n"
@@ -109,6 +134,7 @@ enum CEmit {
       }
     }
     for s in program.structs { defineValue(.structure(s.name)) }
+    for e in program.enums { defineValue(.enumeration(e.name)) }
     for o in program.optionals { defineValue(o) }
     out += values
 
@@ -265,6 +291,19 @@ enum CEmit {
       return "((\(e.ty.cName)){ .some = false })"
     case .isSome(let inner):
       return "((\(expr(inner))).some)"
+    case .enumCase(let info, let tag, let args):
+      var inits = [".tag = \(tag)"]
+      let fields = info.cases.first(where: { $0.tag == tag })?.payload ?? []
+      for (field, arg) in zip(fields, args) {
+        inits.append(".\(field.cName) = \(expr(arg))")
+      }
+      return "((\(e.ty.cName)){ " + inits.joined(separator: ", ") + " })"
+    case .isCase(let inner, let tag):
+      return "((\(expr(inner))).tag == \(tag))"
+    case .funcRef(let f):
+      return f.cName
+    case .callPtr(let callee, let args):
+      return "(\(expr(callee)))(\(args.map(expr).joined(separator: ", ")))"
     case .unwrap(let inner):
       return "unw_\(inner.ty.cName)(\(expr(inner)))"
     }

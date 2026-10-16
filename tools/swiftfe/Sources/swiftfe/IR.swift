@@ -17,7 +17,10 @@ indirect enum Ty: Equatable {
   case nilLiteral
   case structure(String)
   case cls(String)
+  case enumeration(String)
   case optional(Ty)
+  /// A non-capturing function (closure or named function), as a C function pointer.
+  case function([Ty], Ty)
 
   var swiftName: String {
     switch self {
@@ -25,8 +28,10 @@ indirect enum Ty: Equatable {
     case .bool: return "Bool"
     case .void: return "Void"
     case .nilLiteral: return "nil"
-    case .structure(let name), .cls(let name): return name
+    case .structure(let name), .cls(let name), .enumeration(let name): return name
     case .optional(let inner): return inner.swiftName + "?"
+    case .function(let params, let ret):
+      return "(" + params.map { $0.swiftName }.joined(separator: ", ") + ") -> " + ret.swiftName
     }
   }
 
@@ -39,7 +44,10 @@ indirect enum Ty: Equatable {
     case .nilLiteral: return "Nil"
     case .structure(let name): return "S_" + name
     case .cls(let name): return "C_" + name
+    case .enumeration(let name): return "E_" + name
     case .optional(let inner): return "O_" + inner.mangled
+    case .function(let params, let ret):
+      return "F_" + params.map { $0.mangled }.joined(separator: "_") + "_R_" + ret.mangled
     }
   }
 
@@ -52,7 +60,9 @@ indirect enum Ty: Equatable {
     case .void, .nilLiteral: return "void"
     case .structure(let name): return "s_" + name
     case .cls(let name): return "s_" + name + " *"
+    case .enumeration(let name): return "s_" + name
     case .optional(let inner): return "opt_" + inner.mangled
+    case .function: return "fn_" + mangled
     }
   }
 
@@ -104,6 +114,19 @@ final class ClassInfo {
   init(name: String) { self.name = name }
 }
 
+struct EnumCase {
+  let name: String
+  let tag: Int
+  let payload: [Field]
+}
+
+final class EnumInfo {
+  let name: String
+  var cases: [EnumCase] = []
+
+  init(name: String) { self.name = name }
+}
+
 struct Param {
   let label: String?
   let name: String
@@ -150,6 +173,12 @@ indirect enum ExprKind {
   case isSome(Expr)
   /// Force unwrap; traps on nil.
   case unwrap(Expr)
+  case enumCase(EnumInfo, Int, [Expr])
+  /// True when the enum value has the given tag.
+  case isCase(Expr, Int)
+  /// A named function or closure used as a value.
+  case funcRef(FuncInfo)
+  case callPtr(Expr, [Expr])
 }
 
 struct Expr {
@@ -185,8 +214,11 @@ indirect enum Stmt {
 struct Program {
   let structs: [StructInfo]
   let classes: [ClassInfo]
+  let enums: [EnumInfo]
   let funcs: [FuncInfo]
   let main: [Stmt]
   /// Every Optional type that appears in the program, so CEmit can define it.
   let optionals: [Ty]
+  /// Every function type that appears in the program, so CEmit can typedef it.
+  let functionTypes: [Ty]
 }

@@ -3,7 +3,7 @@
 // This is where names are resolved, types are checked, and reference counts
 // are inserted. The first error stops compilation.
 //
-// Ownership rules (M2):
+// Ownership rules:
 // - A class-like value in an owned position (a local's initializer, an
 //   assignment's right side, a call argument, a constructor argument, a
 //   return value) is +1. Places are retained when read into such a position.
@@ -14,6 +14,9 @@
 // - Class-typed temporaries that are not stored are released after their
 //   statement.
 // - Top-level variables are never released (they live until exit, as in Swift).
+//
+// Closures do not capture: a closure body sees only its own parameters and
+// top-level names, and an outer local is reported as not in scope.
 
 import SwiftParser
 import SwiftSyntax
@@ -46,9 +49,11 @@ final class Lowerer {
   private let converter: SourceLocationConverter
   private var structs: [String: StructInfo] = [:]
   private var classes: [String: ClassInfo] = [:]
+  private var enums: [String: EnumInfo] = [:]
   private var funcs: [String: FuncInfo] = [:]
   private var allFuncs: [FuncInfo] = []
   private var optionals: [Ty] = []
+  private var functionTypes: [Ty] = []
   private var scopes: [Scope] = []
   private var returnType: Ty? = nil
   private var counter = 0
@@ -63,6 +68,7 @@ final class Lowerer {
     // Pass 1: declare every type so fields and bodies can refer to them in any order.
     var structDecls: [(StructDeclSyntax, StructInfo)] = []
     var classDecls: [(ClassDeclSyntax, ClassInfo)] = []
+    var enumDecls: [(EnumDeclSyntax, EnumInfo)] = []
     for item in items {
       guard case .decl(let decl) = item.item else { continue }
       if let s = decl.as(StructDeclSyntax.self) {
@@ -80,10 +86,19 @@ final class Lowerer {
         let info = ClassInfo(name: name)
         classes[name] = info
         classDecls.append((c, info))
+      } else if let e = decl.as(EnumDeclSyntax.self) {
+        let name = e.name.text
+        if e.inheritanceClause != nil {
+          throw error("enum inheritance and raw values are not supported yet", e)
+        }
+        try checkNewType(name, e)
+        let info = EnumInfo(name: name)
+        enums[name] = info
+        enumDecls.append((e, info))
       }
     }
 
-    // Pass 2: stored properties and deinitializers.
+    // Pass 2: stored properties, enum payloads and deinitializers.
     var deinitDecls: [(DeinitializerDeclSyntax, ClassInfo)] = []
     for (decl, info) in structDecls {
       info.fields = try lowerMembers(decl.memberBlock, isClass: false).fields
@@ -95,7 +110,17 @@ final class Lowerer {
         deinitDecls.append((d, info))
       }
     }
-    try checkRecursion(structDecls.map { $0.0 })
+    for (decl, info) in enumDecls {
+      info.cases = try lowerEnumCases(decl)
+    }
+    var recursionNodes: [(name: String, node: Syntax, types: [Ty])] = []
+    for (decl, info) in structDecls {
+      recursionNodes.append((info.name, Syntax(decl), info.fields.map { $0.ty }))
+    }
+    for (decl, info) in enumDecls {
+      recursionNodes.append((info.name, Syntax(decl), info.cases.flatMap { $0.payload.map { $0.ty } }))
+    }
+    try checkRecursion(recursionNodes)
 
     // Pass 3: function and deinitializer signatures.
     var funcDecls: [(FunctionDeclSyntax, FuncInfo)] = []
@@ -140,7 +165,8 @@ final class Lowerer {
     for item in items {
       switch item.item {
       case .decl(let decl):
-        if decl.is(FunctionDeclSyntax.self) || decl.is(StructDeclSyntax.self) || decl.is(ClassDeclSyntax.self) {
+        if decl.is(FunctionDeclSyntax.self) || decl.is(StructDeclSyntax.self)
+          || decl.is(ClassDeclSyntax.self) || decl.is(EnumDeclSyntax.self) {
           continue
         }
         main += try lowerDecl(decl)
@@ -154,16 +180,18 @@ final class Lowerer {
     return Program(
       structs: structDecls.map { $0.1 },
       classes: classDecls.map { $0.1 },
+      enums: enumDecls.map { $0.1 },
       funcs: allFuncs,
       main: main,
-      optionals: optionals
+      optionals: optionals,
+      functionTypes: functionTypes
     )
   }
 
   // MARK: - Declarations
 
   private func checkNewType(_ name: String, _ node: some SyntaxProtocol) throws {
-    if structs[name] != nil || classes[name] != nil {
+    if structs[name] != nil || classes[name] != nil || enums[name] != nil {
       throw error("invalid redeclaration of '\(name)'", node)
     }
   }
@@ -207,21 +235,55 @@ final class Lowerer {
     return (fields, deinitializer)
   }
 
-  /// Rejects a struct that contains itself by value, which Swift also rejects.
+  private func lowerEnumCases(_ decl: EnumDeclSyntax) throws -> [EnumCase] {
+    var cases: [EnumCase] = []
+    for member in decl.memberBlock.members {
+      guard let caseDecl = member.decl.as(EnumCaseDeclSyntax.self) else {
+        throw error("only cases are supported in enums in M2", member)
+      }
+      for element in caseDecl.elements {
+        let name = element.name.text
+        if cases.contains(where: { $0.name == name }) {
+          throw error("invalid redeclaration of '\(name)'", element)
+        }
+        if element.rawValue != nil {
+          throw error("raw values are not supported yet", element)
+        }
+        let tag = cases.count
+        var payload: [Field] = []
+        if let params = element.parameterClause?.parameters {
+          for p in params {
+            if p.firstName != nil {
+              throw error("labeled enum payloads are not supported yet", p)
+            }
+            let ty = try resolveType(p.type)
+            if ty.containsClass {
+              throw error("enums with class-typed payloads are not supported yet", p)
+            }
+            payload.append(Field(name: "_\(payload.count)", cName: "c\(tag)_\(payload.count)", ty: ty, mutable: true))
+          }
+        }
+        cases.append(EnumCase(name: name, tag: tag, payload: payload))
+      }
+    }
+    return cases
+  }
+
+  /// Rejects a value type that contains itself by value, which Swift also rejects.
   /// Classes are references, so they may refer to themselves.
-  private func checkRecursion(_ decls: [StructDeclSyntax]) throws {
-    var nodes: [String: StructDeclSyntax] = [:]
-    for d in decls { nodes[d.name.text] = d }
+  private func checkRecursion(_ decls: [(name: String, node: Syntax, types: [Ty])]) throws {
+    var table: [String: (node: Syntax, types: [Ty])] = [:]
+    for d in decls { table[d.name] = (d.node, d.types) }
     var finished = Set<String>()
 
     func visit(_ name: String, _ active: [String]) throws {
       if finished.contains(name) { return }
-      guard let info = structs[name], let node = nodes[name] else { return }
+      guard let entry = table[name] else { return }
       if active.contains(name) {
-        throw error("value type '\(name)' has infinite size", node)
+        throw error("value type '\(name)' has infinite size", entry.node)
       }
-      for field in info.fields {
-        if let child = valueStructName(field.ty) {
+      for ty in entry.types {
+        if let child = valueName(ty) {
           try visit(child, active + [name])
         }
       }
@@ -229,14 +291,16 @@ final class Lowerer {
     }
 
     for d in decls {
-      try visit(d.name.text, [])
+      try visit(d.name, [])
     }
   }
 
-  private func valueStructName(_ ty: Ty) -> String? {
+  private func valueName(_ ty: Ty) -> String? {
     switch ty {
-    case .structure(let name), .optional(.structure(let name)): return name
-    default: return nil
+    case .structure(let name), .enumeration(let name), .optional(.structure(let name)), .optional(.enumeration(let name)):
+      return name
+    default:
+      return nil
     }
   }
 
@@ -291,11 +355,15 @@ final class Lowerer {
       guard let initializer = binding.initializer?.value else {
         throw error("variables need an initial value in M2", binding)
       }
-      var value = try lowerExpr(initializer)
-      var ty = value.ty
+      var declared: Ty? = nil
       if let annotation = binding.typeAnnotation {
-        ty = try resolveType(annotation.type)
-        value = try coerce(value, to: ty, initializer)
+        declared = try resolveType(annotation.type)
+      }
+      var value = try lowerExpr(initializer, expected: declared)
+      var ty = value.ty
+      if let declared {
+        ty = declared
+        value = try coerce(value, to: declared, initializer)
       }
       if ty == .void {
         throw error("cannot initialize a variable with a value of type 'Void'", initializer)
@@ -346,6 +414,15 @@ final class Lowerer {
     return out
   }
 
+  /// Returns `v` from the current function, releasing owned locals first.
+  private func returnValue(_ v: Expr, _ want: Ty) -> [Stmt] {
+    let drops = releasesForReturn()
+    if drops.isEmpty { return [.ret(v)] }
+    // Evaluate the value before releasing locals, which may release it.
+    let tmp = "r\(nextID())"
+    return [.decl(tmp, want, v)] + drops + [.ret(Expr(kind: .local(tmp), ty: want))]
+  }
+
   private func lowerStmt(_ stmt: StmtSyntax) throws -> [Stmt] {
     if let ret = stmt.as(ReturnStmtSyntax.self) {
       guard let want = returnType else {
@@ -355,12 +432,8 @@ final class Lowerer {
         if want == .void {
           throw error("unexpected non-void return value in void function", value)
         }
-        let v = try own(coerce(lowerExpr(value), to: want, value))
-        let drops = releasesForReturn()
-        if drops.isEmpty { return [.ret(v)] }
-        // Evaluate the value before releasing locals, which may release it.
-        let tmp = "r\(nextID())"
-        return [.decl(tmp, want, v)] + drops + [.ret(Expr(kind: .local(tmp), ty: want))]
+        let v = try own(coerce(lowerExpr(value, expected: want), to: want, value))
+        return returnValue(v, want)
       }
       if want != .void {
         throw error("non-void function should return a value", ret)
@@ -381,12 +454,15 @@ final class Lowerer {
     if let ifExpr = expr.as(IfExprSyntax.self) {
       return try lowerIf(ifExpr)
     }
+    if let sw = expr.as(SwitchExprSyntax.self) {
+      return try lowerSwitch(sw)
+    }
     if let infix = expr.as(InfixOperatorExprSyntax.self), infix.operator.is(AssignmentExprSyntax.self) {
       let (target, ty, mutable) = try lowerTarget(infix.leftOperand)
       if !mutable {
         throw error("cannot assign to value: '\(infix.leftOperand.trimmedDescription)' is a 'let' constant", infix.leftOperand)
       }
-      let value = try own(coerce(lowerExpr(infix.rightOperand), to: ty, infix.rightOperand))
+      let value = try own(coerce(lowerExpr(infix.rightOperand, expected: ty), to: ty, infix.rightOperand))
       return [.assign(target, value, ty)]
     }
     let v = try lowerExpr(expr)
@@ -452,6 +528,107 @@ final class Lowerer {
     return prelude + [.ifs(cond, then, otherwise)]
   }
 
+  /// `switch` over an enum. Each case tests the tag and binds payload values.
+  /// Cases are lowered to a chain of tests; every case must be covered unless
+  /// there is a `default`.
+  private func lowerSwitch(_ node: SwitchExprSyntax) throws -> [Stmt] {
+    let subject = try lowerExpr(node.subject)
+    guard case .enumeration(let enumName) = subject.ty, let info = enums[enumName] else {
+      throw error("switch is supported only over enums in M2, not '\(subject.ty.swiftName)'", node.subject)
+    }
+    let tmp = "t\(nextID())"
+    let prelude: [Stmt] = [.decl(tmp, subject.ty, subject)]
+    let subj = Expr(kind: .local(tmp), ty: subject.ty)
+
+    var covered = Set<Int>()
+    var arms: [(cond: Expr, body: [Stmt])] = []
+    var defaultBody: [Stmt]? = nil
+    for item in node.cases {
+      guard case .switchCase(let sc) = item else {
+        throw error("conditional compilation in switch is not supported", item)
+      }
+      switch sc.label {
+      case .default:
+        defaultBody = try lowerBlock(sc.statements)
+      case .case(let label):
+        guard label.caseItems.count == 1, let caseItem = label.caseItems.first else {
+          throw error("multiple patterns in one case are not supported yet", label)
+        }
+        let (c, bindings) = try enumPattern(caseItem.pattern, info)
+        if covered.contains(c.tag) {
+          throw error("case '\(c.name)' is already handled by a previous case", caseItem)
+        }
+        covered.insert(c.tag)
+
+        scopes.append(Scope())
+        var decls: [Stmt] = []
+        for (index, name) in bindings.enumerated() {
+          guard let name else { continue }
+          let field = c.payload[index]
+          let cName = "l\(nextID())_" + name
+          try declare(name, cName: cName, ty: field.ty, mutable: false, owned: false, caseItem)
+          decls.append(.decl(cName, field.ty, Expr(kind: .field(subj, field.cName), ty: field.ty)))
+        }
+        let body = try lowerBlock(sc.statements)
+        scopes.removeLast()
+        arms.append((Expr(kind: .isCase(subj, c.tag), ty: .bool), decls + body))
+      }
+    }
+
+    if defaultBody == nil && covered.count < info.cases.count {
+      throw error("switch must be exhaustive", node)
+    }
+    // With no `default`, the switch is exhaustive, so the last case needs no test.
+    var tail: [Stmt] = defaultBody ?? []
+    if defaultBody == nil, let last = arms.popLast() {
+      tail = last.body
+    }
+    for arm in arms.reversed() {
+      tail = [.ifs(arm.cond, arm.body, tail)]
+    }
+    return prelude + tail
+  }
+
+  /// Reads a `.case(let a, _)` pattern. Returns the case and one binding name per
+  /// payload value (nil for `_`).
+  private func enumPattern(_ pattern: PatternSyntax, _ info: EnumInfo) throws -> (EnumCase, [String?]) {
+    guard let exprPattern = pattern.as(ExpressionPatternSyntax.self) else {
+      throw error("this pattern is not supported in M2", pattern)
+    }
+    let expr = exprPattern.expression
+    var caseName: String
+    var args: [LabeledExprSyntax] = []
+    if let call = expr.as(FunctionCallExprSyntax.self), let member = call.calledExpression.as(MemberAccessExprSyntax.self) {
+      caseName = member.declName.baseName.text
+      args = Array(call.arguments)
+    } else if let member = expr.as(MemberAccessExprSyntax.self) {
+      caseName = member.declName.baseName.text
+    } else {
+      throw error("only enum case patterns are supported in M2", expr)
+    }
+    guard let c = info.cases.first(where: { $0.name == caseName }) else {
+      throw error("type '\(info.name)' has no member '\(caseName)'", expr)
+    }
+    if args.count != c.payload.count {
+      throw error("enum case '\(caseName)' has \(c.payload.count) associated values; \(args.count) patterns given", expr)
+    }
+    var names: [String?] = []
+    for arg in args {
+      guard let pe = arg.expression.as(PatternExprSyntax.self) else {
+        throw error("only bindings and '_' are supported in case patterns in M2", arg)
+      }
+      if pe.pattern.is(WildcardPatternSyntax.self) {
+        names.append(nil)
+      } else if let value = pe.pattern.as(ValueBindingPatternSyntax.self),
+                let id = value.pattern.as(IdentifierPatternSyntax.self) {
+        names.append(id.identifier.text)
+      } else {
+        throw error("only simple bindings are supported in case patterns in M2", pe)
+      }
+    }
+    return (c, names)
+  }
+
   private func lowerCondition(_ list: ConditionElementListSyntax, _ node: some SyntaxProtocol) throws -> Expr {
     guard list.count == 1, let first = list.first, case .expression(let expr) = first.condition else {
       throw error("only a single boolean condition is supported in M2", node)
@@ -489,7 +666,9 @@ final class Lowerer {
 
   // MARK: - Expressions
 
-  private func lowerExpr(_ expr: ExprSyntax) throws -> Expr {
+  /// `expected` is the type the context wants, when it is known. It is used for
+  /// closures and for implicit enum cases such as `.empty`.
+  private func lowerExpr(_ expr: ExprSyntax, expected: Ty? = nil) throws -> Expr {
     if let lit = expr.as(IntegerLiteralExprSyntax.self) {
       let digits = lit.literal.text.filter { $0 != "_" }
       guard let value = Int64(digits) else {
@@ -505,14 +684,25 @@ final class Lowerer {
     }
     if let ref = expr.as(DeclReferenceExprSyntax.self) {
       let name = ref.baseName.text
-      guard let local = lookup(name) else { throw error("cannot find '\(name)' in scope", ref) }
-      return Expr(kind: .local(local.cName), ty: local.ty)
+      if let local = lookup(name) {
+        return Expr(kind: .local(local.cName), ty: local.ty)
+      }
+      if let f = funcs[name] {
+        return Expr(kind: .funcRef(f), ty: functionType(f))
+      }
+      throw error("cannot find '\(name)' in scope", ref)
     }
     if let tuple = expr.as(TupleExprSyntax.self), tuple.elements.count == 1, let only = tuple.elements.first, only.label == nil {
       // Swift parses `(x)` as a one-element tuple expression.
-      return try lowerExpr(only.expression)
+      return try lowerExpr(only.expression, expected: expected)
+    }
+    if let closure = expr.as(ClosureExprSyntax.self) {
+      return try lowerClosure(closure, expected)
     }
     if let member = expr.as(MemberAccessExprSyntax.self) {
+      if let info = try enumForMember(member, expected) {
+        return try enumCase(info, member.declName.baseName.text, nil, member)
+      }
       guard let base = member.base else {
         throw error("implicit member access is not supported in M2", member)
       }
@@ -557,7 +747,7 @@ final class Lowerer {
       return try binary(op.operator.text, l, r, infix)
     }
     if let call = expr.as(FunctionCallExprSyntax.self) {
-      return try lowerCall(call)
+      return try lowerCall(call, expected: expected)
     }
     throw error("this expression is not supported in M2", expr)
   }
@@ -602,47 +792,76 @@ final class Lowerer {
     }
   }
 
-  private func lowerCall(_ call: FunctionCallExprSyntax) throws -> Expr {
+  private func lowerCall(_ call: FunctionCallExprSyntax, expected: Ty?) throws -> Expr {
     guard call.trailingClosure == nil, call.additionalTrailingClosures.isEmpty else {
       throw error("trailing closures are not supported in M2", call)
     }
-    guard let callee = call.calledExpression.as(DeclReferenceExprSyntax.self) else {
-      throw error("only calls to named functions are supported in M2", call)
-    }
-    let name = callee.baseName.text
+    let callee = call.calledExpression
 
-    var args: [ArgInput] = []
-    for arg in call.arguments {
-      args.append(ArgInput(label: arg.label?.text, value: try lowerExpr(arg.expression), node: arg))
-    }
-
-    if let f = funcs[name] {
-      let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
-      return Expr(kind: .call(f, values), ty: f.ret, owned: true)
-    }
-
-    if name == "print" {
-      guard args.count == 1, args[0].label == nil else {
-        throw error("print takes exactly one unlabeled argument in M2", call)
+    if let ref = callee.as(DeclReferenceExprSyntax.self) {
+      let name = ref.baseName.text
+      if let local = lookup(name) {
+        guard case .function(let params, let ret) = local.ty else {
+          throw error("cannot call value of non-function type '\(local.ty.swiftName)'", ref)
+        }
+        return try callValue(Expr(kind: .local(local.cName), ty: local.ty), params, ret, call)
       }
-      let v = args[0].value
-      guard v.ty == .int || v.ty == .bool else {
-        throw error("print is supported for Int and Bool only in M2", args[0].node.expression)
+      if let f = funcs[name] {
+        let args = try lowerArgs(call, f.params.map { $0.ty })
+        let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
+        return Expr(kind: .call(f, values), ty: f.ret, owned: true)
       }
-      return Expr(kind: .print(v), ty: .void)
+      if name == "print" {
+        let args = try lowerArgs(call, nil)
+        guard args.count == 1, args[0].label == nil else {
+          throw error("print takes exactly one unlabeled argument in M2", call)
+        }
+        let v = args[0].value
+        guard v.ty == .int || v.ty == .bool else {
+          throw error("print is supported for Int and Bool only in M2", args[0].node.expression)
+        }
+        return Expr(kind: .print(v), ty: .void)
+      }
+      if let s = structs[name] {
+        let args = try lowerArgs(call, s.fields.map { $0.ty })
+        let values = try matchArguments(name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
+        return Expr(kind: .structLit(s, values), ty: .structure(name))
+      }
+      if let c = classes[name] {
+        let args = try lowerArgs(call, c.fields.map { $0.ty })
+        let values = try matchArguments(name, c.fields.map { (Optional($0.name), $0.ty) }, args, call)
+        return Expr(kind: .construct(c, values), ty: .cls(name), owned: true)
+      }
+      throw error("cannot find '\(name)' in scope", ref)
     }
 
-    if let s = structs[name] {
-      let values = try matchArguments(name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
-      return Expr(kind: .structLit(s, values), ty: .structure(name))
+    if let member = callee.as(MemberAccessExprSyntax.self), let info = try enumForMember(member, expected) {
+      return try enumCase(info, member.declName.baseName.text, call, member)
     }
 
-    if let c = classes[name] {
-      let values = try matchArguments(name, c.fields.map { (Optional($0.name), $0.ty) }, args, call)
-      return Expr(kind: .construct(c, values), ty: .cls(name), owned: true)
+    let value = try lowerExpr(callee)
+    guard case .function(let params, let ret) = value.ty else {
+      throw error("cannot call value of non-function type '\(value.ty.swiftName)'", callee)
     }
+    return try callValue(value, params, ret, call)
+  }
 
-    throw error("cannot find '\(name)' in scope", callee)
+  private func callValue(_ callee: Expr, _ params: [Ty], _ ret: Ty, _ call: FunctionCallExprSyntax) throws -> Expr {
+    let args = try lowerArgs(call, params)
+    let values = try matchArguments("function value", params.map { (nil, $0) }, args, call)
+    return Expr(kind: .callPtr(callee, values), ty: ret, owned: true)
+  }
+
+  /// Lowers call arguments, passing each parameter's type as the expected type
+  /// so that closures and implicit enum cases can be written inline.
+  private func lowerArgs(_ call: FunctionCallExprSyntax, _ types: [Ty]?) throws -> [ArgInput] {
+    var out: [ArgInput] = []
+    for (i, arg) in call.arguments.enumerated() {
+      var expected: Ty? = nil
+      if let types, i < types.count { expected = types[i] }
+      out.append(ArgInput(label: arg.label?.text, value: try lowerExpr(arg.expression, expected: expected), node: arg))
+    }
+    return out
   }
 
   private func matchArguments(
@@ -663,6 +882,105 @@ final class Lowerer {
       values.append(try own(coerce(arg.value, to: ty, arg.node.expression)))
     }
     return values
+  }
+
+  /// The enum named by `member`'s base (`Shape.circle`) or implied by the expected
+  /// type (`.circle`), if the member refers to an enum case.
+  private func enumForMember(_ member: MemberAccessExprSyntax, _ expected: Ty?) throws -> EnumInfo? {
+    if let base = member.base {
+      if let ref = base.as(DeclReferenceExprSyntax.self), lookup(ref.baseName.text) == nil,
+         let info = enums[ref.baseName.text] {
+        return info
+      }
+      return nil
+    }
+    if case .enumeration(let name)? = expected, let info = enums[name] {
+      return info
+    }
+    return nil
+  }
+
+  private func enumCase(_ info: EnumInfo, _ caseName: String, _ call: FunctionCallExprSyntax?, _ node: some SyntaxProtocol) throws -> Expr {
+    guard let c = info.cases.first(where: { $0.name == caseName }) else {
+      throw error("type '\(info.name)' has no member '\(caseName)'", node)
+    }
+    let payloadTypes = c.payload.map { $0.ty }
+    var values: [Expr] = []
+    if let call {
+      let args = try lowerArgs(call, payloadTypes)
+      values = try matchArguments(caseName, payloadTypes.map { (nil, $0) }, args, call)
+    } else if !c.payload.isEmpty {
+      throw error("enum case '\(caseName)' requires \(c.payload.count) associated values", node)
+    }
+    return Expr(kind: .enumCase(info, c.tag, values), ty: .enumeration(info.name))
+  }
+
+  // MARK: - Closures
+
+  /// Lowers a closure with no captures to a generated function. The closure's
+  /// type comes from the context, so it must be known.
+  private func lowerClosure(_ closure: ClosureExprSyntax, _ expected: Ty?) throws -> Expr {
+    guard let expected, case .function(let paramTypes, let ret) = expected else {
+      throw error("a closure needs a contextual function type in M2", closure)
+    }
+    let id = nextID()
+    var names: [String] = []
+    if let clause = closure.signature?.parameterClause {
+      switch clause {
+      case .simpleInput(let list):
+        names = list.map { $0.name.text }
+      case .parameterClause(let pc):
+        names = pc.parameters.map { ($0.secondName ?? $0.firstName).text }
+      }
+    } else {
+      names = (0..<paramTypes.count).map { "$\($0)" }
+    }
+    if names.count != paramTypes.count {
+      throw error("closure takes \(names.count) parameters but the context expects \(paramTypes.count)", closure)
+    }
+    let params = names.enumerated().map { index, name in
+      Param(label: nil, name: name, cName: "p\(id)_\(index)", ty: paramTypes[index])
+    }
+    let info = FuncInfo(name: "closure", cName: "cl\(id)", params: params, ret: ret)
+
+    // Lower the body with only the closure's own parameters in scope.
+    let savedScopes = scopes
+    let savedReturn = returnType
+    defer {
+      scopes = savedScopes
+      returnType = savedReturn
+    }
+    var root = Scope()
+    for p in params {
+      root.vars[p.name] = Local(cName: p.cName, ty: p.ty, mutable: false)
+      if p.ty.isClassLike { root.owned.append((cName: p.cName, ty: p.ty)) }
+    }
+    scopes = [root, Scope()]
+    returnType = ret
+
+    var stmts: [Stmt] = []
+    let items = Array(closure.statements)
+    for (index, item) in items.enumerated() {
+      if index == items.count - 1, ret != .void, case .expr(let e) = item.item {
+        // A single expression in a closure with a result is its return value.
+        let v = try own(coerce(lowerExpr(e, expected: ret), to: ret, e))
+        stmts += returnValue(v, ret)
+        continue
+      }
+      switch item.item {
+      case .decl(let decl): stmts += try lowerDecl(decl)
+      case .stmt(let stmt): stmts += try lowerStmt(stmt)
+      case .expr(let expr): stmts += try lowerExprStmt(expr)
+      }
+    }
+    stmts += releases(of: scopes[1])
+    stmts += releases(of: scopes[0])
+    if ret != .void && !alwaysReturns(stmts) {
+      throw error("missing return in closure expected to return '\(ret.swiftName)'", closure)
+    }
+    info.body = stmts
+    allFuncs.append(info)
+    return Expr(kind: .funcRef(info), ty: expected)
   }
 
   // MARK: - Ownership and conversions
@@ -698,6 +1016,16 @@ final class Lowerer {
     return field
   }
 
+  private func functionType(_ f: FuncInfo) -> Ty {
+    let ty = Ty.function(f.params.map { $0.ty }, f.ret)
+    registerFunctionType(ty)
+    return ty
+  }
+
+  private func registerFunctionType(_ ty: Ty) {
+    if !functionTypes.contains(ty) { functionTypes.append(ty) }
+  }
+
   private func resolveType(_ type: TypeSyntax) throws -> Ty {
     if let opt = type.as(OptionalTypeSyntax.self) {
       let inner = try resolveType(opt.wrappedType)
@@ -708,6 +1036,13 @@ final class Lowerer {
       if !optionals.contains(ty) { optionals.append(ty) }
       return ty
     }
+    if let fn = type.as(FunctionTypeSyntax.self) {
+      let params = try fn.parameters.map { try resolveType($0.type) }
+      let ret = try resolveType(fn.returnClause.type)
+      let ty = Ty.function(params, ret)
+      registerFunctionType(ty)
+      return ty
+    }
     guard let id = type.as(IdentifierTypeSyntax.self) else {
       throw error("this type is not supported in M2", type)
     }
@@ -715,9 +1050,11 @@ final class Lowerer {
     switch name {
     case "Int": return .int
     case "Bool": return .bool
+    case "Void": return .void
     default:
       if structs[name] != nil { return .structure(name) }
       if classes[name] != nil { return .cls(name) }
+      if enums[name] != nil { return .enumeration(name) }
       throw error("cannot find type '\(name)' in scope", type)
     }
   }

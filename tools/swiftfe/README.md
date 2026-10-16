@@ -15,7 +15,7 @@ tests/run.sh                                                   # end-to-end test
 Diagnostics are printed as `file:line:col: error: message`. Exit status is 0 on
 success, 1 on compile errors or check failures, and 2 on usage errors.
 
-## M2: classes, ARC and Optional
+## M2: classes, ARC, Optional, enums and closures
 
 Adds to M1:
 - classes with stored properties, memberwise construction, and reference semantics
@@ -23,6 +23,12 @@ Adds to M1:
   last reference goes away. Object fields are released when the object is destroyed.
 - Optional types `T?` for Int, Bool, structs and classes: `nil`, implicit wrapping,
   `x!` (traps on nil), `if let`, and `== nil` / `!= nil`
+- enums with associated values (`case rect(Int, Int)`), constructed as `Shape.rect(3, 4)`
+  or `.rect(3, 4)` when the type is known, and matched with `switch` (exhaustive
+  unless there is a `default`)
+- function types `(Int) -> Int`, named functions as values, and non-capturing closures
+  (`{ $0 * 3 }`, `{ (n: Int) -> Int in n + 1 }`). A closure needs a known function type
+  from its context: a declared type, a parameter type, or an assignment target.
 
 Ownership model (documented in `Lower.swift`):
 - Owned locals and parameters are released at the end of their block or function,
@@ -31,13 +37,17 @@ Ownership model (documented in `Lower.swift`):
 - Top-level variables are never released, so their `deinit` does not run before exit.
 - Assignment retains the new value before releasing the old one.
 
+Closures do not capture: an outer local used inside a closure is reported as not in scope.
+
 Not yet supported in M2 (each gives a diagnostic):
 - member access, `!`, or `== nil` on a temporary class value, e.g. `make().x`
-- structs with class-typed properties
-- enums with associated values, closures, `while let`, class inheritance and methods
+- structs with class-typed properties, and enums with class-typed payloads
+- labeled enum payloads, raw values, `while let`, class inheritance and methods
+- switching over a value other than an enum, and multiple patterns in one case
 
 Verified with AddressSanitizer and LeakSanitizer on the ARC cases: no leaks and no
-undefined behaviour.
+undefined behaviour. The enum and closure cases are also clean under AddressSanitizer
+and UBSan.
 
 ## M0: parsing
 
