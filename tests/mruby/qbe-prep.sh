@@ -340,6 +340,20 @@ EOF
 both alloca
 expect alloca+c out 'char *p = __builtin_alloca(n);'
 expect alloca+c out '(__builtin_alloca (n + 1))'
+cat >"$tmp/edge/bare_return.c" <<'EOF'
+struct E { };
+typedef struct E ET;
+typedef void VT;
+typedef VT VT2;
+extern void exit(int);
+ET f(int x) { if (x == 2) { exit(1); { return; } } return (ET){}; }
+VT g(int x) { if (x) return; }
+VT2 h(int x) { if (x) return; }
+void *k(int x) { if (x) return; return 0; }
+EOF
+both bare_return
+expect bare_return+c out 'return (ET){};'
+expect bare_return+c out 'return (void *){};'
 cat >"$tmp/edge/ldlits.c" <<'EOF'
 double a = ((double)2.2250738585072014e-308L);
 float b = ((float)1.5L);
@@ -471,7 +485,8 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
   tap_dir builtins; n=0
   for f in "$root"/tests/builtins/*.cpp; do
     dialect=$(sed -n 's,^// DIALECT: *\(.*\),\1,p' "$f" | head -1)
-    par build "$root/nfcxx" --gnu-version=130000 ${dialect:+--dialect=$dialect} "$f" -o "$tmp/bin/b$n"; n=$((n + 1))
+    gnuver=$(sed -n 's,^// GNU-VERSION: *\([0-9]*\).*,\1,p' "$f" | head -1)
+    par build "$root/nfcxx" --gnu-version=${gnuver:-130000} ${dialect:+--dialect=$dialect} "$f" -o "$tmp/bin/b$n"; n=$((n + 1))
   done; wait
   corpus builtins "$n"
   tap_dir lib; n=0

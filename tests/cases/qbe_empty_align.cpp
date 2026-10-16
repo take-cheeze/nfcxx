@@ -3,7 +3,7 @@
 // (_Empty_byte). QBE gave an empty class no alignment (-1), so a struct made of an empty member and a bool got a size of 8 and
 // its 16-byte return value (the optional) came back in RAX only: the engaged flag read whatever RDX held. A nullopt then looked
 // engaged, and an optional whose value is set could look empty. Returns 0 when has_value is right on both paths
-// (scripts/qbe-empty-align.patch, docs/notes/qbe-empty-align.md).
+// (the fork commit 'nfcxx patch: empty-align', docs/notes/qbe-empty-align.md).
 #include <optional>
 
 __attribute__((noinline)) std::optional<long> maybe(bool s) {

@@ -85,10 +85,12 @@ mismatches: 0 of 2069793, guard writes: 0 of 64
 ## 5. Testbed, in order
 
 1. Done: oneAPI vector-add (`tests/gpu/sycl/`), SPIR-V path verified on the XPU.
-2. Next: **fill** (F32) as the first ggml op. The source is `tests/gpu/ggml/fill_kernel.cpp` (the oracle, already passing) and
-   the real `fill.cpp`. Steps: the rewrite learns `nd_range<1>`/`nd_item`, scalar captures and a template instantiation
-   (`fill_kernel<float>`); the host side is a `lib/sycl/` header with `queue`/USM over OpenCL; the check is the test_fill
-   shape. F16 follows once `sycl::half` is in the header.
-3. Then `diag` (F32, `diag.cpp`, 67 lines, `test_diag`), and the unary ops from `element_wise.cpp` (after the template
+2. Done for the oracle: `tests/gpu/ggml/fill_kernel.cpp` (the F32 fill kernel and its `nd_range` launch) builds with
+   `scripts/sycl-build.sh` and passes on the Arc B60 through both OpenCL and Level Zero (2,069,793 elements, 64 guard
+   slots, the value + 1 mutant caught; `tests/gpu/ggml/run.sh`). The upstream subset already has `nd_range`, `nd_item`
+   and the USM calls this needs, so the custom rewrite is not on this path.
+3. Next: the real `fill.cpp` through nfcxx (its 762-header closure, and the template kernel `fill_kernel<T>` with a `void *`
+   capture cast), then F16 (`sycl::half`), then the test_fill shape from `test-backend-ops`.
+4. Then `diag` (F32, `diag.cpp`, 67 lines, `test_diag`), and the unary ops from `element_wise.cpp` (after the template
    and scalar-capture work).
-4. Last: the whole `test-backend-ops` SYCL run, which needs the backend itself (the full `ggml-sycl.cpp`) built by nfcxx.
+5. Last: the whole `test-backend-ops` SYCL run, which needs the backend itself (the full `ggml-sycl.cpp`) built by nfcxx.

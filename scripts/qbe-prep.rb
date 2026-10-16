@@ -32,9 +32,15 @@
 #     prototypes. `fabsl` is not mapped: cproc has no `long double`.
 #   * `__builtin_popcount{,l,ll}`, `__builtin_ctz{,l,ll}`, `__builtin_clz{,ll}` become helper functions
 #     (like `__builtin_clzl` above). For a zero argument ctz and clz return the width; GCC leaves that undefined.
+#   * GCC 14's type-generic `__builtin_{clz,ctz,popcount,parity}g(x[, d])` become `__nfcxx_*g` calls with x zero-extended,
+#     the width of x (sizeof) and d, so one helper serves every unsigned type. With one argument a zero input gives the
+#     width (as above); with two it gives d. Only the call shape is rewritten (see G_OPS).
 #   * Sized atomics `__atomic_{load,store,exchange,compare_exchange,fetch_OP,OP_fetch}_{1,2,4,8}` (what
 #     libstdc++'s std::atomic calls) get prototypes for the libatomic functions of the same name. The QBE
 #     link adds -latomic (scripts/qbe-cc). The 16-byte forms are left alone; they need __int128.
+#   * A bare `return;` in a function whose return type is not void (EDG's cleanup code after a call to exit, which
+#     never runs; cproc: "expected primary expression"). It becomes `return (T){};`, a zero value of the return type.
+#     The void types are the names of `typedef void` (bare_return_edits, void_typedefs).
 #   * `__asm__(".align 2");` alignment hints (anywhere): dropped, as the old sed did. The hint
 #     only matters to EDG's own output, and it is not a semantic change.
 #   * Top-level `__asm__("...")` statements (not declarator labels) are removed from the C and
@@ -728,6 +734,18 @@ OV_TYPES = [['int', 'i', 'unsigned int'], ['unsigned int', 'u', nil], ['long', '
 OV_BAD = '__nfcxx_overflow_unsupported_operand_types'
 OV_OPS = {'__builtin_add_overflow' => 'add', '__builtin_sub_overflow' => 'sub', '__builtin_mul_overflow' => 'mul'}
 
+# GCC 14 type-generic bit builtins: name => operation. The helper takes (unsigned long long x, int bits, int d): x is
+# masked to `bits` (the width of the argument's type), and d is the result for a zero input.
+G_OPS = {'__builtin_clzg' => 'clz', '__builtin_ctzg' => 'ctz', '__builtin_popcountg' => 'popcount',
+         '__builtin_parityg' => 'parity'}
+G_MASK = 'unsigned long long m = bits == 64 ? (unsigned long long)-1 : (1ULL << bits) - 1; x &= m;'
+G_BODY = {
+  'clz' => 'if (x == 0) return d; int n = 0; while (!(x >> 63)) { x <<= 1; ++n; } return n - (64 - bits);',
+  'ctz' => 'if (x == 0) return d; int n = 0; while (!(x & 1)) { x >>= 1; ++n; } return n;',
+  'popcount' => 'int n = 0; while (x) { x &= x - 1; ++n; } return n;',
+  'parity' => 'int n = 0; while (x) { x &= x - 1; ++n; } return n & 1;',
+}
+
 # [name, definition] of the overflow helper for OP on type T; U is the unsigned counterpart of a signed T.
 def ov_helper(op, t, suf, u)
   name = "__nfcxx_#{op}ov_#{suf}"
@@ -1045,6 +1063,78 @@ def weak_function_names(tk)
   names
 end
 
+# Return type text of the function whose body opens at token brace (a file-scope `{` after the parameter list of
+# a declaration that starts at token decl), or nil when that `{` opens no function body. The type is the tokens
+# before the name, without __attribute__ groups and storage-class words.
+FN_DECL_SKIP = %w[static extern inline __inline __inline__]
+def function_return_type(tk, decl, brace)
+  return nil unless tk.punct?(brace - 1, ')')
+  lp = match_back(tk, brace - 1, '(', ')')
+  return nil if lp < 1 || tk.code(lp - 1) != ID_CODE
+  name = lp - 1
+  words = []
+  k = decl
+  while k < name
+    if tk.id?(k, '__attribute__') && tk.punct?(k + 1, '(')
+      k = match_fwd(tk, k + 1, '(', ')') + 1
+      next
+    end
+    words << tk.text(k) unless tk.code(k) == ID_CODE && FN_DECL_SKIP.include?(tk.text(k))
+    k += 1
+  end
+  words.empty? ? nil : words.join(' ')
+end
+
+# Names of the typedefs of void (`typedef void T;`, or of another such name): a function returning one is void.
+def void_typedefs(tk)
+  names = {}
+  n = tk.size
+  changed = true
+  while changed
+    changed = false
+    (0...n - 3).each do |i|
+      next unless tk.id?(i, 'typedef') && tk.punct?(i + 3, ';') && tk.code(i + 2) == ID_CODE
+      next if names.key?(tk.text(i + 2))
+      base = tk.text(i + 1)
+      next unless base == 'void' || names.key?(base)
+      names[tk.text(i + 2)] = true
+      changed = true
+    end
+  end
+  names
+end
+
+# A bare `return;` in a function whose return type is not void: C makes it a constraint violation (gcc only
+# warns) and cproc rejects it ("expected primary expression"). EDG emits one in the cleanup code after a call that
+# does not return (exit), which never runs. It becomes `return (T){};`, a zero value of the return type: cproc
+# accepts that for scalars, pointers and structs (`(T){0}` crashes it for an empty struct).
+def bare_return_edits(tk)
+  edits = []
+  n = tk.size
+  voids = void_typedefs(tk)
+  decl = 0  # first token of the current file-scope declaration
+  i = 0
+  while i < n
+    if tk.punct?(i, ';') && tk.depth(i) == 0
+      decl = i + 1
+    elsif tk.punct?(i, '{') && tk.depth(i) == 0
+      close = match_fwd(tk, i, '{', '}')
+      break if close < 0
+      ret = function_return_type(tk, decl, i)
+      if ret && ret != 'void' && !voids.key?(ret)
+        (i + 1...close).each do |k|
+          next unless tk.id?(k, 'return') && tk.punct?(k + 1, ';')
+          edits << [tk.start(k), tk.stop(k), "return (#{ret}){}"]
+        end
+      end
+      i = close
+      decl = close + 1
+    end
+    i += 1
+  end
+  edits
+end
+
 # Python: re.fullmatch(r'(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?[lL]', text) and re.search(r'[.eE]', text)
 def long_double_literal?(text)
   n = text.bytesize
@@ -1130,7 +1220,7 @@ end
 # goes into testing each token against each rewrite.
 SPECIAL_ID = {}
 (['typedef', '__attribute__', '__asm__', '__asm', 'alloca', '__builtin_mul_overflow'] + VOLATILE_QUALS +
- LIBC_BUILTINS.keys + HELPER_BUILTINS.keys + OV_OPS.keys + FLOAT_TYPE.keys).each { |k| SPECIAL_ID[k] = true }
+ LIBC_BUILTINS.keys + HELPER_BUILTINS.keys + OV_OPS.keys + G_OPS.keys + FLOAT_TYPE.keys).each { |k| SPECIAL_ID[k] = true }
 
 def main(argv)
   c_input = false
@@ -1146,6 +1236,7 @@ def main(argv)
   n = tk.size
   edits = []  # [start, end, replacement]
   tail = []   # assembly directives, in source order
+  edits.concat(bare_return_edits(tk))
   weak = weak_function_names(tk)
   weak_marked = {}
   ctors = []  # constructor functions, in source order
@@ -1366,6 +1457,18 @@ def main(argv)
       elsif nm == '__builtin_mul_overflow' && mulov_const_shape(tk, i + 1)
         edits << [tk.start(i), tk.stop(i), MULOV_NAME]
         prelude[MULOV_NAME] = MULOV_DEF
+      elsif G_OPS.key?(nm) && tk.punct?(i + 1, '(')
+        ranges, rp = split_args(tk, i + 1)
+        want = G_OPS[nm] == 'clz' || G_OPS[nm] == 'ctz' ? [1, 2] : [1]
+        die "qbe-prep: #{nm} expects #{want.join(' or ')} argument(s)" if ranges.nil? || !want.include?(ranges.size)
+        text = ranges.map { |a, b| src.byteslice(tk.start(a), tk.stop(b - 1) - tk.start(a)) }
+        x = text[0]
+        d = text[1] || "sizeof(#{x}) * 8"
+        name = '__nfcxx_' + nm.delete_prefix('__builtin_')
+        prelude[name] = "static int #{name}(unsigned long long x, int bits, int d) { #{G_MASK} #{G_BODY[G_OPS[nm]]} }"
+        edits << [tk.start(i), tk.stop(rp), "#{name}((unsigned long long)(#{x}), sizeof(#{x}) * 8, #{d})"]
+        i = rp + 1
+        next
       elsif OV_OPS.key?(nm) && tk.punct?(i + 1, '(')
         ranges, rp = split_args(tk, i + 1)
         die "qbe-prep: #{nm} expects three arguments" if ranges.nil? || ranges.size != 3
