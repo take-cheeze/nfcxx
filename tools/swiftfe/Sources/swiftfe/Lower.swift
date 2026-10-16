@@ -113,6 +113,8 @@ final class Lowerer {
   private var instEnums: [EnumInfo] = []
   private var pendingDeinits: [PendingDeinit] = []
   private var pendingInits: [PendingInit] = []
+  /// Enclosing loops and switches, innermost last, with the scope depth each one starts at.
+  private var loops: [(depth: Int, isSwitch: Bool)] = []
   private var pendingMethods: [PendingMethod] = []
   /// True while lowering an initializer body, where `self` may be assigned.
   private var initializingSelf = false
@@ -581,7 +583,30 @@ final class Lowerer {
         return try lowerWhileLet(binding, loop)
       }
       let cond = try lowerCondition(loop.conditions, loop)
+      loops.append((scopes.count, false))
+      defer { loops.removeLast() }
       return [.whiles(cond, try lowerBlock(loop.body.statements))]
+    }
+    if let loop = stmt.as(ForStmtSyntax.self) {
+      return try lowerForIn(loop)
+    }
+    if let g = stmt.as(GuardStmtSyntax.self) {
+      return try lowerGuard(g)
+    }
+    if stmt.is(BreakStmtSyntax.self) {
+      guard let target = loops.last else {
+        throw error("'break' is only allowed inside a loop or switch", stmt)
+      }
+      if target.isSwitch {
+        throw error("'break' inside a switch is not supported yet", stmt)
+      }
+      return loopExitReleases(from: target.depth) + [.brk]
+    }
+    if stmt.is(ContinueStmtSyntax.self) {
+      guard let target = loops.last(where: { !$0.isSwitch }) else {
+        throw error("'continue' is only allowed inside a loop", stmt)
+      }
+      return loopExitReleases(from: target.depth) + [.cont]
     }
     if let exprStmt = stmt.as(ExpressionStmtSyntax.self) {
       return try lowerExprStmt(exprStmt.expression)
@@ -684,6 +709,111 @@ final class Lowerer {
     }
   }
 
+  /// Releases the owned locals of every scope a break or continue leaves.
+  private func loopExitReleases(from depth: Int) -> [Stmt] {
+    var out: [Stmt] = []
+    for scope in scopes[depth...].reversed() {
+      out += releases(of: scope)
+    }
+    return out
+  }
+
+  /// `for i in a..<b` and `for i in a...b` over Int, lowered to a counting loop.
+  /// The counter advances before the body, so `continue` needs no extra step.
+  private func lowerForIn(_ loop: ForStmtSyntax) throws -> [Stmt] {
+    if loop.whereClause != nil {
+      throw error("a where clause in for-in is not supported yet", loop)
+    }
+    guard let range = loop.sequence.as(InfixOperatorExprSyntax.self),
+          let op = range.operator.as(BinaryOperatorExprSyntax.self),
+          op.operator.text == "..<" || op.operator.text == "..." else {
+      throw error("for-in is supported only over Int ranges (a..<b and a...b) in M2", loop.sequence)
+    }
+    let lo = try lowerExpr(range.leftOperand)
+    let hi = try lowerExpr(range.rightOperand)
+    guard lo.ty == .int, hi.ty == .int else {
+      throw error("range bounds must be Int, not '\(lo.ty.swiftName)' and '\(hi.ty.swiftName)'", range)
+    }
+    let inclusive = op.operator.text == "..."
+    let cur = "t\(nextID())"
+    let end = "t\(nextID())"
+    let curRef = Expr(kind: .local(cur), ty: .int)
+    let prelude: [Stmt] = [.decl(cur, .int, lo), .decl(end, .int, hi)]
+    let cond = Expr(kind: .binary(inclusive ? "<=" : "<", curRef, Expr(kind: .local(end), ty: .int)), ty: .bool)
+
+    loops.append((scopes.count, false))
+    defer { loops.removeLast() }
+    scopes.append(Scope())
+    var iteration: [Stmt] = []
+    if let id = loop.pattern.as(IdentifierPatternSyntax.self) {
+      let name = id.identifier.text
+      let cName = "l\(nextID())_" + name
+      try declare(name, cName: cName, ty: .int, mutable: false, owned: false, loop.pattern)
+      iteration.append(.decl(cName, .int, curRef))
+    } else if !loop.pattern.is(WildcardPatternSyntax.self) {
+      throw error("only a name or _ is supported in for-in in M2", loop.pattern)
+    }
+    let one = Expr(kind: .int(1), ty: .int)
+    iteration.append(.assign(.local(cur), Expr(kind: .binary("+", curRef, one), ty: .int), .int))
+    iteration += try lowerBlock(loop.body.statements)
+    scopes.removeLast()
+    return prelude + [.whiles(cond, iteration)]
+  }
+
+  /// `guard` runs its body when a condition fails, and that body must leave the
+  /// enclosing scope. Bindings it makes stay in scope for the rest of the block.
+  private func lowerGuard(_ g: GuardStmtSyntax) throws -> [Stmt] {
+    var out: [Stmt] = []
+    for condition in g.conditions {
+      // Lowered where the earlier bindings are in scope, since the else body may use them.
+      let elseBody = try lowerBlock(g.body.statements)
+      if !exits(elseBody) {
+        throw error("the body of a guard must leave the enclosing scope", g.body)
+      }
+      switch condition.condition {
+      case .expression(let expr):
+        let test = try lowerBoolExpr(expr)
+        out.append(.ifs(Expr(kind: .prefix("!", test), ty: .bool), elseBody, []))
+      case .optionalBinding(let binding):
+        guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let initializer = binding.initializer?.value else {
+          throw error("unsupported conditional binding", binding)
+        }
+        var opt = try lowerExpr(initializer)
+        guard case .optional(let inner) = opt.ty else {
+          throw error("initializer for conditional binding must have Optional type, not '\(opt.ty.swiftName)'", initializer)
+        }
+        if opt.owned && opt.ty.isClassLike {
+          throw error("binding a temporary class value is not supported yet", initializer)
+        }
+        if opt.owned {
+          let tmp = "t\(nextID())"
+          out.append(.decl(tmp, opt.ty, opt))
+          opt = Expr(kind: .local(tmp), ty: opt.ty)
+        }
+        let isNone = Expr(kind: .prefix("!", Expr(kind: .isSome(opt), ty: .bool)), ty: .bool)
+        out.append(.ifs(isNone, elseBody, []))
+        let name = id.identifier.text
+        let cName = "l\(nextID())_" + name
+        try declare(name, cName: cName, ty: inner, mutable: false, owned: inner.isClassLike, binding)
+        out.append(.decl(cName, inner, own(Expr(kind: .unwrap(opt), ty: inner))))
+      default:
+        throw error("this condition is not supported in M2", condition)
+      }
+    }
+    return out
+  }
+
+  /// True when a block cannot fall through: it ends in a return, break or continue.
+  private func exits(_ stmts: [Stmt]) -> Bool {
+    stmts.contains { stmt in
+      switch stmt {
+      case .ret, .brk, .cont: return true
+      case .ifs(_, let then, let otherwise): return exits(then) && exits(otherwise)
+      default: return false
+      }
+    }
+  }
+
   private func lowerWhileLet(_ binding: OptionalBindingConditionSyntax, _ loop: WhileStmtSyntax) throws -> [Stmt] {
     guard let id = binding.pattern.as(IdentifierPatternSyntax.self), let initializer = binding.initializer?.value else {
       throw error("unsupported conditional binding", binding)
@@ -698,6 +828,8 @@ final class Lowerer {
 
     let tmp = "t\(nextID())"
     let tmpRef = Expr(kind: .local(tmp), ty: opt.ty)
+    loops.append((scopes.count, false))
+    defer { loops.removeLast() }
     scopes.append(Scope())
     let name = id.identifier.text
     let cName = "l\(nextID())_" + name
@@ -717,12 +849,16 @@ final class Lowerer {
   /// there is a `default`.
   private func lowerSwitch(_ node: SwitchExprSyntax) throws -> [Stmt] {
     let subject = try lowerExpr(node.subject)
-    guard case .enumeration(let info) = subject.ty else {
-      throw error("switch is supported only over enums in M2, not '\(subject.ty.swiftName)'", node.subject)
+    var enumInfo: EnumInfo? = nil
+    switch subject.ty {
+    case .enumeration(let info): enumInfo = info
+    case .int, .bool: break
+    default:
+      throw error("switch is supported over enums, Int and Bool in M2, not '\(subject.ty.swiftName)'", node.subject)
     }
     let tmp = "t\(nextID())"
     // A temporary subject owns its references, so the switch scope releases it after
-    // the switch (and on any return from an arm). A place is only copied.
+    // the switch (and on any return or break out of an arm). A place is only copied.
     scopes.append(Scope())
     if subject.owned && subject.ty.isClassLike {
       scopes[scopes.count - 1].owned.append((cName: tmp, ty: subject.ty))
@@ -730,7 +866,11 @@ final class Lowerer {
     let prelude: [Stmt] = [.decl(tmp, subject.ty, subject)]
     let subj = Expr(kind: .local(tmp), ty: subject.ty)
 
-    var covered = Set<Int>()
+    loops.append((scopes.count - 1, true))
+    defer { loops.removeLast() }
+
+    var coveredTags = Set<Int>()
+    var coveredBools = Set<Bool>()
     var arms: [(cond: Expr, body: [Stmt])] = []
     var defaultBody: [Stmt]? = nil
     for item in node.cases {
@@ -741,36 +881,61 @@ final class Lowerer {
       case .default:
         defaultBody = try lowerBlock(sc.statements)
       case .case(let label):
-        guard label.caseItems.count == 1, let caseItem = label.caseItems.first else {
-          throw error("multiple patterns in one case are not supported yet", label)
+        var conds: [Expr] = []
+        var payload: EnumCase? = nil
+        var bindings: [String?] = []
+        for caseItem in label.caseItems {
+          if let info = enumInfo {
+            let (c, names) = try enumPattern(caseItem.pattern, info)
+            if coveredTags.contains(c.tag) {
+              throw error("case '\(c.name)' is already handled by a previous case", caseItem)
+            }
+            coveredTags.insert(c.tag)
+            conds.append(Expr(kind: .isCase(subj, c.tag), ty: .bool))
+            if label.caseItems.count == 1 {
+              payload = c
+              bindings = names
+            } else if names.contains(where: { $0 != nil }) {
+              throw error("bindings are not supported in a case with several patterns yet", caseItem)
+            }
+          } else {
+            conds.append(try literalCondition(caseItem.pattern, subj, &coveredBools))
+          }
         }
-        let (c, bindings) = try enumPattern(caseItem.pattern, info)
-        if covered.contains(c.tag) {
-          throw error("case '\(c.name)' is already handled by a previous case", caseItem)
+        guard let first = conds.first else {
+          throw error("a case needs a pattern", label)
         }
-        covered.insert(c.tag)
+        let cond = conds.dropFirst().reduce(first) { Expr(kind: .logical("||", $0, $1), ty: .bool) }
 
         scopes.append(Scope())
         var decls: [Stmt] = []
-        for (index, name) in bindings.enumerated() {
-          guard let name else { continue }
-          let field = c.payload[index]
-          let cName = "l\(nextID())_" + name
-          // A class payload is retained by its binding, which the arm releases.
-          try declare(name, cName: cName, ty: field.ty, mutable: false, owned: field.ty.isClassLike, caseItem)
-          let read = Expr(kind: .field(subj, field.cName), ty: field.ty)
-          decls.append(.decl(cName, field.ty, own(read)))
+        if let c = payload {
+          for (index, name) in bindings.enumerated() {
+            guard let name else { continue }
+            let field = c.payload[index]
+            let cName = "l\(nextID())_" + name
+            try declare(name, cName: cName, ty: field.ty, mutable: false, owned: false, label)
+            decls.append(.decl(cName, field.ty, Expr(kind: .field(subj, field.cName), ty: field.ty)))
+          }
         }
         let body = try lowerBlock(sc.statements)
-        let armReleases = releases(of: scopes.removeLast())
-        arms.append((Expr(kind: .isCase(subj, c.tag), ty: .bool), decls + body + armReleases))
+        scopes.removeLast()
+        arms.append((cond, decls + body))
       }
     }
 
-    if defaultBody == nil && covered.count < info.cases.count {
-      throw error("switch must be exhaustive", node)
+    if defaultBody == nil {
+      if let info = enumInfo, coveredTags.count < info.cases.count {
+        throw error("switch must be exhaustive", node)
+      }
+      if enumInfo == nil && subject.ty == .int {
+        throw error("switch over Int must have a default case", node)
+      }
+      if subject.ty == .bool && coveredBools.count < 2 {
+        throw error("switch over Bool must cover both true and false, or have a default", node)
+      }
     }
-    // With no `default`, the switch is exhaustive, so the last case needs no test.
+    // With no default, the last case needs no test once every case is covered.
     var tail: [Stmt] = defaultBody ?? []
     if defaultBody == nil, let last = arms.popLast() {
       tail = last.body
@@ -779,6 +944,33 @@ final class Lowerer {
       tail = [.ifs(arm.cond, arm.body, tail)]
     }
     return prelude + tail + releases(of: scopes.removeLast())
+  }
+
+  /// A case pattern over Int or Bool: a literal, or a range of Ints.
+  private func literalCondition(_ pattern: PatternSyntax, _ subj: Expr, _ coveredBools: inout Set<Bool>) throws -> Expr {
+    guard let exprPattern = pattern.as(ExpressionPatternSyntax.self) else {
+      throw error("this pattern is not supported in M2", pattern)
+    }
+    let expr = exprPattern.expression
+    if let range = expr.as(InfixOperatorExprSyntax.self),
+       let op = range.operator.as(BinaryOperatorExprSyntax.self),
+       op.operator.text == "..<" || op.operator.text == "..." {
+      guard subj.ty == .int else { throw error("ranges in a case pattern need an Int subject", expr) }
+      let lo = try lowerExpr(range.leftOperand)
+      let hi = try lowerExpr(range.rightOperand)
+      guard lo.ty == .int, hi.ty == .int else { throw error("range bounds must be Int", expr) }
+      let lower = Expr(kind: .binary("<=", lo, subj), ty: .bool)
+      let upper = Expr(kind: .binary(op.operator.text == "..." ? "<=" : "<", subj, hi), ty: .bool)
+      return Expr(kind: .logical("&&", lower, upper), ty: .bool)
+    }
+    let value = try lowerExpr(expr)
+    guard value.ty == subj.ty else {
+      throw mismatch(expected: subj.ty, actual: value.ty, expr)
+    }
+    if case .bool(let b) = value.kind {
+      coveredBools.insert(b)
+    }
+    return Expr(kind: .binary("==", subj, value), ty: .bool)
   }
 
   /// Reads a `.case(let a, _)` pattern. Returns the case and one binding name per

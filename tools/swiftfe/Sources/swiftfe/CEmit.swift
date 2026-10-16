@@ -258,6 +258,8 @@ enum CEmit {
       return "\(indent)while (\(expr(cond))) {\n" + block(body, indent + "  ") + "\(indent)}\n"
     case .brk:
       return "\(indent)break;\n"
+    case .cont:
+      return "\(indent)continue;\n"
     case .release(let name, let ty):
       return "\(indent)\(releaseCode(name, ty))\n"
     }

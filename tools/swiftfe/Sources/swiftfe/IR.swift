@@ -218,6 +218,8 @@ indirect enum Stmt {
   case whiles(Expr, [Stmt])
   /// Leaves the innermost loop. Only `while let` lowering emits it.
   case brk
+  /// Continues the innermost loop.
+  case cont
   /// Drops the reference held by an owned local at scope exit.
   case release(String, Ty)
 }
