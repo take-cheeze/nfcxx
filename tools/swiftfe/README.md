@@ -40,9 +40,10 @@ Ownership model (documented in `Lower.swift`):
 - Top-level variables are never released, so their `deinit` does not run before exit.
 - Assignment retains the new value before releasing the old one.
 
-Closures do not capture: an outer local used inside a closure is reported as not in scope.
-
 Not yet supported in M2 (each gives a diagnostic):
+- closures that capture an outer local: the outer local is reported as not in scope.
+  Capturing needs a context value, which makes function types class-like; that conflicts
+  with the current rule that structs may not hold class-like values, and is not done
 - member access, `!`, or `== nil` on a temporary class value, e.g. `make().x`
 - structs with class-typed properties, or with enum properties that hold a class
 - Optional enums that hold a class are supported only as `E?` values; their `if let` works,
@@ -55,9 +56,10 @@ Not yet supported in M2 (each gives a diagnostic):
 - `while let` over a temporary class value, e.g. `while let n = next(of: m)` where
   `next` returns a class (the binding would have to take the temporary's reference)
 
-`while let x = opt { ... }` is supported for Optional locals, parameters, fields and
-call results. The optional is read again on each iteration, and the binding follows
-the same release rules as `if let`.
+`while let x = opt { ... }` is supported for any Optional expression that is not a
+temporary class value: locals, parameters, fields, and calls returning `Int?` or the
+like. The optional is read again on each iteration, and the binding follows the same
+release rules as `if let`.
 
 Top-level variables are C statics, so they stay reachable until exit. Their objects
 are never freed, and LeakSanitizer does not report them.
