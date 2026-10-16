@@ -427,7 +427,35 @@ class ClosedWorld
   # ownerless_native_dispatch_safe? plus a receiver that includes Kernel, which only a
   # BasicObject subclass lacks (the class may be declared, created or subclassed anywhere).
   def kernel_native_dispatch_safe?(name)
-    return false unless ownerless_native_dispatch_safe?(name)
+    ownerless_native_dispatch_safe?(name) && basic_object_subclass_free?
+  end
+
+  # BLOCK_ITERATOR_DIRECT (ADR 0472): an implicit-self send of `name` reaches mruby's own Kernel Ruby body (defined
+  # in `kernel_file`) for every receiver: no computed definer can install the name, the only outside Ruby source that
+  # spells a definition of it (by name, wherever it sits) is `kernel_file`, which defines it on Kernel alone and
+  # reopens nothing dynamically, and every receiver includes Kernel. Native registrations and the program's own
+  # definitions are the caller's to check.
+  def kernel_ruby_dispatch_safe?(name, kernel_file)
+    return false if @global_refusal || @unknown_defs.include?(name)
+
+    paths = outside_ruby_definer_paths(name)
+    return false unless paths.all? { |path| File.expand_path(path) == File.expand_path(kernel_file.to_s) }
+    unless paths.empty?
+      definers = ForeignDefiners.scan(paths)
+      return false unless definers.wild.empty? && definers.names.all? { |owner, names| owner == 'Kernel' || !names.include?(name) }
+    end
+
+    basic_object_subclass_free?
+  end
+
+  # The outside Ruby sources whose text spells a definition of `name` (foreign_method_names, over-collected).
+  def outside_ruby_definer_paths(name)
+    @outside_ruby_definer_paths ||= {}
+    @outside_ruby_definer_paths[name] ||= Array(@ruby_paths).select { |path| foreign_method_names([path]).include?(name) }
+  end
+
+  # No class of the program, created or subclassed anywhere, lacks Kernel.
+  def basic_object_subclass_free?
     return false if @dynamic_subclassed.include?('BasicObject') || @outside_ruby_supers.include?('BasicObject')
 
     supers = @class_decls.values.flatten.map { |decl| decl[:super] }

@@ -16,7 +16,9 @@ class CodeGen
   # The exact-class test of an unproven receiver, by the class the region's recognizer asked for.
   GUARDED_INLINE_TESTS = {
     'Array' => 'mrb_array_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->array_class',
-    'Hash' => 'mrb_hash_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->hash_class'
+    'Hash' => 'mrb_hash_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->hash_class',
+    # ADR 0472: a Fixnum (a bignum is MRB_TT_BIGINT and takes the send, which runs Integer#times).
+    'Integer' => 'mrb_integer_p(%<r>s)'
   }.freeze
 
   # BC2CPP_GUARDED_BLOCK_INLINE=0 turns the guarded loops off, to measure them against the arms alone.
@@ -31,6 +33,7 @@ class CodeGen
 
   # The class each recognizer asks for (region_receiver?), so the emit loop knows which test a guarded region gets.
   GUARDED_INLINE_PASS_CLASS = {
+    recognize_times_regions: 'Integer',
     recognize_each_regions: 'Array', recognize_each_index_regions: 'Array', recognize_hash_each_regions: 'Hash',
     recognize_hash_each_value_regions: 'Hash', recognize_each_key_regions: 'Hash', recognize_sym_regions: 'Array',
     recognize_collect_regions: 'Array', recognize_accum_regions: 'Array', recognize_sort_regions: 'Array'
