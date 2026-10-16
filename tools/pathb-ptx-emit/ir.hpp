@@ -8,7 +8,8 @@
 
 // Malformed IR text (the Ruby's BadIR, exit status 1).
 struct BadIR : std::runtime_error {
-  using std::runtime_error::runtime_error;
+  explicit BadIR(const std::string &m) : std::runtime_error(m), text(m) {}
+  std::string text;   // the whole message: what() stops at a NUL byte, and a name from the IR may hold one
 };
 
 // A form: a list, or an atom. A string literal is a Str (its decoded bytes); a sigil and a quoted name ($"x", @"x",

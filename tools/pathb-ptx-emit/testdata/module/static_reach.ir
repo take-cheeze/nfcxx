@@ -1,0 +1,4 @@
+(ir-module "t.cu.dev.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "k" (ret void) (params) (body (call void &"f")))
+(function "f" (ret void) (params) (static) (body))
+(function "dead" (ret void) (params) (static) (body))
