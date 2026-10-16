@@ -221,6 +221,68 @@ check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_ni
 check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
            !NilNarrowing.non_nil?(irep_of(ternary), 12, '7', ->(_name) { false }))
 
+puts '-- IS_A_GUARD (host, ADR 0456)'
+# The closed world's answers come from a real ClosedWorld over a declared class K (and a subclass, or a Ruby
+# definition, where a case needs one) and CodeGen#is_a_guard_class / #raise_never_returns? on it. Only the native
+# registration scan (class_test_native_owners?: is_a? and raise are registered on Kernel alone, kernel.c) is
+# stubbed, since it reads a build's native sources.
+require_relative '../../tools/bc2cpp/codegen'
+%w[codegen_receiver_facts codegen_class_narrowing codegen_eqq codegen_return_analysis codegen_block_core_direct
+   rbs_param_check].each { |file| require_relative "../../tools/bc2cpp/#{file}" }
+guard_def = Struct.new(:owner, :name, :irep, :kind)
+guard_for = lambda do |registry: {}, classes: { 'K' => [{ super: :none, outer_nil: true }] }|
+  world = ClosedWorld.new(ireps: {}, registry: registry, class_decls: classes, walked: Set.new, native_paths: [],
+                          ruby_paths: [])
+  gen = CodeGen.allocate
+  gen.instance_variable_set(:@closed_world, world)
+  gen.instance_variable_set(:@registry, registry)
+  gen.instance_variable_set(:@ireps, {})
+  gen.define_singleton_method(:class_test_native_owners?) { |_name| true }
+  RbsParamCheck::IsAGuard.new(gen)
+end
+guard = guard_for.call
+# cmd = f; raise TypeError, "..." unless cmd.is_a?(K); execute(cmd)  -- mrbc's code for the Interpreter's run loop.
+guarded_list = lambda do |klass_load = insn(9, 'GETCONST', "R4\tK"), arg = 'R2'|
+  [insn(0, 'SEND0', "R3\t:f"), insn(3, 'MOVE', "R2\tR3"), insn(6, 'MOVE', "R3\tR2"), klass_load,
+   insn(12, 'SEND', "R3\t:is_a?\tn=1"), insn(16, 'JMPIF', "R3\t29"), insn(20, 'GETCONST', "R4\tTypeError"),
+   insn(23, 'STRING', "R5\tL[0]"), insn(26, 'SSEND', "R3\t:raise\tn=2"), insn(29, 'MOVE', "R4\t#{arg}"),
+   insn(32, 'SSEND', "R3\t:execute\tn=1"), insn(36, 'RETURN', 'R3')]
+end
+instance_k = lambda do |list, idx, reg, with = guard|
+  NilNarrowing.instance_of?(irep_of(list), idx, reg, 'K', nil_free, {}, class_guard: with)
+end
+check.call('`raise ... unless x.is_a?(K)`: the argument copy of x is an instance of K at the call',
+           instance_k.call(guarded_list.call, 10, '4'))
+check.call('`raise ... unless x.is_a?(K)`: the local is an instance of K, and non-nil, after the guard',
+           instance_k.call(guarded_list.call, 9, '2') &&
+             NilNarrowing.non_nil?(irep_of(guarded_list.call), 9, '2', nil_free, {}, class_guard: guard))
+check.call('`raise ... unless x.is_a?(K)`: nothing before the test (negative)', !instance_k.call(guarded_list.call, 4, '2'))
+check.call('a guard on another register proves nothing about the argument (negative)',
+           !instance_k.call(guarded_list.call(insn(9, 'GETCONST', "R4\tK"), 'R1'), 10, '4'))
+check.call('a program that defines is_a? in Ruby refuses (negative)',
+           !instance_k.call(guarded_list.call, 10, '4',
+                            guard_for.call(registry: { 'is_a?' => [guard_def.new('K', 'is_a?', 'k_is_a', :method)] })))
+check.call('a K that is a call result, not a constant, refuses (negative)',
+           !instance_k.call(guarded_list.call(insn(9, 'SEND0', "R4\t:k")), 10, '4'))
+check.call('a K something inherits from refuses (negative)',
+           !instance_k.call(guarded_list.call, 10, '4',
+                            guard_for.call(classes: { 'K' => [{ super: :none, outer_nil: true }],
+                                                      'S' => [{ super: 'K', outer_nil: true }] })))
+check.call('a raise that may return (a Ruby `raise`) leaves the fall-through unproven (negative)',
+           !instance_k.call(guarded_list.call, 10, '4',
+                            guard_for.call(registry: { 'raise' => [guard_def.new('K', 'raise', 'k_raise', :method)] })))
+# if x.is_a?(K) then h(x) end
+if_is_a = [insn(0, 'MOVE', "R3\tR1"), insn(3, 'GETCONST', "R4\tK"), insn(6, 'SEND', "R3\t:is_a?\tn=1"),
+           insn(10, 'JMPNOT', "R3\t20"), insn(14, 'MOVE', "R4\tR1"), insn(17, 'SSEND', "R3\t:h\tn=1"),
+           insn(20, 'RETURN', 'R3')]
+check.call('`if x.is_a?(K)`: the taken arm proves the argument', instance_k.call(if_is_a, 5, '4'))
+check.call('`if x.is_a?(K)`: not after the join (negative)', !instance_k.call(if_is_a, 6, '1'))
+# A jump into the test from elsewhere: the branch no longer reads only the is_a? result.
+joined_is_a = [insn(0, 'JMPNOT', "R2\t13"), insn(4, 'MOVE', "R3\tR1"), insn(7, 'GETCONST', "R4\tK"),
+               insn(10, 'SEND', "R3\t:is_a?\tn=1"), insn(13, 'JMPNOT', "R3\t23"), insn(17, 'MOVE', "R4\tR1"),
+               insn(20, 'SSEND', "R3\t:h\tn=1"), insn(23, 'RETURN', 'R3')]
+check.call('a test another edge also reaches proves nothing (negative)', !instance_k.call(joined_is_a, 6, '4'))
+
 if ENV['MRBC']
   require_relative 'fixture_runtime'
   runtime = Bc2cppFixtureRuntime

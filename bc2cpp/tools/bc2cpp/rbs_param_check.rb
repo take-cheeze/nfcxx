@@ -25,7 +25,9 @@ require_relative 'nil_narrowing'
 #     method whose signature declares that class, the same parameter read from a block through GETUPVAR when the
 #     method never reassigns it, `self` in a method of a class nothing inherits from, or an ivar every store of
 #     which is proven and which no read sees unassigned. A call declared `-> C?` gives "C or nil": the argument
-#     then also needs NIL_NARROWING (nil_narrowing.rb) to prove the register non-nil at the call site.
+#     then also needs NIL_NARROWING (nil_narrowing.rb) to prove the register non-nil at the call site. Before
+#     any of that, an argument that every path proves an instance of exactly the class by a true
+#     `x.is_a?(C)` test (IS_A_GUARD, nil_narrowing.rb and CodeGen#is_a_guard_class) is proven.
 #     Anything else is TC1013 at the call site's file:line.
 #
 # A refused or unverified parameter is removed from the annotation tables, so a type check run (which does not
@@ -36,6 +38,12 @@ module RbsParamCheck
 
   # A reaching definition proven "C or nil" (a `-> C?` call): the use must also be proven non-nil.
   Nilable = Struct.new(:why)
+
+  # IS_A_GUARD's two closed-world answers for NilNarrowing (CodeGen#is_a_guard_class, #raise_never_returns?).
+  IsAGuard = Struct.new(:gen) do
+    def is_a_class(irep, idx) = gen.is_a_guard_class(irep, idx)
+    def raise_never_returns?(irep, idx) = gen.raise_never_returns?(irep, idx)
+  end
 
   module_function
 
@@ -52,7 +60,8 @@ module RbsParamCheck
     ctx = context(loaded, ireps, registry, superclass_of)
     ctx.merge!(ivar_cache: {}, ivar_active: Set.new, nil_cache: {},
                declared: (declared_returns || []).reject(&:hint).to_h { |e| [e.label, e] },
-               nil_unanswerable: ->(name) { constructor_entries.nil_unanswerable?(name) })
+               nil_unanswerable: ->(name) { constructor_entries.nil_unanswerable?(name) },
+               class_guard: IsAGuard.new(constructor_entries))
     ctx.merge!(outside: outside_names, display_root: display_root, call_sites: call_sites, applied: applied,
                class_annotations: class_annotations, comment_class_args: comment_class_args,
                constructor_entries: constructor_entries)
@@ -299,6 +308,7 @@ module RbsParamCheck
   # nil when every definition of `reg` reaching instruction `idx` is proven `cls`, else why not.
   def trace(ctx, irep, idx, reg, cls, depth)
     return 'trace depth' if depth > MAX_DEPTH
+    return nil if guarded?(ctx, irep, idx, reg, cls)
 
     defs, refusal = reaching(irep, idx, reg)
     if defs.nil? || defs.empty?
@@ -317,10 +327,21 @@ module RbsParamCheck
       return why if why
     end
     return nil unless nilable
-    return nil if NilNarrowing.non_nil?(irep, idx, reg, ctx[:nil_unanswerable], ctx[:nil_cache])
+    return nil if NilNarrowing.non_nil?(irep, idx, reg, ctx[:nil_unanswerable], ctx[:nil_cache],
+                                        class_guard: ctx[:class_guard])
 
     "#{nilable.why}, and no test or call nil cannot answer proves R#{reg} non-nil at " \
       "#{display(ctx, irep.file)}:#{irep.instructions[idx].lineno} (NIL_NARROWING)"
+  end
+
+  # IS_A_GUARD (NIL_NARROWING): every path to `idx` passes a true `x.is_a?(cls)` of the value `reg` holds, so it is
+  # an instance of exactly `cls`. is_a_guard_class only names a class nothing inherits from; the `subclassed` check
+  # is the same one the `self` rule makes.
+  def guarded?(ctx, irep, idx, reg, cls)
+    return false if ctx[:subclassed].include?(cls)
+
+    NilNarrowing.instance_of?(irep, idx, reg, cls, ctx[:nil_unanswerable], ctx[:nil_cache],
+                              class_guard: ctx[:class_guard])
   end
 
   # Every definition that can reach `reg` at `idx`, exception edges included (a call inside a `begin`/`rescue`
