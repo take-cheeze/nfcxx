@@ -12,6 +12,17 @@ module DynamicNames
              define_method define_singleton_method alias_method attr attr_reader attr_writer
              attr_accessor].freeze
 
+  class << self
+    # DEFINE_METHOD_LOOPS (ADR 0469): [irep label, index] of each `define_method(n)` loop send the settled
+    # registry defines => the names it installs (DefineMethodSites.loop_sites). Its name is not a literal at
+    # the send, yet every name it can install is known. Empty until bc2cpp.rb sets it after settling.
+    attr_writer :settled_sends
+
+    def settled_sends
+      @settled_sends || {}
+    end
+  end
+
   # A name built from a Symbol literal is already poisoned by the call-site scans (LOADSYM);
   # this adds names a program spells as a string, and, once any name is computed, the setter
   # `stem=` of every stem (the only composition the closed-world lint baseline contains).
@@ -34,6 +45,10 @@ module DynamicNames
         end
         next unless insn.op.include?('SEND') && SENDS.include?(insn.sym)
 
+        if (installed = settled_sends[[irep.label, idx]])
+          stems.merge(installed)
+          next
+        end
         literal = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
                   irep.walk_writers(idx - 1, (insn.reg.to_i + 1).to_s, follow_moves: true) { |w| w.op == 'LOADSYM' }
         computed = true unless literal
