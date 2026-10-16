@@ -137,7 +137,7 @@ module AnnotationContradictions
   def self.ivar_conflicts(signature_ivars, class_layout_raw, ivar_layout, unknown)
     (signature_ivars || {}).each_value.filter_map do |sig|
       name = sig.name.delete_prefix('@')
-      t = sig.type
+      t = sig.type.optional || sig.type # `@x: C?` is checked as C: ClassLayout facts are "C or nil" (ADR 0456)
       inferred = (class_layout_raw[sig.owner] || {})[name]
       embed = (ivar_layout[sig.owner] || {})[name]
       got = if inferred && inferred != unknown then inferred.to_s
@@ -163,7 +163,7 @@ module AnnotationContradictions
   # `array_sites` / `hash_sites` are ArrayElementLayout / HashElementLayout `site_classes`. Rows as ivar_conflicts.
   def self.ivar_element_conflicts(signature_ivars, array_sites, hash_sites)
     (signature_ivars || {}).each_value.filter_map do |sig|
-      t = sig.type
+      t = sig.type.optional || sig.type
       sites = { array: array_sites, hash: hash_sites }[t.kind]
       next unless sites && t.element
 

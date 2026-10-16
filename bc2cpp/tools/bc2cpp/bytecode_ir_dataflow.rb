@@ -23,9 +23,8 @@ module BytecodeIR
   end
 
   # Ops that write at most the register in their leading operand and open no
-  # entry point (ops.h, vm.c); the same audited whitelist as
-  # CodeGen::FIXNUM_PROOF_STEP_OVER_OPS (bc2cpp_bytecode_ir_check.rb keeps them
-  # equal). LOADI* is matched by prefix. Anything else refuses.
+  # entry point (ops.h, vm.c). CodeGen::FIXNUM_PROOF_STEP_OVER_OPS is this
+  # Set (ADR 0476). LOADI* is matched by prefix. Anything else refuses.
   WRITES_LEADING_REG_OPS = Set[
     'NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE',
     'GETGV', 'SETGV', 'GETSV', 'SETSV', 'GETIV', 'SETIV', 'GETCV', 'SETCV',
@@ -137,8 +136,14 @@ module BytecodeIR
       all_preds = through_handlers ? instruction_predecessors(include_handlers: true) : nil
       return refused(refusal, :unresolved) if through_handlers && !all_preds
 
-      live = origin_transfers ? origin_reachable : nil
-      if live
+      pred_lists = predecessor_lists(false)
+      all_pred_lists = all_preds && predecessor_lists(true)
+
+      # Instructions some execution reaches (nil when a handler target does not resolve). A predecessor outside
+      # it supplies no value to a live state, so it is skipped in every mode (ADR 0476). A state that is itself
+      # dead (a dead query, or a walk inside dead code) keeps every predecessor, as before.
+      live = origin_reachable
+      if origin_transfers && live
         # SETUPVAR writes into this frame only from a closure of it, which exists only after a closure-creating op
         # ran: with none reaching the query, opaque_regs cannot supply its value (see ORIGIN_CLOSURE_OPS).
         opaque_regs = nil unless origin_closure_reach.include?(index)
@@ -146,55 +151,65 @@ module BytecodeIR
         return refused(refusal, :no_predecessor) unless live.include?(index)
       end
 
-      guarded = through_handlers ? Set.new : dataflow_handler_addrs
-      seen = Set.new
+      # Per-index flags instead of address sets, and a flat (index, register) work stack: the walk allocates
+      # nothing per state but the seen entry (NUMERIC_FLOW_SPEED's lesson, ADR 0467). The answer is the same.
+      guarded = through_handlers ? nil : dataflow_guarded_at
+      live_at = live && live_flags
+      seen = {}
+      states = 0
       defs = Set.new
-      work = [[index, reg.to_s]]
+      work = [index, reg.to_s]
       until work.empty?
-        i, r = work.pop
-        next unless seen.add?([i, r])
-        return refused(refusal, :state_cap) if seen.size > max_states
-        return refused(refusal, :opaque_reg) if opaque_regs&.include?(r)
-        return refused(refusal, :query_guarded) if guarded.include?(@instructions[i].addr)
+        r = work.pop
+        i = work.pop
+        seen_here = (seen[i] ||= {})
+        next if seen_here.key?(r)
 
-        ps = all_preds ? all_preds[i] : preds[i]
+        seen_here[r] = true
+        states += 1
+        return refused(refusal, :state_cap) if states > max_states
+        return refused(refusal, :opaque_reg) if opaque_regs&.include?(r)
+        return refused(refusal, :query_guarded) if guarded && guarded[i]
+
+        ps = (all_preds ? all_pred_lists : pred_lists)[i]
         return refused(refusal, :no_predecessor) if ps.empty?
 
+        live_here = live_at && live_at[i]
         ps.each do |p|
           if p == ENTRY
             defs << Definition.new(ENTRY, r)
             next
           end
-          # Origin only: a predecessor no execution reaches (a jump left dead after a return) supplies no value.
-          next if live && !live.include?(p)
+          # A predecessor no execution reaches (a jump left dead after a return) supplies no value to a live state.
+          next if live_here && !live_at[p]
 
           insn = @instructions[p].source
           # An origin-only EXCEPT defines its own register on every entry (origin_effect), so its handler
           # edges need not be known for that register.
-          exact_entry = origin_transfers && insn.op == 'EXCEPT' && insn.reg == r
-          return refused(refusal, :query_guarded) if guarded.include?(insn.addr) && !exact_entry
+          return refused(refusal, :query_guarded) if guarded && guarded[p] &&
+                                                     !(origin_transfers && insn.op == 'EXCEPT' && insn.reg == r)
           # A protected JMPUW on a normal edge unwinds through its ensure (vm.c OP_JMPUW): the ensure body runs,
           # then RAISEIF jumps to the target, so that body's writes reach the target by no normal edge. The guard
           # above is off under through_handlers, so refuse here. The JMPUW's handler edge into the ensure stays
           # exact: the JMPUW writes nothing, so the ensure is entered with the values the JMPUW saw.
           return refused(refusal, :unwinding_jump) if insn.op == 'JMPUW' && preds[i].include?(p) &&
-                                                     dataflow_handler_addrs.include?(insn.addr)
+                                                     dataflow_guarded_at[p]
 
           # A handler-only edge may fire before the write completes.
-          work << [p, r] if all_preds && !preds[i].include?(p)
-          effect = origin_transfers ? origin_effect(insn, r) : dataflow_effect(insn, r)
+          work.push(p, r) if all_preds && !preds[i].include?(p)
+          effect = origin_transfers ? origin_effect(insn, r) : effect_of(dataflow_effect_at(p), r)
           case effect
           when :refuse then return refused(refusal, "unmodelled:#{insn.op}")
           when :refuse_enter_shape, :refuse_enter_temp
             return refused(refusal, "unmodelled:ENTER:#{effect.to_s.delete_prefix('refuse_enter_')}")
           when :callee_clobber then return refused(refusal, :callee_frame_clobber)
-          when :pass then work << [p, r]
+          when :pass then work.push(p, r)
           when :define
             if follow_moves && insn.op == 'MOVE'
               source = insn.regs[1]
               return refused(refusal, :move_without_source) unless source
 
-              work << [p, source]
+              work.push(p, source)
             else
               built = insn.op == 'ENTER' ? enter_built_kind(insn, r) : nil
               defs << Definition.new(p, r, built)
@@ -303,6 +318,13 @@ module BytecodeIR
       defs.all? { |d| yield d }
     end
 
+    # Can +insn+ change +reg+ (digits)? The reaching-definitions model: anything but :pass (a write, a callee frame
+    # below the register, an unmodelled op) counts. NIL_NARROWING and the captured-parameter rule read it
+    # (rbs_param_check.rb, nil_narrowing.rb).
+    def may_write?(insn, reg)
+      dataflow_effect(insn, reg.to_s) != :pass
+    end
+
     private
 
     # On the audited list of ops that write at most their leading register.
@@ -312,8 +334,7 @@ module BytecodeIR
     end
 
     # Origin-only transfers (SiteOriginTable's walk; codegen never passes origin_transfers:, so its answers
-    # do not change). Each one follows vm.c for the op. JMPUW writes no register: its ensure unwinding needs
-    # a protected range, and a protected predecessor is refused before this runs. RESCUE a b (vm.c OP_RESCUE)
+    # do not change). Each one follows vm.c for the op. RESCUE a b (vm.c OP_RESCUE)
     # reads R[a] and writes only R[b] (the match result). EXCEPT a (vm.c OP_EXCEPT, :2161-2192) stores the exception
     # or nil into R[a] on every entry and writes no other register, so any other register passes through it to the
     # handler edges into it. Those edges exist only under through_handlers: the normal walk refuses at the handler
@@ -324,7 +345,6 @@ module BytecodeIR
     # argument pass to the entry value, every other slot (and the packed R(1)) refuses.
     def origin_effect(insn, reg, typed_enter: true)
       case insn.op
-      when 'JMPUW' then :pass
       when 'RESCUE'
         second = insn.typed[1]
         second&.kind == :reg && second.value.to_s == reg ? :define : :pass
@@ -396,7 +416,7 @@ module BytecodeIR
       %i[arg rest post hash block local].include?(kind) ? kind : nil
     end
 
-    # Instruction indices reachable from the method entry over normal and handler edges (origin only), or nil
+    # Instruction indices reachable from the method entry over normal and handler edges, or nil
     # when a handler target does not resolve: the edge set is then incomplete, and a predecessor outside it
     # cannot be called dead.
     def origin_reachable
@@ -454,18 +474,42 @@ module BytecodeIR
 
     # :pass (writes nothing relevant), :define (writes +reg+), :callee_clobber
     # (a callee frame at a lower register may overwrite +reg+) or :refuse.
+    # JMPUW writes no register (vm.c OP_JMPUW). Only an ensure whose range
+    # covers it can run code on the way to its target, and a protected
+    # predecessor is refused before this runs (the normal walk's guard, the
+    # through_handlers walk's :unwinding_jump), so one that gets here is a
+    # plain jump (ADR 0476; CodeGen#jmpuw_plain_jump_at? asks the narrower
+    # question for emission).
     def dataflow_effect(insn, reg)
-      op = insn.op
-      return :pass if READS_LEADING_REG_OPS.include?(op)
-      run = BytecodeIR.written_run(insn)
-      return(run.cover?(reg.to_i) ? :define : :pass) if run
-      lead = insn.reg
-      return :callee_clobber if ORIGIN_FRAME_OPS.include?(op) && (lead.nil? || lead.to_i < reg.to_i)
-      return :refuse unless WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
+      effect_of(EffectEntry.for(insn), reg)
+    end
 
-      return :callee_clobber if CALLEE_FRAME_OPS.include?(op) && lead && lead.to_i < reg.to_i
+    # What dataflow_effect needs of one instruction, independent of the register asked about: built once per
+    # instruction for the walk (dataflow_effect_at), on the fly for the other callers.
+    EffectEntry = Struct.new(:pass, :run, :frame, :writes, :callee, :lead, :lead_i) do
+      def self.for(insn)
+        op = insn.op
+        lead = insn.reg
+        new(READS_LEADING_REG_OPS.include?(op) || op == 'JMPUW', BytecodeIR.written_run(insn),
+            ORIGIN_FRAME_OPS.include?(op), WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI'),
+            CALLEE_FRAME_OPS.include?(op), lead, lead&.to_i).freeze
+      end
+    end
 
-      lead == reg ? :define : :pass
+    def effect_of(entry, reg)
+      return :pass if entry.pass
+      return(entry.run.cover?(reg.to_i) ? :define : :pass) if entry.run
+      return :callee_clobber if entry.frame && (entry.lead_i.nil? || entry.lead_i < reg.to_i)
+      return :refuse unless entry.writes
+      return :callee_clobber if entry.callee && entry.lead_i && entry.lead_i < reg.to_i
+
+      entry.lead == reg ? :define : :pass
+    end
+
+    # Filled as the walks reach each instruction: an operand is decoded only when an answer needs it, as before.
+    def dataflow_effect_at(index)
+      (@dataflow_effect_table ||= Array.new(@instructions.length))[index] ||=
+        EffectEntry.for(@instructions[index].source)
     end
 
     # Records the first refusal reason in +refusal+ (when given) and returns nil.
@@ -478,6 +522,29 @@ module BytecodeIR
     # protected ranges (end included, as the Fixnum proof's barrier does).
     def dataflow_handler_addrs
       @dataflow_handler_addrs ||= (handler_target_addrs | handler_protected_addrs(inclusive_end: true)).freeze
+    end
+
+    # instruction_predecessors as frozen Arrays in the same order (the walk only iterates them).
+    def predecessor_lists(include_handlers)
+      @predecessor_lists ||= {}
+      @predecessor_lists[include_handlers] ||= instruction_predecessors(include_handlers: include_handlers)
+                                                .map { |set| set.to_a.freeze }.freeze
+    end
+
+    # dataflow_handler_addrs as a flag per instruction index.
+    def dataflow_guarded_at
+      @dataflow_guarded_at ||= begin
+        addrs = dataflow_handler_addrs
+        @instructions.map { |instruction| addrs.include?(instruction.addr) }.freeze
+      end
+    end
+
+    # origin_reachable as a flag per instruction index (nil when it is nil).
+    def live_flags
+      return @live_flags if defined?(@live_flags)
+
+      live = origin_reachable
+      @live_flags = live && Array.new(@instructions.length) { |i| live.include?(i) }.freeze
     end
   end
 

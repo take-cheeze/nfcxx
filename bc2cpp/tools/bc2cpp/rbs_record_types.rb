@@ -3,6 +3,8 @@
 require 'set'
 require_relative 'record_hash'
 require_relative 'rbs_signatures'
+require_relative 'core_hierarchy_sigs'
+require_relative 'escape_analysis'
 
 # RBS_RECORD_TYPES (docs/adr/0454): an RBS record type on an ivar (`@ui: { battle: Game::Battle, ?win: Window }`)
 # is a CHECKED declaration that feeds the facts RECORD_HASH_PROOF (ADR 0285) produces.
@@ -33,7 +35,13 @@ module RbsRecordTypes
   Result = Struct.new(:verified, :diagnostics, :hints, :readers, keyword_init: true)
   # Hash methods that mutate nothing and hand out no reference to the Hash: a call is a read.
   READ_SENDS = %w[key? has_key? include? member? size length empty? fetch dig].freeze
-  HASH_OWNERS = %w[Hash Object Kernel BasicObject Enumerable].freeze
+  # Kernel/BasicObject truth tests: they read only the receiver's identity (nil? / !).
+  NIL_TESTS = %w[nil? !].freeze
+  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
+  # How deep the interprocedural scan follows the Hash into callees before it calls the use an escape.
+  INTERPROC_DEPTH = 16
+  # Hash's lookup chain (core_hierarchy.rbs); only membership is read.
+  HASH_OWNERS = CoreHierarchySigs.ancestors('Hash')
   BASE_CLASSES = %w[Integer Float String Symbol Array Hash NilClass TrueClass FalseClass Range Proc].freeze
 
   class << self
@@ -136,28 +144,23 @@ module RbsRecordTypes
   # +outside_ivars+: ivar names a native or foreign source spells (outside_ivar_names). +superclass_of+: the
   # registry's class tree. +value_class+: optional ->(irep, idx, reg) { class name or nil } tried after the
   # built-in literal / constructor tracing. +display_root+ shortens the file names of the diagnostics.
+  # +escape_world+: the EscapeAnalysis::World the interprocedural scan resolves callees and capture summaries
+  # with (nil: passing the Hash to any method is an escape).
   def check(loaded, ireps, registry, closed_world:, native_paths:, foreign_paths:, outside_ivars:, superclass_of:,
-            container_constants: nil, value_class: nil, display_root: nil)
+            container_constants: nil, value_class: nil, display_root: nil,
+            escape_world: (EscapeAnalysis.world if EscapeAnalysis.enabled?))
     result = Result.new(verified: {}, diagnostics: loaded.diagnostics.dup, hints: {}, readers: Set.new)
     return result if loaded.decls.empty?
 
     known_owners = registry.values.flatten.map(&:owner).to_set
     by_name = loaded.decls.group_by(&:ivar)
-    refusal = world_refusal(closed_world, native_paths, foreign_paths, outside_ivars)
-    # A compile without the closed world / outside-source picture cannot check anything, and RECORD_HASH_PROOF
-    # itself proves nothing there: the declarations stay unverified (a warning, no facts) instead of failing.
-    if refusal
-      loaded.decls.uniq(&:ivar).each do |d|
-        diag(result.diagnostics, d.loc, 'warning', CODE, "#{d.owner}#@#{d.ivar}: not checked: #{refusal}")
-      end
-      return result
-    end
+    refusal = world_refusal(closed_world)
     poison = (RecordHash::Poison.new(ireps, registry, closed_world, native_paths, foreign_paths) unless refusal)
     refusal ||= poison.global && "reflection in the program (#{poison.global})"
     sites = refusal ? {} : collect_sites(ireps, by_name.keys, poison.readers)
     ctx = { registry: registry, superclass_of: superclass_of, known_owners: known_owners, root: display_root,
             container_constants: container_constants, value_class: value_class, closed_world: closed_world,
-            owner_of: body_owners(ireps, registry) }
+            owner_of: body_owners(ireps, registry), escape_world: escape_world }
     by_name.each do |name, decls|
       errors = []
       decl = decls.first
@@ -191,10 +194,7 @@ module RbsRecordTypes
     result
   end
 
-  def world_refusal(closed_world, native_paths, foreign_paths, outside_ivars)
-    unless closed_world && native_paths && foreign_paths && outside_ivars
-      return 'needs a closed world with native and foreign sources'
-    end
+  def world_refusal(closed_world)
     return "closed world refusal #{closed_world.global_refusal}" if closed_world.global_refusal
 
     nil
@@ -238,7 +238,8 @@ module RbsRecordTypes
   # [[loc, message] errors, RecordHash slot table] for one declared name.
   def verify(name, decl, sites, ctx)
     sites ||= { sets: [], gets: [], calls: [] }
-    scanner = DeclScanner.new(name, sites, nil, ctx[:closed_world], ctx[:registry], decl, ctx[:root])
+    scanner = DeclScanner.new(name, sites, nil, ctx[:closed_world], ctx[:registry], decl, ctx[:root],
+                              escape_world: ctx[:escape_world])
     errors = scanner.run_all
     return [errors, nil] unless errors.empty?
 
@@ -364,7 +365,7 @@ module RbsRecordTypes
   def drive(files, diagnostics, ireps, registry, display_root:, closed_world:, native_paths:, foreign_paths:,
             superclass_of:, container_constants:)
     loaded = load(files, display_root: display_root)
-    outside = (outside_ivar_names(native_paths + foreign_paths) if native_paths && foreign_paths)
+    outside = outside_ivar_names(native_paths + foreign_paths)
     result = check(loaded, ireps, registry, closed_world: closed_world, native_paths: native_paths,
                                             foreign_paths: foreign_paths, outside_ivars: outside,
                                             superclass_of: superclass_of, container_constants: container_constants,
@@ -414,10 +415,14 @@ module RbsRecordTypes
   class DeclScanner < RecordHash::Scanner
     attr_reader :writes, :nil_stores
 
-    def initialize(name, sites, trusted, closed_world, registry, decl, root)
+    def initialize(name, sites, trusted, closed_world, registry, decl, root, escape_world: nil)
       super(name, sites, trusted, closed_world, registry)
       @decl = decl
       @root = root
+      @escape_world = escape_world
+      @analyzer = nil
+      @callee_scans = Set.new # [callee label, parameter register] scanned or being scanned
+      @depth = 0
       @errors = []
       @writes = [] # [keys, irep, index, value register]
       @nil_stores = []
@@ -500,9 +505,130 @@ module RbsRecordTypes
         when 'store' then return store_step(irep, k, insn, state, lead)
         when 'delete' then return declared_delete_step(irep, k, insn, state, lead)
         when *READ_SENDS then return read_step(insn, state, lead)
+        when *NIL_TESTS then return nil_test_step(insn, state, lead)
+        when '!=' then return nil_compare_step(irep, k, insn, state, lead)
         end
       end
+      return nil_test_step(insn, state, lead) if insn.op == 'SEND0' && lead && state.include?(lead) &&
+                                                 NIL_TESTS.include?(insn.sym)
+      return nil_compare_step(irep, k, insn, state, lead) if insn.op == 'EQ' && state.include?(lead)
+      if SEND_OPS.include?(insn.op) && lead
+        unless held_call?(insn, state, lead)
+          # Only a self send's leading register held it: overwritten with self, nothing is passed.
+          return state.include?(lead) ? state.reject { |x| x >= lead }.to_set : super
+        end
+        held = held_positions(insn, state, lead)
+        return call_step(insn, state, lead, held) if held
+      end
       super
+    end
+
+    # A block in a callee that reads the parameter outlives the scan of the callee's own frame: an escape. In
+    # the declaring code a captured read is an alias source of its own (RecordHash::Scanner).
+    def scan_captures(irep, reg)
+      return escape('captured by a block inside a callee') if @depth.positive? && !captured_reads(irep, reg).empty?
+
+      super
+    end
+
+    # `h.nil?` / `!h`: a truth test of the receiver, unless the program or an outside source redefines it where
+    # a Hash can reach it (the same check as update/merge!).
+    def nil_test_step(insn, state, lead)
+      return escape("Hash##{insn.sym} may be redefined") unless native_hash?(insn.sym)
+      return escape("#{insn.sym} arity") unless insn.op == 'SEND0' || plain_args?(insn, 0)
+
+      state.reject { |x| x >= lead }.to_set
+    end
+
+    # `h == nil` (OP_EQ) / `h != nil`: an identity test against a literal nil.
+    def nil_compare_step(irep, k, insn, state, lead)
+      name = insn.op == 'EQ' ? '==' : '!='
+      return escape("Hash##{name} may be redefined") unless native_hash?('==') && native_hash?(name)
+      return escape("#{name} arity") unless insn.op == 'EQ' || plain_args?(insn, 1)
+      return escape("#{name} of the Hash with itself") if state.include?(lead + 1)
+
+      defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1).to_s, through_handlers: true)
+      nil_operand = defs && !defs.empty? && defs.all? { |d| !d.entry? && irep.instructions[d.index].op == 'LOADNIL' }
+      return escape("#{name} against a value other than nil") unless nil_operand
+
+      state.reject { |x| x >= lead }.to_set
+    end
+
+    # Does the send read a register holding the Hash? A self send (SSEND*) only writes self into its leading
+    # register, so the Hash there is dropped, not passed.
+    def held_call?(insn, state, lead)
+      self_send = insn.op.start_with?('SS')
+      hi = read_span(insn, lead)
+      state.any? { |x| x >= lead && x <= hi && !(self_send && x == lead) }
+    end
+
+    # A send that takes the Hash (INTERPROC, docs/adr/0454): not an escape when the Hash is a plain positional
+    # argument and, for every definition the name can reach, ESCAPE_ANALYSIS says the callee keeps none of
+    # those arguments and the callee's parameter, scanned as one more alias of the Hash, passes these same
+    # rules (its key writes join the checked stores). Anything else keeps the base rule (an escape).
+    def call_step(insn, state, lead, held_args)
+      return escape("receiver of #{insn.sym}") if !insn.op.start_with?('SS') && state.include?(lead)
+      return escape("passed to #{insn.sym} with a block") if insn.op.end_with?('B')
+      return escape("passed to #{insn.sym} past the scan depth") if @depth >= INTERPROC_DEPTH
+
+      world = @escape_world or return escape("passed to #{insn.sym} (no escape analysis world)")
+      @analyzer ||= EscapeAnalysis::Analyzer.new(world)
+      callees = world.defs_named(insn.sym)
+      return escape("passed to #{insn.sym}, whose definitions cannot be enumerated") if callees.nil?
+
+      held_args.each do |j|
+        # The Hash is a literal never handed to anything that could extend it: exactly a Hash.
+        next unless @analyzer.name_captures_arg?(insn.sym, j, klass: 'Hash')
+
+        why = if world.native_name?(insn.sym) then 'has a native definition (no audited argument fact)'
+              elsif callees.empty? then 'has no definition'
+              else "may keep argument #{j + 1}"
+              end
+        return escape("passed to #{insn.sym}, which #{why} (ESCAPE_ANALYSIS)")
+      end
+      callees.each do |d|
+        held_args.each { |j| return nil unless callee_ok?(d, j, insn.sym) }
+      end
+      state.reject { |x| x >= lead }.to_set
+    end
+
+    # 0-based positional argument indices that hold the Hash, or nil when it sits anywhere else in the window
+    # (a splat, a keyword, the block) or the argument layout is not a plain count.
+    def held_positions(insn, state, lead)
+      n = %w[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
+      spec = insn.argc_operand
+      return nil if n.nil? || (spec && (spec[1].nil? || spec[1].to_i.positive?))
+
+      block = insn.op.end_with?('B') ? lead + n + 1 : nil
+      return nil if block && state.include?(block)
+
+      found = (1..n).select { |j| state.include?(lead + j) }.map { |j| j - 1 }
+      found.empty? ? nil : found
+    end
+
+    # The parameter of +d+ that receives argument +j+, scanned once per (body, register): a frame being scanned
+    # is assumed to pass (co-inductive), which is sound because any failure in the cycle refuses the declaration.
+    def callee_ok?(d, j, name)
+      label = d.installer ? nil : d.irep
+      callee = label && @escape_world.ireps[label]
+      unless callee
+        escape("passed to #{name}, a definition (#{d.owner}) without a scannable body")
+        return false
+      end
+      fields = callee.enter&.enter_fields || []
+      if fields[4].to_i.positive? || fields[5].to_i.positive? || j >= fields[0].to_i
+        escape("passed to #{name} (#{d.owner}) as other than a mandatory positional parameter")
+        return false
+      end
+      return true unless @callee_scans.add?([callee.label, j + 1])
+
+      saved = [@where, @site]
+      @where = [callee, 0]
+      @depth += 1
+      ok = alias_scan(callee, 0, j + 1, from_entry: true)
+      @depth -= 1
+      @where, @site = saved
+      ok
     end
 
     # The receiver is a Hash literal (never extended: any other send escapes), so only a definer that can land

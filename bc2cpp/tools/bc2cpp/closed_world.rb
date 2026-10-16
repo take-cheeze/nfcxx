@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'touch_scan'
+require_relative 'core_hierarchy_sigs'
 require_relative 'foreign_definers'
 require_relative 'core_defs'
 require_relative 'native_names'
@@ -11,7 +12,7 @@ require_relative 'dynamic_names'
 require_relative 'loop_installers'
 require_relative 'scan_cache'
 
-# CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
+# CLOSED_WORLD (docs/adr/0210, 0466): bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
 # native sources of the build's own gems (compiled_gems.rb enforces that). A
 # guard chain's by-name fallback can then call bc2cpp_nomethod, which raises
@@ -21,7 +22,7 @@ require_relative 'scan_cache'
 # Every question defaults to "refuse"; `refusal` returns the reason as a Symbol.
 class ClosedWorld
   # method_missing/respond_to_missing? here reach every receiver.
-  GLOBAL_HOOK_OWNERS = %w[BasicObject Object Kernel].freeze
+  GLOBAL_HOOK_OWNERS = CoreHierarchySigs.ancestors('Object')
   BOOT_CLASSES = %w[BasicObject Object Module Class Kernel].freeze
   # Sends that define methods the registry walk may not attribute to an owner.
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
@@ -68,7 +69,7 @@ class ClosedWorld
   # Sends that run a block with another `self`, which breaks "self is its lexical owner".
   SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
 
-  attr_reader :global_refusal, :native_paths
+  attr_reader :global_refusal, :native_paths, :ruby_paths
 
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
@@ -87,6 +88,7 @@ class ClosedWorld
     @native_code_tokens = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
+    @outside_owner_name = nil
     @ruby_paths = ruby_paths
     # Per outside file: the constants it can create, reopen, subclass or rebind
     # (TouchScan, ADR 0256).
@@ -156,7 +158,8 @@ class ClosedWorld
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
-    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) && !(scoped && native_free)
+    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) &&
+                              @outside_owner_name != name && !(scoped && native_free)
 
     reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?, singleton_arms)
     return reason if reason
@@ -328,6 +331,35 @@ class ClosedWorld
     @native_arms_name = previous
   end
 
+  # OUTSIDE_OWNER_CALL (ADR 0468): while a caller ends the chain's else in a call checked against every
+  # outside (core, native or outside Ruby) class that defines `name` (CodeGen#guarded_fallback_line), those
+  # definitions no longer make the fallback's receiver unknowable; the Ruby-side gates still apply.
+  def with_outside_owner_call(name)
+    previous = @outside_owner_name
+    @outside_owner_name = name
+    yield
+  ensure
+    @outside_owner_name = previous
+  end
+
+  # SELF_NEW_LEAF (ADR 0468): `klass` and every class below it, when the closed world sees every one: the declared
+  # subclasses (matched by last path segment, as the hierarchy is), and none made by `Class.new(klass)`, an outside
+  # Ruby `class X < klass`, or an outside native source that spells the name (an `mrb_define_class` could subclass
+  # it). nil when any of those may exist. A singleton method of `klass` runs with one of these as `self`, an instance
+  # method of `klass` with an instance of one of them.
+  def known_subclasses(klass)
+    return nil if @global_refusal || !@wild.empty? || !@class_decls.key?(klass) || @rebound.include?(simple(klass))
+
+    set = Set[klass] | descendants(klass)
+    return nil unless set.all? { |k| @class_decls.key?(k) }
+
+    names = set.map { |k| simple(k) }.to_set
+    return nil if names.any? { |n| @dynamic_subclassed.include?(n) || @outside_ruby_supers.include?(n) }
+    return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
+
+    set.to_a.sort
+  end
+
   # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby
   # definition, alias, visibility change or prepend on `owner`, a dynamic
   # installer) can replace core `owner`'s native `name`.
@@ -419,7 +451,7 @@ class ClosedWorld
     return false if @global_refusal || @mm_classes.include?('NilClass')
     return false if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
 
-    owners.none? { |owner| ForeignDefiners.defines?(@ruby_paths, owner, name) }
+    !ForeignDefiners.defines_any?(@ruby_paths, owners, name)
   end
 
   # Every native source of the build that spells +name+ (a definition, an alias or a funcall).
@@ -693,6 +725,27 @@ class ClosedWorld
       (global_only || @class_decls.keys.none? { |key| key != name && simple(key) == name })
   end
 
+  # IS_A_GUARD (ADR 0456): the constant path +written+ (`K` or `Root::K`, a GETCONST and at most one GETMCNST)
+  # names exactly the declared class K wherever it is evaluated, and every instance of K is exactly a K:
+  #   * the root names one constant for the whole run: the closed world declares exactly one class or module of
+  #     that simple name, at top level; no bytecode SETCONST writes the name and no dynamic constant mutation
+  #     exists; no foreign Ruby source spells it; no native binds it except a top-level mrb_define_class /
+  #     mrb_define_module (which reopens that same top-level constant). GETCONST then finds that binding from any
+  #     scope (Object holds it), so const_missing is never asked;
+  #   * `Root::K` is found in Root's own constant table, where its declaration put it, before any ancestor;
+  #   * K is a declared, non-opaque class (no rebinding, no dynamic subclass, no outside file reopening it) with no
+  #     declared, unresolved (`wild`) or foreign Ruby subclass, so `x.is_a?(K)` holds only for an exact K.
+  def is_a_guard_constant?(written)
+    return false if @global_refusal || @dynamic_constant_mutation || !written.is_a?(String)
+
+    segments = written.split('::')
+    return false unless segments.size.between?(1, 2) && segments.all? { |s| s.match?(/\A[A-Z]\w*\z/) }
+    return false unless top_level_constant_unique?(segments.first)
+
+    !opaque?(written) && descendants(written).empty? && !@outside_ruby_supers.include?(simple(written)) &&
+      @constant_write_counts[simple(written)].zero? && !@deferred_constant_writes.include?(simple(written))
+  end
+
   # No bytecode of the world spells the constant BasicObject, the one way to an object that lacks Kernel's methods
   # without a class declaration (kernel_native_dispatch_safe? covers the declared subclasses).
   def basic_object_unreferenced?
@@ -700,6 +753,30 @@ class ClosedWorld
   end
 
   private
+
+  # is_a_guard_constant?'s root rule: +name+ is bound once, by the closed world's own top-level declaration.
+  def top_level_constant_unique?(name)
+    declared = (@class_decls.keys + @module_names.to_a).select { |path| simple(path) == name }.uniq
+    return false unless declared == [name]
+    return false if @constant_write_counts[name].positive? || @deferred_constant_writes.include?(name)
+    return false if @ruby_tokens.each_value.any? { |tokens| tokens.include?(name) }
+
+    @native_code_tokens.none? { |path, tokens| tokens.include?(name) && native_binds_nested?(path, name) }
+  end
+
+  NATIVE_CONSTANT_BINDERS = /\bmrb_(?:define_(?:class|module)_under(?:_id)?|define_(?:global_)?const|const_set|const_remove|
+                             define_(?:class|module)_id)\s*\(([^;]*)/mx
+
+  # A native source binds +name+ other than through a top-level mrb_define_class / mrb_define_module with the name
+  # spelled out (a nested define, a const_set or const_remove, a global or class const, or an `_id` define whose
+  # name is a symbol the scan does not resolve). An unreadable source answers true.
+  def native_binds_nested?(path, name)
+    text = File.binread(path).gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ')
+    spelled = /"#{Regexp.escape(name)}"|\bMRB_(?:SYM|CVSYM|IVSYM)\(#{Regexp.escape(name)}\)/
+    text.scan(NATIVE_CONSTANT_BINDERS).any? { |(body)| body.match?(spelled) || !body.match?(/"[A-Za-z_]\w*"|MRB_\w*SYM\(/) }
+  rescue SystemCallError
+    true
+  end
 
   def native_arms_lift?(name)
     @native_arms_name == name && native_only_in?(name, '/mruby-rgss/src/')

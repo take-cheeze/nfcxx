@@ -4,6 +4,7 @@
 
 require_relative 'define_method_sites'
 require_relative 'alias_sites'
+require_relative 'codegen_declared_returns'
 
 class CodeGen
   # ---------------------------------------------------------------------------
@@ -76,7 +77,10 @@ class CodeGen
     # Greatest fixpoint from every candidate. Variant B accessors are seeded and
     # never re-examined, but are visible to the bytecode candidates' proofs (a
     # method returning `other.code`).
-    @fixnum_return_names = Set.new(cand.keys) | accessors
+    # DECLARED_RETURN_CHECK (ADR 0455): checked declarations are seeded the same way (check_declared_returns).
+    declared = declared_return_facts(:fixnum)
+    cand.reject! { |n, _| declared.include?(n) }
+    @fixnum_return_names = Set.new(cand.keys) | accessors | declared
     loop do
       dropped = cand.keys.select do |n|
         @fixnum_return_names.include?(n) && !fixnum_return_sites_proven?(cand[n])
@@ -178,7 +182,9 @@ class CodeGen
       cand[name] = d
     end
 
-    @array_return_names = Set.new(cand.keys)
+    declared = declared_return_facts(:array) # DECLARED_RETURN_CHECK (ADR 0455), as for Fixnum returns
+    cand.reject! { |n, _| declared.include?(n) }
+    @array_return_names = Set.new(cand.keys) | declared
     loop do
       dropped = cand.keys.select do |n|
         @array_return_names.include?(n) && !array_return_sites_proven?(cand[n])
@@ -470,7 +476,7 @@ class CodeGen
       cand[name] = defs
     end
 
-    proven = {}
+    proven = declared_return_facts(:class).dup # DECLARED_RETURN_CHECK (ADR 0455): seeded, checked separately
     ret_class_proof = lambda do |n, owner|
       proven[n] if self_call_reaches_def?(n, owner)
     end

@@ -150,6 +150,8 @@ module NativeOwnerMap
   # The top-level brace blocks of `text` (function bodies), each as [from, to, scope], where scope is
   # `vars` overlaid with what that block's own `RClass *` variables hold. Braces inside string or char
   # literals are blanked first so they cannot unbalance the count.
+  TRANSPARENT_BLOCK_RE = /(?:\bnamespace(?:\s+[\w:]+)?|\bextern\s*"C")\s*\z/
+
   def block_scopes(text, vars)
     blank = text.gsub(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/) { |tok| ' ' * tok.size }
     scopes = []
@@ -165,7 +167,13 @@ module NativeOwnerMap
         next unless depth.zero?
 
         signature = text[prev...start]
-        scopes << [start, i, vars.merge(block_owners(text[start..i], signature, vars))]
+        if signature.match?(TRANSPARENT_BLOCK_RE)
+          # OUTSIDE_OWNER_CALL (ADR 0468): a C++ namespace or `extern "C"` block holds functions, not a body.
+          inner = start + 1
+          scopes.concat(block_scopes(text[inner...i], vars).map { |from, to, scope| [from + inner, to + inner, scope] })
+        else
+          scopes << [start, i, vars.merge(block_owners(text[start..i], signature, vars))]
+        end
         prev = i + 1
       end
     end
@@ -175,22 +183,45 @@ module NativeOwnerMap
   # The owners of the `RClass *` variables a function body declares and assigns, plus its `RClass *`
   # parameters (which keep the file's owner for them). A declared variable whose assignments disagree,
   # or one of whose right-hand sides is not a known class, is UNKNOWN. `a = B = C` gives `a` B's value.
+  # OUTSIDE_OWNER_CALL (ADR 0468): a right-hand side may name another variable of the same body
+  # (`RClass* m = mrb_define_module(M, "RGSS"); RClass* color = mrb_define_class_under(M, m, "Color", ...)`),
+  # so the owners are settled to a fixed point over the body's own variables; and a variable assigned once
+  # from an expression this map cannot read is the class a core field names when the body stores it there
+  # (`mod = boot_defclass(...); mrb->module_class = mod;`) or the class mruby names after it
+  # (`mrb_class_name_class(mrb, NULL, bob, MRB_SYM(BasicObject))`).
   def block_owners(body, signature, vars)
     params = signature.scan(/RClass\s*\*\s*(\w+)\s*[,)]/).flatten
     declared = body.scan(/RClass\s*\*\s*(\w+)/).flatten.to_set
     rhs = Hash.new { |h, k| h[k] = [] }
-    body.scan(/(?<![\w>.])(\w+)\s*=(?!=)([^;]*);/) do
+    # Matched on the body with its string and char literals blanked (a `"color="` registration is not an
+    # assignment to `color`); the right-hand side is read back from the body itself.
+    blank = body.gsub(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/) { |tok| ' ' * tok.size }
+    blank.scan(/(?<![\w>.])(\w+)\s*=(?!=)([^;]*);/) do
       scan = Regexp.last_match
       next unless declared.include?(scan[1])
 
-      first = scan[2].split(/(?<![=!<>])=(?!=)/).first.to_s.strip
-      rhs[scan[1]] << owner_of(first, vars)
+      rhs[scan[1]] << body[scan.begin(2)...scan.end(2)].split(/(?<![=!<>])=(?!=)/).first.to_s.strip
+    end
+    named = Hash.new { |h, k| h[k] = Set.new }
+    body.scan(/(?<![\w.])mrb->(\w+)\s*=(?!=)\s*(\w+)\s*;/) do |field, var|
+      named[var] << CORE_FIELD_OWNERS[field] if CORE_FIELD_OWNERS.key?(field)
+    end
+    body.scan(/\bmrb_class_name_class\(\s*\w+\s*,\s*NULL\s*,\s*(\w+)\s*,\s*MRB_SYM\((\w+)\)\s*\)/) do |var, const|
+      named[var] << const
     end
     out = {}
     params.each { |var| out[var] = vars[var] || UNKNOWN }
-    declared.each do |var|
-      owners = rhs[var]
-      out[var] = owners.empty? || owners.uniq.size != 1 ? UNKNOWN : owners.first
+    4.times do
+      scope = vars.merge(out.reject { |_, owner| owner == UNKNOWN })
+      settled = declared.to_h do |var|
+        owners = rhs[var].map { |text| owner_of(text, scope.reject { |k, _| k == var }) }.uniq
+        owner = owners.size == 1 ? owners.first : UNKNOWN
+        owner = named[var].first if owner == UNKNOWN && rhs[var].size == 1 && named[var].size == 1
+        [var, owner || UNKNOWN]
+      end
+      break if settled.all? { |var, owner| out[var] == owner }
+
+      out.merge!(settled)
     end
     out
   end
@@ -216,11 +247,13 @@ module NativeOwnerMap
       file_vars = NativeDirect.class_variables(typed, NativeDirect.sibling_param_owners(path))
       scopes = block_scopes(typed, file_vars)
       vars_at = ->(pos) { scopes.find { |from, to, _| pos.between?(from, to) }&.last || file_vars }
-      text.scan(CALL_RE) do
+      # Calls are read from `typed`, the text the scopes were built on, so a position names the same block
+      # in both (`struct RClass *` -> `RClass *` shortens the text; ADR 0468).
+      typed.scan(CALL_RE) do
         match = Regexp.last_match
         family = match[1]
-        args, close = call_args(text, match.end(0) - 1)
-        next if args.nil? || definition?(text, match.begin(0), close)
+        args, close = call_args(typed, match.end(0) - 1)
+        next if args.nil? || definition?(typed, match.begin(0), close)
 
         if family == 'prepend_module'
           result.refusals[path.include?('/3rd/mruby/') ? :core_prepend : :native_prepend] += 1
@@ -252,7 +285,7 @@ module NativeOwnerMap
           result.by_name[name].merge(owners)
         end
       end
-      scan_rom_tables(text, vars_at, result)
+      scan_rom_tables(typed, vars_at, result)
     end
     result
   end

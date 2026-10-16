@@ -208,6 +208,21 @@ class CodeGen
       native_owner = native && (native[:class_owner] || known)
       native_constructor_safe = native && @closed_world&.standard_constructor_lookup? &&
                                 exact_constructor_chain?(native_owner)
+      # OVERLOADED_CONSTRUCT (ADR 0468): a class with declared constructor overloads picks one at the call site,
+      # where the path below would leave a by-name `new`: a count its entry point does not take, or an argument
+      # tag test (Bitmap's file-load form) the Fixnum proof does not settle.
+      fixed_arity = native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
+      tag_tested = native && fixed_arity && native[:type_guard] == :int &&
+                   (native_param_unbox_name?('_init_size') ? [0] : argv.each_index.to_a).any? do |i|
+                     !native_int_arg_proven?(irep, new_proof_idx, owner_def, trace_reg_offset, argv, i)
+                   end
+      overloaded = native_constructor_safe && (!fixed_arity || tag_tested) &&
+                   overloaded_construct_code(native_owner, native, d, recv, argv, irep, guard_proof_site, owner_def,
+                                             [irep, new_proof_idx, owner_def, trace_reg_offset])
+      if overloaded
+        @native_construct_used << known
+        return overloaded
+      end
       # Exact arity only (an Array lists several accepted counts); other counts fall
       # through to dynamic dispatch.
       if native_constructor_safe &&
@@ -332,8 +347,9 @@ class CodeGen
       generic_target = known && !listed_target && @closed_world&.stable_class_constant?(known) &&
                        stable_standard_constructor_class?(known)
       if known && (listed_target || generic_target)
-        init_defs = @registry['initialize'].select { |md| md.owner == known }
-        init_def = init_defs.one? ? init_defs.first : nil
+        # INHERITED_DIRECT_CONSTRUCT (ADR 0456): the initialize the ancestor chain resolves to, the class's own or
+        # an ancestor's (direct_construct_init_def).
+        init_def = direct_construct_init_def(known)
         # DIRECT_CONSTRUCT_TARGETS' soundness bar, checked live against this run's
         # registry and ONLY_OWNERS.
         # 1/2: no custom `def self.new`/`def self.allocate` on this class ("X.singleton"
@@ -400,6 +416,8 @@ class CodeGen
                           else
                             !@only_owners || @only_owners.include?(known)
                           end
+          # An inherited initialize's `_impl` is emitted with its own owner.
+          owner_emitted &&= init_def.owner == known || !@only_owners || @only_owners.include?(init_def.owner)
           if owner_emitted
             if listed_target
               accessor = direct_construct_class_expr(known)
@@ -408,7 +426,8 @@ class CodeGen
             end
             @direct_alloc_used = true
             stable_constructor = stable_standard_constructor_class?(known)
-            init_impl = cpp_name(known, 'initialize') + '_impl'
+            init_impl = cpp_name(init_def.owner, 'initialize') + '_impl'
+            inherited = init_def.owner == known ? '' : " (inherited from #{init_def.owner}, the initialize #{known}'s ancestor chain resolves to)"
             # POSITIONAL_OPTIONAL_CONSTRUCT: pad the omitted optionals, then pass
             # how many were really given, so `_impl`'s jump table substitutes the
             # defaults for exactly the omitted positions. Omitted optionals never
@@ -431,7 +450,7 @@ class CodeGen
                     "#{init_impl}) -- skips Class#new's own allocate+initialize dispatch chain entirely; ",
                     "#{known}#initialize's own return value is discarded (real Ruby .new always returns ",
                     "the new object, never whatever #initialize itself returns).\n",
-                    "  // #{known}#initialize declares arity [#{t_mand}, #{t_mand + t_opt}] and this call ",
+                    "  // #{known}#initialize#{inherited} declares arity [#{t_mand}, #{t_mand + t_opt}] and this call ",
                     "passes #{n}.#{opt_phrase}",
                     (stable_constructor ?
                       "  // CLOSED_WORLD_STABLE_CLASS: the class constant and constructor lookup cannot be " \
@@ -1783,6 +1802,10 @@ class CodeGen
       return "  #{line}" if line.start_with?(CORE_EXACT_DIRECT_NOTE)
       # TO_ENUM_DIRECT (ADR 0418): the Enumerator is built in place, the checked arm's else is a guard violation.
       return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
+
+      # OUTSIDE_OWNER_CALL (ADR 0468): a bare send whose every answering class the closed world names.
+      bare = outside_owner_bare_line(d, recv, name, argv, cw_site)
+      return "#{miss}  #{bare}" if bare
 
       "#{diag}#{note}#{miss}  #{line}"
     end

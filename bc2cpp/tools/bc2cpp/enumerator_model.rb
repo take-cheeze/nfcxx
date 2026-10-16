@@ -5,6 +5,7 @@ require_relative 'core_defs'
 require_relative 'source_text'
 require_relative 'const_site_cache'
 require_relative 'integer_constants'
+require_relative 'core_fact_sigs'
 
 # ENUMERATOR_MODEL (docs/adr/0418): what the compiler may assume about mruby's Enumerator machinery,
 # proven from the bytecode of the program rather than from names.
@@ -17,7 +18,8 @@ require_relative 'integer_constants'
 # (`Class#new` on the stable constant, i.e. what the body does) and skips the lookup of `to_enum`.
 module EnumeratorModel
   FILE_SUFFIX = '/mruby-enumerator/mrblib/enumerator.rb'
-  NAMES = %w[to_enum enum_for].freeze
+  # Kernel's Enumerator makers, from sig/native/core_enumerators.rbs.
+  NAMES = CoreFactSigs.enumerator_makers
   # Names the direct construction relies on: a definition of any of them outside mruby's own Ruby (or a second one inside)
   # withdraws the model.
   CONSTRUCTION_NAMES = %w[to_enum enum_for new allocate initialize].freeze

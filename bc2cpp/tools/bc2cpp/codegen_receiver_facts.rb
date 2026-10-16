@@ -202,11 +202,12 @@ class CodeGen
 
   # Resolve a constant expression used as a class/module object, not an
   # instance. A branch edge that can bypass the constant write invalidates it.
-  def constant_object_owner(irep, idx, dest_reg, lexical_owner)
+  def constant_object_owner(irep, idx, dest_reg, lexical_owner, through_handlers: false)
     return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
                       idx < irep.instructions.length && dest_reg
 
-    written = straight_line_constant_name(irep, idx, dest_reg) || irep.agreed_constant_name(idx, dest_reg.to_s)
+    written = straight_line_constant_name(irep, idx, dest_reg) ||
+              irep.agreed_constant_name(idx, dest_reg.to_s, through_handlers: through_handlers)
     return nil unless written
 
     owner = resolve_class_constant_name(written, lexical_owner)
@@ -220,15 +221,15 @@ class CodeGen
   # the name denote one class object for the VM's life, so a guard that only tests
   # "is this class/module (that class)" cannot fail. Closed world only: the open
   # world keeps its fallbacks.
-  def stable_constant_register(irep, idx, reg, lexical_owner)
+  def stable_constant_register(irep, idx, reg, lexical_owner, through_handlers: false)
     return nil unless @closed_world && @closed_world.global_refusal.nil? && guard_violation_enabled? &&
                       @call_block_expr.nil? && irep && idx && reg && idx < irep.instructions.length
 
-    name = irep.agreed_constant_name(idx, reg.to_s)
+    name = irep.agreed_constant_name(idx, reg.to_s, through_handlers: through_handlers)
     return name if name && !name.include?('::') && CodeGen.stable_class_constants&.include?(name)
 
     # A qualified or declared-class constant: the proof behind CLOSED_WORLD_CONSTANT_OBJECT.
-    constant_object_owner(irep, idx, reg, lexical_owner)
+    constant_object_owner(irep, idx, reg, lexical_owner, through_handlers: through_handlers)
   end
 
   # The explicit-receiver SEND at `idx` of `irep` when it is the call `name` being compiled,
@@ -243,6 +244,9 @@ class CodeGen
   def new_receiver_constant_proven?(irep, idx, name, klass, lexical_owner)
     insn = klass && proof_send_insn(irep, idx, name)
     constant = insn && stable_constant_register(irep, idx, insn.reg, lexical_owner)
+    # NEW_IDENTITY_HANDLERS (ADR 0468): a `Klass.new` inside a begin/rescue body; the plain walk refuses a protected
+    # range, the handler-aware one follows its edges and still finds the one constant load.
+    constant ||= insn && stable_constant_register(irep, idx, insn.reg, lexical_owner, through_handlers: true)
     !constant.nil? && (klass == constant || klass.to_s.end_with?("::#{constant}"))
   end
 
@@ -348,6 +352,34 @@ class CodeGen
     return nil if klass.empty? || !@known_owners&.include?(klass)
 
     klass
+  end
+
+  # INHERITED_DIRECT_CONSTRUCT (ADR 0456): the Ruby `initialize` MethodDef an instance of +klass+ runs, or nil.
+  # +klass+'s own single definition is the original direct-construct rule. Without one, the lookup walks the
+  # superclass chain and answers the first class's definition when, for every class it passes:
+  #   * the class is a declared class (not a module) with no unresolved mixin, and no included module defines
+  #     initialize and nothing is prepended (numeric_init_definition answers :unknown otherwise);
+  #   * no outside (native or foreign Ruby) source spells it, so no native registers an initialize on it;
+  # and no DEF the registry does not hold (define_method, a computed name) installs an initialize anywhere.
+  # A chain that reaches Object without a Ruby initialize answers nil: Object's and BasicObject's initialize is
+  # native, and a native body is not called directly (mrb_obj_new keeps that lookup).
+  def direct_construct_init_def(klass)
+    own = (@registry['initialize'] || []).select { |md| md.owner == klass }
+    return own.one? ? own.first : nil unless own.empty?
+    return nil unless @closed_world && !@closed_world.unknown_def?('initialize')
+
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      return nil unless @closed_world.class_declared?(klass) && !@unknown_mixins.include?(klass)
+      return nil if @closed_world.outside_spells_class?(klass)
+
+      definition = numeric_init_definition(klass)
+      return nil if definition == :unknown
+      return definition if definition
+
+      klass = @superclass_of[klass]
+    end
+    nil
   end
 
   def exact_constructor_chain?(klass)
@@ -799,7 +831,7 @@ class CodeGen
   #
   # The scan is over every compiled irep's instructions, so a caller added later
   # is covered without touching a list. Anything it cannot read stays a refusal:
-  # an open world, a dynamic send whose receiver class is unproven, or a name
+  # a body compiled without the world (ADR 0264), a dynamic send whose receiver class is unproven, or a name
   # something installs at runtime all leave the question open, and an open
   # question must keep the `#error` rather than assume the safe answer.
   def super_direct_call_allowed?(owner_def)

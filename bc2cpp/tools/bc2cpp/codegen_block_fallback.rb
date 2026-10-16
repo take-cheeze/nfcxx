@@ -2,6 +2,7 @@
 
 require_relative 'ir_rbs_block_types'
 require_relative 'core_block_param_sigs'
+require_relative 'core_fact_sigs'
 
 # CodeGen: blocks that stay procs, and fiber safety.
 
@@ -416,9 +417,8 @@ class CodeGen
   # assumption is made about any Array.
   STRICT_BLOCK_ELEMENT_SHAPES = [%w[Array each], %w[Array each_with_index], %w[Array each_with_object],
                                  %w[Hash each_value]].freeze
-  # The lookup chain of an exact Array / Hash instance up to the modules core iterators live in.
-  BLOCK_ELEMENT_CHAINS = { 'Array' => %w[Array Enumerable Object Kernel BasicObject],
-                           'Hash' => %w[Hash Enumerable Object Kernel BasicObject] }.freeze
+  # The lookup chain of an exact Array / Hash instance up to the modules core iterators live in (core_hierarchy.rbs).
+  BLOCK_ELEMENT_CHAINS = %w[Array Hash].to_h { |klass| [klass, CoreHierarchySigs.ancestors(klass)] }.freeze
 
   def block_fallback_element_hints(irep, region, owner_name)
     return {} unless irep && !region[:self_implicit]
@@ -1146,8 +1146,9 @@ class CodeGen
   # compile_block_body_insn shift) and is passed on for the capture levels.
   # `self` is not shifted: the block shares the method's self. nil keeps the
   # previous output.
-  # The Proc methods that run the proc (bc2cpp_cfunc_proc_call_p spells the same set).
-  PROC_CALL_NAMES = %w[call yield [] ===].freeze
+  # The Proc methods that run the proc (sig/native/core_proc_calls.rbs; bc2cpp_cfunc_proc_call_p spells the same set,
+  # which scripts/bc2cpp/core_facts_rbs_check.rb compares).
+  PROC_CALL_NAMES = CoreFactSigs.proc_call_names
 
   def emit_block_fallback_glue(region, fn_name, inline_offset: nil, owner_def: nil)
     dest_reg = region[:dest_reg].to_i + (inline_offset || 0)

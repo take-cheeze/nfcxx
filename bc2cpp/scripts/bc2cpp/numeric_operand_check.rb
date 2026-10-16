@@ -633,7 +633,7 @@ if ENV['MRBC']
   code = nil
   err = nil
   Dir.mktmpdir do |dir|
-    code, err = runtime.generate(fixture, dir, closed: true)
+    code, err = runtime.generate(fixture, dir)
   end
   # Every arithmetic/compare site of the method is proven (by the numeric proof or
   # by the Fixnum proof) and none kept its dynamic-send else.
@@ -720,7 +720,7 @@ if ENV['MRBC']
     puts '-- fixture on real mruby, interpreted and compiled'
     Dir.mktmpdir do |dir|
       owners = %w[NqBox NqWriter NqBase NqSub NqLatePar NqSizeShadow NqHidden NqDrv NqConfig NqOther]
-      _code, err = runtime.generate(fixture, dir, closed: true, only_owners: owners)
+      _code, err = runtime.generate(fixture, dir, only_owners: owners)
       body = <<~CPP
         static mrb_value nq_new(mrb_state* M, const char* klass) {
           return mrb_obj_new(M, mrb_class_get(M, klass), 0, nullptr);

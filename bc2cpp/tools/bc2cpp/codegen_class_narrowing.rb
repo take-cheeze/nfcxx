@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'core_fact_sigs'
 
 # CLASS_NARROWING (ADR 0375): occurrence typing for the exact-class flow. A branch on the boolean of a class test
 # (`x.is_a?(C)`, `kind_of?`, `instance_of?`, `C === x` and so `case x when C`, `x.nil?` and `!x` as a value,
@@ -52,10 +53,11 @@ class CodeGen
   # The mrb_state field holding each core class, for the run-time membership check.
   CLASS_TEST_CORE_FIELDS = { 'Integer' => 'integer_class', 'Float' => 'float_class', 'Array' => 'array_class',
                              'Hash' => 'hash_class', 'String' => 'string_class', 'Range' => 'range_class' }.freeze
-  # Superclass chains of the core classes a bit stands for (Object and above are never the tested class).
-  CLASS_TEST_CORE_CHAIN = { 'Integer' => %w[Integer Numeric], 'Float' => %w[Float Numeric], 'Array' => %w[Array],
-                            'Hash' => %w[Hash], 'String' => %w[String], 'Range' => %w[Range],
-                            'NilClass' => %w[NilClass] }.freeze
+  # Superclass chains of the core classes a bit stands for (Object and above are never the tested class), from
+  # sig/native/core_hierarchy.rbs.
+  CLASS_TEST_CORE_CHAIN = CLASS_TEST_CORE_BITS.values.to_h do |klass|
+    [klass, CoreHierarchySigs.superclasses_below(klass, 'Object')]
+  end.freeze
   # A core class a test can name, and the bits of its instances (when no subclass exists, see
   # compute_class_test_positive). Numeric has no instance of its own: it is the union of its subclasses.
   CLASS_TEST_CORE_POSITIVE = { 'Integer' => NumericFlow::INT, 'Float' => NumericFlow::FLT, 'Array' => NumericFlow::ARR,
@@ -67,10 +69,9 @@ class CodeGen
   CLASS_OF = Object.new.freeze
   # More than this many classes and the set stops being a useful proof (ADR 0352 stops at eight for a receiver).
   CLASS_TEST_MAX_CLASSES = 16
-  # The classes mruby's own natives register each tested name on (kernel.c, object.c, class.c).
-  CLASS_TEST_NATIVE_OWNERS = { 'is_a?' => %w[Kernel], 'kind_of?' => %w[Kernel], 'instance_of?' => %w[Kernel],
-                               'nil?' => %w[Kernel NilClass], '!' => %w[BasicObject], 'raise' => %w[Kernel],
-                               'respond_to?' => %w[Kernel], 'class' => %w[Kernel] }.freeze
+  # The classes mruby's own natives register each tested name on (kernel.c, object.c, class.c), from
+  # sig/native/core_class_tests.rbs.
+  CLASS_TEST_NATIVE_OWNERS = CoreFactSigs.class_test_owners
 
   def class_narrowing_enabled?
     ENV['BC2CPP_CLASS_NARROWING'] != '0' && @native_results_ready && !@closed_world.nil? && !@native_name_sources.nil? &&
@@ -144,7 +145,8 @@ class CodeGen
     klass && class_test_object(:instance_of, klass)
   end
 
-  CLASS_OBJECT_OWNERS = %w[Module Class Object Kernel BasicObject].freeze
+  # A class object's lookup: Class and its ancestors (core_hierarchy.rbs). Only membership is read.
+  CLASS_OBJECT_OWNERS = CoreHierarchySigs.ancestors('Class')
 
   def class_object_eq_safe?
     return @class_object_eq_safe if defined?(@class_object_eq_safe)
@@ -229,6 +231,35 @@ class CodeGen
 
     owner = constant_object_owner(irep, index, reg, numeric_owner_of(irep)&.owner)
     owner if owner && @closed_world.class_declared?(owner) && @closed_world.instance_class?(owner)
+  end
+
+  # IS_A_GUARD (ADR 0456, RBS_CHECKED_PARAMS): the class K when the SEND at +index+ is `x.is_a?(K)` or
+  # `x.kind_of?(K)` and a true answer makes x an instance of exactly K; else nil. NIL_NARROWING reads it on the true
+  # edge of the branch on the SEND's result.
+  #   * the name reaches only Kernel's native mrb_obj_is_kind_of (class_test_name_safe?: no Ruby, foreign, computed
+  #     or other native definition anywhere, no BasicObject subclass that would method_missing it);
+  #   * the argument is a straight-line GETCONST / GETMCNST chain no branch bypasses (straight_line_constant_name)
+  #     that names exactly the declared class K, which nothing inherits from (ClosedWorld#is_a_guard_constant?).
+  # Not class_narrowing_enabled?: this runs before the code generator's tables exist, and needs none of them.
+  def is_a_guard_class(irep, index)
+    insn = irep&.instructions&.[](index)
+    return nil unless insn && insn.op == 'SEND' && %w[is_a? kind_of?].include?(insn.sym)
+    return nil unless insn.n_spec == '1' && insn.nk_spec.nil?
+    return nil unless @closed_world && @closed_world.global_refusal.nil? && class_test_name_safe?(insn.sym)
+
+    written = straight_line_constant_name(irep, index, (insn.reg.to_i + 1).to_s)
+    written && @closed_world.is_a_guard_constant?(written) ? written : nil
+  end
+
+  # IS_A_GUARD: the `raise` SSEND at +index+ never returns normally. Kernel#raise (kernel.c mrb_f_raise, which ends in
+  # mrb_exc_raise whatever it is given) is the only definition anywhere (class_test_name_safe?), so the instruction
+  # after it is reached only by a jump. class_narrowing_noreturn_call?'s rule, without the flag that gates the
+  # code generator's CLASS_NARROWING.
+  def raise_never_returns?(irep, index)
+    insn = irep&.instructions&.[](index)
+    return false unless insn && %w[SSEND SSEND0].include?(insn.op) && insn.sym == 'raise'
+
+    !@closed_world.nil? && @closed_world.global_refusal.nil? && class_test_name_safe?('raise')
   end
 
   # Symbol's chain (ADR 0429): the closed world has no class_parent for it, so without this a Symbol bit is unknown and
@@ -351,7 +382,8 @@ class CodeGen
     end
   end
 
-  CLASS_TEST_NUMERIC_FAMILY = %w[Numeric Integer Float].freeze
+  # Numeric and its core subclasses (core_hierarchy.rbs).
+  CLASS_TEST_NUMERIC_FAMILY = (['Numeric'] + CoreHierarchySigs.subclasses('Numeric')).freeze
 
   # Every instance of +klass+ is exactly that class: the closed world declares no subclass (ClosedWorld#
   # native_subclass_free?) and no native source of the build creates one (mrb_define_class... with the class as

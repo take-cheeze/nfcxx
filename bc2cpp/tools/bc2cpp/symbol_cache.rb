@@ -21,7 +21,7 @@ module SymbolCache
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
                        'bc2cpp_native_singleton_named' => 2 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
-  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
+  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_owner_call_named|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
   FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
   NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/
   SEND_INDEX = /\G,\s*(\d+)\s*[,)]/
@@ -40,6 +40,8 @@ module SymbolCache
     attr_accessor :nil_receiver_used
     # NATIVE_SINGLETON_CALL (ADR 0416): the same for bc2cpp_native_singleton.
     attr_accessor :native_singleton_used
+    # OUTSIDE_OWNER_CALL (ADR 0468): the same for bc2cpp_owner_call.
+    attr_accessor :owner_call_used
 
     # CHECKED_SEND (ADR 0299): per slot, 0 plain, 1 argument count of an attr_reader, 2 that and
     # the explicit-receiver visibility check.
@@ -53,6 +55,7 @@ module SymbolCache
       @hint_violation_used = false
       @nil_receiver_used = false
       @native_singleton_used = false
+      @owner_call_used = false
     end
 
     # A checked send gets a slot of its own, apart from the same name's plain slot.
@@ -112,12 +115,14 @@ module SymbolCache
         table.hint_violation_used = true if kind == 'bc2cpp_hint_violation_named'
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
         table.native_singleton_used = true if kind == 'bc2cpp_native_singleton_named'
+        table.owner_call_used = true if kind == 'bc2cpp_owner_call_named'
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
                       when 'bc2cpp_nomethod_raise_named' then "bc2cpp_nomethod_raise(M, #{receiver}, #{index}"
                       when 'bc2cpp_guard_violation_named' then "bc2cpp_guard_violation(M, #{receiver}, #{index}"
                       when 'bc2cpp_hint_violation_named' then "bc2cpp_hint_violation(M, #{receiver}, #{index}"
                       when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
+                      when 'bc2cpp_owner_call_named' then "bc2cpp_owner_call(M, #{receiver}, #{index}"
                       when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
@@ -139,7 +144,7 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|owner_call)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       match = recv_end && SEND_INDEX.match(code, recv_end)
@@ -191,11 +196,11 @@ module SymbolCache
       static const char* const bc2cpp_sym_names[#{[table.size, 1].max}] = {
       #{names.empty? ? '  "",' : names}
       };
-      #{table.native_singleton_used ? "// NATIVE_SINGLETON_CALL: bumped with the symbol table, so no slot outlives its VM.\nstatic unsigned bc2cpp_nsc_epoch = 1;" : ''}
+      #{table.native_singleton_used ? "// NATIVE_SINGLETON_CALL: bumped with the symbol table, so no slot outlives its VM.\nstatic unsigned bc2cpp_nsc_epoch = 1;" : ''}#{table.owner_call_used ? "\n// OUTSIDE_OWNER_CALL: bumped with the symbol table, so no owner set outlives its VM.\nstatic unsigned bc2cpp_owner_epoch = 1;" : ''}
       static void bc2cpp_reset_symbol_cache() {
         bc2cpp_sym_state = nullptr;
         for (mrb_sym& s : bc2cpp_syms) s = 0;
-      #{table.native_singleton_used ? '  ++bc2cpp_nsc_epoch;' : ''}
+      #{table.native_singleton_used ? '  ++bc2cpp_nsc_epoch;' : ''}#{table.owner_call_used ? "\n  ++bc2cpp_owner_epoch;" : ''}
       }
       static inline mrb_sym bc2cpp_sym(mrb_state* M, int i) {
         if (bc2cpp_sym_state != M) {
@@ -219,7 +224,7 @@ module SymbolCache
       #{checked ? "  if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, bc2cpp_sym(M, i), argc, argv, bc2cpp_sym_check[i] == 2);" : ''}
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
-      #{table.native_singleton_used ? NATIVE_SINGLETON : ''}
+      #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? OWNER_CALL : ''}
       #{table.nomethod_used ? NOMETHOD : ''}
       #{table.violation_used ? GUARD_VIOLATION : ''}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
@@ -313,6 +318,117 @@ module SymbolCache
     }
   CPP
   private_constant :NATIVE_SINGLETON
+
+  # OUTSIDE_OWNER_CALL (ADR 0468): the else of a closed-world chain whose remaining receivers answer the name only
+  # through outside (core, native or outside Ruby) definitions, every one of which the compiler named
+  # (BC2CPP_OWNERS: class paths as mrb_class_name spells them, `.singleton` for a class object's own method).
+  # The method is looked up once and checked against that list: a listed owner's method runs in the frame mruby's
+  # dispatch pushes (mrb_funcall_with_method: a C function reads its arguments from that frame) after the checks
+  # OP_SEND makes at `level` (2 explicit receiver: visibility; 1 and 2: argument count, aspec); no method raises what
+  # dispatch raises (the receiver is proven method_missing-free, so a dispatch that returns is a violated proof); any
+  # other owner is a definer the closed world did not see, and raises. Owners already matched are kept per site and
+  # VM (up to 16), so the name test runs once per owner.
+  OWNER_CALL = <<~CPP
+    #include <string.h>
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #include <stdio.h>
+    #include <stdlib.h>
+    #endif
+    extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
+    struct bc2cpp_owner_set {
+      const char* const* names;
+      unsigned epoch;
+      mrb_state* state;
+      int seen_count;
+      struct RClass* seen[16];
+    };
+    #define BC2CPP_OWNERS(...) ([]() -> bc2cpp_owner_set& { static const char* const names[] = { __VA_ARGS__, nullptr }; static bc2cpp_owner_set s = { names, 0, nullptr, 0, {} }; return s; }())
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_owner_violation(mrb_state* M, mrb_value recv, mrb_sym mid, const char* what) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: owner-call violation: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
+      fprintf(stderr, "#%s: %s\n", mrb_sym_name(M, mid), what);
+      fflush(stderr);
+      abort();
+    #endif
+      mrb_value msg = mrb_format(M, "closed-world owner violation: %T#%n %s", recv, mid, what);
+      struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
+      mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
+    }
+    // Is `c` (a method's owner, an iclass already resolved to its module) one of `names`?
+    static bool bc2cpp_owner_listed(mrb_state* M, struct RClass* c, const char* const* names) {
+      bool singleton = false;
+      if (c->tt == MRB_TT_SCLASS) {
+        mrb_value attached = mrb_iv_get(M, mrb_obj_value(c), mrb_intern_lit(M, "__attached__"));
+        if (mrb_type(attached) != MRB_TT_CLASS && mrb_type(attached) != MRB_TT_MODULE) return false;
+        c = mrb_class_ptr(attached);
+        singleton = true;
+      }
+      if (c->tt != MRB_TT_CLASS && c->tt != MRB_TT_MODULE) return false;
+      const char* path = mrb_class_name(M, c);
+      if (!path) return false;
+      size_t len = strlen(path);
+      for (int k = 0; names[k]; ++k) {
+        size_t n = strlen(names[k]);
+        bool listed_singleton = n > 10 && strcmp(names[k] + n - 10, ".singleton") == 0;
+        if (listed_singleton != singleton) continue;
+        if ((listed_singleton ? n - 10 : n) == len && memcmp(names[k], path, len) == 0) return true;
+      }
+      return false;
+    }
+    static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      mrb_sym mid = bc2cpp_sym(M, i);
+      // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
+      if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
+      struct RClass* c = mrb_class(M, recv);
+      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      if (MRB_METHOD_UNDEF_P(m)) {
+        if (mrb_nil_p(blk)) bc2cpp_funcall_argv(M, recv, mid, argc, argv);
+        else mrb_funcall_with_block(M, recv, mid, argc, argv, blk);
+        bc2cpp_owner_violation(M, recv, mid, "was proven to raise NoMethodError but dispatched");
+      }
+      struct RClass* owner = c->tt == MRB_TT_ICLASS ? c->c : c;
+      if (s.epoch != bc2cpp_owner_epoch || s.state != M) {
+        s.epoch = bc2cpp_owner_epoch;
+        s.state = M;
+        s.seen_count = 0;
+      }
+      bool seen = false;
+      for (int k = 0; k < s.seen_count; ++k) seen = seen || s.seen[k] == owner;
+      if (!seen) {
+        if (!bc2cpp_owner_listed(M, owner, s.names)) bc2cpp_owner_violation(M, recv, mid, "resolves to a definer the closed world does not list");
+        if (s.seen_count < 16) s.seen[s.seen_count++] = owner;
+      }
+      if (level >= 2) {
+        // vm.c OP_SEND: an explicit receiver may not call a private method, nor a protected one from outside.
+        if (m.flags & MRB_METHOD_PRIVATE_FL) {
+          mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", mid, recv);
+        }
+        if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) {
+          mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", mid, recv);
+        }
+      }
+      if (level >= 1) {
+        if (MRB_METHOD_PROC_P(m)) {
+          const struct RProc* p = MRB_METHOD_PROC(m);
+          if (MRB_PROC_ALIAS_P(p)) p = p->upper;
+          if (MRB_PROC_CFUNC_P(p) && MRB_PROC_NOARG_P(p) && argc > 0) mrb_argnum_error(M, argc, 0, 0);
+        } else {
+          // vm.c check_argument_count: a raw C function's registered aspec, before the call.
+          mrb_aspec aspec = MRB_MT_ASPEC(m.flags);
+          int min = MRB_ASPEC_REQ(aspec) + MRB_ASPEC_POST(aspec);
+          int max = MRB_ASPEC_REST(aspec) ? -1 : min + MRB_ASPEC_OPT(aspec);
+          if (argc < min || (max >= 0 && argc > max)) mrb_argnum_error(M, argc, min, max);
+        }
+      }
+      return mrb_funcall_with_method(M, recv, mid, &m, c, argc, argv, blk);
+    }
+  CPP
+  private_constant :OWNER_CALL
 
   # CLOSED_WORLD (docs/adr/0210): the else arm of a guard chain proven to list
   # every class that answers the name, on a receiver with no method_missing.

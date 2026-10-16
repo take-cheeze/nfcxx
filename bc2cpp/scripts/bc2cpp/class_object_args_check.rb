@@ -264,7 +264,7 @@ if ENV['MRBC'] && runtime.compiler?
       saved = env.to_h { |k, _| [k, ENV[k]] }
       env.each { |k, v| ENV[k] = v }
       begin
-        code, err = runtime.generate(source, dir, closed: true, only_owners: OWNERS, core: true)
+        code, err = runtime.generate(source, dir, only_owners: OWNERS, core: true)
         [code, err]
       ensure
         saved.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }

@@ -514,7 +514,7 @@ def build_registry(ireps, root_label)
   walk.call(root_label, nil)
   unless loop_sites.empty?
     recognized, refused = LoopInstallers.install(registry, ireps, loop_sites)
-    warn "== loop installers (#{recognized} of #{loop_sites.size} registered as accessor definitions) =="
+    warn "== loop installers (#{recognized} of #{loop_sites.size} registered as definitions) =="
     refused.sort.each { |why, count| warn "  left dynamic: #{why}#{count > 1 ? " (x#{count})" : ''}" }
   end
   declared_modules = module_names.to_set
