@@ -51,8 +51,16 @@ t=$(trace_start)
 pflag=(-P); [ -z "${NFCXX_ASAN:-}" ] || pflag=()
 # macOS: the SDK's headers declare nullability keywords (_Nullable, _Nonnull) that cproc does not know; cproc's own
 # configure defines them away only for its internal preprocessor, which this clang -E does not use.
+# NFCXX_MACOS_SYSROOT=DIR: a macOS arm64 compile check from any host. The C is preprocessed by clang for arm64-apple-darwin
+# with the headers in DIR (tests/macos-cleanroom/include, written from public sources, not the SDK). Compile and
+# assembly only: no link, no sret thunks (they need the SDK's export list), and the output is not run.
+macos=0; [ "$(uname -s)" = Darwin ] && macos=1
+if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then
+  macos=1
+  CCBIN=(clang --target=arm64-apple-darwin -nostdinc -isystem "$NFCXX_MACOS_SYSROOT" -isystem "$(clang -print-resource-dir)/include")
+fi
 darwin=()
-if [ "$(uname -s)" = Darwin ]; then
+if [ $macos = 1 ]; then
   # cproc has no 128-bit integers; the SDK's ARM register state (sys/signal.h) has __uint128_t arrays. A two-word
   # struct of the same size stands in for it (only the layout of those ucontext members is affected).
   # __int128_t is a 64-bit integer here: libc++'s filesystem clock uses it for nanosecond counts that fit in 64 bits, and
@@ -72,7 +80,7 @@ else
   ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} -undef -D__CPROC__ ${darwin[@]+"${darwin[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
 fi
 # macOS and Linux aarch64: calls to the exported library functions that return a class go through the thunks of scripts/sret.sh.
-if [ -n "$("$(dirname "$0")/sret.sh")" ]; then
+if [ -z "${NFCXX_MACOS_SYSROOT:-}" ] && [ -n "$("$(dirname "$0")/sret.sh")" ]; then
   rename="$(dirname "$0")/../build/sret/rename.sed"
   sed -E -f "$rename" "$tmp/pp.c" > "$tmp/pp.sret.c" && mv "$tmp/pp.sret.c" "$tmp/pp.c"
   # cproc has no _Atomic. libc++'s atomic operations are calls into libc++ (not inline), so the qualifier only matters
@@ -98,7 +106,7 @@ fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
 # macOS arm64: the aarch64-apple target (Apple's va_list, see scripts/cproc-apple-valist.patch); elsewhere the default.
-cprocarg=(); [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] && cprocarg=(-t aarch64-apple)
+cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t aarch64-apple) ;; esac
 "$cproc" ${cprocarg[@]+"${cprocarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 t=$(trace_start)
@@ -109,7 +117,7 @@ trace_end "$t" "qbe (IL to assembly)" qbe-backend
 t=$(trace_start)
 # Mach-O: QBE's Apple targets prefix every label with "_" (T.assym), so the names are looked up with it.
 symprefix=()
-if [ "$(uname -s)" = Darwin ]; then symprefix=(--sym-prefix=_); fi
+if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
 "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
 cat "$tmp/tail.s" >> "$tmp/out.s"
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
