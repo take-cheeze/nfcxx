@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Joins the BC2CPP_TRACE_PARAMS=1 dumps (tools/bc2cpp/param_trace.rb) with the static facts bc2cpp proved
+# Joins the BC2CPP_TRACE_TYPES=1 dumps (tools/bc2cpp/param_trace.rb) with the static facts bc2cpp proved
 # for each parameter (carried in every dump row) and, optionally, with BC2CPP_TRACE_ELSE=1 dumps
 # (tools/bc2cpp/else_trace.rb), to answer three questions:
 #
@@ -11,8 +11,8 @@
 #   (c) which parameters feed the unresolved by-name sends of the else-arm trace (ELSE_SITE rows whose
 #       origin is `parameter`), ranked by else-arm hits.
 #
-#   BC2CPP_TRACE_PARAMS=1 BC2CPP_TRACE_ELSE=1 (at bc2cpp time), then run the binary with
-#   BC2CPP_TRACE_PARAMS_OUT=params.txt BC2CPP_TRACE_ELSE_OUT=else.txt
+#   BC2CPP_TRACE_TYPES=1 BC2CPP_TRACE_ELSE=1 (at bc2cpp time), then run the binary with
+#   BC2CPP_TRACE_TYPES_OUT=params.txt BC2CPP_TRACE_ELSE_OUT=else.txt
 #   ruby scripts/bc2cpp/param_trace_report.rb [--top N] [--else else.txt ...] params.txt [...]
 #
 # Param dump rows (tab separated; a binary may append several, counts are summed):

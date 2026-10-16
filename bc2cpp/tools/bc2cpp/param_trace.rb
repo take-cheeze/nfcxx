@@ -3,9 +3,10 @@
 require 'stringio'
 require_relative 'else_trace'
 
-# PARAM_TRACE: opt-in runtime classes of the parameters of compiled methods and blocks.
+# PARAM_TRACE: opt-in runtime classes of the parameters of compiled methods and blocks, and of the values
+# their `return` statements hand back (RETURN_SITE rows).
 #
-# Off unless BC2CPP_TRACE_PARAMS=1 is set; the unset output is byte-identical to a build without this
+# Off unless BC2CPP_TRACE_TYPES=1 is set; the unset output is byte-identical to a build without this
 # file (bc2cpp.rb does not even require it). Set, bc2cpp's stdout is rewritten after codegen (nothing
 # in codegen reads it), like ElseTrace:
 #
@@ -26,7 +27,7 @@ require_relative 'else_trace'
 #
 # Each binary keeps, per parameter, its call count and up to MAX_CLASSES distinct runtime classes (the
 # real class, so a singleton class counts as its class), and appends to the file named by
-# BC2CPP_TRACE_PARAMS_OUT (stderr when unset) at exit. Every row carries the statically proven fact
+# BC2CPP_TRACE_TYPES_OUT (stderr when unset) at exit. Every row carries the statically proven fact
 # for the parameter that this bc2cpp run computed, so the dump is self-contained.
 # scripts/bc2cpp/param_trace_report.rb reads it, together with an ElseTrace dump.
 module ParamTrace
@@ -233,7 +234,7 @@ module ParamTrace
     retmeta = rets.empty? ? '""' : rets.map { |r| ElseTrace.c_string(r[:meta]) }.join(",\n  ")
     fnmeta = fns.empty? ? '""' : fns.map { |f| ElseTrace.c_string([f[:method], f[:fn], f[:block] ? 'block' : 'method'].join("\t")) }.join(",\n  ")
     <<~CPP
-      // BC2CPP_TRACE_PARAMS -- see tools/bc2cpp/param_trace.rb.
+      // BC2CPP_TRACE_TYPES -- see tools/bc2cpp/param_trace.rb.
       #include <stdio.h>
       #include <stdlib.h>
       #include <string.h>
@@ -280,7 +281,7 @@ module ParamTrace
         return v;
       }
       static void bc2cpp_param_dump_#{id}(void) {
-        const char* path = getenv("BC2CPP_TRACE_PARAMS_OUT");
+        const char* path = getenv("BC2CPP_TRACE_TYPES_OUT");
         FILE* f = (path && *path) ? fopen(path, "a") : stderr;
         unsigned long long entries = 0;
         unsigned used = 0;

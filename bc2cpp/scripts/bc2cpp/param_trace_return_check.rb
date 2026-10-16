@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Checks the BC2CPP_TRACE_PARAMS return tracing (tools/bc2cpp/param_trace.rb) on a generated-C++ fixture:
+# Checks the BC2CPP_TRACE_TYPES return tracing (tools/bc2cpp/param_trace.rb) on a generated-C++ fixture:
 # every `return` of a traced `_impl` is wrapped in bc2cpp_ret_hit_<sym>, the lambda inside a body is left
 # alone, and the static return fact rides in the site's meta row.
 #
