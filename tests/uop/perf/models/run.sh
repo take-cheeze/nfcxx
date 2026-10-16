@@ -5,6 +5,8 @@
 #   PY_ORT    python with onnx, onnxruntime and numpy (default: python3)
 #   PY_TG     python with tinygrad 0.14 and numpy (default: python3)
 #   MODELS_DIR  where the models and outputs go (default: a temporary directory, removed at exit)
+#   TRACE_DIR   set: write Chrome trace-event JSON per model and back end (kernel level): <model>.ort.trace.json from
+#               onnxruntime's profiler, <model>.nfcxx.trace.json from the C backend's kernel timers (NFCUOP_TRACE)
 #
 cd "$(dirname "$0")/../../../.."
 root=$PWD
@@ -24,14 +26,15 @@ L=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib
 c++ -std=c++17 -O2 -Ilib/uop "${L[@]}" tests/uop/perf/models/bench_models.cpp -o "$b" || { echo "FAIL build bench_models"; exit 1; }
 
 "$PY_ORT" tests/uop/perf/models/models.py export "$dir" || { echo "FAIL export"; exit 1; }
-"$PY_ORT" tests/uop/perf/models/models.py ort "$dir" "$runs" "$warm" || { echo "FAIL onnxruntime"; exit 1; }
+[ -z "${TRACE_DIR:-}" ] || mkdir -p "$TRACE_DIR"
+NFCUOP_TRACE_DIR=${TRACE_DIR:-} "$PY_ORT" tests/uop/perf/models/models.py ort "$dir" "$runs" "$warm" || { echo "FAIL onnxruntime"; exit 1; }
 "$PY_TG" tests/uop/perf/models/models.py tinygrad "$dir" "$runs" "$warm" || echo "tinygrad: failed (see stderr above)" >&2
 
 for f in "$dir"/*.onnx; do
   name=$(basename "$f" .onnx)
   shape=$(cat "$dir/$name.shape")
-  "$b" --onnx="$f" --input="$dir/$name.in.bin" --shape="$shape" --out="$dir/$name.nfcxx.bin" \
-    --runs="$runs" --warm="$warm" > "$dir/$name.nfcxx.json" || echo "nfcxx: failed on $name" >&2
+  NFCUOP_TRACE=${TRACE_DIR:+$TRACE_DIR/$name.nfcxx.trace.json} "$b" --onnx="$f" --input="$dir/$name.in.bin" --shape="$shape" \
+    --out="$dir/$name.nfcxx.bin" --runs="$runs" --warm="$warm" > "$dir/$name.nfcxx.json" || echo "nfcxx: failed on $name" >&2
 done
 # The nfcxx record is the same JSON shape as the others; the compare step reads the .json files.
 "$PY_ORT" tests/uop/perf/models/models.py compare "$dir"

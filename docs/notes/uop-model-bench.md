@@ -66,3 +66,13 @@ PY_ORT=<python with onnx, onnxruntime, numpy> PY_TG=<python with tinygrad 0.14 a
 
 The script builds `bench_models` with the same library list as the other perf tools, exports the models into a temporary
 directory, and prints one JSON line per model and back end, followed by the comparison.
+
+## Kernel-level traces
+
+`TRACE_DIR=DIR tests/uop/perf/models/run.sh` writes Chrome trace-event JSON per model and back end (open in https://ui.perfetto.dev):
+
+- `<model>.nfcxx.trace.json`: the C backend. With `NFCUOP_TRACE` set, `ut::Session` renders the C with per-kernel clock reads (`render_c(roots, profile)`, CLOCK_MONOTONIC), so there is one `run` span per timed run and one `kernel` span per kernel of it. Kernel spans carry the op, dtype and shape in their name. Without `NFCUOP_TRACE` the generated source is unchanged.
+- `<model>.ort.trace.json`: onnxruntime's own profiler (`SessionOptions.enable_profiling`), one event per node with its op type. It covers the warm-up runs too.
+- tinygrad: not traced. Its profiler writes its own packed format for the VIZ server, not Chrome-trace JSON.
+
+`tests/uop/perf/models/trace_test.sh` runs the MLP and CNN at batch 1 and 32 with 2 runs and checks: every run has kernel spans inside it, durations are non-negative, the kernel sum is within the run's duration plus a tolerance, and the ONNX Runtime profile has node events with op types. A kernel with no work (a reshape) can measure 0 µs at the clock's resolution, so only run spans must be positive.

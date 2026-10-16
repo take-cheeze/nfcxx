@@ -65,6 +65,8 @@ struct CProgram {
     int64_t bound = 0;          // the bound, or 0 when there is none
     int64_t minimum = 1;        // the least size a run may give it (a cut of a symbolic dimension reads up to its end)
   };
+  // Profiled programs (render_c with profile): one name per kernel, in the order of CModule::kernel_times.
+  std::vector<std::string> kernel_names;
   bool dynamic = false;         // the loops take the symbols' sizes at run time
   std::vector<Symbol> symbols;  // dynamic: in name order; `sizes[k]` of nfcuop_run is the size of symbols[k]
   // Dynamic: a run-time condition, checked by CModule::run before any code runs. `value` evaluated at the sizes must be at least 0,
@@ -85,7 +87,9 @@ struct CProgram {
 // Renders the graph of `roots` (several outputs share their common subgraph). Throws Error if two Vars of one name
 // differ in dtype or shape. A dynamic program needs every symbol of the graph to name a dimension of an input (else the
 // graph is rendered with integer loops).
-CProgram render_c(const std::vector<const UOp*>& roots);
+// profile: each kernel is bracketed by clock reads (CLOCK_MONOTONIC, microseconds) that CModule::kernel_times reads back. The
+// default source is unchanged, so a program rendered without profiling compiles as before.
+CProgram render_c(const std::vector<const UOp*>& roots, bool profile = false);
 
 // A compiled CProgram. The compiler is `cc` (a command line, split on spaces), or the environment variable NFCUOP_CC, or
 // "cc"; the command `nfcxx` is also fine (docs/notes/uop.md). Compilation errors come back as an Error carrying the
@@ -98,6 +102,10 @@ class CModule {
   // minimum and at most its bound (Error otherwise), and the outputs take the sizes too.
   std::vector<Array> run(const std::map<std::string, Array>& feeds) const;
   const CProgram& program() const { return prog_; }
+  // Profiled modules only: the start and end of each kernel of the last run, in monotonic microseconds (the clock of
+  // clock_gettime(CLOCK_MONOTONIC)), one entry per kernel of program().kernel_names.
+  bool profiled() const { return prof_read_ != nullptr; }
+  void kernel_times(std::vector<double>& begin, std::vector<double>& end) const;
   ~CModule();
   CModule(const CModule&) = delete;
   CModule& operator=(const CModule&) = delete;
@@ -108,6 +116,16 @@ class CModule {
   void* handle_ = nullptr;
   int (*fn_)(const void* const*, void* const*) = nullptr;                      // static programs
   int (*dyn_fn_)(const void* const*, void* const*, const int64_t*) = nullptr;  // dynamic programs
+  int (*prof_count_)() = nullptr;                                             // profiled programs only
+  void (*prof_read_)(double*, double*) = nullptr;
+};
+
+// One timed span of a C-backend np::Session run (NFCUOP_TRACE set): the whole run, named "run", or one kernel, named as in
+// CProgram::kernel_names. run is the index of the run. Times are monotonic microseconds.
+struct KernelTiming {
+  std::string name;
+  int run = 0;
+  double ts_us = 0, dur_us = 0;
 };
 
 }  // namespace nfcuop
