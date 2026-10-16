@@ -577,6 +577,11 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
     when 'MOVE'
       next IrepScans.follow(insn.regs[1])
     when 'GETIDX', 'GETIDX0'
+      # RBS_RECORD_TYPES (ADR 0454): a literal-key read of a checked record key, for guarded consumers only.
+      if insn.op == 'GETIDX' && !resolving_new && path.empty? && JoinDominance.guarded? && defined?(RbsRecordTypes) &&
+         (record_hint = RbsRecordTypes.read_hint(irep, i))
+        return record_hint
+      end
       return nil unless element_annotations && class_layout && registry
 
       # GETIDX overwrites its receiver register; GETIDX0 has a separate source.

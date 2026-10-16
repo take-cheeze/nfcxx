@@ -640,6 +640,9 @@ module RbsSignatures
       note(ap, iv.loc, 'info', 'TC1005',
            "#{iv.owner}##{iv.name}: #{t.text} is checked against the inference but not forced (an embedded slot needs a proof)")
     else
+      # A record type is RbsRecordTypes' (ADR 0454), which checks it and reports its own diagnostics.
+      return if t.text.start_with?('{')
+
       note(ap, iv.loc, 'info', 'TC1005', "#{iv.owner}##{iv.name}: type #{t.text} gives no hint")
     end
   end
