@@ -1516,6 +1516,14 @@ class SFn
     else
       trap_if(res(172, @spv.t_bool, c, @spv.c_u32(width)), 2)
     end
+    # The count has the width of the shifted value. A mixed-width shift (a 32-bit count of a 64-bit value, as the IR gives
+    # `x >> 32` on a u64) is valid SPIR-V, but the OpenCL device compiler drops the stores that depend on its result. The
+    # count is below the width here (checked above), so narrowing it is exact.
+    if wide?(ty) && !wide?(cty)
+      c = res(113, @spv.t_int(64), c)
+    elsif !wide?(ty) && wide?(cty)
+      c = res(113, @spv.t_int(32), c)
+    end
     if h == "cshl"
       canon(res(196, sty(ty), a, c), ty)
     else

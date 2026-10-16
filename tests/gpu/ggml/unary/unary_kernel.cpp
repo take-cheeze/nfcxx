@@ -7,7 +7,7 @@
 // and WARP_SIZE (16, the Intel build default of ggml-sycl's CMakeLists.txt). Three deviations are needed by the nfcxx
 // front end, not by the math: the bfloat16 branches are dropped (F32 only), the op lambdas are named functors, and the
 // kernels take F by const reference (a by-value empty functor passed into a nested call is lowered to a static object the
-// front end refuses). fastdiv's mul_hi is written from 16-bit partial products (see mulhi32). The host side is a main in the style of
+// front end refuses). fastdiv's mul_hi is the plain 64-bit product (see mulhi32). The host side is a main in the style of
 // fill_kernel.cpp: USM, a double-precision reference, and 64 guard slots past the output.
 // Build: scripts/sycl-build.sh --backend=opencl unary_kernel.cpp -o unary_kernel && ./unary_kernel
 #include <sycl/sycl.hpp>
@@ -79,15 +79,9 @@ static const sycl::uint3 init_fastdiv_values(uint32_t d) {
     return sycl::uint3(mp, L, d);
 }
 
-// The high 32 bits of a*b from 16-bit halves. Upstream is sycl::mul_hi<unsigned>, which the nfcxx SYCL library lacks; the
-// 64-bit product written out as (uint64_t)a*b >> 32 miscompiles on the nfcxx OpenCL device path (the stores that depend on
-// it are dropped, see the note in the report), so the high word is built from 16-bit partial products instead.
+// The high 32 bits of a*b. Upstream is sycl::mul_hi<unsigned>, which the nfcxx SYCL library lacks.
 static __dpct_inline__ uint32_t mulhi32(uint32_t a, uint32_t b) {
-    const uint32_t a_lo = a & 0xffffu, a_hi = a >> 16;
-    const uint32_t b_lo = b & 0xffffu, b_hi = b >> 16;
-    const uint32_t p0 = a_lo * b_lo, p1 = a_lo * b_hi, p2 = a_hi * b_lo, p3 = a_hi * b_hi;
-    const uint32_t mid = (p0 >> 16) + (p1 & 0xffffu) + (p2 & 0xffffu);
-    return p3 + (p1 >> 16) + (p2 >> 16) + (mid >> 16);
+    return (uint32_t) (((uint64_t) a * b) >> 32);
 }
 
 static __dpct_inline__ uint32_t fastdiv(uint32_t n, const sycl::uint3 fastdiv_values) {
