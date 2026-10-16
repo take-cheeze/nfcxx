@@ -17,11 +17,14 @@ struct BadCase : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
-// The emitted lines joined by " ~ " (the lines carry their own indentation, as the Ruby's emit writes them).
+// The emitted lines joined by " ~ " (the lines carry their own indentation, as the Ruby's emit writes them). A case is
+// (arith DTY PRESETS INSTR), (call DTY PRESETS INSTR) or (asm PRESETS INSTR); see the header comment.
 std::string run_case(const Node &c) {
-  if (c.kind != Node::List || c.items.size() != 4 || c.items[0].kind != Node::Atom || c.items[0].text != "arith")
-    throw BadCase("case");
-  const Node &presets = c.items[2];
+  if (c.kind != Node::List || c.items.empty() || c.items[0].kind != Node::Atom) throw BadCase("case");
+  const std::string &kind = c.items[0].text;
+  bool is_asm = kind == "asm";
+  if (!(kind == "arith" || kind == "call" || is_asm) || c.items.size() != (is_asm ? 3u : 4u)) throw BadCase("case");
+  const Node &presets = c.items[is_asm ? 1 : 2];
   if (presets.kind != Node::List) throw BadCase("presets");
   FnCtx ctx;
   for (const Node &p : presets.items) {
@@ -29,10 +32,20 @@ std::string run_case(const Node &c) {
       throw BadCase("preset");
     ctx.regs[p.items[0].text] = RegInfo{p.items[1].text, parse_type(&p.items[2])};
   }
-  Ty dty = parse_type(&c.items[1]);
-  const Node &x = c.items[3];
+  const Node &x = c.items[is_asm ? 2 : 3];
   if (x.kind != Node::List || x.items.empty() || x.items[0].kind != Node::Atom) throw BadCase("instr");
-  if (!ctx.arith(x.items[0].text, x, "%d", dty)) return "NOTARITH";
+  if (is_asm) {
+    if (x.items[0].text != "ptx-asm") throw BadCase("instr");
+    ctx.asm_stmt(x);
+  } else {
+    Ty dty = parse_type(&c.items[1]);
+    if (kind == "arith") {
+      if (!ctx.arith(x.items[0].text, x, "%d", dty)) return "NOTARITH";
+    } else {
+      if (x.items[0].text != "call") throw BadCase("instr");
+      if (!ctx.call(x, "%d", dty)) return "NOTCALL";
+    }
+  }
   std::string out;
   for (size_t i = 0; i < ctx.lines.size(); i++) {
     if (i) out += " ~ ";

@@ -1,8 +1,9 @@
 // The per-function emission state of scripts/pathb-ptx-emit.rb's class Fn (the body lines, the register and label
 // counters, the IR register map, the slots) and the arithmetic, comparison and conversion lowering that runs against
 // it: the Ruby's rval branches for wadd..cf2i and the lt..ne comparisons, and their helpers (checked_div,
-// checked_shift, compare, int_convert, float_to_int, canon). Phase 3 of the port; the memory, call, asm, atomic and
-// module lowering are not here yet and refuse by name.
+// checked_shift, compare, int_convert, float_to_int, canon), and (in lower_call.cpp) the device-intrinsic, warp and
+// atomic calls and the ptx-asm statement. Phase 3 of the port; the memory, module-function call and printf lowering
+// are not here yet and refuse by name.
 #pragma once
 
 #include <map>
@@ -55,4 +56,15 @@ class FnCtx {
   void int_convert(const std::string &dest, const Ty &ty, const std::string &a, const Ty &aty);
   void float_to_int(const std::string &dest, const Ty &ty, const std::string &a, const Ty &aty);
   void canon(const std::string &dest, const Ty &t);
+
+  // The Ruby's rval "call" branch for the device intrinsics (special-register reads), the warp shuffles, votes and
+  // reduce, and the atomics (device_builtin). Returns false for any other callee (the module's call_site, printf and
+  // the dynamic shared address are not ported): the caller then falls through, as the Ruby does.
+  bool call(const Node &x, const std::string &dest, const Ty &dty);
+  // The Ruby's stmt branch for ptx-asm (ptx_asm): an inline PTX statement.
+  void asm_stmt(const Node &s);
+
+ private:
+  void device_builtin(const std::string &name, const Node &x, const std::string &dest, const Ty &ty);
+  void full_mask(const Node &op, const std::string &name);
 };
