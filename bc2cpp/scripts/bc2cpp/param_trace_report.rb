@@ -20,6 +20,8 @@
 #   PARAM_FN    sym fnid entries method fn method|block
 #   PARAM_SITE  sym id calls overflow method fn method|block kind index name static
 #   PARAM_CLASS sym id class count
+#   RETURN_SITE sym id calls overflow method fn method|block kind=return ordinal static(ret=...)
+#   RETURN_CLASS sym id class count
 # static: comma-separated `kind=value` facts (argtypes, classarg, entryfix, numeric, pool, annot) or
 # `none:mono` (single definition, nothing proved) / `none:poly(N)` / `none:non_mandatory` / `none:block` /
 # `none:keyword`.
@@ -57,6 +59,7 @@ def allowed_classes(fact)
 end
 
 params = {}  # [sym, fn, name] => {...}
+rets = {}    # [sym, return id] => {...}
 symbols = {}
 fn_entries = Hash.new(0)
 ids = {}     # [sym, id] => key
@@ -80,6 +83,13 @@ ARGV.each do |path|
     when 'PARAM_CLASS'
       key = ids[[f[1], f[2].to_i]] or next
       params[key][:classes][f[3]] += f[4].to_i
+    when 'RETURN_SITE'
+      # [sym, id] => { calls:, overflow:, classes:, static:, label: } for each traced `return` statement.
+      rets[[f[1], f[2].to_i]] = { calls: f[3].to_i, overflow: f[4].to_i, classes: Hash.new(0),
+                                  method: f[5], fn: f[6], static: f[11] }
+    when 'RETURN_CLASS'
+      rets[[f[1], f[2].to_i]] or next
+      rets[[f[1], f[2].to_i]][:classes][f[3]] += f[4].to_i
     end
   end
 end
@@ -169,6 +179,26 @@ cands = mono.reject(&proven).sort_by { |p| [-p[:calls], p[:method], p[:index]] }
 cands.first(options[:top]).each_with_index do |p, i|
   puts format('%3d. %10d  %-70s %s  [%s]', i + 1, p[:calls], label(p), p[:classes].keys.first, p[:static])
 end
+puts ''
+
+returns = rets.values.select { |r| r[:calls].positive? }
+ret_facts = returns.select { |r| r[:static].start_with?('ret=') && r[:static] != 'ret=none' }
+ret_contradictions = returns.filter_map do |r|
+  allowed = case r[:static]
+            when 'ret=fixnum' then ['Integer']
+            when 'ret=array' then ['Array']
+            when /\Aret=class=(.+)\z/ then [Regexp.last_match(1)]
+            end
+  next unless allowed
+
+  bad = r[:classes].reject { |c, _| allowed.any? { |a| a == c || c.end_with?("::#{a}") } }
+  [r, bad] unless bad.empty?
+end
+puts "== (d) returns: #{rets.size} traced, #{returns.size} reached at run time, #{ret_facts.size} with a static return fact =="
+ret_contradictions.each do |r, bad|
+  puts "  CONTRADICTION #{r[:method]} [#{r[:fn]}] return #{r[:static]}  observed #{r[:classes].sort_by { |c, n| [-n, c] }.map { |c, n| "#{c} #{n}" }.join(', ')}  (outside the fact: #{bad.map(&:first).join(', ')})"
+end
+puts '  (none)' if ret_contradictions.empty?
 puts ''
 
 unless options[:else_files].empty?
