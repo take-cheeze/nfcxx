@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'core_hierarchy_sigs'
+
 # ARRAY_NEW_BLOCK (docs/adr/0391): `Array.new(n) { |i| BODY }` as an inlined loop.
 #
 # The send is a block-carrying native constructor: Class#new allocates, then Array#initialize
@@ -33,7 +35,9 @@
 # set is not observable.
 # BC2CPP_ARRAY_NEW_INLINE=0 keeps the BLOCK_FALLBACK call.
 class CodeGen
-  ARRAY_NEW_CHAIN_OWNERS = %w[Array Object BasicObject Class Module Kernel].freeze
+  # `Array.new` is looked up on Array's singleton chain (Array, Object, BasicObject), then on Class's ancestors
+  # (core_hierarchy.rbs).
+  ARRAY_NEW_CHAIN_OWNERS = (CoreHierarchySigs.superclasses_below('Array', nil) | CoreHierarchySigs.ancestors('Class')).freeze
 
   def array_new_inline_enabled?
     ENV['BC2CPP_ARRAY_NEW_INLINE'] != '0'

@@ -96,12 +96,6 @@ module FixnumBarrierShadow
       end
     end
 
-    def fixnum_proof_reaching_defs?(irep, ctx, need_idx, reg, owner_def, depth)
-      shadow_query(:reaching_defs, irep, need_idx, reg, super) do
-        super(irep, @fixnum_barrier_shadow_ctxs[irep.label], need_idx, reg, owner_def, depth)
-      end
-    end
-
     def proven_fixnum_operand?(irep, idx, reg, owner_def, depth = 0)
       shadow_query(:proven_fixnum_operand, irep, idx, reg, super) do
         super(irep, idx, reg, owner_def, depth)

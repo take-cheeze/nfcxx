@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'touch_scan'
+require_relative 'core_hierarchy_sigs'
 require_relative 'foreign_definers'
 require_relative 'core_defs'
 require_relative 'native_names'
@@ -21,7 +22,7 @@ require_relative 'scan_cache'
 # Every question defaults to "refuse"; `refusal` returns the reason as a Symbol.
 class ClosedWorld
   # method_missing/respond_to_missing? here reach every receiver.
-  GLOBAL_HOOK_OWNERS = %w[BasicObject Object Kernel].freeze
+  GLOBAL_HOOK_OWNERS = CoreHierarchySigs.ancestors('Object')
   BOOT_CLASSES = %w[BasicObject Object Module Class Kernel].freeze
   # Sends that define methods the registry walk may not attribute to an owner.
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
@@ -68,7 +69,7 @@ class ClosedWorld
   # Sends that run a block with another `self`, which breaks "self is its lexical owner".
   SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
 
-  attr_reader :global_refusal, :native_paths
+  attr_reader :global_refusal, :native_paths, :ruby_paths
 
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
@@ -87,6 +88,7 @@ class ClosedWorld
     @native_code_tokens = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
+    @outside_owner_name = nil
     @ruby_paths = ruby_paths
     # Per outside file: the constants it can create, reopen, subclass or rebind
     # (TouchScan, ADR 0256).
@@ -156,7 +158,8 @@ class ClosedWorld
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
-    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) && !(scoped && native_free)
+    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) &&
+                              @outside_owner_name != name && !(scoped && native_free)
 
     reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?, singleton_arms)
     return reason if reason
@@ -326,6 +329,35 @@ class ClosedWorld
     yield
   ensure
     @native_arms_name = previous
+  end
+
+  # OUTSIDE_OWNER_CALL (ADR 0468): while a caller ends the chain's else in a call checked against every
+  # outside (core, native or outside Ruby) class that defines `name` (CodeGen#guarded_fallback_line), those
+  # definitions no longer make the fallback's receiver unknowable; the Ruby-side gates still apply.
+  def with_outside_owner_call(name)
+    previous = @outside_owner_name
+    @outside_owner_name = name
+    yield
+  ensure
+    @outside_owner_name = previous
+  end
+
+  # SELF_NEW_LEAF (ADR 0468): `klass` and every class below it, when the closed world sees every one: the declared
+  # subclasses (matched by last path segment, as the hierarchy is), and none made by `Class.new(klass)`, an outside
+  # Ruby `class X < klass`, or an outside native source that spells the name (an `mrb_define_class` could subclass
+  # it). nil when any of those may exist. A singleton method of `klass` runs with one of these as `self`, an instance
+  # method of `klass` with an instance of one of them.
+  def known_subclasses(klass)
+    return nil if @global_refusal || !@wild.empty? || !@class_decls.key?(klass) || @rebound.include?(simple(klass))
+
+    set = Set[klass] | descendants(klass)
+    return nil unless set.all? { |k| @class_decls.key?(k) }
+
+    names = set.map { |k| simple(k) }.to_set
+    return nil if names.any? { |n| @dynamic_subclassed.include?(n) || @outside_ruby_supers.include?(n) }
+    return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
+
+    set.to_a.sort
   end
 
   # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby

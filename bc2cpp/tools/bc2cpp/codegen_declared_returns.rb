@@ -164,6 +164,7 @@ class CodeGen
                end
       @declared_return_report << "  DECLARED_RET #{entry.key} -> #{entry.text}: #{status}"
     end
+    check_block_returns
     @declared_return_diagnostics
   end
 
