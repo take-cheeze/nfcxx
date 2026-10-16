@@ -19,7 +19,6 @@ class CallSiteIndex
   # `Class.new(A) { def set(x) = super("s") }` super call reaches (that def is in a block, so not
   # in the registry: `set` stays MONO) would look fed by its direct callers only.
   SUPER_OP = 'SUPER'
-  NAME_RE = /:([\w+\-*\/<>=!?\[\]&|^~%@]+)/
 
   def self.build(ireps)
     by_name = Hash.new { |hash, name| hash[name] = [] }

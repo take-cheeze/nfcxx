@@ -128,8 +128,6 @@ class YieldReach
     end
   end
 
-  def may_yield?(label) = !yield_free?(label)
-
   # The raw answer, also for a world the proof does not cover (a closed world with a global refusal): the
   # refusal of methods under a Fiber is best effort there, as it always was.
   def may_yield_unsealed?(label)

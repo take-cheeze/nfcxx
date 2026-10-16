@@ -124,16 +124,6 @@ module BytecodeIR
       seen
     end
 
-    # Does every path from the method entry to +target_index+ pass through
-    # +dominator_index+? false when +target_index+ is unreachable.
-    def dominates?(dominator_index, target_index, include_handlers: false)
-      return false if @instructions.empty?
-      return false unless reachable_from(0, include_handlers: include_handlers).include?(target_index)
-      return true if dominator_index == target_index
-
-      !reachable_from(0, include_handlers: include_handlers, avoiding: dominator_index).include?(target_index)
-    end
-
     # Does every path from +from+ that completes (ends at an instruction with
     # no NORMAL successor: RETURN, STOP, the last instruction...) pass through
     # +to+? Exits are judged on normal flow even with +include_handlers+: a

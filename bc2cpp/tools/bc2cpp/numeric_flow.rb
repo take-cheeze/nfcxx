@@ -107,7 +107,6 @@ module NumericFlow
   NO_WRITE_OPS = Set['NOP', 'ENTER', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RETURN', 'RETURN_BLK', 'RETSELF',
                      'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP', 'SETUPVAR', 'SETIDX', 'DEBUG',
                      'KEYEND', 'RAISEIF', 'MATCHERR'].freeze
-  COND_BRANCHES = Set['JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   # How many copies of one variable a recorded class test follows.
   CLASS_TEST_CHAIN_MAX = 8
   # How many branches on one test boolean a narrowed edge is carried through.
@@ -285,7 +284,7 @@ module NumericFlow
   C_NONE = 4 # EXEC BLKCALL
   CALL_KINDS = { 'SEND' => C_SEND, 'SEND0' => C_SEND, 'SSEND' => C_SEND, 'SSEND0' => C_SEND, 'SENDB' => C_BLOCK,
                  'SSENDB' => C_BLOCK, 'SUPER' => C_SUPER, 'EXEC' => C_NONE, 'BLKCALL' => C_NONE }.freeze
-  # Silent kinds (see #silent_call?): how the op decides whether it dispatches to Ruby.
+  # Silent kinds (see #step_silent_call?): how the op decides whether it dispatches to Ruby.
   S_NONE = 0
   S_NUMERIC = 1 # ADD SUB MUL DIV EQ LT LE GT GE
   S_INDEX = 2 # GETIDX SETIDX
@@ -902,11 +901,6 @@ module NumericFlow
   SILENT_CALL_OPS = Set['ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'GETIDX', 'GETIDX0', 'SETIDX',
                         'STRCAT', 'HASH', 'HASHADD', 'HASHCAT', 'ARYCAT', 'ARYSPLAT', 'AREF', 'RANGE_INC',
                         'RANGE_EXC', 'GETCONST', 'GETMCNST'].freeze
-
-  # Judged on the state before the op, whose operands are still intact.
-  def silent_call?(insn, state, ctx)
-    step_silent_call?(decode_step(insn), state, ctx.is_a?(Ctx) ? ctx : Ctx.from_hash(ctx))
-  end
 
   def step_silent_call?(step, state, c)
     silent = step.silent

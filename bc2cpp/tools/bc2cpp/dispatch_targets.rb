@@ -522,7 +522,7 @@ def trace_new_target_reaching(irep, idx, reg, rest, opts)
     defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
     return nil if defs.nil? || defs.empty?
 
-    ivar_classes, mand, arg_classes = rest
+    _ivar_classes, mand, arg_classes = rest
     classes = defs.map do |definition|
       if definition.entry?
         # Register N is argument N for N <= mand; only an annotation names its class.
@@ -1054,17 +1054,4 @@ def trace_eqq_literal_receiver(irep, idx, reg)
   end
   # Anything else, or never written (an argument or block-entry register), is
   # not a literal: no "argument is always literal N" fact exists to fall back on.
-end
-
-# FLOAT_DIV_RECEIVER: an mrbc float pool entry is always an immediate Float, so
-# Float#/ can use its core body without a runtime receiver check. Follow only
-# MOVEs; every other write loses this exact-type proof.
-def trace_float_literal_receiver(irep, idx, reg)
-  return false unless irep && idx && reg
-
-  insn = irep.source_writer(idx - 1, reg)
-  return false unless insn&.op == 'LOADL'
-
-  entry = insn.pool_index && irep.pool[insn.pool_index]
-  entry.is_a?(Hash) && entry[:type] == :float
 end

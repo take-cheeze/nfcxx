@@ -575,18 +575,6 @@ module TypeFacts
     []
   end
 
-  def const_sites(ctx)
-    found = {}
-    ctx.ireps.each_value do |irep|
-      next unless irep.file
-
-      irep.each_with_op('SETCONST') do |insn, _|
-        found[insn.const_name.to_s] ||= [relative(ctx, irep.file), insn.lineno]
-      end
-    end
-    found
-  end
-
   # ------------------------------------------------------------------------------------------------ annotations
 
   def annotation_rows(ctx, defs, reader)
@@ -631,7 +619,6 @@ module TypeFacts
   # a declared class RETURN against a COMPLETE inferred class set that lacks it.
   def contradiction_rows(ctx, gen, defs, reader)
     out = []
-    by_irep = defs.to_h { |d| [d.irep, d] }
     seen = Set.new
     add = lambda do |d, slot, declared, inferred, line_irep|
       key = [d.irep, slot, declared]

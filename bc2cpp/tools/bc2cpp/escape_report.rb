@@ -12,7 +12,6 @@
 # `confined` (CONFINED_LAMBDA_CALL proof held), `lambda` (LAMBDA_FALLBACK without a proof), `-` (not
 # an RProc site, or no code is emitted for it).
 module EscapeReport
-  CREATING = %w[LAMBDA BLOCK ARRAY ARRAY2 HASH STRING].freeze
   TODAY = {}
   LAMBDA_REGIONS = {}
 
