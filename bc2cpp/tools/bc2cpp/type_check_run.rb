@@ -28,7 +28,6 @@ module TypeCheckRun
     }
     if sources
       env['BC2CPP_SELF_REGISTERING'] = '1'
-      env['BC2CPP_RECEIVER_PROOF_ANY'] = '1'
     else
       env['ONLY_OWNERS'] = BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }.join(',')
     end

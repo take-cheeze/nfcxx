@@ -62,10 +62,7 @@ module BlockCoreDirectFallback
       kernel = block_core_kernel_line(d, recv, name, argv, tail)
       return kernel if kernel
 
-      reasons = @block_core_reasons && @block_core_reasons[[name, argv.size]]
-      return tail unless reasons&.any?
-
-      return "// BLOCK_CORE_WHY :#{name}/#{argv.size} -- #{reasons.uniq.join('; ')}\n  #{tail}"
+      return tail
     end
 
     # EXACT_CORE_RECEIVER (ADR 0280): a proven exact class leaves one arm and no class test. The
@@ -196,10 +193,9 @@ module BlockCoreDirectFallback
     unguarded
   end
 
-  # BC2CPP_BLOCK_CORE_WHY=1 reports, on stderr, why a class gets no arm for a name.
+  # Why a class gets no arm for a name: recorded only while block_send_why collects them (block_send_report.rb).
   def block_core_refuse(klass, name, arity, reason)
-    (@block_core_reasons ||= Hash.new { |hash, key| hash[key] = [] })[[name, arity]] << "#{klass}: #{reason}" if
-      ENV['BC2CPP_BLOCK_CORE_WHY'] == '1'
+    (@block_core_reasons ||= Hash.new { |hash, key| hash[key] = [] })[[name, arity]] << "#{klass}: #{reason}" if @block_core_why_on
     nil
   end
 

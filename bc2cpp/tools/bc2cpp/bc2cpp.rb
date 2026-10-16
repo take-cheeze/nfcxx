@@ -137,7 +137,6 @@ require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
-require_relative 'codegen_method_inline'
 require_relative 'codegen_eqq'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
@@ -614,9 +613,6 @@ if $PROGRAM_NAME == __FILE__
     trusted = slot.keys.count { |_, t| t[:trusted] == Set['Array'] }
     warn "  RECORD_HASH  @#{name}  (#{slot.literals} literal#{'s' unless slot.literals == 1}, #{slot.keys.size} keys, " \
          "#{slot.reads} reads, #{slot.stores} stores; non-nil Array keys: #{arrays} strict, #{trusted} trusted)"
-    next unless ENV['BC2CPP_RECORD_HASH_KEYS'] == '1'
-
-    slot.keys.sort.each { |key, t| warn "    :#{key} strict=#{t[:strict].map(&:to_s).sort.join('|')} trusted=#{t[:trusted].map(&:to_s).sort.join('|')}" }
   end
   record_hash.refused.sort.each { |name, why| warn "  RECORD_HASH_REFUSED  @#{name}  (#{why})" }
   warn ''
