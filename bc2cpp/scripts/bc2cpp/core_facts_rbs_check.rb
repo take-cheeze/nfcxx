@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Core method facts declared in sig/native (docs/adr/0470). Host only, a few seconds:
+# Core method facts declared in sig/native (docs/adr/0473). Host only, a few seconds:
 # 1. each fact file loads, and its loader rejects the malformed shapes it exists to keep out;
 # 2. the facts read from the RBS match the real 3rd/mruby sources (skipped, with a SKIP line, when the submodule is
 #    not checked out): the native registrations' owners and arities, the mrblib bodies, the Proc call_proc entries;

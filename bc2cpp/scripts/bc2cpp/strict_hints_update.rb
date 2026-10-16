@@ -19,8 +19,8 @@ ENV[StrictHints::ENV_NAME] = 'all'
 # (ADR 0428), and both must be listed.
 sites = BC2CPP_COMPILED_GEMS.keys.product([nil, BC2CPP_HOT_METHODS_PATH]).map do |gem_name, hot|
   Thread.new do
-    _out, err, status = NomethodReviewedProbe.run(gem_name, root, mrbc, hot_methods: hot, allow: true)
-    raise "#{gem_name}: bc2cpp.rb failed:\n#{err[-4000..] || err}" unless status.success?
+    # Read past a reviewed-list abort (the unreviewed sites are what this lists); any other failure raises.
+    _out, err, = NomethodReviewedProbe.listing_run(gem_name, root, mrbc, hot_methods: hot)
 
     StrictHints.parse_listing(err).map { |key| { key: key, gem: gem_name } }
   end

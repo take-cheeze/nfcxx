@@ -5,7 +5,7 @@ require_relative 'native_core_result_sigs'
 require_relative 'core_hierarchy_sigs'
 
 # CoreFactSigs: facts about mruby core methods that used to be Ruby constants in the generator, read from RBS files
-# under sig/native/ (docs/adr/0470). Each file holds one kind of fact; its loader accepts only the declaration shape
+# under sig/native/ (docs/adr/0473). Each file holds one kind of fact; its loader accepts only the declaration shape
 # that fact has and raises on anything else, so a file edit cannot slip a malformed claim past it. The owners must be
 # classes or modules of sig/native/core_hierarchy.rbs, declared with the right keyword. scripts/bc2cpp/
 # core_facts_rbs_check.rb checks every entry against the 3rd/mruby sources.

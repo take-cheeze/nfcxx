@@ -415,6 +415,16 @@ module EscapeAnalysis
       cyclic([:summary, mdef.object_id, position]) { compute_summary(mdef, position) }
     end
 
+    # RBS_RECORD_TYPES' interprocedural scan (ADR 0454): may a call of +name+ keep its argument +k+? Callees
+    # are every definition the name reaches (the by-name set); a native or unenumerable one keeps it. With
+    # +klass+ the argument is known to be exactly an instance of that class, so each callee's own sends on it
+    # resolve through that class's ancestry (the summary is computed and memoised per class).
+    def name_captures_arg?(name, k, klass: nil)
+      return true unless @world.reflective_sites.empty?
+
+      arg_captured_by_name?(name, k, @world.defs_named(name), klass)
+    end
+
     # Does the closure BLOCK/LAMBDA at irep[index] leave its frame?
     def closure_escapes?(irep, index)
       cyclic([:closure, irep.label, index]) { creation(irep, index).escapes? }
@@ -465,12 +475,25 @@ module EscapeAnalysis
       label && @world.ireps[label]
     end
 
-    # Leading mandatory arguments sit in R1.. on entry; other layouts are not modelled.
-    def arg_captured?(irep, k)
+    # Leading mandatory arguments sit in R1.. on entry; other layouts are not modelled. +klass+: the exact
+    # class of the argument, when the caller knows it.
+    def arg_captured?(irep, k, klass = nil)
       enter = irep.enter
       return true unless enter && k < enter.enter_fields[0].to_i
 
-      flow(irep, { 0 => { (1 + k).to_s => true } }).escapes?
+      flow(irep, { 0 => { (1 + k).to_s => true } }, value_class: klass).escapes?
+    end
+
+    # [:arg, k] of +mdef+ for an argument that is exactly a +klass+ instance.
+    def arg_captured_as?(mdef, k, klass)
+      cyclic([:summary_as, mdef.object_id, k, klass]) do
+        if mdef.irep.nil? && mdef.kind == :ivar_accessor
+          mdef.name.end_with?('=')
+        else
+          irep = body_irep(mdef)
+          irep.nil? || arg_captured?(irep, k, klass)
+        end
+      end
     end
 
     # The block of a method is born at BLKPUSH (level 0) and, with a block parameter, in its local.
@@ -744,11 +767,11 @@ module EscapeAnalysis
     end
 
     # No native has an audited argument fact: a name with a native definition keeps every argument.
-    def arg_captured_by_name?(name, k, list)
+    def arg_captured_by_name?(name, k, list, klass = nil)
       return true if list.nil? || list.empty? || installer?(list) || @world.native_name?(name)
       return true unless opaque_defs(list).empty?
 
-      list.any? { |d| captures?(d, [:arg, k]) }
+      list.any? { |d| klass ? arg_captured_as?(d, k, klass) : captures?(d, [:arg, k]) }
     end
 
     def block_captured_by_name?(name, list)

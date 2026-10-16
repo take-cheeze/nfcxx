@@ -233,6 +233,35 @@ class CodeGen
     owner if owner && @closed_world.class_declared?(owner) && @closed_world.instance_class?(owner)
   end
 
+  # IS_A_GUARD (ADR 0456, RBS_CHECKED_PARAMS): the class K when the SEND at +index+ is `x.is_a?(K)` or
+  # `x.kind_of?(K)` and a true answer makes x an instance of exactly K; else nil. NIL_NARROWING reads it on the true
+  # edge of the branch on the SEND's result.
+  #   * the name reaches only Kernel's native mrb_obj_is_kind_of (class_test_name_safe?: no Ruby, foreign, computed
+  #     or other native definition anywhere, no BasicObject subclass that would method_missing it);
+  #   * the argument is a straight-line GETCONST / GETMCNST chain no branch bypasses (straight_line_constant_name)
+  #     that names exactly the declared class K, which nothing inherits from (ClosedWorld#is_a_guard_constant?).
+  # Not class_narrowing_enabled?: this runs before the code generator's tables exist, and needs none of them.
+  def is_a_guard_class(irep, index)
+    insn = irep&.instructions&.[](index)
+    return nil unless insn && insn.op == 'SEND' && %w[is_a? kind_of?].include?(insn.sym)
+    return nil unless insn.n_spec == '1' && insn.nk_spec.nil?
+    return nil unless @closed_world && @closed_world.global_refusal.nil? && class_test_name_safe?(insn.sym)
+
+    written = straight_line_constant_name(irep, index, (insn.reg.to_i + 1).to_s)
+    written && @closed_world.is_a_guard_constant?(written) ? written : nil
+  end
+
+  # IS_A_GUARD: the `raise` SSEND at +index+ never returns normally. Kernel#raise (kernel.c mrb_f_raise, which ends in
+  # mrb_exc_raise whatever it is given) is the only definition anywhere (class_test_name_safe?), so the instruction
+  # after it is reached only by a jump. class_narrowing_noreturn_call?'s rule, without the flag that gates the
+  # code generator's CLASS_NARROWING.
+  def raise_never_returns?(irep, index)
+    insn = irep&.instructions&.[](index)
+    return false unless insn && %w[SSEND SSEND0].include?(insn.op) && insn.sym == 'raise'
+
+    !@closed_world.nil? && @closed_world.global_refusal.nil? && class_test_name_safe?('raise')
+  end
+
   # Symbol's chain (ADR 0429): the closed world has no class_parent for it, so without this a Symbol bit is unknown and
   # passes both edges of every kind_of test. Only a name class_test_constant admits reaches it, and none of those is
   # a superclass or a module of Symbol, so the verdict is exact. It is not in CLASS_TEST_CORE_CHAIN, which also

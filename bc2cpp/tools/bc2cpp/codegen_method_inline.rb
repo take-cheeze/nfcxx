@@ -68,6 +68,9 @@ class CodeGen
       stack.pop
     end
     local << "#{exit_label}:;\n"
+    # DECLARED_RETURN_GUARD (ADR 0455): an inlined body keeps its runtime-checked return declaration's check.
+    guard = declared_return_guard(target.irep)
+    local << declared_return_guard_statement(guard, result) if guard
     if @resumable
       # These regions cannot suspend; only the caller needs persistent registers.
       # Rename identifiers outside literals so frame assembly ignores local values.

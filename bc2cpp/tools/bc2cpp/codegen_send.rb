@@ -332,8 +332,9 @@ class CodeGen
       generic_target = known && !listed_target && @closed_world&.stable_class_constant?(known) &&
                        stable_standard_constructor_class?(known)
       if known && (listed_target || generic_target)
-        init_defs = @registry['initialize'].select { |md| md.owner == known }
-        init_def = init_defs.one? ? init_defs.first : nil
+        # INHERITED_DIRECT_CONSTRUCT (ADR 0456): the initialize the ancestor chain resolves to, the class's own or
+        # an ancestor's (direct_construct_init_def).
+        init_def = direct_construct_init_def(known)
         # DIRECT_CONSTRUCT_TARGETS' soundness bar, checked live against this run's
         # registry and ONLY_OWNERS.
         # 1/2: no custom `def self.new`/`def self.allocate` on this class ("X.singleton"
@@ -400,6 +401,8 @@ class CodeGen
                           else
                             !@only_owners || @only_owners.include?(known)
                           end
+          # An inherited initialize's `_impl` is emitted with its own owner.
+          owner_emitted &&= init_def.owner == known || !@only_owners || @only_owners.include?(init_def.owner)
           if owner_emitted
             if listed_target
               accessor = direct_construct_class_expr(known)
@@ -408,7 +411,8 @@ class CodeGen
             end
             @direct_alloc_used = true
             stable_constructor = stable_standard_constructor_class?(known)
-            init_impl = cpp_name(known, 'initialize') + '_impl'
+            init_impl = cpp_name(init_def.owner, 'initialize') + '_impl'
+            inherited = init_def.owner == known ? '' : " (inherited from #{init_def.owner}, the initialize #{known}'s ancestor chain resolves to)"
             # POSITIONAL_OPTIONAL_CONSTRUCT: pad the omitted optionals, then pass
             # how many were really given, so `_impl`'s jump table substitutes the
             # defaults for exactly the omitted positions. Omitted optionals never
@@ -431,7 +435,7 @@ class CodeGen
                     "#{init_impl}) -- skips Class#new's own allocate+initialize dispatch chain entirely; ",
                     "#{known}#initialize's own return value is discarded (real Ruby .new always returns ",
                     "the new object, never whatever #initialize itself returns).\n",
-                    "  // #{known}#initialize declares arity [#{t_mand}, #{t_mand + t_opt}] and this call ",
+                    "  // #{known}#initialize#{inherited} declares arity [#{t_mand}, #{t_mand + t_opt}] and this call ",
                     "passes #{n}.#{opt_phrase}",
                     (stable_constructor ?
                       "  // CLOSED_WORLD_STABLE_CLASS: the class constant and constructor lookup cannot be " \

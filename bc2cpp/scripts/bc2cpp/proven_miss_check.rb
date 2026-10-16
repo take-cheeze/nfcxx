@@ -12,7 +12,8 @@
 #   - a fixture world: the error fires for proven-class misses, and does NOT
 #     fire for hint-only receivers, respond_to?-guarded sends, method_missing
 #     classes, rescued sends, inherited definitions or defined names;
-#   - bc2cpp.rb aborts on an unreviewed site and lists it with the allow switch;
+#   - bc2cpp.rb aborts on an unreviewed site in an engine-owner method; a fixture
+#     program's sites are listed, and judged here through a scope with its owners;
 #   - the real wio closed world has exactly the listed sites, in both
 #     directions, and its hot-only codegen passes the gate.
 #
@@ -23,6 +24,7 @@ require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/closed_world'
+require_relative '../../tools/bc2cpp/wio_world_env'
 
 root = File.expand_path('../..', __dir__)
 mrbc = ENV['MRBC'] || 'mrbc'
@@ -39,15 +41,18 @@ marked = { owner: 'A', name: 'm', code: "r1 = x;\n  #{ProvenMiss.marker('foo', :
 plain = { owner: 'B', name: 'n', code: "r1 = y;\n" }
 compiled = [marked, plain]
 sites = ProvenMiss.sites(compiled)
+all = ReviewScope::ALL
 check.call('a marked site becomes its "Owner#method -> name (kind Class)" key',
            sites.map { |s| s[:key] } == ['A#m -> foo (fresh_new B)'])
-check.call('a listed site passes', ProvenMiss.violations(sites, compiled, reviewed: Set['A#m -> foo (fresh_new B)']).empty?)
-v = ProvenMiss.violations(sites, compiled, reviewed: Set[])
+check.call('a listed site passes', ProvenMiss.violations(sites, compiled, scope: all, reviewed: Set['A#m -> foo (fresh_new B)']).empty?)
+v = ProvenMiss.violations(sites, compiled, scope: all, reviewed: Set[])
 check.call('an unlisted site fails', v == ['unreviewed proven-class miss: A#m -> foo (fresh_new B)'])
-v = ProvenMiss.violations(sites, compiled, reviewed: Set['A#m -> foo (fresh_new B)', 'B#n -> gone (literal Array)'])
+v = ProvenMiss.violations(sites, compiled, scope: all, reviewed: Set['A#m -> foo (fresh_new B)', 'B#n -> gone (literal Array)'])
 check.call('a listed site gone from a compiled method fails as stale', v.size == 1 && v.first.start_with?('stale'))
 check.call('a hot-only run (stale: false) checks unreviewed sites only',
-           ProvenMiss.violations(sites, compiled, reviewed: Set['B#n -> gone (literal Array)'], stale: false).size == 1)
+           ProvenMiss.violations(sites, compiled, scope: all, reviewed: Set['B#n -> gone (literal Array)'], stale: false).size == 1)
+check.call('a site outside the scope is not judged',
+           ProvenMiss.violations(sites, compiled, scope: Set['B'], reviewed: Set[]).empty?)
 check.call('the stderr listing parses back',
            ProvenMiss.parse_listing("  PROVEN_MISS A#m -> foo? (lexical_self X::Y)\n") ==
              [{ key: 'A#m -> foo? (lexical_self X::Y)' }])
@@ -139,17 +144,30 @@ WORLD = <<~'RUBY'
   end
 RUBY
 gems_env = Shellwords.join(NomethodReviewedProbe.wio_gems(root).map { |n, d| "#{n}=#{d}" })
-generate = lambda do |allow|
+ENGINE_WORLD = <<~'RUBY'
+  class PmPet
+    def pm_beep; 1; end
+  end
+  module Game
+    class Shop
+      def pm_fires
+        PmPet.new.pm_fresh_typo
+      end
+    end
+  end
+RUBY
+generate = lambda do |world|
   Dir.mktmpdir do |dir|
     path = File.join(dir, 'pm_fixture.rb')
-    File.write(path, WORLD)
+    File.write(path, world)
+    # The repo's sig/bc2cpp signatures describe the engine's classes; this fixture program has none of them.
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'pm_fixture', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
-            'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env,
-            NomethodReviewed::ALLOW_ENV => (allow ? 'allow' : nil) }
-    Open3.capture3(env, RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+            'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env,
+            'BC2CPP_SIG_DIRS' => '' }
+    Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
   end
 end
-out, err, status = generate.call(true)
+out, err, status = generate.call(WORLD)
 found = ProvenMiss.parse_listing(err).map { |s| s[:key] }.sort
 expected = [
   'PmHolder#fires_constant_object -> pm_const_typo (constant_object PmPet)',
@@ -160,17 +178,21 @@ expected = [
   'PmHolder#fires_self_implicit -> pm_self_typo (lexical_self PmHolder)',
   'PmHolder#fires_string_literal -> pm_string_typo (literal String)'
 ]
-check.call('the fixture generates with the allow switch', status.success?)
+check.call('the fixture program (outside the reviewed program) generates and lists its sites', status.success?)
 (expected - found).each { |k| puts "    missing: #{k}" }
 (found - expected).each { |k| puts "    unexpected: #{k}" }
 check.call('every proven-class miss is a site; hints, probes, method_missing, rescue and defined names are not',
            found == expected)
+check.call('the gate judges those sites through a scope that includes the fixture owner',
+           ProvenMiss.violations(ProvenMiss.parse_listing(err), [], scope: Set['PmHolder'], reviewed: Set[]).size ==
+             expected.size)
 check.call('the site keeps a real dispatch (the miss raises NoMethodError at run time as before)',
            out.include?('/* CLOSED_WORLD proven_miss: fresh_new PmPet.pm_fresh_typo */') &&
            out.match?(%r{/\* CLOSED_WORLD proven_miss: fresh_new PmPet\.pm_fresh_typo \*/\n\s+r\d+ = (?:mrb_funcall|bc2cpp_send)\(}))
-_out, err, status = generate.call(false)
-check.call('without the allow switch bc2cpp.rb aborts and names the unreviewed site',
-           !status.success? && err.include?('unreviewed proven-class miss: PmHolder#fires_fresh_new -> pm_fresh_typo'))
+_out, err, status = generate.call(ENGINE_WORLD)
+check.call('in an engine-owner method bc2cpp.rb aborts and names the unreviewed site, after every listing',
+           !status.success? && err.include?('unreviewed proven-class miss: Game::Shop#pm_fires -> pm_fresh_typo') &&
+             NomethodReviewedProbe.review_abort?(status, err))
 
 # -- the real wio closed world ------------------------------------------------------
 
