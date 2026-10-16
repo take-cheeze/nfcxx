@@ -1,8 +1,9 @@
 // Prints the typed IR as C11. The output is compiled by the system C compiler.
 //
 // Integer arithmetic goes through checked helpers that trap on overflow and
-// division by zero, as Swift does. Every expression is fully parenthesized, so
-// the emitter never has to reason about C precedence.
+// division by zero, as Swift does. Class instances start with an `sw_obj`
+// header holding the reference count and destroy function. Every expression
+// is fully parenthesized, so the emitter never has to reason about C precedence.
 
 enum CEmit {
   static let prelude = """
@@ -47,34 +48,107 @@ enum CEmit {
     static void sw_print_bool(bool v) {
       printf("%s\\n", v ? "true" : "false");
     }
+
+    typedef struct sw_obj {
+      int64_t rc;
+      void (*destroy)(void *);
+    } sw_obj;
+    static void *sw_retain(void *p) {
+      if (p) ((sw_obj *)p)->rc++;
+      return p;
+    }
+    static void sw_release(void *p) {
+      if (!p) return;
+      sw_obj *o = p;
+      if (--o->rc == 0) {
+        o->rc = 1;  // deinit may retain and release self; the count must not reach 0 again
+        o->destroy(p);
+      }
+    }
     """
 
   static func emit(_ program: Program) -> String {
     var out = prelude + "\n\n"
-
-    // Struct definitions, dependencies first. Recursion has already been rejected.
-    var emitted = Set<String>()
-    func emitStruct(_ s: StructInfo) {
-      if emitted.contains(s.name) { return }
-      emitted.insert(s.name)
-      for field in s.fields {
-        if case .structure(let dep) = field.ty,
-           let depInfo = program.structs.first(where: { $0.name == dep }) {
-          emitStruct(depInfo)
-        }
-      }
-      out += "typedef struct \(s.cName) {\n"
-      for field in s.fields {
-        out += "  \(field.ty.cName) \(field.cName);\n"
-      }
-      out += "} \(s.cName);\n\n"
+    for c in program.classes {
+      out += "typedef struct s_\(c.name) s_\(c.name);\n"
     }
-    for s in program.structs { emitStruct(s) }
+    out += "\n"
+
+    // Value types (structs and optionals) come next, dependencies first.
+    var defined = Set<String>()
+    var values = ""
+    func defineValue(_ ty: Ty) {
+      guard !defined.contains(ty.mangled) else { return }
+      defined.insert(ty.mangled)
+      switch ty {
+      case .structure(let name):
+        guard let info = program.structs.first(where: { $0.name == name }) else { return }
+        for field in info.fields {
+          if case .structure = field.ty { defineValue(field.ty) }
+          if case .optional = field.ty { defineValue(field.ty) }
+        }
+        values += "typedef struct s_\(name) {\n"
+        for field in info.fields {
+          values += "  \(field.ty.cName) \(field.cName);\n"
+        }
+        values += "} s_\(name);\n\n"
+      case .optional(let inner):
+        if case .structure = inner { defineValue(inner) }
+        let opt = ty.cName
+        values += "typedef struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n} \(opt);\n"
+        values += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
+        values += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
+        values += "  return v.value;\n}\n"
+        if inner.isClass {
+          values += "static \(opt) ret_\(opt)(\(opt) v) {\n  if (v.some) sw_retain(v.value);\n  return v;\n}\n"
+          values += "static void rel_\(opt)(\(opt) v) {\n  if (v.some) sw_release(v.value);\n}\n"
+        }
+        values += "\n"
+      default:
+        break
+      }
+    }
+    for s in program.structs { defineValue(.structure(s.name)) }
+    for o in program.optionals { defineValue(o) }
+    out += values
+
+    // Class layout: the header first, then the stored properties.
+    for c in program.classes {
+      out += "struct s_\(c.name) {\n  sw_obj hdr;\n"
+      for f in c.fields {
+        out += "  \(f.ty.cName) \(f.cName);\n"
+      }
+      out += "};\n\n"
+    }
 
     for f in program.funcs {
       out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params)));\n"
     }
     out += "static void swift_main(void);\n\n"
+
+    // Destroy and constructor for each class. Destroy runs the deinitializer,
+    // then releases the stored references, then frees the object.
+    for c in program.classes {
+      let name = c.name
+      out += "static void d_\(name)(void *p) {\n  s_\(name) *self = p;\n"
+      if let d = c.deinitializer {
+        out += "  \(d.cName)(self);\n"
+      }
+      for f in c.fields where f.ty.isClassLike {
+        out += "  " + releaseCode("self->\(f.cName)", f.ty) + "\n"
+      }
+      out += "  free(p);\n}\n\n"
+
+      let params = c.fields.isEmpty ? "void" : c.fields.map { "\($0.ty.cName) \($0.cName)" }.joined(separator: ", ")
+      out += "static s_\(name) * n_\(name)(\(params)) {\n"
+      out += "  s_\(name) *o = calloc(1, sizeof *o);\n"
+      out += "  if (!o) sw_trap(\"out of memory\");\n"
+      out += "  o->hdr.rc = 1;\n  o->hdr.destroy = d_\(name);\n"
+      for f in c.fields {
+        out += "  o->\(f.cName) = \(f.cName);\n"
+      }
+      out += "  return o;\n}\n\n"
+    }
 
     for f in program.funcs {
       out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params))) {\n"
@@ -102,7 +176,14 @@ enum CEmit {
     switch s {
     case .decl(let name, let ty, let value):
       return "\(indent)\(ty.cName) \(name) = \(expr(value));\n"
-    case .assign(let target, let value):
+    case .assign(let target, let value, let ty):
+      if ty.isClassLike {
+        // Retain-then-release order: the new value is stored before the old one is dropped.
+        let lhs = lvalue(target)
+        return "\(indent){\n\(indent)  \(ty.cName) assign_new = \(expr(value));\n"
+          + "\(indent)  \(releaseCode(lhs, ty))\n"
+          + "\(indent)  \(lhs) = assign_new;\n\(indent)}\n"
+      }
       return "\(indent)\(lvalue(target)) = \(expr(value));\n"
     case .expr(let value):
       return "\(indent)(void)(\(expr(value)));\n"
@@ -119,13 +200,23 @@ enum CEmit {
       return text + "\n"
     case .whiles(let cond, let body):
       return "\(indent)while (\(expr(cond))) {\n" + block(body, indent + "  ") + "\(indent)}\n"
+    case .release(let name, let ty):
+      return "\(indent)\(releaseCode(name, ty))\n"
     }
+  }
+
+  /// Drops one reference to a class-like value held in `expr`.
+  private static func releaseCode(_ expr: String, _ ty: Ty) -> String {
+    if ty.isClass { return "sw_release(\(expr));" }
+    return "rel_\(ty.cName)(\(expr));"
   }
 
   private static func lvalue(_ target: LValue) -> String {
     switch target {
-    case .local(let name): return name
-    case .field(let base, let name): return "(\(lvalue(base))).\(name)"
+    case .local(let name):
+      return name
+    case .field(let base, let name, let arrow):
+      return arrow ? "(\(lvalue(base)))->\(name)" : "(\(lvalue(base))).\(name)"
     }
   }
 
@@ -138,6 +229,7 @@ enum CEmit {
     case .local(let name):
       return name
     case .field(let base, let name):
+      if base.ty.isClass { return "(\(expr(base)))->\(name)" }
       return "(\(expr(base))).\(name)"
     case .call(let f, let args):
       return "\(f.cName)(\(args.map(expr).joined(separator: ", ")))"
@@ -145,7 +237,9 @@ enum CEmit {
       return (v.ty == .bool ? "sw_print_bool(" : "sw_print_int(") + expr(v) + ")"
     case .structLit(let s, let args):
       let inits = zip(s.fields, args).map { ".\($0.0.cName) = \(expr($0.1))" }
-      return "((\(s.cName)){ " + inits.joined(separator: ", ") + " })"
+      return "((s_\(s.name)){ " + inits.joined(separator: ", ") + " })"
+    case .construct(let c, let args):
+      return "n_\(c.name)(\(args.map(expr).joined(separator: ", ")))"
     case .prefix("-", let v):
       return "sw_sub(INT64_C(0), \(expr(v)))"
     case .prefix(_, let v):
@@ -162,6 +256,17 @@ enum CEmit {
       }
     case .logical(let op, let l, let r):
       return "(\(expr(l)) \(op) \(expr(r)))"
+    case .retain(let inner):
+      if e.ty.isClass { return "((\(e.ty.cName))sw_retain(\(expr(inner))))" }
+      return "ret_\(e.ty.cName)(\(expr(inner)))"
+    case .wrap(let inner):
+      return "((\(e.ty.cName)){ .some = true, .value = \(expr(inner)) })"
+    case .nilValue:
+      return "((\(e.ty.cName)){ .some = false })"
+    case .isSome(let inner):
+      return "((\(expr(inner))).some)"
+    case .unwrap(let inner):
+      return "unw_\(inner.ty.cName)(\(expr(inner)))"
     }
   }
 }

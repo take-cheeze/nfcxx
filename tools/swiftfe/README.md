@@ -9,11 +9,35 @@ swift build -c release
 .build/release/swiftfe check [--stats] <file.swift | dir>...   # parse only (M0)
 .build/release/swiftfe emit-c <file.swift>                     # print C (M1)
 .build/release/swiftfe build <file.swift> -o <exe>             # compile with cc (M1)
-tests/run.sh                                                   # M1 end-to-end tests
+tests/run.sh                                                   # end-to-end tests (M1 and M2)
 ```
 
 Diagnostics are printed as `file:line:col: error: message`. Exit status is 0 on
 success, 1 on compile errors or check failures, and 2 on usage errors.
+
+## M2: classes, ARC and Optional
+
+Adds to M1:
+- classes with stored properties, memberwise construction, and reference semantics
+- reference counting in C (`sw_retain`/`sw_release`) with `deinit`, run when the
+  last reference goes away. Object fields are released when the object is destroyed.
+- Optional types `T?` for Int, Bool, structs and classes: `nil`, implicit wrapping,
+  `x!` (traps on nil), `if let`, and `== nil` / `!= nil`
+
+Ownership model (documented in `Lower.swift`):
+- Owned locals and parameters are released at the end of their block or function,
+  and before any `return` that leaves them. Parameters are owned by the callee.
+- Locals are released in reverse declaration order.
+- Top-level variables are never released, so their `deinit` does not run before exit.
+- Assignment retains the new value before releasing the old one.
+
+Not yet supported in M2 (each gives a diagnostic):
+- member access, `!`, or `== nil` on a temporary class value, e.g. `make().x`
+- structs with class-typed properties
+- enums with associated values, closures, `while let`, class inheritance and methods
+
+Verified with AddressSanitizer and LeakSanitizer on the ARC cases: no leaks and no
+undefined behaviour.
 
 ## M0: parsing
 
