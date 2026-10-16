@@ -1,0 +1,32 @@
+--- !tapi-tbd
+# Clean-room link stub for scripts/cross-macos-check.sh --link. Written from the public C and POSIX names and from
+# nfcxx's own references (tests/c, be/nfcxx_ldrt.c). It exports symbols only: there is no code and no behaviour, so a
+# program linked against it can be checked for its Mach-O shape and its imports, not run. Not Apple's libSystem.
+tbd-version:     4
+targets:         [ arm64-macos ]
+uuids:
+  - target:          arm64-macos
+    value:           00000000-0000-0000-0000-000000000000
+install-name:    /usr/lib/libSystem.B.dylib
+current-version: 1
+compatibility-version: 1
+exports:
+  - targets:         [ arm64-macos ]
+    symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
+                       ___divti3, dyld_stub_binder, ___error, _exit, _exp, _fabs, _fabsf, _fclose, _feof,
+                       _ferror, _fflush, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti,
+                       ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor, _fmod, _fopen,
+                       _fprintf, _fputs, _fread, _free, _freopen, _frexp, _fseek, _ftell, _fwrite, _getc,
+                       _getenv, _gmtime, _isalnum, _isalpha, _iscntrl, _isdigit, _isgraph, _islower,
+                       _ispunct, _isspace, _isupper, _isxdigit, _ldexp, _localeconv, _localtime, _log,
+                       _log10, _log2, _longjmp, _memchr, _memcmp, _memcpy, _memset, _mktime, ___modti3, _pow,
+                       _printf, _puts, _qsort, _realloc, _remove, _rename, _setjmp, _setlocale, _setvbuf,
+                       _signal, _sin, _snprintf, _sqrt, ___stderrp, ___stdinp, ___stdoutp, _strchr, _strcmp,
+                       _strcoll, _strcpy, _strerror, _strftime, _strlen, _strncmp, _strpbrk, _strspn,
+                       _strstr, _strtod, _strtol, _system, _tan, _time, _tmpfile, _tmpnam, _tolower,
+                       _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf ]
+    weak-symbols:    [ ]
+    objc-classes:    [ ]
+    objc-ivars:      [ ]
+    objc-eh-types:   [ ]
+...
