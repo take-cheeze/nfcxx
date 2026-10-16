@@ -58,6 +58,33 @@ clang --target=aarch64-linux-gnu -ffreestanding -c prog.c -o prog.o     # the ge
   its last bits from what the target computes. Not tested here; the fix is EDG's host floating-point configuration
   (`src/includes/cmake_defines.h`, as `scripts/setup-edg.sh` sets it on an aarch64 host).
 
+## Windows (`--target=win64`, MinGW-w64 and wine)
+
+`win64` is EDG's Windows configuration (LLP64). Its own predefined-macro table is Microsoft's and lacks the gcc type macros
+`lib/cstdint` uses, so with MinGW-w64 installed `scripts/setup-edg.sh` replaces that table with MinGW's own `gcc -dM`
+output (`scripts/win-predef.sh`). Without MinGW the table is EDG's, and the generated C does not compile with MinGW.
+
+```
+./nfcxx --freestanding --emit-c --target=win64 prog.cpp > prog.c
+x86_64-w64-mingw32-gcc -O2 -fwrapv -fno-strict-aliasing prog.c -o prog.exe
+wine prog.exe
+```
+
+- **Checked:** `tests/target/win64_probe.cpp` (static asserts for `long` = 4, `void*` = 8, signed `char`, and the
+  `lib/cstdint` types, then a computed result) is built this way and run under wine: exit 42. `tests/target/run.sh` runs it
+  when MinGW and wine are installed and skips otherwise. Of the `tests/lib` programs, `limits` links and runs too; it fails
+  with exit 1 because it asserts a 64-bit `long`, which LLP64 does not have. That is a test that is LP64-only, not a bug.
+- **Not working yet: linking.** Most `tests/lib` programs need EDG's C++ runtime (`__curr_eh_stack_entry`,
+  `__internal_rethrow`, `__eh_curr_region`), which Linux takes from the host-built `libC.a`. A MinGW build of it means
+  compiling `3rd/edg/lib_src` with MinGW's headers, and EDG's default mode rejects those headers (`__debugbreak` and
+  other MinGW declarations). Also `--emit-c` does not run the prelinker, so a template the program uses (for example
+  `sum_indices` in `tests/lib/utility.cpp`) is an unresolved extern at link time. The Linux path gets both from `eccp`.
+- **Wrong in EDG's `win64` table: `long double`.** EDG has it as 8 bytes (`TARG_SIZEOF_LONG_DOUBLE_win64` in `defines.h`, a
+  compiled-in constant, so the driver cannot change it). MinGW's gcc uses 16 bytes (x87). Code whose layout or `sizeof`
+  depends on `long double` is wrong for MinGW. `win64_probe.cpp` avoids `long double`. The fix is in EDG's source, not here.
+- **Not checked:** the wine run covers exit codes only; `write` and the panic path are not exercised under wine, and no
+  hosted (libstdc++, MSVCRT-free) program is built for Windows.
+
 ## Headers
 
 | header | provides | notes |

@@ -13,11 +13,25 @@ for f in tests/target/*.cpp; do
   name=$(basename "$f" .cpp)
   read -r _ target triple < <(sed -n 's,^// TARGET: *,TARGET ,p' "$f" | head -1)
   if [ -z "${target:-}" ]; then echo "FAIL  $name: no '// TARGET:' line"; fail=1; continue; fi
+  if grep -q '^// NEEDS: mingw' "$f" && ! command -v x86_64-w64-mingw32-gcc >/dev/null; then
+    echo "skip  $name: needs MinGW-w64 (x86_64-w64-mingw32-gcc) at EDG setup for the win64 table"; continue
+  fi
   if ./nfcxx --freestanding --emit-c --target="$target" "$f" > "$tmp/$name.c" 2> "$tmp/$name.err"; then
     if clang --target="$triple" -ffreestanding -w -std=gnu11 -c "$tmp/$name.c" -o "$tmp/$name.o" 2> "$tmp/$name.cc"; then
       echo "ok    $name ($target, $triple)"
     else
       echo "FAIL  $name: clang --target=$triple rejected the generated C"; head -4 "$tmp/$name.cc"; fail=1
+    fi
+    # `// RUN-WINE: N`: the generated C built by MinGW-w64's gcc and run under wine must exit N.
+    if want=$(sed -n 's,^// RUN-WINE: *,,p' "$f" | head -1) && [ -n "$want" ]; then
+      if command -v x86_64-w64-mingw32-gcc >/dev/null && command -v wine >/dev/null; then
+        if x86_64-w64-mingw32-gcc -O2 -fwrapv -fno-strict-aliasing -w "$tmp/$name.c" -o "$tmp/$name.exe" 2> "$tmp/$name.ld" &&
+           WINEDEBUG=-all timeout 300 wine "$tmp/$name.exe" > /dev/null 2>&1; then got=0; else got=$?; fi
+        if [ "$got" -eq "$want" ]; then echo "ok    $name: wine exit $got"
+        else echo "FAIL  $name: wine exit $got, want $want"; head -4 "$tmp/$name.ld"; fail=1; fi
+      else
+        echo "skip  $name: running needs x86_64-w64-mingw32-gcc and wine"
+      fi
     fi
   else
     echo "FAIL  $name: EDG refused it for $target"; head -4 "$tmp/$name.err"; fail=1
