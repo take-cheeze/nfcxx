@@ -5,7 +5,7 @@
 # the engine, i.e. the methods the gems of BC2CPP_COMPILED_GEMS compile. Their keys are
 # "<compiled owner>#<compiled method> -> ...", and every owner they name is one of those gems' owners.
 #
-# On an engine closed-world build (psp, wio, maix) a site is held to the lists when its compiled
+# On an engine closed-world build (psp, wio, maix, closed) a site is held to the lists when its compiled
 # owner is an engine owner, matched exactly. Nothing is skipped on a real engine build: each gem's
 # ONLY_OWNERS is its BC2CPP_COMPILED_GEMS owners, and the only other owner compile_all emits is the
 # module whose module_function body a selected `X.singleton` copy shares (owner `X`), which the scope
