@@ -32,5 +32,22 @@ DECLARED_RETURN_GUARDS_REVIEWED = Set[
   'RPG2k::Scene::Map#blockers_at -> Array',
   # `@all[id]` reads whose stored values are only `Actor.new`; nil for an absent or invalid id.
   'Game::Actors#[] -> Game::Actor?',
-  'Game::Actors#existing -> Game::Actor?'
+  'Game::Actors#existing -> Game::Actor?',
+  # Traced on the real-run workloads and read against each body (ADR 0455): every path returns the declared
+  # class, or nil where the declaration is optional. Each is checked at run time, so a wrong one aborts.
+  'Game::Interpreter#operand_value -> Integer',
+  'Game::Interpreter#actor_operand -> Integer',
+  'Game::Interpreter#event_operand -> Integer',
+  'Game::ChipSet#terrain -> Integer',
+  'Game::Screen#update_pan -> Integer',
+  'Game::State#timer -> Game::Timer',
+  'Game::State#timer_seconds -> Integer',
+  'Game::State#timer2_seconds -> Integer',
+  'Game::Party#leader -> Game::Actor?',
+  'RPG2k::Scene::Map#event_bush_depth -> Integer',
+  'RPG2k::Scene::Map#event_jump_offset -> Integer',
+  'RPG2k::Scene::Map#event_pixel_x -> Integer',
+  'RPG2k::Scene::Map#event_pixel_y -> Integer',
+  'RPG2k::Scene::Map#rev -> Integer',
+  'RPG2k::Scene::Map#patch_anim_cells -> Array',
 ].freeze

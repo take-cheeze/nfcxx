@@ -79,6 +79,8 @@ STRICT_HINTS_REVIEWED = Set[
   "RPG2k::Scene::Map#pictures_signature -> name (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#pictures_signature -> screen (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#player_translucent? -> party (IVAR_ACCESSOR)",
+  # `leader.transparent` is read only as a truth test (`leader && leader.transparent ? true : false`), so any value the accessor returns is safe.
+  "RPG2k::Scene::Map#player_translucent? -> transparent (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#step_parallel -> switches (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#toned_picture_src -> name (IVAR_ACCESSOR)",
   "RPG2k::Scene::Map#update -> party (IVAR_ACCESSOR)",
