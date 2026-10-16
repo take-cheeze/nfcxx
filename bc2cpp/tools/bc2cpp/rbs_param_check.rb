@@ -21,7 +21,7 @@ require_relative 'nil_narrowing'
 #   * every argument at such a site must trace to the declared class through the reaching definitions of its
 #     register (exception edges included): `Klass.new` (an unoverridden constructor of exactly that class), a call
 #     whose every definition has a checked `-> C` declaration (DECLARED_RETURN_CHECK, ADR 0455; a %a{bc2cpp:hint}
-#     one is not checked and proves nothing) or is an attr_reader of a proven slot, a parameter of the enclosing
+#     one is checked at run time by its compiled body, DECLARED_RETURN_GUARD) or is an attr_reader of a proven slot, a parameter of the enclosing
 #     method whose signature declares that class, the same parameter read from a block through GETUPVAR when the
 #     method never reassigns it, `self` in a method of a class nothing inherits from, or an ivar every store of
 #     which is proven and which no read sees unassigned. A call declared `-> C?` gives "C or nil": the argument
@@ -53,13 +53,15 @@ module RbsParamCheck
   # outside_names: outside_call_names' result (nil: no outside scan, every declaration is refused);
   # constructor_entries: a CodeGen built with `analysis_only: :constructor_sites` (constructor_entry_sites,
   # constructor_init_target); nil refuses every initialize declaration.
-  # declared_returns: DeclaredReturns.from_signatures' entries (CodeGen.declared_returns); only the checked ones
-  # (not %a{bc2cpp:hint}) prove a call's result.
+  # declared_returns: DeclaredReturns.from_signatures' entries (CodeGen.declared_returns). Each proves a call's
+  # result: DECLARED_RETURN_CHECK aborts the build on a body that does not prove its declaration, and a
+  # %a{bc2cpp:hint} one is checked on every return by its compiled body (DECLARED_RETURN_GUARD), which raises
+  # instead of returning another type.
   def check(loaded, ireps, registry, class_annotations, comment_class_args:, call_sites:, outside_names:,
             superclass_of:, display_root: nil, applied: nil, constructor_entries: nil, declared_returns: nil)
     ctx = context(loaded, ireps, registry, superclass_of)
     ctx.merge!(ivar_cache: {}, ivar_active: Set.new, nil_cache: {},
-               declared: (declared_returns || []).reject(&:hint).to_h { |e| [e.label, e] },
+               declared: (declared_returns || []).to_h { |e| [e.label, e] },
                nil_unanswerable: ->(name) { constructor_entries.nil_unanswerable?(name) },
                class_guard: IsAGuard.new(constructor_entries))
     ctx.merge!(outside: outside_names, display_root: display_root, call_sites: call_sites, applied: applied,
@@ -490,9 +492,10 @@ module RbsParamCheck
 
   # A call is `cls` when every definition of its name either has a checked `-> cls` declaration or is an
   # attr_reader whose slot the ivar rule proves `cls` (a call that runs none of them raises NoMethodError and
-  # returns nothing). A declaration counts only when DECLARED_RETURN_CHECK (ADR 0455) verifies it: an entry of
-  # +declared_returns+ that is not %a{bc2cpp:hint}; that check aborts the build when a body does not prove it. A
-  # checked `-> cls?` gives a Nilable (the caller then needs NIL_NARROWING at the use).
+  # returns nothing). A declaration counts when it is an entry of +declared_returns+: DECLARED_RETURN_CHECK (ADR
+  # 0455) aborts the build when a body does not prove it, and a %a{bc2cpp:hint} one raises at run time instead of
+  # returning another type (DECLARED_RETURN_GUARD). A checked `-> cls?` gives a Nilable (the caller then needs
+  # NIL_NARROWING at the use).
   def returns_why(ctx, name, cls, depth)
     defs = ctx[:registry].fetch(name, [])
     return "a call to #{name}, which the program does not define" if defs.empty?
@@ -513,8 +516,7 @@ module RbsParamCheck
 
       ret = d.irep && ctx[:sig_of][d.irep]&.ret
       if ret && (ret.kind == :class ? ret.cls : ret.optional&.cls) == cls
-        return "#{d.owner}##{name}'s -> #{ret.text} is not a checked declaration (%a{bc2cpp:hint}, or no " \
-               'DECLARED_RETURN_CHECK)'
+        return "#{d.owner}##{name}'s -> #{ret.text} is not a checked declaration (no DECLARED_RETURN_CHECK entry)"
       end
       return "#{d.owner}##{name} does not declare -> #{cls}"
     end

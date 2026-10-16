@@ -738,6 +738,8 @@ class CodeGen
     aspec << 'MRB_ARGS_REST()' if has_rest
     aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
+    # DECLARED_RETURN_GUARD (ADR 0455): a runtime-checked return declaration checks every value the body returns.
+    out = declared_return_guard_wrap(label, out, impl_name)
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
       code: out, visibility: d.visibility, guard: guard&.fetch(:index), resumable: !resumable.nil? }

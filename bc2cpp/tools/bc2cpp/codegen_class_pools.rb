@@ -277,7 +277,7 @@ class CodeGen
     return :registry if (@registry[name] || []).any? { |definition| nil_ancestor_modules.include?(definition.owner) }
 
     world.native_paths_spelling(name).each do |path|
-      registrations, opaque = NativeExpressionDevirt.scan_class_registrations([path])
+      registrations, opaque = NativeExpressionDevirt.path_registrations(path)
       owners = registrations.fetch(name, []).map { |entry| entry[:owner]&.fetch(:class_name, nil) } + opaque.fetch(name, [])
       return :unresolved_native_owner if owners.any?(&:nil?)
       return :native_on_nil if owners.any? { |owner| nil_ancestor_modules.include?(owner) }
