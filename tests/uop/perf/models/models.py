@@ -8,7 +8,7 @@
 #   models.py ort DIR [RUNS WARM]              onnxruntime CPU: DIR/<case>.ort.json and DIR/<case>.ort.bin
 #   models.py tinygrad DIR [RUNS WARM]         tinygrad (the default device): DIR/<case>.tinygrad.json and .bin
 #   models.py compare DIR                      the table lines of every case and back end, and the errors, to stdout as JSON
-import json, os, statistics, sys, time
+import json, os, shutil, statistics, sys, time
 
 import numpy as np
 
@@ -129,14 +129,24 @@ def read_input(d, name):
 def run_ort(d, runs, warm):
     import onnxruntime as ort
     print("onnxruntime", ort.__version__, file=sys.stderr)
+    # NFCUOP_TRACE_DIR set: onnxruntime's own profiler writes one Chrome trace-event file per model (one event per node, with
+    # its op type); it covers the warm-up runs too.
+    trace_dir = os.environ.get("NFCUOP_TRACE_DIR")
     for name in cases(d):
-        sess = ort.InferenceSession(os.path.join(d, name + ".onnx"), providers=["CPUExecutionProvider"])
+        opts = ort.SessionOptions()
+        opts.enable_profiling = bool(trace_dir)
+        if trace_dir:
+            opts.profile_file_prefix = os.path.join(trace_dir, name + "_ort_profile")   # not the working directory
+        sess = ort.InferenceSession(os.path.join(d, name + ".onnx"), sess_options=opts, providers=["CPUExecutionProvider"])
         x = read_input(d, name)
         out = {}
 
         def f():
             out["y"] = sess.run(None, {"x": x})[0]
         ts = timed(f, runs, warm)
+        if trace_dir:
+            prof = sess.end_profiling()
+            shutil.move(prof, os.path.join(trace_dir, name + ".ort.trace.json"))
         out["y"].astype(np.float32).tofile(os.path.join(d, name + ".ort.bin"))
         write_json(os.path.join(d, name + ".ort.json"), "onnxruntime-cpu", ts,
                    {"version": ort.__version__, "shape": list(out["y"].shape)})

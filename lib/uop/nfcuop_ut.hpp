@@ -163,6 +163,10 @@ class Session {
   Backend backend = Backend::Interpreter;
   std::string cc;
   const CProgram* last_program() const { return has_program_ ? &last_program_ : nullptr; }  // the last C program run
+  // With NFCUOP_TRACE set in the environment, a C-backend run times its kernels (render_c with profile) and keeps one span
+  // for the run and one per kernel here, until clear_kernel_timings().
+  const std::vector<KernelTiming>& kernel_timings() const { return kernel_timings_; }
+  void clear_kernel_timings() { kernel_timings_.clear(); }
 
  private:
   Graph g_;
@@ -171,6 +175,8 @@ class Session {
   std::map<std::string, std::shared_ptr<CModule>> modules_;
   CProgram last_program_;
   bool has_program_ = false;
+  std::vector<KernelTiming> kernel_timings_;
+  int runs_ = 0;
 };
 
 // ---- functions ----

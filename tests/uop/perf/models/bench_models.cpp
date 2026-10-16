@@ -3,10 +3,15 @@
 // given by --shape; the output is written as raw float32 (--out) and a JSON line is printed for models.py.
 //
 //   bench_models --onnx=FILE --input=FILE.bin --shape=1,784 --out=FILE.bin [--runs=10] [--warm=3]
+//
+// NFCUOP_TRACE=FILE also writes the timed runs as Chrome trace-event JSON: one "run" span per run and one "kernel" span per
+// kernel of it (named by the kernel's op, dtype and shape), each with its run index. Open the file in https://ui.perfetto.dev.
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -88,12 +93,24 @@ int main(int argc, char** argv) {
   us.backend = ut::Session::Backend::C;
   Array res = us.eval(y, feeds);   // the first call compiles and loads the module; not timed
   for (int i = 1; i < warm; i++) res = us.eval(y, feeds);
+  us.clear_kernel_timings();   // the trace covers the timed runs only
   std::vector<double> ts;
   for (int i = 0; i < runs; i++) {
     auto t0 = std::chrono::steady_clock::now();
     res = us.eval(y, feeds);
     auto t1 = std::chrono::steady_clock::now();
     ts.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+  }
+
+  if (const char* trace = std::getenv("NFCUOP_TRACE"); trace && *trace) {
+    std::ofstream t(trace);
+    t << "[\n";
+    const std::vector<nfcuop::KernelTiming>& kt = us.kernel_timings();
+    for (size_t i = 0; i < kt.size(); i++)
+      t << (i ? ",\n" : "") << "{\"name\": \"" << kt[i].name << "\", \"cat\": \"" << (kt[i].name == "run" ? "run" : "kernel")
+        << "\", \"ph\": \"X\", \"ts\": " << std::fixed << std::setprecision(3) << kt[i].ts_us << ", \"dur\": " << kt[i].dur_us
+        << ", \"pid\": 1, \"tid\": 1, \"args\": {\"run\": " << kt[i].run << "}}";
+    t << "\n]\n";
   }
 
   std::ofstream f(out, std::ios::binary);

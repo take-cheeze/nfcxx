@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <time.h>
 #include <limits>
 
 namespace nfcuop {
@@ -645,6 +647,13 @@ Tensor Session::placeholder(const std::string& name, const Shape& shape, DType d
   return Tensor(this, g_.var(name, d, shape));
 }
 
+// The clock of the generated kernels' timers (clock_gettime(CLOCK_MONOTONIC)), so run and kernel spans share one time line.
+static double monotonic_us() {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return static_cast<double>(t.tv_sec) * 1e6 + static_cast<double>(t.tv_nsec) / 1e3;
+}
+
 Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) { return eval_all({t}, feeds)[0]; }
 
 std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds) {
@@ -671,13 +680,24 @@ std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::m
     for (const UOp* root : roots) out.push_back(evaluate_array(root, env));
     return out;
   }
-  CProgram prog = render_c(roots);
+  const char* trace_env = std::getenv("NFCUOP_TRACE");
+  const bool trace = trace_env && *trace_env;   // the kernels are timed only when asked (render_c profile)
+  CProgram prog = render_c(roots, trace);
   std::string key = cc + "\n" + prog.source;
   auto it = modules_.find(key);
   if (it == modules_.end()) it = modules_.emplace(key, CModule::compile(prog, cc)).first;
   last_program_ = prog;
   has_program_ = true;
-  return it->second->run(env);
+  if (!trace) return it->second->run(env);
+  const double t0 = monotonic_us();
+  std::vector<Array> res = it->second->run(env);
+  const double t1 = monotonic_us();
+  const int run = runs_++;
+  kernel_timings_.push_back({"run", run, t0, t1 - t0});
+  std::vector<double> kb, ke;
+  it->second->kernel_times(kb, ke);
+  for (size_t k = 0; k < kb.size(); k++) kernel_timings_.push_back({it->second->program().kernel_names[k], run, kb[k], ke[k] - kb[k]});
+  return res;
 }
 
 // ---- functions ----
