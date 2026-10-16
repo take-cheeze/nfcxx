@@ -1006,7 +1006,6 @@ NOMETHOD_REVIEWED = Set[
   "Game::Party#equipped_item_count -> equipment",
   "Game::Party#escape_skill_available? -> escape_access",
   "Game::Party#escape_skill_available? -> escape_target",
-  "Game::Party#field_skills -> skills",
   "Game::Party#has_item? -> equipment",
   "Game::Party#hit_modifier -> states",
   "Game::Party#include_actor? -> id",
