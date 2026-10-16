@@ -419,7 +419,7 @@ class ClosedWorld
     return false if @global_refusal || @mm_classes.include?('NilClass')
     return false if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
 
-    owners.none? { |owner| ForeignDefiners.defines?(@ruby_paths, owner, name) }
+    !ForeignDefiners.defines_any?(@ruby_paths, owners, name)
   end
 
   # Every native source of the build that spells +name+ (a definition, an alias or a funcall).

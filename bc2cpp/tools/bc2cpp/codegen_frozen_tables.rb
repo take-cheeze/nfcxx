@@ -304,7 +304,7 @@ end
 
     owners = frozen_table_owners(klass, name)
     return :foreign_ruby unless world.nil_foreign_definition_free?(name, owners)
-    return :foreign_ruby if owners.any? { |owner| ForeignDefiners.defines?(frozen_table_foreign_paths, owner, name) }
+    return :foreign_ruby if ForeignDefiners.defines_any?(frozen_table_foreign_paths, owners, name)
     return :ruby_definition if (@registry[name] || []).any? { |d| d.irep && owners.include?(d.owner) }
 
     frozen_table_native_refusal(name, owners)
