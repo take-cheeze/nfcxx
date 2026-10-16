@@ -4,11 +4,12 @@
 # scripts/setup-cross-macos.sh first (build/cross-macos.env). Nothing is run here: copy the executable to a Mac and run it
 # there. The expected results are printed after the build and are the ones the project's own check uses.
 #   NAME=lua       Lua 5.4 (run_lua.sh's pin): the interpreter. Expect print(1+1) -> 2 and lua_test.lua -> lua-ok line.
+#   NAME=tinyxml2 tinyxml2 (run.sh's pin) with tests/realworld/tinyxml2_main.cpp. Expect exit code 12.
 #   NAME=doctest   doctest v2.4.12 (run_doctest.sh's pin) with tests/realworld/doctest_main.cpp. Expect exit code 2.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
-name=${1:?usage: cross_macos.sh lua|doctest}
+name=${1:?usage: cross_macos.sh lua|doctest|tinyxml2}
 envf=$root/build/cross-macos.env
 [ -f "$envf" ] || { echo "cross_macos: $envf is missing; run scripts/setup-cross-macos.sh first" >&2; exit 2; }
 . "$envf"
@@ -75,5 +76,20 @@ doctest)
   LINK_EXTRA=(-L tests/macos-sysroot/lib -lc++); link "$out" "$W/doctest.o"
   echo "expected on the Mac: exit code 2 (two deliberate CHECK failures); doctest prints its summary"
   ;;
-*) echo "cross_macos: unknown NAME '$name' (lua|doctest)" >&2; exit 2 ;;
+tinyxml2)
+  pin=8224e427b655b83dae5e2298f1e6919523a78737   # leethomason/tinyxml2 master, 2026-05-23, as run.sh
+  src=$work/tinyxml2; out=$root/build/tinyxml2-macos/tinyxml2
+  fetch https://github.com/leethomason/tinyxml2 "$pin" "$src"
+  # both translation units compile through the Darwin C++ check; the driver includes tinyxml2.h from the pinned source
+  if ! NFCXX_CXX_FLAGS="-I$src" scripts/macos-cxx-check.sh "$src/tinyxml2.cpp" "$W/tinyxml2.s" >/dev/null \
+     || ! NFCXX_CXX_FLAGS="-I$src" scripts/macos-cxx-check.sh tests/realworld/tinyxml2_main.cpp "$W/main.s" >/dev/null; then
+    echo "cross_macos: tinyxml2 did not reach assembly (see scripts/macos-cxx-check.sh output)" >&2
+    exit 3
+  fi
+  llvm-mc -triple=arm64-apple-darwin -filetype=obj "$W/tinyxml2.s" -o "$W/tinyxml2.o"
+  llvm-mc -triple=arm64-apple-darwin -filetype=obj "$W/main.s" -o "$W/main.o"
+  LINK_EXTRA=(-L tests/macos-sysroot/lib -lc++); link "$out" "$W/tinyxml2.o" "$W/main.o"
+  echo "expected on the Mac: exit code 12 (tinyxml2_main.cpp's XML check)"
+  ;;
+*) echo "cross_macos: unknown NAME '$name' (lua|doctest|tinyxml2)" >&2; exit 2 ;;
 esac
