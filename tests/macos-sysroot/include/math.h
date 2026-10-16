@@ -173,6 +173,8 @@ long double floorl(long double);
 long double ceill(long double);
 long double fmodl(long double, long double);
 long double fmal(long double, long double, long double);
+long double truncl(long double);
+long double ldexpl(long double, int);
 
 #ifdef __cplusplus
 }

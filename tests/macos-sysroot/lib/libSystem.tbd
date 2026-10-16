@@ -1,0 +1,23 @@
+--- !tapi-tbd
+# Clean-room link stub for scripts/cross-macos-check.sh --link. Written from the public C and POSIX names and from
+# nfcxx's own references (tests/c, be/nfcxx_ldrt.c). It exports symbols only: there is no code and no behaviour, so a
+# program linked against it can be checked for its Mach-O shape and its imports, not run. Not Apple's libSystem.
+tbd-version:     4
+targets:         [ arm64-macos ]
+uuids:
+  - target:          arm64-macos
+    value:           00000000-0000-0000-0000-000000000000
+install-name:    /usr/lib/libSystem.B.dylib
+current-version: 1
+compatibility-version: 1
+exports:
+  - targets:         [ arm64-macos ]
+    symbols:         [ _abort, _fabsf, _fprintf, _ldexp, _longjmp, _memcpy, _memset, _printf, _puts, _qsort,
+                       _setjmp, _strcmp, _strtol, _toupper, _vsnprintf, ___error, ___stderrp, dyld_stub_binder,
+                       ___divti3, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti, ___floattidf, ___floattisf,
+                       ___floatuntidf, ___floatuntisf, ___modti3, ___udivti3, ___umodti3 ]
+    weak-symbols:    [ ]
+    objc-classes:    [ ]
+    objc-ivars:      [ ]
+    objc-eh-types:   [ ]
+...
