@@ -26,6 +26,24 @@ for f in tests/target/*.cpp; do
     else
       echo "FAIL  $name: clang --target=$triple rejected the generated C"; head -4 "$tmp/$name.cc"; fail=1
     fi
+    # `// RUN-QEMU: N`: the generated C built by the target's cross gcc (static, so no sysroot is needed) and run under
+    # qemu-user must exit N. Skipped when the cross compiler or qemu is missing.
+    if want=$(sed -n 's,^// RUN-QEMU: *,,p' "$f" | head -1) && [ -n "$want" ]; then
+      case $target in
+        linux_aarch64) cross=aarch64-linux-gnu-gcc; qemu=qemu-aarch64 ;;
+        linux_armv7) cross=arm-linux-gnueabihf-gcc; qemu=qemu-arm ;;
+        linux_riscv64) cross=riscv64-linux-gnu-gcc; qemu=qemu-riscv64 ;;
+        *) cross=""; qemu="" ;;
+      esac
+      if [ -n "$cross" ] && command -v "$cross" >/dev/null && command -v "$qemu" >/dev/null; then
+        if "$cross" -O2 -fwrapv -fno-strict-aliasing -w -static "$tmp/$name.c" -o "$tmp/$name.qemu" 2> "$tmp/$name.ld" &&
+           timeout 300 "$qemu" "$tmp/$name.qemu" > /dev/null 2>&1; then got=0; else got=$?; fi
+        if [ "$got" -eq "$want" ]; then echo "ok    $name: $qemu exit $got"
+        else echo "FAIL  $name: $qemu exit $got, want $want"; head -4 "$tmp/$name.ld"; fail=1; fi
+      else
+        echo "skip  $name: running needs $cross and $qemu"
+      fi
+    fi
     # `// RUN-WINE: N`: the generated C built by MinGW-w64's gcc and run under wine must exit N.
     if want=$(sed -n 's,^// RUN-WINE: *,,p' "$f" | head -1) && [ -n "$want" ]; then
       if command -v x86_64-w64-mingw32-gcc >/dev/null && command -v wine >/dev/null; then
