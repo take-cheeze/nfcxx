@@ -432,6 +432,14 @@ void Fn::rval(const Node &x, const std::string &dest, const Ty &dty) {
     call_value(x, dest, ty);
     return;
   }
+  if (h == "null") {
+    // a null pointer (or integer zero) as the value of a let: the same 0 the operand gives (lower_arith.cpp)
+    Ty ty = parse_type(&at(x, 1));
+    if (ty.is_bool) throw Refused("null of bool");
+    expect(dty, ty);
+    emit("mov." + ptx_type(ty) + " " + dest + ", 0;");
+    return;
+  }
   if (h == "gpu") {
     Ty ty = parse_type(&at(x, 1));
     expect(dty, ty);
