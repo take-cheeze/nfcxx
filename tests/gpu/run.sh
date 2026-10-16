@@ -7,6 +7,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
+# The PTX emitter: the Ruby script (the default), or the C++ port with NFCXX_PTX_EMITTER=cxx (same text, same exit status).
+emit_ptx() {
+  if [ "${NFCXX_PTX_EMITTER:-ruby}" = cxx ]; then
+    [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
+    "$root/build/pathb-ptx-emit" --emit "$@"
+  else
+    "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$@"
+  fi
+}
 arch=${GPU_ARCH:-sm_75}
 cuda=${CUDA_HOME:-/usr/local/cuda}
 
@@ -18,7 +27,7 @@ fi
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" mul2.ir > "$out/mul2.ptx"
+emit_ptx mul2.ir > "$out/mul2.ptx"
 "$ptxas" -arch="$arch" "$out/mul2.ptx" -o "$out/mul2.cubin"
 gcc -O2 -Wall -I"$inc" -L"$cuda/lib64" launch.c -o "$out/launch" -lcudart
 "$out/launch" "$out/mul2.cubin"

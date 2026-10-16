@@ -6,11 +6,20 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
+# The PTX emitter: the Ruby script (the default), or the C++ port with NFCXX_PTX_EMITTER=cxx (same text, same exit status).
+emit_ptx() {
+  if [ "${NFCXX_PTX_EMITTER:-ruby}" = cxx ]; then
+    [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
+    "$root/build/pathb-ptx-emit" --emit "$@"
+  else
+    "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$@"
+  fi
+}
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
 gcc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -o "$out/ptxi" ptx-interp/ptxi.c
-"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" mul2.ir > "$out/mul2.ptx"
+emit_ptx mul2.ir > "$out/mul2.ptx"
 
 launch=(mul2 --grid 8 --block 128 ptr:1064:iota=-299 ptr:1064 s32:1000 --dump 1)
 
@@ -59,7 +68,7 @@ echo "out-of-bounds access faults (exit 4)"
 # Device helpers (tests/gpu/device/helper.ir): helper_kernel calls square_plus_one, which calls square, so the PTX has
 # .func bodies and call instructions. The same launch as tests/gpu/device/launch_helper.c: out[i] = in[i]^2 + 1 for
 # i < 1000 (in[i] = i - 300), and the guard ints stay zero. A mutant (+1 becomes +2) must be caught.
-"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$root/tests/gpu/device/helper.ir" > "$out/helper.ptx"
+emit_ptx "$root/tests/gpu/device/helper.ir" > "$out/helper.ptx"
 hlaunch=(helper_kernel --grid 8 --block 128 ptr:1064:iota=-300 ptr:1064 s32:1000 --dump 1)
 check_helper() {
   awk 'BEGIN { bad = 0; guard = 0 }
