@@ -532,7 +532,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
 - A toolchain finding, kept in `nfcast_tier_rt.h` as a comment: the QBE back end miscompiled a struct that has a 4-byte member next to
   padding and is copied by value, as the generated code copies an `nfcr_N`: the branch on the member tested the padding half of the
   word (a float came back as its integer part). It was found by comparing a small accumulator with real Lua. Root cause: amd64 isel
-  of QBE (fixed by `scripts/qbe-wflag.patch`, test `tests/cases/qbe_wflag_padding.cpp`, report `docs/notes/qbe-wflag.md`). With the
+  of QBE (fixed by `the fork commit 'nfcxx patch: wflag'`, test `tests/cases/qbe_wflag_padding.cpp`, report `docs/notes/qbe-wflag.md`). With the
   patch `nfcr_N`'s flag is a 32-bit `int` again; with a QBE built without it, 4 checks of `tier.cpp` and `tier_kernels.lua` fail on
   qbe, so re-run `scripts/setup-qbe.sh` after pulling.
 - A kernel that fails often costs the failed run plus the interpreter's run until it is given up.

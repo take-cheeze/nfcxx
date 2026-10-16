@@ -1,6 +1,6 @@
 // EXPECT: 7
 // Passing a never-initialized struct by value is legal C. QBE used to kill the stack slot (empty store mask)
-// and pass a null address, so the call segfaulted at "movq 0, %rsi" (scripts/qbe-uninit-slot.patch, found with
+// and pass a null address, so the call segfaulted at "movq 0, %rsi" (the fork commit 'nfcxx patch: uninit-slot', found with
 // nlohmann::json: libstdc++ passes a _Iter_pred<lambda> temporary that holds only a dummy char).
 struct P { char d; };
 struct Q { int a; int b; };
