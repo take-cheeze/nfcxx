@@ -130,7 +130,8 @@ module SelfNewConstruct
   def kernel_class_only?
     @kernel_class_only = begin
       ruby = (@registry['class'] || []).reject { |definition| definition.owner == '<native>' }
-      ruby.empty? && !@closed_world.unknown_definer?('class') && !symbol_installed_names.include?('class') &&
+      installed = symbol_installed_names
+      ruby.empty? && !@closed_world.unknown_definer?('class') && installed && !installed.include?('class') &&
         @closed_world.exact_instances_singleton_free?
     end if @kernel_class_only.nil?
     @kernel_class_only
@@ -149,6 +150,9 @@ module SelfNewConstruct
     return nil if @only_owners && !@only_owners.include?(owner) && !@other_owners&.include?(owner)
 
     init = @ireps.fetch(definition.irep)
+    _, _, rest, post, = init.enter&.enter_fields
+    return nil unless rest.to_i.zero? && post.to_i.zero?
+
     mand = mandatory_arity(init)
     opt = optional_arity(init)
     return nil unless argv.size.between?(mand, mand + opt)

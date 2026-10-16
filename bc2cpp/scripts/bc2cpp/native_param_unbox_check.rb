@@ -365,14 +365,17 @@ if ENV['MRBC']
       legacy, = generate.call(CLASSES + CALLERS, off, env: { 'BC2CPP_NATIVE_PARAM_UNBOX' => '0' })
 
       x = live_of.call(code, 'set_x')
+      # The tail reaching every other receiver: a by-name send, or the owner call over the name's whole owner set
+      # (NAME_OWNER_SET, ADR 0468), which is not a by-name send but stays the else.
+      tails = ->(text) { text.scan('bc2cpp_send(').size + text.scan('bc2cpp_owner_call(').size }
       check.call('x=: one converting arm per entry point, no Integer tag test, no mrb_integer, one by-name send (the chain tail)',
                  x.include?('rgss::rect_x_set_direct(') && x.include?('rgss::object_x_set_direct(') &&
-                   x.scan(/mrb_as_int\(M, r\d+\)/).size == 2 && !x.include?('mrb_integer') && x.scan('bc2cpp_send(').size == 1)
+                   x.scan(/mrb_as_int\(M, r\d+\)/).size == 2 && !x.include?('mrb_integer') && tails.call(x) == 1)
       check.call('x=: the receiver class-identity test is kept and the tail still dispatches a receiver outside the arms',
-                 x.include?('bc2cpp_native_class ==') && x.include?("} else {\n    r") && x.scan('bc2cpp_send(').size == 1)
+                 x.include?('bc2cpp_native_class ==') && x.include?("} else {\n    r") && tails.call(x) == 1)
       lx = live_of.call(legacy, 'set_x')
       check.call('BC2CPP_NATIVE_PARAM_UNBOX=0: x= keeps its Integer tag test and the by-name else',
-                 lx.scan('mrb_integer_p(r').size == 2 && lx.scan('bc2cpp_send(').size == 3 && !lx.include?('mrb_as_int('))
+                 lx.scan('mrb_integer_p(r').size == 2 && tails.call(lx) == 3 && !lx.include?('mrb_as_int('))
 
       t = live_of.call(code, 'trans')
       check.call('a call with two float arguments converts them in two statements, in argument order',
@@ -386,7 +389,7 @@ if ENV['MRBC']
       check.call('a :bool argument is mrb_test, with no conversion statement',
                  live_of.call(code, 'set_visible').include?('mrb_test(r') && !live_of.call(code, 'set_visible').include?('mrb_as_'))
       check.call('a call of another arity than the entry point takes keeps the by-name send',
-                 live_of.call(code, 'flash1').include?('bc2cpp_send(') && !live_of.call(code, 'flash1').include?('rgss::'))
+                 tails.call(live_of.call(code, 'flash1')) == 1 && !live_of.call(code, 'flash1').include?('rgss::'))
       i = live_of.call(code, 'init_size')
       check.call('_init_size: both arguments are converted as "ii" does, in order', i.match?(/mrb_int (bc2cpp_pu\d+_0) = mrb_as_int\(M, r(\d+)\);\n\s+mrb_int bc2cpp_pu\d+_1 = mrb_as_int\(M, r(\d+)\);/) &&
                    !i.include?('mrb_integer_p'))

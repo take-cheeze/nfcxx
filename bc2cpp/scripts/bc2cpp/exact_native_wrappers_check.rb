@@ -145,7 +145,10 @@ exact = lambda do |code, owner, fn|
 end
 guarded = lambda do |code, owner, fn|
   body = body_of.call(code, owner, fn)
-  !body.empty? && !body.include?('EXACT_NATIVE_WRAPPER') && live_of.call(code, owner, fn).include?('bc2cpp_send(')
+  # The else reaching a receiver outside the guard: a by-name send, or the owner call over the name's owner set
+  # (NAME_OWNER_SET, ADR 0468).
+  live = live_of.call(code, owner, fn)
+  !body.empty? && !body.include?('EXACT_NATIVE_WRAPPER') && (live.include?('bc2cpp_send(') || live.include?('bc2cpp_owner_call('))
 end
 nilable = lambda do |code, owner, fn|
   body = body_of.call(code, owner, fn)
