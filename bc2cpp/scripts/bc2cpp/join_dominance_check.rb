@@ -308,7 +308,7 @@ if ENV['MRBC']
           def initialize; @a = 1; end
         end
       RUBY
-      _code, err = runtime.generate(source, dir, closed: true, only_owners: %w[JdProbe JdHolder JdLate JdFoo JdBaz])
+      _code, err = runtime.generate(source, dir, only_owners: %w[JdProbe JdHolder JdLate JdFoo JdBaz])
       body = <<~CPP
         static int scenario(mrb_state* M) {
           mrb_value probe = mrb_obj_new(M, mrb_class_get(M, "JdProbe"), 0, nullptr);

@@ -12,7 +12,7 @@
 # 2. With MRBC: `include Enumerable` is a known ancestor unless the closed
 #    world declares its own; the inlines appear in a closed world and go away
 #    when anything on the receiver's ancestry redefines the name, when a
-#    prepend or dynamic installer could, and in an open world; a
+#    prepend or dynamic installer could; a
 #    module_function body whose blocks never look at self is called directly.
 # 3. With MRBC, BC2CPP_MRUBY_FULL and g++: values, exceptions and dispatch
 #    counts against the interpreter.
@@ -179,9 +179,9 @@ if ENV['MRBC']
     { min: code.include?('CORE_MIN_MAX :min'), max: code.include?('CORE_MIN_MAX :max'),
       pos: code.include?('CORE_NUMERIC_SIGN :positive?'), neg: code.include?('CORE_NUMERIC_SIGN :negative?') }
   end
-  world = lambda do |extra, closed: true|
+  world = lambda do |extra|
     Dir.mktmpdir do |dir|
-      code, err = runtime.generate("#{extra}\n#{inlines}", dir, closed: closed)
+      code, err = runtime.generate("#{extra}\n#{inlines}", dir)
       [code, err]
     end
   end
@@ -194,9 +194,6 @@ if ENV['MRBC']
              err.include?("== core Ruby methods verified against the build's sources (CORE_MIXINS): max, min, negative?, positive? =="))
   check.call('a block-taking min keeps its dispatch', !body_of.call(code, 'CmProbe_with_block').include?('CORE_MIN_MAX'))
   check.call('the else arm is the ordinary dispatch', body_of.call(code, 'CmProbe_lo').match?(/if \(!bc2cpp_mm_\d+_done\) \{\n\s+r\d+ = bc2cpp_send\(/))
-  open_code, = world.call('', closed: false)
-  check.call('an open world inlines none of them (a game script may redefine the name)',
-             markers.call(open_code).values.none?)
   {
     'class Array; def min; 0; end; end' => { min: false, max: true, pos: true, neg: true },
     'class Array; def each; end; end' => { min: false, max: false, pos: true, neg: true },
@@ -330,7 +327,7 @@ if ENV['MRBC']
           out
         end
       RUBY
-      _code, err = runtime.generate(source, dir, closed: true, only_owners: %w[CmProbe CmMod CmMod.singleton CmCaller])
+      _code, err = runtime.generate(source, dir, only_owners: %w[CmProbe CmMod CmMod.singleton CmCaller])
       body = <<~CPP
         static int scenario(mrb_state* M) {
           call(M, "drive", mrb_top_self(M), "cm_drive");

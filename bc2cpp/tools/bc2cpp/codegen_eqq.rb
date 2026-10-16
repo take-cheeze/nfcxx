@@ -84,7 +84,7 @@ class CodeGen
     !installed.nil? && !installed.include?(name)
   end
 
-  # Open worlds prove nothing about installs; a closed one must see none for `name`.
+  # Without a world (a unit fixture) there are no installs to see; the program's closed world must see none for `name`.
   def eqq_name_unrebound?(name)
     block_core_world.nil? || name_unrebound?(name)
   end

@@ -14,6 +14,7 @@
 # scripts/bc2cpp/proven_miss_check.rb re-proves it over a full wio run.
 # Regenerate with `MRBC=... ruby scripts/bc2cpp/proven_miss_update.rb`.
 require 'set'
+require_relative 'review_scope'
 
 module ProvenMiss
   MARKER = %r{/\* CLOSED_WORLD proven_miss: (\w+) (\S+?)\.(\S+) \*/}
@@ -39,10 +40,11 @@ module ProvenMiss
     end
   end
 
-  # Same contract as NomethodReviewed.violations.
-  def violations(sites, compiled, reviewed: PROVEN_MISS_REVIEWED, stale: true)
-    found = sites.map { |s| s[:key] }.to_set
-    compiled_methods = compiled.reject { |m| m[:unsupported] }.map { |m| "#{m[:owner]}##{m[:name]}" }.to_set
+  # Same contract as NomethodReviewed.violations (`scope`: ReviewScope.for_build of the run).
+  def violations(sites, compiled, scope:, reviewed: PROVEN_MISS_REVIEWED, stale: true)
+    found = ReviewScope.select(scope, sites).map { |s| s[:key] }.to_set
+    compiled_methods = compiled.reject { |m| m[:unsupported] || !ReviewScope.cover?(scope, m[:owner]) }
+                               .map { |m| "#{m[:owner]}##{m[:name]}" }.to_set
     unreviewed = (found - reviewed).sort.map { |k| "unreviewed proven-class miss: #{k}" }
     return unreviewed unless stale
 

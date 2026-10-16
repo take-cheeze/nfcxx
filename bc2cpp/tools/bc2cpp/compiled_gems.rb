@@ -361,6 +361,8 @@ end
 # (build_config.rb's single_format_only). Their games carry no Ruby, so the
 # only Ruby that can run is the closed world plus the build's own gems.
 # The standalone Optcarrot benchmark seals its host separately (ADR 0400).
+# bc2cpp compiles these builds only (docs/adr/0466); every other build, and any
+# build with a gem below, is the plain mruby build.
 BC2CPP_CLOSED_WORLD_BUILDS = %w[psp wio maix optcarrot-probe].freeze
 # Gems that load or define Ruby at runtime; any of them opens the world.
 BC2CPP_OPEN_WORLD_GEMS = %w[
@@ -376,17 +378,6 @@ BC2CPP_SOURCE_LOADER_CALL = /\b(?:mrb_load_n?string(?:_cxt)?|mrb_load_file(?:_cx
                                mrb_parse_n?string|mrb_parse_file|mrb_load_detect_file_cxt)\s*\(([^;]*)/mx
 BC2CPP_NATIVE_GLOB = '*.{c,cc,cpp,cxx,h,hh,hpp,hxx,inc}'
 
-# Opt-in from build_config.rb (`conf.gem ... { enable_bc2cpp_closed_world }`).
-module Bc2cppClosedWorldOption
-  def enable_bc2cpp_closed_world
-    @bc2cpp_closed_world = true
-  end
-
-  def bc2cpp_closed_world?
-    @bc2cpp_closed_world == true
-  end
-end
-
 # The top-level arguments of a C call, given the text after its `(`.
 def bc2cpp_c_call_args(text)
   args = [+'']
@@ -401,19 +392,8 @@ def bc2cpp_c_call_args(text)
   args
 end
 
-# RPGMAKER_BC2CPP_CLOSED_WORLD_HOST=1 (test-only, ADR 0428): build the desktop `host` engine as the
-# RPG2000/2003-only world the wio/maix/psp builds ship (build_config.rb's single_format_only: no XP/VX/
-# Wolf/MV gems), with src/ as its native host, so the closed-world tiers (NOMETHOD_REVIEWED, guard
-# violations, BC2CPP_STRICT_HINTS) can be verified against the real engine on a machine with a display.
-# The binary can only play RPG2k games; the host's mruby-compiler stays linked, so the host-source check
-# for runtime-compiled Ruby is skipped. Never set for a shipped build.
-def bc2cpp_closed_world_host?(build_name, env: ENV)
-  build_name == 'host' && env['RPGMAKER_BC2CPP_CLOSED_WORLD_HOST'] == '1'
-end
-
 def bc2cpp_host_native_srcs(build_name, repo_root)
   host = BC2CPP_CLOSED_WORLD_HOST_SRCS[build_name]
-  host = 'src' if bc2cpp_closed_world_host?(build_name)
   host ? Dir["#{repo_root}/#{host}/**/#{BC2CPP_NATIVE_GLOB}"].sort : []
 end
 
@@ -421,7 +401,7 @@ end
 # closed world; empty when it can.
 def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cpp_host_native_srcs(build_name, repo_root), compiled_srcs: [])
   errors = []
-  unless BC2CPP_CLOSED_WORLD_BUILDS.include?(build_name) || bc2cpp_closed_world_host?(build_name)
+  unless BC2CPP_CLOSED_WORLD_BUILDS.include?(build_name)
     errors << "build '#{build_name}' is not one of #{BC2CPP_CLOSED_WORLD_BUILDS.join('/')}"
   end
   required = build_name == 'optcarrot-probe' ? %w[optcarrot-benchmark optcarrot-compiled] : BC2CPP_CLOSED_WORLD_GEMS
@@ -448,7 +428,7 @@ def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cp
   end
   # Without mruby-compiler no source string can be compiled at all; with it,
   # every host call must compile a fixed literal that defines nothing.
-  if gems.key?('mruby-compiler') && !bc2cpp_closed_world_host?(build_name)
+  if gems.key?('mruby-compiler')
     host_srcs.each do |path|
       text = File.read(path, encoding: 'BINARY')
       text.scan(BC2CPP_SOURCE_LOADER_CALL) do |(args)|
@@ -485,25 +465,26 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
   [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
 end
 
-# The extra bc2cpp environment for `spec`'s build: the closed-world switch and
-# its gem list when build_config.rb enabled it, {} otherwise. Called from the
-# codegen task, once every gem (dependencies included) is in the build.
+# The bc2cpp environment for `spec`'s build: its name and gem list. bc2cpp is
+# closed-world only (docs/adr/0466), so a build that is not a closed world is
+# an error here; build_config.rb adds the compiled gems to closed-world builds
+# only. Called from the codegen task, once every gem (dependencies included) is
+# in the build.
 def bc2cpp_closed_world_env(spec, repo_root)
-  return {} unless spec.bc2cpp_closed_world?
-
   require 'shellwords'
   gems = spec.build.gems.to_h { |g| [g.name, File.expand_path(g.dir)] }
   errors = bc2cpp_closed_world_violations(spec.build.name, gems, repo_root)
   unless errors.empty?
-    raise "#{spec.name}: BC2CPP_CLOSED_WORLD refused for build '#{spec.build.name}':\n  #{errors.join("\n  ")}"
+    raise "#{spec.name}: build '#{spec.build.name}' is not a closed world, and bc2cpp compiles closed-world " \
+          "builds only (docs/adr/0466):\n  #{errors.join("\n  ")}"
   end
 
-  { 'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => spec.build.name, 'BC2CPP_COLLECTION_EXPORTS' => '1',
+  { 'BC2CPP_BUILD_NAME' => spec.build.name, 'BC2CPP_COLLECTION_EXPORTS' => '1',
     'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" }) }
 end
 
 # HOT_ONLY (ADR 0214): compile only hot_methods.txt's methods on flash-limited
-# builds. Opt-in from build_config.rb like Bc2cppClosedWorldOption.
+# builds. Opt-in from build_config.rb (`conf.gem ... { enable_bc2cpp_hot_only }`).
 BC2CPP_HOT_METHODS_PATH = File.expand_path('hot_methods.txt', __dir__)
 
 module Bc2cppHotOnlyOption

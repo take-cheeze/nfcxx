@@ -1,0 +1,326 @@
+# frozen_string_literal: true
+
+require 'set'
+require_relative 'integer_constants'
+
+# DECLARED_CONSTANT_CHECK (docs/adr/0455): RBS constant declarations, checked at every assignment.
+#
+#   FOO: Integer        every SETCONST/SETMCNST binding the bare name FOO evaluates to one Fixnum: an integer literal,
+#                       a proven or declared Integer constant, or ADD/SUB/MUL/DIV/ADDI/SUBI of those whose exact value
+#                       fits the narrowest Fixnum. Feeds INTEGER_CONSTANT_PROOF (bare-name keyed, as that proof is).
+#   TABLE: Array[...]   the declared constant's one assignment is an Array (an ARRAY literal, or a source the array
+#                       proofs accept, `.freeze` included). Feeds CONST_CONTAINER.
+#   OBJ: C              the one assignment is exactly `C.new(...)` (trace_new_target). Feeds CONST_CONTAINER.
+#
+# Errors (TC1011, a build abort): no assignment in the program, a second assignment of the declared name
+# (reassignment refuses), an assignment whose value does not prove the declared type, an assignment control can jump
+# onto (`X = c || 1`). Infos (checked, no fact): the bare name is also bound outside the program (native, foreign Ruby,
+# a class or module of that name) or, for Integer, by another assignment that does not prove.
+module DeclaredConstants
+  Entry = Struct.new(:name, :bare, :kind, :cls, :text, :loc, keyword_init: true)
+  Result = Struct.new(:integer_names, :containers, :diagnostics, :report, :locs, keyword_init: true)
+  CODE = 'TC1011'
+  KILL_ENV = 'BC2CPP_DECLARED_CONSTANTS'
+
+  # Stands for "every name" (no outside-world scan).
+  module AllNames
+    def self.include?(_name) = true
+  end
+
+  module_function
+
+  def enabled?
+    ENV[KILL_ENV] != '0'
+  end
+
+  # Entries for the constant declarations of the signature files (RbsSignatures.load notes them as TC1005 only).
+  def load(files, display_root, known_owners)
+    return [] unless enabled? && files && !files.empty?
+
+    require 'rbs'
+    files.flat_map do |file|
+      next [] if file.include?('sig/native/')
+
+      rel = display_root ? file.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : file
+      _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: rel, content: File.read(file)))
+      collect(decls, [], rel, known_owners)
+    rescue RBS::ParsingError
+      [] # RbsSignatures.load already reports the file (TC1002)
+    end
+  end
+
+  def collect(decls, scope, rel, known_owners)
+    decls.flat_map do |decl|
+      case decl
+      when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
+        inner = scope + [decl.name.to_s.delete_prefix('::')]
+        collect(decl.members.grep(RBS::AST::Declarations::Base), inner, rel, known_owners)
+      when RBS::AST::Declarations::Constant
+        name = (scope + [decl.name.to_s.delete_prefix('::')]).join('::')
+        entry_for(name, decl, rel, known_owners) || []
+      else []
+      end
+    end
+  end
+
+  def entry_for(name, decl, rel, known_owners)
+    type = decl.type
+    return nil unless type.is_a?(RBS::Types::ClassInstance)
+
+    cls = type.name.to_s.delete_prefix('::')
+    kind = if cls == 'Integer' && type.args.empty? then :int
+           elsif cls == 'Array' then :array
+           elsif type.args.empty? && known_owners.include?(cls) then :class
+           end
+    return nil unless kind
+
+    l = decl.location
+    loc = RbsSignatures::Loc.new(rel, l ? l.start_line : 1, l ? l.start_column + 1 : 1)
+    Entry.new(name: name, bare: name.split('::').last, kind: kind, cls: kind == :int ? 'Integer' : cls,
+              text: type.to_s, loc: loc)
+  end
+
+  # `sites`: the registry's constant_assignment_sites ({name:, irep:, idx:, reg:}); `poisoned` the bare names bound
+  # outside the program's bytecode (nil: unknown); `container_constants` is read for trace_new_target only. The
+  # proven integer constants are not needed: the evaluator re-derives every binding it reads.
+  def check(entries, ireps, registry, sites, _integer_constants, poisoned, container_constants, display_root)
+    result = Result.new(integer_names: Set.new, containers: {}, diagnostics: [], report: [], locs: entries.map(&:loc))
+    return result if entries.empty?
+
+    qualified_at = sites.to_h { |s| [[s[:irep], s[:idx]], s[:name]] }
+    bindings = Hash.new { |h, k| h[k] = [] }
+    class_named = Set.new
+    ireps.each_value do |irep|
+      irep.instructions.each_with_index do |insn, idx|
+        case insn.op
+        when 'SETCONST', 'SETMCNST'
+          bare = insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name
+          bindings[bare] << [irep, idx, insn, qualified_at[[irep.label, idx]]] if bare
+        when 'CLASS', 'MODULE'
+          class_named << insn.sym_token
+        end
+      end
+    end
+    # Without the outside-world scan every name may be bound elsewhere: the evaluator then reads literals only.
+    blocked = poisoned ? poisoned | class_named : nil
+    evaluator = Evaluator.new(bindings, blocked || AllNames)
+    rel = ->(path) { display_root ? path.to_s.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : path.to_s }
+    entries.each do |entry|
+      diag = lambda do |severity, where, message|
+        file, line, col = where || [entry.loc.file, entry.loc.line, entry.loc.col]
+        result.diagnostics << { file: file, line: line, col: col, severity: severity, code: CODE,
+                                message: "#{entry.name}: #{entry.text} (#{entry.loc.file}:#{entry.loc.line}): " \
+                                         "#{message}" }
+      end
+      own, unresolved = bindings[entry.bare].partition { |_i, _x, _n, q| q == entry.name }
+      unresolved = unresolved.select { |_i, _x, insn, q| q.nil? || insn.op == 'SETMCNST' }
+      errors = result.diagnostics.size
+      diag.call('error', nil, 'no assignment of this constant in the program') if own.empty?
+      own.drop(1).each do |irep, idx, insn,|
+        diag.call('error', [rel.call(irep.file), insn.lineno, 1], 'reassigned (a declared constant is assigned once)')
+      end
+      unresolved.each do |irep, _idx, insn,|
+        diag.call('error', [rel.call(irep.file), insn.lineno, 1],
+                  "`#{entry.bare}` is assigned in a scope the checker does not resolve; it may reassign this constant")
+      end
+      own.first(1).each do |irep, idx, insn,|
+        why = site_failure(entry, irep, idx, insn, evaluator, registry, container_constants)
+        diag.call('error', [rel.call(irep.file), insn.lineno, 1], why) if why
+      end
+      failed = result.diagnostics.size > errors
+      fact = !failed && feed(entry, bindings, poisoned, class_named, evaluator, result, diag)
+      status = if failed then 'FAILED'
+               elsif fact then 'checked, fact'
+               else 'checked, no fact'
+               end
+      result.report << "  DECLARED_CONST #{entry.name}: #{entry.text}: #{status}"
+    end
+    result
+  end
+
+  # Records the fact for a checked entry; true when it was fed.
+  def feed(entry, bindings, poisoned, class_named, evaluator, result, diag)
+    case entry.kind
+    when :int
+      if poisoned.nil? || poisoned.include?(entry.bare) || class_named.include?(entry.bare)
+        diag.call('info', nil,
+                  "`#{entry.bare}` is also bound outside the program's bytecode; no INTEGER_CONSTANT_PROOF fact")
+        return false
+      end
+      other = bindings[entry.bare].find { |irep, idx, insn,| evaluator.binding_value(irep, idx, insn).nil? }
+      if other
+        diag.call('info', nil, "another `#{entry.bare}` (#{other[3] || 'unresolved scope'}, line #{other[2].lineno}) " \
+                               'does not prove Integer; no INTEGER_CONSTANT_PROOF fact')
+        return false
+      end
+      result.integer_names << entry.bare
+    else
+      result.containers[entry.name] = entry.kind == :array ? 'Array' : entry.cls
+    end
+    true
+  end
+
+  def site_failure(entry, irep, idx, insn, evaluator, registry, container_constants)
+    if evaluator.entry_site?(irep, insn)
+      return 'control can jump onto the assignment, so its value is not one expression'
+    end
+
+    src = insn.regs.last
+    return 'the assigned register is unknown' unless src
+
+    case entry.kind
+    when :int
+      evaluator.binding_value(irep, idx, insn).nil? ? 'the assigned value is not a proven Fixnum expression' : nil
+    when :array
+      traced = trace_new_target(irep, idx, src, nil, 0, nil, registry: registry,
+                                                             container_constants: container_constants)
+      return nil if traced == 'Array' || proven_array_source_scan(irep, idx, src, registry)
+      return nil if frozen_array_source?(irep, idx, src, registry, container_constants)
+
+      'the assigned value is not a proven Array'
+    when :class
+      traced = trace_new_target(irep, idx, src, nil, 0, nil, registry: registry,
+                                                             container_constants: container_constants)
+      return nil if traced == entry.cls
+
+      "the assigned value is #{traced ? "a #{traced}" : 'not a proven instance'}, not exactly #{entry.cls}"
+    end
+  end
+
+  # `[...].freeze` / `X.dup.freeze`: Object#freeze answers its receiver (no program `freeze`).
+  def frozen_array_source?(irep, idx, reg, registry, container_constants)
+    return false if (registry['freeze'] || []).any?(&:irep)
+
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
+      next false unless insn.op == 'SEND0' && insn.sym == 'freeze'
+
+      trace_new_target(irep, j, cur, nil, 0, nil, registry: registry,
+                                                  container_constants: container_constants) == 'Array' ||
+        !proven_array_source_scan(irep, j, cur, registry).nil?
+    end || false
+  end
+
+  # Fixnum intervals of constant expressions over integer literals and other constants. A constant read is keyed by
+  # its bare name, as INTEGER_CONSTANT_PROOF is (lexical lookup is not modelled), so it stands for the union of every
+  # binding of that name: all must evaluate, and none may be bound outside the bytecode (`blocked`). An interval, not a
+  # value, so `TEXT_COLOR` bound to 0 in one class and 1 in another still reads as a Fixnum.
+  class Evaluator
+    OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
+    MAX_DEPTH = 16
+    MIN = -1_073_741_824 # CodeGen::LOADI_FIXNUM_MIN / MAX: the narrowest Fixnum of any shipped target
+    MAX = 1_073_741_823
+
+    def initialize(bindings, blocked)
+      @bindings = bindings
+      @blocked = blocked
+      @entries = {}
+      @memo = {}
+    end
+
+    def entry_site?(irep, insn)
+      (@entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)).include?(insn.addr)
+    end
+
+    # [lo, hi] of what one binding stores, or nil.
+    def binding_value(irep, idx, insn, visiting = Set.new)
+      return nil if entry_site?(irep, insn)
+
+      src = insn.regs.last
+      src && value(irep, idx, src, visiting, 0)
+    end
+
+    # The union over every binding of bare `name`, or nil (also for a cycle, which is not memoized).
+    def name_value(name, visiting)
+      return @memo[name] if @memo.key?(name)
+      return nil if visiting.include?(name) || @blocked.include?(name)
+
+      sites = @bindings[name]
+      return nil if sites.empty?
+
+      ranges = sites.map { |irep, idx, insn,| binding_value(irep, idx, insn, visiting | [name]) }
+      return nil if ranges.any?(&:nil?)
+
+      @memo[name] = [ranges.map(&:first).min, ranges.map(&:last).max]
+    end
+
+    def value(irep, idx, reg, visiting, depth)
+      return nil if depth > MAX_DEPTH
+
+      entries = @entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)
+      irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
+                                           follow_moves: true) do |insn, j, cur|
+        if insn.op.start_with?('LOADI')
+          v = loadi(insn)
+          next v && fixnum([v, v])
+        end
+
+        case insn.op
+        when 'GETCONST' then name_value(insn.const_name, visiting)
+        when 'GETMCNST' then name_value(insn.mcnst_name, visiting)
+        when *OPS then arithmetic(irep, j, insn, cur, visiting, depth)
+        end
+      end
+    end
+
+    # Integer operands take vm.c's integer arms of these opcodes (no method lookup), so a redefined Integer#+ is
+    # never called; DIV is Integer#/ (floored), and a divisor interval holding 0 is refused (ZeroDivisionError).
+    def arithmetic(irep, j, insn, cur, visiting, depth)
+      left = value(irep, j, cur, visiting, depth + 1)
+      right = if %w[ADDI SUBI].include?(insn.op)
+                (i = insn.imm_operand&.to_i) && [i, i]
+              elsif insn.regs[1]
+                value(irep, j, insn.regs[1], visiting, depth + 1)
+              end
+      return nil unless left && right
+
+      corners = ->(&f) { left.product(right).map { |a, b| f.call(a, b) } }
+      result = case insn.op
+               when 'ADD', 'ADDI' then [left[0] + right[0], left[1] + right[1]]
+               when 'SUB', 'SUBI' then [left[0] - right[1], left[1] - right[0]]
+               when 'MUL' then corners.call { |a, b| a * b }.minmax
+               when 'DIV'
+                 return nil if right[0] <= 0 && right[1] >= 0
+
+                 corners.call { |a, b| a / b }.minmax
+               end
+      fixnum(result)
+    end
+
+    # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode; the others print it as an operand.
+    def loadi(insn)
+      case insn.op
+      when 'LOADI__1' then -1
+      when /\ALOADI_(\d)\z/ then Regexp.last_match(1).to_i
+      else IntegerConstants.loadi_value(insn)
+      end
+    end
+
+    def fixnum(range)
+      range if range && range[0] >= MIN && range[1] <= MAX
+    end
+  end
+
+  # Prints the outcome, adds the diagnostics to the signature diagnostics and aborts a build on an error.
+  def report(result, sig_applied, abort_on_error:)
+    return if result.report.empty?
+
+    warn '== declared constants checked at every assignment (DECLARED_CONSTANT_CHECK, ADR 0455): ' \
+         "#{result.report.size} =="
+    result.report.each { |line| warn line }
+    result.diagnostics.each do |d|
+      warn "  #{d[:file]}:#{d[:line]}:#{d[:col]}: #{d[:severity]}: #{d[:message]} [#{d[:code]}]"
+    end
+    if sig_applied
+      # The loader notes every constant as accepted without a hint; these are checked now.
+      checked = result.locs.to_set { |l| [l.file, l.line] }
+      sig_applied.diagnostics.reject! do |d|
+        d.code == 'TC1005' && d.message.start_with?('Constant ') && checked.include?([d.file, d.line])
+      end
+      sig_applied.diagnostics.concat(result.diagnostics.map { |d| RbsSignatures::Diag.new(**d) })
+    end
+    errors = result.diagnostics.count { |d| d[:severity] == 'error' }
+    return unless errors.positive? && abort_on_error
+
+    abort "\n[bc2cpp] DECLARED_CONSTANT_CHECK: #{errors} constant declaration(s) do not hold (see above)."
+  end
+end

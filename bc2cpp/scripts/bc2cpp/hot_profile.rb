@@ -3,7 +3,9 @@
 
 # Regenerates tools/bc2cpp/hot_methods.txt, the profile the flash-limited
 # builds' BC2CPP_HOT_ONLY mode compiles (docs/adr/0214), from callgrind runs
-# of the desktop RPGMAKER_BC2CPP=1 binary. Two steps:
+# of an RPGMAKER_BC2CPP=1 binary. bc2cpp compiles closed-world builds only
+# (docs/adr/0466), so the desktop engine no longer is one: `record` needs a
+# closed-world build that runs the scenarios. Two steps:
 #
 #   ruby scripts/bc2cpp/hot_profile.rb record --binary build/rpg_maker_clone \
 #        --out /tmp/hot --game NEPHESHEL_DIR [--game OTHER_RPG2K_DIR ...]

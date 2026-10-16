@@ -700,7 +700,7 @@ omits only the mruby-specific compatibility shims.
 Two additional opt-in experiments can run together:
 
 ```sh
-OPTCARROT_CLOSED_WORLD=1 OPTCARROT_STATIC_DISPATCH=1 \
+OPTCARROT_STATIC_DISPATCH=1 \
   ruby tools/optcarrot_probe/compiled_run.rb 180
 ```
 

@@ -41,8 +41,7 @@ module ScanCache
     end
   end
 
-  # An in-process memo with the same keys (ADR 0416). WarmGenerator's server fills it before it forks, so every
-  # forked generation finds the scans in memory. nil (the default) leaves it off.
+  # An in-process memo with the same keys (ADR 0416). nil (the default) leaves it off.
   class << self
     attr_accessor :memory, :directory_override
 

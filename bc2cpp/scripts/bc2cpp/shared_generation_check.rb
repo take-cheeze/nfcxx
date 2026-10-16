@@ -16,6 +16,7 @@ require 'rbconfig'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/shared_generation'
 require_relative '../../tools/bc2cpp/compiled_gems'
+require_relative '../../tools/bc2cpp/wio_world_env'
 
 ROOT = File.expand_path('../..', __dir__)
 TOOL = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
@@ -34,7 +35,7 @@ end
 Dir.mktmpdir('bc2cpp-shared') do |tmp|
   puts '-- SHARED_GENERATION plans'
   plan = File.join(tmp, 'bad.json')
-  File.write(plan, JSON.generate([{ 'env' => { 'ONLY_OWNERS' => 'A', 'BC2CPP_CLOSED_WORLD' => '1' }, 'out' => 'o', 'err' => 'e' }]))
+  File.write(plan, JSON.generate([{ 'env' => { 'ONLY_OWNERS' => 'A', 'SKIP_UNSUPPORTED' => '1' }, 'out' => 'o', 'err' => 'e' }]))
   check.call('a plan whose units differ in a non-unit key is refused',
              raises.call(SharedGeneration::Error) { SharedGeneration.load_plan(plan) })
   SharedGeneration.arm_guard
@@ -78,7 +79,7 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
         def make; Alpha.new(3); end
       end
     RUBY
-    common = { 'MRBC' => mrbc, 'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '' }
+    common = bc2cpp_wio_world_env({ 'MRBC' => mrbc, 'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '' }, ROOT)
     units = [%w[Alpha Beta], %w[Beta Alpha]].map do |only, other|
       dir = FileUtils.mkdir_p(File.join(tmp, "unit-#{only}")).first
       { 'OUT_SYMBOL' => "u_#{only.downcase}", 'OUT_DIR' => dir, 'ONLY_OWNERS' => only, 'OTHER_OWNERS' => other }

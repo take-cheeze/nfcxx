@@ -11,7 +11,7 @@ require_relative 'dynamic_names'
 require_relative 'loop_installers'
 require_relative 'scan_cache'
 
-# CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
+# CLOSED_WORLD (docs/adr/0210, 0466): bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
 # native sources of the build's own gems (compiled_gems.rb enforces that). A
 # guard chain's by-name fallback can then call bc2cpp_nomethod, which raises
