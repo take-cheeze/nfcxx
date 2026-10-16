@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'fixpoint'
 require 'set'
 require_relative 'bytecode_ir'
 
@@ -121,7 +122,7 @@ class IvarLayout
     # (measured: the opaque-send fixture embedded only on one order).
     seen = Hash.new { |h, k| h[k] = {} }
 
-    10.times do
+    Fixpoint.iterate('IvarLayout.analyze', Fixpoint::SWEEP_LIMIT) do
       changed = false
       methods_of.each do |klass, irep_labels|
         irep_labels.each do |label|
@@ -167,7 +168,7 @@ class IvarLayout
           end
         end
       end
-      break unless changed
+      changed
 
     end
 
