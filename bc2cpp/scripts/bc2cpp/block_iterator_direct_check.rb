@@ -116,13 +116,15 @@ code, = generate_world
 %w[lp lp_value lp_return lp_next lp_stop lp_drain lp_raise].each do |name|
   check.call("#{name}: loop { } calls the compiled Kernel#loop", code_of(code, name).include?(KERNEL_LOOP))
 end
-check.call('lp: a block with a break keeps the root-context test, the dynamic send its else',
-           code_of(code, 'lp').match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = Kernel_loop_impl\(M, self, .*\} else \{\n\s+r\d+ = mrb_funcall_with_block\(M, self, /m))
+# The else is the site's send: by name, or the owner call of ADR 0468 when the closed world names every owner.
+ELSE_SEND = '(?:mrb_funcall_with_block|bc2cpp_owner_call)\\('
+check.call('lp: a block with a break keeps the root-context test, the send its else',
+           code_of(code, 'lp').match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = Kernel_loop_impl\(M, self, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}M, self, /m))
 check.call('lp_drain: a yield-free block leaves no dynamic send',
            code_of(code, 'lp_drain').include?('no dynamic send') && !code_of(code, 'lp_drain').include?(DYNAMIC))
 chars = code_of(code, 'chars')
-check.call('chars: an unproven each_char receiver gets an exact-String arm with the dynamic send as its else',
-           chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n\s+r\d+ = mrb_funcall_with_block\(/m))
+check.call('chars: an unproven each_char receiver gets an exact-String arm with the send as its else',
+           chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}/m))
 check.call('str_lines: each_line gets the String arm', code_of(code, 'str_lines').include?('String_each_line_impl(M, '))
 nested = code_with_blocks(code, 'tm_nested')
 # The only dynamic send left is the outer `n.times`'s own else (its receiver is unproven); the inner `2.times` keeps
