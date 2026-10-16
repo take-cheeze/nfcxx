@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SYCL tests (lib/sycl, docs/notes/sycl-webgpu.md).
 #   host path     each program builds with g++ and with nfcxx (--cpu) and prints its "ok" line.
+#   OpenCL path   scripts/sycl-build.sh --backend=opencl: the Kernel-capability SPIR-V on an Intel GPU (rt_opencl.hpp).
 #   WebGPU path   scripts/sycl-build.sh compiles the device pass (WGSL) and the host side with nfcxx; the program runs the
 #                 kernels through tests/sycl/server.cjs (Chromium's WebGPU: a GPU, or SwiftShader without one).
 #                 Needs the Path B harness (scripts/setup-pathb.sh), the nfcxx build (setup-edg.sh, setup-qbe.sh), node,
@@ -59,6 +60,32 @@ if [ $vk_ok = 1 ]; then
   fi
 else
   echo "SKIP: vulkan: needs the nfcxx build, spirv-val and libvulkan"
+fi
+
+# ---- OpenCL path (scripts/pathb-spirv-emit.rb --kernel-cl, lib/sycl/include/sycl/rt_opencl.hpp): the same programs on an Intel
+# GPU through OpenCL (SPIR-V 1.2 with the OpenCL 2.2 memory model, the heap in shared USM, the local size in specialization
+# constants). Skips when the OpenCL headers, the ICD loader, spirv-val or a usable device is missing. The host is g++ (the
+# runtime is plain C++ over the OpenCL C API).
+cl_inc=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
+cl_ok=0
+if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then cl_ok=1; fi
+if [ $cl_ok = 1 ]; then
+  clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
+  clprobe=1
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices; do
+    if ! clbuild $t; then echo "opencl    $t: FAIL (build)"; grep -v prelinker "$out/cl_$t.log" | head -3; fail=1; continue; fi
+    "$out/cl_$t" > "$out/cl_$t.out" 2> "$out/cl_$t.err"; rc=$?
+    if [ $rc = 70 ] && grep -q "OpenCL runtime" "$out/cl_$t.err"; then clprobe=0; break; fi
+    if [ "$(tail -1 "$out/cl_$t.out")" = "$t ok" ]; then echo "opencl    $t: ok"; else echo "opencl    $t: FAIL (exit $rc)"; cat "$out/cl_$t.err" "$out/cl_$t.out" | tail -3; fail=1; fi
+  done
+  if [ $clprobe = 0 ]; then
+    echo "SKIP: opencl: no usable OpenCL device ($(head -c 120 "$out/cl_vecadd.err" 2>/dev/null))"
+  elif clbuild trap_div; then
+    "$out/cl_trap_div" > /dev/null 2> "$out/cl_trap_div.err"; rc=$?
+    if [ $rc = 71 ] && grep -q "division by zero" "$out/cl_trap_div.err"; then echo "opencl    trap_div: trapped (exit 71)"; else echo "opencl    trap_div: FAIL (exit $rc)"; cat "$out/cl_trap_div.err"; fail=1; fi
+  else echo "opencl    trap_div: FAIL (build)"; fail=1; fi
+else
+  echo "SKIP: opencl: needs spirv-val, the OpenCL headers (OPENCL_INCLUDE) and libOpenCL.so.1"
 fi
 
 # ---- WebGPU path

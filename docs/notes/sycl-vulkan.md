@@ -107,6 +107,9 @@ bytes each. The rest are the samples' own usage errors and deliberate bugs. The 
   address, so the USM translation is exercised there for the first time: `usm` and `usm_ptr` are the ones to watch. To check:
   `tests/sycl/run.sh` on the B60 box with the Vulkan loader and ANV installed. Expect `double` to be slow (FP64 is emulated on
   some Arc parts).
-- **Level Zero / OpenCL** for Intel XPU: a Kernel-capability variant of the same module (physical addresses are the same
-  idea; the memory model and the built-ins differ). Not started.
+- **OpenCL for Intel XPU: done** (`--backend=opencl`). The Kernel-capability module (`pathb-spirv-emit.rb --kernel-cl`,
+  OpenCL 2.2, OpenCL.std for the math: Intel's compiler rejects GLSL.std.450 in a kernel) runs all 19 `tests/sycl`
+  programs on the Arc B60 through `rt_opencl.hpp` (the heap is shared USM with atomics: the B60's SVM is coarse-grained
+  with no atomics). The local size is set by specialization constants. `double` runs too (under a second, three runs; an
+  earlier run that looked hung did not reproduce). Level Zero is not started.
 - Work-group sizes above 256 are fine here (lavapipe allows 1024); the WebGPU path keeps its 256 limit.

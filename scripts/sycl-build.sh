@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a SYCL program (lib/sycl, docs/notes/sycl-webgpu.md) for the host CPU or for WebGPU.
 #
-#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan] [--keep-ir] [-I dir] [-D mac] [--cxx=CMD] prog.cpp -o prog
+#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan|opencl] [--keep-ir] [-I dir] [-D mac] [--cxx=CMD] prog.cpp -o prog
 #
 # WebGPU (the default): a device pass compiles prog.cpp with -D__NFCXX_SYCL_DEVICE__ through the Path B front end
 # (scripts/pathb-dump --ir), scripts/pathb-wgsl-emit.rb lowers every kernel to WGSL, and the host pass compiles the
@@ -19,7 +19,7 @@ cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; opts=(); std=
 while [ $# -gt 0 ]; do
   case $1 in
     --cpu) mode=cpu ;;
-    --backend=*) backend=${1#--backend=}; case $backend in webgpu|vulkan) ;; *) echo "sycl-build: --backend must be webgpu or vulkan" >&2; exit 2 ;; esac ;;
+    --backend=*) backend=${1#--backend=}; case $backend in webgpu|vulkan|opencl) ;; *) echo "sycl-build: --backend must be webgpu, vulkan or opencl" >&2; exit 2 ;; esac ;;
     --keep-ir) keep=1 ;;
     --cxx=*) cxx=${1#--cxx=} ;;
     -std=*) std=${1#-std=} ;;
@@ -47,16 +47,28 @@ absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 rc=0
 if [ $backend = vulkan ]; then
   "$root/scripts/mrb" "$root/scripts/pathb-spirv-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
+elif [ $backend = opencl ]; then
+  # the Kernel-capability module (OpenCL 2.2): one kernel per entry point, the push block as its argument
+  "$root/scripts/mrb" "$root/scripts/pathb-spirv-emit.rb" --kernel-cl --manifest="$absout.man" "$absout.dev.ir" > "$absout.cl.spv" || rc=$?
 else
   "$root/scripts/mrb" "$root/scripts/pathb-wgsl-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.wgsl" || rc=$?
 fi
 [ "$keep" = 1 ] || rm -f "$absout.dev.ir"
-if [ $rc -ne 0 ]; then rm -f "$absout.wgsl" "$absout.spv" "$absout.man"; echo "sycl-build: the device code of $src was refused (exit $rc)" >&2; exit $rc; fi
+if [ $rc -ne 0 ]; then rm -f "$absout.wgsl" "$absout.spv" "$absout.cl.spv" "$absout.man"; echo "sycl-build: the device code of $src was refused (exit $rc)" >&2; exit $rc; fi
 if [ $backend = vulkan ]; then
   if [ -s "$absout.spv" ] && ! spirv-val --target-env vulkan1.2 "$absout.spv" > "$absout.val.log" 2>&1; then
     cat "$absout.val.log" >&2; echo "sycl-build: the SPIR-V of $src does not validate" >&2; exit 1
   fi
   exec $cxx -std=$std $optflag -DNFCXX_SYCL_VULKAN -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" -lvulkan
+fi
+if [ $backend = opencl ]; then
+  if [ -s "$absout.cl.spv" ] && ! spirv-val --target-env opencl2.2 "$absout.cl.spv" > "$absout.val.log" 2>&1; then
+    cat "$absout.val.log" >&2; echo "sycl-build: the OpenCL SPIR-V of $src does not validate" >&2; exit 1
+  fi
+  # the OpenCL headers: OPENCL_INCLUDE (default: the oneAPI compiler's); libOpenCL.so.1 is the ICD loader
+  # the runtime's own headers first: the OpenCL include directory of the oneAPI tree also holds a sycl/ directory
+  exec $cxx -std=$std $optflag -DNFCXX_SYCL_OPENCL -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" \
+    -I"${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}" "${opts[@]}" "$src" -o "$out" -l:libOpenCL.so.1
 fi
 exec $cxx -std=$std $optflag -DNFCXX_SYCL_WEBGPU -DNFCXX_SYCL_SERVER_JS="\"$root/tests/sycl/server.cjs\"" \
   -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out"
