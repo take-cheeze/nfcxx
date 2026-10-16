@@ -1729,6 +1729,13 @@ class CodeGen
 
       cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                   trace_insn: insn, trace_reg_offset: trace_reg_offset)
+      # SUBTREE_DISPATCH (docs/adr/0453): a receiver hinted to one closed subtree dispatches over that subtree only.
+      unless self_implicit || via_element || known_class || exact_site
+        subtree_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+        subtree = compile_subtree_dispatch(name, n, d, recv, argv, irep, idx || trace_idx, subtree_reg, owner_def,
+                                           cw_site)
+        return subtree if subtree
+      end
       poly = with_exact_core_site(exact_site) do
         compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
           compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)

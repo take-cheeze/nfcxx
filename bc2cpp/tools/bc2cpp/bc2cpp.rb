@@ -138,6 +138,7 @@ require_relative 'codegen_guarded_block_inline'
 require_relative 'codegen_core_exact_direct'
 require_relative 'codegen_core_compiled_cmp'
 require_relative 'codegen_interface_tables'
+require_relative 'codegen_subtree_dispatch'
 require_relative 'codegen_block_param_call'
 require_relative 'escape_analysis'
 require_relative 'codegen_escape'
@@ -407,7 +408,8 @@ if $PROGRAM_NAME == __FILE__
     sig_owners = registry.values.flatten.map(&:owner).uniq
     sig_class_annotations = ClassAnnotations.extract(ireps, registry, sig_owners)
     sig_element_annotations = ElementAnnotations.extract(ireps, registry, sig_owners)
-    sig_applied = RbsSignatures.apply(sig_loaded, ireps, registry, annotations, sig_class_annotations, sig_element_annotations)
+    sig_applied = RbsSignatures.apply(sig_loaded, ireps, registry, annotations, sig_class_annotations,
+                                      sig_element_annotations, class_decls: class_decls)
     # RBS_BLOCK_PARAM_HINT: the declared block types, read by block_fallback_rbs_param_class.
     CodeGen.rbs_block_signatures = sig_applied.ir_block_signatures
     warn '== signature files (RBS_SIGNATURES) =='
@@ -641,6 +643,17 @@ if $PROGRAM_NAME == __FILE__
   # RBS_SIGNATURES: a declared ivar class fills an ivar the analysis left unknown (guarded hint, like CLASS_HINT); an
   # inferred class is kept and a disagreement is a contradiction in the type check.
   RbsSignatures.seed_table(class_layout, sig_applied.ivar_classes) if sig_applied
+  # SUBTREE_DISPATCH (docs/adr/0453): "C or a descendant" receiver facts, read only by the send devirtualization.
+  CodeGen.subtree_facts = nil
+  if closed_world && SubtreeFacts.enabled?
+    subtree_labels = {}
+    registry.each_value { |defs| defs.each { |d| subtree_labels[d.irep] = "#{d.owner}##{d.name}" if d.irep } }
+    CodeGen.subtree_facts = SubtreeFacts.build(raw: class_layout_raw, store_log: ivar_store_log, world: closed_world,
+                                               exact_layout: class_layout, applied: sig_applied, labels: subtree_labels)
+    warn ''
+    warn "== subtree receiver facts (SUBTREE_DISPATCH, ADR 0453): #{CodeGen.subtree_facts.sources.size} =="
+    CodeGen.subtree_facts.sources.each { |line| warn "  SUBTREE_FACT #{line}" }
+  end
   profile_phase.call('class layout fixed-point passes')
   # Step 6c-bis: the same call-site inference ArgTypes does, for the class-name
   # lattice. Its only consumer is RBS_SEED_CONTRADICTION below -- a class
@@ -1705,6 +1718,12 @@ if $PROGRAM_NAME == __FILE__
   eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
   warn "== shared === helper (EQQ_DIRECT): #{gen.eqq_helper_site_count(compiled)} sites =="
   warn ''
+  if CodeGen.subtree_facts
+    subtree_sites = gen.subtree_site_counts(compiled)
+    warn "== subtree dispatch (SUBTREE_DISPATCH, ADR 0453): #{subtree_sites.sum(&:last)} sites =="
+    subtree_sites.each { |(kind, name, root), count| warn "  #{kind} :#{name} on #{root}: #{count}" }
+    warn ''
+  end
   poly_table_sites = gen.poly_table_site_counts(compiled)
   warn "== poly table dispatch: #{poly_table_sites.map { |t, n| "#{t} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''

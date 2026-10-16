@@ -34,7 +34,9 @@ module RbsSignatures
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
   Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, keyword_init: true)
-  Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, keyword_init: true)
+  Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, :supers, keyword_init: true)
+  # SUBTREE_DISPATCH (docs/adr/0453): a `class C < S` declaration, checked against the program's own superclass.
+  SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
 
   MEMBER_OK = %w[MethodDefinition InstanceVariable AttrReader AttrAccessor].freeze
   MEMBER_NOTED = %w[Public Private Alias Include Extend Prepend ClassInstanceVariable ClassVariable InstanceVariable
@@ -59,7 +61,7 @@ module RbsSignatures
     files = files_in(dirs)
     return nil if files.empty?
 
-    out = Loaded.new(methods: {}, ivars: {}, diagnostics: [], files: files)
+    out = Loaded.new(methods: {}, ivars: {}, diagnostics: [], files: files, supers: [])
     begin
       require 'rbs'
     rescue LoadError
@@ -95,6 +97,10 @@ module RbsSignatures
     case decl
     when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
       name = (scope + [decl.name.to_s.delete_prefix('::')]).join('::')
+      if decl.is_a?(RBS::AST::Declarations::Class) && decl.super_class && out.supers
+        out.supers << SuperDecl.new(name: name, super_name: decl.super_class.name.to_s, scope: name.split('::')[0...-1],
+                                    loc: loc_of(decl, rel))
+      end
       decl.members.each { |m| member(out, m, name, rel) }
       decl.members.grep(RBS::AST::Declarations::Base).each { |inner| declaration(out, inner, [name], rel) }
     when RBS::AST::Declarations::Constant, RBS::AST::Declarations::TypeAlias, RBS::AST::Declarations::Interface
@@ -256,12 +262,15 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_optional_types, :ir_keyword_types, :ir_block_signatures, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_optional_types, :ir_keyword_types, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
   # Annotations / ClassAnnotations / ElementAnnotations.extract returned; comment slots win.
-  def apply(loaded, ireps, registry, annotations, class_annotations, element_annotations)
+  # `class_decls` (build_registry's): the program's class hierarchy, for SUBTREE_DISPATCH (docs/adr/0453). A class type
+  # naming a class with descendants is a subtree hint (subtree_ivars / subtree_args / subtree_returns), never the exact
+  # one a class with none gives; an RBS `class C < S` must agree with the program's superclass of C (TC1009).
+  def apply(loaded, ireps, registry, annotations, class_annotations, element_annotations, class_decls: nil)
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
@@ -270,7 +279,10 @@ module RbsSignatures
                      ir_owners: registry.values.flatten.select(&:irep).group_by(&:irep).filter_map do |label, defs|
                        owners = defs.map(&:owner).uniq
                        [label, owners.first] if owners.size == 1
-                     end.to_h.freeze)
+                     end.to_h.freeze,
+                     subtree_ivars: Hash.new { |h, k| h[k] = {} }, subtree_args: {}, subtree_returns: {},
+                     based: based_classes(class_decls))
+    check_supers(ap, loaded, class_decls) if class_decls
     defs_by = {}
     registry.each_value { |defs| defs.each { |d| defs_by[[d.owner, d.name.to_s]] = d if d.irep } }
     loaded.methods.each_value do |sig|
@@ -427,6 +439,90 @@ module RbsSignatures
     visit.call(owner, Set.new, true) ? owners : []
   end
 
+  # SUBTREE_DISPATCH (docs/adr/0453): the declared classes some other declared class names as its superclass. A
+  # superclass that is not itself a declared path stands for every declared class of its simple name (Ruby's lexical
+  # constant lookup may reach any of them), so this over-approximates. Empty without a hierarchy.
+  def based_classes(class_decls)
+    return Set.new unless class_decls
+
+    by_simple = class_decls.keys.group_by { |k| k.split('::').last }
+    class_decls.values.flatten.each_with_object(Set.new) do |d, out|
+      sup = d[:super]
+      next unless sup.is_a?(String)
+
+      class_decls.key?(sup) ? out << sup : out.merge(by_simple.fetch(sup.split('::').last, []))
+    end
+  end
+
+  # A class type that names a class with descendants: a value of that type may be any of them.
+  def based?(ap, cls)
+    ap.based&.include?(cls)
+  end
+
+  # TC1009: an RBS `class C < S` whose S is not the program's superclass of C. A class the program does not declare,
+  # a core class it only reopens, and a superclass the program does not name with certainty are not checked.
+  def check_supers(ap, loaded, class_decls)
+    Array(loaded.supers).each do |decl|
+      next unless class_decls.key?(decl.name)
+
+      program = program_superclass(decl.name, class_decls)
+      next unless program
+
+      declared = resolve_rbs_class(decl.super_name, decl.scope, class_decls)
+      same = if class_decls.key?(program) then declared == program
+             else declared.split('::').last == program.split('::').last
+             end
+      next if same
+
+      note(ap, decl.loc, 'error', 'TC1009',
+           "#{decl.name}: signature declares superclass #{declared}, the program's is #{program}")
+    end
+  end
+
+  # The program's superclass of `klass` from its CLASS declarations (ClosedWorld#class_parent's reading): a declared
+  # class's full path, an undeclared one as written, 'Object' for an implicit one, nil when it cannot be named.
+  def program_superclass(klass, class_decls)
+    supers = class_decls.fetch(klass).map { |d| d[:super] }.uniq
+    return nil if supers.include?(nil)
+
+    named = supers - [:none]
+    if named.empty?
+      # A core class the program reopens (`class Integer`) keeps the superclass mruby gave it.
+      return core_class?(klass) ? nil : 'Object'
+    end
+    return nil unless named.one?
+
+    return named.first if class_decls.key?(named.first)
+
+    simple = named.first.split('::').last
+    candidates = class_decls.keys.select { |c| c.split('::').last == simple }
+    return named.first if candidates.empty?
+    return nil unless candidates.one?
+
+    parent = candidates.first
+    parent == named.first || parent.end_with?("::#{named.first}") || named.first.end_with?("::#{parent}") ? parent : nil
+  end
+
+  def core_class?(klass)
+    require_relative 'core_hierarchy_sigs'
+    @core_classes ||= CoreHierarchySigs.load.first.keys.to_set
+    @core_classes.include?(klass)
+  rescue StandardError, LoadError
+    true
+  end
+
+  # An RBS class reference resolved against the program: absolute (`::A`), else the innermost enclosing scope that
+  # makes it a declared class, else as written.
+  def resolve_rbs_class(name, scope, class_decls)
+    return name.delete_prefix('::') if name.start_with?('::')
+
+    scope.size.downto(0) do |i|
+      candidate = (scope.first(i) + [name]).join('::')
+      return candidate if class_decls.key?(candidate)
+    end
+    name
+  end
+
   def note(ap, loc, severity, code, message)
     ap.diagnostics << Diag.new(file: loc.file, line: loc.line, col: loc.col, severity: severity, code: code, message: message)
   end
@@ -472,7 +568,19 @@ module RbsSignatures
         next
       end
       ann_args[i] ||= fix unless fix == :array && el # Array[C] elements are ElementAnnotations, not a :array arg
+      if t.kind == :class && cls && based?(ap, cls)
+        # SUBTREE_DISPATCH: a base class is not an exact class; only the send devirtualization reads the subtree.
+        (ap.subtree_args[label] ||= Array.new(sig.args.size))[i] ||= cls unless comment_has
+        note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name} parameter #{i + 1}: class #{cls} has " \
+                                            'subclasses; a subtree hint, not an exact one')
+        next
+      end
       cann_args[i] ||= cls if cls && (!fix || fix == :array)
+      if el && based?(ap, el)
+        note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name} parameter #{i + 1}: element class #{el} has " \
+                                            'subclasses; no element hint')
+        next
+      end
       arg_elements[i] ||= el
       arg_containers[i] ||= cont if el
     end
@@ -481,8 +589,15 @@ module RbsSignatures
       fix, cls, el, = slot_hint(r, known_owners)
       ann_ret ||= fix
       ann_ret ||= :array if r.kind == :array
-      if r.kind == :array && el
+      if el && based?(ap, el)
+        note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name} return: element class #{el} has subclasses; " \
+                                            'no element hint')
+      elsif r.kind == :array && el
         element ||= el
+      elsif r.kind == :class && cls && !fix && based?(ap, cls)
+        ap.subtree_returns[label] ||= cls unless ret_class
+        note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name} return: class #{cls} has subclasses; a " \
+                                            'subtree hint, not an exact one')
       elsif r.kind == :class && cls && !fix
         ret_class ||= cls
       elsif r.kind == :class
@@ -502,17 +617,25 @@ module RbsSignatures
     t = iv.type
     case t.kind
     when :class
-      if known_owners.include?(t.cls)
+      if known_owners.include?(t.cls) && based?(ap, t.cls)
+        ap.subtree_ivars[iv.owner][name] = t.cls
+        note(ap, iv.loc, 'info', 'TC1005', "#{iv.owner}##{iv.name}: class #{t.cls} has subclasses; a subtree hint, " \
+                                           'not an exact one')
+      elsif known_owners.include?(t.cls)
         ap.ivar_classes[iv.owner][name] = t.cls
       else
         note(ap, iv.loc, 'info', 'TC1005', "#{iv.owner}##{iv.name}: class #{t.cls} is not defined by the program; no hint")
       end
     when :array
       ap.ivar_classes[iv.owner][name] = 'Array'
-      ap.ivar_elements[iv.owner][name] = t.element if t.element && known_owners.include?(t.element)
+      if t.element && known_owners.include?(t.element) && !based?(ap, t.element)
+        ap.ivar_elements[iv.owner][name] = t.element
+      end
     when :hash
       ap.ivar_classes[iv.owner][name] = 'Hash'
-      ap.ivar_hash_elements[iv.owner][name] = t.element if t.element && known_owners.include?(t.element)
+      if t.element && known_owners.include?(t.element) && !based?(ap, t.element)
+        ap.ivar_hash_elements[iv.owner][name] = t.element
+      end
     when :int, :sym
       note(ap, iv.loc, 'info', 'TC1005',
            "#{iv.owner}##{iv.name}: #{t.text} is checked against the inference but not forced (an embedded slot needs a proof)")
