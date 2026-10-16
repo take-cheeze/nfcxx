@@ -331,8 +331,8 @@ module CallFacts
       return nil unless insns.all? { |i| NumericFlow::SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
 
       n = [irep.nregs.to_i, 1].max
-      extra = NumericFlow.enter_edges(irep)
-      raises = program.handler_edges.group_by(&:src).transform_values { |edges| edges.map(&:target).uniq }
+      raises = program.raise_targets
+      succ_lists = program.successor_lists
       ins = Array.new(insns.length)
       outs = Array.new(insns.length)
       ins[0] = [(0...n).to_a, Array.new(n)]
@@ -342,16 +342,14 @@ module CallFacts
         i = work.shift
         queued.delete(i)
         out = transfer(insns[i], ins[i], n, opaque)
-        raises.fetch(i, []).each do |target|
+        raises.fetch(i, NumericFlow::EMPTY).each do |target|
           edge = join(raise_state(insns[i], ins[i], n), out)
           push(ins, target, edge, work, queued)
         end
         next if outs[i] == out
 
         outs[i] = out
-        succ = program.instruction_at(i).successors
-        succ |= extra[i] if extra[i]
-        succ.each { |s| push(ins, s, out, work, queued) }
+        succ_lists[i].each { |s| push(ins, s, out, work, queued) }
       end
       ins
     end

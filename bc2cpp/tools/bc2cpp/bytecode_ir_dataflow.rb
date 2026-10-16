@@ -405,9 +405,7 @@ module BytecodeIR
       @origin_reachable = nil
       return nil unless handlers_resolved?
 
-      extra = Hash.new { |h, k| h[k] = [] }
-      handler_edges.each { |edge| extra[edge.src] << edge.target }
-      @origin_reachable = forward_reachable([0], extra)
+      @origin_reachable = forward_reachable([0])
     end
 
     # Instruction indices a closure-creating op can reach (origin only): a block or lambda of this frame, or a
@@ -421,15 +419,15 @@ module BytecodeIR
       @origin_closure_reach = nil
       return nil unless handlers_resolved?
 
-      extra = Hash.new { |h, k| h[k] = [] }
-      handler_edges.each { |edge| extra[edge.src] << edge.target }
       starts = @instructions.filter_map { |i| i.index if ORIGIN_CLOSURE_OPS.include?(i.source.op) }
-                            .flat_map { |c| @instructions[c].successors + extra[c] }
-      @origin_closure_reach = forward_reachable(starts, extra)
+                            .flat_map { |c| @instructions[c].successors + raise_targets.fetch(c, EMPTY_TARGETS) }
+      @origin_closure_reach = forward_reachable(starts)
     end
 
-    # Indices reached from +starts+ (inclusive) over normal successors and the +extra+ edges.
-    def forward_reachable(starts, extra)
+    EMPTY_TARGETS = [].freeze
+
+    # Indices reached from +starts+ (inclusive) over normal successors and the handler edges (#raise_targets).
+    def forward_reachable(starts)
       seen = Set.new
       work = starts.dup
       until work.empty?
@@ -437,7 +435,7 @@ module BytecodeIR
         next unless seen.add?(i)
 
         @instructions[i].successors.each { |s| work << s }
-        extra[i].each { |t| work << t }
+        raise_targets.fetch(i, EMPTY_TARGETS).each { |t| work << t }
       end
       seen.freeze
     end
