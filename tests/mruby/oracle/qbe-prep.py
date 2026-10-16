@@ -333,6 +333,26 @@ def bit_helpers():
 
 HELPER_BUILTINS.update(bit_helpers())
 
+# GCC's __sync read-modify-write builtins over cproc's __atomic_fetch_OP (which returns the old value, so the new one
+# is old OP v) and __atomic_compare_exchange_n (on failure it writes the current value into the expected one, so the
+# result is the old value either way). Sizes 4 and 8 are the ones CoreCLR uses.
+for nbytes in (4, 8):
+    t = 'unsigned int' if nbytes == 4 else 'unsigned long'
+    for op, sym in (('add', '+'), ('sub', '-'), ('and', '&'), ('or', '|'), ('xor', '^')):
+        name = f'__sync_{op}_and_fetch_{nbytes}'
+        HELPER_BUILTINS[name] = (
+            f'__nfcxx_{name}',
+            f'static {t} __nfcxx_{name}(void *p, {t} v) {{ return __atomic_fetch_{op}(({t} *)p, v, 5) {sym} v; }}')
+    name = f'__sync_val_compare_and_swap_{nbytes}'
+    HELPER_BUILTINS[name] = (
+        f'__nfcxx_{name}',
+        f'static {t} __nfcxx_{name}(void *p, {t} o, {t} n) {{ __atomic_compare_exchange_n(({t} *)p, &o, n, 0, 5, 5); return o; }}')
+HELPER_BUILTINS['__builtin_ia32_pause'] = ('__nfcxx_pause', 'static void __nfcxx_pause(void) { }')
+HELPER_BUILTINS['__builtin_prefetch'] = ('__nfcxx_prefetch', 'static void __nfcxx_prefetch(const void *p, ...) { (void)p; }')
+HELPER_BUILTINS['__builtin_ffs'] = ('__nfcxx_ffs',
+    'static int __nfcxx_ffs(int x) { unsigned int u = (unsigned int)x; int n = 0; if (u == 0) return 0;'
+    ' while (!(u & 1)) { u >>= 1; ++n; } return n + 1; }')
+
 # Type-generic overflow builtins: (C type, helper suffix, unsigned counterpart of a signed type).
 OV_TYPES = (('int', 'i', 'unsigned int'), ('unsigned int', 'u', None), ('long', 'l', 'unsigned long'),
             ('unsigned long', 'ul', None), ('long long', 'll', 'unsigned long long'),
@@ -712,11 +732,10 @@ def main():
     need_int3 = False
     need_fence = False
     prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
-    if C_INPUT:
-        keep = volatile_locals(toks)
-        if keep:
-            edits.extend(keep)
-            prelude[KEEP_NAME] = KEEP_DEF
+    keep = volatile_locals(toks)
+    if keep:
+        edits.extend(keep)
+        prelude[KEEP_NAME] = KEEP_DEF
 
     def mark_weak_alias(name):
         # _ZTHx is the thread_local init alias for _ZTWx; if the wrapper is COMDAT (weak), so is the alias.
@@ -730,12 +749,12 @@ def main():
         prev = tok_at(toks, i - 1)
         stmt_ctx = prev is None or (prev.kind == 'punct' and prev.text in (';', '}', '{'))
 
-        # 0b. Hand-written C only (NFCXX_C_INPUT, set by nfcxx for .c inputs): cproc rejects every store to a
-        # volatile object ("volatile store is not yet supported"), yet it already emits volatile loads as
-        # plain loads and QBE does not reorder or remove memory accesses of an object whose address escapes
-        # (struct members, globals). So the qualifier is dropped, except on inline asm. A volatile local
-        # whose address is never taken is promoted to a register by QBE, so volatile_locals() makes its address escape.
-        if C_INPUT and t.kind == 'id' and t.text in ('volatile', '__volatile__', '__volatile') and not (
+        # 0b. cproc rejects every store to a volatile object ("volatile store is not yet supported"), yet it
+        # already emits volatile loads as plain loads and QBE does not reorder or remove memory accesses of an
+        # object whose address escapes (struct members, globals). So the qualifier is dropped, except on inline
+        # asm (see the file comment). A volatile local whose address is never taken is promoted to a register by
+        # QBE, so volatile_locals() makes its address escape.
+        if t.kind == 'id' and t.text in ('volatile', '__volatile__', '__volatile') and not (
                 prev is not None and prev.kind == 'id' and prev.text in ('__asm__', '__asm', 'asm')):
             edits.append((t.start, t.end, ''))
             i += 1
