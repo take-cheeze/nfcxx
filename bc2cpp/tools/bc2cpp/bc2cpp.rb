@@ -1324,7 +1324,7 @@ if $PROGRAM_NAME == __FILE__
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
   # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
   # else trace instruments the plain text first (at_exit runs last-in first-out).
-  if ENV['BC2CPP_TRACE_PARAMS'] == '1'
+  if ENV['BC2CPP_TRACE_TYPES'] == '1'
     require_relative 'param_trace'
     ParamTrace.capture_stdout(
       symbol,
