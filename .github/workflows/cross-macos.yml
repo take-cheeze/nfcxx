@@ -1,0 +1,52 @@
+name: Cross to macOS arm64
+
+# The macOS arm64 compile checks from a Linux host (docs/notes/cross-macos.md): the clean-room sysroot, the C and C++
+# syntax and assembly checks, and the link mode's Mach-O shape check. Compile and assembly only; nothing is run.
+# Runs on pull requests only when a change can affect these checks.
+on:
+  pull_request:
+    paths:
+      - "scripts/cross-macos-check.sh"
+      - "scripts/macos-cxx-check.sh"
+      - "scripts/macos-stub-tbd.sh"
+      - "scripts/setup-cross-macos.sh"
+      - "scripts/setup-edg.sh"
+      - "scripts/setup-qbe.sh"
+      - "scripts/qbe-cc"
+      - "scripts/qbe-prep.rb"
+      - "scripts/cross-macos-*.sh"
+      - "tests/macos-sysroot/**"
+      - "tests/c/**"
+      - "tests/cases/**"
+      - "nfcxx"
+      - "nfcc"
+      - "3rd/edg"
+      - "3rd/qbe"
+      - "3rd/cproc"
+      - ".github/workflows/cross-macos.yml"
+  workflow_dispatch:
+
+# A newer push to the same PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cross-macos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: LLVM 18 toolchain for the cross build (clang, llvm-mc, ld64.lld, libc++ headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 llvm-18 lld-18 libc++-18-dev cmake ninja-build
+
+      - name: Set up the cross configuration (EDG, QBE and cproc for this host)
+        run: scripts/setup-cross-macos.sh
+
+      - name: Cross checks (C and C++ syntax and assembly, link mode Mach-O shape)
+        run: scripts/cross-macos-check.sh

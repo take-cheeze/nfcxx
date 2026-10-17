@@ -14,6 +14,10 @@
 // - Class-typed temporaries that are not stored are released after their
 //   statement.
 // - Top-level variables are never released (they live until exit, as in Swift).
+// - Arrays are class-like too: a copy copies the buffer (retaining each class-like
+//   element), and the buffer is freed with its elements. A struct or enum holding an
+//   array is class-like as well, and its copy copies the array. A subscript or `count`
+//   of a temporary array frees the temporary when it reads the element.
 //
 // Closures and captures:
 // - A closure is a function value { fn, ctx }. Its body sees its own parameters,
@@ -34,6 +38,9 @@ struct CompileError: Error {
   let line: Int
   let column: Int
 }
+
+/// The compound assignment operators. Each is its arithmetic operator followed by `=`.
+private let compoundAssignmentOperators: Set<String> = ["+=", "-=", "*=", "/="]
 
 private struct Local {
   /// C place of the value. For a box, this is the value inside the box.
@@ -102,6 +109,45 @@ private final class ClosureNameCollector: SyntaxVisitor {
   }
 }
 
+/// Collects every `where` clause in the file.
+private final class WhereClauseCollector: SyntaxVisitor {
+  var clauses: [GenericWhereClauseSyntax] = []
+
+  init() { super.init(viewMode: .sourceAccurate) }
+
+  override func visit(_ node: GenericWhereClauseSyntax) -> SyntaxVisitorContinueKind {
+    clauses.append(node)
+    return .visitChildren
+  }
+}
+
+/// Whether `type` is one of the type parameters `names`, written without arguments.
+private func isTypeParameter(_ type: TypeSyntax, _ names: [String]) -> Bool {
+  guard let id = type.as(IdentifierTypeSyntax.self), id.genericArgumentClause == nil else { return false }
+  return names.contains(id.name.text)
+}
+
+/// Whether `node` is a function or type declaration with type parameters.
+private func hasGenericParameters(_ node: Syntax?) -> Bool {
+  guard let node else { return false }
+  if let f = node.as(FunctionDeclSyntax.self) { return f.genericParameterClause != nil }
+  if let s = node.as(StructDeclSyntax.self) { return s.genericParameterClause != nil }
+  if let c = node.as(ClassDeclSyntax.self) { return c.genericParameterClause != nil }
+  if let e = node.as(EnumDeclSyntax.self) { return e.genericParameterClause != nil }
+  return false
+}
+
+/// An enclosing loop or switch that `break` and `continue` may target.
+private struct JumpTarget {
+  /// The scope depth the target starts at. A jump releases the scopes from here on.
+  let depth: Int
+  let isSwitch: Bool
+  /// For a switch, the label that a `break` jumps to.
+  let label: String
+  /// Set once a `break` jumps to the label, so the label is emitted only when it is used.
+  var labelUsed = false
+}
+
 /// Names declared in one block, and the owned references to drop when it ends.
 private struct Scope {
   var vars: [String: Local] = [:]
@@ -118,6 +164,15 @@ private struct ArgInput {
 private struct GenericDecl<Decl> {
   let decl: Decl
   let names: [String]
+  /// The same-type requirements of its `where` clause.
+  var requirements: [SameTypeRequirement] = []
+}
+
+/// A `left == right` requirement of a `where` clause, as written. Both sides are
+/// resolved when an instance is made, with the type parameters bound to its arguments.
+private struct SameTypeRequirement {
+  let left: TypeSyntax
+  let right: TypeSyntax
 }
 
 /// A parameter of a generic declaration as written: its label and its type syntax.
@@ -154,8 +209,13 @@ final class Lowerer {
   private var structs: [String: StructInfo] = [:]
   private var classes: [String: ClassInfo] = [:]
   private var enums: [String: EnumInfo] = [:]
-  private var funcs: [String: FuncInfo] = [:]
+  /// Global functions by name. A name may have several overloads.
+  private var funcs: [String: [FuncInfo]] = [:]
+  /// Every C name given to a function or method, so that each one is unique.
+  private var usedCNames = Set<String>()
   private var allFuncs: [FuncInfo] = []
+  /// Methods that have been called on a temporary class value.
+  private var consumingMethods: [FuncInfo] = []
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
   private var arrays: [Ty] = []
@@ -190,8 +250,9 @@ final class Lowerer {
   private var pendingDeinits: [PendingDeinit] = []
   private var pendingInits: [PendingInit] = []
   /// Enclosing loops and switches, innermost last, with the scope depth each one starts at.
-  private var loops: [(depth: Int, isSwitch: Bool)] = []
+  private var loops: [JumpTarget] = []
   private var pendingMethods: [PendingMethod] = []
+  /// The stored properties of structs, with their declarations, checked at the end of lowering.
   /// True while lowering an initializer body, where `self` may be assigned.
   private var initializingSelf = false
   private var typeEnv: [String: Ty] = [:]
@@ -206,6 +267,12 @@ final class Lowerer {
     let collector = ClosureNameCollector()
     collector.walk(file)
     boxedNames = collector.names
+    // A where clause only constrains the type parameters of its own declaration.
+    let whereCollector = WhereClauseCollector()
+    whereCollector.walk(file)
+    for clause in whereCollector.clauses where !hasGenericParameters(Syntax(clause).parent) {
+      throw error("where clauses are only supported on generic functions and types", clause)
+    }
 
     // Pass 1: declare every type so fields and bodies can refer to them in any order.
     var structDecls: [(StructDeclSyntax, StructInfo)] = []
@@ -217,7 +284,7 @@ final class Lowerer {
         let name = s.name.text
         try checkNewType(name, s)
         if let clause = s.genericParameterClause {
-          genericStructs[name] = GenericDecl<StructDeclSyntax>(decl: s, names: try genericNames(clause, s.genericWhereClause))
+          genericStructs[name] = try genericDecl(s, clause, s.genericWhereClause)
           continue
         }
         let info = StructInfo(name: name)
@@ -230,7 +297,7 @@ final class Lowerer {
         }
         try checkNewType(name, c)
         if let clause = c.genericParameterClause {
-          genericClasses[name] = GenericDecl<ClassDeclSyntax>(decl: c, names: try genericNames(clause, c.genericWhereClause))
+          genericClasses[name] = try genericDecl(c, clause, c.genericWhereClause)
           continue
         }
         let info = ClassInfo(name: name)
@@ -243,7 +310,7 @@ final class Lowerer {
         }
         try checkNewType(name, e)
         if let clause = e.genericParameterClause {
-          genericEnums[name] = GenericDecl<EnumDeclSyntax>(decl: e, names: try genericNames(clause, e.genericWhereClause))
+          genericEnums[name] = try genericDecl(e, clause, e.genericWhereClause)
           continue
         }
         let info = EnumInfo(name: name)
@@ -295,13 +362,17 @@ final class Lowerer {
     for item in items {
       guard case .decl(let decl) = item.item, let f = decl.as(FunctionDeclSyntax.self) else { continue }
       let name = f.name.text
-      if funcs[name] != nil || genericFuncs[name] != nil { throw error("invalid redeclaration of '\(name)'", f) }
       if let clause = f.genericParameterClause {
-        genericFuncs[name] = GenericDecl<FunctionDeclSyntax>(decl: f, names: try genericNames(clause, f.genericWhereClause))
+        if genericFuncs[name] != nil || funcs[name] != nil { throw error("invalid redeclaration of '\(name)'", f) }
+        genericFuncs[name] = try genericDecl(f, clause, f.genericWhereClause)
         continue
       }
+      if genericFuncs[name] != nil { throw error("overloads of a generic function are not supported yet", f) }
       let info = try declareFunction(f)
-      funcs[name] = info
+      if let others = funcs[name], others.contains(where: { sameParameters($0, info) }) {
+        throw error("invalid redeclaration of '\(name)'", f)
+      }
+      funcs[name, default: []].append(info)
       allFuncs.append(info)
       funcDecls.append((f, info))
     }
@@ -373,6 +444,7 @@ final class Lowerer {
       optionals: optionals,
       arrays: arrays,
       functionTypes: functionTypes,
+      consumingMethods: consumingMethods,
       boxes: boxes
     )
   }
@@ -434,15 +506,19 @@ final class Lowerer {
   /// reference-counted by their own fields. Other class-like properties are not supported.
   private func isStructFieldAllowed(_ ty: Ty) -> Bool {
     switch ty {
-    case .function, .structure: return true
+    case .function, .structure, .array: return true
     case .optional(let inner): return isStructFieldAllowed(inner)
+    // An enum may hold an array (its helpers handle it), but no class-like payload other
+    // than one a struct may hold.
+    case .enumeration(let info):
+      return info.cases.allSatisfy { $0.payload.allSatisfy { !$0.ty.isClassLike || isStructFieldAllowed($0.ty) } }
     default: return false
     }
   }
 
   private func checkStructFields(_ fields: [Field], _ nodes: [Syntax]) throws {
     for (field, node) in zip(fields, nodes) where field.ty.isClassLike && !isStructFieldAllowed(field.ty) {
-      throw error("structs with class-typed or array properties are not supported yet", node)
+      throw error("structs with class-typed properties are not supported yet", node)
     }
   }
 
@@ -468,9 +544,6 @@ final class Lowerer {
               throw error("labeled enum payloads are not supported yet", p)
             }
             let ty = try resolveType(p.type)
-            if ty.isArray {
-              throw error("enums with array payloads are not supported yet", p)
-            }
             payload.append(Field(name: "_\(payload.count)", cName: "c\(tag)_\(payload.count)", ty: ty, mutable: true))
           }
         }
@@ -535,17 +608,16 @@ final class Lowerer {
     }
   }
 
-  /// Array elements are plain values: Int, Bool, Double, structs and optionals of
-  /// those. Enums are not allowed, since whether an enum holds references is not known
-  /// until its payloads are lowered.
+  /// Array elements may be any value, class-like or not. Copying an array copies or
+  /// retains each element, and freeing it releases each one (see CEmit.arrayHelpers).
+  /// Whether an element is class-like is read when the C is emitted, so an enum
+  /// whose payloads are still being lowered is accepted here.
   private func checkArrayElement(_ ty: Ty, _ node: some SyntaxProtocol) throws {
     switch ty {
-    case .int, .double, .bool, .structure:
-      return
-    case .optional(let inner) where inner == .int || inner == .double || inner == .bool || inner.isStructure:
-      return
-    default:
+    case .void, .nilLiteral:
       throw error("arrays of \(ty.swiftName) are not supported yet", node)
+    default:
+      return
     }
   }
 
@@ -589,7 +661,7 @@ final class Lowerer {
     } else {
       ret = .void
     }
-    return FuncInfo(name: name, cName: "f_" + cIdent(name), params: params, ret: ret)
+    return FuncInfo(name: name, cName: freshCName("f_" + cIdent(name)), params: params, ret: ret)
   }
 
   private func lowerBody(_ info: FuncInfo, _ body: CodeBlockSyntax, _ node: some SyntaxProtocol) throws -> [Stmt] {
@@ -715,7 +787,7 @@ final class Lowerer {
 
   private func endsInJump(_ stmts: [Stmt]) -> Bool {
     switch stmts.last {
-    case .ret, .brk, .cont: return true
+    case .ret, .brk, .cont, .goto: return true
     default: return false
     }
   }
@@ -731,8 +803,16 @@ final class Lowerer {
 
   private func lowerStmt(_ stmt: StmtSyntax) throws -> [Stmt] {
     if let ret = stmt.as(ReturnStmtSyntax.self) {
-      if initializingSelf {
-        throw error("'return' in an initializer is not supported yet", ret)
+      // Inside an initializer (not a closure in one, which has a return type), a bare
+      // `return` leaves with the new object, after releasing the owned locals it leaves.
+      if initializingSelf && returnType == nil {
+        if ret.expression != nil {
+          throw error("'return' with a value is not allowed in an initializer", ret)
+        }
+        guard let selfLocal = lookup("self") else {
+          throw error("'return' in an initializer needs 'self'", ret)
+        }
+        return releasesForReturn() + [.ret(Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty))]
       }
       guard let want = returnType else {
         throw error("'return' is not supported at top level in M2", ret)
@@ -755,7 +835,7 @@ final class Lowerer {
         return try lowerWhileLet(binding, loop)
       }
       let cond = try lowerCondition(loop.conditions, loop)
-      loops.append((scopes.count, false))
+      loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
       defer { loops.removeLast() }
       return [.whiles(cond, try lowerBlock(loop.body.statements))]
     }
@@ -770,7 +850,10 @@ final class Lowerer {
         throw error("'break' is only allowed inside a loop or switch", stmt)
       }
       if target.isSwitch {
-        throw error("'break' inside a switch is not supported yet", stmt)
+        // The arms are an if-chain, so the break jumps past them. The switch's own
+        // subject is released after the label, so only the arms' scopes are released here.
+        loops[loops.count - 1].labelUsed = true
+        return loopExitReleases(from: target.depth + 1) + [.goto(target.label)]
       }
       return loopExitReleases(from: target.depth) + [.brk]
     }
@@ -800,6 +883,10 @@ final class Lowerer {
       }
       let value = try own(coerce(lowerExpr(infix.rightOperand, expected: ty), to: ty, infix.rightOperand))
       return [.assign(target, value, ty)]
+    }
+    if let infix = expr.as(InfixOperatorExprSyntax.self), let op = infix.operator.as(BinaryOperatorExprSyntax.self),
+       compoundAssignmentOperators.contains(op.operator.text) {
+      return try lowerCompoundAssignment(op.operator.text, infix)
     }
     let v = try lowerExpr(expr)
     if v.ty == .nilLiteral {
@@ -893,9 +980,6 @@ final class Lowerer {
   /// `for i in a..<b` and `for i in a...b` over Int, lowered to a counting loop.
   /// The counter advances before the body, so `continue` needs no extra step.
   private func lowerForIn(_ loop: ForStmtSyntax) throws -> [Stmt] {
-    if loop.whereClause != nil {
-      throw error("a where clause in for-in is not supported yet", loop)
-    }
     if loop.sequence.as(InfixOperatorExprSyntax.self) == nil {
       return try lowerForInArray(loop)
     }
@@ -916,7 +1000,7 @@ final class Lowerer {
     let prelude: [Stmt] = [.decl(cur, .int, lo), .decl(end, .int, hi)]
     let cond = Expr(kind: .binary(inclusive ? "<=" : "<", curRef, Expr(kind: .local(end), ty: .int)), ty: .bool)
 
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     var iteration: [Stmt] = []
@@ -930,9 +1014,21 @@ final class Lowerer {
     }
     let one = Expr(kind: .int(1), ty: .int)
     iteration.append(.assign(.local(cur), Expr(kind: .binary("+", curRef, one), ty: .int), .int))
-    iteration += try lowerBlock(loop.body.statements)
+    iteration += try iterationBody(loop)
     scopes.removeLast()
     return prelude + [.whiles(cond, iteration)]
+  }
+
+  /// The body of one for-in iteration, which runs only when the `where` clause holds. The
+  /// element is bound and the counter advanced before this runs, so `continue` in the body
+  /// goes to the next element, and the clause sees the loop variable.
+  private func iterationBody(_ loop: ForStmtSyntax) throws -> [Stmt] {
+    guard let clause = loop.whereClause else {
+      return try lowerBlock(loop.body.statements)
+    }
+    let cond = try lowerBoolExpr(clause.condition)
+    let body = try lowerBlock(loop.body.statements)
+    return [.ifs(cond, body, [])]
   }
 
   /// `for x in array`: a counting loop over a copy of the array, which the loop owns.
@@ -952,7 +1048,7 @@ final class Lowerer {
     scopes[scopes.count - 1].owned.append((cName: arrName, ty: seq.ty))
     let cond = Expr(kind: .binary("<", curRef, Expr(kind: .arrayCount(arrRef), ty: .int)), ty: .bool)
 
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     var iteration: [Stmt] = []
@@ -965,7 +1061,7 @@ final class Lowerer {
       throw error("only a name or _ is supported in for-in in M2", loop.pattern)
     }
     iteration.append(.assign(.local(cur), Expr(kind: .binary("+", curRef, Expr(kind: .int(1), ty: .int)), ty: .int), .int))
-    iteration += try lowerBlock(loop.body.statements)
+    iteration += try iterationBody(loop)
     scopes.removeLast()
     let drop = releases(of: scopes.removeLast())
     return prelude + [.whiles(cond, iteration)] + drop
@@ -1049,7 +1145,7 @@ final class Lowerer {
   private func exits(_ stmts: [Stmt]) -> Bool {
     stmts.contains { stmt in
       switch stmt {
-      case .ret, .brk, .cont: return true
+      case .ret, .brk, .cont, .goto: return true
       case .ifs(_, let then, let otherwise): return exits(then) && exits(otherwise)
       default: return false
       }
@@ -1070,7 +1166,7 @@ final class Lowerer {
 
     let tmp = "t\(nextID())"
     let tmpRef = Expr(kind: .local(tmp), ty: opt.ty)
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     let name = id.identifier.text
@@ -1090,13 +1186,15 @@ final class Lowerer {
   /// Cases are lowered to a chain of tests; every case must be covered unless
   /// there is a `default`.
   private func lowerSwitch(_ node: SwitchExprSyntax) throws -> [Stmt] {
-    let subject = try lowerExpr(node.subject)
+    // A place subject is copied (retained) too: the arms bind payloads from the copy, so
+    // an assignment to the place in an arm cannot free what a binding still refers to.
+    let subject = own(try lowerExpr(node.subject))
     var enumInfo: EnumInfo? = nil
     switch subject.ty {
     case .enumeration(let info): enumInfo = info
-    case .int, .bool: break
+    case .int, .bool, .double: break
     default:
-      throw error("switch is supported over enums, Int and Bool in M2, not '\(subject.ty.swiftName)'", node.subject)
+      throw error("switch is supported over enums, Int, Bool and Double in M2, not '\(subject.ty.swiftName)'", node.subject)
     }
     let tmp = "t\(nextID())"
     // A temporary subject owns its references, so the switch scope releases it after
@@ -1108,7 +1206,8 @@ final class Lowerer {
     let prelude: [Stmt] = [.decl(tmp, subject.ty, subject)]
     let subj = Expr(kind: .local(tmp), ty: subject.ty)
 
-    loops.append((scopes.count - 1, true))
+    let label = "sw_end\(nextID())"
+    loops.append(JumpTarget(depth: scopes.count - 1, isSwitch: true, label: label))
     defer { loops.removeLast() }
 
     var coveredTags = Set<Int>()
@@ -1170,8 +1269,9 @@ final class Lowerer {
       if let info = enumInfo, coveredTags.count < info.cases.count {
         throw error("switch must be exhaustive", node)
       }
-      if enumInfo == nil && subject.ty == .int {
-        throw error("switch over Int must have a default case", node)
+      // Int and Double have too many values to cover with literals, so they need a default.
+      if enumInfo == nil && (subject.ty == .int || subject.ty == .double) {
+        throw error("switch over \(subject.ty.swiftName) must have a default case", node)
       }
       if subject.ty == .bool && coveredBools.count < 2 {
         throw error("switch over Bool must cover both true and false, or have a default", node)
@@ -1185,10 +1285,16 @@ final class Lowerer {
     for arm in arms.reversed() {
       tail = [.ifs(arm.cond, arm.body, tail)]
     }
-    return prelude + tail + releases(of: scopes.removeLast())
+    // A `break` in an arm jumps to the label, which comes before the subject's release
+    // so that the subject is released once on every path.
+    var out = prelude + tail
+    if loops[loops.count - 1].labelUsed {
+      out.append(.label(label))
+    }
+    return out + releases(of: scopes.removeLast())
   }
 
-  /// A case pattern over Int or Bool: a literal, or a range of Ints.
+  /// A case pattern over Int, Bool or Double: a literal, or a range of Ints or Doubles.
   private func literalCondition(_ pattern: PatternSyntax, _ subj: Expr, _ coveredBools: inout Set<Bool>) throws -> Expr {
     guard let exprPattern = pattern.as(ExpressionPatternSyntax.self) else {
       throw error("this pattern is not supported in M2", pattern)
@@ -1197,15 +1303,19 @@ final class Lowerer {
     if let range = expr.as(InfixOperatorExprSyntax.self),
        let op = range.operator.as(BinaryOperatorExprSyntax.self),
        op.operator.text == "..<" || op.operator.text == "..." {
-      guard subj.ty == .int else { throw error("ranges in a case pattern need an Int subject", expr) }
-      let lo = try lowerExpr(range.leftOperand)
-      let hi = try lowerExpr(range.rightOperand)
-      guard lo.ty == .int, hi.ty == .int else { throw error("range bounds must be Int", expr) }
+      guard subj.ty == .int || subj.ty == .double else {
+        throw error("ranges in a case pattern need an Int or Double subject", expr)
+      }
+      let lo = try patternOperand(range.leftOperand, subj.ty)
+      let hi = try patternOperand(range.rightOperand, subj.ty)
+      guard lo.ty == subj.ty, hi.ty == subj.ty else {
+        throw error("range bounds must be \(subj.ty.swiftName)", expr)
+      }
       let lower = Expr(kind: .binary("<=", lo, subj), ty: .bool)
       let upper = Expr(kind: .binary(op.operator.text == "..." ? "<=" : "<", subj, hi), ty: .bool)
       return Expr(kind: .logical("&&", lower, upper), ty: .bool)
     }
-    let value = try lowerExpr(expr)
+    let value = try patternOperand(expr, subj.ty)
     guard value.ty == subj.ty else {
       throw mismatch(expected: subj.ty, actual: value.ty, expr)
     }
@@ -1213,6 +1323,30 @@ final class Lowerer {
       coveredBools.insert(b)
     }
     return Expr(kind: .binary("==", subj, value), ty: .bool)
+  }
+
+  /// A value in a case pattern. Where the subject is Double, an integer literal (`case 1:`)
+  /// or a negated literal is a Double, as in Swift. Anything else is lowered as usual.
+  private func patternOperand(_ expr: ExprSyntax, _ subjTy: Ty) throws -> Expr {
+    if subjTy == .double, let value = doubleLiteral(expr) {
+      return Expr(kind: .double(value), ty: .double)
+    }
+    return try lowerExpr(expr)
+  }
+
+  /// The value of a Double literal written as an integer or float literal, optionally negated.
+  private func doubleLiteral(_ expr: ExprSyntax) -> Double? {
+    if let lit = expr.as(IntegerLiteralExprSyntax.self) {
+      return Double(lit.literal.text.filter { $0 != "_" })
+    }
+    if let lit = expr.as(FloatLiteralExprSyntax.self) {
+      return Double(lit.literal.text.filter { $0 != "_" })
+    }
+    if let prefix = expr.as(PrefixOperatorExprSyntax.self), prefix.operator.text == "-",
+       let value = doubleLiteral(prefix.expression) {
+      return -value
+    }
+    return nil
   }
 
   /// Reads a `.case(let a, _)` pattern. Returns the case and one binding name per
@@ -1322,6 +1456,58 @@ final class Lowerer {
     throw error("expression is not assignable", expr)
   }
 
+  /// `place op= value` for Int and Double, as a statement. The place is read and written
+  /// in one assignment, so it is written as `place = place op value` with the arithmetic
+  /// lowered by `binary`: overflow and division by zero trap as they do for `+`, `-`, `*`
+  /// and `/`. Each index in the place and the right side are evaluated once, into
+  /// temporaries, in Swift's order (place, then value).
+  private func lowerCompoundAssignment(_ op: String, _ infix: InfixOperatorExprSyntax) throws -> [Stmt] {
+    let (target, ty, mutable) = try lowerTarget(infix.leftOperand)
+    if !mutable {
+      throw error("cannot assign to value: '\(infix.leftOperand.trimmedDescription)' is a 'let' constant", infix.leftOperand)
+    }
+    let value = try lowerExpr(infix.rightOperand, expected: ty)
+    guard ty == .int || ty == .double, value.ty == ty else {
+      throw error("binary operator '\(op)' cannot be applied to operands of type '\(ty.swiftName)' and '\(value.ty.swiftName)'", infix)
+    }
+
+    var stmts: [Stmt] = []
+    let place = hoistPlaceIndexes(target, into: &stmts)
+    var rhs = value
+    switch value.kind {
+    case .int, .double:
+      break
+    default:
+      let tmp = "t\(nextID())"
+      stmts.append(.decl(tmp, ty, value))
+      rhs = Expr(kind: .local(tmp), ty: ty)
+    }
+    let current = Expr(kind: .place(place), ty: ty)
+    let result = try binary(String(op.dropLast()), current, rhs, infix)
+    return stmts + [.assign(place, result, ty)]
+  }
+
+  /// Moves each non-literal index of a place into a temporary, base first, so the place
+  /// can be read and written without evaluating the index twice.
+  private func hoistPlaceIndexes(_ target: LValue, into stmts: inout [Stmt]) -> LValue {
+    switch target {
+    case .local:
+      return target
+    case .field(let base, let name, let arrow):
+      return .field(hoistPlaceIndexes(base, into: &stmts), name, arrow: arrow)
+    case .index(let base, let idx, let arrTy):
+      let place = hoistPlaceIndexes(base, into: &stmts)
+      switch idx.kind {
+      case .int:
+        return .index(place, idx, arrTy)
+      default:
+        let tmp = "t\(nextID())"
+        stmts.append(.decl(tmp, .int, idx))
+        return .index(place, Expr(kind: .local(tmp), ty: .int), arrTy)
+      }
+    }
+  }
+
   // MARK: - Expressions
 
   /// `expected` is the type the context wants, when it is known. It is used for
@@ -1342,11 +1528,10 @@ final class Lowerer {
       guard case .array(let elem) = base.ty else {
         throw error("subscripts are supported on arrays only in M2, not on '\(base.ty.swiftName)'", sub)
       }
-      if base.owned {
-        throw error("subscript of a temporary array is not supported yet", sub)
-      }
       let idx = try indexArgument(sub)
-      return Expr(kind: .index(base, idx), ty: elem)
+      // A temporary array is freed once the element is read, so an element that is
+      // class-like is returned owned (retained before the array is freed).
+      return Expr(kind: .index(base, idx), ty: elem, owned: base.owned && elem.isClassLike)
     }
     if let lit = expr.as(FloatLiteralExprSyntax.self) {
       let digits = lit.literal.text.filter { $0 != "_" }
@@ -1366,7 +1551,8 @@ final class Lowerer {
       if let local = lookup(name) {
         return Expr(kind: .local(local.cName), ty: local.ty)
       }
-      if let f = funcs[name] {
+      if let overloads = funcs[name] {
+        let f = try functionValue(name, overloads, expected, ref)
         return funcValue(f)
       }
       if genericFuncs[name] != nil {
@@ -1396,9 +1582,6 @@ final class Lowerer {
       if b.ty.isArray {
         guard member.declName.baseName.text == "count" else {
           throw error("arrays have no member '\(member.declName.baseName.text)' in M2", member)
-        }
-        if b.owned {
-          throw error("count of a temporary array is not supported yet", member)
         }
         return Expr(kind: .arrayCount(b), ty: .int)
       }
@@ -1436,7 +1619,8 @@ final class Lowerer {
       }
     }
     if let infix = expr.as(InfixOperatorExprSyntax.self) {
-      guard let op = infix.operator.as(BinaryOperatorExprSyntax.self) else {
+      guard let op = infix.operator.as(BinaryOperatorExprSyntax.self),
+            !compoundAssignmentOperators.contains(op.operator.text) else {
         throw error("assignment is not an expression in M2", infix)
       }
       let l = try lowerExpr(infix.leftOperand)
@@ -1520,11 +1704,11 @@ final class Lowerer {
       if isGenericName(name) {
         return try lowerGenericCall(name, explicit: [], call, expected, ref)
       }
-      if let selfTy = peek("self")?.ty, let method = methodOf(selfTy, name), let selfLocal = lookup("self") {
-        return try callMethod(method, Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), name, call)
+      if let selfLocal = lookup("self"), let methods = methodsOf(selfLocal.ty, name) {
+        return try callMethod(methods, name, Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), call)
       }
-      if let f = funcs[name] {
-        let args = try lowerArgs(call, f.params.map { $0.ty })
+      if let overloads = funcs[name] {
+        let (f, args) = try resolveOverload(name, overloads, dropReceiver: false, call)
         let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
         return Expr(kind: .call(f, values), ty: f.ret, owned: true)
       }
@@ -1551,6 +1735,7 @@ final class Lowerer {
         return Expr(kind: .print(v), ty: .void)
       }
       if let s = structs[name] {
+        // A struct initializer returns a fresh value, which the caller owns.
         if !s.initializers.isEmpty {
           return try callInitializer(name, s.initializers, .structure(name), owned: true, call)
         }
@@ -1590,8 +1775,8 @@ final class Lowerer {
     if let member = callee.as(MemberAccessExprSyntax.self), let base = member.base {
       let receiver = try lowerExpr(base)
       let name = member.declName.baseName.text
-      if let method = methodOf(receiver.ty, name) {
-        return try callMethod(method, receiver, name, call)
+      if let methods = methodsOf(receiver.ty, name) {
+        return try callMethod(methods, name, receiver, call)
       }
       let field = try fieldOf(receiver.ty, name, member)
       guard case .function(let params, let ret) = field.ty else {
@@ -1883,9 +2068,6 @@ final class Lowerer {
       if case .optional = inner {
         throw error("nested optional types are not supported yet", type)
       }
-      if inner.isArray {
-        throw error("optional arrays are not supported yet", type)
-      }
       let ty = Ty.optional(inner)
       if !optionals.contains(ty) { optionals.append(ty) }
       return ty
@@ -1923,12 +2105,60 @@ final class Lowerer {
 
   // MARK: - Generics
 
-  /// Type parameter names of a generic declaration. Constraints and `where`
-  /// clauses are not supported in M3.
-  private func genericNames(_ clause: GenericParameterClauseSyntax, _ whereClause: GenericWhereClauseSyntax?) throws -> [String] {
-    if let whereClause {
-      throw error("where clauses on generic declarations are not supported yet", whereClause)
+  /// A generic declaration with its type parameters and the requirements of its `where` clause.
+  private func genericDecl<Decl>(
+    _ decl: Decl,
+    _ clause: GenericParameterClauseSyntax,
+    _ whereClause: GenericWhereClauseSyntax?
+  ) throws -> GenericDecl<Decl> {
+    let names = try genericNames(clause)
+    let requirements = try sameTypeRequirements(whereClause)
+    for r in requirements where !isTypeParameter(r.left, names) && !isTypeParameter(r.right, names) {
+      throw error("a same-type requirement must name a type parameter", r.left)
     }
+    return GenericDecl(decl: decl, names: names, requirements: requirements)
+  }
+
+  /// The same-type requirements of a `where` clause. A conformance or layout
+  /// requirement is refused, as `T: Equatable` is, because it needs protocols.
+  private func sameTypeRequirements(_ whereClause: GenericWhereClauseSyntax?) throws -> [SameTypeRequirement] {
+    guard let whereClause else { return [] }
+    var out: [SameTypeRequirement] = []
+    for requirement in whereClause.requirements {
+      switch requirement.requirement {
+      case .sameTypeRequirement(let same):
+        guard case .type(let left) = same.leftType, case .type(let right) = same.rightType else {
+          throw error("value generic requirements are not supported yet", same)
+        }
+        out.append(SameTypeRequirement(left: left, right: right))
+      case .conformanceRequirement, .layoutRequirement:
+        throw error("generic parameter constraints are not supported yet", requirement)
+      }
+    }
+    return out
+  }
+
+  /// Refuses an instance whose arguments do not satisfy the same-type requirements of its
+  /// declaration. Both sides are resolved with the arguments bound to the parameters, so
+  /// the check sees the types the body will be lowered with.
+  private func checkRequirements(
+    _ base: String,
+    _ names: [String],
+    _ requirements: [SameTypeRequirement],
+    _ args: [Ty],
+    _ node: some SyntaxProtocol
+  ) throws {
+    let env = envFor(names, args)
+    for r in requirements {
+      let (left, right) = try inEnv(env) { try (resolveType(r.left), resolveType(r.right)) }
+      if left != right {
+        throw error("generic '\(base)' requires the types '\(left.swiftName)' and '\(right.swiftName)' be equivalent", node)
+      }
+    }
+  }
+
+  /// Type parameter names of a generic declaration. Constraints are not supported in M3.
+  private func genericNames(_ clause: GenericParameterClauseSyntax) throws -> [String] {
     var names: [String] = []
     for p in clause.parameters {
       if p.inheritedType != nil {
@@ -2028,6 +2258,7 @@ final class Lowerer {
     if let existing = structs[name] { return existing }
     guard let g = genericStructs[base] else { throw error("cannot find type '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let info = StructInfo(name: name)
       structs[name] = info  // registered before the fields, so they can refer to it
@@ -2051,6 +2282,7 @@ final class Lowerer {
     if let existing = classes[name] { return existing }
     guard let g = genericClasses[base] else { throw error("cannot find type '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let info = ClassInfo(name: name)
       classes[name] = info
@@ -2082,6 +2314,7 @@ final class Lowerer {
     if let existing = enums[name] { return existing }
     guard let g = genericEnums[base] else { throw error("cannot find type '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let info = EnumInfo(name: name)
       enums[name] = info
@@ -2101,6 +2334,7 @@ final class Lowerer {
     if let existing = instanceFuncs[name] { return existing }
     guard let g = genericFuncs[base] else { throw error("cannot find '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let env = envFor(g.names, args)
       let info = try inEnv(env) { try declareFunction(g.decl, instanceName: name) }
@@ -2136,23 +2370,28 @@ final class Lowerer {
     owner: Ty,
     env: [String: Ty],
     name: String
-  ) throws -> [String: FuncInfo] {
-    var out: [String: FuncInfo] = [:]
+  ) throws -> [String: [FuncInfo]] {
+    var out: [String: [FuncInfo]] = [:]
     for d in decls {
       let method = d.name.text
-      if out[method] != nil {
-        throw error("overloaded methods are not supported yet", d)
-      }
       let params = try inEnv(env) { try declareParams(d.signature.parameterClause.parameters) }
       let ret: Ty = try inEnv(env) {
         if let clause = d.signature.returnClause { return try resolveType(clause.type) }
         return .void
       }
       let receiver = Param(label: nil, name: "self", cName: "self", ty: owner)
-      let info = FuncInfo(name: name + "." + method, cName: "m_\(cIdent(name))_\(method)", params: [receiver] + params, ret: ret)
+      let info = FuncInfo(
+        name: name + "." + method,
+        cName: freshCName("m_\(cIdent(name))_\(method)"),
+        params: [receiver] + params,
+        ret: ret
+      )
+      if let others = out[method], others.contains(where: { sameParameters($0, info) }) {
+        throw error("invalid redeclaration of '\(method)'", d)
+      }
       allFuncs.append(info)
       pendingMethods.append(PendingMethod(info: info, decl: d, env: env))
-      out[method] = info
+      out[method, default: []].append(info)
     }
     return out
   }
@@ -2206,13 +2445,16 @@ final class Lowerer {
       }
       var stmts = [allocation]
       stmts += try lowerBlock(body.statements)
-      stmts += releases(of: root)
-      stmts.append(.ret(Expr(kind: .local("self"), ty: selfTy)))
+      // A body that ends in a `return` has already released the owned locals.
+      if !endsInJump(stmts) {
+        stmts += releases(of: root)
+        stmts.append(.ret(Expr(kind: .local("self"), ty: selfTy)))
+      }
       return stmts
     }
   }
 
-  private func methodOf(_ ty: Ty, _ name: String) -> FuncInfo? {
+  private func methodsOf(_ ty: Ty, _ name: String) -> [FuncInfo]? {
     switch ty {
     case .structure(let n): return structs[n]?.methods[name]
     case .cls(let n): return classes[n]?.methods[name]
@@ -2220,19 +2462,25 @@ final class Lowerer {
     }
   }
 
-  /// Calls a method with `receiver` as self. The receiver is borrowed, so a
+  /// Calls the method that the arguments select. The receiver is borrowed, so a
   /// temporary class value would leak; it is rejected for now.
-  private func callMethod(_ method: FuncInfo, _ receiver: Expr, _ name: String, _ call: FunctionCallExprSyntax) throws -> Expr {
-    if receiver.owned && receiver.ty.isClassLike {
-      throw error("calling a method on a temporary class value is not supported yet", call)
-    }
+  private func callMethod(_ methods: [FuncInfo], _ name: String, _ receiver: Expr, _ call: FunctionCallExprSyntax) throws -> Expr {
+    let (method, args) = try resolveOverload(name, methods, dropReceiver: true, call)
     let params = Array(method.params.dropFirst())
-    let args = try lowerArgs(call, params.map { $0.ty })
     let values = try matchArguments(name, params.map { ($0.label, $0.ty) }, args, call)
+    if receiver.owned && receiver.ty.isClassLike {
+      // A temporary receiver is released once the method returns, by a wrapper (see CEmit),
+      // as Swift releases it. The result is owned, so it does not depend on the receiver.
+      if !consumingMethods.contains(where: { $0.cName == method.cName }) {
+        consumingMethods.append(method)
+      }
+      return Expr(kind: .callOnTemp(method, [receiver] + values), ty: method.ret, owned: true)
+    }
     return Expr(kind: .call(method, [receiver] + values), ty: method.ret, owned: true)
   }
 
-  /// Calls the initializer whose argument labels match the call.
+  /// Calls the initializer whose argument labels match the call, then picks among the
+  /// matching ones by argument types.
   private func callInitializer(
     _ name: String,
     _ candidates: [FuncInfo],
@@ -2241,12 +2489,170 @@ final class Lowerer {
     _ call: FunctionCallExprSyntax
   ) throws -> Expr {
     let labels = call.arguments.map { $0.label?.text }
-    guard let chosen = candidates.first(where: { $0.params.map { $0.label } == labels }) else {
+    let matching = candidates.filter { $0.params.map { $0.label } == labels }
+    guard !matching.isEmpty else {
       throw error("no initializer of '\(name)' takes these argument labels", call)
     }
-    let args = try lowerArgs(call, chosen.params.map { $0.ty })
+    let (chosen, args) = try resolveOverload(name, matching, dropReceiver: false, call, what: "initializer")
     let values = try matchArguments(name, chosen.params.map { ($0.label, $0.ty) }, args, call)
     return Expr(kind: .call(chosen, values), ty: ty, owned: owned)
+  }
+
+  /// Chooses among the overloads of a function, method or initializer. The argument
+  /// labels select the candidates, then the argument types select one. Among those that
+  /// fit, an exact type match beats one that needs Optional wrapping. With a single
+  /// candidate the arguments are lowered as usual, so its diagnostics do not change.
+  /// `dropReceiver` skips a method's self parameter.
+  private func resolveOverload(
+    _ name: String,
+    _ candidates: [FuncInfo],
+    dropReceiver: Bool,
+    _ call: FunctionCallExprSyntax,
+    what: String = "overload"
+  ) throws -> (FuncInfo, [ArgInput]) {
+    func paramsOf(_ f: FuncInfo) -> [Param] {
+      dropReceiver ? Array(f.params.dropFirst()) : f.params
+    }
+    if candidates.count == 1 {
+      let only = candidates[0]
+      return (only, try lowerArgs(call, paramsOf(only).map { $0.ty }))
+    }
+    let labels = call.arguments.map { $0.label?.text }
+    let matching = candidates.filter { paramsOf($0).map { $0.label } == labels }
+    guard !matching.isEmpty else {
+      throw error("no \(what) of '\(name)' takes these argument labels", call)
+    }
+
+    // An argument whose type does not depend on its parameter is lowered once, here.
+    // The others are lowered after the choice, with the chosen parameter's type.
+    let args = Array(call.arguments)
+    var lowered: [Expr?] = []
+    for arg in args {
+      if needsOverloadContext(arg.expression) {
+        lowered.append(nil)
+      } else {
+        lowered.append(try lowerExpr(arg.expression))
+      }
+    }
+
+    var scored: [(f: FuncInfo, score: Int)] = []
+    for f in matching {
+      let params = paramsOf(f)
+      var score = 0
+      var fits = true
+      for (i, arg) in args.enumerated() {
+        if let value = lowered[i] {
+          if value.ty == params[i].ty { continue }
+          if case .optional(let inner) = params[i].ty, inner == value.ty {
+            score += 1
+            continue
+          }
+          fits = false
+        } else {
+          fits = acceptsContext(arg.expression, params[i].ty)
+        }
+        if !fits { break }
+      }
+      if fits { scored.append((f, score)) }
+    }
+    guard let best = scored.map({ $0.score }).min() else {
+      throw error("no \(what) of '\(name)' matches these argument types", call)
+    }
+    let winners = scored.filter { $0.score == best }
+    guard winners.count == 1 else {
+      throw error("ambiguous use of '\(name)'", call)
+    }
+    let chosen = winners[0].f
+    let params = paramsOf(chosen)
+    var values: [ArgInput] = []
+    for (i, arg) in args.enumerated() {
+      let value: Expr
+      if let known = lowered[i] {
+        value = known
+      } else {
+        value = try lowerExpr(arg.expression, expected: params[i].ty)
+      }
+      values.append(ArgInput(label: arg.label?.text, value: value, node: arg))
+    }
+    return (chosen, values)
+  }
+
+  /// True for an argument whose type comes from the parameter it is passed to: a
+  /// closure, `nil`, an array literal, an implicit enum case, a generic function with
+  /// explicit arguments, or a function name.
+  private func needsOverloadContext(_ e: ExprSyntax) -> Bool {
+    if e.is(ClosureExprSyntax.self) || e.is(NilLiteralExprSyntax.self)
+      || e.is(ArrayExprSyntax.self) || e.is(GenericSpecializationExprSyntax.self) {
+      return true
+    }
+    if implicitMemberName(e) != nil { return true }
+    if let ref = e.as(DeclReferenceExprSyntax.self) {
+      let name = ref.baseName.text
+      return lookup(name) == nil && (funcs[name] != nil || genericFuncs[name] != nil)
+    }
+    return false
+  }
+
+  /// Whether an argument from `needsOverloadContext` can have the parameter type `ty`.
+  private func acceptsContext(_ e: ExprSyntax, _ ty: Ty) -> Bool {
+    if e.is(NilLiteralExprSyntax.self) {
+      if case .optional = ty { return true }
+      return false
+    }
+    if e.is(ArrayExprSyntax.self) {
+      if case .array = ty { return true }
+      return false
+    }
+    if let member = implicitMemberName(e) {
+      if case .enumeration(let info) = ty { return info.cases.contains { $0.name == member } }
+      return false
+    }
+    if case .function = ty { return true }
+    return false
+  }
+
+  /// The case name of an implicit member, `.full` or `.full(n)`.
+  private func implicitMemberName(_ e: ExprSyntax) -> String? {
+    if let member = e.as(MemberAccessExprSyntax.self), member.base == nil {
+      return member.declName.baseName.text
+    }
+    if let call = e.as(FunctionCallExprSyntax.self), let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+       member.base == nil {
+      return member.declName.baseName.text
+    }
+    return nil
+  }
+
+  /// The overload that a bare function name denotes as a value. Several overloads
+  /// need the expected function type to pick one.
+  private func functionValue(_ name: String, _ overloads: [FuncInfo], _ expected: Ty?, _ node: some SyntaxProtocol) throws -> FuncInfo {
+    if overloads.count == 1 { return overloads[0] }
+    guard let expected, case .function = expected else {
+      throw error("ambiguous use of '\(name)'", node)
+    }
+    let matches = overloads.filter { functionType($0) == expected }
+    guard matches.count == 1 else {
+      throw error("no overload of '\(name)' has type '\(expected.swiftName)'", node)
+    }
+    return matches[0]
+  }
+
+  /// True when two overloads take the same argument labels and types, so both cannot be declared.
+  private func sameParameters(_ a: FuncInfo, _ b: FuncInfo) -> Bool {
+    a.params.map { $0.label } == b.params.map { $0.label } && a.params.map { $0.ty } == b.params.map { $0.ty }
+  }
+
+  /// A C name that no other function or method has. Overloads share a Swift name, so a
+  /// name that is taken already gets a numeric suffix.
+  private func freshCName(_ base: String) -> String {
+    var name = base
+    var n = 1
+    while usedCNames.contains(name) {
+      name = base + "_\(n)"
+      n += 1
+    }
+    usedCNames.insert(name)
+    return name
   }
 
   /// Binds the parameters in `names` by matching a parameter type, as written, against
@@ -2293,7 +2699,8 @@ final class Lowerer {
 
   private func instanceOrigin(_ ty: Ty) -> (base: String, args: [Ty])? {
     switch ty {
-    case .structure(let n), .cls(let n): return instanceArgs[n]
+    case .structure(let n): return instanceArgs[n]
+    case .cls(let n): return instanceArgs[n]
     case .enumeration(let info): return instanceArgs[info.name]
     default: return nil
     }

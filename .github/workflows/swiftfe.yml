@@ -1,0 +1,37 @@
+name: swiftfe
+
+# Builds the LLVM-free Swift frontend in tools/swiftfe and runs its unit and integration
+# suites. The integration programs are checked against the stored output of the real
+# Swift compiler (tests/integration/programs/*.expected), so no swiftc is needed here.
+on:
+  pull_request:
+    paths:
+      - "tools/swiftfe/**"
+      - ".github/workflows/swiftfe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tools/swiftfe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Swift toolchain
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Unit tests
+        run: sh tests/run.sh
+
+      - name: Integration tests
+        run: sh tests/integration/run.sh

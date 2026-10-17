@@ -278,6 +278,7 @@ if [ $rcr -eq 0 ] && grep -q '^data \$p = { b 40, b 0 }' "$tmp/paren.out" && [ $
   report ok "pathb-qbe-emit reads a \"(\" string constant (the Python original misreads it as a parenthesis: known bug)"
 else report fail "pathb-qbe-emit parenthesis string constant: rb=$rcr py=$rcp"; fi
 "$root/tests/mruby/qbe-prep.sh" || fail=1
+"$root/tests/mruby/strip-atomic.sh" || fail=1
 
 echo "tests/mruby: $pass passed, $skip skipped"
 [ $fail -eq 0 ]

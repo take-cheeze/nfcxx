@@ -89,13 +89,24 @@ Supported:
   payload) and `.some(true)` where the type is declared.
 - an operation on a type parameter is checked after substitution, for the type it was
   instantiated with: `a + b` compiles for `Int` and is rejected for `Bool`.
+- same-type requirements in a `where` clause on a generic function, struct, class or enum:
+  `where T == Int`, `where T == Double`, `where T == Bool`. The requirement is checked for
+  each instance: `same(true, false)` is rejected for `where T == Int`, and the body is
+  lowered with `T` bound to the type the clause fixes.
 
 Limits:
 - Only instances are checked. A generic body is checked when it is instantiated, not
   when it is declared, so an unused generic is not checked at all. Swift would reject
   `a + b` for an unconstrained `T` in the declaration itself.
-- No constraints, protocols or `where` clauses. `T: Equatable` and `where T == Int` give
-  a diagnostic.
+- Constraints and protocols are not supported. `T: Equatable`, `where T: Equatable` and any
+  other conformance or layout requirement give the diagnostic `generic parameter constraints
+  are not supported yet`.
+- A `where` clause is accepted only on a generic function, struct, class or enum. One on a
+  method, an initializer or a declaration without type parameters is refused.
+- A same-type requirement is not used to infer a type parameter. `func zero<T>() -> T where
+  T == Int` needs `zero<Int>()`, or an expected type, or an argument that fixes `T`.
+  Requirements with value generics (`where T == 3`) are refused, and so is a requirement
+  with no bare type parameter on either side (`where Int == Bool`, `where [T] == [Int]`).
 - No extensions or value generics. Generic types may have initializers and methods. A generic struct or
   class has stored properties only, with a memberwise initializer.
 - A struct with a class-typed property is still rejected, so `Box<Obj>` (a struct) is
@@ -152,22 +163,63 @@ Swift compiler, but the wording is not guaranteed to be identical.
 
 Supported:
 - `break` and `continue` in loops. Each releases the owned locals it leaves.
+- `break` inside a `switch` leaves the switch, and `continue` inside a switch continues
+  the enclosing loop. The switch is an if-chain, so the break jumps to a label after it
+  (emitted only when a break uses it). The subject is still released once, after the label.
 - `for i in a..<b` and `for i in a...b` over Int; `for x in array`, which loops over a copy.
+- `for x in xs where cond` over Int ranges and arrays. The body runs only for the elements
+  where `cond` holds, in order; `continue` and `break` work as in a plain loop.
 - `guard let`, `guard cond`, with bindings that stay in scope after the guard.
 - `switch` over Int and Bool with literal, range (`4...9`) and several-value cases.
   Int needs a default; Bool must cover both values. Enum cases may list several
   patterns when they bind nothing.
+- `switch` over Double with literal, several-value and range (`0.0..<1.0`, `1.0...2.5`)
+  cases. Integer and negated literals are Doubles there (`case 1:`, `case -2.0:`). The
+  first matching case runs. A default is required.
 - `Double` with literals, `+ - * /`, comparisons, `Double(n)` and Swift's printing.
-- Arrays `[T]` of Int, Bool, Double, structs and optionals of those: literals, `a[i]`
-  (reads and writes, trapping out of range), `a.count`, `a.append(x)`, `for x in a`,
-  and `print` of arrays of Int, Bool or Double. Arrays are values: copying one copies
-  the buffer, and the buffer is freed when its owner ends.
+- Arrays `[T]` of any element type: Int, Bool, Double, structs, classes, enums that hold
+  classes, optionals and nested arrays. Literals, `a[i]` (reads and writes, trapping out of
+  range), `a.count`, `a.append(x)`, `for x in a`, and `print` of arrays of Int, Bool or
+  Double. Arrays are values: copying one copies the buffer, and each class element in it
+  gets its own reference (retained, then released when the buffer is freed, in order).
+- Structs and enum payloads that hold arrays, including a struct that holds an array of
+  itself (`struct Tree { var kids: [Tree] }`). Such a struct is class-like: a copy copies
+  its arrays, and its owner frees them. A struct may not hold a class, directly or through
+  another struct, an enum or an Optional (structs with class-typed properties are still
+  rejected). Class fields may hold arrays already.
+- Optional arrays (`[Int]?`): assignment, `x!`, `if let`, `== nil`, and `x![i]`.
+- Subscripts and `count` of a temporary array, e.g. `make()[0]` and `make().count`. The
+  temporary is freed after the element is read, and a class element is returned owned.
 
 Limits (each gives a diagnostic):
-- `break` inside a `switch`
 - arrays of classes, enums or function values, arrays in struct properties, enum payloads or optionals
-- subscripts and `count` of a temporary array; `for-in` with a `where` clause
-- `switch` over Double or String; `%` on Double
+- subscripts and `count` of a temporary array
+- `switch` over String; `%` on Double
+
+## Initializers, overloads and temporaries
+
+Supported:
+- `return` inside an initializer. A bare `return` releases the owned locals it leaves
+  (its parameters and the locals of the enclosing blocks) and returns `self`. The
+  initializer's implicit return is skipped when the body already ends in a `return`.
+- Overloaded functions, methods and initializers: the same name with different argument
+  labels or types. The labels choose the candidates, then the argument types choose one.
+  An exact type match beats one that needs Optional wrapping, so `f(1)` picks `f(_: Int)`
+  over `f(_: Int?)`. A closure, `nil`, an array literal, an implicit enum case or a function
+  name takes its type from the candidate. A function name used as a value picks its
+  overload from the expected function type. Overloads with the same labels and types are
+  redeclarations. Each overload has its own C name (`f_show`, `f_show_1`, ...).
+- a method called on a temporary class value, e.g. `Make().describe()`, in any statement,
+  condition or loop. The method borrows the receiver, so a wrapper `cs_<method>` releases it
+  once the method returns, as Swift does: the deinit output comes before the rest of the
+  enclosing expression. The method's result is owned, so it does not depend on the receiver.
+
+Limits (each gives a diagnostic):
+- `return` with a value in an initializer
+- overloads of a generic function, or a generic function with a plain overload of the same
+  name. Arguments of an overloaded call are typed before the candidate is chosen, so a generic
+  call that needs its parameter's type to infer its type arguments is not supported there.
+- an ambiguous call, such as `f(nil)` with `f(_: Int?)` and `f(_: Bool?)`
 
 ## Integration tests
 
@@ -188,16 +240,15 @@ Supported in this step beyond M2 and M3:
   initializer chosen by argument labels; the memberwise initializer is available only
   when no explicit one exists
 - methods on classes and structs, called as `obj.method(args)` or, inside a type, as
-  `method(args)`; a method's receiver is borrowed, so a temporary class value is rejected
+  `method(args)`; a method's receiver is borrowed, and a temporary class value is released
+  once the method returns (see "Initializers, overloads and temporaries")
 - implicit `self` for properties, in initializers, deinitializers and methods
 - `if let a = x, let b = y, cond { ... }`: each condition is tested in order
 - top-level variables are visible to functions and closures
 - `_` as a payload pattern in `switch`
 
 Limits of this step (each gives a diagnostic):
-- `return` inside an initializer; a failable initializer
-- overloaded methods with the same name
-- a method call on a temporary class value
+- a failable initializer
 
 ## Closure captures
 

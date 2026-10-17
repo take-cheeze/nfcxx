@@ -138,7 +138,8 @@ struct Field {
 final class StructInfo {
   let name: String
   var fields: [Field] = []
-  var methods: [String: FuncInfo] = [:]
+  /// Overloads by name. Each method's receiver is the first parameter.
+  var methods: [String: [FuncInfo]] = [:]
   var initializers: [FuncInfo] = []
 
   init(name: String) { self.name = name }
@@ -148,8 +149,8 @@ final class ClassInfo {
   let name: String
   var fields: [Field] = []
   var deinitializer: FuncInfo?
-  /// Methods by name. The receiver is the first parameter, named self.
-  var methods: [String: FuncInfo] = [:]
+  /// Overloads by name. The receiver is the first parameter, named self.
+  var methods: [String: [FuncInfo]] = [:]
   /// Explicit initializers. When there are any, the memberwise one is not available.
   var initializers: [FuncInfo] = []
 
@@ -236,8 +237,13 @@ indirect enum ExprKind {
   case arrayAppend(LValue, Expr)
   case bool(Bool)
   case local(String)
+  /// The value of a place, read in place. A compound assignment reads its target this way.
+  case place(LValue)
   case field(Expr, String)
   case call(FuncInfo, [Expr])
+  /// A method call whose receiver is a temporary class value. The receiver is passed
+  /// to a wrapper (see CEmit), which releases it once the method returns.
+  case callOnTemp(FuncInfo, [Expr])
   case print(Expr)
   case structLit(StructInfo, [Expr])
   case construct(ClassInfo, [Expr])
@@ -304,6 +310,10 @@ indirect enum Stmt {
   case brk
   /// Continues the innermost loop.
   case cont
+  /// Jumps to a label in the same function. A `break` out of a switch uses it,
+  /// because the switch is an if-chain and has no C statement of its own to leave.
+  case goto(String)
+  case label(String)
   /// Drops the reference held by an owned local at scope exit.
   case release(String, Ty)
 }
@@ -328,6 +338,8 @@ struct Program {
   let arrays: [Ty]
   /// Every function type that appears in the program, so CEmit can typedef it.
   let functionTypes: [Ty]
+  /// Methods called on a temporary class value, each of which needs a wrapper.
+  let consumingMethods: [FuncInfo]
   /// Every box type (`.box`) that appears in the program.
   let boxes: [Ty]
 }
