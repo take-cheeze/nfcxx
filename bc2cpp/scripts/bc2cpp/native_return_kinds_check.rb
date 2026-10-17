@@ -24,6 +24,7 @@ end
 puts '== kinds of direct returns'
 check.call('a fixnum return is Integer', ret('{ return mrb_fixnum_value(x); }') == 'Integer')
 check.call('a str_new return is String', ret('{ return mrb_str_new_cstr(M, s); }') == 'String')
+check.call('a mrb_format return is String', ret('{ return mrb_format(M, "%d", x); }') == 'String')
 check.call('a nil return is nil', ret('{ return mrb_nil_value(); }') == 'nil')
 check.call('a bool return is bool', ret('{ return mrb_bool_value(a != 0); }') == 'bool')
 check.call('a self return is self on an instance method', ret('{ return self; }') == 'self')

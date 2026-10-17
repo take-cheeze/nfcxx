@@ -123,21 +123,50 @@ module BaseRbsNative
         skipped << "#{owner}##{name}"
         next
       end
-      sig = method_sig(text, args[3], singleton)
+      sig = method_sig(text, args[3], singleton, args[4])
       methods << [owner, singleton, name, sig]
-      methods << [owner, false, name, method_sig(text, args[3], false)] if kind == 'module_function'
+      methods << [owner, false, name, method_sig(text, args[3], false, args[4])] if kind == 'module_function'
     end
     [kinds, supers, methods.uniq, skipped]
   end
 
-  # The RBS signature of a registered function: its parameters (param_shape) and its return type (NativeReturnKinds).
-  # A function that is not in this text keeps the rest parameter and an untyped return.
-  def method_sig(text, function, singleton)
+  # The RBS signature of a registered function: its parameters and its return type (NativeReturnKinds). The parameters
+  # are the mrb_get_args format when the body reads its arguments that way, and otherwise the arity the registration's
+  # aspec declares (aspec_shape). A function that is not in this text keeps the rest parameter and an untyped return.
+  def method_sig(text, function, singleton, aspec)
     body = function_body_of(text, function)
     return '(*untyped) -> untyped' unless body
 
     ret = NativeReturnKinds.rbs_of(NativeReturnKinds.kind_of_body(body), singleton: singleton)
-    "(#{param_shape(body)}) -> #{ret}"
+    params = if body.match?(/\bmrb_get_args\s*\(/) then param_shape(body) else aspec_shape(aspec) || '*untyped' end
+    "(#{params}) -> #{ret}"
+  end
+
+  # The value of a registration's aspec expression, as the preprocessed text spells it (`((mrb_aspec)((1)&0x1f) << 18)`),
+  # or nil when the text is not plain integer arithmetic. The text is checked against a whitelist of characters before it
+  # is evaluated, so only digits, parentheses and the operators the aspec macros use reach the evaluator.
+  def aspec_value(expr)
+    return nil unless expr
+
+    text = expr.gsub(/\(\s*mrb_aspec\s*\)/, '')
+    return nil unless text.gsub(/0[xX][0-9a-fA-F]+/, '').match?(/\A[\s\d()|&<>]*\z/)
+
+    eval(text) # rubocop:disable Security/Eval -- the whitelist above admits only digits, hex literals and operators
+  rescue SyntaxError
+    nil
+  end
+
+  # The parameter list an aspec declares: its required parameters, then its optional ones. A rest, post-required or
+  # keyword parameter is not modelled (nil), so the caller keeps the rest parameter.
+  def aspec_shape(expr)
+    aspec = aspec_value(expr)
+    return nil unless aspec
+
+    req = (aspec >> 18) & 0x1f
+    opt = (aspec >> 13) & 0x1f
+    return nil if [(aspec >> 12) & 1, (aspec >> 7) & 0x1f, (aspec >> 2) & 0x1f, (aspec >> 1) & 1].any?(&:positive?)
+
+    (Array.new(req) { 'untyped' } + Array.new(opt) { '?untyped' }).join(', ')
   end
 
   # The parameter list from a function body: its `mrb_get_args` format, when the body makes exactly one such call

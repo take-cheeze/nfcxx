@@ -15,7 +15,7 @@ module NativeReturnKinds
     Entry.new(/\bmrb_(?:true_value|false_value|bool_value)\s*\(/, 'bool'),
     Entry.new(/\bmrb_(?:fixnum_value|int_value)\s*\(/, 'Integer'),
     Entry.new(/\bmrb_float_value\s*\(/, 'Float'),
-    Entry.new(/\bmrb_(?:str_new|str_new_cstr|str_new_static|str_buf_new|str_dup|str_cat|str_substr|str_resize|str_plus)\w*\s*\(/,
+    Entry.new(/\bmrb_(?:str_new|str_new_cstr|str_new_static|str_buf_new|str_dup|str_cat|str_substr|str_resize|str_plus|format)\w*\s*\(/,
               'String'),
     Entry.new(/\bmrb_(?:ary_new|ary_new_capa|ary_new_from_values|ary_dup)\s*\(/, 'Array'),
     Entry.new(/\bmrb_(?:hash_new|hash_new_capa|hash_dup)\s*\(/, 'Hash'),
