@@ -85,6 +85,7 @@ if [ "${1:-}" = "--link" ]; then
       echo "C++ link fail $b: assembly: $(head -1 "$tmp/l.err")"; continue
     fi
     if ! ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$exeout/$b.exe" "$tmp/cxx/$b.o" "$tmp/ldrt.o" \
+      ${NFCXX_MACOS_LIBC:+"$NFCXX_MACOS_LIBC"} \
          -L "$stub" -lSystem -L "$cxxstub" -lc++ 2>"$tmp/l.err"; then
       echo "C++ link fail $b: $(grep -m1 error "$tmp/l.err" || head -1 "$tmp/l.err")"; continue
     fi
