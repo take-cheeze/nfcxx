@@ -90,6 +90,22 @@ else
   echo "SKIP: opencl: needs spirv-val, the OpenCL headers (OPENCL_INCLUDE) and libOpenCL.so.1"
 fi
 
+# ---- closure names (closure_name.cpp, OpenCL): a kernel closure in a translation unit whose module id falls back to the
+# working directory (the ggml-sycl dpct helper leaves the TU without a candidate). The device pass and the host build must
+# name the closure alike. Needs GGML_SRC (the llama.cpp ggml-sycl source directory, which holds dpct/helper.hpp); skips without it.
+ggml_src=${GGML_SRC:-/home/takecheeze/dev/llm/llama.cpp/ggml/src/ggml-sycl}
+if [ $cl_ok = 1 ] && [ -f "$ggml_src/dpct/helper.hpp" ]; then
+  if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl -DCLOSURE_NAME_DPCT -I"$ggml_src" -I"$root/lib/sycl-ggml" \
+      closure_name.cpp -o "$out/cl_closure_name" > "$out/cl_closure_name.log" 2>&1 \
+     && [ "$("$out/cl_closure_name" | tail -1)" = "closure_name ok" ]; then
+    echo "opencl    closure_name: ok"
+  else
+    echo "opencl    closure_name: FAIL"; grep -v prelinker "$out/cl_closure_name.log" | tail -3; fail=1
+  fi
+elif [ $cl_ok = 1 ]; then
+  echo "SKIP: closure_name: needs GGML_SRC/dpct/helper.hpp (the ggml-sycl source directory)"
+fi
+
 # ---- Level Zero path (scripts/pathb-spirv-emit.rb --kernel-cl, lib/sycl/include/sycl/rt_level_zero.hpp): the same module as the
 # OpenCL path, run on an Intel GPU through the Level Zero API (the heap in shared USM with atomics, the local size in
 # specialization constants, one immediate command list). Skips when the Level Zero headers, the loader, spirv-val or a usable
