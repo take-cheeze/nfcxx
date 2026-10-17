@@ -63,6 +63,7 @@ module DeclaredReturns
     when 'Hash' then nilable || !type.args.empty? ? nil : [:hash, 'Hash', false]
     when 'Symbol' then nilable || !type.args.empty? ? nil : [:symbol, 'Symbol', false]
     when 'Float' then nilable || !type.args.empty? ? nil : [:float, 'Float', false]
+    when 'Enumerable' then type.args.size <= 1 ? [:module, 'Enumerable', nilable] : nil
     else
       return nil unless type.args.empty?
       # A native class is checked by its class pointer like a program class; the constant is resolved at run time.
@@ -76,7 +77,8 @@ module DeclaredReturns
 
   # The kinds that only a runtime-checked declaration (%a{bc2cpp:hint}) may take: no proof analysis reads them, so
   # the compiled body's guard is their whole check (codegen_declared_returns.rb). A native class is one too.
-  GUARD_ONLY_KINDS = %i[bool nil string hash symbol float].freeze
+  # A module (Enumerable) is a kind-of test, since no exact class test matches its includers.
+  GUARD_ONLY_KINDS = %i[bool nil string hash symbol float module].freeze
 
   # Entries for the loaded method signatures that name a bytecode definition with the signature's required arity
   # (RbsSignatures.apply reports the others). `ireps` is only read for that arity.
