@@ -1,5 +1,5 @@
 # Predicates (methods ending in ?) whose returns bool cannot prove (tools/bc2cpp/predicate_returns.rb).
-# Each line is "path Owner#name"; a program that makes one return bool can drop its line.
+# Each line is "path Owner#name", the path from the gem directory; a program that makes one return bool can drop its line.
 3rd/mruby/lib/mruby/build.rb MRuby::Build#benchmark_enabled?
 3rd/mruby/lib/mruby/build.rb MRuby::Build#bintest_enabled?
 3rd/mruby/lib/mruby/build.rb MRuby::Build#build_mrbtest_lib_only?
@@ -17,11 +17,6 @@
 3rd/mruby/lib/mruby/gem.rb MRuby::Gem::Specification#skip_test?
 3rd/mruby/lib/mruby/gem.rb MRuby::Gem::Version#twiddle_wakka_ok?
 3rd/mruby/lib/mruby/lockfile.rb MRuby::Lockfile#enabled?
-3rd/mruby/mrbgems/mruby-errno/mrblib/errno.rb Errno#const_defined?
-3rd/mruby/mrbgems/mruby-numeric-ext/mrblib/numeric_ext.rb Numeric#nonzero?
-3rd/mruby/mrbgems/mruby-proc-ext/test/proc.rb Object#enable_debug_info?
-3rd/mruby/mrbgems/mruby-socket/mrblib/socket.rb Addrinfo#ip?
-3rd/mruby/mrbgems/mruby-symbol-ext/mrblib/symbol.rb Symbol#casecmp?
 3rd/mruby/test/assert.rb Object#_str_match?
 3rd/mruby/test/t/exception.rb Object#backtrace_available?
 3rd/mruby/test/t/hash.rb HashKey#eql?
@@ -29,6 +24,7 @@
 3rd/mruby/tools/lrama/lib/lrama/grammar_validator.rb Lrama::GrammarValidator#valid?
 3rd/mruby/tools/lrama/lib/lrama/states/item.rb Lrama::States::Item#empty_rule?
 3rd/mruby/tools/lrama/lib/lrama/states/item.rb Lrama::States::Item#start_item?
+mruby-errno/mrblib/errno.rb Errno#const_defined?
 mruby-lcf/mrblib/lcf.rb LCF#field?
 mruby-lcf/mrblib/lcf_file.rb LCF::File#field?
 mruby-lcf/mrblib/save_typed_put.rb LCF::SaveTyped#save_writable?
@@ -41,6 +37,8 @@ mruby-mvjs/mrblib/mz.rb MZ#message_play_shot_ready?
 mruby-mvjs/mrblib/mz.rb MZ#render_skip_enabled?
 mruby-mvjs/mrblib/mz.rb MZ#runtime_available?
 mruby-mvjs/mrblib/mz.rb MZ#shop_shot_ready?
+mruby-numeric-ext/mrblib/numeric_ext.rb Numeric#nonzero?
+mruby-proc-ext/test/proc.rb Object#enable_debug_info?
 mruby-rgss/mrblib/error_report.rb RGSS::ErrorReport#installed?
 mruby-rgss/mrblib/lib.rb RGSS::Audio#midi_available?
 mruby-rgss/mrblib/lib.rb RGSS::Input#mouse_pressed?
@@ -169,6 +167,8 @@ mruby-rpgxp/mrblib/script_host.rb RPGXP::ScriptHost#menu_test?
 mruby-rpgxp/mrblib/script_host.rb RPGXP::ScriptHost#move_test?
 mruby-rpgxp/mrblib/script_host.rb RPGXP::ScriptHost#probing_menu?
 mruby-rpgxp/mrblib/script_host.rb RPGXP::ScriptHost#save_test?
+mruby-socket/mrblib/socket.rb Addrinfo#ip?
+mruby-symbol-ext/mrblib/symbol.rb Symbol#casecmp?
 mruby-wolf/mrblib/data.rb Wolf::DBField#string?
 mruby-wolf/mrblib/data.rb Wolf::Page#above_hero?
 mruby-wolf/mrblib/data.rb Wolf::Page#slip_through?
