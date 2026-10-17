@@ -449,8 +449,9 @@ jobs:
         with:
           path: |
             build/mrustc/src/bin/mrustc
+            build/mrustc/src/bin/minicargo
             build/mrustc/src/output-1.90.0
-          key: mrustc-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh') }}
+          key: mrustc-v2-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh') }}
 
       - name: Build mrustc and its standard library
         if: steps.mrustc.outputs.cache-hit != 'true'
