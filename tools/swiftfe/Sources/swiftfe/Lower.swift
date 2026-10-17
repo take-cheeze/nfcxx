@@ -19,8 +19,16 @@
 //   array is class-like as well, and its copy copies the array. A subscript or `count`
 //   of a temporary array frees the temporary when it reads the element.
 //
-// Closures do not capture: a closure body sees only its own parameters and
-// top-level names, and an outer local is reported as not in scope.
+// Closures and captures:
+// - A closure is a function value { fn, ctx }. Its body sees its own parameters,
+//   the locals it captures, and top-level names (which are globals, not captured).
+// - A captured `let` or parameter is copied into the closure's context when the
+//   closure is made; a class-like copy is retained, so the context owns it.
+// - A `var` that any closure in the file mentions is a box (a heap cell owned by
+//   its declaring scope). The context holds a retained reference to the box, so a
+//   later assignment is seen by both sides.
+// - The context is released with the function value, which is owned like a class
+//   reference: copying it retains the context, and its owner releases it.
 
 import SwiftParser
 import SwiftSyntax
@@ -32,9 +40,70 @@ struct CompileError: Error {
 }
 
 private struct Local {
+  /// C place of the value. For a box, this is the value inside the box.
   let cName: String
   let ty: Ty
   let mutable: Bool
+  /// For a boxed variable, the C pointer to its box.
+  var box: String? = nil
+  /// Identifies the variable across closures. Nil for a variable of the current body,
+  /// whose identity is its box or its C name.
+  var key: String? = nil
+}
+
+/// A closure being lowered: the scopes of the body it is in, and what it captures.
+private final class ClosureFrame {
+  let outerScopes: [Scope]
+  var slots: [CaptureSlot] = []
+  /// The slot index of each captured variable, by identity.
+  var index: [String: Int] = [:]
+
+  init(outerScopes: [Scope]) { self.outerScopes = outerScopes }
+}
+
+/// One captured value of a closure, stored in its context as field `name`.
+private struct CaptureSlot {
+  let name: String
+  /// The field's type: the value's type, or a box of it.
+  let ty: Ty
+  /// The C place, in the enclosing body, that the field is copied from.
+  let sourceName: String
+  let valueTy: Ty
+  let mutable: Bool
+  let boxed: Bool
+
+  /// The variable as seen from inside the closure body.
+  func local(key: String) -> Local {
+    Local(
+      cName: boxed ? "cx->\(name)->v" : "cx->\(name)",
+      ty: valueTy,
+      mutable: mutable,
+      box: boxed ? "cx->\(name)" : nil,
+      key: key
+    )
+  }
+}
+
+/// Finds the names that closures mention. A `var` with one of these names is boxed.
+private final class ClosureNameCollector: SyntaxVisitor {
+  var names = Set<String>()
+  private var depth = 0
+
+  init() { super.init(viewMode: .sourceAccurate) }
+
+  override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind {
+    depth += 1
+    return .visitChildren
+  }
+
+  override func visitPost(_ node: ClosureExprSyntax) {
+    depth -= 1
+  }
+
+  override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+    if depth > 0 { names.insert(node.baseName.text) }
+    return .visitChildren
+  }
 }
 
 /// Names declared in one block, and the owned references to drop when it ends.
@@ -94,10 +163,16 @@ final class Lowerer {
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
   private var arrays: [Ty] = []
+  private var boxes: [Ty] = []
   private var globals: [Global] = []
   /// Top-level variables. Function bodies and closures see them as globals.
   private var globalVars: [String: Local] = [:]
   private var scopes: [Scope] = []
+  /// The closures being lowered, innermost last. Each keeps the scopes of the body that
+  /// encloses it, which is where its captures come from.
+  private var frames: [ClosureFrame] = []
+  /// Names that some closure in the file mentions. A `var` with such a name is boxed.
+  private var boxedNames = Set<String>()
   private var returnType: Ty? = nil
   private var counter = 0
 
@@ -122,7 +197,6 @@ final class Lowerer {
   private var loops: [(depth: Int, isSwitch: Bool)] = []
   private var pendingMethods: [PendingMethod] = []
   /// The stored properties of structs, with their declarations, checked at the end of lowering.
-  private var structFieldChecks: [(node: Syntax, ty: Ty)] = []
   /// True while lowering an initializer body, where `self` may be assigned.
   private var initializingSelf = false
   private var typeEnv: [String: Ty] = [:]
@@ -134,6 +208,9 @@ final class Lowerer {
 
   func lower(_ file: SourceFileSyntax) throws -> Program {
     let items = Array(file.statements)
+    let collector = ClosureNameCollector()
+    collector.walk(file)
+    boxedNames = collector.names
 
     // Pass 1: declare every type so fields and bodies can refer to them in any order.
     var structDecls: [(StructDeclSyntax, StructInfo)] = []
@@ -186,11 +263,19 @@ final class Lowerer {
       info.cases = try lowerEnumCases(decl)
     }
     var deinitDecls: [(DeinitializerDeclSyntax, ClassInfo)] = []
+    var structFieldNodes: [[Syntax]] = []
     for (decl, info) in structDecls {
       let members = try lowerMembers(decl.memberBlock, isClass: false)
       info.fields = members.fields
-      info.initializers = try declareInitializers(members.initializers, owner: .structure(info), env: [:], name: info.name)
-      info.methods = try declareMethods(members.methods, owner: .structure(info), env: [:], name: info.name)
+      structFieldNodes.append(members.nodes)
+      info.initializers = try declareInitializers(members.initializers, owner: .structure(info.name), env: [:], name: info.name)
+      info.methods = try declareMethods(members.methods, owner: .structure(info.name), env: [:], name: info.name)
+    }
+    // Which structs and enums hold a reference count depends on each other, so they are
+    // decided together, before any struct field is checked against that.
+    markReferenceTypes(structs: structDecls.map { $0.1 }, enums: enumDecls.map { $0.1 })
+    for (index, (_, info)) in structDecls.enumerated() {
+      try checkStructFields(info.fields, structFieldNodes[index])
     }
     for (decl, info) in classDecls {
       let members = try lowerMembers(decl.memberBlock, isClass: true)
@@ -283,9 +368,6 @@ final class Lowerer {
 
     try lowerPendingDeinits()
 
-    for check in structFieldChecks where check.ty.holdsClassRef {
-      throw error("structs with class-typed properties are not supported yet", check.node)
-    }
     return Program(
       structs: structDecls.map { $0.1 } + instStructs,
       classes: classDecls.map { $0.1 } + instClasses,
@@ -295,7 +377,8 @@ final class Lowerer {
       main: main,
       optionals: optionals,
       arrays: arrays,
-      functionTypes: functionTypes
+      functionTypes: functionTypes,
+      boxes: boxes
     )
   }
 
@@ -310,8 +393,10 @@ final class Lowerer {
   private func lowerMembers(
     _ block: MemberBlockSyntax,
     isClass: Bool
-  ) throws -> (fields: [Field], deinitializer: DeinitializerDeclSyntax?, initializers: [InitializerDeclSyntax], methods: [FunctionDeclSyntax]) {
+  ) throws -> (fields: [Field], nodes: [Syntax], deinitializer: DeinitializerDeclSyntax?, initializers: [InitializerDeclSyntax], methods: [FunctionDeclSyntax]) {
     var fields: [Field] = []
+    // The binding of each field, for the diagnostic of a struct field that is not supported.
+    var nodes: [Syntax] = []
     var deinitializer: DeinitializerDeclSyntax? = nil
     var initializers: [InitializerDeclSyntax] = []
     var methods: [FunctionDeclSyntax] = []
@@ -330,9 +415,8 @@ final class Lowerer {
             throw error("invalid redeclaration of '\(name)'", binding)
           }
           let ty = try resolveType(annotation.type)
-          // Checked after every type is declared, since the field's type may be a struct not yet lowered.
-          if !isClass { structFieldChecks.append((Syntax(binding), ty)) }
           fields.append(Field(name: name, cName: "m_" + name, ty: ty, mutable: mutable))
+          nodes.append(Syntax(binding))
         }
       } else if isClass, let d = member.decl.as(DeinitializerDeclSyntax.self) {
         if deinitializer != nil { throw error("invalid redeclaration of 'deinit'", d) }
@@ -348,7 +432,23 @@ final class Lowerer {
     if !isClass && fields.isEmpty {
       throw error("structs without stored properties are not supported yet", block)
     }
-    return (fields, deinitializer, initializers, methods)
+    return (fields, nodes, deinitializer, initializers, methods)
+  }
+
+  /// A struct may hold a function value and a struct that holds one, as those are
+  /// reference-counted by their own fields. Other class-like properties are not supported.
+  private func isStructFieldAllowed(_ ty: Ty) -> Bool {
+    switch ty {
+    case .function, .structure, .array: return true
+    case .optional(let inner): return isStructFieldAllowed(inner)
+    default: return false
+    }
+  }
+
+  private func checkStructFields(_ fields: [Field], _ nodes: [Syntax]) throws {
+    for (field, node) in zip(fields, nodes) where field.ty.isClassLike && !isStructFieldAllowed(field.ty) {
+      throw error("structs with class-typed properties are not supported yet", node)
+    }
   }
 
   private func lowerEnumCases(_ decl: EnumDeclSyntax) throws -> [EnumCase] {
@@ -380,6 +480,35 @@ final class Lowerer {
       }
     }
     return cases
+  }
+
+  /// Marks each struct with a reference-counted field, and each enum with a
+  /// reference-counted payload. A struct and an enum can hold each other, so this
+  /// repeats until nothing changes.
+  private func markReferenceTypes(structs: [StructInfo], enums: [EnumInfo]) {
+    var changed = true
+    while changed {
+      changed = false
+      for info in structs where !refStructNames.contains(info.name) {
+        if info.fields.contains(where: { $0.ty.isClassLike }) {
+          refStructNames.insert(info.name)
+          changed = true
+        }
+      }
+      for info in enums where !info.holdsRef {
+        if info.cases.contains(where: { $0.payload.contains { $0.ty.isClassLike } }) {
+          info.holdsRef = true
+          changed = true
+        }
+      }
+    }
+  }
+
+  /// The box type that holds a value of type `ty`, recorded once for CEmit.
+  private func boxOf(_ ty: Ty) -> Ty {
+    let box = Ty.box(ty)
+    if !boxes.contains(box) { boxes.append(box) }
+    return box
   }
 
   /// Rejects a value type that contains itself by value, which Swift also rejects.
@@ -516,16 +645,33 @@ final class Lowerer {
       value = own(value)
       let name = id.identifier.text
       let cName = "l\(nextID())_" + name
-      try declare(name, cName: cName, ty: ty, mutable: mutable, owned: ty.isClassLike, binding)
       if scopes.count == 1 {
-        // Top-level code: the variable is a global, assigned where its declaration
-        // runs. The global is still zero here, so the assignment releases nothing.
+        // Top-level code: the variable is a global, assigned where its declaration runs.
+        // The global is still zero here, so the assignment releases nothing. Globals are
+        // not in a scope, so a closure reads them directly rather than capturing them.
+        if globalVars[name] != nil {
+          throw error("invalid redeclaration of '\(name)'", binding)
+        }
         globals.append(Global(cName: cName, ty: ty))
         globalVars[name] = Local(cName: cName, ty: ty, mutable: mutable)
         out.append(.assign(.local(cName), value, ty))
-      } else {
-        out.append(.decl(cName, ty, value))
+        continue
       }
+      if mutable && boxedNames.contains(name) {
+        // A `var` that a closure mentions lives in a box, which the scope owns.
+        let box = boxOf(ty)
+        let depth = scopes.count - 1
+        if scopes[depth].vars[name] != nil {
+          throw error("invalid redeclaration of '\(name)'", binding)
+        }
+        let ptr = "b\(nextID())_" + name
+        scopes[depth].vars[name] = Local(cName: ptr + "->v", ty: ty, mutable: true, box: ptr)
+        scopes[depth].owned.append((cName: ptr, ty: box))
+        out.append(.decl(ptr, box, Expr(kind: .boxNew(value), ty: box, owned: true)))
+        continue
+      }
+      try declare(name, cName: cName, ty: ty, mutable: mutable, owned: ty.isClassLike, binding)
+      out.append(.decl(cName, ty, value))
     }
     return out
   }
@@ -834,8 +980,8 @@ final class Lowerer {
     for item in lit.elements {
       let v = try lowerExpr(item.expression, expected: elemTy)
       if elemTy == nil { elemTy = v.ty }
-      // The array owns each element, so a place element is retained.
-      values.append(own(try coerce(v, to: elemTy!, item.expression)))
+      // The array keeps each element, so a class-like element is retained here.
+      values.append(try own(coerce(v, to: elemTy!, item.expression)))
     }
     guard let elem = elemTy else {
       throw error("an empty array literal needs a type, such as [Int]", lit)
@@ -1223,7 +1369,7 @@ final class Lowerer {
         return Expr(kind: .local(local.cName), ty: local.ty)
       }
       if let f = funcs[name] {
-        return Expr(kind: .funcRef(f), ty: functionType(f))
+        return funcValue(f)
       }
       if genericFuncs[name] != nil {
         return try genericFunctionValue(name, explicit: [], expected: expected, ref)
@@ -1355,7 +1501,7 @@ final class Lowerer {
     let callee = call.calledExpression
 
     if let spec = callee.as(GenericSpecializationExprSyntax.self) {
-      guard let ref = spec.expression.as(DeclReferenceExprSyntax.self), lookup(ref.baseName.text) == nil else {
+      guard let ref = spec.expression.as(DeclReferenceExprSyntax.self), peek(ref.baseName.text) == nil else {
         throw error("this call is not supported in M3", call)
       }
       let explicit = try genericArguments(spec.genericArgumentClause)
@@ -1373,7 +1519,7 @@ final class Lowerer {
       if isGenericName(name) {
         return try lowerGenericCall(name, explicit: [], call, expected, ref)
       }
-      if let selfLocal = lookup("self"), let method = methodOf(selfLocal.ty, name) {
+      if let selfTy = peek("self")?.ty, let method = methodOf(selfTy, name), let selfLocal = lookup("self") {
         return try callMethod(method, Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), name, call)
       }
       if let f = funcs[name] {
@@ -1381,7 +1527,7 @@ final class Lowerer {
         let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
         return Expr(kind: .call(f, values), ty: f.ret, owned: true)
       }
-      if name == "Double" && lookup(name) == nil && structs[name] == nil && classes[name] == nil {
+      if name == "Double" && peek(name) == nil && structs[name] == nil && classes[name] == nil {
         let args = try lowerArgs(call, [.int])
         guard args.count == 1, args[0].label == nil, args[0].value.ty == .int else {
           throw error("Double(...) converts one Int in M2", call)
@@ -1406,11 +1552,11 @@ final class Lowerer {
       if let s = structs[name] {
         // A struct initializer returns a fresh value, which the caller owns.
         if !s.initializers.isEmpty {
-          return try callInitializer(name, s.initializers, .structure(s), owned: true, call)
+          return try callInitializer(name, s.initializers, .structure(name), owned: true, call)
         }
         let args = try lowerArgs(call, s.fields.map { $0.ty })
         let values = try matchArguments(name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
-        return Expr(kind: .structLit(s, values), ty: .structure(s), owned: s.isClassLike)
+        return Expr(kind: .structLit(s, values), ty: .structure(name), owned: true)
       }
       if let c = classes[name] {
         if !c.initializers.isEmpty {
@@ -1503,7 +1649,7 @@ final class Lowerer {
   /// type (`.circle`), if the member refers to an enum case.
   private func enumForMember(_ member: MemberAccessExprSyntax, _ expected: Ty?) throws -> EnumInfo? {
     if let base = member.base {
-      if let ref = base.as(DeclReferenceExprSyntax.self), lookup(ref.baseName.text) == nil,
+      if let ref = base.as(DeclReferenceExprSyntax.self), peek(ref.baseName.text) == nil,
          let info = enums[ref.baseName.text] {
         return info
       }
@@ -1533,12 +1679,14 @@ final class Lowerer {
 
   // MARK: - Closures
 
-  /// Lowers a closure with no captures to a generated function. The closure's
-  /// type comes from the context, so it must be known.
+  /// Lowers a closure to a generated function that takes its context first. The
+  /// closure's type comes from the context, so it must be known. Locals of the
+  /// enclosing bodies that the closure mentions are captured (see `lookup`).
   private func lowerClosure(_ closure: ClosureExprSyntax, _ expected: Ty?) throws -> Expr {
     guard let expected, case .function(let paramTypes, let ret) = expected else {
       throw error("a closure needs a contextual function type in M2", closure)
     }
+    registerFunctionType(expected)
     let id = nextID()
     var names: [String] = []
     if let clause = closure.signature?.parameterClause {
@@ -1558,13 +1706,20 @@ final class Lowerer {
       Param(label: nil, name: name, cName: "p\(id)_\(index)", ty: paramTypes[index])
     }
     let info = FuncInfo(name: "closure", cName: "cl\(id)", params: params, ret: ret)
+    info.isClosure = true
 
-    // Lower the body with only the closure's own parameters in scope.
+    // Lower the body with the closure's own parameters in scope. Names of the enclosing
+    // bodies are found through the frame, which records what they capture.
+    let frame = ClosureFrame(outerScopes: scopes)
     let savedScopes = scopes
     let savedReturn = returnType
+    let savedLoops = loops
+    frames.append(frame)
     defer {
+      frames.removeLast()
       scopes = savedScopes
       returnType = savedReturn
+      loops = savedLoops
     }
     var root = Scope()
     for p in params {
@@ -1573,6 +1728,9 @@ final class Lowerer {
     }
     scopes = [root, Scope()]
     returnType = ret
+    // A break or continue cannot leave a closure, so the loops of the enclosing body
+    // are not visible here.
+    loops = []
 
     var stmts: [Stmt] = []
     let items = Array(closure.statements)
@@ -1596,7 +1754,75 @@ final class Lowerer {
     }
     info.body = stmts
     allFuncs.append(info)
-    return Expr(kind: .funcRef(info), ty: expected)
+    if frame.slots.isEmpty {
+      return Expr(kind: .funcRef(info), ty: expected, owned: true)
+    }
+    // Each captured value is copied from the enclosing body. The new context owns the
+    // copies, so each class-like one is retained.
+    info.context = ClosureContext(id: id, fields: frame.slots.map {
+      Field(name: $0.name, cName: $0.name, ty: $0.ty, mutable: true)
+    })
+    let values = frame.slots.map { own(Expr(kind: .local($0.sourceName), ty: $0.ty)) }
+    return Expr(kind: .makeClosure(info, info.context!, values), ty: expected, owned: true)
+  }
+
+  // MARK: - Captures
+
+  /// Finds `name` as the current body sees it, adding captures for a local of an
+  /// enclosing body. Each closure between that body and this one captures the local
+  /// from its enclosing body, so a closure in a closure gets the value transitively.
+  private func lookup(_ name: String) -> Local? {
+    if let local = find(name, in: scopes) { return local }
+    for level in stride(from: frames.count - 1, through: 0, by: -1) {
+      if var local = find(name, in: frames[level].outerScopes) {
+        for m in level..<frames.count {
+          local = capture(local, into: frames[m])
+        }
+        return local
+      }
+    }
+    return globalVars[name]
+  }
+
+  /// The local `name` refers to, without adding captures. For a check that does not
+  /// use the variable (the local may be in an enclosing body, so its C place is not
+  /// valid here).
+  private func peek(_ name: String) -> Local? {
+    if let local = find(name, in: scopes) { return local }
+    for frame in frames.reversed() {
+      if let local = find(name, in: frame.outerScopes) { return local }
+    }
+    return globalVars[name]
+  }
+
+  private func find(_ name: String, in list: [Scope]) -> Local? {
+    for scope in list.reversed() {
+      if let local = scope.vars[name] { return local }
+    }
+    return nil
+  }
+
+  /// The place of `source` as seen from inside `frame`, adding a slot for it on first use.
+  /// `source` is valid in the body that encloses the frame's closure.
+  private func capture(_ source: Local, into frame: ClosureFrame) -> Local {
+    let key = source.key ?? source.box ?? source.cName
+    let index: Int
+    if let known = frame.index[key] {
+      index = known
+    } else {
+      index = frame.slots.count
+      let boxed = source.box != nil
+      frame.slots.append(CaptureSlot(
+        name: "c\(index)",
+        ty: boxed ? boxOf(source.ty) : source.ty,
+        sourceName: source.box ?? source.cName,
+        valueTy: source.ty,
+        mutable: source.mutable,
+        boxed: boxed
+      ))
+      frame.index[key] = index
+    }
+    return frame.slots[index].local(key: key)
   }
 
   // MARK: - Ownership and conversions
@@ -1630,6 +1856,12 @@ final class Lowerer {
       throw error("value of type '\(ty.swiftName)' has no member '\(name)'", node)
     }
     return field
+  }
+
+  /// A named function as a function value. It is called through a thunk, so it is marked.
+  private func funcValue(_ f: FuncInfo) -> Expr {
+    f.asValue = true
+    return Expr(kind: .funcRef(f), ty: functionType(f), owned: true)
   }
 
   private func functionType(_ f: FuncInfo) -> Ty {
@@ -1676,7 +1908,7 @@ final class Lowerer {
     case "Bool": return .bool
     case "Void": return .void
     default:
-      if let info = structs[name] { return .structure(info) }
+      if structs[name] != nil { return .structure(name) }
       if classes[name] != nil { return .cls(name) }
       if let info = enums[name] { return .enumeration(info) }
       if isGenericName(name) {
@@ -1723,7 +1955,7 @@ final class Lowerer {
   private func instanceType(_ base: String, _ args: [Ty], _ node: some SyntaxProtocol) throws -> Ty {
     if genericStructs[base] != nil {
       let info = try instantiateStruct(base, args, node)
-      return .structure(info)
+      return .structure(info.name)
     }
     if genericClasses[base] != nil {
       let info = try instantiateClass(base, args, node)
@@ -1761,12 +1993,14 @@ final class Lowerer {
   }
 
   /// Runs `body` with `env` as the type parameter bindings. An instance can be
-  /// lowered while another body is being lowered, so the caller's scopes and
-  /// return type are saved and restored.
+  /// lowered while another body is being lowered, so the caller's scopes, closures,
+  /// loops and return type are saved and restored. The instance sees none of them.
   private func inEnv<T>(_ env: [String: Ty], _ body: () throws -> T) rethrows -> T {
-    let saved = (typeEnv, scopes, returnType)
+    let saved = (typeEnv, scopes, returnType, frames, loops)
     typeEnv = env
-    defer { (typeEnv, scopes, returnType) = saved }
+    frames = []
+    loops = []
+    defer { (typeEnv, scopes, returnType, frames, loops) = saved }
     return try body()
   }
 
@@ -1799,8 +2033,12 @@ final class Lowerer {
       let env = envFor(g.names, args)
       let members = try inEnv(env) { try lowerMembers(g.decl.memberBlock, isClass: false) }
       info.fields = members.fields
-      info.initializers = try declareInitializers(members.initializers, owner: .structure(info), env: env, name: name)
-      info.methods = try declareMethods(members.methods, owner: .structure(info), env: env, name: name)
+      try checkStructFields(members.fields, members.nodes)
+      if members.fields.contains(where: { $0.ty.isClassLike }) {
+        refStructNames.insert(name)
+      }
+      info.initializers = try declareInitializers(members.initializers, owner: .structure(name), env: env, name: name)
+      info.methods = try declareMethods(members.methods, owner: .structure(name), env: env, name: name)
       return info
     }
   }
@@ -1848,6 +2086,7 @@ final class Lowerer {
       instEnums.append(info)
       let env = envFor(g.names, args)
       info.cases = try inEnv(env) { try lowerEnumCases(g.decl) }
+      markReferenceTypes(structs: [], enums: instEnums)
       return info
     }
   }
@@ -2200,12 +2439,12 @@ final class Lowerer {
         let params = initializerParams(i)
         let (types, args) = try bindGeneric(g.names, explicit: explicit, params: params, result: nil, expected: nil, call)
         let s = try instantiateStruct(name, types, node)
-        return try callInstanceInitializer(s.name, s.initializers, .structure(s), owned: true, args, call)
+        return try callInstanceInitializer(s.name, s.initializers, .structure(s.name), owned: true, args, call)
       }
       let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
       let s = try instantiateStruct(name, types, node)
       let values = try matchArguments(s.name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
-      return Expr(kind: .structLit(s, values), ty: .structure(s), owned: s.isClassLike)
+      return Expr(kind: .structLit(s, values), ty: .structure(s.name), owned: true)
     }
     if let g = genericClasses[name] {
       if let i = genericInitializer(g.decl.memberBlock, call) {
@@ -2242,7 +2481,7 @@ final class Lowerer {
       throw error("generic parameter '\(n)' could not be inferred", node)
     }
     let f = try instantiateFunction(name, g.names.map { bindings[$0]! }, node)
-    return Expr(kind: .funcRef(f), ty: functionType(f))
+    return funcValue(f)
   }
 
   /// `first<Int>` used as a value.
@@ -2265,7 +2504,7 @@ final class Lowerer {
        genericEnums[ref.baseName.text] != nil {
       name = ref.baseName.text
       explicit = try genericArguments(spec.genericArgumentClause)
-    } else if let ref = base.as(DeclReferenceExprSyntax.self), lookup(ref.baseName.text) == nil,
+    } else if let ref = base.as(DeclReferenceExprSyntax.self), peek(ref.baseName.text) == nil,
               genericEnums[ref.baseName.text] != nil {
       name = ref.baseName.text
     } else {
@@ -2286,7 +2525,7 @@ final class Lowerer {
         throw error("type '\(info.name)' has no member '\(caseName)'", member)
       }
       let values = try matchArguments(caseName, c.payload.map { (nil, $0.ty) }, args, call)
-      return Expr(kind: .enumCase(info, c.tag, values), ty: .enumeration(info))
+      return Expr(kind: .enumCase(info, c.tag, values), ty: .enumeration(info), owned: info.holdsRef)
     }
     guard let explicit else {
       throw error("generic parameter '\(g.names[0])' could not be inferred", member)
@@ -2299,20 +2538,14 @@ final class Lowerer {
 
   /// The property `name` of the enclosing `self`, if there is one.
   private func implicitSelfMember(_ name: String, _ node: some SyntaxProtocol) -> (base: Expr, field: Field)? {
-    guard let selfLocal = lookup("self"), let field = try? fieldOf(selfLocal.ty, name, node) else { return nil }
+    guard let selfTy = peek("self")?.ty, let field = try? fieldOf(selfTy, name, node) else { return nil }
+    guard let selfLocal = lookup("self") else { return nil }
     return (Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), field)
   }
 
   private func isSelfInInitializer(_ base: ExprSyntax) -> Bool {
     guard initializingSelf, let ref = base.as(DeclReferenceExprSyntax.self) else { return false }
     return ref.baseName.text == "self"
-  }
-
-  private func lookup(_ name: String) -> Local? {
-    for scope in scopes.reversed() {
-      if let local = scope.vars[name] { return local }
-    }
-    return globalVars[name]
   }
 
   private func releases(of scope: Scope) -> [Stmt] {

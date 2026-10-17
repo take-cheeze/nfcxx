@@ -29,9 +29,10 @@ Adds to M1:
   enum (`case full(Node)`). Such an enum is reference-counted like a class value: copies
   retain, owned locals and `switch` subjects release, and a payload bound by `case .full(let n)`
   is retained for the arm.
-- function types `(Int) -> Int`, named functions as values, and non-capturing closures
-  (`{ $0 * 3 }`, `{ (n: Int) -> Int in n + 1 }`). A closure needs a known function type
-  from its context: a declared type, a parameter type, or an assignment target.
+- function types `(Int) -> Int`, named functions as values, and closures
+  (`{ $0 * 3 }`, `{ (n: Int) -> Int in n + 1 }`, and closures that capture; see
+  "Closure captures" below). A closure needs a known function type from its context: a
+  declared type, a parameter type, or an assignment target.
 
 Ownership model (documented in `Lower.swift`):
 - Owned locals and parameters are released at the end of their block or function,
@@ -39,13 +40,14 @@ Ownership model (documented in `Lower.swift`):
 - Locals are released in reverse declaration order.
 - Top-level variables are never released, so their `deinit` does not run before exit.
 - Assignment retains the new value before releasing the old one.
+- A function value is reference-counted through its context, so it is owned like a
+  class reference. A struct with a function-valued property is reference-counted too,
+  and so is an enum or array element that holds one.
 
 Not yet supported in M2 (each gives a diagnostic):
-- closures that capture an outer local: the outer local is reported as not in scope.
-  Capturing needs a context value, which makes function types class-like; that conflicts
-  with the current rule that structs may not hold class-like values, and is not done
 - member access, `!`, or `== nil` on a temporary class value, e.g. `make().x`
-- structs with class-typed properties, or with enum properties that hold a class
+- structs with class-typed or array properties, or with enum properties that hold a class
+  (a struct may hold function values)
 - Optional enums that hold a class are supported only as `E?` values; their `if let` works,
   but temporary values of them cannot be bound or compared with `nil` (as for classes)
 - an implicit member such as `.full(n)` cannot be written where the context is `E?`
@@ -172,10 +174,8 @@ Supported:
 
 Limits (each gives a diagnostic):
 - `break` inside a `switch`
-- `for-in` with a `where` clause
-- member access on a temporary class-like value, e.g. `make().n` for a struct that holds
-  an array, and a method call on one, since its arrays would leak. Also `make()!`,
-  `if let x = make()` and `make() == nil` for an Optional array or class-like temporary.
+- arrays of classes, enums or function values, arrays in struct properties, enum payloads or optionals
+- subscripts and `count` of a temporary array; `for-in` with a `where` clause
 - `switch` over Double or String; `%` on Double
 
 ## Integration tests
@@ -207,6 +207,38 @@ Limits of this step (each gives a diagnostic):
 - `return` inside an initializer; a failable initializer
 - overloaded methods with the same name
 - a method call on a temporary class value
+
+## Closure captures
+
+A closure can read and assign the locals of the functions around it. The closure value
+is still a function value of its declared type, so it can be returned, stored and
+passed like a closure that captures nothing. A function value is a pair `{ fn, ctx }`:
+a named function or a non-capturing closure has a NULL context, and a capturing closure
+has a heap context that holds its captured values.
+
+Supported:
+- a captured `let` or parameter is copied into the context when the closure is made. A
+  class-like copy is retained, so the context owns it
+- a captured `var` lives in a box, a heap cell owned by the scope that declares it. The
+  closure and the scope share the box, so an assignment in either is seen in the other.
+  Every `var` whose name appears inside some closure of the file is boxed, which can
+  box more variables than needed but gives the same results
+- closures in closures capture transitively, and a closure can be returned from a
+  function that declared the captured local
+- a method's closure captures `self`
+- captured values of any class-like type: classes, arrays, structs with function values,
+  enums and Optionals of these
+- a struct, enum or class may hold a function value, including a capturing one, and an
+  array may hold structs that hold function values
+- top-level variables are globals, not captures, so a closure reads and assigns them directly
+
+Limits (each gives a diagnostic):
+- a closure needs a contextual function type, as before: `let f = { ... }` is rejected
+- the type of a generic parameter cannot be inferred from a closure argument alone
+- arrays of function values and Optionals of function values
+- a `break` or `continue` cannot leave a closure, since a closure has its own loops only
+
+Verified against the Swift compiler's output and with the sanitizers on the emitted C.
 
 ## Tests
 

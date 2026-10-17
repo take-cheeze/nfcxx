@@ -103,110 +103,145 @@ enum CEmit {
     for e in program.enums { out += "typedef struct s_\(cIdent(e.name)) s_\(cIdent(e.name));\n" }
     for o in program.optionals { out += "typedef struct \(o.cName) \(o.cName);\n" }
     for a in program.arrays { out += "typedef struct \(a.cName) \(a.cName);\n" }
+    for fn in program.functionTypes { out += "typedef struct \(fn.cName) \(fn.cName);\n" }
     out += "\n"
+    // A function value is { fn, ctx }. Every function of the type takes the context
+    // pointer first, so a named function is called through a thunk (see below).
+    // Retaining or releasing a function value retains or releases its context.
     for fn in program.functionTypes {
       guard case .function(let params, let ret) = fn else { continue }
-      let list = params.isEmpty ? "void" : params.map { $0.cName }.joined(separator: ", ")
-      out += "typedef \(ret.cName) (*\(fn.cName))(\(list));\n"
+      let list = (["void *"] + params.map { $0.cName }).joined(separator: ", ")
+      out += "struct \(fn.cName) {\n  \(ret.cName) (*fn)(\(list));\n  void *ctx;\n};\n"
+      out += "static \(fn.cName) ret_\(fn.cName)(\(fn.cName) v) {\n  sw_retain(v.ctx);\n  return v;\n}\n"
+      out += "static void rel_\(fn.cName)(\(fn.cName) v) {\n  sw_release(v.ctx);\n}\n"
     }
     out += "\n"
 
-    // Value types (structs, enums, Optionals and arrays), dependencies first. The output
-    // has three parts, in order: the type bodies, the prototypes of the copy and release
-    // helpers, and the helper bodies. A helper may then use any type and call any other
-    // helper. That matters for a type that holds an array of itself: the array's helpers
-    // need the element complete, and the element's helpers call the array's.
+    // Value types (structs, enums and optionals), dependencies first.
     var defined = Set<String>()
-    var bodies = ""
-    var protos = ""
-    var helpers = ""
+    var values = ""
     func needsDefinition(_ ty: Ty) -> Bool {
       switch ty {
       case .structure, .enumeration, .optional, .array: return true
       default: return false
       }
     }
-    /// Declares `ret_T` (adds one reference to each class-like part) and `rel_T` (drops
-    /// them) for a value type `T`. `copy` and `drop` are the statements for its parts.
-    func addCopyHelpers(_ cn: String, copy: String, drop: String) {
-      protos += "static \(cn) ret_\(cn)(\(cn) v);\nstatic void rel_\(cn)(\(cn) v);\n"
-      helpers += "static \(cn) ret_\(cn)(\(cn) v) {\n\(copy)  return v;\n}\n"
-      helpers += "static void rel_\(cn)(\(cn) v) {\n\(drop)}\n\n"
-    }
     func defineValue(_ ty: Ty) {
       guard !defined.contains(ty.mangled) else { return }
       defined.insert(ty.mangled)
       switch ty {
-      case .structure(let info):
+      case .structure(let name):
+        guard let info = program.structs.first(where: { $0.name == name }) else { return }
         for field in info.fields where needsDefinition(field.ty) { defineValue(field.ty) }
-        let cn = ty.cName
-        bodies += "struct \(cn) {\n"
+        values += "struct s_\(cIdent(name)) {\n"
         for field in info.fields {
-          bodies += "  \(field.ty.cName) \(field.cName);\n"
+          values += "  \(field.ty.cName) \(field.cName);\n"
         }
-        bodies += "};\n\n"
-        if info.isClassLike {
-          var copy = "", drop = ""
+        values += "};\n\n"
+        if ty.isClassLike {
+          // A struct with a reference-counted field is copied like an enum with a class
+          // payload: copies retain each such field, and drops release it.
+          let cn = ty.cName
+          values += "static \(cn) ret_\(cn)(\(cn) v) {\n"
           for field in info.fields where field.ty.isClassLike {
-            copy += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
-            drop += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
+            values += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
           }
-          addCopyHelpers(cn, copy: copy, drop: drop)
+          values += "  return v;\n}\n"
+          values += "static void rel_\(cn)(\(cn) v) {\n"
+          for field in info.fields where field.ty.isClassLike {
+            values += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
+          }
+          values += "}\n\n"
         }
       case .enumeration(let info):
         for c in info.cases {
           for field in c.payload where needsDefinition(field.ty) { defineValue(field.ty) }
         }
         let cn = ty.cName
-        bodies += "struct \(cn) {\n  int64_t tag;\n"
+        values += "struct \(cn) {\n  int64_t tag;\n"
         for c in info.cases {
           for field in c.payload {
-            bodies += "  \(field.ty.cName) \(field.cName);\n"
+            values += "  \(field.ty.cName) \(field.cName);\n"
           }
         }
-        bodies += "};\n"
+        values += "};\n"
         if info.holdsRef {
           // Copies retain, and drops release, every class-like payload field. A value
           // leaves the fields of its other cases zero (a compound literal zeroes the
-          // fields it does not name), and retaining or releasing a null pointer, an
-          // empty Optional or an empty array does nothing, so no switch on the tag is needed.
-          var copy = "", drop = ""
+          // fields it does not name), and retaining or releasing a null pointer or an
+          // empty Optional does nothing, so no switch on the tag is needed.
+          values += "static \(cn) ret_\(cn)(\(cn) v) {\n"
           for c in info.cases {
             for field in c.payload where field.ty.isClassLike {
-              copy += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
-              drop += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
+              values += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
             }
           }
-          addCopyHelpers(cn, copy: copy, drop: drop)
+          values += "  return v;\n}\n"
+          values += "static void rel_\(cn)(\(cn) v) {\n"
+          for c in info.cases {
+            for field in c.payload where field.ty.isClassLike {
+              values += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
+            }
+          }
+          values += "}\n"
         }
-        bodies += "\n"
+        values += "\n"
       case .array(let elem):
         if needsDefinition(elem) { defineValue(elem) }
-        bodies += arrayStruct(ty, elem)
-        protos += arrayPrototypes(ty, elem)
-        helpers += arrayHelpers(ty, elem)
+        values += arrayHelpers(ty, elem)
       case .optional(let inner):
         if needsDefinition(inner) { defineValue(inner) }
         let opt = ty.cName
-        bodies += "struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n};\n"
-        bodies += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
-        bodies += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
-        bodies += "  return v.value;\n}\n"
-        bodies += "\n"
+        values += "struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n};\n"
+        values += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
+        values += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
+        values += "  return v.value;\n}\n"
         if inner.isClassLike {
-          addCopyHelpers(opt,
-            copy: "  if (v.some) \(retainCode("v.value", inner))\n",
-            drop: "  if (v.some) \(releaseCode("v.value", inner))\n")
+          values += "static \(opt) ret_\(opt)(\(opt) v) {\n  if (v.some) \(retainCode("v.value", inner))\n  return v;\n}\n"
+          values += "static void rel_\(opt)(\(opt) v) {\n  if (v.some) \(releaseCode("v.value", inner))\n}\n"
         }
+        values += "\n"
       default:
         break
       }
     }
-    for s in program.structs { defineValue(.structure(s)) }
+    for s in program.structs { defineValue(.structure(s.name)) }
     for e in program.enums { defineValue(.enumeration(e)) }
     for o in program.optionals { defineValue(o) }
     for a in program.arrays { defineValue(a) }
-    out += bodies + protos + helpers
+    // A box holds its value by value, so the value's type is defined first.
+    for b in program.boxes {
+      guard case .box(let inner) = b else { continue }
+      if needsDefinition(inner) { defineValue(inner) }
+      let tag = "bx_" + inner.mangled
+      values += "struct \(tag) {\n  sw_obj hdr;\n  \(inner.cName) v;\n};\n"
+      values += "static void d_\(tag)(void *p) {\n  struct \(tag) *b = p;\n"
+      if inner.isClassLike {
+        values += "  " + releaseCode("b->v", inner) + "\n"
+      }
+      values += "  free(p);\n}\n"
+      values += "static struct \(tag) * bxn_\(inner.mangled)(\(inner.cName) v) {\n"
+      values += "  struct \(tag) *b = calloc(1, sizeof *b);\n  if (!b) sw_trap(\"out of memory\");\n"
+      values += "  b->hdr.rc = 1;\n  b->hdr.destroy = d_\(tag);\n  b->v = v;\n  return b;\n}\n\n"
+    }
+    out += values
+
+    // Call helpers for each function type. They need the complete parameter types,
+    // so they come after the value definitions. An owned callee is released after the
+    // call, since nothing else holds it.
+    for fn in program.functionTypes {
+      guard case .function(let params, let ret) = fn else { continue }
+      let decl = ([fn.cName + " f"] + params.enumerated().map { "\($0.element.cName) a\($0.offset)" }).joined(separator: ", ")
+      let args = (["f.ctx"] + params.indices.map { "a\($0)" }).joined(separator: ", ")
+      let call = "f.fn(\(args))"
+      if ret == .void {
+        out += "static void call_\(fn.cName)(\(decl)) {\n  \(call);\n}\n"
+        out += "static void callo_\(fn.cName)(\(decl)) {\n  \(call);\n  sw_release(f.ctx);\n}\n\n"
+      } else {
+        out += "static \(ret.cName) call_\(fn.cName)(\(decl)) {\n  return \(call);\n}\n"
+        out += "static \(ret.cName) callo_\(fn.cName)(\(decl)) {\n  \(ret.cName) r = \(call);\n  sw_release(f.ctx);\n  return r;\n}\n\n"
+      }
+    }
 
     // Class layout: the header first, then the stored properties.
     for c in program.classes {
@@ -223,9 +258,45 @@ enum CEmit {
     if !program.globals.isEmpty { out += "\n" }
 
     for f in program.funcs {
-      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params)));\n"
+      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f)));\n"
     }
     out += "static void swift_main(void);\n\n"
+
+    // A named function used as a value is called through a thunk with the context
+    // parameter, which it ignores.
+    for f in program.funcs where f.asValue && !f.isClosure {
+      let params = (["void *ctx_"] + f.params.map { "\($0.ty.cName) \($0.cName)" }).joined(separator: ", ")
+      let args = f.params.map { $0.cName }.joined(separator: ", ")
+      let body = f.ret == .void ? "  \(f.cName)(\(args));\n" : "  return \(f.cName)(\(args));\n"
+      out += "static \(f.ret.cName) thk_\(f.cName)(\(params)) {\n  (void)ctx_;\n\(body)}\n\n"
+    }
+
+    // The context of each closure that captures: its layout, its destroy function
+    // (which releases the captured values), and the constructor that makes the closure
+    // value from them. The constructor takes ownership of its arguments.
+    for f in program.funcs {
+      guard let ctx = f.context else { continue }
+      let name = ctx.cName
+      out += "struct \(name) {\n  sw_obj hdr;\n"
+      for field in ctx.fields {
+        out += "  \(field.ty.cName) \(field.cName);\n"
+      }
+      out += "};\n"
+      out += "static void d_\(name)(void *p) {\n  struct \(name) *c = p;\n"
+      for field in ctx.fields where field.ty.isClassLike {
+        out += "  " + releaseCode("c->\(field.cName)", field.ty) + "\n"
+      }
+      out += "  free(p);\n}\n"
+      let fnTy = Ty.function(f.params.map { $0.ty }, f.ret)
+      let params = ctx.fields.enumerated().map { "\($0.element.ty.cName) v\($0.offset)" }.joined(separator: ", ")
+      out += "static \(fnTy.cName) mk_\(ctx.id)(\(params)) {\n"
+      out += "  struct \(name) *c = calloc(1, sizeof *c);\n  if (!c) sw_trap(\"out of memory\");\n"
+      out += "  c->hdr.rc = 1;\n  c->hdr.destroy = d_\(name);\n"
+      for (index, field) in ctx.fields.enumerated() {
+        out += "  c->\(field.cName) = v\(index);\n"
+      }
+      out += "  return (\(fnTy.cName)){ .fn = \(f.cName), .ctx = c };\n}\n\n"
+    }
 
     // Destroy and constructor for each class. Destroy runs the deinitializer,
     // then releases the stored references, then frees the object.
@@ -256,7 +327,14 @@ enum CEmit {
     }
 
     for f in program.funcs {
-      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params))) {\n"
+      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f))) {\n"
+      if f.isClosure {
+        out += "  (void)ctx_;\n"
+        if let ctx = f.context {
+          // Captured values are read through the context, named `cx` in the body.
+          out += "  struct \(ctx.cName) *cx = ctx_;\n"
+        }
+      }
       out += block(f.body, "  ")
       out += "}\n\n"
     }
@@ -268,50 +346,28 @@ enum CEmit {
     return out
   }
 
-  /// The struct of an array. It holds a pointer to its elements, which need only be
-  /// declared, so it can be written before the element type is complete.
-  private static func arrayStruct(_ ty: Ty, _ elem: Ty) -> String {
-    "struct \(ty.cName) {\n  \(elem.cName) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
-  }
-
-  /// Prototypes of the helpers of an array of `elem`, which other helpers may call.
-  private static func arrayPrototypes(_ ty: Ty, _ elem: Ty) -> String {
-    let e = elem.cName
-    let m = elem.mangled
-    let arr = ty.cName
-    var text = ""
-    text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals);\n"
-    text += "static \(arr) arr_copy_\(m)(\(arr) a);\n"
-    text += "static void arr_free_\(m)(\(arr) a);\n"
-    text += "static void arr_check_\(m)(\(arr) a, int64_t i);\n"
-    text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i);\n"
-    text += "static \(e) *arr_at_\(m)(\(arr) *a, int64_t i);\n"
-    text += "static void arr_append_\(m)(\(arr) *a, \(e) v);\n"
-    return text
-  }
-
-  /// The helper bodies of an array of `elem`. Helpers are named by the element type, so
-  /// they are shared by every array of that element.
+  /// The struct and helpers of an array of `elem`. Helpers are named by the element
+  /// type, so they are shared by every array of that element.
   private static func arrayHelpers(_ ty: Ty, _ elem: Ty) -> String {
     let e = elem.cName
     let m = elem.mangled
     let arr = ty.cName
     var text = ""
-    text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals) {\n"
+    text += "struct \(arr) {\n  \(e) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
+    text += "static \(arr) arr_lit_\(m)(int64_t n, const \(e) *vals) {\n"
     text += "  \(arr) a = { NULL, 0, 0 };\n"
     text += "  if (n > 0) {\n"
     text += "    a.data = malloc(sizeof(\(e)) * (size_t)n);\n"
     text += "    if (!a.data) sw_trap(\"out of memory\");\n"
     text += "    memcpy(a.data, vals, sizeof(\(e)) * (size_t)n);\n"
     text += "    a.count = n;\n    a.cap = n;\n  }\n  return a;\n}\n"
-    // A copy is a new buffer; for class-like elements each element gets its own reference.
-    text += "static \(arr) arr_copy_\(m)(\(arr) a) {\n"
-    text += "  \(arr) r = arr_lit_\(m)(a.count, a.data);\n"
+    // Elements that hold a reference count (a struct with a function value, say) are
+    // retained by each copy and released when the array is freed.
+    text += "static \(arr) arr_copy_\(m)(\(arr) a) {\n  \(arr) r = arr_lit_\(m)(a.count, a.data);\n"
     if elem.isClassLike {
       text += "  for (int64_t i = 0; i < r.count; i++) { \(retainCode("r.data[i]", elem)) }\n"
     }
     text += "  return r;\n}\n"
-    // Freeing the buffer releases each element first (in order, as Swift does).
     text += "static void arr_free_\(m)(\(arr) a) {\n"
     if elem.isClassLike {
       text += "  for (int64_t i = 0; i < a.count; i++) { \(releaseCode("a.data[i]", elem)) }\n"
@@ -358,9 +414,11 @@ enum CEmit {
     return text
   }
 
-  private static func paramList(_ params: [Param]) -> String {
-    if params.isEmpty { return "void" }
-    return params.map { "\($0.ty.cName) \($0.cName)" }.joined(separator: ", ")
+  /// The C parameter list of a function. A closure takes its context pointer first.
+  private static func paramList(_ f: FuncInfo) -> String {
+    var items: [String] = f.isClosure ? ["void *ctx_"] : []
+    items += f.params.map { "\($0.ty.cName) \($0.cName)" }
+    return items.isEmpty ? "void" : items.joined(separator: ", ")
   }
 
   private static func block(_ stmts: [Stmt], _ indent: String) -> String {
@@ -373,8 +431,8 @@ enum CEmit {
       return "\(indent)\(ty.cName) \(name) = \(expr(value));\n"
     case .assign(let target, let value, let ty):
       if ty.isClassLike {
-        // The new value is stored before the old one is dropped. The place is
-        // evaluated once, through a pointer, so an index expression runs once.
+        // The new value is stored before the old one is dropped. The place is evaluated
+        // once, through a pointer, so an index expression runs once.
         return "\(indent){\n\(indent)  \(ty.cName) assign_new = \(expr(value));\n"
           + "\(indent)  \(ty.cName) *assign_slot = &(\(lvalue(target)));\n"
           + "\(indent)  \(ty.cName) assign_old = *assign_slot;\n"
@@ -408,16 +466,16 @@ enum CEmit {
 
   /// Drops one reference to a class-like value held in `expr`.
   private static func releaseCode(_ expr: String, _ ty: Ty) -> String {
-    if ty.isClass { return "sw_release(\(expr));" }
+    if ty.isClass || ty.isBox { return "sw_release(\(expr));" }
     if case .array(let elem) = ty { return "arr_free_\(elem.mangled)(\(expr));" }
     return "rel_\(ty.cName)(\(expr));"
   }
 
-  /// Adds one reference to a class-like value held in `expr`. A value that holds
-  /// an array by value (an enum, an Optional or a struct) is copied, so the place is
-  /// assigned its copy; the copy is a new buffer, not a count.
+  /// Adds one reference to a class-like value held in `expr`. A value that holds an array
+  /// (directly, or in a struct, enum or Optional) is copied, so the place takes the copy;
+  /// the copy is a new buffer, not a count.
   private static func retainCode(_ expr: String, _ ty: Ty) -> String {
-    if ty.isClass { return "sw_retain(\(expr));" }
+    if ty.isClass || ty.isBox { return "sw_retain(\(expr));" }
     if case .array(let elem) = ty { return "\(expr) = arr_copy_\(elem.mangled)(\(expr));" }
     return "\(expr) = ret_\(ty.cName)(\(expr));"
   }
@@ -485,7 +543,7 @@ enum CEmit {
     case .logical(let op, let l, let r):
       return "(\(expr(l)) \(op) \(expr(r)))"
     case .retain(let inner):
-      if e.ty.isClass { return "((\(e.ty.cName))sw_retain(\(expr(inner))))" }
+      if e.ty.isClass || e.ty.isBox { return "((\(e.ty.cName))sw_retain(\(expr(inner))))" }
       if case .array(let elem) = e.ty { return "arr_copy_\(elem.mangled)(\(expr(inner)))" }
       return "ret_\(e.ty.cName)(\(expr(inner)))"
     case .wrap(let inner):
@@ -520,9 +578,16 @@ enum CEmit {
     case .isCase(let inner, let tag):
       return "((\(expr(inner))).tag == \(tag))"
     case .funcRef(let f):
-      return f.cName
+      let fn = f.isClosure ? f.cName : "thk_" + f.cName
+      return "((\(e.ty.cName)){ .fn = \(fn), .ctx = NULL })"
+    case .makeClosure(_, let ctx, let args):
+      return "mk_\(ctx.id)(\(args.map(expr).joined(separator: ", ")))"
+    case .boxNew(let v):
+      guard case .box(let inner) = e.ty else { return "NULL" }
+      return "bxn_\(inner.mangled)(\(expr(v)))"
     case .callPtr(let callee, let args):
-      return "(\(expr(callee)))(\(args.map(expr).joined(separator: ", ")))"
+      let helper = (callee.owned ? "callo_" : "call_") + callee.ty.cName
+      return "\(helper)(\(([expr(callee)] + args.map(expr)).joined(separator: ", ")))"
     case .unwrap(let inner):
       return "unw_\(inner.ty.cName)(\(expr(inner)))"
     }
