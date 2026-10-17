@@ -1,0 +1,17 @@
+# Hand-written QBE IL (not cproc output): every data item form qbe2cil.py reads. Floats of both widths, hex floats,
+# infinities, NaN, a subnormal, a float32 overflow boundary, integer widths with signs and bases, string escapes,
+# zero fill, addresses with and without an offset, and an external symbol.
+export data $e_floats = align 8 { s s_1.5, d d_-2.25, s d_0x1p-1, d s_3, s d_inf, d d_-inf, d d_nan, d d_1e-320, s s_3.4e38, d d_0x1.fffffffffffffp+1023, }
+data $e_ints = { b 255, h -2, w 4294967295, l -1, l 18446744073709551615, w 0x10, l 0b101, b 0o17, h 00, w 1_000, }
+export data $e_str = align 1 { b "a\"b\\c\n\000\377\7x", b 0, z 3, z 16, }
+data $e_plain = { w 1 }
+export data $e_addr = align 8 { l $e_str, l $e_str + 4, l $e_ints + -4, l $e_floats+8, l $e_str+2, l $unknown_ext + 16, l $e_plain, }
+export data $e_bytes = { b "", b "x" }
+export data $e_zero = { z 0, w 9 }
+
+export function w $use_data(w %a) {
+@start
+	%t =l copy $e_addr
+	%u =w loadw %t
+	ret %u
+}
