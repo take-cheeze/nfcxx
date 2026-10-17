@@ -2219,6 +2219,101 @@ inline float clamp(float x, float lo, float hi) { return detail::m_clamp(x, lo, 
 inline float abs(float x) { return NFCXX_SYCL_FN1(detail::M_FABS, x); }
 inline int abs(int x) { return x < 0 ? -x : x; }
 
+// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). They are not among the device math
+// ops (detail::math_op), and the device emitter has no lowering for them. On the host they are the C library's; on the device
+// a kernel that reaches one traps (it does not compute a wrong value). Templates, so only an instantiated call is emitted.
+namespace detail {
+template <class T> inline T m_erf(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for erf
+  return x;
+#else
+  return std::erf(x);
+#endif
+}
+template <class T> inline T m_expm1(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for expm1
+  return x;
+#else
+  return std::expm1(x);
+#endif
+}
+template <class T> inline T m_log1p(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for log1p
+  return x;
+#else
+  return std::log1p(x);
+#endif
+}
+}  // namespace detail
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type erf(T x) { return detail::m_erf((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type expm1(T x) { return detail::m_expm1((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type log1p(T x) { return detail::m_log1p((typename detail::fp<T>::type)x); }
+
+// sycl::native::exp (the fast-math exp; the compat library has one exp, so it is that one).
+namespace native {
+inline float exp(float x) { return sycl::exp(x); }
+}  // namespace native
+
+// sycl::ext::oneapi: the names element_wise.cpp spells out for its bfloat16 and work-item branches. bfloat16 is the bf16
+// storage (the upper 16 bits of a binary32, round-to-nearest-even on conversion from float); arithmetic and math go
+// through float and round the result back to bf16, as the device's bf16 math does.
+namespace ext {
+namespace oneapi {
+class bfloat16 {
+ public:
+  bfloat16() = default;
+  bfloat16(float f) : bits_(from_float(f)) {}
+  operator float() const { return to_float(bits_); }
+  uint16_t bits() const { return bits_; }
+  static bfloat16 from_bits(uint16_t b) { bfloat16 r; r.bits_ = b; return r; }
+
+ private:
+  uint16_t bits_ = 0;
+
+  static float to_float(uint16_t b) {
+    uint32_t u = (uint32_t)b << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+  }
+  static uint16_t from_float(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    if ((u & 0x7fffffffu) > 0x7f800000u) return 0x7fc0;  // NaN stays NaN
+    u += 0x7fffu + ((u >> 16) & 1u);                      // round to nearest even
+    return (uint16_t)(u >> 16);
+  }
+};
+inline bfloat16 operator-(bfloat16 a) { return bfloat16(-static_cast<float>(a)); }
+inline bfloat16 operator+(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) + static_cast<float>(b)); }
+inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) - static_cast<float>(b)); }
+inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
+inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
+// the work-item accessor of the nd_range kernels (a helper of element_wise.cpp; the ops under test use the launch's nd_item)
+namespace this_work_item {
+template <int D> inline nd_item<D> get_nd_item() { return nd_item<D>(); }
+}  // namespace this_work_item
+namespace experimental {
+// The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
+#define NFCXX_SYCL_BF16_FN1(name) \
+  inline bfloat16 name(bfloat16 x) { return bfloat16(::sycl::name(static_cast<float>(x))); }
+#define NFCXX_SYCL_BF16_FN2(name) \
+  inline bfloat16 name(bfloat16 x, bfloat16 y) { return bfloat16(::sycl::name(static_cast<float>(x), static_cast<float>(y))); }
+NFCXX_SYCL_BF16_FN1(fabs) NFCXX_SYCL_BF16_FN1(exp) NFCXX_SYCL_BF16_FN1(exp2) NFCXX_SYCL_BF16_FN1(expm1)
+NFCXX_SYCL_BF16_FN1(log) NFCXX_SYCL_BF16_FN1(log2) NFCXX_SYCL_BF16_FN1(log1p) NFCXX_SYCL_BF16_FN1(sqrt)
+NFCXX_SYCL_BF16_FN1(sin) NFCXX_SYCL_BF16_FN1(cos) NFCXX_SYCL_BF16_FN1(tan) NFCXX_SYCL_BF16_FN1(tanh)
+NFCXX_SYCL_BF16_FN1(erf) NFCXX_SYCL_BF16_FN1(floor) NFCXX_SYCL_BF16_FN1(ceil) NFCXX_SYCL_BF16_FN1(trunc)
+NFCXX_SYCL_BF16_FN1(round)
+NFCXX_SYCL_BF16_FN2(fmax) NFCXX_SYCL_BF16_FN2(fmin)
+#undef NFCXX_SYCL_BF16_FN1
+#undef NFCXX_SYCL_BF16_FN2
+}  // namespace experimental
+}  // namespace oneapi
+}  // namespace ext
+
 }  // namespace sycl
 
 #endif
