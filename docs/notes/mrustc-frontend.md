@@ -103,10 +103,19 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
   mrustc builds here reaches them.
 - The program runs from another directory with relative paths (the driver resolves them before it changes directory).
 - `MRUSTC_NFCC_KEEP=1` keeps the intermediate files of a run, for debugging.
-- A real crate with dependencies: `tests/realworld/run_mrustc_serde_json.sh` builds serde_json 1.0.133 (with serde,
-  serde_core, ryu, itoa and memchr, and their build scripts) with mrustc's `minicargo`, then compiles the program and
-  every crate of its link through the pipeline (`MRUSTC_NFCC_CRATES=all`). Its output matches rustc's. It takes about
-  two minutes once the dependency tree is built, and needs `cargo vendor` (network).
+- Real crates with dependencies: `tests/realworld/run_mrustc.sh` runs each case under `tests/realworld/mrustc/`. The
+  dependency tree is built by mrustc's `minicargo` from a `cargo vendor` of the case's lock file, then the program and
+  every crate of its link are compiled by the pipeline (`MRUSTC_NFCC_CRATES=all`), and the output is compared with
+  rustc's. Two cases so far:
+  - `serde-json`: serde_json 1.0.133 with serde, serde_core, ryu, itoa and memchr (and their build scripts);
+  - `regex`: regex 1.13.1 with regex-automata, regex-syntax, aho-corasick and memchr. Its largest crate, regex-automata,
+    has a 40 MB C file. It needed the QBE change below.
+  Each takes a few minutes cold (`cargo vendor` and the mrustc build of the tree, then the pipeline) and needs network
+  access for `cargo vendor`.
+- **QBE's parallel moves.** `rega.c` holds at most 64 copies in one parallel move, the copies a block edge needs for
+  phi operands and call arguments. A join with more stopped QBE with `no more pm slots` while building regex-automata.
+  `scripts/setup-qbe.sh` now raises the limit to 1024 in the build copy (a static array, so no cost). The change
+  belongs in the QBE fork as a commit; the pin in `3rd/qbe` is unchanged.
 - libcore's object, built through nfcxx, has 19,796 defined symbols; mrustc's gcc-built `libcore.rlib.o` has 19,476.
   The counts are not expected to match exactly; they are a sanity check, not a proof.
 
