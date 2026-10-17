@@ -11,7 +11,7 @@ root=$PWD; work=$root/build/mrustc; src=$work/src
 # take-cheeze/mrustc, branch nfcxx/fixes: upstream thepowersgang/mrustc d85e86b (PR #441) plus nfcxx's fixes (NFCXX-FIXES.md
 # in that branch). MRUSTC_REPO overrides the repository.
 url=${MRUSTC_REPO:-https://github.com/take-cheeze/mrustc}
-pin=016c5899c09d0556b3921e9fcfea2ff490a99786
+pin=13c5323e4191cd9f4567affef01ad7407399f4c0
 jobs=${PARLEVEL:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
 
 if [ "${FORCE:-}" != 1 ] && [ -x "$src/bin/mrustc" ] && [ -f "$src/output-1.90.0/libstd.rlib.o" ]; then
