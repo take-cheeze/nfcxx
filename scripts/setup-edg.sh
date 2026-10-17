@@ -23,12 +23,18 @@ fi
 
 # macOS (Apple Silicon or Intel): EDG's own clang base and CMake preset. Its long double (8 bytes, binary64 on arm64)
 # and predefined macros are the macOS ones, so none of the Linux workarounds below apply.
-if [ "$(uname -s)" = Darwin ]; then
-  case "$(uname -m)" in
-    arm64)  cfg=macos-arm;    preset=macos-arm-clang-release ;;
-    x86_64) cfg=macos-x86_64; preset=macos-x86-clang-release ;;
-    *) echo "setup-edg: unsupported macOS architecture $(uname -m)" >&2; exit 1 ;;
-  esac
+# NFCXX_EDG_TARGET=macos-arm64 (cross path, scripts/setup-cross-macos.sh) takes this branch on a Linux host too: the
+# macOS arm64 base and preset, with the front end built by the host's clang. Native Darwin and Linux builds are unchanged.
+if [ "$(uname -s)" = Darwin ] || [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
+  if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
+    cfg=macos-arm; preset=macos-arm-clang-release
+  else
+    case "$(uname -m)" in
+      arm64)  cfg=macos-arm;    preset=macos-arm-clang-release ;;
+      x86_64) cfg=macos-x86_64; preset=macos-x86-clang-release ;;
+      *) echo "setup-edg: unsupported macOS architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+  fi
   rm -rf "$base"; mkdir -p "$(dirname "$base")"
   cp -r "$src/bases/cmake-native/$cfg/clang" "$base"
   # _POSIX_SOURCE hides Darwin's clock_gettime, CLOCK_MONOTONIC and mkdtemp; _DARWIN_C_SOURCE exposes the full C API, and
