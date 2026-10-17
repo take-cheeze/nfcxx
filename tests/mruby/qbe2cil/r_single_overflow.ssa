@@ -1,0 +1,2 @@
+# Refused: a single-precision data item that overflows (struct.pack raises OverflowError in the original).
+data $r_s = { s s_1e39 }

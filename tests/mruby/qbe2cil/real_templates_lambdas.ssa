@@ -1,0 +1,28 @@
+export
+function w $main() {
+@start.1
+	%.1 =l alloc8 8
+	%.2 =l alloc4 8
+	%.4 =l alloc8 8
+@body.2
+	storew 0, %.2
+	%.3 =l add %.2, 4
+	storew 4, %.3
+	%.5 =w call extern $_Z3addIiET_S0_S0_(w 1, w 2)
+	%.6 =l add %.2, 0
+	storew %.5, %.6
+	%.7 =l add %.4, 0
+	storel %.2, %.7
+	%.8 =l add %.4, 0
+	%.9 =l loadl %.8
+	storel %.9, %.1
+	%.10 =l loadl %.1
+	%.11 =l add %.10, 0
+	%.12 =w loadw %.11
+	%.13 =l loadl %.1
+	%.14 =l add %.13, 4
+	%.15 =w loadw %.14
+	%.16 =w add %.12, %.15
+	%.17 =w add %.16, 5
+	ret %.17
+}

@@ -7,14 +7,14 @@ not a managed language: C pointers stay raw addresses in unmanaged memory, and t
 ## Pipeline
 
 ```
-C --cpp--> prep (qbe-prep.rb) --cproc--> QBE IL --qbe2cil.py--> JSON fragment (.o) --cil-link.py--> CIL text
+C --cpp--> prep (qbe-prep.rb) --cproc--> QBE IL --qbe2cil.rb--> JSON fragment (.o) --cil-link.py--> CIL text
    --ilasm--> x.dll  +  x.runtimeconfig.json  +  x (launcher: exec dotnet x.dll "$@")
 ```
 
 - `scripts/cil-cc` is the compiler wrapper: it sets `NFCXX_CIL=1` and runs `scripts/qbe-cc`, which does the
   preprocessing, `qbe-prep.rb` and cproc as for the QBE backend. With `NFCXX_CIL` set it writes a fragment instead of
   running QBE, and its link step is `cil-link.py`.
-- `scripts/qbe2cil.py` turns one translation unit's QBE IL into a fragment: the method bodies as CIL text, the
+- `scripts/qbe2cil.rb` (a port of the former `qbe2cil.py`, see `docs/notes/mruby-scripting.md`) turns one translation unit's QBE IL into a fragment: the method bodies as CIL text, the
   functions, data, the calls with their signatures, and the global symbols the unit uses.
 - `scripts/cil-link.py` links the fragments into one static class `Prog`, writes the CIL, runs ilasm, and writes the
   launcher. Shim source is built with `cc` when a program calls a variadic function (below).

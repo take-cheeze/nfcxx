@@ -114,9 +114,9 @@ cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t
 "$cproc" ${cprocarg[@]+"${cprocarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 if [ -n "${NFCXX_CIL:-}" ]; then
-  # The CIL backend: the QBE IL becomes a fragment for the link (scripts/qbe2cil.py); no assembler, no weak symbols.
+  # The CIL backend: the QBE IL becomes a fragment for the link (scripts/qbe2cil.rb); no assembler, no weak symbols.
   [ $asm = 0 ] || { echo "qbe-cc: -S is not supported by the CIL backend" >&2; exit 1; }
-  python3 "$(dirname "$0")/qbe2cil.py" "$tmp/out.ssa" "$tmp/tail.s" "$(basename "$src" .c | tr -c 'A-Za-z0-9_.-' _)" \
+  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe2cil.rb" "$tmp/out.ssa" "$tmp/tail.s" "$(basename "$src" .c | tr -c 'A-Za-z0-9_.-' _)" \
     "${out:-${src%.c}.o}"
   exit 0
 fi
