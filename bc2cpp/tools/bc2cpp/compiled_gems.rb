@@ -73,6 +73,9 @@ BC2CPP_CORE_MRBLIB_GEMS = %w[
 # - 10error.rb only gives NameError/NoMethodError their accessors; visible, they
 #   would add two exact-class arms to every `.name` call chain for nothing.
 BC2CPP_CORE_MRBLIB_EXCLUDED = %w[mrbgems/mruby-io/mrblib/kernel.rb mrblib/10error.rb].freeze
+# FAIL_FAST_TYPE (compile-time): true defines BC2CPP_FAIL_FAST_TYPE in the compiled gems, so each closed-world
+# fallback (bc2cpp_nomethod) raises TypeError instead of dispatching by name. Off in every shipped build.
+BC2CPP_FAIL_FAST_TYPE = false
 # Same, from 3rd/<name>/mrblib. mruby-marshal has no mrblib.
 BC2CPP_EXTERNAL_MRBLIB_GEMS = %w[mruby-stringio mruby-onig-regexp].freeze
 # The gem set the canonical (script, coverage report) world assumes: wio's,
