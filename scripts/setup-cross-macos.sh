@@ -62,6 +62,8 @@ export NFCXX_LIBCXX="$libcxx"
 # finds only the clean-room sysroot, never the host glibc headers (features-time64.h). Set here, for the cross
 # configuration only; the native build does not source this file.
 export USR_INCLUDE="$root/tests/macos-sysroot/include"
+# The cross front end is for a macOS target on this Linux host: its predefined macros must not be the Linux ones (see 3rd/edg sys_predef.c).
+export NFCXX_TARGET_APPLE=1
 export EDG_BUILD="$root/build/edg-cross"
 export EDG_BASE="$root/build/edg-base-cross"
 export PATH="$llvm/bin:\$PATH"

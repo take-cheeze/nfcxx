@@ -289,13 +289,14 @@ rescue Refused
 end
 
 class Mod
-  attr_accessor :defs, :fns, :need, :globals, :datas, :statics, :static_order, :static_size
+  attr_accessor :defs, :fns, :need, :globals, :datas, :statics, :static_order, :static_size, :empty_types
   def initialize
     @defs = {}     # IR name => function form
     @fns = {}      # IR name => Fn (the reachable ones)
     @need = {}     # prelude helpers used
     @globals = {}  # IR name => global form
     @datas = {}    # IR name => data form (string literals)
+    @empty_types = {}  # IR struct name => true for the empty ABI types (abi-type ... (empty))
     @statics = {}  # name => byte offset in the static region (the objects a kernel uses)
     @static_order = []
     @static_size = 0
@@ -383,7 +384,12 @@ class Mod
           raise Refused, "static #{name}: initializer item #{h}"
         end
       end
-      raise Refused, "static object #{name} is zero-initialized (a dynamic initializer would look the same in the IR, so it is not trusted)" unless nonzero
+      # A lambda closure with no captures is an empty object (one byte, no members): its zero bytes are its whole value, and
+      # no initializer can change them, so it is lowered as the zero bytes it has. Any other zero-initialized object is refused.
+      # A local lambda's closure type is mangled _ZZ...Ul...E<n>_ (no Regexp under mruby, so the test is by substrings).
+      cname = head_of(f[2]) == "struct" ? f[2][1].to_s : ""
+      empty_closure = cname[0, 3] == "_ZZ" && cname.include?("Ul") && cname[-1, 1] == "_" && @empty_types[cname] == true
+      raise Refused, "static object #{name} is zero-initialized (a dynamic initializer would look the same in the IR, so it is not trusted)" unless nonzero || empty_closure
     end
     [bytes, relocs]
   end
@@ -448,6 +454,7 @@ SCOPE_WORKGROUP = 2
 SEM_RELAXED = 0
 SEM_BARRIER = 0x8 | 0x40 | 0x100 | 0x200   # AcquireRelease | UniformMemory | WorkgroupMemory | CrossWorkgroupMemory
 SEM_BARRIER_KERNEL = 0x8 | 0x100 | 0x200   # the same without UniformMemory (which needs the Shader capability)
+SUBGROUP_SIZE = 16   # the fixed sub-group size of the OpenCL module (lib/sycl: sub_group has 16 lanes)
 BUILTIN_WORKGROUP_ID = 26
 BUILTIN_LOCAL_INVOCATION_ID = 27
 BUILTIN_GLOBAL_INVOCATION_ID = 28
@@ -520,6 +527,11 @@ class Spv
 
   def cap(c)
     @caps << c unless @caps.include?(c)
+  end
+
+  # OpExecutionMode of an entry point (mode, literal): the required sub-group size of a kernel
+  def entry_mode(fid, mode, lit)
+    @modes << [16, fid, mode, lit]
   end
 
   def ext(name)
@@ -724,6 +736,7 @@ class Spv
     @entries.each do |model, fid, name, iface, _|
       body << [15, model, fid, *str_words(name), *iface]
     end
+    @modes.each { |m| body << m }
     out_words = []
     (body + @anns + @types + @funcs).each { |inst| out_words.concat(encode(inst)) }
     out[3] = @bound
@@ -751,7 +764,7 @@ end
 
 class SpvModule
   attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
-  attr_accessor :stack_bytes, :fns, :defs
+  attr_accessor :stack_bytes, :fns, :defs, :subgroup_used
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -1443,7 +1456,10 @@ class SFn
       ty = parse_type(x[1])
       raise Refused, "#{h} to #{ty[0]}" unless ty[0] == "float"
       a, aty = operand(x[2])
-      raise Refused, "#{h} of bool" if aty[0] == "int" && aty[3]
+      if aty[0] == "int" && aty[3]   # a bool holds 0 or 1: it converts as the unsigned 0 or 1 (0.0 or 1.0)
+        a = bool_to_u32(a)
+        aty = ["int", 4, false, false]
+      end
       v = h == "i2f" && aty[0] == "int" && aty[2] ? res(111, sty(ty), a) : res(112, sty(ty), a)
       [v, ty]
     when "cf2i"
@@ -1615,6 +1631,19 @@ class SFn
     when "__nfcxx_sycl_scratch"
       lu = res(IADD, @spv.t_int(64), local_base, to_u64(push_load(:local_user, nil), ["int", 4, false, false]))
       return [lu, ["ptr"]]
+    when "__nfcxx_sycl_sg_shuffle_u32", "__nfcxx_sycl_sg_shuffle_xor_u32"
+      # sub-group lanes exchange a 32-bit word: OpSubgroupShuffleINTEL (the value of lane args[1]) or OpSubgroupShuffleXorINTEL
+      # (lane ^ args[1]), SPV_INTEL_subgroups. The OpenCL 2.2 validation environment has no GroupNonUniform (SPIR-V 1.3), so
+      # this is the shuffle that the OpenCL module can carry. The module is an OpenCL module: its kernels get the
+      # SubgroupSize execution mode (see emit_module)
+      raise Refused, "#{name}: sub-group shuffles need the OpenCL module (--kernel-cl)" unless @mod.kernel_cl
+      @mod.subgroup_used = true
+      @spv.cap(5568)   # SubgroupShuffleINTEL
+      @spv.ext("SPV_INTEL_subgroups")
+      v = u32_of(operand(args[0])[0], ["int", 4, false, false])
+      m = u32_of(operand(args[1])[0], ["int", 4, false, false])
+      op = name.end_with?("_xor_u32") ? 5574 : 5571   # OpSubgroupShuffleXorINTEL, OpSubgroupShuffleINTEL
+      return [res(op, @spv.t_int(32), v, m), ["int", 4, false, false]]
     when "__nfcxx_sycl_barrier"
       ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(@mod.kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)])
       return nil
@@ -2105,6 +2134,7 @@ def emit_module(src, kernel_cl = false)
       mod.defs[f[1].to_s] = f
     elsif h == "abi-type"
       sizes[f[1].to_s] = as_int(f[2])
+      mod.empty_types[f[1].to_s] = true if head_of(f[4]) == "empty"
     elsif h == "global"
       mod.globals[f[1].to_s] = f
     elsif h == "data"
@@ -2182,8 +2212,14 @@ def emit_module(src, kernel_cl = false)
     wr.code.each { |inst| spv.func(inst) }
     spv.func([56])
     spv.add_entry(kernel_cl ? 6 : 5, wr.fid, "k#{k}", iface, smod.spec_ids)
+    if smod.subgroup_used
+      # the sub-group size is fixed at 16 (the Intel default that ggml uses); the host picks work-group sizes that are multiples of it
+      spv.cap(58)                        # SubgroupDispatch: the SubgroupSize execution mode needs it
+      spv.entry_mode(wr.fid, 35, SUBGROUP_SIZE)
+    end
     manifest << "k#{k}\t#{key}\t#{sizes[struct] || 0}"
   end
+  manifest << "G\t#{SUBGROUP_SIZE}" if smod.subgroup_used   # the sub-group size the runtimes check (rt_opencl.hpp, rt_level_zero.hpp)
   static_bytes = 0
   if mod.statics.size > 0 || !mod.static_order.empty?
     bytes, relocs = mod.static_image
