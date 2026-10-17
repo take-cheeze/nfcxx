@@ -15,7 +15,7 @@ extern "C" {
 
 typedef struct __sFILE FILE;
 typedef long fpos_t;
-typedef long off_t;
+typedef long long off_t;
 
 #define BUFSIZ 1024
 #define EOF (-1)
