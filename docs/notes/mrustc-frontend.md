@@ -103,6 +103,10 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
   mrustc builds here reaches them.
 - The program runs from another directory with relative paths (the driver resolves them before it changes directory).
 - `MRUSTC_NFCC_KEEP=1` keeps the intermediate files of a run, for debugging.
+- A real crate with dependencies: `tests/realworld/run_mrustc_serde_json.sh` builds serde_json 1.0.133 (with serde,
+  serde_core, ryu, itoa and memchr, and their build scripts) with mrustc's `minicargo`, then compiles the program and
+  every crate of its link through the pipeline (`MRUSTC_NFCC_CRATES=all`). Its output matches rustc's. It takes about
+  two minutes once the dependency tree is built, and needs `cargo vendor` (network).
 - libcore's object, built through nfcxx, has 19,796 defined symbols; mrustc's gcc-built `libcore.rlib.o` has 19,476.
   The counts are not expected to match exactly; they are a sanity check, not a proof.
 
@@ -131,6 +135,9 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 - **Port check:** `tests/mruby/qbe-prep.sh` needs EDG for its corpus part, which was skipped here. Its edge-case part
   passed (92 of 92 identical). Its vacuity check then fails, because the corpus that produces the atomic rewrites is
   missing. That failure is not caused by the `$` change.
+- **mrustc cannot compile `zmij` 1.0.23** (the float formatter of serde_json 1.0.154): it aborts with `Mismatched types -
+  f64 and f32` (`src/hir/hir_ops.cpp:133`). The serde test pins serde_json 1.0.133, which uses `ryu`. This is a
+  frontend bug to report upstream or fix in a fork, not a pipeline problem.
 - **Only the crates the program links are built.** `libtest`, `proc_macro` and the other crates of the 1.90 build were
   surveyed through the rewrite and cproc and accepted, but not compiled and linked.
 - mrustc also links its own gcc binary of each program during the run, and the driver discards it.
