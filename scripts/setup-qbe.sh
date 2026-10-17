@@ -27,7 +27,7 @@ done
 # rega.c holds at most NPm (64) copies in one parallel move, the copies a block edge needs (phi operands, call
 # arguments). A join with more (regex_automata 0.4.18, built by mrustc from the 1.13 regex crate) stops QBE with
 # "no more pm slots". The array is static, so 1024 costs nothing. A fork commit would be the proper home for this.
-sed -i 's/NPm = 64,/NPm = 1024,/' "$root/build/qbe/rega.c"
+sed -i.bak 's/NPm = 64,/NPm = 1024,/' "$root/build/qbe/rega.c" && rm -f "$root/build/qbe/rega.c.bak"
 grep -q 'NPm = 1024,' "$root/build/qbe/rega.c" || { echo "setup-qbe: NPm not found in rega.c" >&2; exit 1; }
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
