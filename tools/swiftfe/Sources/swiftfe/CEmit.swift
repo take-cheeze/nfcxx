@@ -214,6 +214,21 @@ enum CEmit {
     for e in program.enums { defineValue(.enumeration(e)) }
     for o in program.optionals { defineValue(o) }
     for a in program.arrays { defineValue(a) }
+    // A box holds its value by value, so the value's type is defined first.
+    for b in program.boxes {
+      guard case .box(let inner) = b else { continue }
+      if needsDefinition(inner) { defineValue(inner) }
+      let tag = "bx_" + inner.mangled
+      bodies += "struct \(tag) {\n  sw_obj hdr;\n  \(inner.cName) v;\n};\n"
+      helpers += "static void d_\(tag)(void *p) {\n  struct \(tag) *b = p;\n"
+      if inner.isClassLike {
+        helpers += "  " + releaseCode("b->v", inner) + "\n"
+      }
+      helpers += "  free(p);\n}\n"
+      helpers += "static struct \(tag) * bxn_\(inner.mangled)(\(inner.cName) v) {\n"
+      helpers += "  struct \(tag) *b = calloc(1, sizeof *b);\n  if (!b) sw_trap(\"out of memory\");\n"
+      helpers += "  b->hdr.rc = 1;\n  b->hdr.destroy = d_\(tag);\n  b->v = v;\n  return b;\n}\n\n"
+    }
     out += bodies + protos + helpers
 
     // Call helpers for each function type. They need the complete parameter types,
