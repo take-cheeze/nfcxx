@@ -1472,6 +1472,8 @@ final class Lowerer {
         return Expr(kind: .prefix("-", v), ty: .int)
       case ("-", .double):
         return Expr(kind: .prefix("-", v), ty: .double)
+      case ("~", .int):
+        return Expr(kind: .prefix("~", v), ty: .int)
       case ("!", .bool):
         return Expr(kind: .prefix("!", v), ty: .bool)
       default:
@@ -1515,13 +1517,25 @@ final class Lowerer {
     }
 
     func badOperands() -> CompileError {
-      error("binary operator '\(op)' cannot be applied to operands of type '\(l.ty.swiftName)' and '\(r.ty.swiftName)'", node)
+      // Swift words two operands of the same type this way; the mixed form is kept for the rest.
+      if l.ty == .double && r.ty == .double {
+        return error("binary operator '\(op)' cannot be applied to two 'Double' operands", node)
+      }
+      return error("binary operator '\(op)' cannot be applied to operands of type '\(l.ty.swiftName)' and '\(r.ty.swiftName)'", node)
     }
     switch op {
-    case "+", "-", "*", "/", "%":
-      if l.ty == .double && r.ty == .double && op != "%" {
+    case "+", "-", "*", "/":
+      if l.ty == .double && r.ty == .double {
         return Expr(kind: .binary(op, l, r), ty: .double)
       }
+      guard l.ty == .int && r.ty == .int else { throw badOperands() }
+      return Expr(kind: .binary(op, l, r), ty: .int)
+    case "%":
+      // Swift has no `%` for Double (use truncatingRemainder), so only Int is accepted.
+      guard l.ty == .int && r.ty == .int else { throw badOperands() }
+      return Expr(kind: .binary(op, l, r), ty: .int)
+    case "&+", "&-", "&*", "&", "|", "^", "<<", ">>":
+      // Wrapping arithmetic, bitwise operators and shifts exist only for Int.
       guard l.ty == .int && r.ty == .int else { throw badOperands() }
       return Expr(kind: .binary(op, l, r), ty: .int)
     case "<", "<=", ">", ">=":

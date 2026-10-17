@@ -1,0 +1,6 @@
+print(12 & 10)
+print(12 | 10)
+print(12 ^ 10)
+print(~5)
+print(~0)
+print(1 | 2 & 3)

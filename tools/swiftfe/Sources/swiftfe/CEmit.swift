@@ -44,6 +44,25 @@ enum CEmit {
       if (a == INT64_MIN && b == -1) sw_trap("arithmetic overflow");
       return a % b;
     }
+    /// Shifts by a magnitude m. Counts of 64 or more shift every bit out, as Swift's
+    /// smart shifts do: `<<` gives 0, and `>>` gives 0 or -1 by the sign.
+    static int64_t sw_shift_left(int64_t a, uint64_t m) {
+      return m >= 64 ? 0 : (int64_t)((uint64_t)a << m);
+    }
+    static int64_t sw_shift_right(int64_t a, uint64_t m) {
+      if (m >= 64) return a < 0 ? -1 : 0;
+      if (a >= 0) return (int64_t)((uint64_t)a >> m);
+      return ~(int64_t)((uint64_t)~a >> m);
+    }
+    /// Swift's `a << n` and `a >> n` on Int: a negative count shifts the other way.
+    static int64_t sw_shl(int64_t a, int64_t n) {
+      uint64_t m = n < 0 ? (uint64_t)0 - (uint64_t)n : (uint64_t)n;
+      return n < 0 ? sw_shift_right(a, m) : sw_shift_left(a, m);
+    }
+    static int64_t sw_shr(int64_t a, int64_t n) {
+      uint64_t m = n < 0 ? (uint64_t)0 - (uint64_t)n : (uint64_t)n;
+      return n < 0 ? sw_shift_left(a, m) : sw_shift_right(a, m);
+    }
     static void sw_print_int(int64_t v) {
       printf("%lld\\n", (long long)v);
     }
@@ -583,6 +602,8 @@ enum CEmit {
     case .prefix("-", let v):
       if v.ty == .double { return "(-\(expr(v)))" }
       return "sw_sub(INT64_C(0), \(expr(v)))"
+    case .prefix("~", let v):
+      return "(~(\(expr(v))))"
     case .prefix(_, let v):
       return "(!\(expr(v)))"
     case .binary(let op, let l, let r):
@@ -594,6 +615,12 @@ enum CEmit {
       case "*": return "sw_mul(\(a), \(b))"
       case "/": return "sw_div(\(a), \(b))"
       case "%": return "sw_rem(\(a), \(b))"
+      // Wrapping: unsigned arithmetic is modulo 2^64, and the cast back is modulo too.
+      case "&+": return "((int64_t)((uint64_t)(\(a)) + (uint64_t)(\(b))))"
+      case "&-": return "((int64_t)((uint64_t)(\(a)) - (uint64_t)(\(b))))"
+      case "&*": return "((int64_t)((uint64_t)(\(a)) * (uint64_t)(\(b))))"
+      case "<<": return "sw_shl(\(a), \(b))"
+      case ">>": return "sw_shr(\(a), \(b))"
       default: return "(\(a) \(op) \(b))"
       }
     case .logical(let op, let l, let r):
