@@ -1,8 +1,38 @@
 # Predicates (methods ending in ?) whose returns bool cannot prove (tools/bc2cpp/predicate_returns.rb).
 # Each line is "path Owner#name"; a program that makes one return bool can drop its line.
+3rd/mruby/lib/mruby/build.rb MRuby::Build#benchmark_enabled?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#bintest_enabled?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#build_mrbtest_lib_only?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#cxx_abi_enabled?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#cxx_exception_enabled?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#debug_enabled?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#internal?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#libmruby_enabled?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#lock_enabled?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#mrbcfile_external?
+3rd/mruby/lib/mruby/build.rb MRuby::Build#test_enabled?
+3rd/mruby/lib/mruby/build/load_gems.rb MRuby::LoadGems::GemCheckout#canonical?
+3rd/mruby/lib/mruby/build/load_gems.rb MRuby::LoadGems::GemLoader#skip_this?
+3rd/mruby/lib/mruby/gem.rb MRuby::Gem::Specification#cdump?
+3rd/mruby/lib/mruby/gem.rb MRuby::Gem::Specification#skip_test?
+3rd/mruby/lib/mruby/gem.rb MRuby::Gem::Version#twiddle_wakka_ok?
+3rd/mruby/lib/mruby/lockfile.rb MRuby::Lockfile#enabled?
+3rd/mruby/mrbgems/mruby-errno/mrblib/errno.rb Errno#const_defined?
+3rd/mruby/mrbgems/mruby-numeric-ext/mrblib/numeric_ext.rb Numeric#nonzero?
+3rd/mruby/mrbgems/mruby-proc-ext/test/proc.rb Object#enable_debug_info?
+3rd/mruby/mrbgems/mruby-socket/mrblib/socket.rb Addrinfo#ip?
+3rd/mruby/mrbgems/mruby-symbol-ext/mrblib/symbol.rb Symbol#casecmp?
+3rd/mruby/test/assert.rb Object#_str_match?
+3rd/mruby/test/t/exception.rb Object#backtrace_available?
+3rd/mruby/test/t/hash.rb HashKey#eql?
+3rd/mruby/tools/lrama/lib/lrama/grammar/symbol.rb Lrama::Grammar::Symbol#term?
+3rd/mruby/tools/lrama/lib/lrama/grammar_validator.rb Lrama::GrammarValidator#valid?
+3rd/mruby/tools/lrama/lib/lrama/states/item.rb Lrama::States::Item#empty_rule?
+3rd/mruby/tools/lrama/lib/lrama/states/item.rb Lrama::States::Item#start_item?
 mruby-lcf/mrblib/lcf.rb LCF#field?
 mruby-lcf/mrblib/lcf_file.rb LCF::File#field?
 mruby-lcf/mrblib/save_typed_put.rb LCF::SaveTyped#save_writable?
+mruby-lcf/test/lcf_test.rb Object#eof?
 mruby-mvjs/mrblib/mv.rb MV#runtime_available?
 mruby-mvjs/mrblib/mz.rb MZ#animation_shot_ready?
 mruby-mvjs/mrblib/mz.rb MZ#equip_shot_ready?
@@ -146,3 +176,5 @@ mruby-wolf/mrblib/data.rb Wolf::Project#project?
 mruby-wolf/mrblib/interpreter.rb Wolf::Interpreter#condition_met?
 mruby-wolf/mrblib/runtime.rb WolfRPG::MapScene#input_key_pressed?
 mruby-wolf/mrblib/vars.rb Wolf::VarStore#string_ref?
+mruby-wolf/test/wolf_test.rb WolfTestFakeCommonEvent#auto?
+mruby-wolf/test/wolf_test.rb WolfTestFakeDBField#string?
