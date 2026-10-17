@@ -1,1 +1,1 @@
-closure_capture.swift:2:30: error: cannot find 'k' in scope
+closure_capture.swift:3:17: error: cannot find 'k' in scope

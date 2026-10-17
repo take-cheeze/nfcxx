@@ -1,2 +1,4 @@
-let k = 2
-let f: (Int) -> Int = { $0 * k }
+func make() -> (Int) -> Int {
+  let k = 2
+  return { $0 * k }
+}
