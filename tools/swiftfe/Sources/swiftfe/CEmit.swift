@@ -7,10 +7,12 @@
 
 enum CEmit {
   static let prelude = """
+    #include <math.h>
     #include <stdbool.h>
     #include <stdint.h>
     #include <stdio.h>
     #include <stdlib.h>
+    #include <string.h>
 
     static void sw_trap(const char *msg) {
       fflush(stdout);
@@ -44,6 +46,26 @@ enum CEmit {
     }
     static void sw_print_int(int64_t v) {
       printf("%lld\\n", (long long)v);
+    }
+    static void sw_print_double(double v) {
+      // Swift prints the shortest digits that read back to the same value.
+      if (isnan(v)) { printf("nan\\n"); return; }
+      if (isinf(v)) { printf(v < 0 ? "-inf\\n" : "inf\\n"); return; }
+      char buf[64];
+      int digits;
+      for (digits = 1; digits <= 17; digits++) {
+        snprintf(buf, sizeof buf, "%.*e", digits - 1, v);
+        if (strtod(buf, NULL) == v) break;
+      }
+      int exp10 = atoi(strchr(buf, 'e') + 1);
+      if (exp10 < -4 || exp10 >= 16) {
+        printf("%s\\n", buf);
+        return;
+      }
+      int frac = digits - 1 - exp10;
+      if (frac < 1) frac = 1;
+      snprintf(buf, sizeof buf, "%.*f", frac, v);
+      printf("%s\\n", buf);
     }
     static void sw_print_bool(bool v) {
       printf("%s\\n", v ? "true" : "false");
@@ -290,6 +312,10 @@ enum CEmit {
     switch e.kind {
     case .int(let v):
       return "INT64_C(\(v))"
+    case .double(let v):
+      return "(\(v))"
+    case .convert(let inner):
+      return "((double)\(expr(inner)))"
     case .bool(let v):
       return v ? "true" : "false"
     case .local(let name):
@@ -300,7 +326,8 @@ enum CEmit {
     case .call(let f, let args):
       return "\(f.cName)(\(args.map(expr).joined(separator: ", ")))"
     case .print(let v):
-      return (v.ty == .bool ? "sw_print_bool(" : "sw_print_int(") + expr(v) + ")"
+      let printer = v.ty == .bool ? "sw_print_bool(" : (v.ty == .double ? "sw_print_double(" : "sw_print_int(")
+      return printer + expr(v) + ")"
     case .structLit(let s, let args):
       let inits = zip(s.fields, args).map { ".\($0.0.cName) = \(expr($0.1))" }
       return "((s_\(cIdent(s.name))){ " + inits.joined(separator: ", ") + " })"
@@ -311,11 +338,13 @@ enum CEmit {
     case .construct(let c, let args):
       return "n_\(cIdent(c.name))(\(args.map(expr).joined(separator: ", ")))"
     case .prefix("-", let v):
+      if v.ty == .double { return "(-\(expr(v)))" }
       return "sw_sub(INT64_C(0), \(expr(v)))"
     case .prefix(_, let v):
       return "(!\(expr(v)))"
     case .binary(let op, let l, let r):
       let a = expr(l), b = expr(r)
+      if l.ty == .double { return "(\(a) \(op) \(b))" }
       switch op {
       case "+": return "sw_add(\(a), \(b))"
       case "-": return "sw_sub(\(a), \(b))"

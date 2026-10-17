@@ -1082,6 +1082,13 @@ final class Lowerer {
       }
       return Expr(kind: .int(value), ty: .int)
     }
+    if let lit = expr.as(FloatLiteralExprSyntax.self) {
+      let digits = lit.literal.text.filter { $0 != "_" }
+      guard let value = Double(digits) else {
+        throw error("floating-point literal is not supported", lit)
+      }
+      return Expr(kind: .double(value), ty: .double)
+    }
     if let lit = expr.as(BooleanLiteralExprSyntax.self) {
       return Expr(kind: .bool(lit.literal.tokenKind == .keyword(.true)), ty: .bool)
     }
@@ -1145,6 +1152,8 @@ final class Lowerer {
       switch (op, v.ty) {
       case ("-", .int):
         return Expr(kind: .prefix("-", v), ty: .int)
+      case ("-", .double):
+        return Expr(kind: .prefix("-", v), ty: .double)
       case ("!", .bool):
         return Expr(kind: .prefix("!", v), ty: .bool)
       default:
@@ -1192,13 +1201,16 @@ final class Lowerer {
     }
     switch op {
     case "+", "-", "*", "/", "%":
+      if l.ty == .double && r.ty == .double && op != "%" {
+        return Expr(kind: .binary(op, l, r), ty: .double)
+      }
       guard l.ty == .int && r.ty == .int else { throw badOperands() }
       return Expr(kind: .binary(op, l, r), ty: .int)
     case "<", "<=", ">", ">=":
-      guard l.ty == .int && r.ty == .int else { throw badOperands() }
+      guard (l.ty == .int && r.ty == .int) || (l.ty == .double && r.ty == .double) else { throw badOperands() }
       return Expr(kind: .binary(op, l, r), ty: .bool)
     case "==", "!=":
-      guard l.ty == r.ty && (l.ty == .int || l.ty == .bool) else { throw badOperands() }
+      guard l.ty == r.ty && (l.ty == .int || l.ty == .bool || l.ty == .double) else { throw badOperands() }
       return Expr(kind: .binary(op, l, r), ty: .bool)
     case "&&", "||":
       guard l.ty == .bool && r.ty == .bool else { throw badOperands() }
@@ -1241,14 +1253,21 @@ final class Lowerer {
         let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
         return Expr(kind: .call(f, values), ty: f.ret, owned: true)
       }
+      if name == "Double" && lookup(name) == nil && structs[name] == nil && classes[name] == nil {
+        let args = try lowerArgs(call, [.int])
+        guard args.count == 1, args[0].label == nil, args[0].value.ty == .int else {
+          throw error("Double(...) converts one Int in M2", call)
+        }
+        return Expr(kind: .convert(args[0].value), ty: .double)
+      }
       if name == "print" {
         let args = try lowerArgs(call, nil)
         guard args.count == 1, args[0].label == nil else {
           throw error("print takes exactly one unlabeled argument in M2", call)
         }
         let v = args[0].value
-        guard v.ty == .int || v.ty == .bool else {
-          throw error("print is supported for Int and Bool only in M2", args[0].node.expression)
+        guard v.ty == .int || v.ty == .bool || v.ty == .double else {
+          throw error("print is supported for Int, Double and Bool only in M2", args[0].node.expression)
         }
         return Expr(kind: .print(v), ty: .void)
       }
@@ -1506,6 +1525,7 @@ final class Lowerer {
     }
     switch name {
     case "Int": return .int
+    case "Double": return .double
     case "Bool": return .bool
     case "Void": return .void
     default:

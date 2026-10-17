@@ -11,6 +11,7 @@
 
 indirect enum Ty: Equatable {
   case int
+  case double
   case bool
   case void
   /// The type of the `nil` literal before a context gives it an Optional type.
@@ -25,6 +26,7 @@ indirect enum Ty: Equatable {
   var swiftName: String {
     switch self {
     case .int: return "Int"
+    case .double: return "Double"
     case .bool: return "Bool"
     case .void: return "Void"
     case .nilLiteral: return "nil"
@@ -40,6 +42,7 @@ indirect enum Ty: Equatable {
   var mangled: String {
     switch self {
     case .int: return "Int"
+    case .double: return "Double"
     case .bool: return "Bool"
     case .void: return "Void"
     case .nilLiteral: return "Nil"
@@ -57,6 +60,7 @@ indirect enum Ty: Equatable {
   var cName: String {
     switch self {
     case .int: return "int64_t"
+    case .double: return "double"
     case .bool: return "bool"
     case .void, .nilLiteral: return "void"
     case .structure(let name): return "s_" + cIdent(name)
@@ -159,6 +163,9 @@ final class FuncInfo {
 
 indirect enum ExprKind {
   case int(Int64)
+  case double(Double)
+  /// Int to Double, as `Double(n)`.
+  case convert(Expr)
   case bool(Bool)
   case local(String)
   case field(Expr, String)
