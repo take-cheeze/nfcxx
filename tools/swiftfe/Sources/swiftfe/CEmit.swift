@@ -258,15 +258,26 @@ enum CEmit {
     let arr = ty.cName
     var text = ""
     text += "struct \(arr) {\n  \(e) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
-    text += "static \(arr) arr_lit_\(m)(int64_t n, const \(e) *vals) {\n"
+    text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals) {\n"
     text += "  \(arr) a = { NULL, 0, 0 };\n"
     text += "  if (n > 0) {\n"
     text += "    a.data = malloc(sizeof(\(e)) * (size_t)n);\n"
     text += "    if (!a.data) sw_trap(\"out of memory\");\n"
     text += "    memcpy(a.data, vals, sizeof(\(e)) * (size_t)n);\n"
     text += "    a.count = n;\n    a.cap = n;\n  }\n  return a;\n}\n"
-    text += "static \(arr) arr_copy_\(m)(\(arr) a) { return arr_lit_\(m)(a.count, a.data); }\n"
-    text += "static void arr_free_\(m)(\(arr) a) { free(a.data); }\n"
+    // A copy is a new buffer; for class-like elements each element gets its own reference.
+    text += "static \(arr) arr_copy_\(m)(\(arr) a) {\n"
+    text += "  \(arr) r = arr_lit_\(m)(a.count, a.data);\n"
+    if elem.isClassLike {
+      text += "  for (int64_t i = 0; i < r.count; i++) { \(retainCode("r.data[i]", elem)) }\n"
+    }
+    text += "  return r;\n}\n"
+    // Freeing the buffer releases each element first (in order, as Swift does).
+    text += "static void arr_free_\(m)(\(arr) a) {\n"
+    if elem.isClassLike {
+      text += "  for (int64_t i = 0; i < a.count; i++) { \(releaseCode("a.data[i]", elem)) }\n"
+    }
+    text += "  free(a.data);\n}\n"
     text += "static void arr_check_\(m)(\(arr) a, int64_t i) {\n"
     text += "  if (i < 0 || i >= a.count) sw_trap(\"Index out of range\");\n}\n"
     text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i) { arr_check_\(m)(a, i); return a.data[i]; }\n"
@@ -315,11 +326,13 @@ enum CEmit {
       return "\(indent)\(ty.cName) \(name) = \(expr(value));\n"
     case .assign(let target, let value, let ty):
       if ty.isClassLike {
-        // Retain-then-release order: the new value is stored before the old one is dropped.
-        let lhs = lvalue(target)
+        // The new value is stored before the old one is dropped. The place is
+        // evaluated once, through a pointer, so an index expression runs once.
         return "\(indent){\n\(indent)  \(ty.cName) assign_new = \(expr(value));\n"
-          + "\(indent)  \(releaseCode(lhs, ty))\n"
-          + "\(indent)  \(lhs) = assign_new;\n\(indent)}\n"
+          + "\(indent)  \(ty.cName) *assign_slot = &(\(lvalue(target)));\n"
+          + "\(indent)  \(ty.cName) assign_old = *assign_slot;\n"
+          + "\(indent)  *assign_slot = assign_new;\n"
+          + "\(indent)  \(releaseCode("assign_old", ty))\n\(indent)}\n"
       }
       return "\(indent)\(lvalue(target)) = \(expr(value));\n"
     case .expr(let value):
@@ -353,10 +366,13 @@ enum CEmit {
     return "rel_\(ty.cName)(\(expr));"
   }
 
-  /// Adds one reference to a class-like value held in `expr`.
+  /// Adds one reference to a class-like value held in `expr`. A value that holds
+  /// an array by value (an enum, an Optional or a struct) is copied, so the place is
+  /// assigned its copy; the copy is a new buffer, not a count.
   private static func retainCode(_ expr: String, _ ty: Ty) -> String {
     if ty.isClass { return "sw_retain(\(expr));" }
-    return "ret_\(ty.cName)(\(expr));"
+    if case .array(let elem) = ty { return "\(expr) = arr_copy_\(elem.mangled)(\(expr));" }
+    return "\(expr) = ret_\(ty.cName)(\(expr));"
   }
 
   private static func lvalue(_ target: LValue) -> String {

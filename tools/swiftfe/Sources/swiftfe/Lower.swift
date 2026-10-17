@@ -179,7 +179,6 @@ final class Lowerer {
     for (decl, info) in enumDecls {
       info.cases = try lowerEnumCases(decl)
     }
-    markReferenceEnums(enumDecls.map { $0.1 })
     var deinitDecls: [(DeinitializerDeclSyntax, ClassInfo)] = []
     for (decl, info) in structDecls {
       let members = try lowerMembers(decl.memberBlock, isClass: false)
@@ -378,21 +377,6 @@ final class Lowerer {
     return cases
   }
 
-  /// Marks each enum whose payloads hold a class reference. An enum can hold
-  /// another enum that holds a class, so this repeats until nothing changes.
-  private func markReferenceEnums(_ infos: [EnumInfo]) {
-    var changed = true
-    while changed {
-      changed = false
-      for info in infos where !info.holdsRef {
-        if info.cases.contains(where: { $0.payload.contains { $0.ty.isClassLike } }) {
-          info.holdsRef = true
-          changed = true
-        }
-      }
-    }
-  }
-
   /// Rejects a value type that contains itself by value, which Swift also rejects.
   /// Classes are references, so they may refer to themselves.
   private func checkRecursion(_ decls: [(name: String, node: Syntax, types: [Ty])]) throws {
@@ -419,17 +403,16 @@ final class Lowerer {
     }
   }
 
-  /// Array elements are plain values: Int, Bool, Double, structs and optionals of
-  /// those. Enums are not allowed, since whether an enum holds references is not known
-  /// until its payloads are lowered.
+  /// Array elements may be any value, class-like or not. Copying an array copies or
+  /// retains each element, and freeing it releases each one (see CEmit.arrayHelpers).
+  /// Whether an element is class-like is read when the C is emitted, so an enum
+  /// whose payloads are still being lowered is accepted here.
   private func checkArrayElement(_ ty: Ty, _ node: some SyntaxProtocol) throws {
     switch ty {
-    case .int, .double, .bool, .structure:
-      return
-    case .optional(let inner) where inner == .int || inner == .double || inner == .bool || inner.isStructure:
-      return
-    default:
+    case .void, .nilLiteral:
       throw error("arrays of \(ty.swiftName) are not supported yet", node)
+    default:
+      return
     }
   }
 
@@ -846,7 +829,8 @@ final class Lowerer {
     for item in lit.elements {
       let v = try lowerExpr(item.expression, expected: elemTy)
       if elemTy == nil { elemTy = v.ty }
-      values.append(try coerce(v, to: elemTy!, item.expression))
+      // The array owns each element, so a place element is retained.
+      values.append(own(try coerce(v, to: elemTy!, item.expression)))
     }
     guard let elem = elemTy else {
       throw error("an empty array literal needs a type, such as [Int]", lit)

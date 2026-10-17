@@ -156,14 +156,15 @@ Supported:
   Int needs a default; Bool must cover both values. Enum cases may list several
   patterns when they bind nothing.
 - `Double` with literals, `+ - * /`, comparisons, `Double(n)` and Swift's printing.
-- Arrays `[T]` of Int, Bool, Double, structs and optionals of those: literals, `a[i]`
-  (reads and writes, trapping out of range), `a.count`, `a.append(x)`, `for x in a`,
-  and `print` of arrays of Int, Bool or Double. Arrays are values: copying one copies
-  the buffer, and the buffer is freed when its owner ends.
+- Arrays `[T]` of any element type: Int, Bool, Double, structs, classes, enums that hold
+  classes, optionals and nested arrays. Literals, `a[i]` (reads and writes, trapping out of
+  range), `a.count`, `a.append(x)`, `for x in a`, and `print` of arrays of Int, Bool or
+  Double. Arrays are values: copying one copies the buffer, and each class element in it
+  gets its own reference (retained, then released when the buffer is freed, in order).
 
 Limits (each gives a diagnostic):
 - `break` inside a `switch`
-- arrays of classes or enums, arrays in struct properties, enum payloads or optionals
+- arrays in struct properties, enum payloads or optionals
 - subscripts and `count` of a temporary array; `for-in` with a `where` clause
 - `switch` over Double or String; `%` on Double
 

@@ -143,9 +143,11 @@ struct EnumCase {
 final class EnumInfo: Equatable {
   let name: String
   var cases: [EnumCase] = []
-  /// True when some payload holds a class reference. Set by Lowerer once every
-  /// enum's payloads are known, before any type is checked against it.
-  var holdsRef = false
+  /// True when some payload is class-like (a class, an array, or an Optional of one).
+  /// Computed from the payloads, so it is right for every instance, generic or not.
+  var holdsRef: Bool {
+    cases.contains { $0.payload.contains { $0.ty.isClassLike } }
+  }
 
   init(name: String) { self.name = name }
 
