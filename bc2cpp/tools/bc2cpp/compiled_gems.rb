@@ -525,6 +525,17 @@ def bc2cpp_hot_only_env(spec, env: ENV)
   bc2cpp_hot_only_build?(spec.build, env: env) ? { 'BC2CPP_HOT_METHODS' => BC2CPP_HOT_METHODS_PATH } : {}
 end
 
+# ENTRY_GUARDED_SPECIALIZATION (ADR 0380): the plan of hot methods whose parameters the headless runs saw as one class
+# (tools/bc2cpp/specialize_plan.txt). It is set for a hot-only build only, the build the plan was measured on.
+BC2CPP_SPECIALIZE_PLAN_PATH = File.expand_path('specialize_plan.txt', __dir__)
+
+# BC2CPP_SPECIALIZE=0 in the environment builds without the plan (a baseline to compare against).
+def bc2cpp_specialize_env(spec, env: ENV)
+  return {} if env['BC2CPP_SPECIALIZE'] == '0'
+
+  bc2cpp_hot_only_build?(spec.build, env: env) ? { 'BC2CPP_SPECIALIZE' => BC2CPP_SPECIALIZE_PLAN_PATH } : {}
+end
+
 # SHARED_GENERATION (ADR 0464): the bc2cpp.rb run of compiled gem `spec` -- [environment, sources, generated file],
 # exactly what each *-compiled/mrbgem.rake used to build inline. Called from a codegen task, once the gem list is
 # complete.
@@ -547,7 +558,7 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     # A `#error` the toolchain compiles halts the build: a method bc2cpp cannot compile is not emitted and keeps
     # running interpreted.
     'SKIP_UNSUPPORTED' => '1'
-  }.merge(bc2cpp_closed_world_env(spec, gems_root)).merge(bc2cpp_hot_only_env(spec))
+  }.merge(bc2cpp_closed_world_env(spec, gems_root)).merge(bc2cpp_hot_only_env(spec)).merge(bc2cpp_specialize_env(spec))
   [env, bc2cpp_closed_world_srcs(spec, gems_root), "#{spec.build_dir}/#{this_gem[:out_symbol]}_gen.cpp"]
 end
 
