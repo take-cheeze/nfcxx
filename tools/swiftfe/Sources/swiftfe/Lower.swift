@@ -39,6 +39,9 @@ struct CompileError: Error {
   let column: Int
 }
 
+/// The compound assignment operators. Each is its arithmetic operator followed by `=`.
+private let compoundAssignmentOperators: Set<String> = ["+=", "-=", "*=", "/="]
+
 private struct Local {
   /// C place of the value. For a box, this is the value inside the box.
   let cName: String
@@ -838,6 +841,10 @@ final class Lowerer {
       let value = try own(coerce(lowerExpr(infix.rightOperand, expected: ty), to: ty, infix.rightOperand))
       return [.assign(target, value, ty)]
     }
+    if let infix = expr.as(InfixOperatorExprSyntax.self), let op = infix.operator.as(BinaryOperatorExprSyntax.self),
+       compoundAssignmentOperators.contains(op.operator.text) {
+      return try lowerCompoundAssignment(op.operator.text, infix)
+    }
     let v = try lowerExpr(expr)
     if v.ty == .nilLiteral {
       throw error("'nil' requires a contextual type", expr)
@@ -1368,6 +1375,58 @@ final class Lowerer {
     throw error("expression is not assignable", expr)
   }
 
+  /// `place op= value` for Int and Double, as a statement. The place is read and written
+  /// in one assignment, so it is written as `place = place op value` with the arithmetic
+  /// lowered by `binary`: overflow and division by zero trap as they do for `+`, `-`, `*`
+  /// and `/`. Each index in the place and the right side are evaluated once, into
+  /// temporaries, in Swift's order (place, then value).
+  private func lowerCompoundAssignment(_ op: String, _ infix: InfixOperatorExprSyntax) throws -> [Stmt] {
+    let (target, ty, mutable) = try lowerTarget(infix.leftOperand)
+    if !mutable {
+      throw error("cannot assign to value: '\(infix.leftOperand.trimmedDescription)' is a 'let' constant", infix.leftOperand)
+    }
+    let value = try lowerExpr(infix.rightOperand, expected: ty)
+    guard ty == .int || ty == .double, value.ty == ty else {
+      throw error("binary operator '\(op)' cannot be applied to operands of type '\(ty.swiftName)' and '\(value.ty.swiftName)'", infix)
+    }
+
+    var stmts: [Stmt] = []
+    let place = hoistPlaceIndexes(target, into: &stmts)
+    var rhs = value
+    switch value.kind {
+    case .int, .double:
+      break
+    default:
+      let tmp = "t\(nextID())"
+      stmts.append(.decl(tmp, ty, value))
+      rhs = Expr(kind: .local(tmp), ty: ty)
+    }
+    let current = Expr(kind: .place(place), ty: ty)
+    let result = try binary(String(op.dropLast()), current, rhs, infix)
+    return stmts + [.assign(place, result, ty)]
+  }
+
+  /// Moves each non-literal index of a place into a temporary, base first, so the place
+  /// can be read and written without evaluating the index twice.
+  private func hoistPlaceIndexes(_ target: LValue, into stmts: inout [Stmt]) -> LValue {
+    switch target {
+    case .local:
+      return target
+    case .field(let base, let name, let arrow):
+      return .field(hoistPlaceIndexes(base, into: &stmts), name, arrow: arrow)
+    case .index(let base, let idx, let arrTy):
+      let place = hoistPlaceIndexes(base, into: &stmts)
+      switch idx.kind {
+      case .int:
+        return .index(place, idx, arrTy)
+      default:
+        let tmp = "t\(nextID())"
+        stmts.append(.decl(tmp, .int, idx))
+        return .index(place, Expr(kind: .local(tmp), ty: .int), arrTy)
+      }
+    }
+  }
+
   // MARK: - Expressions
 
   /// `expected` is the type the context wants, when it is known. It is used for
@@ -1479,7 +1538,8 @@ final class Lowerer {
       }
     }
     if let infix = expr.as(InfixOperatorExprSyntax.self) {
-      guard let op = infix.operator.as(BinaryOperatorExprSyntax.self) else {
+      guard let op = infix.operator.as(BinaryOperatorExprSyntax.self),
+            !compoundAssignmentOperators.contains(op.operator.text) else {
         throw error("assignment is not an expression in M2", infix)
       }
       let l = try lowerExpr(infix.leftOperand)

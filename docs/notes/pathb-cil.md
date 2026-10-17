@@ -54,6 +54,7 @@ longjmps in EDG's runtime.
 | `two_catches` | several catch clauses: refused, with a message | refused |
 | `rem_shift` | `crem` (with a negative dividend), `cshl` and `cshr` with variable counts | 5 |
 | `float_ptr` | `fneg`, a volatile load (`load.v`), `pdiff`, a compiler barrier | 12 |
+| `small_wrap` | `++` and `--` on `unsigned char`, `signed char` and `short` wrap to the type, in the value of the expression | 42 |
 | `shift_abort` | a checked shift with count 40 on an int: aborts | 134 (SIGABRT) |
 | `builtin_trap` | the `trap` statement (`__builtin_trap`): aborts | 134 (SIGABRT) |
 | `vararg_def` | a C-style variadic definition (va_start): refused, with a message | refused |
@@ -75,13 +76,26 @@ the index is not below the bound, as QBE's abort does. The abort is a call of `a
 (SIGABRT, status 134). `trap` takes the same path. `pdiff` is `(A - B) / SIZE`, `fneg` is `neg`, `load.v` is
 `volatile.`-prefixed `ldind`, and `barrier` emits nothing.
 
+A register `SIZE` of zero in `pdiff` (a zero-length VLA element) aborts, as the divisor check of `cdiv` does. QBE's
+`r_pdiff` has no such check: it emits a plain `div`, which traps (SIGFPE) on x86, so the two differ there. A literal
+zero `SIZE` is refused. The frontend does not produce a register `SIZE` for C++ source in this configuration (its VLA
+strides are literal sizes with a count), so the zero case is checked with a hand-written IR program, not a `tests/` case;
+`tests/pathb-cil/run.sh` checks exit status only, and a CLR unhandled exception also exits 134.
+
+Wrapping arithmetic on a 1- or 2-byte type narrows its result, as the QBE emitter's `narrow` does: `wadd`, `wsub`,
+`wmul`, `wneg`, `and`, `or`, `xor` and `cshl` convert the int32 result with `conv.i1`/`conv.u1`/`conv.i2`/`conv.u2`.
+`bool` is not narrowed, as in QBE.
+
 The `index` form is `BASE + ext(IDX) * SIZE`, with the extension following the IR type of the index (zero for an
 unsigned 32-bit index, sign otherwise). Untyped index operands default to sign extension, as `pathb-stage2.md`
 describes; QBE's behaviour for them is not verified.
 
 Two notes on the trap statement. `docs/notes/pathb-stage2.md` says `(trap)` is an illegal instruction (`ud2`, SIGILL),
-and the QBE emitter spells it `hlt`. This emitter follows the abort path instead (SIGABRT), so the exit status of a
-trap differs from QBE's: SIGILL there, SIGABRT here. Both end the process without returning.
+and the QBE emitter spells it `hlt`. The Path B QBE tests expect that: `tests/pathb-qbe/traps/builtin_trap.cpp` must die
+of SIGILL (exit 132), as `docs/notes/builtins.md` records. This emitter follows the abort path instead (SIGABRT, exit 134,
+`tests/pathb-cil/cases/builtin_trap.cpp`), so the exit status of a trap differs from QBE's: SIGILL there, SIGABRT here.
+Both end the process without returning. The CIL route keeps SIGABRT: it is the clearer exit, and it is what the
+libc `abort` path already gives every other checked failure here.
 
 Unknown statements, and any unknown form at the top of a function, are refused. The emitter used to keep only a fixed
 list of statement heads at the top of a function and silently drop the rest (`asm_refuse.ir` translated without its
@@ -104,10 +118,6 @@ list of statement heads at the top of a function and silently drop the rest (`as
   to a libc function is therefore a native address, and calling it through `calli` uses the managed convention, which
   is wrong for it. Calls through such a pointer are not supported; calls through pointers to the unit's own functions
   are.
-- **Small types.** Arithmetic on `char` and `short` is not narrowed to its type (the emitter's existing `wadd` and friends
-  do not narrow). `cshl` does narrow, as the QBE emitter does, but `wadd` results of a small type can be out of range.
-- **A zero `SIZE` in a register** (a VLA element) makes `pdiff` a CLR `DivideByZeroException`, not an abort. A literal
-  zero is refused.
 
 ## Next steps, in order
 
