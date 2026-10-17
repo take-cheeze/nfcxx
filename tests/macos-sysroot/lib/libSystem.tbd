@@ -12,7 +12,7 @@ current-version: 1
 compatibility-version: 1
 exports:
   - targets:         [ arm64-macos ]
-        symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
+    symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
                        ___divti3, dyld_stub_binder, ___error, _exit, _exp, _fabs, _fabsf, _fclose, _feof,
                        _ferror, _fflush, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti,
                        ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor, _fmod, _fopen,
