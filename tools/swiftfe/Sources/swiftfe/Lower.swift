@@ -109,6 +109,34 @@ private final class ClosureNameCollector: SyntaxVisitor {
   }
 }
 
+/// Collects every `where` clause in the file.
+private final class WhereClauseCollector: SyntaxVisitor {
+  var clauses: [GenericWhereClauseSyntax] = []
+
+  init() { super.init(viewMode: .sourceAccurate) }
+
+  override func visit(_ node: GenericWhereClauseSyntax) -> SyntaxVisitorContinueKind {
+    clauses.append(node)
+    return .visitChildren
+  }
+}
+
+/// Whether `type` is one of the type parameters `names`, written without arguments.
+private func isTypeParameter(_ type: TypeSyntax, _ names: [String]) -> Bool {
+  guard let id = type.as(IdentifierTypeSyntax.self), id.genericArgumentClause == nil else { return false }
+  return names.contains(id.name.text)
+}
+
+/// Whether `node` is a function or type declaration with type parameters.
+private func hasGenericParameters(_ node: Syntax?) -> Bool {
+  guard let node else { return false }
+  if let f = node.as(FunctionDeclSyntax.self) { return f.genericParameterClause != nil }
+  if let s = node.as(StructDeclSyntax.self) { return s.genericParameterClause != nil }
+  if let c = node.as(ClassDeclSyntax.self) { return c.genericParameterClause != nil }
+  if let e = node.as(EnumDeclSyntax.self) { return e.genericParameterClause != nil }
+  return false
+}
+
 /// An enclosing loop or switch that `break` and `continue` may target.
 private struct JumpTarget {
   /// The scope depth the target starts at. A jump releases the scopes from here on.
@@ -136,6 +164,15 @@ private struct ArgInput {
 private struct GenericDecl<Decl> {
   let decl: Decl
   let names: [String]
+  /// The same-type requirements of its `where` clause.
+  var requirements: [SameTypeRequirement] = []
+}
+
+/// A `left == right` requirement of a `where` clause, as written. Both sides are
+/// resolved when an instance is made, with the type parameters bound to its arguments.
+private struct SameTypeRequirement {
+  let left: TypeSyntax
+  let right: TypeSyntax
 }
 
 /// A parameter of a generic declaration as written: its label and its type syntax.
@@ -230,6 +267,12 @@ final class Lowerer {
     let collector = ClosureNameCollector()
     collector.walk(file)
     boxedNames = collector.names
+    // A where clause only constrains the type parameters of its own declaration.
+    let whereCollector = WhereClauseCollector()
+    whereCollector.walk(file)
+    for clause in whereCollector.clauses where !hasGenericParameters(Syntax(clause).parent) {
+      throw error("where clauses are only supported on generic functions and types", clause)
+    }
 
     // Pass 1: declare every type so fields and bodies can refer to them in any order.
     var structDecls: [(StructDeclSyntax, StructInfo)] = []
@@ -241,7 +284,7 @@ final class Lowerer {
         let name = s.name.text
         try checkNewType(name, s)
         if let clause = s.genericParameterClause {
-          genericStructs[name] = GenericDecl<StructDeclSyntax>(decl: s, names: try genericNames(clause, s.genericWhereClause))
+          genericStructs[name] = try genericDecl(s, clause, s.genericWhereClause)
           continue
         }
         let info = StructInfo(name: name)
@@ -254,7 +297,7 @@ final class Lowerer {
         }
         try checkNewType(name, c)
         if let clause = c.genericParameterClause {
-          genericClasses[name] = GenericDecl<ClassDeclSyntax>(decl: c, names: try genericNames(clause, c.genericWhereClause))
+          genericClasses[name] = try genericDecl(c, clause, c.genericWhereClause)
           continue
         }
         let info = ClassInfo(name: name)
@@ -267,7 +310,7 @@ final class Lowerer {
         }
         try checkNewType(name, e)
         if let clause = e.genericParameterClause {
-          genericEnums[name] = GenericDecl<EnumDeclSyntax>(decl: e, names: try genericNames(clause, e.genericWhereClause))
+          genericEnums[name] = try genericDecl(e, clause, e.genericWhereClause)
           continue
         }
         let info = EnumInfo(name: name)
@@ -321,7 +364,7 @@ final class Lowerer {
       let name = f.name.text
       if let clause = f.genericParameterClause {
         if genericFuncs[name] != nil || funcs[name] != nil { throw error("invalid redeclaration of '\(name)'", f) }
-        genericFuncs[name] = GenericDecl<FunctionDeclSyntax>(decl: f, names: try genericNames(clause, f.genericWhereClause))
+        genericFuncs[name] = try genericDecl(f, clause, f.genericWhereClause)
         continue
       }
       if genericFuncs[name] != nil { throw error("overloads of a generic function are not supported yet", f) }
@@ -2062,12 +2105,60 @@ final class Lowerer {
 
   // MARK: - Generics
 
-  /// Type parameter names of a generic declaration. Constraints and `where`
-  /// clauses are not supported in M3.
-  private func genericNames(_ clause: GenericParameterClauseSyntax, _ whereClause: GenericWhereClauseSyntax?) throws -> [String] {
-    if let whereClause {
-      throw error("where clauses on generic declarations are not supported yet", whereClause)
+  /// A generic declaration with its type parameters and the requirements of its `where` clause.
+  private func genericDecl<Decl>(
+    _ decl: Decl,
+    _ clause: GenericParameterClauseSyntax,
+    _ whereClause: GenericWhereClauseSyntax?
+  ) throws -> GenericDecl<Decl> {
+    let names = try genericNames(clause)
+    let requirements = try sameTypeRequirements(whereClause)
+    for r in requirements where !isTypeParameter(r.left, names) && !isTypeParameter(r.right, names) {
+      throw error("a same-type requirement must name a type parameter", r.left)
     }
+    return GenericDecl(decl: decl, names: names, requirements: requirements)
+  }
+
+  /// The same-type requirements of a `where` clause. A conformance or layout
+  /// requirement is refused, as `T: Equatable` is, because it needs protocols.
+  private func sameTypeRequirements(_ whereClause: GenericWhereClauseSyntax?) throws -> [SameTypeRequirement] {
+    guard let whereClause else { return [] }
+    var out: [SameTypeRequirement] = []
+    for requirement in whereClause.requirements {
+      switch requirement.requirement {
+      case .sameTypeRequirement(let same):
+        guard case .type(let left) = same.leftType, case .type(let right) = same.rightType else {
+          throw error("value generic requirements are not supported yet", same)
+        }
+        out.append(SameTypeRequirement(left: left, right: right))
+      case .conformanceRequirement, .layoutRequirement:
+        throw error("generic parameter constraints are not supported yet", requirement)
+      }
+    }
+    return out
+  }
+
+  /// Refuses an instance whose arguments do not satisfy the same-type requirements of its
+  /// declaration. Both sides are resolved with the arguments bound to the parameters, so
+  /// the check sees the types the body will be lowered with.
+  private func checkRequirements(
+    _ base: String,
+    _ names: [String],
+    _ requirements: [SameTypeRequirement],
+    _ args: [Ty],
+    _ node: some SyntaxProtocol
+  ) throws {
+    let env = envFor(names, args)
+    for r in requirements {
+      let (left, right) = try inEnv(env) { try (resolveType(r.left), resolveType(r.right)) }
+      if left != right {
+        throw error("generic '\(base)' requires the types '\(left.swiftName)' and '\(right.swiftName)' be equivalent", node)
+      }
+    }
+  }
+
+  /// Type parameter names of a generic declaration. Constraints are not supported in M3.
+  private func genericNames(_ clause: GenericParameterClauseSyntax) throws -> [String] {
     var names: [String] = []
     for p in clause.parameters {
       if p.inheritedType != nil {
@@ -2167,6 +2258,7 @@ final class Lowerer {
     if let existing = structs[name] { return existing }
     guard let g = genericStructs[base] else { throw error("cannot find type '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let info = StructInfo(name: name)
       structs[name] = info  // registered before the fields, so they can refer to it
@@ -2190,6 +2282,7 @@ final class Lowerer {
     if let existing = classes[name] { return existing }
     guard let g = genericClasses[base] else { throw error("cannot find type '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let info = ClassInfo(name: name)
       classes[name] = info
@@ -2221,6 +2314,7 @@ final class Lowerer {
     if let existing = enums[name] { return existing }
     guard let g = genericEnums[base] else { throw error("cannot find type '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let info = EnumInfo(name: name)
       enums[name] = info
@@ -2240,6 +2334,7 @@ final class Lowerer {
     if let existing = instanceFuncs[name] { return existing }
     guard let g = genericFuncs[base] else { throw error("cannot find '\(base)' in scope", node) }
     try checkArity(base, g.names, args, node)
+    try checkRequirements(base, g.names, g.requirements, args, node)
     return try nested(node) {
       let env = envFor(g.names, args)
       let info = try inEnv(env) { try declareFunction(g.decl, instanceName: name) }
