@@ -354,7 +354,7 @@ enum CEmit {
     let arr = ty.cName
     var text = ""
     text += "struct \(arr) {\n  \(e) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
-    text += "static \(arr) arr_lit_\(m)(int64_t n, const \(e) *vals) {\n"
+    text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals) {\n"
     text += "  \(arr) a = { NULL, 0, 0 };\n"
     text += "  if (n > 0) {\n"
     text += "    a.data = malloc(sizeof(\(e)) * (size_t)n);\n"
