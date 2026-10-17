@@ -2138,8 +2138,8 @@ class CodeGen
     # other receiver or override, which takes the generic send below. The closed world links mruby-stringio.
     if name == 'read' && argv.size == 1 && !@call_block_expr
       generic = dynamic_dispatch_line_generic(d, recv, name, argv)
-      return "{\n  extern \"C\" mrb_bool mrb_stringio_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n" \
-             "  mrb_value bc2cpp_rd;\n" \
+      @stringio_direct_read_used = true
+      return "{\n  mrb_value bc2cpp_rd;\n" \
              "  if (mrb_stringio_read_direct(M, #{recv}, #{argv[0]}, &bc2cpp_rd)) {\n    r#{d} = bc2cpp_rd;\n" \
              "  } else {\n    #{generic}  }\n}\n"
     end

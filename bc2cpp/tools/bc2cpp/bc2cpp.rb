@@ -1779,6 +1779,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
+  print gen.emit_stringio_read_decl
   print gen.emit_forward_decls(compiled)
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
