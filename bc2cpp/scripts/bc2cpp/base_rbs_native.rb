@@ -96,7 +96,7 @@ module BaseRbsNative
       full = [outer_name, name].compact.join('::')
       kinds[full] = kind == 'class' ? 'class' : 'module'
       super_index = under ? 3 : 2
-      supers[full] = args[super_index] if kind == 'class' && args.size > super_index
+      supers[full] = super_name(args[super_index]) if kind == 'class' && args.size > super_index
       next unless var
 
       set_owner(owners, var, full)
@@ -125,6 +125,15 @@ module BaseRbsNative
       methods << [owner, false, name] if kind == 'module_function'
     end
     [kinds, supers, methods.uniq, skipped]
+  end
+
+  # A superclass argument as a Ruby constant name: the core object class is `M->object_class` (or `mrb->...`);
+  # any other C expression is not a name, so the superclass is left out rather than written wrong.
+  def super_name(expr)
+    return 'Object' if expr.match?(/\A(?:M|mrb)->object_class\z/)
+    return expr if expr.match?(NAME_TOKEN)
+
+    nil
   end
 
   def owner_of(owners, var)
