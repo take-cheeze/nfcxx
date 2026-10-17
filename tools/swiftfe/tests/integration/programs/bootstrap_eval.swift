@@ -23,12 +23,12 @@ func lex(_ src: [Int]) -> [Tok] {
   while i < src.count {
     let c = src[i]
     if c == 32 {
-      i += 1
+      i = i + 1
     } else if isDigit(c) {
       var v = 0
       while i < src.count && isDigit(src[i]) {
         v = v * 10 + (src[i] - 48)
-        i += 1
+        i = i + 1
       }
       out.append(.num(v))
     } else {
@@ -45,7 +45,7 @@ func lex(_ src: [Int]) -> [Tok] {
       } else {
         out.append(.rparen)
       }
-      i += 1
+      i = i + 1
     }
   }
   out.append(.end)
@@ -66,7 +66,7 @@ class Parser {
   }
 
   func advance() {
-    pos += 1
+    pos = pos + 1
   }
 
   // expr := term (('+' | '-') term)*
