@@ -66,9 +66,9 @@ doctest)
   # DOCTEST_IS_DEBUGGER_ACTIVE() override replaces that whole check; it is defined here as "not under a debugger", for
   # the cross build only.
   # The prelinker step (scripts/macos-cxx-link.sh, as in #363): doctest's toString<float> and toString<long double> are
-  # template instances, which the prelinker compiles through the Darwin path. The include path and the override reach the
-  # compile and the prelinker's instance compiles through NFCXX_CXX_FLAGS.
-  NFCXX_CXX_FLAGS="-I$src -DDOCTEST_IS_DEBUGGER_ACTIVE()=false" scripts/macos-cxx-link.sh tests/realworld/doctest_main.cpp "$out"
+  # template instances, which the prelinker compiles through the Darwin path. The include path and the override are
+  # nfcxx options, passed to both steps.
+  scripts/macos-cxx-link.sh tests/realworld/doctest_main.cpp "$out" "-I$src" "-DDOCTEST_IS_DEBUGGER_ACTIVE()=false"
   echo "expected on the Mac: exit code 2 (two deliberate CHECK failures); doctest prints its summary"
   ;;
 *) echo "cross_macos: unknown NAME '$name' (lua|doctest)" >&2; exit 2 ;;
