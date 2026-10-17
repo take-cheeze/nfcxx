@@ -1,21 +1,30 @@
-# Rewrite the C that mrustc's C backend emits so cproc accepts it. Run on the output of `cc -E` (the system
-# headers it includes are expanded there), before scripts/qbe-cc, which then does the rest (qbe-prep.rb, cproc,
-# QBE, assembling). scripts/mrustc-nfcc.sh does all of it. The forms rewritten, the rest passes through unchanged:
+# Rewrite the C that mrustc's C backend emits so cproc accepts it, and keep what cproc would otherwise lose. Run on
+# the output of `cc -E -P -D__CPROC__` (not -undef: that makes glibc drop the GNU attributes). scripts/qbe-cc then
+# does the rest (qbe-prep.rb, cproc, QBE, assembling). scripts/mrustc-nfcc.sh does all of it. The forms rewritten,
+# the rest passes through unchanged:
 #
-#   * `_Atomic` type qualifier, from <stdatomic.h> (`typedef _Atomic char atomic_char`). cproc has no qualifier,
-#     so it is dropped, as scripts/strip-atomic.py drops it for libc++. The atomicity of Rust's atomics comes from
-#     the calls in the next form, not from the qualifier.
-#   * `__mrustc_atomicloop{8,16,32,64}`, mrustc's fetch-op loop (a compare-exchange retry loop, one line of the
-#     prelude). It uses GCC's generic `__atomic_load` and `__atomic_compare_exchange` in statement expressions,
-#     which cproc does not parse. Each line becomes the same loop over the sized `__atomic_load_N` and
-#     `__atomic_compare_exchange_N`, which qbe-prep.rb declares and the link takes from libatomic (as gcc does).
-#   * An extern function whose symbol is named by an asm label: `extern T ZRG...(...)` then `asm("__rust_alloc");`.
-#     cproc has no asm labels, so the label is dropped from the C, and the tail assembly (the third argument)
-#     defines the mangled name as a jump to the label: `ZRG...: jmp __rust_alloc@PLT`. Only functions are handled;
-#     a label on anything else stops the rewrite. ELF only: the tail assumes no leading underscore on symbols.
+#   * `_Atomic` qualifier (from <stdatomic.h>), `__extension__` and `__restrict` (the C99 spelling, which cproc reads).
+#   * Attributes: the trailing comma in `__attribute__((__aligned__(16),))` is dropped on attribute lines only (`,)`
+#     also occurs in string literals). A `#pragma pack(push, 1)` struct gets `packed` after its keyword (cproc ignores
+#     #pragma, and reads the attribute only there).
+#   * `__mrustc_atomicloop{8,16,32,64}`, mrustc's fetch-op loop (one prelude line each): the same loop over the sized
+#     `__atomic_load_N` and `__atomic_compare_exchange_N`, which qbe-prep.rb declares and libatomic provides.
+#   * Atomic loads, stores, exchanges and compare-exchanges in GNU statement expressions (`atomic_expr`): the same
+#     operation over the sized builtins, or over the generic libatomic calls for the 16-byte `uint128_t` (helpers
+#     after its typedef).
+#   * mrustc's placeholders for intrinsics it does not implement, `({ if (!"MSG") ; else __assert_fail (...); })`,
+#     as the conditional expression they are equivalent to. `__PRETTY_FUNCTION__` becomes `__func__`.
+#   * Inline asm libcore uses (`pause`, `xgetbv`, `cpuid`): `pause` is dropped, the other two call helpers of the tail.
+#     glibc's redirect of strerror_r is dropped (libcore only declares it).
+#   * An extern function whose symbol is named by an asm label, `extern T ZRG...(...)` then `asm("__rust_alloc");`:
+#     the label leaves the C, and the tail defines the mangled name as a jump to it (weak, so every object may carry
+#     it). Only functions; a label on anything else stops the rewrite. ELF only: no leading underscore on symbols.
+#   * Weak data (`__attribute__((weak))` on vtables and type ids, which cproc ignores): the names go to the weak file,
+#     and scripts/mrustc-nfcc.sh weakens them in the object (`objcopy --weaken-symbols`, which must be in the same
+#     object as the definition).
 #
 # The script uses no regular expressions, so it runs on the self-built mruby (scripts/mrb), as qbe-prep.rb does.
-# Usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s
+# Usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt
 
 IDENT_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
 
@@ -24,18 +33,182 @@ def fail_with(msg)
   exit 1
 end
 
-# Drop each `_Atomic ` that starts a token (not the tail of a longer identifier).
-def strip_atomic(line)
+# mrustc's placeholder for an intrinsic it does not implement is a GNU statement expression that aborts when it runs:
+#   ({ if (!"MSG") ; else __assert_fail ("MSG", "FILE", LINE, __PRETTY_FUNCTION__); })
+# It has no value, so the same test as a conditional expression is equivalent and cproc accepts it:
+#   (!"MSG" ? (void)0 : __assert_fail ("MSG", "FILE", LINE, __PRETTY_FUNCTION__))
+ASSERT_IF = '({ if ('
+ASSERT_ELSE = ') ; else __assert_fail ('
+ASSERT_END = '); })'
+
+def rewrite_assert_stmt_exprs(line)
   out = ''
   rest = line
-  while (i = rest.index('_Atomic ')) != nil
-    prev = i > 0 ? rest.byteslice(i - 1, 1) : ' '
-    if IDENT_CHARS.index(prev)
-      out << rest.byteslice(0, i + 8)
+  while (s = rest.index(ASSERT_IF)) != nil
+    cond_start = s + ASSERT_IF.bytesize
+    fail_with("statement expression that is not the assert form: #{line}") unless rest.byteslice(cond_start, 2) == '!"'
+    e = rest.index(ASSERT_ELSE, cond_start)
+    fail_with("assert form without its else branch: #{line}") if e.nil?
+    args_start = e + ASSERT_ELSE.bytesize
+    x = rest.index(ASSERT_END, args_start)
+    fail_with("assert form without its end: #{line}") if x.nil?
+    cond = rest.byteslice(cond_start, e - cond_start)
+    args = rest.byteslice(args_start, x - args_start)
+    out << rest.byteslice(0, s) << "(#{cond} ? (void)0 : __assert_fail (#{args}))"
+    rest = rest.byteslice(x + ASSERT_END.bytesize, rest.bytesize - x - ASSERT_END.bytesize)
+  end
+  out << rest
+end
+
+# mrustc's atomic loads, stores, exchanges and compare-exchanges on libcore's integer types are GNU statement
+# expressions over the generic __atomic builtins, with a temporary of the pointee type (see `atomic_expr`). Each
+# becomes an expression over the sized builtin of the same width, which cproc calls as a function (qbe-prep.rb
+# declares it), with a cast to the pointee type where a value comes back.
+ATOMIC_HEAD = '({ __auto_type __atomic_'
+ATOMIC_SIZE = {
+  'int8_t' => 1, 'uint8_t' => 1, 'int16_t' => 2, 'uint16_t' => 2, 'int32_t' => 4, 'uint32_t' => 4,
+  'int64_t' => 8, 'uint64_t' => 8, 'intptr_t' => 8, 'uintptr_t' => 8
+}
+
+# The 16-byte type (a struct in mrustc's prelude, not a builtin integer). Its atomics go through the generic libatomic
+# calls, which take the size, in the helpers below. They follow the prelude's typedef, which declares the type.
+WIDE_ATOMIC_TYPE = 'uint128_t'
+WIDE_ATOMIC_TYPEDEF = 'typedef struct { uint64_t lo, hi; } uint128_t;'
+WIDE_ATOMIC_HELPERS = <<'HELPERS'
+extern _Bool __atomic_compare_exchange (unsigned long, void *, void *, void *, int, int);
+extern void __atomic_load (unsigned long, void *, void *, int);
+extern void __atomic_store (unsigned long, void *, void *, int);
+extern void __atomic_exchange (unsigned long, void *, void *, void *, int);
+static inline uint128_t __nfcxx_atomic_load16 (volatile void *p, int o) { uint128_t r; __atomic_load (16, (void *)p, &r, o); return r; }
+static inline void __nfcxx_atomic_store16 (volatile void *p, uint128_t v, int o) { __atomic_store (16, (void *)p, &v, o); }
+static inline uint128_t __nfcxx_atomic_exchange16 (volatile void *p, uint128_t v, int o) { uint128_t r; __atomic_exchange (16, (void *)p, &v, &r, o); return r; }
+static inline _Bool __nfcxx_atomic_compare_exchange16 (volatile void *p, void *e, uint128_t d, int s, int f) { return __atomic_compare_exchange (16, (void *)p, e, &d, s, f); }
+HELPERS
+
+# The arguments of a call `name (a, b, c)` (the text of `stmt`), split at the commas outside parentheses.
+def call_args(stmt, name)
+  fail_with("expected a call of #{name}: #{stmt}") unless stmt.byteslice(0, name.bytesize + 2) == "#{name} ("
+  inside = stmt.byteslice(name.bytesize + 2, stmt.bytesize - name.bytesize - 3)
+  args = []
+  depth = 0
+  cur = ''
+  i = 0
+  while i < inside.bytesize
+    c = inside.byteslice(i, 1)
+    if c == ',' && depth == 0
+      args << cur.strip
+      cur = ''
     else
-      out << rest.byteslice(0, i)
+      depth += 1 if c == '('
+      depth -= 1 if c == ')'
+      cur << c
     end
-    rest = rest.byteslice(i + 8, rest.bytesize - i - 8)
+    i += 1
+  end
+  args << cur.strip
+  args
+end
+
+# The text after ` = ` of a declaration `__typeof__ ((void)0, *P) TMP = V`, and the name TMP.
+def tmp_decl(decl)
+  eq = decl.index(' = ')
+  fail_with("expected a temporary declaration: #{decl}") if eq.nil?
+  [decl.byteslice(0, eq).split(' ').last, decl.byteslice(eq + 3, decl.bytesize - eq - 3).strip]
+end
+
+# The C expression for one atomic statement expression, given its body (the statements between `({` and `})`).
+def atomic_expr(body)
+  stmts = body.split(';').map { |s| s.strip }.reject { |s| s.empty? }
+  head = stmts[0].to_s
+  prefix = '__auto_type __atomic_'
+  fail_with("atomic statement expression without its pointer: #{body}") unless head.byteslice(0, prefix.bytesize) == prefix
+  decl = head.byteslice(prefix.bytesize, head.bytesize - prefix.bytesize)
+  ptr_at = decl.index('_ptr = ((')
+  fail_with("atomic statement expression without its pointer: #{body}") if ptr_at.nil?
+  op = decl.byteslice(0, ptr_at)
+  typed = decl.byteslice(ptr_at + 9, decl.bytesize - ptr_at - 9)
+  star = typed.index('*)')
+  fail_with("atomic pointer of an unknown form: #{body}") if star.nil?
+  t = typed.byteslice(0, star).strip
+  a = typed.byteslice(star + 2, typed.bytesize - star - 2).strip
+  fail_with("atomic pointer of an unknown form: #{body}") unless a.byteslice(a.bytesize - 1, 1) == ')'
+  a = a.byteslice(0, a.bytesize - 1).strip
+  n = ATOMIC_SIZE[t]
+  wide = t == WIDE_ATOMIC_TYPE
+  fail_with("atomic on #{t}, which has no builtin here: #{body}") if n.nil? && !wide
+  vptr = "(volatile void *)(#{a})"
+  case op
+  when 'load'
+    fail_with("unexpected atomic load: #{body}") unless stmts.size == 4
+    fail_with("unexpected atomic load temporary: #{body}") unless stmts[1].byteslice(0, 12) == '__typeof__ ('
+    o = call_args(stmts[2], '__atomic_load')[2]
+    wide ? "__nfcxx_atomic_load16 (#{vptr}, #{o})" : "((#{t}) __atomic_load_#{n} (#{vptr}, #{o}))"
+  when 'store'
+    fail_with("unexpected atomic store: #{body}") unless stmts.size == 3
+    _, v = tmp_decl(stmts[1])
+    o = call_args(stmts[2], '__atomic_store')[2]
+    wide ? "__nfcxx_atomic_store16 (#{vptr}, (#{v}), #{o})" : "__atomic_store_#{n} (#{vptr}, (#{v}), #{o})"
+  when 'exchange'
+    fail_with("unexpected atomic exchange: #{body}") unless stmts.size == 5
+    _, v = tmp_decl(stmts[1])
+    o = call_args(stmts[3], '__atomic_exchange')[3]
+    wide ? "__nfcxx_atomic_exchange16 (#{vptr}, (#{v}), #{o})" : "((#{t}) __atomic_exchange_#{n} (#{vptr}, (#{v}), #{o}))"
+  when 'compare_exchange'
+    fail_with("unexpected atomic compare-exchange: #{body}") unless stmts.size == 3
+    _, v = tmp_decl(stmts[1])
+    args = call_args(stmts[2], '__atomic_compare_exchange')
+    fail_with("unexpected atomic compare-exchange arguments: #{body}") unless args.size == 6 && (args[3] == '0' || args[3] == '1')
+    e = "(void *)(#{args[1]})"
+    wide ? "__nfcxx_atomic_compare_exchange16 (#{vptr}, #{e}, (#{v}), #{args[4]}, #{args[5]})" :
+           "((_Bool) __atomic_compare_exchange_#{n} (#{vptr}, #{e}, (#{v}), #{args[3]}, #{args[4]}, #{args[5]}))"
+  else
+    fail_with("atomic #{op} is not one of load, store, exchange and compare_exchange: #{body}")
+  end
+end
+
+# Every atomic statement expression on the line replaced by its expression (see atomic_expr).
+def rewrite_atomic_stmt_exprs(line)
+  out = ''
+  rest = line
+  while (s = rest.index(ATOMIC_HEAD)) != nil
+    open = s + 1   # the `{` after the `(`
+    depth = 0
+    close = nil
+    i = open
+    while i < rest.bytesize
+      c = rest.byteslice(i, 1)
+      if c == '{'
+        depth += 1
+      elsif c == '}'
+        depth -= 1
+        if depth == 0
+          close = i
+          break
+        end
+      end
+      i += 1
+    end
+    fail_with("unterminated atomic statement expression: #{line}") if close.nil? || rest.byteslice(close + 1, 1) != ')'
+    out << rest.byteslice(0, s) << atomic_expr(rest.byteslice(open + 1, close - open - 1))
+    rest = rest.byteslice(close + 2, rest.bytesize - close - 2)
+  end
+  out << rest
+end
+
+# Every occurrence of the whole token `word` (not part of a longer identifier) replaced by `repl`.
+def replace_word(line, word, repl)
+  out = ''
+  rest = line
+  while (i = rest.index(word)) != nil
+    before = i > 0 ? rest.byteslice(i - 1, 1) : ' '
+    j = i + word.bytesize
+    after = j < rest.bytesize ? rest.byteslice(j, 1) : ' '
+    if IDENT_CHARS.index(before) || IDENT_CHARS.index(after)
+      out << rest.byteslice(0, j)
+    else
+      out << rest.byteslice(0, i) << repl
+    end
+    rest = rest.byteslice(j, rest.bytesize - j)
   end
   out << rest
 end
@@ -53,6 +226,32 @@ end
 ATOMICLOOP_HEAD = {}
 [8, 16, 32, 64].each do |bits|
   ATOMICLOOP_HEAD["static inline uint#{bits}_t __mrustc_atomicloop#{bits}("] = atomicloop(bits)
+end
+
+# mrustc marks monomorphised statics (vtables) and type ids weak: `__attribute__((weak)) union {...} NAME;`, or
+# `T NAME __attribute__((weak));`. cproc ignores the attribute on data, so the name is returned for the tail to mark
+# weak (the same objects are linked with other crates' copies). Functions are left to weak-symbols.rb (they have a
+# parenthesis in the line).
+WEAK_ATTR = '__attribute__((weak))'
+
+# The identifier at the end of `s`. `$` is part of mrustc's mangled names (a hash after it), as qbe-prep.rb's scanner has it.
+def trailing_ident(s)
+  i = s.bytesize
+  i -= 1 while i > 0 && (IDENT_CHARS.index(s.byteslice(i - 1, 1)) || s.byteslice(i - 1, 1) == '$')
+  name = s.byteslice(i, s.bytesize - i)
+  name.empty? ? nil : name
+end
+
+def weak_data_name(line)
+  code = line.lstrip
+  if code.byteslice(0, WEAK_ATTR.bytesize) == WEAK_ATTR
+    body = code.byteslice(WEAK_ATTR.bytesize, code.bytesize - WEAK_ATTR.bytesize).rstrip
+    return nil if body.index('(') || body.index(')') || body.byteslice(body.bytesize - 1, 1) != ';'
+    return trailing_ident(body.byteslice(0, body.bytesize - 1).rstrip)
+  end
+  at = code.index(' ' + WEAK_ATTR + ';')
+  return trailing_ident(code.byteslice(0, at)) unless at.nil?
+  nil
 end
 
 # The name an `extern` declaration line declares: the identifier before its first '(', or nil.
@@ -74,23 +273,100 @@ def asm_label(line)
   rest.byteslice(0, q)
 end
 
+# Every occurrence of `from` in `s` replaced by `to`.
+def replace_all(s, from, to)
+  out = ''
+  rest = s
+  while (i = rest.index(from)) != nil
+    out << rest.byteslice(0, i) << to
+    rest = rest.byteslice(i + from.bytesize, rest.bytesize - i - from.bytesize)
+  end
+  out << rest
+end
+
+# mrustc writes a trailing comma in an attribute list, `__attribute__((__aligned__(16),))`. GNU C allows it, but
+# qbe-prep.rb matches the aligned attribute only without the comma, and drops it otherwise, which changes the
+# layout (cproc then fails the alignment assertion next to the struct). The comma is removed on attribute lines
+# only: `,)` also occurs in string literals.
+def drop_attribute_trailing_comma(line)
+  return line unless line.index('__attribute__((')
+  replace_all(line, ',))', '))')
+end
+
 def rewrite_line(line)
   ATOMICLOOP_HEAD.each do |head, body|
     return body if line.byteslice(0, head.bytesize) == head
   end
-  strip_atomic(line)
+  # Keyword and attribute forms first, so the statement-expression rewrites below see plain C types.
+  line = replace_word(drop_attribute_trailing_comma(line), '_Atomic', '')
+  # `__extension__` only silences pedantic warnings. glibc's `__restrict` is the C99 `restrict`, which cproc
+  # reads (the `__` form is the GNU keyword, which it does not).
+  line = replace_word(line, '__extension__', '')
+  line = replace_word(line, '__restrict__', 'restrict')
+  line = replace_word(line, '__restrict', 'restrict')
+  # glibc's redirect of strerror_r to the XPG symbol. libcore only declares strerror_r, so the label is dropped.
+  line = replace_all(line, ' __asm__ ("" "__xpg_strerror_r")', '')
+  # GNU's name for the function in the message of an assert form; C99's `__func__` in cproc.
+  line = replace_word(line, '__PRETTY_FUNCTION__', '__func__')
+  line = rewrite_assert_stmt_exprs(line) if line.index(ASSERT_IF)
+  line = rewrite_atomic_stmt_exprs(line) if line.index(ATOMIC_HEAD)
+  line
 end
 
+# Inline asm in libcore, by its text (stripped of indentation), and the C that does the same. `pause` is a spin-loop
+# hint with no effect on data. xgetbv and cpuid read CPU state, so they call helpers of the tail assembly.
+ASM_REWRITES = {
+  '__asm__ __volatile__ ("pause");' => ';',
+  '__asm__ __volatile__ ("xgetbv" : "=a" (lo), "=d" (hi) : "c" (arg0) );' =>
+    '{ unsigned long __nfcxx_xgv = __nfcxx_xgetbv (arg0); lo = (unsigned int)__nfcxx_xgv; hi = (unsigned int)(__nfcxx_xgv >> 32); }',
+  '__asm__("cpuid" : "=a" (var0), "=b" (var1), "=c" (var2), "=d" (var3) : "a" (arg0), "c" (arg1) );' =>
+    '{ unsigned int __nfcxx_regs[4]; __nfcxx_cpuid (arg0, arg1, __nfcxx_regs); var0 = __nfcxx_regs[0]; var1 = __nfcxx_regs[1]; var2 = __nfcxx_regs[2]; var3 = __nfcxx_regs[3]; }'
+}
+# The helpers those rewrites call, declared at the top of the output (before the prelude's typedefs, so plain types).
+ASM_HELPER_DECLS = [
+  'extern unsigned long __nfcxx_xgetbv (unsigned int);',
+  'extern void __nfcxx_cpuid (unsigned int, unsigned int, unsigned int *);'
+]
+# Their definitions in the tail (x86-64, System V calling convention; weak, so each object may carry them).
+ASM_HELPER_TAIL = <<'TAIL'
+.weak __nfcxx_xgetbv
+.type __nfcxx_xgetbv,@function
+__nfcxx_xgetbv:
+	mov %edi, %ecx
+	xgetbv
+	shl $32, %rdx
+	or %rdx, %rax
+	ret
+.weak __nfcxx_cpuid
+.type __nfcxx_cpuid,@function
+__nfcxx_cpuid:
+	push %rbx
+	mov %rdx, %r8
+	mov %edi, %eax
+	mov %esi, %ecx
+	cpuid
+	mov %eax, (%r8)
+	mov %ebx, 4(%r8)
+	mov %ecx, 8(%r8)
+	mov %edx, 12(%r8)
+	pop %rbx
+	ret
+TAIL
+
 def main(argv)
-  if argv.size != 3
-    $stderr.puts "usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s"
+  if argv.size != 4
+    $stderr.puts "usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt"
     exit 2
   end
   src = File.open(argv[0], 'rb') { |f| f.read } || ''
-  out = []
+  out = ASM_HELPER_DECLS.dup
   labels = []   # [declared name, asm label] pairs, in order
+  weak = []     # data symbols mrustc marks weak (see weak_data_name)
   name = nil    # the extern function the last declaration line declared
+  packed = false  # inside a `#pragma pack(push, 1)` region
   src.split("\n", -1).each do |line|
+    wn = weak_data_name(line)
+    weak << wn unless wn.nil?
     name = declared_name(line) if line.byteslice(0, 7) == "extern "
     code = line.lstrip
     if code.byteslice(0, 5) == 'asm("'
@@ -99,15 +375,30 @@ def main(argv)
       out << ';'   # the declaration keeps its ';'
       next
     end
+    line = ASM_REWRITES[code] if ASM_REWRITES.key?(code)
+    line += "\n" + WIDE_ATOMIC_HELPERS if line == WIDE_ATOMIC_TYPEDEF
+    # cproc ignores #pragma, so the struct in a packed region gets the attribute after its keyword, where cproc
+    # reads it (`struct __attribute__((packed)) tag {`; after the closing brace it is refused).
+    if line == '#pragma pack(push, 1)'
+      packed = true
+    elsif line == '#pragma pack(pop)'
+      packed = false
+    elsif line.byteslice(0, 13) == '#pragma pack(' && line != '#pragma pack(push, 1)'
+      fail_with("unsupported pack pragma (only push, 1 and pop): #{line}")
+    elsif packed && line.byteslice(0, 7) == 'struct ' && line.byteslice(line.bytesize - 2, 2) == ' {'
+      line = 'struct __attribute__((packed)) ' + line.byteslice(7, line.bytesize - 7)
+    end
     out << rewrite_line(line)
   end
   tail = ''
   labels.each do |n, label|
-    tail << ".globl #{n}\n.type #{n},@function\n#{n}:\n\tjmp #{label}@PLT\n"
+    tail << ".weak #{n}\n.type #{n},@function\n#{n}:\n\tjmp #{label}@PLT\n"
   end
+  File.open(argv[3], "wb") { |f| f.write(weak.map { |n| n + "\n" }.join) }
+  tail << ASM_HELPER_TAIL
   File.open(argv[1], 'wb') { |f| f.write(out.join("\n")) }
   # A non-executable stack for the object (without the note, ld makes the program's stack executable).
-  tail << ".section .note.GNU-stack,\"\",@progbits\n" unless labels.empty?
+  tail << ".section .note.GNU-stack,\"\",@progbits\n"
   File.open(argv[2], 'wb') { |f| f.write(tail) }
 end
 

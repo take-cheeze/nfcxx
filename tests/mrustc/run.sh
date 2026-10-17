@@ -21,6 +21,8 @@ check() {
 
 check hello tests/mrustc/hello.rs "Hello, world!"
 check vec_sum tests/mrustc/vec_sum.rs "55 10"   # a Vec, an iterator sum and format!: heap allocation and monomorphised std code
+# The same program with libcore compiled through nfcxx too (cached in build/mrustc/nfcxx after the first run).
+MRUSTC_NFCC_CORE=1 check vec_sum_core tests/mrustc/vec_sum.rs "55 10"
 
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]
