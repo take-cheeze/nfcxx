@@ -10,7 +10,9 @@ extern "C" {
 
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
-typedef int wchar_t;
+#ifndef __cplusplus
+typedef int wchar_t; /* a keyword in C++ */
+#endif
 
 #ifndef NULL
 #ifdef __cplusplus
