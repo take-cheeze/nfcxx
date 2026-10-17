@@ -103,8 +103,8 @@ Limits:
   are not supported yet`.
 - A `where` clause is accepted only on a generic function, struct, class or enum. One on a
   method, an initializer or a declaration without type parameters is refused.
-- A same-type requirement is not used to infer a type parameter. `func zero<T>() -> T where
-  T == Int` needs `zero<Int>()`, or an expected type, or an argument that fixes `T`.
+- A same-type requirement binds a type parameter that no argument or expected type fixes:
+  `let z = zero()` with `func zero<T>() -> T where T == Int` gives `T` the type `Int`.
   Requirements with value generics (`where T == 3`) are refused, and so is a requirement
   with no bare type parameter on either side (`where Int == Bool`, `where [T] == [Int]`).
 - No extensions or value generics. Generic types may have initializers and methods. A generic struct or
