@@ -1,0 +1,6 @@
+"nfcxx"
+"rust"
+43
+{"n":42,"name":"nfcxx","ok":true,"pi":3.5,"tags":["c","rust"]}
+true
+error at line 1

@@ -405,6 +405,7 @@ template <int D = 1> class nd_item {
   }
   size_t get_group(int d) const { return grp_[d]; }
   range<D> get_group_range() const { range<D> n; for (int i = 0; i < D; i++) n[i] = gr_[i] / lr_[i]; return n; }
+  size_t get_group_range(int d) const { return get_group_range()[d]; }
   size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * (gr_[i] / lr_[i]) + grp_[i]; return l; }
   range<D> get_global_range() const { return gr_; }
   size_t get_global_range(int d) const { return gr_[d]; }
@@ -1066,6 +1067,7 @@ template <class T, int D = 1> class local_accessor {
   size_t get_count() const { return r_.size(); }
   range<D> get_range() const { return r_; }
   T *get_pointer() const { return base(); }
+  template <access::decorated Dec = access::decorated::legacy> local_ptr<T, Dec> get_multi_ptr() const { return local_ptr<T, Dec>(base()); }
 
  private:
 #ifdef __NFCXX_SYCL_DEVICE__
@@ -2292,9 +2294,19 @@ inline bfloat16 operator+(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<
 inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) - static_cast<float>(b)); }
 inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
 inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
-// the work-item accessor of the nd_range kernels (a helper of element_wise.cpp; the ops under test use the launch's nd_item)
+// the work-item of the caller (a helper of element_wise.cpp and softmax.cpp; the ops under test use the launch's nd_item).
+// On the device it is the item the entry builds for the kernel (__nfcxx_sycl_entry_nd); on the host it is an empty item,
+// since a host work-item is not reachable from its helpers.
 namespace this_work_item {
-template <int D> inline nd_item<D> get_nd_item() { return nd_item<D>(); }
+template <int D> inline nd_item<D> get_nd_item() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return nd_item<D>(detail::device_gid<D>(), detail::device_lid<D>(), detail::device_group<D>(),
+                    detail::device_global_range<D>(), detail::device_local_range<D>());
+#else
+  return nd_item<D>();
+#endif
+}
+template <int D = 3> inline sub_group get_sub_group() { return get_nd_item<D>().get_sub_group(); }
 }  // namespace this_work_item
 namespace experimental {
 // The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
