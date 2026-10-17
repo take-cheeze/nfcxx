@@ -71,6 +71,13 @@ if [ $macos = 1 ]; then
   # cproc can compare and compute with a long long where it cannot with a struct.
   # __int128_t and __uint128_t are clang builtins (no header typedef): name cproc's 128-bit integer types
   darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= '-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
+  # Native macOS only: the SDK's TargetConditionals.h stops with "unknown compiler" under -undef, because -undef removes the
+  # compiler and target macros it reads. Predefine its include guard so the header is skipped, as mruby's common.h expects
+  # on macOS. TARGET_OS_IPHONE is then undefined, which mruby-io reads as 0 (macOS), so its branches are unchanged.
+  # The cross path (NFCXX_MACOS_SYSROOT, clean-room headers, no TargetConditionals.h) is unchanged.
+  if [ "$(uname -s)" = Darwin ] && [ -z "${NFCXX_MACOS_SYSROOT:-}" ]; then
+    darwin+=(-D__TARGETCONDITIONALS__)
+  fi
 fi
 if [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
