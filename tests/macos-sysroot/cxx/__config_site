@@ -53,8 +53,3 @@
 #endif
 
 #endif // _LIBCPP___CONFIG_SITE
-
-/* The front end rejects the _Atomic qualifier in C++ (as in tests/cases/qbe_atomics). libc++ then has
- * _LIBCPP_HAS_C_ATOMIC_IMP as its first choice; this macro makes it use the __atomic_* builtins instead, which cproc
- * implements. Cross path only: the native builds read their own __config_site. */
-#define _LIBCPP_ATOMIC_ONLY_USE_BUILTINS
