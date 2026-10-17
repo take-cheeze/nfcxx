@@ -237,6 +237,8 @@ indirect enum ExprKind {
   case arrayAppend(LValue, Expr)
   case bool(Bool)
   case local(String)
+  /// The value of a place, read in place. A compound assignment reads its target this way.
+  case place(LValue)
   case field(Expr, String)
   case call(FuncInfo, [Expr])
   /// A method call whose receiver is a temporary class value. The receiver is passed

@@ -89,13 +89,24 @@ Supported:
   payload) and `.some(true)` where the type is declared.
 - an operation on a type parameter is checked after substitution, for the type it was
   instantiated with: `a + b` compiles for `Int` and is rejected for `Bool`.
+- same-type requirements in a `where` clause on a generic function, struct, class or enum:
+  `where T == Int`, `where T == Double`, `where T == Bool`. The requirement is checked for
+  each instance: `same(true, false)` is rejected for `where T == Int`, and the body is
+  lowered with `T` bound to the type the clause fixes.
 
 Limits:
 - Only instances are checked. A generic body is checked when it is instantiated, not
   when it is declared, so an unused generic is not checked at all. Swift would reject
   `a + b` for an unconstrained `T` in the declaration itself.
-- No constraints, protocols or `where` clauses. `T: Equatable` and `where T == Int` give
-  a diagnostic.
+- Constraints and protocols are not supported. `T: Equatable`, `where T: Equatable` and any
+  other conformance or layout requirement give the diagnostic `generic parameter constraints
+  are not supported yet`.
+- A `where` clause is accepted only on a generic function, struct, class or enum. One on a
+  method, an initializer or a declaration without type parameters is refused.
+- A same-type requirement is not used to infer a type parameter. `func zero<T>() -> T where
+  T == Int` needs `zero<Int>()`, or an expected type, or an argument that fixes `T`.
+  Requirements with value generics (`where T == 3`) are refused, and so is a requirement
+  with no bare type parameter on either side (`where Int == Bool`, `where [T] == [Int]`).
 - No extensions or value generics. Generic types may have initializers and methods. A generic struct or
   class has stored properties only, with a memberwise initializer.
 - A struct with a class-typed property is still rejected, so `Box<Obj>` (a struct) is
@@ -156,10 +167,15 @@ Supported:
   the enclosing loop. The switch is an if-chain, so the break jumps to a label after it
   (emitted only when a break uses it). The subject is still released once, after the label.
 - `for i in a..<b` and `for i in a...b` over Int; `for x in array`, which loops over a copy.
+- `for x in xs where cond` over Int ranges and arrays. The body runs only for the elements
+  where `cond` holds, in order; `continue` and `break` work as in a plain loop.
 - `guard let`, `guard cond`, with bindings that stay in scope after the guard.
 - `switch` over Int and Bool with literal, range (`4...9`) and several-value cases.
   Int needs a default; Bool must cover both values. Enum cases may list several
   patterns when they bind nothing.
+- `switch` over Double with literal, several-value and range (`0.0..<1.0`, `1.0...2.5`)
+  cases. Integer and negated literals are Doubles there (`case 1:`, `case -2.0:`). The
+  first matching case runs. A default is required.
 - `Double` with literals, `+ - * /`, comparisons, `Double(n)` and Swift's printing.
 - Arrays `[T]` of any element type: Int, Bool, Double, structs, classes, enums that hold
   classes, optionals and nested arrays. Literals, `a[i]` (reads and writes, trapping out of
@@ -177,8 +193,8 @@ Supported:
 
 Limits (each gives a diagnostic):
 - arrays of classes, enums or function values, arrays in struct properties, enum payloads or optionals
-- subscripts and `count` of a temporary array; `for-in` with a `where` clause
-- `switch` over Double or String; `%` on Double
+- subscripts and `count` of a temporary array
+- `switch` over String; `%` on Double
 
 ## Initializers, overloads and temporaries
 
