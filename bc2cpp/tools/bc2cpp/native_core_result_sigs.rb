@@ -2,14 +2,14 @@
 
 require 'set'
 
-# NativeCoreResultSigs: the result kind of built-in methods, read from RBS files under sig/native/. It replaces the
+# NativeCoreResultSigs: the result kind of built-in methods, read from RBS files under sig/bc2cpp/. It replaces the
 # hand-written NativeClassResults::EXACT_CORE_KINDS table with the same { class => { name => kind } } shape. A file
 # only names kinds; codegen_native_results.rb and the NATIVE_RESULT_FACTS audit still gate every answer on the
 # closed-world pins and the source checks, so a file edit can only widen what is considered, never skip those checks.
 module NativeCoreResultSigs
-  PATH = File.expand_path('../../sig/native/core_results.rbs', __dir__)
-  FRESH_ARRAY_PATH = File.expand_path('../../sig/native/core_fresh_arrays.rbs', __dir__)
-  RGSS_PATH = File.expand_path('../../sig/native/rgss_results.rbs', __dir__)
+  PATH = File.expand_path('../../sig/bc2cpp/core_results.rbs', __dir__)
+  FRESH_ARRAY_PATH = File.expand_path('../../sig/bc2cpp/core_fresh_arrays.rbs', __dir__)
+  RGSS_PATH = File.expand_path('../../sig/bc2cpp/rgss_results.rbs', __dir__)
   RESULT_CLASSES = %w[Array String].freeze
 
   module_function

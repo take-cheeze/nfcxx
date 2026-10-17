@@ -20,7 +20,7 @@ module ArgShapeCalls
   # `block_given?` and its alias `iterator?` (one cfunc in kernel.c) are modelled
   # (BLOCK_SEMANTICS, ADR 0266): they read the `bc2cpp_blk` parameter, see
   # compile_block_given.
-  # Kernel methods reading the caller's block or whole frame (sig/native/core_frame_readers.rbs).
+  # Kernel methods reading the caller's block or whole frame (sig/bc2cpp/core_frame_readers.rbs).
   BLOCK_GIVEN_NAMES = CoreFactSigs.block_given_names
   FRAME_READING_NAMES = CoreFactSigs.frame_reading_names
 

@@ -26,7 +26,7 @@ end
 #
 # A call site `recv.m(args) { ... }` (SENDB/SSENDB, plain fixed argc, the block a dominating literal BLOCK) gets the
 # declaration's result when every method the call can run is a checked declaration of the same shape:
-#   * a native singleton declaration (`def self.m` in sig/native) on a module or class constant C: the receiver is
+#   * a native singleton declaration (`def self.m` in sig/bc2cpp) on a module or class constant C: the receiver is
 #     the constant C (straight-line constant path, lexically resolved), C and its enclosing constants keep their
 #     identity, one native source spells the name and it is the scanned one, no Ruby definition sits on C or its
 #     singleton, no prepend or unresolved mixin on either, and no installer, alias or opaque core definition can
@@ -85,7 +85,7 @@ class CodeGen
       return nil
     end
     unless entry.native
-      return ['error', "#{entry.owner}##{entry.name} has no Ruby definition; a native method is declared in sig/native"]
+      return ['error', "#{entry.owner}##{entry.name} has no Ruby definition; a native method is declared in sig/bc2cpp"]
     end
 
     native_why, found = BlockReturns.native_entry_why(entry, block_return_native_paths(entry.name))

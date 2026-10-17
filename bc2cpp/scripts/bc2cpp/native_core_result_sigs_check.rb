@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NativeCoreResultSigs (sig/native/core_results.rbs) replaces the hand-written EXACT_CORE_KINDS table. Host only:
+# NativeCoreResultSigs (sig/bc2cpp/core_results.rbs) replaces the hand-written EXACT_CORE_KINDS table. Host only:
 # the loaded table must equal the audited entries, and malformed signature files must fail loudly.
 require 'set'
 require 'tmpdir'
@@ -89,7 +89,7 @@ AUDITED_RGSS = {
 }.freeze
 check.call('RGSS result kinds equal the audited map', NativeResultFacts::KINDS == AUDITED_RGSS)
 
-# CORE_BLOCK_ELEMENT_HINT (sig/native/core_block_params.rbs): where a core iterator's block gets an element.
+# CORE_BLOCK_ELEMENT_HINT (sig/bc2cpp/core_block_params.rbs): where a core iterator's block gets an element.
 def rejects_block_params(text)
   Dir.mktmpdir do |dir|
     path = File.join(dir, 'b.rbs')

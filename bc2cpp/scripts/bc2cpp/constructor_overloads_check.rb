@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check OVERLOADED_CONSTRUCT (docs/adr/0468): the constructor overloads of sig/native/rgss_constructors.rbs.
+# Check OVERLOADED_CONSTRUCT (docs/adr/0468): the constructor overloads of sig/bc2cpp/rgss_constructors.rbs.
 #
 #   1. audit (no mrbc): the shipped declarations agree with the C and Ruby sources of each initialize; each mismatch
 #      world refuses the file: an extra or missing form, a wrong parameter type, a dropped `else`, a wrong optional

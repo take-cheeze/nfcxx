@@ -229,7 +229,7 @@ module BlockSelfWorld
     end
 
     # `new`/`define` on a receiver that may be a class factory: anything but a constant naming a class known not to
-    # derive from Class/Module/Struct/Data (by its declaration or sig/native/core_hierarchy.rbs) and never assigned.
+    # derive from Class/Module/Struct/Data (by its declaration or sig/bc2cpp/core_hierarchy.rbs) and never assigned.
     def factory_send?(irep, idx, insn)
       return true if insn.op.start_with?('SS')
 
@@ -262,7 +262,7 @@ module BlockSelfWorld
     # Simple class names along the superclass chain of every class +simple+ names, or nil when a link is unknown.
     # The links come from every `class` statement of the world's Ruby (CLASS's superclass operand: nil is Object, a
     # constant its last segment, anything else unknown), the registry's superclass_of, and, for classes mruby
-    # defines natively, sig/native/core_hierarchy.rbs. Classes are matched by their last name segment, so two
+    # defines natively, sig/bc2cpp/core_hierarchy.rbs. Classes are matched by their last name segment, so two
     # same-named classes contribute both chains.
     def ancestors(simple)
       out = []
