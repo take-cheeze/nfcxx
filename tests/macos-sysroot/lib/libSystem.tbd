@@ -12,7 +12,7 @@ current-version: 1
 compatibility-version: 1
 exports:
   - targets:         [ arm64-macos ]
-    symbols:         [  _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
+        symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
                        ___divti3, dyld_stub_binder, ___error, _exit, _exp, _fabs, _fabsf, _fclose, _feof,
                        _ferror, _fflush, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti,
                        ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor, _fmod, _fopen,
@@ -24,7 +24,9 @@ exports:
                        _signal, _sin, _snprintf, _sqrt, ___stderrp, ___stdinp, ___stdoutp, _strchr, _strcmp,
                        _strcoll, _strcpy, _strerror, _strftime, _strlen, _strncmp, _strpbrk, _strspn,
                        _strstr, _strtod, _strtol, _system, _tan, _time, _tmpfile, _tmpnam, _tolower,
-                       _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _access, _close, _dup, _isatty, _read, _write ]
+                       _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _access,
+                       _close, _dup, _isatty, _read, _write, _trunc, _round, _strrchr, _strncpy, _strncat,
+                       _strcat, _putc, _fputc, _fileno, _fgetc, __longjmp ]
     weak-symbols:    [ ]
     objc-classes:    [ ]
     objc-ivars:      [ ]
