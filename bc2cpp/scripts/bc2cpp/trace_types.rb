@@ -16,6 +16,8 @@
 # The dump rows are documented in the report section below (PARAM_*, RETURN_*).
 
 require 'optparse'
+require 'set'
+require 'digest'
 
 module TraceTypes
   module Report
@@ -267,6 +269,84 @@ module TraceTypes
     classes.keys.map { |c| RBS_CLASS.fetch(c, c) }.uniq.sort.join(' | ')
   end
 
+  # The widest union the runtime guard checks linearly (DeclaredReturns::UNION_MAX, tools/bc2cpp/declared_returns.rb).
+  # A wider observation is untyped: a declaration bc2cpp cannot guard is no use as a hint.
+  UNION_MAX = 4
+
+  # Observed classes wider than a union: the nearest common ancestor the hierarchy gives them (a subclass instance is
+  # an instance of it, so this is a kind-of claim, not the exact-class fact a guard checks today), else the methods
+  # every observed class shares as a named interface, else untyped.
+  def self.bounded_type(classes, hierarchy = nil)
+    return 'untyped' if classes.empty?
+
+    names = classes.keys.map { |c| RBS_CLASS.fetch(c, c) }.uniq
+    return names.sort.join(' | ') if names.size <= UNION_MAX
+    return 'untyped' unless hierarchy
+
+    ancestor = hierarchy.common_ancestor(names)
+    return ancestor if ancestor
+
+    shared = hierarchy.shared_methods(names)
+    return 'untyped' if shared.empty?
+
+    hierarchy.interface_for(shared)
+  end
+
+  # The class hierarchy and each class's own methods, from scripts/bc2cpp/class_hierarchy.rb (TSV: SUPER, DEF rows).
+  class Hierarchy
+    OBJECT_ROOTS = %w[Object BasicObject Kernel].freeze
+
+    attr_reader :interfaces
+
+    def initialize(supers, defs)
+      @supers = supers
+      @defs = defs
+      @interfaces = {}
+    end
+
+    def self.read(path)
+      supers = {}
+      defs = Hash.new { |h, k| h[k] = [] }
+      File.foreach(path) do |raw|
+        kind, owner, value = raw.chomp.split("\t", 3)
+        case kind
+        when 'SUPER' then supers[owner] = value
+        when 'DEF' then defs[owner] << value
+        end
+      end
+      new(supers, defs)
+    end
+
+    def chain(name)
+      out = []
+      cur = name
+      while cur && !out.include?(cur)
+        out << cur
+        cur = @supers[cur]
+      end
+      out
+    end
+
+    def common_ancestor(names)
+      chains = names.map { |n| chain(n) }
+      first = chains.first.find { |c| chains.all? { |ch| ch.include?(c) } }
+      first unless first.nil? || OBJECT_ROOTS.include?(first)
+    end
+
+    # Method names every observed class answers, inherited ones included. `initialize` is never a shared interface.
+    def shared_methods(names)
+      sets = names.map { |n| chain(n).flat_map { |c| @defs.fetch(c, []) }.to_set }
+      sets.reduce(:&).to_a.reject { |m| m == 'initialize' }.sort
+    end
+
+    # Names the RBS interface for a method set. The same set gets the same name, so declarations are shared.
+    def interface_for(methods)
+      name = "_Shared#{Digest::SHA1.hexdigest(methods.join(' '))[0, 10]}"
+      @interfaces[name] = methods
+      name
+    end
+  end
+
   # Merges the dumps by what a site is (method, parameter or return, name), not by the per-binary site id, so runs
   # of one build add up and runs of different builds are compared on the same key. A site whose class table
   # overflowed has classes nobody recorded, so it has no complete observed type.
@@ -300,7 +380,7 @@ module TraceTypes
     [params, rets]
   end
 
-  def self.candidates(params, rets)
+  def self.candidates(params, rets, hierarchy = nil)
     by_method = Hash.new { |h, k| h[k] = { params: {}, ret: Hash.new(0), ret_calls: 0 } }
     params.each do |(method, kind, index, name), p|
       next unless kind == 'req' && p[:calls].positive? && p[:overflow].zero?
@@ -321,18 +401,22 @@ module TraceTypes
       next unless owner && name && OWNER_RE.match?(owner) && NAME_RE.match?(name)
       next if m[:params].empty? && m[:ret_calls].zero?
 
-      args = m[:params].sort.map { |_, (_, classes)| rbs_type(classes) }
+      args = m[:params].sort.map { |_, (_, classes)| bounded_type(classes, hierarchy) }
       next if args.any?(&:nil?)
 
-      ret = m[:ret].empty? ? 'untyped' : rbs_type(m[:ret])
-      next if ret.nil?
+      ret = bounded_type(m[:ret], hierarchy)
 
       { owner: owner, name: name, args: args, ret: ret, calls: m[:ret_calls] }
     end
   end
 
-  def self.render(cands)
+  def self.render(cands, interfaces = {})
     out = +"# Trace candidates (scripts/bc2cpp/trace_types.rb candidates). Not loaded by bc2cpp; review before any hint.\n"
+    interfaces.sort.each do |name, methods|
+      out << "interface #{name}\n"
+      methods.each { |m| out << "  def #{m}: (*untyped) -> untyped\n" }
+      out << "end\n"
+    end
     cands.group_by { |c| c[:owner] }.sort.each do |owner, list|
       out << "class #{owner}\n"
       list.sort_by { |c| c[:name] }.each do |c|
@@ -346,15 +430,22 @@ module TraceTypes
 
   def self.main(argv)
     out_path = nil
+    hierarchy_path = nil
     args = argv.dup
-    if args.first == '--out'
-      args.shift
-      out_path = args.shift
+    while args.first&.start_with?('--')
+      flag = args.shift
+      case flag
+      when '--out' then out_path = args.shift
+      when '--hierarchy' then hierarchy_path = args.shift
+      else abort "unknown option #{flag}"
+      end
     end
-    abort 'usage: trace_types.rb candidates [--out FILE] dump.txt [...]' if args.empty?
+    abort 'usage: trace_types.rb candidates [--out FILE] [--hierarchy TSV] dump.txt [...]' if args.empty?
 
     params, rets = read_dumps(args)
-    text = render(candidates(params, rets))
+    hierarchy = hierarchy_path && Hierarchy.read(hierarchy_path)
+    cands = candidates(params, rets, hierarchy)
+    text = render(cands, hierarchy ? hierarchy.interfaces : {})
     if out_path
       File.write(out_path, text)
       puts "wrote #{out_path}"

@@ -379,26 +379,34 @@ class CodeGen
                      method_return_class: ->(n) { class_return_for_dispatch(n) }, dominated: dominated)
   end
 
+  # The C++ test that `var` has the declared kind (see declared_return_guard_statement). A :union is the members' tests
+  # joined by `||`: one linear test per member (UNION_LINEAR, DeclaredReturns.kind_of).
+  def declared_return_condition(kind, cls, nilable, var)
+    case kind
+    when :fixnum then "mrb_fixnum_p(#{var})"
+    when :array then "mrb_array_p(#{var})"
+    when :string then "mrb_string_p(#{var})"
+    when :bool then "mrb_true_p(#{var}) || mrb_false_p(#{var})"
+    when :nil then "mrb_nil_p(#{var})"
+    when :hash then "mrb_hash_p(#{var})"
+    when :symbol then "mrb_symbol_p(#{var})"
+    when :float then "mrb_float_p(#{var})"
+    when :module then "mrb_obj_is_kind_of(M, #{var}, mrb_module_get(M, \"#{cls}\"))"
+    when :union then cls.map { |k, c, n| "(#{declared_return_condition(k, c, n, var)})" }.join(' || ')
+    when :class
+      exact = "mrb_obj_class(M, #{var}) == #{owner_class_ptr_expr(cls)}"
+      nilable ? "mrb_nil_p(#{var}) || #{exact}" : exact
+    else raise "DECLARED_RETURN_GUARD: no runtime check for kind #{kind.inspect}"
+    end
+  end
+
   # DECLARED_RETURN_GUARD: the C++ statement that checks `var` against the runtime-checked declaration `entry` and
   # raises on a mismatch. The kinds test exactly what their facts let a consumer assume: a Fixnum (an unchecked
   # mrb_fixnum is allowed on a FIXNUM_RETURN_PROOF result, so Integer is not enough), an Array (mrb_array_p, the
   # ARRAY_RETURN_PROOF tripwire's own test), an instance of exactly C (the class return fixpoint's exact class, by
   # the class-equality test the receiver guards use) or, for `C?`, nil.
   def declared_return_guard_statement(entry, var)
-    cond = case entry.kind
-           when :fixnum then "mrb_fixnum_p(#{var})"
-           when :array then "mrb_array_p(#{var})"
-           when :string then "mrb_string_p(#{var})"
-           when :bool then "mrb_true_p(#{var}) || mrb_false_p(#{var})"
-           when :nil then "mrb_nil_p(#{var})"
-           when :hash then "mrb_hash_p(#{var})"
-           when :symbol then "mrb_symbol_p(#{var})"
-           when :float then "mrb_float_p(#{var})"
-           when :class
-             exact = "mrb_obj_class(M, #{var}) == #{owner_class_ptr_expr(entry.cls)}"
-             entry.nilable ? "mrb_nil_p(#{var}) || #{exact}" : exact
-           else raise "DECLARED_RETURN_GUARD: #{entry.key}: no runtime check for kind #{entry.kind.inspect}"
-           end
+    cond = declared_return_condition(entry.kind, entry.cls, entry.nilable, var)
     quote = ->(text) { text.gsub(/["\\]/) { |c| "\\#{c}" } }
     "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_return_violation(M, #{var}, \"#{quote.call(entry.key)}\", " \
       "\"#{quote.call(entry.text)}\"); #{DeclaredReturns.guard_marker(entry)}\n"

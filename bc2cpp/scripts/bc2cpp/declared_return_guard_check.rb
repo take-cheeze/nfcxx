@@ -109,6 +109,15 @@ list_code = gen.declared_return_guard_wrap('L4', body.call('Foo_list_impl'), 'Fo
   kind_code = gen.declared_return_guard_statement(entry.call('Foo', 'list', label, kind, nil, text), 'bc2cpp_declared_ret')
   check.call("-> #{text} is checked by #{test}", kind_code.include?("!(#{test})"))
 end
+enum_code = gen.declared_return_guard_statement(entry.call('Foo', 'items', 'L9', :module, 'Enumerable', 'Enumerable[Bar]'),
+                                                'bc2cpp_declared_ret')
+check.call('-> Enumerable is a kind-of test on the module (includers pass; no exact class)',
+           enum_code.include?('!(mrb_obj_is_kind_of(M, bc2cpp_declared_ret, mrb_module_get(M, "Enumerable")))'))
+union_code = gen.declared_return_guard_statement(entry.call('Foo', 'pick_either', 'L10', :union,
+                                                             [[:fixnum, 'Integer', false], [:nil, nil, false]], 'Integer | nil'),
+                                                  'bc2cpp_declared_ret')
+check.call('-> Integer | nil is one linear test per member (the Integer test or the nil test)',
+           union_code.include?('!((mrb_fixnum_p(bc2cpp_declared_ret)) || (mrb_nil_p(bc2cpp_declared_ret)))'))
 rect_code = gen.declared_return_guard_statement(entry.call('Foo', 'rect', 'L8', :class, 'RGSS::Rect', 'RGSS::Rect'),
                                                 'bc2cpp_declared_ret')
 check.call('-> RGSS::Rect is checked as exactly the native class (its class pointer, like a program class)',
@@ -155,7 +164,7 @@ Dir.mktmpdir do |dir|
       %a{bc2cpp:hint}
       def nowhere: () -> Integer
       %a{bc2cpp:hint}
-      def name_text: () -> (Integer | String)
+      def name_text: () -> (Integer | Set[Integer])
       %a{bc2cpp:hint}
       def count: () -> Integer
     end

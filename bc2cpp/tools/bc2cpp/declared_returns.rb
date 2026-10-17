@@ -47,6 +47,15 @@ module DeclaredReturns
       nilable = true
       type = type.type
     end
+    if defined?(RBS::Types::Union) && type.is_a?(RBS::Types::Union)
+      # UNION_LINEAR: each member is a checkable kind; the guard is the members' tests joined by `||`, one linear
+      # test per member, so a union is only admitted when it is short (UNION_MAX members, none a union itself).
+      return nil if nilable || type.types.size < 2 || type.types.size > UNION_MAX
+      members = type.types.map { |t| kind_of(t, known_owners) }
+      return nil if members.any? { |m| m.nil? || m[0] == :union }
+
+      return [:union, members, false]
+    end
     if defined?(RBS::Types::Bases::Bool) && type.is_a?(RBS::Types::Bases::Bool)
       return nilable ? nil : [:bool, nil, false]
     end
@@ -63,6 +72,7 @@ module DeclaredReturns
     when 'Hash' then nilable || !type.args.empty? ? nil : [:hash, 'Hash', false]
     when 'Symbol' then nilable || !type.args.empty? ? nil : [:symbol, 'Symbol', false]
     when 'Float' then nilable || !type.args.empty? ? nil : [:float, 'Float', false]
+    when 'Enumerable' then type.args.size <= 1 ? [:module, 'Enumerable', nilable] : nil
     else
       return nil unless type.args.empty?
       # A native class is checked by its class pointer like a program class; the constant is resolved at run time.
@@ -76,7 +86,9 @@ module DeclaredReturns
 
   # The kinds that only a runtime-checked declaration (%a{bc2cpp:hint}) may take: no proof analysis reads them, so
   # the compiled body's guard is their whole check (codegen_declared_returns.rb). A native class is one too.
-  GUARD_ONLY_KINDS = %i[bool nil string hash symbol float].freeze
+  # A module (Enumerable) is a kind-of test, since no exact class test matches its includers.
+  GUARD_ONLY_KINDS = %i[bool nil string hash symbol float module union].freeze
+  UNION_MAX = 4
 
   # Entries for the loaded method signatures that name a bytecode definition with the signature's required arity
   # (RbsSignatures.apply reports the others). `ireps` is only read for that arity.
