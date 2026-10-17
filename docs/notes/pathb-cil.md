@@ -77,8 +77,10 @@ unsigned 32-bit index, sign otherwise). Untyped index operands default to sign e
 describes; QBE's behaviour for them is not verified.
 
 Two notes on the trap statement. `docs/notes/pathb-stage2.md` says `(trap)` is an illegal instruction (`ud2`, SIGILL),
-and the QBE emitter spells it `hlt`. This emitter follows the abort path instead (SIGABRT), so the exit status of a
-trap differs from QBE's: SIGILL there, SIGABRT here. Both end the process without returning.
+and the QBE emitter spells it `hlt`. The Path B QBE tests expect that: `tests/pathb-qbe/traps/builtin_trap.cpp` must die
+of SIGILL (exit 132), as `docs/notes/builtins.md` records. This emitter follows the abort path instead (SIGABRT, exit 134,
+`tests/pathb-cil/cases/builtin_trap.cpp`), so the exit status of a trap differs from QBE's: SIGILL there, SIGABRT here.
+Both end the process without returning. Which one the CIL route should keep is not decided.
 
 Unknown statements, and any unknown form at the top of a function, are refused. The emitter used to keep only a fixed
 list of statement heads at the top of a function and silently drop the rest (`asm_refuse.ir` translated without its
