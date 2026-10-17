@@ -18,6 +18,7 @@
 # Exit status 3 when the emitter refuses a kernel (the reason is on stderr).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/scripts/oneapi-env.sh"   # the oneAPI runtime libraries and OPENCL_INCLUDE, for the tools and compilers run below
 cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; opts=(); link=(); std=c++17
 while [ $# -gt 0 ]; do
   case $1 in
@@ -78,11 +79,11 @@ if [ $backend = level-zero ]; then
     -l:libze_loader.so.1 "${link[@]}"
 fi
 if [ $backend = opencl ]; then
-  # the OpenCL headers: OPENCL_INCLUDE (default: the oneAPI compiler's); libOpenCL.so.1 is the ICD loader
-  # the search order: the user's -I/-D first, then the runtime's own headers, OPENCL_INCLUDE last. The oneAPI OpenCL
+  # the OpenCL headers: OPENCL_INCLUDE (the oneAPI compiler's, from scripts/oneapi-env.sh); libOpenCL.so.1 is the ICD loader
+  # the search order: the user's -I/-D first, then the runtime's own headers, OPENCL_INCLUDE last (set by scripts/oneapi-env.sh). The oneAPI OpenCL
   # include directory also holds a sycl/ directory, so it must not shadow a user header of the same name.
   exec $cxx -std=$std $optflag -DNFCXX_SYCL_OPENCL -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" "${opts[@]}" -I"$inc" \
-    -I"${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}" "$src" -o "$out" -l:libOpenCL.so.1 "${link[@]}"
+    ${OPENCL_INCLUDE:+"-I$OPENCL_INCLUDE"} "$src" -o "$out" -l:libOpenCL.so.1 "${link[@]}"
 fi
 exec $cxx -std=$std $optflag -DNFCXX_SYCL_WEBGPU -DNFCXX_SYCL_SERVER_JS="\"$root/tests/sycl/server.cjs\"" \
   -DNFCXX_SYCL_IMAGE_PREFIX="\"$absout\"" -I"$inc" "${opts[@]}" "$src" -o "$out" "${link[@]}"

@@ -82,6 +82,23 @@ class ze_rt {
       if (pv->first + pv->second == it->first) { pv->second += it->second; free_.erase(it); }
     }
   }
+  uint64_t largest_free() const {
+    uint64_t m = 0;
+    for (const auto &f : free_) m = std::max(m, f.second);
+    return m;
+  }
+  // a check that failed in the kernel sets the flag: the program stops with the reason
+  void check_flag() {
+    uint32_t flag = 0;
+    std::memcpy(&flag, at(dev_base_), 4);
+    if (flag) {
+      static const char *why[] = {"", "integer division by zero or INT_MIN / -1", "shift count out of range", "index out of bounds",
+                                  "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
+                                  "a write to the kernel's captured state"};
+      std::fprintf(stderr, "sycl: a kernel trapped: %s\n", flag < 8 ? why[flag] : "unknown");
+      std::exit(71);
+    }
+  }
   uint8_t *at(uint64_t addr) const {
     if (addr < dev_base_ || addr - dev_base_ >= heap_size_) fail("device address outside the heap");
     return host_ + (addr - dev_base_);
@@ -118,43 +135,61 @@ class ze_rt {
       groups *= n;
     }
     uint64_t stride = (uint64_t(lmem) + 1024 + 15) & ~uint64_t(15);
+    // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
+    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd); the
+    // dimensions above sd must be a single invocation, so the slab's invocations are contiguous in the emitter's linear
+    // index. The emitter numbers stacks and local memory over the whole grid (the slab offset ox/oy/oz is in that
+    // index), so each slab's bases are biased by the slab's first index and the region holds just the slab.
     uint64_t stack_total = invocations * stack_bytes_;
-    uint64_t region = alloc(stack_total + groups * stride);
+    uint64_t room = largest_free();
+    int sd = 0;
+    for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
+    bool sliceable = true;
+    for (int e = sd + 1; e < 3; e++) if (l[e] != 1) sliceable = false;
+    uint64_t inner = 1;   // the groups in the dimensions below sd
+    for (int e = 0; e < sd; e++) inner *= ng[e];
+    uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
+    uint64_t per_group = inv_group * stack_bytes_ + stride;
+    uint32_t per_launch = ng[sd];   // groups along sd in one launch
+    if (stack_total + groups * stride > room && sliceable) {
+      uint64_t fit = room / (inner * per_group);
+      per_launch = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
+    }
     std::memset(at(dev_base_), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    ze_push p{};
-    p.closure = closure_addr();
-    p.statics = statics_;
-    p.stack = region;
-    p.local = region + stack_total;
-    p.flag = dev_base_;
-    p.hlo = (uint64_t)(uintptr_t)host_;
-    p.hsize = heap_size_;
-    p.dbase = dev_base_;
-    p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
-    p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
-    p.stack_bytes = stack_bytes_;
-    p.local_stride = (uint32_t)stride;
-    p.local_user = lmem;
     ze_kernel_handle_t k = kernel(it->second.entry, l);
-    // one slice: the whole grid (the device does not take more groups in a dimension than the grid, here)
-    p.ox = 0; p.oy = 0; p.oz = 0;
-    std::memcpy(at(dev_base_ + ze_push_at), &p, sizeof p);
-    void *push = at(dev_base_ + ze_push_at);
-    check(zeKernelSetArgumentValue(k, 0, sizeof push, &push), "zeKernelSetArgumentValue");
-    ze_group_count_t gc = {ng[0], ng[1], ng[2]};
-    check(zeCommandListAppendLaunchKernel(imm_, k, &gc, nullptr, 0, nullptr), "zeCommandListAppendLaunchKernel");
-    check(zeCommandListAppendBarrier(imm_, nullptr, 0, nullptr), "zeCommandListAppendBarrier");
-    check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
-    release(region);
-    uint32_t flag = 0;
-    std::memcpy(&flag, at(dev_base_), 4);
-    if (flag) {
-      static const char *why[] = {"", "integer division by zero or INT_MIN / -1", "shift count out of range", "index out of bounds",
-                                  "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
-                                  "a write to the kernel's captured state"};
-      std::fprintf(stderr, "sycl: a kernel trapped: %s\n", flag < 8 ? why[flag] : "unknown");
-      std::exit(71);
+    for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_launch) {
+      uint32_t cnt = std::min(per_launch, ng[sd] - s0);
+      uint64_t first_group = (uint64_t)s0 * inner;
+      uint64_t slab_groups = (uint64_t)cnt * inner;
+      uint64_t slab_stack = slab_groups * inv_group * stack_bytes_;
+      uint64_t region = alloc(slab_stack + slab_groups * stride);
+      ze_push p{};
+      p.closure = closure_addr();
+      p.statics = statics_;
+      p.stack = region - first_group * inv_group * stack_bytes_;   // biased: the slab's first invocation is at region
+      p.local = region + slab_stack - first_group * stride;
+      p.flag = dev_base_;
+      p.hlo = (uint64_t)(uintptr_t)host_;
+      p.hsize = heap_size_;
+      p.dbase = dev_base_;
+      p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
+      p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
+      p.stack_bytes = stack_bytes_;
+      p.local_stride = (uint32_t)stride;
+      p.local_user = lmem;
+      p.ox = 0; p.oy = 0; p.oz = 0;
+      uint32_t *o[3] = {&p.ox, &p.oy, &p.oz};
+      *o[sd] = s0;
+      std::memcpy(at(dev_base_ + ze_push_at), &p, sizeof p);
+      void *push = at(dev_base_ + ze_push_at);
+      check(zeKernelSetArgumentValue(k, 0, sizeof push, &push), "zeKernelSetArgumentValue");
+      ze_group_count_t gc = {sd == 0 ? cnt : ng[0], sd == 1 ? cnt : ng[1], sd == 2 ? cnt : ng[2]};
+      check(zeCommandListAppendLaunchKernel(imm_, k, &gc, nullptr, 0, nullptr), "zeCommandListAppendLaunchKernel");
+      check(zeCommandListAppendBarrier(imm_, nullptr, 0, nullptr), "zeCommandListAppendBarrier");
+      check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+      release(region);
+      check_flag();
     }
     for (int i = 0; i < nbufs; i++) if (modes[i] & 2) { bufs[i]->dev_valid = true; bufs[i]->host_valid = false; }
   }
