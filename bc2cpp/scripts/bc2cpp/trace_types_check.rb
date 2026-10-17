@@ -40,6 +40,43 @@ DUMP = <<~TSV
   RETURN_CLASS\tfx\t5\tBox\t1
 TSV
 
+HIERARCHY = <<~TSV
+  SUPER\tBox::Sub1\tBox::Base
+  SUPER\tBox::Sub2\tBox::Base
+  SUPER\tBox::Sub3\tBox::Base
+  SUPER\tBox::Sub4\tBox::Base
+  SUPER\tBox::Sub5\tBox::Base
+  DEF\tBox::Base\tname
+  DEF\tBox::Base\tsize
+  DEF\tBox::Sub1\tinitialize
+  DEF\tU1\tsize
+  DEF\tU1\teach
+  DEF\tU2\tsize
+  DEF\tU2\teach
+  DEF\tU2\tother
+  DEF\tU3\tsize
+  DEF\tU3\teach
+  DEF\tU4\tsize
+  DEF\tU4\teach
+  DEF\tU5\tsize
+  DEF\tU5\teach
+TSV
+
+WIDE = <<~TSV
+  PARAM_SITE\tfx\t0\t10\t0\tBox#put\tBox_put_impl\tmethod\treq\t1\tv\tnone:mono
+  PARAM_CLASS\tfx\t0\tBox::Sub1\t2
+  PARAM_CLASS\tfx\t0\tBox::Sub2\t2
+  PARAM_CLASS\tfx\t0\tBox::Sub3\t2
+  PARAM_CLASS\tfx\t0\tBox::Sub4\t2
+  PARAM_CLASS\tfx\t0\tBox::Sub5\t2
+  PARAM_SITE\tfx\t1\t10\t0\tBox#pick\tBox_pick_impl\tmethod\treq\t1\tv\tnone:mono
+  PARAM_CLASS\tfx\t1\tU1\t2
+  PARAM_CLASS\tfx\t1\tU2\t2
+  PARAM_CLASS\tfx\t1\tU3\t2
+  PARAM_CLASS\tfx\t1\tU4\t2
+  PARAM_CLASS\tfx\t1\tU5\t2
+TSV
+
 failures = []
 check = ->(name, ok) { failures << name unless ok }
 
@@ -58,6 +95,27 @@ Tempfile.create(['trace_types', '.txt']) do |dump|
   check.call('an operator name is not written into RBS', !text.include?('def <'))
   check.call('initialize keeps its parameter types and its return is untyped (Ruby discards it)',
               text.include?('def initialize: (Integer) -> untyped'))
+  Tempfile.create(['hierarchy', '.tsv']) do |hier_file|
+    hier_file.write(HIERARCHY)
+    hier_file.flush
+    Tempfile.create(['wide', '.txt']) do |wide_dump|
+      wide_dump.write(WIDE)
+      wide_dump.flush
+      wparams, wrets = TraceTypes::Candidates.read_dumps([wide_dump.path])
+      hierarchy = TraceTypes::Candidates::Hierarchy.read(hier_file.path)
+      wtext = TraceTypes::Candidates.render(TraceTypes::Candidates.candidates(wparams, wrets, hierarchy), hierarchy.interfaces)
+      check.call('five subclasses of one base are typed as the common ancestor', wtext.include?('def put: (Box::Base) -> untyped'))
+      check.call('unrelated classes sharing methods get a named interface, without initialize',
+                 wtext.match?(/interface _Shared\w+\n  def each: \(\*untyped\) -> untyped\n  def size: \(\*untyped\) -> untyped\nend/))
+      check.call('the interface is used as the parameter type', wtext.match?(/def pick: \(_Shared\w+\) -> untyped/))
+      check.call('the candidates with hierarchy parse as RBS', begin
+        RBS::Parser.parse_signature(wtext)
+        true
+      rescue RBS::ParsingError
+        false
+      end)
+    end
+  end
   check.call('the output parses as RBS', begin
     RBS::Parser.parse_signature(text)
     true
