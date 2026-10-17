@@ -144,10 +144,24 @@ module BaseRbs
     end
   end
 
+  # A superclass is looked up the way Ruby looks a constant up: the innermost enclosing namespace first, then outward,
+  # then the top level. RBS resolves a name in the declaration's own scope, so the resolved full name is written. A name
+  # the sources do not define is written as it is (an external class such as File).
+  def resolve_super(expr, nest, decls)
+    return expr.delete_prefix('::') if expr.start_with?('::')
+
+    nest.length.downto(0) do |i|
+      candidate = (nest[0, i] + [expr]).join('::')
+      return candidate if decls.key?(candidate)
+    end
+    expr
+  end
+
   def run(out_dir, paths)
     decls = {}
     skipped = []
     paths.each { |path| scan(path, decls, skipped) }
+    decls.each_value { |decl| decl.super_expr = resolve_super(decl.super_expr, decl.nest, decls) if decl.super_expr }
     FileUtils.mkdir_p(out_dir)
     files = []
     decls.values.group_by { |d| d.name.split('::').first }.each do |top, list|
