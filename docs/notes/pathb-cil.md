@@ -57,13 +57,16 @@ longjmps in EDG's runtime.
 | `shift_abort` | a checked shift with count 40 on an int: aborts | 134 (SIGABRT) |
 | `builtin_trap` | the `trap` statement (`__builtin_trap`): aborts | 134 (SIGABRT) |
 | `vararg_def` | a C-style variadic definition (va_start): refused, with a message | refused |
+| `funcaddr_arg` | `&"f"` passed to a callee, which calls it (calli) | 42 |
+| `funcaddr_table` | a static table of function addresses, indexed calls, pointer comparison | 78 |
+| `funcaddr_void` | a void callee and a callee given a pointer argument, both called through pointers | 7 |
 
-Coverage of the existing Path B IR corpus (`tests/pathb-ir/*.ir`, 62 files): **19 translate**, 43 are refused. The
+Coverage of the existing Path B IR corpus (`tests/pathb-ir/*.ir`, 62 files): **24 translate**, 38 are refused. The
 refusals, by count:
 
-- 10: variadic definitions (`va_start`) and variadic calls (`printf`); 9: taking the address of a function (`&"f"`)
-- 8: aggregate values (`struct` or `byval`) used as a value; 3: `std::floatN_t`
-- 2 indirect calls; 2 `fence`; 2 `bitfield` initializers; 2 `switch`
+- 11 variadic calls (`printf`); 3 variadic definitions (`va_start`)
+- 8 aggregate values (`struct` or `byval`) used as a value; 3 `std::float16_t`
+- 2 `switch`; 2 `fence`; 2 `copy`; 2 `bitfield` initializers
 - 1 each: `bfload.v`, `alloca`, `cf2i`, `store.v`, and an asm statement
 
 Checked forms follow the QBE emitter (`scripts/pathb-qbe-emit.rb`, `r_divrem`, `r_shift`): a zero divisor and
@@ -93,8 +96,14 @@ list of statement heads at the top of a function and silently drop the rest (`as
 - **No destructors during unwinding.** EDG's cleanup tables are not translated. Objects with destructors in the `try`
   block are not destroyed when a throw leaves it.
 - **Native exceptions.** Exceptions thrown by native code (the host's libstdc++) are not CLR exceptions and are not caught.
-- **The IR is a subset.** Classes with virtual dispatch, function addresses, variadic calls and `sret` need more emitter
-  work (above). `cf2i` (a checked float-to-int conversion) and volatile stores (`store.v`) are refused too.
+- **The IR is a subset.** Classes with virtual dispatch, variadic calls and `sret` need more emitter work (above).
+  `cf2i` (a checked float-to-int conversion) and volatile stores (`store.v`) are refused too. Floating-point arithmetic
+  is not translated yet: the emitter has `fneg` only, so `fadd`, `fdiv` and float comparisons (`lt.f`) are refused.
+- **Function addresses of undefined functions.** `&"f"` is the function's linker field: a function the unit defines is
+  its `ldftn` (set at `Init`), and any other name is `dlsym`'d, which gives null for a name not in the process. A pointer
+  to a libc function is therefore a native address, and calling it through `calli` uses the managed convention, which
+  is wrong for it. Calls through such a pointer are not supported; calls through pointers to the unit's own functions
+  are.
 - **Small types.** Arithmetic on `char` and `short` is not narrowed to its type (the emitter's existing `wadd` and friends
   do not narrow). `cshl` does narrow, as the QBE emitter does, but `wadd` results of a small type can be out of range.
 - **A zero `SIZE` in a register** (a VLA element) makes `pdiff` a CLR `DivideByZeroException`, not an abort. A literal
@@ -102,7 +111,7 @@ list of statement heads at the top of a function and silently drop the rest (`as
 
 ## Next steps, in order
 
-1. Function addresses (`&"f"`), `byval` and aggregate values, and the variadic calls (they carry most of the refusals).
+1. `byval` and aggregate values, and the variadic calls (they carry most of the refusals).
 2. Typeinfo objects for the thrown and caught types, so catch clauses can be selected and checked by type.
 3. Cleanups: translate the destructor calls of the `try` block's objects to `finally` (or `fault`) regions.
 4. `sret` and aggregate values (C++ classes passed or returned by value).
