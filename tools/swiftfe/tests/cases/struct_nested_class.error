@@ -1,0 +1,1 @@
+struct_nested_class.swift:10:7: error: structs with class-typed or array properties are not supported yet

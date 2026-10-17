@@ -161,11 +161,18 @@ Supported:
   range), `a.count`, `a.append(x)`, `for x in a`, and `print` of arrays of Int, Bool or
   Double. Arrays are values: copying one copies the buffer, and each class element in it
   gets its own reference (retained, then released when the buffer is freed, in order).
+- Structs and enum payloads that hold arrays, including a struct that holds an array of
+  itself (`struct Tree { var kids: [Tree] }`). Such a struct is class-like: a copy copies
+  its arrays, and its owner frees them. A struct may not hold a class, directly or through
+  another struct, an enum or an Optional (structs with class-typed properties are still
+  rejected). Class fields may hold arrays already.
 
 Limits (each gives a diagnostic):
 - `break` inside a `switch`
-- arrays in struct properties, enum payloads or optionals
+- optional arrays (`[Int]?`)
 - subscripts and `count` of a temporary array; `for-in` with a `where` clause
+- member access on a temporary struct that holds an array, e.g. `make().n`, and a method
+  call on one, since the temporary's arrays would leak
 - `switch` over Double or String; `%` on Double
 
 ## Integration tests

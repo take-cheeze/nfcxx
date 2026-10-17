@@ -111,84 +111,102 @@ enum CEmit {
     }
     out += "\n"
 
-    // Value types (structs, enums and optionals), dependencies first.
+    // Value types (structs, enums, Optionals and arrays), dependencies first. The output
+    // has three parts, in order: the type bodies, the prototypes of the copy and release
+    // helpers, and the helper bodies. A helper may then use any type and call any other
+    // helper. That matters for a type that holds an array of itself: the array's helpers
+    // need the element complete, and the element's helpers call the array's.
     var defined = Set<String>()
-    var values = ""
+    var bodies = ""
+    var protos = ""
+    var helpers = ""
     func needsDefinition(_ ty: Ty) -> Bool {
       switch ty {
       case .structure, .enumeration, .optional, .array: return true
       default: return false
       }
     }
+    /// Declares `ret_T` (adds one reference to each class-like part) and `rel_T` (drops
+    /// them) for a value type `T`. `copy` and `drop` are the statements for its parts.
+    func addCopyHelpers(_ cn: String, copy: String, drop: String) {
+      protos += "static \(cn) ret_\(cn)(\(cn) v);\nstatic void rel_\(cn)(\(cn) v);\n"
+      helpers += "static \(cn) ret_\(cn)(\(cn) v) {\n\(copy)  return v;\n}\n"
+      helpers += "static void rel_\(cn)(\(cn) v) {\n\(drop)}\n\n"
+    }
     func defineValue(_ ty: Ty) {
       guard !defined.contains(ty.mangled) else { return }
       defined.insert(ty.mangled)
       switch ty {
-      case .structure(let name):
-        guard let info = program.structs.first(where: { $0.name == name }) else { return }
+      case .structure(let info):
         for field in info.fields where needsDefinition(field.ty) { defineValue(field.ty) }
-        values += "struct s_\(cIdent(name)) {\n"
+        let cn = ty.cName
+        bodies += "struct \(cn) {\n"
         for field in info.fields {
-          values += "  \(field.ty.cName) \(field.cName);\n"
+          bodies += "  \(field.ty.cName) \(field.cName);\n"
         }
-        values += "};\n\n"
+        bodies += "};\n\n"
+        if info.isClassLike {
+          var copy = "", drop = ""
+          for field in info.fields where field.ty.isClassLike {
+            copy += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+            drop += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
+          }
+          addCopyHelpers(cn, copy: copy, drop: drop)
+        }
       case .enumeration(let info):
         for c in info.cases {
           for field in c.payload where needsDefinition(field.ty) { defineValue(field.ty) }
         }
         let cn = ty.cName
-        values += "struct \(cn) {\n  int64_t tag;\n"
+        bodies += "struct \(cn) {\n  int64_t tag;\n"
         for c in info.cases {
           for field in c.payload {
-            values += "  \(field.ty.cName) \(field.cName);\n"
+            bodies += "  \(field.ty.cName) \(field.cName);\n"
           }
         }
-        values += "};\n"
+        bodies += "};\n"
         if info.holdsRef {
           // Copies retain, and drops release, every class-like payload field. A value
           // leaves the fields of its other cases zero (a compound literal zeroes the
-          // fields it does not name), and retaining or releasing a null pointer or an
-          // empty Optional does nothing, so no switch on the tag is needed.
-          values += "static \(cn) ret_\(cn)(\(cn) v) {\n"
+          // fields it does not name), and retaining or releasing a null pointer, an
+          // empty Optional or an empty array does nothing, so no switch on the tag is needed.
+          var copy = "", drop = ""
           for c in info.cases {
             for field in c.payload where field.ty.isClassLike {
-              values += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+              copy += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+              drop += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
             }
           }
-          values += "  return v;\n}\n"
-          values += "static void rel_\(cn)(\(cn) v) {\n"
-          for c in info.cases {
-            for field in c.payload where field.ty.isClassLike {
-              values += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
-            }
-          }
-          values += "}\n"
+          addCopyHelpers(cn, copy: copy, drop: drop)
         }
-        values += "\n"
+        bodies += "\n"
       case .array(let elem):
         if needsDefinition(elem) { defineValue(elem) }
-        values += arrayHelpers(ty, elem)
+        bodies += arrayStruct(ty, elem)
+        protos += arrayPrototypes(ty, elem)
+        helpers += arrayHelpers(ty, elem)
       case .optional(let inner):
         if needsDefinition(inner) { defineValue(inner) }
         let opt = ty.cName
-        values += "struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n};\n"
-        values += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
-        values += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
-        values += "  return v.value;\n}\n"
+        bodies += "struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n};\n"
+        bodies += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
+        bodies += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
+        bodies += "  return v.value;\n}\n"
+        bodies += "\n"
         if inner.isClassLike {
-          values += "static \(opt) ret_\(opt)(\(opt) v) {\n  if (v.some) \(retainCode("v.value", inner))\n  return v;\n}\n"
-          values += "static void rel_\(opt)(\(opt) v) {\n  if (v.some) \(releaseCode("v.value", inner))\n}\n"
+          addCopyHelpers(opt,
+            copy: "  if (v.some) \(retainCode("v.value", inner))\n",
+            drop: "  if (v.some) \(releaseCode("v.value", inner))\n")
         }
-        values += "\n"
       default:
         break
       }
     }
-    for s in program.structs { defineValue(.structure(s.name)) }
+    for s in program.structs { defineValue(.structure(s)) }
     for e in program.enums { defineValue(.enumeration(e)) }
     for o in program.optionals { defineValue(o) }
     for a in program.arrays { defineValue(a) }
-    out += values
+    out += bodies + protos + helpers
 
     // Class layout: the header first, then the stored properties.
     for c in program.classes {
@@ -252,12 +270,34 @@ enum CEmit {
 
   /// The struct and helpers of an array of `elem`. Helpers are named by the element
   /// type, so they are shared by every array of that element.
+  /// The struct of an array. It holds a pointer to its elements, which need only be
+  /// declared, so it can be written before the element type is complete.
+  private static func arrayStruct(_ ty: Ty, _ elem: Ty) -> String {
+    "struct \(ty.cName) {\n  \(elem.cName) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
+  }
+
+  /// Prototypes of the helpers of an array of `elem`, which other helpers may call.
+  private static func arrayPrototypes(_ ty: Ty, _ elem: Ty) -> String {
+    let e = elem.cName
+    let m = elem.mangled
+    let arr = ty.cName
+    var text = ""
+    text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals);\n"
+    text += "static \(arr) arr_copy_\(m)(\(arr) a);\n"
+    text += "static void arr_free_\(m)(\(arr) a);\n"
+    text += "static void arr_check_\(m)(\(arr) a, int64_t i);\n"
+    text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i);\n"
+    text += "static \(e) *arr_at_\(m)(\(arr) *a, int64_t i);\n"
+    text += "static void arr_append_\(m)(\(arr) *a, \(e) v);\n"
+    return text
+  }
+
+  /// The helper bodies of an array of `elem`.
   private static func arrayHelpers(_ ty: Ty, _ elem: Ty) -> String {
     let e = elem.cName
     let m = elem.mangled
     let arr = ty.cName
     var text = ""
-    text += "struct \(arr) {\n  \(e) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
     text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals) {\n"
     text += "  \(arr) a = { NULL, 0, 0 };\n"
     text += "  if (n > 0) {\n"

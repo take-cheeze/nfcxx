@@ -117,6 +117,8 @@ final class Lowerer {
   /// Enclosing loops and switches, innermost last, with the scope depth each one starts at.
   private var loops: [(depth: Int, isSwitch: Bool)] = []
   private var pendingMethods: [PendingMethod] = []
+  /// The stored properties of structs, with their declarations, checked at the end of lowering.
+  private var structFieldChecks: [(node: Syntax, ty: Ty)] = []
   /// True while lowering an initializer body, where `self` may be assigned.
   private var initializingSelf = false
   private var typeEnv: [String: Ty] = [:]
@@ -183,8 +185,8 @@ final class Lowerer {
     for (decl, info) in structDecls {
       let members = try lowerMembers(decl.memberBlock, isClass: false)
       info.fields = members.fields
-      info.initializers = try declareInitializers(members.initializers, owner: .structure(info.name), env: [:], name: info.name)
-      info.methods = try declareMethods(members.methods, owner: .structure(info.name), env: [:], name: info.name)
+      info.initializers = try declareInitializers(members.initializers, owner: .structure(info), env: [:], name: info.name)
+      info.methods = try declareMethods(members.methods, owner: .structure(info), env: [:], name: info.name)
     }
     for (decl, info) in classDecls {
       let members = try lowerMembers(decl.memberBlock, isClass: true)
@@ -277,6 +279,9 @@ final class Lowerer {
 
     try lowerPendingDeinits()
 
+    for check in structFieldChecks where check.ty.holdsClassRef {
+      throw error("structs with class-typed or array properties are not supported yet", check.node)
+    }
     return Program(
       structs: structDecls.map { $0.1 } + instStructs,
       classes: classDecls.map { $0.1 } + instClasses,
@@ -321,9 +326,8 @@ final class Lowerer {
             throw error("invalid redeclaration of '\(name)'", binding)
           }
           let ty = try resolveType(annotation.type)
-          if !isClass && ty.isClassLike {
-            throw error("structs with class-typed or array properties are not supported yet", binding)
-          }
+          // Checked after every type is declared, since the field's type may be a struct not yet lowered.
+          if !isClass { structFieldChecks.append((Syntax(binding), ty)) }
           fields.append(Field(name: name, cName: "m_" + name, ty: ty, mutable: mutable))
         }
       } else if isClass, let d = member.decl.as(DeinitializerDeclSyntax.self) {
@@ -365,9 +369,6 @@ final class Lowerer {
               throw error("labeled enum payloads are not supported yet", p)
             }
             let ty = try resolveType(p.type)
-            if ty.isArray {
-              throw error("enums with array payloads are not supported yet", p)
-            }
             payload.append(Field(name: "_\(payload.count)", cName: "c\(tag)_\(payload.count)", ty: ty, mutable: true))
           }
         }
@@ -425,8 +426,8 @@ final class Lowerer {
 
   private func valueName(_ ty: Ty) -> String? {
     switch ty {
-    case .structure(let name), .optional(.structure(let name)):
-      return name
+    case .structure(let info), .optional(.structure(let info)):
+      return info.name
     case .enumeration(let info), .optional(.enumeration(let info)):
       return info.name
     default:
@@ -1401,12 +1402,13 @@ final class Lowerer {
         return Expr(kind: .print(v), ty: .void)
       }
       if let s = structs[name] {
+        // A struct initializer returns a fresh value, which the caller owns.
         if !s.initializers.isEmpty {
-          return try callInitializer(name, s.initializers, .structure(name), owned: false, call)
+          return try callInitializer(name, s.initializers, .structure(s), owned: true, call)
         }
         let args = try lowerArgs(call, s.fields.map { $0.ty })
         let values = try matchArguments(name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
-        return Expr(kind: .structLit(s, values), ty: .structure(name))
+        return Expr(kind: .structLit(s, values), ty: .structure(s), owned: s.isClassLike)
       }
       if let c = classes[name] {
         if !c.initializers.isEmpty {
@@ -1618,7 +1620,7 @@ final class Lowerer {
   private func fieldOf(_ ty: Ty, _ name: String, _ node: some SyntaxProtocol) throws -> Field {
     let fields: [Field]
     switch ty {
-    case .structure(let n): fields = structs[n]?.fields ?? []
+    case .structure(let info): fields = info.fields
     case .cls(let n): fields = classes[n]?.fields ?? []
     default: throw error("value of type '\(ty.swiftName)' has no member '\(name)'", node)
     }
@@ -1675,7 +1677,7 @@ final class Lowerer {
     case "Bool": return .bool
     case "Void": return .void
     default:
-      if structs[name] != nil { return .structure(name) }
+      if let info = structs[name] { return .structure(info) }
       if classes[name] != nil { return .cls(name) }
       if let info = enums[name] { return .enumeration(info) }
       if isGenericName(name) {
@@ -1722,7 +1724,7 @@ final class Lowerer {
   private func instanceType(_ base: String, _ args: [Ty], _ node: some SyntaxProtocol) throws -> Ty {
     if genericStructs[base] != nil {
       let info = try instantiateStruct(base, args, node)
-      return .structure(info.name)
+      return .structure(info)
     }
     if genericClasses[base] != nil {
       let info = try instantiateClass(base, args, node)
@@ -1798,8 +1800,8 @@ final class Lowerer {
       let env = envFor(g.names, args)
       let members = try inEnv(env) { try lowerMembers(g.decl.memberBlock, isClass: false) }
       info.fields = members.fields
-      info.initializers = try declareInitializers(members.initializers, owner: .structure(name), env: env, name: name)
-      info.methods = try declareMethods(members.methods, owner: .structure(name), env: env, name: name)
+      info.initializers = try declareInitializers(members.initializers, owner: .structure(info), env: env, name: name)
+      info.methods = try declareMethods(members.methods, owner: .structure(info), env: env, name: name)
       return info
     }
   }
@@ -1971,7 +1973,7 @@ final class Lowerer {
 
   private func methodOf(_ ty: Ty, _ name: String) -> FuncInfo? {
     switch ty {
-    case .structure(let n): return structs[n]?.methods[name]
+    case .structure(let info): return info.methods[name]
     case .cls(let n): return classes[n]?.methods[name]
     default: return nil
     }
@@ -2050,7 +2052,8 @@ final class Lowerer {
 
   private func instanceOrigin(_ ty: Ty) -> (base: String, args: [Ty])? {
     switch ty {
-    case .structure(let n), .cls(let n): return instanceArgs[n]
+    case .structure(let info): return instanceArgs[info.name]
+    case .cls(let n): return instanceArgs[n]
     case .enumeration(let info): return instanceArgs[info.name]
     default: return nil
     }
@@ -2198,12 +2201,12 @@ final class Lowerer {
         let params = initializerParams(i)
         let (types, args) = try bindGeneric(g.names, explicit: explicit, params: params, result: nil, expected: nil, call)
         let s = try instantiateStruct(name, types, node)
-        return try callInstanceInitializer(s.name, s.initializers, .structure(s.name), owned: false, args, call)
+        return try callInstanceInitializer(s.name, s.initializers, .structure(s), owned: true, args, call)
       }
       let (types, args) = try bindGeneric(g.names, explicit: explicit, params: storedParams(g.decl.memberBlock), result: nil, expected: nil, call)
       let s = try instantiateStruct(name, types, node)
       let values = try matchArguments(s.name, s.fields.map { (Optional($0.name), $0.ty) }, args, call)
-      return Expr(kind: .structLit(s, values), ty: .structure(s.name))
+      return Expr(kind: .structLit(s, values), ty: .structure(s), owned: s.isClassLike)
     }
     if let g = genericClasses[name] {
       if let i = genericInitializer(g.decl.memberBlock, call) {

@@ -19,7 +19,7 @@ indirect enum Ty: Equatable {
   case void
   /// The type of the `nil` literal before a context gives it an Optional type.
   case nilLiteral
-  case structure(String)
+  case structure(StructInfo)
   case cls(String)
   case enumeration(EnumInfo)
   case optional(Ty)
@@ -34,7 +34,8 @@ indirect enum Ty: Equatable {
     case .void: return "Void"
     case .nilLiteral: return "nil"
     case .array(let elem): return "[" + elem.swiftName + "]"
-    case .structure(let name), .cls(let name): return name
+    case .structure(let info): return info.name
+    case .cls(let name): return name
     case .enumeration(let info): return info.name
     case .optional(let inner): return inner.swiftName + "?"
     case .function(let params, let ret):
@@ -51,7 +52,7 @@ indirect enum Ty: Equatable {
     case .void: return "Void"
     case .nilLiteral: return "Nil"
     case .array(let elem): return "A_" + elem.mangled
-    case .structure(let name): return "S_" + cIdent(name)
+    case .structure(let info): return "S_" + cIdent(info.name)
     case .cls(let name): return "C_" + cIdent(name)
     case .enumeration(let info): return "E_" + cIdent(info.name)
     case .optional(let inner): return "O_" + inner.mangled
@@ -69,7 +70,7 @@ indirect enum Ty: Equatable {
     case .array(let elem): return "arr_" + elem.mangled
     case .bool: return "bool"
     case .void, .nilLiteral: return "void"
-    case .structure(let name): return "s_" + cIdent(name)
+    case .structure(let info): return "s_" + cIdent(info.name)
     case .cls(let name): return "s_" + cIdent(name) + " *"
     case .enumeration(let info): return "s_" + cIdent(info.name)
     case .optional(let inner): return "opt_" + inner.mangled
@@ -92,15 +93,29 @@ indirect enum Ty: Equatable {
     return false
   }
 
-  /// True for types whose values hold a reference count: a class, an enum with
-  /// a class in a payload, or an Optional wrapping one of these. Such values are
-  /// retained when copied from a place and released by their owner. Structs may
-  /// not hold them, because copying a struct would need its own retains.
+  /// True for types whose values hold a reference count: a class, an array, a struct
+  /// or enum with such a field or payload, or an Optional wrapping one of these. Such
+  /// values are retained when copied from a place and released by their owner.
   var isClassLike: Bool {
     switch self {
     case .cls, .array: return true
+    case .structure(let info): return info.isClassLike
     case .enumeration(let info): return info.holdsRef
     case .optional(let inner): return inner.isClassLike
+    default: return false
+    }
+  }
+
+  /// True when a value of this type holds a class instance directly, or through
+  /// structs, enums and Optionals. Structs may not hold such a value (a struct copy
+  /// would need class retains), so this is what a struct property may not be. An
+  /// array does not count: its elements are handled by the array helpers.
+  var holdsClassRef: Bool {
+    switch self {
+    case .cls: return true
+    case .optional(let inner): return inner.holdsClassRef
+    case .structure(let info): return info.fields.contains { $0.ty.holdsClassRef }
+    case .enumeration(let info): return info.cases.contains { $0.payload.contains { $0.ty.holdsClassRef } }
     default: return false
     }
   }
@@ -113,13 +128,18 @@ struct Field {
   let mutable: Bool
 }
 
-final class StructInfo {
+final class StructInfo: Equatable {
   let name: String
   var fields: [Field] = []
   var methods: [String: FuncInfo] = [:]
   var initializers: [FuncInfo] = []
 
   init(name: String) { self.name = name }
+
+  /// True when a field is class-like, so a copy of the struct retains or copies it.
+  var isClassLike: Bool { fields.contains { $0.ty.isClassLike } }
+
+  static func == (a: StructInfo, b: StructInfo) -> Bool { a === b }
 }
 
 final class ClassInfo {
