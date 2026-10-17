@@ -150,6 +150,13 @@ def parse_forms(toks)
   stack[0]
 end
 
+# EDG's exception-handling state (lib_src/eh.h). A noexcept function (libstdc++'s std::array::operator[], for one) pushes
+# a kind-6 entry on __curr_eh_stack_entry and pops it on every exit; nothing on the device unwinds, so the cells are
+# ordinary static storage here, not an extern to refuse.
+EH_RUNTIME_STATE = %w[__curr_eh_stack_entry __eh_curr_region __catch_clause_number __caught_object_address].freeze
+# libstdc++'s __glibcxx_assert_fail (the failing branch of std::array::operator[] and other _GLIBCXX_ASSERTIONS checks)
+GLIBCXX_ASSERT_FAIL = "_ZSt21__glibcxx_assert_failPKciS0_S0_".freeze
+
 def head_of(x)
   x.is_a?(Array) && !x.empty? && x[0].is_a?(String) ? x[0] : nil
 end
@@ -302,7 +309,7 @@ class Mod
       d = @datas[name]
       raise Refused, "static object @\"#{name}\" has no definition in the device unit" if f.nil? && d.nil?
       size, align = if f
-                      raise Refused, "static object @\"#{name}\" is extern" if f.drop(5).any? { |x| head_of(x) == "extern" }
+                      raise Refused, "static object @\"#{name}\" is extern" if f.drop(5).any? { |x| head_of(x) == "extern" } && !EH_RUNTIME_STATE.include?(name)
                       [as_int(f[3]), as_int(f[4])]
                     else
                       [static_bytes(d).length, 1]
@@ -339,6 +346,7 @@ class Mod
       end
       f = @globals[name]
       init = f.drop(5).find { |x| head_of(x) == "init" }
+      next if init.nil? && EH_RUNTIME_STATE.include?(name)   # the EH state starts zeroed, as an extern cell would be
       raise Refused, "static object #{name} has no initializer" if init.nil?
       nonzero = false
       init.drop(1).each do |it|
@@ -1695,6 +1703,12 @@ class SFn
     end
     if name.start_with?("__nfcxx_")
       raise Refused, "unknown device intrinsic #{name}"
+    end
+    # libstdc++'s assertion failure is noreturn (the host aborts): the device traps, as for an unreachable path
+    if name == GLIBCXX_ASSERT_FAIL
+      trap(5)
+      check_dead_after_call
+      return nil
     end
     callee_fn = @mod.fns[name]
     raise Refused, "call of #{name}, which has no body in the device unit (a host function, or a declaration)" if callee_fn.nil?
