@@ -4,4 +4,7 @@
 # clang rather than QBE here: the front end writes _Float16 constants as F16, which cproc does not accept.
 set -euo pipefail
 : "${NFCXX_MACOS_SYSROOT:?set NFCXX_MACOS_SYSROOT to the clean-room include directory}"
-exec clang --target=arm64-apple-darwin -nostdinc -isystem "$NFCXX_MACOS_SYSROOT" -isystem "$(clang -print-resource-dir)/include" "$@"
+# The front end emits the standard streams as extern globals named stdin, stdout and stderr; Darwin's libc names them
+# __stdinp and friends (the stdio.h macros in the clean-room headers do the same).
+exec clang --target=arm64-apple-darwin -nostdinc -isystem "$NFCXX_MACOS_SYSROOT" -isystem "$(clang -print-resource-dir)/include" \
+  -Dstdin=__stdinp -Dstdout=__stdoutp -Dstderr=__stderrp "$@"
