@@ -44,6 +44,8 @@ require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
 require_relative 'proven_miss_reviewed'
 require_relative 'strict_hints'
+require_relative 'predicate_returns'
+require_relative 'conversion_returns'
 require_relative 'hot_methods'
 require_relative 'core_methods'
 require_relative 'enumerator_model'
@@ -203,6 +205,12 @@ if $PROGRAM_NAME == __FILE__
     value
   end
 
+  # PREDICATE_RETURNS: a method ending in ? must return bool, or be whitelisted; a violation fails the build here.
+  PredicateReturns.enforce!(srcs.select { |path| path.end_with?('.rb') })
+  # CONVERSION_RETURNS: to_s, to_str, to_int, to_ary and to_hash take only optional positional parameters; their returns
+  # are runtime-checked hints, declared in a generated signature file that joins the program's signatures.
+  ConversionReturns.enforce!(srcs.select { |path| path.end_with?('.rb') })
+  conversion_sigs = ConversionReturns.write_sigs(srcs.select { |path| path.end_with?('.rb') })
   ireps, root_label = compile_ireps(srcs, symbol, out_dir)
   order = dfs_order(ireps, root_label)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
@@ -428,7 +436,8 @@ if $PROGRAM_NAME == __FILE__
   sig_class_annotations = nil
   sig_element_annotations = nil
   sig_root = ENV['BC2CPP_SIG_ROOT'] || File.expand_path('../..', __dir__)
-  if (sig_loaded = RbsSignatures.load(RbsSignatures.dirs_from_env(File.expand_path('../..', __dir__)), display_root: sig_root))
+  sig_dirs = RbsSignatures.dirs_from_env(File.expand_path('../..', __dir__)) + [conversion_sigs].compact
+  if (sig_loaded = RbsSignatures.load(sig_dirs, display_root: sig_root))
     sig_owners = registry.values.flatten.map(&:owner).uniq
     sig_class_annotations = ClassAnnotations.extract(ireps, registry, sig_owners)
     sig_element_annotations = ElementAnnotations.extract(ireps, registry, sig_owners)
