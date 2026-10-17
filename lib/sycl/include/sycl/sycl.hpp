@@ -1066,6 +1066,8 @@ template <class T, int D = 1> class local_accessor {
   size_t get_count() const { return r_.size(); }
   range<D> get_range() const { return r_; }
   T *get_pointer() const { return base(); }
+  // as the global accessor's: the multi_ptr of the slice (ggml-sycl's get_pointer(local_accessor) calls it)
+  template <access::decorated Dec = access::decorated::legacy> global_ptr<T, Dec> get_multi_ptr() const { return global_ptr<T, Dec>(base()); }
 
  private:
 #ifdef __NFCXX_SYCL_DEVICE__
