@@ -182,6 +182,10 @@ Supported:
   name takes its type from the candidate. A function name used as a value picks its
   overload from the expected function type. Overloads with the same labels and types are
   redeclarations. Each overload has its own C name (`f_show`, `f_show_1`, ...).
+- a method called on a temporary class value, e.g. `Make().describe()`, in any statement,
+  condition or loop. The method borrows the receiver, so a wrapper `cs_<method>` releases it
+  once the method returns, as Swift does: the deinit output comes before the rest of the
+  enclosing expression. The method's result is owned, so it does not depend on the receiver.
 
 Limits (each gives a diagnostic):
 - `return` with a value in an initializer
@@ -209,16 +213,15 @@ Supported in this step beyond M2 and M3:
   initializer chosen by argument labels; the memberwise initializer is available only
   when no explicit one exists
 - methods on classes and structs, called as `obj.method(args)` or, inside a type, as
-  `method(args)`; a method's receiver is borrowed, so a temporary class value is rejected
+  `method(args)`; a method's receiver is borrowed, and a temporary class value is released
+  once the method returns (see "Initializers, overloads and temporaries")
 - implicit `self` for properties, in initializers, deinitializers and methods
 - `if let a = x, let b = y, cond { ... }`: each condition is tested in order
 - top-level variables are visible to functions and closures
 - `_` as a payload pattern in `switch`
 
 Limits of this step (each gives a diagnostic):
-- `return` inside an initializer; a failable initializer
-- overloaded methods with the same name
-- a method call on a temporary class value
+- a failable initializer
 
 ## Tests
 

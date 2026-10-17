@@ -208,6 +208,9 @@ enum CEmit {
       out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params)));\n"
     }
     out += "static void swift_main(void);\n\n"
+    for f in program.consumingMethods {
+      out += consumingWrapper(f)
+    }
 
     // Destroy and constructor for each class. Destroy runs the deinitializer,
     // then releases the stored references, then frees the object.
@@ -296,6 +299,21 @@ enum CEmit {
       text += "static void prf_arr_\(m)(\(arr) a) { pr_arr_\(m)(a); arr_free_\(m)(a); }\n\n"
     default:
       break
+    }
+    return text
+  }
+
+  /// The wrapper for a method called on a temporary class value. The receiver is the
+  /// first parameter, owned by the wrapper. The method returns an owned value, so the
+  /// receiver can be released once the method has returned.
+  private static func consumingWrapper(_ f: FuncInfo) -> String {
+    let params = f.params.indices.map { "\(f.params[$0].ty.cName) p\($0)" }
+    let args = f.params.indices.map { "p\($0)" }.joined(separator: ", ")
+    var text = "static \(f.ret.cName) cs_\(f.cName)(\(params.isEmpty ? "void" : params.joined(separator: ", "))) {\n"
+    if f.ret == .void {
+      text += "  \(f.cName)(\(args));\n  sw_release(p0);\n}\n\n"
+    } else {
+      text += "  \(f.ret.cName) r = \(f.cName)(\(args));\n  sw_release(p0);\n  return r;\n}\n\n"
     }
     return text
   }
@@ -392,6 +410,8 @@ enum CEmit {
       return "(\(expr(base))).\(name)"
     case .call(let f, let args):
       return "\(f.cName)(\(args.map(expr).joined(separator: ", ")))"
+    case .callOnTemp(let f, let args):
+      return "cs_\(f.cName)(\(args.map(expr).joined(separator: ", ")))"
     case .print(let v):
       if case .array(let elem) = v.ty {
         return (v.owned ? "prf_arr_" : "pr_arr_") + elem.mangled + "(\(expr(v)))"

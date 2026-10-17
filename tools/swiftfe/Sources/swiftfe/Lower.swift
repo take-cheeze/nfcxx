@@ -101,6 +101,8 @@ final class Lowerer {
   /// Every C name given to a function or method, so that each one is unique.
   private var usedCNames = Set<String>()
   private var allFuncs: [FuncInfo] = []
+  /// Methods that have been called on a temporary class value.
+  private var consumingMethods: [FuncInfo] = []
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
   private var arrays: [Ty] = []
@@ -305,7 +307,8 @@ final class Lowerer {
       main: main,
       optionals: optionals,
       arrays: arrays,
-      functionTypes: functionTypes
+      functionTypes: functionTypes,
+      consumingMethods: consumingMethods
     )
   }
 
@@ -2041,12 +2044,17 @@ final class Lowerer {
   /// Calls the method that the arguments select. The receiver is borrowed, so a
   /// temporary class value would leak; it is rejected for now.
   private func callMethod(_ methods: [FuncInfo], _ name: String, _ receiver: Expr, _ call: FunctionCallExprSyntax) throws -> Expr {
-    if receiver.owned && receiver.ty.isClassLike {
-      throw error("calling a method on a temporary class value is not supported yet", call)
-    }
     let (method, args) = try resolveOverload(name, methods, dropReceiver: true, call)
     let params = Array(method.params.dropFirst())
     let values = try matchArguments(name, params.map { ($0.label, $0.ty) }, args, call)
+    if receiver.owned && receiver.ty.isClassLike {
+      // A temporary receiver is released once the method returns, by a wrapper (see CEmit),
+      // as Swift releases it. The result is owned, so it does not depend on the receiver.
+      if !consumingMethods.contains(where: { $0.cName == method.cName }) {
+        consumingMethods.append(method)
+      }
+      return Expr(kind: .callOnTemp(method, [receiver] + values), ty: method.ret, owned: true)
+    }
     return Expr(kind: .call(method, [receiver] + values), ty: method.ret, owned: true)
   }
 

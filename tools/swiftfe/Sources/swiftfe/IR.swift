@@ -195,6 +195,9 @@ indirect enum ExprKind {
   case local(String)
   case field(Expr, String)
   case call(FuncInfo, [Expr])
+  /// A method call whose receiver is a temporary class value. The receiver is passed
+  /// to a wrapper (see CEmit), which releases it once the method returns.
+  case callOnTemp(FuncInfo, [Expr])
   case print(Expr)
   case structLit(StructInfo, [Expr])
   case construct(ClassInfo, [Expr])
@@ -282,6 +285,8 @@ struct Program {
   let arrays: [Ty]
   /// Every function type that appears in the program, so CEmit can typedef it.
   let functionTypes: [Ty]
+  /// Methods called on a temporary class value, each of which needs a wrapper.
+  let consumingMethods: [FuncInfo]
 }
 
 /// C spelling of a type or function name. Identifier characters are kept, so the
