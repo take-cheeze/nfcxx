@@ -89,13 +89,24 @@ Supported:
   payload) and `.some(true)` where the type is declared.
 - an operation on a type parameter is checked after substitution, for the type it was
   instantiated with: `a + b` compiles for `Int` and is rejected for `Bool`.
+- same-type requirements in a `where` clause on a generic function, struct, class or enum:
+  `where T == Int`, `where T == Double`, `where T == Bool`. The requirement is checked for
+  each instance: `same(true, false)` is rejected for `where T == Int`, and the body is
+  lowered with `T` bound to the type the clause fixes.
 
 Limits:
 - Only instances are checked. A generic body is checked when it is instantiated, not
   when it is declared, so an unused generic is not checked at all. Swift would reject
   `a + b` for an unconstrained `T` in the declaration itself.
-- No constraints, protocols or `where` clauses. `T: Equatable` and `where T == Int` give
-  a diagnostic.
+- Constraints and protocols are not supported. `T: Equatable`, `where T: Equatable` and any
+  other conformance or layout requirement give the diagnostic `generic parameter constraints
+  are not supported yet`.
+- A `where` clause is accepted only on a generic function, struct, class or enum. One on a
+  method, an initializer or a declaration without type parameters is refused.
+- A same-type requirement is not used to infer a type parameter. `func zero<T>() -> T where
+  T == Int` needs `zero<Int>()`, or an expected type, or an argument that fixes `T`.
+  Requirements with value generics (`where T == 3`) are refused, and so is a requirement
+  with no bare type parameter on either side (`where Int == Bool`, `where [T] == [Int]`).
 - No extensions or value generics. Generic types may have initializers and methods. A generic struct or
   class has stored properties only, with a memberwise initializer.
 - A struct with a class-typed property is still rejected, so `Box<Obj>` (a struct) is
