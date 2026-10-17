@@ -58,7 +58,29 @@ class CodeGen
   # the wrapper would change the context (and so the cached answer) other sends get it in.
   def guarded_inline_arm?(name, argc, klass)
     arms = @block_core_arms && @block_core_arms[[name, argc]]
-    !arms.nil? && arms.any? { |arm| arm[:class] == klass }
+    return true if !arms.nil? && arms.any? { |arm| arm[:class] == klass }
+
+    guarded_plain_chain_arm?(name, argc, klass)
+  end
+
+  # GUARDED_PLAIN_ARM (ADR 0483): the arm when no compiled body is named. A core Ruby method the closed world leaves
+  # uncompiled (mruby's Array#each is ineligible, so it is in neither the registry nor core_hidden_defs) has no body for
+  # block_core_arms to name, but the loop does not call that body: it replaces the send with the same iteration. What
+  # it still needs is the rest of the arm's proof: no project definition, native, prepend, mixin or dynamic installer
+  # answers `name` on the class, and the core source defines `name` on the class itself. Array and Hash receivers,
+  # zero-argument sends: the shape the recognizers model.
+  GUARDED_PLAIN_CLASSES = %w[Array Hash].freeze
+
+  def guarded_plain_chain_arm?(name, argc, klass)
+    world = block_core_world
+    installed = symbol_installed_names
+    return false unless GUARDED_PLAIN_CLASSES.include?(klass) && argc&.zero? && world && installed && !installed.include?(name)
+
+    chain = BlockCoreDirectFallback::BLOCK_RECEIVERS.fetch(klass)[:chain]
+    return false if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) }
+    return false unless chain.all? { |owner| block_core_owner_plain?(owner, name) }
+
+    world.core_ruby_defines?(name, chain.first)
   end
 
   # The guarded regions the passes emitted, settled after the fallback glue pass has run the wrapper for every send

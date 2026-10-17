@@ -259,12 +259,12 @@ def external_gem_native_srcs(gems_root)
     Dir["#{gems_root}/3rd/mruby-stringio/src/*.c"]
 end
 
-# The closed-world sources one build's codegen reads: core mrblib only when the
-# build compiles it (not a hot-only build, ADR 0214: flash-limited targets keep
-# core Ruby interpreted), and only for the gems it really has. Called from a
-# codegen task, when the gem list is complete.
+# The closed-world sources one build's codegen reads: the core mrblib of the gems the build really has. A hot-only
+# build compiles only its listed methods (ADR 0214), but an excluded core method still defines its name, so the world
+# keeps it: without it an Array#each defined by mruby's own Ruby is not in the registry and no proof can name it
+# (ADR 0484). Called from a codegen task, when the gem list is complete.
 def bc2cpp_closed_world_srcs(spec, gems_root)
-  core_gems = bc2cpp_hot_only_build?(spec.build) ? nil : spec.build.gems.map(&:name)
+  core_gems = spec.build.gems.map(&:name)
   closed_world_mrblib_srcs(gems_root, core_gems: core_gems, tts: RgssTtsConfig.backend_possible?(spec.build.name))
 end
 
