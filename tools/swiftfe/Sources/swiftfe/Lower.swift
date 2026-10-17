@@ -609,8 +609,16 @@ final class Lowerer {
 
   private func lowerStmt(_ stmt: StmtSyntax) throws -> [Stmt] {
     if let ret = stmt.as(ReturnStmtSyntax.self) {
-      if initializingSelf {
-        throw error("'return' in an initializer is not supported yet", ret)
+      // Inside an initializer (not a closure in one, which has a return type), a bare
+      // `return` leaves with the new object, after releasing the owned locals it leaves.
+      if initializingSelf && returnType == nil {
+        if ret.expression != nil {
+          throw error("'return' with a value is not allowed in an initializer", ret)
+        }
+        guard let selfLocal = lookup("self") else {
+          throw error("'return' in an initializer needs 'self'", ret)
+        }
+        return releasesForReturn() + [.ret(Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty))]
       }
       guard let want = returnType else {
         throw error("'return' is not supported at top level in M2", ret)
@@ -2000,8 +2008,11 @@ final class Lowerer {
       }
       var stmts = [allocation]
       stmts += try lowerBlock(body.statements)
-      stmts += releases(of: root)
-      stmts.append(.ret(Expr(kind: .local("self"), ty: selfTy)))
+      // A body that ends in a `return` has already released the owned locals.
+      if !endsInJump(stmts) {
+        stmts += releases(of: root)
+        stmts.append(.ret(Expr(kind: .local("self"), ty: selfTy)))
+      }
       return stmts
     }
   }

@@ -169,6 +169,16 @@ Limits (each gives a diagnostic):
 - subscripts and `count` of a temporary array; `for-in` with a `where` clause
 - `switch` over Double or String; `%` on Double
 
+## Initializers, overloads and temporaries
+
+Supported:
+- `return` inside an initializer. A bare `return` releases the owned locals it leaves
+  (its parameters and the locals of the enclosing blocks) and returns `self`. The
+  initializer's implicit return is skipped when the body already ends in a `return`.
+
+Limits (each gives a diagnostic):
+- `return` with a value in an initializer
+
 ## Integration tests
 
 `tests/integration/run.sh` builds each testbed program in `tests/integration/programs`
