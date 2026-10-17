@@ -11,10 +11,10 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 cd "$work"
 sysincl="$NFCXX_MACOS_CLEANROOM/cxx:$NFCXX_LIBCXX:$NFCXX_MACOS_SYSROOT"
 # 1. compile: the object and its .ii/.ti records (the template requests) beside it; the Darwin C path compiles the C
-NFCXX_CC="$root/scripts/cross-macos-cc.sh" NFCXX_CXX=clang++ NFCXX_SYS_INCLUDES="$sysincl" \
+NFCXX_CC="$root/scripts/cross-macos-cc.sh" NFCXX_CXX="$root/scripts/cross-macos-cxx.sh" NFCXX_SYS_INCLUDES="$sysincl" \
   "$root/nfcxx" -c ${extra[@]+"${extra[@]}"} "$src" -o tl.o
 # 2. link: the prelinker reads tl.ii/.ti, compiles the instances through NFCXX_CC, and eccp links with the stub linker
-NFCXX_CC="$root/scripts/cross-macos-cc.sh" NFCXX_CXX="${NFCXX_LINK_DIALECT:-clang++}" NFCXX_SYS_INCLUDES="$sysincl" \
+NFCXX_CC="$root/scripts/cross-macos-cc.sh" NFCXX_CXX="${NFCXX_LINK_DIALECT:-$root/scripts/cross-macos-cxx.sh}" NFCXX_SYS_INCLUDES="$sysincl" \
   EDG_OBJ_TO_EXEC_LINKER="$root/scripts/cross-macos-link.sh" \
   "$root/nfcxx" ${extra[@]+"${extra[@]}"} tl.o -o exe
 cp exe "$out"
