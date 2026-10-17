@@ -435,10 +435,16 @@ module SymbolCache
   # mruby's own dispatch can only raise NoMethodError there; running it keeps
   # the error (message, args, call-depth and memory limits) exactly the same.
   NOMETHOD = <<~CPP
+    #include <stdlib.h>
     #ifdef BC2CPP_NOMETHOD_VERIFY
     #include <stdio.h>
     #include <stdlib.h>
     #endif
+    // Read once: the switch is a runtime environment variable, checked only on the fallback path.
+    static bool bc2cpp_fail_fast_type() {
+      static const bool on = [] { const char* v = getenv("BC2CPP_FAIL_FAST_TYPE"); return v != nullptr && v[0] == '1'; }();
+      return on;
+    }
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {
       mrb_sym mid = bc2cpp_sym(M, i);
     #ifdef BC2CPP_NOMETHOD_VERIFY
@@ -450,11 +456,9 @@ module SymbolCache
       fflush(stderr);
       abort();
     #endif
-    #ifdef BC2CPP_FAIL_FAST_TYPE
-      // FAIL_FAST_TYPE: the receiver is not one the closed world proved answers the name, so the fallback is a type
-      // error. Raised here instead of dispatching, so the wrong receiver is reported where it arrives.
-      mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: fail-fast: %T does not answer %n", recv, mid);
-    #endif
+      // FAIL_FAST_TYPE (runtime, BC2CPP_FAIL_FAST_TYPE=1): the receiver is not one the closed world proved answers the
+      // name, so the fallback is a type error. Raised here instead of dispatching, so the wrong receiver is reported.
+      if (bc2cpp_fail_fast_type()) mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: fail-fast: %T does not answer %n", recv, mid);
       mrb_funcall_argv(M, recv, mid, argc, argv);
       // The dispatch above found a method: the proof was wrong (ADR 0262). A
       // NoMethodError here would look like an ordinary user error.
