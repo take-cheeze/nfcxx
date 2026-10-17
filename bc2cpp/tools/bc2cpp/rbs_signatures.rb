@@ -60,9 +60,12 @@ module RbsSignatures
 
   # The fact tables under sig/bc2cpp (CoreFactSigs::FILES) are read by their own loaders and are not program
   # signatures: some name methods with mrblib bodies (Kernel#to_enum, Proc#yield), which a signature would hint.
+  # Program files load first, then native ones: a native declaration of a method the program also declares wins, as it did
+  # when the native files lived in their own directory (sorted after sig/bc2cpp).
   def files_in(dirs)
     facts = CoreFactSigs::FILES.to_set
-    dirs.flat_map { |d| File.file?(d) ? [d] : Dir[File.join(d, '**/*.rbs')] }.reject { |f| facts.include?(File.expand_path(f)) }.sort
+    files = dirs.flat_map { |d| File.file?(d) ? [d] : Dir[File.join(d, '**/*.rbs')] }.reject { |f| facts.include?(File.expand_path(f)) }
+    files.sort_by { |f| [NativeSigs.file?(f) ? 1 : 0, f] }
   end
 
   # nil when there is nothing to load (the byte-identical path).
