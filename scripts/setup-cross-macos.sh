@@ -28,12 +28,36 @@ else
   "$root/scripts/setup-qbe.sh"
 fi
 
+# The prelinker runs `nm` on the objects it reads at link time. On a Linux host the EDG base's default is GNU `nm -og`,
+# which cannot read Mach-O (its symbol values are 16 hex digits), so it stops reading and the template instances are
+# never generated. The cross path therefore gets its own EDG tree and base: llvm-nm reads the Mach-O objects, and
+# -fMacOSX64 is the prelinker's option for that output, and -u makes it strip the Mach-O leading underscore from
+# the symbol names it matches (the instance is __Z..., the prelinker looks for _Z...) (as scripts/setup-edg.sh sets it for a macOS host). The native
+# Linux tree (build/edg, build/edg-base) is not touched.
+cross_edg="$root/build/edg-cross"; cross_base="$root/build/edg-base-cross"
+if [ ! -x "$cross_edg/bin/eccp" ]; then
+  rm -rf "$cross_edg" "$cross_base"; mkdir -p "$cross_edg/bin"
+  cp -r "$root/build/edg-base" "$cross_base"
+  sed -i 's|-c "nm -og 2>/dev/null" |-c "llvm-nm -og 2>/dev/null" -fMacOSX64 -u |' "$cross_base/edg_eccp_config"
+  grep -q 'llvm-nm -og 2>/dev/null" -fMacOSX64 -u' "$cross_base/edg_eccp_config" || { echo "setup-cross-macos: the prelink option did not change in $cross_base" >&2; exit 1; }
+  for f in "$root/build/edg/bin/"*; do
+    b=$(basename "$f")
+    case "$b" in eccp) ;; *) ln -sf "$f" "$cross_edg/bin/$b" ;; esac
+  done
+  sed "s|$root/build/edg/|$cross_edg/|g; s|^export EDG_BASE=.*|export EDG_BASE=\"$cross_base\"|" "$root/build/edg/environment.sh" > "$cross_edg/environment.sh"
+  sed "s|$root/build/edg/|$cross_edg/|g" "$root/build/edg/bin/eccp" > "$cross_edg/bin/eccp"; chmod +x "$cross_edg/bin/eccp"
+  ln -sfn "$root/build/edg/lib" "$cross_edg/lib"
+fi
+grep -q 'llvm-nm -og 2>/dev/null" -fMacOSX64 -u' "$cross_base/edg_eccp_config" || { echo "setup-cross-macos: $cross_base does not have the Mach-O prelink option" >&2; exit 1; }
+
 mkdir -p "$root/build"
 cat > "$root/build/cross-macos.env" <<EOF
 # Written by scripts/setup-cross-macos.sh. Source this to run the macOS arm64 compile checks on this Linux host.
 export NFCXX_MACOS_CLEANROOM="$root/tests/macos-sysroot"
 export NFCXX_MACOS_SYSROOT="$root/tests/macos-sysroot/include"
 export NFCXX_LIBCXX="$libcxx"
+export EDG_BUILD="$root/build/edg-cross"
+export EDG_BASE="$root/build/edg-base-cross"
 export PATH="$llvm/bin:\$PATH"
 EOF
 echo "wrote $root/build/cross-macos.env"

@@ -1,0 +1,86 @@
+# Hand-written QBE IL (not cproc output): the operators, conversions, comparisons, loads and stores, block copies,
+# an indirect call, a variadic call, a conditional branch to a halt, and a phi.
+export function w $ops(w %a, l %b, s %c, d %d, w %p) {
+@start
+	%t1 =w add %a, 1
+	%t2 =l extsw %t1
+	%t3 =l sub %b, %t2
+	%t4 =w udiv %a, 3
+	%t5 =w urem %a, 3
+	%t6 =w sar %a, 2
+	%t7 =w shr %a, 2
+	%t8 =w shl %a, 1
+	%t9 =w mul %t1, %t4
+	%t10 =w div %t9, 7
+	%t11 =w rem %t9, 7
+	%t12 =w and %t11, 0xff
+	%t13 =w or %t12, -1
+	%t14 =w xor %t13, 0x7fffffff
+	%t15 =w neg %t14
+	%f1 =d add %d, d_0x1.8p1
+	%f2 =d sub %f1, d_-0.5
+	%f3 =d mul %f2, d_1e3
+	%f4 =d div %f3, d_3
+	%f5 =s truncd %f4
+	%f6 =d exts %c
+	%f7 =s swtof %a
+	%f8 =d swtod %a
+	%f9 =d uwtod %a
+	%f10 =s ultof %b
+	%f11 =d sltod %b
+	%f12 =d neg %d
+	%i1 =w stosi %c
+	%i2 =w dtoui %d
+	%i3 =l dtosl %d
+	%i4 =l dtoul %d
+	%i5 =w stoui %c
+	%c1 =w csltw %a, 0
+	%c2 =w cultw %a, %p
+	%c3 =w ceql %b, %t2
+	%c4 =w cnel %b, 0
+	%c5 =w cslew %a, 5
+	%c6 =w cugel %b, 5
+	%c7 =w cugtw %a, 5
+	%c8 =w culel %b, %t2
+	%c9 =w ceqd %d, %f1
+	%c10 =w cled %d, %f1
+	%c11 =w cges %c, %f5
+	%c12 =w cgtd %d, d_nan
+	%x1 =w extsb %a
+	%x2 =w extub %a
+	%x3 =w extsh %a
+	%x4 =w extuh %a
+	%x5 =l extuw %a
+	%cast1 =w cast %c
+	%cast2 =l cast %d
+	%cast3 =s cast %a
+	%cast4 =d cast %b
+	%ld1 =w loadsb %p
+	%ld2 =w loadub %p
+	%ld3 =w loadsh %p
+	%ld4 =l loadl %b
+	%ld5 =s loads %p
+	%ld6 =d loadd %b
+	%ld7 =l loadsw %p
+	%ld8 =l loaduw %p
+	storeb %a, %b
+	storeh %a, %b
+	storew %a, %b
+	storel %b, %b
+	stores %c, %b
+	stored %d, %b
+	blit %b, %b, 16
+	%fp =l copy $ops
+	%r1 =w call %fp(w %a, w 1)
+	%r3 =w call $printf(l $e_str, ..., w %a, d %d, l %b)
+	%sum =w add %r1, %r3
+	jnz %c1, @then, @else
+@then
+	%r2 =w copy %t14
+	jmp @end
+@else
+	hlt
+@end
+	%r4 =w phi @then %r2, @else %sum
+	ret %r4
+}
