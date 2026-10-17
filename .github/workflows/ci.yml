@@ -50,7 +50,9 @@ jobs:
             dotnet: true
             run: |
               scripts/setup-cil.sh
+              scripts/setup-pathb.sh
               tests/cil/run.sh
+              tests/pathb-cil/run.sh
           - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
             run: |
               tests/lib/run.sh

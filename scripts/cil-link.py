@@ -42,6 +42,18 @@ def qname(name):
     return name.replace("'", "\\'")
 
 
+# name -> (IL return type, parameter IL types, body): the runtime of the C++ exceptions on CIL.
+CXX_RUNTIME = {
+    '_setjmp': ('int32', ['int64'], ['ldc.i4.0', 'ret']),
+    '__throw_setup': ('int64', ['int64', 'int64', 'int32'],
+                      ["ldc.i8 1", 'ldarg.1', "call int64 Prog::'calloc'(int64, int64)", "dup",
+                       "stsfld int64 Prog::'cxx_ptr'", 'ret']),
+    '__throw': ('void', [], ['newobj instance void class CxxThrow::.ctor()', 'throw']),
+    '__rethrow': ('void', [], ['newobj instance void class CxxThrow::.ctor()', 'throw']),
+    '__exception_caught': ('void', [], ['ret']),
+    '__destroy_exception_object': ('void', [], ['ret']),
+}
+
 SHIM_C = r"""#define _GNU_SOURCE
 #include <dlfcn.h>
 /* Calls the named function through a variadic prototype, so the SysV ABI sees the vector registers in use (%al). */
@@ -106,6 +118,17 @@ def main():
         addrs.update(fr['addrs'])
         ctors.extend(fr['ctors'])
 
+    # The C++ exception runtime of the Path B CIL spike (docs/notes/pathb-cil.md): a throw stores the object's storage
+    # pointer in cxx_ptr and raises CxxThrow; the catch in the emitted IL reads cxx_ptr. Synthesized as functions, so
+    # the address and init handling of other functions apply to them.
+    used = set(calls) | addrs
+    for name, (ret, params, body) in CXX_RUNTIME.items():
+        if name in used and name not in functions:
+            functions[name] = {'name': name, 'ret': ret, 'params': params, 'exported': True,
+                               'il': [f".method static {ret} '{name}'({', '.join(params)}) cil managed {{",
+                                      '  .maxstack 4'] + ['    ' + b for b in body] + ['}']}
+    cxx_runtime = True  # the class and cxx_ptr are always there: a try in the IR catches CxxThrow
+
     # Undefined functions: P/Invoke. Intrinsics with no CIL form become empty methods.
     externs = {n: s for n, s in calls.items() if n not in functions}
     noops = {n: s for n, s in externs.items() if n in NOOP_INTRINSICS}
@@ -140,9 +163,18 @@ def main():
     emit('.assembly extern System.Runtime { .ver 8:0:0:0 }')
     emit('.assembly nfcxx_program { }')
     emit(f".module '{qname(os.path.basename(out))}.dll'")
+    if cxx_runtime:  # declared before its uses (ilasm needs the class first)
+        emit('.class public auto ansi CxxThrow extends [System.Runtime]System.Exception {')
+        emit('  .method public specialname rtspecialname instance void .ctor() cil managed {')
+        for x in ('    ldarg.0', '    call instance void [System.Runtime]System.Exception::.ctor()', '    ret'):
+            emit(x)
+        emit('  }')
+        emit('}')
     emit('.class public abstract sealed auto ansi beforefieldinit Prog extends [System.Runtime]System.Object {')
     for n in sorted(names):
         emit(f"  .field public static int64 'addr_{qname(n)}'")
+    if cxx_runtime:
+        emit("  .field public static int64 'cxx_ptr'")
 
     # P/Invoke stubs for the functions this program calls and no unit defines (a variadic call goes through the shim).
     variadic = any(s.get('variadic') for s in calls.values()) or any(fr.get('variadic') for fr in frags)
@@ -259,10 +291,15 @@ def main():
         with open(il_path, 'w') as fh:
             fh.write('\n'.join(lines) + '\n')
         dll = out + '.dll'
+        if os.environ.get('NFCXX_KEEP_IL'):  # debugging: keep the CIL text next to the output
+            with open(out + '.il', 'w') as fh:
+                fh.write('\n'.join(lines) + '\n')
         r = subprocess.run([ilasm_path(), '-exe', f'-output={dll}', il_path], capture_output=True, text=True)
         if r.returncode != 0:
             sys.stderr.write(r.stdout + r.stderr)
-            die('ilasm failed (the IL is in ' + il_path + ')')
+            with open(out + '.failed.il', 'w') as fh:
+                fh.write('\n'.join(lines) + '\n')
+            die(f'ilasm failed (the IL is in {out}.failed.il)')
     with open(out + '.runtimeconfig.json', 'w') as fh:
         json.dump({'runtimeOptions': {'tfm': 'net8.0', 'rollForward': 'LatestMajor',
                                       'framework': {'name': 'Microsoft.NETCore.App', 'version': RUNTIME}}}, fh)
