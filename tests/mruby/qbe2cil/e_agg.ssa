@@ -1,0 +1,31 @@
+# Hand-written QBE IL (not cproc output): aggregate types (a count field, a nested aggregate, a 3-byte field), an
+# aggregate argument, an aggregate result of a call, a static and a dynamic stack slot, and a fall-through block.
+type :small = align 4 { w 2, b }
+type :outer = align 8 { :small, l, h 3 }
+
+export function :outer $mk(w %x) {
+@start
+	%p =l alloc8 24
+	storew %x, %p
+	ret %p
+}
+
+export function w $use(:outer %v, w %k) {
+@start
+	%q =l add %v, 0
+	%t =w loadw %q
+	%x =:outer call $mk(w %k)
+	%s =l alloc8 32
+	%d =l alloc16 %k
+	storel %t, %d
+	call $sink(:outer %x, l %s)
+	%u =w call $mk2(:outer %v)
+@next
+	%w =w add %t, %u
+	ret %w
+}
+
+function w $mk2(:outer %v) {
+@start
+	ret 7
+}
