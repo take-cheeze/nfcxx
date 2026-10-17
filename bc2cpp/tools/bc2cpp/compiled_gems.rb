@@ -529,7 +529,10 @@ end
 # (tools/bc2cpp/specialize_plan.txt). It is set for a hot-only build only, the build the plan was measured on.
 BC2CPP_SPECIALIZE_PLAN_PATH = File.expand_path('specialize_plan.txt', __dir__)
 
+# BC2CPP_SPECIALIZE=0 in the environment builds without the plan (a baseline to compare against).
 def bc2cpp_specialize_env(spec, env: ENV)
+  return {} if env['BC2CPP_SPECIALIZE'] == '0'
+
   bc2cpp_hot_only_build?(spec.build, env: env) ? { 'BC2CPP_SPECIALIZE' => BC2CPP_SPECIALIZE_PLAN_PATH } : {}
 end
 
