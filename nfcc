@@ -38,8 +38,10 @@ case $backend in
   qbe) [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ] ||
          die "QBE not built; run scripts/setup-qbe.sh"
        qcc=$root/scripts/qbe-cc ;;
+  cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.sh"
+       qcc=$root/scripts/cil-cc ;;
   gcc) ;;
-  *) die "unknown NFCXX_BACKEND '$backend' (qbe or gcc)" ;;
+  *) die "unknown NFCXX_BACKEND '$backend' (qbe, cil or gcc)" ;;
 esac
 
 # Response files (@file), expanded in place with gcc's (libiberty buildargv) rules: arguments are separated by
@@ -240,7 +242,7 @@ compile_one() {
       die "dependency generation failed for $src"
   fi
   local what=-c; [ $asm = 0 ] || what=-S
-  if [ $backend = qbe ]; then
+  if [ $backend = qbe ] || [ $backend = cil ]; then
     NFCXX_C_INPUT=1 "$qcc" $what "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
     gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${pp[@]+"${pp[@]}"}" \
@@ -268,8 +270,9 @@ for e in "${inputs[@]}"; do
   esac
 done
 [ "$sawout" = 1 ] || out=a.out
-if [ $backend = qbe ]; then
-  # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits).
+if [ $backend = qbe ] || [ $backend = cil ]; then
+  # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits); the cil
+  # backend's link is cil-link.py (the wrapper sets NFCXX_CIL).
   "$qcc" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
 else
   gcc "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
