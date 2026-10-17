@@ -53,13 +53,14 @@ longjmps in EDG's runtime.
 | `loop_break_in_catch` | `break` out of a handler inside a loop | 150 |
 | `two_catches` | several catch clauses: refused, with a message | refused |
 
-Coverage of the existing Path B IR corpus (`tests/pathb-ir/*.ir`, 62 files): **7 translate**, 55 are refused. The
+Coverage of the existing Path B IR corpus (`tests/pathb-ir/*.ir`, 62 files): **12 translate**, 50 are refused. The
+`bytes` initializers (string literals and typeinfo names: `(data ...)` string constants become data, and `bytes` copies
+them), `index` and `bounds` (`abort()` when the index is not below the bound, as QBE's abort) translate now. The
 refusals, by count:
 
-- 16: `bytes` initializers (copies of constant data: string literals and typeinfo names)
-- 11: `index` (array addressing), 2 `bounds` (its check)
-- 3: variadic parameters; 2 `crem`, `cshl`, `pdiff`, `fneg`, `trap`, `barrier` and `load.v` (one each or two each)
-- 2: `byval`/aggregate values; 2 `bitfield` initializers; the rest are parser gaps (a `)` inside a name)
+- 9: taking the address of a function (`&"f"`); 7: variadic expressions; 3: `(ellipsis)` parameters
+- 6: `byval`/aggregate values; 2 indirect calls; 2 each: `trap`, `pdiff`, `load.v`, `cshr`, `crem`, `bitfield`
+  initializers; 3: `std::float16_t`; the rest are one-offs (`barrier`, `fneg`, `cshl`, `cf2i`, `cdiv`, `bfload`, `alloca`)
 
 ## Limits of this spike (each a refusal or a known wrong result)
 
@@ -70,11 +71,12 @@ refusals, by count:
 - **No destructors during unwinding.** EDG's cleanup tables are not translated. Objects with destructors in the `try`
   block are not destroyed when a throw leaves it.
 - **Native exceptions.** Exceptions thrown by native code (the host's libstdc++) are not CLR exceptions and are not caught.
-- **The IR is a subset.** Classes with virtual dispatch, `index`, `bytes` and `sret` need more emitter work (above).
+- **The IR is a subset.** Classes with virtual dispatch, function addresses, variadic calls and `sret` need more emitter
+  work (above).
 
 ## Next steps, in order
 
-1. `bytes` initializers and `index`/`bounds` (they carry most of the refusals; with them, string literals and arrays work).
+1. Function addresses (`&"f"`), `byval` and aggregate values, and the variadic calls (they carry most of the refusals).
 2. Typeinfo objects for the thrown and caught types, so catch clauses can be selected and checked by type.
 3. Cleanups: translate the destructor calls of the `try` block's objects to `finally` (or `fault`) regions.
 4. `sret` and aggregate values (C++ classes passed or returned by value).

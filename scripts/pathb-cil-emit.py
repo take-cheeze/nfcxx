@@ -38,6 +38,15 @@ class Refused(Exception):
     pass
 
 
+def is_unsigned(ty):
+    """True for an IR integer type that is unsigned (a const-qualified type counts as its base type)."""
+    if isinstance(ty, str):
+        return ty in SCALARS and ty != 'void' and not SCALARS[ty][2]
+    if isinstance(ty, list) and ty and ty[0] == 'const':
+        return is_unsigned(ty[1])
+    return False
+
+
 def refuse(msg):
     raise Refused(msg)
 
@@ -55,6 +64,34 @@ class Tmp:
         self.n = n
 
 
+def read_quoted(text, i):
+    """A double-quoted IR string at text[i]: returns (its characters, one per byte, and the index after it). The escapes
+    are those of read_string in pathb-qbe-emit.rb: \\n, \\\\, \\" and a three-digit octal."""
+    out, i, n = [], i + 1, len(text)
+    while True:
+        if i >= n:
+            refuse('unterminated string in IR')
+        c = text[i]
+        if c == '"':
+            return ''.join(out), i + 1
+        if c != '\\':
+            out.append(c)
+            i += 1
+            continue
+        e = text[i + 1] if i + 1 < n else ''
+        if e == 'n':
+            out.append('\n')
+            i += 2
+        elif e in ('"', '\\'):
+            out.append(e)
+            i += 2
+        elif e and e in '01234567' and i + 3 < n and text[i + 2] in '01234567' and text[i + 3] in '01234567':
+            out.append(chr(int(text[i + 1 : i + 4], 8)))
+            i += 4
+        else:
+            refuse(f'unknown escape \\{e} in IR string')
+
+
 def tokenize(text):
     toks, i, n = [], 0, len(text)
     while i < n:
@@ -65,13 +102,11 @@ def tokenize(text):
             toks.append(c)
             i += 1
         elif c == '"':
-            j = text.index('"', i + 1)
-            toks.append(text[i + 1 : j])
-            i = j + 1
+            s, i = read_quoted(text, i)
+            toks.append(s)
         elif c in '$@&' and i + 1 < n and text[i + 1] == '"':
-            j = text.index('"', i + 2)
-            toks.append(Ref({'$': 'slot', '@': 'glob', '&': 'fn'}[c], text[i + 2 : j]))
-            i = j + 1
+            s, i = read_quoted(text, i + 1)
+            toks.append(Ref({'$': 'slot', '@': 'glob', '&': 'fn'}[c], s))
         elif c == '%' and i + 1 < n and text[i + 1].isdigit():
             j = i + 1
             while j < n and text[j].isdigit():
@@ -84,6 +119,7 @@ def tokenize(text):
                 j += 1
             atom = text[i:j]
             toks.append(int(atom) if re.match(r'^-?\d+$', atom) else
+                        int(atom, 16) if re.match(r'^-?0x[0-9a-fA-F]+$', atom) else
                         float(atom) if re.match(r'^-?\d+\.\d*(e-?\d+)?$', atom) else atom)
             i = j
     return toks
@@ -117,6 +153,28 @@ class Emitter:
         self.globals = {}  # name -> IR type
         self.fn_sigs = {}
 
+    def global_image(self, ref, who):
+        """The bytes of the constant `ref`: a string literal (a data form) or a global with an initializer."""
+        if not (isinstance(ref, Ref) and ref.kind == 'glob'):
+            refuse(f'{who}: bytes from {ref!r}, which is not a global of this unit')
+        if ref.name in self.data_forms:
+            return string_bytes(self.data_forms[ref.name], self)
+        if ref.name not in self.global_forms:
+            refuse(f'{who}: bytes from {ref.name}, which is not defined in this unit')
+        d = global_data(self.global_forms[ref.name], self)
+        if d is None:
+            refuse(f'{who}: bytes from {ref.name}, which has no initializer in this unit')
+        widths = {'int8': 1, 'int16': 2, 'int32': 4, 'int64': 8, 'float32': 4, 'float64': 8}
+        img = bytearray()
+        for it in d['items']:
+            if it[0] == 'zero':
+                img += bytes(it[1])
+            elif it[0] in widths:
+                img += (it[1] & ((1 << (8 * widths[it[0]])) - 1)).to_bytes(widths[it[0]], 'little')
+            else:
+                refuse(f'{who}: bytes from {ref.name}, whose initializer has a {it[0]} item')
+        return bytes(img)
+
     def type_of(self, t):
         """IR type -> (IL type, size, signed); ptr and const are int64 addresses; aggregates are refused as values."""
         if isinstance(t, str):
@@ -147,6 +205,8 @@ class Function:
         self.labels = 0
         self.ret = 'void'
         self.params = []
+        self.param_ty = {}  # parameter number -> IR type
+        self.tmp_ty = {}    # temporary number -> IR type of its let
         self.slots = {}
         self.frame = 0
         self.ret_local = None
@@ -165,6 +225,7 @@ class Function:
                     if not (isinstance(p, list) and len(p) >= 3 and isinstance(p[1], Tmp)):
                         refuse(f'{self.name}: parameter form {p!r} is not supported by the spike')
                     pty = p[-1]
+                    self.param_ty[p[1].n] = pty
                     self.params.append((p[1].n, p[2] if len(p) == 4 else None, self.em.type_of(pty)[0]))
         if self.ret not in ('void', 'int32', 'int64', 'float32', 'float64'):
             refuse(f'{self.name}: unsupported return type {self.ret}')
@@ -286,7 +347,48 @@ class Function:
             return il
         if head == 'call':
             return self.call(e)
+        if head == 'index':
+            # (index BASE IDX SIZE) = BASE + ext(IDX) * SIZE, wrapping. The extension follows IDX's IR type as in
+            # pathb-qbe-emit.rb: zero for an unsigned 32-bit index, sign otherwise (a 64-bit index is used as it is).
+            have = self.expr(e[1])
+            self.coerce(have, 'int64')
+            have = self.expr(e[2])
+            if have == 'int32':
+                self.emit('conv.u8' if is_unsigned(self.ir_type(e[2])) else 'conv.i8')
+            elif have != 'int64':
+                refuse(f'{self.name}: index with a {have} index')
+            self.size_operand(e[3])
+            self.emit('mul', 'add')
+            return 'int64'
         refuse(f'{self.name}: unsupported expression {head}')
+
+    def size_operand(self, s):
+        """Push an index SIZE as int64: a number, or a register (a VLA element size, zero-extended as in QBE)."""
+        if isinstance(s, int):
+            self.emit(f'ldc.i8 {s}')
+            return
+        have = self.expr(s)
+        if have == 'int32':
+            self.emit('conv.u8')
+        elif have != 'int64':
+            refuse(f'{self.name}: size of a {have} type')
+
+    def ir_type(self, e):
+        """The IR type of operand e when the IR states it (a parameter, a let, a constant, a load or a conversion)."""
+        if isinstance(e, Tmp):
+            if f'p{e.n}' in self.locals:
+                return self.param_ty.get(e.n)
+            return self.tmp_ty.get(e.n)
+        if isinstance(e, list) and e and e[0] in ('const', 'load', 'iconv', 'bitcast', 'call', 'wadd', 'wsub', 'wmul',
+                                                  'and', 'or', 'xor', 'wneg') and len(e) > 1:
+            return e[1]
+        return None
+
+    def note_call(self, gname, sig, who):
+        known = self.em.fragment_calls.get(gname)
+        if known and known != sig:
+            refuse(f'{who}: {gname} called with two signatures')
+        self.em.fragment_calls[gname] = sig
 
     def call(self, e):
         callee = e[2]
@@ -309,10 +411,7 @@ class Function:
             typed.append(il)
         gname = self.em.fn_name(name)
         sig = {'ret': ret, 'params': typed, 'variadic': False}
-        known = self.em.fragment_calls.get(gname)
-        if known and known != sig:
-            refuse(f'{self.name}: {name} called with two signatures')
-        self.em.fragment_calls[gname] = sig
+        self.note_call(gname, sig, self.name)
         self.emit(f"call {ret} Prog::'{gname}'({', '.join(typed)})")
         return ret
 
@@ -348,6 +447,7 @@ class Function:
             if il == 'void':
                 refuse(f'{self.name}: void let')
             self.defs[tmp.n] = e
+            self.tmp_ty[tmp.n] = ty
             idx = self.new_local(il)
             self.locals[f'%{tmp.n}'] = ('local', idx, il)
             have = self.expr(e)
@@ -393,6 +493,28 @@ class Function:
             return
         if head == 'unreachable':
             self.emit('ldnull', 'throw')
+            return
+        if head == 'bounds':
+            # (bounds IDX N): abort() unless IDX < N as an unsigned integer (a negative IDX fails, as in QBE). N is a
+            # number, or a register (a VLA's element count, unsigned_long), which needs a 64-bit IDX.
+            have = self.expr(s[1])
+            if have not in ('int32', 'int64'):
+                refuse(f'{self.name}: bounds on a {have} index')
+            bound = s[2]
+            if isinstance(bound, int):
+                if have == 'int32':
+                    v = bound & 0xFFFFFFFF
+                    self.emit(f'ldc.i4 {v - (1 << 32) if v >= 1 << 31 else v}')
+                else:
+                    self.emit(f'ldc.i8 {bound & ((1 << 64) - 1)}')
+            else:
+                if have != 'int64':
+                    refuse(f'{self.name}: bounds with a register bound needs a 64-bit index')
+                self.coerce(self.expr(bound), 'int64')
+            ok = self.new_label('IL_bounds_ok')
+            self.emit(f'blt.un {ok}')
+            self.note_call('abort', {'ret': 'void', 'params': [], 'variadic': False}, self.name)
+            self.emit("call void Prog::'abort'()", 'ldnull', 'throw', f'{ok}:')
             return
         if head == 'nonnull':
             self.expr(s[1])
@@ -511,7 +633,7 @@ class Function:
                 body.extend(part[1:])
             elif isinstance(part, list) and part and part[0] in ('block', 'let', 'store', 'eval', 'return',
                                                                      'unreachable', 'if', 'set', 'loop', 'nonnull', 'label',
-                                                                     'goto', 'break', 'continue'):
+                                                                     'goto', 'break', 'continue', 'bounds'):
                 body.append(part)
         off = 0
         for sl in slots:
@@ -544,6 +666,24 @@ class Function:
 INT_ITEM = {1: 'int8', 2: 'int16', 4: 'int32', 8: 'int64'}
 
 
+def string_bytes(f, em):
+    """`(data "NAME" TYPE (string "..."))`, a string literal: the bytes of its array, zero padded to the array's size, as
+    in emit_string of pathb-qbe-emit.rb. Other data forms are refused (nothing emits them yet)."""
+    name, ty, text = f[1], f[2], f[3]
+    if not (isinstance(text, list) and len(text) == 2 and text[0] == 'string' and isinstance(text[1], str)):
+        refuse(f'data {name}: only string literals are supported by the spike')
+    t = ty
+    while isinstance(t, list) and t and t[0] == 'const':
+        t = t[1]
+    if not (isinstance(t, list) and len(t) == 3 and t[0] == 'array'):
+        refuse(f'data {name}: not an array')
+    total = int(t[1]) * em.type_of(t[2])[1]
+    raw = [ord(c) for c in text[1]]
+    if any(c > 255 for c in raw) or len(raw) > total:
+        refuse(f'data {name}: string does not fit its array')
+    return bytes(raw + [0] * (total - len(raw)))
+
+
 def global_data(f, em):
     """`(global NAME TYPE SIZE ALIGN [(static)] (init ITEM...))` -> a fragment data entry. ITEMs are (addr OFF TYPE REF
     ADD) and (scalar OFF TYPE (const TYPE V) | (null TYPE)); the offsets become zero fill. An EH runtime global
@@ -568,6 +708,14 @@ def global_data(f, em):
         if kind == 'zero':  # (zero OFF SIZE)
             items.append(['zero', int(it[2])])
             pos = off + int(it[2])
+            continue
+        if kind == 'bytes':  # (bytes OFF LEN @"const"): a copy of the bytes of a constant global (string literals)
+            n = int(it[2])
+            img = em.global_image(it[3], name)
+            if len(img) != n:
+                refuse(f'{name}: bytes of {n} from {it[3]!r}, which holds {len(img)} bytes')
+            items.extend(['int8', b] for b in img)
+            pos = off + n
             continue
         if kind == 'addr':
             ref = it[3]
@@ -600,7 +748,8 @@ def global_data(f, em):
 
 def main():
     src, out_path = sys.argv[1], sys.argv[2]
-    text = sys.stdin.read() if src == '-' else open(src).read()
+    # latin-1: one character per byte, as the IR's strings are read (pathb-qbe-emit.rb)
+    text = sys.stdin.buffer.read().decode('latin-1') if src == '-' else open(src, encoding='latin-1').read()
     forms = parse(tokenize(text))
     fragment = {'tu': 'pathb', 'functions': [], 'data': [], 'calls': {}, 'addrs': set(), 'ctors': []}
     em = Emitter(fragment)
@@ -609,6 +758,8 @@ def main():
     em.gname = lambda n: n
     em.fn_name = lambda n: n
     em.fn_il = lambda n: f"int64 Prog::'{n}'()"
+    em.global_forms = {f[1]: f for f in forms if isinstance(f, list) and f and f[0] == 'global'}
+    em.data_forms = {f[1]: f for f in forms if isinstance(f, list) and f and f[0] == 'data'}
     for f in forms:
         if not isinstance(f, list) or not f:
             continue
@@ -616,6 +767,11 @@ def main():
             d = global_data(f, em)
             if d is not None:
                 fragment['data'].append(d)
+            continue
+        if f[0] == 'data':
+            raw = string_bytes(f, em)
+            fragment['data'].append({'name': f[1], 'exported': True, 'align': 1, 'size': len(raw),
+                                     'items': [['int8', c] for c in raw]})
             continue
         if f[0] == 'function':
             name = f[1]
