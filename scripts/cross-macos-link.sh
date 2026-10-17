@@ -16,7 +16,9 @@ while [ $# -gt 0 ]; do
     -l*) case "${1#-l}" in C|stdc++|gcc|gcc_s|m|c|pthread|dl|rt) ;; *) libs+=("$1") ;; esac ;;
     -Wl,*) ;;
     -O*|-f*|-g*|-W*|-m*|-pipe|-c|-shared|-rdynamic|-fPIC|-pic) ;;
-    *.o|*.a) objs+=("$1") ;;
+    *.o|*.a)
+      # the driver adds the host-built sret thunks (ELF); they are not Mach-O and not needed by the programs here
+      case "$(file -b "$1" 2>/dev/null)" in *ELF*) echo "cross-macos-link: dropped host object $1 (not Mach-O)" >&2 ;; *) objs+=("$1") ;; esac ;;
     *) ;;
   esac
   shift
