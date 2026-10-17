@@ -1,0 +1,1 @@
+for_where_not_bool.swift:2:19: error: condition must be of type 'Bool', but is of type 'Int'
