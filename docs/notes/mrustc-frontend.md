@@ -26,7 +26,10 @@ the program, and each crate of MRUSTC_NFCC_CRATES (cached as build/mrustc/nfcxx/
 `scripts/mrustc-nfcc.sh prog.rs -o prog` builds the program. `MRUSTC_NFCC_CRATES` names the crates to compile through
 nfcxx (`core alloc std`, or `all`); `MRUSTC_NFCC_CORE=1` is `core` alone. A crate is rebuilt when its C file or the
 rewrite scripts are newer than its object. `scripts/setup-mrustc.sh` builds mrustc and the 1.90 standard library into
-`build/mrustc/src` (pinned commit `d85e86b`, from the mrustc `build-1.90.0.sh` steps). The driver takes `MRUSTC` and
+`build/mrustc/src` (pinned commit `016c5899` on take-cheeze/mrustc branch `nfcxx/fixes`: upstream `d85e86b` plus the fixes
+in that branch's `NFCXX-FIXES.md`; from the mrustc `build-1.90.0.sh` steps, with `MRUSTC_REPO` to override the repository).
+The census and the rewrites were re-run on this pin: `tests/mrustc/run.sh` (15 of 15) and `tests/realworld/run_mrustc.sh`
+(3 of 3) pass. The driver takes `MRUSTC` and
 `MRUSTC_STD` to use another build. The edition defaults to 2021.
 
 Three choices in the first step matter:
@@ -79,14 +82,19 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 ## 3. Checks
 
-- `tests/mrustc/run.sh` (ten cases, about half a minute once the crates are cached; the first run of `vec_sum_all`
-  builds all of them, a few minutes):
+- `tests/mrustc/run.sh` (fifteen cases, about 40 seconds once the crates are cached; the first run of `vec_sum_all`
+  builds all of them, a few minutes). It runs in CI as the `mrustc` job, which is part of `build-and-test`:
   - `hello` prints `Hello, world!`; `vec_sum` prints `55 10`; `vec_sum_core` (`MRUSTC_NFCC_CORE=1`) and `vec_sum_all`
     (`MRUSTC_NFCC_CRATES=all`) print the same;
   - on the all-crates build: `threads` (atomics, `Mutex`, `join`), `fsio` (`File`, `metadata`, `remove_file`), `proc`
     (a child process through `Command`), `hashing` (`HashMap`, the random state), `floats` (formatting), and `i128`
-    (128-bit arithmetic). Each expected output was also produced by mrustc's gcc-built standard library, and each value
-    was checked by hand.
+    (128-bit arithmetic);
+  - also on the all-crates build: `time` (`Instant`, `SystemTime`, `sleep`, `Duration` formatting), `net` (a TCP echo
+    over loopback with a server thread, a UDP datagram, a refused connection), `signals` (a handler installed with
+    `signal` and raised with `raise`), `dlopen` (`dlopen`, `dlsym`, `dlclose`, `dlerror` on libc and libm), and
+    `checked` (checked, overflowing, wrapping and saturating arithmetic at several widths).
+  Each expected output was also produced by mrustc's gcc-built standard library, and checked against Rust's semantics.
+  Two results mrustc gets wrong are left out (section 4).
 
   Needs `scripts/setup-mrustc.sh`.
 - Also checked by hand, on the gcc-std build and the all-crates build alike: `std::env::args` sees its arguments (the
@@ -98,6 +106,19 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
   mrustc builds here reaches them.
 - The program runs from another directory with relative paths (the driver resolves them before it changes directory).
 - `MRUSTC_NFCC_KEEP=1` keeps the intermediate files of a run, for debugging.
+- Real crates with dependencies: `tests/realworld/run_mrustc.sh` runs each case under `tests/realworld/mrustc/`. The
+  dependency tree is built by mrustc's `minicargo` from a `cargo vendor` of the case's lock file, then the program and
+  every crate of its link are compiled by the pipeline (`MRUSTC_NFCC_CRATES=all`), and the output is compared with
+  rustc's. Two cases so far:
+  - `serde-json`: serde_json 1.0.133 with serde, serde_core, ryu, itoa and memchr (and their build scripts);
+  - `regex`: regex 1.13.1 with regex-automata, regex-syntax, aho-corasick and memchr. Its largest crate, regex-automata,
+    has a 40 MB C file. It needed the QBE change below.
+  Each takes a few minutes cold (`cargo vendor` and the mrustc build of the tree, then the pipeline) and needs network
+  access for `cargo vendor`.
+- **QBE's parallel moves.** `rega.c` holds at most 64 copies in one parallel move, the copies a block edge needs for
+  phi operands and call arguments. A join with more stopped QBE with `no more pm slots` while building regex-automata.
+  `scripts/setup-qbe.sh` now raises the limit to 1024 in the build copy (a static array, so no cost). The change
+  belongs in the QBE fork as a commit; the pin in `3rd/qbe` is unchanged.
 - libcore's object, built through nfcxx, has 19,796 defined symbols; mrustc's gcc-built `libcore.rlib.o` has 19,476.
   The counts are not expected to match exactly; they are a sanity check, not a proof.
 
@@ -105,9 +126,16 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 - **The system is still gcc's.** The objects are nfcxx's, but the linker driver (`cc`), the assembler (`as`, which
   QBE's output goes through) and glibc, libgcc_s, libm and the rest come from the host.
-- **Not exercised:** `std::time` (`Instant`, `SystemTime`), networking, signals, dynamic loading (`dlopen`), the
-  checked-arithmetic forms of `__builtin_*_overflow` (which `qbe-prep.rb` rewrites for some operand types), and panics
-  that unwind through more than one frame of user code.
+- **Not exercised:** panics that unwind through more than one frame of user code, `std::fs` beyond the `fsio` case,
+  the `libtest` and `proc_macro` crates (section 4 below), and the 16-byte atomics (no program reaches them). `time`,
+  networking, signals, `dlopen` and checked arithmetic are now covered (section 3).
+- **mrustc's bugs found by the checked-arithmetic and time cases.** Both reproduce in mrustc's own gcc build, so they
+  are not the pipeline's, and both are left out of `checked.rs`:
+  - The 128-bit multiply helper in mrustc's prelude (`mul128_o`) does not flag the bits of the multiplicand it shifts
+    out, so `(1u128 << 100).checked_mul(1 << 28)` gives `Some(0)`, not `None`.
+  - mrustc's constant evaluator folds `(-30000i16).checked_mul(2)` to `Some(5536)` (the wrapped value, not overflowing).
+    At run time the same operation gives `None`. `checked.rs` passes its operands through a non-`const` function so
+    they are not folded.
 - **The `0xffffffffdeaddead` warnings.** Assembling some crates warns `0xffffffffdeaddead shortened to 0xad`. The
   constant is QBE's undefined-value marker (section 6). It is not proven harmless, but no output changed when the marker
   was changed (section 6).
@@ -119,18 +147,42 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 - **Port check:** `tests/mruby/qbe-prep.sh` needs EDG for its corpus part, which was skipped here. Its edge-case part
   passed (92 of 92 identical). Its vacuity check then fails, because the corpus that produces the atomic rewrites is
   missing. That failure is not caused by the `$` change.
+- **mrustc cannot compile `zmij` 1.0.23** (the float formatter of serde_json 1.0.154): it aborts with `Mismatched types -
+  f64 and f32` (`src/hir/hir_ops.cpp:133`). The serde test pins serde_json 1.0.133, which uses `ryu`. This is a
+  frontend bug to report upstream or fix in a fork, not a pipeline problem.
+- **mrustc frontend bugs that stop real crates** (each reproduced with a small file; rustc accepts all of them):
+  - `async fn` in a `$item:item` macro fragment: `m! { async fn f() {} }` with `macro_rules! m { ($($i:item)*) => { $($i)* } }`
+    fails with `Macro_InvokeRules_MatchPattern - No arm matched`. A plain `fn` matches. tokio's `cfg_io_util!` block
+    contains an `async fn`, so tokio does not compile (`tokio` 1.53.3, features `rt,sync,time,io-util`).
+  - A `'static` reference to a generic associated constant holding function pointers, `Bytes { vtable: &Owned::<T>::VTABLE }`
+    with `const VTABLE: VTable = VTable { drop: owned_drop::<T> }`, fails with `Lifetime bound '#local0: 'static
+    failed`. This is `bytes` 1.12.1's `owned_clone`. `bytes` 1.10.1 gets past it.
+  - `libc` 0.2.191's `custom_struct` macro: `No arm matched`, not minimised. `mio` 1.2.4 (tokio's `net` feature) needs
+    libc 0.2.191, so tokio's `net` feature is out too.
+- **Batch of 13 small crates** (`tests/realworld/mrustc/batch`: log, once_cell, either, bitflags, smallvec, base64,
+  semver, hex, unicode-segmentation, itoa, fnv, scopeguard): mrustc's `minicargo` builds all of them and the gcc binary
+  matches rustc. The pipeline stops on `unicode-segmentation` 1.13.3 in QBE: `emit, too many instructions` (the 2^20
+  emit buffer). Raising the buffer to 2^22 moved the failure to QBE being killed (out of memory on a 15 GB machine).
+  The C has no function above about 2,000 lines, so the instruction growth is not in one function; the cause is not
+  yet found. The cap was reverted.
 - **Only the crates the program links are built.** `libtest`, `proc_macro` and the other crates of the 1.90 build were
   surveyed through the rewrite and cproc and accepted, but not compiled and linked.
 - mrustc also links its own gcc binary of each program during the run, and the driver discards it.
 
 ## 5. Next steps
 
-1. Cover what section 4 lists as not exercised: `std::time`, networking, signals, `dlopen`, and checked arithmetic.
-2. Make mrustc stop producing reads of variables with no reaching definition, if they can be shown to be dead (section 6
-   lists where they are), or find the paths where they are not dead.
+1. Real crates past the frontend. Step 2 (regex, clap) passed with no new rewrite; the frontend bugs in section 4 are what
+   stop the next ones (tokio). The next pins to try are a tokio release whose macros avoid `async fn` in item fragments,
+   and whatever mrustc fixes first. Each new bug is a mrustc change, not a rewrite.
+2. Panics that unwind through several frames, `std::fs` beyond `fsio`, and `libtest`/`proc_macro` (compile and link).
+2. The undefined-value site that does run (section 6): either make mrustc's C initialise the return union, or accept
+   the copy as dead by construction. Other sites are not reached by any program in the suite.
 3. Decide whether the rewrites belong in a fork of mrustc's codegen rather than in text. They are specific to this pin
-   of mrustc, and each new pin means redoing the census (section 2).
-4. Wire the all-crates test into CI, with a cache for `build/mrustc`. The first build takes minutes.
+   of mrustc, and each new pin means redoing the census (section 2). The two mrustc bugs in section 4 would be fixed
+   there, not in text.
+4. CI: the `mrustc` job (`.github/workflows/ci.yml`) caches mrustc's compiler and standard library (`bin/mrustc`,
+   `output-1.90.0`) and the per-crate objects. It has not run on GitHub's runners yet: the first run is the test of the
+   cold build (minutes; a download of the rustc source).
 
 ## 6. Undefined values: what was checked
 
@@ -151,3 +203,16 @@ The undefined value is `UNDEF`, the constant `0xdeaddead` (`parse.c`). Those are
 - **Why there are reads at all.** mrustc's C declares a function's locals up front and assigns them on the paths of the
   MIR that define them, so a join can see a variable that was assigned on one path only. In valid Rust such a value is
   only read where the MIR defines it. Whether any site is reachable and used is what section 5 item 2 would settle.
+- **Which sites run.** A probe build (scratch: a QBE copy with a call to `__nfcxx_undef_probe(id)` at the start of each
+  block that reads `UNDEF` in an instruction or a jump, or feeds it to a successor's phi; the map from ids to function
+  and block is written at compile time). Block entry over-approximates, so a probe that never fires proves that no
+  such read ran. A positive control (an uninitialised local read on one path) fires and prints the value
+  `-559030611`, which is `0xdeaddead`. Across the fifteen programs of section 3, all built with `MRUSTC_NFCC_CRATES=all`,
+  exactly one site runs: `std::sys::net::connection::socket::socket_addr_to_c`, in its IPv4 arm, which the `net` case
+  calls six times (one per IPv4 address conversion). The other fourteen programs never reach a probe.
+- **What the reached site does.** Its join phi takes `UNDEF` from the IPv4 edge for three words, and stores them into
+  bytes 16 to 28 of the `SocketAddrCRepr` union that the function returns. The IPv4 arm writes only the first 16 bytes
+  (`sockaddr_in`), and returns length 0x10, so `bind`, `connect` and `sendto` read only those bytes. The copied
+  `UNDEF` bytes are never read by a consumer, so the program's output does not depend on them. This is dead by
+  construction for this site, not a general argument: the same shape in another function would need its own check.
+  The root is mrustc's C, which leaves the union's unused tail unwritten; a fix would zero it in mrustc's output.

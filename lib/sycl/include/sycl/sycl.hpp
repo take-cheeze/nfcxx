@@ -408,6 +408,7 @@ template <int D = 1> class nd_item {
   }
   size_t get_group(int d) const { return grp_[d]; }
   range<D> get_group_range() const { range<D> n; for (int i = 0; i < D; i++) n[i] = gr_[i] / lr_[i]; return n; }
+  size_t get_group_range(int d) const { return get_group_range()[d]; }
   size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * (gr_[i] / lr_[i]) + grp_[i]; return l; }
   range<D> get_global_range() const { return gr_; }
   size_t get_global_range(int d) const { return gr_[d]; }
@@ -1069,8 +1070,7 @@ template <class T, int D = 1> class local_accessor {
   size_t get_count() const { return r_.size(); }
   range<D> get_range() const { return r_; }
   T *get_pointer() const { return base(); }
-  // as the global accessor's: the multi_ptr of the slice (ggml-sycl's get_pointer(local_accessor) calls it)
-  template <access::decorated Dec = access::decorated::legacy> global_ptr<T, Dec> get_multi_ptr() const { return global_ptr<T, Dec>(base()); }
+  template <access::decorated Dec = access::decorated::legacy> local_ptr<T, Dec> get_multi_ptr() const { return local_ptr<T, Dec>(base()); }
 
  private:
 #ifdef __NFCXX_SYCL_DEVICE__
