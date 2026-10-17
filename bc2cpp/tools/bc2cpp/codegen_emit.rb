@@ -705,12 +705,13 @@ class CodeGen
     "#{direct_construct_class_fn(owner)}()"
   end
 
-  # STRINGIO_DIRECT_READ (codegen_send.rb): the file-scope prototype of mrb_stringio_read_direct, which mruby-stringio
-  # defines with C linkage. Only a unit that emits the read form declares it.
+  # STRINGIO_DIRECT_READ (codegen_send.rb): the file-scope prototypes of mrb_stringio_read_direct and mrb_io_read_direct,
+  # which mruby-stringio and mruby-io define with C linkage. Only a unit that emits the read form declares it.
   def emit_stringio_read_decl
     return '' unless @stringio_direct_read_used
 
-    "extern \"C\" mrb_bool mrb_stringio_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n\n"
+    "extern \"C\" mrb_bool mrb_stringio_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n" \
+      "extern \"C\" mrb_bool mrb_io_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n\n"
   end
 
   # Declarations for direct compiled construction actually used:
