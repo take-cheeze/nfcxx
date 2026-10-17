@@ -29,6 +29,11 @@ done
 # "no more pm slots". The array is static, so 1024 costs nothing. A fork commit would be the proper home for this.
 sed -i 's/NPm = 64,/NPm = 1024,/' "$root/build/qbe/rega.c"
 grep -q 'NPm = 1024,' "$root/build/qbe/rega.c" || { echo "setup-qbe: NPm not found in rega.c" >&2; exit 1; }
+# all.h caps the instructions of the emit buffer at NIns (1 << 20). A straight-line block of a large table (mrustc's
+# unicode_segmentation, batch case) needs more, and QBE stops with "emit, too many instructions". The buffer is static,
+# so a larger cap costs address space only.
+sed -i 's/NIns    = 1 << 20,/NIns    = 1 << 22,/' "$root/build/qbe/all.h"
+grep -q 'NIns    = 1 << 22,' "$root/build/qbe/all.h" || { echo "setup-qbe: NIns not found in all.h" >&2; exit 1; }
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.
