@@ -158,10 +158,19 @@ Supported:
   Int needs a default; Bool must cover both values. Enum cases may list several
   patterns when they bind nothing.
 - `Double` with literals, `+ - * /`, comparisons, `Double(n)` and Swift's printing.
-- Arrays `[T]` of Int, Bool, Double, structs and optionals of those: literals, `a[i]`
-  (reads and writes, trapping out of range), `a.count`, `a.append(x)`, `for x in a`,
-  and `print` of arrays of Int, Bool or Double. Arrays are values: copying one copies
-  the buffer, and the buffer is freed when its owner ends.
+- Arrays `[T]` of any element type: Int, Bool, Double, structs, classes, enums that hold
+  classes, optionals and nested arrays. Literals, `a[i]` (reads and writes, trapping out of
+  range), `a.count`, `a.append(x)`, `for x in a`, and `print` of arrays of Int, Bool or
+  Double. Arrays are values: copying one copies the buffer, and each class element in it
+  gets its own reference (retained, then released when the buffer is freed, in order).
+- Structs and enum payloads that hold arrays, including a struct that holds an array of
+  itself (`struct Tree { var kids: [Tree] }`). Such a struct is class-like: a copy copies
+  its arrays, and its owner frees them. A struct may not hold a class, directly or through
+  another struct, an enum or an Optional (structs with class-typed properties are still
+  rejected). Class fields may hold arrays already.
+- Optional arrays (`[Int]?`): assignment, `x!`, `if let`, `== nil`, and `x![i]`.
+- Subscripts and `count` of a temporary array, e.g. `make()[0]` and `make().count`. The
+  temporary is freed after the element is read, and a class element is returned owned.
 
 Limits (each gives a diagnostic):
 - `break` inside a `switch`

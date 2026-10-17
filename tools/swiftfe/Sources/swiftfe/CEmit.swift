@@ -117,14 +117,26 @@ enum CEmit {
     }
     out += "\n"
 
-    // Value types (structs, enums and optionals), dependencies first.
+    // Value types (structs, enums, Optionals and arrays), dependencies first. The output has
+    // three parts, in order: the type bodies, the prototypes of the copy and release helpers,
+    // and the helper bodies. A helper may then use any type and call any other helper, which
+    // a type that holds an array of itself needs.
     var defined = Set<String>()
-    var values = ""
+    var bodies = ""
+    var protos = ""
+    var helpers = ""
     func needsDefinition(_ ty: Ty) -> Bool {
       switch ty {
       case .structure, .enumeration, .optional, .array: return true
       default: return false
       }
+    }
+    /// Declares `ret_cn` (adds one reference to each class-like part) and `rel_cn` (drops
+    /// them) for a value type `cn`. `copy` and `drop` are the statements for its parts.
+    func addCopyHelpers(_ cn: String, copy: String, drop: String) {
+      protos += "static \(cn) ret_\(cn)(\(cn) v);\nstatic void rel_\(cn)(\(cn) v);\n"
+      helpers += "static \(cn) ret_\(cn)(\(cn) v) {\n\(copy)  return v;\n}\n"
+      helpers += "static void rel_\(cn)(\(cn) v) {\n\(drop)}\n\n"
     }
     func defineValue(_ ty: Ty) {
       guard !defined.contains(ty.mangled) else { return }
@@ -133,74 +145,67 @@ enum CEmit {
       case .structure(let name):
         guard let info = program.structs.first(where: { $0.name == name }) else { return }
         for field in info.fields where needsDefinition(field.ty) { defineValue(field.ty) }
-        values += "struct s_\(cIdent(name)) {\n"
+        let cn = ty.cName
+        bodies += "struct \(cn) {\n"
         for field in info.fields {
-          values += "  \(field.ty.cName) \(field.cName);\n"
+          bodies += "  \(field.ty.cName) \(field.cName);\n"
         }
-        values += "};\n\n"
+        bodies += "};\n\n"
         if ty.isClassLike {
           // A struct with a reference-counted field is copied like an enum with a class
           // payload: copies retain each such field, and drops release it.
-          let cn = ty.cName
-          values += "static \(cn) ret_\(cn)(\(cn) v) {\n"
+          var copy = "", drop = ""
           for field in info.fields where field.ty.isClassLike {
-            values += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+            copy += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+            drop += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
           }
-          values += "  return v;\n}\n"
-          values += "static void rel_\(cn)(\(cn) v) {\n"
-          for field in info.fields where field.ty.isClassLike {
-            values += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
-          }
-          values += "}\n\n"
+          addCopyHelpers(cn, copy: copy, drop: drop)
         }
       case .enumeration(let info):
         for c in info.cases {
           for field in c.payload where needsDefinition(field.ty) { defineValue(field.ty) }
         }
         let cn = ty.cName
-        values += "struct \(cn) {\n  int64_t tag;\n"
+        bodies += "struct \(cn) {\n  int64_t tag;\n"
         for c in info.cases {
           for field in c.payload {
-            values += "  \(field.ty.cName) \(field.cName);\n"
+            bodies += "  \(field.ty.cName) \(field.cName);\n"
           }
         }
-        values += "};\n"
+        bodies += "};\n"
         if info.holdsRef {
           // Copies retain, and drops release, every class-like payload field. A value
           // leaves the fields of its other cases zero (a compound literal zeroes the
-          // fields it does not name), and retaining or releasing a null pointer or an
-          // empty Optional does nothing, so no switch on the tag is needed.
-          values += "static \(cn) ret_\(cn)(\(cn) v) {\n"
+          // fields it does not name), and retaining or releasing a null pointer, an
+          // empty Optional or an empty array does nothing, so no switch on the tag is needed.
+          var copy = "", drop = ""
           for c in info.cases {
             for field in c.payload where field.ty.isClassLike {
-              values += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+              copy += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+              drop += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
             }
           }
-          values += "  return v;\n}\n"
-          values += "static void rel_\(cn)(\(cn) v) {\n"
-          for c in info.cases {
-            for field in c.payload where field.ty.isClassLike {
-              values += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
-            }
-          }
-          values += "}\n"
+          addCopyHelpers(cn, copy: copy, drop: drop)
         }
-        values += "\n"
+        bodies += "\n"
       case .array(let elem):
         if needsDefinition(elem) { defineValue(elem) }
-        values += arrayHelpers(ty, elem)
+        bodies += arrayStruct(ty, elem)
+        protos += arrayPrototypes(ty, elem)
+        helpers += arrayHelpers(ty, elem)
       case .optional(let inner):
         if needsDefinition(inner) { defineValue(inner) }
         let opt = ty.cName
-        values += "struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n};\n"
-        values += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
-        values += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
-        values += "  return v.value;\n}\n"
+        bodies += "struct \(opt) {\n  bool some;\n  \(inner.cName) value;\n};\n"
+        bodies += "static \(inner.cName) unw_\(opt)(\(opt) v) {\n"
+        bodies += "  if (!v.some) sw_trap(\"Unexpectedly found nil while unwrapping an Optional value\");\n"
+        bodies += "  return v.value;\n}\n"
+        bodies += "\n"
         if inner.isClassLike {
-          values += "static \(opt) ret_\(opt)(\(opt) v) {\n  if (v.some) \(retainCode("v.value", inner))\n  return v;\n}\n"
-          values += "static void rel_\(opt)(\(opt) v) {\n  if (v.some) \(releaseCode("v.value", inner))\n}\n"
+          addCopyHelpers(opt,
+            copy: "  if (v.some) \(retainCode("v.value", inner))\n",
+            drop: "  if (v.some) \(releaseCode("v.value", inner))\n")
         }
-        values += "\n"
       default:
         break
       }
@@ -214,17 +219,17 @@ enum CEmit {
       guard case .box(let inner) = b else { continue }
       if needsDefinition(inner) { defineValue(inner) }
       let tag = "bx_" + inner.mangled
-      values += "struct \(tag) {\n  sw_obj hdr;\n  \(inner.cName) v;\n};\n"
-      values += "static void d_\(tag)(void *p) {\n  struct \(tag) *b = p;\n"
+      bodies += "struct \(tag) {\n  sw_obj hdr;\n  \(inner.cName) v;\n};\n"
+      helpers += "static void d_\(tag)(void *p) {\n  struct \(tag) *b = p;\n"
       if inner.isClassLike {
-        values += "  " + releaseCode("b->v", inner) + "\n"
+        helpers += "  " + releaseCode("b->v", inner) + "\n"
       }
-      values += "  free(p);\n}\n"
-      values += "static struct \(tag) * bxn_\(inner.mangled)(\(inner.cName) v) {\n"
-      values += "  struct \(tag) *b = calloc(1, sizeof *b);\n  if (!b) sw_trap(\"out of memory\");\n"
-      values += "  b->hdr.rc = 1;\n  b->hdr.destroy = d_\(tag);\n  b->v = v;\n  return b;\n}\n\n"
+      helpers += "  free(p);\n}\n"
+      helpers += "static struct \(tag) * bxn_\(inner.mangled)(\(inner.cName) v) {\n"
+      helpers += "  struct \(tag) *b = calloc(1, sizeof *b);\n  if (!b) sw_trap(\"out of memory\");\n"
+      helpers += "  b->hdr.rc = 1;\n  b->hdr.destroy = d_\(tag);\n  b->v = v;\n  return b;\n}\n\n"
     }
-    out += values
+    out += bodies + protos + helpers
 
     // Call helpers for each function type. They need the complete parameter types,
     // so they come after the value definitions. An owned callee is released after the
@@ -348,13 +353,35 @@ enum CEmit {
 
   /// The struct and helpers of an array of `elem`. Helpers are named by the element
   /// type, so they are shared by every array of that element.
+  /// The struct of an array. It holds a pointer to its elements, which need only be
+  /// declared, so it can be written before the element type is complete.
+  private static func arrayStruct(_ ty: Ty, _ elem: Ty) -> String {
+    "struct \(ty.cName) {\n  \(elem.cName) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
+  }
+
+  /// Prototypes of the helpers of an array of `elem`, which other helpers may call.
+  private static func arrayPrototypes(_ ty: Ty, _ elem: Ty) -> String {
+    let e = elem.cName
+    let m = elem.mangled
+    let arr = ty.cName
+    var text = ""
+    text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals);\n"
+    text += "static \(arr) arr_copy_\(m)(\(arr) a);\n"
+    text += "static void arr_free_\(m)(\(arr) a);\n"
+    text += "static void arr_check_\(m)(\(arr) a, int64_t i);\n"
+    text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i);\n"
+    text += "static \(e) *arr_at_\(m)(\(arr) *a, int64_t i);\n"
+    text += "static void arr_append_\(m)(\(arr) *a, \(e) v);\n"
+    return text
+  }
+
+  /// The helper bodies of an array of `elem`.
   private static func arrayHelpers(_ ty: Ty, _ elem: Ty) -> String {
     let e = elem.cName
     let m = elem.mangled
     let arr = ty.cName
     var text = ""
-    text += "struct \(arr) {\n  \(e) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
-    text += "static \(arr) arr_lit_\(m)(int64_t n, const \(e) *vals) {\n"
+    text += "static \(arr) arr_lit_\(m)(int64_t n, \(e) *vals) {\n"
     text += "  \(arr) a = { NULL, 0, 0 };\n"
     text += "  if (n > 0) {\n"
     text += "    a.data = malloc(sizeof(\(e)) * (size_t)n);\n"
@@ -376,6 +403,14 @@ enum CEmit {
     text += "static void arr_check_\(m)(\(arr) a, int64_t i) {\n"
     text += "  if (i < 0 || i >= a.count) sw_trap(\"Index out of range\");\n}\n"
     text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i) { arr_check_\(m)(a, i); return a.data[i]; }\n"
+    // Reading or counting a temporary array frees it. The element is copied out first, so
+    // a class-like element keeps its own reference when the buffer's references are dropped.
+    text += "static \(e) arr_get_tmp_\(m)(\(arr) a, int64_t i) {\n"
+    text += "  \(e) v = arr_get_\(m)(a, i);\n"
+    if elem.isClassLike { text += "  \(retainCode("v", elem))\n" }
+    text += "  arr_free_\(m)(a);\n  return v;\n}\n"
+    text += "static int64_t arr_count_tmp_\(m)(\(arr) a) {\n"
+    text += "  int64_t n = a.count;\n  arr_free_\(m)(a);\n  return n;\n}\n"
     text += "static \(e) *arr_at_\(m)(\(arr) *a, int64_t i) { arr_check_\(m)(*a, i); return &a->data[i]; }\n"
     text += "static void arr_append_\(m)(\(arr) *a, \(e) v) {\n"
     text += "  if (a->count == a->cap) {\n"
@@ -423,11 +458,13 @@ enum CEmit {
       return "\(indent)\(ty.cName) \(name) = \(expr(value));\n"
     case .assign(let target, let value, let ty):
       if ty.isClassLike {
-        // Retain-then-release order: the new value is stored before the old one is dropped.
-        let lhs = lvalue(target)
+        // The new value is stored before the old one is dropped. The place is evaluated
+        // once, through a pointer, so an index expression runs once.
         return "\(indent){\n\(indent)  \(ty.cName) assign_new = \(expr(value));\n"
-          + "\(indent)  \(releaseCode(lhs, ty))\n"
-          + "\(indent)  \(lhs) = assign_new;\n\(indent)}\n"
+          + "\(indent)  \(ty.cName) *assign_slot = &(\(lvalue(target)));\n"
+          + "\(indent)  \(ty.cName) assign_old = *assign_slot;\n"
+          + "\(indent)  *assign_slot = assign_new;\n"
+          + "\(indent)  \(releaseCode("assign_old", ty))\n\(indent)}\n"
       }
       return "\(indent)\(lvalue(target)) = \(expr(value));\n"
     case .expr(let value):
@@ -461,10 +498,13 @@ enum CEmit {
     return "rel_\(ty.cName)(\(expr));"
   }
 
-  /// Adds one reference to a class-like value held in `expr`.
+  /// Adds one reference to a class-like value held in `expr`. A value that holds an array
+  /// (directly, or in a struct, enum or Optional) is copied, so the place takes the copy;
+  /// the copy is a new buffer, not a count.
   private static func retainCode(_ expr: String, _ ty: Ty) -> String {
     if ty.isClass || ty.isBox { return "sw_retain(\(expr));" }
-    return "ret_\(ty.cName)(\(expr));"
+    if case .array(let elem) = ty { return "\(expr) = arr_copy_\(elem.mangled)(\(expr));" }
+    return "\(expr) = ret_\(ty.cName)(\(expr));"
   }
 
   private static func lvalue(_ target: LValue) -> String {
@@ -552,8 +592,13 @@ enum CEmit {
       return "arr_lit_\(elem.mangled)(\(elems.count), (\(elem.cName)[]){\(elems.map(expr).joined(separator: ", "))})"
     case .index(let base, let idx):
       guard case .array(let elem) = base.ty else { return "0" }
-      return "arr_get_\(elem.mangled)(\(expr(base)), \(expr(idx)))"
+      // A temporary array is freed by the `_tmp` helper, after the element is read.
+      let getter = base.owned ? "arr_get_tmp_" : "arr_get_"
+      return "\(getter)\(elem.mangled)(\(expr(base)), \(expr(idx)))"
     case .arrayCount(let base):
+      if base.owned, case .array(let elem) = base.ty {
+        return "arr_count_tmp_\(elem.mangled)(\(expr(base)))"
+      }
       return "((\(expr(base))).count)"
     case .arrayAppend(let target, let value):
       return "arr_append_\(value.ty.mangled)(&\(lvalue(target)), \(expr(value)))"

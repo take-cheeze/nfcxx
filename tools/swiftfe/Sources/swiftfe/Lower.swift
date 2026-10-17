@@ -14,6 +14,10 @@
 // - Class-typed temporaries that are not stored are released after their
 //   statement.
 // - Top-level variables are never released (they live until exit, as in Swift).
+// - Arrays are class-like too: a copy copies the buffer (retaining each class-like
+//   element), and the buffer is freed with its elements. A struct or enum holding an
+//   array is class-like as well, and its copy copies the array. A subscript or `count`
+//   of a temporary array frees the temporary when it reads the element.
 //
 // Closures and captures:
 // - A closure is a function value { fn, ctx }. Its body sees its own parameters,
@@ -192,6 +196,7 @@ final class Lowerer {
   /// Enclosing loops and switches, innermost last, with the scope depth each one starts at.
   private var loops: [(depth: Int, isSwitch: Bool)] = []
   private var pendingMethods: [PendingMethod] = []
+  /// The stored properties of structs, with their declarations, checked at the end of lowering.
   /// True while lowering an initializer body, where `self` may be assigned.
   private var initializingSelf = false
   private var typeEnv: [String: Ty] = [:]
@@ -434,15 +439,19 @@ final class Lowerer {
   /// reference-counted by their own fields. Other class-like properties are not supported.
   private func isStructFieldAllowed(_ ty: Ty) -> Bool {
     switch ty {
-    case .function, .structure: return true
+    case .function, .structure, .array: return true
     case .optional(let inner): return isStructFieldAllowed(inner)
+    // An enum may hold an array (its helpers handle it), but no class-like payload other
+    // than one a struct may hold.
+    case .enumeration(let info):
+      return info.cases.allSatisfy { $0.payload.allSatisfy { !$0.ty.isClassLike || isStructFieldAllowed($0.ty) } }
     default: return false
     }
   }
 
   private func checkStructFields(_ fields: [Field], _ nodes: [Syntax]) throws {
     for (field, node) in zip(fields, nodes) where field.ty.isClassLike && !isStructFieldAllowed(field.ty) {
-      throw error("structs with class-typed or array properties are not supported yet", node)
+      throw error("structs with class-typed properties are not supported yet", node)
     }
   }
 
@@ -468,9 +477,6 @@ final class Lowerer {
               throw error("labeled enum payloads are not supported yet", p)
             }
             let ty = try resolveType(p.type)
-            if ty.isArray {
-              throw error("enums with array payloads are not supported yet", p)
-            }
             payload.append(Field(name: "_\(payload.count)", cName: "c\(tag)_\(payload.count)", ty: ty, mutable: true))
           }
         }
@@ -535,17 +541,16 @@ final class Lowerer {
     }
   }
 
-  /// Array elements are plain values: Int, Bool, Double, structs and optionals of
-  /// those. Enums are not allowed, since whether an enum holds references is not known
-  /// until its payloads are lowered.
+  /// Array elements may be any value, class-like or not. Copying an array copies or
+  /// retains each element, and freeing it releases each one (see CEmit.arrayHelpers).
+  /// Whether an element is class-like is read when the C is emitted, so an enum
+  /// whose payloads are still being lowered is accepted here.
   private func checkArrayElement(_ ty: Ty, _ node: some SyntaxProtocol) throws {
     switch ty {
-    case .int, .double, .bool, .structure:
-      return
-    case .optional(let inner) where inner == .int || inner == .double || inner == .bool || inner.isStructure:
-      return
-    default:
+    case .void, .nilLiteral:
       throw error("arrays of \(ty.swiftName) are not supported yet", node)
+    default:
+      return
     }
   }
 
@@ -1090,7 +1095,9 @@ final class Lowerer {
   /// Cases are lowered to a chain of tests; every case must be covered unless
   /// there is a `default`.
   private func lowerSwitch(_ node: SwitchExprSyntax) throws -> [Stmt] {
-    let subject = try lowerExpr(node.subject)
+    // A place subject is copied (retained) too: the arms bind payloads from the copy, so
+    // an assignment to the place in an arm cannot free what a binding still refers to.
+    let subject = own(try lowerExpr(node.subject))
     var enumInfo: EnumInfo? = nil
     switch subject.ty {
     case .enumeration(let info): enumInfo = info
@@ -1342,11 +1349,10 @@ final class Lowerer {
       guard case .array(let elem) = base.ty else {
         throw error("subscripts are supported on arrays only in M2, not on '\(base.ty.swiftName)'", sub)
       }
-      if base.owned {
-        throw error("subscript of a temporary array is not supported yet", sub)
-      }
       let idx = try indexArgument(sub)
-      return Expr(kind: .index(base, idx), ty: elem)
+      // A temporary array is freed once the element is read, so an element that is
+      // class-like is returned owned (retained before the array is freed).
+      return Expr(kind: .index(base, idx), ty: elem, owned: base.owned && elem.isClassLike)
     }
     if let lit = expr.as(FloatLiteralExprSyntax.self) {
       let digits = lit.literal.text.filter { $0 != "_" }
@@ -1396,9 +1402,6 @@ final class Lowerer {
       if b.ty.isArray {
         guard member.declName.baseName.text == "count" else {
           throw error("arrays have no member '\(member.declName.baseName.text)' in M2", member)
-        }
-        if b.owned {
-          throw error("count of a temporary array is not supported yet", member)
         }
         return Expr(kind: .arrayCount(b), ty: .int)
       }
@@ -1551,6 +1554,7 @@ final class Lowerer {
         return Expr(kind: .print(v), ty: .void)
       }
       if let s = structs[name] {
+        // A struct initializer returns a fresh value, which the caller owns.
         if !s.initializers.isEmpty {
           return try callInitializer(name, s.initializers, .structure(name), owned: true, call)
         }
@@ -1882,9 +1886,6 @@ final class Lowerer {
       let inner = try resolveType(opt.wrappedType)
       if case .optional = inner {
         throw error("nested optional types are not supported yet", type)
-      }
-      if inner.isArray {
-        throw error("optional arrays are not supported yet", type)
       }
       let ty = Ty.optional(inner)
       if !optionals.contains(ty) { optionals.append(ty) }
@@ -2293,7 +2294,8 @@ final class Lowerer {
 
   private func instanceOrigin(_ ty: Ty) -> (base: String, args: [Ty])? {
     switch ty {
-    case .structure(let n), .cls(let n): return instanceArgs[n]
+    case .structure(let n): return instanceArgs[n]
+    case .cls(let n): return instanceArgs[n]
     case .enumeration(let info): return instanceArgs[info.name]
     default: return nil
     }
