@@ -147,13 +147,25 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 - **mrustc cannot compile `zmij` 1.0.23** (the float formatter of serde_json 1.0.154): it aborts with `Mismatched types -
   f64 and f32` (`src/hir/hir_ops.cpp:133`). The serde test pins serde_json 1.0.133, which uses `ryu`. This is a
   frontend bug to report upstream or fix in a fork, not a pipeline problem.
+- **mrustc frontend bugs that stop real crates** (each reproduced with a small file; rustc accepts all of them):
+  - `async fn` in a `$item:item` macro fragment: `m! { async fn f() {} }` with `macro_rules! m { ($($i:item)*) => { $($i)* } }`
+    fails with `Macro_InvokeRules_MatchPattern - No arm matched`. A plain `fn` matches. tokio's `cfg_io_util!` block
+    contains an `async fn`, so tokio does not compile (`tokio` 1.53.3, features `rt,sync,time,io-util`).
+  - A `'static` reference to a generic associated constant holding function pointers, `Bytes { vtable: &Owned::<T>::VTABLE }`
+    with `const VTABLE: VTable = VTable { drop: owned_drop::<T> }`, fails with `Lifetime bound '#local0: 'static
+    failed`. This is `bytes` 1.12.1's `owned_clone`. `bytes` 1.10.1 gets past it.
+  - `libc` 0.2.191's `custom_struct` macro: `No arm matched`, not minimised. `mio` 1.2.4 (tokio's `net` feature) needs
+    libc 0.2.191, so tokio's `net` feature is out too.
 - **Only the crates the program links are built.** `libtest`, `proc_macro` and the other crates of the 1.90 build were
   surveyed through the rewrite and cproc and accepted, but not compiled and linked.
 - mrustc also links its own gcc binary of each program during the run, and the driver discards it.
 
 ## 5. Next steps
 
-1. Panics that unwind through several frames, `std::fs` beyond `fsio`, and `libtest`/`proc_macro` (compile and link).
+1. Real crates past the frontend. Step 2 (regex, clap) passed with no new rewrite; the frontend bugs in section 4 are what
+   stop the next ones (tokio). The next pins to try are a tokio release whose macros avoid `async fn` in item fragments,
+   and whatever mrustc fixes first. Each new bug is a mrustc change, not a rewrite.
+2. Panics that unwind through several frames, `std::fs` beyond `fsio`, and `libtest`/`proc_macro` (compile and link).
 2. The undefined-value site that does run (section 6): either make mrustc's C initialise the return union, or accept
    the copy as dead by construction. Other sites are not reached by any program in the suite.
 3. Decide whether the rewrites belong in a fork of mrustc's codegen rather than in text. They are specific to this pin
