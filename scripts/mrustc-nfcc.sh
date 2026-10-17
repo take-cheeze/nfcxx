@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Build a Rust program with mrustc, and compile the C it emits with nfcxx's C pipeline (cproc -> QBE; scripts/qbe-cc).
-# The program's own code and the monomorphised generics it uses go through QBE. The rest of the standard library is the
-# one mrustc built with gcc (its rlib objects), linked in unchanged, unless MRUSTC_NFCC_CORE=1, which also compiles
-# libcore through the same pipeline (cached in build/mrustc/nfcxx). See docs/notes/mrustc-frontend.md.
+# The program's own code and the monomorphised generics it uses go through QBE. Any other crate of the standard library is the
+# one mrustc built with gcc (its rlib objects), linked in unchanged, unless MRUSTC_NFCC_CRATES (or MRUSTC_NFCC_CORE)
+# names it: those are compiled through the same pipeline (cached in build/mrustc/nfcxx). See docs/notes/mrustc-frontend.md.
 #   scripts/mrustc-nfcc.sh prog.rs -o prog [mrustc flags...]
 #   MRUSTC=<bin>      mrustc binary (default build/mrustc/src/bin/mrustc, from scripts/setup-mrustc.sh)
 #   MRUSTC_STD=<dir>  directory with the standard library objects (default build/mrustc/src/output-1.90.0)
 #   MRUSTC_NFCC_CORE=1  compile libcore (MRUSTC_STD's libcore.rlib.c) through nfcxx's pipeline instead of linking gcc's
+#   MRUSTC_NFCC_CRATES="core alloc std" (or all) compile those crates the same way (all: every rlib of the link command)
 #   MRUSTC_NFCC_KEEP=1  keep the intermediate files, for debugging
 # The edition defaults to 2021 (pass --edition to override it; mrustc's own default is 2015).
 set -euo pipefail
@@ -58,27 +59,38 @@ MRUSTC_TARGET_VER=${MRUSTC_TARGET_VER:-1.90} "$mrustc" "$src" -o "$tmp/prog" -L 
 [ -f "$tmp/prog.c" ] && [ -f "$tmp/prog_cmd.txt" ] || { echo "mrustc-nfcc: mrustc wrote no C" >&2; exit 1; }
 nfcxx_compile "$tmp/prog.c" prog "$tmp"
 
-# libcore, when asked for. Cached: rebuilt when its C file or the rewrite scripts are newer than the object.
-core_objs=()
-if [ -n "${MRUSTC_NFCC_CORE:-}" ]; then
-  [ -f "$std/libcore.rlib.c" ] || { echo "mrustc-nfcc: no libcore.rlib.c in $std" >&2; exit 1; }
-  cache=$root/build/mrustc/nfcxx
-  mkdir -p "$cache"
-  if [ ! -f "$cache/libcore.o" ] || [ "$std/libcore.rlib.c" -nt "$cache/libcore.o" ] \
-     || [ "$root/scripts/mrustc-prep.rb" -nt "$cache/libcore.o" ] || [ "$root/scripts/qbe-prep.rb" -nt "$cache/libcore.o" ]; then
-    nfcxx_compile "$std/libcore.rlib.c" libcore "$cache"
-  fi
-  core_objs=("$cache/libcore.o" "$cache/libcore.tail.o")
+# The crates to compile through nfcxx: MRUSTC_NFCC_CRATES (a list of core, alloc, std), and core also for
+# MRUSTC_NFCC_CORE=1. Each is cached in build/mrustc/nfcxx and rebuilt when its C file or the rewrite scripts are newer.
+crates=${MRUSTC_NFCC_CRATES:-}
+[ -n "${MRUSTC_NFCC_CORE:-}" ] && crates="core $crates"
+# `all`: every rlib of mrustc's link command (the names keep their hashes, e.g. compiler_builtins-0_1_160_Ha2).
+if [ "$crates" = all ]; then
+  crates=$(tr -d '"' < "$tmp/prog_cmd.txt" | tr ' ' '\n' | grep '\.rlib\.o$' | sed -e 's|.*/lib||' -e 's|\.rlib\.o$||' | tr '\n' ' ')
 fi
+cache=$root/build/mrustc/nfcxx
+core_objs=()
+for crate in $crates; do
+  c=$std/lib$crate.rlib.c
+  [ -f "$c" ] || { echo "mrustc-nfcc: no lib$crate.rlib.c in $std" >&2; exit 1; }
+  mkdir -p "$cache"
+  if [ ! -f "$cache/$crate.o" ] || [ "$c" -nt "$cache/$crate.o" ] \
+     || [ "$root/scripts/mrustc-prep.rb" -nt "$cache/$crate.o" ] || [ "$root/scripts/qbe-prep.rb" -nt "$cache/$crate.o" ]; then
+    nfcxx_compile "$c" "$crate" "$cache"
+  fi
+  core_objs+=("$cache/$crate.o" "$cache/$crate.tail.o")
+done
 
-# The link: the program, its tail, libcore if compiled here, then mrustc's objects for the rest of the standard library
-# and the libraries it names, in mrustc's order (without libcore.rlib.o when it is replaced).
+# The link: the program, its tail, the crates compiled here, then mrustc's objects for the rest of the standard library
+# and the libraries it names, in mrustc's order (without the rlib objects of the crates replaced).
 std_objs=()
 while IFS= read -r t; do
-  case $t in */libcore.rlib.o) [ -z "${MRUSTC_NFCC_CORE:-}" ] && std_objs+=("$t") ;; *) std_objs+=("$t") ;; esac
+  base=${t##*/}
+  replaced=""
+  for crate in $crates; do [ "$base" = "lib$crate.rlib.o" ] && replaced=1; done
+  [ -z "$replaced" ] && std_objs+=("$t")
 done < <(tr -d '"' < "$tmp/prog_cmd.txt" | tr ' ' '\n' | grep '\.rlib\.o$' || true)
 libs=()
 while IFS= read -r t; do libs+=("$t"); done < <(tr -d '"' < "$tmp/prog_cmd.txt" | tr ' ' '\n' | awk 'prev == "-l" { print "-l" $0 } { prev = $0 }' || true)
-[ ${#std_objs[@]} -gt 0 ] || { echo "mrustc-nfcc: no standard library objects in $tmp/prog_cmd.txt" >&2; exit 1; }
+grep -q '\.rlib\.o' "$tmp/prog_cmd.txt" || { echo "mrustc-nfcc: no standard library objects in $tmp/prog_cmd.txt" >&2; exit 1; }
 "$root/scripts/qbe-cc" -o "$out" "$tmp/prog.o" "$tmp/prog.tail.o" ${core_objs[@]+"${core_objs[@]}"} \
   ${std_objs[@]+"${std_objs[@]}"} ${libs[@]+"${libs[@]}"}

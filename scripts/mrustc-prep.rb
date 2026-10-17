@@ -133,7 +133,10 @@ def atomic_expr(body)
   a = typed.byteslice(star + 2, typed.bytesize - star - 2).strip
   fail_with("atomic pointer of an unknown form: #{body}") unless a.byteslice(a.bytesize - 1, 1) == ')'
   a = a.byteslice(0, a.bytesize - 1).strip
-  n = ATOMIC_SIZE[t]
+  # An atomic pointer is one of pointer width; its value is passed to the sized builtin as an integer.
+  ptr = t.byteslice(t.bytesize - 1, 1) == '*'
+  n = ptr ? 8 : ATOMIC_SIZE[t]
+  vcast = ptr ? "(unsigned long)" : ""
   wide = t == WIDE_ATOMIC_TYPE
   fail_with("atomic on #{t}, which has no builtin here: #{body}") if n.nil? && !wide
   vptr = "(volatile void *)(#{a})"
@@ -147,12 +150,12 @@ def atomic_expr(body)
     fail_with("unexpected atomic store: #{body}") unless stmts.size == 3
     _, v = tmp_decl(stmts[1])
     o = call_args(stmts[2], '__atomic_store')[2]
-    wide ? "__nfcxx_atomic_store16 (#{vptr}, (#{v}), #{o})" : "__atomic_store_#{n} (#{vptr}, (#{v}), #{o})"
+    wide ? "__nfcxx_atomic_store16 (#{vptr}, (#{v}), #{o})" : "__atomic_store_#{n} (#{vptr}, #{vcast}(#{v}), #{o})"
   when 'exchange'
     fail_with("unexpected atomic exchange: #{body}") unless stmts.size == 5
     _, v = tmp_decl(stmts[1])
     o = call_args(stmts[3], '__atomic_exchange')[3]
-    wide ? "__nfcxx_atomic_exchange16 (#{vptr}, (#{v}), #{o})" : "((#{t}) __atomic_exchange_#{n} (#{vptr}, (#{v}), #{o}))"
+    wide ? "__nfcxx_atomic_exchange16 (#{vptr}, (#{v}), #{o})" : "((#{t}) __atomic_exchange_#{n} (#{vptr}, #{vcast}(#{v}), #{o}))"
   when 'compare_exchange'
     fail_with("unexpected atomic compare-exchange: #{body}") unless stmts.size == 3
     _, v = tmp_decl(stmts[1])
@@ -160,7 +163,7 @@ def atomic_expr(body)
     fail_with("unexpected atomic compare-exchange arguments: #{body}") unless args.size == 6 && (args[3] == '0' || args[3] == '1')
     e = "(void *)(#{args[1]})"
     wide ? "__nfcxx_atomic_compare_exchange16 (#{vptr}, #{e}, (#{v}), #{args[4]}, #{args[5]})" :
-           "((_Bool) __atomic_compare_exchange_#{n} (#{vptr}, #{e}, (#{v}), #{args[3]}, #{args[4]}, #{args[5]}))"
+           "((_Bool) __atomic_compare_exchange_#{n} (#{vptr}, #{e}, #{vcast}(#{v}), #{args[3]}, #{args[4]}, #{args[5]}))"
   else
     fail_with("atomic #{op} is not one of load, store, exchange and compare_exchange: #{body}")
   end
@@ -251,6 +254,11 @@ def weak_data_name(line)
   end
   at = code.index(' ' + WEAK_ATTR + ';')
   return trailing_ident(code.byteslice(0, at)) unless at.nil?
+  # A weak reference to a symbol that may be absent (std tests for it at run time): `extern char __attribute__((weak))
+  # NAME[0];`. The reference is weakened in the object as well, so the link leaves it unresolved (null) when absent.
+  if code.byteslice(0, 7) == 'extern ' && code.index(' ' + WEAK_ATTR + ' ') && code.byteslice(code.bytesize - 4, 4) == '[0];'
+    return trailing_ident(code.byteslice(0, code.bytesize - 4))
+  end
   nil
 end
 
@@ -313,15 +321,42 @@ def rewrite_line(line)
   line
 end
 
-# Inline asm in libcore, by its text (stripped of indentation), and the C that does the same. `pause` is a spin-loop
+# Inline asm, by its statement (stripped of indentation), and the C that does the same. The operand names differ from
+# one crate to the next, so each form is taken apart by its fixed text and the names are kept. `pause` is a spin-loop
 # hint with no effect on data. xgetbv and cpuid read CPU state, so they call helpers of the tail assembly.
-ASM_REWRITES = {
-  '__asm__ __volatile__ ("pause");' => ';',
-  '__asm__ __volatile__ ("xgetbv" : "=a" (lo), "=d" (hi) : "c" (arg0) );' =>
-    '{ unsigned long __nfcxx_xgv = __nfcxx_xgetbv (arg0); lo = (unsigned int)__nfcxx_xgv; hi = (unsigned int)(__nfcxx_xgv >> 32); }',
-  '__asm__("cpuid" : "=a" (var0), "=b" (var1), "=c" (var2), "=d" (var3) : "a" (arg0), "c" (arg1) );' =>
-    '{ unsigned int __nfcxx_regs[4]; __nfcxx_cpuid (arg0, arg1, __nfcxx_regs); var0 = __nfcxx_regs[0]; var1 = __nfcxx_regs[1]; var2 = __nfcxx_regs[2]; var3 = __nfcxx_regs[3]; }'
-}
+# take_seq: the captures of `text` between `prefix`, the separators in `seps` and `suffix`, or nil when it does not fit.
+def take_seq(text, prefix, seps, suffix)
+  return nil unless text.byteslice(0, prefix.bytesize) == prefix
+  return nil unless text.byteslice(text.bytesize - suffix.bytesize, suffix.bytesize) == suffix
+  pos = prefix.bytesize
+  end_i = text.bytesize - suffix.bytesize
+  caps = []
+  seps.each do |sep|
+    i = text.index(sep, pos)
+    return nil if i.nil? || i + sep.bytesize > end_i
+    caps << text.byteslice(pos, i - pos).strip
+    pos = i + sep.bytesize
+  end
+  return nil if pos > end_i
+  caps << text.byteslice(pos, end_i - pos).strip
+  caps
+end
+
+def asm_rewrite(code)
+  return ';' if code == '__asm__ __volatile__ ("pause");'
+  x = take_seq(code, '__asm__ __volatile__ ("xgetbv" : "=a" (', ['), "=d" (', ') : "c" ('], ') );')
+  unless x.nil?
+    lo, hi, arg = x
+    return "{ unsigned long __nfcxx_xgv = __nfcxx_xgetbv (#{arg}); #{lo} = (unsigned int)__nfcxx_xgv; #{hi} = (unsigned int)(__nfcxx_xgv >> 32); }"
+  end
+  c = take_seq(code, '__asm__("cpuid" : "=a" (', ['), "=b" (', '), "=c" (', '), "=d" (', ') : "a" (', '), "c" ('], ') );')
+  unless c.nil?
+    v0, v1, v2, v3, a0, a1 = c
+    return "{ unsigned int __nfcxx_regs[4]; __nfcxx_cpuid (#{a0}, #{a1}, __nfcxx_regs); #{v0} = __nfcxx_regs[0]; " \
+           "#{v1} = __nfcxx_regs[1]; #{v2} = __nfcxx_regs[2]; #{v3} = __nfcxx_regs[3]; }"
+  end
+  nil
+end
 # The helpers those rewrites call, declared at the top of the output (before the prelude's typedefs, so plain types).
 ASM_HELPER_DECLS = [
   'extern unsigned long __nfcxx_xgetbv (unsigned int);',
@@ -353,6 +388,49 @@ __nfcxx_cpuid:
 	ret
 TAIL
 
+# glibc runs the function pointers in `.init_array.N` sections at start-up. mrustc puts one there for std's argv
+# capture: `__attribute__((section(".init_array.N"))) union {...} NAME;`, initialised with `(uintptr_t)&FUNC`.
+# cproc accepts the section attribute on functions only, so the attribute is dropped, and the tail places the
+# address of FUNC in that section. Only that shape is handled; another section stops the rewrite.
+SECTION_ATTR = '__attribute__((section("'
+
+# [section, rest of the line without the attribute] when the line carries an init_array section attribute, else nil.
+def init_array_section(line)
+  at = line.index(SECTION_ATTR)
+  return nil if at.nil?
+  start = at + SECTION_ATTR.bytesize
+  q = line.index('"', start)
+  close = q.nil? ? nil : line.index(')))', q)
+  fail_with("unsupported section attribute: #{line}") if close.nil?
+  section = line.byteslice(start, q - start)
+  fail_with("only .init_array sections are handled: #{line}") unless section.byteslice(0, 12) == '.init_array.'
+  [section, line.byteslice(0, at) + line.byteslice(close + 3, line.bytesize - close - 3)]
+end
+
+# The function of an initialiser `NAME = { .raw = {(uintptr_t)&FUNC} };`, or nil for another line.
+INIT_ARRAY_INIT = ' = { .raw = {(uintptr_t)&'
+def init_array_init(line)
+  at = line.index(INIT_ARRAY_INIT)
+  return nil if at.nil?
+  name = trailing_ident(line.byteslice(0, at))
+  rest = line.byteslice(at + INIT_ARRAY_INIT.bytesize, line.bytesize - at - INIT_ARRAY_INIT.bytesize)
+  close = rest.index('}')
+  fail_with("unsupported initialiser: #{line}") if close.nil?
+  [name, rest.byteslice(0, close).strip]
+end
+
+# `extern T NAME asm("LABEL");` on one line: a data object named by an asm label. cproc has no asm labels, and the
+# label names a symbol, so NAME is replaced by LABEL everywhere in the file and the label leaves the declaration.
+# (Functions with labels are handled by asm_label, below.)
+def data_asm_label(line)
+  at = line.index(' asm("')
+  return nil if at.nil? || line.byteslice(0, 7) != 'extern '
+  rest = line.byteslice(at + 6, line.bytesize - at - 6)
+  q = rest.index('"')
+  fail_with("unsupported asm label on a declaration: #{line}") if q.nil? || rest.byteslice(q, rest.bytesize - q) != '")' && rest.byteslice(q, rest.bytesize - q) != '");'
+  [trailing_ident(line.byteslice(0, at)), rest.byteslice(0, q)]
+end
+
 def main(argv)
   if argv.size != 4
     $stderr.puts "usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt"
@@ -364,7 +442,30 @@ def main(argv)
   weak = []     # data symbols mrustc marks weak (see weak_data_name)
   name = nil    # the extern function the last declaration line declared
   packed = false  # inside a `#pragma pack(push, 1)` region
-  src.split("\n", -1).each do |line|
+  init_pending = {}   # init_array object name -> its section, until its initialiser is seen
+  init_entries = []   # [section, function] pairs
+  # Data objects named by an asm label (see data_asm_label): renamed throughout the file, before the rewrite below.
+  lines = src.split("\n", -1)
+  renames = {}
+  lines.each { |l| r = data_asm_label(l); renames[r[0]] = r[1] unless r.nil? }
+  unless renames.empty?
+    lines = lines.map do |l|
+      r = data_asm_label(l)
+      l = replace_all(l, ' asm("' + r[1] + '")', '') unless r.nil?
+      renames.each { |n, label| l = replace_word(l, n, label) }
+      l
+    end
+  end
+  lines.each do |line|
+    sec = init_array_section(line)
+    unless sec.nil?
+      line = sec[1]
+      decl = line.rstrip
+      decl = decl.byteslice(0, decl.bytesize - 1).rstrip if decl.byteslice(decl.bytesize - 1, 1) == ';'
+      init_pending[trailing_ident(decl)] = sec[0]
+    end
+    ini = init_array_init(line)
+    init_entries << [init_pending.delete(ini[0]), ini[1]] if !ini.nil? && init_pending.key?(ini[0])
     wn = weak_data_name(line)
     weak << wn unless wn.nil?
     name = declared_name(line) if line.byteslice(0, 7) == "extern "
@@ -375,7 +476,8 @@ def main(argv)
       out << ';'   # the declaration keeps its ';'
       next
     end
-    line = ASM_REWRITES[code] if ASM_REWRITES.key?(code)
+    asm = asm_rewrite(code)
+    line = asm unless asm.nil?
     line += "\n" + WIDE_ATOMIC_HELPERS if line == WIDE_ATOMIC_TYPEDEF
     # cproc ignores #pragma, so the struct in a packed region gets the attribute after its keyword, where cproc
     # reads it (`struct __attribute__((packed)) tag {`; after the closing brace it is refused).
@@ -392,8 +494,14 @@ def main(argv)
   end
   tail = ''
   labels.each do |n, label|
-    tail << ".weak #{n}\n.type #{n},@function\n#{n}:\n\tjmp #{label}@PLT\n"
+    # The target is weak too: a label whose symbol is absent (sysctl, on glibc 2.32 and later) only matters if it is called.
+    tail << ".weak #{label}\n.weak #{n}\n.type #{n},@function\n#{n}:\n\tjmp #{label}@PLT\n"
   end
+  fail_with("init_array object without its initialiser: #{init_pending.keys.join(' ')}") unless init_pending.empty?
+  init_entries.each do |sec, f|
+    tail << ".section #{sec},\"aw\"\n.p2align 3\n.quad #{f}\n"
+  end
+  tail << ".text\n"
   File.open(argv[3], "wb") { |f| f.write(weak.map { |n| n + "\n" }.join) }
   tail << ASM_HELPER_TAIL
   File.open(argv[1], 'wb') { |f| f.write(out.join("\n")) }
