@@ -5,7 +5,7 @@ require_relative 'native_core_result_sigs'
 # NATIVE_RESULT_FACTS (ADR 0302): what a call that returns from an RGSS native hands back, per exact
 # receiver class. A fact pins the registration's callee text and the delegation chain down to the
 # function whose `return`s decide the kind; scripts/bc2cpp/native_result_facts_check.rb re-audits both.
-# The kind of each fact is declared in sig/native/rgss_results.rbs, not here (see NativeResultFacts.kind).
+# The kind of each fact is declared in sig/bc2cpp/rgss_results.rbs, not here (see NativeResultFacts.kind).
 # Kinds: :fixnum (mrb_fixnum_value), :float (mrb_float_value), a class name (mrb_obj_new of that constant).
 # Left out on purpose, as not one class on every path: Viewport#rect/#ox/#oy (an unset ivar reads nil),
 # Window/Plane readers, and setters and drawing calls (they return self, which no bytecode reads).
@@ -55,7 +55,7 @@ module NativeResultFacts
   # The kinds and the facts describe the same (owner, name) pairs; a mismatch is a broken table, not a silent gap.
   unless KINDS.transform_values(&:keys).values.flatten.sort == FACTS.transform_values(&:keys).values.flatten.sort &&
          KINDS.keys.sort == FACTS.keys.sort
-    raise 'bc2cpp: sig/native/rgss_results.rbs and NATIVE_RESULT_FACTS name different (owner, method) pairs'
+    raise 'bc2cpp: sig/bc2cpp/rgss_results.rbs and NATIVE_RESULT_FACTS name different (owner, method) pairs'
   end
 
   module_function

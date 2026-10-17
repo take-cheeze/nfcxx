@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'integer_constants'
+require_relative 'native_sigs'
 
 # DECLARED_CONSTANT_CHECK (docs/adr/0455): RBS constant declarations, checked at every assignment.
 #
@@ -39,7 +40,7 @@ module DeclaredConstants
 
     require 'rbs'
     files.flat_map do |file|
-      next [] if file.include?('sig/native/')
+      next [] if NativeSigs.file?(file)
 
       rel = display_root ? file.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : file
       _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: rel, content: File.read(file)))

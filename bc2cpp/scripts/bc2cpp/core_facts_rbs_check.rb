@@ -1,11 +1,11 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Core method facts declared in sig/native (docs/adr/0473). Host only, a few seconds:
+# Core method facts declared in sig/bc2cpp (docs/adr/0473). Host only, a few seconds:
 # 1. each fact file loads, and its loader rejects the malformed shapes it exists to keep out;
 # 2. the facts read from the RBS match the real 3rd/mruby sources (skipped, with a SKIP line, when the submodule is
 #    not checked out): the native registrations' owners and arities, the mrblib bodies, the Proc call_proc entries;
-# 3. bc2cpp_cfunc_proc_call_p (bc2cpp.rb) spells the same Proc names as sig/native/core_proc_calls.rbs;
+# 3. bc2cpp_cfunc_proc_call_p (bc2cpp.rb) spells the same Proc names as sig/bc2cpp/core_proc_calls.rbs;
 # 4. RbsSignatures does not read the fact files as program signatures;
 # 5. the hierarchy helpers the generator's ancestor tables come from.
 #
@@ -149,11 +149,11 @@ end
 # 3. The runtime's spelling of the Proc call names.
 runtime = File.read(File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'))[/static bool bc2cpp_cfunc_proc_call_p\(.*?\n    \}\n/m].to_s
 spelled = runtime[/if \(!name \|\| !\((.*?)\)\) return false;/, 1].to_s.scan(/!strcmp\(name, "([^"]+)"\)/).flatten
-check.call('bc2cpp_cfunc_proc_call_p spells exactly sig/native/core_proc_calls.rbs', spelled == CoreFactSigs.proc_call_names)
+check.call('bc2cpp_cfunc_proc_call_p spells exactly sig/bc2cpp/core_proc_calls.rbs', spelled == CoreFactSigs.proc_call_names)
 
 # 4. Not program signatures.
 listed = RbsSignatures.files_in([File.join(ROOT, 'sig')]).map { |f| File.expand_path(f) }
-check.call('RbsSignatures skips the fact files and still reads the other sig/native files',
+check.call('RbsSignatures skips the fact files and still reads the other sig/bc2cpp files',
            (listed & CoreFactSigs::FILES).empty? && listed.include?(CoreHierarchySigs::PATH))
 
 # 5. Hierarchy helpers.

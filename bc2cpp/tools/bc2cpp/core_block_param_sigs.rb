@@ -3,12 +3,12 @@
 require_relative 'native_core_result_sigs'
 
 # CoreBlockParamSigs (CORE_BLOCK_ELEMENT_HINT): which block parameters of a core Array / Hash iterator receive an
-# element of the receiver, read from sig/native/core_block_params.rbs. The file declares `class Array[Elem]` and
+# element of the receiver, read from sig/bc2cpp/core_block_params.rbs. The file declares `class Array[Elem]` and
 # `class Hash[K, V]`; a block positional typed with the container's element variable (Elem, or V for a Hash value)
 # is an element position. The table only says where an element arrives: CodeGen#block_fallback_element_hints still
 # needs the receiver proven to be that container and its element class proven by the element scans.
 module CoreBlockParamSigs
-  PATH = File.expand_path('../../sig/native/core_block_params.rbs', __dir__)
+  PATH = File.expand_path('../../sig/bc2cpp/core_block_params.rbs', __dir__)
   # The type variable whose value is the element class the element scans prove, per container.
   ELEMENT_VARIABLE = { 'Array' => 'Elem', 'Hash' => 'V' }.freeze
   # argc: the argument counts the shape holds for; arity: the block's positional count; elements: the 0-based block

@@ -21,7 +21,7 @@ class CodeGen
   # What an Array (and a Hash: the same chain) inherits, with the ROM scan's spellings (core_hierarchy.rbs).
   FROZEN_TABLE_ANCESTORS = CoreHierarchySigs.with_scan_spellings(CoreHierarchySigs.ancestors('Array').drop(1))
   unless CoreHierarchySigs.ancestors('Hash').drop(1) == CoreHierarchySigs.ancestors('Array').drop(1)
-    raise 'bc2cpp: FROZEN_TABLE_ANCESTORS: Array and Hash no longer share their ancestors (sig/native/core_hierarchy.rbs)'
+    raise 'bc2cpp: FROZEN_TABLE_ANCESTORS: Array and Hash no longer share their ancestors (sig/bc2cpp/core_hierarchy.rbs)'
   end
   FROZEN_TABLE_CORE_PATH = %r{/3rd/mruby/(?:src|mrbgems)/}
   FROZEN_TABLE_NAMES = %w[freeze [] first last sample size length].freeze

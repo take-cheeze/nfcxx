@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'annotations'
 require_relative 'core_fact_sigs'
+require_relative 'native_sigs'
 require_relative 'rbs_optional_hint'
 
 # RBS_SIGNATURES (docs/adr/0413): RBS files as a source of the same hints the `# bc2cpp:` comments give.
@@ -56,7 +57,7 @@ module RbsSignatures
     File.directory?(default) ? [default] : []
   end
 
-  # The fact tables under sig/native (CoreFactSigs::FILES) are read by their own loaders and are not program
+  # The fact tables under sig/bc2cpp (CoreFactSigs::FILES) are read by their own loaders and are not program
   # signatures: some name methods with mrblib bodies (Kernel#to_enum, Proc#yield), which a signature would hint.
   def files_in(dirs)
     facts = CoreFactSigs::FILES.to_set
@@ -145,7 +146,7 @@ module RbsSignatures
   def method_definition(out, m, owner, loc)
     if m.overloads.size != 1
       # A native declaration may list several overloads (join with and without a separator); it is not a hint.
-      if loc.file.include?('sig/native/')
+      if NativeSigs.file?(loc.file)
         diag(out, loc, 'info', 'TC1005', "#{owner}##{m.name}: #{m.overloads.size} native overloads; no program hint")
         return
       end
@@ -296,9 +297,9 @@ module RbsSignatures
     loaded.methods.each_value do |sig|
       d = defs_by[[sig.owner, sig.name]]
       unless d
-        # sig/native declares built-in and RGSS methods the program does not define; their tables are checked by the
+        # sig/bc2cpp declares built-in and RGSS methods the program does not define; their tables are checked by the
         # generators (scripts/bc2cpp/native_sigs_check.rb), so they are declarations here, not errors.
-        if sig.loc.file.include?('sig/native/')
+        if NativeSigs.file?(sig.loc.file)
           note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name}: native method declaration; no program hint")
         else
           note(ap, sig.loc, 'error', 'TC1003', "#{sig.owner}##{sig.name}: no such method in the program")

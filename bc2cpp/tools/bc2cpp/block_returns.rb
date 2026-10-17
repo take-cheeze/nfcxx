@@ -5,6 +5,7 @@ require 'set'
 require_relative 'bytecode_ir'
 require_relative 'block_self'
 require_relative 'native_block_returns_reviewed'
+require_relative 'native_sigs'
 
 # BLOCK_RETURNS (docs/adr/0475): RBS declarations of methods whose result is their block's value, or their receiver,
 # checked against the method body and then used at call sites with a literal block.
@@ -62,7 +63,7 @@ module BlockReturns
 
     Entry.new(owner: sig.owner, name: sig.name, kind: kind, args: sig.args.size,
               arity: fn.respond_to?(:required_positionals) ? fn.required_positionals.size : nil, loc: sig.loc,
-              native: sig.loc.file.include?('sig/native/'), text: text_of(block, ret), problem: problem_of(sig, kind))
+              native: NativeSigs.file?(sig.loc.file), text: text_of(block, ret), problem: problem_of(sig, kind))
   end
 
   def text_of(block, ret)

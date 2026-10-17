@@ -25,6 +25,7 @@ require 'rbs'
 require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/block_returns'
+require_relative '../../tools/bc2cpp/native_sigs'
 require_relative '../../tools/bc2cpp/rbs_signatures'
 require_relative '../../tools/bc2cpp/wio_world_env'
 
@@ -38,9 +39,9 @@ check = lambda do |what, condition|
 end
 
 # BlockReturns entries of one signature text (as RbsSignatures loads it).
-entries_of = lambda do |text, dir_name: 'bc2cpp'|
+entries_of = lambda do |text|
   Dir.mktmpdir do |dir|
-    sig = File.join(dir, 'sig', dir_name)
+    sig = File.join(dir, 'sig', 'bc2cpp')
     FileUtils.mkdir_p(sig)
     File.write(File.join(sig, 'x.rbs'), text)
     BlockReturns.from_signatures(RbsSignatures.load([dir], display_root: dir))
@@ -71,7 +72,8 @@ check.call('`{ (B) -> void } -> self` is a :self declaration', shapes['me']&.kin
 end
 check.call('a block with an unrelated return type, and `-> self` without a block, are not block returns',
            !shapes.key?('plain') && !shapes.key?('noblock'))
-check.call('a declaration in sig/native is a native one', entries_of.call(<<~RBS, dir_name: 'native').first&.native)
+check.call('a declaration in a native-marked file is a native one', entries_of.call(<<~RBS).first&.native)
+  #{NativeSigs::MARKER} fixture
   module M
     def self.s: [T] () { () -> T } -> T
   end
@@ -279,13 +281,14 @@ generate = lambda do |world, sigs, native_sigs: nil, native: nil|
     FileUtils.mkdir_p(File.join(dir, 'sig', 'bc2cpp'))
     File.write(File.join(dir, 'sig', 'bc2cpp', 'gb.rbs'), sigs)
     if native_sigs
-      FileUtils.mkdir_p(File.join(dir, 'sig', 'native'))
-      File.write(File.join(dir, 'sig', 'native', 'gb.rbs'), native_sigs)
+      File.write(File.join(dir, 'sig', 'bc2cpp', 'gb_native.rbs'), "#{NativeSigs::MARKER} fixture\n#{native_sigs}")
     end
     # The fixture's own signatures and the repository's native declarations (RGSS::Profiler, Kernel, Array); the
-    # repository's sig/bc2cpp describes engine classes this program does not have.
+    # repository's program declarations in sig/bc2cpp describe engine classes this program does not have, so only
+    # the native files are passed from there.
+    repo_native = Dir[File.join(ROOT, 'sig', 'bc2cpp', '*.rbs')].select { |f| NativeSigs.file?(f) }
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'gb_fixture', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
-            'BC2CPP_SIG_DIRS' => [File.join(dir, 'sig'), File.join(ROOT, 'sig', 'native')].join(File::PATH_SEPARATOR),
+            'BC2CPP_SIG_DIRS' => [File.join(dir, 'sig', 'bc2cpp'), *repo_native].join(File::PATH_SEPARATOR),
             'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
     world_env = bc2cpp_wio_world_env(env, ROOT)
     if native
