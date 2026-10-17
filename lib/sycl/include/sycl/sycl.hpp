@@ -2257,36 +2257,59 @@ namespace native {
 inline float exp(float x) { return sycl::exp(x); }
 }  // namespace native
 
-// sycl::ext::oneapi: the names element_wise.cpp spells out for its bfloat16 and work-item branches. The bfloat16 branches
-// are not instantiated for F32 (GGML_SYCL_HAS_BF16 is not defined and the F32 ops take the other arm of each if constexpr),
-// so bfloat16 here is a stand-in that holds a float (it is not a bf16 value, and no bf16 arithmetic is provided).
+// sycl::ext::oneapi: the names element_wise.cpp spells out for its bfloat16 and work-item branches. bfloat16 is the bf16
+// storage (the upper 16 bits of a binary32, round-to-nearest-even on conversion from float); arithmetic and math go
+// through float and round the result back to bf16, as the device's bf16 math does.
 namespace ext {
 namespace oneapi {
 class bfloat16 {
  public:
   bfloat16() = default;
-  bfloat16(float f) : v_(f) {}
-  operator float() const { return v_; }
+  bfloat16(float f) : bits_(from_float(f)) {}
+  operator float() const { return to_float(bits_); }
+  uint16_t bits() const { return bits_; }
+  static bfloat16 from_bits(uint16_t b) { bfloat16 r; r.bits_ = b; return r; }
+
  private:
-  float v_ = 0.0f;
+  uint16_t bits_ = 0;
+
+  static float to_float(uint16_t b) {
+    uint32_t u = (uint32_t)b << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+  }
+  static uint16_t from_float(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    if ((u & 0x7fffffffu) > 0x7f800000u) return 0x7fc0;  // NaN stays NaN
+    u += 0x7fffu + ((u >> 16) & 1u);                      // round to nearest even
+    return (uint16_t)(u >> 16);
+  }
 };
+inline bfloat16 operator-(bfloat16 a) { return bfloat16(-static_cast<float>(a)); }
+inline bfloat16 operator+(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) + static_cast<float>(b)); }
+inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) - static_cast<float>(b)); }
+inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
+inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
 // the work-item accessor of the nd_range kernels (a helper of element_wise.cpp; the ops under test use the launch's nd_item)
 namespace this_work_item {
 template <int D> inline nd_item<D> get_nd_item() { return nd_item<D>(); }
 }  // namespace this_work_item
 namespace experimental {
-// The bf16 math of the ops' bfloat16 arms: declared, not defined. Such a call reached at run time fails at link time, not
-// silently; the F32 ops never reach these.
-#define NFCXX_SYCL_BF16_DECL1(name) template <class T> T name(T x);
-#define NFCXX_SYCL_BF16_DECL2(name) template <class T> T name(T x, T y);
-NFCXX_SYCL_BF16_DECL1(fabs) NFCXX_SYCL_BF16_DECL1(exp) NFCXX_SYCL_BF16_DECL1(exp2) NFCXX_SYCL_BF16_DECL1(expm1)
-NFCXX_SYCL_BF16_DECL1(log) NFCXX_SYCL_BF16_DECL1(log2) NFCXX_SYCL_BF16_DECL1(log1p) NFCXX_SYCL_BF16_DECL1(sqrt)
-NFCXX_SYCL_BF16_DECL1(sin) NFCXX_SYCL_BF16_DECL1(cos) NFCXX_SYCL_BF16_DECL1(tan) NFCXX_SYCL_BF16_DECL1(tanh)
-NFCXX_SYCL_BF16_DECL1(erf) NFCXX_SYCL_BF16_DECL1(floor) NFCXX_SYCL_BF16_DECL1(ceil) NFCXX_SYCL_BF16_DECL1(trunc)
-NFCXX_SYCL_BF16_DECL1(round)
-NFCXX_SYCL_BF16_DECL2(fmax) NFCXX_SYCL_BF16_DECL2(fmin)
-#undef NFCXX_SYCL_BF16_DECL1
-#undef NFCXX_SYCL_BF16_DECL2
+// The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
+#define NFCXX_SYCL_BF16_FN1(name) \
+  inline bfloat16 name(bfloat16 x) { return bfloat16(::sycl::name(static_cast<float>(x))); }
+#define NFCXX_SYCL_BF16_FN2(name) \
+  inline bfloat16 name(bfloat16 x, bfloat16 y) { return bfloat16(::sycl::name(static_cast<float>(x), static_cast<float>(y))); }
+NFCXX_SYCL_BF16_FN1(fabs) NFCXX_SYCL_BF16_FN1(exp) NFCXX_SYCL_BF16_FN1(exp2) NFCXX_SYCL_BF16_FN1(expm1)
+NFCXX_SYCL_BF16_FN1(log) NFCXX_SYCL_BF16_FN1(log2) NFCXX_SYCL_BF16_FN1(log1p) NFCXX_SYCL_BF16_FN1(sqrt)
+NFCXX_SYCL_BF16_FN1(sin) NFCXX_SYCL_BF16_FN1(cos) NFCXX_SYCL_BF16_FN1(tan) NFCXX_SYCL_BF16_FN1(tanh)
+NFCXX_SYCL_BF16_FN1(erf) NFCXX_SYCL_BF16_FN1(floor) NFCXX_SYCL_BF16_FN1(ceil) NFCXX_SYCL_BF16_FN1(trunc)
+NFCXX_SYCL_BF16_FN1(round)
+NFCXX_SYCL_BF16_FN2(fmax) NFCXX_SYCL_BF16_FN2(fmin)
+#undef NFCXX_SYCL_BF16_FN1
+#undef NFCXX_SYCL_BF16_FN2
 }  // namespace experimental
 }  // namespace oneapi
 }  // namespace ext
