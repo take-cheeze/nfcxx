@@ -15,6 +15,7 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 | `scripts/qbe-prep.rb` | Port of `qbe-prep.py` (stage 3, below); used by `scripts/qbe-cc`. |
 | `tests/hexagon/flatlink.rb` | Port of `flatlink.py`; used by `tests/hexagon/run.sh`. |
 | `scripts/pathb-qbe-emit.rb` | Port of `pathb-qbe-emit.py` (done, see the section below); used by `tests/pathb-qbe/run.sh`. |
+| `scripts/cil-link.rb` | Port of `cil-link.py` (stage 4, below); used by `scripts/qbe-cc` (the CIL backend) and `scripts/pathb-cil`. Takes `--ilasm`, `--cc` and `--keep-il` as arguments. `tests/mruby/cil-link.sh` checks it. |
 | `tests/mruby/run.sh` | Runs the Python original and the port on real inputs and compares the output byte for byte. The originals are kept as oracles in `tests/mruby/oracle/`; nothing else uses them. CI runs it. |
 
 What the test compares:
@@ -57,6 +58,10 @@ What the test compares:
   `-v` loses the sign of a zero (`v * -1.0` does not).
 - Operator precedence differs from Python: `a & b == 0` is `a & (b == 0)`; write the parentheses.
 - Exit codes: `exit 1` (from `mruby-exit`); messages to `$stderr`.
+- No `Process` (so no `Process::Status`, no `system`, no backticks that report a status). Run a command with
+  `IO.popen("cmd >out 2>err; echo $?")` (`/bin/sh -c`) and read the status from the output.
+- `JSON.parse` (mruby-json) reads an integer above `2**63 - 1` as a Float, which loses its bits. Quote such
+  numbers before the parse and convert them back after it (`quote_big_ints`, `restore_big_ints` in `cil-link.rb`).
 
 ## Stage 3 (done): `qbe-prep.py` to `qbe-prep.rb`
 
@@ -175,6 +180,26 @@ refusal of an `(unsupported ...)` statement that prints the marker (`r_unsupport
 The address of a thread-local object is always `copy extern thread $x` (initial-exec, valid in a
 shared library) also for a definition in the module; the oracle changed with it (covered by `thread_data.ir`,
 `r_thread_addr.ir` and the `tests/pathb-ir/tls*.ir` goldens).
+
+## Stage 4 (done): `cil-link.py` to `cil-link.rb`
+
+`scripts/cil-link.rb` replaces `scripts/cil-link.py`, which moved to `tests/mruby/oracle/cil-link.py`. The callers
+(`scripts/qbe-cc` for the CIL backend, `scripts/pathb-cil`) pass what the Python read from the environment: `--ilasm`
+(the `ILASM` setting, default `build/cil/ilasm`), `--cc` (`CC`, for the variadic call shim) and `--keep-il`
+(`NFCXX_KEEP_IL`). The fragments are read with `JSON.parse`; the integers above `2**63 - 1` (a float64 whose sign bit
+is set is one) are quoted first, see the rules above. ilasm and the shim's C compile run through `IO.popen`, with
+stdout and stderr in files next to the output, and the status is read back from the shell.
+
+`tests/mruby/cil-link.sh` (called by `tests/mruby/run.sh`) links the same fragments with the oracle and the port: the
+fragments of `tests/cil/cases/*.c` (nfcc with `NFCXX_BACKEND=cil -c`, the qbe2cil.py route) and of
+`tests/pathb-cil/cases/*.cpp` (`pathb-dump --ir` and `pathb-cil-emit.py`). For each: the CIL text, the failed IL and the
+runtime config byte for byte, the exit status, and the output of the linked program (its status, its stdout, the
+`EXPECT` line and the `.out` file). Hand-written fragments in `tests/mruby/cil-link/`: `bigint.json` (the integer
+bit patterns), `bad-il.json` (ilasm refuses it: `OUT.failed.il`), `bad-main.json` (a main with arguments). Usage errors
+compare the exit status, and the message where the two versions print the same text. The DLL itself is not compared
+(ilasm writes a new module id each time); the programs are. Parts 1 and 2 need the front ends and are skipped without
+them. Not reproduced: the Python traceback of an uncaught error (a missing fragment, `-o` without its name), where
+only the status is compared, and the ilasm error text, which names the temporary IL file.
 
 ## Bootstrap caveat
 

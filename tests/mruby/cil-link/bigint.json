@@ -1,0 +1,15 @@
+{"tu": "big", "functions": [
+ {"name": "main", "ret": "int32", "params": ["int32", "int64"], "exported": true, "il": [
+   ".method static int32 'main'(int32, int64) cil managed {", "  .maxstack 2", "  ldc.i4.0", "  ret", "}"]},
+ {"name": "strlit", "ret": "void", "params": [], "exported": false, "il": [
+   ".method static void 'strlit'() cil managed {", "  .maxstack 1",
+   "  ldstr \"x\\\"12345678901234567890123 9\"", "  pop", "  ret", "}"]}
+], "data": [
+ {"name": "dd", "exported": true, "align": 8, "size": 24, "items": [
+   ["float64", 13835058055282163712], ["int64", -9223372036854775808], ["addr", "main", 0]]},
+ {"name": "ff", "exported": false, "align": 4, "size": 8, "items": [
+   ["float32", 3212836864], ["zero", 4]]},
+ {"name": "s'q", "exported": true, "align": 1, "size": 3, "items": [["int8", 65], ["int8", -1], ["int16", -2]]},
+ {"name": "big1234567890123456789", "exported": true, "align": 8, "size": 16, "items": [
+   ["int64", -1], ["int64", 9223372036854775807]]}
+], "calls": {}, "addrs": ["dd", "s'q"], "ctors": []}

@@ -7,11 +7,11 @@ of Path B's IR is turned into CLR `try`/`catch`, not into EDG's `setjmp`/`longjm
 ## Pipeline
 
 ```
-C++ --pathb-dump --ir--> Path B IR --pathb-cil-emit.py--> JSON fragment --cil-link.py--> CIL --ilasm--> x.dll (+ launcher)
+C++ --pathb-dump --ir--> Path B IR --pathb-cil-emit.py--> JSON fragment --cil-link.rb--> CIL --ilasm--> x.dll (+ launcher)
 ```
 
 - `scripts/pathb-cil-emit.py` reads the IR text (its format: `docs/notes/pathb-stage2.md`) and writes a fragment, the
-  same format `qbe2cil.py` writes, so `cil-link.py` links both: one class `Prog`, globals as `addr_<name>` fields,
+  same format `qbe2cil.py` writes, so `cil-link.rb` links both: one class `Prog`, globals as `addr_<name>` fields,
   `Init` for data, and the entry point.
 - The memory model is the C backend's: pointers are int64 addresses, frame slots are one `localloc` per call, and
   globals with initializers are data in `Init`.

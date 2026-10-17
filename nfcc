@@ -272,7 +272,7 @@ done
 [ "$sawout" = 1 ] || out=a.out
 if [ $backend = qbe ] || [ $backend = cil ]; then
   # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits); the cil
-  # backend's link is cil-link.py (the wrapper sets NFCXX_CIL).
+  # backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
   "$qcc" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
 else
   gcc "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"

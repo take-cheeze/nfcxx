@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 # C compiler wrapper for nfcc's cil backend (NFCXX_BACKEND=cil): the qbe-cc pipeline (preprocess, qbe-prep.rb, cproc),
-# then qbe2cil.py instead of QBE, and cil-link.py for the link. The object file is a JSON fragment (docs/notes/cil.md).
+# then qbe2cil.py instead of QBE, and cil-link.rb for the link. The object file is a JSON fragment (docs/notes/cil.md).
 export NFCXX_CIL=1
 exec "$(dirname "$0")/qbe-cc" "$@"
