@@ -12,22 +12,18 @@ current-version: 1
 compatibility-version: 1
 exports:
   - targets:         [ arm64-macos ]
-    symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
+        symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
                        ___divti3, dyld_stub_binder, ___error, _exit, _exp, _fabs, _fabsf, _fclose, _feof,
-                       _ferror, _fflush, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti,
-                       ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor, _fmod, _fopen,
-                       _fprintf, _fputs, _fread, _free, _freopen, _frexp, _fseek, _ftell, _fwrite, _getc,
-                       _getenv, _gmtime, _isalnum, _isalpha, _iscntrl, _isdigit, _isgraph, _islower,
-                       _ispunct, _isspace, _isupper, _isxdigit, _ldexp, _localeconv, _localtime, _log,
-                       _log10, _log2, _longjmp, _memchr, _memcmp, _memcpy, _memset, _mktime, ___modti3, _pow,
-                       _printf, _puts, _qsort, _realloc, _remove, _rename, _setjmp, _setlocale, _setvbuf,
-                       _signal, _sin, _snprintf, _sqrt, ___stderrp, ___stdinp, ___stdoutp, _strchr, _strcmp,
+                       _ferror, _fflush, _fgetc, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti,
+                       ___fixunssfti, ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor,
+                       _fmod, _fopen, _fprintf, _fputc, _fputs, _fread, _free, _freopen, _frexp, _fseek,
+                       _fseeko, _ftell, _ftello, _fwrite, _getc, _getenv, _gmtime, _isalnum, _isalpha,
+                       _iscntrl, _isdigit, _isgraph, _islower, _ispunct, _isspace, _isupper, _isxdigit,
+                       _ldexp, _ldrt, _localeconv, _localtime, _log, _log10, _log2, _longjmp, _memchr,
+                       _memcmp, _memcpy, _memmove, _memset, _mktime, ___modti3, _pow, _printf, _puts, _qsort,
+                       _realloc, _remove, _rename, __setjmp, _setjmp, _setlocale, _setvbuf, _signal, _sin,
+                       _snprintf, _sqrt, _sscanf, ___stderrp, ___stdinp, ___stdoutp, _strchr, _strcmp,
                        _strcoll, _strcpy, _strerror, _strftime, _strlen, _strncmp, _strpbrk, _strspn,
                        _strstr, _strtod, _strtol, _system, _tan, _time, _tmpfile, _tmpnam, _tolower,
-    symbols:         [ _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _fseeko,
-                       _ftello ]
-    weak-symbols:    [ ]
-    objc-classes:    [ ]
-    objc-ivars:      [ ]
-    objc-eh-types:   [ ]
-...
+                       _toupper, ___udivti3, ___umodti3, _ungetc, _vfprintf, _vsnprintf ]
+    weak-
