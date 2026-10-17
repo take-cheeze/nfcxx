@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Path B CIL spike (docs/notes/pathb-cil.md): a C++ file -> Path B IR (pathb-dump --ir) -> pathb-cil-emit.py (fragment) ->
-# cil-link.py (CIL, ilasm) -> an executable launcher (dotnet). Usage: scripts/pathb-cil [-o OUT] file.cpp
+# cil-link.rb (CIL, ilasm) -> an executable launcher (dotnet). Usage: scripts/pathb-cil [-o OUT] file.cpp
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=a.out; files=()
@@ -14,4 +14,7 @@ done
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 "$root/scripts/pathb-dump" --ir "${files[0]}" > "$tmp/ir" 2> "$tmp/dump.err" || { cat "$tmp/dump.err" >&2; exit 1; }
 python3 "$root/scripts/pathb-cil-emit.py" "$tmp/ir" "$tmp/frag.json"
-ILASM=${ILASM:-$root/build/cil/ilasm} python3 "$root/scripts/cil-link.py" -o "$out" "$tmp/frag.json"
+# The link takes its settings as arguments (the mruby interpreter has no environment): ILASM, CC and NFCXX_KEEP_IL.
+keep=(); [ -z "${NFCXX_KEEP_IL:-}" ] || keep=(--keep-il)
+"$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "${ILASM:-$root/build/cil/ilasm}" --cc "${CC:-cc}" \
+  ${keep[@]+"${keep[@]}"} -o "$out" "$tmp/frag.json"
