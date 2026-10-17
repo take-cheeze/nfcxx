@@ -65,6 +65,30 @@ module BaseRbsNative
     text[/\A"((?:[^"\\]|\\.)*)"\z/, 1]
   end
 
+  # A class or method name: a string literal, or the presym `MRB_SYM(name)` of the `_id` forms, which the preprocessor
+  # spells `MRB_SYM__name` (MRB_SYM_B / _Q / _E are `name!`, `name?`, `name=`). Operator presyms are not names here.
+  PRESYM = /\AMRB_SYM(_[BQE])?__(\w+)\z/.freeze
+  PRESYM_SUFFIX = { '' => '', '_B' => '!', '_Q' => '?', '_E' => '=' }.freeze
+
+  def symbol_name(arg)
+    literal = string_literal(arg)
+    return literal if literal
+
+    m = arg.match(PRESYM)
+    m && m[2] + PRESYM_SUFFIX.fetch(m[1].to_s, '')
+  end
+
+  # The Ruby class a core class variable names (`mrb->string_class` is String), or nil for any other expression.
+  CORE_OWNER = { 'object' => 'Object', 'fixnum' => 'Integer', 'nil' => 'NilClass', 'true' => 'TrueClass',
+                 'false' => 'FalseClass' }.freeze
+  CORE_CLASS = /\A(?:M|mrb)->(\w+?)_(?:class|module)\z/.freeze
+
+  # mruby's error classes are `eStandardError`-style (the `e` is a prefix, not part of the name).
+  def core_owner(expr)
+    m = expr.match(CORE_CLASS)
+    m && CORE_OWNER.fetch(m[1]) { m[1].sub(/\Ae(?=[A-Z])/, '').split('_').map { |w| w[0].upcase + w[1..] }.join }
+  end
+
   # The variable a call result is assigned to (`RClass* rect = mrb_define_class_under(...)`), if any.
   def assigned_name(text, index)
     before = text[[index - 200, 0].max...index]
@@ -86,9 +110,9 @@ module BaseRbsNative
       under = !m[2].nil?
       var = assigned_name(text, m.begin(0))
       if under
-        outer, name = args[1], string_literal(args[2])
+        outer, name = args[1], symbol_name(args[2])
       else
-        outer, name = nil, string_literal(args[1])
+        outer, name = nil, symbol_name(args[1])
       end
       next unless name && name.match?(/\A[A-Za-z_]\w*\z/)
 
@@ -103,6 +127,10 @@ module BaseRbsNative
 
       set_owner(owners, var, full)
     end
+    # A variable taken from a core class (`krn = mrb->kernel_module;`) owns the methods registered on it.
+    text.scan(/(\w+)\s*=\s*((?:M|mrb)->\w+_(?:class|module))\s*;/) do |var, expr|
+      set_owner(owners, var, core_owner(expr)) if core_owner(expr)
+    end
     text.scan(METHOD_CALL) do
       m = Regexp.last_match
       args = call_args(text, m.end(0) - 1)
@@ -110,8 +138,13 @@ module BaseRbsNative
       next if args.size < 3
 
       target = args[1]
-      name = string_literal(args[2])
-      next unless name
+      next if target.match?(/\s/) # a prototype from an included header (`struct RClass *cla`), not a call
+
+      name = symbol_name(args[2])
+      unless name
+        skipped << "#{target} #{args[2]} (operator or unnamed)"
+        next
+      end
 
       owner = owner_of(owners, target)
       if owner.nil? || owner.is_a?(Symbol)
@@ -211,8 +244,10 @@ module BaseRbsNative
   # A superclass argument as a Ruby constant name. The core object class is `M->object_class` (or `mrb->...`), which is
   # Object, the superclass a class gets when none is written, so it is left out as the Ruby source leaves it. Any other
   # C expression is not a name, so the superclass is left out rather than written wrong.
+  # `E_*_ERROR` is mruby's macro for a core error class; its name is not written here, so the superclass is left out.
   def super_name(expr)
-    return nil if expr.match?(/\A(?:M|mrb)->object_class\z/)
+    return nil if expr.match?(/\A(?:M|mrb)->object_class\z/) || expr.start_with?('E_')
+    return core_owner(expr) if core_owner(expr)
     return expr if expr.match?(NAME_TOKEN)
 
     nil
@@ -220,6 +255,7 @@ module BaseRbsNative
 
   def owner_of(owners, var)
     return var if var.match?(NAME_TOKEN)
+    return core_owner(var.strip) if core_owner(var.strip)
 
     value = owners[var.strip]
     value == :ambiguous ? :ambiguous : value
