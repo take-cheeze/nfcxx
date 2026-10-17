@@ -5,10 +5,12 @@
 # there. The expected results are printed after the build and are the ones the project's own check uses.
 #   NAME=lua       Lua 5.4 (run_lua.sh's pin): the interpreter. Expect print(1+1) -> 2 and lua_test.lua -> lua-ok line.
 #   NAME=doctest   doctest v2.4.12 (run_doctest.sh's pin) with tests/realworld/doctest_main.cpp. Expect exit code 2.
+#   NAME=json      nlohmann/json v3.12.0 (run_json.sh's pin) with tests/realworld/json_main.cpp. Expect the output of the
+#                  same program built natively (run_json.sh's host build), byte for byte.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
-name=${1:?usage: cross_macos.sh lua|doctest}
+name=${1:?usage: cross_macos.sh lua|doctest|json}
 envf=$root/build/cross-macos.env
 [ -f "$envf" ] || { echo "cross_macos: $envf is missing; run scripts/setup-cross-macos.sh first" >&2; exit 2; }
 . "$envf"
@@ -75,5 +77,17 @@ doctest)
   LINK_EXTRA=(-L tests/macos-sysroot/lib -lc++); link "$out" "$W/doctest.o"
   echo "expected on the Mac: exit code 2 (two deliberate CHECK failures); doctest prints its summary"
   ;;
-*) echo "cross_macos: unknown NAME '$name' (lua|doctest)" >&2; exit 2 ;;
+json)
+  pin=55f93686c01528224f448c19128836e7df245f72   # nlohmann/json tag v3.12.0, as run_json.sh
+  src=$work/json; out=$root/build/json-macos/json
+  fetch https://github.com/nlohmann/json "$pin" "$src"
+  if ! NFCXX_CXX_FLAGS="-I$src/single_include" scripts/macos-cxx-check.sh tests/realworld/json_main.cpp "$W/json.s" >/dev/null; then
+    echo "cross_macos: json is blocked, not built: the front end or the libc++ headers did not compile json_main.cpp for arm64 Darwin" >&2
+    exit 3
+  fi
+  llvm-mc -triple=arm64-apple-darwin -filetype=obj "$W/json.s" -o "$W/json.o"
+  LINK_EXTRA=(-L tests/macos-sysroot/lib -lc++); link "$out" "$W/json.o"
+  echo "expected on the Mac: the output of json_main.cpp built natively on the Mac with clang++ -std=c++17 -I<json>/single_include (exit 0)"
+  ;;
+*) echo "cross_macos: unknown NAME '$name' (lua|doctest|json)" >&2; exit 2 ;;
 esac
