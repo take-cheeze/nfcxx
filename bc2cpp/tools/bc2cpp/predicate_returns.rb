@@ -124,8 +124,12 @@ module PredicateReturns
     "#{relative(violation.path)} #{violation.name}"
   end
 
+  # The whitelist key of a file: its path from the gem directory (`mruby-rgss/mrblib/lib.rb`), so a copy of a gem's sources
+  # (a check's fixture, a build directory) keys the same as the repository's own file.
   def relative(path)
-    File.expand_path(path).delete_prefix("#{ROOT}/")
+    parts = File.expand_path(path).split('/')
+    gem = parts.rindex { |part| part.start_with?('mruby-') && !part.end_with?('-compiled') }
+    gem ? parts[gem..].join('/') : parts.join('/').delete_prefix("#{ROOT}/")
   end
 
   # Build gate: raises with every unlisted predicate, and warns about whitelist entries that are no longer needed.
