@@ -79,14 +79,19 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 ## 3. Checks
 
-- `tests/mrustc/run.sh` (ten cases, about half a minute once the crates are cached; the first run of `vec_sum_all`
-  builds all of them, a few minutes):
+- `tests/mrustc/run.sh` (fifteen cases, about 40 seconds once the crates are cached; the first run of `vec_sum_all`
+  builds all of them, a few minutes). It runs in CI as the `mrustc` job, which is part of `build-and-test`:
   - `hello` prints `Hello, world!`; `vec_sum` prints `55 10`; `vec_sum_core` (`MRUSTC_NFCC_CORE=1`) and `vec_sum_all`
     (`MRUSTC_NFCC_CRATES=all`) print the same;
   - on the all-crates build: `threads` (atomics, `Mutex`, `join`), `fsio` (`File`, `metadata`, `remove_file`), `proc`
     (a child process through `Command`), `hashing` (`HashMap`, the random state), `floats` (formatting), and `i128`
-    (128-bit arithmetic). Each expected output was also produced by mrustc's gcc-built standard library, and each value
-    was checked by hand.
+    (128-bit arithmetic);
+  - also on the all-crates build: `time` (`Instant`, `SystemTime`, `sleep`, `Duration` formatting), `net` (a TCP echo
+    over loopback with a server thread, a UDP datagram, a refused connection), `signals` (a handler installed with
+    `signal` and raised with `raise`), `dlopen` (`dlopen`, `dlsym`, `dlclose`, `dlerror` on libc and libm), and
+    `checked` (checked, overflowing, wrapping and saturating arithmetic at several widths).
+  Each expected output was also produced by mrustc's gcc-built standard library, and checked against Rust's semantics.
+  Two results mrustc gets wrong are left out (section 4).
 
   Needs `scripts/setup-mrustc.sh`.
 - Also checked by hand, on the gcc-std build and the all-crates build alike: `std::env::args` sees its arguments (the
@@ -105,9 +110,16 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 - **The system is still gcc's.** The objects are nfcxx's, but the linker driver (`cc`), the assembler (`as`, which
   QBE's output goes through) and glibc, libgcc_s, libm and the rest come from the host.
-- **Not exercised:** `std::time` (`Instant`, `SystemTime`), networking, signals, dynamic loading (`dlopen`), the
-  checked-arithmetic forms of `__builtin_*_overflow` (which `qbe-prep.rb` rewrites for some operand types), and panics
-  that unwind through more than one frame of user code.
+- **Not exercised:** panics that unwind through more than one frame of user code, `std::fs` beyond the `fsio` case,
+  the `libtest` and `proc_macro` crates (section 4 below), and the 16-byte atomics (no program reaches them). `time`,
+  networking, signals, `dlopen` and checked arithmetic are now covered (section 3).
+- **mrustc's bugs found by the checked-arithmetic and time cases.** Both reproduce in mrustc's own gcc build, so they
+  are not the pipeline's, and both are left out of `checked.rs`:
+  - The 128-bit multiply helper in mrustc's prelude (`mul128_o`) does not flag the bits of the multiplicand it shifts
+    out, so `(1u128 << 100).checked_mul(1 << 28)` gives `Some(0)`, not `None`.
+  - mrustc's constant evaluator folds `(-30000i16).checked_mul(2)` to `Some(5536)` (the wrapped value, not overflowing).
+    At run time the same operation gives `None`. `checked.rs` passes its operands through a non-`const` function so
+    they are not folded.
 - **The `0xffffffffdeaddead` warnings.** Assembling some crates warns `0xffffffffdeaddead shortened to 0xad`. The
   constant is QBE's undefined-value marker (section 6). It is not proven harmless, but no output changed when the marker
   was changed (section 6).
@@ -125,12 +137,15 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 ## 5. Next steps
 
-1. Cover what section 4 lists as not exercised: `std::time`, networking, signals, `dlopen`, and checked arithmetic.
-2. Make mrustc stop producing reads of variables with no reaching definition, if they can be shown to be dead (section 6
-   lists where they are), or find the paths where they are not dead.
+1. Panics that unwind through several frames, `std::fs` beyond `fsio`, and `libtest`/`proc_macro` (compile and link).
+2. The undefined-value site that does run (section 6): either make mrustc's C initialise the return union, or accept
+   the copy as dead by construction. Other sites are not reached by any program in the suite.
 3. Decide whether the rewrites belong in a fork of mrustc's codegen rather than in text. They are specific to this pin
-   of mrustc, and each new pin means redoing the census (section 2).
-4. Wire the all-crates test into CI, with a cache for `build/mrustc`. The first build takes minutes.
+   of mrustc, and each new pin means redoing the census (section 2). The two mrustc bugs in section 4 would be fixed
+   there, not in text.
+4. CI: the `mrustc` job (`.github/workflows/ci.yml`) caches mrustc's compiler and standard library (`bin/mrustc`,
+   `output-1.90.0`) and the per-crate objects. It has not run on GitHub's runners yet: the first run is the test of the
+   cold build (minutes; a download of the rustc source).
 
 ## 6. Undefined values: what was checked
 
@@ -151,3 +166,16 @@ The undefined value is `UNDEF`, the constant `0xdeaddead` (`parse.c`). Those are
 - **Why there are reads at all.** mrustc's C declares a function's locals up front and assigns them on the paths of the
   MIR that define them, so a join can see a variable that was assigned on one path only. In valid Rust such a value is
   only read where the MIR defines it. Whether any site is reachable and used is what section 5 item 2 would settle.
+- **Which sites run.** A probe build (scratch: a QBE copy with a call to `__nfcxx_undef_probe(id)` at the start of each
+  block that reads `UNDEF` in an instruction or a jump, or feeds it to a successor's phi; the map from ids to function
+  and block is written at compile time). Block entry over-approximates, so a probe that never fires proves that no
+  such read ran. A positive control (an uninitialised local read on one path) fires and prints the value
+  `-559030611`, which is `0xdeaddead`. Across the fifteen programs of section 3, all built with `MRUSTC_NFCC_CRATES=all`,
+  exactly one site runs: `std::sys::net::connection::socket::socket_addr_to_c`, in its IPv4 arm, which the `net` case
+  calls six times (one per IPv4 address conversion). The other fourteen programs never reach a probe.
+- **What the reached site does.** Its join phi takes `UNDEF` from the IPv4 edge for three words, and stores them into
+  bytes 16 to 28 of the `SocketAddrCRepr` union that the function returns. The IPv4 arm writes only the first 16 bytes
+  (`sockaddr_in`), and returns length 0x10, so `bind`, `connect` and `sendto` read only those bytes. The copied
+  `UNDEF` bytes are never read by a consumer, so the program's output does not depend on them. This is dead by
+  construction for this site, not a general argument: the same shape in another function would need its own check.
+  The root is mrustc's C, which leaves the union's unused tail unwritten; a fix would zero it in mrustc's output.
