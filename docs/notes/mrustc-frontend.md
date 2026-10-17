@@ -79,16 +79,23 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 ## 3. Checks
 
-- `tests/mrustc/run.sh` (four cases, about ten seconds once the crates are cached; the first run of `vec_sum_all`
+- `tests/mrustc/run.sh` (ten cases, about half a minute once the crates are cached; the first run of `vec_sum_all`
   builds all of them, a few minutes):
-  - `hello` prints `Hello, world!`;
-  - `vec_sum` prints `55 10`;
-  - `vec_sum_core` (`MRUSTC_NFCC_CORE=1`) prints `55 10`;
-  - `vec_sum_all` (`MRUSTC_NFCC_CRATES=all`) prints `55 10`.
+  - `hello` prints `Hello, world!`; `vec_sum` prints `55 10`; `vec_sum_core` (`MRUSTC_NFCC_CORE=1`) and `vec_sum_all`
+    (`MRUSTC_NFCC_CRATES=all`) print the same;
+  - on the all-crates build: `threads` (atomics, `Mutex`, `join`), `fsio` (`File`, `metadata`, `remove_file`), `proc`
+    (a child process through `Command`), `hashing` (`HashMap`, the random state), `floats` (formatting), and `i128`
+    (128-bit arithmetic). Each expected output was also produced by mrustc's gcc-built standard library, and each value
+    was checked by hand.
+
   Needs `scripts/setup-mrustc.sh`.
-- Also checked by hand: a program that prints its arguments (`std::env::args`, through the `.init_array` rewrite) gives
-  `3 x` for `x y`, in both the gcc-std build and the all-crates build. A program that panics prints the panic message
-  and aborts with 134, in all of: mrustc's own build, the gcc-std build and the all-crates build.
+- Also checked by hand, on the gcc-std build and the all-crates build alike: `std::env::args` sees its arguments (the
+  `.init_array` rewrite); stdin is read line by line; `is_x86_feature_detected!` reports `sse2` and `avx2` on this host;
+  a panic prints its message and aborts with 134 (mrustc's `panic_abort` default); with `-C panic=unwind`,
+  `catch_unwind` catches an explicit panic.
+- Not buildable: `AtomicU128`. mrustc reports an unresolved `use` for it, which suggests the type is cfg-gated on a
+  target property mrustc does not set (not verified). So the 16-byte atomic helpers are compiled, but no program that
+  mrustc builds here reaches them.
 - The program runs from another directory with relative paths (the driver resolves them before it changes directory).
 - `MRUSTC_NFCC_KEEP=1` keeps the intermediate files of a run, for debugging.
 - libcore's object, built through nfcxx, has 19,796 defined symbols; mrustc's gcc-built `libcore.rlib.o` has 19,476.
@@ -98,16 +105,15 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 - **The system is still gcc's.** The objects are nfcxx's, but the linker driver (`cc`), the assembler (`as`, which
   QBE's output goes through) and glibc, libgcc_s, libm and the rest come from the host.
-- **Not exercised at run time:** the `cpuid` and `xgetbv` helpers beyond what the programs above reach (std's feature
-  detection is linked, but its use in these programs is not known), the 16-byte atomics (`uint128_t`), threads and
-  atomics, trait objects, `std::fs`, processes, checked arithmetic (`__builtin_*_overflow`, which `qbe-prep.rb` rewrites
-  for some operand types). The `Vec` and `args` programs exercise formatting, iterators, the allocator and argv.
+- **Not exercised:** `std::time` (`Instant`, `SystemTime`), networking, signals, dynamic loading (`dlopen`), the
+  checked-arithmetic forms of `__builtin_*_overflow` (which `qbe-prep.rb` rewrites for some operand types), and panics
+  that unwind through more than one frame of user code.
 - **The `0xffffffffdeaddead` warnings.** Assembling some crates warns `0xffffffffdeaddead shortened to 0xad`. The
-  constant is QBE's undefined-value marker (`curf->con[0].bits.i = 0xdeaddead` in `3rd/qbe/parse.c`): code reads a
-  value nobody defined, and the assembler truncates the constant. Not investigated; it may be harmless (the value is
-  never used by the program) or it may hide a real bug. The count per crate was not recorded.
-- **mrustc's own bugs, not the pipeline's:** `let _ = v[3];` on an empty `Vec` does not panic, in mrustc's gcc build as
-  well. Panics report `:0:0` locations, since mrustc does not track source positions.
+  constant is QBE's undefined-value marker (section 6). It is not proven harmless, but no output changed when the marker
+  was changed (section 6).
+- **mrustc's own bugs, not the pipeline's:** `let _ = v[3];` and `v[10]` inside a closure do not panic on an empty or
+  short `Vec`, in mrustc's gcc build as well. Panics report `:0:0` locations, since mrustc does not track source
+  positions.
 - **Borrow checking:** none. mrustc assumes its input is valid (`docs/notes/borrowck-plan.md` §4.4). A program that
   rustc would reject is compiled.
 - **Port check:** `tests/mruby/qbe-prep.sh` needs EDG for its corpus part, which was skipped here. Its edge-case part
@@ -119,9 +125,29 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 ## 5. Next steps
 
-1. Run a wider runtime check on the all-crates build: threads, atomics, `std::fs`, processes, panics that unwind through
-   user code, and `is_x86_feature_detected!`. Each finds a rewrite that is wrong only at run time, if there is one.
-2. Investigate the `0xdeaddead` warnings: find which reads of undefined values reach an instruction that truncates them.
+1. Cover what section 4 lists as not exercised: `std::time`, networking, signals, `dlopen`, and checked arithmetic.
+2. Make mrustc stop producing reads of variables with no reaching definition, if they can be shown to be dead (section 6
+   lists where they are), or find the paths where they are not dead.
 3. Decide whether the rewrites belong in a fork of mrustc's codegen rather than in text. They are specific to this pin
    of mrustc, and each new pin means redoing the census (section 2).
 4. Wire the all-crates test into CI, with a cache for `build/mrustc`. The first build takes minutes.
+
+## 6. Undefined values: what was checked
+
+QBE's SSA renaming returns its undefined value where a temporary has no reaching definition (`getstk` in
+`3rd/qbe/ssa.c`), and slot coalescing turns a load from a slot that is never stored into a copy of it (`3rd/qbe/mem.c`).
+The undefined value is `UNDEF`, the constant `0xdeaddead` (`parse.c`). Those are the sites the assembler reports.
+
+- **Where the reads are.** A scratch copy of QBE, not the repo's, prints each site: the phi operands at a join
+  (`ssa.c`) and the never-stored slot loads (`mem.c`). A positive control (a function that reads an uninitialised
+  local on one path) is reported, so the instrumentation works. Counts for libcore: 97 phi operands in 50 functions,
+  and 30 slot loads. For alloc: 4 and 6. For std: 15 and 14. Instrumenting the ordinary instruction operands (the other
+  place renaming can put the undefined value) reported none in the three crates.
+- **Whether they matter.** The undefined value is QBE's constant for an uninitialised read. The question is whether
+  the program ever depends on it. A scratch copy of QBE with the constant set to `0` and another with `0x5a5a5a5a` were
+  each used to rebuild all the crates and the twelve runtime programs (the runtime cases, `vec`, `args`, `stdin`,
+  `unwind`, `boom`). All twelve gave identical output under the three values. That is evidence that these programs do not
+  depend on those reads. It is not proof for every site.
+- **Why there are reads at all.** mrustc's C declares a function's locals up front and assigns them on the paths of the
+  MIR that define them, so a join can see a variable that was assigned on one path only. In valid Rust such a value is
+  only read where the MIR defines it. Whether any site is reachable and used is what section 5 item 2 would settle.
