@@ -268,8 +268,6 @@ enum CEmit {
     return out
   }
 
-  /// The struct and helpers of an array of `elem`. Helpers are named by the element
-  /// type, so they are shared by every array of that element.
   /// The struct of an array. It holds a pointer to its elements, which need only be
   /// declared, so it can be written before the element type is complete.
   private static func arrayStruct(_ ty: Ty, _ elem: Ty) -> String {
@@ -292,7 +290,8 @@ enum CEmit {
     return text
   }
 
-  /// The helper bodies of an array of `elem`.
+  /// The helper bodies of an array of `elem`. Helpers are named by the element type, so
+  /// they are shared by every array of that element.
   private static func arrayHelpers(_ ty: Ty, _ elem: Ty) -> String {
     let e = elem.cName
     let m = elem.mangled

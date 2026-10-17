@@ -14,6 +14,10 @@
 // - Class-typed temporaries that are not stored are released after their
 //   statement.
 // - Top-level variables are never released (they live until exit, as in Swift).
+// - Arrays are class-like too: a copy copies the buffer (retaining each class-like
+//   element), and the buffer is freed with its elements. A struct or enum holding an
+//   array is class-like as well, and its copy copies the array. A subscript or `count`
+//   of a temporary array frees the temporary when it reads the element.
 //
 // Closures do not capture: a closure body sees only its own parameters and
 // top-level names, and an outer local is reported as not in scope.
@@ -941,7 +945,9 @@ final class Lowerer {
   /// Cases are lowered to a chain of tests; every case must be covered unless
   /// there is a `default`.
   private func lowerSwitch(_ node: SwitchExprSyntax) throws -> [Stmt] {
-    let subject = try lowerExpr(node.subject)
+    // A place subject is copied (retained) too: the arms bind payloads from the copy, so
+    // an assignment to the place in an arm cannot free what a binding still refers to.
+    let subject = own(try lowerExpr(node.subject))
     var enumInfo: EnumInfo? = nil
     switch subject.ty {
     case .enumeration(let info): enumInfo = info

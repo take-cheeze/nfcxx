@@ -1,7 +1,7 @@
 // Typed IR produced by Lower.swift and printed as C by CEmit.swift.
 //
-// M2 subset: Int, Bool, Void, structs with Int/Bool/struct/optional
-// properties, reference-counted classes with stored properties and deinit,
+// M2 subset: Int, Bool, Void, structs with value or array properties,
+// reference-counted classes with stored properties and deinit,
 // Optional types, global functions, and top-level statements.
 //
 // Ownership: an Expr with `owned == false` is a place (a local, or a field of
@@ -13,8 +13,9 @@ indirect enum Ty: Equatable {
   case int
   case double
   case bool
-  /// A growable array of value elements. It is owned like a class reference:
-  /// copying it copies the buffer, and it is freed when its owner goes away.
+  /// A growable array of any element type. It is owned like a class reference:
+  /// copying it copies the buffer (and retains each class-like element), and it is
+  /// freed, with its elements released, when its owner goes away.
   case array(Ty)
   case void
   /// The type of the `nil` literal before a context gives it an Optional type.
