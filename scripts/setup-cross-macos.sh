@@ -56,6 +56,8 @@ cat > "$root/build/cross-macos.env" <<EOF
 export NFCXX_MACOS_CLEANROOM="$root/tests/macos-sysroot"
 export NFCXX_MACOS_SYSROOT="$root/tests/macos-sysroot/include"
 export NFCXX_LIBCXX="$libcxx"
+# The cross front end is for a macOS target on this Linux host: its predefined macros must not be the Linux ones (see 3rd/edg sys_predef.c).
+export NFCXX_TARGET_APPLE=1
 export EDG_BUILD="$root/build/edg-cross"
 export EDG_BASE="$root/build/edg-base-cross"
 export PATH="$llvm/bin:\$PATH"
