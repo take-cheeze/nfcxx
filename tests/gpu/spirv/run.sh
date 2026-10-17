@@ -9,8 +9,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
+. "$root/scripts/oneapi-env.sh"   # LD_LIBRARY_PATH (the oneAPI runtime) and OPENCL_INCLUDE
 tools=${SPIRV_TOOLS_BIN:-}
-clinc=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
+clinc=${OPENCL_INCLUDE:-}
 if [ -n "$tools" ]; then export PATH="$tools:$PATH"; fi
 if ! command -v spirv-as >/dev/null || ! command -v spirv-val >/dev/null || [ ! -f "$clinc/CL/cl.h" ] \
    || [ ! -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then

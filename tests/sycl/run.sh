@@ -11,6 +11,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
+. "$root/scripts/oneapi-env.sh"   # LD_LIBRARY_PATH (the oneAPI runtime) and OPENCL_INCLUDE
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 fail=0
@@ -67,7 +68,7 @@ fi
 # GPU through OpenCL (SPIR-V 1.2 with the OpenCL 2.2 memory model, the heap in shared USM, the local size in specialization
 # constants). Skips when the OpenCL headers, the ICD loader, spirv-val or a usable device is missing. The host is g++ (the
 # runtime is plain C++ over the OpenCL C API).
-cl_inc=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
+cl_inc=${OPENCL_INCLUDE:-}
 cl_ok=0
 if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then cl_ok=1; fi
 if [ $cl_ok = 1 ]; then
