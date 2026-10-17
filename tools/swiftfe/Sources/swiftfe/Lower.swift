@@ -441,6 +441,10 @@ final class Lowerer {
     switch ty {
     case .function, .structure, .array: return true
     case .optional(let inner): return isStructFieldAllowed(inner)
+    // An enum may hold an array (its helpers handle it), but no class-like payload other
+    // than one a struct may hold.
+    case .enumeration(let info):
+      return info.cases.allSatisfy { $0.payload.allSatisfy { !$0.ty.isClassLike || isStructFieldAllowed($0.ty) } }
     default: return false
     }
   }
