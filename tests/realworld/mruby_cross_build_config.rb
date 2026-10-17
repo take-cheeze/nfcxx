@@ -12,6 +12,10 @@ MRuby::CrossBuild.new('arm64-macos') do |conf|
   # mruby's read-only-data check on Apple targets reads the Mach-O segment layout (mach-o/getsect.h). Turning it off is
   # mruby's documented option: literal data is then not recognised as read-only, which only costs an optimisation.
   conf.cc.defines << 'MRB_NO_DEFAULT_RO_DATA_P'
+  # The VM's labels-as-values dispatch (&&label, a GNU extension) is selected because the cross compiler preprocesses with
+  # clang, which defines __clang__. cproc has no labels-as-values, so the switch dispatch is used instead; mruby's
+  # documented option, and the same bytecode semantics.
+  conf.cc.defines << 'MRB_USE_VM_SWITCH_DISPATCH'
   conf.cc.command = ENV.fetch('MRUBY_CROSS_CC')
   conf.linker.command = ENV.fetch('MRUBY_CROSS_LD')
   conf.archiver.command = ENV.fetch('MRUBY_AR', 'llvm-ar')
