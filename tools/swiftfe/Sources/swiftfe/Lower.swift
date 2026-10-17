@@ -284,7 +284,7 @@ final class Lowerer {
     try lowerPendingDeinits()
 
     for check in structFieldChecks where check.ty.holdsClassRef {
-      throw error("structs with class-typed or array properties are not supported yet", check.node)
+      throw error("structs with class-typed properties are not supported yet", check.node)
     }
     return Program(
       structs: structDecls.map { $0.1 } + instStructs,
