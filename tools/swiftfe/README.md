@@ -166,13 +166,16 @@ Supported:
   its arrays, and its owner frees them. A struct may not hold a class, directly or through
   another struct, an enum or an Optional (structs with class-typed properties are still
   rejected). Class fields may hold arrays already.
+- Optional arrays (`[Int]?`): assignment, `x!`, `if let`, `== nil`, and `x![i]`.
+- Subscripts and `count` of a temporary array, e.g. `make()[0]` and `make().count`. The
+  temporary is freed after the element is read, and a class element is returned owned.
 
 Limits (each gives a diagnostic):
 - `break` inside a `switch`
-- optional arrays (`[Int]?`)
-- subscripts and `count` of a temporary array; `for-in` with a `where` clause
-- member access on a temporary struct that holds an array, e.g. `make().n`, and a method
-  call on one, since the temporary's arrays would leak
+- `for-in` with a `where` clause
+- member access on a temporary class-like value, e.g. `make().n` for a struct that holds
+  an array, and a method call on one, since its arrays would leak. Also `make()!`,
+  `if let x = make()` and `make() == nil` for an Optional array or class-like temporary.
 - `switch` over Double or String; `%` on Double
 
 ## Integration tests

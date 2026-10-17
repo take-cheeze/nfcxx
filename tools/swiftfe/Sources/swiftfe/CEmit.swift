@@ -321,6 +321,14 @@ enum CEmit {
     text += "static void arr_check_\(m)(\(arr) a, int64_t i) {\n"
     text += "  if (i < 0 || i >= a.count) sw_trap(\"Index out of range\");\n}\n"
     text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i) { arr_check_\(m)(a, i); return a.data[i]; }\n"
+    // Reading or counting a temporary array frees it. The element is copied out first, so
+    // a class-like element keeps its own reference when the buffer's references are dropped.
+    text += "static \(e) arr_get_tmp_\(m)(\(arr) a, int64_t i) {\n"
+    text += "  \(e) v = arr_get_\(m)(a, i);\n"
+    if elem.isClassLike { text += "  \(retainCode("v", elem))\n" }
+    text += "  arr_free_\(m)(a);\n  return v;\n}\n"
+    text += "static int64_t arr_count_tmp_\(m)(\(arr) a) {\n"
+    text += "  int64_t n = a.count;\n  arr_free_\(m)(a);\n  return n;\n}\n"
     text += "static \(e) *arr_at_\(m)(\(arr) *a, int64_t i) { arr_check_\(m)(*a, i); return &a->data[i]; }\n"
     text += "static void arr_append_\(m)(\(arr) *a, \(e) v) {\n"
     text += "  if (a->count == a->cap) {\n"
@@ -500,8 +508,13 @@ enum CEmit {
       return "arr_lit_\(elem.mangled)(\(elems.count), (\(elem.cName)[]){\(elems.map(expr).joined(separator: ", "))})"
     case .index(let base, let idx):
       guard case .array(let elem) = base.ty else { return "0" }
-      return "arr_get_\(elem.mangled)(\(expr(base)), \(expr(idx)))"
+      // A temporary array is freed by the `_tmp` helper, after the element is read.
+      let getter = base.owned ? "arr_get_tmp_" : "arr_get_"
+      return "\(getter)\(elem.mangled)(\(expr(base)), \(expr(idx)))"
     case .arrayCount(let base):
+      if base.owned, case .array(let elem) = base.ty {
+        return "arr_count_tmp_\(elem.mangled)(\(expr(base)))"
+      }
       return "((\(expr(base))).count)"
     case .arrayAppend(let target, let value):
       return "arr_append_\(value.ty.mangled)(&\(lvalue(target)), \(expr(value)))"

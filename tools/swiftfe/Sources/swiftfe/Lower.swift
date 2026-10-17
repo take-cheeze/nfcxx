@@ -1193,11 +1193,10 @@ final class Lowerer {
       guard case .array(let elem) = base.ty else {
         throw error("subscripts are supported on arrays only in M2, not on '\(base.ty.swiftName)'", sub)
       }
-      if base.owned {
-        throw error("subscript of a temporary array is not supported yet", sub)
-      }
       let idx = try indexArgument(sub)
-      return Expr(kind: .index(base, idx), ty: elem)
+      // A temporary array is freed once the element is read, so an element that is
+      // class-like is returned owned (retained before the array is freed).
+      return Expr(kind: .index(base, idx), ty: elem, owned: base.owned && elem.isClassLike)
     }
     if let lit = expr.as(FloatLiteralExprSyntax.self) {
       let digits = lit.literal.text.filter { $0 != "_" }
@@ -1247,9 +1246,6 @@ final class Lowerer {
       if b.ty.isArray {
         guard member.declName.baseName.text == "count" else {
           throw error("arrays have no member '\(member.declName.baseName.text)' in M2", member)
-        }
-        if b.owned {
-          throw error("count of a temporary array is not supported yet", member)
         }
         return Expr(kind: .arrayCount(b), ty: .int)
       }
@@ -1648,9 +1644,6 @@ final class Lowerer {
       let inner = try resolveType(opt.wrappedType)
       if case .optional = inner {
         throw error("nested optional types are not supported yet", type)
-      }
-      if inner.isArray {
-        throw error("optional arrays are not supported yet", type)
       }
       let ty = Ty.optional(inner)
       if !optionals.contains(ty) { optionals.append(ty) }
