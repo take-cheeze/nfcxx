@@ -47,10 +47,10 @@ enum CEmit {
     static void sw_print_int(int64_t v) {
       printf("%lld\\n", (long long)v);
     }
-    static void sw_print_double(double v) {
+    static void sw_fmt_double(double v, char *out, size_t n) {
       // Swift prints the shortest digits that read back to the same value.
-      if (isnan(v)) { printf("nan\\n"); return; }
-      if (isinf(v)) { printf(v < 0 ? "-inf\\n" : "inf\\n"); return; }
+      if (isnan(v)) { snprintf(out, n, "nan"); return; }
+      if (isinf(v)) { snprintf(out, n, v < 0 ? "-inf" : "inf"); return; }
       char buf[64];
       int digits;
       for (digits = 1; digits <= 17; digits++) {
@@ -59,12 +59,16 @@ enum CEmit {
       }
       int exp10 = atoi(strchr(buf, 'e') + 1);
       if (exp10 < -4 || exp10 >= 16) {
-        printf("%s\\n", buf);
+        snprintf(out, n, "%s", buf);
         return;
       }
       int frac = digits - 1 - exp10;
       if (frac < 1) frac = 1;
-      snprintf(buf, sizeof buf, "%.*f", frac, v);
+      snprintf(out, n, "%.*f", frac, v);
+    }
+    static void sw_print_double(double v) {
+      char buf[64];
+      sw_fmt_double(v, buf, sizeof buf);
       printf("%s\\n", buf);
     }
     static void sw_print_bool(bool v) {
@@ -98,6 +102,7 @@ enum CEmit {
     for s in program.structs { out += "typedef struct s_\(cIdent(s.name)) s_\(cIdent(s.name));\n" }
     for e in program.enums { out += "typedef struct s_\(cIdent(e.name)) s_\(cIdent(e.name));\n" }
     for o in program.optionals { out += "typedef struct \(o.cName) \(o.cName);\n" }
+    for a in program.arrays { out += "typedef struct \(a.cName) \(a.cName);\n" }
     out += "\n"
     for fn in program.functionTypes {
       guard case .function(let params, let ret) = fn else { continue }
@@ -111,7 +116,7 @@ enum CEmit {
     var values = ""
     func needsDefinition(_ ty: Ty) -> Bool {
       switch ty {
-      case .structure, .enumeration, .optional: return true
+      case .structure, .enumeration, .optional, .array: return true
       default: return false
       }
     }
@@ -160,6 +165,9 @@ enum CEmit {
           values += "}\n"
         }
         values += "\n"
+      case .array(let elem):
+        if needsDefinition(elem) { defineValue(elem) }
+        values += arrayHelpers(ty, elem)
       case .optional(let inner):
         if needsDefinition(inner) { defineValue(inner) }
         let opt = ty.cName
@@ -179,6 +187,7 @@ enum CEmit {
     for s in program.structs { defineValue(.structure(s.name)) }
     for e in program.enums { defineValue(.enumeration(e)) }
     for o in program.optionals { defineValue(o) }
+    for a in program.arrays { defineValue(a) }
     out += values
 
     // Class layout: the header first, then the stored properties.
@@ -241,6 +250,56 @@ enum CEmit {
     return out
   }
 
+  /// The struct and helpers of an array of `elem`. Helpers are named by the element
+  /// type, so they are shared by every array of that element.
+  private static func arrayHelpers(_ ty: Ty, _ elem: Ty) -> String {
+    let e = elem.cName
+    let m = elem.mangled
+    let arr = ty.cName
+    var text = ""
+    text += "struct \(arr) {\n  \(e) *data;\n  int64_t count;\n  int64_t cap;\n};\n"
+    text += "static \(arr) arr_lit_\(m)(int64_t n, const \(e) *vals) {\n"
+    text += "  \(arr) a = { NULL, 0, 0 };\n"
+    text += "  if (n > 0) {\n"
+    text += "    a.data = malloc(sizeof(\(e)) * (size_t)n);\n"
+    text += "    if (!a.data) sw_trap(\"out of memory\");\n"
+    text += "    memcpy(a.data, vals, sizeof(\(e)) * (size_t)n);\n"
+    text += "    a.count = n;\n    a.cap = n;\n  }\n  return a;\n}\n"
+    text += "static \(arr) arr_copy_\(m)(\(arr) a) { return arr_lit_\(m)(a.count, a.data); }\n"
+    text += "static void arr_free_\(m)(\(arr) a) { free(a.data); }\n"
+    text += "static void arr_check_\(m)(\(arr) a, int64_t i) {\n"
+    text += "  if (i < 0 || i >= a.count) sw_trap(\"Index out of range\");\n}\n"
+    text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i) { arr_check_\(m)(a, i); return a.data[i]; }\n"
+    text += "static \(e) *arr_at_\(m)(\(arr) *a, int64_t i) { arr_check_\(m)(*a, i); return &a->data[i]; }\n"
+    text += "static void arr_append_\(m)(\(arr) *a, \(e) v) {\n"
+    text += "  if (a->count == a->cap) {\n"
+    text += "    int64_t cap = a->cap ? a->cap * 2 : 4;\n"
+    text += "    \(e) *d = realloc(a->data, sizeof(\(e)) * (size_t)cap);\n"
+    text += "    if (!d) sw_trap(\"out of memory\");\n"
+    text += "    a->data = d;\n    a->cap = cap;\n  }\n"
+    text += "  a->data[a->count++] = v;\n}\n"
+    // print() of an array of Int, Bool or Double. Other elements are not printed.
+    switch elem {
+    case .int, .bool, .double:
+      var element = ""
+      switch elem {
+      case .int: element = "printf(\"%lld\", (long long)a.data[i]);"
+      case .bool: element = "printf(\"%s\", a.data[i] ? \"true\" : \"false\");"
+      default: element = "char buf[64]; sw_fmt_double(a.data[i], buf, sizeof buf); printf(\"%s\", buf);"
+      }
+      text += "static void pr_arr_\(m)(\(arr) a) {\n"
+      text += "  printf(\"[\");\n"
+      text += "  for (int64_t i = 0; i < a.count; i++) {\n"
+      text += "    if (i) printf(\", \");\n    \(element)\n  }\n"
+      text += "  printf(\"]\\n\");\n}\n"
+      // An owned temporary is freed after printing, since print does not keep it.
+      text += "static void prf_arr_\(m)(\(arr) a) { pr_arr_\(m)(a); arr_free_\(m)(a); }\n\n"
+    default:
+      break
+    }
+    return text
+  }
+
   private static func paramList(_ params: [Param]) -> String {
     if params.isEmpty { return "void" }
     return params.map { "\($0.ty.cName) \($0.cName)" }.joined(separator: ", ")
@@ -290,6 +349,7 @@ enum CEmit {
   /// Drops one reference to a class-like value held in `expr`.
   private static func releaseCode(_ expr: String, _ ty: Ty) -> String {
     if ty.isClass { return "sw_release(\(expr));" }
+    if case .array(let elem) = ty { return "arr_free_\(elem.mangled)(\(expr));" }
     return "rel_\(ty.cName)(\(expr));"
   }
 
@@ -305,6 +365,9 @@ enum CEmit {
       return name
     case .field(let base, let name, let arrow):
       return arrow ? "(\(lvalue(base)))->\(name)" : "(\(lvalue(base))).\(name)"
+    case .index(let base, let idx, let arrTy):
+      guard case .array(let elem) = arrTy else { return "(*(&(\(lvalue(base)))))" }
+      return "(*arr_at_\(elem.mangled)(&\(lvalue(base)), \(expr(idx))))"
     }
   }
 
@@ -326,6 +389,9 @@ enum CEmit {
     case .call(let f, let args):
       return "\(f.cName)(\(args.map(expr).joined(separator: ", ")))"
     case .print(let v):
+      if case .array(let elem) = v.ty {
+        return (v.owned ? "prf_arr_" : "pr_arr_") + elem.mangled + "(\(expr(v)))"
+      }
       let printer = v.ty == .bool ? "sw_print_bool(" : (v.ty == .double ? "sw_print_double(" : "sw_print_int(")
       return printer + expr(v) + ")"
     case .structLit(let s, let args):
@@ -357,6 +423,7 @@ enum CEmit {
       return "(\(expr(l)) \(op) \(expr(r)))"
     case .retain(let inner):
       if e.ty.isClass { return "((\(e.ty.cName))sw_retain(\(expr(inner))))" }
+      if case .array(let elem) = e.ty { return "arr_copy_\(elem.mangled)(\(expr(inner)))" }
       return "ret_\(e.ty.cName)(\(expr(inner)))"
     case .wrap(let inner):
       return "((\(e.ty.cName)){ .some = true, .value = \(expr(inner)) })"
@@ -371,6 +438,17 @@ enum CEmit {
         inits.append(".\(field.cName) = \(expr(arg))")
       }
       return "((\(e.ty.cName)){ " + inits.joined(separator: ", ") + " })"
+    case .arrayLit(let ty, let elems):
+      guard case .array(let elem) = ty else { return "arr_lit_0(0, NULL)" }
+      if elems.isEmpty { return "arr_lit_\(elem.mangled)(0, NULL)" }
+      return "arr_lit_\(elem.mangled)(\(elems.count), (\(elem.cName)[]){\(elems.map(expr).joined(separator: ", "))})"
+    case .index(let base, let idx):
+      guard case .array(let elem) = base.ty else { return "0" }
+      return "arr_get_\(elem.mangled)(\(expr(base)), \(expr(idx)))"
+    case .arrayCount(let base):
+      return "((\(expr(base))).count)"
+    case .arrayAppend(let target, let value):
+      return "arr_append_\(value.ty.mangled)(&\(lvalue(target)), \(expr(value)))"
     case .isCase(let inner, let tag):
       return "((\(expr(inner))).tag == \(tag))"
     case .funcRef(let f):

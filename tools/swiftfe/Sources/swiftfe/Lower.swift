@@ -89,6 +89,7 @@ final class Lowerer {
   private var allFuncs: [FuncInfo] = []
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
+  private var arrays: [Ty] = []
   private var globals: [Global] = []
   /// Top-level variables. Function bodies and closures see them as globals.
   private var globalVars: [String: Local] = [:]
@@ -285,6 +286,7 @@ final class Lowerer {
       globals: globals,
       main: main,
       optionals: optionals,
+      arrays: arrays,
       functionTypes: functionTypes
     )
   }
@@ -321,7 +323,7 @@ final class Lowerer {
           }
           let ty = try resolveType(annotation.type)
           if !isClass && ty.isClassLike {
-            throw error("structs with class-typed properties are not supported yet", binding)
+            throw error("structs with class-typed or array properties are not supported yet", binding)
           }
           fields.append(Field(name: name, cName: "m_" + name, ty: ty, mutable: mutable))
         }
@@ -364,6 +366,9 @@ final class Lowerer {
               throw error("labeled enum payloads are not supported yet", p)
             }
             let ty = try resolveType(p.type)
+            if ty.isArray {
+              throw error("enums with array payloads are not supported yet", p)
+            }
             payload.append(Field(name: "_\(payload.count)", cName: "c\(tag)_\(payload.count)", ty: ty, mutable: true))
           }
         }
@@ -414,6 +419,27 @@ final class Lowerer {
     }
   }
 
+  /// Array elements are plain values: Int, Bool, Double, structs and optionals of
+  /// those. Enums are not allowed, since whether an enum holds references is not known
+  /// until its payloads are lowered.
+  private func checkArrayElement(_ ty: Ty, _ node: some SyntaxProtocol) throws {
+    switch ty {
+    case .int, .double, .bool, .structure:
+      return
+    case .optional(let inner) where inner == .int || inner == .double || inner == .bool || inner.isStructure:
+      return
+    default:
+      throw error("arrays of \(ty.swiftName) are not supported yet", node)
+    }
+  }
+
+  private func arrayOf(_ elem: Ty, _ node: some SyntaxProtocol) throws -> Ty {
+    try checkArrayElement(elem, node)
+    let ty = Ty.array(elem)
+    if !arrays.contains(ty) { arrays.append(ty) }
+    return ty
+  }
+
   private func valueName(_ ty: Ty) -> String? {
     switch ty {
     case .structure(let name), .optional(.structure(let name)):
@@ -461,7 +487,9 @@ final class Lowerer {
     scopes = [root]
     returnType = info.ret
     var stmts = try lowerBlock(body.statements)
-    stmts += releases(of: scopes[0])
+    if !endsInJump(stmts) {
+      stmts += releases(of: scopes[0])
+    }
     if info.ret != .void && !alwaysReturns(stmts) {
       throw error("missing return in global function expected to return '\(info.ret.swiftName)'", node)
     }
@@ -544,8 +572,19 @@ final class Lowerer {
       case .expr(let expr): out += try lowerExprStmt(expr)
       }
     }
-    out += releases(of: scopes.removeLast())
+    let scope = scopes.removeLast()
+    // A block that ends in a jump has already released what the jump leaves.
+    if !endsInJump(out) {
+      out += releases(of: scope)
+    }
     return out
+  }
+
+  private func endsInJump(_ stmts: [Stmt]) -> Bool {
+    switch stmts.last {
+    case .ret, .brk, .cont: return true
+    default: return false
+    }
   }
 
   /// Returns `v` from the current function, releasing owned locals first.
@@ -724,6 +763,9 @@ final class Lowerer {
     if loop.whereClause != nil {
       throw error("a where clause in for-in is not supported yet", loop)
     }
+    if loop.sequence.as(InfixOperatorExprSyntax.self) == nil {
+      return try lowerForInArray(loop)
+    }
     guard let range = loop.sequence.as(InfixOperatorExprSyntax.self),
           let op = range.operator.as(BinaryOperatorExprSyntax.self),
           op.operator.text == "..<" || op.operator.text == "..." else {
@@ -758,6 +800,72 @@ final class Lowerer {
     iteration += try lowerBlock(loop.body.statements)
     scopes.removeLast()
     return prelude + [.whiles(cond, iteration)]
+  }
+
+  /// `for x in array`: a counting loop over a copy of the array, which the loop owns.
+  private func lowerForInArray(_ loop: ForStmtSyntax) throws -> [Stmt] {
+    let seq = try lowerExpr(loop.sequence)
+    guard case .array(let elem) = seq.ty else {
+      throw error("for-in is supported over Int ranges and arrays in M2, not '\(seq.ty.swiftName)'", loop.sequence)
+    }
+    let arrName = "t\(nextID())"
+    let cur = "t\(nextID())"
+    let arrRef = Expr(kind: .local(arrName), ty: seq.ty)
+    let curRef = Expr(kind: .local(cur), ty: .int)
+
+    // The temporary scope owns the copy until the loop ends, including on return.
+    let prelude: [Stmt] = [.decl(arrName, seq.ty, own(seq)), .decl(cur, .int, Expr(kind: .int(0), ty: .int))]
+    scopes.append(Scope())
+    scopes[scopes.count - 1].owned.append((cName: arrName, ty: seq.ty))
+    let cond = Expr(kind: .binary("<", curRef, Expr(kind: .arrayCount(arrRef), ty: .int)), ty: .bool)
+
+    loops.append((scopes.count, false))
+    defer { loops.removeLast() }
+    scopes.append(Scope())
+    var iteration: [Stmt] = []
+    if let id = loop.pattern.as(IdentifierPatternSyntax.self) {
+      let name = id.identifier.text
+      let cName = "l\(nextID())_" + name
+      try declare(name, cName: cName, ty: elem, mutable: false, owned: false, loop.pattern)
+      iteration.append(.decl(cName, elem, Expr(kind: .index(arrRef, curRef), ty: elem)))
+    } else if !loop.pattern.is(WildcardPatternSyntax.self) {
+      throw error("only a name or _ is supported in for-in in M2", loop.pattern)
+    }
+    iteration.append(.assign(.local(cur), Expr(kind: .binary("+", curRef, Expr(kind: .int(1), ty: .int)), ty: .int), .int))
+    iteration += try lowerBlock(loop.body.statements)
+    scopes.removeLast()
+    let drop = releases(of: scopes.removeLast())
+    return prelude + [.whiles(cond, iteration)] + drop
+  }
+
+  /// `[a, b, c]`. The element type comes from the context, or from the first element.
+  private func lowerArrayLiteral(_ lit: ArrayExprSyntax, _ expected: Ty?) throws -> Expr {
+    var elemTy: Ty? = nil
+    if case .array(let e)? = expected { elemTy = e }
+    var values: [Expr] = []
+    for item in lit.elements {
+      let v = try lowerExpr(item.expression, expected: elemTy)
+      if elemTy == nil { elemTy = v.ty }
+      values.append(try coerce(v, to: elemTy!, item.expression))
+    }
+    guard let elem = elemTy else {
+      throw error("an empty array literal needs a type, such as [Int]", lit)
+    }
+    let ty = try arrayOf(elem, lit)
+    return Expr(kind: .arrayLit(ty, values), ty: ty, owned: true)
+  }
+
+  /// The single index of a subscript, as an Int.
+  private func indexArgument(_ sub: SubscriptCallExprSyntax) throws -> Expr {
+    let args = Array(sub.arguments)
+    guard args.count == 1, args[0].label == nil else {
+      throw error("an array subscript takes one index", sub)
+    }
+    let idx = try lowerExpr(args[0].expression, expected: .int)
+    guard idx.ty == .int else {
+      throw error("an array index must be Int, not '\(idx.ty.swiftName)'", args[0].expression)
+    }
+    return idx
   }
 
   /// `guard` runs its body when a condition fails, and that body must leave the
@@ -1035,6 +1143,16 @@ final class Lowerer {
 
   /// Returns the target of an assignment, its type, and whether it may be assigned.
   private func lowerTarget(_ expr: ExprSyntax) throws -> (LValue, Ty, Bool) {
+    if let sub = expr.as(SubscriptCallExprSyntax.self) {
+      let (baseTarget, baseTy, baseMutable) = try lowerTarget(sub.calledExpression)
+      guard case .array(let elem) = baseTy else {
+        throw error("subscripts are supported on arrays only in M2", sub)
+      }
+      guard baseMutable else {
+        throw error("cannot assign through a let array", sub)
+      }
+      return (.index(baseTarget, try indexArgument(sub), baseTy), elem, true)
+    }
     if let ref = expr.as(DeclReferenceExprSyntax.self) {
       let name = ref.baseName.text
       if let local = lookup(name) {
@@ -1082,6 +1200,20 @@ final class Lowerer {
       }
       return Expr(kind: .int(value), ty: .int)
     }
+    if let lit = expr.as(ArrayExprSyntax.self) {
+      return try lowerArrayLiteral(lit, expected)
+    }
+    if let sub = expr.as(SubscriptCallExprSyntax.self) {
+      let base = try lowerExpr(sub.calledExpression)
+      guard case .array(let elem) = base.ty else {
+        throw error("subscripts are supported on arrays only in M2, not on '\(base.ty.swiftName)'", sub)
+      }
+      if base.owned {
+        throw error("subscript of a temporary array is not supported yet", sub)
+      }
+      let idx = try indexArgument(sub)
+      return Expr(kind: .index(base, idx), ty: elem)
+    }
     if let lit = expr.as(FloatLiteralExprSyntax.self) {
       let digits = lit.literal.text.filter { $0 != "_" }
       guard let value = Double(digits) else {
@@ -1127,6 +1259,15 @@ final class Lowerer {
         throw error("implicit member access is not supported in M2", member)
       }
       let b = try lowerExpr(base)
+      if b.ty.isArray {
+        guard member.declName.baseName.text == "count" else {
+          throw error("arrays have no member '\(member.declName.baseName.text)' in M2", member)
+        }
+        if b.owned {
+          throw error("count of a temporary array is not supported yet", member)
+        }
+        return Expr(kind: .arrayCount(b), ty: .int)
+      }
       if b.ty.isClassLike && b.owned {
         throw error("member access on a temporary class value is not supported yet", member)
       }
@@ -1266,8 +1407,12 @@ final class Lowerer {
           throw error("print takes exactly one unlabeled argument in M2", call)
         }
         let v = args[0].value
-        guard v.ty == .int || v.ty == .bool || v.ty == .double else {
-          throw error("print is supported for Int, Double and Bool only in M2", args[0].node.expression)
+        var printable = v.ty == .int || v.ty == .bool || v.ty == .double
+        if case .array(let elem) = v.ty, elem == .int || elem == .bool || elem == .double {
+          printable = true
+        }
+        guard printable else {
+          throw error("print is supported for Int, Double, Bool and arrays of them in M2", args[0].node.expression)
         }
         return Expr(kind: .print(v), ty: .void)
       }
@@ -1297,6 +1442,17 @@ final class Lowerer {
       return e
     }
 
+    if let member = callee.as(MemberAccessExprSyntax.self), let base = member.base,
+       member.declName.baseName.text == "append",
+       let (target, targetTy, mutable) = try? lowerTarget(base),
+       case .array(let elem) = targetTy {
+      guard mutable else {
+        throw error("cannot append to a let array", member)
+      }
+      let args = try lowerArgs(call, [elem])
+      let values = try matchArguments("append", [(nil, elem)], args, call)
+      return Expr(kind: .arrayAppend(target, values[0]), ty: .void)
+    }
     if let member = callee.as(MemberAccessExprSyntax.self), let base = member.base {
       let receiver = try lowerExpr(base)
       let name = member.declName.baseName.text
@@ -1499,10 +1655,16 @@ final class Lowerer {
   }
 
   private func resolveType(_ type: TypeSyntax) throws -> Ty {
+    if let arrayType = type.as(ArrayTypeSyntax.self) {
+      return try arrayOf(try resolveType(arrayType.element), type)
+    }
     if let opt = type.as(OptionalTypeSyntax.self) {
       let inner = try resolveType(opt.wrappedType)
       if case .optional = inner {
         throw error("nested optional types are not supported yet", type)
+      }
+      if inner.isArray {
+        throw error("optional arrays are not supported yet", type)
       }
       let ty = Ty.optional(inner)
       if !optionals.contains(ty) { optionals.append(ty) }

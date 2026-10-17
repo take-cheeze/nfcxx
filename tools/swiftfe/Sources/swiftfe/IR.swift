@@ -13,6 +13,9 @@ indirect enum Ty: Equatable {
   case int
   case double
   case bool
+  /// A growable array of value elements. It is owned like a class reference:
+  /// copying it copies the buffer, and it is freed when its owner goes away.
+  case array(Ty)
   case void
   /// The type of the `nil` literal before a context gives it an Optional type.
   case nilLiteral
@@ -30,6 +33,7 @@ indirect enum Ty: Equatable {
     case .bool: return "Bool"
     case .void: return "Void"
     case .nilLiteral: return "nil"
+    case .array(let elem): return "[" + elem.swiftName + "]"
     case .structure(let name), .cls(let name): return name
     case .enumeration(let info): return info.name
     case .optional(let inner): return inner.swiftName + "?"
@@ -46,6 +50,7 @@ indirect enum Ty: Equatable {
     case .bool: return "Bool"
     case .void: return "Void"
     case .nilLiteral: return "Nil"
+    case .array(let elem): return "A_" + elem.mangled
     case .structure(let name): return "S_" + cIdent(name)
     case .cls(let name): return "C_" + cIdent(name)
     case .enumeration(let info): return "E_" + cIdent(info.name)
@@ -61,6 +66,7 @@ indirect enum Ty: Equatable {
     switch self {
     case .int: return "int64_t"
     case .double: return "double"
+    case .array(let elem): return "arr_" + elem.mangled
     case .bool: return "bool"
     case .void, .nilLiteral: return "void"
     case .structure(let name): return "s_" + cIdent(name)
@@ -76,13 +82,23 @@ indirect enum Ty: Equatable {
     return false
   }
 
+  var isStructure: Bool {
+    if case .structure = self { return true }
+    return false
+  }
+
+  var isArray: Bool {
+    if case .array = self { return true }
+    return false
+  }
+
   /// True for types whose values hold a reference count: a class, an enum with
   /// a class in a payload, or an Optional wrapping one of these. Such values are
   /// retained when copied from a place and released by their owner. Structs may
   /// not hold them, because copying a struct would need its own retains.
   var isClassLike: Bool {
     switch self {
-    case .cls: return true
+    case .cls, .array: return true
     case .enumeration(let info): return info.holdsRef
     case .optional(let inner): return inner.isClassLike
     default: return false
@@ -166,6 +182,14 @@ indirect enum ExprKind {
   case double(Double)
   /// Int to Double, as `Double(n)`.
   case convert(Expr)
+  /// An array literal. The element type is kept for an empty literal.
+  case arrayLit(Ty, [Expr])
+  /// `a[i]` for reading.
+  case index(Expr, Expr)
+  /// `a.count`.
+  case arrayCount(Expr)
+  /// `a.append(v)`, where the target is an array place.
+  case arrayAppend(LValue, Expr)
   case bool(Bool)
   case local(String)
   case field(Expr, String)
@@ -213,6 +237,8 @@ indirect enum LValue {
   case local(String)
   /// `arrow` is true when the base is a class pointer.
   case field(LValue, String, arrow: Bool)
+  /// `a[i]` as a place. The array type is kept to name its helpers.
+  case index(LValue, Expr, Ty)
 }
 
 indirect enum Stmt {
@@ -247,6 +273,8 @@ struct Program {
   let main: [Stmt]
   /// Every Optional type that appears in the program, so CEmit can define it.
   let optionals: [Ty]
+  /// Every array type that appears in the program.
+  let arrays: [Ty]
   /// Every function type that appears in the program, so CEmit can typedef it.
   let functionTypes: [Ty]
 }
