@@ -127,10 +127,11 @@ module BaseRbsNative
     [kinds, supers, methods.uniq, skipped]
   end
 
-  # A superclass argument as a Ruby constant name: the core object class is `M->object_class` (or `mrb->...`);
-  # any other C expression is not a name, so the superclass is left out rather than written wrong.
+  # A superclass argument as a Ruby constant name. The core object class is `M->object_class` (or `mrb->...`), which is
+  # Object, the superclass a class gets when none is written, so it is left out as the Ruby source leaves it. Any other
+  # C expression is not a name, so the superclass is left out rather than written wrong.
   def super_name(expr)
-    return 'Object' if expr.match?(/\A(?:M|mrb)->object_class\z/)
+    return nil if expr.match?(/\A(?:M|mrb)->object_class\z/)
     return expr if expr.match?(NAME_TOKEN)
 
     nil

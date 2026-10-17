@@ -162,6 +162,8 @@ module BaseRbs
     skipped = []
     paths.each { |path| scan(path, decls, skipped) }
     decls.each_value { |decl| decl.super_expr = resolve_super(decl.super_expr, decl.nest, decls) if decl.super_expr }
+    # Object is the superclass a class gets when none is written, so the stub omits it, as the Ruby source does.
+    decls.each_value { |decl| decl.super_expr = nil if decl.super_expr == 'Object' }
     FileUtils.mkdir_p(out_dir)
     files = []
     decls.values.group_by { |d| d.name.split('::').first }.each do |top, list|

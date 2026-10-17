@@ -35,6 +35,8 @@ FIXTURE = <<~RUBY
     class Scene::Title < Scene::Base; end
   end
   class Standalone < File; end
+  class Plain < Object; end
+  class Implicit; end
 RUBY
 
 puts '== superclass resolution'
@@ -60,6 +62,8 @@ Dir.mktmpdir('base-rbs-check') do |dir|
              lines.include?('class Standalone < File'))
   check.call('an undefined name inside a namespace stays as written (RPG2k::Scene::Menu < Helper)',
              lines.include?('class RPG2k::Scene::Menu < Helper'))
+  check.call('an explicit Object superclass is left out, as a class with none is (Plain, Implicit)',
+             lines.include?('class Plain') && lines.include?('class Implicit') && lines.none? { |l| l.end_with?('< Object') })
 
   puts '== the output parses as RBS'
   text.each do |name, content|
