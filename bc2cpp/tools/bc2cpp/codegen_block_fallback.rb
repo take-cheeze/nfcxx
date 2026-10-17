@@ -409,7 +409,7 @@ class CodeGen
   # BLOCK_FALLBACK_ELEMENT_SUPPORT: pass an exact element class into the cfunc
   # only for a known Array or Hash iterator with a proven yield shape; otherwise
   # dynamic dispatch.
-  # CORE_BLOCK_ELEMENT_HINT: the yield shapes are sig/bc2cpp/core_block_params.rbs
+  # CORE_BLOCK_ELEMENT_HINT: the yield shapes are sig/bc2cpp/declarations.rbs#core_block_params
   # (CoreBlockParamSigs). Returns { block parameter register => hint }, where a
   # hint is the class name (a STRICT_HINTS element hint, as before) for the shapes
   # this pass always had, and a SoftElementHint for the rest: those keep their
@@ -420,7 +420,7 @@ class CodeGen
   # assumption is made about any Array.
   STRICT_BLOCK_ELEMENT_SHAPES = [%w[Array each], %w[Array each_with_index], %w[Array each_with_object],
                                  %w[Hash each_value]].freeze
-  # The lookup chain of an exact Array / Hash instance up to the modules core iterators live in (core_hierarchy.rbs).
+  # The lookup chain of an exact Array / Hash instance up to the modules core iterators live in (declarations.rbs#core_hierarchy).
   BLOCK_ELEMENT_CHAINS = %w[Array Hash].to_h { |klass| [klass, CoreHierarchySigs.ancestors(klass)] }.freeze
 
   def block_fallback_element_hints(irep, region, owner_name)
@@ -1052,7 +1052,7 @@ class CodeGen
   # compile_block_body_insn shift) and is passed on for the capture levels.
   # `self` is not shifted: the block shares the method's self. nil keeps the
   # previous output.
-  # The Proc methods that run the proc (sig/bc2cpp/core_proc_calls.rbs; bc2cpp_cfunc_proc_call_p spells the same set,
+  # The Proc methods that run the proc (sig/bc2cpp/declarations.rbs#core_proc_calls; bc2cpp_cfunc_proc_call_p spells the same set,
   # which scripts/bc2cpp/core_facts_rbs_check.rb compares).
   PROC_CALL_NAMES = CoreFactSigs.proc_call_names
 

@@ -3,7 +3,7 @@
 require_relative 'native_constructor_sigs'
 
 # OVERLOADED_CONSTRUCT (docs/adr/0468): `Klass.new(args)` for a native class whose constructor overloads
-# sig/bc2cpp/rgss_constructors.rbs declares (and NativeConstructorSigs audits against the C and Ruby source).
+# sig/bc2cpp/declarations.rbs#rgss_constructors declares (and NativeConstructorSigs audits against the C and Ruby source).
 #
 # The call site picks the overload: first by argument count, then by the argument classes the flow proves (a Fixnum
 # proof makes an argument Integer, an exact String flow makes it a String). One overload left, or one whose class
@@ -34,7 +34,7 @@ class CodeGen
     return nil unless body
 
     note = "  // OVERLOADED_CONSTRUCT :new -> #{owner}, overload chosen by argument count and class " \
-           "(sig/bc2cpp/rgss_constructors.rbs, ADR 0468)\n"
+           "(sig/bc2cpp/declarations.rbs#rgss_constructors, ADR 0468)\n"
     return "#{note}#{body}" if stable
 
     "#{note}  if (mrb_class_ptr(#{recv}) == #{native[:class_fn]}()) {\n" \

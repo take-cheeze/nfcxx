@@ -1,15 +1,16 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'native_sigs'
 
 # NativeCoreResultSigs: the result kind of built-in methods, read from RBS files under sig/bc2cpp/. It replaces the
 # hand-written NativeClassResults::EXACT_CORE_KINDS table with the same { class => { name => kind } } shape. A file
 # only names kinds; codegen_native_results.rb and the NATIVE_RESULT_FACTS audit still gate every answer on the
 # closed-world pins and the source checks, so a file edit can only widen what is considered, never skip those checks.
 module NativeCoreResultSigs
-  PATH = File.expand_path('../../sig/bc2cpp/core_results.rbs', __dir__)
-  FRESH_ARRAY_PATH = File.expand_path('../../sig/bc2cpp/core_fresh_arrays.rbs', __dir__)
-  RGSS_PATH = File.expand_path('../../sig/bc2cpp/rgss_results.rbs', __dir__)
+  PATH = NativeSigs.table('core_results')
+  FRESH_ARRAY_PATH = NativeSigs.table('core_fresh_arrays')
+  RGSS_PATH = NativeSigs.table('rgss_results')
   RESULT_CLASSES = %w[Array String].freeze
 
   module_function
@@ -31,13 +32,11 @@ module NativeCoreResultSigs
     kinds(path).values.flat_map(&:keys).to_set.freeze
   end
 
-  # The declarations of a core signature file (the rbs gem parses it; it is bundled with CRuby).
+  # The declarations of one native table (NativeSigs.table names it), or of a file holding one table's text.
   def parse_decls(path)
-    begin
-      require 'rbs'
-    rescue LoadError
-      raise "bc2cpp: #{path} needs the rbs gem (gem install rbs)"
-    end
+    return NativeSigs.decls(path) if NativeSigs.table?(path)
+
+    require 'rbs'
     _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: File.basename(path), content: File.read(path)))
     decls
   end

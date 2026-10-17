@@ -40,7 +40,7 @@ module RbsRecordTypes
   SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
   # How deep the interprocedural scan follows the Hash into callees before it calls the use an escape.
   INTERPROC_DEPTH = 16
-  # Hash's lookup chain (core_hierarchy.rbs); only membership is read.
+  # Hash's lookup chain (declarations.rbs#core_hierarchy); only membership is read.
   HASH_OWNERS = CoreHierarchySigs.ancestors('Hash')
   BASE_CLASSES = %w[Integer Float String Symbol Array Hash NilClass TrueClass FalseClass Range Proc].freeze
 

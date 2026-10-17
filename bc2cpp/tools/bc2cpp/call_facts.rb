@@ -13,7 +13,7 @@ require_relative 'core_hierarchy_sigs'
 # analysis of those facts; Answers is the closed-world question "which classes answer `m`".
 module CallFacts
   # mruby core classes the closed world does not declare (superclass) and the modules the core mixes into them,
-  # from sig/bc2cpp/core_hierarchy.rbs.
+  # from sig/bc2cpp/declarations.rbs#core_hierarchy.
   CORE_SUPER, CORE_MIXINS = CoreHierarchySigs.hierarchy
   # A definer on one of these answers every object: Object's ancestors (Object, Kernel, BasicObject).
   EVERYTHING = CoreHierarchySigs.ancestors('Object').to_set.freeze

@@ -33,7 +33,7 @@ CHAINED_ARRAY_METHODS = %w[select reject map].freeze
 # CORE_ARRAY_CHAIN: core methods that return a fresh Array whenever they
 # return. Admitted only after core_array_return? confirms nothing in this
 # program redefines the name (so a future `def keys` withdraws the claim).
-# The names and their 3rd/mruby verification live in sig/bc2cpp/core_fresh_arrays.rbs.
+# The names and their 3rd/mruby verification live in sig/bc2cpp/declarations.rbs#core_fresh_arrays.
 # Not here: to_a/dup (receiver-dependent), to_h (Hash), blockless sort_by
 # (CORE_ARRAY_CHAIN_NEEDS_BLOCK), argless first/last (CORE_ARRAY_CHAIN_NEEDS_ARG).
 CORE_ARRAY_RETURN_METHODS = NativeCoreResultSigs.fresh_array_names

@@ -3,10 +3,10 @@
 require_relative 'native_core_result_sigs'
 
 # CoreHierarchySigs: the mruby core classes the closed world does not declare, with their superclass and the modules
-# they include, read from sig/bc2cpp/core_hierarchy.rbs. Replaces CallFacts::CORE_SUPER and CORE_MIXINS, with the same
+# they include, read from sig/bc2cpp/declarations.rbs#core_hierarchy. Replaces CallFacts::CORE_SUPER and CORE_MIXINS, with the same
 # values and key order. The file only describes ancestry; CallFacts still decides what an answer means.
 module CoreHierarchySigs
-  PATH = File.expand_path('../../sig/bc2cpp/core_hierarchy.rbs', __dir__)
+  PATH = NativeSigs.table('core_hierarchy')
 
   module_function
 

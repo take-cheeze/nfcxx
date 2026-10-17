@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check OVERLOADED_CONSTRUCT (docs/adr/0468): the constructor overloads of sig/bc2cpp/rgss_constructors.rbs.
+# Check OVERLOADED_CONSTRUCT (docs/adr/0468): the constructor overloads of sig/bc2cpp/declarations.rbs#rgss_constructors.
 #
 #   1. audit (no mrbc): the shipped declarations agree with the C and Ruby sources of each initialize; each mismatch
 #      world refuses the file: an extra or missing form, a wrong parameter type, a dropped `else`, a wrong optional
@@ -29,7 +29,7 @@ check = lambda do |what, condition|
 end
 
 puts '== audit'
-real = File.read(NativeConstructorSigs::PATH)
+real = NativeSigs.table_source(NativeConstructorSigs::PATH)
 shipped = begin
   NativeConstructorSigs.table && true
 rescue RuntimeError

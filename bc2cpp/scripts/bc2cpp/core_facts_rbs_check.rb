@@ -5,7 +5,7 @@
 # 1. each fact file loads, and its loader rejects the malformed shapes it exists to keep out;
 # 2. the facts read from the RBS match the real 3rd/mruby sources (skipped, with a SKIP line, when the submodule is
 #    not checked out): the native registrations' owners and arities, the mrblib bodies, the Proc call_proc entries;
-# 3. bc2cpp_cfunc_proc_call_p (bc2cpp.rb) spells the same Proc names as sig/bc2cpp/core_proc_calls.rbs;
+# 3. bc2cpp_cfunc_proc_call_p (bc2cpp.rb) spells the same Proc names as sig/bc2cpp/declarations.rbs#core_proc_calls;
 # 4. RbsSignatures does not read the fact files as program signatures;
 # 5. the hierarchy helpers the generator's ancestor tables come from.
 #
@@ -149,12 +149,13 @@ end
 # 3. The runtime's spelling of the Proc call names.
 runtime = File.read(File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'))[/static bool bc2cpp_cfunc_proc_call_p\(.*?\n    \}\n/m].to_s
 spelled = runtime[/if \(!name \|\| !\((.*?)\)\) return false;/, 1].to_s.scan(/!strcmp\(name, "([^"]+)"\)/).flatten
-check.call('bc2cpp_cfunc_proc_call_p spells exactly sig/bc2cpp/core_proc_calls.rbs', spelled == CoreFactSigs.proc_call_names)
+check.call('bc2cpp_cfunc_proc_call_p spells exactly sig/bc2cpp/declarations.rbs#core_proc_calls', spelled == CoreFactSigs.proc_call_names)
 
-# 4. Not program signatures.
-listed = RbsSignatures.files_in([File.join(ROOT, 'sig')]).map { |f| File.expand_path(f) }
-check.call('RbsSignatures skips the fact files and still reads the other sig/bc2cpp files',
-           (listed & CoreFactSigs::FILES).empty? && listed.include?(CoreHierarchySigs::PATH))
+# 4. Not program signatures: RbsSignatures skips the fact tables and still reads the other native tables.
+hierarchy_decls = NativeSigs.decls(CoreHierarchySigs::PATH)
+check.call('RbsSignatures skips the fact tables and still reads the other native tables',
+           CoreFactSigs::TABLES.all? { |table| NativeSigs.decls(table).all? { |d| RbsSignatures.fact_table?(d) } } &&
+           !hierarchy_decls.empty? && hierarchy_decls.none? { |d| RbsSignatures.fact_table?(d) })
 
 # 5. Hierarchy helpers.
 check.call('ancestors: Object, then Kernel, then BasicObject', CoreHierarchySigs.ancestors('Object') == %w[Object Kernel BasicObject])

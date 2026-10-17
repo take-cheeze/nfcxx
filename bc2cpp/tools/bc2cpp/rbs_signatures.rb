@@ -58,14 +58,15 @@ module RbsSignatures
     File.directory?(default) ? [default] : []
   end
 
-  # The fact tables under sig/bc2cpp (CoreFactSigs::FILES) are read by their own loaders and are not program
-  # signatures: some name methods with mrblib bodies (Kernel#to_enum, Proc#yield), which a signature would hint.
-  # Program files load first, then native ones: a native declaration of a method the program also declares wins, as it did
-  # when the native files lived in their own directory (sorted after sig/bc2cpp).
   def files_in(dirs)
-    facts = CoreFactSigs::FILES.to_set
-    files = dirs.flat_map { |d| File.file?(d) ? [d] : Dir[File.join(d, '**/*.rbs')] }.reject { |f| facts.include?(File.expand_path(f)) }
-    files.sort_by { |f| [NativeSigs.file?(f) ? 1 : 0, f] }
+    dirs.flat_map { |d| File.file?(d) ? [d] : Dir[File.join(d, '**/*.rbs')] }.sort
+  end
+
+  # The fact tables (CoreFactSigs::TABLES) are read by their own loaders and are not program signatures: some name
+  # methods with mrblib bodies (Kernel#to_enum, Proc#yield), which a declaration would hint.
+  def fact_table?(decl)
+    name = NativeSigs.table_of(decl)
+    !name.nil? && CoreFactSigs::TABLES.include?(NativeSigs.table(name))
   end
 
   # nil when there is nothing to load (the byte-identical path).
@@ -91,40 +92,40 @@ module RbsSignatures
                                     code: 'TC1002', message: "RBS syntax error: #{e.message.sub(/\A\S+:\d+:\d+\.\.\.\d+:\d+: /, '')}")
         next
       end
-      decls.each { |d| declaration(out, d, [], rel) }
+      decls.each { |d| declaration(out, d, [], rel, NativeSigs.native?(d)) unless fact_table?(d) }
     end
     out
   end
 
-  def loc_of(node, rel)
+  def loc_of(node, rel, native)
     l = node.location
-    Loc.new(rel, l ? l.start_line : 1, l ? l.start_column + 1 : 1, NativeSigs.text?(l&.buffer&.content))
+    Loc.new(rel, l ? l.start_line : 1, l ? l.start_column + 1 : 1, native)
   end
 
   def diag(out, loc, severity, code, message)
     out.diagnostics << Diag.new(file: loc.file, line: loc.line, col: loc.col, severity: severity, code: code, message: message)
   end
 
-  def declaration(out, decl, scope, rel)
+  def declaration(out, decl, scope, rel, native)
     case decl
     when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
       name = (scope + [decl.name.to_s.delete_prefix('::')]).join('::')
       if decl.is_a?(RBS::AST::Declarations::Class) && decl.super_class && out.supers
         out.supers << SuperDecl.new(name: name, super_name: decl.super_class.name.to_s, scope: name.split('::')[0...-1],
-                                    loc: loc_of(decl, rel))
+                                    loc: loc_of(decl, rel, native))
       end
-      decl.members.each { |m| member(out, m, name, rel) }
-      decl.members.grep(RBS::AST::Declarations::Base).each { |inner| declaration(out, inner, [name], rel) }
+      decl.members.each { |m| member(out, m, name, rel, native) }
+      decl.members.grep(RBS::AST::Declarations::Base).each { |inner| declaration(out, inner, [name], rel, native || NativeSigs.native?(inner)) }
     when RBS::AST::Declarations::Constant, RBS::AST::Declarations::TypeAlias, RBS::AST::Declarations::Interface
-      diag(out, loc_of(decl, rel), 'info', 'TC1005', "#{decl.class.name.split('::').last} #{decl.name} is accepted but gives no hint")
+      diag(out, loc_of(decl, rel, native), 'info', 'TC1005', "#{decl.class.name.split('::').last} #{decl.name} is accepted but gives no hint")
     else
-      diag(out, loc_of(decl, rel), 'error', 'TC1002', "unsupported RBS syntax: #{decl.class.name.split('::').last} declaration")
+      diag(out, loc_of(decl, rel, native), 'error', 'TC1002', "unsupported RBS syntax: #{decl.class.name.split('::').last} declaration")
     end
   end
 
-  def member(out, m, owner, rel)
+  def member(out, m, owner, rel, native)
     kind = m.class.name.split('::').last
-    loc = loc_of(m, rel)
+    loc = loc_of(m, rel, native)
     case m
     when RBS::AST::Declarations::Base
       nil # handled by declaration
