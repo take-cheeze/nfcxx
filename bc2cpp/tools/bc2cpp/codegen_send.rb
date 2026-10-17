@@ -2133,6 +2133,16 @@ class CodeGen
              "    r#{d} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, bc2cpp_call_argv);\n" \
              "  } else {\n    #{generic}  }\n"
     end
+    # STRINGIO_DIRECT_READ: `x.read(n)` tries mrb_stringio_read_direct (3rd/mruby-stringio) first. It answers only
+    # when the receiver is a StringIO whose `read` still resolves to StringIO's own body, and returns FALSE for every
+    # other receiver or override, which takes the generic send below. The closed world links mruby-stringio.
+    if name == 'read' && argv.size == 1 && !@call_block_expr
+      generic = dynamic_dispatch_line_generic(d, recv, name, argv)
+      return "{\n  extern \"C\" mrb_bool mrb_stringio_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n" \
+             "  mrb_value bc2cpp_rd;\n" \
+             "  if (mrb_stringio_read_direct(M, #{recv}, #{argv[0]}, &bc2cpp_rd)) {\n    r#{d} = bc2cpp_rd;\n" \
+             "  } else {\n    #{generic}  }\n}\n"
+    end
     dynamic_dispatch_line_generic(d, recv, name, argv)
   end
 
