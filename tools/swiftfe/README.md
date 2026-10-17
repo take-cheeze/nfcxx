@@ -146,6 +146,27 @@ Type checking follows Swift's rules for this subset. Missing returns and recursi
 structs are rejected. The checks produce Swift's messages where they match the
 Swift compiler, but the wording is not guaranteed to be identical.
 
+## Control flow, Double and arrays
+
+Supported:
+- `break` and `continue` in loops. Each releases the owned locals it leaves.
+- `for i in a..<b` and `for i in a...b` over Int; `for x in array`, which loops over a copy.
+- `guard let`, `guard cond`, with bindings that stay in scope after the guard.
+- `switch` over Int and Bool with literal, range (`4...9`) and several-value cases.
+  Int needs a default; Bool must cover both values. Enum cases may list several
+  patterns when they bind nothing.
+- `Double` with literals, `+ - * /`, comparisons, `Double(n)` and Swift's printing.
+- Arrays `[T]` of Int, Bool, Double, structs and optionals of those: literals, `a[i]`
+  (reads and writes, trapping out of range), `a.count`, `a.append(x)`, `for x in a`,
+  and `print` of arrays of Int, Bool or Double. Arrays are values: copying one copies
+  the buffer, and the buffer is freed when its owner ends.
+
+Limits (each gives a diagnostic):
+- `break` inside a `switch`
+- arrays of classes or enums, arrays in struct properties, enum payloads or optionals
+- subscripts and `count` of a temporary array; `for-in` with a `where` clause
+- `switch` over Double or String; `%` on Double
+
 ## Integration tests
 
 `tests/integration/run.sh` builds each testbed program in `tests/integration/programs`
