@@ -8,3 +8,9 @@
 [submodule "3rd/cproc"]
 	path = 3rd/cproc
 	url = https://github.com/take-cheeze/cproc
+[submodule "3rd/mruby-onig-regexp"]
+	path = 3rd/mruby-onig-regexp
+	url = https://github.com/mattn/mruby-onig-regexp
+[submodule "3rd/mruby-json"]
+	path = 3rd/mruby-json
+	url = https://github.com/mattn/mruby-json
