@@ -52,15 +52,37 @@ longjmps in EDG's runtime.
 | `no_throw` | a `try` that returns normally | 5 |
 | `loop_break_in_catch` | `break` out of a handler inside a loop | 150 |
 | `two_catches` | several catch clauses: refused, with a message | refused |
+| `rem_shift` | `crem` (with a negative dividend), `cshl` and `cshr` with variable counts | 5 |
+| `float_ptr` | `fneg`, a volatile load (`load.v`), `pdiff`, a compiler barrier | 12 |
+| `shift_abort` | a checked shift with count 40 on an int: aborts | 134 (SIGABRT) |
+| `builtin_trap` | the `trap` statement (`__builtin_trap`): aborts | 134 (SIGABRT) |
+| `vararg_def` | a C-style variadic definition (va_start): refused, with a message | refused |
 
-Coverage of the existing Path B IR corpus (`tests/pathb-ir/*.ir`, 62 files): **12 translate**, 50 are refused. The
-`bytes` initializers (string literals and typeinfo names: `(data ...)` string constants become data, and `bytes` copies
-them), `index` and `bounds` (`abort()` when the index is not below the bound, as QBE's abort) translate now. The
+Coverage of the existing Path B IR corpus (`tests/pathb-ir/*.ir`, 62 files): **19 translate**, 43 are refused. The
 refusals, by count:
 
-- 9: taking the address of a function (`&"f"`); 7: variadic expressions; 3: `(ellipsis)` parameters
-- 6: `byval`/aggregate values; 2 indirect calls; 2 each: `trap`, `pdiff`, `load.v`, `cshr`, `crem`, `bitfield`
-  initializers; 3: `std::float16_t`; the rest are one-offs (`barrier`, `fneg`, `cshl`, `cf2i`, `cdiv`, `bfload`, `alloca`)
+- 10: variadic definitions (`va_start`) and variadic calls (`printf`); 9: taking the address of a function (`&"f"`)
+- 8: aggregate values (`struct` or `byval`) used as a value; 3: `std::floatN_t`
+- 2 indirect calls; 2 `fence`; 2 `bitfield` initializers; 2 `switch`
+- 1 each: `bfload.v`, `alloca`, `cf2i`, `store.v`, and an asm statement
+
+Checked forms follow the QBE emitter (`scripts/pathb-qbe-emit.rb`, `r_divrem`, `r_shift`): a zero divisor and
+`INT_MIN / -1` abort (`crem` and `cdiv`), and a count not in `[0, width)` aborts (`cshl`, `cshr`). `bounds` aborts when
+the index is not below the bound, as QBE's abort does. The abort is a call of `abort`, which the linker binds to libc
+(SIGABRT, status 134). `trap` takes the same path. `pdiff` is `(A - B) / SIZE`, `fneg` is `neg`, `load.v` is
+`volatile.`-prefixed `ldind`, and `barrier` emits nothing.
+
+The `index` form is `BASE + ext(IDX) * SIZE`, with the extension following the IR type of the index (zero for an
+unsigned 32-bit index, sign otherwise). Untyped index operands default to sign extension, as `pathb-stage2.md`
+describes; QBE's behaviour for them is not verified.
+
+Two notes on the trap statement. `docs/notes/pathb-stage2.md` says `(trap)` is an illegal instruction (`ud2`, SIGILL),
+and the QBE emitter spells it `hlt`. This emitter follows the abort path instead (SIGABRT), so the exit status of a
+trap differs from QBE's: SIGILL there, SIGABRT here. Both end the process without returning.
+
+Unknown statements, and any unknown form at the top of a function, are refused. The emitter used to keep only a fixed
+list of statement heads at the top of a function and silently drop the rest (`asm_refuse.ir` translated without its
+`fence`); that is fixed, and it is why some files that translated before now refuse.
 
 ## Limits of this spike (each a refusal or a known wrong result)
 
@@ -72,7 +94,11 @@ refusals, by count:
   block are not destroyed when a throw leaves it.
 - **Native exceptions.** Exceptions thrown by native code (the host's libstdc++) are not CLR exceptions and are not caught.
 - **The IR is a subset.** Classes with virtual dispatch, function addresses, variadic calls and `sret` need more emitter
-  work (above).
+  work (above). `cf2i` (a checked float-to-int conversion) and volatile stores (`store.v`) are refused too.
+- **Small types.** Arithmetic on `char` and `short` is not narrowed to its type (the emitter's existing `wadd` and friends
+  do not narrow). `cshl` does narrow, as the QBE emitter does, but `wadd` results of a small type can be out of range.
+- **A zero `SIZE` in a register** (a VLA element) makes `pdiff` a CLR `DivideByZeroException`, not an abort. A literal
+  zero is refused.
 
 ## Next steps, in order
 

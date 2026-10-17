@@ -11,7 +11,8 @@
 # exception object's storage) followed by __throw, which raises CxxThrow (see cil-link.py's runtime). The
 # destructors of the try block's objects are not run during unwinding yet (a documented gap).
 # Refused with an error, never miscompiled: forms outside the subset below (bounds, index, switch, sret, copy,
-# long double, inline asm, indirect calls).
+# long double, fence, cf2i, indirect and variadic calls, variadic definitions). A statement the emitter does not know
+# is refused too, never dropped.
 import json
 import re
 import struct
@@ -32,6 +33,7 @@ LDIND = {('int32', 1, True): 'i1', ('int32', 1, False): 'u1', ('int32', 2, True)
 STIND = {'int32': {1: 'i1', 2: 'i2', 4: 'i4'}, 'int64': {8: 'i8'}, 'float32': {4: 'r4'}, 'float64': {8: 'r8'}}
 CMP = {'eq', 'ne', 'lt.s', 'lt.u', 'gt.s', 'gt.u', 'le.s', 'le.u', 'ge.s', 'ge.u'}
 BIN = {'wadd': 'add', 'wsub': 'sub', 'wmul': 'mul', 'and': 'and', 'or': 'or', 'xor': 'xor'}
+FUNCTION_HEADER = ('ret', 'params', 'static', 'weak', 'constructor', 'destructor')  # the function form's non-statements
 
 
 class Refused(Exception):
@@ -221,6 +223,9 @@ class Function:
                 self.ret = self.em.type_of(part[1])[0]
             elif part[0] == 'params':
                 for p in part[1:]:
+                    if isinstance(p, list) and p and p[0] == 'ellipsis':
+                        # C-style variadic definitions read their arguments with va_start (a va_list): out of scope
+                        refuse(f'{self.name}: variadic definitions (va_start) are not supported by the spike')
                     # (param %N "name" TYPE) or, unnamed, (param %N TYPE)
                     if not (isinstance(p, list) and len(p) >= 3 and isinstance(p[1], Tmp)):
                         refuse(f'{self.name}: parameter form {p!r} is not supported by the spike')
@@ -295,15 +300,49 @@ class Function:
         if head == 'null':
             self.emit('ldc.i8 0')
             return 'int64'
-        if head == 'load':
+        if head in ('load', 'load.v'):
             il, size, signed = self.em.type_of(e[1])
             self.expr(e[2])
             self.emit('conv.u')
             key = (il, size, signed)
             if key not in LDIND:
                 refuse(f'{self.name}: load of {e[1]}')
+            if head == 'load.v':  # the CIL volatile. prefix: the JIT does not merge or drop this access
+                self.emit('volatile.')
             self.emit(f'ldind.{LDIND[key]}')
             return 'int32' if il == 'int32' else il
+        if head in ('cdiv', 'crem'):
+            return self.divrem(e, head)
+        if head in ('cshl', 'cshr'):
+            return self.shift(e, head == 'cshl')
+        if head == 'pdiff':
+            # (A - B) / SIZE in the pointer difference type (int64). A register SIZE (a VLA element) is zero-extended.
+            a = self.expr(e[1])
+            self.coerce(a, 'int64')
+            b = self.expr(e[2])
+            self.coerce(b, 'int64')
+            self.emit('sub')
+            size = e[3]
+            if isinstance(size, int):
+                if size == 0:
+                    refuse(f'{self.name}: pdiff with element size 0')
+                self.emit(f'ldc.i8 {size}')
+            else:
+                have = self.expr(size)
+                if have == 'int32':
+                    self.emit('conv.u8')
+                elif have != 'int64':
+                    refuse(f'{self.name}: pdiff size of type {have}')
+            self.emit('div')
+            return 'int64'
+        if head == 'fneg':
+            il = self.em.type_of(e[1])[0]
+            if il not in ('float32', 'float64'):
+                refuse(f'{self.name}: fneg of non-float type {e[1]!r}')
+            have = self.expr(e[2])
+            self.coerce(have, il)
+            self.emit('neg')
+            return il
         if head == 'offset':
             self.expr(e[1])
             self.emit(f'ldc.i8 {int(e[2])}', 'add')
@@ -390,6 +429,83 @@ class Function:
             refuse(f'{who}: {gname} called with two signatures')
         self.em.fragment_calls[gname] = sig
 
+    def abort(self):
+        """The abort path of the QBE emitter (its `call $abort()`): the linker binds abort to libc. The throw after it
+        is never reached; it only keeps the IL from falling through if abort ever returned."""
+        sig = {'ret': 'void', 'params': [], 'variadic': False}
+        known = self.em.fragment_calls.get('abort')
+        if known and known != sig:
+            refuse(f'{self.name}: abort is called with two signatures')
+        self.em.fragment_calls['abort'] = sig
+        self.emit("call void Prog::'abort'()", 'ldnull', 'throw')
+
+    def check_fail_if(self, ok):
+        """The failing case of a check: the abort path, then the label `ok` that the passing case branches to."""
+        self.abort()
+        self.emit(f'{ok}:')
+
+    def divrem(self, e, op):
+        """(cdiv|crem T A B) as the QBE emitter's r_divrem: abort on a zero divisor, and on INT_MIN / -1 for signed
+        types (crem too). The operands go to locals first, so every check is one compare and a branch."""
+        ty = e[1]
+        il, size, signed = self.em.type_of(ty)
+        if il not in ('int32', 'int64'):
+            refuse(f'{self.name}: {op} of non-integer type {ty!r}')
+        suffix = 'i8' if il == 'int64' else 'i4'
+        a = self.expr(e[2])
+        self.coerce(a, il)
+        ta = self.new_local(il)
+        self.emit(f'stloc {ta}')
+        b = self.expr(e[3])
+        self.coerce(b, il)
+        tb = self.new_local(il)
+        self.emit(f'stloc {tb}')
+        ok = self.new_label('IL_ok')
+        self.emit(f'ldloc {tb}', f'ldc.{suffix} 0', f'bne.un {ok}')
+        self.check_fail_if(ok)
+        if signed:
+            lo = -(1 << (8 * size - 1))  # the range of the type (its size is the IR type's size)
+            ok2 = self.new_label('IL_ok')
+            self.emit(f'ldloc {ta}', f'ldc.{suffix} {lo}', f'bne.un {ok2}',
+                      f'ldloc {tb}', f'ldc.{suffix} -1', f'bne.un {ok2}')
+            self.check_fail_if(ok2)
+        il_op = 'div' if op == 'cdiv' else 'rem'
+        self.emit(f'ldloc {ta}', f'ldloc {tb}', il_op if signed else il_op + '.un')
+        return il
+
+    def shift(self, e, left):
+        """(cshl|cshr T A COUNT) as the QBE emitter's r_shift: abort unless 0 <= COUNT < the bit width of T (an
+        unsigned compare of the whole count, before it is narrowed to int32). cshl narrows a small type, as QBE does;
+        cshr is arithmetic for signed and logical for unsigned types."""
+        ty = e[1]
+        il, size, signed = self.em.type_of(ty)
+        if il not in ('int32', 'int64'):
+            refuse(f'{self.name}: shift of non-integer type {ty!r}')
+        a = self.expr(e[2])
+        self.coerce(a, il)
+        ta = self.new_local(il)
+        self.emit(f'stloc {ta}')
+        cil = self.expr(e[3])
+        if cil not in ('int32', 'int64'):
+            refuse(f'{self.name}: shift count of type {cil}')
+        tc = self.new_local(cil)
+        self.emit(f'stloc {tc}')
+        suffix = 'i8' if cil == 'int64' else 'i4'
+        ok = self.new_label('IL_ok')
+        self.emit(f'ldloc {tc}', f'ldc.{suffix} {8 * size}', f'blt.un {ok}')
+        self.check_fail_if(ok)
+        self.emit(f'ldloc {ta}', f'ldloc {tc}')
+        if cil == 'int64':
+            self.emit('conv.i4')
+        if left:
+            self.emit('shl')
+            narrow = {(1, True): 'conv.i1', (1, False): 'conv.u1', (2, True): 'conv.i2', (2, False): 'conv.u2'}
+            if (size, signed) in narrow:
+                self.emit(narrow[(size, signed)])
+        else:
+            self.emit('shr' if signed else 'shr.un')
+        return il
+
     def call(self, e):
         callee = e[2]
         if not isinstance(callee, Ref) or callee.kind != 'fn':
@@ -397,6 +513,8 @@ class Function:
         name = callee.name
         ret = self.em.type_of(e[1])[0]
         args = e[3:]
+        if any(isinstance(a, list) and a and a[0] == 'variadic' for a in args):
+            refuse(f'{self.name}: variadic calls ({name}) are not supported by the spike')
         if name in ('_setjmp',):
             for a in args:
                 self.expr(a)
@@ -513,8 +631,16 @@ class Function:
                 self.coerce(self.expr(bound), 'int64')
             ok = self.new_label('IL_bounds_ok')
             self.emit(f'blt.un {ok}')
-            self.note_call('abort', {'ret': 'void', 'params': [], 'variadic': False}, self.name)
-            self.emit("call void Prog::'abort'()", 'ldnull', 'throw', f'{ok}:')
+            self.check_fail_if(ok)
+            return
+        if head == 'trap':  # the abort path, as the QBE emitter's checked failures (its trap is hlt: see the notes)
+            if len(s) != 1:
+                refuse(f'{self.name}: trap form')
+            self.abort()
+            return
+        if head == 'barrier':  # a compiler barrier: no effect in this model (the C backend's memory model, no reordering)
+            if len(s) != 1:
+                refuse(f'{self.name}: barrier form')
             return
         if head == 'nonnull':
             self.expr(s[1])
@@ -631,10 +757,12 @@ class Function:
                 slots.append(part)
             elif isinstance(part, list) and part and part[0] == 'body':
                 body.extend(part[1:])
-            elif isinstance(part, list) and part and part[0] in ('block', 'let', 'store', 'eval', 'return',
-                                                                     'unreachable', 'if', 'set', 'loop', 'nonnull', 'label',
-                                                                     'goto', 'break', 'continue', 'bounds'):
-                body.append(part)
+            elif isinstance(part, list) and part and part[0] in FUNCTION_HEADER:
+                pass  # (ret ...) and (params ...) were read by parse_header; the linkage markers need no code
+            elif isinstance(part, list) and part:
+                body.append(part)  # a statement; stmt() refuses one it does not know (nothing is dropped)
+            else:
+                refuse(f'{self.name}: unexpected {part!r} in a function')
         off = 0
         for sl in slots:
             size, align = int(sl[3]), int(sl[4])
