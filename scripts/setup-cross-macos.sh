@@ -58,6 +58,10 @@ export NFCXX_MACOS_SYSROOT="$root/tests/macos-sysroot/include"
 # NFCXX_MACOS_LIBC to build/edg/lib/libC.a links it into the C++ cross links; it is off by default, because the test
 # programs that use the standard streams do not link with it yet (see the notes in docs/notes/cross-macos.md).
 export NFCXX_LIBCXX="$libcxx"
+# EDG reads USR_INCLUDE at run time in place of its built-in /usr/include (host_envir.c), so the cross front end
+# finds only the clean-room sysroot, never the host glibc headers (features-time64.h). Set here, for the cross
+# configuration only; the native build does not source this file.
+export USR_INCLUDE="$root/tests/macos-sysroot/include"
 export EDG_BUILD="$root/build/edg-cross"
 export EDG_BASE="$root/build/edg-base-cross"
 export PATH="$llvm/bin:\$PATH"
