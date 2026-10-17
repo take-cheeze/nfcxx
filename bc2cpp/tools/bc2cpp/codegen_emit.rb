@@ -693,12 +693,13 @@ class CodeGen
   end
 
   # The class expression of a DIRECT_CONSTRUCT_TARGETS owner at a direct-construct site. A full build
-  # reads the gem's hand-wired accessor; a HOT_ONLY build reads the owner-class cache instead, because
-  # register.cxx captures the g_direct_construct_* globals under `#ifndef BC2CPP_HOT_ONLY_STUBS`, so in
-  # a hot-only build every such accessor would return nullptr (found by the BC2CPP_STRICT_HINTS verify
-  # run on the sealed desktop host, ADR 0428: Game::Party#initialize crashed in bc2cpp_direct_alloc).
+  # reads the gem's hand-wired accessor when one exists (DIRECT_CONSTRUCT_ACCESSOR_TARGETS); the others
+  # use the owner-class cache. A HOT_ONLY build always uses the cache, because register.cxx captures the
+  # g_direct_construct_* globals under `#ifndef BC2CPP_HOT_ONLY_STUBS`, so in a hot-only build every such
+  # accessor would return nullptr (found by the BC2CPP_STRICT_HINTS verify run on the sealed desktop
+  # host, ADR 0428: Game::Party#initialize crashed in bc2cpp_direct_alloc).
   def direct_construct_class_expr(owner)
-    return owner_class_ptr_expr(owner) if hot_only_active?
+    return owner_class_ptr_expr(owner) if hot_only_active? || !DIRECT_CONSTRUCT_ACCESSOR_TARGETS.include?(owner)
 
     @direct_construct_used << owner
     "#{direct_construct_class_fn(owner)}()"
