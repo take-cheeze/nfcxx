@@ -2219,6 +2219,78 @@ inline float clamp(float x, float lo, float hi) { return detail::m_clamp(x, lo, 
 inline float abs(float x) { return NFCXX_SYCL_FN1(detail::M_FABS, x); }
 inline int abs(int x) { return x < 0 ? -x : x; }
 
+// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). They are not among the device math
+// ops (detail::math_op), and the device emitter has no lowering for them. On the host they are the C library's; on the device
+// a kernel that reaches one traps (it does not compute a wrong value). Templates, so only an instantiated call is emitted.
+namespace detail {
+template <class T> inline T m_erf(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for erf
+  return x;
+#else
+  return std::erf(x);
+#endif
+}
+template <class T> inline T m_expm1(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for expm1
+  return x;
+#else
+  return std::expm1(x);
+#endif
+}
+template <class T> inline T m_log1p(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for log1p
+  return x;
+#else
+  return std::log1p(x);
+#endif
+}
+}  // namespace detail
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type erf(T x) { return detail::m_erf((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type expm1(T x) { return detail::m_expm1((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type log1p(T x) { return detail::m_log1p((typename detail::fp<T>::type)x); }
+
+// sycl::native::exp (the fast-math exp; the compat library has one exp, so it is that one).
+namespace native {
+inline float exp(float x) { return sycl::exp(x); }
+}  // namespace native
+
+// sycl::ext::oneapi: the names element_wise.cpp spells out for its bfloat16 and work-item branches. The bfloat16 branches
+// are not instantiated for F32 (GGML_SYCL_HAS_BF16 is not defined and the F32 ops take the other arm of each if constexpr),
+// so bfloat16 here is a stand-in that holds a float (it is not a bf16 value, and no bf16 arithmetic is provided).
+namespace ext {
+namespace oneapi {
+class bfloat16 {
+ public:
+  bfloat16() = default;
+  bfloat16(float f) : v_(f) {}
+  operator float() const { return v_; }
+ private:
+  float v_ = 0.0f;
+};
+// the work-item accessor of the nd_range kernels (a helper of element_wise.cpp; the ops under test use the launch's nd_item)
+namespace this_work_item {
+template <int D> inline nd_item<D> get_nd_item() { return nd_item<D>(); }
+}  // namespace this_work_item
+namespace experimental {
+// The bf16 math of the ops' bfloat16 arms: declared, not defined. Such a call reached at run time fails at link time, not
+// silently; the F32 ops never reach these.
+#define NFCXX_SYCL_BF16_DECL1(name) template <class T> T name(T x);
+#define NFCXX_SYCL_BF16_DECL2(name) template <class T> T name(T x, T y);
+NFCXX_SYCL_BF16_DECL1(fabs) NFCXX_SYCL_BF16_DECL1(exp) NFCXX_SYCL_BF16_DECL1(exp2) NFCXX_SYCL_BF16_DECL1(expm1)
+NFCXX_SYCL_BF16_DECL1(log) NFCXX_SYCL_BF16_DECL1(log2) NFCXX_SYCL_BF16_DECL1(log1p) NFCXX_SYCL_BF16_DECL1(sqrt)
+NFCXX_SYCL_BF16_DECL1(sin) NFCXX_SYCL_BF16_DECL1(cos) NFCXX_SYCL_BF16_DECL1(tan) NFCXX_SYCL_BF16_DECL1(tanh)
+NFCXX_SYCL_BF16_DECL1(erf) NFCXX_SYCL_BF16_DECL1(floor) NFCXX_SYCL_BF16_DECL1(ceil) NFCXX_SYCL_BF16_DECL1(trunc)
+NFCXX_SYCL_BF16_DECL1(round)
+NFCXX_SYCL_BF16_DECL2(fmax) NFCXX_SYCL_BF16_DECL2(fmin)
+#undef NFCXX_SYCL_BF16_DECL1
+#undef NFCXX_SYCL_BF16_DECL2
+}  // namespace experimental
+}  // namespace oneapi
+}  // namespace ext
+
 }  // namespace sycl
 
 #endif
