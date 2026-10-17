@@ -57,11 +57,11 @@ module NativeReturnKinds
     kinds.uniq.size == 1 ? kinds.first : nil
   end
 
-  # The RBS return type of a kind for a method of +owner+ (a class name). `self` is the receiver, so it is written
-  # only for an instance method; a class method returning self is left untyped.
-  def rbs_of(kind, singleton:)
+  # The RBS return type of a kind for a method of +owner+ (a class name). `self` is the receiver: an instance method
+  # returns `self`, and a class method returns the class object, which RBS spells `singleton(owner)`.
+  def rbs_of(kind, owner:, singleton:)
     return 'untyped' if kind.nil?
-    return(singleton ? 'untyped' : 'self') if kind == SELF
+    return(singleton ? "singleton(#{owner})" : 'self') if kind == SELF
 
     kind
   end

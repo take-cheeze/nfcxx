@@ -252,6 +252,7 @@ module RbsSignatures
 
                members.flat_map(&:to_a)
              when RBS::Types::Bases::Bool then [:TrueClass, :FalseClass]
+             when RBS::Types::ClassSingleton then [:Class]
              when RBS::Types::Bases::Nil then [:NilClass]
              when RBS::Types::Literal
                case t.literal
