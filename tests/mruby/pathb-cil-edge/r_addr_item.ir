@@ -1,0 +1,1 @@
+(global "p" (ptr int) 8 8 (init (addr 0 (ptr int) 5 0)))

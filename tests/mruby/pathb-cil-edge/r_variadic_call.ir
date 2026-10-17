@@ -1,0 +1,1 @@
+(function "f" (ret int) (params) (return (call int &"printf" (variadic) (const int 1))))

@@ -1,0 +1,2 @@
+(global "n" (array 4 char) 4 1 (extern))
+(global "g" (array 4 char) 4 1 (init (bytes 0 4 @"n")))

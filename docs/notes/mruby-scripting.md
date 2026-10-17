@@ -15,7 +15,9 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 | `scripts/qbe-prep.rb` | Port of `qbe-prep.py` (stage 3, below); used by `scripts/qbe-cc`. |
 | `tests/hexagon/flatlink.rb` | Port of `flatlink.py`; used by `tests/hexagon/run.sh`. |
 | `scripts/pathb-qbe-emit.rb` | Port of `pathb-qbe-emit.py` (done, see the section below); used by `tests/pathb-qbe/run.sh`. |
+| `scripts/cil-link.rb` | Port of `cil-link.py` (stage 5, below); used by `scripts/qbe-cc` (the CIL backend) and `scripts/pathb-cil`. Takes `--ilasm`, `--cc` and `--keep-il` as arguments. `tests/mruby/cil-link.sh` checks it. |
 | `scripts/qbe2cil.rb` | Port of `qbe2cil.py` (done, see the stage 4 section below); used by `scripts/qbe-cc` on the CIL backend (so `scripts/cil-cc`). |
+| `scripts/pathb-cil-emit.rb` | Port of `pathb-cil-emit.py` (stage 6, below); used by `scripts/pathb-cil`. |
 | `tests/mruby/run.sh` | Runs the Python original and the port on real inputs and compares the output byte for byte. The originals are kept as oracles in `tests/mruby/oracle/`; nothing else uses them. CI runs it. |
 
 What the test compares:
@@ -34,6 +36,12 @@ What the test compares:
   variadic calls, `setjmp`, latin-1 bytes, CRLF input), and the IR of `tests/pathb-qbe/{cases,multi,traps}` and
   `tests/cases` when the Path B harness is built (`PATHB_CPFE`); each with and without `--no-prune`, plus stdin,
   usage errors and `--append-weak`. It needs only python3 and the interpreter (no EDG or QBE) for the stored IR.
+- pathb-cil-emit (`tests/mruby/pathb-cil-emit.sh`): the JSON fragment (the output file; the original writes nothing to
+  stdout), stdout, stderr and the exit status of the Python original and the port over every `tests/pathb-ir/*.ir` and
+  `borrow/*.ir`, the hand-written IR in `tests/mruby/pathb-cil-edge/` (one file per refusal and error path of the
+  emitter, and the success forms of the number atoms, data initializers, the try idiom and an indirect call; `x_*`
+  files make the original raise, so only the status is compared), the IR of `tests/pathb-cil/cases` when the Path B
+  harness is built, and generated inputs (CRLF, octal escapes in a name, stdin, usage errors, a missing file).
 - qbe2cil: the JSON fragment (byte for byte), and the exit status with a message on stderr, of the Python original and the
   port over the QBE IL in `tests/mruby/qbe2cil/`: ten `real_*.ssa` (IL made once by the repo's front end from `tests/cases`,
   `tests/c` and `tests/cil/cases`; the recipe is in `tests/mruby/qbe2cil.sh`), four hand-written `e_*.ssa` (every data
@@ -64,6 +72,10 @@ What the test compares:
   `-v` loses the sign of a zero (`v * -1.0` does not).
 - Operator precedence differs from Python: `a & b == 0` is `a & (b == 0)`; write the parentheses.
 - Exit codes: `exit 1` (from `mruby-exit`); messages to `$stderr`.
+- No `Process` (so no `Process::Status`, no `system`, no backticks that report a status). Run a command with
+  `IO.popen("cmd >out 2>err; echo $?")` (`/bin/sh -c`) and read the status from the output.
+- `JSON.parse` (mruby-json) reads an integer above `2**63 - 1` as a Float, which loses its bits. Quote such
+  numbers before the parse and convert them back after it (`quote_big_ints`, `restore_big_ints` in `cil-link.rb`).
 
 ## Stage 3 (done): `qbe-prep.py` to `qbe-prep.rb`
 
@@ -210,6 +222,47 @@ a string literal of a data item is one byte (Python reads one code point, which 
 `float()` accepts underscores (`1_0`), the port does not; the tail's `.quad` regex is applied line by line, so a
 `.quad` whose name is on the next line is not found. Uncaught Python exceptions give a traceback, the port a
 `qbe2cil:` line; both exit 1, and the test compares only the status for those.
+
+## Stage 5 (done): `cil-link.py` to `cil-link.rb`
+
+`scripts/cil-link.rb` replaces `scripts/cil-link.py`, which moved to `tests/mruby/oracle/cil-link.py`. The callers
+(`scripts/qbe-cc` for the CIL backend, `scripts/pathb-cil`) pass what the Python read from the environment: `--ilasm`
+(the `ILASM` setting, default `build/cil/ilasm`), `--cc` (`CC`, for the variadic call shim) and `--keep-il`
+(`NFCXX_KEEP_IL`). The fragments are read with `JSON.parse`; the integers above `2**63 - 1` (a float64 whose sign bit
+is set is one) are quoted first, see the rules above. ilasm and the shim's C compile run through `IO.popen`, with
+stdout and stderr in files next to the output, and the status is read back from the shell.
+
+`tests/mruby/cil-link.sh` (called by `tests/mruby/run.sh`) links the same fragments with the oracle and the port: the
+fragments of `tests/cil/cases/*.c` (nfcc with `NFCXX_BACKEND=cil -c`, the qbe2cil route) and of
+`tests/pathb-cil/cases/*.cpp` (`pathb-dump --ir` and `pathb-cil-emit.py`). For each: the CIL text, the failed IL and the
+runtime config byte for byte, the exit status, and the output of the linked program (its status, its stdout, the
+`EXPECT` line and the `.out` file). Hand-written fragments in `tests/mruby/cil-link/`: `bigint.json` (the integer
+bit patterns), `bad-il.json` (ilasm refuses it: `OUT.failed.il`), `bad-main.json` (a main with arguments). Usage errors
+compare the exit status, and the message where the two versions print the same text. The DLL itself is not compared
+(ilasm writes a new module id each time); the programs are. Parts 1 and 2 need the front ends and are skipped without
+them. Not reproduced: the Python traceback of an uncaught error (a missing fragment, `-o` without its name), where
+only the status is compared, and the ilasm error text, which names the temporary IL file.
+
+## Stage 6 (done): `pathb-cil-emit.py` to `pathb-cil-emit.rb`
+
+`scripts/pathb-cil-emit.rb` replaces `scripts/pathb-cil-emit.py`; `scripts/pathb-cil` runs
+`scripts/mrb scripts/pathb-cil-emit.rb IR.txt OUT.json`. The Python is the oracle `tests/mruby/oracle/pathb-cil-emit.py`.
+The fragment is written to the output file (`json.dump`, `indent=1`), so stdout stays empty in both.
+
+| Python | mruby |
+| --- | --- |
+| `re` in `tokenize` (`\d`, the hex and float atoms) | `atom_value` and `tokenize` scan the code points by hand; `isdigit_py` keeps Python's `str.isdigit`, which is also true for the superscripts, and `int()` then refuses them |
+| `json.dump(indent=1)` | `json_val`: the same layout (`[]` and `{}` when empty) and the `ensure_ascii` escapes (`é`, `\u007f`), so no JSON gem is needed |
+| `latin-1` text, one character per byte; an octal escape can reach 511 | the input is read as bytes and every string is a UTF-8 string of code points (`cps` / `from_cps`), so `len()` and the escapes are per code point |
+| text-mode `open()` (universal newlines) | `main` translates `\r\n` and `\r` for a file; stdin is not translated, as in the original |
+| `int(v)`, `float(v)`, `struct.pack` | `py_int`, `py_float_of`, `pack_double` / `pack_single`: exact (`float_to_int`, `dec_to_double`); `pack('e')` gives infinity where `struct` raises, so `pack_single` raises the overflow itself |
+| `x[i]` (IndexError, TypeError) and `bool(x)` | `pyidx` and `truthy`: mruby's `nil` and `Integer#[]` would not raise |
+| `str(x)` / `repr(x)` in messages | `pys` / `py_repr` (a list prints as `[...]`, a `Ref` as `glob"x"`, `None` as `None`) |
+
+Known differences, none reachable from the corpus: a `Tmp` (a Python object without a repr) inside a message prints
+without its address, and the traceback of an uncaught exception is an `error:` line. Both exit with status 1, as the
+original does, and the `x_*` inputs of the test compare only the status for them. The original's bug with a quoted
+`"("` in the IR (the token reads as a parenthesis) is kept, not fixed: the port must give the oracle's output.
 
 ## Bootstrap caveat
 

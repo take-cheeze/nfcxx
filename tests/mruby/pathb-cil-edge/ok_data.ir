@@ -1,0 +1,14 @@
+(ir-module "data.cpp" (layout (int 4)))
+(data "lit" (array 6 (const char)) (string "a\101\n\\\"z"))
+(global "s" (array 8 char) 8 1 (init (bytes 0 6 @"lit")))
+(global "gf" (array 2 double) 16 8 (init
+    (scalar 0 double (const double 0.1))
+    (scalar 8 float (const float 0.5))))
+(global "gs" (struct "T") 16 8 (init
+    (scalar 0 short (const short -2))
+    (scalar 4 unsigned_char (const unsigned_char 255))
+    (scalar 8 (ptr int) (null (ptr int)))
+    (addr 8 (ptr int) @"s" 2)))
+(global "zeroed" (array 3 int) 12 4 (init (zero 0 12)))
+(function "f" (ret int) (params)
+  (return (load int (offset (const long 0) 4))))
