@@ -559,8 +559,8 @@ final class Lowerer {
 
   private func valueName(_ ty: Ty) -> String? {
     switch ty {
-    case .structure(let info), .optional(.structure(let info)):
-      return info.name
+    case .structure(let name), .optional(.structure(let name)):
+      return name
     case .enumeration(let info), .optional(.enumeration(let info)):
       return info.name
     default:
@@ -1848,7 +1848,7 @@ final class Lowerer {
   private func fieldOf(_ ty: Ty, _ name: String, _ node: some SyntaxProtocol) throws -> Field {
     let fields: [Field]
     switch ty {
-    case .structure(let info): fields = info.fields
+    case .structure(let n): fields = structs[n]?.fields ?? []
     case .cls(let n): fields = classes[n]?.fields ?? []
     default: throw error("value of type '\(ty.swiftName)' has no member '\(name)'", node)
     }
@@ -2211,7 +2211,7 @@ final class Lowerer {
 
   private func methodOf(_ ty: Ty, _ name: String) -> FuncInfo? {
     switch ty {
-    case .structure(let info): return info.methods[name]
+    case .structure(let n): return structs[n]?.methods[name]
     case .cls(let n): return classes[n]?.methods[name]
     default: return nil
     }
@@ -2290,7 +2290,7 @@ final class Lowerer {
 
   private func instanceOrigin(_ ty: Ty) -> (base: String, args: [Ty])? {
     switch ty {
-    case .structure(let info): return instanceArgs[info.name]
+    case .structure(let n): return instanceArgs[n]
     case .cls(let n): return instanceArgs[n]
     case .enumeration(let info): return instanceArgs[info.name]
     default: return nil
