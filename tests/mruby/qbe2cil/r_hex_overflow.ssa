@@ -1,0 +1,6 @@
+# Refused: a hexadecimal double that overflows (float.fromhex raises OverflowError in the original).
+function w $f(w %a, l %p) {
+@start
+	stored d_0x1p99999, %p
+	ret 0
+}

@@ -30,8 +30,11 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 
 if [ $compile = 0 ] && [ -n "${NFCXX_CIL:-}" ]; then
-  # The CIL backend (scripts/cil-cc): the link is cil-link.py over the translation units' fragments (docs/notes/cil.md).
-  exec python3 "$(dirname "$0")/cil-link.py" "$@"
+  # The CIL backend (scripts/cil-cc): the link is cil-link.rb over the translation units' fragments (docs/notes/cil.md).
+  # The link's settings are arguments (the mruby interpreter has no environment): ILASM, CC and NFCXX_KEEP_IL.
+  keep=(); [ -z "${NFCXX_KEEP_IL:-}" ] || keep=(--keep-il)
+  exec "$(dirname "$0")/mrb" "$(dirname "$0")/cil-link.rb" --ilasm "${ILASM:-$root/build/cil/ilasm}" --cc "${CC:-cc}" \
+    ${keep[@]+"${keep[@]}"} "$@"
 fi
 if [ $compile = 0 ]; then
   # The link. The sized __atomic_* calls qbe-prep.rb leaves in the C (for libstdc++'s std::atomic) are
@@ -97,6 +100,8 @@ trace_end "$t" "cc -E (preprocess)" qbe-backend
 # The C-input mode (hand-written C) is an argument: the mruby interpreter has no ENV.
 t=$(trace_start)
 prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
+# Mach-O targets: qbe-prep.rb lists constructors in __mod_init_func with the "_" label prefix
+macho=(); [ $macos = 1 ] && macho=(--macho)
 # qbe-prep.rb changes only the forms named in its header, and all of them contain one of these tokens. With
 # none present (and no CR, which it would normalize), its output is its input and the tail is empty, so the
 # file goes through unchanged. Under mruby the scan costs minutes on a multi-MB file (unicode_name_fsm: 11 MB).
@@ -105,7 +110,7 @@ if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -
    ! grep -q "$(printf '\r')" "$tmp/pp.c"; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
-  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${macho[@]+"${macho[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
 fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
@@ -114,9 +119,9 @@ cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t
 "$cproc" ${cprocarg[@]+"${cprocarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 if [ -n "${NFCXX_CIL:-}" ]; then
-  # The CIL backend: the QBE IL becomes a fragment for the link (scripts/qbe2cil.py); no assembler, no weak symbols.
+  # The CIL backend: the QBE IL becomes a fragment for the link (scripts/qbe2cil.rb); no assembler, no weak symbols.
   [ $asm = 0 ] || { echo "qbe-cc: -S is not supported by the CIL backend" >&2; exit 1; }
-  python3 "$(dirname "$0")/qbe2cil.py" "$tmp/out.ssa" "$tmp/tail.s" "$(basename "$src" .c | tr -c 'A-Za-z0-9_.-' _)" \
+  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe2cil.rb" "$tmp/out.ssa" "$tmp/tail.s" "$(basename "$src" .c | tr -c 'A-Za-z0-9_.-' _)" \
     "${out:-${src%.c}.o}"
   exit 0
 fi
