@@ -1,5 +1,8 @@
 # ggml-sycl as a testbed for the SYCL front end
 
+Status (origin/main, PRs through #358): F32 fill runs through the real `libggml-sycl` on the Arc B60; diag and unary have
+standalone oracles; the real diag and unary code, F16, sub-group ops and `test-backend-ops` are open. Sections 4-8 are the status.
+
 Source: `/home/takecheeze/dev/llm/llama.cpp` (ggml-sycl at `ggml/src/ggml-sycl/`, 46k lines in `.cpp`/`.hpp`/`.h`;
 `tests/test-backend-ops.cpp`). The reference build is `build-sycl` (icpx 2026.1, `GGML_SYCL_TARGET=INTEL`, `GGML_SYCL_F16`,
 `GGML_SYCL_DNNL=0`), whose `compile_commands.json` gives the flags used below.
@@ -33,64 +36,86 @@ The smallest op: **FILL** (`fill.cpp`, 55 lines, F32 and F16 cases). `test-backe
 (`tests/test-backend-ops.cpp`, the cases from line 11509, 3 F32 and 3 F16 shapes). Its F16 path needs `sycl::half`; its
 F32 path needs only `nd_range<1>`, `nd_item<1>`, `get_global_id(0)` and `parallel_for`.
 
-## 3. Is the op self-contained?
+## 3. The fill op through nfcxx (done for F32)
 
-No, at the include level. `fill.cpp` includes `fill.hpp` and `common.hpp`, and `common.hpp` brings in:
+`fill.cpp` includes `fill.hpp` and `common.hpp`, which bring in `dpct/helper.hpp`, `ggml.h`, `ggml-impl.h`, `ggml-sycl.h`,
+`presets.hpp`, `type.hpp`, `sycl_hw.hpp`, and the backend context (`ggml_backend_sycl_context`, `SYCL_CHECK`, `GGML_ABORT`).
+Measured with the reference flags (`icpx ... -E -H`): the closure is **762 unique headers** (3365 include lines), expanding to
+**612,722 preprocessed lines**. By origin: 307 under oneAPI's `compiler/include`, 77 under `mkl`, 210 libstdc++, 10 ggml, 3 Level Zero.
 
-- `base.hpp`, `dpct/helper.hpp` (3782 lines), `ggml.h`, `ggml-impl.h`, `ggml-sycl.h`, `presets.hpp`, `type.hpp`,
-  `sycl_hw.hpp`, `memtrace.hpp`, `common.hpp` itself (1070 lines), and `dnnl.hpp` (off in the reference build).
-- `ggml_backend_sycl_context`, `dpct::queue_ptr`, `ggml_sycl_set_device`, `SYCL_CHECK`, `scope_op_debug_print`,
-  `GGML_ABORT`.
+`fill_real` (`tests/gpu/ggml/fill_real/`) compiles the real `fill.cpp` as its own TU, unchanged, through `scripts/sycl-build.sh`
+and links it against the real `libggml-sycl.so` and `libggml-base.so` from the llama.cpp build. It runs on the Arc B60 over
+2,069,793 elements with 64 guard slots. The test has three shims in place of the full closure, all in `lib/sycl-ggml/`:
+`sycl/half_type.hpp` (a minimal `sycl::half`), `oneapi/mkl.hpp` (declarations of the oneMKL BLAS names `dpct` calls; not
+implemented), and `sycl/info/aspects.def`. The link uses a version script (`local: *`) so the test executable's own dpct
+helper copies do not interpose the library's (#355).
 
-Measured with the reference flags (`icpx ... -E -H`): `fill.cpp` pulls **762 unique headers** (3365 include lines) and
-expands to **612,722 preprocessed lines**. By origin: 307 under oneAPI's `compiler/include`, 77 under `mkl`, 210 libstdc++, 10
-ggml, 3 Level Zero. The preprocessed unit contains about 7000 `__attribute__`, about 2000 `__builtin_`, 138 `__int128`,
-89 `_Float16`, 30 `__float128` and 80 `__asm__`. None of the SYCL- or clang-only markers (`__SYCL_DEVICE_ONLY__` is
-host-pass-empty, `__clang__`, `__sycl_kernel`) appear in the host pass.
-
-The kernel itself is self-contained. `fill_kernel<T>` (the template) and its launch are in `tests/gpu/ggml/fill_kernel.cpp`,
-a verbatim copy with a host `main` in place of the backend context. It runs on the Arc B60 and matches the fill value over
-2,069,793 elements with 0 guard writes (the `test_fill` shape 303x207x11x3):
+The fill oracle (`tests/gpu/ggml/fill_kernel.cpp`, a verbatim copy of the kernel and its `nd_range` launch, with a host `main`)
+is the standalone check of the same kernel (#319, #327). It also matches the fill value with 0 guard writes:
 
 ```
 device: Intel(R) Arc(TM) Pro B60 Graphics
 mismatches: 0 of 2069793, guard writes: 0 of 64
 ```
 
-## 4. What nfcxx's SYCL front end would need, ranked by how much it blocks
+## 4. Status by rung
 
-1. **The SYCL header closure** (blocks everything). `<sycl/sycl.hpp>` and the 762-header closure use clang extensions
-   (`__attribute__`, `__builtin_*`, `__int128`, `_Float16`, `__float128`, `__asm__`) and templates EDG has to accept.
-   Options: teach EDG the clang extensions, or give nfcxx its own minimal `lib/sycl/` headers that declare only what the
-   kernels use (`queue`, `nd_range`, `nd_item`, `range`, `half`, `malloc_shared`). The second is the practical first step
-   and matches the `lib/cuda/nfcxx_cuda.h` approach.
-2. **The host API used by fill** (blocks the launch): `sycl::queue` with `parallel_for(nd_range<1>, lambda)` and `.wait()`,
-   `sycl::malloc_device/malloc_shared/free`, and `memcpy`. These map onto the OpenCL launch the XPU tests already use
-   (`tests/gpu/spirv/launch.c`), with USM pointers passed as kernel arguments.
-3. **The device rewrite** (`scripts/sycl-rewrite.rb`): it handles `range<1>` with an id lambda only. The fill kernel needs
-   `nd_range<1>` with `nd_item<1>` and `item.get_global_id(0)`; scalar captures (`k`, `value`: the rewrite does not detect
-   them and would leave them undeclared); a `void *` capture cast with `static_cast`; and a **template kernel**
-   `fill_kernel<T>` instantiated per element type. The last one is the same refusal the CUDA build of llama.cpp hits
-   (`build/llama-build2.log`: "template launch of k_repeat_back<T> depends on the template parameter T of the enclosing
-   template"), so the fix serves both paths.
-4. **The backend context** (`ggml_backend_sycl_context`, `dpct::queue_ptr`, `SYCL_CHECK`, `GGML_ABORT`,
-   `scope_op_debug_print`): needed only for the full op test through `test-backend-ops`. A standalone extraction does not
-   need it.
-5. **Level Zero, oneMKL, oneDNN headers**: needed by `common.hpp` through `GGML_SYCL_SUPPORT_LEVEL_ZERO_API`, and by the
-   other ops. A reduced build (no Level Zero, no MKL, no dnnl) would remove most of the closure, if the rest of
-   `common.hpp` still compiles without them.
-6. **Subgroups, reductions, ESIMD, bfloat16, joint_matrix**: not used by fill. They block the norm and mul_mat ops
-   (`sub_group` in 22 files, `reduce_over_group` in 5, `esimd` in 4).
+| Rung | What | Status | Where |
+| --- | --- | --- | --- |
+| 1 | oneAPI vector add (SPIR-V through OpenCL and Level Zero on the Arc B60) | done | `tests/sycl/vecadd.cpp`, `tests/sycl/run.sh` |
+| 2a | fill, F32 oracle (standalone kernel copy) | done | `tests/gpu/ggml/run.sh` (#319, #327) |
+| 2b | fill, F32, real `fill.cpp` through the real `libggml-sycl` | done | `tests/gpu/ggml/fill_real/` (#355) |
+| 2c | fill, F16 (`sycl::half`) | not started | |
+| 3a | diag, F32 oracle | done | `tests/gpu/ggml/diag/` (#334) |
+| 3b | diag, real `diag.cpp` | not started (no open PR) | |
+| 4a | unary (neg, relu, silu, gelu; F32, flat and strided) oracle | done | `tests/gpu/ggml/unary/` (#338) |
+| 4b | unary, real `element_wise.cpp` | not started (no open PR) | |
+| 5 | `test-backend-ops` SYCL run | not run (0 of 133 `test_*` cases) | `tests/test-backend-ops.cpp` in llama.cpp |
+| 6 | end-to-end `llama-bench` or `llama-cli` | not started | |
 
-## 5. Testbed, in order
+## 5. Fixes that unblocked the real code
 
-1. Done: oneAPI vector-add (`tests/gpu/sycl/`), SPIR-V path verified on the XPU.
-2. Done for the oracle: `tests/gpu/ggml/fill_kernel.cpp` (the F32 fill kernel and its `nd_range` launch) builds with
-   `scripts/sycl-build.sh` and passes on the Arc B60 through both OpenCL and Level Zero (2,069,793 elements, 64 guard
-   slots, the value + 1 mutant caught; `tests/gpu/ggml/run.sh`). The upstream subset already has `nd_range`, `nd_item`
-   and the USM calls this needs, so the custom rewrite is not on this path.
-3. Next: the real `fill.cpp` through nfcxx (its 762-header closure, and the template kernel `fill_kernel<T>` with a `void *`
-   capture cast), then F16 (`sycl::half`), then the test_fill shape from `test-backend-ops`.
-4. Then `diag` (F32, `diag.cpp`, 67 lines, `test_diag`), and the unary ops from `element_wise.cpp` (after the template
-   and scalar-capture work).
-5. Last: the whole `test-backend-ops` SYCL run, which needs the backend itself (the full `ggml-sycl.cpp`) built by nfcxx.
+| PR | Fix |
+| --- | --- |
+| #343 | spirv: a shift count takes the width of the shifted value (dropped stores after a 64-bit multiply-high) |
+| #330 | qbe-prep: lower GCC 14 type-generic bit builtins (`clzg`, `ctzg`, `popcountg`, `parityg`) |
+| #329 | qbe-prep: rewrite a bare `return` in a non-void function (cproc rejects it) |
+| #331 | QBE: keep a loaded-but-never-stored slot, in the fork (pin bump, no patch files) |
+| #333 | sycl-build: `-l`, `-L`, `-Wl,*` and `-rpath` go to the host link only |
+| #350 | sycl-build: user `-I` flags before `OPENCL_INCLUDE` on the OpenCL host compile |
+| #342 | sycl runtime: split a dispatch into slabs when its stacks exceed the heap (OpenCL, Level Zero) |
+| #351 | sycl Vulkan runtime: the same slab split |
+| #355 | the real `libggml-sycl` linked; ODR fixed by a version script; `fill_real` added |
+| #358 | `scripts/oneapi-env.sh`: the shared oneAPI runtime environment |
+
+## 6. Open gaps
+
+1. **The header closure beyond fill.** `diag.cpp` and `element_wise.cpp` include `common.hpp` too, and the fill test still
+   uses the `lib/sycl-ggml/` shims. Removing them means the full `dpct/helper.hpp` and `common.hpp` closure compiles
+   through nfcxx, with the `<sycl/sycl.hpp>` headers.
+2. **F16 and BF16.** `sycl::half` (38 files, 676 uses), `bfloat16` (15 files). Fill F16 and the F16 paths of the other ops.
+3. **Sub-group and reduction ops**, needed by the norms and `mul_mat`: `sub_group` (22 files), `reduce_over_group` (5 files),
+   ESIMD (4 files), `joint_matrix` (2 files).
+4. **`test-backend-ops`**: not run. 0 of 133 cases. It needs the whole backend (`ggml-sycl.cpp`) built by nfcxx.
+5. **End-to-end `llama-bench` or `llama-cli`**: not started.
+
+## 7. How to run
+
+Each script skips with exit 0 when a tool is missing (`spirv-val` or `spirv-as`, the OpenCL headers, `libOpenCL.so.1`, or a
+GPU), and a backend whose runtime reports no device is skipped (exit 70). Each one also builds a mutant that must fail.
+
+- `tests/sycl/run.sh`: the SYCL programs on the host, OpenCL and Level Zero (`vecadd`, `mulhi`, `vulkan_slab`, ...).
+- `tests/gpu/ggml/run.sh`: fill oracle, OpenCL and Level Zero.
+- `tests/gpu/ggml/fill_real/run.sh`: real `fill.cpp`. Env: `GGML_BUILD` (the llama.cpp build bin dir with `libggml-sycl.so`
+  and `libggml-base.so`), `GGML_SRC` (`ggml/src/ggml-sycl`), `ONEAPI_LIB`.
+- `tests/gpu/ggml/diag/run.sh`: diag oracle, three shapes.
+- `tests/gpu/ggml/unary/run.sh`: unary oracle, four ops, two shapes.
+- `tests/gpu/spirv/run.sh`: the SPIR-V vector add and loop on the XPU.
+
+## 8. Environment
+
+- The oneAPI runtime (compiler, MKL, TBB, UMF libraries) comes from `scripts/oneapi-env.sh`, which `sycl-build.sh` and every
+  test above source. It sets `LD_LIBRARY_PATH` and `OPENCL_INCLUDE` and does not source `setvars.sh`. Sourcing `setvars.sh`
+  is refused by this environment's tool guard, so use `oneapi-env.sh` instead.
+- SPIR-V tools: `SPIRV_TOOLS_BIN` or `PATH` (nixpkgs `spirv-tools`).
+- Device: the name is printed by the test (`Intel(R) Arc(TM) Pro B60 Graphics`), read from the device, not hard-coded.
