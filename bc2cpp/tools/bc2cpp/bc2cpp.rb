@@ -1860,8 +1860,9 @@ if $PROGRAM_NAME == __FILE__
     warn "== review scope: engine owners; #{outside} listed site(s) outside the reviewed program ==" if outside.positive?
   end
   review_failures = []
-  violations = NomethodReviewed.violations(nomethod_sites, compiled, scope: review_scope,
-                                                                     stale: !ENV['BC2CPP_HOT_METHODS'])
+  # No stale check (full builds): the per-gem probe (nomethod_reviewed_probe.rb) emits some fallbacks this whole-program
+  # build does not, so a listed key can be absent here yet present there. Unreviewed sites still fail.
+  violations = NomethodReviewed.violations(nomethod_sites, compiled, scope: review_scope, stale: false)
   unless violations.empty?
     review_failures << "bc2cpp: #{violations.size} closed-world NOMETHOD_REVIEWED violation(s) (docs/adr/0226):\n  " \
                        "#{violations.join("\n  ")}\n" \
