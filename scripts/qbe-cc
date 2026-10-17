@@ -61,8 +61,7 @@ pflag=(-P); [ -z "${NFCXX_ASAN:-}" ] || pflag=()
 macos=0; [ "$(uname -s)" = Darwin ] && macos=1
 if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then
   macos=1
-  # the standard streams: EDG emits them as extern globals named stdin/stdout/stderr; Darwin libc names them __stdinp and friends
-  CCBIN=(clang --target=arm64-apple-darwin -nostdinc -isystem "$NFCXX_MACOS_SYSROOT" -isystem "$(clang -print-resource-dir)/include" -Dstdin=__stdinp -Dstdout=__stdoutp -Dstderr=__stderrp)
+  CCBIN=(clang --target=arm64-apple-darwin -nostdinc -isystem "$NFCXX_MACOS_SYSROOT" -isystem "$(clang -print-resource-dir)/include")
 fi
 darwin=()
 if [ $macos = 1 ]; then
