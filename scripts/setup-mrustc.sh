@@ -20,7 +20,7 @@ fi
 if [ ! -d "$src/.git" ]; then
   mkdir -p "$work"
   rm -rf "$src"
-  git clone --quiet https://github.com/thepowersgang/mrustc "$src"
+  git clone --quiet "$url" "$src"
 fi
 git -C "$src" checkout --quiet "$pin"
 
