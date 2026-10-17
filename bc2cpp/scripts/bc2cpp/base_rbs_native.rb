@@ -17,6 +17,7 @@
 require 'open3'
 require 'fileutils'
 require 'set'
+require_relative '../../tools/bc2cpp/native_format_types'
 
 module BaseRbsNative
   DEFINE_CLASS = /\bmrb_define_(class|module)(_under)?(?:_id)?\s*\(/.freeze
@@ -121,10 +122,47 @@ module BaseRbsNative
         skipped << "#{owner}##{name}"
         next
       end
-      methods << [owner, singleton, name]
-      methods << [owner, false, name] if kind == 'module_function'
+      shape = param_shape(text, args[3])
+      methods << [owner, singleton, name, shape]
+      methods << [owner, false, name, shape] if kind == 'module_function'
     end
     [kinds, supers, methods.uniq, skipped]
+  end
+
+  # The parameter list of a registered function: its `mrb_get_args` format, when the body makes exactly one such call
+  # (NativeFormatTypes). A class type only where the conversion is a check; everything else is untyped. A function whose
+  # format is not modelled, or that is not in this text, keeps the rest parameter.
+  def param_shape(text, function)
+    return '*untyped' unless function&.match?(/\A\w+\z/)
+
+    head = text.match(/\b#{Regexp.escape(function)}\s*\([^)]*\)\s*\{/)
+    return '*untyped' unless head
+
+    body = function_body(text, head.end(0) - 1)
+    formats = body.scan(/\bmrb_get_args\s*\(\s*\w+\s*,\s*"([^"]*)"/).flatten
+    return '*untyped' unless formats.size == 1
+
+    format = formats.first
+    positions = NativeFormatTypes.positions(format)
+    return '*untyped' unless positions
+
+    params = positions.map do |pos|
+      type = NativeFormatTypes.rbs_of(pos[:letter]) || 'untyped'
+      pos[:optional] ? "?#{type}" : type
+    end
+    params << '*untyped' if format.include?('*')
+    params.join(', ')
+  end
+
+  # The text of a function body from its opening brace at +open+ to the matching close brace.
+  def function_body(text, open)
+    depth = 0
+    (open...text.length).each do |i|
+      depth += 1 if text[i] == '{'
+      depth -= 1 if text[i] == '}'
+      return text[open..i] if depth.zero?
+    end
+    ''
   end
 
   # A superclass argument as a Ruby constant name. The core object class is `M->object_class` (or `mrb->...`), which is
@@ -149,14 +187,23 @@ module BaseRbsNative
     owners[var] = prev.nil? || prev == full ? full : :ambiguous
   end
 
-  def member(name, singleton: false)
-    "def #{singleton ? 'self.' : ''}#{name}: (*untyped) -> untyped"
+  def member(name, shape, singleton: false)
+    "def #{singleton ? 'self.' : ''}#{name}: (#{shape}) -> untyped"
+  end
+
+  # One member per method name: the same name registered twice with different parameter shapes (a module_function
+  # pair, or two C functions sharing a name) has no single shape this stub can state, so it is left untyped.
+  def merge_shapes(entries)
+    entries.group_by(&:first).sort.map do |name, rows|
+      shapes = rows.map(&:last).uniq
+      [name, shapes.size == 1 ? shapes.first : '*untyped']
+    end
   end
 
   def render(kinds, supers, methods)
     by_class = Hash.new { |h, k| h[k] = { singleton: [], instance: [] } }
-    methods.each do |owner, singleton, name|
-      by_class[owner][singleton ? :singleton : :instance] << name
+    methods.each do |owner, singleton, name, shape|
+      by_class[owner][singleton ? :singleton : :instance] << [name, shape]
     end
     names = (kinds.keys + by_class.keys).uniq.sort
     names.map do |full|
@@ -166,8 +213,8 @@ module BaseRbsNative
              else "class #{full}"
              end
       body = []
-      by_class.fetch(full, { instance: [], singleton: [] })[:instance].uniq.sort.each { |n| body << member(n) }
-      by_class.fetch(full, { instance: [], singleton: [] })[:singleton].uniq.sort.each { |n| body << member(n, singleton: true) }
+      merge_shapes(by_class.fetch(full, { instance: [] })[:instance]).each { |n, shape| body << member(n, shape) }
+      merge_shapes(by_class.fetch(full, { singleton: [] })[:singleton]).each { |n, shape| body << member(n, shape, singleton: true) }
       body = body.select { |line| valid_member?(line) }
       "#{head}\n#{body.map { |l| "  #{l}\n" }.join}end\n"
     end
@@ -186,7 +233,8 @@ module BaseRbsNative
     out, err, status = Open3.capture3('clang', *lang, '-E', '-P', *flags, path)
     raise "clang -E failed for #{path}: #{err.lines.first}" unless status.success?
 
-    out
+    # The sources are UTF-8 whatever the locale says; a US-ASCII read fails on the first non-ASCII comment.
+    out.force_encoding(Encoding::UTF_8)
   end
 
   def run(out_dir, paths, flags)
