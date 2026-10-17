@@ -134,7 +134,7 @@ module PredicateReturns
     checked = paths.map { |path| relative(path) }.to_set
     found = paths.flat_map { |path| violations_in(path) }
     unlisted = found.reject { |v| listed.include?(key(v)) }
-    stale = listed.select { |entry| checked.include?(entry.split(' ', 2).first) } - found.map { |v| key(v) }.to_set
+    stale = listed.select { |entry| checked.include?(entry.split(' ', 2).first) }.to_set - found.map { |v| key(v) }.to_set
     stale.each { |entry| warn "bc2cpp: predicate whitelist entry is no longer needed: #{entry}" }
     return if unlisted.empty?
 
