@@ -61,4 +61,5 @@ size_t wcstombs(char *restrict, const wchar_t *restrict, size_t);
 }
 #endif
 
+char *realpath(const char *path, char *resolved);
 #endif
