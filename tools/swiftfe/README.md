@@ -194,7 +194,7 @@ Supported:
 Limits (each gives a diagnostic):
 - arrays of classes, enums or function values, arrays in struct properties, enum payloads or optionals
 - subscripts and `count` of a temporary array
-- `switch` over String; `%` on Double
+- `switch` over String; `%` on Double (Swift rejects it too, see "Operators" below)
 
 ## Initializers, overloads and temporaries
 
@@ -281,6 +281,26 @@ Limits (each gives a diagnostic):
 - a `break` or `continue` cannot leave a closure, since a closure has its own loops only
 
 Verified against the Swift compiler's output and with the sanitizers on the emitted C.
+
+## Operators
+
+Supported, by operand type:
+- `Int`: `+ - * / %` (overflow, division by zero and remainder by zero trap, as before),
+  the wrapping operators `&+ &- &*` (two's complement, no trap), the bitwise operators
+  `& | ^` and unary `~`, the shifts `<<` and `>>`, comparisons, `==` and `!=`, and unary `-`.
+  Shifts follow Swift's smart shifts: a count of 64 or more gives 0 for `<<`, and for `>>`
+  gives 0 or -1 by the sign; a negative count shifts the other way, and bits shifted out
+  are dropped without a trap. Precedence comes from swift-syntax's standard operator table.
+- `Double`: `+ - * /`, comparisons, `==`, `!=`, and unary `-`.
+- `Bool`: `&&`, `||`, `!`, `==` and `!=`.
+
+Refused (each gives a diagnostic):
+- `%` on `Double`. Swift rejects it too, with `binary operator '%' cannot be applied to two
+  'Double' operands`. The alternative `truncatingRemainder` is not offered, since method calls
+  on `Double` are not supported.
+- `&+ &- &*`, `& | ^`, `<< >>` on `Double` and `Bool`, and `~` on `Double` and `Bool`
+- the masking shifts `&<<` and `&>>`, and any other operator not listed above, which
+  gives `operator '...' is not supported in M2`
 
 ## Tests
 
