@@ -1,0 +1,1 @@
+int_switch_default.swift:2:3: error: switch over Int must have a default case

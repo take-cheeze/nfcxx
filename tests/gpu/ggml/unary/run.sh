@@ -9,7 +9,8 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../../.. && pwd)
-clinc=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
+. "$root/scripts/oneapi-env.sh"   # LD_LIBRARY_PATH (the oneAPI runtime) and OPENCL_INCLUDE
+clinc=${OPENCL_INCLUDE:-}
 if ! command -v spirv-val >/dev/null || [ ! -f "$clinc/CL/cl.h" ] || [ ! -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then
   echo "SKIP: gpu ggml unary: needs spirv-val, the OpenCL headers (OPENCL_INCLUDE) and libOpenCL.so.1"; exit 0
 fi
