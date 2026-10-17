@@ -34,7 +34,8 @@ module RbsSignatures
   Diag = Struct.new(:file, :line, :col, :severity, :code, :message, keyword_init: true) do
     def to_h = { 'file' => file, 'line' => line, 'col' => col, 'severity' => severity, 'code' => code, 'message' => message }
   end
-  Loc = Struct.new(:file, :line, :col)
+  # native: the declaration is in a native signature file (NativeSigs), not a program declaration.
+  Loc = Struct.new(:file, :line, :col, :native)
   # args: one Type per required positional parameter; ret: Type or nil
   MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
@@ -94,7 +95,7 @@ module RbsSignatures
 
   def loc_of(node, rel)
     l = node.location
-    Loc.new(rel, l ? l.start_line : 1, l ? l.start_column + 1 : 1)
+    Loc.new(rel, l ? l.start_line : 1, l ? l.start_column + 1 : 1, NativeSigs.text?(l&.buffer&.content))
   end
 
   def diag(out, loc, severity, code, message)
@@ -146,7 +147,7 @@ module RbsSignatures
   def method_definition(out, m, owner, loc)
     if m.overloads.size != 1
       # A native declaration may list several overloads (join with and without a separator); it is not a hint.
-      if NativeSigs.file?(loc.file)
+      if loc.native
         diag(out, loc, 'info', 'TC1005', "#{owner}##{m.name}: #{m.overloads.size} native overloads; no program hint")
         return
       end
@@ -299,7 +300,7 @@ module RbsSignatures
       unless d
         # sig/bc2cpp declares built-in and RGSS methods the program does not define; their tables are checked by the
         # generators (scripts/bc2cpp/native_sigs_check.rb), so they are declarations here, not errors.
-        if NativeSigs.file?(sig.loc.file)
+        if sig.loc.native
           note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name}: native method declaration; no program hint")
         else
           note(ap, sig.loc, 'error', 'TC1003', "#{sig.owner}##{sig.name}: no such method in the program")

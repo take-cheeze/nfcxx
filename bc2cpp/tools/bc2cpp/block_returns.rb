@@ -63,7 +63,7 @@ module BlockReturns
 
     Entry.new(owner: sig.owner, name: sig.name, kind: kind, args: sig.args.size,
               arity: fn.respond_to?(:required_positionals) ? fn.required_positionals.size : nil, loc: sig.loc,
-              native: NativeSigs.file?(sig.loc.file), text: text_of(block, ret), problem: problem_of(sig, kind))
+              native: sig.loc.native, text: text_of(block, ret), problem: problem_of(sig, kind))
   end
 
   def text_of(block, ret)

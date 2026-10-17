@@ -101,7 +101,7 @@ module DeclaredReturns
     defs_by = {}
     registry.each_value { |defs| defs.each { |d| defs_by[[d.owner, d.name.to_s]] = d if d.irep } }
     loaded.methods.each_value.filter_map do |sig|
-      next if NativeSigs.file?(sig.loc.file)
+      next if sig.loc.native
 
       d = defs_by[[sig.owner, sig.name]]
       next unless d && sig.return_type
@@ -142,7 +142,7 @@ module DeclaredReturns
       d = defs_by[key]&.find(&:irep)
       irep = d && ireps[d.irep]
       mand = irep&.enter ? irep.enter.enter_fields.first.to_i : 0
-      why = if NativeSigs.file?(sig.loc.file) then 'a native signature: no compiled body carries the check'
+      why = if sig.loc.native then 'a native signature: no compiled body carries the check'
             elsif defs_by[key].nil? then 'the program defines no such method, so no compiled body carries the check'
             elsif d.nil? || irep.nil?
               'a native or accessor method: no compiled body carries the check, and no native fact proves it'

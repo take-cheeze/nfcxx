@@ -8,9 +8,14 @@ module NativeSigs
 
   module_function
 
+  # The source text of a signature file, as RBS parsed it, is native when it opens with the marker.
+  def text?(text)
+    !text.nil? && text.start_with?(MARKER)
+  end
+
   def file?(path)
     return false unless path && File.file?(path)
 
-    File.foreach(path).first.to_s.start_with?(MARKER)
+    text?(File.read(path))
   end
 end
