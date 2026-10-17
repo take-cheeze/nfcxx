@@ -193,3 +193,13 @@ generated files from `mrbc`, which itself needs bootstrapping), which is not pla
 
 The mruby build also fetches from GitHub (a shallow fetch of the pinned commit). For an offline setup,
 mirror `github.com/mruby/mruby` like the submodules in `build-self-hosting.md`.
+
+### Host tools of the vendored gems
+
+The gems under `3rd/` (`mruby-json`, `mruby-onig-regexp`) need the submodules initialized
+(`git submodule update --init 3rd/mruby-json 3rd/mruby-onig-regexp`). `mruby-onig-regexp` bundles Onigmo 6.2.0
+and builds it itself unless a system Onigmo or Oniguruma header is found. That build runs `sh` (its `configure`
+ships in the tarball, so autotools are not needed), `make`, `ar` (also used to archive the objects), `gzip` and
+`tar` (to unpack the tarball), and the C compiler (`cc`, or the `MRUBY_CC` given). `setup-mruby.sh` checks for
+`cc`, `make`, `ar`, `gzip` and `tar` before the build starts and names each missing one with its package
+(`apt-get install binutils` for `ar`, `build-essential` for the compiler). `sh` is not checked: every POSIX host has it.
