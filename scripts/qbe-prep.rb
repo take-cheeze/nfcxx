@@ -1254,10 +1254,12 @@ SPECIAL_ID = {}
 def main(argv)
   c_input = false
   args = argv.dup
-  while args.first == '--c-input'
-    c_input = true
-    args.shift
+  # --macho: Mach-O labels carry the target's underscore prefix, and the Apple assembler takes .weak_definition, not .weak
+  macho = false
+  while args.first == '--c-input' || args.first == '--macho'
+    if args.shift == '--macho' then macho = true else c_input = true end
   end
+  label = ->(name) { macho ? "_#{name}" : name }
   die 'usage: qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
   src_path, out_path, tail_path = args
   src = read_text(src_path)
@@ -1286,7 +1288,7 @@ def main(argv)
   mark_weak_alias = lambda do |name|
     if name.start_with?('_ZTH') && weak.key?('_ZTW' + name.byteslice(4, name.bytesize - 4)) && !weak_marked.key?(name)
       weak_marked[name] = true
-      tail << "\t.weak #{name}"
+      tail << (macho ? "\t.weak_definition #{label.call(name)}" : "\t.weak #{name}")
     end
   end
 
@@ -1378,10 +1380,10 @@ def main(argv)
           m = globl_name(text)
           s = m.nil? ? set_names(text) : nil
           if m
-            tail << "\t.globl #{m}"
+            tail << "\t.globl #{label.call(m)}"
             mark_weak_alias.call(m)
           elsif s
-            tail << "\t.set #{s[0]}, #{s[1]}"
+            tail << "\t.set #{label.call(s[0])}, #{label.call(s[1])}"
             mark_weak_alias.call(s[0])
           else
             die "qbe-prep: unsupported top-level asm \"#{text}\""
