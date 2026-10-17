@@ -20,7 +20,7 @@ have_nfcxx=0
 [ -x "$root/build/edg/bin/eccp" ] && [ -x "$root/build/qbe/qbe" ] && have_nfcxx=1
 
 # ---- host path
-for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure; do
+for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure calculate_offset; do
   want="$t ok"
   if "$root/scripts/sycl-build.sh" --cpu "$t.cpp" -o "$out/$t.g++" > "$out/$t.log" 2>&1 && [ "$("$out/$t.g++" | tail -1)" = "$want" ]; then
     echo "host g++   $t: ok"
@@ -46,7 +46,7 @@ if [ $have_nfcxx = 1 ] && command -v spirv-val >/dev/null && [ -n "$libvk" ]; th
 if [ $vk_ok = 1 ]; then
   vkbuild() { "$root/scripts/sycl-build.sh" --backend=vulkan --cxx="$nfcxx" "$1.cpp" -o "$out/vk_$1" > "$out/vk_$1.log" 2>&1; }
   vkprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure vulkan_slab; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure vulkan_slab calculate_offset; do
     if ! vkbuild $t; then echo "vulkan     $t: FAIL (build)"; grep -v prelinker "$out/vk_$t.log" | head -3; fail=1; continue; fi
     "$out/vk_$t" > "$out/vk_$t.out" 2> "$out/vk_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "Vulkan runtime" "$out/vk_$t.err"; then vkprobe=0; break; fi
@@ -74,7 +74,7 @@ if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/
 if [ $cl_ok = 1 ]; then
   clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
   clprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset; do
     if ! clbuild $t; then echo "opencl    $t: FAIL (build)"; grep -v prelinker "$out/cl_$t.log" | head -3; fail=1; continue; fi
     "$out/cl_$t" > "$out/cl_$t.out" 2> "$out/cl_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "OpenCL runtime" "$out/cl_$t.err"; then clprobe=0; break; fi
@@ -115,7 +115,7 @@ if command -v spirv-val >/dev/null && [ -f /usr/include/level_zero/ze_api.h ] &&
 if [ $lz_ok = 1 ]; then
   lzbuild() { "$root/scripts/sycl-build.sh" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
   lzprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset; do
     if ! lzbuild $t; then echo "level-zero $t: FAIL (build)"; grep -v prelinker "$out/lz_$t.log" | head -3; fail=1; continue; fi
     "$out/lz_$t" > "$out/lz_$t.out" 2> "$out/lz_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "Level Zero runtime" "$out/lz_$t.err"; then lzprobe=0; break; fi
