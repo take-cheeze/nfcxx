@@ -450,6 +450,11 @@ module SymbolCache
       fflush(stderr);
       abort();
     #endif
+    #ifdef BC2CPP_FAIL_FAST_TYPE
+      // FAIL_FAST_TYPE (compile-time, see BC2CPP_FAIL_FAST_TYPE in compiled_gems.rb): the receiver is not one the closed
+      // world proved answers the name, so the fallback is a type error. Raised here instead of dispatching.
+      mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: fail-fast: %T does not answer %n", recv, mid);
+    #endif
       mrb_funcall_argv(M, recv, mid, argc, argv);
       // The dispatch above found a method: the proof was wrong (ADR 0262). A
       // NoMethodError here would look like an ordinary user error.
