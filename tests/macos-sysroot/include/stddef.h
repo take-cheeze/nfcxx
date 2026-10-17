@@ -10,6 +10,8 @@ extern "C" {
 
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
+/* C11 7.19p2: a type whose alignment is the greatest fundamental alignment; built from the fundamental types */
+typedef struct { long long __ll; long double __ld; } max_align_t;
 #ifndef __cplusplus
 typedef int wchar_t; /* a keyword in C++ */
 #endif
