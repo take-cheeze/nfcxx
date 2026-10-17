@@ -28,4 +28,6 @@ extern "C" {
 }
 #endif
 
+/* PATH_MAX is the BSD value on macOS (1024), an assumption checked by the Mac run. */
+#define PATH_MAX 1024
 #endif

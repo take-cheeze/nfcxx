@@ -18,6 +18,10 @@ extern "C" {
 #define W_OK 2
 #define R_OK 4
 
+/* _SC_OPEN_MAX is the BSD value (5) on macOS; an assumption checked by the Mac run (IO fd limit). */
+#define _SC_OPEN_MAX 5
+long sysconf(int name);
+
 int access(const char *path, int mode);
 int close(int fd);
 int dup(int fd);

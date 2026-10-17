@@ -8,11 +8,15 @@
 #include <sys/types.h>
 #include <time.h>
 
+typedef int32_t suseconds_t;
+
 struct timeval {
   time_t tv_sec;
-  int32_t tv_usec;
+  suseconds_t tv_usec;
 };
 
 int gettimeofday(struct timeval *tv, void *tz);
+
+#include <sys/select.h>
 
 #endif /* _SYS_TIME_H_ */
