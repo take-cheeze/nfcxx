@@ -159,6 +159,12 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
     failed`. This is `bytes` 1.12.1's `owned_clone`. `bytes` 1.10.1 gets past it.
   - `libc` 0.2.191's `custom_struct` macro: `No arm matched`, not minimised. `mio` 1.2.4 (tokio's `net` feature) needs
     libc 0.2.191, so tokio's `net` feature is out too.
+- **Batch of 13 small crates** (`tests/realworld/mrustc/batch`: log, once_cell, either, bitflags, smallvec, base64,
+  semver, hex, unicode-segmentation, itoa, fnv, scopeguard): mrustc's `minicargo` builds all of them and the gcc binary
+  matches rustc. The pipeline stops on `unicode-segmentation` 1.13.3 in QBE: `emit, too many instructions` (the 2^20
+  emit buffer). Raising the buffer to 2^22 moved the failure to QBE being killed (out of memory on a 15 GB machine).
+  The C has no function above about 2,000 lines, so the instruction growth is not in one function; the cause is not
+  yet found. The cap was reverted.
 - **Only the crates the program links are built.** `libtest`, `proc_macro` and the other crates of the 1.90 build were
   surveyed through the rewrite and cproc and accepted, but not compiled and linked.
 - mrustc also links its own gcc binary of each program during the run, and the driver discards it.
