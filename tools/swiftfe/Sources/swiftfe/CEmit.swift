@@ -103,11 +103,17 @@ enum CEmit {
     for e in program.enums { out += "typedef struct s_\(cIdent(e.name)) s_\(cIdent(e.name));\n" }
     for o in program.optionals { out += "typedef struct \(o.cName) \(o.cName);\n" }
     for a in program.arrays { out += "typedef struct \(a.cName) \(a.cName);\n" }
+    for fn in program.functionTypes { out += "typedef struct \(fn.cName) \(fn.cName);\n" }
     out += "\n"
+    // A function value is { fn, ctx }. Every function of the type takes the context
+    // pointer first, so a named function is called through a thunk (see below).
+    // Retaining or releasing a function value retains or releases its context.
     for fn in program.functionTypes {
       guard case .function(let params, let ret) = fn else { continue }
-      let list = params.isEmpty ? "void" : params.map { $0.cName }.joined(separator: ", ")
-      out += "typedef \(ret.cName) (*\(fn.cName))(\(list));\n"
+      let list = (["void *"] + params.map { $0.cName }).joined(separator: ", ")
+      out += "struct \(fn.cName) {\n  \(ret.cName) (*fn)(\(list));\n  void *ctx;\n};\n"
+      out += "static \(fn.cName) ret_\(fn.cName)(\(fn.cName) v) {\n  sw_retain(v.ctx);\n  return v;\n}\n"
+      out += "static void rel_\(fn.cName)(\(fn.cName) v) {\n  sw_release(v.ctx);\n}\n"
     }
     out += "\n"
 
@@ -132,6 +138,21 @@ enum CEmit {
           values += "  \(field.ty.cName) \(field.cName);\n"
         }
         values += "};\n\n"
+        if ty.isClassLike {
+          // A struct with a reference-counted field is copied like an enum with a class
+          // payload: copies retain each such field, and drops release it.
+          let cn = ty.cName
+          values += "static \(cn) ret_\(cn)(\(cn) v) {\n"
+          for field in info.fields where field.ty.isClassLike {
+            values += "  " + retainCode("v.\(field.cName)", field.ty) + "\n"
+          }
+          values += "  return v;\n}\n"
+          values += "static void rel_\(cn)(\(cn) v) {\n"
+          for field in info.fields where field.ty.isClassLike {
+            values += "  " + releaseCode("v.\(field.cName)", field.ty) + "\n"
+          }
+          values += "}\n\n"
+        }
       case .enumeration(let info):
         for c in info.cases {
           for field in c.payload where needsDefinition(field.ty) { defineValue(field.ty) }
@@ -188,7 +209,39 @@ enum CEmit {
     for e in program.enums { defineValue(.enumeration(e)) }
     for o in program.optionals { defineValue(o) }
     for a in program.arrays { defineValue(a) }
+    // A box holds its value by value, so the value's type is defined first.
+    for b in program.boxes {
+      guard case .box(let inner) = b else { continue }
+      if needsDefinition(inner) { defineValue(inner) }
+      let tag = "bx_" + inner.mangled
+      values += "struct \(tag) {\n  sw_obj hdr;\n  \(inner.cName) v;\n};\n"
+      values += "static void d_\(tag)(void *p) {\n  struct \(tag) *b = p;\n"
+      if inner.isClassLike {
+        values += "  " + releaseCode("b->v", inner) + "\n"
+      }
+      values += "  free(p);\n}\n"
+      values += "static struct \(tag) * bxn_\(inner.mangled)(\(inner.cName) v) {\n"
+      values += "  struct \(tag) *b = calloc(1, sizeof *b);\n  if (!b) sw_trap(\"out of memory\");\n"
+      values += "  b->hdr.rc = 1;\n  b->hdr.destroy = d_\(tag);\n  b->v = v;\n  return b;\n}\n\n"
+    }
     out += values
+
+    // Call helpers for each function type. They need the complete parameter types,
+    // so they come after the value definitions. An owned callee is released after the
+    // call, since nothing else holds it.
+    for fn in program.functionTypes {
+      guard case .function(let params, let ret) = fn else { continue }
+      let decl = ([fn.cName + " f"] + params.enumerated().map { "\($0.element.cName) a\($0.offset)" }).joined(separator: ", ")
+      let args = (["f.ctx"] + params.indices.map { "a\($0)" }).joined(separator: ", ")
+      let call = "f.fn(\(args))"
+      if ret == .void {
+        out += "static void call_\(fn.cName)(\(decl)) {\n  \(call);\n}\n"
+        out += "static void callo_\(fn.cName)(\(decl)) {\n  \(call);\n  sw_release(f.ctx);\n}\n\n"
+      } else {
+        out += "static \(ret.cName) call_\(fn.cName)(\(decl)) {\n  return \(call);\n}\n"
+        out += "static \(ret.cName) callo_\(fn.cName)(\(decl)) {\n  \(ret.cName) r = \(call);\n  sw_release(f.ctx);\n  return r;\n}\n\n"
+      }
+    }
 
     // Class layout: the header first, then the stored properties.
     for c in program.classes {
@@ -205,9 +258,45 @@ enum CEmit {
     if !program.globals.isEmpty { out += "\n" }
 
     for f in program.funcs {
-      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params)));\n"
+      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f)));\n"
     }
     out += "static void swift_main(void);\n\n"
+
+    // A named function used as a value is called through a thunk with the context
+    // parameter, which it ignores.
+    for f in program.funcs where f.asValue && !f.isClosure {
+      let params = (["void *ctx_"] + f.params.map { "\($0.ty.cName) \($0.cName)" }).joined(separator: ", ")
+      let args = f.params.map { $0.cName }.joined(separator: ", ")
+      let body = f.ret == .void ? "  \(f.cName)(\(args));\n" : "  return \(f.cName)(\(args));\n"
+      out += "static \(f.ret.cName) thk_\(f.cName)(\(params)) {\n  (void)ctx_;\n\(body)}\n\n"
+    }
+
+    // The context of each closure that captures: its layout, its destroy function
+    // (which releases the captured values), and the constructor that makes the closure
+    // value from them. The constructor takes ownership of its arguments.
+    for f in program.funcs {
+      guard let ctx = f.context else { continue }
+      let name = ctx.cName
+      out += "struct \(name) {\n  sw_obj hdr;\n"
+      for field in ctx.fields {
+        out += "  \(field.ty.cName) \(field.cName);\n"
+      }
+      out += "};\n"
+      out += "static void d_\(name)(void *p) {\n  struct \(name) *c = p;\n"
+      for field in ctx.fields where field.ty.isClassLike {
+        out += "  " + releaseCode("c->\(field.cName)", field.ty) + "\n"
+      }
+      out += "  free(p);\n}\n"
+      let fnTy = Ty.function(f.params.map { $0.ty }, f.ret)
+      let params = ctx.fields.enumerated().map { "\($0.element.ty.cName) v\($0.offset)" }.joined(separator: ", ")
+      out += "static \(fnTy.cName) mk_\(ctx.id)(\(params)) {\n"
+      out += "  struct \(name) *c = calloc(1, sizeof *c);\n  if (!c) sw_trap(\"out of memory\");\n"
+      out += "  c->hdr.rc = 1;\n  c->hdr.destroy = d_\(name);\n"
+      for (index, field) in ctx.fields.enumerated() {
+        out += "  c->\(field.cName) = v\(index);\n"
+      }
+      out += "  return (\(fnTy.cName)){ .fn = \(f.cName), .ctx = c };\n}\n\n"
+    }
 
     // Destroy and constructor for each class. Destroy runs the deinitializer,
     // then releases the stored references, then frees the object.
@@ -238,7 +327,14 @@ enum CEmit {
     }
 
     for f in program.funcs {
-      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f.params))) {\n"
+      out += "static \(f.ret.cName) \(f.cName)(\(paramList(f))) {\n"
+      if f.isClosure {
+        out += "  (void)ctx_;\n"
+        if let ctx = f.context {
+          // Captured values are read through the context, named `cx` in the body.
+          out += "  struct \(ctx.cName) *cx = ctx_;\n"
+        }
+      }
       out += block(f.body, "  ")
       out += "}\n\n"
     }
@@ -265,8 +361,18 @@ enum CEmit {
     text += "    if (!a.data) sw_trap(\"out of memory\");\n"
     text += "    memcpy(a.data, vals, sizeof(\(e)) * (size_t)n);\n"
     text += "    a.count = n;\n    a.cap = n;\n  }\n  return a;\n}\n"
-    text += "static \(arr) arr_copy_\(m)(\(arr) a) { return arr_lit_\(m)(a.count, a.data); }\n"
-    text += "static void arr_free_\(m)(\(arr) a) { free(a.data); }\n"
+    // Elements that hold a reference count (a struct with a function value, say) are
+    // retained by each copy and released when the array is freed.
+    text += "static \(arr) arr_copy_\(m)(\(arr) a) {\n  \(arr) r = arr_lit_\(m)(a.count, a.data);\n"
+    if elem.isClassLike {
+      text += "  for (int64_t i = 0; i < r.count; i++) { \(retainCode("r.data[i]", elem)) }\n"
+    }
+    text += "  return r;\n}\n"
+    text += "static void arr_free_\(m)(\(arr) a) {\n"
+    if elem.isClassLike {
+      text += "  for (int64_t i = 0; i < a.count; i++) { \(releaseCode("a.data[i]", elem)) }\n"
+    }
+    text += "  free(a.data);\n}\n"
     text += "static void arr_check_\(m)(\(arr) a, int64_t i) {\n"
     text += "  if (i < 0 || i >= a.count) sw_trap(\"Index out of range\");\n}\n"
     text += "static \(e) arr_get_\(m)(\(arr) a, int64_t i) { arr_check_\(m)(a, i); return a.data[i]; }\n"
@@ -300,9 +406,11 @@ enum CEmit {
     return text
   }
 
-  private static func paramList(_ params: [Param]) -> String {
-    if params.isEmpty { return "void" }
-    return params.map { "\($0.ty.cName) \($0.cName)" }.joined(separator: ", ")
+  /// The C parameter list of a function. A closure takes its context pointer first.
+  private static func paramList(_ f: FuncInfo) -> String {
+    var items: [String] = f.isClosure ? ["void *ctx_"] : []
+    items += f.params.map { "\($0.ty.cName) \($0.cName)" }
+    return items.isEmpty ? "void" : items.joined(separator: ", ")
   }
 
   private static func block(_ stmts: [Stmt], _ indent: String) -> String {
@@ -348,14 +456,14 @@ enum CEmit {
 
   /// Drops one reference to a class-like value held in `expr`.
   private static func releaseCode(_ expr: String, _ ty: Ty) -> String {
-    if ty.isClass { return "sw_release(\(expr));" }
+    if ty.isClass || ty.isBox { return "sw_release(\(expr));" }
     if case .array(let elem) = ty { return "arr_free_\(elem.mangled)(\(expr));" }
     return "rel_\(ty.cName)(\(expr));"
   }
 
   /// Adds one reference to a class-like value held in `expr`.
   private static func retainCode(_ expr: String, _ ty: Ty) -> String {
-    if ty.isClass { return "sw_retain(\(expr));" }
+    if ty.isClass || ty.isBox { return "sw_retain(\(expr));" }
     return "ret_\(ty.cName)(\(expr));"
   }
 
@@ -422,7 +530,7 @@ enum CEmit {
     case .logical(let op, let l, let r):
       return "(\(expr(l)) \(op) \(expr(r)))"
     case .retain(let inner):
-      if e.ty.isClass { return "((\(e.ty.cName))sw_retain(\(expr(inner))))" }
+      if e.ty.isClass || e.ty.isBox { return "((\(e.ty.cName))sw_retain(\(expr(inner))))" }
       if case .array(let elem) = e.ty { return "arr_copy_\(elem.mangled)(\(expr(inner)))" }
       return "ret_\(e.ty.cName)(\(expr(inner)))"
     case .wrap(let inner):
@@ -452,9 +560,16 @@ enum CEmit {
     case .isCase(let inner, let tag):
       return "((\(expr(inner))).tag == \(tag))"
     case .funcRef(let f):
-      return f.cName
+      let fn = f.isClosure ? f.cName : "thk_" + f.cName
+      return "((\(e.ty.cName)){ .fn = \(fn), .ctx = NULL })"
+    case .makeClosure(_, let ctx, let args):
+      return "mk_\(ctx.id)(\(args.map(expr).joined(separator: ", ")))"
+    case .boxNew(let v):
+      guard case .box(let inner) = e.ty else { return "NULL" }
+      return "bxn_\(inner.mangled)(\(expr(v)))"
     case .callPtr(let callee, let args):
-      return "(\(expr(callee)))(\(args.map(expr).joined(separator: ", ")))"
+      let helper = (callee.owned ? "callo_" : "call_") + callee.ty.cName
+      return "\(helper)(\(([expr(callee)] + args.map(expr)).joined(separator: ", ")))"
     case .unwrap(let inner):
       return "unw_\(inner.ty.cName)(\(expr(inner)))"
     }
