@@ -26,7 +26,7 @@ exports:
                        _strstr, _strtod, _strtol, _system, _tan, _time, _tmpfile, _tmpnam, _tolower,
                        _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _strrchr,
                        _atoi, ___cxa_atexit, ___cxa_thread_atexit, ___stack_chk_fail, ___stack_chk_guard,
-                       ___cxa_finalize, _atexit, _bzero, _malloc, _posix_memalign, _strncpy ]
+                       ___cxa_finalize, _atexit, _bzero, _malloc, _posix_memalign, _strncpy, _gettimeofday, _isatty, _raise ]
     weak-symbols:    [ ]
     objc-classes:    [ ]
     objc-ivars:      [ ]
