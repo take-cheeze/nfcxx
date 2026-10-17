@@ -113,9 +113,6 @@ typedef float cl_float;
 typedef double cl_double;
 
 namespace sycl {
-enum class rounding_mode { automatic, rte, rtz, rtp, rtn };
-
-enum class backend { host, opencl, level_zero, cuda, hip, vulkan, webgpu, ext_oneapi_level_zero };
 
 using size_t = unsigned long;
 
@@ -219,7 +216,6 @@ template <int D = 1, bool WithOffset = true> class item : public detail::size_co
 
 template <int D = 1> class nd_range {
  public:
-  nd_range() {}
   nd_range(const range<D> &g, const range<D> &l) : g_(g), l_(l) {}
   range<D> get_global_range() const { return g_; }
   range<D> get_local_range() const { return l_; }
@@ -1214,8 +1210,6 @@ struct max_work_group_size {};
 struct max_work_item_dimensions {};
 struct max_compute_units {};
 struct global_mem_size {};
-struct global_mem_cache_size {};
-struct mem_base_addr_align {};
 struct local_mem_size {};
 struct max_mem_alloc_size {};
 struct sub_group_sizes {};
@@ -1285,7 +1279,6 @@ class device {
  public:
   device() {}
   template <class S> device(const S &) {}
-  backend get_backend() const { return is_gpu() ? backend::opencl : backend::host; }
   bool is_gpu() const {
 #ifdef NFCXX_SYCL_GPU
     return true;
@@ -1333,9 +1326,6 @@ class device {
   unsigned info_of(info::device::max_work_item_dimensions *) const { return 3; }
   unsigned info_of(info::device::max_compute_units *) const { return 1; }
   unsigned long info_of(info::device::global_mem_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
-  unsigned long info_of(info::device::global_mem_cache_size *) const { return 1ul << 20; }
-  unsigned info_of(info::device::mem_base_addr_align *) const { return 1024; }
-  friend bool operator==(const device &, const device &) { return true; }   // one device in this subset
   unsigned long info_of(info::device::local_mem_size *) const { return 16384; }
   unsigned long info_of(info::device::max_mem_alloc_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
   std::vector<size_t> info_of(info::device::sub_group_sizes *) const { return std::vector<size_t>(1, 1); }
@@ -1836,8 +1826,6 @@ class queue {
 
   event memcpy(void *dst, const void *src, size_t n) { detail::backend_memcpy(dst, src, n); return event(); }
   event memcpy(void *dst, const void *src, size_t n, const event &) { return memcpy(dst, src, n); }
-  event memcpy(void *dst, const void *src, size_t n, const std::vector<event> &) { return memcpy(dst, src, n); }
-  friend bool operator==(const queue &, const queue &) { return true; }   // one in-order queue in this subset
   event memset(void *p, int v, size_t n) { detail::backend_memset(p, v, n); return event(); }
   template <class T> event fill(void *p, const T &v, size_t count) {
     handler h;
@@ -1873,7 +1861,6 @@ inline int kind_of(usm::alloc k) { return k == usm::alloc::device ? 0 : (k == us
 
 template <class T> T *malloc_device(size_t count, const queue &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 0); }
 template <class T> T *malloc_device(size_t count, const device &, const context &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 0); }
-inline void *malloc_device(size_t bytes, const device &, const context &) { return detail::usm_malloc(bytes, 16, 0); }
 template <class T> T *malloc_shared(size_t count, const queue &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 1); }
 template <class T> T *malloc_shared(size_t count, const device &, const context &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 1); }
 template <class T> T *malloc_host(size_t count, const queue &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 2); }
@@ -1940,10 +1927,6 @@ template <class T, int N> class vec {
     for (int i = 0; i < N; i++) r[i] = (U)v_[i];
     return r;
   }
-  // as<U>(): the same bytes read as another vector or scalar type.
-  template <class U> U as() const { U u; std::memcpy(&u, v_, sizeof(U)); return u; }
-  // convert<U, rounding_mode>(): the rounding is the conversion's own (round to nearest), so the mode is accepted and ignored.
-  template <class U, rounding_mode> vec<U, N> convert() const { return convert<U>(); }
   friend vec operator+(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] + b.v_[i]; return r; }
   friend vec operator-(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] - b.v_[i]; return r; }
   friend vec operator*(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] * b.v_[i]; return r; }
