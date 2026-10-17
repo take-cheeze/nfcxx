@@ -51,10 +51,10 @@ NativeFormatTypes::ENTRIES.each do |entry|
   check.call("#{entry.letter}: class.c's arm contains #{EVIDENCE.fetch(entry.letter)}",
              !arm.nil? && arm.include?(EVIDENCE.fetch(entry.letter)))
 end
-check.call('the check letters name a class with an RBS type', NativeFormatTypes::ENTRIES
-  .select { |e| e.conversion == :check }.all? { |e| e.rbs && e.rbs.match?(/\A[A-Z]\w*\z/) })
-check.call('the coercion letters name no RBS type (they accept values that are not the class)',
-           NativeFormatTypes::ENTRIES.select { |e| e.conversion == :coerce }.all? { |e| e.rbs.nil? })
+check.call('the check letters name classes (a union of them for n) with an RBS type', NativeFormatTypes::ENTRIES
+  .select { |e| e.conversion == :check }.all? { |e| e.rbs && e.rbs.split(' | ').all? { |c| c.match?(/\A[A-Z]\w*\z/) } })
+check.call('no letter is a coercion: mruby calls no user method, so every letter is a check or unchecked',
+           NativeFormatTypes::ENTRIES.none? { |e| e.conversion == :coerce })
 
 puts '== every native format is modelled'
 formats = NATIVE_DIRS.flat_map do |dir|

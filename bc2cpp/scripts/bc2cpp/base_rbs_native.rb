@@ -18,6 +18,7 @@ require 'open3'
 require 'fileutils'
 require 'set'
 require_relative '../../tools/bc2cpp/native_format_types'
+require_relative '../../tools/bc2cpp/native_return_kinds'
 
 module BaseRbsNative
   DEFINE_CLASS = /\bmrb_define_(class|module)(_under)?(?:_id)?\s*\(/.freeze
@@ -64,6 +65,30 @@ module BaseRbsNative
     text[/\A"((?:[^"\\]|\\.)*)"\z/, 1]
   end
 
+  # A class or method name: a string literal, or the presym `MRB_SYM(name)` of the `_id` forms, which the preprocessor
+  # spells `MRB_SYM__name` (MRB_SYM_B / _Q / _E are `name!`, `name?`, `name=`). Operator presyms are not names here.
+  PRESYM = /\AMRB_SYM(_[BQE])?__(\w+)\z/.freeze
+  PRESYM_SUFFIX = { '' => '', '_B' => '!', '_Q' => '?', '_E' => '=' }.freeze
+
+  def symbol_name(arg)
+    literal = string_literal(arg)
+    return literal if literal
+
+    m = arg.match(PRESYM)
+    m && m[2] + PRESYM_SUFFIX.fetch(m[1].to_s, '')
+  end
+
+  # The Ruby class a core class variable names (`mrb->string_class` is String), or nil for any other expression.
+  CORE_OWNER = { 'object' => 'Object', 'fixnum' => 'Integer', 'nil' => 'NilClass', 'true' => 'TrueClass',
+                 'false' => 'FalseClass' }.freeze
+  CORE_CLASS = /\A(?:M|mrb)->(\w+?)_(?:class|module)\z/.freeze
+
+  # mruby's error classes are `eStandardError`-style (the `e` is a prefix, not part of the name).
+  def core_owner(expr)
+    m = expr.match(CORE_CLASS)
+    m && CORE_OWNER.fetch(m[1]) { m[1].sub(/\Ae(?=[A-Z])/, '').split('_').map { |w| w[0].upcase + w[1..] }.join }
+  end
+
   # The variable a call result is assigned to (`RClass* rect = mrb_define_class_under(...)`), if any.
   def assigned_name(text, index)
     before = text[[index - 200, 0].max...index]
@@ -85,9 +110,9 @@ module BaseRbsNative
       under = !m[2].nil?
       var = assigned_name(text, m.begin(0))
       if under
-        outer, name = args[1], string_literal(args[2])
+        outer, name = args[1], symbol_name(args[2])
       else
-        outer, name = nil, string_literal(args[1])
+        outer, name = nil, symbol_name(args[1])
       end
       next unless name && name.match?(/\A[A-Za-z_]\w*\z/)
 
@@ -102,6 +127,10 @@ module BaseRbsNative
 
       set_owner(owners, var, full)
     end
+    # A variable taken from a core class (`krn = mrb->kernel_module;`) owns the methods registered on it.
+    text.scan(/(\w+)\s*=\s*((?:M|mrb)->\w+_(?:class|module))\s*;/) do |var, expr|
+      set_owner(owners, var, core_owner(expr)) if core_owner(expr)
+    end
     text.scan(METHOD_CALL) do
       m = Regexp.last_match
       args = call_args(text, m.end(0) - 1)
@@ -109,8 +138,13 @@ module BaseRbsNative
       next if args.size < 3
 
       target = args[1]
-      name = string_literal(args[2])
-      next unless name
+      next if target.match?(/\s/) # a prototype from an included header (`struct RClass *cla`), not a call
+
+      name = symbol_name(args[2])
+      unless name
+        skipped << "#{target} #{args[2]} (operator or unnamed)"
+        next
+      end
 
       owner = owner_of(owners, target)
       if owner.nil? || owner.is_a?(Symbol)
@@ -122,23 +156,56 @@ module BaseRbsNative
         skipped << "#{owner}##{name}"
         next
       end
-      shape = param_shape(text, args[3])
-      methods << [owner, singleton, name, shape]
-      methods << [owner, false, name, shape] if kind == 'module_function'
+      sig = method_sig(text, args[3], singleton, args[4])
+      methods << [owner, singleton, name, sig]
+      methods << [owner, false, name, method_sig(text, args[3], false, args[4])] if kind == 'module_function'
     end
     [kinds, supers, methods.uniq, skipped]
   end
 
-  # The parameter list of a registered function: its `mrb_get_args` format, when the body makes exactly one such call
-  # (NativeFormatTypes). A class type only where the conversion is a check; everything else is untyped. A function whose
-  # format is not modelled, or that is not in this text, keeps the rest parameter.
-  def param_shape(text, function)
-    return '*untyped' unless function&.match?(/\A\w+\z/)
+  # The RBS signature of a registered function: its parameters and its return type (NativeReturnKinds). The parameters
+  # are the mrb_get_args format when the body reads its arguments that way, and otherwise the arity the registration's
+  # aspec declares (aspec_shape). A function that is not in this text keeps the rest parameter and an untyped return.
+  def method_sig(text, function, singleton, aspec)
+    body = function_body_of(text, function)
+    return '(*untyped) -> untyped' unless body
 
-    head = text.match(/\b#{Regexp.escape(function)}\s*\([^)]*\)\s*\{/)
-    return '*untyped' unless head
+    ret = NativeReturnKinds.rbs_of(NativeReturnKinds.kind_of_body(body), singleton: singleton)
+    params = if body.match?(/\bmrb_get_args\s*\(/) then param_shape(body) else aspec_shape(aspec) || '*untyped' end
+    "(#{params}) -> #{ret}"
+  end
 
-    body = function_body(text, head.end(0) - 1)
+  # The value of a registration's aspec expression, as the preprocessed text spells it (`((mrb_aspec)((1)&0x1f) << 18)`),
+  # or nil when the text is not plain integer arithmetic. The text is checked against a whitelist of characters before it
+  # is evaluated, so only digits, parentheses and the operators the aspec macros use reach the evaluator.
+  def aspec_value(expr)
+    return nil unless expr
+
+    text = expr.gsub(/\(\s*mrb_aspec\s*\)/, '')
+    return nil unless text.gsub(/0[xX][0-9a-fA-F]+/, '').match?(/\A[\s\d()|&<>]*\z/)
+
+    eval(text) # rubocop:disable Security/Eval -- the whitelist above admits only digits, hex literals and operators
+  rescue SyntaxError
+    nil
+  end
+
+  # The parameter list an aspec declares: its required parameters, then its optional ones. A rest, post-required or
+  # keyword parameter is not modelled (nil), so the caller keeps the rest parameter.
+  def aspec_shape(expr)
+    aspec = aspec_value(expr)
+    return nil unless aspec
+
+    req = (aspec >> 18) & 0x1f
+    opt = (aspec >> 13) & 0x1f
+    return nil if [(aspec >> 12) & 1, (aspec >> 7) & 0x1f, (aspec >> 2) & 0x1f, (aspec >> 1) & 1].any?(&:positive?)
+
+    (Array.new(req) { 'untyped' } + Array.new(opt) { '?untyped' }).join(', ')
+  end
+
+  # The parameter list from a function body: its `mrb_get_args` format, when the body makes exactly one such call
+  # (NativeFormatTypes). A class type only where the conversion is a check; everything else is untyped. A format that is
+  # not modelled keeps the rest parameter.
+  def param_shape(body)
     formats = body.scan(/\bmrb_get_args\s*\(\s*\w+\s*,\s*"([^"]*)"/).flatten
     return '*untyped' unless formats.size == 1
 
@@ -148,10 +215,19 @@ module BaseRbsNative
 
     params = positions.map do |pos|
       type = NativeFormatTypes.rbs_of(pos[:letter]) || 'untyped'
+      type = "(#{type})" if type.include?(' | ')
       pos[:optional] ? "?#{type}" : type
     end
     params << '*untyped' if format.include?('*')
     params.join(', ')
+  end
+
+  # The body of a function defined in +text+, from its opening brace to the matching close, or nil.
+  def function_body_of(text, function)
+    return nil unless function&.match?(/\A\w+\z/)
+
+    head = text.match(/\b#{Regexp.escape(function)}\s*\([^)]*\)\s*\{/)
+    head && function_body(text, head.end(0) - 1)
   end
 
   # The text of a function body from its opening brace at +open+ to the matching close brace.
@@ -168,8 +244,10 @@ module BaseRbsNative
   # A superclass argument as a Ruby constant name. The core object class is `M->object_class` (or `mrb->...`), which is
   # Object, the superclass a class gets when none is written, so it is left out as the Ruby source leaves it. Any other
   # C expression is not a name, so the superclass is left out rather than written wrong.
+  # `E_*_ERROR` is mruby's macro for a core error class; its name is not written here, so the superclass is left out.
   def super_name(expr)
-    return nil if expr.match?(/\A(?:M|mrb)->object_class\z/)
+    return nil if expr.match?(/\A(?:M|mrb)->object_class\z/) || expr.start_with?('E_')
+    return core_owner(expr) if core_owner(expr)
     return expr if expr.match?(NAME_TOKEN)
 
     nil
@@ -177,6 +255,7 @@ module BaseRbsNative
 
   def owner_of(owners, var)
     return var if var.match?(NAME_TOKEN)
+    return core_owner(var.strip) if core_owner(var.strip)
 
     value = owners[var.strip]
     value == :ambiguous ? :ambiguous : value
@@ -187,23 +266,23 @@ module BaseRbsNative
     owners[var] = prev.nil? || prev == full ? full : :ambiguous
   end
 
-  def member(name, shape, singleton: false)
-    "def #{singleton ? 'self.' : ''}#{name}: (#{shape}) -> untyped"
+  def member(name, sig, singleton: false)
+    "def #{singleton ? 'self.' : ''}#{name}: #{sig}"
   end
 
-  # One member per method name: the same name registered twice with different parameter shapes (a module_function
-  # pair, or two C functions sharing a name) has no single shape this stub can state, so it is left untyped.
-  def merge_shapes(entries)
+  # One member per method name: the same name registered twice with different signatures (a module_function pair, or
+  # two C functions sharing a name) has no single signature this stub can state, so it is left untyped.
+  def merge_sigs(entries)
     entries.group_by(&:first).sort.map do |name, rows|
-      shapes = rows.map(&:last).uniq
-      [name, shapes.size == 1 ? shapes.first : '*untyped']
+      sigs = rows.map(&:last).uniq
+      [name, sigs.size == 1 ? sigs.first : '(*untyped) -> untyped']
     end
   end
 
   def render(kinds, supers, methods)
     by_class = Hash.new { |h, k| h[k] = { singleton: [], instance: [] } }
-    methods.each do |owner, singleton, name, shape|
-      by_class[owner][singleton ? :singleton : :instance] << [name, shape]
+    methods.each do |owner, singleton, name, sig|
+      by_class[owner][singleton ? :singleton : :instance] << [name, sig]
     end
     names = (kinds.keys + by_class.keys).uniq.sort
     names.map do |full|
@@ -213,9 +292,13 @@ module BaseRbsNative
              else "class #{full}"
              end
       body = []
-      merge_shapes(by_class.fetch(full, { instance: [] })[:instance]).each { |n, shape| body << member(n, shape) }
-      merge_shapes(by_class.fetch(full, { singleton: [] })[:singleton]).each { |n, shape| body << member(n, shape, singleton: true) }
-      body = body.select { |line| valid_member?(line) }
+      merge_sigs(by_class.fetch(full, { instance: [] })[:instance]).each { |n, sig| body << member(n, sig) }
+      merge_sigs(by_class.fetch(full, { singleton: [] })[:singleton]).each { |n, sig| body << member(n, sig, singleton: true) }
+      body = body.select do |line|
+        valid = valid_member?(line)
+        warn "base_rbs_native: dropped #{full}, not valid RBS: #{line}" unless valid
+        valid
+      end
       "#{head}\n#{body.map { |l| "  #{l}\n" }.join}end\n"
     end
   end
