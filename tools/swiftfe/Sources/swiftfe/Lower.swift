@@ -106,6 +106,17 @@ private final class ClosureNameCollector: SyntaxVisitor {
   }
 }
 
+/// An enclosing loop or switch that `break` and `continue` may target.
+private struct JumpTarget {
+  /// The scope depth the target starts at. A jump releases the scopes from here on.
+  let depth: Int
+  let isSwitch: Bool
+  /// For a switch, the label that a `break` jumps to.
+  let label: String
+  /// Set once a `break` jumps to the label, so the label is emitted only when it is used.
+  var labelUsed = false
+}
+
 /// Names declared in one block, and the owned references to drop when it ends.
 private struct Scope {
   var vars: [String: Local] = [:]
@@ -158,8 +169,13 @@ final class Lowerer {
   private var structs: [String: StructInfo] = [:]
   private var classes: [String: ClassInfo] = [:]
   private var enums: [String: EnumInfo] = [:]
-  private var funcs: [String: FuncInfo] = [:]
+  /// Global functions by name. A name may have several overloads.
+  private var funcs: [String: [FuncInfo]] = [:]
+  /// Every C name given to a function or method, so that each one is unique.
+  private var usedCNames = Set<String>()
   private var allFuncs: [FuncInfo] = []
+  /// Methods that have been called on a temporary class value.
+  private var consumingMethods: [FuncInfo] = []
   private var optionals: [Ty] = []
   private var functionTypes: [Ty] = []
   private var arrays: [Ty] = []
@@ -194,7 +210,7 @@ final class Lowerer {
   private var pendingDeinits: [PendingDeinit] = []
   private var pendingInits: [PendingInit] = []
   /// Enclosing loops and switches, innermost last, with the scope depth each one starts at.
-  private var loops: [(depth: Int, isSwitch: Bool)] = []
+  private var loops: [JumpTarget] = []
   private var pendingMethods: [PendingMethod] = []
   /// The stored properties of structs, with their declarations, checked at the end of lowering.
   /// True while lowering an initializer body, where `self` may be assigned.
@@ -300,13 +316,17 @@ final class Lowerer {
     for item in items {
       guard case .decl(let decl) = item.item, let f = decl.as(FunctionDeclSyntax.self) else { continue }
       let name = f.name.text
-      if funcs[name] != nil || genericFuncs[name] != nil { throw error("invalid redeclaration of '\(name)'", f) }
       if let clause = f.genericParameterClause {
+        if genericFuncs[name] != nil || funcs[name] != nil { throw error("invalid redeclaration of '\(name)'", f) }
         genericFuncs[name] = GenericDecl<FunctionDeclSyntax>(decl: f, names: try genericNames(clause, f.genericWhereClause))
         continue
       }
+      if genericFuncs[name] != nil { throw error("overloads of a generic function are not supported yet", f) }
       let info = try declareFunction(f)
-      funcs[name] = info
+      if let others = funcs[name], others.contains(where: { sameParameters($0, info) }) {
+        throw error("invalid redeclaration of '\(name)'", f)
+      }
+      funcs[name, default: []].append(info)
       allFuncs.append(info)
       funcDecls.append((f, info))
     }
@@ -378,6 +398,7 @@ final class Lowerer {
       optionals: optionals,
       arrays: arrays,
       functionTypes: functionTypes,
+      consumingMethods: consumingMethods,
       boxes: boxes
     )
   }
@@ -594,7 +615,7 @@ final class Lowerer {
     } else {
       ret = .void
     }
-    return FuncInfo(name: name, cName: "f_" + cIdent(name), params: params, ret: ret)
+    return FuncInfo(name: name, cName: freshCName("f_" + cIdent(name)), params: params, ret: ret)
   }
 
   private func lowerBody(_ info: FuncInfo, _ body: CodeBlockSyntax, _ node: some SyntaxProtocol) throws -> [Stmt] {
@@ -720,7 +741,7 @@ final class Lowerer {
 
   private func endsInJump(_ stmts: [Stmt]) -> Bool {
     switch stmts.last {
-    case .ret, .brk, .cont: return true
+    case .ret, .brk, .cont, .goto: return true
     default: return false
     }
   }
@@ -736,8 +757,16 @@ final class Lowerer {
 
   private func lowerStmt(_ stmt: StmtSyntax) throws -> [Stmt] {
     if let ret = stmt.as(ReturnStmtSyntax.self) {
-      if initializingSelf {
-        throw error("'return' in an initializer is not supported yet", ret)
+      // Inside an initializer (not a closure in one, which has a return type), a bare
+      // `return` leaves with the new object, after releasing the owned locals it leaves.
+      if initializingSelf && returnType == nil {
+        if ret.expression != nil {
+          throw error("'return' with a value is not allowed in an initializer", ret)
+        }
+        guard let selfLocal = lookup("self") else {
+          throw error("'return' in an initializer needs 'self'", ret)
+        }
+        return releasesForReturn() + [.ret(Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty))]
       }
       guard let want = returnType else {
         throw error("'return' is not supported at top level in M2", ret)
@@ -760,7 +789,7 @@ final class Lowerer {
         return try lowerWhileLet(binding, loop)
       }
       let cond = try lowerCondition(loop.conditions, loop)
-      loops.append((scopes.count, false))
+      loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
       defer { loops.removeLast() }
       return [.whiles(cond, try lowerBlock(loop.body.statements))]
     }
@@ -775,7 +804,10 @@ final class Lowerer {
         throw error("'break' is only allowed inside a loop or switch", stmt)
       }
       if target.isSwitch {
-        throw error("'break' inside a switch is not supported yet", stmt)
+        // The arms are an if-chain, so the break jumps past them. The switch's own
+        // subject is released after the label, so only the arms' scopes are released here.
+        loops[loops.count - 1].labelUsed = true
+        return loopExitReleases(from: target.depth + 1) + [.goto(target.label)]
       }
       return loopExitReleases(from: target.depth) + [.brk]
     }
@@ -921,7 +953,7 @@ final class Lowerer {
     let prelude: [Stmt] = [.decl(cur, .int, lo), .decl(end, .int, hi)]
     let cond = Expr(kind: .binary(inclusive ? "<=" : "<", curRef, Expr(kind: .local(end), ty: .int)), ty: .bool)
 
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     var iteration: [Stmt] = []
@@ -957,7 +989,7 @@ final class Lowerer {
     scopes[scopes.count - 1].owned.append((cName: arrName, ty: seq.ty))
     let cond = Expr(kind: .binary("<", curRef, Expr(kind: .arrayCount(arrRef), ty: .int)), ty: .bool)
 
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     var iteration: [Stmt] = []
@@ -1054,7 +1086,7 @@ final class Lowerer {
   private func exits(_ stmts: [Stmt]) -> Bool {
     stmts.contains { stmt in
       switch stmt {
-      case .ret, .brk, .cont: return true
+      case .ret, .brk, .cont, .goto: return true
       case .ifs(_, let then, let otherwise): return exits(then) && exits(otherwise)
       default: return false
       }
@@ -1075,7 +1107,7 @@ final class Lowerer {
 
     let tmp = "t\(nextID())"
     let tmpRef = Expr(kind: .local(tmp), ty: opt.ty)
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     let name = id.identifier.text
@@ -1115,7 +1147,8 @@ final class Lowerer {
     let prelude: [Stmt] = [.decl(tmp, subject.ty, subject)]
     let subj = Expr(kind: .local(tmp), ty: subject.ty)
 
-    loops.append((scopes.count - 1, true))
+    let label = "sw_end\(nextID())"
+    loops.append(JumpTarget(depth: scopes.count - 1, isSwitch: true, label: label))
     defer { loops.removeLast() }
 
     var coveredTags = Set<Int>()
@@ -1192,7 +1225,13 @@ final class Lowerer {
     for arm in arms.reversed() {
       tail = [.ifs(arm.cond, arm.body, tail)]
     }
-    return prelude + tail + releases(of: scopes.removeLast())
+    // A `break` in an arm jumps to the label, which comes before the subject's release
+    // so that the subject is released once on every path.
+    var out = prelude + tail
+    if loops[loops.count - 1].labelUsed {
+      out.append(.label(label))
+    }
+    return out + releases(of: scopes.removeLast())
   }
 
   /// A case pattern over Int or Bool: a literal, or a range of Ints.
@@ -1372,7 +1411,8 @@ final class Lowerer {
       if let local = lookup(name) {
         return Expr(kind: .local(local.cName), ty: local.ty)
       }
-      if let f = funcs[name] {
+      if let overloads = funcs[name] {
+        let f = try functionValue(name, overloads, expected, ref)
         return funcValue(f)
       }
       if genericFuncs[name] != nil {
@@ -1523,11 +1563,11 @@ final class Lowerer {
       if isGenericName(name) {
         return try lowerGenericCall(name, explicit: [], call, expected, ref)
       }
-      if let selfTy = peek("self")?.ty, let method = methodOf(selfTy, name), let selfLocal = lookup("self") {
-        return try callMethod(method, Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), name, call)
+      if let selfLocal = lookup("self"), let methods = methodsOf(selfLocal.ty, name) {
+        return try callMethod(methods, name, Expr(kind: .local(selfLocal.cName), ty: selfLocal.ty), call)
       }
-      if let f = funcs[name] {
-        let args = try lowerArgs(call, f.params.map { $0.ty })
+      if let overloads = funcs[name] {
+        let (f, args) = try resolveOverload(name, overloads, dropReceiver: false, call)
         let values = try matchArguments(name, f.params.map { ($0.label, $0.ty) }, args, call)
         return Expr(kind: .call(f, values), ty: f.ret, owned: true)
       }
@@ -1594,8 +1634,8 @@ final class Lowerer {
     if let member = callee.as(MemberAccessExprSyntax.self), let base = member.base {
       let receiver = try lowerExpr(base)
       let name = member.declName.baseName.text
-      if let method = methodOf(receiver.ty, name) {
-        return try callMethod(method, receiver, name, call)
+      if let methods = methodsOf(receiver.ty, name) {
+        return try callMethod(methods, name, receiver, call)
       }
       let field = try fieldOf(receiver.ty, name, member)
       guard case .function(let params, let ret) = field.ty else {
@@ -2137,23 +2177,28 @@ final class Lowerer {
     owner: Ty,
     env: [String: Ty],
     name: String
-  ) throws -> [String: FuncInfo] {
-    var out: [String: FuncInfo] = [:]
+  ) throws -> [String: [FuncInfo]] {
+    var out: [String: [FuncInfo]] = [:]
     for d in decls {
       let method = d.name.text
-      if out[method] != nil {
-        throw error("overloaded methods are not supported yet", d)
-      }
       let params = try inEnv(env) { try declareParams(d.signature.parameterClause.parameters) }
       let ret: Ty = try inEnv(env) {
         if let clause = d.signature.returnClause { return try resolveType(clause.type) }
         return .void
       }
       let receiver = Param(label: nil, name: "self", cName: "self", ty: owner)
-      let info = FuncInfo(name: name + "." + method, cName: "m_\(cIdent(name))_\(method)", params: [receiver] + params, ret: ret)
+      let info = FuncInfo(
+        name: name + "." + method,
+        cName: freshCName("m_\(cIdent(name))_\(method)"),
+        params: [receiver] + params,
+        ret: ret
+      )
+      if let others = out[method], others.contains(where: { sameParameters($0, info) }) {
+        throw error("invalid redeclaration of '\(method)'", d)
+      }
       allFuncs.append(info)
       pendingMethods.append(PendingMethod(info: info, decl: d, env: env))
-      out[method] = info
+      out[method, default: []].append(info)
     }
     return out
   }
@@ -2207,13 +2252,16 @@ final class Lowerer {
       }
       var stmts = [allocation]
       stmts += try lowerBlock(body.statements)
-      stmts += releases(of: root)
-      stmts.append(.ret(Expr(kind: .local("self"), ty: selfTy)))
+      // A body that ends in a `return` has already released the owned locals.
+      if !endsInJump(stmts) {
+        stmts += releases(of: root)
+        stmts.append(.ret(Expr(kind: .local("self"), ty: selfTy)))
+      }
       return stmts
     }
   }
 
-  private func methodOf(_ ty: Ty, _ name: String) -> FuncInfo? {
+  private func methodsOf(_ ty: Ty, _ name: String) -> [FuncInfo]? {
     switch ty {
     case .structure(let n): return structs[n]?.methods[name]
     case .cls(let n): return classes[n]?.methods[name]
@@ -2221,19 +2269,25 @@ final class Lowerer {
     }
   }
 
-  /// Calls a method with `receiver` as self. The receiver is borrowed, so a
+  /// Calls the method that the arguments select. The receiver is borrowed, so a
   /// temporary class value would leak; it is rejected for now.
-  private func callMethod(_ method: FuncInfo, _ receiver: Expr, _ name: String, _ call: FunctionCallExprSyntax) throws -> Expr {
-    if receiver.owned && receiver.ty.isClassLike {
-      throw error("calling a method on a temporary class value is not supported yet", call)
-    }
+  private func callMethod(_ methods: [FuncInfo], _ name: String, _ receiver: Expr, _ call: FunctionCallExprSyntax) throws -> Expr {
+    let (method, args) = try resolveOverload(name, methods, dropReceiver: true, call)
     let params = Array(method.params.dropFirst())
-    let args = try lowerArgs(call, params.map { $0.ty })
     let values = try matchArguments(name, params.map { ($0.label, $0.ty) }, args, call)
+    if receiver.owned && receiver.ty.isClassLike {
+      // A temporary receiver is released once the method returns, by a wrapper (see CEmit),
+      // as Swift releases it. The result is owned, so it does not depend on the receiver.
+      if !consumingMethods.contains(where: { $0.cName == method.cName }) {
+        consumingMethods.append(method)
+      }
+      return Expr(kind: .callOnTemp(method, [receiver] + values), ty: method.ret, owned: true)
+    }
     return Expr(kind: .call(method, [receiver] + values), ty: method.ret, owned: true)
   }
 
-  /// Calls the initializer whose argument labels match the call.
+  /// Calls the initializer whose argument labels match the call, then picks among the
+  /// matching ones by argument types.
   private func callInitializer(
     _ name: String,
     _ candidates: [FuncInfo],
@@ -2242,12 +2296,170 @@ final class Lowerer {
     _ call: FunctionCallExprSyntax
   ) throws -> Expr {
     let labels = call.arguments.map { $0.label?.text }
-    guard let chosen = candidates.first(where: { $0.params.map { $0.label } == labels }) else {
+    let matching = candidates.filter { $0.params.map { $0.label } == labels }
+    guard !matching.isEmpty else {
       throw error("no initializer of '\(name)' takes these argument labels", call)
     }
-    let args = try lowerArgs(call, chosen.params.map { $0.ty })
+    let (chosen, args) = try resolveOverload(name, matching, dropReceiver: false, call, what: "initializer")
     let values = try matchArguments(name, chosen.params.map { ($0.label, $0.ty) }, args, call)
     return Expr(kind: .call(chosen, values), ty: ty, owned: owned)
+  }
+
+  /// Chooses among the overloads of a function, method or initializer. The argument
+  /// labels select the candidates, then the argument types select one. Among those that
+  /// fit, an exact type match beats one that needs Optional wrapping. With a single
+  /// candidate the arguments are lowered as usual, so its diagnostics do not change.
+  /// `dropReceiver` skips a method's self parameter.
+  private func resolveOverload(
+    _ name: String,
+    _ candidates: [FuncInfo],
+    dropReceiver: Bool,
+    _ call: FunctionCallExprSyntax,
+    what: String = "overload"
+  ) throws -> (FuncInfo, [ArgInput]) {
+    func paramsOf(_ f: FuncInfo) -> [Param] {
+      dropReceiver ? Array(f.params.dropFirst()) : f.params
+    }
+    if candidates.count == 1 {
+      let only = candidates[0]
+      return (only, try lowerArgs(call, paramsOf(only).map { $0.ty }))
+    }
+    let labels = call.arguments.map { $0.label?.text }
+    let matching = candidates.filter { paramsOf($0).map { $0.label } == labels }
+    guard !matching.isEmpty else {
+      throw error("no \(what) of '\(name)' takes these argument labels", call)
+    }
+
+    // An argument whose type does not depend on its parameter is lowered once, here.
+    // The others are lowered after the choice, with the chosen parameter's type.
+    let args = Array(call.arguments)
+    var lowered: [Expr?] = []
+    for arg in args {
+      if needsOverloadContext(arg.expression) {
+        lowered.append(nil)
+      } else {
+        lowered.append(try lowerExpr(arg.expression))
+      }
+    }
+
+    var scored: [(f: FuncInfo, score: Int)] = []
+    for f in matching {
+      let params = paramsOf(f)
+      var score = 0
+      var fits = true
+      for (i, arg) in args.enumerated() {
+        if let value = lowered[i] {
+          if value.ty == params[i].ty { continue }
+          if case .optional(let inner) = params[i].ty, inner == value.ty {
+            score += 1
+            continue
+          }
+          fits = false
+        } else {
+          fits = acceptsContext(arg.expression, params[i].ty)
+        }
+        if !fits { break }
+      }
+      if fits { scored.append((f, score)) }
+    }
+    guard let best = scored.map({ $0.score }).min() else {
+      throw error("no \(what) of '\(name)' matches these argument types", call)
+    }
+    let winners = scored.filter { $0.score == best }
+    guard winners.count == 1 else {
+      throw error("ambiguous use of '\(name)'", call)
+    }
+    let chosen = winners[0].f
+    let params = paramsOf(chosen)
+    var values: [ArgInput] = []
+    for (i, arg) in args.enumerated() {
+      let value: Expr
+      if let known = lowered[i] {
+        value = known
+      } else {
+        value = try lowerExpr(arg.expression, expected: params[i].ty)
+      }
+      values.append(ArgInput(label: arg.label?.text, value: value, node: arg))
+    }
+    return (chosen, values)
+  }
+
+  /// True for an argument whose type comes from the parameter it is passed to: a
+  /// closure, `nil`, an array literal, an implicit enum case, a generic function with
+  /// explicit arguments, or a function name.
+  private func needsOverloadContext(_ e: ExprSyntax) -> Bool {
+    if e.is(ClosureExprSyntax.self) || e.is(NilLiteralExprSyntax.self)
+      || e.is(ArrayExprSyntax.self) || e.is(GenericSpecializationExprSyntax.self) {
+      return true
+    }
+    if implicitMemberName(e) != nil { return true }
+    if let ref = e.as(DeclReferenceExprSyntax.self) {
+      let name = ref.baseName.text
+      return lookup(name) == nil && (funcs[name] != nil || genericFuncs[name] != nil)
+    }
+    return false
+  }
+
+  /// Whether an argument from `needsOverloadContext` can have the parameter type `ty`.
+  private func acceptsContext(_ e: ExprSyntax, _ ty: Ty) -> Bool {
+    if e.is(NilLiteralExprSyntax.self) {
+      if case .optional = ty { return true }
+      return false
+    }
+    if e.is(ArrayExprSyntax.self) {
+      if case .array = ty { return true }
+      return false
+    }
+    if let member = implicitMemberName(e) {
+      if case .enumeration(let info) = ty { return info.cases.contains { $0.name == member } }
+      return false
+    }
+    if case .function = ty { return true }
+    return false
+  }
+
+  /// The case name of an implicit member, `.full` or `.full(n)`.
+  private func implicitMemberName(_ e: ExprSyntax) -> String? {
+    if let member = e.as(MemberAccessExprSyntax.self), member.base == nil {
+      return member.declName.baseName.text
+    }
+    if let call = e.as(FunctionCallExprSyntax.self), let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+       member.base == nil {
+      return member.declName.baseName.text
+    }
+    return nil
+  }
+
+  /// The overload that a bare function name denotes as a value. Several overloads
+  /// need the expected function type to pick one.
+  private func functionValue(_ name: String, _ overloads: [FuncInfo], _ expected: Ty?, _ node: some SyntaxProtocol) throws -> FuncInfo {
+    if overloads.count == 1 { return overloads[0] }
+    guard let expected, case .function = expected else {
+      throw error("ambiguous use of '\(name)'", node)
+    }
+    let matches = overloads.filter { functionType($0) == expected }
+    guard matches.count == 1 else {
+      throw error("no overload of '\(name)' has type '\(expected.swiftName)'", node)
+    }
+    return matches[0]
+  }
+
+  /// True when two overloads take the same argument labels and types, so both cannot be declared.
+  private func sameParameters(_ a: FuncInfo, _ b: FuncInfo) -> Bool {
+    a.params.map { $0.label } == b.params.map { $0.label } && a.params.map { $0.ty } == b.params.map { $0.ty }
+  }
+
+  /// A C name that no other function or method has. Overloads share a Swift name, so a
+  /// name that is taken already gets a numeric suffix.
+  private func freshCName(_ base: String) -> String {
+    var name = base
+    var n = 1
+    while usedCNames.contains(name) {
+      name = base + "_\(n)"
+      n += 1
+    }
+    usedCNames.insert(name)
+    return name
   }
 
   /// Binds the parameters in `names` by matching a parameter type, as written, against

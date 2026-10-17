@@ -152,6 +152,9 @@ Swift compiler, but the wording is not guaranteed to be identical.
 
 Supported:
 - `break` and `continue` in loops. Each releases the owned locals it leaves.
+- `break` inside a `switch` leaves the switch, and `continue` inside a switch continues
+  the enclosing loop. The switch is an if-chain, so the break jumps to a label after it
+  (emitted only when a break uses it). The subject is still released once, after the label.
 - `for i in a..<b` and `for i in a...b` over Int; `for x in array`, which loops over a copy.
 - `guard let`, `guard cond`, with bindings that stay in scope after the guard.
 - `switch` over Int and Bool with literal, range (`4...9`) and several-value cases.
@@ -173,10 +176,34 @@ Supported:
   temporary is freed after the element is read, and a class element is returned owned.
 
 Limits (each gives a diagnostic):
-- `break` inside a `switch`
 - arrays of classes, enums or function values, arrays in struct properties, enum payloads or optionals
 - subscripts and `count` of a temporary array; `for-in` with a `where` clause
 - `switch` over Double or String; `%` on Double
+
+## Initializers, overloads and temporaries
+
+Supported:
+- `return` inside an initializer. A bare `return` releases the owned locals it leaves
+  (its parameters and the locals of the enclosing blocks) and returns `self`. The
+  initializer's implicit return is skipped when the body already ends in a `return`.
+- Overloaded functions, methods and initializers: the same name with different argument
+  labels or types. The labels choose the candidates, then the argument types choose one.
+  An exact type match beats one that needs Optional wrapping, so `f(1)` picks `f(_: Int)`
+  over `f(_: Int?)`. A closure, `nil`, an array literal, an implicit enum case or a function
+  name takes its type from the candidate. A function name used as a value picks its
+  overload from the expected function type. Overloads with the same labels and types are
+  redeclarations. Each overload has its own C name (`f_show`, `f_show_1`, ...).
+- a method called on a temporary class value, e.g. `Make().describe()`, in any statement,
+  condition or loop. The method borrows the receiver, so a wrapper `cs_<method>` releases it
+  once the method returns, as Swift does: the deinit output comes before the rest of the
+  enclosing expression. The method's result is owned, so it does not depend on the receiver.
+
+Limits (each gives a diagnostic):
+- `return` with a value in an initializer
+- overloads of a generic function, or a generic function with a plain overload of the same
+  name. Arguments of an overloaded call are typed before the candidate is chosen, so a generic
+  call that needs its parameter's type to infer its type arguments is not supported there.
+- an ambiguous call, such as `f(nil)` with `f(_: Int?)` and `f(_: Bool?)`
 
 ## Integration tests
 
@@ -197,16 +224,15 @@ Supported in this step beyond M2 and M3:
   initializer chosen by argument labels; the memberwise initializer is available only
   when no explicit one exists
 - methods on classes and structs, called as `obj.method(args)` or, inside a type, as
-  `method(args)`; a method's receiver is borrowed, so a temporary class value is rejected
+  `method(args)`; a method's receiver is borrowed, and a temporary class value is released
+  once the method returns (see "Initializers, overloads and temporaries")
 - implicit `self` for properties, in initializers, deinitializers and methods
 - `if let a = x, let b = y, cond { ... }`: each condition is tested in order
 - top-level variables are visible to functions and closures
 - `_` as a payload pattern in `switch`
 
 Limits of this step (each gives a diagnostic):
-- `return` inside an initializer; a failable initializer
-- overloaded methods with the same name
-- a method call on a temporary class value
+- a failable initializer
 
 ## Closure captures
 
