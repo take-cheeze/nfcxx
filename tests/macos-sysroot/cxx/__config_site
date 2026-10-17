@@ -26,6 +26,9 @@
 /* #undef _LIBCPP_HAS_NO_FILESYSTEM */
 /* #undef _LIBCPP_HAS_NO_RANDOM_DEVICE */
 /* #undef _LIBCPP_HAS_NO_LOCALIZATION */
+/* The front end does not take _Atomic ("not yet supported"), and libc++ emits it for clang feature checks alone.
+   The GCC builtin atomics are the same operations without the qualifier; cxx_atomic_impl.h checks this macro first. */
+#define _LIBCPP_HAS_GCC_ATOMIC_IMP
 /* #undef _LIBCPP_HAS_NO_WIDE_CHARACTERS */
 /* #undef _LIBCPP_HAS_NO_STD_MODULES */
 /* #undef _LIBCPP_HAS_NO_TIME_ZONE_DATABASE */
