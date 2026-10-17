@@ -26,7 +26,10 @@ the program, and each crate of MRUSTC_NFCC_CRATES (cached as build/mrustc/nfcxx/
 `scripts/mrustc-nfcc.sh prog.rs -o prog` builds the program. `MRUSTC_NFCC_CRATES` names the crates to compile through
 nfcxx (`core alloc std`, or `all`); `MRUSTC_NFCC_CORE=1` is `core` alone. A crate is rebuilt when its C file or the
 rewrite scripts are newer than its object. `scripts/setup-mrustc.sh` builds mrustc and the 1.90 standard library into
-`build/mrustc/src` (pinned commit `d85e86b`, from the mrustc `build-1.90.0.sh` steps). The driver takes `MRUSTC` and
+`build/mrustc/src` (pinned commit `016c5899` on take-cheeze/mrustc branch `nfcxx/fixes`: upstream `d85e86b` plus the fixes
+in that branch's `NFCXX-FIXES.md`; from the mrustc `build-1.90.0.sh` steps, with `MRUSTC_REPO` to override the repository).
+The census and the rewrites were re-run on this pin: `tests/mrustc/run.sh` (15 of 15) and `tests/realworld/run_mrustc.sh`
+(3 of 3) pass. The driver takes `MRUSTC` and
 `MRUSTC_STD` to use another build. The edition defaults to 2021.
 
 Three choices in the first step matter:
