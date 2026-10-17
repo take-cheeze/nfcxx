@@ -38,6 +38,12 @@ cross_edg="$root/build/edg-cross"; cross_base="$root/build/edg-base-cross"
 if [ ! -x "$cross_edg/bin/eccp" ]; then
   rm -rf "$cross_edg" "$cross_base"; mkdir -p "$cross_edg/bin"
   cp -r "$root/build/edg-base" "$cross_base"
+  # The copied predefines are the Linux host's. __linux__ (and the other Linux names) would make libc++'s __config include
+  # glibc's features.h, which the clean-room sysroot does not have. Darwin does not define them, so drop them here.
+  sed -i '/^gnu no  \(__gnu_linux__\|__linux\|__linux__\|linux\) 1$/d' "$cross_base/lib/predefined_macros.txt"
+  if grep -qE '^gnu no  (__gnu_linux__|__linux|__linux__|linux) 1$' "$cross_base/lib/predefined_macros.txt"; then
+    echo "setup-cross-macos: Linux predefines remain in $cross_base" >&2; exit 1
+  fi
   sed -i 's|-c "nm -og 2>/dev/null" |-c "llvm-nm -og 2>/dev/null" -fMacOSX64 -u |' "$cross_base/edg_eccp_config"
   grep -q 'llvm-nm -og 2>/dev/null" -fMacOSX64 -u' "$cross_base/edg_eccp_config" || { echo "setup-cross-macos: the prelink option did not change in $cross_base" >&2; exit 1; }
   for f in "$root/build/edg/bin/"*; do
