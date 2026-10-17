@@ -68,7 +68,9 @@ doctest)
   # The prelinker step (scripts/macos-cxx-link.sh, as in #363): doctest's toString<float> and toString<long double> are
   # template instances, which the prelinker compiles through the Darwin path. The include path and the override are
   # nfcxx options, passed to both steps.
-  scripts/macos-cxx-link.sh tests/realworld/doctest_main.cpp "$out" "-I$src" "-DDOCTEST_IS_DEBUGGER_ACTIVE()=false"
+  # DOCTEST_CONFIG_USE_STD_HEADERS: doctest otherwise forward-declares std types itself, including its own size_t, which
+  # clashes with the libc++ headers. The cross build uses the real standard headers.
+  scripts/macos-cxx-link.sh tests/realworld/doctest_main.cpp "$out" "-I$src" "-DDOCTEST_IS_DEBUGGER_ACTIVE()=false" "-DDOCTEST_CONFIG_USE_STD_HEADERS"
   echo "expected on the Mac: exit code 2 (two deliberate CHECK failures); doctest prints its summary"
   ;;
 *) echo "cross_macos: unknown NAME '$name' (lua|doctest)" >&2; exit 2 ;;
