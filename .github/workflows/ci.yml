@@ -474,7 +474,7 @@ jobs:
       - name: The mrustc suite (every crate through nfcxx)
         run: tests/mrustc/run.sh
 
-      # The real-world cases that pass (batch is not in the list: its QBE step runs out of memory on unicode-segmentation).
+      # The real-world cases that pass: clap, regex, serde-json, and batch (13 small crates, through the QBE large-block and large-alloc fixes).
       # They run only when the change touches the Rust frontend path: the real-world cases, their runner, the mrustc scripts
       # and the mrustc suite. A push to main compares with the commit before it.
       - name: Did the change touch the Rust frontend
@@ -491,9 +491,9 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Real-world mrustc cases (clap, regex, serde-json)
+      - name: Real-world mrustc cases (clap, regex, serde-json, batch)
         if: steps.rust-changes.outputs.changed == 'true'
-        run: tests/realworld/run_mrustc.sh clap regex serde-json
+        run: tests/realworld/run_mrustc.sh clap regex serde-json batch
 
   # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
   # the build, every test group, the Linux arm64 tests, the macOS suites and the mrustc suite passed. if: always() stops a
