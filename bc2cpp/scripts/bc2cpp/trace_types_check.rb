@@ -21,6 +21,12 @@ DUMP = <<~TSV
   PARAM_SITE\tfx\t2\t5\t3\tBox#over\tBox_over_impl\tmethod\treq\t1\tx\tnone:mono
   PARAM_CLASS\tfx\t2\tInteger\t5
   PARAM_SITE\tfx\t3\t0\t0\tBox#unused\tBox_unused_impl\tmethod\treq\t1\tx\tnone:mono
+  PARAM_SITE\tfx\t6\t1\t0\tBox#wide\tBox_wide_impl\tmethod\treq\t1\tx\tnone:mono
+  PARAM_CLASS\tfx\t6\tInteger\t1
+  PARAM_CLASS\tfx\t6\tString\t1
+  PARAM_CLASS\tfx\t6\tSymbol\t1
+  PARAM_CLASS\tfx\t6\tFloat\t1
+  PARAM_CLASS\tfx\t6\tArray\t1
   PARAM_SITE\tfx\t4\t1\t0\tBox#<\tBox_lt_impl\tmethod\treq\t1\tother\tnone:mono
   PARAM_CLASS\tfx\t4\tInteger\t1
   RETURN_SITE\tfx\t0\t2\t0\tBox#put\tBox_put_impl\tmethod\treturn\t0\treturn#1\tret=none
@@ -46,6 +52,7 @@ Tempfile.create(['trace_types', '.txt']) do |dump|
   check.call('a parameter seen as Integer and String is their union, a return of Integer and nil is parenthesized',
               text.include?('def put: (Integer | String) -> (Integer | nil)'))
   check.call('true and false together give bool', text.include?('def flag: (bool) -> bool'))
+  check.call('a parameter with more classes than a guarded union holds is untyped', text.include?('def wide: (untyped)'))
   check.call('an overflowed parameter is left out of the candidates', !text.include?('def over'))
   check.call('a never-reached method with no returns is left out', !text.include?('def unused'))
   check.call('an operator name is not written into RBS', !text.include?('def <'))

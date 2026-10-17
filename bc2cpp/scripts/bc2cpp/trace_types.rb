@@ -267,6 +267,17 @@ module TraceTypes
     classes.keys.map { |c| RBS_CLASS.fetch(c, c) }.uniq.sort.join(' | ')
   end
 
+  # The widest union the runtime guard checks linearly (DeclaredReturns::UNION_MAX, tools/bc2cpp/declared_returns.rb).
+  # A wider observation is untyped: a declaration bc2cpp cannot guard is no use as a hint.
+  UNION_MAX = 4
+
+  def self.bounded_type(classes)
+    return 'untyped' if classes.empty?
+
+    names = classes.keys.map { |c| RBS_CLASS.fetch(c, c) }.uniq
+    names.size > UNION_MAX ? 'untyped' : names.sort.join(' | ')
+  end
+
   # Merges the dumps by what a site is (method, parameter or return, name), not by the per-binary site id, so runs
   # of one build add up and runs of different builds are compared on the same key. A site whose class table
   # overflowed has classes nobody recorded, so it has no complete observed type.
@@ -321,11 +332,10 @@ module TraceTypes
       next unless owner && name && OWNER_RE.match?(owner) && NAME_RE.match?(name)
       next if m[:params].empty? && m[:ret_calls].zero?
 
-      args = m[:params].sort.map { |_, (_, classes)| rbs_type(classes) }
+      args = m[:params].sort.map { |_, (_, classes)| bounded_type(classes) }
       next if args.any?(&:nil?)
 
-      ret = m[:ret].empty? ? 'untyped' : rbs_type(m[:ret])
-      next if ret.nil?
+      ret = bounded_type(m[:ret])
 
       { owner: owner, name: name, args: args, ret: ret, calls: m[:ret_calls] }
     end
