@@ -16,4 +16,3 @@ int main() {
     if (g_registrar.v != 5) return 2;
     return 0;
 }
-// MACOS-XFAIL-qbe: link error of the QBE path for a global constructor (Mach-O constructor section)

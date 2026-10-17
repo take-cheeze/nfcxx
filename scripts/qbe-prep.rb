@@ -1253,14 +1253,13 @@ SPECIAL_ID = {}
 
 def main(argv)
   c_input = false
-  args = argv.dup
-  # --macho: Mach-O labels carry the target's underscore prefix, and the Apple assembler takes .weak_definition, not .weak
   macho = false
+  args = argv.dup
   while args.first == '--c-input' || args.first == '--macho'
     if args.shift == '--macho' then macho = true else c_input = true end
   end
   label = ->(name) { macho ? "_#{name}" : name }
-  die 'usage: qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
+  die 'usage: qbe-prep.rb [--c-input] [--macho] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
   src_path, out_path, tail_path = args
   src = read_text(src_path)
   tk = tokenize(src)
@@ -1531,10 +1530,17 @@ def main(argv)
   decls.concat(prelude.values)
   edits << [0, 0, decls.join("\n") + "\n"] unless decls.empty?
   unless ctors.empty?
-    tail << "\t.pushsection .init_array,\"aw\""
-    tail << "\t.p2align 3"
-    ctors.each { |name| tail << "\t.quad #{name}" }
-    tail << "\t.popsection"
+    # Mach-O (--macho): the constructor is listed in __DATA,__mod_init_func, and QBE prefixes its labels with "_"
+    # (as for every symbol), so the entry names the label the definition has. ELF keeps .init_array.
+    if macho
+      tail << "\t.section __DATA,__mod_init_func,mod_init_funcs" << "\t.p2align 3"
+      ctors.each { |name| tail << "\t.quad _#{name}" }
+    else
+      tail << "\t.pushsection .init_array,\"aw\""
+      tail << "\t.p2align 3"
+      ctors.each { |name| tail << "\t.quad #{name}" }
+      tail << "\t.popsection"
+    end
   end
 
   File.open(out_path, 'wb') { |f| f.write(apply_edits(src, edits)) }

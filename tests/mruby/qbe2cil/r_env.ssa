@@ -1,0 +1,5 @@
+# Refused: an env parameter.
+function w $f(env %e) {
+@start
+	ret 0
+}

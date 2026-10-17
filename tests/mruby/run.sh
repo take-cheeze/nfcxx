@@ -10,6 +10,7 @@
 #      refusal and error path) and, when the Path B harness exists, the IR of tests/pathb-qbe/{cases,multi,
 #      traps} and tests/cases; plus --no-prune, stdin, usage errors and --append-weak.
 #   4. scripts/qbe-prep.{py,rb}: tests/mruby/qbe-prep.sh (its own header says what it compares).
+#   5. scripts/qbe2cil.{py,rb}: tests/mruby/qbe2cil.sh (the JSON fragment and the exit status over the QBE IL fixtures).
 # Parts whose tools are missing (EDG, QBE, hexagon clang, the Path B harness) are skipped with a message.
 #   CLANG (default clang)   MRB (an existing mruby executable; default build/mruby-tool/bin/mruby)
 #   PATHB_CPFE, PATHB_BASE  the Path B harness (default build/pathb/...), as for tests/pathb-qbe/run.sh
@@ -279,6 +280,7 @@ if [ $rcr -eq 0 ] && grep -q '^data \$p = { b 40, b 0 }' "$tmp/paren.out" && [ $
 else report fail "pathb-qbe-emit parenthesis string constant: rb=$rcr py=$rcp"; fi
 "$root/tests/mruby/qbe-prep.sh" || fail=1
 "$root/tests/mruby/strip-atomic.sh" || fail=1
+"$root/tests/mruby/qbe2cil.sh" || fail=1
 
 echo "tests/mruby: $pass passed, $skip skipped"
 [ $fail -eq 0 ]

@@ -1,0 +1,5 @@
+# Refused: a jump to a label that does not exist (a KeyError in the Python original).
+function w $f(w %a) {
+@start
+	jmp @missing
+}
