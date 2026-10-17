@@ -18,6 +18,10 @@ namespace sycl {
 
 class half {
  public:
+  // The default constructor is trivial (no member initialiser): an array of half (vec<half, N>'s storage) is then
+  // default-initialised without a constructor call, and the front end emits no constructor address for the device pass
+  // (pathb-spirv-emit refuses "address of function" for a __cxa_vec_ctor over a non-trivial element type). value-init
+  // (half()) still zeroes the bits.
   half() = default;
   half(float f) : bits_(from_float(f)) {}
   operator float() const { return to_float(bits_); }
@@ -25,7 +29,7 @@ class half {
   static half from_bits(uint16_t b) { half h; h.bits_ = b; return h; }
 
  private:
-  uint16_t bits_ = 0;
+  uint16_t bits_;
 
   static float to_float(uint16_t h) {
     uint32_t sign = (uint32_t)(h & 0x8000) << 16;

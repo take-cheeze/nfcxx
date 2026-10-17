@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a SYCL program (lib/sycl, docs/notes/sycl-webgpu.md) for the host CPU or for WebGPU.
 #
-#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan|opencl|level-zero] [--keep-ir] [-I dir] [-D mac] [--cxx=CMD]
+#   scripts/sycl-build.sh [--cpu] [--backend=webgpu|vulkan|opencl|level-zero] [--keep-ir] [--ndebug] [-I dir] [-D mac] [--cxx=CMD]
 #                         [-L dir] [-l lib] [-Wl,...] [-rpath dir] prog.cpp -o prog
 #
 # WebGPU (the default): a device pass compiles prog.cpp with -D__NFCXX_SYCL_DEVICE__ through the Path B front end
@@ -12,6 +12,8 @@
 # --cpu: the host path only, no WGSL (the kernels are C++ loops).
 # Link flags (-L, -l, -Wl,..., -rpath dir; -rpath becomes -Wl,-rpath,dir) go to the host compile only, after the source and
 # -o; the device pass never sees them.
+# --ndebug: -DNDEBUG on the device pass only (the host pass keeps its asserts). For a TU that reaches ggml.h's assert() from a
+# device-side function: the device pass refuses the call to the host __assert_fail, and the device has no assert to lower it to.
 # --cxx=CMD: the host compiler (default: $CXX; else nfcxx for WebGPU when built, else g++). The closure types' mangling and
 # layout must match the device pass's (this front end; g++ mostly agrees), because the host finds a kernel by
 # typeid(F).name() and copies the closure bytes. The server refuses a closure whose size differs.
@@ -19,12 +21,13 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/scripts/oneapi-env.sh"   # the oneAPI runtime libraries and OPENCL_INCLUDE, for the tools and compilers run below
-cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; opts=(); link=(); std=c++17
+cxx=${CXX:-}; mode=webgpu; backend=webgpu; out=""; src=""; keep=0; ndebug=; opts=(); link=(); std=c++17
 while [ $# -gt 0 ]; do
   case $1 in
     --cpu) mode=cpu ;;
     --backend=*) backend=${1#--backend=}; case $backend in webgpu|vulkan|opencl|level-zero) ;; *) echo "sycl-build: --backend must be webgpu, vulkan, opencl or level-zero" >&2; exit 2 ;; esac ;;
     --keep-ir) keep=1 ;;
+    --ndebug) ndebug=-DNDEBUG ;;
     --cxx=*) cxx=${1#--cxx=} ;;
     -std=*) std=${1#-std=} ;;
     -o) out=$2; shift ;;
@@ -50,7 +53,7 @@ if [ "$mode" = cpu ]; then
   exec $cxx -std=$std $optflag -I"$inc" "${opts[@]}" "$src" -o "$out" "${link[@]}"
 fi
 absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
-"$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ -I"$inc" "${opts[@]}" "$src" > "$absout.dev.ir"
+"$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" "$src" > "$absout.dev.ir"
 rc=0
 if [ $backend = vulkan ]; then
   "$root/scripts/mrb" "$root/scripts/pathb-spirv-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
