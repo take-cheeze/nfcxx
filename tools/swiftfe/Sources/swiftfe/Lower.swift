@@ -930,9 +930,6 @@ final class Lowerer {
   /// `for i in a..<b` and `for i in a...b` over Int, lowered to a counting loop.
   /// The counter advances before the body, so `continue` needs no extra step.
   private func lowerForIn(_ loop: ForStmtSyntax) throws -> [Stmt] {
-    if loop.whereClause != nil {
-      throw error("a where clause in for-in is not supported yet", loop)
-    }
     if loop.sequence.as(InfixOperatorExprSyntax.self) == nil {
       return try lowerForInArray(loop)
     }
@@ -967,9 +964,21 @@ final class Lowerer {
     }
     let one = Expr(kind: .int(1), ty: .int)
     iteration.append(.assign(.local(cur), Expr(kind: .binary("+", curRef, one), ty: .int), .int))
-    iteration += try lowerBlock(loop.body.statements)
+    iteration += try iterationBody(loop)
     scopes.removeLast()
     return prelude + [.whiles(cond, iteration)]
+  }
+
+  /// The body of one for-in iteration, which runs only when the `where` clause holds. The
+  /// element is bound and the counter advanced before this runs, so `continue` in the body
+  /// goes to the next element, and the clause sees the loop variable.
+  private func iterationBody(_ loop: ForStmtSyntax) throws -> [Stmt] {
+    guard let clause = loop.whereClause else {
+      return try lowerBlock(loop.body.statements)
+    }
+    let cond = try lowerBoolExpr(clause.condition)
+    let body = try lowerBlock(loop.body.statements)
+    return [.ifs(cond, body, [])]
   }
 
   /// `for x in array`: a counting loop over a copy of the array, which the loop owns.
@@ -1002,7 +1011,7 @@ final class Lowerer {
       throw error("only a name or _ is supported in for-in in M2", loop.pattern)
     }
     iteration.append(.assign(.local(cur), Expr(kind: .binary("+", curRef, Expr(kind: .int(1), ty: .int)), ty: .int), .int))
-    iteration += try lowerBlock(loop.body.statements)
+    iteration += try iterationBody(loop)
     scopes.removeLast()
     let drop = releases(of: scopes.removeLast())
     return prelude + [.whiles(cond, iteration)] + drop
@@ -1133,9 +1142,9 @@ final class Lowerer {
     var enumInfo: EnumInfo? = nil
     switch subject.ty {
     case .enumeration(let info): enumInfo = info
-    case .int, .bool: break
+    case .int, .bool, .double: break
     default:
-      throw error("switch is supported over enums, Int and Bool in M2, not '\(subject.ty.swiftName)'", node.subject)
+      throw error("switch is supported over enums, Int, Bool and Double in M2, not '\(subject.ty.swiftName)'", node.subject)
     }
     let tmp = "t\(nextID())"
     // A temporary subject owns its references, so the switch scope releases it after
@@ -1210,8 +1219,9 @@ final class Lowerer {
       if let info = enumInfo, coveredTags.count < info.cases.count {
         throw error("switch must be exhaustive", node)
       }
-      if enumInfo == nil && subject.ty == .int {
-        throw error("switch over Int must have a default case", node)
+      // Int and Double have too many values to cover with literals, so they need a default.
+      if enumInfo == nil && (subject.ty == .int || subject.ty == .double) {
+        throw error("switch over \(subject.ty.swiftName) must have a default case", node)
       }
       if subject.ty == .bool && coveredBools.count < 2 {
         throw error("switch over Bool must cover both true and false, or have a default", node)
@@ -1234,7 +1244,7 @@ final class Lowerer {
     return out + releases(of: scopes.removeLast())
   }
 
-  /// A case pattern over Int or Bool: a literal, or a range of Ints.
+  /// A case pattern over Int, Bool or Double: a literal, or a range of Ints or Doubles.
   private func literalCondition(_ pattern: PatternSyntax, _ subj: Expr, _ coveredBools: inout Set<Bool>) throws -> Expr {
     guard let exprPattern = pattern.as(ExpressionPatternSyntax.self) else {
       throw error("this pattern is not supported in M2", pattern)
@@ -1243,15 +1253,19 @@ final class Lowerer {
     if let range = expr.as(InfixOperatorExprSyntax.self),
        let op = range.operator.as(BinaryOperatorExprSyntax.self),
        op.operator.text == "..<" || op.operator.text == "..." {
-      guard subj.ty == .int else { throw error("ranges in a case pattern need an Int subject", expr) }
-      let lo = try lowerExpr(range.leftOperand)
-      let hi = try lowerExpr(range.rightOperand)
-      guard lo.ty == .int, hi.ty == .int else { throw error("range bounds must be Int", expr) }
+      guard subj.ty == .int || subj.ty == .double else {
+        throw error("ranges in a case pattern need an Int or Double subject", expr)
+      }
+      let lo = try patternOperand(range.leftOperand, subj.ty)
+      let hi = try patternOperand(range.rightOperand, subj.ty)
+      guard lo.ty == subj.ty, hi.ty == subj.ty else {
+        throw error("range bounds must be \(subj.ty.swiftName)", expr)
+      }
       let lower = Expr(kind: .binary("<=", lo, subj), ty: .bool)
       let upper = Expr(kind: .binary(op.operator.text == "..." ? "<=" : "<", subj, hi), ty: .bool)
       return Expr(kind: .logical("&&", lower, upper), ty: .bool)
     }
-    let value = try lowerExpr(expr)
+    let value = try patternOperand(expr, subj.ty)
     guard value.ty == subj.ty else {
       throw mismatch(expected: subj.ty, actual: value.ty, expr)
     }
@@ -1259,6 +1273,30 @@ final class Lowerer {
       coveredBools.insert(b)
     }
     return Expr(kind: .binary("==", subj, value), ty: .bool)
+  }
+
+  /// A value in a case pattern. Where the subject is Double, an integer literal (`case 1:`)
+  /// or a negated literal is a Double, as in Swift. Anything else is lowered as usual.
+  private func patternOperand(_ expr: ExprSyntax, _ subjTy: Ty) throws -> Expr {
+    if subjTy == .double, let value = doubleLiteral(expr) {
+      return Expr(kind: .double(value), ty: .double)
+    }
+    return try lowerExpr(expr)
+  }
+
+  /// The value of a Double literal written as an integer or float literal, optionally negated.
+  private func doubleLiteral(_ expr: ExprSyntax) -> Double? {
+    if let lit = expr.as(IntegerLiteralExprSyntax.self) {
+      return Double(lit.literal.text.filter { $0 != "_" })
+    }
+    if let lit = expr.as(FloatLiteralExprSyntax.self) {
+      return Double(lit.literal.text.filter { $0 != "_" })
+    }
+    if let prefix = expr.as(PrefixOperatorExprSyntax.self), prefix.operator.text == "-",
+       let value = doubleLiteral(prefix.expression) {
+      return -value
+    }
+    return nil
   }
 
   /// Reads a `.case(let a, _)` pattern. Returns the case and one binding name per

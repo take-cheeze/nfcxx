@@ -156,10 +156,15 @@ Supported:
   the enclosing loop. The switch is an if-chain, so the break jumps to a label after it
   (emitted only when a break uses it). The subject is still released once, after the label.
 - `for i in a..<b` and `for i in a...b` over Int; `for x in array`, which loops over a copy.
+- `for x in xs where cond` over Int ranges and arrays. The body runs only for the elements
+  where `cond` holds, in order; `continue` and `break` work as in a plain loop.
 - `guard let`, `guard cond`, with bindings that stay in scope after the guard.
 - `switch` over Int and Bool with literal, range (`4...9`) and several-value cases.
   Int needs a default; Bool must cover both values. Enum cases may list several
   patterns when they bind nothing.
+- `switch` over Double with literal, several-value and range (`0.0..<1.0`, `1.0...2.5`)
+  cases. Integer and negated literals are Doubles there (`case 1:`, `case -2.0:`). The
+  first matching case runs. A default is required.
 - `Double` with literals, `+ - * /`, comparisons, `Double(n)` and Swift's printing.
 - Arrays `[T]` of any element type: Int, Bool, Double, structs, classes, enums that hold
   classes, optionals and nested arrays. Literals, `a[i]` (reads and writes, trapping out of
@@ -177,8 +182,8 @@ Supported:
 
 Limits (each gives a diagnostic):
 - arrays of classes, enums or function values, arrays in struct properties, enum payloads or optionals
-- subscripts and `count` of a temporary array; `for-in` with a `where` clause
-- `switch` over Double or String; `%` on Double
+- subscripts and `count` of a temporary array
+- `switch` over String; `%` on Double
 
 ## Initializers, overloads and temporaries
 
