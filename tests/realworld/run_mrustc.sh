@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real crates with dependencies through mrustc and nfcxx's C pipeline. Each case directory under tests/realworld/mrustc
-# holds a program (src/main.rs), its Cargo.toml and Cargo.lock (the lock pins the versions mrustc compiles, and the single
-# entry under [dependencies] is the crate it uses), and expected.txt: what rustc prints for the program. The dependency
+# holds a program (src/main.rs), its Cargo.toml and Cargo.lock (the lock pins the versions mrustc compiles, and every entry
+# under [dependencies] is a crate it uses), and expected.txt: what rustc prints for the program. The dependency
 # tree is built by mrustc's minicargo from a `cargo vendor` of the lock, and the program and every crate of its link are
 # compiled by scripts/mrustc-nfcc.sh with MRUSTC_NFCC_CRATES=all. Needs scripts/setup-mrustc.sh, cargo (cargo vendor
 # downloads the crates) and network access.
@@ -21,8 +21,7 @@ for case in "${cases[@]}"; do
   out=$work/out
   pkg=$(sed -n 's/^name = "\(.*\)"/\1/p' "$src/Cargo.toml" | head -1)
   tag=$(sed -n 's/^version = "\(.*\)"/\1/p' "$src/Cargo.toml" | head -1 | tr . _)
-  dep=$(sed -n '/^\[dependencies\]/,$p' "$src/Cargo.toml" | sed -n 's/^\([A-Za-z0-9_-]*\) = .*/\1/p' | head -1)
-  ext=${dep//-/_}
+  deps=$(sed -n '/^\[dependencies\]/,$p' "$src/Cargo.toml" | sed -n 's/^\([A-Za-z0-9_-]*\) = .*/\1/p')
   mkdir -p "$out"
   [ -d "$work/vendor" ] || (cd "$src" && cargo vendor --locked -q "$work/vendor" > /dev/null)
   # minicargo looks for core and the other std crates in its output directory, so the library output is copied there.
@@ -32,15 +31,19 @@ for case in "${cases[@]}"; do
     tail -20 "$work/minicargo.log" >&2
     echo "FAIL $case: minicargo" ; fail=$((fail + 1)); continue
   fi
-  rlib=$(ls "$out/lib$ext"-*.rlib | head -1)
+  externs=()
+  for dep in $deps; do
+    ext=${dep//-/_}
+    externs+=(--extern "$ext=$(ls "$out/lib$ext"-*.rlib | head -1)")
+  done
   if ! MRUSTC_NFCC_CRATES=all MRUSTC_STD="$out" "$root/scripts/mrustc-nfcc.sh" "$src/src/main.rs" -o "$work/$pkg" \
-      --crate-name "${pkg//-/_}" --crate-type bin --crate-tag "$tag" --extern "$ext=$rlib" --cfg debug_assertions -O \
+      --crate-name "${pkg//-/_}" --crate-type bin --crate-tag "$tag" "${externs[@]}" --cfg debug_assertions -O \
       > "$work/nfcc.log" 2>&1; then
     tail -20 "$work/nfcc.log" >&2
     echo "FAIL $case: mrustc-nfcc" ; fail=$((fail + 1)); continue
   fi
   if got=$("$work/$pkg" 2>&1) && [ "$got" = "$(cat "$src/expected.txt")" ]; then
-    echo "ok   $case ($dep through mrustc and nfcxx)"; pass=$((pass + 1))
+    echo "ok   $case ($(echo $deps | tr " " ",") through mrustc and nfcxx)"; pass=$((pass + 1))
   else
     echo "FAIL $case: output differs from expected.txt"; fail=$((fail + 1))
   fi
