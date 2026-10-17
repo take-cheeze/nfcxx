@@ -31,7 +31,7 @@ printf '{\n  local: *;\n};\n' > "$out/hide.map"   # the executable exports no sy
 # the Intel runtime libraries that libggml-sycl needs at run time
 export LD_LIBRARY_PATH=$oneapi_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 # the mutant: a sed copy of the real file (relu's max becomes min); element_wise.hpp and common.hpp come with it
-sed 's/return sycl::fmax(x, static_cast<T>(0));/return sycl::fmin(x, static_cast<T>(0));/' "$ggml_src/element_wise.cpp" > "$out/mut/element_wise.cpp"
+sed -e 's/return sycl::fmax(x, static_cast<T>(0));/return sycl::fmin(x, static_cast<T>(0));/' -e 's/return sycl::ext::oneapi::experimental::fmax(x, static_cast<T>(0));/return sycl::ext::oneapi::experimental::fmin(x, static_cast<T>(0));/' "$ggml_src/element_wise.cpp" > "$out/mut/element_wise.cpp"
 if cmp -s "$ggml_src/element_wise.cpp" "$out/mut/element_wise.cpp"; then echo "mutant unary_real: FAIL (mutation did not apply)"; exit 1; fi
 cp "$ggml_src/element_wise.hpp" "$ggml_src/common.hpp" "$out/mut/"
 fail=0 notrun=0
@@ -41,7 +41,7 @@ fail=0 notrun=0
 # device), 3 FAIL (build).
 run() {
   local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED -DGGML_SYCL_HAS_BF16 \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/unary_real/unary_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \
@@ -53,24 +53,24 @@ run() {
   res=$(timeout 300 "$out/$name" 2>&1); rc=$?
   printf '%s\n' "$res" > "$out/$name.res"
   if [ $rc = 70 ]; then echo "SKIP: unary_real $b: no device"; return 2; fi
-  if [ $rc = 0 ] && grep -q "checks: 16, failed: 0" <<< "$res"; then
-    echo "unary_real $b $name: ok, 16 of 16 checks ($(grep -m1 device: <<< "$res"))"; return 0
+  if [ $rc = 0 ] && grep -q "checks: 48, failed: 0" <<< "$res"; then
+    echo "unary_real $b $name: ok, 48 of 48 checks ($(grep -m1 device: <<< "$res"))"; return 0
   fi
   echo "unary_real $b $name: FAIL (rc $rc)"; grep -v ': ok$' <<< "$res" | tail -20; return 1
 }
 
 # mutant_verdict FILE: classifies a mutant run's output. Returns 0 caught, 1 not caught, 2 NOT RUN.
-# Caught needs a completed run (its "checks: 16, failed: K" line, and nothing else but the device and check lines) in which
+# Caught needs a completed run (its "checks: 48, failed: K" line, and nothing else but the device and check lines) in which
 # every relu check, the op the mutant touches, reports mismatches. A run with any other line (an error, a kernel-lookup
 # message, an abort) or without the checks line did not run to a wrong result.
 mutant_verdict() {
   local f=$1 relu
-  grep -q "^checks: 16, failed: [0-9][0-9]*$" "$f" || return 2
-  if grep -vqE '^(device: .*|checks: 16, failed: [0-9]+|(neg|relu|silu|gelu) [0-9x]+ (flat|strided): mismatches: [0-9]+ of [0-9]+, guard writes: [0-9]+ of 64, max abs err .*: (ok|FAIL))$' "$f"; then
+  grep -q "^checks: 48, failed: [0-9][0-9]*$" "$f" || return 2
+  if grep -vqE '^(device: .*|checks: 48, failed: [0-9]+|(neg|relu|silu|gelu) (F32|F16|BF16) [0-9x]+ (flat|strided): mismatches: [0-9]+ of [0-9]+, guard writes: [0-9]+ of 64, max abs err .*: (ok|FAIL))$' "$f"; then
     return 2
   fi
-  relu=$(grep -cE '^relu [0-9x]+ (flat|strided): mismatches: [1-9][0-9]* of [0-9]+,' "$f")
-  [ "$relu" = 4 ] && return 0
+  relu=$(grep -cE '^relu (F32|F16|BF16) [0-9x]+ (flat|strided): mismatches: [1-9][0-9]* of [0-9]+,' "$f")
+  [ "$relu" = 12 ] && return 0
   return 1
 }
 

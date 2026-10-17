@@ -413,17 +413,99 @@ jobs:
         if: always()
         run: ccache -s || true
 
+  # The mrustc suite (tests/mrustc/run.sh): Rust programs that mrustc compiles to C, with every crate they link compiled
+  # through nfcxx's C pipeline (cproc, QBE). A cache miss builds mrustc and its Rust 1.90 standard library
+  # (scripts/setup-mrustc.sh: minutes, and a download of the rustc source). Only mrustc's compiler and the library output
+  # are cached: the rest of build/mrustc/src is the rustc source tree and mrustc's intermediate objects, about 5 GB, which
+  # the suite does not read.
+  mrustc:
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      # sccache stores compiler outputs in the GitHub Actions cache.
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      # fetch-depth 0: the change check below diffs against the PR's base commit, which a shallow clone does not have.
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      # mrustc's build needs zlib (-dev), curl and pkg-config; its mruby tool (scripts/mrb) needs ruby and rake.
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: ruby rake zlib1g-dev pkg-config patch curl
+
+      - name: Cache keys
+        id: key
+        run: echo "qbe=$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)-${{ hashFiles('scripts/setup-qbe.sh', 'scripts/qbe-uninit-slot.patch', 'scripts/qbe-wflag.patch', 'scripts/qbe-empty-align.patch', 'scripts/pathb-ldrt', 'be/nfcxx_ldrt.c') }}" >> "$GITHUB_OUTPUT"
+
+      # The key holds the pin, which setup-mrustc.sh has: a new mrustc commit changes the script.
+      - name: Restore mrustc and its standard library
+        id: mrustc
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/mrustc/src/bin/mrustc
+            build/mrustc/src/output-1.90.0
+          key: mrustc-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh') }}
+
+      - name: Build mrustc and its standard library
+        if: steps.mrustc.outputs.cache-hit != 'true'
+        run: scripts/setup-mrustc.sh
+
+      # The crates compiled through the pipeline, cached per crate by mrustc-nfcc.sh. The key holds the scripts that rewrite
+      # and compile them, the mrustc pin and the QBE and cproc revisions.
+      - name: Restore the crates compiled through nfcxx
+        id: crates
+        uses: actions/cache@v4
+        with:
+          path: build/mrustc/nfcxx
+          key: mrustc-nfcxx-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh', 'scripts/mrustc-nfcc.sh', 'scripts/mrustc-prep.rb', 'scripts/qbe-prep.rb', 'scripts/qbe-cc') }}-${{ steps.key.outputs.qbe }}
+
+      # mrustc-nfcc.sh rebuilds a crate whose C file is newer than its object. Restored files keep the mtimes they were saved
+      # with, so the objects are touched here (as the poly step does): their inputs are the ones the key holds.
+      - name: Mark the restored crates up to date
+        if: steps.crates.outputs.cache-hit == 'true'
+        run: find build/mrustc/nfcxx -type f -exec touch {} +
+
+      - name: The mrustc suite (every crate through nfcxx)
+        run: tests/mrustc/run.sh
+
+      # The real-world cases that pass (batch is not in the list: its QBE step runs out of memory on unicode-segmentation).
+      # They run only when the change touches the Rust frontend path: the real-world cases, their runner, the mrustc scripts
+      # and the mrustc suite. A push to main compares with the commit before it.
+      - name: Did the change touch the Rust frontend
+        id: rust-changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(tests/realworld/mrustc/|tests/realworld/run_mrustc\.sh|tests/mrustc/|scripts/(mrustc-|setup-mrustc\.sh|qbe-cc|qbe-prep\.rb)|\.github/workflows/ci\.yml)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Real-world mrustc cases (clap, regex, serde-json)
+        if: steps.rust-changes.outputs.changed == 'true'
+        run: tests/realworld/run_mrustc.sh clap regex serde-json
+
   # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
-  # the build, every test group, the Linux arm64 tests and the macOS suites passed. if: always() stops a skipped
-  # dependency from skipping this job.
+  # the build, every test group, the Linux arm64 tests, the macOS suites and the mrustc suite passed. if: always() stops a
+  # skipped dependency from skipping this job.
   build-and-test:
     if: always()
-    needs: [build, test, arm-test, macos-suites]
+    needs: [build, test, arm-test, macos-suites, mrustc]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every build and test job to pass
         run: |
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.arm-test.result }}" != "success" ] || [ "${{ needs.macos-suites.result }}" != "success" ]; then
-            echo "build=${{ needs.build.result }} test=${{ needs.test.result }} arm-test=${{ needs.arm-test.result }} macos-suites=${{ needs.macos-suites.result }}"
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.arm-test.result }}" != "success" ] || [ "${{ needs.macos-suites.result }}" != "success" ] || [ "${{ needs.mrustc.result }}" != "success" ]; then
+            echo "build=${{ needs.build.result }} test=${{ needs.test.result }} arm-test=${{ needs.arm-test.result }} macos-suites=${{ needs.macos-suites.result }} mrustc=${{ needs.mrustc.result }}"
             exit 1
           fi

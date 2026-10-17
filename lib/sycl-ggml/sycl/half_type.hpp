@@ -3,8 +3,10 @@
 #ifndef NFCXX_SYCL_GGML_HALF_TYPE_HPP
 #define NFCXX_SYCL_GGML_HALF_TYPE_HPP
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 // The real sycl headers include these; the ggml sources rely on them (std::lock_guard in dpct/helper.hpp).
 #include <memory>
 #include <mutex>
@@ -125,6 +127,30 @@ inline bool isnan(float f) { return f != f; }
 inline bool isnan(half h) { return (float)h != (float)h; }
 template <class T> T mul_hi(T a, T b) { return (T)(((uint64_t)a * (uint64_t)b) >> 32); }
 inline half fmax(half a, half b) { return half((float)a > (float)b ? (float)a : (float)b); }
+
+// Math on half, computed in float and rounded back (the compat math templates in lib/sycl take arithmetic types only).
+// The ggml-sycl ops instantiate their F16 arm even for F32 tensors, so these must exist for the names they call.
+#define NFCXX_SYCL_HALF_MATH1(name, cf) inline half name(half x) { return half(cf(static_cast<float>(x))); }
+NFCXX_SYCL_HALF_MATH1(sqrt, std::sqrt)
+NFCXX_SYCL_HALF_MATH1(exp, std::exp)
+NFCXX_SYCL_HALF_MATH1(exp2, std::exp2)
+NFCXX_SYCL_HALF_MATH1(log, std::log)
+NFCXX_SYCL_HALF_MATH1(log2, std::log2)
+NFCXX_SYCL_HALF_MATH1(sin, std::sin)
+NFCXX_SYCL_HALF_MATH1(cos, std::cos)
+NFCXX_SYCL_HALF_MATH1(tan, std::tan)
+NFCXX_SYCL_HALF_MATH1(tanh, std::tanh)
+NFCXX_SYCL_HALF_MATH1(fabs, std::fabs)
+NFCXX_SYCL_HALF_MATH1(floor, std::floor)
+NFCXX_SYCL_HALF_MATH1(ceil, std::ceil)
+NFCXX_SYCL_HALF_MATH1(trunc, std::trunc)
+NFCXX_SYCL_HALF_MATH1(round, std::round)
+#undef NFCXX_SYCL_HALF_MATH1
+// erf, expm1, log1p: templates on half, so that only a call that is reached is emitted (see sycl.hpp: no device lowering).
+template <class H, class = typename std::enable_if<std::is_same<H, half>::value>::type> inline H erf(H x) { return H(sycl::erf((float)x)); }
+template <class H, class = typename std::enable_if<std::is_same<H, half>::value>::type> inline H expm1(H x) { return H(sycl::expm1((float)x)); }
+template <class H, class = typename std::enable_if<std::is_same<H, half>::value>::type> inline H log1p(H x) { return H(sycl::log1p((float)x)); }
+inline half fmin(half a, half b) { return half((float)a < (float)b ? (float)a : (float)b); }
 
 namespace ext {
 namespace oneapi {
