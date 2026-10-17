@@ -18,15 +18,36 @@ require_relative 'base_rbs_native'
 
 module BaseRbsAll
   ROOT = File.expand_path('../..', __dir__)
+  MRUBY_ROOT = File.join(ROOT, '3rd', 'mruby')
+  MRUBY_TOKEN = '#{MRUBY_ROOT}'
   GEM_RAKE = %r{(?:cxx|cc)\.include_paths[^\n]*}.freeze
   INCLUDE_LITERAL = /"([^"]*)"/.freeze
+  CORE_GEM = /conf\.gem core: ['"]([^'"]+)['"]/.freeze
+  PATH_GEM = /conf\.gem ['"]([^'"]+)['"]/.freeze
+  MRUBY_PATH = /\A#{Regexp.escape(MRUBY_TOKEN)}/.freeze
 
   module_function
 
-  # The `*-compiled` gems hold bc2cpp's generated register files, which are outputs, not sources to describe.
+  # Every gem the build config builds: the repo's own gems (`*/mrbgem.rake`), the mruby core gems named by `conf.gem
+  # core:` (3rd/mruby/mrbgems), and the path gems `conf.gem "#{MRUBY_ROOT}/../..."` names. The `*-compiled` gems hold
+  # bc2cpp's generated register files, which are outputs, not sources to describe.
   def gems
-    Dir[File.join(ROOT, '*', 'mrbgem.rake')].map { |rake| File.dirname(rake) }
-                                              .reject { |dir| File.basename(dir).end_with?('-compiled') }.sort
+    repo = Dir[File.join(ROOT, '*', 'mrbgem.rake')].map { |rake| File.dirname(rake) }
+    (repo + build_config_gems).reject { |dir| File.basename(dir).end_with?('-compiled') }.uniq.sort
+  end
+
+  # The gem directories build_config.rb names, with `#{MRUBY_ROOT}` expanded. A name that does not resolve to a
+  # directory is listed on stderr rather than dropped.
+  def build_config_gems
+    text = File.read(File.join(ROOT, 'build_config.rb'), encoding: 'UTF-8')
+    core = text.scan(CORE_GEM).flatten.map { |name| File.join(MRUBY_ROOT, 'mrbgems', name) }
+    paths = text.scan(PATH_GEM).flatten.grep(MRUBY_PATH).map { |lit| File.expand_path(lit.sub(MRUBY_TOKEN, MRUBY_ROOT)) }
+    (core + paths).filter_map do |dir|
+      next dir if File.directory?(dir)
+
+      warn "base_rbs_all: build config gem #{dir} is not a directory; skipped"
+      nil
+    end
   end
 
   # The include directories a gem's rake file names, with `#{dir}` (the gem's own directory) expanded.
@@ -41,8 +62,9 @@ module BaseRbsAll
     end
   end
 
+  # mruby's own core gems keep their C under `core/` (mruby-bigint, mruby-compiler); the repo's gems use `src/`.
   def native_sources(gem_dir)
-    Dir[File.join(gem_dir, 'src', '**', '*.{c,cc,cpp,cxx}')].sort
+    %w[src core].flat_map { |dir| Dir[File.join(gem_dir, dir, '**', '*.{c,cc,cpp,cxx}')] }.sort
   end
 
   def ruby_sources(gem_dir)
