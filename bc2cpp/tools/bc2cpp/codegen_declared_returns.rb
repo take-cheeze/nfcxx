@@ -388,6 +388,9 @@ class CodeGen
     cond = case entry.kind
            when :fixnum then "mrb_fixnum_p(#{var})"
            when :array then "mrb_array_p(#{var})"
+           when :string then "mrb_string_p(#{var})"
+           when :bool then "mrb_true_p(#{var}) || mrb_false_p(#{var})"
+           when :nil then "mrb_nil_p(#{var})"
            when :class
              exact = "mrb_obj_class(M, #{var}) == #{owner_class_ptr_expr(entry.cls)}"
              entry.nilable ? "mrb_nil_p(#{var}) || #{exact}" : exact
