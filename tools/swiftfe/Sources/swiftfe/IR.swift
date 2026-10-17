@@ -23,8 +23,13 @@ indirect enum Ty: Equatable {
   case cls(String)
   case enumeration(EnumInfo)
   case optional(Ty)
-  /// A non-capturing function (closure or named function), as a C function pointer.
+  /// A function value: a function and the context it is called with. A named function
+  /// or a closure that captures nothing has a NULL context. Function values are
+  /// reference-counted through the context (see `Ty.isClassLike`).
   case function([Ty], Ty)
+  /// A heap cell holding a `var` that a closure captures, so that both the closure and
+  /// the enclosing body see the same value.
+  case box(Ty)
 
   var swiftName: String {
     switch self {
@@ -39,6 +44,7 @@ indirect enum Ty: Equatable {
     case .optional(let inner): return inner.swiftName + "?"
     case .function(let params, let ret):
       return "(" + params.map { $0.swiftName }.joined(separator: ", ") + ") -> " + ret.swiftName
+    case .box(let inner): return "Box<" + inner.swiftName + ">"
     }
   }
 
@@ -57,11 +63,13 @@ indirect enum Ty: Equatable {
     case .optional(let inner): return "O_" + inner.mangled
     case .function(let params, let ret):
       return "F_" + params.map { $0.mangled }.joined(separator: "_") + "_R_" + ret.mangled
+    case .box(let inner): return "B_" + inner.mangled
     }
   }
 
   /// C spelling of values of this type. Optionals are named structs
-  /// (`opt_<inner>`), and class values are pointers.
+  /// (`opt_<inner>`), and class values are pointers. A function value is a struct
+  /// `{ fn, ctx }`, and a box is a pointer to a struct with a header.
   var cName: String {
     switch self {
     case .int: return "int64_t"
@@ -74,6 +82,7 @@ indirect enum Ty: Equatable {
     case .enumeration(let info): return "s_" + cIdent(info.name)
     case .optional(let inner): return "opt_" + inner.mangled
     case .function: return "fn_" + mangled
+    case .box(let inner): return "struct bx_" + inner.mangled + " *"
     }
   }
 
@@ -92,19 +101,32 @@ indirect enum Ty: Equatable {
     return false
   }
 
-  /// True for types whose values hold a reference count: a class, an enum with
-  /// a class in a payload, or an Optional wrapping one of these. Such values are
-  /// retained when copied from a place and released by their owner. Structs may
-  /// not hold them, because copying a struct would need its own retains.
+  var isBox: Bool {
+    if case .box = self { return true }
+    return false
+  }
+
+  /// True for types whose values hold a reference count: a class, an array, a function
+  /// value (through its context), a box, an enum with a class-like payload, a struct
+  /// with a class-like field, or an Optional wrapping one of these. Such values are
+  /// retained when copied from a place and released by their owner. Only a struct
+  /// that is itself reference-counted may be stored in a struct, which
+  /// `refStructNames` records.
   var isClassLike: Bool {
     switch self {
-    case .cls, .array: return true
+    case .cls, .array, .function, .box: return true
+    case .structure(let name): return refStructNames.contains(name)
     case .enumeration(let info): return info.holdsRef
     case .optional(let inner): return inner.isClassLike
     default: return false
     }
   }
 }
+
+/// Names of the structs that are reference-counted, filled in by Lowerer before any
+/// type is checked against them. A struct is reference-counted when a field is.
+/// Compilation handles one file per process, so a single set is enough.
+var refStructNames: Set<String> = []
 
 struct Field {
   let name: String
@@ -167,6 +189,14 @@ final class FuncInfo {
   let ret: Ty
   /// False for deinitializers, whose `self` is borrowed from the destroy path.
   let ownsParams: Bool
+  /// True for a closure body. Its C function takes the context pointer as its first
+  /// argument, and it is only ever called through a function value.
+  var isClosure = false
+  /// The captured values of a closure, or nil when it captures nothing.
+  var context: ClosureContext? = nil
+  /// True when a named function is used as a value, so it needs a thunk that takes
+  /// the context pointer.
+  var asValue = false
   var body: [Stmt] = []
 
   init(name: String, cName: String, params: [Param], ret: Ty, ownsParams: Bool = true) {
@@ -176,6 +206,20 @@ final class FuncInfo {
     self.ret = ret
     self.ownsParams = ownsParams
   }
+}
+
+/// The heap object that holds the values a closure captured. Its fields are copies of
+/// the captured values (class-like ones retained), or boxes for captured `var`s.
+final class ClosureContext {
+  let id: Int
+  let fields: [Field]
+
+  init(id: Int, fields: [Field]) {
+    self.id = id
+    self.fields = fields
+  }
+
+  var cName: String { "cx_\(id)" }
 }
 
 indirect enum ExprKind {
@@ -216,9 +260,16 @@ indirect enum ExprKind {
   case enumCase(EnumInfo, Int, [Expr])
   /// True when the enum value has the given tag.
   case isCase(Expr, Int)
-  /// A named function or closure used as a value.
+  /// A named function or a closure that captures nothing, as a function value.
   case funcRef(FuncInfo)
+  /// A closure that captures values. The arguments are the captured values, owned by
+  /// the new context.
+  case makeClosure(FuncInfo, ClosureContext, [Expr])
+  /// A function value called through its context. An owned callee is released after
+  /// the call.
   case callPtr(Expr, [Expr])
+  /// A new box holding the owned value.
+  case boxNew(Expr)
   /// A new class instance with every stored property zeroed, owned by the caller.
   case allocObject(ClassInfo)
   /// The zero value of a struct, used as `self` before an initializer assigns it.
@@ -287,6 +338,8 @@ struct Program {
   let functionTypes: [Ty]
   /// Methods called on a temporary class value, each of which needs a wrapper.
   let consumingMethods: [FuncInfo]
+  /// Every box type (`.box`) that appears in the program.
+  let boxes: [Ty]
 }
 
 /// C spelling of a type or function name. Identifier characters are kept, so the

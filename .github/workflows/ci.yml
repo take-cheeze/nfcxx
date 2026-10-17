@@ -46,6 +46,13 @@ jobs:
             run: NFCXX_BACKEND=qbe tests/run.sh
           - name: cases (gcc backend)
             run: NFCXX_BACKEND=gcc tests/run.sh
+          - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
+            dotnet: true
+            run: |
+              scripts/setup-cil.sh
+              scripts/setup-pathb.sh
+              tests/cil/run.sh
+              tests/pathb-cil/run.sh
           - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
             run: |
               tests/lib/run.sh
@@ -271,6 +278,12 @@ jobs:
         with:
           path: build/test-bin
           key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+
+      - name: .NET 8 SDK (the CIL backend's test programs run with dotnet)
+        if: matrix.dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
 
       - name: ${{ matrix.name }}
         env:

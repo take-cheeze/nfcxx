@@ -1,1 +1,1 @@
-struct_with_class.swift:5:7: error: structs with class-typed or array properties are not supported yet
+struct_with_class.swift:5:7: error: structs with class-typed properties are not supported yet
