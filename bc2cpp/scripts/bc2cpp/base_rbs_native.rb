@@ -18,6 +18,7 @@ require 'open3'
 require 'fileutils'
 require 'set'
 require_relative '../../tools/bc2cpp/native_format_types'
+require_relative '../../tools/bc2cpp/native_return_kinds'
 
 module BaseRbsNative
   DEFINE_CLASS = /\bmrb_define_(class|module)(_under)?(?:_id)?\s*\(/.freeze
@@ -122,23 +123,27 @@ module BaseRbsNative
         skipped << "#{owner}##{name}"
         next
       end
-      shape = param_shape(text, args[3])
-      methods << [owner, singleton, name, shape]
-      methods << [owner, false, name, shape] if kind == 'module_function'
+      sig = method_sig(text, args[3], singleton)
+      methods << [owner, singleton, name, sig]
+      methods << [owner, false, name, method_sig(text, args[3], false)] if kind == 'module_function'
     end
     [kinds, supers, methods.uniq, skipped]
   end
 
-  # The parameter list of a registered function: its `mrb_get_args` format, when the body makes exactly one such call
-  # (NativeFormatTypes). A class type only where the conversion is a check; everything else is untyped. A function whose
-  # format is not modelled, or that is not in this text, keeps the rest parameter.
-  def param_shape(text, function)
-    return '*untyped' unless function&.match?(/\A\w+\z/)
+  # The RBS signature of a registered function: its parameters (param_shape) and its return type (NativeReturnKinds).
+  # A function that is not in this text keeps the rest parameter and an untyped return.
+  def method_sig(text, function, singleton)
+    body = function_body_of(text, function)
+    return '(*untyped) -> untyped' unless body
 
-    head = text.match(/\b#{Regexp.escape(function)}\s*\([^)]*\)\s*\{/)
-    return '*untyped' unless head
+    ret = NativeReturnKinds.rbs_of(NativeReturnKinds.kind_of_body(body), singleton: singleton)
+    "(#{param_shape(body)}) -> #{ret}"
+  end
 
-    body = function_body(text, head.end(0) - 1)
+  # The parameter list from a function body: its `mrb_get_args` format, when the body makes exactly one such call
+  # (NativeFormatTypes). A class type only where the conversion is a check; everything else is untyped. A format that is
+  # not modelled keeps the rest parameter.
+  def param_shape(body)
     formats = body.scan(/\bmrb_get_args\s*\(\s*\w+\s*,\s*"([^"]*)"/).flatten
     return '*untyped' unless formats.size == 1
 
@@ -152,6 +157,14 @@ module BaseRbsNative
     end
     params << '*untyped' if format.include?('*')
     params.join(', ')
+  end
+
+  # The body of a function defined in +text+, from its opening brace to the matching close, or nil.
+  def function_body_of(text, function)
+    return nil unless function&.match?(/\A\w+\z/)
+
+    head = text.match(/\b#{Regexp.escape(function)}\s*\([^)]*\)\s*\{/)
+    head && function_body(text, head.end(0) - 1)
   end
 
   # The text of a function body from its opening brace at +open+ to the matching close brace.
@@ -187,23 +200,23 @@ module BaseRbsNative
     owners[var] = prev.nil? || prev == full ? full : :ambiguous
   end
 
-  def member(name, shape, singleton: false)
-    "def #{singleton ? 'self.' : ''}#{name}: (#{shape}) -> untyped"
+  def member(name, sig, singleton: false)
+    "def #{singleton ? 'self.' : ''}#{name}: #{sig}"
   end
 
-  # One member per method name: the same name registered twice with different parameter shapes (a module_function
-  # pair, or two C functions sharing a name) has no single shape this stub can state, so it is left untyped.
-  def merge_shapes(entries)
+  # One member per method name: the same name registered twice with different signatures (a module_function pair, or
+  # two C functions sharing a name) has no single signature this stub can state, so it is left untyped.
+  def merge_sigs(entries)
     entries.group_by(&:first).sort.map do |name, rows|
-      shapes = rows.map(&:last).uniq
-      [name, shapes.size == 1 ? shapes.first : '*untyped']
+      sigs = rows.map(&:last).uniq
+      [name, sigs.size == 1 ? sigs.first : '(*untyped) -> untyped']
     end
   end
 
   def render(kinds, supers, methods)
     by_class = Hash.new { |h, k| h[k] = { singleton: [], instance: [] } }
-    methods.each do |owner, singleton, name, shape|
-      by_class[owner][singleton ? :singleton : :instance] << [name, shape]
+    methods.each do |owner, singleton, name, sig|
+      by_class[owner][singleton ? :singleton : :instance] << [name, sig]
     end
     names = (kinds.keys + by_class.keys).uniq.sort
     names.map do |full|
@@ -213,8 +226,8 @@ module BaseRbsNative
              else "class #{full}"
              end
       body = []
-      merge_shapes(by_class.fetch(full, { instance: [] })[:instance]).each { |n, shape| body << member(n, shape) }
-      merge_shapes(by_class.fetch(full, { singleton: [] })[:singleton]).each { |n, shape| body << member(n, shape, singleton: true) }
+      merge_sigs(by_class.fetch(full, { instance: [] })[:instance]).each { |n, sig| body << member(n, sig) }
+      merge_sigs(by_class.fetch(full, { singleton: [] })[:singleton]).each { |n, sig| body << member(n, sig, singleton: true) }
       body = body.select { |line| valid_member?(line) }
       "#{head}\n#{body.map { |l| "  #{l}\n" }.join}end\n"
     end
