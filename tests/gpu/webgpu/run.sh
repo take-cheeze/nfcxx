@@ -4,7 +4,7 @@
 # Dawn, and opencl_bench.c runs the same small-dispatch shapes through OpenCL (NEO) for comparison.
 # Needs the Dawn build (DAWN_BUILD, default /home/takecheeze/dev/third/dawn/build), its headers (DAWN_INCLUDE, a
 # colon-separated list, default the source include dir and the generated include dir of that build) and the Intel
-# Vulkan adapter. The OpenCL part needs OPENCL_INCLUDE (default /opt/intel/oneapi/compiler/2026.1/include) and
+# Vulkan adapter. The OpenCL part needs OPENCL_INCLUDE (set by scripts/oneapi-env.sh) and
 # libOpenCL.so.1 plus an Intel OpenCL GPU. Skips (exit 0) when the Dawn build or the Intel Vulkan adapter is missing;
 # the OpenCL part is skipped on its own.
 set -euo pipefail
@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 DAWN_BUILD=${DAWN_BUILD:-/home/takecheeze/dev/third/dawn/build}
 DAWN_SRC=$(dirname "$DAWN_BUILD")
 DAWN_INCLUDE=${DAWN_INCLUDE:-$DAWN_SRC/include:$DAWN_BUILD/gen/include}
-OPENCL_INCLUDE=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
+. ../../../scripts/oneapi-env.sh   # OPENCL_INCLUDE (the oneAPI compiler's) and LD_LIBRARY_PATH
 
 if [ ! -f "$DAWN_BUILD/src/dawn/native/libwebgpu_dawn.a" ] || [ ! -f "$DAWN_BUILD/src/dawn/libdawn_proc.a" ] \
    || [ ! -f "$DAWN_BUILD/gen/include/dawn/webgpu_cpp.h" ]; then
