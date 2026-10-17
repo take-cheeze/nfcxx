@@ -60,14 +60,23 @@ module DeclaredReturns
     when 'Integer' then nilable || !type.args.empty? ? nil : [:fixnum, 'Integer', false]
     when 'Array' then nilable ? nil : [:array, 'Array', false]
     when 'String' then nilable || !type.args.empty? ? nil : [:string, 'String', false]
+    when 'Hash' then nilable || !type.args.empty? ? nil : [:hash, 'Hash', false]
+    when 'Symbol' then nilable || !type.args.empty? ? nil : [:symbol, 'Symbol', false]
+    when 'Float' then nilable || !type.args.empty? ? nil : [:float, 'Float', false]
     else
-      type.args.empty? && known_owners.include?(name) ? [:class, name, nilable] : nil
+      return nil unless type.args.empty?
+      # A native class is checked by its class pointer like a program class; the constant is resolved at run time.
+      known_owners.include?(name) || NATIVE_CHECKED_CLASSES.include?(name) ? [:class, name, nilable] : nil
     end
   end
 
+  # Native classes a runtime-checked declaration may name (their class pointer is read at run time, as for a
+  # program class). Other native names stay refused: a module, or a class with subclasses the exact test would miss.
+  NATIVE_CHECKED_CLASSES = %w[RGSS::Rect RGSS::Color RGSS::Tone RGSS::Bitmap RGSS::Font Range Proc].freeze
+
   # The kinds that only a runtime-checked declaration (%a{bc2cpp:hint}) may take: no proof analysis reads them, so
-  # the compiled body's guard is their whole check (codegen_declared_returns.rb).
-  GUARD_ONLY_KINDS = %i[bool nil string].freeze
+  # the compiled body's guard is their whole check (codegen_declared_returns.rb). A native class is one too.
+  GUARD_ONLY_KINDS = %i[bool nil string hash symbol float].freeze
 
   # Entries for the loaded method signatures that name a bytecode definition with the signature's required arity
   # (RbsSignatures.apply reports the others). `ireps` is only read for that arity.
@@ -92,7 +101,8 @@ module DeclaredReturns
 
       kind, cls, nilable = kind_of(sig.return_type, known_owners)
       next unless kind
-      next if GUARD_ONLY_KINDS.include?(kind) && !hinted.include?([sig.owner, sig.name])
+      guard_only = GUARD_ONLY_KINDS.include?(kind) || (kind == :class && !known_owners.include?(cls))
+      next if guard_only && !hinted.include?([sig.owner, sig.name])
 
       Entry.new(owner: sig.owner, name: sig.name, label: d.irep, kind: kind, cls: cls, nilable: nilable,
                 text: sig.return_type.to_s, loc: sig.loc, hint: hinted.include?([sig.owner, sig.name]))
@@ -127,7 +137,7 @@ module DeclaredReturns
             elsif sig.args.size != mand
               "declares #{sig.args.size} required parameter(s), the body takes #{mand}"
             else
-              "-> #{sig.return_type} is no checked kind (Integer, Array, Array[T], String, bool, nil, C or C? of a program class)"
+              "-> #{sig.return_type} is no checked kind (Integer, Array, String, Hash, Symbol, Float, bool, nil, C or C? of a program or listed native class)"
             end
       { key: "#{sig.owner}##{sig.name}", text: sig.return_type.to_s, loc: sig.loc, why: why }
     end

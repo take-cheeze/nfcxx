@@ -391,6 +391,9 @@ class CodeGen
            when :string then "mrb_string_p(#{var})"
            when :bool then "mrb_true_p(#{var}) || mrb_false_p(#{var})"
            when :nil then "mrb_nil_p(#{var})"
+           when :hash then "mrb_hash_p(#{var})"
+           when :symbol then "mrb_symbol_p(#{var})"
+           when :float then "mrb_float_p(#{var})"
            when :class
              exact = "mrb_obj_class(M, #{var}) == #{owner_class_ptr_expr(entry.cls)}"
              entry.nilable ? "mrb_nil_p(#{var}) || #{exact}" : exact
