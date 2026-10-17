@@ -19,6 +19,26 @@ typedef int sig_atomic_t;
 #define SIGSEGV 11
 #define SIGTERM 15
 
+
+/* POSIX.1-2008 sigaction family, from the POSIX specification: enough for doctest's stack-overflow handler. */
+typedef int sigset_t;
+#define SIGSTKSZ 16384
+#define SA_ONSTACK 0x0001
+#define SA_SIGINFO 0x0002
+#define SA_RESTART 0x0004
+#define SIGBUS 10
+#define SIGTRAP 5
+typedef struct { void *ss_sp; int ss_flags; unsigned long ss_size; } stack_t;
+struct sigaction {
+    void (*sa_handler)(int);
+    sigset_t sa_mask;
+    int sa_flags;
+};
+int sigaction(int sig, const struct sigaction *act, struct sigaction *oact);
+int sigaltstack(const stack_t *ss, stack_t *oss);
+int sigemptyset(sigset_t *set);
+int sigaddset(sigset_t *set, int sig);
+
 void (*signal(int sig, void (*func)(int)))(int);
 int raise(int sig);
 
