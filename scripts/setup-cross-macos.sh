@@ -55,6 +55,8 @@ cat > "$root/build/cross-macos.env" <<EOF
 # Written by scripts/setup-cross-macos.sh. Source this to run the macOS arm64 compile checks on this Linux host.
 export NFCXX_MACOS_CLEANROOM="$root/tests/macos-sysroot"
 export NFCXX_MACOS_SYSROOT="$root/tests/macos-sysroot/include"
+# The EDG C++ runtime for arm64 Darwin (scripts/setup-edg.sh, NFCXX_EDG_TARGET=macos-arm64): linked into the C++ cross links.
+export NFCXX_MACOS_LIBC="$root/build/edg/lib/libC.a"
 export NFCXX_LIBCXX="$libcxx"
 # The cross front end is for a macOS target on this Linux host: its predefined macros must not be the Linux ones (see 3rd/edg sys_predef.c).
 export NFCXX_TARGET_APPLE=1
