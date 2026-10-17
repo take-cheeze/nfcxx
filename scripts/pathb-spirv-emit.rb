@@ -282,13 +282,14 @@ rescue Refused
 end
 
 class Mod
-  attr_accessor :defs, :fns, :need, :globals, :datas, :statics, :static_order, :static_size
+  attr_accessor :defs, :fns, :need, :globals, :datas, :statics, :static_order, :static_size, :empty_types
   def initialize
     @defs = {}     # IR name => function form
     @fns = {}      # IR name => Fn (the reachable ones)
     @need = {}     # prelude helpers used
     @globals = {}  # IR name => global form
     @datas = {}    # IR name => data form (string literals)
+    @empty_types = {}  # IR struct name => true for the empty ABI types (abi-type ... (empty))
     @statics = {}  # name => byte offset in the static region (the objects a kernel uses)
     @static_order = []
     @static_size = 0
@@ -375,7 +376,12 @@ class Mod
           raise Refused, "static #{name}: initializer item #{h}"
         end
       end
-      raise Refused, "static object #{name} is zero-initialized (a dynamic initializer would look the same in the IR, so it is not trusted)" unless nonzero
+      # A lambda closure with no captures is an empty object (one byte, no members): its zero bytes are its whole value, and
+      # no initializer can change them, so it is lowered as the zero bytes it has. Any other zero-initialized object is refused.
+      # A local lambda's closure type is mangled _ZZ...Ul...E<n>_ (no Regexp under mruby, so the test is by substrings).
+      cname = head_of(f[2]) == "struct" ? f[2][1].to_s : ""
+      empty_closure = cname[0, 3] == "_ZZ" && cname.include?("Ul") && cname[-1, 1] == "_" && @empty_types[cname] == true
+      raise Refused, "static object #{name} is zero-initialized (a dynamic initializer would look the same in the IR, so it is not trusted)" unless nonzero || empty_closure
     end
     [bytes, relocs]
   end
@@ -1435,7 +1441,10 @@ class SFn
       ty = parse_type(x[1])
       raise Refused, "#{h} to #{ty[0]}" unless ty[0] == "float"
       a, aty = operand(x[2])
-      raise Refused, "#{h} of bool" if aty[0] == "int" && aty[3]
+      if aty[0] == "int" && aty[3]   # a bool holds 0 or 1: it converts as the unsigned 0 or 1 (0.0 or 1.0)
+        a = bool_to_u32(a)
+        aty = ["int", 4, false, false]
+      end
       v = h == "i2f" && aty[0] == "int" && aty[2] ? res(111, sty(ty), a) : res(112, sty(ty), a)
       [v, ty]
     when "cf2i"
@@ -2091,6 +2100,7 @@ def emit_module(src, kernel_cl = false)
       mod.defs[f[1].to_s] = f
     elsif h == "abi-type"
       sizes[f[1].to_s] = as_int(f[2])
+      mod.empty_types[f[1].to_s] = true if head_of(f[4]) == "empty"
     elsif h == "global"
       mod.globals[f[1].to_s] = f
     elsif h == "data"
