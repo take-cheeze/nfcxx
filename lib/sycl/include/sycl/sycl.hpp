@@ -2356,20 +2356,6 @@ inline bfloat16 operator+(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<
 inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) - static_cast<float>(b)); }
 inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
 inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
-// the work-item of the caller (a helper of element_wise.cpp and softmax.cpp; the ops under test use the launch's nd_item).
-// On the device it is the item the entry builds for the kernel (__nfcxx_sycl_entry_nd); on the host it is an empty item,
-// since a host work-item is not reachable from its helpers.
-namespace this_work_item {
-template <int D> inline nd_item<D> get_nd_item() {
-#ifdef __NFCXX_SYCL_DEVICE__
-  return nd_item<D>(detail::device_gid<D>(), detail::device_lid<D>(), detail::device_group<D>(),
-                    detail::device_global_range<D>(), detail::device_local_range<D>());
-#else
-  return nd_item<D>();
-#endif
-}
-template <int D = 3> inline sub_group get_sub_group() { return get_nd_item<D>().get_sub_group(); }
-}  // namespace this_work_item
 namespace experimental {
 // The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
 #define NFCXX_SYCL_BF16_FN1(name) \
