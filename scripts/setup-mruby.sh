@@ -7,7 +7,8 @@
 #                   scripts/qbe-cc runs mruby, so an nfcc build needs one to exist.
 #                   Run scripts with it via MRB=build/mruby-tool/bin/mruby-nfcc scripts/mrb ...
 #   FORCE=1         rebuild even if bin/mruby exists
-# Needs ruby and the rake gem (mruby's `minirake` is only a shim that execs `rake`; see the note).
+# Needs ruby and the rake gem (mruby's `minirake` is only a shim that execs `rake`; see the note), and the
+# host tools of the vendored gems: a C compiler, make, ar, gzip and tar (docs/notes/mruby-scripting.md).
 cd "$(dirname "$0")/.."
 root=$PWD; work=$root/build/mruby-tool
 pin=831da26b9021de0369d17b71b5667e2941a1a32d   # mruby/mruby tag 4.0.0, same pin as tests/realworld/run_mruby.sh
@@ -25,6 +26,15 @@ if command -v rake >/dev/null; then rake=(rake)
 elif [ -x "$(ruby -e 'print Gem.bindir')/rake" ]; then rake=("$(ruby -e 'print Gem.bindir')/rake")
 else rake=(ruby -rrake -e 'Rake.application.run(ARGV)' --); fi
 "${rake[@]}" --version >/dev/null 2>&1 || { echo "setup-mruby: the rake gem is needed (apt-get install rake)" >&2; exit 1; }
+# The gems under 3rd/ build Onigmo with the host's `make`, `ar`, `gzip` and `tar` (mrbgem.rake of mruby-onig-regexp;
+# its configure script ships in the tarball, so only `sh` is needed to run it). Fail here, not 10 minutes into the build.
+missing=
+for t in "$cc" make ar gzip tar; do
+  command -v "$t" >/dev/null 2>&1 && continue
+  case $t in make) p=make ;; ar) p=binutils ;; gzip|tar) p=$t ;; *) p="build-essential (or gcc)" ;; esac
+  missing="$missing${missing:+; }$t (apt-get install $p)"
+done
+[ -z "$missing" ] || { echo "setup-mruby: host tool(s) missing: $missing" >&2; exit 1; }
 mkdir -p "$work"
 # One build at a time (parallel compiles can all find the interpreter missing); re-check once locked.
 exec 9>"$work/.lock"; command -v flock >/dev/null && flock 9 || true
@@ -40,7 +50,7 @@ git -C "$src" checkout -q "$pin" || exit 1
 # mruby writes a .lock file next to its config, so the config is copied into the work dir.
 cp scripts/mruby-tool-config.rb "$work/build_config$tag.rb"
 log=$work/build$tag.log
-if ! (cd "$src" && MRUBY_CC=$cc MRUBY_CONFIG=$work/build_config$tag.rb MRUBY_BUILD_DIR=$work/out$tag \
+if ! (cd "$src" && MRUBY_CC=$cc NFCXX_ROOT=$root MRUBY_CONFIG=$work/build_config$tag.rb MRUBY_BUILD_DIR=$work/out$tag \
         "${rake[@]}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" all) >"$log" 2>&1; then
   tail -20 "$log" >&2; echo "setup-mruby: build failed (full log: $log)" >&2; exit 1
 fi

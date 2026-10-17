@@ -8,6 +8,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
+. "$root/scripts/oneapi-env.sh"   # OPENCL_INCLUDE (the oneAPI compiler's) and LD_LIBRARY_PATH
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 fail=0
@@ -33,7 +34,7 @@ else
 fi
 
 # ---- opencl: the device pass must ignore the link flags (a -l or -L in it fails the device compile)
-cl_inc=${OPENCL_INCLUDE:-/opt/intel/oneapi/compiler/2026.1/include}
+cl_inc=${OPENCL_INCLUDE:-}
 if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then
   if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl -L"$lib" -lgreet -Wl,-rpath,"$lib" ../vecadd.cpp -o "$out/cl_vecadd" > "$out/cl.log" 2>&1; then
     "$out/cl_vecadd" > "$out/cl.out" 2> "$out/cl.err"; rc=$?
