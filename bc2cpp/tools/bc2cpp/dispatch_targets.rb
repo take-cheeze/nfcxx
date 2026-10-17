@@ -131,6 +131,20 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                RPG2k::Scene::StatusMenu RPG2k::Scene::Title
                                RPG2k::Scene::VehicleWorld].freeze
 
+# The DIRECT_CONSTRUCT_TARGETS owners whose `<Owner>_compiled_class()` accessor
+# is hand-wired in mruby-rpg2k-compiled/src/register.cxx. A full build reads that
+# accessor for these; every other listed target uses the owner-class cache
+# (owner_class_ptr_expr), as a hot-only build does for all of them. Keep in step
+# with register.cxx: a listed owner missing from both is an undefined reference
+# at link time.
+DIRECT_CONSTRUCT_ACCESSOR_TARGETS = %w[Game::Transition Game::Map Game::Screen
+                                       Game::Switches Game::Timer Game::MessageConfig
+                                       Game::ChipSet Game::Interpreter Game::NumberInput
+                                       Game::MoveRoute Game::Battle
+                                       RPG2k::Scene::Map RPG2k::Scene::MapViewer
+                                       RPG2k::Scene::ChipsetEditor RPG2k::Scene::Menu
+                                       RPG2k::Scene::DebugMenu RPG2k::Scene::ItemMenu].freeze
+
 # NATIVE_ARG_TARGETS (the Set after sanitize_c_ident below): human-vetted
 # "Owner#name" allowlist that moves a compiled method's mandatory argument
 # from mrb_value to a native mrb_int/mrb_sym parameter. A position is retyped
