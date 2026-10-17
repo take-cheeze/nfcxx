@@ -153,6 +153,7 @@ module BaseRbsNative
 
     params = positions.map do |pos|
       type = NativeFormatTypes.rbs_of(pos[:letter]) || 'untyped'
+      type = "(#{type})" if type.include?(' | ')
       pos[:optional] ? "?#{type}" : type
     end
     params << '*untyped' if format.include?('*')
@@ -228,7 +229,11 @@ module BaseRbsNative
       body = []
       merge_sigs(by_class.fetch(full, { instance: [] })[:instance]).each { |n, sig| body << member(n, sig) }
       merge_sigs(by_class.fetch(full, { singleton: [] })[:singleton]).each { |n, sig| body << member(n, sig, singleton: true) }
-      body = body.select { |line| valid_member?(line) }
+      body = body.select do |line|
+        valid = valid_member?(line)
+        warn "base_rbs_native: dropped #{full}, not valid RBS: #{line}" unless valid
+        valid
+      end
       "#{head}\n#{body.map { |l| "  #{l}\n" }.join}end\n"
     end
   end

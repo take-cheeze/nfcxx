@@ -19,9 +19,11 @@ module NativeFormatTypes
     Entry.new(letter: 'A', rbs: 'Array', conversion: :check),
     Entry.new(letter: 'a', rbs: 'Array', conversion: :check),
     Entry.new(letter: 'H', rbs: 'Hash', conversion: :check),
-    Entry.new(letter: 'i', rbs: nil, conversion: :coerce),
-    Entry.new(letter: 'f', rbs: nil, conversion: :coerce),
-    Entry.new(letter: 'n', rbs: nil, conversion: :coerce),
+    # mruby calls no user method for these: i and f accept the built-in numeric classes (a Float truncates for i), n a
+    # Symbol or a String, and any other value raises TypeError.
+    Entry.new(letter: 'i', rbs: 'Numeric', conversion: :check),
+    Entry.new(letter: 'f', rbs: 'Numeric', conversion: :check),
+    Entry.new(letter: 'n', rbs: 'Symbol | String', conversion: :check),
     Entry.new(letter: 'b', rbs: nil, conversion: :truthy),
     Entry.new(letter: 'd', rbs: nil, conversion: :any)
   ].freeze
