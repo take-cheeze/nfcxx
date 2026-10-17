@@ -70,5 +70,5 @@ exports:
                        ___cxa_throw_bad_array_new_length, ___destroy_exception_object, ___dynamic_cast,
                        ___eh_curr_region, ___exception_caught, ___internal_rethrow, ___rethrow,
                        ___suppress_optim_on_vars_in_try, ___throw, ___throw_setup, ___throw_setup_dtor,
-                       __ZnwmSt11align_val_tRKSt9nothrow_t ]
+                       __ZnwmSt11align_val_tRKSt9nothrow_t, ___curr_eh_stack_entry ]
 ...
