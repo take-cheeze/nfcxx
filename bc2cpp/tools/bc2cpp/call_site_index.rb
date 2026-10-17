@@ -7,7 +7,7 @@ require_relative 'core_fact_sigs'
 # every monomorphic name.
 class CallSiteIndex
   SEND_OPS = %w[SEND0 SEND SENDB SSEND0 SSEND SSENDB].freeze
-  # Kernel#to_enum / enum_for (sig/bc2cpp/core_enumerators.rbs): `to_enum(:meth, *args)` later runs `meth(*args)` on
+  # Kernel#to_enum / enum_for (sig/bc2cpp/declarations.rbs#core_enumerators): `to_enum(:meth, *args)` later runs `meth(*args)` on
   # the receiver, so the site is a caller of `meth` although no SEND spells it.
   ENUM_SENDS = CoreFactSigs.enumerator_makers
   # Key of the sites whose method name is not a literal: any name could be their target. It is no

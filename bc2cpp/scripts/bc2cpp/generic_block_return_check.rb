@@ -285,10 +285,10 @@ generate = lambda do |world, sigs, native_sigs: nil, native: nil|
     end
     # The fixture's own signatures and the repository's native declarations (RGSS::Profiler, Kernel, Array); the
     # repository's program declarations in sig/bc2cpp describe engine classes this program does not have, so only
-    # the native files are passed from there.
-    repo_native = Dir[File.join(ROOT, 'sig', 'bc2cpp', '*.rbs')].select { |f| NativeSigs.file?(f) }
+    # the native declarations are written into the fixture.
+    File.write(File.join(dir, 'sig', 'bc2cpp', 'repo_native.rbs'), NativeSigs.native_source)
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'gb_fixture', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
-            'BC2CPP_SIG_DIRS' => [File.join(dir, 'sig', 'bc2cpp'), *repo_native].join(File::PATH_SEPARATOR),
+            'BC2CPP_SIG_DIRS' => File.join(dir, 'sig', 'bc2cpp'),
             'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
     world_env = bc2cpp_wio_world_env(env, ROOT)
     if native

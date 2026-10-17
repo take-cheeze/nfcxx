@@ -225,7 +225,7 @@ end
 
 # CodeGen: the nil half of a pooled class set (ADR 0296).
 class CodeGen
-  # Classes whose methods nil answers: itself and what it inherits (core_hierarchy.rbs), each with the names the ROM
+  # Classes whose methods nil answers: itself and what it inherits (declarations.rbs#core_hierarchy), each with the names the ROM
   # scan gives it (CoreHierarchySigs::SCAN_SPELLINGS: "Nil", "Basic_object").
   NIL_OWNER_NAMES = CoreHierarchySigs.with_scan_spellings(CoreHierarchySigs.ancestors('NilClass'))
 

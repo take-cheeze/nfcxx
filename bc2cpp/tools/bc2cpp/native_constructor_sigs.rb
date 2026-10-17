@@ -5,7 +5,7 @@ require_relative 'native_direct'
 require_relative 'native_owner_map'
 require_relative 'native_core_result_sigs'
 
-# NativeConstructorSigs: the constructor overloads of sig/bc2cpp/rgss_constructors.rbs (OVERLOADED_CONSTRUCT,
+# NativeConstructorSigs: the constructor overloads of sig/bc2cpp/declarations.rbs#rgss_constructors (OVERLOADED_CONSTRUCT,
 # docs/adr/0468), each audited against the source of the initialize it describes.
 #
 # An overload is { req: [type...], opt: [type...], path: [:direct, fn, [arg...]] | [:compiled], else: bool } with
@@ -16,7 +16,7 @@ require_relative 'native_core_result_sigs'
 # `<first param>.kind_of? String` between two native helpers (each helper's format is an overload, the non-String one
 # the `else`). A declaration that does not equal what its source derives refuses the file.
 module NativeConstructorSigs
-  PATH = File.expand_path('../../sig/bc2cpp/rgss_constructors.rbs', __dir__)
+  PATH = NativeSigs.table('rgss_constructors')
   ROOT = File.expand_path('../..', __dir__)
   # "o" (any object, untouched) has no declarable type here: an overload taking one is not modelled.
   FORMAT_TYPES = { 'i' => :num, 'f' => :num, 'z' => :str, 's' => :str, 'S' => :str, 'b' => :boolish }.freeze

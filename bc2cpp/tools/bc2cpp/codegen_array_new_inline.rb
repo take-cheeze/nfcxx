@@ -36,7 +36,7 @@ require_relative 'core_hierarchy_sigs'
 # BC2CPP_ARRAY_NEW_INLINE=0 keeps the BLOCK_FALLBACK call.
 class CodeGen
   # `Array.new` is looked up on Array's singleton chain (Array, Object, BasicObject), then on Class's ancestors
-  # (core_hierarchy.rbs).
+  # (declarations.rbs#core_hierarchy).
   ARRAY_NEW_CHAIN_OWNERS = (CoreHierarchySigs.superclasses_below('Array', nil) | CoreHierarchySigs.ancestors('Class')).freeze
 
   def array_new_inline_enabled?

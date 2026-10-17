@@ -7,23 +7,22 @@ require_relative 'core_hierarchy_sigs'
 # CoreFactSigs: facts about mruby core methods that used to be Ruby constants in the generator, read from RBS files
 # under sig/bc2cpp/ (docs/adr/0473). Each file holds one kind of fact; its loader accepts only the declaration shape
 # that fact has and raises on anything else, so a file edit cannot slip a malformed claim past it. The owners must be
-# classes or modules of sig/bc2cpp/core_hierarchy.rbs, declared with the right keyword. scripts/bc2cpp/
+# classes or modules of sig/bc2cpp/declarations.rbs#core_hierarchy, declared with the right keyword. scripts/bc2cpp/
 # core_facts_rbs_check.rb checks every entry against the 3rd/mruby sources.
 #
 # These files are fact tables, not program signatures: RbsSignatures skips them (FILES), because some of the methods
 # (Kernel#to_enum, Proc#yield, Proc#===) have mrblib bodies a signature would otherwise attach a hint to.
 module CoreFactSigs
-  DIR = File.expand_path('../../sig/bc2cpp', __dir__)
-  FRAME_READERS_PATH = File.join(DIR, 'core_frame_readers.rbs')
-  ENUMERATORS_PATH = File.join(DIR, 'core_enumerators.rbs')
-  PROC_CALLS_PATH = File.join(DIR, 'core_proc_calls.rbs')
-  CLASS_TESTS_PATH = File.join(DIR, 'core_class_tests.rbs')
-  FILES = [FRAME_READERS_PATH, ENUMERATORS_PATH, PROC_CALLS_PATH, CLASS_TESTS_PATH].freeze
+  FRAME_READERS_PATH = NativeSigs.table('core_frame_readers')
+  ENUMERATORS_PATH = NativeSigs.table('core_enumerators')
+  PROC_CALLS_PATH = NativeSigs.table('core_proc_calls')
+  CLASS_TESTS_PATH = NativeSigs.table('core_class_tests')
+  TABLES = [FRAME_READERS_PATH, ENUMERATORS_PATH, PROC_CALLS_PATH, CLASS_TESTS_PATH].freeze
 
   module_function
 
   # [[owner, MethodDefinition], ...] in file order: single-overload instance methods without a block, on an owner
-  # in +owners+ declared as core_hierarchy.rbs has it (a module only if some class includes it).
+  # in +owners+ declared as declarations.rbs#core_hierarchy has it (a module only if some class includes it).
   def methods_of(path, owners)
     super_of, mixins = CoreHierarchySigs.hierarchy
     modules = mixins.values.flatten.to_set
@@ -35,7 +34,7 @@ module CoreFactSigs
       is_module = decl.is_a?(RBS::AST::Declarations::Module)
       unless (is_module && modules.include?(owner)) ||
              (decl.is_a?(RBS::AST::Declarations::Class) && decl.super_class.nil? && decl.type_params.empty? && super_of.key?(owner))
-        raise "bc2cpp: #{path}: #{owner} must be declared as core_hierarchy.rbs has it (module or class, no superclass line)"
+        raise "bc2cpp: #{path}: #{owner} must be declared as declarations.rbs#core_hierarchy has it (module or class, no superclass line)"
       end
 
       decl.members.each do |member|

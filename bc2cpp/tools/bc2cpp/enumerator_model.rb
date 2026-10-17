@@ -18,7 +18,7 @@ require_relative 'core_fact_sigs'
 # (`Class#new` on the stable constant, i.e. what the body does) and skips the lookup of `to_enum`.
 module EnumeratorModel
   FILE_SUFFIX = '/mruby-enumerator/mrblib/enumerator.rb'
-  # Kernel's Enumerator makers, from sig/bc2cpp/core_enumerators.rbs.
+  # Kernel's Enumerator makers, from sig/bc2cpp/declarations.rbs#core_enumerators.
   NAMES = CoreFactSigs.enumerator_makers
   # Names the direct construction relies on: a definition of any of them outside mruby's own Ruby (or a second one inside)
   # withdraws the model.

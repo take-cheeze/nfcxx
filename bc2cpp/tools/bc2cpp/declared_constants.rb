@@ -40,11 +40,10 @@ module DeclaredConstants
 
     require 'rbs'
     files.flat_map do |file|
-      next [] if NativeSigs.file?(file)
-
       rel = display_root ? file.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : file
       _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: rel, content: File.read(file)))
-      collect(decls, [], rel, known_owners)
+      # Native declarations are checked by their own generators, not as the program's constants.
+      collect(decls.reject { |decl| NativeSigs.native?(decl) }, [], rel, known_owners)
     rescue RBS::ParsingError
       [] # RbsSignatures.load already reports the file (TC1002)
     end

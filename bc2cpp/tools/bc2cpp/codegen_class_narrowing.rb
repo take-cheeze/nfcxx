@@ -54,7 +54,7 @@ class CodeGen
   CLASS_TEST_CORE_FIELDS = { 'Integer' => 'integer_class', 'Float' => 'float_class', 'Array' => 'array_class',
                              'Hash' => 'hash_class', 'String' => 'string_class', 'Range' => 'range_class' }.freeze
   # Superclass chains of the core classes a bit stands for (Object and above are never the tested class), from
-  # sig/bc2cpp/core_hierarchy.rbs.
+  # sig/bc2cpp/declarations.rbs#core_hierarchy.
   CLASS_TEST_CORE_CHAIN = CLASS_TEST_CORE_BITS.values.to_h do |klass|
     [klass, CoreHierarchySigs.superclasses_below(klass, 'Object')]
   end.freeze
@@ -70,7 +70,7 @@ class CodeGen
   # More than this many classes and the set stops being a useful proof (ADR 0352 stops at eight for a receiver).
   CLASS_TEST_MAX_CLASSES = 16
   # The classes mruby's own natives register each tested name on (kernel.c, object.c, class.c), from
-  # sig/bc2cpp/core_class_tests.rbs.
+  # sig/bc2cpp/declarations.rbs#core_class_tests.
   CLASS_TEST_NATIVE_OWNERS = CoreFactSigs.class_test_owners
 
   # The return-class / class-pool fixpoint narrows too (@rc_narrowing, POOL_NARROWING): a store dominated by
@@ -149,7 +149,7 @@ class CodeGen
     klass && class_test_object(:instance_of, klass)
   end
 
-  # A class object's lookup: Class and its ancestors (core_hierarchy.rbs). Only membership is read.
+  # A class object's lookup: Class and its ancestors (declarations.rbs#core_hierarchy). Only membership is read.
   CLASS_OBJECT_OWNERS = CoreHierarchySigs.ancestors('Class')
 
   def class_object_eq_safe?
@@ -386,7 +386,7 @@ class CodeGen
     end
   end
 
-  # Numeric and its core subclasses (core_hierarchy.rbs).
+  # Numeric and its core subclasses (declarations.rbs#core_hierarchy).
   CLASS_TEST_NUMERIC_FAMILY = (['Numeric'] + CoreHierarchySigs.subclasses('Numeric')).freeze
 
   # Every instance of +klass+ is exactly that class: the closed world declares no subclass (ClosedWorld#
