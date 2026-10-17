@@ -1,0 +1,13 @@
+(ir-module "try.cpp" (layout (int 4)))
+(function "thrower" (ret void) (params (param %0 "x" int))
+  (eval (call void &"__throw_setup" (const long 8)))
+  (eval (call void &"__throw" (const long 0))))
+(function "t" (ret int) (params)
+  (let %0 int (call int &"_setjmp" (const long 0)))
+  (let %1 bool (eq int %0 (const int 0)))
+  (if %1
+    (then (block (eval (call void &"thrower" (const int 1)))))
+    (else (block (return (const int 7)))))
+  (return (const int 0)))
+(function "ind" (ret int) (params (param %0 "fp" (ptr (fn int ()))))
+  (return (call int (load (ptr (fn int ())) (const long 0)) (const int 1) (const long 2))))
