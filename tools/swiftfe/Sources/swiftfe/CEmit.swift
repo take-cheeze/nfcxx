@@ -577,6 +577,8 @@ enum CEmit {
       return v ? "true" : "false"
     case .local(let name):
       return name
+    case .place(let target):
+      return lvalue(target)
     case .field(let base, let name):
       if base.ty.isClass { return "(\(expr(base)))->\(name)" }
       return "(\(expr(base))).\(name)"

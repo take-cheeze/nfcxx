@@ -326,14 +326,23 @@ class Function:
             if isinstance(size, int):
                 if size == 0:
                     refuse(f'{self.name}: pdiff with element size 0')
-                self.emit(f'ldc.i8 {size}')
-            else:
-                have = self.expr(size)
-                if have == 'int32':
-                    self.emit('conv.u8')
-                elif have != 'int64':
-                    refuse(f'{self.name}: pdiff size of type {have}')
-            self.emit('div')
+                self.emit(f'ldc.i8 {size}', 'div')
+                return 'int64'
+            # A register SIZE: a zero one (a zero-length VLA element) aborts, as the checks of divrem do (the difference
+            # and the size go to locals first, so the check is one compare and a branch).
+            td = self.new_local('int64')
+            self.emit(f'stloc {td}')
+            have = self.expr(size)
+            if have == 'int32':
+                self.emit('conv.u8')
+            elif have != 'int64':
+                refuse(f'{self.name}: pdiff size of type {have}')
+            ts = self.new_local('int64')
+            self.emit(f'stloc {ts}')
+            ok = self.new_label('IL_ok')
+            self.emit(f'ldloc {ts}', 'ldc.i8 0', f'bne.un {ok}')
+            self.check_fail_if(ok)
+            self.emit(f'ldloc {td}', f'ldloc {ts}', 'div')
             return 'int64'
         if head == 'fneg':
             il = self.em.type_of(e[1])[0]
@@ -377,12 +386,14 @@ class Function:
             b = self.expr(e[3])
             self.coerce(b, il)
             self.emit(BIN[head])
+            self.narrow_small(e[1])
             return il
         if head == 'wneg':
             il = self.em.type_of(e[1])[0]
             have = self.expr(e[2])
             self.coerce(have, il)
             self.emit('neg')
+            self.narrow_small(e[1])
             return il
         if head == 'call':
             return self.call(e)
@@ -400,6 +411,18 @@ class Function:
             self.emit('mul', 'add')
             return 'int64'
         refuse(f'{self.name}: unsupported expression {head}')
+
+    def narrow_small(self, ty):
+        """Narrow the int32 value on the stack to the IR type ty when ty is a 1- or 2-byte integer, as the QBE emitter's
+        narrow does (its r_wbin, r_wneg, r_bitop, r_shift). bool is left alone, as QBE leaves it. Wrapping arithmetic on a
+        small type then yields the wrapped value, which the expression's own value and any later use see."""
+        while isinstance(ty, list) and ty and ty[0] == 'const':
+            ty = ty[1]
+        if not isinstance(ty, str) or ty == 'bool' or ty not in SCALARS:
+            return
+        il, size, signed = self.em.type_of(ty)
+        if il == 'int32' and size in (1, 2):
+            self.emit({(1, True): 'conv.i1', (1, False): 'conv.u1', (2, True): 'conv.i2', (2, False): 'conv.u2'}[(size, signed)])
 
     def size_operand(self, s):
         """Push an index SIZE as int64: a number, or a register (a VLA element size, zero-extended as in QBE)."""
@@ -499,9 +522,7 @@ class Function:
             self.emit('conv.i4')
         if left:
             self.emit('shl')
-            narrow = {(1, True): 'conv.i1', (1, False): 'conv.u1', (2, True): 'conv.i2', (2, False): 'conv.u2'}
-            if (size, signed) in narrow:
-                self.emit(narrow[(size, signed)])
+            self.narrow_small(ty)
         else:
             self.emit('shr' if signed else 'shr.un')
         return il
