@@ -1,0 +1,1 @@
+(function "f" (ret int) (params) (trap 1) (return (const int 0)))

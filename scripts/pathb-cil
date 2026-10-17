@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Path B CIL spike (docs/notes/pathb-cil.md): a C++ file -> Path B IR (pathb-dump --ir) -> pathb-cil-emit.py (fragment) ->
+# Path B CIL spike (docs/notes/pathb-cil.md): a C++ file -> Path B IR (pathb-dump --ir) -> pathb-cil-emit.rb (fragment) ->
 # cil-link.py (CIL, ilasm) -> an executable launcher (dotnet). Usage: scripts/pathb-cil [-o OUT] file.cpp
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -13,5 +13,5 @@ done
 [ ${#files[@]} -eq 1 ] || { echo "usage: scripts/pathb-cil [-o OUT] file.cpp" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 "$root/scripts/pathb-dump" --ir "${files[0]}" > "$tmp/ir" 2> "$tmp/dump.err" || { cat "$tmp/dump.err" >&2; exit 1; }
-python3 "$root/scripts/pathb-cil-emit.py" "$tmp/ir" "$tmp/frag.json"
+"$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "$tmp/ir" "$tmp/frag.json"
 ILASM=${ILASM:-$root/build/cil/ilasm} python3 "$root/scripts/cil-link.py" -o "$out" "$tmp/frag.json"

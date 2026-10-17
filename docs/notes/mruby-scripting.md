@@ -15,6 +15,7 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 | `scripts/qbe-prep.rb` | Port of `qbe-prep.py` (stage 3, below); used by `scripts/qbe-cc`. |
 | `tests/hexagon/flatlink.rb` | Port of `flatlink.py`; used by `tests/hexagon/run.sh`. |
 | `scripts/pathb-qbe-emit.rb` | Port of `pathb-qbe-emit.py` (done, see the section below); used by `tests/pathb-qbe/run.sh`. |
+| `scripts/pathb-cil-emit.rb` | Port of `pathb-cil-emit.py` (stage 4, below); used by `scripts/pathb-cil`. |
 | `tests/mruby/run.sh` | Runs the Python original and the port on real inputs and compares the output byte for byte. The originals are kept as oracles in `tests/mruby/oracle/`; nothing else uses them. CI runs it. |
 
 What the test compares:
@@ -33,6 +34,12 @@ What the test compares:
   variadic calls, `setjmp`, latin-1 bytes, CRLF input), and the IR of `tests/pathb-qbe/{cases,multi,traps}` and
   `tests/cases` when the Path B harness is built (`PATHB_CPFE`); each with and without `--no-prune`, plus stdin,
   usage errors and `--append-weak`. It needs only python3 and the interpreter (no EDG or QBE) for the stored IR.
+- pathb-cil-emit (`tests/mruby/pathb-cil-emit.sh`): the JSON fragment (the output file; the original writes nothing to
+  stdout), stdout, stderr and the exit status of the Python original and the port over every `tests/pathb-ir/*.ir` and
+  `borrow/*.ir`, the hand-written IR in `tests/mruby/pathb-cil-edge/` (one file per refusal and error path of the
+  emitter, and the success forms of the number atoms, data initializers, the try idiom and an indirect call; `x_*`
+  files make the original raise, so only the status is compared), the IR of `tests/pathb-cil/cases` when the Path B
+  harness is built, and generated inputs (CRLF, octal escapes in a name, stdin, usage errors, a missing file).
 
 ### Rules for scripts written for this interpreter
 
@@ -175,6 +182,27 @@ refusal of an `(unsupported ...)` statement that prints the marker (`r_unsupport
 The address of a thread-local object is always `copy extern thread $x` (initial-exec, valid in a
 shared library) also for a definition in the module; the oracle changed with it (covered by `thread_data.ir`,
 `r_thread_addr.ir` and the `tests/pathb-ir/tls*.ir` goldens).
+
+## Stage 4 (done): `pathb-cil-emit.py` to `pathb-cil-emit.rb`
+
+`scripts/pathb-cil-emit.rb` replaces `scripts/pathb-cil-emit.py`; `scripts/pathb-cil` runs
+`scripts/mrb scripts/pathb-cil-emit.rb IR.txt OUT.json`. The Python is the oracle `tests/mruby/oracle/pathb-cil-emit.py`.
+The fragment is written to the output file (`json.dump`, `indent=1`), so stdout stays empty in both.
+
+| Python | mruby |
+| --- | --- |
+| `re` in `tokenize` (`\d`, the hex and float atoms) | `atom_value` and `tokenize` scan the code points by hand; `isdigit_py` keeps Python's `str.isdigit`, which is also true for the superscripts, and `int()` then refuses them |
+| `json.dump(indent=1)` | `json_val`: the same layout (`[]` and `{}` when empty) and the `ensure_ascii` escapes (`é`, `\u007f`), so no JSON gem is needed |
+| `latin-1` text, one character per byte; an octal escape can reach 511 | the input is read as bytes and every string is a UTF-8 string of code points (`cps` / `from_cps`), so `len()` and the escapes are per code point |
+| text-mode `open()` (universal newlines) | `main` translates `\r\n` and `\r` for a file; stdin is not translated, as in the original |
+| `int(v)`, `float(v)`, `struct.pack` | `py_int`, `py_float_of`, `pack_double` / `pack_single`: exact (`float_to_int`, `dec_to_double`); `pack('e')` gives infinity where `struct` raises, so `pack_single` raises the overflow itself |
+| `x[i]` (IndexError, TypeError) and `bool(x)` | `pyidx` and `truthy`: mruby's `nil` and `Integer#[]` would not raise |
+| `str(x)` / `repr(x)` in messages | `pys` / `py_repr` (a list prints as `[...]`, a `Ref` as `glob"x"`, `None` as `None`) |
+
+Known differences, none reachable from the corpus: a `Tmp` (a Python object without a repr) inside a message prints
+without its address, and the traceback of an uncaught exception is an `error:` line. Both exit with status 1, as the
+original does, and the `x_*` inputs of the test compare only the status for them. The original's bug with a quoted
+`"("` in the IR (the token reads as a parenthesis) is kept, not fixed: the port must give the oracle's output.
 
 ## Bootstrap caveat
 

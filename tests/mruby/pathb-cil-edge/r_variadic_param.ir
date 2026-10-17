@@ -1,0 +1,1 @@
+(function "f" (ret int) (params (param %0 "a" int) (ellipsis)))
