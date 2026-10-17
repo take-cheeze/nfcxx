@@ -116,7 +116,8 @@ struct Field {
 final class StructInfo {
   let name: String
   var fields: [Field] = []
-  var methods: [String: FuncInfo] = [:]
+  /// Overloads by name. Each method's receiver is the first parameter.
+  var methods: [String: [FuncInfo]] = [:]
   var initializers: [FuncInfo] = []
 
   init(name: String) { self.name = name }
@@ -126,8 +127,8 @@ final class ClassInfo {
   let name: String
   var fields: [Field] = []
   var deinitializer: FuncInfo?
-  /// Methods by name. The receiver is the first parameter, named self.
-  var methods: [String: FuncInfo] = [:]
+  /// Overloads by name. The receiver is the first parameter, named self.
+  var methods: [String: [FuncInfo]] = [:]
   /// Explicit initializers. When there are any, the memberwise one is not available.
   var initializers: [FuncInfo] = []
 

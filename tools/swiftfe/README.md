@@ -175,9 +175,20 @@ Supported:
 - `return` inside an initializer. A bare `return` releases the owned locals it leaves
   (its parameters and the locals of the enclosing blocks) and returns `self`. The
   initializer's implicit return is skipped when the body already ends in a `return`.
+- Overloaded functions, methods and initializers: the same name with different argument
+  labels or types. The labels choose the candidates, then the argument types choose one.
+  An exact type match beats one that needs Optional wrapping, so `f(1)` picks `f(_: Int)`
+  over `f(_: Int?)`. A closure, `nil`, an array literal, an implicit enum case or a function
+  name takes its type from the candidate. A function name used as a value picks its
+  overload from the expected function type. Overloads with the same labels and types are
+  redeclarations. Each overload has its own C name (`f_show`, `f_show_1`, ...).
 
 Limits (each gives a diagnostic):
 - `return` with a value in an initializer
+- overloads of a generic function, or a generic function with a plain overload of the same
+  name. Arguments of an overloaded call are typed before the candidate is chosen, so a generic
+  call that needs its parameter's type to infer its type arguments is not supported there.
+- an ambiguous call, such as `f(nil)` with `f(_: Int?)` and `f(_: Bool?)`
 
 ## Integration tests
 
