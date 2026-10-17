@@ -150,6 +150,9 @@ Swift compiler, but the wording is not guaranteed to be identical.
 
 Supported:
 - `break` and `continue` in loops. Each releases the owned locals it leaves.
+- `break` inside a `switch` leaves the switch, and `continue` inside a switch continues
+  the enclosing loop. The switch is an if-chain, so the break jumps to a label after it
+  (emitted only when a break uses it). The subject is still released once, after the label.
 - `for i in a..<b` and `for i in a...b` over Int; `for x in array`, which loops over a copy.
 - `guard let`, `guard cond`, with bindings that stay in scope after the guard.
 - `switch` over Int and Bool with literal, range (`4...9`) and several-value cases.
@@ -162,7 +165,6 @@ Supported:
   the buffer, and the buffer is freed when its owner ends.
 
 Limits (each gives a diagnostic):
-- `break` inside a `switch`
 - arrays of classes or enums, arrays in struct properties, enum payloads or optionals
 - subscripts and `count` of a temporary array; `for-in` with a `where` clause
 - `switch` over Double or String; `%` on Double

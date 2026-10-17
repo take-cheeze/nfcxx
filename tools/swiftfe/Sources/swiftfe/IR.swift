@@ -253,6 +253,10 @@ indirect enum Stmt {
   case brk
   /// Continues the innermost loop.
   case cont
+  /// Jumps to a label in the same function. A `break` out of a switch uses it,
+  /// because the switch is an if-chain and has no C statement of its own to leave.
+  case goto(String)
+  case label(String)
   /// Drops the reference held by an owned local at scope exit.
   case release(String, Ty)
 }

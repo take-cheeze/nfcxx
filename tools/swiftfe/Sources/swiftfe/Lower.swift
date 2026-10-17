@@ -33,6 +33,17 @@ private struct Local {
   let mutable: Bool
 }
 
+/// An enclosing loop or switch that `break` and `continue` may target.
+private struct JumpTarget {
+  /// The scope depth the target starts at. A jump releases the scopes from here on.
+  let depth: Int
+  let isSwitch: Bool
+  /// For a switch, the label that a `break` jumps to.
+  let label: String
+  /// Set once a `break` jumps to the label, so the label is emitted only when it is used.
+  var labelUsed = false
+}
+
 /// Names declared in one block, and the owned references to drop when it ends.
 private struct Scope {
   var vars: [String: Local] = [:]
@@ -115,7 +126,7 @@ final class Lowerer {
   private var pendingDeinits: [PendingDeinit] = []
   private var pendingInits: [PendingInit] = []
   /// Enclosing loops and switches, innermost last, with the scope depth each one starts at.
-  private var loops: [(depth: Int, isSwitch: Bool)] = []
+  private var loops: [JumpTarget] = []
   private var pendingMethods: [PendingMethod] = []
   /// True while lowering an initializer body, where `self` may be assigned.
   private var initializingSelf = false
@@ -582,7 +593,7 @@ final class Lowerer {
 
   private func endsInJump(_ stmts: [Stmt]) -> Bool {
     switch stmts.last {
-    case .ret, .brk, .cont: return true
+    case .ret, .brk, .cont, .goto: return true
     default: return false
     }
   }
@@ -622,7 +633,7 @@ final class Lowerer {
         return try lowerWhileLet(binding, loop)
       }
       let cond = try lowerCondition(loop.conditions, loop)
-      loops.append((scopes.count, false))
+      loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
       defer { loops.removeLast() }
       return [.whiles(cond, try lowerBlock(loop.body.statements))]
     }
@@ -637,7 +648,10 @@ final class Lowerer {
         throw error("'break' is only allowed inside a loop or switch", stmt)
       }
       if target.isSwitch {
-        throw error("'break' inside a switch is not supported yet", stmt)
+        // The arms are an if-chain, so the break jumps past them. The switch's own
+        // subject is released after the label, so only the arms' scopes are released here.
+        loops[loops.count - 1].labelUsed = true
+        return loopExitReleases(from: target.depth + 1) + [.goto(target.label)]
       }
       return loopExitReleases(from: target.depth) + [.brk]
     }
@@ -783,7 +797,7 @@ final class Lowerer {
     let prelude: [Stmt] = [.decl(cur, .int, lo), .decl(end, .int, hi)]
     let cond = Expr(kind: .binary(inclusive ? "<=" : "<", curRef, Expr(kind: .local(end), ty: .int)), ty: .bool)
 
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     var iteration: [Stmt] = []
@@ -819,7 +833,7 @@ final class Lowerer {
     scopes[scopes.count - 1].owned.append((cName: arrName, ty: seq.ty))
     let cond = Expr(kind: .binary("<", curRef, Expr(kind: .arrayCount(arrRef), ty: .int)), ty: .bool)
 
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     var iteration: [Stmt] = []
@@ -915,7 +929,7 @@ final class Lowerer {
   private func exits(_ stmts: [Stmt]) -> Bool {
     stmts.contains { stmt in
       switch stmt {
-      case .ret, .brk, .cont: return true
+      case .ret, .brk, .cont, .goto: return true
       case .ifs(_, let then, let otherwise): return exits(then) && exits(otherwise)
       default: return false
       }
@@ -936,7 +950,7 @@ final class Lowerer {
 
     let tmp = "t\(nextID())"
     let tmpRef = Expr(kind: .local(tmp), ty: opt.ty)
-    loops.append((scopes.count, false))
+    loops.append(JumpTarget(depth: scopes.count, isSwitch: false, label: ""))
     defer { loops.removeLast() }
     scopes.append(Scope())
     let name = id.identifier.text
@@ -974,7 +988,8 @@ final class Lowerer {
     let prelude: [Stmt] = [.decl(tmp, subject.ty, subject)]
     let subj = Expr(kind: .local(tmp), ty: subject.ty)
 
-    loops.append((scopes.count - 1, true))
+    let label = "sw_end\(nextID())"
+    loops.append(JumpTarget(depth: scopes.count - 1, isSwitch: true, label: label))
     defer { loops.removeLast() }
 
     var coveredTags = Set<Int>()
@@ -1051,7 +1066,13 @@ final class Lowerer {
     for arm in arms.reversed() {
       tail = [.ifs(arm.cond, arm.body, tail)]
     }
-    return prelude + tail + releases(of: scopes.removeLast())
+    // A `break` in an arm jumps to the label, which comes before the subject's release
+    // so that the subject is released once on every path.
+    var out = prelude + tail
+    if loops[loops.count - 1].labelUsed {
+      out.append(.label(label))
+    }
+    return out + releases(of: scopes.removeLast())
   }
 
   /// A case pattern over Int or Bool: a literal, or a range of Ints.

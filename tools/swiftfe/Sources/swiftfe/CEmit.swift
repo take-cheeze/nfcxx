@@ -341,6 +341,10 @@ enum CEmit {
       return "\(indent)break;\n"
     case .cont:
       return "\(indent)continue;\n"
+    case .goto(let name):
+      return "\(indent)goto \(name);\n"
+    case .label(let name):
+      return "\(indent)\(name): ;\n"
     case .release(let name, let ty):
       return "\(indent)\(releaseCode(name, ty))\n"
     }
