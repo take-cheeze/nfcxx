@@ -58,6 +58,12 @@ module ForeignDefiners
     result.wild.include?(owner) || result.names.fetch(owner, Set.new).include?(name)
   end
 
+  # Does one of +paths+ define +name+ on +owner+ by a name the scan reads? Unlike defines?, a wild owner does not count:
+  # a caller uses this as proof that a definition exists, where defines? is proof that one may.
+  def defines_named?(paths, owner, name)
+    scan(paths).names.fetch(owner, Set.new).include?(name)
+  end
+
   # defines? for any of +owners+, from one scan: a caller asking about several owners checks the stat key once.
   # No owners asks nothing, so it scans nothing (a foreign file that does not parse raises only when asked).
   def defines_any?(paths, owners, name)

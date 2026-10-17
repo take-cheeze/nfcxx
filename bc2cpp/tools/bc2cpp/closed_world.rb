@@ -388,6 +388,12 @@ class ClosedWorld
     !ForeignDefiners.defines?(@ruby_paths.reject { |path| CoreDefs.core_source?(path) }, owner, name)
   end
 
+  # Does a core mrblib file define `owner#name`? The registry may leave such a definition out (CoreMethods.excluded_labels
+  # drops ineligible core methods before any proof reads them), so this reads the source.
+  def core_ruby_defines?(name, owner)
+    ForeignDefiners.defines_named?(@ruby_paths.select { |path| CoreDefs.core_source?(path) }, owner, name)
+  end
+
   # Names an outside (native or foreign Ruby) source defines.
   def outside_names
     @outside_names
