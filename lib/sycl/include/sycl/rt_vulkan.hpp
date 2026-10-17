@@ -9,7 +9,8 @@
 // and accessors work everywhere: they only need device addresses, which the runtime gets from the driver).
 //
 // Dispatch. Each dispatch is submitted and waited for before the next (an in-order queue, the simple way). The flag word at
-// the start of the heap holds the first failed check's code; it is read after every dispatch.
+// the start of the heap holds the first failed check's code; it is read after every dispatch. A dispatch whose stacks and
+// work-group memory do not fit the heap's largest free block runs as slabs, one dispatch each (see dispatch()).
 //
 // Environment: NFCXX_SYCL_IMAGE (the prefix; defaults to the NFCXX_SYCL_IMAGE_PREFIX macro of the build).
 #ifndef NFCXX_SYCL_RT_VULKAN_HPP
@@ -80,6 +81,23 @@ class vk_rt {
       if (pv->first + pv->second == it->first) { pv->second += it->second; free_.erase(it); }
     }
   }
+  uint64_t largest_free() const {
+    uint64_t m = 0;
+    for (const auto &f : free_) m = std::max(m, f.second);
+    return m;
+  }
+  // a check that failed in the kernel sets the flag: the program stops with the reason
+  void check_flag() {
+    uint32_t flag = 0;
+    std::memcpy(&flag, at(dev_base_), 4);
+    if (flag) {
+      static const char *why[] = {"", "integer division by zero or INT_MIN / -1", "shift count out of range", "index out of bounds",
+                                  "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
+                                  "a write to the kernel's captured state"};
+      std::fprintf(stderr, "sycl: a kernel trapped: %s\n", flag < 8 ? why[flag] : "unknown");
+      std::exit(71);
+    }
+  }
   uint8_t *at(uint64_t addr) const {
     if (addr < dev_base_ || addr - dev_base_ >= heap_size_) fail("device address outside the heap");
     return host_ + (addr - dev_base_);
@@ -121,43 +139,64 @@ class vk_rt {
     uint32_t lim[3];
     for (int d = 0; d < 3; d++) lim[d] = limits_.maxComputeWorkGroupCount[d];
     uint64_t stride = (uint64_t(lmem) + 1024 + 15) & ~uint64_t(15);
-    uint64_t stack_total = invocations * stack_bytes_;
-    uint64_t region = alloc(stack_total + groups * stride);
+    // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
+    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd); the
+    // dimensions above sd must be a single invocation, so the slab's invocations are contiguous in the emitter's linear
+    // index. The emitter numbers stacks and local memory over the whole grid (the offsets ox/oy/oz are in that index), so
+    // each slab's bases are biased by the slab's first index and the region holds just the slab. Inside a slab, the
+    // device's group-count limit still tiles the slab's range.
+    uint64_t room = largest_free();
+    int sd = 0;
+    for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
+    bool sliceable = true;
+    for (int e = sd + 1; e < 3; e++) if (l[e] != 1) sliceable = false;
+    uint64_t inner = 1;   // the groups in the dimensions below sd
+    for (int e = 0; e < sd; e++) inner *= ng[e];
+    uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
+    uint64_t per_group = inv_group * stack_bytes_ + stride;
+    uint32_t per_slab = ng[sd];   // groups along sd in one slab
+    if (invocations * stack_bytes_ + groups * stride > room && sliceable) {
+      uint64_t fit = room / (inner * per_group);
+      per_slab = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
+    }
     std::memset(at(dev_base_ + 0), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    vk_push p{};
-    p.closure = closure_addr();
-    p.statics = statics_;
-    p.stack = region;
-    p.local = region + stack_total;
-    p.flag = dev_base_;
-    p.hlo = (uint64_t)(uintptr_t)host_;
-    p.hsize = heap_size_;
-    p.dbase = dev_base_;
-    p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
-    p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
-    p.stack_bytes = stack_bytes_;
-    p.local_stride = (uint32_t)stride;
-    p.local_user = lmem;
     VkPipeline pipe = pipeline(it->second.entry, l);
-    for (uint32_t oz = 0; oz < ng[2]; oz += lim[2])
-      for (uint32_t oy = 0; oy < ng[1]; oy += lim[1])
-        for (uint32_t ox = 0; ox < ng[0]; ox += lim[0]) {
-          p.ox = ox;
-          p.oy = oy;
-          p.oz = oz;
-          uint32_t cnt[3] = {std::min(lim[0], ng[0] - ox), std::min(lim[1], ng[1] - oy), std::min(lim[2], ng[2] - oz)};
-          submit(pipe, &p, cnt);
-        }
-    release(region);
-    uint32_t flag = 0;
-    std::memcpy(&flag, at(dev_base_), 4);
-    if (flag) {
-      static const char *why[] = {"", "integer division by zero or INT_MIN / -1", "shift count out of range", "index out of bounds",
-                                  "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
-                                  "a write to the kernel's captured state"};
-      std::fprintf(stderr, "sycl: a kernel trapped: %s\n", flag < 8 ? why[flag] : "unknown");
-      std::exit(71);
+    for (uint32_t s0 = 0; s0 < ng[sd]; s0 += per_slab) {
+      uint32_t cnt = std::min(per_slab, ng[sd] - s0);
+      uint64_t first_group = (uint64_t)s0 * inner;
+      uint64_t slab_groups = (uint64_t)cnt * inner;
+      uint64_t slab_stack = slab_groups * inv_group * stack_bytes_;
+      uint64_t region = alloc(slab_stack + slab_groups * stride);
+      vk_push p{};
+      p.closure = closure_addr();
+      p.statics = statics_;
+      p.stack = region - first_group * inv_group * stack_bytes_;   // biased: the slab's first invocation is at region
+      p.local = region + slab_stack - first_group * stride;
+      p.flag = dev_base_;
+      p.hlo = (uint64_t)(uintptr_t)host_;
+      p.hsize = heap_size_;
+      p.dbase = dev_base_;
+      p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
+      p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
+      p.stack_bytes = stack_bytes_;
+      p.local_stride = (uint32_t)stride;
+      p.local_user = lmem;
+      // the slab's range of groups: [lo, hi) per dimension
+      uint32_t lo[3] = {0, 0, 0}, hi[3] = {ng[0], ng[1], ng[2]};
+      lo[sd] = s0;
+      hi[sd] = s0 + cnt;
+      for (uint32_t oz = lo[2]; oz < hi[2]; oz += lim[2])
+        for (uint32_t oy = lo[1]; oy < hi[1]; oy += lim[1])
+          for (uint32_t ox = lo[0]; ox < hi[0]; ox += lim[0]) {
+            p.ox = ox;
+            p.oy = oy;
+            p.oz = oz;
+            uint32_t tc[3] = {std::min(lim[0], hi[0] - ox), std::min(lim[1], hi[1] - oy), std::min(lim[2], hi[2] - oz)};
+            submit(pipe, &p, tc);
+          }
+      release(region);
+      check_flag();
     }
     for (int i = 0; i < nbufs; i++) if (modes[i] & 2) { bufs[i]->dev_valid = true; bufs[i]->host_valid = false; }
   }

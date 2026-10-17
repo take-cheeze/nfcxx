@@ -8,6 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
+. "$root/scripts/oneapi-env.sh"   # LD_LIBRARY_PATH (the oneAPI runtime)
 tools=${SPIRV_TOOLS_BIN:-}
 if [ -n "$tools" ]; then export PATH="$tools:$PATH"; fi
 loader=""
