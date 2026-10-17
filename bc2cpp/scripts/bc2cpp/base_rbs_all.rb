@@ -23,13 +23,15 @@ module BaseRbsAll
 
   module_function
 
+  # The `*-compiled` gems hold bc2cpp's generated register files, which are outputs, not sources to describe.
   def gems
-    Dir[File.join(ROOT, '*', 'mrbgem.rake')].map { |rake| File.dirname(rake) }.sort
+    Dir[File.join(ROOT, '*', 'mrbgem.rake')].map { |rake| File.dirname(rake) }
+                                              .reject { |dir| File.basename(dir).end_with?('-compiled') }.sort
   end
 
   # The include directories a gem's rake file names, with `#{dir}` (the gem's own directory) expanded.
   def gem_includes(gem_dir)
-    rake = File.read(File.join(gem_dir, 'mrbgem.rake'))
+    rake = File.read(File.join(gem_dir, 'mrbgem.rake'), encoding: 'UTF-8')
     dirs = rake.scan(GEM_RAKE).flat_map { |line| line.scan(INCLUDE_LITERAL).flatten }
     dirs.filter_map do |literal|
       next unless literal.include?('#{dir}')
@@ -47,10 +49,16 @@ module BaseRbsAll
     Dir[File.join(gem_dir, 'mrblib', '**', '*.rb')].sort
   end
 
+  # Shared third-party headers the gems include, and the closed build's generated headers for this gem.
   def flags_for(gem_dir, closed_build)
-    base = ['-I' + File.join(ROOT, '3rd/mruby/include'), '-I' + File.join(gem_dir, 'include')]
+    name = File.basename(gem_dir)
+    base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
+    base << "-I#{File.join(gem_dir, 'include')}"
     base += gem_includes(gem_dir).map { |dir| "-I#{dir}" }
-    base << "-I#{closed_build}/include" if closed_build
+    if closed_build
+      base << "-I#{closed_build}/include"
+      base << "-I#{closed_build}/mrbgems/#{name}"
+    end
     base
   end
 

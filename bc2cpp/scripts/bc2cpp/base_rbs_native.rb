@@ -181,7 +181,8 @@ module BaseRbsNative
   end
 
   def preprocess(path, flags)
-    out, err, status = Open3.capture3('clang', '-std=gnu++17', '-E', '-P', *flags, path)
+    lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
+    out, err, status = Open3.capture3('clang', *lang, '-E', '-P', *flags, path)
     raise "clang -E failed for #{path}: #{err.lines.first}" unless status.success?
 
     out
