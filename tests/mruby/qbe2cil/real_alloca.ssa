@@ -1,0 +1,59 @@
+function w $fill(w %.1) {
+@start.1
+	%.2 =l alloc4 4
+	storew %.1, %.2
+	%.3 =l alloc8 8
+	%.11 =l alloc4 4
+	%.12 =l alloc4 4
+@body.2
+	%.4 =w loadw %.2
+	%.5 =l extsw %.4
+	%.6 =l alloc16 %.5
+	storel %.6, %.3
+	%.7 =l loadl %.3
+	%.8 =w loadw %.2
+	%.9 =l extsw %.8
+	%.10 =l call extern $memset(l %.7, w 120, l %.9)
+	storew 0, %.11
+	storew 0, %.12
+@for_cond.3
+	%.13 =w loadw %.12
+	%.14 =w loadw %.2
+	%.15 =w csltw %.13, %.14
+	jnz %.15, @for_body.4, @for_join.6
+@for_body.4
+	%.16 =w loadw %.11
+	%.17 =l loadl %.3
+	%.18 =w loadw %.12
+	%.19 =l extsw %.18
+	%.20 =l mul %.19, 1
+	%.21 =l add %.17, %.20
+	%.22 =w loadsb %.21
+	%.23 =w extsb %.22
+	%.24 =w sub %.23, 120
+	%.25 =w add %.24, 1
+	%.26 =w add %.16, %.25
+	storew %.26, %.11
+@for_cont.5
+	%.27 =w loadw %.12
+	%.28 =w add %.27, 1
+	storew %.28, %.12
+	jmp @for_cond.3
+@for_join.6
+	%.29 =w loadw %.11
+	ret %.29
+}
+export
+function w $main() {
+@start.7
+@body.8
+	%.1 =w call $fill(w 100)
+	%.2 =w ceqw %.1, 100
+	jnz %.2, @cond_true.9, @cond_false.10
+@cond_true.9
+	jmp @cond_join.11
+@cond_false.10
+@cond_join.11
+	%.3 =w phi @cond_true.9 0, @cond_false.10 1
+	ret %.3
+}

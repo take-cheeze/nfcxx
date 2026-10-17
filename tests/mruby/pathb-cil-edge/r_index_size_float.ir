@@ -1,0 +1,1 @@
+(function "f" (ret long) (params) (return (index (const long 0) (const int 1) (const double 1.0))))

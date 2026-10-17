@@ -1,0 +1,1 @@
+double_rem.swift:1:7: error: binary operator '%' cannot be applied to two 'Double' operands

@@ -11,7 +11,7 @@
 # exception object's storage) followed by __throw, which raises CxxThrow (see cil-link.py's runtime). The
 # destructors of the try block's objects are not run during unwinding yet (a documented gap).
 # Refused with an error, never miscompiled: forms outside the subset below (bounds, index, switch, sret, copy,
-# long double, fence, cf2i, indirect and variadic calls, variadic definitions). A statement the emitter does not know
+# long double, fence, cf2i, variadic calls, variadic definitions). A statement the emitter does not know
 # is refused too, never dropped.
 import json
 import re
@@ -281,7 +281,11 @@ class Function:
                 self.emit(f"ldsfld int64 Prog::'addr_{self.em.gname(e.name)}'")
                 return 'int64'
             if e.kind == 'fn':
-                refuse(f'{self.name}: taking the address of function {e.name} is not supported by the spike')
+                # A function's address is its linker field, as a global's is: cil-link.py stores ldftn of a function
+                # the unit defines at Init, and dlsym of any other name (null when it is not in the process).
+                self.em.addrs.add(self.em.fn_name(e.name))
+                self.emit(f"ldsfld int64 Prog::'addr_{self.em.fn_name(e.name)}'")
+                return 'int64'
         if not isinstance(e, list) or not e:
             refuse(f'{self.name}: bad expression {e!r}')
         head = e[0]
@@ -326,14 +330,23 @@ class Function:
             if isinstance(size, int):
                 if size == 0:
                     refuse(f'{self.name}: pdiff with element size 0')
-                self.emit(f'ldc.i8 {size}')
-            else:
-                have = self.expr(size)
-                if have == 'int32':
-                    self.emit('conv.u8')
-                elif have != 'int64':
-                    refuse(f'{self.name}: pdiff size of type {have}')
-            self.emit('div')
+                self.emit(f'ldc.i8 {size}', 'div')
+                return 'int64'
+            # A register SIZE: a zero one (a zero-length VLA element) aborts, as the checks of divrem do (the difference
+            # and the size go to locals first, so the check is one compare and a branch).
+            td = self.new_local('int64')
+            self.emit(f'stloc {td}')
+            have = self.expr(size)
+            if have == 'int32':
+                self.emit('conv.u8')
+            elif have != 'int64':
+                refuse(f'{self.name}: pdiff size of type {have}')
+            ts = self.new_local('int64')
+            self.emit(f'stloc {ts}')
+            ok = self.new_label('IL_ok')
+            self.emit(f'ldloc {ts}', 'ldc.i8 0', f'bne.un {ok}')
+            self.check_fail_if(ok)
+            self.emit(f'ldloc {td}', f'ldloc {ts}', 'div')
             return 'int64'
         if head == 'fneg':
             il = self.em.type_of(e[1])[0]
@@ -377,12 +390,14 @@ class Function:
             b = self.expr(e[3])
             self.coerce(b, il)
             self.emit(BIN[head])
+            self.narrow_small(e[1])
             return il
         if head == 'wneg':
             il = self.em.type_of(e[1])[0]
             have = self.expr(e[2])
             self.coerce(have, il)
             self.emit('neg')
+            self.narrow_small(e[1])
             return il
         if head == 'call':
             return self.call(e)
@@ -400,6 +415,18 @@ class Function:
             self.emit('mul', 'add')
             return 'int64'
         refuse(f'{self.name}: unsupported expression {head}')
+
+    def narrow_small(self, ty):
+        """Narrow the int32 value on the stack to the IR type ty when ty is a 1- or 2-byte integer, as the QBE emitter's
+        narrow does (its r_wbin, r_wneg, r_bitop, r_shift). bool is left alone, as QBE leaves it. Wrapping arithmetic on a
+        small type then yields the wrapped value, which the expression's own value and any later use see."""
+        while isinstance(ty, list) and ty and ty[0] == 'const':
+            ty = ty[1]
+        if not isinstance(ty, str) or ty == 'bool' or ty not in SCALARS:
+            return
+        il, size, signed = self.em.type_of(ty)
+        if il == 'int32' and size in (1, 2):
+            self.emit({(1, True): 'conv.i1', (1, False): 'conv.u1', (2, True): 'conv.i2', (2, False): 'conv.u2'}[(size, signed)])
 
     def size_operand(self, s):
         """Push an index SIZE as int64: a number, or a register (a VLA element size, zero-extended as in QBE)."""
@@ -499,18 +526,15 @@ class Function:
             self.emit('conv.i4')
         if left:
             self.emit('shl')
-            narrow = {(1, True): 'conv.i1', (1, False): 'conv.u1', (2, True): 'conv.i2', (2, False): 'conv.u2'}
-            if (size, signed) in narrow:
-                self.emit(narrow[(size, signed)])
+            self.narrow_small(ty)
         else:
             self.emit('shr' if signed else 'shr.un')
         return il
 
     def call(self, e):
         callee = e[2]
-        if not isinstance(callee, Ref) or callee.kind != 'fn':
-            refuse(f'{self.name}: indirect calls are not supported by the spike')
-        name = callee.name
+        indirect = not (isinstance(callee, Ref) and callee.kind == 'fn')
+        name = 'indirect' if indirect else callee.name
         ret = self.em.type_of(e[1])[0]
         args = e[3:]
         if any(isinstance(a, list) and a and a[0] == 'variadic' for a in args):
@@ -527,6 +551,13 @@ class Function:
                 refuse(f'{self.name}: sret results are not supported by the spike')
             il = self.expr(a)
             typed.append(il)
+        if indirect:
+            # The callee is a function address (int64, as every pointer is): a calli on it. Its signature is the
+            # call's, as the arguments carry it (the same as qbe2cil.py's indirect calls).
+            if self.expr(callee) != 'int64':
+                refuse(f'{self.name}: indirect call through a value that is not a pointer')
+            self.emit('conv.i', f"calli {ret} ({', '.join(typed)})")
+            return ret
         gname = self.em.fn_name(name)
         sig = {'ret': ret, 'params': typed, 'variadic': False}
         self.note_call(gname, sig, self.name)

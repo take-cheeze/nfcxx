@@ -1,0 +1,389 @@
+export data $_ZTV1V = align 8 { l 0, l $_ZTI1V, l $_ZNK1V1kEv, l $_ZN1VD1Ev, l $_ZN1VD0Ev, }
+export data $_ZTV1W = align 8 { l 0, l $_ZTI1W, l $_ZNK1W1kEv, l $_ZN1WD1Ev, l $_ZN1WD0Ev, }
+export data $_ZTV1X = align 8 { l 0, l $_ZTI1X, l $_ZNK1X1kEv, l $_ZN1XD1Ev, l $_ZN1XD0Ev, }
+export data $_ZTI1V = align 8 { l $_ZTVN10__cxxabiv117__class_type_infoE + 16, l $_ZTS1V, }
+export data $_ZTI1W = align 8 { l $_ZTVN10__cxxabiv120__si_class_type_infoE + 16, l $_ZTS1W, l $_ZTI1V, }
+export data $_ZTI1X = align 8 { l $_ZTVN10__cxxabiv120__si_class_type_infoE + 16, l $_ZTS1X, l $_ZTI1W + 0, }
+export data $_ZTS1V = align 1 { b "1V\000", }
+export data $_ZTS1W = align 1 { b "1W\000", }
+export data $_ZTS1X = align 1 { b "1X\000", }
+export
+function w $_Z1hRK1V(l %.1) {
+@start.1
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.2
+	%.3 =l loadl %.2
+	%.4 =l loadl %.2
+	%.5 =l add %.4, 0
+	%.6 =l loadl %.5
+	%.7 =l extsw 0
+	%.8 =l mul %.7, 8
+	%.9 =l add %.6, %.8
+	%.10 =l loadl %.9
+	%.11 =w call %.10(l %.3)
+	ret %.11
+}
+data $.L__T1.3 = align 8 { l $_ZN1WD1Ev, h 0, h 65535, b 0, z 3, l $_ZN1XD1Ev, h 1, h 0, b 0, z 3 }
+export
+function w $main() {
+@start.3
+	%.1 =l alloc8 16
+	%.2 =l alloc4 4
+	%.3 =l alloc8 240
+	%.4 =l alloc8 8
+	%.5 =l alloc8 8
+@body.4
+	%.6 =l loadl extern $__curr_eh_stack_entry
+	%.7 =l add %.3, 0
+	storel %.6, %.7
+	storel %.3, extern $__curr_eh_stack_entry
+	%.8 =l add %.3, 8
+	storeb 1, %.8
+	%.9 =l add %.3, 16
+	%.10 =l add %.9, 0
+	%.11 =l add %.10, 0
+	storel $.L__T1.3, %.11
+	%.12 =l add %.3, 16
+	%.13 =l add %.12, 0
+	%.14 =l add %.13, 8
+	storel %.1, %.14
+	%.15 =w loaduh extern $__eh_curr_region
+	%.16 =l add %.3, 16
+	%.17 =l add %.16, 0
+	%.18 =l add %.17, 24
+	storeh %.15, %.18
+	storeh 65535, extern $__eh_curr_region
+	%.19 =l extsw 2
+	%.20 =l mul %.19, 8
+	%.21 =l add extern $_ZTV1W, %.20
+	%.22 =l add %.4, 0
+	%.23 =l add %.22, 0
+	storel %.21, %.23
+	%.24 =l mul 0, 8
+	%.25 =l add %.1, %.24
+	storel %.4, %.25
+	storeh 0, extern $__eh_curr_region
+	%.26 =l extsw 2
+	%.27 =l mul %.26, 8
+	%.28 =l add extern $_ZTV1X, %.27
+	%.29 =l add %.5, 0
+	%.30 =l add %.29, 0
+	%.31 =l add %.30, 0
+	storel %.28, %.31
+	%.32 =l mul 1, 8
+	%.33 =l add %.1, %.32
+	storel %.5, %.33
+	storeh 1, extern $__eh_curr_region
+	%.34 =l add %.4, 0
+	%.35 =w call extern $_Z1hRK1V(l %.34)
+	%.36 =w mul %.35, 10
+	%.37 =l add %.5, 0
+	%.38 =l add %.37, 0
+	%.39 =w call extern $_Z1hRK1V(l %.38)
+	%.40 =w add %.36, %.39
+	storew %.40, %.2
+	storeh 0, extern $__eh_curr_region
+	call extern $_ZN1XD1Ev(l %.5)
+	storeh 65535, extern $__eh_curr_region
+	call extern $_ZN1WD1Ev(l %.4)
+	%.41 =l add %.3, 16
+	%.42 =l add %.41, 0
+	%.43 =l add %.42, 24
+	%.44 =w loaduh %.43
+	storeh %.44, extern $__eh_curr_region
+	%.45 =l add %.3, 0
+	%.46 =l loadl %.45
+	storel %.46, extern $__curr_eh_stack_entry
+	%.47 =w loadw %.2
+	ret %.47
+}
+export
+function w $_ZNK1V1kEv(l %.1) {
+@start.5
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.6
+	ret 1
+}
+export
+function $_ZN1VD1Ev(l %.1) {
+@start.7
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.3 =l alloc8 240
+@body.8
+	%.4 =l loadl extern $__curr_eh_stack_entry
+	%.5 =l add %.3, 0
+	storel %.4, %.5
+	storel %.3, extern $__curr_eh_stack_entry
+	%.6 =l add %.3, 8
+	storeb 6, %.6
+	%.7 =l extsw 2
+	%.8 =l mul %.7, 8
+	%.9 =l add extern $_ZTV1V, %.8
+	%.10 =l loadl %.2
+	%.11 =l add %.10, 0
+	storel %.9, %.11
+	%.12 =l add %.3, 0
+	%.13 =l loadl %.12
+	storel %.13, extern $__curr_eh_stack_entry
+	ret
+}
+export
+function $_ZN1VD0Ev(l %.1) {
+@start.9
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.3 =l alloc8 240
+@body.10
+	%.4 =l loadl extern $__curr_eh_stack_entry
+	%.5 =l add %.3, 0
+	storel %.4, %.5
+	storel %.3, extern $__curr_eh_stack_entry
+	%.6 =l add %.3, 8
+	storeb 6, %.6
+	%.7 =l extsw 2
+	%.8 =l mul %.7, 8
+	%.9 =l add extern $_ZTV1V, %.8
+	%.10 =l loadl %.2
+	%.11 =l add %.10, 0
+	storel %.9, %.11
+	%.12 =l add %.3, 0
+	%.13 =l loadl %.12
+	storel %.13, extern $__curr_eh_stack_entry
+	%.14 =l loadl %.2
+	call extern $_ZdlPvm(l %.14, l 8)
+	ret
+}
+export
+function $_ZN1VD2Ev(l %.1) {
+@start.11
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.3 =l alloc8 240
+@body.12
+	%.4 =l loadl extern $__curr_eh_stack_entry
+	%.5 =l add %.3, 0
+	storel %.4, %.5
+	storel %.3, extern $__curr_eh_stack_entry
+	%.6 =l add %.3, 8
+	storeb 6, %.6
+	%.7 =l extsw 2
+	%.8 =l mul %.7, 8
+	%.9 =l add extern $_ZTV1V, %.8
+	%.10 =l loadl %.2
+	%.11 =l add %.10, 0
+	storel %.9, %.11
+	%.12 =l add %.3, 0
+	%.13 =l loadl %.12
+	storel %.13, extern $__curr_eh_stack_entry
+	ret
+}
+export
+function w $_ZNK1W1kEv(l %.1) {
+@start.13
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.14
+	ret 2
+}
+data $.L__T8.10 = align 8 { l $_ZN1VD2Ev, h 0, h 65535, b 64, z 3 }
+export
+function $_ZN1WD1Ev(l %.1) {
+@start.15
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.3 =l alloc8 240
+	%.4 =l alloc8 8
+	%.5 =l alloc8 240
+	%.6 =l alloc8 240
+@body.16
+	%.7 =l loadl extern $__curr_eh_stack_entry
+	%.8 =l add %.5, 0
+	storel %.7, %.8
+	storel %.5, extern $__curr_eh_stack_entry
+	%.9 =l add %.5, 8
+	storeb 6, %.9
+	%.10 =l loadl extern $__curr_eh_stack_entry
+	%.11 =l add %.6, 0
+	storel %.10, %.11
+	storel %.6, extern $__curr_eh_stack_entry
+	%.12 =l add %.6, 8
+	storeb 1, %.12
+	%.13 =l add %.6, 16
+	%.14 =l add %.13, 0
+	%.15 =l add %.14, 0
+	storel $.L__T8.10, %.15
+	%.16 =l add %.6, 16
+	%.17 =l add %.16, 0
+	%.18 =l add %.17, 8
+	storel %.4, %.18
+	%.19 =w loaduh extern $__eh_curr_region
+	%.20 =l add %.6, 16
+	%.21 =l add %.20, 0
+	%.22 =l add %.21, 24
+	storeh %.19, %.22
+	storeh 65535, extern $__eh_curr_region
+	%.23 =l extsw 2
+	%.24 =l mul %.23, 8
+	%.25 =l add extern $_ZTV1W, %.24
+	%.26 =l loadl %.2
+	%.27 =l add %.26, 0
+	%.28 =l add %.27, 0
+	storel %.25, %.28
+	%.29 =l loadl %.2
+	%.30 =l add %.29, 0
+	%.31 =l mul 0, 8
+	%.32 =l add %.4, %.31
+	storel %.30, %.32
+	storeh 0, extern $__eh_curr_region
+	storeh 65535, extern $__eh_curr_region
+	%.33 =l loadl extern $__curr_eh_stack_entry
+	%.34 =l add %.3, 0
+	storel %.33, %.34
+	storel %.3, extern $__curr_eh_stack_entry
+	%.35 =l add %.3, 8
+	storeb 6, %.35
+	%.36 =l extsw 2
+	%.37 =l mul %.36, 8
+	%.38 =l add extern $_ZTV1V, %.37
+	%.39 =l loadl %.2
+	%.40 =l add %.39, 0
+	%.41 =l add %.40, 0
+	storel %.38, %.41
+	%.42 =l add %.3, 0
+	%.43 =l loadl %.42
+	storel %.43, extern $__curr_eh_stack_entry
+	%.44 =l add %.6, 16
+	%.45 =l add %.44, 0
+	%.46 =l add %.45, 24
+	%.47 =w loaduh %.46
+	storeh %.47, extern $__eh_curr_region
+	%.48 =l add %.6, 0
+	%.49 =l loadl %.48
+	storel %.49, extern $__curr_eh_stack_entry
+	%.50 =l add %.5, 0
+	%.51 =l loadl %.50
+	storel %.51, extern $__curr_eh_stack_entry
+	ret
+}
+export
+function $_ZN1WD0Ev(l %.1) {
+@start.17
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.18
+	%.3 =l loadl %.2
+	call extern $_ZN1WD1Ev(l %.3)
+	%.4 =l loadl %.2
+	call extern $_ZdlPvm(l %.4, l 8)
+	ret
+}
+export
+function $_ZN1WD2Ev(l %.1) {
+@start.19
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.20
+	%.3 =l loadl %.2
+	call extern $_ZN1WD1Ev(l %.3)
+	ret
+}
+export
+function w $_ZNK1X1kEv(l %.1) {
+@start.21
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.22
+	ret 3
+}
+data $.L__T13.15 = align 8 { l $_ZN1WD2Ev, h 0, h 65535, b 64, z 3 }
+export
+function $_ZN1XD1Ev(l %.1) {
+@start.23
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.3 =l alloc8 8
+	%.4 =l alloc8 240
+	%.5 =l alloc8 240
+@body.24
+	%.6 =l loadl extern $__curr_eh_stack_entry
+	%.7 =l add %.4, 0
+	storel %.6, %.7
+	storel %.4, extern $__curr_eh_stack_entry
+	%.8 =l add %.4, 8
+	storeb 6, %.8
+	%.9 =l loadl extern $__curr_eh_stack_entry
+	%.10 =l add %.5, 0
+	storel %.9, %.10
+	storel %.5, extern $__curr_eh_stack_entry
+	%.11 =l add %.5, 8
+	storeb 1, %.11
+	%.12 =l add %.5, 16
+	%.13 =l add %.12, 0
+	%.14 =l add %.13, 0
+	storel $.L__T13.15, %.14
+	%.15 =l add %.5, 16
+	%.16 =l add %.15, 0
+	%.17 =l add %.16, 8
+	storel %.3, %.17
+	%.18 =w loaduh extern $__eh_curr_region
+	%.19 =l add %.5, 16
+	%.20 =l add %.19, 0
+	%.21 =l add %.20, 24
+	storeh %.18, %.21
+	storeh 65535, extern $__eh_curr_region
+	%.22 =l extsw 2
+	%.23 =l mul %.22, 8
+	%.24 =l add extern $_ZTV1X, %.23
+	%.25 =l loadl %.2
+	%.26 =l add %.25, 0
+	%.27 =l add %.26, 0
+	%.28 =l add %.27, 0
+	storel %.24, %.28
+	%.29 =l loadl %.2
+	%.30 =l add %.29, 0
+	%.31 =l mul 0, 8
+	%.32 =l add %.3, %.31
+	storel %.30, %.32
+	storeh 0, extern $__eh_curr_region
+	storeh 65535, extern $__eh_curr_region
+	%.33 =l loadl %.2
+	%.34 =l add %.33, 0
+	call extern $_ZN1WD1Ev(l %.34)
+	%.35 =l add %.5, 16
+	%.36 =l add %.35, 0
+	%.37 =l add %.36, 24
+	%.38 =w loaduh %.37
+	storeh %.38, extern $__eh_curr_region
+	%.39 =l add %.5, 0
+	%.40 =l loadl %.39
+	storel %.40, extern $__curr_eh_stack_entry
+	%.41 =l add %.4, 0
+	%.42 =l loadl %.41
+	storel %.42, extern $__curr_eh_stack_entry
+	ret
+}
+export
+function $_ZN1XD0Ev(l %.1) {
+@start.25
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.26
+	%.3 =l loadl %.2
+	call extern $_ZN1XD1Ev(l %.3)
+	%.4 =l loadl %.2
+	call extern $_ZdlPvm(l %.4, l 8)
+	ret
+}
+export
+function $_ZN1XD2Ev(l %.1) {
+@start.27
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.28
+	%.3 =l loadl %.2
+	call extern $_ZN1XD1Ev(l %.3)
+	ret
+}

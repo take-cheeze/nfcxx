@@ -1,0 +1,4 @@
+{"tu": "bad_il", "functions": [
+ {"name": "main", "ret": "int32", "params": [], "exported": true, "il": [
+   ".method static int32 'main'() cil managed {", "  .maxstack 1", "  ldc.i4.0", "  no.such.opcode", "  ret", "}"]}
+], "data": [], "calls": {}, "addrs": [], "ctors": []}
