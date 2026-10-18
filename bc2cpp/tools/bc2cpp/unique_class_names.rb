@@ -29,6 +29,7 @@ module UniqueClassNames
     canonical = UniqueClassNames.table&.[](name)
     return nil unless canonical && owner
 
+    return canonical unless canonical.include?('::') # top-level: visible from every scope, see analyze
     scope = canonical.delete_suffix("::#{name}")
     site = owner.to_s.delete_suffix('.singleton')
     lexical = site == scope || site.start_with?("#{scope}::")
@@ -66,8 +67,14 @@ module UniqueClassNames
                                  .map { |path| File.read(path, encoding: 'UTF-8') }
     bindings = native_bindings(sources)
     paths.each_with_object({}) do |(name, defs), out|
-      next unless defs.size == 1 && defs.first.is_a?(String) && defs.first.include?('::')
+      next unless defs.size == 1 && defs.first.is_a?(String)
       next if defs.first.split('::').any? { |segment| assigned.include?(segment) || foreign.include?(segment) }
+      # A top-level module (`module LCF`) is reachable from every lexical scope through Object: its one binding is
+      # the answer when no native source binds the name too.
+      unless defs.first.include?('::')
+        out[name] = name if bindings[name].empty? && !assigned.include?(name) && !foreign.include?(name)
+        next
+      end
 
       scope = defs.first.delete_suffix("::#{name}")
       agree = bindings[name].all? do |source, pos, var|
