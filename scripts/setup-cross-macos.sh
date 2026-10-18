@@ -34,19 +34,23 @@ fi
 # -fMacOSX64 is the prelinker's option for that output, and -u makes it strip the Mach-O leading underscore from
 # the symbol names it matches (the instance is __Z..., the prelinker looks for _Z...) (as scripts/setup-edg.sh sets it for a macOS host). The native
 # Linux tree (build/edg, build/edg-base) is not touched.
+# The cross front end is built from the macOS arm64 EDG base (NFCXX_EDG_TARGET=macos-arm64, scripts/setup-edg.sh), not
+# from the Linux base: the Linux front end defines __linux__ and __GLIBC__, so libc++'s __config takes its glibc branch
+# and includes features.h. The macOS base's predefined macros are Darwin's. Its tree and base are the cross-only
+# build/edg-cross and build/edg-base-cross; the native Linux tree (build/edg, build/edg-base) is not touched.
 cross_edg="$root/build/edg-cross"; cross_base="$root/build/edg-base-cross"
 if [ ! -x "$cross_edg/bin/eccp" ]; then
-  rm -rf "$cross_edg" "$cross_base"; mkdir -p "$cross_edg/bin"
-  cp -r "$root/build/edg-base" "$cross_base"
-  sed -i 's|-c "nm -og 2>/dev/null" |-c "llvm-nm -og 2>/dev/null" -fMacOSX64 -u |' "$cross_base/edg_eccp_config"
-  grep -q 'llvm-nm -og 2>/dev/null" -fMacOSX64 -u' "$cross_base/edg_eccp_config" || { echo "setup-cross-macos: the prelink option did not change in $cross_base" >&2; exit 1; }
-  for f in "$root/build/edg/bin/"*; do
-    b=$(basename "$f")
-    case "$b" in eccp) ;; *) ln -sf "$f" "$cross_edg/bin/$b" ;; esac
-  done
-  sed "s|$root/build/edg/|$cross_edg/|g; s|^export EDG_BASE=.*|export EDG_BASE=\"$cross_base\"|" "$root/build/edg/environment.sh" > "$cross_edg/environment.sh"
-  sed "s|$root/build/edg/|$cross_edg/|g" "$root/build/edg/bin/eccp" > "$cross_edg/bin/eccp"; chmod +x "$cross_edg/bin/eccp"
-  ln -sfn "$root/build/edg/lib" "$cross_edg/lib"
+  rm -rf "$cross_edg" "$cross_base"
+  # USR_INCLUDE must be set for this build too: the EDG C++ runtime (lib_src) is compiled during it, and without it the
+  # runtime takes the host glibc headers (features-time64, __float128), which fail on an x86-64 Linux host.
+  # EDG_CINCLDIR is the C library the runtime (lib_src) is compiled against; without it CMake detects the host glibc
+  # paths (for example /usr/include/x86_64-linux-gnu), which fail on an x86-64 host. Point it at the clean-room headers.
+  EDG_CINCLDIR="$root/tests/macos-sysroot/include" USR_INCLUDE="$root/tests/macos-sysroot/include" \
+    NFCXX_EDG_TARGET=macos-arm64 EDG_BUILD="$cross_edg" EDG_BASE="$cross_base" "$root/scripts/setup-edg.sh"
+  # The prelinker reads the instance symbols with nm. On a Linux host, plain nm cannot read Mach-O objects, so use
+  # llvm-nm. The macOS base already passes -fMacOSX64 (the 16-digit Mach-O values) to the prelinker. -u strips the Mach-O
+  # leading underscore from the names it matches (the instance is __Z..., the prelinker looks for _Z...).
+  sed -i 's|-c "nm -og 2>/dev/null" -fMacOSX64 |-c "llvm-nm -og 2>/dev/null" -fMacOSX64 -u |' "$cross_base/edg_eccp_config"
 fi
 grep -q 'llvm-nm -og 2>/dev/null" -fMacOSX64 -u' "$cross_base/edg_eccp_config" || { echo "setup-cross-macos: $cross_base does not have the Mach-O prelink option" >&2; exit 1; }
 
@@ -59,6 +63,10 @@ export NFCXX_MACOS_SYSROOT="$root/tests/macos-sysroot/include"
 # NFCXX_MACOS_LIBC to build/edg/lib/libC.a links it into the C++ cross links; it is off by default, because the test
 # programs that use the standard streams do not link with it yet (see the notes in docs/notes/cross-macos.md).
 export NFCXX_LIBCXX="$libcxx"
+# EDG reads USR_INCLUDE at run time in place of its built-in /usr/include (host_envir.c), so the cross front end
+# finds only the clean-room sysroot, never the host glibc headers (features-time64.h). Set here, for the cross
+# configuration only; the native build does not source this file.
+export USR_INCLUDE="$root/tests/macos-sysroot/include"
 # The cross front end is for a macOS target on this Linux host: its predefined macros must not be the Linux ones (see 3rd/edg sys_predef.c).
 export NFCXX_TARGET_APPLE=1
 export EDG_BUILD="$root/build/edg-cross"

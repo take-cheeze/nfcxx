@@ -19,4 +19,11 @@ int gettimeofday(struct timeval *tv, void *tz);
 
 #include <sys/select.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* _SYS_TIME_H_ */

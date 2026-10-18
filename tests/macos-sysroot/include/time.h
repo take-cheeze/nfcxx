@@ -50,6 +50,11 @@ size_t strftime(char *restrict, size_t, const char *restrict, const struct tm *r
 /* POSIX (time.h): the sleep that libc++'s threading layer uses */
 int nanosleep(const struct timespec *, struct timespec *);
 
+/* POSIX.1-2008 reentrant time conversions, from the specification. */
+struct tm *gmtime_r(const time_t *timer, struct tm *result);
+struct tm *localtime_r(const time_t *timer, struct tm *result);
+char *asctime_r(const struct tm *tm, char *buf);
+char *ctime_r(const time_t *timer, char *buf);
 #ifdef __cplusplus
 }
 #endif

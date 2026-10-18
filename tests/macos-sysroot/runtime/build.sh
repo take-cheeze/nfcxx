@@ -38,8 +38,14 @@ cxxinc=(-nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$NFCXX_LI
 for f in stdlib_new_delete cxa_virtual cxa_vector abort_message; do
   clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
 done
+# stdlib_typeinfo.cpp is the key function of std::type_info, so it emits the _ZTISt9type_info object only with RTTI on.
+clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -frtti -O2 -c "$src/libcxxabi/src/stdlib_typeinfo.cpp" -o stdlib_typeinfo.o
+# new_handler.cpp uses constinit, so it is built as C++20 (as libc++ builds it).
+clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++20 -fno-exceptions -fno-rtti -O2 -c "$src/libcxx/src/new_handler.cpp" -o new_handler.o
+# private_typeinfo.cpp uses dynamic_cast itself, so it is built with RTTI on (no -fno-rtti).
+clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -O2 -c "$src/libcxxabi/src/private_typeinfo.cpp" -o private_typeinfo.o
 
 rm -f libnfcxx-darwin-rt.a
-llvm-ar rcs libnfcxx-darwin-rt.a atomic.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o
+llvm-ar rcs libnfcxx-darwin-rt.a atomic.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"

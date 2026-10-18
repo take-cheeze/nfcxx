@@ -20,6 +20,9 @@ as a sparse, shallow clone of the three trees it needs, and stops if the checked
 | `libcxxabi/src/abort_message.cpp`, `abort_message.h` | `_abort_message` (used by the operator new paths) |
 | `libcxxabi/include/cxxabi.h`, `__cxxabi_config.h` | headers for the above |
 | `libcxx/src/include/overridable_function.h` | header used by `stdlib_new_delete.cpp` |
+| `libcxx/src/new_handler.cpp`, `libcxx/src/include/atomic_support.h` | `std::get_new_handler` |
+| `libcxxabi/src/stdlib_typeinfo.cpp` | `std::type_info::~type_info` |
+| `libcxxabi/src/private_typeinfo.cpp`, `private_typeinfo.h` | the `__cxxabiv1::__vmi_class_type_info` vtable and the type-info classes |
 
 Licence: Apache License 2.0 with LLVM exceptions (see the LLVM project LICENSE.TXT).
 
@@ -31,8 +34,17 @@ Licence: Apache License 2.0 with LLVM exceptions (see the LLVM project LICENSE.T
   not Apple's libc++ headers. Their ABI tags and availability macros may differ from Apple's, so a successful link here
   does not prove binary compatibility with Apple's libc++ dylib; the Mac run is the check.
 
+## Stubs (no behaviour)
+
+- `__tlv_bootstrap` (Darwin's thread-local loader, not open source): exported by `tests/macos-sysroot/lib/libSystem.tbd` so the link resolves. It has no behaviour. Any `thread_local` access at run time will fail, so a program that uses one must not be run on the Mac until this is implemented.
+
+## Built here, but the symbols are provided by the EH work
+
+- `std::type_info` typeinfo (`__ZTISt9type_info`): built from `stdlib_typeinfo.cpp` with RTTI on. The key function emits the object only with RTTI, so the build script compiles that one file with `-frtti`.
+
 ## Not provided here (report, do not stub)
 
-`std::get_new_handler`, `__cxa_uncaught_exception`, the `__vmi_class_type_info` vtable (libc++abi's exception and
-type-info runtime, part of the EH work), `__tlv_bootstrap` (Darwin's thread-local loader, not open source), and the
-prelinker's libc++ template instances (`std::__sort`).
+`__cxa_uncaught_exception` (`libcxxabi/src/cxa_exception.cpp`, open source, but building it needs libunwind's configuration
+and headers and a port of libc++abi's exception storage to this libc++ 18 header set; it failed on the missing
+`__libunwind_config.h` and on `std::unexpected_handler`, which libc++ 18 no longer declares). That is part of the EH work, so it is
+not built here. The prelinker's libc++ template instances (`std::__sort`) wait on the demangler pin.

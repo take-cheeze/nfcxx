@@ -71,6 +71,9 @@ if [ "$(uname -s)" = Darwin ] || [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
 #define TARG_FLT_MANT_DIG 24
 #define TARG_FLT_MAX_EXP 128
 #define TARG_FLT_MIN_EXP (-125)
+/* The default is set from the host compiler that builds the front end (targ_def.h), which on a Linux host with a recent
+   gcc enables __bf16, so the runtime's C99 complex code uses bf16 literals that the macOS arm64 front end rejects. */
+#define HOST_COMPILER_SUPPORTS_BFLOAT16 FALSE
 DEFS
   fi
   cd "$out"

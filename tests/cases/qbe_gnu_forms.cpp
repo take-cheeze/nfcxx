@@ -27,4 +27,3 @@ int main() {
     return tl == 7 ? 0 : 4;
 }
 // X86-ONLY-LINUX: the qbe arm64 backend has no extern thread (TLS) support (gcc passes; the gate covers the whole file); macOS arm64 runs it
-// MACOS-XFAIL-qbe: the QBE path emits a directive ld64/cproc does not accept on Mach-O (__tls_init alias)
