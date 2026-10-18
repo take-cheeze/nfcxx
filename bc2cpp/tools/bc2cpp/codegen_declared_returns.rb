@@ -363,6 +363,27 @@ class CodeGen
                                 (@registry['+'] || []).none? { |md| md.irep && strict_subclass?(md.owner, 'Array') }
   end
 
+  # Range#to_a (mruby-range-ext mrblib/range.rb) answers a fresh Array: `__num_to_a` for Integer endpoints, else
+  # Enumerable#to_a (`super`), which calls Range#each, whose String arm calls String#upto. Each of those must be the
+  # stock definition, so no Ruby definition of these names may sit on Range, Enumerable or String, or on a module
+  # mixed into them, and none of the three may have a prepend or an unresolved mixin. Scoped to those owners: a
+  # program-wide name check would refuse on the engine's own `each` methods (lcf.rb, game.rb).
+  RANGE_TO_A_NAMES = %w[to_a each upto __num_to_a].freeze
+  RANGE_TO_A_OWNERS = %w[Range Enumerable String].freeze
+
+  def range_to_a_safe?
+    return @range_to_a_safe if defined?(@range_to_a_safe)
+
+    touched = RANGE_TO_A_OWNERS + RANGE_TO_A_OWNERS.flat_map { |owner| Array(@included_modules[owner]) }
+    mixins_resolved = touched.none? do |owner|
+      @unknown_mixins.include?(owner) || !Array(@prepended_modules[owner]).empty?
+    end
+    defined_on_touched = RANGE_TO_A_NAMES.any? do |name|
+      (@registry[name] || []).any? { |d| d.irep && touched.include?(d.owner) }
+    end
+    @range_to_a_safe = mixins_resolved && !defined_on_touched
+  end
+
   # The writer at `w` is a reaching definition already; every deeper hop must dominate (ADR 0198).
   def declared_hop_dominance(ir, w)
     ->(w_idx, use_idx, hop) { (w_idx == w && use_idx == w + 1) || return_write_dominates?(ir, w_idx, use_idx, hop) }

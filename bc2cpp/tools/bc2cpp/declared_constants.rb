@@ -261,25 +261,67 @@ module DeclaredConstants
   # ARRAY_SUM (type_facts const_rows): `(A + B).freeze` whose two operands both prove Array. Array#+ answers a fresh
   # Array (or raises), so the sum is an Array when `plus_safe` holds (no program or foreign `+` or `freeze` that can
   # answer something else; see TypeFacts.array_sum_safe?). An operand is proven by trace_new_target over `containers`
-  # (which carries the sum constants already proven, see array_sum_names), by the array scan, or by a nested sum.
+  # (which carries the sum constants already proven, see array_sum_names), by the array scan, by a literal Range's
+  # to_a (range_to_a_source?, only when `range_safe`), or by a nested sum.
   SUM_MAX_DEPTH = 8
 
-  def array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: nil, depth: 0)
+  def array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: nil, depth: 0, range_safe: false)
     return false unless plus_safe && depth < SUM_MAX_DEPTH
 
     j, insn = sum_writer(irep, idx, reg)
     return false unless insn&.op == 'ADD' && insn.reg && insn.paren_reg
 
-    operand = ->(r) { proven_array_value?(irep, j, r, registry, containers, plus_safe, owner, depth + 1) }
+    operand = lambda do |r|
+      proven_array_value?(irep, j, r, registry, containers, plus_safe, owner, depth + 1, range_safe: range_safe)
+    end
     operand.call(insn.reg) && operand.call(insn.paren_reg)
   end
 
-  def proven_array_value?(irep, idx, reg, registry, containers, plus_safe, owner, depth)
+  def proven_array_value?(irep, idx, reg, registry, containers, plus_safe, owner, depth, range_safe: false)
     return true if trace_new_target(irep, idx, reg, registry: registry, container_constants: containers,
                                                     owner: owner) == 'Array'
     return true if proven_array_source_scan(irep, idx, reg, registry)
+    return true if range_safe && range_to_a_source?(irep, idx, reg)
 
-    array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: owner, depth: depth)
+    array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: owner, depth: depth,
+                                                                        range_safe: range_safe)
+  end
+
+  # `(lo..hi).to_a` over two literal endpoints of one kind, a String literal (STRING) or an Integer literal (LOADI*):
+  # Range#to_a answers a fresh Array or raises (CodeGen#range_to_a_safe? holds the stock-method condition). The
+  # receiver of the to_a is the dominating RANGE_INC / RANGE_EXC, and each endpoint is the dominating writer of its
+  # register before that range instruction.
+  LITERAL_INTEGER_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
+
+  def range_to_a_source?(irep, idx, reg)
+    j, call, recv = dominating_writer(irep, idx, reg)
+    return false unless call&.op == 'SEND0' && call.sym == 'to_a'
+
+    k, range = dominating_writer(irep, j, recv)
+    return false unless range && %w[RANGE_INC RANGE_EXC].include?(range.op) && range.reg
+
+    lo = literal_kind(irep, k, range.reg)
+    hi = literal_kind(irep, k, (range.reg.to_i + 1).to_s)
+    !lo.nil? && lo == hi
+  end
+
+  # The writer of +reg+ before +idx+ that dominates the read, skipping `.freeze` (which answers its receiver):
+  # [index, instruction, register holding the value at that index], or nil.
+  def dominating_writer(irep, idx, reg)
+    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, cur|
+      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+
+      [j, insn, cur]
+    end
+  end
+
+  def literal_kind(irep, idx, reg)
+    _j, insn = dominating_writer(irep, idx, reg)
+    return nil unless insn
+    return :String if insn.op == 'STRING'
+    return :Integer if LITERAL_INTEGER_OP.match?(insn.op)
+
+    nil
   end
 
   # The writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil. Dominating: a join between
@@ -295,7 +337,7 @@ module DeclaredConstants
   # The qualified names whose every assignment is an Array sum, as { name => 'Array' }. A sum over another sum constant
   # counts once that one is proven, so the set only grows and the loop ends when a pass adds nothing. Names already in
   # `containers` (literal or declared) are left to their own proofs.
-  def array_sum_names(ireps, sites, registry, containers, plus_safe)
+  def array_sum_names(ireps, sites, registry, containers, plus_safe, range_safe: false)
     return {} unless plus_safe
 
     by_name = sites.group_by { |s| s[:name] }
@@ -306,7 +348,8 @@ module DeclaredConstants
         !known.key?(name) && !containers.key?(name) &&
           group.all? do |s|
             irep = ireps[s[:irep]]
-            irep && array_sum_source?(irep, s[:idx], s[:reg], registry, merged, plus_safe, owner: s[:owner])
+            irep && array_sum_source?(irep, s[:idx], s[:reg], registry, merged, plus_safe, owner: s[:owner],
+                                                                                           range_safe: range_safe)
           end
       end
       break if grown.empty?
