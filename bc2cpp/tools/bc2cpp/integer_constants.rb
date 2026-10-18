@@ -147,6 +147,11 @@ module IntegerConstants
               when 'ADD', 'ADDI' then left + right
               when 'SUB', 'SUBI' then left - right
               when 'MUL' then left * right
+              when 'DIV'
+                # mruby's fixnum DIV floors (-7 / 2 == -4). A zero divisor raises at run time, so it is no constant.
+                return nil if right.zero?
+
+                left.div(right)
               else raise ArgumentError, "bc2cpp: IntegerConstants: unknown arithmetic opcode #{kind[1].inspect}"
               end
       value if value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
@@ -197,7 +202,7 @@ module IntegerConstants
         # of that name.
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL'
+      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL', 'DIV'
         args = insn.regs
         left = const_source_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
@@ -278,7 +283,7 @@ module IntegerConstants
       when 'GETMCNST'
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL'
+      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL', 'DIV'
         args = insn.regs
         left = literal_value_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
