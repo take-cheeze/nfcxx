@@ -57,6 +57,7 @@ unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
 float __nfcxx_sycl_fn1(int op, float x);  // math builtins; op is a literal: see SYCL_MATH in scripts/pathb-wgsl-emit.rb
 float __nfcxx_sycl_fn2(int op, float x, float y);
 float __nfcxx_sycl_fn3(int op, float x, float y, float z);
+double __nfcxx_sycl_fn1_f64(int op, double x);  // the double form of __nfcxx_sycl_fn1 (erf, expm1, log1p: OpenCL.std on Float64)
 // 32-bit integer atomics on global or work-group memory; they return the old value
 int __nfcxx_sycl_atomic_add(void *p, int v);
 int __nfcxx_sycl_atomic_max(void *p, int v);
@@ -2157,6 +2158,7 @@ namespace detail {
 enum math_op {
   M_SQRT = 1, M_EXP, M_LOG, M_SIN, M_COS, M_TAN, M_FABS, M_FLOOR, M_CEIL, M_TRUNC, M_ROUND, M_RSQRT, M_EXP2, M_LOG2,
   M_ASIN, M_ACOS, M_ATAN, M_SINH, M_COSH, M_TANH,
+  M_ERF = 21, M_EXPM1, M_LOG1P,
   M_POW = 32, M_FMIN, M_FMAX, M_ATAN2, M_FMOD, M_COPYSIGN,
   M_FMA = 48, M_CLAMP, M_MIX
 };
@@ -2183,6 +2185,9 @@ inline float fn1(int op, float x) {
     case M_SINH: return ::sinhf(x);
     case M_COSH: return ::coshf(x);
     case M_TANH: return ::tanhf(x);
+    case M_ERF: return ::erff(x);
+    case M_EXPM1: return ::expm1f(x);
+    case M_LOG1P: return ::log1pf(x);
   }
   return 0.0f;
 }
@@ -2294,34 +2299,25 @@ inline float clamp(float x, float lo, float hi) { return detail::m_clamp(x, lo, 
 inline float abs(float x) { return NFCXX_SYCL_FN1(detail::M_FABS, x); }
 inline int abs(int x) { return x < 0 ? -x : x; }
 
-// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). They are not among the device math
-// ops (detail::math_op), and the device emitter has no lowering for them. On the host they are the C library's; on the device
-// a kernel that reaches one traps (it does not compute a wrong value). Templates, so only an instantiated call is emitted.
+// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). float runs as the device
+// builtins M_ERF, M_EXPM1, M_LOG1P (OpenCL.std erf, expm1, log1p; the SPIR-V emitter lowers them). double runs as the same
+// builtins on the double form __nfcxx_sycl_fn1_f64 (OpenCL.std on Float64). On the host these are the C library's.
 namespace detail {
-template <class T> inline T m_erf(T x) {
 #ifdef __NFCXX_SYCL_DEVICE__
-  __builtin_trap();  // no device lowering for erf
-  return x;
+inline float m_erf(float x) { return NFCXX_SYCL_FN1(detail::M_ERF, x); }
+inline float m_expm1(float x) { return NFCXX_SYCL_FN1(detail::M_EXPM1, x); }
+inline float m_log1p(float x) { return NFCXX_SYCL_FN1(detail::M_LOG1P, x); }
+inline double m_erf(double x) { return __nfcxx_sycl_fn1_f64(detail::M_ERF, x); }
+inline double m_expm1(double x) { return __nfcxx_sycl_fn1_f64(detail::M_EXPM1, x); }
+inline double m_log1p(double x) { return __nfcxx_sycl_fn1_f64(detail::M_LOG1P, x); }
 #else
-  return std::erf(x);
+inline float m_erf(float x) { return ::erff(x); }
+inline float m_expm1(float x) { return ::expm1f(x); }
+inline float m_log1p(float x) { return ::log1pf(x); }
+inline double m_erf(double x) { return ::erf(x); }
+inline double m_expm1(double x) { return ::expm1(x); }
+inline double m_log1p(double x) { return ::log1p(x); }
 #endif
-}
-template <class T> inline T m_expm1(T x) {
-#ifdef __NFCXX_SYCL_DEVICE__
-  __builtin_trap();  // no device lowering for expm1
-  return x;
-#else
-  return std::expm1(x);
-#endif
-}
-template <class T> inline T m_log1p(T x) {
-#ifdef __NFCXX_SYCL_DEVICE__
-  __builtin_trap();  // no device lowering for log1p
-  return x;
-#else
-  return std::log1p(x);
-#endif
-}
 }  // namespace detail
 template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type erf(T x) { return detail::m_erf((typename detail::fp<T>::type)x); }
 template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type expm1(T x) { return detail::m_expm1((typename detail::fp<T>::type)x); }
