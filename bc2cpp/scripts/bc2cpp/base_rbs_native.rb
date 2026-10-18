@@ -101,7 +101,7 @@ module BaseRbsNative
   end
 
   # Scans one preprocessed source. Returns [classes, methods, skipped]; classes maps a full name to its kind.
-  def scan(text)
+  def scan(text, &ast_kinds)
     owners = {}      # variable -> full class name, or :ambiguous
     kinds = {}       # full class name -> 'class' / 'module'
     supers = {}      # full class name -> superclass expression as written
@@ -160,10 +160,10 @@ module BaseRbsNative
         skipped << "#{owner}##{name}"
         next
       end
-      sig = method_sig(text, args[3], owner, singleton, args[4])
+      sig = method_sig(text, args[3], owner, singleton, args[4], &ast_kinds)
       sig = manual_return(owner, name, sig)
       methods << [owner, singleton, name, sig]
-      methods << [owner, false, name, method_sig(text, args[3], owner, false, args[4])] if kind == 'module_function'
+      methods << [owner, false, name, method_sig(text, args[3], owner, false, args[4], &ast_kinds)] if kind == 'module_function'
     end
     [kinds, supers, methods.uniq, skipped]
   end
@@ -199,14 +199,14 @@ module BaseRbsNative
     "#{sig.rpartition(' -> ').first} -> #{ret}"
   end
 
-  def method_sig(text, function, owner, singleton, aspec)
+  def method_sig(text, function, owner, singleton, aspec, &ast_kinds)
     body = function_body_of(text, function)
     return '(*untyped) -> untyped' unless body
     return OVERLOADS[function].join(' | ') if OVERLOADS.key?(function)
 
     # The clang AST's kind for this function when it has one (native_ast_returns.rb follows locals and same-file calls);
     # otherwise the regex classifier's kind for its return text.
-    kind = @ast_kinds&.[](function)
+    kind = ast_kinds&.call&.[](function)
     kind = NativeReturnKinds.kind_of_body(body) if kind.nil?
     ret = NativeReturnKinds.rbs_of(kind, owner: owner, singleton: singleton)
     params = if body.match?(/\bmrb_get_args\s*\(/) then param_shape(body) else aspec_shape(aspec) || '*untyped' end
@@ -380,8 +380,9 @@ module BaseRbsNative
     methods = []
     skipped = []
     scans = BaseRbsWorkers.map(paths, jobs: jobs) do |path|
-      @ast_kinds = ast_function_kinds(path, flags)
-      scan(preprocess(path, flags))
+      ast_kinds = nil
+      # Only registered functions with readable bodies consume AST return kinds.
+      scan(preprocess(path, flags)) { ast_kinds ||= ast_function_kinds(path, flags) }
     end
     scans.each do |k, s, m, sk|
       kinds.merge!(k)
