@@ -60,14 +60,6 @@
       (return (const bool 0x0))))
   (unreachable))
 
-(function "_ZSt35__aligned_storage_default_alignmentm"
-  (ret unsigned_long)
-  (params (param %0 "__len" unsigned_long))
-  (weak)
-  (slot "__len" unsigned_long 8 8)
-  (store unsigned_long $"__len" %0)
-  (return (const unsigned_long 16)))
-
 (function "_ZSt21is_constant_evaluatedv"
   (ret bool)
   (params)
