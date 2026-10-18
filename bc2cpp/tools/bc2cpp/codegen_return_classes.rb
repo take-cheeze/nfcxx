@@ -598,8 +598,12 @@ class CodeGen
 
     primitive = { NumericFlow::INT => :Integer, NumericFlow::FLT => :Float, NumericFlow::ARR => :Array,
                   NumericFlow::HSH => :Hash, NumericFlow::STR => :String, NumericFlow::NIL => :NilClass, NumericFlow::RNG => :Range }
+    # LCF object kinds (LcfRowFlow) are exactly one class each, named by the row-flow model, so they are admitted
+    # only while that model is on: a kind bit without it names nothing.
+    kinds = mask & ~((1 << NumericFlow::OBJECT_KIND_BASE) - 1)
+    warn "LCFTRACE kinds=#{kinds.positive?} model=#{!lcf_rows_model.nil?}"
     allowed = primitive.keys.reduce(NumericFlow::CLASS_BITS, :|)
-    return nil unless (mask & ~allowed).zero?
+    return nil unless ((mask & ~kinds) & ~allowed).zero?
 
     classes = primitive.filter_map { |bit, klass| klass if mask.anybits?(bit) }.to_set
     remaining = mask & NumericFlow::CLASS_BITS
@@ -610,6 +614,14 @@ class CodeGen
 
       classes << klass.to_sym
       remaining &= ~bit
+    end
+    until kinds.zero?
+      bit = kinds & -kinds
+      kind = lcf_rows_model&.kind(bit)
+      return nil unless kind
+
+      classes << (kind.file_class || kind.owner).to_sym
+      kinds &= ~bit
     end
     classes.freeze
   end
