@@ -200,6 +200,27 @@ module BytecodeIR
       end
     end
 
+    # LCF_ROW_FIELD: `row[:name]` on an LCF::Array1D reads the field the record's schema declares under that name, and
+    # Array1D#[] raises for a name it does not declare, so the read is one of the classes every schema position
+    # spelling the name can give (LcfSchemaOracle.by_name, receiver-independent). A key that is not a literal Symbol
+    # has no such bound: it is reported as a non-literal key and stays untyped.
+    def lcf_row_field(definition, insn, register, max_states:, refusal:)
+      key_register = insn.op == 'GETIDX0' ? nil : (insn.reg.to_i + 1)
+      return nil unless key_register
+      key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, origin_transfers: true,
+                                                 max_states: max_states, refusal: refusal)
+      syms = key_defs&.map { |source| source.entry? ? nil : @irep.instructions[source.index] }
+      unless syms && !syms.empty? && syms.all? { |producer| producer&.op == 'LOADSYM' }
+        return unknown(refusal, :lcf_non_literal_key)
+      end
+
+      names = syms.map { |producer| producer.sym.to_s }.uniq
+      return unknown(refusal, :lcf_non_literal_key) unless names.size == 1
+
+      field = LcfSchemaOracle.field_classes.fetch(names.first) { return unknown(refusal, :lcf_unknown_field) }
+      Fact.new(classes: field.map(&:to_sym).to_set.freeze, declared: false, contracts: [].freeze).freeze
+    end
+
     # Container element bounds remain conditional on their RBS contract, including nil for absent keys.
     def indexed_definition(definition, max_states:, refusal:)
       return nil if ENV['BC2CPP_IR_ELEMENT_TYPES'] == '0'
@@ -209,6 +230,8 @@ module BytecodeIR
 
       register = insn.op == 'GETIDX0' ? insn.regs[1] : insn.reg
       receiver = query(definition.index, register, use_declarations: true, max_states: max_states, refusal: refusal)
+      return lcf_row_field(definition, insn, register, max_states: max_states, refusal: refusal) if
+        receiver && receiver.classes == Set[:'LCF::Array1D']
       return nil unless receiver && receiver.classes.size == 1 && [:Array, :Hash].include?(receiver.classes.first)
 
       contracts = receiver.contracts.to_set
