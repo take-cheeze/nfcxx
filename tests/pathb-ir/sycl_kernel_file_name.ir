@@ -1,0 +1,88 @@
+(ir-module "sycl_kernel_file_name.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "_Z9ends_withPKcS0_"
+  (ret bool)
+  (params (param %0 "s" (ptr (const char))) (param %1 "suffix" (ptr (const char))))
+  (weak)
+  (slot "s" (ptr (const char)) 8 8)
+  (slot "suffix" (ptr (const char)) 8 8)
+  (slot "n" unsigned_long 8 8)
+  (slot "m" unsigned_long 8 8)
+  (slot "i" unsigned_long 8 8)
+  (store (ptr (const char)) $"s" %0)
+  (store (ptr (const char)) $"suffix" %1)
+  (store unsigned_long $"n" (const unsigned_long 0))
+  (store unsigned_long $"m" (const unsigned_long 0))
+  (loop
+    (body
+      (let %2 (ptr (const char)) (load (ptr (const char)) $"s"))
+      (let %3 unsigned_long (load unsigned_long $"n"))
+      (let %4 (ptr char) (index %2 %3 1))
+      (let %5 char (load char %4))
+      (let %6 int (iconv int %5))
+      (let %7 bool (ne int %6 (const int 0)))
+      (if %7 (then) (else (break)))
+      (block
+        (let %8 unsigned_long (load unsigned_long $"n"))
+        (let %9 unsigned_long (wadd unsigned_long %8 (const unsigned_long 1)))
+        (store unsigned_long $"n" %9)))
+    (step))
+  (loop
+    (body
+      (let %10 (ptr (const char)) (load (ptr (const char)) $"suffix"))
+      (let %11 unsigned_long (load unsigned_long $"m"))
+      (let %12 (ptr char) (index %10 %11 1))
+      (let %13 char (load char %12))
+      (let %14 int (iconv int %13))
+      (let %15 bool (ne int %14 (const int 0)))
+      (if %15 (then) (else (break)))
+      (block
+        (let %16 unsigned_long (load unsigned_long $"m"))
+        (let %17 unsigned_long (wadd unsigned_long %16 (const unsigned_long 1)))
+        (store unsigned_long $"m" %17)))
+    (step))
+  (let %18 unsigned_long (load unsigned_long $"m"))
+  (let %19 unsigned_long (load unsigned_long $"n"))
+  (let %20 bool (lt.u unsigned_long %19 %18))
+  (if %20
+    (then
+      (block
+        (return (const bool 0x0)))))
+  (block
+    (store unsigned_long $"i" (const unsigned_long 0))
+    (loop
+      (body
+        (let %21 unsigned_long (load unsigned_long $"i"))
+        (let %22 unsigned_long (load unsigned_long $"m"))
+        (let %23 bool (lt.u unsigned_long %21 %22))
+        (if %23 (then) (else (break)))
+        (block
+          (let %24 (ptr (const char)) (load (ptr (const char)) $"s"))
+          (let %25 unsigned_long (load unsigned_long $"n"))
+          (let %26 unsigned_long (load unsigned_long $"m"))
+          (let %27 unsigned_long (wsub unsigned_long %25 %26))
+          (let %28 unsigned_long (load unsigned_long $"i"))
+          (let %29 unsigned_long (wadd unsigned_long %27 %28))
+          (let %30 (ptr char) (index %24 %29 1))
+          (let %31 char (load char %30))
+          (let %32 int (iconv int %31))
+          (let %33 (ptr (const char)) (load (ptr (const char)) $"suffix"))
+          (let %34 unsigned_long (load unsigned_long $"i"))
+          (let %35 (ptr char) (index %33 %34 1))
+          (let %36 char (load char %35))
+          (let %37 int (iconv int %36))
+          (let %38 bool (ne int %32 %37))
+          (if %38
+            (then
+              (block
+                (return (const bool 0x0)))))))
+      (step
+        (let %39 unsigned_long (load unsigned_long $"i"))
+        (let %40 unsigned_long (wadd unsigned_long %39 (const unsigned_long 1)))
+        (store unsigned_long $"i" %40))))
+  (return (const bool 0x1)))
+
+(function "main"
+  (ret int)
+  (params)
+  (return (const int 0)))
