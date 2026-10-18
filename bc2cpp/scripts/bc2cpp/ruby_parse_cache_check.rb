@@ -13,6 +13,7 @@ require 'set'
 require_relative '../../tools/bc2cpp/ruby_parse_cache'
 require_relative '../../tools/bc2cpp/foreign_definers'
 require_relative '../../tools/bc2cpp/native_names'
+require_relative '../../tools/bc2cpp/closed_world'
 
 failures = []
 check = lambda do |what, condition|
@@ -144,6 +145,43 @@ else
   calls = 0
   ForeignDefiners.scan(foreign.sort)
   check.call('ForeignDefiners.scan of the same files parses nothing more', calls.zero?)
+end
+
+puts '-- closed-world queries share each file scan across method names'
+Dir.mktmpdir do |tmp|
+  one = File.join(tmp, 'one.rb')
+  two = File.join(tmp, 'two.rb')
+  File.write(one, "class A; def first; end; attr_accessor :shared; end\n")
+  File.write(two, "class B; def second; end; alias shared second; end\n")
+  paths = [two, one, two]
+  expected = %w[first second shared shared= absent].to_h do |name|
+    [name, paths.select { |path| foreign_method_names([path]).include?(name) }]
+  end
+  world_class = Class.new(ClosedWorld) do
+    attr_reader :scans
+
+    def initialize(paths)
+      @ruby_paths = paths
+      @scans = []
+    end
+
+    def foreign_method_names(paths)
+      @scans.concat(paths)
+      super
+    end
+  end
+  world = world_class.new(paths)
+  expected.each do |name, defining|
+    check.call("definer paths for #{name} retain order and duplicates",
+               world.outside_ruby_definer_paths(name) == defining)
+    check.call("return paths for #{name} agree with definer paths",
+               world.outside_ruby_paths_defining(name) == defining)
+  end
+  check.call('both query families scan each distinct path once', world.scans == [two, one])
+  File.write(one, "class A; def replacement; end; end\n")
+  fresh_world = world_class.new(paths)
+  check.call('a new world scans current file contents', fresh_world.outside_ruby_definer_paths('replacement') == [one])
+  check.call('a new world does not retain old definitions', fresh_world.outside_ruby_definer_paths('first').empty?)
 end
 
 if failures.empty?
