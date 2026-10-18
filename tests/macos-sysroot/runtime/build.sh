@@ -32,6 +32,9 @@ inc=(-nostdinc -isystem "$NFCXX_MACOS_SYSROOT" -isystem "$(clang -print-resource
 # compiler-rt's atomic.c picks its lock by __APPLE__ (OSSpinLock, an SDK header). -U__APPLE__ takes the portable branch,
 # which is plain C11 atomics; the sized __atomic_* functions the link needs are the same either way.
 clang "${tgt[@]}" "${inc[@]}" -I "$src/compiler-rt/lib/builtins" -U__APPLE__ -O2 -c "$src/compiler-rt/lib/builtins/atomic.c" -o atomic.o
+# The sized add/sub/and/or/xor _fetch functions (for example __atomic_add_fetch_8) are not in compiler-rt; they are in
+# this repository (src/atomic_fetch.c), written with clang's inline __atomic builtins.
+clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/atomic_fetch.c" -o atomic_fetch.o
 
 cxxinc=(-nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$NFCXX_LIBCXX" -isystem "$NFCXX_MACOS_SYSROOT"
         -isystem "$(clang -print-resource-dir)/include" -I "$src/libcxxabi/include" -I "$src/libcxxabi/src" -I "$src/libcxx/src")
@@ -46,6 +49,6 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++20 -fno-exceptions -fno-rtti -O2 -c "
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -O2 -c "$src/libcxxabi/src/private_typeinfo.cpp" -o private_typeinfo.o
 
 rm -f libnfcxx-darwin-rt.a
-llvm-ar rcs libnfcxx-darwin-rt.a atomic.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o
+llvm-ar rcs libnfcxx-darwin-rt.a atomic.o atomic_fetch.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
