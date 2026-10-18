@@ -18,7 +18,7 @@ check = lambda do |what, condition|
 end
 
 def ret(body)
-  NativeReturnKinds.rbs_of(NativeReturnKinds.kind_of_body(body), singleton: false)
+  NativeReturnKinds.rbs_of(NativeReturnKinds.kind_of_body(body), owner: 'Foo', singleton: false)
 end
 
 puts '== kinds of direct returns'
@@ -28,9 +28,9 @@ check.call('a mrb_format return is String', ret('{ return mrb_format(M, "%d", x)
 check.call('a nil return is nil', ret('{ return mrb_nil_value(); }') == 'nil')
 check.call('a bool return is bool', ret('{ return mrb_bool_value(a != 0); }') == 'bool')
 check.call('a self return is self on an instance method', ret('{ return self; }') == 'self')
-check.call('a self return on a class method is untyped', NativeReturnKinds.rbs_of(
-  NativeReturnKinds.kind_of_body('{ return self; }'), singleton: true
-) == 'untyped')
+check.call('a self return on a class method is the class object', NativeReturnKinds.rbs_of(
+  NativeReturnKinds.kind_of_body('{ return self; }'), owner: 'Foo', singleton: true
+) == 'singleton(Foo)')
 
 puts '== mixed and unknown returns'
 check.call('a body returning nil and an Integer is untyped',
