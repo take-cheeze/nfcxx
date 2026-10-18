@@ -699,6 +699,8 @@ end
 HELPER_BUILTINS = {
   # nlohmann::json: float constants and conversions (double only; cproc has no long double anyway)
   '__builtin_huge_val' => ['__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'],
+  # HUGE_VALF and INFINITY (CUDA's host math.h): cproc has __builtin_inff as a constant, so a static initializer may use it
+  '__builtin_huge_valf' => ['__builtin_inff', ''],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
   # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
   '__builtin_bswap16' => ['__nfcxx_bswap16',

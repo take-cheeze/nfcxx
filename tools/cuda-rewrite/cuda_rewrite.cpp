@@ -4787,12 +4787,15 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   if (needed["log2f"]) needed["__float_as_uint"] = true;
   // The tiles of cooperative groups shuffle with the idx form (COOP_DEF uses __shfl_sync).
   if (needed["cg"] || needed["cooperative_groups"]) needed["__shfl_sync"] = true;
+  // Names that share a text (the bf16 block of several names) emit it once.
+  std::set<std::string> emitted_defs;
   for (const auto &kv : builtin_defs_table()) {
     if (!needed[kv.first]) continue;
     bool defined_here = false;
     for (const auto &pc : pieces)
       if (pc.keep && has_tok(pc.defined, kv.first)) defined_here = true;
     if (defined_here) continue;
+    if (!emitted_defs.insert(kv.second).second) continue;
     out += kv.second;
   }
   bool coop_defined = false;
@@ -5703,7 +5706,7 @@ std::string device_decls() {
 
 // The command line of the Ruby script (line 3371): -I DIR, --device, --kernels=FILE, --edg-launches, FILE.cu.
 int usage() {
-  std::fprintf(stderr, "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
+  std::fprintf(stderr, "usage: cuda-rewrite [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
   return 2;
 }
 

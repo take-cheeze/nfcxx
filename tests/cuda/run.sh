@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# CUDA source through the nfcxx driver: the launch rewrite (scripts/cuda-rewrite.rb) and the runtime helper
+# CUDA source through the nfcxx driver: the launch rewrite (tools/cuda-rewrite) and the runtime helper
 # (lib/cuda/nfcxx_cuda.h). Needs the CUDA runtime headers and libcudart (CUDA_HOME, default /usr/local/cuda) and
 # an NVIDIA driver. Skips (exit 0) when they are missing.
 #
 # Checks: the rewrite matches its golden files; unsupported launch forms are refused (exit 3); mul2.cu compiles
-# and links through nfcxx, its device code is built by the driver (scripts/cuda-rewrite.rb --device, pathb-ptx-emit,
+# and links through nfcxx, its device code is built by the driver (tools/cuda-rewrite --device, pathb-ptx-emit,
 # ptxas, cuda-embed), and the program runs the kernels and checks the results. Expected output: "launch: no error"
 # and "mul2: 1000 elements, 0 mismatches". (Before the device pipeline, the launch returned an error: the kernel was
 # not registered with the runtime.) docs/notes/gpu.md, "CUDA source".
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
+[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
 cuda=${CUDA_HOME:-/usr/local/cuda}
 if [ ! -f "$cuda/include/cuda_runtime.h" ] || [ ! -e "$cuda/lib64/libcudart.so" ]; then
   echo "SKIP: cuda: needs cuda_runtime.h and libcudart (CUDA_HOME)"; exit 0
@@ -19,7 +20,7 @@ fi
 fail=0
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-rw() { "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1"; }
+rw() { "$root/build/cuda-rewrite" "$1"; }
 
 # 1. The rewrite matches the goldens.
 for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage rewrite/member_linkage rewrite/device_lambda; do
@@ -31,7 +32,7 @@ for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage re
 done
 
 # 1b. The device unit of the template case matches its golden (template kernel, helper, no host-only code).
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/template.cu > "$out/template.device.cpp" \
+if "$root/build/cuda-rewrite" --device rewrite/template.cu > "$out/template.device.cpp" \
    && diff -u rewrite/template.device.expected.cpp "$out/template.device.cpp"; then
   echo "device unit template: ok"
 else
@@ -40,7 +41,7 @@ fi
 # 1c. The device units of a macro named only in a launch's template arguments, and of a launch whose template arguments
 # are block-local constants, keep the macro and name the values in the wrapper.
 for c in macro_wrapper local_targs launch_macro_body using_namespace define_header_skip static_kernel_enum host_member_drop bf16_class; do
-  if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
+  if "$root/build/cuda-rewrite" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
      && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
     echo "device unit $c: ok"
   else
@@ -62,7 +63,7 @@ done
 
 # 1b3. The device pass takes only the branches of the conditionals it evaluates (#if/#elif/#else/#ifndef), so the
 # kernels of the untaken branches are not in the unit and not in the kernel list.
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device --kernels="$out/cond.kernels" rewrite/conditional_kernel.cu > "$out/cond.device.cpp" \
+if "$root/build/cuda-rewrite" --device --kernels="$out/cond.kernels" rewrite/conditional_kernel.cu > "$out/cond.device.cpp" \
    && diff -u rewrite/conditional_kernel.device.expected.cpp "$out/cond.device.cpp" \
    && [ "$(cat "$out/cond.kernels")" = "$(printf 'fast_kernel\narch_kernel\nifndef_kernel')" ]; then
   echo "device unit conditionals: ok"
@@ -71,7 +72,7 @@ else
 fi
 
 # 1b2. The device unit of __syncwarp (both forms) matches its golden.
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/syncwarp.cu > "$out/syncwarp.device.cpp" \
+if "$root/build/cuda-rewrite" --device rewrite/syncwarp.cu > "$out/syncwarp.device.cpp" \
    && diff -u rewrite/syncwarp.device.expected.cpp "$out/syncwarp.device.cpp"; then
   echo "device unit syncwarp: ok"
 else
@@ -80,7 +81,7 @@ fi
 
 # 1b2b. A static __shared__ array shadows a dynamic one of the same name in its block only (the device unit keeps the
 # static block's uses as the array and rewrites the dynamic kernel's uses to the pointer).
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_shared.cu > "$out/shadow.device.cpp" \
+if "$root/build/cuda-rewrite" --device rewrite/shadow_shared.cu > "$out/shadow.device.cpp" \
    && diff -u rewrite/shadow_shared.device.expected.cpp "$out/shadow.device.cpp"; then
   echo "device unit shadow_shared: ok"
 else
@@ -89,7 +90,7 @@ fi
 
 # 1b2c. A parameter and a local named like a dynamic array (llama.cpp fattn.cu) are their own declarations in their
 # scopes; the device unit takes the C++ branch of a `#ifndef __cplusplus` conditional.
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_decl.cu > "$out/shadow_decl.device.cpp" \
+if "$root/build/cuda-rewrite" --device rewrite/shadow_decl.cu > "$out/shadow_decl.device.cpp" \
    && diff -u rewrite/shadow_decl.device.expected.cpp "$out/shadow_decl.device.cpp"; then
   echo "device unit shadow_decl: ok"
 else
@@ -98,7 +99,7 @@ fi
 
 # 1b3. A host `const` reference is not a constant: the device unit carries neither its initializer nor its struct type
 # (with a FILE * member). A value constant (LIMIT) is still carried.
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/const_host_ref.cu > "$out/const_host_ref.device.cpp" \
+if "$root/build/cuda-rewrite" --device rewrite/const_host_ref.cu > "$out/const_host_ref.device.cpp" \
    && diff -u rewrite/const_host_ref.device.expected.cpp "$out/const_host_ref.device.cpp"; then
   echo "device unit const_host_ref: ok"
 else
@@ -107,7 +108,7 @@ fi
 
 # 1b4. A linkage block (extern "C" { ... }) is split: only the pieces the device unit needs are carried, each inside the
 # block's linkage. The host struct with a FILE * member is not carried.
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/linkage_block.cu > "$out/linkage_block.device.cpp" \
+if "$root/build/cuda-rewrite" --device rewrite/linkage_block.cu > "$out/linkage_block.device.cpp" \
    && diff -u rewrite/linkage_block.device.expected.cpp "$out/linkage_block.device.cpp"; then
   echo "device unit linkage_block: ok"
 else
@@ -117,7 +118,7 @@ fi
 # 1c. Included headers are expanded once each: a diamond-shaped include tree (each level includes the next one three
 # times) gave 46k lines and took 6 s with the expansion repeated per include; the device unit is 110 lines and
 # takes milliseconds. The 10 s limit catches the blow-up again.
-if timeout 10 "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/include/main.cu > "$out/include.device.cpp" \
+if timeout 10 "$root/build/cuda-rewrite" --device rewrite/include/main.cu > "$out/include.device.cpp" \
    && diff -u rewrite/include/main.device.expected.cpp "$out/include.device.cpp"; then
   echo "device unit include tree: ok"
 else

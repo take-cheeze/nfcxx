@@ -39,7 +39,7 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 - **The device compile has no CUDA qualifiers or intrinsics.** `__shared__`, `__syncthreads`, `__any_sync` and device
   `printf` are unknown there. Shared memory and barriers are the next features to lower.
 - **Template kernel launches are refused by the rewriter.** Three samples use `k<T><<<...>>>` (matrixMul, reduction,
-  MC_EstimatePiP). Supporting them needs the template argument list parsed in `cuda-rewrite.rb`.
+  MC_EstimatePiP). Supporting them needs the template argument list parsed in `tools/cuda-rewrite`.
 - **`nonnull` statements are refused by the emitter** (gaussian). The emitter would need the null check lowered.
 - **Environment:** `cuda_profiler_api.h` is not in this CUDA package. It comes from the `cuda-profiler-api` package,
   which we have not installed.
