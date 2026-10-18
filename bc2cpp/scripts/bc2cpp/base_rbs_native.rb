@@ -165,6 +165,14 @@ module BaseRbsNative
     [kinds, supers, methods.uniq, skipped]
   end
 
+  # Functions whose mrb_get_args formats differ by argument count, so one parameter list cannot describe them. Each
+  # form is one RBS overload, written from that function's own mrb_get_args calls (the object form raises TypeError
+  # unless it is the class, DataType<T>::get).
+  OVERLOADS = {
+    'color_set' => ['(RGSS::Color) -> self', '(Numeric, Numeric, Numeric, ?Numeric) -> self'],
+    'tone_set' => ['(RGSS::Tone) -> self', '(Numeric, Numeric, Numeric, ?Numeric) -> self']
+  }.freeze
+
   # The RBS signature of a registered function: its parameters and its return type (NativeReturnKinds). The parameters
   # are the mrb_get_args format when the body reads its arguments that way, and otherwise the arity the registration's
   # aspec declares (aspec_shape). A function that is not in this text keeps the rest parameter and an untyped return.
@@ -191,6 +199,7 @@ module BaseRbsNative
   def method_sig(text, function, owner, singleton, aspec)
     body = function_body_of(text, function)
     return '(*untyped) -> untyped' unless body
+    return OVERLOADS[function].join(' | ') if OVERLOADS.key?(function)
 
     # The clang AST's kind for this function when it has one (native_ast_returns.rb follows locals and same-file calls);
     # otherwise the regex classifier's kind for its return text.

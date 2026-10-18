@@ -105,6 +105,13 @@ module BaseRbs
     ['RGSS::Window', 'contents'] => 'RGSS::Bitmap'
   }.freeze
 
+  # Signatures written by hand where the source's own return depends on an argument. IO.open without a block is
+  # `self.new(*args)` (mruby-io's io.rb), an IO; with a block it returns the block's value (io.rb: `return io unless
+  # block`), so the two forms are separate overloads.
+  SIGNATURE_OVERRIDES = {
+    ['IO', 'open'] => 'def self.open: (*untyped) -> IO | (*untyped) { (IO) -> untyped } -> untyped'
+  }.freeze
+
   def method_line(name, shape, singleton: false)
     positional = []
     shape.each do |kind, _|
@@ -146,7 +153,9 @@ module BaseRbs
         body << "def #{attr}=: (untyped) -> untyped" if %w[attr_writer attr_accessor].include?(kind)
       end
       d.methods.uniq { |m, _| m }.sort_by { |m, _| m }.each { |m, shape| body << method_line(m, shape) }
-      d.singletons.uniq { |m, _| m }.sort_by { |m, _| m }.each { |m, shape| body << method_line(m, shape, singleton: true) }
+      d.singletons.uniq { |m, _| m }.sort_by { |m, _| m }.each do |m, shape|
+        body << SIGNATURE_OVERRIDES.fetch([d.name, m]) { method_line(m, shape, singleton: true) }
+      end
       body = body.select { |line| valid_member?(line) }
       "#{head}\n#{body.map { |l| "  #{l}\n" }.join}end\n"
     end

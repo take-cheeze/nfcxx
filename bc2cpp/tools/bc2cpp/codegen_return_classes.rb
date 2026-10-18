@@ -601,7 +601,6 @@ class CodeGen
     # LCF object kinds (LcfRowFlow) are exactly one class each, named by the row-flow model, so they are admitted
     # only while that model is on: a kind bit without it names nothing.
     kinds = mask & ~((1 << NumericFlow::OBJECT_KIND_BASE) - 1)
-    warn "LCFTRACE kinds=#{kinds.positive?} model=#{!lcf_rows_model.nil?}"
     allowed = primitive.keys.reduce(NumericFlow::CLASS_BITS, :|)
     return nil unless ((mask & ~kinds) & ~allowed).zero?
 
