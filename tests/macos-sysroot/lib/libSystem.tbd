@@ -16,7 +16,7 @@ exports:
                        ___divti3, dyld_stub_binder, ___error, _exit, _exp, _fabs, _fabsf, _fclose, _feof,
                        _ferror, _fflush, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti,
                        ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor, _fmod, _fopen,
-                       _fprintf, _fputc, _fputs, _vfprintf, _fread, _free, _freopen, _frexp, _fseek, _ftell, _fwrite, _getc,
+                       _fprintf, _fputs, _fread, _free, _freopen, _frexp, _fseek, _ftell, _fwrite, _getc,
                        _getenv, _gmtime, _isalnum, _isalpha, _iscntrl, _isdigit, _isgraph, _islower,
                        _ispunct, _isspace, _isupper, _isxdigit, _ldexp, _localeconv, _localtime, _log,
                        _log10, _log2, _longjmp, _memchr, _memcmp, _memcpy, _memset, _mktime, ___modti3, _pow,
@@ -24,15 +24,9 @@ exports:
                        _signal, _sin, _snprintf, _sqrt, ___stderrp, ___stdinp, ___stdoutp, _strchr, _strcmp,
                        _strcoll, _strcpy, _strerror, _strftime, _strlen, _strncmp, _strpbrk, _strspn,
                        _strstr, _strtod, _strtol, _system, _tan, _time, _tmpfile, _tmpnam, _tolower,
-    symbols:         [ _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _access,
+                       _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _access,
                        _close, _dup, _isatty, _read, _write, _trunc, _round, _strrchr, _strncpy, _strncat,
-                       _strcat, _putc, _fputc, _fileno, _fgetc, __longjmp, __exit, _dup2, _execl, _fcntl,
-                       _flock, _fork, _ftruncate, _getcwd, _getpwnam, _lseek, _open, _pipe, _readlink,
-                       _realpath, _select, _symlink, _sysconf, _umask, _unlink, _waitpid, _chmod, _lstat,
-                       _fstat, _stat, _pwrite, _pread, _atoi, ___cxa_atexit, ___cxa_thread_atexit,
-                       ___stack_chk_fail, ___stack_chk_guard, ___cxa_finalize, _atexit, _bzero, _malloc,
-                       _posix_memalign, _gettimeofday, _raise, _gmtime_r, _sigaction, _sigaltstack, _rand,
-                       _srand, _ceilf, __tlv_bootstrap ]
+                       _strcat, _putc, _fputc, _fileno, _fgetc, __longjmp, __exit, _dup2, _execl, _fcntl, _flock, _fork, _ftruncate, _getcwd, _getpwnam, _lseek, _open, _pipe, _readlink, _realpath, _select, _symlink, _sysconf, _umask, _unlink, _waitpid, _chmod, _lstat, _fstat, _stat, _pwrite, _pread, _vfprintf, _atoi, ___cxa_atexit, ___cxa_thread_atexit, ___stack_chk_fail, ___stack_chk_guard, ___cxa_finalize, _atexit, _bzero, _malloc, _posix_memalign, _gettimeofday, _raise, _gmtime_r, _sigaction, _sigaltstack, _rand, _srand, _ceilf, __tlv_bootstrap ]
     weak-symbols:    [ ]
     objc-classes:    [ ]
     objc-ivars:      [ ]
