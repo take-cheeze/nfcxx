@@ -16,6 +16,8 @@ into `build/macos-rt/libnfcxx-darwin-rt.a`; the cross link adds that archive whe
 | `libcxxabi/src/abort_message.cpp`, `abort_message.h` | `_abort_message` (used by the operator new paths) |
 | `libcxxabi/include/cxxabi.h`, `__cxxabi_config.h` | headers for the above |
 | `libcxx/src/include/overridable_function.h` | header used by `stdlib_new_delete.cpp` |
+| `libcxx/src/new_handler.cpp`, `libcxx/src/include/atomic_support.h` | `std::get_new_handler` |
+| `libcxxabi/src/private_typeinfo.cpp`, `private_typeinfo.h` | the `__cxxabiv1::__vmi_class_type_info` vtable and the type-info classes |
 
 Licence: Apache License 2.0 with LLVM exceptions (see the LLVM project LICENSE.TXT).
 
@@ -29,6 +31,6 @@ Licence: Apache License 2.0 with LLVM exceptions (see the LLVM project LICENSE.T
 
 ## Not provided here (report, do not stub)
 
-`std::get_new_handler`, `__cxa_uncaught_exception`, the `__vmi_class_type_info` vtable (libc++abi's exception and
-type-info runtime, part of the EH work), `__tlv_bootstrap` (Darwin's thread-local loader, not open source), and the
+`__cxa_uncaught_exception` (`libcxxabi/src/cxa_exception.cpp`, which needs the unwinder and the exception storage
+code: part of the EH work), `__tlv_bootstrap` (Darwin's thread-local loader, not open source), and the
 prelinker's libc++ template instances (`std::__sort`).
