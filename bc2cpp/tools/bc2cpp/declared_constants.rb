@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'integer_constants'
+require_relative 'irep_scans'
 require_relative 'native_sigs'
 
 # DECLARED_CONSTANT_CHECK (docs/adr/0455): RBS constant declarations, checked at every assignment.
@@ -11,6 +12,9 @@ require_relative 'native_sigs'
 #                       fits the narrowest Fixnum. Feeds INTEGER_CONSTANT_PROOF (bare-name keyed, as that proof is).
 #   TABLE: Array[...]   the declared constant's one assignment is an Array (an ARRAY literal, or a source the array
 #                       proofs accept, `.freeze` included). Feeds CONST_CONTAINER.
+#   TABLE: Array[T]     as above, and the assignment is a frozen `[...]` literal whose every element proves T (Integer,
+#                       Float, String or Symbol). Feeds the element bound for the bare name, when only this assignment
+#                       binds that name.
 #   OBJ: C              the one assignment is exactly `C.new(...)` (trace_new_target). Feeds CONST_CONTAINER.
 #
 # Errors (TC1011, a build abort): no assignment in the program, a second assignment of the declared name
@@ -18,8 +22,9 @@ require_relative 'native_sigs'
 # onto (`X = c || 1`). Infos (checked, no fact): the bare name is also bound outside the program (native, foreign Ruby,
 # a class or module of that name) or, for Integer, by another assignment that does not prove.
 module DeclaredConstants
-  Entry = Struct.new(:name, :bare, :kind, :cls, :text, :loc, keyword_init: true)
-  Result = Struct.new(:integer_names, :containers, :diagnostics, :report, :locs, keyword_init: true)
+  Entry = Struct.new(:name, :bare, :kind, :cls, :text, :loc, :elem, keyword_init: true)
+  ELEMENT_CLASSES = %w[Integer Float String Symbol].freeze
+  Result = Struct.new(:integer_names, :containers, :elements, :diagnostics, :report, :locs, keyword_init: true)
   CODE = 'TC1011'
   KILL_ENV = 'BC2CPP_DECLARED_CONSTANTS'
 
@@ -74,17 +79,28 @@ module DeclaredConstants
            end
     return nil unless kind
 
+    elem = element_class(type) if kind == :array
     l = decl.location
     loc = RbsSignatures::Loc.new(rel, l ? l.start_line : 1, l ? l.start_column + 1 : 1)
     Entry.new(name: name, bare: name.split('::').last, kind: kind, cls: kind == :int ? 'Integer' : cls,
-              text: type.to_s, loc: loc)
+              text: type.to_s, loc: loc, elem: elem)
+  end
+
+  # The element class of `Array[T]` when T is one of ELEMENT_CLASSES; nil for any other argument (no element fact).
+  def element_class(type)
+    arg = type.args.first
+    return nil unless type.args.size == 1 && arg.is_a?(RBS::Types::ClassInstance) && arg.args.empty?
+
+    name = arg.name.to_s.delete_prefix('::')
+    ELEMENT_CLASSES.include?(name) ? name : nil
   end
 
   # `sites`: the registry's constant_assignment_sites ({name:, irep:, idx:, reg:}); `poisoned` the bare names bound
   # outside the program's bytecode (nil: unknown); `container_constants` is read for trace_new_target only. The
   # proven integer constants are not needed: the evaluator re-derives every binding it reads.
   def check(entries, ireps, registry, sites, _integer_constants, poisoned, container_constants, display_root)
-    result = Result.new(integer_names: Set.new, containers: {}, diagnostics: [], report: [], locs: entries.map(&:loc))
+    result = Result.new(integer_names: Set.new, containers: {}, elements: {}, diagnostics: [], report: [],
+                        locs: entries.map(&:loc))
     return result if entries.empty?
 
     qualified_at = sites.to_h { |s| [[s[:irep], s[:idx]], s[:name]] }
@@ -156,8 +172,21 @@ module DeclaredConstants
       result.integer_names << entry.bare
     else
       result.containers[entry.name] = entry.kind == :array ? 'Array' : entry.cls
+      element_fact(entry, bindings, poisoned, class_named, result, diag) if entry.elem
     end
     true
+  end
+
+  # The element bound is keyed by the bare name, as the reader resolves GETCONST, so it is recorded only when no
+  # other binding in the program or the outside world can supply that name.
+  def element_fact(entry, bindings, poisoned, class_named, result, diag)
+    if poisoned.nil? || poisoned.include?(entry.bare) || class_named.include?(entry.bare) ||
+       !bindings[entry.bare].all? { |_i, _x, _n, q| q == entry.name }
+      diag.call('info', nil, "`#{entry.bare}` is also bound elsewhere; no element fact for its Array[#{entry.elem}]")
+      return
+    end
+
+    result.elements[entry.bare] = entry.elem
   end
 
   def site_failure(entry, irep, idx, insn, evaluator, registry, container_constants)
@@ -172,6 +201,8 @@ module DeclaredConstants
     when :int
       evaluator.binding_value(irep, idx, insn).nil? ? 'the assigned value is not a proven Fixnum expression' : nil
     when :array
+      return element_failure(entry, irep, idx, src, registry, container_constants) if entry.elem
+
       traced = trace_new_target(irep, idx, src, nil, 0, nil, registry: registry,
                                                              container_constants: container_constants)
       return nil if traced == 'Array' || proven_array_source_scan(irep, idx, src, registry)
@@ -184,6 +215,33 @@ module DeclaredConstants
       return nil if traced == entry.cls
 
       "the assigned value is #{traced ? "a #{traced}" : 'not a proven instance'}, not exactly #{entry.cls}"
+    end
+  end
+
+  # `Array[T]`: a frozen `[...]` literal (ARRAY, not ARRAY2 / ARYPUSH) whose element registers each prove exactly T
+  # at the literal. Frozen, so no later write can change the element classes read back.
+  def element_failure(entry, irep, idx, src, registry, container_constants)
+    return 'the declared element type needs a frozen array literal (`[...].freeze`)' unless
+      frozen_array_source?(irep, idx, src, registry, container_constants)
+
+    literal_index, literal = literal_writer(irep, idx, src)
+    return 'the frozen array is not an array literal' unless literal&.op == 'ARRAY' && literal.uint_operand
+
+    types = BytecodeIR::Types.new(irep)
+    want = Set[entry.elem.to_sym]
+    bad = (0...literal.uint_operand).find do |offset|
+      fact = types.fact_at(literal_index, (literal.reg.to_i + offset).to_s)
+      fact.nil? || fact.classes != want
+    end
+    bad && "element #{bad} of the literal is not proven #{entry.elem}"
+  end
+
+  # The nearest writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil.
+  def literal_writer(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, _cur|
+      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+
+      [j, insn]
     end
   end
 

@@ -590,6 +590,7 @@ if $PROGRAM_NAME == __FILE__
     )
     integer_constants |= declared_constants.integer_names
     declared_constants.containers.each { |name, klass| container_constants[name] ||= klass }
+    sig_applied.ir_const_elements = declared_constants.elements if sig_applied
     DeclaredConstants.report(declared_constants, sig_applied,
                              abort_on_error: !ENV['BC2CPP_TYPE_FACTS'].to_s.then { |v| !v.empty? })
   end
