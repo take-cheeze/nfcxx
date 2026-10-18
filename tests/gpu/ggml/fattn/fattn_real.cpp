@@ -106,7 +106,18 @@ static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_s
     dst_t.src[0] = &Q_t;
     dst_t.src[1] = &K_t;
     dst_t.src[2] = &V_t;
-    dst_t.src[3] = nullptr;  // no mask
+    // The mask: all zeros, F16, [N keys, T tokens, 1, 1]. It leaves the scores unchanged (slope * 0), so the output is the
+    // unmasked attention. Needed because the upstream vec kernel computes maskh = mask + nb33 * (sequence % ne33) + ... even
+    // without a mask, and the launch passes ne33 = 0 when there is none: the modulo is then a division by zero (the device
+    // traps). With a mask, ne33 = 1.
+    sycl::half * M = sycl::malloc_shared<sycl::half>(N * T, q);
+    for (int64_t i = 0; i < N * T; i++) M[i] = sycl::half(0.0f);
+    ggml_tensor mask_t{};
+    mask_t.type = GGML_TYPE_F16;
+    mask_t.ne[0] = N; mask_t.ne[1] = T; mask_t.ne[2] = 1; mask_t.ne[3] = 1;
+    mask_t.nb[0] = sizeof(sycl::half); mask_t.nb[1] = mask_t.nb[0] * N; mask_t.nb[2] = mask_t.nb[1] * T; mask_t.nb[3] = mask_t.nb[2];
+    mask_t.data = M;
+    dst_t.src[3] = &mask_t;
     dst_t.src[4] = nullptr;  // no sinks
     // op_params: [0] scale (float), [1] max_bias (float, 0: no ALiBi), [2] logit_softcap (float, 0: off)
     const float scale = 1.0f / std::sqrt((float) D), max_bias = 0.0f, logit_softcap = 0.0f;
@@ -164,6 +175,7 @@ static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_s
     sycl::free(K, q);
     sycl::free(V, q);
     sycl::free(dst, q);
+    sycl::free(M, q);
     return ok ? 0 : 1;
 }
 
