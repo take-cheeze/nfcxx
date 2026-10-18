@@ -99,6 +99,11 @@ module BaseRbsAll
   def run(out_dir, closed_build)
     report = []
     path, = BaseRbs.run(File.join(out_dir, 'mruby-core', 'ruby'), CORE_RUBY.map { |rel| File.join(ROOT, rel) })
+    # Only the class headers: the closed world does not compile these methods, so a declared method is not in the
+    # program and the type check rejects it (TC1003). The headers carry the superclass the hierarchy needs.
+    Dir[File.join(out_dir, 'mruby-core', 'ruby', '*.rbs')].each do |file|
+      File.write(file, File.read(file).lines.reject { |line| line.start_with?('  ') }.join)
+    end
     report << ['mruby-core ruby', 'ok', CORE_RUBY.size, 0, path]
     CORE_NATIVE.each do |name, rels|
       srcs = rels.map { |rel| File.join(ROOT, rel) }
