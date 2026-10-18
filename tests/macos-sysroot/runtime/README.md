@@ -5,7 +5,11 @@ library provides on a Mac and that the clean-room sysroot does not. They come fr
 stubs, so the cross link resolves them to real code. `build.sh` compiles them for `arm64-apple-darwin` and archives them
 into `build/macos-rt/libnfcxx-darwin-rt.a`; the cross link adds that archive when it exists. Native builds never see it.
 
-## Sources (LLVM 18.1.8, tag `llvmorg-18.1.8`, fetched verbatim from github.com/llvm/llvm-project)
+## Sources (LLVM 18.1.8, fetched at the commit in `LLVM_PIN`)
+
+Pinned: tag `llvmorg-18.1.8`, commit `3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff` (`LLVM_PIN`). Nothing from LLVM is
+vendored in this repository: `build.sh` fetches exactly that commit from github.com/llvm/llvm-project at build time,
+as a sparse, shallow clone of the three trees it needs, and stops if the checked-out commit is not the pin.
 
 | file | provides |
 | --- | --- |
