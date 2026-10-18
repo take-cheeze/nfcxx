@@ -303,10 +303,12 @@ void emit_module(const ModuleText &text, const std::string &sm, const std::vecto
   // The functions of the module, for the calls and the function addresses: their kernel flags are final now.
   std::map<std::string, bool> functions;
   for (const auto &fn : fns) functions[fn->name()] = fn->kernel;
+  const std::map<std::string, AggShape> aggs = abi_shapes(scan.nonfn);
   for (const auto &fn : fns) {
     fn->module_fns = &by_name;
     fn->mod = &syms;
     fn->functions = &functions;
+    fn->aggs = &aggs;
   }
   // Each function is compiled and its text is taken; the text is kept until it is written (in the call order below).
   std::vector<std::string> texts(fns.size());

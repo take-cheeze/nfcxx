@@ -14,6 +14,17 @@
 #include "lower_arith.hpp"
 #include "lower_types.hpp"
 
+// The size and alignment of a struct or union passed or returned by value: its (abi-type) form of the module.
+struct AggShape {
+  long long size = 0;
+  long long align = 1;
+  bool empty = false;  // (empty): no data, so it is not passed at all (no PTX parameter or result), as nvcc does
+};
+
+// The module's (abi-type NAME SIZE ALIGN SHAPE) forms by name (the shape is not needed: the value is copied by bytes).
+// Throws BadIR when a form is malformed.
+std::map<std::string, AggShape> abi_shapes(const std::vector<Node> &forms);
+
 class Fn : public FnCtx {
  public:
   // name is the function's IR name; index is its position among the module's functions (the frame's name,
@@ -32,6 +43,13 @@ class Fn : public FnCtx {
   bool uses_dynshared = false;         // the dynamic shared symbol is used (the module declares it)
   bool uses_printf = false;            // vprintf is called (the module declares it)
   const std::map<std::string, Fn *> *module_fns = nullptr;  // the module's functions by name (the calls)
+  // The module's aggregates by name (its (abi-type) forms): the shapes of the struct and union parameters and results.
+  const std::map<std::string, AggShape> *aggs = nullptr;
+  // Per parameter: the shape of a struct or union passed by value (the byval parameters), set for the hidden result too.
+  std::vector<std::optional<AggShape>> agg_params;
+  // The shape of the struct the function returns through its hidden result (sret), which is its first parameter: the
+  // result is a .param array of the device function (nvcc's func_retval0), set when the function returns a struct.
+  std::optional<AggShape> sret;
 
   // The header: the return type, the parameters and the frame slots. Idempotent.
   void setup();
@@ -46,6 +64,12 @@ class Fn : public FnCtx {
   void call_value(const Node &x, const std::string &dest, const Ty &ty);
   void call_site(const Node &x, const std::string &dest, const Ty *ty);
   void printf_call(const Node &x, const std::string &dest, const Ty &ty);
+  AggShape aggregate(const Node &t) const;
+  long long alloc_frame(long long size, long long align);
+  std::string param_name(size_t k) const;
+  // Whether parameter k is a PTX .param of the function: not the sret result and not an empty object.
+  bool is_ptx_param(size_t k) const;
+  void emit_return();
   void scalar_u32(const std::string &name, const Node &x, const std::string &dest, const Ty &ty);
   void float_builtin(const std::string &name, const Node &x, const std::string &dest, const Ty &ty);
   void float_to_int_builtin(const std::string &name, const Node &x, const std::string &dest, const Ty &ty);
@@ -60,6 +84,8 @@ class Fn : public FnCtx {
   std::string name_;
   bool setup_done_ = false;
   long long frame_ = 0;                // the frame's size in bytes (the slots, the printf buffers)
+  long long frame_align_ = 8;          // the frame's alignment (the largest slot alignment, at least 8)
+  std::vector<long long> agg_off_;     // per parameter: the frame offset of its byval copy (or of the sret object)
   int ncall_ = 0;                      // the calls of module functions (their parameter names)
   std::vector<const Node *> body_;     // the statements (the forms that are not the header)
   std::vector<std::string> prologue_;  // the frame address, the parameter loads
