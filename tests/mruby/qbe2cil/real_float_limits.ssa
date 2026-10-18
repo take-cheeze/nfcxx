@@ -1,0 +1,58 @@
+export
+function w $main() {
+@start.1
+	%.1 =l alloc8 8
+	%.2 =l alloc8 8
+	%.3 =l alloc8 8
+	%.4 =l alloc4 4
+	%.5 =l alloc4 4
+	%.6 =l alloc8 8
+	%.19 =l alloc4 4
+@body.2
+	stored d_2.2250738585072014e-308, %.1
+	stored d_1.7976931348623157e+308, %.2
+	stored d_2.2204460492503131e-16, %.3
+	stores s_3.4028234663852886e+38, %.4
+	stores s_1.1920928955078125e-07, %.5
+	%.7 =l extsw 8
+	%.8 =l call extern $memcpy(l %.6, l %.1, l %.7)
+	%.9 =l loadl %.6
+	%.10 =w cnel %.9, 4503599627370496
+	jnz %.10, @if_true.3, @if_false.4
+@if_true.3
+	ret 1
+@if_false.4
+	%.11 =l extsw 8
+	%.12 =l call extern $memcpy(l %.6, l %.2, l %.11)
+	%.13 =l loadl %.6
+	%.14 =w cnel %.13, 9218868437227405311
+	jnz %.14, @if_true.5, @if_false.6
+@if_true.5
+	ret 2
+@if_false.6
+	%.15 =l extsw 8
+	%.16 =l call extern $memcpy(l %.6, l %.3, l %.15)
+	%.17 =l loadl %.6
+	%.18 =w cnel %.17, 4372995238176751616
+	jnz %.18, @if_true.7, @if_false.8
+@if_true.7
+	ret 3
+@if_false.8
+	%.20 =l extsw 4
+	%.21 =l call extern $memcpy(l %.19, l %.4, l %.20)
+	%.22 =w loadw %.19
+	%.23 =w cnew %.22, 2139095039
+	jnz %.23, @if_true.9, @if_false.10
+@if_true.9
+	ret 4
+@if_false.10
+	%.24 =l extsw 4
+	%.25 =l call extern $memcpy(l %.19, l %.5, l %.24)
+	%.26 =w loadw %.19
+	%.27 =w cnew %.26, 872415232
+	jnz %.27, @if_true.11, @if_false.12
+@if_true.11
+	ret 5
+@if_false.12
+	ret 0
+}

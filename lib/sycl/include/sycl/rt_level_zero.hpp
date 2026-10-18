@@ -213,6 +213,7 @@ class ze_rt {
   }
 
   std::string device_name() const { return device_name_; }
+  bool has_fp16() const { return has_fp16_; }
 
  private:
   struct kernel_info {
@@ -257,6 +258,8 @@ class ze_rt {
         kernels_[key] = kernel_info{s.substr(0, a), (uint32_t)std::strtoul(s.c_str() + b + 1, nullptr, 10)};
       } else if (s.size() > 2 && s[0] == 'T' && s[1] == '\t') {
         stack_bytes_ = (uint32_t)std::strtoul(s.c_str() + 2, nullptr, 10);
+      } else if (s.size() > 2 && s[0] == 'G' && s[1] == '\t') {
+        subgroup_size_ = (uint32_t)std::strtoul(s.c_str() + 2, nullptr, 10);
       } else if (s.size() > 2 && s[0] == 'S' && s[1] == '\t') {
         size_t a = s.find('\t', 2);
         static_size_ = std::strtoull(s.c_str() + 2, nullptr, 10);
@@ -308,6 +311,10 @@ class ze_rt {
     max_wi_[1] = cp.maxGroupSizeY;
     max_wi_[2] = cp.maxGroupSizeZ;
     local_mem_ = cp.maxSharedLocalMemory;
+    ze_device_module_properties_t mp = {};
+    mp.stype = ZE_STRUCTURE_TYPE_DEVICE_MODULE_PROPERTIES;
+    check(zeDeviceGetModuleProperties(dev_, &mp), "zeDeviceGetModuleProperties");
+    has_fp16_ = (mp.flags & ZE_DEVICE_MODULE_FLAG_FP16) != 0;
 
     ze_device_memory_access_properties_t mem = {};
     mem.stype = ZE_STRUCTURE_TYPE_DEVICE_MEMORY_ACCESS_PROPERTIES;
@@ -393,6 +400,10 @@ class ze_rt {
     }
     if (total > max_wg_)
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
+    // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
+    if (subgroup_size_ && total % subgroup_size_ != 0)
+      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(subgroup_size_) +
+           " lanes, so the work-group size must be a multiple of " + std::to_string(subgroup_size_));
     if (lmem + 1024 > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
   }
@@ -449,6 +460,15 @@ class ze_rt {
     ze_kernel_handle_t kern = nullptr;
     check(zeKernelCreate(module(l), &kd, &kern), "zeKernelCreate");
     check(zeKernelSetGroupSize(kern, l[0], l[1], l[2]), "zeKernelSetGroupSize");
+    if (subgroup_size_) {
+      // the kernel must be compiled for the sub-group size the module asks for (its SubgroupSize execution mode)
+      ze_kernel_properties_t kp = {};
+      kp.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+      check(zeKernelGetProperties(kern, &kp), "zeKernelGetProperties");
+      if (kp.requiredSubgroupSize != subgroup_size_)
+        fail("the kernel requires sub-groups of " + std::to_string(kp.requiredSubgroupSize) + " lanes; the module needs " +
+             std::to_string(subgroup_size_));
+    }
     kernels_obj_[k] = kern;
     return kern;
   }
@@ -461,6 +481,7 @@ class ze_rt {
   uint32_t max_wg_ = 0;
   uint32_t max_wi_[3] = {0, 0, 0};
   uint32_t local_mem_ = 0;
+  bool has_fp16_ = false;
   std::vector<uint8_t> il_;
   size_t il_size_ = 0;
   uint8_t *host_ = nullptr;
@@ -471,6 +492,7 @@ class ze_rt {
   std::map<std::string, ze_module_handle_t> modules_;
   std::map<std::string, ze_kernel_handle_t> kernels_obj_;
   uint32_t stack_bytes_ = 0;
+  uint32_t subgroup_size_ = 0;   // the sub-group size of the module's kernels (manifest line G), 0 when none uses sub-groups
   uint64_t static_size_ = 0, statics_ = 0;
   std::string static_hex_;
   std::vector<std::pair<uint64_t, uint64_t>> relocs_;

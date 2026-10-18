@@ -1,0 +1,1 @@
+(function "f" (ret float) (params) (return (const float 1e39)))

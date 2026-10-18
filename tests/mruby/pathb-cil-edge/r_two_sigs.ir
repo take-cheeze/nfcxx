@@ -1,0 +1,4 @@
+(function "f" (ret int) (params)
+  (eval (call void &"g" (const int 1)))
+  (eval (call void &"g" (const long 1)))
+  (return (const int 0)))

@@ -51,6 +51,9 @@ void *__nfcxx_sycl_closure(void);     // the closure object, copied by the host
 void *__nfcxx_sycl_local_base(void);  // the work-group memory (local_accessor storage)
 void *__nfcxx_sycl_scratch(void);     // 256 words of work-group memory kept for the group algorithms
 void __nfcxx_sycl_barrier(void);
+// sub-group shuffles (OpGroupNonUniformShuffle, ShuffleXor in the OpenCL module): the word of lane src, of lane (lane ^ mask)
+unsigned __nfcxx_sycl_sg_shuffle_u32(unsigned w, unsigned src);
+unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
 float __nfcxx_sycl_fn1(int op, float x);  // math builtins; op is a literal: see SYCL_MATH in scripts/pathb-wgsl-emit.rb
 float __nfcxx_sycl_fn2(int op, float x, float y);
 float __nfcxx_sycl_fn3(int op, float x, float y, float z);
@@ -184,6 +187,9 @@ template <int D> inline bool operator!=(const id<D> &a, const id<D> &b) { return
 template <int D> inline range<D> operator+(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] + b[i]; return r; }
 template <int D> inline range<D> operator-(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] - b[i]; return r; }
 template <int D> inline range<D> operator*(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] * b[i]; return r; }
+// dpct::dim3 converts to range<3> with its x, y, z in reverse index order (dim3 operator sycl::range<3>), so a non-template
+// overload accepts dim3 * range<3> and range<3> * dim3 through that conversion (a template cannot deduce from dim3).
+inline range<3> operator*(const range<3> &a, const range<3> &b) { return range<3>(a[0] * b[0], a[1] * b[1], a[2] * b[2]); }
 template <int D> inline range<D> operator/(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] / b[i]; return r; }
 template <int D> inline range<D> operator%(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] % b[i]; return r; }
 template <int D> inline range<D> operator-(const range<D> &a, size_t k) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] - k; return r; }
@@ -322,22 +328,52 @@ inline multi_ptr<T, AS, Dec> make_ptr(T *p) { return multi_ptr<T, AS, Dec>(p); }
 
 template <class T, int N> class vec;
 
-// A sub-group here is one work-item (the sub-group size is 1, which is what device::get_info<sub_group_sizes> reports), so
-// every sub-group algorithm is trivial and host and device agree.
+// A sub-group has 16 lanes (detail::kSubGroupSize: the Intel default that ggml uses; the work-groups of a kernel that uses
+// sub-groups are multiples of it). Lane k of sub-group j is the work-item with local linear id 16j+k. The exchanges are real:
+// on the device they are the sub-group shuffles of the OpenCL module (scripts/pathb-spirv-emit.rb gives such a kernel the
+// SubgroupSize 16 execution mode); on the host the work-items of a group, which run as fibers, swap the words through the
+// group's scratch words, with a barrier before and after each swap.
+namespace detail {
+constexpr unsigned kSubGroupSize = 16;
+inline unsigned sg_shuffle32(unsigned w, unsigned src);       // the word of lane src (0..15) of the caller's sub-group
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask);  // the word of lane (lane ^ mask), mask 0..15
+// x of any trivially copyable type, moved word by word
+template <class T> inline T sg_shuffle(T x, unsigned src) {
+  constexpr size_t n = (sizeof(T) + 3) / 4;
+  unsigned w[n] = {};
+  std::memcpy(w, &x, sizeof(T));
+  for (size_t i = 0; i < n; i++) w[i] = sg_shuffle32(w[i], src);
+  T r;
+  std::memcpy(&r, w, sizeof(T));
+  return r;
+}
+template <class T> inline T sg_shuffle_xor(T x, unsigned mask) {
+  constexpr size_t n = (sizeof(T) + 3) / 4;
+  unsigned w[n] = {};
+  std::memcpy(w, &x, sizeof(T));
+  for (size_t i = 0; i < n; i++) w[i] = sg_shuffle_xor32(w[i], mask & 15);
+  T r;
+  std::memcpy(&r, w, sizeof(T));
+  return r;
+}
+}  // namespace detail
+
 class sub_group {
  public:
-  sub_group() : lin_(0), count_(1) {}
-  sub_group(size_t lin, size_t count) : lin_(lin), count_(count) {}
-  id<1> get_local_id() const { return id<1>(0); }
-  size_t get_local_linear_id() const { return 0; }
-  range<1> get_local_range() const { return range<1>(1); }
-  range<1> get_max_local_range() const { return range<1>(1); }
-  size_t get_local_linear_range() const { return 1; }
-  id<1> get_group_id() const { return id<1>(lin_); }
-  size_t get_group_linear_id() const { return lin_; }
-  range<1> get_group_range() const { return range<1>(count_); }
-  size_t get_group_linear_range() const { return count_; }
-  bool leader() const { return true; }
+  sub_group() : lane_(0), sg_(0), nsg_(1) {}
+  // lin: the work-item's local linear id, wg: the work-group size
+  sub_group(size_t lin, size_t wg)
+      : lane_(lin % detail::kSubGroupSize), sg_(lin / detail::kSubGroupSize), nsg_((wg + detail::kSubGroupSize - 1) / detail::kSubGroupSize) {}
+  id<1> get_local_id() const { return id<1>(lane_); }
+  size_t get_local_linear_id() const { return lane_; }
+  range<1> get_local_range() const { return range<1>(detail::kSubGroupSize); }
+  range<1> get_max_local_range() const { return range<1>(detail::kSubGroupSize); }
+  size_t get_local_linear_range() const { return detail::kSubGroupSize; }
+  id<1> get_group_id() const { return id<1>(sg_); }
+  size_t get_group_linear_id() const { return sg_; }
+  range<1> get_group_range() const { return range<1>(nsg_); }
+  size_t get_group_linear_range() const { return nsg_; }
+  bool leader() const { return lane_ == 0; }
   // block load and store: one element per work-item
   template <class T, access::address_space AS, access::decorated Dec> T load(multi_ptr<T, AS, Dec> p) const { return *p; }
   template <int N, class T, access::address_space AS, access::decorated Dec> vec<T, N> load(multi_ptr<T, AS, Dec> p) const {
@@ -353,8 +389,9 @@ class sub_group {
   template <class T> void store(T *p, const T &x) const { *p = x; }
 
  private:
-  size_t lin_, count_;
+  size_t lane_, sg_, nsg_;
 };
+
 template <int D = 1> class nd_item {
  public:
   nd_item() {}
@@ -371,6 +408,7 @@ template <int D = 1> class nd_item {
   }
   size_t get_group(int d) const { return grp_[d]; }
   range<D> get_group_range() const { range<D> n; for (int i = 0; i < D; i++) n[i] = gr_[i] / lr_[i]; return n; }
+  size_t get_group_range(int d) const { return get_group_range()[d]; }
   size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * (gr_[i] / lr_[i]) + grp_[i]; return l; }
   range<D> get_global_range() const { return gr_; }
   size_t get_global_range(int d) const { return gr_[d]; }
@@ -392,18 +430,53 @@ template <int D = 1> class nd_item {
   range<D> gr_, lr_;
 };
 
-template <class T> inline T select_from_group(sub_group, T x, id<1>) { return x; }
-template <class T> inline T group_broadcast(sub_group, T x) { return x; }
-template <class T> inline T group_broadcast(sub_group, T x, id<1>) { return x; }
-template <class T> inline T shift_group_left(sub_group, T x, unsigned = 1) { return x; }
-template <class T> inline T shift_group_right(sub_group, T x, unsigned = 1) { return x; }
-template <class T> inline T permute_group_by_xor(sub_group, T x, unsigned) { return x; }
-template <class T, class Op> inline T reduce_over_group(sub_group, T x, Op) { return x; }
-template <class T, class Op> inline T inclusive_scan_over_group(sub_group, T x, Op) { return x; }
-inline bool any_of_group(sub_group, bool p) { return p; }
-inline bool all_of_group(sub_group, bool p) { return p; }
-inline bool none_of_group(sub_group, bool p) { return !p; }
-inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {}
+// the lanes of the caller's sub-group exchange values; every lane must reach each of these (the sub-group is collective)
+template <class T> inline T select_from_group(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)(i[0] & 15)); }
+template <class T> inline T group_broadcast(sub_group, T x) { return detail::sg_shuffle(x, 0u); }
+template <class T> inline T group_broadcast(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)(i[0] & 15)); }
+// the value of lane lane + delta (or of the caller itself when that lane is past the end)
+template <class T> inline T shift_group_left(sub_group sg, T x, unsigned delta = 1) {
+  unsigned lane = (unsigned)sg.get_local_linear_id();
+  return detail::sg_shuffle(x, lane + delta < detail::kSubGroupSize ? lane + delta : lane);
+}
+// the value of lane lane - delta (or of the caller itself when that lane is before the start)
+template <class T> inline T shift_group_right(sub_group sg, T x, unsigned delta = 1) {
+  unsigned lane = (unsigned)sg.get_local_linear_id();
+  return detail::sg_shuffle(x, lane >= delta ? lane - delta : lane);
+}
+template <class T> inline T permute_group_by_xor(sub_group, T x, unsigned mask) { return detail::sg_shuffle_xor(x, mask); }
+// butterfly over the 16 lanes: after the xor steps 8, 4, 2, 1 every lane holds the whole sum (op commutative, as SYCL requires)
+template <class T, class Op> inline T reduce_over_group(sub_group, T x, Op op) {
+  for (unsigned m = detail::kSubGroupSize / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
+  return x;
+}
+// Hillis-Steele: after the steps 1, 2, 4, 8 lane k holds the combination of lanes 0..k
+template <class T, class Op> inline T inclusive_scan_over_group(sub_group sg, T x, Op op) {
+  unsigned lane = (unsigned)sg.get_local_linear_id();
+  for (unsigned d = 1; d < detail::kSubGroupSize; d <<= 1) {
+    T y = shift_group_right(sg, x, d);
+    if (lane >= d) x = op(y, x);
+  }
+  return x;
+}
+inline bool any_of_group(sub_group, bool p) {
+  unsigned r = p ? 1u : 0u;
+  for (unsigned m = detail::kSubGroupSize / 2; m > 0; m >>= 1) r |= detail::sg_shuffle_xor(r, m);
+  return r != 0;
+}
+inline bool all_of_group(sub_group, bool p) {
+  unsigned r = p ? 1u : 0u;
+  for (unsigned m = detail::kSubGroupSize / 2; m > 0; m >>= 1) r &= detail::sg_shuffle_xor(r, m);
+  return r != 0;
+}
+inline bool none_of_group(sub_group sg, bool p) { return !any_of_group(sg, p); }
+inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __nfcxx_sycl_barrier();
+#else
+  detail::barrier_on_host();
+#endif
+}
 
 template <int D> inline void group_barrier(const group<D> &, memory_scope = memory_scope::work_group) {
 #ifdef __NFCXX_SYCL_DEVICE__
@@ -997,6 +1070,7 @@ template <class T, int D = 1> class local_accessor {
   size_t get_count() const { return r_.size(); }
   range<D> get_range() const { return r_; }
   T *get_pointer() const { return base(); }
+  template <access::decorated Dec = access::decorated::legacy> local_ptr<T, Dec> get_multi_ptr() const { return local_ptr<T, Dec>(base()); }
 
  private:
 #ifdef __NFCXX_SYCL_DEVICE__
@@ -1017,6 +1091,13 @@ template <class T, int D = 1> class local_accessor {
 #define NFCXX_SYCL_FIBER_STACK (96 * 1024)
 #endif
 namespace detail {
+// The item of a work-item on the host: its nd_item<dim> (set by the kernel's body while the fiber runs), and its local
+// linear id and group size, which get_sub_group() needs without the dimension.
+struct host_item {
+  const void *nd = nullptr;
+  int dim = 0;
+  size_t lin = 0, wg = 1;
+};
 struct host_group {
   int n = 0, cur = 0;
   ucontext_t sched;
@@ -1024,12 +1105,18 @@ struct host_group {
   std::vector<char *> stacks;
   std::vector<char> done;
   std::vector<unsigned long> scratch;   // one word per work-item, for the group algorithms
+  std::vector<host_item> items;         // one per work-item
   void (*run)(void *, int) = nullptr;
   void *arg = nullptr;
 };
 inline host_group *&current_group() {
   static host_group *g = nullptr;
   return g;
+}
+// The item of the work-item that is running: the scheduler points it at that fiber's slot before each switch into the fiber.
+inline host_item *&current_host_item() {
+  static thread_local host_item *p = nullptr;
+  return p;
 }
 inline void fiber_main() {
   host_group *g = current_group();
@@ -1043,7 +1130,15 @@ inline void barrier_on_host() {
 }
 // Runs body(i) for i < n as the n work-items of one group, with barriers working.
 template <class Body> inline void run_group_items(host_group &g, int n, Body &body) {
-  if (n == 1) { body(0); return; }
+  g.items.assign(n, host_item{});
+  for (int i = 0; i < n; i++) { g.items[i].lin = (size_t)i; g.items[i].wg = (size_t)n; }
+  host_item *saved_item = current_host_item();
+  if (n == 1) {
+    current_host_item() = &g.items[0];
+    body(0);
+    current_host_item() = saved_item;
+    return;
+  }
   g.run = [](void *a, int i) { (*(Body *)a)(i); };
   g.arg = &body;
   g.n = n;
@@ -1068,16 +1163,37 @@ template <class Body> inline void run_group_items(host_group &g, int n, Body &bo
     for (int i = 0; i < n; i++) {
       if (g.done[i]) continue;
       g.cur = i;
+      current_host_item() = &g.items[i];
       swapcontext(&g.sched, &g.ctx[i]);
       if (g.done[i]) left--;
     }
+  current_host_item() = saved_item;
   current_group() = saved;
 }
 inline void free_group(host_group &g) { for (char *s : g.stacks) std::free(s); g.stacks.clear(); }
+// sub-group exchanges on the host: each work-item writes its word, a barrier, reads its source's word, a barrier (so the next
+// write waits until every read is done). The lanes of a sub-group are the work-items 16j..16j+15 of the group (g->cur is the index).
+inline unsigned sg_shuffle32(unsigned w, unsigned src) {
+  host_group *g = current_group();
+  if (!g) return w;
+  int cur = g->cur, from = (cur & ~15) + (int)(src & 15);
+  g->scratch[cur] = w;
+  barrier_on_host();
+  unsigned r = from < g->n ? (unsigned)g->scratch[from] : w;
+  barrier_on_host();
+  return r;
+}
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask) {
+  host_group *g = current_group();
+  if (!g) return w;
+  return sg_shuffle32(w, (unsigned)(g->cur & 15) ^ (mask & 15));
+}
 }  // namespace detail
 #else
 namespace detail {
 inline void barrier_on_host() {}   // never called on the device: nd_item::barrier lowers to __nfcxx_sycl_barrier
+inline unsigned sg_shuffle32(unsigned w, unsigned src) { return __nfcxx_sycl_sg_shuffle_u32(w, src & 15); }
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask) { return __nfcxx_sycl_sg_shuffle_xor_u32(w, mask & 15); }
 }  // namespace detail
 #endif
 
@@ -1174,7 +1290,12 @@ template <class Name, int D, class F> void handler::parallel_for(nd_range<D> r, 
         loc[d] = tl % lr[d]; tl /= lr[d];
         glo[d] = grp[d] * lr[d] + loc[d];
       }
-      f(nd_item<D>(glo, loc, grp, gr, lr));
+      nd_item<D> it(glo, loc, grp, gr, lr);
+      detail::host_item &hi = hg.items[ll];
+      hi.nd = &it;
+      hi.dim = D;
+      f(it);
+      hi.nd = nullptr;
     };
     detail::run_group_items(hg, (int)nlocal, body);
   }
@@ -1192,6 +1313,37 @@ template <class Name, class F> void handler::single_task(F f) {
   f();
 #endif
 }
+
+// ------------------------------------------------------------------------------------------------ this_work_item
+// The item of the work-item that is running. On the device it is built from the builtins the kernel's item comes from. On
+// the host it is the item of the running fiber (detail::current_host_item, set by the scheduler in run_group_items).
+namespace ext::oneapi::this_work_item {
+template <int D> inline nd_item<D> get_nd_item() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return nd_item<D>(detail::device_gid<D>(), detail::device_lid<D>(), detail::device_group<D>(), detail::device_global_range<D>(),
+                    detail::device_local_range<D>());
+#else
+  const detail::host_item *h = detail::current_host_item();
+  if (!h || !h->nd || h->dim != D) {
+    std::fprintf(stderr, "this_work_item::get_nd_item<%d>: no nd_range work-item is running\n", D);
+    std::abort();
+  }
+  return *static_cast<const nd_item<D> *>(h->nd);
+#endif
+}
+inline sub_group get_sub_group() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return get_nd_item<3>().get_sub_group();   // unused dimensions have range 1 and id 0, so the linear id and size are the kernel's
+#else
+  const detail::host_item *h = detail::current_host_item();
+  if (!h) {
+    std::fprintf(stderr, "this_work_item::get_sub_group: no nd_range work-item is running\n");
+    std::abort();
+  }
+  return sub_group(h->lin, h->wg);
+#endif
+}
+}  // namespace ext::oneapi::this_work_item
 
 // ------------------------------------------------------------------------------------------------ device, platform, context
 
@@ -1302,8 +1454,8 @@ class device {
       case aspect::fp64: return !is_gpu();
       case aspect::usm_device_allocations:
       case aspect::usm_host_allocations:
-      case aspect::usm_shared_allocations:
-      case aspect::fp16: return a != aspect::fp16;
+      case aspect::usm_shared_allocations: return true;
+      case aspect::fp16: return has_fp16();
       default: return false;
     }
   }
@@ -1313,6 +1465,17 @@ class device {
   template <class P> auto get_info() const { return info_of(static_cast<P *>(nullptr)); }
 
  private:
+  // fp16 is a property of the backend device: the host has it (emulated), a GPU has it when its runtime reports it
+  bool has_fp16() const {
+    if (!is_gpu()) return true;
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::cl_rt::get().has_fp16();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::ze_rt::get().has_fp16();
+#else
+    return false;  // WebGPU and Vulkan: no fp16 query in this subset
+#endif
+  }
   std::string info_of(info::device::name *) const {
     if (!is_gpu()) return "nfcxx host";
 #if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
@@ -1338,7 +1501,7 @@ class device {
   friend bool operator==(const device &, const device &) { return true; }   // one device in this subset
   unsigned long info_of(info::device::local_mem_size *) const { return 16384; }
   unsigned long info_of(info::device::max_mem_alloc_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
-  std::vector<size_t> info_of(info::device::sub_group_sizes *) const { return std::vector<size_t>(1, 1); }
+  std::vector<size_t> info_of(info::device::sub_group_sizes *) const { return std::vector<size_t>(1, detail::kSubGroupSize); }
   info::local_mem_type info_of(info::device::local_mem_type *) const { return info::local_mem_type::local; }
   template <int D> id<3> info_of(info::device::max_work_item_sizes<D> *) const { return id<3>(256, 256, 64); }
   std::string info_of(info::device::profile *) const { return "FULL_PROFILE"; }
@@ -1726,8 +1889,14 @@ template <class T, int D> inline T *scratch_slot(size_t lid) {
 }  // namespace detail
 
 template <int D> inline bool group<D>::leader() const { return detail::group_lid<D>() == 0; }
-template <class T, class Op> inline T exclusive_scan_over_group(sub_group, T, Op) { return detail::red_identity<detail::op_kind<Op>::value, T>(); }
-template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_group, T, V init, Op) { return (T)init; }
+// lane k holds the combination of lanes 0..k-1 (lane 0 the identity)
+template <class T, class Op> inline T exclusive_scan_over_group(sub_group sg, T x, Op op) {
+  T e = shift_group_right(sg, inclusive_scan_over_group(sg, x, op), 1);
+  return sg.get_local_linear_id() == 0 ? detail::red_identity<detail::op_kind<Op>::value, T>() : e;
+}
+template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_group sg, T x, V init, Op op) {
+  return op((T)init, exclusive_scan_over_group(sg, x, op));
+}
 
 template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, Op op) {
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
@@ -2124,6 +2293,97 @@ template <class T> inline T clamp(T x, T lo, T hi) { return x < lo ? lo : (hi < 
 inline float clamp(float x, float lo, float hi) { return detail::m_clamp(x, lo, hi); }
 inline float abs(float x) { return NFCXX_SYCL_FN1(detail::M_FABS, x); }
 inline int abs(int x) { return x < 0 ? -x : x; }
+
+// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). They are not among the device math
+// ops (detail::math_op), and the device emitter has no lowering for them. On the host they are the C library's; on the device
+// a kernel that reaches one traps (it does not compute a wrong value). Templates, so only an instantiated call is emitted.
+namespace detail {
+template <class T> inline T m_erf(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for erf
+  return x;
+#else
+  return std::erf(x);
+#endif
+}
+template <class T> inline T m_expm1(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for expm1
+  return x;
+#else
+  return std::expm1(x);
+#endif
+}
+template <class T> inline T m_log1p(T x) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __builtin_trap();  // no device lowering for log1p
+  return x;
+#else
+  return std::log1p(x);
+#endif
+}
+}  // namespace detail
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type erf(T x) { return detail::m_erf((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type expm1(T x) { return detail::m_expm1((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type log1p(T x) { return detail::m_log1p((typename detail::fp<T>::type)x); }
+
+// sycl::native::exp (the fast-math exp; the compat library has one exp, so it is that one).
+namespace native {
+inline float exp(float x) { return sycl::exp(x); }
+}  // namespace native
+
+// sycl::ext::oneapi: the names element_wise.cpp spells out for its bfloat16 and work-item branches. bfloat16 is the bf16
+// storage (the upper 16 bits of a binary32, round-to-nearest-even on conversion from float); arithmetic and math go
+// through float and round the result back to bf16, as the device's bf16 math does.
+namespace ext {
+namespace oneapi {
+class bfloat16 {
+ public:
+  bfloat16() = default;
+  bfloat16(float f) : bits_(from_float(f)) {}
+  operator float() const { return to_float(bits_); }
+  uint16_t bits() const { return bits_; }
+  static bfloat16 from_bits(uint16_t b) { bfloat16 r; r.bits_ = b; return r; }
+
+ private:
+  uint16_t bits_ = 0;
+
+  static float to_float(uint16_t b) {
+    uint32_t u = (uint32_t)b << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+  }
+  static uint16_t from_float(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    if ((u & 0x7fffffffu) > 0x7f800000u) return 0x7fc0;  // NaN stays NaN
+    u += 0x7fffu + ((u >> 16) & 1u);                      // round to nearest even
+    return (uint16_t)(u >> 16);
+  }
+};
+inline bfloat16 operator-(bfloat16 a) { return bfloat16(-static_cast<float>(a)); }
+inline bfloat16 operator+(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) + static_cast<float>(b)); }
+inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) - static_cast<float>(b)); }
+inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
+inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
+namespace experimental {
+// The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
+#define NFCXX_SYCL_BF16_FN1(name) \
+  inline bfloat16 name(bfloat16 x) { return bfloat16(::sycl::name(static_cast<float>(x))); }
+#define NFCXX_SYCL_BF16_FN2(name) \
+  inline bfloat16 name(bfloat16 x, bfloat16 y) { return bfloat16(::sycl::name(static_cast<float>(x), static_cast<float>(y))); }
+NFCXX_SYCL_BF16_FN1(fabs) NFCXX_SYCL_BF16_FN1(exp) NFCXX_SYCL_BF16_FN1(exp2) NFCXX_SYCL_BF16_FN1(expm1)
+NFCXX_SYCL_BF16_FN1(log) NFCXX_SYCL_BF16_FN1(log2) NFCXX_SYCL_BF16_FN1(log1p) NFCXX_SYCL_BF16_FN1(sqrt)
+NFCXX_SYCL_BF16_FN1(sin) NFCXX_SYCL_BF16_FN1(cos) NFCXX_SYCL_BF16_FN1(tan) NFCXX_SYCL_BF16_FN1(tanh)
+NFCXX_SYCL_BF16_FN1(erf) NFCXX_SYCL_BF16_FN1(floor) NFCXX_SYCL_BF16_FN1(ceil) NFCXX_SYCL_BF16_FN1(trunc)
+NFCXX_SYCL_BF16_FN1(round)
+NFCXX_SYCL_BF16_FN2(fmax) NFCXX_SYCL_BF16_FN2(fmin)
+#undef NFCXX_SYCL_BF16_FN1
+#undef NFCXX_SYCL_BF16_FN2
+}  // namespace experimental
+}  // namespace oneapi
+}  // namespace ext
 
 }  // namespace sycl
 

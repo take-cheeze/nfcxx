@@ -5,7 +5,7 @@
 #
 # 3rd/qbe is take-cheeze/qbe, a daily mirror of https://c9x.me/git/qbe.git (see that
 # repo's sync workflow). 3rd/cproc is take-cheeze/cproc, a fork of michaelforney/cproc: its branch
-# nfcxx-qbe-darwin-combined (the pin, f13ca10) is the pinned upstream commit a44a644 plus nfcxx's cproc patches as commits
+# nfcxx-qbe-darwin-atomic (the pin, 8ed4e22) is the pinned upstream commit a44a644 plus nfcxx's cproc patches as commits
 # (unprototyped-fnptr, dollar-ident, aligned-attr, darwin-ldouble, apple-valist, apple-driver, apple-predefines,
 # atomic-builtins), which this script applied before, the __builtin_strstr, __builtin_char_memchr and libc++ string builtins (strchr, strrchr, strpbrk, strlen, memcmp, memmove), and the aarch64-apple va_arg of aggregates. Earlier nfcxx patches (empty-struct, vaarg-aggregate, empty-copy,
 # array-qual) are commits of a44a644 itself; see
@@ -24,6 +24,11 @@ for p in qbe cproc; do
   cp -r "$root/3rd/$p" "$root/build/$p"
   rm -rf "$root/build/$p/.git"
 done
+# rega.c holds at most NPm (64) copies in one parallel move, the copies a block edge needs (phi operands, call
+# arguments). A join with more (regex_automata 0.4.18, built by mrustc from the 1.13 regex crate) stops QBE with
+# "no more pm slots". The array is static, so 1024 costs nothing. A fork commit would be the proper home for this.
+sed -i.bak 's/NPm = 64,/NPm = 1024,/' "$root/build/qbe/rega.c" && rm -f "$root/build/qbe/rega.c.bak"
+grep -q 'NPm = 1024,' "$root/build/qbe/rega.c" || { echo "setup-qbe: NPm not found in rega.c" >&2; exit 1; }
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,
 # and "arm64-apple-darwin" is not one of its targets); the host equals the target, so no SDK is asked for.

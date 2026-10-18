@@ -1,0 +1,2 @@
+(data "s" (array 3 char) (string "abc"))
+(global "g" (array 5 char) 5 1 (init (bytes 0 5 @"s")))

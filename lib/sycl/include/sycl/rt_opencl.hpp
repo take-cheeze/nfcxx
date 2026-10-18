@@ -254,6 +254,8 @@ class cl_rt {
         kernels_[key] = kernel_info{s.substr(0, a), (uint32_t)std::strtoul(s.c_str() + b + 1, nullptr, 10)};
       } else if (s.size() > 2 && s[0] == 'T' && s[1] == '\t') {
         stack_bytes_ = (uint32_t)std::strtoul(s.c_str() + 2, nullptr, 10);
+      } else if (s.size() > 2 && s[0] == 'G' && s[1] == '\t') {
+        subgroup_size_ = (uint32_t)std::strtoul(s.c_str() + 2, nullptr, 10);
       } else if (s.size() > 2 && s[0] == 'S' && s[1] == '\t') {
         size_t a = s.find('\t', 2);
         static_size_ = std::strtoull(s.c_str() + 2, nullptr, 10);
@@ -300,6 +302,9 @@ class cl_rt {
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof max_wg_, &max_wg_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof max_wi_, max_wi_, nullptr);
     clGetDeviceInfo(dev_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof local_mem_, &local_mem_, nullptr);
+    cl_device_fp_config half_cfg = 0;
+    clGetDeviceInfo(dev_, CL_DEVICE_HALF_FP_CONFIG, sizeof half_cfg, &half_cfg, nullptr);
+    has_fp16_ = half_cfg != 0;
 
     cl_int e = CL_SUCCESS;
     ctx_ = clCreateContext(nullptr, 1, &dev_, nullptr, nullptr, &e);
@@ -357,6 +362,10 @@ class cl_rt {
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
     if (lmem + 1024 > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
+    // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
+    if (subgroup_size_ && total % subgroup_size_ != 0)
+      fail("a work-group of " + std::to_string(total) + " work-items; the module's sub-groups have " + std::to_string(subgroup_size_) +
+           " lanes, so the work-group size must be a multiple of " + std::to_string(subgroup_size_));
   }
 
   uint64_t closure_addr() const { return dev_base_ + cl_closure_at; }
@@ -381,6 +390,14 @@ class cl_rt {
     }
     cl_kernel kern = clCreateKernel(prog, entry.c_str(), &e);
     check(e, "clCreateKernel");
+    if (subgroup_size_) {
+      // the driver must run this local size with the sub-group size the module asks for (16 lanes)
+      size_t lsz[3] = {l[0], l[1], l[2]}, sg = 0;
+      check(clGetKernelSubGroupInfo(kern, dev_, CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE, sizeof lsz, lsz, sizeof sg, &sg, nullptr),
+            "clGetKernelSubGroupInfo");
+      if (sg != subgroup_size_)
+        fail("the device runs sub-groups of " + std::to_string(sg) + " lanes for this kernel; the module needs " + std::to_string(subgroup_size_));
+    }
     clReleaseProgram(prog);
     kernels_obj_[k] = kern;
     return kern;
@@ -389,6 +406,7 @@ class cl_rt {
 
  public:
   std::string device_name() const { return device_name_; }
+  bool has_fp16() const { return has_fp16_; }
 
  private:
   // the USM entry points of cl_intel_unified_shared_memory (the ICD loader resolves them per platform)
@@ -405,6 +423,7 @@ class cl_rt {
   size_t max_wg_ = 0;
   size_t max_wi_[3] = {0, 0, 0};
   cl_ulong local_mem_ = 0;
+  bool has_fp16_ = false;
   std::vector<uint8_t> il_;
   size_t il_size_ = 0;
   uint8_t *host_ = nullptr;
@@ -414,6 +433,7 @@ class cl_rt {
   std::map<std::string, kernel_info> kernels_;
   std::map<std::string, cl_kernel> kernels_obj_;
   uint32_t stack_bytes_ = 0;
+  uint32_t subgroup_size_ = 0;   // the sub-group size of the module's kernels (manifest line G), 0 when none uses sub-groups
   uint64_t static_size_ = 0, statics_ = 0;
   std::string static_hex_;
   std::vector<std::pair<uint64_t, uint64_t>> relocs_;

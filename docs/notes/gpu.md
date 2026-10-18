@@ -185,6 +185,12 @@ Refused (exit 3): trap, checked division and shifts, cf2i, bool in memory, 1- an
 `clCreateProgramWithIL`): 0 mismatches over 50000 elements, 0 guard writes. A mutant (`OpFAdd` -> `OpFSub`) is caught, and
 `trap` is refused. The loop kernel (`loop.ir`: `break`, a `set` accumulator) sums 0..9 to 45 on the GPU, and its bound-test mutant is caught.
 
+The same SPIR-V runs through the SYCL runtime (`lib/sycl`, `rt_opencl.hpp` and `rt_level_zero.hpp`): `tests/sycl/run.sh` builds
+the SYCL programs for `--backend=opencl` and `--backend=level-zero`. A dispatch whose stacks exceed the heap is split into
+slabs on both (#342). The ggml-sycl rung tests (`tests/gpu/ggml/`, fill, diag, unary) use this path; their status is in
+`docs/notes/ggml-sycl.md`. The runners need `spirv-as`/`spirv-val` (`SPIRV_TOOLS_BIN` or `PATH`) and the oneAPI runtime, which
+`scripts/oneapi-env.sh` sets up (#358).
+
 Not done: the checked operations and calls between functions, and running through SYCL's own kernel bundles (OpenCL is used).
 
 ## WebGPU (Dawn) vs OpenCL on the Arc B60

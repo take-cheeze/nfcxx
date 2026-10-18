@@ -155,6 +155,11 @@ def parse_forms(toks)
   stack[0]
 end
 
+# EDG's exception-handling state (lib_src/eh.h). A noexcept function (libstdc++'s std::array::operator[], for one) pushes
+# a kind-6 entry on __curr_eh_stack_entry and pops it on every exit; nothing on the device unwinds, so the cells are
+# ordinary static storage here, not an extern to refuse.
+EH_RUNTIME_STATE = %w[__curr_eh_stack_entry __eh_curr_region __catch_clause_number __caught_object_address].freeze
+
 def head_of(x)
   x.is_a?(Array) && !x.empty? && x[0].is_a?(String) ? x[0] : nil
 end
@@ -417,7 +422,7 @@ class Mod
       d = @datas[name]
       raise Refused, "static object @\"#{name}\" has no definition in the device unit" if f.nil? && d.nil?
       size, align = if f
-                      raise Refused, "static object @\"#{name}\" is extern" if f.drop(5).any? { |x| head_of(x) == "extern" }
+                      raise Refused, "static object @\"#{name}\" is extern" if f.drop(5).any? { |x| head_of(x) == "extern" } && !EH_RUNTIME_STATE.include?(name)
                       [as_int(f[3]), as_int(f[4])]
                     else
                       [static_bytes(d).length, 1]
@@ -1198,12 +1203,15 @@ class Fn
       @ind -= 1
       emit("}")
     when "nonnull"
-      p, _ = operand(s[1])
-      emit("if (#{p} == 0u) {")
-      @ind += 1
-      trap(4)
-      @ind -= 1
-      emit("}")
+      # the address of a function is never null (the front end's check on a function pointer that is a template argument)
+      unless s[1].is_a?(IRSym) && s[1].sig == "&"
+        p, _ = operand(s[1])
+        emit("if (#{p} == 0u) {")
+        @ind += 1
+        trap(4)
+        @ind -= 1
+        emit("}")
+      end
     when "return"
       if @ret.nil?
         emit("return;")
