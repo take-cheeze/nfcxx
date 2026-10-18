@@ -1655,7 +1655,7 @@ class SFn
     when "__nfcxx_sycl_barrier"
       ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(@mod.kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)])
       return nil
-    when "__nfcxx_sycl_fn1", "__nfcxx_sycl_fn2", "__nfcxx_sycl_fn3"
+    when "__nfcxx_sycl_fn1", "__nfcxx_sycl_fn1_f64", "__nfcxx_sycl_fn2", "__nfcxx_sycl_fn3"
       op = args[0]
       raise Refused, "#{name} with a non-constant operation" unless head_of(op) == "const"
       k = as_int(op[2])
