@@ -29,6 +29,7 @@ module LcfSchemaOracle
   }.freeze
   TYPE_RANGES = { 'int' => [-0x8000_0000, 0x7fff_ffff], 'uint8' => [0, 255] }.freeze
   DUMP = File.expand_path('lcf_schema_dump.rb', __dir__)
+  LCF_SCHEMA_MRBLIB = File.expand_path('../../mruby-lcf/mrblib', __dir__)
 
   module_function
 
@@ -55,6 +56,11 @@ module LcfSchemaOracle
     absent = row['has_default'] ? row['default_class'] : 'NilClass'
     Fact.new(path: row['path'], id: row['id'], name: row['name'], type: type, has_elements: row['has_elements'], classes: (classes | [absent]).freeze,
              range: TYPE_RANGES[type], nilable: !row['has_default'] || row['default_class'] == 'NilClass')
+  end
+
+  # by_name over the dump of the closed world's schema, read once per process.
+  def field_classes
+    @field_classes ||= by_name(facts(LCF_SCHEMA_MRBLIB)).transform_values { |info| info[:classes].to_a }
   end
 
   # field name => the union over every schema position that spells it. A name whose facts agree is
