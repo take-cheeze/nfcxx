@@ -619,6 +619,12 @@ class ClosedWorld
     @constant_write_counts[name].zero? && @outside_constant_write_counts[name] == bindings
   end
 
+  # NATIVE_CONSTRUCTED_CONSTANT: native_class_constant_stable?, and no program class of that simple name either. A
+  # CLASS opcode binds its constant without a SETCONST, so the write counts above do not see a class declaration.
+  def native_class_unshadowed?(full)
+    native_class_constant_stable?(full) && !@class_constant_names.include?(simple(full))
+  end
+
   # A literal `Klass.new` has an exact-class result only while ordinary
   # construction is visible: no unresolved installer can replace `new` or
   # `allocate`, and no outside Ruby file defines either name.

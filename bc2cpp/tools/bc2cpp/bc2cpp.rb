@@ -561,7 +561,9 @@ if $PROGRAM_NAME == __FILE__
   # CLOSED_WORLD_VALUE_CONSTANT: a single class-constructor assignment is a
   # guarded receiver hint, not an unconditional claim about the constant value.
   inferred_constant_classes = profile_call.call('single-assignment value constants') do
-    infer_constructed_constant_classes(ireps, constant_assignment_sites, registry, container_constants, closed_world)
+    infer_constructed_constant_classes(ireps, constant_assignment_sites, registry, container_constants, closed_world,
+                                       native_name_sources: native_name_sources, included_modules: included_modules,
+                                       prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
   end
   container_constants.merge!(inferred_constant_classes)
   warn "== single-assignment constructed constants (CLOSED_WORLD_VALUE_CONSTANT): #{inferred_constant_classes.size} =="
