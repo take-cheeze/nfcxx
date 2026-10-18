@@ -958,9 +958,11 @@ class ClosedWorld
   # Every `def name` anywhere in the text, not only at a line start: foreign_method_names
   # misses `private def loop` (mruby's Kernel#loop), which a proven miss must not call absent.
   def broad_def_names(paths)
-    Array(paths).each_with_object(Set.new) do |path, names|
-      text = File.read(path, encoding: 'BINARY')
-      text.scan(/(?:^|[\s;(])def\s+(?:[A-Za-z_]\w*\.)?(#{FOREIGN_METHOD_NAME_RE})/o) { |(n)| names << n }
+    ScanCache.fetch('closed_world.broad_def_names', Array(paths), cache_absent: false) do
+      Array(paths).each_with_object(Set.new) do |path, names|
+        text = File.read(path, encoding: 'BINARY')
+        text.scan(/(?:^|[\s;(])def\s+(?:[A-Za-z_]\w*\.)?(#{FOREIGN_METHOD_NAME_RE})/o) { |(n)| names << n }
+      end
     end
   end
 
