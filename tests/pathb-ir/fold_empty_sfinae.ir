@@ -1,0 +1,86 @@
+(ir-module "fold_empty_sfinae.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "_ZN1A5valueE" (const int) 4 4 (weak) (init
+    (scalar 0 int (const int 0))))
+(global "_ZNSt17integral_constantIbLb1EE5valueE" (const bool) 1 1 (weak) (init
+    (scalar 0 bool (const bool 0x1))))
+(global "_ZNSt17integral_constantIbLb0EE5valueE" (const bool) 1 1 (weak) (init
+    (scalar 0 bool (const bool 0x0))))
+(global "_ZNSt17integral_constantImLm0EE5valueE" (const unsigned_long) 8 8 (extern))
+(global "_ZNSt29__make_unsigned_selector_base5_ListIJhtjmyEE6__sizeE" (const unsigned_long) 8 8 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 1))))
+(global "_ZNSt29__make_unsigned_selector_base5_ListIJtjmyEE6__sizeE" (const unsigned_long) 8 8 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 2))))
+(global "_ZNSt29__make_unsigned_selector_base5_ListIJjmyEE6__sizeE" (const unsigned_long) 8 8 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 4))))
+(global "_ZNSt29__make_unsigned_selector_base5_ListIJmyEE6__sizeE" (const unsigned_long) 8 8 (extern))
+(global "_ZNSt29__make_unsigned_selector_base5_ListIJyEE6__sizeE" (const unsigned_long) 8 8 (extern))
+
+(function "_Z4pickv"
+  (ret int)
+  (params)
+  (return (const int 2)))
+
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (call int &"_Z4pickv"))
+  (return %0))
+
+(function "_ZSt11__terminatev"
+  (ret void)
+  (params)
+  (weak)
+  (slot "tmp" (struct "__C8") 240 8)
+  (let %0 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp" %0)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp")
+  (let %1 (ptr unsigned_char) (offset $"tmp" 8))
+  (store unsigned_char %1 (const unsigned_char 6))
+  (eval (call void &"_ZSt9terminatev"))
+  (block
+    (let %2 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %2)
+    (return)))
+
+(function "_ZSt23__is_constant_evaluatedv"
+  (ret bool)
+  (params)
+  (weak)
+  (slot "tmp" (struct "__C8") 240 8)
+  (let %0 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp" %0)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp")
+  (let %1 (ptr unsigned_char) (offset $"tmp" 8))
+  (store unsigned_char %1 (const unsigned_char 6))
+  (block
+    (block
+      (let %2 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
+      (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %2)
+      (return (const bool 0x0))))
+  (unreachable))
+
+(function "_ZSt35__aligned_storage_default_alignmentm"
+  (ret unsigned_long)
+  (params (param %0 "__len" unsigned_long))
+  (weak)
+  (slot "__len" unsigned_long 8 8)
+  (store unsigned_long $"__len" %0)
+  (return (const unsigned_long 16)))
+
+(function "_ZSt21is_constant_evaluatedv"
+  (ret bool)
+  (params)
+  (weak)
+  (slot "tmp" (struct "__C8") 240 8)
+  (let %0 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp" %0)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp")
+  (let %1 (ptr unsigned_char) (offset $"tmp" 8))
+  (store unsigned_char %1 (const unsigned_char 6))
+  (block
+    (block
+      (let %2 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
+      (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %2)
+      (return (const bool 0x0))))
+  (unreachable))
