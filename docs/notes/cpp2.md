@@ -63,8 +63,17 @@ Repro used: the six lines above, in `/home/user/hsutter/cppfront` (clone), built
 `regression-tests/*.cpp2` at the pin, excluding names with `error`, `bad` or `fail` (160 files). Each was compiled with
 `nfcxx FILE.cpp2 -o OUT` on the qbe backend; no run-time check of the output.
 
-Not yet complete: 41 of 160 at the time of this commit (25 pass, 5 fail, 11 fail in EDG on the UFCS lambda). The totals will be
-recorded here when the run finishes.
+**73 of 160 compile and link** on the qbe backend (output not checked). The other 87 fail in EDG's front end, none in
+cppfront: 81 with the `CPP2_UFCS` lambda error above. The other six:
+
+- `pure2-bugfix-for-ufcs-sfinae`: EDG segfaults in the front end (exit 139).
+- `pure2-default-arguments`: "expected an identifier".
+- `pure2-statement-scope-parameters`: "name followed by "::" must be a class or namespace name".
+- `pure2-inspect-expression-with-as-in-generic-function`: namespace "std" has no member (not checked further).
+- `mixed-is-as-value-with-variant`: an error at `cpp2util.h` line 2036.
+- `mixed-inspect-values`: a prelinker name-decoding warning, followed by a missing object after a front-end error.
+
+The count is from the logs of this run, grouped by their first diagnostic; a sample can have more than one error.
 
 ## Tests
 
