@@ -61,10 +61,20 @@ module UniqueClassNames
       return candidate if defined.include?(candidate)
     end
 
+    # Ancestors in MRO order: the class, its included modules (last include first), its superclass, and so on.
+    # A prepended module sits before the class's own table, so a class with one is never walked past.
     cursor = site
     seen = Set.new
     loop do
-      return nil if facts[:included].key?(cursor) || !seen.add?(cursor)
+      return nil unless seen.add?(cursor)
+      return nil if facts[:prepended].key?(cursor) || facts[:unknown_mixins].include?(cursor)
+
+      mixins_of(facts, cursor).reverse_each do |mixin|
+        return nil unless closed_module?(facts, mixin)
+
+        candidate = "#{mixin}::#{name}"
+        return candidate if defined.include?(candidate)
+      end
 
       sup = facts[:superclass_of].fetch(cursor) { return nil }
       break if sup == :none
@@ -75,11 +85,33 @@ module UniqueClassNames
 
       cursor = sup
     end
-    # Object's own constants come before its mixins (object_mixins), so a top-level definition is the answer.
-    defined.include?(name) ? name : nil
+    # Object's own constants come before its mixins; the mixins (`include RGSS` at top level) come last, last include first.
+    return name if defined.include?(name)
+    return nil if facts[:unknown_mixins].include?('Object')
+
+    Array(UniqueClassNames.object_mixins).map { |mixin| mixin.delete_prefix('Object::') }.reverse_each do |mixin|
+      return nil unless closed_module?(facts, mixin)
+
+      candidate = "#{mixin}::#{name}"
+      return candidate if defined.include?(candidate)
+    end
+    nil
   end
 
-  def analyze(ireps, root_label, native_paths, foreign_paths, superclass_of: {}, included: {})
+  # The modules `owner` includes, in include order.
+  def mixins_of(facts, owner)
+    Array(facts[:included][owner])
+  end
+
+  # A module whose own constant table is the whole story: declared in the closed world and including nothing,
+  # prepending nothing, and with no unresolved include.
+  def closed_module?(facts, mod)
+    facts[:defined].include?(mod) && mixins_of(facts, mod).empty? && !facts[:prepended].key?(mod) &&
+      !facts[:unknown_mixins].include?(mod)
+  end
+
+  def analyze(ireps, root_label, native_paths, foreign_paths, superclass_of: {}, included: {}, prepended: {},
+              unknown_mixins: Set.new)
     UniqueClassNames.lexical = nil
     return {} unless native_paths && foreign_paths
 
@@ -131,7 +163,9 @@ module UniqueClassNames
       unknown: paths.select { |_, defs| defs.any? { |d| !d.is_a?(String) } }.keys.to_set,
       refused: assigned | Set.new(Array(foreign)) | native_refused,
       superclass_of: superclass_of,
-      included: included
+      included: included,
+      prepended: prepended,
+      unknown_mixins: unknown_mixins.to_set
     }
     paths.each_with_object({}) do |(name, defs), out|
       next unless defs.size == 1 && defs.first.is_a?(String)

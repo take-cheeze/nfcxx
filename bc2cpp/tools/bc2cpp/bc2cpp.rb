@@ -514,7 +514,8 @@ if $PROGRAM_NAME == __FILE__
   # trace_new_target caller reads it (and ClosedWorld#stable_constant_identity?, which BLOCK_RETURNS needs).
   UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
     UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs,
-                             superclass_of: superclass_of, included: included_modules)
+                             superclass_of: superclass_of, included: included_modules,
+                             prepended: prepended_modules, unknown_mixins: unknown_mixins)
   end
   UniqueClassNames.object_mixins = Array(included_modules['Object'])
   if (dump = ENV['BC2CPP_LEXICAL_DUMP']) # for scripts/bc2cpp checks of the constant lookup: the facts as JSON
