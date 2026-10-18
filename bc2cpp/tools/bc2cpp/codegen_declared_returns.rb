@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'declared_constants'
 require_relative 'declared_returns'
 require_relative 'codegen_sealed_containers'
 
@@ -359,8 +360,8 @@ class CodeGen
   def declared_array_plus_safe?
     return @declared_array_plus_safe if defined?(@declared_array_plus_safe)
 
-    @declared_array_plus_safe = builtin_class_send_safe?('+', ['Array']) &&
-                                (@registry['+'] || []).none? { |md| md.irep && strict_subclass?(md.owner, 'Array') }
+    @declared_array_plus_safe = DeclaredConstants.array_plus_safe?(@registry, @superclass_of, @prepended_modules,
+                                                                   @unknown_mixins)
   end
 
   # The writer at `w` is a reaching definition already; every deeper hop must dominate (ADR 0198).
