@@ -486,7 +486,11 @@ GLSL_OF_MATH = {
   1 => 31, 2 => 27, 3 => 28, 4 => 13, 5 => 14, 6 => 15, 7 => 4, 8 => 8, 9 => 9, 10 => 3, 11 => 1, 12 => 32,
   13 => 29, 14 => 30, 15 => 16, 16 => 17, 17 => 18, 18 => 19, 19 => 20, 20 => 21,
   32 => 26, 33 => 37, 34 => 40, 35 => 25, 48 => 50, 49 => 43, 50 => 46,
+  # OpenCL.std only (GLSL.std.450 has no erf, expm1 or log1p): codes 1000 and up, see OPENCL_ONLY
+  21 => 1002, 22 => 1000, 23 => 1001,
 }
+# the OpenCL.std-only instructions of GLSL_OF_MATH (codes >= 1000), with their OpenCL.std opcodes: expm1 (22), log1p (40), erf (18)
+OPENCL_ONLY = { 1000 => 22, 1001 => 40, 1002 => 18 }
 # The OpenCL.std opcode of each GLSL.std.450 instruction the emitter uses (Kernel mode: OpenCL.std is the extended
 # instruction set of OpenCL kernels, and Intel's compiler rejects GLSL.std.450 in a Kernel module). Same operation by
 # name: round, trunc, fabs, ..., rsqrt (InverseSqrt), clamp (FClamp), mix (FMix), fma.
@@ -557,6 +561,10 @@ class Spv
   end
 
   def ext_num(g)
+    if g >= 1000
+      raise Refused, "an OpenCL.std instruction (no GLSL.std.450 counterpart) outside a Kernel module" unless @kernel_cl
+      return OPENCL_ONLY.fetch(g)
+    end
     @kernel_cl ? OPENCL_OF_GLSL.fetch(g) : g
   end
 

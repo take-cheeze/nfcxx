@@ -2157,6 +2157,7 @@ namespace detail {
 enum math_op {
   M_SQRT = 1, M_EXP, M_LOG, M_SIN, M_COS, M_TAN, M_FABS, M_FLOOR, M_CEIL, M_TRUNC, M_ROUND, M_RSQRT, M_EXP2, M_LOG2,
   M_ASIN, M_ACOS, M_ATAN, M_SINH, M_COSH, M_TANH,
+  M_ERF = 21, M_EXPM1, M_LOG1P,
   M_POW = 32, M_FMIN, M_FMAX, M_ATAN2, M_FMOD, M_COPYSIGN,
   M_FMA = 48, M_CLAMP, M_MIX
 };
@@ -2183,6 +2184,9 @@ inline float fn1(int op, float x) {
     case M_SINH: return ::sinhf(x);
     case M_COSH: return ::coshf(x);
     case M_TANH: return ::tanhf(x);
+    case M_ERF: return ::erff(x);
+    case M_EXPM1: return ::expm1f(x);
+    case M_LOG1P: return ::log1pf(x);
   }
   return 0.0f;
 }
@@ -2294,13 +2298,16 @@ inline float clamp(float x, float lo, float hi) { return detail::m_clamp(x, lo, 
 inline float abs(float x) { return NFCXX_SYCL_FN1(detail::M_FABS, x); }
 inline int abs(int x) { return x < 0 ? -x : x; }
 
-// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). They are not among the device math
-// ops (detail::math_op), and the device emitter has no lowering for them. On the host they are the C library's; on the device
-// a kernel that reaches one traps (it does not compute a wrong value). Templates, so only an instantiated call is emitted.
+// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). float runs as the device
+// builtins M_ERF, M_EXPM1, M_LOG1P (OpenCL.std erf, expm1, log1p; the SPIR-V emitter lowers them). double has no device
+// lowering: a kernel that reaches it traps (it does not compute a wrong value). On the host these are the C library's.
 namespace detail {
+inline float m_erf(float x) { return NFCXX_SYCL_FN1(detail::M_ERF, x); }
+inline float m_expm1(float x) { return NFCXX_SYCL_FN1(detail::M_EXPM1, x); }
+inline float m_log1p(float x) { return NFCXX_SYCL_FN1(detail::M_LOG1P, x); }
 template <class T> inline T m_erf(T x) {
 #ifdef __NFCXX_SYCL_DEVICE__
-  __builtin_trap();  // no device lowering for erf
+  __builtin_trap();  // no device lowering for double erf
   return x;
 #else
   return std::erf(x);
@@ -2308,7 +2315,7 @@ template <class T> inline T m_erf(T x) {
 }
 template <class T> inline T m_expm1(T x) {
 #ifdef __NFCXX_SYCL_DEVICE__
-  __builtin_trap();  // no device lowering for expm1
+  __builtin_trap();  // no device lowering for double expm1
   return x;
 #else
   return std::expm1(x);
@@ -2316,7 +2323,7 @@ template <class T> inline T m_expm1(T x) {
 }
 template <class T> inline T m_log1p(T x) {
 #ifdef __NFCXX_SYCL_DEVICE__
-  __builtin_trap();  // no device lowering for log1p
+  __builtin_trap();  // no device lowering for double log1p
   return x;
 #else
   return std::log1p(x);
