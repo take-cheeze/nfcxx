@@ -58,9 +58,11 @@ sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); 
 # directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
 cudatmp=""
 # Device code of a .cu file: its __global__ and __device__ functions go through the Path B front end
-# (scripts/pathb-dump), the IR-to-PTX emitter (tools/pathb-ptx-emit) and ptxas for NFCXX_SM (default 75). The
-# cubin is embedded at the end of the host copy with a registration tail (scripts/cuda-embed.rb), so the one object
-# holds the host code and its device image. A file with no kernel gets no device image.
+# (scripts/pathb-dump), the IR-to-PTX emitter (tools/pathb-ptx-emit) and ptxas for NFCXX_SM (default 75). The kernels
+# are split into modules within NFCXX_CUDA_MAX_CONST_BYTES (65536: ptxas's limit on constant data) and
+# NFCXX_CUDA_MAX_PTX_LINES; each module is one cubin (a file that fits has one). The cubins are embedded at the end of
+# the host copy with a registration tail (scripts/cuda-embed.rb), so the one object holds the host code and its device
+# images. A file with no kernel gets no device image.
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
@@ -159,14 +161,22 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
   [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
-  "$root/build/pathb-ptx-emit" --emit --sm=$sm ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" > "$dev.ptx" || exit $?
-  # NFCXX_CUDA_JIT=1: the image is the PTX text, loaded by the runtime's JIT (cudaLibraryLoadData); ptxas is not run.
+  # The kernels are partitioned into modules within the budgets (NFCXX_CUDA_MAX_CONST_BYTES: the constant data a module
+  # references, 64 KB is ptxas's limit; NFCXX_CUDA_MAX_PTX_LINES: its functions). A file that fits one module has one
+  # group. Each group is one PTX module: $dev.groups/gNNNN.ptx and its kernels in groups.txt.
+  local groups=$dev.groups
+  rm -rf "$groups"
+  "$root/build/pathb-ptx-emit" --emit --sm=$sm --groups-dir="$groups" \
+    --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-60000} \
+    ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
+  # NFCXX_CUDA_JIT=1: the image of each group is its PTX text, loaded by the runtime's JIT (cudaLibraryLoadData); ptxas is not run.
+  local ext=cubin g
   if [ "${NFCXX_CUDA_JIT:-0}" = 1 ]; then
-    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.ptx" "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
+    ext=ptx
   else
-    "$ptxas" -arch=sm_$sm "$dev.ptx" -o "$dev.cubin" || exit $?
-    "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.cubin" "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
+    for g in "$groups"/g*.ptx; do "$ptxas" -arch=sm_$sm "$g" -o "${g%.ptx}.cubin" || exit $?; done
   fi
+  "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
 }
 # A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
 # <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the
