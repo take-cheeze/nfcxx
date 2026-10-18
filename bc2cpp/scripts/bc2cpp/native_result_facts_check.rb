@@ -436,8 +436,8 @@ if ENV['MRBC']
   check.call('text_size is defined only by Bitmap, so its result is a Rect whatever the receiver: `.width` is exact',
              label.include?('NATIVE_EXACT_DIRECT :width -> RGSS::Rect') && label.include?('operands proven Fixnum'))
   check.call('and the sum has no by-name fallback', !label.include?('bc2cpp_slow_add'))
-  check.call('the unproven receiver of text_size itself keeps its class guard and dispatch',
-             label.match?(/native_bitmap_class\(\)\) \{\n\s*r\d+ = rgss::bitmap_text_size_direct.*\} else \{\n\s*r\d+ = bc2cpp_send\(/m))
+  check.call('the unproven receiver of text_size keeps its class guard and Bitmap owner-call fallback',
+             label.match?(/native_bitmap_class\(\)\) \{\n\s*r\d+ = rgss::bitmap_text_size_direct[^\n]*\n\} else \{\n\s*r\d+ = bc2cpp_owner_call\([^\n]*BC2CPP_OWNERS\("RGSS::Bitmap"\)/))
 
   override = generate.call(PRELUDE.sub('class Bitmap; end', "class Bitmap\n    def width; 1.5; end\n  end") + <<~'RUBY', 'nr_override')
     class NrBox
@@ -529,7 +529,7 @@ if ENV['MRBC']
              read.include?('/* CLOSED_WORLD nomethod: recv.width */') && !read.include?('kept: singleton_definer'))
   read = body_of_impl.call(code, 'NrUse_read_open')
   check.call('an unproven receiver could be NrScreen itself: the singleton definer keeps the dispatch',
-             read.include?('kept: singleton_definer') && !read.include?('bc2cpp_nomethod'))
+             read.match?(/bc2cpp_owner_call\([^\n]*BC2CPP_OWNERS\([^\n]*"NrScreen\.singleton"/) && !read.include?('bc2cpp_nomethod'))
   read = body_of_impl.call(code, 'NrUse_read_class')
   check.call('a send to the class object itself is not an instance receiver', !read.include?('bc2cpp_nomethod'))
 
