@@ -258,6 +258,64 @@ module DeclaredConstants
     end || false
   end
 
+  # ARRAY_SUM (type_facts const_rows): `(A + B).freeze` whose two operands both prove Array. Array#+ answers a fresh
+  # Array (or raises), so the sum is an Array when `plus_safe` holds (no program or foreign `+` or `freeze` that can
+  # answer something else; see TypeFacts.array_sum_safe?). An operand is proven by trace_new_target over `containers`
+  # (which carries the sum constants already proven, see array_sum_names), by the array scan, or by a nested sum.
+  SUM_MAX_DEPTH = 8
+
+  def array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: nil, depth: 0)
+    return false unless plus_safe && depth < SUM_MAX_DEPTH
+
+    j, insn = sum_writer(irep, idx, reg)
+    return false unless insn&.op == 'ADD' && insn.reg && insn.paren_reg
+
+    operand = ->(r) { proven_array_value?(irep, j, r, registry, containers, plus_safe, owner, depth + 1) }
+    operand.call(insn.reg) && operand.call(insn.paren_reg)
+  end
+
+  def proven_array_value?(irep, idx, reg, registry, containers, plus_safe, owner, depth)
+    return true if trace_new_target(irep, idx, reg, registry: registry, container_constants: containers,
+                                                    owner: owner) == 'Array'
+    return true if proven_array_source_scan(irep, idx, reg, registry)
+
+    array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: owner, depth: depth)
+  end
+
+  # The writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil. Dominating: a join between
+  # the writer and the read may hold another value, and then there is no single writer to prove.
+  def sum_writer(irep, idx, reg)
+    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, _cur|
+      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+
+      [j, insn]
+    end
+  end
+
+  # The qualified names whose every assignment is an Array sum, as { name => 'Array' }. A sum over another sum constant
+  # counts once that one is proven, so the set only grows and the loop ends when a pass adds nothing. Names already in
+  # `containers` (literal or declared) are left to their own proofs.
+  def array_sum_names(ireps, sites, registry, containers, plus_safe)
+    return {} unless plus_safe
+
+    by_name = sites.group_by { |s| s[:name] }
+    known = {}
+    loop do
+      merged = containers.merge(known)
+      grown = by_name.select do |name, group|
+        !known.key?(name) && !containers.key?(name) &&
+          group.all? do |s|
+            irep = ireps[s[:irep]]
+            irep && array_sum_source?(irep, s[:idx], s[:reg], registry, merged, plus_safe, owner: s[:owner])
+          end
+      end
+      break if grown.empty?
+
+      grown.each_key { |name| known[name] = 'Array' }
+    end
+    known
+  end
+
   # Fixnum intervals of constant expressions over integer literals and other constants. A constant read is keyed by
   # its bare name, as INTEGER_CONSTANT_PROOF is (lexical lookup is not modelled), so it stands for the union of every
   # binding of that name: all must evaluate, and none may be bound outside the bytecode (`blocked`). An interval, not a
