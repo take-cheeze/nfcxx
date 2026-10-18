@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Checks tools/bc2cpp/native_ast_returns.rb: the return kind of each function in a small C++ fixture, from the clang AST
+# (`clang -fsyntax-only -Xclang -ast-dump=json`). Covers a constructor, `self` (also through a copy), a local, a
+# conditional, a join of two kinds, a call to a function in the same file, and a recursive cycle. Skips when clang is
+# not installed.
+#
+#   ruby scripts/bc2cpp/native_ast_returns_check.rb
+
+require 'json'
+require 'open3'
+require 'tmpdir'
+require_relative '../../tools/bc2cpp/native_ast_returns'
+
+unless system('clang --version', out: File::NULL, err: File::NULL)
+  puts 'SKIP native_ast_returns_check: clang is not installed'
+  exit 0
+end
+
+FIXTURE = <<~CPP
+  struct mrb_value { int v; };
+  mrb_value mrb_fixnum_value(int);
+  mrb_value mrb_nil_value();
+  mrb_value mrb_ary_new(int);
+  bool test(int);
+
+  mrb_value int_fn(mrb_value self) { return mrb_fixnum_value(1); }
+  mrb_value self_fn(mrb_value self) { return self; }
+  mrb_value local_fn(mrb_value self) { mrb_value r = mrb_ary_new(0); return r; }
+  mrb_value cond_fn(mrb_value self, int c) { return c ? mrb_fixnum_value(1) : mrb_fixnum_value(2); }
+  mrb_value mixed_fn(mrb_value self, int c) { return c ? mrb_fixnum_value(1) : mrb_nil_value(); }
+  mrb_value call_fn(mrb_value self) { return int_fn(self); }
+  mrb_value rec_fn(mrb_value self) { return rec_fn(self); }
+CPP
+
+EXPECTED = {
+  'int_fn' => 'Integer', 'self_fn' => 'self', 'local_fn' => 'Array', 'cond_fn' => 'Integer',
+  'mixed_fn' => nil, 'call_fn' => 'Integer', 'rec_fn' => nil
+}.freeze
+
+failures = []
+Dir.mktmpdir('native_ast_returns_check') do |dir|
+  source = File.join(dir, 'fixture.cxx')
+  File.write(source, FIXTURE)
+  ast, err, status = Open3.capture3('clang', '-fsyntax-only', '-Xclang', '-ast-dump=json', '-x', 'c++', source)
+  abort "clang failed: #{err}" unless status.success?
+
+  kinds = NativeAstReturns.analyze(JSON.parse(ast), source)
+  EXPECTED.each do |fn, want|
+    got = kinds[fn]
+    failures << "#{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+  end
+  failures << "functions found #{kinds.keys.sort.inspect}, expected #{EXPECTED.keys.sort.inspect}" unless kinds.keys.sort == EXPECTED.keys.sort
+end
+
+if failures.empty?
+  puts "native AST returns check: #{EXPECTED.size} functions classified"
+else
+  failures.each { |failure| warn "  #{failure}" }
+  abort "native AST returns check: #{failures.size} failure(s)"
+end
