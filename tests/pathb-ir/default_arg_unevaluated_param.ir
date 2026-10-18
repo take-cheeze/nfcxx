@@ -1,0 +1,35 @@
+(ir-module "default_arg_unevaluated_param.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "_Z3grpILi5EE" 1 1 (empty))
+(global "_ZN3grpILi5EE11fence_scopeE" (const int) 4 4 (weak) (init
+    (scalar 0 int (const int 5))))
+
+(function "_Z13size_of_firstii"
+  (ret int)
+  (params (param %0 "G" int) (param %1 "x" int))
+  (slot "G" int 4 4)
+  (slot "x" int 4 4)
+  (store int $"G" %0)
+  (store int $"x" %1)
+  (let %2 int (load int $"x"))
+  (return %2))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "tmp" (struct "_Z3grpILi5EE") 1 1)
+  (slot "tmp.1" (struct "_Z3grpILi5EE") 1 1)
+  (block
+    (copy 1 $"tmp.1" $"tmp")
+    (let %0 int (call int &"_Z7barrierILi5EEi3grpIXT_EEi" (byval (struct "_Z3grpILi5EE") $"tmp.1") (const int 5)))
+    (let %1 int (call int &"_Z13size_of_firstii" (const int 1) (const int 4)))
+    (let %2 int (wadd int %0 %1))
+    (return %2)))
+
+(function "_Z7barrierILi5EEi3grpIXT_EEi"
+  (ret int)
+  (params (param %0 "G" (byval (struct "_Z3grpILi5EE"))) (param %1 "scope" int))
+  (weak)
+  (slot "scope" int 4 4)
+  (store int $"scope" %1)
+  (let %2 int (load int $"scope"))
+  (return %2))
