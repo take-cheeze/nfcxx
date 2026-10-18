@@ -1,0 +1,61 @@
+(ir-module "reinterpret_dependent_member_alias.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "v" int 4 4)
+  (slot "o" (struct "Obj") 8 8)
+  (slot "a" (ptr int) 8 8)
+  (slot "b" (ptr int) 8 8)
+  (store int $"v" (const int 40))
+  (let %0 (ptr void) (bitcast (ptr void) $"v"))
+  (store (ptr void) $"o" %0)
+  (let %1 (ptr (const (struct "Obj"))) (bitcast (ptr (const (struct "Obj"))) $"o"))
+  (let %2 (ptr int) (call (ptr int) &"_Z10get_nativeILi1E3ObjEN14backend_traitsIXT_EE11return_typeIT0_EERKS4_" %1))
+  (store (ptr int) $"a" %2)
+  (let %3 (ptr (const (struct "Obj"))) (bitcast (ptr (const (struct "Obj"))) $"o"))
+  (let %4 (ptr int) (call (ptr int) &"_Z16get_native_aliasILi1E3ObjEN14backend_traitsIXT_EE11return_typeIT0_EERKS4_" %3))
+  (store (ptr int) $"b" %4)
+  (let %5 (ptr int) (load (ptr int) $"a"))
+  (nonnull %5)
+  (let %6 int (load int %5))
+  (let %7 bool (eq int %6 (const int 40)))
+  (let %8 bool (const bool 0))
+  (if %7
+    (then
+      (let %9 (ptr int) (load (ptr int) $"b"))
+      (nonnull %9)
+      (let %10 int (load int %9))
+      (let %11 bool (eq int %10 (const int 40)))
+      (set %8 %11)))
+  (let %12 int (const int 0))
+  (if %8
+    (then
+      (set %12 (const int 42)))
+    (else
+      (set %12 (const int 1))))
+  (return %12))
+
+(function "_Z10get_nativeILi1E3ObjEN14backend_traitsIXT_EE11return_typeIT0_EERKS4_"
+  (ret (ptr int))
+  (params (param %0 "o" (ptr (const (struct "Obj")))))
+  (weak)
+  (slot "o" (ptr (const (struct "Obj"))) 8 8)
+  (store (ptr (const (struct "Obj"))) $"o" %0)
+  (let %1 (ptr (const (struct "Obj"))) (load (ptr (const (struct "Obj"))) $"o"))
+  (nonnull %1)
+  (let %2 (ptr void) (load (ptr void) %1))
+  (let %3 (ptr int) (bitcast (ptr int) %2))
+  (return %3))
+
+(function "_Z16get_native_aliasILi1E3ObjEN14backend_traitsIXT_EE11return_typeIT0_EERKS4_"
+  (ret (ptr int))
+  (params (param %0 "o" (ptr (const (struct "Obj")))))
+  (weak)
+  (slot "o" (ptr (const (struct "Obj"))) 8 8)
+  (store (ptr (const (struct "Obj"))) $"o" %0)
+  (let %1 (ptr (const (struct "Obj"))) (load (ptr (const (struct "Obj"))) $"o"))
+  (nonnull %1)
+  (let %2 (ptr void) (load (ptr void) %1))
+  (let %3 (ptr int) (bitcast (ptr int) %2))
+  (return %3))
