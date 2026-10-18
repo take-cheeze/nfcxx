@@ -48,6 +48,10 @@ size_t strxfrm_l(char *, const char *, size_t, locale_t);
 size_t strftime_l(char *, size_t, const char *, const struct tm *, locale_t);
 int vsnprintf_l(char *, size_t, locale_t, const char *, va_list);
 int snprintf_l(char *, size_t, locale_t, const char *, ...);
+/* BSD-style scanf and printf with a locale, as libc++'s bsd_locale_defaults.h calls them (its signature for asprintf_l is
+   the one in libc++'s locale_win32.h). Declarations only. */
+int sscanf_l(const char *, locale_t, const char *, ...);
+int asprintf_l(char **, locale_t, const char *, ...);
 int toupper_l(int, locale_t);
 int tolower_l(int, locale_t);
 int isalnum_l(int, locale_t);
