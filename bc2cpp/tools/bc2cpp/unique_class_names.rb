@@ -18,6 +18,8 @@ module UniqueClassNames
   class << self
     # bare name => "P::N"; nil (the default) disables canonicalization.
     attr_accessor :table
+    # The closed world's class facts for lookup_name (set by analyze; nil when analyze refuses).
+    attr_accessor :lexical
     # Modules the closed world includes into Object; entries may be qualified
     # as `Object::RGSS` or already normalized to `RGSS`.
     attr_accessor :object_mixins
@@ -25,19 +27,60 @@ module UniqueClassNames
 
   module_function
 
+  # The class `name` names inside `owner` (a class name, `.singleton` allowed), or nil when the closed world does not
+  # settle it. The unique table answers first (one binding, so no other class can be found); otherwise lookup_name
+  # follows Ruby's order over the facts analyze recorded.
   def resolve(name, owner)
     canonical = UniqueClassNames.table&.[](name)
-    return nil unless canonical && owner
-
-    return canonical unless canonical.include?('::') # top-level: visible from every scope, see analyze
-    scope = canonical.delete_suffix("::#{name}")
-    site = owner.to_s.delete_suffix('.singleton')
-    lexical = site == scope || site.start_with?("#{scope}::")
-    mixins = Array(UniqueClassNames.object_mixins).map { |mixin| mixin.delete_prefix('Object::') }
-    lexical || mixins.include?(scope) ? canonical : nil
+    if canonical && owner
+      scope = canonical.delete_suffix("::#{name}")
+      site = owner.to_s.delete_suffix('.singleton')
+      lexical = site == scope || site.start_with?("#{scope}::")
+      mixins = Array(UniqueClassNames.object_mixins).map { |mixin| mixin.delete_prefix('Object::') }
+      return canonical if lexical || mixins.include?(scope)
+    end
+    lookup_name(name, owner)
   end
 
-  def analyze(ireps, root_label, native_paths, foreign_paths)
+  # Ruby's constant lookup from a method of `owner` (vm.c): the lexically enclosing classes, innermost first and
+  # excluding the top level; then the ancestors of `owner` (superclass chain); then Object. Each step asks the closed
+  # world's own table, so a step that cannot be settled returns nil. Only a name bound in the closed world (no
+  # native, foreign or assigned binding) is answered, and a class with an included module is never walked past.
+  # The ancestor steps need the superclass chain: a missing entry means the superclass is unknown.
+  def lookup_name(name, owner)
+    facts = UniqueClassNames.lexical
+    return nil unless facts && owner
+    return nil if facts[:refused].include?(name)
+
+    site = owner.to_s.delete_suffix('.singleton')
+    parts = site.split('::')
+    return nil if facts[:unknown].include?(parts.last) # a compact `class A::B`: its lexical scope is not in the bytecode
+    defined = facts[:defined]
+    parts.size.downto(1) do |k|
+      candidate = (parts[0, k] + [name]).join('::')
+      return candidate if defined.include?(candidate)
+    end
+
+    cursor = site
+    seen = Set.new
+    loop do
+      return nil if facts[:included].key?(cursor) || !seen.add?(cursor)
+
+      sup = facts[:superclass_of].fetch(cursor) { return nil }
+      break if sup == :none
+      return nil unless sup.is_a?(String)
+
+      candidate = "#{sup}::#{name}"
+      return candidate if defined.include?(candidate)
+
+      cursor = sup
+    end
+    # Object's own constants come before its mixins (object_mixins), so a top-level definition is the answer.
+    defined.include?(name) ? name : nil
+  end
+
+  def analyze(ireps, root_label, native_paths, foreign_paths, superclass_of: {}, included: {})
+    UniqueClassNames.lexical = nil
     return {} unless native_paths && foreign_paths
 
     paths = bytecode_class_paths(ireps, root_label)
@@ -66,6 +109,13 @@ module UniqueClassNames
     sources = Array(native_paths).select { |path| File.file?(path) }
                                  .map { |path| File.read(path, encoding: 'UTF-8') }
     bindings = native_bindings(sources)
+    UniqueClassNames.lexical = {
+      defined: paths.values.flat_map { |defs| defs.grep(String) }.to_set,
+      unknown: paths.select { |_, defs| defs.any? { |d| !d.is_a?(String) } }.keys.to_set,
+      refused: assigned | Set.new(Array(foreign)) | bindings.select { |_, v| v.any? }.keys.to_set,
+      superclass_of: superclass_of,
+      included: included
+    }
     paths.each_with_object({}) do |(name, defs), out|
       next unless defs.size == 1 && defs.first.is_a?(String)
       next if defs.first.split('::').any? { |segment| assigned.include?(segment) || foreign.include?(segment) }
