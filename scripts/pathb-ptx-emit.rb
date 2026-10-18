@@ -823,6 +823,9 @@ class Fn
     tmpl = s[1].to_s
     regs = []
     stores = []
+    # ldmatrix reads shared memory through a 32-bit shared-state address: its pointer input is a generic address,
+    # converted here as nvcc does (the C++ emitter's asm_stmt does the same)
+    ldmatrix = tmpl.start_with?("ldmatrix.")
     s.drop(2).each do |o|
       raise BadIR, "asm operand #{form_text(o)}" unless head_of(o) == "opnd"
       kind = o[1].to_s
@@ -831,6 +834,14 @@ class Fn
       raise Refused, "asm operand of type #{ty[0]} #{type_size(ty)} bytes (2-, 4- and 8-byte integers, 4- and 8-byte floats, pointers)" unless asm_operand_ok(ty)
       if kind == "in"
         v, _ = operand(arg)
+        if ldmatrix && ty[0] == "ptr"
+          g = fresh("rd")
+          r = fresh("r")
+          emit("cvta.to.shared.u64 #{g}, #{v};")
+          emit("cvt.u32.u64 #{r}, #{g};")
+          regs << r
+          next
+        end
         r = fresh(asm_class(ty))
         if asm_class(ty) == "h"
           emit("cvt.#{mem_type(ty)}.#{ptx_type(ty)} #{r}, #{v};")
