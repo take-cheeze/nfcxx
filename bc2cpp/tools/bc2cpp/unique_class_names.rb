@@ -1,4 +1,6 @@
 # frozen_string_literal: true
+require_relative 'native_expression_devirt'
+require_relative 'source_text'
 
 # UNIQUE_CLASS_NAME: maps a bare class name N (e.g. `Bitmap` written in RPG2k
 # code, which reaches RGSS::Bitmap through `class Object; include RGSS; end`)
@@ -10,7 +12,7 @@ module UniqueClassNames
   BINDING_CALLS = [
     /mrb_define_(?:global_)?const(?:_id)?\s*\([^;]{0,200}/m,
     /mrb_const_set\s*\([^;]{0,200}/m,
-    /mrb_define_(?:class|module)(?:_[a-z_]*)?\s*\([^;]{0,200}/m
+    /mrb_define_(?:class|module)(?:_under)?(?:_id)?\s*\([^;]{0,200}/m
   ].freeze
   UNDER_DEFINITION = /\Amrb_define_(?:class|module)_under(?:_id)?\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*(?:"(\w+)"|MRB_SYM\((\w+)\))/
   FUNCTION_HEADER = /^(?:[\w:<>*&"]+[ \t]+)*[*&]?(\w+)\s*\(([^;{}()]*)\)\s*(?:const\s*)?\{/m
@@ -76,7 +78,8 @@ module UniqueClassNames
         return candidate if defined.include?(candidate)
       end
 
-      sup = facts[:superclass_of].fetch(cursor) { return nil }
+      # A module has no superclass: after its includes, the search goes to Object.
+      sup = facts[:modules].include?(cursor) ? :none : facts[:superclass_of].fetch(cursor) { return nil }
       break if sup == :none
       return nil unless sup.is_a?(String)
 
@@ -115,7 +118,8 @@ module UniqueClassNames
     UniqueClassNames.lexical = nil
     return {} unless native_paths && foreign_paths
 
-    paths = bytecode_class_paths(ireps, root_label)
+    modules = Set.new
+    paths = bytecode_class_paths(ireps, root_label, modules)
     assigned = Set.new
     ireps.each_value do |irep|
       irep.instructions.each do |insn|
@@ -137,7 +141,6 @@ module UniqueClassNames
       return {}
     end
 
-    foreign = IntegerConstants.foreign_const_names(foreign_paths)
     sources = Array(native_paths).select { |path| File.file?(path) }
                                  .map { |path| File.read(path, encoding: 'UTF-8') }
     bindings = native_bindings(sources)
@@ -158,11 +161,23 @@ module UniqueClassNames
         end
       end
     end
+    defined = paths.values.flat_map { |defs| defs.grep(String) }.to_set | native_classes
+    # A foreign top-level `class X < Y` that the closed world does not compile (mruby's 10error.rb, which
+    # is kept out for speed) still binds X at top level under Y: it is defined with that superclass. Its own
+    # includes are unknown, so the ancestor walk never passes through it.
+    top_level, nested = foreign_class_names(foreign_paths)
+    closed_top = defined.reject { |n| n.include?('::') }
+    foreign_classes = top_level.reject { |name, sup| closed_top.include?(name) || sup.nil? }
+    foreign = foreign_rebound_names(foreign_paths) | nested | (top_level.keys.to_set - closed_top - foreign_classes.keys)
+    defined |= foreign_classes.keys.to_set
+    superclass_of = superclass_of.merge(foreign_classes)
+    unknown_mixins = unknown_mixins.to_set | foreign_classes.keys
     UniqueClassNames.lexical = {
-      defined: paths.values.flat_map { |defs| defs.grep(String) }.to_set | native_classes,
+      defined: defined,
       unknown: paths.select { |_, defs| defs.any? { |d| !d.is_a?(String) } }.keys.to_set,
       refused: assigned | Set.new(Array(foreign)) | native_refused,
       superclass_of: superclass_of,
+      modules: modules,
       included: included,
       prepended: prepended,
       unknown_mixins: unknown_mixins.to_set
@@ -185,6 +200,32 @@ module UniqueClassNames
     end
   end
 
+  # Names a foreign Ruby source assigns (`NAME = value`): the binding changes, so the name is refused.
+  def foreign_rebound_names(paths)
+    names = Set.new
+    Array(paths).each do |path|
+      src = SourceText.read(path, 'UniqueClassNames.foreign_rebound_names') or next
+      src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
+    end
+    names
+  end
+
+  # [top-level, nested] names foreign Ruby sources open with `class`/`module`. top-level maps each name to its
+  # superclass name (nil when the definition has none written). A column-0 definition is top-level; a nested
+  # (indented) one may bind a new constant in its scope, so its name is always refused.
+  def foreign_class_names(paths)
+    top_level = {}
+    nested = Set.new
+    Array(paths).each do |path|
+      src = SourceText.read(path, 'UniqueClassNames.foreign_class_names') or next
+      src.scan(/^(?:class|module)\s+([A-Z][A-Za-z_0-9]*)(?:\s*<\s*([A-Z][A-Za-z_0-9]*)\b)?/) do |name, sup|
+        top_level[name] = top_level.key?(name) && top_level[name] != sup ? nil : sup # conflicting supers: unknown
+      end
+      src.scan(/^[ \t]+(?:class|module)\s+([A-Z][A-Za-z_0-9]*)/) { nested << Regexp.last_match(1) }
+    end
+    [top_level, nested]
+  end
+
   # bare name => [[source, offset, outer variable or nil], ...] for every native
   # constant binding naming it; the variable is set only for an `_under` form.
   def native_bindings(sources)
@@ -194,21 +235,44 @@ module UniqueClassNames
         source.to_enum(:scan, pattern).each do
           match = Regexp.last_match
           segment = match[0]
-          names = segment.scan(/"([A-Z]\w*)"/).flatten | segment.scan(/MRB_SYM[A-Z_]*\(\s*(\w+)\s*\)/).flatten
+          args, = NativeExpressionDevirt.split_call_arguments(source, match.begin(0) + segment.index('('))
           under = segment.match(UNDER_DEFINITION)
-          names.each do |name|
-            var = under && (under[2] || under[3]) == name ? under[1] : nil
-            out[name] << [source, match.begin(0), var, kind]
-          end
+          # Only the argument that binds the name counts; the others may be lookups (`mrb_module_get(M, "RGSS")`).
+          index = binding_name_index(segment, kind)
+          name = binding_name(args&.[](index))
+          next unless name
+
+          var = under && (under[2] || under[3]) == name ? under[1] : nil
+          out[name] << [source, match.begin(0), var, kind]
         end
       end
     end
     out
   end
 
+  # The position of the name argument: after `mrb` for a constant or class registration, after `mrb` and the outer
+  # module for a `_under` form, and first for `mrb_define_global_const`.
+  def binding_name_index(segment, kind)
+    case kind
+    when 0 then segment.start_with?('mrb_define_global') ? 1 : 2
+    when 1 then 2
+    else segment.match?(/\Amrb_define_(?:class|module)_under/) ? 2 : 1
+    end
+  end
+
+  # The constant a name argument spells: "Name", MRB_SYM(Name) or mrb_intern_lit(mrb, "Name"). Anything else is nil.
+  def binding_name(arg)
+    arg = arg&.strip
+    return nil unless arg
+
+    name = arg[/\A"(\w+)"\z/, 1] || arg[/\AMRB_SYM[A-Z_]*\(\s*(\w+)\s*\)\z/, 1] ||
+           arg[/\Amrb_intern_(?:lit|cstr)\(\s*\w+\s*,\s*"(\w+)"\s*\)\z/, 1]
+    name if name&.match?(/\A[A-Z]\w*\z/)
+  end
+
   # bare name => Set of full paths opened by its CLASS/MODULE statements, with
   # :unknown for a statement whose outer scope is not the lexical one.
-  def bytecode_class_paths(ireps, root_label)
+  def bytecode_class_paths(ireps, root_label, modules = nil)
     paths = Hash.new { |hash, name| hash[name] = Set.new }
     seen = Set.new
     walk = lambda do |label, namespace|
@@ -226,6 +290,7 @@ module UniqueClassNames
                  else :unknown
                  end
           paths[name] << full
+          modules << full if modules && insn.op == 'MODULE' && full.is_a?(String)
           seen << [label, idx]
           pending = [reg, full, idx]
         when 'EXEC'
