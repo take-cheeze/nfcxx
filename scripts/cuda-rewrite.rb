@@ -2837,6 +2837,10 @@ def device_tu(text)
       template_site(d[:name], split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst, d[:outer][:pack]) }.join(", "))
     end
   end
+  # Device functions are kept only when the unit names them (the fixed point below): a function that no kept piece
+  # mentions is not in the unit. Kernels, and the other device pieces (variables with an initializer), are kept always.
+  # A function with no name of its own (`operator+`, `operator()`) is kept always too.
+  tag_words = %w[struct class union enum]
   pieces.each do |pc|
     next if pc[:kind] == :pp
     if pc[:device]
@@ -2844,12 +2848,32 @@ def device_tu(text)
         refuse("device variable: #{pc[:text].strip[0, 60]}")
       end
       if pc[:body]
-        if pc[:toks].include?("__global__") && pc[:toks].first != "template"
-          name = function_name(remove_words(pc[:text], DEVICE_QUALIFIERS))
+        kernel = pc[:toks].include?("__global__") && pc[:toks].first != "template"
+        name = function_name(remove_words(pc[:text], DEVICE_QUALIFIERS))
+        if kernel
           refuse("kernel without a name: #{pc[:text].strip[0, 60]}") if name.nil? || name.empty?
           kernels << name
         end
-        pc[:keep] = true
+        tagged = !(pc[:toks] & tag_words).empty?
+        fn = !kernel && !tagged && !name.nil? && !name.empty? && name != "operator" && pc[:text].include?("(")
+        tag_kw = (pc[:toks] & tag_words).first
+        if !kernel && !fn && tag_kw && !function_head?(blank_comments(pc[:text]))
+          # A class or enum with device code is kept when its tag is needed, with its members (see the fixed point).
+          t = blank_comments(pc[:text])
+          tag = tag_after(t, tag_kw)
+          tag = tag_after(t, tag) if tag_kw == "enum" && %w[class struct].include?(tag)
+          unless tag.to_s.empty?
+            pc[:fn] = true
+            pc[:defined] = [tag]
+            pc[:defined] += enum_enumerators(t) if tag_kw == "enum"
+          end
+        end
+        if fn
+          pc[:fn] = true
+          pc[:defined] = [name]
+        elsif !pc[:fn]
+          pc[:keep] = true
+        end
         # a class of the device side keeps its device members only: its host-only members go, and so do their tokens
         if pc[:toks].include?("struct") || pc[:toks].include?("class")
           dropped = drop_host_members(pc[:text])
@@ -2861,11 +2885,18 @@ def device_tu(text)
         # a kernel has external linkage (it is launched from the host): `static __global__ void k()` is not static in the
         # device unit, or the front end drops it when no device code calls it
         pc[:text] = remove_words(pc[:text], pc[:toks].include?("__global__") ? DEVICE_QUALIFIERS + ["static"] : DEVICE_QUALIFIERS)
-        seeds.concat(pc[:toks])
+        seeds.concat(pc[:toks]) unless pc[:fn]
       elsif pc[:text].include?("(")
-        pc[:keep] = true
+        tagged = !(pc[:toks] & tag_words).empty?
+        name = tagged || pc[:text].include?("=") || pc[:toks].first == "typedef" ? nil : function_name(remove_words(pc[:text], DEVICE_QUALIFIERS))
         pc[:text] = remove_words(pc[:text], DEVICE_QUALIFIERS)
-        seeds.concat(pc[:toks])
+        if name && !name.empty? && name != "operator"
+          pc[:fn] = true
+          pc[:defined] = [name]
+        else
+          pc[:keep] = true
+          seeds.concat(pc[:toks])
+        end
       end
     end
   end
@@ -2909,27 +2940,35 @@ def device_tu(text)
   # Fixed point: a host declaration is carried over when the unit refers to a name it defines.
   # The wrappers (see template_site) name their template arguments and parameters: a macro or constant among them is
   # a name the unit needs even when no kept kernel body mentions it (ggml-cuda's mmf: MMF_ROWS_PER_BLOCK_CDNA).
+  # A #define inside a piece names the piece too: a macro can sit in the middle of a declaration (llama.cpp's common.cuh
+  # WARP_SIZE follows a table of ggml-common.h), so the piece is kept when the macro is needed. A host function body is
+  # never kept, so its macros do not make it one.
+  pieces.each do |pc|
+    next if pc[:kind] == :pp
+    next if pc[:body] && !pc[:device] && pc[:text].include?("(") && (pc[:toks] & %w[struct class union enum]).empty?
+    pc[:defined] += blank_comments(pc[:text]).scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/).flatten
+  end
+  # The wrapper calls the template kernel (its name and the call's arguments), so both are needed.
   $sites.each_value do |site|
+    seeds << site[:name]
     seeds.concat(tokens_of(site[:targs].to_s))
     seeds.concat(tokens_of(site[:decl].to_s))
+    site[:call].each { |c| seeds.concat(tokens_of(c)) }
   end
   needed = {}
   (seeds + tokens_of(DEVICE_PRELUDE)).each { |x| needed[x] = true }
+  # A macro is kept with its tokens: its expansion names what the unit needs (a device function it calls, a constant).
   changed = true
   while changed
     changed = false
     pieces.each do |pc|
-      next if pc[:keep] || pc[:device]
+      next if pc[:keep] || (pc[:device] && !pc[:fn])
       next if pc[:defined].empty?
       next unless pc[:defined].any? { |d| needed[d] }
       pc[:keep] = true
       changed = true
       pc[:toks].each { |x| needed[x] = true }
     end
-  end
-  pieces.each do |pc|
-    next unless pc[:kind] == :pp && pc[:macro] && pc[:defined].any? { |d| needed[d] }
-    pc[:keep] = true
   end
   # A `using namespace n;` is kept when the unit keeps a piece of n: device code names n's members unqualified
   # (ggml-cuda's mmq-vec-dot.cuh uses ggml_cuda_mma's tile that way). Its name is not a definition, so the fixed point
