@@ -41,7 +41,9 @@ fi
 cross_edg="$root/build/edg-cross"; cross_base="$root/build/edg-base-cross"
 if [ ! -x "$cross_edg/bin/eccp" ]; then
   rm -rf "$cross_edg" "$cross_base"
-  NFCXX_EDG_TARGET=macos-arm64 EDG_BUILD="$cross_edg" EDG_BASE="$cross_base" "$root/scripts/setup-edg.sh"
+  # USR_INCLUDE must be set for this build too: the EDG C++ runtime (lib_src) is compiled during it, and without it the
+  # runtime takes the host glibc headers (features-time64, __float128), which fail on an x86-64 Linux host.
+  USR_INCLUDE="$root/tests/macos-sysroot/include" NFCXX_EDG_TARGET=macos-arm64 EDG_BUILD="$cross_edg" EDG_BASE="$cross_base" "$root/scripts/setup-edg.sh"
   # The prelinker reads the instance symbols with nm. On a Linux host, plain nm cannot read Mach-O objects, so use
   # llvm-nm. The macOS base already passes -fMacOSX64 (the 16-digit Mach-O values) to the prelinker. -u strips the Mach-O
   # leading underscore from the names it matches (the instance is __Z..., the prelinker looks for _Z...).
