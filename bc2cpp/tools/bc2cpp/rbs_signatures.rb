@@ -277,7 +277,7 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_optional_types, :ir_keyword_types, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -289,7 +289,7 @@ module RbsSignatures
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
-                     ivar_sigs: loaded.ivars, ir_block_signatures: {}, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
+                     ivar_sigs: loaded.ivars, ir_block_signatures: {}, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_const_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
                      ir_methods: registry.values.flatten.map { |d| [d.owner, d.name.to_s].freeze }.to_set.freeze,
                      ir_owners: registry.values.flatten.select(&:irep).group_by(&:irep).filter_map do |label, defs|
                        owners = defs.map(&:owner).uniq
@@ -377,7 +377,7 @@ module RbsSignatures
   def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0')
     require_relative 'bytecode_ir'
     owner = applied.ir_owners[irep.label]
-    return BytecodeIR::Types.new(irep, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver) unless owner
+    return BytecodeIR::Types.new(irep, declared_const_elements: applied.ir_const_elements, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver) unless owner
 
     lookup = ->(klass) { contract_owners(klass, superclass_of, included_modules: included_modules, prepended_modules: prepended_modules, unknown_mixins: unknown_mixins) }
     owners = lookup.call(owner)
@@ -431,6 +431,7 @@ module RbsSignatures
     BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}),
                          declared_optional_args: applied.ir_optional_types.fetch(irep.label, {}), declared_keywords: applied.ir_keyword_types.fetch(irep.label, {}),
                          declared_arg_elements: applied.ir_arg_elements.fetch(irep.label, {}),
+                         declared_const_elements: applied.ir_const_elements,
                          declared_ivars: ivars, declared_ivar_elements: ivar_elements, declared_calls: calls, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
   end
 

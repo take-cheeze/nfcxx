@@ -21,7 +21,7 @@ module BytecodeIR
       def declared? = declared
     end
 
-    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, source_resolver: nil, call_resolver: nil, argument_facts: {})
+    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, declared_const_elements: {}, source_resolver: nil, call_resolver: nil, argument_facts: {})
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @argument_facts = argument_facts.to_h do |reg, fact|
@@ -54,6 +54,7 @@ module BytecodeIR
       @inferred_args = inferred_args.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
       @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
       @declared_ivar_elements = declared_ivar_elements.to_h { |name, types| [name.to_s.delete_prefix('@'), types.to_set.dup.freeze] }.freeze
+      @declared_const_elements = declared_const_elements.to_h { |name, type| [name.to_s, Set[type.to_sym]] }.freeze
       @source_resolver = source_resolver
       @call_resolver = call_resolver
       @active_queries = Set.new
@@ -94,9 +95,7 @@ module BytecodeIR
           bound = @declared_arg_elements[source.reg]
           contract = "element:argument:R#{source.reg}"
         else
-          producer = @irep.instructions[source.index]
-          bound = producer.op == 'GETIV' ? @declared_ivar_elements[producer.ivar] : nil
-          contract = "element:ivar:@#{producer.ivar}"
+          bound, contract = element_bound_of(@irep.instructions[source.index])
         end
         return nil unless bound && !bound.empty?
 
@@ -251,9 +250,7 @@ module BytecodeIR
           bound = @declared_arg_elements[source.reg]
           contract = "element:argument:R#{source.reg}"
         else
-          producer = @irep.instructions[source.index]
-          bound = producer.op == 'GETIV' ? @declared_ivar_elements[producer.ivar] : nil
-          contract = "element:ivar:@#{producer.ivar}"
+          bound, contract = element_bound_of(@irep.instructions[source.index])
         end
         return nil unless bound && !bound.empty?
 
@@ -261,6 +258,15 @@ module BytecodeIR
         contracts << contract.freeze
       end
       Fact.new(classes: elements.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
+    end
+
+    # The declared element bound of a receiver written by an ivar or constant read, with its provenance.
+    def element_bound_of(producer)
+      case producer.op
+      when 'GETIV' then [@declared_ivar_elements[producer.ivar], "element:ivar:@#{producer.ivar}"]
+      when 'GETCONST' then [@declared_const_elements[producer.const_name], "element:constant:#{producer.const_name}"]
+      else [nil, nil]
+      end
     end
 
     def definition_types(definition)
