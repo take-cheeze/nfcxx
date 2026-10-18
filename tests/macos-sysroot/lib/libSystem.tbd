@@ -12,21 +12,7 @@ current-version: 1
 compatibility-version: 1
 exports:
   - targets:         [ arm64-macos ]
-    symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime,
-                       ___divti3, dyld_stub_binder, ___error, _exit, _exp, _fabs, _fabsf, _fclose, _feof,
-                       _ferror, _fflush, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti,
-                       ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor, _fmod, _fopen,
-                       _fprintf, _fputc, _fputs, _vfprintf, _fread, _free, _freopen, _frexp, _fseek, _ftell, _fwrite, _getc,
-                       _getenv, _gmtime, _isalnum, _isalpha, _iscntrl, _isdigit, _isgraph, _islower,
-                       _ispunct, _isspace, _isupper, _isxdigit, _ldexp, _localeconv, _localtime, _log,
-                       _log10, _log2, _longjmp, _memchr, _memcmp, _memcpy, _memset, _mktime, ___modti3, _pow,
-                       _printf, _puts, _qsort, _realloc, _remove, _rename, _setjmp, _setlocale, _setvbuf,
-                       _signal, _sin, _snprintf, _sqrt, ___stderrp, ___stdinp, ___stdoutp, _strchr, _strcmp,
-                       _strcoll, _strcpy, _strerror, _strftime, _strlen, _strncmp, _strpbrk, _strspn,
-                       _strstr, _strtod, _strtol, _system, _tan, _time, _tmpfile, _tmpnam, _tolower,
-                       _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _strrchr,
-                       _atoi, ___cxa_atexit, ___cxa_thread_atexit, ___stack_chk_fail, ___stack_chk_guard,
-                       ___cxa_finalize, _atexit, _bzero, _malloc, _posix_memalign, _strncpy, _gettimeofday, _isatty, _raise, _gmtime_r, _sigaction, _sigaltstack, _rand, _srand, _ceilf, __tlv_bootstrap ]
+    symbols:         [ _abort, _abs, _acos, _asin, _atan2, _ceil, _clearerr, _clock, _cos, _difftime, ___divti3, dyld_stub_binder, ___error, _exit, _exp, _fabs, _fabsf, _fclose, _feof, _ferror, _fflush, _fgets, ___fixdfti, ___fixsfti, ___fixunsdfti, ___fixunssfti, ___floattidf, ___floattisf, ___floatuntidf, ___floatuntisf, _floor, _fmod, _fopen, _fprintf, _fputc, _fputs, _vfprintf, _fread, _free, _freopen, _frexp, _fseek, _ftell, _fwrite, _getc, _getenv, _gmtime, _isalnum, _isalpha, _iscntrl, _isdigit, _isgraph, _islower, _ispunct, _isspace, _isupper, _isxdigit, _ldexp, _localeconv, _localtime, _log, _log10, _log2, _longjmp, _memchr, _memcmp, _memcpy, _memset, _mktime, ___modti3, _pow, _printf, _puts, _qsort, _realloc, _remove, _rename, _setjmp, _setlocale, _setvbuf, _signal, _sin, _snprintf, _sqrt, ___stderrp, ___stdinp, ___stdoutp, _strchr, _strcmp, _strcoll, _strcpy, _strerror, _strftime, _strlen, _strncmp, _strpbrk, _strspn, _strstr, _strtod, _strtol, _system, _tan, _time, _tmpfile, _tmpnam, _tolower, _toupper, ___udivti3, ___umodti3, _ungetc, _vsnprintf, _memmove, __setjmp, _strrchr, _atoi, ___cxa_atexit, ___cxa_thread_atexit, ___stack_chk_fail, ___stack_chk_guard, ___cxa_finalize, _atexit, _bzero, _malloc, _posix_memalign, _strncpy, _gettimeofday, _isatty, _raise, _gmtime_r, _sigaction, _sigaltstack, _rand, _srand, _ceilf, __tlv_bootstrap, _dladdr, __dyld_find_unwind_sections, __dyld_register_func_for_remove_image, _calloc, _pthread_getspecific, _pthread_key_create, _pthread_mutex_lock, _pthread_mutex_unlock, _pthread_once, _pthread_rwlock_rdlock, _pthread_rwlock_unlock, _pthread_rwlock_wrlock, _pthread_setspecific ]
     weak-symbols:    [ ]
     objc-classes:    [ ]
     objc-ivars:      [ ]
