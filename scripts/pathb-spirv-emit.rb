@@ -271,6 +271,71 @@ end
 # result: the front end stores it into a slot, then calls it through a load) is folded: the stores are dropped and each call
 # through a load of the slot calls that function directly (the same direct call the front end emits for a known callee).
 # Any other use of the slot (a load used as a value, a store of another address, the slot's address) leaves it alone.
+# The front end default-initialises an array of a class with a non-trivial constructor by one runtime helper call,
+# __cxa_vec_ctor(array, count, size, constructor address, null). The device pass has no runtime helper and no constructor
+# address, so the call is unrolled here into one direct call of the constructor per element (the element address is the
+# array plus i * size). The let that holds the constructor's address is dropped when that address was used only by these
+# calls. Any other use of the address stays and is refused as before.
+def cxa_count(x, name)
+  return (x == name ? 1 : 0) if x.is_a?(String)
+  return 0 unless x.is_a?(Array)
+  x.inject(0) { |a, y| a + cxa_count(y, name) }
+end
+
+def cxa_ctor_refs(x, name)
+  return 0 unless x.is_a?(Array)
+  n = 0
+  if head_of(x) == "call" && x[2].is_a?(IRSym) && x[2].name == "__cxa_vec_ctor" && x[6] == name
+    n += 1
+  end
+  x.each { |y| n += cxa_ctor_refs(y, name) }
+  n
+end
+
+def cxa_resolve(a, regs)
+  return a.name if a.is_a?(IRSym) && a.sig == "&"
+  return regs[a] if a.is_a?(String) && regs.key?(a)
+  nil
+end
+
+def expand_cxa_vec_ctor(body)
+  counter = [0]
+  expand = lambda do |x, regs|
+    out = []
+    x.each do |c|
+      if head_of(c) == "let" && c.length == 4 && c[3].is_a?(Array) && head_of(c[3]) == "bitcast" &&
+         c[3][2].is_a?(IRSym) && c[3][2].sig == "&"
+        regs[c[1]] = c[3][2].name
+        # dropped when its address is used only as a constructor argument
+        next if cxa_count(body, c[1]) == 1 + cxa_ctor_refs(body, c[1])
+        out << c
+        next
+      end
+      if head_of(c) == "eval" && c[1].is_a?(Array) && head_of(c[1]) == "call" && c[1][2].is_a?(IRSym) &&
+         c[1][2].sig == "&" && c[1][2].name == "__cxa_vec_ctor"
+        call = c[1]
+        ctor = cxa_resolve(call[6], regs)
+        raise Refused, "__cxa_vec_ctor with an unknown constructor" if ctor.nil?
+        raise Refused, "__cxa_vec_ctor with a destructor" unless head_of(call[7]) == "null"
+        raise Refused, "__cxa_vec_ctor with a non-constant count" unless head_of(call[4]) == "const" && call[3].is_a?(String)
+        n = as_int(call[4][2])
+        size = call[5][2]
+        n.times do |i|
+          counter[0] += 1
+          r = "%cxa#{counter[0]}"
+          out << ["let", r, ["ptr", "void"], ["index", call[3], ["const", "unsigned_long", i.to_s], size]]
+          out << ["eval", ["call", "void", IRSym.new("&", ctor), r]]
+        end
+        next
+      end
+      expand.call(c, regs) if c.is_a?(Array)
+      out << c
+    end
+    x.replace(out)
+  end
+  expand.call(body, {})
+end
+
 def fnptr_slot?(t)
   t = t[1] if head_of(t) == "const"
   head_of(t) == "ptr" && t.length > 1 && head_of(t[1]) == "fn"
@@ -2218,6 +2283,8 @@ def emit_module(src, kernel_cl = false)
   end
   entries = mod.defs.keys.select { |n| n.include?("__nfcxx_sycl_entry_") }
   return [nil, [], nil] if entries.empty?
+  # the array constructor calls are unrolled before the reachable set is taken: the constructors they call are reachable
+  mod.defs.each_value { |f| expand_cxa_vec_ctor(f) if f.is_a?(Array) }
   order = []
   state = {}
   visit = lambda do |name|
