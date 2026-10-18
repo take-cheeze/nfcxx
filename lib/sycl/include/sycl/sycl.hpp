@@ -187,6 +187,9 @@ template <int D> inline bool operator!=(const id<D> &a, const id<D> &b) { return
 template <int D> inline range<D> operator+(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] + b[i]; return r; }
 template <int D> inline range<D> operator-(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] - b[i]; return r; }
 template <int D> inline range<D> operator*(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] * b[i]; return r; }
+// dpct::dim3 converts to range<3> with its x, y, z in reverse index order (dim3 operator sycl::range<3>), so a non-template
+// overload accepts dim3 * range<3> and range<3> * dim3 through that conversion (a template cannot deduce from dim3).
+inline range<3> operator*(const range<3> &a, const range<3> &b) { return range<3>(a[0] * b[0], a[1] * b[1], a[2] * b[2]); }
 template <int D> inline range<D> operator/(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] / b[i]; return r; }
 template <int D> inline range<D> operator%(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] % b[i]; return r; }
 template <int D> inline range<D> operator-(const range<D> &a, size_t k) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] - k; return r; }
@@ -1088,6 +1091,13 @@ template <class T, int D = 1> class local_accessor {
 #define NFCXX_SYCL_FIBER_STACK (96 * 1024)
 #endif
 namespace detail {
+// The item of a work-item on the host: its nd_item<dim> (set by the kernel's body while the fiber runs), and its local
+// linear id and group size, which get_sub_group() needs without the dimension.
+struct host_item {
+  const void *nd = nullptr;
+  int dim = 0;
+  size_t lin = 0, wg = 1;
+};
 struct host_group {
   int n = 0, cur = 0;
   ucontext_t sched;
@@ -1095,12 +1105,18 @@ struct host_group {
   std::vector<char *> stacks;
   std::vector<char> done;
   std::vector<unsigned long> scratch;   // one word per work-item, for the group algorithms
+  std::vector<host_item> items;         // one per work-item
   void (*run)(void *, int) = nullptr;
   void *arg = nullptr;
 };
 inline host_group *&current_group() {
   static host_group *g = nullptr;
   return g;
+}
+// The item of the work-item that is running: the scheduler points it at that fiber's slot before each switch into the fiber.
+inline host_item *&current_host_item() {
+  static thread_local host_item *p = nullptr;
+  return p;
 }
 inline void fiber_main() {
   host_group *g = current_group();
@@ -1114,7 +1130,15 @@ inline void barrier_on_host() {
 }
 // Runs body(i) for i < n as the n work-items of one group, with barriers working.
 template <class Body> inline void run_group_items(host_group &g, int n, Body &body) {
-  if (n == 1) { body(0); return; }
+  g.items.assign(n, host_item{});
+  for (int i = 0; i < n; i++) { g.items[i].lin = (size_t)i; g.items[i].wg = (size_t)n; }
+  host_item *saved_item = current_host_item();
+  if (n == 1) {
+    current_host_item() = &g.items[0];
+    body(0);
+    current_host_item() = saved_item;
+    return;
+  }
   g.run = [](void *a, int i) { (*(Body *)a)(i); };
   g.arg = &body;
   g.n = n;
@@ -1139,9 +1163,11 @@ template <class Body> inline void run_group_items(host_group &g, int n, Body &bo
     for (int i = 0; i < n; i++) {
       if (g.done[i]) continue;
       g.cur = i;
+      current_host_item() = &g.items[i];
       swapcontext(&g.sched, &g.ctx[i]);
       if (g.done[i]) left--;
     }
+  current_host_item() = saved_item;
   current_group() = saved;
 }
 inline void free_group(host_group &g) { for (char *s : g.stacks) std::free(s); g.stacks.clear(); }
@@ -1264,7 +1290,12 @@ template <class Name, int D, class F> void handler::parallel_for(nd_range<D> r, 
         loc[d] = tl % lr[d]; tl /= lr[d];
         glo[d] = grp[d] * lr[d] + loc[d];
       }
-      f(nd_item<D>(glo, loc, grp, gr, lr));
+      nd_item<D> it(glo, loc, grp, gr, lr);
+      detail::host_item &hi = hg.items[ll];
+      hi.nd = &it;
+      hi.dim = D;
+      f(it);
+      hi.nd = nullptr;
     };
     detail::run_group_items(hg, (int)nlocal, body);
   }
@@ -1282,6 +1313,37 @@ template <class Name, class F> void handler::single_task(F f) {
   f();
 #endif
 }
+
+// ------------------------------------------------------------------------------------------------ this_work_item
+// The item of the work-item that is running. On the device it is built from the builtins the kernel's item comes from. On
+// the host it is the item of the running fiber (detail::current_host_item, set by the scheduler in run_group_items).
+namespace ext::oneapi::this_work_item {
+template <int D> inline nd_item<D> get_nd_item() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return nd_item<D>(detail::device_gid<D>(), detail::device_lid<D>(), detail::device_group<D>(), detail::device_global_range<D>(),
+                    detail::device_local_range<D>());
+#else
+  const detail::host_item *h = detail::current_host_item();
+  if (!h || !h->nd || h->dim != D) {
+    std::fprintf(stderr, "this_work_item::get_nd_item<%d>: no nd_range work-item is running\n", D);
+    std::abort();
+  }
+  return *static_cast<const nd_item<D> *>(h->nd);
+#endif
+}
+inline sub_group get_sub_group() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return get_nd_item<3>().get_sub_group();   // unused dimensions have range 1 and id 0, so the linear id and size are the kernel's
+#else
+  const detail::host_item *h = detail::current_host_item();
+  if (!h) {
+    std::fprintf(stderr, "this_work_item::get_sub_group: no nd_range work-item is running\n");
+    std::abort();
+  }
+  return sub_group(h->lin, h->wg);
+#endif
+}
+}  // namespace ext::oneapi::this_work_item
 
 // ------------------------------------------------------------------------------------------------ device, platform, context
 
@@ -2294,20 +2356,6 @@ inline bfloat16 operator+(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<
 inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) - static_cast<float>(b)); }
 inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
 inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
-// the work-item of the caller (a helper of element_wise.cpp and softmax.cpp; the ops under test use the launch's nd_item).
-// On the device it is the item the entry builds for the kernel (__nfcxx_sycl_entry_nd); on the host it is an empty item,
-// since a host work-item is not reachable from its helpers.
-namespace this_work_item {
-template <int D> inline nd_item<D> get_nd_item() {
-#ifdef __NFCXX_SYCL_DEVICE__
-  return nd_item<D>(detail::device_gid<D>(), detail::device_lid<D>(), detail::device_group<D>(),
-                    detail::device_global_range<D>(), detail::device_local_range<D>());
-#else
-  return nd_item<D>();
-#endif
-}
-template <int D = 3> inline sub_group get_sub_group() { return get_nd_item<D>().get_sub_group(); }
-}  // namespace this_work_item
 namespace experimental {
 // The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
 #define NFCXX_SYCL_BF16_FN1(name) \
