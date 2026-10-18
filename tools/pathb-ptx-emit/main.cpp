@@ -27,7 +27,17 @@ bool read_all(const std::string &path, std::string &out) {
   }
   std::ifstream f(path, std::ios::binary);
   if (!f) return false;
-  out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  // the file is read into one buffer of its size (a byte-iterator copy grows the string and copies it again)
+  f.seekg(0, std::ios::end);
+  const std::streamoff size = f.tellg();
+  f.seekg(0, std::ios::beg);
+  if (size < 0) {
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+  }
+  out.resize(static_cast<size_t>(size));
+  f.read(&out[0], size);
+  out.resize(static_cast<size_t>(f.gcount()));
   return true;
 }
 
@@ -86,6 +96,33 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+  if (emit && !arith && !eval && !plan && !decls) {
+    // The module is read chunk by chunk from the file (a standard input is read whole first). Exit 3 on a refusal, 1 on
+    // malformed IR; nothing is written to stdout then.
+    std::string whole;
+    ModuleText text(nullptr, file);
+    if (file == "-") {
+      if (!read_all(file, whole)) {
+        std::fprintf(stderr, "error: cannot read %s\n", file.c_str());
+        return 1;
+      }
+      text = ModuleText(&whole, "");
+    } else if (!std::ifstream(file, std::ios::binary)) {
+      std::fprintf(stderr, "error: cannot read %s\n", file.c_str());
+      return 1;
+    }
+    auto sink = [](const std::string &piece) { std::fwrite(piece.data(), 1, piece.size(), stdout); };
+    try {
+      emit_module(text, sm, kernels, sink);
+    } catch (const Refused &e) {
+      std::fprintf(stderr, "refused: %s\n", e.what());
+      return 3;
+    } catch (const BadIR &e) {
+      std::fprintf(stderr, "error: %s\n", e.what());
+      return 1;
+    }
+    return 0;
+  }
   std::string src;
   if (!read_all(file, src)) {
     std::fprintf(stderr, "error: cannot read %s\n", file.c_str());
@@ -119,21 +156,6 @@ int main(int argc, char **argv) {
       return 3;
     } catch (const BadIR &e) {
       write_err("error: ", e.text);
-      return 1;
-    }
-    return 0;
-  }
-  if (emit) {
-    // The PTX of the module (the same text as scripts/pathb-ptx-emit.rb, which stays the default until the C++ emitter is
-    // switched in). Exit 3 on a refusal, 1 on malformed IR.
-    try {
-      std::string ptx = emit_module(src, sm, kernels);
-      std::fwrite(ptx.data(), 1, ptx.size(), stdout);
-    } catch (const Refused &e) {
-      std::fprintf(stderr, "refused: %s\n", e.what());
-      return 3;
-    } catch (const BadIR &e) {
-      std::fprintf(stderr, "error: %s\n", e.what());
       return 1;
     }
     return 0;

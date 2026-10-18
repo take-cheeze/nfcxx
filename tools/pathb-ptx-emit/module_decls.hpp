@@ -5,6 +5,7 @@
 
 #include <set>
 #include <string>
+#include <vector>
 
 #include "ir.hpp"
 
@@ -20,4 +21,8 @@ struct ModuleSymbols {
 // declares (the sets the function lowering looks its @name operands up in). Throws Refused (the Ruby's refusals) and
 // BadIR.
 std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool uses_printf,
+                              ModuleSymbols *syms = nullptr);
+
+// The same declarations from the module's top-level forms (the non-function forms, in order: the function forms are skipped).
+std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshared, bool uses_printf,
                               ModuleSymbols *syms = nullptr);
