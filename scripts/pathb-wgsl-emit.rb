@@ -1203,12 +1203,15 @@ class Fn
       @ind -= 1
       emit("}")
     when "nonnull"
-      p, _ = operand(s[1])
-      emit("if (#{p} == 0u) {")
-      @ind += 1
-      trap(4)
-      @ind -= 1
-      emit("}")
+      # the address of a function is never null (the front end's check on a function pointer that is a template argument)
+      unless s[1].is_a?(IRSym) && s[1].sig == "&"
+        p, _ = operand(s[1])
+        emit("if (#{p} == 0u) {")
+        @ind += 1
+        trap(4)
+        @ind -= 1
+        emit("}")
+      end
     when "return"
       if @ret.nil?
         emit("return;")
