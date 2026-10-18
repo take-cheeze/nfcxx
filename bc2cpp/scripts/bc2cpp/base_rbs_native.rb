@@ -14,11 +14,13 @@
 #
 # Every member line is validated with the rbs parser before it is written, as base_rbs.rb does.
 
+require 'json'
 require 'open3'
 require 'fileutils'
 require 'set'
 require_relative '../../tools/bc2cpp/native_format_types'
 require_relative '../../tools/bc2cpp/native_return_kinds'
+require_relative '../../tools/bc2cpp/native_ast_returns'
 
 module BaseRbsNative
   DEFINE_CLASS = /\bmrb_define_(class|module)(_under)?(?:_id)?\s*\(/.freeze
@@ -178,7 +180,11 @@ module BaseRbsNative
     return '(*untyped) -> untyped' unless body
     return OVERLOADS[function].join(' | ') if OVERLOADS.key?(function)
 
-    ret = NativeReturnKinds.rbs_of(NativeReturnKinds.kind_of_body(body), owner: owner, singleton: singleton)
+    # The clang AST's kind for this function when it has one (native_ast_returns.rb follows locals and same-file calls);
+    # otherwise the regex classifier's kind for its return text.
+    kind = @ast_kinds&.[](function)
+    kind = NativeReturnKinds.kind_of_body(body) if kind.nil?
+    ret = NativeReturnKinds.rbs_of(kind, owner: owner, singleton: singleton)
     params = if body.match?(/\bmrb_get_args\s*\(/) then param_shape(body) else aspec_shape(aspec) || '*untyped' end
     "(#{params}) -> #{ret}"
   end
@@ -320,6 +326,19 @@ module BaseRbsNative
     false
   end
 
+  # Return kinds the clang AST gives the functions of one source (NativeAstReturns). A file clang cannot parse keeps
+  # the regex kinds, and says so.
+  def ast_function_kinds(path, flags)
+    lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
+    out, err, status = Open3.capture3('clang', *lang, '-fsyntax-only', '-Xclang', '-ast-dump=json', *flags, path)
+    unless status.success?
+      warn "base_rbs_native: AST returns unavailable for #{path}, regex kinds kept: #{err.lines.first}"
+      return {}
+    end
+
+    NativeAstReturns.analyze(JSON.parse(out.force_encoding(Encoding::UTF_8)), path)
+  end
+
   def preprocess(path, flags)
     lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
     out, err, status = Open3.capture3('clang', *lang, '-E', '-P', *flags, path)
@@ -335,6 +354,7 @@ module BaseRbsNative
     methods = []
     skipped = []
     paths.each do |path|
+      @ast_kinds = ast_function_kinds(path, flags)
       k, s, m, sk = scan(preprocess(path, flags))
       kinds.merge!(k)
       supers.merge!(s)
