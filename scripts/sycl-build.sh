@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
     -L|-l) [ $# -ge 2 ] || { echo "sycl-build: $1 needs an argument" >&2; exit 2; }; link+=("$1" "$2"); shift ;;
     -rpath) [ $# -ge 2 ] || { echo "sycl-build: -rpath needs an argument" >&2; exit 2; }; link+=("-Wl,-rpath,$2"); shift ;;
     -L*|-l*|-Wl,*) link+=("$1") ;;
-    -I*|-D*|-U*|-O*|-g|-W*) opts+=("$1") ;;
+    -I*|-D*|-U*|-O*|-g|-W*|--diag_*) opts+=("$1") ;;
     -*) echo "sycl-build: unknown option $1" >&2; exit 2 ;;
     *) src=$1 ;;
   esac

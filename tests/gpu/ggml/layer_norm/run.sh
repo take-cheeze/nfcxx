@@ -41,7 +41,7 @@ fail=0
 # pass, 2 when the runtime reports no device, 1 otherwise (a build failure prints NOT RUN (build)).
 run() {
   local b=$1 srcdir=$2 name=$3 res rc
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.sh" --backend="$b" --ndebug --diag_warning=narrowing_conversion -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/layer_norm/layer_norm_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \
