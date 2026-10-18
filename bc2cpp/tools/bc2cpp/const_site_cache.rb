@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'source_text'
+require_relative 'scan_cache'
 
 # CONST_SITE_CACHE: a GETCONST inside a namespaced owner resolves its lexical
 # scope chain on every execution -- one mrb_const_get per owner path segment,
@@ -91,35 +92,39 @@ module StableClassConstants
   # `mrb_define_(class|module)(_under)?(mrb, "Name", ...)`, class.c's
   # `boot_defclass`+`mrb_define_const_id`), reduced to the bare names.
   def self.native_class_module_names(native_paths)
-    counts = Hash.new(0)
-    Array(native_paths).each do |path|
-      next unless File.file?(path)
+    ScanCache.fetch('stable_class_constants.native_class_module_names', Array(native_paths), cache_absent: true) do
+      counts = Hash.new(0)
+      Array(native_paths).each do |path|
+        next unless File.file?(path)
 
-      source = File.read(path, encoding: 'UTF-8')
-      source.scan(/\bmrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) { counts[Regexp.last_match(1)] += 1 }
-      source.scan(/\bmrb_define_(?:class|module)(?:_under)?\s*\(\s*\w+(?:\s*,\s*\w+)?\s*,\s*"([^"]+)"/) do
-        counts[Regexp.last_match(1)] += 1
-      end
-      booted = source.include?('boot_defclass') ? source.scan(/(?<!\w)(\w+)\s*=\s*boot_defclass\s*\(/).flatten : []
-      next if booted.empty?
+        source = File.read(path, encoding: 'UTF-8')
+        source.scan(/\bmrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) { counts[Regexp.last_match(1)] += 1 }
+        source.scan(/\bmrb_define_(?:class|module)(?:_under)?\s*\(\s*\w+(?:\s*,\s*\w+)?\s*,\s*"([^"]+)"/) do
+          counts[Regexp.last_match(1)] += 1
+        end
+        booted = source.include?('boot_defclass') ? source.scan(/(?<!\w)(\w+)\s*=\s*boot_defclass\s*\(/).flatten : []
+        next if booted.empty?
 
-      source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\(\1\)\s*\)/) do |variable, name|
-        counts[name] += 1 if booted.include?(variable)
+        source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\(\1\)\s*\)/) do |variable, name|
+          counts[name] += 1 if booted.include?(variable)
+        end
       end
+      # Refuse a bare name defined by more than one distinct native site.
+      counts.select { |_name, count| count == 1 }.keys.to_set
     end
-    # Refuse a bare name defined by more than one distinct native site.
-    counts.select { |_name, count| count == 1 }.keys.to_set
   end
 
   # Only the `Name = value` half of `IntegerConstants.foreign_const_names`: its
   # `class`/`module` half also matches a harmless reopening (point 3 above).
   def self.foreign_reassigned_names(paths)
-    names = Set.new
-    Array(paths).each do |path|
-      text = SourceText.read(path, 'StableClassConstants.foreign_reassigned_names') or next
-      text.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
+    ScanCache.fetch('stable_class_constants.foreign_reassigned_names', Array(paths), cache_absent: false) do
+      names = Set.new
+      Array(paths).each do |path|
+        text = SourceText.read(path, 'StableClassConstants.foreign_reassigned_names') or next
+        text.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
+      end
+      names
     end
-    names
   end
 
   # The native sibling of `analyze`; the caller unions the two Sets. Both require

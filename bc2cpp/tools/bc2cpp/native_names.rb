@@ -108,9 +108,10 @@ class ForeignDefNames < Prism::Visitor
 end
 
 def foreign_method_names(paths)
-  names = Set.new
-  Array(paths).each do |path|
-    src = SourceText.read(path, 'foreign_method_names') or next
+  ScanCache.fetch('native_names.foreign_method_names', Array(paths), cache_absent: false) do
+    names = Set.new
+    Array(paths).each do |path|
+      src = SourceText.read(path, 'foreign_method_names') or next
     parsed = RubyParseCache.parse(src, path)
     # The tree still recovers around an error and the regexes below cover the rest, but a
     # file that does not parse must not go unnoticed.
@@ -137,6 +138,7 @@ def foreign_method_names(paths)
     src.scan(/define_method\s*\(?\s*:"?(#{FOREIGN_METHOD_NAME_RE})/o) { names << Regexp.last_match(1) }
   end
   names
+  end
 end
 
 # ---------------------------------------------------------------------------
@@ -181,30 +183,35 @@ end
 # scan never sees, so the ivar is not provable.
 # ---------------------------------------------------------------------------
 def nil_class_operator_names(paths)
-  names = Set.new
-  Array(paths).each do |path|
-    src = SourceText.read(path, 'nil_class_operator_names', binary: true) or next
-    next unless src.include?('nil_class')
+  ScanCache.fetch('native_names.nil_class_operator_names', Array(paths), cache_absent: false) do
+    names = Set.new
+    Array(paths).each do |path|
+      src = SourceText.read(path, 'nil_class_operator_names', binary: true) or next
+      next unless src.include?('nil_class')
 
-    src.scan(/MRB_OPSYM\((\w+)\)/) { |(n)| names << (OPSYM_TO_RUBY[n] || n) }
-    src.scan(/"([+\-*\/%<>=!&|^~\[\]]+@?)"/) { |(n)| names << n }
+      src.scan(/MRB_OPSYM\((\w+)\)/) { |(n)| names << (OPSYM_TO_RUBY[n] || n) }
+      src.scan(/"([+\-*\/%<>=!&|^~\[\]]+@?)"/) { |(n)| names << n }
+    end
+    names
   end
-  names
 end
 
 def outside_ivar_names(paths)
-  names = Set.new
-  Array(paths).each do |path|
-    src = SourceText.read(path, 'outside_ivar_names', binary: true) or next
-    src.scan(/@([A-Za-z_][A-Za-z_0-9]*)/) { |(n)| names << n }
-    src.scan(/MRB_IVSYM\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { |(n)| names << n }
+  ScanCache.fetch('native_names.outside_ivar_names', Array(paths), cache_absent: false) do
+    names = Set.new
+    Array(paths).each do |path|
+      src = SourceText.read(path, 'outside_ivar_names', binary: true) or next
+      src.scan(/@([A-Za-z_][A-Za-z_0-9]*)/) { |(n)| names << n }
+      src.scan(/MRB_IVSYM\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { |(n)| names << n }
+    end
+    names
   end
-  names
 end
 
 def extract_native_method_names(src_paths)
-  names = Set.new
-  # MRB_SYM(name) is the bare name, MRB_OPSYM(op) an operator (OPSYM_TO_RUBY).
+  ScanCache.fetch('native_names.extract_native_method_names', Array(src_paths), cache_absent: false) do
+    names = Set.new
+    # MRB_SYM(name) is the bare name, MRB_OPSYM(op) an operator (OPSYM_TO_RUBY).
   # presym.h also defines MRB_SYM_Q -> "name?", MRB_SYM_B -> "name!" and
   # MRB_SYM_E -> "name=", which core uses constantly (Array#empty?, Kernel#nil?,
   # ...). Missing them made names like :empty? look MONO (Game::MoveRoute#empty?
@@ -240,6 +247,7 @@ def extract_native_method_names(src_paths)
     end
   end
   names
+  end
 end
 
 # ZSUPER_NATIVE_SUPPORT: like extract_native_method_names, but keeps which
