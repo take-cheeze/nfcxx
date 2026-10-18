@@ -4,10 +4,26 @@ require_relative 'native_result_facts'
 require_relative 'native_class_results'
 require_relative 'native_core_result_sigs'
 require_relative 'numeric_flow'
+require_relative 'codegen_return_classes'
 
 # CodeGen: NATIVE_RESULT_FACTS (ADR 0302). A fact is used only for a receiver the exact-class flow
 # proved, while lookup from that class provably reaches the registration (native_exact_owner_safe?).
 class CodeGen
+  NATIVE_RESULT_CORE_CLASS_BITS = RETURN_CORE_CLASS.map { |bit, klass| [klass, bit, bit.bit_length - 1].freeze }.freeze
+
+  # Class bits only append; identity also separates copies restored by without_probe_side_effects.
+  def native_result_class_bits
+    bits = @numeric_class_bits
+    return NATIVE_RESULT_CORE_CLASS_BITS unless bits
+
+    cached = @native_result_class_bits
+    return cached[2] if cached && cached[0].equal?(bits) && cached[1] == bits.size
+
+    entries = (bits.map { |klass, bit| [klass, bit, bit.bit_length - 1].freeze } + NATIVE_RESULT_CORE_CLASS_BITS).freeze
+    @native_result_class_bits = [bits, bits.size, entries]
+    entries
+  end
+
   # :fixnum, :float, a class name or nil for `name` sent to an exact `klass` receiver.
   def native_result_kind(name, klass)
     @native_result_kinds ||= {}
@@ -143,9 +159,10 @@ class CodeGen
     mask = 0
     rest = recv
     found = false
-    class_bits = (@numeric_class_bits || {}).to_a + RETURN_CORE_CLASS.map { |bit, klass| [klass, bit] }
-    class_bits.each do |klass, bit|
-      next unless recv.anybits?(bit)
+    class_bits = native_result_class_bits
+    class_bits.each do |klass, bit, position|
+      # Each class owns one bit; indexing avoids a temporary bignum intersection.
+      next unless recv[position] == 1
 
       rest &= ~bit
       kind = native_result_kind(name, klass)

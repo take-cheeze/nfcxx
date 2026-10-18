@@ -29,6 +29,8 @@ require_relative '../../tools/bc2cpp/native_direct'
 require_relative '../../tools/bc2cpp/native_result_facts'
 require_relative '../../tools/bc2cpp/closed_world'
 require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/codegen'
+require_relative '../../tools/bc2cpp/codegen_native_results'
 
 root = File.expand_path('../..', __dir__)
 failures = []
@@ -245,6 +247,117 @@ Dir.mktmpdir do |dir|
   check.call('a class list without one is free even in a world that has one', world.send(:method_missing_free?, nil, %w[Win]))
   check.call('no class list and no self is not free', !world.send(:method_missing_free?, nil))
 end
+
+# -- Native result receiver snapshots ---------------------------------------------------------
+
+puts '-- native result receiver snapshots'
+probe_class = Class.new(CodeGen) do
+  attr_reader :lookups
+
+  def initialize(kinds = {}, nil_raises = false)
+    @kinds = kinds
+    @nil_raises = nil_raises
+    @lookups = []
+  end
+
+  def native_result_kind(name, klass)
+    @lookups << [name, klass]
+    @kinds[[name, klass]]
+  end
+
+  def nil_unanswerable?(_name)
+    @nil_raises
+  end
+end
+probe = probe_class.new
+check.call('a core-only snapshot is shared', probe.native_result_class_bits.equal?(probe.native_result_class_bits))
+first_bit = probe.numeric_class_bit('First')
+first = probe.native_result_class_bits
+check.call('an unchanged class table reuses its snapshot', first.equal?(probe.native_result_class_bits))
+probe.numeric_class_bit('Second')
+second = probe.native_result_class_bits
+check.call('growth replaces the snapshot without changing an active snapshot',
+           !second.equal?(first) && first.first[0, 2] == ['First', first_bit] && !first.any? { |klass, _| klass == 'Second' })
+check.call('snapshots and their entries are immutable', second.frozen? && second.all?(&:frozen?))
+check.call('entry positions identify the single class bit', second.all? { |_, bit, position| bit == 1 << position })
+replacement = probe.instance_variable_get(:@numeric_class_bits).transform_keys { |klass| klass == 'First' ? 'Replacement' : klass }
+probe.instance_variable_set(:@numeric_class_bits, replacement)
+check.call('a replacement table is read even with the same size as an old snapshot',
+           probe.native_result_class_bits.first[0, 2] == ['Replacement', first_bit])
+before_probe = probe.native_result_class_bits
+probe.without_probe_side_effects do
+  probe.numeric_class_bit('Transient')
+  probe.native_result_class_bits
+end
+check.call('probe rollback restores class entries without retaining transient entries',
+           probe.native_result_class_bits == before_probe && !probe.native_result_class_bits.any? { |klass, _| klass == 'Transient' })
+
+# The pre-optimization algorithm is the reference for results, lookup order and class-bit allocation.
+reference = lambda do |cg, name, recv, classes|
+  next nil unless recv.is_a?(Integer)
+
+  mask = 0
+  rest = recv
+  found = false
+  entries = (cg.instance_variable_get(:@numeric_class_bits) || {}).to_a + CodeGen::RETURN_CORE_CLASS.map { |bit, klass| [klass, bit] }
+  entries.each do |klass, bit|
+    next unless recv.anybits?(bit)
+
+    rest &= ~bit
+    kind = cg.native_result_kind(name, klass)
+    found ||= !kind.nil?
+    mask |= cg.native_result_bits(kind, classes)
+  end
+  next nil unless found
+
+  rest &= ~NumericFlow::NIL if cg.nil_unanswerable?(name)
+  rest.zero? ? mask : mask | NumericFlow::OTHER
+end
+rng = Random.new(20_261_019)
+choices = [:fixnum, :float, :nil, 'Result', [:fixnum, 'Result'], nil]
+equivalent = 1_000.times.all? do
+  kinds = (%w[First Second Third] + CodeGen::RETURN_CORE_CLASS.values).to_h { |klass| [['read', klass], choices.sample(random: rng)] }
+  nil_raises = rng.rand(2).zero?
+  old = probe_class.new(kinds, nil_raises)
+  current = probe_class.new(kinds, nil_raises)
+  rng.rand(80).times do |index|
+    old.numeric_class_bit("Filler#{index}")
+    current.numeric_class_bit("Filler#{index}")
+  end
+  bits = %w[First Second Third].map do |klass|
+    bit = old.numeric_class_bit(klass)
+    current.numeric_class_bit(klass)
+    bit
+  end
+  candidates = bits + CodeGen::RETURN_CORE_CLASS.keys + [NumericFlow::NIL, NumericFlow::INT, NumericFlow::OTHER, old.numeric_class_bit('Unknown')]
+  current.numeric_class_bit('Unknown')
+  4.times.all? do
+    recv = candidates.sample(rng.rand(candidates.size + 1), random: rng).reduce(0, :|)
+    recv = ~recv if rng.rand(10).zero?
+    classes = rng.rand(2).zero?
+    expected = reference.call(old, 'read', recv, classes)
+    got = current.native_result_flow_mask('read', recv, classes: classes)
+    expected == got && old.lookups == current.lookups &&
+      old.instance_variable_get(:@numeric_class_bits) == current.instance_variable_get(:@numeric_class_bits)
+  end
+end
+check.call('4,000 randomized narrow/wide queries preserve masks, lookup order and discovered class bits', equivalent)
+check.call('noninteger receiver masks still have no result', probe.native_result_flow_mask('read', nil).nil?)
+
+mutating_class = Class.new(probe_class) do
+  def native_result_kind(name, klass)
+    numeric_class_bit('Discovered')
+    native_result_class_bits
+    super
+  end
+end
+mutating = mutating_class.new({ ['read', 'First'] => :fixnum, ['read', 'Discovered'] => :float })
+first_bit = mutating.numeric_class_bit('First')
+future_bit = 1 << (NumericFlow::CLASS_BIT_BASE + 1)
+check.call('class discovery during a query retains that query snapshot',
+           mutating.native_result_flow_mask('read', first_bit | future_bit) == (NumericFlow::INT | NumericFlow::OTHER))
+check.call('the next query sees a class discovered by the previous query',
+           mutating.native_result_flow_mask('read', future_bit) == NumericFlow::FLT)
 
 # -- 3. generated code ------------------------------------------------------------------------
 
