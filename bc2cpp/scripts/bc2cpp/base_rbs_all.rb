@@ -5,7 +5,7 @@
 # hand-written C / C++ sources. The native include paths are the gem's own (`cxx.include_paths` / `cc.include_paths`
 # in its mrbgem.rake, with `#{dir}` expanded), plus the mruby headers and the closed build's generated headers.
 #
-#   ruby scripts/bc2cpp/base_rbs_all.rb OUT_DIR [CLOSED_BUILD_DIR]
+#   ruby scripts/bc2cpp/base_rbs_all.rb [--jobs N] OUT_DIR [CLOSED_BUILD_DIR]
 #
 # Output: OUT_DIR/<gem>/ruby/*.rbs and OUT_DIR/<gem>/native.rbs. A gem whose native sources fail to preprocess is listed
 # and skipped; the others still run. Nothing is written under sig/: these are base stubs, not compiler inputs.
@@ -13,6 +13,7 @@
 require 'fileutils'
 require 'open3'
 require 'set'
+require 'optparse'
 require_relative 'base_rbs'
 require_relative 'base_rbs_native'
 
@@ -96,7 +97,7 @@ module BaseRbsAll
     base
   end
 
-  def run(out_dir, closed_build)
+  def run(out_dir, closed_build, jobs: BaseRbsWorkers::DEFAULT_JOBS)
     report = []
     path, = BaseRbs.run(File.join(out_dir, 'mruby-core', 'ruby'), CORE_RUBY.map { |rel| File.join(ROOT, rel) })
     # Only the class headers: the closed world does not compile these methods, so a declared method is not in the
@@ -109,7 +110,7 @@ module BaseRbsAll
       srcs = rels.map { |rel| File.join(ROOT, rel) }
       gem_out = File.join(out_dir, name)
       FileUtils.mkdir_p(gem_out)
-      path, skipped = BaseRbsNative.run(gem_out, srcs, core_flags(closed_build))
+      path, skipped = BaseRbsNative.run(gem_out, srcs, core_flags(closed_build), jobs: jobs)
       report << [name, 'ok', srcs.size, skipped.size, path]
     end
     gems.each do |gem_dir|
@@ -125,7 +126,7 @@ module BaseRbsAll
 
       FileUtils.mkdir_p(gem_out)
       begin
-        path, skipped = BaseRbsNative.run(gem_out, natives, flags_for(gem_dir, closed_build))
+        path, skipped = BaseRbsNative.run(gem_out, natives, flags_for(gem_dir, closed_build), jobs: jobs)
         report << [name, 'ok', natives.size, skipped.size, path]
       rescue RuntimeError => e
         report << [name, 'native failed', natives.size, e.message.lines.first.to_s.strip]
@@ -136,8 +137,19 @@ module BaseRbsAll
 end
 
 if $PROGRAM_NAME == __FILE__
-  abort 'usage: base_rbs_all.rb OUT_DIR [CLOSED_BUILD_DIR]' if ARGV.empty?
+  jobs = BaseRbsWorkers::DEFAULT_JOBS
+  parser = OptionParser.new do |opts|
+    opts.banner = 'usage: base_rbs_all.rb [--jobs N] OUT_DIR [CLOSED_BUILD_DIR]'
+    opts.on('-j N', '--jobs N', Integer, 'Native file workers (default: at most 2; 1 runs serially)') { |n| jobs = n }
+  end
+  begin
+    parser.parse!(ARGV)
+    raise OptionParser::InvalidArgument, 'jobs must be positive' unless jobs.positive?
+  rescue OptionParser::ParseError => e
+    abort "#{e.message}\n#{parser}"
+  end
+  abort parser.to_s unless (1..2).cover?(ARGV.size)
 
-  report = BaseRbsAll.run(ARGV[0], ARGV[1])
+  report = BaseRbsAll.run(ARGV[0], ARGV[1], jobs: jobs)
   report.each { |row| puts row.join("\t") }
 end

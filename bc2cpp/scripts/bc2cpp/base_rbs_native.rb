@@ -4,7 +4,7 @@
 # Base RBS for native (C / C++) method registrations: the mrb_define_* calls of mruby's C API, found in the
 # preprocessed source (`clang -E`), so macros such as MRB_ARGS_REQ are already expanded.
 #
-#   ruby scripts/bc2cpp/base_rbs_native.rb OUT_DIR [-I DIR]... [-D MACRO]... SRC.cxx...
+#   ruby scripts/bc2cpp/base_rbs_native.rb [--jobs N] OUT_DIR [-I DIR]... [-D MACRO]... SRC.cxx...
 #
 # A class or module is named by the call that defines it (mrb_define_class / _under, mrb_define_module / _under,
 # and the _id forms); a method is attached to the variable it is registered on. Methods are written as
@@ -18,6 +18,8 @@ require 'json'
 require 'open3'
 require 'fileutils'
 require 'set'
+require 'optparse'
+require_relative 'base_rbs_workers'
 require_relative '../../tools/bc2cpp/native_format_types'
 require_relative '../../tools/bc2cpp/native_return_kinds'
 require_relative '../../tools/bc2cpp/native_ast_returns'
@@ -369,14 +371,16 @@ module BaseRbsNative
     out.force_encoding(Encoding::UTF_8)
   end
 
-  def run(out_dir, paths, flags)
+  def run(out_dir, paths, flags, jobs: BaseRbsWorkers::DEFAULT_JOBS)
     kinds = {}
     supers = {}
     methods = []
     skipped = []
-    paths.each do |path|
+    scans = BaseRbsWorkers.map(paths, jobs: jobs) do |path|
       @ast_kinds = ast_function_kinds(path, flags)
-      k, s, m, sk = scan(preprocess(path, flags))
+      scan(preprocess(path, flags))
+    end
+    scans.each do |k, s, m, sk|
       kinds.merge!(k)
       supers.merge!(s)
       methods.concat(m)
@@ -392,16 +396,23 @@ end
 
 if $PROGRAM_NAME == __FILE__
   args = ARGV.dup
-  abort 'usage: base_rbs_native.rb OUT_DIR [-I DIR] [-D MACRO] SRC...' if args.size < 2
-
-  out_dir = args.shift
   flags = []
-  while args.first&.start_with?('-I', '-D')
-    flag = args.shift
-    flag = "#{flag}#{args.shift}" if flag.length == 2
-    flags << flag
+  jobs = BaseRbsWorkers::DEFAULT_JOBS
+  parser = OptionParser.new do |opts|
+    opts.banner = 'usage: base_rbs_native.rb [--jobs N] OUT_DIR [-I DIR] [-D MACRO] SRC...'
+    opts.on('-j N', '--jobs N', Integer, 'Native file workers (default: at most 2; 1 runs serially)') { |n| jobs = n }
+    opts.on('-I DIR') { |dir| flags << "-I#{dir}" }
+    opts.on('-D MACRO') { |macro| flags << "-D#{macro}" }
   end
-  path, skipped = BaseRbsNative.run(out_dir, args, flags)
+  begin
+    parser.parse!(args)
+    raise OptionParser::InvalidArgument, 'jobs must be positive' unless jobs.positive?
+  rescue OptionParser::ParseError => e
+    abort "#{e.message}\n#{parser}"
+  end
+  abort parser.to_s if args.size < 2
+
+  path, skipped = BaseRbsNative.run(args.shift, args, flags, jobs: jobs)
   warn "base_rbs_native: wrote #{path}, skipped #{skipped.size} registration(s)"
   skipped.first(10).each { |s| warn "  skipped #{s}" }
 end
