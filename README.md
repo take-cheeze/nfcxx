@@ -8,6 +8,9 @@ git submodule update --init --depth 1   # fetch 3rd/edg
 scripts/setup-edg.sh      # build EDG (3rd/edg submodule) into build/edg (~3 min)
 scripts/setup-qbe.sh      # build QBE + cproc (3rd/qbe, 3rd/cproc) into build/
 scripts/setup-mruby.sh    # the mruby interpreter that runs the helper scripts (needs ruby + rake once); built on first use otherwise
+scripts/setup-cppfront.sh # cppfront v0.8.2 (Cpp2 to C++1) into build/, for .cpp2 inputs (experimental; docs/notes/cpp2.md)
+./nfcxx hello.cpp2 -o hello  # Cpp2: cppfront translates it, then the C++ pipeline above (experimental)
+tests/cpp2/run.sh         # Cpp2 inputs: build, -c and link, mixed with .cpp, includes, a syntax error (experimental)
 ./nfcxx hello.cpp -o hello   # C++ -> C -> cproc -> QBE -> asm (default backend)
 ./nfcxx --backend=gcc ...    # C++ -> C -> gcc -O2 -fwrapv -fno-strict-aliasing
 ./nfcxx --emit-c hello.cpp   # print the generated C
