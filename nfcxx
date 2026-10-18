@@ -216,6 +216,9 @@ while [ $# -gt 0 ]; do
     # -lNAME stays -lNAME for the host link steps; the EDG call below spells it --c_to_obj_lib=NAME (eccp's own -l
     # search only looks in -L directories and /lib, /usr/lib, so it cannot find a multiarch libm).
     -l?*) files+=("$1") ;;
+    # -Wno-narrowing (icpx and ggml-sycl build with it): a non-constant narrowing conversion is a warning, so a braced
+    # std::array argument of wider values stays viable in clang mode (EDG --diag_warning=narrowing_conversion)
+    -Wno-narrowing) diag_opts+=(--diag_warning=narrowing_conversion) ;;
     -W*|-w) ;;                                      # warnings do not change the object code
     -m*) isa+=("$1") ;;                             # ISA/target options (-mavx2, -march=..): see the -m block below
     -MD|-MMD) depmode=$1 ;;
@@ -354,7 +357,7 @@ if [ $emit_c = 1 ]; then
   for x in ${files[@]+${files[@]+"${files[@]}"}}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+${inc[@]+"${inc[@]}"}}) ;; esac; done
   t=$(trace_start)
   posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)   # as the macOS base
-  (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${gnu_opts[@]+"${gnu_opts[@]}"} \
+  (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${gnu_opts[@]+"${gnu_opts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} \
       ${inc[@]+"${inc[@]}"} --gen_c_file_name="$tmp/out.c" "$f")
   trace_end "$t" "cpfe --emit-c (front end)" frontend
   cat "$tmp/out.c"
@@ -603,7 +606,7 @@ fi
 t=$(trace_start)
 (
   [ -z "$eccp_dir" ] || cd "$eccp_dir"
-  "$eccp_bin" "$std" --"$dialect" --wdir / ${extra[@]+"${extra[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
+  "$eccp_bin" "$std" --"$dialect" --wdir / ${extra[@]+"${extra[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
     ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pre_opts[@]+${pre_opts[@]+"${pre_opts[@]}"}} ${cuda_opts[@]+${cuda_opts[@]+"${cuda_opts[@]}"}} ${eflist[@]+${eflist[@]+"${eflist[@]}"}} ${shim[@]+${shim[@]+"${shim[@]}"}} ${vlart[@]+${vlart[@]+"${vlart[@]}"}} ${rtlib[@]+${rtlib[@]+"${rtlib[@]}"}} -o "$eccp_out"
 )
 trace_end "$t" "eccp (front end, C compile, link)" eccp
