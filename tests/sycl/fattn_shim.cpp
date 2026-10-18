@@ -6,6 +6,7 @@
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/work_group_static.hpp>
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
+#include "../../lib/sycl-ggml/sycl/half_type.hpp"  // sycl::isnan (float and half) is the ggml overlay's
 #include <cstdio>
 #include <functional>
 #include <limits>
