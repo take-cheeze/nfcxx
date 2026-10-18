@@ -69,3 +69,5 @@ export EDG_BASE="$root/build/edg-base-cross"
 export PATH="$llvm/bin:\$PATH"
 EOF
 echo "wrote $root/build/cross-macos.env"
+# The open-source compiler and libc++abi runtime for the cross link (tests/macos-sysroot/runtime/README.md).
+"$root/tests/macos-sysroot/runtime/build.sh"
