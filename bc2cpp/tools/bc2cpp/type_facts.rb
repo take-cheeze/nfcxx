@@ -532,10 +532,18 @@ module TypeFacts
 
   # ------------------------------------------------------------------------------------------------ constants
 
+  # ARRAY_SUM: `+` on Array and `freeze` answer what the proof assumes only while no Ruby definition of either can
+  # replace it (CodeGen#declared_array_plus_safe?: no program `+` on Array or a subclass, no prepend).
+  def array_sum_safe?(ctx)
+    ctx.gen.declared_array_plus_safe? && (ctx.registry['freeze'] || []).none?(&:irep)
+  end
+
   def const_rows(ctx)
     classes = ctx.container_constants || {}
     pools = ctx.gen.instance_variable_get(:@class_const_pools) || {}
     ints = ctx.integer_constants || Set.new
+    sums = DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
+                                             array_sum_safe?(ctx))
     seen = {}
     Array(ctx.constant_sites).each do |site|
       name = site[:name].to_s
@@ -557,6 +565,9 @@ module TypeFacts
       elsif ints.include?(bare)
         row['type'] = 'Integer'
         row['source'] = 'inferred:integer-constant'
+      elsif sums[name]
+        row['type'] = 'Array'
+        row['source'] = 'inferred:array-sum'
       else
         producer = textual_producer(ctx, irep, site[:idx], site[:reg])
         if producer.start_with?('literal:') && !%w[literal:nil literal:Numeric].include?(producer)
