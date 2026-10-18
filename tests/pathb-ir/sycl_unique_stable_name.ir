@@ -103,19 +103,22 @@
   (ret (ptr (const char)))
   (params)
   (weak)
-  (return @"const"))
+  (let %0 (ptr (const char)) (bitcast (ptr (const char)) @"const"))
+  (return %0))
 
 (function "_Z7name_ofI1BEPKcv"
   (ret (ptr (const char)))
   (params)
   (weak)
-  (return @"const.1"))
+  (let %0 (ptr (const char)) (bitcast (ptr (const char)) @"const.1"))
+  (return %0))
 
 (function "_Z7name_ofIiEPKcv"
   (ret (ptr (const char)))
   (params)
   (weak)
-  (return @"const.2"))
+  (let %0 (ptr (const char)) (bitcast (ptr (const char)) @"const.2"))
+  (return %0))
 
 (function "_ZSt11__terminatev"
   (ret void)
