@@ -66,7 +66,16 @@ bool contains_printf(const Node &f) {
 
 }  // namespace
 
-Fn::Fn(const Node &form, size_t index) : form_(&form), index_(index), name_(at(form, 1).text) {}
+Fn::Fn(std::string name, size_t index, Loader load) : load_(std::move(load)), index_(index), name_(std::move(name)) {}
+
+void Fn::release() {
+  body_.clear();
+  form_.reset();
+  lines.clear();
+  lines.shrink_to_fit();
+  prologue_.clear();
+  prologue_.shrink_to_fit();
+}
 
 void Fn::label(const std::string &l) { lines.push_back(l + ":"); }
 
@@ -85,6 +94,7 @@ std::string Fn::ret_bits(const Ty &t) const {
 void Fn::setup() {
   if (setup_done_) return;
   setup_done_ = true;
+  if (!form_) form_ = load_();
   body_.clear();
   bool have_ret = false;
   const Node &form = *form_;

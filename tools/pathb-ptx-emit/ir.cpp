@@ -1,5 +1,7 @@
 // Reader for the Path B IR text. Each function here is the C++ form of the Ruby function of the same name in
 // scripts/pathb-ptx-emit.rb; the byte rules (space, octal, escapes, lstrip, split) follow mruby's, which runs the Ruby.
+#include <fstream>
+#include <functional>
 #include <map>
 #include <set>
 
@@ -185,24 +187,65 @@ std::string strip_comments(const std::string &src) {
   return out;
 }
 
+// The module's chunks, one line at a time (the Ruby's module_chunks, see ModuleText): a line that begins with '(' starts a
+// chunk, unless the chunk has no line yet; a full-line comment is left out; the empty lines at the end of the text are left
+// out (an empty line before a comment or a line is kept, as split_lines keeps it).
+class ChunkBuilder {
+ public:
+  explicit ChunkBuilder(const std::function<void(size_t, const std::string &)> &visit) : visit_(visit) {}
+
+  void line(const std::string &l) {
+    if (lstrip_starts_with(l, ';')) {
+      flush_empty();
+      return;
+    }
+    if (l.empty()) {
+      empty_ += 1;
+      return;
+    }
+    flush_empty();
+    if (l[0] == '(' && started_) emit();
+    add(l);
+  }
+
+  // The end of the text: the chunk in progress is the last one (the pending empty lines are the text's end).
+  void finish() {
+    if (started_) emit();
+  }
+
+ private:
+  void add(const std::string &l) {
+    if (!started_) {
+      started_ = true;
+      cur_.clear();
+    } else {
+      cur_ += '\n';
+    }
+    cur_ += l;
+  }
+
+  void flush_empty() {
+    for (; empty_ > 0; empty_--) add("");
+  }
+
+  void emit() {
+    visit_(index_++, cur_);
+    started_ = false;
+    cur_.clear();
+  }
+
+  const std::function<void(size_t, const std::string &)> &visit_;
+  std::string cur_;
+  bool started_ = false;
+  size_t empty_ = 0;
+  size_t index_ = 0;
+};
+
 // The Ruby's module_chunks: the chunks of the text, each starting at a line that begins with '(' (full-line comments
 // dropped).
 std::vector<std::string> module_chunks(const std::string &src) {
   std::vector<std::string> chunks;
-  std::string cur;
-  bool cur_empty = true;
-  for (const std::string &line : split_lines(src)) {
-    if (lstrip_starts_with(line, ';')) continue;
-    if (!line.empty() && line[0] == '(' && !cur_empty) {
-      chunks.push_back(cur);
-      cur.clear();
-      cur_empty = true;
-    }
-    if (!cur_empty) cur += '\n';
-    cur += line;
-    cur_empty = false;
-  }
-  if (!cur_empty) chunks.push_back(cur);
+  ModuleText(&src, "").each_chunk([&chunks](size_t, const std::string &t) { chunks.push_back(t); });
   return chunks;
 }
 
@@ -348,4 +391,65 @@ bool parse_module_forms(const std::string &src, const std::vector<std::string> &
     for (Node &f : parsed) out.forms.push_back(std::move(f));
   }
   return true;
+}
+
+void ModuleText::each_chunk(const std::function<void(size_t, const std::string &)> &visit) const {
+  ChunkBuilder b(visit);
+  if (src_) {
+    const std::string &src = *src_;
+    size_t start = 0;
+    while (true) {
+      size_t nl = src.find('\n', start);
+      if (nl == std::string::npos) {
+        b.line(src.substr(start));
+        break;
+      }
+      b.line(src.substr(start, nl - start));
+      start = nl + 1;
+    }
+  } else {
+    std::ifstream f(path_, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot read " + path_);
+    std::string line;
+    while (std::getline(f, line)) b.line(line);
+  }
+  b.finish();
+}
+
+std::string ModuleText::whole() const {
+  if (src_) return *src_;
+  std::ifstream f(path_, std::ios::binary);
+  if (!f) throw std::runtime_error("cannot read " + path_);
+  std::string out;
+  f.seekg(0, std::ios::end);
+  const std::streamoff size = f.tellg();
+  f.seekg(0, std::ios::beg);
+  if (size > 0) {
+    out.resize(static_cast<size_t>(size));
+    f.read(&out[0], size);
+    out.resize(static_cast<size_t>(f.gcount()));
+  }
+  return out;
+}
+
+std::vector<Node> parse_text_forms(const std::string &text) { return parse_forms(tokenize(text)); }
+
+bool chunk_function_name(const std::string &chunk, std::string &name) { return function_chunk_name(chunk, name); }
+
+std::vector<Node> parse_nonfunction_forms(const std::string &src) {
+  std::vector<Node> forms;
+  try {
+    ModuleText(&src, "").each_chunk([&forms](size_t, const std::string &text) {
+      for (Node &f : parse_text_forms(text)) {
+        if (!head_is(f, "function")) forms.push_back(std::move(f));
+      }
+    });
+  } catch (const BadIR &) {
+    // parse_forms_chunked's fallback: the whole text, with its comments stripped
+    forms.clear();
+    for (Node &f : parse_forms(tokenize(strip_comments(src)))) {
+      if (!head_is(f, "function")) forms.push_back(std::move(f));
+    }
+  }
+  return forms;
 }

@@ -82,7 +82,10 @@ struct ByteInitSrc {
 }  // namespace
 
 std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool uses_printf, ModuleSymbols *syms) {
-  std::vector<Node> forms = parse_forms_chunked(src);
+  return emit_module_decls(parse_nonfunction_forms(src), uses_dynshared, uses_printf, syms);
+}
+
+std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshared, bool uses_printf, ModuleSymbols *syms) {
   OMap<Shared> shared;
   OMap<Global> globals;
   OMap<Const> consts;
