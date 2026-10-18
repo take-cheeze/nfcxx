@@ -22,10 +22,17 @@ libcxx=${NFCXX_LIBCXX:-$llvm/include/c++/v1}
 
 # Build only what is missing: a second run skips these, so it is a no-op apart from rewriting the env file.
 if [ -x "$root/build/edg/bin/cpfe" ]; then echo "EDG: already built"; else "$root/scripts/setup-edg.sh"; fi
-if [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ]; then
-  echo "QBE and cproc: already built"
+# QBE and cproc are rebuilt when the pins recorded in HEAD differ from the stamp written after the last build. Checking
+# only that the binaries exist missed a pin change (the old binaries were kept).
+pins=$(git -C "$root" ls-tree HEAD 3rd/qbe 3rd/cproc | awk '{print $3}' | tr '\n' ' ')
+stamp="$root/build/qbe-cproc.pins"
+if [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ] && [ "$(cat "$stamp" 2>/dev/null || true)" = "$pins" ]; then
+  echo "QBE and cproc: already built at pins $pins"
 else
   "$root/scripts/setup-qbe.sh"
+  mkdir -p "$root/build"
+  echo "$pins" > "$stamp"
+  echo "QBE and cproc: built at pins $pins"
 fi
 
 mkdir -p "$root/build"
