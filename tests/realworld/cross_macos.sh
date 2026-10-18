@@ -33,7 +33,7 @@ link() {
   clang --target=arm64-apple-darwin -O2 -nostdinc -isystem "$NFCXX_MACOS_CLEANROOM/include" \
     -isystem "$(clang -print-resource-dir)/include" -c be/nfcxx_ldrt.c -o "$W/ldrt.o"
   mkdir -p "$(dirname "$out")"
-  ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "$@" "$W/ldrt.o" \
+  ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "$@" "$W/ldrt.o" ${NFCXX_MACOS_LIBC:+"$NFCXX_MACOS_LIBC"} \
     -L tests/macos-sysroot/lib -lSystem "${LINK_EXTRA[@]}"
   local hdr; hdr=$(llvm-objdump --macho --private-headers "$out")
   grep -q EXECUTE <<<"$hdr" && grep -q ARM64 <<<"$hdr" || { echo "cross_macos: $out is not a Mach-O arm64 executable" >&2; exit 1; }
