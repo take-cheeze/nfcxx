@@ -3,11 +3,11 @@
 # scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU: the real ggml_sycl_op_dequantize_mul_mat_vec (the dmmv path of the ggml-sycl mul_mat
 # dispatch) with a Q8_0 src0 and an F32 src1 vector, no reorder, on ncols 32, 256 and 1024 (rows 5, 64, 37), every output
-# row checked against a double-precision dot product at 1e-4 of sum |w x|, and 64 guard slots past the output that must stay
-# untouched. The F32 accumulation build (no GGML_SYCL_F16): the F16 build (sycl::half2 partial sums) needs sycl::half2
-# operators and .s0()/.s1() members that lib/sycl does not have (see mul_mat_q8_real.cpp). A mutant (a sed copy of the real
-# file with the sub-group xor reduction stopped one step early, in the generic dequantize_mul_mat_vec) must produce wrong
-# results: it is caught only by a run that completes with a checks line reporting mismatches on all three checks (a build
+# row checked against a double-precision dot product, and 64 guard slots past the output that must stay untouched. Two builds
+# of the same source: F32 (float partial sums) and F16 (-DGGML_SYCL_F16, the libggml-sycl.so build: src1 converted to F16 and
+# sycl::half2 partial sums; the half2 operators come from the lib/sycl-ggml shim). A mutant (a sed copy of the real file with
+# the sub-group xor reduction stopped one step early, in the generic dequantize_mul_mat_vec) must produce wrong results in
+# both builds: it is caught only by a run that completes with a checks line reporting mismatches on all three checks (a build
 # failure, an abort or a stray line is not a catch). The link uses a version script that makes every symbol of the test
 # executable local, so the test TU's own dpct helper copies do not interpose libggml-sycl's (see rope/rope_real.cpp).
 # Env: GGML_BUILD (the build bin dir, libggml-sycl.so and libggml-base.so), GGML_SRC (the ggml-sycl source dir), ONEAPI_LIB
@@ -49,8 +49,8 @@ fail=0 notrun=0
 # the run's output in $out/NAME.res. Returns 0 ok, 1 FAIL (the run failed its checks or exited nonzero), 2 SKIP (no device),
 # 3 FAIL (build).
 run() {
-  local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  local b=$1 srcdir=$2 name=$3 vflags=$4
+  if ! "$root/scripts/sycl-build.sh" --backend="$b" --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED $vflags \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_root/include" -I"$ggml_root/src" -I"$ggml_root" \
       "$root/tests/gpu/ggml/mul_mat_quant/mul_mat_q8_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \
@@ -82,21 +82,24 @@ mutant_verdict() {
   return 1
 }
 
-for b in opencl level-zero; do
-  rc=0; run "$b" "$ggml_src" "$b" || rc=$?
-  case $rc in 0) ;; 2) continue ;; *) fail=1 ;; esac
-  # the mutant: caught only by a run that completes with wrong results on all three checks
-  rc=0; run "$b" "$out/mut" "$b.mut" || rc=$?
-  case $rc in
-    2) continue ;;
-    3) echo "mutant mul_mat_quant $b: NOT RUN (build failed)"; notrun=$((notrun+1)) ;;
-    *) mv=0; mutant_verdict "$out/$b.mut.res" || mv=$?
-       case $mv in
-         0) echo "mutant mul_mat_quant $b: caught" ;;
-         1) echo "mutant mul_mat_quant $b: FAIL (not caught)"; fail=1 ;;
-         *) echo "mutant mul_mat_quant $b: NOT RUN (the run did not complete with wrong results; see above)"; notrun=$((notrun+1)) ;;
-       esac ;;
-  esac
+for v in f32 f16; do
+  vflags=""; [ $v = f16 ] && vflags=-DGGML_SYCL_F16
+  for b in opencl level-zero; do
+    rc=0; run "$b" "$ggml_src" "$b.$v" "$vflags" || rc=$?
+    case $rc in 0) ;; 2) continue ;; *) fail=1 ;; esac
+    # the mutant: caught only by a run that completes with wrong results on all three checks
+    rc=0; run "$b" "$out/mut" "$b.$v.mut" "$vflags" || rc=$?
+    case $rc in
+      2) continue ;;
+      3) echo "mutant mul_mat_quant $b.$v: NOT RUN (build failed)"; notrun=$((notrun+1)) ;;
+      *) mv=0; mutant_verdict "$out/$b.$v.mut.res" || mv=$?
+         case $mv in
+           0) echo "mutant mul_mat_quant $b.$v: caught" ;;
+           1) echo "mutant mul_mat_quant $b.$v: FAIL (not caught)"; fail=1 ;;
+           *) echo "mutant mul_mat_quant $b.$v: NOT RUN (the run did not complete with wrong results; see above)"; notrun=$((notrun+1)) ;;
+         esac ;;
+    esac
+  done
 done
 [ $notrun = 0 ] || { echo "NOT RUN: $notrun run(s) did not run (see above); this is a failure, not a pass"; fail=1; }
 exit $fail

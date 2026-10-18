@@ -16,11 +16,37 @@
 // The link must hide this TU's own definitions of the dpct helpers (run.sh passes a version script that makes every symbol
 // of the executable local), as in tests/gpu/ggml/rope/rope_real.cpp.
 #include "dmmv.cpp"
+// The F32 -> F16 conversion of src1 (ggml_get_to_fp16_sycl, the F16 build only), compiled from the upstream convert.cpp in
+// this TU too: the to-fp16 kernels take a sycl::queue, and the libggml-sycl.so copy of them takes the oneAPI compiler's
+// sycl::_V1::queue, so calling that copy from here crashes in its device check (see the pool note below).
+#include "convert.cpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
+
+// The scratch pool for the F16 path (ctx.pool() in ggml_sycl_op_dequantize_mul_mat_vec converts src1 into it). The real
+// ggml_backend_sycl_context::new_pool_for_device (ggml-sycl.cpp) is in libggml-sycl.so, built by the oneAPI compiler, whose
+// sycl::queue is sycl::_V1::queue; this TU's queue is the nfcxx subset's sycl::queue, so the call does not link to it. This
+// is the harness's own pool, a device USM allocation per request, with the same ggml_sycl_pool interface (the kernel only
+// needs scratch memory). It is used only when the F16 build calls pool(); the F32 build never does.
+struct mm_test_pool : ggml_sycl_pool {
+    sycl::queue * q;
+    explicit mm_test_pool(sycl::queue * qp) : q(qp) {}
+    void * alloc(size_t size, size_t * actual_size) override {
+        *actual_size = size;
+        return sycl::malloc_device(size, *q);
+    }
+    void free(void * ptr, size_t) override {
+        q->wait();
+        sycl::free(ptr, *q);
+    }
+};
+
+std::unique_ptr<ggml_sycl_pool> ggml_backend_sycl_context::new_pool_for_device(queue_ptr qptr, int) {
+    return std::make_unique<mm_test_pool>(qptr);
+}
 
 // The input values: a fixed LCG over [-4, 4), so the run is repeatable.
 static float mm_next_value(uint32_t & state) {
