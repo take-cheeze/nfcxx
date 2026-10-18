@@ -513,9 +513,16 @@ if $PROGRAM_NAME == __FILE__
   # UNIQUE_CLASS_NAME: set before RBS_CHECKED_PARAMS and the first ClassLayout pass, since every
   # trace_new_target caller reads it (and ClosedWorld#stable_constant_identity?, which BLOCK_RETURNS needs).
   UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
-    UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
+    UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs,
+                             superclass_of: superclass_of, included: included_modules,
+                             prepended: prepended_modules, unknown_mixins: unknown_mixins)
   end
   UniqueClassNames.object_mixins = Array(included_modules['Object'])
+  if (dump = ENV['BC2CPP_LEXICAL_DUMP']) # for scripts/bc2cpp checks of the constant lookup: the facts as JSON
+    require 'json'
+    facts = UniqueClassNames.lexical&.transform_values { |v| v.is_a?(Set) ? v.to_a : v }
+    File.write(dump, JSON.generate(table: UniqueClassNames.table, lexical: facts, object_mixins: UniqueClassNames.object_mixins))
+  end
   warn '== bare class names with one definition (UNIQUE_CLASS_NAME) =='
   UniqueClassNames.table.sort.each { |name, full| warn "  UNIQUE_CLASS  #{name}  (#{full})" }
 

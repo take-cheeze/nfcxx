@@ -18,6 +18,8 @@ module UniqueClassNames
   class << self
     # bare name => "P::N"; nil (the default) disables canonicalization.
     attr_accessor :table
+    # The closed world's class facts for lookup_name (set by analyze; nil when analyze refuses).
+    attr_accessor :lexical
     # Modules the closed world includes into Object; entries may be qualified
     # as `Object::RGSS` or already normalized to `RGSS`.
     attr_accessor :object_mixins
@@ -25,18 +27,92 @@ module UniqueClassNames
 
   module_function
 
+  # The class `name` names inside `owner` (a class name, `.singleton` allowed), or nil when the closed world does not
+  # settle it. The unique table answers first (one binding, so no other class can be found); otherwise lookup_name
+  # follows Ruby's order over the facts analyze recorded.
   def resolve(name, owner)
     canonical = UniqueClassNames.table&.[](name)
-    return nil unless canonical && owner
-
-    scope = canonical.delete_suffix("::#{name}")
-    site = owner.to_s.delete_suffix('.singleton')
-    lexical = site == scope || site.start_with?("#{scope}::")
-    mixins = Array(UniqueClassNames.object_mixins).map { |mixin| mixin.delete_prefix('Object::') }
-    lexical || mixins.include?(scope) ? canonical : nil
+    if canonical && owner
+      scope = canonical.delete_suffix("::#{name}")
+      site = owner.to_s.delete_suffix('.singleton')
+      lexical = site == scope || site.start_with?("#{scope}::")
+      mixins = Array(UniqueClassNames.object_mixins).map { |mixin| mixin.delete_prefix('Object::') }
+      return canonical if lexical || mixins.include?(scope)
+    end
+    lookup_name(name, owner)
   end
 
-  def analyze(ireps, root_label, native_paths, foreign_paths)
+  # Ruby's constant lookup from a method of `owner` (vm.c): the lexically enclosing classes, innermost first and
+  # excluding the top level; then the ancestors of `owner` (superclass chain); then Object. Each step asks the closed
+  # world's own table, so a step that cannot be settled returns nil. Only a name bound in the closed world (no
+  # native, foreign or assigned binding) is answered, and a class with an included module is never walked past.
+  # The ancestor steps need the superclass chain: a missing entry means the superclass is unknown.
+  def lookup_name(name, owner)
+    facts = UniqueClassNames.lexical
+    return nil unless facts && owner
+    return nil if facts[:refused].include?(name)
+
+    site = owner.to_s.delete_suffix('.singleton')
+    parts = site.split('::')
+    return nil if facts[:unknown].include?(parts.last) # a compact `class A::B`: its lexical scope is not in the bytecode
+    defined = facts[:defined]
+    parts.size.downto(1) do |k|
+      candidate = (parts[0, k] + [name]).join('::')
+      return candidate if defined.include?(candidate)
+    end
+
+    # Ancestors in MRO order: the class, its included modules (last include first), its superclass, and so on.
+    # A prepended module sits before the class's own table, so a class with one is never walked past.
+    cursor = site
+    seen = Set.new
+    loop do
+      return nil unless seen.add?(cursor)
+      return nil if facts[:prepended].key?(cursor) || facts[:unknown_mixins].include?(cursor)
+
+      mixins_of(facts, cursor).reverse_each do |mixin|
+        return nil unless closed_module?(facts, mixin)
+
+        candidate = "#{mixin}::#{name}"
+        return candidate if defined.include?(candidate)
+      end
+
+      sup = facts[:superclass_of].fetch(cursor) { return nil }
+      break if sup == :none
+      return nil unless sup.is_a?(String)
+
+      candidate = "#{sup}::#{name}"
+      return candidate if defined.include?(candidate)
+
+      cursor = sup
+    end
+    # Object's own constants come before its mixins; the mixins (`include RGSS` at top level) come last, last include first.
+    return name if defined.include?(name)
+    return nil if facts[:unknown_mixins].include?('Object')
+
+    Array(UniqueClassNames.object_mixins).map { |mixin| mixin.delete_prefix('Object::') }.reverse_each do |mixin|
+      return nil unless closed_module?(facts, mixin)
+
+      candidate = "#{mixin}::#{name}"
+      return candidate if defined.include?(candidate)
+    end
+    nil
+  end
+
+  # The modules `owner` includes, in include order.
+  def mixins_of(facts, owner)
+    Array(facts[:included][owner])
+  end
+
+  # A module whose own constant table is the whole story: declared in the closed world and including nothing,
+  # prepending nothing, and with no unresolved include.
+  def closed_module?(facts, mod)
+    facts[:defined].include?(mod) && mixins_of(facts, mod).empty? && !facts[:prepended].key?(mod) &&
+      !facts[:unknown_mixins].include?(mod)
+  end
+
+  def analyze(ireps, root_label, native_paths, foreign_paths, superclass_of: {}, included: {}, prepended: {},
+              unknown_mixins: Set.new)
+    UniqueClassNames.lexical = nil
     return {} unless native_paths && foreign_paths
 
     paths = bytecode_class_paths(ireps, root_label)
@@ -65,9 +141,41 @@ module UniqueClassNames
     sources = Array(native_paths).select { |path| File.file?(path) }
                                  .map { |path| File.read(path, encoding: 'UTF-8') }
     bindings = native_bindings(sources)
+    # A native class or module (kind 2 of BINDING_CALLS) is a candidate at its full path; a native value constant, or a
+    # class whose outer namespace is not known, refuses the name.
+    native_classes = Set.new
+    native_refused = Set.new
+    bindings.each do |name, list|
+      list.each do |source, pos, var, kind|
+        if kind != 2
+          native_refused << name
+        elsif var.nil?
+          native_classes << name
+        elsif (outer = native_module_binding(sources, source, pos, var))
+          native_classes << "#{outer}::#{name}"
+        else
+          native_refused << name
+        end
+      end
+    end
+    UniqueClassNames.lexical = {
+      defined: paths.values.flat_map { |defs| defs.grep(String) }.to_set | native_classes,
+      unknown: paths.select { |_, defs| defs.any? { |d| !d.is_a?(String) } }.keys.to_set,
+      refused: assigned | Set.new(Array(foreign)) | native_refused,
+      superclass_of: superclass_of,
+      included: included,
+      prepended: prepended,
+      unknown_mixins: unknown_mixins.to_set
+    }
     paths.each_with_object({}) do |(name, defs), out|
-      next unless defs.size == 1 && defs.first.is_a?(String) && defs.first.include?('::')
+      next unless defs.size == 1 && defs.first.is_a?(String)
       next if defs.first.split('::').any? { |segment| assigned.include?(segment) || foreign.include?(segment) }
+      # A top-level module (`module LCF`) is reachable from every lexical scope through Object: its one binding is
+      # the answer when no native source binds the name too.
+      unless defs.first.include?('::')
+        out[name] = name if bindings[name].empty? && !assigned.include?(name) && !foreign.include?(name)
+        next
+      end
 
       scope = defs.first.delete_suffix("::#{name}")
       agree = bindings[name].all? do |source, pos, var|
@@ -82,7 +190,7 @@ module UniqueClassNames
   def native_bindings(sources)
     out = Hash.new { |hash, name| hash[name] = [] }
     sources.each do |source|
-      BINDING_CALLS.each do |pattern|
+      BINDING_CALLS.each_with_index do |pattern, kind|
         source.to_enum(:scan, pattern).each do
           match = Regexp.last_match
           segment = match[0]
@@ -90,7 +198,7 @@ module UniqueClassNames
           under = segment.match(UNDER_DEFINITION)
           names.each do |name|
             var = under && (under[2] || under[3]) == name ? under[1] : nil
-            out[name] << [source, match.begin(0), var]
+            out[name] << [source, match.begin(0), var, kind]
           end
         end
       end
