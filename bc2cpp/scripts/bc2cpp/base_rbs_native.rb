@@ -131,7 +131,8 @@ module BaseRbsNative
       vars.each { |var| set_owner(owners, var, full) }
     end
     # A variable taken from a core class (`krn = mrb->kernel_module;`) owns the methods registered on it.
-    text.scan(/(\w+)\s*=\s*((?:M|mrb)->\w+_(?:class|module))\s*;/) do |var, expr|
+    # A full identifier wins before any suffix; skip those redundant regex starts.
+    text.scan(/(?<!\w)(\w+)\s*=\s*((?:M|mrb)->\w+_(?:class|module))\s*;/) do |var, expr|
       set_owner(owners, var, core_owner(expr)) if core_owner(expr)
     end
     text.scan(METHOD_CALL) do
@@ -270,10 +271,12 @@ module BaseRbsNative
   # The text of a function body from its opening brace at +open+ to the matching close brace.
   def function_body(text, open)
     depth = 0
-    (open...text.length).each do |i|
-      depth += 1 if text[i] == '{'
-      depth -= 1 if text[i] == '}'
-      return text[open..i] if depth.zero?
+    cursor = open
+    while (brace = /[{}]/.match(text, cursor))
+      depth += brace[0] == '{' ? 1 : -1
+      return text[open...brace.end(0)] if depth.zero?
+
+      cursor = brace.end(0)
     end
     ''
   end
