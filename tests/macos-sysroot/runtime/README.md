@@ -17,6 +17,7 @@ into `build/macos-rt/libnfcxx-darwin-rt.a`; the cross link adds that archive whe
 | `libcxxabi/include/cxxabi.h`, `__cxxabi_config.h` | headers for the above |
 | `libcxx/src/include/overridable_function.h` | header used by `stdlib_new_delete.cpp` |
 | `libcxx/src/new_handler.cpp`, `libcxx/src/include/atomic_support.h` | `std::get_new_handler` |
+| `libcxxabi/src/stdlib_typeinfo.cpp` | `std::type_info::~type_info` |
 | `libcxxabi/src/private_typeinfo.cpp`, `private_typeinfo.h` | the `__cxxabiv1::__vmi_class_type_info` vtable and the type-info classes |
 
 Licence: Apache License 2.0 with LLVM exceptions (see the LLVM project LICENSE.TXT).
