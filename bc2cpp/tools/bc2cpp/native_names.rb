@@ -270,12 +270,14 @@ end
 # the receiver argument is often itself a call with commas. A false match only
 # adds a name to the "reachable" set, which is safe here.
 def extract_native_call_names(src_paths)
-  names = Set.new
-  Array(src_paths).each do |path|
-    src = SourceText.read(path, 'extract_native_call_names') or next
+  ScanCache.fetch('native_names.extract_native_call_names', Array(src_paths), cache_absent: false) do
+    names = Set.new
+    Array(src_paths).each do |path|
+      src = SourceText.read(path, 'extract_native_call_names') or next
     src.scan(/mrb_funcall(?:_id|_argv|_with_block)?\s*\(.{0,200}?(?:"((?:[^"\\]|\\.)*)"|#{MRB_SYM_TOKEN_RE})/m) do |str, macro, sym|
       names << (str ? unescape_c_string(str) : resolve_mrb_sym_token(macro, sym))
     end
   end
   names
+  end
 end
