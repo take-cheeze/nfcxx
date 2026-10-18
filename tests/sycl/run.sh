@@ -153,8 +153,10 @@ else echo "webgpu     trap_div: FAIL (build)"; tail -3 "$out/trap_div.log"; fail
 # a refusal: double (WebGPU core has no f64; Vulkan has it, see double.cpp)
 rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_double.cpp -o "$out/refuse_double" > "$out/refuse.log" 2>&1 || rc=$?
 if [ $rc = 3 ] && grep -q "double" "$out/refuse.log"; then echo "webgpu     refuse_double: refused (exit 3)"; else echo "webgpu     refuse_double: FAIL (exit $rc)"; cat "$out/refuse.log"; fail=1; fi
-# a refusal: a constexpr function-pointer local (from a template selector) called in a kernel body that a function-pointer
-# template argument reaches (fattn-vec.hpp's vec_dot_KQ). The device emitter refuses the address of the selected function.
-rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_fnptr_constexpr.cpp -o "$out/refuse_fnptr" > "$out/refuse2.log" 2>&1 || rc=$?
-if [ $rc = 3 ] && grep -q "refused: address of function" "$out/refuse2.log"; then echo "webgpu     refuse_fnptr_constexpr: refused (exit 3)"; else echo "webgpu     refuse_fnptr_constexpr: FAIL (exit $rc)"; cat "$out/refuse2.log"; fail=1; fi
+# the reproducer of the constexpr function-pointer local (from a template selector) called in a kernel body that a
+# function-pointer template argument reaches (fattn-vec.hpp's vec_dot_KQ): the device pass used to refuse the address of the
+# selected function ("refused: address of function"); the device emitters fold the stored address into the direct call, so
+# the device compile must now succeed (its run is fnptr_constexpr, above).
+rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_fnptr_constexpr.cpp -o "$out/fnptr_repro" > "$out/fnptr_repro.log" 2>&1 || rc=$?
+if [ $rc = 0 ]; then echo "webgpu     refuse_fnptr_constexpr: device pass accepted"; else echo "webgpu     refuse_fnptr_constexpr: FAIL (exit $rc)"; cat "$out/fnptr_repro.log"; fail=1; fi
 exit $fail

@@ -267,6 +267,69 @@ def collect_calls(x, acc)
 end
 
 # Names of the slots a form takes the address of in a way other than the address of a load or a store.
+# A function-pointer local whose every store is the address of one function (a constexpr pointer, e.g. a template selector's
+# result: the front end stores it into a slot, then calls it through a load) is folded: the stores are dropped and each call
+# through a load of the slot calls that function directly (the same direct call the front end emits for a known callee).
+# Any other use of the slot (a load used as a value, a store of another address, the slot's address) leaves it alone.
+def fnptr_slot?(t)
+  t = t[1] if head_of(t) == "const"
+  head_of(t) == "ptr" && t.length > 1 && head_of(t[1]) == "fn"
+end
+
+def fnptr_scan(x, st)
+  if x.is_a?(IRSym)
+    st[:bad][x.name] = true if x.sig == "$" && st[:names][x.name]
+    return
+  end
+  return unless x.is_a?(Array)
+  h = head_of(x)
+  if h == "store" && x[2].is_a?(IRSym) && x[2].sig == "$" && st[:names][x[2].name]
+    n = x[2].name
+    v = x[3]
+    if v.is_a?(IRSym) && v.sig == "&" && (st[:target][n].nil? || st[:target][n] == v.name)
+      st[:target][n] = v.name
+      st[:drop][x.object_id] = n
+    else
+      st[:bad][n] = true
+    end
+    return
+  end
+  if h == "call" && x[2].is_a?(Array) && head_of(x[2]) == "load" && x[2][2].is_a?(IRSym) && x[2][2].sig == "$" &&
+     st[:names][x[2][2].name]
+    st[:calls][x[2].object_id] = x[2][2].name
+    x.drop(3).each { |y| fnptr_scan(y, st) }
+    return
+  end
+  if h == "load" && x[2].is_a?(IRSym) && x[2].sig == "$" && st[:names][x[2].name]
+    st[:bad][x[2].name] = true
+    return
+  end
+  x.each { |y| fnptr_scan(y, st) }
+end
+
+def fnptr_rewrite(x, st)
+  return unless x.is_a?(Array)
+  x.reject! { |c| c.is_a?(Array) && st[:drop].key?(c.object_id) }
+  if head_of(x) == "call" && x[2].is_a?(Array) && st[:calls].key?(x[2].object_id)
+    x[2] = IRSym.new("&", st[:target][st[:calls][x[2].object_id]])
+  end
+  x.each { |c| fnptr_rewrite(c, st) }
+end
+
+def fold_fnptr_slots(body, slots)
+  st = { names: {}, target: {}, bad: {}, drop: {}, calls: {} }
+  slots.each { |f| st[:names][f[1].to_s] = true if fnptr_slot?(f[2]) }
+  return if st[:names].empty?
+  body.each { |s| fnptr_scan(s, st) }
+  ok = {}
+  st[:names].each_key { |n| ok[n] = true if st[:target][n] && !st[:bad][n] }
+  return if ok.empty?
+  st[:drop].delete_if { |_, n| !ok[n] }
+  st[:calls].delete_if { |_, n| !ok[n] }
+  body.reject! { |s| s.is_a?(Array) && st[:drop].key?(s.object_id) }
+  body.each { |s| fnptr_rewrite(s, st) }
+end
+
 def scan_slots(x, direct, escaped)
   if x.is_a?(IRSym)
     escaped[x.name] = true if x.sig == "$"
@@ -927,6 +990,7 @@ class SFn
         @body << f
       end
     end
+    fold_fnptr_slots(@body, slots)
     direct = {}
     escaped = {}
     @body.each { |s| scan_slots(s, direct, escaped) }
