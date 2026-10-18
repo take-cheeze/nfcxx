@@ -97,6 +97,14 @@ module BaseRbs
     out
   end
 
+  # Attribute readers whose stored value the program always sets to one class (mruby-rgss/mrblib/lib.rb).
+  ATTR_RETURNS = {
+    ['RGSS::Plane', 'ox'] => 'Integer', ['RGSS::Plane', 'oy'] => 'Integer',
+    ['RGSS::Tilemap', 'ox'] => 'Integer', ['RGSS::Tilemap', 'oy'] => 'Integer',
+    ['RGSS::Window', 'ox'] => 'Integer', ['RGSS::Window', 'oy'] => 'Integer',
+    ['RGSS::Window', 'contents'] => 'RGSS::Bitmap'
+  }.freeze
+
   def method_line(name, shape, singleton: false)
     positional = []
     shape.each do |kind, _|
@@ -134,7 +142,7 @@ module BaseRbs
              end
       body = []
       d.accessors.each do |attr, kind|
-        body << "def #{attr}: () -> untyped" if %w[attr_reader attr_accessor].include?(kind)
+        body << "def #{attr}: () -> #{ATTR_RETURNS.fetch([d.name, attr], 'untyped')}" if %w[attr_reader attr_accessor].include?(kind)
         body << "def #{attr}=: (untyped) -> untyped" if %w[attr_writer attr_accessor].include?(kind)
       end
       d.methods.uniq { |m, _| m }.sort_by { |m, _| m }.each { |m, shape| body << method_line(m, shape) }
