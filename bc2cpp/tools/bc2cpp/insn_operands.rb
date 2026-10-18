@@ -9,18 +9,31 @@ module InsnOperands
   # The typed operand list. An instruction the schema cannot parse is a schema
   # gap, so it raises instead of answering nil to every question.
   def typed
-    @typed ||= OperandSchema.parse(op, args) ||
-               raise(ArgumentError, "bc2cpp: no operand schema for #{op} #{args.inspect}")
+    @typed || install_typed(OperandSchema.parse(op, args) ||
+                            raise(ArgumentError, "bc2cpp: no operand schema for #{op} #{args.inspect}"))
   end
 
   # The binary loader decodes operands directly and installs them here.
   def typed=(operands)
+    install_typed(operands)
+  end
+
+  # Installs the operand list with its first-operand-per-kind index, so a single-kind lookup is one hash read.
+  def install_typed(operands)
+    @first_of_kind = {}
+    operands.each { |operand| @first_of_kind[operand.kind] ||= operand }
     @typed = operands.freeze
   end
 
+  # The earliest operand whose kind is one of +kinds+ (several kinds need the scan; one kind is first_kind).
   def first_of(*kinds)
     typed.each { |operand| return operand if kinds.include?(operand.kind) }
     nil
+  end
+
+  def first_kind(kind)
+    typed
+    @first_of_kind[kind]
   end
 
   # First register operand as digits, only when it is the leading operand.
@@ -72,7 +85,7 @@ module InsnOperands
   def sym
     return @sym if defined?(@sym)
 
-    @sym = first_of(:sym)&.value
+    @sym = first_kind(:sym)&.value
   end
 
   def sym_token
@@ -82,31 +95,31 @@ module InsnOperands
   def ivar
     return @ivar if defined?(@ivar)
 
-    name = first_of(:name)&.value
-    @ivar = name&.start_with?('@') && !name.start_with?('@@') ? name[1..] : nil
+    name = first_kind(:name)&.value
+    @ivar =name&.start_with?('@') && !name.start_with?('@@') ? name[1..] : nil
   end
 
   def global_name
     return @global_name if defined?(@global_name)
 
-    name = first_of(:name)&.value
-    @global_name = name&.start_with?('$') ? name : nil
+    name = first_kind(:name)&.value
+    @global_name =name&.start_with?('$') ? name : nil
   end
 
   # Constant name of GETCONST/SETCONST (bare) and GETMCNST/SETMCNST (`::Name`).
   def const_name
     case op
-    when 'SETCONST', 'GETCONST' then first_of(:name)&.value
+    when 'SETCONST', 'GETCONST' then first_kind(:name)&.value
     when 'GETMCNST', 'SETMCNST' then mcnst_name
     end
   end
 
   def mcnst_name
-    first_of(:mcnst)&.value&.at(1)
+    first_kind(:mcnst)&.value&.at(1)
   end
 
   def argc_operand
-    first_of(:argc)&.value
+    first_kind(:argc)&.value
   end
 
   # Positional argument count (`n=3`); nil for a splat or when absent.
@@ -147,20 +160,20 @@ module InsnOperands
   def block_index
     return @block_index if defined?(@block_index)
 
-    @block_index = first_of(:irep)&.value
+    @block_index = first_kind(:irep)&.value
   end
 
   def pool_index
     return @pool_index if defined?(@pool_index)
 
-    @pool_index = first_of(:pool)&.value
+    @pool_index = first_kind(:pool)&.value
   end
 
   # Target address of a branch op, nil for every other op.
   def branch_target
     return nil unless %w[JMP JMPUW JMPIF JMPNOT JMPNIL].include?(op)
 
-    first_of(:addr)&.value
+    first_kind(:addr)&.value
   end
 
   # Target of JMP/JMPUW/JMPIF/JMPNOT/JMPNIL excluding JMPUW (Insn#jump_target's
@@ -170,7 +183,7 @@ module InsnOperands
   end
 
   def jmp_addr
-    op == 'JMP' || op == 'JMPUW' ? first_of(:addr).value : 0
+    op == 'JMP' || op == 'JMPUW' ? first_kind(:addr).value : 0
   end
 
   # Non-negative integer right after the leading register (`R1 3`).
@@ -219,11 +232,11 @@ module InsnOperands
   end
 
   def enter_fields
-    @enter_fields ||= (first_of(:enter)&.value || []).freeze
+    @enter_fields ||= (first_kind(:enter)&.value || []).freeze
   end
 
   def argary_spec
-    first_of(:spec)&.value
+    first_kind(:spec)&.value
   end
 
   # Child irep index of a DEF-family op whose operands are exactly
