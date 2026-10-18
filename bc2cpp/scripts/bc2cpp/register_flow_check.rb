@@ -50,6 +50,18 @@ def rescue_model(begin_addr, end_addr, target, reads: [])
     glue_reads: { begin_addr => reads } }
 end
 
+puts '-- register mention masks'
+scanner = RegisterFlow.allocate
+samples = ['', 'r1 + r1 + r01', 'r0 + r63 + r127 + r255',
+           'ar1 r2x _r3 r4_ r5.r6 // r7 "r8"', "r9\nr10\tr11"]
+random = Random.new(415)
+tokens = %w[r0 r1 r01 r63 r127 r255 ar1 r2x _r3 r4_ + ; //]
+500.times { samples << Array.new(random.rand(1..30)) { tokens.sample(random: random) }.join(' ') }
+check.call('streamed masks preserve duplicate, wide and conservative textual mentions', samples.all? do |text|
+  expected = text.scan(RegisterFlow::MENTION).flatten.map(&:to_i).uniq.sum { |reg| 1 << reg }
+  scanner.send(:mention_mask, text) == expected
+end)
+
 puts '-- hand-built shapes'
 # t = a; t = b; return t
 list = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'MOVE', "R3\tR2"), insn(4, 'RETURN', 'R3')]
