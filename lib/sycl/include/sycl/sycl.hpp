@@ -1454,8 +1454,8 @@ class device {
       case aspect::fp64: return !is_gpu();
       case aspect::usm_device_allocations:
       case aspect::usm_host_allocations:
-      case aspect::usm_shared_allocations:
-      case aspect::fp16: return a != aspect::fp16;
+      case aspect::usm_shared_allocations: return true;
+      case aspect::fp16: return has_fp16();
       default: return false;
     }
   }
@@ -1465,6 +1465,17 @@ class device {
   template <class P> auto get_info() const { return info_of(static_cast<P *>(nullptr)); }
 
  private:
+  // fp16 is a property of the backend device: the host has it (emulated), a GPU has it when its runtime reports it
+  bool has_fp16() const {
+    if (!is_gpu()) return true;
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::cl_rt::get().has_fp16();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::ze_rt::get().has_fp16();
+#else
+    return false;  // WebGPU and Vulkan: no fp16 query in this subset
+#endif
+  }
   std::string info_of(info::device::name *) const {
     if (!is_gpu()) return "nfcxx host";
 #if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)

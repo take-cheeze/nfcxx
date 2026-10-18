@@ -1935,8 +1935,11 @@ class SFn
       vi = wide?(vty) ? v : u32_of(v, vty)
       trap_if(res(172, @spv.t_bool, vi, n), 3)
     when "nonnull"
-      p, _ = operand(s[1])
-      trap_if(res(170, @spv.t_bool, p, @spv.c_u64(0)), 4)
+      # the address of a function is never null (the front end's check on a function pointer that is a template argument)
+      unless s[1].is_a?(IRSym) && s[1].sig == "&"
+        p, _ = operand(s[1])
+        trap_if(res(170, @spv.t_bool, p, @spv.c_u64(0)), 4)
+      end
     when "return"
       if @ret.nil?
         raise Refused, "return with a value in a void function" if s.length > 1
