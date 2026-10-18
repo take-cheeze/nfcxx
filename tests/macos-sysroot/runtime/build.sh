@@ -36,11 +36,14 @@ clang "${tgt[@]}" "${inc[@]}" -I "$src/compiler-rt/lib/builtins" -U__APPLE__ -O2
 # this repository (src/atomic_fetch.c), written with clang's inline __atomic builtins.
 clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/atomic_fetch.c" -o atomic_fetch.o
 
-cxxinc=(-nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$NFCXX_LIBCXX" -isystem "$NFCXX_MACOS_SYSROOT"
+cxxinc=(-nostdinc -nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$NFCXX_LIBCXX" -isystem "$NFCXX_MACOS_SYSROOT"
         -isystem "$(clang -print-resource-dir)/include" -I "$src/libcxxabi/include" -I "$src/libcxxabi/src" -I "$src/libcxx/src")
 for f in stdlib_new_delete cxa_virtual cxa_vector abort_message; do
   clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
 done
+# cxa_demangle.cpp is libc++abi's demangler (__cxa_demangle, the ___cxa_demangle name). Its ItaniumDemangle.h lives under
+# libcxxabi/src/demangle, which the -I above reaches. Built with only the clean-room sysroot and the libc++ headers.
+clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/cxa_demangle.cpp" -o cxa_demangle.o
 # stdlib_typeinfo.cpp is the key function of std::type_info, so it emits the _ZTISt9type_info object only with RTTI on.
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -frtti -O2 -c "$src/libcxxabi/src/stdlib_typeinfo.cpp" -o stdlib_typeinfo.o
 # new_handler.cpp uses constinit, so it is built as C++20 (as libc++ builds it).
@@ -62,6 +65,6 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_
   -std=c++20 -fexceptions -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
 
 rm -f libnfcxx-darwin-rt.a
-llvm-ar rcs libnfcxx-darwin-rt.a atomic.o atomic_fetch.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o cxa_default_handlers.o fallback_malloc.o stdlib_exception.o
+llvm-ar rcs libnfcxx-darwin-rt.a atomic.o atomic_fetch.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o cxa_default_handlers.o fallback_malloc.o stdlib_exception.o cxa_demangle.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
