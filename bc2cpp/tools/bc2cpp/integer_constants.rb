@@ -1,5 +1,4 @@
 # frozen_string_literal: true
-
 require_relative 'source_text'
 
 # INTEGER_CONSTANT_PROOF: constant names that only ever hold an Integer.
@@ -29,6 +28,10 @@ require_relative 'source_text'
 # header for why it must be the greatest fixpoint). ADD/SUB bytecodes may also
 # combine proven integer constants; their exact result must fit target Fixnum.
 module IntegerConstants
+  # The Fixnum margin a LOADI literal may take, the same bounds as CodeGen::LOADI_FIXNUM_MIN/MAX (codegen_fixnum_proof.rb).
+  # Repeated here because that file needs BytecodeIR at load time, which this module must not require.
+  LOADI_FIXNUM_MIN = -1_073_741_824
+  LOADI_FIXNUM_MAX = 1_073_741_823
   # `SETCONST NAME R1` / `SETMCNST (R2)::NAME R1` (codedump.c): the name comes
   # first and the source register last, the reverse of GETCONST. print_lv_a may
   # append a `; R1:name` comment, which is stripped before reading the register.
@@ -154,7 +157,7 @@ module IntegerConstants
                 left.div(right)
               else raise ArgumentError, "bc2cpp: IntegerConstants: unknown arithmetic opcode #{kind[1].inspect}"
               end
-      value if value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+      value if value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
     else raise ArgumentError, "bc2cpp: IntegerConstants: unknown definition kind #{kind.inspect}"
     end
   end
@@ -315,7 +318,7 @@ module IntegerConstants
     return nil unless tok
 
     value = tok.to_i
-    return nil if insn.op == 'LOADI32' && !value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+    return nil if insn.op == 'LOADI32' && !value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
 
     value
   end
