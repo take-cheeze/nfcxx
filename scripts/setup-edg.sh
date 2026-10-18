@@ -60,7 +60,7 @@ if [ "$(uname -s)" = Darwin ] || [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
     export NFCXX_MACOS_SYSROOT=${NFCXX_MACOS_SYSROOT:-$root/tests/macos-sysroot/include}
   fi
   cd "$src"
-  EDG_BASE=$base cmake --preset "$preset" "${cmake_extra[@]}" -B "$out" >/dev/null
+  EDG_BASE=$base cmake --preset "$preset" ${cmake_extra[@]+"${cmake_extra[@]}"} -B "$out" >/dev/null
   if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
     cat >> "$out/src/includes/cmake_defines.h" <<'DEFS'
 
@@ -105,7 +105,7 @@ fi
 sed -i 's|^EDG_C_TO_OBJ_COMPILER=gcc|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-gcc}|' "$base/edg_eccp_config"
 
 cd "$src"
-EDG_BASE=$base cmake --preset linux-gcc-release "${cmake_extra[@]}" -B "$out" >/dev/null
+EDG_BASE=$base cmake --preset linux-gcc-release ${cmake_extra[@]+"${cmake_extra[@]}"} -B "$out" >/dev/null
 # gcc's cmakedef turns on USE_QUADMATH_LIBRARY, but quadmath.h is missing on aarch64 runners. There the host's own
 # long double is already the 128-bit IEEE quad that the target uses, so EDG computes with it directly. Approximate
 # quadmath (the clang configuration's choice) rejects long double literals that need the full 113-bit mantissa.
