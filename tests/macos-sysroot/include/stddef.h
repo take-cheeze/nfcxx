@@ -24,7 +24,12 @@ typedef int wchar_t; /* a keyword in C++ */
 #endif
 #endif
 
+#ifdef __cplusplus
+/* In C++ the (type*)0 form is not a constant expression, so use the compiler's builtin (C++ 17 [support.types.layout]). */
+#define offsetof(type, member) __builtin_offsetof(type, member)
+#else
 #define offsetof(type, member) ((size_t)&(((type *)0)->member))
+#endif
 
 #ifdef __cplusplus
 }
