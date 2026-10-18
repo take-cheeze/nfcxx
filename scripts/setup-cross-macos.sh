@@ -59,9 +59,9 @@ cat > "$root/build/cross-macos.env" <<EOF
 # Written by scripts/setup-cross-macos.sh. Source this to run the macOS arm64 compile checks on this Linux host.
 export NFCXX_MACOS_CLEANROOM="$root/tests/macos-sysroot"
 export NFCXX_MACOS_SYSROOT="$root/tests/macos-sysroot/include"
-# Opt-in: the EDG C++ runtime for arm64 Darwin (scripts/setup-edg.sh, NFCXX_EDG_TARGET=macos-arm64). Setting
-# NFCXX_MACOS_LIBC to build/edg/lib/libC.a links it into the C++ cross links; it is off by default, because the test
-# programs that use the standard streams do not link with it yet (see the notes in docs/notes/cross-macos.md).
+# The EDG C++ runtime for arm64 Darwin (scripts/setup-edg.sh, NFCXX_EDG_TARGET=macos-arm64). It defines the EH state
+# (___curr_eh_stack_entry) that C++ cross binaries load with, so it is linked by default; NFCXX_MACOS_LIBC overrides it.
+export NFCXX_MACOS_LIBC="\${NFCXX_MACOS_LIBC:-$root/build/edg-cross/lib/libC.a}"
 export NFCXX_LIBCXX="$libcxx"
 # EDG reads USR_INCLUDE at run time in place of its built-in /usr/include (host_envir.c), so the cross front end
 # finds only the clean-room sysroot, never the host glibc headers (features-time64.h). Set here, for the cross
