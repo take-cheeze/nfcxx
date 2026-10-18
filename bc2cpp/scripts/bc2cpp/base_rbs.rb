@@ -101,7 +101,7 @@ module BaseRbs
   # `self.new(*args)` (mruby-io's io.rb), an IO; with a block it returns the block's value (io.rb: `return io unless
   # block`), so the two forms are separate overloads.
   SIGNATURE_OVERRIDES = {
-    ['IO', 'open'] => 'def self.open: (*untyped) -> IO | (*untyped) { (untyped) -> untyped } -> untyped'
+    ['IO', 'open'] => 'def self.open: (*untyped) -> IO | (*untyped) { (IO) -> untyped } -> untyped'
   }.freeze
 
   def method_line(name, shape, singleton: false)
