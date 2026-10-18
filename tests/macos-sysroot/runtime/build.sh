@@ -20,9 +20,11 @@ clang "${tgt[@]}" "${inc[@]}" -I "$src/compiler-rt/lib/builtins" -U__APPLE__ -O2
 
 cxxinc=(-nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$NFCXX_LIBCXX" -isystem "$NFCXX_MACOS_SYSROOT"
         -isystem "$(clang -print-resource-dir)/include" -I "$src/libcxxabi/include" -I "$src/libcxxabi/src" -I "$src/libcxx/src")
-for f in stdlib_new_delete cxa_virtual cxa_vector abort_message stdlib_typeinfo; do
+for f in stdlib_new_delete cxa_virtual cxa_vector abort_message; do
   clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
 done
+# stdlib_typeinfo.cpp is the key function of std::type_info, so it emits the _ZTISt9type_info object only with RTTI on.
+clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -frtti -O2 -c "$src/libcxxabi/src/stdlib_typeinfo.cpp" -o stdlib_typeinfo.o
 # new_handler.cpp uses constinit, so it is built as C++20 (as libc++ builds it).
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++20 -fno-exceptions -fno-rtti -O2 -c "$src/libcxx/src/new_handler.cpp" -o new_handler.o
 # private_typeinfo.cpp uses dynamic_cast itself, so it is built with RTTI on (no -fno-rtti).
