@@ -2364,10 +2364,6 @@ inline vec<T, N> add_sat(const vec<T, N> &x, const vec<T, N> &y) {
 // erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). float runs as the device
 // builtins M_ERF, M_EXPM1, M_LOG1P (OpenCL.std erf, expm1, log1p; the SPIR-V emitter lowers them). double runs as the same
 // builtins on the double form __nfcxx_sycl_fn1_f64 (OpenCL.std on Float64). On the host these are the C library's.
-||||||| parent of dda6fb6cf2 (sycl shim: fattn-vec front-end gaps, regression cases, fattn harness)
-// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). They are not among the device math
-// ops (detail::math_op), and the device emitter has no lowering for them. On the host they are the C library's; on the device
-// a kernel that reaches one traps (it does not compute a wrong value). Templates, so only an instantiated call is emitted.
 namespace detail {
 #ifdef __NFCXX_SYCL_DEVICE__
 inline float m_erf(float x) { return NFCXX_SYCL_FN1(detail::M_ERF, x); }
