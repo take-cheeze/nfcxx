@@ -95,3 +95,33 @@ status=0
 "$out/ptxi" "$out/helper_nocallee.ptx" "${hlaunch[@]}" > /dev/null 2>&1 || status=$?
 [ "$status" -eq 3 ] || { echo "undefined callee: expected exit 3, got $status" >&2; exit 1; }
 echo "call of an undefined function refused (exit 3)"
+
+# Structs and unions by value (device/struct_int.ir, integer members only): a struct parameter is a byte array of the
+# caller's copy, a struct result is the func_retval0 array, a struct argument is copied into the callee's array, and
+# a union is passed like a struct, as nvcc passes them. The host's bytes are the arguments p = {3, 5}, u = 7 and
+# m = {10, -2, 3, 4}; out[i] = (3 + i + 5) + 7 + (bump(m with a += i)'s sum) = 35 + 2i, guards zero. A mutant (the
+# struct result read at the wrong offset) must be caught.
+emit_ptx "$root/tests/gpu/device/struct_int.ir" > "$out/struct_int.ptx"
+slaunch=(struct_kernel --grid 8 --block 128 ptr:1064 s32:1000 bytes:0300000005000000 bytes:07000000
+         bytes:0a000000feff030004000000 --dump 0)
+check_struct() {
+  awk 'BEGIN { bad = 0; guard = 0 }
+       { i = NR - 1
+         if (i < 1000) { if ($1 + 0 != 35 + 2 * i) bad++ }
+         else if ($1 + 0 != 0) guard++ }
+       END { if (NR != 1064) { printf "  wrong line count %d\n", NR; exit 1 }
+             printf "  %d elements, %d mismatches, %d guard writes\n", 1000, bad, guard
+             exit (bad != 0 || guard != 0) }' "$1"
+}
+"$out/ptxi" "$out/struct_int.ptx" "${slaunch[@]}" > "$out/struct_int.out"
+check_struct "$out/struct_int.out"
+echo "struct parameters on the PTX interpreter: ok"
+sed '/^\.func (\.param \.align 4 \.b8 func_retval0\[8\]) mk_p8/,/^}/ s/func_retval0+4\]/func_retval0+0]/' \
+  "$out/struct_int.ptx" > "$out/struct_int_mut.ptx"
+status=0
+"$out/ptxi" "$out/struct_int_mut.ptx" "${slaunch[@]}" > "$out/struct_int_mut.out" || status=$?
+if [ "$status" -eq 0 ] && check_struct "$out/struct_int_mut.out"; then
+  echo "struct mutant was not caught" >&2
+  exit 1
+fi
+echo "struct mutant caught (interpreter exit $status)"
