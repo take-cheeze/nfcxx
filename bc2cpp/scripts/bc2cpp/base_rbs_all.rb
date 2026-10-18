@@ -72,6 +72,18 @@ module BaseRbsAll
   end
 
   # Shared third-party headers the gems include, and the closed build's generated headers for this gem.
+  # mruby's own native sources outside every gem: error.c defines the exception hierarchy (ADR-free; the classes are
+  # native registrations with superclasses, which the base section declares as `class X < Y`).
+  CORE_NATIVE = { 'mruby-core' => ['3rd/mruby/src/error.c'] }.freeze
+  # mruby's Ruby-defined exception classes: NameError, NoMethodError and StopIteration. The closed world leaves this file
+  # out of its compiled set (compiled_gems.rb, BC2CPP_CORE_MRBLIB_EXCLUDED), so only the declarations describe it.
+  CORE_RUBY = ['3rd/mruby/mrblib/10error.rb'].freeze
+
+  def core_flags(closed_build)
+    base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
+    closed_build ? base + ["-I#{closed_build}/include"] : base
+  end
+
   def flags_for(gem_dir, closed_build)
     name = File.basename(gem_dir)
     base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
@@ -86,6 +98,20 @@ module BaseRbsAll
 
   def run(out_dir, closed_build)
     report = []
+    path, = BaseRbs.run(File.join(out_dir, 'mruby-core', 'ruby'), CORE_RUBY.map { |rel| File.join(ROOT, rel) })
+    # Only the class headers: the closed world does not compile these methods, so a declared method is not in the
+    # program and the type check rejects it (TC1003). The headers carry the superclass the hierarchy needs.
+    Dir[File.join(out_dir, 'mruby-core', 'ruby', '*.rbs')].each do |file|
+      File.write(file, File.read(file).lines.reject { |line| line.start_with?('  ') }.join)
+    end
+    report << ['mruby-core ruby', 'ok', CORE_RUBY.size, 0, path]
+    CORE_NATIVE.each do |name, rels|
+      srcs = rels.map { |rel| File.join(ROOT, rel) }
+      gem_out = File.join(out_dir, name)
+      FileUtils.mkdir_p(gem_out)
+      path, skipped = BaseRbsNative.run(gem_out, srcs, core_flags(closed_build))
+      report << [name, 'ok', srcs.size, skipped.size, path]
+    end
     gems.each do |gem_dir|
       name = File.basename(gem_dir)
       gem_out = File.join(out_dir, name)

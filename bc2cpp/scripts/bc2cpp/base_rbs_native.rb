@@ -89,10 +89,11 @@ module BaseRbsNative
     m && CORE_OWNER.fetch(m[1]) { m[1].sub(/\Ae(?=[A-Z])/, '').split('_').map { |w| w[0].upcase + w[1..] }.join }
   end
 
-  # The variable a call result is assigned to (`RClass* rect = mrb_define_class_under(...)`), if any.
-  def assigned_name(text, index)
+  # The variables a call result is assigned to, innermost first (`RClass* rect = mrb_define_class_under(...)`, or the
+  # chain `RClass* exception = mrb->eException_class = mrb_define_class_id(...)`).
+  def assigned_names(text, index)
     before = text[[index - 200, 0].max...index]
-    before[/(\w+)\s*=\s*\z/, 1]
+    before[/[^;{}]*\z/].scan(/(\w+)\s*=(?!=)/).flatten.reverse
   end
 
   # Scans one preprocessed source. Returns [classes, methods, skipped]; classes maps a full name to its kind.
@@ -108,7 +109,7 @@ module BaseRbsNative
       args = call_args(text, open)
       kind = m[1]
       under = !m[2].nil?
-      var = assigned_name(text, m.begin(0))
+      vars = assigned_names(text, m.begin(0))
       if under
         outer, name = args[1], symbol_name(args[2])
       else
@@ -122,10 +123,8 @@ module BaseRbsNative
       full = [outer_name, name].compact.join('::')
       kinds[full] = kind == 'class' ? 'class' : 'module'
       super_index = under ? 3 : 2
-      supers[full] = super_name(args[super_index]) if kind == 'class' && args.size > super_index
-      next unless var
-
-      set_owner(owners, var, full)
+      supers[full] = super_name(args[super_index], owners) if kind == 'class' && args.size > super_index
+      vars.each { |var| set_owner(owners, var, full) }
     end
     # A variable taken from a core class (`krn = mrb->kernel_module;`) owns the methods registered on it.
     text.scan(/(\w+)\s*=\s*((?:M|mrb)->\w+_(?:class|module))\s*;/) do |var, expr|
@@ -245,9 +244,10 @@ module BaseRbsNative
   # Object, the superclass a class gets when none is written, so it is left out as the Ruby source leaves it. Any other
   # C expression is not a name, so the superclass is left out rather than written wrong.
   # `E_*_ERROR` is mruby's macro for a core error class; its name is not written here, so the superclass is left out.
-  def super_name(expr)
+  def super_name(expr, owners)
     return nil if expr.match?(/\A(?:M|mrb)->object_class\z/) || expr.start_with?('E_')
     return core_owner(expr) if core_owner(expr)
+    return owners[expr] if owners[expr].is_a?(String) # a variable holding an earlier class (`RClass* range_error`)
     return expr if expr.match?(NAME_TOKEN)
 
     nil
