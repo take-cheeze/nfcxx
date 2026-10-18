@@ -20,7 +20,7 @@ have_nfcxx=0
 [ -x "$root/build/edg/bin/eccp" ] && [ -x "$root/build/qbe/qbe" ] && have_nfcxx=1
 
 # ---- host path
-for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64; do
+for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fattn_shim; do
   want="$t ok"
   if "$root/scripts/sycl-build.sh" --cpu "$t.cpp" -o "$out/$t.g++" > "$out/$t.log" 2>&1 && [ "$("$out/$t.g++" | tail -1)" = "$want" ]; then
     echo "host g++   $t: ok"
@@ -153,4 +153,8 @@ else echo "webgpu     trap_div: FAIL (build)"; tail -3 "$out/trap_div.log"; fail
 # a refusal: double (WebGPU core has no f64; Vulkan has it, see double.cpp)
 rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_double.cpp -o "$out/refuse_double" > "$out/refuse.log" 2>&1 || rc=$?
 if [ $rc = 3 ] && grep -q "double" "$out/refuse.log"; then echo "webgpu     refuse_double: refused (exit 3)"; else echo "webgpu     refuse_double: FAIL (exit $rc)"; cat "$out/refuse.log"; fail=1; fi
+# a refusal: a constexpr function-pointer local (from a template selector) called in a kernel body that a function-pointer
+# template argument reaches (fattn-vec.hpp's vec_dot_KQ). The device emitter refuses the address of the selected function.
+rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_fnptr_constexpr.cpp -o "$out/refuse_fnptr" > "$out/refuse2.log" 2>&1 || rc=$?
+if [ $rc = 3 ] && grep -q "refused: address of function" "$out/refuse2.log"; then echo "webgpu     refuse_fnptr_constexpr: refused (exit 3)"; else echo "webgpu     refuse_fnptr_constexpr: FAIL (exit $rc)"; cat "$out/refuse2.log"; fail=1; fi
 exit $fail

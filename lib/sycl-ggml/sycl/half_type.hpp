@@ -201,14 +201,6 @@ template <class H, class = typename std::enable_if<std::is_same<H, half>::value>
 template <class H, class = typename std::enable_if<std::is_same<H, half>::value>::type> inline H log1p(H x) { return H(sycl::log1p((float)x)); }
 inline half fmin(half a, half b) { return half((float)a < (float)b ? (float)a : (float)b); }
 
-namespace ext {
-namespace oneapi {
-namespace experimental {
-enum class architecture { unknown };
-}  // namespace experimental
-}  // namespace oneapi
-}  // namespace ext
-
 }  // namespace sycl
 
 #endif
