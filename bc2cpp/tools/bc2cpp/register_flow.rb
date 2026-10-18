@@ -30,6 +30,14 @@ class RegisterFlow
   WALK_BUDGET = 400
   CLEAN_DEF = /\A  r(\d+) = ([^;{}\n"]*);\n\z/
   MENTION = /\br(\d+)\b/
+  # One register's patterns, built on first use: its name as a whole word, and the forms that write it.
+  REGISTER_PATTERNS = Hash.new do |cache, reg|
+    name = "r#{reg}"
+    cache[reg] = {
+      mention: /\b#{name}\b/,
+      write: /(?:\+\+|--)\s*#{name}\b|&\s*#{name}\b|\b#{name}\b\s*(?:=(?!=)|[-+*\/%&|^]=|<<=|>>=|\+\+|--|[.\[]|->)|mrb_value\s+#{name}\b/
+    }
+  end
 
   Stats = Hash.new(0)
 
@@ -116,6 +124,10 @@ class RegisterFlow
   end
 
   def run
+    # Only a pure write can change a text (copy propagation takes a MOVE, which is one). Without one the texts come
+    # back unchanged, so the CFG and the refusal checks are not needed.
+    return @original unless @insns.any? { |insn| pure_write_op?(insn.op) }
+
     reason = refusal
     if reason
       Stats["refused #{reason}"] += 1
@@ -303,7 +315,10 @@ class RegisterFlow
   end
 
   def pure_write?(index)
-    op = @insns[index].op
+    pure_write_op?(@insns[index].op)
+  end
+
+  def pure_write_op?(op)
     PURE_WRITE_OPS.include?(op) || op.start_with?('LOADI')
   end
 
@@ -427,11 +442,11 @@ class RegisterFlow
 
   # The text names +reg+ only as a value to read.
   def readonly?(index, reg)
+    patterns = REGISTER_PATTERNS[reg]
     text = @texts[index]
-    name = "r#{reg}"
-    return true unless text.match?(/\b#{name}\b/)
+    return true unless text.match?(patterns[:mention])
 
-    !text.match?(/(?:\+\+|--)\s*#{name}\b|&\s*#{name}\b|\b#{name}\b\s*(?:=(?!=)|[-+*\/%&|^]=|<<=|>>=|\+\+|--|[.\[]|->)|mrb_value\s+#{name}\b/)
+    !text.match?(patterns[:write])
   end
 
   def substitutable?(index, dest, src)
@@ -440,11 +455,12 @@ class RegisterFlow
 
     text = @texts[index]
     stripped = text.gsub(/"(?:\\.|[^"\\])*"/, '""').gsub(%r{//[^\n]*}, '').gsub(%r{/\*.*?\*/}m, '')
-    text.scan(/\br#{dest}\b/).length == stripped.scan(/\br#{dest}\b/).length
+    mention = REGISTER_PATTERNS[dest][:mention]
+    text.scan(mention).length == stripped.scan(mention).length
   end
 
   def substitute(index, dest, src)
-    @texts[index] = @texts[index].gsub(/\br#{dest}\b/, "r#{src}")
+    @texts[index] = @texts[index].gsub(REGISTER_PATTERNS[dest][:mention], "r#{src}")
     @info[index] = info_for(index)
   end
 end
