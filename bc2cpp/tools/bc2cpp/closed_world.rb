@@ -440,7 +440,7 @@ class ClosedWorld
   # The outside Ruby sources whose text spells a definition of `name` (foreign_method_names, over-collected).
   def outside_ruby_definer_paths(name)
     @outside_ruby_definer_paths ||= {}
-    @outside_ruby_definer_paths[name] ||= Array(@ruby_paths).select { |path| foreign_method_names([path]).include?(name) }
+    @outside_ruby_definer_paths[name] ||= Array(@ruby_paths).select { |path| outside_ruby_path_method_names(path).include?(name) }
   end
 
   # No class of the program, created or subclassed anywhere, lacks Kernel.
