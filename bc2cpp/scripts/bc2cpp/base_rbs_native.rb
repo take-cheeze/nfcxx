@@ -158,6 +158,7 @@ module BaseRbsNative
         next
       end
       sig = method_sig(text, args[3], owner, singleton, args[4])
+      sig = manual_return(owner, name, sig)
       methods << [owner, singleton, name, sig]
       methods << [owner, false, name, method_sig(text, args[3], owner, false, args[4])] if kind == 'module_function'
     end
@@ -175,6 +176,26 @@ module BaseRbsNative
   # The RBS signature of a registered function: its parameters and its return type (NativeReturnKinds). The parameters
   # are the mrb_get_args format when the body reads its arguments that way, and otherwise the arity the registration's
   # aspec declares (aspec_shape). A function that is not in this text keeps the rest parameter and an untyped return.
+  # Returns written by hand where the C body's return is not readable from the text (the clang AST still gives
+  # `untyped` for them). Each entry is the class and method name, and the return type it must have.
+  MANUAL_RETURNS = {
+    # stringio.c: read(n) and getc return nil at end of file (read() with no length returns "" there).
+    ['StringIO', 'read'] => 'String?',
+    ['StringIO', 'getc'] => 'String?',
+    # RGSS::Viewport accessors (mruby-rgss/src/lib.cxx: vp_ox, vp_oy, vp_rect, vp_tone) hold an Integer, a Rect and a Tone.
+    ['RGSS::Viewport', 'ox'] => 'Integer',
+    ['RGSS::Viewport', 'oy'] => 'Integer',
+    ['RGSS::Viewport', 'rect'] => 'RGSS::Rect',
+    ['RGSS::Viewport', 'tone'] => 'RGSS::Tone'
+  }.freeze
+
+  def manual_return(owner, name, sig)
+    ret = MANUAL_RETURNS[[owner, name]]
+    return sig unless ret
+
+    "#{sig.rpartition(' -> ').first} -> #{ret}"
+  end
+
   def method_sig(text, function, owner, singleton, aspec)
     body = function_body_of(text, function)
     return '(*untyped) -> untyped' unless body
