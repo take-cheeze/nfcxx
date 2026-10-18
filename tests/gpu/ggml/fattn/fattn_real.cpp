@@ -59,6 +59,13 @@ struct fa_pool : ggml_sycl_pool {
     void free(void * ptr, size_t) override { sycl::free(ptr, q); }
 };
 
+// ggml_backend_sycl_context::pool() calls new_pool_for_device when a device has no pool. libggml-sycl.so defines that with the
+// real sycl::_V1::queue, so this program's subset queue would not link to it. The harness defines it with the subset's queue
+// (and the same fa_pool), so the reference binds here.
+std::unique_ptr<ggml_sycl_pool> ggml_backend_sycl_context::new_pool_for_device(sycl::queue * qptr, int) {
+    return std::unique_ptr<ggml_sycl_pool>(new fa_pool(*qptr));
+}
+
 static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_shape & sh, uint32_t seed) {
     const int64_t H = sh.n_head, HK = sh.n_head_kv, T = sh.n_tokens, N = sh.n_kv, D = FA_D;
     const int64_t nq = D * T * H, nkv = D * N * HK, nd = D * H * T;
