@@ -75,5 +75,26 @@ doctest)
   LINK_EXTRA=(-L tests/macos-sysroot/lib -lc++); link "$out" "$W/doctest.o"
   echo "expected on the Mac: exit code 2 (two deliberate CHECK failures); doctest prints its summary"
   ;;
-*) echo "cross_macos: unknown NAME '$name' (lua|doctest)" >&2; exit 2 ;;
+mruby)
+  pin=831da26b9021de0369d17b71b5667e2941a1a32d   # mruby/mruby tag 4.0.0, as run_mruby.sh
+  src=$work/mruby; out=$root/build/mruby-macos/mruby
+  fetch https://github.com/mruby/mruby "$pin" "$src"
+  # mruby writes a .lock file next to its config, so the config is copied out of the repository first (as run_mruby.sh)
+  cp "$root/tests/realworld/mruby_cross_build_config.rb" "$W/build_config.rb"
+  if command -v rake >/dev/null; then rake=(rake); else rake=(ruby -rrake -e 'Rake.application.run(ARGV)' --); fi
+  if ! (cd "$src" && MRUBY_CROSS_ROOT=$root MRUBY_CROSS_CC=$root/tests/realworld/mruby_cross_cc.sh \
+        MRUBY_CROSS_LD=$root/tests/realworld/mruby_cross_cc.sh MRUBY_CROSS_AR=llvm-ar MRUBY_CONFIG=$W/build_config.rb \
+        MRUBY_BUILD_DIR=$W/mruby-build "${rake[@]}" -j"$(nproc)" all >"$W/rake.log" 2>&1); then
+    echo "cross_macos: mruby build blocked; first error:" >&2
+    grep -m3 -E 'error|undefined|fatal' "$W/rake.log" >&2 || tail -5 "$W/rake.log" >&2
+    exit 3
+  fi
+  exe=$W/mruby-build/arm64-macos/bin/mruby
+  hdr=$(llvm-objdump --macho --private-headers "$exe")
+  grep -q EXECUTE <<<"$hdr" && grep -q ARM64 <<<"$hdr" || { echo "cross_macos: $exe is not a Mach-O arm64 executable" >&2; exit 1; }
+  mkdir -p "$(dirname "$out")"; cp "$exe" "$out"
+  echo "built: $out (sha256 $(sha256sum "$out" | cut -c1-16))"
+  echo "expected on the Mac: -e 'puts 1+1' -> 2; mruby_test.rb -> mruby-ok mruby 3 [1, 3, 5, 8] 6765; exit 0"
+  ;;
+*) echo "cross_macos: unknown NAME '$name' (lua|doctest|mruby)" >&2; exit 2 ;;
 esac

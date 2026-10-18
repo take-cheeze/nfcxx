@@ -213,6 +213,7 @@ class ze_rt {
   }
 
   std::string device_name() const { return device_name_; }
+  bool has_fp16() const { return has_fp16_; }
 
  private:
   struct kernel_info {
@@ -310,6 +311,10 @@ class ze_rt {
     max_wi_[1] = cp.maxGroupSizeY;
     max_wi_[2] = cp.maxGroupSizeZ;
     local_mem_ = cp.maxSharedLocalMemory;
+    ze_device_module_properties_t mp = {};
+    mp.stype = ZE_STRUCTURE_TYPE_DEVICE_MODULE_PROPERTIES;
+    check(zeDeviceGetModuleProperties(dev_, &mp), "zeDeviceGetModuleProperties");
+    has_fp16_ = (mp.flags & ZE_DEVICE_MODULE_FLAG_FP16) != 0;
 
     ze_device_memory_access_properties_t mem = {};
     mem.stype = ZE_STRUCTURE_TYPE_DEVICE_MEMORY_ACCESS_PROPERTIES;
@@ -476,6 +481,7 @@ class ze_rt {
   uint32_t max_wg_ = 0;
   uint32_t max_wi_[3] = {0, 0, 0};
   uint32_t local_mem_ = 0;
+  bool has_fp16_ = false;
   std::vector<uint8_t> il_;
   size_t il_size_ = 0;
   uint8_t *host_ = nullptr;
