@@ -2283,14 +2283,14 @@ def emit_module(src, kernel_cl = false)
   end
   entries = mod.defs.keys.select { |n| n.include?("__nfcxx_sycl_entry_") }
   return [nil, [], nil] if entries.empty?
-  # the array constructor calls are unrolled before the reachable set is taken: the constructors they call are reachable
-  mod.defs.each_value { |f| expand_cxa_vec_ctor(f) if f.is_a?(Array) }
+  # the array constructor calls of a reachable function are unrolled before its callees are taken (see visit)
   order = []
   state = {}
   visit = lambda do |name|
     next if state[name] == :done
     raise Refused, "recursive call of #{name}" if state[name] == :open
     state[name] = :open
+    expand_cxa_vec_ctor(mod.defs[name]) if mod.defs[name].is_a?(Array)
     callees = collect_calls(mod.defs[name], []).select { |c| mod.defs.key?(c) }.uniq
     callees.each { |c| visit.call(c) }
     state[name] = :done
