@@ -957,7 +957,7 @@ class ClosedWorld
 
   # Every `def name` anywhere in the text, not only at a line start: foreign_method_names
   # misses `private def loop` (mruby's Kernel#loop), which a proven miss must not call absent.
-  def broad_def_names(paths)
+  def self.broad_def_names(paths)
     ScanCache.fetch('closed_world.broad_def_names', Array(paths), cache_absent: false) do
       Array(paths).each_with_object(Set.new) do |path, names|
         text = File.read(path, encoding: 'BINARY')
@@ -967,25 +967,89 @@ class ClosedWorld
   end
 
   def scan_outside_ruby(paths)
-    ruby_names = foreign_method_names(paths)
+    paths = Array(paths)
+    facts = ScanCache.fetch('closed_world.ruby', paths) { self.class.ruby_facts(paths) }
+
+    ruby_names = Set.new(facts.fetch(:ruby_names))
     global!(:outside_method_missing) if ruby_names.include?('method_missing')
     global!(:outside_respond_to_missing) if ruby_names.include?('respond_to_missing?')
     @outside_ruby_names.merge(ruby_names)
-    @outside_def_names.merge(broad_def_names(paths))
+    @outside_def_names.merge(facts.fetch(:broad_defs))
     @outside_names.merge(ruby_names)
-    paths.each do |path|
-      text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
-      merge_outside_tokens(path, text)
-      text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
-      record_ruby_touches(path, text)
-      @clone_sent = true if text.match?(/\bclone\b/)
-      @freeze_possible = true if !CoreDefs.core_source?(path) && text.match?(/\bfreeze\b/)
-      @singleton_makers << [path, :ruby] if !CoreDefs.core_source?(path) && text.match?(RUBY_SINGLETON)
-      text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| note_outside_constant_write(m.first) }
-      global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
-      @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
-      global!(:outside_class_factory) if text.match?(/\b(?:Class|Struct)\.new\b/)
+
+    facts.fetch(:files).each do |file|
+      path = file.fetch(:path)
+      @ruby_tokens[path] = Set.new(file.fetch(:tokens))
+
+      file.fetch(:supers).each { |sup| @outside_ruby_supers << sup }
+
+      touch = file.fetch(:touch)
+      if touch
+        if touch.fetch(:legacy)
+          names = Set.new(touch.fetch(:names))
+          @touches << Touch.new(path, names, {}, touch.fetch(:note), false)
+        else
+          hard = Set.new(touch.fetch(:hard))
+          @touches << Touch.new(path, hard, touch.fetch(:evidence), '', false) unless hard.empty?
+        end
+      end
+
+      @clone_sent = true if file.fetch(:clone_sent)
+      @freeze_possible = true if file.fetch(:freeze_possible)
+      @singleton_makers << [path, :ruby] if file.fetch(:singleton_maker)
+
+      file.fetch(:constant_writes).each { |name| note_outside_constant_write(name) }
+
+      global!(:outside_dynamic_definition) if file.fetch(:dynamic)
+      @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
+      global!(:outside_class_factory) if file.fetch(:class_factory)
     end
+  end
+
+  def self.ruby_facts(paths)
+    paths = Array(paths)
+    {
+      ruby_names: foreign_method_names(paths).to_a,
+      broad_defs: broad_def_names(paths).to_a,
+      files: paths.map { |path| ruby_file_facts(path) }
+    }
+  end
+
+  def self.ruby_file_facts(path)
+    text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
+
+    tokens = Set.new
+    text.scan(/[A-Za-z_]\w*[?!=]?/) do |tok|
+      tokens << tok
+      tokens << tok.chomp('=').chomp('?').chomp('!')
+    end
+
+    supers = text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/).map { |(sup)| sup.split('::').last }
+
+    scan = TouchScan.ruby(text)
+    touch =
+      if scan.legacy
+        names = text.scan(/\b[A-Z]\w*/).to_set
+        { legacy: true, names: names.to_a, note: "legacy (#{scan.legacy}): spells #{names.size} constants" }
+      else
+        { legacy: false, hard: scan.hard.to_a, evidence: scan.evidence }
+      end
+
+    core = CoreDefs.core_source?(path)
+
+    {
+      path: path,
+      tokens: tokens.to_a,
+      supers: supers,
+      touch: touch,
+      clone_sent: text.match?(/\bclone\b/),
+      freeze_possible: !core && text.match?(/\bfreeze\b/),
+      singleton_maker: !core && text.match?(RUBY_SINGLETON),
+      constant_writes: text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/).map(&:first),
+      dynamic: text.match?(RUBY_DYNAMIC),
+      dynamic_constant_mutation: text.match?(RUBY_CONST_DYNAMIC),
+      class_factory: text.match?(/\b(?:Class|Struct)\.new\b/)
+    }
   end
 
   # YIELD_REACH (ADR 0283): the method names outside code can call back into Ruby by. Native code
