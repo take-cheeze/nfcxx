@@ -43,7 +43,10 @@ if [ ! -x "$cross_edg/bin/eccp" ]; then
   rm -rf "$cross_edg" "$cross_base"
   # USR_INCLUDE must be set for this build too: the EDG C++ runtime (lib_src) is compiled during it, and without it the
   # runtime takes the host glibc headers (features-time64, __float128), which fail on an x86-64 Linux host.
-  USR_INCLUDE="$root/tests/macos-sysroot/include" NFCXX_EDG_TARGET=macos-arm64 EDG_BUILD="$cross_edg" EDG_BASE="$cross_base" "$root/scripts/setup-edg.sh"
+  # EDG_CINCLDIR is the C library the runtime (lib_src) is compiled against; without it CMake detects the host glibc
+  # paths (for example /usr/include/x86_64-linux-gnu), which fail on an x86-64 host. Point it at the clean-room headers.
+  EDG_CINCLDIR="$root/tests/macos-sysroot/include" USR_INCLUDE="$root/tests/macos-sysroot/include" \
+    NFCXX_EDG_TARGET=macos-arm64 EDG_BUILD="$cross_edg" EDG_BASE="$cross_base" "$root/scripts/setup-edg.sh"
   # The prelinker reads the instance symbols with nm. On a Linux host, plain nm cannot read Mach-O objects, so use
   # llvm-nm. The macOS base already passes -fMacOSX64 (the 16-digit Mach-O values) to the prelinker. -u strips the Mach-O
   # leading underscore from the names it matches (the instance is __Z..., the prelinker looks for _Z...).
