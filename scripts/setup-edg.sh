@@ -23,12 +23,18 @@ fi
 
 # macOS (Apple Silicon or Intel): EDG's own clang base and CMake preset. Its long double (8 bytes, binary64 on arm64)
 # and predefined macros are the macOS ones, so none of the Linux workarounds below apply.
-if [ "$(uname -s)" = Darwin ]; then
-  case "$(uname -m)" in
-    arm64)  cfg=macos-arm;    preset=macos-arm-clang-release ;;
-    x86_64) cfg=macos-x86_64; preset=macos-x86-clang-release ;;
-    *) echo "setup-edg: unsupported macOS architecture $(uname -m)" >&2; exit 1 ;;
-  esac
+# NFCXX_EDG_TARGET=macos-arm64 (cross path, scripts/setup-cross-macos.sh) takes this branch on a Linux host too: the
+# macOS arm64 base and preset, with the front end built by the host's clang. Native Darwin and Linux builds are unchanged.
+if [ "$(uname -s)" = Darwin ] || [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
+  if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
+    cfg=macos-arm; preset=macos-arm-clang-release
+  else
+    case "$(uname -m)" in
+      arm64)  cfg=macos-arm;    preset=macos-arm-clang-release ;;
+      x86_64) cfg=macos-x86_64; preset=macos-x86-clang-release ;;
+      *) echo "setup-edg: unsupported macOS architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+  fi
   rm -rf "$base"; mkdir -p "$(dirname "$base")"
   cp -r "$src/bases/cmake-native/$cfg/clang" "$base"
   # _POSIX_SOURCE hides Darwin's clock_gettime, CLOCK_MONOTONIC and mkdtemp; _DARWIN_C_SOURCE exposes the full C API, and
@@ -41,8 +47,32 @@ if [ "$(uname -s)" = Darwin ]; then
   # The prelinker reads `nm -og` output. Mach-O values are 16 hex digits, so the nm format is MacOSX64 (-f); without it
   # the default parser rejects the template-info objects ("invalid input format").
   sed -i.bak 's|"nm -og 2>/dev/null" |"nm -og 2>/dev/null" -fMacOSX64 |' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
+  if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
+    # The cross runtime is C for arm64 Darwin: scripts/cross-macos-cc.sh (clang for the Darwin target, Mach-O objects)
+    # compiles it, against the clean-room headers. Its long double is IEEE double (the Apple ABI), which the macOS
+    # platform config does not state, so the target values the front end reads are set here, in the generated defines.
+    root_cc=$root/scripts/cross-macos-cc.sh
+    sed -i.bak "s|^EDG_C_TO_OBJ_COMPILER=.*|EDG_C_TO_OBJ_COMPILER=\${NFCXX_CC:-$root_cc}|" "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
+    export NFCXX_MACOS_SYSROOT=${NFCXX_MACOS_SYSROOT:-$root/tests/macos-sysroot/include}
+  fi
   cd "$src"
   EDG_BASE=$base cmake --preset "$preset" -B "$out" >/dev/null
+  if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
+    cat >> "$out/src/includes/cmake_defines.h" <<'DEFS'
+
+/* macOS arm64: long double is IEEE double (Apple ABI), so the long double and double value sets agree (the front end
+   checks the mantissa against the size). Values from IEEE 754. */
+#define TARG_DBL_MANT_DIG 53
+#define TARG_DBL_MAX_EXP 1024
+#define TARG_DBL_MIN_EXP (-1021)
+#define TARG_LDBL_MANT_DIG 53
+#define TARG_LDBL_MAX_EXP 1024
+#define TARG_LDBL_MIN_EXP (-1021)
+#define TARG_FLT_MANT_DIG 24
+#define TARG_FLT_MAX_EXP 128
+#define TARG_FLT_MIN_EXP (-125)
+DEFS
+  fi
   cd "$out"
   ninja bin/cpfe bin/edg_prelink lib/libC.a
   echo "EDG built: $out/bin/eccp"
