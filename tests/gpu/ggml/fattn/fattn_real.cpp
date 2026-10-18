@@ -68,7 +68,11 @@ std::unique_ptr<ggml_sycl_pool> ggml_backend_sycl_context::new_pool_for_device(s
 
 static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_shape & sh, uint32_t seed) {
     const int64_t H = sh.n_head, HK = sh.n_head_kv, T = sh.n_tokens, N = sh.n_kv, D = FA_D;
-    const int64_t nq = D * T * H, nkv = D * N * HK, nd = D * H * T;
+    // The KV length as the kernel sees it: padded to 256 keys. The vec kernel reads whole tiles of keys past N and expects
+    // them masked with -inf (the padded keys of a KV cache), so K, V and the mask are laid out with NP keys, the keys past N
+    // zero in K and V and -inf in the mask.
+    const int64_t NP = ((N + 255) / 256) * 256;
+    const int64_t nq = D * T * H, nkv = D * NP * HK, nd = D * H * T;
 
     float *      Q   = sycl::malloc_shared<float>(nq, q);
     sycl::half * K   = sycl::malloc_shared<sycl::half>(nkv, q);
@@ -77,8 +81,15 @@ static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_s
 
     uint32_t state = seed;
     for (int64_t i = 0; i < nq; i++) Q[i] = fa_next_value(state);
-    for (int64_t i = 0; i < nkv; i++) K[i] = sycl::half(fa_next_value(state));
-    for (int64_t i = 0; i < nkv; i++) V[i] = sycl::half(fa_next_value(state));
+    // element i of K or V is key (i / D) % NP of head (i / D) / NP: the keys past N are zero
+    for (int64_t i = 0; i < nkv; i++) {
+        const sycl::half kv = sycl::half(fa_next_value(state));
+        K[i] = ((i / D) % NP) < N ? kv : sycl::half(0.0f);
+    }
+    for (int64_t i = 0; i < nkv; i++) {
+        const sycl::half kv = sycl::half(fa_next_value(state));
+        V[i] = ((i / D) % NP) < N ? kv : sycl::half(0.0f);
+    }
     const float guard = -7.0f;
     for (int64_t i = 0; i < nd + 64; i++) dst[i] = guard;  // guard tail past nd must stay untouched
 
@@ -90,13 +101,13 @@ static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_s
     Q_t.data = Q;
 
     K_t.type = GGML_TYPE_F16;
-    K_t.ne[0] = D; K_t.ne[1] = N; K_t.ne[2] = HK; K_t.ne[3] = 1;
-    K_t.nb[0] = sizeof(sycl::half); K_t.nb[1] = K_t.nb[0] * D; K_t.nb[2] = K_t.nb[1] * N; K_t.nb[3] = K_t.nb[2] * HK;
+    K_t.ne[0] = D; K_t.ne[1] = NP; K_t.ne[2] = HK; K_t.ne[3] = 1;
+    K_t.nb[0] = sizeof(sycl::half); K_t.nb[1] = K_t.nb[0] * D; K_t.nb[2] = K_t.nb[1] * NP; K_t.nb[3] = K_t.nb[2] * HK;
     K_t.data = K;
 
     V_t.type = GGML_TYPE_F16;
-    V_t.ne[0] = D; V_t.ne[1] = N; V_t.ne[2] = HK; V_t.ne[3] = 1;
-    V_t.nb[0] = sizeof(sycl::half); V_t.nb[1] = V_t.nb[0] * D; V_t.nb[2] = V_t.nb[1] * N; V_t.nb[3] = V_t.nb[2] * HK;
+    V_t.ne[0] = D; V_t.ne[1] = NP; V_t.ne[2] = HK; V_t.ne[3] = 1;
+    V_t.nb[0] = sizeof(sycl::half); V_t.nb[1] = V_t.nb[0] * D; V_t.nb[2] = V_t.nb[1] * NP; V_t.nb[3] = V_t.nb[2] * HK;
     V_t.data = V;
 
     dst_t.type = GGML_TYPE_F32;
@@ -110,12 +121,19 @@ static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_s
     // unmasked attention. Needed because the upstream vec kernel computes maskh = mask + nb33 * (sequence % ne33) + ... even
     // without a mask, and the launch passes ne33 = 0 when there is none: the modulo is then a division by zero (the device
     // traps). With a mask, ne33 = 1.
-    sycl::half * M = sycl::malloc_shared<sycl::half>(N * T, q);
-    for (int64_t i = 0; i < N * T; i++) M[i] = sycl::half(0.0f);
+    // the mask: [NP keys, T tokens]; 0 for the N real keys, -inf (F16 0xFC00) for the padded keys past N
+    sycl::half * M = sycl::malloc_shared<sycl::half>(NP * T, q);
+    const uint16_t neg_inf_bits = 0xFC00;
+    sycl::half neg_inf;
+    std::memcpy(&neg_inf, &neg_inf_bits, sizeof(neg_inf));
+    for (int64_t i = 0; i < NP * T; i++) {
+        const int64_t k = i % NP;
+        M[i] = k < N ? sycl::half(0.0f) : neg_inf;
+    }
     ggml_tensor mask_t{};
     mask_t.type = GGML_TYPE_F16;
-    mask_t.ne[0] = N; mask_t.ne[1] = T; mask_t.ne[2] = 1; mask_t.ne[3] = 1;
-    mask_t.nb[0] = sizeof(sycl::half); mask_t.nb[1] = mask_t.nb[0] * N; mask_t.nb[2] = mask_t.nb[1] * T; mask_t.nb[3] = mask_t.nb[2];
+    mask_t.ne[0] = NP; mask_t.ne[1] = T; mask_t.ne[2] = 1; mask_t.ne[3] = 1;
+    mask_t.nb[0] = sizeof(sycl::half); mask_t.nb[1] = mask_t.nb[0] * NP; mask_t.nb[2] = mask_t.nb[1] * T; mask_t.nb[3] = mask_t.nb[2];
     mask_t.data = M;
     dst_t.src[3] = &mask_t;
     dst_t.src[4] = nullptr;  // no sinks
@@ -143,7 +161,7 @@ static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_s
             for (int64_t k = 0; k < N; k++) {
                 double dot = 0.0;
                 for (int64_t d = 0; d < D; d++) {
-                    dot += (double) Q[d + D * (t + T * h)] * (double) (float) K[d + D * (k + N * hk)];
+                    dot += (double) Q[d + D * (t + T * h)] * (double) (float) K[d + D * (k + NP * hk)];
                 }
                 s[(size_t) k] = dot * dscale;
                 if (s[(size_t) k] > smax) smax = s[(size_t) k];
@@ -156,7 +174,7 @@ static int fa_check(sycl::queue & q, ggml_backend_sycl_context & ctx, const fa_s
             for (int64_t d = 0; d < D; d++) {
                 double want = 0.0;
                 for (int64_t k = 0; k < N; k++) {
-                    want += (s[(size_t) k] / sum) * (double) (float) V[d + D * (k + N * hk)];
+                    want += (s[(size_t) k] / sum) * (double) (float) V[d + D * (k + NP * hk)];
                 }
                 const double got = (double) dst[d + D * (h + H * t)];
                 const double err = std::fabs(got - want);
