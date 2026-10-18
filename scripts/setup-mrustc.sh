@@ -8,10 +8,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD; work=$root/build/mrustc; src=$work/src
-# take-cheeze/mrustc, branch nfcxx/fixes: upstream thepowersgang/mrustc d85e86b (PR #441) plus nfcxx's fixes (NFCXX-FIXES.md
-# in that branch). MRUSTC_REPO overrides the repository.
+# take-cheeze/mrustc, branch nfcxx/patches (the tracking branch): nfcxx/fixes (upstream thepowersgang/mrustc d85e86b plus
+# nfcxx's fixes, NFCXX-FIXES.md) plus the open bug PRs on top of it. MRUSTC_REPO overrides the repository.
 url=${MRUSTC_REPO:-https://github.com/take-cheeze/mrustc}
-pin=aa96080eab1d55961d2e9614437acc10fb4a3eb9
+pin=2dfe9ccb
 jobs=${PARLEVEL:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
 
 if [ "${FORCE:-}" != 1 ] && [ -x "$src/bin/mrustc" ] && [ -f "$src/output-1.90.0/libstd.rlib.o" ]; then
