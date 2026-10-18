@@ -41,13 +41,14 @@ clang "${tgt[@]}" "${inc[@]}" "${unwinc[@]}" -O2 -c "$src/libunwind/src/UnwindRe
 clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libunwind/src/libunwind.cpp" -o libunwind.o
 # The exception runtime: cxa_exception and what it calls (libc++abi 18.1.8). cxa_default_handlers uses constinit, so C++20.
 cxxabi_defs=(-D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS)
-for f in cxa_exception cxa_exception_storage cxa_handlers fallback_malloc; do
+for f in cxa_exception cxa_exception_storage fallback_malloc; do
   clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" "${cxxabi_defs[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
 done
-clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" "${cxxabi_defs[@]}" -std=c++20 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
-# libc++ (new_handler.o) is the one std::get_new_handler / std::set_new_handler pair the link keeps: both use libc++'s variable.
-# libc++abi's copy of std::set_new_handler is removed; nothing in this object refers to it.
-llvm-objcopy --strip-symbol=__ZSt15set_new_handlerPFvvE cxa_default_handlers.o
+# libc++abi's std::set_new_handler and std::get_new_handler duplicate libc++'s (new_handler.o, which the link keeps: both
+# share libc++'s variable). The libc++abi copies are compiled under other names, so they do not collide; nothing in them
+# refers to the renamed functions.
+clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" "${cxxabi_defs[@]}" -D'set_new_handler=__nfcxx_libcxxabi_set_new_handler' -std=c++20 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
+clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" "${cxxabi_defs[@]}" '-Dget_new_handler=__nfcxx_libcxxabi_get_new_handler' -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/cxa_handlers.cpp" -o cxa_handlers.o
 
 rm -f libnfcxx-darwin-rt.a
 llvm-ar rcs libnfcxx-darwin-rt.a atomic.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o \
