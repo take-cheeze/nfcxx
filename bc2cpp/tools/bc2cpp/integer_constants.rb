@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require_relative 'source_text'
+require_relative 'scan_cache'
 
 # INTEGER_CONSTANT_PROOF: constant names that only ever hold an Integer.
 
@@ -332,8 +333,9 @@ module IntegerConstants
   #     mrb_define_class_id does its own const_set.
   # Deliberately over-broad; over-collecting only costs a proof.
   def self.native_defined_const_names(paths)
-    names = Set.new
-    Array(paths).each do |path|
+    ScanCache.fetch('integer_constants.native_defined_const_names', Array(paths), cache_absent: false) do
+      names = Set.new
+      Array(paths).each do |path|
       src = SourceText.read(path, 'IntegerConstants.native_defined_const_names') or next
       src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\([^;]{0,200}/m) do
         seg = Regexp.last_match(0)
@@ -352,6 +354,7 @@ module IntegerConstants
       end
     end
     names
+    end
   end
 
   # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: every constant name with a
@@ -382,13 +385,15 @@ module IntegerConstants
   # Poison source 4: any `NAME =` at line start, whatever the right-hand side.
   # Over-collecting only costs a proof; under-collecting would be wrong.
   def self.foreign_const_names(paths)
-    names = Set.new
-    Array(paths).each do |path|
-      src = SourceText.read(path, 'IntegerConstants.foreign_const_names') or next
+    ScanCache.fetch('integer_constants.foreign_const_names', Array(paths), cache_absent: false) do
+      names = Set.new
+      Array(paths).each do |path|
+        src = SourceText.read(path, 'IntegerConstants.foreign_const_names') or next
       src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
       # `class Foo` / `module Foo` bind a constant too (poison source 2).
       src.scan(/^\s*(?:class|module)\s+([A-Z][A-Za-z_0-9]*)/) { names << Regexp.last_match(1) }
     end
     names
+    end
   end
 end
