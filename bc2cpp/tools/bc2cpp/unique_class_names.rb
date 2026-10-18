@@ -109,10 +109,27 @@ module UniqueClassNames
     sources = Array(native_paths).select { |path| File.file?(path) }
                                  .map { |path| File.read(path, encoding: 'UTF-8') }
     bindings = native_bindings(sources)
+    # A native class or module (kind 2 of BINDING_CALLS) is a candidate at its full path; a native value constant, or a
+    # class whose outer namespace is not known, refuses the name.
+    native_classes = Set.new
+    native_refused = Set.new
+    bindings.each do |name, list|
+      list.each do |source, pos, var, kind|
+        if kind != 2
+          native_refused << name
+        elsif var.nil?
+          native_classes << name
+        elsif (outer = native_module_binding(sources, source, pos, var))
+          native_classes << "#{outer}::#{name}"
+        else
+          native_refused << name
+        end
+      end
+    end
     UniqueClassNames.lexical = {
-      defined: paths.values.flat_map { |defs| defs.grep(String) }.to_set,
+      defined: paths.values.flat_map { |defs| defs.grep(String) }.to_set | native_classes,
       unknown: paths.select { |_, defs| defs.any? { |d| !d.is_a?(String) } }.keys.to_set,
-      refused: assigned | Set.new(Array(foreign)) | bindings.select { |_, v| v.any? }.keys.to_set,
+      refused: assigned | Set.new(Array(foreign)) | native_refused,
       superclass_of: superclass_of,
       included: included
     }
@@ -139,7 +156,7 @@ module UniqueClassNames
   def native_bindings(sources)
     out = Hash.new { |hash, name| hash[name] = [] }
     sources.each do |source|
-      BINDING_CALLS.each do |pattern|
+      BINDING_CALLS.each_with_index do |pattern, kind|
         source.to_enum(:scan, pattern).each do
           match = Regexp.last_match
           segment = match[0]
@@ -147,7 +164,7 @@ module UniqueClassNames
           under = segment.match(UNDER_DEFINITION)
           names.each do |name|
             var = under && (under[2] || under[3]) == name ? under[1] : nil
-            out[name] << [source, match.begin(0), var]
+            out[name] << [source, match.begin(0), var, kind]
           end
         end
       end
