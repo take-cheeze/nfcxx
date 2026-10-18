@@ -17,7 +17,7 @@ llvm="$root/build/llvm-src"
 rm -rf "$llvm"; mkdir -p "$llvm"
 git -C "$llvm" init -q
 git -C "$llvm" remote add origin https://github.com/llvm/llvm-project
-git -C "$llvm" sparse-checkout set --cone compiler-rt/lib/builtins libcxxabi libcxx/src/include
+git -C "$llvm" sparse-checkout set --cone compiler-rt/lib/builtins libcxxabi libcxx/src/include libunwind/include
 git -C "$llvm" fetch -q --depth 1 --filter=blob:none origin "$pin"
 git -C "$llvm" checkout -q FETCH_HEAD
 [ "$(git -C "$llvm" rev-parse HEAD)" = "$pin" ] || { echo "build.sh: checked-out HEAD is not the pinned commit $pin" >&2; exit 1; }
@@ -47,8 +47,21 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -frtti -O2 -c "$sr
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++20 -fno-exceptions -fno-rtti -O2 -c "$src/libcxx/src/new_handler.cpp" -o new_handler.o
 # private_typeinfo.cpp uses dynamic_cast itself, so it is built with RTTI on (no -fno-rtti).
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -O2 -c "$src/libcxxabi/src/private_typeinfo.cpp" -o private_typeinfo.o
+# cxa_exception.cpp defines __cxa_uncaught_exception (the ___cxa_uncaught_exception name the cross link needs). It is
+# built with exceptions and RTTI on, as libc++abi builds it; the _LIBCPP opt-in keeps std::unexpected_handler, which
+# its headers use. The _Unwind_* functions it calls are the system unwinder's, from libunwind's headers at the pin.
+# The rest of the exception runtime that cxa_exception.o needs: the terminate and unexpected handlers (std::terminate,
+# get_terminate), the per-thread globals (__cxa_get_globals), the personality routine (__gxx_personality_v0), the
+# fallback allocator for exception objects, and the default handlers. Built as libc++abi builds them: exceptions on.
+eh=(-I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS -std=c++17 -fexceptions -O2)
+for f in cxa_exception cxa_handlers cxa_exception_storage cxa_personality fallback_malloc stdlib_exception; do
+  clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
+done
+# cxa_default_handlers.cpp uses constinit, so it is built as C++20 (as new_handler.cpp is).
+clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS \
+  -std=c++20 -fexceptions -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
 
 rm -f libnfcxx-darwin-rt.a
-llvm-ar rcs libnfcxx-darwin-rt.a atomic.o atomic_fetch.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o
+llvm-ar rcs libnfcxx-darwin-rt.a atomic.o atomic_fetch.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o cxa_default_handlers.o fallback_malloc.o stdlib_exception.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
