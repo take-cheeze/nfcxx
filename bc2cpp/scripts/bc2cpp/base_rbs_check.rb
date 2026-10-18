@@ -231,11 +231,30 @@ if system('clang', '--version', out: File::NULL, err: File::NULL)
         void install(mrb_state *mrb) {
           RClass *klass = mrb_define_class(mrb, "#{name}", 0);
           mrb_define_method(mrb, klass, "result", result, 0);
+          mrb_define_method(mrb, klass, "second", result, 0);
         }
       CPP
       path
     end
-    serial, serial_skipped = BaseRbsNative.run(File.join(dir, 'serial'), paths, [], jobs: 1)
+    external = File.join(dir, 'external.cxx')
+    File.write(external, header + <<~CPP)
+      mrb_value elsewhere(mrb_state*, mrb_value);
+      void install(mrb_state *mrb) {
+        RClass *klass = mrb_define_class(mrb, "External", 0);
+        mrb_define_method(mrb, klass, "result", elsewhere, 0);
+      }
+    CPP
+    paths << external
+    ast_calls = []
+    trace = TracePoint.new(:call) do |event|
+      ast_calls << event.binding.local_variable_get(:path) if event.method_id == :ast_function_kinds
+    end
+    serial, serial_skipped = trace.enable do
+      BaseRbsNative.run(File.join(dir, 'serial'), paths, [], jobs: 1)
+    end
+    check.call('AST extraction runs once per file with a registered body', ast_calls == paths[0...-1])
+    check.call('a registered external function retains its untyped signature',
+               File.read(serial).include?("class External\n  def result: (*untyped) -> untyped"))
     parallel, parallel_skipped = BaseRbsNative.run(File.join(dir, 'parallel'), paths, [], jobs: 2)
     text = File.read(parallel)
     check.call('serial and parallel RBS are byte-identical', text == File.read(serial))
@@ -252,6 +271,27 @@ if system('clang', '--version', out: File::NULL, err: File::NULL)
     check.call('native CLI accepts jobs alongside include/define flags',
                status.success? && File.read(File.join(cli_out, 'native.rbs')) == text)
     check.call('native CLI reports its output', err.include?('wrote') && err.include?("skipped #{serial_skipped.size}"))
+
+    invalid = File.join(dir, 'invalid.cxx')
+    File.write(invalid, File.read(paths.first).sub('return Helpers::helper(self);', 'return mrb_fixnum_value(undeclared);'))
+    Tempfile.create('base-rbs-ast-warning') do |warning|
+      saved_stderr = $stderr
+      begin
+        $stderr = warning
+        ast_calls.clear
+        fallback, = trace.enable do
+          BaseRbsNative.run(File.join(dir, 'fallback'), [invalid], [], jobs: 1)
+        end
+      ensure
+        $stderr = saved_stderr
+      end
+      warning.flush
+      warning.rewind
+      check.call('failed AST extraction is attempted once and remains visible',
+                 ast_calls == [invalid] && warning.read.scan('AST returns unavailable').size == 1)
+      check.call('an AST failure retains regex return analysis',
+                 File.read(fallback).include?('def result: () -> Integer'))
+    end
   end
 else
   puts '  SKIP native equivalence: clang is not installed'

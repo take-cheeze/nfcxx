@@ -98,7 +98,8 @@ module DeclaredConstants
   # `sites`: the registry's constant_assignment_sites ({name:, irep:, idx:, reg:}); `poisoned` the bare names bound
   # outside the program's bytecode (nil: unknown); `container_constants` is read for trace_new_target only. The
   # proven integer constants are not needed: the evaluator re-derives every binding it reads.
-  def check(entries, ireps, registry, sites, _integer_constants, poisoned, container_constants, display_root)
+  def check(entries, ireps, registry, sites, _integer_constants, poisoned, container_constants, display_root,
+            plus_safe:, range_safe:)
     result = Result.new(integer_names: Set.new, containers: {}, elements: {}, diagnostics: [], report: [],
                         locs: entries.map(&:loc))
     return result if entries.empty?
@@ -120,6 +121,8 @@ module DeclaredConstants
     # Without the outside-world scan every name may be bound elsewhere: the evaluator then reads literals only.
     blocked = poisoned ? poisoned | class_named : nil
     evaluator = Evaluator.new(bindings, blocked || AllNames)
+    # The same sum names const_rows reports (ARRAY_SUM), so a declared `X: Array` accepts exactly what the rows type.
+    sums = array_sum_names(ireps, sites, registry, container_constants, plus_safe, range_safe: range_safe)
     rel = ->(path) { display_root ? path.to_s.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : path.to_s }
     entries.each do |entry|
       diag = lambda do |severity, where, message|
@@ -140,7 +143,7 @@ module DeclaredConstants
                   "`#{entry.bare}` is assigned in a scope the checker does not resolve; it may reassign this constant")
       end
       own.first(1).each do |irep, idx, insn,|
-        why = site_failure(entry, irep, idx, insn, evaluator, registry, container_constants)
+        why = site_failure(entry, irep, idx, insn, evaluator, registry, container_constants, sums)
         diag.call('error', [rel.call(irep.file), insn.lineno, 1], why) if why
       end
       failed = result.diagnostics.size > errors
@@ -189,7 +192,7 @@ module DeclaredConstants
     result.elements[entry.bare] = entry.elem
   end
 
-  def site_failure(entry, irep, idx, insn, evaluator, registry, container_constants)
+  def site_failure(entry, irep, idx, insn, evaluator, registry, container_constants, sums)
     if evaluator.entry_site?(irep, insn)
       return 'control can jump onto the assignment, so its value is not one expression'
     end
@@ -207,6 +210,8 @@ module DeclaredConstants
                                                              container_constants: container_constants)
       return nil if traced == 'Array' || proven_array_source_scan(irep, idx, src, registry)
       return nil if frozen_array_source?(irep, idx, src, registry, container_constants)
+      # ARRAY_SUM: the name is a sum in every assignment (array_sum_names), so this site is one too.
+      return nil if sums.key?(entry.name)
 
       'the assigned value is not a proven Array'
     when :class
@@ -264,6 +269,51 @@ module DeclaredConstants
   # (which carries the sum constants already proven, see array_sum_names), by the array scan, by a literal Range's
   # to_a (range_to_a_source?, only when `range_safe`), or by a nested sum.
   SUM_MAX_DEPTH = 8
+
+  # CodeGen#declared_array_plus_safe?: no Ruby `+` on Array (or a subclass), and Array is not prepended or mixed into
+  # by an unknown module. The declared check runs before CodeGen is built, so the predicate lives here; CodeGen
+  # delegates to it and the two cannot drift.
+  def array_plus_safe?(registry, superclass_of, prepended_modules, unknown_mixins)
+    defs = registry['+'] || []
+    return false unless defs.any? { |d| d.owner == '<native>' && d.irep.nil? }
+    return false if defs.any? { |d| d.owner == 'Array' }
+    return false if !Array(prepended_modules['Array']).empty? || unknown_mixins.include?('Array')
+
+    defs.none? { |d| d.irep && strict_ancestors(superclass_of, d.owner).include?('Array') }
+  end
+
+  def strict_ancestors(superclass_of, klass)
+    seen = Set.new
+    superclass = superclass_of[klass]
+    superclass = superclass_of[superclass] while superclass.is_a?(String) && seen.add?(superclass)
+    seen
+  end
+
+  # The array sum proof's full precondition (array_sum_names' `plus_safe`): array_plus_safe? and no Ruby `freeze`.
+  def array_sum_safe?(registry, superclass_of, prepended_modules, unknown_mixins)
+    array_plus_safe?(registry, superclass_of, prepended_modules, unknown_mixins) &&
+      (registry['freeze'] || []).none?(&:irep)
+  end
+
+  # Range#to_a (mruby-range-ext mrblib/range.rb) answers a fresh Array: `__num_to_a` for Integer endpoints, else
+  # Enumerable#to_a (`super`), which calls Range#each, whose String arm calls String#upto. Each of those must be the
+  # stock definition, so no Ruby definition of these names may sit on Range, Enumerable or String, or on a module
+  # mixed into them, and none of the three may have a prepend or an unresolved mixin. Scoped to those owners: a
+  # program-wide name check would refuse on the engine's own `each` methods (lcf.rb, game.rb).
+  # CodeGen#range_to_a_safe? delegates here, so the declared check and the rows read one predicate.
+  RANGE_TO_A_NAMES = %w[to_a each upto __num_to_a].freeze
+  RANGE_TO_A_OWNERS = %w[Range Enumerable String].freeze
+
+  def range_to_a_safe?(registry, included_modules, prepended_modules, unknown_mixins)
+    touched = RANGE_TO_A_OWNERS + RANGE_TO_A_OWNERS.flat_map { |owner| Array(included_modules[owner]) }
+    mixins_resolved = touched.none? do |owner|
+      unknown_mixins.include?(owner) || !Array(prepended_modules[owner]).empty?
+    end
+    defined_on_touched = RANGE_TO_A_NAMES.any? do |name|
+      (registry[name] || []).any? { |d| d.irep && touched.include?(d.owner) }
+    end
+    mixins_resolved && !defined_on_touched
+  end
 
   def array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: nil, depth: 0, range_safe: false)
     return false unless plus_safe && depth < SUM_MAX_DEPTH

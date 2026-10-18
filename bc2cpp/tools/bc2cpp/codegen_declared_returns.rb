@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'declared_constants'
 require_relative 'declared_returns'
 require_relative 'codegen_sealed_containers'
 
@@ -359,29 +360,16 @@ class CodeGen
   def declared_array_plus_safe?
     return @declared_array_plus_safe if defined?(@declared_array_plus_safe)
 
-    @declared_array_plus_safe = builtin_class_send_safe?('+', ['Array']) &&
-                                (@registry['+'] || []).none? { |md| md.irep && strict_subclass?(md.owner, 'Array') }
+    @declared_array_plus_safe = DeclaredConstants.array_plus_safe?(@registry, @superclass_of, @prepended_modules,
+                                                                   @unknown_mixins)
   end
 
-  # Range#to_a (mruby-range-ext mrblib/range.rb) answers a fresh Array: `__num_to_a` for Integer endpoints, else
-  # Enumerable#to_a (`super`), which calls Range#each, whose String arm calls String#upto. Each of those must be the
-  # stock definition, so no Ruby definition of these names may sit on Range, Enumerable or String, or on a module
-  # mixed into them, and none of the three may have a prepend or an unresolved mixin. Scoped to those owners: a
-  # program-wide name check would refuse on the engine's own `each` methods (lcf.rb, game.rb).
-  RANGE_TO_A_NAMES = %w[to_a each upto __num_to_a].freeze
-  RANGE_TO_A_OWNERS = %w[Range Enumerable String].freeze
-
+  # DeclaredConstants.range_to_a_safe? (the predicate lives there so the declared check can read it too).
   def range_to_a_safe?
     return @range_to_a_safe if defined?(@range_to_a_safe)
 
-    touched = RANGE_TO_A_OWNERS + RANGE_TO_A_OWNERS.flat_map { |owner| Array(@included_modules[owner]) }
-    mixins_resolved = touched.none? do |owner|
-      @unknown_mixins.include?(owner) || !Array(@prepended_modules[owner]).empty?
-    end
-    defined_on_touched = RANGE_TO_A_NAMES.any? do |name|
-      (@registry[name] || []).any? { |d| d.irep && touched.include?(d.owner) }
-    end
-    @range_to_a_safe = mixins_resolved && !defined_on_touched
+    @range_to_a_safe = DeclaredConstants.range_to_a_safe?(@registry, @included_modules, @prepended_modules,
+                                                          @unknown_mixins)
   end
 
   # The writer at `w` is a reaching definition already; every deeper hop must dominate (ADR 0198).
