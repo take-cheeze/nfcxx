@@ -20,6 +20,15 @@ void *dlsym(void *handle, const char *symbol);
 int dlclose(void *handle);
 char *dlerror(void);
 
+/* dladdr (a Darwin and glibc extension, not POSIX), from the dladdr(3) description: the image and nearest symbol of an address. */
+typedef struct dl_info {
+    const char *dli_fname;
+    void *dli_fbase;
+    const char *dli_sname;
+    void *dli_saddr;
+} Dl_info;
+int dladdr(const void *addr, Dl_info *info);
+
 #ifdef __cplusplus
 }
 #endif
