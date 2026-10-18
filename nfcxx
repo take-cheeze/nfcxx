@@ -13,6 +13,8 @@
 #   -fsanitize=undefined|CHECK[,CHECK...]: the undefined behavior sanitizer (docs/notes/ubsan.md). Implies Path B, whose IR has the
 #                  checks; a failing check prints "file:line: runtime error: ..." and aborts. -fno-sanitize=all turns it off.
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
+#   --module-dir=DIR: where C++ module interface files (NAME.eifc) are written and read; the default is the directory of -o.
+#                  A program with `export module` or `import` is built one source at a time (docs/notes/modules.md).
 #   NFCXX_KEEP_INTERMEDIATES=1: a compile and link keeps its intermediates (the .o files, <stem>.ii, <stem>.ti) in the
 #                  temporary directory the driver names on stderr, instead of removing it on exit. A -c compile keeps
 #                  <stem>.ii and <stem>.ti beside its object in any case: the link that follows reads them there.
@@ -47,6 +49,7 @@ dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX
 obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
+moddir=""   # --module-dir=DIR: where C++ module interface files are written and read (docs/notes/modules.md)
 sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); isa=(); cuda_opts=()
 # A .cu input is rewritten to C++ before the front end (tools/cuda-rewrite: launches become calls of
 # __nfcxx_cuda_launch), and the runtime helper lib/cuda/nfcxx_cuda.h is included first. The copy goes in a temp
@@ -164,6 +167,75 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   trace_finish
   return $rc
 }
+# C++ modules (docs/notes/modules.md). mod_decl_name FILE prints NAME for an interface unit (export module NAME;); mod_imports FILE
+# prints the names it imports (import NAME;). Both read the declarations at the start of a line only.
+mod_is_module_src() {  # mod_is_module_src FILE: true when FILE declares a module or imports one
+  grep -Eq '^[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]' "$1"
+}
+mod_decl_name() {
+  awk '/^[ \t]*export[ \t]+module[ \t]+[A-Za-z_][A-Za-z0-9_.]*[ \t]*;/ {
+         sub(/^[ \t]*export[ \t]+module[ \t]+/, ""); sub(/[ \t]*;.*/, ""); print; exit }' "$1"
+}
+mod_imports() {
+  awk '/^[ \t]*(export[ \t]+)?import[ \t]+[A-Za-z_][A-Za-z0-9_.]*[ \t]*;/ {
+         sub(/^[ \t]*(export[ \t]+)?import[ \t]+/, ""); sub(/[ \t]*;.*/, ""); print }' "$1"
+}
+mod_check_src() {  # mod_check_src FILE: refuses the module features that are not built yet
+  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?module[[:space:]]+[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*:' "$1"; then
+    echo "nfcxx: $1: module partitions are not supported yet (docs/notes/modules.md)" >&2; exit 2
+  fi
+  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?import[[:space:]]+[<"]' "$1"; then
+    echo "nfcxx: $1: header units are not supported yet (docs/notes/modules.md)" >&2; exit 2
+  fi
+  local d
+  for d in $(mod_imports "$1"); do
+    case $d in std|std.*) echo "nfcxx: $1: import $d: the standard library modules are not built yet (docs/notes/modules.md)" >&2; exit 2 ;; esac
+  done
+}
+# mod_build_program: a program with modules is compiled one source at a time (EDG takes one translation unit per call with
+# modules on), the interface units first in dependency order, and the objects are then linked. Each step is this driver again.
+mod_build_program() {
+  local mdir ifaces=() others=() ordered=() rest=() s d o n=0 ready progress all=" " done_names=" "
+  local objs=() compile_args=() link_args=() a x is_src skip=0
+  mtmp=$(mktemp -d); trap 'rm -rf "$mtmp"' EXIT
+  mdir=${moddir:-$mtmp}
+  for s in ${srcs[@]+"${srcs[@]}"}; do
+    mod_check_src "$s"
+    if [ -n "$(mod_decl_name "$s")" ]; then ifaces+=("$s"); all+="$(mod_decl_name "$s") "; else others+=("$s"); fi
+  done
+  while [ ${#ifaces[@]} -gt 0 ]; do
+    progress=0; rest=()
+    for s in "${ifaces[@]}"; do
+      ready=1
+      for d in $(mod_imports "$s"); do
+        case $all in *" $d "*) case $done_names in *" $d "*) ;; *) ready=0 ;; esac ;; esac
+      done
+      if [ $ready = 1 ]; then ordered+=("$s"); done_names+="$(mod_decl_name "$s") "; progress=1; else rest+=("$s"); fi
+    done
+    [ $progress = 1 ] || { echo "nfcxx: cyclic module imports among: ${rest[*]}" >&2; exit 2; }
+    ifaces=(${rest[@]+"${rest[@]}"})
+  done
+  ordered+=(${others[@]+"${others[@]}"})
+  # The options of each step: the compile gets everything but the link-only ones, the link gets everything but the sources.
+  for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
+    if [ $skip = 1 ]; then skip=0; continue; fi
+    is_src=0; for x in ${srcs[@]+"${srcs[@]}"}; do [ "$x" = "$a" ] && is_src=1; done
+    [ $is_src = 0 ] || continue
+    case $a in
+      -o) skip=1 ;;
+      -c|--module-dir=*) ;;
+      -l?*|-L?*|-Wl,*|*.o|*.a|*.so) link_args+=("$a") ;;
+      *) compile_args+=("$a"); link_args+=("$a") ;;
+    esac
+  done
+  for s in ${ordered[@]+"${ordered[@]}"}; do
+    o=$mtmp/m$n.o; n=$((n + 1))
+    "$root/nfcxx" -c "$s" -o "$o" --module-dir="$mdir" ${compile_args[@]+"${compile_args[@]}"}
+    objs+=("$o")
+  done
+  "$root/nfcxx" ${objs[@]+"${objs[@]}"} ${link_args[@]+"${link_args[@]}"} -o "$out"
+  exit 0
+}
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
 while [ $# -gt 0 ]; do
@@ -180,6 +252,7 @@ while [ $# -gt 0 ]; do
     --freestanding) freestanding=1 ;;
     --target=*) target=${1#--target=} ;;
     --trace=*) trace=${1#--trace=} ;;
+    --module-dir=*) moddir=${1#--module-dir=} ;;
     -shared) shared=1; pic=1 ;;
     -fPIC|-fpic) pic=1 ;;
     -rdynamic) rdynamic=1 ;;
@@ -293,6 +366,25 @@ if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 
 fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
 [ -z "$trace" ] || trace_begin "$trace"
+# C++ modules (docs/notes/modules.md). A program whose sources declare or import a module is built by mod_build_program, which
+# runs this driver once per source. A compile gets the module options: --modules, the directory of the interface files (BMIs,
+# --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.
+modules=0; modopts=()
+for s in ${srcs[@]+"${srcs[@]}"}; do
+  if mod_is_module_src "$s"; then modules=1; fi
+done
+if [ $modules = 1 ]; then
+  case $std in --c++98|--c++03|--c++11|--c++14|--c++17) echo "nfcxx: C++ modules need -std=c++20 or later" >&2; exit 2 ;; esac
+  [ $emit_c = 0 ] || { echo "nfcxx: --emit-c does not support C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
+  [ ${#cfiles[@]} = 0 ] || { echo "nfcxx: C sources cannot be built with C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
+  for s in ${srcs[@]+"${srcs[@]}"}; do mod_check_src "$s"; done
+  if [ $compile_only = 0 ]; then mod_build_program; fi
+  [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with C++ modules takes one source" >&2; exit 2; }
+  mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
+  modopts=(--modules --modules_directory "$mdir")
+  n=$(mod_decl_name "${srcs[0]}")
+  [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
+fi
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc
 # branch nfcxx-asan-combined, the pin of 3rd/cproc; NFCXX_ASAN). Both link libasan. Path B is not instrumented yet (docs/notes/asan-plan.md).
@@ -404,6 +496,7 @@ if [ -n "$sanitize" ]; then
   backend=pathb
 fi
 [ "${NFCXX_PATH:-}" != b ] || backend=pathb   # NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md)
+[ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
 case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
@@ -611,7 +704,7 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
   printf '%s\n' "$key"
 }
 cache_entry=""
-if [ -n "${NFCXX_CACHE:-}" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] \
+if [ -n "${NFCXX_CACHE:-}" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] && [ $modules = 0 ] \
    && [ ${#cu_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
   if key=$(cache_lookup "${srcs[0]}" "$out") && [ -n "$key" ]; then
     cache_entry=$NFCXX_CACHE/objects/$key
@@ -632,7 +725,7 @@ fi
 t=$(trace_start)
 (
   [ -z "$eccp_dir" ] || cd "$eccp_dir"
-  "$eccp_bin" "$std" --"$dialect" --wdir / ${extra[@]+"${extra[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
+  "$eccp_bin" "$std" --"$dialect" --wdir / ${extra[@]+"${extra[@]}"} ${modopts[@]+"${modopts[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
     ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pre_opts[@]+${pre_opts[@]+"${pre_opts[@]}"}} ${cuda_opts[@]+${cuda_opts[@]+"${cuda_opts[@]}"}} ${eflist[@]+${eflist[@]+"${eflist[@]}"}} ${shim[@]+${shim[@]+"${shim[@]}"}} ${vlart[@]+${vlart[@]+"${vlart[@]}"}} ${rtlib[@]+${rtlib[@]+"${rtlib[@]}"}} -o "$eccp_out"
 )
 trace_end "$t" "eccp (front end, C compile, link)" eccp

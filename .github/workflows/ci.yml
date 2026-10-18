@@ -72,9 +72,10 @@ jobs:
               tests/realworld/run_json.sh
           - name: real-world {fmt}
             run: tests/realworld/run_fmt.sh
-          - name: multi-TU, EH shim, nfceval
+          - name: multi-TU, modules, EH shim, nfceval
             run: |
               tests/multi-tu/run.sh
+              tests/modules/run.sh
               tests/ehshim/run.sh
               tests/eval/run.sh
           # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
