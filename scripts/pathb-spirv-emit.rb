@@ -336,6 +336,35 @@ def expand_cxa_vec_ctor(body)
   expand.call(body, {})
 end
 
+# A work-group static (syclex::work_group_static<T>, lib/sycl ext/oneapi/work_group_static.hpp) is one buffer per work-group,
+# not one per work-item. Its object (a kernel-body slot whose type names work_group_static) is placed in the group's static
+# local region, after the 1024-byte scratch tail of the group's local memory: the host reserves wgs_total bytes more per
+# work-group (manifest line L; rt_opencl.hpp, rt_level_zero.hpp). Offsets are unique across the module; the map is keyed by
+# [function name, slot name] and wgs_layout returns [map, total bytes (16-aligned)].
+def mentions_wgs?(t)
+  return t.to_s.include?("work_group_static") if t.is_a?(String) || t.is_a?(IRStr)   # quoted names are IRStr
+  return false unless t.is_a?(Array)
+  t.any? { |y| mentions_wgs?(y) }
+end
+
+def wgs_layout(defs)
+  map = {}
+  total = 0
+  defs.each do |fname, form|
+    next unless form.is_a?(Array)
+    form.each do |f|
+      # the object itself: a slot of the struct type (not a pointer to it, as the constructors' parameters are)
+      next unless head_of(f) == "slot" && f.length == 5 && head_of(f[2]) == "struct" && mentions_wgs?(f[2])
+      size = as_int(f[3])
+      align = [as_int(f[4]), 16].max
+      total = (total + align - 1) / align * align
+      map[[fname, f[1].to_s]] = total
+      total += size
+    end
+  end
+  [map, (total + 15) / 16 * 16]
+end
+
 def fnptr_slot?(t)
   t = t[1] if head_of(t) == "const"
   head_of(t) == "ptr" && t.length > 1 && head_of(t[1]) == "fn"
@@ -900,7 +929,7 @@ end
 
 class SpvModule
   attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
-  attr_accessor :stack_bytes, :fns, :defs, :subgroup_used
+  attr_accessor :stack_bytes, :fns, :defs, :subgroup_used, :wgs, :wgs_total
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -920,6 +949,8 @@ class SpvModule
     @fns = {}
     @defs = {}
     @stack_bytes = 0
+    @wgs = {}          # [function name, slot name] => offset in the group's static local region (see wgs_layout)
+    @wgs_total = 0
   end
 
   def spec_size(i)
@@ -960,6 +991,7 @@ class SFn
     @ptypes = []
     @ret = nil
     @slots = {}          # memory slot name => byte offset in the frame
+    @wgs = {}            # work-group static slot name => offset in the group's static local region (wgs_layout)
     @locals = {}         # scalar slot name => [variable id, IR type]
     @frame = 0
     @body = []
@@ -1062,6 +1094,10 @@ class SFn
     off = 0
     slots.each do |f|
       sname = f[1].to_s
+      if @mod.wgs && @mod.wgs.key?([@name, sname])
+        @wgs[sname] = @mod.wgs[[@name, sname]]
+        next
+      end
       size = f.length == 5 ? as_int(f[3]) : 4
       align = f.length == 5 ? as_int(f[4]) : 4
       ty = scalar_form?(f[2]) ? parse_type(f[2]) : nil
@@ -1233,6 +1269,11 @@ class SFn
     return [@spv.c_u64(0), ["ptr"]] if h == "null"
     return operand(x[2]) if h == "sret" || h == "byval"
     if x.is_a?(IRSym) && x.sig == "$"
+      if @wgs.key?(x.name)
+        # a work-group static: the group's region after the scratch tail (one object per group)
+        lu = res(IADD, @spv.t_int(64), local_base, to_u64(push_load(:local_user, nil), ["int", 4, false, false]))
+        return [res(IADD, @spv.t_int(64), lu, @spv.c_u64(1024 + @wgs[x.name])), ["ptr"]]
+      end
       off = @slots[x.name]
       raise Refused, "address of the scalar slot #{x.name}" if off.nil? && @locals.key?(x.name)
       raise BadIR, "slot #{x.name} is not declared" if off.nil?
@@ -2316,6 +2357,10 @@ def emit_module(src, kernel_cl = false)
   smod = SpvModule.new(spv, kernel_cl)
   smod.irmod = mod
   smod.defs = mod.defs
+  # the work-group statics live in the group's static local region (OpenCL-style modules; the Vulkan module keeps frames)
+  if kernel_cl
+    smod.wgs, smod.wgs_total = wgs_layout(mod.defs)
+  end
   fns = {}
   order.each_with_index do |n, i|
     fn = SFn.new(mod.defs[n], spv.id, smod)
@@ -2368,6 +2413,7 @@ def emit_module(src, kernel_cl = false)
     manifest << "S\t#{mod.static_size}\t#{bytes.map { |b| ('0' + b.to_s(16))[-2, 2] }.join}"
     relocs.each { |o, t| manifest << "R\t#{o}\t#{t}" }
   end
+  manifest << "L\t#{smod.wgs_total}" if smod.wgs_total > 0   # the work-group static bytes per group (see wgs_layout)
   manifest << "T\t#{stack_bytes}"
   [spv.finish(kernel_cl ? 0x00010200 : 0x00010500), manifest, nil]   # OpenCL 2.2 takes SPIR-V 1.2
 end
