@@ -30,6 +30,24 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++20 -fno-exceptions -fno-rtti -O2 -c "
 # private_typeinfo.cpp uses dynamic_cast itself, so it is built with RTTI on (no -fno-rtti).
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -O2 -c "$src/libcxxabi/src/private_typeinfo.cpp" -o private_typeinfo.o
 
+# libunwind (LLVM 18.1.8, open source), for the _Unwind_* entry points the exception runtime calls. Built as native-only
+# for the arm64 target. Its Darwin paths need the availability macro empty (the SDK's AvailabilityMacros.h is not used)
+# and the clean-room mach-o/dyld.h and dladdr.
+unwinc=(-I "$src/libunwind/include" -I "$src/libunwind/src" -D_LIBUNWIND_IS_NATIVE_ONLY '-D__OSX_AVAILABLE_STARTING(a,b)=')
+clang "${tgt[@]}" "${inc[@]}" "${unwinc[@]}" -O2 -c "$src/libunwind/src/UnwindLevel1.c" -o UnwindLevel1.o
+clang "${tgt[@]}" "${inc[@]}" "${unwinc[@]}" -O2 -c "$src/libunwind/src/UnwindLevel1-gcc-ext.c" -o UnwindLevel1-gcc-ext.o
+clang "${tgt[@]}" "${inc[@]}" "${unwinc[@]}" -O2 -c "$src/libunwind/src/UnwindRegistersSave.S" -o UnwindRegistersSave.o
+clang "${tgt[@]}" "${inc[@]}" "${unwinc[@]}" -O2 -c "$src/libunwind/src/UnwindRegistersRestore.S" -o UnwindRegistersRestore.o
+clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libunwind/src/libunwind.cpp" -o libunwind.o
+# The exception runtime: cxa_exception and what it calls (libc++abi 18.1.8). cxa_default_handlers uses constinit, so C++20.
+cxxabi_defs=(-D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS)
+for f in cxa_exception cxa_exception_storage cxa_handlers fallback_malloc; do
+  clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" "${cxxabi_defs[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
+done
+clang++ "${tgt[@]}" "${cxxinc[@]}" "${unwinc[@]}" "${cxxabi_defs[@]}" -std=c++20 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
+
 rm -f libnfcxx-darwin-rt.a
-llvm-ar rcs libnfcxx-darwin-rt.a atomic.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o
+llvm-ar rcs libnfcxx-darwin-rt.a atomic.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o new_handler.o \
+  UnwindLevel1.o UnwindLevel1-gcc-ext.o UnwindRegistersSave.o UnwindRegistersRestore.o libunwind.o \
+  cxa_exception.o cxa_exception_storage.o cxa_handlers.o cxa_default_handlers.o fallback_malloc.o
 echo "built $out/libnfcxx-darwin-rt.a"
