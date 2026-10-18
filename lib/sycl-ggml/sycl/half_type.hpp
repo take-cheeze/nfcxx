@@ -27,6 +27,11 @@ class half {
   operator float() const { return to_float(bits_); }
   uint16_t bits() const { return bits_; }
   static half from_bits(uint16_t b) { half h; h.bits_ = b; return h; }
+  // compound assignment (sycl::half has them; the ops compute through float and round back to half)
+  half &operator+=(half o) { *this = half((float)*this + (float)o); return *this; }
+  half &operator-=(half o) { *this = half((float)*this - (float)o); return *this; }
+  half &operator*=(half o) { *this = half((float)*this * (float)o); return *this; }
+  half &operator/=(half o) { *this = half((float)*this / (float)o); return *this; }
 
  private:
   uint16_t bits_;
@@ -105,20 +110,60 @@ inline double pown(double x, int n) {
   return n < 0 ? 1.0 / r : r;
 }
 
+// sycl::half2 has the semantics of sycl::vec<sycl::half, 2>: component-wise + - * / (and with a scalar half, which broadcasts),
+// unary minus, compound assignment, x/y (s0/s1 are the same components), operator[], and convert<U>() to vec<U, 2>. Each
+// component is computed through float and rounded back to half, as the scalar ops are.
 class half2 {
  public:
   half2() = default;
   half2(half a, half b) : v_{a, b} {}
+  // a broadcast (vec(T x)); explicit, so that a half argument never converts to half2 where an overload of fma or an
+  // operator is picked for a half operand (the half2 operators take a half scalar directly)
+  explicit half2(half a) : v_{a, a} {}
   half &x() { return v_[0]; }
   half &y() { return v_[1]; }
   const half &x() const { return v_[0]; }
   const half &y() const { return v_[1]; }
+  half &s0() { return v_[0]; }
+  half &s1() { return v_[1]; }
+  const half &s0() const { return v_[0]; }
+  const half &s1() const { return v_[1]; }
   half &operator[](int i) { return v_[i]; }
   const half &operator[](int i) const { return v_[i]; }
+  static constexpr size_t size() { return 2; }
+  template <class U> vec<U, 2> convert() const { return vec<U, 2>((U)v_[0], (U)v_[1]); }
+  template <class U, rounding_mode> vec<U, 2> convert() const { return convert<U>(); }
+
+#define NFCXX_SYCL_HALF2_BINOP(op)                                                                   \
+  friend half2 operator op(half2 a, half2 b) {                                                       \
+    half2 r;                                                                                         \
+    for (int i = 0; i < 2; i++) r.v_[i] = half((float)a.v_[i] op (float)b.v_[i]);                    \
+    return r;                                                                                        \
+  }                                                                                                  \
+  friend half2 operator op(half2 a, half b) { return a op half2(b); }                                \
+  friend half2 operator op(half a, half2 b) { return half2(a) op b; }                                \
+  half2 &operator op##=(half2 b) { *this = *this op b; return *this; }
+  NFCXX_SYCL_HALF2_BINOP(+)
+  NFCXX_SYCL_HALF2_BINOP(-)
+  NFCXX_SYCL_HALF2_BINOP(*)
+  NFCXX_SYCL_HALF2_BINOP(/)
+#undef NFCXX_SYCL_HALF2_BINOP
+
+  friend half2 operator-(half2 a) {
+    half2 r;
+    for (int i = 0; i < 2; i++) r.v_[i] = half(-(float)a.v_[i]);
+    return r;
+  }
 
  private:
   half v_[2];
 };
+
+// fma on half: the product of two binary16 values is exact in float (22 significant bits), the sum is rounded to float and
+// then to half (two roundings; the device pass has no double, and std::fma is not lowered).
+inline half fma(half a, half b, half c) { return half((float)a * (float)b + (float)c); }
+// fma on half2: the product and the sum are each rounded to half per component, as a * b + c.
+inline half2 fma(half2 a, half2 b, half2 c) { return a * b + c; }
 
 // Free functions the ggml sources call on device values (the real headers provide them; these are the host-side forms).
 template <class To, class From> To bit_cast(const From &f) {
