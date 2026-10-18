@@ -44,3 +44,24 @@ Licence: Apache License 2.0 with LLVM exceptions (see the LLVM project LICENSE.T
 and headers and a port of libc++abi's exception storage to this libc++ 18 header set; it failed on the missing
 `__libunwind_config.h` and on `std::unexpected_handler`, which libc++ 18 no longer declares). That is part of the EH work, so it is
 not built here. The prelinker's libc++ template instances (`std::__sort`) wait on the demangler pin.
+
+## libunwind and the libc++abi exception runtime (added)
+
+- **libunwind**, LLVM 18.1.8 (`libunwind/src`, `libunwind/include`, Apache-2.0 with LLVM exception), built native-only for the
+  arm64 target. Its availability macro is made empty on the command line (`__OSX_AVAILABLE_STARTING(a,b)=`), so the SDK's
+  `AvailabilityMacros.h` is not used. Its Darwin headers are LLVM's `compact_unwind_encoding.h`, a minimal `mach-o/dyld.h`
+  written from the public `_dyld_register_func_for_remove_image` signature, and the `dladdr` declaration in the clean-room
+  `dlfcn.h`.
+- **libc++abi exception runtime**, LLVM 18.1.8 (`libcxxabi/src`, `libcxxabi/include`): `cxa_exception`,
+  `cxa_exception_storage`, `cxa_handlers` and `fallback_malloc` are built as C++17, and `cxa_default_handlers` as C++20
+  (it uses `constinit`). `-D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS` keeps `std::unexpected_handler`, which
+  libc++ 18 otherwise removes.
+- **Duplicate symbols renamed, not dropped:** libc++abi's `std::set_new_handler` (cxa_default_handlers) and
+  `std::get_new_handler` (cxa_handlers) are compiled under other names; libc++'s `new_handler.o` keeps the pair.
+- **Symbol conflicts with Apple's system library:** the archive defines the libunwind names `_Unwind_*` (for example
+  `_Unwind_RaiseException`, `_Unwind_Resume`, `_Unwind_Backtrace`) and `_unw_*`/`___unw_*`. Apple's `libSystem` exports the
+  same public unwinder entry points. An executable linked with this archive uses the archive's copies for its own
+  references; the system library's copies still serve any code that calls them. Two unwinders in one process is the same
+  split recorded for libc++ throws (see docs/notes/cross-macos.md).
+- **Stubs added (public names only):** `_dladdr`, `__dyld_find_unwind_sections`, `__dyld_register_func_for_remove_image`,
+  `_calloc`, and the pthread key, mutex, once and rwlock functions libunwind uses.
