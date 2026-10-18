@@ -106,7 +106,7 @@ module IntegerConstants
   end
 
   def self.integral_kind?(kind, candidates)
-    return true if kind == :literal
+    return true if kind == :literal || kind.is_a?(Numeric)
     return false unless kind.is_a?(Array)
 
     case kind[0]
@@ -146,6 +146,7 @@ module IntegerConstants
       value = case kind[1]
               when 'ADD', 'ADDI' then left + right
               when 'SUB', 'SUBI' then left - right
+              when 'MUL' then left * right
               else raise ArgumentError, "bc2cpp: IntegerConstants: unknown arithmetic opcode #{kind[1].inspect}"
               end
       value if value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
@@ -182,7 +183,8 @@ module IntegerConstants
   def self.const_source_kind(irep, idx, reg, entries)
     irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                          follow_moves: true) do |insn, j, cur|
-      next :literal if insn.op.start_with?('LOADI')
+      # The value rides along so arithmetic on a register-held literal (`2 * M3`) can be evaluated.
+      next(loadi_value(insn) || :literal) if insn.op.start_with?('LOADI')
 
       case insn.op
       when 'GETCONST'
@@ -195,7 +197,7 @@ module IntegerConstants
         # of that name.
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI'
+      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL'
         args = insn.regs
         left = const_source_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
@@ -276,7 +278,7 @@ module IntegerConstants
       when 'GETMCNST'
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI'
+      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL'
         args = insn.regs
         left = literal_value_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
@@ -300,6 +302,10 @@ module IntegerConstants
   # CodeGen instance). Only LOADI32 can leave the LOADI_FIXNUM_MIN/MAX margin, so
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
+    # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode name; imm_operand is nil for them.
+    return Regexp.last_match(1).to_i if insn.op.match(/\ALOADI_([0-7])\z/)
+    return -1 if insn.op == 'LOADI__1'
+
     tok = insn.imm_operand
     return nil unless tok
 
