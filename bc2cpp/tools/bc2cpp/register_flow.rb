@@ -153,6 +153,12 @@ class RegisterFlow
     regs.uniq.sum { |reg| 1 << reg }
   end
 
+  def mention_mask(text)
+    mask = 0
+    text.scan(MENTION) { |(reg)| mask |= 1 << reg.to_i }
+    mask
+  end
+
   def transparent?(index)
     @texts[index].each_line.all? { |line| line.strip.empty? || line.lstrip.start_with?('//') }
   end
@@ -305,10 +311,10 @@ class RegisterFlow
   # [definition register or nil, read mask, all-mention mask]
   def info_for(index)
     text = @texts[index]
-    all = mask_of(mentions(text))
+    all = mention_mask(text)
     match = CLEAN_DEF.match(text)
     if match && !match[2].match?(/(?<![=!<>])=(?!=)|\b(?:goto|return|throw)\b/)
-      [match[1].to_i, mask_of(mentions(match[2])), all]
+      [match[1].to_i, mention_mask(match[2]), all]
     else
       [nil, all, all]
     end
