@@ -168,5 +168,7 @@ if [ -z "$left" ]; then echo "no .nfcxx left in the tree: ok"; else echo "no .nf
 
 # 4. The launch path (llama.cpp features): tests/cuda/launch/run.sh.
 "$root/tests/cuda/launch/run.sh" || fail=1
+# 5. Kernels split into several device modules (the driver's grouping; tests/cuda/groups/run.sh).
+"$root/tests/cuda/groups/run.sh" || fail=1
 
 exit $fail
