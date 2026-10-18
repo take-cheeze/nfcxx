@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GPU kernel test: the hand-written IR kernel (mul2.ir) is lowered to PTX by scripts/pathb-ptx-emit.rb,
+# GPU kernel test: the hand-written IR kernel (mul2.ir) is lowered to PTX by tools/pathb-ptx-emit,
 # assembled by ptxas for sm_75, and launched through the CUDA runtime API (launch.c).
 # The launcher uses the CUDA runtime API (cudart), not the driver API. Needs ptxas, cuda_runtime.h and libcudart
 # (CUDA 12.8 or later, for cudaLibraryLoadData), and an NVIDIA GPU. Skips (exit 0) when one is missing.
@@ -7,14 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
-# The PTX emitter: the C++ port (the default), or the Ruby script with NFCXX_PTX_EMITTER=ruby (same text, same exit status).
+[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
+# The PTX emitter: the C++ tool (tools/pathb-ptx-emit).
 emit_ptx() {
-  if [ "${NFCXX_PTX_EMITTER:-cxx}" = cxx ]; then
-    [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
-    "$root/build/pathb-ptx-emit" --emit "$@"
-  else
-    "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$@"
-  fi
+  [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
+  "$root/build/pathb-ptx-emit" --emit "$@"
 }
 arch=${GPU_ARCH:-sm_75}
 cuda=${CUDA_HOME:-/usr/local/cuda}

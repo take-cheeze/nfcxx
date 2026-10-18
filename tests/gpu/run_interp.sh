@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
-# CPU-only GPU check: scripts/pathb-ptx-emit.rb lowers tests/gpu/mul2.ir to PTX, and the ptx-interp
+# CPU-only GPU check: tools/pathb-ptx-emit lowers tests/gpu/mul2.ir to PTX, and the ptx-interp
 # interpreter runs it with the launch tests/gpu/launch.c uses (8 blocks of 128 threads, N=1000,
 # 64 guard ints past b, a[i] = i - 299). No GPU and no CUDA are needed.
 # The mutants must be caught, which shows the check notices a wrong multiplier and a missing bounds check.
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../.. && pwd)
-# The PTX emitter: the C++ port (the default), or the Ruby script with NFCXX_PTX_EMITTER=ruby (same text, same exit status).
+[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
+# The PTX emitter: the C++ tool (tools/pathb-ptx-emit).
 emit_ptx() {
-  if [ "${NFCXX_PTX_EMITTER:-cxx}" = cxx ]; then
-    [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
-    "$root/build/pathb-ptx-emit" --emit "$@"
-  else
-    "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$@"
-  fi
+  [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || return 1
+  "$root/build/pathb-ptx-emit" --emit "$@"
 }
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT

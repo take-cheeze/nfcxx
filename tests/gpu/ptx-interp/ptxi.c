@@ -1,4 +1,4 @@
-/* ptxi: a CPU interpreter for the PTX subset that scripts/pathb-ptx-emit.rb emits.
+/* ptxi: a CPU interpreter for the PTX subset that tools/pathb-ptx-emit emits.
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *   ARG is one kernel parameter, in order:
