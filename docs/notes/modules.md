@@ -58,6 +58,11 @@ The front end is `take-cheeze/edg-compiler` (`3rd/edg`). The changes are in `src
   translation unit, and their types are not all representable in the IFC (GNU mode declares builtins for the
   extended floating-point types).
 
-These changes are on the branch `claude/exciting-euler-h9iicd` of the EDG fork. The `3rd/edg` pin in this repository
-still names the commit before them, so the module tests need an EDG build from that branch (`EDG_SRC=<clone>
-scripts/setup-edg.sh`).
+`main` pins `3rd/edg` to `370cfc187` on the `claude/exciting-euler-h9iicd` branch of the EDG fork. That commit
+is the writer/reader fix merged onto the EDG commit `main` pinned before. Branch deletion would break the submodule
+checkout, so the fork's default branch should carry it.
+
+Known upstream issue at the previously pinned EDG commit `daf6668`: the `cpfe-cp` target fails to compile
+`src/folding.c`. The SYCL kernel-name folding calls `mangled_typeinfo_string`, which is declared and defined only under
+`IA64_ABI`, and that target builds without it. nfcxx does not build `cpfe-cp`, so CI is unaffected. The fix needs a
+decision about what the non-IA64 build should fold to, so it is not done here.
