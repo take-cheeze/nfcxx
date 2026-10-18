@@ -3,7 +3,9 @@
 // call, asm) is the same code the --eval-arith differentials check.
 #pragma once
 
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,12 +16,15 @@
 
 class Fn : public FnCtx {
  public:
-  // form is the function's form in the module's forms (it must outlive the Fn); index is its position among the module's
-  // functions (the frame's name, __local_depot<index>).
-  Fn(const Node &form, size_t index);
+  // name is the function's IR name; index is its position among the module's functions (the frame's name,
+  // __local_depot<index>); load parses the function's form. The form is parsed when the function is set up (by its own
+  // compile, or by a call to it from a function being compiled) and kept until release().
+  using Loader = std::function<std::unique_ptr<Node>()>;
+  Fn(std::string name, size_t index, Loader load);
 
   const std::string &name() const { return name_; }
-  const Node &form() const { return *form_; }
+  // Drops the form and the body once the function is compiled and its text is taken: neither is needed again.
+  void release();
 
   bool kernel = true;                  // an entry point (the module's kernels), else a .func
   std::vector<Ty> params;              // the IR types of the parameters, in order
@@ -49,7 +54,8 @@ class Fn : public FnCtx {
   void label(const std::string &l);
   std::string named_label(const std::string &name);
 
-  const Node *form_;
+  Loader load_;
+  std::unique_ptr<Node> form_;
   size_t index_;
   std::string name_;
   bool setup_done_ = false;
