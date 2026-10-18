@@ -31,7 +31,7 @@ link() {
   clang --target=arm64-apple-darwin -O2 -nostdinc -isystem "$NFCXX_MACOS_CLEANROOM/include" \
     -isystem "$(clang -print-resource-dir)/include" -c be/nfcxx_ldrt.c -o "$W/ldrt.o"
   mkdir -p "$(dirname "$out")"
-  ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "$@" "$W/ldrt.o" \
+  ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "$@" "$W/ldrt.o" ${NFCXX_MACOS_LIBC:+"$NFCXX_MACOS_LIBC"} \
     -L tests/macos-sysroot/lib -lSystem "${LINK_EXTRA[@]}"
   local hdr; hdr=$(llvm-objdump --macho --private-headers "$out")
   grep -q EXECUTE <<<"$hdr" && grep -q ARM64 <<<"$hdr" || { echo "cross_macos: $out is not a Mach-O arm64 executable" >&2; exit 1; }
@@ -65,14 +65,12 @@ doctest)
   # The Darwin branch of doctest's debugger check reads the kinfo_proc layout (sys/sysctl.h). doctest's own
   # DOCTEST_IS_DEBUGGER_ACTIVE() override replaces that whole check; it is defined here as "not under a debugger", for
   # the cross build only.
-  if ! NFCXX_CXX_FLAGS="-I$src -DDOCTEST_IS_DEBUGGER_ACTIVE()=false" \
-       scripts/macos-cxx-check.sh tests/realworld/doctest_main.cpp "$W/doctest.s" >/dev/null; then
-    echo "cross_macos: doctest is blocked, not built: its headers need libc++ localization (<fstream>, <sstream>, <locale>)," >&2
-    echo "  which the clean-room libc++ config turns off, and tests/macos-sysroot has no xlocale.h or locale functions." >&2
-    exit 3
-  fi
-  llvm-mc -triple=arm64-apple-darwin -filetype=obj "$W/doctest.s" -o "$W/doctest.o"
-  LINK_EXTRA=(-L tests/macos-sysroot/lib -lc++); link "$out" "$W/doctest.o"
+  # The prelinker step (scripts/macos-cxx-link.sh, as in #363): doctest's toString<float> and toString<long double> are
+  # template instances, which the prelinker compiles through the Darwin path. The include path and the override are
+  # nfcxx options, passed to both steps.
+  # DOCTEST_CONFIG_USE_STD_HEADERS: doctest otherwise forward-declares std types itself, including its own size_t, which
+  # clashes with the libc++ headers. The cross build uses the real standard headers.
+  scripts/macos-cxx-link.sh tests/realworld/doctest_main.cpp "$out" "-I$src" "-DDOCTEST_IS_DEBUGGER_ACTIVE()=false" "-DDOCTEST_CONFIG_USE_STD_HEADERS"
   echo "expected on the Mac: exit code 2 (two deliberate CHECK failures); doctest prints its summary"
   ;;
 *) echo "cross_macos: unknown NAME '$name' (lua|doctest)" >&2; exit 2 ;;
