@@ -948,7 +948,8 @@ end
 # constant initialized directly by a statically resolved `Klass.new`. The
 # resulting receiver fact remains guarded at dispatch; a custom constructor
 # returning another class therefore takes the ordinary fallback.
-def infer_constructed_constant_classes(ireps, assignment_sites, registry, container_constants, closed_world)
+def infer_constructed_constant_classes(ireps, assignment_sites, registry, container_constants, closed_world,
+                                       native_name_sources:, included_modules:, prepended_modules:, unknown_mixins:)
 
   known_owners = Set.new(registry.values.flatten.map(&:owner))
   inferred = {}
@@ -965,11 +966,57 @@ def infer_constructed_constant_classes(ireps, assignment_sites, registry, contai
     klass = trace_new_target(irep, site[:idx], site[:reg], nil, 0, nil, owner: site[:owner],
                              registry: registry, container_constants: container_constants,
                              known_owners: known_owners)
-    next unless klass.is_a?(String) && known_owners.include?(klass)
+    next unless klass.is_a?(String)
 
-    inferred[site[:name]] = klass
+    if known_owners.include?(klass)
+      inferred[site[:name]] = klass
+    elsif (native = native_constructed_class(klass, registry, closed_world, native_name_sources: native_name_sources,
+                                             included_modules: included_modules,
+                                             prepended_modules: prepended_modules, unknown_mixins: unknown_mixins))
+      inferred[site[:name]] = native
+    end
   end
   inferred
+end
+
+# NATIVE_CONSTRUCTED_CONSTANT: the full name of the native class `klass` (a bare `Color` or `RGSS::Color`) when a
+# `Klass.new` on it provably allocates exactly that class. Only NATIVE_CONSTRUCT_TARGETS rows qualify, since those
+# name the class a gem defines. The proof has two parts:
+#   * the name can only denote that native class: no other binding of the simple name exists in the program or
+#     the natives (ClosedWorld#native_class_unshadowed?). So a bare `Color` reached through Object's include of RGSS,
+#     or any other lookup that succeeds, finds RGSS::Color, and one that finds nothing raises before any assignment;
+#   * Class#new is the constructor the class object reaches (class_new_is_stock?).
+# Class#new allocates its receiver, so the result is that class whatever #initialize does.
+def native_constructed_class(klass, registry, closed_world, native_name_sources:, included_modules:, prepended_modules:,
+                             unknown_mixins:)
+  full = NATIVE_CONSTRUCT_TARGETS.each_value.map { |row| row[:class_owner] }.find do |owner|
+    owner == klass || klass == owner.split('::').last
+  end
+  return nil unless full
+  return nil unless closed_world.native_class_unshadowed?(full)
+  return nil unless class_new_is_stock?(registry, closed_world, native_name_sources, included_modules,
+                                        prepended_modules, unknown_mixins)
+
+  full
+end
+
+# Class#new is what a class object's `new` and `allocate` reach. It is stock when no Ruby definition of either name
+# sits on a class object's singleton chain or on Class, no mixin reaches those, no unknown installer defines them, and
+# no non-core native source names them (mruby's own definitions are taken as the stock Class#new). Any singleton of
+# any class is refused, not only the ones on the chain: the closed world keeps no superclass facts for native classes.
+def class_new_is_stock?(registry, closed_world, native_name_sources, included_modules, prepended_modules, unknown_mixins)
+  return false unless closed_world.standard_constructor_lookup?
+  return false if unknown_mixins.any? { |mixin| mixin == 'Class' || mixin.end_with?('.singleton') }
+  mixed = [included_modules, prepended_modules].flat_map(&:to_a)
+  return false if mixed.any? { |owner, mods| (owner == 'Class' || owner.end_with?('.singleton')) && Array(mods).any? }
+
+  %w[new allocate].all? do |name|
+    ruby_on_class_objects = registry.fetch(name, []).any? do |definition|
+      definition.owner != '<native>' && (definition.owner == 'Class' || definition.owner.end_with?('.singleton'))
+    end
+    native_definers = native_name_sources.fetch(name, []).reject { |path| path.match?(ClosedWorld::NATIVE_CORE) }
+    !ruby_on_class_objects && native_definers.empty?
+  end
 end
 
 # A SETCONST value may be copied after the constructor send. Follow only plain
