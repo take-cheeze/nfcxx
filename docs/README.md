@@ -23,6 +23,7 @@ covers say so.
 | [sycl-webgpu.md](notes/sycl-webgpu.md) | SYCL 2020 subset on WebGPU: `lib/sycl` header library, the IR-to-WGSL emitter `scripts/pathb-wgsl-emit.rb`, the pointer model, USM by identity-mapped addresses, the Node/Chromium runtime, API coverage and a sweep of oneAPI-samples. `tests/sycl/run.sh`. |
 | [hexagon.md](notes/hexagon.md) | Generated C through clang for Hexagon, run on qemu-hexagon; what blocks a real Hexagon target. |
 | [llamacpp.md](notes/llamacpp.md) | llama.cpp's host-side ggml through the gcc backend: what compiles, the driver fixes, and the blockers (EDG AVX10.2 builtins, a cross-TU template instance). `tests/llamacpp/run.sh`. |
+| [modules.md](notes/modules.md) | C++20 named modules (`export module`, `import`): the one-command and separate-compile routes, the refusals, and the gaps (standard headers in the global module fragment, unions in the reader). `tests/modules/run.sh`. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
 | [mrustc-frontend.md](notes/mrustc-frontend.md) | Rust programs built by mrustc, with the program's C compiled through cproc and QBE (`scripts/mrustc-nfcc.sh`, `tests/mrustc`): the rewrites mrustc's C needs, and what is still gcc-built (the standard library). |
 | [ast.md](notes/ast.md) | `nfcast` (`lib/ast`): a self-specializing AST interpreter for a Lua 5.4 subset and the three steps of a Truffle-style plan (the AST level of the third): nodes that rewrite themselves, a tier that compiles hot numeric kernels through the nfcxx driver, small script functions inlined at hot call sites by cloning their bodies, its own collector, differential tests against a real Lua. `tests/ast/run.sh`. |
@@ -49,6 +50,7 @@ covers say so.
 
 | Area | Supported (test) | CI |
 | --- | --- | --- |
+| C++20 modules (`export module`, `import`; `docs/notes/modules.md`): interface units with classes, templates, inline functions and enums, chains of imports, one-command and `-c` routes with `--module-dir` | `tests/modules/run.sh` (both backends) | ci.yml |
 | Path A, gcc backend (`nfcxx --backend=gcc`: EDG's C through `gcc -O2 -fwrapv -fno-strict-aliasing`) | The 15 programs of `tests/cases` (`NFCXX_BACKEND=gcc tests/run.sh`); freestanding library (`tests/lib/run.sh`); builtin probes (`tests/builtins/run.sh`); C inputs (`tests/c/run.sh`); tinyxml2 (`tests/realworld/run.sh`); doctest on the hosted headers (`tests/realworld/run_doctest.sh`, gcc only) | ci.yml, realworld.yml |
 | Path A, qbe backend (the default: EDG's C -> `qbe-prep.rb` -> cproc -> QBE -> asm; `scripts/qbe-cc`) | Same `tests/cases`, `tests/lib`, `tests/builtins`, `tests/c`, tinyxml2 as above with `NFCXX_BACKEND=qbe` or the default; C++ exceptions (`tests/cases/exceptions.cpp`); signed overflow wraps (`tests/cases/signed_overflow_wraps.cpp`); Lua and mruby as C (`run_lua.sh`, `run_mruby.sh`); CoreCLR's workstation GC compiles, 34 translation units (`run_coreclr_gc.sh`, `docs/notes/coreclr-gc.md`) | ci.yml, realworld.yml |
 | Path B (EDG lowered IL -> own IR -> QBE, `scripts/setup-pathb.sh`, `be/`, `scripts/pathb-qbe-emit.rb`) | IL goldens (`tests/pathb/run.sh`); IR goldens and node coverage (`tests/pathb-ir/run.sh`); IR -> QBE -> run, equal to `// EXPECT:` and to the gcc backend (`tests/pathb-qbe/run.sh`): arithmetic and control flow, `continue`, bool loads, `setjmp`, bit-fields (`cases/bitfield*.cpp`), VLAs including scope exit (`cases/vla*.cpp`), GNU statement expressions (`cases/stmtexpr*.cpp`), volatile (`cases/volatile.cpp`), thread-local objects (`cases/tls*.cpp`, `multi/tls_*`), dynamic initialization (`cases/dyn_*.cpp`, `multi/dyn_init`), C++ exceptions (`cases/eh_*.cpp`), `long double` (`cases/longdouble_*.cpp`, `multi/abi_ld`, `traps/longdouble_*`; `docs/notes/pathb-longdouble.md`), COMDAT/weak linkage (`multi/comdat`, `multi/weak_link`), checked operations that must abort with SIGABRT (`traps/`) | pathb.yml |
@@ -77,6 +79,11 @@ SKIP line in the log, not as a red job.
 ## Known limitations, in one place
 
 Each entry names where it comes from and what, if anything, checks it.
+
+**C++ modules** (`docs/notes/modules.md`)
+- Standard headers in the global module fragment (`module; #include <cstdio>`) make the interface compile fail: the IFC writer dumps the whole global scope, including the declarations of the included headers. `tests/modules/run.sh` does not cover it.
+- A union type cannot be read back by an importer ("invalid combination of type specifiers"); the writer now writes it. Not covered by a test.
+- `import std;` and header units are refused with a message (no standard library module yet).
 
 **`long double`**
 - Path A qbe: cproc rejects it ("long double is not yet supported"). `tests/realworld/run_doctest.sh` therefore
