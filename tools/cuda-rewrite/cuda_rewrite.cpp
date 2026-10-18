@@ -3889,6 +3889,7 @@ struct DevPiece {
   std::vector<std::string> toks;
   std::vector<std::string> defined;
   bool keep = false, device = false, macro = false;
+  bool fn = false;  // a device function or tagged type: kept when a name it defines is needed (see device_tu)
 };
 
 // Ruby drop_host_members: a __host__ member definition (no __device__ or __global__) is removed with its body, keeping its
@@ -3947,6 +3948,36 @@ static long alias_head_index(const std::vector<std::string> &toks) {
   for (size_t i = 1; i < toks.size(); i++)
     if (toks[i] == "using") return (long)i;
   return -1;
+}
+
+// The names of the #define lines inside a piece's text. A piece is a declaration or a definition, but a #define can sit in
+// the middle of one (llama.cpp's common.cuh WARP_SIZE follows a table of ggml-common.h): the piece defines that name too,
+// so the piece is kept when the name is needed. Comments are blanked first, as the host declarations are.
+static std::vector<std::string> embedded_macros(const std::string &text) {
+  std::vector<std::string> out;
+  const std::string t = blank_comments(text);
+  auto sp = [](char c) { return c == ' ' || c == '\t'; };
+  size_t pos = 0;
+  while (pos <= t.size()) {
+    size_t eol = t.find('\n', pos);
+    if (eol == std::string::npos) eol = t.size();
+    size_t i = pos;
+    while (i < eol && sp(t[i])) i++;
+    if (i < eol && t[i] == '#') {
+      i++;
+      while (i < eol && sp(t[i])) i++;
+      if (eol - i > 6 && t.compare(i, 6, "define") == 0 && sp(t[i + 6])) {
+        i += 6;
+        while (i < eol && sp(t[i])) i++;
+        size_t b = i;
+        while (i < eol && ident_c((unsigned char)t[i])) i++;
+        if (i > b && !isdigit((unsigned char)t[b])) out.push_back(t.substr(b, i - b));
+      }
+    }
+    if (eol >= t.size()) break;
+    pos = eol + 1;
+  }
+  return out;
 }
 
 // Ruby device_tu (line 2642): the device translation unit of a unit: [text, kernel names].
@@ -4461,6 +4492,15 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
     i = j;
   }
   static const std::vector<std::string> dq(DEVICE_QUALIFIERS.begin(), DEVICE_QUALIFIERS.end());
+  // Device functions are kept only when the unit names them (the fixed point below): a function that no kept piece
+  // mentions is not in the unit. Kernels, and the other device pieces (classes, variables with an initializer), are kept
+  // always. A function with no name of its own (`operator+`, `operator()`) is kept always too: its name is not a word the
+  // code uses.
+  auto has_tag = [](const std::vector<std::string> &v) {
+    for (const char *w : {"struct", "class", "union", "enum"})
+      if (std::find(v.begin(), v.end(), w) != v.end()) return true;
+    return false;
+  };
   for (auto &pc : pieces) {
     if (pc.kind == "pp") continue;
     if (!pc.device) continue;
@@ -4469,12 +4509,34 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       refuse("device variable: " + sl(strip(pc.text), 0, 60));
     if (pc.body) {
       bool has_g = std::find(pc.toks.begin(), pc.toks.end(), "__global__") != pc.toks.end();
-      if (has_g && (pc.toks.empty() || pc.toks.front() != "template")) {
-        std::string name = function_name(remove_words(pc.text, DEVICE_QUALIFIERS));
+      bool kernel = has_g && (pc.toks.empty() || pc.toks.front() != "template");
+      std::string name = function_name(remove_words(pc.text, DEVICE_QUALIFIERS));
+      if (kernel) {
         if (name.empty()) refuse("kernel without a name: " + sl(strip(pc.text), 0, 60));
         kernels.push_back(name);
       }
-      pc.keep = true;
+      bool fn = !kernel && !has_tag(pc.toks) && !name.empty() && name != "operator" && str_index(pc.text, "(", 0) >= 0;
+      // A class or enum with device code is kept when its tag is needed (a type is named to be used), with its members.
+      std::string tag_kw;
+      for (const auto &tk : pc.toks)
+        if (tk == "struct" || tk == "class" || tk == "union" || tk == "enum") { tag_kw = tk; break; }
+      if (!kernel && !fn && !tag_kw.empty() && !function_head(blank_comments(pc.text))) {
+        std::string t = blank_comments(pc.text);
+        std::string tag = tag_after(t, tag_kw);
+        if (tag_kw == "enum" && (tag == "class" || tag == "struct")) tag = tag_after(t, tag);
+        if (!tag.empty()) {
+          pc.fn = true;
+          pc.defined = {tag};
+          if (tag_kw == "enum")
+            for (const auto &en : enum_enumerators(t)) pc.defined.push_back(en);
+        }
+      }
+      if (fn) {
+        pc.fn = true;
+        pc.defined = {name};
+      } else if (!pc.fn) {
+        pc.keep = true;
+      }
       // a class of the device side keeps its device members only: its host-only members go, and so do their tokens
       if (std::find(pc.toks.begin(), pc.toks.end(), "struct") != pc.toks.end() ||
           std::find(pc.toks.begin(), pc.toks.end(), "class") != pc.toks.end()) {
@@ -4489,11 +4551,19 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       std::vector<std::string> words = dq;
       if (has_g) words.push_back("static");
       pc.text = remove_words(pc.text, words);
-      seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+      if (!pc.fn) seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
     } else if (str_index(pc.text, "(", 0) >= 0) {
-      pc.keep = true;
+      std::string name = has_tag(pc.toks) || str_index(pc.text, "=", 0) >= 0 || (!pc.toks.empty() && pc.toks.front() == "typedef")
+                             ? std::string()
+                             : function_name(remove_words(pc.text, DEVICE_QUALIFIERS));
       pc.text = remove_words(pc.text, DEVICE_QUALIFIERS);
-      seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+      if (!name.empty() && name != "operator") {
+        pc.fn = true;
+        pc.defined = {name};
+      } else {
+        pc.keep = true;
+        seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+      }
     }
   }
 
@@ -4565,18 +4635,31 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   // Fixed point: a host declaration is carried over when the unit refers to a name it defines.
   // The wrappers (see template_site) name their template arguments and parameters: a macro or constant among them is
   // a name the unit needs even when no kept kernel body mentions it (ggml-cuda's mmf: MMF_ROWS_PER_BLOCK_CDNA).
+  // A #define inside a piece names the piece too (see embedded_macros). A host function body is never kept, so its
+  // macros do not make it one.
+  for (auto &pc : pieces) {
+    if (pc.kind == "pp") continue;
+    if (pc.body && !pc.device && str_index(pc.text, "(", 0) >= 0 && !has_tag(pc.toks)) continue;
+    for (const auto &m : embedded_macros(pc.text)) pc.defined.push_back(m);
+  }
+  // The wrapper calls the template kernel (its name and the call's arguments), so both are needed.
   for (const auto &site : g_sites) {
+    seeds.push_back(site.name);
     for (const auto &x : tokens_of(site.targs)) seeds.push_back(x);
     for (const auto &x : tokens_of(site.decl)) seeds.push_back(x);
+    for (const auto &c : site.call)
+      for (const auto &x : tokens_of(c)) seeds.push_back(x);
   }
   std::map<std::string, bool> needed;
   for (const auto &x : seeds) needed[x] = true;
   for (const auto &x : tokens_of(DEVICE_PRELUDE)) needed[x] = true;
+  // A macro is kept with its tokens: its expansion names what the unit needs (a device function it calls, a constant).
   bool changed = true;
   while (changed) {
     changed = false;
     for (auto &pc : pieces) {
-      if (pc.keep || (pc.device && !device_variable_piece(pc))) continue;
+      if (pc.keep || (pc.device && !device_variable_piece(pc) && !pc.fn)) continue;
+      if (pc.kind == "pp" && !pc.macro) continue;
       if (pc.defined.empty()) continue;
       bool any = false;
       for (const auto &dn : pc.defined)
@@ -4600,13 +4683,6 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       for (const auto &x : tokens_of(kv.second))
         if (!needed[x]) { needed[x] = true; grew = true; }
     }
-  }
-  for (auto &pc : pieces) {
-    if (!(pc.kind == "pp" && pc.macro)) continue;
-    bool any = false;
-    for (const auto &dn : pc.defined)
-      if (needed.count(dn)) any = true;
-    if (any) pc.keep = true;
   }
   // A `using namespace n;` is kept when the unit keeps a piece of n (ggml-cuda's mmq-vec-dot.cuh uses tile that way).
   for (auto &pc : pieces) {

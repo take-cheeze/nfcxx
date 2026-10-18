@@ -10,6 +10,13 @@ static constexpr __host__ __device__ bool sparse_ok(const int A, const int B) {
     return (A == 512 && B == 1) || (A == 256 && B == 8);
 }
 
+// The same constexpr condition in device code: the device unit keeps sparse_ok and this kernel's if constexpr.
+__device__ int pick_mul(int A, int B) {
+    if constexpr (sparse_ok(A, B)) return A * 2;
+    else return B;
+}
+__global__ void tagdev(int *p) { p[threadIdx.x] = pick_mul(512, 1) + pick_mul(64, 64); }
+
 typedef void (*kfn)(int *, int);
 
 template <int A, int B> static kfn pick(bool rt) {

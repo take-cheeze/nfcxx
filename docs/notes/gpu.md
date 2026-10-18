@@ -89,10 +89,14 @@ match". On qbe, `scripts/qbe-prep.rb` maps `__builtin_fabsf` and `__builtin_fabs
 sample exits 0 even when its check fails: the check is its output line.
 
 Device unit (`scripts/cuda-rewrite.rb --device`): the top-level pieces of the source (preprocessor lines, declarations,
-definitions) are classified. The unit has every `__global__`/`__device__` function, and the host declarations those
-reference, transitively: typedefs, using, struct/class/union/enum, `const`/`constexpr` variables and #define/#undef. Host
-functions, host variables and `#include` lines are left out; quoted includes of files that exist are inlined first, so a
-kernel in a `.cu` or `.cuh` of the same program is in the unit. A short prelude gives `uint`, `NULL`, `__shared__`
+definitions) are classified. The unit has the `__global__` kernels, and the `__device__` functions, classes and enums
+that the kept pieces name, transitively: a function is kept when its name (any overload) appears in a kept piece, so an
+address, a template argument, a function pointer or a member call keeps it. The host declarations those reference are
+kept the same way: typedefs, using, struct/class/union/enum, `const`/`constexpr` variables and #define/#undef (a #define
+inside a piece names the piece). Host functions, host variables and `#include` lines are left out; quoted includes of
+files that exist are inlined first, so a kernel in a `.cu` or `.cuh` of the same program is in the unit. A device
+function no kernel reaches is not in the unit (llama.cpp's mmq.cu: 2.5 MB to 2.2 MB, most of what is left is the kernel
+wrappers). A short prelude gives `uint`, `NULL`, `__shared__`
 (a static object, refused by the emitter until static data is lowered) and `__syncthreads` (an intrinsic the emitter
 does not lower yet).
 
