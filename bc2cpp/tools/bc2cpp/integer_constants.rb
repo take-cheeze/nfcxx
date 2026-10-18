@@ -1,5 +1,4 @@
 # frozen_string_literal: true
-
 require_relative 'source_text'
 
 # INTEGER_CONSTANT_PROOF: constant names that only ever hold an Integer.
@@ -29,6 +28,10 @@ require_relative 'source_text'
 # header for why it must be the greatest fixpoint). ADD/SUB bytecodes may also
 # combine proven integer constants; their exact result must fit target Fixnum.
 module IntegerConstants
+  # The Fixnum margin a LOADI literal may take, the same bounds as CodeGen::LOADI_FIXNUM_MIN/MAX (codegen_fixnum_proof.rb).
+  # Repeated here because that file needs BytecodeIR at load time, which this module must not require.
+  LOADI_FIXNUM_MIN = -1_073_741_824
+  LOADI_FIXNUM_MAX = 1_073_741_823
   # `SETCONST NAME R1` / `SETMCNST (R2)::NAME R1` (codedump.c): the name comes
   # first and the source register last, the reverse of GETCONST. print_lv_a may
   # append a `; R1:name` comment, which is stripped before reading the register.
@@ -106,7 +109,7 @@ module IntegerConstants
   end
 
   def self.integral_kind?(kind, candidates)
-    return true if kind == :literal
+    return true if kind == :literal || kind.is_a?(Numeric)
     return false unless kind.is_a?(Array)
 
     case kind[0]
@@ -146,9 +149,15 @@ module IntegerConstants
       value = case kind[1]
               when 'ADD', 'ADDI' then left + right
               when 'SUB', 'SUBI' then left - right
+              when 'MUL' then left * right
+              when 'DIV'
+                # mruby's fixnum DIV floors (-7 / 2 == -4). A zero divisor raises at run time, so it is no constant.
+                return nil if right.zero?
+
+                left.div(right)
               else raise ArgumentError, "bc2cpp: IntegerConstants: unknown arithmetic opcode #{kind[1].inspect}"
               end
-      value if value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+      value if value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
     else raise ArgumentError, "bc2cpp: IntegerConstants: unknown definition kind #{kind.inspect}"
     end
   end
@@ -182,7 +191,8 @@ module IntegerConstants
   def self.const_source_kind(irep, idx, reg, entries)
     irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                          follow_moves: true) do |insn, j, cur|
-      next :literal if insn.op.start_with?('LOADI')
+      # The value rides along so arithmetic on a register-held literal (`2 * M3`) can be evaluated.
+      next(loadi_value(insn) || :literal) if insn.op.start_with?('LOADI')
 
       case insn.op
       when 'GETCONST'
@@ -195,7 +205,7 @@ module IntegerConstants
         # of that name.
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI'
+      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL', 'DIV'
         args = insn.regs
         left = const_source_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
@@ -276,7 +286,7 @@ module IntegerConstants
       when 'GETMCNST'
         n = insn.mcnst_name
         n && [:alias, n]
-      when 'ADD', 'SUB', 'ADDI', 'SUBI'
+      when 'ADD', 'SUB', 'ADDI', 'SUBI', 'MUL', 'DIV'
         args = insn.regs
         left = literal_value_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
@@ -300,11 +310,15 @@ module IntegerConstants
   # CodeGen instance). Only LOADI32 can leave the LOADI_FIXNUM_MIN/MAX margin, so
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
+    # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode name; imm_operand is nil for them.
+    return Regexp.last_match(1).to_i if insn.op.match(/\ALOADI_([0-7])\z/)
+    return -1 if insn.op == 'LOADI__1'
+
     tok = insn.imm_operand
     return nil unless tok
 
     value = tok.to_i
-    return nil if insn.op == 'LOADI32' && !value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+    return nil if insn.op == 'LOADI32' && !value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
 
     value
   end
