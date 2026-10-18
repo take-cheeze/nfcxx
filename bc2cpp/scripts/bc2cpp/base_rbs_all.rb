@@ -75,6 +75,9 @@ module BaseRbsAll
   # mruby's own native sources outside every gem: error.c defines the exception hierarchy (ADR-free; the classes are
   # native registrations with superclasses, which the base section declares as `class X < Y`).
   CORE_NATIVE = { 'mruby-core' => ['3rd/mruby/src/error.c'] }.freeze
+  # mruby's Ruby-defined exception classes: NameError, NoMethodError and StopIteration. The closed world leaves this file
+  # out of its compiled set (compiled_gems.rb, BC2CPP_CORE_MRBLIB_EXCLUDED), so only the declarations describe it.
+  CORE_RUBY = ['3rd/mruby/mrblib/10error.rb'].freeze
 
   def core_flags(closed_build)
     base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
@@ -95,6 +98,8 @@ module BaseRbsAll
 
   def run(out_dir, closed_build)
     report = []
+    path, = BaseRbs.run(File.join(out_dir, 'mruby-core', 'ruby'), CORE_RUBY.map { |rel| File.join(ROOT, rel) })
+    report << ['mruby-core ruby', 'ok', CORE_RUBY.size, 0, path]
     CORE_NATIVE.each do |name, rels|
       srcs = rels.map { |rel| File.join(ROOT, rel) }
       gem_out = File.join(out_dir, name)
