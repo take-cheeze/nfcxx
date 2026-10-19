@@ -74,7 +74,7 @@ if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/
 if [ $cl_ok = 1 ]; then
   clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
   clprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope; do
     if ! clbuild $t; then echo "opencl    $t: FAIL (build)"; grep -v prelinker "$out/cl_$t.log" | head -3; fail=1; continue; fi
     "$out/cl_$t" > "$out/cl_$t.out" 2> "$out/cl_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "OpenCL runtime" "$out/cl_$t.err"; then clprobe=0; break; fi
@@ -86,6 +86,14 @@ if [ $cl_ok = 1 ]; then
     "$out/cl_trap_div" > /dev/null 2> "$out/cl_trap_div.err"; rc=$?
     if [ $rc = 71 ] && grep -q "division by zero" "$out/cl_trap_div.err"; then echo "opencl    trap_div: trapped (exit 71)"; else echo "opencl    trap_div: FAIL (exit $rc)"; cat "$out/cl_trap_div.err"; fail=1; fi
   else echo "opencl    trap_div: FAIL (build)"; fail=1; fi
+  # the barrier scopes in the module of sg_barrier_scope (built above): group_barrier(sub_group) is
+  # OpControlBarrier(Subgroup, Subgroup, ...), group_barrier(group) keeps OpControlBarrier(Workgroup, Workgroup, ...)
+  if [ -s "$out/cl_sg_barrier_scope.cl.spv" ] && command -v spirv-dis >/dev/null; then
+    spirv-dis "$out/cl_sg_barrier_scope.cl.spv" -o "$out/cl_sg_barrier_scope.dis"
+    sgb=$(grep -cE 'OpControlBarrier %uint_3 %uint_3 ' "$out/cl_sg_barrier_scope.dis"); wgb=$(grep -cE 'OpControlBarrier %uint_2 %uint_2 ' "$out/cl_sg_barrier_scope.dis")
+    if [ "$sgb" = 1 ] && [ "$wgb" = 1 ]; then echo "opencl    sg_barrier_scope module: Subgroup and Workgroup scopes ok"
+    else echo "opencl    sg_barrier_scope module: FAIL (Subgroup barriers $sgb, Workgroup barriers $wgb; want 1 and 1)"; fail=1; fi
+  else echo "opencl    sg_barrier_scope module: FAIL (no module or no spirv-dis)"; fail=1; fi
 else
   echo "SKIP: opencl: needs spirv-val, the OpenCL headers (OPENCL_INCLUDE) and libOpenCL.so.1"
 fi
@@ -115,7 +123,7 @@ if command -v spirv-val >/dev/null && [ -f /usr/include/level_zero/ze_api.h ] &&
 if [ $lz_ok = 1 ]; then
   lzbuild() { "$root/scripts/sycl-build.sh" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
   lzprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope; do
     if ! lzbuild $t; then echo "level-zero $t: FAIL (build)"; grep -v prelinker "$out/lz_$t.log" | head -3; fail=1; continue; fi
     "$out/lz_$t" > "$out/lz_$t.out" 2> "$out/lz_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "Level Zero runtime" "$out/lz_$t.err"; then lzprobe=0; break; fi

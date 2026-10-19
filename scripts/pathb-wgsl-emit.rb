@@ -1048,7 +1048,7 @@ class Fn
     args = x.drop(3)
     if SYCL_VALUES.key?(name)
       return SYCL_VALUES[name]
-    elsif name == "__nfcxx_sycl_barrier"
+    elsif name == "__nfcxx_sycl_barrier" || name == "__nfcxx_sycl_sg_barrier"
       emit("workgroupBarrier();")
       return nil
     elsif name == "__nfcxx_sycl_fn1" || name == "__nfcxx_sycl_fn2" || name == "__nfcxx_sycl_fn3"

@@ -608,9 +608,11 @@ SC_CROSSWG = 5
 SC_PSB = 5349
 SCOPE_DEVICE = 1
 SCOPE_WORKGROUP = 2
+SCOPE_SUBGROUP = 3
 SEM_RELAXED = 0
 SEM_BARRIER = 0x8 | 0x40 | 0x100 | 0x200   # AcquireRelease | UniformMemory | WorkgroupMemory | CrossWorkgroupMemory
 SEM_BARRIER_KERNEL = 0x8 | 0x100 | 0x200   # the same without UniformMemory (which needs the Shader capability)
+SEM_SG_BARRIER_KERNEL = 0x8 | 0x80 | 0x100 | 0x200   # AcquireRelease | SubgroupMemory | WorkgroupMemory | CrossWorkgroupMemory
 SUBGROUP_SIZE = 16   # the fixed sub-group size of the OpenCL module (lib/sycl: sub_group has 16 lanes)
 BUILTIN_WORKGROUP_ID = 26
 BUILTIN_LOCAL_INVOCATION_ID = 27
@@ -1824,6 +1826,15 @@ class SFn
       return [res(op, @spv.t_int(32), v, m), ["int", 4, false, false]]
     when "__nfcxx_sycl_barrier"
       ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(@mod.kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)])
+      return nil
+    when "__nfcxx_sycl_sg_barrier"
+      # group_barrier(sub_group): in the OpenCL module a Subgroup-scope control barrier, as icpx emits it, so a sub-group
+      # that reaches it alone does not wait for the rest of the work-group. The Vulkan module keeps the work-group barrier.
+      if @mod.kernel_cl
+        ins([224, @spv.c_u32(SCOPE_SUBGROUP), @spv.c_u32(SCOPE_SUBGROUP), @spv.c_u32(SEM_SG_BARRIER_KERNEL)])
+      else
+        ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SEM_BARRIER)])
+      end
       return nil
     when "__nfcxx_sycl_fn1", "__nfcxx_sycl_fn1_f64", "__nfcxx_sycl_fn2", "__nfcxx_sycl_fn3"
       op = args[0]

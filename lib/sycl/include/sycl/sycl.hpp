@@ -51,6 +51,7 @@ void *__nfcxx_sycl_closure(void);     // the closure object, copied by the host
 void *__nfcxx_sycl_local_base(void);  // the work-group memory (local_accessor storage)
 void *__nfcxx_sycl_scratch(void);     // 256 words of work-group memory kept for the group algorithms
 void __nfcxx_sycl_barrier(void);
+void __nfcxx_sycl_sg_barrier(void);   // the sub-group barrier: Subgroup scope in the OpenCL module (pathb-spirv-emit.rb)
 // sub-group shuffles (OpGroupNonUniformShuffle, ShuffleXor in the OpenCL module): the word of lane src, of lane (lane ^ mask)
 unsigned __nfcxx_sycl_sg_shuffle_u32(unsigned w, unsigned src);
 unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
@@ -479,7 +480,7 @@ inline bool all_of_group(sub_group, bool p) {
 inline bool none_of_group(sub_group sg, bool p) { return !any_of_group(sg, p); }
 inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {
 #ifdef __NFCXX_SYCL_DEVICE__
-  __nfcxx_sycl_barrier();
+  __nfcxx_sycl_sg_barrier();
 #else
   detail::barrier_on_host();
 #endif
