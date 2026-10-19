@@ -5,6 +5,7 @@
 
 #include <set>
 #include <string>
+#include <vector>
 
 #include "ir.hpp"
 
@@ -21,3 +22,27 @@ struct ModuleSymbols {
 // BadIR.
 std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool uses_printf,
                               ModuleSymbols *syms = nullptr);
+
+// The same declarations from the module's top-level forms (the non-function forms, in order: the function forms are skipped).
+std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshared, bool uses_printf,
+                              ModuleSymbols *syms = nullptr);
+
+// One data symbol of the declarations: a string constant, a shared, global or constant object. The lines are the
+// declarations as emit_module_decls writes them (without the newline).
+struct DataDecl {
+  enum Kind { String, Shared, Global, Const };
+  Kind kind = String;
+  std::string sym;   // the PTX symbol (string_const_sym or ptx_sym)
+  size_t bytes = 0;  // the constant data's size (String and Const); 0 otherwise
+  std::string line;
+};
+struct DataDecls {
+  std::vector<DataDecl> items;  // in the output order: the strings, the shared, the global and the constant symbols
+};
+
+// The data symbols of the module (the declarations' values; the checks of emit_module_decls). Fills syms when given.
+DataDecls collect_data_decls(const std::vector<Node> &forms, ModuleSymbols *syms = nullptr);
+
+// The declarations text for the items whose keep flag is set (all of them when keep is empty): the dynamic shared symbol and
+// the vprintf declaration when they are used, the items in order, and a blank line after the shared and global symbols.
+std::string render_data_decls(const DataDecls &d, const std::vector<bool> &keep, bool uses_dynshared, bool uses_printf);

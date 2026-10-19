@@ -13,8 +13,8 @@ scripts/sycl-build.sh --cpu prog.cpp -o prog  # host path only: kernels are C++ 
 
 ## Why this shape
 
-The repo already had one single-source GPU path: `.cu` files, `scripts/cuda-rewrite.rb` splitting host and device text, and
-`scripts/pathb-ptx-emit.rb` lowering the device IR to PTX (`docs/notes/gpu.md`). SYCL is easier on the front end and harder
+The repo already had one single-source GPU path: `.cu` files, `tools/cuda-rewrite` splitting host and device text, and
+`tools/pathb-ptx-emit` lowering the device IR to PTX (`docs/notes/gpu.md`). SYCL is easier on the front end and harder
 on the back end:
 
 - SYCL is plain C++. No new syntax, so no rewriter: the kernel is the `operator()` of a closure object, which the Path B IR

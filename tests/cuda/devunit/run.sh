@@ -10,13 +10,14 @@
 # needs only the rewriter (mruby).
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
+[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
 cuda=${CUDA_HOME:-/usr/local/cuda}
 fail=0
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
 # 1. The device unit of keep.cu matches its golden.
-if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device --kernels="$out/k" keep.cu > "$out/keep.cpp" \
+if "$root/build/cuda-rewrite" --device --kernels="$out/k" keep.cu > "$out/keep.cpp" \
    && diff -u keep.device.expected.cpp "$out/keep.cpp"; then
   echo "device unit keep rules: ok"
 else
@@ -39,7 +40,7 @@ else
 fi
 
 # 3. File-scope enums used by device code: an anonymous one and a named one are carried; a host-only enum is not.
-if ! "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device --kernels="$out/enumk" src/enum.cu > "$out/enum.dev.cpp" 2>/dev/null; then
+if ! "$root/build/cuda-rewrite" --device --kernels="$out/enumk" src/enum.cu > "$out/enum.dev.cpp" 2>/dev/null; then
   echo "enum device unit: FAIL (the rewriter refused it)"; fail=1
 elif grep -q "HO_ONE" "$out/enum.dev.cpp"; then
   echo "enum device unit: FAIL (a host-only enumerator reached the device unit)"; fail=1
@@ -59,7 +60,7 @@ if [ -f "$cuda/include/cuda_runtime.h" ] && [ -e "$cuda/lib64/libcudart.so" ] &&
   fi
 fi
 # 4. Dynamic shared memory: the device unit matches its golden, and the GPU run checks the values.
-if ! "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device src/dynshared.cu > "$out/dynshared.dev.cpp" \
+if ! "$root/build/cuda-rewrite" --device src/dynshared.cu > "$out/dynshared.dev.cpp" \
    || ! diff -u src/dynshared.device.expected.cpp "$out/dynshared.dev.cpp"; then
   echo "device unit dynshared: FAIL"; fail=1
 else
