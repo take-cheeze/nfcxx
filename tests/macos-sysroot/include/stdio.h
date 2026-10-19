@@ -44,6 +44,7 @@ char *tmpnam(char *);
 int fclose(FILE *);
 int fflush(FILE *);
 FILE *fopen(const char *restrict, const char *restrict);
+FILE *fdopen(int, const char *);  /* POSIX.1-2008 <stdio.h> */
 FILE *freopen(const char *restrict, const char *restrict, FILE *restrict);
 void setbuf(FILE *restrict, char *restrict);
 int setvbuf(FILE *restrict, char *restrict, int, size_t);

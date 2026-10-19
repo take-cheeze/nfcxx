@@ -5,21 +5,23 @@
 extern "C" {
 #endif
 
-/* Character class masks used by libc++'s __locale on __APPLE__ (the class names are libc++'s; the bit values are
- * ours, chosen to be distinct and to avoid 0x80, 0x0100 and 0x00ff, which libc++ reserves for regex). */
+/* Character class masks: the values Apple's Libc publishes in include/_ctype.h (apple-oss-distributions/Libc, commit
+ * 71bbe350ab79eef58113991d817ccc6165061a64). libc++ on Apple uses these bits with the system's rune table, so the
+ * clean-room header must match them, or the inline classification macros read the wrong bits from the Mac's table. */
 #ifndef NFCXX_CTYPE_MASKS
 #define NFCXX_CTYPE_MASKS
 typedef unsigned int __uint32_t;
-#define _CTYPE_U 0x00010000
-#define _CTYPE_L 0x00020000
-#define _CTYPE_A 0x00040000
-#define _CTYPE_D 0x00080000
-#define _CTYPE_P 0x00100000
-#define _CTYPE_X 0x00200000
-#define _CTYPE_S 0x00400000
-#define _CTYPE_R 0x00800000
-#define _CTYPE_C 0x01000000
-#define _CTYPE_B 0x02000000
+#define _CTYPE_A 0x00000100L
+#define _CTYPE_C 0x00000200L
+#define _CTYPE_D 0x00000400L
+#define _CTYPE_G 0x00000800L
+#define _CTYPE_L 0x00001000L
+#define _CTYPE_P 0x00002000L
+#define _CTYPE_S 0x00004000L
+#define _CTYPE_U 0x00008000L
+#define _CTYPE_X 0x00010000L
+#define _CTYPE_B 0x00020000L
+#define _CTYPE_R 0x00040000L
 #endif
 
 int isalnum(int);

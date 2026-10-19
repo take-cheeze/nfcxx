@@ -27,6 +27,9 @@ done
 # calls, the aligned operator new and delete, __cxa_pure_virtual and the __cxa_vec_* helpers. Added only when built.
 rt=${NFCXX_MACOS_RT:-$root/build/macos-rt/libnfcxx-darwin-rt.a}
 libc=${NFCXX_MACOS_LIBC:-}; libcargs=(); [ -n "$libc" ] && [ -f "$libc" ] && libcargs=("$libc")
+# The libc++ built from the open-source sources (tests/macos-sysroot/runtime/build.sh). Linked before -lc++, so its definitions
+# are used when it is built; the system libc++ supplies the rest at run time.
+cxxb=${NFCXX_MACOS_LIBCXX_BUILT:-$root/build/macos-rt/libc++-darwin.a}; cxxbargs=(); [ -f "$cxxb" ] && cxxbargs=("$cxxb")
 rtargs=(); [ -f "$rt" ] && rtargs=("$rt")
-exec ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "${objs[@]}" ${libcargs[@]+"${libcargs[@]}"} ${rtargs[@]+"${rtargs[@]}"} \
+exec ld64.lld --error-limit=0 -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "${objs[@]}" ${libcargs[@]+"${libcargs[@]}"} ${rtargs[@]+"${rtargs[@]}"} ${cxxbargs[@]+"${cxxbargs[@]}"} \
   -L "$stub" -lSystem -L "$stub" -lc++ ${libs[@]+"${libs[@]}"}
