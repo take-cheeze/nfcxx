@@ -138,8 +138,12 @@ class CodeGen
       elsif insn.op.include?('SEND') && (count = ALIAS_NAME_ARGUMENTS[insn.sym])
         return nil unless insn.plain_fixed_argc? && insn.argc.to_i >= count
 
+        # Every name that can reach each argument, not only the textually last arm of a join.
         literal = (1..count).all? do |k|
-          irep.walk_writers(idx - 1, (insn.reg.to_i + k).to_s, follow_moves: true) { |w| w.op == 'LOADSYM' && w.sym ? names << w.sym : false }
+          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + k).to_s)&.map { |i| irep.instructions[i] }
+          next false unless sources&.all? { |w| w.op == 'LOADSYM' && w.sym }
+
+          sources.each { |w| names << w.sym }
         end
         return nil unless literal
       end

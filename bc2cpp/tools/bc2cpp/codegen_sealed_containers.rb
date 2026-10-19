@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 require_relative 'dynamic_names'
 
 # SEALED_HASH_IVAR (docs/adr/0456, third step): `@h[k]` is exactly C or nil when the Hash in `@h` never leaves the
@@ -39,15 +40,13 @@ class CodeGen
   # nil when the GETIDX at +w+ of +irep+ reads a sealed Hash ivar whose values are exactly +cls+, else why not.
   # +prove+ is called as (irep, index, register) for each stored value and answers nil or why it is not +cls+.
   def sealed_hash_read_failure(irep, w, cls, prove)
-    insn = irep.instructions[w]
-    return 'not a GETIDX' unless insn.op == 'GETIDX' && insn.reg
+    insn = BytecodeIR.for(irep).source_at(w)
+    return 'not a GETIDX' unless insn&.op == 'GETIDX' && insn.reg
 
-    defs = BytecodeIR.reaching_definitions(irep, w, insn.reg, through_handlers: true)
-    unless defs && defs.size == 1 && !defs.first.entry? && irep.instructions[defs.first.index].op == 'GETIV'
-      return 'its receiver is not one ivar read'
-    end
+    sources = BytecodeIR.producers(irep, w, insn.reg, through_handlers: true)
+    return 'its receiver is not one ivar read' unless sources&.size == 1 && sources.first.op == 'GETIV'
 
-    name = irep.instructions[defs.first.index].ivar
+    name = sources.first.insn.ivar
     owner = ivar_reader_owner(irep.label)
     return 'its receiver is not an ivar of a known class' unless name && owner
 
@@ -59,7 +58,7 @@ class CodeGen
 
     sites.each do |site_irep, idx, reg|
       why = sealed_hash_store_failure(site_irep, idx, reg, cls, prove)
-      return "@#{name} = (#{why}) at #{site_irep.file}:#{site_irep.instructions[idx].lineno}" if why
+      return "@#{name} = (#{why}) at #{site_irep.file}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
     end
     nil
   end
@@ -81,8 +80,8 @@ class CodeGen
     return "#{accessor.owner} has an attr reader `#{name}`" if accessor
 
     @ireps.each_value do |ir|
-      ir.instructions.each_with_index do |insn, g|
-        next unless insn.op == 'GETIV' && insn.ivar == name
+      BytecodeIR.for(ir).each_with_op('GETIV') do |insn, g|
+        next unless insn.ivar == name
         next if sealed_hash_getiv_consumed?(ir, g)
 
         return "the read at #{ir.file}:#{insn.lineno} is used other than as `@#{name}[k]`"
@@ -108,7 +107,7 @@ class CodeGen
   # Every send of +name+ is an instance_variable_get of a literal ivar Symbol (which fails that ivar's group).
   def sealed_hash_sends_visible?(name)
     @ireps.each_value.none? do |ir|
-      ir.instructions.each_with_index.any? do |insn, idx|
+      BytecodeIR.for(ir).each_source.any? do |insn, idx|
         insn.sym == name && insn.op.include?('SEND') &&
           !(name == 'instance_variable_get' && literal_ivar_argument?(ir, idx, insn))
       end
@@ -117,7 +116,7 @@ class CodeGen
 
   # The GETIV at +g+ feeds only `GETIDX` on its own register, in straight-line code.
   def sealed_hash_getiv_consumed?(irep, g)
-    x = irep.instructions[g].reg
+    x = BytecodeIR.for(irep).source_at(g).reg
     return false unless x
 
     sealed_hash_straight_line(irep, g + 1) do |insn|
@@ -132,24 +131,24 @@ class CodeGen
   # One store: nil, or a HASH literal directly before the SETIV whose register dies unread and whose values are
   # exactly +cls+.
   def sealed_hash_store_failure(irep, idx, reg, cls, prove)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, follow_moves: false)
-    return 'a value the checker cannot follow' if defs.nil? || defs.empty?
+    sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true, follow_moves: false)
+    return 'a value the checker cannot follow' unless sources
 
-    preds = BytecodeIR.for(irep).instruction_predecessors(include_handlers: true)
-    defs.each do |definition|
-      return 'an argument' if definition.entry?
+    program = BytecodeIR.for(irep)
+    preds = program.instruction_predecessors(include_handlers: true)
+    sources.each do |producer|
+      return 'an argument' if producer.entry?
+      next if producer.op == 'LOADNIL'
 
-      writer = irep.instructions[definition.index]
-      next if writer.op == 'LOADNIL'
-      return "#{writer.op}, not a Hash literal" unless writer.op == 'HASH' && writer.uint_operand
-      unless definition.index == idx - 1 && preds && preds[idx] == Set[idx - 1]
+      literal = program.container_literal(producer.index)
+      return "#{producer.op}, not a Hash literal" unless literal&.kind == :hash
+      unless producer.index == idx - 1 && preds && preds[idx] == Set[idx - 1]
         return 'a Hash literal another instruction can see before it is stored'
       end
       return 'a Hash literal whose register is read after the store' unless sealed_hash_dead_after?(irep, idx, reg.to_s)
 
-      base = writer.reg.to_i
-      writer.uint_operand.times do |k|
-        why = prove.call(irep, definition.index, (base + (2 * k) + 1).to_s)
+      literal.value_regs.each_with_index do |value, k|
+        why = prove.call(irep, producer.index, value)
         return "value #{k + 1}: #{why}" if why
       end
     end
@@ -167,21 +166,14 @@ class CodeGen
     end
   end
 
-  # Walks the straight line from +start+ (each instruction entered only from the one before it, normal or handler
-  # edges) while each is a SEALED_HASH_LOAD_OPS / LOADI* load; the block answers :done, :fail or :next for each.
-  # true on :done, false on :fail, on any other instruction or past the window.
+  # Walks Program#straight_line from +start+ while each instruction is a SEALED_HASH_LOAD_OPS / LOADI* load; the
+  # block answers :done, :fail or :next for each. true on :done, false on :fail, on any other instruction or past
+  # the window.
   def sealed_hash_straight_line(irep, start)
-    preds = BytecodeIR.for(irep).instruction_predecessors(include_handlers: true) or return false
-    k = start
-    while k < irep.instructions.length && k < start + SEALED_HASH_WINDOW
-      return false unless preds[k] == Set[k - 1]
-
-      insn = irep.instructions[k]
+    BytecodeIR.for(irep).straight_line(start, SEALED_HASH_WINDOW) do |insn, _k|
       verdict = yield insn
       return true if verdict == :done && (insn.op == 'GETIDX' || sealed_hash_load_op?(insn.op))
       return false if verdict == :fail || !sealed_hash_load_op?(insn.op)
-
-      k += 1
     end
     false
   end
