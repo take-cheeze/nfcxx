@@ -101,4 +101,6 @@ int mbsinit_l(const mbstate_t *, locale_t);
 size_t mbsrtowcs_l(wchar_t *restrict, const char **restrict, size_t, mbstate_t *restrict, locale_t);
 size_t wcrtomb_l(char *restrict, wchar_t, mbstate_t *restrict, locale_t);
 size_t wcsnrtombs_l(char *restrict, const wchar_t **restrict, size_t, size_t, mbstate_t *restrict, locale_t);
+int mbtowc_l(wchar_t *restrict, const char *restrict, size_t, locale_t);
+size_t mbsnrtowcs_l(wchar_t *restrict, const char **restrict, size_t, size_t, mbstate_t *restrict, locale_t);
 #endif
