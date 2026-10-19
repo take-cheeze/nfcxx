@@ -2464,17 +2464,17 @@ class CodeGen
   # The block's mandatory parameter (R1) is the loop element in the inlined each/map/select bodies.
   LOOP_ELEMENT_REG = '1'
 
-  # Any instruction of the body writes R1 after the parameter binding (ENTER).
+  # The body writes R1 after ENTER bound it: a nested block's SETUPVAR (not one of the body's instructions) or the body's
+  # own leading-register write. Not may_write?, which counts EXCEPT/RESCUE as writing every register.
   def loop_element_reassigned?(irep)
-    written_leading_regs(irep).include?(LOOP_ELEMENT_REG)
-  end
-
-  # Leading registers the irep's instructions write (ENTER and NumericFlow::NO_WRITE_OPS excluded), once per irep.
-  def written_leading_regs(irep)
-    @written_leading_regs ||= {}.compare_by_identity
-    @written_leading_regs[irep] ||= irep.instructions.each_with_object(Set.new) do |i, regs|
-      regs << i.reg.to_s unless i.op == 'ENTER' || NumericFlow::NO_WRITE_OPS.include?(i.op)
-    end.freeze
+    @loop_element_reassigned ||= {}.compare_by_identity
+    @loop_element_reassigned.fetch(irep) do
+      @loop_element_reassigned[irep] = BytecodeIR.own_upvar_written_regs(irep).include?(LOOP_ELEMENT_REG) ||
+                                       irep.instructions.any? do |i|
+                                         i.reg.to_s == LOOP_ELEMENT_REG && i.op != 'ENTER' &&
+                                           !NumericFlow::NO_WRITE_OPS.include?(i.op)
+                                       end
+    end
   end
 
   # Counted once per (body, position, reason): compile_send runs on a site more than once.

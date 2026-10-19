@@ -199,10 +199,15 @@ class CodeGen
     return false unless d && d.irep == ancestor.label && index.positive? && index <= mandatory_arity(ancestor)
     return false unless pure_mandatory_arity?(ancestor)
 
+    # The write test of rbs_param_check.rb's upvar_why, without a reaching-definitions walk per instruction. A RETURN
+    # of the register writes nothing a later instruction reads, so the NO_WRITE_OPS are not writes here.
     reg = index.to_s
-    ancestor.instructions.each_index.all? do |i|
-      defs = BytecodeIR.reaching_definitions(ancestor, i, reg, through_handlers: true, follow_moves: false)
-      defs && defs.all?(&:entry?)
+    return false if BytecodeIR.own_upvar_written_regs(ancestor).include?(reg)
+
+    program = BytecodeIR.for(ancestor)
+    ancestor.instructions.each_index.none? do |i|
+      op = ancestor.instructions[i].op
+      op != 'ENTER' && !NumericFlow::NO_WRITE_OPS.include?(op) && program.may_write_at?(i, reg)
     end
   end
 end
