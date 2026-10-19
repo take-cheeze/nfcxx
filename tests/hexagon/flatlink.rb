@@ -129,7 +129,8 @@ end
 
 def cstr(data, off)
   e = off
-  e += 1 while data.getbyte(e) != 0
+  e += 1 while e < data.bytesize && data.getbyte(e) != 0
+  raise "substring not found" if e >= data.bytesize # unterminated name (Python: data.index raises ValueError)
   data.byteslice(off, e - off)
 end
 
