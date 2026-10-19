@@ -146,6 +146,46 @@ end
 
 def eval_simple(expr, types, locals, params)
   expr = expr.strip
+  # BINOP
+  if expr.start_with?("BINOP")
+    parts = expr.sub(/^BINOP\s+/, "").split(/\s+/, 3)
+    # parts: [L, op, R] but L/R may contain spaces? L/R are simple tokens/projections without spaces usually
+    # Re-parse: find op token
+    # Format: BINOP <left_expr> <op> <right_expr> where left/right have no spaces except projections
+    m = expr.match(/^BINOP\s+(.+?)\s+(<=?|>=?|==|!=|<<|>>|[+\-*\/%&|^])\s+(.+)$/)
+    if m
+      l = m[1].strip; op = m[2]; r = m[3].strip
+      lt = eval_simple(l, types, locals, params)
+      rt = eval_simple(r, types, locals, params)
+      # determine type from l if const? default int
+      ty = "int"
+      # if l is a const with type, extract
+      cm = l.match(/^\+?[\-]?\d+\s+([A-Za-z0-9_]+)$/)
+      if cm
+        ty = rust_type_to_pathb(cm[1], types) rescue "int"
+      end
+      # signedness guess: unsigned if ty contains unsigned
+      unsigned = ty.include?("unsigned")
+      case op
+      when "+" then return "(wadd #{ty} #{lt} #{rt})"
+      when "-" then return "(wsub #{ty} #{lt} #{rt})"
+      when "*" then return "(wmul #{ty} #{lt} #{rt})"
+      when "/" then return "(cdiv #{ty} #{lt} #{rt})"
+      when "%" then return "(crem #{ty} #{lt} #{rt})"
+      when "&" then return "(and #{ty} #{lt} #{rt})"
+      when "|" then return "(or #{ty} #{lt} #{rt})"
+      when "^" then return "(xor #{ty} #{lt} #{rt})"
+      when "<<" then return "(cshl #{ty} #{lt} #{rt})"
+      when ">>" then return "(cshr #{ty} #{lt} #{rt})"
+      when "==" then return "(eq #{ty} #{lt} #{rt})"
+      when "!=" then return "(ne #{ty} #{lt} #{rt})"
+      when "<" then return "(#{unsigned ? "lt.u" : "lt.s"} #{ty} #{lt} #{rt})"
+      when "<=" then return "(#{unsigned ? "le.u" : "le.s"} #{ty} #{lt} #{rt})"
+      when ">" then return "(#{unsigned ? "lt.u" : "lt.s"} #{ty} #{rt} #{lt})"
+      when ">=" then return "(#{unsigned ? "le.u" : "le.s"} #{ty} #{rt} #{lt})"
+      end
+    end
+  end
   # projection: (*argN).field or (*varN).field
   m = expr.match(/^\(\*(arg|var)(\d+)\)\.(\d+)$/)
   if m
