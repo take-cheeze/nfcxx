@@ -1,15 +1,11 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Integer constant arithmetic typing (NUMERIC_CONSTANT_RANGES in the constant rows, docs/bc2cpp-type-check.md): a bare
-# name whose every definition is integer arithmetic with a Fixnum interval is typed Integer (source
-# inferred:integer-range), and the same name is refused when the program redefines an Integer operator (the owner
-# scoped integer_ops_safe?, like DeclaredConstants.range_to_a_safe?). Each fixture is compiled by the host mrbc. The
-# interval values and the operator predicate are checked in process; the typing is checked end to end, through
-# type_check.rb --files, which is the analysis a build runs. Needs MRBC (a host mrbc); without it the check prints
-# SKIP and exits 0.
+# Constant typing: frozen containers, Hash merges, Array sums and integer arithmetic. Compatible positives share
+# one end-to-end type_check.rb run; Object#freeze withdrawal shares another. Other method redefinitions each stay
+# in their own closed world. Integer interval and operator predicates are also checked independently in process.
 #
-#   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/integer_arith_constant_check.rb
+#   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/constant_typing_check.rb
 
 require 'json'
 require 'open3'
@@ -18,63 +14,58 @@ require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
 
 unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
-  puts 'SKIP integer_arith_constant_check: MRBC is not set to a host mrbc'
+  puts 'SKIP constant_typing_check: MRBC is not set to a host mrbc'
   exit 0
 end
 
 ROOT = File.expand_path('../..', __dir__)
 TYPE_CHECK = File.join(ROOT, 'scripts/bc2cpp/type_check.rb')
-
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
 end
 
-# The constant row for bare name `bare` in a type_check JSON run, or nil.
+# Empty signatures make fixture diagnostics meaningful: engine-only declarations do not belong to these programs.
+typed_rows = lambda do |source|
+  Dir.mktmpdir('constant-typing') do |dir|
+    rb = File.join(dir, 'fixture.rb')
+    out = File.join(dir, 'facts.json')
+    sig = File.join(dir, 'sig')
+    Dir.mkdir(sig)
+    File.write(rb, source)
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, TYPE_CHECK, '--files', rb, '--sig', sig,
+                                          '--no-sends', '--format', 'json', '--out', out, '-q')
+    raise "type_check failed (#{status.exitstatus}):\n#{stdout}#{stderr}" unless status.success?
+
+    JSON.parse(File.read(out)).fetch('constants')
+  end
+end
+container_rows = lambda do |rows|
+  rows.to_h { |row| [row.fetch('name'), [row['type'], row['source'], row['reason']]] }
+end
 row_for = lambda do |rows, bare|
   rows.find { |r| r['name'] == bare || r['name'].end_with?("::#{bare}") }
 end
 
-# A program's constant rows from the end-to-end analysis (type_check.rb --files, the closed world of that program).
-# Its exit status is 1 whenever a declared engine signature has no assignment in the fixture; the rows still stand.
-typed_rows = lambda do |source|
-  Dir.mktmpdir do |dir|
-    rb = File.join(dir, 'fixture.rb')
-    out = File.join(dir, 'facts.json')
-    File.write(rb, source)
-    _stdout, stderr, status = Open3.capture3({ 'MRBC' => ENV['MRBC'] }, RbConfig.ruby, TYPE_CHECK,
-                                             '--files', rb, '--no-sends', '--format', 'json', '--out', out, '-q')
-    unless File.exist?(out)
-      warn stderr
-      raise "type_check.rb wrote no JSON (exit #{status.exitstatus})"
+BASE = <<~RUBY
+  module Gfx
+    def self.freeze
+      nil
     end
-
-    JSON.parse(File.read(out))['constants']
   end
-end
-
-# The interval proof and the operator predicate over one program, in process.
-analysis = lambda do |source|
-  Dir.mktmpdir do |dir|
-    rb = File.join(dir, 'fixture.rb')
-    File.write(rb, source)
-    ireps, root = compile_ireps([rb], 'integer_arith', dir)
-    registry, _superclass_of, _containers, included, prepended, unknown = build_registry(ireps, root)
-    safe = IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
-    # FREEZE_SELF: the same owner-scoped proof the build passes (bc2cpp.rb), not a copy of it.
-    freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
-    {
-      safe: safe,
-      freeze_safe: freeze_safe,
-      ranges: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: safe, freeze_safe: freeze_safe),
-      refused: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: false),
-      # The exact-value proof with the operator gate bypassed, and with the gate as the program sets it.
-      ints_ungated: IntegerConstants.analyze(ireps, [], [], operators_safe: true),
-      ints_gated: IntegerConstants.analyze(ireps, [], [], operators_safe: safe)
-    }
+  FROZEN_ARR = [1, 2].freeze
+  FROZEN_HASH = { a: 1 }.freeze
+  LIT_MERGE = { a: 1 }.merge({ b: 2 })
+  MERGE_BASE = { 11 => 1 }
+  CONST_MERGE = MERGE_BASE.merge({ 12 => 2 })
+  KANA = (%w[a b] + [:t, nil]).freeze
+  SUM = (KANA + %w[c]).freeze
+  def go
+    [FROZEN_ARR, FROZEN_HASH, LIT_MERGE, CONST_MERGE, SUM]
   end
-end
+  go
+RUBY
 
 positive = <<~RUBY
   module ZaIntArith
@@ -98,6 +89,115 @@ positive = <<~RUBY
   end
 RUBY
 
+frozen = <<~RUBY
+  module ZaFreeze
+    ZF_BASE = 40
+    ZF_STEP = 3
+    ZF_NONE = 0
+    ZF_SLOT = (ZF_BASE - ZF_STEP).freeze
+    ZF_SPAN = (ZF_STEP * 13).freeze
+    ZF_HALF = (-7 / 2).freeze
+    ZF_ZERO = (ZF_BASE / ZF_NONE).freeze
+    ZF_NONLIT = (ZF_BASE + "abc".length).freeze
+    ZF_STR = "abc".freeze
+    ZF_ARR = [1, 2].freeze
+    ZF_SUM = (ZF_ARR + [3]).freeze
+  end
+RUBY
+
+freeze_object = <<~RUBY
+  class Object
+    def freeze
+      self
+    end
+  end
+  module ZaFreeze
+    ZF_STR = "abc".freeze
+    ZF_SLOT = (3 - 1).freeze
+  end
+RUBY
+
+puts '== shared end-to-end positives: containers and integer arithmetic'
+positive_rows = typed_rows.call(BASE + positive + frozen)
+
+puts '== positives: stock owners, a foreign Ruby freeze'
+rows = container_rows.call(positive_rows)
+check.call('a frozen Array literal is Array', rows['FROZEN_ARR']&.first(2) == ['Array', 'inferred:constructed'])
+check.call('a frozen Hash literal is Hash', rows['FROZEN_HASH']&.first(2) == ['Hash', 'inferred:constructed'])
+check.call('a Hash literal merge is Hash', rows['LIT_MERGE']&.first(2) == ['Hash', 'inferred:hash-merge'])
+check.call('a Hash merge of a constant Hash is Hash', rows['CONST_MERGE']&.first(2) == ['Hash', 'inferred:hash-merge'])
+check.call('an Array sum that is frozen is Array', rows['SUM']&.first(2) == ['Array', 'inferred:array-sum'])
+check.call('the sum over a frozen sum is Array', rows['KANA']&.first(2) == ['Array', 'inferred:array-sum'])
+
+negatives = {
+  'Array#freeze defined in Ruby' => [
+    "class Array\n  def freeze\n    self\n  end\nend\n",
+    %w[FROZEN_ARR KANA SUM]
+  ],
+  'a module mixed into Hash defines freeze' => [
+    "module Frz\n  def freeze\n    self\n  end\nend\nclass Hash\n  include Frz\nend\n",
+    %w[FROZEN_HASH]
+  ],
+  'a module prepended to Array defines freeze' => [
+    "module Frz\n  def freeze\n    self\n  end\nend\nclass Array\n  prepend Frz\nend\n",
+    %w[FROZEN_ARR KANA SUM]
+  ],
+  'an unresolved mixin into Hash' => [
+    "class Hash\n  include NoSuchMixinAnywhere\nend\n",
+    %w[FROZEN_HASH LIT_MERGE CONST_MERGE]
+  ],
+  'a Hash prepend (merge and freeze)' => [
+    "module MergeP\n  def merge(other)\n    {}\n  end\nend\nclass Hash\n  prepend MergeP\nend\n",
+    %w[FROZEN_HASH LIT_MERGE CONST_MERGE]
+  ],
+  'Hash#merge redefined in Ruby' => [
+    "class Hash\n  def merge(other)\n    1\n  end\nend\n",
+    %w[LIT_MERGE CONST_MERGE]
+  ],
+  'a singleton merge on the constant receiver' => [
+    "MERGE_BASE_S = { 11 => 1 }\ndef MERGE_BASE_S.merge(other)\n  {}\nend\nSINGLE_MERGE = MERGE_BASE_S.merge({ 12 => 2 })\n",
+    %w[SINGLE_MERGE]
+  ],
+  'a non-literal merge receiver (a global nothing proves)' => [
+    "X_MERGE = $unproven.merge({ b: 2 })\n",
+    %w[X_MERGE]
+  ]
+}
+
+negatives.each do |what, (extra, names)|
+  puts "== negative: #{what}"
+  program = BASE + extra
+  # The Ruby definition is in the program itself, so each negative is its own closed world.
+  rows = container_rows.call(typed_rows.call(program))
+  names.each do |name|
+    check.call("#{name} stays untyped (#{what})", rows[name] && rows[name][0].nil?)
+  end
+end
+
+
+# The interval proof and the operator predicate over one program, in process.
+analysis = lambda do |source|
+  Dir.mktmpdir do |dir|
+    rb = File.join(dir, 'fixture.rb')
+    File.write(rb, source)
+    ireps, root = compile_ireps([rb], 'integer_arith', dir)
+    registry, _superclass_of, _containers, included, prepended, unknown = build_registry(ireps, root)
+    safe = IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
+    # FREEZE_SELF: the same owner-scoped proof the build passes (bc2cpp.rb), not a copy of it.
+    freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
+    {
+      safe: safe,
+      freeze_safe: freeze_safe,
+      ranges: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: safe, freeze_safe: freeze_safe),
+      refused: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: false),
+      # The exact-value proof with the operator gate bypassed, and with the gate as the program sets it.
+      ints_ungated: IntegerConstants.analyze(ireps, [], [], operators_safe: true),
+      ints_gated: IntegerConstants.analyze(ireps, [], [], operators_safe: safe)
+    }
+  end
+end
+
+
 puts '== positive: literals and named constants (exact values and intervals)'
 pos = analysis.call(positive)
 check.call('the operators are the core ones (no Ruby definition on Integer)', pos[:safe])
@@ -113,7 +213,7 @@ puts '== floor division: -7 / 2 is -4 (mrb_div_int floors), not -3'
 check.call('ZA_HALF has the interval [-4, -4]', pos[:ranges]['ZA_HALF'] == [-4, -4])
 
 puts '== positive, end to end: arithmetic typed Integer'
-rows = typed_rows.call(positive)
+rows = positive_rows
 slot = row_for.call(rows, 'ZA_SLOT')
 check.call('ZA_SLOT is typed Integer', slot && slot['type'] == 'Integer')
 check.call('ZA_SPAN is typed Integer', (r = row_for.call(rows, 'ZA_SPAN')) && r['type'] == 'Integer')
@@ -191,21 +291,6 @@ rows = typed_rows.call(prepended)
 slot = row_for.call(rows, 'ZA_SLOT')
 check.call('ZA_SLOT stays untyped', slot && slot['type'].nil?)
 
-frozen = <<~RUBY
-  module ZaFreeze
-    ZF_BASE = 40
-    ZF_STEP = 3
-    ZF_NONE = 0
-    ZF_SLOT = (ZF_BASE - ZF_STEP).freeze
-    ZF_SPAN = (ZF_STEP * 13).freeze
-    ZF_HALF = (-7 / 2).freeze
-    ZF_ZERO = (ZF_BASE / ZF_NONE).freeze
-    ZF_NONLIT = (ZF_BASE + "abc".length).freeze
-    ZF_STR = "abc".freeze
-    ZF_ARR = [1, 2].freeze
-    ZF_SUM = (ZF_ARR + [3]).freeze
-  end
-RUBY
 
 puts '== freeze returns its receiver: a frozen Integer expression keeps its interval'
 fr = analysis.call(frozen)
@@ -215,7 +300,7 @@ check.call('ZF_SPAN (= (ZF_STEP * 13).freeze) has the interval [39, 39]', fr[:ra
 check.call('ZF_HALF (= (-7 / 2).freeze) has the interval [-4, -4]', fr[:ranges]['ZF_HALF'] == [-4, -4])
 check.call('ZF_ZERO (divisor interval holds 0) has no interval', !fr[:ranges].key?('ZF_ZERO'))
 check.call('ZF_NONLIT (a send operand) has no interval', !fr[:ranges].key?('ZF_NONLIT'))
-rows = typed_rows.call(frozen)
+rows = positive_rows
 slot = row_for.call(rows, 'ZF_SLOT')
 check.call('ZF_SLOT is typed Integer by inferred:integer-constant end to end (ADR 0501)',
            slot && slot['type'] == 'Integer' && slot['source'] == 'inferred:integer-constant')
@@ -251,29 +336,20 @@ fi_slot = row_for.call(typed_rows.call(freeze_integer), 'ZF_SLOT')
 check.call('ZF_SLOT is not typed by inferred:integer-range',
            fi_slot.nil? || fi_slot['source'] != 'inferred:integer-range')
 
-freeze_object = <<~RUBY
-  class Object
-    def freeze
-      self
-    end
-  end
-  module ZaFreeze
-    ZF_STR = "abc".freeze
-    ZF_SLOT = (3 - 1).freeze
-  end
-RUBY
 
 puts '== a Ruby freeze on Object withdraws the freeze-through proof for a frozen String and Integer'
 fo = analysis.call(freeze_object)
 check.call('freeze_safe is false (a Ruby freeze on Object, an ancestor of Integer)', !fo[:freeze_safe])
 check.call('ZF_SLOT has no interval', !fo[:ranges].key?('ZF_SLOT'))
-ostr = row_for.call(typed_rows.call(freeze_object), 'ZF_STR')
+object_freeze_rows = typed_rows.call(BASE + freeze_object)
+object_containers = container_rows.call(object_freeze_rows)
+%w[FROZEN_ARR FROZEN_HASH KANA].each do |name|
+  check.call("#{name} stays untyped (Object#freeze defined in Ruby (Array and Hash inherit it))",
+             object_containers[name] && object_containers[name][0].nil?)
+end
+ostr = row_for.call(object_freeze_rows, 'ZF_STR')
 check.call('ZF_STR (frozen String) is untyped while Object#freeze is redefined', ostr && ostr['type'].nil?)
 
-puts
-if failures.empty?
-  puts 'integer_arith_constant_check: all checks passed'
-else
-  puts "integer_arith_constant_check: #{failures.size} check(s) failed"
-  exit 1
-end
+
+puts "#{failures.empty? ? 'PASS' : 'FAIL'} constant_typing_check: #{failures.size} failure(s)"
+exit(failures.empty? ? 0 : 1)
