@@ -6077,6 +6077,7 @@ std::string inline_generic_lambdas(const std::string &text) {
     long n = (long)out.size();
     long def_start = -1, def_end = -1, body_open = -1, body_close = -1;
     std::string name, param;
+    std::vector<std::string> params;
     for (long k = 0; k < n && def_start < 0; k++) {
       long e = skip_literal(out, k);
       if (e >= 0) {
@@ -6104,12 +6105,19 @@ std::string inline_generic_lambdas(const std::string &text) {
       long rp = matching_close(out, lp);
       if (rp < 0) continue;
       std::string inside = sl(out, lp + 1, rp);
-      // The parameter list is exactly `auto P`.
-      if (inside.compare(0, 5, "auto ") != 0) continue;
-      std::string pn = inside.substr(5);
-      while (!pn.empty() && pn.back() == ' ') pn.pop_back();
-      while (!pn.empty() && pn.front() == ' ') pn.erase(pn.begin());
-      if (pn.empty()) continue;
+      // The parameter list is `auto P` or `auto P, auto Q, ...` (each a tag or a constant, the calls say which).
+      std::vector<std::string> pns;
+      bool all_auto = true;
+      for (const auto &part : split_top(inside)) {
+        std::string pt = strip(part);
+        if (pt.compare(0, 5, "auto ") != 0) all_auto = false;
+        else pns.push_back(strip(pt.substr(5)));
+      }
+      if (!all_auto || pns.empty()) continue;
+      bool named = true;
+      for (const auto &pn : pns)
+        if (pn.empty()) named = false;
+      if (!named) continue;
       // An optional trailing return type (`-> bool`) may sit between the parameter list and the body.
       long bo = rp + 1;
       while (bo < n && (ch(out, bo) == ' ' || ch(out, bo) == '\n' || ch(out, bo) == '\t')) bo += 1;
@@ -6129,12 +6137,15 @@ std::string inline_generic_lambdas(const std::string &text) {
       std::string body = sl(out, bo, bc + 1);
       // The parameter is used either as decltype(P)::value or as a bare name (concat.cu: `concat_non_cont<T, dim>`, where
       // the integral_constant converts to its value in a constant expression).
-      bool bare_use = false;
-      for (size_t i = body.find(pn); i != std::string::npos && !bare_use; i = body.find(pn, i + 1))
-        if ((i == 0 || !ident_c((unsigned char)body[i - 1])) &&
-            (i + pn.size() >= body.size() || !ident_c((unsigned char)body[i + pn.size()])))
-          bare_use = true;
-      if (body.find("decltype(" + pn + ")::value") == std::string::npos && !bare_use) continue;
+      bool bare_use = false, used = false;
+      for (const auto &pn : pns) {
+        for (size_t i = body.find(pn); i != std::string::npos && !bare_use; i = body.find(pn, i + 1))
+          if ((i == 0 || !ident_c((unsigned char)body[i - 1])) &&
+              (i + pn.size() >= body.size() || !ident_c((unsigned char)body[i + pn.size()])))
+            bare_use = true;
+        if (body.find("decltype(" + pn + ")::value") != std::string::npos) used = true;
+      }
+      if (!used && !bare_use) continue;
       long de = bc + 1;
       while (de < n && (ch(out, de) == ' ' || ch(out, de) == '\t')) de += 1;
       if (ch(out, de) != ';') continue;
@@ -6143,7 +6154,8 @@ std::string inline_generic_lambdas(const std::string &text) {
       body_open = bo;
       body_close = bc;
       name = nm;
-      param = pn;
+      params = pns;
+      param = pns[0];
     }
     if (def_start < 0) break;
 
@@ -6154,7 +6166,7 @@ std::string inline_generic_lambdas(const std::string &text) {
       long fold_s = -1, fold_e = -1;
       std::string pack;
       std::string key = "std::integral_constant<int, ";
-      for (long k = 0; k < n && fold_s < 0; k++) {
+      for (long k = 0; k < n && fold_s < 0 && params.size() == 1; k++) {
         if (k >= def_start && k < def_end) {
           k = def_end - 1;
           continue;
@@ -6235,7 +6247,7 @@ std::string inline_generic_lambdas(const std::string &text) {
     // Every call of the lambda must pass a literal integral_constant; each call is one instance.
     struct Call {
       long start, end;
-      std::string value;
+      std::vector<std::string> values;
     };
     std::vector<Call> calls;
     for (long k = 0; k < n; k++) {
@@ -6254,57 +6266,78 @@ std::string inline_generic_lambdas(const std::string &text) {
       if (ch(out, p) != '(') continue;
       long close = matching_close(out, p);
       if (close < 0) continue;
-      std::string arg = sl(out, p + 1, close);
-      std::string key = "std::integral_constant<int,";
-      std::string flat;
-      for (char c : arg)
-        if (c != ' ' && c != '\t' && c != '\n') flat.push_back(c);
-      bool ok = flat.compare(0, key.size(), key) == 0;
-      std::string val;
-      if (ok) {
-        size_t gt = flat.find('>', key.size());
-        if (gt == std::string::npos) ok = false;
+      // Each argument is a literal std::integral_constant<int, V>{} (or <bool, V>), or std::true_type{} / std::false_type{}.
+      std::vector<std::string> vals;
+      for (const auto &arg : split_top(sl(out, p + 1, close))) {
+        std::string flat;
+        for (char c : arg)
+          if (c != ' ' && c != '\t' && c != '\n') flat.push_back(c);
+        std::string val;
+        if (flat == "std::true_type{}" || flat == "std::true_type()") val = "true";
+        else if (flat == "std::false_type{}" || flat == "std::false_type()") val = "false";
         else {
-          val = flat.substr(key.size(), gt - key.size());
-          std::string tail = flat.substr(gt + 1);
-          ok = !val.empty();
-          for (char c : val)
-            if (c < '0' || c > '9') ok = false;
-          if (tail != "{}" && tail != "()") ok = false;
+          std::string key = "std::integral_constant<";
+          bool ok = flat.compare(0, key.size(), key) == 0;
+          size_t gt = ok ? flat.find('>', key.size()) : std::string::npos;
+          if (gt == std::string::npos) ok = false;
+          else {
+            std::string inner = flat.substr(key.size(), gt - key.size());
+            std::string tail = flat.substr(gt + 1);
+            size_t comma = inner.find(',');
+            if (comma == std::string::npos) ok = false;
+            else {
+              std::string type = inner.substr(0, comma), v = inner.substr(comma + 1);
+              if (type != "int" && type != "bool") ok = false;
+              if (type == "bool") ok = ok && (v == "true" || v == "false");
+              else
+                for (char c : v)
+                  if (c < '0' || c > '9') ok = false;
+              if (ok && (tail == "{}" || tail == "()")) val = v;
+              else ok = false;
+            }
+          }
+          if (!ok)
+            refuse("generic lambda " + name + " at line " + std::to_string(line_of(out, k)) +
+                   " is called with an argument that is not a literal std::integral_constant<int, V>{}");
         }
+        vals.push_back(val);
       }
-      if (!ok)
-        refuse("generic lambda " + name + " at line " + std::to_string(line_of(out, k)) +
-               " is called with an argument that is not a literal std::integral_constant<int, V>{}");
-      calls.push_back({k, close + 1, val});
+      if (vals.size() != params.size())
+        refuse("generic lambda " + name + " at line " + std::to_string(line_of(out, k)) + " takes " +
+               std::to_string(params.size()) + " arguments, its call gives " + std::to_string(vals.size()));
+      calls.push_back({k, close + 1, vals});
       k = close;
     }
     if (calls.empty())
       refuse("generic lambda " + name + " is never called with a literal value, so its instances are not known");
 
     // The body without its braces, with the parameter substituted for one value.
-    auto instance = [&](const std::string &v) {
+    auto instance = [&](const std::vector<std::string> &vs) {
       std::string inner = sl(out, body_open + 1, body_close);
       std::string r;
-      std::string dec = "decltype(" + param + ")::value";
       for (size_t i = 0; i < inner.size();) {
-        if (inner.compare(i, dec.size(), dec) == 0) {
-          r += v;
-          i += dec.size();
-          continue;
+        bool hit = false;
+        for (size_t k = 0; k < params.size() && !hit; k++) {
+          const std::string &pn = params[k];
+          std::string dec = "decltype(" + pn + ")::value";
+          if (inner.compare(i, dec.size(), dec) == 0) {
+            r += vs[k];
+            i += dec.size();
+            hit = true;
+          } else if (inner.compare(i, pn.size(), pn) == 0 && (i == 0 || !ident_c((unsigned char)inner[i - 1])) &&
+                     (i + pn.size() >= inner.size() || !ident_c((unsigned char)inner[i + pn.size()]))) {
+            // A bare use is the constant itself: the literal in any constant expression (`concat_non_cont<T, dim>`).
+            // A use as an object (called, or a member accessed) is not a constant, so it is refused by name.
+            size_t after = i + pn.size();
+            while (after < inner.size() && (inner[after] == ' ' || inner[after] == '\t')) after += 1;
+            if (after < inner.size() && (inner[after] == '(' || inner[after] == '.'))
+              refuse("generic lambda " + name + " uses its parameter " + pn + " as an object (call or member), not a constant");
+            r += vs[k];
+            i += pn.size();
+            hit = true;
+          }
         }
-        if (inner.compare(i, param.size(), param) == 0 && (i == 0 || !ident_c((unsigned char)inner[i - 1])) &&
-            (i + param.size() >= inner.size() || !ident_c((unsigned char)inner[i + param.size()]))) {
-          // A bare use is the constant itself: the literal in any constant expression (`concat_non_cont<T, dim>`).
-          // A use as an object (called, or a member accessed) is not a constant, so it is refused by name.
-          size_t after = i + param.size();
-          while (after < inner.size() && (inner[after] == ' ' || inner[after] == '\t')) after += 1;
-          if (after < inner.size() && (inner[after] == '(' || inner[after] == '.'))
-            refuse("generic lambda " + name + " uses its parameter " + param + " as an object (call or member), not a constant");
-          r += v;
-          i += param.size();
-          continue;
-        }
+        if (hit) continue;
         r.push_back(inner[i]);
         i += 1;
       }
@@ -6317,7 +6350,7 @@ std::string inline_generic_lambdas(const std::string &text) {
       std::string repl;
     };
     std::vector<Edit> edits;
-    for (const auto &c : calls) edits.push_back({c.start, c.end, instance(c.value)});
+    for (const auto &c : calls) edits.push_back({c.start, c.end, instance(c.values)});
     edits.push_back({def_start, def_end, ""});
     std::sort(edits.begin(), edits.end(), [](const Edit &a, const Edit &b) { return a.start < b.start; });
     std::string res;
