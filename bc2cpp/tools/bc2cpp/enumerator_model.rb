@@ -6,6 +6,7 @@ require_relative 'source_text'
 require_relative 'const_site_cache'
 require_relative 'integer_constants'
 require_relative 'core_fact_sigs'
+require_relative 'bytecode_ir_regions'
 
 # ENUMERATOR_MODEL (docs/adr/0418): what the compiler may assume about mruby's Enumerator machinery,
 # proven from the bytecode of the program rather than from names.
@@ -80,11 +81,12 @@ module EnumeratorModel
   BODY_OPS = %w[ENTER JMP LOADSYM GETCONST LOADSELF MOVE ARRAY ARYCAT HASH HASHCAT SEND RETURN].freeze
 
   def to_enum_body?(body, _ireps)
-    return false unless body.reps.empty? && body.instructions.all? { |i| BODY_OPS.include?(i.op) }
+    return false unless body.reps.empty? && BytecodeIR.for(body).instructions.all? { |i| BODY_OPS.include?(i.op) }
 
-    sends = body.instructions.select { |i| i.op == 'SEND' }
-    consts = body.instructions.select { |i| i.op == 'GETCONST' }
-    syms = body.instructions.select { |i| i.op == 'LOADSYM' }
+    program = BytecodeIR.for(body)
+    sends = program.instructions_with_op('SEND')
+    consts = program.instructions_with_op('GETCONST')
+    syms = program.instructions_with_op('LOADSYM')
     sends.size == 1 && sends.first.sym == 'new' && consts.size == 1 && consts.first.const_name == 'Enumerator' &&
       syms.all? { |i| i.sym == 'each' }
   end
@@ -99,7 +101,8 @@ module EnumeratorModel
     return 'no native/foreign inputs' unless native_paths && foreign_paths
 
     ireps.each_value do |irep|
-      irep.instructions.each do |insn|
+      BytecodeIR.for(irep).instructions_with_op('CLASS', 'MODULE', 'SETCONST', 'SETMCNST', 'LOADSYM',
+                                                *BytecodeIR::Ops::SEND).each do |insn|
         case insn.op
         when 'CLASS', 'MODULE'
           # The compiled sources run as one script, whose own irep holds the top-level statements. A statement there

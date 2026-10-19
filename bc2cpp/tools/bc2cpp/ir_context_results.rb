@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_regions'
 require_relative 'numeric_flow'
 require_relative 'call_context_arguments'
 
@@ -167,7 +168,7 @@ class IrContextResults
       numeric = @gen.numeric_entry_mask(body, position)
       frozen_mask?(numeric) ? numeric : mask(direct)
     end
-    keywords = body.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.uniq.to_h { |name| [name, NumericFlow::OTHER] }
+    keywords = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.uniq.to_h { |name| [name, NumericFlow::OTHER] }
     binding = bind(body, arguments, keywords, root: true)
     @roots[body.label] = binding && add(body, receiver, arguments, keywords, binding, root: true)
   end
@@ -179,8 +180,8 @@ class IrContextResults
     required, optional, rest, post, key_count, keydict, block, extra = fields
     return nil if extra != 0 || rest > 1 || keydict > 1 || block > 1
     return nil if arguments.size < required + post || rest.zero? && arguments.size > required + optional + post
-    names = body.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.uniq
-    optional_names = body.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KEY_P' }.uniq
+    names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.uniq
+    optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
     return nil unless root || (names - optional_names - keywords.keys).empty?
     return nil unless root || keydict.positive? || (keywords.keys - names).empty?
     return nil unless keywords.empty? || key_count.positive? || keydict.positive?
