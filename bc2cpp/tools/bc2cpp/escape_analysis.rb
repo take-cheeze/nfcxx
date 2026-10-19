@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'irep'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_regions'
 require_relative 'core_hierarchy_sigs'
 require_relative 'core_defs'
 
@@ -31,6 +32,17 @@ module EscapeAnalysis
   # BC2CPP_ESCAPE_ANALYSIS=0 returns every consumer to the earlier output.
   def self.enabled?
     ENV['BC2CPP_ESCAPE_ANALYSIS'] != '0'
+  end
+
+  # [[instruction, index]] of the IR instructions whose op is one of +ops+, in program order.
+  def self.op_sites(irep, ops)
+    sites = []
+    BytecodeIR.for(irep).each_with_op(*ops) { |insn, index| sites << [insn, index] }
+    sites
+  end
+
+  def self.insn_at(irep, index)
+    BytecodeIR.for(irep).instruction_at(index).source
   end
 
   class << self
@@ -151,6 +163,8 @@ module EscapeAnalysis
     REFLECTIVE_SENDS = %w[binding eval local_variable_get local_variable_set local_variables
                           local_variable_defined?].freeze
     REFLECTIVE_CONSTS = %w[ObjectSpace].freeze
+    # Every op scan_definitions reads.
+    SCANNED_OPS = (SENDS | DEF_OPS | %w[GETCONST GETMCNST]).freeze
 
     attr_reader :ireps, :aliases, :dynamic_sites, :reflective_sites
 
@@ -314,12 +328,10 @@ module EscapeAnalysis
       @defs.each { |name, list| list.each { |d| known[name] << d.irep if d.irep } }
       closure_bodies = Set.new
       @ireps.each_value do |irep|
-        irep.instructions.each do |insn|
-          closure_bodies << irep.reps[insn.block_index.to_i] if CLOSURE_OPS.include?(insn.op)
-        end
+        EscapeAnalysis.op_sites(irep, CLOSURE_OPS).each { |insn, _| closure_bodies << irep.reps[insn.block_index.to_i] }
       end
       @ireps.each_value do |irep|
-        irep.instructions.each_with_index do |insn, idx|
+        EscapeAnalysis.op_sites(irep, SCANNED_OPS).each do |insn, idx|
           if (SENDS.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)) ||
              (%w[GETCONST GETMCNST].include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
             @reflective_sites << [irep.label, idx]
@@ -371,10 +383,13 @@ module EscapeAnalysis
       defs = BytecodeIR.reaching_definitions(irep, idx, reg)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
-      loads = defs.map { |d| irep.instructions[d.index] }
+      loads = defs.map { |d| EscapeAnalysis.insn_at(irep, d.index) }
       loads.first.sym if loads.all? { |l| l.op == 'LOADSYM' } && loads.map(&:sym).uniq.size == 1
     end
   end
+
+  BLKPUSH = %w[BLKPUSH].freeze
+  REF_OPS = %w[GETUPVAR BLKPUSH].freeze
 
   class Analyzer
     MAX_DEPTH = 24
@@ -398,10 +413,10 @@ module EscapeAnalysis
     CREATED_CLASS = { 'LAMBDA' => 'Proc', 'BLOCK' => 'Proc', 'ARRAY' => 'Array', 'HASH' => 'Hash',
                       'STRING' => 'String', 'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range' }.freeze
 
-    # The value written to the leading register of irep.instructions[index]: a LAMBDA, BLOCK, ARRAY, HASH,
+    # The value written to the leading register of the instruction at +index+: a LAMBDA, BLOCK, ARRAY, HASH,
     # STRING or the result of a `new` send (then +value_class+ is the constructed class when known).
     def creation(irep, index, value_class: nil)
-      insn = irep.instructions[index]
+      insn = EscapeAnalysis.insn_at(irep, index)
       return failed(:no_destination) unless insn.reg
       return failed(:reflection) unless @world.reflective_sites.empty?
 
@@ -499,8 +514,7 @@ module EscapeAnalysis
     # The block of a method is born at BLKPUSH (level 0) and, with a block parameter, in its local.
     def block_captured?(irep)
       fields = irep.enter ? irep.enter.enter_fields : []
-      sources = []
-      irep.instructions.each_with_index { |insn, j| sources << j if insn.op == 'BLKPUSH' && insn.paren_value.to_i.zero? }
+      sources = EscapeAnalysis.op_sites(irep, BLKPUSH).filter_map { |insn, j| j if insn.paren_value.to_i.zero? }
       starts = {}
       local = nil
       if fields[6].to_i.positive?
@@ -793,14 +807,14 @@ module EscapeAnalysis
       irep = run.irep
       closure_children(irep).each do |ci, child|
         refs = closure_refs(irep, ci, child).select do |ref|
-          !ref[:write] && (ref[:kind] == :blk ? block_tracked : ever.include?(ref[:idx].to_s))
+          ref[:kind] == :blk ? block_tracked : ever.include?(ref[:idx].to_s)
         end
         next if refs.empty? && !run.self_tracked
 
         reason = closure_reason(irep, ci, child, refs, run)
         next unless reason
 
-        run.reasons << [reason, irep.instructions[ci].addr]
+        run.reasons << [reason, EscapeAnalysis.insn_at(irep, ci).addr]
         return
       end
     end
@@ -827,27 +841,23 @@ module EscapeAnalysis
 
     # [[closure instruction index, child irep]] of +irep+.
     def closure_children(irep)
-      irep.instructions.each_with_index.filter_map do |insn, j|
-        next unless CLOSURE_OPS.include?(insn.op)
-
+      EscapeAnalysis.op_sites(irep, CLOSURE_OPS).filter_map do |insn, j|
         child = @world.ireps[irep.reps[insn.block_index.to_i]]
         [j, child] if child
       end
     end
 
-    # Reads (GETUPVAR/SETUPVAR/BLKPUSH) inside +irep+'s closure subtree that resolve to the frame +irep+
-    # is a closure of (+depth+ 0 = a read in +irep+ itself). +chain+: the [irep, closure index] pairs that
-    # carry the read out of that frame.
+    # Reads (GETUPVAR/BLKPUSH) inside +irep+'s closure subtree that resolve to the frame +irep+ is a closure
+    # of (+depth+ 0 = a read in +irep+ itself). +chain+: the [irep, closure index] pairs that carry the read
+    # out of that frame. A SETUPVAR only writes the frame's register, so it is no read.
     def subtree_refs(irep, depth, chain)
       refs = []
-      irep.instructions.each_with_index do |insn, j|
-        case insn.op
-        when 'GETUPVAR', 'SETUPVAR'
+      EscapeAnalysis.op_sites(irep, REF_OPS).each do |insn, j|
+        if insn.op == 'GETUPVAR'
           idx, level = insn.upvar_ref
-          refs << { kind: :up, idx: idx, irep: irep, index: j, dest: insn.reg, write: insn.op == 'SETUPVAR',
-                    chain: chain } if level == depth
-        when 'BLKPUSH'
-          refs << { kind: :blk, irep: irep, index: j, dest: insn.reg, write: false, chain: chain } if insn.paren_value.to_i == depth + 1
+          refs << { kind: :up, idx: idx, irep: irep, index: j, dest: insn.reg, chain: chain } if level == depth
+        elsif insn.paren_value.to_i == depth + 1
+          refs << { kind: :blk, irep: irep, index: j, dest: insn.reg, chain: chain }
         end
       end
       closure_children(irep).each do |ci, child|
