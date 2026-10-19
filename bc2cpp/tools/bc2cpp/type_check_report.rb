@@ -172,8 +172,8 @@ module TypeCheckReport
       out << Diagnostic.new(file: d['file'], line: d['line'], col: d['col'], severity: d['severity'], code: d['code'],
                             message: d['message'])
     end
-    Array(facts['ir_feedback']).each do |row|
-      next unless scope == 'all' || row['scope'] == scope
+    fc = filtered_collections(facts, scope)
+    fc[:feedback].each do |row|
       if all && row['status'] == 'unknown'
         out << Diagnostic.new(file: row['file'], line: row['line'], col: row['col'], severity: 'info', code: 'TC2004',
                               message: "#{row['owner']}##{row['method']} #{row['kind']} #{row['detail']}: IR type unknown (#{row['reason']})")
@@ -201,9 +201,7 @@ module TypeCheckReport
                                      "#{s['sites']} site(s)#{est}")
     end
     if all
-      facts['methods'].each do |m|
-        next unless scope == 'all' || m['scope'] == scope
-
+      fc[:methods].each do |m|
         m['params'].each do |p|
           next if p['type']
 
@@ -215,8 +213,8 @@ module TypeCheckReport
         out << Diagnostic.new(file: m['file'], line: m['line'], col: m['col'], severity: 'info', code: 'TC2002',
                               message: "#{m['owner']}##{m['name']} return has no type: #{m['return']['reason']}")
       end
-      facts['ivars'].each do |i|
-        next if i['type'] || !(scope == 'all' || i['scope'] == scope)
+      fc[:ivars].each do |i|
+        next if i['type']
 
         out << Diagnostic.new(file: i['file'] || '-', line: i['line'], col: i['col'], severity: 'info', code: 'TC2003',
                               message: "#{i['owner']}##{i['name']} has no type: #{i['reason']}")
@@ -348,14 +346,23 @@ module TypeCheckReport
     rows.join("\n") << "\n"
   end
 
+  def filtered_collections(facts, scope)
+    @filtered_collections ||= {}
+    @filtered_collections[[facts.object_id, scope]] ||= {
+      methods: facts['methods'].select { |m| scope == 'all' || m['scope'] == scope },
+      ivars: facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope },
+      constants: facts['constants'].select { |c| scope == 'all' || c['scope'] == scope },
+      feedback: Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope }
+    }
+  end
+
   def json(facts, suggestions, diags, summary, scope: 'engine')
-    methods = facts['methods'].select { |m| scope == 'all' || m['scope'] == scope }
-    ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }
+    fc = filtered_collections(facts, scope)
     JSON.pretty_generate({ 'version' => facts['version'], 'scope' => scope, 'summary' => summary, 'diagnostics' => diags.map(&:to_h),
-                           'suggestions' => suggestions, 'methods' => methods, 'ivars' => ivars,
+                           'suggestions' => suggestions, 'methods' => fc[:methods], 'ivars' => fc[:ivars],
                            'constants' => facts['constants'], 'annotations' => facts['annotations'],
                            'native_direct_forms' => Array(facts['native_direct_forms']),
                            'rbs_suggestions' => TypeCheckRbs.inferred_return_suggestions(facts, scope: scope),
-                           'ir_feedback' => Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope } }) << "\n"
+                           'ir_feedback' => fc[:feedback] }) << "\n"
   end
 end

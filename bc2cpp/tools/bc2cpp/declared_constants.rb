@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'core_hierarchy_sigs'
 require_relative 'integer_constants'
 require_relative 'irep_scans'
 require_relative 'native_sigs'
@@ -407,6 +408,81 @@ module DeclaredConstants
       grown.each_key { |name| known[name] = 'Array' }
     end
     known
+  end
+
+  # ---------------------------------------------------------------------------------------------- report-level owners
+  # The owner-scoped proofs below feed TypeFacts const_rows only. The declared check and CodeGen keep their own
+  # program-wide predicates, so generated code is unchanged by them.
+
+  # CORE_CONTAINERS: the exact classes whose stock methods the owner proofs cover.
+  CORE_CONTAINERS = %w[Array Hash].freeze
+
+  # Whether a call of +name+ on an exact +klass+ instance (Array or Hash) is mruby's own method. The owners that answer
+  # it first are the core ancestors of +klass+ (CoreHierarchySigs: Array, Enumerable, Object, Kernel, BasicObject) and
+  # every module mixed into those, transitively. A Ruby definition on one of them, a prepend on one of them, or an
+  # unresolved mixin into one of them refuses the proof. A Ruby definition anywhere else (Graphics.freeze, a game
+  # class) cannot answer an Array or Hash receiver, so it does not. Scoped to the owners because a program-wide name
+  # check refuses on the engine's own methods of the same name.
+  def stock_method?(name, klass, registry, included_modules, prepended_modules, unknown_mixins)
+    return false unless CORE_CONTAINERS.include?(klass)
+
+    owners = Set.new(CoreHierarchySigs.ancestors(klass))
+    loop do
+      grown = owners.flat_map { |owner| Array(included_modules[owner]) }.reject { |m| owners.include?(m) }
+      break if grown.empty?
+
+      owners.merge(grown)
+    end
+    return false if owners.any? { |owner| unknown_mixins.include?(owner) || !Array(prepended_modules[owner]).empty? }
+
+    (registry[name] || []).none? { |d| owners.include?(d.owner) }
+  end
+
+  # Whether the value of +reg+ at +idx+ is the result of a `.freeze` (the first writer, past moves, is a SEND0 freeze).
+  # A constant whose value is frozen needs the stock freeze proof to be typed by its literal class.
+  def frozen_at?(irep, idx, reg)
+    found = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, _j, _cur|
+      insn.op == 'SEND0' && insn.sym == 'freeze'
+    end
+    found == true
+  end
+
+  # `R.merge(H)` at +idx+: the one-argument SEND `merge` whose receiver proves exactly Hash (a Hash literal, or a constant
+  # the containers say is a Hash). Hash#merge answers a fresh Hash (or raises), so the result is a Hash when
+  # `merge_safe` (stock_method? on Hash) and `singleton_free` hold: no singleton `merge` can sit on the receiver.
+  def hash_merge_source?(irep, idx, reg, registry, containers, merge_safe:, singleton_free:, owner: nil)
+    return false unless merge_safe && singleton_free
+
+    j, insn = merge_writer(irep, idx, reg)
+    return false unless insn&.op == 'SEND' && insn.sym == 'merge' && insn.argc.to_i == 1 && insn.reg
+
+    # `owner` is the lexical scope of the assignment: a bare constant receiver (`SAVE_MOVABLE.merge`) resolves in it.
+    trace_new_target(irep, j, insn.reg, registry: registry, container_constants: containers, owner: owner) == 'Hash'
+  end
+
+  # The writer of +reg+ before +idx+ that dominates the read, as [index, instruction], or nil (see sum_writer).
+  def merge_writer(irep, idx, reg)
+    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, _cur|
+      [j, insn]
+    end
+  end
+
+  # The qualified names whose every assignment is a Hash merge, as { name => 'Hash' } (see hash_merge_source?).
+  def hash_merge_names(ireps, sites, registry, containers, merge_safe:, singleton_free:)
+    return {} unless merge_safe && singleton_free
+
+    by_name = sites.group_by { |s| s[:name] }
+    by_name.each_with_object({}) do |(name, group), known|
+      next if containers.key?(name)
+
+      proven = group.all? do |s|
+        irep = ireps[s[:irep]]
+        irep && hash_merge_source?(irep, s[:idx], s[:reg], registry, containers, merge_safe: merge_safe,
+                                                                               singleton_free: singleton_free,
+                                                                               owner: s[:owner])
+      end
+      known[name] = 'Hash' if proven
+    end
   end
 
   # Fixnum intervals of constant expressions over integer literals and other constants. A constant read is keyed by
