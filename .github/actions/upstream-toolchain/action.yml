@@ -1,0 +1,31 @@
+name: Upstream suite toolchain
+description: Ubuntu 26.04 tools with caches isolated from the existing PR toolchain.
+inputs:
+  pathb:
+    default: "false"
+    description: Also build or restore Path B.
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/toolchain
+      with:
+        cache-prefix: nightly-ubuntu26-v1-
+        packages: gcc-15 g++-15 python3 python3-psutil ruby rake ripgrep curl clang-21
+    - uses: actions/cache@v4
+      with:
+        path: build/mruby-tool
+        key: nightly-mruby-ubuntu26-v1-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+    - shell: bash
+      run: scripts/setup-mruby.sh
+    - name: EDG cache identity
+      id: key
+      shell: bash
+      run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      if: inputs.pathb == 'true'
+      with:
+        path: build/pathb
+        key: nightly-pathb-ubuntu26-v1-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+    - shell: bash
+      if: inputs.pathb == 'true'
+      run: scripts/setup-pathb.sh

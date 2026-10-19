@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 tests/upstream/setup-git.sh llvm-test-suite
 src=$PWD/build/testsuite-snapshots/llvm-test-suite
-out=$PWD/build/testsuite-snapshots/llvm-test-suite-host
+out=${LLVM_TEST_SUITE_OUT:-$PWD/build/testsuite-snapshots/llvm-test-suite-host}
 cmake -S "$src" -B "$out" -G Ninja \
   -DCMAKE_C_COMPILER=/usr/bin/clang-21 -DCMAKE_CXX_COMPILER=/usr/bin/clang++-21 \
   -DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER= \

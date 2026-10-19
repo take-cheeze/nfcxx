@@ -1,0 +1,33 @@
+name: Pinned upstream snapshot
+description: Restore sources and validate their committed pin; never cache test results.
+inputs:
+  suite:
+    required: true
+    description: Snapshot name from tests/upstream manifests, or cppreference.
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      if: inputs.suite == 'cppreference'
+      with:
+        path: build/testsuite-snapshots/html-book-*.tar.xz
+        key: upstream-archive-v1-${{ hashFiles('tests/upstream/snapshots.tsv') }}
+    - uses: actions/cache@v4
+      with:
+        path: |
+          build/testsuite-snapshots/${{ inputs.suite }}
+          build/testsuite-snapshots/${{ inputs.suite }}-examples
+          build/testsuite-snapshots/${{ inputs.suite }}-inventory.tsv
+          build/testsuite-snapshots/${{ inputs.suite }}-all-inventory.tsv
+        key: upstream-source-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.suite }}-${{ hashFiles('tests/upstream/git-snapshots.tsv', 'tests/upstream/snapshots.tsv', 'tests/upstream/*extract.rb', 'tests/upstream/setup*.sh') }}
+    - name: Materialize and verify the pinned source
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+      run: |
+        case "$SUITE" in
+          cppreference) tests/upstream/setup.sh ;;
+          cpprefjp) tests/upstream/setup-cpprefjp.sh ;;
+          gcc|clang|llvm-test-suite|microsoft-stl) tests/upstream/setup-git.sh "$SUITE" ;;
+          *) echo "Unknown snapshot: $SUITE" >&2; exit 1 ;;
+        esac

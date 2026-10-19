@@ -5,19 +5,20 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
 snapshot=$root/build/testsuite-snapshots
+dejagnu=${DEJAGNU_ROOT:-$snapshot/dejagnu}
 src=$snapshot/gcc
 out=${GCC_SUITE_OUT:-$snapshot/gcc-native-full}
 compiler=${GCC_SUITE_CXX:-/usr/bin/g++}
 jobs=${SUITE_JOBS:-8}
 [[ $jobs =~ ^[1-9][0-9]*$ ]] || exit 1
 test -f "$src/contrib/test_installed"
-test -x "$snapshot/dejagnu/usr/bin/runtest"
+test -x "$dejagnu/usr/bin/runtest"
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 test ! -e "$out/started" || { echo "choose a fresh GCC_SUITE_OUT: $out" >&2; exit 1; }
 touch "$out/started"
 mkdir "$out/parallel"
-export PATH="$snapshot/dejagnu/usr/bin:/usr/bin:/bin:$PATH"
-export LD_LIBRARY_PATH="$snapshot/dejagnu/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$dejagnu/usr/bin:/usr/bin:/bin:$PATH"
+export LD_LIBRARY_PATH="$dejagnu/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GCC_RUNTEST_PARALLELIZE_DIR=$out/parallel
 "$compiler" --version > "$out/compiler.txt" 2>&1 || true
 target=${GCC_SUITE_TARGET:-x86_64-linux-gnu}

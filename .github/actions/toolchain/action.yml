@@ -6,6 +6,9 @@ description: >
   caller sets SCCACHE_GHA_ENABLED and CMAKE_*_COMPILER_LAUNCHER, as before.
 
 inputs:
+  cache-prefix:
+    description: Optional cache namespace for callers using a different runner image or toolchain ABI.
+    default: ""
   packages:
     description: Extra apt packages, space separated.
     default: ""
@@ -39,7 +42,7 @@ runs:
         path: |
           build/edg
           build/edg-base
-        key: edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.edg }}
+        key: ${{ inputs.cache-prefix }}edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.edg }}
 
     - name: Build EDG front end
       if: steps.edg.outputs.cache-hit != 'true'
@@ -55,7 +58,7 @@ runs:
           build/qbe
           build/cproc
           build/pathb-ldrt
-        key: qbe-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.qbe }}
+        key: ${{ inputs.cache-prefix }}qbe-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.qbe }}
 
     - name: Build QBE and cproc
       if: inputs.qbe == 'true' && steps.qbe.outputs.cache-hit != 'true'

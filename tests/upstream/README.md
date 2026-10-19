@@ -171,7 +171,8 @@ Results are under build/testsuite-snapshots, with separate folders per survey
 and runner. Manifests, compiler versions, nfcxx commit/dirty patch and logs
 accompany survey results. Untracked harness files are not captured by git diff;
 commit or archive them alongside the results when preserving a baseline.
-No new scheduled workflows are enabled. See the [CI rollout plan](../../docs/notes/cpp-test-ci-plan.md).
+Nightly and weekly collection is configured in `upstream-nightly.yml`; see the
+[CI tiers and failure policy](../../docs/notes/cpp-test-ci-plan.md).
 
 ## Broad native runs
 
@@ -256,3 +257,27 @@ upstream stl-lit. It disables extra ASan configurations (`notags=ASAN`), keeps
 remaining matrix flags, and writes JSON. This Windows command has not been
 executed locally; clang-cl and Wine alone do not supply its missing MSVC/SDK
 prerequisites. See [measured library results](../../docs/notes/library-suite-results.md).
+
+## Scheduled runs
+
+[Upstream nightly](../../.github/workflows/upstream-nightly.yml) runs at 02:23
+JST daily after merge to the default branch. Monday JST adds the extended
+surveys/full EDG tree. Manual dispatch accepts `extended=true`. No PR or push
+trigger runs these broad suites. Native Microsoft STL/extra architectures are
+not scheduled yet.
+
+Native GCC/Clang/library jobs collect compatibility observations using
+`nightly-native.py`: known test failures remain visible in JSON and job
+summaries; missing or broken harness outputs fail the job. Strict feature and
+reviewed library runtime checks and EDG expectation changes still fail.
+`nightly-self-test.py` covers failure classification. Four workers, per-case
+budgets and step/job ceilings bound execution. Artifacts are uploaded on
+failure and retained for 14 days. Existing local measured results do not
+constitute a hosted-runner baseline.
+
+`DEJAGNU_ROOT=/` selects an installed DejaGnu/Expect in the native GCC/library
+runners; the default is still the locally extracted pinned packages.
+`CLANG_TIDY_EXE` selects a matching installed tool and skips the optional local
+package extraction during libc++ setup. `LLVM_TEST_SUITE_OUT` changes the LLVM
+hello smoke build/results directory. `SURVEY_ROUTES` can restrict the
+Microsoft-origin object survey to one route for independent weekly jobs.

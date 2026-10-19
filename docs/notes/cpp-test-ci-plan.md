@@ -1,7 +1,9 @@
-# C++ test coverage: local environment and proposed CI tiers
+# C++ test coverage: local environment and scheduled CI tiers
 
-Status: local environment is implemented and exercised; the new scheduled
-jobs below are a rollout plan. Existing workflows are not rescheduled here.
+Status: the local environment is exercised and `upstream-nightly.yml` now
+implements nightly Linux coverage, weekly extended surveys, and manual runs.
+Existing PR protection and other workflows retain their schedules. Native
+compatibility observations still need reviewed CI baselines.
 Reproduction, pins and measured results are in
 [`tests/upstream/README.md`](../../tests/upstream/README.md).
 
@@ -30,22 +32,27 @@ should be separate, reviewable workflow changes.
 
 ## Nightly: broad compatibility and baseline comparison
 
-Proposed schedule: `23 17 * * *` UTC (02:23 JST the following day), on the
-default branch, plus `workflow_dispatch` for a chosen ref. PRs can request a
-manual broad run; nightly jobs do not run for each PR update.
+Implemented in [upstream-nightly.yml](../../.github/workflows/upstream-nightly.yml):
+02:23 JST daily, split into `23 17 * * 1-6` and `23 17 * * 0` UTC. The Sunday
+UTC run (Monday JST) also runs extended surveys and the full EDG tree.
+`workflow_dispatch` can request extended coverage on a chosen ref after the
+workflow reaches the default branch. There is no PR/push trigger.
 
 | Job | Coverage | Initial failure policy |
 | --- | --- | --- |
 | nfcxx language matrix | All committed probes, all three routes; extend through C++17–23 as probes are written. | Fail any regression from the reviewed per-route baseline. |
-| cppreference and cpprefjp | Reviewed runtime examples plus compile-only language surveys (185 and 290 examples); bounded library shards. Never auto-execute unreviewed examples. | Publish actual results; compare with a reviewed baseline. Keep unsupported dialects and compile budgets explicit. |
+| cppreference and cpprefjp | Reviewed runtime examples plus compile-only language surveys (185 and 290 examples); library shards remain future work. Never auto-execute unreviewed examples. | Publish actual results; compare with a reviewed baseline. Keep unsupported dialects and compile budgets explicit. |
 | EDG own suite | Native Docker harness, C-generating x86-64 configuration; `regressions`, `cwg`, `changes`, then other native groups as timings permit. | Compare recorded upstream expectations; fail new status/output changes and infrastructure failures. Do not rerecord automatically. |
 | GCC language suite pilot | Four reviewed exit-zero programs now run on all routes; grow the selection or implement a full directive adapter. | Preserve original oracles; stdout with addresses is not an exact-output assertion. Unsupported directives require the native harness. |
-| Clang and LLVM native harnesses | Original diagnostic smoke tests through lit; LLVM CMake/lit reference-output checks and reviewed nfcxx programs. | Keep native compiler results separate from nfcxx route results. |
+| Clang and LLVM native harnesses | Full Clang regression lit run; LLVM CMake/lit hello smoke and reviewed nfcxx programs. | Keep native compiler results separate from nfcxx route results. |
 | Standard library Linux baselines | Native libc++ lit and installed libstdc++ DejaGnu, separate jobs; nine reviewed source probes on nfcxx routes. | Keep vendor implementation baselines separate from source-origin probes using local libstdc++; triage native failures before gating deltas. |
 | Existing larger integration suites | Selected poly/uop/real-world checks after the PR-cost audit. | Retain their existing correctness assertions. |
 
-Target: a 30-minute timeout per broad shard initially. Keep route and upstream
-group shards independent so one failure does not discard the others' results.
+Reference and extended survey steps have 30-minute timeouts; native steps
+have 30 minutes except libc++ (45), and EDG allows 60 including its cold
+Docker build. Jobs have a 90-minute ceiling including setup, with four survey
+workers. These are initial limits to revisit after hosted-runner measurement.
+Keep route and upstream group shards independent so one failure does not discard the others' results.
 Set small per-case timeouts, bounded parallelism, and a total job timeout.
 Use stable test ordering and deterministic shard assignment. If EDG/GCC
 inventory exceeds the budget, rotate fixed shards over nightly runs and label
@@ -124,8 +131,9 @@ cases needing a native harness. Full native GCC/Clang/EDG runs are now measured 
 triage and nfcxx diagnostic adaptation still requires explicit feature/tool
 support. The warm local parallel window was 13m23s (EDG 12m13s, GCC 8m41s,
 Clang 6m46s plus a 12s retry); measure setup and execution again on Actions.
-These full native baselines can run nightly within the proposed initial
-30-minute shard budget; keep extra configurations and targets weekly.
+These local measurements motivate the nightly native jobs; check hosted
+costs against their configured 30/45-minute step ceilings before adopting
+baselines. Keep extra configurations and targets weekly.
 
 ## Rollout order
 
@@ -140,11 +148,35 @@ These full native baselines can run nightly within the proposed initial
    smoke matches recorded expectations, while the full tree identifies nine
    regressed entries. Native GCC/Clang and library failures, plus nfcxx
    crashes/timeouts, remain visible in the linked reports.
-3. **PR self-tests wired:** the small upstream extraction self-test shares the
-   feature-probe job. Next introduce a manual broad workflow using these exact
-   pins and upload reports.
+3. **Wired:** the small upstream extraction self-test shares the PR feature
+   job. The nightly/manual workflow uses these pins, isolates Ubuntu 26.04
+   caches from existing PR caches, and uploads 14-day artifacts even on failures.
 4. Implement explicit baseline comparison and GCC directive handling. Measure
    cold/warm setup and test costs on the actual Actions runner.
-5. Enable the nightly schedule after the manual workflow is repeatable; split
-   or rotate suites to stay within the budget. Migrate existing heavy PR jobs
-   in separate changes based on measured costs.
+5. The nightly schedule activates when this workflow reaches the default
+   branch. Confirm its first hosted runs and adjust sharding from their costs.
+   Migrate existing heavy PR jobs in separate changes based on measured costs.
+
+## Implemented workflow policy
+
+Each nfcxx route gets its own feature checks, reviewed reference/compiler
+programs, nine reviewed library programs, and the two language surveys.
+Feature probes and reviewed library programs require passes. Reference/compiler
+smokes retain their known observations. Independent native jobs run GCC,
+Clang, libc++, libstdc++, and the LLVM test-suite hello smoke. EDG compares
+regressions/cwg/changes nightly and its full tree weekly. The full GCC positive
+and Microsoft-origin object surveys run weekly/manual, split by route.
+
+Native GCC/Clang/library outcomes are explicitly observational while reviewed
+CI baselines are absent. A completed native run may report FAIL, UNRESOLVED,
+or TIMEOUT and still successfully collect data; that is not an all-pass claim.
+Missing/empty results, unexplained exits, DejaGnu ERRORs and failed workers fail
+the collection step. EDG's recorded expectations remain a strict gate; no
+expectations are rerecorded. There is no blanket continue-on-error.
+
+Job summaries list outcome counts and artifacts contain the corresponding
+TSV/JSON, compiler versions, pins, commit/runner identity and logs. EDG uploads
+comparison logs/lists rather than every per-case archive. Source caches exclude
+results; toolchain caches have an Ubuntu 26 namespace to avoid replacing PR
+compiler builds with binaries from a different system ABI. A successfully
+built EDG compiler is cached even if its subsequent expectations fail.

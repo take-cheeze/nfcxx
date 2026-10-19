@@ -1,0 +1,297 @@
+name: Upstream nightly
+
+on:
+  schedule:
+    - cron: "23 17 * * 1-6" # 02:23 JST, normal nightly coverage
+    - cron: "23 17 * * 0"   # Sunday UTC: add the expensive compile surveys/full EDG tree
+  workflow_dispatch:
+    inputs:
+      extended:
+        description: Include weekly GCC/Microsoft-origin object surveys and the full EDG tree
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SUITE_JOBS: "4"
+  SURVEY_JOBS: "4"
+  SURVEY_TIMEOUT: "20"
+  HOST_CXX: /usr/bin/g++-15
+  GCC_SUITE_CXX: /usr/bin/g++-15
+  SCCACHE_GHA_ENABLED: "true"
+  CMAKE_C_COMPILER_LAUNCHER: sccache
+  CMAKE_CXX_COMPILER_LAUNCHER: sccache
+  PATHB_JOBS: "4"
+
+jobs:
+  toolchain:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90 # includes a cold compiler build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/upstream-toolchain
+        with:
+          pathb: "true"
+
+  routes:
+    needs: toolchain
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [qbe, gcc, pathb]
+    env:
+      FEATURE_ROUTES: ${{ matrix.route }}
+      UPSTREAM_ROUTES: ${{ matrix.route }}
+      SURVEY_ROUTES: ${{ matrix.route }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/upstream-toolchain
+        with:
+          pathb: ${{ matrix.route == 'pathb' && 'true' || 'false' }}
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: cppreference
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: cpprefjp
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: gcc
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: clang
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: llvm-test-suite
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: microsoft-stl
+      - name: Offline harness checks
+        id: ready
+        run: |
+          tests/cpp-features/self-test.sh
+          tests/upstream/self-test.sh
+          python3 tests/upstream/nightly-self-test.py
+      - name: Feature probes (strict)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          FEATURE_REQUIRE_PASS: "1"
+          FEATURE_OUT: build/nightly/features
+        run: tests/cpp-features/run.sh
+      - name: Reviewed reference and compiler-suite programs (observational)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          UPSTREAM_OUT=build/nightly/cppreference tests/upstream/run-cppreference.sh
+          UPSTREAM_OUT=build/nightly/selected tests/upstream/run-selected.sh
+      - name: Reviewed library runtime programs (strict)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          UPSTREAM_MANIFEST: tests/upstream/reviewed-libraries.tsv
+          UPSTREAM_OUT: build/nightly/libraries
+          UPSTREAM_REQUIRE_PASS: "1"
+        run: tests/upstream/run-selected.sh
+      - name: cppreference language object survey (observational)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          SURVEY_OUT: build/nightly/cppreference-language
+        run: tests/upstream/survey.sh cppreference language
+      - name: cpprefjp language object survey (observational)
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          SURVEY_OUT: build/nightly/cpprefjp-language
+        run: tests/upstream/survey.sh cpprefjp language
+      - name: Stage results and job summary
+        if: always()
+        run: python3 tests/upstream/nightly-artifacts.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-route-${{ matrix.route }}-${{ github.run_attempt }}
+          path: build/nightly-artifact
+          retention-days: 14
+          if-no-files-found: error
+
+  native:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: gcc
+            source: gcc
+          - suite: clang
+            source: clang
+          - suite: libstdcxx
+            source: gcc
+          - suite: libcxx
+            source: clang
+          - suite: llvm-test-suite
+            source: llvm-test-suite
+    env:
+      DEJAGNU_ROOT: /
+      CLANG_TIDY_EXE: /usr/bin/clang-tidy-21
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native harness tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gcc-15 g++-15 \
+            cmake ninja-build ruby rake ripgrep curl python3 python3-psutil python3-yaml \
+            clang-21 clang-tools-21 clang-tidy-21 llvm-21-dev llvm-21-tools lld-21 \
+            libclang-21-dev dejagnu expect
+          mkdir -p build/nightly
+          dpkg-query -W gcc-15 g++-15 clang-21 clang-tidy-21 llvm-21-dev dejagnu expect > build/nightly/toolchain.txt
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: ${{ matrix.source }}
+      - uses: ./.github/actions/upstream-snapshot
+        if: matrix.suite == 'llvm-test-suite'
+        with:
+          suite: clang
+      - name: Native harness self-test
+        run: python3 tests/upstream/nightly-self-test.py
+      - name: Set up sccache for the libc++ build
+        if: matrix.suite == 'libcxx'
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: libc++ compiler cache identity
+        if: matrix.suite == 'libcxx'
+        id: compiler
+        run: echo "id=$(sha256sum build/nightly/toolchain.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        if: matrix.suite == 'libcxx'
+        with:
+          path: build/testsuite-snapshots/libcxx-build-system
+          key: nightly-libcxx-ubuntu26-v1-${{ steps.compiler.outputs.id }}-${{ hashFiles('tests/upstream/git-snapshots.tsv', 'tests/upstream/setup-libcxx.sh') }}
+      - name: Build libc++ and its test dependencies
+        if: matrix.suite == 'libcxx'
+        run: tests/upstream/setup-libcxx.sh
+      - name: Collect native compatibility observations
+        timeout-minutes: ${{ matrix.suite == 'libcxx' && 45 || 30 }}
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: python3 tests/upstream/nightly-native.py "$SUITE" "build/nightly/$SUITE"
+      - name: Stage results and job summary
+        if: always()
+        run: python3 tests/upstream/nightly-artifacts.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-native-${{ matrix.suite }}-${{ github.run_attempt }}
+          path: build/nightly-artifact
+          retention-days: 14
+          if-no-files-found: error
+
+  edg:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: EDG Docker build cache identity
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: 3rd/edg/build/gcc
+          key: nightly-edg-docker-ubuntu26-v1-${{ steps.key.outputs.edg }}-${{ hashFiles('tests/upstream/edg-c.json', 'tests/upstream/edg.sh') }}
+      - name: Native EDG recorded expectations (strict)
+        timeout-minutes: 60 # cold Docker build plus tests
+        env:
+          EXTENDED: ${{ github.event.schedule == '23 17 * * 0' || inputs.extended == true }}
+          EDG_TEST_TIMEOUT: "120"
+        run: |
+          if [ "$EXTENDED" = true ]; then
+            tests/upstream/edg.sh all
+          else
+            tests/upstream/edg.sh regressions,cwg,changes
+          fi
+      - name: Save a completed build even when expectation checks fail
+        if: always() && steps.cache.outputs.cache-hit != 'true' && hashFiles('3rd/edg/build/gcc/upstream-build-complete') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: 3rd/edg/build/gcc
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Stage comparison logs and job summary
+        if: always()
+        run: python3 tests/upstream/nightly-artifacts.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-edg-${{ github.run_attempt }}
+          path: build/nightly-artifact
+          retention-days: 14
+          if-no-files-found: error
+
+  extended:
+    if: github.event.schedule == '23 17 * * 0' || inputs.extended == true
+    needs: toolchain
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [qbe, gcc, pathb]
+        suite: [gcc, microsoft-stl]
+    env:
+      SURVEY_ROUTES: ${{ matrix.route }}
+      SURVEY_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/upstream-toolchain
+        with:
+          pathb: ${{ matrix.route == 'pathb' && 'true' || 'false' }}
+      - uses: ./.github/actions/upstream-snapshot
+        with:
+          suite: ${{ matrix.suite }}
+      - name: Extended compile observations (no unreviewed execution)
+        timeout-minutes: 30
+        env:
+          SUITE: ${{ matrix.suite }}
+          SURVEY_OUT: build/nightly/object-survey
+        run: |
+          if [ "$SUITE" = gcc ]; then
+            root="$PWD/build/testsuite-snapshots"
+            rg --files --no-ignore "$root/gcc/gcc/testsuite/g++.dg" "$root/gcc/gcc/testsuite/g++.old-deja" \
+              "$root/gcc/gcc/testsuite/g++.target" -g '*.C' -g '*.cpp' | sort | sed "s|^$root/gcc/||" > "$root/gcc-files.txt"
+            scripts/mrb tests/upstream/gcc-index.rb "$root/gcc" "$root/gcc-files.txt" > "$root/gcc-inventory.tsv"
+            tests/upstream/survey-gcc.sh
+          else
+            python3 tests/upstream/survey-ms-stl.py
+            tests/upstream/survey-ms-stl-routes.sh
+          fi
+      - name: Stage results and job summary
+        if: always()
+        run: python3 tests/upstream/nightly-artifacts.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-extended-${{ matrix.suite }}-${{ matrix.route }}-${{ github.run_attempt }}
+          path: build/nightly-artifact
+          retention-days: 14
+          if-no-files-found: error

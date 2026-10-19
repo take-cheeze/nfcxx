@@ -11,6 +11,13 @@ mkdir -p "$out"; out=$(cd "$out" && pwd)
 mkdir "$out/.lock" || { echo "already running: $out" >&2; exit 1; }
 trap 'rm -rf "$out/.lock"' EXIT
 mkdir "$out/.lock/tasks"
+printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
+for route in host $routes; do
+  compiler=$root/nfcxx; flags=("--backend=$route" -c)
+  if [ "$route" = host ]; then compiler=${HOST_CXX:-g++}; flags=(-fsyntax-only); fi
+  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
+    -std=c++11 "$out/.lock/smoke.cpp" -o "$out/.lock/smoke.o" > "$out/preflight-$route.log" 2>&1
+done
 scripts/mrb tests/upstream/gcc-positive-manifest.rb "$snapshot" > "$out/manifest.tsv"
 n=0
 while IFS= read -r row; do
@@ -29,3 +36,4 @@ scripts/mrb tests/upstream/normalize-survey.rb "$out" "$out/results.tsv.tmp" > "
 git rev-parse HEAD > "$out/nfcxx.commit"
 cp tests/upstream/git-snapshots.tsv "$out/"
 echo "GCC positive compile observations: $out/results.tsv"
+if awk -F '\t' 'NR>1 && $6=="infrastructure-error" {bad=1} END {exit !bad}' "$out/results.tsv"; then exit 1; fi
