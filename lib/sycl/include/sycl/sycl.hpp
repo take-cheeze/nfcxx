@@ -2074,6 +2074,7 @@ template <class T> T *aligned_alloc_host(size_t align, size_t count, const queue
 template <class T> T *malloc(size_t count, const queue &, usm::alloc k) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), detail::kind_of(k)); }
 inline void *malloc_device(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 0); }
 inline void *malloc_shared(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 1); }
+inline void *malloc_shared(size_t bytes, const device &, const context &) { return detail::usm_malloc(bytes, 16, 1); }
 inline void *malloc_host(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 2); }
 inline void *malloc(size_t bytes, const queue &, usm::alloc k) { return detail::usm_malloc(bytes, 16, detail::kind_of(k)); }
 inline void free(void *p, const queue &) { if (p) detail::backend_usm_free(p); }
