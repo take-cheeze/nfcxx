@@ -58,14 +58,35 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -O2 -c "$src/libcx
 # get_terminate), the per-thread globals (__cxa_get_globals), the personality routine (__gxx_personality_v0), the
 # fallback allocator for exception objects, and the default handlers. Built as libc++abi builds them: exceptions on.
 eh=(-I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS -std=c++17 -fexceptions -O2)
-for f in cxa_exception cxa_handlers cxa_exception_storage cxa_personality fallback_malloc stdlib_exception; do
+for f in cxa_exception cxa_exception_storage cxa_personality fallback_malloc stdlib_exception; do
   clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
 done
+# cxa_handlers.cpp also defines std::unexpected, std::get_terminate and std::terminate, which libC.a (EDG's runtime)
+# defines too; two definitions collide at link time. The copy built here drops those three public functions and keeps
+# the handler storage and __terminate/__unexpected, which cxa_exception needs. Each block must match exactly once.
+python3 - "$src/libcxxabi/src/cxa_handlers.cpp" cxa_handlers.cpp <<'PY'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+blocks = [
+    r'__attribute__\(\(noreturn\)\)\nvoid\nunexpected\(\)\n\{\n.*?\n\}\n',
+    r'terminate_handler\nget_terminate\(\) noexcept\n\{\n.*?\n\}\n',
+    r'__attribute__\(\(noreturn\)\)\nvoid\nterminate\(\) noexcept\n\{\n.*?\n\}\n',
+]
+for b in blocks:
+    hits = re.findall(b, text, flags=re.S)
+    assert len(hits) == 1, ('cxa_handlers block not found exactly once', b)
+    text = re.sub(b, '', text, count=1, flags=re.S)
+open(dst, 'w').write(text)
+PY
+clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c cxa_handlers.cpp -o cxa_handlers.o
 # cxa_default_handlers.cpp uses constinit, so it is built as C++20 (as new_handler.cpp is).
 clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS \
   -std=c++20 -fexceptions -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
 
 rm -f libnfcxx-darwin-rt.a
-llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o atomic.o atomic_fetch.o stdlib_new_delete.o cxa_virtual.o cxa_vector.o abort_message.o stdlib_typeinfo.o private_typeinfo.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o cxa_default_handlers.o fallback_malloc.o stdlib_exception.o cxa_demangle.o
+# Only members with no symbol in libC.a go into the archive. libC.a (EDG's runtime) owns the EH, type_info,
+# handler and new/delete names that the other members define; the real libc++ on the Mac exports the libc++ names at run time.
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
