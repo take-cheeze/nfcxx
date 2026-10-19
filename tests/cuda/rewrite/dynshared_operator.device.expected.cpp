@@ -47,3 +47,7 @@ float f(int n) {
     }
     return acc;
 }
+
+
+                                                      
+void kf(float *o) { o[__nfcxx_tid_x()] = f(__nfcxx_tid_x()); }

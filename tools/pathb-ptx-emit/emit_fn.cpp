@@ -3,7 +3,9 @@
 // name, with the same order of fresh registers and emitted lines, so the PTX text is the same.
 #include "emit_fn.hpp"
 
+#include <algorithm>
 #include <functional>
+#include <map>
 #include <utility>
 
 #include "tables.inc"
@@ -64,9 +66,66 @@ bool contains_printf(const Node &f) {
   return false;
 }
 
+// The pieces of a copy of an aggregate (a byval parameter or argument, or an sret result): (offset, width) pairs, each as
+// wide as the alignment allows (8, 4, 2 or 1 bytes) and at an offset that is a multiple of its width. Each piece is one
+// ld and one st, as nvcc's struct parameters are moved (the parameter array is aligned to the struct's alignment).
+std::vector<std::pair<long long, int>> agg_pieces(long long size, long long align) {
+  std::vector<std::pair<long long, int>> out;
+  for (long long off = 0; off < size;) {
+    int w = 8;
+    while (w > 1 && (w > align || off % w != 0 || off + w > size)) w /= 2;
+    out.push_back({off, w});
+    off += w;
+  }
+  return out;
+}
+
+// The register class of a copy piece of width w (bytes): a 16-bit piece is a .b16 register, the others .b32 or .b64.
+std::string piece_reg(int w) { return w == 8 ? "rd" : w == 2 ? "h" : "r"; }
+
+// The access type of a copy piece of width w: loads are unsigned (zero-extended), stores are untyped bits.
+std::string piece_load(int w) { return "u" + std::to_string(w * 8); }
+std::string piece_store(int w) { return "b" + std::to_string(w * 8); }
+
 }  // namespace
 
+std::map<std::string, AggShape> abi_shapes(const std::vector<Node> &forms) {
+  std::map<std::string, AggShape> out;
+  for (const Node &f : forms) {
+    if (head_of(f) != "abi-type") continue;
+    if (f.items.size() < 4 || f.items[1].kind != Node::Str) throw BadIR("abi-type form " + form_text(f));
+    AggShape sh;
+    sh.size = static_cast<long long>(as_int(&f.items[2]));
+    sh.align = static_cast<long long>(as_int(&f.items[3]));
+    sh.empty = f.items.size() == 5 && head_of(f.items[4]) == "empty";
+    out[f.items[1].text] = sh;
+  }
+  return out;
+}
+
 Fn::Fn(std::string name, size_t index, Loader load) : load_(std::move(load)), index_(index), name_(std::move(name)) {}
+
+AggShape Fn::aggregate(const Node &t) const {
+  std::string h = head_of(t);
+  if (!((h == "struct" || h == "union") && t.items.size() == 2 && t.items[1].kind == Node::Str))
+    throw Refused("aggregate form " + form_text(t));
+  const std::string &name = t.items[1].text;
+  if (!aggs) throw Refused(h + " " + name + " passed by value (the module has no (abi-type) forms)");
+  auto it = aggs->find(name);
+  if (it == aggs->end()) throw Refused(h + " " + name + " has no (abi-type) form");
+  if (it->second.size <= 0 || it->second.align <= 0) throw Refused(h + " " + name + " has no size");
+  if (it->second.empty) return it->second;
+  return it->second;
+}
+
+long long Fn::alloc_frame(long long size, long long align) {
+  if (align < 1) align = 1;
+  frame_align_ = std::max(frame_align_, align);
+  frame_ = (frame_ + align - 1) / align * align;
+  long long off = frame_;
+  frame_ += size;
+  return off;
+}
 
 void Fn::release() {
   body_.clear();
@@ -87,6 +146,20 @@ std::string Fn::named_label(const std::string &name) {
   return l;
 }
 
+// The PTX name of parameter k: the parameters are numbered as nvcc numbers them, without the sret result.
+std::string Fn::param_name(size_t k) const {
+  size_t n = 0;  // the PTX parameters before k: not the sret result, not a function's empty object
+  for (size_t j = 0; j < k; j++)
+    if (is_ptx_param(j)) n++;
+  return name_ + "_param_" + std::to_string(n);
+}
+
+bool Fn::is_ptx_param(size_t k) const {
+  if (sret && k == 0) return false;
+  // a kernel's empty object is the host's one byte (the argument layout of the launch); a function's is not passed
+  return kernel || !(agg_params[k] && agg_params[k]->empty);
+}
+
 std::string Fn::ret_bits(const Ty &t) const {
   return t.kind == "float" ? "f" + std::to_string(t.size * 8) : bits_type(t);
 }
@@ -98,6 +171,12 @@ void Fn::setup() {
   body_.clear();
   bool have_ret = false;
   const Node &form = *form_;
+  // Each parameter (and the hidden result) has its entry in agg_params and agg_off_, parallel to params.
+  auto add_param = [this](const Ty &t, std::optional<AggShape> agg, long long off) {
+    params.push_back(t);
+    agg_params.push_back(agg);
+    agg_off_.push_back(off);
+  };
   for (size_t i = 2; i < form.items.size(); i++) {
     const Node &f = form.items[i];
     std::string h = head_of(f);
@@ -121,20 +200,32 @@ void Fn::setup() {
         std::string ph = head_of(p);
         if (ph == "ellipsis") throw Refused("variadic function");
         if (ph == "sret") {
-          // the hidden result parameter of a function returning a struct: the address of the result object
+          // the hidden result of a function returning a struct: a .param array of the device function (nvcc's
+          // func_retval0), not a PTX parameter. The IR's register is the address of the result object, which is a
+          // frame slot here and copied to func_retval0 at each return.
           if (p.items.size() != 3) throw Refused("sret form " + form_text(p));
           if (!atom_is(p, 1, "%" + std::to_string(kk))) throw BadIR("sret register must be %" + std::to_string(kk));
-          params.push_back(Ty{"ptr", -1, false, false});
+          if (kernel) throw Refused("kernel " + name_ + " returns a struct");
+          AggShape sh = aggregate(p.items[2]);
+          sret = sh;
+          add_param(Ty{"ptr", -1, false, false}, sh, alloc_frame(sh.size, sh.align));
           continue;
         }
         if (!(ph == "param" && p.items.size() == 4)) throw Refused("parameter form " + form_text(p));
         if (!atom_is(p, 1, "%" + std::to_string(kk))) throw BadIR("parameter register must be %" + std::to_string(kk));
-        // a byval parameter: the address of the caller's copy (the value is read through it)
-        Ty t = head_of(p.items[3]) == "byval" ? Ty{"ptr", -1, false, false} : parse_type(&p.items[3]);
+        if (head_of(p.items[3]) == "byval") {
+          // a struct or union passed by value: the caller copies its bytes into a .param array (nvcc's convention), and
+          // the callee copies them into the frame (compile), so its register is the address of that copy
+          if (p.items[3].items.size() != 2) throw Refused("byval form " + form_text(p.items[3]));
+          AggShape sh = aggregate(p.items[3].items[1]);
+          add_param(Ty{"ptr", -1, false, false}, sh, alloc_frame(sh.size, sh.align));
+          continue;
+        }
+        Ty t = parse_type(&p.items[3]);
         bool ok = t.kind == "ptr" || (t.kind == "int" && !t.is_bool && (t.size == 1 || t.size == 2 || t.size == 4 || t.size == 8)) ||
                   (t.kind == "int" && t.is_bool) || (t.kind == "float" && (t.size == 4 || t.size == 8));
         if (!ok) throw Refused("parameter of type " + t.kind);
-        params.push_back(t);
+        add_param(t, std::nullopt, 0);
       }
     } else if (h == "static" || h == "weak") {
       // linkage of the function: no effect on the PTX (the entry or helper is emitted the same way)
@@ -149,10 +240,7 @@ void Fn::setup() {
         size = type_size(parse_type(&f.items[2]));
         align = size;
       }
-      if (align < 1) align = 1;
-      frame_ = (frame_ + align - 1) / align * align;
-      slots[f.items[1].text] = static_cast<int>(frame_);
-      frame_ += size;
+      slots[f.items[1].text] = static_cast<int>(alloc_frame(size, align));
     } else {
       body_.push_back(&f);
     }
@@ -174,8 +262,20 @@ void Fn::compile() {
     const Ty ty = params[k];
     std::string r = fresh(reg_class(ty));
     regs["%" + std::to_string(k)] = RegInfo{r, ty};
-    std::string pk = name_ + "_param_" + std::to_string(k);
-    if (ty.kind == "int" && ty.is_bool) {
+    std::string pk = param_name(k);
+    if (agg_params[k]) {
+      // the register is the frame address of the object: a byval copy is loaded from the parameter array (its bytes),
+      // the sret result is the frame slot that emit_return copies to func_retval0
+      const AggShape &sh = *agg_params[k];
+      prologue_.push_back("add.u64 " + r + ", " + sp + ", " + std::to_string(agg_off_[k]) + ";");
+      if (is_ptx_param(k)) {
+        for (auto [off, w] : agg_pieces(sh.size, sh.align)) {
+          std::string t = fresh(piece_reg(w));
+          prologue_.push_back("ld.param." + piece_load(w) + " " + t + ", [" + pk + "+" + std::to_string(off) + "];");
+          prologue_.push_back("st." + piece_store(w) + " [" + r + "+" + std::to_string(off) + "], " + t + ";");
+        }
+      }
+    } else if (ty.kind == "int" && ty.is_bool) {
       // a bool parameter is one byte (PTX has no predicate parameters): load it, then the predicate is value != 0
       std::string b = fresh("r");
       prologue_.push_back(std::string("ld.param.") + (kernel ? "u8" : "u32") + " " + b + ", [" + pk + "];");
@@ -185,7 +285,20 @@ void Fn::compile() {
     }
   }
   for (const Node *s : body_) stmt(*s);
-  if (body_.empty() || head_of(*body_.back()) != "return") emit("ret;");
+  if (body_.empty() || head_of(*body_.back()) != "return") emit_return();
+}
+
+void Fn::emit_return() {
+  // the sret result is copied from its frame slot to func_retval0 (a .param array) before the return
+  if (sret && !sret->empty) {
+    long long base = agg_off_[0];
+    for (auto [off, w] : agg_pieces(sret->size, sret->align)) {
+      std::string t = fresh(piece_reg(w));
+      emit("ld." + piece_load(w) + " " + t + ", [" + sp + "+" + std::to_string(base + off) + "];");
+      emit("st.param." + piece_store(w) + " [func_retval0+" + std::to_string(off) + "], " + t + ";");
+    }
+  }
+  emit("ret;");
 }
 
 std::string Fn::text() const {
@@ -194,17 +307,29 @@ std::string Fn::text() const {
     out.push_back(".visible .entry " + name_ + "(");
   } else if (ret) {
     out.push_back(".func (.reg ." + ret_bits(*ret) + " %rv) " + name_ + "(");
+  } else if (sret && !sret->empty) {
+    out.push_back(".func (.param .align " + std::to_string(sret->align) + " .b8 func_retval0[" + std::to_string(sret->size) +
+                  "]) " + name_ + "(");
   } else {
     out.push_back(".func " + name_ + "(");
   }
+  std::vector<std::string> decls;
   for (size_t k = 0; k < params.size(); k++) {
+    if (!is_ptx_param(k)) continue;  // the result, and an empty object, are not parameters
     const Ty &ty = params[k];
-    std::string comma = k + 1 < params.size() ? "," : "";
+    std::string pk = param_name(k);
+    if (agg_params[k]) {
+      decls.push_back(".param .align " + std::to_string(agg_params[k]->align) + " .b8 " + pk + "[" +
+                      std::to_string(agg_params[k]->size) + "]");
+      continue;
+    }
     // a kernel's bool parameter is the host's one byte; a device function's is 32 bits
     std::string bool_type = kernel ? "u8" : "u32";
     std::string t = (ty.kind == "int" && ty.is_bool) ? bool_type : ptx_type(ty);
-    out.push_back("  .param ." + t + " " + name_ + "_param_" + std::to_string(k) + comma);
+    decls.push_back(".param ." + t + " " + pk);
   }
+  for (size_t i = 0; i < decls.size(); i++)
+    out.push_back("  " + decls[i] + (i + 1 < decls.size() ? "," : ""));
   out.push_back(")");
   out.push_back("{");
   auto count_of = [&](const char *c) { return count.at(c); };
@@ -215,7 +340,8 @@ std::string Fn::text() const {
   if (count_of("h") > 0) out.push_back("  .reg .b16 %h<" + std::to_string(count_of("h")) + ">;");
   if (count_of("fd") > 0) out.push_back("  .reg .f64 %fd<" + std::to_string(count_of("fd")) + ">;");
   if (frame_ > 0) {
-    out.push_back("  .local .align 8 .b8 __local_depot" + std::to_string(index_) + "[" + std::to_string(frame_) + "];");
+    out.push_back("  .local .align " + std::to_string(frame_align_) + " .b8 __local_depot" + std::to_string(index_) + "[" +
+                  std::to_string(frame_) + "];");
   }
   for (const std::string &s : prologue_) out.push_back("  " + s);
   for (const std::string &s : lines) out.push_back(s);
@@ -413,7 +539,7 @@ void Fn::stmt(const Node &s) {
   } else if (h == "return") {
     if (!ret) {
       if (s.items.size() > 1) throw Refused("return with a value in a void function");
-      emit("ret;");
+      emit_return();
     } else {
       if (s.items.size() != 2) throw Refused("return without a value in " + name_);
       Operand v = operand(at(s, 1));
@@ -705,10 +831,11 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     if (!callee->ret) throw Refused("call of " + cname + " as a value, but it returns nothing");
     expect(*ty, *callee->ret);
   }
+  if (callee->sret && head_of(args[0]) != "sret") throw BadIR("call of " + cname + " without its sret argument");
   int nc = ++ncall_;
   std::string c = "$call" + std::to_string(nc);
   emit("{");
-  std::vector<std::string> regs_;
+  std::vector<std::string> regs_;  // the address of each object argument, or the register of a scalar
   for (size_t k = 0; k < args.size(); k++) {
     // (byval (struct ...) OBJ) and (sret (struct ...) OBJ): the object's address is the argument
     const Node *a = &args[k];
@@ -717,9 +844,25 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     expect(callee->params[k], o.ty);
     regs_.push_back(reg_of(o.text, o.ty));
   }
-  for (size_t k = 0; k < regs_.size(); k++) {
+  // The PTX parameters: a scalar is one .param, a byval struct or union a .param array of its bytes (nvcc's convention).
+  // The sret object is not one: the callee's result array is copied into it after the call.
+  std::vector<size_t> ps;  // the argument indices that are PTX parameters
+  for (size_t k = 0; k < args.size(); k++)
+    if (callee->is_ptx_param(k)) ps.push_back(k);
+  for (size_t i = 0; i < ps.size(); i++) {
+    const size_t k = ps[i];
+    std::string K = std::to_string(i);
+    const std::optional<AggShape> &agg = callee->agg_params[k];
+    if (agg) {
+      emit("  .param .align " + std::to_string(agg->align) + " .b8 " + c + "_p" + K + "[" + std::to_string(agg->size) + "];");
+      for (auto [off, w] : agg_pieces(agg->size, agg->align)) {
+        std::string t = fresh(piece_reg(w));
+        emit("  ld." + piece_load(w) + " " + t + ", [" + regs_[k] + "+" + std::to_string(off) + "];");
+        emit("  st.param." + piece_store(w) + " [" + c + "_p" + K + "+" + std::to_string(off) + "], " + t + ";");
+      }
+      continue;
+    }
     const Ty &pty = callee->params[k];
-    std::string K = std::to_string(k);
     if (pty.kind == "int" && pty.is_bool) {
       // a bool argument is one byte, 0 or 1 (the callee's bool parameter convention); ptxas does not take 8-bit
       // parameters of device functions, so it is 32 bits
@@ -733,8 +876,18 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     }
   }
   std::string list;
-  for (size_t k = 0; k < regs_.size(); k++) list += (k ? ", " : "") + c + "_p" + std::to_string(k);
-  if (!dest.empty()) {
+  for (size_t i = 0; i < ps.size(); i++) list += (i ? ", " : "") + c + "_p" + std::to_string(i);
+  if (callee->sret && !callee->sret->empty) {
+    // the result array (func_retval0's shape), read after the call into the object's bytes
+    const AggShape &sh = *callee->sret;
+    emit("  .param .align " + std::to_string(sh.align) + " .b8 " + c + "_ret[" + std::to_string(sh.size) + "];");
+    emit("  call (" + c + "_ret), " + cname + ", (" + list + ");");
+    for (auto [off, w] : agg_pieces(sh.size, sh.align)) {
+      std::string t = fresh(piece_reg(w));
+      emit("  ld.param." + piece_load(w) + " " + t + ", [" + c + "_ret+" + std::to_string(off) + "];");
+      emit("  st." + piece_store(w) + " [" + regs_[0] + "+" + std::to_string(off) + "], " + t + ";");
+    }
+  } else if (!dest.empty()) {
     emit("  call (" + dest + "), " + cname + ", (" + list + ");");
   } else {
     emit("  call " + cname + ", (" + list + ");");

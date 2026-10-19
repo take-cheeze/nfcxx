@@ -171,6 +171,9 @@ void FnCtx::asm_stmt(const Node &s) {
     Ty ty;
   };
   std::vector<Store> stores;
+  // ldmatrix reads shared memory through a 32-bit shared-state address: its pointer input (the "l" operand of
+  // llama.cpp's mma.cuh) is a generic address, converted here as nvcc does
+  const bool ldmatrix = tmpl.compare(0, 9, "ldmatrix.") == 0;
   for (size_t i = 2; i < s.items.size(); i++) {
     const Node &o = s.items[i];
     const std::string *h = head(o);
@@ -182,6 +185,14 @@ void FnCtx::asm_stmt(const Node &s) {
     if (!asm_operand_ok(ty)) throw Refused("asm operand of type " + ty.kind + " (2-, 4- and 8-byte integers, 4- and 8-byte floats, pointers)");
     if (kind == "in") {
       Operand v = operand(arg);
+      if (ldmatrix && ty.kind == "ptr") {
+        std::string g = fresh("rd");
+        std::string r = fresh("r");
+        emit("cvta.to.shared.u64 " + g + ", " + v.text + ";");
+        emit("cvt.u32.u64 " + r + ", " + g + ";");
+        regs.push_back(r);
+        continue;
+      }
       std::string r = fresh(asm_class(ty));
       if (asm_class(ty) == "h") {
         emit("cvt." + mem_type(ty) + "." + ptx_type(ty) + " " + r + ", " + v.text + ";");

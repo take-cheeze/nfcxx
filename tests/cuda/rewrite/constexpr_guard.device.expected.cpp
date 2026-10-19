@@ -43,6 +43,15 @@ template <int K> void tagk(int *p, int v) { p[__nfcxx_tid_x()] = v * 10 + K; }
 static constexpr bool sparse_ok(const int A, const int B) {
     return (A == 512 && B == 1) || (A == 256 && B == 8);
 }
+
+
+                                                                                                               
+int pick_mul(int A, int B) {
+    if constexpr (sparse_ok(A, B)) return A * 2;
+    else return B;
+}
+
+void tagdev(int *p) { p[__nfcxx_tid_x()] = pick_mul(512, 1) + pick_mul(64, 64); }
 extern "C" void __nfcxx_k_tagk_512__1(int *p, int v) { tagk<512 + 1>(p, v); }
 extern "C" void __nfcxx_k_tagk_256__1(int *p, int v) { tagk<256 + 1>(p, v); }
 extern "C" void __nfcxx_k_tagk_512__2(int *p, int v) { tagk<512 + 2>(p, v); }

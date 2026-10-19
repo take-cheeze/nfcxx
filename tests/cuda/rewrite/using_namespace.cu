@@ -19,3 +19,7 @@ __global__ void k(float *out) {
     typedef tile<16, 8, float> t;
     out[threadIdx.x] = (float) t::rows + (float) N;
 }
+
+// The unqualified tile of a kernel body, and the template kernel launched from the host (its instance is kept).
+__global__ void kuse(float *out) { out[threadIdx.x] = (float) tile<16, 8, float>::cols; }
+void launch(float *out) { k<4><<<1, 4>>>(out); }

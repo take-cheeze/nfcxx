@@ -14,6 +14,9 @@ typedef int nl_item;
 typedef void *nl_catd;
 
 #define NL_SETD 1
+/* The category argument libc++ passes to catopen (libc++'s locale source names NL_CAT_LOCALE and gives no value).
+   POSIX leaves its value implementation-defined; 1 is the value the message-catalog interface uses for it. */
+#define NL_CAT_LOCALE 1
 
 nl_catd catopen(const char *, int);
 char *catgets(nl_catd, int, int, const char *);

@@ -3,6 +3,8 @@
 // prints the parsed forms in the canonical text (diff-forms.sh); --plan prints the module without its function bodies
 // (diff-plan.sh); --decls prints the declarations (diff-module-decls.sh).
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -60,6 +62,8 @@ int main(int argc, char **argv) {
   bool plan = false;
   bool emit = false;
   std::string sm = "sm_75";
+  std::string groups_dir;  // --groups-dir=DIR: the grouped emit (g0000.ptx, ... and groups.txt in DIR)
+  size_t max_const_bytes = 65536, max_ptx_lines = 60000;
   std::vector<std::string> kernels;
   std::string file = "-";
   bool have_file = false;
@@ -75,6 +79,12 @@ int main(int argc, char **argv) {
       sm = "sm_" + a.substr(5);
     } else if (a.rfind("--kernel=", 0) == 0) {
       kernels.push_back(a.substr(9));
+    } else if (a.rfind("--groups-dir=", 0) == 0) {
+      groups_dir = a.substr(13);
+    } else if (a.rfind("--max-const-bytes=", 0) == 0) {
+      max_const_bytes = std::stoull(a.substr(18));
+    } else if (a.rfind("--max-ptx-lines=", 0) == 0) {
+      max_ptx_lines = std::stoull(a.substr(16));
     } else if (a == "--eval-cases" && i + 1 < argc) {
       eval = true;
       file = argv[++i];
@@ -110,6 +120,46 @@ int main(int argc, char **argv) {
     } else if (!std::ifstream(file, std::ios::binary)) {
       std::fprintf(stderr, "error: cannot read %s\n", file.c_str());
       return 1;
+    }
+    if (!groups_dir.empty()) {
+      // The grouped emit: one module per group of kernels (see emit_module_groups), written to the directory with the
+      // group index (kernel names are the IR names). A refusal writes no group.
+      std::string index;
+      try {
+        std::error_code ec;
+        std::filesystem::create_directories(groups_dir, ec);
+        if (ec) {
+          std::fprintf(stderr, "error: cannot create %s\n", groups_dir.c_str());
+          return 1;
+        }
+        emit_module_groups(text, sm, kernels, GroupBudget{max_const_bytes, max_ptx_lines},
+                           [&](size_t i, const std::vector<std::string> &names, const std::string &ptx) {
+                             char base[32];
+                             std::snprintf(base, sizeof base, "g%04zu.ptx", i);
+                             std::string path = groups_dir + "/" + base;
+                             FILE *f = std::fopen(path.c_str(), "wb");
+                             if (!f || std::fwrite(ptx.data(), 1, ptx.size(), f) != ptx.size() || std::fclose(f) != 0) {
+                               std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
+                               std::exit(1);
+                             }
+                             index += base;
+                             for (const std::string &k : names) index += " " + k;
+                             index += "\n";
+                           });
+      } catch (const Refused &e) {
+        std::fprintf(stderr, "refused: %s\n", e.what());
+        return 3;
+      } catch (const BadIR &e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+      }
+      std::string path = groups_dir + "/groups.txt";
+      FILE *f = std::fopen(path.c_str(), "wb");
+      if (!f || std::fwrite(index.data(), 1, index.size(), f) != index.size() || std::fclose(f) != 0) {
+        std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
+        return 1;
+      }
+      return 0;
     }
     auto sink = [](const std::string &piece) { std::fwrite(piece.data(), 1, piece.size(), stdout); };
     try {

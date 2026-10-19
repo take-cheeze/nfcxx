@@ -6,6 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
+[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
 cuda=${CUDA_HOME:-/usr/local/cuda}
 if [ ! -x "$root/build/pathb/cmake/bin/cpfe" ] || [ ! -x "$cuda/bin/ptxas" ] || [ ! -f "$cuda/include/cuda_runtime.h" ] \
    || [ ! -e "$cuda/lib64/libcudart.so" ] || ! command -v nvidia-smi >/dev/null; then
@@ -19,7 +20,7 @@ K=_Z8warp_opsPKiPiPfPjS1_i
 "$root/scripts/pathb-dump" --ir --freestanding warp.cpp > "$out/warp.ir"
 if diff -u warp.ir "$out/warp.ir"; then echo "IR warp: ok"; else echo "IR warp: FAIL (golden differs)"; fail=1; fi
 
-"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$out/warp.ir" > "$out/warp.ptx"
+"$root/build/pathb-ptx-emit" --emit "$out/warp.ir" > "$out/warp.ptx"
 "$cuda/bin/ptxas" -arch=sm_75 "$out/warp.ptx" -o "$out/warp.cubin"
 gcc -O2 -Wall -I"$cuda/include" -L"$cuda/lib64" launch_warp.c -o "$out/launch" -lcudart
 if LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/launch" "$out/warp.cubin" "$K"; then
@@ -52,6 +53,6 @@ extern "C" int __nfcxx_shfl_xor_sync_i(unsigned mask, int v, int lane);
 void k(int *o, unsigned m) { o[0] = __nfcxx_shfl_xor_sync_i(m, 1, 2); }
 CPP
 rc=0; "$root/scripts/pathb-dump" --ir --freestanding "$out/refuse_mask.cpp" > "$out/refuse.ir" 2>/dev/null \
-  && "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$out/refuse.ir" > /dev/null 2>&1 || rc=$?
+  && "$root/build/pathb-ptx-emit" --emit "$out/refuse.ir" > /dev/null 2>&1 || rc=$?
 if [ "$rc" = 3 ]; then echo "refused shuffle with a variable mask: ok"; else echo "refused shuffle with a variable mask: FAIL (exit $rc)"; fail=1; fi
 exit $fail

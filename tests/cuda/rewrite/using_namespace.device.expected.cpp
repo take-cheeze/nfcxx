@@ -62,3 +62,8 @@ void k(float *out) {
     typedef tile<16, 8, float> t;
     out[__nfcxx_tid_x()] = (float) t::rows + (float) N;
 }
+
+
+                                                                                                                
+void kuse(float *out) { out[__nfcxx_tid_x()] = (float) tile<16, 8, float>::cols; }
+extern "C" void __nfcxx_k_k_4(float *out) { k<4>(out); }

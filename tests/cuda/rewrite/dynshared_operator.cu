@@ -7,3 +7,6 @@ __device__ float f(int n) {
     }
     return acc;
 }
+
+// A kernel that calls f, so the device unit keeps it.
+__global__ void kf(float *o) { o[threadIdx.x] = f(threadIdx.x); }

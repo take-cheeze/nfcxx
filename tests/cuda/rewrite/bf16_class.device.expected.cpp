@@ -51,42 +51,6 @@ static inline __nfcxx_bfloat16 operator*(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b)
 static inline __nfcxx_bfloat16 operator/(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a / (float)b); }
 static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a) { return __nfcxx_bfloat16(-(float)a); }
 #endif
-#ifndef __NFCXX_BF16_CORE
-#define __NFCXX_BF16_CORE
-typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;
-static inline unsigned short __nfcxx_float2bf16_bits(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }
-static inline float __nfcxx_bf16_bits2float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }
-struct __nfcxx_bfloat16 { unsigned short x; __host__ __device__ __nfcxx_bfloat16() {} __host__ __device__ __nfcxx_bfloat16(float f) { x = __nfcxx_float2bf16_bits(f); } __host__ __device__ operator float() const { return __nfcxx_bf16_bits2float(x); } };
-typedef __nfcxx_bfloat16 nv_bfloat16;
-typedef __nfcxx_bfloat16 __nv_bfloat16;
-typedef nv_bfloat162 __nv_bfloat162;
-static inline __nfcxx_bfloat16 __nfcxx_bf16_from_bits(unsigned short b) { __nfcxx_bfloat16 r; r.x = b; return r; }
-static inline float __bfloat162float(__nfcxx_bfloat16 b) { return (float)b; }
-static inline __nfcxx_bfloat16 __float2bfloat16(float f) { return __nfcxx_bfloat16(f); }
-static inline __nfcxx_bfloat16 operator+(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a + (float)b); }
-static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a - (float)b); }
-static inline __nfcxx_bfloat16 operator*(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a * (float)b); }
-static inline __nfcxx_bfloat16 operator/(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a / (float)b); }
-static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a) { return __nfcxx_bfloat16(-(float)a); }
-#endif
-#ifndef __NFCXX_BF16_CORE
-#define __NFCXX_BF16_CORE
-typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;
-static inline unsigned short __nfcxx_float2bf16_bits(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return 0x7fffu; x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }
-static inline float __nfcxx_bf16_bits2float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }
-struct __nfcxx_bfloat16 { unsigned short x; __host__ __device__ __nfcxx_bfloat16() {} __host__ __device__ __nfcxx_bfloat16(float f) { x = __nfcxx_float2bf16_bits(f); } __host__ __device__ operator float() const { return __nfcxx_bf16_bits2float(x); } };
-typedef __nfcxx_bfloat16 nv_bfloat16;
-typedef __nfcxx_bfloat16 __nv_bfloat16;
-typedef nv_bfloat162 __nv_bfloat162;
-static inline __nfcxx_bfloat16 __nfcxx_bf16_from_bits(unsigned short b) { __nfcxx_bfloat16 r; r.x = b; return r; }
-static inline float __bfloat162float(__nfcxx_bfloat16 b) { return (float)b; }
-static inline __nfcxx_bfloat16 __float2bfloat16(float f) { return __nfcxx_bfloat16(f); }
-static inline __nfcxx_bfloat16 operator+(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a + (float)b); }
-static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a - (float)b); }
-static inline __nfcxx_bfloat16 operator*(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a * (float)b); }
-static inline __nfcxx_bfloat16 operator/(__nfcxx_bfloat16 a, __nfcxx_bfloat16 b) { return __nfcxx_bfloat16((float)a / (float)b); }
-static inline __nfcxx_bfloat16 operator-(__nfcxx_bfloat16 a) { return __nfcxx_bfloat16(-(float)a); }
-#endif
                                                                                                                  
                                                                                         
 

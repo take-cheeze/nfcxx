@@ -73,6 +73,7 @@ struct Const {
   std::string ptype, lit;
   i128 align;
   std::optional<i128> count;
+  i128 size;  // the object's size in bytes
 };
 struct ByteInitSrc {
   std::string src;
@@ -81,11 +82,7 @@ struct ByteInitSrc {
 
 }  // namespace
 
-std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool uses_printf, ModuleSymbols *syms) {
-  return emit_module_decls(parse_nonfunction_forms(src), uses_dynshared, uses_printf, syms);
-}
-
-std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshared, bool uses_printf, ModuleSymbols *syms) {
+DataDecls collect_data_decls(const std::vector<Node> &forms, ModuleSymbols *syms) {
   OMap<Shared> shared;
   OMap<Global> globals;
   OMap<Const> consts;
@@ -133,7 +130,7 @@ std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshare
       // A constant with a value: a typed .const symbol with its value (scalar_const_init).
       if (head_is(ty, "const")) {
         if (auto c = scalar_const_init(init, name, size)) {
-          consts.set(name, Const{(*c)[0], (*c)[1], align, std::nullopt});
+          consts.set(name, Const{(*c)[0], (*c)[1], align, std::nullopt, size});
           continue;
         }
       }
@@ -149,14 +146,14 @@ std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshare
       // a const array of scalars with its values
       if (head_is(ty, "const")) {
         if (auto ca = scalar_const_array_init(ty, init, name, size)) {
-          consts.set(name, Const{ca->ptype, ca->body, align, ca->count});
+          consts.set(name, Const{ca->ptype, ca->body, align, ca->count, size});
           continue;
         }
       }
       // integer scalars and zero runs at byte offsets: a static one is a read-only .const, a global one a .global
       if (auto bi = byte_const_init(init, name, size)) {
         if (linkage == "static") {
-          consts.set(name, Const{"b8", bi->body, align, size});
+          consts.set(name, Const{"b8", bi->body, align, size, size});
           continue;
         }
         globals.set(name, Global{size, align, bi->body});
@@ -194,7 +191,7 @@ std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshare
       body += std::to_string((*bytes)[i]);
     }
     body += "}";
-    consts.set(name, Const{"u8", body, b.align, b.size});
+    consts.set(name, Const{"u8", body, b.align, b.size, b.size});
   }
 
   if (syms) {
@@ -205,32 +202,78 @@ std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshare
     for (const auto &s : strings.items) syms->strings.insert(s.first);
   }
 
-  std::string out;
-  if (uses_dynshared) out += std::string(".extern .shared .align 16 .b8 ") + DYNSHARED_SYM_DECL + "[];\n";
+  DataDecls out;
   for (const auto &s : strings.items) {
     std::string body;
     for (size_t i = 0; i < s.second.size(); i++) {
       if (i) body += ",";
       body += std::to_string(s.second[i]);
     }
-    out += ".const .align 1 .b8 " + string_const_sym(s.first) + "[" + std::to_string(s.second.size()) +
-           "] = {" + body + "};\n";
+    DataDecl d;
+    d.kind = DataDecl::String;
+    d.sym = string_const_sym(s.first);
+    d.bytes = s.second.size();
+    d.line = ".const .align 1 .b8 " + d.sym + "[" + std::to_string(s.second.size()) + "] = {" + body + "};";
+    out.items.push_back(std::move(d));
   }
-  if (uses_printf)
-    out += ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n";
-  for (const auto &s : shared.items)
-    out += ".shared .align " + i128_text(s.second.align) + " .b8 " + ptx_sym(s.first) + "[" +
-           i128_text(s.second.size) + "];\n";
+  for (const auto &s : shared.items) {
+    DataDecl d;
+    d.kind = DataDecl::Shared;
+    d.sym = ptx_sym(s.first);
+    d.bytes = 0;
+    d.line = ".shared .align " + i128_text(s.second.align) + " .b8 " + d.sym + "[" + i128_text(s.second.size) + "];";
+    out.items.push_back(std::move(d));
+  }
   for (const auto &g : globals.items) {
+    DataDecl d;
+    d.kind = DataDecl::Global;
+    d.sym = ptx_sym(g.first);
+    d.bytes = 0;
     std::string init = g.second.lit ? " = " + *g.second.lit : "";
-    out += ".global .align " + i128_text(g.second.align) + " .b8 " + ptx_sym(g.first) + "[" +
-           i128_text(g.second.size) + "]" + init + ";\n";
+    d.line = ".global .align " + i128_text(g.second.align) + " .b8 " + d.sym + "[" + i128_text(g.second.size) + "]" +
+             init + ";";
+    out.items.push_back(std::move(d));
   }
   for (const auto &c : consts.items) {
+    DataDecl d;
+    d.kind = DataDecl::Const;
+    d.sym = ptx_sym(c.first);
+    d.bytes = static_cast<size_t>(c.second.size);
     std::string dims = c.second.count ? "[" + i128_text(*c.second.count) + "]" : "";
-    out += ".const .align " + i128_text(c.second.align) + " ." + c.second.ptype + " " + ptx_sym(c.first) + dims +
-           " = " + c.second.lit + ";\n";
+    d.line = ".const .align " + i128_text(c.second.align) + " ." + c.second.ptype + " " + d.sym + dims + " = " +
+             c.second.lit + ";";
+    out.items.push_back(std::move(d));
   }
-  if (!(shared.items.empty() && globals.items.empty())) out += "\n";
   return out;
+}
+
+std::string render_data_decls(const DataDecls &d, const std::vector<bool> &keep, bool uses_dynshared, bool uses_printf) {
+  std::string out;
+  if (uses_dynshared) out += std::string(".extern .shared .align 16 .b8 ") + DYNSHARED_SYM_DECL + "[];\n";
+  bool any_shared_or_global = false, vprintf_done = false;
+  for (size_t i = 0; i < d.items.size(); i++) {
+    const DataDecl &it = d.items[i];
+    if (!keep.empty() && !keep[i]) continue;
+    // the vprintf declaration follows the string constants, before the shared and global symbols
+    if (it.kind != DataDecl::String && !vprintf_done) {
+      if (uses_printf)
+        out += ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n";
+      vprintf_done = true;
+    }
+    if (it.kind == DataDecl::Shared || it.kind == DataDecl::Global) any_shared_or_global = true;
+    out += it.line;
+    out += "\n";
+  }
+  if (!vprintf_done && uses_printf)
+    out += ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n";
+  if (any_shared_or_global) out += "\n";
+  return out;
+}
+
+std::string emit_module_decls(const std::string &src, bool uses_dynshared, bool uses_printf, ModuleSymbols *syms) {
+  return emit_module_decls(parse_nonfunction_forms(src), uses_dynshared, uses_printf, syms);
+}
+
+std::string emit_module_decls(const std::vector<Node> &forms, bool uses_dynshared, bool uses_printf, ModuleSymbols *syms) {
+  return render_data_decls(collect_data_decls(forms, syms), {}, uses_dynshared, uses_printf);
 }
