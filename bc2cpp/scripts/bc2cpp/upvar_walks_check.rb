@@ -9,24 +9,18 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/upvar_walks_check.rb
 
-require 'tmpdir'
+require_relative 'check_support'
 require 'set'
 
-unless ENV['MRBC']
-  puts '  SKIP: set MRBC (a host mrbc built from the patched 3rd/mruby)'
-  exit 0
-end
+suite = FixtureCheck.new('upvar_walks_check')
+suite.require_mrbc!
 
 # The fixtures declare no RBS; the repository's signatures name engine classes these fixtures lack.
 ENV['BC2CPP_SIG_DIRS'] = ''
 TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.expand_path('../../tools/bc2cpp', __dir__)
 require File.join(TOOLS, 'bc2cpp')
 
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
+check = suite.method(:check)
 
 # Locals of the snippet's top frame, as mrbc numbers them: x=R1, y=R2, z=R3 (the blocks name no register of their own).
 SNIPPET = <<~RUBY
@@ -49,10 +43,7 @@ end
 
 # Compile +source+; yields [ireps, gen] (the irep table and a CodeGen over it).
 with_ireps = lambda do |source, &block|
-  Dir.mktmpdir do |dir|
-    path = File.join(dir, 'upvar_walks.rb')
-    File.write(path, source)
-    ireps, top = compile_ireps(path, 'upvar_walks_fixture', dir)
+  suite.compile(source) do |ireps, top|
     registry = build_registry(ireps, top)[0]
     block.call(ireps, top, CodeGen.new(ireps, registry, {}))
   end
@@ -101,5 +92,4 @@ puts '-- depth bound (MAX_UPVAR_NEST_DEPTH)'
   end
 end
 
-puts "upvar_walks_check: #{failures.size} failures"
-exit(failures.empty? ? 0 : 1)
+suite.finish!
