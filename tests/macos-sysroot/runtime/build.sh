@@ -90,3 +90,23 @@ rm -f libnfcxx-darwin-rt.a
 llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
+
+# libc++ itself, built from LLVM's own sources at the pin with the cross clang (not a hand-written subset), into a
+# separate archive. _LIBCPP_NO_ABI_TAG keeps the names untagged, which matches the Mac's libc++ spellings. The config
+# site is ours (tests/macos-sysroot/cxx/__config_site); the headers and sources are LLVM's at the pin.
+cxxlib=(-nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$src/libcxx/include" -isystem "$NFCXX_MACOS_SYSROOT"
+        -isystem "$(clang -print-resource-dir)/include" -I "$src/libcxxabi/include" -I "$src/libcxx/src")
+cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY)
+mkdir -p libcxx-obj
+rm -f libc++-darwin.a libcxx-obj/*.o
+cxxlib_fail=0
+for f in "$src"/libcxx/src/*.cpp "$src"/libcxx/src/filesystem/*.cpp; do
+  [ -f "$f" ] || continue
+  o="libcxx-obj/$(basename "$(dirname "$f")")_$(basename "$f" .cpp).o"
+  if ! clang++ "${tgt[@]}" "${cxxlib[@]}" "${cxxlibdefs[@]}" -std=c++20 -fexceptions -O2 -c "$f" -o "$o" 2>"libcxx-obj/$(basename "$f" .cpp).err"; then
+    echo "build.sh: libc++ source did not compile: $f" >&2; cxxlib_fail=$((cxxlib_fail+1))
+  fi
+done
+[ "$cxxlib_fail" = 0 ] || echo "build.sh: $cxxlib_fail libc++ sources failed; see build/macos-rt/libcxx-obj/*.err" >&2
+ls libcxx-obj/*.o >/dev/null 2>&1 && llvm-ar rcs libc++-darwin.a libcxx-obj/*.o && echo "built $out/libc++-darwin.a ($(ls libcxx-obj/*.o | wc -l) objects)"
+
