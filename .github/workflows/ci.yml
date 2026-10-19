@@ -82,6 +82,7 @@ jobs:
               tests/multi-tu/run.sh
               tests/modules/run.sh
               tests/ehshim/run.sh
+              tests/eh-unwind/run.sh
               tests/eval/run.sh
           # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
           # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
