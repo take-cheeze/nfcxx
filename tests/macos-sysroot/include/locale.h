@@ -34,6 +34,14 @@ struct lconv {
   char n_sep_by_space;
   char p_sign_posn;
   char n_sign_posn;
+  /* The international-format members (POSIX.1-2008 <locale.h>, all char; their names and the lmonetary.c field list are
+     from Apple's open-source Libc, locale/FreeBSD/lmonetary.c). Values are the C locale's CHAR_MAX where unset. */
+  char int_p_cs_precedes;
+  char int_n_cs_precedes;
+  char int_p_sep_by_space;
+  char int_n_sep_by_space;
+  char int_p_sign_posn;
+  char int_n_sign_posn;
 };
 
 char *setlocale(int category, const char *locale);
