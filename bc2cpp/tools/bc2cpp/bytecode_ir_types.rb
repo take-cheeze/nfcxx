@@ -105,7 +105,95 @@ module BytecodeIR
       Fact.new(classes: elements.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
     end
 
+    # The exact runtime class of a register read (+klass+, a Symbol) and, when every source is the same Integer
+    # literal, its +value+.
+    Exact = Struct.new(:klass, :value)
+
+    EXACT_LITERAL_CLASSES = LITERAL_TYPES.except('LAMBDA', 'BLOCK').freeze
+    # Ops that add to the container R(a) already holds, so its class stays (vm.c OP_ARYPUSH and the rest).
+    # OP_ARYCAT stores a fresh Array over a nil R(a): requiring the result class rules that out.
+    EXACT_EXTEND_OPS = { 'ARYPUSH' => :Array, 'ARYCAT' => :Array, 'HASHADD' => :Hash, 'HASHCAT' => :Hash,
+                         'STRCAT' => :String }.freeze
+
+    # EXACT_LITERAL (ADR 0280): the Exact class every definition reaching the read of +reg+ at +index+ agrees on,
+    # from literal writers only, or nil. No argument, signature, inferred or resolver fact enters: those bound a
+    # class nominally, and these callers drop their class test. Integers come from LOADI* alone (a pool integer
+    # can overflow a 32-bit mrb_int). +self_class+ is the caller's own proof of R0 and LOADSELF.
+    def exact_at(index, reg, self_class: nil, max_states: DATAFLOW_MAX_STATES)
+      @exact_cache ||= {}
+      key = [index, reg.to_s.dup.freeze, self_class, max_states]
+      return @exact_cache[key] if @exact_cache.key?(key)
+
+      result = compute_exact(index, reg.to_s, self_class, max_states)
+      @exact_cache[key] = result if @exact_cache.size < QUERY_CACHE_CAP
+      result
+    end
+
     private
+
+    def compute_exact(index, reg, self_class, max_states)
+      classes = Set.new
+      values = Set.new
+      required = Set.new
+      seen = Set.new
+      work = [[index, reg]]
+      until work.empty?
+        at, register = work.pop
+        next unless seen.add?([at, register])
+
+        # Inside a protected range the handler edges are followed instead of refused (RECORD_HASH_PROOF's mode).
+        definitions = [false, true].lazy.filter_map do |through|
+          BytecodeIR.reaching_definitions(@irep, at, register, origin_transfers: true, through_handlers: through,
+                                                                max_states: max_states)
+        end.first
+        return nil unless definitions && !definitions.empty?
+
+        definitions.each do |definition|
+          insn = definition.entry? ? nil : @irep.instructions[definition.index]
+          if insn && insn.reg == definition.reg && (container = EXACT_EXTEND_OPS[insn.op])
+            required << container
+            work << [definition.index, definition.reg]
+            next
+          end
+          klass, value = exact_definition(definition, insn, self_class)
+          return nil unless klass
+
+          classes << klass
+          values << value
+        end
+      end
+      return nil unless classes.size == 1 && required.subset?(classes)
+
+      klass = classes.first
+      Exact.new(klass, klass == :Integer && values.size == 1 ? values.first : nil).freeze
+    end
+
+    def exact_definition(definition, insn, self_class)
+      unless insn
+        return [self_class] if definition.reg == '0'
+
+        return nil
+      end
+      return { rest: [:Array], local: [:NilClass] }[definition.built] if definition.built
+      return nil unless insn.reg == definition.reg
+      return [self_class] if insn.op == 'LOADSELF'
+
+      value = integer_literal(insn)
+      return [:Integer, value] unless value.nil?
+
+      klass = EXACT_LITERAL_CLASSES[insn.op]
+      klass && [klass]
+    end
+
+    def integer_literal(insn)
+      case insn.op
+      when 'LOADI__1' then -1
+      when /\ALOADI_([0-7])\z/ then Regexp.last_match(1).to_i
+      when 'LOADI', 'LOADI8', 'LOADI16', 'LOADI32', 'LOADINEG'
+        value = insn.imm_operand&.to_i
+        value && insn.op == 'LOADINEG' ? -value.abs : value
+      end
+    end
 
     def query(index, reg, use_declarations:, max_states:, refusal:)
       key = [index, reg.to_s.dup.freeze, use_declarations, max_states]
