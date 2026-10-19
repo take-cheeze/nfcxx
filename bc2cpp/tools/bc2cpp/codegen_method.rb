@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'strscan'
+
 # CodeGen: compile_method and jump targets.
 
 class CodeGen
@@ -746,9 +748,26 @@ class CodeGen
   # Generated register references are literal r<N> identifiers. Counting comments
   # and strings too only retains extra declarations; address-taken locals count.
   def drop_unused_nil_registers(code, declarations)
-    uses = code.scan(/\br\d+\b/).tally
-    code[declarations] = code[declarations].gsub(/^  mrb_value (r\d+) = mrb_nil_value\(\);\n/) do |declaration|
-      uses.fetch(Regexp.last_match(1)) == 1 ? '' : declaration
+    uses = Hash.new(0)
+    # Integer keys avoid allocating each matched token; leading zeros keep their distinct spelling.
+    scanner = StringScanner.new(code)
+    while scanner.skip_until(/\br\d+\b/)
+      first = scanner.pos - scanner.matched_size + 1
+      if code.getbyte(first) == 48 && scanner.matched_size > 2
+        key = code.byteslice(first, scanner.matched_size - 1)
+      else
+        key = 0
+        while first < scanner.pos
+          key = key * 10 + code.getbyte(first) - 48
+          first += 1
+        end
+      end
+      uses[key] += 1
+    end
+    code[declarations] = code[declarations].gsub(/^  mrb_value r(\d+) = mrb_nil_value\(\);\n/) do |declaration|
+      digits = Regexp.last_match(1)
+      key = digits.size > 1 && digits.start_with?('0') ? digits : digits.to_i
+      uses.fetch(key) == 1 ? '' : declaration
     end
     code
   end
