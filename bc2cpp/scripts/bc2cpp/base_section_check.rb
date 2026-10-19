@@ -5,27 +5,39 @@
 # that differs from its regenerated body, or a Ruby declaration the generator no longer writes (or writes and the file
 # lacks). Host plus the closed build's headers, a few minutes (base_rbs_all.rb preprocesses every native gem).
 #
-#   ruby scripts/bc2cpp/base_section_check.rb CLOSED_BUILD_DIR [DECLARATIONS]
+#   ruby scripts/bc2cpp/base_section_check.rb [--output DIR] CLOSED_BUILD_DIR [DECLARATIONS]
 #
 # DECLARATIONS defaults to sig/bc2cpp/declarations.rbs; a fixture passes a copy. See tools/bc2cpp/base_section.rb.
 
 require 'open3'
+require 'optparse'
 require 'rbconfig'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/base_section'
 
 ROOT = File.expand_path('../..', __dir__)
 GENERATOR = File.join(ROOT, 'scripts/bc2cpp/base_rbs_all.rb')
-abort 'usage: base_section_check.rb CLOSED_BUILD_DIR [DECLARATIONS]' if ARGV.empty?
+output = nil
+parser = OptionParser.new do |opts|
+  opts.banner = 'usage: base_section_check.rb [--output DIR] CLOSED_BUILD_DIR [DECLARATIONS]'
+  opts.on('--output DIR', 'Keep freshly generated base RBS in DIR') { |dir| output = File.expand_path(dir) }
+end
+parser.parse!(ARGV)
+abort parser.to_s unless (1..2).cover?(ARGV.size)
+abort 'base_section_check: output directory must be absent or empty' if output && File.exist?(output) &&
+                                                                        (!File.directory?(output) || !Dir.empty?(output))
 
 closed = File.expand_path(ARGV[0])
 declarations = File.expand_path(ARGV[1] || File.join(ROOT, 'sig/bc2cpp/declarations.rbs'))
 committed = BaseSection.section_of(File.read(declarations))
 
 failures = []
-Dir.mktmpdir('base-section-check') do |gen|
-  _out, err, status = Open3.capture3(RbConfig.ruby, GENERATOR, gen, closed)
-  abort "base_section_check: base_rbs_all.rb failed:\n#{err}" unless status.success?
+Dir.mktmpdir('base-section-check') do |temporary|
+  gen = output || temporary
+  out, err, status = Open3.capture3(RbConfig.ruby, GENERATOR, gen, closed)
+  $stdout.write(out)
+  $stderr.write(err)
+  abort "base_section_check: base_rbs_all.rb failed (#{status})" unless status.success?
 
   regenerated = BaseSection.regenerate_native(committed, gen)
   committed_native = BaseSection.native_text(committed)
