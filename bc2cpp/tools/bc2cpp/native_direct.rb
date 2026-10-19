@@ -97,14 +97,24 @@ module NativeDirect
     Dir[File.join(File.dirname(path), '*.cxx')].sort
   end
 
-  # cross_file_param_owners over the sibling sources of `path`, memoized per directory.
+  # cross_file_param_owners over the sibling sources of `path`, memoized by the
+  # identity (path + mtime + size) of those siblings so a changed file is never
+  # served a stale owner table (ADR 0416).
   def sibling_param_owners(path)
-    dir = File.dirname(path)
+    siblings = sibling_sources(path)
+    key = [File.dirname(path), *siblings.map { |file| file_identity(file) }]
     @sibling_owners ||= {}
-    @sibling_owners[dir] ||= begin
-      texts = sibling_sources(path).to_h { |file| [file, strip_comments(File.binread(file).force_encoding('UTF-8'))] }
+    @sibling_owners[key] ||= begin
+      texts = siblings.to_h { |file| [file, strip_comments(File.binread(file).force_encoding('UTF-8'))] }
       cross_file_param_owners(texts)
     end
+  end
+
+  def file_identity(path)
+    return path unless File.file?(path)
+
+    stat = File.stat(path)
+    [path, stat.mtime.to_i, stat.size]
   end
 
   # Every "name" registration in `path` as [owner, kind]; owner is nil when
@@ -113,7 +123,9 @@ module NativeDirect
   # { name => { owners: [..], literals: n } } per file, memoized in process and stored by ScanCache (ADR 0415).
   # Its inputs are `path` and its sibling sources, whose parameter owners the scan reads.
   def file_registrations(path)
-    @registrations[path] ||= ScanCache.fetch('native_direct.file_registrations', [path, *sibling_sources(path)]) do
+    siblings = sibling_sources(path)
+    key = [file_identity(path), *siblings.map { |file| file_identity(file) }]
+    @registrations[key] ||= ScanCache.fetch('native_direct.file_registrations', [path, *siblings]) do
       scan_file_registrations(path)
     end
   end
