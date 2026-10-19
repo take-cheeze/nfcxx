@@ -17,7 +17,7 @@
 #
 # usage: scripts/mrb tests/hexagon/flatlink.rb <in.o> <out.elf> <entry_symbol>
 #
-# Port of flatlink.py (kept as tests/mruby/oracle/flatlink.py) for mruby (no Regexp, struct -> pack/unpack). Integer literals above 2**31-1 are
+# Port of flatlink.py (its oracle port is tests/mruby/oracle/flatlink.rb) for mruby (no Regexp, struct -> pack/unpack). Integer literals above 2**31-1 are
 # avoided (mruby without mruby-bigint parses them as bigints): 32-bit masks are spelled as shifts.
 
 BASE = 0x10000        # load address; file offset == address - BASE
