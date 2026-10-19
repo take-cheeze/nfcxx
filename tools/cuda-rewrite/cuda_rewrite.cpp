@@ -6483,6 +6483,110 @@ std::string obfuscate_kernels(const std::string &text, const std::string &seed) 
   return rename_identifiers(text, map);
 }
 
+// A table macro of a carried header (ggml-common.h: GGML_TABLE_BEGIN(type, name, size) opens `static const __device__ type
+// name[size] = {`, GGML_TABLE_END() closes it). The device unit would see the macro invocation, not the table, so the
+// table is dropped. Here each one-line invocation of such a macro (a body that ends in `{`, or `};`) is replaced by its
+// body, with the arguments in place of the parameters. Other macros (GGML_TENSOR_BINARY_OP_LOCALS) are left as they are.
+// The lines of text, each with its newline (the last one may have none).
+std::vector<std::string> lines_with_newlines(const std::string &text) {
+  std::vector<std::string> out;
+  size_t b = 0;
+  while (b < text.size()) {
+    size_t e = text.find('\n', b);
+    e = e == std::string::npos ? text.size() : e + 1;
+    out.push_back(text.substr(b, e - b));
+    b = e;
+  }
+  return out;
+}
+
+std::string expand_table_macros(const std::string &text) {
+  std::map<std::string, std::pair<std::vector<std::string>, std::string>> macros;
+  for (const auto &line : lines_with_newlines(text)) {
+    std::string s = strip(line);
+    if (s.compare(0, 7, "#define") != 0) continue;
+    std::string r = strip(s.substr(7));
+    long lp = str_index(r, "(", 0);
+    if (lp <= 0) continue;
+    std::string name = strip(sl(r, 0, lp));
+    if (name.empty() || !ident_c((unsigned char)name[0]) || name.find(' ') != std::string::npos) continue;
+    long rp = matching_paren(r, lp);
+    if (rp < 0) continue;
+    std::string body = strip(sl(r, rp + 1, (long)r.size()));
+    if (!((!body.empty() && body.back() == '{') || body == "};")) continue;
+    std::vector<std::string> params;
+    for (const auto &q : split_top(sl(r, lp + 1, rp))) params.push_back(strip(q));
+    if (params.size() == 1 && params[0].empty()) params.clear();
+    macros[name] = {params, body};
+  }
+  if (macros.empty()) return text;
+  std::string out;
+  for (const auto &line : lines_with_newlines(text)) {
+    if (!line.empty() && strip(line)[0] == '#') {
+      out += line;
+      continue;
+    }
+    std::string res;
+    long i = 0, n = (long)line.size();
+    while (i < n) {
+      if (!ident_c((unsigned char)line[(size_t)i]) || (i > 0 && ident_c((unsigned char)line[(size_t)i - 1]))) {
+        res += line[(size_t)i];
+        i += 1;
+        continue;
+      }
+      long j = i;
+      while (j < n && ident_c((unsigned char)line[(size_t)j])) j += 1;
+      std::string name = sl(line, i, j);
+      auto it = macros.find(name);
+      long lp = j;
+      while (lp < n && white_c(line[(size_t)lp])) lp += 1;
+      if (it == macros.end() || lp >= n || line[(size_t)lp] != '(') {
+        res += name;
+        i = j;
+        continue;
+      }
+      long rp = matching_paren(line, lp);
+      if (rp < 0) {
+        res += name;
+        i = j;
+        continue;
+      }
+      std::vector<std::string> args;
+      for (const auto &a : split_top(sl(line, lp + 1, rp))) args.push_back(strip(a));
+      if (args.size() == 1 && args[0].empty()) args.clear();
+      const auto &params = it->second.first;
+      if (args.size() != params.size()) refuse("table macro " + name + " takes " + std::to_string(params.size()) + " arguments");
+      const std::string &body = it->second.second;
+      for (long k = 0; k < (long)body.size();) {
+        if (!ident_c((unsigned char)body[(size_t)k]) || (k > 0 && ident_c((unsigned char)body[(size_t)k - 1]))) {
+          res += body[(size_t)k];
+          k += 1;
+          continue;
+        }
+        long e = k;
+        while (e < (long)body.size() && ident_c((unsigned char)body[(size_t)e])) e += 1;
+        std::string w = sl(body, k, e);
+        bool sub = false;
+        for (size_t q = 0; q < params.size(); q++)
+          if (params[q] == w) {
+            res += args[q];
+            sub = true;
+            break;
+          }
+        if (!sub) res += w;
+        k = e;
+      }
+      // The table is constant data (its qualifier, which the device unit defines as empty, is dropped): a device
+      // variable is refused, and a const table is what device code reads as a value.
+      for (size_t at = res.find("__device__"); at != std::string::npos; at = res.find("__device__", at))
+        res.erase(at, std::string("__device__").size());
+      i = rp + 1;
+    }
+    out += res;
+  }
+  return out;
+}
+
 int main(int argc, char **argv) {
   bool device = false;
   bool has_kernels = false;
@@ -6527,6 +6631,7 @@ int main(int argc, char **argv) {
   text = dynamic_shared_rewrite(strip_launch_bounds(text));
   std::map<std::string, bool> seen;
   g_expanded = expand_includes(text, dirname_of(path), 0, seen);
+  if (device) g_expanded = expand_table_macros(g_expanded);
   g_expanded = inline_generic_lambdas(g_expanded);
   g_expanded = launch_prepare(g_expanded);
   if (has_obfuscate) g_expanded = obfuscate_kernels(g_expanded, obfuscate_seed);
