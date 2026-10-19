@@ -88,7 +88,6 @@ rm -f libnfcxx-darwin-rt.a
 # Only members with no symbol in libC.a go into the archive. libC.a (EDG's runtime) owns the EH, type_info,
 # handler and new/delete names that the other members define; the real libc++ on the Mac exports the libc++ names at run time.
 llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
-rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 
 # libc++ itself, built from LLVM's own sources at the pin with the cross clang (not a hand-written subset), into a
@@ -109,4 +108,5 @@ for f in "$src"/libcxx/src/*.cpp "$src"/libcxx/src/filesystem/*.cpp; do
 done
 [ "$cxxlib_fail" = 0 ] || echo "build.sh: $cxxlib_fail libc++ sources failed; see build/macos-rt/libcxx-obj/*.err" >&2
 ls libcxx-obj/*.o >/dev/null 2>&1 && llvm-ar rcs libc++-darwin.a libcxx-obj/*.o && echo "built $out/libc++-darwin.a ($(ls libcxx-obj/*.o | wc -l) objects)"
-
+# The LLVM sources are removed only now, after the libc++ step that reads them.
+rm -rf "$llvm"
