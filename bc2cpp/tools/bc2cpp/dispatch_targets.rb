@@ -475,42 +475,25 @@ end
 # each one traces to the same class. Never applied with `dominated:`: RETURN
 # proofs run their own reaching-definition walk (return_value_sources).
 def trace_new_target(irep, idx, reg, *rest, dominated: nil, guarded: false, **opts)
-  return trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, **opts) if dominated && !dominated.is_a?(JoinDominance)
+  return trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, guarded: guarded, **opts) if dominated && !dominated.is_a?(JoinDominance)
 
-  # A guarded consumer re-checks the class at run time; a join costs it a compare.
-  if guarded || JoinDominance.guarded?
-    return JoinDominance.guarded do
-      klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: nil, **opts)
-      klass || trace_new_target_reaching(irep, idx, reg, rest, opts)
-    end
+  # A guarded consumer re-checks the class at run time, so a join costs it a compare. The mode is an argument of
+  # this trace only: a trace nested in it (a callback, a return proof) asks for its own mode (ADR 0508).
+  if guarded
+    klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: nil, guarded: true, **opts)
+    return klass || trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: true)
   end
 
-  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: JoinDominance.new(irep), **opts)
+  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: JoinDominance.new(irep), guarded: false, **opts)
   return klass if klass
 
-  trace_new_target_reaching(irep, idx, reg, rest, opts)
+  trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: false)
 end
 
 # JOIN_DOMINANCE (ADR 0261): every hop of the walk must dominate the read it
 # feeds; a hop that does not ends the walk and trace_new_target_reaching then
 # accepts only a unanimous answer over the reaching definitions.
 class JoinDominance
-  @guarded_depth = 0
-
-  class << self
-    # Runs the block for a consumer that guards the fact at run time.
-    def guarded
-      @guarded_depth += 1
-      yield
-    ensure
-      @guarded_depth -= 1
-    end
-
-    def guarded?
-      @guarded_depth.positive?
-    end
-  end
-
   def initialize(irep)
     @irep = irep
   end
@@ -526,7 +509,7 @@ module TraceReaching
   IN_PROGRESS = Set.new
 end
 
-def trace_new_target_reaching(irep, idx, reg, rest, opts)
+def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
   return nil unless idx&.positive? && reg
 
   key = [irep.label, idx, reg.to_s, opts[:resolving_new] ? true : false]
@@ -543,7 +526,10 @@ def trace_new_target_reaching(irep, idx, reg, rest, opts)
         pos = definition.reg.to_i
         (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)) || rest_entry_class(irep, pos)
       else
-        trace_new_target_walk(irep, definition.index + 1, definition.reg, *rest, dominated: nil, **opts)
+        # The definition's own walk continues past it into the join (a `.new` send walks its receiver), so an
+        # unguarded hop must dominate the read it feeds. A guarded consumer accepts the join-blind answer.
+        trace_new_target_walk(irep, definition.index + 1, definition.reg, *rest,
+                              dominated: guarded ? nil : JoinDominance.new(irep), guarded: guarded, **opts)
       end
     end
     classes.first if classes.first && classes.uniq.size == 1
@@ -557,7 +543,7 @@ end
 def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
                       known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
-                      dominated: nil, canonical: true)
+                      dominated: nil, canonical: true, guarded: false)
   path = []
   use = idx
   # GETCONST/GETMCNST are class-name evidence only while resolving a `.new`
@@ -592,7 +578,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       next IrepScans.follow(insn.regs[1])
     when 'GETIDX', 'GETIDX0'
       # RBS_RECORD_TYPES (ADR 0454): a literal-key read of a checked record key, for guarded consumers only.
-      if insn.op == 'GETIDX' && !resolving_new && path.empty? && JoinDominance.guarded? && defined?(RbsRecordTypes) &&
+      if insn.op == 'GETIDX' && !resolving_new && path.empty? && guarded && defined?(RbsRecordTypes) &&
          (record_hint = RbsRecordTypes.read_hint(irep, i))
         return record_hint
       end
@@ -612,15 +598,23 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
                                      element_annotations: element_annotations,
                                      known_owners: known_owners, capture_hints: capture_hints,
                                      ret_class_proof: ret_class_proof, method_return_class: method_return_class,
-                                     dominated: dominated, canonical: canonical)
+                                     dominated: dominated, canonical: canonical, guarded: guarded)
       # An annotated Hash<Klass> parameter is a safe source for indexed values.
       # Only plain MOVE aliases back to the untouched argument register count;
       # GETIDX keeps its Hash and subclass dispatch guards at codegen.
       captured_reg = nil
-      arg_reg = irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: ->(last) { last }) do |prior|
+      alias_probe = proc do |prior|
         captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
         nil
       end
+      # An unguarded alias must dominate this GETIDX: a join the alias skips would name the argument on one path
+      # only (ADR 0508). A guarded consumer keeps the join-blind alias, as its recv_class does.
+      arg_reg = if guarded
+                  irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: ->(last) { last }, &alias_probe)
+                else
+                  irep.walk_dominating_writers(i - 1, recv_reg, use: i, follow_moves: true,
+                                               exhausted: ->(last) { last }, &alias_probe)
+                end
       # The trace can stop at a block's GETUPVAR before reaching the captured
       # container; the callsite hint is limited to annotated Hash arguments.
       recv_class ||= capture_hints&.dig(irep.label, captured_reg, :container_class) if captured_reg
@@ -662,7 +656,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
                                  element_annotations: element_annotations,
                                  known_owners: known_owners, capture_hints: capture_hints,
                                  ret_class_proof: ret_class_proof, method_return_class: method_return_class,
-                                 dominated: dominated, canonical: canonical)
+                                 dominated: dominated, canonical: canonical, guarded: guarded)
       else
         # A whole-program return proof is receiver-independent only when every
         # registered implementation of the name agrees on its returned class.
@@ -688,7 +682,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
                                        element_annotations: element_annotations,
                                        known_owners: known_owners, capture_hints: capture_hints,
                                        ret_class_proof: ret_class_proof, method_return_class: method_return_class,
-                                       dominated: dominated, canonical: canonical)
+                                       dominated: dominated, canonical: canonical, guarded: guarded)
         return singleton_declared_return(registry, element_annotations, name) unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
@@ -1032,9 +1026,12 @@ def container_phi_merge(irep, at, reg)
   lit = irep.instructions[at + 1]
   return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
+  # The literal arm and the taken edge meet at the jump's target only in this shape. The definitions reaching that
+  # join cover both arms and every other predecessor of it; the definitions before the branch do not (ADR 0508).
+  return nil unless BytecodeIR.for(irep).decoded[at]&.goto == at + 2
+
   lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
-  # Every definition that can reach the branch, not the textually nearest one.
-  defs = BytecodeIR.reaching_definitions(irep, at, reg)
+  defs = BytecodeIR.reaching_definitions(irep, at + 2, reg)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
   agree = defs.all? do |d|
@@ -1068,24 +1065,43 @@ def nil_literal_write?(irep, idx, reg)
   irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) { |insn| insn.op == 'LOADNIL' } == true
 end
 
-# CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` is a fresh
-# Array/Hash/Range literal, optionally followed by exactly one `.freeze` on the
-# same register (`ARRAY R1 2` / `SEND0 R1 :freeze` / `SETCONST NAME R1`).
-# `.freeze` is accepted only directly on such a literal, never as a general
-# passthrough: RGSS::Transition#freeze is an unrelated override with a
-# different return value.
+# CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` holds a fresh Array/Hash/Range
+# literal on every path, optionally frozen (`ARRAY R1 2` / `SEND0 R1 :freeze` /
+# `SETCONST NAME R1`). Every reaching definition must give the same class, so
+# `X = c ? [] : {}` has none (ADR 0508). `.freeze` is accepted only directly on
+# such a literal, never as a general passthrough: RGSS::Transition#freeze is an
+# unrelated override with a different return value.
 def literal_container_class(irep, idx, reg)
-  irep.walk_writers(idx - 1, reg, follow_moves: true) do |insn|
-    case insn.op
-    when 'SEND0'
-      insn.sym == 'freeze' ? IrepScans::KEEP : nil
-    when 'ARRAY', 'ARRAY2'
-      'Array'
-    when 'HASH'
-      'Hash'
-    when 'RANGE_INC', 'RANGE_EXC'
-      'Range'
-    end
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+  return nil if defs.nil? || defs.empty?
+
+  classes = defs.map { |definition| literal_container_definition_class(irep, definition, Set.new) }
+  classes.first if classes.first && classes.uniq.size == 1
+end
+
+# The container class one reaching definition of a literal_container_class read gives, or nil. A `.freeze` writes
+# its own register from the value it was called on, so the class is that value's, read at the freeze itself.
+def literal_container_definition_class(irep, definition, path)
+  return nil if definition.entry?
+
+  insn = irep.instructions[definition.index]
+  return nil unless insn.reg == definition.reg
+
+  case insn.op
+  when 'SEND0'
+    return nil unless insn.sym == 'freeze'
+
+    # A loop-carried `x = x.freeze` names its own definition again: no class.
+    key = [definition.index, definition.reg]
+    return nil unless path.add?(key)
+
+    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg.to_s)
+    classes = frozen&.map { |inner| literal_container_definition_class(irep, inner, path) }
+    path.delete(key)
+    classes.first if classes&.first && classes.uniq.size == 1
+  when 'ARRAY', 'ARRAY2' then 'Array'
+  when 'HASH' then 'Hash'
+  when 'RANGE_INC', 'RANGE_EXC' then 'Range'
   end
 end
 
@@ -1102,8 +1118,24 @@ end
 # terminals. Follows MOVEs defensively. Returns {type: :fixnum, value: "5"} /
 # {type: :symbol, name: "bar"}, or nil (compile_send keeps POLY dispatch).
 def trace_eqq_literal_receiver(irep, idx, reg)
-  insn = irep.source_writer(idx - 1, reg)
-  case insn&.op
+  # Every definition reaching the receiver must load the same literal: a join with a call on one arm leaves
+  # no literal (ADR 0508). An argument or block-entry definition is not a literal either.
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+  return nil if defs.nil? || defs.empty?
+
+  literals = defs.map { |definition| eqq_literal_of(irep, definition) }
+  first = literals.first
+  first if first && literals.all? { |literal| literal == first }
+end
+
+# The literal one definition of an EQQ receiver loads, or nil.
+def eqq_literal_of(irep, definition)
+  return nil if definition.entry?
+
+  insn = irep.instructions[definition.index]
+  return nil unless insn.reg == definition.reg
+
+  case insn.op
   when 'LOADSYM'
     # Same extraction as LOADSYM's codegen (stops before a local-name comment).
     name = insn.sym_token
@@ -1113,6 +1145,4 @@ def trace_eqq_literal_receiver(irep, idx, reg)
     lit = insn.paren_value || insn.imm_operand
     lit ? { type: :fixnum, value: lit } : nil
   end
-  # Anything else, or never written (an argument or block-entry register), is
-  # not a literal: no "argument is always literal N" fact exists to fall back on.
 end

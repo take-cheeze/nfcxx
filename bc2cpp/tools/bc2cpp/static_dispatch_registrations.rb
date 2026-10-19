@@ -49,6 +49,7 @@ require_relative 'compiled_gems'
 require_relative 'never_called_registrations'
 require_relative 'static_dispatch_unregistered'
 require_relative 'symbol_cache'
+require_relative 'bytecode_ir'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
@@ -351,74 +352,41 @@ module StaticDispatchRegistrations
   INSTANTIATING = %w[new allocate dup clone load _load marshal_load].freeze
   ENGINE_RE = /\A(?:Game|RPG2k3?|LCF|RGSS)(?:::|\z)/
 
-  # What each register of `irep` can hold, flow-insensitively: the join of
-  # every write to it anywhere in the irep (so a value reaching a send along
-  # any path is covered). [:const, Name] | :core (a literal) | :self |
-  # :unknown. Registers never written here (arguments, locals set by a
-  # caller) are :unknown; R0 is :self.
-  def register_kinds(irep)
-    kinds = Hash.new { |h, k| h[k] = [] }
-    # APOST writes a whole run of registers, not just its first argument --
-    # not modelled, so an irep using it gets no register facts at all.
-    return Hash.new(:unknown) if irep.instructions.any? { |i| i.op == 'APOST' }
+  # The receiver kind of every instruction of `irep` that sends (nil for the rest): [:const, Name] | :core (a
+  # literal) | :self | :unknown. The kind is the one every definition reaching the receiver register agrees on
+  # (BytecodeIR.reaching_definitions, ADR 0508). A register a nested block writes (SETUPVAR) is opaque to that query,
+  # so its send is :unknown rather than the kind of the local write.
+  def receiver_kinds(irep)
+    # APOST writes a whole run of registers, which the query does not model: no receiver facts for this irep.
+    apost = irep.instructions.any? { |insn| insn.op == 'APOST' }
+    opaque = BytecodeIR.own_upvar_written_regs(irep)
+    irep.instructions.each_with_index.map do |insn, index|
+      next nil unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
+      next :self if insn.op.start_with?('SS')
+      next :unknown if apost
 
-    irep.instructions.each do |insn|
-      dst = insn.reg
-      next unless dst
-
-      kinds[dst] << case insn.op
-                    when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
-                    when 'LOADSELF' then :self
-                    when 'MOVE' then [:move, insn.regs[1]]
-                    else
-                      insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
-                    end
+      receiver_kind_at(irep, index, insn.reg, opaque)
     end
-    resolve = lambda do |reg, seen = Set.new|
-      return :self if reg == '0' && !kinds.key?('0')
-      return :unknown unless kinds.key?(reg) && seen.add?(reg)
-
-      vals = kinds[reg].map { |k| k.is_a?(Array) && k[0] == :move ? resolve.call(k[1], seen.dup) : k }.uniq
-      vals.size == 1 ? vals.first : :unknown
-    end
-    Hash.new { |h, reg| h[reg] = resolve.call(reg) }
   end
 
-  BLOCK_ENDERS = %w[RETURN RETURN_BLK RETNIL RETTRUE RETFALSE RETSELF BREAK RAISEIF EXCEPT RESCUE].freeze
+  # The kind every definition of +reg+ reaching +index+ gives, or :unknown when they disagree or the query refuses.
+  def receiver_kind_at(irep, index, reg, opaque)
+    defs = BytecodeIR.reaching_definitions(irep, index, reg, opaque_regs: opaque)
+    return :unknown unless defs && !defs.empty?
 
-  # The receiver kind of every send in `irep` (nil for other instructions).
-  # Within one basic block the last write before the send is exact; a
-  # register not written earlier in the same block (so its value may arrive
-  # along another path) falls back to register_kinds' whole-irep join, which
-  # covers every path. Blocks start at every jump target, every catch-handler
-  # target, and right after every jump/return/raise.
-  def receiver_kinds(irep)
-    global = register_kinds(irep)
-    insns = irep.instructions
-    starts = Set.new
-    insns.each_with_index do |insn, i|
-      starts << insn.branch_target if insn.op.start_with?('JMP') && insn.branch_target
-      starts << insns[i + 1].addr.to_i if insns[i + 1] && (insn.op.start_with?('JMP') || BLOCK_ENDERS.include?(insn.op))
-    end
-    (irep.catch_handlers || []).each { |h| starts << h.target.to_i }
+    kinds = defs.map { |definition| definition_kind(irep, definition) }.uniq
+    kinds.size == 1 ? kinds.first : :unknown
+  end
 
-    local = {}
-    kind_of = ->(reg) { local.key?(reg) ? local[reg] : global[reg] }
-    insns.map do |insn|
-      local = {} if starts.include?(insn.addr.to_i) || insn.op == 'APOST'
-      reg = insn.reg
-      kind = if SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
-               insn.op.start_with?('SS') ? :self : kind_of.call(reg)
-             end
-      if reg
-        local[reg] = case insn.op
-                     when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
-                     when 'LOADSELF' then :self
-                     when 'MOVE' then kind_of.call(insn.regs[1])
-                     else insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
-                     end
-      end
-      kind
+  def definition_kind(irep, definition)
+    # Only R0 is a known value at entry; an argument or a caller's local is not.
+    return definition.reg == '0' ? :self : :unknown if definition.entry?
+
+    insn = irep.instructions[definition.index]
+    case insn.op
+    when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
+    when 'LOADSELF' then :self
+    else insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
     end
   end
 
