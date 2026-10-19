@@ -54,7 +54,7 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "
 # get_terminate), the per-thread globals (__cxa_get_globals), the personality routine (__gxx_personality_v0), the
 # fallback allocator for exception objects, and the default handlers. Built as libc++abi builds them: exceptions on.
 eh=(-I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS -std=c++17 -fexceptions -O2)
-for f in cxa_exception cxa_exception_storage cxa_personality fallback_malloc stdlib_exception; do
+for f in cxa_exception cxa_exception_storage cxa_personality fallback_malloc; do
   clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
 done
 # cxa_handlers.cpp is built whole: it defines std::unexpected, std::get_terminate and std::terminate. These are libc++abi's
@@ -78,13 +78,12 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_
 clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$root/tests/macos-sysroot/runtime/src/eh_glue.cpp" -o eh_glue.o
 
 rm -f libnfcxx-darwin-rt.a
-# The runtime archive. stdlib_exception.o (std::exception, bad_alloc, bad_array_new_length) replaces EDG's copies in
-# libC-darwin.a. type_info and bad_cast are not replaced: EDG's typeinfo.o and rtti.o define them with EDG's dynamic_cast ABI
-# (___dynamic_cast, __db_type_info), which libc++abi's private_typeinfo.o and stdlib_typeinfo.o do not match (both would define
-# ___dynamic_cast, and stdlib_typeinfo.o defines the bad_cast and type_info names typeinfo.o owns). Members that libC.a still
-# owns (stdlib_new_delete, ...) are built but not archived, as before.
+# The runtime archive. cxa_handlers.o and cxa_default_handlers.o replace EDG's terminate and unexpected handlers (libc_drop
+# below). std::exception, bad_alloc, bad_cast and type_info stay in EDG's libC.a: the exception.cpp and stdlib_exception.cpp
+# copies would duplicate or undercut them (see above), and the stdlib_typeinfo and private_typeinfo members would duplicate
+# EDG's ___dynamic_cast. Members that libC.a still owns (stdlib_new_delete, ...) are built but not archived, as before.
 clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/xlocale_shim.c" -o xlocale_shim.o
-llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o stdlib_exception.o eh_glue.o cxa_default_handlers.o
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o eh_glue.o cxa_default_handlers.o
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 
 # libc++ itself, built from LLVM's own sources at the pin with the cross clang (not a hand-written subset), into a
@@ -112,21 +111,21 @@ cxxlib=(-nostdinc -nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem 
 # -mmacosx-version-min=11.0: aligned new/delete are available from 10.13, and arm64 Darwin starts at 11.0.
 # -U__ENVIRONMENT_*: refstring.h adds a check for libstdc++'s empty-string singleton (only for a process that also
 # loads libstdc++, which none of our programs do) and includes mach-o/dyld.h, which is not a clean-room header.
-# -DLIBCXX_BUILDING_LIBCXXABI selects libc++'s libc++abi-backed runtime (exception.cpp, typeinfo.cpp, stdexcept), as LLVM's CMake
-# does when libc++abi is the ABI library. Without it exception.cpp builds the fallback runtime, which defines no std::exception.
-cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -DLIBCXX_BUILDING_LIBCXXABI -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY -mmacosx-version-min=11.0
+cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY -mmacosx-version-min=11.0
             -U__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ -U__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
 # Excluded: tz.cpp (its path is #error on any non-Linux host, and libc++ 18 has no config switch for it) and chrono.cpp
 # (its Apple branch needs CLOCK_MONOTONIC_RAW, which is not a POSIX name and is not in the clean-room headers). The
 # names they define are left to the link check to report.
 # Also excluded: the three filesystem sources that include dirent.h (directory_entry, directory_iterator, operations). The
 # dirent layout is not defined by POSIX; it would have to come from the target, which is not read here.
-# exception.cpp (std::exception and std::bad_exception) is built: the cross link takes it from here, and the EDG copies in
-# libC.a are dropped (libc_drop below).
+# exception.cpp is left out for now. Its std::exception family would replace EDG's exception.o and bad_alloc.o, but EDG's
+# typeinfo.o (bad_cast) calls std::exception's constructors out-of-line, and libc++abi's stdlib_exception.o does not define
+# them (the libc++ headers make them inline), so those members cannot move without undefined references. The terminate
+# family is the part that moves (libc_drop below).
 # locale.cpp is excluded too: it needs the multibyte _l functions and MB_CUR_MAX (__mb_cur_max), which the clean-room
 # headers do not define, and Apple's default rune table, which is not public. The link takes the locale symbols from the
 # Mac's libc++ at run time, which is how the programs that link today resolve them.
-libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp locale.cpp "
+libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp exception.cpp locale.cpp "
 mkdir -p libcxx-obj
 rm -f libc++-darwin.a libcxx-obj/*.o
 cxxlib_fail=0
@@ -140,15 +139,14 @@ for f in "$src"/libcxx/src/*.cpp "$src"/libcxx/src/filesystem/*.cpp; do
 done
 [ "$cxxlib_fail" = 0 ] || { echo "build.sh: $cxxlib_fail libc++ sources failed; see build/macos-rt/libcxx-obj/*.err" >&2; exit 1; }
 ls libcxx-obj/*.o >/dev/null 2>&1 && llvm-ar rcs libc++-darwin.a libcxx-obj/*.o && echo "built $out/libc++-darwin.a ($(ls libcxx-obj/*.o | wc -l) objects)"
-# libC-darwin.a is EDG's libC.a without the members that the libc++ and libc++abi archives replace: exception.o (std::exception,
-# bad_exception), bad_alloc.o (std::bad_alloc, bad_array_new_length) and eh_util.o (std::terminate, get/set_terminate,
-# std::unexpected, set_unexpected and uncaught_exception(s)). The EH entry points (throw.o: __curr_eh_stack_entry, the EH shim
-# members), typeinfo.o, rtti.o, vars.o and vec_newdel.o stay in libC.a.
+# libC-darwin.a is EDG's libC.a without eh_util.o: std::terminate, get/set_terminate, std::unexpected, set_unexpected and
+# uncaught_exception(s) are defined by the archives built here (cxa_handlers.o, cxa_default_handlers.o, and eh_glue.o for the
+# uncaught functions and the names the EH runtime calls). The EH entry points (throw.o: __curr_eh_stack_entry, the EH shim
+# members), exception.o, bad_alloc.o, typeinfo.o, rtti.o, vars.o and vec_newdel.o stay in libC.a.
 # A dropped symbol that a remaining member refers to must come from one of the two archives built here; otherwise the link of
-# such a program would fail, so the build stops with the list. (Dropped symbols that nothing refers to, such as the copy
-# constructors of these classes, which libc++ declares inline, are not checked.)
+# such a program would fail, so the build stops with the list.
 libc_in=${NFCXX_MACOS_LIBC:-$root/build/edg-cross/lib/libC.a}
-libc_drop="exception.o bad_alloc.o eh_util.o"
+libc_drop="eh_util.o"
 cp "$libc_in" libC-darwin.a
 llvm-ar d libC-darwin.a $libc_drop
 drop_syms=$(for m in $libc_drop; do llvm-nm -A --defined-only -g "$libc_in" | grep -E ":$m: " ; done | awk '{print $NF}' | sort -u)
