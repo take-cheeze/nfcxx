@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_ops'
 require_relative 'native_expression_devirt'
 
 # BLOCK_PARAM_CALL (docs/adr/0274): `blk.call(...)` in a compiled core method where `blk`
@@ -126,9 +127,10 @@ module BlockParamCall
 
     return true if copies.first == 1 && irep.instructions[0].op == 'ENTER'
 
-    irep.instructions.each_index.all? do |i|
-      !%w[BLOCK LAMBDA].include?(irep.instructions[i].op) || BytecodeIR.write_dominates?(irep, copies.first, i, copy)
+    irep.each_with_op('BLOCK', 'LAMBDA') do |_insn, i|
+      return false unless BytecodeIR.write_dominates?(irep, copies.first, i, copy)
     end
+    true
   end
 
   # Indices of the instructions that store to `reg` (any use of it as a leading operand
@@ -136,7 +138,7 @@ module BlockParamCall
   def block_param_writers(irep, reg)
     irep.instructions.each_index.select do |i|
       insn = irep.instructions[i]
-      insn.reg == reg && !BytecodeIR::READS_LEADING_REG_OPS.include?(insn.op)
+      insn.reg == reg && !BytecodeIR::Ops::READS_LEAD.include?(insn.op)
     end
   end
 

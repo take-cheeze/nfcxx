@@ -42,8 +42,8 @@ class CodeGen
     @frozen_symbol_bit = symbol_class_enabled? ? numeric_class_bit('Symbol') : nil
     registry = FrozenTables::Registry.new(symbol_bit: @frozen_symbol_bit)
     @ireps.each do |label, irep|
-      irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op == 'SEND0' && insn.sym == 'freeze'
+      irep.each_with_op('SEND0') do |insn, idx|
+        next unless insn.sym == 'freeze'
 
         shape = frozen_table_literal_shape(irep, idx, insn, registry)
         @frozen_table_sites[[label, idx]] = shape.bit if shape
