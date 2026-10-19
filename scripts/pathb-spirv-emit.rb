@@ -889,6 +889,17 @@ class Spv
     memo([:private, elem]) { var(SC_PRIVATE, t_ptr(SC_PRIVATE, elem)) }
   end
 
+  # an array type of len elements (OpTypeArray, the length a constant)
+  def t_array(elem, len)
+    memo([:array, elem, len]) { i = id; decl([28, i, elem, c_u32(len)]); i }
+  end
+
+  # the work-group static storage of a group: a module-scope Workgroup variable of `words` 32-bit words (the OpenCL local
+  # memory the static accesses of the clones go to, see SFn#wgs_access)
+  def wgs_var(words)
+    memo([:wgsvar, words]) { var(SC_WORKGROUP, t_ptr(SC_WORKGROUP, t_array(t_int(32), words))) }
+  end
+
   def add_entry(model, fid, name, iface, lsizes)
     @entries << [model, fid, name, iface, lsizes]
   end
@@ -931,7 +942,7 @@ end
 
 class SpvModule
   attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
-  attr_accessor :stack_bytes, :fns, :fns_wgs, :defs, :subgroup_used, :wgs, :wgs_total
+  attr_accessor :stack_bytes, :fns, :fns_wgs, :defs, :subgroup_used, :wgs, :wgs_total, :wgs_var
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -1454,7 +1465,7 @@ class SFn
     res(61, @spv.t_int(32), wp, 2, 4) # Aligned 4
   end
 
-  def mem_load(addr, t)
+  def heap_load(addr, t)
     if t[0] == "int" && (t[1] <= 2 || t[3])
       w = load_word(addr)
       sh = byte_shift(addr)
@@ -1470,13 +1481,121 @@ class SFn
     t[0] == "ptr" ? ptr_to_device(v) : v
   end
 
+  # ---- work-group statics (wgs_mode clones). The static region of the group is the Workgroup variable @mod.wgs_var; an access
+  # whose address lies in the region (sbase = the group's local base + the scratch tail, the length wgs_total) goes to the
+  # variable, any other to the heap path. Routing is by address, so every access to a static takes the same storage.
+  def mem_load(addr, t)
+    return heap_load(addr, t) unless @wgs_mode
+    raise Refused, "a work-group static access in #{@name} without the Workgroup variable" unless @mod.wgs_var
+    rel, inside = wgs_range(addr)
+    b_in, b_out, merge = new_label, new_label, new_label
+    ins([247, merge, 0])   # OpSelectionMerge
+    cond_branch(inside, b_in, b_out)
+    label(b_in)
+    vin = wgs_load_val(rel, t)
+    vin = ptr_to_device(vin) if t[0] == "ptr"
+    branch(merge)
+    label(b_out)
+    vout = heap_load(addr, t)
+    branch(merge)
+    label(merge)
+    res(245, sty(t), vin, b_in, vout, b_out)   # OpPhi
+  end
+
+  def mem_store(addr, t, v)
+    return heap_store(addr, t, v) unless @wgs_mode
+    raise Refused, "a work-group static access in #{@name} without the Workgroup variable" unless @mod.wgs_var
+    rel, inside = wgs_range(addr)
+    b_in, b_out, merge = new_label, new_label, new_label
+    ins([247, merge, 0])   # OpSelectionMerge
+    cond_branch(inside, b_in, b_out)
+    label(b_in)
+    wgs_store_val(rel, t, t[0] == "ptr" ? ptr_to_host(v) : v)
+    branch(merge)
+    label(b_out)
+    heap_store(addr, t, v)
+    branch(merge)
+    label(merge)
+  end
+
+  # whether addr lies in the group's static region: its offset rel (unsigned, below wgs_total) and the test
+  def wgs_range(addr)
+    t64 = @spv.t_int(64)
+    sbase = res(IADD, t64, local_base, to_u64(push_load(:local_user, nil), ["int", 4, false, false]))
+    sbase = res(IADD, t64, sbase, @spv.c_u64(1024))
+    rel = res(ISUB, t64, addr, sbase)
+    [rel, res(176, @spv.t_bool, rel, @spv.c_u64(@mod.wgs_total))]
+  end
+
+  # the pointer to the 32-bit word that holds the bytes at offset rel + 4 * word_off of the static region
+  def wgs_word(rel, word_off = 0)
+    t64 = @spv.t_int(64)
+    r = word_off == 0 ? rel : res(IADD, t64, rel, @spv.c_u64(4 * word_off))
+    widx = res(113, @spv.t_int(32), res(194, t64, r, @spv.c_u64(2)))
+    res(65, @spv.t_ptr(SC_WORKGROUP, @spv.t_int(32)), @mod.wgs_var, widx)
+  end
+
+  # the bytes an access of type t covers: 1 for bool, 8 for pointers
+  def wgs_bytes(t)
+    return 8 if t[0] == "ptr"
+    return 1 if t[0] == "int" && t[3]
+    t[1]
+  end
+
+  def wgs_load_val(rel, t)
+    t32, t64 = @spv.t_int(32), @spv.t_int(64)
+    n = wgs_bytes(t)
+    if n == 8
+      lo = res(113, t64, res(61, t32, wgs_word(rel, 0)))
+      hi = res(113, t64, res(61, t32, wgs_word(rel, 1)))
+      v = res(197, t64, lo, res(196, t64, hi, @spv.c_u64(32)))
+      return t[0] == "float" ? res(124, sty(t), v) : v
+    end
+    w = res(61, t32, wgs_word(rel))
+    if n == 4
+      return t[0] == "float" ? res(124, sty(t), w) : w
+    end
+    bits = n * 8
+    v = res(194, t32, w, byte_shift(rel))
+    v = res(199, t32, v, @spv.c_u32((1 << bits) - 1))
+    return res(171, @spv.t_bool, v, @spv.c_u32(0)) if t[0] == "int" && t[3]
+    canon(v, t)
+  end
+
+  def wgs_store_val(rel, t, v)
+    t32, t64 = @spv.t_int(32), @spv.t_int(64)
+    n = wgs_bytes(t)
+    if n == 8
+      u = t[0] == "float" ? res(124, t64, v) : v
+      ins([62, wgs_word(rel, 0), res(113, t32, u)])
+      ins([62, wgs_word(rel, 1), res(113, t32, res(194, t64, u, @spv.c_u64(32)))])
+      return
+    end
+    if n == 4
+      u = t[0] == "float" ? res(124, t32, v) : v
+      ins([62, wgs_word(rel), u])
+      return
+    end
+    # a sub-word store: the bits of the word outside the access are kept; the update is atomic, as the other items of the
+    # group may write the same word
+    bits = n * 8
+    mask = (1 << bits) - 1
+    vv = t[0] == "int" && t[3] ? bool_to_u32(v) : u32_of(v, t)
+    vv = res(199, t32, vv, @spv.c_u32(mask))
+    sh = byte_shift(rel)
+    wp = wgs_word(rel)
+    clear = res(200, t32, res(196, t32, @spv.c_u32(mask), sh))
+    ins([240, t32, @spv.id, wp, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SEM_RELAXED), clear])   # OpAtomicAnd
+    ins([241, t32, @spv.id, wp, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SEM_RELAXED), res(196, t32, vv, sh)])   # OpAtomicOr
+  end
+
   def res_load(p, rtype, align)
     i = @spv.id
     ins([61, rtype, i, p, 2, align])
     i
   end
 
-  def mem_store(addr, t, v)
+  def heap_store(addr, t, v)
     if t[0] == "int" && (t[1] <= 2 || t[3])
       bits = t[3] ? 8 : t[1] * 8
       mask = (1 << bits) - 1
@@ -1499,6 +1618,7 @@ class SFn
 
   # ---- the atomic compare-and-swap loop of a float atomic (WebGPU and Vulkan lack a float min/max)
   def float_atomic(p_addr, t, v, op)
+    raise Refused, "an atomic on memory in #{@name}, which may be a work-group static (not routed)" if @wgs_mode
     expected = var_decl(@spv.t_int(32))
     wp = res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), p_addr)
     ins([62, expected, res(61, @spv.t_int(32), wp, 2, 4)])
@@ -1947,6 +2067,7 @@ class SFn
   end
 
   def atomic_ptr(x)
+    raise Refused, "an atomic on memory in #{@name}, which may be a work-group static (not routed)" if @wgs_mode
     a, _ = operand(x)
     res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), a)
   end
@@ -2373,6 +2494,8 @@ def emit_module(src, kernel_cl = false)
   # the work-group statics live in the group's static local region (OpenCL-style modules; the Vulkan module keeps frames)
   if kernel_cl
     smod.wgs, smod.wgs_total = wgs_layout(mod.defs)
+    # the static storage: a Workgroup variable (OpenCL local memory) of the group's static bytes, when there are statics
+    smod.wgs_var = spv.wgs_var(smod.wgs_total / 4) if smod.wgs_total > 0
   end
   fns = {}
   order.each_with_index do |n, i|
@@ -2416,9 +2539,14 @@ def emit_module(src, kernel_cl = false)
   stack_bytes = entries.map { |e| depth_of.call(e) }.max.to_i + 16
   stack_bytes = (stack_bytes + 15) / 16 * 16
   smod.stack_bytes = stack_bytes
-  order.each { |n| fns[n].compile }
+  # the originals that a non-static entry reaches (the ids of all originals are fixed above; an original that only a
+  # static-using kernel reaches is not compiled, its clone is)
+  orig_needed = {}
+  entries.each { |e| reach.call(e).each { |n| orig_needed[n] = true } unless static_entries.include?(e) }
+  order.each { |n| fns[n].compile if orig_needed[n] }
   clone_order.each { |n| smod.fns_wgs[n].compile }
   order.each do |n|
+    next unless orig_needed[n]
     fn = fns[n]
     fn.function_text.each { |inst| spv.func(inst) }
   end
