@@ -78,7 +78,7 @@
 # Usage: scripts/mrb scripts/qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL
 # ASM_TAIL is appended to the QBE assembly by qbe-cc.
 #
-# Port of the Python original (tests/mruby/oracle/qbe-prep.py), byte for byte (tests/mruby/qbe-prep.sh).
+# Port of the Python original (tests/mruby/oracle/qbe-prep.py, deleted; the oracle port is tests/mruby/oracle/qbe-prep.rb), byte for byte on the tested inputs (tests/mruby/qbe-prep.sh).
 # mruby has no Regexp (and strings are bytes), so the tokenizer and the few regex checks are by hand.
 # Where Python's `\w`/`\s`/`\d` would match non-ASCII characters this accepts the bytes >= 0x80 as word
 # characters and nothing else non-ASCII (EDG's output and glibc's headers are ASCII outside literals).
