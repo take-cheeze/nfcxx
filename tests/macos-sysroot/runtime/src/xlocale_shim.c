@@ -52,3 +52,87 @@ int iswprint_l(wint_t c, locale_t l) {
   uselocale(old);
   return r;
 }
+
+int iswalpha_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswalpha(c);
+  uselocale(old);
+  return r;
+}
+
+int iswblank_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswblank(c);
+  uselocale(old);
+  return r;
+}
+
+int iswcntrl_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswcntrl(c);
+  uselocale(old);
+  return r;
+}
+
+int iswdigit_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswdigit(c);
+  uselocale(old);
+  return r;
+}
+
+int iswlower_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswlower(c);
+  uselocale(old);
+  return r;
+}
+
+int iswpunct_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswpunct(c);
+  uselocale(old);
+  return r;
+}
+
+int iswxdigit_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswxdigit(c);
+  uselocale(old);
+  return r;
+}
+
+wint_t towlower_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  wint_t r = towlower(c);
+  uselocale(old);
+  return r;
+}
+
+wint_t towupper_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  wint_t r = towupper(c);
+  uselocale(old);
+  return r;
+}
+
+int iswctype_l(wint_t c, wctype_t t, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = iswctype(c, t);
+  uselocale(old);
+  return r;
+}
+
+wint_t btowc_l(int c, locale_t l) {
+  locale_t old = uselocale(l);
+  wint_t r = btowc(c);
+  uselocale(old);
+  return r;
+}
+
+int wctob_l(wint_t c, locale_t l) {
+  locale_t old = uselocale(l);
+  int r = wctob(c);
+  uselocale(old);
+  return r;
+}

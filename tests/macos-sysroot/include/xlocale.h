@@ -10,6 +10,7 @@
 #include <locale.h>
 #include <stddef.h>
 #include <wchar.h>
+#include <wctype.h>
 #include <time.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -44,6 +45,18 @@ size_t wcsxfrm_l(wchar_t *restrict, const wchar_t *restrict, size_t, locale_t);
 int iswupper_l(wint_t, locale_t);
 int iswspace_l(wint_t, locale_t);
 int iswprint_l(wint_t, locale_t);
+int iswalpha_l(wint_t, locale_t);
+int iswblank_l(wint_t, locale_t);
+int iswcntrl_l(wint_t, locale_t);
+int iswdigit_l(wint_t, locale_t);
+int iswlower_l(wint_t, locale_t);
+int iswpunct_l(wint_t, locale_t);
+int iswxdigit_l(wint_t, locale_t);
+wint_t towlower_l(wint_t, locale_t);
+wint_t towupper_l(wint_t, locale_t);
+int iswctype_l(wint_t, wctype_t, locale_t);
+wint_t btowc_l(int, locale_t);
+int wctob_l(wint_t, locale_t);
 float strtof_l(const char *, char **, locale_t);
 long double strtold_l(const char *, char **, locale_t);
 long strtol_l(const char *, char **, int, locale_t);
