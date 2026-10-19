@@ -65,12 +65,16 @@ inline int __all_sync(unsigned int mask, int pred) { (void)mask; (void)pred; ret
 // The CUDA math overloads of min and max (unqualified calls in device code; the host copy never runs them).
 inline int min(int a, int b) { return a < b ? a : b; }
 inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }
+inline long min(long a, long b) { return a < b ? a : b; }
+inline unsigned long min(unsigned long a, unsigned long b) { return a < b ? a : b; }
 inline long long min(long long a, long long b) { return a < b ? a : b; }
 inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }
 inline float min(float a, float b) { return a < b ? a : b; }
 inline double min(double a, double b) { return a < b ? a : b; }
 inline int max(int a, int b) { return a > b ? a : b; }
 inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }
+inline long max(long a, long b) { return a > b ? a : b; }
+inline unsigned long max(unsigned long a, unsigned long b) { return a > b ? a : b; }
 inline long long max(long long a, long long b) { return a > b ? a : b; }
 inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }
 inline float max(float a, float b) { return a > b ? a : b; }

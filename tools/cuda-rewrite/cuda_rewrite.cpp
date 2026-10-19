@@ -539,6 +539,8 @@ std::string name_comment_params(const std::string &s) {
   return out;
 }
 
+std::string blank_comments(const std::string &text);
+
 // Ruby template_site (line 288): the wrapper of a template launch. Registers it in g_sites.
 std::string template_site(const std::string &name, const std::string &targs) {
   KernelTemplate kt;
@@ -553,7 +555,9 @@ std::string template_site(const std::string &name, const std::string &targs) {
     if (pt.empty()) refuse("template kernel " + name + ": unnamed parameter " + part);
     call.push_back(declared_name(part));
   }
-  std::string w = wrapper_name(name, targs);
+  // The wrapper's name is made from the arguments without their comments: the device unit has its comments blanked
+  // (`reduce_rows_f32</*norm=*/false>` is `reduce_rows_f32_false` there), and the host copy must name the same wrapper.
+  std::string w = wrapper_name(name, strip(blank_comments(targs)));
   if (!g_site_index.count(w)) {
     g_site_index[w] = g_sites.size();
     g_sites.push_back(Site{w, name, targs, decl, call});
@@ -5245,6 +5249,31 @@ std::vector<long> token_positions(const std::string &s, const std::string &tok) 
   return found;
 }
 
+// A `,` before the type word continues a parameter list only when the list is a function definition's (a `{` follows
+// its `)`, possibly through qualifiers): `f(a, b * c)` in an expression is not a declaration of c.
+bool in_definition_parameters(const std::string &s, long comma) {
+  long o = comma - 1;
+  long depth = 0;
+  while (o >= 0) {
+    int c = ch(s, o);
+    if (c == ')') {
+      depth += 1;
+    } else if (c == '(') {
+      if (depth == 0) break;
+      depth -= 1;
+    } else if (c == ';' || c == '{' || c == '}') {
+      return false;
+    }
+    o -= 1;
+  }
+  if (o < 0) return false;
+  long close = matching_paren(s, o);
+  if (close < 0) return false;
+  long b = close + 1;
+  while (b < (long)s.size() && (white_c(ch(s, b)) || ident_c(ch(s, b)))) b += 1;
+  return b < (long)s.size() && ch(s, b) == '{';
+}
+
 // Ruby declares_name? (line 3122): a type word, `*` or `&` before the identifier, and `,`, `)`, `;`, `=` or `[` after.
 // True when the `*` or `&` at q declares a pointer or reference (`T * name`), not an operator (`a * name[i]`): the
 // type word before it must follow the start of a statement, a brace, or an opening parenthesis, possibly through
@@ -5273,6 +5302,7 @@ bool star_declares(const std::string &s, long q) {
     while (x >= 0 && white_c(ch(s, x))) x -= 1;
   }
   if (x < 0) return true;
+  if (ch(s, x) == ',') return in_definition_parameters(s, x);
   return std::string(";{}(").find((char)ch(s, x)) != std::string::npos;
 }
 
