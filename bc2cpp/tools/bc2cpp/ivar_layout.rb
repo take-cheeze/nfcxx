@@ -224,22 +224,36 @@ class IvarLayout
   # an unreadable one (an opaque send, a call whose result the analysis cannot
   # type) is exactly what the declaration exists to tolerate.
   #
-  # Deliberately coarse and conservative: it returns true only for a site whose
-  # value the analysis positively resolved to a non-Fixnum, so a false "readable"
-  # can only cost an embedding, never admit a wrong one.
+  # True when any reaching definition is positively another type. A refused query is true as well: a site not proven
+  # unreadable must keep poisoning.
+  ARITHMETIC_OPS = %w[ADD ADDI SUB SUBI MUL DIV].freeze
+  OTHER_LITERAL_OPS = %w[LOADSYM LOADTRUE LOADFALSE STRING ARRAY ARRAY2 HASH RANGE_INC RANGE_EXC].freeze
+
   def self.readable_but_other(irep, idx, src_reg)
-    # An arithmetic site is never a Fixnum (see the ADD arm of trace_type), so the
-    # value is not readable and the walk steps over it.
-    irep.walk_writers(idx - 1, src_reg, skip_ops: %w[ADD ADDI SUB SUBI MUL DIV], follow_moves: true) do |insn|
-      case insn.op
-      when /^LOADI/, 'LOADNIL'
-        false # a literal Integer (readable, and a Fixnum) or nil (legal in the type)
-      when 'LOADSYM', 'LOADTRUE', 'LOADFALSE', 'STRING', 'ARRAY', 'ARRAY2', 'HASH', 'RANGE_INC', 'RANGE_EXC'
-        true # positively another kind of value
-      else
-        false # an unmodeled writer: unreadable, not "other"
+    pending = [[idx, src_reg]]
+    seen = Set.new
+    until pending.empty?
+      at, reg = pending.pop
+      next unless seen.add?([at, reg])
+
+      defs = BytecodeIR.reaching_definitions(irep, at, reg, through_handlers: true)
+      return true if defs.nil?
+
+      defs.each do |d|
+        next if d.entry?
+
+        insn = irep.instructions[d.index]
+        # An arithmetic site is never a Fixnum (see the ADD arm of trace_type), so it is unreadable: the question
+        # moves to the value it overwrote (the ADD's own register, before the ADD).
+        if ARITHMETIC_OPS.include?(insn.op)
+          pending << [d.index, d.reg]
+        elsif OTHER_LITERAL_OPS.include?(insn.op)
+          return true
+        end
+        # LOADI* / LOADNIL (a Fixnum or nil, legal in the type) and any unmodeled writer are not other.
       end
-    end || false
+    end
+    false
   end
 
   # NILABLE_EMBED_SUPPORT: the only disagreeing pairs that are still
