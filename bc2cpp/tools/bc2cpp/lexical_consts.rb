@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir'
 
 # CodeGen: LEXICAL_CONST (ADR 0423).
 #
@@ -129,7 +130,7 @@ module LexicalConsts
 
     def body_scope(irep, idx, insn, parent)
       return :unknown if insn.op == 'SCLASS' || parent == :unknown
-      return :unknown unless irep.last_writer(idx - 1, reg_number(insn))&.op == 'LOADNIL'
+      return :unknown unless all_writers?(irep, idx, reg_number(insn)) { |_j, w| w.op == 'LOADNIL' }
 
       LexicalConsts.qualify(parent, insn.sym)
     end
@@ -143,10 +144,12 @@ module LexicalConsts
             define(scope, insn.sym, klass: true)
             next unless insn.op == 'CLASS' && scope != :unknown
 
-            # The superclass register is the one after the class's own; only a LOADNIL there is "none".
+            # The superclass register is the one after the class's own; only a LOADNIL on every path there is "none"
+            # (`class X < (c ? B : nil)` joins a class into it).
             super_reg = (reg_number(insn).to_i + 1).to_s
-            sup = irep.last_writer(idx - 1, super_reg)
-            @explicit_super << LexicalConsts.qualify(scope, insn.sym) unless sup&.op == 'LOADNIL'
+            unless all_writers?(irep, idx, super_reg) { |_j, w| w.op == 'LOADNIL' }
+              @explicit_super << LexicalConsts.qualify(scope, insn.sym)
+            end
           when 'SETCONST'
             define(scope, insn.const_name, value: true)
           when 'SETMCNST'
@@ -175,13 +178,16 @@ module LexicalConsts
     # anything else makes every ancestor set unknown.
     def collect_mixin(scope, irep, idx, insn)
       recv = reg_number(insn)
-      self_writer = recv && irep.last_writer(idx - 1, recv)
-      arg = recv && irep.last_writer(idx - 1, (recv.to_i + 1).to_s)
-      # SSEND is a send to self, so its receiver register is not read; a SEND needs the LOADSELF write.
-      on_self = insn.op.start_with?('SSEND') || self_writer&.op == 'LOADSELF'
-      well_formed = scope != :unknown && on_self && insn.argc == 1 && arg&.op == 'GETCONST'
+      # SSEND is a send to self, so its receiver register is not read; a SEND needs every writer to be LOADSELF.
+      on_self = insn.op.start_with?('SSEND') || (recv && all_writers?(irep, idx, recv) { |_j, w| w.op == 'LOADSELF' })
+      # One constant on every arm: `include(c ? A : B)` names no single module.
+      names = recv && BytecodeIR.writers_reaching(irep, idx, (recv.to_i + 1).to_s)&.map do |_j, w|
+        w.op == 'GETCONST' ? w.const_name : nil
+      end
+      name = names.first if names && names.uniq.size == 1
+      well_formed = scope != :unknown && on_self && insn.argc == 1 && name
       if well_formed
-        @mixin_sites << [scope, arg.const_name]
+        @mixin_sites << [scope, name]
       else
         @mixin_unknown = true
       end
@@ -256,21 +262,33 @@ module LexicalConsts
     end
 
     # The class/module scope a receiver register holds: a lexical CONST naming a class, or a
-    # `Class::CONST` path of one. Nil for any other receiver.
+    # `Class::CONST` path of one. Nil for any other receiver. Every writer that reaches the register must name the
+    # same scope: `(c ? A : B)::X` names A on one arm and B on the other.
     def class_path(irep, idx, reg, scope, depth = 0)
       return nil if reg.nil? || depth > 8
 
-      w_idx = irep.last_writer_index(idx - 1, reg.to_s)
-      w = w_idx && irep.instructions[w_idx]
-      case w&.op
+      writers = BytecodeIR.writers_reaching(irep, idx, reg.to_s)
+      return nil unless writers
+
+      keys = writers.map { |j, w| class_path_of(irep, j, w, scope, depth) }
+      keys.first if keys.first && keys.uniq.size == 1
+    end
+
+    def class_path_of(irep, j, w, scope, depth)
+      case w.op
       when 'GETCONST'
         hit = lexical_hit(scope, w.const_name)
         class_definition?(w.const_name, hit) ? LexicalConsts.qualify(hit, w.const_name) : nil
       when 'GETMCNST'
-        base = class_path(irep, w_idx, w.paren_reg, scope, depth + 1)
+        base = class_path(irep, j, w.paren_reg, scope, depth + 1)
         key = scoped_key(base, w.mcnst_name)
         key if key && class_definition?(w.mcnst_name, base)
       end
+    end
+
+    # Whether every writer of +reg+ that reaches the read at +idx+ passes the block (BytecodeIR.all_writers_reaching?).
+    def all_writers?(irep, idx, reg, &test)
+      reg && BytecodeIR.all_writers_reaching?(irep, idx, reg, &test)
     end
 
     def class_definition?(name, scope)

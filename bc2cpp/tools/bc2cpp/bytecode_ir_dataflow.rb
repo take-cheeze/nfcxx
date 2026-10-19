@@ -621,6 +621,28 @@ module BytecodeIR
     self.for(irep).reaching_definitions(index, reg, opaque_regs: own_upvar_written_regs(irep), **options)
   end
 
+  # The instruction writers of +reg+ that reach the read at +index+, as [index, instruction] pairs: one per join arm.
+  # Nil when the answer is not provable (a refusal, the method's entry value, or a definition whose instruction does
+  # not write that register).
+  def self.writers_reaching(irep, index, reg)
+    defs = reaching_definitions(irep, index, reg.to_s, origin_transfers: true)
+    return nil unless defs && !defs.empty? && defs.none?(&:entry?)
+
+    defs.map do |definition|
+      insn = irep.instructions[definition.index]
+      return nil unless insn.reg == definition.reg
+
+      [definition.index, insn]
+    end
+  end
+
+  # Whether every writer of +reg+ reaching the read at +index+ passes the block (see writers_reaching). A refusal fails.
+  def self.all_writers_reaching?(irep, index, reg)
+    writers = writers_reaching(irep, index, reg)
+    !writers.nil? && writers.all? { |writer_index, insn| yield writer_index, insn }
+
+  end
+
   # Instruction indices of every write of +reg+ that reaches the read at +index+ (MOVEs followed), or nil when the
   # answer is not provable, when none reaches, or when the method entry is among them (the value came in as an
   # argument). A walk over the textually last writer answers for one arm of a join only; ask this for all of them.
