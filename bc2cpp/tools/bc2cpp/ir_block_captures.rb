@@ -50,7 +50,7 @@ class IrBlockCaptures
     return false unless @call_index.is_a?(Integer) && producer_index.is_a?(Integer) && producer_index < @call_index
     return false unless Array(@parent.catch_handlers).empty? && Array(@child.catch_handlers).empty? && Array(@child.reps).empty?
     return false unless BytecodeIR.for(@parent).resolved? && BytecodeIR.for(@child).resolved?
-    return false unless @child.instructions.all? { |instruction| PURE_OPS.include?(instruction.op) || instruction.op.match?(/\ALOADI_[0-7]\z/) }
+    return false unless BytecodeIR.for(@child).instructions.all? { |instruction| PURE_OPS.include?(instruction.op) || instruction.op.match?(/\ALOADI_[0-7]\z/) }
 
     call = @parent.instructions[@call_index]
     producer = @parent.instructions[producer_index]

@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'integer_constants'
+require_relative 'bytecode_ir_regions'
 
 # COMPUTED_SEND_EXPANSION (ADR 0303): the finite set of method names a computed-name
 # `send(name, ...)` can carry, when the program makes it provable.
@@ -100,7 +101,7 @@ module ComputedSendNames
       defs = Hash.new { |h, k| h[k] = [] }
       poisoned = Set.new
       ireps.each_value do |irep|
-        irep.instructions.each_with_index do |insn, idx|
+        BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST', 'CLASS', 'MODULE') do |insn, idx|
           case insn.op
           when 'SETCONST', 'SETMCNST'
             name = insn.const_name or next

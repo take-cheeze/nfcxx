@@ -3,6 +3,7 @@
 require 'digest'
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_regions'
 require_relative 'block_self'
 require_relative 'native_block_returns_reviewed'
 require_relative 'native_sigs'
@@ -161,13 +162,11 @@ module BlockReturns
       next unless seen.add?(label)
 
       child = ireps[label] or return 'has a nested block with no body'
-      exit = child.instructions.find { |insn| %w[RETURN_BLK BREAK].include?(insn.op) }
+      exit = BytecodeIR.for(child).instructions_with_op('RETURN_BLK', 'BREAK').first
       return "a nested block leaves with #{exit.op} at line #{exit.lineno}" if exit
 
       # A `yield` in a nested block runs the method's block too (OP_BLKPUSH reads the method frame's block).
-      child.instructions.each do |insn|
-        next unless insn.op == 'BLKCALL'
-
+      BytecodeIR.for(child).instructions_with_op('BLKCALL').each do |insn|
         n = insn.typed.find { |operand| operand.kind == :int }&.value
         return "yields #{n} argument(s) at line #{insn.lineno}, the block declares #{arity}" unless n == arity
       end
@@ -192,7 +191,7 @@ module BlockReturns
       insn = irep.instructions[idx]
       succ = program.successor_lists[idx]
       target = insn.branch_target && program.address_to_index[insn.branch_target]
-      if %w[JMPIF JMPNOT JMPNIL].include?(insn.op) && target && holds_proc.call(idx, insn.reg)
+      if BytecodeIR::CONDITIONAL_BRANCHES.include?(insn.op) && target && holds_proc.call(idx, insn.reg)
         succ = insn.op == 'JMPIF' ? [target] : succ - [target]
       end
       stack.concat(succ)
