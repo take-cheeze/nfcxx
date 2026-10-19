@@ -37,7 +37,7 @@ module TypeFacts
                    :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, :constant_sites,
                    :modules, :superclass_of, :integer_constants, :signature_arg_types, :signature_contracts,
                    :ir_return_facts, :included_modules, :prepended_modules,
-                   :element_site_classes, :hash_element_site_classes, keyword_init: true)
+                   :element_site_classes, :hash_element_site_classes, :integer_constant_ranges, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
@@ -542,6 +542,9 @@ module TypeFacts
     classes = ctx.container_constants || {}
     pools = ctx.gen.instance_variable_get(:@class_const_pools) || {}
     ints = ctx.integer_constants || Set.new
+    # NUMERIC_CONSTANT_RANGES: a bare name whose every definition has a Fixnum interval is an Integer. Consulted only
+    # after the other producers, so no row that already has a type changes.
+    ranges = ctx.integer_constant_ranges || {}
     sums = DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
                                              array_sum_safe?(ctx))
     seen = {}
@@ -576,6 +579,9 @@ module TypeFacts
         elsif producer == 'literal:Numeric'
           row['type'] = 'Numeric'
           row['source'] = 'inferred:literal'
+        elsif ranges.key?(bare)
+          row['type'] = 'Integer'
+          row['source'] = 'inferred:integer-range'
         else
           row['reason'] = producer
         end

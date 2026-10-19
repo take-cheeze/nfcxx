@@ -569,13 +569,17 @@ if $PROGRAM_NAME == __FILE__
   warn "== single-assignment constructed constants (CLOSED_WORLD_VALUE_CONSTANT): #{inferred_constant_classes.size} =="
   inferred_constant_classes.sort.each { |name, klass| warn "  CONST_CLASS  #{name}  (#{klass})" }
 
+  # The operator precondition both integer proofs share (IntegerConstantRanges.integer_ops_safe?): no Ruby
+  # Integer#+ - * / == anywhere in the program.
+  operators_safe = IntegerConstantRanges.integer_ops_safe?(registry, included_modules, prepended_modules, unknown_mixins)
   # INTEGER_CONSTANT_PROOF (ADR 0466): a proven name lets GETCONST feed an unchecked mrb_fixnum, so the proof holds
   # only where the closed world shows every constant binding static, and its poison scan covers the closed world's
   # outside sources (the target's host, every linked gem) as well as NATIVE_SRCS and FOREIGN_RUBY_SRCS.
   integer_constants =
     if closed_world.constants_static?
       profile_call.call('IntegerConstants.analyze') do
-        IntegerConstants.analyze(ireps, (native_paths + outside_native).uniq, (foreign_ruby_srcs + outside_ruby).uniq)
+        IntegerConstants.analyze(ireps, (native_paths + outside_native).uniq, (foreign_ruby_srcs + outside_ruby).uniq,
+                                 operators_safe: operators_safe)
       end
     else
       warn "== INTEGER_CONSTANT_PROOF off: constant bindings are not static (#{closed_world.global_refusal || 'dynamic constant mutation'}) =="
@@ -1066,15 +1070,17 @@ if $PROGRAM_NAME == __FILE__
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
   # NUMERIC_CONSTANT_RANGES (ADR 0318); BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
-  CodeGen.integer_constant_ranges =
+  integer_constant_ranges =
     if IntegerConstantRanges.enabled?
       range_report = ENV['BC2CPP_NUMERIC_CONSTANTS_REPORT'] ? [] : nil
       ranges = profile_call.call('IntegerConstantRanges.analyze') do
-        IntegerConstantRanges.analyze(ireps, native_paths, foreign_ruby_srcs, report: range_report)
+        IntegerConstantRanges.analyze(ireps, native_paths, foreign_ruby_srcs, operators_safe: operators_safe,
+                                                                             report: range_report)
       end
       File.write(ENV.fetch('BC2CPP_NUMERIC_CONSTANTS_REPORT'), "#{range_report.sort.join("\n")}\n") if range_report
       ranges
     end
+  CodeGen.integer_constant_ranges = integer_constant_ranges
   warn "== constants with a proven Fixnum interval (NUMERIC_CONSTANT_RANGES): #{CodeGen.integer_constant_ranges&.size.to_i} =="
   (CodeGen.integer_constant_ranges || {}).sort.each { |n, (lo, hi)| warn "  CONST_RANGE #{n} #{lo} #{hi}" }
   CodeGen.stable_class_constants.sort.each { |n| warn "  STABLE_CLASS #{n}" }
@@ -1191,7 +1197,7 @@ if $PROGRAM_NAME == __FILE__
       included_modules: included_modules, prepended_modules: prepended_modules,
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
       integer_constants: integer_constants, element_site_classes: element_site_classes,
-      hash_element_site_classes: hash_element_site_classes
+      hash_element_site_classes: hash_element_site_classes, integer_constant_ranges: integer_constant_ranges
     )))
   end
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='
