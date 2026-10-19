@@ -1,0 +1,81 @@
+name: MCU
+
+# ESP32-C3 (RV32IMC, bare metal) checks (tests/mcu/run.sh): the layout facts EDG assumes for the linux_riscv32 stand-in,
+# the compile of tests/mcu/*.cpp for the ESP32-C3 ISA and ABI, and the run of the RUN-QEMU probes on Espressif's QEMU
+# (esp32c3 machine). The emulator is built from espressif/qemu at a pinned commit and cached on that commit. Runs when
+# a change can affect these checks, and on demand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tests/mcu/**"
+      - "tests/hexagon/layout_probe.cpp"
+      - "scripts/gen-c-target.sh"
+      - "scripts/setup-edg.sh"
+      - "nfcxx"
+      - "be/**"
+      - "lib/**"
+      - "3rd/edg"
+      - ".github/workflows/mcu.yml"
+  pull_request:
+    paths:
+      - "tests/mcu/**"
+      - "tests/hexagon/layout_probe.cpp"
+      - "scripts/gen-c-target.sh"
+      - "scripts/setup-edg.sh"
+      - "nfcxx"
+      - "be/**"
+      - "lib/**"
+      - "3rd/edg"
+      - ".github/workflows/mcu.yml"
+  workflow_dispatch:
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  esp32c3:
+    runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # clang and lld: tests/mcu/run.sh compiles and links for riscv32-unknown-elf with clang. QBE is not needed here.
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: clang lld
+          qbe: "false"
+
+      # Espressif's QEMU needs glib, pixman, libslirp and libgcrypt (libgcrypt brings the esp32c3 AES device) and meson.
+      - name: Install the emulator's build dependencies
+        run: |
+          sudo apt-get install -y --no-install-recommends libglib2.0-dev libpixman-1-dev libslirp-dev libgcrypt20-dev pkg-config
+          sudo pip3 install --break-system-packages meson
+
+      - name: Restore the ESP32-C3 emulator
+        id: qemu
+        uses: actions/cache@v4
+        with:
+          path: build/espressif-qemu/build/qemu-system-riscv32
+          key: espressif-qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/mcu-qemu.sh') }}
+
+      # Espressif's QEMU fork (hw/riscv/esp32c3.c) at the commit pinned in scripts/mcu-qemu.sh.
+      - name: Build the ESP32-C3 emulator
+        if: steps.qemu.outputs.cache-hit != 'true'
+        run: scripts/mcu-qemu.sh build/espressif-qemu
+
+      - name: ESP32-C3 checks (layout, compile, and run under the emulator)
+        run: tests/mcu/run.sh
+        env:
+          QEMU_ESP32C3: ${{ github.workspace }}/build/espressif-qemu/build/qemu-system-riscv32
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
