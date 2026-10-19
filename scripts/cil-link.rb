@@ -1,4 +1,4 @@
-# cil-link.rb: link qbe2cil.py / pathb-cil-emit.py fragments into one CIL executable (the nfcc `cil` backend;
+# cil-link.rb: link qbe2cil.rb / pathb-cil-emit.rb fragments into one CIL executable (the nfcc `cil` backend;
 # docs/notes/cil.md). Port of tests/mruby/oracle/cil-link.py, which writes the same CIL text and the same launcher.
 #
 #   scripts/mrb scripts/cil-link.rb [--ilasm PATH] [--cc CC] [--keep-il] -o OUT FRAGMENT...
