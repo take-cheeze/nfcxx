@@ -382,9 +382,26 @@ bool g_kernel_pieces_ready = false;
 std::string g_kernel_pieces_for;
 std::vector<Piece> g_kernel_pieces;
 
+bool linkage_block(const std::string &t, long &open_out, long &close_out);
+
+// The pieces of a unit that kernel_template searches: the top-level pieces, with the namespace and extern "C" blocks
+// opened, so a template kernel inside `namespace { ... }` is found as the top-level one is. Offsets are into the unit.
+void kernel_search_pieces(const std::string &text, long base, std::vector<Piece> &out) {
+  for (const auto &pc : top_pieces(text)) {
+    std::string t = sl(text, pc.st, pc.en);
+    long open = 0, close = 0;
+    if (pc.kind != "pp" && pc.body && linkage_block(t, open, close)) {
+      kernel_search_pieces(sl(t, open + 1, close), base + pc.st + open + 1, out);
+    } else {
+      out.push_back(Piece{base + pc.st, base + pc.en, pc.kind, pc.body});
+    }
+  }
+}
+
 bool kernel_template_uncached(const std::string &name, const std::string &src, KernelTemplate &out) {
   if (!g_kernel_pieces_ready || g_kernel_pieces_for != src) {
-    g_kernel_pieces = top_pieces(src);
+    g_kernel_pieces.clear();
+    kernel_search_pieces(src, 0, g_kernel_pieces);
     g_kernel_pieces_for = src;
     g_kernel_pieces_ready = true;
   }
@@ -2682,6 +2699,11 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
         sites.push_back({targs, p});
         continue;
       }
+      // `return name<...>(args)` is a call that leaves out a defaulted argument (`return init<16, 64>(device)`), not a
+      // function pointer: the call's own arguments and the default give the rest, as in the calls above.
+      long after = gt + 1;
+      while (after < (long)text.size() && white_c(ch(text, after))) after += 1;
+      if (after < (long)text.size() && ch(text, after) == '(') continue;
       std::vector<std::string> fp;
       if (!fnptr_return_params(text, p, fp) || fp.size() != rhead.parts.size())
         refuse("call of " + name + " (at line " + std::to_string(line_of(text, p)) + "): the function pointer returned there does not give its template arguments");
