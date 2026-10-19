@@ -621,6 +621,17 @@ module BytecodeIR
     self.for(irep).reaching_definitions(index, reg, opaque_regs: own_upvar_written_regs(irep), **options)
   end
 
+  # Instruction indices of every write of +reg+ that reaches the read at +index+ (MOVEs followed), or nil when the
+  # answer is not provable, when none reaches, or when the method entry is among them (the value came in as an
+  # argument). A walk over the textually last writer answers for one arm of a join only; ask this for all of them.
+  # Handler edges are crossed (through_handlers), so a read inside a rescue range is answered, not refused.
+  def self.reaching_writer_indices(irep, index, reg)
+    defs = reaching_definitions(irep, index, reg, through_handlers: true)
+    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+    defs.map(&:index)
+  end
+
   # Program#write_dominates? with the irep's own nested-block writes accounted for.
   def self.write_dominates?(irep, w, use, reg)
     self.for(irep).write_dominates?(w, use, reg, opaque_regs: own_upvar_written_regs(irep))
