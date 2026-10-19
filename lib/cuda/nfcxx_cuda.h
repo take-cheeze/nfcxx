@@ -257,10 +257,9 @@ inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void *
   return cudaLaunchKernelExC(&cfg, reinterpret_cast<const void *>(kernel), args);
 }
 
-// The macros take the whole argument list: a kernel's template-id in the first argument (gdn_single<C, V, B>) has commas
-// that a macro parameter would split, and the call is a function call in CUDA.
-#define cudaFuncSetAttribute(...) __nfcxx_cuda_func_set_attribute(__VA_ARGS__)
-#define cudaLaunchKernel(...) __nfcxx_cuda_launch_raw(__VA_ARGS__)
+#define cudaFuncSetAttribute(func, attr, value) __nfcxx_cuda_func_set_attribute((func), (attr), (value))
+#define cudaLaunchKernel(func, grid, block, args, shmem, stream) \
+  __nfcxx_cuda_launch_raw((func), (grid), (block), (args), (shmem), (stream))
 
 // A cooperative launch: the driver checks that every block is resident (cudaErrorCooperativeLaunchTooLarge otherwise),
 // which the grid barrier of grid_group::sync (scripts/cuda-rewrite.rb's GRID_DEF in the device unit) relies on.
