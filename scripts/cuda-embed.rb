@@ -56,6 +56,28 @@ read_bytes(ir_path).split("\n").each do |line|
   j = line.index("\"", i + 11)
   names << line[(i + 11)...j] unless j.nil?
 end
+# The lookups below find the names by index, not by a scan of all names for each kernel (the scan was kernels x names string
+# compares: seconds of mruby on a large IR). exact_idx: the indices of each name. key_idx: for a name "_Z<digits><ident>"
+# with the digits N and the identifier of N characters, the key is "<digits><ident>", so a kernel K (not starting with a
+# digit) matches the names that start with "_Z<K.length>K" exactly those whose key is "#{K.length}#{K}". The hits are in
+# IR order, as the scan gave them.
+exact_idx = {}
+key_idx = {}
+names.each_with_index do |n, i|
+  (exact_idx[n] ||= []) << i
+  next unless n.start_with?("_Z")
+  e = 2
+  e += 1 while e < n.length && n[e] >= "0" && n[e] <= "9"
+  next if e == 2 || e > n.length
+  len = n[2...e].to_i
+  next if e + len > n.length
+  (key_idx[n[2...(e + len)]] ||= []) << i
+end
+def name_hits(k, names, exact_idx, key_idx)  # the names equal to k, or starting with "_Z#{k.length}#{k}", in IR order
+  return names.select { |n| n == k || n.start_with?("_Z#{k.length}#{k}") } if k.empty? || (k[0] >= "0" && k[0] <= "9")
+  idx = (exact_idx[k] || []) + (key_idx["#{k.length}#{k}"] || [])
+  idx.uniq.sort.map { |i| names[i] }
+end
 
 kernels = read_bytes(kernels_path).split("\n").reject { |k| k.empty? }
 # Address-taken instances (addr file, from cuda-rewrite): "HOST-EXPRESSION<TAB>WRAPPER" lines. Their wrappers are kernels
@@ -64,8 +86,7 @@ addr_lines = (addr_path.nil? || !File.exist?(addr_path)) ? [] : read_bytes(addr_
 addr_wrappers = addr_lines.map { |l| l.split("\t", 2)[1] }
 entries = []
 kernels.each do |k|
-  mangled = "_Z#{k.length}#{k}"
-  hits = names.select { |n| n == k || n.start_with?(mangled) }
+  hits = name_hits(k, names, exact_idx, key_idx)
   refuse("kernel #{k}: no device function named #{k} (IR has #{names.join(', ')})") if hits.empty?
   refuse("kernel #{k}: #{hits.length} device functions match") if hits.length > 1
   entries << [k, hits[0]] unless addr_wrappers.include?(k)
@@ -76,7 +97,7 @@ end
 addr_lines.each do |line|
   host, wrapper = line.split("\t", 2)
   refuse("address table line without a wrapper: #{line}") if wrapper.nil?
-  hits = names.select { |n| n == wrapper }
+  hits = (exact_idx[wrapper] || []).map { |i| names[i] }
   refuse("address of #{host}: no device function named #{wrapper}") if hits.empty?
   refuse("address of #{host}: #{hits.length} device functions match") if hits.length > 1
   entries << [host, hits[0]]
