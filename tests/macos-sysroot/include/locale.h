@@ -1,17 +1,18 @@
 /* Clean-room locale.h: declarations from C11 7.11 (Localization). Written from the standard, not from any SDK.
- * The LC_* values are the conventional ones; the Mac run checks them, since setlocale takes them as arguments. */
+ * The LC_* values are Apple's, from the public Libc include/locale.h (apple-oss-distributions/Libc commit 71bbe350ab79eef58113991d817ccc6165061a64): LC_ALL 0, LC_COLLATE 1, LC_CTYPE 2, LC_MONETARY 3, LC_NUMERIC 4, LC_TIME 5, LC_MESSAGES 6. */
 #ifndef CLEANROOM_LOCALE_H
 #define CLEANROOM_LOCALE_H
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define LC_ALL 6
+#define LC_ALL 0
 #define LC_COLLATE 1
 #define LC_CTYPE 2
 #define LC_MONETARY 3
 #define LC_NUMERIC 4
 #define LC_TIME 5
+#define LC_MESSAGES 6
 
 struct lconv {
   char *decimal_point;

@@ -16,7 +16,10 @@ extern "C" {
 #define EXIT_FAILURE 1
 #define EXIT_SUCCESS 0
 #define RAND_MAX 0x7fffffff
-#define MB_CUR_MAX 1
+/* MB_CUR_MAX is the current locale's value, from a function the system library exports (Apple Libc
+ * include/_mb_cur_max.h: #define MB_CUR_MAX (___mb_cur_max())). */
+int ___mb_cur_max(void);
+#define MB_CUR_MAX (___mb_cur_max())
 
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;

@@ -55,6 +55,9 @@ typedef int clockid_t;
 #endif
 /* POSIX.1-2008 <time.h> requires CLOCK_REALTIME; 0 is the wall clock on the target (checked on the Mac). */
 #define CLOCK_REALTIME 0
+/* CLOCK_MONOTONIC and CLOCK_MONOTONIC_RAW: Apple's public Libc include/_time.h (commit 71bbe350ab79eef58113991d817ccc6165061a64). */
+#define CLOCK_MONOTONIC 6
+#define CLOCK_MONOTONIC_RAW 4
 int clock_gettime(clockid_t, struct timespec *);
 
 /* POSIX.1-2008 reentrant time conversions, from the specification. */

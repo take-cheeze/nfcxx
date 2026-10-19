@@ -91,4 +91,14 @@ int isxdigit_l(int, locale_t);
 }
 #endif
 
+
+/* Multibyte and wide-character _l functions libc++'s locale.cpp uses. Signatures from Apple's public Libc
+ * include/xlocale/_wchar.h (apple-oss-distributions/Libc, commit 71bbe350ab79eef58113991d817ccc6165061a64), with the
+ * Libc annotation macros removed. Declarations only: the system library provides the definitions. */
+#include <wchar.h>
+size_t mbrtowc_l(wchar_t *restrict, const char *restrict, size_t, mbstate_t *restrict, locale_t);
+int mbsinit_l(const mbstate_t *, locale_t);
+size_t mbsrtowcs_l(wchar_t *restrict, const char **restrict, size_t, mbstate_t *restrict, locale_t);
+size_t wcrtomb_l(char *restrict, wchar_t, mbstate_t *restrict, locale_t);
+size_t wcsnrtombs_l(char *restrict, const wchar_t **restrict, size_t, size_t, mbstate_t *restrict, locale_t);
 #endif
