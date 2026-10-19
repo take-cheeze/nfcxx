@@ -1503,6 +1503,30 @@ struct LaunchMacro {
   std::vector<std::string> params;
   std::string body;
 };
+// A macro body that instantiates a template (`return name<...>;`, `name<...>(...)`): the instances it names are the
+// template's instances, visible only once the macro is expanded (FATTN_VEC_CASE in fattn.cu returns one per head size).
+bool names_template_instance(const std::string &body) {
+  long n = (long)body.size();
+  for (long i = 0; i < n; i++) {
+    if (!ident_c(ch(body, i)) || (i > 0 && ident_c(ch(body, i - 1)))) continue;
+    long j = i;
+    while (j < n && ident_c(ch(body, j))) j += 1;
+    long k = j;
+    while (k < n && white_c(ch(body, k))) k += 1;
+    if (k >= n || ch(body, k) != '<') continue;
+    long close = matching_angle(body, k);
+    if (close < 0) continue;
+    long m = close + 1;
+    while (m < n && white_c(ch(body, m))) m += 1;
+    if (m < n && ch(body, m) == '(') return true;
+    long w = i - 1;
+    while (w >= 0 && white_c(ch(body, w))) w -= 1;
+    if (m < n && ch(body, m) == ';' && w >= 5 && sl(body, w - 5, w + 1) == "return" && (w < 6 || !ident_c(ch(body, w - 6))))
+      return true;
+  }
+  return false;
+}
+
 std::vector<LaunchMacro> launch_macros(const std::string &text) {
   std::vector<LaunchMacro> out;
   for (const auto &sp : directive_spans(text)) {
@@ -1534,7 +1558,11 @@ std::vector<LaunchMacro> launch_macros(const std::string &text) {
     if (close < 0) continue;
     std::string body = strip(sl(after, close + 1, (long)after.size()));
     bool keep = body.find("<<<") != std::string::npos || body.compare(0, 9, "template ") == 0 ||
-                body.compare(0, 16, "extern template ") == 0;
+                body.compare(0, 16, "extern template ") == 0 || names_template_instance(body);
+    // A macro that expands a kept macro (FATTN_VEC_CASES_ALL_D) is kept as well. One that declares explicit instances
+    // (extern DECL_...) is not: its declarations are not calls, and the ones of the explicit lists stay as they were.
+    for (const auto &x : out)
+      if (!keep && body.compare(0, 7, "extern ") != 0 && body.find(x.name + "(") != std::string::npos) keep = true;
     if (!keep) continue;
     LaunchMacro m;
     m.name = name;
@@ -1560,6 +1588,21 @@ bool define_name_at(const std::string &text, long i) {
   std::string rest = strip(pre.substr(1));
   if (rest.compare(0, 6, "define") != 0) return false;
   return strip(rest.size() >= 6 ? rest.substr(6) : std::string()).empty();
+}
+
+// Token pasting (`a ## b` in a macro body) joins the two tokens: the operator and the blanks around it go.
+std::string paste_tokens(const std::string &s) {
+  std::string out;
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s.compare(i, 2, "##") == 0) {
+      while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+      i += 1;
+      while (i + 1 < s.size() && (s[i + 1] == ' ' || s[i + 1] == '\t')) i += 1;
+      continue;
+    }
+    out += s[i];
+  }
+  return out;
 }
 
 // Ruby expand_launch_macros (line 1227): expands the calls of the launch macros in code, nested calls included.
@@ -1599,7 +1642,7 @@ std::string expand_launch_macros(const std::string &text, int depth) {
         if (args.size() != m->params.size())
           refuse("launch macro " + name + " takes " + std::to_string(m->params.size()) + " arguments, its call gives " +
                  std::to_string(args.size()));
-        std::string body = substitute(m->body, m->params, args, false, 0);
+        std::string body = paste_tokens(substitute(m->body, m->params, args, false, 0));
         for (char &c : body)
           if (c == '\n') c = ' ';
         out += body;
@@ -2603,10 +2646,16 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   // function pointer the enclosing function returns (convert.cu's ggml_get_to_fp16_cuda: dst_t from to_fp16_cuda_t).
   TemplateHead rhead;
   if (template_head_of(text, name, rhead)) {
+    const auto dspans = directive_spans(text);
     for (long p = str_index(text, name, 0); p >= 0; p = str_index(text, name, p + 1)) {
       bool word = (p == 0 || !ident_c((unsigned char)text[(size_t)(p - 1)])) &&
                   (p + (long)name.size() >= (long)text.size() || !ident_c((unsigned char)text[(size_t)(p + (long)name.size())]));
       if (!word) continue;
+      // A #define's body is not code: its uses are seen where the macro is expanded (call_sites skips directives too).
+      bool in_directive = false;
+      for (const auto &sp : dspans)
+        if (p >= sp.first && p < sp.second) in_directive = true;
+      if (in_directive) continue;
       {  // a match in a // comment (on its line, before the match) is not code
         long ls = p;
         while (ls > 0 && text[(size_t)(ls - 1)] != '\n') ls -= 1;
