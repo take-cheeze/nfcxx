@@ -749,7 +749,7 @@ void Fn::printf_call(const Node &x, const std::string &dest, const Ty &ty) {
     emit("st." + ptx_type(sl.op.ty) + " [" + addr + "], " + value + ";");
   }
   std::string fmt_reg = fresh("rd");
-  emit("cvta.const.u64 " + fmt_reg + ", " + string_const_sym(fmt.text) + ";");
+  emit("cvta.const.u64 " + fmt_reg + ", " + string_const_sym(mod->data_name(fmt.text)) + ";");
   int n = ++nlab;
   std::string N = std::to_string(n);
   emit("{");

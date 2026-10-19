@@ -2,6 +2,7 @@
 // ordered map here, so the declarations come out in the Ruby's order, and a key set twice keeps its first position.
 #include "module_decls.hpp"
 
+#include <map>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -194,16 +195,35 @@ DataDecls collect_data_decls(const std::vector<Node> &forms, ModuleSymbols *syms
     consts.set(name, Const{"u8", body, b.align, b.size, b.size});
   }
 
+  // A string or a constant with the bytes of an earlier one (the same literal, or the same table, in another template
+  // instance) is not emitted again: its references use the earlier name, so the module holds each distinct value once
+  // (the .const limit is per module).
+  std::map<std::vector<uint8_t>, std::string> first_string;
+  std::map<std::string, std::string> first_const;
+  std::map<std::string, std::string> alias;
+  for (const auto &s : strings.items) {
+    auto it = first_string.emplace(s.second, s.first).first;
+    if (it->second != s.first) alias[s.first] = it->second;
+  }
+  for (const auto &c : consts.items) {
+    std::string key = c.second.ptype + "|" + (c.second.count ? i128_text(*c.second.count) : "") + "|" +
+                      i128_text(c.second.align) + "|" + c.second.lit;
+    auto it = first_const.emplace(key, c.first).first;
+    if (it->second != c.first) alias[c.first] = it->second;
+  }
+
   if (syms) {
     for (const auto &s : shared.items) syms->shared.insert(s.first);
     for (const auto &g : globals.items) syms->globals.insert(g.first);
     for (const auto &c : consts.items) syms->consts.insert(c.first);
     for (const auto &e : externs.items) syms->externs.insert(e.first);
     for (const auto &s : strings.items) syms->strings.insert(s.first);
+    syms->data_alias = alias;
   }
 
   DataDecls out;
   for (const auto &s : strings.items) {
+    if (alias.count(s.first)) continue;
     std::string body;
     for (size_t i = 0; i < s.second.size(); i++) {
       if (i) body += ",";
@@ -235,6 +255,7 @@ DataDecls collect_data_decls(const std::vector<Node> &forms, ModuleSymbols *syms
     out.items.push_back(std::move(d));
   }
   for (const auto &c : consts.items) {
+    if (alias.count(c.first)) continue;
     DataDecl d;
     d.kind = DataDecl::Const;
     d.sym = ptx_sym(c.first);

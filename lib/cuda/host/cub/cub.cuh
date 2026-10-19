@@ -6,6 +6,8 @@
 #pragma once
 #include <stddef.h>
 
+#include <cuda_runtime.h>
+
 namespace cub {
 enum BlockLoadAlgorithm { BLOCK_LOAD_DIRECT, BLOCK_LOAD_WARP_TRANSPOSE };
 enum BlockStoreAlgorithm { BLOCK_STORE_DIRECT, BLOCK_STORE_WARP_TRANSPOSE };
@@ -41,9 +43,28 @@ public:
 struct DeviceScan {
   template <typename... Args> static int InclusiveSum(Args &&...) { return 0; }
 };
-// Device-wide reduction: a host function of ggml-cuda (mean.cu, sum.cu) calls it for a whole row. It is declared
-// without a body, so a host program that calls it fails at link time rather than computing nothing.
+// Device-wide algorithms are host calls that launch and allocate; the host copy only needs them declared (the device
+// unit never contains them), so they fail at link time rather than computing nothing. They return cudaError_t so
+// CUDA_CHECK around a call parses (the fix-misc3 shim returned cudaSuccess; origin's DeviceReduce did not).
 struct DeviceReduce {
-  template <typename... Args> static int Sum(Args &&...);
+  template <typename... Args> static cudaError_t Sum(Args &&...);
+};
+struct DeviceRadixSort {
+  template <typename... Args> static cudaError_t SortPairs(Args &&...);
+  template <typename... Args> static cudaError_t SortPairsDescending(Args &&...);
+};
+struct DeviceSegmentedRadixSort {
+  template <typename... Args> static cudaError_t SortPairs(Args &&...);
+  template <typename... Args> static cudaError_t SortPairsDescending(Args &&...);
+};
+struct DeviceSegmentedSort {
+  template <typename... Args> static cudaError_t SortPairs(Args &&...);
+  template <typename... Args> static cudaError_t SortPairsDescending(Args &&...);
+};
+struct DeviceSegmentedScan {
+  template <typename... Args> static cudaError_t InclusiveSegmentedSum(Args &&...);
+};
+struct DeviceTopK {
+  template <typename... Args> static cudaError_t MaxPairs(Args &&...);
 };
 }  // namespace cub

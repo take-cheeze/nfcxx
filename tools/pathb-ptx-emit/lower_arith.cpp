@@ -106,11 +106,11 @@ Operand FnCtx::module_operand(const Node &x) {
     emit("cvta.global.u64 " + t + ", " + ptx_sym(name) + ";");
   } else if (in(&ModuleSymbols::consts)) {
     // a constant with a value (see scalar_const_init): read-only memory, its address is generic through .const
-    emit("cvta.const.u64 " + t + ", " + ptx_sym(name) + ";");
+    emit("cvta.const.u64 " + t + ", " + ptx_sym(mod->data_name(name)) + ";");
   } else if (in(&ModuleSymbols::externs)) {
     throw Refused("global " + name + " is extern (no definition in this unit)");
   } else if (in(&ModuleSymbols::strings)) {
-    emit("cvta.const.u64 " + t + ", " + string_const_sym(name) + ";");
+    emit("cvta.const.u64 " + t + ", " + string_const_sym(mod->data_name(name)) + ";");
   } else {
     throw Refused("static object @\"" + name + "\" (only block-shared and device globals are lowered)");
   }
@@ -373,6 +373,15 @@ bool FnCtx::arith(const std::string &h, const Node &x, const std::string &dest, 
     expect(dty, ty);
     Operand a = operand(at(x, 2));
     int_convert(dest, ty, a.text, a.ty);
+    return true;
+  }
+  if (h == "p2i") {
+    // a pointer as an integer: its 8-byte generic address, kept or truncated like an unsigned 8-byte integer
+    Ty ty = parse_type(&at(x, 1));
+    expect(dty, ty);
+    Operand a = operand(at(x, 2));
+    if (a.ty.kind != "ptr") throw BadIR("p2i of a " + a.ty.kind);
+    int_convert(dest, ty, a.text, Ty{"int", 8, false, false});
     return true;
   }
   if (h == "fconv") {
