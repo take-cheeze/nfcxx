@@ -2,15 +2,14 @@
 # Build SQLite (the amalgamation, sqlite3.c) with the project's C compiler into build/sqlite/<backend>/libsqlite3.a,
 # with sqlite3.h beside it. nfcc compiles it: qbe (cproc -> QBE, the default) or gcc (NFCXX_BACKEND=gcc).
 #
-# The amalgamation is SQLite 3.53.4. Its canonical home is sqlite.org, which some build hosts cannot reach, so this
-# takes the copy that better-sqlite3 13.0.3 ships in deps/sqlite3 (the same file, from the npm registry). Both
-# files are checked against the SHA-256 below before use; a mismatch stops the build. Move the pins together when
-# the version changes.
+# The amalgamation is SQLite 3.54.1, the release zip from sqlite.org. Its published SHA3-256 is
+# 92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30; the SHA-256 pins below are checked before use, and
+# a mismatch stops the build. Move the pins together when the version changes.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-tgz_url=https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-13.0.3.tgz
-tgz_sha256=77e0513dc1a469fb3bceec4c7fb5ad3f403109787eda05be047ec17fd56868cb
-c_sha256=6a2805f8c1ef020a7086e62258519323cf98b219e9fe87a42065d916cfebaefc
+zip_url=https://sqlite.org/2026/sqlite-amalgamation-3540100.zip
+zip_sha256=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
+c_sha256=0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52
 backend=${NFCXX_BACKEND:-qbe}
 dest=$root/build/sqlite/$backend
 src=$root/build/sqlite/src
@@ -24,11 +23,11 @@ check() {  # check FILE WANT: stops when FILE does not have the SHA-256 WANT
 mkdir -p "$src"
 if [ ! -f "$src/sqlite3.c" ] || [ "$(sha256_of "$src/sqlite3.c")" != "$c_sha256" ]; then
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL "$tgz_url" -o "$tmp/sqlite.tgz"
-  check "$tmp/sqlite.tgz" "$tgz_sha256"
-  tar -xzf "$tmp/sqlite.tgz" -C "$tmp" package/deps/sqlite3/sqlite3.c package/deps/sqlite3/sqlite3.h
-  check "$tmp/package/deps/sqlite3/sqlite3.c" "$c_sha256"
-  mv "$tmp/package/deps/sqlite3/sqlite3.c" "$tmp/package/deps/sqlite3/sqlite3.h" "$src/"
+  curl -fsSL "$zip_url" -o "$tmp/amalgamation.zip"
+  check "$tmp/amalgamation.zip" "$zip_sha256"
+  unzip -q "$tmp/amalgamation.zip" -d "$tmp"
+  check "$tmp/sqlite-amalgamation-3540100/sqlite3.c" "$c_sha256"
+  mv "$tmp/sqlite-amalgamation-3540100/sqlite3.c" "$tmp/sqlite-amalgamation-3540100/sqlite3.h" "$src/"
 fi
 
 # SQLITE_THREADSAFE=1: the serialized mode, safe to share one connection set across threads. SQLITE_DQS=0: a double-quoted
