@@ -384,9 +384,7 @@ class CodeGen
       rebound = numeric_self_rebound_ireps
       reflective = @numeric_ivar_disabled
       @numeric_ivar_disabled = saved
-      rebound.each do |label|
-        @ireps[label].instructions.each { |i| names << i.ivar if %w[GETIV SETIV].include?(i.op) && i.ivar }
-      end
+      rebound.each { |label| names.merge(own_ivar_names(label)) }
       [names, reflective]
     end
   end
@@ -607,11 +605,19 @@ class CodeGen
   def subtree_ivar_names(label)
     @subtree_ivar_names ||= {}
     @subtree_ivar_names[label] ||= begin
-      irep = @ireps.fetch(label)
-      names = Set.new
-      irep.instructions.each { |insn| names << insn.ivar if insn.op == 'SETIV' || insn.op == 'GETIV' }
-      irep.reps.each { |child| names.merge(subtree_ivar_names(child)) }
+      names = own_ivar_names(label).dup
+      @ireps.fetch(label).reps.each { |child| names.merge(subtree_ivar_names(child)) }
       names
+    end
+  end
+
+  # The ivar names the irep's own GETIV/SETIV mention (nested ireps excluded), scanned once per irep.
+  def own_ivar_names(label)
+    @own_ivar_names ||= {}
+    @own_ivar_names[label] ||= begin
+      names = Set.new
+      @ireps.fetch(label).instructions.each { |i| names << i.ivar if (i.op == 'GETIV' || i.op == 'SETIV') && i.ivar }
+      names.freeze
     end
   end
 
