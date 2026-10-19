@@ -757,6 +757,6 @@ module TypeFacts
   end
 
   def write(path, facts)
-    File.write(path, JSON.pretty_generate(facts))
+    File.write(path, JSON.generate(facts))
   end
 end
