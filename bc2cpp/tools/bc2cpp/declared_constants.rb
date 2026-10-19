@@ -414,19 +414,20 @@ module DeclaredConstants
   # The owner-scoped proofs below feed TypeFacts const_rows only. The declared check and CodeGen keep their own
   # program-wide predicates, so generated code is unchanged by them.
 
-  # CORE_CONTAINERS: the exact classes whose stock methods the owner proofs cover.
+  # CORE_CONTAINERS: the exact classes whose stock methods the owner proofs cover. STOCK_PROOF_CLASSES adds Integer
+  # (`freeze`: the FREEZE_SELF fact, type_facts freeze_self_type and IntegerConstantRanges) and String (`freeze`, and
+  # `length` for BOOL_COMPARE).
   CORE_CONTAINERS = %w[Array Hash].freeze
-  # STOCK_OWNER_CLASSES: the exact classes stock_method? answers for; String is added for String#length (BOOL_COMPARE).
-  STOCK_OWNER_CLASSES = (CORE_CONTAINERS + %w[String]).freeze
+  STOCK_PROOF_CLASSES = (CORE_CONTAINERS + %w[Integer String]).freeze
 
-  # Whether a call of +name+ on an exact +klass+ instance (Array or Hash) is mruby's own method. The owners that answer
+  # Whether a call of +name+ on an exact +klass+ instance (STOCK_PROOF_CLASSES) is mruby's own method. The owners that answer
   # it first are the core ancestors of +klass+ (CoreHierarchySigs: Array, Enumerable, Object, Kernel, BasicObject) and
   # every module mixed into those, transitively. A Ruby definition on one of them, a prepend on one of them, or an
   # unresolved mixin into one of them refuses the proof. A Ruby definition anywhere else (Graphics.freeze, a game
   # class) cannot answer an Array or Hash receiver, so it does not. Scoped to the owners because a program-wide name
   # check refuses on the engine's own methods of the same name.
   def stock_method?(name, klass, registry, included_modules, prepended_modules, unknown_mixins)
-    return false unless STOCK_OWNER_CLASSES.include?(klass)
+    return false unless STOCK_PROOF_CLASSES.include?(klass)
 
     owners = Set.new(CoreHierarchySigs.ancestors(klass))
     loop do

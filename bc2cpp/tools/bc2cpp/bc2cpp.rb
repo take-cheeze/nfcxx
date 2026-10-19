@@ -1074,8 +1074,12 @@ if $PROGRAM_NAME == __FILE__
   integer_constant_ranges =
     if IntegerConstantRanges.enabled?
       range_report = ENV['BC2CPP_NUMERIC_CONSTANTS_REPORT'] ? [] : nil
+      # FREEZE_SELF: the interval walk reads through `.freeze` only where Object#freeze is stock on Integer.
+      freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included_modules,
+                                                    prepended_modules, unknown_mixins)
       ranges = profile_call.call('IntegerConstantRanges.analyze') do
         IntegerConstantRanges.analyze(ireps, native_paths, foreign_ruby_srcs, operators_safe: operators_safe,
+                                                                             freeze_safe: freeze_safe,
                                                                              report: range_report)
       end
       File.write(ENV.fetch('BC2CPP_NUMERIC_CONSTANTS_REPORT'), "#{range_report.sort.join("\n")}\n") if range_report
