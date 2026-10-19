@@ -116,15 +116,10 @@ module LexicalConsts
         @scope[label] = parent
         irep = @ireps.fetch(label)
         body = {}
-        irep.instructions.each_with_index do |insn, idx|
-          next unless %w[CLASS MODULE SCLASS].include?(insn.op)
-
-          exec = irep.instructions[idx + 1]
-          next unless exec&.op == 'EXEC' && exec.reg_token == insn.reg_token
-
-          body[exec.block_index] = body_scope(irep, idx, insn, parent)
+        BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE', 'SCLASS').each do |idx, child|
+          body[child] = body_scope(irep, idx, irep.instructions[idx], parent)
         end
-        irep.reps.each_with_index { |child, i| stack << [child, body.fetch(i, parent)] }
+        irep.reps.each { |child| stack << [child, body.fetch(child, parent)] }
       end
     end
 
