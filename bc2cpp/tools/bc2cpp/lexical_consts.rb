@@ -20,6 +20,8 @@ module LexicalConsts
   EMPTY = Set.new.freeze
   # A string evaluated with one of these changes the cref of its code, which is not modelled.
   STRING_EVAL_SENDS = %w[class_eval module_eval instance_eval].freeze
+  # The ops collect_definitions reads besides the sends: the class bodies and the constant writes.
+  DEFINITION_OPS = %w[CLASS MODULE SETCONST SETMCNST].freeze
 
   # read_keys: GETCONST/GETMCNST insn (by identity) -> qualified name of the definition it reads.
   # site_keys: SETCONST insn (by identity) -> qualified name it defines, nil when its scope is unknown.
@@ -39,8 +41,8 @@ module LexicalConsts
   # Only a string argument evaluates code. A block runs in the lexical cref (mruby: `Foo.class_eval { BAR }`
   # reads the lexical BAR), so the block form of these sends keeps the model. An unknown count may carry a string.
   def eval_send?(irep)
-    irep.instructions.any? do |insn|
-      insn.op.start_with?('SEND', 'SSEND') && STRING_EVAL_SENDS.include?(insn.sym) && string_argument?(insn)
+    BytecodeIR.for(irep).instructions_with_op(*BytecodeIR::Ops::SEND_FAMILY).any? do |insn|
+      STRING_EVAL_SENDS.include?(insn.sym) && string_argument?(insn)
     end
   end
 
@@ -85,7 +87,7 @@ module LexicalConsts
       site_keys = {}.compare_by_identity
       @ireps.each do |label, irep|
         scope = @scope.fetch(label, :unknown)
-        irep.instructions.each_with_index do |insn, idx|
+        BytecodeIR.for(irep).each_with_op('SETCONST', 'GETCONST', 'GETMCNST') do |insn, idx|
           case insn.op
           when 'SETCONST'
             site_keys[insn] = scope == :unknown ? nil : LexicalConsts.qualify(scope, insn.const_name)
@@ -133,7 +135,7 @@ module LexicalConsts
     def collect_definitions
       @ireps.each do |label, irep|
         scope = @scope.fetch(label, :unknown)
-        irep.instructions.each_with_index do |insn, idx|
+        BytecodeIR.for(irep).each_with_op(*DEFINITION_OPS, *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
           case insn.op
           when 'CLASS', 'MODULE'
             define(scope, insn.sym, klass: true)
@@ -150,8 +152,6 @@ module LexicalConsts
           when 'SETMCNST'
             @unknown << insn.mcnst_name
           else
-            next unless insn.op.start_with?('SEND', 'SSEND')
-
             # A private constant raises for a scoped `K::NAME` read from outside, which scoped_key does not model.
             @scoped_unknown = true if insn.sym == 'private_constant'
             collect_mixin(scope, irep, idx, insn) if %w[include prepend].include?(insn.sym)
