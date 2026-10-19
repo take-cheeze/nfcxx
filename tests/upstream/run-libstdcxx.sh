@@ -4,6 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
 base=$root/build/testsuite-snapshots
+dejagnu=${DEJAGNU_ROOT:-$base/dejagnu}
+test -x "$dejagnu/usr/bin/runtest"
 out=${LIBSTDCXX_SUITE_OUT:-$base/libstdcxx-native-full}
 jobs=${SUITE_JOBS:-8}
 [[ $jobs =~ ^[1-9][0-9]*$ ]] || exit 1
@@ -11,8 +13,8 @@ mkdir -p "$out"; out=$(cd "$out" && pwd)
 test ! -e "$out/started" || { echo "choose a fresh LIBSTDCXX_SUITE_OUT" >&2; exit 1; }
 date -u +%FT%TZ > "$out/started"
 mkdir "$out/parallel"
-export PATH="$base/dejagnu/usr/bin:/usr/bin:/bin:$PATH"
-export LD_LIBRARY_PATH="$base/dejagnu/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$dejagnu/usr/bin:/usr/bin:/bin:$PATH"
+export LD_LIBRARY_PATH="$dejagnu/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GCC_RUNTEST_PARALLELIZE_DIR=$out/parallel
 export LIBSTDCXX_SOURCE=$base/gcc/libstdc++-v3/testsuite LIBSTDCXX_RESULT=$out
 g++ --version > "$out/compiler.txt"

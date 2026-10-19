@@ -23,6 +23,7 @@ if [ ! -f build/gcc/CMakeCache.txt ]; then
   edg-exec -- cmake --preset linux-gcc-debug
 fi
 edg-exec -- cmake --build build/gcc --target cpfe edg_prelink edg_decode edg_munch libedgrt.a
+touch build/gcc/upstream-build-complete
 before=$(find tests/runs -maxdepth 1 -type d -name '20*' | sort | tail -1)
 rc=0
 dev_tools/bin/edg-docker-test --non-interactive \

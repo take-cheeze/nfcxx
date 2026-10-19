@@ -5,7 +5,11 @@ unset CMAKE_INCLUDE_PATH CMAKE_LIBRARY_PATH
 /usr/bin/python3 -c 'import psutil'
 cd "$(dirname "$0")/../.."
 tests/upstream/setup-git.sh clang
-tests/upstream/setup-clang-tidy.sh
+if [ -n "${CLANG_TIDY_EXE:-}" ]; then
+  test -x "$CLANG_TIDY_EXE"
+else
+  tests/upstream/setup-clang-tidy.sh
+fi
 base=$PWD/build/testsuite-snapshots
 cmake -G Ninja -S "$base/clang/runtimes" -B "$base/libcxx-build-system" \
   -DCMAKE_C_COMPILER=/usr/bin/clang-21 -DCMAKE_CXX_COMPILER=/usr/bin/clang++-21 \
