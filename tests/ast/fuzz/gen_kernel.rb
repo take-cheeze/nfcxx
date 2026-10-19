@@ -8,46 +8,34 @@
 # operators, comparisons, locals, if / while / repeat / numeric for / break / return, calls of earlier functions, some of them
 # recursive), each called with a number of argument tuples, some of the wrong type, through pcall; the results and the error
 # messages are printed. The tier compiles these functions, so the output has to be the same as a real Lua's.
-# The draws come from Rng (xorshift64 seeded by SEED), not from Python's random module, so the program for a given seed is not
+# The draws come from Rng (mruby-random's Random seeded by SEED), not from Python's random module, so the program for a given seed is not
 # the Python original's; the grammar and the order of the draws are the same. With no SEGMENTS argument the count of segments
 # is drawn, as in the original.
 
-M64 = (1 << 64) - 1
-
-# Seeded draws. mruby has no Random class. Every draw goes through u, a float in [0, 1) with 30 random bits.
+# Seeded draws: mruby-random's Random, seeded by SEED. The helpers keep the names the generator calls.
 class Rng
   def initialize(seed)
-    @s = ((seed + 1) * 0x9E3779B97F4A7C1) & M64
-    @s = 1 if @s == 0
-  end
-
-  def u
-    x = @s
-    x ^= (x << 13) & M64
-    x ^= x >> 7
-    x ^= (x << 17) & M64
-    @s = x
-    (x >> 34) / 1073741824.0
+    @r = Random.new(seed)
   end
 
   def random
-    u
+    @r.rand
   end
 
   def randint(a, b)
-    a + (u * (b - a + 1)).floor
+    @r.rand(a..b)
   end
 
   def choice(seq)
-    seq[(u * seq.size).floor]
+    seq[@r.rand(seq.size)]
   end
 
   # two distinct elements of SEQ: one, then one of the others
   def sample2(seq)
-    i = (u * seq.size).floor
+    i = @r.rand(seq.size)
     a = seq[i]
     rest = seq[0, i] + seq[i + 1..-1]
-    j = (u * (seq.size - 1)).floor
+    j = @r.rand(seq.size - 1)
     [a, rest[j]]
   end
 end

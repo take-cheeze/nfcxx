@@ -2,37 +2,25 @@
 # Writes a Lua program of N random expressions (arithmetic, bitwise, comparison, concatenation, logic and a few math functions
 # over integers, floats, strings and other values) to stdout, each evaluated under pcall; run by tests/ast/fuzz.sh.
 # usage: scripts/mrb tests/ast/fuzz/gen_expr.rb SEED N
-# The draws come from Rng (xorshift64 seeded by SEED), not from Python's random module, so the programs for a given seed are
+# The draws come from Rng (mruby-random's Random seeded by SEED), not from Python's random module, so the programs for a given seed are
 # not the Python original's; the grammar and the order of the draws are the same.
 
-M64 = (1 << 64) - 1
-
-# Seeded draws. mruby has no Random class. Every draw goes through u, a float in [0, 1) with 30 random bits.
+# Seeded draws: mruby-random's Random, seeded by SEED. The helpers keep the names the generator calls.
 class Rng
   def initialize(seed)
-    @s = ((seed + 1) * 0x9E3779B97F4A7C1) & M64
-    @s = 1 if @s == 0
-  end
-
-  def u
-    x = @s
-    x ^= (x << 13) & M64
-    x ^= x >> 7
-    x ^= (x << 17) & M64
-    @s = x
-    (x >> 34) / 1073741824.0
+    @r = Random.new(seed)
   end
 
   def random
-    u
+    @r.rand
   end
 
   def randint(a, b)
-    a + (u * (b - a + 1)).floor
+    @r.rand(a..b)
   end
 
   def choice(seq)
-    seq[(u * seq.size).floor]
+    seq[@r.rand(seq.size)]
   end
 end
 
