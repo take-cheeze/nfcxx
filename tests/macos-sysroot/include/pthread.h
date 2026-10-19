@@ -1,5 +1,7 @@
 /* Clean-room declarations of the POSIX threads functions used by libc++'s threading layer, from the POSIX
- * specification (pthread.h). Compile checks only: the object types are opaque placeholders, not Darwin's layouts. */
+ * specification (pthread.h). Compile checks only. The mutex, condition, once and attribute types follow the LP64 layouts and
+ * initializer signatures of Apple's open-source libpthread (_pthread_types.h and types_internal.h), so a binary's objects
+ * match the Mac's libSystem. */
 #ifndef NFCXX_CLEANROOM_PTHREAD_H
 #define NFCXX_CLEANROOM_PTHREAD_H
 
@@ -11,20 +13,20 @@ extern "C" {
 
 struct __nfcxx_pthread;
 typedef struct __nfcxx_pthread *pthread_t;   /* a pointer, as on Darwin, so thread ids compare with == */
-typedef struct { long __opaque[8]; } pthread_attr_t;
-typedef struct { long __opaque[8]; } pthread_mutex_t;
-typedef struct { long __opaque[4]; } pthread_mutexattr_t;
-typedef struct { long __opaque[8]; } pthread_cond_t;
-typedef struct { long __opaque[4]; } pthread_condattr_t;
-typedef struct { long __opaque[4]; } pthread_once_t;
+typedef struct { long __sig; char __opaque[56]; } pthread_attr_t;
+typedef struct { long __sig; char __opaque[56]; } pthread_mutex_t;
+typedef struct { long __sig; char __opaque[8]; } pthread_mutexattr_t;
+typedef struct { long __sig; char __opaque[40]; } pthread_cond_t;
+typedef struct { long __sig; char __opaque[8]; } pthread_condattr_t;
+typedef struct { long __sig; char __opaque[8]; } pthread_once_t;
 typedef unsigned long pthread_key_t;
 
 #define PTHREAD_MUTEX_NORMAL 0
 #define PTHREAD_MUTEX_RECURSIVE 2
 #define PTHREAD_MUTEX_ERRORCHECK 1
-#define PTHREAD_MUTEX_INITIALIZER {{0}}
-#define PTHREAD_COND_INITIALIZER {{0}}
-#define PTHREAD_ONCE_INIT {{0}}
+#define PTHREAD_MUTEX_INITIALIZER {0x32AAABA7, {0}}
+#define PTHREAD_COND_INITIALIZER {0x3CB0B1BB, {0}}
+#define PTHREAD_ONCE_INIT {0x30B1BCBA, {0}}
 
 int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
 int pthread_join(pthread_t, void **);

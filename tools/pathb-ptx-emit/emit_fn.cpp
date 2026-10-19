@@ -105,10 +105,12 @@ std::map<std::string, AggShape> abi_shapes(const std::vector<Node> &forms) {
 
 Fn::Fn(std::string name, size_t index, Loader load) : load_(std::move(load)), index_(index), name_(std::move(name)) {}
 
-AggShape Fn::aggregate(const Node &t) const {
+AggShape Fn::aggregate(const Node &type) const {
+  // A const-qualified struct passes the same bytes: (const (struct NAME)) is the struct.
+  const Node &t = head_of(type) == "const" && type.items.size() == 2 ? type.items[1] : type;
   std::string h = head_of(t);
   if (!((h == "struct" || h == "union") && t.items.size() == 2 && t.items[1].kind == Node::Str))
-    throw Refused("aggregate form " + form_text(t));
+    throw Refused("aggregate form " + form_text(type));
   const std::string &name = t.items[1].text;
   if (!aggs) throw Refused(h + " " + name + " passed by value (the module has no (abi-type) forms)");
   auto it = aggs->find(name);
