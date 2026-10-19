@@ -179,7 +179,7 @@ module IrSymbolFlow
 
   # The SETIDX instructions that store into the value the GETCONST at idx loads, or nil when that value may be read
   # any other way: as another operand or a send's receiver, copied by MOVE, or captured by a nested block. An
-  # element a GETIDX reads from it may only be splatted (ARYCAT's source) or indexed in turn.
+  # element a GETIDX reads from it may only be splatted (ARYCAT's source), which copies it.
   def table_uses(irep, idx)
     reg = irep.instructions[idx].reg
     uses = reg && value_reads(irep, idx, reg) or return nil
@@ -199,7 +199,7 @@ module IrSymbolFlow
     uses = value_reads(irep, idx, reg) or return false
     uses.all? do |n|
       insn = irep.instructions[n]
-      (insn.op == 'ARYCAT' && insn.reg.to_i + 1 == reg.to_i) || (insn.op == 'GETIDX' && insn.reg == reg)
+      insn.op == 'ARYCAT' && insn.reg.to_i + 1 == reg.to_i
     end
   end
 

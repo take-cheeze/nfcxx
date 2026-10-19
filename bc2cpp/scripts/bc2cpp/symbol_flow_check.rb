@@ -10,7 +10,6 @@
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/symbol_flow'
 require_relative '../../tools/bc2cpp/ir_symbol_flow'
 
 unless system(MRBC, '--version', out: File::NULL, err: File::NULL)
@@ -43,8 +42,8 @@ def compiled(source)
 end
 
 # The universe of table const in source, or nil when the premises reject it.
-def universe_of(source, const, analysis = IrSymbolFlow)
-  compiled(source) { |ireps, names| analysis.dispatch_universes(ireps, names)[const] }
+def universe_of(source, const)
+  compiled(source) { |ireps, names| IrSymbolFlow.dispatch_universes(ireps, names)[const] }
 end
 
 # The table each `send(*...)` splat send of source reads, in instruction order.
@@ -77,7 +76,6 @@ EOS_FIXTURE
 uni = universe_of(LITERAL_TABLE, 'TABLE')
 check.call('a table of literal entries has a finite universe', uni.is_a?(Set))
 check.call('the universe is exactly the stored names', uni == Set['_lda', '_sta', 'lit'])
-check.call('the old walk agrees the table is literal', universe_of(LITERAL_TABLE, 'TABLE', SymbolFlow)&.superset?(uni))
 check.call('`send(*TABLE[i])` reads TABLE', splat_tables(LITERAL_TABLE) == ['TABLE'])
 
 runtime_symbol = LITERAL_TABLE.sub('TABLE[code] = [entry, :lit]', 'TABLE[code] = [entry.to_s.to_sym, :lit]')
@@ -95,7 +93,7 @@ outside_writer = LITERAL_TABLE + <<~'EOS_FIXTURE'
 EOS_FIXTURE
 check.call('a table written from a second method is rejected (P1)', universe_of(outside_writer, 'TABLE').nil?)
 
-# Each of these lets :evil into the table where the premises do not look (the raw-instruction walk missed them).
+# Each of these lets :evil into the table where the premises do not look (ADR 0499 lists the ones ADR 0450's walk missed).
 argument = LITERAL_TABLE.sub('send(*TABLE[code])', 'fill(TABLE); send(*TABLE[code])')
 check.call('a table passed as an argument is rejected (P2)', universe_of(argument, 'TABLE').nil?)
 receiver = LITERAL_TABLE.sub('send(*TABLE[code])', 'TABLE.push([:evil]); send(*TABLE[code])')

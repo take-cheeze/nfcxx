@@ -2,7 +2,6 @@
 
 require 'set'
 require_relative 'bytecode_ir'
-require_relative 'symbol_flow'
 require_relative 'ir_symbol_flow'
 
 # YIELD_REACH (ADR 0283): a whole-program, by-name "may this code suspend the current Fiber?"
@@ -477,7 +476,7 @@ class YieldReach
       return nil
     end
     if (universe = dispatch_send_universe(node, idx, dest))
-      # `send(*TABLE[i])` of a constant table whose stored values are all literal (SymbolFlow): the send
+      # `send(*TABLE[i])` of a constant table whose stored values are all literal (IrSymbolFlow): the send
       # reaches exactly the names of that table.
       universe.each { |name| node.calls << name }
       @reasons[:dispatch_table] += 1
@@ -490,44 +489,19 @@ class YieldReach
     nil
   end
 
-  # BC2CPP_IR_SYMBOL_FLOW (ADR 0493): 1 answers from IrSymbolFlow, compare answers from SymbolFlow and reports
-  # where IrSymbolFlow disagrees on stderr; unset keeps SymbolFlow.
-  IR_SYMBOL_FLOW = ENV.fetch('BC2CPP_IR_SYMBOL_FLOW', '')
-
   # The finite name set of a splat send built from a verified dispatch table, or nil.
   def dispatch_send_universe(node, idx, dest)
     return nil unless @sound && dest
 
-    irep = node.irep
-    reg = (dest.to_i + 1).to_s
-    ir_table = IrSymbolFlow.splat_table(irep, idx, reg) unless IR_SYMBOL_FLOW.empty?
-    return ir_table && ir_dispatch_universes[ir_table] if IR_SYMBOL_FLOW == '1'
-
-    @preds ||= {}
-    preds = (@preds[irep.label] ||= SymbolFlow.predecessors(irep))
-    table = SymbolFlow.splat_table(irep, preds, idx, reg)
-    universe = table && dispatch_universes[table]
-    if IR_SYMBOL_FLOW == 'compare'
-      ir_universe = ir_table && ir_dispatch_universes[ir_table]
-      unless universe == ir_universe
-        warn "[symbol_flow] #{irep.label}:#{idx} table=#{table.inspect}/#{ir_table.inspect} " \
-             "names=#{universe&.size.inspect}/#{ir_universe&.size.inspect}"
-      end
-    end
-    universe
+    table = IrSymbolFlow.splat_table(node.irep, idx, (dest.to_i + 1).to_s)
+    table && dispatch_universes[table]
   end
 
-  def method_names_by_label
-    @nodes.values.select { |n| n.kind == :method }.to_h { |n| [n.label, n.name] }
-  end
-
-  # { constant => names } for the program's dispatch tables whose premises SymbolFlow checks.
+  # { constant => names } for the program's dispatch tables whose premises IrSymbolFlow checks.
   def dispatch_universes
-    @dispatch_universes ||= SymbolFlow.dispatch_universes(@ireps, method_names_by_label)
-  end
-
-  def ir_dispatch_universes
-    @ir_dispatch_universes ||= IrSymbolFlow.dispatch_universes(@ireps, method_names_by_label)
+    @dispatch_universes ||= IrSymbolFlow.dispatch_universes(
+      @ireps, @nodes.values.select { |n| n.kind == :method }.to_h { |n| [n.label, n.name] }
+    )
   end
 
   def scan_special_call(node, program, idx, dest, name, explicit, lit_block, recv_const, insn)
