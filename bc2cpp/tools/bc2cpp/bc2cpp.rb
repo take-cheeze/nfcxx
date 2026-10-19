@@ -1843,26 +1843,34 @@ if $PROGRAM_NAME == __FILE__
   # DIRECT_RAISE (ADR 0226): a reviewed dead fallback raises without dispatching (before the rewrite renames its callee).
   compiled.each { |m| m[:code] = NomethodReviewed.direct_raise(m[:code], m[:owner], m[:name]) }
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
+  # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
+  # live in separate `.each`/`.sum` scans of the same code strings.
   kept = Hash.new(0)
-  compiled.each { |m| m[:code].scan(%r{/\* CLOSED_WORLD kept: (\w+) \*/}) { |(r)| kept[r] += 1 } }
-  converted = compiled.sum { |m| m[:code].scan(/\bbc2cpp_nomethod\(M,/).size }
-  dropped = compiled.sum { |m| m[:code].scan(%r{^\s*// CLOSED_WORLD_SELF :}).size }
+  converted = 0
+  dropped = 0
+  violation_families = Hash.new(0)
+  owner_call = 0
+  nilable_receiver = 0
+  compiled.each do |m|
+    code = m[:code]
+    code.scan(%r{/\* CLOSED_WORLD kept: (\w+) \*/}) { |(r)| kept[r] += 1 }
+    converted += code.scan(/\bbc2cpp_nomethod\(M,/).size
+    dropped += code.scan(%r{^\s*// CLOSED_WORLD_SELF :}).size
+    code.scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|CLASS_NARROWING|COMPUTED_SEND|CORE_BODY_EXACT|CHECKED_POOL_EXACT|SELF_NEW_LEAF)\)"/) { |(f)| violation_families[f] += 1 }
+    owner_call += code.scan('/* CLOSED_WORLD owner-call: ').size
+    nilable_receiver += code.scan(%r{^\s*// NILABLE_RECEIVER :}).size
+  end
   warn "== closed world fallbacks: #{dropped} guards dropped, #{converted} bc2cpp_nomethod, " \
        "#{kept.values.sum} kept dispatching =="
-  # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
-  violation_families = Hash.new(0)
-  compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|CLASS_NARROWING|COMPUTED_SEND|CORE_BODY_EXACT|CHECKED_POOL_EXACT|SELF_NEW_LEAF)\)"/) { |(f)| violation_families[f] += 1 } }
   warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
   violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
   NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
   kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
-  # OUTSIDE_OWNER_CALL (ADR 0468): by-name sends replaced by the call checked against the name's owners.
-  warn "  OWNER_CALL: #{compiled.sum { |m| m[:code].scan('/* CLOSED_WORLD owner-call: ').size }}"
+  warn "  OWNER_CALL: #{owner_call}"
   warn ''
-  # NIL_RECEIVER (ADR 0296): nil arms of receivers proven nil-or-one-class.
   nil_sites = NomethodReviewed.nil_receiver_sites(compiled)
   warn "== closed world nil receivers: #{nil_sites.size} bc2cpp_nil_receiver =="
-  warn "  NILABLE_RECEIVER sites: #{compiled.sum { |m| m[:code].scan(%r{^\s*// NILABLE_RECEIVER :}).size }}"
+  warn "  NILABLE_RECEIVER sites: #{nilable_receiver}"
   nil_sites.uniq.sort.each { |k| warn "  NIL_RECEIVER_SITE #{k}" }
   warn ''
   # NOMETHOD_REVIEWED (docs/adr/0226), STRICT_HINTS_REVIEWED (docs/adr/0419), PROVEN_MISS_REVIEWED (docs/adr/0275):
