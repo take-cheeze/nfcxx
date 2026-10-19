@@ -37,6 +37,13 @@ locale_t duplocale(locale_t);
 
 struct lconv *localeconv_l(locale_t);
 double strtod_l(const char *, char **, locale_t);
+/* The xlocale wide-character and classification variants: POSIX gives the same behaviour through uselocale, which the
+   shims in tests/macos-sysroot/runtime/src/xlocale_shim.c implement. */
+int wcscoll_l(const wchar_t *, const wchar_t *, locale_t);
+size_t wcsxfrm_l(wchar_t *restrict, const wchar_t *restrict, size_t, locale_t);
+int iswupper_l(wint_t, locale_t);
+int iswspace_l(wint_t, locale_t);
+int iswprint_l(wint_t, locale_t);
 float strtof_l(const char *, char **, locale_t);
 long double strtold_l(const char *, char **, locale_t);
 long strtol_l(const char *, char **, int, locale_t);
