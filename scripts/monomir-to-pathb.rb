@@ -183,10 +183,17 @@ def program_item?(name)
   name.include?("D3bin") || name == "main" || name == "main#" || name.start_with?("panic_impl")
 end
 
+def static_type(name)
+  return nil unless $statics_types
+  $statics_types[name]
+end
+
 def local_type(name, locals, params)
   if name == "retval" || name == "$\"retval\""
     return $cur_ret
   end
+  st = static_type(name)
+  return st unless st.nil?
   t = nil
   locals.each { |n, ty| t = ty if n == name }
   if t.nil? && name.start_with?("arg")
@@ -327,6 +334,15 @@ end
 def place_root_addr(root, types, locals, params, param_reg, stmts, regi)
   if root == "$\"retval\"" || root == "retval"
     return ["$\"retval\"", regi]
+  end
+  if static_type(root)
+    return ["@\"#{pb_sym(root)}\"", regi]
+  end
+  known = locals.map(&:first).include?(root) || (root.start_with?("arg") && local_type(root, locals, params))
+  unless known
+    if root.match(/^[A-Z]/) && root.match(/^[A-Za-z0-9_]+$/)
+      return ["@\"#{pb_sym(root)}\"", regi]
+    end
   end
   ["$\"#{root}\"", regi]
 end
@@ -519,6 +535,8 @@ src.scan(/^static (.+?): (.+?) = (.*?);\n/m) do |name, ty, init|
   statics << {name: name.strip, type: ty.strip, init: init.strip}
 end
 $statics_names = statics.map { |st| st[:name] }
+$statics_types = {}
+statics.each { |st| $statics_types[st[:name]] = st[:type] }
 
 fn_path_map = {}
 src.scan(/\/\* (.+?) \*\/\nfn (\S+?)\(/) do |comment, fname|
@@ -824,26 +842,68 @@ def load_operand(expr, types, locals, params, param_reg, stmts, regi)
   [v, regi]
 end
 
+def operand_pt(expr, types, locals, params)
+  expr = expr.strip
+  m = expr.match(/^([+-]?\d+)\s+([A-Za-z0-9_]+)$/)
+  if m
+    return rust_type_to_pathb(m[2], types)
+  end
+  return "bool" if expr == "true" || expr == "false"
+  pt = place_type(expr, types, locals, params)
+  pt ? rust_type_to_pathb(pt, types) : nil
+end
+
+def coerce_to(ty, v, vpt, stmts, regi)
+  return [v, regi] if vpt == ty
+  if v.start_with?("(const")
+    m = v.match(/^\(const \S+ (.+)\)$/)
+    if m
+      return ["(const #{ty} #{m[1]})", regi]
+    end
+    return [v, regi]
+  end
+  r = regi; regi += 1
+  if (ty == "float" || ty == "double") != ((vpt || "").include?("float") || (vpt || "") == "double")
+    if ty == "float" || ty == "double"
+      op = (vpt || "").include?("unsigned") ? "u2f" : "i2f"
+      stmts << "(let %#{r} #{ty} (#{op} #{ty} #{v}))"
+    else
+      op = (vpt || "") == "float" ? "f2i" : "d2i"
+      op = op + ".s" unless ty.include?("unsigned")
+      stmts << "(let %#{r} #{ty} (#{op} #{ty} #{v}))"
+    end
+  else
+    stmts << "(let %#{r} #{ty} (iconv #{ty} #{v}))"
+  end
+  ["%#{r}", regi]
+end
+
 def const_int_value(expr)
   m = expr.strip.match(/^([+-]?\d+)\s+([A-Za-z0-9_]+)$/)
   return nil if m.nil?
   [m[1].sub(/^\+/, ""), m[2]]
 end
 
-def eval_binop(op, l, r, types, locals, params, param_reg, stmts, regi)
+def eval_binop(op, l, r, types, locals, params, param_reg, stmts, regi, hint_ty = nil)
   lt, regi = load_operand(l, types, locals, params, param_reg, stmts, regi)
   rt, regi = load_operand(r, types, locals, params, param_reg, stmts, regi)
-  ty = "int"
+  ty = hint_ty || "int"
   lc = const_int_value(l)
   rc = const_int_value(r)
-  if lc
-    ty = rust_type_to_pathb(lc[1], types)
-  elsif rc
-    ty = rust_type_to_pathb(rc[1], types)
-  else
-    lt2 = place_type(l, types, locals, params)
-    ty = rust_type_to_pathb(lt2, types) unless lt2.nil?
+  if hint_ty.nil?
+    if lc
+      ty = rust_type_to_pathb(lc[1], types)
+    elsif rc
+      ty = rust_type_to_pathb(rc[1], types)
+    else
+      lt2 = place_type(l, types, locals, params)
+      ty = rust_type_to_pathb(lt2, types) unless lt2.nil?
+    end
   end
+  lpt = operand_pt(l, types, locals, params)
+  rpt = operand_pt(r, types, locals, params)
+  lt, regi = coerce_to(ty, lt, lpt, stmts, regi)
+  rt, regi = coerce_to(ty, rt, rpt, stmts, regi)
   unsigned = ty.include?("unsigned")
   code = case op
   when "+" then "(wadd #{ty} #{lt} #{rt})"
@@ -894,7 +954,7 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
   end
   m = expr.match(/^BINOP\s+(.+?)\s+(<=?|>=?|==|!=|<<|>>|[+\-*\/%&|^])\s+(.+)$/)
   if m
-    code, ty, regi = eval_binop(m[2], m[1].strip, m[3].strip, types, locals, params, param_reg, stmts, regi)
+    code, ty, regi = eval_binop(m[2], m[1].strip, m[3].strip, types, locals, params, param_reg, stmts, regi, $binop_hint)
     return [code, regi]
   end
   if expr.start_with?("ADDROF")
@@ -907,12 +967,44 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
   if expr.start_with?("&mut ") || expr.start_with?("&move ") || expr.start_with?("&")
     place = expr.sub(/^&mut\s+|^&move\s+|^&\s*/, "").strip
     p = parse_place(place)
-    if p[:ops].size == 1 && p[:ops][0][:k] == :deref
-      inner_ty = local_type(p[:root], locals, params)
-      if inner_ty
-        rest = inner_ty.strip.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-        if fat_rest?(rest)
-          return ["$\"#{p[:root]}\"", regi]
+    if p[:ops].size >= 1 && p[:ops].last[:k] == :deref
+      prefix_ops = p[:ops][0...-1]
+      cur = local_type(p[:root], locals, params)
+      unless cur.nil?
+        cur = cur.strip
+        ok = true
+        prefix_ops.each do |w|
+          if w[:k] == :deref
+            inner, _ = type_deref_once(cur, types)
+            if inner.nil?
+              ok = false
+              break
+            end
+            cur = inner.strip
+          else
+            nc = apply_wrapper_ty(cur, w, types)
+            if nc.nil?
+              ok = false
+              break
+            end
+            cur = nc
+          end
+        end
+        if ok
+          rest = cur.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
+          if cur != rest && fat_rest?(rest.strip)
+            prefix_str = p[:root]
+            prefix_ops.each do |w|
+              case w[:k]
+              when :field then prefix_str = "#{prefix_str}.#{w[:idx]}"
+              when :downcast then prefix_str = "#{prefix_str}@#{w[:idx]}"
+              when :index then prefix_str = "#{prefix_str}[#{w[:idx]}]"
+              when :deref then prefix_str = "(*#{prefix_str})"
+              end
+            end
+            addr, regi = place_addr(prefix_str, types, locals, params, param_reg, stmts, regi)
+            return [addr, regi]
+          end
         end
       end
     end
@@ -935,7 +1027,7 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
       return regi
     end
     ret_active = pathb_ret != "void" || $agg_ret
-    composite = rhs.start_with?("ENUM") || rhs.start_with?("{") || rhs.start_with?("UNION") || rhs.start_with?('"') || (rhs.start_with?("(") && rhs.include?(","))
+    composite = rhs.start_with?("ENUM") || rhs.start_with?("{") || rhs.start_with?("UNION") || rhs.start_with?('"') || rhs.start_with?("MAKEDST") || rhs.start_with?("CAST") || rhs.start_with?("DSTPTR") || rhs.start_with?("DSTMETA") || (rhs.start_with?("(") && rhs.include?(","))
     if composite && ret_active
       regi = store_rvalue("$\"retval\"", rhs, types, locals, params, param_reg, stmts, regi, lines, pathb_ret)
       unless $agg_ret
@@ -971,7 +1063,20 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
     ptr_expr = parts[0]
     meta_expr = parts[1]
     pv, regi = eval_rvalue_operand(ptr_expr, types, locals, params, param_reg, stmts, regi, lines)
-    mv, regi = eval_rvalue_operand(meta_expr, types, locals, params, param_reg, stmts, regi, lines)
+    mty = nil
+    begin
+      mty = place_type(meta_expr, types, locals, params)
+    rescue
+      mty = nil
+    end
+    if meta_expr.start_with?("ADDROF") || meta_expr.start_with?("&") || meta_expr.start_with?('"') || meta_expr.match?(/^([+-]?\d+)\s+[A-Za-z0-9_]+$/) || meta_expr == "true" || meta_expr == "false"
+      mty = "usize"
+    end
+    if mty.nil? || mty == "()" || mty == "!" || is_zst_ty(mty, types)
+      mv = "(const unsigned_long 0)"
+    else
+      mv, regi = eval_rvalue_operand(meta_expr, types, locals, params, param_reg, stmts, regi, lines)
+    end
     addr, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi)
     r1 = regi; regi += 1
     stmts << "(let %#{r1} (ptr (const char)) #{pv})"
@@ -1181,6 +1286,10 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
           stmts << "(let %#{r} #{dpt} (iconv #{dpt} #{svv}))"
           val = "%#{r}"
         end
+      elsif dpt.start_with?("(ptr") && (spt || "").start_with?("(struct")
+        r = regi; regi += 1
+        stmts << "(let %#{r} #{dpt} (load #{dpt} #{svv}))"
+        val = "%#{r}"
       elsif (dpt.start_with?("(ptr") && (spt || "").start_with?("(ptr")) && dpt != spt
         r = regi; regi += 1
         stmts << "(let %#{r} #{dpt} (bitcast #{dpt} #{svv}))"
@@ -1208,6 +1317,10 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
   end
   if rhs.start_with?("DSTMETA")
     target = rhs.sub(/^DSTMETA\s+/, "").strip
+    dty0 = place_type(dst_place, types, locals, params)
+    if dty0.nil? || dty0 == "()" || dty0 == "!" || is_zst_ty(dty0, types)
+      return regi
+    end
     addr, regi = place_addr(target, types, locals, params, param_reg, stmts, regi)
     r = regi; regi += 1
     stmts << "(let %#{r} (ptr unsigned_long) (offset #{addr} 8))"
@@ -1266,7 +1379,18 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
     end
     return regi
   end
+  hint = nil
+  if rhs.strip.start_with?("BINOP")
+    bm = rhs.strip.match(/^BINOP\s+(.+?)\s+(<=?|>=?|==|!=|<<|>>|[+\-*\/%&|^])\s+(.+)$/)
+    if bm && !["==", "!=", "<", "<=", ">", ">="].include?(bm[2])
+      dst_t0 = place_type(dst_place, types, locals, params)
+      hint = dst_t0 ? rust_type_to_pathb(dst_t0, types) : nil
+      hint = nil if hint && hint.start_with?("(")
+    end
+  end
+  $binop_hint = hint
   val, regi = eval_rvalue_operand(rhs, types, locals, params, param_reg, stmts, regi, lines)
+  $binop_hint = nil
   vty = place_type(rhs, types, locals, params)
   vpt = vty ? rust_type_to_pathb(vty, types) : nil
   if val.start_with?("(") && !val.start_with?("(const") && !val.start_with?("(load")
@@ -1660,6 +1784,22 @@ functions.each do |fn|
                 end
               end
             end
+          when "catch_unwind"
+            if arg_vals.size >= 3
+              r = regi; regi += 1
+              stmts << "(let %#{r} (ptr void) (call (ptr void) #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+              if !ret_void && dest_ty
+                dpt = rust_type_to_pathb(dest_ty, types)
+                stmts << "(store #{dpt} #{dest == "RETURN" ? "$\"retval\"" : place_addr(dest, types, locals, params, param_reg, stmts, regi)[0]} (const #{dpt} 0))"
+              end
+            elsif !ret_void && dest_ty
+              dpt = rust_type_to_pathb(dest_ty, types)
+              dsz, _ = type_size_align(dest_ty, types)
+              if dsz > 0
+                daddr = dest == "RETURN" ? "$\"retval\"" : place_addr(dest, types, locals, params, param_reg, stmts, regi)[0]
+                stmts << "(zero-fill #{dsz} #{daddr})"
+              end
+            end
           when "transmute", "transmute_unchecked"
             if arg_vals.size >= 1
               v, at = arg_vals[0]
@@ -1757,6 +1897,16 @@ functions.each do |fn|
               stmts << "(let %#{r} #{ty} (wsub #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
               store_dest.call("%#{r}")
             end
+          when "arith_offset"
+            if arg_vals.size >= 2
+              dty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "(ptr unsigned_char)"
+              ety = iparams[0] ? iparams[0].sub(/^\*(const|mut|move)\s+/, "") : "u8"
+              es, _ = type_size_align(ety, types)
+              es = 1 if es == 0
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{dty} (index #{arg_vals[0][0]} #{arg_vals[1][0]} #{es}))"
+              store_dest.call("%#{r}")
+            end
           when "drop_in_place"
             if arg_vals.size >= 1 && iparams.size >= 1
               tt = iparams[0]
@@ -1771,6 +1921,65 @@ functions.each do |fn|
             sz, al = type_size_align(t, types)
             v = iname == "size_of" ? sz : al
             store_dest.call("(const #{ty} #{v})")
+          when "size_of_val", "align_of_val"
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            t = iparams[0] || "u8"
+            t = t.sub(/^(?:&|&mut\s+|&move\s+|\*const\s+|\*mut\s+|\*move\s+)/, "")
+            sz, al = type_size_align(t, types)
+            v = iname == "size_of_val" ? sz : al
+            store_dest.call("(const #{ty} #{v})")
+          when "discriminant_value"
+            if arg_vals.size >= 1 && iparams.size >= 1
+              t = iparams[0]
+              info = types.key?(t) ? types[t] : nil
+              if info && info[:tag]
+                tag = info[:tag]
+                toff = 0
+                fty = nil
+                subs = tag[:sub].split(",").map(&:strip).reject(&:empty?).map(&:to_i)
+                f0 = info[:fields][tag[:field]]
+                unless f0.nil?
+                  toff += f0[:off]
+                  cur_t = f0[:type]
+                  fty = cur_t
+                  subs.each do |pi|
+                    rec = cur_t && types.key?(cur_t) ? types[cur_t] : nil
+                    f = rec ? rec[:fields][pi] : nil
+                    if f.nil?
+                      fty = nil
+                      break
+                    end
+                    toff += f[:off]
+                    fty = f[:type]
+                    cur_t = fty
+                  end
+                end
+                fty = "u8" if fty.nil?
+                fsz, _ = type_size_align(fty, types)
+                fpt = rust_type_to_pathb(fty, types)
+                if fsz > 8 || fpt.start_with?("(")
+                  fpt = "unsigned_long"
+                end
+                dpt = dest_ty ? rust_type_to_pathb(dest_ty, types) : "long"
+                r = regi; regi += 1
+                if toff == 0
+                  stmts << "(let %#{r} #{fpt} (load #{fpt} #{arg_vals[0][0]}))"
+                else
+                  r0 = regi; regi += 1
+                  stmts << "(let %#{r0} (ptr #{fpt}) (offset #{arg_vals[0][0]} #{toff}))"
+                  stmts << "(let %#{r} #{fpt} (load #{fpt} %#{r0}))"
+                end
+                if dpt != fpt && !dpt.start_with?("(")
+                  r2 = regi; regi += 1
+                  stmts << "(let %#{r2} #{dpt} (iconv #{dpt} %#{r}))"
+                  store_dest.call("%#{r2}")
+                else
+                  store_dest.call("%#{r}")
+                end
+              else
+                store_dest.call("(const #{dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"} 0)")
+              end
+            end
           when "needs_drop"
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "bool"
             t = iparams[0] || "u8"
