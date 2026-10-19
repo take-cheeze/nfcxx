@@ -31,5 +31,5 @@ libc=${NFCXX_MACOS_LIBC:-}; libcargs=(); [ -n "$libc" ] && [ -f "$libc" ] && lib
 # are used when it is built; the system libc++ supplies the rest at run time.
 cxxb=${NFCXX_MACOS_LIBCXX_BUILT:-$root/build/macos-rt/libc++-darwin.a}; cxxbargs=(); [ -f "$cxxb" ] && cxxbargs=("$cxxb")
 rtargs=(); [ -f "$rt" ] && rtargs=("$rt")
-exec ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "${objs[@]}" ${libcargs[@]+"${libcargs[@]}"} ${rtargs[@]+"${rtargs[@]}"} ${cxxbargs[@]+"${cxxbargs[@]}"} \
+exec ld64.lld --error-limit=0 -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "${objs[@]}" ${libcargs[@]+"${libcargs[@]}"} ${rtargs[@]+"${rtargs[@]}"} ${cxxbargs[@]+"${cxxbargs[@]}"} \
   -L "$stub" -lSystem -L "$stub" -lc++ ${libs[@]+"${libs[@]}"}
