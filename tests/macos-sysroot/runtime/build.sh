@@ -123,7 +123,9 @@ cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDIN
 # names they define are left to the link check to report.
 # Also excluded: the three filesystem sources that include dirent.h (directory_entry, directory_iterator, operations). The
 # dirent layout is not defined by POSIX; it would have to come from the target, which is not read here.
-libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp "
+# exception.cpp (std::exception, bad_alloc, bad_cast, typeinfo, terminate) is left out: the cross link takes those from EDG's libC.a,
+# and linking both defines them twice.
+libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp exception.cpp "
 mkdir -p libcxx-obj
 rm -f libc++-darwin.a libcxx-obj/*.o
 cxxlib_fail=0
