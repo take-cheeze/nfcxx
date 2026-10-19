@@ -2,6 +2,7 @@
 
 # CodeGen: receiver, owner and super-target facts.
 
+require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir_returns'
 
 class CodeGen
@@ -188,14 +189,14 @@ class CodeGen
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
     at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
-    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], exhausted: at_entry) do |insn|
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
       case insn.op
       when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source'
       when 'GETIV' then 'get_ivar'
       when 'GETIDX', 'GETIDX0' then 'indexed_result'
       when 'GETUPVAR' then 'captured_upvar'
       when 'GETCONST', 'GETMCNST' then 'constant_lookup'
-      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB' then 'send_result'
+      when *BytecodeIR::Ops::SEND then 'send_result'
       when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
       else "write_#{insn.op.downcase}"
       end
@@ -275,7 +276,7 @@ class CodeGen
     return nil unless branch_edges
 
     barriers = skip_blocks ? %w[JMPUW ONERR RESCUE EXCEPT] : %w[JMPUW ONERR RESCUE EXCEPT BLOCK]
-    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP, barrier: barriers)
+    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
     return nil unless ref&.root == :const
 
     # A forward edge from before this write into the send's block could

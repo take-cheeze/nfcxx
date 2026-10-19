@@ -48,7 +48,7 @@ module CoreDefs
       end
       next if spans.empty?
 
-      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, _|
+      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, _index|
         next unless spans.any? { |from, to| from < insn.addr && insn.addr < to }
 
         label = def_body_label(irep, insn)
@@ -114,8 +114,7 @@ module CoreDefs
   # Generator run their iteration inside a Fiber; a compiled frame in there breaks
   # the same way.
   def references_fiber?(irep, ireps)
-    fiber_consts = BytecodeIR.for(irep).instructions_with_op('GETCONST', 'GETMCNST')
-    return true if fiber_consts.any? { |insn| insn.const_name == 'Fiber' }
+    return true if BytecodeIR.for(irep).instructions_with_op('GETCONST', 'GETMCNST').any? { |insn| insn.const_name == 'Fiber' }
 
     irep.reps.any? { |child| child && references_fiber?(ireps.fetch(child), ireps) }
   end
