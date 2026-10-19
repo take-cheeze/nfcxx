@@ -1426,7 +1426,11 @@ std::string resolve_local_constants(const std::string &text, const std::string &
       // A parameter of the enclosing template is that template's, not a local: its launch is dependent.
       bool is_param = has_outer && std::find(outer.names.begin(), outer.names.end(), v) != outer.names.end();
       std::string val;
-      bool have = !is_param && local_constant_visible(text, pos, v, val);
+      // A template-id (`type_for_index<const T *, I>`) keeps its name: the name of an alias template is not its target.
+      long after = j;
+      while (after < n && white_c(ch(targs, after))) after += 1;
+      bool template_id = after < n && ch(targs, after) == '<';
+      bool have = !is_param && !template_id && local_constant_visible(text, pos, v, val);
       if (have) {
         // An integer expression of constants is its value. A single name (a macro, or a type alias) is carried as the
         // name. Anything else (a generic lambda's decltype(I)::value) is not carried.
@@ -2362,6 +2366,32 @@ std::string make_index_sequence_count(const std::string &arg) {
   return count;
 }
 
+// True when a `std::make_index_sequence<N>{}` argument has a count that is not a literal yet (an enclosing template
+// parameter), so its pack's length is not known at this call.
+bool open_index_sequence(const std::string &arg) {
+  std::string a = strip(arg);
+  long at = str_index(a, "make_index_sequence<", 0);
+  if (at < 0) return false;
+  long open = at + (long)std::string("make_index_sequence").size();
+  long close = matching_angle(a, open);
+  if (close < 0) return false;
+  std::string count = strip(sl(a, open + 1, close));
+  if (count.empty()) return true;
+  for (char c : count)
+    if (c < '0' || c > '9') return true;
+  return false;
+}
+
+// A call in a template body with such an argument belongs to that template's instances, which are substituted into
+// the body later: it is not expanded here.
+bool inside_open_index_sequence(const std::string &text, long pos, const std::vector<std::string> &args) {
+  bool open = false;
+  for (const auto &a : args)
+    if (open_index_sequence(a)) open = true;
+  OuterTemplate o;
+  return open && enclosing_template(text, pos, o);
+}
+
 // Ruby deduce_call_targs (line 889): the explicit template arguments of a call, deduced from the argument types.
 bool deduce_call_targs(const std::string &text, const std::string &name, long pos,
                        const std::vector<std::string> &args, std::vector<std::string> &out) {
@@ -2644,6 +2674,7 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
         }
         size_t first_missing = after_pack > 0 ? head.names.size() - after_pack : targs.size();
         std::vector<std::string> missing(head.names.begin() + (long)first_missing, head.names.end());
+        if (inside_open_index_sequence(text, cs.second, cargs)) continue;
         std::map<std::string, std::string> got = deduce_missing_targs(text, name, cs.second, cargs, missing);
         for (const auto &p : missing) {
           // A deduced pack comes back as its values, one per element (deduce_missing_targs).
@@ -2723,6 +2754,7 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   for (const auto &pc : plain_call_sites(text, name)) {
     // Another overload of the name: fewer arguments than its required parameters, or more than its parameters.
     if (parts >= 0 && ((long)pc.first.size() > parts || (long)pc.first.size() < key_min(key))) continue;
+    if (inside_open_index_sequence(text, pc.second, pc.first)) continue;
     std::vector<std::string> deduced;
     if (deduce_call_targs(text, name, pc.second, pc.first, deduced)) sites.push_back({deduced, pc.second});
   }
