@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'ir_block_operands'
 require_relative 'ir_symbol_flow'
@@ -55,7 +56,6 @@ class YieldReach
   }.freeze
   # Punctuation names have no identifier for the outside-source scan to find.
   OPERATOR_NAMES = %w[+ - * / % ** == != < <= > >= <=> === =~ !~ [] []= << >> ! & | ^ ~ +@ -@].freeze
-  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
   # Ops that copy a value without keeping or running it, or read it only as a condition.
   NEUTRAL_OPS = %w[MOVE GETUPVAR BLKPUSH BLKCALL JMPIF JMPNOT JMPNIL ENTER NOP STOP].freeze
   # Ops whose leading register is only read.
@@ -308,7 +308,7 @@ class YieldReach
           node.bodies << child if child
         end
         note_index_read(node, program, insn, idx) if %w[GETIDX GETIDX0].include?(op)
-        fiber_classified += scan_send(node, program, insn, idx) if SEND_OPS.include?(op)
+        fiber_classified += scan_send(node, program, insn, idx) if BytecodeIR::Ops::SEND.include?(op)
       end
     end
     @fiber_roots_unknown = true if fiber_sites > fiber_classified
@@ -763,7 +763,7 @@ class YieldReach
       op = insn.op
       next if NEUTRAL_OPS.include?(op)
 
-      if SEND_OPS.include?(op)
+      if BytecodeIR::Ops::SEND.include?(op)
         return true if send_keeps?(node, program, insn, idx, &holds)
       elsif insn.regs.any? { |r| !written_here?(insn, r) && may_hold?(node, program, idx, r, &holds) }
         return true

@@ -37,7 +37,7 @@ class CodeGen
   #     this instruction list. A register some nested block's SETUPVAR reaches
   #     at its level is refused (BytecodeIR.own_upvar_written_regs, opaque_regs).
   #   - a callee frame or a vm.c fallback send based below the register may
-  #     overwrite it: refused (BytecodeIR::CALLEE_FRAME_OPS, ORIGIN_FRAME_OPS).
+  #     overwrite it: refused (BytecodeIR::Ops::CALLEE_FRAME, ORIGIN_FRAME_OPS).
   # Anything else declines and keeps the dual-path codegen. The single-path
   # walks (fixnum_interval, guarded_game_integer_range) ask
   # BytecodeIR.write_dominates? per hop, as return_write_dominates? does.

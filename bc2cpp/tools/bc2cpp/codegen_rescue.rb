@@ -332,7 +332,7 @@ class CodeGen
         return (1...nlocals).to_a unless regs
 
         written.merge(regs)
-        if BytecodeIR::CALLEE_FRAME_OPS.include?(i.op) && i.reg
+        if BytecodeIR::Ops::CALLEE_FRAME.include?(i.op) && i.reg
           written.merge((i.reg.to_i...irep.nregs.to_i).map(&:to_s))
         end
       end

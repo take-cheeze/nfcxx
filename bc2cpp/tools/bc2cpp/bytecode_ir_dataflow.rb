@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
+
 # Reaching definitions over BytecodeIR's normal-flow CFG: the SET of writes
 # that can supply a register's value at an instruction, through joins and
 # loops. The backward walks in IrepScans see only the textually preceding
@@ -69,9 +71,6 @@ module BytecodeIR
       lead.to_i..(lead.to_i + insn.typed[2].value)
     end
   end
-
-  # A callee's frame starts at R(a): it may overwrite every register above a.
-  CALLEE_FRAME_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC', 'BLKCALL'].freeze
 
   # Multi-write ops, refused by both walks (dataflow_effect). The vm.c fallback dispatch (L_SEND_SYM / L_SENDB_SYM)
   # starts a frame at R(a) and writes R(a+2) (nil); GETIDX0 and ADDI/SUBI also write R(a+1), SETIDX R(a+3). Every
@@ -270,7 +269,7 @@ module BytecodeIR
         insn = @instructions[k].source
         return false unless k == use || dataflow_steps_over?(insn)
         # An exit's leading register is read, not written, and nothing falls through from it to +use+.
-        return false if k != use && !FRAME_EXIT_OPS.include?(insn.op) &&
+        return false if k != use && !BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) &&
                         %i[callee_clobber define].include?(origin_effect(insn, reg.to_s, typed_enter: false))
 
         preds[k].each do |p|
@@ -282,8 +281,6 @@ module BytecodeIR
 
     private :compute_write_dominates?
 
-    # Ops that leave the frame.
-    FRAME_EXIT_OPS = Set['RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'].freeze
     # Ops that can hand `self` to code that reads its ivars.
     SELF_EXPOSING_OPS = Set['LOADSELF', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLOCK', 'LAMBDA', 'METHOD', 'EXEC', 'SCLASS'].freeze
 
@@ -315,7 +312,7 @@ module BytecodeIR
         insn = instruction.source
         reached = preds[i].map { |p| p == ENTRY ? false : out[p] }
         assigned = reached.empty? || reached.all?
-        observes = FRAME_EXIT_OPS.include?(insn.op) || SELF_EXPOSING_OPS.include?(insn.op) ||
+        observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || SELF_EXPOSING_OPS.include?(insn.op) ||
                    (insn.op == 'GETIV' && insn.ivar == ivar) ||
                    (!%w[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
         assigned || !observes
@@ -509,7 +506,7 @@ module BytecodeIR
         lead = insn.reg
         new(READS_LEADING_REG_OPS.include?(op) || op == 'JMPUW', BytecodeIR.written_run(insn),
             ORIGIN_FRAME_OPS.include?(op), WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI'),
-            CALLEE_FRAME_OPS.include?(op), lead, lead&.to_i).freeze
+            BytecodeIR::Ops::CALLEE_FRAME.include?(op), lead, lead&.to_i).freeze
       end
     end
 

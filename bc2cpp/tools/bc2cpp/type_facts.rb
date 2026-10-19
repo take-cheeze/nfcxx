@@ -2,6 +2,7 @@
 
 require 'json'
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'annotations'
 require_relative 'annotation_contradictions'
 require_relative 'ir_type_feedback'
@@ -42,7 +43,6 @@ module TypeFacts
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
-  CALL_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB SUPER].freeze
   PRODUCERS = {
     'GETIV' => 'ivar', 'GETIDX' => 'element', 'GETIDX0' => 'element', 'GETCONST' => 'constant', 'GETMCNST' => 'constant',
     'GETUPVAR' => 'upvar', 'GETGV' => 'global', 'GETCV' => 'class_variable', 'STRING' => 'literal:String',
@@ -412,7 +412,7 @@ module TypeFacts
   def producer_of(ctx, w)
     return 'unreadable' unless w
 
-    if CALL_OPS.include?(w.op)
+    if BytecodeIR::Ops::CALL.include?(w.op)
       "send_result:#{w.sym}#{definer_kind(ctx, w.sym)}"
     elsif w.op == 'GETIV'
       "ivar:@#{w.ivar}"

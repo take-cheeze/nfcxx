@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'irep'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
@@ -123,7 +124,6 @@ module EscapeAnalysis
     'ADD' => '+', 'SUB' => '-', 'MUL' => '*', 'DIV' => '/', 'EQ' => '==', 'LT' => '<', 'LE' => '<=',
     'GT' => '>', 'GE' => '>='
   }.freeze
-  SEND_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'].freeze
   CLOSURE_OPS = Set['BLOCK', 'LAMBDA'].freeze
 
   # The callee side: ireps, every definition of a name and the native method names. +defs+ is
@@ -134,7 +134,6 @@ module EscapeAnalysis
   # that name; such a name has no enumerable definitions.
   class World
     DEF_OPS = Set['TDEF', 'SDEF', 'DEF'].freeze
-    SENDS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'].freeze
     # Sends that make a method from a name computed at run time. A literal name is modelled below; any
     # other makes every callee set unknowable (`dynamic`).
     NAMING_SENDS = %w[define_method define_singleton_method alias_method].freeze
@@ -164,7 +163,7 @@ module EscapeAnalysis
                           local_variable_defined?].freeze
     REFLECTIVE_CONSTS = %w[ObjectSpace].freeze
     # Every op scan_definitions reads.
-    SCANNED_OPS = (SENDS | DEF_OPS | %w[GETCONST GETMCNST]).freeze
+    SCANNED_OPS = (BytecodeIR::Ops::SEND | DEF_OPS | %w[GETCONST GETMCNST]).freeze
 
     attr_reader :ireps, :aliases, :dynamic_sites, :reflective_sites
 
@@ -332,15 +331,15 @@ module EscapeAnalysis
       end
       @ireps.each_value do |irep|
         EscapeAnalysis.op_sites(irep, SCANNED_OPS).each do |insn, idx|
-          if (SENDS.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)) ||
+          if (BytecodeIR::Ops::SEND.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)) ||
              (%w[GETCONST GETMCNST].include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
             @reflective_sites << [irep.label, idx]
           end
           if DEF_OPS.include?(insn.op) && insn.sym
             scan_definition_op(irep, idx, insn, known, closure_bodies.include?(irep.label))
-          elsif SENDS.include?(insn.op) && NAMING_SENDS.include?(insn.sym)
+          elsif BytecodeIR::Ops::SEND.include?(insn.op) && NAMING_SENDS.include?(insn.sym)
             scan_naming_send(irep, idx, insn, insn.sym, 1)
-          elsif SENDS.include?(insn.op) && FORWARDING_SENDS.include?(insn.sym)
+          elsif BytecodeIR::Ops::SEND.include?(insn.op) && FORWARDING_SENDS.include?(insn.sym)
             named = insn.plain_fixed_argc? && insn.argc.to_i.positive? && literal_symbol(irep, idx, (insn.reg.to_i + 1).to_s)
             scan_naming_send(irep, idx, insn, named, 2) if named && NAMING_SENDS.include?(named)
           end
@@ -650,7 +649,7 @@ module EscapeAnalysis
       when 'GETIDX0' then send_site(run, i, insn, s, '[]', recv: insn.regs[1], args: [], dest: lead)
       when 'SETIDX'
         send_site(run, i, insn, s, '[]=', recv: lead, args: [lead.to_i + 1, lead.to_i + 2], dest: lead)
-      when *SEND_OPS then send_op(run, i, insn, s)
+      when *BytecodeIR::Ops::SEND then send_op(run, i, insn, s)
       when 'BLKCALL'
         escape.call(:block_call_argument) if window.call(lead.to_i + 1, insn.uint_operand.to_i)
         run.uses << Use.new(index: i, kind: :call, name: 'call', reg: lead) if held.call(lead)

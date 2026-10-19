@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'ivar_layout'
@@ -46,7 +47,8 @@ module RecordHash
   UNKNOWN_SET = Set[:unknown].freeze
   REFLECTION_SENDS = %w[instance_variable_get instance_variable_set remove_instance_variable
                         instance_variable_defined? each_object].freeze
-  CALL_OPS = %w[SEND SENDB SSEND SSENDB SEND0 SSEND0 SUPER].freeze
+  # rbs_record_types.rb reads this name.
+  CALL_OPS = BytecodeIR::Ops::CALL
   # Ops whose leading register is only written (no implicit reads).
   WRITE_LEAD_ONLY = Set[
     'LOADL', 'LOADSYM', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSELF', 'GETGV', 'GETSV', 'GETIV',

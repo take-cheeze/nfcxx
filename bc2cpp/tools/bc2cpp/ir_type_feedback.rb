@@ -194,7 +194,7 @@ module IrTypeFeedback
       inferred_calls = {}
       if ENV['BC2CPP_IR_CALL_RESULTS'] != '0' && ctx.gen.respond_to?(:bytecode_ir_call_result_classes)
         irep.instructions.each_with_index do |insn, index|
-          next unless BytecodeIR::Types::CALL_OPS.include?(insn.op)
+          next unless BytecodeIR::Ops::SEND.include?(insn.op)
 
           classes = ctx.gen.bytecode_ir_call_result_classes(irep, index)
           contextual = ctx.gen.bytecode_ir_context_results&.call_classes(irep, index) if ctx.gen.respond_to?(:bytecode_ir_context_results)
