@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_numeric'
 require_relative 'literal_element_proof'
 
 # NUMERIC_FLOW (ADR 0276): a forward dataflow over one irep that says which
@@ -65,6 +66,13 @@ module NumericFlow
   # Provenance, not a class (ADR 0370): the set came from a pool whose completeness is a runtime-checked claim. A mask
   # that carries it never equals a class bit, so every unguarded decoder refuses it; only CHECKED_POOL_EXACT reads it.
   CHECKED = 1 << (OBJECT_KIND_BASE - 1)
+  # The type layer's literal classes (BytecodeIR::Types.literal_class) the flow has a bit for. Symbol, true and false
+  # are closed-world class bits only the oracle names (literal_class_mask).
+  LITERAL_CLASS_MASKS = { Integer: INT, Float: FLT, Array: ARR, Hash: HSH, String: STR, NilClass: NIL, Range: RNG }.freeze
+
+  # NUMERIC_CLASSES (ADR 0493): read operands and literal elements from the IR (opt-in while the two are compared).
+  def self.ir? = ENV['BC2CPP_IR_NUMERIC_FLOW'] == '1'
+  def self.compare? = ENV['BC2CPP_IR_NUMERIC_COMPARE'] == '1'
 
   module_function
 
@@ -318,15 +326,30 @@ module NumericFlow
       instructions = program.instructions
       supported = instructions.all? { |i| SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
       decoded = program.decoded if supported
-      steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index]).freeze }.freeze if supported)
+      operands = program.operands if supported && (ir? || compare?)
+      steps = (instructions.map { |i| NumericFlow.table_step(i, decoded, operands).freeze }.freeze if supported)
       Table.new(supported, steps).freeze
     end
+  end
+
+  def table_step(instruction, decoded, operands)
+    index = instruction.index
+    return decode_step(instruction.source, decoded[index]) unless operands
+
+    step = decode_step(instruction.source, decoded[index], operands[index])
+    if compare?
+      raw = decode_step(instruction.source, decoded[index])
+      warn "[bc2cpp] NUMERIC_CLASSES step #{index} #{step.op}: raw #{raw.to_a.inspect} ir #{step.to_a.inspect}" unless raw == step
+    end
+    step
   end
 
   # Decode +insn+ for the flow from its BytecodeIR decode +decoded+, reading of the insn itself only the operands the
   # op's rule reads (an instruction-like object from a check may answer nothing else). Without a Program's decode,
   # +goto+ stays nil.
-  def decode_step(insn, decoded = BytecodeIR.decode(insn))
+  def decode_step(insn, decoded = BytecodeIR.decode(insn), operands = nil)
+    return decode_ir_step(decoded, operands) if operands
+
     op = decoded.op
     silent = SILENT_KINDS.fetch(op) { SILENT_CALL_OPS.include?(op) ? S_ALWAYS : S_NONE }
     step = Step.new(op, nil, nil, silent, decoded.cond)
@@ -357,6 +380,36 @@ module NumericFlow
     step.sym = ARITH_OPS[op] || IMM_ARITH_OPS[op]
     step.b = insn.paren_reg.to_i if silent == S_NUMERIC && step.b.nil?
     step.b = insn.regs[1].to_i if silent == S_INDEX0
+    step
+  end
+
+  # decode_step from the IR's Decoded and Operands alone.
+  def decode_ir_step(decoded, operands)
+    op = decoded.op
+    silent = SILENT_KINDS.fetch(op) { SILENT_CALL_OPS.include?(op) ? S_ALWAYS : S_NONE }
+    step = Step.new(op, nil, nil, silent, decoded.cond)
+    if NO_WRITE_OPS.include?(op)
+      step.kind = op == 'SETIDX' ? K_SETIDX : K_NO_WRITE
+      step.a = decoded.reg.to_i if op == 'SETIDX' || op == 'RAISEIF' || step.branch
+      step.goto = decoded.goto if step.branch
+      return step
+    end
+    if op == 'SETIV'
+      step.kind = K_SETIV
+      step.ivar = operands.ivar
+      step.b = operands.b
+      return step
+    end
+
+    step.a = decoded.reg
+    step.call = CALL_KINDS[op]
+    step.kind = if step.call then K_CALL
+                elsif op.start_with?('LOADI') then K_LOADI
+                else STEP_KINDS.fetch(op, K_OTHER)
+                end
+    step.ivar = operands.ivar if step.kind == K_GETIV
+    step.b = operands.b
+    step.sym = ARITH_OPS[op] || IMM_ARITH_OPS[op]
     step
   end
 
@@ -852,7 +905,7 @@ module NumericFlow
       ok = oracle.op_native?('/') && b < nregs
       set_reg(out, a, ok ? arith(state[a], state[b], oracle.nil_raises?('/')) : OTHER, c)
     when K_GETIDX
-      literal = LiteralElementProof.mask(irep, index, c.opaque)
+      literal = element_mask(irep, index, c.opaque)
       set_reg(out, a, literal || (c.index_mask ? oracle.index_mask(irep, index, insn, state) : OTHER), c)
     when K_AREF
       set_reg(out, a, c.aref_mask ? oracle.aref_mask(irep, index, insn, state) : OTHER, c)
@@ -866,6 +919,18 @@ module NumericFlow
     end
     refresh_slots(out, c) if step_silent_call?(step, state, c)
     out
+  end
+
+  def element_mask(irep, index, opaque)
+    return LiteralElementProof.mask(irep, index, opaque) unless ir? || compare?
+
+    ir = BytecodeIR::NumericClasses.element_literal_mask(irep, index, opaque)
+    if compare?
+      raw = LiteralElementProof.mask(irep, index, opaque)
+      warn "[bc2cpp] NUMERIC_CLASSES element #{irep.label}@#{index}: raw #{raw.inspect} ir #{ir.inspect}" unless raw == ir
+      return raw unless ir?
+    end
+    ir
   end
 
   # Register +r+ (below nregs) now holds +mask+ (OTHER when a block captures it): nothing mirrors its old value any more.

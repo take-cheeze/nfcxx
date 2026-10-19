@@ -276,14 +276,22 @@ module BytecodeIR
       insn = @irep.instructions[definition.index]
       return nil unless insn.reg == definition.reg
       return @inferred_calls[definition.index] if CALL_OPS.include?(insn.op)
-      return [:Integer] if insn.op.match?(/\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/)
-      return [LITERAL_TYPES[insn.op]] if LITERAL_TYPES.key?(insn.op)
-      return nil unless insn.op == 'LOADL'
+
+      type = Types.literal_class(insn, @irep.pool)
+      type && [type]
+    end
+
+    # The class a literal-producing +insn+ leaves in its leading register (+pool+: the irep's literal pool, for LOADL),
+    # or nil when the op is not a literal. Shared with NumericClasses' element proof.
+    def self.literal_class(insn, pool)
+      op = insn.op
+      return :Integer if op.match?(/\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/)
+      return LITERAL_TYPES[op] if LITERAL_TYPES.key?(op)
+      return nil unless op == 'LOADL'
 
       pool_index = insn.pool_index
-      entry = pool_index && @irep.pool && @irep.pool[pool_index]
-      type = entry.is_a?(Hash) && POOL_TYPES[entry[:type]]
-      type && [type]
+      entry = pool_index && pool && pool[pool_index]
+      entry.is_a?(Hash) ? POOL_TYPES[entry[:type]] : nil
     end
 
     def unknown(refusal, cause)
