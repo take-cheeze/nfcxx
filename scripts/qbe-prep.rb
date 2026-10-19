@@ -78,7 +78,7 @@
 # Usage: scripts/mrb scripts/qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL
 # ASM_TAIL is appended to the QBE assembly by qbe-cc.
 #
-# Port of the Python original (tests/mruby/oracle/qbe-prep.py), byte for byte (tests/mruby/qbe-prep.sh).
+# Port of the Python original (tests/mruby/oracle/qbe-prep.py, deleted; the oracle port is tests/mruby/oracle/qbe-prep.rb), byte for byte on the tested inputs (tests/mruby/qbe-prep.sh).
 # mruby has no Regexp (and strings are bytes), so the tokenizer and the few regex checks are by hand.
 # Where Python's `\w`/`\s`/`\d` would match non-ASCII characters this accepts the bytes >= 0x80 as word
 # characters and nothing else non-ASCII (EDG's output and glibc's headers are ASCII outside literals).
@@ -699,6 +699,8 @@ end
 HELPER_BUILTINS = {
   # nlohmann::json: float constants and conversions (double only; cproc has no long double anyway)
   '__builtin_huge_val' => ['__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'],
+  # HUGE_VALF and INFINITY (CUDA's host math.h): cproc has __builtin_inff as a constant, so a static initializer may use it
+  '__builtin_huge_valf' => ['__builtin_inff', ''],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
   # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
   '__builtin_bswap16' => ['__nfcxx_bswap16',

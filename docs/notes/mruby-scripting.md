@@ -16,7 +16,7 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 | `tests/hexagon/flatlink.rb` | Port of `flatlink.py`; used by `tests/hexagon/run.sh`. |
 | `scripts/pathb-qbe-emit.rb` | Port of `pathb-qbe-emit.py` (done, see the section below); used by `tests/pathb-qbe/run.sh`. |
 | `scripts/cil-link.rb` | Port of `cil-link.py` (stage 5, below); used by `scripts/qbe-cc` (the CIL backend) and `scripts/pathb-cil`. Takes `--ilasm`, `--cc` and `--keep-il` as arguments. `tests/mruby/cil-link.sh` checks it. |
-| `scripts/qbe2cil.rb` | Port of `qbe2cil.py` (done, see the stage 4 section below); used by `scripts/qbe-cc` on the CIL backend (so `scripts/cil-cc`). |
+| `scripts/qbe2cil.rb` | Port of `tests/mruby/oracle/qbe2cil.py` (done, see the stage 4 section below); used by `scripts/qbe-cc` on the CIL backend (so `scripts/cil-cc`). |
 | `scripts/pathb-cil-emit.rb` | Port of `pathb-cil-emit.py` (stage 6, below); used by `scripts/pathb-cil`. |
 | `tests/mruby/run.sh` | Runs the Python original and the port on real inputs and compares the output byte for byte. The originals are kept as oracles in `tests/mruby/oracle/`; nothing else uses them. CI runs it. |
 

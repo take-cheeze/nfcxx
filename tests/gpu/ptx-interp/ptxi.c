@@ -1,9 +1,11 @@
-/* ptxi: a CPU interpreter for the PTX subset that scripts/pathb-ptx-emit.rb emits.
+/* ptxi: a CPU interpreter for the PTX subset that tools/pathb-ptx-emit emits.
  *
  * Usage: ptxi FILE.ptx KERNEL [--grid X[,Y[,Z]]] [--block X[,Y[,Z]]] ARG... [--dump K]...
  *   ARG is one kernel parameter, in order:
  *     ptr:COUNT[:iota=START]   a global buffer of COUNT int32 (zeroed, or START+i in element i)
  *     s32:VALUE                a 32-bit scalar
+ *     bytes:HEX                a byte array parameter (.param .align A .b8 NAME[N]), given as N bytes of hex; every
+ *                              thread gets its own copy
  *   --dump K                   print argument K (a ptr) as COUNT lines of int32 values
  *
  * Every thread of the grid runs to completion, one after another, on the host; threads do not
@@ -15,6 +17,9 @@
  * Accepted: .version, .target, .address_size (ignored), .visible .entry and .func with .param, call (of a
  * .func of the module, no recursion), st.param (call arguments), .reg (ignored:
  * registers are created on first use), .local, labels, ld (param, generic, global, local), st,
+ * byte-array parameters (.param .align A .b8 NAME[N], in a function's header, a call's block, or a result
+ * "(.param .align A .b8 func_retval0[N])": their bytes live in the thread's frame, ld.param and st.param of
+ * [NAME+OFF] move them, and call copies them by value, as nvcc's struct parameters),
  * mov, cvta, add, sub, mul.lo / mul.wide, mad.lo, shl, and, or, setp, bra, ret, predicates
  * (@%p, @!%p), and the special registers %tid, %ntid, %ctaid, %nctaid (x, y, z).
  *
@@ -36,7 +41,7 @@
 
 #define MAXINST 8192
 #define MAXREG 1024
-#define MAXPARAM 64
+#define MAXPARAM 256
 #define MAXLOCAL 64
 #define MAXLABEL 1024
 #define MAXNAME 64
@@ -85,14 +90,14 @@ static uint64_t canon(Ty t, uint64_t v) {
 
 /* ---- operands and instructions ---- */
 
-enum { K_NONE, K_REG, K_IMM, K_SPECIAL, K_SYM, K_MEM, K_PARAM };
+enum { K_NONE, K_REG, K_IMM, K_SPECIAL, K_SYM, K_MEM, K_PARAM, K_PARR };
 enum {
   SP_TIDX, SP_TIDY, SP_TIDZ, SP_NTIDX, SP_NTIDY, SP_NTIDZ,
   SP_CTAIDX, SP_CTAIDY, SP_CTAIDZ, SP_NCTAIDX, SP_NCTAIDY, SP_NCTAIDZ
 };
 enum {
   OP_LD, OP_ST, OP_MOV, OP_CVTA, OP_ADD, OP_SUB, OP_MUL, OP_MAD,
-  OP_SHL, OP_AND, OP_OR, OP_SETP, OP_BRA, OP_RET, OP_CALL
+  OP_SHL, OP_SHR, OP_AND, OP_OR, OP_SETP, OP_BRA, OP_RET, OP_CALL, OP_CVT
 };
 enum { SPACE_NONE, SPACE_PARAM, SPACE_GLOBAL, SPACE_LOCAL };
 enum { CMP_NONE, CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE };
@@ -118,6 +123,8 @@ typedef struct {
   int ret;    /* call: register that receives the result, -1 for none */
   int nargs;  /* call: number of arguments */
   int argp[4]; /* call: parameter index of each argument */
+  int ret_param; /* call: the array parameter that receives the result, -1 for none */
+  Ty src;        /* cvt: the source type (ty is the destination type) */
   char label[MAXNAME];
   char text[MAXTEXT];
 } Inst;
@@ -125,6 +132,9 @@ typedef struct {
 typedef struct {
   char name[MAXNAME];
   Ty ty;
+  int is_array;   /* a byte array (.b8 NAME[N]): its bytes are in the thread's frame at off */
+  uint64_t size;  /* the array's size in bytes */
+  uint64_t off;   /* the array's offset in the thread's frame */
 } Param;
 
 typedef struct {
@@ -156,6 +166,7 @@ typedef struct {
   int is_entry;
   int start, end;
   int rv;     /* register holding the result of a .func, -1 for none */
+  int rv_param; /* the array parameter holding the result of a .func (func_retval0[N]), -1 for none */
   int nparam;
   int param[MAXFPARAM];
 } Func;
@@ -218,12 +229,27 @@ static Operand parse_operand(const char *tok) {
       o.kind = K_MEM;
       o.idx = reg_index(inner);
     } else {
+      /* [NAME] or [NAME+OFF]: a scalar parameter, or an offset in a byte array parameter */
+      int64_t off = 0;
+      char *plus = strchr(inner, '+');
+      if (plus) {
+        *plus = 0;
+        off = strtoll(plus + 1, NULL, 0);
+      }
       char key[MAXNAME];
       scoped(key, sizeof key, inner);
       int p = param_index(key);
       if (p < 0) fail(EXIT_BAD, "unknown parameter in '%s'", tok);
-      o.kind = K_PARAM;
-      o.idx = p;
+      if (params[p].is_array) {
+        if (off < 0 || (uint64_t)off > params[p].size) fail(EXIT_BAD, "offset past the parameter in '%s'", tok);
+        o.kind = K_PARR;
+        o.idx = p;
+        o.imm = off;
+      } else {
+        if (off != 0) fail(EXIT_UNSUPPORTED, "offset into a scalar parameter in '%s'", tok);
+        o.kind = K_PARAM;
+        o.idx = p;
+      }
     }
     return o;
   }
@@ -362,25 +388,33 @@ static void add_inst(char *stmt) {
     in.op = OP_CALL;
     in.callee = -1;
     in.ret = -1;
+    in.ret_param = -1;
     if (nt - i < 1) fail(EXIT_BAD, "call needs a function name: '%s'", stmt);
     if (tok[i][0] == '(') {
       size_t l = strlen(tok[i]);
       if (l < 3 || tok[i][l - 1] != ')') fail(EXIT_BAD, "bad call result: '%s'", stmt);
       tok[i][l - 1] = 0;
-      in.ret = reg_index(tok[i] + 1);
+      char rkey[MAXNAME];
+      scoped(rkey, sizeof rkey, tok[i] + 1);
+      int rp = param_index(rkey);
+      if (rp >= 0 && params[rp].is_array) in.ret_param = rp;
+      else in.ret = reg_index(tok[i] + 1);
       i++;
     }
     if (nt - i < 1) fail(EXIT_BAD, "call needs a function name: '%s'", stmt);
     snprintf(in.label, sizeof in.label, "%s", tok[i++]);
+    /* the argument list: (A, B, ...), split at the commas, so the first token has the '(' and the last the ')' */
     for (; i < nt; i++) {
-      size_t l = strlen(tok[i]);
-      if (tok[i][0] != '(' || l < 3 || tok[i][l - 1] != ')') fail(EXIT_BAD, "bad call argument: '%s'", stmt);
-      tok[i][l - 1] = 0;
+      char *a = tok[i];
+      if (a[0] == '(') a++;
+      size_t l = strlen(a);
+      if (l && a[l - 1] == ')') a[--l] = 0;
+      if (!l) continue;
       if (in.nargs == 4) fail(EXIT_UNSUPPORTED, "call with more than 4 arguments: '%s'", stmt);
       char key[MAXNAME];
-      scoped(key, sizeof key, tok[i] + 1);
+      scoped(key, sizeof key, a);
       int p = param_index(key);
-      if (p < 0) fail(EXIT_BAD, "unknown call argument '%s'", tok[i] + 1);
+      if (p < 0) fail(EXIT_BAD, "unknown call argument '%s'", a);
       in.argp[in.nargs++] = p;
     }
     if (ninst == MAXINST) fail(EXIT_UNSUPPORTED, "too many instructions");
@@ -388,7 +422,7 @@ static void add_inst(char *stmt) {
     return;
   }
   static const char *known[] = {"ld", "st", "mov", "cvta", "add", "sub", "mul", "mad",
-                                "shl", "and", "or", "setp", "bra", "ret"};
+                                "shl", "shr", "and", "or", "setp", "bra", "ret", "cvt"};
   int is_known = 0;
   for (int k = 0; k < (int)(sizeof known / sizeof known[0]); k++)
     if (!strcmp(op, known[k])) is_known = 1;
@@ -441,6 +475,16 @@ static void add_inst(char *stmt) {
   } else if (!strcmp(op, "shl")) {
     in.op = OP_SHL;
     want = 3;
+  } else if (!strcmp(op, "shr")) {
+    in.op = OP_SHR;
+    want = 3;
+  } else if (!strcmp(op, "cvt")) {
+    /* integer to integer only: cvt.DST.SRC (the value is canonical for DST); no floating point */
+    in.op = OP_CVT;
+    want = 2;
+    if (np != 3 || !parse_ty(parts[1], &in.ty) || !parse_ty(parts[2], &in.src) || in.ty.bits == 0 || in.src.bits == 0)
+      fail(EXIT_UNSUPPORTED, "unsupported conversion '%s'", stmt);
+    have_ty = 1;
   } else if (!strcmp(op, "and")) {
     in.op = OP_AND;
     want = 3;
@@ -477,10 +521,10 @@ static void add_inst(char *stmt) {
   /* Operand kinds the emitter's code shapes use. */
   if (in.op == OP_LD) {
     if (in.a[0].kind != K_REG) fail(EXIT_BAD, "ld destination must be a register: '%s'", stmt);
-    if (in.space == SPACE_PARAM ? in.a[1].kind != K_PARAM : in.a[1].kind != K_MEM)
+    if (in.space == SPACE_PARAM ? (in.a[1].kind != K_PARAM && in.a[1].kind != K_PARR) : in.a[1].kind != K_MEM)
       fail(EXIT_BAD, "bad ld source: '%s'", stmt);
   } else if (in.op == OP_ST) {
-    if (in.a[0].kind != K_MEM && !(in.space == SPACE_PARAM && in.a[0].kind == K_PARAM))
+    if (in.a[0].kind != K_MEM && !(in.space == SPACE_PARAM && (in.a[0].kind == K_PARAM || in.a[0].kind == K_PARR)))
       fail(EXIT_BAD, "st destination must be a memory or parameter operand: '%s'", stmt);
   } else if (in.op != OP_BRA && in.op != OP_RET) {
     if (in.a[0].kind != K_REG) fail(EXIT_BAD, "destination must be a register: '%s'", stmt);
@@ -543,12 +587,30 @@ static void parse_params(char *text) {
     if (nt) {
       if (nparams == MAXPARAM) fail(EXIT_UNSUPPORTED, "too many parameters");
       Param *pr = &params[nparams++];
-      scoped(pr->name, MAXNAME, tok[nt - 1]);
+      memset(pr, 0, sizeof *pr);
+      char *br = strchr(tok[nt - 1], '[');
       int found = 0;
+      if (br) {
+        /* NAME[N] of .b8: a byte array, with the alignment of its .align (default 1) */
+        char *close = strchr(br, ']');
+        if (!close || close[1]) fail(EXIT_UNSUPPORTED, "unsupported parameter '%s'", p);
+        *br = 0;
+        pr->is_array = 1;
+        pr->size = strtoull(br + 1, NULL, 10);
+      }
+      scoped(pr->name, MAXNAME, tok[nt - 1]);
+      uint64_t align = 1;
       for (int i = 0; i < nt - 1; i++) {
         if (tok[i][0] == '.' && strcmp(tok[i], ".param") && parse_ty(tok[i] + 1, &pr->ty)) found = 1;
+        if (!strcmp(tok[i], ".align") && i + 1 < nt - 1) align = strtoull(tok[i + 1], NULL, 10);
       }
-      if (!found) fail(EXIT_UNSUPPORTED, "unsupported parameter '%s'", p);
+      if (!found || (pr->is_array && pr->ty.bits != 8)) fail(EXIT_UNSUPPORTED, "unsupported parameter '%s'", p);
+      if (pr->is_array) {
+        if (align < 1) align = 1;
+        frame_bytes = (frame_bytes + align - 1) / align * align;
+        pr->off = frame_bytes;
+        frame_bytes += pr->size;
+      }
     }
     if (!comma) break;
     p = comma + 1;
@@ -675,6 +737,7 @@ static int parse_function(const Def *d) {
   snprintf(fn->name, MAXNAME, "%s", d->name);
   fn->is_entry = d->is_entry;
   fn->rv = -1;
+  fn->rv_param = -1;
   size_t sl = strlen(d->name);
   if (sl + 2 > sizeof scope) fail(EXIT_UNSUPPORTED, "function name too long: %s", d->name);
   memcpy(scope, d->name, sl);
@@ -686,7 +749,26 @@ static int parse_function(const Def *d) {
   fn->nparam = nparams - p0;
   if (fn->nparam > MAXFPARAM) fail(EXIT_UNSUPPORTED, "too many parameters in '%s'", d->name);
   for (int k = 0; k < fn->nparam; k++) fn->param[k] = p0 + k;
-  if (d->rv[0]) fn->rv = reg_index(d->rv);
+  if (strchr(d->rv, '[')) {
+    /* (.param .align A .b8 func_retval0[N]): the result is a byte array of the function */
+    char *tokn = dup_range(d->rv, strlen(d->rv));
+    char *br = strchr(tokn, '[');
+    if (nparams == MAXPARAM) fail(EXIT_UNSUPPORTED, "too many parameters");
+    Param *pr = &params[nparams];
+    memset(pr, 0, sizeof *pr);
+    pr->is_array = 1;
+    pr->ty.bits = 8;
+    *br = 0;
+    pr->size = strtoull(br + 1, NULL, 10);
+    scoped(pr->name, MAXNAME, tokn);
+    frame_bytes = (frame_bytes + 7) / 8 * 8;
+    pr->off = frame_bytes;
+    frame_bytes += pr->size;
+    fn->rv_param = nparams++;
+    free(tokn);
+  } else if (d->rv[0]) {
+    fn->rv = reg_index(d->rv);
+  }
   fn->start = ninst;
   char *body = dup_range(d->brace + 1, (size_t)(d->body_end - d->brace - 1));
   parse_body(body);
@@ -828,11 +910,29 @@ static void run_range(const Launch *l, uint64_t *r, uint64_t *pv, const uint64_t
         const Func *callee = &funcs[in->callee];
         uint64_t args[4];
         for (int k = 0; k < in->nargs; k++) args[k] = pv[in->argp[k]];
-        for (int k = 0; k < in->nargs; k++) pv[callee->param[k]] = args[k];
+        for (int k = 0; k < in->nargs; k++) {
+          const Param *formal = &params[callee->param[k]];
+          if (formal->is_array) {
+            /* a byte array argument is copied by value into the callee's array */
+            const Param *actual = &params[in->argp[k]];
+            if (!actual->is_array || actual->size != formal->size) fail(EXIT_BAD, "array argument of '%s' does not match", callee->name);
+            memmove(mem_at(l, local_base, frame, local_base + formal->off, formal->size, in),
+                    mem_at(l, local_base, frame, local_base + actual->off, actual->size, in), formal->size);
+          } else {
+            pv[callee->param[k]] = args[k];
+          }
+        }
         run_range(l, r, pv, tid, ctaid, local_base, frame, callee->start, callee->end);
         if (in->ret >= 0) {
           if (callee->rv < 0) fail(EXIT_UNSUPPORTED, "'%s' returns no value", callee->name);
           r[in->ret] = r[callee->rv];
+        }
+        if (in->ret_param >= 0) {
+          if (callee->rv_param < 0) fail(EXIT_UNSUPPORTED, "'%s' returns no array", callee->name);
+          const Param *dst = &params[in->ret_param], *src = &params[callee->rv_param];
+          if (dst->size != src->size) fail(EXIT_BAD, "result of '%s' does not match its call", callee->name);
+          memmove(mem_at(l, local_base, frame, local_base + dst->off, dst->size, in),
+                  mem_at(l, local_base, frame, local_base + src->off, src->size, in), dst->size);
         }
         break;
       }
@@ -841,7 +941,10 @@ static void run_range(const Launch *l, uint64_t *r, uint64_t *pv, const uint64_t
         break;
       case OP_LD: {
         uint64_t v;
-        if (in->space == SPACE_PARAM) {
+        if (in->space == SPACE_PARAM && in->a[1].kind == K_PARR) {
+          uint64_t addr = local_base + params[in->a[1].idx].off + (uint64_t)in->a[1].imm;
+          v = load_bytes(mem_at(l, local_base, frame, addr, nbytes, in), nbytes);
+        } else if (in->space == SPACE_PARAM) {
           v = pv[in->a[1].idx];
         } else {
           uint64_t addr = r[in->a[1].idx] + (uint64_t)in->a[1].imm;
@@ -851,6 +954,11 @@ static void run_range(const Launch *l, uint64_t *r, uint64_t *pv, const uint64_t
         break;
       }
       case OP_ST: {
+        if (in->space == SPACE_PARAM && in->a[0].kind == K_PARR) {
+          uint64_t addr = local_base + params[in->a[0].idx].off + (uint64_t)in->a[0].imm;
+          store_bytes(mem_at(l, local_base, frame, addr, nbytes, in), nbytes, a);
+          break;
+        }
         if (in->space == SPACE_PARAM) {
           pv[in->a[0].idx] = a;
           break;
@@ -884,6 +992,18 @@ static void run_range(const Launch *l, uint64_t *r, uint64_t *pv, const uint64_t
         break;
       case OP_SHL:
         r[in->a[0].idx] = b >= (uint64_t)in->ty.bits ? 0 : canon(in->ty, a << b);
+        break;
+      case OP_CVT:
+        r[in->a[0].idx] = canon(in->ty, a);
+        break;
+      case OP_SHR:
+        /* the operand is read at the instruction's width (shr.s32 of a 32-bit register sign-extends it) */
+        if (in->ty.sign) {
+          int64_t x = (int64_t)canon(in->ty, a);
+          r[in->a[0].idx] = canon(in->ty, (uint64_t)(x >> (b >= 63 ? 63 : b)));
+        } else {
+          r[in->a[0].idx] = b >= (uint64_t)in->ty.bits ? 0 : canon(in->ty, canon(in->ty, a) >> b);
+        }
         break;
       case OP_AND:
         r[in->a[0].idx] = canon(in->ty, a & b);
@@ -970,8 +1090,9 @@ int main(int argc, char **argv) {
   uint64_t grid[3] = {1, 1, 1}, block[3] = {1, 1, 1};
 
   int nargs = 0;
-  int akind[MAXPARAM];  /* 0 ptr, 1 s32 */
+  int akind[MAXPARAM];  /* 0 ptr, 1 s32, 2 bytes */
   uint64_t acount[MAXPARAM], abuf[MAXPARAM];
+  uint8_t *abytes[MAXPARAM];
   int has_iota[MAXPARAM];
   int64_t aval[MAXPARAM];
   int dumps[MAXPARAM], ndump = 0;
@@ -1003,6 +1124,18 @@ int main(int argc, char **argv) {
       } else if (!strncmp(a, "s32:", 4)) {
         akind[nargs] = 1;
         aval[nargs] = strtoll(a + 4, NULL, 0);
+      } else if (!strncmp(a, "bytes:", 6)) {
+        size_t hl = strlen(a + 6);
+        if (hl % 2) usage();
+        akind[nargs] = 2;
+        acount[nargs] = hl / 2;
+        abytes[nargs] = malloc(hl / 2 + 1);
+        if (!abytes[nargs]) fail(EXIT_FAULT, "out of memory");
+        for (size_t k = 0; k < hl / 2; k++) {
+          unsigned v;
+          if (sscanf(a + 6 + 2 * k, "%2x", &v) != 1) usage();
+          abytes[nargs][k] = (uint8_t)v;
+        }
       } else usage();
       nargs++;
     }
@@ -1034,8 +1167,10 @@ int main(int argc, char **argv) {
       if (params[i].ty.bits != 64) fail(EXIT_BAD, "parameter %d is not a pointer", i);
       abuf[i] = cursor;
       cursor = align16(cursor + acount[i] * 4);
-    } else {
+    } else if (akind[i] == 1) {
       if (params[i].ty.bits != 32) fail(EXIT_BAD, "parameter %d is not a 32-bit scalar", i);
+    } else {
+      if (!params[i].is_array || params[i].size != acount[i]) fail(EXIT_BAD, "parameter %d is not a byte array of %llu bytes", i, (unsigned long long)acount[i]);
     }
   }
   uint64_t local_start = cursor;
@@ -1081,6 +1216,8 @@ int main(int argc, char **argv) {
               memset(pv, 0, sizeof pv);
               memcpy(pv, L.params, sizeof(uint64_t) * (size_t)nargs);
               uint64_t local_base = ARENA_BASE + local_start + gid * frame;
+              for (int i = 0; i < nargs; i++)
+                if (akind[i] == 2) memcpy(L.arena + (local_base + params[i].off - ARENA_BASE), abytes[i], acount[i]);
               run_thread(&L, r, pv, tid, ctaid, local_base, frame);
             }
 

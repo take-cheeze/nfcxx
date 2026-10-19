@@ -112,3 +112,6 @@ int f0(int x) { return x + 0; }
 
 
 void k(int *o) { o[0] = f0(1) + f8(2); }
+
+                                                                                                                  
+void k2(int *o) { o[1] = f1(1) + f2(1) + f3(1) + f4(1) + f5(1) + f6(1) + f7(1); }

@@ -24,7 +24,12 @@ typedef int wchar_t; /* a keyword in C++ */
 #endif
 #endif
 
+/* C++ needs a constant expression (libc++abi's static_asserts on the exception headers), which the pointer cast is not. */
+#ifdef __cplusplus
+#define offsetof(type, member) __builtin_offsetof(type, member)
+#else
 #define offsetof(type, member) ((size_t)&(((type *)0)->member))
+#endif
 
 #ifdef __cplusplus
 }

@@ -51,6 +51,9 @@ void *__nfcxx_sycl_closure(void);     // the closure object, copied by the host
 void *__nfcxx_sycl_local_base(void);  // the work-group memory (local_accessor storage)
 void *__nfcxx_sycl_scratch(void);     // 256 words of work-group memory kept for the group algorithms
 void __nfcxx_sycl_barrier(void);
+// memory fence (OpMemoryBarrier in the OpenCL module): order is a memory_order value and scope a memory_scope value, both
+// literals at the call (a non-literal is refused by the emitter)
+void __nfcxx_sycl_fence(int order, int scope);
 // sub-group shuffles (OpGroupNonUniformShuffle, ShuffleXor in the OpenCL module): the word of lane src, of lane (lane ^ mask)
 unsigned __nfcxx_sycl_sg_shuffle_u32(unsigned w, unsigned src);
 unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
@@ -484,6 +487,17 @@ template <int D> inline void group_barrier(const group<D> &, memory_scope = memo
   __nfcxx_sycl_barrier();
 #else
   detail::barrier_on_host();
+#endif
+}
+
+// atomic_fence: a fence at the given order and scope. On the device it is OpMemoryBarrier (the OpenCL memory model's
+// work-group or device fence). On the host it is a no-op, as barrier_on_host is.
+inline void atomic_fence(memory_order order, memory_scope scope) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __nfcxx_sycl_fence(static_cast<int>(order), static_cast<int>(scope));
+#else
+  (void) order;
+  (void) scope;
 #endif
 }
 

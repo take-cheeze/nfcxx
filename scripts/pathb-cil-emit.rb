@@ -1,5 +1,5 @@
-# pathb-cil-emit.rb: Path B IR (scripts/pathb-dump --ir) -> a JSON fragment for scripts/cil-link.py, the CIL spike of the
-# Path B route (docs/notes/pathb-cil.md). Same memory model as qbe2cil.py: pointers are int64 addresses, frame slots are
+# pathb-cil-emit.rb: Path B IR (scripts/pathb-dump --ir) -> a JSON fragment for scripts/cil-link.rb, the CIL spike of the
+# Path B route (docs/notes/pathb-cil.md). Same memory model as qbe2cil.rb: pointers are int64 addresses, frame slots are
 # one localloc per call, globals are the linker's addr_<name> fields.
 #
 #   pathb-dump --ir x.cpp | scripts/mrb scripts/pathb-cil-emit.rb - OUT.json
@@ -11,7 +11,7 @@
 # The EH idiom of the lowered try (the IR of `try { B } catch (T) { H }`, see docs/notes/pathb-stage3.md):
 #   if (_setjmp(buf) == 0) { B } else { H }
 # becomes  .try { B } catch CxxThrow { H }, and _setjmp is 0 (the linker's runtime). throw is __throw_setup (the
-# exception object's storage) followed by __throw, which raises CxxThrow (see cil-link.py's runtime). The
+# exception object's storage) followed by __throw, which raises CxxThrow (see cil-link.rb's runtime). The
 # destructors of the try block's objects are not run during unwinding yet (a documented gap).
 # Refused with an error, never miscompiled: forms outside the subset below (bounds, index, switch, sret, copy,
 # long double, fence, cf2i, variadic calls, variadic definitions). A statement the emitter does not know
@@ -839,7 +839,7 @@ class Function
         return 'int64'
       end
       if e.kind == 'fn'
-        # A function's address is its linker field, as a global's is: cil-link.py stores ldftn of a function
+        # A function's address is its linker field, as a global's is: cil-link.rb stores ldftn of a function
         # the unit defines at Init, and dlsym of any other name (null when it is not in the process).
         @em.addrs[@em.fn_name(e.name)] = true
         emit("ldsfld int64 Prog::'addr_#{@em.fn_name(e.name)}'")
@@ -1134,7 +1134,7 @@ class Function
     end
     if indirect
       # The callee is a function address (int64, as every pointer is): a calli on it. Its signature is the
-      # call's, as the arguments carry it (the same as qbe2cil.py's indirect calls).
+      # call's, as the arguments carry it (the same as qbe2cil.rb's indirect calls).
       refuse("#{pys(@name)}: indirect call through a value that is not a pointer") unless expr(callee) == 'int64'
       emit('conv.i', "calli #{ret} (#{typed.join(', ')})")
       return ret

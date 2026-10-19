@@ -608,7 +608,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   program while a caller holds a rewritten site.
 - `tests/ast/fuzz.sh` (not in CI): random programs, a few hundred seeds of each kind: arithmetic, bitwise, comparison,
   concatenation and logic over integers, floats, strings and other values, calls of `find`, `match`, `gsub`, `gmatch` with
-  random patterns, and (`fuzz/gen_inl.py`) random small helper functions and methods of two classes called from random
+  random patterns, and (`fuzz/gen_inl.rb`) random small helper functions and methods of two classes called from random
   expressions, each expression run over ten tuples of argument values and three receivers so that the sites are hot when the
   types change; since the second inlining the helpers and methods also have loops (numeric, float, `while`, `repeat`, `break`,
   `return` from inside, `ipairs`), multiple assignment (swapped parameters, fields, an upvalue), assigned parameters, and some
@@ -706,7 +706,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   loops over captured locals (through the cell: the loop runs as native code, with the alias of an assigned cell the guard fails and
   the interpreter runs it), local functions as callees (also one that is a cell, one that is another function the next time, one
   assigned in the loop, a number, a native function).
-- `tests/ast/fuzz_tier.sh` (by hand): random numeric kernels (`fuzz/gen_kernel.py`: integer, float, boolean and "number of either kind" locals, parameters and results, every
+- `tests/ast/fuzz_tier.sh` (by hand): random numeric kernels (`fuzz/gen_kernel.rb`: integer, float, boolean and "number of either kind" locals, parameters and results, every
   operator, `if` / `while` / `repeat` / `for`, `break`, upvalues and globals that change type between calls, calls between functions,
   recursion, functions without a result, wrong and missing arguments) run by a real Lua 5.4.9 and by nfcast with every function
   compiled at its first call, output and error messages compared. On the final code: 24 seeds of 10 functions on the gcc back end (321 functions compiled, 1251 calls ran as native code) and 25 seeds on qbe (268 and 1224), no mismatch. It also found two differences between the engine and
