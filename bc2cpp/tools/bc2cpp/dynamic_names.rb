@@ -13,6 +13,9 @@ module DynamicNames
              define_method define_singleton_method alias_method attr attr_reader attr_writer
              attr_accessor].freeze
 
+  # Every send op, the splat forms included: they name the method the same way, so the scan must visit them.
+  SEND_OPS = (BytecodeIR::Ops::SEND | %w[SENDV SENDVB SSENDV SSENDVB]).freeze
+
   class << self
     # DEFINE_METHOD_LOOPS (ADR 0469): [irep label, index] of each `define_method(n)` loop send the settled
     # registry defines => the names it installs (DefineMethodSites.loop_sites). Its name is not a literal at
@@ -38,13 +41,15 @@ module DynamicNames
     stems = Set.new
     computed = false
     ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
+      program = BytecodeIR.for(irep)
+      program.each_with_op('LOADSYM', 'STRING', *SEND_OPS) do |insn, idx|
         stems << insn.sym if insn.op == 'LOADSYM' && insn.sym
         if insn.op == 'STRING'
           entry = irep.pool[insn.pool_index.to_i]
           stems << entry if entry.is_a?(String) && entry.match?(/\A[A-Za-z_]\w*[?!=]?\z/)
+          next
         end
-        next unless insn.op.include?('SEND') && SENDS.include?(insn.sym)
+        next unless SENDS.include?(insn.sym)
 
         if (installed = settled_sends[[irep.label, idx]])
           stems.merge(installed)
@@ -53,7 +58,7 @@ module DynamicNames
         # Every write of the name reaching the send must be a LOADSYM: one non-literal arm of a join makes it computed.
         writers = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
                   BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
-        literal = writers && writers.all? { |i| irep.instructions[i].op == 'LOADSYM' }
+        literal = writers && writers.all? { |i| program.instruction_at(i).op == 'LOADSYM' }
         computed = true unless literal
       end
     end
