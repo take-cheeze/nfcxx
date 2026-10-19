@@ -67,13 +67,15 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$src/libcxxabi/src/cxa_handler
 # cxa_default_handlers.cpp uses constinit, so it is built as C++20 (as new_handler.cpp is).
 clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS \
   -std=c++20 -fexceptions -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
+# The names EDG's runtime (libC.a) calls for terminate and unexpected, forwarded to the handlers above (see eh_glue.cpp).
+clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$root/tests/macos-sysroot/runtime/src/eh_glue.cpp" -o eh_glue.o
 
 rm -f libnfcxx-darwin-rt.a
-# The runtime archive. stdlib_typeinfo.o and private_typeinfo.o hold the std::type_info and __cxxabiv1 type_info names, which
-# replace EDG's typeinfo.o in libC-darwin.a. Other members that libC.a still owns (stdlib_exception, cxa_default_handlers,
-# stdlib_new_delete, ...) are built but not archived, as before.
+# The runtime archive. stdlib_exception.o (std::exception, bad_alloc, bad_array_new_length), stdlib_typeinfo.o and
+# private_typeinfo.o (std::type_info and the __cxxabiv1 type_info names) replace EDG's copies in libC-darwin.a. Members that
+# libC.a still owns (cxa_default_handlers, stdlib_new_delete, ...) are built but not archived, as before.
 clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/xlocale_shim.c" -o xlocale_shim.o
-llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o stdlib_typeinfo.o private_typeinfo.o
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o stdlib_exception.o stdlib_typeinfo.o private_typeinfo.o eh_glue.o
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 
 # libc++ itself, built from LLVM's own sources at the pin with the cross clang (not a hand-written subset), into a
@@ -101,7 +103,9 @@ cxxlib=(-nostdinc -nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem 
 # -mmacosx-version-min=11.0: aligned new/delete are available from 10.13, and arm64 Darwin starts at 11.0.
 # -U__ENVIRONMENT_*: refstring.h adds a check for libstdc++'s empty-string singleton (only for a process that also
 # loads libstdc++, which none of our programs do) and includes mach-o/dyld.h, which is not a clean-room header.
-cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY -mmacosx-version-min=11.0
+# -DLIBCXX_BUILDING_LIBCXXABI selects libc++'s libc++abi-backed runtime (exception.cpp, typeinfo.cpp, stdexcept), as LLVM's CMake
+# does when libc++abi is the ABI library. Without it exception.cpp builds the fallback runtime, which defines no std::exception.
+cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -DLIBCXX_BUILDING_LIBCXXABI -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY -mmacosx-version-min=11.0
             -U__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ -U__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
 # Excluded: tz.cpp (its path is #error on any non-Linux host, and libc++ 18 has no config switch for it) and chrono.cpp
 # (its Apple branch needs CLOCK_MONOTONIC_RAW, which is not a POSIX name and is not in the clean-room headers). The
@@ -139,7 +143,8 @@ cp "$libc_in" libC-darwin.a
 llvm-ar d libC-darwin.a $libc_drop
 drop_syms=$(for m in $libc_drop; do llvm-nm -A --defined-only -g "$libc_in" | grep -E ":$m: " ; done | awk '{print $NF}' | sort -u)
 provided=$( (llvm-nm -A --defined-only -g libc++-darwin.a; llvm-nm -A --defined-only -g libnfcxx-darwin-rt.a) | awk '{print $NF}' | sort -u)
-missing=$(comm -23 <(printf '%s\n' "$drop_syms") <(printf '%s\n' "$provided"))
+# __dummy_typeinfo and __gen_dummy_typeinfos (lib_src/typeinfo.c) are not provided: no code in the tree refers to them.
+missing=$(comm -23 <(printf '%s\n' "$drop_syms") <(printf '%s\n' "$provided") | grep -v -x -E '__ZSt16__dummy_typeinfo|__ZSt21__gen_dummy_typeinfosv' || true)
 if [ -n "$missing" ]; then
   echo "build.sh: symbols of the dropped libC.a members that no archive provides:" >&2
   printf '%s\n' "$missing" >&2
