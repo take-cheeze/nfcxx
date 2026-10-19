@@ -3,6 +3,7 @@
 require 'digest'
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'ir_block_operands'
 require_relative 'block_self'
 require_relative 'native_block_returns_reviewed'
 require_relative 'native_sigs'
@@ -127,7 +128,7 @@ module BlockReturns
       irep.instructions[df.index].op == 'BLKPUSH'
     end
     holds_proc = lambda do |idx, reg|
-      defs = program.reaching_definitions(idx, reg.to_s, through_handlers: true)
+      defs = definitions(irep, program, idx, reg)
       defs && !defs.empty? && defs.all? { |df| proc_def.call(df) }
     end
     reachable(irep, program, holds_proc).sort.each do |idx|
@@ -201,8 +202,15 @@ module BlockReturns
     seen
   end
 
+  # Reaching definitions that count a nested block's SETUPVAR into the method's registers.
+  def definitions(irep, program, idx, reg)
+    return program.reaching_definitions(idx, reg.to_s, through_handlers: true) unless IrBlockOperands.enabled?
+
+    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
+  end
+
   def return_value_why(irep, program, idx, reg, entry, holds_proc)
-    defs = program.reaching_definitions(idx, reg.to_s, through_handlers: true)
+    defs = definitions(irep, program, idx, reg)
     return 'returns a value whose definitions cannot be listed' unless defs && !defs.empty?
 
     defs.each do |df|

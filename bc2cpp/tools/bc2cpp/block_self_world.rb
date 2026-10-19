@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'ir_block_operands'
 require_relative 'core_hierarchy_sigs'
 
 # BLOCK_SELF_WORLD (docs/adr/0477): `self` inside a block is the self of the frame that created it, unless something
@@ -86,6 +87,8 @@ module BlockSelfWorld
 
   # Is +insn+ (at +idx+) a send whose block operand is a literal block or lambda? The irep label of that block, or nil.
   def literal_block_label(irep, idx)
+    return IrBlockOperands.literal_block_label(irep, idx) if IrBlockOperands.enabled?
+
     insn = irep.instructions[idx]
     prev = idx.positive? ? irep.instructions[idx - 1] : nil
     return nil unless prev && %w[BLOCK LAMBDA].include?(prev.op) && prev.block_index
@@ -97,15 +100,22 @@ module BlockSelfWorld
   # The register a SENDB/SSENDB reads its block from (vm.c OP_SENDB: R(a + argc + kwargs + 1), a packed `*` argument
   # list and a packed `**` hash taking one register each).
   def block_register(insn)
-    return nil unless insn.reg && insn.argc_operand
+    IrBlockOperands.block_register(insn)
+  end
 
-    n, nk, = insn.argc_operand
-    positional = n.nil? ? 1 : n
-    keywords = if insn.nk_spec.nil? then 0
-               elsif nk.nil? then 1
-               else 2 * nk
-               end
-    (insn.reg.to_i + positional + keywords + 1).to_s
+  # Every literal block the send at +idx+ may be given, or nil when its operand may be anything else.
+  def literal_block_labels(irep, idx)
+    return IrBlockOperands.literal_block_labels(irep, idx) if IrBlockOperands.enabled?
+
+    label = literal_block_label(irep, idx)
+    label && [label]
+  end
+
+  # Reaching definitions with the irep's nested SETUPVAR writes counted (BytecodeIR.reaching_definitions).
+  def definitions(irep, idx, reg, **options)
+    return BytecodeIR.for(irep).reaching_definitions(idx, reg, through_handlers: true, **options) unless IrBlockOperands.enabled?
+
+    BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, **options)
   end
 
   class World
@@ -190,11 +200,13 @@ module BlockSelfWorld
       return if what == :plain
 
       block = %w[SENDB SSENDB].include?(insn.op)
-      label = block && BlockSelfWorld.literal_block_label(irep, idx)
-      if label
+      labels = block && BlockSelfWorld.literal_block_labels(irep, idx)
+      if labels
         if compiled
-          @sites << [irep.label, idx, name, label]
-          mark_rebound(label, ireps)
+          labels.each do |label|
+            @sites << [irep.label, idx, name, label]
+            mark_rebound(label, ireps)
+          end
         end
       elsif block && !nil_block?(irep, idx, insn)
         fail!(irep, insn, "passes a block that is not a literal block to #{detail}")
@@ -217,7 +229,7 @@ module BlockSelfWorld
 
     def nil_block?(irep, idx, insn)
       reg = BlockSelfWorld.block_register(insn)
-      defs = reg && BytecodeIR.for(irep).reaching_definitions(idx, reg, through_handlers: true)
+      defs = reg && BlockSelfWorld.definitions(irep, idx, reg)
       defs && !defs.empty? && defs.all? { |df| !df.entry? && irep.instructions[df.index].op == 'LOADNIL' }
     end
 
@@ -234,13 +246,17 @@ module BlockSelfWorld
       return true if insn.op.start_with?('SS')
 
       factories = FACTORY_SENDS.fetch(insn.sym)
-      const = irep.walk_dominating_writers(idx - 1, insn.reg.to_s, use: idx, follow_moves: true) do |writer|
+      const = if IrBlockOperands.enabled?
+                IrBlockOperands.constant_name(irep, idx, insn.reg)
+              else
+                irep.walk_dominating_writers(idx - 1, insn.reg.to_s, use: idx, follow_moves: true) do |writer|
         case writer.op
         when 'GETCONST' then writer.const_name.to_s
         when 'GETMCNST' then writer.mcnst_name.to_s
         else false
         end
       end
+              end
       return true unless const.is_a?(String) && !const.empty?
 
       simple = const.split('::').last
@@ -305,6 +321,8 @@ module BlockSelfWorld
     end
 
     def class_statement_super(irep, idx, insn)
+      return ir_class_statement_super(irep, idx, insn) if IrBlockOperands.enabled?
+
       found = irep.walk_dominating_writers(idx - 1, (insn.reg.to_i + 1).to_s, use: idx, follow_moves: true) do |writer|
         case writer.op
         when 'LOADNIL' then 'Object'
@@ -314,6 +332,21 @@ module BlockSelfWorld
         end
       end
       found.is_a?(String) && !found.empty? ? found : :unknown
+    end
+
+    def ir_class_statement_super(irep, idx, insn)
+      defs = BlockSelfWorld.definitions(irep, idx, (insn.reg.to_i + 1).to_s) or return :unknown
+      found = defs.map do |df|
+        next :unknown if df.entry?
+
+        writer = irep.instructions[df.index]
+        case writer.op
+        when 'LOADNIL' then 'Object'
+        when 'GETCONST', 'GETMCNST' then writer.const_name.to_s.split('::').last
+        else :unknown
+        end
+      end.uniq
+      found.size == 1 && found.first.is_a?(String) && !found.first.empty? ? found.first : :unknown
     end
 
     # [:plain] when the names a computed-name send or Method maker can reach are proven and none is a rebinder,
@@ -342,7 +375,7 @@ module BlockSelfWorld
     # [R(a)..R(a+n-1)]; OP_ARRAY2 R(a) R(b) n, decoded as ARRAY with two registers: R(a) = [R(b)..]; OP_ARYCAT and
     # OP_ARYPUSH append to R(a) in place).
     def packed_first_names(irep, idx, reg, ireps, parents)
-      defs = BytecodeIR.for(irep).reaching_definitions(idx, reg, follow_moves: false, through_handlers: true)
+      defs = BlockSelfWorld.definitions(irep, idx, reg, follow_moves: false)
       return :unknown if defs.nil? || defs.empty?
 
       defs.each_with_object(Set.new) do |df, out|
@@ -363,7 +396,7 @@ module BlockSelfWorld
     end
 
     def names_at(irep, idx, reg, ireps, parents)
-      defs = BytecodeIR.for(irep).reaching_definitions(idx, reg, through_handlers: true)
+      defs = BlockSelfWorld.definitions(irep, idx, reg)
       return :unknown if defs.nil? || defs.empty?
 
       defs.each_with_object(Set.new) do |df, out|
@@ -463,7 +496,7 @@ module BlockSelfWorld
 
     def block_operand_symbols(irep, idx, insn, ireps, parents)
       reg = BlockSelfWorld.block_register(insn)
-      defs = reg && BytecodeIR.for(irep).reaching_definitions(idx, reg, through_handlers: true)
+      defs = reg && BlockSelfWorld.definitions(irep, idx, reg)
       return :unknown if defs.nil? || defs.empty?
 
       defs.each_with_object(Set.new) do |df, out|
@@ -505,7 +538,7 @@ module BlockSelfWorld
         case w.op
         when 'LOADNIL', 'BLOCK', 'LAMBDA' then true
         when 'MOVE'
-          defs = BytecodeIR.for(frame).reaching_definitions(j, w.regs[1], through_handlers: true)
+          defs = BlockSelfWorld.definitions(frame, j, w.regs[1])
           defs && !defs.empty? && defs.all? { |df| df.entry? && df.reg.to_s == block_param_register(frame) }
         else false
         end
