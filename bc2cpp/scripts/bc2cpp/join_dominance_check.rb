@@ -221,7 +221,7 @@ check.call('`(v.m? && x) ? g(v) : nil`: a later argument copy of v is non-nil at
 check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_nil.call(ternary, 3, '4'))
 check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
            !NilNarrowing.non_nil?(irep_of(ternary), 12, '7', ->(_name) { false }))
-# b = blk; c = b; return unless c; use(blk)  -- available copies (ADR 0497): a test of c narrows every copy of it.
+# b = blk; c = b; return unless c; use(blk)  -- available copies (ADR 0505): a test of c narrows every copy of it.
 chain = [insn(0, 'MOVE', "R2\tR1"), insn(3, 'MOVE', "R3\tR2"), insn(6, 'JMPIF', "R3\t12"), insn(10, 'RETNIL', ''),
          insn(12, 'RETURN', 'R1')]
 check.call('a test narrows the register its copy was copied from, two copies back', non_nil.call(chain, 4, '1'))
