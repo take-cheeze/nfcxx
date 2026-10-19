@@ -62,9 +62,12 @@ analysis = lambda do |source|
     ireps, root = compile_ireps([rb], 'integer_arith', dir)
     registry, _superclass_of, _containers, included, prepended, unknown = build_registry(ireps, root)
     safe = IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
+    # FREEZE_SELF: the same owner-scoped proof the build passes (bc2cpp.rb), not a copy of it.
+    freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
     {
       safe: safe,
-      ranges: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: safe),
+      freeze_safe: freeze_safe,
+      ranges: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: safe, freeze_safe: freeze_safe),
       refused: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: false),
       # The exact-value proof with the operator gate bypassed, and with the gate as the program sets it.
       ints_ungated: IntegerConstants.analyze(ireps, [], [], operators_safe: true),
@@ -186,6 +189,85 @@ check.call('integer_ops_safe? is false (a prepend into Integer)', !pre[:safe])
 rows = typed_rows.call(prepended)
 slot = row_for.call(rows, 'ZA_SLOT')
 check.call('ZA_SLOT stays untyped', slot && slot['type'].nil?)
+
+frozen = <<~RUBY
+  module ZaFreeze
+    ZF_BASE = 40
+    ZF_STEP = 3
+    ZF_NONE = 0
+    ZF_SLOT = (ZF_BASE - ZF_STEP).freeze
+    ZF_SPAN = (ZF_STEP * 13).freeze
+    ZF_HALF = (-7 / 2).freeze
+    ZF_ZERO = (ZF_BASE / ZF_NONE).freeze
+    ZF_NONLIT = (ZF_BASE + "abc".length).freeze
+    ZF_STR = "abc".freeze
+    ZF_ARR = [1, 2].freeze
+    ZF_SUM = (ZF_ARR + [3]).freeze
+  end
+RUBY
+
+puts '== freeze returns its receiver: a frozen Integer expression keeps its interval'
+fr = analysis.call(frozen)
+check.call('freeze is stock on Integer (no Ruby freeze on its ancestors)', fr[:freeze_safe])
+check.call('ZF_SLOT (= (ZF_BASE - ZF_STEP).freeze) has the interval [37, 37]', fr[:ranges]['ZF_SLOT'] == [37, 37])
+check.call('ZF_SPAN (= (ZF_STEP * 13).freeze) has the interval [39, 39]', fr[:ranges]['ZF_SPAN'] == [39, 39])
+check.call('ZF_HALF (= (-7 / 2).freeze) has the interval [-4, -4]', fr[:ranges]['ZF_HALF'] == [-4, -4])
+check.call('ZF_ZERO (divisor interval holds 0) has no interval', !fr[:ranges].key?('ZF_ZERO'))
+check.call('ZF_NONLIT (a send operand) has no interval', !fr[:ranges].key?('ZF_NONLIT'))
+rows = typed_rows.call(frozen)
+slot = row_for.call(rows, 'ZF_SLOT')
+check.call('ZF_SLOT is typed Integer by inferred:integer-range end to end',
+           slot && slot['type'] == 'Integer' && slot['source'] == 'inferred:integer-range')
+zero = row_for.call(rows, 'ZF_ZERO')
+check.call('ZF_ZERO (zero divisor) stays untyped', zero && zero['type'].nil?)
+nonlit = row_for.call(rows, 'ZF_NONLIT')
+check.call('ZF_NONLIT (non-literal operand) stays untyped', nonlit && nonlit['type'].nil?)
+arr = row_for.call(rows, 'ZF_ARR')
+check.call('a frozen literal keeps its class (ZF_ARR is Array)', arr && arr['type'] == 'Array')
+sum = row_for.call(rows, 'ZF_SUM')
+check.call('a frozen sum of frozen Arrays is Array (inferred:array-sum)', sum && sum['type'] == 'Array')
+str = row_for.call(rows, 'ZF_STR')
+check.call('a frozen String literal keeps its class (ZF_STR is String)', str && str['type'] == 'String')
+
+freeze_integer = <<~RUBY
+  class Integer
+    def freeze
+      self
+    end
+  end
+  module ZaFreeze
+    ZF_BASE = 40
+    ZF_STEP = 3
+    ZF_SLOT = (ZF_BASE - ZF_STEP).freeze
+  end
+RUBY
+
+puts '== a Ruby freeze on Integer withdraws the freeze-through proof'
+fi = analysis.call(freeze_integer)
+check.call('freeze_safe is false (a Ruby freeze on Integer)', !fi[:freeze_safe])
+check.call('ZF_SLOT has no interval without the freeze proof', !fi[:ranges].key?('ZF_SLOT'))
+fi_slot = row_for.call(typed_rows.call(freeze_integer), 'ZF_SLOT')
+check.call('ZF_SLOT is not typed by inferred:integer-range',
+           fi_slot.nil? || fi_slot['source'] != 'inferred:integer-range')
+
+freeze_object = <<~RUBY
+  class Object
+    def freeze
+      self
+    end
+  end
+  module ZaFreeze
+    ZF_STR = "abc".freeze
+    ZF_SLOT = (3 - 1).freeze
+  end
+RUBY
+
+puts '== a Ruby freeze on Object withdraws the freeze-through proof for a frozen String and Integer'
+fo = analysis.call(freeze_object)
+check.call('freeze_safe is false (a Ruby freeze on Object, an ancestor of Integer)', !fo[:freeze_safe])
+check.call('ZF_SLOT has no interval', !fo[:ranges].key?('ZF_SLOT'))
+ostr = row_for.call(typed_rows.call(freeze_object), 'ZF_STR')
+check.call('ZF_STR (frozen String) is untyped while Object#freeze is redefined', ostr && ostr['type'].nil?)
 
 puts
 if failures.empty?

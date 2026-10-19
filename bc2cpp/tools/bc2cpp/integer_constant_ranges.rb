@@ -41,7 +41,9 @@ module IntegerConstantRanges
   end
 
   # name => [lo, hi]. `operators_safe` is integer_ops_safe?; without it no interval is proven.
-  def self.analyze(ireps, native_paths, foreign_paths, operators_safe:, report: nil)
+  # `freeze_safe` is DeclaredConstants.stock_method?('freeze', 'Integer', ...): `R.freeze` on an Integer answers R, so the
+  # walk reads through it. Without it a frozen arithmetic value is a poison, as before.
+  def self.analyze(ireps, native_paths, foreign_paths, operators_safe:, freeze_safe: false, report: nil)
     return {} unless operators_safe
 
     defs = Hash.new { |h, k| h[k] = [] }
@@ -56,7 +58,8 @@ module IntegerConstantRanges
           next unless name
 
           src = insn.regs.last
-          defs[name] << (src && !entries.include?(insn.addr) ? source_kind(irep, i, src, entries) : nil)
+          kind = src && !entries.include?(insn.addr) ? source_kind(irep, i, src, entries, freeze_safe: freeze_safe) : nil
+          defs[name] << kind
         when 'CLASS', 'MODULE'
           poisoned << insn.sym_token
           class_names << insn.sym_token
@@ -121,12 +124,13 @@ module IntegerConstantRanges
   # How `reg` is written at this point of the class body: [:literal, v], [:alias, NAME], [:arith, op, l, r] or nil.
   # The walk does not step over a jump target (see IntegerConstants.const_source_kind), except that a target may itself
   # be the load that writes the register: control reaching it runs that load.
-  def self.source_kind(irep, idx, reg, entries)
+  def self.source_kind(irep, idx, reg, entries, freeze_safe: false)
     barrier = lambda do |insn, cur|
       load_here = insn.reg == cur.to_s && (LOADS.include?(insn.op) || insn.op.start_with?('LOADI'))
       entries.include?(insn.addr) && !load_here
     end
     irep.walk_writers(idx - 1, reg.to_s, barrier: barrier, follow_moves: true) do |insn, j, cur|
+      next IrepScans::KEEP if freeze_safe && insn.op == 'SEND0' && insn.sym == 'freeze'
       if insn.op.start_with?('LOADI')
         value = literal(insn)
         next value.nil? ? nil : [:literal, value]
@@ -135,7 +139,7 @@ module IntegerConstantRanges
       case insn.op
       when 'GETCONST' then (n = insn.const_name) && [:alias, n]
       when 'GETMCNST' then (n = insn.mcnst_name) && [:alias, n]
-      when *OPS then arith_kind(irep, j, insn, cur, entries)
+      when *OPS then arith_kind(irep, j, insn, cur, entries, freeze_safe: freeze_safe)
       end
     end
   end
@@ -151,15 +155,15 @@ module IntegerConstantRanges
     value if value && value >= FIXNUM_MIN && value <= FIXNUM_MAX
   end
 
-  def self.arith_kind(irep, idx, insn, cur, entries)
+  def self.arith_kind(irep, idx, insn, cur, entries, freeze_safe: false)
     return nil if entries.include?(insn.addr)
 
-    left = source_kind(irep, idx, cur, entries)
+    left = source_kind(irep, idx, cur, entries, freeze_safe: freeze_safe)
     right = if %w[ADDI SUBI].include?(insn.op)
               imm = insn.imm_operand
               imm && [:literal, imm.to_i]
             else
-              insn.regs[1] && source_kind(irep, idx, insn.regs[1], entries)
+              insn.regs[1] && source_kind(irep, idx, insn.regs[1], entries, freeze_safe: freeze_safe)
             end
     left && right ? [:arith, insn.op, left, right] : nil
   end
