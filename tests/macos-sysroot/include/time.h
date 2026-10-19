@@ -20,6 +20,11 @@ typedef long clock_t;
 
 #define CLOCKS_PER_SEC ((clock_t)1000000)
 
+/* clockid_t values from Apple's open-source Libc, include/_time.h (commit 63976b8). */
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 6
+#define CLOCK_MONOTONIC_RAW 4
+
 struct tm {
   int tm_sec;
   int tm_min;
