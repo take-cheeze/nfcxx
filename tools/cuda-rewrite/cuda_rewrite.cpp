@@ -752,6 +752,25 @@ struct OuterTemplate {
   long min_parts = -1;  // the parameters without a default value: the fewest arguments a call passes
 };
 
+// An `if constexpr` branch enclosing a position: its condition text, and whether the position is in its else.
+struct CxBranch {
+  std::string cond;
+  bool negated;
+};
+
+std::vector<CxBranch> enclosing_constexpr_branches(const std::string &code, long body_open, long pos);
+int guards_taken(const std::string &text, long pos, const OuterTemplate &outer, const std::vector<std::string> &inst,
+                 const std::vector<CxBranch> &guards, std::string &why);
+
+// The text with its directives blanked (same length): the code the explicit calls of a template are read from.
+std::string code_without_directives(const std::string &text) {
+  std::string code = text;
+  for (const auto &d : directive_ends(text))
+    for (long k = d.first; k < d.second && k < (long)code.size(); k++)
+      if (code[(size_t)k] != '\n') code[(size_t)k] = ' ';
+  return code;
+}
+
 std::vector<std::vector<std::string>> member_instances(const OuterTemplate &outer, const std::string &text) {
   const MemberQualifier &q = outer.qual;
   std::vector<std::vector<std::string>> raw;
@@ -2603,7 +2622,19 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
     }
     if (has_outer && mentions) {
       const std::string outer_key = overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts);
+      // A call in an `if constexpr` branch of the enclosing template is an instance only where that branch is taken
+      // (ggml-cuda's fattn-tile: switch_ncols2 calls switch_ncols1<DKQ, DV, 4> under `DKQ != 320`, so DKQ = 320 has no
+      // such instance; the front end would instantiate the discarded call and fail on a kernel config it lacks).
+      const std::vector<CxBranch> guards = enclosing_constexpr_branches(code_without_directives(text), outer.open, pos);
       for (const auto &inst : template_instances(outer.fname, text, next_stack, outer_key)) {
+        if (!guards.empty()) {
+          std::string why;
+          const int taken = guards_taken(text, pos, outer, inst, guards, why);
+          if (taken < 0)
+            refuse("call of " + name + " at line " + std::to_string(line_of(text, pos)) +
+                   " is in a branch of " + outer.fname + " whose condition cannot be evaluated: " + why);
+          if (taken == 0) continue;
+        }
         // A pack expands to several arguments: the list is split again after the substitution.
         std::vector<std::string> subbed;
         for (const auto &a : args) subbed.push_back(substitute(a, outer.names, inst, outer.has_pack, outer.pack));
@@ -4009,12 +4040,6 @@ bool word_ends_at(const std::string &s, long end, const std::string &w) {
   if (start < 0 || s.compare((size_t)start, w.size(), w) != 0) return false;
   return start == 0 || !ident_c((unsigned char)s[start - 1]);
 }
-
-// An `if constexpr` branch enclosing a position: its condition text, and whether the position is in its else.
-struct CxBranch {
-  std::string cond;
-  bool negated;
-};
 
 // The `if constexpr` branches between the template body's open brace and pos, outermost first. The braced else of an
 // `if constexpr` block is the negated condition. A runtime if takes no instance out of the program, so it is not listed.
