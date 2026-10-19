@@ -325,7 +325,8 @@ module TypeFacts
 
   # A body whose every exit is RETSELF / RETNIL / RETTRUE / RETFALSE (no value register to trace).
   def trivial_return(irep)
-    ops = irep.instructions.map(&:op).grep(/\ARET|\ABREAK\z|\ARETURN/)
+    # The IR's exits minus STOP: it ends the program, not the body, and the grep this replaces never matched it.
+    ops = BytecodeIR.for(irep).exits.map(&:op).reject { |o| o == 'STOP' }
     return nil if ops.empty? || ops.any? { |o| %w[RETURN RETURN_BLK BREAK].include?(o) }
 
     kinds = ops.map { |o| { 'RETSELF' => 'self', 'RETNIL' => 'nil', 'RETTRUE' => 'bool', 'RETFALSE' => 'bool' }[o] }.uniq
@@ -361,14 +362,17 @@ module TypeFacts
     if cant
       why = if (irep.catch_handlers || []).any? { |h| h.type == :ensure } then 'ensure'
             elsif gen.send(:subtree_has_nonlocal_exit?, irep) then 'nonlocal-exit'
-            elsif irep.instructions.none? { |i| %w[RETURN RETURN_BLK].include?(i.op) } then 'implicit-return-op'
+            elsif BytecodeIR.for(irep).exits.none? { |ex| %w[RETURN RETURN_BLK].include?(ex.op) } then 'implicit-return-op'
             else 'rescue'
             end
       return "unanalyzable:#{why}"
     end
 
     causes = Set.new
-    irep.instructions.each_with_index do |insn, idx|
+    # Only frame exits name a cause, so the exit list visits the same instructions in the same order.
+    BytecodeIR.for(irep).exits.each do |ex|
+      idx = ex.index
+      insn = irep.instructions[idx]
       case insn.op
       when 'RETURN'
         srcs = gen.respond_to?(:return_value_sources, true) ? gen.send(:return_value_sources, irep, idx, insn.reg) : nil

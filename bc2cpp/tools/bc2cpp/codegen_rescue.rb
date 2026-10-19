@@ -341,31 +341,23 @@ class CodeGen
       child = @ireps[irep.reps[i.block_index]]
       next unless child
 
-      all, child_written = upvar_refs_into(child, 0)
+      all, child_written = upvar_refs_into(child)
       inside ? written.merge(child_written) : touched.merge(all)
     end
     (written | touched).map(&:to_i).select { |r| r.between?(1, nlocals - 1) && r.to_s != region[:connector_reg] }.sort
   end
 
-  # Registers (digits) of the frame `level` levels above +irep+'s parent that
-  # +irep+ and its nested blocks touch through GETUPVAR/SETUPVAR: [all, written].
-  def upvar_refs_into(irep, level)
+  # Registers (digits) of +irep+'s parent that +irep+ and its nested blocks touch through GETUPVAR/SETUPVAR:
+  # [all, written] (BytecodeIR.each_nested_insn: a reference at level k in depth k names the parent).
+  def upvar_refs_into(irep)
     all = Set.new
     written = Set.new
-    irep.instructions.each do |insn|
+    BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }) do |insn, depth|
       ref = insn.upvar_ref
-      if ref && ref.last == level
-        all << ref.first.to_s
-        written << ref.first.to_s if insn.op == 'SETUPVAR'
-      end
-      next unless insn.block_index && irep.reps
+      next unless ref && ref.last == depth
 
-      child = @ireps[irep.reps[insn.block_index]]
-      next unless child
-
-      sub_all, sub_written = upvar_refs_into(child, level + 1)
-      all.merge(sub_all)
-      written.merge(sub_written)
+      all << ref.first.to_s
+      written << ref.first.to_s if insn.op == 'SETUPVAR'
     end
     [all, written]
   end
