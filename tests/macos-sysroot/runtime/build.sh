@@ -44,13 +44,9 @@ done
 # cxa_demangle.cpp is libc++abi's demangler (__cxa_demangle, the ___cxa_demangle name). Its ItaniumDemangle.h lives under
 # libcxxabi/src/demangle, which the -I above reaches. Built with only the clean-room sysroot and the libc++ headers.
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/cxa_demangle.cpp" -o cxa_demangle.o
-# stdlib_typeinfo.cpp is the key function of std::type_info, so it emits the _ZTISt9type_info object only with RTTI on.
-clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -frtti -O2 -c "$src/libcxxabi/src/stdlib_typeinfo.cpp" -o stdlib_typeinfo.o
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$root/tests/macos-sysroot/runtime/src/streambuf_seekpos.cpp" -o streambuf_seekpos.o
 # new_handler.cpp (libc++'s copy of std::get_new_handler and set_new_handler) is not built: libc++abi's
 # cxa_default_handlers.cpp defines set_new_handler against the runtime's __cxa_new_handler, and two definitions would collide.
-# private_typeinfo.cpp uses dynamic_cast itself, so it is built with RTTI on (no -fno-rtti).
-clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -O2 -c "$src/libcxxabi/src/private_typeinfo.cpp" -o private_typeinfo.o
 # cxa_exception.cpp defines __cxa_uncaught_exception (the ___cxa_uncaught_exception name the cross link needs). It is
 # built with exceptions and RTTI on, as libc++abi builds it; the _LIBCPP opt-in keeps std::unexpected_handler, which
 # its headers use. The _Unwind_* functions it calls are the system unwinder's, from libunwind's headers at the pin.
@@ -82,11 +78,13 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_
 clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$root/tests/macos-sysroot/runtime/src/eh_glue.cpp" -o eh_glue.o
 
 rm -f libnfcxx-darwin-rt.a
-# The runtime archive. stdlib_exception.o (std::exception, bad_alloc, bad_array_new_length), stdlib_typeinfo.o and
-# private_typeinfo.o (std::type_info and the __cxxabiv1 type_info names) replace EDG's copies in libC-darwin.a. Members that
-# libC.a still owns (cxa_default_handlers, stdlib_new_delete, ...) are built but not archived, as before.
+# The runtime archive. stdlib_exception.o (std::exception, bad_alloc, bad_array_new_length) replaces EDG's copies in
+# libC-darwin.a. type_info and bad_cast are not replaced: EDG's typeinfo.o and rtti.o define them with EDG's dynamic_cast ABI
+# (___dynamic_cast, __db_type_info), which libc++abi's private_typeinfo.o and stdlib_typeinfo.o do not match (both would define
+# ___dynamic_cast, and stdlib_typeinfo.o defines the bad_cast and type_info names typeinfo.o owns). Members that libC.a still
+# owns (stdlib_new_delete, ...) are built but not archived, as before.
 clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/xlocale_shim.c" -o xlocale_shim.o
-llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o stdlib_exception.o stdlib_typeinfo.o private_typeinfo.o eh_glue.o cxa_default_handlers.o
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o stdlib_exception.o eh_glue.o cxa_default_handlers.o
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 
 # libc++ itself, built from LLVM's own sources at the pin with the cross clang (not a hand-written subset), into a
@@ -143,25 +141,26 @@ done
 [ "$cxxlib_fail" = 0 ] || { echo "build.sh: $cxxlib_fail libc++ sources failed; see build/macos-rt/libcxx-obj/*.err" >&2; exit 1; }
 ls libcxx-obj/*.o >/dev/null 2>&1 && llvm-ar rcs libc++-darwin.a libcxx-obj/*.o && echo "built $out/libc++-darwin.a ($(ls libcxx-obj/*.o | wc -l) objects)"
 # libC-darwin.a is EDG's libC.a without the members that the libc++ and libc++abi archives replace: exception.o (std::exception,
-# bad_exception), bad_alloc.o (std::bad_alloc, bad_array_new_length), typeinfo.o (std::type_info, bad_cast, __cxxabiv1 type_info)
-# and eh_util.o (std::terminate, get/set_terminate, std::unexpected, set_unexpected and uncaught_exception(s)). The EH entry
-# points (throw.o: __curr_eh_stack_entry, the EH shim members), rtti.o, vars.o and vec_newdel.o stay in libC.a.
-# Every symbol a dropped member defined must now come from one of the two archives built here; if one does not, the link of a
-# program that needs it would fail, so the build stops with the list instead.
+# bad_exception), bad_alloc.o (std::bad_alloc, bad_array_new_length) and eh_util.o (std::terminate, get/set_terminate,
+# std::unexpected, set_unexpected and uncaught_exception(s)). The EH entry points (throw.o: __curr_eh_stack_entry, the EH shim
+# members), typeinfo.o, rtti.o, vars.o and vec_newdel.o stay in libC.a.
+# A dropped symbol that a remaining member refers to must come from one of the two archives built here; otherwise the link of
+# such a program would fail, so the build stops with the list. (Dropped symbols that nothing refers to, such as the copy
+# constructors of these classes, which libc++ declares inline, are not checked.)
 libc_in=${NFCXX_MACOS_LIBC:-$root/build/edg-cross/lib/libC.a}
-libc_drop="exception.o bad_alloc.o typeinfo.o eh_util.o"
+libc_drop="exception.o bad_alloc.o eh_util.o"
 cp "$libc_in" libC-darwin.a
 llvm-ar d libC-darwin.a $libc_drop
 drop_syms=$(for m in $libc_drop; do llvm-nm -A --defined-only -g "$libc_in" | grep -E ":$m: " ; done | awk '{print $NF}' | sort -u)
+refs=$(llvm-nm -A -u libC-darwin.a libnfcxx-darwin-rt.a libc++-darwin.a | awk '{print $NF}' | sort -u)
 provided=$( (llvm-nm -A --defined-only -g libc++-darwin.a; llvm-nm -A --defined-only -g libnfcxx-darwin-rt.a) | awk '{print $NF}' | sort -u)
-# __dummy_typeinfo and __gen_dummy_typeinfos (lib_src/typeinfo.c) are not provided: no code in the tree refers to them.
-missing=$(comm -23 <(printf '%s\n' "$drop_syms") <(printf '%s\n' "$provided") | grep -v -x -E '__ZSt16__dummy_typeinfo|__ZSt21__gen_dummy_typeinfosv' || true)
+missing=$(comm -23 <(comm -12 <(printf '%s\n' "$drop_syms") <(printf '%s\n' "$refs")) <(printf '%s\n' "$provided") || true)
 if [ -n "$missing" ]; then
-  echo "build.sh: symbols of the dropped libC.a members that no archive provides:" >&2
+  echo "build.sh: symbols of the dropped libC.a members that a remaining member needs and no archive provides:" >&2
   printf '%s\n' "$missing" >&2
   exit 1
 fi
-echo "built $out/libC-darwin.a (libC.a without $libc_drop; $(printf '%s\n' "$drop_syms" | wc -l) dropped symbols, all provided)"
+echo "built $out/libC-darwin.a (libC.a without $libc_drop; $(printf '%s\n' "$drop_syms" | wc -l) dropped symbols)"
 
 # The LLVM sources are removed only now, after the libc++ step that reads them.
 rm -rf "$llvm"
