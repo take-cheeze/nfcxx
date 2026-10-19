@@ -70,6 +70,8 @@ mismatches: 0 of 2069793, guard writes: 0 of 64
 | 4a | unary (neg, relu, silu, gelu; F32, flat and strided) oracle | done | #338 | `tests/gpu/ggml/unary/` |
 | 4b | unary, real `element_wise.cpp` | blocked: the device emitter refuses it (`u2f` of bool, zero-initialized closure). Closure names fixed by #395 (merged); emitter fix #381 is an open draft; the test is #378 (draft) | #378, #381 | `tests/gpu/ggml/unary_real/` (fails at build) |
 | 4c | `rms_norm`, F32 oracle with a warp reduction | not run: the `std::array` device gap is fixed by #400 (merged), but the real 16-lane sub-group reduction needs #401 (open). Test is a draft | #394, #401 | `tests/gpu/ggml/rms_norm/` on the #394 branch |
+| 4d | `layer_norm` (GGML_OP_NORM), F32, real `norm.cpp` through the real `libggml-sycl`, rows of 64 and 1536 | blocked at the front end: `norm.cpp:18` (and `:19`, `:169`, `:170`), `error: no instance of function template "calculate_offset" matches the argument list` (`argument types are: ({...}, {...})`). The braced `std::array<int, N>` argument narrows `int64_t` strides. Reproducer: `tests/gpu/ggml/layer_norm/calc_offset_narrowing.cpp` (the int-stride control compiles) | | `tests/gpu/ggml/layer_norm/` (fails at build) |
+| 4e | `group_norm` (GGML_OP_GROUP_NORM), F32, 4 groups, real `norm.cpp` | blocked at the same front-end error: `norm.cpp` is one TU and the `calculate_offset` calls of 4d are in it (`group_norm_f32` itself has none). Same reproducer | | `tests/gpu/ggml/group_norm/` (fails at build) |
 | 5 | `test-backend-ops` SYCL run | not run (0 of 133 `test_*` cases) | | `tests/test-backend-ops.cpp` in llama.cpp |
 | 6 | end-to-end `llama-bench` or `llama-cli` | not started | | |
 

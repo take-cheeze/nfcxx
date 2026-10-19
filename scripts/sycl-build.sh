@@ -35,6 +35,7 @@ while [ $# -gt 0 ]; do
     -L|-l) [ $# -ge 2 ] || { echo "sycl-build: $1 needs an argument" >&2; exit 2; }; link+=("$1" "$2"); shift ;;
     -rpath) [ $# -ge 2 ] || { echo "sycl-build: -rpath needs an argument" >&2; exit 2; }; link+=("-Wl,-rpath,$2"); shift ;;
     -L*|-l*|-Wl,*) link+=("$1") ;;
+    --diag_*) diag+=("$1") ;;                              # front-end (EDG) diagnostic options: the device pass only
     -I*|-D*|-U*|-O*|-g|-W*) opts+=("$1") ;;
     -*) echo "sycl-build: unknown option $1" >&2; exit 2 ;;
     *) src=$1 ;;
@@ -64,7 +65,7 @@ if [ "$mode" = cpu ]; then
   exec $cxx -std=$std $optflag -I"$inc" "${opts[@]}" "$src" -o "$out" "${link[@]}"
 fi
 absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
-"$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" "$src" > "$absout.dev.ir"
+"$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" ${diag[@]+"${diag[@]}"} "$src" > "$absout.dev.ir"
 rc=0
 if [ $backend = vulkan ]; then
   "$root/scripts/mrb" "$root/scripts/pathb-spirv-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
