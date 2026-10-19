@@ -1,40 +1,32 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require 'tmpdir'
-require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/ir_yield_types'
-
-unless ENV['MRBC']
-  puts 'SKIP mrbc yield protocol fixtures (set MRBC)'
-  exit
-end
+require_relative '../../../tools/bc2cpp/irep'
+require_relative '../../../tools/bc2cpp/ir_yield_types'
 
 check = lambda do |label, condition|
   raise label unless condition
 
   puts "ok #{label}"
 end
-Dir.mktmpdir('ir-yield-types') do |dir|
-  path = File.join(dir, 'yield.rb')
-  File.write(path, <<~SOURCE)
-    class YieldCases
-      def twice(value); yield value; yield 1; end
-      def effect(value); @state = value; yield value; end
-      def splat(value); yield(*value); end
-      def unknown(value); yield value.unknown; end
-      def two(value); yield value, 1; end
-      def escape(value, &block); @callback = block; yield value; end
-      def caller; twice(:tag) { |item| item }; end
-      def declared_caller(value); twice(value) { |item| item }; end
-      def effect_caller; effect(:tag) { |item| item }; end
-      def splat_caller; splat([1]) { |item| item }; end
-      def unknown_caller; unknown(:tag) { |item| item }; end
-      def wrong_arity; two(:tag) { |item| item }; end
-      def escape_caller; escape(:tag) { |item| item }; end
-    end
-  SOURCE
-  ireps, = compile_ireps([path], "yield_fixture", dir)
+source = <<~SOURCE
+  class YieldCases
+    def twice(value); yield value; yield 1; end
+    def effect(value); @state = value; yield value; end
+    def splat(value); yield(*value); end
+    def unknown(value); yield value.unknown; end
+    def two(value); yield value, 1; end
+    def escape(value, &block); @callback = block; yield value; end
+    def caller; twice(:tag) { |item| item }; end
+    def declared_caller(value); twice(value) { |item| item }; end
+    def effect_caller; effect(:tag) { |item| item }; end
+    def splat_caller; splat([1]) { |item| item }; end
+    def unknown_caller; unknown(:tag) { |item| item }; end
+    def wrong_arity; two(:tag) { |item| item }; end
+    def escape_caller; escape(:tag) { |item| item }; end
+  end
+SOURCE
+Bc2cppIrBlockFixtures.compile(source, 'yields') do |ireps, _root|
   methods = {}
   ireps.each_value do |body|
     body.instructions.each do |insn|
