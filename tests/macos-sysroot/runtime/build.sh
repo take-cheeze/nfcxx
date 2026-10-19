@@ -65,11 +65,19 @@ done
 # now; the EDG copies are left out of libC-darwin.a (see libc_drop below), so there is one definition of each.
 clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$src/libcxxabi/src/cxa_handlers.cpp" -o cxa_handlers.o
 # cxa_default_handlers.cpp uses constinit, so it is built as C++20 (as new_handler.cpp is).
+# cxa_default_handlers.cpp defines the handler storage (__cxa_terminate_handler, which cxa_handlers.o reads), set_terminate and
+# set_unexpected. It also defines std::set_new_handler, which libC.a's new-handler member owns, so the copy built here drops
+# that one function (the block must match exactly once). __cxa_new_handler, the handler storage, stays.
+python3 - "$src/libcxxabi/src/cxa_default_handlers.cpp" cxa_default_handlers.cpp <<'PY'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+b = r'new_handler\nset_new_handler\(new_handler handler\) noexcept\n\{\n.*?\n\}\n'
+assert len(re.findall(b, text, flags=re.S)) == 1, 'set_new_handler block not found exactly once'
+open(dst, 'w').write(re.sub(b, '', text, count=1, flags=re.S))
+PY
 clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS \
-  -std=c++20 -fexceptions -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
-# cxa_default_handlers.o defines __cxa_terminate_handler (which cxa_handlers.o reads), and set_terminate and set_unexpected.
-# It also defines std::set_new_handler, which libC.a's new-handler member owns; the copy here keeps that name local.
-llvm-objcopy --localize-symbol=__ZSt15set_new_handlerPFvvE cxa_default_handlers.o
+  -std=c++20 -fexceptions -O2 -c cxa_default_handlers.cpp -o cxa_default_handlers.o
 # The names EDG's runtime (libC.a) calls for terminate and unexpected, forwarded to the handlers above (see eh_glue.cpp).
 clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$root/tests/macos-sysroot/runtime/src/eh_glue.cpp" -o eh_glue.o
 
