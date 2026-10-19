@@ -146,6 +146,18 @@ end
 
 def eval_simple(expr, types, locals, params)
   expr = expr.strip
+  if expr.start_with?("UNIOP")
+    m = expr.match(/^UNIOP\s+(!|-)\s+(.+)$/)
+    if m
+      op = m[1]; v = m[2].strip
+      vt = eval_simple(v, types, locals, params)
+      if op == "!"
+        return "(not int #{vt})"
+      else
+        return "(wneg int #{vt})"
+      end
+    end
+  end
   # BINOP
   if expr.start_with?("BINOP")
     parts = expr.sub(/^BINOP\s+/, "").split(/\s+/, 3)
@@ -429,6 +441,29 @@ functions.each do |fn|
         end
         dst_pt = dst_type ? rust_type_to_pathb(dst_type, types) : "unsigned_long"
 
+        if rhs.start_with?('"')
+          # string constant assigned to a &str slot: build a fat pointer
+          strval = rhs  # includes quotes
+          # unquote
+          inner = rhs[1..rhs.rindex('"')-1]
+          bytes = unescape_mir(inner) rescue inner.bytes
+          n = bytes.size
+          data_name = "str_#{bytes.hash.abs}"
+          # ensure data exists (append now)
+          lines << "(data #{data_name.inspect} (array #{n+1} (const char)) (string \"#{encode_pb_str(bytes)}\"))" unless defined?(@strdata) && @strdata.include?(data_name)
+          @strdata ||= []
+          @strdata << data_name unless @strdata.include?(data_name)
+          # store ptr at 0, len at 8
+          r1 = regi; regi += 1
+          stmts << "(let %#{r1} (ptr (const char)) &\"#{data_name}\")"
+          stmts << "(store (ptr (const char)) $\"#{dst_name}\" %#{r1})"
+          r2 = regi; regi += 1
+          stmts << "(let %#{r2} unsigned_long (const unsigned_long #{n}))"
+          r3 = regi; regi += 1
+          stmts << "(let %#{r3} (ptr unsigned_long) (offset $\"#{dst_name}\" 8))"
+          stmts << "(store unsigned_long %#{r3} %#{r2})"
+          next
+        end
         if rhs.start_with?("MAKEDST")
           parts = rhs.sub(/^MAKEDST\s+/, "").split(",", 2).map(&:strip)
           ptr_expr = parts[0]
