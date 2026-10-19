@@ -470,9 +470,10 @@ module RbsParamCheck
   # A checked `[T] ... { ... -> T } -> T` declaration (BLOCK_RETURNS, ADR 0475: `RGSS::Profiler.section(...) { ... }`)
   # returns its literal block's value, and the block's exits are plain returns: every RETURN must be proven `cls`.
   def block_value_why(ctx, body, name, cls, depth)
-    body.instructions.each_with_index do |insn, idx|
-      next unless insn.op.start_with?('RET') || %w[BREAK STOP].include?(insn.op)
-      return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless insn.op == 'RETURN'
+    BytecodeIR.for(body).exits.each do |ex|
+      idx = ex.index
+      insn = body.instructions[idx]
+      return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless ex.op == 'RETURN'
 
       why = trace(ctx, body, idx, insn.reg, cls, depth + 1)
       return "the block of #{name} returns (#{why})" if why

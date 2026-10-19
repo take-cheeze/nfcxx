@@ -16,15 +16,21 @@ class CodeGen
   # the entry wrapper does); a missing required one is refused (the interpreter
   # would raise ArgumentError).
   #
-  # literal_symbol_write: was `reg`'s most recent write (scanning back from
-  # `before_idx`, inclusive) a `LOADSYM :name`? Shared by compile_keyword_send
-  # and splat_hash_literal_pairs.
-  def literal_symbol_write(irep, before_idx, reg)
-    # The most recent write must be the LOADSYM.
-    insn = irep.last_writer(before_idx, reg)
-    return nil unless insn&.op == 'LOADSYM'
+  # literal_symbol_write: is every write of `reg` that reaches instruction `use` a `LOADSYM` of one name? That name,
+  # else nil. Shared by compile_keyword_send and splat_hash_literal_pairs.
+  def literal_symbol_write(irep, use, reg)
+    writers = BytecodeIR.reaching_writer_indices(irep, use, reg)&.map { |i| irep.instructions[i] }
+    return nil unless writers&.all? { |w| w.op == 'LOADSYM' }
 
-    insn.sym_token&.sub(/\A:/, '')
+    names = writers.map { |w| w.sym_token&.sub(/\A:/, '') }.uniq
+    names.size == 1 ? names.first : nil
+  end
+
+  # The index of the one write of `reg` that reaches instruction `use`, or nil: a join has several, and an
+  # unprovable register has none to offer.
+  def sole_reaching_write(irep, use, reg)
+    indices = BytecodeIR.reaching_writer_indices(irep, use, reg)
+    indices.first if indices&.size == 1
   end
 
   # KEYWORD_CALLSITE_SUPPORT: the shared tail of compile_keyword_send (MONO
@@ -546,8 +552,8 @@ class CodeGen
   #      `NAME =`/class/module);
   #   2. such a GETCONST compiles to the bc2cpp_const_try chain ending in
   #      mrb_const_get from Object, which raises NameError (src/variable.c);
-  #   3. the receiver register's first write before the call is that GETCONST,
-  #      and no jump or catch target lands strictly between it and the send.
+  #   3. every write of the receiver register that reaches the call is that
+  #      GETCONST (BytecodeIR.reaching_writer_indices), and it dominates the call.
   # So the send never executes. It is still emitted in the faithful OP_SEND form
   # (pairs packed into one trailing Hash, dynamic dispatch) so a broken proof
   # yields a well-formed send.
@@ -567,19 +573,19 @@ class CodeGen
     return nil unless send_insn && send_insn.op == 'SEND'
 
     recv_reg = d.to_i
-    # The first write to the receiver register must be the constant read itself.
-    write = irep.last_writer(idx - 1, recv_reg)
-    return nil unless write && write.op == 'GETCONST'
+    # The only write of the receiver register that reaches the send must be the constant read itself.
+    write_index = sole_reaching_write(irep, idx, recv_reg.to_s)
+    return nil unless write_index
+
+    write = irep.instructions[write_index]
+    return nil unless write.op == 'GETCONST'
 
     const_name = write.const_name
     return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
     return nil if universe.include?(const_name)
 
-    # No jump target or handler entry may land in (write, send]: that edge would
-    # reach the send without the raising GETCONST.
-    blocked = jump_targets(irep)
-    irep.catch_handlers&.each { |ch| blocked << ch.target }
-    return nil if blocked.any? { |t| t > write.addr && t <= send_insn.addr }
+    # The GETCONST must hold the register on every path to the send, so no jump or handler entry lands between.
+    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, recv_reg.to_s)
 
     out = String.new
     out << "  // KEYWORD_NEVER_DEFINED_CONST :#{name} (n=#{n}|nk=#{nk}) -- receiver is the value of " \
@@ -609,17 +615,20 @@ class CodeGen
   # so a bare r<base> would pass the Array as the first argument.
   # Returns C++ expressions or nil.
   def splat_array_literal_regs(irep, idx, reg)
-    # Skip the block proc register (see array_element_source_scan).
-    irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true, max_moves: 8) do |insn, _index, base_reg|
-      case insn.op
-      when 'ARRAY', 'ARRAY2'
-        n = insn.uint_operand
-        next nil if n.nil?
+    # One reaching write, and it is the literal: an ARRAY on one arm of a join leaves the other arm unknown.
+    write_index = sole_reaching_write(irep, idx, reg)
+    return nil unless write_index
 
-        base = base_reg.to_i
-        (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
-      end
-    end
+    insn = irep.instructions[write_index]
+    return nil unless %w[ARRAY ARRAY2].include?(insn.op)
+
+    n = insn.uint_operand
+    return nil if n.nil?
+    # mrb_ary_ref reads the base register at the send, so the ARRAY must still hold it there.
+    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, insn.reg)
+
+    base = insn.reg.to_i
+    (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
   end
 
   # SPLAT_UNROLL_SUPPORT: the double-splat analogue: a literal `HASH Rd N` (pairs
@@ -627,21 +636,25 @@ class CodeGen
   # LOADSYMs (needed to match the callee's keyword table). Returns [{name:,
   # val_reg:}] in order, or nil.
   def splat_hash_literal_pairs(irep, idx, reg)
-    irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true, max_moves: 8) do |insn, index, base_reg|
-      next nil unless insn.op == 'HASH'
+    # One reaching write, and it is the literal (see splat_array_literal_regs).
+    write_index = sole_reaching_write(irep, idx, reg)
+    return nil unless write_index
 
-      n = insn.uint_operand
-      next nil if n.nil?
+    insn = irep.instructions[write_index]
+    return nil unless insn.op == 'HASH'
 
-      base = base_reg.to_i
-      (0...n).map do |k|
-        key_reg = base + (2 * k)
-        val_reg = base + (2 * k) + 1
-        kname = literal_symbol_write(irep, index - 1, key_reg.to_s)
-        break nil unless kname
+    n = insn.uint_operand
+    return nil if n.nil?
+    return nil unless BytecodeIR.write_dominates?(irep, write_index, idx, insn.reg)
 
-        { name: kname, val_reg: "r#{val_reg}" }
-      end
+    base = insn.reg.to_i
+    (0...n).map do |k|
+      key_reg = base + (2 * k)
+      val_reg = base + (2 * k) + 1
+      kname = literal_symbol_write(irep, write_index, key_reg.to_s)
+      return nil unless kname
+
+      { name: kname, val_reg: "r#{val_reg}" }
     end
   end
 

@@ -204,16 +204,18 @@ class CodeGen
     n = insn.op.end_with?('0B') ? 0 : insn.argc
     return false unless n
 
-    irep.walk_writers(idx - 1, (insn.reg.to_i + n + 1).to_s, follow_moves: true) do |writer|
-      %w[BLOCK LAMBDA].include?(writer.op)
-    end || false
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + n + 1).to_s)
+    writers&.all? { |i| %w[BLOCK LAMBDA].include?(irep.instructions[i].op) } || false
   end
 
-  # `instance_variable_set(:@x, v)`: the name is a LOADSYM (already poisoned).
+  # `instance_variable_set(:@x, v)`: every write that reaches the name is a LOADSYM of an ivar name (already
+  # poisoned); a parameter or a second arm of a join that is not one makes the name computed.
   def literal_ivar_argument?(irep, idx, insn)
     return false unless insn.reg
 
-    irep.walk_writers(idx - 1, (insn.reg.to_i + 1).to_s, follow_moves: true) do |writer|
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
+    writers&.all? do |i|
+      writer = irep.instructions[i]
       writer.op == 'LOADSYM' && writer.sym.to_s.start_with?('@')
     end || false
   end

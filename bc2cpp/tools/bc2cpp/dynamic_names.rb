@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir'
 
 # Method names a computed-name send (`send("#{stem}=", v)`, `method(name)`, ...) could reach
 # although no call site spells them: the proofs that enumerate call sites (ArgTypes,
@@ -49,8 +50,10 @@ module DynamicNames
           stems.merge(installed)
           next
         end
-        literal = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
-                  irep.walk_writers(idx - 1, (insn.reg.to_i + 1).to_s, follow_moves: true) { |w| w.op == 'LOADSYM' }
+        # Every write of the name reaching the send must be a LOADSYM: one non-literal arm of a join makes it computed.
+        writers = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
+                  BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + 1).to_s)
+        literal = writers && writers.all? { |i| irep.instructions[i].op == 'LOADSYM' }
         computed = true unless literal
       end
     end

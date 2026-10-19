@@ -577,7 +577,7 @@ module BytecodeIR
     if !irep.reps.nil? && !irep.reps.empty?
       tree = irep.tree
       if tree
-        collect_upvar_writes(tree, irep, 1, written)
+        collect_upvar_writes(tree, irep, written)
       else
         (1...irep.nlocals.to_i).each { |n| written << n.to_s }
       end
@@ -585,18 +585,33 @@ module BytecodeIR
     irep.instance_variable_set(:@own_upvar_written_regs, written.freeze)
   end
 
-  def self.collect_upvar_writes(tree, irep, depth, written)
-    Array(irep.reps).each do |label|
-      child = tree[label]
-      raise ArgumentError, "bc2cpp: irep #{label} missing from the tree" unless child
+  # Every instruction of +irep+ and of the ireps nested in it, as (insn, depth): depth 0 for +irep+'s own, 1 for a
+  # direct child's, and so on. +lookup+ maps a rep label to its Irep (nil skips that child). Relative to the root
+  # +irep+, an upvar reference at level L in an instruction at depth k names the frame k - L - 1 (-1 is the root's
+  # parent). Returns false, stopping the walk, when a nested irep is deeper than +max_depth+; true otherwise.
+  def self.each_nested_insn(irep, lookup, depth = 0, max_depth: nil, &block)
+    return false if max_depth && depth > max_depth
 
-      child.instructions.each do |insn|
+    irep.instructions.each { |insn| block.call(insn, depth) }
+    Array(irep.reps).each do |label|
+      child = lookup.call(label)
+      next unless child
+      return false unless each_nested_insn(child, lookup, depth + 1, max_depth: max_depth, &block)
+    end
+    true
+  end
+
+  # SETUPVAR registers that the blocks nested in +irep+ write in +irep+'s frame (only the level that reaches +irep+
+  # counts: a child's own level-0 references, a grandchild's level-1 ones, ...).
+  def self.collect_upvar_writes(tree, irep, written)
+    lookup = ->(label) { tree[label] or raise ArgumentError, "bc2cpp: irep #{label} missing from the tree" }
+    Array(irep.reps).each do |label|
+      each_nested_insn(lookup.call(label), lookup) do |insn, depth|
         next unless insn.op == 'SETUPVAR'
 
         index, level = insn.upvar_ref
-        written << index.to_s if level == depth - 1
+        written << index.to_s if level == depth
       end
-      collect_upvar_writes(tree, child, depth + 1, written)
     end
   end
 
@@ -604,6 +619,17 @@ module BytecodeIR
   # own nested-block writes accounted for. See Program#reaching_definitions.
   def self.reaching_definitions(irep, index, reg, **options)
     self.for(irep).reaching_definitions(index, reg, opaque_regs: own_upvar_written_regs(irep), **options)
+  end
+
+  # Instruction indices of every write of +reg+ that reaches the read at +index+ (MOVEs followed), or nil when the
+  # answer is not provable, when none reaches, or when the method entry is among them (the value came in as an
+  # argument). A walk over the textually last writer answers for one arm of a join only; ask this for all of them.
+  # Handler edges are crossed (through_handlers), so a read inside a rescue range is answered, not refused.
+  def self.reaching_writer_indices(irep, index, reg)
+    defs = reaching_definitions(irep, index, reg, through_handlers: true)
+    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+    defs.map(&:index)
   end
 
   # Program#write_dominates? with the irep's own nested-block writes accounted for.
