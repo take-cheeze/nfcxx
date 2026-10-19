@@ -1,0 +1,154 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# BYTECODE_CONSTANT_FACTS fixtures (tools/bc2cpp/bytecode_ir_constants.rb): each Ruby program is compiled by the host
+# mrbc, its IREPs and constant sites are read by the registry, and BytecodeIR::ConstantFacts.analyze answers the class,
+# exact value and Fixnum interval of every constant path and bare-name group. The expectations are the facts the
+# IntegerConstants / IntegerConstantRanges proofs were tested for (literal, alias, arithmetic, join, poison, margin,
+# operator gate), now read from the IR. Needs MRBC (a host mrbc); without it the check prints SKIP and exits 0.
+#
+#   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/bytecode_ir_constants_check.rb
+
+require 'set'
+require 'tmpdir'
+require_relative '../../tools/bc2cpp/bc2cpp'
+require_relative '../../tools/bc2cpp/bytecode_ir_constants'
+
+unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
+  puts 'SKIP bytecode_ir_constants_check: MRBC is not set to a host mrbc'
+  exit 0
+end
+
+failures = []
+check = lambda do |what, condition|
+  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
+  failures << what unless condition
+end
+
+# Facts for one program: { paths: {path => Fact}, groups: {bare => Fact} } from the IR pass, with the operator gate
+# the program sets (or forced off when +safe+ is false).
+analyze = lambda do |source, safe: true|
+  Dir.mktmpdir do |dir|
+    rb = File.join(dir, 'fixture.rb')
+    File.write(rb, source)
+    ireps, root = compile_ireps([rb], 'bytecode_ir_constants', dir)
+    registry, _superclass_of, _containers, included, prepended, unknown, _structs, _decls, _walked, _ivars, sites = build_registry(ireps, root)
+    operators_safe = safe && IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
+    BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: operators_safe)
+  end
+end
+
+# The fact of a path (suffix match on the full lexical path) in a result.
+fact_of = lambda do |result, path|
+  result.paths.find { |p, _| p == path || p.end_with?("::#{path}") }&.last
+end
+
+positive = <<~RUBY
+  module Fx
+    BASE = 32
+    TILE = BASE
+    HALF = TILE / 2
+    NEG = -7 / 2
+    SPAN = BASE * 3 + 1
+    NAME = "name"
+    LIST = [1, 2]
+    FROZEN = [1, 2].freeze
+    RANGE = (1..3)
+    FLOAT = 1.5
+    BIG = 2_000_000_000
+    BITS = BASE | 1
+  end
+RUBY
+
+result = analyze.call(positive)
+tile = fact_of.call(result, 'Fx::TILE')
+check.call('alias to a literal carries the value 32 and the interval [32, 32]',
+           tile && tile.value == 32 && tile.interval == [32, 32] && tile.classes == Set[:Integer])
+check.call('DIV floors: -7 / 2 is -4', fact_of.call(result, 'Fx::NEG')&.value == -4)
+check.call('arithmetic over an alias: HALF = TILE / 2 is 16',
+           fact_of.call(result, 'Fx::HALF')&.value == 16 && fact_of.call(result, 'Fx::HALF')&.interval == [16, 16])
+check.call('SPAN = BASE * 3 + 1 is 97 with the interval [97, 97]',
+           fact_of.call(result, 'Fx::SPAN')&.value == 97 && fact_of.call(result, 'Fx::SPAN')&.interval == [97, 97])
+check.call("bit operator over a constant: BASE | 1 is 33, exact, with no interval",
+           fact_of.call(result, "Fx::BITS")&.value == 33 && fact_of.call(result, 'Fx::BITS')&.interval.nil?)
+check.call('String literal: class String, no value, no interval',
+           (f = fact_of.call(result, 'Fx::NAME')) && f.classes == Set[:String] && f.value.nil? && f.interval.nil?)
+check.call('Array literal: class Array',
+           fact_of.call(result, 'Fx::LIST')&.classes == Set[:Array])
+# `.freeze` is not modelled yet (stage 1): the writer is an unknown SEND0, so the binding has no class, no value.
+check.call('frozen literal: freeze is not modelled, so the binding has no class and no value (never a wrong class)',
+           fact_of.call(result, 'Fx::FROZEN')&.classes.nil? && fact_of.call(result, 'Fx::FROZEN')&.value.nil?)
+check.call('Range literal: class Range', fact_of.call(result, 'Fx::RANGE')&.classes == Set[:Range])
+check.call('Float literal: class Float, no value', (f = fact_of.call(result, 'Fx::FLOAT')) && f.classes == Set[:Float] && f.value.nil?)
+big = fact_of.call(result, 'Fx::BIG')
+check.call('out-of-margin literal is Integer with no value and no interval (never folded as an immediate)',
+           big && big.classes == Set[:Integer] && big.value.nil? && big.interval.nil?)
+
+join_result = analyze.call(<<~RUBY)
+  module Jn
+    x = Object.new.frozen? ? 1 : 2
+    LOW = x
+  end
+RUBY
+low = fact_of.call(join_result, 'Jn::LOW')
+check.call('a join of two literals is Integer with the hull interval [1, 2] and no single value',
+           low && low.classes == Set[:Integer] && low.interval == [1, 2] && low.value.nil?)
+
+poison = <<~RUBY
+  class Pz
+  end
+  module Ps
+    Pz = 5
+  end
+RUBY
+poison_result = analyze.call(poison)
+pz = poison_result.groups['Pz']
+check.call('a CLASS of the bare name poisons the group: Pz has no class, value or interval for reads',
+           pz && pz.classes.nil? && pz.value.nil? && pz.interval.nil?)
+
+reassign_alias = <<~RUBY
+  module Ra
+    SRC = 10
+    DST = SRC + 1
+  end
+  module Rb
+    SRC = Ra::SRC
+  end
+RUBY
+ra = analyze.call(reassign_alias)
+check.call('bare-name group: two bindings of SRC merge into [10, 10]',
+           ra.groups['SRC'] && ra.groups['SRC'].interval == [10, 10] && ra.groups['SRC'].value == 10)
+check.call('alias of a group name gets the group value: DST = SRC + 1 is 11',
+           fact_of.call(ra, 'Ra::DST')&.value == 11)
+
+self_alias = <<~RUBY
+  module Sa
+    TILE = 16
+  end
+  module Sb
+    TILE = Sa::TILE
+  end
+RUBY
+sa = analyze.call(self_alias)
+check.call('a binding whose only source is its own bare name is not a fact (self-alias dropped, cycle)',
+           sa.groups['TILE']&.value == 16 && sa.groups['TILE']&.interval == [16, 16])
+
+gated = analyze.call(positive, safe: false)
+check.call('an Integer operator redefinition gates arithmetic: SPAN has no interval and no value',
+           (f = fact_of.call(gated, 'Fx::SPAN')) && f.interval.nil? && f.value.nil?)
+check.call('a literal alias survives the operator gate: TILE keeps value 32',
+           fact_of.call(gated, 'Fx::TILE')&.value == 32)
+
+overflow = <<~RUBY
+  module Of
+    A = 1_000_000_000
+    B = A + A
+  end
+RUBY
+of = analyze.call(overflow)
+b = fact_of.call(of, 'Of::B')
+check.call('an intermediate outside the Fixnum margin has no value and no interval (B = A + A)',
+           b && b.value.nil? && b.interval.nil? && b.classes == Set[:Integer])
+
+failures.empty? or abort("bytecode_ir_constants_check: #{failures.size} failure(s): #{failures.join('; ')}")
+puts 'bytecode_ir_constants_check: ok'

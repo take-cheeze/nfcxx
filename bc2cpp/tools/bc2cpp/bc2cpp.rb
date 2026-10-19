@@ -25,6 +25,7 @@ require_relative 'shared_generation'
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
 require_relative 'registry'
 require_relative 'lint_crosscheck'
@@ -615,6 +616,24 @@ if $PROGRAM_NAME == __FILE__
   profile_phase.call('global facts + annotations')
   warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
+  # BYTECODE_CONSTANT_FACTS (ADR 0493): the constant facts the bytecode IR derives. Report-only in this stage: the proofs
+  # above still decide the build; scripts/bc2cpp/ir_constant_facts_compare.rb compares the two from this log.
+  ir_constant_facts = profile_call.call('BytecodeIR::ConstantFacts.analyze') do
+    BytecodeIR::ConstantFacts.analyze(
+      ireps, sites: constant_assignment_sites,
+             poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
+                       IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq),
+             operators_safe: operators_safe
+    )
+  end
+  warn "== BYTECODE_CONSTANT_FACTS (report-only): #{ir_constant_facts.paths.size} paths, " \
+       "#{ir_constant_facts.groups.size} names =="
+  ir_constant_facts.paths.sort.each do |path, fact|
+    warn "  IR_CONST #{path} #{BytecodeIR::ConstantFacts.report_fields(fact).join(' ')}"
+  end
+  ir_constant_facts.groups.sort.each do |name, fact|
+    warn "  IR_GROUP #{name} #{BytecodeIR::ConstantFacts.report_fields(fact).join(' ')}"
+  end
 
   # RECORD_HASH_PROOF (docs/adr/0285): needs the same outside-source picture as
   # IntegerConstants and the closed world, which sees every writer.
