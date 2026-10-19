@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'rbs_signatures'
 require_relative 'ir_yield_types'
@@ -7,6 +8,7 @@ require_relative 'ir_block_captures'
 require_relative 'ir_rbs_block_types'
 
 module IrTypeFeedback
+  # Not Ops::FRAME_EXIT: that set also holds STOP, which these block and method return kinds leave out.
   RETURN_OPS = %w[RETURN RETURN_BLK BREAK RETSELF RETNIL RETTRUE RETFALSE].freeze
   LITERAL_RETURNS = { 'RETNIL' => :NilClass, 'RETTRUE' => :TrueClass, 'RETFALSE' => :FalseClass }.freeze
   CORE_PARENTS = {

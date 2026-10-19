@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
 
@@ -27,7 +28,6 @@ module AliasSites
   # (mruby's MRB_PROC_ALIAS), a compiled copy registered under `new` would answer `new`.
   NAME_OPS = %w[SUPER ARGARY].freeze
   NAME_SENDS = %w[__method__ binding].freeze
-  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
   # `private alias_method :a, :b` hands the alias's answer (`:a`) to a visibility send, which the registry
   # does not attribute; such a site is not recognized.
   VISIBILITY_SENDS = %w[private public protected module_function private_class_method public_class_method].freeze
@@ -58,7 +58,7 @@ module AliasSites
     return nil unless old_insn.op == 'LOADSYM' && old_insn.reg.to_i == base + 2 && old_insn.sym_token
 
     following = irep.instructions[idx + 1]
-    return nil if following && SEND_OPS.include?(following.op) && VISIBILITY_SENDS.include?(following.sym)
+    return nil if following && BytecodeIR::Ops::SEND.include?(following.op) && VISIBILITY_SENDS.include?(following.sym)
 
     Site.new(new_name: new_insn.sym_token, old_name: old_insn.sym_token)
   end
@@ -88,7 +88,7 @@ module AliasSites
 
   def name_free?(irep, ireps)
     irep.instructions.none? do |insn|
-      NAME_OPS.include?(insn.op) || (SEND_OPS.include?(insn.op) && NAME_SENDS.include?(insn.sym)) ||
+      NAME_OPS.include?(insn.op) || (BytecodeIR::Ops::SEND.include?(insn.op) && NAME_SENDS.include?(insn.sym)) ||
         (insn.op == 'LOADSYM' && NAME_SENDS.include?(insn.sym_token))
     end && irep.reps.compact.all? { |child| ireps[child] && name_free?(ireps[child], ireps) }
   end

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 
 # DEFINE_METHOD_SITES (docs/adr/0288): `define_method(:name) { |a, b| ... }` written
 # directly in a class or module body is an ordinary method definition to the registry,
@@ -26,7 +27,6 @@ module DefineMethodSites
   DEFINITION_OPS = %w[TCLASS TDEF SDEF DEF METHOD CLASS MODULE SCLASS EXEC ALIAS UNDEF].freeze
   # Sends that read the frame of the method they run in; a proc method has its own.
   FRAME_SENDS = %w[block_given? iterator? binding local_variables __method__ caller caller_locations].freeze
-  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
 
   module_function
 
@@ -73,7 +73,7 @@ module DefineMethodSites
     irep.instructions.each do |insn|
       next if insn.op == 'RETURN_BLK' && depth.zero?
       return false if FRAME_ESCAPES.include?(insn.op) || DEFINITION_OPS.include?(insn.op)
-      return false if SEND_OPS.include?(insn.op) && FRAME_SENDS.include?(insn.sym)
+      return false if BytecodeIR::Ops::SEND.include?(insn.op) && FRAME_SENDS.include?(insn.sym)
       return false if insn.op == 'LOADSYM' && FRAME_SENDS.include?(insn.sym_token)
       next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
 

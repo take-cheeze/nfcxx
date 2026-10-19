@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
 require_relative 'block_send_report_columns'
 require_relative 'receiver_proof_report_columns'
 require_relative 'numeric_flow'
@@ -50,7 +51,6 @@ module ReceiverProofReport
   NATIVE_RESULT_ASSUMED = { 'keys' => 'Array', 'parameters' => 'Array', 'members' => 'Array', 'to_a' => 'Array',
                             'split' => 'Array', 'bytes' => 'Array', 'to_h' => 'Hash', 'to_s' => 'String',
                             'snap_to_bitmap' => 'RGSS::Bitmap' }.freeze
-  CALL_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
 
   def compile_send(insn, **kwargs)
     return super if @rp_force || !ReceiverProofReport.active?
@@ -297,7 +297,7 @@ module ReceiverProofReport
 
   def rp_writer(irep, site, reg, ins, index, hypothesis)
     case ins.op
-    when *CALL_OPS then ['call', ins.sym.to_s, hypothesis ? rp_call_hypothesis(irep, index, ins) : nil]
+    when *BytecodeIR::Ops::SEND then ['call', ins.sym.to_s, hypothesis ? rp_call_hypothesis(irep, index, ins) : nil]
     when 'GETIV' then ['ivar', ins.ivar.to_s, hypothesis ? rp_ivar_hypothesis(irep, ins) : nil]
     when 'GETIDX', 'GETIDX0' then ['element', '-', nil]
     when 'GETUPVAR' then ['upvar', '-', nil]
@@ -316,7 +316,7 @@ module ReceiverProofReport
     other = irep.walk_writers(index - 1, ins.reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], follow_moves: true,
                                                        exhausted: ->(last) { last == '0' ? 'self' : 'argument' }) do |w, _wi|
       case w.op
-      when *CALL_OPS then "call:#{w.sym}"
+      when *BytecodeIR::Ops::SEND then "call:#{w.sym}"
       when 'GETIV' then "ivar:#{w.ivar}"
       when 'GETIDX', 'GETIDX0' then 'element'
       when 'GETCONST' then "const:#{w.sym}"

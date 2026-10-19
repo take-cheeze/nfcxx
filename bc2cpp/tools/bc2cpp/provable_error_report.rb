@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'call_facts'
 
 # Debug report for errors the compiler can prove (ADR 0317): with BC2CPP_PROVABLE_ERROR_REPORT=<path>,
@@ -21,7 +22,6 @@ module ProvableErrorReport
   ROWS = {}
   ENGINE_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/
-  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
   ARITH = { 'ADD' => '+', 'SUB' => '-', 'MUL' => '*', 'DIV' => '/', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.freeze
   NUM = %w[Integer Float].freeze
   # Operand class pairs (left, right) the core operator always rejects, by operator.
@@ -144,7 +144,7 @@ module ProvableErrorReport
 
       owner_def = owners[irep.label]
       irep.instructions.each_with_index do |insn, idx|
-        if SEND_OPS.include?(insn.op) && insn.sym
+        if BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym
           out.concat(error_send_rows(answers, irep, idx, insn, owner_def))
         elsif ARITH.key?(insn.op)
           out.concat(error_operator_rows(irep, idx, insn, owner_def))

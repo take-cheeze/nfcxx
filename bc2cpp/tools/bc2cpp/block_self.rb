@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 
 # BLOCK_SELF (ADR 0456): is a Ruby method a plain yielder, one that runs its block only through Proc#call?
@@ -18,7 +19,6 @@ module BlockSelf
                        'METHOD', 'JMP', 'RETNIL', 'RETSELF', 'RETTRUE', 'RETFALSE', 'BLKPUSH', 'OCLASS', 'TCLASS',
                        'EXCEPT', 'STRING', 'MOVE', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   FORWARDING_OPS = Set['SUPER', 'ARGARY'].freeze
-  SENDS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'].freeze
   # Operators whose read set is R(a)..R(a+width-1) (vm.c OP_ADD..OP_GE: R(a) op R(a+1); OP_GETIDX: R(a)[R(a+1)];
   # OP_SETIDX: R(a)[R(a+1)] = R(a+2); OP_ADDI/OP_SUBI and the patched OP_ADDILV/OP_SUBILV: R(a) op an immediate, whose
   # fallback writes the immediate before sending), including their method-send fallback, which passes exactly those.
@@ -102,7 +102,7 @@ module BlockSelf
   def reads_of(irep, insn)
     op = insn.op
     regs = insn.regs
-    if SENDS.include?(op)
+    if BytecodeIR::Ops::SEND.include?(op)
       no_args = op.end_with?('0')
       return nil unless insn.reg && (no_args || insn.plain_fixed_argc?)
 
