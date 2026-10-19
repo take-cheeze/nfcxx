@@ -115,7 +115,9 @@ module TypeFacts
     reader = source_reader
     gen = ctx.gen
     defs = ctx.registry.values.flatten.select(&:irep).uniq(&:irep)
-    sites = ctx.call_sites
+    raw_sites = ctx.call_sites
+    unknown_sites = raw_sites && (raw_sites[CallSiteIndex::UNKNOWN_TARGET] || [])
+    sites = raw_sites && Hash.new { |h, k| h[k] = (raw_sites[k] || []) + unknown_sites }
     feedback = IrTypeFeedback.collect(ctx)
     ctx.ir_return_facts = feedback[:returns]
     methods = defs.filter_map { |d| method_row(ctx, gen, d, reader, sites) }
@@ -218,11 +220,11 @@ module TypeFacts
     end
     out << ['Integer', 'inferred:entry-callsite'] if entry_fixnum?(gen, label, k)
     pools = gen.instance_variable_get(:@class_arg_pools) || {}
+    numeric = gen.instance_variable_get(:@entry_arg_numeric) || {}
     if (mask = pools[[label, k]]) && mask.nonzero?
       names = mask_classes(gen, mask)
       out << [names.join(' | '), 'inferred:class-pool'] unless names.empty? || names.include?('OTHER')
     end
-    numeric = gen.instance_variable_get(:@entry_arg_numeric) || {}
     if (mask = numeric[[label, k]]) && mask.nonzero? && out.empty?
       n = mask_classes_of_numeric(gen, mask)
       out << [n.join(' | '), 'inferred:numeric-flow'] unless n.empty? || n.include?('OTHER')
@@ -260,13 +262,14 @@ module TypeFacts
     return "poly:#{ndefs}" unless mono
     return 'dynamic-name' if ctx.dynamic_names&.include?(name)
 
-    callers = sites ? CallSiteIndex.sites(sites, name) : []
+    callers = sites ? sites[name] : []
     return 'never-called' if callers.empty?
     return 'packed-caller' if callers.any? { |_c, _i, _d, n| n.nil? }
 
     if gen.respond_to?(:rp_argument_why, true)
       pools = gen.instance_variable_get(:@class_arg_pools) || {}
-      return gen.send(:rp_argument_why, [d.irep, k], pools[[d.irep, k]]).to_s
+      mask = pools[[d.irep, k]]
+      return gen.send(:rp_argument_why, [d.irep, k], mask).to_s
     end
     'opaque-callers'
   rescue StandardError
@@ -558,7 +561,7 @@ module TypeFacts
     pools = ctx.gen.instance_variable_get(:@class_const_pools) || {}
     ints = ctx.integer_constants || Set.new
     sums = DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
-                                             array_sum_safe?(ctx))
+                                             array_sum_safe?(ctx), range_safe: ctx.gen.range_to_a_safe?)
     merges = DeclaredConstants.hash_merge_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
                                                 merge_safe: stock_proof(ctx, 'merge', 'Hash'),
                                                 singleton_free: singleton_free?(ctx))
