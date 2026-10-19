@@ -174,7 +174,8 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   if [ "${NFCXX_CUDA_JIT:-0}" = 1 ]; then
     ext=ptx
   else
-    for g in "$groups"/g*.ptx; do "$ptxas" -arch=sm_$sm "$g" -o "${g%.ptx}.cubin" || exit $?; done
+    # The groups are independent: assemble them NFCXX_PTXAS_JOBS at a time (default 4; each ptxas is ~170 MB at 8 kernels).
+    ls "$groups"/g*.ptx | xargs -P "${NFCXX_PTXAS_JOBS:-4}" -I{} sh -c 'f=$1; "$2" -arch=sm_$3 "$f" -o "${f%.ptx}.cubin"' _ {} "$ptxas" "$sm" || exit $?
   fi
   "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
 }
