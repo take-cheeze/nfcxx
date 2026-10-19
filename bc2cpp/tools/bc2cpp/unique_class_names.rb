@@ -277,28 +277,15 @@ module UniqueClassNames
     seen = Set.new
     walk = lambda do |label, namespace|
       irep = ireps.fetch(label)
-      pending = nil
-      irep.instructions.each_with_index do |insn, idx|
-        case insn.op
-        when 'CLASS', 'MODULE'
-          reg = insn.reg_token
-          name = insn.sym
-          outer = irep.last_writer(idx - 1, insn.reg)
-          full = case outer&.op
-                 when 'LOADNIL' then namespace ? "#{namespace}::#{name}" : name
-                 when 'OCLASS' then name
-                 else :unknown
-                 end
-          paths[name] << full
-          modules << full if modules && insn.op == 'MODULE' && full.is_a?(String)
-          seen << [label, idx]
-          pending = [reg, full, idx]
-        when 'EXEC'
-          if pending && pending[0] == insn.reg_token && pending[2] == idx - 1 && pending[1].is_a?(String)
-            walk.call(irep.reps[insn.block_index], pending[1])
-          end
-          pending = nil
-        end
+      bodies = BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE')
+      irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
+        full = BytecodeIR.class_body_path(irep, idx, namespace) || :unknown
+        paths[insn.sym] << full
+        modules << full if modules && insn.op == 'MODULE' && full.is_a?(String)
+        seen << [label, idx]
+        # Walked at the opener: its body EXEC is the next instruction, so no
+        # other instruction of this irep runs between the two.
+        walk.call(bodies[idx], full) if bodies.key?(idx) && full.is_a?(String)
       end
     end
     walk.call(root_label, nil)

@@ -165,16 +165,17 @@ def build_registry(ireps, root_label)
   walk = lambda do |label, namespace|
     walked << label
     irep = ireps.fetch(label)
-    # Which register holds the class/module/singleton class just opened by
-    # CLASS/MODULE/SCLASS, so its EXEC can be matched. pending_idx pins the EXEC to
-    # the literal next instruction: mrbc always emits it there, and an empty body
-    # (`class Timeout < StandardError; end`) emits no EXEC at all, so matching "the
-    # next EXEC on this register" would attach an unrelated later body to the empty
-    # class (this registered RGSS.asset_archive under RGSS::Timeout).
-    pending_reg = nil
-    pending_name = nil
-    pending_idx = nil
-    pending_ivar_owner = nil
+    # Body EXEC by opener index (BytecodeIR.class_bodies). Walked at the opener:
+    # the body EXEC is the next instruction, so nothing else in this irep runs
+    # between them. A nil name (unrecognized singleton receiver) is not walked.
+    bodies = BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE', 'SCLASS')
+    enter_body = lambda do |idx, body_name, ivar_owner|
+      child_label = bodies[idx]
+      next unless child_label && body_name
+
+      module_body_ivar_labels[ivar_owner] << child_label if ivar_owner
+      walk.call(child_label, body_name)
+    end
     # `private`/`protected`/`public` tracking, scoped to this body. A bare call
     # (n=0) switches the mode for later defs; a call with Symbol arguments marks
     # already-defined methods without changing the mode. Getting visibility wrong
@@ -209,48 +210,40 @@ def build_registry(ireps, root_label)
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
         reg = insn.reg_token
         name = insn.sym
-        pending_reg = reg
-        pending_idx = idx
-        pending_ivar_owner = nil
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
         # ADR 0402: `class Outer::Name` / `module Outer::Name` (a compact definition)
         # is named by its resolved outer constant, not by the lexical namespace.
         outer_qualified = compact_outer_name(irep, idx, reg[/\d+/], namespace, module_names)
-        pending_name = if outer_qualified
-                         "#{outer_qualified}::#{name}"
-                       else
-                         namespace ? "#{namespace}::#{name}" : name
-                       end
-        module_names << pending_name if insn.op == 'MODULE'
-        if insn.op == 'MODULE'
-          pending_ivar_owner = "#{pending_name}.singleton"
-        end
+        opener_name = if outer_qualified
+                        "#{outer_qualified}::#{name}"
+                      else
+                        namespace ? "#{namespace}::#{name}" : name
+                      end
+        module_names << opener_name if insn.op == 'MODULE'
+        opener_ivar_owner = insn.op == 'MODULE' ? "#{opener_name}.singleton" : nil
         # SUPER_SUPPORT: OP_CLASS is `R[a] = newclass(R[a], Syms[b], R[a+1])`
         # (mruby/ops.h, vm.c), and the superclass expression is evaluated right before
         # it, so resolve_superclass_ref walks back from this CLASS.
         if insn.op == 'CLASS'
           superclass_reg = (reg[/\d+/].to_i + 1).to_s
           resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
-          superclass_of[pending_name] = resolved if resolved
+          superclass_of[opener_name] = resolved if resolved
           outer_nil = resolve_superclass_ref(irep, idx, reg[/\d+/], nil) == :none
-          class_decls[pending_name] << { super: resolved, outer_nil: outer_nil,
-                                         outer_qualified: !outer_qualified.nil? }
+          class_decls[opener_name] << { super: resolved, outer_nil: outer_nil,
+                                        outer_qualified: !outer_qualified.nil? }
         end
+        enter_body.call(idx, opener_name, opener_ivar_owner)
       when 'SCLASS'
         # "SCLASS R1": R[a] = R[a].singleton_class. A `class << self` / `class <<
-        # SomeConst` body holds ordinary TDEFs, so it is walked like a CLASS/MODULE body
-        # by the same EXEC-matching code below. Without this, defs inside it (e.g.
-        # RGSS::Bitmap.extensions) were unregistered.
+        # SomeConst` body holds ordinary TDEFs, so it is walked like a CLASS/MODULE body.
+        # Without this, defs inside it (e.g. RGSS::Bitmap.extensions) were unregistered.
         # The receiver is resolved by resolve_singleton_receiver (LOADSELF or GETCONST
         # only; anything else is a safe miss).
         reg = insn.reg_token
         recv = resolve_singleton_receiver.call(reg, idx)
-        pending_reg = reg
-        pending_idx = idx
-        pending_ivar_owner = nil
         # "X.singleton" is a pseudo-owner, never a real constant path, so ONLY_OWNERS
-        # can never select it. nil (unrecognized receiver) keeps EXEC from recursing.
-        pending_name = recv ? "#{recv}.singleton" : nil
+        # can never select it. nil (unrecognized receiver) leaves the body unwalked.
+        enter_body.call(idx, recv ? "#{recv}.singleton" : nil, nil)
       when 'SETCONST'
         # CONST_CONTAINER_SUPPORT: "SETCONST NAME Rsrc" in a class/module body;
         # `namespace` is this body's lexical nesting. Only the literal (optionally
@@ -267,17 +260,6 @@ def build_registry(ireps, root_label)
         else
           container_constants[qualified] = klass
         end
-      when 'EXEC'
-        reg = insn.reg_token
-        child_label = irep.reps[insn.block_index]
-        if reg == pending_reg && pending_name && idx == pending_idx + 1
-          module_body_ivar_labels[pending_ivar_owner] << child_label if pending_ivar_owner
-          walk.call(child_label, pending_name)
-        end
-        pending_reg = nil
-        pending_name = nil
-        pending_idx = nil
-        pending_ivar_owner = nil
       when 'ALIAS'
         old_name = insn.first_of(:name)&.value
         alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label } if insn.sym && old_name
