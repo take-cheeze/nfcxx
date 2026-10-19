@@ -1,5 +1,5 @@
 /* Clean-room wchar.h: declarations from C11 7.29 (Wide character utilities). Written from the standard, not from any SDK.
- * mbstate_t is a struct chosen here (C11 only requires an object type); its size and layout are not Darwin's. */
+ * mbstate_t follows Apple's public layout (see below). */
 #ifndef CLEANROOM_WCHAR_H
 #define CLEANROOM_WCHAR_H
 #ifdef __cplusplus
@@ -18,12 +18,11 @@ extern "C" {
 
 typedef unsigned int wint_t;
 
-typedef struct {
-  int __count;
-  union {
-    unsigned int __wch;
-    unsigned char __wchb[4];
-  } __value;
+/* mbstate_t: the layout of Apple's open-source xnu bsd/arm/_types.h (__mbstate_t), so std::fpos<mbstate_t> and the
+ * stream position types of the Mac's libc++ have the same size and return convention as in our objects. */
+typedef union {
+  char __mbstate8[128];
+  long long _mbstateL;
 } mbstate_t;
 
 #define WEOF ((wint_t)0xffffffffu)
