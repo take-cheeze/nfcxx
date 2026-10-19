@@ -2,36 +2,36 @@
 
 # EXACT_CORE_RECEIVER (ADR 0280): an unguarded proof that a receiver is exactly an Array, Hash,
 # Range or String (or a fresh `Klass.new`), so the arms of ADR 0253/0257/0270 can drop their
-# class test. Nothing checks the class at run time, so only a dominating literal or `*rest`
-# write counts (plus exact_flow_core_class, ADR 0289), and only while ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint,
-# an annotation or a branch join is a guarded fact and never enters here. A compiled core body gets the walk
-# only, as a checked proof (ADR 0359).
+# class test. Nothing checks the class at run time, so only a literal or `*rest` write on every reaching path
+# counts (BytecodeIR::Types#exact_at; plus exact_flow_core_class, ADR 0289), and only while
+# ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint or an annotation is a guarded fact and never
+# enters here. A compiled core body gets the literal proof only, as a checked proof (ADR 0359).
 class CodeGen
   EXACT_LITERAL_CLASS = {
     'ARRAY' => 'Array', 'ARRAY2' => 'Array', 'HASH' => 'Hash', 'STRING' => 'String',
     'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range', 'LOADNIL' => 'NilClass'
   }.freeze
-  # Ops that add to the container their first register already holds.
-  EXACT_EXTEND_OPS = %w[ARYPUSH ARYCAT HASHADD HASHCAT STRCAT].freeze
 
   # 'Array' | 'Hash' | 'Range' | 'String' (| 'NilClass', for arguments) when the value in `reg`
   # at `idx` is exactly that class.
   def exact_core_value_class(irep, idx, reg)
     return nil unless @closed_world&.exact_instances_singleton_free? && irep && idx&.positive? && reg
 
-    exact_walk_class(irep, idx, reg) || exact_flow_core_class(irep, idx, reg) || frozen_table_exact_class(irep, idx, reg)
+    exact_literal_class(irep, idx, reg) || exact_flow_core_class(irep, idx, reg) || frozen_table_exact_class(irep, idx, reg)
   end
 
-  # The dominating-writer walk alone: a literal or the method's own `*rest` slot, through MOVEs.
-  def exact_walk_class(irep, idx, reg)
-    at_entry = ->(entry_reg) { rest_entry_class(irep, entry_reg.to_i) }
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, exhausted: at_entry) do |insn, _i, _cur|
-      case insn.op
-      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
-      when *EXACT_EXTEND_OPS then IrepScans::KEEP
-      else EXACT_LITERAL_CLASS[insn.op]
-      end
-    end
+  # The literal proof alone: BytecodeIR::Types#exact_at (a literal or the method's own `*rest` slot on every
+  # reaching path), narrowed to the classes above.
+  def exact_literal_class(irep, idx, reg, self_class: nil)
+    klass = exact_literal(irep, idx, reg, self_class: self_class)&.klass&.to_s
+    klass if EXACT_LITERAL_CLASS.value?(klass)
+  end
+
+  # BytecodeIR::Types#exact_at for +irep+, one Types per irep.
+  def exact_literal(irep, idx, reg, self_class: nil)
+    @exact_literal_types ||= {}.compare_by_identity
+    types = (@exact_literal_types[irep] ||= BytecodeIR::Types.new(irep))
+    types.exact_at(idx, reg, self_class: self_class&.to_sym)
   end
 
   CORE_BODY_EXACT_TESTS = {
@@ -46,8 +46,7 @@ class CodeGen
   def core_body_exact_class(irep, idx, reg, owner_def: nil)
     return nil unless core_body_exact_enabled? && irep && idx&.positive? && reg
 
-    klass = exact_walk_class(irep, idx, reg)
-    klass ||= core_self_walk_class(irep, idx, reg, owner_def)
+    klass = exact_literal_class(irep, idx, reg, self_class: core_self_exact_class(irep, owner_def))
     klass if CORE_BODY_EXACT_TESTS.key?(klass)
   end
 
@@ -61,19 +60,6 @@ class CodeGen
     return nil unless core_class_subclass_free?(owner_def.owner)
 
     owner_def.owner
-  end
-
-  # The dominating-writer walk with `self` as a source: LOADSELF, or register 0 at the method's entry.
-  def core_self_walk_class(irep, idx, reg, owner_def)
-    klass = core_self_exact_class(irep, owner_def)
-    return nil unless klass
-
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, exhausted: ->(entry_reg) { entry_reg.to_i.zero? ? klass : nil }) do |insn, _i, _cur|
-      case insn.op
-      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
-      when 'LOADSELF' then klass
-      end
-    end
   end
 
   def core_body_exact_enabled?

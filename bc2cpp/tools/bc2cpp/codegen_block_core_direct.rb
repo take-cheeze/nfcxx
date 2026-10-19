@@ -34,9 +34,6 @@ module BlockCoreDirectFallback
   BLOCK_RECEIVERS = RECEIVERS.merge(
     'String' => { guard: 'mrb_string_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->string_class', chain: %w[String Comparable] }
   ).freeze
-  # The ops that load an Integer literal: their value is an Integer whatever the world is.
-  INTEGER_LITERAL_OPS = %w[LOADI LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7
-                           LOADI8 LOADI16 LOADI32 LOADINEG].freeze
 
   def native_direct_dynamic_line(d, recv, name, argv)
     block_core_direct_wrap(d, recv, name, argv, super)
@@ -107,9 +104,9 @@ module BlockCoreDirectFallback
       "  }\n"
   end
 
-  # BLOCK_ITERATOR_DIRECT (ADR 0472): is the receiver of the literal-block send being compiled an Integer literal?
-  # Every dominating writer of its register, through MOVEs, is a LOADI* of the send's own irep (the parent irep of
-  # a block nested in an inlined loop body, whose registers the walk reads unshifted).
+  # BLOCK_ITERATOR_DIRECT (ADR 0472): is the receiver of the literal-block send being compiled an Integer literal on
+  # every reaching path? The registers are the send's own irep's (the parent irep of a block nested in an inlined
+  # loop body, read unshifted).
   def block_core_integer_literal?
     region = @call_block_region
     irep = region && region[:parent_irep]
@@ -118,13 +115,7 @@ module BlockCoreDirectFallback
     idx = irep.index_of_addr(region[:sendb_addr])
     return false unless idx&.positive?
 
-    found = irep.walk_dominating_writers(idx - 1, region[:dest_reg].to_s, use: idx) do |insn, _i, _cur|
-      case insn.op
-      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
-      else INTEGER_LITERAL_OPS.include?(insn.op) ? :integer : nil
-      end
-    end
-    found == :integer
+    exact_literal(irep, idx, region[:dest_reg])&.klass == :Integer
   end
 
   # BLOCK_ITERATOR_DIRECT (ADR 0472): an implicit-self literal-block send (`loop { }`) whose only definition in the
