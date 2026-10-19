@@ -17,7 +17,7 @@ llvm="$root/build/llvm-src"
 rm -rf "$llvm"; mkdir -p "$llvm"
 git -C "$llvm" init -q
 git -C "$llvm" remote add origin https://github.com/llvm/llvm-project
-git -C "$llvm" sparse-checkout set --cone compiler-rt/lib/builtins libcxxabi libcxx/src/include libunwind/include
+git -C "$llvm" sparse-checkout set --cone compiler-rt/lib/builtins libcxxabi libcxx/include libcxx/src libunwind/include
 git -C "$llvm" fetch -q --depth 1 --filter=blob:none origin "$pin"
 git -C "$llvm" checkout -q FETCH_HEAD
 [ "$(git -C "$llvm" rev-parse HEAD)" = "$pin" ] || { echo "build.sh: checked-out HEAD is not the pinned commit $pin" >&2; exit 1; }
