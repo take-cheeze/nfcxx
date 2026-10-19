@@ -10,6 +10,9 @@ module BytecodeIR
   module Ops
     # Method sends: R(a) is the receiver, the callee frame starts at R(a).
     SEND = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'].freeze
+    # Every op whose name starts with SEND or SSEND: SEND plus the splat forms (SENDV takes its arguments as an
+    # array). A pass matching the name prefix uses this set, so the splat forms are not dropped.
+    SEND_FAMILY = (SEND | %w[SENDV SENDVB SSENDV SSENDVB]).freeze
     # SEND plus SUPER: every op that dispatches a method by name.
     CALL = (SEND | ['SUPER']).freeze
     # Every op whose callee frame starts at R(a) and may overwrite R(a) and above.

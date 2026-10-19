@@ -13,9 +13,6 @@ module DynamicNames
              define_method define_singleton_method alias_method attr attr_reader attr_writer
              attr_accessor].freeze
 
-  # Every send op, the splat forms included: they name the method the same way, so the scan must visit them.
-  SEND_OPS = (BytecodeIR::Ops::SEND | %w[SENDV SENDVB SSENDV SSENDVB]).freeze
-
   class << self
     # DEFINE_METHOD_LOOPS (ADR 0469): [irep label, index] of each `define_method(n)` loop send the settled
     # registry defines => the names it installs (DefineMethodSites.loop_sites). Its name is not a literal at
@@ -42,7 +39,7 @@ module DynamicNames
     computed = false
     ireps.each_value do |irep|
       program = BytecodeIR.for(irep)
-      program.each_with_op('LOADSYM', 'STRING', *SEND_OPS) do |insn, idx|
+      program.each_with_op('LOADSYM', 'STRING', *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
         stems << insn.sym if insn.op == 'LOADSYM' && insn.sym
         if insn.op == 'STRING'
           entry = irep.pool[insn.pool_index.to_i]
