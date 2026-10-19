@@ -404,7 +404,7 @@ functions.each do |fn|
         elsif rhs.start_with?("ENUM")
           m2 = rhs.match(/^ENUM \S+ (\d+)/)
           idx = m2 ? m2[1].to_i : 0
-          sz, _ = type_size_align(dst_type, types)
+          sz, _ = dst_type ? type_size_align(dst_type, types) : [8,8]
           sz = 1 if sz == 0
           stmts << "(zero-fill #{sz} $\"#{dst_name}\")"
         elsif rhs.start_with?("{")
@@ -576,7 +576,7 @@ functions.each do |fn|
             end
             if fexpr == "ZRG2cD8std0_0_02rt10lang_start0g"
                 fexpr = "ZRG2cD8std0_0_02rt10lang_start1gT0"
-                args_str = args_str.empty? ? "1 u8" : args_str + ", 1 u8"
+                args_str = args_str.empty? ? "0 u8" : args_str + ", 0 u8"
             end
             fname = fexpr
         end
