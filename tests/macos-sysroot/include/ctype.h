@@ -43,4 +43,7 @@ int isascii(int);
 }
 #endif
 
+/* _DefaultRuneLocale, the classic table libc++ reads on Apple (see runetype.h). Included last: it needs __uint32_t above. */
+#include <runetype.h>
+
 #endif
