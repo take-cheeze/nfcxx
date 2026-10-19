@@ -3,7 +3,6 @@
 require 'digest'
 require 'set'
 require_relative 'bytecode_ir'
-require_relative 'ir_block_operands'
 require_relative 'block_self'
 require_relative 'native_block_returns_reviewed'
 require_relative 'native_sigs'
@@ -203,9 +202,7 @@ module BlockReturns
   end
 
   # Reaching definitions that count a nested block's SETUPVAR into the method's registers.
-  def definitions(irep, program, idx, reg)
-    return program.reaching_definitions(idx, reg.to_s, through_handlers: true) unless IrBlockOperands.enabled?
-
+  def definitions(irep, _program, idx, reg)
     BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
   end
 

@@ -211,22 +211,12 @@ class YieldReach
       @module_names << insn.sym
       return
     end
-    sup = IrBlockOperands.enabled? ? ir_superclass(irep, idx, insn.reg.to_i + 1) : textual_superclass(irep, idx, insn.reg.to_i + 1)
+    sup = superclass_operand(irep, idx, insn.reg.to_i + 1)
     @super_of[insn.sym] = @super_of.key?(insn.sym) && @super_of[insn.sym] != sup ? :unknown : sup
   end
 
-  def textual_superclass(irep, idx, reg)
-    w = irep.source_writer(idx - 1, reg)
-    case w&.op
-    when 'LOADNIL' then :object
-    when 'GETCONST' then w.const_name
-    when 'GETMCNST' then w.mcnst_name
-    else :unknown
-    end
-  end
-
   # A superclass operand every reaching definition agrees on, else :unknown.
-  def ir_superclass(irep, idx, reg)
+  def superclass_operand(irep, idx, reg)
     defs = IrBlockOperands.definitions(irep, idx, reg) or return :unknown
     sups = defs.map do |df|
       next :unknown if df.entry?
@@ -349,14 +339,8 @@ class YieldReach
 
   # `pr[1]` runs a Proc like `pr.call(1)`; the index ops do not say what the receiver (R(a)) is.
   def note_index_read(node, program, insn, idx)
-    reg = insn.regs.last
-    non_proc = if IrBlockOperands.enabled?
-                 recv = insn.reg
-                 recv && IrBlockOperands.all_writers?(node.irep, idx, recv) { |w| NON_PROC_WRITERS.include?(w.op) }
-               else
-                 w = reg && node.irep.source_writer(idx - 1, reg)
-                 w && NON_PROC_WRITERS.include?(w.op)
-               end
+    recv = insn.reg
+    non_proc = recv && IrBlockOperands.all_writers?(node.irep, idx, recv) { |w| NON_PROC_WRITERS.include?(w.op) }
     node.proc_call = true unless non_proc
   end
 
@@ -552,24 +536,9 @@ class YieldReach
     note_enumerator(node, program, idx, dest, name, recv_const)
   end
 
-  # The literal must dominate this read: a parameter can retain its incoming Proc when a later
-  # or conditional assignment is the register's only writer.
-  def literal_proc_receiver?(node, program, idx, reg)
-    return false unless reg
-    return IrBlockOperands.all_writers?(node.irep, idx, reg) { |w| %w[BLOCK LAMBDA].include?(w.op) } if IrBlockOperands.enabled?
-
-    from = idx
-    loop do
-      writer = writers_of(node.irep)[reg.to_i].select { |i| i < from }.max
-      return false unless writer && straight?(program, node.irep, writer, from)
-
-      insn = node.irep.instructions[writer]
-      return true if %w[BLOCK LAMBDA].include?(insn.op)
-      return false unless insn.op == 'MOVE'
-
-      reg = insn.regs[1]
-      from = writer
-    end
+  # Every definition reaching this read is a literal: a parameter can keep its incoming Proc on another path.
+  def literal_proc_receiver?(node, _program, idx, reg)
+    reg && IrBlockOperands.all_writers?(node.irep, idx, reg) { |w| %w[BLOCK LAMBDA].include?(w.op) }
   end
 
   def note_callable(node, program, idx, dest, name)
@@ -629,46 +598,17 @@ class YieldReach
 
   # Register of the block argument of a SENDB/SSENDB.
   def block_register(insn)
-    return IrBlockOperands.block_register(insn)&.to_i if IrBlockOperands.enabled?
-
-    dest = insn.reg
-    return nil unless dest
-
-    pos = insn.n_spec == '*' ? 1 : insn.n_spec.to_i
-    kw = case insn.nk_spec
-         when nil then 0
-         when '*' then 1
-         else insn.nk_spec.to_i * 2
-         end
-    dest.to_i + pos + kw + 1
+    IrBlockOperands.block_register(insn)&.to_i
   end
 
-  # Name of the constant a receiver register was loaded from, or nil when it is not a plain
-  # GETCONST in the same straight line.
+  # Name of the constant every definition of a receiver register loads, or nil.
   def const_receiver(irep, idx, reg)
-    return nil unless reg
-    return IrBlockOperands.constant_name(irep, idx, reg) if IrBlockOperands.enabled?
-
-    w = irep.source_writer(idx - 1, reg)
-    case w&.op
-    when 'GETCONST' then w.const_name
-    when 'GETMCNST' then w.mcnst_name
-    end
+    reg && IrBlockOperands.constant_name(irep, idx, reg)
   end
 
   # The literal block a SENDB/SSENDB at +idx+ is given, or nil.
   def literal_block_child(irep, idx)
-    return IrBlockOperands.literal_block_label(irep, idx) if IrBlockOperands.enabled?
-
-    prev = irep.instructions[idx - 1]
-    prev&.op == 'BLOCK' ? irep.reps[prev.block_index] : nil
-  end
-
-  # True when no jump lands between the two instructions.
-  def straight?(program, irep, from_idx, to_idx)
-    lo = irep.instructions[from_idx].addr
-    hi = irep.instructions[to_idx].addr
-    program.branch_targets.none? { |t| t > lo && t <= hi }
+    IrBlockOperands.literal_block_label(irep, idx)
   end
 
   # Register that holds the block the method received (ENTER's block field).
@@ -695,54 +635,12 @@ class YieldReach
     end
   end
 
-  # What a register holds when instruction idx reads it: [:lit, child_label], [:sym, name],
-  # [:forward] (the block the method received), [:const, name], [:ivar, name] or [:unknown]. A
-  # register with one writer in the whole irep holds that writer's value; a temporary with several
-  # is followed only when no jump lands between its last writer and the read.
-  def classify_reg(node, program, idx, reg, elem0: false)
-    if IrBlockOperands.enabled?
-      kinds = classify_kinds(node, idx, reg, elem0: elem0)
-      return kinds&.size == 1 ? kinds.first : [:unknown]
-    end
-
-    irep = node.irep
-    reg = reg.to_i
-    from = idx
-    loop do
-      ws = writers_of(irep)[reg]
-      w_idx = if ws.size == 1
-                ws.first
-              else
-                last = ws.select { |x| x < from }.max
-                last && straight?(program, irep, last, from) ? last : nil
-              end
-      if w_idx.nil?
-        return [:forward] if ws.empty? && reg == block_reg_of(irep)
-        return [:param, 1] if ws.empty? && reg == 1 && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
-
-        return [:unknown]
-      end
-      w = irep.instructions[w_idx]
-      case w.op
-      when 'MOVE'
-        reg = w.regs[1].to_i
-        from = w_idx
-        next
-      when 'BLOCK', 'LAMBDA' then return [:lit, irep.reps[w.block_index]]
-      when 'LOADSYM' then return [:sym, w.sym]
-      when 'BLKPUSH' then return [:forward]
-      when 'GETCONST' then return [:const, w.const_name]
-      when 'GETIV' then return [:ivar, w.ivar]
-      when 'GETUPVAR' then return classify_upvar(node, w)
-      when 'ARRAY', 'ARYCAT', 'ARYPUSH'
-        # The first element of an argument array is what the register held before it was built.
-        return [:unknown] unless elem0
-
-        from = w_idx
-        next
-      else return [:unknown]
-      end
-    end
+  # What a register holds when instruction idx reads it, when every reaching definition agrees: [:lit, child_label],
+  # [:sym, name], [:forward] (the block the method received), [:param, 1] (a generator's yielder), [:const, name],
+  # [:ivar, name], else [:unknown]. +elem0+ asks for the first element of an argument array.
+  def classify_reg(node, _program, idx, reg, elem0: false)
+    kinds = classify_kinds(node, idx, reg, elem0: elem0)
+    kinds&.size == 1 ? kinds.first : [:unknown]
   end
 
   # The distinct classifications of the definitions of +reg+ reaching +idx+ (see classify_reg). A refused query is
@@ -816,12 +714,7 @@ class YieldReach
     return true unless writers_of(node.irep)[index].empty?
     return true if node.irep.instructions.any? { |i| i.op == 'SETUPVAR' && i.upvar_ref&.first == index }
 
-    node.lit.any? { |c| writes_upvar?(@nodes[c], index) }
-  end
-
-  def writes_upvar?(node, index)
-    node.irep.instructions.any? { |i| i.op == 'SETUPVAR' && i.upvar_ref&.first == index } ||
-      node.lit.any? { |c| writes_upvar?(@nodes[c], index) }
+    BytecodeIR.own_upvar_written_regs(node.irep).include?(index.to_s)
   end
 
   # Every write of register +index+ in the method (and every SETUPVAR of it below) is a MOVE of
@@ -836,27 +729,11 @@ class YieldReach
       return false
     end
 
-    !descendant_sets?(method, index)
+    !BytecodeIR.own_upvar_written_regs(method.irep).include?(index.to_s)
   end
 
-  def descendant_sets?(method, index)
-    method.lit.any? do |c|
-      n = @nodes[c]
-      n.irep.instructions.any? { |i| i.op == 'SETUPVAR' && i.upvar_ref&.first == index } ||
-        descendant_sets?(n, index)
-    end
-  end
-
-  def classify_block(node, program, insn, idx, block_reg)
-    return [:unknown] unless block_reg
-
-    irep = node.irep
-    prev = irep.instructions[idx - 1]
-    if !IrBlockOperands.enabled? && prev&.op == 'BLOCK' && prev.reg == block_reg.to_s
-      child = irep.reps[prev.block_index]
-      return child ? [:lit, child] : [:unknown]
-    end
-    classify_reg(node, program, idx, block_reg)
+  def classify_block(node, program, _insn, idx, block_reg)
+    block_reg ? classify_reg(node, program, idx, block_reg) : [:unknown]
   end
 
   def literal_symbol_arg(node, program, idx, dest)
@@ -917,8 +794,6 @@ class YieldReach
   # Can the register hold a value +holds+ answers for? An escape question: one matching definition is enough, and a
   # register the IR cannot account for may hold anything.
   def may_hold?(node, program, idx, reg, &holds)
-    return holds.call(classify_reg(node, program, idx, reg)) unless IrBlockOperands.enabled?
-
     kinds = classify_kinds(node, idx, reg, fallback: true)
     kinds.nil? || kinds.any?(&holds)
   end

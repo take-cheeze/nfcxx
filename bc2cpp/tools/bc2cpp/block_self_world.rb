@@ -85,16 +85,9 @@ module BlockSelfWorld
     World.new(ireps, outside_ireps, native_paths, method_labels, superclass_of, root).result(refusal)
   end
 
-  # Is +insn+ (at +idx+) a send whose block operand is a literal block or lambda? The irep label of that block, or nil.
+  # Is the send at +idx+ given exactly one literal block or lambda (IR_BLOCK_OPERANDS)? Its irep label, or nil.
   def literal_block_label(irep, idx)
-    return IrBlockOperands.literal_block_label(irep, idx) if IrBlockOperands.enabled?
-
-    insn = irep.instructions[idx]
-    prev = idx.positive? ? irep.instructions[idx - 1] : nil
-    return nil unless prev && %w[BLOCK LAMBDA].include?(prev.op) && prev.block_index
-    return nil unless %w[SENDB SSENDB].include?(insn.op) && prev.reg == block_register(insn)
-
-    irep.reps[prev.block_index.to_i]
+    IrBlockOperands.literal_block_label(irep, idx)
   end
 
   # The register a SENDB/SSENDB reads its block from (vm.c OP_SENDB: R(a + argc + kwargs + 1), a packed `*` argument
@@ -105,16 +98,11 @@ module BlockSelfWorld
 
   # Every literal block the send at +idx+ may be given, or nil when its operand may be anything else.
   def literal_block_labels(irep, idx)
-    return IrBlockOperands.literal_block_labels(irep, idx) if IrBlockOperands.enabled?
-
-    label = literal_block_label(irep, idx)
-    label && [label]
+    IrBlockOperands.literal_block_labels(irep, idx)
   end
 
   # Reaching definitions with the irep's nested SETUPVAR writes counted (BytecodeIR.reaching_definitions).
   def definitions(irep, idx, reg, **options)
-    return BytecodeIR.for(irep).reaching_definitions(idx, reg, through_handlers: true, **options) unless IrBlockOperands.enabled?
-
     BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, **options)
   end
 
@@ -246,18 +234,8 @@ module BlockSelfWorld
       return true if insn.op.start_with?('SS')
 
       factories = FACTORY_SENDS.fetch(insn.sym)
-      const = if IrBlockOperands.enabled?
-                IrBlockOperands.constant_name(irep, idx, insn.reg)
-              else
-                irep.walk_dominating_writers(idx - 1, insn.reg.to_s, use: idx, follow_moves: true) do |writer|
-        case writer.op
-        when 'GETCONST' then writer.const_name.to_s
-        when 'GETMCNST' then writer.mcnst_name.to_s
-        else false
-        end
-      end
-              end
-      return true unless const.is_a?(String) && !const.empty?
+      const = IrBlockOperands.constant_name(irep, idx, insn.reg)
+      return true unless const
 
       simple = const.split('::').last
       return true if assigned_constants.include?(simple)
@@ -320,21 +298,8 @@ module BlockSelfWorld
       end
     end
 
+    # The superclass operand every reaching definition agrees on, else :unknown.
     def class_statement_super(irep, idx, insn)
-      return ir_class_statement_super(irep, idx, insn) if IrBlockOperands.enabled?
-
-      found = irep.walk_dominating_writers(idx - 1, (insn.reg.to_i + 1).to_s, use: idx, follow_moves: true) do |writer|
-        case writer.op
-        when 'LOADNIL' then 'Object'
-        when 'GETCONST' then writer.const_name.to_s.split('::').last
-        when 'GETMCNST' then writer.mcnst_name.to_s.split('::').last
-        else :unknown
-        end
-      end
-      found.is_a?(String) && !found.empty? ? found : :unknown
-    end
-
-    def ir_class_statement_super(irep, idx, insn)
       defs = BlockSelfWorld.definitions(irep, idx, (insn.reg.to_i + 1).to_s) or return :unknown
       found = defs.map do |df|
         next :unknown if df.entry?
@@ -454,14 +419,8 @@ module BlockSelfWorld
     end
 
     # Does a block nested (at any depth) in +frame+ store into its local +index+?
-    def setupvar_target?(frame, index, ireps, depth = 0)
-      Array(frame.reps).any? do |child_label|
-        child = ireps[child_label]
-        next true unless child
-
-        child.instructions.any? { |w| w.op == 'SETUPVAR' && w.upvar_ref == [index, depth] } ||
-          setupvar_target?(child, index, ireps, depth + 1)
-      end
+    def setupvar_target?(frame, index, _ireps)
+      BytecodeIR.own_upvar_written_regs(frame).include?(index.to_s)
     end
 
     # Every Symbol a block operand can be, which OP_SENDB turns into a Proc through Symbol#to_proc; :unknown when a
