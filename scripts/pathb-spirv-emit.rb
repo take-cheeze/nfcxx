@@ -931,7 +931,7 @@ end
 
 class SpvModule
   attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
-  attr_accessor :stack_bytes, :fns, :defs, :subgroup_used, :wgs, :wgs_total
+  attr_accessor :stack_bytes, :fns, :fns_wgs, :defs, :subgroup_used, :wgs, :wgs_total
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -949,6 +949,7 @@ class SpvModule
     # not valid in an OpenCL module (the validator wants a variable)
     spv.workgroup_size(@spec) unless kernel_cl
     @fns = {}
+    @fns_wgs = {}      # the clones of the functions that a work-group-static kernel reaches (see emit_module)
     @defs = {}
     @stack_bytes = 0
     @wgs = {}          # [function name, slot name] => offset in the group's static local region (see wgs_layout)
@@ -984,11 +985,12 @@ end
 class SFn
   attr_reader :name, :fid, :ptypes, :ret, :frame, :callees, :ftype, :param_ids, :code, :vars, :param_lines
 
-  def initialize(form, fid, mod)
+  def initialize(form, fid, mod, wgs_mode = false)
     @form = form
     @fid = fid
     @mod = mod
     @spv = mod.spv
+    @wgs_mode = wgs_mode   # a clone for a kernel that uses a work-group static: its memory accesses route (see mem_access)
     @name = form ? form[1].to_s : "wrapper"
     @ptypes = []
     @ret = nil
@@ -1928,7 +1930,7 @@ class SFn
       check_dead_after_call
       return nil
     end
-    callee_fn = @mod.fns[name]
+    callee_fn = @wgs_mode ? @mod.fns_wgs[name] : @mod.fns[name]
     raise Refused, "call of #{name}, which has no body in the device unit (a host function, or a declaration)" if callee_fn.nil?
     raise Refused, "call of #{name} with #{args.length} arguments, it takes #{callee_fn.ptypes.length}" if args.length != callee_fn.ptypes.length
     xs = args.map { |a| operand(a)[0] }
@@ -2378,6 +2380,30 @@ def emit_module(src, kernel_cl = false)
     fns[n] = fn
   end
   smod.fns = fns
+  # Clones for the work-group-static kernels. A kernel whose call graph reaches a function with a work-group static gets a
+  # clone (wgs_mode) of every function it reaches: the clone routes its memory accesses to the group's static storage, the
+  # original keeps the global path. Non-static kernels reach only originals, so their code is unchanged. The clones are
+  # created after the originals, so the originals' ids do not move; each clone compiles from its own copy of the IR.
+  static_names = smod.wgs ? smod.wgs.keys.map { |k| k[0] }.uniq : []
+  reach = lambda do |root|
+    seen = {}
+    stack = [root]
+    until stack.empty?
+      n = stack.pop
+      next if seen[n] || !mod.defs.key?(n)
+      seen[n] = true
+      stack.concat(collect_calls(mod.defs[n], []).select { |c| mod.defs.key?(c) })
+    end
+    seen.keys
+  end
+  static_entries = entries.select { |e| reach.call(e).any? { |n| static_names.include?(n) } }
+  clone_set = static_entries.flat_map { |e| reach.call(e) }.uniq
+  clone_order = order.select { |n| clone_set.include?(n) }
+  # a copy of the forms: the arrays are copied, the tokens (IRStr, IRSym, strings, numbers) are shared, as they are immutable
+  copy_forms = lambda { |x| x.is_a?(Array) ? x.map { |y| copy_forms.call(y) } : x }
+  clone_order.each do |n|
+    smod.fns_wgs[n] = SFn.new(copy_forms.call(mod.defs[n]), spv.id, smod, true)
+  end
   # the stack: the deepest chain of frames from a kernel, with slack for alignment
   depth = {}
   depth_of = nil
@@ -2391,14 +2417,18 @@ def emit_module(src, kernel_cl = false)
   stack_bytes = (stack_bytes + 15) / 16 * 16
   smod.stack_bytes = stack_bytes
   order.each { |n| fns[n].compile }
+  clone_order.each { |n| smod.fns_wgs[n].compile }
   order.each do |n|
     fn = fns[n]
     fn.function_text.each { |inst| spv.func(inst) }
   end
+  clone_order.each do |n|
+    smod.fns_wgs[n].function_text.each { |inst| spv.func(inst) }
+  end
   iface = kernel_cl ? [smod.gid, smod.lid, smod.wid] : [smod.gid, smod.lid, smod.wid, smod.sp, smod.dead, smod.push]
   manifest = []
   entries.each_with_index do |e, k|
-    f = fns[e]
+    f = smod.fns_wgs.key?(e) ? smod.fns_wgs[e] : fns[e]
     raise Refused, "kernel #{e} takes parameters" unless f.ptypes.empty?
     key, struct = kernel_key(mod.defs[e])
     raise Refused, "kernel #{e}: cannot find the closure type (no cast of __nfcxx_sycl_closure())" if key.nil?
