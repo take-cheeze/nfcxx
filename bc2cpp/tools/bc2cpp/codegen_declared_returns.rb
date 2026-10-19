@@ -47,7 +47,7 @@ class CodeGen
     attr_accessor :declared_returns, :declared_return_root, :declared_return_hint_refusals
   end
 
-  DECLARED_RETURN_TERMINALS = %w[RETNIL RETSELF RETTRUE RETFALSE STOP].freeze
+  DECLARED_RETURN_TERMINALS = %i[true false stop].freeze
 
   # The checked declarations: statically checked ones and the runtime-checked %a{bc2cpp:hint} ones.
   def declared_return_entries
@@ -200,47 +200,30 @@ class CodeGen
                                   "#{entry.key}: declared -> #{entry.text} (#{entry.loc.file}:#{entry.loc.line}), " \
                                   "but #{why}")
     end
-    irep.instructions.each_with_index do |insn, idx|
-      case insn.op
-      when 'RETURN', 'RETURN_BLK'
-        why = declared_return_value_failure(entry, d, irep, idx, insn.reg, breaks)
+    BytecodeIR.for(irep).exits.each do |exit|
+      idx = exit.index
+      case exit.kind
+      when :value, :block_return
+        why = declared_return_value_failure(entry, d, irep, idx, exit.reg, breaks)
         flag.call(irep, idx, why) if why
-      when 'RETNIL'
+      when :nil
         flag.call(irep, idx, 'a path returns nil') unless entry.nilable && entry.kind == :class
-      when 'RETSELF'
+      when :self
         flag.call(irep, idx, 'a path returns self') unless declared_self_is?(entry, d)
       when *DECLARED_RETURN_TERMINALS
-        flag.call(irep, idx, "a path ends with #{insn.op}")
+        flag.call(irep, idx, "a path ends with #{exit.source.op}")
       end
     end
-    declared_block_returns(irep).each do |child, idx, insn|
-      why = declared_return_value_failure(entry, d, child, idx, insn.reg, breaks)
-      flag.call(child, idx, "a `return` inside a block: #{why}") if why
+    # A `return` from a block leaves the method.
+    BytecodeIR.nested_exits(irep, :block_return).each do |child, exit|
+      why = declared_return_value_failure(entry, d, child, exit.index, exit.reg, breaks)
+      flag.call(child, exit.index, "a `return` inside a block: #{why}") if why
     end
     out
   end
 
-  # [child irep, index, insn] of every RETURN_BLK below +irep+ (a `return` from a block leaves the method).
-  def declared_block_returns(irep, seen = Set.new, acc = [])
-    (irep.reps || []).each do |label|
-      next unless seen.add?(label)
-
-      child = @ireps[label]
-      next unless child
-
-      child.instructions.each_with_index { |insn, idx| acc << [child, idx, insn] if insn.op == 'RETURN_BLK' }
-      declared_block_returns(child, seen, acc)
-    end
-    acc
-  end
-
-  def declared_subtree_breaks?(irep, seen = Set.new)
-    (irep.reps || []).any? do |label|
-      next false unless seen.add?(label)
-
-      child = @ireps[label]
-      child && (child.instructions.any? { |i| i.op == 'BREAK' } || declared_subtree_breaks?(child, seen))
-    end
+  def declared_subtree_breaks?(irep)
+    BytecodeIR.nested_exit?(irep, :break)
   end
 
   # `self` is exactly C only in a class with no subclass that is not a module or a singleton.

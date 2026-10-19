@@ -63,17 +63,6 @@ class CodeGen
   # They are exactly the steppable members of BytecodeIR::READS_LEADING_REG_OPS.
   FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::READS_LEADING_REG_OPS & FIXNUM_PROOF_STEP_OVER_OPS).freeze
 
-  # Does `insn` write register `reg`? Used by return_value_sources' worklist.
-  # For every whitelisted op except the three
-  # read-only ones, the leading `R<n>` is the destination (the audited
-  # property). Under-reporting a write would be a wrong answer, so this is an
-  # explicit exception list, nothing inferred.
-  def fixnum_proof_writes_reg?(insn, reg)
-    return false if FIXNUM_PROOF_READONLY_REG_OPS.include?(insn.op)
-
-    insn.reg == reg.to_s
-  end
-
   # Nested proven-arithmetic hops for source 4. `(a + b) * (c - d)` needs two;
   # unbounded recursion could go exponential on long chains.
   FIXNUM_PROOF_MAX_DEPTH = 4
@@ -221,10 +210,6 @@ class CodeGen
   def fixnum_proof_max_states(irep)
     [BytecodeIR::DATAFLOW_MAX_STATES, 2 * irep.instructions.length].max
   end
-
-  # Cap on the (index, register) states return_value_sources expands. Refusing
-  # on exhaustion is safe and keeps codegen linear.
-  FIXNUM_PROOF_REACHING_MAX_STATES = 400
 
   # Predecessor map: index -> indices control can come from (-1 = method entry),
   # nil when a jump targets a non-instruction so every query refuses. Extra

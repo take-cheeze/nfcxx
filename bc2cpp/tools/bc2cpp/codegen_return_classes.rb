@@ -7,6 +7,7 @@ require_relative 'ir_call_graph_types'
 require_relative 'ir_native_expression_types'
 require_relative 'readonly_call_effects'
 require_relative 'call_context_arguments'
+require_relative 'bytecode_ir_returns'
 
 # CodeGen: RETURN_CLASS_TABLE (ADR 0289).
 #
@@ -180,11 +181,9 @@ class CodeGen
 
     setup_block_return_dependencies
     setup_class_pools
-    numeric_return_candidates.each { |name| @rc_return[name] = 0 }
-    @ireps.each_value do |irep|
-      irep.instructions.each do |insn|
-        @rc_send_ireps[insn.sym] << irep.label if RETURN_CALL_OPS.include?(insn.op) && @rc_return.key?(insn.sym)
-      end
+    numeric_return_candidates.each do |name|
+      @rc_return[name] = 0
+      @rc_send_ireps[name].merge(return_call_labels(name))
     end
     @rc_checked_alias_names = checked_alias_name_candidates
     @rc_admitted_alias_names = Set.new
@@ -224,13 +223,19 @@ class CodeGen
 
       @rc_admitted_alias_names << name
       @rc_return[name] = 0
-      @ireps.each_value do |irep|
-        irep.instructions.each { |insn| @rc_send_ireps[name] << irep.label if RETURN_CALL_OPS.include?(insn.op) && insn.sym == name }
-      end
+      @rc_send_ireps[name].merge(return_call_labels(name))
       @rc_send_ireps[name].each { |label| return_class_invalidate(label) }
       admitted = true
     end
     admitted
+  end
+
+  # Labels of the bodies with a RETURN_CALL_OPS send of +name+: the flows a change of its set invalidates.
+  def return_call_labels(name)
+    @rc_call_labels ||= @ireps.each_with_object(Hash.new { |h, k| h[k] = Set.new }) do |(label, irep), index|
+      BytecodeIR.for(irep).each_with_op(*RETURN_CALL_OPS) { |insn, _| index[insn.sym] << label }
+    end
+    @rc_call_labels.fetch(name, Set.new)
   end
 
   # One growth pass; true when a name's set grew or the name was dropped (it may return an unmodelled class).
@@ -312,8 +317,8 @@ class CodeGen
       return "outside Ruby spells #{name}" if @closed_world.outside_ruby_token?(name)
     end
     @ireps.each_value do |irep|
-      irep.instructions.each do |insn|
-        next unless insn.sym && insn.op.include?('SEND') && POOL_SELF_REBINDING_SENDS.include?(insn.sym)
+      BytecodeIR.for(irep).each_with_op(*POOL_SELF_SEND_OPS) do |insn, _|
+        next unless POOL_SELF_REBINDING_SENDS.include?(insn.sym)
         next if insn.sym == 'define_method' && insn.op.end_with?('B')
 
         return "#{insn.sym} at #{irep.label}"
@@ -321,6 +326,8 @@ class CodeGen
     end
     nil
   end
+
+  POOL_SELF_SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
 
   # On-demand counterpart to the table-building flow. It can use stable scoped
   # return facts without changing the global name summaries or class pools.
@@ -388,49 +395,38 @@ class CodeGen
     states = scoped ? return_class_scoped_states(irep) : return_class_states(irep)
     return NumericFlow::OTHER unless states
 
-    joined = return_class_block_returns(irep, Set.new, scoped: scoped)
+    joined = return_class_block_returns(irep, scoped: scoped)
     return NumericFlow::OTHER if joined.nil?
 
-    irep.instructions.each_with_index do |insn, idx|
-      state = states[idx]
-      next unless state
+    BytecodeIR.for(irep).exits.reduce(joined) do |acc, exit|
+      state = states[exit.index]
+      next acc unless state
 
-      joined |= case insn.op
-                when 'RETURN', 'RETURN_BLK' then state[insn.reg.to_i] || NumericFlow::OTHER
-                when 'RETNIL' then NumericFlow::NIL
-                when 'RETSELF', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP' then NumericFlow::OTHER
-                else 0
-                end
+      acc | case exit.kind
+            when :value, :block_return then state[exit.reg.to_i] || NumericFlow::OTHER
+            when :nil then NumericFlow::NIL
+            else NumericFlow::OTHER
+            end
     end
-    joined
   end
 
   # The value a `return` inside a block nested in +irep+ hands back from the method (RETURN_BLK, at
   # any depth); nil when such a block is not modelled. A `break` is the result of the call that took
   # the block, which a SENDB never reads. A lambda's own RETURN_BLK is counted as well: only ever a
   # superset.
-  def return_class_block_returns(irep, seen = Set.new, scoped: false)
-    joined = 0
-    (irep.reps || []).each do |label|
-      next unless seen.add?(label)
+  def return_class_block_returns(irep, scoped: false)
+    BytecodeIR.nested_bodies(irep).reduce(0) do |joined, child|
+      exits = BytecodeIR.for(child).exits.select { |exit| exit.kind == :block_return }
+      next joined if exits.empty?
 
-      child = @ireps[label]
-      next unless child
+      states = scoped ? return_class_scoped_states(child) : return_class_states(child)
+      return nil unless states
 
-      if child.instructions.any? { |i| i.op == 'RETURN_BLK' }
-        states = scoped ? return_class_scoped_states(child) : return_class_states(child)
-        return nil unless states
-
-        child.instructions.each_with_index do |insn, idx|
-          joined |= states[idx][insn.reg.to_i] || NumericFlow::OTHER if insn.op == 'RETURN_BLK' && states[idx]
-        end
+      exits.reduce(joined) do |acc, exit|
+        state = states[exit.index]
+        state ? acc | (state[exit.reg.to_i] || NumericFlow::OTHER) : acc
       end
-      nested = return_class_block_returns(child, seen, scoped: scoped)
-      return nil if nested.nil?
-
-      joined |= nested
     end
-    joined
   end
 
   # Class set of a SEND-family result: a tracked name's set, the receiver's own set for `freeze`, a native
@@ -780,16 +776,15 @@ class CodeGen
     block_returns = return_class_context_block_returns(body, states, writes)
     return nil if block_returns.nil?
 
-    body.instructions.each_with_index.reduce(block_returns) do |joined, (insn, index)|
-      state = states[index]
+    BytecodeIR.for(body).exits.reduce(block_returns) do |joined, exit|
+      state = states[exit.index]
       next joined unless state
 
-      joined | case insn.op
-               when 'RETURN' then state[insn.reg.to_i] || NumericFlow::OTHER
-               when 'RETSELF' then receiver
-               when 'RETNIL' then NumericFlow::NIL
-               when 'RETTRUE', 'RETFALSE', 'RETURN_BLK', 'BREAK', 'STOP' then NumericFlow::OTHER
-               else 0
+      joined | case exit.kind
+               when :value then state[exit.reg.to_i] || NumericFlow::OTHER
+               when :self then receiver
+               when :nil then NumericFlow::NIL
+               else NumericFlow::OTHER
                end
     end
   end
@@ -813,28 +808,19 @@ class CodeGen
   def return_class_context_block_returns(body, states, writes)
     contexts = { body.label => { states: states, writes: writes } }
     oracle = ContextBlockOracle.new(self, contexts)
-    joined = 0
-    seen = Set.new
-    walk = lambda do |parent|
-      Array(parent.reps).each do |label|
-        next unless seen.add?(label)
+    # Depth first, so a child's frame is in +contexts+ before its own children read their captures from it.
+    BytecodeIR.nested_bodies(body).reduce(0) do |joined, child|
+      child_writes = {}
+      child_states = NumericFlow.states(child, oracle, fixnum_proof_ctx(child)[:upvars], child_writes)
+      contexts[child.label] = { states: child_states, writes: child_writes }
+      BytecodeIR.for(child).exits.reduce(joined) do |acc, exit|
+        next acc unless exit.kind == :block_return
+        return nil unless child_states
 
-        child = @ireps.fetch(label)
-        child_writes = {}
-        child_states = NumericFlow.states(child, oracle, fixnum_proof_ctx(child)[:upvars], child_writes)
-        contexts[label] = { states: child_states, writes: child_writes }
-        child.instructions.each_with_index do |insn, index|
-          next unless insn.op == 'RETURN_BLK'
-          return nil unless child_states
-
-          state = child_states[index]
-          joined |= state[insn.reg.to_i] || NumericFlow::OTHER if state
-        end
-        return nil if walk.call(child).nil?
+        state = child_states[exit.index]
+        state ? acc | (state[exit.reg.to_i] || NumericFlow::OTHER) : acc
       end
-      joined
     end
-    walk.call(body)
   end
 
   def return_class_scoped_def_mask(definition)
