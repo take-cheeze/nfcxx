@@ -197,18 +197,17 @@ class CodeGen
 
     block_register = fields[6] == 1 ? arguments.size + 1 : nil
     oracle = CoreRubyResults::Oracle.new(self, receiver, arguments, block_given, block_register, seen | Set[key], target, call_name)
-    states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars])
+    states = BytecodeIR::NumericClasses.states(body, oracle, fixnum_proof_ctx(body)[:upvars])
     return nil unless states
 
-    mask = body.instructions.each_with_index.reduce(0) do |joined, (op, idx)|
-      st = states[idx]
-      value = if st && op.op == 'RETURN' then st[op.reg.to_i]
-              elsif st && op.op == 'RETSELF' then receiver
-              elsif st && op.op == 'RETNIL' then NumericFlow::NIL
-              elsif st && %w[RETTRUE RETFALSE STOP].include?(op.op) then NumericFlow::OTHER
-              else 0
-              end
-      joined | value
+    mask = BytecodeIR::NumericClasses.exit_mask(body, states) do |exit, state|
+      case exit.op
+      when 'RETURN' then state[exit.reg]
+      when 'RETSELF' then receiver
+      when 'RETNIL' then NumericFlow::NIL
+      when 'RETURN_BLK', 'BREAK' then 0
+      else NumericFlow::OTHER
+      end
     end
     mask if mask.positive? && (mask & ~NumericFlow::CONTAINERS).zero?
   end

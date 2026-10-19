@@ -16,26 +16,21 @@ class CodeGen
                        name_unrebound?('===')
   end
 
-  # The static kind of the receiver register `reg` of the `===` at `idx`, from its dominating
-  # writer (MOVEs followed), or nil:
+  # The static kind of the receiver register `reg` of the `===` at `idx`, agreed by every definition reaching it,
+  # or nil:
   #   [:class]        a constant bound only to one class/module (StableClassConstants)
   #   [:fixnum, v]    a proven Integer constant or literal
   #   [:string] [:nil] [:true] [:false]   literals of those exact classes
   def eqq_receiver_kind(irep, idx, reg)
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn|
-      case insn.op
-      when 'GETCONST', 'GETMCNST'
-        eqq_constant_kind(insn.op == 'GETCONST' ? insn.const_name : insn.mcnst_name)
-      when /\ALOADI/
-        lit = insn.paren_value || insn.imm_operand
-        lit && eqq_fixnum_kind(lit.to_i)
-      when 'STRING' then [:string]
-      when 'LOADNIL' then [:nil]
-      when 'LOADTRUE' then [:true]
-      when 'LOADFALSE' then [:false]
-      end
-    end
+    literal = exact_literal(irep, idx, reg)
+    return EQQ_LITERAL_KINDS[literal.klass] || (literal.value && eqq_fixnum_kind(literal.value)) if literal
+
+    # Both constant tables key bare names (a SETMCNST under its last segment).
+    name = irep.agreed_constant_name(idx, reg.to_s)
+    name && eqq_constant_kind(name.split('::').last)
   end
+
+  EQQ_LITERAL_KINDS = { String: [:string], NilClass: [:nil], TrueClass: [:true], FalseClass: [:false] }.freeze
 
   # `r<d> = <Class|Integer|String|...> === arg` for a receiver whose class the bytecode proves,
   # or nil to keep bc2cpp_eqq. The register `recv` holds that very value (the dominating

@@ -1,18 +1,16 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_regions'
+
 # Backward register scans over an Irep's instructions: the reaching-definition
 # questions ("what wrote this register before here?") that every analysis pass
-# asks. Each pass used to hand-roll the same `downto(0)` loop with its own
-# MOVE / skip / stop rules; they live here so the rules are spelled as options
-# and the loop exists once.
+# asks. The walk and its index live on BytecodeIR::Program (bytecode_ir_regions.rb);
+# these keep the Irep-side spelling the passes call and the queries built on it.
 module IrepScans
-  # Block result: keep walking, now following +reg+. A nil +reg+ is a MOVE with
-  # no source, which ends the walk with nil.
-  Follow = Struct.new(:reg)
-
-  # Block result: keep walking with the register unchanged (the instruction was
-  # transparent for this question, e.g. a `.freeze` on the same register).
-  KEEP = Follow.new(:same).freeze
+  # Block results of #walk_writers: IrepScans.follow(reg) / KEEP.
+  Follow = BytecodeIR::Follow
+  KEEP = BytecodeIR::KEEP
 
   # A constant expression read back from a register (see #constant_path).
   # +root+ is :const (GETCONST), :object (OCLASS) or :nil (LOADNIL); +name+ and
@@ -20,66 +18,17 @@ module IrepScans
   # others); +segments+ are the GETMCNST names applied on top, outermost first.
   ConstantPath = Struct.new(:root, :name, :root_index, :segments, :qualified)
 
+  # origin_ivar's walk steps over BLOCK's proc register and every lead-read-only op.
+  ORIGIN_IVAR_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | ['BLOCK']).freeze
+
   def self.follow(reg)
     Follow.new(reg)
   end
 
-  # Walk backwards from instruction +from+ (inclusive) along register +reg+,
-  # yielding `(insn, index, reg)` for each instruction whose leading register
-  # operand is the followed register. The block's result decides what happens:
-  # IrepScans.follow(other) / KEEP continue, anything else (nil, false, a
-  # value) ends the walk and is returned.
-  #
-  # Options, checked per instruction in this order:
-  # * barrier: ops (Array) or `->(insn, reg)`; a hit ends the walk with
-  #   +barrier_result+ whether or not the instruction touches the register.
-  # * skip_ops: ops ignored even when they name the register (read-only
-  #   opcodes, BLOCK's proc register).
-  # * follow_moves: MOVE is followed to its source without yielding; a MOVE
-  #   without a source, or more than +max_moves+ of them, ends the walk with nil.
-  # +exhausted+ (`->(reg)`) supplies the result when the top of the body is
-  # reached with +reg+ never written, i.e. an incoming register.
-  def walk_writers(from, reg, skip_ops: nil, barrier: nil, barrier_result: nil,
-                   follow_moves: false, max_moves: nil, exhausted: nil)
-    moves = 0
-    callable_barrier = barrier.respond_to?(:call)
-    index = [from, instructions.length - 1].min
-    while index >= 0
-      # Without a barrier only an instruction leading with +reg+ can matter, so
-      # jump straight to the previous one (skip_ops only ever skips those too).
-      unless barrier
-        index = previous_lead_index(reg, index)
-        break unless index
-      end
-      insn = instructions[index]
-      hit = barrier && (callable_barrier ? barrier.call(insn, reg) : barrier.include?(insn.op))
-      return barrier_result if hit
-      next_index = index - 1
-      if insn.reg != reg || skip_ops&.include?(insn.op)
-        index = next_index
-        next
-      end
-
-      if follow_moves && insn.op == 'MOVE'
-        moves += 1
-        return nil if max_moves && moves > max_moves
-
-        reg = insn.regs[1]
-        return nil unless reg
-
-        index = next_index
-        next
-      end
-
-      step = yield insn, index, reg
-      index = next_index
-      next if step.equal?(KEEP)
-      return step unless step.is_a?(Follow)
-
-      reg = step.reg
-      return nil unless reg
-    end
-    exhausted&.call(reg)
+  # BytecodeIR::Program#walk_writers over this irep's instructions (options and
+  # block protocol documented there).
+  def walk_writers(from, reg, **options, &block)
+    BytecodeIR.for(self).walk_writers(from, reg, **options, &block)
   end
 
   # JOIN_DOMINANCE (ADR 0261): walk_writers whose every hop must dominate the
@@ -103,17 +52,9 @@ module IrepScans
   end
 
   # Index of the nearest instruction at or before +from+ whose leading register
-  # operand is +reg+, or nil. The per-register index lists are built once per
-  # irep (instructions never change after loading).
+  # operand is +reg+, or nil (BytecodeIR::Program#last_writer_index).
   def previous_lead_index(reg, from)
-    @lead_indices ||= instructions.each_with_index.group_by { |insn, _| insn.reg }
-                                  .transform_values { |pairs| pairs.map(&:last).freeze }.freeze
-    indices = @lead_indices[reg]
-    return nil unless indices
-
-    position = indices.bsearch_index { |i| i > from }
-    position = position ? position - 1 : indices.length - 1
-    position.negative? ? nil : indices[position]
+    BytecodeIR.for(self).last_writer_index(from, reg)
   end
 
   # The constant expression held in +reg+ at instruction +from+ (inclusive):
@@ -175,21 +116,12 @@ module IrepScans
   # program order, at most +limit+ of them (the newest ones): the LOADSYMs of
   # `private :a, :b` sit right before the send.
   def preceding_run(op, from, limit: nil)
-    run = []
-    [from, instructions.length - 1].min.downto(0) do |index|
-      break if limit && run.size >= limit
-
-      insn = instructions[index]
-      break unless insn.op == op
-
-      run.unshift(insn)
-    end
-    run
+    BytecodeIR.for(self).run_of_op_ending(from, op, limit: limit)
   end
 
   # `Owner#@ivar` when the nearest defining instruction is a GETIV, else empty.
   def self.origin_ivar(irep, site, reg, owner_def)
-    irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP]) do |ins|
+    irep.walk_writers(site - 1, reg.to_s, skip_ops: ORIGIN_IVAR_SKIP_OPS) do |ins|
       next follow(ins.regs[1]) if ins.op == 'MOVE' && ins.regs[1]
 
       break "#{owner_def&.owner}#@#{ins.ivar}" if ins.op == 'GETIV'

@@ -159,20 +159,7 @@ class CodeGen
     joined = numeric_block_return_mask(irep)
     return NumericFlow::OTHER if joined.nil?
 
-    irep.instructions.each_with_index do |insn, idx|
-      state = states[idx]
-      next unless state
-
-      case insn.op
-      when 'RETURN', 'RETURN_BLK'
-        joined |= state[insn.reg.to_i] || NumericFlow::OTHER
-      when 'RETNIL'
-        joined |= NumericFlow::NIL
-      when 'RETSELF', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'
-        joined |= NumericFlow::OTHER
-      end
-    end
-    joined
+    BytecodeIR::NumericClasses.returned_mask(irep, states, joined)
   end
 
   # What a `return` inside a block nested in +irep+ hands back from the method (RETURN_BLK, at
@@ -187,15 +174,11 @@ class CodeGen
       child = @ireps[label]
       next unless child
 
-      if child.instructions.any? { |i| i.op == 'RETURN_BLK' }
+      if BytecodeIR::NumericClasses.block_returns?(child)
         states = numeric_states_for(child)
         return nil unless states
 
-        child.instructions.each_with_index do |insn, idx|
-          next unless insn.op == 'RETURN_BLK' && states[idx]
-
-          joined |= states[idx][insn.reg.to_i] || NumericFlow::OTHER
-        end
+        joined |= BytecodeIR::NumericClasses.block_return_mask(child, states)
       end
       nested = numeric_block_return_mask(child, seen)
       return nil if nested.nil?
