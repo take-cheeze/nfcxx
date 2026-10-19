@@ -12,10 +12,7 @@
 extern "C" {
 #endif
 
-#ifndef CLEANROOM_WINT_T
-#define CLEANROOM_WINT_T
-typedef int32_t wint_t;
-#endif
+typedef unsigned int wint_t;  /* the same type wchar.h declares */
 
 int iswupper(wint_t);
 int iswspace(wint_t);
