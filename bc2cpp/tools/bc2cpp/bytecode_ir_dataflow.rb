@@ -606,6 +606,27 @@ module BytecodeIR
     self.for(irep).reaching_definitions(index, reg, opaque_regs: own_upvar_written_regs(irep), **options)
   end
 
+  # The instruction writers of +reg+ that reach the read at +index+, as [index, instruction] pairs: one per join arm.
+  # Nil when the answer is not provable (a refusal, the method's entry value, or a definition whose instruction does
+  # not write that register).
+  def self.writers_reaching(irep, index, reg)
+    defs = reaching_definitions(irep, index, reg.to_s, origin_transfers: true)
+    return nil unless defs && !defs.empty? && defs.none?(&:entry?)
+
+    defs.map do |definition|
+      insn = irep.instructions[definition.index]
+      return nil unless insn.reg == definition.reg
+
+      [definition.index, insn]
+    end
+  end
+
+  # Whether every writer of +reg+ reaching the read at +index+ passes the block (see writers_reaching). A refusal fails.
+  def self.all_writers_reaching?(irep, index, reg)
+    writers = writers_reaching(irep, index, reg)
+    !writers.nil? && writers.all? { |writer_index, insn| yield writer_index, insn }
+  end
+
   # Program#write_dominates? with the irep's own nested-block writes accounted for.
   def self.write_dominates?(irep, w, use, reg)
     self.for(irep).write_dominates?(w, use, reg, opaque_regs: own_upvar_written_regs(irep))

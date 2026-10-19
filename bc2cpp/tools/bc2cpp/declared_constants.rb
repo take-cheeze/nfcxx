@@ -242,7 +242,9 @@ module DeclaredConstants
     bad && "element #{bad} of the literal is not proven #{entry.elem}"
   end
 
-  # The nearest writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil.
+  # The nearest writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil. Linear on purpose:
+  # it is reached only through frozen_array_source?, whose JOIN_DOMINANCE trace refuses a join between that writer and
+  # the freeze, so the nearest writer is the only one that reaches it.
   def literal_writer(irep, idx, reg)
     irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, _cur|
       next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
@@ -441,13 +443,14 @@ module DeclaredConstants
     (registry[name] || []).none? { |d| owners.include?(d.owner) }
   end
 
-  # Whether the value of +reg+ at +idx+ is the result of a `.freeze` (the first writer, past moves, is a SEND0 freeze).
-  # A constant whose value is frozen needs the stock freeze proof to be typed by its literal class.
+  # Whether the value of +reg+ at +idx+ may be the result of a `.freeze`: some writer reaching the read is one, since a
+  # join brings in the others. A refusal answers true too, because the caller only withholds a type on it. A constant
+  # whose value is frozen needs the stock freeze proof to be typed by its literal class.
   def frozen_at?(irep, idx, reg)
-    found = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, _j, _cur|
-      insn.op == 'SEND0' && insn.sym == 'freeze'
-    end
-    found == true
+    writers = BytecodeIR.writers_reaching(irep, idx, reg)
+    return true if writers.nil?
+
+    writers.any? { |_j, insn| insn.op == 'SEND0' && insn.sym == 'freeze' }
   end
 
   # `R.merge(H)` at +idx+: the one-argument SEND `merge` whose receiver proves exactly Hash (a Hash literal, or a constant
@@ -531,6 +534,8 @@ module DeclaredConstants
       @memo[name] = [ranges.map(&:first).min, ranges.map(&:last).max]
     end
 
+    # Linear by design: the barrier stops the walk at every jump target, and each arm of a `c ? a : b` join starts at one
+    # (the JMPNOT target), so no walk steps over a join. Join-sound on the cases the declared check meets.
     def value(irep, idx, reg, visiting, depth)
       return nil if depth > MAX_DEPTH
 
@@ -591,30 +596,37 @@ module DeclaredConstants
   # BOOL_COMPARE (report-level): the value at +idx+ is `X == Y` (the EQ opcode) whose receiver is `'literal'.length`
   # and whose argument is an integer literal. Integer#== answers true or false, so the value is a bool. Needs String#length
   # stock (string_length_safe) and Integer#== stock (integer_ops_safe, the operator gate).
+  # Every writer that reaches the read must be the EQ (a join's other arm would make the value something else).
   def bool_compare_site?(irep, idx, reg, string_length_safe:, integer_ops_safe:)
     return false unless string_length_safe && integer_ops_safe
 
-    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
-      insn.op == 'EQ' && string_length_value?(irep, j, cur) && integer_literal_source?(irep, j, insn.regs[1])
-    end == true
+    BytecodeIR.all_writers_reaching?(irep, idx, reg) do |j, insn|
+      insn.op == 'EQ' && string_length_value?(irep, j, insn.reg) && integer_literal_source?(irep, j, insn.regs[1])
+    end
   end
 
-  # The value of +reg+ before +idx+ is `'literal'.length` (SEND0 length on a STRING literal).
+  # The value of +reg+ before +idx+ is `'literal'.length` (SEND0 length on a STRING literal), on every path.
   def string_length_value?(irep, idx, reg)
-    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
-      insn.op == 'SEND0' && insn.sym == 'length' && string_literal_source?(irep, j, cur)
-    end == true
+    BytecodeIR.all_writers_reaching?(irep, idx, reg) do |j, insn|
+      insn.op == 'SEND0' && insn.sym == 'length' && string_literal_source?(irep, j, insn.reg)
+    end
   end
 
+  # The value of +reg+ before +idx+ is a String literal (STRING), on every path.
   def string_literal_source?(irep, idx, reg)
-    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) { |insn| insn.op == 'STRING' } == true
+    BytecodeIR.all_writers_reaching?(irep, idx, reg) do |_j, insn|
+      BytecodeIR::Types.literal_class(insn, irep.pool) == :String
+    end
   end
 
-  # The value of +reg+ before +idx+ is an integer literal (any LOADI-family load, in or out of the Fixnum margin).
+  # The value of +reg+ before +idx+ is an integer literal (any LOADI-family load, in or out of the Fixnum margin), on
+  # every path.
   def integer_literal_source?(irep, idx, reg)
     return false if reg.nil?
 
-    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) { |insn| insn.op.start_with?('LOADI') } == true
+    BytecodeIR.all_writers_reaching?(irep, idx, reg) do |_j, insn|
+      BytecodeIR::Types.literal_class(insn, irep.pool) == :Integer
+    end
   end
 
   # Prints the outcome, adds the diagnostics to the signature diagnostics and aborts a build on an error.
