@@ -140,7 +140,7 @@ module NumericFlow
   # each register the union of every value any instruction stores into it (what
   # a block created earlier may see when it runs later).
   #
-  # NUMERIC_FLOW_SPEED (ADR 0467), NUMERIC_CLASSES (ADR 0493): the flow reads the irep's bytecode facts from its
+  # NUMERIC_FLOW_SPEED (ADR 0467), NUMERIC_CLASSES (ADR 0500): the flow reads the irep's bytecode facts from its
   # BytecodeIR::Program (successor lists, raise targets, rescue-only targets, the decode and operands, the instructions
   # the oracle is asked about, the literal-element proof) and derives its own Step table from them once
   # (NumericFlow.table), keeps the run's facts in a Ctx with the oracle's optional methods looked up once, and joins

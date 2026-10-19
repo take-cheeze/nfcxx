@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NUMERIC_CLASSES (docs/adr/0493): NumericFlow reads its instruction facts from the BytecodeIR::Program. Host only,
+# NUMERIC_CLASSES (docs/adr/0500): NumericFlow reads its instruction facts from the BytecodeIR::Program. Host only,
 # under a second:
 #   - Program#operands decodes the second register and the ivar the flow reads, and a bare instruction decodes to
 #     the step the Program's table holds;
