@@ -158,7 +158,11 @@ module NativeOwnerMap
     depth = 0
     start = nil
     prev = 0
-    blank.each_char.with_index do |c, i|
+    cursor = 0
+    while (brace = /[{}]/.match(blank, cursor))
+      i = brace.begin(0)
+      cursor = brace.end(0)
+      c = brace[0]
       if c == '{'
         start = i if depth.zero?
         depth += 1
