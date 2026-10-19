@@ -59,6 +59,7 @@ else
 fi
 pass linkage_block.cu "linkage block: no error, 0 mismatches"
 pass macro_launch.cu "macro launch: no error, value 3"
+pass comment_targs.cu "comment targs: no error, value 5"
 pass deduced_launch.cu "deduced launch: no error, value 3.0"
 pass member_launch.cu "member launch: no error, value 7.0"
 pass deduce_expr.cu "deduced launch: no error, value 3.0"
