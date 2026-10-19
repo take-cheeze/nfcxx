@@ -138,7 +138,7 @@ module ElementSiteReport
   def record_literal_extreme(insn, irep, owner_def, idx, owner)
     return unless %w[SEND SEND0].include?(insn.op) && %w[min max].include?(insn.sym) && insn.n_spec.to_i.zero?
 
-    prev = idx.positive? ? irep.instructions[idx - 1] : nil
+    prev = BytecodeIR.for(irep).previous(idx)
     unless prev && %w[ARRAY ARRAY2].include?(prev.op) && prev.reg == insn.reg
       ROWS[['extreme', irep.label, idx]] = ['extreme', "#{irep.label}:#{idx}", owner, insn.op, insn.sym, 'not-adjacent', ''].join("\t")
       return

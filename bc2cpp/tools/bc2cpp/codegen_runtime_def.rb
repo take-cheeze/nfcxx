@@ -10,9 +10,7 @@ class CodeGen
   # recognize_block_fallback_regions (empty at method level).
   def recognize_lambda_fallback_regions(irep, available_upvars: [])
     regions = []
-    irep.instructions.each do |insn|
-      next unless insn.op == 'LAMBDA'
-
+    irep.each_with_op('LAMBDA') do |insn, _index|
       dest_reg = insn.reg
       next unless dest_reg
 
@@ -90,7 +88,7 @@ class CodeGen
     # (1) a named local, so no implicit register window can alias it.
     return nil unless d >= 1 && d < nlocals
     # (2) the two opcodes that read a named local without printing it.
-    return nil if irep.instructions.any? { |i| %w[ARGARY BLKPUSH].include?(i.op) }
+    return nil if BytecodeIR.for(irep).op?('ARGARY', 'BLKPUSH')
 
     # A child irep capturing R<d> as an upvar would point at it from a scope this
     # proof does not cover; block_upvar_needs propagates deeper needs as
@@ -314,9 +312,7 @@ class CodeGen
   # (SDEF names plus EXEC class bodies), or nil if any body is unbounded.
   def runtime_installed_names_for(irep, exec_regions)
     names = Set.new
-    irep.instructions.each do |insn|
-      next unless insn.op == 'SDEF'
-
+    irep.each_with_op('SDEF') do |insn, _index|
       return nil unless insn.def_child_index
 
       names << insn.sym_token
@@ -486,7 +482,7 @@ class CodeGen
   def recognize_exec_fallback_regions(irep)
     regions = []
     irep.each_with_op('SCLASS') do |insn, idx|
-      nxt = irep.instructions[idx + 1]
+      nxt = BytecodeIR.for(irep).instruction_at(idx + 1)&.source
       next unless nxt && nxt.op == 'EXEC'
 
       reg = insn.reg if insn.operand_kinds == %i[reg]
