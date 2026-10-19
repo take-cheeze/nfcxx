@@ -1698,10 +1698,16 @@ functions.each do |fn|
           v, regi = eval_rvalue_operand(a, types, locals, params, param_reg, stmts, regi, lines)
           apt = at ? rust_type_to_pathb(at, types) : nil
           agg_arg = at && (types.key?(at) || (at.start_with?("[") && at.include?(";")))
-          fat_arg = apt && apt.start_with?("(struct \"&") 
-          if agg_arg || fat_arg
-            addr, regi = place_addr(a, types, locals, params, param_reg, stmts, regi)
-            arg_vals << ["(byval #{apt} #{addr})", at]
+          fat_arg = apt && apt.start_with?("(struct \"&")
+          str_arg = a.strip.start_with?('"') && a.strip.end_with?('"')
+          if agg_arg || fat_arg || str_arg
+            if str_arg
+              addr = v
+              apt = "(struct \"&str\")"
+            else
+              addr, regi = place_addr(a, types, locals, params, param_reg, stmts, regi)
+            end
+            arg_vals << ["(byval #{apt} #{addr})", at || "&str"]
           else
             arg_vals << [v, at]
           end
@@ -1893,9 +1899,18 @@ functions.each do |fn|
           when "ptr_offset_from_unsigned", "ptr_offset_from"
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "long"
             if arg_vals.size >= 2
+              ety = iparams[0] ? iparams[0].sub(/^\*(const|mut|move)\s+/, "") : "u8"
+              es, _ = type_size_align(ety, types)
+              es = 1 if es == 0
               r = regi; regi += 1
               stmts << "(let %#{r} #{ty} (wsub #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
-              store_dest.call("%#{r}")
+              if es != 1
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{ty} (cdiv #{ty} %#{r} (const #{ty} #{es})))"
+                store_dest.call("%#{r2}")
+              else
+                store_dest.call("%#{r}")
+              end
             end
           when "arith_offset"
             if arg_vals.size >= 2
