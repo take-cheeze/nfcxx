@@ -40,3 +40,5 @@ tests/sqlite/run.sh       # lib/sqlcache (a TTL key-value cache on SQLite) built
 ```
 
 Which workflow runs which test script: `docs/README.md`, "Status matrix".
+
+License: nfcxx is MIT (`LICENSE`). Third-party code under `3rd/` and the SQLite bundle keeps its own license.

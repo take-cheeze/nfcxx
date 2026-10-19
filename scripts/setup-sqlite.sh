@@ -36,4 +36,16 @@ rm -rf "$dest"; mkdir -p "$dest"
 cp "$src/sqlite3.h" "$dest/"
 NFCXX_BACKEND=$backend "$root/nfcc" -c "$src/sqlite3.c" -o "$dest/sqlite3.o" -DSQLITE_THREADSAFE=1 -DSQLITE_DQS=0
 ar rcs "$dest/libsqlite3.a" "$dest/sqlite3.o"
+# The bundle: the archive, its header and a manifest, so a program links it with -L$dest -lsqlite3. SQLite is in the
+# public domain (https://sqlite.org/copyright.html); the manifest says where it came from.
+cat > "$dest/MANIFEST" <<MANIFEST
+name: sqlite
+version: 3.54.1
+backend: $backend
+source: $zip_url
+source-sha256: $zip_sha256
+sqlite3.c-sha256: $c_sha256
+license: public domain (https://sqlite.org/copyright.html)
+files: libsqlite3.a sqlite3.h MANIFEST
+MANIFEST
 echo "built $dest/libsqlite3.a (SQLite $(sed -n 's/^#define SQLITE_VERSION *"\(.*\)"/\1/p' "$dest/sqlite3.h"))"
