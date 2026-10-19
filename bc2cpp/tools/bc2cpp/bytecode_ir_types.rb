@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
+
 module BytecodeIR
   # Value classes, not representation/width proofs. See ADR 0440.
   class Types
@@ -12,7 +14,6 @@ module BytecodeIR
     POOL_TYPES = { int32: :Integer, int64: :Integer, bigint: :Integer, float: :Float }.freeze
     ENTER_TYPES = { rest: [:Array], hash: [:Hash], block: [:Proc, :NilClass], local: [:NilClass] }.transform_values(&:freeze).freeze
 
-    CALL_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
     CALL_DEPTH_CAP = 24
     QUERY_CACHE_CAP = 2048
     CALL_QUERY_CAP = 2048
@@ -363,7 +364,7 @@ module BytecodeIR
 
       insn = @irep.instructions[definition.index]
       return nil unless insn.reg == definition.reg
-      return @inferred_calls[definition.index] if CALL_OPS.include?(insn.op)
+      return @inferred_calls[definition.index] if BytecodeIR::Ops::SEND.include?(insn.op)
 
       type = Types.literal_class(insn, @irep.pool)
       type && [type]

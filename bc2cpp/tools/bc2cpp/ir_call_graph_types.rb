@@ -35,7 +35,7 @@ module IrCallGraphTypes
 
         analyses[body.label] ||= begin
           calls = body.instructions.each_with_index.filter_map do |insn, call_index|
-            next unless BytecodeIR::Types::CALL_OPS.include?(insn.op)
+            next unless BytecodeIR::Ops::SEND.include?(insn.op)
 
             classes = gen.bytecode_ir_call_result_classes(body, call_index)
             [call_index, classes] if classes

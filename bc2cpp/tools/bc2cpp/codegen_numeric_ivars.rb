@@ -461,7 +461,7 @@ class CodeGen
     insns.all? do |instruction|
       insn = instruction.source
       exposing = BytecodeIR::Program::SELF_EXPOSING_OPS.include?(insn.op) && !(insn.op == 'SUPER' && super_safe)
-      observes = BytecodeIR::Program::FRAME_EXIT_OPS.include?(insn.op) || exposing ||
+      observes = BytecodeIR::Ops::FRAME_EXIT.include?(insn.op) || exposing ||
                  (insn.op == 'GETIV' && insn.ivar == ivar) ||
                  (!%w[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
       before.call(instruction.index) || !observes
