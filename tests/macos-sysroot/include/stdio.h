@@ -74,6 +74,8 @@ size_t fread(void *restrict, size_t, size_t, FILE *restrict);
 size_t fwrite(const void *restrict, size_t, size_t, FILE *restrict);
 int fgetpos(FILE *restrict, fpos_t *restrict);
 int fseek(FILE *, long, int);
+int fseeko(FILE *, off_t, int);
+off_t ftello(FILE *);
 int fsetpos(FILE *, const fpos_t *);
 long ftell(FILE *);
 void rewind(FILE *);
