@@ -554,13 +554,16 @@ std::string template_site(const std::string &name, const std::string &targs) {
   if (bad) refuse("template kernel " + name + "<" + targs + ">: explicit arguments must give every template parameter");
   std::string decl = name_comment_params(substitute(kt.params, kt.names, args, kt.has_pack, kt.pack));
   std::vector<std::string> call;
+  std::string plain;  // the wrapper's parameters without their defaults: the stub and the definition both spell them
   for (const auto &part : split_top(decl)) {
     std::vector<std::string> pt = tokens_of(ruby_split_eq0(part));
     if (pt.empty()) refuse("template kernel " + name + ": unnamed parameter " + part);
     call.push_back(declared_name(part));
+    plain += (plain.empty() ? "" : ", ") + strip(ruby_split_eq0(part));
   }
   // The wrapper's name is made from the arguments without their comments: the device unit has its comments blanked
   // (`reduce_rows_f32</*norm=*/false>` is `reduce_rows_f32_false` there), and the host copy must name the same wrapper.
+  decl = plain;
   std::string w = wrapper_name(name, strip(blank_comments(targs)));
   if (!g_site_index.count(w)) {
     g_site_index[w] = g_sites.size();
@@ -1292,6 +1295,43 @@ bool int_expr_value(const std::string &text, long pos, const std::string &s, lon
 
 // Ruby local_constant_visible (line 415): the value of the nearest local constant `name = VALUE` before pos whose block
 // is still open at pos.
+// True when the declaration at pos is a parameter of a template header (`template <...>`).
+bool in_template_header(const std::string &s, long pos) {
+  long depth = 0;
+  for (long o = pos - 1; o >= 0; o -= 1) {
+    int c = ch(s, o);
+    if (c == ';' || c == '{' || c == '}') return false;
+    if (c == '>') {
+      depth += 1;
+    } else if (c == '<') {
+      if (depth == 0) {
+        long w = o - 1;
+        while (w >= 0 && white_c(ch(s, w))) w -= 1;
+        long we = w;
+        while (w >= 0 && ident_c(ch(s, w))) w -= 1;
+        return sl(s, w + 1, we + 1) == "template";
+      }
+      depth -= 1;
+    }
+  }
+  return false;
+}
+
+// The end of a template parameter's default that starts at from: its top-level `,` or the `>` closing the header.
+long header_default_end(const std::string &s, long from) {
+  long paren = 0, angle = 0;
+  for (long i = from; i < (long)s.size(); i += 1) {
+    int c = ch(s, i);
+    if (c == '(' || c == '[' || c == '{') paren += 1;
+    else if (c == ')' || c == ']' || c == '}') paren -= 1;
+    else if (c == '<') angle += 1;
+    else if (paren == 0 && angle == 0 && (c == ',' || c == '>')) return i;
+    else if (c == '>') angle -= 1;
+    if (paren < 0) return i;
+  }
+  return (long)s.size();
+}
+
 bool local_constant_visible(const std::string &text, long pos, const std::string &name, std::string &value) {
   std::string seg = sl(text, 0, pos);
   bool found = false;
@@ -1315,6 +1355,9 @@ bool local_constant_visible(const std::string &text, long pos, const std::string
     bool has_blk = enclosing_block(text, k, blk_open_unused, blk_close);
     if (has_blk && !(blk_close > pos)) continue;
     found = true;
+    // A template parameter default (`template <bool a = false, bool b = false>`) ends at its `,` or `>`, not at the
+    // `;` of the function after the header.
+    if (in_template_header(text, k)) semi = header_default_end(seg, a + 1);
     value = strip(sl(seg, a + 1, semi));
   }
   return found;
