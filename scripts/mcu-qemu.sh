@@ -6,7 +6,8 @@
 # cache key of .github/workflows/mcu.yml (the key hashes this file), so change it here and only here.
 set -euo pipefail
 rev=febae182e132e4055529be423a818225ebddaa3a
-dir=${1:?usage: scripts/mcu-qemu.sh DIR}
+# Absolute, before the cd below: a relative DIR would make the final check look in the wrong place.
+dir=$(realpath -m "${1:?usage: scripts/mcu-qemu.sh DIR}")
 out=$dir/build/qemu-system-riscv32
 
 mkdir -p "$dir"
