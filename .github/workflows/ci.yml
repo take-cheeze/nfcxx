@@ -46,6 +46,11 @@ jobs:
             run: NFCXX_BACKEND=qbe tests/run.sh
           - name: cases (gcc backend)
             run: NFCXX_BACKEND=gcc tests/run.sh
+          - name: C++11 and C++14 language feature probes (qbe and gcc)
+            run: |
+              tests/cpp-features/self-test.sh
+              tests/upstream/self-test.sh
+              FEATURE_ROUTES="qbe gcc" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
           - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
             dotnet: true
             run: |

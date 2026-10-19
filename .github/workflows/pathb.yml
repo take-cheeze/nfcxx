@@ -40,6 +40,8 @@ on:
       - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
+      - "tests/cpp-features/**"
+      - "scripts/cpp-feature-*.rb"
       - "tests/ehshim/**"
       - "lib/ehshim/**"
       - "scripts/ehshim"
@@ -71,6 +73,8 @@ on:
       - "scripts/qbe-prep.rb"
       - "tests/mruby/**"
       - "tests/cases/**"
+      - "tests/cpp-features/**"
+      - "scripts/cpp-feature-*.rb"
       - "tests/ehshim/**"
       - "lib/ehshim/**"
       - "scripts/ehshim"
@@ -158,6 +162,8 @@ jobs:
             run: tests/pathb-qbe/run.sh
           - name: Hosted Path B (NFCXX_PATH=b)
             run: tests/pathb-qbe/hosted.sh
+          - name: C++11 and C++14 language feature probes (Path B)
+            run: FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
           - name: EH shim (gcc, qbe and Path B)
             run: tests/ehshim/run.sh
           - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
