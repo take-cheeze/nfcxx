@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 require_relative 'ivar_layout'
 
 # RECORD_HASH_PROOF (docs/adr/0285): per-key value classes of a record-like
@@ -113,24 +114,24 @@ module RecordHash
   # True when the SETIV at +idx+ has a HASH literal among its reaching sources
   # (cheap candidate filter; Scanner re-proves everything).
   def hash_literal_store?(irep, idx)
-    defs = BytecodeIR.reaching_definitions(irep, idx, irep.instructions[idx].regs.first, through_handlers: true)
-    defs&.any? { |d| !d.entry? && irep.instructions[d.index].op == 'HASH' }
+    program = BytecodeIR.for(irep)
+    sources = BytecodeIR.producers(irep, idx, program.source_at(idx).regs.first, through_handlers: true)
+    sources&.any? { |p| !p.entry? && program.container_literal(p.index)&.kind == :hash }
   end
 
   # The Symbol names register +reg+ can hold at +idx+ (strings), or nil when some reaching value is not
   # provably a literal Symbol. +for_write+ lets provably non-Symbol keys through: storing under one never
   # touches a Symbol key.
   def literal_keys(irep, idx, reg, for_write: false, depth: 0)
-    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
-    return nil if defs.nil? || defs.empty?
+    sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true) or return nil
 
     keys = []
-    defs.each do |d|
+    sources.each do |d|
       found =
         if d.entry?
           pool&.positional(irep, d.reg.to_i, depth)
         else
-          insn = irep.instructions[d.index]
+          insn = d.insn
           if insn.op == 'LOADSYM' then [insn.sym]
           elsif insn.op == 'KARG' then pool&.keyword(irep, insn, depth)
           elsif for_write && (NON_SYMBOL_OPS.include?(insn.op) || insn.op.start_with?('LOADI')) then []
@@ -147,15 +148,14 @@ module RecordHash
   # (every reaching value is `@slot` or a call of its attr reader) and the key a literal Symbol; else nil.
   def read_slots(irep, index)
     table = self.table or return nil
-    insn = irep.instructions[index]
+    insn = BytecodeIR.for(irep).source_at(index)
     return nil unless insn&.op == 'GETIDX'
 
     recv, key = insn.regs
-    defs = BytecodeIR.reaching_definitions(irep, index, recv, through_handlers: true)
-    return nil if defs.nil? || defs.empty?
+    sources = BytecodeIR.producers(irep, index, recv, through_handlers: true) or return nil
 
-    names = defs.map do |d|
-      writer = d.entry? ? nil : irep.instructions[d.index]
+    names = sources.map do |d|
+      writer = d.insn
       if writer&.op == 'GETIV' then writer.ivar
       elsif writer && CALL_OPS.include?(writer.op) && (readers || Set.new).include?(writer.sym) then writer.sym
       end
@@ -188,7 +188,7 @@ module RecordHash
       @body_def = {}
       registry.each_value { |defs| defs.each { |d| @body_def[d.irep] = d if d.irep } }
       ireps.each_value do |irep|
-        irep.instructions.each_with_index do |insn, i|
+        BytecodeIR.for(irep).each_source do |insn, i|
           name = insn.sym or next
 
           case insn.op
@@ -214,7 +214,7 @@ module RecordHash
 
       pooled = []
       sites.each do |site_irep, i|
-        site = site_irep.instructions[i]
+        site = BytecodeIR.for(site_irep).source_at(i)
         n, nk = site_counts(site)
         return nil unless n == fields[0] && nk == 0
 
@@ -239,7 +239,7 @@ module RecordHash
 
       pooled = []
       sites.each do |site_irep, i|
-        site = site_irep.instructions[i]
+        site = BytecodeIR.for(site_irep).source_at(i)
         n, nk = site_counts(site)
         # Positional count fixed to the mandatory count so no trailing Hash can be read as keywords.
         return nil unless n == mand && nk
@@ -326,7 +326,7 @@ module RecordHash
           @global ||= "#{entry} named as a string" if entry.is_a?(String) && REFLECTION_SENDS.include?(entry)
         end
         installer_args = installer_symbol_positions(irep)
-        irep.instructions.each_with_index do |insn, i|
+        BytecodeIR.for(irep).each_source do |insn, i|
           if insn.op == 'LOADSYM'
             @global ||= "#{insn.sym} escapes as a Symbol" if REFLECTION_SENDS.include?(insn.sym)
             # `send(:ui)` / `&:ui` / `method(:ui)` would call a reader without a visible call site.
@@ -342,12 +342,12 @@ module RecordHash
     # LOADSYM indices that are the literal Symbol arguments of an attr_* installer.
     def installer_symbol_positions(irep)
       positions = Set.new
-      irep.instructions.each_with_index do |insn, i|
-        next unless %w[SSEND SSEND0].include?(insn.op) && insn.sym.to_s.start_with?('attr')
+      program = BytecodeIR.for(irep)
+      program.each_with_op('SSEND', 'SSEND0') do |insn, i|
+        next unless insn.sym.to_s.start_with?('attr')
 
         n = insn.argc or next
-        run = irep.instructions[(i - n).clamp(0, i)...i]
-        run.each_index { |k| positions << (i - n + k) if run[k].op == 'LOADSYM' }
+        ((i - n).clamp(0, i)...i).each { |k| positions << k if program.source_at(k).op == 'LOADSYM' }
       end
       positions
     end
@@ -355,13 +355,12 @@ module RecordHash
     # The ivar named by the first argument of a reflective send, when literal.
     def literal_ivar_arg(irep, idx, insn)
       arg = (insn.reg.to_i + 1).to_s
-      defs = BytecodeIR.reaching_definitions(irep, idx, arg, through_handlers: true)
-      return nil if defs.nil? || defs.empty?
+      sources = BytecodeIR.producers(irep, idx, arg, through_handlers: true) or return nil
 
-      names = defs.map do |d|
+      names = sources.map do |d|
         next nil if d.entry?
 
-        w = irep.instructions[d.index]
+        w = d.insn
         case w.op
         when 'LOADSYM' then w.sym
         when 'STRING'
@@ -407,7 +406,7 @@ module RecordHash
       return "#{@name}: no Hash literal store" if @literals.empty?
 
       %i[gets calls].each do |kind|
-        @sites[kind].each { |irep, i| return @failure unless alias_scan(irep, i, irep.instructions[i].reg.to_i) }
+        @sites[kind].each { |irep, i| return @failure unless alias_scan(irep, i, lead_reg(irep, i)) }
       end
       return @failure unless @literals.all? { |irep, d| literal_scan(irep, d) }
 
@@ -415,6 +414,10 @@ module RecordHash
     end
 
     private
+
+    def lead_reg(irep, index)
+      BytecodeIR.for(irep).source_at(index).reg.to_i
+    end
 
     def fail!(why)
       @failure ||= "#{@name}: #{why}#{@site}"
@@ -427,34 +430,28 @@ module RecordHash
     end
 
     def store_ok?(irep, i)
-      insn = irep.instructions[i]
-      defs = BytecodeIR.reaching_definitions(irep, i, insn.regs.first, through_handlers: true)
-      return fail!('store source not provable') if defs.nil? || defs.empty?
+      program = BytecodeIR.for(irep)
+      sources = BytecodeIR.producers(irep, i, program.source_at(i).regs.first, through_handlers: true)
+      return fail!('store source not provable') unless sources
 
-      defs.all? do |d|
+      sources.all? do |d|
         next fail!('store from an argument') if d.entry?
+        next true if d.op == 'LOADNIL'
+        next fail!("store from #{d.op}") unless program.container_literal(d.index)&.kind == :hash
 
-        src = irep.instructions[d.index]
-        case src.op
-        when 'LOADNIL' then true
-        when 'HASH'
-          @literals << [irep, d.index] unless @literals.any? { |l, x| l.equal?(irep) && x == d.index }
-          true
-        else fail!("store from #{src.op}")
-        end
+        @literals << [irep, d.index] unless @literals.any? { |l, x| l.equal?(irep) && x == d.index }
+        true
       end
     end
 
     # Alias scan from the literal: it may only be stored to this slot (or read/written by key).
     def literal_scan(irep, d)
-      insn = irep.instructions[d]
-      n = insn.uint_operand or return fail!('HASH without a pair count')
-      base = insn.reg.to_i
-      n.times do |k|
-        keys = RecordHash.literal_keys(irep, d, base + 2 * k) or return fail!('non-literal key in a Hash literal')
-        @literal_pairs << [irep, d, keys, base + 2 * k + 1]
+      literal = BytecodeIR.for(irep).container_literal(d) or return fail!('HASH without a pair count')
+      literal.key_regs.zip(literal.value_regs) do |key, value|
+        keys = RecordHash.literal_keys(irep, d, key) or return fail!('non-literal key in a Hash literal')
+        @literal_pairs << [irep, d, keys, value.to_i]
       end
-      alias_scan(irep, d, base)
+      alias_scan(irep, d, literal.base)
     end
 
     # Forward walk over every path from +start+ where register +reg+ holds the Hash.
@@ -511,7 +508,7 @@ module RecordHash
       return true unless @captured.add?([irep.label, reg])
 
       site = @site
-      ok = captured_reads(irep, reg).all? { |child, i| alias_scan(child, i, child.instructions[i].reg.to_i) }
+      ok = captured_reads(irep, reg).all? { |child, i| alias_scan(child, i, lead_reg(child, i)) }
       @site = site
       ok
     end
@@ -522,9 +519,7 @@ module RecordHash
       walk = lambda do |node, depth|
         (node.reps || []).each do |label|
           child = irep.tree[label] or next
-          child.instructions.each_with_index do |insn, i|
-            next unless insn.op == 'GETUPVAR'
-
+          BytecodeIR.for(child).each_with_op('GETUPVAR') do |insn, i|
             index, level = insn.upvar_ref
             found << [child, i] if index == reg && level == depth
           end
@@ -669,40 +664,22 @@ module RecordHash
     end
 
     def classify(irep, idx, reg)
-      defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
-      return [UNKNOWN_SET, UNKNOWN_SET] if defs.nil? || defs.empty?
+      sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true)
+      return [UNKNOWN_SET, UNKNOWN_SET] unless sources
 
       strict = Set.new
       trusted = Set.new
-      defs.each do |d|
-        cls = d.entry? ? nil : (literal_class(irep, d.index) || strict_new_class(irep, d.index))
+      sources.each do |d|
+        cls = d.entry? ? nil : (BytecodeIR.literal_class(irep, d.index) || strict_new_class(irep, d.index))
         strict << cls
         trusted << (cls || (@trusted&.call(irep, idx, reg) ? 'Array' : nil))
       end
       [strict.include?(nil) ? UNKNOWN_SET : strict, trusted.include?(nil) ? UNKNOWN_SET : trusted]
     end
 
-    def literal_class(irep, d)
-      insn = irep.instructions[d]
-      case insn.op
-      when 'ARRAY' then 'Array'
-      when 'HASH' then 'Hash'
-      when 'STRING' then 'String'
-      when 'LOADSYM' then 'Symbol'
-      when 'LOADTRUE' then 'TrueClass'
-      when 'LOADFALSE' then 'FalseClass'
-      when 'LOADNIL' then NIL_CLASS
-      when 'LOADL'
-        entry = irep.pool[insn.pool_index]
-        entry.is_a?(Hash) ? (entry[:type] == :float ? 'Float' : 'Integer') : nil
-      else
-        insn.op.start_with?('LOADI') ? 'Integer' : nil
-      end
-    end
-
     # `Array.new(...)`/`Hash.new(...)`/`String.new(...)` on the untouched core constant.
     def strict_new_class(irep, d)
-      insn = irep.instructions[d]
+      insn = BytecodeIR.for(irep).source_at(d)
       return nil unless %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
 
       path = irep.constant_path(d - 1, insn.reg, skip_ops: READ_ONLY_OPCODE_SKIP)
