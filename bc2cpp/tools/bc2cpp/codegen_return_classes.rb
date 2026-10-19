@@ -277,7 +277,7 @@ class CodeGen
 
     writes = {}
     @rc_writes[irep.label] = writes
-    @rc_states[irep.label] = NumericFlow.states(irep, return_class_table_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
+    @rc_states[irep.label] = BytecodeIR::NumericClasses.states(irep, return_class_table_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
   end
 
   # POOL_SELF_CLASS: the oracle of the table-building and pool-growth flow. A method body whose `self` is a fixed class
@@ -343,7 +343,7 @@ class CodeGen
     @rc_scoped_writes[irep.label] = writes
     @rc_scoped_active_labels << irep.label
     building = true
-    @rc_scoped_states[irep.label] = NumericFlow.states(irep, return_class_method_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
+    @rc_scoped_states[irep.label] = BytecodeIR::NumericClasses.states(irep, return_class_method_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
   ensure
     @rc_scoped_active_labels&.delete(irep.label) if building
   end
@@ -398,16 +398,7 @@ class CodeGen
     joined = return_class_block_returns(irep, scoped: scoped)
     return NumericFlow::OTHER if joined.nil?
 
-    BytecodeIR.for(irep).exits.reduce(joined) do |acc, exit|
-      state = states[exit.index]
-      next acc unless state
-
-      acc | case exit.kind
-            when :value, :block_return then state[exit.reg.to_i] || NumericFlow::OTHER
-            when :nil then NumericFlow::NIL
-            else NumericFlow::OTHER
-            end
-    end
+    BytecodeIR::NumericClasses.returned_mask(irep, states, joined)
   end
 
   # The value a `return` inside a block nested in +irep+ hands back from the method (RETURN_BLK, at
@@ -416,16 +407,12 @@ class CodeGen
   # superset.
   def return_class_block_returns(irep, scoped: false)
     BytecodeIR.nested_bodies(irep).reduce(0) do |joined, child|
-      exits = BytecodeIR.for(child).exits.select { |exit| exit.kind == :block_return }
-      next joined if exits.empty?
+      next joined unless BytecodeIR::NumericClasses.block_returns?(child)
 
       states = scoped ? return_class_scoped_states(child) : return_class_states(child)
       return nil unless states
 
-      exits.reduce(joined) do |acc, exit|
-        state = states[exit.index]
-        state ? acc | (state[exit.reg.to_i] || NumericFlow::OTHER) : acc
-      end
+      joined | BytecodeIR::NumericClasses.block_return_mask(child, states)
     end
   end
 
@@ -770,22 +757,19 @@ class CodeGen
 
     oracle = ContextOracle.new(self, receiver, binding)
     writes = {}
-    states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars], writes)
+    states = BytecodeIR::NumericClasses.states(body, oracle, fixnum_proof_ctx(body)[:upvars], writes)
     return nil unless states
 
     block_returns = return_class_context_block_returns(body, states, writes)
     return nil if block_returns.nil?
 
-    BytecodeIR.for(body).exits.reduce(block_returns) do |joined, exit|
-      state = states[exit.index]
-      next joined unless state
-
-      joined | case exit.kind
-               when :value then state[exit.reg.to_i] || NumericFlow::OTHER
-               when :self then receiver
-               when :nil then NumericFlow::NIL
-               else NumericFlow::OTHER
-               end
+    BytecodeIR::NumericClasses.exit_mask(body, states, block_returns) do |exit, state|
+      case exit.op
+      when 'RETURN' then state[exit.reg] || NumericFlow::OTHER
+      when 'RETSELF' then receiver
+      when 'RETNIL' then NumericFlow::NIL
+      else NumericFlow::OTHER
+      end
     end
   end
 
@@ -811,15 +795,12 @@ class CodeGen
     # Depth first, so a child's frame is in +contexts+ before its own children read their captures from it.
     BytecodeIR.nested_bodies(body).reduce(0) do |joined, child|
       child_writes = {}
-      child_states = NumericFlow.states(child, oracle, fixnum_proof_ctx(child)[:upvars], child_writes)
+      child_states = BytecodeIR::NumericClasses.states(child, oracle, fixnum_proof_ctx(child)[:upvars], child_writes)
       contexts[child.label] = { states: child_states, writes: child_writes }
-      BytecodeIR.for(child).exits.reduce(joined) do |acc, exit|
-        next acc unless exit.kind == :block_return
-        return nil unless child_states
+      next joined unless BytecodeIR::NumericClasses.block_returns?(child)
+      return nil unless child_states
 
-        state = child_states[exit.index]
-        state ? acc | (state[exit.reg.to_i] || NumericFlow::OTHER) : acc
-      end
+      joined | BytecodeIR::NumericClasses.block_return_mask(child, child_states)
     end
   end
 

@@ -34,13 +34,13 @@ class CodeGen
   #     enclosing irep, so the walk must not step back out of it.
   #   - nested blocks writing an enclosing local: SETUPVAR compiles to a write
   #     of r<b> (inlined bodies) or *bc2cpp_upvar_<b> (BLOCK_FALLBACK), outside
-  #     this instruction list. Every SETUPVAR destination in the child subtree
-  #     (any level) is refused (opaque_regs).
+  #     this instruction list. A register some nested block's SETUPVAR reaches
+  #     at its level is refused (BytecodeIR.own_upvar_written_regs, opaque_regs).
   #   - a callee frame or a vm.c fallback send based below the register may
   #     overwrite it: refused (BytecodeIR::CALLEE_FRAME_OPS, ORIGIN_FRAME_OPS).
-  # Anything else declines and keeps the dual-path codegen. REGION_DOMINANCE
-  # (fixnum_proof_region_ok?) remains the single-path test of fixnum_interval,
-  # guarded_game_integer_range and return_write_dominates?.
+  # Anything else declines and keeps the dual-path codegen. The single-path
+  # walks (fixnum_interval, guarded_game_integer_range) ask
+  # BytecodeIR.write_dominates? per hop, as return_write_dominates? does.
   # ---------------------------------------------------------------------------
 
   # Opcodes a backward scan may STEP OVER: verified (ops.h, vm.c) to write at
@@ -67,100 +67,18 @@ class CodeGen
   # unbounded recursion could go exponential on long chains.
   FIXNUM_PROOF_MAX_DEPTH = 4
 
-  # Per-irep, memoized: entry addresses (goto targets and catch targets),
-  # protected-range addresses, SETUPVAR destinations, and (REGION_DOMINANCE)
-  # the branch-edge map and catch-target set.
+  # Per-irep, memoized: protected-range addresses, catch targets and the
+  # registers a nested block writes (BytecodeIR.own_upvar_written_regs).
   def fixnum_proof_ctx(irep)
     @fixnum_proof_ctx ||= {}
     return @fixnum_proof_ctx[irep.label] if @fixnum_proof_ctx.key?(irep.label)
 
     program = BytecodeIR.for(irep)
-    entries = jump_targets(irep).dup
-    catch_targets = program.handler_target_addrs.dup
-    entries.merge(catch_targets)
     # Inclusive end: the instruction after a range is refused too, which is
     # more than the VM's half-open range needs.
-    protected_addrs = program.handler_protected_addrs(inclusive_end: true).dup
-    edges = fixnum_proof_edge_sources(irep)
-    entries.merge(edges.keys)
     @fixnum_proof_ctx[irep.label] =
-      { entries: entries, protected: protected_addrs, upvars: subtree_upvar_written_regs(irep).freeze,
-        edge_sources: edges, catch_targets: catch_targets }
-  end
-
-  # REGION_DOMINANCE: target address -> addresses branching to it. Exactly five
-  # opcodes move pc within a frame (ops.h): JMP/JMPUW (S, target only) and
-  # JMPIF/JMPNOT/JMPNIL (BS, register then target). OP_ENTER does not branch
-  # (optional-argument dispatch is an ordinary JMP table after it).
-  # RETURN/RETURN_BLK/BREAK/STOP leave the frame; RAISEIF/ERR/EXCEPT reach a
-  # handler only through a catch entry, which has no source instruction, so
-  # catch targets always refuse.
-  # JMPUW is included although jump_targets omits it: the proof still runs in
-  # such a body during a compiles_clean? probe, and an unmodelled edge is the
-  # one miss this test cannot afford.
-  def fixnum_proof_edge_sources(irep)
-    edges = Hash.new { |h, k| h[k] = Set.new }
-    irep.instructions.each do |insn|
-      target = insn.branch_target
-      edges[target] << insn.addr if target
-    end
-    edges
-  end
-
-  # REGION_DOMINANCE: does the write at `w_idx` dominate the use at `u_idx`?
-  # The region [w_idx, u_idx] is contiguous (the walk only steps back, and
-  # addresses grow with index). The forward walk checked that nothing in
-  # (w_idx, u_idx] writes the register, so a path reaching the use can only have
-  # entered the region by falling into w_idx (the write ran) or by branching to
-  # a label inside (w_idx, u_idx] (skipping it). So W dominates U iff every
-  # source of every entry address inside the region lies within [lo, hi]. A
-  # source below lo skips the write; a source above hi is a back-edge that could
-  # bring a later write around to U.
-  #
-  #     x = 5          # W  -- LOADI_5
-  #     if cond        #    -- JMPNOT ... L1
-  #       ...
-  #     end            # L1:
-  #     y = x + 1      # U  -- ADD, operand x
-  #
-  # A loop wholly between W and U is admitted; a loop whose back-edge follows U
-  # is refused. A catch target, or an entry with no recorded in-edge (an
-  # unmodelled edge), refuses. `w_idx` -1 means "the method preamble wrote it":
-  # the region is the whole body up to the use, and back-edges from below still
-  # refuse.
-  def fixnum_proof_region_ok?(irep, ctx, w_idx, u_idx)
-    lo = irep.instructions[[w_idx, 0].max].addr
-    hi = irep.instructions[u_idx].addr
-    ((w_idx + 1)..u_idx).each do |k|
-      addr = irep.instructions[k].addr
-      next unless ctx[:entries].include?(addr)
-      return false if ctx[:catch_targets].include?(addr)
-
-      srcs = ctx[:edge_sources][addr]
-      return false if srcs.nil? || srcs.empty?
-      return false unless srcs.all? { |s| s >= lo && s <= hi }
-    end
-    true
-  end
-
-  # SETUPVAR destinations (operand B) anywhere in the child subtree. The level is
-  # ignored: over-collecting only costs a proof.
-  def subtree_upvar_written_regs(irep, acc = Set.new, seen = Set.new)
-    (irep.reps || []).each do |label|
-      next if seen.include?(label)
-
-      seen << label
-      child = @ireps[label]
-      next unless child
-
-      child.instructions.each do |insn|
-        next unless insn.op == 'SETUPVAR'
-
-        acc << insn.upvar_ref.first.to_s
-      end
-      subtree_upvar_written_regs(child, acc, seen)
-    end
-    acc
+      { protected: program.handler_protected_addrs(inclusive_end: true),
+        upvars: BytecodeIR.own_upvar_written_regs(irep), catch_targets: program.handler_target_addrs }
   end
 
   # FIXNUM_OPERAND_PROOF entry point (see the header). `reg` is a register
@@ -172,7 +90,7 @@ class CodeGen
   # reaching_definitions, which follows MOVE chains). Its barriers are this
   # proof's: an op outside the audited write list, a catch target or protected
   # instruction (the inclusive range end included) on the way, a register a
-  # nested block writes (the whole child subtree, opaque_regs), a callee frame
+  # nested block writes (own_upvar_written_regs, opaque_regs), a callee frame
   # or vm.c fallback that may overwrite the register, and the state cap. A
   # write that dominates the read is the one-definition case, so the old
   # single-path walk and its REGION_DOMINANCE test are subsumed.
@@ -294,10 +212,8 @@ class CodeGen
       !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')) ||
         fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
     end
-    irep.walk_writers(idx - 1, reg.to_s, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, barrier: unaudited,
-                                         follow_moves: true) do |insn, j, cur|
-      next nil unless fixnum_proof_region_ok?(irep, fixnum_proof_ctx(irep), j, idx)
-
+    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS,
+                                                    barrier: unaudited, follow_moves: true) do |insn, j, cur|
       case insn.op
       when /^LOADI/
         value = loadi_literal(insn)

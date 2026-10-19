@@ -332,10 +332,9 @@ class CodeGen
     # fallback body and the main loop reach compile_send through this ivar. nil
     # (no SDEF and no SCLASS+EXEC) makes devirt_blocked_name? always false;
     # :unknown blocks devirtualization of every name in this method.
-    # recognize_exec_fallback_regions is pure and is simply called again later.
-    if irep.instructions.any? { |i| i.op == 'SDEF' } || !recognize_exec_fallback_regions(irep).empty?
-      @runtime_installed_names =
-        runtime_installed_names_for(irep, recognize_exec_fallback_regions(irep)) || :unknown
+    exec_fallback_regions = recognize_exec_fallback_regions(irep)
+    if irep.instructions.any? { |i| i.op == 'SDEF' } || !exec_fallback_regions.empty?
+      @runtime_installed_names = runtime_installed_names_for(irep, exec_fallback_regions) || :unknown
     end
 
     # OPTIONAL_ARG_SUPPORT: replace the ENTER jump table with a `switch` on
@@ -450,7 +449,7 @@ class CodeGen
     # SCLASS+EXEC: `block_addr` is the SCLASS (where the replacement starts, so it
     # keeps any label; see JUMP_TARGET_GLUE_FIX) and the EXEC is suppressed with no
     # glue, like a BLOCK_FALLBACK sendb_addr.
-    recognize_exec_fallback_regions(irep).each do |region|
+    exec_fallback_regions.each do |region|
       next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:exec_addr])
 
       fn_result = emit_proc_fallback_fn(region, d)

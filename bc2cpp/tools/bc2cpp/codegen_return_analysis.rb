@@ -120,7 +120,7 @@ class CodeGen
     return false unless irep
 
     BytecodeIR.for(irep).exits.all? do |exit|
-      exit.kind == :value && exit.reg && proven_fixnum_operand?(irep, exit.index, exit.reg, d)
+      exit.kind == :value && exit.reg && proven_fixnum_operand?(irep, exit.index, exit.reg.to_s, d)
     end
   end
 
@@ -197,7 +197,7 @@ class CodeGen
     dominated = ->(w_idx, use_idx, r) { return_write_dominates?(irep, w_idx, use_idx, r) }
 
     BytecodeIR.for(irep).exits.all? do |exit|
-      reg = exit.reg
+      reg = exit.reg&.to_s
       exit.kind == :value && reg && straightline_return_reg?(irep, exit.index, reg) &&
         proven_array_operand?(irep, exit.index, reg, d.owner, mand, ivar_classes, arg_classes, dominated: dominated)
     end
@@ -226,7 +226,7 @@ class CodeGen
       case exit.kind
       # RETURN_BLK in a method body is a plain return (methods are strict procs).
       when :value, :block_return
-        sources = return_value_sources(irep, exit.index, exit.reg)
+        sources = return_value_sources(irep, exit.index, exit.reg&.to_s)
         return nil unless sources
 
         sources.each do |src|

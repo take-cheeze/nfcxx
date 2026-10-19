@@ -2,7 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
-require_relative 'symbol_flow'
+require_relative 'ir_symbol_flow'
 
 # YIELD_REACH (ADR 0283): a whole-program, by-name "may this code suspend the current Fiber?"
 # analysis over the ireps of a closed world. A compiled frame that sits between a Fiber's entry
@@ -476,7 +476,7 @@ class YieldReach
       return nil
     end
     if (universe = dispatch_send_universe(node, idx, dest))
-      # `send(*TABLE[i])` of a constant table whose stored values are all literal (SymbolFlow): the send
+      # `send(*TABLE[i])` of a constant table whose stored values are all literal (IrSymbolFlow): the send
       # reaches exactly the names of that table.
       universe.each { |name| node.calls << name }
       @reasons[:dispatch_table] += 1
@@ -493,16 +493,13 @@ class YieldReach
   def dispatch_send_universe(node, idx, dest)
     return nil unless @sound && dest
 
-    irep = node.irep
-    @preds ||= {}
-    preds = (@preds[irep.label] ||= SymbolFlow.predecessors(irep))
-    table = SymbolFlow.splat_table(irep, preds, idx, (dest.to_i + 1).to_s)
+    table = IrSymbolFlow.splat_table(node.irep, idx, (dest.to_i + 1).to_s)
     table && dispatch_universes[table]
   end
 
-  # { constant => names } for the program's dispatch tables whose premises SymbolFlow checks.
+  # { constant => names } for the program's dispatch tables whose premises IrSymbolFlow checks.
   def dispatch_universes
-    @dispatch_universes ||= SymbolFlow.dispatch_universes(
+    @dispatch_universes ||= IrSymbolFlow.dispatch_universes(
       @ireps, @nodes.values.select { |n| n.kind == :method }.to_h { |n| [n.label, n.name] }
     )
   end

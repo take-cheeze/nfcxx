@@ -1,16 +1,16 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Unit checks for SymbolFlow (tools/bc2cpp/symbol_flow.rb): the finite name set of a constant
-# dispatch table, and the premises that reject a table which could hold a non-literal name.
-# Each fixture is compiled by mrbc and analysed as a closed world.
+# Unit checks for IrSymbolFlow (tools/bc2cpp/ir_symbol_flow.rb, ADR 0450, ADR 0493): the finite name set of a
+# constant dispatch table, and the premises that reject a table which could hold a non-literal name. Each fixture
+# is compiled by mrbc and analysed as a closed world.
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/symbol_flow_check.rb
 
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/symbol_flow'
+require_relative '../../tools/bc2cpp/ir_symbol_flow'
 
 unless system(MRBC, '--version', out: File::NULL, err: File::NULL)
   puts '  SKIP: no host mrbc (set MRBC)'
@@ -23,8 +23,7 @@ check = lambda do |what, condition|
   failures << what unless condition
 end
 
-# The universe of table const in source, or nil when the premises reject it.
-def universe_of(source, const)
+def compiled(source)
   Dir.mktmpdir('symbol-flow-check-') do |dir|
     src = File.join(dir, 'fixture.rb')
     File.write(src, source)
@@ -38,7 +37,25 @@ def universe_of(source, const)
         names[irep.reps[target.value]] = insn.sym if target && insn.sym && irep.reps[target.value]
       end
     end
-    SymbolFlow.dispatch_universes(ireps, names)[const]
+    yield ireps, names
+  end
+end
+
+# The universe of table const in source, or nil when the premises reject it.
+def universe_of(source, const)
+  compiled(source) { |ireps, names| IrSymbolFlow.dispatch_universes(ireps, names)[const] }
+end
+
+# The table each `send(*...)` splat send of source reads, in instruction order.
+def splat_tables(source)
+  compiled(source) do |ireps, _|
+    ireps.values.flat_map do |irep|
+      irep.instructions.each_with_index.filter_map do |insn, idx|
+        next unless insn.sym == 'send' && insn.n_spec == '*'
+
+        [IrSymbolFlow.splat_table(irep, idx, (insn.reg.to_i + 1).to_s)]
+      end
+    end.flatten(1)
   end
 end
 
@@ -58,7 +75,8 @@ EOS_FIXTURE
 
 uni = universe_of(LITERAL_TABLE, 'TABLE')
 check.call('a table of literal entries has a finite universe', uni.is_a?(Set))
-check.call('the universe holds the literal names', uni&.superset?(Set['_lda', '_sta', 'lit']))
+check.call('the universe is exactly the stored names', uni == Set['_lda', '_sta', 'lit'])
+check.call('`send(*TABLE[i])` reads TABLE', splat_tables(LITERAL_TABLE) == ['TABLE'])
 
 runtime_symbol = LITERAL_TABLE.sub('TABLE[code] = [entry, :lit]', 'TABLE[code] = [entry.to_s.to_sym, :lit]')
 check.call('a table fed by to_sym is rejected (P5)', universe_of(runtime_symbol, 'TABLE').nil?)
@@ -74,6 +92,28 @@ outside_writer = LITERAL_TABLE + <<~'EOS_FIXTURE'
   end
 EOS_FIXTURE
 check.call('a table written from a second method is rejected (P1)', universe_of(outside_writer, 'TABLE').nil?)
+
+# Each of these lets :evil into the table where the premises do not look (ADR 0499 lists the ones ADR 0450's walk missed).
+argument = LITERAL_TABLE.sub('send(*TABLE[code])', 'fill(TABLE); send(*TABLE[code])')
+check.call('a table passed as an argument is rejected (P2)', universe_of(argument, 'TABLE').nil?)
+receiver = LITERAL_TABLE.sub('send(*TABLE[code])', 'TABLE.push([:evil]); send(*TABLE[code])')
+check.call('a table that is a send receiver is rejected (P2)', universe_of(receiver, 'TABLE').nil?)
+scoped = LITERAL_TABLE.sub('send(*TABLE[code])', 'Cpu::TABLE.clear; send(*TABLE[code])')
+check.call('a table read as Cpu::TABLE is rejected (P2)', universe_of(scoped, 'TABLE').nil?)
+element = LITERAL_TABLE.sub('send(*TABLE[code])', 'TABLE[code][0] = :evil; send(*TABLE[code])')
+check.call('a table whose element is written is rejected (P2)', universe_of(element, 'TABLE').nil?)
+spelled = LITERAL_TABLE.sub('send(*TABLE[code])', 'send(:op, code, :evil); send(*TABLE[code])')
+check.call('a writer named as data is rejected (P2)', universe_of(spelled, 'TABLE').nil?)
+
+splat_call = LITERAL_TABLE.sub('op(2, :_sta)', 'args = [2, :_sta]; op(*args)')
+check.call('a splat call of the writer is rejected (P4)', universe_of(splat_call, 'TABLE').nil?)
+mutated = LITERAL_TABLE.sub('TABLE[code] = [entry, :lit]', 'row = [entry]; row.concat([:x]); TABLE[code] = row')
+check.call('an entry mutated by a non-core mutator is rejected (P5)', universe_of(mutated, 'TABLE').nil?)
+pushed = LITERAL_TABLE.sub('TABLE[code] = [entry, :lit]', 'row = [entry]; row << :pushed; TABLE[code] = row')
+check.call('an entry grown by << keeps a finite universe', universe_of(pushed, 'TABLE') == Set['_lda', '_sta', 'pushed'])
+
+prefixed = LITERAL_TABLE.sub('send(*TABLE[code])', 'send(:wait, *TABLE[code])')
+check.call('`send(:name, *TABLE[i])` is not a table send', splat_tables(prefixed) == [nil])
 
 if failures.empty?
   puts 'bc2cpp symbol flow check: PASS'

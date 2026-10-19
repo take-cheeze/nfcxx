@@ -31,7 +31,7 @@ mixed = irep_of([insn(0, 'JMPNOT', "R1\t6"), insn(4, 'RETURN', 'R2'), insn(6, 'J
 exits = BytecodeIR.for(mixed).exits
 check.call('every frame exit, in order, with its kind', exits.map(&:kind) == %i[value nil self] &&
                                                        exits.map(&:index) == [1, 3, 4])
-check.call('RETURN hands back its register; RETNIL none', exits.first.reg == '2' && exits[1].reg.nil?)
+check.call('RETURN hands back its register; RETNIL none', exits.first.reg == 2 && exits[1].reg.nil?)
 check.call('exit? asks by kind', BytecodeIR.for(mixed).exit?(:value) && !BytecodeIR.for(mixed).exit?(:block_return))
 
 puts '-- nested bodies'
