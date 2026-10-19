@@ -1,8 +1,10 @@
 # C++ language feature coverage for nfcxx: plan
 
-Status: plan only. Nothing here is implemented or run. It was written from reading the cpprefjp markdown at the
-commit below and from search results for the other sources; the full compiler status pages could not be fetched
-from this session, so their details are not checked.
+Status: the C++11/C++14 pilot is implemented and run. See [the matrix](cpp-feature-matrix.md) and
+[the runner documentation](../../tests/cpp-features/README.md). The parser covers all 246 checklist rows;
+51 independently written probes pass on qbe, gcc and Path B in their own standard modes. Later standards,
+next-mode reruns for partial support and vendor cross-checks remain to do. The source-access notes below
+describe the original planning session.
 
 ## Goal
 
@@ -34,8 +36,8 @@ Caveats on the cpprefjp data, from its own `implementation.md`:
 - Cells can say "partial", carry a footnote, or be empty. An empty cell means the page has no entry, not that the
   feature is unsupported.
 
-Size of the checklist, counted from the table rows by pattern (verify before use): C++11 41, C++14 10, C++17 40,
-C++20 58, C++23 34, C++26 44, C++29 19; about 246 papers in total.
+Size of the checklist, verified by `scripts/cpp-feature-checklist.rb`: C++11 41, C++14 10, C++17 40,
+C++20 58, C++23 34, C++26 44, C++29 19; 246 feature rows in total (some papers span several rows).
 
 ## Non-goals
 
@@ -76,7 +78,9 @@ C++20 58, C++23 34, C++26 44, C++29 19; about 246 papers in total.
 
 ## Next steps
 
-1. Decide the open items above.
-2. Write the parser and the probe layout (step 1 and the start of step 2), and run them on C++11 and C++14 first,
-   since those tables are small and the probes are the easiest to check by hand.
-3. Run the remaining standards in order.
+1. Extend the independently written probes to C++17, then the remaining standards in order.
+2. Add next-mode reruns for upstream partial-support notes; the pilot measures each feature's own mode only.
+3. Cross-check vendor status pages before drawing support-gap conclusions from upstream version cells.
+
+The pilot commits probes after running them, preserves separate rows for a paper with several features,
+and attributes the generated version cells under cpprefjp's CC BY 4.0 license. Draft rows remain inventory only.
