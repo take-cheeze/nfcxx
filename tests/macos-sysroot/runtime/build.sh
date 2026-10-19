@@ -83,7 +83,9 @@ rm -f libnfcxx-darwin-rt.a
 # copies would duplicate or undercut them (see above), and the stdlib_typeinfo and private_typeinfo members would duplicate
 # EDG's ___dynamic_cast. Members that libC.a still owns (stdlib_new_delete, ...) are built but not archived, as before.
 clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/xlocale_shim.c" -o xlocale_shim.o
-llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o eh_glue.o cxa_default_handlers.o
+# The classic rune table libc++ reads for ctype<char> on Apple (locale.cpp under _LIBCPP_HAS_DEFAULTRUNELOCALE).
+clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/rune_default.c" -o rune_default.o
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o rune_default.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o eh_glue.o cxa_default_handlers.o
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 
 # libc++ itself, built from LLVM's own sources at the pin with the cross clang (not a hand-written subset), into a
@@ -93,19 +95,9 @@ echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 # template has no placeholders), so the copy is made here and its directory is searched before the libc++ headers.
 mkdir -p libcxx-gen
 cp "$src/libcxx/vendor/llvm/default_assertion_handler.in" libcxx-gen/__assertion_handler
-# __config defines _LIBCPP_HAS_DEFAULTRUNELOCALE for Apple, so locale.cpp would need Apple's _DefaultRuneLocale (a data
-# layout that POSIX does not define). The copy below replaces that define with _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE, which
-# makes libc++ use its own public default table for the classic ctype. The replacement must match exactly once.
+# The copy keeps the headers in one place for the libc++ build below. __config is used as LLVM ships it: on Apple it
+# defines _LIBCPP_HAS_DEFAULTRUNELOCALE, and locale.cpp then reads _DefaultRuneLocale, which rune_default.c provides.
 rm -rf libcxx-include && cp -R "$src/libcxx/include" libcxx-include
-python3 - "$src/libcxx/include/__config" libcxx-include/__config <<'PY'
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-block = "#  if defined(__APPLE__) || defined(__FreeBSD__)\n#    define _LIBCPP_HAS_DEFAULTRUNELOCALE\n#  endif\n"
-assert text.count(block) == 1, "rune-table block not found exactly once"
-text = text.replace(block, "#  define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE\n", 1)
-open(dst, "w").write(text)
-PY
 cxxlib=(-nostdinc -nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$out/libcxx-gen" -isystem "$out/libcxx-include" -isystem "$NFCXX_MACOS_SYSROOT"
         -isystem "$(clang -print-resource-dir)/include" -I "$src/libcxxabi/include" -I "$src/libcxx/src")
 # -mmacosx-version-min=11.0: aligned new/delete are available from 10.13, and arm64 Darwin starts at 11.0.
@@ -121,11 +113,8 @@ cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDIN
 # exception.cpp is left out for now. Its std::exception family would replace EDG's exception.o and bad_alloc.o, but EDG's
 # typeinfo.o (bad_cast) calls std::exception's constructors out-of-line, and libc++abi's stdlib_exception.o does not define
 # them (the libc++ headers make them inline), so those members cannot move without undefined references. The terminate
-# family is the part that moves (libc_drop below).
-# locale.cpp is excluded too: it needs the multibyte _l functions and MB_CUR_MAX (__mb_cur_max), which the clean-room
-# headers do not define, and Apple's default rune table, which is not public. The link takes the locale symbols from the
-# Mac's libc++ at run time, which is how the programs that link today resolve them.
-libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp exception.cpp locale.cpp "
+# family is the part that moves (libc_drop below). locale.cpp is built: its rune table is rune_default.c above.
+libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp exception.cpp "
 mkdir -p libcxx-obj
 rm -f libc++-darwin.a libcxx-obj/*.o
 cxxlib_fail=0
