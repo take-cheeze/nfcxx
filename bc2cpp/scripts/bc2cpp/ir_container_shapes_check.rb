@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# IR container shapes (docs/bc2cpp-ir-containers.md, ADR 0493) on hand-built instruction lists: the container literal
+# IR container shapes (docs/bc2cpp-ir-containers.md, ADR 0502) on hand-built instruction lists: the container literal
 # an instruction builds, the producers of a register through a join, the literal value classes, the straight-line
 # window SEALED_HASH_IVAR walks, and the element join the layouts take over every producer.
 #

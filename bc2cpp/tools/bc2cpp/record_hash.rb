@@ -670,34 +670,11 @@ module RecordHash
       strict = Set.new
       trusted = Set.new
       sources.each do |d|
-        cls = d.entry? ? nil : (literal_class(irep, d.index) || strict_new_class(irep, d.index))
+        cls = d.entry? ? nil : (BytecodeIR.literal_class(irep, d.index) || strict_new_class(irep, d.index))
         strict << cls
         trusted << (cls || (@trusted&.call(irep, idx, reg) ? 'Array' : nil))
       end
       [strict.include?(nil) ? UNKNOWN_SET : strict, trusted.include?(nil) ? UNKNOWN_SET : trusted]
-    end
-
-    def literal_class(irep, d)
-      BytecodeIR.container_shape('RecordHash.literal_class', -> { [irep.label, d] },
-                                 -> { legacy_literal_class(irep, d) }, -> { BytecodeIR.literal_class(irep, d) })
-    end
-
-    def legacy_literal_class(irep, d)
-      insn = irep.instructions[d]
-      case insn.op
-      when 'ARRAY' then 'Array'
-      when 'HASH' then 'Hash'
-      when 'STRING' then 'String'
-      when 'LOADSYM' then 'Symbol'
-      when 'LOADTRUE' then 'TrueClass'
-      when 'LOADFALSE' then 'FalseClass'
-      when 'LOADNIL' then NIL_CLASS
-      when 'LOADL'
-        entry = irep.pool[insn.pool_index]
-        entry.is_a?(Hash) ? (entry[:type] == :float ? 'Float' : 'Integer') : nil
-      else
-        insn.op.start_with?('LOADI') ? 'Integer' : nil
-      end
     end
 
     # `Array.new(...)`/`Hash.new(...)`/`String.new(...)` on the untouched core constant.

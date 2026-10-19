@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 
-# Container shapes on the IR (ADR 0493): the literal that built the Array or Hash a register holds, the registers
+# Container shapes on the IR (ADR 0502): the literal that built the Array or Hash a register holds, the registers
 # its elements and pairs came from, and the value class each producer of a register gives. RecordHash,
 # ArrayElementLayout / HashElementLayout and SEALED_HASH_IVAR read these instead of indexing irep.instructions.
 module BytecodeIR
@@ -151,44 +151,5 @@ module BytecodeIR
   # Program#literal_class of the instruction at +index+ of +irep+.
   def self.literal_class(irep, index)
     self.for(irep).literal_class(index, irep.pool)
-  end
-end
-
-module BytecodeIR
-  # Stage switch for the move onto these facts: BC2CPP_IR_CONTAINER_SHAPES=1 answers from the IR, `compare` answers
-  # from the legacy walk and reports every query the two answer differently (once each), anything else is legacy.
-  # A query nested in one side stays on that side.
-  def self.container_shape(kind, where, legacy, ir)
-    side = Thread.current[:bc2cpp_container_side]
-    return side == :ir ? ir.call : legacy.call if side
-
-    mode = ENV['BC2CPP_IR_CONTAINER_SHAPES']
-    return ir.call if mode == '1'
-    return legacy.call unless mode == 'compare'
-
-    old = container_side(:legacy, legacy)
-    new = container_side(:ir, ir)
-    unless container_answer(old) == container_answer(new)
-      line = "IR_CONTAINER_DIFF #{kind} #{where.call.inspect}: legacy=#{container_answer(old).inspect} " \
-             "ir=#{container_answer(new).inspect}"
-      warn line if (@container_diffs ||= Set.new).add?(line)
-    end
-    old
-  end
-
-  def self.container_side(side, body)
-    Thread.current[:bc2cpp_container_side] = side
-    body.call
-  ensure
-    Thread.current[:bc2cpp_container_side] = nil
-  end
-
-  # Comparable form of an answer (an irep compares by label, a list as a set).
-  def self.container_answer(value)
-    case value
-    when Array then value.map { |v| container_answer(v) }.sort_by(&:to_s)
-    when Set then value.map { |v| container_answer(v) }.sort_by(&:to_s)
-    else value.respond_to?(:label) && value.respond_to?(:instructions) ? value.label : value
-    end
   end
 end
