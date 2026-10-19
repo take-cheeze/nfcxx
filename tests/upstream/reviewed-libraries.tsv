@@ -1,0 +1,10 @@
+suite	id	standard	source	oracle	review
+libcxx	array-size	c++14	clang/libcxx/test/std/containers/sequences/array/array.size/size.pass.cpp	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+libcxx	vector-empty	c++14	clang/libcxx/test/std/containers/sequences/vector/vector.capacity/empty.pass.cpp	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+libcxx	make-pair	c++14	clang/libcxx/test/std/utilities/utility/pairs/pairs.spec/make_pair.pass.cpp	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+libstdcxx	pair-ref-assign	c++11	gcc/libstdc++-v3/testsuite/20_util/pair/ref_assign.cc	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+libstdcxx	pair-object	c++11	gcc/libstdc++-v3/testsuite/20_util/pair/4.cc	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+microsoft-stl	pair-move	c++14	microsoft-stl/tests/std/tests/Dev11_0302476_pair_move/test.cpp	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+microsoft-stl	stream-reading	c++14	microsoft-stl/tests/std/tests/Dev08_496675_iostream_int_reading/test.cpp	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+microsoft-stl	nested-bind	c++14	microsoft-stl/tests/std/tests/Dev09_152755_tr1_nested_bind/test.cpp	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.
+microsoft-stl	array-compare	c++20	microsoft-stl/tests/std/tests/P1023R0_constexpr_for_array_comparisons/test.cpp	exit	Reviewed single-source runtime assertions; local libstdc++ only, no vendor matrix claim.

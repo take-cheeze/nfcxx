@@ -51,6 +51,9 @@ void *__nfcxx_sycl_closure(void);     // the closure object, copied by the host
 void *__nfcxx_sycl_local_base(void);  // the work-group memory (local_accessor storage)
 void *__nfcxx_sycl_scratch(void);     // 256 words of work-group memory kept for the group algorithms
 void __nfcxx_sycl_barrier(void);
+// memory fence (OpMemoryBarrier in the OpenCL module): order is a memory_order value and scope a memory_scope value, both
+// literals at the call (a non-literal is refused by the emitter)
+void __nfcxx_sycl_fence(int order, int scope);
 // sub-group shuffles (OpGroupNonUniformShuffle, ShuffleXor in the OpenCL module): the word of lane src, of lane (lane ^ mask)
 unsigned __nfcxx_sycl_sg_shuffle_u32(unsigned w, unsigned src);
 unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
@@ -100,6 +103,12 @@ float __nfcxx_sycl_atomic_fmax(void *p, float v);
 #include <ucontext.h>
 #include <type_traits>
 #include <math.h>
+
+// clang's __builtin_assume(cond) is an optimizer hint ggml-sycl's flash-attention kernels use (fattn-vec.hpp, fattn-common.hpp).
+// The front end here has no such builtin; dropping the hint changes no value.
+#ifndef __builtin_assume
+#define __builtin_assume(cond) ((void) 0)
+#endif
 
 #define SYCL_LANGUAGE_VERSION 202011
 #define CL_SYCL_LANGUAGE_VERSION 202011
@@ -484,6 +493,17 @@ template <int D> inline void group_barrier(const group<D> &, memory_scope = memo
   __nfcxx_sycl_barrier();
 #else
   detail::barrier_on_host();
+#endif
+}
+
+// atomic_fence: a fence at the given order and scope. On the device it is OpMemoryBarrier (the OpenCL memory model's
+// work-group or device fence). On the host it is a no-op, as barrier_on_host is.
+inline void atomic_fence(memory_order order, memory_scope scope) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __nfcxx_sycl_fence(static_cast<int>(order), static_cast<int>(scope));
+#else
+  (void) order;
+  (void) scope;
 #endif
 }
 
@@ -2054,6 +2074,7 @@ template <class T> T *aligned_alloc_host(size_t align, size_t count, const queue
 template <class T> T *malloc(size_t count, const queue &, usm::alloc k) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), detail::kind_of(k)); }
 inline void *malloc_device(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 0); }
 inline void *malloc_shared(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 1); }
+inline void *malloc_shared(size_t bytes, const device &, const context &) { return detail::usm_malloc(bytes, 16, 1); }
 inline void *malloc_host(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 2); }
 inline void *malloc(size_t bytes, const queue &, usm::alloc k) { return detail::usm_malloc(bytes, 16, detail::kind_of(k)); }
 inline void free(void *p, const queue &) { if (p) detail::backend_usm_free(p); }
@@ -2096,6 +2117,8 @@ template <class T, int N> class vec {
   }
   T &operator[](int i) { return v_[i]; }
   const T &operator[](int i) const { return v_[i]; }
+  // a one-element vector is usable as its element (SYCL 2020: vec<T,1> converts to T)
+  template <int M = N, class = detail::enable_if_t<(M == 1)>> operator T() const { return v_[0]; }
   static constexpr size_t size() { return N; }
   T &x() { return v_[0]; }
   T &y() { static_assert(N > 1, "y"); return v_[1]; }
@@ -2128,8 +2151,21 @@ template <class T, int N> class vec {
   vec &operator-=(const vec &b) { for (int i = 0; i < N; i++) v_[i] -= b.v_[i]; return *this; }
   vec &operator*=(const vec &b) { for (int i = 0; i < N; i++) v_[i] *= b.v_[i]; return *this; }
   vec &operator/=(const vec &b) { for (int i = 0; i < N; i++) v_[i] /= b.v_[i]; return *this; }
-  friend bool operator==(const vec &a, const vec &b) { for (int i = 0; i < N; i++) if (!(a.v_[i] == b.v_[i])) return false; return true; }
-  friend bool operator!=(const vec &a, const vec &b) { return !(a == b); }
+  // SYCL 2020: a relational operator on vectors compares lane by lane and returns a vector of the signed integer type of
+  // the same width, -1 for a true lane and 0 for a false one (dpct's vectorized_binary relies on this shape).
+  using mask_elem = typename std::conditional<sizeof(T) == 1, int8_t,
+                    typename std::conditional<sizeof(T) == 2, int16_t,
+                    typename std::conditional<sizeof(T) == 4, int32_t, int64_t>::type>::type>::type;
+  friend vec<mask_elem, N> operator==(const vec &a, const vec &b) {
+    vec<mask_elem, N> r;
+    for (int i = 0; i < N; i++) r[i] = (a.v_[i] == b.v_[i]) ? (mask_elem)-1 : (mask_elem)0;
+    return r;
+  }
+  friend vec<mask_elem, N> operator!=(const vec &a, const vec &b) {
+    vec<mask_elem, N> r;
+    for (int i = 0; i < N; i++) r[i] = (a.v_[i] != b.v_[i]) ? (mask_elem)-1 : (mask_elem)0;
+    return r;
+  }
 
  private:
   static constexpr int storage = detail::vec_store<N>::n;
@@ -2299,6 +2335,47 @@ inline float clamp(float x, float lo, float hi) { return detail::m_clamp(x, lo, 
 inline float abs(float x) { return NFCXX_SYCL_FN1(detail::M_FABS, x); }
 inline int abs(int x) { return x < 0 ? -x : x; }
 
+// classification of a binary32 value by arithmetic alone (no library call for the device to lower): x - x is 0 for a finite
+// x and NaN for an infinity. isnan is in lib/sycl-ggml/sycl/half_type.hpp.
+inline bool isinf(float x) { return x == x && (x - x) != 0.0f; }
+inline bool isfinite(float x) { return (x - x) == 0.0f; }
+
+// add_sat and sub_sat (SYCL 2020 integer saturating arithmetic): the result clamped to the range of T. dpct's sub_sat functor
+// (dpct/helper.hpp) calls sycl::sub_sat on the lanes of a vectorized binary op, so every integer type reaches here.
+template <class T, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline T sub_sat(T x, T y) {
+  if constexpr (std::is_unsigned<T>::value) {
+    return x > y ? (T)(x - y) : (T)0;
+  } else {
+    if (y > 0 && x < std::numeric_limits<T>::min() + y) return std::numeric_limits<T>::min();
+    if (y < 0 && x > std::numeric_limits<T>::max() + y) return std::numeric_limits<T>::max();
+    return (T)(x - y);
+  }
+}
+// on vectors: lane by lane (dpct's vectorized_binary passes sycl::char4 and friends)
+template <class T, int N, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline vec<T, N> sub_sat(const vec<T, N> &x, const vec<T, N> &y) {
+  vec<T, N> r;
+  for (int i = 0; i < N; i++) r[i] = sub_sat(x[i], y[i]);
+  return r;
+}
+template <class T, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline T add_sat(T x, T y) {
+  if constexpr (std::is_unsigned<T>::value) {
+    return (T)(x + y) < x ? std::numeric_limits<T>::max() : (T)(x + y);
+  } else {
+    if (y > 0 && x > std::numeric_limits<T>::max() - y) return std::numeric_limits<T>::max();
+    if (y < 0 && x < std::numeric_limits<T>::min() - y) return std::numeric_limits<T>::min();
+    return (T)(x + y);
+  }
+}
+template <class T, int N, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline vec<T, N> add_sat(const vec<T, N> &x, const vec<T, N> &y) {
+  vec<T, N> r;
+  for (int i = 0; i < N; i++) r[i] = add_sat(x[i], y[i]);
+  return r;
+}
+
 // erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). float runs as the device
 // builtins M_ERF, M_EXPM1, M_LOG1P (OpenCL.std erf, expm1, log1p; the SPIR-V emitter lowers them). double runs as the same
 // builtins on the double form __nfcxx_sycl_fn1_f64 (OpenCL.std on Float64). On the host these are the C library's.
@@ -2364,6 +2441,26 @@ inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<
 inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
 inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
 namespace experimental {
+// The device architectures ggml-sycl names (gpu_arch in sycl_hw.hpp). The values are the ones the oneAPI runtime reports
+// (device_architecture.def), so an architecture read from the runtime compares equal to these. Only the Intel GPUs that the
+// backend mentions are listed.
+enum class architecture : uint64_t {
+  intel_gpu_bdw = 0x0000000200000000, intel_gpu_skl = 0x0000000240000900, intel_gpu_kbl = 0x0000000240400900,
+  intel_gpu_cfl = 0x0000000240800900, intel_gpu_apl = 0x0000000240c00000, intel_gpu_glk = 0x0000000241000000,
+  intel_gpu_whl = 0x0000000241400000, intel_gpu_aml = 0x0000000241800000, intel_gpu_cml = 0x0000000241c00000,
+  intel_gpu_icllp = 0x00000002c0000000, intel_gpu_ehl = 0x00000002c0800000, intel_gpu_tgllp = 0x0000000300000000,
+  intel_gpu_rkl = 0x0000000300400000, intel_gpu_adl_s = 0x0000000300800000, intel_gpu_adl_p = 0x0000000300c00000,
+  intel_gpu_adl_n = 0x0000000301000000, intel_gpu_dg1 = 0x0000000302800000, intel_gpu_acm_g10 = 0x000000030dc00800,
+  intel_gpu_acm_g11 = 0x000000030e000500, intel_gpu_acm_g12 = 0x000000030e400000, intel_gpu_pvc = 0x000000030f000700,
+  intel_gpu_pvc_vg = 0x000000030f400700, intel_gpu_mtl_u = 0x0000000311800400, intel_gpu_mtl_h = 0x0000000311c00400,
+  intel_gpu_arl_h = 0x0000000312800400, intel_gpu_bmg_g21 = 0x0000000500400400, intel_gpu_bmg_g31 = 0x0000000500800000,
+  intel_gpu_lnl_m = 0x0000000501000400, intel_gpu_ptl_h = 0x0000000780000400, intel_gpu_ptl_u = 0x0000000780400100,
+  intel_gpu_wcl = 0x0000000780c00000,
+  // aliases of the entries above (device_architecture.def)
+  intel_gpu_dg2_g10 = intel_gpu_acm_g10, intel_gpu_dg2_g11 = intel_gpu_acm_g11, intel_gpu_dg2_g12 = intel_gpu_acm_g12,
+  intel_gpu_icl = intel_gpu_icllp, intel_gpu_tgl = intel_gpu_tgllp, intel_gpu_bxt = intel_gpu_apl,
+};
+
 // The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
 #define NFCXX_SYCL_BF16_FN1(name) \
   inline bfloat16 name(bfloat16 x) { return bfloat16(::sycl::name(static_cast<float>(x))); }

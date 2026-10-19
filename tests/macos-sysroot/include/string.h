@@ -32,6 +32,7 @@ char *strstr(const char *, const char *);
 char *strtok(char *restrict, const char *restrict);
 void *memset(void *, int, size_t);
 char *strerror(int);
+int strerror_r(int, char *, size_t);  /* POSIX.1-2008 XSI variant: returns int */
 size_t strlen(const char *);
 char *strdup(const char *);
 char *strndup(const char *, size_t);

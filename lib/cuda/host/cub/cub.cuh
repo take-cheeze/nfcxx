@@ -41,4 +41,9 @@ public:
 struct DeviceScan {
   template <typename... Args> static int InclusiveSum(Args &&...) { return 0; }
 };
+// Device-wide reduction: a host function of ggml-cuda (mean.cu, sum.cu) calls it for a whole row. It is declared
+// without a body, so a host program that calls it fails at link time rather than computing nothing.
+struct DeviceReduce {
+  template <typename... Args> static int Sum(Args &&...);
+};
 }  // namespace cub

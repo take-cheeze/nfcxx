@@ -1,0 +1,6 @@
+suite	url	commit	paths
+gcc	https://github.com/gcc-mirror/gcc.git	5115c7e447fc07457443df874bf57840e8316d5f	gcc/testsuite contrib libstdc++-v3 config include libgcc
+clang	https://github.com/llvm/llvm-project.git	3623fe661ae35c6c80ac221f14d85be76aa870f1	clang llvm/utils llvm/include llvm/cmake clang-tools-extra/clang-tidy/tool libcxx libcxxabi libunwind runtimes cmake libc
+llvm-test-suite	https://github.com/llvm/llvm-test-suite.git	86553dfbe141d8246e8ab2662e9898b2a25cdf3a	SingleSource MultiSource cmake litsupport tools
+cpprefjp	https://github.com/cpprefjp/site.git	213f89dfff08e0e07152d165cdd779fe20310cb2	lang reference
+microsoft-stl	https://github.com/microsoft/STL.git	b6f01e438b68ee497f9c08313e49d12bb2f0d8e0	tests stl cmake tools

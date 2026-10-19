@@ -31,7 +31,9 @@ while [ $i -lt ${#args[@]} ]; do
     -std=c++*) std=--c++${arg#-std=c++} ;;
     -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
-    -W*|--diag_*) user_opts+=("$arg") ;;                     # diagnostic options (-Wno-narrowing, --diag_warning=...) reach cpfe
+    --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
+    -Wno-narrowing) user_opts+=(--diag_warning=narrowing_conversion) ;;   # as nfcxx: a narrowing is a warning
+    -W*) ;;                                                  # other warnings do not change the object code
     *) files+=("$arg") ;;
   esac
   i=$((i + 1))

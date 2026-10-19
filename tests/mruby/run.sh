@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # mruby scripting check (docs/notes/mruby-scripting.md): every script ported from Python to mruby must
-# give byte-identical output to the Python original on real inputs. The Python originals live on as the
-# oracles in tests/mruby/oracle/ (they are no longer used by the build).
-#   1. scripts/weak-symbols.{py,rb}: the assembly QBE produces for generated C of several tests/cases.
-#   2. tests/hexagon/flatlink.{py,rb}: Hexagon objects (clang, if it has the hexagon target) built from
+# give byte-identical output to the Python original on real inputs. The oracles in tests/mruby/oracle/ are the mruby
+# ports of those originals (the Python files were verified against them and deleted; see the headers there). Each
+# production script is compared with its oracle.
+#   1. scripts/weak-symbols.rb (oracle tests/mruby/oracle/weak-symbols.rb): the assembly QBE produces for generated C of several tests/cases.
+#   2. tests/hexagon/flatlink.rb (oracle tests/mruby/oracle/flatlink.rb): Hexagon objects (clang, if it has the hexagon target) built from
 #      the generated C of several tests/cases and the HVX kernel; output image, stderr and exit status.
-#   3. scripts/pathb-qbe-emit.{py,rb}: the QBE IL (stdout), stderr text and exit status over every IR in
+#   3. scripts/pathb-qbe-emit.rb (oracle tests/mruby/oracle/pathb-qbe-emit.rb): the QBE IL (stdout), stderr text and exit status over every IR in
 #      tests/pathb-ir (goldens), tests/mruby/pathb-edge (hand-written IR: constants, floats, data, every
 #      refusal and error path) and, when the Path B harness exists, the IR of tests/pathb-qbe/{cases,multi,
 #      traps} and tests/cases; plus --no-prune, stdin, usage errors and --append-weak.
-#   4. scripts/qbe-prep.{py,rb}: tests/mruby/qbe-prep.sh (its own header says what it compares).
-#   5. scripts/qbe2cil.{py,rb}: tests/mruby/qbe2cil.sh (the JSON fragment and the exit status over the QBE IL fixtures).
-#   6. scripts/pathb-cil-emit.{py,rb}: tests/mruby/pathb-cil-emit.sh (the JSON fragment, stdout, stderr and status).
-#   6. scripts/cil-link.{py,rb}: tests/mruby/cil-link.sh (the CIL text, the exit status and the output of the linked
+#   4. scripts/qbe-prep.rb (oracle tests/mruby/oracle/qbe-prep.rb): tests/mruby/qbe-prep.sh (its own header says what it compares).
+#   5. scripts/qbe2cil.rb (the Python oracle tests/mruby/oracle/qbe2cil.py): tests/mruby/qbe2cil.sh (the JSON fragment and the exit status over the QBE IL fixtures).
+#   6. scripts/pathb-cil-emit.rb (the Python oracle tests/mruby/oracle/pathb-cil-emit.py): tests/mruby/pathb-cil-emit.sh (the JSON fragment, stdout, stderr and status).
+#   7. scripts/cil-link.rb (the Python oracle tests/mruby/oracle/cil-link.py): tests/mruby/cil-link.sh (the CIL text, the exit status and the output of the linked
 #      programs, over the fragments of tests/cil/cases and tests/pathb-cil/cases, and hand-written fragments).
 # Parts whose tools are missing (EDG, QBE, hexagon clang, the Path B harness) are skipped with a message.
 #   CLANG (default clang)   MRB (an existing mruby executable; default build/mruby-tool/bin/mruby)
@@ -22,7 +23,6 @@ root=$PWD; oracle=$root/tests/mruby/oracle; clang=${CLANG:-clang}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0; skip=0
 
-command -v python3 >/dev/null || { echo "SKIP mruby: python3 not installed"; exit 0; }
 if [ ! -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ]; then
   command -v ruby >/dev/null || { echo "SKIP mruby: ruby (needed to build mruby) not installed"; exit 0; }
   "$root/scripts/setup-mruby.sh" || { echo "FAIL mruby: setup-mruby.sh failed"; exit 1; }
@@ -55,12 +55,12 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
        ! "$root/build/qbe/qbe" "$tmp/$n.ssa" >"$tmp/$n.s" 2>/dev/null; then
       report skip "weak-symbols $n: QBE pipeline failed"; continue
     fi
-    cp "$tmp/$n.s" "$tmp/$n.py.s"; cp "$tmp/$n.s" "$tmp/$n.rb.s"
-    python3 "$oracle/weak-symbols.py" "$tmp/$n.prep.c" "$tmp/$n.py.s"
+    cp "$tmp/$n.s" "$tmp/$n.orc.s"; cp "$tmp/$n.s" "$tmp/$n.rb.s"
+    "$mrb" "$oracle/weak-symbols.rb" "$tmp/$n.prep.c" "$tmp/$n.orc.s"
     "$mrb" "$root/scripts/weak-symbols.rb" "$tmp/$n.prep.c" "$tmp/$n.rb.s"
-    k=$(grep -c '^\.weak ' "$tmp/$n.py.s")
-    if cmp -s "$tmp/$n.py.s" "$tmp/$n.rb.s"; then report ok "weak-symbols $n ($k .weak lines identical)"; weak_total=$((weak_total + k))
-    else report fail "weak-symbols $n: output differs"; diff "$tmp/$n.py.s" "$tmp/$n.rb.s" | head -5; fi
+    k=$(grep -c '^\.weak ' "$tmp/$n.orc.s")
+    if cmp -s "$tmp/$n.orc.s" "$tmp/$n.rb.s"; then report ok "weak-symbols $n ($k .weak lines identical)"; weak_total=$((weak_total + k))
+    else report fail "weak-symbols $n: output differs"; diff "$tmp/$n.orc.s" "$tmp/$n.rb.s" | head -5; fi
   done
   # The comparison must not be vacuous.
   if [ $weak_total -eq 0 ]; then report fail "weak-symbols: no input produced a .weak line"; fi
@@ -80,19 +80,19 @@ extern __inline__ __attribute__((__always_inline__)) char *ext_inline(int n) { r
 static __inline__ int static_inline(int n) { return n; }
 EOF
   printf 'cmp_id:\nlits:\nretfn:\nretfn_weak:\next_inline:\nstatic_inline:\nalpha:\n\tret\nbeta:\n\tret\ngamma_decl:\nobj:\ndelta:\n\tret\n.Lx:\nnot_weak:\n  bad:\n' >"$tmp/edge.s"
-  cp "$tmp/edge.s" "$tmp/edge.py.s"; cp "$tmp/edge.s" "$tmp/edge.rb.s"
-  python3 "$oracle/weak-symbols.py" "$tmp/edge.c" "$tmp/edge.py.s"
+  cp "$tmp/edge.s" "$tmp/edge.orc.s"; cp "$tmp/edge.s" "$tmp/edge.rb.s"
+  "$mrb" "$oracle/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.orc.s"
   "$mrb" "$root/scripts/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.rb.s"
-  if cmp -s "$tmp/edge.py.s" "$tmp/edge.rb.s" && [ "$(grep -c '^\.weak ' "$tmp/edge.py.s")" -ge 3 ]; then
+  if cmp -s "$tmp/edge.orc.s" "$tmp/edge.rb.s" && [ "$(grep -c '^\.weak ' "$tmp/edge.orc.s")" -ge 3 ]; then
     report ok "weak-symbols edge cases (nested attributes, declarations)"
-  else report fail "weak-symbols edge cases differ"; diff "$tmp/edge.py.s" "$tmp/edge.rb.s" | head -5; fi
+  else report fail "weak-symbols edge cases differ"; diff "$tmp/edge.orc.s" "$tmp/edge.rb.s" | head -5; fi
   # Mach-O labels carry the target's "_" prefix (--sym-prefix=_, passed by qbe-cc on Darwin): .weak_definition lines name them.
-  printf '_alpha:\n\tret\n_beta:\n\tret\n_delta:\n\tret\n' > "$tmp/macho.py.s"; cp "$tmp/macho.py.s" "$tmp/macho.rb.s"
-  python3 "$oracle/weak-symbols.py" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.py.s"
+  printf '_alpha:\n\tret\n_beta:\n\tret\n_delta:\n\tret\n' > "$tmp/macho.orc.s"; cp "$tmp/macho.orc.s" "$tmp/macho.rb.s"
+  "$mrb" "$oracle/weak-symbols.rb" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.orc.s"
   "$mrb" "$root/scripts/weak-symbols.rb" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.rb.s"
-  if cmp -s "$tmp/macho.py.s" "$tmp/macho.rb.s" && grep -q '^\.weak_definition _alpha$' "$tmp/macho.rb.s" && ! grep -q '^\.weak ' "$tmp/macho.rb.s"; then
+  if cmp -s "$tmp/macho.orc.s" "$tmp/macho.rb.s" && grep -q '^\.weak_definition _alpha$' "$tmp/macho.rb.s" && ! grep -q '^\.weak ' "$tmp/macho.rb.s"; then
     report ok "weak-symbols --sym-prefix=_ (Mach-O labels, .weak_definition) matches the oracle"
-  else report fail "weak-symbols --sym-prefix=_ differs or misses _alpha"; diff "$tmp/macho.py.s" "$tmp/macho.rb.s" | head -5; fi
+  else report fail "weak-symbols --sym-prefix=_ differs or misses _alpha"; diff "$tmp/macho.orc.s" "$tmp/macho.rb.s" | head -5; fi
   # No-op case: the assembly is left untouched when nothing is weak.
   cp "$tmp/edge.s" "$tmp/none.s"; "$mrb" "$root/scripts/weak-symbols.rb" /dev/null "$tmp/none.s"
   if cmp -s "$tmp/edge.s" "$tmp/none.s"; then report ok "weak-symbols no-op leaves the assembly untouched"
@@ -130,14 +130,14 @@ else
   fi
   linked=0
   for n in "${objs[@]}"; do
-    python3 "$oracle/flatlink.py" "$tmp/$n.o" "$tmp/$n.py.elf" _start 2>"$tmp/$n.py.err"; rcp=$?
+    "$mrb" "$oracle/flatlink.rb" "$tmp/$n.o" "$tmp/$n.orc.elf" _start 2>"$tmp/$n.orc.err"; rcp=$?
     "$mrb" "$here/flatlink.rb" "$tmp/$n.o" "$tmp/$n.rb.elf" _start 2>"$tmp/$n.rb.err"; rcr=$?
-    if [ $rcp -ne $rcr ] || ! cmp -s "$tmp/$n.py.err" "$tmp/$n.rb.err"; then
-      report fail "flatlink $n: status/stderr differ (py=$rcp rb=$rcr)"; head -2 "$tmp/$n.py.err" "$tmp/$n.rb.err"
+    if [ $rcp -ne $rcr ] || ! cmp -s "$tmp/$n.orc.err" "$tmp/$n.rb.err"; then
+      report fail "flatlink $n: status/stderr differ (oracle=$rcp rb=$rcr)"; head -2 "$tmp/$n.orc.err" "$tmp/$n.rb.err"
     elif [ $rcp -ne 0 ]; then
-      report ok "flatlink $n (same refusal: $(head -c 90 "$tmp/$n.py.err"))"
-    elif cmp -s "$tmp/$n.py.elf" "$tmp/$n.rb.elf"; then
-      report ok "flatlink $n (image identical, $(stat -c %s "$tmp/$n.py.elf") bytes)"; linked=$((linked + 1))
+      report ok "flatlink $n (same refusal: $(head -c 90 "$tmp/$n.orc.err"))"
+    elif cmp -s "$tmp/$n.orc.elf" "$tmp/$n.rb.elf"; then
+      report ok "flatlink $n (image identical, $(stat -c %s "$tmp/$n.orc.elf") bytes)"; linked=$((linked + 1))
     else
       report fail "flatlink $n: images differ"
     fi
@@ -145,16 +145,16 @@ else
   if [ $linked -eq 0 ]; then report fail "flatlink: no object was linked, the comparison is vacuous"; fi
   # Error paths: not an ELF, entry symbol missing.
   echo notelf >"$tmp/bad.o"
-  python3 "$oracle/flatlink.py" "$tmp/bad.o" "$tmp/bad.elf" _start 2>"$tmp/bad.py.err"; rcp=$?
+  "$mrb" "$oracle/flatlink.rb" "$tmp/bad.o" "$tmp/bad.elf" _start 2>"$tmp/bad.orc.err"; rcp=$?
   "$mrb" "$here/flatlink.rb" "$tmp/bad.o" "$tmp/bad.elf" _start 2>"$tmp/bad.rb.err"; rcr=$?
-  if [ $rcp -eq $rcr ] && [ $rcp -ne 0 ] && cmp -s "$tmp/bad.py.err" "$tmp/bad.rb.err"; then report ok "flatlink rejects a non-ELF the same way"
-  else report fail "flatlink non-ELF handling differs (py=$rcp rb=$rcr)"; fi
+  if [ $rcp -eq $rcr ] && [ $rcp -ne 0 ] && cmp -s "$tmp/bad.orc.err" "$tmp/bad.rb.err"; then report ok "flatlink rejects a non-ELF the same way"
+  else report fail "flatlink non-ELF handling differs (oracle=$rcp rb=$rcr)"; fi
   if [ ${#objs[@]} -gt 0 ]; then
     n=${objs[0]}
-    python3 "$oracle/flatlink.py" "$tmp/$n.o" "$tmp/x.elf" no_such_symbol 2>"$tmp/ns.py.err"; rcp=$?
+    "$mrb" "$oracle/flatlink.rb" "$tmp/$n.o" "$tmp/x.elf" no_such_symbol 2>"$tmp/ns.orc.err"; rcp=$?
     "$mrb" "$here/flatlink.rb" "$tmp/$n.o" "$tmp/x.elf" no_such_symbol 2>"$tmp/ns.rb.err"; rcr=$?
-    if [ $rcp -eq $rcr ] && cmp -s "$tmp/ns.py.err" "$tmp/ns.rb.err"; then report ok "flatlink missing entry symbol handled the same way"
-    else report fail "flatlink missing-entry handling differs (py=$rcp rb=$rcr)"; fi
+    if [ $rcp -eq $rcr ] && cmp -s "$tmp/ns.orc.err" "$tmp/ns.rb.err"; then report ok "flatlink missing entry symbol handled the same way"
+    else report fail "flatlink missing-entry handling differs (oracle=$rcp rb=$rcr)"; fi
   fi
 fi
 
@@ -164,12 +164,12 @@ fi
 emit_cmp() {
   local label=$1; shift
   local in=${emit_in:-/dev/null}
-  python3 "$oracle/pathb-qbe-emit.py" "$@" <"$in" >"$tmp/em.py.out" 2>"$tmp/em.py.err"; local rcp=$?
+  "$mrb" "$oracle/pathb-qbe-emit.rb" "$@" <"$in" >"$tmp/em.orc.out" 2>"$tmp/em.orc.err"; local rcp=$?
   "$mrb" "$root/scripts/pathb-qbe-emit.rb" "$@" <"$in" >"$tmp/em.rb.out" 2>"$tmp/em.rb.err"; local rcr=$?
   emit_rc=$rcp
-  if [ $rcp -ne $rcr ]; then report fail "pathb-qbe-emit $label: exit status py=$rcp rb=$rcr"; head -2 "$tmp/em.py.err" "$tmp/em.rb.err"; emit_rc=-1
-  elif ! cmp -s "$tmp/em.py.out" "$tmp/em.rb.out"; then report fail "pathb-qbe-emit $label: output differs"; diff "$tmp/em.py.out" "$tmp/em.rb.out" | head -5; emit_rc=-1
-  elif ! cmp -s "$tmp/em.py.err" "$tmp/em.rb.err"; then report fail "pathb-qbe-emit $label: stderr differs"; head -2 "$tmp/em.py.err" "$tmp/em.rb.err"; emit_rc=-1
+  if [ $rcp -ne $rcr ]; then report fail "pathb-qbe-emit $label: exit status oracle=$rcp rb=$rcr"; head -2 "$tmp/em.orc.err" "$tmp/em.rb.err"; emit_rc=-1
+  elif ! cmp -s "$tmp/em.orc.out" "$tmp/em.rb.out"; then report fail "pathb-qbe-emit $label: output differs"; diff "$tmp/em.orc.out" "$tmp/em.rb.out" | head -5; emit_rc=-1
+  elif ! cmp -s "$tmp/em.orc.err" "$tmp/em.rb.err"; then report fail "pathb-qbe-emit $label: stderr differs"; head -2 "$tmp/em.orc.err" "$tmp/em.rb.err"; emit_rc=-1
   fi
 }
 emit_n=0; emit_ok=0; emit_refused=0; emit_err=0; emit_bytes=0
@@ -180,7 +180,7 @@ emit_file() {
     emit_n=$((emit_n + 1))
     emit_cmp "$label${flag:+ $flag}" ${flag:+"$flag"} "$f"
     case $emit_rc in
-      0) emit_ok=$((emit_ok + 1)); emit_bytes=$((emit_bytes + $(wc -c <"$tmp/em.py.out"))) ;;
+      0) emit_ok=$((emit_ok + 1)); emit_bytes=$((emit_bytes + $(wc -c <"$tmp/em.orc.out"))) ;;
       3) emit_refused=$((emit_refused + 1)) ;;
       1) emit_err=$((emit_err + 1)) ;;
     esac
@@ -231,7 +231,7 @@ emit_cmp "usage (two files)" "$g" "$g"; r3=$emit_rc
 emit_cmp "usage (append-weak args)" --append-weak "$g"; r4=$emit_rc
 emit_cmp "usage (no-prune twice)" --no-prune --no-prune "$g"; r5=$emit_rc
 # A missing file is an uncaught exception in both (a Python traceback, an mruby backtrace): only the status is compared.
-python3 "$oracle/pathb-qbe-emit.py" "$tmp/no-such-file.ir" >/dev/null 2>&1; r6=$?
+"$mrb" "$oracle/pathb-qbe-emit.rb" "$tmp/no-such-file.ir" >/dev/null 2>&1; r6=$?
 "$mrb" "$root/scripts/pathb-qbe-emit.rb" "$tmp/no-such-file.ir" >/dev/null 2>&1; r7=$?
 if [ "$r1 $r2 $r3 $r4 $r5" = "0 0 1 1 1" ] && [ "$r6" = 1 ] && [ "$r7" = 1 ]; then report ok "pathb-qbe-emit stdin, usage errors and a missing file behave the same"
 else report fail "pathb-qbe-emit stdin/usage statuses unexpected: $r1 $r2 $r3 $r4 $r5 $r6 $r7"; fi
@@ -239,13 +239,13 @@ else report fail "pathb-qbe-emit stdin/usage statuses unexpected: $r1 $r2 $r3 $r
 # `# pathb-alias` marks (fence/rdtsc helpers, GNU aliases) become the helper functions and .set lines.
 weak_n=0; weak_lines=0
 for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do
-  python3 "$oracle/pathb-qbe-emit.py" "$f" >"$tmp/w.ssa" 2>/dev/null || continue
+  "$mrb" "$oracle/pathb-qbe-emit.rb" "$f" >"$tmp/w.ssa" 2>/dev/null || continue
   grep -q '^# pathb-\(weak\|asm\|alias\) ' "$tmp/w.ssa" || continue
-  printf '\t.text\nfoo:\n\tret\n' >"$tmp/w.py.s"; cp "$tmp/w.py.s" "$tmp/w.rb.s"
-  python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/w.ssa" "$tmp/w.py.s"; rcp=$?
+  printf '\t.text\nfoo:\n\tret\n' >"$tmp/w.orc.s"; cp "$tmp/w.orc.s" "$tmp/w.rb.s"
+  "$mrb" "$oracle/pathb-qbe-emit.rb" --append-weak "$tmp/w.ssa" "$tmp/w.orc.s"; rcp=$?
   "$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/w.ssa" "$tmp/w.rb.s"; rcr=$?
-  if [ $rcp -eq $rcr ] && cmp -s "$tmp/w.py.s" "$tmp/w.rb.s"; then
-    weak_n=$((weak_n + 1)); weak_lines=$((weak_lines + $(grep -c '^\.weak ' "$tmp/w.py.s")))
+  if [ $rcp -eq $rcr ] && cmp -s "$tmp/w.orc.s" "$tmp/w.rb.s"; then
+    weak_n=$((weak_n + 1)); weak_lines=$((weak_lines + $(grep -c '^\.weak ' "$tmp/w.orc.s")))
   else report fail "pathb-qbe-emit --append-weak ${f#$root/tests/}: differs"; fi
 done
 if [ $weak_lines -gt 0 ]; then report ok "pathb-qbe-emit --append-weak ($weak_n modules, $weak_lines .weak lines identical)"
@@ -254,21 +254,21 @@ else report fail "pathb-qbe-emit --append-weak: no module had a weak definition"
 # and an assembler are there, a file the assembler accepts.
 x87_n=0; x87_marks=0
 for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do
-  python3 "$oracle/pathb-qbe-emit.py" "$f" >"$tmp/x.ssa" 2>/dev/null || continue
+  "$mrb" "$oracle/pathb-qbe-emit.rb" "$f" >"$tmp/x.ssa" 2>/dev/null || continue
   grep -q '^# pathb-x87 ' "$tmp/x.ssa" || continue
-  printf '\t.text\nfoo:\n\tret\n' >"$tmp/x.py.s"; cp "$tmp/x.py.s" "$tmp/x.rb.s"
-  python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/x.ssa" "$tmp/x.py.s"; rcp=$?
+  printf '\t.text\nfoo:\n\tret\n' >"$tmp/x.orc.s"; cp "$tmp/x.orc.s" "$tmp/x.rb.s"
+  "$mrb" "$oracle/pathb-qbe-emit.rb" --append-weak "$tmp/x.ssa" "$tmp/x.orc.s"; rcp=$?
   "$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/x.ssa" "$tmp/x.rb.s"; rcr=$?
-  if [ $rcp -eq $rcr ] && cmp -s "$tmp/x.py.s" "$tmp/x.rb.s"; then
+  if [ $rcp -eq $rcr ] && cmp -s "$tmp/x.orc.s" "$tmp/x.rb.s"; then
     x87_n=$((x87_n + 1)); x87_marks=$((x87_marks + $(grep -c '^# pathb-x87 ' "$tmp/x.ssa")))
-    if ! cc -c -o "$tmp/x.o" "$tmp/x.py.s" 2>"$tmp/x.as"; then report fail "pathb-qbe-emit x87 thunks of ${f#$root/tests/} do not assemble: $(head -1 "$tmp/x.as")"; fi
+    if ! cc -c -o "$tmp/x.o" "$tmp/x.orc.s" 2>"$tmp/x.as"; then report fail "pathb-qbe-emit x87 thunks of ${f#$root/tests/} do not assemble: $(head -1 "$tmp/x.as")"; fi
   else report fail "pathb-qbe-emit --append-weak (x87) ${f#$root/tests/}: differs"; fi
 done
 if [ $x87_marks -gt 0 ]; then report ok "pathb-qbe-emit x87 thunks ($x87_n modules, $x87_marks thunks identical and assembled)"
 else report fail "pathb-qbe-emit x87 thunks: no module had a thunk"; fi
 printf 'x\n' >"$tmp/w.none.s"; cp "$tmp/w.none.s" "$tmp/w.none2.s"
 echo '# no marks' >"$tmp/w.none.ssa"
-python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/w.none.ssa" "$tmp/w.none.s"
+"$mrb" "$oracle/pathb-qbe-emit.rb" --append-weak "$tmp/w.none.ssa" "$tmp/w.none.s"
 "$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/w.none.ssa" "$tmp/w.none2.s"
 if cmp -s "$tmp/w.none.s" "$tmp/w.none2.s" && [ "$(cat "$tmp/w.none2.s")" = x ]; then report ok "pathb-qbe-emit --append-weak without marks leaves the assembly alone"
 else report fail "pathb-qbe-emit --append-weak without marks"; fi
@@ -277,10 +277,10 @@ else report fail "pathb-qbe-emit --append-weak without marks"; fi
 printf '%s\n' '(ir-module "p.cpp" (layout (int 4)))' '(data "p" (array 2 (const char)) (string "("))' \
   '(function "main" (ret int) (params) (return (const int 0)))' >"$tmp/paren.ir"
 "$mrb" "$root/scripts/pathb-qbe-emit.rb" "$tmp/paren.ir" >"$tmp/paren.out" 2>&1; rcr=$?
-python3 "$oracle/pathb-qbe-emit.py" "$tmp/paren.ir" >/dev/null 2>&1; rcp=$?
+"$mrb" "$oracle/pathb-qbe-emit.rb" "$tmp/paren.ir" >/dev/null 2>&1; rcp=$?
 if [ $rcr -eq 0 ] && grep -q '^data \$p = { b 40, b 0 }' "$tmp/paren.out" && [ $rcp -eq 1 ]; then
-  report ok "pathb-qbe-emit reads a \"(\" string constant (the Python original misreads it as a parenthesis: known bug)"
-else report fail "pathb-qbe-emit parenthesis string constant: rb=$rcr py=$rcp"; fi
+  report ok "pathb-qbe-emit reads a \"(\" string constant (the Python original misreads it as a parenthesis; scripts/pathb-qbe-emit.rb reads it: known difference)"
+else report fail "pathb-qbe-emit parenthesis string constant: rb= oracle="; fi
 "$root/tests/mruby/qbe-prep.sh" || fail=1
 "$root/tests/mruby/strip-atomic.sh" || fail=1
 "$root/tests/mruby/qbe2cil.sh" || fail=1

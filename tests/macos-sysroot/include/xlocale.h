@@ -10,6 +10,7 @@
 #include <locale.h>
 #include <stddef.h>
 #include <wchar.h>
+#include <wctype.h>
 #include <time.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -37,6 +38,25 @@ locale_t duplocale(locale_t);
 
 struct lconv *localeconv_l(locale_t);
 double strtod_l(const char *, char **, locale_t);
+/* The xlocale wide-character and classification variants: POSIX gives the same behaviour through uselocale, which the
+   shims in tests/macos-sysroot/runtime/src/xlocale_shim.c implement. */
+int wcscoll_l(const wchar_t *, const wchar_t *, locale_t);
+size_t wcsxfrm_l(wchar_t *restrict, const wchar_t *restrict, size_t, locale_t);
+int iswupper_l(wint_t, locale_t);
+int iswspace_l(wint_t, locale_t);
+int iswprint_l(wint_t, locale_t);
+int iswalpha_l(wint_t, locale_t);
+int iswblank_l(wint_t, locale_t);
+int iswcntrl_l(wint_t, locale_t);
+int iswdigit_l(wint_t, locale_t);
+int iswlower_l(wint_t, locale_t);
+int iswpunct_l(wint_t, locale_t);
+int iswxdigit_l(wint_t, locale_t);
+wint_t towlower_l(wint_t, locale_t);
+wint_t towupper_l(wint_t, locale_t);
+int iswctype_l(wint_t, wctype_t, locale_t);
+wint_t btowc_l(int, locale_t);
+int wctob_l(wint_t, locale_t);
 float strtof_l(const char *, char **, locale_t);
 long double strtold_l(const char *, char **, locale_t);
 long strtol_l(const char *, char **, int, locale_t);
@@ -71,4 +91,27 @@ int isxdigit_l(int, locale_t);
 }
 #endif
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Multibyte and wide-character _l functions libc++'s locale.cpp uses. Signatures from Apple's public Libc
+ * include/xlocale/_wchar.h (apple-oss-distributions/Libc, commit 71bbe350ab79eef58113991d817ccc6165061a64), with the
+ * Libc annotation macros removed. Declarations only: the system library provides the definitions. */
+#include <wchar.h>
+size_t mbrtowc_l(wchar_t *restrict, const char *restrict, size_t, mbstate_t *restrict, locale_t);
+int mbsinit_l(const mbstate_t *, locale_t);
+size_t mbsrtowcs_l(wchar_t *restrict, const char **restrict, size_t, mbstate_t *restrict, locale_t);
+size_t wcrtomb_l(char *restrict, wchar_t, mbstate_t *restrict, locale_t);
+size_t wcsnrtombs_l(char *restrict, const wchar_t **restrict, size_t, size_t, mbstate_t *restrict, locale_t);
+int mbtowc_l(wchar_t *restrict, const char *restrict, size_t, locale_t);
+size_t mbsnrtowcs_l(wchar_t *restrict, const char **restrict, size_t, size_t, mbstate_t *restrict, locale_t);
+/* MB_CUR_MAX_L: Apple's public Libc include/__xlocale.h (commit 71bbe350ab79eef58113991d817ccc6165061a64). */
+int ___mb_cur_max_l(locale_t);
+#define MB_CUR_MAX_L(x) (___mb_cur_max_l(x))
+size_t mbrlen_l(const char *restrict, size_t, mbstate_t *restrict, locale_t);
+#ifdef __cplusplus
+}
+#endif
 #endif

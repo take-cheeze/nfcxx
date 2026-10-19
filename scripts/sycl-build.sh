@@ -44,9 +44,20 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$src" ] || { echo "usage: sycl-build.sh [--cpu] prog.cpp -o prog" >&2; exit 2; }
 [ -n "$out" ] || out=${src%.cpp}
-# the host compiler: for WebGPU, nfcxx when it is built (the closure layouts then match the device pass by construction), else $CXX or g++
+# the host compiler: for a device backend, nfcxx when its EDG build is found (EDG_BUILD, default build/edg; EDG_BASE, default
+# build/edg-base; the closure layouts then match the device pass by construction), else $CXX or g++. The device pass names a
+# kernel closure in a file-local scope with EDG's module id (a CRC of the source's mtime and the working directory, --wdir /);
+# g++ names it differently (ZL... against ZN41_INTERNAL_...), so g++ cannot host the device image. nfcxx without build/qbe
+# compiles EDG's C through gcc (NFCXX_BACKEND=gcc).
 if [ -z "$cxx" ]; then
-  if [ "$mode" = webgpu ] && [ -x "$root/build/edg/bin/eccp" ] && [ -x "$root/build/qbe/qbe" ]; then cxx=$root/nfcxx; else cxx=g++; fi
+  if [ "$mode" = webgpu ] && [ -x "$root/nfcxx" ] && [ -x "${EDG_BUILD:-$root/build/edg}/bin/eccp" ]; then
+    cxx=$root/nfcxx
+    export EDG_BUILD=${EDG_BUILD:-$root/build/edg} EDG_BASE=${EDG_BASE:-$root/build/edg-base}
+    [ -x "$root/build/qbe/qbe" ] || export NFCXX_BACKEND=${NFCXX_BACKEND:-gcc}
+  else
+    cxx=g++
+    [ "$mode" = cpu ] || echo "sycl-build: the host is g++, which names file-local kernel closures differently from the device pass (no kernel for the closure type); build nfcxx's EDG (build/edg, or EDG_BUILD) or pass --cxx" >&2
+  fi
 fi
 inc=$root/lib/sycl/include
 case $(basename "${cxx%% *}") in nfcxx) optflag="" ;; *) optflag="-O2" ;; esac   # nfcxx optimizes by itself; a plain compiler needs it for the host loops

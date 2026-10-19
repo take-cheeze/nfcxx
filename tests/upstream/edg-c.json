@@ -1,0 +1,11 @@
+{
+  "builds": [{
+    "cmake_preset": "linux-gcc-debug",
+    "build_path": "build/gcc",
+    "targets": ["cpfe"],
+    "test_configs": ["edg_x86_64"],
+    "edg_base": "bases/docker/dev-env/gcc"
+  }],
+  "test_timeout_seconds": 120,
+  "record_tests": false
+}

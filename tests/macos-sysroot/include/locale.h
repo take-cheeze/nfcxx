@@ -6,7 +6,9 @@
 extern "C" {
 #endif
 
-#define LC_ALL 6
+/* LC_ALL is 0 (Apple's open-source Libc, include/locale.h, commit 3af5442); the other categories are the conventional
+ * values above. */
+#define LC_ALL 0
 #define LC_COLLATE 1
 #define LC_CTYPE 2
 #define LC_MONETARY 3

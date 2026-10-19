@@ -1,0 +1,4 @@
+package	version	filename	sha256
+dejagnu	1.6.3-2	dejagnu_1.6.3-2_all.deb	8379bf9b1f7e1a29a1f8553516dc63c9ba0f193b5b68cd453467558f88015c17
+expect	5.45.4-4build1	expect_5.45.4-4build1_amd64.deb	c1c8e4be558d2f23d4daf09d94d71183f618c9cba912691973fbb7f155181014
+tcl-expect	5.45.4-4build1	tcl-expect_5.45.4-4build1_amd64.deb	8c6df60c5904091854350aa0f1c1c4e33a87da6fd4f356a407bbcdeef49abfed

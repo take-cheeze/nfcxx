@@ -384,12 +384,12 @@ class Mod
           raise Refused, "static #{name}: initializer item #{h}"
         end
       end
-      # A lambda closure with no captures is an empty object (one byte, no members): its zero bytes are its whole value, and
-      # no initializer can change them, so it is lowered as the zero bytes it has. Any other zero-initialized object is refused.
-      # A local lambda's closure type is mangled _ZZ...Ul...E<n>_ (no Regexp under mruby, so the test is by substrings).
+      # An object of an empty ABI type (abi-type ... (empty)) has no members: its zero bytes are its whole value, and no
+      # initializer can change them, so it is lowered as the zero bytes it has. This covers a lambda closure with no captures
+      # and a functor such as sycl::plus<T>, which a call passes by value. Any other zero-initialized object is refused.
       cname = head_of(f[2]) == "struct" ? f[2][1].to_s : ""
-      empty_closure = cname[0, 3] == "_ZZ" && cname.include?("Ul") && cname[-1, 1] == "_" && @empty_types[cname] == true
-      raise Refused, "static object #{name} is zero-initialized (a dynamic initializer would look the same in the IR, so it is not trusted)" unless nonzero || empty_closure
+      empty_obj = @empty_types[cname] == true
+      raise Refused, "static object #{name} is zero-initialized (a dynamic initializer would look the same in the IR, so it is not trusted)" unless nonzero || empty_obj
     end
     [bytes, relocs]
   end
@@ -1654,6 +1654,23 @@ class SFn
       return [res(op, @spv.t_int(32), v, m), ["int", 4, false, false]]
     when "__nfcxx_sycl_barrier"
       ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(@mod.kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)])
+      return nil
+    when "__nfcxx_sycl_fence"
+      # atomic_fence(order, scope) as OpMemoryBarrier (OpenCL's atomic_work_item_fence with a memory scope). The function is
+      # emitted once for all callers, so order and scope are run-time values here (no constant folding across the call):
+      # memory_order relaxed/acquire/release/acq_rel/seq_cst = 0..4, memory_scope work_item/sub_group/work_group/device/system
+      # = 0..4. The SPIR-V scope is 4 - scope (Invocation, Subgroup, Workgroup, Device, CrossDevice); the semantics are
+      # 1 << order (Acquire, Release, AcquireRelease, SequentiallyConsistent) for order >= 1 and none for relaxed, with the
+      # workgroup and cross-workgroup memory bits.
+      o32 = ["int", 4, false, false]
+      order = u32_of(operand(args[0])[0], o32)
+      scope = u32_of(operand(args[1])[0], o32)
+      spv_scope = res(130, @spv.t_int(32), @spv.c_u32(4), scope)   # ISub
+      sh = res(196, @spv.t_int(32), @spv.c_u32(1), order)          # ShiftLeftLogical
+      is_relaxed = res(170, @spv.t_bool, order, @spv.c_u32(0))     # IEqual
+      ord_bits = res(169, @spv.t_int(32), is_relaxed, @spv.c_u32(0), sh)   # Select
+      sem = res(197, @spv.t_int(32), ord_bits, @spv.c_u32(0x100 | 0x200))  # BitwiseOr with WorkgroupMemory | CrossWorkgroupMemory
+      ins([225, spv_scope, sem])   # OpMemoryBarrier
       return nil
     when "__nfcxx_sycl_fn1", "__nfcxx_sycl_fn1_f64", "__nfcxx_sycl_fn2", "__nfcxx_sycl_fn3"
       op = args[0]

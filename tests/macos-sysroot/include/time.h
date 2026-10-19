@@ -20,6 +20,11 @@ typedef long clock_t;
 
 #define CLOCKS_PER_SEC ((clock_t)1000000)
 
+/* clockid_t values from Apple's open-source Libc, include/_time.h (commit 63976b8). */
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 6
+#define CLOCK_MONOTONIC_RAW 4
+
 struct tm {
   int tm_sec;
   int tm_min;
@@ -49,6 +54,16 @@ size_t strftime(char *restrict, size_t, const char *restrict, const struct tm *r
 
 /* POSIX (time.h): the sleep that libc++'s threading layer uses */
 int nanosleep(const struct timespec *, struct timespec *);
+#ifndef CLEANROOM_CLOCKID_T
+#define CLEANROOM_CLOCKID_T
+typedef int clockid_t;
+#endif
+/* POSIX.1-2008 <time.h> requires CLOCK_REALTIME; 0 is the wall clock on the target (checked on the Mac). */
+#define CLOCK_REALTIME 0
+/* CLOCK_MONOTONIC and CLOCK_MONOTONIC_RAW: Apple's public Libc include/_time.h (commit 71bbe350ab79eef58113991d817ccc6165061a64). */
+#define CLOCK_MONOTONIC 6
+#define CLOCK_MONOTONIC_RAW 4
+int clock_gettime(clockid_t, struct timespec *);
 
 /* POSIX.1-2008 reentrant time conversions, from the specification. */
 struct tm *gmtime_r(const time_t *timer, struct tm *result);
