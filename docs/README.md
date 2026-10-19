@@ -43,6 +43,7 @@ covers say so.
 | [coreclr-gc.md](notes/coreclr-gc.md) | CoreCLR's workstation GC (34 translation units) compiled by nfcxx on both backends; the QBE rewrites it needed; what a link and run still needs. |
 | [ubsan.md](notes/ubsan.md) | `nfcxx -fsanitize=undefined` (Path B): checked operations that report `file:line: runtime error: ...`, and `[[likely]]`/`[[unlikely]]` as block layout. `tests/pathb-qbe/run.sh` (traps/ubsan_*, cases/ubsan_clean, cases/likely_unlikely). |
 | [tracing.md](notes/tracing.md) | `--trace` Chrome/Perfetto JSON of the driver steps. |
+| [cpp-feature-coverage-plan.md](notes/cpp-feature-coverage-plan.md) | Plan (not run yet): a per-paper C++ language feature matrix for nfcxx, checklist from cpprefjp's markdown and cross-checked with the compilers' status pages. |
 
 ## Status matrix
 
