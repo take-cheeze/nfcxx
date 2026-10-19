@@ -40,8 +40,7 @@ class CodeGen
   #     overwrite it: refused (BytecodeIR::CALLEE_FRAME_OPS, ORIGIN_FRAME_OPS).
   # Anything else declines and keeps the dual-path codegen. The single-path
   # walks (fixnum_interval, guarded_game_integer_range) ask
-  # BytecodeIR.write_dominates? per hop; fixnum_proof_region_ok? is its
-  # register-agnostic form for return_write_dominates?.
+  # BytecodeIR.write_dominates? per hop, as return_write_dominates? does.
   # ---------------------------------------------------------------------------
 
   # Opcodes a backward scan may STEP OVER: verified (ops.h, vm.c) to write at
@@ -64,17 +63,6 @@ class CodeGen
   # They are exactly the steppable members of BytecodeIR::READS_LEADING_REG_OPS.
   FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::READS_LEADING_REG_OPS & FIXNUM_PROOF_STEP_OVER_OPS).freeze
 
-  # Does `insn` write register `reg`? Used by return_value_sources' worklist.
-  # For every whitelisted op except the three
-  # read-only ones, the leading `R<n>` is the destination (the audited
-  # property). Under-reporting a write would be a wrong answer, so this is an
-  # explicit exception list, nothing inferred.
-  def fixnum_proof_writes_reg?(insn, reg)
-    return false if FIXNUM_PROOF_READONLY_REG_OPS.include?(insn.op)
-
-    insn.reg == reg.to_s
-  end
-
   # Nested proven-arithmetic hops for source 4. `(a + b) * (c - d)` needs two;
   # unbounded recursion could go exponential on long chains.
   FIXNUM_PROOF_MAX_DEPTH = 4
@@ -91,25 +79,6 @@ class CodeGen
     @fixnum_proof_ctx[irep.label] =
       { protected: program.handler_protected_addrs(inclusive_end: true),
         upvars: BytecodeIR.own_upvar_written_regs(irep), catch_targets: program.handler_target_addrs }
-  end
-
-
-  # REGION_DOMINANCE, register-agnostic: does every path reaching `u_idx` pass
-  # through `w_idx` (-1: method entry) without leaving [w_idx, u_idx] in
-  # between? The IR's predecessors, catch-handler edges included, are the
-  # edge set; BytecodeIR#write_dominates? is the same test plus the register's
-  # own writes, which callers with a register should ask instead. A catch
-  # target inside the region still refuses: its body runs in a RESCUE_SUPPORT
-  # function with re-initialized registers.
-  def fixnum_proof_region_ok?(irep, ctx, w_idx, u_idx)
-    preds = BytecodeIR.for(irep).instruction_predecessors(include_handlers: true)
-    return false unless preds
-
-    low = [w_idx, 0].max
-    ((w_idx + 1)..u_idx).all? do |k|
-      !ctx[:catch_targets].include?(irep.instructions[k].addr) &&
-        preds[k].all? { |p| p == BytecodeIR::ENTRY ? w_idx == BytecodeIR::ENTRY : p.between?(low, u_idx) }
-    end
   end
 
   # FIXNUM_OPERAND_PROOF entry point (see the header). `reg` is a register
@@ -159,10 +128,6 @@ class CodeGen
   def fixnum_proof_max_states(irep)
     [BytecodeIR::DATAFLOW_MAX_STATES, 2 * irep.instructions.length].max
   end
-
-  # Cap on the (index, register) states return_value_sources expands. Refusing
-  # on exhaustion is safe and keeps codegen linear.
-  FIXNUM_PROOF_REACHING_MAX_STATES = 400
 
   # Predecessor map: index -> indices control can come from (-1 = method entry),
   # nil when a jump targets a non-instruction so every query refuses. Extra
