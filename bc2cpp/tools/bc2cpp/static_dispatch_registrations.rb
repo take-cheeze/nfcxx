@@ -44,6 +44,7 @@
 # scripts/bc2cpp/static_dispatch_check.rb re-proves every listed name on every
 # run, so a new dynamic reference fails CI instead of shipping a NoMethodError.
 require 'set'
+require_relative 'bytecode_ir_ops'
 require 'tmpdir'
 require_relative 'compiled_gems'
 require_relative 'never_called_registrations'
@@ -53,7 +54,8 @@ require_relative 'bytecode_ir'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
-  SEND_OPS = %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB LOADSYM].freeze
+  # Ops::SEND plus LOADSYM, whose symbol operand is read as a method name.
+  SEND_OPS = (BytecodeIR::Ops::SEND | %w[LOADSYM]).freeze
   NAME_ARG = %r{:([\w+\-*/<>=!?\[\]&|^~%@]+)}
   # The identifier group accepts `$`: a generated symbol for an operator or
   # predicate name carries the mangling's `$<hex>` escapes

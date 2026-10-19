@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'record_hash'
 require_relative 'rbs_signatures'
 require_relative 'core_hierarchy_sigs'
@@ -37,7 +38,6 @@ module RbsRecordTypes
   READ_SENDS = %w[key? has_key? include? member? size length empty? fetch dig].freeze
   # Kernel/BasicObject truth tests: they read only the receiver's identity (nil? / !).
   NIL_TESTS = %w[nil? !].freeze
-  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
   # How deep the interprocedural scan follows the Hash into callees before it calls the use an escape.
   INTERPROC_DEPTH = 16
   # Hash's lookup chain (declarations.rbs#core_hierarchy); only membership is read.
@@ -512,7 +512,7 @@ module RbsRecordTypes
       return nil_test_step(insn, state, lead) if insn.op == 'SEND0' && lead && state.include?(lead) &&
                                                  NIL_TESTS.include?(insn.sym)
       return nil_compare_step(irep, k, insn, state, lead) if insn.op == 'EQ' && state.include?(lead)
-      if SEND_OPS.include?(insn.op) && lead
+      if BytecodeIR::Ops::SEND.include?(insn.op) && lead
         unless held_call?(insn, state, lead)
           # Only a self send's leading register held it: overwritten with self, nothing is passed.
           return state.include?(lead) ? state.reject { |x| x >= lead }.to_set : super

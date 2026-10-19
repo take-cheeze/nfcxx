@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'numeric_flow'
 require_relative 'bytecode_ir'
 require_relative 'foreign_definers'
@@ -310,7 +311,7 @@ module CallFacts
   module Flow
     module_function
 
-    CALLS = NumericFlow::CALL_OPS
+    CALLS = BytecodeIR::Ops::CALLEE_FRAME
     NO_WRITE = NumericFlow::NO_WRITE_OPS
     REFINING = %w[SEND SEND0 SENDB].freeze
 

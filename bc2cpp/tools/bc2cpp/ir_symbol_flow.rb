@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 
 # SYMBOL_FLOW (ADR 0450, ADR 0499): finite symbol sets for constant dispatch tables, for yield_reach.rb.
@@ -27,7 +28,6 @@ require_relative 'bytecode_ir'
 module IrSymbolFlow
   # Loads of a symbol, integer, nil, boolean or self: the values a literal table can hold.
   LITERAL_LOAD = /\ALOAD(SYM|I\w*|L|NIL|T|F|SELF|TRUE|FALSE)\z/.freeze
-  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
   # Core methods that add their arguments to their receiver.
   MUTATORS = %w[<< push].freeze
   # Core container methods that store values other than through MUTATORS: their arguments are not followed.
@@ -134,7 +134,7 @@ module IrSymbolFlow
         when 'SYMBOL', 'STRING'
           entry = irep.pool[insn.pool_index.to_i]
           index[:spelled] << entry if entry.is_a?(String)
-        when *SEND_OPS then index[:sends][insn.sym] << [label, instruction.index] if insn.sym
+        when *BytecodeIR::Ops::SEND then index[:sends][insn.sym] << [label, instruction.index] if insn.sym
         end
       end
     end
@@ -279,7 +279,7 @@ module IrSymbolFlow
     when 'SETIDX' then [a, a + 1, a + 2]
     when 'ARRAY', 'ARRAY2' then element_regs(insn, 1)
     when 'HASH' then element_regs(insn, 2)
-    when *SEND_OPS
+    when *BytecodeIR::Ops::SEND
       # R[a] (the receiver), then n arguments or one splat Array, then the block for the B forms.
       args = if insn.op.end_with?('0') then 0
              elsif insn.plain_fixed_argc? then insn.argc
@@ -462,7 +462,7 @@ module IrSymbolFlow
     case insn.op
     when 'SETIDX' then [setidx_value_reg(insn)]
     when 'ASET' then nil
-    when *SEND_OPS
+    when *BytecodeIR::Ops::SEND
       return [] unless MUTATORS.include?(insn.sym) || OTHER_MUTATORS.include?(insn.sym)
       return nil if OTHER_MUTATORS.include?(insn.sym) || ctx.user_methods.include?(insn.sym)
       return nil unless insn.plain_fixed_argc?
@@ -485,7 +485,7 @@ module IrSymbolFlow
   def symbol_free?(irep)
     BytecodeIR.for(irep).instructions.none? do |instruction|
       insn = instruction.source
-      insn.op == 'INTERN' || (SEND_OPS.include?(insn.op) && SYMBOL_SENDS.include?(insn.sym))
+      insn.op == 'INTERN' || (BytecodeIR::Ops::SEND.include?(insn.op) && SYMBOL_SENDS.include?(insn.sym))
     end
   end
 end

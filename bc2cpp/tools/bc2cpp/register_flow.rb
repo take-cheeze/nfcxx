@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 
 # REGISTER_FLOW (ADR 0415): copy propagation and dead register-write removal
 # over one method's emitted instruction texts. Registers are the C++ locals
@@ -21,7 +22,6 @@ require 'set'
 # Only a text of the exact shape `  rD = <side-effect-free expression>;` counts
 # as a definition; any other text that names a register counts as reading it.
 class RegisterFlow
-  PURE_WRITE_OPS = Set['MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE'].freeze
   # A reader whose text takes the register as one plain operand. Window
   # consumers (SEND, ARRAY, ADD, ...) stay out: their texts write registers
   # next to the one they read.
@@ -324,7 +324,7 @@ class RegisterFlow
   end
 
   def pure_write_op?(op)
-    PURE_WRITE_OPS.include?(op) || op.start_with?('LOADI')
+    BytecodeIR::Ops::PURE_LOAD.include?(op) || op.start_with?('LOADI')
   end
 
   # --- liveness -------------------------------------------------------------
