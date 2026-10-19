@@ -140,6 +140,38 @@ check.call('a provenance that disagrees is dropped', NF.join_state(old, [INT, FL
 check.call('nothing joined yet: a copy of the edge', NF.join_state(nil, old, 2) == old && !NF.join_state(nil, old, 2).equal?(old))
 check.call('a nil entry joins to false, as `nil | nil` does', NF.join_state([nil, 0], [nil, 0], 1) == [false, 0])
 
+# Distinct wide integers with equal values must not obscure another register's growth.
+wide = (1 << 200) | INT
+other_wide = wide.to_s.to_i
+wide_old = [wide, INT, 2]
+check.call('equal wide masks survive another mask growing',
+           !wide.equal?(other_wide) && NF.join_state(wide_old, [other_wide, FLT, 2], 2) == [wide, INT | FLT, 2])
+invalid_mask_raises = begin
+  NF.join_state([INT, INT], [INT.to_f, FLT], 2)
+  false
+rescue TypeError
+  true
+end
+check.call('an equal-valued Float still raises as an invalid mask', invalid_mask_raises)
+random = Random.new(467)
+join_matches = 2_000.times.all? do
+  masks = Array.new(6) { random.rand(-1 << 240...1 << 240) }
+  incoming = masks.map { |mask| random.rand(2).zero? ? mask.to_s.to_i : random.rand(-1 << 240...1 << 240) }
+  previous = masks + [random.rand(4), random.rand(4)]
+  incoming += [random.rand(4), random.rand(4)]
+  expected = previous.each_with_index.map { |mask, reg| reg < 6 ? mask | incoming[reg] : mask == incoming[reg] ? mask : 0 }
+  original = previous.dup
+  NF.join_state(previous, incoming, 6) == expected && previous == original
+end
+check.call('wide and negative masks retain union and provenance behavior across 2,000 joins', join_matches)
+
+puts '-- opaque registers (host)'
+[Set.new, Set['0', '2', '02', '8', 1]].each do |opaque|
+  context = NF::Ctx.new(nil, Object.new, opaque, 4, [], {}, [], 4, nil)
+  check.call("opaque register membership matches canonical strings: #{opaque.to_a.inspect}",
+             context.opq == Array.new(4) { |reg| opaque.include?(reg.to_s) } && context.opq.frozen?)
+end
+
 puts '-- Hash ctx (host)'
 FakeCall = Struct.new(:op, :reg)
 hash_oracle = Object.new

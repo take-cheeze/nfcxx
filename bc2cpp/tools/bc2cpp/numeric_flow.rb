@@ -399,7 +399,7 @@ module NumericFlow
       @irep = irep
       @oracle = oracle
       @opaque = opaque
-      @opq = Array.new(nregs) { |r| opaque.include?(r.to_s) }.freeze
+      @opq = (opaque.empty? ? Array.new(nregs, false) : Array.new(nregs) { |r| opaque.include?(r.to_s) }).freeze
       @nregs = nregs
       @slots = slots
       @nslots = slots.size
@@ -710,7 +710,7 @@ module NumericFlow
     while r < size
       m = old[r]
       x = new[r]
-      unless x.equal?(m) && m.is_a?(Integer)
+      unless m.eql?(x) && m.is_a?(Integer)
         j = r < prov_base ? m | x : (m == x ? m : 0)
         unless j == m
           joined ||= old.dup
