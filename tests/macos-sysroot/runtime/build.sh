@@ -97,7 +97,7 @@ echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 # template has no placeholders), so the copy is made here and its directory is searched before the libc++ headers.
 mkdir -p libcxx-gen
 cp "$src/libcxx/vendor/llvm/default_assertion_handler.in" libcxx-gen/__assertion_handler
-cxxlib=(-nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$out/libcxx-gen" -isystem "$src/libcxx/include" -isystem "$NFCXX_MACOS_SYSROOT"
+cxxlib=(-nostdinc -nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$out/libcxx-gen" -isystem "$src/libcxx/include" -isystem "$NFCXX_MACOS_SYSROOT"
         -isystem "$(clang -print-resource-dir)/include" -I "$src/libcxxabi/include" -I "$src/libcxx/src")
 cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY)
 mkdir -p libcxx-obj
