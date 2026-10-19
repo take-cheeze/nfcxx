@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'fixpoint'
+require_relative 'bytecode_ir_containers'
 
 # Step 6g-bis: element classes of Array and Hash ivars.
 
@@ -66,7 +67,7 @@ PRIMITIVE_ELEMENT_CLASSES = %w[Integer Hash String Symbol].freeze
 # writer only when it dominates the read it feeds, so `@a = c ? [A.new] : [B.new]`
 # and `@a = other || []` no longer read just the textually nearest arm. The strict
 # hint tier forces ELEMENT hints (ADR 0419), so a guard no longer covers that.
-def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+def legacy_array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   # Two ivars can reference each other (`@a = @b.compact`, `@b = @a.compact`),
   # so the depth cap makes termination local to this function.
   return nil if depth > 8
@@ -108,7 +109,7 @@ end
 # HASH_ELEMENT_SUPPORT: VALUE class of the Hash in `reg` at `idx`. Narrower
 # than array_element_source_scan: only a literal and a chained ivar read, plus
 # MOVE-following; nil on anything else.
-def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+def legacy_hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   return nil if depth > 8
 
   irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, reg|
@@ -236,7 +237,7 @@ end
 
 # ELEMENT_CLASS_SUPPORT: the block irep of the SENDB at `i`, re-checking the
 # `BLOCK R(a+1) I[k]` adjacency.
-def adjacent_block_irep(irep, i, recv_reg, ctx)
+def legacy_adjacent_block_irep(irep, i, recv_reg, ctx)
   block_insn = i.positive? ? irep.instructions[i - 1] : nil
   return nil unless block_insn && block_insn.op == 'BLOCK'
   return nil unless block_insn.reg == (recv_reg.to_i + 1).to_s
@@ -260,7 +261,7 @@ end
 
 # ELEMENT_CLASS_SUPPORT: filter_map drops falsy results, so nil/false exits
 # are ignored; every other RETURN must prove the same class.
-def filter_map_block_return_class(block_irep, ctx, depth, input_class)
+def legacy_filter_map_block_return_class(block_irep, ctx, depth, input_class)
   return nil if depth > 8
 
   found = nil
@@ -292,7 +293,7 @@ def filter_map_block_return_class(block_irep, ctx, depth, input_class)
   found
 end
 
-def block_mandatory_param_source?(irep, idx, reg)
+def legacy_block_mandatory_param_source?(irep, idx, reg)
   enter = irep.enter
   mandatory = enter ? enter.enter_fields.first : 0
   return false if mandatory.zero?
@@ -365,7 +366,7 @@ end
 
 # ELEMENT_CLASS_SUPPORT: the one class every RETURN of this irep hands back,
 # or nil. Shared by block_return_class and mono_fresh_return_class.
-def irep_return_class(irep, ctx, depth)
+def legacy_irep_return_class(irep, ctx, depth)
   return nil if depth > 8
 
   found = nil
@@ -431,7 +432,7 @@ def class_scoped_return_class(recv_class, name, ctx, depth)
         !entries.to_a.empty?
       end
 
-      owner = ctx[:superclass_of][owner]
+      owner = (ctx[:superclass_of] || {})[owner]
       break unless owner.is_a?(String)
 
       inherited_defs = defs.select { |m| m.owner == owner }
@@ -495,12 +496,11 @@ end
 #   3. an indexer on an array with a known element class (`@actors[i]`), which
 #      lets a self-referential reorder (`@a = order.map { |i| @a[i] }`) agree
 #      instead of poisoning.
-def element_value_class(irep, idx, reg, ctx, depth = 0)
+def legacy_element_value_class(irep, idx, reg, ctx, depth = 0)
   return nil if depth > 8
 
   direct = traced_owner(irep, idx, reg, ctx)
   return direct if direct
-
   irep.walk_dominating_writers(idx - 1, reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, cur|
     # PRIMITIVE_ELEMENT_SUPPORT: a literal Integer/Hash/String/Symbol element.
     # Diagnostic only (`.known` strips these; see PRIMITIVE_ELEMENT_CLASSES): it
@@ -770,7 +770,7 @@ end
 # it, still counts as a write to @x. Extra targets only add checks. Empty means
 # "not attributed" (the aliasing residual in this section's header), not "no
 # mutation".
-def mutated_ivar_targets(irep, idx, reg)
+def legacy_mutated_ivar_targets(irep, idx, reg)
   return [] unless reg
 
   nearest = irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn|
@@ -955,4 +955,257 @@ class HashElementLayout
 
     hash_elements
   end
+end
+
+# Stage switch (BytecodeIR.container_shape): the legacy walks above or the IR scans below.
+
+def container_where(irep, idx, reg)
+  refusal = {}
+  BytecodeIR.for(irep).reaching_definitions(idx, reg.to_s, opaque_regs: BytecodeIR.own_upvar_written_regs(irep),
+                                                          refusal: refusal)
+  ["#{File.basename(irep.file.to_s)}:#{irep.instructions[idx]&.lineno}", irep.label, idx, reg, refusal[:cause]]
+end
+
+def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  BytecodeIR.container_shape('array_element_source_scan', -> { container_where(irep, idx, dest_reg) },
+                             -> { legacy_array_element_source_scan(irep, idx, dest_reg, ctx, depth) }, -> { ir_array_element_source_scan(irep, idx, dest_reg, ctx, depth) })
+end
+
+def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  BytecodeIR.container_shape('hash_element_source_scan', -> { container_where(irep, idx, dest_reg) },
+                             -> { legacy_hash_element_source_scan(irep, idx, dest_reg, ctx, depth) }, -> { ir_hash_element_source_scan(irep, idx, dest_reg, ctx, depth) })
+end
+
+def adjacent_block_irep(irep, i, recv_reg, ctx)
+  BytecodeIR.container_shape('adjacent_block_irep', -> { container_where(irep, i, recv_reg) },
+                             -> { legacy_adjacent_block_irep(irep, i, recv_reg, ctx) }, -> { ir_adjacent_block_irep(irep, i, recv_reg, ctx) })
+end
+
+def filter_map_block_return_class(block_irep, ctx, depth, input_class)
+  BytecodeIR.container_shape('filter_map_block_return_class', -> { [block_irep.label] },
+                             -> { legacy_filter_map_block_return_class(block_irep, ctx, depth, input_class) }, -> { ir_filter_map_block_return_class(block_irep, ctx, depth, input_class) })
+end
+
+def block_mandatory_param_source?(irep, idx, reg)
+  BytecodeIR.container_shape('block_mandatory_param_source?', -> { container_where(irep, idx, reg) },
+                             -> { legacy_block_mandatory_param_source?(irep, idx, reg) }, -> { ir_block_mandatory_param_source?(irep, idx, reg) })
+end
+
+def irep_return_class(irep, ctx, depth)
+  BytecodeIR.container_shape('irep_return_class', -> { [irep.label] },
+                             -> { legacy_irep_return_class(irep, ctx, depth) }, -> { ir_irep_return_class(irep, ctx, depth) })
+end
+
+def element_value_class(irep, idx, reg, ctx, depth = 0)
+  BytecodeIR.container_shape('element_value_class', -> { container_where(irep, idx, reg) },
+                             -> { legacy_element_value_class(irep, idx, reg, ctx, depth) }, -> { ir_element_value_class(irep, idx, reg, ctx, depth) })
+end
+
+def mutated_ivar_targets(irep, idx, reg)
+  BytecodeIR.container_shape('mutated_ivar_targets', -> { container_where(irep, idx, reg) },
+                             -> { legacy_mutated_ivar_targets(irep, idx, reg) }, -> { ir_mutated_ivar_targets(irep, idx, reg) })
+end
+
+# ---------------------------------------------------------------------------
+# The element scans on the IR (ADR 0493). Each scan joins over every producer of the register the shared reaching
+# definitions find (BytecodeIR.producers), not the nearest dominating writer: all producers must classify and agree,
+# and a VACUOUS one (an empty literal) agrees with any class. A refused dataflow answers nil, as a non-dominating
+# writer did. A container literal counts only when nothing can mutate it before the read (Program#quiet_span?).
+# ---------------------------------------------------------------------------
+
+# The one class +classify+ gives every producer of +reg+ at +idx+, VACUOUS when each is vacuous, else nil. +entry+
+# classifies the value the frame was entered with.
+def join_element_producers(irep, idx, reg, entry: nil)
+  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true) or return nil
+  found = nil
+  vacuous = false
+  sources.each do |producer|
+    cls = producer.entry? ? entry&.call(producer.reg) : yield(producer)
+    return nil if cls.nil?
+
+    if cls == ArrayElementLayout::VACUOUS
+      vacuous = true
+      next
+    end
+    return nil if found && found != cls
+
+    found = cls
+  end
+  found || (vacuous ? ArrayElementLayout::VACUOUS : nil)
+end
+
+# The one class every element (or Hash value) of a container literal has, VACUOUS for an empty one, else nil.
+def literal_element_class(irep, literal, ctx, depth)
+  return ArrayElementLayout::VACUOUS if literal.empty?
+
+  classes = literal.value_regs.map { |r| element_value_class(irep, literal.index, r, ctx, depth + 1) }
+  classes.any?(&:nil?) || classes.uniq.size != 1 ? nil : classes.first
+end
+
+def ir_array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  # An `Array<Klass>` argument annotation counts only for the untouched incoming argument register; consumers
+  # still guard each element.
+  at_entry = lambda do |reg|
+    pos = reg.to_i
+    ctx[:arg_elements][pos - 1] if ctx[:arg_elements] && pos.between?(1, ctx[:mand])
+  end
+  program = BytecodeIR.for(irep)
+  join_element_producers(irep, idx, dest_reg, entry: at_entry) do |producer|
+    literal = program.container_literal(producer.index)
+    if literal
+      next nil unless literal.kind == :array && program.quiet_span?(producer.index, idx)
+
+      literal_element_class(irep, literal, ctx, depth)
+    else
+      case producer.op
+      when 'GETIV'
+        ivar = producer.insn.ivar
+        ivar && ivar_element_hint(ctx[:owner], ivar, ctx)
+      when 'SEND', 'SEND0', 'SENDB', 'SSENDB', 'SSEND', 'SSEND0'
+        send_element_class(irep, producer.index, producer.reg, producer.insn, ctx, depth)
+      end
+    end
+  end
+end
+
+def ir_hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  program = BytecodeIR.for(irep)
+  join_element_producers(irep, idx, dest_reg) do |producer|
+    literal = program.container_literal(producer.index)
+    if literal
+      next nil unless literal.kind == :hash && program.quiet_span?(producer.index, idx)
+
+      literal_element_class(irep, literal, ctx, depth)
+    elsif producer.op == 'GETIV'
+      ivar = producer.insn.ivar
+      ivar && ivar_hash_element_hint(ctx[:owner], ivar, ctx)
+    end
+  end
+end
+
+def ir_adjacent_block_irep(irep, i, recv_reg, ctx)
+  k = BytecodeIR.for(irep).adjacent_block_index(i, recv_reg)
+  label = k && irep.reps[k.to_i]
+  label && ctx[:ireps][label]
+end
+
+def ir_filter_map_block_return_class(block_irep, ctx, depth, input_class)
+  return nil if depth > 8
+
+  found = nil
+  subctx = ctx.merge(arg_classes: nil, mand: 0)
+  program = BytecodeIR.for(block_irep)
+  program.each_with_op('RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE', 'BREAK', 'RETURN_BLK') do |insn, i|
+    # filter_map drops nil and false itself.
+    next if %w[RETNIL RETFALSE].include?(insn.op)
+    return nil unless insn.op == 'RETURN'
+
+    reg = insn.no_operands? ? '0' : insn.reg
+    sources = BytecodeIR.producers(block_irep, i, reg, through_handlers: true)
+    next if sources&.all? { |p| %w[LOADNIL LOADFALSE].include?(p.op) }
+
+    klass = element_value_class(block_irep, i, reg, subctx, depth + 1)
+    klass ||= input_class if block_mandatory_param_source?(block_irep, i, reg)
+    return nil unless klass && ctx[:known_owners].include?(klass)
+    return nil if found && found != klass
+
+    found = klass
+  end
+  found
+end
+
+def ir_block_mandatory_param_source?(irep, idx, reg)
+  enter = irep.enter
+  mandatory = enter ? enter.enter_fields.first : 0
+  return false if mandatory.zero?
+
+  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true)
+  !sources.nil? && sources.all? { |p| p.entry? && p.reg.to_i.between?(1, mandatory) }
+end
+
+def ir_irep_return_class(irep, ctx, depth)
+  return nil if depth > 8
+
+  found = nil
+  BytecodeIR.for(irep).each_with_op('RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE', 'BREAK', 'RETURN_BLK') do |insn, i|
+    # nil/false/true is not an object class, and a non-local return leaves by a path not read here.
+    return nil unless insn.op == 'RETURN'
+
+    cls = element_value_class(irep, i, insn.no_operands? ? '0' : insn.reg, ctx, depth)
+    return nil unless cls
+    return nil if found && found != cls
+
+    found = cls
+  end
+  found
+end
+
+def ir_element_value_class(irep, idx, reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  direct = traced_owner(irep, idx, reg, ctx)
+  return direct if direct
+
+  join_element_producers(irep, idx, reg) do |producer|
+    element_producer_class(irep, producer, ctx, depth)
+  end
+end
+
+# One producer's class for element_value_class.
+def element_producer_class(irep, producer, ctx, depth)
+  insn = producer.insn
+  i = producer.index
+  # PRIMITIVE_ELEMENT_SUPPORT: diagnostic only (`.known` strips these); nil is not an element shape here.
+  literal = BytecodeIR.literal_class(irep, i)
+  return PRIMITIVE_ELEMENT_CLASSES.include?(literal) ? literal : nil if literal
+
+  # `a[i]` is an index opcode, not SEND :[]. GETIDX reads R[a][R[a+1]], GETIDX0 R[b][0], AREF R[b][c].
+  if %w[GETIDX GETIDX0 AREF].include?(insn.op)
+    recv = insn.op == 'GETIDX' ? producer.reg : insn.regs[1]
+    return nil unless recv
+
+    hit = array_element_source_scan(irep, i, recv, ctx, depth + 1)
+    return hit if hit && hit != ArrayElementLayout::VACUOUS
+    # AREF on a non-Array is destructuring (index 0 yields the receiver), not a `:[]` dispatch.
+    return nil if insn.op == 'AREF'
+
+    return receiver_scoped_return_class(irep, i, recv, '[]', ctx, depth)
+  end
+  return nil unless %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].include?(insn.op)
+
+  name = insn.sym
+  return nil unless name
+
+  annotated = ctx[:annotated_ret_class]&.call(name)
+  return annotated if annotated
+
+  argc = insn.argc || 0
+  self_recv = %w[SSEND SSEND0 SSENDB].include?(insn.op)
+  indexer = (ARRAY_ELEMENT_INDEXERS_NEEDS_ARG.include?(name) && argc == 1) ||
+            (ARRAY_ELEMENT_INDEXERS_NO_ARG.include?(name) && argc.zero?)
+  if indexer && !self_recv
+    hit = array_element_source_scan(irep, i, producer.reg, ctx, depth + 1)
+    return hit if hit && hit != ArrayElementLayout::VACUOUS
+  end
+
+  scoped = if self_recv
+             sc = self_receiver_class(ctx)
+             sc && class_scoped_return_class(sc, name, ctx, depth)
+           else
+             receiver_scoped_return_class(irep, i, producer.reg, name, ctx, depth)
+           end
+  scoped || mono_fresh_return_class(name, ctx, depth)
+end
+
+# The ivars a mutation's receiver may name: the GETIV of every producer (through handler edges, so a write inside a
+# protected range is still attributed). Empty means "not attributed", not "no mutation".
+def ir_mutated_ivar_targets(irep, idx, reg)
+  return [] unless reg
+
+  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true) || []
+  sources.filter_map { |p| p.insn.ivar if p.op == 'GETIV' }.uniq
 end
