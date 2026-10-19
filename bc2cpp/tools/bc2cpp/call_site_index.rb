@@ -73,8 +73,9 @@ class CallSiteIndex
     end
     return nil unless writer.is_a?(Array)
 
-    sym_insn = writer.first
-    return nil if irep.instructions.any? { |j| (t = j.branch_target) && t > sym_insn.addr && t <= insn.addr }
+    sym_insn, sym_index = writer
+    # The name is the LOADSYM's on every path only if nothing enters the run after it, a jump or a catch handler.
+    return nil unless BytecodeIR.for(irep).linear_corridor?(sym_index, idx, include_handlers: true)
 
     sym_insn.sym
   end

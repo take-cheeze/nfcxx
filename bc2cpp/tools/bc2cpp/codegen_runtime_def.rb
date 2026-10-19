@@ -127,8 +127,8 @@ class CodeGen
 
   # CONFINED_LAMBDA_UPVAR_SUPPORT: gate (3)'s straight-line half: walk from the
   # MOVE at `i` to the consuming `SEND`/`SEND0 R<t> :call`, allowing only
-  # whitelisted setup opcodes, with no jump inside the stretch and no jump target
-  # inside it. Then "after the MOVE, the next use of R<t> is the :call receiver,
+  # whitelisted setup opcodes, with no jump inside the stretch, no jump target inside it and no catch-handler entry
+  # into it (linear_corridor?). Then "after the MOVE, the next use of R<t> is the :call receiver,
   # which overwrites it" holds on every execution.
   # Returns { send_addr:, dest_reg:, n: } or nil.
   def lambda_confined_call_consumes?(irep, i, t)
@@ -138,6 +138,9 @@ class CodeGen
       nxt = insns[j]
       if %w[SEND SEND0].include?(nxt.op) &&
          nxt.reg == t.to_s && nxt.sym == 'call' && nxt.nk_spec.nil? && nxt.n_spec != '*'
+        # A catch handler entering the run reaches the call without the MOVE (BytecodeIR's handler edges).
+        return nil unless BytecodeIR.for(irep).linear_corridor?(i, j, include_handlers: true)
+
         return { send_addr: nxt.addr, dest_reg: t, n: nxt.n_spec.to_i }
       end
 

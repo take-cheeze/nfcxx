@@ -34,10 +34,11 @@ module BytecodeIR
       @operands ||= @instructions.map { |instruction| BytecodeIR.operands(instruction.source).freeze }.freeze
     end
 
-    # True when every instruction in (+first+, +last+] is entered only from the one before it: no jump, handler or
-    # method entry lands inside, so the run executes as written once +first+ has.
-    def linear_corridor?(first, last)
-      preds = instruction_predecessors or return false
+    # True when every instruction in (+first+, +last+] is entered only from the one before it: no jump or method
+    # entry lands inside, so the run executes as written once +first+ has. A catch handler entering the run is a
+    # predecessor only with +include_handlers+ (the normal-flow graph does not carry it).
+    def linear_corridor?(first, last, include_handlers: false)
+      preds = instruction_predecessors(include_handlers: include_handlers) or return false
 
       ((first + 1)..last).all? { |target| preds[target].size == 1 && preds[target].include?(target - 1) }
     end

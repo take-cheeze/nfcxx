@@ -41,16 +41,22 @@ module CoreRubyResults
       next unless CoreDefs.core_source?(body.file)
 
       mapped = Array(aliases[[site[:owner], site[:old]]]).include?(site[:new])
-      conditional = body.instructions.any? do |branch|
-        next false unless %w[JMPIF JMPNOT JMPNIL JMP].include?(branch.op) && branch.branch_target
-
-        body.instructions.any? do |insn|
-          insn.op == 'ALIAS' && insn.sym == site[:new] && branch.addr < insn.addr && insn.addr < branch.branch_target
-        end
-      end
+      conditional = skippable_alias?(body, site[:new])
       out << [site[:owner], site[:new]] unless mapped && !conditional
     end
     out
+  end
+
+  # Can some run reach an exit of +body+ without passing an ALIAS of +name+? A jump over it, a back-edge or a
+  # catch handler's path all count, so the answer comes from the flow graph, not from a textual branch range.
+  def self.skippable_alias?(body, name)
+    program = BytecodeIR.for(body)
+    program.instructions.any? do |alias_insn|
+      next false unless alias_insn.op == 'ALIAS' && alias_insn.source.sym == name
+
+      reached = program.reachable_from(0, include_handlers: true, avoiding: alias_insn.index)
+      program.exits.any? { |frame_exit| reached.include?(frame_exit.index) }
+    end
   end
 
   # The body reads only its input masks and audited core facts. Growing caller
