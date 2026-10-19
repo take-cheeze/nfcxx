@@ -146,6 +146,46 @@ end
 
 def eval_simple(expr, types, locals, params)
   expr = expr.strip
+  # BINOP
+  if expr.start_with?("BINOP")
+    parts = expr.sub(/^BINOP\s+/, "").split(/\s+/, 3)
+    # parts: [L, op, R] but L/R may contain spaces? L/R are simple tokens/projections without spaces usually
+    # Re-parse: find op token
+    # Format: BINOP <left_expr> <op> <right_expr> where left/right have no spaces except projections
+    m = expr.match(/^BINOP\s+(.+?)\s+(<=?|>=?|==|!=|<<|>>|[+\-*\/%&|^])\s+(.+)$/)
+    if m
+      l = m[1].strip; op = m[2]; r = m[3].strip
+      lt = eval_simple(l, types, locals, params)
+      rt = eval_simple(r, types, locals, params)
+      # determine type from l if const? default int
+      ty = "int"
+      # if l is a const with type, extract
+      cm = l.match(/^\+?[\-]?\d+\s+([A-Za-z0-9_]+)$/)
+      if cm
+        ty = rust_type_to_pathb(cm[1], types) rescue "int"
+      end
+      # signedness guess: unsigned if ty contains unsigned
+      unsigned = ty.include?("unsigned")
+      case op
+      when "+" then return "(wadd #{ty} #{lt} #{rt})"
+      when "-" then return "(wsub #{ty} #{lt} #{rt})"
+      when "*" then return "(wmul #{ty} #{lt} #{rt})"
+      when "/" then return "(cdiv #{ty} #{lt} #{rt})"
+      when "%" then return "(crem #{ty} #{lt} #{rt})"
+      when "&" then return "(and #{ty} #{lt} #{rt})"
+      when "|" then return "(or #{ty} #{lt} #{rt})"
+      when "^" then return "(xor #{ty} #{lt} #{rt})"
+      when "<<" then return "(cshl #{ty} #{lt} #{rt})"
+      when ">>" then return "(cshr #{ty} #{lt} #{rt})"
+      when "==" then return "(eq #{ty} #{lt} #{rt})"
+      when "!=" then return "(ne #{ty} #{lt} #{rt})"
+      when "<" then return "(#{unsigned ? "lt.u" : "lt.s"} #{ty} #{lt} #{rt})"
+      when "<=" then return "(#{unsigned ? "le.u" : "le.s"} #{ty} #{lt} #{rt})"
+      when ">" then return "(#{unsigned ? "lt.u" : "lt.s"} #{ty} #{rt} #{lt})"
+      when ">=" then return "(#{unsigned ? "le.u" : "le.s"} #{ty} #{rt} #{lt})"
+      end
+    end
+  end
   # projection: (*argN).field or (*varN).field
   m = expr.match(/^\(\*(arg|var)(\d+)\)\.(\d+)$/)
   if m
@@ -404,7 +444,7 @@ functions.each do |fn|
         elsif rhs.start_with?("ENUM")
           m2 = rhs.match(/^ENUM \S+ (\d+)/)
           idx = m2 ? m2[1].to_i : 0
-          sz, _ = type_size_align(dst_type, types)
+          sz, _ = dst_type ? type_size_align(dst_type, types) : [8,8]
           sz = 1 if sz == 0
           stmts << "(zero-fill #{sz} $\"#{dst_name}\")"
         elsif rhs.start_with?("{")
@@ -576,7 +616,7 @@ functions.each do |fn|
             end
             if fexpr == "ZRG2cD8std0_0_02rt10lang_start0g"
                 fexpr = "ZRG2cD8std0_0_02rt10lang_start1gT0"
-                args_str = args_str.empty? ? "1 u8" : args_str + ", 1 u8"
+                args_str = args_str.empty? ? "0 u8" : args_str + ", 0 u8"
             end
             fname = fexpr
         end
