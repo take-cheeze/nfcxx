@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'irep'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_regions'
 require_relative 'core_hierarchy_sigs'
 require_relative 'core_defs'
 
@@ -33,27 +34,15 @@ module EscapeAnalysis
     ENV['BC2CPP_ESCAPE_ANALYSIS'] != '0'
   end
 
-  # BC2CPP_IR_NIL_ESCAPE=1: the op scans read the IR (Program#each_with_op); =compare reads the irep and logs
-  # where the two differ. Anything else reads irep.instructions.
+  # [[instruction, index]] of the IR instructions whose op is one of +ops+, in program order.
   def self.op_sites(irep, ops)
-    mode = ENV['BC2CPP_IR_NIL_ESCAPE']
-    ir = lambda do
-      sites = []
-      BytecodeIR.for(irep).each_with_op(*ops) { |insn, index| sites << [insn, index] }
-      sites
-    end
-    return ir.call if mode == '1'
-
-    legacy = irep.instructions.each_with_index.select { |insn, _| ops.include?(insn.op) }
-    if mode == 'compare' && (other = ir.call).map(&:last) != legacy.map(&:last)
-      warn "[bc2cpp] ESCAPE_IR_DIFF #{irep.label} #{ops.to_a.join(',')} legacy=#{legacy.map(&:last)} ir=#{other.map(&:last)}"
-    end
-    legacy
+    sites = []
+    BytecodeIR.for(irep).each_with_op(*ops) { |insn, index| sites << [insn, index] }
+    sites
   end
 
-  # The instruction at +index+ (through the IR under BC2CPP_IR_NIL_ESCAPE=1).
   def self.insn_at(irep, index)
-    ENV['BC2CPP_IR_NIL_ESCAPE'] == '1' ? BytecodeIR.for(irep).instruction_at(index).source : irep.instructions[index]
+    BytecodeIR.for(irep).instruction_at(index).source
   end
 
   class << self

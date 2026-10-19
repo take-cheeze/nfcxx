@@ -221,6 +221,20 @@ check.call('`(v.m? && x) ? g(v) : nil`: a later argument copy of v is non-nil at
 check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_nil.call(ternary, 3, '4'))
 check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
            !NilNarrowing.non_nil?(irep_of(ternary), 12, '7', ->(_name) { false }))
+# b = blk; c = b; return unless c; use(blk)  -- available copies (ADR 0497): a test of c narrows every copy of it.
+chain = [insn(0, 'MOVE', "R2\tR1"), insn(3, 'MOVE', "R3\tR2"), insn(6, 'JMPIF', "R3\t12"), insn(10, 'RETNIL', ''),
+         insn(12, 'RETURN', 'R1')]
+check.call('a test narrows the register its copy was copied from, two copies back', non_nil.call(chain, 4, '1'))
+check.call('a test narrows a sibling copy', non_nil.call(chain, 4, '2'))
+broken = [insn(0, 'MOVE', "R2\tR1"), insn(3, 'LOADNIL', "R1\t(nil)"), insn(5, 'MOVE', "R3\tR2"),
+          insn(8, 'JMPIF', "R3\t14"), insn(12, 'RETNIL', ''), insn(14, 'RETURN', 'R1')]
+check.call('a write of the original ends the copy (negative)', !non_nil.call(broken, 5, '1') && non_nil.call(broken, 5, '2'))
+joined_copy = [insn(0, 'JMPNOT', "R4\t10"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'JMP', '13'), insn(10, 'MOVE', "R2\tR1"),
+               insn(13, 'JMPIF', "R2\t19"), insn(17, 'RETNIL', ''), insn(19, 'RETURN', 'R1')]
+check.call('a copy made on both arms of a join still narrows the original', non_nil.call(joined_copy, 6, '1'))
+one_arm = [insn(0, 'JMPNOT', "R4\t10"), insn(4, 'MOVE', "R2\tR1"), insn(7, 'JMP', '13'), insn(10, 'MOVE', "R2\tR3"),
+           insn(13, 'JMPIF', "R2\t19"), insn(17, 'RETNIL', ''), insn(19, 'RETURN', 'R1')]
+check.call('a copy made on one arm only does not narrow the original (negative)', !non_nil.call(one_arm, 6, '1'))
 
 puts '-- IS_A_GUARD (host, ADR 0456)'
 # The closed world's answers come from a real ClosedWorld over a declared class K (and a subclass, or a Ruby
