@@ -17,6 +17,7 @@ require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/irep_arity'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/register_flow'
+require_relative '../../tools/bc2cpp/codegen_method'
 require_relative 'cxx'
 require_relative '../../tools/bc2cpp/wio_world_env'
 
@@ -49,6 +50,29 @@ def rescue_model(begin_addr, end_addr, target, reads: [])
   { regions: [{ begin_addr: begin_addr, end_addr: end_addr, except_addr: target }],
     glue_reads: { begin_addr => reads } }
 end
+
+puts '-- unused-register declarations'
+generator = CodeGen.allocate
+prune_before = lambda do |code, declarations|
+  uses = code.scan(/\br\d+\b/).tally
+  code[declarations] = code[declarations].gsub(/^  mrb_value (r\d+) = mrb_nil_value\(\);\n/) do |declaration|
+    uses.fetch(Regexp.last_match(1)) == 1 ? '' : declaration
+  end
+  code
+end
+prune_random = Random.new(20261019)
+register_names = %w[r0 r1 r01 r00 r3 r7 r63 r255 r10000000000000000000000000000001]
+mention_tokens = register_names + %w[ar1 r1x _r1 r1_ r3.r7 &r63] + ['日本語r1', 'r1日本語', '"r1"', '// r3']
+prune_cases = Array.new(1000) do
+  declarations = register_names.sample(prune_random.rand(1..register_names.size), random: prune_random)
+                               .map { |name| "  mrb_value #{name} = mrb_nil_value();\n" }.join
+  text = declarations + Array.new(prune_random.rand(0..50)) { mention_tokens.sample(random: prune_random) }.join(' ')
+  [text, 0...declarations.size]
+end
+check.call('streamed counts preserve pruning, word boundaries, leading zeros and unbounded indices',
+           prune_cases.all? do |text, declarations|
+             generator.drop_unused_nil_registers(text.dup, declarations) == prune_before.call(text.dup, declarations)
+           end)
 
 puts '-- register mention masks'
 scanner = RegisterFlow.allocate
