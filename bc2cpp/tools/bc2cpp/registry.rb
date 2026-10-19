@@ -8,6 +8,30 @@ require_relative 'loop_installers'
 
 # Step 6: the whole-program class/method registry.
 
+# The instructions that supply +reg+ to the read at +use+ on every path (BytecodeIR.reaching_definitions, MOVEs
+# followed), or nil when the IR cannot prove that set: a refused query, or a value from the frame's entry.
+def reaching_sources(irep, use, reg)
+  defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s)
+  return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+  defs.map { |d| irep.instructions[d.index] }
+end
+
+# The receiver instruction of a read at +use+ of +reg+: the one definition every reaching source shares (same op,
+# same constant), else nil. When the IR cannot prove the set, the textually nearest writer, as before, so a refused
+# query never recognizes less than the linear rule did.
+def receiver_source(irep, use, reg)
+  sources = reaching_sources(irep, use, reg)
+  if sources
+    first = sources.first
+    return first if sources.all? { |s| s.op == first.op && s.const_name == first.const_name }
+
+    return nil
+  end
+
+  irep.last_writer(use - 1, reg.to_s)
+end
+
 # STRUCT_MEMBERS_ANALYSIS: `Const = Struct.new(:a, :b, ...)` (with or without
 # a block, keyword_init or not) stores member i at array index i: mruby-struct
 # struct.c writes mrb_ary_set(self, i, ...) for the i-th __members__ entry, and
@@ -15,7 +39,7 @@ require_relative 'loop_installers'
 #
 # Returns `[owner, [member names in declared order]]` or nil when anything is
 # not confidently recognized (anonymous Struct, receiver not a bare `Struct`
-# GETCONST, LOADSYM scan count mismatch). A miss only means GETIDX keeps
+# GETCONST on every path, LOADSYM scan count mismatch). A miss only means GETIDX keeps
 # dynamic dispatch for that owner.
 #
 # Two argument shapes: n <= CALL_MAXARGS members in consecutive LOADSYM
@@ -27,8 +51,8 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   d = insn.reg
   return nil unless d
 
-  prev = irep.last_writer(idx - 1, d)
-  struct_recv = prev && prev.op == 'GETCONST' && prev.const_name == 'Struct'
+  source = receiver_source(irep, idx, d)
+  struct_recv = source&.op == 'GETCONST' && source.const_name == 'Struct'
   return nil unless struct_recv
 
   # The Struct's name comes from a SETCONST right after the call on the same
@@ -162,7 +186,7 @@ def build_registry(ireps, root_label)
     # trusted; anything else is unrecognized (a safe miss). Shared by the SCLASS
     # body case and the unfused DEF case below.
     resolve_singleton_receiver = lambda do |reg, before_idx|
-      prev = irep.last_writer(before_idx - 1, reg.delete_prefix('R'))
+      prev = receiver_source(irep, before_idx, reg.delete_prefix('R'))
       case prev&.op
       when 'LOADSELF'
         namespace || 'Object'
@@ -469,9 +493,8 @@ def build_registry(ireps, root_label)
         d = insn.reg
         # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
         # miss.
-        prev = irep.last_writer(idx - 1, d)
-        struct_recv = prev && prev.op == 'GETCONST' && prev.const_name == 'Struct'
-        next unless struct_recv
+        source = receiver_source(irep, idx, d)
+        next unless source&.op == 'GETCONST' && source.const_name == 'Struct'
 
         # The block operand is the BLOCK right before the SENDB (codegen emits it
         # there).
