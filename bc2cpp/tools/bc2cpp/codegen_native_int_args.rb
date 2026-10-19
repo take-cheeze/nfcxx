@@ -94,7 +94,7 @@ module NativeIntArgs
   end
 
   def native_int_arg_leaves(irep, proof_idx, reg, owner_def)
-    numeric_root_leaves(irep, proof_idx - 1, reg, owner_def).join('|')
+    numeric_root_leaves(irep, proof_idx, reg, owner_def).join('|')
   rescue StandardError => e
     "ERR:#{e.class}:#{e.message[0, 80]}"
   end
