@@ -34,7 +34,10 @@ analyze = lambda do |source, safe: true|
     ireps, root = compile_ireps([rb], 'bytecode_ir_constants', dir)
     registry, _superclass_of, _containers, included, prepended, unknown, _structs, _decls, _walked, _ivars, sites = build_registry(ireps, root)
     operators_safe = safe && IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
-    BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: operators_safe)
+    # The gate the build passes (bc2cpp.rb): stock Integer#freeze.
+    freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
+    BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: operators_safe,
+                                             freeze_safe: freeze_safe)
   end
 end
 
@@ -57,6 +60,7 @@ positive = <<~RUBY
     FLOAT = 1.5
     BIG = 2_000_000_000
     BITS = BASE | 1
+    FZ = BASE.freeze
   end
 RUBY
 
@@ -80,6 +84,13 @@ check.call('frozen literal: freeze is not modelled, so the binding has no class 
            fact_of.call(result, 'Fx::FROZEN')&.classes.nil? && fact_of.call(result, 'Fx::FROZEN')&.value.nil?)
 check.call('Range literal: class Range', fact_of.call(result, 'Fx::RANGE')&.classes == Set[:Range])
 check.call('Float literal: class Float, no value', (f = fact_of.call(result, 'Fx::FLOAT')) && f.classes == Set[:Float] && f.value.nil?)
+check.call('Integer#freeze is the identity when stock: FZ = BASE.freeze is 32 with interval [32, 32]',
+           fact_of.call(result, 'Fx::FZ')&.value == 32 && fact_of.call(result, 'Fx::FZ')&.interval == [32, 32])
+check.call('fixnum_names admits TILE and not BIG (out of margin) or NAME (String)',
+           result.fixnum_names.include?('TILE') && !result.fixnum_names.include?('BIG') &&
+           !result.fixnum_names.include?('NAME'))
+check.call('values and intervals report the group facts: TILE 32, HALF 16',
+           result.values['TILE'] == 32 && result.intervals['HALF'] == [16, 16] && !result.values.key?('BIG'))
 big = fact_of.call(result, 'Fx::BIG')
 check.call('out-of-margin literal is Integer with no value and no interval (never folded as an immediate)',
            big && big.classes == Set[:Integer] && big.value.nil? && big.interval.nil?)

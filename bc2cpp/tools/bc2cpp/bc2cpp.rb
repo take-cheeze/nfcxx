@@ -576,12 +576,21 @@ if $PROGRAM_NAME == __FILE__
   # INTEGER_CONSTANT_PROOF (ADR 0466): a proven name lets GETCONST feed an unchecked mrb_fixnum, so the proof holds
   # only where the closed world shows every constant binding static, and its poison scan covers the closed world's
   # outside sources (the target's host, every linked gem) as well as NATIVE_SRCS and FOREIGN_RUBY_SRCS.
+  # BYTECODE_CONSTANT_FACTS (ADR 0501): the class, value and Fixnum interval of every constant binding, derived on the
+  # bytecode IR. It decides the constant sets below: the Fixnum-admitted names, the folded values and the intervals.
+  freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included_modules, prepended_modules,
+                                                unknown_mixins)
+  constant_facts = profile_call.call('BytecodeIR::ConstantFacts.analyze') do
+    BytecodeIR::ConstantFacts.analyze(
+      ireps, sites: constant_assignment_sites,
+             poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
+                       IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq),
+             operators_safe: operators_safe, freeze_safe: freeze_safe
+    )
+  end
   integer_constants =
     if closed_world.constants_static?
-      profile_call.call('IntegerConstants.analyze') do
-        IntegerConstants.analyze(ireps, (native_paths + outside_native).uniq, (foreign_ruby_srcs + outside_ruby).uniq,
-                                 operators_safe: operators_safe)
-      end
+      constant_facts.fixnum_names
     else
       warn "== INTEGER_CONSTANT_PROOF off: constant bindings are not static (#{closed_world.global_refusal || 'dynamic constant mutation'}) =="
       Set.new
@@ -603,35 +612,23 @@ if $PROGRAM_NAME == __FILE__
     DeclaredConstants.report(declared_constants, sig_applied,
                              abort_on_error: !ENV['BC2CPP_TYPE_FACTS'].to_s.then { |v| !v.empty? })
   end
-  warn "== integer-valued constants proven (INTEGER_CONSTANT_PROOF) =="
+  warn "== integer-valued constants (BYTECODE_CONSTANT_FACTS) =="
   if integer_constants.empty?
     warn '  (none)'
   else
     integer_constants.sort.each { |n| warn "  CONST #{n}" }
   end
 
-  integer_constant_values = profile_call.call('IntegerConstants.analyze_values') do
-    IntegerConstants.analyze_values(ireps, integer_constants)
-  end
+  # The values of the admitted names, folded at GETCONST/GETMCNST (CodeGen.integer_constant_values).
+  integer_constant_values = constant_facts.values.select { |name, _| integer_constants.include?(name) }
   profile_phase.call('global facts + annotations')
-  warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
+  warn "== integer constant literal values (BYTECODE_CONSTANT_FACTS): #{integer_constant_values.size} of #{integer_constants.size} =="
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
-  # BYTECODE_CONSTANT_FACTS (ADR 0493): the constant facts the bytecode IR derives. Report-only in this stage: the proofs
-  # above still decide the build; scripts/bc2cpp/ir_constant_facts_compare.rb compares the two from this log.
-  ir_constant_facts = profile_call.call('BytecodeIR::ConstantFacts.analyze') do
-    BytecodeIR::ConstantFacts.analyze(
-      ireps, sites: constant_assignment_sites,
-             poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
-                       IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq),
-             operators_safe: operators_safe
-    )
-  end
-  warn "== BYTECODE_CONSTANT_FACTS (report-only): #{ir_constant_facts.paths.size} paths, " \
-       "#{ir_constant_facts.groups.size} names =="
-  ir_constant_facts.paths.sort.each do |path, fact|
+  warn "== BYTECODE_CONSTANT_FACTS: #{constant_facts.paths.size} paths, #{constant_facts.groups.size} names =="
+  constant_facts.paths.sort.each do |path, fact|
     warn "  IR_CONST #{path} #{BytecodeIR::ConstantFacts.report_fields(fact).join(' ')}"
   end
-  ir_constant_facts.groups.sort.each do |name, fact|
+  constant_facts.groups.sort.each do |name, fact|
     warn "  IR_GROUP #{name} #{BytecodeIR::ConstantFacts.report_fields(fact).join(' ')}"
   end
 
@@ -1089,21 +1086,9 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
-  # NUMERIC_CONSTANT_RANGES (ADR 0318); BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
-  integer_constant_ranges =
-    if IntegerConstantRanges.enabled?
-      range_report = ENV['BC2CPP_NUMERIC_CONSTANTS_REPORT'] ? [] : nil
-      # FREEZE_SELF: the interval walk reads through `.freeze` only where Object#freeze is stock on Integer.
-      freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included_modules,
-                                                    prepended_modules, unknown_mixins)
-      ranges = profile_call.call('IntegerConstantRanges.analyze') do
-        IntegerConstantRanges.analyze(ireps, native_paths, foreign_ruby_srcs, operators_safe: operators_safe,
-                                                                             freeze_safe: freeze_safe,
-                                                                             report: range_report)
-      end
-      File.write(ENV.fetch('BC2CPP_NUMERIC_CONSTANTS_REPORT'), "#{range_report.sort.join("\n")}\n") if range_report
-      ranges
-    end
+  # NUMERIC_CONSTANT_RANGES (ADR 0318) on the IR: the interval of each name (BYTECODE_CONSTANT_FACTS). The kill switch
+  # BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
+  integer_constant_ranges = IntegerConstantRanges.enabled? ? constant_facts.intervals : nil
   CodeGen.integer_constant_ranges = integer_constant_ranges
   warn "== constants with a proven Fixnum interval (NUMERIC_CONSTANT_RANGES): #{CodeGen.integer_constant_ranges&.size.to_i} =="
   (CodeGen.integer_constant_ranges || {}).sort.each { |n, (lo, hi)| warn "  CONST_RANGE #{n} #{lo} #{hi}" }
