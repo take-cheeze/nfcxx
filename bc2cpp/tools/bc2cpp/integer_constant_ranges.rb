@@ -22,8 +22,28 @@ module IntegerConstantRanges
     ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0'
   end
 
-  # name => [lo, hi]
-  def self.analyze(ireps, native_paths, foreign_paths, report: nil)
+  # The Integer operators the interval arms compute, and the owners whose definitions could replace them.
+  OPERATOR_NAMES = %w[+ - * / ==].freeze
+  OPERATOR_OWNERS = %w[Integer].freeze
+
+  # The operator proof's precondition, owner-scoped like DeclaredConstants.range_to_a_safe?: no Ruby definition of an
+  # operator on Integer or a module it includes, and no prepend or unknown mixin into those owners. A redefined
+  # operator would make the interval describe a value the program never computes.
+  def self.integer_ops_safe?(registry, included_modules, prepended_modules, unknown_mixins)
+    touched = OPERATOR_OWNERS + OPERATOR_OWNERS.flat_map { |owner| Array(included_modules[owner]) }
+    mixins_resolved = touched.none? do |owner|
+      unknown_mixins.include?(owner) || !Array(prepended_modules[owner]).empty?
+    end
+    redefined = OPERATOR_NAMES.any? do |name|
+      (registry[name] || []).any? { |d| d.irep && touched.include?(d.owner) }
+    end
+    mixins_resolved && !redefined
+  end
+
+  # name => [lo, hi]. `operators_safe` is integer_ops_safe?; without it no interval is proven.
+  def self.analyze(ireps, native_paths, foreign_paths, operators_safe:, report: nil)
+    return {} unless operators_safe
+
     defs = Hash.new { |h, k| h[k] = [] }
     poisoned = Set.new
     class_names = Set.new

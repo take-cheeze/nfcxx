@@ -36,7 +36,9 @@ module IntegerConstants
   # `SETCONST NAME R1` / `SETMCNST (R2)::NAME R1` (codedump.c): the name comes
   # first and the source register last, the reverse of GETCONST. print_lv_a may
   # append a `; R1:name` comment, which is stripped before reading the register.
-  def self.analyze(ireps, native_paths, foreign_paths)
+  # `operators_safe` is IntegerConstantRanges.integer_ops_safe? (the operator precondition both proofs share): with a
+  # redefined Integer operator no arithmetic definition is admitted.
+  def self.analyze(ireps, native_paths, foreign_paths, operators_safe:)
     # name -> list of one entry per real definition of that bare name:
     # `:literal` (an integer literal), `[:alias, M]` (a read of bare constant
     # name M), or nil (anything else -- an unconditional poison).
@@ -59,13 +61,16 @@ module IntegerConstants
         end
       end
     end
+    unless operators_safe
+      defs.each_value { |kinds| kinds.map! { |kind| arithmetic_kind?(kind) ? nil : kind } }
+    end
     poisoned.merge(native_defined_const_names(native_paths))
     poisoned.merge(foreign_const_names(foreign_paths))
     admitted = resolve_integral(defs, poisoned)
     loop do
       values = analyze_values(ireps, admitted)
       invalid = admitted.select do |name|
-        defs[name].any? { |kind| kind.is_a?(Array) && kind[0] == :arithmetic } && values[name].nil?
+        defs[name].any? { |kind| arithmetic_kind?(kind) } && values[name].nil?
       end
       break if invalid.empty?
 
@@ -107,6 +112,10 @@ module IntegerConstants
     end
 
     cand
+  end
+
+  def self.arithmetic_kind?(kind)
+    kind.is_a?(Array) && kind[0] == :arithmetic
   end
 
   def self.integral_kind?(kind, candidates)
