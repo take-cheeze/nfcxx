@@ -26,9 +26,7 @@ class CodeGen
     return if @tuple_returns.empty?
 
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op == 'AREF'
-
+      irep.each_with_op('AREF') do |insn, idx|
         src, = insn.src_and_literal
         name = src && tuple_aref_call(irep, idx, src)
         @tuple_consumers[name] << irep.label if name && @tuple_returns.key?(name)
@@ -59,13 +57,11 @@ class CodeGen
     return nil unless program.resolved? && !program.handlers?
 
     insns = irep.instructions
-    return nil if insns.any? { |i| TUPLE_FOREIGN_RETURN_OPS.include?(i.op) } || tuple_block_returns?(irep)
+    return nil if program.op?(*TUPLE_FOREIGN_RETURN_OPS) || tuple_block_returns?(irep)
 
     arrays = {}
-    insns.each_index do |r|
-      next unless insns[r].op == 'RETURN'
-
-      reg = insns[r].reg
+    irep.each_with_op('RETURN') do |ret, r|
+      reg = ret.reg
       defs = BytecodeIR.reaching_definitions(irep, r, reg, follow_moves: false)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
@@ -86,7 +82,7 @@ class CodeGen
       child = @ireps[label]
       next false unless child && seen.add?(label)
 
-      child.instructions.any? { |i| i.op == 'RETURN_BLK' } || tuple_block_returns?(child, seen)
+      BytecodeIR.for(child).op?('RETURN_BLK') || tuple_block_returns?(child, seen)
     end
   end
 

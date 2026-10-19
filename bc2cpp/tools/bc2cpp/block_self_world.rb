@@ -150,7 +150,7 @@ module BlockSelfWorld
     end
 
     def scan_irep(irep, ireps, parents, compiled)
-      irep.instructions.each_with_index do |insn, idx|
+      irep.each_with_op('LOADSYM', 'STRING', 'ALIAS', 'DEF', 'TDEF', 'SDEF', *SENDS) do |insn, idx|
         case insn.op
         when 'LOADSYM'
           fail!(irep, insn, "spells the rebinder :#{insn.sym}") if REBIND_NAMES.include?(insn.sym)
@@ -247,8 +247,8 @@ module BlockSelfWorld
     # Simple names a SETCONST assigns anywhere (`K = Class` is not a class declaration).
     def assigned_constants
       @assigned_constants ||= (@ireps.values + @outside.values).each_with_object(Set.new) do |irep, out|
-        irep.instructions.each do |insn|
-          out << insn.const_name.to_s.split('::').last if %w[SETCONST SETMCNST].include?(insn.op) && insn.const_name
+        irep.each_with_op('SETCONST', 'SETMCNST') do |insn, _|
+          out << insn.const_name.to_s.split('::').last if insn.const_name
         end
       end
     end
@@ -287,8 +287,8 @@ module BlockSelfWorld
           links[name.split('::').last] << (sup == :none ? 'Object' : sup.to_s.split('::').last)
         end
         (@ireps.values + @outside.values).each do |irep|
-          irep.instructions.each_with_index do |insn, idx|
-            next unless insn.op == 'CLASS' && insn.reg && insn.sym
+          irep.each_with_op('CLASS') do |insn, idx|
+            next unless insn.reg && insn.sym
 
             links[insn.sym.split('::').last] << class_statement_super(irep, idx, insn)
           end
@@ -437,8 +437,7 @@ module BlockSelfWorld
       [@ireps, @outside].each do |ireps|
         parents = parent_map(ireps)
         ireps.each_value do |irep|
-          irep.instructions.each_with_index do |insn, idx|
-            next unless SENDS.include?(insn.op)
+          irep.each_with_op(*SENDS) do |insn, idx|
             return :unknown if insn.sym == 'to_proc'
             next unless %w[SENDB SSENDB].include?(insn.op)
             next if BlockSelfWorld.literal_block_label(irep, idx)

@@ -251,10 +251,7 @@ module IrSymbolFlow
   def collect_captures(tree, irep, depth, out)
     Array(irep.reps).each do |label|
       child = tree[label] or next
-      BytecodeIR.for(child).instructions.each do |instruction|
-        insn = instruction.source
-        next unless insn.op == 'GETUPVAR'
-
+      BytecodeIR.for(child).each_with_op('GETUPVAR') do |insn, _|
         index, level = insn.upvar_ref
         out << index.to_s if index && level == depth - 1
       end
@@ -302,14 +299,15 @@ module IrSymbolFlow
   # Constants other than const whose one binding is a SETCONST of a literal value in the class irep, with their sets.
   def literal_constants(ctx, index, class_label, const)
     irep = ctx.ireps[class_label]
-    BytecodeIR.for(irep).instructions.each_with_object({}) do |instruction, lits|
-      insn = instruction.source
-      name = insn.op == 'SETCONST' && insn.const_name
+    lits = {}
+    BytecodeIR.for(irep).each_with_op('SETCONST') do |insn, idx|
+      name = insn.const_name
       next unless name && name != const && index[:setconst][name].size == 1 && !index[:mcnst].include?(name)
 
-      set = values_at(ctx, class_label, instruction.index, insn.regs.last, Set.new)
+      set = values_at(ctx, class_label, idx, insn.regs.last, Set.new)
       lits[insn.const_name] = set if set
     end
+    lits
   end
 
   # P4: register => Set of names for the writer's parameters, or nil.
@@ -483,9 +481,8 @@ module IrSymbolFlow
 
   # P5: no symbol is created at run time.
   def symbol_free?(irep)
-    BytecodeIR.for(irep).instructions.none? do |instruction|
-      insn = instruction.source
-      insn.op == 'INTERN' || (BytecodeIR::Ops::SEND.include?(insn.op) && SYMBOL_SENDS.include?(insn.sym))
+    BytecodeIR.for(irep).instructions_with_op('INTERN', *BytecodeIR::Ops::SEND).none? do |insn|
+      insn.op == 'INTERN' || SYMBOL_SENDS.include?(insn.sym)
     end
   end
 end
