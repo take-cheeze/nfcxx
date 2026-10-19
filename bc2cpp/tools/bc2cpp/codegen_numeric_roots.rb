@@ -26,7 +26,7 @@ class CodeGen
       next if NumericFlow.numeric?(raw)
 
       begin
-        leaves.concat(numeric_root_leaves(irep, idx - 1, reg.to_i, owner_def))
+        leaves.concat(numeric_root_leaves(irep, idx, reg.to_i, owner_def))
       rescue StandardError => e
         leaves << "ERR:#{e.class}:#{e.message[0, 80]}@#{e.backtrace&.first}"
       end
@@ -44,7 +44,7 @@ class CodeGen
         next if NumericFlow.numeric?(mask)
 
         leaves = @tuple_sites[name].flat_map do |irep, idx, d, _n|
-          numeric_root_leaves(irep, idx - 1, irep.instructions[idx].reg.to_i + pos, d)
+          numeric_root_leaves(irep, idx, irep.instructions[idx].reg.to_i + pos, d)
         end
         CodeGen.numeric_root_lines[[:tuple, name, pos]] =
           ['TUPLE', name, pos, numeric_mask_name(mask), leaves.uniq.join('|')].join("\t").gsub(/[\r\n]/, ' ')
@@ -63,25 +63,33 @@ class CodeGen
     end
   end
 
-  # The non-numeric leaves feeding +reg+ as read after instruction +idx+: the nearest earlier writer, looking
-  # through arithmetic and moves, plus later MOVE/arithmetic writers of the same register (loop-carried values).
-  def numeric_root_leaves(irep, idx, reg, owner_def)
+  # The non-numeric leaves of +reg+ as read by instruction +at+. Its writers are the reaching definitions
+  # (BytecodeIR.reaching_definitions: joins, loops and handler edges; MOVEs followed), and each writer's own
+  # operands are queried the same way. A refused query is a leaf of its own: the writes are unknown, not none.
+  def numeric_root_leaves(irep, at, reg, owner_def)
     out = []
     seen = {}
-    work = [[idx, reg.to_i]]
+    work = [[at, reg.to_i]]
     until work.empty?
-      from, r = work.pop
-      w = irep.last_writer_index(from, r.to_s)
-      w = nil if w && !numeric_root_writer?(irep.instructions[w])
-      out << "param:#{numeric_root_param_status(irep, r, owner_def)}" if w.nil? && numeric_root_param?(irep, r)
-      later = irep.instructions.each_index.select do |i|
-        i > from && irep.instructions[i].reg.to_s == r.to_s && numeric_root_loop_writer?(irep.instructions[i])
-      end
-      ([w] + later).compact.each do |i|
-        next if seen[i]
+      i, r = work.pop
+      next if seen[[i, r]]
 
-        seen[i] = true
-        out.concat(numeric_root_writer_leaves(irep, i, irep.instructions[i], owner_def, work))
+      seen[[i, r]] = true
+      refusal = {}
+      defs = BytecodeIR.reaching_definitions(irep, i, r.to_s, through_handlers: true, refusal: refusal)
+      unless defs
+        out << "unproven:#{refusal[:cause]}"
+        next
+      end
+      defs.each do |d|
+        writer = d.entry? ? nil : irep.instructions[d.index]
+        if writer.nil? || !numeric_root_writer?(writer)
+          next unless numeric_root_param?(irep, d.reg.to_i)
+
+          out << "param:#{numeric_root_param_status(irep, d.reg.to_i, owner_def)}"
+          next
+        end
+        out.concat(numeric_root_writer_leaves(irep, d.index, writer, owner_def, work))
       end
     end
     out.uniq
@@ -89,10 +97,6 @@ class CodeGen
 
   def numeric_root_writer?(insn)
     insn.op.start_with?('LOADI') || ROOT_WRITERS.include?(insn.op)
-  end
-
-  def numeric_root_loop_writer?(insn)
-    insn.op == 'MOVE' || ROOT_ARITH.key?(insn.op) || ROOT_ARITH_IMM.include?(insn.op)
   end
 
   # Why a method argument is not a proven number: the admission rule it fails (entry_arg_candidates), or, for an
@@ -113,7 +117,7 @@ class CodeGen
       mask = numeric_raw_mask(sirep, idx, recv + k, sowner)
       next if mask && (mask & NumericFlow::OPAQUE).zero?
 
-      numeric_root_leaves(sirep, idx - 1, recv + k, sowner).first(2).join('+')
+      numeric_root_leaves(sirep, idx, recv + k, sowner).first(2).join('+')
     end
     "#{tag}[dropped<#{culprits.uniq.first(3).join(';')}>]"
   end
@@ -166,7 +170,7 @@ class CodeGen
         mask = numeric_raw_mask(sirep, idx, reg, numeric_irep_owner[sirep.label])
         next [] if mask && (mask & NumericFlow::OPAQUE).zero?
 
-        numeric_root_leaves(sirep, idx - 1, reg, numeric_irep_owner[sirep.label])
+        numeric_root_leaves(sirep, idx, reg, numeric_irep_owner[sirep.label])
       end
       "flowfail<#{leaves.uniq.first(4).join(';')}>"
     end
@@ -191,22 +195,21 @@ class CodeGen
 
   def numeric_root_writer_leaves(irep, i, insn, owner_def, work)
     op = insn.op
-    if op == 'MOVE'
-      work << [i - 1, insn.regs[1].to_i]
-      return []
-    elsif ROOT_ARITH.key?(op) || ROOT_ARITH_IMM.include?(op)
+    # An arithmetic or passthrough writer's operands are read by it, so they are queried at it (MOVEs never
+    # arrive here: reaching_definitions follows them).
+    if ROOT_ARITH.key?(op) || ROOT_ARITH_IMM.include?(op)
       regs = [insn.reg.to_i]
       regs << (insn.reg.to_i + 1) if ROOT_ARITH.key?(op)
       regs.each do |r|
         m = numeric_raw_mask(irep, i, r, owner_def)
-        work << [i - 1, r] unless NumericFlow.numeric?(m)
+        work << [i, r] unless NumericFlow.numeric?(m)
       end
       return []
     end
     if %w[SEND SEND0].include?(op) && ROOT_PASSTHROUGH.include?(insn.sym) && insn.sym != 'min' && insn.sym != 'max'
       regs = [insn.reg.to_i]
       regs << (insn.reg.to_i + 1) if insn.argc.to_i == 1 && %w[% fdiv clamp].include?(insn.sym)
-      regs.each { |r| work << [i - 1, r] unless NumericFlow.numeric?(numeric_raw_mask(irep, i, r, owner_def)) }
+      regs.each { |r| work << [i, r] unless NumericFlow.numeric?(numeric_raw_mask(irep, i, r, owner_def)) }
       return []
     end
     case op
@@ -224,14 +227,16 @@ class CodeGen
       recv = numeric_raw_mask(irep, i, src, owner_def)
       key = if op == 'GETIDX0' then '0'
             else
+              # Label only: the textually nearest writer, as before ADR 0509 (not a feed set).
               kw = irep.last_writer_index(i - 1, (insn.reg.to_i + 1).to_s)
               kins = kw && irep.instructions[kw]
               kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
             end
-      inner = numeric_root_nest('') { numeric_root_leaves(irep, i - 1, src, owner_def).first(2).join('+') }
+      inner = numeric_root_nest('') { numeric_root_leaves(irep, i, src, owner_def).first(2).join('+') }
       ["idx[#{key}]@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}<#{inner}>"]
     when 'AREF'
       src = insn.regs[1].to_i
+      # Label only, as the GETIDX key above (ADR 0509).
       w = irep.last_writer_index(i - 1, src.to_s)
       wi = w && irep.instructions[w]
       what = if wi.nil? then 'param'
