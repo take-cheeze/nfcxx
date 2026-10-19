@@ -296,8 +296,7 @@ class ClosedWorld
     @class_object_bodies ||= @singleton_opens.each_with_object(Set.new) do |(irep, idx, insn), out|
       next unless insn.op == 'SCLASS' && class_constant_target?(irep, idx, insn.reg.to_s)
 
-      exec = irep.instructions[idx + 1]
-      body = exec && exec.op == 'EXEC' && exec.reg.to_s == insn.reg.to_s && irep.reps[exec.block_index.to_i]
+      body = BytecodeIR.class_bodies(irep, 'SCLASS')[idx]
       out << body if body
     end
     @class_object_bodies.include?(label)
