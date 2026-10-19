@@ -168,6 +168,8 @@ end
 
 def load_fragment(path)
   restore_big_ints(JSON.parse(quote_big_ints(read_file(path))))
+rescue StandardError => e
+  die("#{path}: #{e.message}")
 end
 
 def build_shim(dirname, cc, out)
@@ -374,6 +376,8 @@ def main(args)
       end
       width = { "int8" => 1, "int16" => 2, "int32" => 4, "int64" => 8, "float32" => 4, "float64" => 8 }[kind]
       if kind == "float32" || kind == "float64"
+        # the bit pattern: an unsigned integer that fits the width (to_bytes refuses anything else)
+        die("#{kind} item of #{n} is not a bit pattern: #{it[1]}") unless it[1].is_a?(Integer) && it[1] >= 0 && it[1] < (1 << (8 * width))
         hex = le_bytes(it[1], width).map { |b| format("%02x", b) }.join(" ")
         init.concat(base)
         if kind == "float32"

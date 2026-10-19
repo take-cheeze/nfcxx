@@ -6,7 +6,7 @@
 # attributes, so QBE emits them as strong symbols and the link fails with "multiple definition".
 # Usage: scripts/mrb scripts/weak-symbols.rb [--c-input] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
 #
-# mruby has no Regexp, so the scanning is by hand. It mirrors the Python original (tests/mruby/oracle/weak-symbols.py) exactly.
+# mruby has no Regexp, so the scanning is by hand. It mirrors the Python original (tests/mruby/oracle/weak-symbols.py, deleted; the oracle port is tests/mruby/oracle/weak-symbols.rb).
 
 SPACE = " \t\n\r\f\v"
 

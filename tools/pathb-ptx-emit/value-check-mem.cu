@@ -1,4 +1,4 @@
-// GPU value check of the memory forms (see value-check-mem.py): loads the module of the emitter's index, load and store
+// GPU value check of the memory forms (see value-check-mem.rb): loads the module of the emitter's index, load and store
 // lines, runs each type's kernel on 32 threads (thread t copies in[idx[t]] to out[t]), and compares the output bytes with
 // the host's copy. Usage: value-check-mem MODULE.ptx. Build: nvcc -o value-check-mem value-check-mem.cu -lcuda
 #include <cuda.h>

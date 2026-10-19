@@ -11,7 +11,7 @@
 # The EH idiom of the lowered try (the IR of `try { B } catch (T) { H }`, see docs/notes/pathb-stage3.md):
 #   if (_setjmp(buf) == 0) { B } else { H }
 # becomes  .try { B } catch CxxThrow { H }, and _setjmp is 0 (the linker's runtime). throw is __throw_setup (the
-# exception object's storage) followed by __throw, which raises CxxThrow (see cil-link.py's runtime). The
+# exception object's storage) followed by __throw, which raises CxxThrow (see cil-link.rb's runtime). The
 # destructors of the try block's objects are not run during unwinding yet (a documented gap).
 # Refused with an error, never miscompiled: forms outside the subset below (bounds, index, switch, sret, copy,
 # long double, fence, cf2i, variadic calls, variadic definitions). A statement the emitter does not know
@@ -839,7 +839,7 @@ class Function
         return 'int64'
       end
       if e.kind == 'fn'
-        # A function's address is its linker field, as a global's is: cil-link.py stores ldftn of a function
+        # A function's address is its linker field, as a global's is: cil-link.rb stores ldftn of a function
         # the unit defines at Init, and dlsym of any other name (null when it is not in the process).
         @em.addrs[@em.fn_name(e.name)] = true
         emit("ldsfld int64 Prog::'addr_#{@em.fn_name(e.name)}'")

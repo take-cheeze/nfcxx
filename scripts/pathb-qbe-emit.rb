@@ -14,7 +14,7 @@
 # to one shared abort block that calls abort(). Registers are stack slots; QBE's own promotion turns them back into
 # SSA temporaries. Scalar sizes assume LP64 (int 4, long 8, pointers 8), which is what the x86-64 Linux target uses.
 #
-# This is a line-by-line port of the Python original (tests/mruby/oracle/pathb-qbe-emit.py) to mruby; the output,
+# This is a line-by-line port of the Python original (tests/mruby/oracle/pathb-qbe-emit.py, deleted; the oracle port is tests/mruby/oracle/pathb-qbe-emit.rb) to mruby; the output,
 # the messages on stderr and the exit status are identical (tests/mruby/run.sh compares them). Notes on the port:
 #   - mruby has no Regexp: the three patterns of the original are character checks (as_int, reg?, qname?).
 #   - Integer constants go up to 2**64 - 1, so the interpreter needs mruby-bigint (scripts/mruby-tool-config.rb).
