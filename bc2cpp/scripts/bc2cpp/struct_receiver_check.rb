@@ -12,22 +12,14 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/struct_receiver_check.rb
 
-require 'tmpdir'
+require_relative 'check_support'
 
-unless ENV['MRBC']
-  puts '  SKIP: set MRBC (a host mrbc built from the patched 3rd/mruby)'
-  exit 0
-end
-
+suite = FixtureCheck.new('struct_receiver_check')
+suite.require_mrbc!
 # The fixtures declare no RBS; the repository's signatures name engine classes these fixtures lack.
 ENV['BC2CPP_SIG_DIRS'] = ''
 require_relative '../../tools/bc2cpp/bc2cpp'
-
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
+check = suite.method(:check)
 
 SNIPPET = <<~RUBY
   class Host; end
@@ -51,17 +43,10 @@ SNIPPET = <<~RUBY
 RUBY
 
 # [registry, struct member lists] of the snippet, compiled by mrbc.
-compiled = lambda do
-  Dir.mktmpdir do |dir|
-    path = File.join(dir, 'struct_receiver.rb')
-    File.write(path, SNIPPET)
-    ireps, root = compile_ireps(path, 'struct_receiver_fixture', dir)
-    result = build_registry(ireps, root)
-    [result[0], result[6]]
-  end
+registry, members = suite.compile(SNIPPET) do |ireps, root|
+  result = build_registry(ireps, root)
+  [result[0], result[6]]
 end
-
-registry, members = compiled.call
 owner_of = ->(name) { registry.fetch(name, []).map(&:owner) }
 
 puts '-- STRUCT_RECEIVER (registry)'
@@ -80,5 +65,4 @@ check.call('the direct Struct.new block defs still register under their owner', 
 check.call('a join where Struct is the receiver on every arm is still recognized (never less)',
            members['Pt7'] == ['w'] && owner_of.call('both') == ['Pt7'])
 
-puts "struct_receiver_check: #{failures.size} failures"
-exit(failures.empty? ? 0 : 1)
+suite.finish!

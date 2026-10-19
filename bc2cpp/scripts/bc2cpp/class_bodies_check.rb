@@ -8,15 +8,13 @@
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/class_bodies_check.rb
 
-require 'tmpdir'
+require_relative 'check_support'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir_classes'
 
-failures = []
-check = lambda do |name, condition|
-  puts "#{condition ? 'ok  ' : 'FAIL'} #{name}"
-  failures << name unless condition
-end
+suite = FixtureCheck.new('class_bodies_check')
+suite.require_mrbc!
+check = suite.method(:check)
 
 def opener_index(irep, name)
   found = nil
@@ -26,31 +24,23 @@ def opener_index(irep, name)
   found
 end
 
-unless ENV['MRBC']
-  puts 'SKIP class bodies check (MRBC not set)'
-  exit 0
-end
-
-Dir.mktmpdir('class-bodies') do |directory|
-  path = File.join(directory, 'fixture.rb')
-  File.write(path, <<~SOURCE)
-    class Timeout < StandardError; end
-    class Real
-      def hi; end
-    end
-    class Outer::Viaconst
-      def v; end
-    end
-    module Outer
-      class Inner; end
-      module Deep
-        class ::TopLevel
-          def top; end
-        end
+suite.compile(<<~SOURCE) do |ireps, root_label|
+  class Timeout < StandardError; end
+  class Real
+    def hi; end
+  end
+  class Outer::Viaconst
+    def v; end
+  end
+  module Outer
+    class Inner; end
+    module Deep
+      class ::TopLevel
+        def top; end
       end
     end
-  SOURCE
-  ireps, root_label = load_ireps(run_mrbc([path], 'class_bodies', directory))
+  end
+SOURCE
   root = ireps.fetch(root_label)
   bodies = BytecodeIR.class_bodies(root, 'CLASS', 'MODULE')
 
@@ -80,9 +70,4 @@ Dir.mktmpdir('class-bodies') do |directory|
              BytecodeIR.class_body_path(deep_body, top, 'Outer::Deep') == 'TopLevel')
 end
 
-if failures.empty?
-  puts 'class bodies checks passed'
-else
-  warn "class bodies checks failed: #{failures.join(', ')}"
-  exit 1
-end
+suite.finish!

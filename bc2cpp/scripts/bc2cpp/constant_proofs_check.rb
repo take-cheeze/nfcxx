@@ -8,30 +8,13 @@
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/constant_proofs_check.rb
 
 require 'set'
-require 'tmpdir'
+require_relative 'check_support'
 require_relative '../../tools/bc2cpp/bc2cpp'
 
-unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
-  puts 'SKIP constant_proofs_check: MRBC is not set to a host mrbc'
-  exit 0
-end
-
-failures = []
-checks = 0
-check = lambda do |what, condition|
-  checks += 1
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
-
-compile = lambda do |source, &block|
-  Dir.mktmpdir('constant-proofs') do |dir|
-    rb = File.join(dir, 'fixture.rb')
-    File.write(rb, source)
-    ireps, root = compile_ireps([rb], 'constant_proofs', dir)
-    block.call(ireps, root, dir)
-  end
-end
+suite = FixtureCheck.new('constant_proofs_check')
+suite.require_mrbc!
+check = suite.method(:check)
+compile = suite.method(:compile)
 
 # The declared gate and report rows use the same registry and core-method assumptions.
 declared = lambda do |source, sig|
@@ -236,9 +219,4 @@ check.call('U in C4 resolves when both arms include B4 (a module that does not d
            mixin_agree.include?(['GETCONST', 'U', 'U']))
 
 
-if failures.empty?
-  puts "constant_proofs_check: #{checks} checks passed"
-else
-  warn "constant_proofs_check: #{failures.size} of #{checks} checks failed"
-  exit 1
-end
+suite.finish!
