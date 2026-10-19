@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 require 'tmpdir'
-require_relative '../../tools/bc2cpp/ir_rbs_block_types'
+require_relative '../../../tools/bc2cpp/ir_rbs_block_types'
 
 def check(label, condition)
   raise label unless condition
