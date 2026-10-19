@@ -46,6 +46,7 @@ done
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$src/libcxxabi/src/cxa_demangle.cpp" -o cxa_demangle.o
 # stdlib_typeinfo.cpp is the key function of std::type_info, so it emits the _ZTISt9type_info object only with RTTI on.
 clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -frtti -O2 -c "$src/libcxxabi/src/stdlib_typeinfo.cpp" -o stdlib_typeinfo.o
+clang++ "${tgt[@]}" "${cxxinc[@]}" -std=c++17 -fno-exceptions -fno-rtti -O2 -c "$root/tests/macos-sysroot/runtime/src/streambuf_seekpos.cpp" -o streambuf_seekpos.o
 # new_handler.cpp (libc++'s copy of std::get_new_handler and set_new_handler) is not built: libc++abi's
 # cxa_default_handlers.cpp defines set_new_handler against the runtime's __cxa_new_handler, and two definitions would collide.
 # private_typeinfo.cpp uses dynamic_cast itself, so it is built with RTTI on (no -fno-rtti).
@@ -67,6 +68,6 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_
 rm -f libnfcxx-darwin-rt.a
 # Only members with no symbol in libC.a go into the archive. libC.a (EDG's runtime) owns the EH, type_info,
 # handler and new/delete names that the other members define; the real libc++ on the Mac exports the libc++ names at run time.
-llvm-ar rcs libnfcxx-darwin-rt.a atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
