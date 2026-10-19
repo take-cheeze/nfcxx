@@ -1,5 +1,5 @@
 // The vecAdd kernel of NVIDIA cuda-samples 0_Introduction/vectorAdd, device side. The thread indices are
-// intrinsic calls (scripts/pathb-ptx-emit.rb maps them to PTX special registers): the device compile has no
+// intrinsic calls (tools/pathb-ptx-emit maps them to PTX special registers): the device compile has no
 // CUDA headers. The kernel is `vecAdd` in the sample, with threadIdx.x + blockIdx.x * blockDim.x as the index.
 extern "C" unsigned __nfcxx_tid_x(void);
 extern "C" unsigned __nfcxx_ctaid_x(void);

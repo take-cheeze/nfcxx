@@ -241,9 +241,13 @@ std::string sanitize(const std::string &s) {
   return res;
 }
 
-// The name of the C-linkage wrapper of a template launch (Ruby: wrapper_name).
+std::string blank_comments(const std::string &text);
+
+// The name of the C-linkage wrapper of a template launch (Ruby: wrapper_name). The name must be the same in both passes,
+// so the comments of the template arguments are blanked first: the device pass blanks every comment of its text
+// (`reduce_rows_f32</*norm=*/true>` is `true` there), and the host copy's wrapper must not read the comment as a name.
 std::string wrapper_name(const std::string &name, const std::string &targs) {
-  return "__nfcxx_k_" + sanitize(name) + "_" + sanitize(targs);
+  return "__nfcxx_k_" + sanitize(name) + "_" + sanitize(strip(blank_comments(targs)));
 }
 
 // ---- template kernels and launches (Ruby lines 190-690) ------------------------------------------------------------
@@ -539,6 +543,8 @@ std::string name_comment_params(const std::string &s) {
   return out;
 }
 
+std::string blank_comments(const std::string &text);
+
 // Ruby template_site (line 288): the wrapper of a template launch. Registers it in g_sites.
 std::string template_site(const std::string &name, const std::string &targs) {
   KernelTemplate kt;
@@ -553,7 +559,9 @@ std::string template_site(const std::string &name, const std::string &targs) {
     if (pt.empty()) refuse("template kernel " + name + ": unnamed parameter " + part);
     call.push_back(declared_name(part));
   }
-  std::string w = wrapper_name(name, targs);
+  // The wrapper's name is made from the arguments without their comments: the device unit has its comments blanked
+  // (`reduce_rows_f32</*norm=*/false>` is `reduce_rows_f32_false` there), and the host copy must name the same wrapper.
+  std::string w = wrapper_name(name, strip(blank_comments(targs)));
   if (!g_site_index.count(w)) {
     g_site_index[w] = g_sites.size();
     g_sites.push_back(Site{w, name, targs, decl, call});
@@ -751,6 +759,25 @@ struct OuterTemplate {
   long parts = -1;  // the number of function parameters of this overload (-1: unknown)
   long min_parts = -1;  // the parameters without a default value: the fewest arguments a call passes
 };
+
+// An `if constexpr` branch enclosing a position: its condition text, and whether the position is in its else.
+struct CxBranch {
+  std::string cond;
+  bool negated;
+};
+
+std::vector<CxBranch> enclosing_constexpr_branches(const std::string &code, long body_open, long pos);
+int guards_taken(const std::string &text, long pos, const OuterTemplate &outer, const std::vector<std::string> &inst,
+                 const std::vector<CxBranch> &guards, std::string &why);
+
+// The text with its directives blanked (same length): the code the explicit calls of a template are read from.
+std::string code_without_directives(const std::string &text) {
+  std::string code = text;
+  for (const auto &d : directive_ends(text))
+    for (long k = d.first; k < d.second && k < (long)code.size(); k++)
+      if (code[(size_t)k] != '\n') code[(size_t)k] = ' ';
+  return code;
+}
 
 std::vector<std::vector<std::string>> member_instances(const OuterTemplate &outer, const std::string &text) {
   const MemberQualifier &q = outer.qual;
@@ -1294,7 +1321,24 @@ bool local_constant_visible(const std::string &text, long pos, const std::string
 }
 
 // Ruby resolve_local_constants (line 517): the template arguments of a launch with its local constants' values.
-std::string resolve_local_constants(const std::string &text, const std::string &targs, long pos) {
+std::string resolve_local_constants(const std::string &text, const std::string &raw_targs, long pos) {
+  // Comments are not part of the arguments: `rms_norm_f32_dispatch</*do_multiply*/false, do_scale>` names no local.
+  std::string targs;
+  for (long c = 0; c < (long)raw_targs.size();) {
+    if (raw_targs.compare((size_t)c, 2, "/*") == 0) {
+      long close = str_index(raw_targs, "*/", c + 2);
+      c = close < 0 ? (long)raw_targs.size() : close + 2;
+      targs.push_back(' ');
+      continue;
+    }
+    if (raw_targs.compare((size_t)c, 2, "//") == 0) {
+      while (c < (long)raw_targs.size() && raw_targs[(size_t)c] != '\n') c += 1;
+      continue;
+    }
+    targs.push_back(raw_targs[(size_t)c]);
+    c += 1;
+  }
+  targs = strip(targs);
   bool has_ident = false;
   for (char c : targs)
     if (ident_c((unsigned char)c) && !(c >= '0' && c <= '9')) has_ident = true;
@@ -1767,7 +1811,11 @@ long additive_op(const std::string &a) {
 }
 
 // Ruby argument_type (line 1384): the type of a launch argument: a literal's, or the declared type of an identifier.
-std::vector<std::string> argument_type(const std::string &text, long pos, const std::string &arg, const std::string &nm) {
+std::string blank_comments(const std::string &text);
+std::vector<std::string> argument_type(const std::string &text_raw, long pos, const std::string &arg, const std::string &nm) {
+  // The declaration is searched in code: a comment after a declaration (`const ggml_tensor * src1 = ...; // src1 ...`) is
+  // not part of the type of the next one. Comments are blanked, so the positions do not change.
+  const std::string text = blank_comments(text_raw);
   bool all_num = !arg.empty();
   for (char c : arg)
     if (!((c >= '0' && c <= '9') || c == 'u' || c == 'U' || c == 'l' || c == 'L')) all_num = false;
@@ -2582,7 +2630,19 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
     }
     if (has_outer && mentions) {
       const std::string outer_key = overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts);
+      // A call in an `if constexpr` branch of the enclosing template is an instance only where that branch is taken
+      // (ggml-cuda's fattn-tile: switch_ncols2 calls switch_ncols1<DKQ, DV, 4> under `DKQ != 320`, so DKQ = 320 has no
+      // such instance; the front end would instantiate the discarded call and fail on a kernel config it lacks).
+      const std::vector<CxBranch> guards = enclosing_constexpr_branches(code_without_directives(text), outer.open, pos);
       for (const auto &inst : template_instances(outer.fname, text, next_stack, outer_key)) {
+        if (!guards.empty()) {
+          std::string why;
+          const int taken = guards_taken(text, pos, outer, inst, guards, why);
+          if (taken < 0)
+            refuse("call of " + name + " at line " + std::to_string(line_of(text, pos)) +
+                   " is in a branch of " + outer.fname + " whose condition cannot be evaluated: " + why);
+          if (taken == 0) continue;
+        }
         // A pack expands to several arguments: the list is split again after the substitution.
         std::vector<std::string> subbed;
         for (const auto &a : args) subbed.push_back(substitute(a, outer.names, inst, outer.has_pack, outer.pack));
@@ -2651,8 +2711,9 @@ std::set<std::string> template_param_names(const std::string &text) {
     long close = matching_angle(text, k);
     if (close < 0) continue;
     for (const auto &part : split_top(sl(text, k + 1, close))) {
-      std::vector<std::string> toks = tokens_of(ruby_split_eq0(part));
-      if (!toks.empty() && !toks.back().empty() && ident_c((unsigned char)toks.back()[0])) names.insert(toks.back());
+      // The declared name (a function-pointer parameter `float (*op)(float)` is named by its `(*op)`, not its last token).
+      std::string nm = declared_name(strip(ruby_split_eq0(part)));
+      if (!nm.empty() && ident_c((unsigned char)nm[0])) names.insert(nm);
     }
   }
   return names;
@@ -3889,6 +3950,7 @@ struct DevPiece {
   std::vector<std::string> toks;
   std::vector<std::string> defined;
   bool keep = false, device = false, macro = false;
+  bool fn = false;  // a device function or tagged type: kept when a name it defines is needed (see device_tu)
 };
 
 // Ruby drop_host_members: a __host__ member definition (no __device__ or __global__) is removed with its body, keeping its
@@ -3949,6 +4011,36 @@ static long alias_head_index(const std::vector<std::string> &toks) {
   return -1;
 }
 
+// The names of the #define lines inside a piece's text. A piece is a declaration or a definition, but a #define can sit in
+// the middle of one (llama.cpp's common.cuh WARP_SIZE follows a table of ggml-common.h): the piece defines that name too,
+// so the piece is kept when the name is needed. Comments are blanked first, as the host declarations are.
+static std::vector<std::string> embedded_macros(const std::string &text) {
+  std::vector<std::string> out;
+  const std::string t = blank_comments(text);
+  auto sp = [](char c) { return c == ' ' || c == '\t'; };
+  size_t pos = 0;
+  while (pos <= t.size()) {
+    size_t eol = t.find('\n', pos);
+    if (eol == std::string::npos) eol = t.size();
+    size_t i = pos;
+    while (i < eol && sp(t[i])) i++;
+    if (i < eol && t[i] == '#') {
+      i++;
+      while (i < eol && sp(t[i])) i++;
+      if (eol - i > 6 && t.compare(i, 6, "define") == 0 && sp(t[i + 6])) {
+        i += 6;
+        while (i < eol && sp(t[i])) i++;
+        size_t b = i;
+        while (i < eol && ident_c((unsigned char)t[i])) i++;
+        if (i > b && !isdigit((unsigned char)t[b])) out.push_back(t.substr(b, i - b));
+      }
+    }
+    if (eol >= t.size()) break;
+    pos = eol + 1;
+  }
+  return out;
+}
+
 // Ruby device_tu (line 2642): the device translation unit of a unit: [text, kernel names].
 // True when the word `w` ends at index `end` of s (and starts at a word boundary).
 bool word_ends_at(const std::string &s, long end, const std::string &w) {
@@ -3956,12 +4048,6 @@ bool word_ends_at(const std::string &s, long end, const std::string &w) {
   if (start < 0 || s.compare((size_t)start, w.size(), w) != 0) return false;
   return start == 0 || !ident_c((unsigned char)s[start - 1]);
 }
-
-// An `if constexpr` branch enclosing a position: its condition text, and whether the position is in its else.
-struct CxBranch {
-  std::string cond;
-  bool negated;
-};
 
 // The `if constexpr` branches between the template body's open brace and pos, outermost first. The braced else of an
 // `if constexpr` block is the negated condition. A runtime if takes no instance out of the program, so it is not listed.
@@ -4461,6 +4547,15 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
     i = j;
   }
   static const std::vector<std::string> dq(DEVICE_QUALIFIERS.begin(), DEVICE_QUALIFIERS.end());
+  // Device functions are kept only when the unit names them (the fixed point below): a function that no kept piece
+  // mentions is not in the unit. Kernels, and the other device pieces (classes, variables with an initializer), are kept
+  // always. A function with no name of its own (`operator+`, `operator()`) is kept always too: its name is not a word the
+  // code uses.
+  auto has_tag = [](const std::vector<std::string> &v) {
+    for (const char *w : {"struct", "class", "union", "enum"})
+      if (std::find(v.begin(), v.end(), w) != v.end()) return true;
+    return false;
+  };
   for (auto &pc : pieces) {
     if (pc.kind == "pp") continue;
     if (!pc.device) continue;
@@ -4469,12 +4564,34 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       refuse("device variable: " + sl(strip(pc.text), 0, 60));
     if (pc.body) {
       bool has_g = std::find(pc.toks.begin(), pc.toks.end(), "__global__") != pc.toks.end();
-      if (has_g && (pc.toks.empty() || pc.toks.front() != "template")) {
-        std::string name = function_name(remove_words(pc.text, DEVICE_QUALIFIERS));
+      bool kernel = has_g && (pc.toks.empty() || pc.toks.front() != "template");
+      std::string name = function_name(remove_words(pc.text, DEVICE_QUALIFIERS));
+      if (kernel) {
         if (name.empty()) refuse("kernel without a name: " + sl(strip(pc.text), 0, 60));
         kernels.push_back(name);
       }
-      pc.keep = true;
+      bool fn = !kernel && !has_tag(pc.toks) && !name.empty() && name != "operator" && str_index(pc.text, "(", 0) >= 0;
+      // A class or enum with device code is kept when its tag is needed (a type is named to be used), with its members.
+      std::string tag_kw;
+      for (const auto &tk : pc.toks)
+        if (tk == "struct" || tk == "class" || tk == "union" || tk == "enum") { tag_kw = tk; break; }
+      if (!kernel && !fn && !tag_kw.empty() && !function_head(blank_comments(pc.text))) {
+        std::string t = blank_comments(pc.text);
+        std::string tag = tag_after(t, tag_kw);
+        if (tag_kw == "enum" && (tag == "class" || tag == "struct")) tag = tag_after(t, tag);
+        if (!tag.empty()) {
+          pc.fn = true;
+          pc.defined = {tag};
+          if (tag_kw == "enum")
+            for (const auto &en : enum_enumerators(t)) pc.defined.push_back(en);
+        }
+      }
+      if (fn) {
+        pc.fn = true;
+        pc.defined = {name};
+      } else if (!pc.fn) {
+        pc.keep = true;
+      }
       // a class of the device side keeps its device members only: its host-only members go, and so do their tokens
       if (std::find(pc.toks.begin(), pc.toks.end(), "struct") != pc.toks.end() ||
           std::find(pc.toks.begin(), pc.toks.end(), "class") != pc.toks.end()) {
@@ -4489,11 +4606,19 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       std::vector<std::string> words = dq;
       if (has_g) words.push_back("static");
       pc.text = remove_words(pc.text, words);
-      seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+      if (!pc.fn) seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
     } else if (str_index(pc.text, "(", 0) >= 0) {
-      pc.keep = true;
+      std::string name = has_tag(pc.toks) || str_index(pc.text, "=", 0) >= 0 || (!pc.toks.empty() && pc.toks.front() == "typedef")
+                             ? std::string()
+                             : function_name(remove_words(pc.text, DEVICE_QUALIFIERS));
       pc.text = remove_words(pc.text, DEVICE_QUALIFIERS);
-      seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+      if (!name.empty() && name != "operator") {
+        pc.fn = true;
+        pc.defined = {name};
+      } else {
+        pc.keep = true;
+        seeds.insert(seeds.end(), pc.toks.begin(), pc.toks.end());
+      }
     }
   }
 
@@ -4565,18 +4690,31 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   // Fixed point: a host declaration is carried over when the unit refers to a name it defines.
   // The wrappers (see template_site) name their template arguments and parameters: a macro or constant among them is
   // a name the unit needs even when no kept kernel body mentions it (ggml-cuda's mmf: MMF_ROWS_PER_BLOCK_CDNA).
+  // A #define inside a piece names the piece too (see embedded_macros). A host function body is never kept, so its
+  // macros do not make it one.
+  for (auto &pc : pieces) {
+    if (pc.kind == "pp") continue;
+    if (pc.body && !pc.device && str_index(pc.text, "(", 0) >= 0 && !has_tag(pc.toks)) continue;
+    for (const auto &m : embedded_macros(pc.text)) pc.defined.push_back(m);
+  }
+  // The wrapper calls the template kernel (its name and the call's arguments), so both are needed.
   for (const auto &site : g_sites) {
+    seeds.push_back(site.name);
     for (const auto &x : tokens_of(site.targs)) seeds.push_back(x);
     for (const auto &x : tokens_of(site.decl)) seeds.push_back(x);
+    for (const auto &c : site.call)
+      for (const auto &x : tokens_of(c)) seeds.push_back(x);
   }
   std::map<std::string, bool> needed;
   for (const auto &x : seeds) needed[x] = true;
   for (const auto &x : tokens_of(DEVICE_PRELUDE)) needed[x] = true;
+  // A macro is kept with its tokens: its expansion names what the unit needs (a device function it calls, a constant).
   bool changed = true;
   while (changed) {
     changed = false;
     for (auto &pc : pieces) {
-      if (pc.keep || (pc.device && !device_variable_piece(pc))) continue;
+      if (pc.keep || (pc.device && !device_variable_piece(pc) && !pc.fn)) continue;
+      if (pc.kind == "pp" && !pc.macro) continue;
       if (pc.defined.empty()) continue;
       bool any = false;
       for (const auto &dn : pc.defined)
@@ -4600,13 +4738,6 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
       for (const auto &x : tokens_of(kv.second))
         if (!needed[x]) { needed[x] = true; grew = true; }
     }
-  }
-  for (auto &pc : pieces) {
-    if (!(pc.kind == "pp" && pc.macro)) continue;
-    bool any = false;
-    for (const auto &dn : pc.defined)
-      if (needed.count(dn)) any = true;
-    if (any) pc.keep = true;
   }
   // A `using namespace n;` is kept when the unit keeps a piece of n (ggml-cuda's mmq-vec-dot.cuh uses tile that way).
   for (auto &pc : pieces) {
@@ -4711,12 +4842,15 @@ std::pair<std::string, std::vector<std::string>> device_tu(const std::string &te
   if (needed["log2f"]) needed["__float_as_uint"] = true;
   // The tiles of cooperative groups shuffle with the idx form (COOP_DEF uses __shfl_sync).
   if (needed["cg"] || needed["cooperative_groups"]) needed["__shfl_sync"] = true;
+  // Names that share a text (the bf16 block of several names) emit it once.
+  std::set<std::string> emitted_defs;
   for (const auto &kv : builtin_defs_table()) {
     if (!needed[kv.first]) continue;
     bool defined_here = false;
     for (const auto &pc : pieces)
       if (pc.keep && has_tok(pc.defined, kv.first)) defined_here = true;
     if (defined_here) continue;
+    if (!emitted_defs.insert(kv.second).second) continue;
     out += kv.second;
   }
   bool coop_defined = false;
@@ -5119,6 +5253,31 @@ std::vector<long> token_positions(const std::string &s, const std::string &tok) 
   return found;
 }
 
+// A `,` before the type word continues a parameter list only when the list is a function definition's (a `{` follows
+// its `)`, possibly through qualifiers): `f(a, b * c)` in an expression is not a declaration of c.
+bool in_definition_parameters(const std::string &s, long comma) {
+  long o = comma - 1;
+  long depth = 0;
+  while (o >= 0) {
+    int c = ch(s, o);
+    if (c == ')') {
+      depth += 1;
+    } else if (c == '(') {
+      if (depth == 0) break;
+      depth -= 1;
+    } else if (c == ';' || c == '{' || c == '}') {
+      return false;
+    }
+    o -= 1;
+  }
+  if (o < 0) return false;
+  long close = matching_paren(s, o);
+  if (close < 0) return false;
+  long b = close + 1;
+  while (b < (long)s.size() && (white_c(ch(s, b)) || ident_c(ch(s, b)))) b += 1;
+  return b < (long)s.size() && ch(s, b) == '{';
+}
+
 // Ruby declares_name? (line 3122): a type word, `*` or `&` before the identifier, and `,`, `)`, `;`, `=` or `[` after.
 // True when the `*` or `&` at q declares a pointer or reference (`T * name`), not an operator (`a * name[i]`): the
 // type word before it must follow the start of a statement, a brace, or an opening parenthesis, possibly through
@@ -5147,6 +5306,7 @@ bool star_declares(const std::string &s, long q) {
     while (x >= 0 && white_c(ch(s, x))) x -= 1;
   }
   if (x < 0) return true;
+  if (ch(s, x) == ',') return in_definition_parameters(s, x);
   return std::string(";{}(").find((char)ch(s, x)) != std::string::npos;
 }
 
@@ -5627,7 +5787,7 @@ std::string device_decls() {
 
 // The command line of the Ruby script (line 3371): -I DIR, --device, --kernels=FILE, --edg-launches, FILE.cu.
 int usage() {
-  std::fprintf(stderr, "usage: cuda-rewrite.rb [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
+  std::fprintf(stderr, "usage: cuda-rewrite [--device [--kernels=FILE]] [--edg-launches] [--obfuscate=SEED] FILE.cu\n");
   return 2;
 }
 

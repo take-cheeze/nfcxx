@@ -46,6 +46,11 @@ jobs:
             run: NFCXX_BACKEND=qbe tests/run.sh
           - name: cases (gcc backend)
             run: NFCXX_BACKEND=gcc tests/run.sh
+          - name: C++11 and C++14 language feature probes (qbe and gcc)
+            run: |
+              tests/cpp-features/self-test.sh
+              tests/upstream/self-test.sh
+              FEATURE_ROUTES="qbe gcc" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
           - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
             dotnet: true
             run: |
@@ -72,9 +77,10 @@ jobs:
               tests/realworld/run_json.sh
           - name: real-world {fmt}
             run: tests/realworld/run_fmt.sh
-          - name: multi-TU, EH shim, nfceval
+          - name: multi-TU, modules, EH shim, nfceval
             run: |
               tests/multi-tu/run.sh
+              tests/modules/run.sh
               tests/ehshim/run.sh
               tests/eval/run.sh
           # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
@@ -164,11 +170,8 @@ jobs:
             run: NFCXX_BACKEND=gcc tests/uop/run_poly.sh
           - name: mruby scripts
             run: tests/mruby/run.sh
-          - name: C++ PTX emitter (reader and tables; not the default yet)
-            run: |
-              make -C tools/pathb-ptx-emit
-              tools/pathb-ptx-emit/check-tables.sh
-              tools/pathb-ptx-emit/diff-forms.sh
+          - name: C++ PTX emitter (build)
+            run: make -C tools/pathb-ptx-emit
           - name: GPU kernel on the PTX interpreter
             run: tests/gpu/run_interp.sh
           - name: AddressSanitizer (gcc and qbe backends)

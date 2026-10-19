@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
 # qbe-prep port check (docs/notes/mruby-scripting.md, stage 3): scripts/qbe-prep.rb must give the same
-# output C, the same assembly tail, the same stderr and the same exit status as the Python original
-# (tests/mruby/oracle/qbe-prep.py, the NFCXX_C_INPUT environment variable of which is the --c-input
-# argument of the port) on
+# output C, the same assembly tail, the same stderr and the same exit status as the Python original, through its
+# oracle port tests/mruby/oracle/qbe-prep.rb (NFCXX_C_INPUT, which the original reads, is the --c-input argument of both) on
 #   1. every input scripts/qbe-cc really feeds it: the compiles of tests/cases, tests/c, tests/builtins and
 #      tests/lib (and tinyxml2, doctest, json, lua when build/realworld has them) run with the interpreter wrapped
 #      by tests/mruby/qbe-prep-tap.sh, which saves each preprocessed C file and the C-input flag;
 #   2. hand-written edge cases for each rewrite (aligned attributes, __bf16/_Float*, constructors,
 #      thread_local aliases, overflow builtins, volatile locals, alloca, atomics, float literals, tokenizer).
 # The comparison fails when it is vacuous: every corpus must have produced inputs, and every kind of rewrite must
-# occur in the Python output somewhere. Skipped without EDG/QBE (part 1) or python3 and an interpreter.
+# occur in the Python output somewhere. Skipped without EDG/QBE (part 1) or an interpreter.
 #   MRB (an existing mruby executable)   QBE_PREP_CORPUS=<dir> (also compare the captures in <dir>, as written by
 #   the tap, e.g. from a tests/realworld/run_mruby.sh run with MRB=tests/mruby/qbe-prep-tap.sh)
 cd "$(dirname "$0")/../.."
-root=$PWD; oracle=$root/tests/mruby/oracle/qbe-prep.py
+root=$PWD; oracle=$root/tests/mruby/oracle/qbe-prep.rb
 real=${MRB:-$root/build/mruby-tool/bin/mruby}
 prep=$root/scripts/qbe-prep.rb
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0; total=0; changed=0; errors=0
 mkdir -p "$tmp/cmp" "$tmp/edge" "$tmp/tap" "$tmp/bin"; : >"$tmp/all.out"; : >"$tmp/all.tail"
 
-command -v python3 >/dev/null || { echo "SKIP qbe-prep: python3 not installed"; exit 0; }
 if [ ! -x "$real" ]; then
   command -v ruby >/dev/null || { echo "SKIP qbe-prep: ruby (needed to build mruby) not installed"; exit 0; }
   "$root/scripts/setup-mruby.sh" || { echo "FAIL qbe-prep: setup-mruby.sh failed"; exit 1; }
@@ -34,43 +32,43 @@ cmp_one() {
   local name=$1 src=$2 flag=$3 mode=${4:-exact} d
   d=$tmp/cmp/$name; mkdir -p "$d"; rm -f "$d"/*
   if [ -n "$flag" ]; then
-    NFCXX_C_INPUT=1 python3 -I "$oracle" "$src" "$d/py.out" "$d/py.tail" 2>"$d/py.err"; local prc=$?
+    mrb "$oracle" --c-input "$src" "$d/orc.out" "$d/orc.tail" 2>"$d/orc.err"; local prc=$?
     mrb "$prep" --c-input "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
   else
-    env -u NFCXX_C_INPUT python3 -I "$oracle" "$src" "$d/py.out" "$d/py.tail" 2>"$d/py.err"; local prc=$?
+    mrb "$oracle" "$src" "$d/orc.out" "$d/orc.tail" 2>"$d/orc.err"; local prc=$?
     mrb "$prep" "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
   fi
   total=$((total + 1))
   local why=""
   [ $prc -eq $rrc ] || why="exit status py=$prc rb=$rrc"
-  if [ -z "$why" ] && [ "$mode" != status-only ] && ! cmp -s "$d/py.err" "$d/rb.err"; then why="stderr differs"; fi
+  if [ -z "$why" ] && [ "$mode" != status-only ] && ! cmp -s "$d/orc.err" "$d/rb.err"; then why="stderr differs"; fi
   if [ -z "$why" ]; then
     for f in out tail; do
-      if [ -e "$d/py.$f" ] && [ ! -e "$d/rb.$f" ] || [ ! -e "$d/py.$f" ] && [ -e "$d/rb.$f" ]; then why="only one wrote $f"
-      elif [ -e "$d/py.$f" ] && ! cmp -s "$d/py.$f" "$d/rb.$f"; then why="$f differs"; fi
+      if [ -e "$d/orc.$f" ] && [ ! -e "$d/rb.$f" ] || [ ! -e "$d/orc.$f" ] && [ -e "$d/rb.$f" ]; then why="only one wrote $f"
+      elif [ -e "$d/orc.$f" ] && ! cmp -s "$d/orc.$f" "$d/rb.$f"; then why="$f differs"; fi
     done
   fi
   if [ -n "$why" ]; then
     echo "FAIL qbe-prep $name: $why"; fail=1
-    diff "$d/py.out" "$d/rb.out" 2>&1 | head -5; diff "$d/py.tail" "$d/rb.tail" 2>&1 | head -3
-    diff "$d/py.err" "$d/rb.err" 2>&1 | head -3
+    diff "$d/orc.out" "$d/rb.out" 2>&1 | head -5; diff "$d/orc.tail" "$d/rb.tail" 2>&1 | head -3
+    diff "$d/orc.err" "$d/rb.err" 2>&1 | head -3
     return
   fi
   pass=$((pass + 1))
   if [ $prc -ne 0 ]; then errors=$((errors + 1))
   else
-    cmp -s "$src" "$d/py.out" || changed=$((changed + 1))
-    cat "$d/py.out" >>"$tmp/all.out"; cat "$d/py.tail" >>"$tmp/all.tail"
+    cmp -s "$src" "$d/orc.out" || changed=$((changed + 1))
+    cat "$d/orc.out" >>"$tmp/all.out"; cat "$d/orc.tail" >>"$tmp/all.tail"
   fi
 }
 
 # expect NAME out|tail TEXT: the Python output of case NAME contains TEXT (the rewrite really happened).
 expect() {
-  if ! grep -qF -e "$3" "$tmp/cmp/$1/py.$2"; then echo "FAIL qbe-prep $1: expected '$3' in the $2"; fail=1; fi
+  if ! grep -qF -e "$3" "$tmp/cmp/$1/orc.$2"; then echo "FAIL qbe-prep $1: expected '$3' in the $2"; fail=1; fi
 }
 # refuse NAME STATUS-TEXT: the case ended with a nonzero status and the message contains TEXT.
 refuse() {
-  if ! grep -qF -e "$2" "$tmp/cmp/$1/py.err" || [ -e "$tmp/cmp/$1/py.out" ]; then
+  if ! grep -qF -e "$2" "$tmp/cmp/$1/orc.err" || [ -e "$tmp/cmp/$1/orc.out" ]; then
     echo "FAIL qbe-prep $1: expected a refusal containing '$2'"; fail=1; fi
 }
 # both NAME [status-only]: compare an edge file in the plain and the C-input mode

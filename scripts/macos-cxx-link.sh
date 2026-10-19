@@ -17,4 +17,4 @@ NFCXX_CC="$root/scripts/cross-macos-cc.sh" NFCXX_CXX="$root/scripts/cross-macos-
 NFCXX_CC="$root/scripts/cross-macos-cc.sh" NFCXX_CXX="${NFCXX_LINK_DIALECT:-$root/scripts/cross-macos-cxx.sh}" NFCXX_SYS_INCLUDES="$sysincl" \
   EDG_OBJ_TO_EXEC_LINKER="$root/scripts/cross-macos-link.sh" \
   "$root/nfcxx" ${extra[@]+"${extra[@]}"} tl.o -o exe
-cp exe "$out"
+mkdir -p "$(dirname "$out")"; cp exe "$out"

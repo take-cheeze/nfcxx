@@ -6,6 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
+[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
 cuda=${CUDA_HOME:-/usr/local/cuda}
 if [ ! -x "$root/build/pathb/cmake/bin/cpfe" ] || [ ! -x "$cuda/bin/ptxas" ] || [ ! -f "$cuda/include/cuda_runtime.h" ] \
    || [ ! -e "$cuda/lib64/libcudart.so" ] || ! command -v nvidia-smi >/dev/null; then
@@ -19,7 +20,7 @@ K=_Z7atomicsPKiPiPfS1_S1_S1_S1_i
 "$root/scripts/pathb-dump" --ir --freestanding atomics.cpp > "$out/atomics.ir"
 if diff -u atomics.ir "$out/atomics.ir"; then echo "IR atomics: ok"; else echo "IR atomics: FAIL (golden differs)"; fail=1; fi
 
-"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$out/atomics.ir" > "$out/atomics.ptx"
+"$root/build/pathb-ptx-emit" --emit "$out/atomics.ir" > "$out/atomics.ptx"
 "$cuda/bin/ptxas" -arch=sm_75 "$out/atomics.ptx" -o "$out/atomics.cubin"
 gcc -O2 -Wall -I"$cuda/include" -L"$cuda/lib64" launch_atomics.c -o "$out/launch" -lcudart
 if LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/launch" "$out/atomics.cubin" "$K"; then

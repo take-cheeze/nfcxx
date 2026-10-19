@@ -10,7 +10,7 @@ MRuby::Build.new do |conf|
   %w[hal-posix-io hal-posix-dir hal-posix-socket hal-posix-task].each { |g| conf.gem core: g }
   %w[mruby-io mruby-pack mruby-sprintf mruby-string-ext mruby-array-ext mruby-hash-ext mruby-set
      mruby-enum-ext mruby-numeric-ext mruby-kernel-ext mruby-object-ext mruby-symbol-ext mruby-range-ext
-     mruby-error mruby-exit mruby-bigint mruby-bin-mruby].each { |g| conf.gem core: g }
+     mruby-error mruby-exit mruby-bigint mruby-random mruby-bin-mruby].each { |g| conf.gem core: g }
   # Note: mruby 4 parses an integer literal above 2**31-1 as a bigint (mruby-bigint, included for the exact
   # float-literal arithmetic of scripts/qbe-prep.rb); scripts still spell such constants as shifts, e.g.
   # (1 << 32) - 1, so that they also run on an interpreter without it. Integer itself is 64-bit.

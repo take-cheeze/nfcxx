@@ -6,6 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
+[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
 cuda=${CUDA_HOME:-/usr/local/cuda}
 if [ ! -x "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" ] || [ ! -x "$cuda/bin/ptxas" ] || [ ! -f "$cuda/include/cuda_runtime.h" ] \
    || [ ! -e "$cuda/lib64/libcudart.so" ] || ! command -v nvidia-smi >/dev/null; then
@@ -18,7 +19,7 @@ trap 'rm -rf "$out"' EXIT
 export LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu"
 lower() { # lower SRC.cpp OUT: front end, emitter, ptxas; OUT.ptx and OUT.cubin
   "$root/scripts/pathb-dump" --ir --freestanding "$1" > "$2.ir" \
-    && "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$2.ir" > "$2.ptx" \
+    && "$root/build/pathb-ptx-emit" --emit "$2.ir" > "$2.ptx" \
     && "$cuda/bin/ptxas" -arch=sm_75 "$2.ptx" -o "$2.cubin"
 }
 

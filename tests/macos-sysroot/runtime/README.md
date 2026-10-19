@@ -42,9 +42,14 @@ Licence: Apache License 2.0 with LLVM exceptions (see the LLVM project LICENSE.T
 
 - `std::type_info` typeinfo (`__ZTISt9type_info`): built from `stdlib_typeinfo.cpp` with RTTI on. The key function emits the object only with RTTI, so the build script compiles that one file with `-frtti`.
 
-## Not provided here (report, do not stub)
+## Status, and what is not provided here (report, do not stub)
 
-`__cxa_uncaught_exception` (`libcxxabi/src/cxa_exception.cpp`, open source, but building it needs libunwind's configuration
-and headers and a port of libc++abi's exception storage to this libc++ 18 header set; it failed on the missing
-`__libunwind_config.h` and on `std::unexpected_handler`, which libc++ 18 no longer declares). That is part of the EH work, so it is
-not built here. The prelinker's libc++ template instances (`std::__sort`) wait on the demangler pin.
+The exception runtime (`cxa_exception`, `cxa_handlers`, `cxa_exception_storage`, `cxa_personality`, `cxa_default_handlers`, `fallback_malloc`, `stdlib_exception`) is built from the pinned sources, with `_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS` (which libc++abi's own build sets) so `std::unexpected_handler` is declared. The prelinker's libc++ template instances (`std::__sort`) are still not requested; that is a separate gap.
+
+## Names the archive needs from the system (not defined here)
+
+- `_Unwind_*` (the system unwinder, libunwind): `__Unwind_RaiseException`, `__Unwind_Resume` and the others the exception
+  runtime calls. Not in the cross stub's export list; a link needs them exported from `libSystem` (unconfirmed here).
+- `pthread_*` and `calloc`: the exception runtime's per-thread globals and fallback allocator. Not in the stub's export list.
+- `___cxa_demangle` (libc++abi `cxa_demangle.cpp`) is not built: it pulls in host glibc headers through the clean-room
+  sysroot, so it is left out until that include path is fixed.

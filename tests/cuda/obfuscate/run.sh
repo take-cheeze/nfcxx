@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kernel name obfuscation (scripts/cuda-rewrite.rb --obfuscate=SEED; the driver's --obfuscate-kernels and
+# Kernel name obfuscation (tools/cuda-rewrite --obfuscate=SEED; the driver's --obfuscate-kernels and
 # NFCXX_OBFUSCATE_KERNELS, docs/notes/gpu.md "Kernel name obfuscation"). The rewrite checks need no CUDA toolkit: the
 # host copy and the device unit must not carry a kernel's name, the names follow the seed, and the launches use them.
 # The device checks (IR, PTX, the embedded kernel table) run when the Path B front end is built
@@ -7,7 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd ../../.. && pwd)
-rw() { "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$@"; }
+[ -x "$root/build/cuda-rewrite" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
+[ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
+rw() { "$root/build/cuda-rewrite" "$@"; }
 fail=0
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
@@ -51,7 +53,7 @@ check "off by default" bash -c 'grep -q ob_scale_kernel "$1" && ! grep -q __nfcx
 if [ -x "$root/build/pathb/cmake/bin/cpfe" ]; then
   "$root/scripts/pathb-dump" --ir --freestanding "$out/dev_a.cpp" > "$out/a.ir"
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$out/a.kernels"
-  "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" --sm=75 "${kopts[@]}" "$out/a.ir" > "$out/a.ptx"
+  "$root/build/pathb-ptx-emit" --emit --sm=75 "${kopts[@]}" "$out/a.ir" > "$out/a.ptx"
   check "IR and PTX free of the names" absent "$names" "$out/a.ir" "$out/a.ptx"
   check "PTX entries are the new names" present '\.visible \.entry (_Z[0-9]+)?__nfcxx_kn_' "$out/a.ptx"
   # The table: a stand-in cubin (the table is the same whatever the image holds).

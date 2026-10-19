@@ -10,6 +10,10 @@
 # 3rd/edg is take-cheeze/edg-compiler, a fork of edgcpp/compiler that carries nfcxx's front end patches
 # (branch nfcxx/cpp17-eval-order: C++17 evaluation order). See docs/notes/eval-order.md.
 set -euo pipefail
+# The cross target (NFCXX_EDG_TARGET=macos-arm64) builds the prelinker's demangler with IA64_ABI=1 (the NFCXX_DECODE_IA64_ABI
+# option of 3rd/edg/util): on a Linux host the default leaves IA64_ABI at 0, which decodes no Itanium names.
+cmake_extra=()
+[ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ] && cmake_extra=(-DNFCXX_DECODE_IA64_ABI=ON)
 root=$(cd "$(dirname "$0")/.." && pwd)
 # ccache when it is installed: CMake's compiler launchers (the EDG build is most of a fresh setup).
 if command -v ccache >/dev/null; then export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache; fi
@@ -56,7 +60,7 @@ if [ "$(uname -s)" = Darwin ] || [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
     export NFCXX_MACOS_SYSROOT=${NFCXX_MACOS_SYSROOT:-$root/tests/macos-sysroot/include}
   fi
   cd "$src"
-  EDG_BASE=$base cmake --preset "$preset" -B "$out" >/dev/null
+  EDG_BASE=$base cmake --preset "$preset" ${cmake_extra[@]+"${cmake_extra[@]}"} -B "$out" >/dev/null
   if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
     cat >> "$out/src/includes/cmake_defines.h" <<'DEFS'
 
@@ -101,7 +105,7 @@ fi
 sed -i 's|^EDG_C_TO_OBJ_COMPILER=gcc|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-gcc}|' "$base/edg_eccp_config"
 
 cd "$src"
-EDG_BASE=$base cmake --preset linux-gcc-release -B "$out" >/dev/null
+EDG_BASE=$base cmake --preset linux-gcc-release ${cmake_extra[@]+"${cmake_extra[@]}"} -B "$out" >/dev/null
 # gcc's cmakedef turns on USE_QUADMATH_LIBRARY, but quadmath.h is missing on aarch64 runners. There the host's own
 # long double is already the 128-bit IEEE quad that the target uses, so EDG computes with it directly. Approximate
 # quadmath (the clang configuration's choice) rejects long double literals that need the full 113-bit mantissa.

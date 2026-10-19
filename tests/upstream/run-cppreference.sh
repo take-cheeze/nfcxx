@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Run only reviewed complete examples; compare output with the same host toolchain.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+root=$PWD
+snapshot=$root/build/testsuite-snapshots
+out=${UPSTREAM_OUT:-$snapshot/cppreference-results}
+routes=${UPSTREAM_ROUTES:-'qbe gcc pathb'}
+host=${HOST_CXX:-g++}
+limit=${UPSTREAM_TIMEOUT:-60}
+test -f "$snapshot/cppreference-inventory.tsv" || { echo 'Run tests/upstream/setup.sh first' >&2; exit 1; }
+mkdir -p "$out"; out=$(cd "$out" && pwd)
+mkdir "$out/.lock" 2>/dev/null || { echo "results already in use: $out" >&2; exit 1; }
+trap 'rm -rf "$out/.lock"' EXIT
+for route in $routes; do
+  case $route in qbe|gcc|pathb) ;; *) echo "unknown route: $route" >&2; exit 1 ;; esac
+done
+# Existing feature runner provides a real build/run preflight for each route.
+printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
+for route in host $routes; do
+  compiler=$root/nfcxx; flags=("--backend=$route")
+  if [ "$route" = host ]; then compiler=$host; flags=(); fi
+  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 5 "$limit" "$compiler" "${flags[@]}" \
+    -std=c++11 "$out/.lock/smoke.cpp" -o "$out/.lock/smoke" > "$out/$route-smoke.log" 2>&1
+  timeout -k 5 "$limit" "$out/.lock/smoke" >> "$out/$route-smoke.log" 2>&1
+done
+printf 'id\tstandard\troute\tstatus\tcompile_exit\trun_exit\n' > "$out/results.tsv"
+git rev-parse HEAD > "$out/nfcxx.commit"
+git diff --binary HEAD > "$out/nfcxx.patch"
+cp tests/upstream/snapshots.tsv tests/upstream/cppreference-reviewed.tsv "$out/"
+uname -sm > "$out/host.txt"
+"$host" --version >> "$out/host.txt"
+fail=0
+while IFS=$'\t' read -r id std mode review; do
+  [ "$id" = id ] && continue
+  [ "$mode" = run ] || { echo "unsupported mode: $mode" >&2; exit 1; }
+  [[ $id =~ ^[a-zA-Z0-9_-]+$ && $std =~ ^c\+\+(11|14|17|20|23)$ ]] || exit 1
+  source="$snapshot/cppreference-examples/$id.cpp"
+  test -f "$source"
+  dir="$out/$id"; mkdir -p "$dir"
+  # A host failure invalidates the comparison; do not call it an nfcxx gap.
+  timeout -k 5 "$limit" "$host" "-std=$std" "$source" -o "$dir/host" > "$dir/host-compile.log" 2>&1
+  timeout -k 5 "$limit" "$dir/host" > "$dir/host.out" 2> "$dir/host.err"
+  for route in $routes; do
+    compile=0; run=-; status=pass
+    rm -f "$dir/$route"
+    env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 5 "$limit" "$root/nfcxx" "--backend=$route" \
+      "-std=$std" "$source" -o "$dir/$route" > "$dir/$route-compile.log" 2>&1 || compile=$?
+    case $compile in
+      0)
+        run=0
+        timeout -k 5 "$limit" "$dir/$route" > "$dir/$route.out" 2> "$dir/$route.err" || run=$?
+        if [ "$run" = 124 ] || [ "$run" = 137 ]; then status=run-timeout
+        elif [ "$run" -gt 128 ]; then status=run-crash
+        elif [ "$run" != 0 ]; then status=wrong-exit
+        elif ! cmp -s "$dir/host.out" "$dir/$route.out"; then status=output-mismatch; fi ;;
+      124|137) status=compile-timeout ;;
+      125|126|127) echo "cannot invoke route $route" >&2; exit 1 ;;
+      *) if [ "$compile" -gt 128 ]; then status=compile-crash; else status=compile-rejected; fi ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$std" "$route" "$status" "$compile" "$run" >> "$out/results.tsv"
+    [ "$status" = pass ] || fail=1
+    echo "$id $route: $status"
+  done
+done < tests/upstream/cppreference-reviewed.tsv
+echo "Results: $out/results.tsv"
+if [ "${UPSTREAM_REQUIRE_PASS:-0}" = 1 ]; then exit "$fail"; fi

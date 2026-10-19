@@ -15,7 +15,6 @@
 #   build/cproc/cproc-qbe < prep.c > out.ssa
 cd "$(dirname "$0")/../.."
 root=$PWD; here=$root/tests/mruby/qbe2cil; oracle=$root/tests/mruby/oracle
-command -v python3 >/dev/null || { echo "SKIP qbe2cil: python3 not installed"; exit 0; }
 [ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP qbe2cil: no mruby (scripts/setup-mruby.sh)"; exit 0; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; accepted=0; refused=0
@@ -25,7 +24,7 @@ for f in "$here"/*.ssa; do
   tail=$here/$n.tail.s; [ -f "$tail" ] || tail=-
   tp=$tail; tr=$tail
   if [ "$tail" != - ]; then cp "$tail" "$tmp/$n.py.tail"; cp "$tail" "$tmp/$n.rb.tail"; tp=$tmp/$n.py.tail; tr=$tmp/$n.rb.tail; fi
-  python3 "$oracle/qbe2cil.py" "$f" "$tp" "$n" "$tmp/$n.py.json" 2>"$tmp/$n.py.err"; rcp=$?
+  "$root/scripts/mrb" "$oracle/qbe2cil.rb" "$f" "$tp" "$n" "$tmp/$n.py.json" 2>"$tmp/$n.py.err"; rcp=$?
   "$root/scripts/mrb" "$root/scripts/qbe2cil.rb" "$f" "$tr" "$n" "$tmp/$n.rb.json" 2>"$tmp/$n.rb.err"; rcr=$?
   if [ "$tail" != - ] && { ! cmp -s "$tail" "$tmp/$n.py.tail" || ! cmp -s "$tail" "$tmp/$n.rb.tail"; }; then
     echo "FAIL qbe2cil $n: the assembly tail was changed by a run"; fail=1; continue

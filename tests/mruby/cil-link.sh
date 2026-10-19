@@ -11,9 +11,8 @@
 # ends (build/edg, build/qbe, build/cproc: scripts/setup-edg.sh, setup-qbe.sh; build/pathb: setup-pathb.sh) and are
 # skipped with a message without them. The programs run only when dotnet is installed.
 cd "$(dirname "$0")/../.."
-root=$PWD; oracle=$root/tests/mruby/oracle/cil-link.py; here=$root/tests/mruby/cil-link
+root=$PWD; oracle=$root/tests/mruby/oracle/cil-link.rb; here=$root/tests/mruby/cil-link
 ilasm=${ILASM:-$root/build/cil/ilasm}
-command -v python3 >/dev/null || { echo "SKIP cil-link: python3 not installed"; exit 0; }
 [ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP cil-link: no mruby (scripts/setup-mruby.sh)"; exit 0; }
 [ -x "$ilasm" ] || { echo "SKIP cil-link: scripts/setup-cil.sh has not run"; exit 0; }
 dotnet=$(command -v dotnet || true)
@@ -32,7 +31,7 @@ link_cmp() {
   local label=$1; shift
   local d=$tmp/link/$label
   mkdir -p "$d/py" "$d/rb"
-  ILASM=$ilasm NFCXX_KEEP_IL=1 python3 "$oracle" -o "$d/py/prog" "$@" 2>"$d/py.err"; local rcp=$?
+  "$root/scripts/mrb" "$oracle" --ilasm "$ilasm" --keep-il -o "$d/py/prog" "$@" 2>"$d/py.err"; local rcp=$?
   "$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "$ilasm" --keep-il -o "$d/rb/prog" "$@" 2>"$d/rb.err"; local rcr=$?
   if [ $rcp -ne $rcr ]; then
     echo "FAIL cil-link $label: exit status py=$rcp rb=$rcr"; head -3 "$d/py.err" "$d/rb.err"; fail=1; return
@@ -64,7 +63,7 @@ link_cmp() {
 usage_cmp() {
   local label=$1 msg=$2; shift 2
   local d=$tmp/usage/$label; mkdir -p "$d"
-  ILASM=$ilasm python3 "$oracle" "$@" 2>"$d/py.err" >/dev/null; local rcp=$?
+  "$root/scripts/mrb" "$oracle" --ilasm "$ilasm" "$@" 2>"$d/py.err" >/dev/null; local rcp=$?
   "$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "$ilasm" "$@" 2>"$d/rb.err" >/dev/null; local rcr=$?
   if [ $rcp -ne 1 ] || [ $rcr -ne 1 ]; then echo "FAIL cil-link usage $label: status py=$rcp rb=$rcr, want 1"; fail=1; return; fi
   if [ "$msg" != - ] && { [ "$(cat "$d/py.err")" != "$msg" ] || [ "$(cat "$d/rb.err")" != "$msg" ]; }; then
@@ -134,7 +133,7 @@ usage_cmp missing-fragment - -o "$tmp/usage/x" "$tmp/usage/no-such-file.json"
 usage_cmp o-without-name - "$here/bigint.json" -o
 # An ilasm that is not there: both refuse with status 1 (the messages name the setting differently).
 d=$tmp/usage/no-ilasm; mkdir -p "$d"
-ILASM=$tmp/usage/no-such-ilasm python3 "$oracle" -o "$d/py" "$here/bigint.json" 2>"$d/py.err"; rcp=$?
+"$root/scripts/mrb" "$oracle" --ilasm "$tmp/usage/no-such-ilasm" -o "$d/py" "$here/bigint.json" 2>"$d/py.err"; rcp=$?
 "$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "$tmp/usage/no-such-ilasm" -o "$d/rb" "$here/bigint.json" 2>"$d/rb.err"; rcr=$?
 if [ $rcp -eq 1 ] && [ $rcr -eq 1 ] && grep -q '^cil-link: ilasm not found at ' "$d/py.err" && grep -q '^cil-link: ilasm not found at ' "$d/rb.err"; then
   echo "ok   cil-link usage no-ilasm"

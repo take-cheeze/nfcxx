@@ -11,11 +11,15 @@ extern "C" {
 #define restrict __restrict
 #endif
 #include <stddef.h>
+#include <stdint.h>
 
 #define EXIT_FAILURE 1
 #define EXIT_SUCCESS 0
 #define RAND_MAX 0x7fffffff
-#define MB_CUR_MAX 1
+/* MB_CUR_MAX is the current locale's value, from a function the system library exports (Apple Libc
+ * include/_mb_cur_max.h: #define MB_CUR_MAX (___mb_cur_max())). */
+int ___mb_cur_max(void);
+#define MB_CUR_MAX (___mb_cur_max())
 
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
@@ -30,6 +34,8 @@ int posix_memalign(void **, size_t, size_t);
 void abort(void) __attribute__((__noreturn__));
 int atexit(void (*)(void));
 void exit(int) __attribute__((__noreturn__));
+/* Public API of the target (arc4random(3)): a uniformly distributed 32-bit value, no seeding. */
+uint32_t arc4random(void);
 void _Exit(int) __attribute__((__noreturn__));
 char *getenv(const char *);
 int system(const char *);

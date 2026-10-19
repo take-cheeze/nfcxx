@@ -4,6 +4,7 @@
 #   // X86-ONLY: reason          depends on the x86-64 target; skipped on every other host.
 #   // X86-ONLY-LINUX: reason    depends on the x86-64 long double layout of the Linux front end; skipped on non-x86-64
 #                                Linux only (macOS arm64 runs it).
+#   // NFCXX-FLAGS: flags        extra nfcxx driver flags for this test (word-split), e.g. --dialect=clang.
 #   // MACOS-XFAIL-<backend>: reason   a documented macOS-only failure of that backend: reported as xfail on Darwin. A pass
 #                                there is an XPASS and fails the run, so the marker gets removed.
 cd "$(dirname "$0")/.."
@@ -19,7 +20,8 @@ for f in tests/cases/*.cpp; do
   xf=""
   [ "$(uname -s)" = Darwin ] && xf=$(sed -n "s,^// MACOS-XFAIL-$be: *,,p" "$f" | head -1)
   want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
-  if ! ./nfcxx "$f" -o "$tmp/t" 2>"$tmp/err"; then
+  flags=$(sed -n 's,^// NFCXX-FLAGS: *,,p' "$f" | head -1)   # extra driver flags (e.g. --dialect=clang -Wno-narrowing)
+  if ! ./nfcxx $flags "$f" -o "$tmp/t" 2>"$tmp/err"; then
     if [ -n "$xf" ]; then echo "xfail $f (compile): $xf"; continue; fi
     echo "FAIL (compile) $f"; head -30 "$tmp/err"; fail=1; continue
   fi

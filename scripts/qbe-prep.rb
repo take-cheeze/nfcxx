@@ -48,6 +48,8 @@
 #     becomes `.set X, Y`. EDG uses these for thread_local initialization aliases
 #     (`_ZTHx = __tls_init`). A `_ZTHx` alias is marked `.weak` when its `_ZTWx` wrapper is weak
 #     (COMDAT), as gcc does.
+#     The device image block of scripts/cuda-embed.rb (a local data symbol that .incbin's a file) is re-emitted
+#     the same way (image_asm?).
 #   * `__attribute__((__constructor__))` on a function declaration (EDG's static initializers, `__sti_*`)
 #     is removed from the C, and the function is listed in `.init_array` in the assembly tail, so the
 #     C runtime runs it before main. Only the plain form is handled; a priority argument is left alone.
@@ -78,7 +80,7 @@
 # Usage: scripts/mrb scripts/qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL
 # ASM_TAIL is appended to the QBE assembly by qbe-cc.
 #
-# Port of the Python original (tests/mruby/oracle/qbe-prep.py), byte for byte (tests/mruby/qbe-prep.sh).
+# Port of the Python original (tests/mruby/oracle/qbe-prep.py, deleted; the oracle port is tests/mruby/oracle/qbe-prep.rb), byte for byte on the tested inputs (tests/mruby/qbe-prep.sh).
 # mruby has no Regexp (and strings are bytes), so the tokenizer and the few regex checks are by hand.
 # Where Python's `\w`/`\s`/`\d` would match non-ASCII characters this accepts the bytes >= 0x80 as word
 # characters and nothing else non-ASCII (EDG's output and glibc's headers are ASCII outside literals).
@@ -699,6 +701,8 @@ end
 HELPER_BUILTINS = {
   # nlohmann::json: float constants and conversions (double only; cproc has no long double anyway)
   '__builtin_huge_val' => ['__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'],
+  # HUGE_VALF and INFINITY (CUDA's host math.h): cproc has __builtin_inff as a constant, so a static initializer may use it
+  '__builtin_huge_valf' => ['__builtin_inff', ''],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
   # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
   '__builtin_bswap16' => ['__nfcxx_bswap16',
@@ -1190,6 +1194,18 @@ def long_double_literal?(text)
   k == n && (text.include?('.') || text.include?('e') || text.include?('E'))
 end
 
+# The device image block of scripts/cuda-embed.rb: a local data symbol that .incbin's the module's file. Only these lines
+# (and the label and the .incbin path) pass; any other top-level asm is refused as before.
+IMAGE_ASM_PREFIXES = ['.local __nfcxx_image', '.type __nfcxx_image', '.size __nfcxx_image', '.incbin "']
+def image_asm?(text)
+  lines = text.split("\n")
+  return false unless lines.size >= 2 && lines[0] == '.pushsection .rodata' && lines[-1] == '.popsection'
+  lines.all? do |l|
+    l == '.pushsection .rodata' || l == '.popsection' || l == '.balign 16' || l == '.byte 0' ||
+      (l.start_with?('__nfcxx_image') && l.end_with?(':')) || IMAGE_ASM_PREFIXES.any? { |pre| l.start_with?(pre) }
+  end
+end
+
 # ".align N" / ".globl X" / ".global X" / "A = B" tests of the top-level asm text (Python re.fullmatch).
 def align_text?(text)
   return false unless text.start_with?('.align')
@@ -1371,6 +1387,14 @@ def main(argv)
         stmt_start = tk.start(i)
         stmt_end = tk.stop(j + 1)
         if align_text?(text)
+          edits << [stmt_start, stmt_end, '']
+          i = j + 2
+          next
+        end
+        if tk.depth(i) == 0 && tk.pdepth(i) == 0 && image_asm?(text)
+          # a device image (scripts/cuda-embed.rb): the .incbin block goes to the tail, as it is
+          die "qbe-prep: device image block with --macho is not supported" if macho
+          text.split("\n").each { |l| tail << "\t#{l}" }
           edits << [stmt_start, stmt_end, '']
           i = j + 2
           next

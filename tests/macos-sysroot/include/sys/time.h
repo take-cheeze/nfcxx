@@ -22,6 +22,7 @@ extern "C" {
 #endif
 
 int gettimeofday(struct timeval *tv, void *tz);
+int utimes(const char *, const struct timeval[2]);  /* POSIX.1-2008 <sys/time.h> */
 
 #ifdef __cplusplus
 }

@@ -3,6 +3,8 @@
 // prints the parsed forms in the canonical text (diff-forms.sh); --plan prints the module without its function bodies
 // (diff-plan.sh); --decls prints the declarations (diff-module-decls.sh).
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -27,7 +29,17 @@ bool read_all(const std::string &path, std::string &out) {
   }
   std::ifstream f(path, std::ios::binary);
   if (!f) return false;
-  out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  // the file is read into one buffer of its size (a byte-iterator copy grows the string and copies it again)
+  f.seekg(0, std::ios::end);
+  const std::streamoff size = f.tellg();
+  f.seekg(0, std::ios::beg);
+  if (size < 0) {
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+  }
+  out.resize(static_cast<size_t>(size));
+  f.read(&out[0], size);
+  out.resize(static_cast<size_t>(f.gcount()));
   return true;
 }
 
@@ -50,6 +62,8 @@ int main(int argc, char **argv) {
   bool plan = false;
   bool emit = false;
   std::string sm = "sm_75";
+  std::string groups_dir;  // --groups-dir=DIR: the grouped emit (g0000.ptx, ... and groups.txt in DIR)
+  size_t max_const_bytes = 65536, max_ptx_lines = 60000;
   std::vector<std::string> kernels;
   std::string file = "-";
   bool have_file = false;
@@ -65,6 +79,12 @@ int main(int argc, char **argv) {
       sm = "sm_" + a.substr(5);
     } else if (a.rfind("--kernel=", 0) == 0) {
       kernels.push_back(a.substr(9));
+    } else if (a.rfind("--groups-dir=", 0) == 0) {
+      groups_dir = a.substr(13);
+    } else if (a.rfind("--max-const-bytes=", 0) == 0) {
+      max_const_bytes = std::stoull(a.substr(18));
+    } else if (a.rfind("--max-ptx-lines=", 0) == 0) {
+      max_ptx_lines = std::stoull(a.substr(16));
     } else if (a == "--eval-cases" && i + 1 < argc) {
       eval = true;
       file = argv[++i];
@@ -85,6 +105,73 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "usage: pathb-ptx-emit [--sm=75] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n");
       return 1;
     }
+  }
+  if (emit && !arith && !eval && !plan && !decls) {
+    // The module is read chunk by chunk from the file (a standard input is read whole first). Exit 3 on a refusal, 1 on
+    // malformed IR; nothing is written to stdout then.
+    std::string whole;
+    ModuleText text(nullptr, file);
+    if (file == "-") {
+      if (!read_all(file, whole)) {
+        std::fprintf(stderr, "error: cannot read %s\n", file.c_str());
+        return 1;
+      }
+      text = ModuleText(&whole, "");
+    } else if (!std::ifstream(file, std::ios::binary)) {
+      std::fprintf(stderr, "error: cannot read %s\n", file.c_str());
+      return 1;
+    }
+    if (!groups_dir.empty()) {
+      // The grouped emit: one module per group of kernels (see emit_module_groups), written to the directory with the
+      // group index (kernel names are the IR names). A refusal writes no group.
+      std::string index;
+      try {
+        std::error_code ec;
+        std::filesystem::create_directories(groups_dir, ec);
+        if (ec) {
+          std::fprintf(stderr, "error: cannot create %s\n", groups_dir.c_str());
+          return 1;
+        }
+        emit_module_groups(text, sm, kernels, GroupBudget{max_const_bytes, max_ptx_lines},
+                           [&](size_t i, const std::vector<std::string> &names, const std::string &ptx) {
+                             char base[32];
+                             std::snprintf(base, sizeof base, "g%04zu.ptx", i);
+                             std::string path = groups_dir + "/" + base;
+                             FILE *f = std::fopen(path.c_str(), "wb");
+                             if (!f || std::fwrite(ptx.data(), 1, ptx.size(), f) != ptx.size() || std::fclose(f) != 0) {
+                               std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
+                               std::exit(1);
+                             }
+                             index += base;
+                             for (const std::string &k : names) index += " " + k;
+                             index += "\n";
+                           });
+      } catch (const Refused &e) {
+        std::fprintf(stderr, "refused: %s\n", e.what());
+        return 3;
+      } catch (const BadIR &e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+      }
+      std::string path = groups_dir + "/groups.txt";
+      FILE *f = std::fopen(path.c_str(), "wb");
+      if (!f || std::fwrite(index.data(), 1, index.size(), f) != index.size() || std::fclose(f) != 0) {
+        std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
+        return 1;
+      }
+      return 0;
+    }
+    auto sink = [](const std::string &piece) { std::fwrite(piece.data(), 1, piece.size(), stdout); };
+    try {
+      emit_module(text, sm, kernels, sink);
+    } catch (const Refused &e) {
+      std::fprintf(stderr, "refused: %s\n", e.what());
+      return 3;
+    } catch (const BadIR &e) {
+      std::fprintf(stderr, "error: %s\n", e.what());
+      return 1;
+    }
+    return 0;
   }
   std::string src;
   if (!read_all(file, src)) {
@@ -119,21 +206,6 @@ int main(int argc, char **argv) {
       return 3;
     } catch (const BadIR &e) {
       write_err("error: ", e.text);
-      return 1;
-    }
-    return 0;
-  }
-  if (emit) {
-    // The PTX of the module (the same text as scripts/pathb-ptx-emit.rb, which stays the default until the C++ emitter is
-    // switched in). Exit 3 on a refusal, 1 on malformed IR.
-    try {
-      std::string ptx = emit_module(src, sm, kernels);
-      std::fwrite(ptx.data(), 1, ptx.size(), stdout);
-    } catch (const Refused &e) {
-      std::fprintf(stderr, "refused: %s\n", e.what());
-      return 3;
-    } catch (const BadIR &e) {
-      std::fprintf(stderr, "error: %s\n", e.what());
       return 1;
     }
     return 0;

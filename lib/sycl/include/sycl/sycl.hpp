@@ -52,6 +52,9 @@ void *__nfcxx_sycl_local_base(void);  // the work-group memory (local_accessor s
 void *__nfcxx_sycl_scratch(void);     // 256 words of work-group memory kept for the group algorithms
 void __nfcxx_sycl_barrier(void);
 void __nfcxx_sycl_sg_barrier(void);   // the sub-group barrier: Subgroup scope in the OpenCL module (pathb-spirv-emit.rb)
+// memory fence (OpMemoryBarrier in the OpenCL module): order is a memory_order value and scope a memory_scope value, both
+// literals at the call (a non-literal is refused by the emitter)
+void __nfcxx_sycl_fence(int order, int scope);
 // sub-group shuffles (OpGroupNonUniformShuffle, ShuffleXor in the OpenCL module): the word of lane src, of lane (lane ^ mask)
 unsigned __nfcxx_sycl_sg_shuffle_u32(unsigned w, unsigned src);
 unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
@@ -491,6 +494,17 @@ template <int D> inline void group_barrier(const group<D> &, memory_scope = memo
   __nfcxx_sycl_barrier();
 #else
   detail::barrier_on_host();
+#endif
+}
+
+// atomic_fence: a fence at the given order and scope. On the device it is OpMemoryBarrier (the OpenCL memory model's
+// work-group or device fence). On the host it is a no-op, as barrier_on_host is.
+inline void atomic_fence(memory_order order, memory_scope scope) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __nfcxx_sycl_fence(static_cast<int>(order), static_cast<int>(scope));
+#else
+  (void) order;
+  (void) scope;
 #endif
 }
 
@@ -2070,6 +2084,7 @@ template <class T> T *aligned_alloc_host(size_t align, size_t count, const queue
 template <class T> T *malloc(size_t count, const queue &, usm::alloc k) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), detail::kind_of(k)); }
 inline void *malloc_device(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 0); }
 inline void *malloc_shared(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 1); }
+inline void *malloc_shared(size_t bytes, const device &, const context &) { return detail::usm_malloc(bytes, 16, 1); }
 inline void *malloc_host(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 2); }
 inline void *malloc(size_t bytes, const queue &, usm::alloc k) { return detail::usm_malloc(bytes, 16, detail::kind_of(k)); }
 inline void free(void *p, const queue &) { if (p) detail::backend_usm_free(p); }
