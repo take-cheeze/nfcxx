@@ -82,21 +82,20 @@ class RegisterFlow
 
     tree = irep.tree or return nil
     found = Set.new
-    collect_captured(tree, irep, 1, found) ? found : nil
+    collect_captured(tree, irep, found) ? found : nil
   end
 
   # False when a nested block reads this frame's arguments implicitly (ARGARY),
   # which names no register.
-  def self.collect_captured(tree, irep, depth, found)
+  def self.collect_captured(tree, irep, found)
+    lookup = ->(label) { tree[label] or raise ArgumentError, "bc2cpp: irep #{label} missing from the tree" }
     Array(irep.reps).all? do |label|
-      child = tree[label] or raise ArgumentError, "bc2cpp: irep #{label} missing from the tree"
-      child.instructions.each do |insn|
+      BytecodeIR.each_nested_insn(lookup.call(label), lookup) do |insn, depth|
         return false if insn.op == 'ARGARY'
 
         index, level = insn.upvar_ref
-        found << index.to_i if index && level == depth - 1
+        found << index.to_i if index && level == depth
       end
-      collect_captured(tree, child, depth + 1, found)
     end
   end
 
