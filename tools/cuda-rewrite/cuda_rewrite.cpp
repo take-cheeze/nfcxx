@@ -241,9 +241,13 @@ std::string sanitize(const std::string &s) {
   return res;
 }
 
-// The name of the C-linkage wrapper of a template launch (Ruby: wrapper_name).
+std::string blank_comments(const std::string &text);
+
+// The name of the C-linkage wrapper of a template launch (Ruby: wrapper_name). The name must be the same in both passes,
+// so the comments of the template arguments are blanked first: the device pass blanks every comment of its text
+// (`reduce_rows_f32</*norm=*/true>` is `true` there), and the host copy's wrapper must not read the comment as a name.
 std::string wrapper_name(const std::string &name, const std::string &targs) {
-  return "__nfcxx_k_" + sanitize(name) + "_" + sanitize(targs);
+  return "__nfcxx_k_" + sanitize(name) + "_" + sanitize(strip(blank_comments(targs)));
 }
 
 // ---- template kernels and launches (Ruby lines 190-690) ------------------------------------------------------------
