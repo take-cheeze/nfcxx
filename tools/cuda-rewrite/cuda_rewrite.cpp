@@ -4479,6 +4479,41 @@ bool cx_eval(CxCtx &cx, const std::string &expr, long &value) {
 
 // For one instance of the enclosing template at pos: 1 when every enclosing constexpr branch is taken, 0 when one is not
 // (the front end drops the address site, so the instance has no entry), -1 when a condition cannot be evaluated (why).
+// std::is_same_v<A, B> and std::is_same<A, B>::value between two type arguments, once the enclosing template's
+// parameters are substituted (`std::is_same_v<T, half>` with T = float): 1 or 0. The types compare as text, without
+// their spaces.
+std::string fold_is_same(const std::string &s) {
+  std::string out;
+  size_t i = 0;
+  for (;;) {
+    size_t p = s.find("is_same", i);
+    if (p == std::string::npos) break;
+    size_t lt = p + 7;
+    if (s.compare(lt, 2, "_v") == 0) lt += 2;
+    if (lt >= s.size() || s[lt] != '<') {
+      out += s.substr(i, p + 7 - i);
+      i = p + 7;
+      continue;
+    }
+    long gt = matching_angle(s, (long)lt);
+    if (gt < 0) break;
+    size_t start = p >= 5 && p - 5 >= i && s.compare(p - 5, 5, "std::") == 0 ? p - 5 : p;
+    out += s.substr(i, start - i);
+    std::vector<std::string> args = split_top(s.substr(lt + 1, (size_t)gt - lt - 1));
+    bool same = args.size() == 2;
+    if (same) {
+      std::string a, b;
+      for (char c : args[0]) if (!white_c((unsigned char)c)) a.push_back(c);
+      for (char c : args[1]) if (!white_c((unsigned char)c)) b.push_back(c);
+      same = a == b;
+    }
+    out += same ? "1" : "0";
+    i = (size_t)gt + 1;
+    if (s.compare(i, 7, "::value") == 0) i += 7;
+  }
+  return out + s.substr(i);
+}
+
 int guards_taken(const std::string &text, long pos, const OuterTemplate &outer, const std::vector<std::string> &inst,
                  const std::vector<CxBranch> &guards, std::string &why) {
   if (guards.empty()) return 1;
@@ -4489,13 +4524,17 @@ int guards_taken(const std::string &text, long pos, const OuterTemplate &outer, 
     // an instance argument is an expression over literals (8/8, 64/8, true); it has no names of its own
     CxCtx arg{text, pos, {}, "", 0};
     long v;
-    if (!cx_eval(arg, inst[k], v)) { why = "template argument " + inst[k] + " (" + arg.why + ")"; return -1; }
+    // a type argument (float) has no value here: it reaches only the is_same folding, which substitutes it as text
+    if (!cx_eval(arg, inst[k], v)) continue;
     cx.vars[outer.names[k]] = v;
   }
   for (const CxBranch &g : guards) {
     long v;
     cx.why.clear();
-    if (!cx_eval(cx, g.cond, v)) { why = "the condition " + g.cond + " (" + cx.why + ")"; return -1; }
+    std::string cond = g.cond.find("is_same") != std::string::npos
+                           ? fold_is_same(substitute(g.cond, outer.names, inst, outer.has_pack, outer.pack))
+                           : g.cond;
+    if (!cx_eval(cx, cond, v)) { why = "the condition " + g.cond + " (" + cx.why + ")"; return -1; }
     if ((v != 0) == g.negated) return 0;
   }
   return 1;
