@@ -51,24 +51,17 @@ class CodeGen
   # graphs.
   MAX_UPVAR_NEST_DEPTH = 16
 
-  def block_upvar_needs(irep, depth = 0)
-    return nil if depth > MAX_UPVAR_NEST_DEPTH
-
+  def block_upvar_needs(irep)
     needs = []
-    BytecodeIR.for(irep).instructions_with_op('GETUPVAR', 'SETUPVAR').each do |insn|
+    walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |insn, depth|
+      next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
+
       upvar_idx, level = insn.upvar_ref
-      needs << [level, upvar_idx]
+      # Relative to +irep+ a reference `depth` blocks down needs the frame `level - depth` up; a negative one is the
+      # enclosing frame, which +irep+ does not need.
+      needs << [level - depth, upvar_idx] if level >= depth
     end
-    (irep.reps || []).each do |child_label|
-      child = child_label && @ireps[child_label]
-      next unless child
-
-      child_needs = block_upvar_needs(child, depth + 1)
-      return nil if child_needs.nil?
-
-      child_needs.each { |(l, x)| needs << [l - 1, x] if l >= 1 }
-    end
-    needs.uniq.sort
+    walked ? needs.uniq.sort : nil
   end
 
   # BLOCK_FALLBACK_YIELD_SUPPORT: which enclosing frames' received blocks does
