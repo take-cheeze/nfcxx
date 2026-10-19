@@ -1196,28 +1196,38 @@ class ClosedWorld
   # `reg` holds a class or module object (`self` in a class body, a constant nothing assigns a
   # value to) or a fresh `Object.new` at `idx`, never an Array/Hash/Range/String.
   def class_object_register?(irep, idx, reg)
-    irep.walk_writers(idx - 1, reg, follow_moves: true) do |writer, i, cur|
+    every_definition?(irep, idx, reg) do |writer, definition|
       case writer.op
       when 'LOADSELF' then @walked.include?(irep.label)
       when 'GETCONST', 'GETMCNST' then class_constant?(writer.op == 'GETCONST' ? writer.const_name : writer.mcnst_name)
-      when 'SEND0' then writer.sym == 'new' && fresh_object_class?(irep, i, cur)
+      when 'SEND0' then writer.sym == 'new' && fresh_object_class?(irep, definition.index, definition.reg)
       else false
       end
-    end || false
+    end
   end
 
   # `reg` holds a class or module object on every path: a constant nothing assigns a value to, or `self` in a
   # class body. Unlike class_object_register? it refuses a fresh `Object.new`, whose singleton class an
   # instance of a proven set can have.
   def class_constant_target?(irep, idx, reg)
-    irep.walk_writers(idx - 1, reg, follow_moves: true) do |writer|
+    every_definition?(irep, idx, reg) do |writer|
       case writer.op
       when 'LOADSELF' then @walked.include?(irep.label)
       when 'GETCONST' then class_constant?(writer.const_name)
       when 'GETMCNST' then class_constant?(writer.mcnst_name)
       else false
       end
-    end || false
+    end
+  end
+
+  # Every definition of +reg+ reaching the read at +idx+ passes the block, which gets the defining instruction and
+  # its Definition. A join has one definition per branch, so the nearest writer says nothing about the others
+  # (BytecodeIR.reaching_definitions). An entry value, no definition and a refused query all answer false.
+  def every_definition?(irep, idx, reg)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
+    return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+    defs.all? { |definition| yield irep.instructions[definition.index], definition }
   end
 
   # No SETCONST binds a value to the name, so it can only name a class or module.
@@ -1225,9 +1235,9 @@ class ClosedWorld
     @constant_write_counts[name].zero?
   end
 
+  # The receiver of the `new` at +idx+ is the constant Object on every path (a join of Object and Foo is not).
   def fresh_object_class?(irep, idx, reg)
-    standard_constructor_lookup? &&
-      irep.constant_path(idx - 1, reg)&.then { |path| path.root == :const && path.name == 'Object' && path.segments.empty? }
+    standard_constructor_lookup? && irep.agreed_constant_name(idx, reg, through_handlers: true) == 'Object'
   end
 
   def loop_installer_sites
