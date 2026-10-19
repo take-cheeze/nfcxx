@@ -40,14 +40,8 @@ runtime = Bc2cppFixtureRuntime
 
 # [registry after settle, ireps, kept, dropped, CodeGen#symbol_installed_names] for +source+.
 registry_of = lambda do |source, trusted: true|
-  Dir.mktmpdir do |dir|
-    path = File.join(dir, 'dm.rb')
-    File.write(path, source)
-    ireps, root = compile_ireps(path, 'dm_fixture', dir)
-    registry = build_registry(ireps, root)[0]
-    kept, dropped = DefineMethodSites.settle(registry, trusted: trusted)
-    installed = CodeGen.new(ireps, registry, {}).send(:symbol_installed_names)
-    [registry, ireps, kept, dropped, installed]
+  runtime.registry_snapshot(source) do |registry, ireps|
+    DefineMethodSites.settle(registry, trusted: trusted)
   end
 end
 defined_by = ->(registry, name) { registry.fetch(name, []).select(&:installer) }
