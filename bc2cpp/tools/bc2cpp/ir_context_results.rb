@@ -243,24 +243,19 @@ class IrContextResults
       return NumericFlow::OTHER
     end
     oracle = Oracle.new(self, node)
-    node.states = NumericFlow.states(body, oracle, @gen.send(:fixnum_proof_ctx, body)[:upvars])
+    node.states = BytecodeIR::NumericClasses.states(body, oracle, @gen.send(:fixnum_proof_ctx, body)[:upvars])
     node.calls = oracle.calls
     return NumericFlow::OTHER unless node.states
 
-    body.instructions.each_with_index.reduce(0) do |joined, (insn, index)|
-      state = node.states[index]
-      next joined unless state
-
-      value = case insn.op
-              when 'RETURN' then state[insn.reg.to_i]
-              when 'RETSELF' then node.receiver
-              when 'RETNIL' then NumericFlow::NIL
-              when 'RETTRUE' then @gen.numeric_class_bit('TrueClass')
-              when 'RETFALSE' then @gen.numeric_class_bit('FalseClass')
-              when 'RETURN_BLK', 'BREAK', 'STOP' then NumericFlow::OTHER
-              else 0
-              end
-      joined | value
+    BytecodeIR::NumericClasses.exit_mask(body, node.states) do |exit, state|
+      case exit.op
+      when 'RETURN' then state[exit.reg]
+      when 'RETSELF' then node.receiver
+      when 'RETNIL' then NumericFlow::NIL
+      when 'RETTRUE' then @gen.numeric_class_bit('TrueClass')
+      when 'RETFALSE' then @gen.numeric_class_bit('FalseClass')
+      else NumericFlow::OTHER
+      end
     end
   end
 
@@ -368,7 +363,7 @@ class IrContextResults
     return nil unless shape && shape.container == receivers.first && shape.elements && shape.elements.all? { |mask| mask.is_a?(Integer) && !mask.anybits?(NumericFlow::OTHER | NumericFlow::EXC | NumericFlow::CHECKED) }
     corridor = body.instructions[origin + 1...index]
     return nil unless corridor.all? { |op| %w[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE].include?(op.op) || op.op.start_with?('LOADI') } &&
-                      LiteralElementProof.linear?(BytecodeIR.for(body), origin, index)
+                      BytecodeIR.for(body).linear_corridor?(origin, index)
 
     key = [shape.container, shape.elements]
     return @shapes[key] if @shapes.key?(key)

@@ -2,7 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
-require_relative 'literal_element_proof'
+require_relative 'bytecode_ir_numeric'
 
 # NUMERIC_FLOW (ADR 0276): a forward dataflow over one irep that says which
 # registers provably hold an Integer (fixnum or bigint), a Float, an exact
@@ -65,6 +65,9 @@ module NumericFlow
   # Provenance, not a class (ADR 0370): the set came from a pool whose completeness is a runtime-checked claim. A mask
   # that carries it never equals a class bit, so every unguarded decoder refuses it; only CHECKED_POOL_EXACT reads it.
   CHECKED = 1 << (OBJECT_KIND_BASE - 1)
+  # The type layer's literal classes (BytecodeIR::Types.literal_class) the flow has a bit for. Symbol, true and false
+  # are closed-world class bits only the oracle names (literal_class_mask).
+  LITERAL_CLASS_MASKS = { Integer: INT, Float: FLT, Array: ARR, Hash: HSH, String: STR, NilClass: NIL, Range: RNG }.freeze
 
   module_function
 
@@ -137,8 +140,9 @@ module NumericFlow
   # each register the union of every value any instruction stores into it (what
   # a block created earlier may see when it runs later).
   #
-  # NUMERIC_FLOW_SPEED (ADR 0467): the flow reads the irep's bytecode facts from its BytecodeIR::Program (successor
-  # lists, raise targets, rescue-only targets, the instruction decode) and derives its own Step table from them once
+  # NUMERIC_FLOW_SPEED (ADR 0467), NUMERIC_CLASSES (ADR 0500): the flow reads the irep's bytecode facts from its
+  # BytecodeIR::Program (successor lists, raise targets, rescue-only targets, the decode and operands, the instructions
+  # the oracle is asked about, the literal-element proof) and derives its own Step table from them once
   # (NumericFlow.table), keeps the run's facts in a Ctx with the oracle's optional methods looked up once, and joins
   # without allocating when nothing grows. It asks the
   # oracle the same questions, with the same arguments, in the same order as before; only its own bookkeeping changed.
@@ -147,8 +151,8 @@ module NumericFlow
     return nil unless program.resolved?
     return nil if program.handlers? && !program.handlers_resolved?
 
-    insns = irep.instructions
-    return nil if insns.empty?
+    instructions = program.instructions
+    return nil if instructions.empty?
 
     unless program.built_from?(irep)
       raise "NumericFlow: the decoded plan of #{irep.label} no longer matches its instructions"
@@ -172,7 +176,7 @@ module NumericFlow
     entry.fill(0, entry.size, nregs) # provenance: which slot (+1) each register was loaded from
     entry.fill(0, entry.size, nregs) if c.tb # class tests: which test each register's boolean holds
 
-    n = insns.length
+    n = instructions.length
     pb = c.pb
     raises = program.raise_targets
     succ = program.successor_lists
@@ -189,7 +193,7 @@ module NumericFlow
       st = ins[i]
       next unless st
 
-      insn = insns[i]
+      insn = instructions[i].source
       step = steps[i]
       out = step_transfer(i, insn, step, st, c)
       # Every instruction of a protected range may raise into its handler, where the registers
@@ -318,15 +322,20 @@ module NumericFlow
       instructions = program.instructions
       supported = instructions.all? { |i| SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
       decoded = program.decoded if supported
-      steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index]).freeze }.freeze if supported)
+      operands = program.operands if supported
+      steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index], operands[i.index]).freeze }.freeze if supported)
       Table.new(supported, steps).freeze
     end
   end
 
-  # Decode +insn+ for the flow from its BytecodeIR decode +decoded+, reading of the insn itself only the operands the
-  # op's rule reads (an instruction-like object from a check may answer nothing else). Without a Program's decode,
-  # +goto+ stays nil.
-  def decode_step(insn, decoded = BytecodeIR.decode(insn))
+  # The flow's Step of an instruction from its IR facts: the BytecodeIR decode +decoded+ and the Operands +operands+
+  # (Program#decoded, Program#operands). A check may pass a bare instruction; it is decoded the same way. Without a
+  # Program's decode, +goto+ stays nil.
+  def decode_step(insn, decoded = BytecodeIR.decode(insn), operands = BytecodeIR.operands(insn))
+    decode_ir_step(decoded, operands)
+  end
+
+  def decode_ir_step(decoded, operands)
     op = decoded.op
     silent = SILENT_KINDS.fetch(op) { SILENT_CALL_OPS.include?(op) ? S_ALWAYS : S_NONE }
     step = Step.new(op, nil, nil, silent, decoded.cond)
@@ -338,8 +347,8 @@ module NumericFlow
     end
     if op == 'SETIV'
       step.kind = K_SETIV
-      step.ivar = insn.ivar
-      step.b = insn.regs.first.to_i
+      step.ivar = operands.ivar
+      step.b = operands.b
       return step
     end
 
@@ -349,14 +358,9 @@ module NumericFlow
                 elsif op.start_with?('LOADI') then K_LOADI
                 else STEP_KINDS.fetch(op, K_OTHER)
                 end
-    case step.kind
-    when K_MOVE, K_RESCUE, K_IMM_LV then step.b = insn.regs[1].to_i
-    when K_ARITH, K_DIV, K_EQ then step.b = insn.paren_reg.to_i
-    when K_GETIV then step.ivar = insn.ivar
-    end
+    step.ivar = operands.ivar if step.kind == K_GETIV
+    step.b = operands.b
     step.sym = ARITH_OPS[op] || IMM_ARITH_OPS[op]
-    step.b = insn.paren_reg.to_i if silent == S_NUMERIC && step.b.nil?
-    step.b = insn.regs[1].to_i if silent == S_INDEX0
     step
   end
 
@@ -852,7 +856,7 @@ module NumericFlow
       ok = oracle.op_native?('/') && b < nregs
       set_reg(out, a, ok ? arith(state[a], state[b], oracle.nil_raises?('/')) : OTHER, c)
     when K_GETIDX
-      literal = LiteralElementProof.mask(irep, index, c.opaque)
+      literal = BytecodeIR::NumericClasses.element_literal_mask(irep, index, c.opaque)
       set_reg(out, a, literal || (c.index_mask ? oracle.index_mask(irep, index, insn, state) : OTHER), c)
     when K_AREF
       set_reg(out, a, c.aref_mask ? oracle.aref_mask(irep, index, insn, state) : OTHER, c)

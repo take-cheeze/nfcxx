@@ -21,19 +21,12 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
 
   # Instruction whose address is +addr+, as an index into #instructions.
   def index_of_addr(addr)
-    @addr_index ||= instructions.each_with_index.to_h { |insn, index| [insn.addr, index] }
-    @addr_index[addr]
+    BytecodeIR.for(self).address_to_index[addr]
   end
 
-  # Yields `(insn, index)` for each instruction whose op is one of +ops+.
-  def each_with_op(*ops)
-    # Per-op index lists (built once; instructions never change after loading)
-    # merged back into program order.
-    @op_indices ||= instructions.each_with_index.group_by { |insn, _| insn.op }
-                                .transform_values { |pairs| pairs.map(&:last).freeze }.freeze
-    indices = ops.uniq.flat_map { |op| @op_indices.fetch(op, []) }
-    indices.sort! if ops.uniq.size > 1
-    indices.each { |index| yield instructions[index], index }
+  # Yields `(insn, index)` for each instruction whose op is one of +ops+, in program order.
+  def each_with_op(*ops, &block)
+    BytecodeIR.for(self).each_with_op(*ops, &block)
   end
 
   # The ENTER instruction (nil for a bodyless zero-argument method).
@@ -52,7 +45,7 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   # mrbc -v prints EXT1/EXT2/EXT3 as their own lines widening the next
   # instruction; this is the index of the nearest real opcode at or before
   # +from+, or -1.
-  EXT_OPS = %w[EXT1 EXT2 EXT3].freeze
+  EXT_OPS = BytecodeIR::Ops::EXT
 
   def previous_real_index(from)
     index = from
@@ -68,25 +61,14 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   end
 
   def last_writer_index(from, reg)
-    previous_lead_index(reg.to_s, from)
+    BytecodeIR.for(self).last_writer_index(from, reg.to_s)
   end
 
   # The first non-MOVE instruction writing +reg+ at or before index +from+,
-  # following MOVE copies to their source register. Nil when the register is
-  # never written or a MOVE has no source.
+  # following MOVE copies to their source register (BytecodeIR::Program#copy_root).
+  # Nil when the register is never written or a MOVE has no source.
   def source_writer(from, reg)
-    loop do
-      index = last_writer_index(from, reg)
-      return nil unless index
-
-      insn = instructions[index]
-      return insn unless insn.op == 'MOVE'
-
-      reg = insn.regs[1]
-      return nil unless reg
-
-      from = index - 1
-    end
+    BytecodeIR.for(self).copy_root(from, reg.to_s)&.writer
   end
 
   # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).

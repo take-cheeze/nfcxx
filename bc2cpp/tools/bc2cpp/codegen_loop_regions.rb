@@ -114,13 +114,7 @@ class CodeGen
   # ADR 0472: is the receiver of the `times` send at `idx` a Fixnum on every path (an Integer literal, or
   # FIXNUM_OPERAND_PROOF for the method's own registers)?
   def times_fixnum_receiver?(irep, idx, dest_reg)
-    literal = irep.walk_dominating_writers(idx - 1, dest_reg.to_s, use: idx) do |insn, _i, _cur|
-      case insn.op
-      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
-      else BlockCoreDirectFallback::INTEGER_LITERAL_OPS.include?(insn.op) ? :fixnum : nil
-      end
-    end
-    return true if literal == :fixnum
+    return true if exact_literal(irep, idx, dest_reg)&.klass == :Integer
 
     owner_def = @owner_of[irep.label]
     !owner_def.nil? && proven_fixnum_operand?(irep, idx, dest_reg, owner_def)

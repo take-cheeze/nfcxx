@@ -5,7 +5,8 @@
 # fixnum_interval answers "is register +reg+ at +idx+ a Fixnum whose value lies in a known interval", from integer
 # literals, constants with a proven interval (IntegerConstantRanges) and + - * / of those. An arithmetic result is a
 # Fixnum here only because its interval fits the narrowest target Fixnum range (ADR 0279 retired the unbounded rule).
-# The walk is proven_fixnum_operand?'s single-path walk: same barriers, same region dominance; a join gives up.
+# The walk is single-path with proven_fixnum_operand?'s barriers; every hop must dominate the read it feeds
+# (BytecodeIR.write_dominates?), so a join gives up.
 class CodeGen
   FIXNUM_INTERVAL_OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
 
@@ -55,16 +56,18 @@ class CodeGen
     use_insn = idx >= 0 && irep.instructions[idx]
     return fixnum_interval_fail(why, 'barrier') if !use_insn || unaudited.call(use_insn, cur)
 
+    read = idx
     irep.walk_writers(idx - 1, cur, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, barrier: unaudited,
                                     exhausted: ->(_r) { fixnum_interval_fail(why, 'param') }) do |insn, j, wreg|
+      next fixnum_interval_fail(why, 'join') unless BytecodeIR.write_dominates?(irep, j, read, wreg)
+
+      read = j
       if insn.op == 'MOVE'
         src = insn.regs[1]
         next fixnum_interval_fail(why, 'move') if src.nil? || ctx[:upvars].include?(src)
 
         next IrepScans.follow(src)
       end
-      next fixnum_interval_fail(why, 'join') unless fixnum_proof_region_ok?(irep, ctx, j, idx)
-
       fixnum_interval_source(irep, j, insn, wreg, owner_def, depth, why)
     end
   end
