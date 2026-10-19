@@ -272,7 +272,7 @@ class CodeGen
 
     writes = {}
     @rc_writes[irep.label] = writes
-    @rc_states[irep.label] = NumericFlow.states(irep, return_class_table_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
+    @rc_states[irep.label] = BytecodeIR::NumericClasses.states(irep, return_class_table_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
   end
 
   # POOL_SELF_CLASS: the oracle of the table-building and pool-growth flow. A method body whose `self` is a fixed class
@@ -336,7 +336,7 @@ class CodeGen
     @rc_scoped_writes[irep.label] = writes
     @rc_scoped_active_labels << irep.label
     building = true
-    @rc_scoped_states[irep.label] = NumericFlow.states(irep, return_class_method_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
+    @rc_scoped_states[irep.label] = BytecodeIR::NumericClasses.states(irep, return_class_method_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
   ensure
     @rc_scoped_active_labels&.delete(irep.label) if building
   end
@@ -391,18 +391,7 @@ class CodeGen
     joined = return_class_block_returns(irep, Set.new, scoped: scoped)
     return NumericFlow::OTHER if joined.nil?
 
-    irep.instructions.each_with_index do |insn, idx|
-      state = states[idx]
-      next unless state
-
-      joined |= case insn.op
-                when 'RETURN', 'RETURN_BLK' then state[insn.reg.to_i] || NumericFlow::OTHER
-                when 'RETNIL' then NumericFlow::NIL
-                when 'RETSELF', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP' then NumericFlow::OTHER
-                else 0
-                end
-    end
-    joined
+    BytecodeIR::NumericClasses.returned_mask(irep, states, joined)
   end
 
   # The value a `return` inside a block nested in +irep+ hands back from the method (RETURN_BLK, at
@@ -417,13 +406,11 @@ class CodeGen
       child = @ireps[label]
       next unless child
 
-      if child.instructions.any? { |i| i.op == 'RETURN_BLK' }
+      if BytecodeIR::NumericClasses.block_returns?(child)
         states = scoped ? return_class_scoped_states(child) : return_class_states(child)
         return nil unless states
 
-        child.instructions.each_with_index do |insn, idx|
-          joined |= states[idx][insn.reg.to_i] || NumericFlow::OTHER if insn.op == 'RETURN_BLK' && states[idx]
-        end
+        joined |= BytecodeIR::NumericClasses.block_return_mask(child, states)
       end
       nested = return_class_block_returns(child, seen, scoped: scoped)
       return nil if nested.nil?
@@ -774,23 +761,19 @@ class CodeGen
 
     oracle = ContextOracle.new(self, receiver, binding)
     writes = {}
-    states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars], writes)
+    states = BytecodeIR::NumericClasses.states(body, oracle, fixnum_proof_ctx(body)[:upvars], writes)
     return nil unless states
 
     block_returns = return_class_context_block_returns(body, states, writes)
     return nil if block_returns.nil?
 
-    body.instructions.each_with_index.reduce(block_returns) do |joined, (insn, index)|
-      state = states[index]
-      next joined unless state
-
-      joined | case insn.op
-               when 'RETURN' then state[insn.reg.to_i] || NumericFlow::OTHER
-               when 'RETSELF' then receiver
-               when 'RETNIL' then NumericFlow::NIL
-               when 'RETTRUE', 'RETFALSE', 'RETURN_BLK', 'BREAK', 'STOP' then NumericFlow::OTHER
-               else 0
-               end
+    BytecodeIR::NumericClasses.exit_mask(body, states, block_returns) do |exit, state|
+      case exit.op
+      when 'RETURN' then state[exit.reg] || NumericFlow::OTHER
+      when 'RETSELF' then receiver
+      when 'RETNIL' then NumericFlow::NIL
+      else NumericFlow::OTHER
+      end
     end
   end
 
@@ -821,14 +804,12 @@ class CodeGen
 
         child = @ireps.fetch(label)
         child_writes = {}
-        child_states = NumericFlow.states(child, oracle, fixnum_proof_ctx(child)[:upvars], child_writes)
+        child_states = BytecodeIR::NumericClasses.states(child, oracle, fixnum_proof_ctx(child)[:upvars], child_writes)
         contexts[label] = { states: child_states, writes: child_writes }
-        child.instructions.each_with_index do |insn, index|
-          next unless insn.op == 'RETURN_BLK'
+        if BytecodeIR::NumericClasses.block_returns?(child)
           return nil unless child_states
 
-          state = child_states[index]
-          joined |= state[insn.reg.to_i] || NumericFlow::OTHER if state
+          joined |= BytecodeIR::NumericClasses.block_return_mask(child, child_states)
         end
         return nil if walk.call(child).nil?
       end

@@ -327,17 +327,17 @@ class CodeGen
       return receiver.is_a?(Integer) && (receiver & NumericFlow::OTHER).zero? ? receiver : nil
     end
 
-    states = NumericFlow.states(body, BlockReturns::Oracle.new(self), fixnum_proof_ctx(body)[:upvars])
+    states = BytecodeIR::NumericClasses.states(body, BlockReturns::Oracle.new(self), fixnum_proof_ctx(body)[:upvars])
     return nil unless states
 
-    mask = body.instructions.each_with_index.reduce(0) do |joined, (op, idx)|
-      s = states[idx]
-      value = if s && op.op == 'RETURN' then s[op.reg.to_i]
-              elsif s && op.op == 'RETNIL' then NumericFlow::NIL
-              elsif s && %w[RETSELF RETTRUE RETFALSE STOP].include?(op.op) then NumericFlow::OTHER
-              else 0
-              end
-      joined | value
+    # RETURN_BLK and BREAK leave the block for its method or call, not for the yield this answers.
+    mask = BytecodeIR::NumericClasses.exit_mask(body, states) do |exit, state|
+      case exit.op
+      when 'RETURN' then state[exit.reg]
+      when 'RETNIL' then NumericFlow::NIL
+      when 'RETURN_BLK', 'BREAK' then 0
+      else NumericFlow::OTHER
+      end
     end
     mask if (mask & NumericFlow::OTHER).zero?
   end

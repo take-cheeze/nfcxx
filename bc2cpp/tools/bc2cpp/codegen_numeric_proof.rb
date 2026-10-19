@@ -172,7 +172,7 @@ class CodeGen
 
     writes = {}
     @numeric_writes[irep.label] = writes
-    @numeric_states[irep.label] = NumericFlow.states(irep, @numeric_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
+    @numeric_states[irep.label] = BytecodeIR::NumericClasses.states(irep, @numeric_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
   end
 
   # Forget the flow of +label+ and of every block nested in it: those read its
