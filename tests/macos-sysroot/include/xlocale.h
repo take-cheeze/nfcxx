@@ -103,4 +103,8 @@ size_t wcrtomb_l(char *restrict, wchar_t, mbstate_t *restrict, locale_t);
 size_t wcsnrtombs_l(char *restrict, const wchar_t **restrict, size_t, size_t, mbstate_t *restrict, locale_t);
 int mbtowc_l(wchar_t *restrict, const char *restrict, size_t, locale_t);
 size_t mbsnrtowcs_l(wchar_t *restrict, const char **restrict, size_t, size_t, mbstate_t *restrict, locale_t);
+/* MB_CUR_MAX_L: Apple's public Libc include/__xlocale.h (commit 71bbe350ab79eef58113991d817ccc6165061a64). */
+int ___mb_cur_max_l(locale_t);
+#define MB_CUR_MAX_L(x) (___mb_cur_max_l(x))
+size_t mbrlen_l(const char *restrict, size_t, mbstate_t *restrict, locale_t);
 #endif
