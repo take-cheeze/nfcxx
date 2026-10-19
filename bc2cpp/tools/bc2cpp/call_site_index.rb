@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'core_fact_sigs'
+require_relative 'bytecode_ir_numeric'
 
 # Shared index for analyses that need to visit every call to one method name.
 # Build once per bc2cpp invocation rather than rescanning all instructions for
