@@ -125,7 +125,10 @@ cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDIN
 # dirent layout is not defined by POSIX; it would have to come from the target, which is not read here.
 # exception.cpp (std::exception, bad_alloc, bad_cast, typeinfo, terminate) is left out: the cross link takes those from EDG's libC.a,
 # and linking both defines them twice.
-libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp exception.cpp "
+# locale.cpp is excluded too: it needs the multibyte _l functions and MB_CUR_MAX (__mb_cur_max), which the clean-room
+# headers do not define, and Apple's default rune table, which is not public. The link takes the locale symbols from the
+# Mac's libc++ at run time, which is how the programs that link today resolve them.
+libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp exception.cpp locale.cpp "
 mkdir -p libcxx-obj
 rm -f libc++-darwin.a libcxx-obj/*.o
 cxxlib_fail=0
