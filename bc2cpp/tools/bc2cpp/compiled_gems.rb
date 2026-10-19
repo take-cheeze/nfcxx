@@ -74,8 +74,8 @@ BC2CPP_CORE_MRBLIB_GEMS = %w[
 #   would add two exact-class arms to every `.name` call chain for nothing.
 BC2CPP_CORE_MRBLIB_EXCLUDED = %w[mrbgems/mruby-io/mrblib/kernel.rb mrblib/10error.rb].freeze
 # Core mrblib gems whose Ruby is analysed as program, so their method names are known callers and not outside tokens
-# (ADR 0514). Only their C sources stay outside. Pilot: mruby-array-ext only.
-BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = %w[mruby-array-ext].freeze
+# (ADR 0514). Only their C sources stay outside. Files in BC2CPP_CORE_MRBLIB_EXCLUDED stay foreign.
+BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = BC2CPP_CORE_MRBLIB_GEMS
 # FAIL_FAST_TYPE (compile-time): true defines BC2CPP_FAIL_FAST_TYPE in the compiled gems, so each closed-world
 # fallback (bc2cpp_nomethod) raises TypeError instead of dispatching by name. Off in every shipped build.
 BC2CPP_FAIL_FAST_TYPE = false
@@ -358,7 +358,8 @@ end
 def foreign_mrblib_srcs(gems_root)
   Dir["#{gems_root}/3rd/mruby/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"].reject do |path|
-      BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.any? { |gem| path.include?("/mrbgems/#{gem}/mrblib/") }
+      BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.any? { |gem| path.include?("/mrbgems/#{gem}/mrblib/") } &&
+        BC2CPP_CORE_MRBLIB_EXCLUDED.none? { |tail| path.end_with?("/3rd/mruby/#{tail}") }
     end +
     Dir["#{gems_root}/3rd/mruby-marshal/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-onig-regexp/mrblib/**/*.rb"] +
