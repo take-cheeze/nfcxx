@@ -424,7 +424,7 @@ class CodeGen
   # front is refused.
   def straightline_return_reg?(irep, idx, reg)
     use = idx
-    irep.walk_writers(idx - 1, reg, skip_ops: READ_ONLY_OPCODE_SKIP) do |pin, i, r|
+    irep.walk_writers(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY) do |pin, i, r|
       # proven_array_source_scan steps over BLOCK, so it must not end this walk.
       next false if pin.op == 'BLOCK'
       next false unless return_write_dominates?(irep, i, use, r)

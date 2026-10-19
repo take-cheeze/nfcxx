@@ -517,7 +517,7 @@ class CodeGen
       mask = return_class_raw_mask(irep, idx, (recv + k).to_s)
       next if mask && !mask.anybits?(CLASS_POOL_UNSHIPPABLE)
 
-      writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], follow_moves: true,
+      writer = irep.walk_writers(idx - 1, (recv + k).to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                           exhausted: ->(last) { last == '0' ? 'self' : 'incoming_arg' }) do |ins|
         %w[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.downcase
       end

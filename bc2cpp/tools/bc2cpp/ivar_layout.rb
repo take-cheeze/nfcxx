@@ -6,16 +6,15 @@ require_relative 'bytecode_ir'
 
 # Step 6b: which statically named ivars use compiler-managed RData slots.
 
-# Opcodes that print a READ-only register as their first `R<n>` operand.
+# BytecodeIR::Ops::LEAD_READ_ONLY: opcodes that print a READ-only register as their first `R<n>` operand.
 # mruby/ops.h: RETURN/RETURN_BLK "return R[a]", BREAK, JMPIF/JMPNOT/JMPNIL
 # "if R[a] ...", RAISEIF, MATCHERR, SETUPVAR "uvset(b,c,R[a])"; codedump.c prints
 # them that way. Skipping a non-writer is as sound as skipping a MOVE to another
 # register; without it an early `return v if v == @flag` stopped the trace for a
 # later `@flag = v`. SETUPVAR's `b`/`c` are slot/level numbers in an ancestor
 # frame, not this irep's registers, so its only `R` token is a same-frame read.
-READ_ONLY_OPCODE_SKIP = %w[RETURN RETURN_BLK BREAK JMPIF JMPNOT JMPNIL RAISEIF MATCHERR SETUPVAR].freeze
 # IvarLayout.trace_type also steps over RESCUE's read operand; its write is a barrier.
-TRACE_TYPE_SKIP_OPS = (READ_ONLY_OPCODE_SKIP + %w[RESCUE]).freeze
+TRACE_TYPE_SKIP_OPS = (BytecodeIR::Ops::LEAD_READ_ONLY | ['RESCUE']).freeze
 
 # ---------------------------------------------------------------------------
 # Step 6b: ivar embedding: which ivars can move out of iv_tbl into C struct

@@ -47,8 +47,6 @@ module RecordHash
   UNKNOWN_SET = Set[:unknown].freeze
   REFLECTION_SENDS = %w[instance_variable_get instance_variable_set remove_instance_variable
                         instance_variable_defined? each_object].freeze
-  # rbs_record_types.rb reads this name.
-  CALL_OPS = BytecodeIR::Ops::CALL
   # Ops whose leading register is only written (no implicit reads).
   WRITE_LEAD_ONLY = Set[
     'LOADL', 'LOADSYM', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSELF', 'GETGV', 'GETSV', 'GETIV',
@@ -90,7 +88,7 @@ module RecordHash
 
         (insn.op == 'SETIV' ? candidates[name][:sets] : candidates[name][:gets]) << [irep, i]
       end
-      irep.each_with_op(*CALL_OPS) do |insn, i|
+      irep.each_with_op(*BytecodeIR::Ops::CALL) do |insn, i|
         (calls[insn.sym] ||= []) << [irep, i] if poison.readers.include?(insn.sym)
       end
     end
@@ -159,7 +157,7 @@ module RecordHash
     names = sources.map do |d|
       writer = d.insn
       if writer&.op == 'GETIV' then writer.ivar
-      elsif writer && CALL_OPS.include?(writer.op) && (readers || Set.new).include?(writer.sym) then writer.sym
+      elsif writer && BytecodeIR::Ops::CALL.include?(writer.op) && (readers || Set.new).include?(writer.sym) then writer.sym
       end
     end
     return nil if names.any? { |n| n.nil? || !table.key?(n) }
@@ -333,7 +331,7 @@ module RecordHash
             @global ||= "#{insn.sym} escapes as a Symbol" if REFLECTION_SENDS.include?(insn.sym)
             # `send(:ui)` / `&:ui` / `method(:ui)` would call a reader without a visible call site.
             poison(insn.sym, 'reader named as a Symbol') if @readers.include?(insn.sym) && !installer_args.include?(i)
-          elsif CALL_OPS.include?(insn.op) && REFLECTION_SENDS.include?(insn.sym)
+          elsif BytecodeIR::Ops::CALL.include?(insn.op) && REFLECTION_SENDS.include?(insn.sym)
             literal = insn.op.end_with?('0') ? nil : literal_ivar_arg(irep, i, insn)
             literal ? poison(literal, "reflection #{insn.sym}") : (@global ||= "computed #{insn.sym}")
           end
@@ -613,7 +611,7 @@ module RecordHash
         return escape("operand of #{op}") if state.any? { |x| x >= lead && x <= hi }
       end
       return state if READ_LEAD_KEEP.include?(op)
-      return state.reject { |x| x >= lead }.to_set if CALL_OPS.include?(op)
+      return state.reject { |x| x >= lead }.to_set if BytecodeIR::Ops::CALL.include?(op)
 
       state - [lead]
     end
@@ -622,7 +620,7 @@ module RecordHash
     def read_span(insn, lead)
       case insn.op
       when 'SEND0', 'SSEND0' then lead
-      when *CALL_OPS
+      when *BytecodeIR::Ops::CALL
         n = insn.argc
         nk = insn.argc_operand&.at(1)
         n && nk ? lead + n + 2 * nk + 1 : INF
@@ -684,7 +682,7 @@ module RecordHash
       insn = BytecodeIR.for(irep).source_at(d)
       return nil unless %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
 
-      path = irep.constant_path(d - 1, insn.reg, skip_ops: READ_ONLY_OPCODE_SKIP)
+      path = irep.constant_path(d - 1, insn.reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY)
       return nil unless path&.root == :const && path.segments.empty? && %w[Array Hash String].include?(path.name)
       return nil unless @closed_world.stable_constant_identity?(path.name) && @closed_world.standard_constructor_lookup?
       return nil unless (@registry['new'] || []).all? { |md| md.owner == '<native>' }

@@ -60,8 +60,8 @@ class CodeGen
   # `a || 7`, `h&.size || 3`, where the condition register is the result. This
   # affects only the write test; they stay steppable and remain branch sources
   # for the dominance and reaching-definition machinery.
-  # They are exactly the steppable members of BytecodeIR::READS_LEADING_REG_OPS.
-  FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::READS_LEADING_REG_OPS & FIXNUM_PROOF_STEP_OVER_OPS).freeze
+  # They are exactly the steppable members of BytecodeIR::Ops::READS_LEAD.
+  FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::Ops::READS_LEAD & FIXNUM_PROOF_STEP_OVER_OPS).freeze
 
   # Nested proven-arithmetic hops for source 4. `(a + b) * (c - d)` needs two;
   # unbounded recursion could go exponential on long chains.

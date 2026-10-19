@@ -366,7 +366,7 @@ class CodeGen
   # are not modelled. WRITES_LEADING_REG_OPS is the audited leading-operand set.
   def rescue_insn_written_regs(insn)
     op = insn.op
-    if BytecodeIR::READS_LEADING_REG_OPS.include?(op) || op == 'JMPUW'
+    if BytecodeIR::Ops::READS_LEAD.include?(op) || op == 'JMPUW'
       []
     elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
       [insn.reg].compact

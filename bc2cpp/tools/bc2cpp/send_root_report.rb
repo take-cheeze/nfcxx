@@ -47,7 +47,7 @@ module SendRootReport
   end
 
   def send_root_producer(irep, site, reg)
-    result = irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], follow_moves: true,
+    result = irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                    exhausted: ->(last) { [last == '0' ? 'self' : 'incoming_arg', '-', '-'] }) do |ins, index|
       case ins.op
       when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'

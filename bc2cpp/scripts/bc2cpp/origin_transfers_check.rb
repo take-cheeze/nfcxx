@@ -183,9 +183,9 @@ check.call('without the handler the same body is dead and skipped',
 proof = File.read(File.expand_path('../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
 check.call('FIXNUM_PROOF_STEP_OVER_OPS is WRITES_LEADING_REG_OPS itself',
            proof.include?("FIXNUM_PROOF_STEP_OVER_OPS = BytecodeIR::WRITES_LEADING_REG_OPS\n"))
-check.call('FIXNUM_PROOF_READONLY_REG_OPS is derived from READS_LEADING_REG_OPS',
-           proof.include?('FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::READS_LEADING_REG_OPS & FIXNUM_PROOF_STEP_OVER_OPS)') &&
-             (BytecodeIR::READS_LEADING_REG_OPS & BytecodeIR::WRITES_LEADING_REG_OPS) == Set['JMPIF', 'JMPNOT', 'JMPNIL'])
+check.call('FIXNUM_PROOF_READONLY_REG_OPS is derived from BytecodeIR::Ops::READS_LEAD',
+           proof.include?('FIXNUM_PROOF_READONLY_REG_OPS = (BytecodeIR::Ops::READS_LEAD & FIXNUM_PROOF_STEP_OVER_OPS)') &&
+             (BytecodeIR::Ops::READS_LEAD & BytecodeIR::WRITES_LEADING_REG_OPS) == Set['JMPIF', 'JMPNOT', 'JMPNIL'])
 check.call('the Fixnum proof keeps no reaching-definitions walk of its own',
            !proof.include?('def fixnum_proof_reaching_defs?') && proof.include?('every_reaching_definition('))
 

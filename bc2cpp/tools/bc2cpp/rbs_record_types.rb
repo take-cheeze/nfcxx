@@ -210,7 +210,7 @@ module RbsRecordTypes
 
         (insn.op == 'SETIV' ? sites[name][:sets] : sites[name][:gets]) << [irep, i]
       end
-      irep.each_with_op(*RecordHash::CALL_OPS) do |insn, i|
+      irep.each_with_op(*BytecodeIR::Ops::CALL) do |insn, i|
         sites[insn.sym][:calls] << [irep, i] if wanted.include?(insn.sym) && readers.include?(insn.sym)
       end
     end

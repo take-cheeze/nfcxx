@@ -555,8 +555,8 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
   # a read, so RESCUE is skipped unless it writes the followed register.
   rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
   # JMPIF/JMPNOT stay visible for CONTAINER_PHI_MERGE below; the rest of
-  # READ_ONLY_OPCODE_SKIP only reads its register.
-  skip_ops = ['RESCUE', *(READ_ONLY_OPCODE_SKIP - %w[JMPIF JMPNOT])]
+  # LEAD_READ_ONLY only reads its register.
+  skip_ops = ['RESCUE', *(BytecodeIR::Ops::LEAD_READ_ONLY - %w[JMPIF JMPNOT])]
   # Never written: an incoming argument (register N is argument N for N <=
   # mand). Only a class annotation can name its class; pooling call sites is
   # unsound for POLY names.
@@ -567,7 +567,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
     (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)) || rest_entry_class(irep, pos)
   end
   irep.walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: rescue_write, exhausted: at_entry) do |insn, i, cur|
-    if dominated && !READ_ONLY_OPCODE_SKIP.include?(insn.op)
+    if dominated && !BytecodeIR::Ops::LEAD_READ_ONLY.include?(insn.op)
       return nil unless dominated.call(i, use, cur)
 
       use = i
@@ -887,7 +887,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # into `reg` on ONE side of the branch, so the register has two incoming
       # definitions and the walk would otherwise keep going past the literal
       # to an older, unrelated write (or off the top of the body to the
-      # argument). ADR 0191 added this opcode to READ_ONLY_OPCODE_SKIP, which is
+      # argument). ADR 0191 added this opcode to the read-only skip set, which is
       # correct for soundness of the skip but loses the literal: ADR 0191
       # verified that had zero measurable effect, because no `x || []` receiver
       # was reachable then.
@@ -906,7 +906,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       merged = container_phi_merge(irep, i, cur)
       return merged if merged
 
-      # Unproven: fall through to the READ_ONLY_OPCODE_SKIP behaviour ADR 0191
+      # Unproven: fall through to the LEAD_READ_ONLY behaviour ADR 0191
       # established, which is to keep walking backwards past this read.
     else
       return nil
@@ -1017,7 +1017,7 @@ end
 # MOVE aliases; every other write ends the proof, while trace_new_target repeats
 # the walk and proves the class expression itself.
 def assigned_from_new_send?(irep, idx, reg)
-  irep.walk_writers(idx - 1, reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP, follow_moves: true) do |insn|
+  irep.walk_writers(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, follow_moves: true) do |insn|
     %w[SEND SEND0 SENDB].include?(insn.op) && insn.sym == 'new'
   end || false
 end

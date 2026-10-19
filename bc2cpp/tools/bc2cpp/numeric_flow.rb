@@ -103,7 +103,7 @@ module NumericFlow
   # audited BytecodeIR::WRITES_LEADING_REG_OPS list), plus the read-only
   # leaders and the two a rescue clause adds: EXCEPT writes its leading register,
   # RESCUE its second. Any other op has no facts.
-  SUPPORTED_OPS = (BytecodeIR::WRITES_LEADING_REG_OPS | BytecodeIR::READS_LEADING_REG_OPS |
+  SUPPORTED_OPS = (BytecodeIR::WRITES_LEADING_REG_OPS | BytecodeIR::Ops::READS_LEAD |
                    Set['EXCEPT', 'RESCUE']).freeze
   # Leading register is only read (or the op writes an enclosing frame).
   NO_WRITE_OPS = Set['NOP', 'ENTER', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RETURN', 'RETURN_BLK', 'RETSELF',

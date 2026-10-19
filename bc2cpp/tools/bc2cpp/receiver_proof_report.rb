@@ -215,7 +215,7 @@ module ReceiverProofReport
   # [source, detail, hypothesis] of the receiver register: the nearest textual writer, and the set the source would
   # give were it proven (see the header). hypothesis is {mask:, complete:} or nil when the source has no candidate.
   def rp_source(irep, site, reg, hypothesis: true)
-    found = irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], follow_moves: true,
+    found = irep.walk_writers(site - 1, reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                   exhausted: ->(last) { rp_incoming(irep, last, hypothesis) }) do |ins, i|
       rp_writer(irep, site, reg, ins, i, hypothesis)
     end
@@ -313,7 +313,7 @@ module ReceiverProofReport
     klass = LITERAL_CLASS[ins.op]
     return ['literal', klass, nil] if exact_core_value_class(irep, site, reg)
 
-    other = irep.walk_writers(index - 1, ins.reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], follow_moves: true,
+    other = irep.walk_writers(index - 1, ins.reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
                                                        exhausted: ->(last) { last == '0' ? 'self' : 'argument' }) do |w, _wi|
       case w.op
       when *BytecodeIR::Ops::SEND then "call:#{w.sym}"

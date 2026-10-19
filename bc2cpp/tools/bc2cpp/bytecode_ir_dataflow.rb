@@ -45,12 +45,6 @@ module BytecodeIR
     'SCLASS', 'TCLASS', 'DEBUG', 'STOP'
   ].freeze
 
-  # Ops whose leading register is only READ (vm.c tests or raises on regs[a]);
-  # SETUPVAR stores into an enclosing frame, never a local. They step over
-  # without defining anything. RAISEIF/MATCHERR fall through only on the
-  # non-raising value, and the raise itself is a handler edge (refused below).
-  READS_LEADING_REG_OPS = Set['JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR', 'SETUPVAR'].freeze
-
   # Ops that write a run of registers from their leading operand (vm.c), not just that operand. The run's extent
   # comes from the operands; only its values are runtime. ARGARY R(a) m1:r:m2:kd (vm.c OP_ARGARY, body 2492-2548)
   # writes R(a) (the rest Array, or the m1+m2 values without a rest), R(a+1) (the block slot, or the kdict with
@@ -341,10 +335,12 @@ module BytecodeIR
 
     private
 
-    # On the audited list of ops that write at most their leading register.
+    # On the audited list of ops that write at most their leading register. BytecodeIR::Ops::READS_LEAD ops
+    # step over without defining anything; RAISEIF/MATCHERR fall through only on the non-raising value, the raise
+    # being a handler edge (refused below).
     def dataflow_steps_over?(insn)
       op = insn.op
-      READS_LEADING_REG_OPS.include?(op) || WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
+      BytecodeIR::Ops::READS_LEAD.include?(op) || WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
     end
 
     # Origin-only transfers (SiteOriginTable's walk; codegen never passes origin_transfers:, so its answers
@@ -504,7 +500,7 @@ module BytecodeIR
       def self.for(insn)
         op = insn.op
         lead = insn.reg
-        new(READS_LEADING_REG_OPS.include?(op) || op == 'JMPUW', BytecodeIR.written_run(insn),
+        new(BytecodeIR::Ops::READS_LEAD.include?(op) || op == 'JMPUW', BytecodeIR.written_run(insn),
             ORIGIN_FRAME_OPS.include?(op), WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI'),
             BytecodeIR::Ops::CALLEE_FRAME.include?(op), lead, lead&.to_i).freeze
       end
