@@ -2350,11 +2350,7 @@ class CodeGen
 
     self_owner = owner_def && self_class(owner_def)
     unless recv == 'self'
-      reg = recv[/\Ar(\d+)\z/, 1]
-      prev = reg && irep && idx&.positive? && irep.instructions[idx - 1]
-      self_loaded = prev && prev.op == 'LOADSELF' && prev.reg == reg &&
-                    fixnum_proof_preds(irep)&.fetch(idx, nil).to_a == [idx - 1]
-      self_owner = nil unless self_loaded
+      self_owner = nil unless receiver_loaded_self?(recv, irep, idx)
     end
     # The instruction is kept for unlisted_class_call, which checks that it is
     # the send of its own name before trusting SSEND vs SEND.
@@ -2365,6 +2361,15 @@ class CodeGen
       site[:flow] = loop_flow_position(irep, trace_idx, trace_insn, trace_reg_offset)
     end
     site
+  end
+
+  # Every definition of the receiver register reaching the send is a LOADSELF of this irep.
+  def receiver_loaded_self?(recv, irep, idx)
+    reg = recv[/\Ar(\d+)\z/, 1]
+    return false unless reg && irep && idx
+
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
+    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && irep.instructions[d.index].op == 'LOADSELF' }
   end
 
   # LOOP_FLOW_POSITION (docs/adr/0398): the flow position of a send compiled from an inlined loop body (compile_insn
@@ -2461,9 +2466,15 @@ class CodeGen
 
   # Any instruction of the body writes R1 after the parameter binding (ENTER).
   def loop_element_reassigned?(irep)
-    irep.instructions.any? do |i|
-      i.op != 'ENTER' && !NumericFlow::NO_WRITE_OPS.include?(i.op) && i.reg.to_s == LOOP_ELEMENT_REG
-    end
+    written_leading_regs(irep).include?(LOOP_ELEMENT_REG)
+  end
+
+  # Leading registers the irep's instructions write (ENTER and NumericFlow::NO_WRITE_OPS excluded), once per irep.
+  def written_leading_regs(irep)
+    @written_leading_regs ||= {}.compare_by_identity
+    @written_leading_regs[irep] ||= irep.instructions.each_with_object(Set.new) do |i, regs|
+      regs << i.reg.to_s unless i.op == 'ENTER' || NumericFlow::NO_WRITE_OPS.include?(i.op)
+    end.freeze
   end
 
   # Counted once per (body, position, reason): compile_send runs on a site more than once.
