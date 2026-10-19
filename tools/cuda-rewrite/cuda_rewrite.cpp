@@ -246,8 +246,14 @@ std::string blank_comments(const std::string &text);
 // The name of the C-linkage wrapper of a template launch (Ruby: wrapper_name). The name must be the same in both passes,
 // so the comments of the template arguments are blanked first: the device pass blanks every comment of its text
 // (`reduce_rows_f32</*norm=*/true>` is `true` there), and the host copy's wrapper must not read the comment as a name.
+// A run of spaces counts as one (a macro's `do_multiply, do_add` on continuation lines).
 std::string wrapper_name(const std::string &name, const std::string &targs) {
-  return "__nfcxx_k_" + sanitize(name) + "_" + sanitize(strip(blank_comments(targs)));
+  std::string spaced;
+  for (char c : blank_comments(targs)) {
+    if (white_c((unsigned char)c) && !spaced.empty() && white_c((unsigned char)spaced.back())) continue;
+    spaced.push_back(white_c((unsigned char)c) ? ' ' : c);
+  }
+  return "__nfcxx_k_" + sanitize(name) + "_" + sanitize(strip(spaced));
 }
 
 // ---- template kernels and launches (Ruby lines 190-690) ------------------------------------------------------------
