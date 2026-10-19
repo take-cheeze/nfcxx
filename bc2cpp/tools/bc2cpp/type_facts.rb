@@ -36,7 +36,7 @@ module TypeFacts
                    :container_constants, :gen, :contradictions, :dynamic_names, :call_sites, :root,
                    :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, :constant_sites,
                    :modules, :superclass_of, :integer_constants, :signature_arg_types, :signature_contracts,
-                   :ir_return_facts, :included_modules, :prepended_modules,
+                   :ir_return_facts, :included_modules, :prepended_modules, :unknown_mixins,
                    :element_site_classes, :hash_element_site_classes, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
@@ -533,9 +533,24 @@ module TypeFacts
   # ------------------------------------------------------------------------------------------------ constants
 
   # ARRAY_SUM: `+` on Array and `freeze` answer what the proof assumes only while no Ruby definition of either can
-  # replace it (CodeGen#declared_array_plus_safe?: no program `+` on Array or a subclass, no prepend).
+  # replace it (CodeGen#declared_array_plus_safe?: no program `+` on Array or a subclass, no prepend). `freeze` is
+  # scoped to the Array owners (stock_proof), not to every program `freeze`, so Graphics.freeze does not refuse it.
   def array_sum_safe?(ctx)
-    ctx.gen.declared_array_plus_safe? && (ctx.registry['freeze'] || []).none?(&:irep)
+    ctx.gen.declared_array_plus_safe? && stock_proof(ctx, 'freeze', 'Array')
+  end
+
+  # The owner-scoped proof of a stock +name+ on Array or Hash (DeclaredConstants.stock_method?) over the program's
+  # class graph. Report-level only: CodeGen keeps its own predicates.
+  def stock_proof(ctx, name, klass)
+    DeclaredConstants.stock_method?(name, klass, ctx.registry, ctx.included_modules || {},
+                                    ctx.prepended_modules || {}, ctx.unknown_mixins || [])
+  end
+
+  # The merge proof reads a Hash receiver's `merge`, which a singleton method on that very object could replace. The
+  # closed world's exact-instance check (no singleton makers in the program) is the proof that none can exist.
+  def singleton_free?(ctx)
+    world = ctx.gen.instance_variable_get(:@closed_world)
+    !world.nil? && world.exact_instances_singleton_free?
   end
 
   def const_rows(ctx)
@@ -544,6 +559,25 @@ module TypeFacts
     ints = ctx.integer_constants || Set.new
     sums = DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
                                              array_sum_safe?(ctx))
+    merges = DeclaredConstants.hash_merge_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
+                                                merge_safe: stock_proof(ctx, 'merge', 'Hash'),
+                                                singleton_free: singleton_free?(ctx))
+    # A value that is `.freeze`d keeps the class of its receiver only while freeze is stock on that class. The literal's
+    # container class (literal_container_class) and the class pools walk past the freeze without checking it, so a
+    # name with a frozen site that could hold an Array or Hash whose freeze is not proven is untyped by either.
+    freeze_refused = Set.new
+    Array(ctx.constant_sites).each do |site|
+      name = site[:name].to_s
+      irep = ctx.ireps[site[:irep]]
+      next unless irep && DeclaredConstants.frozen_at?(irep, site[:idx], site[:reg])
+
+      held = if classes[name] then [classes[name]]
+             elsif pools[name] then mask_classes(ctx.gen, pools[name])
+             else []
+             end
+      unproven = held.any? { |klass| %w[Array Hash].include?(klass) && !stock_proof(ctx, 'freeze', klass) }
+      freeze_refused << name if unproven
+    end
     seen = {}
     Array(ctx.constant_sites).each do |site|
       name = site[:name].to_s
@@ -556,10 +590,10 @@ module TypeFacts
                              'scope' => scope_of(irep.file) }
       next if row['type']
 
-      if classes[name]
+      if classes[name] && !freeze_refused.include?(name)
         row['type'] = classes[name].to_s
         row['source'] = 'inferred:constructed'
-      elsif pools[name] && !mask_classes(ctx.gen, pools[name]).include?('OTHER')
+      elsif pools[name] && !freeze_refused.include?(name) && !mask_classes(ctx.gen, pools[name]).include?('OTHER')
         row['type'] = mask_classes(ctx.gen, pools[name]).join(' | ')
         row['source'] = 'inferred:class-pool'
       elsif ints.include?(bare)
@@ -568,6 +602,9 @@ module TypeFacts
       elsif sums[name]
         row['type'] = 'Array'
         row['source'] = 'inferred:array-sum'
+      elsif merges[name]
+        row['type'] = 'Hash'
+        row['source'] = 'inferred:hash-merge'
       else
         producer = textual_producer(ctx, irep, site[:idx], site[:reg])
         if producer.start_with?('literal:') && !%w[literal:nil literal:Numeric].include?(producer)
