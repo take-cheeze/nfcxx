@@ -549,6 +549,23 @@ module TypeFacts
                                     ctx.prepended_modules || {}, ctx.unknown_mixins || [])
   end
 
+  # FREEZE_SELF: `R.freeze` answers its receiver (Object#freeze), so `(literal).freeze` has the literal's class while
+  # freeze is stock on it (stock_proof). Only a literal receiver is proven here; a send, sum or ivar keeps its own
+  # producer. Returns the class, or nil.
+  FREEZE_SELF_LITERALS = { 'literal:Integer' => 'Integer', 'literal:String' => 'String', 'literal:Array' => 'Array',
+                           'literal:Hash' => 'Hash' }.freeze
+
+  def freeze_self_type(ctx, irep, idx, reg)
+    found = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
+      insn.op == 'SEND0' && insn.sym == 'freeze' ? [j, cur] : false
+    end
+    return nil unless found.is_a?(Array)
+
+    j, cur = found
+    klass = FREEZE_SELF_LITERALS[textual_producer(ctx, irep, j, cur)]
+    klass && stock_proof(ctx, 'freeze', klass) ? klass : nil
+  end
+
   # The merge proof reads a Hash receiver's `merge`, which a singleton method on that very object could replace. The
   # closed world's exact-instance check (no singleton makers in the program) is the proof that none can exist.
   def singleton_free?(ctx)
@@ -583,6 +600,13 @@ module TypeFacts
              end
       unproven = held.any? { |klass| %w[Array Hash].include?(klass) && !stock_proof(ctx, 'freeze', klass) }
       freeze_refused << name if unproven
+    end
+    # FREEZE_SELF needs every assignment of the name to be the same frozen literal class: the row takes one site's
+    # type, so a name with a site of another class (or any unproven site) keeps no type from this fact.
+    freeze_self = {}
+    Array(ctx.constant_sites).group_by { |s| s[:name].to_s }.each do |name, group|
+      kinds = group.map { |s| (irep = ctx.ireps[s[:irep]]) && freeze_self_type(ctx, irep, s[:idx], s[:reg]) }
+      freeze_self[name] = kinds.first if kinds.first && kinds.uniq.size == 1
     end
     seen = {}
     Array(ctx.constant_sites).each do |site|
@@ -619,6 +643,9 @@ module TypeFacts
         elsif producer == 'literal:Numeric'
           row['type'] = 'Numeric'
           row['source'] = 'inferred:literal'
+        elsif freeze_self[name]
+          row['type'] = freeze_self[name]
+          row['source'] = 'inferred:freeze-self'
         elsif ranges.key?(bare)
           row['type'] = 'Integer'
           row['source'] = 'inferred:integer-range'
