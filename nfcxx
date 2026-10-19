@@ -555,10 +555,8 @@ case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc ;;   # for the .c inputs
-  # A caller's NFCXX_CC wins: scripts/macos-cxx-link.sh sets cross-macos-cc.sh (clang for arm64-apple-darwin) for the
-  # prelinker's instances, which QBE's spiller cannot compile (json's vector<uint8_t> instance asserts "dead reg").
   qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=${NFCXX_CC:-$root/scripts/qbe-cc} ;;
+       export NFCXX_CC=$root/scripts/qbe-cc ;;
   gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
