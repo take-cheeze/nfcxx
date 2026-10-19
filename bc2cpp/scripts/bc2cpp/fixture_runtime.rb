@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-# Shared by the bc2cpp checks that compile a fixture with bc2cpp.rb and run it
-# against a real mruby: generation (in the wio closed world: bc2cpp is closed-world only, ADR 0466), the C++ driver that
+# Shared by bc2cpp registry fixtures and checks that compile with bc2cpp.rb
+# and run against a real mruby: generation (in the wio closed world: bc2cpp is closed-world only, ADR 0466), the C++ driver that
 # registers the compiled methods over the interpreted ones, and the run.
 #
 # Two mruby builds are used, both optional (a check prints SKIP without them):
@@ -139,6 +139,21 @@ module Bc2cppFixtureRuntime
 
     File.write(File.join(dir, 'fixture_gen.cpp'), code)
     [code, err]
+  end
+
+  # Keep each installer/refusal world separate; callers supply their own settle policy.
+  def registry_snapshot(source)
+    require_relative '../../tools/bc2cpp/bc2cpp'
+
+    Dir.mktmpdir('bc2cpp-registry') do |dir|
+      path = File.join(dir, 'fixture.rb')
+      File.write(path, source)
+      ireps, root = compile_ireps(path, 'registry_fixture', dir)
+      registry = build_registry(ireps, root)[0]
+      kept, dropped = yield registry, ireps
+      installed = CodeGen.new(ireps, registry, {}).send(:symbol_installed_names)
+      [registry, ireps, kept, dropped, installed]
+    end
   end
 
   # The outside-world sources a closed-world run scans before its own `native` ones (generate's NATIVE_SRCS).

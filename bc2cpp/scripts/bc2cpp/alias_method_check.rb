@@ -39,14 +39,8 @@ runtime = Bc2cppFixtureRuntime
 
 # [registry after settle, ireps, kept, dropped, CodeGen#symbol_installed_names] for +source+.
 registry_of = lambda do |source, closed: true, method_trusted: true|
-  Dir.mktmpdir do |dir|
-    path = File.join(dir, 'al.rb')
-    File.write(path, source)
-    ireps, root = compile_ireps(path, 'al_fixture', dir)
-    registry = build_registry(ireps, root)[0]
-    kept, dropped = AliasSites.settle(registry, ireps, closed: closed, method_trusted: method_trusted)
-    installed = CodeGen.new(ireps, registry, {}).send(:symbol_installed_names)
-    [registry, ireps, kept, dropped, installed]
+  runtime.registry_snapshot(source) do |registry, ireps|
+    AliasSites.settle(registry, ireps, closed: closed, method_trusted: method_trusted)
   end
 end
 alias_of = ->(registry, name) { registry.fetch(name, []).select { |d| d.installer == :alias } }
