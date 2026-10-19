@@ -546,7 +546,7 @@ module TypeFacts
     pools = ctx.gen.instance_variable_get(:@class_const_pools) || {}
     ints = ctx.integer_constants || Set.new
     sums = DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
-                                             array_sum_safe?(ctx))
+                                             array_sum_safe?(ctx), range_safe: ctx.gen.range_to_a_safe?)
     seen = {}
     Array(ctx.constant_sites).each do |site|
       name = site[:name].to_s

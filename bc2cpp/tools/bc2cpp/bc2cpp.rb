@@ -589,7 +589,8 @@ if $PROGRAM_NAME == __FILE__
     declared_constants = DeclaredConstants.check(
       DeclaredConstants.load(sig_loaded.files, sig_root, registry.values.flatten.map(&:owner).to_set),
       ireps, registry, constant_assignment_sites, integer_constants, outside_bound, container_constants, sig_root,
-      plus_safe: DeclaredConstants.array_sum_safe?(registry, superclass_of, prepended_modules, unknown_mixins)
+      plus_safe: DeclaredConstants.array_sum_safe?(registry, superclass_of, prepended_modules, unknown_mixins),
+      range_safe: DeclaredConstants.range_to_a_safe?(registry, included_modules, prepended_modules, unknown_mixins)
     )
     integer_constants |= declared_constants.integer_names
     declared_constants.containers.each { |name, klass| container_constants[name] ||= klass }

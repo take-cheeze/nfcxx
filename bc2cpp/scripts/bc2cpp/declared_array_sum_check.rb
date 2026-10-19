@@ -32,15 +32,17 @@ run = lambda do |source, sig|
     File.write(rb, source)
     File.write(rbs, sig)
     ireps, root = compile_ireps([rb], 'declared_array_sum', dir)
-    registry, superclass_of, container_constants, _included, prepended, unknown, _structs, _decls, _walked, _ivars,
+    registry, superclass_of, container_constants, included, prepended, unknown, _structs, _decls, _walked, _ivars,
       sites, = build_registry(ireps, root)
     # The mruby core definitions bc2cpp.rb adds from NATIVE_SRCS: without them no `+` or `freeze` is the core one.
     %w[+ freeze].each { |name| registry[name] << MethodDef.new(name: name, owner: '<native>', irep: nil, visibility: :public) }
-    plus_safe =DeclaredConstants.array_sum_safe?(registry, superclass_of, prepended, unknown)
+    plus_safe = DeclaredConstants.array_sum_safe?(registry, superclass_of, prepended, unknown)
+    range_safe = DeclaredConstants.range_to_a_safe?(registry, included, prepended, unknown)
     entries = DeclaredConstants.load([rbs], dir, registry.values.flatten.map(&:owner).to_set)
     result = DeclaredConstants.check(entries, ireps, registry, sites, Set.new, Set.new, container_constants, dir,
-                                     plus_safe: plus_safe)
-    rows = DeclaredConstants.array_sum_names(ireps, sites, registry, container_constants, plus_safe)
+                                     plus_safe: plus_safe, range_safe: range_safe)
+    rows = DeclaredConstants.array_sum_names(ireps, sites, registry, container_constants, plus_safe,
+                                             range_safe: range_safe)
     {
       errors: result.diagnostics.select { |d| d[:severity] == 'error' }.map { |d| d[:message] },
       report: result.report.join("\n"),
@@ -90,6 +92,18 @@ mixed = run.call("A = [1]\nB = 2\nX = (A + B).freeze\n", sig)
 check.call('an Array plus an Integer fails the declared Array check',
            mixed[:errors].any? { |m| m.include?('the assigned value is not a proven Array') })
 check.call('the rows do not type it as an array sum either', !mixed[:rows_sum])
+
+# Range#to_a operands (range_to_a_source?, withheld unless range_to_a_safe?): the operand is an inline literal
+# `(lo..hi).to_a`, not a constant bound to one (the proof does not follow constants). The declared check and the rows agree.
+puts '== Range#to_a operands'
+range = run.call("X = (('a'..'c').to_a + (1..2).to_a).freeze\n", sig)
+check.call('a sum of two inline literal Range#to_a passes the declared Array check', range[:errors].empty?)
+check.call('the rows type it as an array sum too (same proof)', range[:rows_sum])
+
+redefined = run.call("class Range\n  def to_a\n    1\n  end\nend\nX = (('a'..'c').to_a + [1]).freeze\n", sig)
+check.call('a program `class Range; def to_a` fails the declared Array check',
+           redefined[:errors].any? { |m| m.include?('the assigned value is not a proven Array') })
+check.call('the rows do not type it as an array sum either', !redefined[:rows_sum])
 
 puts "#{failures.empty? ? 'PASS' : 'FAIL'} declared_array_sum_check: #{failures.size} failure(s)"
 exit(failures.empty? ? 0 : 1)

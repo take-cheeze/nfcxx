@@ -364,6 +364,14 @@ class CodeGen
                                                                    @unknown_mixins)
   end
 
+  # DeclaredConstants.range_to_a_safe? (the predicate lives there so the declared check can read it too).
+  def range_to_a_safe?
+    return @range_to_a_safe if defined?(@range_to_a_safe)
+
+    @range_to_a_safe = DeclaredConstants.range_to_a_safe?(@registry, @included_modules, @prepended_modules,
+                                                          @unknown_mixins)
+  end
+
   # The writer at `w` is a reaching definition already; every deeper hop must dominate (ADR 0198).
   def declared_hop_dominance(ir, w)
     ->(w_idx, use_idx, hop) { (w_idx == w && use_idx == w + 1) || return_write_dominates?(ir, w_idx, use_idx, hop) }
