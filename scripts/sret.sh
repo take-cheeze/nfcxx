@@ -25,7 +25,7 @@ else
   esac
 fi
 dir=$root/build/sret; [ "$cross" = 1 ] && dir=$root/build/sret-cross
-out=$dir/sret.o; [ "$cross" = 1 ] && out=$dir/sret-macos.o
+out=$dir/sret.o; [ "$cross" = 1 ] && out=$dir/sret-macos.a
 if [ ! -f "$out" ] || [ "$list" -nt "$out" ] || [ "$0" -nt "$out" ]; then
   mkdir -p "$dir"
   tmp=$(mktemp -d "$dir/.build.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
@@ -47,24 +47,34 @@ if [ ! -f "$out" ] || [ "$list" -nt "$out" ] || [ "$0" -nt "$out" ]; then
   for n in $names; do
     if ! check "$n"; then echo "sret: $n is not exported by its library ($exports)" >&2; exit 1; fi
     thunk=__nfcxx_sret_$n
+    one=$tmp/one.$thunk.s
     {
+      printf '\t.text\n'
       printf '\t.globl\t%s%s\n' "$prefix" "$thunk"
       [ -n "$prefix" ] || printf '\t.type\t%s%s,%%function\n' "$prefix" "$thunk"
       printf '\t.p2align\t2\n'
       printf '%s%s:\n' "$prefix" "$thunk"
       printf '\tmov\tx8, x0\n\tmov\tx0, x1\n\tmov\tx1, x2\n\tmov\tx2, x3\n\tmov\tx3, x4\n\tmov\tx4, x5\n\tmov\tx5, x6\n\tmov\tx6, x7\n'
       printf '\tb\t%s%s\n' "$prefix" "$n"
-    } >> "$tmp/thunks.s"
+    } > "$one"
+    cat "$one" >> "$tmp/thunks.s"
+    if [ "$cross" = 1 ]; then
+      llvm-mc -triple=arm64-apple-darwin -filetype=obj -o "$tmp/$thunk.o" "$one"
+      llvm-ar rcs "$tmp/sret.a" "$tmp/$thunk.o"
+    fi
     # extended regular expressions (sed -E, both GNU and BSD): the identifier after a non-identifier character or at a line start
     # (only the leading character is matched, so neighbouring occurrences do not overlap)
     echo "s/(^|[^A-Za-z0-9_])$n/\\1$thunk/g" >> "$tmp/rename.sed"
   done
   if [ "$cross" = 1 ]; then
-    llvm-mc -triple=arm64-apple-darwin -filetype=obj -o "$tmp/sret.o" "$tmp/thunks.s"
+    # an archive: the linker pulls only the thunks the program calls (the others name library functions the stub need not list)
+    : > "$tmp/sret.a.check"; [ -f "$tmp/sret.a" ] || llvm-ar rcs "$tmp/sret.a"
+    mv -f "$tmp/rename.sed" "$dir/rename.sed"
+    mv -f "$tmp/sret.a" "$out"
   else
     cc -c -o "$tmp/sret.o" "$tmp/thunks.s"
+    mv -f "$tmp/rename.sed" "$dir/rename.sed"
+    mv -f "$tmp/sret.o" "$out"
   fi
-  mv -f "$tmp/rename.sed" "$dir/rename.sed"
-  mv -f "$tmp/sret.o" "$out"
 fi
 printf '%s\n' "$out"
