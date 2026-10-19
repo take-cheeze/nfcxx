@@ -136,7 +136,8 @@ class cl_rt {
       invocations *= (uint64_t)n * l[d];
       groups *= n;
     }
-    uint64_t stride = (uint64_t(lmem) + 1024 + 15) & ~uint64_t(15);
+    // the group's local region: the user's local memory, the 1024-byte scratch tail, then the work-group statics (manifest L)
+    uint64_t stride = (uint64_t(lmem) + 1024 + static_local_ + 15) & ~uint64_t(15);
     // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
     // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd); the
     // dimensions above sd must be a single invocation, so the slab's invocations are contiguous in the emitter's linear
@@ -260,6 +261,8 @@ class cl_rt {
         size_t a = s.find('\t', 2);
         static_size_ = std::strtoull(s.c_str() + 2, nullptr, 10);
         hex = s.substr(a + 1);
+      } else if (s.size() > 2 && s[0] == 'L' && s[1] == '\t') {
+        static_local_ = std::strtoull(s.c_str() + 2, nullptr, 10);   // the work-group statics per group (absent: 0)
       } else if (s.size() > 2 && s[0] == 'R' && s[1] == '\t') {
         size_t a = s.find('\t', 2);
         relocs_.push_back({std::strtoull(s.c_str() + 2, nullptr, 10), std::strtoull(s.c_str() + a + 1, nullptr, 10)});
@@ -360,7 +363,7 @@ class cl_rt {
     }
     if (total > max_wg_)
       fail("a work-group of " + std::to_string(total) + " work-items; the device allows " + std::to_string(max_wg_) + " (device::get_info<max_work_group_size>)");
-    if (lmem + 1024 > local_mem_ && lmem > 0)
+    if (lmem + 1024 + static_local_ > local_mem_ && lmem > 0)
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
     // a module that uses sub-groups runs them 16 lanes wide (its SubgroupSize execution mode): whole sub-groups only
     if (subgroup_size_ && total % subgroup_size_ != 0)
@@ -435,6 +438,7 @@ class cl_rt {
   uint32_t stack_bytes_ = 0;
   uint32_t subgroup_size_ = 0;   // the sub-group size of the module's kernels (manifest line G), 0 when none uses sub-groups
   uint64_t static_size_ = 0, statics_ = 0;
+  uint64_t static_local_ = 0;   // the work-group static bytes per group (manifest L)
   std::string static_hex_;
   std::vector<std::pair<uint64_t, uint64_t>> relocs_;
 };

@@ -20,7 +20,7 @@ have_nfcxx=0
 [ -x "$root/build/edg/bin/eccp" ] && [ -x "$root/build/qbe/qbe" ] && have_nfcxx=1
 
 # ---- host path
-for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64; do
+for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fattn_shim fnptr_constexpr vec_array_init host_only_reach; do
   want="$t ok"
   if "$root/scripts/sycl-build.sh" --cpu "$t.cpp" -o "$out/$t.g++" > "$out/$t.log" 2>&1 && [ "$("$out/$t.g++" | tail -1)" = "$want" ]; then
     echo "host g++   $t: ok"
@@ -74,7 +74,7 @@ if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/
 if [ $cl_ok = 1 ]; then
   clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
   clprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fence; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class fence; do
     if ! clbuild $t; then echo "opencl    $t: FAIL (build)"; grep -v prelinker "$out/cl_$t.log" | head -3; fail=1; continue; fi
     "$out/cl_$t" > "$out/cl_$t.out" 2> "$out/cl_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "OpenCL runtime" "$out/cl_$t.err"; then clprobe=0; break; fi
@@ -86,6 +86,28 @@ if [ $cl_ok = 1 ]; then
     "$out/cl_trap_div" > /dev/null 2> "$out/cl_trap_div.err"; rc=$?
     if [ $rc = 71 ] && grep -q "division by zero" "$out/cl_trap_div.err"; then echo "opencl    trap_div: trapped (exit 71)"; else echo "opencl    trap_div: FAIL (exit $rc)"; cat "$out/cl_trap_div.err"; fail=1; fi
   else echo "opencl    trap_div: FAIL (build)"; fail=1; fi
+  # the barrier scopes in the module of sg_barrier_scope (built above): group_barrier(sub_group) is
+  # OpControlBarrier(Subgroup, Subgroup, ...), group_barrier(group) keeps OpControlBarrier(Workgroup, Workgroup, ...)
+  if [ -s "$out/cl_sg_barrier_scope.cl.spv" ] && command -v spirv-dis >/dev/null; then
+    spirv-dis "$out/cl_sg_barrier_scope.cl.spv" -o "$out/cl_sg_barrier_scope.dis"
+    sgb=$(grep -cE 'OpControlBarrier %uint_3 %uint_3 ' "$out/cl_sg_barrier_scope.dis"); wgb=$(grep -cE 'OpControlBarrier %uint_2 %uint_2 ' "$out/cl_sg_barrier_scope.dis")
+    if [ "$sgb" = 1 ] && [ "$wgb" = 1 ]; then echo "opencl    sg_barrier_scope module: Subgroup and Workgroup scopes ok"
+    else echo "opencl    sg_barrier_scope module: FAIL (Subgroup barriers $sgb, Workgroup barriers $wgb; want 1 and 1)"; fail=1; fi
+  else echo "opencl    sg_barrier_scope module: FAIL (no module or no spirv-dis)"; fail=1; fi
+  # the storage class of the work-group statics: the static-using module has a Workgroup-storage variable and its accesses go
+  # to it (wgs_storage_class); a module without statics (vecadd) has none
+  if [ -s "$out/cl_wgs_storage_class.cl.spv" ] && command -v spirv-dis >/dev/null; then
+    spirv-dis "$out/cl_wgs_storage_class.cl.spv" -o "$out/cl_wgs_storage_class.dis"
+    wgv=$(grep -cE 'OpVariable %_ptr_Workgroup_[^ ]+ Workgroup$' "$out/cl_wgs_storage_class.dis"); wga=$(grep -c 'OpAccessChain %_ptr_Workgroup_uint' "$out/cl_wgs_storage_class.dis")
+    if [ "$wgv" -ge 1 ] && [ "$wga" -ge 1 ]; then echo "opencl    wgs_storage_class module: $wgv Workgroup variable(s), $wga accesses ok"
+    else echo "opencl    wgs_storage_class module: FAIL (Workgroup variables $wgv, accesses $wga)"; fail=1; fi
+  else echo "opencl    wgs_storage_class module: FAIL (no module or no spirv-dis)"; fail=1; fi
+  if [ -s "$out/cl_vecadd.cl.spv" ] && command -v spirv-dis >/dev/null; then
+    spirv-dis "$out/cl_vecadd.cl.spv" -o "$out/cl_vecadd.dis"
+    wgv0=$(grep -cE 'OpVariable %_ptr_Workgroup_[^ ]+ Workgroup$' "$out/cl_vecadd.dis")
+    if [ "$wgv0" = 0 ]; then echo "opencl    vecadd module (no statics): no Workgroup variable ok"
+    else echo "opencl    vecadd module (no statics): FAIL ($wgv0 Workgroup variables)"; fail=1; fi
+  fi
 else
   echo "SKIP: opencl: needs spirv-val, the OpenCL headers (OPENCL_INCLUDE) and libOpenCL.so.1"
 fi
@@ -115,7 +137,7 @@ if command -v spirv-val >/dev/null && [ -f /usr/include/level_zero/ze_api.h ] &&
 if [ $lz_ok = 1 ]; then
   lzbuild() { "$root/scripts/sycl-build.sh" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
   lzprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class; do
     if ! lzbuild $t; then echo "level-zero $t: FAIL (build)"; grep -v prelinker "$out/lz_$t.log" | head -3; fail=1; continue; fi
     "$out/lz_$t" > "$out/lz_$t.out" 2> "$out/lz_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "Level Zero runtime" "$out/lz_$t.err"; then lzprobe=0; break; fi
@@ -153,4 +175,10 @@ else echo "webgpu     trap_div: FAIL (build)"; tail -3 "$out/trap_div.log"; fail
 # a refusal: double (WebGPU core has no f64; Vulkan has it, see double.cpp)
 rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_double.cpp -o "$out/refuse_double" > "$out/refuse.log" 2>&1 || rc=$?
 if [ $rc = 3 ] && grep -q "double" "$out/refuse.log"; then echo "webgpu     refuse_double: refused (exit 3)"; else echo "webgpu     refuse_double: FAIL (exit $rc)"; cat "$out/refuse.log"; fail=1; fi
+# the reproducer of the constexpr function-pointer local (from a template selector) called in a kernel body that a
+# function-pointer template argument reaches (fattn-vec.hpp's vec_dot_KQ): the device pass used to refuse the address of the
+# selected function ("refused: address of function"); the device emitters fold the stored address into the direct call, so
+# the device compile must now succeed (its run is fnptr_constexpr, above).
+rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_fnptr_constexpr.cpp -o "$out/fnptr_repro" > "$out/fnptr_repro.log" 2>&1 || rc=$?
+if [ $rc = 0 ]; then echo "webgpu     refuse_fnptr_constexpr: device pass accepted"; else echo "webgpu     refuse_fnptr_constexpr: FAIL (exit $rc)"; cat "$out/fnptr_repro.log"; fail=1; fi
 exit $fail

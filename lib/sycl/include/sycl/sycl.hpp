@@ -51,6 +51,7 @@ void *__nfcxx_sycl_closure(void);     // the closure object, copied by the host
 void *__nfcxx_sycl_local_base(void);  // the work-group memory (local_accessor storage)
 void *__nfcxx_sycl_scratch(void);     // 256 words of work-group memory kept for the group algorithms
 void __nfcxx_sycl_barrier(void);
+void __nfcxx_sycl_sg_barrier(void);   // the sub-group barrier: Subgroup scope in the OpenCL module (pathb-spirv-emit.rb)
 // memory fence (OpMemoryBarrier in the OpenCL module): order is a memory_order value and scope a memory_scope value, both
 // literals at the call (a non-literal is refused by the emitter)
 void __nfcxx_sycl_fence(int order, int scope);
@@ -482,7 +483,7 @@ inline bool all_of_group(sub_group, bool p) {
 inline bool none_of_group(sub_group sg, bool p) { return !any_of_group(sg, p); }
 inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {
 #ifdef __NFCXX_SYCL_DEVICE__
-  __nfcxx_sycl_barrier();
+  __nfcxx_sycl_sg_barrier();
 #else
   detail::barrier_on_host();
 #endif
@@ -634,6 +635,14 @@ void backend_memset(void *p, int v, unsigned long n);
 bool backend_is_usm(const void *);
 void backend_dispatch(const char *key, const void *closure, unsigned closure_bytes, const unsigned *global,
                       const unsigned *local, unsigned local_mem_bytes, buffer_use *uses, int nuses);
+// The launch triple reaches the runtimes reversed: the device's dimension 0 (the x of get_local_id(x), the one a sub-group
+// is formed along) is the last SYCL dimension, the one that varies fastest in SYCL's linear ids. Unused dimensions have
+// size 1, so reversing all three is exact for every D. The device-side ids are mapped to match (device_lid and friends).
+inline void gpu_dispatch(const char *key, const void *closure, unsigned closure_bytes, const unsigned *g, const unsigned *l,
+                         unsigned local_mem_bytes, buffer_use *uses, int nuses) {
+  const unsigned gr[3] = {g[2], g[1], g[0]}, lr[3] = {l[2], l[1], l[0]};
+  backend_dispatch(key, closure, closure_bytes, gr, lr, local_mem_bytes, uses, nuses);
+}
 void backend_wait();
 
 }  // namespace detail
@@ -1224,25 +1233,26 @@ namespace detail {
 
 #ifdef __NFCXX_SYCL_DEVICE__
 template <int D> inline range<D> device_global_range();
-template <> inline range<1> device_global_range<1>() { return range<1>(__nfcxx_sycl_grange_x()); }
-template <> inline range<2> device_global_range<2>() { return range<2>(__nfcxx_sycl_grange_x(), __nfcxx_sycl_grange_y()); }
-template <> inline range<3> device_global_range<3>() { return range<3>(__nfcxx_sycl_grange_x(), __nfcxx_sycl_grange_y(), __nfcxx_sycl_grange_z()); }
+// The device's x is the last SYCL dimension (see gpu_dispatch): SYCL dimension d is the device's component 2 - d.
+template <> inline range<1> device_global_range<1>() { return range<1>(__nfcxx_sycl_grange_z()); }
+template <> inline range<2> device_global_range<2>() { return range<2>(__nfcxx_sycl_grange_z(), __nfcxx_sycl_grange_y()); }
+template <> inline range<3> device_global_range<3>() { return range<3>(__nfcxx_sycl_grange_z(), __nfcxx_sycl_grange_y(), __nfcxx_sycl_grange_x()); }
 template <int D> inline range<D> device_local_range();
-template <> inline range<1> device_local_range<1>() { return range<1>(__nfcxx_sycl_lrange_x()); }
-template <> inline range<2> device_local_range<2>() { return range<2>(__nfcxx_sycl_lrange_x(), __nfcxx_sycl_lrange_y()); }
-template <> inline range<3> device_local_range<3>() { return range<3>(__nfcxx_sycl_lrange_x(), __nfcxx_sycl_lrange_y(), __nfcxx_sycl_lrange_z()); }
+template <> inline range<1> device_local_range<1>() { return range<1>(__nfcxx_sycl_lrange_z()); }
+template <> inline range<2> device_local_range<2>() { return range<2>(__nfcxx_sycl_lrange_z(), __nfcxx_sycl_lrange_y()); }
+template <> inline range<3> device_local_range<3>() { return range<3>(__nfcxx_sycl_lrange_z(), __nfcxx_sycl_lrange_y(), __nfcxx_sycl_lrange_x()); }
 template <int D> inline id<D> device_gid();
-template <> inline id<1> device_gid<1>() { return id<1>(__nfcxx_sycl_gid_x()); }
-template <> inline id<2> device_gid<2>() { return id<2>(__nfcxx_sycl_gid_x(), __nfcxx_sycl_gid_y()); }
-template <> inline id<3> device_gid<3>() { return id<3>(__nfcxx_sycl_gid_x(), __nfcxx_sycl_gid_y(), __nfcxx_sycl_gid_z()); }
+template <> inline id<1> device_gid<1>() { return id<1>(__nfcxx_sycl_gid_z()); }
+template <> inline id<2> device_gid<2>() { return id<2>(__nfcxx_sycl_gid_z(), __nfcxx_sycl_gid_y()); }
+template <> inline id<3> device_gid<3>() { return id<3>(__nfcxx_sycl_gid_z(), __nfcxx_sycl_gid_y(), __nfcxx_sycl_gid_x()); }
 template <int D> inline id<D> device_lid();
-template <> inline id<1> device_lid<1>() { return id<1>(__nfcxx_sycl_lid_x()); }
-template <> inline id<2> device_lid<2>() { return id<2>(__nfcxx_sycl_lid_x(), __nfcxx_sycl_lid_y()); }
-template <> inline id<3> device_lid<3>() { return id<3>(__nfcxx_sycl_lid_x(), __nfcxx_sycl_lid_y(), __nfcxx_sycl_lid_z()); }
+template <> inline id<1> device_lid<1>() { return id<1>(__nfcxx_sycl_lid_z()); }
+template <> inline id<2> device_lid<2>() { return id<2>(__nfcxx_sycl_lid_z(), __nfcxx_sycl_lid_y()); }
+template <> inline id<3> device_lid<3>() { return id<3>(__nfcxx_sycl_lid_z(), __nfcxx_sycl_lid_y(), __nfcxx_sycl_lid_x()); }
 template <int D> inline id<D> device_group();
-template <> inline id<1> device_group<1>() { return id<1>(__nfcxx_sycl_group_x()); }
-template <> inline id<2> device_group<2>() { return id<2>(__nfcxx_sycl_group_x(), __nfcxx_sycl_group_y()); }
-template <> inline id<3> device_group<3>() { return id<3>(__nfcxx_sycl_group_x(), __nfcxx_sycl_group_y(), __nfcxx_sycl_group_z()); }
+template <> inline id<1> device_group<1>() { return id<1>(__nfcxx_sycl_group_z()); }
+template <> inline id<2> device_group<2>() { return id<2>(__nfcxx_sycl_group_z(), __nfcxx_sycl_group_y()); }
+template <> inline id<3> device_group<3>() { return id<3>(__nfcxx_sycl_group_z(), __nfcxx_sycl_group_y(), __nfcxx_sycl_group_x()); }
 
 // Kernel entries. The WGSL emitter turns each function whose name contains __nfcxx_sycl_entry_ into a compute entry point.
 // The closure's type, found from the cast of __nfcxx_sycl_closure(), names the kernel for the host.
@@ -1275,7 +1285,7 @@ template <class Name, int D, class F> void handler::parallel_for(range<D> r, F f
 #elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
   for (int d = 0; d < D; d++) { g[d] = (unsigned)r[d]; l[d] = detail::default_local<D>(d); }
-  detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
+  detail::gpu_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
 #else
   range<D> rr = r;
   size_t n = rr.size();
@@ -1295,7 +1305,7 @@ template <class Name, int D, class F> void handler::parallel_for(nd_range<D> r, 
 #elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
   for (int d = 0; d < D; d++) { g[d] = (unsigned)r.get_global_range()[d]; l[d] = (unsigned)r.get_local_range()[d]; }
-  detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
+  detail::gpu_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
 #else
   // The groups run one after another; the work-items of a group are fibers, so barrier() and the group algorithms work.
   range<D> gr = r.get_global_range(), lr = r.get_local_range();
@@ -1329,7 +1339,7 @@ template <class Name, class F> void handler::single_task(F f) {
   detail::__nfcxx_sycl_entry_single<F>();
 #elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
-  detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
+  detail::gpu_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
 #else
   f();
 #endif

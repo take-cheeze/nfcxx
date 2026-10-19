@@ -267,6 +267,163 @@ def collect_calls(x, acc)
 end
 
 # Names of the slots a form takes the address of in a way other than the address of a load or a store.
+# A function-pointer local whose every store is the address of one function (a constexpr pointer, e.g. a template selector's
+# result: the front end stores it into a slot, then calls it through a load) is folded: the stores are dropped and each call
+# through a load of the slot calls that function directly (the same direct call the front end emits for a known callee).
+# Any other use of the slot (a load used as a value, a store of another address, the slot's address) leaves it alone.
+# The front end default-initialises an array of a class with a non-trivial constructor by one runtime helper call,
+# __cxa_vec_ctor(array, count, size, constructor address, null). The device pass has no runtime helper and no constructor
+# address, so the call is unrolled here into one direct call of the constructor per element (the element address is the
+# array plus i * size). The let that holds the constructor's address is dropped when that address was used only by these
+# calls. Any other use of the address stays and is refused as before.
+def cxa_count(x, name)
+  return (x == name ? 1 : 0) if x.is_a?(String)
+  return 0 unless x.is_a?(Array)
+  x.inject(0) { |a, y| a + cxa_count(y, name) }
+end
+
+def cxa_ctor_refs(x, name)
+  return 0 unless x.is_a?(Array)
+  n = 0
+  if head_of(x) == "call" && x[2].is_a?(IRSym) && x[2].name == "__cxa_vec_ctor" && x[6] == name
+    n += 1
+  end
+  x.each { |y| n += cxa_ctor_refs(y, name) }
+  n
+end
+
+def cxa_resolve(a, regs)
+  return a.name if a.is_a?(IRSym) && a.sig == "&"
+  return regs[a] if a.is_a?(String) && regs.key?(a)
+  nil
+end
+
+def expand_cxa_vec_ctor(body)
+  counter = [0]
+  expand = lambda do |x, regs|
+    out = []
+    x.each do |c|
+      if head_of(c) == "let" && c.length == 4 && c[3].is_a?(Array) && head_of(c[3]) == "bitcast" &&
+         c[3][2].is_a?(IRSym) && c[3][2].sig == "&"
+        regs[c[1]] = c[3][2].name
+        # dropped when its address is used only as a constructor argument
+        next if cxa_count(body, c[1]) == 1 + cxa_ctor_refs(body, c[1])
+        out << c
+        next
+      end
+      if head_of(c) == "eval" && c[1].is_a?(Array) && head_of(c[1]) == "call" && c[1][2].is_a?(IRSym) &&
+         c[1][2].sig == "&" && c[1][2].name == "__cxa_vec_ctor"
+        call = c[1]
+        ctor = cxa_resolve(call[6], regs)
+        raise Refused, "__cxa_vec_ctor with an unknown constructor" if ctor.nil?
+        raise Refused, "__cxa_vec_ctor with a destructor" unless head_of(call[7]) == "null"
+        raise Refused, "__cxa_vec_ctor with a non-constant count" unless head_of(call[4]) == "const" && call[3].is_a?(String)
+        n = as_int(call[4][2])
+        size = call[5][2]
+        n.times do |i|
+          counter[0] += 1
+          r = "%cxa#{counter[0]}"
+          out << ["let", r, ["ptr", "void"], ["index", call[3], ["const", "unsigned_long", i.to_s], size]]
+          out << ["eval", ["call", "void", IRSym.new("&", ctor), r]]
+        end
+        next
+      end
+      expand.call(c, regs) if c.is_a?(Array)
+      out << c
+    end
+    x.replace(out)
+  end
+  expand.call(body, {})
+end
+
+# A work-group static (syclex::work_group_static<T>, lib/sycl ext/oneapi/work_group_static.hpp) is one buffer per work-group,
+# not one per work-item. Its object (a kernel-body slot whose type names work_group_static) is placed in the group's static
+# local region, after the 1024-byte scratch tail of the group's local memory: the host reserves wgs_total bytes more per
+# work-group (manifest line L; rt_opencl.hpp, rt_level_zero.hpp). Offsets are unique across the module; the map is keyed by
+# [function name, slot name] and wgs_layout returns [map, total bytes (16-aligned)].
+def mentions_wgs?(t)
+  return t.to_s.include?("work_group_static") if t.is_a?(String) || t.is_a?(IRStr)   # quoted names are IRStr
+  return false unless t.is_a?(Array)
+  t.any? { |y| mentions_wgs?(y) }
+end
+
+def wgs_layout(defs)
+  map = {}
+  total = 0
+  defs.each do |fname, form|
+    next unless form.is_a?(Array)
+    form.each do |f|
+      # the object itself: a slot of the struct type (not a pointer to it, as the constructors' parameters are)
+      next unless head_of(f) == "slot" && f.length == 5 && head_of(f[2]) == "struct" && mentions_wgs?(f[2])
+      size = as_int(f[3])
+      align = [as_int(f[4]), 16].max
+      total = (total + align - 1) / align * align
+      map[[fname, f[1].to_s]] = total
+      total += size
+    end
+  end
+  [map, (total + 15) / 16 * 16]
+end
+
+def fnptr_slot?(t)
+  t = t[1] if head_of(t) == "const"
+  head_of(t) == "ptr" && t.length > 1 && head_of(t[1]) == "fn"
+end
+
+def fnptr_scan(x, st)
+  if x.is_a?(IRSym)
+    st[:bad][x.name] = true if x.sig == "$" && st[:names][x.name]
+    return
+  end
+  return unless x.is_a?(Array)
+  h = head_of(x)
+  if h == "store" && x[2].is_a?(IRSym) && x[2].sig == "$" && st[:names][x[2].name]
+    n = x[2].name
+    v = x[3]
+    if v.is_a?(IRSym) && v.sig == "&" && (st[:target][n].nil? || st[:target][n] == v.name)
+      st[:target][n] = v.name
+      st[:drop][x.object_id] = n
+    else
+      st[:bad][n] = true
+    end
+    return
+  end
+  if h == "call" && x[2].is_a?(Array) && head_of(x[2]) == "load" && x[2][2].is_a?(IRSym) && x[2][2].sig == "$" &&
+     st[:names][x[2][2].name]
+    st[:calls][x[2].object_id] = x[2][2].name
+    x.drop(3).each { |y| fnptr_scan(y, st) }
+    return
+  end
+  if h == "load" && x[2].is_a?(IRSym) && x[2].sig == "$" && st[:names][x[2].name]
+    st[:bad][x[2].name] = true
+    return
+  end
+  x.each { |y| fnptr_scan(y, st) }
+end
+
+def fnptr_rewrite(x, st)
+  return unless x.is_a?(Array)
+  x.reject! { |c| c.is_a?(Array) && st[:drop].key?(c.object_id) }
+  if head_of(x) == "call" && x[2].is_a?(Array) && st[:calls].key?(x[2].object_id)
+    x[2] = IRSym.new("&", st[:target][st[:calls][x[2].object_id]])
+  end
+  x.each { |c| fnptr_rewrite(c, st) }
+end
+
+def fold_fnptr_slots(body, slots)
+  st = { names: {}, target: {}, bad: {}, drop: {}, calls: {} }
+  slots.each { |f| st[:names][f[1].to_s] = true if fnptr_slot?(f[2]) }
+  return if st[:names].empty?
+  body.each { |s| fnptr_scan(s, st) }
+  ok = {}
+  st[:names].each_key { |n| ok[n] = true if st[:target][n] && !st[:bad][n] }
+  return if ok.empty?
+  st[:drop].delete_if { |_, n| !ok[n] }
+  st[:calls].delete_if { |_, n| !ok[n] }
+  body.reject! { |s| s.is_a?(Array) && st[:drop].key?(s.object_id) }
+  body.each { |s| fnptr_rewrite(s, st) }
+end
+
 def scan_slots(x, direct, escaped)
   if x.is_a?(IRSym)
     escaped[x.name] = true if x.sig == "$"
@@ -451,9 +608,11 @@ SC_CROSSWG = 5
 SC_PSB = 5349
 SCOPE_DEVICE = 1
 SCOPE_WORKGROUP = 2
+SCOPE_SUBGROUP = 3
 SEM_RELAXED = 0
 SEM_BARRIER = 0x8 | 0x40 | 0x100 | 0x200   # AcquireRelease | UniformMemory | WorkgroupMemory | CrossWorkgroupMemory
 SEM_BARRIER_KERNEL = 0x8 | 0x100 | 0x200   # the same without UniformMemory (which needs the Shader capability)
+SEM_SG_BARRIER_KERNEL = 0x8 | 0x80 | 0x100 | 0x200   # AcquireRelease | SubgroupMemory | WorkgroupMemory | CrossWorkgroupMemory
 SUBGROUP_SIZE = 16   # the fixed sub-group size of the OpenCL module (lib/sycl: sub_group has 16 lanes)
 BUILTIN_WORKGROUP_ID = 26
 BUILTIN_LOCAL_INVOCATION_ID = 27
@@ -730,6 +889,17 @@ class Spv
     memo([:private, elem]) { var(SC_PRIVATE, t_ptr(SC_PRIVATE, elem)) }
   end
 
+  # an array type of len elements (OpTypeArray, the length a constant)
+  def t_array(elem, len)
+    memo([:array, elem, len]) { i = id; decl([28, i, elem, c_u32(len)]); i }
+  end
+
+  # the work-group static storage of a group: a module-scope Workgroup variable of `words` 32-bit words (the OpenCL local
+  # memory the static accesses of the clones go to, see SFn#wgs_access)
+  def wgs_var(words)
+    memo([:wgsvar, words]) { var(SC_WORKGROUP, t_ptr(SC_WORKGROUP, t_array(t_int(32), words))) }
+  end
+
   def add_entry(model, fid, name, iface, lsizes)
     @entries << [model, fid, name, iface, lsizes]
   end
@@ -772,7 +942,7 @@ end
 
 class SpvModule
   attr_reader :spv, :push, :gid, :lid, :wid, :sp, :dead, :kernel_cl
-  attr_accessor :stack_bytes, :fns, :defs, :subgroup_used
+  attr_accessor :stack_bytes, :fns, :fns_wgs, :defs, :subgroup_used, :wgs, :wgs_total, :wgs_var
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -790,8 +960,11 @@ class SpvModule
     # not valid in an OpenCL module (the validator wants a variable)
     spv.workgroup_size(@spec) unless kernel_cl
     @fns = {}
+    @fns_wgs = {}      # the clones of the functions that a work-group-static kernel reaches (see emit_module)
     @defs = {}
     @stack_bytes = 0
+    @wgs = {}          # [function name, slot name] => offset in the group's static local region (see wgs_layout)
+    @wgs_total = 0
   end
 
   def spec_size(i)
@@ -823,15 +996,17 @@ end
 class SFn
   attr_reader :name, :fid, :ptypes, :ret, :frame, :callees, :ftype, :param_ids, :code, :vars, :param_lines
 
-  def initialize(form, fid, mod)
+  def initialize(form, fid, mod, wgs_mode = false)
     @form = form
     @fid = fid
     @mod = mod
     @spv = mod.spv
+    @wgs_mode = wgs_mode   # a clone for a kernel that uses a work-group static: its memory accesses route (see mem_access)
     @name = form ? form[1].to_s : "wrapper"
     @ptypes = []
     @ret = nil
     @slots = {}          # memory slot name => byte offset in the frame
+    @wgs = {}            # work-group static slot name => offset in the group's static local region (wgs_layout)
     @locals = {}         # scalar slot name => [variable id, IR type]
     @frame = 0
     @body = []
@@ -927,12 +1102,17 @@ class SFn
         @body << f
       end
     end
+    fold_fnptr_slots(@body, slots)
     direct = {}
     escaped = {}
     @body.each { |s| scan_slots(s, direct, escaped) }
     off = 0
     slots.each do |f|
       sname = f[1].to_s
+      if @mod.wgs && @mod.wgs.key?([@name, sname])
+        @wgs[sname] = @mod.wgs[[@name, sname]]
+        next
+      end
       size = f.length == 5 ? as_int(f[3]) : 4
       align = f.length == 5 ? as_int(f[4]) : 4
       ty = scalar_form?(f[2]) ? parse_type(f[2]) : nil
@@ -1104,6 +1284,11 @@ class SFn
     return [@spv.c_u64(0), ["ptr"]] if h == "null"
     return operand(x[2]) if h == "sret" || h == "byval"
     if x.is_a?(IRSym) && x.sig == "$"
+      if @wgs.key?(x.name)
+        # a work-group static: the group's region after the scratch tail (one object per group)
+        lu = res(IADD, @spv.t_int(64), local_base, to_u64(push_load(:local_user, nil), ["int", 4, false, false]))
+        return [res(IADD, @spv.t_int(64), lu, @spv.c_u64(1024 + @wgs[x.name])), ["ptr"]]
+      end
       off = @slots[x.name]
       raise Refused, "address of the scalar slot #{x.name}" if off.nil? && @locals.key?(x.name)
       raise BadIR, "slot #{x.name} is not declared" if off.nil?
@@ -1280,7 +1465,7 @@ class SFn
     res(61, @spv.t_int(32), wp, 2, 4) # Aligned 4
   end
 
-  def mem_load(addr, t)
+  def heap_load(addr, t)
     if t[0] == "int" && (t[1] <= 2 || t[3])
       w = load_word(addr)
       sh = byte_shift(addr)
@@ -1296,13 +1481,121 @@ class SFn
     t[0] == "ptr" ? ptr_to_device(v) : v
   end
 
+  # ---- work-group statics (wgs_mode clones). The static region of the group is the Workgroup variable @mod.wgs_var; an access
+  # whose address lies in the region (sbase = the group's local base + the scratch tail, the length wgs_total) goes to the
+  # variable, any other to the heap path. Routing is by address, so every access to a static takes the same storage.
+  def mem_load(addr, t)
+    return heap_load(addr, t) unless @wgs_mode
+    raise Refused, "a work-group static access in #{@name} without the Workgroup variable" unless @mod.wgs_var
+    rel, inside = wgs_range(addr)
+    b_in, b_out, merge = new_label, new_label, new_label
+    ins([247, merge, 0])   # OpSelectionMerge
+    cond_branch(inside, b_in, b_out)
+    label(b_in)
+    vin = wgs_load_val(rel, t)
+    vin = ptr_to_device(vin) if t[0] == "ptr"
+    branch(merge)
+    label(b_out)
+    vout = heap_load(addr, t)
+    branch(merge)
+    label(merge)
+    res(245, sty(t), vin, b_in, vout, b_out)   # OpPhi
+  end
+
+  def mem_store(addr, t, v)
+    return heap_store(addr, t, v) unless @wgs_mode
+    raise Refused, "a work-group static access in #{@name} without the Workgroup variable" unless @mod.wgs_var
+    rel, inside = wgs_range(addr)
+    b_in, b_out, merge = new_label, new_label, new_label
+    ins([247, merge, 0])   # OpSelectionMerge
+    cond_branch(inside, b_in, b_out)
+    label(b_in)
+    wgs_store_val(rel, t, t[0] == "ptr" ? ptr_to_host(v) : v)
+    branch(merge)
+    label(b_out)
+    heap_store(addr, t, v)
+    branch(merge)
+    label(merge)
+  end
+
+  # whether addr lies in the group's static region: its offset rel (unsigned, below wgs_total) and the test
+  def wgs_range(addr)
+    t64 = @spv.t_int(64)
+    sbase = res(IADD, t64, local_base, to_u64(push_load(:local_user, nil), ["int", 4, false, false]))
+    sbase = res(IADD, t64, sbase, @spv.c_u64(1024))
+    rel = res(ISUB, t64, addr, sbase)
+    [rel, res(176, @spv.t_bool, rel, @spv.c_u64(@mod.wgs_total))]
+  end
+
+  # the pointer to the 32-bit word that holds the bytes at offset rel + 4 * word_off of the static region
+  def wgs_word(rel, word_off = 0)
+    t64 = @spv.t_int(64)
+    r = word_off == 0 ? rel : res(IADD, t64, rel, @spv.c_u64(4 * word_off))
+    widx = res(113, @spv.t_int(32), res(194, t64, r, @spv.c_u64(2)))
+    res(65, @spv.t_ptr(SC_WORKGROUP, @spv.t_int(32)), @mod.wgs_var, widx)
+  end
+
+  # the bytes an access of type t covers: 1 for bool, 8 for pointers
+  def wgs_bytes(t)
+    return 8 if t[0] == "ptr"
+    return 1 if t[0] == "int" && t[3]
+    t[1]
+  end
+
+  def wgs_load_val(rel, t)
+    t32, t64 = @spv.t_int(32), @spv.t_int(64)
+    n = wgs_bytes(t)
+    if n == 8
+      lo = res(113, t64, res(61, t32, wgs_word(rel, 0)))
+      hi = res(113, t64, res(61, t32, wgs_word(rel, 1)))
+      v = res(197, t64, lo, res(196, t64, hi, @spv.c_u64(32)))
+      return t[0] == "float" ? res(124, sty(t), v) : v
+    end
+    w = res(61, t32, wgs_word(rel))
+    if n == 4
+      return t[0] == "float" ? res(124, sty(t), w) : w
+    end
+    bits = n * 8
+    v = res(194, t32, w, byte_shift(rel))
+    v = res(199, t32, v, @spv.c_u32((1 << bits) - 1))
+    return res(171, @spv.t_bool, v, @spv.c_u32(0)) if t[0] == "int" && t[3]
+    canon(v, t)
+  end
+
+  def wgs_store_val(rel, t, v)
+    t32, t64 = @spv.t_int(32), @spv.t_int(64)
+    n = wgs_bytes(t)
+    if n == 8
+      u = t[0] == "float" ? res(124, t64, v) : v
+      ins([62, wgs_word(rel, 0), res(113, t32, u)])
+      ins([62, wgs_word(rel, 1), res(113, t32, res(194, t64, u, @spv.c_u64(32)))])
+      return
+    end
+    if n == 4
+      u = t[0] == "float" ? res(124, t32, v) : v
+      ins([62, wgs_word(rel), u])
+      return
+    end
+    # a sub-word store: the bits of the word outside the access are kept; the update is atomic, as the other items of the
+    # group may write the same word
+    bits = n * 8
+    mask = (1 << bits) - 1
+    vv = t[0] == "int" && t[3] ? bool_to_u32(v) : u32_of(v, t)
+    vv = res(199, t32, vv, @spv.c_u32(mask))
+    sh = byte_shift(rel)
+    wp = wgs_word(rel)
+    clear = res(200, t32, res(196, t32, @spv.c_u32(mask), sh))
+    ins([240, t32, @spv.id, wp, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SEM_RELAXED), clear])   # OpAtomicAnd
+    ins([241, t32, @spv.id, wp, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SEM_RELAXED), res(196, t32, vv, sh)])   # OpAtomicOr
+  end
+
   def res_load(p, rtype, align)
     i = @spv.id
     ins([61, rtype, i, p, 2, align])
     i
   end
 
-  def mem_store(addr, t, v)
+  def heap_store(addr, t, v)
     if t[0] == "int" && (t[1] <= 2 || t[3])
       bits = t[3] ? 8 : t[1] * 8
       mask = (1 << bits) - 1
@@ -1325,6 +1618,7 @@ class SFn
 
   # ---- the atomic compare-and-swap loop of a float atomic (WebGPU and Vulkan lack a float min/max)
   def float_atomic(p_addr, t, v, op)
+    raise Refused, "an atomic on memory in #{@name}, which may be a work-group static (not routed)" if @wgs_mode
     expected = var_decl(@spv.t_int(32))
     wp = res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), p_addr)
     ins([62, expected, res(61, @spv.t_int(32), wp, 2, 4)])
@@ -1655,6 +1949,15 @@ class SFn
     when "__nfcxx_sycl_barrier"
       ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(@mod.kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)])
       return nil
+    when "__nfcxx_sycl_sg_barrier"
+      # group_barrier(sub_group): in the OpenCL module a Subgroup-scope control barrier, as icpx emits it, so a sub-group
+      # that reaches it alone does not wait for the rest of the work-group. The Vulkan module keeps the work-group barrier.
+      if @mod.kernel_cl
+        ins([224, @spv.c_u32(SCOPE_SUBGROUP), @spv.c_u32(SCOPE_SUBGROUP), @spv.c_u32(SEM_SG_BARRIER_KERNEL)])
+      else
+        ins([224, @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SCOPE_WORKGROUP), @spv.c_u32(SEM_BARRIER)])
+      end
+      return nil
     when "__nfcxx_sycl_fence"
       # atomic_fence(order, scope) as OpMemoryBarrier (OpenCL's atomic_work_item_fence with a memory scope). The function is
       # emitted once for all callers, so order and scope are run-time values here (no constant folding across the call):
@@ -1764,7 +2067,7 @@ class SFn
       check_dead_after_call
       return nil
     end
-    callee_fn = @mod.fns[name]
+    callee_fn = @wgs_mode ? @mod.fns_wgs[name] : @mod.fns[name]
     raise Refused, "call of #{name}, which has no body in the device unit (a host function, or a declaration)" if callee_fn.nil?
     raise Refused, "call of #{name} with #{args.length} arguments, it takes #{callee_fn.ptypes.length}" if args.length != callee_fn.ptypes.length
     xs = args.map { |a| operand(a)[0] }
@@ -1781,6 +2084,7 @@ class SFn
   end
 
   def atomic_ptr(x)
+    raise Refused, "an atomic on memory in #{@name}, which may be a work-group static (not routed)" if @wgs_mode
     a, _ = operand(x)
     res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), a)
   end
@@ -2171,12 +2475,14 @@ def emit_module(src, kernel_cl = false)
   end
   entries = mod.defs.keys.select { |n| n.include?("__nfcxx_sycl_entry_") }
   return [nil, [], nil] if entries.empty?
+  # the array constructor calls of a reachable function are unrolled before its callees are taken (see visit)
   order = []
   state = {}
   visit = lambda do |name|
     next if state[name] == :done
     raise Refused, "recursive call of #{name}" if state[name] == :open
     state[name] = :open
+    expand_cxa_vec_ctor(mod.defs[name]) if mod.defs[name].is_a?(Array)
     callees = collect_calls(mod.defs[name], []).select { |c| mod.defs.key?(c) }.uniq
     callees.each { |c| visit.call(c) }
     state[name] = :done
@@ -2202,12 +2508,42 @@ def emit_module(src, kernel_cl = false)
   smod = SpvModule.new(spv, kernel_cl)
   smod.irmod = mod
   smod.defs = mod.defs
+  # the work-group statics live in the group's static local region (OpenCL-style modules; the Vulkan module keeps frames)
+  if kernel_cl
+    smod.wgs, smod.wgs_total = wgs_layout(mod.defs)
+    # the static storage: a Workgroup variable (OpenCL local memory) of the group's static bytes, when there are statics
+    smod.wgs_var = spv.wgs_var(smod.wgs_total / 4) if smod.wgs_total > 0
+  end
   fns = {}
   order.each_with_index do |n, i|
     fn = SFn.new(mod.defs[n], spv.id, smod)
     fns[n] = fn
   end
   smod.fns = fns
+  # Clones for the work-group-static kernels. A kernel whose call graph reaches a function with a work-group static gets a
+  # clone (wgs_mode) of every function it reaches: the clone routes its memory accesses to the group's static storage, the
+  # original keeps the global path. Non-static kernels reach only originals, so their code is unchanged. The clones are
+  # created after the originals, so the originals' ids do not move; each clone compiles from its own copy of the IR.
+  static_names = smod.wgs ? smod.wgs.keys.map { |k| k[0] }.uniq : []
+  reach = lambda do |root|
+    seen = {}
+    stack = [root]
+    until stack.empty?
+      n = stack.pop
+      next if seen[n] || !mod.defs.key?(n)
+      seen[n] = true
+      stack.concat(collect_calls(mod.defs[n], []).select { |c| mod.defs.key?(c) })
+    end
+    seen.keys
+  end
+  static_entries = entries.select { |e| reach.call(e).any? { |n| static_names.include?(n) } }
+  clone_set = static_entries.flat_map { |e| reach.call(e) }.uniq
+  clone_order = order.select { |n| clone_set.include?(n) }
+  # a copy of the forms: the arrays are copied, the tokens (IRStr, IRSym, strings, numbers) are shared, as they are immutable
+  copy_forms = lambda { |x| x.is_a?(Array) ? x.map { |y| copy_forms.call(y) } : x }
+  clone_order.each do |n|
+    smod.fns_wgs[n] = SFn.new(copy_forms.call(mod.defs[n]), spv.id, smod, true)
+  end
   # the stack: the deepest chain of frames from a kernel, with slack for alignment
   depth = {}
   depth_of = nil
@@ -2220,15 +2556,24 @@ def emit_module(src, kernel_cl = false)
   stack_bytes = entries.map { |e| depth_of.call(e) }.max.to_i + 16
   stack_bytes = (stack_bytes + 15) / 16 * 16
   smod.stack_bytes = stack_bytes
-  order.each { |n| fns[n].compile }
+  # the originals that a non-static entry reaches (the ids of all originals are fixed above; an original that only a
+  # static-using kernel reaches is not compiled, its clone is)
+  orig_needed = {}
+  entries.each { |e| reach.call(e).each { |n| orig_needed[n] = true } unless static_entries.include?(e) }
+  order.each { |n| fns[n].compile if orig_needed[n] }
+  clone_order.each { |n| smod.fns_wgs[n].compile }
   order.each do |n|
+    next unless orig_needed[n]
     fn = fns[n]
     fn.function_text.each { |inst| spv.func(inst) }
+  end
+  clone_order.each do |n|
+    smod.fns_wgs[n].function_text.each { |inst| spv.func(inst) }
   end
   iface = kernel_cl ? [smod.gid, smod.lid, smod.wid] : [smod.gid, smod.lid, smod.wid, smod.sp, smod.dead, smod.push]
   manifest = []
   entries.each_with_index do |e, k|
-    f = fns[e]
+    f = smod.fns_wgs.key?(e) ? smod.fns_wgs[e] : fns[e]
     raise Refused, "kernel #{e} takes parameters" unless f.ptypes.empty?
     key, struct = kernel_key(mod.defs[e])
     raise Refused, "kernel #{e}: cannot find the closure type (no cast of __nfcxx_sycl_closure())" if key.nil?
@@ -2254,6 +2599,7 @@ def emit_module(src, kernel_cl = false)
     manifest << "S\t#{mod.static_size}\t#{bytes.map { |b| ('0' + b.to_s(16))[-2, 2] }.join}"
     relocs.each { |o, t| manifest << "R\t#{o}\t#{t}" }
   end
+  manifest << "L\t#{smod.wgs_total}" if smod.wgs_total > 0   # the work-group static bytes per group (see wgs_layout)
   manifest << "T\t#{stack_bytes}"
   [spv.finish(kernel_cl ? 0x00010200 : 0x00010500), manifest, nil]   # OpenCL 2.2 takes SPIR-V 1.2
 end
