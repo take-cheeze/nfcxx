@@ -2892,6 +2892,13 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
     std::vector<std::vector<std::string>> insts;
     if (outer.has_qual) insts = member_instances(outer, text);
     else insts = template_instances(outer.fname, text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts));
+    // The same instance reached from two call sites (a macro expanded twice) is one dispatch specialization.
+    {
+      std::vector<std::vector<std::string>> uniq;
+      for (const auto &inst : insts)
+        if (std::find(uniq.begin(), uniq.end(), inst) == uniq.end()) uniq.push_back(inst);
+      insts = uniq;
+    }
     // A free template that the unit never calls (the explicit calls live in other units, as launch_fattn's do for
     // lightning-indexer.cu) is not instantiated here: nvcc would not compile its body, so the launch stays a dependent
     // call of the kernel (__nfcxx_cuda_launch with the kernel's template arguments), which the front end does not
