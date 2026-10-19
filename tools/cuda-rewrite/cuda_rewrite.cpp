@@ -2307,8 +2307,12 @@ bool deduce_call_targs(const std::string &text, const std::string &name, long po
                        const std::vector<std::string> &args, std::vector<std::string> &out) {
   TemplateHead head;
   if (!template_head_of(text, name, head)) return false;
-  // A call with another number of arguments is an overload (set_rows_cuda's plain one), not this template's call.
-  if (args.size() != head.parts.size()) return false;
+  // A call with another number of arguments is an overload (set_rows_cuda's plain one), not this template's call. The
+  // parameters with a default value may be left out (rms_norm_f32_cuda's scale_out).
+  size_t fewest = 0;
+  for (const auto &p : head.parts)
+    if (str_index(p, "=", 0) < 0) fewest += 1;
+  if (args.size() > head.parts.size() || args.size() < fewest) return false;
   std::map<std::string, std::string> found;
   // A parameter pack deduced from a std::index_sequence argument: its values, one per element of the sequence.
   std::vector<std::string> pack_values;
@@ -2646,7 +2650,8 @@ std::vector<std::vector<std::string>> template_instances(const std::string &name
   }
   // Calls without explicit template arguments: their arguments' types give the instance (softmax's soft_max_f32_cuda).
   for (const auto &pc : plain_call_sites(text, name)) {
-    if (parts >= 0 && (long)pc.first.size() != parts) continue;  // another overload of the name
+    // Another overload of the name: fewer arguments than its required parameters, or more than its parameters.
+    if (parts >= 0 && ((long)pc.first.size() > parts || (long)pc.first.size() < key_min(key))) continue;
     std::vector<std::string> deduced;
     if (deduce_call_targs(text, name, pc.second, pc.first, deduced)) sites.push_back({deduced, pc.second});
   }
