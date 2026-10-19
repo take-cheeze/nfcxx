@@ -26,6 +26,7 @@ done
 # The open-source compiler and libc++abi runtime (tests/macos-sysroot/runtime, built by build.sh): the sized __atomic_*
 # calls, the aligned operator new and delete, __cxa_pure_virtual and the __cxa_vec_* helpers. Added only when built.
 rt=${NFCXX_MACOS_RT:-$root/build/macos-rt/libnfcxx-darwin-rt.a}
+libc=${NFCXX_MACOS_LIBC:-}; libcargs=(); [ -n "$libc" ] && [ -f "$libc" ] && libcargs=("$libc")
 rtargs=(); [ -f "$rt" ] && rtargs=("$rt")
-exec ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "${objs[@]}" ${rtargs[@]+"${rtargs[@]}"} \
+exec ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "${objs[@]}" ${libcargs[@]+"${libcargs[@]}"} ${rtargs[@]+"${rtargs[@]}"} \
   -L "$stub" -lSystem -L "$stub" -lc++ ${libs[@]+"${libs[@]}"}
