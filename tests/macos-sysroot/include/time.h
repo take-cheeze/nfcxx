@@ -49,6 +49,13 @@ size_t strftime(char *restrict, size_t, const char *restrict, const struct tm *r
 
 /* POSIX (time.h): the sleep that libc++'s threading layer uses */
 int nanosleep(const struct timespec *, struct timespec *);
+#ifndef CLEANROOM_CLOCKID_T
+#define CLEANROOM_CLOCKID_T
+typedef int clockid_t;
+#endif
+/* POSIX.1-2008 <time.h> requires CLOCK_REALTIME; 0 is the wall clock on the target (checked on the Mac). */
+#define CLOCK_REALTIME 0
+int clock_gettime(clockid_t, struct timespec *);
 
 /* POSIX.1-2008 reentrant time conversions, from the specification. */
 struct tm *gmtime_r(const time_t *timer, struct tm *result);

@@ -99,12 +99,21 @@ mkdir -p libcxx-gen
 cp "$src/libcxx/vendor/llvm/default_assertion_handler.in" libcxx-gen/__assertion_handler
 cxxlib=(-nostdinc -nostdinc++ -isystem "$root/tests/macos-sysroot/cxx" -isystem "$out/libcxx-gen" -isystem "$src/libcxx/include" -isystem "$NFCXX_MACOS_SYSROOT"
         -isystem "$(clang -print-resource-dir)/include" -I "$src/libcxxabi/include" -I "$src/libcxx/src")
-cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY)
+# -mmacosx-version-min=11.0: aligned new/delete are available from 10.13, and arm64 Darwin starts at 11.0.
+# -U__ENVIRONMENT_*: refstring.h adds a check for libstdc++'s empty-string singleton (only for a process that also
+# loads libstdc++, which none of our programs do) and includes mach-o/dyld.h, which is not a clean-room header.
+cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDING_LIBRARY -mmacosx-version-min=11.0
+            -U__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ -U__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
+# Excluded: tz.cpp (its path is #error on any non-Linux host, and libc++ 18 has no config switch for it) and chrono.cpp
+# (its Apple branch needs CLOCK_MONOTONIC_RAW, which is not a POSIX name and is not in the clean-room headers). The
+# names they define are left to the link check to report.
+libcxx_skip=" tz.cpp chrono.cpp "
 mkdir -p libcxx-obj
 rm -f libc++-darwin.a libcxx-obj/*.o
 cxxlib_fail=0
 for f in "$src"/libcxx/src/*.cpp "$src"/libcxx/src/filesystem/*.cpp; do
   [ -f "$f" ] || continue
+  case "$libcxx_skip" in *" $(basename "$f") "*) continue;; esac
   o="libcxx-obj/$(basename "$(dirname "$f")")_$(basename "$f" .cpp).o"
   if ! clang++ "${tgt[@]}" "${cxxlib[@]}" "${cxxlibdefs[@]}" -std=c++20 -fexceptions -O2 -c "$f" -o "$o" 2>"libcxx-obj/$(basename "$f" .cpp).err"; then
     echo "build.sh: libc++ source did not compile: $f" >&2; cxxlib_fail=$((cxxlib_fail+1))

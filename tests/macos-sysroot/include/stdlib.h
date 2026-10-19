@@ -11,6 +11,7 @@ extern "C" {
 #define restrict __restrict
 #endif
 #include <stddef.h>
+#include <stdint.h>
 
 #define EXIT_FAILURE 1
 #define EXIT_SUCCESS 0
@@ -30,6 +31,8 @@ int posix_memalign(void **, size_t, size_t);
 void abort(void) __attribute__((__noreturn__));
 int atexit(void (*)(void));
 void exit(int) __attribute__((__noreturn__));
+/* Public API of the target (arc4random(3)): a uniformly distributed 32-bit value, no seeding. */
+uint32_t arc4random(void);
 void _Exit(int) __attribute__((__noreturn__));
 char *getenv(const char *);
 int system(const char *);
