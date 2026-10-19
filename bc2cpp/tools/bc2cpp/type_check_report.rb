@@ -168,8 +168,8 @@ module TypeCheckReport
       out << Diagnostic.new(file: d['file'], line: d['line'], col: d['col'], severity: d['severity'], code: d['code'],
                             message: d['message'])
     end
-    Array(facts['ir_feedback']).each do |row|
-      next unless scope == 'all' || row['scope'] == scope
+    fc = filtered_collections(facts, scope)
+    fc[:feedback].each do |row|
       if all && row['status'] == 'unknown'
         out << Diagnostic.new(file: row['file'], line: row['line'], col: row['col'], severity: 'info', code: 'TC2004',
                               message: "#{row['owner']}##{row['method']} #{row['kind']} #{row['detail']}: IR type unknown (#{row['reason']})")
@@ -191,9 +191,7 @@ module TypeCheckReport
                                      "#{s['sites']} site(s)#{est}")
     end
     if all
-      facts['methods'].each do |m|
-        next unless scope == 'all' || m['scope'] == scope
-
+      fc[:methods].each do |m|
         m['params'].each do |p|
           next if p['type']
 
@@ -205,8 +203,8 @@ module TypeCheckReport
         out << Diagnostic.new(file: m['file'], line: m['line'], col: m['col'], severity: 'info', code: 'TC2002',
                               message: "#{m['owner']}##{m['name']} return has no type: #{m['return']['reason']}")
       end
-      facts['ivars'].each do |i|
-        next if i['type'] || !(scope == 'all' || i['scope'] == scope)
+      fc[:ivars].each do |i|
+        next if i['type']
 
         out << Diagnostic.new(file: i['file'] || '-', line: i['line'], col: i['col'], severity: 'info', code: 'TC2003',
                               message: "#{i['owner']}##{i['name']} has no type: #{i['reason']}")
