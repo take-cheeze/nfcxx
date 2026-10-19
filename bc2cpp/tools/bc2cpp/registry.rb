@@ -204,7 +204,8 @@ def build_registry(ireps, root_label)
          respond_to_missing?].include?(method_name) ? :private : default_visibility
     end
 
-    irep.instructions.each_with_index do |insn, idx|
+    irep.each_with_op('CLASS', 'MODULE', 'SCLASS', 'SETCONST', 'ALIAS', 'TDEF', 'SDEF', 'DEF', 'SEND0', 'SEND',
+                      'SSEND0', 'SSEND', 'SENDB', 'SSENDB') do |insn, idx|
       case insn.op
       when 'CLASS', 'MODULE'
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"

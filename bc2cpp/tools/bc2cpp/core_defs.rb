@@ -42,16 +42,13 @@ module CoreDefs
   def conditional_def_labels(ireps)
     out = Set.new
     ireps.each_value do |irep|
-      spans = irep.instructions.filter_map do |insn|
-        next unless %w[JMPIF JMPNOT JMPNIL JMP].include?(insn.op)
-
+      spans = BytecodeIR.for(irep).instructions_with_op('JMPIF', 'JMPNOT', 'JMPNIL', 'JMP').filter_map do |insn|
         target = insn.branch_target
         [insn.addr, target] if target && target > insn.addr
       end
       next if spans.empty?
 
-      irep.instructions.each do |insn|
-        next unless %w[TDEF SDEF DEF].include?(insn.op)
+      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, _|
         next unless spans.any? { |from, to| from < insn.addr && insn.addr < to }
 
         label = def_body_label(irep, insn)
@@ -99,7 +96,7 @@ module CoreDefs
   def touches_block?(irep, ireps)
     enter = irep.enter
     return true if enter && enter.enter_fields[6].to_i.positive?
-    return true if irep.instructions.any? { |insn| BLOCK_OPS.include?(insn.op) }
+    return true if BytecodeIR.for(irep).op?(*BLOCK_OPS)
 
     irep.reps.any? { |child| child && touches_block?(ireps.fetch(child), ireps) }
   end
@@ -108,7 +105,7 @@ module CoreDefs
   # method's result; the guard covers frames that sit on the stack while a block runs,
   # not a closure that a Fiber calls after the frame is gone.
   def builds_lambda?(irep, ireps)
-    return true if irep.instructions.any? { |insn| insn.op == 'LAMBDA' }
+    return true if BytecodeIR.for(irep).op?('LAMBDA')
 
     irep.reps.any? { |child| child && builds_lambda?(ireps.fetch(child), ireps) }
   end
@@ -117,7 +114,8 @@ module CoreDefs
   # Generator run their iteration inside a Fiber; a compiled frame in there breaks
   # the same way.
   def references_fiber?(irep, ireps)
-    return true if irep.instructions.any? { |insn| %w[GETCONST GETMCNST].include?(insn.op) && insn.const_name == 'Fiber' }
+    fiber_consts = BytecodeIR.for(irep).instructions_with_op('GETCONST', 'GETMCNST')
+    return true if fiber_consts.any? { |insn| insn.const_name == 'Fiber' }
 
     irep.reps.any? { |child| child && references_fiber?(ireps.fetch(child), ireps) }
   end
