@@ -59,7 +59,7 @@ exits_irep = irep_of([insn(0, 'JMPNOT', "R1\t7"), insn(4, 'LOADI_1', "R2\t(1)"),
                       insn(7, 'RETNIL', ''), insn(8, 'RETSELF', '')])
 exits = BytecodeIR.for(exits_irep).exits
 check.call('every exit is listed, with the register RETURN hands out',
-           exits.map(&:to_a) == [[2, 'RETURN', 2], [3, 'RETNIL', nil], [4, 'RETSELF', nil]])
+           exits.map { |e| [e.index, e.op, e.reg] } == [[2, 'RETURN', 2], [3, 'RETNIL', nil], [4, 'RETSELF', nil]])
 states = [[0], [0], [0, 0, NF::INT], [0], nil]
 joined = NC.exit_mask(exits_irep, states) { |exit, state| exit.reg ? state[exit.reg] : NF::NIL }
 check.call('exit_mask joins the reached exits only', joined == (NF::INT | NF::NIL))

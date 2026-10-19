@@ -120,8 +120,9 @@ check.call('ZA_SPAN is typed Integer', (r = row_for.call(rows, 'ZA_SPAN')) && r[
 half = row_for.call(rows, 'ZA_HALF')
 check.call('ZA_HALF (floor division) is typed Integer', half && half['type'] == 'Integer')
 range_only = row_for.call(rows, 'ZA_SLOT_RANGE')
-check.call('ZA_SLOT_RANGE (no single value, interval only) is typed Integer by inferred:integer-range',
-           range_only && range_only['type'] == 'Integer' && range_only['source'] == 'inferred:integer-range')
+# The IR (ADR 0501) admits an interval-only name as a Fixnum constant, so its row comes from the integer-constant set.
+check.call('ZA_SLOT_RANGE (no single value, interval only) is typed Integer by inferred:integer-constant',
+           range_only && range_only['type'] == 'Integer' && range_only['source'] == 'inferred:integer-constant')
 nonlit = row_for.call(rows, 'ZA_NONLIT')
 check.call('ZA_NONLIT (non-literal operand) stays untyped', nonlit && nonlit['type'].nil?)
 big = row_for.call(rows, 'ZA_BIG')
@@ -216,8 +217,8 @@ check.call('ZF_ZERO (divisor interval holds 0) has no interval', !fr[:ranges].ke
 check.call('ZF_NONLIT (a send operand) has no interval', !fr[:ranges].key?('ZF_NONLIT'))
 rows = typed_rows.call(frozen)
 slot = row_for.call(rows, 'ZF_SLOT')
-check.call('ZF_SLOT is typed Integer by inferred:integer-range end to end',
-           slot && slot['type'] == 'Integer' && slot['source'] == 'inferred:integer-range')
+check.call('ZF_SLOT is typed Integer by inferred:integer-constant end to end (ADR 0501)',
+           slot && slot['type'] == 'Integer' && slot['source'] == 'inferred:integer-constant')
 zero = row_for.call(rows, 'ZF_ZERO')
 check.call('ZF_ZERO (zero divisor) stays untyped', zero && zero['type'].nil?)
 nonlit = row_for.call(rows, 'ZF_NONLIT')
