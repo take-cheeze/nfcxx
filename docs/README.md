@@ -43,7 +43,12 @@ covers say so.
 | [coreclr-gc.md](notes/coreclr-gc.md) | CoreCLR's workstation GC (34 translation units) compiled by nfcxx on both backends; the QBE rewrites it needed; what a link and run still needs. |
 | [ubsan.md](notes/ubsan.md) | `nfcxx -fsanitize=undefined` (Path B): checked operations that report `file:line: runtime error: ...`, and `[[likely]]`/`[[unlikely]]` as block layout. `tests/pathb-qbe/run.sh` (traps/ubsan_*, cases/ubsan_clean, cases/likely_unlikely). |
 | [tracing.md](notes/tracing.md) | `--trace` Chrome/Perfetto JSON of the driver steps. |
-| [cpp-feature-coverage-plan.md](notes/cpp-feature-coverage-plan.md) | Plan (not run yet): a per-paper C++ language feature matrix for nfcxx, checklist from cpprefjp's markdown and cross-checked with the compilers' status pages. |
+| [cpp-feature-coverage-plan.md](notes/cpp-feature-coverage-plan.md) | Plan and remaining milestones for a per-paper C++ language feature matrix, using the pinned cpprefjp checklist. |
+| [cpp-feature-matrix.md](notes/cpp-feature-matrix.md) | C++11/C++14 pilot: 51 focused feature probes on qbe, gcc and Path B, upstream compiler versions and reproduction steps (`tests/cpp-features/run.sh`). |
+| [cpp-test-ci-plan.md](notes/cpp-test-ci-plan.md) | Local cppreference/GCC snapshots and EDG harness; proposed small PR gate, broad nightly comparisons and weekly expensive suites. `tests/upstream/README.md`. |
+| [library-suite-results.md](notes/library-suite-results.md) | Native libc++/libstdc++ baselines, Microsoft STL source portability survey, and reviewed library probes on nfcxx routes. |
+| [upstream-suite-results.md](notes/upstream-suite-results.md) | Broad native GCC/Clang/EDG results and GCC positive-source survey through nfcxx. |
+| [reference-suite-survey.md](notes/reference-suite-survey.md) | Full cppreference/cpprefjp compile surveys: 3,158/6,743 examples, plus language-only results on all nfcxx routes; candidates versus reviewed runtime assertions. |
 
 ## Status matrix
 

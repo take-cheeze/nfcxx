@@ -1,0 +1,12 @@
+suite	id	standard	source	oracle	review
+gcc	constexpr-tuple	c++11	gcc/gcc/testsuite/g++.dg/cpp0x/constexpr-tuple.C	exit	dg-do run target c++11; stdout contains addresses and is not an oracle.
+gcc	initlist	c++11	gcc/gcc/testsuite/g++.dg/cpp0x/initlist1.C	exit	dg-do run target c++11; no additional directives.
+gcc	implicit-move	c++11	gcc/gcc/testsuite/g++.dg/cpp0x/implicit3.C	exit	dg-do run target c++11; no additional directives.
+gcc	delegating-ctor	c++11	gcc/gcc/testsuite/g++.dg/cpp0x/dc10.C	exit	dg-do run target c++11; includes an aligned local.
+llvm-test-suite	hello	c++11	llvm-test-suite/SingleSource/Benchmarks/Shootout-C++/hello.cpp	stdout	No arguments or auxiliary inputs; stdout checked against host.
+llvm-test-suite	member-functions	c++11	llvm-test-suite/SingleSource/UnitTests/member-function-pointers.cpp	stdout	No arguments or auxiliary inputs; stdout checked against host.
+llvm-test-suite	array-init	c++11	llvm-test-suite/SingleSource/UnitTests/DefaultInitDynArrays.cpp	stdout	Zero-initialized arrays, no arguments; host comparison.
+cpprefjp	binary-literals	c++14	cpprefjp-examples/lang--cpp14--binary_literals-1.cpp	stdout	Tagged complete example, deterministic integer output.
+cpprefjp	generic-lambda	c++14	cpprefjp-examples/lang--cpp14--generic_lambdas-1.cpp	stdout	Tagged complete example, initialized values and strings.
+cpprefjp	constexpr	c++11	cpprefjp-examples/lang--cpp11--constexpr-1.cpp	stdout	Tagged complete example; constant arithmetic.
+cpprefjp	scoped-enum	c++11	cpprefjp-examples/lang--cpp11--scoped_enum-1.cpp	stdout	Tagged complete example; scoped enumeration and fixed output.
