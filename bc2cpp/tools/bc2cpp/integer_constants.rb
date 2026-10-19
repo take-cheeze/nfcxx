@@ -33,12 +33,32 @@ module IntegerConstants
   # Repeated here because that file needs BytecodeIR at load time, which this module must not require.
   LOADI_FIXNUM_MIN = -1_073_741_824
   LOADI_FIXNUM_MAX = 1_073_741_823
+  # Bit operators: mruby 4 has no opcode for them, so `a | b` is `SEND R1 :| n=1`. Each is exact on any Integer
+  # (two's complement), so the value is the Ruby result; the margin check in value_for_kind still applies.
+  BIT_OPS = { '|' => 'BIT_OR', '&' => 'BIT_AND', '^' => 'BIT_XOR' }.freeze
   # `SETCONST NAME R1` / `SETMCNST (R2)::NAME R1` (codedump.c): the name comes
   # first and the source register last, the reverse of GETCONST. print_lv_a may
   # append a `; R1:name` comment, which is stripped before reading the register.
   # `operators_safe` is IntegerConstantRanges.integer_ops_safe? (the operator precondition both proofs share): with a
   # redefined Integer operator no arithmetic definition is admitted.
   def self.analyze(ireps, native_paths, foreign_paths, operators_safe:)
+    defs, poisoned = definitions(ireps, native_paths, foreign_paths, operators_safe: operators_safe)
+    admitted = resolve_integral(defs, poisoned)
+    loop do
+      values = analyze_values(ireps, admitted)
+      invalid = admitted.select do |name|
+        defs[name].any? { |kind| arithmetic_kind?(kind) } && values[name].nil?
+      end
+      break if invalid.empty?
+
+      invalid.each { |name| poisoned << name }
+      admitted = resolve_integral(defs, poisoned)
+    end
+    admitted
+  end
+
+  # The definitions of every bare constant name and its poison set, shared by analyze and class_admitted.
+  def self.definitions(ireps, native_paths, foreign_paths, operators_safe:)
     # name -> list of one entry per real definition of that bare name:
     # `:literal` (an integer literal), `[:alias, M]` (a read of bare constant
     # name M), or nil (anything else -- an unconditional poison).
@@ -66,18 +86,32 @@ module IntegerConstants
     end
     poisoned.merge(native_defined_const_names(native_paths))
     poisoned.merge(foreign_const_names(foreign_paths))
-    admitted = resolve_integral(defs, poisoned)
-    loop do
-      values = analyze_values(ireps, admitted)
-      invalid = admitted.select do |name|
-        defs[name].any? { |kind| arithmetic_kind?(kind) } && values[name].nil?
-      end
-      break if invalid.empty?
+    [defs, poisoned]
+  end
 
-      invalid.each { |name| poisoned << name }
-      admitted = resolve_integral(defs, poisoned)
+  # CLASS_INTEGER_PROOF (bignum-capable): the bare names that only ever hold an Integer CLASS instance, whatever its
+  # value. It is resolve_integral's class-level fixpoint before analyze's Fixnum check, so a name whose intermediate
+  # leaves the Fixnum margin (`BRIGHTNESS_Z = TRANSITION_Z - 1`, with TRANSITION_Z = 0x40000000) still qualifies.
+  # Integer operators stay gated by operators_safe. A literal-only arithmetic definition (no constant operand) must
+  # still have an exact value inside the margin: that is the literal-only rule, so it is refused otherwise.
+  def self.class_admitted(ireps, native_paths, foreign_paths, operators_safe:)
+    defs, poisoned = definitions(ireps, native_paths, foreign_paths, operators_safe: operators_safe)
+    admitted = resolve_integral(defs, poisoned)
+    admitted.reject do |name|
+      defs[name].any? { |kind| literal_only_arithmetic?(kind) && value_for_kind(kind, Set.new, ->(_n, _v) {}).nil? }
     end
-    admitted
+  end
+
+  # An arithmetic definition with no constant operand: its value is fixed by its literals alone.
+  def self.literal_only_arithmetic?(kind)
+    kind.is_a?(Array) && kind[0] == :arithmetic && [kind[2], kind[3]].none? { |op| contains_alias?(op) }
+  end
+
+  def self.contains_alias?(operand)
+    return false unless operand.is_a?(Array)
+    return true if operand[0] == :alias
+
+    operand[0] == :arithmetic && [operand[2], operand[3]].any? { |op| contains_alias?(op) }
   end
 
   # CONST_ALIAS_CHAINING: the GREATEST fixpoint of "every definition of this bare
@@ -165,6 +199,9 @@ module IntegerConstants
                 return nil if right.zero?
 
                 left.div(right)
+              when 'BIT_OR' then left | right
+              when 'BIT_AND' then left & right
+              when 'BIT_XOR' then left ^ right
               else raise ArgumentError, "bc2cpp: IntegerConstants: unknown arithmetic opcode #{kind[1].inspect}"
               end
       value if value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
@@ -231,8 +268,23 @@ module IntegerConstants
         next nil unless source_operand_kind?(left) && source_operand_kind?(right)
 
         [:arithmetic, insn.op, left, right]
+      when 'SEND'
+        bit_op_kind(irep, j, insn, cur, entries)
       end
     end
+  end
+
+  # `a | b` / `a & b` / `a ^ b`: SEND with one argument in the register after the receiver. Returns the arithmetic kind
+  # (its operator name from BIT_OPS) or nil. Operand kinds are walked exactly like the ADD/SUB operands.
+  def self.bit_op_kind(irep, j, insn, cur, entries)
+    name = BIT_OPS[insn.sym]
+    return nil unless name && insn.argc == 1
+
+    left = const_source_kind(irep, j, cur, entries)
+    right = const_source_kind(irep, j, (cur.to_i + 1).to_s, entries)
+    return nil unless source_operand_kind?(left) && source_operand_kind?(right)
+
+    [:arithmetic, name, left, right]
   end
 
   # INTEGER_CONSTANT_VALUE_PROOF: analyze proves a bare name always binds a
@@ -312,8 +364,19 @@ module IntegerConstants
         next nil unless left && right
 
         [:arithmetic, insn.op, left, right]
+      when 'SEND'
+        literal_bit_op_kind(irep, j, insn, cur, entries)
       end
     end
+  end
+
+  def self.literal_bit_op_kind(irep, j, insn, cur, entries)
+    name = BIT_OPS[insn.sym]
+    return nil unless name && insn.argc == 1
+
+    left = literal_value_kind(irep, j, cur, entries)
+    right = literal_value_kind(irep, j, (cur.to_i + 1).to_s, entries)
+    left && right ? [:arithmetic, name, left, right] : nil
   end
 
   # Duplicate of CodeGen's loadi_literal/loadi_proven_fixnum? (this module has no

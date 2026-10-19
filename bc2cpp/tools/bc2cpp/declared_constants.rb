@@ -414,9 +414,9 @@ module DeclaredConstants
   # The owner-scoped proofs below feed TypeFacts const_rows only. The declared check and CodeGen keep their own
   # program-wide predicates, so generated code is unchanged by them.
 
-  # CORE_CONTAINERS: the exact classes whose stock methods the owner proofs cover. Integer and String join them for
-  # `freeze` alone (the FREEZE_SELF fact, type_facts freeze_self_type and IntegerConstantRanges): no other owner-scoped
-  # proof reads these two classes.
+  # CORE_CONTAINERS: the exact classes whose stock methods the owner proofs cover. STOCK_PROOF_CLASSES adds Integer
+  # (`freeze`: the FREEZE_SELF fact, type_facts freeze_self_type and IntegerConstantRanges) and String (`freeze`, and
+  # `length` for BOOL_COMPARE).
   CORE_CONTAINERS = %w[Array Hash].freeze
   STOCK_PROOF_CLASSES = (CORE_CONTAINERS + %w[Integer String]).freeze
 
@@ -586,6 +586,35 @@ module DeclaredConstants
     def fixnum(range)
       range if range && range[0] >= MIN && range[1] <= MAX
     end
+  end
+
+  # BOOL_COMPARE (report-level): the value at +idx+ is `X == Y` (the EQ opcode) whose receiver is `'literal'.length`
+  # and whose argument is an integer literal. Integer#== answers true or false, so the value is a bool. Needs String#length
+  # stock (string_length_safe) and Integer#== stock (integer_ops_safe, the operator gate).
+  def bool_compare_site?(irep, idx, reg, string_length_safe:, integer_ops_safe:)
+    return false unless string_length_safe && integer_ops_safe
+
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
+      insn.op == 'EQ' && string_length_value?(irep, j, cur) && integer_literal_source?(irep, j, insn.regs[1])
+    end == true
+  end
+
+  # The value of +reg+ before +idx+ is `'literal'.length` (SEND0 length on a STRING literal).
+  def string_length_value?(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
+      insn.op == 'SEND0' && insn.sym == 'length' && string_literal_source?(irep, j, cur)
+    end == true
+  end
+
+  def string_literal_source?(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) { |insn| insn.op == 'STRING' } == true
+  end
+
+  # The value of +reg+ before +idx+ is an integer literal (any LOADI-family load, in or out of the Fixnum margin).
+  def integer_literal_source?(irep, idx, reg)
+    return false if reg.nil?
+
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) { |insn| insn.op.start_with?('LOADI') } == true
   end
 
   # Prints the outcome, adds the diagnostics to the signature diagnostics and aborts a build on an error.

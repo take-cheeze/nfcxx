@@ -23,7 +23,8 @@ module IntegerConstantRanges
   end
 
   # The Integer operators the interval arms compute, and the owners whose definitions could replace them.
-  OPERATOR_NAMES = %w[+ - * / ==].freeze
+  # The bit operators are gated too: IntegerConstants' exact `| & ^` proof reads them as Integer's.
+  OPERATOR_NAMES = %w[+ - * / == | & ^].freeze
   OPERATOR_OWNERS = %w[Integer].freeze
 
   # The operator proof's precondition, owner-scoped like DeclaredConstants.range_to_a_safe?: no Ruby definition of an

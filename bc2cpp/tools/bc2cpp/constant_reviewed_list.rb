@@ -8,8 +8,6 @@ require 'set'
 
 CONSTANT_REVIEWED = Set[
   "Game::ChipSet::ALL_DIRS",
-  "RGSS::Graphics::BRIGHTNESS_Z",
-  "RPG2k::Scene::Base::UTF8_AWARE_STRINGS",
   "RPG2k::Scene::ChipsetEditor::BLOCKED_COLOR",
   "RPG2k::Scene::ChipsetEditor::CURSOR_COLOR",
   "RPG2k::Scene::ChipsetEditor::HINT_COLOR",
