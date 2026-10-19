@@ -61,34 +61,19 @@ eh=(-I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTI
 for f in cxa_exception cxa_exception_storage cxa_personality fallback_malloc stdlib_exception; do
   clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$src/libcxxabi/src/$f.cpp" -o "$f.o"
 done
-# cxa_handlers.cpp also defines std::unexpected, std::get_terminate and std::terminate, which libC.a (EDG's runtime)
-# defines too; two definitions collide at link time. The copy built here drops those three public functions and keeps
-# the handler storage and __terminate/__unexpected, which cxa_exception needs. Each block must match exactly once.
-python3 - "$src/libcxxabi/src/cxa_handlers.cpp" cxa_handlers.cpp <<'PY'
-import re, sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-blocks = [
-    r'__attribute__\(\(noreturn\)\)\nvoid\nunexpected\(\)\n\{\n.*?\n\}\n',
-    r'terminate_handler\nget_terminate\(\) noexcept\n\{\n.*?\n\}\n',
-    r'__attribute__\(\(noreturn\)\)\nvoid\nterminate\(\) noexcept\n\{\n.*?\n\}\n',
-]
-for b in blocks:
-    hits = re.findall(b, text, flags=re.S)
-    assert len(hits) == 1, ('cxa_handlers block not found exactly once', b)
-    text = re.sub(b, '', text, count=1, flags=re.S)
-open(dst, 'w').write(text)
-PY
-clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c cxa_handlers.cpp -o cxa_handlers.o
+# cxa_handlers.cpp is built whole: it defines std::unexpected, std::get_terminate and std::terminate. These are libc++abi's
+# now; the EDG copies are left out of libC-darwin.a (see libc_drop below), so there is one definition of each.
+clang++ "${tgt[@]}" "${cxxinc[@]}" "${eh[@]}" -c "$src/libcxxabi/src/cxa_handlers.cpp" -o cxa_handlers.o
 # cxa_default_handlers.cpp uses constinit, so it is built as C++20 (as new_handler.cpp is).
 clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS \
   -std=c++20 -fexceptions -O2 -c "$src/libcxxabi/src/cxa_default_handlers.cpp" -o cxa_default_handlers.o
 
 rm -f libnfcxx-darwin-rt.a
-# Only members with no symbol in libC.a go into the archive. libC.a (EDG's runtime) owns the EH, type_info,
-# handler and new/delete names that the other members define; the real libc++ on the Mac exports the libc++ names at run time.
+# The runtime archive. stdlib_typeinfo.o and private_typeinfo.o hold the std::type_info and __cxxabiv1 type_info names, which
+# replace EDG's typeinfo.o in libC-darwin.a. Other members that libC.a still owns (stdlib_exception, cxa_default_handlers,
+# stdlib_new_delete, ...) are built but not archived, as before.
 clang "${tgt[@]}" "${inc[@]}" -O2 -c "$root/tests/macos-sysroot/runtime/src/xlocale_shim.c" -o xlocale_shim.o
-llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o xlocale_shim.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o stdlib_typeinfo.o private_typeinfo.o
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
 
 # libc++ itself, built from LLVM's own sources at the pin with the cross clang (not a hand-written subset), into a
@@ -123,12 +108,12 @@ cxxlibdefs=(-D_LIBCPP_BUILDING_LIBRARY -D_LIBCPP_NO_ABI_TAG -D_LIBCXXABI_BUILDIN
 # names they define are left to the link check to report.
 # Also excluded: the three filesystem sources that include dirent.h (directory_entry, directory_iterator, operations). The
 # dirent layout is not defined by POSIX; it would have to come from the target, which is not read here.
-# exception.cpp (std::exception, bad_alloc, bad_cast, typeinfo, terminate) is left out: the cross link takes those from EDG's libC.a,
-# and linking both defines them twice.
+# exception.cpp (std::exception and std::bad_exception) is built: the cross link takes it from here, and the EDG copies in
+# libC.a are dropped (libc_drop below).
 # locale.cpp is excluded too: it needs the multibyte _l functions and MB_CUR_MAX (__mb_cur_max), which the clean-room
 # headers do not define, and Apple's default rune table, which is not public. The link takes the locale symbols from the
 # Mac's libc++ at run time, which is how the programs that link today resolve them.
-libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp exception.cpp locale.cpp "
+libcxx_skip=" tz.cpp chrono.cpp directory_entry.cpp directory_iterator.cpp operations.cpp locale.cpp "
 mkdir -p libcxx-obj
 rm -f libc++-darwin.a libcxx-obj/*.o
 cxxlib_fail=0
@@ -142,5 +127,25 @@ for f in "$src"/libcxx/src/*.cpp "$src"/libcxx/src/filesystem/*.cpp; do
 done
 [ "$cxxlib_fail" = 0 ] || { echo "build.sh: $cxxlib_fail libc++ sources failed; see build/macos-rt/libcxx-obj/*.err" >&2; exit 1; }
 ls libcxx-obj/*.o >/dev/null 2>&1 && llvm-ar rcs libc++-darwin.a libcxx-obj/*.o && echo "built $out/libc++-darwin.a ($(ls libcxx-obj/*.o | wc -l) objects)"
+# libC-darwin.a is EDG's libC.a without the members that the libc++ and libc++abi archives replace: exception.o (std::exception,
+# bad_exception), bad_alloc.o (std::bad_alloc, bad_array_new_length), typeinfo.o (std::type_info, bad_cast, __cxxabiv1 type_info)
+# and eh_util.o (std::terminate, get/set_terminate, std::unexpected, set_unexpected and uncaught_exception(s)). The EH entry
+# points (throw.o: __curr_eh_stack_entry, the EH shim members), rtti.o, vars.o and vec_newdel.o stay in libC.a.
+# Every symbol a dropped member defined must now come from one of the two archives built here; if one does not, the link of a
+# program that needs it would fail, so the build stops with the list instead.
+libc_in=${NFCXX_MACOS_LIBC:-$root/build/edg-cross/lib/libC.a}
+libc_drop="exception.o bad_alloc.o typeinfo.o eh_util.o"
+cp "$libc_in" libC-darwin.a
+llvm-ar d libC-darwin.a $libc_drop
+drop_syms=$(for m in $libc_drop; do llvm-nm -A --defined-only -g "$libc_in" | grep -E ":$m: " ; done | awk '{print $NF}' | sort -u)
+provided=$( (llvm-nm -A --defined-only -g libc++-darwin.a; llvm-nm -A --defined-only -g libnfcxx-darwin-rt.a) | awk '{print $NF}' | sort -u)
+missing=$(comm -23 <(printf '%s\n' "$drop_syms") <(printf '%s\n' "$provided"))
+if [ -n "$missing" ]; then
+  echo "build.sh: symbols of the dropped libC.a members that no archive provides:" >&2
+  printf '%s\n' "$missing" >&2
+  exit 1
+fi
+echo "built $out/libC-darwin.a (libC.a without $libc_drop; $(printf '%s\n' "$drop_syms" | wc -l) dropped symbols, all provided)"
+
 # The LLVM sources are removed only now, after the libc++ step that reads them.
 rm -rf "$llvm"

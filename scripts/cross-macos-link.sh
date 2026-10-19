@@ -26,7 +26,10 @@ done
 # The open-source compiler and libc++abi runtime (tests/macos-sysroot/runtime, built by build.sh): the sized __atomic_*
 # calls, the aligned operator new and delete, __cxa_pure_virtual and the __cxa_vec_* helpers. Added only when built.
 rt=${NFCXX_MACOS_RT:-$root/build/macos-rt/libnfcxx-darwin-rt.a}
-libc=${NFCXX_MACOS_LIBC:-}; libcargs=(); [ -n "$libc" ] && [ -f "$libc" ] && libcargs=("$libc")
+# EDG's libC.a without the exception, typeinfo and terminate members that libc++ and libc++abi provide (build.sh writes
+# libC-darwin.a from it); the raw libC.a is used only when that archive has not been built.
+libc=${NFCXX_MACOS_LIBC:-}; libcb=$root/build/macos-rt/libC-darwin.a; [ -f "$libcb" ] && libc=$libcb
+libcargs=(); [ -n "$libc" ] && [ -f "$libc" ] && libcargs=("$libc")
 # The libc++ built from the open-source sources (tests/macos-sysroot/runtime/build.sh). Linked before -lc++, so its definitions
 # are used when it is built; the system libc++ supplies the rest at run time.
 cxxb=${NFCXX_MACOS_LIBCXX_BUILT:-$root/build/macos-rt/libc++-darwin.a}; cxxbargs=(); [ -f "$cxxb" ] && cxxbargs=("$cxxb")
