@@ -73,9 +73,22 @@ module NilNarrowing
     return nil if BytecodeIR.own_upvar_written_regs(irep).include?(reg)
 
     states = cache.fetch(irep.label) do
-      cache[irep.label] = compute(irep, nil_unanswerable || ->(_name) { false }, class_guard)
+      cache[irep.label] = compute_for_mode(irep, nil_unanswerable || ->(_name) { false }, class_guard)
     end
     states && states[idx]
+  end
+
+  # BC2CPP_IR_NIL_ESCAPE=1 answers from the IR flow (Flow); =compare answers from the legacy walk and logs where
+  # the two disagree. Anything else is the legacy walk.
+  def compute_for_mode(irep, nil_unanswerable, class_guard)
+    case ENV['BC2CPP_IR_NIL_ESCAPE']
+    when '1' then Flow.compute(irep, nil_unanswerable, class_guard)
+    when 'compare'
+      legacy = compute(irep, nil_unanswerable, class_guard)
+      Flow.report_difference(irep, legacy, Flow.compute(irep, nil_unanswerable, class_guard))
+      legacy
+    else compute(irep, nil_unanswerable, class_guard)
+    end
   end
 
   def compute(irep, nil_unanswerable, class_guard = nil)
@@ -214,5 +227,170 @@ module NilNarrowing
     return nil if ((k + 1)...p).any? { |j| prog.may_write?(prog.instructions[j].source, src) }
 
     src
+  end
+
+  # NIL_NARROWING on the IR's dataflow: the same must-analysis, with the "r was copied from b" back-walk replaced
+  # by available copies carried in the state ([:copy, a, b]: a and b hold the same value on every path), and the
+  # ops read from Program#decoded and Program#may_write_at?.
+  module Flow
+    module_function
+
+    def compute(irep, nil_unanswerable, class_guard = nil)
+      prog = BytecodeIR.for(irep)
+      all_preds = prog.instruction_predecessors(include_handlers: true) or return nil
+      normal_preds = prog.instruction_predecessors or return nil
+      # An edge that is both a normal successor and a handler edge is taken as a handler edge.
+      raised = prog.handler_edges.to_set { |edge| [edge.src, edge.target] }
+      states = Array.new(prog.instructions.length, :all)
+      env = { irep: irep, prog: prog, decoded: prog.decoded, nil_unanswerable: nil_unanswerable,
+              class_guard: class_guard, opaque: BytecodeIR.own_upvar_written_regs(irep), all_preds: all_preds,
+              raised: raised, states: states }
+      loop do
+        changed = false
+        states.each_index do |i|
+          acc = :all
+          all_preds[i].each do |p|
+            out = if p == BytecodeIR::ENTRY then Set.new
+                  else edge_out(env, states[p], p, i, normal_preds[i].include?(p) && !raised.include?([p, i]))
+                  end
+            acc = NilNarrowing.meet(acc, out)
+          end
+          next if acc == states[i]
+
+          states[i] = acc
+          changed = true
+        end
+        break unless changed
+      end
+      states.map { |s| s == :all ? s : s.freeze }.freeze
+    end
+
+    def copy_fact?(fact)
+      fact.is_a?(Array) && fact.first == :copy
+    end
+
+    def class_fact?(fact)
+      fact.is_a?(Array) && fact.size == 2
+    end
+
+    def fact_regs(fact)
+      return [fact] unless fact.is_a?(Array)
+
+      copy_fact?(fact) ? fact.drop(1) : [fact.first]
+    end
+
+    def copy(a, b)
+      a.to_i < b.to_i ? [:copy, a, b] : [:copy, b, a]
+    end
+
+    # Registers that hold the same value as +reg+ on entry, by +state+'s available copies.
+    def partners(state, reg)
+      state.filter_map do |f|
+        next unless copy_fact?(f) && f.include?(reg)
+
+        f[1] == reg ? f[2] : f[1]
+      end
+    end
+
+    def edge_out(env, state, p, i, normal)
+      return :all if state == :all
+      return :all if normal && env[:class_guard]&.raise_never_returns?(env[:irep], p)
+
+      prog = env[:prog]
+      out = state.reject { |f| fact_regs(f).any? { |r| prog.may_write_at?(p, r) } }.to_set
+      return out unless normal
+
+      op = env[:decoded][p].op
+      return Set.new if op == 'JMPUW'
+      return move(env, state, out, p) if op == 'MOVE'
+
+      tested = narrowed_register(env, p, i)
+      return out unless tested
+
+      ([tested] + partners(state, tested)).each do |r|
+        out << r unless env[:opaque].include?(r) || prog.may_write_at?(p, r)
+      end
+      is_a_facts(env, p, tested).each { |f| out << f.first << f }
+      out
+    end
+
+    # `MOVE dest src`: dest takes src's facts and becomes a copy of src and of everything src is a copy of.
+    def move(env, state, out, p)
+      dest, src = env[:prog].instruction_at(p).source.regs
+      return out unless dest && src && dest != src
+
+      out << dest if state.include?(src)
+      state.each { |f| out << [dest, f.last] if class_fact?(f) && f.first == src }
+      return out if env[:opaque].include?(dest) || env[:opaque].include?(src)
+
+      out << copy(dest, src)
+      partners(state, src).each { |r| out << copy(dest, r) unless r == dest }
+      out
+    end
+
+    # IS_A_GUARD: [b, K] for each copy b of the receiver of `SEND tested :is_a? K` at p - 1, when the edge out of
+    # the truth test at p (already known to be the edge a truthy +tested+ takes) is that SEND's true edge.
+    def is_a_facts(env, p, tested)
+      guard = env[:class_guard]
+      return [] unless guard && TRUTH_TESTS.include?(env[:decoded][p].op) && p.positive?
+      # The test reads the SEND's result only when the SEND is its one way in, on a normal edge.
+      return [] unless env[:all_preds][p].to_a == [p - 1] && !env[:raised].include?([p - 1, p])
+
+      prog = env[:prog]
+      send = prog.instruction_at(p - 1).source
+      return [] unless send.op == 'SEND' && IS_A_NAMES.include?(send.sym) && send.reg == tested
+
+      klass = guard.is_a_class(env[:irep], p - 1) or return []
+      before = env[:states][p - 1]
+      return [] if before == :all
+
+      partners(before, tested).filter_map do |src|
+        next if env[:opaque].include?(src) || prog.may_write_at?(p - 1, src) || prog.may_write_at?(p, src)
+
+        [src, klass]
+      end
+    end
+
+    # The register a non-nil value must be in for control to take the edge p -> i, or nil.
+    def narrowed_register(env, p, i)
+      d = env[:decoded][p]
+      insn = env[:prog].instruction_at(p).source
+      if d.cond
+        return nil if d.goto.nil? || d.goto == p + 1
+
+        taken = i == d.goto
+        return insn.reg if d.cond == BytecodeIR::COND_IF ? taken : !taken
+
+        return nil
+      end
+      return nil unless RECEIVER_CALLS.include?(d.op) && insn.sym && env[:nil_unanswerable].call(insn.sym)
+
+      # The receiver register itself now holds the call's result: only its copies keep the receiver.
+      insn.reg
+    end
+
+    # BC2CPP_IR_NIL_ESCAPE=compare: one stderr line per instruction where the legacy walk and this flow prove
+    # different register or class facts.
+    def report_difference(irep, legacy, ir)
+      if legacy.nil? != ir.nil?
+        return warn("[bc2cpp] NIL_NARROWING_IR_DIFF #{irep.label} resolved=#{!legacy.nil?}/#{!ir.nil?}")
+      end
+      return if legacy.nil?
+
+      legacy.each_index do |i|
+        a = comparable(legacy[i])
+        b = comparable(ir[i])
+        next if a == b
+
+        only_legacy = a == :all || b == :all ? [a.inspect] : (a - b).to_a
+        only_ir = a == :all || b == :all ? [b.inspect] : (b - a).to_a
+        warn "[bc2cpp] NIL_NARROWING_IR_DIFF #{irep.label} #{i} legacy_only=#{only_legacy.inspect} " \
+             "ir_only=#{only_ir.inspect}"
+      end
+    end
+
+    def comparable(state)
+      state == :all ? :all : state.reject { |f| copy_fact?(f) }.to_set
+    end
   end
 end

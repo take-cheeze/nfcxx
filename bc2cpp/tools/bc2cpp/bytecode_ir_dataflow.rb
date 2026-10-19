@@ -325,6 +325,11 @@ module BytecodeIR
       dataflow_effect(insn, reg.to_s) != :pass
     end
 
+    # may_write? of the instruction at +index+, from the walk's per-instruction effect table.
+    def may_write_at?(index, reg)
+      effect_of(dataflow_effect_at(index), reg.to_s) != :pass
+    end
+
     private
 
     # On the audited list of ops that write at most their leading register.
