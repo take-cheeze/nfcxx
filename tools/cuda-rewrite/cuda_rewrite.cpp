@@ -1294,7 +1294,24 @@ bool local_constant_visible(const std::string &text, long pos, const std::string
 }
 
 // Ruby resolve_local_constants (line 517): the template arguments of a launch with its local constants' values.
-std::string resolve_local_constants(const std::string &text, const std::string &targs, long pos) {
+std::string resolve_local_constants(const std::string &text, const std::string &raw_targs, long pos) {
+  // Comments are not part of the arguments: `rms_norm_f32_dispatch</*do_multiply*/false, do_scale>` names no local.
+  std::string targs;
+  for (long c = 0; c < (long)raw_targs.size();) {
+    if (raw_targs.compare((size_t)c, 2, "/*") == 0) {
+      long close = str_index(raw_targs, "*/", c + 2);
+      c = close < 0 ? (long)raw_targs.size() : close + 2;
+      targs.push_back(' ');
+      continue;
+    }
+    if (raw_targs.compare((size_t)c, 2, "//") == 0) {
+      while (c < (long)raw_targs.size() && raw_targs[(size_t)c] != '\n') c += 1;
+      continue;
+    }
+    targs.push_back(raw_targs[(size_t)c]);
+    c += 1;
+  }
+  targs = strip(targs);
   bool has_ident = false;
   for (char c : targs)
     if (ident_c((unsigned char)c) && !(c >= '0' && c <= '9')) has_ident = true;
@@ -1767,7 +1784,11 @@ long additive_op(const std::string &a) {
 }
 
 // Ruby argument_type (line 1384): the type of a launch argument: a literal's, or the declared type of an identifier.
-std::vector<std::string> argument_type(const std::string &text, long pos, const std::string &arg, const std::string &nm) {
+std::string blank_comments(const std::string &text);
+std::vector<std::string> argument_type(const std::string &text_raw, long pos, const std::string &arg, const std::string &nm) {
+  // The declaration is searched in code: a comment after a declaration (`const ggml_tensor * src1 = ...; // src1 ...`) is
+  // not part of the type of the next one. Comments are blanked, so the positions do not change.
+  const std::string text = blank_comments(text_raw);
   bool all_num = !arg.empty();
   for (char c : arg)
     if (!((c >= '0' && c <= '9') || c == 'u' || c == 'U' || c == 'l' || c == 'L')) all_num = false;
@@ -2651,8 +2672,9 @@ std::set<std::string> template_param_names(const std::string &text) {
     long close = matching_angle(text, k);
     if (close < 0) continue;
     for (const auto &part : split_top(sl(text, k + 1, close))) {
-      std::vector<std::string> toks = tokens_of(ruby_split_eq0(part));
-      if (!toks.empty() && !toks.back().empty() && ident_c((unsigned char)toks.back()[0])) names.insert(toks.back());
+      // The declared name (a function-pointer parameter `float (*op)(float)` is named by its `(*op)`, not its last token).
+      std::string nm = declared_name(strip(ruby_split_eq0(part)));
+      if (!nm.empty() && ident_c((unsigned char)nm[0])) names.insert(nm);
     }
   }
   return names;
