@@ -21,6 +21,10 @@ module Bc2cppCxx
   module_function
 
   # The sccache to put in front of a compile, or nil.
+  def reset_launcher!
+    remove_instance_variable(:@launcher) if defined?(@launcher)
+  end
+
   def launcher
     return @launcher if defined?(@launcher)
 
@@ -64,7 +68,7 @@ module Bc2cppCxx
   def plan(args)
     return [[[*compiler, *args], {}]] if launcher.nil?
 
-    split(args) || [[[*compiler, *args], {}]]
+    split(args) || (args.include?('-c') ? [[[*launched, *args], {}]] : [[[*compiler, *args], {}]])
   end
 
   # The cached compile and the link, or nil when `args` is not a single-source build.
@@ -73,7 +77,7 @@ module Bc2cppCxx
 
     out_at = args.index('-o')
     sources = args.grep(SOURCE)
-    return nil if out_at.nil? || sources.size != 1
+    return nil if out_at.nil? || out_at + 1 >= args.size || sources.size != 1
 
     source = sources.first
     output = args[out_at + 1]
@@ -102,10 +106,10 @@ module Bc2cppCxx
   end
 
   # Drop-in for `Open3.capture3('g++', *args)`: [stdout, stderr, status] of the failing step, else of the last.
-  def capture3(*args)
+  def capture3(*args, **options)
     results = []
     plan(args).each do |argv, extra|
-      results << Open3.capture3(*argv, **extra)
+      results << Open3.capture3(*argv, **options, **extra)
       break unless results.last.last.success?
     end
     [results.sum('') { |r| r[0] }, results.sum('') { |r| r[1] }, results.last.last]
