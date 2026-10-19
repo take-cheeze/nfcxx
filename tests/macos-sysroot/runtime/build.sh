@@ -87,6 +87,6 @@ clang++ "${tgt[@]}" "${cxxinc[@]}" -I "$src/libunwind/include" -D_LIBCPP_ENABLE_
 rm -f libnfcxx-darwin-rt.a
 # Only members with no symbol in libC.a go into the archive. libC.a (EDG's runtime) owns the EH, type_info,
 # handler and new/delete names that the other members define; the real libc++ on the Mac exports the libc++ names at run time.
-llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
+llvm-ar rcs libnfcxx-darwin-rt.a streambuf_seekpos.o atomic.o atomic_fetch.o abort_message.o cxa_exception.o cxa_handlers.o cxa_exception_storage.o cxa_personality.o fallback_malloc.o
 rm -rf "$llvm"
 echo "built $out/libnfcxx-darwin-rt.a from llvm-project $pin"
