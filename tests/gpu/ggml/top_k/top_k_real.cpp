@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <vector>
 
 // Values in [-4, 4): a fixed LCG so the run is repeatable. ties: quantized to 1/8, 64 distinct values.
@@ -29,6 +30,27 @@ static float next_value(uint32_t & state, bool ties) {
     const float u = (float) ((state >> 8) & 0xFFFFFF) / (float) 0x1000000;
     const float v = -4.0f + 8.0f * u;
     return ties ? std::floor(v * 8.0f) / 8.0f : v;
+}
+
+// The pool the split path allocates its state from (ctx.pool() is inline in common.hpp and calls new_pool_for_device). The
+// backend's own new_pool_for_device, in libggml-sycl.so, takes a queue of the oneAPI ABI (sycl::_V1::queue), which the nfcxx
+// queue type here does not match, so the link cannot bind it; this TU defines the function itself. It is a plain USM
+// allocator with no reuse, which changes only the allocation, not the kernel under test.
+namespace {
+struct top_k_test_pool : ggml_sycl_pool {
+    sycl::queue * q = nullptr;
+    void * alloc(size_t size, size_t * actual_size) override {
+        *actual_size = size;
+        return sycl::malloc_shared<char>(size ? size : 1, *q);
+    }
+    void free(void * ptr, size_t) override { sycl::free(ptr, *q); }
+};
+}
+
+std::unique_ptr<ggml_sycl_pool> ggml_backend_sycl_context::new_pool_for_device(queue_ptr qptr, int) {
+    auto p = std::make_unique<top_k_test_pool>();
+    p->q = qptr;
+    return p;
 }
 
 // One check: the top-k of nrows rows of ncols columns, through the real ggml_sycl_top_k_radix.
