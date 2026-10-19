@@ -5,6 +5,7 @@
 require_relative 'define_method_sites'
 require_relative 'alias_sites'
 require_relative 'codegen_declared_returns'
+require_relative 'bytecode_ir_returns'
 
 class CodeGen
   # ---------------------------------------------------------------------------
@@ -294,6 +295,37 @@ class CodeGen
   # walk and barriers with ADR 0198's level-aware block-write barrier, minus the
   # protected range (a codegen concern, not a value one).
   def return_value_sources(irep, idx, reg)
+    case ir_return_sites_mode
+    when '1' then ir_return_value_sources(irep, idx, reg)
+    when 'compare'
+      old = legacy_return_value_sources(irep, idx, reg)
+      refusal = {}
+      ir = BytecodeIR.for(irep).reaching_definitions(idx, reg.to_s, opaque_regs: BytecodeIR.own_upvar_written_regs(irep),
+                                                           max_states: fixnum_proof_max_states(irep),
+                                                           through_handlers: true, refusal: refusal)
+      mine = ir_return_value_sources(irep, idx, reg)
+      norm = ->(list) { list&.map(&:to_s)&.uniq&.sort }
+      unless norm.call(old) == norm.call(mine)
+        warn "[bc2cpp] IR_RETURN_SITES sources #{irep.label}@#{idx}(#{irep.instructions[idx].op}) R#{reg} " \
+             "old=#{norm.call(old).inspect} ir=#{norm.call(mine).inspect} defs=#{ir&.map { |d| [d.index, d.reg] }.inspect} " \
+             "cause=#{refusal[:cause]}"
+      end
+      old
+    else legacy_return_value_sources(irep, idx, reg)
+    end
+  end
+
+  # BC2CPP_IR_RETURN_SITES (stage switch): '1' answers return_value_sources and return_write_dominates? from
+  # BytecodeIR; 'compare' asks both, logs every disagreement and keeps the old answer.
+  def ir_return_sites_mode
+    @ir_return_sites_mode ||= ENV.fetch('BC2CPP_IR_RETURN_SITES', '0')
+  end
+
+  def ir_return_value_sources(irep, idx, reg)
+    BytecodeIR.return_sources(irep, idx, reg, max_states: fixnum_proof_max_states(irep))
+  end
+
+  def legacy_return_value_sources(irep, idx, reg)
     preds = fixnum_proof_preds(irep)
     return nil unless preds
 
@@ -524,6 +556,21 @@ class CodeGen
   # every path? FIXNUM_OPERAND_PROOF's own region test, over its audited
   # step-over whitelist (a hidden writer such as RESCUE/APOST refuses).
   def return_write_dominates?(irep, w_idx, use_idx, reg)
+    case ir_return_sites_mode
+    when '1' then BytecodeIR.write_dominates?(irep, w_idx, use_idx, reg.to_s)
+    when 'compare'
+      old = legacy_return_write_dominates?(irep, w_idx, use_idx, reg)
+      ir = BytecodeIR.write_dominates?(irep, w_idx, use_idx, reg.to_s)
+      unless old == ir
+        warn "[bc2cpp] IR_RETURN_SITES dominates #{irep.label} w=#{w_idx}(#{w_idx >= 0 ? irep.instructions[w_idx].op : 'ENTRY'}) " \
+             "use=#{use_idx}(#{irep.instructions[use_idx]&.op}) R#{reg} old=#{old} ir=#{ir}"
+      end
+      old
+    else legacy_return_write_dominates?(irep, w_idx, use_idx, reg)
+    end
+  end
+
+  def legacy_return_write_dominates?(irep, w_idx, use_idx, reg)
     ctx = fixnum_proof_ctx(irep)
     return false if own_upvar_written_regs(irep).include?(reg)
 
