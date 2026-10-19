@@ -66,6 +66,7 @@ cudatmp=""
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
+cu_keep=""   # with -c: the directory the device images are kept in (the link re-reads the copy, and the copy names them)
 cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
   [ ${#cu_inputs[@]} -gt 0 ] || return 0
   cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT
@@ -78,6 +79,7 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     local key; key=$(realpath -m "$obj" | sha1sum | cut -c1-16)
     dir=${NFCXX_CU_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nfcxx}/cu/$key
     mkdir -p "$dir"
+    cu_keep=$dir
   fi
   local src copy i sdir
   for src in ${cu_inputs[@]+"${cu_inputs[@]}"}; do
@@ -163,8 +165,9 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   [ -x "$root/build/pathb-ptx-emit" ] || make -s -C "$root/tools/pathb-ptx-emit" || exit 1
   # The kernels are partitioned into modules within the budgets (NFCXX_CUDA_MAX_CONST_BYTES: the constant data a module
   # references, 64 KB is ptxas's limit; NFCXX_CUDA_MAX_PTX_LINES: its functions). A file that fits one module has one
-  # group. Each group is one PTX module: $dev.groups/gNNNN.ptx and its kernels in groups.txt.
-  local groups=$dev.groups
+  # group. Each group is one PTX module: $base.groups/gNNNN.ptx and its kernels in groups.txt.
+  # The images are the copy's .incbin files: with -c they are kept beside the copy, which the link re-reads (cu_prepare).
+  local groups=${cu_keep:-$cudatmp}/$base.groups
   rm -rf "$groups"
   "$root/build/pathb-ptx-emit" --emit --sm=$sm --groups-dir="$groups" \
     --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-60000} \
