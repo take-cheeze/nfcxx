@@ -2892,11 +2892,21 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
     std::vector<std::vector<std::string>> insts;
     if (outer.has_qual) insts = member_instances(outer, text);
     else insts = template_instances(outer.fname, text, {}, overload_key(outer.fname, (long)outer.names.size(), outer.parts, outer.min_parts));
-    // The same instance reached from two call sites (a macro expanded twice) is one dispatch specialization.
+    // The same instance reached from two call sites (a macro expanded twice, or written as 8/8 and 1) is one dispatch
+    // specialization: integer arguments are compared by value.
     {
-      std::vector<std::vector<std::string>> uniq;
-      for (const auto &inst : insts)
-        if (std::find(uniq.begin(), uniq.end(), inst) == uniq.end()) uniq.push_back(inst);
+      std::vector<std::vector<std::string>> uniq, keys;
+      for (const auto &inst : insts) {
+        std::vector<std::string> key;
+        for (const auto &arg : inst) {
+          long nv;
+          key.push_back(int_expr_value(text, tl.pos, arg, nv, 0) ? std::to_string(nv) : arg);
+        }
+        if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+          keys.push_back(key);
+          uniq.push_back(inst);
+        }
+      }
       insts = uniq;
     }
     // A free template that the unit never calls (the explicit calls live in other units, as launch_fattn's do for
@@ -6560,6 +6570,21 @@ std::string expand_table_macros(const std::string &text) {
     macros[name] = {params, body};
   }
   if (macros.empty()) return text;
+  // An integer #define (NGRID_IQ1S) is its value in the table's size: the device pass keeps a table whose size is a literal.
+  std::map<std::string, std::string> ints;
+  for (const auto &line : lines_with_newlines(text)) {
+    std::string s = strip(line);
+    if (s.compare(0, 7, "#define") != 0) continue;
+    std::string r = strip(s.substr(7));
+    long sp = 0;
+    while (sp < (long)r.size() && ident_c((unsigned char)r[(size_t)sp])) sp += 1;
+    if (sp == 0 || sp >= (long)r.size() || r[(size_t)sp] != ' ') continue;
+    std::string v = strip(sl(r, sp, (long)r.size()));
+    bool digits = !v.empty();
+    for (char c : v)
+      if (c < '0' || c > '9') digits = false;
+    if (digits) ints[sl(r, 0, sp)] = v;
+  }
   std::string out;
   for (const auto &line : lines_with_newlines(text)) {
     if (!line.empty() && strip(line)[0] == '#') {
@@ -6592,7 +6617,11 @@ std::string expand_table_macros(const std::string &text) {
         continue;
       }
       std::vector<std::string> args;
-      for (const auto &a : split_top(sl(line, lp + 1, rp))) args.push_back(strip(a));
+      for (const auto &a : split_top(sl(line, lp + 1, rp))) {
+        std::string arg = strip(a);
+        if (ints.count(arg)) arg = ints[arg];
+        args.push_back(arg);
+      }
       if (args.size() == 1 && args[0].empty()) args.clear();
       const auto &params = it->second.first;
       if (args.size() != params.size()) refuse("table macro " + name + " takes " + std::to_string(params.size()) + " arguments");
