@@ -1198,7 +1198,15 @@ if $PROGRAM_NAME == __FILE__
       included_modules: included_modules, prepended_modules: prepended_modules, unknown_mixins: unknown_mixins,
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
       integer_constants: integer_constants, element_site_classes: element_site_classes,
-      hash_element_site_classes: hash_element_site_classes, integer_constant_ranges: integer_constant_ranges
+      hash_element_site_classes: hash_element_site_classes, integer_constant_ranges: integer_constant_ranges,
+      # Report only (CLASS_INTEGER_PROOF): codegen never reads it, so a build without BC2CPP_TYPE_FACTS is unchanged.
+      integer_class_constants: if closed_world.constants_static?
+                                 IntegerConstants.class_admitted(ireps, (native_paths + outside_native).uniq,
+                                                                 (foreign_ruby_srcs + outside_ruby).uniq,
+                                                                 operators_safe: operators_safe)
+                               else
+                                 Set.new
+                               end
     )))
   end
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='

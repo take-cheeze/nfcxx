@@ -37,7 +37,8 @@ module TypeFacts
                    :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, :constant_sites,
                    :modules, :superclass_of, :integer_constants, :signature_arg_types, :signature_contracts,
                    :ir_return_facts, :included_modules, :prepended_modules, :unknown_mixins,
-                   :element_site_classes, :hash_element_site_classes, :integer_constant_ranges, keyword_init: true)
+                   :element_site_classes, :hash_element_site_classes, :integer_constant_ranges,
+                   :integer_class_constants, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
@@ -556,6 +557,26 @@ module TypeFacts
     !world.nil? && world.exact_instances_singleton_free?
   end
 
+  # Non-core native files that name `length` and were read as NOT defining it on String: StringIO#length (an alias on
+  # StringIO), MatchData#length, and two JS property reads. Any other non-core definer refuses the String#length proof.
+  STRING_LENGTH_NOT_STRING_NATIVES = %w[
+    3rd/mruby-stringio/src/stringio.c
+    3rd/mruby-onig-regexp/src/mruby_onig_regexp.c
+    mruby-mvjs/src/mvwebgl.cxx
+    mruby-mvjs/src/mvcanvas.cxx
+  ].freeze
+
+  # The String#length proof of BOOL_COMPARE: stock on String (owner-scoped) and every non-core native `length` definer is
+  # one read as not String's (STRING_LENGTH_NOT_STRING_NATIVES).
+  def string_length_safe?(ctx)
+    native = ctx.gen.instance_variable_get(:@native_name_sources) || {}
+    DeclaredConstants.stock_method?('length', 'String', ctx.registry, ctx.included_modules || {},
+                                    ctx.prepended_modules || {}, ctx.unknown_mixins || []) &&
+      Array(native.fetch('length', [])).none? do |path|
+        !path.match?(ClosedWorld::NATIVE_CORE) && STRING_LENGTH_NOT_STRING_NATIVES.none? { |known| path.end_with?(known) }
+      end
+  end
+
   def const_rows(ctx)
     classes = ctx.container_constants || {}
     pools = ctx.gen.instance_variable_get(:@class_const_pools) || {}
@@ -563,7 +584,13 @@ module TypeFacts
     # NUMERIC_CONSTANT_RANGES: a bare name whose every definition has a Fixnum interval is an Integer. Consulted only
     # after the other producers, so no row that already has a type changes.
     ranges = ctx.integer_constant_ranges || {}
-    sums = DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
+    # CLASS_INTEGER_PROOF (bignum-capable Integer), then the bool and IO proofs below. Each is consulted only after the
+    # producers above, so a row that already has a type does not change.
+    int_classes = ctx.integer_class_constants || Set.new
+    string_length_safe = string_length_safe?(ctx)
+    integer_ops_safe = IntegerConstantRanges.integer_ops_safe?(ctx.registry, ctx.included_modules || {},
+                                                              ctx.prepended_modules || {}, ctx.unknown_mixins || [])
+    sums =DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
                                              array_sum_safe?(ctx), range_safe: ctx.gen.range_to_a_safe?)
     merges = DeclaredConstants.hash_merge_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
                                                 merge_safe: stock_proof(ctx, 'merge', 'Hash'),
@@ -622,6 +649,13 @@ module TypeFacts
         elsif ranges.key?(bare)
           row['type'] = 'Integer'
           row['source'] = 'inferred:integer-range'
+        elsif int_classes.include?(bare)
+          row['type'] = 'Integer'
+          row['source'] = 'inferred:integer-class'
+        elsif DeclaredConstants.bool_compare_site?(irep, site[:idx], site[:reg], string_length_safe: string_length_safe,
+                                                                               integer_ops_safe: integer_ops_safe)
+          row['type'] = 'bool'
+          row['source'] = 'inferred:bool-compare'
         else
           row['reason'] = producer
         end

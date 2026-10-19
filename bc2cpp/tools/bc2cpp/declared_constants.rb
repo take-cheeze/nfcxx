@@ -416,6 +416,8 @@ module DeclaredConstants
 
   # CORE_CONTAINERS: the exact classes whose stock methods the owner proofs cover.
   CORE_CONTAINERS = %w[Array Hash].freeze
+  # STOCK_OWNER_CLASSES: the exact classes stock_method? answers for; String is added for String#length (BOOL_COMPARE).
+  STOCK_OWNER_CLASSES = (CORE_CONTAINERS + %w[String]).freeze
 
   # Whether a call of +name+ on an exact +klass+ instance (Array or Hash) is mruby's own method. The owners that answer
   # it first are the core ancestors of +klass+ (CoreHierarchySigs: Array, Enumerable, Object, Kernel, BasicObject) and
@@ -424,7 +426,7 @@ module DeclaredConstants
   # class) cannot answer an Array or Hash receiver, so it does not. Scoped to the owners because a program-wide name
   # check refuses on the engine's own methods of the same name.
   def stock_method?(name, klass, registry, included_modules, prepended_modules, unknown_mixins)
-    return false unless CORE_CONTAINERS.include?(klass)
+    return false unless STOCK_OWNER_CLASSES.include?(klass)
 
     owners = Set.new(CoreHierarchySigs.ancestors(klass))
     loop do
@@ -583,6 +585,35 @@ module DeclaredConstants
     def fixnum(range)
       range if range && range[0] >= MIN && range[1] <= MAX
     end
+  end
+
+  # BOOL_COMPARE (report-level): the value at +idx+ is `X == Y` (the EQ opcode) whose receiver is `'literal'.length`
+  # and whose argument is an integer literal. Integer#== answers true or false, so the value is a bool. Needs String#length
+  # stock (string_length_safe) and Integer#== stock (integer_ops_safe, the operator gate).
+  def bool_compare_site?(irep, idx, reg, string_length_safe:, integer_ops_safe:)
+    return false unless string_length_safe && integer_ops_safe
+
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
+      insn.op == 'EQ' && string_length_value?(irep, j, cur) && integer_literal_source?(irep, j, insn.regs[1])
+    end == true
+  end
+
+  # The value of +reg+ before +idx+ is `'literal'.length` (SEND0 length on a STRING literal).
+  def string_length_value?(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
+      insn.op == 'SEND0' && insn.sym == 'length' && string_literal_source?(irep, j, cur)
+    end == true
+  end
+
+  def string_literal_source?(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) { |insn| insn.op == 'STRING' } == true
+  end
+
+  # The value of +reg+ before +idx+ is an integer literal (any LOADI-family load, in or out of the Fixnum margin).
+  def integer_literal_source?(irep, idx, reg)
+    return false if reg.nil?
+
+    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) { |insn| insn.op.start_with?('LOADI') } == true
   end
 
   # Prints the outcome, adds the diagnostics to the signature diagnostics and aborts a build on an error.
