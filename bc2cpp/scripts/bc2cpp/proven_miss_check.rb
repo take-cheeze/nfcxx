@@ -62,7 +62,7 @@ Dir.mktmpdir do |dir|
   path = File.join(dir, 'kernel.rb')
   File.write(path, "module Kernel\n  private def loop(&block); end\n  public def pm_public; end\n  def self.pm_s; end\nend\n")
   # ClosedWorld is built by the compiler; only its private outside-source scan is exercised.
-  names = ClosedWorld.allocate.send(:broad_def_names, [path])
+  names = ClosedWorld.broad_def_names([path])
   check.call('`private def loop` (mruby Kernel#loop) counts as an outside definition, not a missing name',
              names >= Set['loop', 'pm_public', 'pm_s'])
 end

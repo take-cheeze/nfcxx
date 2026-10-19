@@ -593,7 +593,8 @@ if $PROGRAM_NAME == __FILE__
     declared_constants = DeclaredConstants.check(
       DeclaredConstants.load(sig_loaded.files, sig_root, registry.values.flatten.map(&:owner).to_set),
       ireps, registry, constant_assignment_sites, integer_constants, outside_bound, container_constants, sig_root,
-      plus_safe: DeclaredConstants.array_sum_safe?(registry, superclass_of, prepended_modules, unknown_mixins)
+      plus_safe: DeclaredConstants.array_sum_safe?(registry, superclass_of, prepended_modules, unknown_mixins),
+      range_safe: DeclaredConstants.range_to_a_safe?(registry, included_modules, prepended_modules, unknown_mixins)
     )
     integer_constants |= declared_constants.integer_names
     declared_constants.containers.each { |name, klass| container_constants[name] ||= klass }
@@ -1194,7 +1195,7 @@ if $PROGRAM_NAME == __FILE__
       root: ENV['BC2CPP_TYPE_FACTS_ROOT'], signature_origins: sig_applied&.origins, signature_locs: sig_applied&.locs,
       signature_diagnostics: sig_applied&.diagnostics&.map(&:to_h), signature_ivars: sig_applied&.ivar_sigs,
       signature_arg_types: sig_applied&.ir_arg_types, signature_contracts: sig_applied,
-      included_modules: included_modules, prepended_modules: prepended_modules,
+      included_modules: included_modules, prepended_modules: prepended_modules, unknown_mixins: unknown_mixins,
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
       integer_constants: integer_constants, element_site_classes: element_site_classes,
       hash_element_site_classes: hash_element_site_classes, integer_constant_ranges: integer_constant_ranges

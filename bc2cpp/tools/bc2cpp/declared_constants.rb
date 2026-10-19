@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'core_hierarchy_sigs'
 require_relative 'integer_constants'
 require_relative 'irep_scans'
 require_relative 'native_sigs'
@@ -99,7 +100,7 @@ module DeclaredConstants
   # outside the program's bytecode (nil: unknown); `container_constants` is read for trace_new_target only. The
   # proven integer constants are not needed: the evaluator re-derives every binding it reads.
   def check(entries, ireps, registry, sites, _integer_constants, poisoned, container_constants, display_root,
-            plus_safe:)
+            plus_safe:, range_safe:)
     result = Result.new(integer_names: Set.new, containers: {}, elements: {}, diagnostics: [], report: [],
                         locs: entries.map(&:loc))
     return result if entries.empty?
@@ -122,7 +123,7 @@ module DeclaredConstants
     blocked = poisoned ? poisoned | class_named : nil
     evaluator = Evaluator.new(bindings, blocked || AllNames)
     # The same sum names const_rows reports (ARRAY_SUM), so a declared `X: Array` accepts exactly what the rows type.
-    sums = array_sum_names(ireps, sites, registry, container_constants, plus_safe)
+    sums = array_sum_names(ireps, sites, registry, container_constants, plus_safe, range_safe: range_safe)
     rel = ->(path) { display_root ? path.to_s.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : path.to_s }
     entries.each do |entry|
       diag = lambda do |severity, where, message|
@@ -266,7 +267,8 @@ module DeclaredConstants
   # ARRAY_SUM (type_facts const_rows): `(A + B).freeze` whose two operands both prove Array. Array#+ answers a fresh
   # Array (or raises), so the sum is an Array when `plus_safe` holds (no program or foreign `+` or `freeze` that can
   # answer something else; see TypeFacts.array_sum_safe?). An operand is proven by trace_new_target over `containers`
-  # (which carries the sum constants already proven, see array_sum_names), by the array scan, or by a nested sum.
+  # (which carries the sum constants already proven, see array_sum_names), by the array scan, by a literal Range's
+  # to_a (range_to_a_source?, only when `range_safe`), or by a nested sum.
   SUM_MAX_DEPTH = 8
 
   # CodeGen#declared_array_plus_safe?: no Ruby `+` on Array (or a subclass), and Array is not prepended or mixed into
@@ -294,22 +296,83 @@ module DeclaredConstants
       (registry['freeze'] || []).none?(&:irep)
   end
 
-  def array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: nil, depth: 0)
+  # Range#to_a (mruby-range-ext mrblib/range.rb) answers a fresh Array: `__num_to_a` for Integer endpoints, else
+  # Enumerable#to_a (`super`), which calls Range#each, whose String arm calls String#upto. Each of those must be the
+  # stock definition, so no Ruby definition of these names may sit on Range, Enumerable or String, or on a module
+  # mixed into them, and none of the three may have a prepend or an unresolved mixin. Scoped to those owners: a
+  # program-wide name check would refuse on the engine's own `each` methods (lcf.rb, game.rb).
+  # CodeGen#range_to_a_safe? delegates here, so the declared check and the rows read one predicate.
+  RANGE_TO_A_NAMES = %w[to_a each upto __num_to_a].freeze
+  RANGE_TO_A_OWNERS = %w[Range Enumerable String].freeze
+
+  def range_to_a_safe?(registry, included_modules, prepended_modules, unknown_mixins)
+    touched = RANGE_TO_A_OWNERS + RANGE_TO_A_OWNERS.flat_map { |owner| Array(included_modules[owner]) }
+    mixins_resolved = touched.none? do |owner|
+      unknown_mixins.include?(owner) || !Array(prepended_modules[owner]).empty?
+    end
+    defined_on_touched = RANGE_TO_A_NAMES.any? do |name|
+      (registry[name] || []).any? { |d| d.irep && touched.include?(d.owner) }
+    end
+    mixins_resolved && !defined_on_touched
+  end
+
+  def array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: nil, depth: 0, range_safe: false)
     return false unless plus_safe && depth < SUM_MAX_DEPTH
 
     j, insn = sum_writer(irep, idx, reg)
     return false unless insn&.op == 'ADD' && insn.reg && insn.paren_reg
 
-    operand = ->(r) { proven_array_value?(irep, j, r, registry, containers, plus_safe, owner, depth + 1) }
+    operand = lambda do |r|
+      proven_array_value?(irep, j, r, registry, containers, plus_safe, owner, depth + 1, range_safe: range_safe)
+    end
     operand.call(insn.reg) && operand.call(insn.paren_reg)
   end
 
-  def proven_array_value?(irep, idx, reg, registry, containers, plus_safe, owner, depth)
+  def proven_array_value?(irep, idx, reg, registry, containers, plus_safe, owner, depth, range_safe: false)
     return true if trace_new_target(irep, idx, reg, registry: registry, container_constants: containers,
                                                     owner: owner) == 'Array'
     return true if proven_array_source_scan(irep, idx, reg, registry)
+    return true if range_safe && range_to_a_source?(irep, idx, reg)
 
-    array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: owner, depth: depth)
+    array_sum_source?(irep, idx, reg, registry, containers, plus_safe, owner: owner, depth: depth,
+                                                                        range_safe: range_safe)
+  end
+
+  # `(lo..hi).to_a` over two literal endpoints of one kind, a String literal (STRING) or an Integer literal (LOADI*):
+  # Range#to_a answers a fresh Array or raises (CodeGen#range_to_a_safe? holds the stock-method condition). The
+  # receiver of the to_a is the dominating RANGE_INC / RANGE_EXC, and each endpoint is the dominating writer of its
+  # register before that range instruction.
+  LITERAL_INTEGER_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
+
+  def range_to_a_source?(irep, idx, reg)
+    j, call, recv = dominating_writer(irep, idx, reg)
+    return false unless call&.op == 'SEND0' && call.sym == 'to_a'
+
+    k, range = dominating_writer(irep, j, recv)
+    return false unless range && %w[RANGE_INC RANGE_EXC].include?(range.op) && range.reg
+
+    lo = literal_kind(irep, k, range.reg)
+    hi = literal_kind(irep, k, (range.reg.to_i + 1).to_s)
+    !lo.nil? && lo == hi
+  end
+
+  # The writer of +reg+ before +idx+ that dominates the read, skipping `.freeze` (which answers its receiver):
+  # [index, instruction, register holding the value at that index], or nil.
+  def dominating_writer(irep, idx, reg)
+    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, cur|
+      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+
+      [j, insn, cur]
+    end
+  end
+
+  def literal_kind(irep, idx, reg)
+    _j, insn = dominating_writer(irep, idx, reg)
+    return nil unless insn
+    return :String if insn.op == 'STRING'
+    return :Integer if LITERAL_INTEGER_OP.match?(insn.op)
+
+    nil
   end
 
   # The writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil. Dominating: a join between
@@ -325,7 +388,7 @@ module DeclaredConstants
   # The qualified names whose every assignment is an Array sum, as { name => 'Array' }. A sum over another sum constant
   # counts once that one is proven, so the set only grows and the loop ends when a pass adds nothing. Names already in
   # `containers` (literal or declared) are left to their own proofs.
-  def array_sum_names(ireps, sites, registry, containers, plus_safe)
+  def array_sum_names(ireps, sites, registry, containers, plus_safe, range_safe: false)
     return {} unless plus_safe
 
     by_name = sites.group_by { |s| s[:name] }
@@ -336,7 +399,8 @@ module DeclaredConstants
         !known.key?(name) && !containers.key?(name) &&
           group.all? do |s|
             irep = ireps[s[:irep]]
-            irep && array_sum_source?(irep, s[:idx], s[:reg], registry, merged, plus_safe, owner: s[:owner])
+            irep && array_sum_source?(irep, s[:idx], s[:reg], registry, merged, plus_safe, owner: s[:owner],
+                                                                                           range_safe: range_safe)
           end
       end
       break if grown.empty?
@@ -344,6 +408,81 @@ module DeclaredConstants
       grown.each_key { |name| known[name] = 'Array' }
     end
     known
+  end
+
+  # ---------------------------------------------------------------------------------------------- report-level owners
+  # The owner-scoped proofs below feed TypeFacts const_rows only. The declared check and CodeGen keep their own
+  # program-wide predicates, so generated code is unchanged by them.
+
+  # CORE_CONTAINERS: the exact classes whose stock methods the owner proofs cover.
+  CORE_CONTAINERS = %w[Array Hash].freeze
+
+  # Whether a call of +name+ on an exact +klass+ instance (Array or Hash) is mruby's own method. The owners that answer
+  # it first are the core ancestors of +klass+ (CoreHierarchySigs: Array, Enumerable, Object, Kernel, BasicObject) and
+  # every module mixed into those, transitively. A Ruby definition on one of them, a prepend on one of them, or an
+  # unresolved mixin into one of them refuses the proof. A Ruby definition anywhere else (Graphics.freeze, a game
+  # class) cannot answer an Array or Hash receiver, so it does not. Scoped to the owners because a program-wide name
+  # check refuses on the engine's own methods of the same name.
+  def stock_method?(name, klass, registry, included_modules, prepended_modules, unknown_mixins)
+    return false unless CORE_CONTAINERS.include?(klass)
+
+    owners = Set.new(CoreHierarchySigs.ancestors(klass))
+    loop do
+      grown = owners.flat_map { |owner| Array(included_modules[owner]) }.reject { |m| owners.include?(m) }
+      break if grown.empty?
+
+      owners.merge(grown)
+    end
+    return false if owners.any? { |owner| unknown_mixins.include?(owner) || !Array(prepended_modules[owner]).empty? }
+
+    (registry[name] || []).none? { |d| owners.include?(d.owner) }
+  end
+
+  # Whether the value of +reg+ at +idx+ is the result of a `.freeze` (the first writer, past moves, is a SEND0 freeze).
+  # A constant whose value is frozen needs the stock freeze proof to be typed by its literal class.
+  def frozen_at?(irep, idx, reg)
+    found = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, _j, _cur|
+      insn.op == 'SEND0' && insn.sym == 'freeze'
+    end
+    found == true
+  end
+
+  # `R.merge(H)` at +idx+: the one-argument SEND `merge` whose receiver proves exactly Hash (a Hash literal, or a constant
+  # the containers say is a Hash). Hash#merge answers a fresh Hash (or raises), so the result is a Hash when
+  # `merge_safe` (stock_method? on Hash) and `singleton_free` hold: no singleton `merge` can sit on the receiver.
+  def hash_merge_source?(irep, idx, reg, registry, containers, merge_safe:, singleton_free:, owner: nil)
+    return false unless merge_safe && singleton_free
+
+    j, insn = merge_writer(irep, idx, reg)
+    return false unless insn&.op == 'SEND' && insn.sym == 'merge' && insn.argc.to_i == 1 && insn.reg
+
+    # `owner` is the lexical scope of the assignment: a bare constant receiver (`SAVE_MOVABLE.merge`) resolves in it.
+    trace_new_target(irep, j, insn.reg, registry: registry, container_constants: containers, owner: owner) == 'Hash'
+  end
+
+  # The writer of +reg+ before +idx+ that dominates the read, as [index, instruction], or nil (see sum_writer).
+  def merge_writer(irep, idx, reg)
+    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, follow_moves: true) do |insn, j, _cur|
+      [j, insn]
+    end
+  end
+
+  # The qualified names whose every assignment is a Hash merge, as { name => 'Hash' } (see hash_merge_source?).
+  def hash_merge_names(ireps, sites, registry, containers, merge_safe:, singleton_free:)
+    return {} unless merge_safe && singleton_free
+
+    by_name = sites.group_by { |s| s[:name] }
+    by_name.each_with_object({}) do |(name, group), known|
+      next if containers.key?(name)
+
+      proven = group.all? do |s|
+        irep = ireps[s[:irep]]
+        irep && hash_merge_source?(irep, s[:idx], s[:reg], registry, containers, merge_safe: merge_safe,
+                                                                               singleton_free: singleton_free,
+                                                                               owner: s[:owner])
+      end
+      known[name] = 'Hash' if proven
+    end
   end
 
   # Fixnum intervals of constant expressions over integer literals and other constants. A constant read is keyed by
