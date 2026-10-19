@@ -7,6 +7,7 @@ require_relative 'ir_call_graph_types'
 require_relative 'ir_native_expression_types'
 require_relative 'readonly_call_effects'
 require_relative 'call_context_arguments'
+require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir_returns'
 
 # CodeGen: RETURN_CLASS_TABLE (ADR 0289).
@@ -50,7 +51,7 @@ class CodeGen
     def nil_raises?(_sym) = false
 
     def ivar_slots(irep)
-      irep.instructions.filter_map { |insn| insn.ivar if %w[GETIV SETIV].include?(insn.op) }.uniq.sort
+      BytecodeIR.for(irep).instructions_with_op('GETIV', 'SETIV').filter_map(&:ivar).uniq.sort
     end
 
     def send_mask(irep, index, insn, state)
@@ -480,7 +481,7 @@ class CodeGen
     return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
 
     insn = irep.instructions[index]
-    return nil unless %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].include?(insn.op)
+    return nil unless BytecodeIR::Ops::SEND.include?(insn.op)
 
     state = return_class_states(irep)&.[](index)
     return nil unless state
