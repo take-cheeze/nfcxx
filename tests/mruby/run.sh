@@ -23,7 +23,6 @@ root=$PWD; oracle=$root/tests/mruby/oracle; clang=${CLANG:-clang}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0; skip=0
 
-command -v python3 >/dev/null || { echo "SKIP mruby: python3 not installed"; exit 0; }
 if [ ! -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ]; then
   command -v ruby >/dev/null || { echo "SKIP mruby: ruby (needed to build mruby) not installed"; exit 0; }
   "$root/scripts/setup-mruby.sh" || { echo "FAIL mruby: setup-mruby.sh failed"; exit 1; }

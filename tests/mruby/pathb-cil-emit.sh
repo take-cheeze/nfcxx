@@ -12,7 +12,6 @@
 # The usage is `pathb-cil-emit FILE.ir OUT.json` (or `-` for stdin); the fragment goes to OUT.json.
 cd "$(dirname "$0")/../.."
 root=$PWD; oracle=$root/tests/mruby/oracle; here=$root/tests/mruby/pathb-cil-edge
-command -v python3 >/dev/null || { echo "SKIP pathb-cil-emit: python3 not installed"; exit 0; }
 [ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP pathb-cil-emit: no mruby (scripts/setup-mruby.sh)"; exit 0; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; runs=0; emitted=0; refused=0; errors=0; bytes=0
@@ -28,7 +27,7 @@ cil_both() {
   done
   rm -f "$tmp/py.json" "$tmp/rb.json"
   runs=$((runs + 1))
-  python3 "$oracle/pathb-cil-emit.py" "${pa[@]}" <"$in" >"$tmp/py.out" 2>"$tmp/py.err"; rcp=$?
+  "$root/scripts/mrb" "$oracle/pathb-cil-emit.rb" "${pa[@]}" <"$in" >"$tmp/py.out" 2>"$tmp/py.err"; rcp=$?
   "$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "${ra[@]}" <"$in" >"$tmp/rb.out" 2>"$tmp/rb.err"; rcr=$?
   if [ "$rcp" -ne "$rcr" ]; then
     echo "FAIL pathb-cil-emit $label: exit status py=$rcp rb=$rcr"; head -2 "$tmp/py.err" "$tmp/rb.err"; fail=1; return
