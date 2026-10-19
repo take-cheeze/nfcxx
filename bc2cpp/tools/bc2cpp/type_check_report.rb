@@ -338,14 +338,23 @@ module TypeCheckReport
     rows.join("\n") << "\n"
   end
 
+  def filtered_collections(facts, scope)
+    @filtered_collections ||= {}
+    @filtered_collections[[facts.object_id, scope]] ||= {
+      methods: facts['methods'].select { |m| scope == 'all' || m['scope'] == scope },
+      ivars: facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope },
+      constants: facts['constants'].select { |c| scope == 'all' || c['scope'] == scope },
+      feedback: Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope }
+    }
+  end
+
   def json(facts, suggestions, diags, summary, scope: 'engine')
-    methods = facts['methods'].select { |m| scope == 'all' || m['scope'] == scope }
-    ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }
+    fc = filtered_collections(facts, scope)
     JSON.pretty_generate({ 'version' => facts['version'], 'scope' => scope, 'summary' => summary, 'diagnostics' => diags.map(&:to_h),
-                           'suggestions' => suggestions, 'methods' => methods, 'ivars' => ivars,
+                           'suggestions' => suggestions, 'methods' => fc[:methods], 'ivars' => fc[:ivars],
                            'constants' => facts['constants'], 'annotations' => facts['annotations'],
                            'native_direct_forms' => Array(facts['native_direct_forms']),
                            'rbs_suggestions' => TypeCheckRbs.inferred_return_suggestions(facts, scope: scope),
-                           'ir_feedback' => Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope } }) << "\n"
+                           'ir_feedback' => fc[:feedback] }) << "\n"
   end
 end
