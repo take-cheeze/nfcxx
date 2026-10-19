@@ -375,6 +375,15 @@ bool FnCtx::arith(const std::string &h, const Node &x, const std::string &dest, 
     int_convert(dest, ty, a.text, a.ty);
     return true;
   }
+  if (h == "p2i") {
+    // a pointer as an integer: its 8-byte generic address, kept or truncated like an unsigned 8-byte integer
+    Ty ty = parse_type(&at(x, 1));
+    expect(dty, ty);
+    Operand a = operand(at(x, 2));
+    if (a.ty.kind != "ptr") throw BadIR("p2i of a " + a.ty.kind);
+    int_convert(dest, ty, a.text, Ty{"int", 8, false, false});
+    return true;
+  }
   if (h == "fconv") {
     Ty ty = parse_type(&at(x, 1));
     if (ty.kind != "float") throw Refused("fconv to " + ty.kind);
