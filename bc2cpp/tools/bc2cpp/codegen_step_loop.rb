@@ -45,8 +45,9 @@ class CodeGen
     regions
   end
 
-  # The integer a register holds at `from` if the LOADI that wrote it is straight-line
-  # code up to the call (no jump lands between them), else nil.
+  # The integer a register holds at the call (instruction `from + 1`) if the LOADI that
+  # wrote it dominates the call (BytecodeIR.write_dominates?, catch-handler edges included),
+  # else nil.
   def step_loop_literal(irep, from, reg)
     writer_index = irep.last_writer_index(from, reg)
     return nil unless writer_index
@@ -57,8 +58,7 @@ class CodeGen
     value = (writer.paren_value || writer.imm_operand)&.to_i
     return nil unless value&.abs&.<=(STEP_LOOP_LITERAL_MAX)
 
-    landed = jump_targets(irep).any? { |addr| addr > writer.addr && addr <= irep.instructions[from].addr }
-    landed ? nil : value
+    BytecodeIR.write_dominates?(irep, writer_index, from + 1, reg) ? value : nil
   end
 
   # A C++ `long long` expression for a loop operand, or nil if it is not provably an Integer.
