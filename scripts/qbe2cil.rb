@@ -1,5 +1,6 @@
 # qbe2cil.rb: translate one translation unit's QBE IL (cproc's output, after qbe-prep.rb) into a JSON fragment that
-# scripts/cil-link.py links into one CIL assembly (the nfcc `cil` backend; docs/notes/cil.md).
+# scripts/cil-link.rb links into one CIL assembly (the nfcc `cil` backend; docs/notes/cil.md).
+# Port of tests/mruby/oracle/qbe2cil.py (the former scripts/qbe2cil.py); tests/mruby/qbe2cil.sh checks the two agree.
 #
 #   scripts/mrb scripts/qbe2cil.rb IN.ssa TAIL.s TU_NAME OUT.json
 #

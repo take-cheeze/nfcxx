@@ -1,5 +1,5 @@
-# pathb-cil-emit.rb: Path B IR (scripts/pathb-dump --ir) -> a JSON fragment for scripts/cil-link.py, the CIL spike of the
-# Path B route (docs/notes/pathb-cil.md). Same memory model as qbe2cil.py: pointers are int64 addresses, frame slots are
+# pathb-cil-emit.rb: Path B IR (scripts/pathb-dump --ir) -> a JSON fragment for scripts/cil-link.rb, the CIL spike of the
+# Path B route (docs/notes/pathb-cil.md). Same memory model as qbe2cil.rb: pointers are int64 addresses, frame slots are
 # one localloc per call, globals are the linker's addr_<name> fields.
 #
 #   pathb-dump --ir x.cpp | scripts/mrb scripts/pathb-cil-emit.rb - OUT.json
@@ -1134,7 +1134,7 @@ class Function
     end
     if indirect
       # The callee is a function address (int64, as every pointer is): a calli on it. Its signature is the
-      # call's, as the arguments carry it (the same as qbe2cil.py's indirect calls).
+      # call's, as the arguments carry it (the same as qbe2cil.rb's indirect calls).
       refuse("#{pys(@name)}: indirect call through a value that is not a pointer") unless expr(callee) == 'int64'
       emit('conv.i', "calli #{ret} (#{typed.join(', ')})")
       return ret
