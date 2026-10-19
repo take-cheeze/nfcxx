@@ -304,7 +304,7 @@ module RbsSignatures
       d = defs_by[[sig.owner, sig.name]]
       unless d
         # sig/bc2cpp declares built-in and RGSS methods the program does not define; their tables are checked by the
-        # generators (scripts/bc2cpp/native_sigs_check.rb), so they are declarations here, not errors.
+        # generators (scripts/bc2cpp/native_results_check.rb), so they are declarations here, not errors.
         if sig.loc.native
           note(ap, sig.loc, 'info', 'TC1005', "#{sig.owner}##{sig.name}: native method declaration; no program hint")
         else
