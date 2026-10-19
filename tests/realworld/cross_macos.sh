@@ -33,8 +33,8 @@ link() {
   clang --target=arm64-apple-darwin -O2 -nostdinc -isystem "$NFCXX_MACOS_CLEANROOM/include" \
     -isystem "$(clang -print-resource-dir)/include" -c be/nfcxx_ldrt.c -o "$W/ldrt.o"
   mkdir -p "$(dirname "$out")"
-  # the source-built runtime and libc++ archives (build.sh), when present, before -lSystem and -lc++ as cross-macos-link.sh does
-  local rt=(); for a in build/macos-rt/libnfcxx-darwin-rt.a build/macos-rt/libc++-darwin.a; do [ -f "$a" ] && rt+=("$a"); done
+  # the sret thunks (sret.sh, cross mode) and the source-built runtime and libc++ archives, when present, before -lSystem and -lc++
+  local rt=(); for a in build/sret-cross/sret-macos.a build/macos-rt/libnfcxx-darwin-rt.a build/macos-rt/libc++-darwin.a; do [ -f "$a" ] && rt+=("$a"); done
   ld64.lld --error-limit=0 -arch arm64 -platform_version macos 11.0 11.0 -o "$out" "$@" "$W/ldrt.o" ${NFCXX_MACOS_LIBC:+"$NFCXX_MACOS_LIBC"} \
     "${rt[@]}" -L tests/macos-sysroot/lib -lSystem "${LINK_EXTRA[@]}"
   local hdr; hdr=$(llvm-objdump --macho --private-headers "$out")
