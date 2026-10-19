@@ -61,7 +61,7 @@ module BytecodeIR
   module NumericClasses
     module_function
 
-    # NumericFlow's class facts of +irep+ (see NumericFlow.states).
+    # NumericFlow's class facts of +irep+ (see NumericFlow.states): index -> state, nil when not modelled.
     def states(irep, oracle, opaque_regs, writes = nil)
       NumericFlow.states(irep, oracle, opaque_regs, writes)
     end
@@ -72,6 +72,28 @@ module BytecodeIR
         state = states[exit.index]
         state ? joined | yield(exit, state) : joined
       end
+    end
+
+    # What the method whose body is +irep+ hands back through its own exits: RETURN and RETURN_BLK their register,
+    # RETNIL nil, any other exit (self, true, false, break, stop) OTHER.
+    def returned_mask(irep, states, init = 0)
+      exit_mask(irep, states, init) do |exit, state|
+        case exit.op
+        when 'RETURN', 'RETURN_BLK' then state[exit.reg] || NumericFlow::OTHER
+        when 'RETNIL' then NumericFlow::NIL
+        else NumericFlow::OTHER
+        end
+      end
+    end
+
+    # What the reached RETURN_BLK exits of the block +irep+ return from its method.
+    def block_return_mask(irep, states)
+      exit_mask(irep, states) { |exit, state| exit.op == 'RETURN_BLK' ? state[exit.reg] || NumericFlow::OTHER : 0 }
+    end
+
+    # True when the block +irep+ has a RETURN_BLK (a `return` from its method).
+    def block_returns?(irep)
+      BytecodeIR.for(irep).exits.any? { |exit| exit.op == 'RETURN_BLK' }
     end
 
     # Ops that run no Ruby, raise nothing and write one register: between an Array literal and its read they leave

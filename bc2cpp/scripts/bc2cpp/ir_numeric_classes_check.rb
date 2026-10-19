@@ -3,8 +3,8 @@
 
 # NUMERIC_CLASSES (docs/adr/0493): NumericFlow reads its instruction facts from the BytecodeIR::Program. Host only,
 # under a second:
-#   - Program#operands decodes the second register and the ivar the flow reads, and a step built from the IR alone is
-#     the one the raw instruction gives;
+#   - Program#operands decodes the second register and the ivar the flow reads, and a bare instruction decodes to
+#     the step the Program's table holds;
 #   - Program#exits lists the frame exits, and NumericClasses.exit_mask joins the reached ones only;
 #   - the literal-element proof (ADR 0354) answers from reaching definitions: a literal reaching the element's
 #     register at the ARRAY, through joins and moves, is admitted; a call, a branch or a mutation between the ARRAY
@@ -50,9 +50,8 @@ check.call('SETIV names its ivar and value, GETIV its ivar',
 check.call('GETIDX0 reads its receiver', ops.operands[4].b == 9)
 check.call('an op without either operand shares the empty Operands', ops.operands[5].equal?(BytecodeIR::NO_OPERANDS))
 ops.instructions.each do |instruction|
-  raw = NF.decode_step(instruction.source, ops.decoded[instruction.index])
-  ir = NF.decode_step(instruction.source, ops.decoded[instruction.index], ops.operands[instruction.index])
-  check.call("the IR step of #{instruction.op} is the raw one", raw == ir)
+  bare = NF.decode_step(instruction.source, ops.decoded[instruction.index])
+  check.call("a bare #{instruction.op} decodes to the Program's step", bare == NF.table(ops).steps[instruction.index])
 end
 
 puts '-- exits (host)'
