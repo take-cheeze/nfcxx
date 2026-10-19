@@ -103,22 +103,27 @@ module BytecodeIR
     #
     # +refusal+, when a Hash, receives `:cause` (the first reason the query
     # refused) and is otherwise not read: the answer is the same with or without it.
+    #
+    # +raiseif_nil+ (RETURN_SITES, ADR 0503): vm.c OP_RAISEIF falls through only when R(a) is nil, so a RAISEIF of
+    # the register on a normal edge is itself its definition (the nil value), not a step over.
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
-                             through_handlers: false, origin_transfers: false, refusal: nil)
+                             through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false)
       # Mutable opaque sets and refusal diagnostics belong to the caller; do not retain them.
       if refusal || (opaque_regs && !opaque_regs.frozen?)
         return compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                             max_states: max_states, through_handlers: through_handlers,
-                                            origin_transfers: origin_transfers, refusal: refusal)
+                                            origin_transfers: origin_transfers, refusal: refusal,
+                                            raiseif_nil: raiseif_nil)
       end
 
       @reaching_definitions_cache ||= {}
       opaque_key = opaque_regs&.map { |r| r.dup.freeze }&.sort&.freeze
-      key = [index, reg.to_s.dup.freeze, opaque_key, follow_moves, max_states, through_handlers, origin_transfers]
+      key = [index, reg.to_s.dup.freeze, opaque_key, follow_moves, max_states, through_handlers, origin_transfers,
+             raiseif_nil]
       unless @reaching_definitions_cache.key?(key)
         result = compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                              max_states: max_states, through_handlers: through_handlers,
-                                             origin_transfers: origin_transfers)
+                                             origin_transfers: origin_transfers, raiseif_nil: raiseif_nil)
         return result if @reaching_definitions_cache.size >= DATAFLOW_CACHE_SIZE
 
         @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg.dup.freeze, d.built).freeze }&.freeze
@@ -128,7 +133,7 @@ module BytecodeIR
     end
 
     def compute_reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
-                                     through_handlers: false, origin_transfers: false, refusal: nil)
+                                     through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false)
       preds = instruction_predecessors
       return refused(refusal, :unresolved) unless preds
       return refused(refusal, :bad_index) unless index.between?(0, @instructions.length - 1)
@@ -195,6 +200,11 @@ module BytecodeIR
           return refused(refusal, :unwinding_jump) if insn.op == 'JMPUW' && preds[i].include?(p) &&
                                                      dataflow_guarded_at[p]
 
+          if raiseif_nil && insn.op == 'RAISEIF' && insn.reg == r && preds[i].include?(p) &&
+             !raise_targets.fetch(p, EMPTY_TARGETS).include?(i)
+            defs << Definition.new(p, r)
+            next
+          end
           # A handler-only edge may fire before the write completes.
           work.push(p, r) if all_preds && !preds[i].include?(p)
           effect = origin_transfers ? origin_effect(insn, r) : effect_of(dataflow_effect_at(p), r)
@@ -259,7 +269,9 @@ module BytecodeIR
       ((w + 1)..use).each do |k|
         insn = @instructions[k].source
         return false unless k == use || dataflow_steps_over?(insn)
-        return false if k != use && %i[callee_clobber define].include?(origin_effect(insn, reg.to_s, typed_enter: false))
+        # An exit's leading register is read, not written, and nothing falls through from it to +use+.
+        return false if k != use && !FRAME_EXIT_OPS.include?(insn.op) &&
+                        %i[callee_clobber define].include?(origin_effect(insn, reg.to_s, typed_enter: false))
 
         preds[k].each do |p|
           return false if p == ENTRY ? w != ENTRY : (p < low || p > use)

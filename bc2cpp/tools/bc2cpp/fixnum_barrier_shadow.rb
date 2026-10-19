@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # Shadow decision procedure for the exception-flow barriers of the Fixnum proof
-# and return analysis (ctx[:catch_targets], ctx[:protected]), derived from
+# (ctx[:catch_targets], ctx[:protected]), derived from
 # BytecodeIR handler edges. See ADR 0250 addendum "Barrier shadow".
 #
 # Preload with `ruby -r fixnum_barrier_shadow bc2cpp.rb ...`: it prepends
@@ -90,12 +90,6 @@ module FixnumBarrierShadow
       real
     end
 
-    def fixnum_proof_region_ok?(irep, ctx, w_idx, u_idx)
-      shadow_query(:region_ok, irep, u_idx, w_idx, super) do
-        super(irep, @fixnum_barrier_shadow_ctxs[irep.label], w_idx, u_idx)
-      end
-    end
-
     def proven_fixnum_operand?(irep, idx, reg, owner_def, depth = 0)
       shadow_query(:proven_fixnum_operand, irep, idx, reg, super) do
         super(irep, idx, reg, owner_def, depth)
@@ -105,18 +99,6 @@ module FixnumBarrierShadow
     def guarded_game_integer_range(irep, idx, reg, owner_def, depth = 0)
       shadow_query(:game_integer_range, irep, idx, reg, super) do
         super(irep, idx, reg, owner_def, depth)
-      end
-    end
-
-    def return_value_sources(irep, idx, reg)
-      shadow_query(:return_value_sources, irep, idx, reg, super) do
-        super(irep, idx, reg)
-      end
-    end
-
-    def return_write_dominates?(irep, w_idx, use_idx, reg)
-      shadow_query(:return_write_dominates, irep, use_idx, reg, super) do
-        super(irep, w_idx, use_idx, reg)
       end
     end
 

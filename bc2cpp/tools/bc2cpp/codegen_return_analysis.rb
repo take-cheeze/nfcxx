@@ -5,6 +5,7 @@
 require_relative 'define_method_sites'
 require_relative 'alias_sites'
 require_relative 'codegen_declared_returns'
+require_relative 'bytecode_ir_returns'
 
 class CodeGen
   # ---------------------------------------------------------------------------
@@ -104,22 +105,12 @@ class CodeGen
     return false unless (irep.catch_handlers || []).empty?
     return false if subtree_has_nonlocal_exit?(irep)
 
-    irep.instructions.any? { |i| i.op == 'RETURN' }
+    BytecodeIR.for(irep).exit?(:value)
   end
 
-  # Does any nested block/lambda under `irep` contain a non-local exit? All
-  # depths, `seen`-guarded.
-  def subtree_has_nonlocal_exit?(irep, seen = Set.new)
-    (irep.reps || []).any? do |label|
-      next false if seen.include?(label)
-
-      seen << label
-      child = @ireps[label]
-      next false unless child
-
-      child.instructions.any? { |i| i.op == 'RETURN_BLK' || i.op == 'BREAK' } ||
-        subtree_has_nonlocal_exit?(child, seen)
-    end
+  # Does any nested block/lambda under `irep`, at any depth, contain a non-local exit?
+  def subtree_has_nonlocal_exit?(irep)
+    BytecodeIR.nested_exit?(irep, :block_return, :break)
   end
 
   # Every return path of the body holds a Fixnum (see
@@ -128,18 +119,9 @@ class CodeGen
     irep = @ireps[d.irep]
     return false unless irep
 
-    irep.instructions.each_with_index do |insn, idx|
-      case insn.op
-      when 'RETURN'
-        # `"RETURN\tR%d"` -- the returned register is the first operand.
-        reg = insn.reg
-        return false unless reg
-        return false unless proven_fixnum_operand?(irep, idx, reg, d)
-      when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
-        return false
-      end
+    BytecodeIR.for(irep).exits.all? do |exit|
+      exit.kind == :value && exit.reg && proven_fixnum_operand?(irep, exit.index, exit.reg.to_s, d)
     end
-    true
   end
 
   # ---------------------------------------------------------------------------
@@ -214,20 +196,11 @@ class CodeGen
     mand = mandatory_arity(irep)
     dominated = ->(w_idx, use_idx, r) { return_write_dominates?(irep, w_idx, use_idx, r) }
 
-    irep.instructions.each_with_index do |insn, idx|
-      case insn.op
-      when 'RETURN'
-        # `"RETURN\tR%d"` -- the returned register is the first operand.
-        reg = insn.reg
-        return false unless reg
-        return false unless straightline_return_reg?(irep, idx, reg)
-        return false unless proven_array_operand?(irep, idx, reg, d.owner, mand, ivar_classes, arg_classes,
-                                                  dominated: dominated)
-      when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
-        return false
-      end
+    BytecodeIR.for(irep).exits.all? do |exit|
+      reg = exit.reg&.to_s
+      exit.kind == :value && reg && straightline_return_reg?(irep, exit.index, reg) &&
+        proven_array_operand?(irep, exit.index, reg, d.owner, mand, ivar_classes, arg_classes, dominated: dominated)
     end
-    true
   end
 
   # RETCLASS_SELF_CALL_SUPPORT (ADR 0194): "every return path of this MONO method
@@ -249,14 +222,11 @@ class CodeGen
     mand = mandatory_arity(irep)
 
     proven = nil
-    irep.instructions.each_with_index do |insn, idx|
-      case insn.op
+    BytecodeIR.for(irep).exits.each do |exit|
+      case exit.kind
       # RETURN_BLK in a method body is a plain return (methods are strict procs).
-      when 'RETURN', 'RETURN_BLK'
-        reg = insn.reg
-        return nil unless reg
-
-        sources = return_value_sources(irep, idx, reg)
+      when :value, :block_return
+        sources = return_value_sources(irep, exit.index, exit.reg&.to_s)
         return nil unless sources
 
         sources.each do |src|
@@ -277,74 +247,19 @@ class CodeGen
 
           proven = klass
         end
-      when 'RETNIL'
+      when :nil
         next
-      when 'BREAK', 'RETSELF', 'RETTRUE', 'RETFALSE', 'STOP'
+      else
         return nil
       end
     end
     proven
   end
 
-  # A Ruby callee's frame starts at R(a), so it may overwrite every register above a.
-  RETURN_SOURCE_CALLS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC'].freeze
-
-  # RETCLASS_NILABLE_JOIN: the definitions of `reg` reaching `idx` (`:nil` or
-  # `[writer_idx, reg]`), or nil if a path is unaccounted for. JOIN_REACHING_DEFS'
-  # walk and barriers with ADR 0198's level-aware block-write barrier, minus the
-  # protected range (a codegen concern, not a value one).
+  # RETCLASS_NILABLE_JOIN: the definitions of `reg` reaching `idx` (`:nil` or `[writer_idx, reg]`), or nil if a path
+  # is unaccounted for (BytecodeIR.return_sources, RETURN_SITES, ADR 0503).
   def return_value_sources(irep, idx, reg)
-    preds = fixnum_proof_preds(irep)
-    return nil unless preds
-
-    ctx = fixnum_proof_ctx(irep)
-    block_written = own_upvar_written_regs(irep)
-    out = []
-    seen = Set.new
-    work = [[idx, reg.to_s]]
-    until work.empty?
-      state = work.pop
-      next unless seen.add?(state)
-      return nil if seen.size > FIXNUM_PROOF_REACHING_MAX_STATES
-
-      i, r = state
-      return nil if block_written.include?(r)
-      return nil if ctx[:catch_targets].include?(irep.instructions[i].addr)
-
-      ps = preds[i]
-      return nil if ps.nil? || ps.empty?
-
-      ps.each do |p|
-        return nil if p.negative?
-
-        insn = irep.instructions[p]
-        # vm.c only falls through a `RAISEIF Ra` when regs[a] is nil.
-        if insn.op == 'RAISEIF'
-          if insn.reg == r
-            out << :nil
-          else
-            work << [p, r]
-          end
-          next
-        end
-        return nil unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
-        return nil if RETURN_SOURCE_CALLS.include?(insn.op) && insn.reg.to_i < r.to_i
-
-        if !fixnum_proof_writes_reg?(insn, r)
-          work << [p, r]
-        elsif insn.op == 'MOVE'
-          src = insn.regs[1]
-          return nil unless src
-
-          work << [p, src]
-        elsif insn.op == 'LOADNIL'
-          out << :nil
-        else
-          out << [p, r]
-        end
-      end
-    end
-    out
+    BytecodeIR.return_sources(irep, idx, reg, max_states: fixnum_proof_max_states(irep))
   end
 
   # fixnum_return_analyzable?, but a rescue handler is allowed: its entry is a
@@ -353,7 +268,7 @@ class CodeGen
     return false unless (irep.catch_handlers || []).all? { |h| h.type == :rescue }
     return false if subtree_has_nonlocal_exit?(irep)
 
-    irep.instructions.any? { |i| i.op == 'RETURN' || i.op == 'RETURN_BLK' }
+    BytecodeIR.for(irep).exit?(:value, :block_return)
   end
 
   # Sends that can give a name a body (or remove one) the registry does not list.
@@ -520,42 +435,10 @@ class CodeGen
     end || false
   end
 
-  # Does the write of `reg` at `w_idx` (-1: method entry) reach `use_idx` on
-  # every path? FIXNUM_OPERAND_PROOF's own region test, over its audited
-  # step-over whitelist (a hidden writer such as RESCUE/APOST refuses).
+  # Does the write of `reg` at `w_idx` (-1: method entry) reach `use_idx` on every path? JOIN_DOMINANCE over the
+  # audited write list, with the body's own nested-block writes opaque (BytecodeIR.write_dominates?).
   def return_write_dominates?(irep, w_idx, use_idx, reg)
-    ctx = fixnum_proof_ctx(irep)
-    return false if own_upvar_written_regs(irep).include?(reg)
-
-    stepped = ((w_idx + 1)...use_idx).all? do |k|
-      op = irep.instructions[k].op
-      FIXNUM_PROOF_STEP_OVER_OPS.include?(op) || op.start_with?('LOADI')
-    end
-    stepped && fixnum_proof_region_ok?(irep, ctx, w_idx, use_idx)
-  end
-
-  # Registers of `irep` ITSELF that a nested block writes: unlike
-  # subtree_upvar_written_regs, a SETUPVAR `depth` blocks down counts only
-  # when its level is `depth - 1` (vm.c's `uvenv` walks that many uppers).
-  def own_upvar_written_regs(irep)
-    @own_upvar_written_regs ||= {}
-    @own_upvar_written_regs[irep.label] ||= collect_own_upvar_writes(irep, 1, Set.new)
-  end
-
-  def collect_own_upvar_writes(irep, depth, acc)
-    (irep.reps || []).each do |label|
-      child = @ireps[label]
-      next unless child
-
-      child.instructions.each do |insn|
-        next unless insn.op == 'SETUPVAR'
-
-        index, level = insn.upvar_ref
-        acc << index.to_s if level == depth - 1
-      end
-      collect_own_upvar_writes(child, depth + 1, acc)
-    end
-    acc
+    BytecodeIR.write_dominates?(irep, w_idx, use_idx, reg.to_s)
   end
 
   # "Is `reg` at `idx` provably an Array?": recognize_each_regions' two-step

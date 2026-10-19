@@ -2,6 +2,8 @@
 
 # CodeGen: receiver, owner and super-target facts.
 
+require_relative 'bytecode_ir_returns'
+
 class CodeGen
   # A rescue handler's exception register stays an Exception value until it is
   # overwritten. Follow only MOVE aliases back to the recognized EXCEPT.
@@ -322,17 +324,10 @@ class CodeGen
     return false unless irep
     return false if @ivar_layout.key?(owner)
 
-    seen = Set.new
-    pending = [irep]
-    until pending.empty?
-      current = pending.pop
-      next unless seen.add?(current.label)
-
-      return false if current.instructions.any? { |insn| MODULE_FUNCTION_INSTANCE_OPS.include?(insn.op) || insn.mentions_reg?(0) || insn.upvar_ref&.first&.zero? }
-
-      pending.concat(current.reps.map { |label| @ireps.fetch(label) })
+    [irep, *BytecodeIR.nested_bodies(irep)].none? do |body|
+      BytecodeIR.for(body).op?(*MODULE_FUNCTION_INSTANCE_OPS) ||
+        body.instructions.any? { |insn| insn.mentions_reg?(0) || insn.upvar_ref&.first&.zero? }
     end
-    true
   end
 
   def stable_standard_constructor_class?(klass)
@@ -876,13 +871,11 @@ class CodeGen
       states = call_facts_states(irep)
       next unless states
 
-      irep.instructions.each do |insn|
-        next unless %w[SENDB SSENDB].include?(insn.op)
+      BytecodeIR.for(irep).each_with_op('SENDB', 'SSENDB') do |insn, idx|
         next unless insn.sym == name
 
-        idx = irep.index_of_addr(insn.addr)
         reg = insn.reg.to_i
-        names = idx && states[idx] && CallFacts::Flow.facts(states[idx], reg)
+        names = states[idx] && CallFacts::Flow.facts(states[idx], reg)
         classes = names && call_facts_classes(names)
         if classes.nil?
           unknown = true

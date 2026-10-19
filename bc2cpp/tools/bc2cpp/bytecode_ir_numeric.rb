@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_returns'
 
 # NUMERIC_CLASSES (ADR 0500): the IR's side of NumericFlow. The flow reads every instruction fact from the
 # BytecodeIR::Program (decode, operands, edges, handler targets, frame exits) and answers the literal-element question
@@ -27,26 +28,10 @@ module BytecodeIR
     end
   end
 
-  # A frame exit: +op+ (RETURN, RETSELF, ...) and +reg+, the register RETURN/RETURN_BLK/BREAK hands out (nil for the
-  # others).
-  Exit = Struct.new(:index, :op, :reg)
-  EXIT_OPS = Set['RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'].freeze
-  VALUE_EXIT_OPS = Set['RETURN', 'RETURN_BLK', 'BREAK'].freeze
-
   class Program
     # Every instruction's Operands, frozen and index-aligned.
     def operands
       @operands ||= @instructions.map { |instruction| BytecodeIR.operands(instruction.source).freeze }.freeze
-    end
-
-    # The frame exits in instruction order.
-    def exits
-      @exits ||= @instructions.filter_map do |instruction|
-        op = instruction.op
-        next unless EXIT_OPS.include?(op)
-
-        Exit.new(instruction.index, op, VALUE_EXIT_OPS.include?(op) ? instruction.source.reg.to_i : nil).freeze
-      end.freeze
     end
 
     # True when every instruction in (+first+, +last+] is entered only from the one before it: no jump, handler or
