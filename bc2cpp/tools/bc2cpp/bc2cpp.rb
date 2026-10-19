@@ -1818,12 +1818,12 @@ if $PROGRAM_NAME == __FILE__
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
   # GUARD_VIOLATION (ADR 0290): name the method a violation site sits in.
+  # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
-    m[:code] = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
+    code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
+    code = NomethodReviewed.direct_raise(code, m[:owner], m[:name])
+    m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
-  # DIRECT_RAISE (ADR 0226): a reviewed dead fallback raises without dispatching (before the rewrite renames its callee).
-  compiled.each { |m| m[:code] = NomethodReviewed.direct_raise(m[:code], m[:owner], m[:name]) }
-  compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
   # live in separate `.each`/`.sum` scans of the same code strings.
   kept = Hash.new(0)
