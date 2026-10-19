@@ -3,6 +3,7 @@
 // function interleaves this with the function compile; this part depends only on the top-level forms.
 #pragma once
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -13,6 +14,13 @@
 // the hashes emit_module builds). An operand @name is looked up in them, in that order (see FnCtx::operand).
 struct ModuleSymbols {
   std::set<std::string> shared, globals, consts, externs, strings;
+  // A string or constant with the value of an earlier one: its name => the earlier name, which is the one emitted (see
+  // data_name).
+  std::map<std::string, std::string> data_alias;
+  const std::string &data_name(const std::string &name) const {
+    auto it = data_alias.find(name);
+    return it == data_alias.end() ? name : it->second;
+  }
 };
 
 // The declarations of the module, as the Ruby's emit_module writes them after the header: the extern dynamic shared

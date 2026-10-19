@@ -106,11 +106,11 @@ Operand FnCtx::module_operand(const Node &x) {
     emit("cvta.global.u64 " + t + ", " + ptx_sym(name) + ";");
   } else if (in(&ModuleSymbols::consts)) {
     // a constant with a value (see scalar_const_init): read-only memory, its address is generic through .const
-    emit("cvta.const.u64 " + t + ", " + ptx_sym(name) + ";");
+    emit("cvta.const.u64 " + t + ", " + ptx_sym(mod->data_name(name)) + ";");
   } else if (in(&ModuleSymbols::externs)) {
     throw Refused("global " + name + " is extern (no definition in this unit)");
   } else if (in(&ModuleSymbols::strings)) {
-    emit("cvta.const.u64 " + t + ", " + string_const_sym(name) + ";");
+    emit("cvta.const.u64 " + t + ", " + string_const_sym(mod->data_name(name)) + ";");
   } else {
     throw Refused("static object @\"" + name + "\" (only block-shared and device globals are lowered)");
   }
