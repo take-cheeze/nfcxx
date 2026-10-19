@@ -2,8 +2,8 @@
 # frozen_string_literal: true
 
 require 'set'
-require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/ir_block_captures'
+require_relative '../../../tools/bc2cpp/irep'
+require_relative '../../../tools/bc2cpp/ir_block_captures'
 
 def instruction(index, op, args)
   Insn.new(lineno: 1, addr: index * 4, op: op, args: args, raw: "#{op} #{args}")
@@ -40,23 +40,20 @@ check('opaque effects in the block are refused', build.call(invocation_safe: tru
 puts 'block capture checks passed'
 
 if ENV['MRBC']
-  require 'tmpdir'
-  Dir.mktmpdir('ir-block-captures') do |directory|
-    path = File.join(directory, 'fixture.rb')
-    File.write(path, <<~SOURCE)
-      def stable
-        captured = :held
-        [1].map { |element| captured }
-      end
-      def unstable
-        captured = :held
-        [1].map { |element| captured = element }
-      end
-      def conditional(captured)
-        [1].map { |element| captured }
-      end
-    SOURCE
-    ireps = load_ireps(run_mrbc([path], 'captures', directory)).first
+  source = <<~SOURCE
+    def stable
+      captured = :held
+      [1].map { |element| captured }
+    end
+    def unstable
+      captured = :held
+      [1].map { |element| captured = element }
+    end
+    def conditional(captured)
+      [1].map { |element| captured }
+    end
+  SOURCE
+  Bc2cppIrBlockFixtures.compile(source, 'captures') do |ireps, _root|
     methods = ireps.values.select { |body| body.instructions.any? { |insn| insn.op == 'SENDB' } }
     methods.each do |body|
       call_index = body.instructions.index { |insn| insn.op == 'SENDB' }

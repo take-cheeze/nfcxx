@@ -5,18 +5,12 @@
 # definitions. Real mrbc fixtures for the shapes the textual-predecessor walks answered wrongly: a join, a block
 # reached through a local, a nested block's SETUPVAR and the receiver of `x[i]`.
 #
-# Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/ir_block_operands_check.rb
+# Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/ir_blocks_check.rb
 
 require 'set'
-require 'tmpdir'
-
-unless ENV['MRBC']
-  puts 'SKIP ir block operand fixtures (set MRBC)'
-  exit
-end
 
 ENV['BC2CPP_SIG_DIRS'] = ''
-require_relative '../../tools/bc2cpp/bc2cpp'
+require_relative '../../../tools/bc2cpp/bc2cpp'
 
 failures = []
 check = lambda do |what, condition|
@@ -26,10 +20,7 @@ end
 
 # [BlockSelfWorld result, YieldReach, the YieldReach node of method `m`] for +source+.
 analyze = lambda do |source|
-  Dir.mktmpdir do |dir|
-    path = File.join(dir, 'ibo.rb')
-    File.write(path, source)
-    ireps, root = compile_ireps(path, 'ibo_fixture', dir)
+  Bc2cppIrBlockFixtures.compile(source, 'operands') do |ireps, root|
     registry, superclass_of, = build_registry(ireps, root)
     labels = registry.each_with_object({}) { |(name, defs), out| defs.each { |d| out[d.irep] = [d.owner, name] if d.irep } }
     world = BlockSelfWorld.analyze(ireps: ireps, method_labels: labels, superclass_of: superclass_of)
