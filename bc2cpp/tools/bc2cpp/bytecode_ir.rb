@@ -280,3 +280,4 @@ end
 require_relative 'bytecode_ir_handlers'
 require_relative 'bytecode_ir_dataflow'
 require_relative 'bytecode_ir_types'
+require_relative 'bytecode_ir_classes'

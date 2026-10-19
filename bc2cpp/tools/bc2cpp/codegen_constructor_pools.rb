@@ -211,21 +211,14 @@ class CodeGen
       children = @ireps.values.flat_map { |irep| Array(irep.reps) }.to_set
       walk = lambda do |label, namespace|
         irep = @ireps.fetch(label)
-        pending = nil
-        irep.instructions.each_with_index do |insn, idx|
-          case insn.op
-          when 'CLASS', 'MODULE'
-            outer = irep.last_writer(idx - 1, insn.reg)&.op
-            full = outer == 'LOADNIL' ? [namespace, insn.sym].compact.join('::') : (insn.sym if outer == 'OCLASS')
-            pending = [insn.reg_token, full, idx]
-          when 'EXEC'
-            if pending && pending[0] == insn.reg_token && pending[2] == idx - 1 && pending[1]
-              child = irep.reps[insn.block_index]
-              map[child] = pending[1]
-              walk.call(child, pending[1])
-            end
-            pending = nil
-          end
+        bodies = BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE')
+        irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
+          full = BytecodeIR.class_body_path(irep, idx, namespace)
+          next unless full && bodies.key?(idx)
+
+          child = bodies[idx]
+          map[child] = full
+          walk.call(child, full)
         end
       end
       @ireps.each_key { |label| walk.call(label, nil) unless children.include?(label) }
