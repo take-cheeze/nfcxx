@@ -49,6 +49,7 @@ class CodeGen
       end
     end
     (@entry_cand || {}).each_key { |key| @class_arg_pools[key] = 0 }
+    poly_arg_candidates.each_key { |key| @class_arg_pools[key] = 0 }
     setter_arg_candidates.each_key do |key|
       @class_arg_pools[key] = NumericFlow::CHECKED
       @checked_pools_used = true
@@ -164,6 +165,20 @@ class CodeGen
       changed = true
     end
     @class_arg_pools.keys.each do |key|
+      if (poly = poly_arg_candidates[key])
+        reads = poly_arg_reads(*poly, key)
+        # A pool the receiver flow can no longer bound is dropped for good (OTHER at every read).
+        if reads.nil?
+          @class_arg_pools.delete(key)
+          return_class_invalidate(key[0])
+          changed = true
+          next
+        end
+        next unless grow_class_pool(@class_arg_pools, key, reads) { return_class_invalidate(key[0]) }
+
+        changed = true
+        next
+      end
       reads = setter_arg_candidates[key]
       unless reads
         sites, k = @entry_cand.fetch(key)
@@ -201,6 +216,110 @@ class CodeGen
     grown.nil? ? pools.delete(key) : pools[key] = grown
     yield
     true
+  end
+
+  # POLY_ARG_POOLS: a mandatory argument of a name with several definitions. entry_arg_candidates' rule 1 refuses such
+  # a name because a by-name send may reach any of them; the receiver of each send says which one it reaches, so the
+  # callers of a definition are the sites whose receiver classes dispatch to it (poly_arg_reads). Keyed like
+  # @entry_cand: [irep label, k] => [name, mandatory arity]. A `super` naming the method is refused, because the
+  # call-site index does not carry it as a site (CallSiteIndex.build does, by enclosing def).
+  def poly_arg_candidates
+    @poly_arg_cand ||= compute_poly_arg_candidates
+  end
+
+  def compute_poly_arg_candidates
+    cand = {}
+    return cand unless @foreign_method_names && @outside_tokens
+
+    sites, poisoned = entry_arg_call_index
+    enclosing = CallSiteIndex.enclosing_def_names(@ireps)
+    super_names = Set.new
+    @ireps.each_value do |irep|
+      next unless irep.instructions.any? { |insn| insn.op == CallSiteIndex::SUPER_OP }
+
+      name = enclosing[irep.label]
+      return cand unless name # a super outside any named def: no name to refuse
+
+      super_names << name
+    end
+    labels = Hash.new { |h, k| h[k] = Set.new }
+    @registry.each do |name, defs|
+      next if defs.size < 2
+      next unless name =~ /\A[A-Za-z_]/
+      next if name == 'initialize' || poisoned.include?(name) || super_names.include?(name)
+      next if @foreign_method_names.include?(name) || @outside_tokens.include?(name)
+      next if numeric_dynamically_named?(name)
+
+      defs.each do |d|
+        irep = d.irep && @ireps[d.irep]
+        next unless irep && pure_mandatory_arity?(irep)
+
+        mand = mandatory_arity(irep)
+        next if mand.zero?
+
+        labels[d.irep] << [name, mand]
+      end
+    end
+    setters = setter_arg_candidates
+    labels.each do |label, owners|
+      # Two names bound to one body (an alias) would share the key; refuse it rather than pick a name.
+      next unless owners.size == 1
+
+      name, mand = owners.first
+      (1..mand).each do |k|
+        key = [label, k]
+        cand[key] = [name, mand] unless setters.key?(key)
+      end
+    end
+    cand
+  end
+
+  # The argument registers (irep, idx, reg) that reach a poly candidate, or nil when its pool must be dropped. A call
+  # site counts when its receiver classes all resolve (closed_world_exact_target) and at least one resolves to this
+  # definition; a receiver with no class the flow can name, a non-exact target or a count that is not the mandatory
+  # arity refuses the pool. A receiver the flow has not reached (mask 0) adds nothing yet.
+  def poly_arg_reads(name, mand, key)
+    label, k = key
+    sites, = entry_arg_call_index
+    reads = []
+    pending = false
+    sites.fetch(name, []).each do |irep, idx, recv, argc, _owner|
+      classes = site_receiver_classes(irep, idx, recv)
+      return nil if classes.nil?
+
+      if classes.empty?
+        pending = true
+        next
+      end
+
+      targets = classes.map { |klass| closed_world_exact_target(name, klass.to_s) }
+      return nil if targets.any?(&:nil?)
+      next unless targets.any? { |body| body.irep == label }
+
+      return nil unless argc == mand
+
+      reads << [irep, idx, (recv + k).to_s]
+    end
+    # Every site resolved and none reaches this definition: nothing calls it, so the pool has nothing to hold.
+    return nil if reads.empty? && !pending
+
+    reads
+  end
+
+  # The exact classes the receiver of the send at +idx+ may be: self's class set for an implicit-receiver send
+  # (SSEND*, return_class_self_receiver), else the flow's receiver register. [] when the flow has not reached
+  # it (mask 0), nil when a class is not nameable (OTHER, EXC, NIL, a non-exact class).
+  def site_receiver_classes(irep, idx, recv)
+    insn = irep.instructions[idx]
+    mask = if %w[SSEND SSEND0 SSENDB].include?(insn.op)
+             return_class_self_receiver(irep)
+           else
+             return_class_raw_mask(irep, idx, recv.to_s)
+           end
+    return nil if mask.nil?
+    return [] if mask.is_a?(Integer) && mask.zero?
+
+    bytecode_ir_mask_classes(mask)
   end
 
   # Pools that hold a class set, for the diagnostic and the coverage report.
