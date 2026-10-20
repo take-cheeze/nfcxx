@@ -87,6 +87,31 @@ Actions.
 - Error paths on the server: a front-end syntax error, a refusal (`variadic call`), 413, 400, 404.
 - No automated test runs the page. The CDN, and the browser, are not in CI.
 
+## Browser bindings
+
+A module's imports (functions of module `env` that the program declares and does not define) are connected to browser
+features by name. The table is `BINDINGS` in `index.html`; the page lists it in the Module tab, and each import of the
+module is marked "browser binding" or "stub" in the imports table. A stub returns its first argument plus one, as before.
+
+| Declaration (C++) | Browser feature |
+| --- | --- |
+| `void log_i32(int)` | the Console tab (the value) |
+| `void log_i64(long)` | the Console tab (the value, as a BigInt) |
+| `void log_f64(double)` | the Console tab |
+| `void log_str(const char* s, long length)` | the Console tab (UTF-8 read from the module's memory) |
+| `double now_ms()` | `performance.now()` |
+| `double random_f64()` | `Math.random()` |
+| `void set_title(const char* s, long length)` | `document.title`, restored after Run |
+
+The emitter passes an i32 as a Number, an i64 or an LP64 pointer as a BigInt, and an f64 as a Number. A return value must
+match the declared type. The Console tab shows the output of the last Run. The example `browser-bindings` uses all of
+them and returns 3 whatever the timer and random values are, so the static build can check its result. Both the live
+and the static page run it with the bindings connected (checked in headless Chromium).
+
+Not done: DOM elements and canvas drawing (the module would write a display list into its memory for the page to
+read), fetch and timers that call back into the module (the emitter has no function table, so a callback needs one),
+and input events.
+
 ## Compiler Explorer features
 
 | Feature | Status | Notes |
@@ -95,7 +120,7 @@ Actions.
 | Compile on edit, and on demand | done | Auto on the live server only. |
 | Examples | done (4) | Each checked in every mode at build time. |
 | Options: standard, emitter mode | done | `pipeline.cjs` takes them. |
-| Run the output | done | `main` only; imports are stubbed. |
+| Run the output | done | `main`; imports bound to browser features (see "Browser bindings"), others stubbed. |
 | Compiler errors | done | Text, and markers on the lines. |
 | WAT (text format) | done | `wabt`, from the CDN. |
 | IR, bytes, download | done | |
