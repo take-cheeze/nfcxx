@@ -6,6 +6,19 @@ require_relative 'ir_entry_seeds'
 # CodeGen: ENTRY_SEEDS (see ir_entry_seeds.rb). Reporting only: IrCallGraphTypes reads these facts, and nothing in the
 # code generator does, so the compiled output does not change with the switch.
 class CodeGen
+  # The `start` receiver: the native entry calls `start` on the maker it built, so self in RPG2k#start is RPG2k. Seeded
+  # explicitly; the closed-world self model gives the same class (return_class_self_receiver), and the seed must agree
+  # with it, or the seed is refused.
+  START_RECEIVER_CLASS = 'RPG2k'
+
+  def bytecode_ir_entry_seed_self_class(definition)
+    return nil if ENV['BC2CPP_ENTRY_SEEDS'] == '0'
+    return nil unless definition.name == 'start' && definition.owner == START_RECEIVER_CLASS && definition.irep
+    return nil unless @closed_world&.exact_class?(START_RECEIVER_CLASS)
+
+    START_RECEIVER_CLASS
+  end
+
   # IrCallGraphTypes asks this for a body's parameter that no SEND names. Only the maker `initialize` at position 1 is
   # seeded: its complete caller set is the native construction (an Array) and no Ruby site.
   def bytecode_ir_entry_seed_classes(definition, position)
