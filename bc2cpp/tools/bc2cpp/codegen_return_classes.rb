@@ -17,6 +17,7 @@ require_relative 'bytecode_ir_returns'
 # (exact_new_class_at) and calls of names in the return table, admitted as NUMERIC_RETURN_PROOF admits
 # them. Everything needs ClosedWorld#exact_instances_singleton_free? (ADR 0280).
 class CodeGen
+  CLASS_MEMBER_CACHE_LIMIT = 2048
   RETURN_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
   # Classes with bits of their own in NumericFlow: a `Klass.new` of one of them gets no class bit.
   RETURN_CORE_CLASS = { NumericFlow::ARR => 'Array', NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String',
@@ -153,8 +154,53 @@ class CodeGen
     end
   end
 
+  def class_member_index_enabled?
+    return @class_member_index_enabled if defined?(@class_member_index_enabled)
+
+    @class_member_index_enabled = ENV['BC2CPP_CLASS_MEMBER_INDEX'] != '0'
+  end
+
+  # Identity separates tables restored by probes; numeric class allocation only appends.
+  def numeric_class_member_index
+    table = @numeric_class_bits
+    size = table&.size.to_i
+    cached = @numeric_class_member_index
+    return cached if cached && cached[0].equal?(table) && cached[1] == size
+
+    @numeric_class_member_index = [table, size, (table || {}).invert.freeze, {}]
+  end
+
   def return_class_name_of_bit(bit)
-    @numeric_class_bits&.key(bit)
+    return @numeric_class_bits&.key(bit) unless class_member_index_enabled?
+
+    numeric_class_member_index[2][bit]
+  end
+
+  # A bounded receiver union contains only registered class bits, in allocation order.
+  def numeric_receiver_class_bits(receiver)
+    return nil unless receiver.is_a?(Integer) && receiver.positive?
+    unless class_member_index_enabled?
+      bits = (@numeric_class_bits || {}).values.select { |bit| receiver.anybits?(bit) }
+      return (1..8).cover?(bits.size) && bits.reduce(0, :|) == receiver ? bits.freeze : nil
+    end
+
+    _table, _size, names, cache = numeric_class_member_index
+    return cache[receiver] if cache.key?(receiver)
+
+    bits = []
+    rest = receiver
+    until rest.zero?
+      bit = rest & -rest
+      unless names.key?(bit) && bits.size < 8
+        bits = nil
+        break
+      end
+      bits << bit
+      rest ^= bit
+    end
+    result = bits&.freeze
+    cache[receiver] = result if cache.size < CLASS_MEMBER_CACHE_LIMIT
+    result
   end
 
   # BC2CPP_IMMEDIATE_CLASS_BITS=0 turns off the TrueClass, FalseClass and Symbol bits of true, false and Symbol literals.
@@ -696,8 +742,8 @@ class CodeGen
     return nil if ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
     return nil unless receiver.is_a?(Integer) && receiver.positive?
 
-    bits = (@numeric_class_bits || {}).values.select { |bit| receiver.anybits?(bit) }
-    return nil unless (2..8).cover?(bits.size) && bits.reduce(0, :|) == receiver
+    bits = numeric_receiver_class_bits(receiver)
+    return nil unless bits && bits.size >= 2
 
     result = nil
     bits.each do |bit|
@@ -718,8 +764,8 @@ class CodeGen
     receiver = exact_flow_mask(irep, index, reg)
     return nil unless receiver.is_a?(Integer) && receiver.positive?
 
-    bits = (@numeric_class_bits || {}).values.select { |bit| receiver.anybits?(bit) }
-    return nil unless (2..8).cover?(bits.size) && bits.reduce(0, :|) == receiver
+    bits = numeric_receiver_class_bits(receiver)
+    return nil unless bits && bits.size >= 2
 
     bits.map do |bit|
       klass = return_class_name_of_bit(bit)
