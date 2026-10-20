@@ -48,8 +48,8 @@ module TypeFacts
     'GETUPVAR' => 'upvar', 'GETGV' => 'global', 'GETCV' => 'class_variable', 'STRING' => 'literal:String',
     'STRCAT' => 'literal:String', 'ARRAY' => 'literal:Array', 'ARRAY2' => 'literal:Array', 'HASH' => 'literal:Hash',
     'RANGE_INC' => 'literal:Range', 'RANGE_EXC' => 'literal:Range', 'LAMBDA' => 'literal:Proc', 'BLOCK' => 'literal:Proc',
-    'LOADSYM' => 'literal:Symbol', 'LOADSELF' => 'self', 'LOADNIL' => 'literal:nil', 'LOADT' => 'literal:bool',
-    'LOADF' => 'literal:bool', 'LOADL' => 'literal:Numeric'
+    'LOADSYM' => 'literal:Symbol', 'LOADSELF' => 'self', 'LOADNIL' => 'literal:nil', 'LOADTRUE' => 'literal:bool',
+    'LOADFALSE' => 'literal:bool', 'LOADL' => 'literal:Numeric'
   }.freeze
 
   module_function
