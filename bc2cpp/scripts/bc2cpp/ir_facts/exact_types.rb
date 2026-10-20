@@ -5,12 +5,12 @@
 # and literal-block sites, on hand-built bytecode. Every reaching definition must be a literal (or the `*rest` slot)
 # of one class; a container op keeps the class only of the container it extends.
 #
-#   ruby scripts/bc2cpp/ir_exact_types_check.rb
-require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/bytecode_ir'
+#   ruby scripts/bc2cpp/ir_facts_check.rb
+require_relative '../../../tools/bc2cpp/irep'
+require_relative '../../../tools/bc2cpp/bytecode_ir'
 
-require_relative 'check_support'
-require_relative 'ir_instruction_fixtures'
+require_relative '../check_support'
+require_relative '../ir_instruction_fixtures'
 extend IrInstructionFixtures
 suite = FixtureCheck.new('ir_exact_types_check')
 check = suite.method(:check)

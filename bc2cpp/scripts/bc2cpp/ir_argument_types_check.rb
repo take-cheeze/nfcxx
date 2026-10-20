@@ -213,8 +213,11 @@ if ENV['MRBC']
     sink = ->(facts) { facts['methods'].find { |method| method['owner'] == 'IrGraphSink' && method['name'] == 'ir_graph_forward' } }
     check.call('call graph forwards a complete argument union into another polymorphic name',
                sink.call(graph_on)['params'][0]['type'].split(' | ').sort == %w[Array Integer] &&
-                 sink.call(graph_on)['params'][0]['source'] == 'inferred:call-graph')
-    check.call('disabled call graph leaves forwarding parameter unknown', sink.call(graph_off)['params'][0]['type'].nil?)
+                 sink.call(graph_on)['params'][0]['source'] == 'inferred:receiver-call-sites')
+    # The pools type the forwarding parameter without the call graph: its entry is a poly name whose sites all reach it.
+    check.call('disabled call graph still types forwarding parameter from its pooled callers (same union, receiver-call-sites)',
+               sink.call(graph_off)['params'][0]['type'].split(' | ').sort == %w[Array Integer] &&
+                 sink.call(graph_off)['params'][0]['source'] == 'inferred:receiver-call-sites')
     check.call('graph argument facts feed independent IR returns', graph_on['ir_feedback'].any? { |row|
       row['owner'] == 'IrGraphSink' && row['kind'] == 'return' && row['status'] == 'inferred' && row['type'].split(' | ').sort == %w[Array Integer]
     })

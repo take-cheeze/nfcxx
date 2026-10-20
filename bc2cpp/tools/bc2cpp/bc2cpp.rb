@@ -170,8 +170,13 @@ if $PROGRAM_NAME == __FILE__
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
   # without it they are stripped from stdout (CompactOutput, ADR 0463), the only default.
   annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
+  type_check_only = ENV['BC2CPP_TYPE_CHECK_ONLY'] == '1'
+  if type_check_only && ENV['BC2CPP_TYPE_FACTS'].to_s.empty?
+    abort 'bc2cpp: BC2CPP_TYPE_CHECK_ONLY requires BC2CPP_TYPE_FACTS'
+  end
   # SHARED_GENERATION (ADR 0464): `--units PLAN` runs the analysis once and forks one generation per unit.
   shared_units, srcs = SharedGeneration.parse_argv(ARGV)
+  abort 'bc2cpp: BC2CPP_TYPE_CHECK_ONLY cannot emit shared units' if type_check_only && shared_units
   if srcs.empty?
     raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
           '(env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)'
@@ -1329,6 +1334,13 @@ if $PROGRAM_NAME == __FILE__
   if type_facts_path
     require_relative 'type_facts'
     TypeFacts.append_nilable_index(type_facts_path, gen.unguarded_index_sites, ENV['BC2CPP_TYPE_FACTS_ROOT'])
+  end
+
+  # Report diagnostics depend on real method compilation, guard checks and TC1005 above,
+  # but not translation-unit assembly or its sidecars (ADR 0517). Report writers run at exit.
+  if type_check_only
+    profile_phase.call('type-check report complete')
+    exit 0
   end
 
   # SKIP_UNSUPPORTED=1 drops methods containing `#error` from the output; they

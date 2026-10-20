@@ -4,12 +4,12 @@
 # RETURN_SITES (docs/adr/0503): the exits of a body, the bodies and exits nested in it, and the definitions a
 # returned register comes from (BytecodeIR::Program#return_sources), on hand-built instruction lists. Host only.
 #
-# Usage: ruby scripts/bc2cpp/ir_return_sites_check.rb
+# Usage: ruby scripts/bc2cpp/ir_facts_check.rb
 
 require 'set'
-require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/bytecode_ir'
-require_relative '../../tools/bc2cpp/bytecode_ir_returns'
+require_relative '../../../tools/bc2cpp/irep'
+require_relative '../../../tools/bc2cpp/bytecode_ir'
+require_relative '../../../tools/bc2cpp/bytecode_ir_returns'
 
 failures = []
 check = lambda do |what, condition|

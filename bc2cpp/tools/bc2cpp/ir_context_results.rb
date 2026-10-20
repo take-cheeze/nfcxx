@@ -3,16 +3,18 @@
 require_relative 'bytecode_ir_regions'
 require_relative 'numeric_flow'
 require_relative 'call_context_arguments'
+require_relative 'ir_context_leaf_evaluations'
 
 # Reporting contexts form a finite may-set graph. Bottom stays private until a whole fixpoint settles.
 class IrContextResults
   MAX_CONTEXTS = 512
   MAX_ROUNDS = 48
   MAX_CLASSES = 16
+  CLASS_CACHE_LIMIT = 2048
   PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
                  'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
-  Node = Struct.new(:arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
+  Node = Struct.new(:key, :has_callees, :arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
 
   class Oracle < CodeGen::ContextOracle
     attr_reader :calls
@@ -85,6 +87,9 @@ class IrContextResults
     @failed = false
     @shapes = {}
     @shape_bits = {}
+    @shape_mask = 0
+    @class_cache = {}
+    @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
     native_rows = @gen.instance_variable_get(:@lcf_rows)&.mask.to_i
     @shape_base = [NumericFlow::OBJECT_KIND_BASE + 256, native_tables.bit_length, native_rows.bit_length].max + 1
@@ -121,19 +126,44 @@ class IrContextResults
     classes(@roots.fetch(body.label).states&.[](index)&.[](register.to_i))
   end
 
+  # Registered bits are immutable; visit only the shapes present in this receiver.
+  def each_shape_in(bits)
+    return enum_for(__method__, bits) unless block_given?
+
+    until bits.zero?
+      bit = bits & -bits
+      yield @shape_bits.fetch(bit)
+      bits &= ~bit
+    end
+  end
+
   def classes(mask)
     return nil unless mask.is_a?(Integer) && mask.positive? && !mask.anybits?(NumericFlow::OTHER | NumericFlow::EXC | NumericFlow::CHECKED)
 
+    # Numeric class bits can still be allocated lazily during report queries.
+    generation = @gen.numeric_class_bit_count
+    if @class_cache_generation != generation
+      @class_cache.clear
+      @class_cache_generation = generation
+    end
+    return @class_cache[mask] if @class_cache.key?(mask)
+
+    result = classes_for_mask(mask)
+    @class_cache[mask] = result if @class_cache.size < CLASS_CACHE_LIMIT
+    result
+  end
+
+  def classes_for_mask(mask)
     registry = @gen.frozen_tables_model
     tables = registry ? registry.tables(mask) : 0
-    private_bits = @shape_bits.keys.select { |bit| mask.anybits?(bit) }.reduce(0, :|)
+    private_bits = mask & @shape_mask
     plain = mask & ~(tables | private_bits)
     output = @gen.bytecode_ir_mask_classes(plain)
     return nil unless output || plain.zero?
 
     output = output ? output.dup : Set.new
     registry&.each_shape_in(tables) { |shape| output << (shape.array? ? :Array : :Hash) }
-    @shape_bits.each { |bit, shape| output << shape.container if private_bits.anybits?(bit) }
+    each_shape_in(private_bits) { |shape| output << shape.container }
     output.empty? ? nil : output.freeze
   end
 
@@ -205,6 +235,8 @@ class IrContextResults
   end
 
   def add(body, receiver, arguments, keywords, binding, root: false)
+    # Even an existing node is a dependency: its states may change in a later round.
+    @evaluating.has_callees = true if @evaluating
     key = [body.label, receiver, arguments, keywords.sort, root]
     return @nodes[key] if @nodes.key?(key)
     if @nodes.size >= @max_contexts
@@ -212,7 +244,11 @@ class IrContextResults
       return nil
     end
     @changed = true
-    @nodes[key] = Node.new(body: body, receiver: receiver, arguments: arguments.dup.freeze,
+    key[2] = arguments.dup.freeze
+    key[3].each(&:freeze)
+    key[3].freeze
+    key.freeze
+    @nodes[key] = Node.new(key: key, body: body, receiver: receiver, arguments: key[2],
                           keywords: keywords.dup.freeze, binding: binding, root: root, mask: 0)
   end
 
@@ -236,6 +272,24 @@ class IrContextResults
   end
 
   def evaluate(node)
+    return evaluate_body(node) unless @leaf_evaluations
+
+    classes, shapes = @gen.numeric_class_bit_count, @shapes.size
+    snapshot = @leaf_evaluations.fetch(node.key, classes: classes, shapes: shapes)
+    return snapshot.restore(node) if snapshot
+
+    @evaluating = node
+    node.has_callees = false
+    value = evaluate_body(node)
+    if !node.has_callees && !@failed && classes == @gen.numeric_class_bit_count && shapes == @shapes.size
+      @leaf_evaluations.remember(node.key, node, value, classes: @gen.numeric_class_bit_count, shapes: @shapes.size)
+    end
+    value
+  ensure
+    @evaluating = nil
+  end
+
+  def evaluate_body(node)
     body = node.body
     program = BytecodeIR.for(body)
     unless Array(body.reps).empty? && program.resolved? && !program.handlers?
@@ -318,12 +372,12 @@ class IrContextResults
   end
 
   def native(_node, body, index, insn, state, klass, receiver, argc)
-    private_bits = @shape_bits.keys.select { |bit| receiver.anybits?(bit) }.reduce(0, :|)
+    private_bits = receiver & @shape_mask
     if private_bits.nonzero? && (receiver & ~private_bits).zero? && argc.zero?
       if insn.sym == 'freeze'
         return receiver if @gen.send(:frozen_table_name_safe?, 'freeze', klass.to_s)
       elsif klass == :Array && %w[first last sample].include?(insn.sym) && @gen.send(:frozen_table_name_safe?, insn.sym, klass.to_s)
-        return @shape_bits.select { |bit, _| private_bits.anybits?(bit) }.values.reduce(0) do |joined, shape|
+        return each_shape_in(private_bits).reduce(0) do |joined, shape|
           values = insn.sym == 'first' ? shape.elements.first : insn.sym == 'last' ? shape.elements.last : shape.elements.empty? ? NumericFlow::NIL : shape.elements.reduce(0, :|)
           joined | (values || NumericFlow::NIL)
         end
@@ -366,6 +420,10 @@ class IrContextResults
     return nil unless corridor.all? { |op| %w[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE].include?(op.op) || op.op.start_with?('LOADI') } &&
                       BytecodeIR.for(body).linear_corridor?(origin, index)
 
+    shape_bit(shape)
+  end
+
+  def shape_bit(shape)
     key = [shape.container, shape.elements]
     return @shapes[key] if @shapes.key?(key)
     return nil if @shapes.size >= 8192
@@ -373,19 +431,21 @@ class IrContextResults
     bit = 1 << (@shape_base + @shapes.size)
     @shapes[key] = bit
     @shape_bits[bit] = shape.freeze
+    @shape_mask |= bit
+    # A previously unknown mask may now name this newly registered shape.
+    @class_cache.clear
     bit
   end
 
   def index_mask(body, index, insn, state)
     register = insn.op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i
     receiver = state[register]
-    private_bits = @shape_bits.keys.select { |bit| receiver.anybits?(bit) }.reduce(0, :|)
+    private_bits = receiver & @shape_mask
     rest = receiver & ~private_bits
     plain = state.dup
     plain[register] = rest
     result = rest.zero? ? 0 : @gen.element_index_mask(body, index, insn, plain)
-    @shape_bits.each do |bit, shape|
-      next unless private_bits.anybits?(bit)
+    each_shape_in(private_bits) do |shape|
       return NumericFlow::OTHER unless @gen.send(:frozen_table_name_safe?, '[]', shape.container.to_s)
 
       if shape.container == :Hash

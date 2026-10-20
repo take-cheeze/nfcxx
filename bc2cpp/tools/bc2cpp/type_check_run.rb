@@ -24,6 +24,7 @@ module TypeCheckRun
       'NATIVE_SRCS' => Shellwords.join(natives), 'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(root)),
       'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_COLLECTION_EXPORTS' => '1',
       'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(root).map { |n, d| "#{n}=#{d}" }),
+      'BC2CPP_TYPE_CHECK_ONLY' => '1',
       'BC2CPP_TYPE_FACTS' => File.join(workdir, 'facts.json'), 'BC2CPP_TYPE_FACTS_ROOT' => display_root, 'BC2CPP_SIG_ROOT' => display_root
     }
     if sources
