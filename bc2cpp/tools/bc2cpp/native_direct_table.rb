@@ -190,9 +190,6 @@ module NativeDirect
       "RGSS::Rect" => ["rect_height_set_direct", [:int]],
       "RGSS::Window" => ["window_height_set_direct", [:int]]
     },
-    "initialize_copy" => {
-      "RGSS::Bitmap" => ["bmp_init_copy_direct", [:value]]
-    },
     "map_data=" => {
       "RGSS::Tilemap" => ["tilemap_set_map_data_direct", [:value]]
     },
@@ -262,9 +259,6 @@ module NativeDirect
     },
     "stretch=" => {
       "RGSS::Window" => ["window_set_stretch_direct", [:bool]]
-    },
-    "text_size" => {
-      "RGSS::Bitmap" => ["bmp_text_size_direct", [:str]]
     },
     "tileset=" => {
       "RGSS::Tilemap" => ["tilemap_set_tileset_direct", [:value]]
