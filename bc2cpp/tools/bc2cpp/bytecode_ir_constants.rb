@@ -277,7 +277,7 @@ module BytecodeIR
       case node[0]
       when :int then node[1]
       when :alias then known[node[1]]
-      when :freeze then exact_of(node[1], known)
+      when :freeze then node[2].include?(:Integer) ? exact_of(node[1], known) : nil
       when :arith
         left = exact_of(node[2], known)
         right = exact_of(node[3], known)
@@ -313,7 +313,7 @@ module BytecodeIR
       case node[0]
       when :int then node[1] && [node[1], node[1]].freeze
       when :alias then known[node[1]]
-      when :freeze then hull(node[1], known)
+      when :freeze then node[2].include?(:Integer) ? hull(node[1], known) : nil
       when :arith
         return nil unless INTERVAL_OPS.include?(node[1])
 
