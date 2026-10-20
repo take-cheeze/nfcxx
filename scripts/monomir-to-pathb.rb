@@ -257,7 +257,13 @@ def type_deref_once(ty, types)
   m = ty.match(/^(?:&mut\s+|&move\s+|&\s*|\*const\s+|\*mut\s+|\*move\s+)(.+)$/)
   if m
     rest = m[1].strip
-    return [nil, nil] if fat_rest?(rest)
+    if fat_rest?(rest)
+      if rest.start_with?("[")
+        inner = rest[1...-1].strip
+        return [inner, :slice_elem] unless inner.include?(";")
+      end
+      return [nil, :fat]
+    end
     return [rest, nil]
   end
   if ty.start_with?("[") && ty.include?(";")
@@ -368,6 +374,9 @@ def apply_wrapper_addr(addr, cur_ty, w, types, locals, params, stmts, regi)
     end
   when :index
     inner, _ = type_deref_once(cur_ty || "", types)
+    if inner.nil? && cur_ty && !cur_ty.empty?
+      inner = cur_ty.strip
+    end
     es = 8
     ept = "unsigned_long"
     if inner
@@ -800,8 +809,30 @@ def mir_unescape_str(s)
   unescape_mir(s)
 end
 
+def parse_hex_float(s)
+  m = s.strip.match(/^([+-]?)0x([0-9A-Fa-f]*)\.?([0-9A-Fa-f]*)p([+-]?\d+)$/)
+  return nil if m.nil?
+  sign = m[1] == "-" ? -1.0 : 1.0
+  intpart = m[2].empty? ? 0 : m[2].to_i(16)
+  fracpart = m[3]
+  frac = 0.0
+  fracpart.each_char.with_index do |c, i|
+    frac += c.to_i(16) * (16.0 ** -(i + 1))
+  end
+  exp = m[4].to_i
+  sign * (intpart + frac) * (2.0 ** exp)
+end
+
 def pb_const_for_rust(ty, val, types)
   pt = rust_type_to_pathb(ty, types)
+  if (pt == "float" || pt == "double") && val.match?(/[xXp]/)
+    f = parse_hex_float(val) || val.to_f
+    if pt == "float"
+      f = [f].pack("f").unpack("f")[0]
+    end
+    val = f.to_s
+    val += ".0" if val.match?(/\A-?\d+\z/)
+  end
   "(const #{pt} #{val})"
 end
 
@@ -827,7 +858,7 @@ end
 
 def load_operand(expr, types, locals, params, param_reg, stmts, regi)
   expr = expr.strip
-  m = expr.match(/^([+-]?\d+)\s+([A-Za-z0-9_]+)$/)
+  m = expr.match(/^([+-]?(?:\d+|0x[0-9A-Fa-f.]+p[+-]?\d+))\s+([A-Za-z0-9_]+)$/)
   if m
     val = m[1].sub(/^\+/, ""); ty = m[2]
     return [pb_const_for_rust(ty, val, types), regi]
@@ -1825,12 +1856,40 @@ functions.each do |fn|
               stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
               store_dest.call("%#{r}")
             end
-          when "wrapping_sub", "saturating_add"
-            op = iname == "wrapping_sub" ? "wsub" : "wadd"
+          when "unchecked_div", "unchecked_rem", "exact_div"
+            op = iname.end_with?("div") ? "cdiv" : "crem"
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
             if arg_vals.size >= 2
               r = regi; regi += 1
               stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "unchecked_shl", "unchecked_shr"
+            op = iname.end_with?("shl") ? "cshl" : "cshr"
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            if arg_vals.size >= 2
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "wrapping_sub", "wrapping_mul", "wrapping_add", "saturating_add", "saturating_sub", "saturating_mul"
+            op = iname.include?("sub") ? "wsub" : (iname.include?("mul") ? "wmul" : "wadd")
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            if arg_vals.size >= 2
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "sqrtf32", "sqrtf64", "sinf32", "sinf64", "cosf32", "cosf64", "expf32", "expf64", "exp2f32", "exp2f64", "logf32", "logf64", "log2f32", "log2f64", "log10f32", "log10f64", "fabsf32", "fabsf64", "floorf32", "floorf64", "ceilf32", "ceilf64", "truncf32", "truncf64", "roundf32", "roundf64", "powf32", "powf64", "powif32", "powif64", "fmaf32", "fmaf64", "fmuladdf32", "fmuladdf64"
+            is32 = iname.end_with?("f32")
+            base = iname.sub(/f(32|64)$/, "")
+            base = "pow" if base == "powi"
+            base = "fma" if base == "fmuladd"
+            fn = is32 ? base + "f" : base
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "double"
+            if arg_vals.size >= 1
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (call #{ty} &\"#{fn}\" #{arg_vals.map(&:first).join(' ')}))"
               store_dest.call("%#{r}")
             end
           when "add_with_overflow", "mul_with_overflow"
@@ -1936,6 +1995,88 @@ functions.each do |fn|
             sz, al = type_size_align(t, types)
             v = iname == "size_of" ? sz : al
             store_dest.call("(const #{ty} #{v})")
+          when "cttz", "cttz_nonzero", "ctlz", "ctlz_nonzero", "ctpop", "compare_bytes"
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            if iname == "compare_bytes" && arg_vals.size >= 3
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (call #{ty} &\"memcmp\" #{arg_vals[0][0]} #{arg_vals[1][0]} #{arg_vals[2][0]}))"
+              store_dest.call("%#{r}")
+              next
+            end
+            if arg_vals.size >= 1
+              x = arg_vals[0][0]
+              xty = arg_vals[0][1] ? rust_type_to_pathb(arg_vals[0][1], types) : "unsigned_long"
+              xty = "unsigned_long" if xty.start_with?("(")
+              bits = xty.include?("char") || xty == "bool" ? 8 : (xty.include?("short") ? 16 : (xty == "int" || xty == "unsigned_int" || xty == "float" ? 32 : 64))
+              ty = xty
+              m1 = bits == 64 ? 0x5555555555555555 : 0x55555555
+              m2 = bits == 64 ? 0x3333333333333333 : 0x33333333
+              m4 = bits == 64 ? 0x0f0f0f0f0f0f0f0f : 0x0f0f0f0f
+              h01 = bits == 64 ? 0x0101010101010101 : 0x01010101
+              popcount = lambda do |v, out|
+                r0 = regi; regi += 1
+                stmts << "(let %#{r0} #{ty} (cshr #{ty} #{v} (const #{ty} 1)))"
+                r1 = regi; regi += 1
+                stmts << "(let %#{r1} #{ty} (and #{ty} %#{r0} (const #{ty} #{m1})))"
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{ty} (wsub #{ty} #{v} %#{r1}))"
+                r3 = regi; regi += 1
+                stmts << "(let %#{r3} #{ty} (and #{ty} %#{r2} (const #{ty} #{m2})))"
+                r3b = regi; regi += 1
+                stmts << "(let %#{r3b} #{ty} (cshr #{ty} %#{r2} (const #{ty} 2)))"
+                r4 = regi; regi += 1
+                stmts << "(let %#{r4} #{ty} (and #{ty} %#{r3b} (const #{ty} #{m2})))"
+                r5 = regi; regi += 1
+                stmts << "(let %#{r5} #{ty} (wadd #{ty} %#{r3} %#{r4}))"
+                r5b = regi; regi += 1
+                stmts << "(let %#{r5b} #{ty} (cshr #{ty} %#{r5} (const #{ty} 4)))"
+                r5c = regi; regi += 1
+                stmts << "(let %#{r5c} #{ty} (wadd #{ty} %#{r5} %#{r5b}))"
+                r6 = regi; regi += 1
+                stmts << "(let %#{r6} #{ty} (and #{ty} %#{r5c} (const #{ty} #{m4})))"
+                r6b = regi; regi += 1
+                stmts << "(let %#{r6b} #{ty} (wmul #{ty} %#{r6} (const #{ty} #{h01})))"
+                stmts << "(let %#{out} #{ty} (cshr #{ty} %#{r6b} (const #{ty} #{bits - 8})))"
+              end
+              r = regi; regi += 1
+              if iname.start_with?("ctpop")
+                rt = regi; regi += 1
+                popcount.call(x, rt)
+                stmts << "(let %#{r} #{ty} %#{rt})"
+              elsif iname.start_with?("cttz")
+                r1 = regi; regi += 1
+                stmts << "(let %#{r1} #{ty} (not #{ty} #{x}))"
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{ty} (wsub #{ty} #{x} (const #{ty} 1)))"
+                r3 = regi; regi += 1
+                stmts << "(let %#{r3} #{ty} (and #{ty} %#{r1} %#{r2}))"
+                rt = regi; regi += 1
+                popcount.call("%#{r3}", rt)
+                stmts << "(let %#{r} #{ty} %#{rt})"
+              else
+                v = x
+                s = 1
+                while s < bits
+                  rs = regi; regi += 1
+                  stmts << "(let %#{rs} #{ty} (cshr #{ty} #{v} (const #{ty} #{s})))"
+                  r1 = regi; regi += 1
+                  stmts << "(let %#{r1} #{ty} (or #{ty} #{v} %#{rs}))"
+                  v = "%#{r1}"
+                  s *= 2
+                end
+                r8 = regi; regi += 1
+                popcount.call(v, r8)
+                stmts << "(let %#{r} #{ty} (wsub #{ty} (const #{ty} #{bits}) %#{r8}))"
+              end
+              dpt = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+              if dpt != ty && !dpt.start_with?("(")
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{dpt} (iconv #{dpt} %#{r}))"
+                store_dest.call("%#{r2}")
+              else
+                store_dest.call("%#{r}")
+              end
+            end
           when "size_of_val", "align_of_val"
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
             t = iparams[0] || "u8"
