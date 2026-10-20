@@ -78,13 +78,16 @@ def parse_params_str(s)
   split_top(s)
 end
 
-def fat_rest?(rest)
+def fat_rest?(rest, types = nil)
   rest = rest.strip
   return true if rest == "str"
   return true if rest.start_with?("dyn")
   if rest.start_with?("[") && rest.end_with?("]")
     inner = rest[1...-1].strip
     return true unless inner.include?(";")
+  end
+  if types && types[rest] && types[rest][:size] == 18446744073709551615
+    return true
   end
   false
 end
@@ -101,7 +104,7 @@ def type_size_align(ty, types)
   end
   if ty.start_with?("&") || ty.start_with?("*const") || ty.start_with?("*mut") || ty.start_with?("*move")
     rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-    if fat_rest?(rest)
+    if fat_rest?(rest, types)
       return [16, 8]
     end
     return [8,8]
@@ -149,7 +152,7 @@ def rust_type_to_pathb(ty, types)
   else
     if ty.start_with?("&") || ty.start_with?("*const") || ty.start_with?("*mut") || ty.start_with?("*move")
       rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-      if fat_rest?(rest)
+      if fat_rest?(rest, types)
         return "(struct #{ty.inspect})"
       end
       return "(ptr #{rust_type_to_pathb(rest, types)})"
@@ -260,7 +263,7 @@ def type_deref_once(ty, types)
   m = ty.match(/^(?:&mut\s+|&move\s+|&\s*|\*const\s+|\*mut\s+|\*move\s+)(.+)$/)
   if m
     rest = m[1].strip
-    if fat_rest?(rest)
+    if fat_rest?(rest, types)
       if rest.start_with?("[")
         inner = rest[1...-1].strip
         return [inner, :slice_elem] unless inner.include?(";")
@@ -589,7 +592,7 @@ def abi_leaves(ty, types, base_off = 0)
   end
   if ty.start_with?("&") || ty.start_with?("*const") || ty.start_with?("*mut") || ty.start_with?("*move")
     rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-    if fat_rest?(rest)
+    if fat_rest?(rest, types)
       return [[base_off, "l"], [base_off + 8, "l"]]
     end
     return [[base_off, "l"]]
@@ -750,7 +753,7 @@ def note_fat(ty, types)
   ty = ty.strip
   return unless ty.start_with?("&")
   rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*/, "")
-  return unless fat_rest?(rest)
+  return unless fat_rest?(rest, types)
   $fat_types[ty] = true
 end
 
@@ -861,6 +864,17 @@ def materialize_str(bytes, stmts, regi, lines)
   stmts << "(let %#{r3} (ptr unsigned_long) (offset $\"#{slot}\" 8))"
   stmts << "(store unsigned_long %#{r3} %#{r2})"
   ["$\"#{slot}\"", regi]
+end
+
+def materialize_bytes(bytes, stmts, regi, lines)
+  n = bytes.size
+  data_name = "bytelit_#{bytes.hash.abs}"
+  unless lines.any? { |l| l.include?("(data #{data_name.inspect}") }
+    lines << "(data #{data_name.inspect} (array #{n} unsigned_char) #{n == 0 ? "(zero 0 0)" : "(string \"#{encode_pb_str(bytes)}\")"})"
+  end
+  r1 = regi; regi += 1
+  stmts << "(let %#{r1} (ptr unsigned_char) &\"#{data_name}\")"
+  ["%#{r1}", regi]
 end
 
 def materialize_i128(ty, val, stmts, regi, lines)
@@ -1097,6 +1111,11 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
     bytes = unescape_mir(inner)
     return materialize_str(bytes, stmts, regi, lines)
   end
+  if expr.start_with?('b"') && expr.end_with?('"') && expr.length >= 3
+    inner = expr[2...-1]
+    bytes = unescape_mir(inner)
+    return materialize_bytes(bytes, stmts, regi, lines)
+  end
   m = expr.match(/^UNIOP\s+(!|-)\s+(.+)$/)
   if m
     op = m[1]; v = m[2].strip
@@ -1125,6 +1144,72 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
   if expr.start_with?("&mut ") || expr.start_with?("&move ") || expr.start_with?("&")
     place = expr.sub(/^&mut\s+|^&move\s+|^&\s*/, "").strip
     p = parse_place(place)
+    if p[:ops].size >= 1 && p[:ops].first[:k] == :deref
+      root_ty = local_type(p[:root], locals, params)
+      if root_ty
+        rt = root_ty.strip.sub(/^&(mut|move)?\s*|^\*(const|mut|move)\s+/, "").strip
+        if fat_rest?(rt, types)
+          res_ty = nil
+          begin
+            res_ty = place_type(expr, types, locals, params)
+          rescue
+            res_ty = nil
+          end
+          if res_ty.nil?
+            begin
+              res_ty = place_type(place, types, locals, params)
+              res_ty = res_ty ? "&" + res_ty : nil
+            rescue
+              res_ty = nil
+            end
+            if res_ty.nil?
+              cur2 = rt
+              ok2 = true
+              (p[:ops][1..] || []).each do |w|
+                if w[:k] == :field
+                  f = types[cur2] && types[cur2][:fields].find { |ff| ff[:off] == w[:idx] * 0 + w[:idx] }
+                  f ||= types[cur2] && types[cur2][:fields][w[:idx]] rescue nil
+                  if f
+                    cur2 = f[:type]
+                  else
+                    ok2 = false
+                    break
+                  end
+                elsif w[:k] == :deref
+                  inner, _ = type_deref_once(cur2, types)
+                  if inner.nil?
+                    ok2 = false
+                    break
+                  end
+                  cur2 = inner
+                else
+                  ok2 = false
+                  break
+                end
+              end
+              res_ty = ok2 ? "&" + cur2 : nil
+            end
+          end
+          if res_ty && fat_rest?(res_ty.sub(/^&(mut|move)?\s*|^\*(const|mut|move)\s+/, "").strip, types)
+            daddr, regi = place_addr(place, types, locals, params, param_reg, stmts, regi)
+            rroot, regi = place_addr(p[:root], types, locals, params, param_reg, stmts, regi)
+            r1 = regi; regi += 1
+            stmts << "(let %#{r1} (ptr unsigned_long) (offset #{rroot} 8))"
+            r2 = regi; regi += 1
+            stmts << "(let %#{r2} unsigned_long (load unsigned_long %#{r1}))"
+            $lit_slots ||= []
+            slot = "fattmp#{$lit_slots.size}"
+            apt = rust_type_to_pathb(res_ty, types)
+            $lit_slots << "(slot #{slot.inspect} #{apt} 16 8)"
+            stmts << "(store unsigned_long $\"#{slot}\" #{daddr})"
+            r3 = regi; regi += 1
+            stmts << "(let %#{r3} (ptr unsigned_long) (offset $\"#{slot}\" 8))"
+            stmts << "(store unsigned_long %#{r3} %#{r2})"
+            return ["$\"#{slot}\"", regi]
+          end
+        end
+      end
+    end
     if p[:ops].size >= 1 && p[:ops].last[:k] == :deref
       prefix_ops = p[:ops][0...-1]
       cur = local_type(p[:root], locals, params)
@@ -1150,7 +1235,7 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
         end
         if ok
           rest = cur.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-          if cur != rest && fat_rest?(rest.strip)
+          if cur != rest && fat_rest?(rest.strip, types)
             prefix_str = p[:root]
             prefix_ops.each do |w|
               case w[:k]
@@ -1495,6 +1580,39 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
         stmts << "(let %#{r} #{dpt} (bitcast #{dpt} #{svv}))"
         val = "%#{r}"
       end
+      dtn = dt.sub(/^\*(const|mut|move)\s+/, "").strip
+      stn = (sty || "").sub(/^&(mut|move)?\s*|^\*(const|mut|move)\s+/, "").strip
+      if dpt.start_with?("(struct") && dtn != stn && fat_rest?(dtn, types) && !fat_rest?(stn, types)
+        addr0, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi)
+        saddr, regi = place_addr(sv, types, locals, params, param_reg, stmts, regi)
+        if stn.include?("PathBuf") || stn.include?("OsString") || stn.start_with?("Vec") || stn.include?("Vec<") || stn.include?("String")
+          r1 = regi; regi += 1
+          stmts << "(let %#{r1} (ptr unsigned_long) (load (ptr unsigned_long) #{saddr}))"
+          stmts << "(store unsigned_long #{addr0} %#{r1})"
+          r2 = regi; regi += 1
+          stmts << "(let %#{r2} (ptr unsigned_long) (offset #{saddr} 8))"
+          r3 = regi; regi += 1
+          stmts << "(let %#{r3} unsigned_long (load unsigned_long %#{r2}))"
+          r4 = regi; regi += 1
+          stmts << "(let %#{r4} (ptr unsigned_long) (offset #{addr0} 8))"
+          stmts << "(store unsigned_long %#{r4} %#{r3})"
+        elsif (stn.start_with?("[") && stn.include?(";")) || stn.start_with?("&")
+          r1 = regi; regi += 1
+          stmts << "(let %#{r1} (ptr unsigned_long) (load (ptr unsigned_long) #{saddr}))" if false
+          stmts << "(store unsigned_long #{addr0} #{svv})"
+          n = stn[/\[\s*[^\];]+;\s*(\d+)/, 1]
+          n ||= "0"
+          r4 = regi; regi += 1
+          stmts << "(let %#{r4} (ptr unsigned_long) (offset #{addr0} 8))"
+          stmts << "(store unsigned_long %#{r4} (const unsigned_long #{n}))"
+        else
+          stmts << "(store unsigned_long #{addr0} #{svv})"
+          r4 = regi; regi += 1
+          stmts << "(let %#{r4} (ptr unsigned_long) (offset #{addr0} 8))"
+          stmts << "(store unsigned_long %#{r4} (const unsigned_long 0))"
+        end
+        return regi
+      end
       addr, fty, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi, true)
       if dpt.start_with?("(") && !dpt.start_with?("(ptr") && !dpt.start_with?("(fn")
         dsz, _ = type_size_align(dt, types)
@@ -1618,13 +1736,18 @@ functions.each do |fn|
   params = parse_params_str(params_str)
   pathb_ret = rust_type_to_pathb(ret, types)
   agg_ret = pathb_ret.start_with?("(") && !pathb_ret.start_with?("(ptr") && !pathb_ret.start_with?("(fn")
-  if agg_ret
+  rsz0, _ = type_size_align(ret, types)
+  big_ret = false # agg_ret && rsz0 > 16 (disabled: breaks checked)
+  if agg_ret && !big_ret
+    pathb_ret = "void"
+  elsif big_ret
     pathb_ret = "void"
   end
   body = fn[:body]
   $lit_slots = []
   $cur_ret = ret
-  $agg_ret = agg_ret
+  $agg_ret = agg_ret && !big_ret
+  $big_ret = big_ret
   $ret_reg = nil
   locals = []
   body.scan(/^\tlet (.+?): (.+);$/) { |n, t| locals << [n.strip, t.strip] }
@@ -1644,9 +1767,11 @@ functions.each do |fn|
   end
   param_lines = []
   param_reg = {}
-  ri = agg_ret ? 1 : 0
-  if agg_ret
+  ri = ($agg_ret || $big_ret) ? 1 : 0
+  if $agg_ret
     param_lines << "(sret %0 #{rust_type_to_pathb(ret, types)})"
+  elsif $big_ret
+    param_lines << "(param %0 \"__sret\" (ptr unsigned_char))"
   end
   params.each_with_index do |t, i|
     pt = rust_type_to_pathb(t, types)
@@ -2229,8 +2354,10 @@ functions.each do |fn|
                     stmts << "(let %#{rq} unsigned_long (cdiv unsigned_long %#{rr} %#{a64}))"
                     rq2 = regi; regi += 1
                     stmts << "(let %#{rq2} bool (ne unsigned_long %#{rq} %#{b64}))"
+                    rnz = regi; regi += 1
+                    stmts << "(let %#{rnz} bool (ne bool %#{rz3} (const bool 1)))"
                     rnov = regi; regi += 1
-                    stmts << "(let %#{rnov} bool (and bool (ne bool %#{rz3} (const bool 1)) %#{rq2}))"
+                    stmts << "(let %#{rnov} bool (and bool %#{rnz} %#{rq2}))"
                     stmts << "(let %#{ro} bool %#{rnov})"
                   else
                     if op == "wadd"
@@ -2579,8 +2706,13 @@ functions.each do |fn|
           end
           callee_code = "&\"#{pb_sym(fname)}\""
           argstr = arg_vals.map(&:first).join(' ')
+          dest_sz = dest == "RETURN" ? type_size_align(ret, types)[0] : (dest_ty ? type_size_align(dest_ty, types)[0] : 0)
+          dest_big = dest_agg && dest_sz > 16
           if dest == "RETURN"
-            if $agg_ret
+            if $big_ret
+              dpt = rust_type_to_pathb(ret, types)
+              stmts << "(eval (call void #{callee_code} $\"retval\" #{argstr}))"
+            elsif $agg_ret
               dpt = rust_type_to_pathb(ret, types)
               stmts << "(eval (call void #{callee_code} (sret #{dpt} $\"retval\") #{argstr}))"
             elsif ret_void || pathb_ret == "void"
@@ -2592,7 +2724,9 @@ functions.each do |fn|
             end
             stmts << "(goto #{retblk.inspect})"
           else
-            if dest_agg
+            if dest_big
+              stmts << "(eval (call void #{callee_code} #{dest_addr} #{argstr}))"
+            elsif dest_agg
               dpt = rust_type_to_pathb(dest_ty, types)
               stmts << "(eval (call void #{callee_code} (sret #{dpt} #{dest_addr}) #{argstr}))"
             elsif ret_void
@@ -2606,7 +2740,11 @@ functions.each do |fn|
           end
         end
       elsif ln == "RETURN"
-        if $agg_ret
+        if $big_ret
+          rsz, _ = type_size_align($cur_ret, types)
+          stmts << "(copy #{rsz} %0 $\"retval\")"
+          stmts << "(return)"
+        elsif $agg_ret
           rsz, _ = type_size_align($cur_ret, types)
           stmts << "(copy #{rsz} %0 $\"retval\")"
           stmts << "(return)"
