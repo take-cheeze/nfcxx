@@ -1,10 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require 'json'
-require 'open3'
-require 'rbconfig'
-require 'tmpdir'
+require_relative 'type_check_fixture'
 
 ROOT = File.expand_path('../..', __dir__)
 TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.join(ROOT, 'tools/bc2cpp')
@@ -101,14 +98,12 @@ if ENV['MRBC']
   Dir.mktmpdir('ir-ivar-types-check') do |dir|
     File.write(File.join(dir, 'fields.rb'), source)
     Dir.mkdir(File.join(dir, 'sig'))
-    command = [RbConfig.ruby, File.join(ROOT, 'scripts/bc2cpp/type_check.rb'), '--format', 'json', '--no-sends', '--sig', File.join(dir, 'sig'), '--files', 'fields.rb']
     reports = {}
     %w[1 0].each do |mode|
       env = { 'BC2CPP_TOOLS_DIR' => TOOLS, 'BC2CPP_IR_IVAR_TYPES' => mode }
-      out, err, status = Open3.capture3(env, *command, chdir: dir)
-      abort "ivar analysis failed: #{err}\n#{out}" unless status.success?
-
-      reports[mode] = JSON.parse(out)['ivars'].to_h { |row| [row['name'], row] }
+      report = TypeCheckFixture.report(dir, files: ['fields.rb'], env: env,
+                                       options: ['--sig', File.join(dir, 'sig')], label: 'ivar analysis')
+      reports[mode] = report['ivars'].to_h { |row| [row['name'], row] }
     end
     row = reports['1']['@union_field']
     check.call('real settled field union is independently reported', row && row['type'] == 'Integer | String' && row['source'] == 'inferred:ivar-class-pool')
