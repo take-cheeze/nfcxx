@@ -36,6 +36,8 @@ class CodeGen
     def ivar_fact_mask(irep, name) = @cg.class_pool_ivar_fact_mask(irep, name)
     def upvar_mask(irep, insn) = @cg.class_upvar_mask(irep, insn)
     def index_mask(irep, index, insn, state) = @cg.exact_lcf_index_mask(irep, index, insn, state)
+    # ELEMENT (generic step 2): the element class mask of a map/collect result, or nil (unknown).
+    def block_element_mask(irep, index, insn, _state) = @cg.block_element_class_mask(irep, index, insn)
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
     # The class bit of a true, false or Symbol literal (exactly TrueClass, FalseClass or Symbol: each has one instance
     # or is a Symbol, and its mrb_class is that class, see the mrb_class immediate cases in mruby's class.h).

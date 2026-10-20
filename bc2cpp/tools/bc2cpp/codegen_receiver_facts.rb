@@ -551,6 +551,20 @@ class CodeGen
       self_accessor: ->(n) { self_accessor_owner?(n, owner_name) } }
   end
 
+  # ELEMENT (generic step 2): the class mask of the elements a `map`/`collect` call with a literal block returns, read
+  # from the block's own returns (block_return_class). Nil unless no program definition has the name and the class
+  # already has a bit: allocating one here would renumber the masks.
+  def block_element_class_mask(irep, index, insn)
+    return nil unless %w[map collect].include?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
+    return nil unless @closed_world&.exact_instances_singleton_free?
+    return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
+
+    ctx = element_ctx({}, 0, nil, @owner_of[irep.label]&.owner)
+    block_irep = adjacent_block_irep(irep, index, insn.reg, ctx)
+    klass = block_irep && block_return_class(block_irep, ctx, 0)
+    klass && (@numeric_class_bits || {})[klass]
+  end
+
   # HASH_ELEMENT_SUPPORT: proven_element_class for Hash values.
   def proven_hash_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
     hash_element_source_scan(irep, idx, dest_reg, hash_element_ctx(ivar_classes, mand, arg_classes, owner_name))
