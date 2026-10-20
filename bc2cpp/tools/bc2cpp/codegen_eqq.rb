@@ -172,12 +172,4 @@ class CodeGen
     texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
     texts.sum { |t| t.scan(/= bc2cpp_eqq\(M,/).size }
   end
-
-  # is_a?/kind_of? with a class/module argument is kernel.c's mrb_obj_is_kind_of_m; any other
-  # argument raises mrb_get_args' 'c' TypeError (class.c ensure_class_type). A receiver without
-  # Kernel (a BasicObject subclass) has no such method, so the raise needs the Kernel proof.
-  def kind_of_type_error_direct?(name)
-    world = block_core_world
-    !world.nil? && world.kernel_native_dispatch_safe?(name) && name_unrebound?(name)
-  end
 end

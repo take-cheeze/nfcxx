@@ -1242,25 +1242,6 @@ class CodeGen
       CPP
     end
 
-    if name == 'key?' && n == 1 && !@native_registered_expressions.key?(name) &&
-       builtin_class_send_safe?(name, %w[Hash])
-      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
-    end
-
-    if name == 'to_s' && n.zero? && !devirt_blocked_name?(name) &&
-       builtin_class_send_safe?(name, %w[Array Hash Integer String]) &&
-       builtin_class_send_safe?('inspect', %w[Array Hash])
-      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
-    end
-
-    # TO_I_BUILTIN_TYPE_TAG_DISPATCH: the native registry has class-specific
-    # to_i entries, while compile_native_primitive_send checks each runtime tag
-    # and keeps ordinary dispatch for receiver types it does not implement.
-    if name == 'to_i' && n.zero? &&
-       builtin_class_send_safe?(name, %w[Integer Float String])
-      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
-    end
-
     # Resolve compiled MONO/TYPED targets first; only the final POLY fallback uses
     # the generated native C expressions.
     native_expression_entries = @native_registered_expressions[name]

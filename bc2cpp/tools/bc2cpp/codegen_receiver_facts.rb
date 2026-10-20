@@ -264,12 +264,6 @@ class CodeGen
     !constant.nil? && (klass == constant || klass.to_s.end_with?("::#{constant}"))
   end
 
-  # GUARD_VIOLATION: the `arg_index`th argument of the call is a stable class/module constant.
-  def constant_argument_proven?(irep, idx, lexical_owner, name, arg_index)
-    insn = proof_send_insn(irep, idx, name)
-    !insn.nil? && !stable_constant_register(irep, idx, (insn.reg.to_i + 1 + arg_index).to_s, lexical_owner).nil?
-  end
-
   # GUARD_VIOLATION: the call's receiver is a stable class/module constant.
   def constant_receiver_proven?(irep, idx, lexical_owner, name)
     insn = proof_send_insn(irep, idx, name)
