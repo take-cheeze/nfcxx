@@ -8,24 +8,24 @@
 # and needs MRBC; without it that section prints SKIP and the rest still run.
 
 require 'set'
-require 'tmpdir'
 
 # The fixtures declare no RBS; the repository's signatures name engine classes these fixtures lack.
 ENV['BC2CPP_SIG_DIRS'] = ''
 require_relative '../../tools/bc2cpp/bc2cpp'
 
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
+require_relative 'check_support'
+require_relative 'ir_instruction_fixtures'
+extend IrInstructionFixtures
+suite = FixtureCheck.new('ir_soundness_classes_check')
+check = suite.method(:check)
 # A hand-built instruction (the same Insn the disassembly reader makes).
-bc = ->(addr, op, args) { Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}") }
+bc = method(:insn)
 
 # -- 1. class objects (closed_world.rb class_object_register? / class_constant_target?), compiled -----------------
 puts '-- 1. class objects: every path into the SCLASS, not the textually nearest writer (MRBC)'
 mrbc = ENV['MRBC']
-if mrbc && File.executable?(mrbc)
+if mrbc
+  suite.require_mrbc!
   # The SCLASS of +ireps+ as [irep, index, insn] (each snippet below has one).
   sclasses = lambda do |ireps|
     ireps.values.flat_map do |irep|
@@ -48,10 +48,7 @@ if mrbc && File.executable?(mrbc)
       ["c = $c\nx = (c ? Foo : Object).new\nclass << x\nend\n", false, false]
   }.freeze
   CLASS_JOINS.each do |what, (source, register, target)|
-    Dir.mktmpdir do |dir|
-      path = File.join(dir, 'snippet.rb')
-      File.write(path, source)
-      ireps, = compile_ireps(path, 'ir_soundness_snippet', dir, mrbc: mrbc)
+    suite.compile(source) do |ireps|
       scs = sclasses.call(ireps)
       check.call("#{what}: one SCLASS", scs.size == 1)
       next unless scs.size == 1
@@ -129,6 +126,4 @@ check.call('a return that skips the ALIAS on a handler path keeps the alias opaq
 check.call('without the handler, the ALIAS is on every path and stays mapped',
            !core_alias_names.call([]).include?(%w[Array new]))
 
-puts
-puts(failures.empty? ? 'ir_soundness_classes_check OK' : "FAILED: #{failures.size}")
-exit(failures.empty? ? 0 : 1)
+suite.finish!

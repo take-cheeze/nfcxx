@@ -14,15 +14,11 @@ require 'irep'
 require 'bytecode_ir_containers'
 require 'element_layouts'
 
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
-
-def insn(addr, op, args)
-  Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
-end
+require_relative 'check_support'
+require_relative 'ir_instruction_fixtures'
+extend IrInstructionFixtures
+suite = FixtureCheck.new('ir_container_shapes_check')
+check = suite.method(:check)
 
 def irep_of(list, pool: [], reps: [])
   Irep.new(label: "t#{list.hash}", instructions: list, catch_handlers: [], pool: pool, reps: reps, nlocals: 2)
@@ -99,9 +95,4 @@ check.call('the BLOCK writing the block slot of the call is found',
            BytecodeIR.for(blocks).adjacent_block_index(1, '2') == 0)
 check.call('a BLOCK writing another register is not', BytecodeIR.for(blocks).adjacent_block_index(1, '1').nil?)
 
-if failures.empty?
-  puts 'ir_container_shapes_check: ok'
-else
-  puts "ir_container_shapes_check: #{failures.size} FAIL"
-  exit 1
-end
+suite.finish!

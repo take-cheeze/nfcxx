@@ -9,15 +9,11 @@
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 
-def insn(addr, op, args)
-  Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
-end
-
-failures = []
-check = lambda do |label, ok|
-  puts "  #{ok ? 'ok  ' : 'FAIL'} #{label}"
-  failures << label unless ok
-end
+require_relative 'check_support'
+require_relative 'ir_instruction_fixtures'
+extend IrInstructionFixtures
+suite = FixtureCheck.new('ir_exact_types_check')
+check = suite.method(:check)
 types = lambda do |list, enter: nil|
   list = [insn(0, 'ENTER', enter)] + list if enter
   BytecodeIR::Types.new(Irep.new(label: 't', instructions: list, catch_handlers: [], nlocals: 8))
@@ -67,9 +63,4 @@ pool = BytecodeIR::Types.new(Irep.new(label: 't', instructions: [insn(0, 'LOADL'
                                       catch_handlers: [], nlocals: 4, pool: [{ type: :int64, value: 1 << 40 }]))
 check.call('LOADL of a pool integer has no exact class', pool.exact_at(1, '1').nil?)
 
-if failures.empty?
-  puts 'bc2cpp IR exact types check: PASS'
-else
-  puts "bc2cpp IR exact types check: #{failures.size} failure(s)"
-  exit 1
-end
+suite.finish!
