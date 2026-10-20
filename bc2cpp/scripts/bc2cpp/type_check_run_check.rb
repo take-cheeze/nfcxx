@@ -36,6 +36,26 @@ raise 'shape union lost a member' unless context.classes(array_bit | hash_bit) =
 raise 'unknown mask became exact' unless context.classes(array_bit | NumericFlow::OTHER).nil?
 puts 'context class caching, shape registration and unknown-mask checks passed'
 
+cache = IrContextLeafEvaluations.new
+key = ['leaf', NumericFlow::INT, [], [], false].freeze
+node = IrContextResults::Node.new(states: [[NumericFlow::INT], nil], calls: { 1 => NumericFlow::INT },
+                                  arrays: { 0 => IrContextResults::Shape.new(container: :Array, elements: [NumericFlow::INT]) })
+cache.remember(key, node, NumericFlow::INT, classes: 0, shapes: 0)
+node.states[0][0] = NumericFlow::STR
+node.arrays[0].elements[0] = NumericFlow::STR
+snapshot = cache.fetch(key, classes: 0, shapes: 0)
+raise 'leaf snapshot retained mutable graph states' unless snapshot.states == [[NumericFlow::INT], nil]
+replayed = IrContextResults::Node.new
+raise 'leaf result changed during replay' unless snapshot.restore(replayed) == NumericFlow::INT
+raise 'leaf snapshot retained mutable literal elements' unless replayed.arrays[0].elements == [NumericFlow::INT] && replayed.arrays[0].elements.frozen?
+raise 'replayed states are mutable' unless replayed.states.frozen? && replayed.states.first.frozen?
+raise 'leaf cache crossed a numeric class generation' if cache.fetch(key, classes: 1, shapes: 0)
+raise 'leaf cache crossed a private shape generation' if cache.fetch(key, classes: 0, shapes: 1)
+large = IrContextResults::Node.new(states: [Array.new(IrContextLeafEvaluations::MAX_STATE_CELLS + 1, NumericFlow::INT)])
+cache.remember(['large'], large, NumericFlow::INT, classes: 0, shapes: 0)
+raise 'oversized leaf retained' if cache.fetch(['large'], classes: 0, shapes: 0)
+puts 'leaf evaluation isolation, generation and size-bound checks passed'
+
 unless ENV['MRBC']
   puts 'SKIP type-check pipeline fixtures (set MRBC)'
   exit 0
