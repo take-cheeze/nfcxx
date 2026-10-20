@@ -7,5 +7,5 @@ int main() {
   if (!__atomic_test_and_set(&flag, __ATOMIC_SEQ_CST)) return 2; // now it is set
   __atomic_clear(&flag, __ATOMIC_RELEASE);
   if (flag != 0) return 3;
-  return __atomic_test_and_set(&flag, __ATOMIC_SEQ_CST) ? 0 : 4;
+  return __atomic_test_and_set(&flag, __ATOMIC_SEQ_CST) ? 4 : 0; // cleared, so the old byte is zero
 }
