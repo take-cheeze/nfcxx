@@ -1,68 +1,114 @@
 # The wasm explorer: an online compiler page for the wasm emitter
 
-`tools/wasm-explorer/` is a small page for trying the Path B WebAssembly emitter (`pathb-wasm.md`): C++ in, the mid-level
-IR and the wasm module out, and the module runs in the page with the browser's WebAssembly. It is an explorer in the
-sense of Compiler Explorer, for one backend.
+`tools/wasm-explorer/` is a page for trying the Path B WebAssembly emitter (`pathb-wasm.md`): C++ in, the IR, the
+WebAssembly text and the binary out, and the module runs in the page with the browser's WebAssembly. It is an explorer
+in the sense of Compiler Explorer, for one backend.
+
+It runs in two ways:
+
+- **Live**, with the local server. It compiles any source on each edit (or on Compile).
+- **Static**, on GitHub Pages (`.github/workflows/wasm-explorer-pages.yml`). It cannot compile: the examples are
+  compiled ahead of time in CI, and their results are checked against the expected values before the site is deployed.
 
 ```
 scripts/setup-pathb.sh && scripts/setup-mruby.sh    # the harness and the mruby tool (once)
-node tools/wasm-explorer/server.cjs                  # http://127.0.0.1:8080/ (--port, --host)
+node tools/wasm-explorer/server.cjs                  # live: http://127.0.0.1:8080/ (--port, --host)
+node tools/wasm-explorer/build-static.cjs            # static: _site/, the examples built and checked
 ```
 
-The compiler is native, so the server runs it and the browser runs the result. The page is one HTML file with no
-external script or style, and the server has no dependency beyond node (22 was used).
+The compiler is native, so it runs where `pipeline.cjs` runs (the server, or the build). The module it produces runs in
+the browser. The page is one HTML file. The editor and the WAT converter come from jsdelivr (pinned, below); the server
+has no dependency beyond node (22 was used).
 
-## What the server does
+## Files
 
-`POST /api/compile` with `{"source": "..."}` writes the source to a temporary directory and runs
-`scripts/pathb-dump --ir prog.cpp` (the IR), then `scripts/mrb scripts/pathb-wasm-emit.rb prog.ir` (the module). It
-answers with `{ok, ir, wasm}` (wasm in base64), or `{ok: false, stage, message}`: `front-end` for a diagnostic from the
-harness, `emit` for a refusal of the emitter (exit status 3, the message names the node refused). `GET /api/health`
-says whether the harness and the mruby tool are built.
+| File | What it is |
+| --- | --- |
+| `pipeline.cjs` | The compile: `pathb-dump --ir`, then `pathb-wasm-emit.rb`, in a temporary directory. Options: the standard and the mode. Diagnostics with line numbers. |
+| `server.cjs` | The live server: the page, `examples/`, `GET /api/health`, `POST /api/compile`. |
+| `build-static.cjs` | The static site: each example in every mode, run and checked, then the page and `builds/<id>.json`. |
+| `index.html` | The page (one file, no build step). |
+| `examples/` | The sources and `index.json` (id, title, file, expected `main()` result). |
 
-Limits: 64 KB of source per request (413 past it), 60 s per compiler step, two compiles at a time (503 past that). The
-server listens on 127.0.0.1 by default, because it runs the compiler on whatever source it is sent. Exposing it on a
-network needs a process sandbox and a rate limit, which are not in this change. A static host (GitHub Pages) can serve
-the page but cannot compile; it would need the modules built ahead of time.
+## The compile
 
-## What the page does
+`POST /api/compile` with `{"source": "...", "options": {"std": "c++20", "mode": "asan"}}` answers with
+`{ok, ir, wasm (base64), diagnostics, mode, std}`, or `{ok: false, stage, message, diagnostics}`. The stages are
+`request` (bad input), `front-end` (a diagnostic from the harness), `emit` (a refusal of the emitter, exit status 3, the
+message names the node refused), and `server`. `diagnostics` is `[{line, severity, message}]`, parsed from EDG's
+messages; the page puts them on the editor's lines as markers.
 
-- An editor with three examples, Ctrl+Enter to compile, and a permalink: the source is in the URL hash (`#src=`, base64url).
-- The Module tab: size, exports, imports, a download of `prog.wasm`, and Run, which calls `main` the way
-  `tests/wasm/host.cjs` does. An import is stubbed as "first argument plus one". A trap prints its message (for
-  example `divide by zero`). A module without `main`, or with a non-function import, says so.
-- The IR tab (the `pathb-dump --ir` text), and the Bytes tab (a hex dump of the first KB).
-- Refusals and diagnostics are shown as text, and Run is disabled.
+The options are checked against a list: `std` is `c++17`, `c++20`, `c++23` or empty (the front end's default); `mode` is
+one of:
 
-Checked here: the three examples give 385, 300 and 610, which match `g++ -O0` (the process status is these modulo 256).
-Front-end errors, a refusal (`variadic call`), an oversized body (413), a bad request, and a trap all come back as
-described. A headless Chromium run of the page compiled, ran, and showed the refusal, and had no console errors. At a
-390 px width there is no horizontal scroll. `tests/wasm-explorer/` has no test yet; the checks above were done by hand.
+| Mode | Front end | Emitter | Data model |
+| --- | --- | --- | --- |
+| `lp64` (default) | as is | as is | LP64, i64 pointers |
+| `asan` | as is | `--asan` | LP64, with the ASan shadow |
+| `emscripten` | `--freestanding --target=linux_riscv32` | `--emscripten` | ILP32, Emscripten's exports |
 
-## Compiler Explorer features: how far they can go
+Limits: 64 KB of source (413 past it), 60 s per compiler step, two compiles at a time (503 past that). The server listens
+on 127.0.0.1 by default, because it runs the compiler on whatever source it is sent. Exposing it needs a process sandbox
+and a rate limit, which are not in this change.
+
+## The page
+
+- **Editor**: Monaco 0.52.2 from `cdn.jsdelivr.net/npm/monaco-editor@0.52.2`, with C++ highlighting, diagnostics as
+  markers, and Ctrl+Enter. If the CDN cannot be reached, the page uses a plain textarea.
+- **Options**: the standard, the mode, and "auto" (compile 0.7 s after an edit; live only).
+- **Module** tab: size, exports, imports, the bytes, the `.wasm` download, and Run, which calls `main` the way
+  `tests/wasm/host.cjs` does (imports return their first argument plus one; a trap prints its message).
+- **WAT** tab: the module as WebAssembly text, converted with `wabt` 1.0.37 (`cdn.jsdelivr.net/npm/wabt@1.0.37`), loaded
+  when the tab is first opened, with a `.wat` download.
+- **IR** and **Bytes** tabs: the mid-level IR text, and a hex dump of the first KB.
+- **Link**: the source, mode and standard are in the URL hash (`#src=<base64url>&mode=asan&std=c++20`).
+
+## Static build
+
+`build-static.cjs` compiles each example in each mode, runs `main` in node, and fails the build if a result differs
+from `expect` in `examples/index.json` or if a compile fails. It writes `_site/`: `index.html`, `examples/` (the sources
+and the manifest), `builds/<id>.json` (the sources, IR, wasm and diagnostics per mode), and `.nojekyll`.
+
+On a static host the page reads the manifest and the builds. An example's source gets its prebuilt result (and the
+default standard only). Any other source gets a message that it needs the local server. A permalink to an example works.
+
+The workflow builds the harness and the mruby tool as `pathb.yml` does, runs the static build (on pull requests too,
+without deploying), and deploys from `main`. The one-time repository setting is Settings > Pages > Source: GitHub
+Actions.
+
+## Checks
+
+- `build-static.cjs` is the check for the examples: 4 examples x 3 modes, each run and compared with its expected
+  result. The three expected results were also checked against `g++ -O0` (modulo 256, the process status).
+- Checked by hand in a headless Chromium with the CDN routed to the npm packages, since this sandbox cannot reach the
+  CDN: live (the examples, the modes, the standard, markers on a syntax error, auto-compile, WAT, the permalink, no
+  console errors); static (the examples, the emscripten mode, WAT, the refusal for other code, no console errors); CDN
+  blocked (the textarea takes over and the examples still run; WAT says it could not load wabt).
+- Error paths on the server: a front-end syntax error, a refusal (`variadic call`), 413, 400, 404.
+- No automated test runs the page. The CDN, and the browser, are not in CI.
+
+## Compiler Explorer features
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Source editor, compile on demand, permalinks | done | Compile on change is not done; it would need debouncing. |
-| Examples | done (3) | |
-| Run the output | done | `main` only; imports are stubbed. Program output (`printf`) is refused, so there is no stdout yet. |
-| Compiler errors | text only | Inline markers need the harness's line numbers in the editor, which is a parse of EDG's messages. |
-| Binary download and byte view | done | |
-| Module summary (imports, exports, sizes) | done | |
-| Text format (WAT) | not done | A disassembler is needed: `wabt.js` if vendored, or a small one of our own. Medium. |
-| The IR, and other stages (`--emit-c`, the QBE asm) | IR done | `--emit-c` is a second run of the same front end. The QBE asm is the native path. Small each. |
-| Side-by-side comparison, diff | not done | Two panels of stages, or of backends (wasm, `g++ -O0` asm). Medium. |
-| Compiler flags (`-std`, `-D`, `-I`, `--freestanding`, `--target`) | not done | `pathb-dump` takes them. Include directories must be restricted to the repo, not left as free paths. Small. |
-| Emitter modes (`--asan`, `--emscripten`) | not done | The emitter already takes them. A dropdown per mode. Small. |
-| Optimization levels | not applicable | The wasm emitter has no optimizer, so there is no `-O` to choose. The native path would have them. |
-| Source-to-output mapping (hover a line, see its code) | not done | Needs a line table. The emitter writes none, and only a `name` section (function names) is cheap. Hard for instructions. |
-| Libraries (`<vector>`, `<string>`, `std::`) | limited by the emitter | Hosted headers work in `pathb-dump`. The emitter refuses exceptions, variadic calls, indirect calls, general `goto`, bit-fields, VLAs and 16-byte types, and in the IR sweep 168 of 262 files are refused. The page would show these refusals, not hide them. |
-| Several compilers, a compiler list | not applicable | One backend. |
-| Accounts, saved snippets, a gallery | not planned | |
-
-So: most of the page's features are reachable with small to medium steps (WAT, the other stages, flags, the modes,
-comparison). Two are not practical in the near term: a line-by-line source map, and running programs that print. The
-bigger limit is the emitter's coverage of C++, which the page reports rather than changes.
+| Editor with highlighting and diagnostics | done | Monaco, from the CDN. |
+| Compile on edit, and on demand | done | Auto on the live server only. |
+| Examples | done (4) | Each checked in every mode at build time. |
+| Options: standard, emitter mode | done | `pipeline.cjs` takes them. |
+| Run the output | done | `main` only; imports are stubbed. |
+| Compiler errors | done | Text, and markers on the lines. |
+| WAT (text format) | done | `wabt`, from the CDN. |
+| IR, bytes, download | done | |
+| Shareable links | done | Source and options in the hash. |
+| Static deployment | done | GitHub Pages, examples only. |
+| Other stages (the C from `--emit-c`, the QBE asm) | not done | Needs the Path A build (`setup-edg.sh`), a second pipeline. |
+| Side-by-side comparison, diff | not done | Two modes or two backends in two panels. |
+| Compiler flags beyond the standard (`-D`, `-I`, `--target`) | not done | Include directories must be limited to the repo, not free paths. |
+| Source-to-output mapping | not done | Needs a line table. The emitter writes none; function names (a `name` section) are cheap. |
+| Program output (`printf`) | not done | The emitter refuses variadic calls, so there is no stdout yet. |
+| Libraries (`<vector>`, `<string>`) | limited by the emitter | The emitter refuses exceptions, variadic calls, indirect calls, general `goto`, bit-fields, VLAs and 16-byte types. In the IR sweep, 168 of 262 files are refused. The page shows these refusals. |
+| Several compilers | not applicable | One backend. |
+| Accounts, saved snippets | not planned | |
 
 ## 64-bit wasm (memory64)
 
@@ -91,4 +137,4 @@ Tests: `tests/wasm/run.sh` with `NFCXX_WASM_MEMORY64=1` (each module is emitted 
 result), and a test with a static object above 4 GB, if the Node build will allocate that much memory (not checked).
 Whether an Emscripten `MEMORY64` runtime accepts the module was not checked, as before (`pathb-wasm.md`, "Unverified names").
 
-This was not implemented. It is a separate change from the page.
+Not implemented. It is a separate change from the page.
