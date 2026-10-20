@@ -73,6 +73,9 @@ BC2CPP_CORE_MRBLIB_GEMS = %w[
 # - 10error.rb only gives NameError/NoMethodError their accessors; visible, they
 #   would add two exact-class arms to every `.name` call chain for nothing.
 BC2CPP_CORE_MRBLIB_EXCLUDED = %w[mrbgems/mruby-io/mrblib/kernel.rb mrblib/10error.rb].freeze
+# Core mrblib gems whose Ruby is analysed as program, so their method names are known callers and not outside tokens
+# (ADR 0514). Only their C sources stay outside. Pilot: mruby-array-ext only.
+BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = %w[mruby-array-ext].freeze
 # FAIL_FAST_TYPE (compile-time): true defines BC2CPP_FAIL_FAST_TYPE in the compiled gems, so each closed-world
 # fallback (bc2cpp_nomethod) raises TypeError instead of dispatching by name. Off in every shipped build.
 BC2CPP_FAIL_FAST_TYPE = false
@@ -354,7 +357,9 @@ end
 # while mruby-rpg2k/mrblib/game.rb has `NONE = 37`.
 def foreign_mrblib_srcs(gems_root)
   Dir["#{gems_root}/3rd/mruby/mrblib/**/*.rb"] +
-    Dir["#{gems_root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"] +
+    Dir["#{gems_root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"].reject do |path|
+      BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.any? { |gem| path.include?("/mrbgems/#{gem}/mrblib/") }
+    end +
     Dir["#{gems_root}/3rd/mruby-marshal/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-onig-regexp/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-stringio/mrblib/**/*.rb"]
@@ -465,6 +470,7 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
     native += Dir["#{dir}/{src,core}/**/#{BC2CPP_NATIVE_GLOB}"]
     native.reject! { |path| path.end_with?("/#{RgssTtsConfig::RGSS_TTS_CXX}") } unless RgssTtsConfig.backend_possible?(build_name)
     ruby += Dir["#{dir}/mrblib/**/*.rb"] unless BC2CPP_CLOSED_WORLD_GEMS.include?(name) ||
+                                               BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.include?(name) ||
                                                (build_name == 'optcarrot-probe' && name == 'optcarrot-benchmark')
   end
   [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
