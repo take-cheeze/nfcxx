@@ -10,28 +10,19 @@
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/bytecode_ir_constants_check.rb
 
 require 'set'
-require 'tmpdir'
+require_relative 'check_support'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/bytecode_ir_constants'
 
-unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
-  puts 'SKIP bytecode_ir_constants_check: MRBC is not set to a host mrbc'
-  exit 0
-end
+suite = FixtureCheck.new('bytecode_ir_constants_check')
+suite.require_mrbc!
 
-failures = []
-check = lambda do |what, condition|
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
+check = suite.method(:check)
 
 # Facts for one program: { paths: {path => Fact}, groups: {bare => Fact} } from the IR pass, with the operator gate
 # the program sets (or forced off when +safe+ is false).
 analyze = lambda do |source, safe: true|
-  Dir.mktmpdir do |dir|
-    rb = File.join(dir, 'fixture.rb')
-    File.write(rb, source)
-    ireps, root = compile_ireps([rb], 'bytecode_ir_constants', dir)
+  suite.compile(source) do |ireps, root|
     registry, _superclass_of, _containers, included, prepended, unknown, _structs, _decls, _walked, _ivars, sites = build_registry(ireps, root)
     operators_safe = safe && IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
     # The gate the build passes (bc2cpp.rb): stock Integer#freeze.
@@ -161,5 +152,4 @@ b = fact_of.call(of, 'Of::B')
 check.call('an intermediate outside the Fixnum margin has no value and no interval (B = A + A)',
            b && b.value.nil? && b.interval.nil? && b.classes == Set[:Integer])
 
-failures.empty? or abort("bytecode_ir_constants_check: #{failures.size} failure(s): #{failures.join('; ')}")
-puts 'bytecode_ir_constants_check: ok'
+suite.finish!

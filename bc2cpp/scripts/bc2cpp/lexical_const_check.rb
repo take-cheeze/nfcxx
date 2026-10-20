@@ -7,30 +7,18 @@
 # definition reachable from that scope (chain, ancestors, Object) could be read instead; anything
 # else has no key. Needs MRBC (a host mrbc); without it the check prints SKIP and exits 0.
 
-require 'tmpdir'
+require_relative 'check_support'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/lexical_consts'
 
-mrbc = ENV['MRBC']
-unless mrbc && File.executable?(mrbc)
-  puts 'SKIP lexical_const_check: MRBC is not set to a host mrbc'
-  exit 0
-end
+suite = FixtureCheck.new('lexical_const_check')
+suite.require_mrbc!
 
-failures = []
-checks = 0
-check = lambda do |what, condition|
-  checks += 1
-  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
-  failures << what unless condition
-end
+check = suite.method(:check)
 
 # [op, name, key] of every GETCONST/GETMCNST read, and [name, key] of every SETCONST site.
 analyze = lambda do |source, static: true|
-  Dir.mktmpdir do |dir|
-    path = File.join(dir, 'fixture.rb')
-    File.write(path, source)
-    ireps, _root = compile_ireps([path], 'lexical_const', dir)
+  suite.compile(source) do |ireps, _root|
     info = LexicalConsts.analyze(ireps, static: static)
     reads = []
     sites = []
@@ -127,9 +115,4 @@ check.call('a splatted class_eval argument may be a string: the whole world is u
 unstatic = analyze.call("class A1; V = 1; def f; V; end; end\n", static: false)
 check.call('non-static constants (const_set and friends) make the whole world unresolved', unstatic[:read_keys].zero?)
 
-if failures.empty?
-  puts "lexical_const_check: #{checks} checks passed"
-else
-  puts "lexical_const_check: #{failures.size} failure(s)"
-  exit 1
-end
+suite.finish!
