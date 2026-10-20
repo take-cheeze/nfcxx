@@ -18,8 +18,10 @@ out=$dir/nfcxx_eh_shim-$(host_gnu_version).o
 if [ ! -f "$out" ] || [ "$src" -nt "$out" ]; then
   mkdir -p "$dir"
   tmp=$(mktemp -d "$dir/.build.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
-  # the driver of this checkout; NFCXX_PATH=b, NFCXX_BACKEND and NFCXX_CC (set by the qbe backend) must not redirect the shim to another compiler
-  if ! env -u NFCXX_PATH -u NFCXX_BACKEND -u NFCXX_CC -u NFCXX_EHSHIM "$root/nfcxx" --backend=gcc -c "$src" -o "$tmp/shim.o" > "$tmp/log" 2>&1; then
+  # the driver of this checkout; NFCXX_PATH=b, NFCXX_BACKEND and NFCXX_CC (set by the qbe backend) must not redirect the shim to another compiler.
+  # NFCXX_EH_UNWIND is unset too: the shim is linked into every hosted program, QBE ones included, and its copy of the
+  # unwinder flag (lib/ehshim/nfcxx_eh_unwind.h, weak and 0 here) must stay 0 so that only gcc programs built with the gate use the unwinder.
+  if ! env -u NFCXX_PATH -u NFCXX_BACKEND -u NFCXX_CC -u NFCXX_EHSHIM -u NFCXX_EH_UNWIND "$root/nfcxx" --backend=gcc -c "$src" -o "$tmp/shim.o" > "$tmp/log" 2>&1; then
     echo "ehshim: cannot build $src; linking without it (exceptions thrown by libstdc++ will abort):" >&2
     head -5 "$tmp/log" >&2
     exit 0
