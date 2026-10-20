@@ -51,6 +51,9 @@ module NumericFlow
   STR = 16
   NIL = 32
   OTHER = 64
+  # The element mask of a register whose elements are unknown (ElementType: `Array[untyped]`). OR-joins absorb it, so a
+  # merge with any other value stays unknown; 0 (no element) is the join identity.
+  ELEM_UNKNOWN = -1
   RNG = 128
   EXC = 256
   NUM = INT | FLT
@@ -172,6 +175,8 @@ module NumericFlow
       r += 1
     end
     c.slots.each { |name| entry << oracle.ivar_entry_mask(irep, name) }
+    # Element block (one entry per register), before the provenance block so join_state OR-joins it.
+    entry.fill(ELEM_UNKNOWN, entry.size, nregs)
     entry.fill(0, entry.size, nregs) # provenance: which slot (+1) each register was loaded from
     entry.fill(0, entry.size, nregs) if c.tb # class tests: which test each register's boolean holds
 
@@ -377,7 +382,8 @@ module NumericFlow
       slots = oracle.ivar_slots(irep)
       slot_of = slots.each_with_index.to_h { |name, k| [name, nregs + k] }
       facts = slots.map { |name| oracle.ivar_fact_mask(irep, name) }
-      c = new(irep, oracle, opaque, nregs, slots, slot_of, facts, nregs + slots.size, writes)
+      # Provenance follows the ivar slots and the element block (one entry per register, ELEM_UNKNOWN in states).
+      c = new(irep, oracle, opaque, nregs, slots, slot_of, facts, nregs + slots.size + nregs, writes)
       # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
       # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
       if oracle.respond_to?(:class_narrowing_active?) && oracle.class_narrowing_active?
