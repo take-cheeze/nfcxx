@@ -27,10 +27,11 @@ class CodeGen
     receiver = state[insn.reg.to_i]
     return false unless receiver.is_a?(Integer) && receiver.positive?
 
-    classes = (@numeric_class_bits || {}).select { |_klass, bit| receiver.anybits?(bit) }
-    return false unless (1..8).cover?(classes.size) && classes.values.reduce(0, :|) == receiver
+    bits = numeric_receiver_class_bits(receiver)
+    return false unless bits
 
-    classes.all? do |klass, _bit|
+    bits.all? do |bit|
+      klass = return_class_name_of_bit(bit)
       definition = closed_world_exact_target(insn.sym, klass)
       definition&.irep && ReadonlyCallEffects.safe?(@ireps[definition.irep])
     end
