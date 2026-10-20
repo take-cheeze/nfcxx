@@ -68,6 +68,7 @@ Dir.mktmpdir('ir-context-results') do |dir|
     TypeCheckFixture.report(dir, env: env, label: 'context fixture')
   end
   report = run.call
+  check.call('leaf evaluation reuse preserves the complete report', report == run.call('BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   returns = report['ir_feedback'].select { |row| row['kind'] == 'return' }.to_h { |row| [[row['owner'], row['method']], row] }
   expected = { 'call_int' => ['Integer'], 'call_symbol' => ['Symbol'], 'call_peer' => ['String'],
                'call_default' => ['Integer'], 'call_given' => ['Symbol'], 'call_kw' => ['String'],
@@ -87,9 +88,13 @@ Dir.mktmpdir('ir-context-results') do |dir|
   without = run.call('BC2CPP_IR_CONTEXT_RESULTS' => '0')
   baseline = without['ir_feedback'].find { |row| row['owner'] == 'ContextCases' && row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('context opt-out withdraws keyword result proof', baseline['status'] == 'unknown')
-  limited = run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1')['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
+  limited_report = run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1')
+  check.call('leaf reuse preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
+  limited = limited_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a context budget never publishes a provisional keyword summary', limited['status'] == 'unknown')
-  rounds = run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1')['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
+  rounds_report = run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1')
+  check.call('leaf reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
+  rounds = rounds_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a round budget never publishes bottom as a return type', rounds['status'] == 'unknown')
   no_effect = run.call('BC2CPP_IR_EFFECT_SUMMARIES' => '0')['ir_feedback'].find { |row| row['method'] == 'effect_read' && row['kind'] == 'return' }
   check.call('effect opt-out withdraws preserved slot refinement', no_effect['type'] != 'Symbol')

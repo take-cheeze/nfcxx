@@ -3,6 +3,7 @@
 require_relative 'bytecode_ir_regions'
 require_relative 'numeric_flow'
 require_relative 'call_context_arguments'
+require_relative 'ir_context_leaf_evaluations'
 
 # Reporting contexts form a finite may-set graph. Bottom stays private until a whole fixpoint settles.
 class IrContextResults
@@ -13,7 +14,7 @@ class IrContextResults
   PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
                  'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
-  Node = Struct.new(:arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
+  Node = Struct.new(:key, :has_callees, :arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
 
   class Oracle < CodeGen::ContextOracle
     attr_reader :calls
@@ -88,6 +89,7 @@ class IrContextResults
     @shape_bits = {}
     @shape_mask = 0
     @class_cache = {}
+    @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
     native_rows = @gen.instance_variable_get(:@lcf_rows)&.mask.to_i
     @shape_base = [NumericFlow::OBJECT_KIND_BASE + 256, native_tables.bit_length, native_rows.bit_length].max + 1
@@ -233,6 +235,8 @@ class IrContextResults
   end
 
   def add(body, receiver, arguments, keywords, binding, root: false)
+    # Even an existing node is a dependency: its states may change in a later round.
+    @evaluating.has_callees = true if @evaluating
     key = [body.label, receiver, arguments, keywords.sort, root]
     return @nodes[key] if @nodes.key?(key)
     if @nodes.size >= @max_contexts
@@ -240,7 +244,11 @@ class IrContextResults
       return nil
     end
     @changed = true
-    @nodes[key] = Node.new(body: body, receiver: receiver, arguments: arguments.dup.freeze,
+    key[2] = arguments.dup.freeze
+    key[3].each(&:freeze)
+    key[3].freeze
+    key.freeze
+    @nodes[key] = Node.new(key: key, body: body, receiver: receiver, arguments: key[2],
                           keywords: keywords.dup.freeze, binding: binding, root: root, mask: 0)
   end
 
@@ -264,6 +272,24 @@ class IrContextResults
   end
 
   def evaluate(node)
+    return evaluate_body(node) unless @leaf_evaluations
+
+    classes, shapes = @gen.numeric_class_bit_count, @shapes.size
+    snapshot = @leaf_evaluations.fetch(node.key, classes: classes, shapes: shapes)
+    return snapshot.restore(node) if snapshot
+
+    @evaluating = node
+    node.has_callees = false
+    value = evaluate_body(node)
+    if !node.has_callees && !@failed && classes == @gen.numeric_class_bit_count && shapes == @shapes.size
+      @leaf_evaluations.remember(node.key, node, value, classes: @gen.numeric_class_bit_count, shapes: @shapes.size)
+    end
+    value
+  ensure
+    @evaluating = nil
+  end
+
+  def evaluate_body(node)
     body = node.body
     program = BytecodeIR.for(body)
     unless Array(body.reps).empty? && program.resolved? && !program.handlers?
