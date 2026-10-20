@@ -64,7 +64,7 @@ module NativeCoreDirectWire
                 apis: #{apis},
                 checks: [[#{function.inspect}, <<~'C', :exact]]),
     RUBY
-    text + body.lines.map { |l| "                  #{l}" }.join.sub(/\n?\z/, "\n") + "              C\n"
+    text + body.lines.map { |l| l == "\n" ? l : "                  #{l}" }.join.sub(/\n?\z/, "\n") + "              C\n"
   end
 
   def helper_text(function)

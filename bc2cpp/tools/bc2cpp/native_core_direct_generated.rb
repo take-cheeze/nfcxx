@@ -8,14 +8,14 @@ module NativeCoreDirect
               expression: "mrb_str_intern(M, recv)",
               apis: [%w[mruby/string.h mrb_str_intern]],
               checks: [["mrb_str_intern", <<~'C', :exact]]),
-                      
+
                         return mrb_symbol_value(mrb_intern_str(mrb, self));
                   C
     Entry.new(name: "to_sym", owner: "String", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: "mrb_str_intern(M, recv)",
               apis: [%w[mruby/string.h mrb_str_intern]],
               checks: [["mrb_str_intern", <<~'C', :exact]]),
-                      
+
                         return mrb_symbol_value(mrb_intern_str(mrb, self));
                   C
   ].freeze
