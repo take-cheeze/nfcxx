@@ -580,12 +580,16 @@ if $PROGRAM_NAME == __FILE__
   # bytecode IR. It decides the constant sets below: the Fixnum-admitted names, the folded values and the intervals.
   freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included_modules, prepended_modules,
                                                 unknown_mixins)
+  # Frozen literal containers (ADR 0501 stage 3 input): a stock Array, Hash or String freeze answers its receiver too.
+  freeze_classes = %w[Array Hash String].select do |klass|
+    DeclaredConstants.stock_method?('freeze', klass, registry, included_modules, prepended_modules, unknown_mixins)
+  end.to_set
   constant_facts = profile_call.call('BytecodeIR::ConstantFacts.analyze') do
     BytecodeIR::ConstantFacts.analyze(
       ireps, sites: constant_assignment_sites,
              poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
                        IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq),
-             operators_safe: operators_safe, freeze_safe: freeze_safe
+             operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes.map(&:to_sym).to_set
     )
   end
   integer_constants =
