@@ -2081,9 +2081,33 @@ functions.each do |fn|
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
             t = iparams[0] || "u8"
             t = t.sub(/^(?:&|&mut\s+|&move\s+|\*const\s+|\*mut\s+|\*move\s+)/, "")
-            sz, al = type_size_align(t, types)
-            v = iname == "size_of_val" ? sz : al
-            store_dest.call("(const #{ty} #{v})")
+            if (t.start_with?("[") && t.end_with?("]") && !t.include?(";")) || t == "str" || t.start_with?("dyn")
+              inner = t == "str" ? "u8" : (t.start_with?("dyn") ? "u8" : t[1...-1].strip)
+              es, ea = type_size_align(inner, types)
+              ea = 1 if ea == 0
+              es = 1 if es == 0
+              if arg_vals.size >= 1
+                r = regi; regi += 1
+                stmts << "(let %#{r} (ptr unsigned_long) (offset #{arg_vals[0][0]} 8))"
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} unsigned_long (load unsigned_long %#{r}))"
+                if iname == "size_of_val" && es != 1
+                  r3 = regi; regi += 1
+                  stmts << "(let %#{r3} #{ty} (wmul #{ty} %#{r2} (const #{ty} #{es})))"
+                  store_dest.call("%#{r3}")
+                elsif iname == "align_of_val" && ea != 1
+                  store_dest.call("(const #{ty} #{ea})")
+                else
+                  r3 = regi; regi += 1
+                  stmts << "(let %#{r3} #{ty} (iconv #{ty} %#{r2}))" if ty != "unsigned_long"
+                  store_dest.call(ty == "unsigned_long" ? "%#{r2}" : "%#{r3}")
+                end
+              end
+            else
+              sz, al = type_size_align(t, types)
+              v = iname == "size_of_val" ? sz : al
+              store_dest.call("(const #{ty} #{v})")
+            end
           when "discriminant_value"
             if arg_vals.size >= 1 && iparams.size >= 1
               t = iparams[0]
