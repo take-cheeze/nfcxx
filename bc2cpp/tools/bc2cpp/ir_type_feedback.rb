@@ -22,7 +22,7 @@ module IrTypeFeedback
 
   module_function
 
-  def callback_binding(ctx, definition, parent, index, analysis)
+  def callback_binding(ctx, definition, parent, index, analysis, prepared: nil)
     return nil if ENV['BC2CPP_IR_RBS_BLOCK_TYPES'] == '0' || !ctx.signature_contracts
 
     insn = parent.instructions[index]
@@ -30,10 +30,10 @@ module IrTypeFeedback
     return nil unless receiver&.size == 1
 
     applied = ctx.signature_contracts
-    owners = RbsSignatures.contract_owners(receiver.first.to_s, ctx.superclass_of || {},
+    owners = prepared ? prepared.owners(receiver.first.to_s) : RbsSignatures.contract_owners(receiver.first.to_s, ctx.superclass_of || {},
                                           included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
                                           unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
-    target = owners.find { |owner| applied.ir_methods.include?([owner, insn.sym.to_s]) }
+    target = prepared ? prepared.target(receiver.first.to_s, insn.sym.to_s) : owners.find { |owner| applied.ir_methods.include?([owner, insn.sym.to_s]) }
     signature = target && IrRbsBlockTypes.signature_for(applied, target, insn.sym)
     return nil unless signature
 
@@ -43,7 +43,7 @@ module IrTypeFeedback
   end
 
   # Protocol contracts never seed exact dispatch or enclosing returns.
-  def iterator_block_rows(ctx, definition, parent, index, analysis)
+  def iterator_block_rows(ctx, definition, parent, index, analysis, prepared: nil)
     return [] if ENV['BC2CPP_IR_BLOCK_TYPES'] == '0'
 
     insn = parent.instructions[index]
@@ -59,7 +59,7 @@ module IrTypeFeedback
 
     iterator = insn.op == 'SENDB' && insn.argc.zero? && %w[each map collect each_with_index].include?(insn.sym)
     elements = analysis.element_fact_at(index, insn.reg) if iterator
-    binding = callback_binding(ctx, definition, parent, index, analysis)
+    binding = callback_binding(ctx, definition, parent, index, analysis, prepared: prepared)
     summary = IrYieldTypes.summarize(ctx, parent, index, analysis)
     if summary && summary.child.equal?(child)
       bounds = summary.arguments
@@ -189,6 +189,11 @@ module IrTypeFeedback
     rows = []
     returns = {}
     applied = ctx.signature_contracts
+    prepared = if applied && ENV['BC2CPP_IR_PREPARED_CONTRACTS'] != '0'
+                 RbsSignatures::IrContracts.new(applied, superclass_of: ctx.superclass_of || {},
+                                               included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
+                                               unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
+               end
     ctx.registry.values.flatten.select(&:irep).uniq(&:irep).each do |definition|
       irep = ctx.ireps[definition.irep]
       next unless irep&.file
@@ -221,11 +226,11 @@ module IrTypeFeedback
         end
       end
       analysis = if applied
-                   RbsSignatures.ir_types(applied, irep, superclass_of: ctx.superclass_of || {}, included_modules: ctx.included_modules || {},
+                   RbsSignatures.ir_types(applied, irep, prepared: prepared, superclass_of: ctx.superclass_of || {}, included_modules: ctx.included_modules || {},
                                           prepended_modules: ctx.prepended_modules || {}, unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver)
                  else BytecodeIR::Types.new(irep, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver)
                  end
-      owners = RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {},
+      owners = prepared ? prepared.owners(definition.owner) : RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {},
                                             included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
                                             unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
       exits = []
@@ -234,7 +239,7 @@ module IrTypeFeedback
                elsif insn.op == 'SETIV' then 'ivar_store'
                elsif %w[SEND SEND0 SENDB].include?(insn.op) then 'receiver'
                end
-        rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis)) if %w[SENDB SSENDB].include?(insn.op)
+        rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis, prepared: prepared)) if %w[SENDB SSENDB].include?(insn.op)
         next unless kind
 
         refusal = {}

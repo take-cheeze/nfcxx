@@ -56,6 +56,38 @@ cache.remember(['large'], large, NumericFlow::INT, classes: 0, shapes: 0)
 raise 'oversized leaf retained' if cache.fetch(['large'], classes: 0, shapes: 0)
 puts 'leaf evaluation isolation, generation and size-bound checks passed'
 
+signatures = RbsSignatures::Applied.new(
+  ir_methods: Set[['Base', 'selfish'], ['Base', 'shadowed'], ['Pre', 'shadowed']],
+  ir_named_returns: { ['Base', 'selfish'] => :self, ['Base', 'shadowed'] => Set[:String] },
+  ir_ivar_types: { ['Base', 'items'] => Set[:Array], ['Child', 'items'] => Set[:Integer], ['Base', 'marker'] => Set[:Symbol] },
+  ir_ivar_elements: { ['Base', 'items'] => Set[:String] }
+)
+hierarchy = { 'Child' => 'Base', 'Base' => :none }
+world = { superclass_of: hierarchy, included_modules: { 'Child' => ['Mix'] },
+          prepended_modules: { 'Child' => ['Pre'] }, unknown_mixins: Set.new }
+contracts = RbsSignatures::IrContracts.new(signatures, **world)
+raise 'prepared owner precedence changed' unless contracts.owners('Child') == RbsSignatures.contract_owners('Child', hierarchy, **world.reject { |key, _| key == :superclass_of })
+raise 'prepared owner order was rebuilt' unless contracts.owners('Child').equal?(contracts.owners('Child'))
+raise 'scalar ivar override was lost' unless contracts.ivars('Child')['items'] == Set[:Integer]
+raise 'inherited element bound survived a scalar override' if contracts.elements('Child').key?('items')
+raise 'unshadowed inherited ivar was lost' unless contracts.ivars('Child')['marker'] == Set[:Symbol]
+raise 'lookup skipped an overriding method without a signature' unless contracts.target('Child', 'shadowed') == 'Pre'
+raise 'receiver-relative self contract changed' unless contracts.named_returns[['Base', 'selfish']] == :self
+raise 'prepared tables are mutable' unless contracts.named_returns.frozen? && contracts.ivars('Child').frozen? && contracts.ivars('Child')['items'].frozen?
+blocked = RbsSignatures::IrContracts.new(signatures, **world.merge(unknown_mixins: Set['Mix']))
+raise 'unknown mixin admitted partial contracts' unless blocked.owners('Child').empty? && blocked.ivars('Child').empty?
+cyclic = RbsSignatures::IrContracts.new(signatures, **world.merge(superclass_of: { 'Child' => 'Base', 'Base' => 'Child' }))
+raise 'cyclic hierarchy admitted contracts' unless cyclic.owners('Child').empty?
+other = RbsSignatures::IrContracts.new(signatures, superclass_of: { 'Child' => 'Other' }, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new)
+raise 'prepared contracts leaked between hierarchy worlds' if other.ivars('Child').key?('marker')
+begin
+  RbsSignatures.ir_types(RbsSignatures::Applied.new, nil, prepared: contracts)
+  raise 'prepared contracts accepted another signature world'
+rescue ArgumentError => error
+  raise unless error.message == 'prepared IR contracts belong to another signature world'
+end
+puts 'prepared RBS precedence, shadowing, self-return and world isolation checks passed'
+
 unless ENV['MRBC']
   puts 'SKIP type-check pipeline fixtures (set MRBC)'
   exit 0
@@ -71,20 +103,44 @@ Dir.mktmpdir('type-check-run') do |dir|
       def receiver(value); value.unknown_pipeline_method; end
       def element(values); values[0]; end
     end
+    class TypeRbsBase
+      def initialize; @items = ['text']; end
+      def items; @items; end
+      def itself; self; end
+    end
+    class TypeRbsChild < TypeRbsBase
+      def initialize; @items = 1; end
+      def items; @items; end
+      def inherited_self; itself; end
+    end
   SOURCE
   sig = File.join(dir, 'sig')
   Dir.mkdir(sig)
   File.write(File.join(sig, 'fixture.rbs'), "class TypeCheckPipeline\n  def value: (Integer) -> String\nend\n")
+  File.write(File.join(sig, 'inherited.rbs'), <<~RBS)
+    class TypeRbsBase
+      @items: Array[String]
+      def items: () -> Array[String]
+      def itself: () -> self
+    end
+    class TypeRbsChild < TypeRbsBase
+      @items: Integer
+      def items: () -> Integer
+      def inherited_self: () -> self
+    end
+  RBS
   results = %w[0 1].map do |mode|
     work = File.join(dir, "mode-#{mode}")
     Dir.mkdir(work)
     result = TypeCheckRun.run(root: root, mrbc: File.expand_path(ENV.fetch('MRBC')), workdir: work,
                               sources: [source], sig_dirs: [sig], display_root: dir,
-                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode })
+                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode, 'BC2CPP_IR_PREPARED_CONTRACTS' => mode })
     [JSON.parse(File.read(result.facts_path)), File.read(result.rows_path), work]
   end
   baseline, optimized = results
   raise 'report-only mode changed type facts' unless baseline[0] == optimized[0]
+  self_row = optimized[0]['ir_feedback'].find { |row| row['owner'] == 'TypeRbsChild' && row['method'] == 'inherited_self' && row['kind'] == 'return' }
+  raise 'inherited self return lost the child receiver' unless self_row && self_row['type'] == 'TypeRbsChild'
   raise 'report-only mode changed receiver rows' unless baseline[1] == optimized[1]
   raise 'fixture did not exercise receiver reporting' if baseline[1].strip.empty?
   raise 'fixture did not retain signature errors' if TypeCheckReport.exit_status(TypeCheckReport.diagnostics(optimized[0], [])).zero?
