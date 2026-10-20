@@ -2066,6 +2066,7 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#drive_message -> choice",
   "RPG2k::Scene::Map#drive_message -> choice_cancellable?",
   "RPG2k::Scene::Map#drive_message -> choose",
+  "RPG2k::Scene::Map#drive_message -> count",
   "RPG2k::Scene::Map#drive_message -> done?",
   "RPG2k::Scene::Map#drive_message -> gold_window",
   "RPG2k::Scene::Map#drive_message -> interp",
