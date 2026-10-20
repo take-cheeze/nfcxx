@@ -120,7 +120,9 @@ if File.exist?(real)
   require_relative '../../tools/bc2cpp/compiled_gems'
   require_relative '../../tools/bc2cpp/bc2cpp'
   native = core_native_srcs("#{ROOT}/3rd/mruby") + Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + external_gem_native_srcs(ROOT)
-  verified = CoreMixins.verified(foreign_mrblib_srcs(ROOT), extract_native_method_sources(native))
+  # Program-owned core files still participate in source-model verification.
+  ruby = (core_compiled_mrblib_srcs(ROOT) + foreign_mrblib_srcs(ROOT)).uniq
+  verified = CoreMixins.verified(ruby, extract_native_method_sources(native))
   check.call('the real 3rd/mruby still matches every modelled method (review CoreMixins::METHODS when this fails)',
              verified == Set.new(CoreMixins::METHODS.map(&:name)))
 else
