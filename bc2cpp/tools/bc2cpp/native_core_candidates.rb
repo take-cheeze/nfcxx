@@ -2,6 +2,7 @@
 
 require 'json'
 require 'set'
+require_relative 'native_names'
 require_relative 'native_rom_extract'
 
 # Direct-call candidates for mruby core's native methods, from the clang AST (ADR 0257 / 0263).
@@ -28,13 +29,6 @@ module NativeCoreCandidates
     'hash' => 'Hash', 'range' => 'Range', 'symbol' => 'Symbol', 'proc' => 'Proc', 'kernel' => 'Kernel',
     'comparable' => 'Comparable', 'class' => 'Class', 'module' => 'Module', 'object' => 'Object',
     'nil' => 'NilClass', 'true' => 'TrueClass', 'false' => 'FalseClass'
-  }.freeze
-
-  OPSYM = {
-    'add' => '+', 'sub' => '-', 'mul' => '*', 'div' => '/', 'mod' => '%', 'lt' => '<', 'le' => '<=', 'gt' => '>',
-    'ge' => '>=', 'eq' => '==', 'eqq' => '===', 'cmp' => '<=>', 'lshift' => '<<', 'rshift' => '>>', 'aref' => '[]',
-    'aset' => '[]=', 'and' => '&', 'or' => '|', 'xor' => '^', 'not' => '!', 'neq' => '!=', 'pow' => '**',
-    'uplus' => '+@', 'uminus' => '-@', 'neg' => '-@', 'mul_nr' => '*'
   }.freeze
 
   # mruby APIs that take an mrb_state and do not depend on the calling frame: the list scripts/native/binding_facts.py
@@ -112,7 +106,7 @@ module NativeCoreCandidates
   # MRB_SYM(name), MRB_SYM_Q(name) and MRB_OPSYM(op) spelled as the Ruby method name.
   def symbol_name(sym)
     case sym
-    when /\AMRB_OPSYM\((\w+)\)\z/ then OPSYM.fetch(Regexp.last_match(1), nil)
+    when /\AMRB_OPSYM\((\w+)\)\z/ then OPSYM_TO_RUBY.fetch(Regexp.last_match(1), nil)
     when /\AMRB_SYM_Q\((\w+)\)\z/ then "#{Regexp.last_match(1)}?"
     when /\AMRB_SYM_E\((\w+)\)\z/ then "#{Regexp.last_match(1)}="
     when /\AMRB_SYM\((\w+)\)\z/ then Regexp.last_match(1)

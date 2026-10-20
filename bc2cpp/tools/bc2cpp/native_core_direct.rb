@@ -72,7 +72,7 @@ module NativeCoreDirect
               checks: [['mrb_obj_itself', 'return self;', :exact, 'object.c']]),
   ].freeze
 
-  ENTRIES = [
+  HAND_ENTRIES = [
     Entry.new(name: 'join', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_OPT(1)',
               expression: 'mrb_ary_join(M, recv, mrb_nil_value())',
               apis: [%w[mruby/array.h mrb_ary_join]],
@@ -274,7 +274,7 @@ module NativeCoreDirect
   ].freeze
 
   # The C text of each helper, emitted once per output that calls it.
-  HELPERS = {
+  HAND_HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
       static inline mrb_value bc2cpp_ary_compact(mrb_state* M, mrb_value self) {
         mrb_value ary = mrb_ary_new_capa(M, RARRAY_LEN(self));
@@ -351,6 +351,12 @@ module NativeCoreDirect
       }
     CPP
   }.freeze
+
+  # The generated entries (scripts/bc2cpp/native_core_direct_wire.rb): frame-free core natives on Array, String and
+  # Integer, each with its body pinned. Loaded here, after Entry and the hand lists, because the file reopens this module.
+  require_relative 'native_core_direct_generated'
+  ENTRIES = (HAND_ENTRIES + GENERATED_ENTRIES).freeze
+  HELPERS = HAND_HELPERS.merge(GENERATED_HELPERS).freeze
 
   @audits = {}
 
