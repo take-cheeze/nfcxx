@@ -27,6 +27,16 @@ if paths.all? { |p| File.file?(p) }
     check("#{entry.owner}##{entry.name} verifies#{reason ? " (#{reason})" : ''}", reason.nil?)
   end
   check('every generated entry is listed in ENTRIES', NativeCoreDirect::GENERATED_ENTRIES.all? { |e| NativeCoreDirect::ENTRIES.include?(e) })
+  # A generated call site is in another translation unit: its function must have external linkage. The audit cannot
+  # see linkage, so this reads the definition's own line and the one before it.
+  NativeCoreDirect::GENERATED_ENTRIES.each do |entry|
+    function = entry.checks.first.first
+    source = paths.find { |p| NativeCoreDirect.function_body(p, function) }
+    lines = source ? File.read(source, encoding: 'UTF-8').lines : []
+    at = lines.index { |l| l.match?(/^#{Regexp.escape(function)}\s*\(/) }
+    external = !at.nil? && lines[[at - 2, 0].max...at].none? { |l| l.match?(/\bstatic\b/) }
+    check("#{entry.owner}##{entry.name} calls #{function}, which has external linkage", external)
+  end
 else
   check('mruby core sources are present (3rd/mruby)', false)
 end

@@ -4,70 +4,12 @@
 # change the generator or the audited hand entries and rerun it.
 module NativeCoreDirect
   GENERATED_ENTRIES = [
-    Entry.new(name: "empty?", owner: "Array", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: "bc2cpp_mrb_ary_empty_p(M, recv)", helper: "bc2cpp_mrb_ary_empty_p",
-              apis: [],
-              checks: [["mrb_ary_empty_p", <<~'C', :exact]]),
-                      
-                        struct RArray *a = mrb_ary_ptr(self);
-                      
-                        return mrb_bool_value(ARY_LEN(a) == 0);
-                  C
-    Entry.new(name: "length", owner: "Array", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: "bc2cpp_mrb_ary_size(M, recv)", helper: "bc2cpp_mrb_ary_size",
-              apis: [],
-              checks: [["mrb_ary_size", <<~'C', :exact]]),
-                      
-                        struct RArray *a = mrb_ary_ptr(self);
-                      
-                        return mrb_int_value(mrb, ARY_LEN(a));
-                  C
-    Entry.new(name: "size", owner: "Array", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: "bc2cpp_mrb_ary_size(M, recv)", helper: "bc2cpp_mrb_ary_size",
-              apis: [],
-              checks: [["mrb_ary_size", <<~'C', :exact]]),
-                      
-                        struct RArray *a = mrb_ary_ptr(self);
-                      
-                        return mrb_int_value(mrb, ARY_LEN(a));
-                  C
-    Entry.new(name: "bytesize", owner: "String", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: "bc2cpp_mrb_str_bytesize(M, recv)", helper: "bc2cpp_mrb_str_bytesize",
-              apis: [],
-              checks: [["mrb_str_bytesize", <<~'C', :exact]]),
-                      
-                        return mrb_int_value(mrb, RSTRING_LEN(self));
-                  C
-    Entry.new(name: "empty?", owner: "String", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: "bc2cpp_mrb_str_empty_p(M, recv)", helper: "bc2cpp_mrb_str_empty_p",
-              apis: [],
-              checks: [["mrb_str_empty_p", <<~'C', :exact]]),
-                      
-                        struct RString *s = mrb_str_ptr(self);
-                      
-                        return mrb_bool_value(RSTR_LEN(s) == 0);
-                  C
-    Entry.new(name: "hash", owner: "String", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: "bc2cpp_mrb_str_hash_m(M, recv)", helper: "bc2cpp_mrb_str_hash_m",
-              apis: [],
-              checks: [["mrb_str_hash_m", <<~'C', :exact]]),
-                      
-                        mrb_int key = mrb_str_hash(mrb, self);
-                        return mrb_int_value(mrb, key);
-                  C
     Entry.new(name: "intern", owner: "String", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: "mrb_str_intern(M, recv)",
               apis: [%w[mruby/string.h mrb_str_intern]],
               checks: [["mrb_str_intern", <<~'C', :exact]]),
                       
                         return mrb_symbol_value(mrb_intern_str(mrb, self));
-                  C
-    Entry.new(name: "to_f", owner: "String", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-              expression: "bc2cpp_mrb_str_to_f(M, recv)", helper: "bc2cpp_mrb_str_to_f",
-              apis: [],
-              checks: [["mrb_str_to_f", <<~'C', :exact]]),
-                      
-                        return mrb_float_value(mrb, mrb_str_to_dbl(mrb, self, FALSE));
                   C
     Entry.new(name: "to_sym", owner: "String", arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: "mrb_str_intern(M, recv)",
@@ -79,41 +21,5 @@ module NativeCoreDirect
   ].freeze
 
   GENERATED_HELPERS = {
-    "bc2cpp_mrb_ary_empty_p" => <<~'CPP',
-      extern "C" mrb_value mrb_ary_empty_p(mrb_state*, mrb_value);
-      static inline mrb_value bc2cpp_mrb_ary_empty_p(mrb_state* M, mrb_value self) {
-        return mrb_ary_empty_p(M, self);
-      }
-    CPP
-    "bc2cpp_mrb_ary_size" => <<~'CPP',
-      extern "C" mrb_value mrb_ary_size(mrb_state*, mrb_value);
-      static inline mrb_value bc2cpp_mrb_ary_size(mrb_state* M, mrb_value self) {
-        return mrb_ary_size(M, self);
-      }
-    CPP
-    "bc2cpp_mrb_str_bytesize" => <<~'CPP',
-      extern "C" mrb_value mrb_str_bytesize(mrb_state*, mrb_value);
-      static inline mrb_value bc2cpp_mrb_str_bytesize(mrb_state* M, mrb_value self) {
-        return mrb_str_bytesize(M, self);
-      }
-    CPP
-    "bc2cpp_mrb_str_empty_p" => <<~'CPP',
-      extern "C" mrb_value mrb_str_empty_p(mrb_state*, mrb_value);
-      static inline mrb_value bc2cpp_mrb_str_empty_p(mrb_state* M, mrb_value self) {
-        return mrb_str_empty_p(M, self);
-      }
-    CPP
-    "bc2cpp_mrb_str_hash_m" => <<~'CPP',
-      extern "C" mrb_value mrb_str_hash_m(mrb_state*, mrb_value);
-      static inline mrb_value bc2cpp_mrb_str_hash_m(mrb_state* M, mrb_value self) {
-        return mrb_str_hash_m(M, self);
-      }
-    CPP
-    "bc2cpp_mrb_str_to_f" => <<~'CPP',
-      extern "C" mrb_value mrb_str_to_f(mrb_state*, mrb_value);
-      static inline mrb_value bc2cpp_mrb_str_to_f(mrb_state* M, mrb_value self) {
-        return mrb_str_to_f(M, self);
-      }
-    CPP
   }.freeze
 end

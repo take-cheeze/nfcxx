@@ -36,7 +36,8 @@ module NativeCoreDirectWire
     hand = NativeCoreDirect::HAND_ENTRIES.map { |e| [e.owner, e.name] }.to_set
     pairs.flat_map do |source, candidates|
       candidates.filter_map do |c|
-        next unless c['frame_free'] && OWNERS.include?(c['owner']) && c['aspec'] == 'MRB_ARGS_NONE()' && c['name']
+        # A static function links nowhere from a generated call site, so only external linkage is wired.
+        next unless c['frame_free'] && c['external'] && OWNERS.include?(c['owner']) && c['aspec'] == 'MRB_ARGS_NONE()' && c['name']
         next if hand.include?([c['owner'], c['name']])
         # The audit matches registrations by identifier name; an operator token maps through OPSYM_TO_RUBY.
         next unless c['name'].match?(/\A\w+[?!]?\z/)

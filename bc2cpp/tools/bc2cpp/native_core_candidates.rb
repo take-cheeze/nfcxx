@@ -173,14 +173,26 @@ module NativeCoreCandidates
   end
 
   # Candidate records for the table entries of +source+, from its clang AST +ast+.
+  # Names of functions this unit declares or defines `static`. A generated call site is in another translation unit,
+  # so it can only reach a function with external linkage; a static one links nowhere (an undefined reference).
+  def static_functions(ast, out = Set.new)
+    return out unless ast.is_a?(Hash)
+
+    out << ast['name'] if ast['kind'] == 'FunctionDecl' && ast['name'] && ast['storageClass'] == 'static'
+    (ast['inner'] || []).each { |c| static_functions(c, out) }
+    out
+  end
+
   def candidates(source, ast)
     defined = NativeRomExtract.defined_functions(ast)
     free = frame_free(ast)
+    static = static_functions(ast)
     entries(source).map do |table, name, fn, aspec|
       owner = OWNERS[table]
       frame = free.fetch(fn, false)
       { 'table' => "#{table}_rom_entries", 'owner' => owner, 'name' => name, 'function' => fn, 'aspec' => aspec,
-        'defined' => defined.include?(fn), 'frame_free' => frame && defined.include?(fn) }
+        'defined' => defined.include?(fn), 'external' => !static.include?(fn),
+        'frame_free' => frame && defined.include?(fn) }
     end
   end
 end
