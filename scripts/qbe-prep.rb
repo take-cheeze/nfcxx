@@ -1564,7 +1564,16 @@ def main(argv)
     prelude['__nfcxx_int3'] = 'void __nfcxx_int3(void);'
     tail << INT3_STUB
   end
-  tail << (arm64 ? FENCE_STUB_ARM64 : FENCE_STUB) if need_fence
+  if need_fence
+    if macho
+      # Mach-O (--macho): the ELF section and .type forms do not assemble there. A weak definition in __TEXT,__text
+      # under the "_"-prefixed label, which is what the call to __nfcxx_fence names after QBE's prefix.
+      tail << "\t.section __TEXT,__text,regular,pure_instructions" << "\t.globl ___nfcxx_fence" <<
+              "\t.weak_definition ___nfcxx_fence" << "___nfcxx_fence:" << "\t#{arm64 ? 'dmb ish' : 'mfence'}" << "\tret"
+    else
+      tail << (arm64 ? FENCE_STUB_ARM64 : FENCE_STUB)
+    end
+  end
   decls.concat(prelude.values)
   edits << [0, 0, decls.join("\n") + "\n"] unless decls.empty?
   unless ctors.empty?
