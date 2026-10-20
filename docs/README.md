@@ -39,6 +39,7 @@ covers say so.
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
 | [pathb-stage3.md](notes/pathb-stage3.md) | The IR-to-QBE emitter, translation validation, and the rounds of closed gaps (volatile, TLS, exceptions, dynamic init, bit-fields, VLAs). |
 | [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the ILP32 layout of wasm32 under `--emscripten` (i32 pointers), the 64-bit memory under `--memory64`, the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`, with the Emscripten glue of emcc when it is installed). |
+| [wasm-explorer.md](notes/wasm-explorer.md) | The wasm explorer page (`tools/wasm-explorer/`): compile C++ to wasm on a local server, run the module in the page; Compiler Explorer feature coverage; memory64 (wasm64) as a change to the emitter. |
 | [realworld.md](notes/realworld.md) | tinyxml2, doctest, Lua, mruby built with nfcxx/nfcc, what each needed, `nfcc` options. |
 | [pathb-llvm.md](notes/pathb-llvm.md) | Path B from LLVM IR (`scripts/llvm-to-pathb.rb`): `clang -S -emit-llvm` text to nfcxx IR, with `nsw` checked and the other policy choices; 9 programs run against `// EXPECT:` and clang -O0 (`tests/llvm-pathb/run.sh`); what is refused. |
 | [pathb-cil.md](notes/pathb-cil.md) | Path B IR to CIL: C++ `try`/`catch` as CLR exceptions (spike), 19 of 62 IR test files translate, `tests/pathb-cil/run.sh`. |

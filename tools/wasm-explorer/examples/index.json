@@ -1,0 +1,6 @@
+[
+  { "id": "loop", "title": "Loop and arithmetic", "file": "loop.cpp", "expect": 385 },
+  { "id": "struct-pointer", "title": "Struct array and pointer", "file": "struct-pointer.cpp", "expect": 300 },
+  { "id": "recursion", "title": "Recursion", "file": "recursion.cpp", "expect": 610 },
+  { "id": "sieve", "title": "Sieve of primes below 100", "file": "sieve.cpp", "expect": 25 }
+]
