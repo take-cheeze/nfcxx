@@ -403,6 +403,10 @@ module NumericFlow
     end
 
     attr_writer :rescue_only
+    attr_reader :block_element
+
+    # The element block starts right after the ivar slots (one entry per register; see states).
+    def elem_base = @pb - @nregs
 
     def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
       @irep = irep
@@ -415,6 +419,7 @@ module NumericFlow
       @slot_of = slot_of
       @facts = facts
       @pb = prov_base
+      @block_element = oracle.respond_to?(:block_element_mask)
       @writes = writes
       @tb = nil
       @tests = nil
@@ -781,6 +786,7 @@ module NumericFlow
              end
       test = c.tb && (step.op == 'SEND' || step.op == 'SEND0') ? oracle.class_test(irep, index, insn, state) : nil
       out.fill(OTHER, a + 1, nregs - a - 1) if a + 1 < nregs
+      out.fill(ELEM_UNKNOWN, c.elem_base + a + 1, nregs - a - 1) if a + 1 < nregs
       preserve = c.preserves && oracle.preserves_ivar_slots?(irep, index, insn, state)
       if preserve
         out.fill(0, pb, nregs) unless c.tb
@@ -789,6 +795,8 @@ module NumericFlow
       end
       clobber_class_test_copies(out, c, a) if c.tb
       set_reg(out, a, mask, c)
+      # ELEMENT (step 2): a block send's elements, when the oracle proves them (block_element_mask); else unknown.
+      out[c.elem_base + a] = oracle.block_element_mask(irep, index, insn, state) || ELEM_UNKNOWN if c.block_element && call == C_BLOCK
       record_class_test(out, state, a, test, c) if test
       return out
     end
@@ -885,6 +893,8 @@ module NumericFlow
     writes[r] = (writes[r] || 0) | value if writes
     pb = c.pb
     out[pb + r] = 0
+    # A new value has no known elements until a rule proves them (ELEMENT, see ELEM_UNKNOWN).
+    out[c.elem_base + r] = ELEM_UNKNOWN
     # Registers that mirrored the old value of r no longer do.
     code = c.nslots + 1 + r
     clear_provenance(out, pb, c.nregs, code)
