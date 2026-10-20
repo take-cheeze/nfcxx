@@ -19,10 +19,16 @@
 # Usage with --emscripten (before the file): the module of the ILP32 IR (pathb-dump --target linux_riscv32) with the
 # exports that the Emscripten JS runtime reads:
 # __indirect_function_table (an empty funcref table), __stack_pointer, __data_end and __heap_base (immutable i32
-# globals), and __wasm_call_ctors (an empty function: the IR has no constructor list). The layout and the code are
+# globals), and __wasm_call_ctors (an empty function: the IR has no constructor list), with the stack functions the glue
+# calls (stackSave, stackRestore, stackAlloc and emscripten_stack_*, see emscripten_stack_fns). The layout and the code are
 # unchanged. --emscripten-import-memory (with --emscripten) imports env.memory instead of exporting memory.
 # --asan and --emscripten are not combined. Without the arguments the module is byte-identical to the one before the
 # mode existed. docs/notes/pathb-wasm.md, "Emscripten".
+#
+# Usage with --memory64 (before the file): the LP64 module with the 64-bit linear memory of the memory64 proposal. The
+# memory is declared with an i64 limit, its data segments have i64 offsets, and a memory access takes its address as the
+# i64 pointer value, with no wrap to i32. The stack stays in the low 4 GB (its pointer is i32, as in the default module).
+# --asan and --emscripten are not combined with it. Without it the module is byte-identical to the one before the mode.
 #
 # Layout and representation. The IR's layout is LP64 (pointers 8 bytes) by default, and the emitter keeps it: a pointer
 # value is an i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Under --emscripten the
@@ -367,6 +373,8 @@ class Module_
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
+  attr_accessor :memory64   # the 64-bit memory (--memory64): memory addresses are i64 (see push_addr)
+  attr_accessor :stack_fns   # --emscripten: the stack functions [name, type index, body] (see emscripten_stack_fns)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
   attr_accessor :alloc_index, :alloc_type   # asan: the function index and the type of malloc and free (name => ...)
 
@@ -904,31 +912,39 @@ class Fn
     raise Refused, "operand #{form_text(op)}"
   end
 
-  # Pushes an operand as the i32 address of memory.
-  def addr32(op)
+  # Pushes an operand as the address of memory: an i32 (the 32-bit linear memory), or under --memory64 an i64, which is
+  # the pointer value itself. A slot's address is computed as an i32 from the frame base (the stack is below 4 GB), and
+  # is extended to i64 under --memory64.
+  def push_addr(op)
     if op.is_a?(IRSym) && op.sig == "$"
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
       e(0x6a)
+      e(0xad) if @mod.memory64             # i64.extend_i32_u
     else
       push_op(op, ptr_wtype)
-      e(0xa7) if $ptr_bytes == 8           # i32.wrap_i64 (an i32 address needs no wrap)
+      e(0xa7) if $ptr_bytes == 8 && !@mod.memory64   # i32.wrap_i64 (an i32 address needs no wrap)
     end
   end
 
-  # The address of a memory access of size bytes, as an i32: in asan mode it is checked first (asan_addr).
+  # The address of a memory access of size bytes: in asan mode it is checked first (asan_addr).
   def mem_addr(op, size)
     if @asan
       asan_addr(op, size)
     else
-      addr32(op)
+      push_addr(op)
     end
+  end
+
+  # An integer constant of the memory's address width: the length of memory.copy, i64 under --memory64, else i32.
+  def mem_const(n)
+    e(@mod.memory64 ? 0x42 : 0x41); leb_s(n)
   end
 
   # asan: pushes the address of an access of size bytes after a call of the check, which traps on a violation. The
   # address goes through the scratch local, since the check takes it as an argument and the access needs it again.
   def asan_addr(op, size)
-    addr32(op)
+    push_addr(op)
     e(0x22); leb_u(@tmp32)                 # local.tee
     e(0x41); leb_s(size)
     e(0x10); leb_u(@mod.check_index)       # call the check: (address, size)
@@ -1401,7 +1417,7 @@ class Fn
       n = as_int(s[1])
       mem_addr(s[2], n)
       mem_addr(s[3], n)
-      e(0x41); leb_s(n)
+      mem_const(n)
       e(0xfc, 0x0a, 0x00, 0x00)            # memory.copy: destination, source, length
     when "eval"
       inner = s[1]
@@ -1876,7 +1892,35 @@ end
 
 # --emscripten: the exports the mode adds (encode_module). A function of the module may not take one of these names.
 EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base",
-                      "__wasm_call_ctors"]
+                      "__wasm_call_ctors", "stackSave", "stackRestore", "stackAlloc", "emscripten_stack_init",
+                      "emscripten_stack_get_free", "emscripten_stack_get_base", "emscripten_stack_get_end"]
+
+# --emscripten: the stack functions of the glue (emcc 3.1.6 calls emscripten_stack_init at start, and stackSave,
+# stackRestore and stackAlloc through its wrappers). The stack is the shadow stack of global 0, growing down from
+# stack_top to the end: the base is the top, the end is the lowest address the stack may reach, data_end rounded up to 16
+# (the glue asserts a 4-byte-aligned end when it writes the stack cookie; the module does not check the limit, as before).
+# Each entry is [name, signature, body]: the signature is [params, result], nil for none.
+def emscripten_stack_fns(mod)
+  stack_end = (mod.data_end + 15) / 16 * 16
+  body = lambda do |locals, code|
+    b = []
+    locals.empty? ? b << 0x00 : (uleb(locals.length, b); locals.each { |c, t| uleb(c, b); b << VT[t] })
+    code.each { |x| b << x }
+    b << 0x0b
+  end
+  consts = lambda { |n| c = []; c << 0x41; sleb(n, c); c }   # i32.const n
+  [
+    ["stackSave", [[], :i32], body.call([], [0x23, 0x00])],                       # global.get 0
+    ["stackRestore", [[:i32], nil], body.call([], [0x20, 0x00, 0x24, 0x00])],     # global.set 0 (local.get 0)
+    ["stackAlloc", [[:i32], :i32],                                                 # sp = (sp - n) & -16; return sp
+     body.call([[1, :i32]], [0x23, 0x00, 0x20, 0x00, 0x6b, 0x41, 0x70, 0x71,     # global.get 0, local.get 0, i32.sub,
+                             0x22, 0x01, 0x24, 0x00, 0x20, 0x01])],              # i32.const -16, i32.and, local.tee 1, global.set 0, local.get 1
+    ["emscripten_stack_init", [[], nil], body.call([], [])],
+    ["emscripten_stack_get_base", [[], :i32], body.call([], consts.call(mod.stack_top))],
+    ["emscripten_stack_get_end", [[], :i32], body.call([], consts.call(stack_end))],
+    ["emscripten_stack_get_free", [[], :i32], body.call([], [0x23, 0x00] + consts.call(stack_end) + [0x6b])],
+  ].map { |name, (params, result), b| [name, mod.type_of(params, result), b] }
+end
 
 # --emscripten: the imports the IR calls under a libc or C++ name that Emscripten's runtime provides under another
 # name, as [IR name => Emscripten name]. Empty: no such pair is verified (docs/notes/pathb-wasm.md, "Emscripten",
@@ -1884,9 +1928,9 @@ EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", 
 # is added only with a source that names both sides.
 EMSCRIPTEN_IMPORT_NAMES = {}
 
-USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [FILE.ir | -] > out.wasm\n"
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [--memory64] [FILE.ir | -] > out.wasm\n"
 
-def emit_module(src, asan = false, emscripten = false, import_memory = false)
+def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false)
   forms = parse_forms(tokenize(src))
   # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
   # takes ILP32 only). The model is set before any type is read.
@@ -1938,6 +1982,7 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false)
   mod.asan = asan
   mod.emscripten = emscripten
   mod.import_memory = import_memory
+  mod.memory64 = memory64
   mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
@@ -1959,6 +2004,7 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false)
   mod.check_index = mod.imports.length + order.length if asan
   mod.alloc_index = { "malloc" => mod.check_index + 1, "free" => mod.check_index + 2 } if asan
   mod.ctors_index = mod.imports.length + order.length + (asan ? 3 : 0) if emscripten
+  mod.stack_fns = emscripten_stack_fns(mod) if emscripten   # after the ctors (the index of each is in encode_module)
   bodies = order.map do |nm|
     fn = Fn.new(mod, defs[nm])
     fn.compile
@@ -2008,7 +2054,7 @@ def encode_module(mod, bodies)
   end
   # functions (asan: the check, then malloc and free, are the last ones; emscripten: then __wasm_call_ctors)
   fsec = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), fsec)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0), fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   if mod.asan
     uleb(mod.check_type, fsec)
@@ -2016,6 +2062,7 @@ def encode_module(mod, bodies)
     uleb(mod.alloc_type["free"], fsec)
   end
   uleb(mod.ctors_type, fsec) if mod.emscripten
+  mod.stack_fns.each { |_, ti, _| uleb(ti, fsec) } if mod.emscripten
   section(3, fsec, out)
   # emscripten: the function table, exported empty. The emitter has no indirect calls and no function values (both are
   # refused, see Fn#call and op_type), so no element segment is needed. It is exported under the name the glue looks for.
@@ -2031,7 +2078,7 @@ def encode_module(mod, bodies)
   unless mod.import_memory
     mem = []
     uleb(1, mem)
-    mem << 0x00
+    mem << (mod.memory64 ? 0x04 : 0x00)  # limits: memory64 (an i64 minimum) without a maximum, or i32 without one
     uleb(mod.pages, mem)
     section(5, mem, out)
   end
@@ -2066,7 +2113,7 @@ def encode_module(mod, bodies)
   # each function under its IR name
   ex = []
   nexp = (mod.import_memory ? 0 : 1) + bodies.length
-  nexp += 5 if mod.emscripten
+  nexp += 5 + mod.stack_fns.length if mod.emscripten
   uleb(nexp, ex)
   unless mod.import_memory
     name_bytes("memory", ex)
@@ -2089,6 +2136,11 @@ def encode_module(mod, bodies)
     name_bytes("__wasm_call_ctors", ex)
     ex << 0x00
     uleb(mod.ctors_index, ex)
+    mod.stack_fns.each_with_index do |(name, _, _), i|
+      name_bytes(name, ex)
+      ex << 0x00
+      uleb(mod.ctors_index + 1 + i, ex)
+    end
   end
   bodies.each_with_index do |(nm, _), i|
     raise Refused, "function name #{nm.inspect} is not ASCII (an export name must be UTF-8)" if nm.bytes.any? { |b| b >= 0x80 }
@@ -2099,7 +2151,7 @@ def encode_module(mod, bodies)
   section(7, ex, out)
   # code
   code = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), code)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0), code)
   bodies.each do |nm, fn|
     b = fn.encode
     uleb(b.length, code)
@@ -2115,6 +2167,10 @@ def encode_module(mod, bodies)
     b = [0x00, 0x0b]                     # no locals, end: __wasm_call_ctors does nothing (no constructor list in the IR)
     uleb(b.length, code)
     b.each { |x| code << x }
+    mod.stack_fns.each do |_, _, body|
+      uleb(body.length, code)
+      body.each { |x| code << x }
+    end
   end
   section(10, code, out)
   # data: the segments of the static objects, each at its address (an active segment in memory 0)
@@ -2122,7 +2178,7 @@ def encode_module(mod, bodies)
     dsec = []
     uleb(mod.segments.length, dsec)
     mod.segments.each do |addr, bytes|
-      dsec << 0x00 << 0x41                 # active, memory 0: the offset is an i32.const
+      dsec << 0x00 << (mod.memory64 ? 0x42 : 0x41)   # active, memory 0: the offset is an i64.const or an i32.const
       sleb(addr, dsec)
       dsec << 0x0b
       uleb(bytes.length, dsec)
@@ -2143,6 +2199,7 @@ def main(argv)
   asan = false
   emscripten = false
   import_memory = false
+  memory64 = false
   while !args.empty? && args.first.start_with?("--")
     flag = args.shift
     if flag == "--asan"
@@ -2151,6 +2208,8 @@ def main(argv)
       emscripten = true
     elsif flag == "--emscripten-import-memory"
       import_memory = true
+    elsif flag == "--memory64"
+      memory64 = true
     else
       $stderr.write(USAGE)
       return 1
@@ -2164,13 +2223,17 @@ def main(argv)
     $stderr.write("error: --asan and --emscripten are not combined (the shadow would sit where the heap begins)\n")
     return 1
   end
+  if memory64 && (asan || emscripten)
+    $stderr.write("error: --memory64 is not combined with --asan or --emscripten (their shadow and runtime are i32)\n")
+    return 1
+  end
   if import_memory && !emscripten
     $stderr.write("error: --emscripten-import-memory needs --emscripten\n")
     return 1
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src, asan, emscripten, import_memory)
+    bytes = emit_module(src, asan, emscripten, import_memory, memory64)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3

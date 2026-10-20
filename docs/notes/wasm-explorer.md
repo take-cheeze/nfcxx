@@ -120,21 +120,11 @@ Checked in this environment: Node 22 (V8) instantiates a module whose memory has
 `0x04`) without a flag, and a function `f(addr: i64) -> i32 { return i32.load(addr) }` reads at a BigInt address, while
 a Number address is a TypeError. So the change can be tested here.
 
-What would change in `scripts/pathb-wasm-emit.rb` (about a dozen sites, found by grepping for `ptr_bytes`, `0xa7`
-(`i32.wrap_i64`), `0x41` and `shadow_base`):
+Implemented: `scripts/pathb-wasm-emit.rb --memory64` (see `pathb-wasm.md`, "Memory64"). The plan above held with two
+changes. The address is taken as the i64 pointer (`push_addr`, no wrap), and `memory.copy` takes i64 lengths. The
+stack pointer stays i32 (point 3): the memory is far below 4 GB, so a slot's address is extended to i64 only where it is
+used as an address. `--asan` and `--emscripten` are refused with `--memory64`, as the plan says.
 
-1. A `--memory64` mode: the memory limits with flag `0x04` and u64 page counts; the data segments' offsets as `i64.const`
-   (`0x42`) instead of `i32.const`.
-2. `addr32` becomes `addr64`: no wrap, the pointer is the address. The memarg offset is a u64 under an i64 memory, which is
-   the same bytes for the offsets the emitter writes.
-3. The shadow stack: the `__stack_pointer` global and the frame arithmetic (`i64.extend_i32_u` for a slot's address and
-   the prologue) move to i64.
-4. `memory.copy` and `memory.fill` take i64 operands under an i64 memory.
-5. ASan and `--emscripten` are refused with `--memory64` at first (their shadow and exports are i32 now), as ILP32 is
-   refused with `--asan`.
-
-Tests: `tests/wasm/run.sh` with `NFCXX_WASM_MEMORY64=1` (each module is emitted in the mode and must give the same
-result), and a test with a static object above 4 GB, if the Node build will allocate that much memory (not checked).
-Whether an Emscripten `MEMORY64` runtime accepts the module was not checked, as before (`pathb-wasm.md`, "Unverified names").
-
-Not implemented. It is a separate change from the page.
+Tests: `NFCXX_WASM_MEMORY64=1 tests/wasm/run.sh` emits every module in the mode and checks the same results, and
+`memory64_high_address.cpp` checks that an address above 2^32 traps. A static object above 4 GB was not tried. Whether an
+Emscripten `MEMORY64` runtime accepts the module was not checked.
