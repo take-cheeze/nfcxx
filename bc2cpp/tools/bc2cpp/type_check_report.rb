@@ -22,8 +22,8 @@ require_relative 'constant_reviewed'
 #   TC1007 error    an inferred IR may-set is disjoint from a nominal RBS return/ivar contract
 #   TC1008 warning  an inferred IR may-set partly overlaps the contract
 #   TC1016 error    an RBS `class C < S` whose S is not the program's superclass of C (ADR 0453)
-#   TC1017 error    an engine constant with no type that CONSTANT_REVIEWED does not list, or a listed one that is typed
-#                   or gone (the ratchet, ADR 0491; only when a list is given)
+#   TC1017 error    an engine constant with no type and no review annotation, or an annotation on one that is typed
+#                   or gone (the ratchet, ADR 0491; not on a --files run)
 #   TC2004 info     (--all) an IR query is unknown, with its refusal reason
 #   TC2001 info     (--all) a parameter has no type, with the reason bucket
 #   TC2002 info     (--all) a return has no type, with the reason bucket
@@ -143,8 +143,8 @@ module TypeCheckReport
 
   # ---------------------------------------------------------------------------------------------- diagnostics
 
-  # `constant_reviewed`: the Set of names the ratchet judges the constants by (ConstantReviewed.load), or nil for no gate.
-  def diagnostics(facts, suggestions, all: false, top: 20, scope: 'engine', constant_reviewed: nil)
+  # `constant_gate`: whether the TC1017 ratchet judges the constants (ConstantReviewed), false for no gate.
+  def diagnostics(facts, suggestions, all: false, top: 20, scope: 'engine', constant_gate: false)
     out = []
     facts['contradictions'].each do |c|
       out << Diagnostic.new(file: c['file'], line: c['line'], col: c['col'], severity: 'error', code: 'TC1001',
@@ -186,8 +186,8 @@ module TypeCheckReport
                             message: "#{row['owner']}##{row['method']} #{row['kind'] == 'return' ? 'return' : row['detail']}: inferred #{row['type']} " \
                                      "#{possible ? 'may exceed' : 'falls outside'} RBS contract #{row['expected']}")
     end
-    if constant_reviewed
-      ConstantReviewed.violations(facts['constants'], reviewed: constant_reviewed).each do |v|
+    if constant_gate
+      ConstantReviewed.violations(facts['constants']).each do |v|
         out << Diagnostic.new(file: v[:file], line: v[:line], col: v[:col], severity: 'error', code: ConstantReviewed::CODE,
                               message: v[:message])
       end

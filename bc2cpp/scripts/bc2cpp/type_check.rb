@@ -24,8 +24,8 @@
 #   --all                    also print one info diagnostic per untyped parameter / return / ivar
 #   --scope engine|all       engine sources only (default) or the mruby core mrblib too
 #   --sig DIR                RBS signature directory (BC2CPP_SIG_DIRS; default sig/bc2cpp; docs/bc2cpp-type-check.md)
-#   --constants FILE         the CONSTANT_REVIEWED list the TC1017 ratchet judges by (ADR 0491). Default: the engine's
-#                            tools/bc2cpp/constant_reviewed_list.rb; a --files run has none unless FILE is given
+#   TC1017 (ADR 0491, 0522)  an untyped engine constant with no review annotation on its line; judged on the engine run
+#                            only, a --files run has no gate
 #   --no-sends               skip the by-name send ranking (the fastest run)
 #   --what-if                estimate, per suggestion, how many by-name lines a signature removes (recompiles each
 #                            send once; several minutes on the engine)
@@ -47,8 +47,7 @@ require 'constant_reviewed'
 
 ROOT = File.expand_path('../..', __dir__)
 
-opts = { format: 'text', top: 20, scope: 'engine', sends: true, what_if: false, all: false, quiet: false, files: nil,
-         constants: nil }
+opts = { format: 'text', top: 20, scope: 'engine', sends: true, what_if: false, all: false, quiet: false, files: nil }
 parser = OptionParser.new do |o|
   o.banner = "usage: #{File.basename($PROGRAM_NAME)} [options]"
   o.on('--format F', %w[text json tsv]) { |v| opts[:format] = v }
@@ -62,7 +61,6 @@ parser = OptionParser.new do |o|
   o.on('--scope S', %w[engine all]) { |v| opts[:scope] = v }
   o.on('--sig DIR') { |v| (opts[:sig] ||= []) << File.expand_path(v) }
   o.on('--no-sends') { opts[:sends] = false }
-  o.on('--constants FILE') { |v| opts[:constants] = v }
   o.on('--what-if') { opts[:what_if] = true }
   o.on('--emit-rbs DIR') { |v| opts[:emit_rbs] = v }
   o.on('--emit-rbs-suggestions DIR') { |v| opts[:emit_rbs_suggestions] = v }
@@ -94,14 +92,10 @@ else
 end
 
 suggestions = opts[:sends] ? TypeCheckReport.suggestions(facts, rows, scope: opts[:scope]) : []
-# The TC1017 ratchet (ADR 0491): the engine's list by default, none for a program of your own unless --constants names one.
-constant_reviewed = if opts[:files] && !opts[:constants]
-                      nil
-                    else
-                      ConstantReviewed.load(opts[:constants] || ConstantReviewed::DEFAULT_LIST)
-                    end
+# The TC1017 ratchet (ADR 0491, 0522): the engine's constants are judged by their review annotations; a --files run is not.
+constant_gate = !opts[:files]
 diags = TypeCheckReport.diagnostics(facts, suggestions, all: opts[:all], top: opts[:top], scope: opts[:scope],
-                                                       constant_reviewed: constant_reviewed)
+                                                       constant_gate: constant_gate)
 summary = TypeCheckReport.summary(facts, scope: opts[:scope])
 
 if opts[:emit_rbs]

@@ -25,11 +25,12 @@
 # Policy: a hint is not a proof, so no proof gates the forcing; every violation the verify build finds
 # is a wrong or incomplete hint, fixed at its source.
 #
-# Every forced site carries `/* STRICT_HINT FAMILY: name */`, is listed on stderr
-# (`STRICT_HINT_SITE Owner#method -> name (FAMILY)`) and must be in STRICT_HINTS_REVIEWED
-# (tools/bc2cpp/strict_hints_reviewed.rb), the way NOMETHOD_REVIEWED holds dead fallbacks.
+# Every forced site carries `/* STRICT_HINT FAMILY: name @ file:line */`, is listed on stderr
+# (`STRICT_HINT_SITE file:line -> name (FAMILY)`) and must carry a review annotation on its source line
+# (`# bc2cpp-reviewed: strict_hint FAMILY name -- reason`, tools/bc2cpp/source_review.rb), the way NOMETHOD holds dead fallbacks.
 require 'set'
 require_relative 'review_scope'
+require_relative 'source_review'
 
 module StrictHints
   ENV_NAME = 'BC2CPP_STRICT_HINTS'
@@ -37,8 +38,8 @@ module StrictHints
   # `1` forces the families that read a receiver hint (layout, annotation, element); `all` adds the
   # candidate-set chains and tables, whose receivers are not traced (docs/adr/0419).
   DEFAULT_FAMILIES = %w[typed element ivar_accessor mono_embed].freeze
-  MARKER = %r{/\* STRICT_HINT (\w+): (\S+) \*/}
-  LISTING = /^  STRICT_HINT_SITE (.+ -> \S+ \(\w+\))$/
+  MARKER = %r{/\* STRICT_HINT (\w+): (\S+) @ (\S+) \*/}
+  LISTING = /^  STRICT_HINT_SITE (.+) -> (\S+) \((\w+)\)$/
   # Classes whose exact-class guards are exact-core-type guards (kept) or whose instances are the
   # numeric and nil values the tier never forces.
   CORE_OWNERS = %w[Object BasicObject Kernel Module Class Comparable Enumerable Array Hash String Symbol Range
@@ -65,49 +66,45 @@ module StrictHints
     families.include?(family)
   end
 
-  def marker(family, name)
-    "/* STRICT_HINT #{family}: #{name} */"
+  # `site`: the "file:line" the send is written on (CodeGen#insn_source_site).
+  def marker(family, name, site:)
+    "/* STRICT_HINT #{family}: #{name} @ #{site} */"
   end
 
-  def key(owner, method, called, family)
-    "#{owner}##{method} -> #{called} (#{family.upcase})"
+  def key(site, called, family)
+    "#{site} -> #{called} (#{family.upcase})"
   end
 
   # Every marked site in `compiled` (bc2cpp.rb's compiled-method hashes).
   def sites(compiled)
     compiled.flat_map do |m|
-      m[:code].scan(MARKER).map do |family, called|
-        { key: key(m[:owner], m[:name], called, family), owner: m[:owner], method: m[:name], called: called,
-          family: family }
+      m[:code].scan(MARKER).map do |family, called, site|
+        file, line = NomethodReviewed.split_site(site)
+        { key: key(site, called, family), owner: m[:owner], method: m[:name], called: called, family: family,
+          site: site, file: file, line: line }
       end
     end
   end
 
+  # bc2cpp.rb's "  STRICT_HINT_SITE <key>" stderr lines, back into sites.
   def parse_listing(stderr)
-    stderr.scan(LISTING).flatten
-  end
-
-  # Why this run's sites break STRICT_HINTS_REVIEWED; empty when they do not. As NomethodReviewed:
-  # stale entries only for methods this run compiled, and not at all for a hot-only run. `scope`:
-  # ReviewScope.for_build of the run (tools/bc2cpp/review_scope.rb).
-  def violations(sites, compiled, scope:, reviewed: reviewed_set, stale: true)
-    found = ReviewScope.select(scope, sites).map { |s| s[:key] }.to_set
-    compiled_methods = compiled.reject { |m| m[:unsupported] || !ReviewScope.cover?(scope, m[:owner]) }
-                               .map { |m| "#{m[:owner]}##{m[:name]}" }.to_set
-    unreviewed = (found - reviewed).sort.map { |k| "unreviewed forced hint: #{k}" }
-    return unreviewed unless stale
-
-    # An entry of a family this run did not force is not stale: it is simply not in play.
-    on = families.map(&:upcase)
-    gone = reviewed.select do |k|
-      compiled_methods.include?(k.split(' -> ', 2).first) && on.include?(k[/\((\w+)\)\z/, 1]) && !found.include?(k)
+    stderr.scan(LISTING).map do |site, called, family|
+      file, line = NomethodReviewed.split_site(site)
+      { key: key(site, called, family.downcase), site: site, file: file, line: line, called: called,
+        family: family.downcase }
     end
-    unreviewed + gone.sort.map { |k| "stale STRICT_HINTS_REVIEWED entry (no such site any more): #{k}" }
   end
 
-  def reviewed_set
-    require_relative 'strict_hints_reviewed'
-    STRICT_HINTS_REVIEWED
+  # Why this run's sites are unreviewed: a forced site whose source line carries no `strict_hint <family> <name>`
+  # annotation. `scope`: ReviewScope.for_build of the run. Stale annotations are checked by source_review_check.rb.
+  def violations(sites, scope:)
+    ReviewScope.select(scope, sites).reject { |s| reviewed?(s) }.map do |s|
+      "unreviewed forced hint: #{s[:key]} (annotate it: # bc2cpp-reviewed: strict_hint #{s[:family]} #{s[:called]} -- reason)"
+    end.uniq.sort
+  end
+
+  def reviewed?(site)
+    SourceReview.annotated?(site[:file], site[:line], SourceReview.key('strict_hint', "#{site[:family]} #{site[:called]}"))
   end
 
   def family_counts(compiled)
