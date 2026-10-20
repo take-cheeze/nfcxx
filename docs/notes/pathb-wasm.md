@@ -262,6 +262,30 @@ verified here: no `emcc` is installed, `emscripten.org` did not resolve, and the
 (the raw GitHub path returned 404, and the GitHub API was not enabled for this session). None of them is added to the
 module or to `EMSCRIPTEN_IMPORT_NAMES`.
 
+## Memory64 (`--memory64`)
+
+`scripts/mrb scripts/pathb-wasm-emit.rb --memory64 prog.ir > prog.wasm` emits the LP64 module with a 64-bit linear memory
+(the memory64 proposal, which node 22 runs without a flag): the memory's limit has the memory64 flag (`0x04`, an i64
+minimum), the data segments' offsets are `i64.const`, and a memory access takes its address as the IR's i64 pointer
+value, with no `i32.wrap_i64`. The copy of `copy` takes i64 operands. The IR is the default one (`pathb-dump --ir`); the
+addresses are the same as in the default module, so only the top of the address range differs. The default output is
+byte-identical to the one before the mode existed (checked on the 84 test and asan inputs).
+
+- **The stack stays in i32.** The frame base and the stack pointer are i32 (the memory is far below 4 GB), and a slot's
+  address is extended to i64 where it is used as an address. So the prologue is unchanged. This is the stack-pointer
+  choice of "The stack pointer's type is i32" above, now made under memory64 as well. A 64-bit stack would need the
+  stack pointer i64 and a wrap-free prologue; no test needs it.
+- **What the mode shows.** A load from `2^32 + 8` traps (`tests/wasm/memory64_high_address.cpp`, `// MEMORY64-TRAP`).
+  The default module wraps that address to 8 and reads it, so the test runs under the mode only. A struct copy through
+  pointers to statics and the stack gives the g++ result (`memory64_copy.cpp`).
+- **Not combined** with `--asan` (its shadow and checks are i32 address arithmetic) or `--emscripten` (ILP32: the pointers
+  are i32 there). `--memory64` with either is refused by the driver.
+- **Not done:** an Emscripten `MEMORY64` runtime (the glue's i64 stack pointer, `__heap_base` as i64), and a memory above
+  4 GB: the memory is still the module's pages, two by default, and no test grows it.
+
+Checks: `NFCXX_WASM_MEMORY64=1 tests/wasm/run.sh` runs every test in the mode (25 passed, the ASan and Emscripten ones
+skipped); `tests/wasm/run.sh` (24 passed) and the ASan and Emscripten modes are unchanged.
+
 ## What is handled
 
 Scalars, pointers and their arithmetic (`offset`, `index`, `pdiff`), the integer and float operators, comparisons,
