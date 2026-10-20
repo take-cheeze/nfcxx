@@ -116,7 +116,9 @@ module NativeCoreResultSigsCases
                rejects_block_params("class Array[Elem]\n  def each: () ?{ (Elem) -> void } -> untyped\nend\n"))
     check.call('block shapes: rejects an optional block parameter',
                rejects_block_params("class Array[Elem]\n  def each: () { (Elem, ?untyped) -> void } -> untyped\nend\n"))
-    check.call('block shapes: rejects an overloaded method',
-               rejects_block_params("class Array[Elem]\n  def each: () { (Elem) -> void } -> untyped\n    | () -> untyped\nend\n"))
+    check.call('block shapes: accepts one block form beside plain overloads',
+               !rejects_block_params("class Array[Elem]\n  def each: () { (Elem) -> void } -> untyped\n    | () -> untyped\nend\n"))
+    check.call('block shapes: rejects two block forms',
+               rejects_block_params("class Array[Elem]\n  def each: () { (Elem) -> void } -> untyped\n    | () { (Elem) -> untyped } -> untyped\nend\n"))
   end
 end

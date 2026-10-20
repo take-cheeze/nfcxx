@@ -35,14 +35,21 @@ module CoreBlockParamSigs
       end
 
       decl.members.each do |member|
-        unless member.is_a?(RBS::AST::Members::MethodDefinition) && member.kind == :instance && member.overloads.size == 1
-          raise "bc2cpp: #{path}: #{klass} members must be single-overload instance method definitions"
+        unless member.is_a?(RBS::AST::Members::MethodDefinition) && member.kind == :instance
+          raise "bc2cpp: #{path}: #{klass} members must be instance method definitions"
+        end
+
+        # A merged member may hold a block form and a plain form (the union of its overloads). Only a call with a
+        # block reads this shape, and a plain overload is never given a block, so the block form is the one shape.
+        block_forms = member.overloads.map(&:method_type).select(&:block)
+        unless block_forms.size == 1
+          raise "bc2cpp: #{path}: #{klass}##{member.name} needs exactly one block form, found #{block_forms.size}"
         end
 
         key = [klass, member.name.to_s]
         raise "bc2cpp: #{path}: #{klass}##{member.name} is declared twice" if out.key?(key)
 
-        out[key] = shape_of(member.overloads.first.method_type, variable, "#{path}: #{klass}##{member.name}")
+        out[key] = shape_of(block_forms.first, variable, "#{path}: #{klass}##{member.name}")
       end
     end
     out.freeze
