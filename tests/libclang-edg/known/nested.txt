@@ -1,0 +1,5 @@
++TypedefDecl 23:25 Alias in Namespace@3:11
+-Namespace 23:11 outer in TranslationUnit@0:0
+-ParmDecl 11:23 n in CXXConstructor@11:12
+-ParmDecl 24:17 a in FunctionDecl@24:6
+-ParmDecl 24:32 b in FunctionDecl@24:6
