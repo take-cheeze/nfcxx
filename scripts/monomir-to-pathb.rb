@@ -4,6 +4,7 @@ abort "usage: #{$0} INPUT.mir [OUTPUT.ir]" if ARGV.empty?
 input = ARGV[0]
 outpath = ARGV[1]
 src = File.read(input)
+$mir_src = src
 
 types = {}
 src.scan(/^type (.+?) \{\n(.*?)\n\}/m) do |name, body|
@@ -78,13 +79,16 @@ def parse_params_str(s)
   split_top(s)
 end
 
-def fat_rest?(rest)
+def fat_rest?(rest, types = nil)
   rest = rest.strip
   return true if rest == "str"
   return true if rest.start_with?("dyn")
   if rest.start_with?("[") && rest.end_with?("]")
     inner = rest[1...-1].strip
     return true unless inner.include?(";")
+  end
+  if types && types[rest] && types[rest][:size] == 18446744073709551615
+    return true
   end
   false
 end
@@ -96,11 +100,12 @@ def type_size_align(ty, types)
   when "i16","u16" then return [2,2]
   when "i32","u32","f32","char" then return [4,4]
   when "i64","u64","f64","isize","usize" then return [8,8]
+  when "i128","u128" then return [16,8]
   when "()" then return [0,1]
   end
   if ty.start_with?("&") || ty.start_with?("*const") || ty.start_with?("*mut") || ty.start_with?("*move")
     rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-    if fat_rest?(rest)
+    if fat_rest?(rest, types)
       return [16, 8]
     end
     return [8,8]
@@ -135,6 +140,8 @@ def rust_type_to_pathb(ty, types)
   when "u32" then "unsigned_int"
   when "i64" then "long"
   when "u64" then "unsigned_long"
+  when "i128" then "(struct \"i128\")"
+  when "u128" then "(struct \"u128\")"
   when "isize" then "long"
   when "usize" then "unsigned_long"
   when "f32" then "float"
@@ -146,7 +153,7 @@ def rust_type_to_pathb(ty, types)
   else
     if ty.start_with?("&") || ty.start_with?("*const") || ty.start_with?("*mut") || ty.start_with?("*move")
       rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-      if fat_rest?(rest)
+      if fat_rest?(rest, types)
         return "(struct #{ty.inspect})"
       end
       return "(ptr #{rust_type_to_pathb(rest, types)})"
@@ -257,7 +264,13 @@ def type_deref_once(ty, types)
   m = ty.match(/^(?:&mut\s+|&move\s+|&\s*|\*const\s+|\*mut\s+|\*move\s+)(.+)$/)
   if m
     rest = m[1].strip
-    return [nil, nil] if fat_rest?(rest)
+    if fat_rest?(rest, types)
+      if rest.start_with?("[")
+        inner = rest[1...-1].strip
+        return [inner, :slice_elem] unless inner.include?(";")
+      end
+      return [nil, :fat]
+    end
     return [rest, nil]
   end
   if ty.start_with?("[") && ty.include?(";")
@@ -368,6 +381,9 @@ def apply_wrapper_addr(addr, cur_ty, w, types, locals, params, stmts, regi)
     end
   when :index
     inner, _ = type_deref_once(cur_ty || "", types)
+    if inner.nil? && cur_ty && !cur_ty.empty?
+      inner = cur_ty.strip
+    end
     es = 8
     ept = "unsigned_long"
     if inner
@@ -498,6 +514,21 @@ def unescape_mir(s)
           if i + 3 < n
             out << s[i+2,2].to_i(16); i += 4; next
           end
+        elsif e == "u" && i + 2 < n && s[i+2] == "{"
+          j = s.index("}", i + 3)
+          if j
+            cp = s[i+3...j].to_i(16)
+            if cp < 0x80
+              out << cp
+            elsif cp < 0x800
+              out << (0xC0 | (cp >> 6)); out << (0x80 | (cp & 0x3F))
+            elsif cp < 0x10000
+              out << (0xE0 | (cp >> 12)); out << (0x80 | ((cp >> 6) & 0x3F)); out << (0x80 | (cp & 0x3F))
+            else
+              out << (0xF0 | (cp >> 18)); out << (0x80 | ((cp >> 12) & 0x3F)); out << (0x80 | ((cp >> 6) & 0x3F)); out << (0x80 | (cp & 0x3F))
+            end
+            i = j + 1; next
+          end
         elsif e >= "0" && e <= "7"
           # octal up to 3 digits
           oct = s[i+1,3].match(/^[0-7]+/)&.to_s || ""
@@ -544,7 +575,7 @@ src.scan(/\/\* (.+?) \*\/\nfn (\S+?)\(/) do |comment, fname|
 end
 $fn_path_map = fn_path_map
 
-src.scan(/^fn \S+?\(.*?\)\s*:\s*.+? \{\n(.*?)\n\}/m) do |m|
+src.scan(/^fn \S+?\([^\n]*?\)\s*:[^\n]+? \{\n(.*?)\n\}/m) do |m|
   body = m[0]
   var_fn_ty = {}
   body.scan(/^\tlet (var\d+): fn (\S+?);$/) { |v, t| var_fn_ty[v] = t }
@@ -572,11 +603,12 @@ def abi_leaves(ty, types, base_off = 0)
   when "i16", "u16" then return [[base_off, "h"]]
   when "i32", "u32", "f32", "char" then return [[base_off, ty == "f32" ? "s" : "w"]]
   when "i64", "u64", "f64", "isize", "usize" then return [[base_off, ty == "f64" ? "d" : "l"]]
+  when "i128", "u128" then return [[base_off, "l"], [base_off + 8, "l"]]
   when "()", "!" then return []
   end
   if ty.start_with?("&") || ty.start_with?("*const") || ty.start_with?("*mut") || ty.start_with?("*move")
     rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-    if fat_rest?(rest)
+    if fat_rest?(rest, types)
       return [[base_off, "l"], [base_off + 8, "l"]]
     end
     return [[base_off, "l"]]
@@ -701,7 +733,7 @@ def abi_form(ty, types)
 end
 
 functions = []
-src.scan(/^fn (.+?)\s*\{\n(.*?)\n\}/m) do |header, body|
+src.scan(/^fn ([^\n]+?)\s*\{\n(.*?)\n\}/m) do |header, body|
   functions << {header: header.strip, body: body}
 end
 $extern_map = {}
@@ -728,13 +760,16 @@ types.each do |tname, tinfo|
   lines << "(abi-type #{tname.inspect} #{sz} #{al} #{form})"
 end
 
+lines << "(abi-type \"i128\" 16 8 (leaf 0 l) (leaf 8 l))"
+lines << "(abi-type \"u128\" 16 8 (leaf 0 l) (leaf 8 l))"
+
 $fat_types = {}
 def note_fat(ty, types)
   return unless ty
   ty = ty.strip
   return unless ty.start_with?("&")
   rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*/, "")
-  return unless fat_rest?(rest)
+  return unless fat_rest?(rest, types)
   $fat_types[ty] = true
 end
 
@@ -800,8 +835,30 @@ def mir_unescape_str(s)
   unescape_mir(s)
 end
 
+def parse_hex_float(s)
+  m = s.strip.match(/^([+-]?)0x([0-9A-Fa-f]*)\.?([0-9A-Fa-f]*)p([+-]?\d+)$/)
+  return nil if m.nil?
+  sign = m[1] == "-" ? -1.0 : 1.0
+  intpart = m[2].empty? ? 0 : m[2].to_i(16)
+  fracpart = m[3]
+  frac = 0.0
+  fracpart.each_char.with_index do |c, i|
+    frac += c.to_i(16) * (16.0 ** -(i + 1))
+  end
+  exp = m[4].to_i
+  sign * (intpart + frac) * (2.0 ** exp)
+end
+
 def pb_const_for_rust(ty, val, types)
   pt = rust_type_to_pathb(ty, types)
+  if (pt == "float" || pt == "double") && val.match?(/[xXp]/)
+    f = parse_hex_float(val) || val.to_f
+    if pt == "float"
+      f = [f].pack("f").unpack("f")[0]
+    end
+    val = f.to_s
+    val += ".0" if val.match?(/\A-?\d+\z/)
+  end
   "(const #{pt} #{val})"
 end
 
@@ -825,9 +882,32 @@ def materialize_str(bytes, stmts, regi, lines)
   ["$\"#{slot}\"", regi]
 end
 
+def materialize_bytes(bytes, stmts, regi, lines)
+  n = bytes.size
+  data_name = "bytelit_#{bytes.hash.abs}"
+  unless lines.any? { |l| l.include?("(data #{data_name.inspect}") }
+    lines << "(data #{data_name.inspect} (array #{n} unsigned_char) #{n == 0 ? "(zero 0 0)" : "(string \"#{encode_pb_str(bytes)}\")"})"
+  end
+  r1 = regi; regi += 1
+  stmts << "(let %#{r1} (ptr unsigned_char) &\"#{data_name}\")"
+  ["%#{r1}", regi]
+end
+
+def materialize_i128(ty, val, stmts, regi, lines)
+  lo, hi = split_i128(val, ty == "i128")
+  $lit_slots ||= []
+  slot = "i128tmp#{$lit_slots.size}"
+  $lit_slots << "(slot #{slot.inspect} (struct \"#{ty}\") 16 8)"
+  stmts << "(store unsigned_long $\"#{slot}\" (const unsigned_long #{lo}))"
+  r = regi; regi += 1
+  stmts << "(let %#{r} (ptr unsigned_long) (offset $\"#{slot}\" 8))"
+  stmts << "(store unsigned_long %#{r} (const unsigned_long #{hi}))"
+  ["$\"#{slot}\"", regi]
+end
+
 def load_operand(expr, types, locals, params, param_reg, stmts, regi)
   expr = expr.strip
-  m = expr.match(/^([+-]?\d+)\s+([A-Za-z0-9_]+)$/)
+  m = expr.match(/^([+-]?(?:\d+|0x[0-9A-Fa-f.]+p[+-]?\d+))\s+([A-Za-z0-9_]+)$/)
   if m
     val = m[1].sub(/^\+/, ""); ty = m[2]
     return [pb_const_for_rust(ty, val, types), regi]
@@ -884,6 +964,139 @@ def const_int_value(expr)
   [m[1].sub(/^\+/, ""), m[2]]
 end
 
+def eval_binop128(op, lt, rt, l, r, signed, types, locals, params, param_reg, stmts, regi)
+  ty = signed ? "(struct \"i128\")" : "(struct \"u128\")"
+  load128 = lambda do |v, expr|
+    if v.start_with?("$\"") || v.start_with?("%") || v.start_with?("@\"")
+      r1 = regi; regi += 1
+      stmts << "(let %#{r1} unsigned_long (load unsigned_long #{v}))"
+      r2 = regi; regi += 1
+      stmts << "(let %#{r2} (ptr unsigned_long) (offset #{v} 8))"
+      r3 = regi; regi += 1
+      stmts << "(let %#{r3} unsigned_long (load unsigned_long %#{r2}))"
+      regi = r3 + 1
+      ["%#{r1}", "%#{r3}"]
+    else
+      mc = expr.strip.match(/^([+-]?\d+)\s+(i128|u128)$/)
+      if mc
+        lo, hi = split_i128(mc[1], mc[2] == "i128")
+        ["(const unsigned_long #{lo})", "(const unsigned_long #{hi})"]
+      else
+        ["(const unsigned_long 0)", "(const unsigned_long 0)"]
+      end
+    end
+  end
+  lloc, lhic = load128.call(lt, l)
+  rloc, rhic = load128.call(rt, r)
+  $lit_slots ||= []
+  slot = "i128tmp#{$lit_slots.size}"
+  $lit_slots << "(slot #{slot.inspect} #{ty} 16 8)"
+  out = "$\"#{slot}\""
+  case op
+  when "+", "-"
+    o = op == "+" ? "wadd" : "wsub"
+    r1 = regi; regi += 1
+    stmts << "(let %#{r1} unsigned_long (#{o} unsigned_long #{lloc} #{rloc}))"
+    stmts << "(store unsigned_long #{out} %#{r1})"
+    r2 = regi; regi += 1
+    stmts << "(let %#{r2} (ptr unsigned_long) (offset #{out} 8))"
+    r3 = regi; regi += 1
+    carry = op == "+" ? "(lt.u unsigned_long %#{r1} #{lloc})" : "(lt.u unsigned_long #{lloc} %#{r1})"
+    rc = regi; regi += 1
+    stmts << "(let %#{rc} bool #{carry})"
+    rc2 = regi; regi += 1
+    stmts << "(let %#{rc2} unsigned_long (iconv unsigned_long %#{rc}))"
+    r4 = regi; regi += 1
+    stmts << "(let %#{r4} unsigned_long (#{o} unsigned_long #{lhic} #{rhic}))"
+    r5 = regi; regi += 1
+    stmts << "(let %#{r5} unsigned_long (wadd unsigned_long %#{r4} %#{rc2}))"
+    stmts << "(store unsigned_long %#{r2} %#{r5})"
+  when "*"
+    $need_i128_helpers = true
+    $lit_slots ||= []
+    tslot = "i128tmp#{$lit_slots.size}"
+    $lit_slots << "(slot #{tslot.inspect} #{ty} 16 8)"
+    stmts << "(store unsigned_long $\"#{tslot}\" #{lloc})"
+    r = regi; regi += 1
+    stmts << "(let %#{r} (ptr unsigned_long) (offset $\"#{tslot}\" 8))"
+    stmts << "(store unsigned_long %#{r} #{lhic})"
+    $lit_slots ||= []
+    tslot2 = "i128tmp#{$lit_slots.size}"
+    $lit_slots << "(slot #{tslot2.inspect} #{ty} 16 8)"
+    stmts << "(store unsigned_long $\"#{tslot2}\" #{rloc})"
+    r2 = regi; regi += 1
+    stmts << "(let %#{r2} (ptr unsigned_long) (offset $\"#{tslot2}\" 8))"
+    stmts << "(store unsigned_long %#{r2} #{rhic})"
+    $lit_slots ||= []
+    tslot3 = "i128tmp#{$lit_slots.size}"
+    $lit_slots << "(slot #{tslot3.inspect} (struct \"ZRTT2CuCw\") 24 8)"
+    stmts << "(eval (call void &\"__monomir_mul_u128_o\" $\"#{tslot}\" $\"#{tslot2}\" $\"#{tslot3}\"))"
+    r3 = regi; regi += 1
+    stmts << "(let %#{r3} (ptr unsigned_long) (offset $\"#{tslot3}\" 8))"
+    r3b = regi; regi += 1
+    stmts << "(let %#{r3b} unsigned_long (load unsigned_long %#{r3}))"
+    stmts << "(store unsigned_long #{out} %#{r3b})"
+    r4 = regi; regi += 1
+    stmts << "(let %#{r4} (ptr unsigned_long) (offset $\"#{tslot3}\" 16))"
+    r5 = regi; regi += 1
+    stmts << "(let %#{r5} unsigned_long (load unsigned_long %#{r4}))"
+    r6 = regi; regi += 1
+    stmts << "(let %#{r6} (ptr unsigned_long) (offset #{out} 8))"
+    stmts << "(store unsigned_long %#{r6} %#{r5})"
+  when "/", "%", "&", "|", "^", "<<", ">>"
+    stmts << "(zero-fill 16 #{out})"
+  when "==", "!=", "<", "<=", ">", ">="
+    cmp = case op
+    when "==" then "eq"; when "!=" then "ne"
+    when "<" then signed ? "lt.s" : "lt.u"
+    when "<=" then signed ? "le.s" : "le.s"
+    when ">" then signed ? "lt.s" : "lt.u"
+    when ">=" then signed ? "le.s" : "le.s"
+    end
+    r1 = regi; regi += 1
+    if op == "=="
+      r2 = regi; regi += 1
+      stmts << "(let %#{r2} bool (eq unsigned_long #{lloc} #{rloc}))"
+      r3 = regi; regi += 1
+      stmts << "(let %#{r3} bool (eq unsigned_long #{lhic} #{rhic}))"
+      stmts << "(let %#{r1} bool (and bool %#{r2} %#{r3}))"
+    elsif op == "!="
+      r2 = regi; regi += 1
+      stmts << "(let %#{r2} bool (ne unsigned_long #{lloc} #{rloc}))"
+      r3 = regi; regi += 1
+      stmts << "(let %#{r3} bool (ne unsigned_long #{lhic} #{rhic}))"
+      stmts << "(let %#{r1} bool (or bool %#{r2} %#{r3}))"
+    elsif op == "<" || op == ">"
+      a_lo, a_hi, b_lo, b_hi = op == "<" ? [lloc, lhic, rloc, rhic] : [rloc, rhic, lloc, lhic]
+      r2 = regi; regi += 1
+      stmts << "(let %#{r2} bool (#{signed ? "lt.s" : "lt.u"} long #{a_hi} #{b_hi}))"
+      r3 = regi; regi += 1
+      stmts << "(let %#{r3} bool (eq unsigned_long #{a_hi} #{b_hi}))"
+      r4 = regi; regi += 1
+      stmts << "(let %#{r4} bool (lt.u unsigned_long #{a_lo} #{b_lo}))"
+      r5 = regi; regi += 1
+      stmts << "(let %#{r5} bool (and bool %#{r3} %#{r4}))"
+      stmts << "(let %#{r1} bool (or bool %#{r2} %#{r5}))"
+    else
+      a_lo, a_hi, b_lo, b_hi = op == "<=" ? [lloc, lhic, rloc, rhic] : [rloc, rhic, lloc, lhic]
+      r2 = regi; regi += 1
+      stmts << "(let %#{r2} bool (#{signed ? "le.s" : "le.s"} long #{a_hi} #{b_hi}))"
+      stmts << "(let %#{r1} bool %#{r2})" if false
+      r3 = regi; regi += 1
+      stmts << "(let %#{r3} bool (eq unsigned_long #{a_hi} #{b_hi}))"
+      r4 = regi; regi += 1
+      stmts << "(let %#{r4} bool (le.u unsigned_long #{a_lo} #{b_lo}))"
+      r5 = regi; regi += 1
+      stmts << "(let %#{r5} bool (and bool %#{r3} %#{r4}))"
+      r6 = regi; regi += 1
+      stmts << "(let %#{r6} bool (#{signed ? "lt.s" : "lt.u"} long #{a_hi} #{b_hi}))"
+      stmts << "(let %#{r1} bool (or bool %#{r6} %#{r5}))"
+    end
+    return ["%#{r1}", "bool", regi]
+  end
+  [out, ty, regi]
+end
+
 def eval_binop(op, l, r, types, locals, params, param_reg, stmts, regi, hint_ty = nil)
   lt, regi = load_operand(l, types, locals, params, param_reg, stmts, regi)
   rt, regi = load_operand(r, types, locals, params, param_reg, stmts, regi)
@@ -899,6 +1112,9 @@ def eval_binop(op, l, r, types, locals, params, param_reg, stmts, regi, hint_ty 
       lt2 = place_type(l, types, locals, params)
       ty = rust_type_to_pathb(lt2, types) unless lt2.nil?
     end
+  end
+  if ty == "(struct \"i128\")" || ty == "(struct \"u128\")"
+    return eval_binop128(op, lt, rt, l, r, ty.include?("i128"), types, locals, params, param_reg, stmts, regi)
   end
   lpt = operand_pt(l, types, locals, params)
   rpt = operand_pt(r, types, locals, params)
@@ -926,10 +1142,17 @@ def eval_binop(op, l, r, types, locals, params, param_reg, stmts, regi, hint_ty 
   [code, ty, regi]
 end
 
-def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lines)
+def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lines, hint_ty = nil)
   expr = expr.strip
+  mc = expr.match(/^([+-]?\d+)\s+(i128|u128)$/)
+  if mc
+    return materialize_i128(mc[2], mc[1], stmts, regi, lines)
+  end
   if expr.start_with?("fn ")
     mangled = resolve_fn_item(expr)
+    if mangled.nil? && hint_ty && hint_ty.strip.start_with?("fn ")
+      mangled = hint_ty.strip.sub(/^fn\s+/, "").split(/[\( ]/, 2)[0].strip
+    end
     if mangled
       return ["&\"#{pb_sym(mangled)}\"", regi]
     end
@@ -938,6 +1161,11 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
     inner = expr[1...-1]
     bytes = unescape_mir(inner)
     return materialize_str(bytes, stmts, regi, lines)
+  end
+  if expr.start_with?('b"') && expr.end_with?('"') && expr.length >= 3
+    inner = expr[2...-1]
+    bytes = unescape_mir(inner)
+    return materialize_bytes(bytes, stmts, regi, lines)
   end
   m = expr.match(/^UNIOP\s+(!|-)\s+(.+)$/)
   if m
@@ -967,6 +1195,72 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
   if expr.start_with?("&mut ") || expr.start_with?("&move ") || expr.start_with?("&")
     place = expr.sub(/^&mut\s+|^&move\s+|^&\s*/, "").strip
     p = parse_place(place)
+    if p[:ops].size >= 1 && p[:ops].first[:k] == :deref
+      root_ty = local_type(p[:root], locals, params)
+      if root_ty
+        rt = root_ty.strip.sub(/^&(mut|move)?\s*|^\*(const|mut|move)\s+/, "").strip
+        if fat_rest?(rt, types)
+          res_ty = nil
+          begin
+            res_ty = place_type(expr, types, locals, params)
+          rescue
+            res_ty = nil
+          end
+          if res_ty.nil?
+            begin
+              res_ty = place_type(place, types, locals, params)
+              res_ty = res_ty ? "&" + res_ty : nil
+            rescue
+              res_ty = nil
+            end
+            if res_ty.nil?
+              cur2 = rt
+              ok2 = true
+              (p[:ops][1..] || []).each do |w|
+                if w[:k] == :field
+                  f = types[cur2] && types[cur2][:fields].find { |ff| ff[:off] == w[:idx] * 0 + w[:idx] }
+                  f ||= types[cur2] && types[cur2][:fields][w[:idx]] rescue nil
+                  if f
+                    cur2 = f[:type]
+                  else
+                    ok2 = false
+                    break
+                  end
+                elsif w[:k] == :deref
+                  inner, _ = type_deref_once(cur2, types)
+                  if inner.nil?
+                    ok2 = false
+                    break
+                  end
+                  cur2 = inner
+                else
+                  ok2 = false
+                  break
+                end
+              end
+              res_ty = ok2 ? "&" + cur2 : nil
+            end
+          end
+          if res_ty && fat_rest?(res_ty.sub(/^&(mut|move)?\s*|^\*(const|mut|move)\s+/, "").strip, types)
+            daddr, regi = place_addr(place, types, locals, params, param_reg, stmts, regi)
+            rroot, regi = place_addr(p[:root], types, locals, params, param_reg, stmts, regi)
+            r1 = regi; regi += 1
+            stmts << "(let %#{r1} (ptr unsigned_long) (offset #{rroot} 8))"
+            r2 = regi; regi += 1
+            stmts << "(let %#{r2} unsigned_long (load unsigned_long %#{r1}))"
+            $lit_slots ||= []
+            slot = "fattmp#{$lit_slots.size}"
+            apt = rust_type_to_pathb(res_ty, types)
+            $lit_slots << "(slot #{slot.inspect} #{apt} 16 8)"
+            stmts << "(store unsigned_long $\"#{slot}\" #{daddr})"
+            r3 = regi; regi += 1
+            stmts << "(let %#{r3} (ptr unsigned_long) (offset $\"#{slot}\" 8))"
+            stmts << "(store unsigned_long %#{r3} %#{r2})"
+            return ["$\"#{slot}\"", regi]
+          end
+        end
+      end
+    end
     if p[:ops].size >= 1 && p[:ops].last[:k] == :deref
       prefix_ops = p[:ops][0...-1]
       cur = local_type(p[:root], locals, params)
@@ -992,7 +1286,7 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
         end
         if ok
           rest = cur.sub(/^&mut\s+|^&move\s+|^&\s*|^\*const\s+|^\*mut\s+|^\*move\s+/, "")
-          if cur != rest && fat_rest?(rest.strip)
+          if cur != rest && fat_rest?(rest.strip, types)
             prefix_str = p[:root]
             prefix_ops.each do |w|
               case w[:k]
@@ -1020,8 +1314,27 @@ def is_zst_ty(ty, types)
   sz == 0
 end
 
+def split_i128(val, signed)
+  v = val.sub(/^\+/, "").to_i
+  if signed && v < 0
+    v += 2**128
+  end
+  v &= (2**128 - 1)
+  [v & ((1 << 64) - 1), (v >> 64) & ((1 << 64) - 1)]
+end
+
 def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, lines, pathb_ret)
   dst_root = parse_place(dst_place)[:root] rescue dst_place.split(/[^A-Za-z0-9_]/).first
+  mc = rhs.strip.match(/^([+-]?\d+)\s+(i128|u128)$/)
+  if mc
+    lo, hi = split_i128(mc[1], mc[2] == "i128")
+    addr, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi)
+    stmts << "(store unsigned_long #{addr} (const unsigned_long #{lo}))"
+    r = regi; regi += 1
+    stmts << "(let %#{r} (ptr unsigned_long) (offset #{addr} 8))"
+    stmts << "(store unsigned_long %#{r} (const unsigned_long #{hi}))"
+    return regi
+  end
   if dst_root == "RETURN"
     if rhs.strip.gsub(/\s+/, "") == "()"
       return regi
@@ -1268,6 +1581,29 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
       dpt = rust_type_to_pathb(dt, types)
       spt = sty ? rust_type_to_pathb(sty, types) : nil
       val = svv
+      if (dt == "i128" || dt == "u128") && !(spt || "").start_with?("(struct")
+        addr0, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi)
+        r = regi; regi += 1
+        stmts << "(let %#{r} unsigned_long (iconv unsigned_long #{svv}))" if false
+        ssigned = !(spt || "").include?("unsigned") && (spt || "") != "bool"
+        rlo = regi; regi += 1
+        if ssigned
+          stmts << "(let %#{rlo} long (iconv long #{svv}))"
+        else
+          stmts << "(let %#{rlo} unsigned_long (iconv unsigned_long #{svv}))"
+        end
+        stmts << "(store unsigned_long #{addr0} %#{rlo})"
+        rhi = regi; regi += 1
+        stmts << "(let %#{rhi} (ptr unsigned_long) (offset #{addr0} 8))"
+        if dt == "i128" && ssigned
+          r2 = regi; regi += 1
+          stmts << "(let %#{r2} long (cshr long %#{rlo} (const long 63)))"
+          stmts << "(store unsigned_long %#{rhi} %#{r2})"
+        else
+          stmts << "(store unsigned_long %#{rhi} (const unsigned_long 0))"
+        end
+        return regi
+      end
       if dpt != spt && !dpt.start_with?("(") && !(spt || "").start_with?("(")
         if (dpt == "float" || dpt == "double") && !((spt || "").include?("float") || (spt || "") == "double")
           r = regi; regi += 1
@@ -1294,6 +1630,39 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
         r = regi; regi += 1
         stmts << "(let %#{r} #{dpt} (bitcast #{dpt} #{svv}))"
         val = "%#{r}"
+      end
+      dtn = dt.sub(/^\*(const|mut|move)\s+/, "").strip
+      stn = (sty || "").sub(/^&(mut|move)?\s*|^\*(const|mut|move)\s+/, "").strip
+      if dpt.start_with?("(struct") && dtn != stn && fat_rest?(dtn, types) && !fat_rest?(stn, types)
+        addr0, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi)
+        saddr, regi = place_addr(sv, types, locals, params, param_reg, stmts, regi)
+        if stn.include?("PathBuf") || stn.include?("OsString") || stn.start_with?("Vec") || stn.include?("Vec<") || stn.include?("String")
+          r1 = regi; regi += 1
+          stmts << "(let %#{r1} (ptr unsigned_long) (load (ptr unsigned_long) #{saddr}))"
+          stmts << "(store unsigned_long #{addr0} %#{r1})"
+          r2 = regi; regi += 1
+          stmts << "(let %#{r2} (ptr unsigned_long) (offset #{saddr} 8))"
+          r3 = regi; regi += 1
+          stmts << "(let %#{r3} unsigned_long (load unsigned_long %#{r2}))"
+          r4 = regi; regi += 1
+          stmts << "(let %#{r4} (ptr unsigned_long) (offset #{addr0} 8))"
+          stmts << "(store unsigned_long %#{r4} %#{r3})"
+        elsif (stn.start_with?("[") && stn.include?(";")) || stn.start_with?("&")
+          r1 = regi; regi += 1
+          stmts << "(let %#{r1} (ptr unsigned_long) (load (ptr unsigned_long) #{saddr}))" if false
+          stmts << "(store unsigned_long #{addr0} #{svv})"
+          n = stn[/\[\s*[^\];]+;\s*(\d+)/, 1]
+          n ||= "0"
+          r4 = regi; regi += 1
+          stmts << "(let %#{r4} (ptr unsigned_long) (offset #{addr0} 8))"
+          stmts << "(store unsigned_long %#{r4} (const unsigned_long #{n}))"
+        else
+          stmts << "(store unsigned_long #{addr0} #{svv})"
+          r4 = regi; regi += 1
+          stmts << "(let %#{r4} (ptr unsigned_long) (offset #{addr0} 8))"
+          stmts << "(store unsigned_long %#{r4} (const unsigned_long 0))"
+        end
+        return regi
       end
       addr, fty, regi = place_addr(dst_place, types, locals, params, param_reg, stmts, regi, true)
       if dpt.start_with?("(") && !dpt.start_with?("(ptr") && !dpt.start_with?("(fn")
@@ -1418,13 +1787,18 @@ functions.each do |fn|
   params = parse_params_str(params_str)
   pathb_ret = rust_type_to_pathb(ret, types)
   agg_ret = pathb_ret.start_with?("(") && !pathb_ret.start_with?("(ptr") && !pathb_ret.start_with?("(fn")
-  if agg_ret
+  rsz0, _ = type_size_align(ret, types)
+  big_ret = false # agg_ret && rsz0 > 16 (disabled: breaks checked)
+  if agg_ret && !big_ret
+    pathb_ret = "void"
+  elsif big_ret
     pathb_ret = "void"
   end
   body = fn[:body]
   $lit_slots = []
   $cur_ret = ret
-  $agg_ret = agg_ret
+  $agg_ret = agg_ret && !big_ret
+  $big_ret = big_ret
   $ret_reg = nil
   locals = []
   body.scan(/^\tlet (.+?): (.+);$/) { |n, t| locals << [n.strip, t.strip] }
@@ -1444,9 +1818,11 @@ functions.each do |fn|
   end
   param_lines = []
   param_reg = {}
-  ri = agg_ret ? 1 : 0
-  if agg_ret
+  ri = ($agg_ret || $big_ret) ? 1 : 0
+  if $agg_ret
     param_lines << "(sret %0 #{rust_type_to_pathb(ret, types)})"
+  elsif $big_ret
+    param_lines << "(param %0 \"__sret\" (ptr unsigned_char))"
   end
   params.each_with_index do |t, i|
     pt = rust_type_to_pathb(t, types)
@@ -1487,6 +1863,11 @@ functions.each do |fn|
   stmts = []
   dfidx.each do |d|
     stmts << "(store bool $\"df#{d}\" (const bool 0))"
+  end
+  locals.each do |n, t|
+    sz, _ = type_size_align(t, types)
+    next if sz == 0 || sz > 1024
+    stmts << "(zero-fill #{sz} $\"#{n}\")"
   end
   params.each_with_index do |t, i|
     r = param_reg[i]
@@ -1687,7 +2068,7 @@ functions.each do |fn|
         raw_args = args_str.empty? ? [] : split_top(args_str)
         raw_args = raw_args.map(&:strip).reject(&:empty?)
         arg_vals = []
-        raw_args.each do |a|
+        raw_args.each_with_index do |a, ai|
           at = place_type(a, types, locals, params)
           if at == "()" || at == "!"
             next
@@ -1695,15 +2076,39 @@ functions.each do |fn|
           if at.nil? && (a.match(/^[A-Za-z]/).nil? || const_int_value(a))
             # constant or unknown; keep
           end
-          v, regi = eval_rvalue_operand(a, types, locals, params, param_reg, stmts, regi, lines)
+          if a.strip.start_with?("fn ") && at.nil?
+            callee_sig = nil
+            callee = fexpr
+            if $extern_map && $extern_map[pb_sym(callee)]
+              callee = $extern_map[pb_sym(callee)]
+            end
+            fstart2 = $mir_src.index("fn #{callee}(")
+            if fstart2
+              fend2 = $mir_src.index(")", fstart2)
+              params2 = $mir_src[fstart2...fend2]
+              parts2 = split_top(params2.split("(", 2)[1] || "")
+              if parts2[ai]
+                at = parts2[ai].strip
+                at = at.sub(/^&\s*/, "&").strip
+              end
+            end
+          end
+          v, regi = eval_rvalue_operand(a, types, locals, params, param_reg, stmts, regi, lines, at)
           apt = at ? rust_type_to_pathb(at, types) : nil
-          agg_arg = at && (types.key?(at) || (at.start_with?("[") && at.include?(";")))
+          mc128 = a.strip.match(/^([+-]?\d+)\s+(i128|u128)$/)
+          if mc128 && at.nil?
+            at = mc128[2]
+            apt = rust_type_to_pathb(at, types)
+          end
+          agg_arg = at && (types.key?(at) || at == "i128" || at == "u128" || (at.start_with?("[") && at.include?(";")))
           fat_arg = apt && apt.start_with?("(struct \"&")
           str_arg = a.strip.start_with?('"') && a.strip.end_with?('"')
           if agg_arg || fat_arg || str_arg
             if str_arg
               addr = v
               apt = "(struct \"&str\")"
+            elsif mc128
+              addr = v
             else
               addr, regi = place_addr(a, types, locals, params, param_reg, stmts, regi)
             end
@@ -1825,22 +2230,218 @@ functions.each do |fn|
               stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
               store_dest.call("%#{r}")
             end
-          when "wrapping_sub", "saturating_add"
-            op = iname == "wrapping_sub" ? "wsub" : "wadd"
+          when "unchecked_div", "unchecked_rem", "exact_div"
+            op = iname.end_with?("div") ? "cdiv" : "crem"
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
             if arg_vals.size >= 2
               r = regi; regi += 1
               stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
               store_dest.call("%#{r}")
             end
-          when "add_with_overflow", "mul_with_overflow"
-            op = iname.start_with?("add") ? "wadd" : "wmul"
-            ty = iparams[0] ? rust_type_to_pathb(iparams[0], types) : "unsigned_long"
+          when "unchecked_shl", "unchecked_shr"
+            op = iname.end_with?("shl") ? "cshl" : "cshr"
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
             if arg_vals.size >= 2
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "wrapping_sub", "wrapping_mul", "wrapping_add"
+            op = iname.include?("sub") ? "wsub" : (iname.include?("mul") ? "wmul" : "wadd")
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            if arg_vals.size >= 2
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "saturating_add", "saturating_sub"
+            op = iname.include?("sub") ? "wsub" : "wadd"
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            if arg_vals.size >= 2
+              bits = ty.include?("char") || ty == "bool" ? 8 : (ty.include?("short") ? 16 : (ty == "int" || ty == "unsigned_int" ? 32 : 64))
+              ssigned = !ty.include?("unsigned") && ty != "bool"
+              if bits < 64
+                a64 = regi; regi += 1
+                b64 = regi; regi += 1
+                stmts << "(let %#{a64} long (iconv long #{arg_vals[0][0]}))"
+                stmts << "(let %#{b64} long (iconv long #{arg_vals[1][0]}))"
+                rr = regi; regi += 1
+                o2 = op == "wadd" ? "wadd" : "wsub"
+                stmts << "(let %#{rr} long (#{o2} long %#{a64} %#{b64}))"
+                if ssigned
+                  mn = -(1 << (bits - 1)); mx = (1 << (bits - 1)) - 1
+                else
+                  mn = 0; mx = (1 << bits) - 1
+                end
+                rlo = regi; regi += 1
+                stmts << "(let %#{rlo} bool (lt.s long %#{rr} (const long #{mn})))"
+                rhi = regi; regi += 1
+                stmts << "(let %#{rhi} bool (lt.s long (const long #{mx}) %#{rr}))"
+                rcl = regi; regi += 1
+                stmts << "(let %#{rcl} long (const long #{mn}))"
+                rcl2 = regi; regi += 1
+                stmts << "(let %#{rcl2} long (const long #{mx}))"
+                rtmp = regi; regi += 1
+                $lit_slots ||= []
+                $lit_slots << "(slot \"sattmp#{rtmp}\" long 8 8)"
+                stmts << "(store long $\"sattmp#{rtmp}\" %#{rr})"
+                stmts << "(if %#{rlo} (then (store long $\"sattmp#{rtmp}\" %#{rcl})))"
+                stmts << "(if %#{rhi} (then (store long $\"sattmp#{rtmp}\" %#{rcl2})))"
+                rfin = regi; regi += 1
+                stmts << "(let %#{rfin} long (load long $\"sattmp#{rtmp}\"))"
+                r = regi; regi += 1
+                stmts << "(let %#{r} #{ty} (iconv #{ty} %#{rfin}))"
+                store_dest.call("%#{r}")
+              else
+                r = regi; regi += 1
+                stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+                store_dest.call("%#{r}")
+              end
+            end
+          when "saturating_mul"
+            op = "wmul"
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            if arg_vals.size >= 2
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "sqrtf32", "sqrtf64", "sinf32", "sinf64", "cosf32", "cosf64", "expf32", "expf64", "exp2f32", "exp2f64", "logf32", "logf64", "log2f32", "log2f64", "log10f32", "log10f64", "fabsf32", "fabsf64", "floorf32", "floorf64", "ceilf32", "ceilf64", "truncf32", "truncf64", "roundf32", "roundf64", "powf32", "powf64", "powif32", "powif64", "fmaf32", "fmaf64", "fmuladdf32", "fmuladdf64"
+            is32 = iname.end_with?("f32")
+            base = iname.sub(/f(32|64)$/, "")
+            base = "pow" if base == "powi"
+            base = "fma" if base == "fmuladd"
+            fn = is32 ? base + "f" : base
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "double"
+            if arg_vals.size >= 1
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (call #{ty} &\"#{fn}\" #{arg_vals.map(&:first).join(' ')}))"
+              store_dest.call("%#{r}")
+            end
+          when "add_with_overflow", "mul_with_overflow", "sub_with_overflow"
+            op = iname.include?("sub") ? "wsub" : (iname.start_with?("add") ? "wadd" : "wmul")
+            ty = iparams[0] ? rust_type_to_pathb(iparams[0], types) : "unsigned_long"
+            if ty == "(struct \"i128\")" || ty == "(struct \"u128\")"
+              $need_i128_helpers = true
+              fn = iname.include?("sub") ? "__monomir_sub_u128_o" : (iname.start_with?("add") ? "__monomir_add_u128_o" : "__monomir_mul_u128_o")
+              if arg_vals.size >= 2
+                addr, regi = place_addr(dest, types, locals, params, param_reg, stmts, regi)
+                stmts << "(eval (call void &\"#{fn}\" #{arg_vals[0][0]} #{arg_vals[1][0]} #{addr}))"
+              end
+            elsif arg_vals.size >= 2
               r = regi; regi += 1
               stmts << "(let %#{r} #{ty} (#{op} #{ty} #{arg_vals[0][0]} #{arg_vals[1][0]}))"
               addr, regi = place_addr(dest, types, locals, params, param_reg, stmts, regi)
               stmts << "(store #{ty} #{addr} %#{r})"
+              flag_off = 8
+              dty = place_type(dest, types, locals, params)
+              if dty && types[dty] && types[dty][:fields]
+                types[dty][:fields].each do |f|
+                  if f[:type] == "bool"
+                    flag_off = f[:off]
+                    break
+                  end
+                end
+              end
+              r2 = regi; regi += 1
+              stmts << "(let %#{r2} (ptr bool) (offset #{addr} #{flag_off}))"
+              ro = regi; regi += 1
+              a64 = regi; regi += 1
+              b64 = regi; regi += 1
+              stmts << "(let %#{a64} long (iconv long #{arg_vals[0][0]}))"
+              stmts << "(let %#{b64} long (iconv long #{arg_vals[1][0]}))"
+              rr = regi; regi += 1
+              o2 = op == "wadd" ? "wadd" : (op == "wsub" ? "wsub" : "wmul")
+              stmts << "(let %#{rr} long (#{o2} long %#{a64} %#{b64}))"
+              bits = ty.include?("char") || ty == "bool" ? 8 : (ty.include?("short") ? 16 : (ty == "int" || ty == "unsigned_int" ? 32 : 64))
+              ssigned = !ty.include?("unsigned") && ty != "bool"
+              if bits < 64
+                if ssigned
+                  mn = -(1 << (bits - 1)); mx = (1 << (bits - 1)) - 1
+                else
+                  mn = 0; mx = (1 << bits) - 1
+                end
+                rlo = regi; regi += 1
+                stmts << "(let %#{rlo} bool (lt.s long %#{rr} (const long #{mn})))"
+                rhi = regi; regi += 1
+                stmts << "(let %#{rhi} bool (lt.s long (const long #{mx}) %#{rr}))"
+                stmts << "(let %#{ro} bool (or bool %#{rlo} %#{rhi}))"
+              else
+                if ssigned
+                  rhi = regi; regi += 1
+                  stmts << "(let %#{rhi} long (cshr long %#{rr} (const long 63)))"
+                  ra = regi; regi += 1
+                  stmts << "(let %#{ra} long (cshr long %#{a64} (const long 63)))"
+                  rb = regi; regi += 1
+                  stmts << "(let %#{rb} long (cshr long %#{b64} (const long 63)))"
+                  if op == "wadd"
+                    r1 = regi; regi += 1
+                    stmts << "(let %#{r1} bool (eq long %#{ra} %#{rb}))"
+                    r2b = regi; regi += 1
+                    stmts << "(let %#{r2b} bool (ne long %#{rhi} %#{ra}))"
+                    stmts << "(let %#{ro} bool (and bool %#{r1} %#{r2b}))"
+                  elsif op == "wsub"
+                    r1 = regi; regi += 1
+                    stmts << "(let %#{r1} bool (ne long %#{ra} %#{rb}))"
+                    r2b = regi; regi += 1
+                    stmts << "(let %#{r2b} bool (ne long %#{rhi} %#{ra}))"
+                    stmts << "(let %#{ro} bool (and bool %#{r1} %#{r2b}))"
+                  else
+                    rz = regi; regi += 1
+                    stmts << "(let %#{rz} bool (eq long %#{a64} (const long 0)))"
+                    rz2 = regi; regi += 1
+                    stmts << "(let %#{rz2} bool (eq long %#{b64} (const long 0)))"
+                    rz3 = regi; regi += 1
+                    stmts << "(let %#{rz3} bool (or bool %#{rz} %#{rz2}))"
+                    rq = regi; regi += 1
+                    stmts << "(let %#{rq} long (cdiv long %#{rr} %#{a64}))"
+                    rq2 = regi; regi += 1
+                    stmts << "(let %#{rq2} bool (ne long %#{rq} %#{b64}))"
+                    ra1 = regi; regi += 1
+                    stmts << "(let %#{ra1} bool (ne long %#{a64} (const long -1)))"
+                    rmn = regi; regi += 1
+                    stmts << "(let %#{rmn} bool (and bool %#{ra1} %#{rq2}))"
+                    ra2 = regi; regi += 1
+                    stmts << "(let %#{ra2} bool (eq long %#{a64} (const long -1)))"
+                    rb2 = regi; regi += 1
+                    stmts << "(let %#{rb2} bool (ne long %#{b64} (const long -9223372036854775808)))"
+                    rmn2 = regi; regi += 1
+                    stmts << "(let %#{rmn2} bool (and bool %#{ra2} %#{rb2}))"
+                    rnov = regi; regi += 1
+                    stmts << "(let %#{rnov} bool (or bool %#{rmn} %#{rmn2}))"
+                    rnz = regi; regi += 1
+                    stmts << "(let %#{rnz} bool (ne bool %#{rz3} (const bool 1)))"
+                    rfin = regi; regi += 1
+                    stmts << "(let %#{rfin} bool (and bool %#{rnz} %#{rnov}))"
+                    stmts << "(let %#{ro} bool %#{rfin})"
+                  end
+                else
+                  if op == "wmul"
+                    rz = regi; regi += 1
+                    stmts << "(let %#{rz} bool (eq unsigned_long %#{a64} (const unsigned_long 0)))"
+                    rz2 = regi; regi += 1
+                    stmts << "(let %#{rz2} bool (eq unsigned_long %#{b64} (const unsigned_long 0)))"
+                    rz3 = regi; regi += 1
+                    stmts << "(let %#{rz3} bool (or bool %#{rz} %#{rz2}))"
+                    rq = regi; regi += 1
+                    stmts << "(let %#{rq} unsigned_long (cdiv unsigned_long %#{rr} %#{a64}))"
+                    rq2 = regi; regi += 1
+                    stmts << "(let %#{rq2} bool (ne unsigned_long %#{rq} %#{b64}))"
+                    rnz = regi; regi += 1
+                    stmts << "(let %#{rnz} bool (ne bool %#{rz3} (const bool 1)))"
+                    rnov = regi; regi += 1
+                    stmts << "(let %#{rnov} bool (and bool %#{rnz} %#{rq2}))"
+                    stmts << "(let %#{ro} bool %#{rnov})"
+                  else
+                    if op == "wadd"
+                      stmts << "(let %#{ro} bool (lt.u unsigned_long %#{rr} %#{a64}))"
+                    else
+                      stmts << "(let %#{ro} bool (lt.u unsigned_long %#{a64} %#{rr}))"
+                    end
+                  end
+                end
+              end
+              stmts << "(store bool %#{r2} %#{ro})"
             end
           when "offset"
             if arg_vals.size >= 2
@@ -1936,13 +2537,187 @@ functions.each do |fn|
             sz, al = type_size_align(t, types)
             v = iname == "size_of" ? sz : al
             store_dest.call("(const #{ty} #{v})")
+          when "cttz", "cttz_nonzero", "ctlz", "ctlz_nonzero", "ctpop", "compare_bytes"
+            ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+            if iname == "compare_bytes" && arg_vals.size >= 3
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ty} (call #{ty} &\"memcmp\" #{arg_vals[0][0]} #{arg_vals[1][0]} #{arg_vals[2][0]}))"
+              store_dest.call("%#{r}")
+              next
+            end
+            if arg_vals.size >= 1
+              x = arg_vals[0][0]
+              xty = arg_vals[0][1] ? rust_type_to_pathb(arg_vals[0][1], types) : "unsigned_long"
+              xty = "unsigned_long" if xty.start_with?("(")
+              bits = xty.include?("char") || xty == "bool" ? 8 : (xty.include?("short") ? 16 : (xty == "int" || xty == "unsigned_int" || xty == "float" ? 32 : 64))
+              ty = xty
+              m1 = bits == 64 ? 0x5555555555555555 : 0x55555555
+              m2 = bits == 64 ? 0x3333333333333333 : 0x33333333
+              m4 = bits == 64 ? 0x0f0f0f0f0f0f0f0f : 0x0f0f0f0f
+              h01 = bits == 64 ? 0x0101010101010101 : 0x01010101
+              popcount = lambda do |v, out|
+                r0 = regi; regi += 1
+                stmts << "(let %#{r0} #{ty} (cshr #{ty} #{v} (const #{ty} 1)))"
+                r1 = regi; regi += 1
+                stmts << "(let %#{r1} #{ty} (and #{ty} %#{r0} (const #{ty} #{m1})))"
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{ty} (wsub #{ty} #{v} %#{r1}))"
+                r3 = regi; regi += 1
+                stmts << "(let %#{r3} #{ty} (and #{ty} %#{r2} (const #{ty} #{m2})))"
+                r3b = regi; regi += 1
+                stmts << "(let %#{r3b} #{ty} (cshr #{ty} %#{r2} (const #{ty} 2)))"
+                r4 = regi; regi += 1
+                stmts << "(let %#{r4} #{ty} (and #{ty} %#{r3b} (const #{ty} #{m2})))"
+                r5 = regi; regi += 1
+                stmts << "(let %#{r5} #{ty} (wadd #{ty} %#{r3} %#{r4}))"
+                r5b = regi; regi += 1
+                stmts << "(let %#{r5b} #{ty} (cshr #{ty} %#{r5} (const #{ty} 4)))"
+                r5c = regi; regi += 1
+                stmts << "(let %#{r5c} #{ty} (wadd #{ty} %#{r5} %#{r5b}))"
+                r6 = regi; regi += 1
+                stmts << "(let %#{r6} #{ty} (and #{ty} %#{r5c} (const #{ty} #{m4})))"
+                r6b = regi; regi += 1
+                stmts << "(let %#{r6b} #{ty} (wmul #{ty} %#{r6} (const #{ty} #{h01})))"
+                stmts << "(let %#{out} #{ty} (cshr #{ty} %#{r6b} (const #{ty} #{bits - 8})))"
+              end
+              r = regi; regi += 1
+              if iname.start_with?("ctpop")
+                rt = regi; regi += 1
+                popcount.call(x, rt)
+                stmts << "(let %#{r} #{ty} %#{rt})"
+              elsif iname.start_with?("cttz")
+                r1 = regi; regi += 1
+                stmts << "(let %#{r1} #{ty} (not #{ty} #{x}))"
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{ty} (wsub #{ty} #{x} (const #{ty} 1)))"
+                r3 = regi; regi += 1
+                stmts << "(let %#{r3} #{ty} (and #{ty} %#{r1} %#{r2}))"
+                rt = regi; regi += 1
+                popcount.call("%#{r3}", rt)
+                stmts << "(let %#{r} #{ty} %#{rt})"
+              else
+                v = x
+                s = 1
+                while s < bits
+                  rs = regi; regi += 1
+                  stmts << "(let %#{rs} #{ty} (cshr #{ty} #{v} (const #{ty} #{s})))"
+                  r1 = regi; regi += 1
+                  stmts << "(let %#{r1} #{ty} (or #{ty} #{v} %#{rs}))"
+                  v = "%#{r1}"
+                  s *= 2
+                end
+                r8 = regi; regi += 1
+                popcount.call(v, r8)
+                stmts << "(let %#{r} #{ty} (wsub #{ty} (const #{ty} #{bits}) %#{r8}))"
+              end
+              dpt = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
+              if dpt != ty && !dpt.start_with?("(")
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{dpt} (iconv #{dpt} %#{r}))"
+                store_dest.call("%#{r2}")
+              else
+                store_dest.call("%#{r}")
+              end
+            end
+          when "atomic_cxchg", "atomic_cxchgweak"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(ptr") || ept.start_with?("(fn")
+            ept = "unsigned_long" if ept.start_with?("(")
+            if arg_vals.size >= 3
+              r1 = regi; regi += 1
+              stmts << "(let %#{r1} #{ept} (load #{ept} #{arg_vals[0][0]}))"
+              rok = regi; regi += 1
+              stmts << "(let %#{rok} bool (eq #{ept} %#{r1} #{arg_vals[1][0]}))"
+              stmts << "(if %#{rok} (then (store #{ept} #{arg_vals[0][0]} #{arg_vals[2][0]})))"
+              addr, regi = place_addr(dest, types, locals, params, param_reg, stmts, regi)
+              dty = place_type(dest, types, locals, params)
+              val_off = 8; flag_off = 0
+              if dty && types[dty] && types[dty][:fields]
+                types[dty][:fields].each do |f|
+                  if f[:type] == "bool"
+                    flag_off = f[:off]
+                  else
+                    val_off = f[:off]
+                  end
+                end
+              end
+              stmts << "(store #{ept} #{addr} %#{r1})" if val_off == 0
+              if val_off != 0
+                rv = regi; regi += 1
+                stmts << "(let %#{rv} (ptr #{ept}) (offset #{addr} #{val_off}))"
+                stmts << "(store #{ept} %#{rv} %#{r1})"
+              end
+              r2 = regi; regi += 1
+              stmts << "(let %#{r2} (ptr bool) (offset #{addr} #{flag_off}))"
+              stmts << "(store bool %#{r2} %#{rok})"
+            end
+          when "atomic_load"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(")
+            if arg_vals.size >= 1
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ept} (load #{ept} #{arg_vals[0][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "atomic_store"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(")
+            if arg_vals.size >= 2
+              stmts << "(store #{ept} #{arg_vals[0][0]} #{arg_vals[1][0]})"
+            end
+          when "atomic_xchg", "atomic_xadd", "atomic_xsub", "atomic_and", "atomic_or", "atomic_xor", "atomic_nand"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(")
+            op = {"atomic_xchg" => nil, "atomic_xadd" => "wadd", "atomic_xsub" => "wsub", "atomic_and" => "and", "atomic_or" => "or", "atomic_xor" => "xor"}[iname]
+            if arg_vals.size >= 2
+              r1 = regi; regi += 1
+              stmts << "(let %#{r1} #{ept} (load #{ept} #{arg_vals[0][0]}))"
+              if op
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{ept} (#{op} #{ept} %#{r1} #{arg_vals[1][0]}))"
+                stmts << "(store #{ept} #{arg_vals[0][0]} %#{r2})"
+              else
+                stmts << "(store #{ept} #{arg_vals[0][0]} #{arg_vals[1][0]})"
+              end
+              store_dest.call("%#{r1}")
+            end
+          when "atomic_fence"
+            nil
           when "size_of_val", "align_of_val"
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
             t = iparams[0] || "u8"
             t = t.sub(/^(?:&|&mut\s+|&move\s+|\*const\s+|\*mut\s+|\*move\s+)/, "")
-            sz, al = type_size_align(t, types)
-            v = iname == "size_of_val" ? sz : al
-            store_dest.call("(const #{ty} #{v})")
+            if (t.start_with?("[") && t.end_with?("]") && !t.include?(";")) || t == "str" || t.start_with?("dyn")
+              inner = t == "str" ? "u8" : (t.start_with?("dyn") ? "u8" : t[1...-1].strip)
+              es, ea = type_size_align(inner, types)
+              ea = 1 if ea == 0
+              es = 1 if es == 0
+              if arg_vals.size >= 1
+                r = regi; regi += 1
+                stmts << "(let %#{r} (ptr unsigned_long) (offset #{arg_vals[0][0]} 8))"
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} unsigned_long (load unsigned_long %#{r}))"
+                if iname == "size_of_val" && es != 1
+                  r3 = regi; regi += 1
+                  stmts << "(let %#{r3} #{ty} (wmul #{ty} %#{r2} (const #{ty} #{es})))"
+                  store_dest.call("%#{r3}")
+                elsif iname == "align_of_val" && ea != 1
+                  store_dest.call("(const #{ty} #{ea})")
+                else
+                  r3 = regi; regi += 1
+                  stmts << "(let %#{r3} #{ty} (iconv #{ty} %#{r2}))" if ty != "unsigned_long"
+                  store_dest.call(ty == "unsigned_long" ? "%#{r2}" : "%#{r3}")
+                end
+              end
+            else
+              sz, al = type_size_align(t, types)
+              v = iname == "size_of_val" ? sz : al
+              store_dest.call("(const #{ty} #{v})")
+            end
           when "discriminant_value"
             if arg_vals.size >= 1 && iparams.size >= 1
               t = iparams[0]
@@ -2072,8 +2847,13 @@ functions.each do |fn|
           end
           callee_code = "&\"#{pb_sym(fname)}\""
           argstr = arg_vals.map(&:first).join(' ')
+          dest_sz = dest == "RETURN" ? type_size_align(ret, types)[0] : (dest_ty ? type_size_align(dest_ty, types)[0] : 0)
+          dest_big = dest_agg && dest_sz > 16
           if dest == "RETURN"
-            if $agg_ret
+            if $big_ret
+              dpt = rust_type_to_pathb(ret, types)
+              stmts << "(eval (call void #{callee_code} $\"retval\" #{argstr}))"
+            elsif $agg_ret
               dpt = rust_type_to_pathb(ret, types)
               stmts << "(eval (call void #{callee_code} (sret #{dpt} $\"retval\") #{argstr}))"
             elsif ret_void || pathb_ret == "void"
@@ -2085,7 +2865,9 @@ functions.each do |fn|
             end
             stmts << "(goto #{retblk.inspect})"
           else
-            if dest_agg
+            if dest_big
+              stmts << "(eval (call void #{callee_code} #{dest_addr} #{argstr}))"
+            elsif dest_agg
               dpt = rust_type_to_pathb(dest_ty, types)
               stmts << "(eval (call void #{callee_code} (sret #{dpt} #{dest_addr}) #{argstr}))"
             elsif ret_void
@@ -2099,7 +2881,11 @@ functions.each do |fn|
           end
         end
       elsif ln == "RETURN"
-        if $agg_ret
+        if $big_ret
+          rsz, _ = type_size_align($cur_ret, types)
+          stmts << "(copy #{rsz} %0 $\"retval\")"
+          stmts << "(return)"
+        elsif $agg_ret
           rsz, _ = type_size_align($cur_ret, types)
           stmts << "(copy #{rsz} %0 $\"retval\")"
           stmts << "(return)"
@@ -2268,6 +3054,10 @@ lines << "(global \"mrustc_panic_target\" (ptr void) 8 8 (thread) (init (zero 0 
 lines << "(global \"mrustc_panic_value\" (ptr void) 8 8 (thread) (init (zero 0 8)))"
 lines << "(global \"__rust_alloc_error_handler_should_panic\" unsigned_char 1 1 (init (zero 0 1)))"
 lines << "(global \"__rust_no_alloc_shim_is_unstable\" unsigned_char 1 1 (init (zero 0 1)))"
+if $need_i128_helpers
+  lines << "(function \"__monomir_add_u128_o\" (ret void) (params (param %0 \"a\" (ptr (struct \"u128\"))) (param %1 \"b\" (ptr (struct \"u128\"))) (param %2 \"o\" (ptr unsigned_long))) (let %10 unsigned_long (load unsigned_long %0)) (let %11 unsigned_long (load unsigned_long %1)) (let %12 unsigned_long (wadd unsigned_long %10 %11)) (let %13 (ptr unsigned_long) (offset %2 8)) (store unsigned_long %13 %12) (let %14 (ptr unsigned_long) (offset %0 8)) (let %15 unsigned_long (load unsigned_long %14)) (let %16 (ptr unsigned_long) (offset %1 8)) (let %17 unsigned_long (load unsigned_long %16)) (let %18 unsigned_long (wadd unsigned_long %15 %17)) (let %19 bool (lt.u unsigned_long %12 %10)) (let %22 unsigned_long (iconv unsigned_long %19)) (let %20 unsigned_long (wadd unsigned_long %18 %22)) (let %21 (ptr unsigned_long) (offset %2 16)) (store unsigned_long %21 %20) (store bool %2 %19) (return))"
+  lines << "(function \"__monomir_mul_u128_o\" (ret void) (params (param %0 \"a\" (ptr (struct \"u128\"))) (param %1 \"b\" (ptr (struct \"u128\"))) (param %2 \"o\" (ptr unsigned_long))) (let %10 unsigned_long (load unsigned_long %0)) (let %11 (ptr unsigned_long) (offset %0 8)) (let %12 unsigned_long (load unsigned_long %11)) (let %13 unsigned_long (load unsigned_long %1)) (let %14 (ptr unsigned_long) (offset %1 8)) (let %15 unsigned_long (load unsigned_long %14)) (let %16 unsigned_long (wmul unsigned_long %10 %13)) (let %17 (ptr unsigned_long) (offset %2 8)) (store unsigned_long %17 %16) (let %18 unsigned_long (wmul unsigned_long %10 %15)) (let %19 unsigned_long (wmul unsigned_long %12 %13)) (let %20 unsigned_long (wadd unsigned_long %18 %19)) (let %21 unsigned_long (wadd unsigned_long %12 %15)) (let %25 bool (ne unsigned_long %21 (const unsigned_long 0))) (let %26 bool (ne unsigned_long %20 (const unsigned_long 0))) (let %22 bool (or bool %25 %26)) (let %23 (ptr unsigned_long) (offset %2 16)) (store unsigned_long %23 %20) (let %27 bool (lt.u unsigned_long %16 %10)) (let %24 bool (or bool %22 %27)) (store bool %2 %24) (return))"
+end
 lines << "(function \"__rust_alloc\" (ret (ptr signed_char)) (params (param %0 \"a0\" unsigned_long) (param %1 \"a1\" unsigned_long)) (let %10 (ptr signed_char) (call (ptr signed_char) &\"__rdl_alloc\" %0 %1)) (return %10))"
 lines << "(function \"__rust_dealloc\" (ret void) (params (param %0 \"a0\" (ptr signed_char)) (param %1 \"a1\" unsigned_long) (param %2 \"a2\" unsigned_long)) (eval (call void &\"__rdl_dealloc\" %0 %1 %2)) (return))"
 lines << "(function \"__rust_realloc\" (ret (ptr signed_char)) (params (param %0 \"a0\" (ptr signed_char)) (param %1 \"a1\" unsigned_long) (param %2 \"a2\" unsigned_long) (param %3 \"a3\" unsigned_long)) (let %10 (ptr signed_char) (call (ptr signed_char) &\"__rdl_realloc\" %0 %1 %2 %3)) (return %10))"
