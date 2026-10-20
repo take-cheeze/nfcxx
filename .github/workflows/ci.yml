@@ -84,11 +84,16 @@ jobs:
               tests/ehshim/run.sh
               tests/eh-unwind/run.sh
               tests/eval/run.sh
-          # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1, gcc backend; tests/ehshim/unwind_members.cpp).
+          # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1; tests/ehshim/unwind_members.cpp). gcc: gcc's
+          # landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj).
           - name: EH unwinder (gcc backend, NFCXX_EH_UNWIND=1)
             run: |
               NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/ehshim/run.sh
               NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/c/run.sh
+          - name: EH unwinder (qbe backend, NFCXX_EH_UNWIND=1)
+            run: |
+              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/ehshim/run.sh
+              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/c/run.sh
           # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
           # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
           - name: nfcpoly host (QBE backend)

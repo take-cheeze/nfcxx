@@ -1,6 +1,6 @@
 // std::regex_error thrown by <regex> (std::__throw_regex_error) is caught by EDG handlers; valid patterns still match.
 // The exit code is the number of wrong results.
-// BACKENDS: gcc
+// BACKENDS: gcc qbe
 // EXPECT: 0
 #include <regex>
 #include <stdexcept>
