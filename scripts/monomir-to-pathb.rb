@@ -1785,6 +1785,37 @@ functions.each do |fn|
   next if fn[:body].nil?
   next if name == "panic_impl" || name.start_with?("panic_impl")
   next if name == "main"
+  if name.include?("sync6atomic11atomic_load1g") || name.include?("sync6atomic11atomic_store1g")
+    params = parse_params_str(params_str)
+    pathb_ret = rust_type_to_pathb(ret, types)
+    ety = params[0] ? params[0].sub(/^\*(const|mut)\s+/, "").strip : "u8"
+    ept = rust_type_to_pathb(ety, types)
+    ept = "unsigned_long" if ept.start_with?("(")
+    is_load = name.include?("atomic_load1g")
+    func_text = []
+    func_text << "(function #{name.inspect}"
+    if is_load
+      func_text << "  (ret #{ept})"
+    else
+      func_text << "  (ret void)"
+    end
+    if is_load
+      func_text << "  (params (param %0 \"arg0\" (ptr #{ept})) (param %1 \"arg1\" unsigned_char))"
+    else
+      func_text << "  (params (param %0 \"arg0\" (ptr #{ept})) (param %1 \"arg1\" #{ept}) (param %2 \"arg2\" unsigned_char))"
+    end
+    func_text << "  (weak)"
+    if is_load
+      func_text << "  (let %10 #{ept} (load #{ept} %0))"
+      func_text << "  (return %10)"
+    else
+      func_text << "  (store #{ept} %0 %1)"
+      func_text << "  (return)"
+    end
+    func_text << ")"
+    lines << func_text.join("\n")
+    next
+  end
   params = parse_params_str(params_str)
   pathb_ret = rust_type_to_pathb(ret, types)
   agg_ret = pathb_ret.start_with?("(") && !pathb_ret.start_with?("(ptr") && !pathb_ret.start_with?("(fn")
