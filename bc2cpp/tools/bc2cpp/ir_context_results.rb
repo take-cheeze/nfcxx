@@ -138,6 +138,12 @@ class IrContextResults
   def classes(mask)
     return nil unless mask.is_a?(Integer) && mask.positive? && !mask.anybits?(NumericFlow::OTHER | NumericFlow::EXC | NumericFlow::CHECKED)
 
+    # Numeric class bits can still be allocated lazily during report queries.
+    generation = @gen.numeric_class_bit_count
+    if @class_cache_generation != generation
+      @class_cache.clear
+      @class_cache_generation = generation
+    end
     return @class_cache[mask] if @class_cache.key?(mask)
 
     result = classes_for_mask(mask)

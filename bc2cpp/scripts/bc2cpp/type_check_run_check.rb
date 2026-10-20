@@ -11,13 +11,22 @@ require_relative '../../tools/bc2cpp/bc2cpp'
 # A cached refusal must be invalidated when its bit becomes a registered shape.
 generator = Object.new
 def generator.frozen_tables_model = nil
+def generator.numeric_class_bit_count = @class_count.to_i
 def generator.bytecode_ir_mask_classes(mask)
   @decodes = (@decodes || 0) + 1
-  mask == NumericFlow::INT ? Set[:Integer].freeze : nil
+  return Set[:Integer].freeze if mask == NumericFlow::INT
+  return Set[:String].freeze if mask == @known_class_bit
+
+  nil
 end
 context = IrContextResults.new(generator, {})
 2.times { raise 'primitive decoding changed' unless context.classes(NumericFlow::INT) == Set[:Integer] }
 raise 'repeated class decoding was not reused' unless generator.instance_variable_get(:@decodes) == 1
+class_bit = 1 << NumericFlow::CLASS_BIT_BASE
+raise 'unregistered numeric class was admitted' unless context.classes(class_bit).nil?
+generator.instance_variable_set(:@known_class_bit, class_bit)
+generator.instance_variable_set(:@class_count, 1)
+raise 'new numeric class did not invalidate a cached refusal' unless context.classes(class_bit) == Set[:String]
 array_bit = context.shape_bit(IrContextResults::Shape.new(container: :Array, elements: [NumericFlow::INT].freeze))
 future_bit = array_bit << 1
 raise 'unregistered shape was admitted' unless context.classes(future_bit).nil?
