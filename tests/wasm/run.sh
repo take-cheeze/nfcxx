@@ -10,6 +10,9 @@
 # the variable the ASAN tests are skipped: their modules are not checked without the mode. A test with "// ASAN-EXPECT: N"
 # is a clean program that needs the mode (its malloc and free are the module's own only under --asan): it runs under the
 # mode, which must give N, and is skipped otherwise.
+# NFCXX_WASM_EMSCRIPTEN=glue runs each module under the real Emscripten glue: emcc (from the distribution, 3.1.6) builds a
+# MODULARIZE glue, and tests/wasm/emcc-glue.cjs instantiates the module with it and calls _main. A module that imports a
+# function the glue does not provide is skipped. Without emcc on PATH the mode is skipped.
 # NFCXX_WASM_EMSCRIPTEN=1 emits every module with --emscripten from the ILP32 IR (pathb-dump --target linux_riscv32, the
 # data model of Emscripten's wasm32: pointers are i32). tests/wasm/emscripten.cjs checks its exports and layout, and the
 # tests must still give their results. NFCXX_WASM_EMSCRIPTEN=import adds --emscripten-import-memory (the memory is
@@ -29,11 +32,21 @@ ir_args=(--ir)                             # the front end's mode: LP64 by defau
 memory64=0
 if [ "${NFCXX_WASM_MEMORY64:-}" = 1 ]; then memory64=1; mode_args=(--memory64); mode=memory64; fi
 if [ "${NFCXX_WASM_EMSCRIPTEN:-}" = 1 ]; then emscripten=1; mode_args=(--emscripten); mode=emscripten; fi
+glue=0
 if [ "${NFCXX_WASM_EMSCRIPTEN:-}" = import ]; then emscripten=1; mode_args=(--emscripten --emscripten-import-memory); mode=emscripten-import; fi
+if [ "${NFCXX_WASM_EMSCRIPTEN:-}" = glue ]; then
+  emscripten=1; glue=1; mode_args=(--emscripten); mode=emscripten-glue
+  command -v emcc >/dev/null || { echo "SKIP tests/wasm (emscripten-glue): no emcc"; exit 0; }
+fi
 [ $emscripten = 1 ] && ir_args=(--ir --freestanding --target linux_riscv32)   # ILP32, as wasm32
 [ $asan = 1 ] && [ $emscripten = 1 ] && { echo "tests/wasm: NFCXX_WASM_ASAN and NFCXX_WASM_EMSCRIPTEN are not combined" >&2; exit 2; }
 [ $memory64 = 1 ] && [ $asan = 1 -o $emscripten = 1 ] && { echo "tests/wasm: NFCXX_WASM_MEMORY64 is not combined with ASAN or EMSCRIPTEN" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+if [ $glue = 1 ]; then
+  printf 'int main(void) { return 0; }\n' > "$tmp/empty.c"
+  emcc -O0 -sMODULARIZE=1 -sEXPORT_NAME=createGlue -sENVIRONMENT=node -sEXIT_RUNTIME=0 -sFILESYSTEM=0 "$tmp/empty.c" \
+    -o "$tmp/glue.js" > "$tmp/glue.log" 2>&1 || { echo "FAIL tests/wasm: emcc could not build the glue: $(head -1 "$tmp/glue.log")"; exit 1; }
+fi
 pass=0; fail=0; skip=0
 for f in "$dir"/*.cpp; do
   n=$(basename "$f" .cpp)
@@ -76,7 +89,12 @@ for f in "$dir"/*.cpp; do
   if [ $emscripten = 1 ] && ! "$node" "$dir/emscripten.cjs" "$tmp/$n.wasm" > "$tmp/$n.emcc" 2>&1; then
     echo "FAIL $n: $(head -1 "$tmp/$n.emcc")"; fail=$((fail + 1)); continue
   fi
-  got=$("$node" "$dir/host.cjs" "$tmp/$n.wasm" 2>&1 | tail -1)
+  if [ $glue = 1 ]; then
+    got=$("$node" "$dir/emcc-glue.cjs" "$tmp/glue.js" "$tmp/$n.wasm" 2>&1 | tail -1)
+    case "$got" in skip:*) echo "skip $n (the glue does not provide its imports)"; skip=$((skip + 1)); continue ;; esac
+  else
+    got=$("$node" "$dir/host.cjs" "$tmp/$n.wasm" 2>&1 | tail -1)
+  fi
   if [ -n "$kind" ]; then
     if [ "$got" = "asan: $kind" ]; then echo "ok   $n (asan: $kind)"; pass=$((pass + 1))
     else echo "FAIL $n: want asan: $kind, got $got"; fail=$((fail + 1)); fi

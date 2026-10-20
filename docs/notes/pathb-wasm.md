@@ -187,6 +187,8 @@ from the ILP32 IR, and `NFCXX_WASM_EMSCRIPTEN=import` with `--emscripten-import-
 | `__data_end` | global, immutable i32 | the end of the static data (the first address after the last object) |
 | `__heap_base` | global, immutable i32 | the top of the memory, which is also the initial stack pointer |
 | `__wasm_call_ctors` | function, `() -> ()` | empty: runs no static constructors (see below) |
+| `stackSave`, `stackRestore`, `stackAlloc` | functions | the stack pointer: read, set, and moved down (aligned to 16) |
+| `emscripten_stack_init`, `emscripten_stack_get_base`, `_get_end`, `_get_free` | functions | the stack limits: init is empty, the base is the top, the end is `data_end` rounded up to 16, and free is the distance from the stack pointer to the end |
 
 With `--emscripten-import-memory` the module imports `env.memory` (no maximum, initial size the module's pages) and has
 no memory section or `memory` export. Growing it is the host's `memory.grow`; the module does not grow it.
@@ -246,21 +248,34 @@ none is installed here, and the Emscripten sources were not reachable from this 
    name) could be verified. Emscripten's libc (`printf`, `malloc`, `memcpy`, ...) is linked into the module, so those
    names are not imports under Emscripten at all; a program that calls them, or `__cxa_*`, does not instantiate under an
    unmodified runtime and needs the import mapped or provided. The emitter does not claim otherwise.
-6. **Exports the glue calls: partly closed.** `__wasm_call_ctors` is exported (empty, point "Constructors"). Not exported,
-   on purpose: `malloc` and `free` (no allocator here, see point 7), and the `emscripten_stack_*` functions (they need
-   stack limits, point 8). `main` is there.
+6. **Exports the glue calls: closed for the emcc 3.1.6 glue.** The glue reads `__wasm_call_ctors`, `_main`, `memory`,
+   `__indirect_function_table`, `__errno_location`, `stackSave`, `stackRestore`, `stackAlloc` and
+   `emscripten_stack_init`, `emscripten_stack_get_base`, `_get_end` and `_get_free` (read from its source, `emcc -O0
+   -sMODULARIZE`). The module exports all of them but `__errno_location` (no errno here) and `dynCall_*` (no indirect calls).
+   `malloc` and `free` are not exported (no allocator here, see point 7).
 7. **Memory growth: open.** The module has no allocator and no call that grows the memory. An `emscripten_resize_heap`
    import would be unused (nothing in the module calls it), and an export under that name would be an interface the
    runtime does not define on that side, so neither is added. The memory grows only in the host (with the import). The
    heap that `__heap_base` marks is empty, so an `sbrk`-style allocator would need the memory grown first.
-8. **Stack limits: open.** `__set_stack_limits` is not exported. The module has no stack-overflow check and no place for
-   limits to be read from: a stored limit that nothing reads would be a fake, so the export is left out.
+8. **Stack limits: closed, for the glue's functions.** The stack is global 0, growing down from `stack_top` to the end, which
+   is `data_end` rounded up to 16 (the glue asserts a 4-byte-aligned end when it writes the stack cookie: found by running
+   the glue, `globals_string.cpp`). `emscripten_stack_get_base` is the top, `_get_end` the end, `_get_free` the distance
+   from the stack pointer to the end, `emscripten_stack_init` does nothing (nothing to set up), and `stackSave`,
+   `stackRestore` and `stackAlloc` read, set and move the stack pointer (`stackAlloc` aligns to 16). The module does not
+   check the limit (as before). `__set_stack_limits` is not exported: the 3.1.6 glue does not call it.
 
-**Unverified names.** The Emscripten runtime names above (`emscripten_resize_heap`, `__set_stack_limits`,
-`emscripten_stack_get_current`, the `__syscall_*` and `fd_write` imports, and the libc behavior in point 5) are not
-verified here: no `emcc` is installed, `emscripten.org` did not resolve, and the Emscripten source was not reachable
-(the raw GitHub path returned 404, and the GitHub API was not enabled for this session). None of them is added to the
-module or to `EMSCRIPTEN_IMPORT_NAMES`.
+**Verified against emcc 3.1.6** (Ubuntu's `emscripten` package, installed here; `emsdk` from GitHub is not reachable).
+The glue's imports for a non-standalone build are `env.emscripten_memcpy_big`, `env.emscripten_resize_heap`,
+`env.setTempRet0` and `wasi_snapshot_preview1.fd_write`; a `-sSTANDALONE_WASM` build imports only WASI. The names of
+point 5 are therefore checked, and none of them is added to `EMSCRIPTEN_IMPORT_NAMES`: the IR's libc names (`printf`,
+`malloc`, `memcpy`) still have no Emscripten implementation here. `emscripten_resize_heap` is not called by the module
+(it does not grow the memory).
+
+**The glue check (`NFCXX_WASM_EMSCRIPTEN=glue`).** `tests/wasm/run.sh` builds a `MODULARIZE` glue with emcc, instantiates
+each `--emscripten` module with it (`tests/wasm/emcc-glue.cjs`) and calls `_main`. That is the real glue, not the
+module's own host: 23 tests pass, and the rest are skipped because they import a function the glue does not provide
+(the glue's own imports are the list above). Without emcc the mode is skipped. Before the stack exports were added, the
+glue failed at `emscripten_stack_init`, and a data end that is not 4-byte aligned failed the stack cookie.
 
 ## Memory64 (`--memory64`)
 
