@@ -560,7 +560,8 @@ class CodeGen
   def block_collection_result_mask(insn)
     return nil unless %w[map collect].include?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
     return nil unless @closed_world&.exact_instances_singleton_free?
-    return nil if symbol_installed_names.include?(insn.sym)
+    installed = symbol_installed_names
+    return nil if installed.nil? || installed.include?(insn.sym)
     return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
 
     NumericFlow::ARR
