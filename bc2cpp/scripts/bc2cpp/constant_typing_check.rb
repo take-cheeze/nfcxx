@@ -118,7 +118,9 @@ freeze_object = <<~RUBY
 RUBY
 
 puts '== shared end-to-end positives: containers and integer arithmetic'
-positive_rows = typed_rows.call(BASE + positive + frozen)
+# This unknown receiver adds no method definitions, so it cannot withdraw the positive proofs.
+unknown_merge = "X_MERGE = $unproven.merge({ b: 2 })\n"
+positive_rows = typed_rows.call(BASE + positive + frozen + unknown_merge)
 
 puts '== positives: stock owners, a foreign Ruby freeze'
 rows = container_rows.call(positive_rows)
@@ -157,10 +159,6 @@ negatives = {
   'a singleton merge on the constant receiver' => [
     "MERGE_BASE_S = { 11 => 1 }\ndef MERGE_BASE_S.merge(other)\n  {}\nend\nSINGLE_MERGE = MERGE_BASE_S.merge({ 12 => 2 })\n",
     %w[SINGLE_MERGE]
-  ],
-  'a non-literal merge receiver (a global nothing proves)' => [
-    "X_MERGE = $unproven.merge({ b: 2 })\n",
-    %w[X_MERGE]
   ]
 }
 
@@ -174,6 +172,11 @@ negatives.each do |what, (extra, names)|
   end
 end
 
+
+what = 'a non-literal merge receiver (a global nothing proves)'
+puts "== negative: #{what}"
+rows = container_rows.call(positive_rows)
+check.call("X_MERGE stays untyped (#{what})", rows['X_MERGE'] && rows['X_MERGE'][0].nil?)
 
 # The interval proof and the operator predicate over one program, in process.
 analysis = lambda do |source|
