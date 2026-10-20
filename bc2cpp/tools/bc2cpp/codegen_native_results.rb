@@ -54,9 +54,26 @@ class CodeGen
     NativeCoreResultSigs.kinds.dig(klass, name)
   end
 
+  # BOOL (`!=`): mruby's BasicObject#!= is `!(self == other)`, and `!` answers true or false, so a `!=` send answers
+  # one of the two boolean class bits whatever the receiver. Gated like the other core results: exact instances, and no
+  # program definition or installer of `!=` or `!` (a program override of either would change the answer).
+  def native_core_neq_class_result(insn, state)
+    return nil unless insn.op == 'SEND' && insn.sym == '!=' && insn.plain_fixed_argc? && insn.argc == 1
+    return nil unless @closed_world&.exact_instances_singleton_free?
+
+    installed = symbol_installed_names
+    return nil if installed.nil? || installed.include?('!=') || installed.include?('!')
+    return nil unless %w[!= !].all? { |name| (@registry[name] || []).all? { |definition| definition.owner == '<native>' } }
+
+    numeric_class_bit('TrueClass') | numeric_class_bit('FalseClass')
+  end
+
   # Only the exact-class oracle supplies this receiver: numeric masks alone
   # do not prove lookup reaches the built-in class's audited body.
   def native_core_class_result(insn, state)
+    neq = native_core_neq_class_result(insn, state)
+    return neq if neq
+
     return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
 
     owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]

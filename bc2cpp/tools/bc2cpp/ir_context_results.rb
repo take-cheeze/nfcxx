@@ -88,6 +88,8 @@ class IrContextResults
     @shapes = {}
     @shape_bits = {}
     @shape_mask = 0
+    @call_layouts = {}.compare_by_identity unless ENV['BC2CPP_IR_CALL_INDEX'] == '0'
+    @binding_layouts = {}.compare_by_identity
     @class_cache = {}
     @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
@@ -188,9 +190,10 @@ class IrContextResults
     definition = @gen.numeric_owner_of(body)
     return nil unless definition && definition.irep == body.label
     receiver = @gen.send(:return_class_self_receiver, body) || NumericFlow::OTHER
-    fields = body.enter&.enter_fields
-    return nil unless fields
+    layout = binding_layout(body)
+    return nil unless layout
 
+    fields, names = layout
     required, optional = fields.first(2)
     arguments = (1..required + optional).map do |position|
       direct = definition && @gen.bytecode_ir_argument_classes(definition, position)
@@ -198,21 +201,19 @@ class IrContextResults
       numeric = @gen.numeric_entry_mask(body, position)
       frozen_mask?(numeric) ? numeric : mask(direct)
     end
-    keywords = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.uniq.to_h { |name| [name, NumericFlow::OTHER] }
+    keywords = names.to_h { |name| [name, NumericFlow::OTHER] }
     binding = bind(body, arguments, keywords, root: true)
     @roots[body.label] = binding && add(body, receiver, arguments, keywords, binding, root: true)
   end
 
   def bind(body, arguments, keywords, root: false)
-    fields = body.enter&.enter_fields
-    return nil unless fields&.size == 8 && fields.all? { |value| value.is_a?(Integer) && value >= 0 }
+    layout = binding_layout(body)
+    return nil unless layout
 
-    required, optional, rest, post, key_count, keydict, block, extra = fields
-    return nil if extra != 0 || rest > 1 || keydict > 1 || block > 1
+    fields, names, required_names, index = layout
+    required, optional, rest, post, key_count, keydict = fields
     return nil if arguments.size < required + post || rest.zero? && arguments.size > required + optional + post
-    names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.uniq
-    optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
-    return nil unless root || (names - optional_names - keywords.keys).empty?
+    return nil unless root || (required_names - keywords.keys).empty?
     return nil unless root || keydict.positive? || (keywords.keys - names).empty?
     return nil unless keywords.empty? || key_count.positive? || keydict.positive?
 
@@ -222,16 +223,35 @@ class IrContextResults
     values.concat(arguments.last(post)) if post.positive?
     values << NumericFlow::HSH if key_count.positive? || keydict.positive?
     values << NumericFlow::NIL
+    edges = {}
+    edges[index] = [index + supplied + 1] if optional.positive? && !root
+    CallContextArguments::Binding.new(masks: values.freeze, enter_edges: edges.freeze)
+  end
+
+  # Bytecode is fixed for this engine; context values and budgets are not.
+  def binding_layout(body)
+    return build_binding_layout(body) if ENV['BC2CPP_IR_BINDING_INDEX'] == '0'
+    return @binding_layouts[body] if @binding_layouts.key?(body)
+
+    @binding_layouts[body] = build_binding_layout(body)
+  end
+
+  def build_binding_layout(body)
+    fields = body.enter&.enter_fields
+    return nil unless fields&.size == 8 && fields.all? { |value| value.is_a?(Integer) && value >= 0 }
+
+    _required, optional, rest, _post, _key_count, keydict, block, extra = fields
+    return nil if extra != 0 || rest > 1 || keydict > 1 || block > 1
+
     index = body.instructions.index(body.enter)
     return nil unless index
-
-    edges = {}
     if optional.positive?
-      return nil unless body.instructions[index + 1, optional + 1]&.size == optional + 1 &&
-                        body.instructions[index + 1, optional + 1].all? { |insn| insn.op == 'JMP' }
-      edges[index] = [index + supplied + 1] unless root
+      jumps = body.instructions[index + 1, optional + 1]
+      return nil unless jumps&.size == optional + 1 && jumps.all? { |insn| insn.op == 'JMP' }
     end
-    CallContextArguments::Binding.new(masks: values.freeze, enter_edges: edges.freeze)
+    names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
+    optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
+    [fields.dup.freeze, names, (names - optional_names).freeze, index].freeze
   end
 
   def add(body, receiver, arguments, keywords, binding, root: false)
@@ -315,25 +335,46 @@ class IrContextResults
   end
 
   def frame(node, body, index, insn, state)
+    layout = call_layout(body, index, insn)
+    return nil unless layout
+
+    implicit, register, argc, keyword_registers = layout
+    receiver = implicit ? node.receiver : state[register]
+    arguments = (1..argc).map { |position| state[register + position] || NumericFlow::OTHER }
+    keywords = {}
+    keyword_registers.each { |name, value_register| keywords[name] = state[value_register] || NumericFlow::OTHER }
+    [receiver, arguments, keywords]
+  end
+
+  def call_layout(body, index, insn)
+    return build_call_layout(body, index, insn) unless @call_layouts
+
+    layouts = (@call_layouts[body] ||= {})
+    return layouts[index] if layouts.key?(index)
+
+    layouts[index] = build_call_layout(body, index, insn)
+  end
+
+  # Keyword names depend only on reaching bytecode definitions, never on context masks.
+  def build_call_layout(body, index, insn)
     return nil unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op)
 
     argc = insn.op.end_with?('0') ? 0 : insn.argc
     return nil unless argc && insn.nk_spec != '*'
 
-    receiver = %w[SSEND SSEND0].include?(insn.op) ? node.receiver : state[insn.reg.to_i]
-    arguments = (1..argc).map { |position| state[insn.reg.to_i + position] || NumericFlow::OTHER }
-    keywords = {}
+    register = insn.reg.to_i
+    keyword_registers = []
     insn.nk_spec.to_i.times do |position|
-      register = insn.reg.to_i + argc + 1 + position * 2
-      definitions = BytecodeIR.reaching_definitions(body, index, register.to_s, origin_transfers: true)
+      key_register = register + argc + 1 + position * 2
+      definitions = BytecodeIR.reaching_definitions(body, index, key_register.to_s, origin_transfers: true)
       return nil unless definitions&.size == 1 && !definitions.first.entry?
 
       producer = body.instructions[definitions.first.index]
       return nil unless producer.op == 'LOADSYM'
 
-      keywords[producer.sym.to_s] = state[register + 1] || NumericFlow::OTHER
+      keyword_registers << [producer.sym.to_s.dup.freeze, key_register + 1].freeze
     end
-    [receiver, arguments, keywords]
+    [%w[SSEND SSEND0].include?(insn.op), register, argc, keyword_registers.freeze].freeze
   end
 
   def dispatch(node, body, index, insn, state)

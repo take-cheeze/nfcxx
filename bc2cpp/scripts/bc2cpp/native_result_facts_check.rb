@@ -292,6 +292,41 @@ end
 check.call('probe rollback restores class entries without retaining transient entries',
            probe.native_result_class_bits == before_probe && !probe.native_result_class_bits.any? { |klass, _| klass == 'Transient' })
 
+# Receiver-member indexes must follow probe table identity as well as lazy growth.
+member_probe = probe_class.new
+member_bits = 10.times.map { |index| member_probe.numeric_class_bit("Member#{index}") }
+member_pair = member_bits[0] | member_bits[1]
+check.call('member masks decode in allocation order', member_probe.numeric_receiver_class_bits(member_pair) == member_bits.first(2))
+check.call('member snapshots are reused and immutable', member_probe.numeric_receiver_class_bits(member_pair).equal?(member_probe.numeric_receiver_class_bits(member_pair)) && member_probe.numeric_receiver_class_bits(member_pair).frozen?)
+check.call('zero, negative and noninteger member masks are refused', [0, -1, nil].all? { |mask| member_probe.numeric_receiver_class_bits(mask).nil? })
+check.call('core and provenance bits never become user members', [NumericFlow::INT, NumericFlow::CHECKED, NumericFlow::OTHER].all? { |mask| member_probe.numeric_receiver_class_bits(member_pair | mask).nil? })
+check.call('the original eight-member limit is retained', member_probe.numeric_receiver_class_bits(member_bits.first(8).reduce(0, :|)) == member_bits.first(8) && member_probe.numeric_receiver_class_bits(member_bits.first(9).reduce(0, :|)).nil?)
+future_bit = member_bits.last << 1
+check.call('an unregistered bit is refused', member_probe.numeric_receiver_class_bits(future_bit).nil?)
+check.call('lazy registration withdraws a cached refusal', member_probe.numeric_class_bit('FutureMember') == future_bit && member_probe.numeric_receiver_class_bits(future_bit) == [future_bit])
+member_table = member_probe.instance_variable_get(:@numeric_class_bits).transform_keys { |name| name == 'Member0' ? 'RenamedMember' : name }
+member_probe.instance_variable_set(:@numeric_class_bits, member_table)
+check.call('same-size replacement updates inverse names', member_probe.return_class_name_of_bit(member_bits.first) == 'RenamedMember')
+member_probe.without_probe_side_effects do
+  transient = member_probe.numeric_class_bit('TransientMember')
+  member_probe.numeric_receiver_class_bits(transient)
+  member_probe.return_class_name_of_bit(transient)
+end
+next_bit = future_bit << 1
+check.call('probe rollback removes transient member and name entries', member_probe.numeric_receiver_class_bits(next_bit).nil? && member_probe.return_class_name_of_bit(next_bit).nil?)
+check.call('a reused bit after rollback receives its new name', member_probe.numeric_class_bit('AfterRollback') == next_bit && member_probe.return_class_name_of_bit(next_bit) == 'AfterRollback')
+member_rng = Random.new(52_23)
+check.call('randomized member queries match the original full-table scan', 1000.times.all? do
+  mask = (member_bits + [future_bit, NumericFlow::NIL, NumericFlow::CHECKED]).sample(member_rng.rand(14), random: member_rng).reduce(0, :|)
+  table = member_probe.instance_variable_get(:@numeric_class_bits)
+  expected = table.values.select { |bit| mask.anybits?(bit) }
+  expected = nil unless mask.positive? && (1..8).cover?(expected.size) && expected.reduce(0, :|) == mask
+  member_probe.numeric_receiver_class_bits(mask) == expected
+end)
+2500.times { |value| member_probe.numeric_receiver_class_bits((1 << 400) | (value << 20)) }
+check.call('member decoding cache stays bounded', member_probe.numeric_class_member_index[3].size == CodeGen::CLASS_MEMBER_CACHE_LIMIT)
+puts 'receiver member index growth, rollback, ordering and refusal checks passed'
+
 # The pre-optimization algorithm is the reference for results, lookup order and class-bit allocation.
 reference = lambda do |cg, name, recv, classes|
   next nil unless recv.is_a?(Integer)
