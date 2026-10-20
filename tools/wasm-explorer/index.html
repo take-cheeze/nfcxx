@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nfcxx wasm explorer</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #fbfaf7; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b675f; --line: #dcd8cf;
+    --accent: #2f6fdb; --ok: #1f7a3d; --bad: #b3261e; --code-bg: #f4f2ed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161513; --panel: #1f1e1b; --ink: #ece9e1; --muted: #9b968b; --line: #3a3833;
+      --accent: #7aa7ff; --ok: #6cc98a; --bad: #ff8a80; --code-bg: #12110f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .status { margin-left: auto; font-size: 13px; color: var(--muted); }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  .note {
+    margin: 0; padding: 8px 16px; font-size: 13px; color: var(--muted);
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .note[hidden] { display: none; }
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    height: calc(100vh - 88px); min-height: 560px;
+  }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; height: auto; }
+    .pane { min-height: 70vh; }
+  }
+  .pane { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
+  .pane:last-child { border-right: 0; }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  select, button, input {
+    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px;
+  }
+  label.check { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled, select:disabled { opacity: .55; cursor: default; }
+  .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
+  #editor { flex: 1; min-height: 320px; border-bottom: 1px solid var(--line); }
+  textarea.src {
+    flex: 1; width: 100%; resize: none; border: 0; outline: none; padding: 14px 16px;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--panel); color: var(--ink); tab-size: 2; white-space: pre;
+  }
+  textarea.src[hidden] { display: none; }
+  .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .tabs button {
+    border: 0; border-radius: 0; background: transparent; padding: 9px 12px; color: var(--muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .view { flex: 1; overflow: auto; padding: 14px 16px; }
+  .view[hidden] { display: none; }
+  .card { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat .v { font-size: 20px; font-weight: 650; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  pre {
+    margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; overflow: auto; white-space: pre; max-height: 70vh;
+  }
+  .error {
+    border: 1px solid var(--bad); color: var(--bad); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 12px; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+  }
+  .error[hidden] { display: none; }
+  .result { font-size: 22px; font-weight: 650; }
+  .result.trap { color: var(--bad); }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>nfcxx wasm explorer</h1>
+  <span class="sub">C++ &rarr; mid-level IR &rarr; WebAssembly, run in this page</span>
+  <span class="status" id="status">checking server&hellip;</span>
+</header>
+<p class="note" id="static-note" hidden>
+  This is the static build: the examples are compiled ahead of time, and other code needs the local server
+  (<code>node tools/wasm-explorer/server.cjs</code>, see docs/notes/wasm-explorer.md).
+</p>
+
+<main>
+  <section class="pane" aria-label="Source">
+    <div class="toolbar">
+      <select id="examples" aria-label="Example"></select>
+      <select id="std" aria-label="C++ standard" title="C++ standard">
+        <option value="">default std</option>
+        <option value="c++17">-std=c++17</option>
+        <option value="c++20">-std=c++20</option>
+        <option value="c++23">-std=c++23</option>
+      </select>
+      <select id="mode" aria-label="Emitter mode" title="Data model and emitter mode"></select>
+      <button class="primary" id="compile" title="Ctrl+Enter">Compile</button>
+      <label class="check"><input type="checkbox" id="auto" checked> auto</label>
+      <button id="share" title="Copy a link that holds this source and these options">Copy link</button>
+      <span class="hint" id="hint">Ctrl+Enter compiles</span>
+    </div>
+    <div id="editor" aria-label="C++ source"></div>
+    <textarea class="src" id="fallback" spellcheck="false" aria-label="C++ source" hidden></textarea>
+  </section>
+
+  <section class="pane" aria-label="Output">
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-module" aria-selected="true" aria-controls="view-module" data-tab="module">Module</button>
+      <button role="tab" id="tab-wat" aria-selected="false" aria-controls="view-wat" data-tab="wat">WAT</button>
+      <button role="tab" id="tab-ir" aria-selected="false" aria-controls="view-ir" data-tab="ir">IR</button>
+      <button role="tab" id="tab-hex" aria-selected="false" aria-controls="view-hex" data-tab="hex">Bytes</button>
+    </div>
+    <div class="view" id="view-module" role="tabpanel" aria-labelledby="tab-module">
+      <div id="error" class="error" hidden></div>
+      <div class="card">
+        <h2>Run</h2>
+        <button id="run" disabled>Run main()</button>
+        <p class="muted" style="margin:8px 0 0">Imports of the module are stubbed the way <code>tests/wasm/host.cjs</code> stubs them:
+          each returns its first argument plus one.</p>
+        <div id="result" class="result" style="margin-top:10px"></div>
+      </div>
+      <div class="card">
+        <h2>Module</h2>
+        <div class="stats">
+          <div class="stat"><div class="v" id="s-size">&ndash;</div><div class="k">bytes</div></div>
+          <div class="stat"><div class="v" id="s-exports">&ndash;</div><div class="k">exports</div></div>
+          <div class="stat"><div class="v" id="s-imports">&ndash;</div><div class="k">imports</div></div>
+          <div class="stat"><div class="v" id="s-ms">&ndash;</div><div class="k">ms, compile</div></div>
+        </div>
+        <p style="margin:12px 0 0">
+          <a id="download" href="#" download="prog.wasm" hidden>Download prog.wasm</a>
+          <a id="download-wat" href="#" download="prog.wat" hidden style="margin-left:14px">Download prog.wat</a>
+        </p>
+      </div>
+      <div class="card">
+        <h2>Exports</h2>
+        <table><thead><tr><th>name</th><th>kind</th></tr></thead><tbody id="exports"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Imports</h2>
+        <table><thead><tr><th>module</th><th>name</th><th>kind</th></tr></thead><tbody id="imports"></tbody></table>
+      </div>
+    </div>
+    <div class="view" id="view-wat" role="tabpanel" aria-labelledby="tab-wat" hidden>
+      <pre id="wat" aria-label="WebAssembly text"></pre>
+      <p class="muted" style="font-size:12px">Text format from <a href="https://github.com/WebAssembly/wabt" rel="noopener">wabt</a> 1.0.37,
+        loaded from jsdelivr when this tab is opened. The editor is <a href="https://microsoft.github.io/monaco-editor/" rel="noopener">Monaco</a> 0.52.2,
+        also from jsdelivr.</p>
+    </div>
+    <div class="view" id="view-ir" role="tabpanel" aria-labelledby="tab-ir" hidden>
+      <pre id="ir" aria-label="Mid-level IR"></pre>
+    </div>
+    <div class="view" id="view-hex" role="tabpanel" aria-labelledby="tab-hex" hidden>
+      <pre id="hex" aria-label="Module bytes"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  // Outside resources, pinned. Monaco is the editor, wabt turns the module into WebAssembly text.
+  const MONACO_BASE = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs";
+  const WABT_URL = "https://cdn.jsdelivr.net/npm/wabt@1.0.37/index.js";
+  const AUTO_DELAY = 700;   // ms after the last edit before an automatic compile (live server only)
+
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    live: false,         // the local server answers the compile API; false on a static host
+    examples: [],        // [{id, title, file, expect}] from examples/index.json
+    builds: {},          // static only: id -> prebuilt example (builds/<id>.json)
+    current: null,       // the last successful compile: { bytes, module, wat? }
+    seq: 0,              // compile requests in flight; a response for an older one is dropped
+    autoTimer: null,
+  };
+  let monaco = null;     // the monaco namespace, once loaded
+  let editor = null;     // the Monaco editor, once created; else the textarea #fallback is the editor
+
+  // ---- source, markers, status ------------------------------------------------------------------------------------
+
+  function source() {
+    return editor ? editor.getValue() : $("fallback").value;
+  }
+  function setSource(text) {
+    if (editor) editor.setValue(text);
+    $("fallback").value = text;
+  }
+  function setMarkers(diagnostics) {
+    if (!monaco || !editor) return;
+    const model = editor.getModel();
+    const markers = (diagnostics || []).filter((d) => d.line >= 1 && d.line <= model.getLineCount()).map((d) => ({
+      startLineNumber: d.line,
+      endLineNumber: d.line,
+      startColumn: 1,
+      endColumn: model.getLineMaxColumn(d.line),
+      severity: d.severity === "error" ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+      message: d.message,
+    }));
+    monaco.editor.setModelMarkers(model, "nfcxx", markers);
+  }
+  function setStatus(text, cls) {
+    const s = $("status");
+    s.textContent = text;
+    s.className = "status " + (cls || "");
+  }
+  function showError(stage, message) {
+    const box = $("error");
+    box.hidden = !message;
+    box.textContent = message ? `${stage}: ${message}` : "";
+  }
+
+  // ---- the module ---------------------------------------------------------------------------------------------------
+
+  function clearRun() {
+    $("result").textContent = "";
+    $("result").className = "result";
+  }
+  function hexDump(bytes, limit) {
+    const rows = [];
+    const n = Math.min(bytes.length, limit);
+    for (let off = 0; off < n; off += 16) {
+      const chunk = bytes.subarray(off, Math.min(off + 16, n));
+      const hex = Array.from(chunk, (b) => b.toString(16).padStart(2, "0")).join(" ");
+      const text = Array.from(chunk, (b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".")).join("");
+      rows.push(off.toString(16).padStart(6, "0") + "  " + hex.padEnd(47, " ") + "  " + text);
+    }
+    if (bytes.length > limit) rows.push(`... ${bytes.length - limit} more bytes`);
+    return rows.join("\n");
+  }
+  function fillTable(id, rows) {
+    const body = $(id);
+    body.textContent = "";
+    for (const cells of rows) {
+      const tr = document.createElement("tr");
+      for (const c of cells) {
+        const td = document.createElement("td");
+        td.textContent = c;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+  }
+  function blobLink(id, bytes, type) {
+    const a = $(id);
+    if (a.href.startsWith("blob:")) URL.revokeObjectURL(a.href);
+    a.href = URL.createObjectURL(new Blob([bytes], { type }));
+    a.hidden = false;
+  }
+  function clearModule() {
+    state.current = null;
+    $("run").disabled = true;
+    clearRun();
+    for (const id of ["s-size", "s-exports", "s-imports", "s-ms"]) $(id).textContent = "–";
+    fillTable("exports", []);
+    fillTable("imports", []);
+    $("hex").textContent = "";
+    $("wat").textContent = "";
+    $("ir").textContent = "";
+    $("download").hidden = true;
+    $("download-wat").hidden = true;
+  }
+  function describe(bytes, ms) {
+    const module = new WebAssembly.Module(bytes);   // throws on a malformed module: a bug, shown as an error
+    state.current = { bytes, module };
+    const exports = WebAssembly.Module.exports(module);
+    const imports = WebAssembly.Module.imports(module);
+    $("s-size").textContent = String(bytes.length);
+    $("s-exports").textContent = String(exports.length);
+    $("s-imports").textContent = String(imports.length);
+    $("s-ms").textContent = ms.toFixed(0);
+    fillTable("exports", exports.map((e) => [e.name, e.kind]));
+    fillTable("imports", imports.map((i) => [i.module, i.name, i.kind]));
+    $("hex").textContent = hexDump(bytes, 1024);
+    blobLink("download", bytes, "application/wasm");
+    $("download-wat").hidden = true;
+    const hasMain = exports.some((e) => e.name === "main" && e.kind === "function");
+    $("run").disabled = !hasMain;
+    $("result").textContent = hasMain ? "" : "the module has no main export";
+  }
+
+  function run() {
+    if (!state.current) return;
+    clearRun();
+    const imports = {};
+    for (const imp of WebAssembly.Module.imports(state.current.module)) {
+      if (imp.kind !== "function") {
+        $("result").textContent = `import ${imp.module}.${imp.name} (${imp.kind}) is not provided by this page`;
+        return;
+      }
+      imports[imp.module] = imports[imp.module] || {};
+      imports[imp.module][imp.name] = (x) => (Number(x) | 0) + 1;
+    }
+    const out = $("result");
+    try {
+      const instance = new WebAssembly.Instance(state.current.module, imports);
+      out.textContent = String(instance.exports.main());
+    } catch (e) {
+      out.textContent = (e instanceof WebAssembly.RuntimeError ? "trap: " : "") + String((e && e.message) || e);
+      out.classList.add("trap");
+    }
+  }
+
+  // ---- WAT, through wabt, loaded when first needed -------------------------------------------------------------------
+
+  let wabtPromise = null;
+  function ensureWabt() {
+    if (!wabtPromise) {
+      wabtPromise = new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = WABT_URL;
+        s.onload = () => {
+          if (typeof window.WabtModule !== "function") return reject(new Error("wabt did not define WabtModule"));
+          window.WabtModule().then(resolve, reject);
+        };
+        s.onerror = () => {
+          wabtPromise = null;
+          reject(new Error("wabt could not be loaded from the CDN"));
+        };
+        document.head.appendChild(s);
+      });
+    }
+    return wabtPromise;
+  }
+  async function renderWat() {
+    const cur = state.current;
+    if (!cur) return;
+    if (cur.wat !== undefined) {
+      $("wat").textContent = cur.wat;
+      return;
+    }
+    $("wat").textContent = "converting with wabt…";
+    try {
+      const wabt = await ensureWabt();
+      const m = wabt.readWasm(cur.bytes, { readDebugNames: true });
+      try {
+        cur.wat = m.toText({ foldExprs: false, inlineExport: false });
+      } finally {
+        m.destroy();
+      }
+    } catch (e) {
+      if (state.current === cur) $("wat").textContent = "could not produce WAT: " + ((e && e.message) || e);
+      return;
+    }
+    if (state.current === cur) {
+      $("wat").textContent = cur.wat;
+      blobLink("download-wat", new TextEncoder().encode(cur.wat), "text/plain");
+    }
+  }
+
+  // ---- options, compile, the link -----------------------------------------------------------------------------------
+
+  function options() {
+    return { mode: $("mode").value, std: $("std").value };
+  }
+
+  // A static host has no compiler: an example's source gets its prebuilt result, any other source gets a message.
+  function staticResult(src, opts) {
+    const example = Object.values(state.builds).find((b) => b.source === src);
+    if (!example) {
+      return { ok: false, stage: "static", diagnostics: [],
+        message: "this is the static build, so only the examples compile here. Other code needs the local server." };
+    }
+    if (opts.std) {
+      return { ok: false, stage: "static", diagnostics: [],
+        message: `the examples are built ahead of time in the default standard only; ${opts.std} needs the local server.` };
+    }
+    const build = example.builds[opts.mode];
+    return Object.assign({ ok: true }, build);
+  }
+
+  async function compile() {
+    const seq = ++state.seq;
+    const src = source();
+    const opts = options();
+    setStatus(state.live ? "compiling…" : "static build", "");
+    const t0 = performance.now();
+    let data;
+    try {
+      if (state.live) {
+        const r = await fetch("api/compile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: src, options: opts }),
+        });
+        data = await r.json();
+      } else {
+        data = staticResult(src, opts);
+      }
+    } catch (e) {
+      if (seq !== state.seq) return;
+      showError("browser", "the server did not answer: " + ((e && e.message) || e));
+      setStatus("failed", "bad");
+      return;
+    }
+    if (seq !== state.seq) return;
+    const ms = performance.now() - t0;
+    setMarkers(data.diagnostics);
+    if (!data.ok) {
+      clearModule();
+      $("ir").textContent = "";
+      showError(data.stage, data.message);
+      setStatus(data.stage === "emit" ? "refused" : data.stage === "static" ? "static build" : "error", "bad");
+      if (data.stage === "front-end") showTab("module");
+      return;
+    }
+    showError("", "");
+    try {
+      const bytes = Uint8Array.from(atob(data.wasm), (c) => c.charCodeAt(0));
+      describe(bytes, ms);
+    } catch (e) {
+      clearModule();
+      showError("browser", "the module did not load: " + ((e && e.message) || e));
+      setStatus("failed", "bad");
+      return;
+    }
+    $("ir").textContent = data.ir || "";
+    setStatus(state.live ? `compiled in ${(ms / 1000).toFixed(1)} s` : "static build", "ok");
+    if (state.live) writeHash();
+    if ($("tab-wat").getAttribute("aria-selected") === "true") renderWat();
+  }
+
+  function scheduleAuto() {
+    if (!state.live || !$("auto").checked) return;
+    clearTimeout(state.autoTimer);
+    state.autoTimer = setTimeout(compile, AUTO_DELAY);
+  }
+
+  // The link: #src=<base64url of the source>&mode=...&std=...
+  function encodeSource(text) {
+    return btoa(unescape(encodeURIComponent(text))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function linkHash() {
+    const o = options();
+    return "src=" + encodeSource(source()) + "&mode=" + o.mode + (o.std ? "&std=" + o.std : "");
+  }
+  function writeHash() {
+    history.replaceState(null, "", "#" + linkHash());
+  }
+  function readHash() {
+    const p = new URLSearchParams(location.hash.replace(/^#/, ""));
+    let src = null;
+    const enc = p.get("src");
+    if (enc) {
+      try {
+        src = decodeURIComponent(escape(atob(enc.replace(/-/g, "+").replace(/_/g, "/"))));
+      } catch (e) {
+        src = null;
+      }
+    }
+    return { src, mode: p.get("mode"), std: p.get("std") };
+  }
+
+  // ---- tabs --------------------------------------------------------------------------------------------------------
+
+  function showTab(name) {
+    for (const b of document.querySelectorAll(".tabs button")) {
+      b.setAttribute("aria-selected", String(b.dataset.tab === name));
+    }
+    for (const v of ["module", "wat", "ir", "hex"]) {
+      $("view-" + v).hidden = v !== name;
+    }
+    if (name === "wat") renderWat();
+  }
+
+  // ---- the editor: Monaco when its CDN loads, else the textarea ------------------------------------------------------
+
+  function loadMonaco() {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = MONACO_BASE + "/loader.js";
+      s.onerror = () => reject(new Error("the Monaco editor could not be loaded from the CDN"));
+      s.onload = () => {
+        window.require.config({ paths: { vs: MONACO_BASE } });
+        window.require(["vs/editor/editor.main"], () => resolve(window.monaco), reject);
+      };
+      document.head.appendChild(s);
+    });
+  }
+  function createEditor(m) {
+    monaco = m;
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    editor = m.editor.create($("editor"), {
+      value: source(),
+      language: "cpp",
+      theme: dark ? "vs-dark" : "vs",
+      automaticLayout: true,
+      minimap: { enabled: false },
+      fontSize: 14,
+      tabSize: 2,
+      scrollBeyondLastLine: false,
+    });
+    editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.Enter, () => compile());
+    editor.onDidChangeModelContent(scheduleAuto);
+    $("fallback").hidden = true;
+  }
+  function showFallback() {
+    $("editor").hidden = true;
+    $("fallback").hidden = false;
+  }
+
+  // ---- startup -----------------------------------------------------------------------------------------------------
+
+  async function loadExamples() {
+    const r = await fetch("examples/index.json");
+    state.examples = await r.json();
+    const sel = $("examples");
+    sel.textContent = "";
+    state.examples.forEach((ex) => {
+      const o = document.createElement("option");
+      o.value = ex.id;
+      o.textContent = ex.title;
+      sel.appendChild(o);
+    });
+  }
+  async function loadStaticBuilds() {
+    await Promise.all(state.examples.map(async (ex) => {
+      const r = await fetch(`builds/${ex.id}.json`);
+      state.builds[ex.id] = await r.json();
+    }));
+  }
+  function fillModes() {
+    const sel = $("mode");
+    sel.textContent = "";
+    // The mode names are the pipeline's (pipeline.cjs MODES); their titles are shown here.
+    const titles = {
+      lp64: "LP64 (x86-64 data model)",
+      asan: "LP64 + AddressSanitizer shadow",
+      emscripten: "ILP32 (wasm32, Emscripten exports)",
+    };
+    for (const [value, title] of Object.entries(titles)) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = title;
+      sel.appendChild(o);
+    }
+  }
+  async function detectServer() {
+    try {
+      const r = await fetch("api/health");
+      if (!r.ok || !(r.headers.get("content-type") || "").includes("json")) return { live: false };
+      const d = await r.json();
+      return { live: !!d.live, ready: !!d.ready };
+    } catch (e) {
+      return { live: false };
+    }
+  }
+
+  async function init() {
+    const server = await detectServer();
+    state.live = !!server.live;
+    if (!state.live) {
+      $("static-note").hidden = false;
+      $("auto").checked = false;
+      $("auto").disabled = true;
+    }
+    fillModes();
+    await loadExamples();
+    if (!state.live) await loadStaticBuilds();
+
+    const h = readHash();
+    if (h.mode && [...$("mode").options].some((o) => o.value === h.mode)) $("mode").value = h.mode;
+    if (h.std && [...$("std").options].some((o) => o.value === h.std)) $("std").value = h.std;
+
+    // The source: the link's, else the first example's.
+    const first = state.examples[0];
+    let initial = h.src;
+    if (initial === null && first) {
+      initial = state.live
+        ? await (await fetch("examples/" + first.file)).text()
+        : state.builds[first.id].source;
+      $("examples").value = first.id;
+    }
+    // Until Monaco is up, the textarea holds the source; createEditor starts from it.
+    $("fallback").value = initial || "";
+    await loadMonaco().then(createEditor, () => showFallback());
+
+    if (!state.live) {
+      setStatus("static build", "");
+    } else if (!server.ready) {
+      setStatus("server up, harness not built", "bad");
+      $("compile").disabled = true;
+      return;
+    } else {
+      setStatus("server ready", "ok");
+    }
+    if (initial) compile();
+  }
+
+  // ---- events ------------------------------------------------------------------------------------------------------
+
+  $("examples").addEventListener("change", async () => {
+    const ex = state.examples.find((e) => e.id === $("examples").value);
+    if (!ex) return;
+    const text = state.live
+      ? await (await fetch("examples/" + ex.file)).text()
+      : state.builds[ex.id].source;
+    setSource(text);
+    compile();
+  });
+  $("std").addEventListener("change", compile);
+  $("mode").addEventListener("change", compile);
+  $("compile").addEventListener("click", compile);
+  $("run").addEventListener("click", run);
+  $("share").addEventListener("click", async () => {
+    const url = location.origin + location.pathname + "#" + linkHash();
+    try {
+      await navigator.clipboard.writeText(url);
+      setStatus("link copied", "ok");
+    } catch (e) {
+      writeHash();
+      setStatus("link is in the address bar", "ok");
+    }
+  });
+  for (const b of document.querySelectorAll(".tabs button")) {
+    b.addEventListener("click", () => showTab(b.dataset.tab));
+  }
+  // The textarea (no Monaco): Tab indents, Ctrl+Enter compiles, and typing auto-compiles as it does in the editor.
+  $("fallback").addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const t = e.target;
+      t.value = t.value.slice(0, t.selectionStart) + "  " + t.value.slice(t.selectionEnd);
+      t.selectionStart = t.selectionEnd = t.selectionStart + 2;
+    }
+  });
+  $("fallback").addEventListener("input", scheduleAuto);
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); compile(); }
+  });
+
+  init().catch((e) => {
+    showError("browser", "the page did not start: " + ((e && e.message) || e));
+    setStatus("failed", "bad");
+  });
+})();
+</script>
+</body>
+</html>
