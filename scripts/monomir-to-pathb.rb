@@ -996,7 +996,39 @@ def eval_binop128(op, lt, rt, l, r, signed, types, locals, params, param_reg, st
     r5 = regi; regi += 1
     stmts << "(let %#{r5} unsigned_long (wadd unsigned_long %#{r4} %#{rc2}))"
     stmts << "(store unsigned_long %#{r2} %#{r5})"
-  when "*", "/", "%", "&", "|", "^", "<<", ">>"
+  when "*"
+    $need_i128_helpers = true
+    $lit_slots ||= []
+    tslot = "i128tmp#{$lit_slots.size}"
+    $lit_slots << "(slot #{tslot.inspect} #{ty} 16 8)"
+    stmts << "(store unsigned_long $\"#{tslot}\" #{lloc})"
+    r = regi; regi += 1
+    stmts << "(let %#{r} (ptr unsigned_long) (offset $\"#{tslot}\" 8))"
+    stmts << "(store unsigned_long %#{r} #{lhic})"
+    $lit_slots ||= []
+    tslot2 = "i128tmp#{$lit_slots.size}"
+    $lit_slots << "(slot #{tslot2.inspect} #{ty} 16 8)"
+    stmts << "(store unsigned_long $\"#{tslot2}\" #{rloc})"
+    r2 = regi; regi += 1
+    stmts << "(let %#{r2} (ptr unsigned_long) (offset $\"#{tslot2}\" 8))"
+    stmts << "(store unsigned_long %#{r2} #{rhic})"
+    $lit_slots ||= []
+    tslot3 = "i128tmp#{$lit_slots.size}"
+    $lit_slots << "(slot #{tslot3.inspect} (struct \"ZRTT2CuCw\") 24 8)"
+    stmts << "(eval (call void &\"__monomir_mul_u128_o\" $\"#{tslot}\" $\"#{tslot2}\" $\"#{tslot3}\"))"
+    r3 = regi; regi += 1
+    stmts << "(let %#{r3} (ptr unsigned_long) (offset $\"#{tslot3}\" 8))"
+    r3b = regi; regi += 1
+    stmts << "(let %#{r3b} unsigned_long (load unsigned_long %#{r3}))"
+    stmts << "(store unsigned_long #{out} %#{r3b})"
+    r4 = regi; regi += 1
+    stmts << "(let %#{r4} (ptr unsigned_long) (offset $\"#{tslot3}\" 16))"
+    r5 = regi; regi += 1
+    stmts << "(let %#{r5} unsigned_long (load unsigned_long %#{r4}))"
+    r6 = regi; regi += 1
+    stmts << "(let %#{r6} (ptr unsigned_long) (offset #{out} 8))"
+    stmts << "(store unsigned_long %#{r6} %#{r5})"
+  when "/", "%", "&", "|", "^", "<<", ">>"
     stmts << "(zero-fill 16 #{out})"
   when "==", "!=", "<", "<=", ">", ">="
     cmp = case op
