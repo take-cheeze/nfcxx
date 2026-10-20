@@ -1,0 +1,2 @@
+-ParmDecl 2:56 k in CXXMethod@2:48
+-ParmDecl 7:15 q in FunctionDecl@7:5

@@ -1,0 +1,560 @@
+/*
+clang_edg.c -- a subset of libclang's C API, backed by the EDG front end.
+
+clang_parseTranslationUnit runs scripts/libclang-cursors (the cpfe built by scripts/setup-libclang-edg.sh with
+be/nfcxx_decl.c as its back end). That lists the declarations of the main file, one per line, as
+
+  KIND <TAB> ID <TAB> PARENT <TAB> LINE <TAB> COLUMN <TAB> NAME
+
+and this file turns the list into a tree of cursors. Declarations only: no expressions, no types and no
+references yet (see docs/notes/libclang-edg.md for what is implemented and what is not).
+
+The front end runs as a separate process, so EDG's global state stays out of the client's process and a front-end
+crash shows up as a failed parse, not as a dead client.
+
+Runner: $LIBCLANG_EDG_RUNNER if set, else the path given at build time (LIBCLANG_EDG_RUNNER_DEFAULT).
+*/
+
+#define _POSIX_C_SOURCE 200809L   /* getline, popen */
+
+#include "clang-c/Index.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef LIBCLANG_EDG_RUNNER_DEFAULT
+#define LIBCLANG_EDG_RUNNER_DEFAULT "scripts/libclang-cursors"
+#endif
+
+struct nfc_node {
+  enum CXCursorKind kind;
+  unsigned line, col;
+  char *name;
+  int parent;        /* index of the parent node, -1 at file scope */
+};
+
+struct CXTranslationUnitImpl {
+  char *file;        /* the main file, as given to clang_parseTranslationUnit */
+  struct nfc_node *nodes;
+  int count;
+  int **kids;        /* per node, then the file scope at index count: the child indices, in source order */
+  int *nkids;
+};
+
+/* A cursor's data: data[0] the translation unit, data[1] the node index + 1 (0 for the translation unit). */
+#define NFC_TU_KIND CXCursor_TranslationUnit
+
+static CXCursor nfc_cursor(CXTranslationUnit tu, int node)
+{
+  CXCursor c;
+  c.kind = node < 0 ? NFC_TU_KIND : tu->nodes[node].kind;
+  c.xdata = 0;
+  c.data[0] = tu;
+  c.data[1] = (const void *)(intptr_t)(node + 1);
+  c.data[2] = NULL;
+  return c;
+}
+
+static int nfc_node_of(CXCursor c)
+{
+  return (int)(intptr_t)c.data[1] - 1;
+}
+
+static CXString nfc_string(const char *s)
+{
+  CXString r;
+  r.data = s == NULL ? NULL : strdup(s);
+  r.private_flags = 1;   /* owned: clang_disposeString frees it */
+  return r;
+}
+
+static const char *nfc_kind_name(enum CXCursorKind kind)
+{
+  switch (kind) {
+    case CXCursor_Namespace: return "Namespace";
+    case CXCursor_FunctionTemplate: return "FunctionTemplate";
+    case CXCursor_ClassTemplate: return "ClassTemplate";
+    case CXCursor_StructDecl: return "StructDecl";
+    case CXCursor_ClassDecl: return "ClassDecl";
+    case CXCursor_UnionDecl: return "UnionDecl";
+    case CXCursor_EnumDecl: return "EnumDecl";
+    case CXCursor_EnumConstantDecl: return "EnumConstantDecl";
+    case CXCursor_TypedefDecl: return "TypedefDecl";
+    case CXCursor_FunctionDecl: return "FunctionDecl";
+    case CXCursor_CXXMethod: return "CXXMethod";
+    case CXCursor_Constructor: return "CXXConstructor";
+    case CXCursor_Destructor: return "CXXDestructor";
+    case CXCursor_VarDecl: return "VarDecl";
+    case CXCursor_FieldDecl: return "FieldDecl";
+    case CXCursor_ParmDecl: return "ParmDecl";
+    case CXCursor_TranslationUnit: return "TranslationUnit";
+    default: return "UnexposedDecl";
+  }
+}
+
+/* The runner's kind word (be/nfcxx_decl.c) to a libclang cursor kind; 0 when unknown. */
+static enum CXCursorKind nfc_kind_of_word(const char *w)
+{
+  static const struct { const char *word; enum CXCursorKind kind; } table[] = {
+    {"namespace", CXCursor_Namespace}, {"struct", CXCursor_StructDecl}, {"class", CXCursor_ClassDecl},
+    {"union", CXCursor_UnionDecl}, {"enum", CXCursor_EnumDecl}, {"enumerator", CXCursor_EnumConstantDecl},
+    {"typedef", CXCursor_TypedefDecl}, {"function", CXCursor_FunctionDecl}, {"method", CXCursor_CXXMethod},
+    {"constructor", CXCursor_Constructor}, {"destructor", CXCursor_Destructor}, {"var", CXCursor_VarDecl},
+    {"field", CXCursor_FieldDecl}, {"param", CXCursor_ParmDecl},
+    {"function_template", CXCursor_FunctionTemplate}, {"class_template", CXCursor_ClassTemplate},
+  };
+  size_t i;
+  for (i = 0; i < sizeof table / sizeof table[0]; i++) {
+    if (strcmp(table[i].word, w) == 0) return table[i].kind;
+  }
+  return 0;
+}
+
+/* Sort key for the children of a node: source position. */
+static struct nfc_node *nfc_sort_nodes;
+static int nfc_by_position(const void *a, const void *b)
+{
+  const struct nfc_node *x = &nfc_sort_nodes[*(const int *)a];
+  const struct nfc_node *y = &nfc_sort_nodes[*(const int *)b];
+  if (x->line != y->line) return x->line < y->line ? -1 : 1;
+  if (x->col != y->col) return x->col < y->col ? -1 : 1;
+  return *(const int *)a < *(const int *)b ? -1 : 1;
+}
+
+/* Build the child lists from the parent links. Children are kept in source order. */
+static void nfc_link(CXTranslationUnit tu)
+{
+  int i, n = tu->count;
+  int *order = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+  int *fill;
+  int slot;
+
+  tu->kids = calloc((size_t)n + 1, sizeof(int *));
+  tu->nkids = calloc((size_t)n + 1, sizeof(int));
+  for (i = 0; i < n; i++) order[i] = i;
+  nfc_sort_nodes = tu->nodes;
+  qsort(order, (size_t)n, sizeof(int), nfc_by_position);
+  for (i = 0; i < n; i++) {
+    slot = tu->nodes[order[i]].parent < 0 ? n : tu->nodes[order[i]].parent;
+    tu->nkids[slot]++;
+  }
+  for (slot = 0; slot <= n; slot++) {
+    tu->kids[slot] = tu->nkids[slot] > 0 ? malloc(sizeof(int) * (size_t)tu->nkids[slot]) : NULL;
+  }
+  fill = calloc((size_t)n + 1, sizeof(int));
+  for (i = 0; i < n; i++) {
+    slot = tu->nodes[order[i]].parent < 0 ? n : tu->nodes[order[i]].parent;
+    tu->kids[slot][fill[slot]++] = order[i];
+  }
+  free(fill);
+  free(order);
+}
+
+static int nfc_shell_quote(char *dst, size_t size, const char *s)
+{
+  size_t used = 0;
+  if (used + 2 >= size) return 0;
+  dst[used++] = '\'';
+  for (; *s != '\0'; s++) {
+    if (*s == '\'') {
+      if (used + 5 >= size) return 0;
+      memcpy(dst + used, "'\\''", 4);
+      used += 4;
+    } else {
+      if (used + 2 >= size) return 0;
+      dst[used++] = *s;
+    }
+  }
+  if (used + 2 >= size) return 0;
+  dst[used++] = '\'';
+  dst[used] = '\0';
+  return 1;
+}
+
+/* Run the runner on the file with the options it understands, and read its records. NULL when it fails. */
+static CXTranslationUnit nfc_run(const char *file, const char *const *args, int nargs)
+{
+  const char *runner = getenv("LIBCLANG_EDG_RUNNER");
+  char cmd[65536], quoted[8192];
+  size_t used;
+  FILE *p;
+  char *line = NULL;
+  size_t cap = 0;
+  ssize_t len;
+  CXTranslationUnit tu;
+  int i, status;
+
+  if (runner == NULL || runner[0] == '\0') runner = LIBCLANG_EDG_RUNNER_DEFAULT;
+  if (!nfc_shell_quote(quoted, sizeof quoted, runner)) return NULL;
+  used = (size_t)snprintf(cmd, sizeof cmd, "%s", quoted);
+  for (i = 0; i < nargs; i++) {
+    /* Only the options the front end takes; anything else is left to the caller's compiler. */
+    if (strncmp(args[i], "-std=", 5) != 0 && strncmp(args[i], "-I", 2) != 0 &&
+        strncmp(args[i], "-D", 2) != 0 && strncmp(args[i], "-U", 2) != 0) continue;
+    if (!nfc_shell_quote(quoted, sizeof quoted, args[i])) return NULL;
+    used += (size_t)snprintf(cmd + used, sizeof cmd - used, " %s", quoted);
+  }
+  if (!nfc_shell_quote(quoted, sizeof quoted, file)) return NULL;
+  snprintf(cmd + used, sizeof cmd - used, " %s", quoted);
+
+  p = popen(cmd, "r");
+  if (p == NULL) return NULL;
+  tu = calloc(1, sizeof *tu);
+  tu->file = strdup(file);
+  tu->count = 0;
+  tu->nodes = NULL;
+  while ((len = getline(&line, &cap, p)) != -1) {
+    char *f[6], *s = line, *tab;
+    int fi;
+    int id, parent;
+    if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
+    for (fi = 0; fi < 5; fi++) {
+      tab = strchr(s, '\t');
+      if (tab == NULL) break;
+      *tab = '\0';
+      f[fi] = s;
+      s = tab + 1;
+    }
+    if (fi < 5) continue;
+    f[5] = s;
+    id = atoi(f[1]);
+    parent = atoi(f[2]);
+    if (id < 1) continue;
+    if (id > tu->count) {
+      tu->nodes = realloc(tu->nodes, sizeof *tu->nodes * (size_t)id);
+      memset(tu->nodes + tu->count, 0, sizeof *tu->nodes * (size_t)(id - tu->count));
+      tu->count = id;
+    }
+    tu->nodes[id - 1].kind = nfc_kind_of_word(f[0]);
+    tu->nodes[id - 1].parent = parent > 0 ? parent - 1 : -1;
+    tu->nodes[id - 1].line = (unsigned)atoi(f[3]);
+    tu->nodes[id - 1].col = (unsigned)atoi(f[4]);
+    tu->nodes[id - 1].name = strdup(f[5]);
+  }
+  free(line);
+  status = pclose(p);
+  if (status != 0) {
+    free(tu->file);
+    free(tu->nodes);
+    free(tu);
+    return NULL;
+  }
+  nfc_link(tu);
+  return tu;
+}
+
+CXIndex clang_createIndex(int excludeDeclarationsFromPCH, int displayDiagnostics)
+{
+  (void)excludeDeclarationsFromPCH;
+  (void)displayDiagnostics;
+  return calloc(1, 1);
+}
+
+void clang_disposeIndex(CXIndex index)
+{
+  free(index);
+}
+
+CXTranslationUnit clang_parseTranslationUnit(CXIndex CIdx, const char *source_filename,
+                                             const char *const *command_line_args, int num_command_line_args,
+                                             struct CXUnsavedFile *unsaved_files, unsigned num_unsaved_files,
+                                             unsigned options)
+{
+  (void)CIdx;
+  (void)unsaved_files;
+  (void)num_unsaved_files;
+  (void)options;
+  if (source_filename == NULL) return NULL;
+  return nfc_run(source_filename, command_line_args, num_command_line_args);
+}
+
+void clang_disposeTranslationUnit(CXTranslationUnit tu)
+{
+  int i;
+  if (tu == NULL) return;
+  for (i = 0; i < tu->count; i++) {
+    free(tu->nodes[i].name);
+    free(tu->kids[i]);
+  }
+  free(tu->kids[tu->count]);
+  free(tu->kids);
+  free(tu->nkids);
+  free(tu->nodes);
+  free(tu->file);
+  free(tu);
+}
+
+CXCursor clang_getTranslationUnitCursor(CXTranslationUnit tu)
+{
+  return nfc_cursor(tu, -1);
+}
+
+/* Visit the children of parent; returns 1 when a visitor stopped the walk. */
+static int nfc_visit(CXTranslationUnit tu, CXCursor parent, CXCursorVisitor visitor, CXClientData data)
+{
+  int self = nfc_node_of(parent);
+  int slot = self < 0 ? tu->count : self;
+  int i;
+  for (i = 0; i < tu->nkids[slot]; i++) {
+    int child = tu->kids[slot][i];
+    enum CXChildVisitResult r = visitor(nfc_cursor(tu, child), parent, data);
+    if (r == CXChildVisit_Break) return 1;
+    if (r == CXChildVisit_Recurse && nfc_visit(tu, nfc_cursor(tu, child), visitor, data)) return 1;
+  }
+  return 0;
+}
+
+unsigned clang_visitChildren(CXCursor parent, CXCursorVisitor visitor, CXClientData client_data)
+{
+  if (parent.data[0] == NULL || visitor == NULL) return 0;
+  return (unsigned)nfc_visit((CXTranslationUnit)parent.data[0], parent, visitor, client_data);
+}
+
+enum CXCursorKind clang_getCursorKind(CXCursor cursor)
+{
+  return cursor.kind;
+}
+
+CXString clang_getCursorKindSpelling(enum CXCursorKind kind)
+{
+  return nfc_string(nfc_kind_name(kind));
+}
+
+CXString clang_getCursorSpelling(CXCursor cursor)
+{
+  CXTranslationUnit tu = (CXTranslationUnit)cursor.data[0];
+  int node = nfc_node_of(cursor);
+  if (tu == NULL) return nfc_string(NULL);
+  if (node < 0) return nfc_string(tu->file);
+  return nfc_string(tu->nodes[node].name);
+}
+
+CXSourceLocation clang_getCursorLocation(CXCursor cursor)
+{
+  CXSourceLocation loc;
+  CXTranslationUnit tu = (CXTranslationUnit)cursor.data[0];
+  int node = nfc_node_of(cursor);
+  loc.ptr_data[0] = tu;
+  loc.ptr_data[1] = node < 0 ? NULL : (const void *)(intptr_t)(node + 1);
+  loc.int_data = 0;
+  return loc;
+}
+
+CXCursor clang_getCursorSemanticParent(CXCursor cursor)
+{
+  CXTranslationUnit tu = (CXTranslationUnit)cursor.data[0];
+  int node = nfc_node_of(cursor);
+  if (tu == NULL || node < 0) return clang_getNullCursor();
+  return nfc_cursor(tu, tu->nodes[node].parent);
+}
+
+CXCursor clang_getCursorLexicalParent(CXCursor cursor)
+{
+  return clang_getCursorSemanticParent(cursor);
+}
+
+CXCursor clang_getNullCursor(void)
+{
+  CXCursor c;
+  c.kind = 0;
+  c.xdata = 0;
+  c.data[0] = NULL;
+  c.data[1] = NULL;
+  c.data[2] = NULL;
+  return c;
+}
+
+unsigned clang_Cursor_isNull(CXCursor cursor)
+{
+  return cursor.data[0] == NULL;
+}
+
+unsigned clang_equalCursors(CXCursor a, CXCursor b)
+{
+  return a.kind == b.kind && a.data[0] == b.data[0] && a.data[1] == b.data[1];
+}
+
+void clang_getSpellingLocation(CXSourceLocation location, CXFile *file, unsigned *line, unsigned *column,
+                               unsigned *offset)
+{
+  CXTranslationUnit tu = (CXTranslationUnit)location.ptr_data[0];
+  int node = location.ptr_data[1] == NULL ? -1 : (int)(intptr_t)location.ptr_data[1] - 1;
+  if (file != NULL) *file = node < 0 || tu == NULL ? NULL : tu;
+  if (line != NULL) *line = node < 0 || tu == NULL ? 0 : tu->nodes[node].line;
+  if (column != NULL) *column = node < 0 || tu == NULL ? 0 : tu->nodes[node].col;
+  if (offset != NULL) *offset = 0;   /* byte offsets are not known */
+}
+
+unsigned clang_Location_isFromMainFile(CXSourceLocation location)
+{
+  return location.ptr_data[1] != NULL;   /* every listed declaration is in the main file */
+}
+
+CXString clang_getFileName(CXFile SFile)
+{
+  CXTranslationUnit tu = (CXTranslationUnit)SFile;
+  return nfc_string(tu == NULL ? NULL : tu->file);
+}
+
+const char *clang_getCString(CXString string)
+{
+  return string.data;
+}
+
+void clang_disposeString(CXString string)
+{
+  if (string.private_flags & 1) free((void *)string.data);
+}
+
+CXString clang_getClangVersion(void)
+{
+  return nfc_string("libclang-edg (EDG front end)");
+}
+
+/* ---- locations, ranges and the cursor predicates clang.cindex uses ---- */
+
+CXSourceLocation clang_getNullLocation(void)
+{
+  CXSourceLocation loc;
+  loc.ptr_data[0] = NULL;
+  loc.ptr_data[1] = NULL;
+  loc.int_data = 0;
+  return loc;
+}
+
+unsigned clang_equalLocations(CXSourceLocation a, CXSourceLocation b)
+{
+  return a.ptr_data[0] == b.ptr_data[0] && a.ptr_data[1] == b.ptr_data[1] && a.int_data == b.int_data;
+}
+
+void clang_getInstantiationLocation(CXSourceLocation location, CXFile *file, unsigned *line, unsigned *column,
+                                    unsigned *offset)
+{
+  clang_getSpellingLocation(location, file, line, column, offset);
+}
+
+void clang_getExpansionLocation(CXSourceLocation location, CXFile *file, unsigned *line, unsigned *column,
+                                unsigned *offset)
+{
+  clang_getSpellingLocation(location, file, line, column, offset);
+}
+
+void clang_getFileLocation(CXSourceLocation location, CXFile *file, unsigned *line, unsigned *column,
+                           unsigned *offset)
+{
+  clang_getSpellingLocation(location, file, line, column, offset);
+}
+
+void clang_getPresumedLocation(CXSourceLocation location, CXString *filename, unsigned *line, unsigned *column)
+{
+  CXFile file = NULL;
+  clang_getSpellingLocation(location, &file, line, column, NULL);
+  if (filename != NULL) *filename = clang_getFileName(file);
+}
+
+unsigned clang_Location_isInSystemHeader(CXSourceLocation location)
+{
+  (void)location;   /* the listed declarations are all in the main file */
+  return 0;
+}
+
+/* A range is its begin and end locations; the end of a cursor's extent is not known, so it is the begin. */
+CXSourceRange clang_getNullRange(void)
+{
+  CXSourceRange r;
+  memset(&r, 0, sizeof r);
+  return r;
+}
+
+CXSourceRange clang_getCursorExtent(CXCursor cursor)
+{
+  CXSourceLocation loc = clang_getCursorLocation(cursor);
+  CXSourceRange r;
+  r.ptr_data[0] = loc.ptr_data[0];
+  r.ptr_data[1] = loc.ptr_data[1];
+  r.begin_int_data = loc.int_data;
+  r.end_int_data = loc.int_data;
+  return r;
+}
+
+CXSourceLocation clang_getRangeStart(CXSourceRange range)
+{
+  CXSourceLocation loc;
+  loc.ptr_data[0] = range.ptr_data[0];
+  loc.ptr_data[1] = range.ptr_data[1];
+  loc.int_data = range.begin_int_data;
+  return loc;
+}
+
+CXSourceLocation clang_getRangeEnd(CXSourceRange range)
+{
+  CXSourceLocation loc;
+  loc.ptr_data[0] = range.ptr_data[0];
+  loc.ptr_data[1] = range.ptr_data[1];
+  loc.int_data = range.end_int_data;
+  return loc;
+}
+
+unsigned clang_equalRanges(CXSourceRange a, CXSourceRange b)
+{
+  return a.ptr_data[0] == b.ptr_data[0] && a.ptr_data[1] == b.ptr_data[1] &&
+         a.begin_int_data == b.begin_int_data && a.end_int_data == b.end_int_data;
+}
+
+CXTranslationUnit clang_Cursor_getTranslationUnit(CXCursor cursor)
+{
+  return (CXTranslationUnit)cursor.data[0];
+}
+
+/* The kinds are libclang's ranges: declarations 1..39, references 40.., expressions 100.., statements 200..,
+   attributes 400.., preprocessing 500..503, invalid 70..73, the translation unit 350. */
+unsigned clang_isDeclaration(enum CXCursorKind kind)
+{
+  return kind >= 1 && kind <= 39;
+}
+
+unsigned clang_isReference(enum CXCursorKind kind)
+{
+  (void)kind;
+  return 0;
+}
+
+unsigned clang_isExpression(enum CXCursorKind kind)
+{
+  (void)kind;
+  return 0;
+}
+
+unsigned clang_isStatement(enum CXCursorKind kind)
+{
+  (void)kind;
+  return 0;
+}
+
+unsigned clang_isAttribute(enum CXCursorKind kind)
+{
+  (void)kind;
+  return 0;
+}
+
+unsigned clang_isInvalid(enum CXCursorKind kind)
+{
+  return kind >= 70 && kind <= 73;
+}
+
+unsigned clang_isPreprocessing(enum CXCursorKind kind)
+{
+  return kind >= 500 && kind <= 503;
+}
+
+unsigned clang_isUnexposed(enum CXCursorKind kind)
+{
+  return kind == CXCursor_UnexposedDecl;
+}
+
+unsigned clang_isTranslationUnit(enum CXCursorKind kind)
+{
+  return kind == CXCursor_TranslationUnit;
+}
