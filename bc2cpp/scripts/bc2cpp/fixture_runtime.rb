@@ -18,6 +18,7 @@ require 'open3'
 require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/compiled_gems'
+require_relative '../../tools/bc2cpp/shared_generation'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/wio_world_env'
 require_relative 'cxx'
@@ -96,9 +97,23 @@ module Bc2cppFixtureRuntime
     host
   end
 
+  GeneratedFixture = Struct.new(:code, :diagnostics, :bytecode) do
+    def write(dir)
+      File.binwrite(File.join(dir, 'fixture_gen.cpp'), code)
+      File.binwrite(File.join(dir, 'fixture.mrb'), bytecode)
+      diagnostics
+    end
+  end
+
+  # Owner selection is an emission-only unit key (ADR 0464); every other input is shared explicitly.
+  # Results live only in this call's caller, with no cross-world or cross-process cache.
+  def generate_owner_variants(source, dir, owners)
+    generate(source, dir, owner_variants: owners)
+  end
+
   # Runs bc2cpp.rb over `source` in the wio closed world with the real core
   # sources (bc2cpp is closed-world only, ADR 0466); `only_owners` limits what
-  # is compiled. Returns [code, stderr, dir-relative bytecode path].
+  # is compiled. Returns [code, stderr].
   # `path` places the fixture below `dir`: a path under 3rd/mruby/mrblib/ makes bc2cpp treat
   # it as mruby's own Ruby (CoreDefs.core_source?), so a check can exercise the core-only proofs.
   # `extra` is more sources ([path, text] pairs) compiled after the fixture, e.g. engine Ruby
@@ -110,7 +125,7 @@ module Bc2cppFixtureRuntime
   # refuses keeps its `#error` in the output instead of being dropped whole --
   # what a check that asserts on a refusal needs.
   def generate(source, dir, only_owners: nil, hot_methods: nil, path: 'fixture.rb', extra: [],
-               native: [], foreign: [], build_gems: [], drop_gems: [], core: false, skip_unsupported: true)
+               native: [], foreign: [], build_gems: [], drop_gems: [], core: false, skip_unsupported: true, owner_variants: nil)
     src = File.join(dir, path)
     FileUtils.mkdir_p(File.dirname(src))
     File.write(src, source)
@@ -134,6 +149,24 @@ module Bc2cppFixtureRuntime
     ), ROOT)
       env['BC2CPP_COLLECTION_EXPORTS'] = '1' if Bc2cppFixtureRuntime.collection_exports_linked
     core_srcs = core ? core_compiled_mrblib_srcs(ROOT) : []
+    if owner_variants
+      raise ArgumentError, 'owner variants require their own owner selection' if only_owners
+
+      unit_envs = owner_variants.each_with_index.map do |owners, index|
+        unit_dir = File.join(dir, "unit-#{index}")
+        FileUtils.mkdir_p(unit_dir)
+        { 'OUT_DIR' => unit_dir, 'OUT_SYMBOL' => 'fixture', 'ONLY_OWNERS' => owners&.join(',') }
+      end
+      results = SharedGeneration.run(tool: BC2CPP, srcs: [*core_srcs, src, *extra_srcs],
+                                     common_env: env.reject { |key, _| SharedGeneration::UNIT_KEYS.include?(key) },
+                                     unit_envs: unit_envs, extra_args: ['--annotated'])
+      return results.zip(unit_envs).map do |(code, err, status), unit|
+        raise "bc2cpp.rb failed:\n#{(err[-3000..] || err)}" unless status.success?
+
+        GeneratedFixture.new(code, err, File.binread(File.join(unit.fetch('OUT_DIR'), 'fixture.mrb')))
+      end
+    end
+
     code, err, status = generator_run(env, [*core_srcs, src, *extra_srcs])
     raise "bc2cpp.rb failed:\n#{(err[-3000..] || err)}" unless status.success?
 

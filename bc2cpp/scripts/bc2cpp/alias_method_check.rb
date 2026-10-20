@@ -159,9 +159,20 @@ REFUSED_WORLD = <<~RUBY
   end
 RUBY
 
+full = runtime.full || (runtime.core ? nil : runtime.full_or_build)
+build = full || runtime.core
+runtime_fixtures = {}
+reuse_runtime = full && runtime.compiler?
+
 puts '-- generated code'
 Dir.mktmpdir do |dir|
-  code, err = runtime.generate(WORLD, dir)
+  code, err = if reuse_runtime
+                shape, fixture = runtime.generate_owner_variants(WORLD, dir, [nil, %w[AlFx]])
+                runtime_fixtures[[WORLD, %w[AlFx]]] = fixture
+                [shape.code, shape.diagnostics]
+              else
+                runtime.generate(WORLD, dir)
+              end
   check.call('the world registers five aliases', err[SITES_LINE, 1] == '5' && err[SITES_LINE, 2] == '0')
   run = body_of.call(code, 'AlFx_run')
   check.call('run calls greet and both aliases of it directly',
@@ -172,7 +183,13 @@ Dir.mktmpdir do |dir|
   check.call('no call is kept dynamic for an installed name', !code.include?('kept: dynamic_install'))
 end
 Dir.mktmpdir do |dir|
-  code, err = runtime.generate(REFUSED_WORLD, dir)
+  code, err = if reuse_runtime
+                shape, fixture = runtime.generate_owner_variants(REFUSED_WORLD, dir, [nil, %w[AlKept]])
+                runtime_fixtures[[REFUSED_WORLD, %w[AlKept]]] = fixture
+                [shape.code, shape.diagnostics]
+              else
+                runtime.generate(REFUSED_WORLD, dir)
+              end
   run = body_of.call(code, 'AlKept_run')
   check.call('a method-body alias registers nothing', err[SITES_LINE, 1].to_i.zero?)
   check.call('a method-body alias keeps its call a dynamic send, never a proven miss',
@@ -221,8 +238,6 @@ REFUSED_SCENARIO = <<~CPP
   }
 CPP
 
-full = runtime.full || (runtime.core ? nil : runtime.full_or_build)
-build = full || runtime.core
 if build.nil? || !runtime.compiler?
   puts '  SKIP run: needs g++ and a mruby build (BC2CPP_MRUBY_FULL, BC2CPP_MRUBY_CORE or build*/mruby/host/mrbc)'
 else
@@ -230,12 +245,12 @@ else
   values = ->(sections, name) { sections.fetch(name, []).reject { |l| l.start_with?('  ') } }
   [[WORLD, %w[AlFx], SCENARIO, 10], [REFUSED_WORLD, %w[AlKept], REFUSED_SCENARIO, 3]].each do |world, owners, scenario, calls|
     Dir.mktmpdir do |dir|
-      _code, err = if full
-                     runtime.generate(world, dir, only_owners: owners)
-                   else
-                     runtime.generate(POLYFILL, dir, only_owners: owners, path: '3rd/mruby/mrblib/al_polyfill.rb',
-                                                     extra: [['fixture.rb', world]])
-                   end
+      err = if full
+              runtime_fixtures.fetch([world, owners]).write(dir)
+            else
+              runtime.generate(POLYFILL, dir, only_owners: owners, path: '3rd/mruby/mrblib/al_polyfill.rb',
+                               extra: [['fixture.rb', world]]).last
+            end
       built, output = runtime.run(dir, err, owners, scenario, build: build, full: !full.nil?, exact_arity: true)
       check.call("#{owners.first} compiles and runs against real mruby", built)
       puts output unless built

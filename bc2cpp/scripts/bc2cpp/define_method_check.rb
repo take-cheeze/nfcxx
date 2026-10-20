@@ -143,9 +143,20 @@ REFUSED_WORLD = <<~RUBY
   end
 RUBY
 
+full = runtime.full || (runtime.core ? nil : runtime.full_or_build)
+build = full || runtime.core
+runtime_fixtures = {}
+reuse_runtime = full && runtime.compiler?
+
 puts '-- generated code'
 Dir.mktmpdir do |dir|
-  code, err = runtime.generate(WORLD, dir)
+  code, err = if reuse_runtime
+                shape, fixture = runtime.generate_owner_variants(WORLD, dir, [nil, %w[DmLoop]])
+                runtime_fixtures[[WORLD, %w[DmLoop]]] = fixture
+                [shape.code, shape.diagnostics]
+              else
+                runtime.generate(WORLD, dir)
+              end
   check.call('the world registers six definitions', err[SITES_LINE, 1] == '6' && err[SITES_LINE, 2] == '0')
   run = body_of.call(code, 'DmLoop_run')
   check.call('run calls the expanded and literal methods directly',
@@ -156,7 +167,13 @@ Dir.mktmpdir do |dir|
              syms.all? { |b| b.include?('mrb_symbol_value(') && !b.include?('upvar') } && syms.uniq.size == 2)
 end
 Dir.mktmpdir do |dir|
-  code, err = runtime.generate(REFUSED_WORLD, dir)
+  code, err = if reuse_runtime
+                shape, fixture = runtime.generate_owner_variants(REFUSED_WORLD, dir, [nil, %w[DmKept]])
+                runtime_fixtures[[REFUSED_WORLD, %w[DmKept]]] = fixture
+                [shape.code, shape.diagnostics]
+              else
+                runtime.generate(REFUSED_WORLD, dir)
+              end
   run = body_of.call(code, 'DmKept_run')
   check.call('a refused loop registers nothing', err[SITES_LINE, 1].to_i.zero?)
   check.call('a refused loop keeps its call a dynamic send', !run.empty? && !run.include?('DmKept_dk_a_impl(') && run.include?('bc2cpp_send('))
@@ -206,8 +223,6 @@ REFUSED_SCENARIO = <<~CPP
   }
 CPP
 
-full = runtime.full || (runtime.core ? nil : runtime.full_or_build)
-build = full || runtime.core
 if build.nil? || !runtime.compiler?
   puts '  SKIP run: needs g++ and a mruby build (BC2CPP_MRUBY_FULL, BC2CPP_MRUBY_CORE or build*/mruby/host/mrbc)'
 else
@@ -215,12 +230,12 @@ else
   values = ->(sections, name) { sections.fetch(name, []).reject { |l| l.start_with?('  ') } }
   [[WORLD, %w[DmLoop], SCENARIO, 10], [REFUSED_WORLD, %w[DmKept], REFUSED_SCENARIO, 3]].each do |world, owners, scenario, calls|
     Dir.mktmpdir do |dir|
-      _code, err = if full
-                     runtime.generate(world, dir, only_owners: owners)
-                   else
-                     runtime.generate(POLYFILL, dir, only_owners: owners, path: '3rd/mruby/mrblib/dm_polyfill.rb',
-                                                     extra: [['fixture.rb', world]])
-                   end
+      err = if full
+              runtime_fixtures.fetch([world, owners]).write(dir)
+            else
+              runtime.generate(POLYFILL, dir, only_owners: owners, path: '3rd/mruby/mrblib/dm_polyfill.rb',
+                               extra: [['fixture.rb', world]]).last
+            end
       built, output = runtime.run(dir, err, owners, scenario, build: build, full: !full.nil?, exact_arity: true)
       check.call("#{owners.first} compiles and runs against real mruby", built)
       puts output unless built
