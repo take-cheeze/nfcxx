@@ -111,8 +111,11 @@ end
 KERNEL_LOOP = 'Kernel_loop_impl(M, self, '
 DYNAMIC = 'mrb_funcall_with_block('
 
+# Keep the baseline bytecode and C++ for runtime; BC2CPP_CXXFLAGS only affects its C++ compilation.
+baseline_dir = Dir.mktmpdir('bc2cpp-iterator')
+at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
-code, = generate_world
+code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: %w[BiFx])
 %w[lp lp_value lp_return lp_next lp_stop lp_drain lp_raise].each do |name|
   check.call("#{name}: loop { } calls the compiled Kernel#loop", code_of(code, name).include?(KERNEL_LOOP))
 end
@@ -246,36 +249,33 @@ else
     saved_flags = ENV.fetch('BC2CPP_CXXFLAGS', nil)
     ENV['BC2CPP_CXXFLAGS'] = '-DMRB_USE_BIGINT'
     begin
-      Dir.mktmpdir do |dir|
-        _code, err = Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: %w[BiFx])
-        body = <<~CPP
-          static int scenario(mrb_state* M) {
-            std::fflush(stdout);
-            const char* src = R"BID(#{DRIVER})BID";
-            mrb_load_string(M, src);
-            std::fflush(stdout);
-            if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
-            return 0;
-          }
-        CPP
-        built, output = Bc2cppFixtureRuntime.run(dir, err, %w[BiFx], body, build: build, full: true)
-        check.call('the fixtures build and run', built)
-        sections = Bc2cppFixtureRuntime.sections(output)
-        interpreted = sections['interpreted']
-        compiled = sections['compiled']
-        check.call("the driver prints #{interpreted&.size} lines in both runs",
-                   interpreted && interpreted.last == 'end' && compiled&.last == 'end')
-        check.call('interpreted and compiled runs print the same', interpreted == compiled)
-        if interpreted && compiled
-          interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
-          check.call('break returns its value from loop', interpreted.include?('lp_value/3: 6'))
-          check.call('return leaves the method from a loop block', interpreted.include?('lp_return/3: [:ret, 3]'))
-          check.call('StopIteration ends loop with its result', interpreted.include?('lp_stop/3: [nil, 3]'))
-          check.call('each re-reads the length of an array grown during the iteration',
-                     interpreted.include?('grow/0: [[1, 2, 11, 12, 21, 22], [1, 2, 11, 12, 21, 22]]'))
-        end
-        puts output.lines.last(30).join unless built && interpreted && compiled
+      body = <<~CPP
+        static int scenario(mrb_state* M) {
+          std::fflush(stdout);
+          const char* src = R"BID(#{DRIVER})BID";
+          mrb_load_string(M, src);
+          std::fflush(stdout);
+          if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+          return 0;
+        }
+      CPP
+      built, output = Bc2cppFixtureRuntime.run(baseline_dir, baseline_err, %w[BiFx], body, build: build, full: true)
+      check.call('the fixtures build and run', built)
+      sections = Bc2cppFixtureRuntime.sections(output)
+      interpreted = sections['interpreted']
+      compiled = sections['compiled']
+      check.call("the driver prints #{interpreted&.size} lines in both runs",
+                 interpreted && interpreted.last == 'end' && compiled&.last == 'end')
+      check.call('interpreted and compiled runs print the same', interpreted == compiled)
+      if interpreted && compiled
+        interpreted.zip(compiled).reject { |a, b| a == b }.first(10).each { |a, b| puts "    interpreted: #{a}\n    compiled:    #{b}" }
+        check.call('break returns its value from loop', interpreted.include?('lp_value/3: 6'))
+        check.call('return leaves the method from a loop block', interpreted.include?('lp_return/3: [:ret, 3]'))
+        check.call('StopIteration ends loop with its result', interpreted.include?('lp_stop/3: [nil, 3]'))
+        check.call('each re-reads the length of an array grown during the iteration',
+                   interpreted.include?('grow/0: [[1, 2, 11, 12, 21, 22], [1, 2, 11, 12, 21, 22]]'))
       end
+      puts output.lines.last(30).join unless built && interpreted && compiled
     ensure
       saved_flags.nil? ? ENV.delete('BC2CPP_CXXFLAGS') : ENV['BC2CPP_CXXFLAGS'] = saved_flags
     end
