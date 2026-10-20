@@ -554,6 +554,18 @@ class CodeGen
   # ELEMENT (generic step 2): the class mask of the elements a `map`/`collect` call with a literal block returns, read
   # from the block's own returns (block_return_class). Nil unless no program definition has the name and the class
   # already has a bit: allocating one here would renumber the masks.
+  # GENERIC step 3: `map`/`collect` with a literal block returns an Array whatever the block returns (mruby's
+  # Enumerable#collect answers its `ary`). Any receiver whose map is Enumerable's; gated on no program definition or
+  # installer of the name, so a program `map` on any class withdraws it.
+  def block_collection_result_mask(insn)
+    return nil unless %w[map collect].include?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
+    return nil unless @closed_world&.exact_instances_singleton_free?
+    return nil if symbol_installed_names.include?(insn.sym)
+    return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
+
+    NumericFlow::ARR
+  end
+
   def block_element_class_mask(irep, index, insn)
     return nil unless %w[map collect].include?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
     return nil unless @closed_world&.exact_instances_singleton_free?
