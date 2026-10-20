@@ -174,8 +174,8 @@ Dir.mktmpdir do |dir|
   natives, outside_ruby = bc2cpp_closed_world_outside_srcs('closed', gems, ROOT)
   natives = (natives + Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{ROOT}/3rd/mruby") + external_gem_native_srcs(ROOT)).uniq
   foreign = (outside_ruby + foreign_mrblib_srcs(ROOT)).map { |p| File.expand_path(p) }.uniq - srcs
-  ireps, root = compile_ireps(srcs, 'bsw_wio', dir)
-  outside, = compile_ireps(foreign.sort, 'bsw_wio_outside', dir)
+  ireps, root = compile_ireps(srcs, 'bsw_closed', dir)
+  outside, = compile_ireps(foreign.sort, 'bsw_closed_outside', dir)
   registry, superclass_of, = build_registry(ireps, root)
   w = BlockSelfWorld.analyze(ireps: ireps, outside_ireps: outside, native_paths: natives, method_labels: method_labels.call(registry),
                              superclass_of: superclass_of, root: ROOT)

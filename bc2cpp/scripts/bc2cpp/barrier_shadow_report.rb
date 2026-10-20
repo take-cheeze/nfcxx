@@ -7,7 +7,7 @@
 #
 #   1. synthetic handlers: the corner cases where the edge-derived sets differ
 #      from the address-range sets, printed as concrete examples;
-#   2. the real closed-world wio build with tools/bc2cpp/fixnum_barrier_shadow.rb
+#   2. the real closed-world build with tools/bc2cpp/fixnum_barrier_shadow.rb
 #      preloaded, comparing old and shadow answers for every barrier query.
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/barrier_shadow_report.rb

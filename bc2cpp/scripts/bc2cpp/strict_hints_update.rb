@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Regenerates STRICT_HINTS_REVIEWED (tools/bc2cpp/strict_hints_reviewed.rb) from a full and a hot-only wio closed-world
+# Regenerates STRICT_HINTS_REVIEWED (tools/bc2cpp/strict_hints_reviewed.rb) from a full and a hot-only closed-world
 # run of the compiled gems with BC2CPP_STRICT_HINTS=1 (docs/adr/0419).
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/strict_hints_update.rb [--write]

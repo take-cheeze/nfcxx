@@ -6,10 +6,8 @@
 #
 #   - wiring: build_config.rb opts the single-format builds in; every compiled
 #     gem passes the list through the checked env; BC2CPP_HOT_ONLY=0 turns it off;
-#     compiled gems that disagree are refused; the wio bytecode strip never
-#     lists an excluded method, and in a hot-only build only a real
-#     registration lets it strip; the checked-in list parses and names only
-#     methods that exist;
+#     compiled gems that disagree are refused; the checked-in list parses and
+#     names only methods that exist;
 #   - generated code, on a fixture world: a list naming every method is
 #     byte-identical to no list; an excluded method has no `_impl`, no entry,
 #     no declaration; its callers (MONO, singleton, POLY chain, another gem's
@@ -25,7 +23,6 @@ require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/hot_methods'
-require_relative '../../tools/bc2cpp/wio_registered_methods'
 require_relative 'cxx'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
@@ -49,8 +46,6 @@ check.call('every compiled gem passes the list through the checked env and rebui
                rake.match?(/BC2CPP_HOT_METHODS_PATH[,\]][^\n]*(?:\n[^\n]*)?do \|t\|/)
            end && File.read(File.join(root, 'tools/bc2cpp/compiled_gems.rb'))[/^def bc2cpp_compiled_gem_job.*?^end$/m]
                       .to_s.include?('.merge(bc2cpp_hot_only_env(spec))'))
-check.call("the wio strip's probe runs with the build's list",
-           config.include?("env = { 'BC2CPP_HOT_METHODS' => (hot_methods if bc2cpp_hot_only_build?(spec.build)) }"))
 
 spec = Struct.new(:name, :build) { include Bc2cppHotOnlyOption }
 build = Struct.new(:name, :gems)
@@ -88,29 +83,6 @@ Dir.mktmpdir do |dir|
   check.call('a line that is not one Owner#name entry fails loudly', bad)
 end
 
-sdu = STATIC_DISPATCH_UNREGISTERED.first
-owner, name = sdu.split('#', 2)
-entry = { owner: owner, name: name, entry: 'Unused_entry' }
-check.call('the wio strip lists a static-dispatch-only entry in a full build (docs/adr/0203)',
-           WioRegisteredMethods.strippable?(entry, installed: Set.new, never_called: Set.new))
-check.call('but in a hot-only build only a real registration lets its bytecode go',
-           !WioRegisteredMethods.strippable?(entry, installed: Set.new, never_called: Set.new, hot_only: true) &&
-             WioRegisteredMethods.strippable?(entry, installed: Set['Unused_entry'], never_called: Set.new, hot_only: true))
-
-# A list changes which names strip, so a stripped name can now trail a mixed
-# `public` list (RPG2k::Scene::Map#try_open_debug_menu); it must go with its def.
-Dir.mktmpdir do |dir|
-  tsv = File.join(dir, 'registered.tsv')
-  src = File.join(dir, 'in.rb')
-  out = File.join(dir, 'out.rb')
-  File.write(tsv, "HoVis\tgone\t0\tpublic\t0\n")
-  File.write(src, "class HoVis\n  private\n\n  def kept; end\n\n  def gone\n    1\n  end\n" \
-                  "  public :kept,\n         :gone\nend\n")
-  _o, st = Open3.capture2e(RbConfig.ruby, File.join(root, 'scripts/wio/strip_bc2cpp_stubs.rb'), tsv, 'HoVis', src, out)
-  stripped = st.success? ? File.read(out) : ''
-  check.call('the wio strip drops a stripped name that trails a multi-line visibility list',
-             stripped.include?('public :kept') && !stripped.include?('gone'))
-end
 
 mrbc = ENV['MRBC'] || 'mrbc'
 ENV['MRBC'] = mrbc

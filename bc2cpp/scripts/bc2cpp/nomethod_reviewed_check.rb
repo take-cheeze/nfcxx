@@ -64,7 +64,7 @@ check.call('a site inside the scope is judged',
 
 puts '== ReviewScope'
 check.call('every engine build is held to the engine owners; any other closed-world build to every owner',
-           %w[psp wio maix closed].all? { |b| ReviewScope.for_build(b) == ReviewScope::ENGINE_OWNERS } &&
+           %w[closed].all? { |b| ReviewScope.for_build(b) == ReviewScope::ENGINE_OWNERS } &&
              ReviewScope.for_build('optcarrot-probe') == ReviewScope::ALL && ReviewScope.for_build('') == ReviewScope::ALL)
 gem_owners = BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }
 check.call('the engine owners are every compiled gem owner (core included) and each X.singleton module X',

@@ -2,7 +2,7 @@
 # encoding: UTF-8
 #
 # bc2cpp coverage report: regenerates tools/bc2cpp/bc2cpp.rb's whole-program
-# wio closed-world diagnostic (every owner across all three compiled gems --
+# closed-world diagnostic (every owner across all three compiled gems --
 # mruby-rpg2k-compiled/mruby-lcf-compiled/mruby-rgss-compiled -- combined,
 # with the actual closed gem set and outside-source proof inputs) and prints a small,
 # stats-only summary: compiled-entry-point and
@@ -71,7 +71,7 @@ env = {
   'NATIVE_SRCS' => Shellwords.join(native_srcs),
   'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
   # The whole-program dispatch count is meaningful only under the same closed
-  # world that the wio compiled gems use. An unreviewed site fails this run as it
+  # world that the closed compiled gems use. An unreviewed site fails this run as it
   # fails a build.
   'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_COLLECTION_EXPORTS' => '1',
   'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).map { |n, d| "#{n}=#{d}" }),

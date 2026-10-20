@@ -10,7 +10,7 @@
 #                      fixtures that need Enumerable, Integer#positive?, ...
 # Both must be built from the patched 3rd/mruby the tree carries.
 # BC2CPP_CXXFLAGS adds compiler flags, e.g. -DMRB_INT32 for a build whose mrb_int is 32 bits
-# wide (the Emscripten/Wio/PSP width); run with that build's own MRBC.
+# wide (the Emscripten width); run with that build's own MRBC.
 # BC2CPP_KEEP_DIR=path keeps the last fixture directory (generated code, binary).
 require 'etc'
 require 'fileutils'
