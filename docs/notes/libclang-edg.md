@@ -85,3 +85,29 @@ declared in a header is listed at file scope.
    difference goes away.
 3. Headers: a flag to visit declarations of included files, and `clang_getIncludes`-style inclusion data.
 4. References and expressions (`clang_getCursorReferenced`, `CallExpr`, `DeclRefExpr`), from the IL's name references.
+
+## The C ABI, and bindings for other languages
+
+- **One versioned library.** `libclang-edg.so.1` (SONAME) exports only `clang_*` (`lib/libclang-edg/libclang-edg.map`,
+  version node `LIBCLANG_EDG_1.0`). `scripts/install-libclang-edg.sh [PREFIX]` installs the library, the headers and
+  `libclang-edg.pc`. A consumer then builds with `pkg-config --cflags --libs libclang-edg`; the install was checked with
+  a C program that calls `clang_getClangVersion`.
+- **Python (ctypes), generated.** `lib/libclang-edg/bindings/python/libclang_edg.py` is written by
+  `scripts/gen-libclang-edg-api.py` from the libclang prototypes in `Index.h` and `Index_api.h`: argtypes and restype for
+  every function, the structs (sizes checked against `clang.cindex` by `_Static_assert`), the visitor as a `CFUNCTYPE`,
+  and the `CXCursorKind` values. `load()` opens the library. Struct returns work through ctypes.
+  `tests/libclang-edg/ffi_python_walk.py` runs the walk through it; `run.sh` compares it with `walk-edg` on every case.
+- **mruby, a gem.** `lib/libclang-edg/mruby` is the gem `mruby-libclang-edg`: `LibclangEdg::Index` (`new`, `parse(path,
+  *args)`), `LibclangEdg::TranslationUnit` (`cursor`, `spelling`), `LibclangEdg::Cursor` (`kind`, `spelling`, `line`,
+  `column`, `children`, `semantic_parent`, `main_file?`, `==`), and `LibclangEdg::ParseError`. The C side is
+  `src/mrb_libclang_edg.c`, built with `scripts/setup-mruby-libclang-edg.sh` into `build/libclang-edg/mruby/bin/mruby`,
+  on the mruby checkout of `scripts/setup-mruby.sh`. `tests/libclang-edg/mruby_walk.rb` is the walk in Ruby; `run.sh`
+  compares it with `walk-edg` on every case.
+- **Not provided: Ruby Fiddle.** Fiddle cannot call a function that returns a struct by value, and `CXCursor`,
+  `CXString` and `CXSourceLocation` are returned that way. A Fiddle binding needs flat wrappers that return through
+  a pointer argument (`clang_getCursorKind_p(CXCursor *)`, and so on), which the header does not have yet.
+
+Tests: `tests/libclang-edg/run.sh` now checks the walk four ways per case: the C API, `clang.cindex` (when the binding
+is installed and `LIBCLANG_EDG_PYTHON` names it), the generated ctypes module, and the mruby gem; the first, the
+ctypes and the mruby walks must equal the `walk-edg` output exactly, `clang.cindex` against libclang has the known
+differences. The mruby part builds the interpreter when it is missing (it needs ruby, rake and the mruby checkout).

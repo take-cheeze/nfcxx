@@ -39,7 +39,8 @@ scripts/setup-sqlite.sh    # SQLite 3.54.1 built with nfcc into build/sqlite (do
 tests/sqlite/run.sh       # lib/sqlcache (a TTL key-value cache on SQLite) built with nfcxx on both backends
 scripts/setup-libclang-edg.sh # libclang's C API on the EDG front end: cpfe that lists declarations (docs/notes/libclang-edg.md)
 scripts/build-libclang-edg.sh # build/libclang-edg/libclang-edg.so, a libclang-compatible shared library
-tests/libclang-edg/run.sh # the library against the system libclang, through the C API and clang.cindex
+scripts/setup-mruby-libclang-edg.sh # mruby with the mruby-libclang-edg gem (LibclangEdg::Index, Cursor)
+tests/libclang-edg/run.sh # the library against the system libclang: C API, clang.cindex, ctypes binding, mruby gem
 ```
 
 Which workflow runs which test script: `docs/README.md`, "Status matrix".

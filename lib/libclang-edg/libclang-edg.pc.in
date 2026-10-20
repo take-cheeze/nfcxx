@@ -1,0 +1,9 @@
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libclang-edg
+Description: libclang's C API backed by the EDG front end (nfcxx)
+Version: @VERSION@
+Libs: -L${libdir} -lclang-edg
+Cflags: -I${includedir}

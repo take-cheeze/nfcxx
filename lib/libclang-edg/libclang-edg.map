@@ -1,0 +1,7 @@
+/* libclang-edg's version script: the C API is the only exported interface (libclang's own symbols). */
+LIBCLANG_EDG_1.0 {
+  global:
+    clang_*;
+  local:
+    *;
+};

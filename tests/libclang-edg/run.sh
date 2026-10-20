@@ -14,6 +14,7 @@ mkdir -p "$work"
 
 [ -x build/libclang-edg/cmake/bin/cpfe ] || scripts/setup-libclang-edg.sh
 scripts/build-libclang-edg.sh >/dev/null
+[ -x build/libclang-edg/mruby/bin/mruby ] || scripts/setup-mruby-libclang-edg.sh
 cc=${CC:-cc}
 
 oracle=${LIBCLANG_ORACLE:-}
@@ -43,12 +44,26 @@ else
   echo "clang.cindex: not importable (install the libclang Python binding, or set LIBCLANG_EDG_PYTHON); skipped"
 fi
 
-status=0
 # The change lines of a unified diff (no headers, no hunks): what the EDG side does differently.
 changes() { grep -E '^[-+][A-Za-z]' "$1" | LC_ALL=C sort; }
+status=0
 for src in tests/libclang-edg/cases/*.cpp; do
   name=$(basename "$src" .cpp)
   "$work/walk-edg" "$src" -std=c++17 > "$work/$name.edg" || { echo "FAIL $name: walk-edg exited non-zero"; status=1; continue; }
+  # The mruby gem (lib/libclang-edg/mruby) through its own interpreter: exactly the C walk.
+  if build/libclang-edg/mruby/bin/mruby tests/libclang-edg/mruby_walk.rb "$src" -std=c++17 \
+       | diff -q "$work/$name.edg" - >/dev/null; then
+    echo "ok   $name through mruby"
+  else
+    echo "FAIL $name through mruby (differs from walk-edg)"; status=1
+  fi
+  # The generated ctypes binding (lib/libclang-edg/bindings/python) through the shared library: exactly the C walk.
+  if python3 tests/libclang-edg/ffi_python_walk.py build/libclang-edg/libclang-edg.so.1 "$src" -std=c++17 \
+       | diff -q "$work/$name.edg" - >/dev/null; then
+    echo "ok   $name through the ctypes binding"
+  else
+    echo "FAIL $name through the ctypes binding (differs from walk-edg)"; status=1
+  fi
   if [ -n "$oracle" ]; then
     "$work/walk-ref" "$src" -std=c++17 > "$work/$name.ref"
     diff -u "$work/$name.ref" "$work/$name.edg" > "$work/$name.diff" || true
