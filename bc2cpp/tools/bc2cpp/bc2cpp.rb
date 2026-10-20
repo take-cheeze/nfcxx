@@ -1090,6 +1090,12 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
+  # Constants whose every writer is one frozen-or-literal container class (ADR 0501): a read is that class.
+  CodeGen.constant_value_classes = constant_facts.groups.filter_map do |name, fact|
+    next unless fact.classes && fact.classes.size == 1 && %i[Array Hash String].include?(fact.classes.first)
+
+    [name, fact.classes.first]
+  end.to_h.freeze
   # NUMERIC_CONSTANT_RANGES (ADR 0318) on the IR: the interval of each name (BYTECODE_CONSTANT_FACTS). The kill switch
   # BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
   integer_constant_ranges = IntegerConstantRanges.enabled? ? constant_facts.intervals : nil

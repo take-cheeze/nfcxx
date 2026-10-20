@@ -26,7 +26,8 @@ class CodeGen
   # or empty excludes nothing. Class-level so every probing CodeGen sees it.
   class << self
     attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
-                  :integer_constant_values, :integer_constant_ranges, :hot_only_excluded, :module_names, :core_hidden_defs,
+                  :integer_constant_values, :integer_constant_ranges, :constant_value_classes, :hot_only_excluded,
+                  :module_names, :core_hidden_defs,
                   :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
                   :enumerator_model, :native_singleton_inputs,
                   :rbs_block_signatures

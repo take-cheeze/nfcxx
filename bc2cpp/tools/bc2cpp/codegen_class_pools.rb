@@ -134,12 +134,20 @@ class CodeGen
   # The pooled class set of a GETCONST/GETMCNST: the join of what every definition it reads stores
   # (ADR 0301, scoped by ADR 0423). A name the numeric proof poisons has no pool; a read with no
   # proven definition falls back to the integer-constant proof, else OTHER.
+  CORE_CONTAINER_BITS = { Array: NumericFlow::ARR, Hash: NumericFlow::HSH, String: NumericFlow::STR }.freeze
+
   def class_pool_const_mask(insn)
     name = insn.const_name
     return NumericFlow::OTHER unless @class_pools_on && name && const_missing_free?
 
     key = const_group_key(insn)
-    (key && @class_const_pools[key]) || (@integer_constants&.include?(name) ? NumericFlow::INT : NumericFlow::OTHER)
+    pooled = key && @class_const_pools[key]
+    return pooled if pooled
+    return NumericFlow::INT if @integer_constants&.include?(name)
+
+    # The IR's whole-program class of a constant with one container class (CodeGen.constant_value_classes).
+    value_class = self.class.constant_value_classes&.[](name)
+    value_class ? CORE_CONTAINER_BITS.fetch(value_class) : NumericFlow::OTHER
   end
 
   # One growth pass over every pool; true when a mask grew or a pool was dropped.
