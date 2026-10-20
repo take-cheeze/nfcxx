@@ -28,6 +28,9 @@ Dir.mktmpdir('ir-context-results') do |dir|
       def optional(value = 1); value; end
       def required_kw(x:); x; end
       def optional_kw(x: :default); x; end
+      def rest(*values); values; end
+      def post(value = 1, *rest, last); last; end
+      def kwrest(**values); values; end
       def recursive(n, value); n == 0 ? value : recursive(n - 1, value); end
       def mutual_a(n, value); n == 0 ? value : mutual_b(n - 1, value); end
       def mutual_b(n, value); mutual_a(n, value); end
@@ -47,6 +50,9 @@ Dir.mktmpdir('ir-context-results') do |dir|
       def call_kw; required_kw(x: 'value'); end
       def call_kw_default; optional_kw; end
       def call_kw_given; optional_kw(x: 3); end
+      def call_rest; rest(1, :tag); end
+      def call_post; post(1, :tag, 'last'); end
+      def call_kwrest; kwrest(x: 1, y: :tag); end
       def call_recursive; recursive(3, 'value'); end
       def call_mutual; mutual_a(3, :tag); end
       def call_never; never(1); end
@@ -69,9 +75,10 @@ Dir.mktmpdir('ir-context-results') do |dir|
   end
   report = run.call
   check.call('leaf evaluation reuse preserves the complete report', report == run.call('BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
+  check.call('binding index preserves the complete report', report == run.call('BC2CPP_IR_BINDING_INDEX' => '0'))
   returns = report['ir_feedback'].select { |row| row['kind'] == 'return' }.to_h { |row| [[row['owner'], row['method']], row] }
   expected = { 'call_int' => ['Integer'], 'call_symbol' => ['Symbol'], 'call_peer' => ['String'],
-               'call_default' => ['Integer'], 'call_given' => ['Symbol'], 'call_kw' => ['String'],
+               'call_post' => ['String'], 'call_default' => ['Integer'], 'call_given' => ['Symbol'], 'call_kw' => ['String'],
                'call_kw_default' => ['Symbol'], 'call_kw_given' => ['Integer'],
                'call_recursive' => ['String'], 'call_mutual' => ['Symbol'], 'call_array' => ['String'],
                'call_hash' => %w[Integer nil], 'call_absent' => ['nil'], 'effect_read' => ['Symbol'], 'call_native' => ['bool'] }
@@ -90,10 +97,12 @@ Dir.mktmpdir('ir-context-results') do |dir|
   check.call('context opt-out withdraws keyword result proof', baseline['status'] == 'unknown')
   limited_report = run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1')
   check.call('leaf reuse preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
+  check.call('binding index preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_BINDING_INDEX' => '0'))
   limited = limited_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a context budget never publishes a provisional keyword summary', limited['status'] == 'unknown')
   rounds_report = run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1')
   check.call('leaf reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
+  check.call('binding index preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_BINDING_INDEX' => '0'))
   rounds = rounds_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a round budget never publishes bottom as a return type', rounds['status'] == 'unknown')
   no_effect = run.call('BC2CPP_IR_EFFECT_SUMMARIES' => '0')['ir_feedback'].find { |row| row['method'] == 'effect_read' && row['kind'] == 'return' }

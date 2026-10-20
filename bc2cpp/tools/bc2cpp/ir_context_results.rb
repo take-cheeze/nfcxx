@@ -88,6 +88,7 @@ class IrContextResults
     @shapes = {}
     @shape_bits = {}
     @shape_mask = 0
+    @binding_layouts = {}.compare_by_identity
     @class_cache = {}
     @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
@@ -188,9 +189,10 @@ class IrContextResults
     definition = @gen.numeric_owner_of(body)
     return nil unless definition && definition.irep == body.label
     receiver = @gen.send(:return_class_self_receiver, body) || NumericFlow::OTHER
-    fields = body.enter&.enter_fields
-    return nil unless fields
+    layout = binding_layout(body)
+    return nil unless layout
 
+    fields, names = layout
     required, optional = fields.first(2)
     arguments = (1..required + optional).map do |position|
       direct = definition && @gen.bytecode_ir_argument_classes(definition, position)
@@ -198,21 +200,19 @@ class IrContextResults
       numeric = @gen.numeric_entry_mask(body, position)
       frozen_mask?(numeric) ? numeric : mask(direct)
     end
-    keywords = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.uniq.to_h { |name| [name, NumericFlow::OTHER] }
+    keywords = names.to_h { |name| [name, NumericFlow::OTHER] }
     binding = bind(body, arguments, keywords, root: true)
     @roots[body.label] = binding && add(body, receiver, arguments, keywords, binding, root: true)
   end
 
   def bind(body, arguments, keywords, root: false)
-    fields = body.enter&.enter_fields
-    return nil unless fields&.size == 8 && fields.all? { |value| value.is_a?(Integer) && value >= 0 }
+    layout = binding_layout(body)
+    return nil unless layout
 
-    required, optional, rest, post, key_count, keydict, block, extra = fields
-    return nil if extra != 0 || rest > 1 || keydict > 1 || block > 1
+    fields, names, required_names, index = layout
+    required, optional, rest, post, key_count, keydict = fields
     return nil if arguments.size < required + post || rest.zero? && arguments.size > required + optional + post
-    names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.uniq
-    optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
-    return nil unless root || (names - optional_names - keywords.keys).empty?
+    return nil unless root || (required_names - keywords.keys).empty?
     return nil unless root || keydict.positive? || (keywords.keys - names).empty?
     return nil unless keywords.empty? || key_count.positive? || keydict.positive?
 
@@ -222,16 +222,35 @@ class IrContextResults
     values.concat(arguments.last(post)) if post.positive?
     values << NumericFlow::HSH if key_count.positive? || keydict.positive?
     values << NumericFlow::NIL
+    edges = {}
+    edges[index] = [index + supplied + 1] if optional.positive? && !root
+    CallContextArguments::Binding.new(masks: values.freeze, enter_edges: edges.freeze)
+  end
+
+  # Bytecode is fixed for this engine; context values and budgets are not.
+  def binding_layout(body)
+    return build_binding_layout(body) if ENV['BC2CPP_IR_BINDING_INDEX'] == '0'
+    return @binding_layouts[body] if @binding_layouts.key?(body)
+
+    @binding_layouts[body] = build_binding_layout(body)
+  end
+
+  def build_binding_layout(body)
+    fields = body.enter&.enter_fields
+    return nil unless fields&.size == 8 && fields.all? { |value| value.is_a?(Integer) && value >= 0 }
+
+    _required, optional, rest, _post, _key_count, keydict, block, extra = fields
+    return nil if extra != 0 || rest > 1 || keydict > 1 || block > 1
+
     index = body.instructions.index(body.enter)
     return nil unless index
-
-    edges = {}
     if optional.positive?
-      return nil unless body.instructions[index + 1, optional + 1]&.size == optional + 1 &&
-                        body.instructions[index + 1, optional + 1].all? { |insn| insn.op == 'JMP' }
-      edges[index] = [index + supplied + 1] unless root
+      jumps = body.instructions[index + 1, optional + 1]
+      return nil unless jumps&.size == optional + 1 && jumps.all? { |insn| insn.op == 'JMP' }
     end
-    CallContextArguments::Binding.new(masks: values.freeze, enter_edges: edges.freeze)
+    names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
+    optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
+    [fields.dup.freeze, names, (names - optional_names).freeze, index].freeze
   end
 
   def add(body, receiver, arguments, keywords, binding, root: false)
