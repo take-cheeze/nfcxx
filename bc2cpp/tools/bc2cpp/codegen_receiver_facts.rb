@@ -178,9 +178,20 @@ class CodeGen
     end
     kind, klass = proven_receiver_class(irep, site_idx, reg, closed_world_site(recv, irep, idx, owner_def),
                                         exact_class, constant_owner, self_implicit)
-    return '' unless klass && @closed_world.proven_miss?(name, klass, symbol_installed_names, kind, label: irep.label)
+    return '' unless klass && @closed_world.proven_miss?(name, klass, proven_miss_answered_names, kind, label: irep.label)
 
     "  #{ProvenMiss.marker(name, kind, klass)}\n"
+  end
+
+  # symbol_installed_names, plus the names of core Ruby definitions the registry hid because a native
+  # method or operator shares them (bc2cpp.rb core_hidden_defs): mruby's own Array#sort_by is one. Those
+  # bodies still exist at run time, so a send of their name is not a miss. Only adds names, so it only
+  # withholds a miss claim. Nil stays nil (the scan did not run).
+  def proven_miss_answered_names
+    return @proven_miss_answered_names if defined?(@proven_miss_answered_names)
+
+    names = symbol_installed_names
+    @proven_miss_answered_names = names && (names | (self.class.core_hidden_defs || []).map(&:name))
   end
 
   # Diagnostic-only: identify the nearest producer behind an unresolved

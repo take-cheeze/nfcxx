@@ -391,7 +391,10 @@ class CodeGen
     end
   end
 
+  # A core body compiles with no closed world (ADR 0264): nothing is assured there, the same as
+  # numeric_ivar_prerequisites_missing?.
   def numeric_ivar_assured_uncached?(owner, ivar)
+    return false if @closed_world.nil?
     return false unless numeric_allocate_free?
     return false unless @closed_world.class_declared?(owner) && @closed_world.standard_constructor_lookup?
 

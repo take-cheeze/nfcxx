@@ -2525,6 +2525,7 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#shop_move_cursor -> index=",
   "RPG2k::Scene::Map#shop_quantity_move -> count",
   "RPG2k::Scene::Map#shop_quantity_move -> count=",
+  "RPG2k::Scene::Map#shop_quantity_move -> max",
   "RPG2k::Scene::Map#shop_status_item_id -> id",
   "RPG2k::Scene::Map#shop_status_item_id -> index",
   "RPG2k::Scene::Map#shop_status_item_id -> quantity",
