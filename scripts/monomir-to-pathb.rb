@@ -4,6 +4,7 @@ abort "usage: #{$0} INPUT.mir [OUTPUT.ir]" if ARGV.empty?
 input = ARGV[0]
 outpath = ARGV[1]
 src = File.read(input)
+$mir_src = src
 
 types = {}
 src.scan(/^type (.+?) \{\n(.*?)\n\}/m) do |name, body|
@@ -1094,7 +1095,7 @@ def eval_binop(op, l, r, types, locals, params, param_reg, stmts, regi, hint_ty 
   [code, ty, regi]
 end
 
-def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lines)
+def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lines, hint_ty = nil)
   expr = expr.strip
   mc = expr.match(/^([+-]?\d+)\s+(i128|u128)$/)
   if mc
@@ -1102,6 +1103,9 @@ def eval_rvalue_operand(expr, types, locals, params, param_reg, stmts, regi, lin
   end
   if expr.start_with?("fn ")
     mangled = resolve_fn_item(expr)
+    if mangled.nil? && hint_ty && hint_ty.strip.start_with?("fn ")
+      mangled = hint_ty.strip.sub(/^fn\s+/, "").split(/[\( ]/, 2)[0].strip
+    end
     if mangled
       return ["&\"#{pb_sym(mangled)}\"", regi]
     end
@@ -1813,6 +1817,11 @@ functions.each do |fn|
   dfidx.each do |d|
     stmts << "(store bool $\"df#{d}\" (const bool 0))"
   end
+  locals.each do |n, t|
+    sz, _ = type_size_align(t, types)
+    next if sz == 0 || sz > 1024
+    stmts << "(zero-fill #{sz} $\"#{n}\")"
+  end
   params.each_with_index do |t, i|
     r = param_reg[i]
     next if r.nil?
@@ -2012,7 +2021,7 @@ functions.each do |fn|
         raw_args = args_str.empty? ? [] : split_top(args_str)
         raw_args = raw_args.map(&:strip).reject(&:empty?)
         arg_vals = []
-        raw_args.each do |a|
+        raw_args.each_with_index do |a, ai|
           at = place_type(a, types, locals, params)
           if at == "()" || at == "!"
             next
@@ -2020,7 +2029,24 @@ functions.each do |fn|
           if at.nil? && (a.match(/^[A-Za-z]/).nil? || const_int_value(a))
             # constant or unknown; keep
           end
-          v, regi = eval_rvalue_operand(a, types, locals, params, param_reg, stmts, regi, lines)
+          if a.strip.start_with?("fn ") && at.nil?
+            callee_sig = nil
+            callee = fexpr
+            if $extern_map && $extern_map[pb_sym(callee)]
+              callee = $extern_map[pb_sym(callee)]
+            end
+            fstart2 = $mir_src.index("fn #{callee}(")
+            if fstart2
+              fend2 = $mir_src.index(")", fstart2)
+              params2 = $mir_src[fstart2...fend2]
+              parts2 = split_top(params2.split("(", 2)[1] || "")
+              if parts2[ai]
+                at = parts2[ai].strip
+                at = at.sub(/^&\s*/, "&").strip
+              end
+            end
+          end
+          v, regi = eval_rvalue_operand(a, types, locals, params, param_reg, stmts, regi, lines, at)
           apt = at ? rust_type_to_pathb(at, types) : nil
           mc128 = a.strip.match(/^([+-]?\d+)\s+(i128|u128)$/)
           if mc128 && at.nil?
