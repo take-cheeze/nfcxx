@@ -28,6 +28,7 @@ has no dependency beyond node (22 was used).
 | `server.cjs` | The live server: the page, `examples/`, `GET /api/health`, `POST /api/compile`. |
 | `build-static.cjs` | The static site: each example in every mode, run and checked, then the page and `builds/<id>.json`. |
 | `index.html` | The page (one file, no build step). |
+| `bindings.js` | The browser bindings (see "Browser bindings"), shared by the page and the static build. |
 | `examples/` | The sources and `index.json` (id, title, file, expected `main()` result). |
 
 ## The compile
@@ -102,11 +103,20 @@ module is marked "browser binding" or "stub" in the imports table. A stub return
 | `double now_ms()` | `performance.now()` |
 | `double random_f64()` | `Math.random()` |
 | `void set_title(const char* s, long length)` | `document.title`, restored after Run |
+| `int putchar(int)`, `int puts(const char*)` | stdout: the Console tab (`putchar` shows a line when it ends) |
+| `int write(int fd, const void* buf, unsigned long n)` | fd 1 is stdout; fd 2 is shown as `[stderr]` |
+| `int fflush(void*)` | shows what `putchar` has left waiting |
 
 The emitter passes an i32 as a Number, an i64 or an LP64 pointer as a BigInt, and an f64 as a Number. A return value must
-match the declared type. The Console tab shows the output of the last Run. The example `browser-bindings` uses all of
-them and returns 3 whatever the timer and random values are, so the static build can check its result. Both the live
+match the declared type. The Console tab shows the output of the last Run. The example `browser-bindings` uses the first seven and returns 3 whatever the timer and random values are. The example
+`stdout` uses the stdio ones and returns 0. Both examples state their expected output in `examples/index.json`, and the
+static build checks it. Both the live
 and the static page run it with the bindings connected (checked in headless Chromium).
+
+`printf` and `std::cout` are not bound. A call to `printf` is variadic, and the emitter refuses variadic calls, so `printf`
+needs variadic lowering in the emitter first. `std::cout` needs the hosted C++ library, whose calls the emitter refuses in
+most of its code. The example declares `puts`, `putchar`, `write` and `fflush` by hand, which also builds in the
+freestanding `emscripten` mode.
 
 Not done: DOM elements and canvas drawing (the module would write a display list into its memory for the page to
 read), fetch and timers that call back into the module (the emitter has no function table, so a callback needs one),
@@ -130,7 +140,7 @@ and input events.
 | Side-by-side comparison, diff | not done | Two modes or two backends in two panels. |
 | Compiler flags beyond the standard (`-D`, `-I`, `--target`) | not done | Include directories must be limited to the repo, not free paths. |
 | Source-to-output mapping | not done | Needs a line table. The emitter writes none; function names (a `name` section) are cheap. |
-| Program output (`printf`) | not done | The emitter refuses variadic calls, so there is no stdout yet. |
+| Program output (stdout) | partly done | `puts`, `putchar`, `write` and `fflush` go to the Console tab. `printf` and `std::cout` do not: the emitter refuses variadic calls and most of the hosted C++ library. |
 | Libraries (`<vector>`, `<string>`) | limited by the emitter | The emitter refuses exceptions, variadic calls, indirect calls, general `goto`, bit-fields, VLAs and 16-byte types. In the IR sweep, 168 of 262 files are refused. The page shows these refusals. |
 | Several compilers | not applicable | One backend. |
 | Accounts, saved snippets | not planned | |

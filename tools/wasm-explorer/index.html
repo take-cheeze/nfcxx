@@ -193,8 +193,10 @@
   </section>
 </main>
 
+<script src="bindings.js"></script>
 <script>
 (() => {
+  const B = window.nfcxxBindings;
   "use strict";
 
   // Outside resources, pinned. Monaco is the editor, wabt turns the module into WebAssembly text.
@@ -210,27 +212,6 @@
     current: null,       // the last successful compile: { bytes, module, wat? }
     seq: 0,              // compile requests in flight; a response for an older one is dropped
     autoTimer: null,
-  };
-  // The browser bindings: a module imports a function named here (module "env") and the page connects it to the browser
-  // feature. The C++ declaration is what a program writes; the page reads the arguments as the emitter passes them
-  // (i32 as a Number, i64 and pointers under LP64 as a BigInt, f64 as a Number). A return value must match the type the
-  // program declares. To add a binding, add an entry here: the table on the page is built from this object.
-  const readBytes = (mem, ptr, len) => new Uint8Array(mem().buffer, Number(ptr), Number(len));
-  const BINDINGS = {
-    log_i32: { decl: "void log_i32(int value);", feature: "console: prints the value",
-      fn: (ctx, v) => ctx.log(String(v | 0)) },
-    log_i64: { decl: "void log_i64(long value);", feature: "console: prints the value (BigInt)",
-      fn: (ctx, v) => ctx.log(String(v)) },
-    log_f64: { decl: "void log_f64(double value);", feature: "console: prints the value",
-      fn: (ctx, v) => ctx.log(String(v)) },
-    log_str: { decl: "void log_str(const char* s, long length);", feature: "console: prints the UTF-8 string from memory",
-      fn: (ctx, ptr, len) => ctx.log(new TextDecoder().decode(readBytes(ctx.mem, ptr, len))) },
-    now_ms: { decl: "double now_ms();", feature: "performance.now(): milliseconds since the page loaded",
-      fn: () => performance.now() },
-    random_f64: { decl: "double random_f64();", feature: "Math.random(): a number in [0, 1)",
-      fn: () => Math.random() },
-    set_title: { decl: "void set_title(const char* s, long length);", feature: "document.title (restored after Run)",
-      fn: (ctx, ptr, len) => { document.title = new TextDecoder().decode(readBytes(ctx.mem, ptr, len)); } },
   };
   const titleAtLoad = document.title;
 
@@ -330,7 +311,7 @@
     $("s-imports").textContent = String(imports.length);
     $("s-ms").textContent = ms.toFixed(0);
     fillTable("exports", exports.map((e) => [e.name, e.kind]));
-    fillTable("imports", imports.map((i) => [i.module, i.name, i.kind, bindingFor(i.name, i.kind) ? "browser binding" : "stub"]));
+    fillTable("imports", imports.map((i) => [i.module, i.name, i.kind, B.bindingFor(i.name, i.kind) ? "browser binding" : "stub"]));
     $("hex").textContent = hexDump(bytes, 1024);
     blobLink("download", bytes, "application/wasm");
     $("download-wat").hidden = true;
@@ -339,43 +320,27 @@
     $("result").textContent = hasMain ? "" : "the module has no main export";
   }
 
-  // The binding that provides an import of the module, or null for a stub.
-  function bindingFor(name, kind) {
-    return kind === "function" && Object.prototype.hasOwnProperty.call(BINDINGS, name) ? BINDINGS[name] : null;
-  }
-
   function run() {
     if (!state.current) return;
     clearRun();
     $("console").textContent = "";
     let memory = null;
-    const ctx = {
-      mem: () => memory,
-      log: (line) => {
-        $("console").textContent += line + "\n";
+    const ctx = B.makeContext({
+      write: (text) => {
+        $("console").textContent += text;
       },
-    };
-    const imports = { env: {} };
-    for (const imp of WebAssembly.Module.imports(state.current.module)) {
-      if (imp.kind !== "function") {
-        $("result").textContent = `import ${imp.module}.${imp.name} (${imp.kind}) is not provided by this page`;
-        return;
-      }
-      const b = bindingFor(imp.name, imp.kind);
-      imports[imp.module] = imports[imp.module] || {};
-      imports[imp.module][imp.name] = b
-        ? (...args) => b.fn(ctx, ...args)
-        : (x) => (Number(x) | 0) + 1;
-    }
+      memory: () => memory,
+    });
     const out = $("result");
     try {
-      const instance = new WebAssembly.Instance(state.current.module, imports);
+      const instance = new WebAssembly.Instance(state.current.module, B.importsFor(state.current.module, ctx));
       memory = instance.exports.memory || null;
       out.textContent = String(instance.exports.main());
     } catch (e) {
       out.textContent = (e instanceof WebAssembly.RuntimeError ? "trap: " : "") + String((e && e.message) || e);
       out.classList.add("trap");
     } finally {
+      ctx.flush();
       document.title = titleAtLoad;
     }
     if (!$("console").textContent) $("console").textContent = "(no output)";
@@ -629,7 +594,7 @@
   function fillBindings() {
     const body = $("bindings");
     body.textContent = "";
-    for (const [name, b] of Object.entries(BINDINGS)) {
+    for (const [name, b] of Object.entries(B.BINDINGS)) {
       const tr = document.createElement("tr");
       for (const text of [name, b.decl, b.feature]) {
         const td = document.createElement("td");

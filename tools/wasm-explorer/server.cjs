@@ -12,7 +12,7 @@ const { compile, MAX_SOURCE, root } = require("./pipeline.cjs");
 const here = __dirname;
 const examplesDir = path.join(here, "examples");
 const MAX_JOBS = 2;   // compiles in flight; more get 503 rather than queueing without bound
-const TYPES = { ".html": "text/html; charset=utf-8", ".cpp": "text/plain; charset=utf-8", ".json": "application/json" };
+const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".cpp": "text/plain; charset=utf-8", ".json": "application/json" };
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -66,6 +66,9 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     return send(res, 200, TYPES[".html"], fs.readFileSync(path.join(here, "index.html")));
+  }
+  if (req.method === "GET" && url.pathname === "/bindings.js") {
+    return send(res, 200, TYPES[".js"], fs.readFileSync(path.join(here, "bindings.js")));
   }
   if (req.method === "GET" && url.pathname.startsWith("/examples/")) {
     return serveExample(res, url.pathname.slice("/examples/".length));
