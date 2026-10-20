@@ -790,6 +790,7 @@ statics.each do |st|
   base = init[/^"(.*)"\{/m, 1]
   base = "" if base.nil?
   base_bytes = unescape_mir(base)
+  base_bytes += [0] * (size - base_bytes.size) if base_bytes.size < size
   relocs = []
   init.scan(/@(\d+)\+(\d+)\s*=\s*("(?:\\.|[^"\\])*"|[^,}]+)/) do |off, len, target|
     relocs << [off.to_i, len.to_i, target.strip]
@@ -800,14 +801,14 @@ statics.each do |st|
     (off...(off+len)).each { |i| covered[i] = true if i < size }
   end
   items = []
-  # bytes segments for uncovered ranges
+  # bytes segments for uncovered ranges (split into <=8-byte chunks)
   i = 0
   while i < size
     if covered[i]
       i += 1; next
     end
     j = i
-    while j < size && !covered[j]
+    while j < size && !covered[j] && (j - i) < 8
       j += 1
     end
     seglen = j - i
