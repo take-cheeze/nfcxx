@@ -139,11 +139,7 @@ check.call('shared body identities are not graph seeds', IrCallGraphTypes.collec
 check.call('graph summary table and completed argument maps are immutable', graph_facts.frozen? && graph_facts['leaf'].frozen?)
 
 if ENV['MRBC']
-  require 'json'
-  require 'open3'
-  require 'tmpdir'
-  require 'rbconfig'
-  root = File.expand_path('../..', __dir__)
+  require_relative 'type_check_fixture'
   Dir.mktmpdir('ir-argument-fixture') do |dir|
     File.write(File.join(dir, 'fixture.rb'), <<~SOURCE)
       class IrArgLeft
@@ -168,14 +164,8 @@ if ENV['MRBC']
         end
       end
     SOURCE
-    mrbc = File.expand_path(ENV.fetch('MRBC'))
     report = File.join(dir, 'facts.json')
-    output, status = Open3.capture2e({ 'MRBC' => mrbc, 'BC2CPP_SIG_DIRS' => '' }, RbConfig.ruby,
-                                    File.join(root, 'scripts/bc2cpp/type_check.rb'), '--files', 'fixture.rb',
-                                    '--format', 'json', '--no-sends', '--out', report, chdir: dir)
-    raise "compiler fixture failed: #{output}" unless status.success?
-
-    facts = JSON.parse(File.read(report))
+    facts = TypeCheckFixture.report(dir, env: { 'BC2CPP_SIG_DIRS' => '' }, out: report, label: 'compiler fixture')
     methods = facts.fetch('methods').select { |method| method['name'] == 'ir_argument_fixture' }
     left_param = methods.find { |method| method['owner'] == 'IrArgLeft' }.fetch('params').first
     right_param = methods.find { |method| method['owner'] == 'IrArgRight' }.fetch('params').first
@@ -215,13 +205,8 @@ if ENV['MRBC']
       end
     SOURCE
     run_graph = lambda do |enabled|
-      output, status = Open3.capture2e({ 'MRBC' => File.expand_path(ENV.fetch('MRBC')), 'BC2CPP_SIG_DIRS' => '',
-                                        'BC2CPP_IR_CALL_GRAPH_TYPES' => enabled ? '1' : '0' }, RbConfig.ruby,
-                                      File.join(root, 'scripts/bc2cpp/type_check.rb'), '--files', 'fixture.rb',
-                                      '--format', 'json', '--no-sends', chdir: dir)
-      raise "call graph fixture failed: #{output}" unless status.success?
-
-      JSON.parse(output)
+      TypeCheckFixture.report(dir, env: { 'BC2CPP_SIG_DIRS' => '',
+                                         'BC2CPP_IR_CALL_GRAPH_TYPES' => enabled ? '1' : '0' }, label: 'call graph fixture')
     end
     graph_on = run_graph.call(true)
     graph_off = run_graph.call(false)
