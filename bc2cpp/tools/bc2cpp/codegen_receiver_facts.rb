@@ -554,17 +554,30 @@ class CodeGen
   # ELEMENT (generic step 2): the class mask of the elements a `map`/`collect` call with a literal block returns, read
   # from the block's own returns (block_return_class). Nil unless no program definition has the name and the class
   # already has a bit: allocating one here would renumber the masks.
-  # GENERIC step 3: `map`/`collect` with a literal block returns an Array whatever the block returns (mruby's
-  # Enumerable#collect answers its `ary`). Any receiver whose map is Enumerable's; gated on no program definition or
-  # installer of the name, so a program `map` on any class withdraws it.
-  def block_collection_result_mask(insn)
-    return nil unless %w[map collect].include?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
+  # GENERIC step 3: the result class of an Enumerable block iterator called with a literal block, from mruby's own
+  # bodies (3rd/mruby mrblib/enum.rb, mruby-enum-ext, array.rb): each answers `ary` (Array) or, for group_by, `h = {}`
+  # (Hash). A block iterator returns the same whatever the block returns. Any receiver whose method is Enumerable's,
+  # gated on no program definition or installer of the name, so a program method of that name withdraws it.
+  def block_iterator_result(name)
+    case name
+    when 'map', 'collect', 'reject', 'find_all', 'partition', 'filter_map', 'sort_by' then NumericFlow::ARR
+    when 'group_by' then NumericFlow::HSH
+    end
+  end
+
+  # Hash answers reject itself with a Hash, so the Enumerable result does not hold for a Hash receiver.
+  HASH_OWN_BLOCK_ITERATORS = %w[reject].freeze
+
+  def block_collection_result_mask(insn, receiver)
+    kind = block_iterator_result(insn.sym)
+    return nil unless kind && insn.plain_fixed_argc? && insn.argc.zero?
+    return nil if HASH_OWN_BLOCK_ITERATORS.include?(insn.sym) && (!receiver.is_a?(Integer) || receiver.zero? || receiver.anybits?(NumericFlow::HSH))
     return nil unless @closed_world&.exact_instances_singleton_free?
     installed = symbol_installed_names
     return nil if installed.nil? || installed.include?(insn.sym)
     return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
 
-    NumericFlow::ARR
+    kind
   end
 
   def block_element_class_mask(irep, index, insn)
