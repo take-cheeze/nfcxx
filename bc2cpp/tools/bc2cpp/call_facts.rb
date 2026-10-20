@@ -40,9 +40,19 @@ module CallFacts
       @memo = {}
       @ancestors = {}
       @members = {}
+      if ENV['BC2CPP_CALL_LOOKUP_INDEX'] != '0'
+        @lookup_paths = {}
+        @simple_names = {}
+        @ruby_owners = {}
+      end
     end
 
-    def simple(name) = name.to_s.split('::').last
+    def simple(name)
+      return name.to_s.split('::').last unless @simple_names
+      return @simple_names[name] if @simple_names.key?(name)
+
+      @simple_names[name] = name.to_s.split('::').last&.freeze
+    end
 
     # Every class an object can be an instance of that this analysis knows: declared, core, native.
     def classes
@@ -166,8 +176,7 @@ module CallFacts
       path = lookup_path(klass)
       return false if path.nil?
 
-      ruby = @w.registry.fetch(name, []).reject { |x| x.owner == '<native>' || x.owner.end_with?('.singleton') }
-                 .to_set(&:owner)
+      ruby = ruby_owners(name)
       # A top-level class name is unambiguous; nested declarations require the outside source to spell their path.
       outside = lambda do |owner|
         (d[:native].include?(simple(owner)) || d[:foreign].include?(simple(owner))) &&
@@ -179,9 +188,29 @@ module CallFacts
 
     private
 
+    def ruby_owners(name)
+      return build_ruby_owners(name) unless @ruby_owners
+      return @ruby_owners[name] if @ruby_owners.key?(name)
+
+      @ruby_owners[name] = build_ruby_owners(name).freeze
+    end
+
+    def build_ruby_owners(name)
+      @w.registry.fetch(name, []).reject { |definition| definition.owner == '<native>' || definition.owner.end_with?('.singleton') }
+        .to_set(&:owner)
+    end
+
     # The owners of +klass+'s method lookup in order (prepends, class, includes, superclass, ...), or nil when
     # part of the chain is unknown.
     def lookup_path(klass)
+      return build_lookup_path(klass) unless @lookup_paths
+      return @lookup_paths[klass] if @lookup_paths.key?(klass)
+
+      # The world is settled; only its ordered path and static refusals are shared.
+      @lookup_paths[klass] = build_lookup_path(klass)&.map { |owner| owner.dup.freeze }&.freeze
+    end
+
+    def build_lookup_path(klass)
       out = []
       seen = Set.new
       cur = klass

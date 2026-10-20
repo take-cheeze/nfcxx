@@ -75,6 +75,64 @@ nonliteral_body = Irep.new(label: 'nonliteral-key', instructions: nonliteral_ins
 raise 'non-Symbol keyword producer gained a fixed name' if context.frame(frame_node, nonliteral_body, 1, nonliteral_instructions.last, state)
 puts 'call layout isolation, dynamic values, duplicate keywords and refusal checks passed'
 
+lookup_world_class = Struct.new(:closed_world, :registry, :superclass_of, :included, :prepended, :unknown_mixins, keyword_init: true)
+lookup_cw = Object.new
+def lookup_cw.method_missing_classes = Set.new
+def lookup_cw.class_declared?(name) = %w[Child Base Pre Mix].include?(name)
+def lookup_cw.outside_spells_class?(_name) = false
+lookup_class = Class.new(CallFacts::Answers) do
+  def definers(name, instance: false)
+    return nil if name == 'unbounded'
+
+    { native: name == 'native_first' ? Set['Pre'] : Set.new, foreign: Set.new }
+  end
+  def native_class_names = []
+end
+lookup_definition = Struct.new(:owner)
+lookup_world = lookup_world_class.new(closed_world: lookup_cw,
+  registry: { 'value' => [lookup_definition.new('Base'.dup), lookup_definition.new('<native>'), lookup_definition.new('Pre.singleton')],
+              'native_first' => [lookup_definition.new('Base'.dup)] },
+  superclass_of: { 'Child' => 'Base', 'Base' => :none },
+  included: { 'Child' => ['Mix'] }, prepended: { 'Child' => ['Pre'] }, unknown_mixins: Set.new)
+lookup_flag = ENV['BC2CPP_CALL_LOOKUP_INDEX']
+begin
+  ENV['BC2CPP_CALL_LOOKUP_INDEX'] = '1'
+  indexed_lookup = lookup_class.new(lookup_world)
+  ENV['BC2CPP_CALL_LOOKUP_INDEX'] = '0'
+  plain_lookup = lookup_class.new(lookup_world)
+ensure
+  lookup_flag ? ENV['BC2CPP_CALL_LOOKUP_INDEX'] = lookup_flag : ENV.delete('BC2CPP_CALL_LOOKUP_INDEX')
+end
+path = indexed_lookup.send(:lookup_path, 'Child')
+raise 'lookup prepend/include/superclass order changed' unless path.first(4) == %w[Pre Child Mix Base]
+raise 'lookup path was rebuilt' unless indexed_lookup.send(:lookup_path, 'Child').equal?(path)
+raise 'indexed lookup path is mutable' unless path.frozen? && path.all?(&:frozen?)
+raise 'singleton/native owners entered the Ruby instance index' unless indexed_lookup.send(:ruby_owners, 'value') == Set['Base']
+raise 'indexed owner set is mutable' unless indexed_lookup.send(:ruby_owners, 'value').frozen?
+%w[value native_first absent unbounded].each do |name|
+  2.times do
+    raise "lookup index changed #{name}" unless indexed_lookup.resolves_in_ruby?('Child', name) == plain_lookup.resolves_in_ruby?('Child', name)
+  end
+end
+raise 'native prepend was bypassed' if indexed_lookup.resolves_in_ruby?('Child', 'native_first')
+raise 'ordinary inherited Ruby body was lost' unless indexed_lookup.resolves_in_ruby?('Child', 'value')
+raise 'simple nested name changed' unless indexed_lookup.simple('Outer::Base') == 'Base'
+raise 'simple nested name was rebuilt' unless indexed_lookup.simple('Outer::Base').equal?(indexed_lookup.simple('Outer::Base'))
+raise 'simple name froze its input' if lookup_world.registry['value'].first.owner.frozen?
+2.times { raise 'unknown superclass gained a partial path' if indexed_lookup.send(:lookup_path, 'Mystery') }
+unknown_world = lookup_world.dup
+unknown_world.unknown_mixins = Set['Mix']
+unknown_lookup = lookup_class.new(unknown_world)
+2.times { raise 'unknown mixin gained a partial path' if unknown_lookup.send(:lookup_path, 'Child') }
+other_world = lookup_world.dup
+other_world.superclass_of = { 'Child' => :none }
+raise 'lookup index leaked between worlds' if lookup_class.new(other_world).send(:lookup_path, 'Child').include?('Base')
+cycle_world = lookup_world.dup
+cycle_world.superclass_of = { 'Child' => 'Base', 'Base' => 'Child' }
+cycle_lookup = lookup_class.new(cycle_world)
+raise 'cycle lookup changed traversal semantics' unless cycle_lookup.send(:lookup_path, 'Child') == cycle_lookup.send(:build_lookup_path, 'Child')
+puts 'method lookup index order, shadowing, refusals and world isolation checks passed'
+
 cache = IrContextLeafEvaluations.new
 key = ['leaf', NumericFlow::INT, [], [], false].freeze
 node = IrContextResults::Node.new(states: [[NumericFlow::INT], nil], calls: { 1 => NumericFlow::INT },
@@ -173,7 +231,7 @@ Dir.mktmpdir('type-check-run') do |dir|
     Dir.mkdir(work)
     result = TypeCheckRun.run(root: root, mrbc: File.expand_path(ENV.fetch('MRBC')), workdir: work,
                               sources: [source], sig_dirs: [sig], display_root: dir,
-                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode, 'BC2CPP_IR_PREPARED_CONTRACTS' => mode })
+                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode, 'BC2CPP_IR_PREPARED_CONTRACTS' => mode, 'BC2CPP_CALL_LOOKUP_INDEX' => mode })
     [JSON.parse(File.read(result.facts_path)), File.read(result.rows_path), work]
   end
   baseline, optimized = results
