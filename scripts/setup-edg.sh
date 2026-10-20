@@ -129,6 +129,11 @@ if [ "$(uname -m)" != x86_64 ]; then
     gcc -dM -E -x c++ /dev/null | grep -E '^#define __(aarch64|ARM_)[A-Za-z0-9_]*( |$)' | sed 's/^#define /gnu no  /'
   } > "$pm.new" && mv "$pm.new" "$pm"
 fi
+# glibc's aarch64 jmp_buf is 312 bytes (39 longs), but EDG sets the x86-64 size (25 longs) for every Linux target. setjmp then
+# writes past the EH stack entry of a try block and into the memory after it, which made throws abort on aarch64.
+case "$(uname -m)" in
+  aarch64|arm64) sed -i 's/^#define TARG_JMP_BUF_NUM_ELEMENTS 25$/#define TARG_JMP_BUF_NUM_ELEMENTS 39/' "$out/src/includes/cmake_defines.h" ;;
+esac
 cd "$out"
 ninja bin/cpfe bin/edg_prelink lib/libC.a
 echo "EDG built: $out/bin/eccp"
