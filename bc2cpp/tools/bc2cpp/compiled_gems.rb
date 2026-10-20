@@ -381,9 +381,9 @@ BC2CPP_OPEN_WORLD_GEMS = %w[
 ].freeze
 # The gems whose mrblib is the closed world itself.
 BC2CPP_CLOSED_WORLD_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
-# Each closed-world target's own native host sources. Empty: `closed` has no host program. The desktop launcher
-# (src/main.cxx) runs non-literal Ruby through mrb_load_string, which bc2cpp_closed_world_violations rejects.
-BC2CPP_CLOSED_WORLD_HOST_SRCS = {}.freeze
+# Each closed-world target's own native host sources (the firmware/executable).
+BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'closed' => 'app/wio/src',
+                                  'psp' => 'app/psp' }.freeze
 # mruby-compiler entry points that turn a string or file into running Ruby.
 BC2CPP_SOURCE_LOADER_CALL = /\b(?:mrb_load_n?string(?:_cxt)?|mrb_load_file(?:_cxt)?|mrb_load_exec|
                                mrb_parse_n?string|mrb_parse_file|mrb_load_detect_file_cxt)\s*\(([^;]*)/mx
