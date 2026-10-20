@@ -1,10 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require 'json'
-require 'open3'
-require 'tmpdir'
-require 'rbconfig'
+require_relative 'type_check_fixture'
 require_relative '../../tools/bc2cpp/ir_native_expression_types'
 
 check = lambda do |message, condition|
@@ -23,7 +20,6 @@ unless ENV['MRBC']
   exit
 end
 
-root = File.expand_path('../..', __dir__)
 Dir.mktmpdir('ir-context-results') do |dir|
   source = <<~RUBY
     class ContextCases
@@ -68,12 +64,8 @@ Dir.mktmpdir('ir-context-results') do |dir|
   RUBY
   File.write(File.join(dir, 'fixture.rb'), source)
   run = lambda do |extra_env = {}|
-    env = { 'MRBC' => File.expand_path(ENV.fetch('MRBC')), 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_STRICT_HINTS' => '0' }.merge(extra_env)
-    output, status = Open3.capture2e(env, RbConfig.ruby, File.join(root, 'scripts/bc2cpp/type_check.rb'),
-                                    '--files', 'fixture.rb', '--format', 'json', '--no-sends', chdir: dir)
-    raise "context fixture failed: #{output}" unless status.success?
-
-    JSON.parse(output)
+    env = { 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_STRICT_HINTS' => '0' }.merge(extra_env)
+    TypeCheckFixture.report(dir, env: env, label: 'context fixture')
   end
   report = run.call
   returns = report['ir_feedback'].select { |row| row['kind'] == 'return' }.to_h { |row| [[row['owner'], row['method']], row] }
