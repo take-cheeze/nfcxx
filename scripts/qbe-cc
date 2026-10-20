@@ -46,7 +46,18 @@ if [ $compile = 0 ]; then
   asan=(); [ -z "${NFCXX_ASAN:-}" ] || asan=(-fsanitize=address)
   # macOS: libc++ instead of libstdc++, and no libatomic (the sized atomics come from clang's runtime).
   if [ "$(uname -s)" = Darwin ]; then libs=(-lc++ -lm); else libs=(-latomic -lstdc++ -lm); fi
-  exec ${CCBIN[@]+"${CCBIN[@]}"} "$@" ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"}
+  # NFCXX_EH_UNWIND=1 (nfcxx's gate, nfcxx): the program's unwinder flag is 1. The gcc backend gets it from its
+  # objects (lib/ehshim/nfcxx_eh_unwind.h); the cproc objects cannot (no weak definitions), so a flag object is linked in.
+  ehflag=(); ehdir=""
+  if [ "${NFCXX_EH_UNWIND:-}" = 1 ]; then
+    ehdir=$(mktemp -d); printf 'int __nfcxx_eh_unwind_frames = 1;\n' > "$ehdir/flag.c"
+    ${CCBIN[@]+"${CCBIN[@]}"} -c "$ehdir/flag.c" -o "$ehdir/flag.o"
+    ehflag=("$ehdir/flag.o")
+  fi
+  st=0
+  ${CCBIN[@]+"${CCBIN[@]}"} "$@" ${ehflag[@]+"${ehflag[@]}"} ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"} || st=$?
+  [ -z "$ehdir" ] || rm -rf "$ehdir"
+  exit $st
 fi
 if [ -z "$src" ]; then
   exec ${CCBIN[@]+"${CCBIN[@]}"} "$@"
