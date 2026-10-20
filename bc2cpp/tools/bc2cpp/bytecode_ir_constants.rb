@@ -64,14 +64,14 @@ module BytecodeIR
     # The gates a build sets (bc2cpp.rb): operator_safe is IntegerConstantRanges.integer_ops_safe?, freeze_safe is
     # DeclaredConstants.stock_method?('freeze', 'Integer', ...). Without an operator gate no arithmetic is a fact; without
     # the freeze gate a frozen Integer is unknown.
-    Policy = Struct.new(:operators_safe, :freeze_safe, keyword_init: true)
+    Policy = Struct.new(:operators_safe, :freeze_safe, :freeze_classes, keyword_init: true)
 
     module_function
 
     # +ireps+: label => Irep. +sites+: the registry's constant_assignment_sites ({name:, irep:, idx:}); they name each
     # SETCONST by its full path. +poisoned+: bare names bound outside the bytecode (native, foreign Ruby).
-    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false)
-      policy = Policy.new(operators_safe: operators_safe, freeze_safe: freeze_safe)
+    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false, freeze_classes: Set.new)
+      policy = Policy.new(operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes)
       path_at = sites.to_h { |site| [[site[:irep], site[:idx]], site[:name]] }
       bindings = []
       poison = Set.new(poisoned)
@@ -167,12 +167,15 @@ module BytecodeIR
       when 'GETMCNST' then (name = insn.mcnst_name) && [:alias, name].freeze
       when *ARITH_OPS then policy.operators_safe ? arith_node(irep, index, insn, policy, depth) : nil
       when 'SEND0'
-        # Object#freeze answers its receiver. Only the Integer proof is taken (freeze_safe); union_classes keeps the
-        # node Integer-only, so a frozen Array or Hash stays unknown here.
-        return nil unless insn.sym == 'freeze' && policy.freeze_safe
+        # Object#freeze answers its receiver, for the classes whose freeze is stock (freeze_classes; freeze_safe is
+        # the Integer case). The node carries the classes it may answer for, and node_classes checks the receiver.
+        return nil unless insn.sym == 'freeze'
+
+        allowed = policy.freeze_classes | (policy.freeze_safe ? Set[:Integer] : Set.new)
+        return nil if allowed.empty?
 
         receiver = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
-        receiver && [:freeze, receiver].freeze
+        receiver && [:freeze, receiver, allowed].freeze
       when 'SEND'
         name = BIT_OPS[insn.sym]
         return nil unless name && insn.argc == 1 && policy.operators_safe
@@ -253,7 +256,7 @@ module BytecodeIR
       when :alias then known[node[1]]
       when :freeze
         classes = union_classes(node[1], known)
-        classes if classes == Set[:Integer]
+        classes if classes && !classes.empty? && classes.subset?(node[2])
       when :arith
         left = union_classes(node[2], known)
         right = union_classes(node[3], known)

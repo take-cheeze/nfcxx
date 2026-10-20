@@ -36,8 +36,12 @@ analyze = lambda do |source, safe: true|
     operators_safe = safe && IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
     # The gate the build passes (bc2cpp.rb): stock Integer#freeze.
     freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
+    # The container gates the build passes (bc2cpp.rb): a stock freeze on Array, Hash or String answers its receiver.
+    freeze_classes = %w[Array Hash String].select do |klass|
+      DeclaredConstants.stock_method?('freeze', klass, registry, included, prepended, unknown)
+    end.map(&:to_sym).to_set
     BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: operators_safe,
-                                             freeze_safe: freeze_safe)
+                                             freeze_safe: freeze_safe, freeze_classes: freeze_classes)
   end
 end
 
@@ -81,7 +85,7 @@ check.call('Array literal: class Array',
            fact_of.call(result, 'Fx::LIST')&.classes == Set[:Array])
 # `.freeze` is not modelled yet (stage 1): the writer is an unknown SEND0, so the binding has no class, no value.
 check.call('frozen literal: freeze is not modelled, so the binding has no class and no value (never a wrong class)',
-           fact_of.call(result, 'Fx::FROZEN')&.classes.nil? && fact_of.call(result, 'Fx::FROZEN')&.value.nil?)
+           fact_of.call(result, 'Fx::FROZEN')&.classes == Set[:Array] && fact_of.call(result, 'Fx::FROZEN')&.value.nil?)
 check.call('Range literal: class Range', fact_of.call(result, 'Fx::RANGE')&.classes == Set[:Range])
 check.call('Float literal: class Float, no value', (f = fact_of.call(result, 'Fx::FLOAT')) && f.classes == Set[:Float] && f.value.nil?)
 check.call('Integer#freeze is the identity when stock: FZ = BASE.freeze is 32 with interval [32, 32]',
