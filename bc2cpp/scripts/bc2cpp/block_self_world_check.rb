@@ -170,7 +170,8 @@ end
 puts '-- the closed world'
 Dir.mktmpdir do |dir|
   srcs = closed_world_mrblib_srcs(ROOT)
-  gems = NomethodReviewedProbe.closed_gems(ROOT)
+  # The closed build's mruby-compiler is there for its smoke probe only; no game Ruby reaches it.
+  gems = NomethodReviewedProbe.closed_gems(ROOT).reject { |name, _| name == 'mruby-compiler' }
   natives, outside_ruby = bc2cpp_closed_world_outside_srcs('closed', gems, ROOT)
   natives = (natives + Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{ROOT}/3rd/mruby") + external_gem_native_srcs(ROOT)).uniq
   foreign = (outside_ruby + foreign_mrblib_srcs(ROOT)).map { |p| File.expand_path(p) }.uniq - srcs
