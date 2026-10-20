@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nfcxx wasm explorer</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #fbfaf7; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b675f; --line: #dcd8cf;
+    --accent: #2f6fdb; --ok: #1f7a3d; --bad: #b3261e; --code-bg: #f4f2ed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161513; --panel: #1f1e1b; --ink: #ece9e1; --muted: #9b968b; --line: #3a3833;
+      --accent: #7aa7ff; --ok: #6cc98a; --bad: #ff8a80; --code-bg: #12110f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161513; --panel: #1f1e1b; --ink: #ece9e1; --muted: #9b968b; --line: #3a3833;
+    --accent: #7aa7ff; --ok: #6cc98a; --bad: #ff8a80; --code-bg: #12110f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px;
+    padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .status { margin-left: auto; font-size: 13px; color: var(--muted); }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0;
+    height: calc(100vh - 57px); min-height: 520px;
+  }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; height: auto; }
+    .pane { min-height: 60vh; }
+  }
+  .pane { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
+  .pane:last-child { border-right: 0; }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  select, button, input {
+    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px;
+  }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
+  textarea.src {
+    flex: 1; width: 100%; resize: none; border: 0; outline: none; padding: 14px 16px;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--panel); color: var(--ink); tab-size: 2; white-space: pre;
+  }
+  .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .tabs button {
+    border: 0; border-radius: 0; background: transparent; padding: 9px 12px; color: var(--muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .view { flex: 1; overflow: auto; padding: 14px 16px; }
+  .view[hidden] { display: none; }
+  .card { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat .v { font-size: 20px; font-weight: 650; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  pre {
+    margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; overflow: auto; white-space: pre; max-height: 60vh;
+  }
+  .error {
+    border: 1px solid var(--bad); color: var(--bad); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 12px; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+  }
+  .result { font-size: 22px; font-weight: 650; }
+  .result.trap { color: var(--bad); }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>nfcxx wasm explorer</h1>
+  <span class="sub">C++ &rarr; mid-level IR &rarr; WebAssembly, run in this page</span>
+  <span class="status" id="status">checking server&hellip;</span>
+</header>
+
+<main>
+  <section class="pane" aria-label="Source">
+    <div class="toolbar">
+      <select id="examples" aria-label="Example"></select>
+      <button class="primary" id="compile" title="Ctrl+Enter">Compile</button>
+      <button id="share" title="Copy a link that holds this source">Copy link</button>
+      <span class="hint">Ctrl+Enter compiles</span>
+    </div>
+    <textarea class="src" id="source" spellcheck="false" aria-label="C++ source"></textarea>
+  </section>
+
+  <section class="pane" aria-label="Output">
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-module" aria-selected="true" aria-controls="view-module" data-tab="module">Module</button>
+      <button role="tab" id="tab-ir" aria-selected="false" aria-controls="view-ir" data-tab="ir">IR</button>
+      <button role="tab" id="tab-hex" aria-selected="false" aria-controls="view-hex" data-tab="hex">Bytes</button>
+    </div>
+    <div class="view" id="view-module" role="tabpanel" aria-labelledby="tab-module">
+      <div id="error" class="error" hidden></div>
+      <div class="card">
+        <h2>Run</h2>
+        <button id="run" disabled>Run main()</button>
+        <p class="muted" style="margin:8px 0 0">Imports of the module are stubbed the way <code>tests/wasm/host.cjs</code> stubs them:
+          each returns its first argument plus one.</p>
+        <div id="result" class="result" style="margin-top:10px"></div>
+      </div>
+      <div class="card">
+        <h2>Module</h2>
+        <div class="stats">
+          <div class="stat"><div class="v" id="s-size">&ndash;</div><div class="k">bytes</div></div>
+          <div class="stat"><div class="v" id="s-exports">&ndash;</div><div class="k">exports</div></div>
+          <div class="stat"><div class="v" id="s-imports">&ndash;</div><div class="k">imports</div></div>
+          <div class="stat"><div class="v" id="s-ms">&ndash;</div><div class="k">ms, compile</div></div>
+        </div>
+        <p style="margin:12px 0 0"><a id="download" href="#" download="prog.wasm" hidden>Download prog.wasm</a></p>
+      </div>
+      <div class="card">
+        <h2>Exports</h2>
+        <table><thead><tr><th>name</th><th>kind</th></tr></thead><tbody id="exports"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Imports</h2>
+        <table><thead><tr><th>module</th><th>name</th><th>kind</th></tr></thead><tbody id="imports"></tbody></table>
+      </div>
+    </div>
+    <div class="view" id="view-ir" role="tabpanel" aria-labelledby="tab-ir" hidden>
+      <pre id="ir" aria-label="Mid-level IR"></pre>
+    </div>
+    <div class="view" id="view-hex" role="tabpanel" aria-labelledby="tab-hex" hidden>
+      <pre id="hex" aria-label="Module bytes"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const EXAMPLES = [
+    { name: "Loop and arithmetic (385)", src:
+`int main() {
+  int s = 0;
+  for (int i = 1; i <= 10; ++i)
+    s += i * i;
+  return s;
+}
+` },
+    { name: "Struct array and pointer (300)", src:
+`struct P { int x; long y; };
+
+static P table[4] = {{1, 10}, {2, 20}, {3, 30}, {4, 40}};
+
+long dot(const P* p, int n) {
+  long s = 0;
+  for (int i = 0; i < n; ++i)
+    s += p[i].x * p[i].y;
+  return s;
+}
+
+int main() {
+  return (int)dot(table, 4);
+}
+` },
+    { name: "Recursion (610)", src:
+`int fib(int n) {
+  return n < 2 ? n : fib(n - 1) + fib(n - 2);
+}
+
+int main() {
+  return fib(15);
+}
+` },
+  ];
+
+  const $ = (id) => document.getElementById(id);
+  const src = $("source");
+  const compileBtn = $("compile");
+  const runBtn = $("run");
+  let current = null;   // the last successful compile: { wasm: Uint8Array, module: WebAssembly.Module }
+
+  // The source lives in the URL hash so a link reproduces it. Failures (no hash, bad encoding) fall back to the example.
+  function fromHash() {
+    try {
+      const h = location.hash.replace(/^#src=/, "");
+      if (!h) return null;
+      return decodeURIComponent(escape(atob(h.replace(/-/g, "+").replace(/_/g, "/"))));
+    } catch (e) {
+      return null;
+    }
+  }
+  function toHash(text) {
+    const b64 = btoa(unescape(encodeURIComponent(text))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return "#src=" + b64;
+  }
+
+  function setStatus(text, cls) {
+    const s = $("status");
+    s.textContent = text;
+    s.className = "status " + (cls || "");
+  }
+
+  function showError(stage, message) {
+    const box = $("error");
+    box.hidden = !message;
+    box.textContent = message ? `${stage}: ${message}` : "";
+  }
+
+  function showTab(name) {
+    for (const b of document.querySelectorAll(".tabs button")) {
+      b.setAttribute("aria-selected", String(b.dataset.tab === name));
+    }
+    for (const v of ["module", "ir", "hex"]) {
+      $("view-" + v).hidden = v !== name;
+    }
+  }
+
+  function hexDump(bytes, limit) {
+    const rows = [];
+    const n = Math.min(bytes.length, limit);
+    for (let off = 0; off < n; off += 16) {
+      const chunk = bytes.subarray(off, Math.min(off + 16, n));
+      const hex = Array.from(chunk, (b) => b.toString(16).padStart(2, "0")).join(" ");
+      const text = Array.from(chunk, (b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".")).join("");
+      rows.push(off.toString(16).padStart(6, "0") + "  " + hex.padEnd(47, " ") + "  " + text);
+    }
+    if (bytes.length > limit) rows.push(`... ${bytes.length - limit} more bytes`);
+    return rows.join("\n");
+  }
+
+  function fillTable(id, rows) {
+    const body = $(id);
+    body.textContent = "";
+    for (const cells of rows) {
+      const tr = document.createElement("tr");
+      for (const c of cells) {
+        const td = document.createElement("td");
+        td.textContent = c;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+  }
+
+  function clearRun() {
+    $("result").textContent = "";
+    $("result").className = "result";
+  }
+
+  function describe(bytes, ms) {
+    current = null;
+    runBtn.disabled = true;
+    clearRun();
+    const module = new WebAssembly.Module(bytes);   // throws on a malformed module: that is a bug, shown as an error
+    current = { bytes, module };
+    const exports = WebAssembly.Module.exports(module);
+    const imports = WebAssembly.Module.imports(module);
+    $("s-size").textContent = String(bytes.length);
+    $("s-exports").textContent = String(exports.length);
+    $("s-imports").textContent = String(imports.length);
+    $("s-ms").textContent = ms.toFixed(0);
+    fillTable("exports", exports.map((e) => [e.name, e.kind]));
+    fillTable("imports", imports.map((i) => [i.module, i.name, i.kind]));
+    $("hex").textContent = hexDump(bytes, 1024);
+    const dl = $("download");
+    if (dl.href.startsWith("blob:")) URL.revokeObjectURL(dl.href);
+    dl.href = URL.createObjectURL(new Blob([bytes], { type: "application/wasm" }));
+    dl.hidden = false;
+    runBtn.disabled = !exports.some((e) => e.name === "main" && e.kind === "function");
+    if (runBtn.disabled) $("result").textContent = "the module has no main export";
+  }
+
+  async function compile() {
+    compileBtn.disabled = true;
+    setStatus("compiling…");
+    showError("", "");
+    const t0 = performance.now();
+    try {
+      const r = await fetch("api/compile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: src.value }),
+      });
+      const data = await r.json();
+      const ms = performance.now() - t0;
+      $("ir").textContent = data.ir || "";
+      if (!data.ok) {
+        current = null;
+        runBtn.disabled = true;
+        clearRun();
+        showError(data.stage, data.message);
+        fillTable("exports", []);
+        fillTable("imports", []);
+        $("hex").textContent = "";
+        $("download").hidden = true;
+        for (const id of ["s-size", "s-exports", "s-imports", "s-ms"]) $(id).textContent = "–";
+        setStatus(data.stage === "emit" ? "refused" : "error", "bad");
+        if (data.stage === "front-end") showTab("module");
+        return;
+      }
+      const bytes = Uint8Array.from(atob(data.wasm), (c) => c.charCodeAt(0));
+      describe(bytes, ms);
+      setStatus(`compiled in ${(ms / 1000).toFixed(1)} s`, "ok");
+      location.hash = toHash(src.value).slice(1);
+    } catch (e) {
+      showError("browser", String(e && e.message || e));
+      setStatus("failed", "bad");
+    } finally {
+      compileBtn.disabled = false;
+    }
+  }
+
+  function run() {
+    if (!current) return;
+    clearRun();
+    const imports = {};
+    for (const imp of WebAssembly.Module.imports(current.module)) {
+      if (imp.kind !== "function") {
+        $("result").textContent = `import ${imp.module}.${imp.name} (${imp.kind}) is not provided by this page`;
+        return;
+      }
+      imports[imp.module] = imports[imp.module] || {};
+      imports[imp.module][imp.name] = (x) => (Number(x) | 0) + 1;
+    }
+    const out = $("result");
+    try {
+      const instance = new WebAssembly.Instance(current.module, imports);
+      out.textContent = String(instance.exports.main());
+    } catch (e) {
+      if (e instanceof WebAssembly.RuntimeError) {
+        out.textContent = "trap: " + e.message;
+        out.classList.add("trap");
+      } else {
+        out.textContent = String(e && e.message || e);
+        out.classList.add("trap");
+      }
+    }
+  }
+
+  // The wasm module is run here, with the browser's WebAssembly; the compiler is on the server.
+  async function checkServer() {
+    try {
+      const r = await fetch("api/health");
+      const data = await r.json();
+      setStatus(data.ready ? "server ready" : "server up, harness not built", data.ready ? "ok" : "bad");
+      compileBtn.disabled = !data.ready;
+    } catch (e) {
+      setStatus("server not reachable", "bad");
+      compileBtn.disabled = true;
+    }
+  }
+
+  // Examples and the link's source.
+  const sel = $("examples");
+  EXAMPLES.forEach((ex, i) => {
+    const o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = ex.name;
+    sel.appendChild(o);
+  });
+  sel.addEventListener("change", () => { src.value = EXAMPLES[Number(sel.value)].src; compile(); });
+  src.value = fromHash() ?? EXAMPLES[0].src;
+
+  compileBtn.addEventListener("click", compile);
+  runBtn.addEventListener("click", run);
+  $("share").addEventListener("click", async () => {
+    const url = location.origin + location.pathname + toHash(src.value);
+    try {
+      await navigator.clipboard.writeText(url);
+      setStatus("link copied", "ok");
+    } catch (e) {
+      location.hash = toHash(src.value).slice(1);
+      setStatus("link is in the address bar", "ok");
+    }
+  });
+  src.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const s = src.selectionStart, end = src.selectionEnd;
+      src.value = src.value.slice(0, s) + "  " + src.value.slice(end);
+      src.selectionStart = src.selectionEnd = s + 2;
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); compile(); }
+  });
+  for (const b of document.querySelectorAll(".tabs button")) {
+    b.addEventListener("click", () => showTab(b.dataset.tab));
+  }
+
+  checkServer();
+})();
+</script>
+</body>
+</html>
