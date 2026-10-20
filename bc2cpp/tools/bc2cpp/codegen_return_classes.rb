@@ -66,7 +66,7 @@ class CodeGen
 
     def block_send_mask(irep, index, insn, state)
       @cg.block_return_class_result(irep, index, insn, state) || @cg.core_ruby_class_result(irep, index, insn, state) ||
-        @cg.block_collection_result_mask(insn, state[insn.reg.to_i]) || @cg.bottom_block_receiver_mask(insn, state) || NumericFlow::OTHER
+        @cg.block_collection_result_mask(insn) || @cg.bottom_block_receiver_mask(insn, state) || NumericFlow::OTHER
     end
 
     def class_test(irep, index, insn, _state) = @cg.class_test_for(irep, index, insn)

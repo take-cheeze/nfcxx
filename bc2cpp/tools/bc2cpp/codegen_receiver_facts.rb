@@ -554,30 +554,36 @@ class CodeGen
   # ELEMENT (generic step 2): the class mask of the elements a `map`/`collect` call with a literal block returns, read
   # from the block's own returns (block_return_class). Nil unless no program definition has the name and the class
   # already has a bit: allocating one here would renumber the masks.
-  # GENERIC step 3: the result class of an Enumerable block iterator called with a literal block, from mruby's own
-  # bodies (3rd/mruby mrblib/enum.rb, mruby-enum-ext, array.rb): each answers `ary` (Array) or, for group_by, `h = {}`
-  # (Hash). A block iterator returns the same whatever the block returns. Any receiver whose method is Enumerable's,
-  # gated on no program definition or installer of the name, so a program method of that name withdraws it.
-  def block_iterator_result(name)
-    case name
-    when 'map', 'collect', 'reject', 'find_all', 'partition', 'filter_map', 'sort_by' then NumericFlow::ARR
-    when 'group_by' then NumericFlow::HSH
-    end
-  end
-
-  # Hash answers reject itself with a Hash, so the Enumerable result does not hold for a Hash receiver.
-  HASH_OWN_BLOCK_ITERATORS = %w[reject].freeze
-
-  def block_collection_result_mask(insn, receiver)
-    kind = block_iterator_result(insn.sym)
-    return nil unless kind && insn.plain_fixed_argc? && insn.argc.zero?
-    return nil if HASH_OWN_BLOCK_ITERATORS.include?(insn.sym) && (!receiver.is_a?(Integer) || receiver.zero? || receiver.anybits?(NumericFlow::HSH))
+  # GENERIC step 3: the result class of a block iterator called with a literal block (a SENDB), read from the core
+  # bodies that answer the name (block_core_index: mruby's own mrblib, e.g. enum.rb's collect, reject, group_by) with
+  # block_given, so the list of iterators is not written here. The union over those definitions bounds the result for
+  # any receiver, Hash's own reject included. Gated on no program definition or installer of the name and on no C
+  # method spelling it; core's `alias map collect` is no install (collect_installed_names skips core mrblib).
+  def block_collection_result_mask(insn)
+    return nil unless insn.plain_fixed_argc? && insn.argc.zero?
     return nil unless @closed_world&.exact_instances_singleton_free?
     installed = symbol_installed_names
     return nil if installed.nil? || installed.include?(insn.sym)
     return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
+    return nil unless @closed_world.native_paths_spelling(insn.sym).empty?
+    return nil if self.class.core_result_opaque_defs&.any? { |_owner, method| method == insn.sym }
 
-    kind
+    @block_iterator_results ||= {}
+    return @block_iterator_results[insn.sym] if @block_iterator_results.key?(insn.sym)
+
+    definitions = block_core_index.select { |(_owner, method), _defs| method == insn.sym }.values.flatten.uniq
+    @block_iterator_results[insn.sym] = block_iterator_body_mask(definitions, insn.sym)
+  end
+
+  def block_iterator_body_mask(definitions, name)
+    return nil if definitions.empty?
+
+    definitions.reduce(0) do |mask, definition|
+      result = core_ruby_body_result(definition, NumericFlow::OTHER, true, call_name: name)
+      return nil unless result
+
+      mask | result
+    end
   end
 
   def block_element_class_mask(irep, index, insn)
