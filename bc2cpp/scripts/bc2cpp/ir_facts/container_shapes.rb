@@ -5,17 +5,17 @@
 # an instruction builds, the producers of a register through a join, the literal value classes, the straight-line
 # window SEALED_HASH_IVAR walks, and the element join the layouts take over every producer.
 #
-# Usage: ruby scripts/bc2cpp/ir_container_shapes_check.rb
+# Usage: ruby scripts/bc2cpp/ir_facts_check.rb
 
 require 'set'
-TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.expand_path('../../tools/bc2cpp', __dir__)
+TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.expand_path('../../../tools/bc2cpp', __dir__)
 $LOAD_PATH.unshift(TOOLS)
 require 'irep'
 require 'bytecode_ir_containers'
 require 'element_layouts'
 
-require_relative 'check_support'
-require_relative 'ir_instruction_fixtures'
+require_relative '../check_support'
+require_relative '../ir_instruction_fixtures'
 extend IrInstructionFixtures
 suite = FixtureCheck.new('ir_container_shapes_check')
 check = suite.method(:check)
