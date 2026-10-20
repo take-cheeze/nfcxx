@@ -10,11 +10,11 @@
 #     register at the ARRAY, through joins and moves, is admitted; a call, a branch or a mutation between the ARRAY
 #     and the read, an argument, a captured register, an out-of-range index and a handler are refused.
 #
-# Usage: ruby scripts/bc2cpp/ir_numeric_classes_check.rb
+# Usage: ruby scripts/bc2cpp/ir_facts_check.rb
 
 require 'set'
-require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/numeric_flow'
+require_relative '../../../tools/bc2cpp/irep'
+require_relative '../../../tools/bc2cpp/numeric_flow'
 
 failures = []
 check = lambda do |what, condition|
@@ -29,10 +29,10 @@ def insn(addr, op, args)
   Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
 end
 
-$irep_serial = 0
+@irep_serial = 0
 def irep_of(list, handlers: [], pool: [])
-  $irep_serial += 1
-  Irep.new(label: "nc#{$irep_serial}", nregs: 10, instructions: list, catch_handlers: handlers, reps: [], pool: pool)
+  @irep_serial += 1
+  Irep.new(label: "nc#{@irep_serial}", nregs: 10, instructions: list, catch_handlers: handlers, reps: [], pool: pool)
 end
 
 # The element mask of the read at the last-but-one instruction (the list ends in a RETURN).

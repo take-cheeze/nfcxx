@@ -7,8 +7,8 @@
 # (the walk answers through the op) and a negative case (the answer stays a
 # refusal). Codegen never passes origin_transfers:, so the default walk must
 # still refuse at these ops, except a plain JMPUW and a dead predecessor (ADR 0476).
-require_relative '../../tools/bc2cpp/irep'
-require_relative '../../tools/bc2cpp/bytecode_ir'
+require_relative '../../../tools/bc2cpp/irep'
+require_relative '../../../tools/bc2cpp/bytecode_ir'
 
 def insn(addr, op, args)
   Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
@@ -180,7 +180,7 @@ check.call('without the handler the same body is dead and skipped',
            defs_of.call(program.call(handler_live.instructions.map(&:source)), 4, '1') == [0])
 
 # The Fixnum proof's audited lists are BytecodeIR's, not copies kept equal by a check.
-proof = File.read(File.expand_path('../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
+proof = File.read(File.expand_path('../../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
 check.call('FIXNUM_PROOF_STEP_OVER_OPS is WRITES_LEADING_REG_OPS itself',
            proof.include?("FIXNUM_PROOF_STEP_OVER_OPS = BytecodeIR::WRITES_LEADING_REG_OPS\n"))
 check.call('FIXNUM_PROOF_READONLY_REG_OPS is derived from BytecodeIR::Ops::READS_LEAD',
