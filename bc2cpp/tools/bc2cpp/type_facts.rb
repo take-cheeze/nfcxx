@@ -222,7 +222,8 @@ module TypeFacts
     out << ['Integer', 'inferred:entry-callsite'] if entry_fixnum?(gen, label, k)
     pools = gen.instance_variable_get(:@class_arg_pools) || {}
     numeric = gen.instance_variable_get(:@entry_arg_numeric) || {}
-    if (mask = pools[[label, k]]) && mask.nonzero?
+    poly = gen.respond_to?(:poly_arg_pool_key?) && gen.poly_arg_pool_key?([label, k])
+    if !poly && (mask = pools[[label, k]]) && mask.nonzero?
       names = mask_classes(gen, mask)
       out << [names.join(' | '), 'inferred:class-pool'] unless names.empty? || names.include?('OTHER')
     end
