@@ -69,7 +69,8 @@
 #     declaration so QBE keeps it in memory across setjmp/longjmp). The stores that remain are plain, in
 #     program order, on x86-64 (TSO): the same code gcc emits for a volatile store there, which is what CoreCLR's
 #     GC needs (src/coreclr/gc/env/volatile.h). Not for other targets: a plain store has no release ordering on
-#     arm64, and the fence stub below is x86 mfence. Hand-written C (--c-input) gets the same rule.
+#     arm64, and the fence stub below is a barrier (mfence or dmb ish), not a release store. Hand-written C
+#     (--c-input) gets the same rule.
 #   * Hand-written C (--c-input; glibc headers and user code): `typedef T _Float32;`-style typedefs of the
 #     floating types above are removed (the names are mapped instead), as glibc's <bits/floatn.h> declares them.
 #   * GCC's `__sync_{add,sub,and,or,xor}_and_fetch_{4,8}` and `__sync_val_compare_and_swap_{4,8}` (the Interlocked
@@ -665,8 +666,9 @@ INT3_STUB = "\t.pushsection .text.__nfcxx_int3,\"ax\",@progbits\n" \
             "\tret\n" \
             "\t.popsection"
 
-# __atomic_thread_fence / __atomic_signal_fence (libstdc++ shared_ptr, nlohmann::json): cproc has no fences, so the
-# call goes to a weak stub with mfence, a full barrier on x86-64 whatever the memory order.
+# __atomic_thread_fence / __atomic_signal_fence (libstdc++ shared_ptr, nlohmann::json, regex): cproc has no fences, so the
+# call goes to a weak stub: mfence on x86-64 (a full barrier whatever the memory order), dmb ish on arm64 (the inner
+# shareable full barrier, which is what a seq_cst fence needs there). The target picks the stub (--arm64).
 FENCE_STUB = "\t.pushsection .text.__nfcxx_fence,\"ax\",@progbits\n" \
              "\t.weak __nfcxx_fence\n" \
              "\t.type __nfcxx_fence,@function\n" \
@@ -674,6 +676,13 @@ FENCE_STUB = "\t.pushsection .text.__nfcxx_fence,\"ax\",@progbits\n" \
              "\tmfence\n" \
              "\tret\n" \
              "\t.popsection"
+FENCE_STUB_ARM64 = "\t.pushsection .text.__nfcxx_fence,\"ax\",@progbits\n" \
+                   "\t.weak __nfcxx_fence\n" \
+                   "\t.type __nfcxx_fence,@function\n" \
+                   "__nfcxx_fence:\n" \
+                   "\tdmb ish\n" \
+                   "\tret\n" \
+                   "\t.popsection"
 
 # builtin -> [libc function, prototype]; cproc has the builtin names but not the functions
 LIBC_BUILTINS = {
@@ -1270,12 +1279,17 @@ SPECIAL_ID = {}
 def main(argv)
   c_input = false
   macho = false
+  arm64 = false
   args = argv.dup
-  while args.first == '--c-input' || args.first == '--macho'
-    if args.shift == '--macho' then macho = true else c_input = true end
+  while args.first == '--c-input' || args.first == '--macho' || args.first == '--arm64'
+    case args.shift
+    when '--macho' then macho = true
+    when '--arm64' then arm64 = true
+    else c_input = true
+    end
   end
   label = ->(name) { macho ? "_#{name}" : name }
-  die 'usage: qbe-prep.rb [--c-input] [--macho] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
+  die 'usage: qbe-prep.rb [--c-input] [--macho] [--arm64] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
   src_path, out_path, tail_path = args
   src = read_text(src_path)
   tk = tokenize(src)
@@ -1550,7 +1564,16 @@ def main(argv)
     prelude['__nfcxx_int3'] = 'void __nfcxx_int3(void);'
     tail << INT3_STUB
   end
-  tail << FENCE_STUB if need_fence
+  if need_fence
+    if macho
+      # Mach-O (--macho): the ELF section and .type forms do not assemble there. A weak definition in __TEXT,__text
+      # under the "_"-prefixed label, which is what the call to __nfcxx_fence names after QBE's prefix.
+      tail << "\t.section __TEXT,__text,regular,pure_instructions" << "\t.globl ___nfcxx_fence" <<
+              "\t.weak_definition ___nfcxx_fence" << "___nfcxx_fence:" << "\t#{arm64 ? 'dmb ish' : 'mfence'}" << "\tret"
+    else
+      tail << (arm64 ? FENCE_STUB_ARM64 : FENCE_STUB)
+    end
+  end
   decls.concat(prelude.values)
   edits << [0, 0, decls.join("\n") + "\n"] unless decls.empty?
   unless ctors.empty?
