@@ -514,6 +514,21 @@ def unescape_mir(s)
           if i + 3 < n
             out << s[i+2,2].to_i(16); i += 4; next
           end
+        elsif e == "u" && i + 2 < n && s[i+2] == "{"
+          j = s.index("}", i + 3)
+          if j
+            cp = s[i+3...j].to_i(16)
+            if cp < 0x80
+              out << cp
+            elsif cp < 0x800
+              out << (0xC0 | (cp >> 6)); out << (0x80 | (cp & 0x3F))
+            elsif cp < 0x10000
+              out << (0xE0 | (cp >> 12)); out << (0x80 | ((cp >> 6) & 0x3F)); out << (0x80 | (cp & 0x3F))
+            else
+              out << (0xF0 | (cp >> 18)); out << (0x80 | ((cp >> 12) & 0x3F)); out << (0x80 | ((cp >> 6) & 0x3F)); out << (0x80 | (cp & 0x3F))
+            end
+            i = j + 1; next
+          end
         elsif e >= "0" && e <= "7"
           # octal up to 3 digits
           oct = s[i+1,3].match(/^[0-7]+/)&.to_s || ""
@@ -2604,6 +2619,74 @@ functions.each do |fn|
                 store_dest.call("%#{r}")
               end
             end
+          when "atomic_cxchg", "atomic_cxchgweak"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(ptr") || ept.start_with?("(fn")
+            ept = "unsigned_long" if ept.start_with?("(")
+            if arg_vals.size >= 3
+              r1 = regi; regi += 1
+              stmts << "(let %#{r1} #{ept} (load #{ept} #{arg_vals[0][0]}))"
+              rok = regi; regi += 1
+              stmts << "(let %#{rok} bool (eq #{ept} %#{r1} #{arg_vals[1][0]}))"
+              stmts << "(if %#{rok} (then (store #{ept} #{arg_vals[0][0]} #{arg_vals[2][0]})))"
+              addr, regi = place_addr(dest, types, locals, params, param_reg, stmts, regi)
+              dty = place_type(dest, types, locals, params)
+              val_off = 8; flag_off = 0
+              if dty && types[dty] && types[dty][:fields]
+                types[dty][:fields].each do |f|
+                  if f[:type] == "bool"
+                    flag_off = f[:off]
+                  else
+                    val_off = f[:off]
+                  end
+                end
+              end
+              stmts << "(store #{ept} #{addr} %#{r1})" if val_off == 0
+              if val_off != 0
+                rv = regi; regi += 1
+                stmts << "(let %#{rv} (ptr #{ept}) (offset #{addr} #{val_off}))"
+                stmts << "(store #{ept} %#{rv} %#{r1})"
+              end
+              r2 = regi; regi += 1
+              stmts << "(let %#{r2} (ptr bool) (offset #{addr} #{flag_off}))"
+              stmts << "(store bool %#{r2} %#{rok})"
+            end
+          when "atomic_load"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(")
+            if arg_vals.size >= 1
+              r = regi; regi += 1
+              stmts << "(let %#{r} #{ept} (load #{ept} #{arg_vals[0][0]}))"
+              store_dest.call("%#{r}")
+            end
+          when "atomic_store"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(")
+            if arg_vals.size >= 2
+              stmts << "(store #{ept} #{arg_vals[0][0]} #{arg_vals[1][0]})"
+            end
+          when "atomic_xchg", "atomic_xadd", "atomic_xsub", "atomic_and", "atomic_or", "atomic_xor", "atomic_nand"
+            ety = iparams[0] || "u8"
+            ept = rust_type_to_pathb(ety, types)
+            ept = "unsigned_long" if ept.start_with?("(")
+            op = {"atomic_xchg" => nil, "atomic_xadd" => "wadd", "atomic_xsub" => "wsub", "atomic_and" => "and", "atomic_or" => "or", "atomic_xor" => "xor"}[iname]
+            if arg_vals.size >= 2
+              r1 = regi; regi += 1
+              stmts << "(let %#{r1} #{ept} (load #{ept} #{arg_vals[0][0]}))"
+              if op
+                r2 = regi; regi += 1
+                stmts << "(let %#{r2} #{ept} (#{op} #{ept} %#{r1} #{arg_vals[1][0]}))"
+                stmts << "(store #{ept} #{arg_vals[0][0]} %#{r2})"
+              else
+                stmts << "(store #{ept} #{arg_vals[0][0]} #{arg_vals[1][0]})"
+              end
+              store_dest.call("%#{r1}")
+            end
+          when "atomic_fence"
+            nil
           when "size_of_val", "align_of_val"
             ty = dest_ty ? rust_type_to_pathb(dest_ty, types) : "unsigned_long"
             t = iparams[0] || "u8"
