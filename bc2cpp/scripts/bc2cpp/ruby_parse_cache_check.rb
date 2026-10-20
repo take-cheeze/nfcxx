@@ -138,13 +138,16 @@ puts '-- one parse per text in a scan'
 if foreign.empty?
   puts '  skip parse count (no real foreign files)'
 else
-  RubyParseCache.clear
-  calls = 0
-  foreign.sort.each { |path| 3.times { foreign_method_names([path]) } }
-  check.call("#{foreign.size} files scanned three times each parse #{foreign.size} times", calls == foreign.size)
-  calls = 0
-  ForeignDefiners.scan(foreign.sort)
-  check.call('ForeignDefiners.scan of the same files parses nothing more', calls.zero?)
+  # Measure parser reuse without a disk-cached scan bypassing the parser entirely.
+  ScanCache.bypass do
+    RubyParseCache.clear
+    calls = 0
+    foreign.sort.each { |path| 3.times { foreign_method_names([path]) } }
+    check.call("#{foreign.size} files scanned three times each parse #{foreign.size} times", calls == foreign.size)
+    calls = 0
+    ForeignDefiners.scan(foreign.sort)
+    check.call('ForeignDefiners.scan of the same files parses nothing more', calls.zero?)
+  end
 end
 
 puts '-- closed-world queries share each file scan across method names'
