@@ -88,6 +88,7 @@ class IrContextResults
     @shapes = {}
     @shape_bits = {}
     @shape_mask = 0
+    @call_layouts = {}.compare_by_identity unless ENV['BC2CPP_IR_CALL_INDEX'] == '0'
     @class_cache = {}
     @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
@@ -315,25 +316,46 @@ class IrContextResults
   end
 
   def frame(node, body, index, insn, state)
+    layout = call_layout(body, index, insn)
+    return nil unless layout
+
+    implicit, register, argc, keyword_registers = layout
+    receiver = implicit ? node.receiver : state[register]
+    arguments = (1..argc).map { |position| state[register + position] || NumericFlow::OTHER }
+    keywords = {}
+    keyword_registers.each { |name, value_register| keywords[name] = state[value_register] || NumericFlow::OTHER }
+    [receiver, arguments, keywords]
+  end
+
+  def call_layout(body, index, insn)
+    return build_call_layout(body, index, insn) unless @call_layouts
+
+    layouts = (@call_layouts[body] ||= {})
+    return layouts[index] if layouts.key?(index)
+
+    layouts[index] = build_call_layout(body, index, insn)
+  end
+
+  # Keyword names depend only on reaching bytecode definitions, never on context masks.
+  def build_call_layout(body, index, insn)
     return nil unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op)
 
     argc = insn.op.end_with?('0') ? 0 : insn.argc
     return nil unless argc && insn.nk_spec != '*'
 
-    receiver = %w[SSEND SSEND0].include?(insn.op) ? node.receiver : state[insn.reg.to_i]
-    arguments = (1..argc).map { |position| state[insn.reg.to_i + position] || NumericFlow::OTHER }
-    keywords = {}
+    register = insn.reg.to_i
+    keyword_registers = []
     insn.nk_spec.to_i.times do |position|
-      register = insn.reg.to_i + argc + 1 + position * 2
-      definitions = BytecodeIR.reaching_definitions(body, index, register.to_s, origin_transfers: true)
+      key_register = register + argc + 1 + position * 2
+      definitions = BytecodeIR.reaching_definitions(body, index, key_register.to_s, origin_transfers: true)
       return nil unless definitions&.size == 1 && !definitions.first.entry?
 
       producer = body.instructions[definitions.first.index]
       return nil unless producer.op == 'LOADSYM'
 
-      keywords[producer.sym.to_s] = state[register + 1] || NumericFlow::OTHER
+      keyword_registers << [producer.sym.to_s.dup.freeze, key_register + 1].freeze
     end
-    [receiver, arguments, keywords]
+    [%w[SSEND SSEND0].include?(insn.op), register, argc, keyword_registers.freeze].freeze
   end
 
   def dispatch(node, body, index, insn, state)

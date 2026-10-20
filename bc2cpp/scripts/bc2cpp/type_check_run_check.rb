@@ -36,6 +36,45 @@ raise 'shape union lost a member' unless context.classes(array_bit | hash_bit) =
 raise 'unknown mask became exact' unless context.classes(array_bit | NumericFlow::OTHER).nil?
 puts 'context class caching, shape registration and unknown-mask checks passed'
 
+# Cached layouts must read current values and preserve duplicate keyword ordering.
+frame_insn = lambda do |index, op, args|
+  Insn.new(lineno: 1, addr: index, op: op, args: args, raw: "#{op} #{args}")
+end
+instructions = [frame_insn.call(0, 'LOADSYM', 'R3 :key'), frame_insn.call(1, 'LOADSYM', 'R5 :key'),
+                frame_insn.call(2, 'SSEND', 'R1 :callee n=1|nk=2')]
+body = Irep.new(label: 'frame', instructions: instructions, catch_handlers: [], nregs: 7, nlocals: 1)
+frame_node = IrContextResults::Node.new(receiver: NumericFlow::INT)
+state = [nil, NumericFlow::STR, NumericFlow::ARR, nil, NumericFlow::FLT, nil, NumericFlow::HSH]
+first = context.frame(frame_node, body, 2, instructions.last, state)
+raise 'implicit receiver or duplicate keyword order changed' unless first == [NumericFlow::INT, [NumericFlow::ARR], { 'key' => NumericFlow::HSH }]
+layout = context.call_layout(body, 2, instructions.last)
+raise 'call layout was rebuilt' unless context.call_layout(body, 2, instructions.last).equal?(layout)
+raise 'call layout retained mutable metadata' unless layout.frozen? && layout.last.frozen? && layout.last.all? { |pair| pair.frozen? && pair.first.frozen? }
+frame_node.receiver = NumericFlow::FLT
+state[2] = NumericFlow::STR
+state[6] = NumericFlow::NIL
+second = context.frame(frame_node, body, 2, instructions.last, state)
+raise 'cached layout retained old context values' unless second == [NumericFlow::FLT, [NumericFlow::STR], { 'key' => NumericFlow::NIL }]
+raise 'frame argument/keyword containers were shared' if first[1].equal?(second[1]) || first[2].equal?(second[2])
+explicit = frame_insn.call(0, 'SEND0', 'R1 :callee')
+explicit_body = Irep.new(label: 'frame', instructions: [explicit], catch_handlers: [], nregs: 3, nlocals: 1)
+raise 'explicit receiver or same-label body identity changed' unless context.frame(frame_node, explicit_body, 0, explicit, state) == [NumericFlow::STR, [], {}]
+unknown = frame_insn.call(0, 'SSEND', 'R1 :callee n=1|nk=1')
+unknown_body = Irep.new(label: 'unknown-key', instructions: [unknown], catch_handlers: [], nregs: 5, nlocals: 1)
+2.times { raise 'entry keyword producer became a literal' if context.frame(frame_node, unknown_body, 0, unknown, state) }
+splat = frame_insn.call(0, 'SSEND', 'R1 :callee n=1|nk=*')
+splat_body = Irep.new(label: 'splat', instructions: [splat], catch_handlers: [], nregs: 5, nlocals: 1)
+raise 'keyword splat acquired a fixed layout' if context.frame(frame_node, splat_body, 0, splat, state)
+branch_instructions = [frame_insn.call(0, 'JMPIF', 'R0 3'), frame_insn.call(1, 'LOADSYM', 'R3 :key'),
+                       frame_insn.call(2, 'JMP', '4'), frame_insn.call(3, 'LOADSYM', 'R3 :other'),
+                       frame_insn.call(4, 'SSEND', 'R1 :callee n=1|nk=1')]
+branch_body = Irep.new(label: 'joined-keys', instructions: branch_instructions, catch_handlers: [], nregs: 5, nlocals: 1)
+2.times { raise 'joined keyword producers gained a fixed name' if context.frame(frame_node, branch_body, 4, branch_instructions.last, state) }
+nonliteral_instructions = [frame_insn.call(0, 'LOADNIL', 'R3 (nil)'), frame_insn.call(1, 'SSEND', 'R1 :callee n=1|nk=1')]
+nonliteral_body = Irep.new(label: 'nonliteral-key', instructions: nonliteral_instructions, catch_handlers: [], nregs: 5, nlocals: 1)
+raise 'non-Symbol keyword producer gained a fixed name' if context.frame(frame_node, nonliteral_body, 1, nonliteral_instructions.last, state)
+puts 'call layout isolation, dynamic values, duplicate keywords and refusal checks passed'
+
 cache = IrContextLeafEvaluations.new
 key = ['leaf', NumericFlow::INT, [], [], false].freeze
 node = IrContextResults::Node.new(states: [[NumericFlow::INT], nil], calls: { 1 => NumericFlow::INT },
