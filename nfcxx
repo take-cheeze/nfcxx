@@ -672,12 +672,15 @@ eflist=(); userinc=()
 # -fkeep-static-functions is a GCC option; clang (the C compiler on macOS) rejects it.
 keep_static=(--c_to_obj_option -fkeep-static-functions)
 "${NFCXX_GCC:-cc}" --version 2>/dev/null | head -1 | grep -qi clang && keep_static=()
-# NFCXX_EH_UNWIND=1 (gcc backend): a throw runs the cleanups of the frames it unwinds in the system unwinder (EDG's
-# --nfcxx_eh_unwind; lib_src/throw.c). The frames need unwind tables (-fexceptions) and the declarations of
-# lib/ehshim/nfcxx_eh_unwind.h, which the C compiler reads first.
+# NFCXX_EH_UNWIND=1: a throw runs the cleanups of the frames it unwinds in the system unwinder (EDG's --nfcxx_eh_unwind;
+# lib_src/throw.c). gcc: the frames need unwind tables (-fexceptions) and the declarations of
+# lib/ehshim/nfcxx_eh_unwind.h, which the C compiler reads first. qbe: cproc lowers the cleanups to landing pads (qbe.c,
+# ehcleanupobj); the unwinder flag comes from the link (scripts/qbe-cc).
 eh_unwind=()
 if [ "${NFCXX_EH_UNWIND:-}" = 1 ] && [ "$backend" = gcc ]; then
   eh_unwind=(--nfcxx_eh_unwind --c_to_obj_option -fexceptions --c_to_obj_option -include --c_to_obj_option "$root/lib/ehshim/nfcxx_eh_unwind.h")
+elif [ "${NFCXX_EH_UNWIND:-}" = 1 ] && [ "$backend" = qbe ]; then
+  eh_unwind=(--nfcxx_eh_unwind)
 fi
 for f in ${files[@]+${files[@]+"${files[@]}"}}; do
   case $f in

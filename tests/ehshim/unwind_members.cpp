@@ -2,7 +2,7 @@
 // vector, a deque, two strings, and a stack over a deque (which destroys its own members). With --nfcxx_eh_unwind the
 // members are destroyed by the system unwinder, and a noexcept destructor (a noexcept frame below the function frame)
 // must not be destroyed a second time. The exit code is the number of wrong results.
-// BACKENDS: gcc
+// BACKENDS: gcc qbe
 // EXPECT: 0
 #include <cstdio>
 #include <deque>
