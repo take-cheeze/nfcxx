@@ -700,6 +700,8 @@ bool local_constant_visible(const std::string &text, long pos, const std::string
 
 // Ruby int_expr_value (line 440): a recursive-descent reader of integer expressions over literals and local constants.
 bool int_expr_value(const std::string &text, long pos, const std::string &s, long &value, int depth = 0);
+// The key of a non-integer template argument: its value when the constant evaluator reads it, else its text.
+std::string constant_key(const std::string &text, long pos, const std::string &arg);
 
 // Ruby resolve_local_constants (line 517): replaces the names of local constants in a launch's template arguments.
 std::string resolve_local_constants(const std::string &text, const std::string &targs, long pos);
@@ -1386,6 +1388,14 @@ bool local_constant_visible(const std::string &text, long pos, const std::string
   return found;
 }
 
+// `false && X` is false and `true && X` is X, at the front of a carried constant expression.
+static std::string fold_leading_and(const std::string &s) {
+  std::string t = strip(s);
+  if (t.compare(0, 9, "false && ") == 0) return "false";
+  if (t.compare(0, 8, "true && ") == 0) return fold_leading_and(t.substr(8));
+  return s;
+}
+
 // Ruby resolve_local_constants (line 517): the template arguments of a launch with its local constants' values.
 std::string resolve_local_constants(const std::string &text, const std::string &raw_targs, long pos) {
   // Comments are not part of the arguments: `rms_norm_f32_dispatch</*do_multiply*/false, do_scale>` names no local.
@@ -1443,10 +1453,28 @@ std::string resolve_local_constants(const std::string &text, const std::string &
         bool single = !val.empty();
         for (char cc : val)
           if (!ident_c((unsigned char)cc)) single = false;
-        if (!single)
-          refuse("template argument " + v + " of the launch at line " + std::to_string(line_of(text, pos)) + " is " + val +
-                 ": only an integer constant or a name is carried");
-        out += val;
+        if (!single) {
+          // A constant expression (`false && c_promoted`, a constexpr call's comparison) is carried as its text, with its
+          // own local names resolved the same way: the front end evaluates it in the wrapper, which sees the file's
+          // constexpr functions. Its outer template parameters are substituted with the instance, as the launch's are.
+          static int nesting = 0;
+          if (nesting > 8) refuse("template argument " + v + " of the launch at line " + std::to_string(line_of(text, pos)) + " nests too deep");
+          nesting += 1;
+          // A leading literal operand decides the `&&`: `false && X` is false, `true && X` is X (a lambda's
+          // `decltype(tag)::value && c_promoted`, inlined with a tag that is false or true).
+          std::string sv = strip(val);
+          std::string inner;
+          if (sv.compare(0, 9, "false && ") == 0) inner = "false";
+          else if (sv.compare(0, 8, "true && ") == 0) inner = resolve_local_constants(text, sv.substr(8), pos);
+          else inner = resolve_local_constants(text, val, pos);
+          // A tag substituted into the resolved text (`decltype(tag)::value && c`, with tag false) leaves the same
+          // `false &&` prefix, so the folded text and the plain `false` compare equal in the dispatch dedupe.
+          inner = fold_leading_and(inner);
+          nesting -= 1;
+          out += inner == "false" ? inner : "(" + inner + ")";
+        } else {
+          out += val;
+        }
       } else {
         out += v;
       }
@@ -2899,8 +2927,7 @@ std::map<std::pair<long, long>, DependentLaunch> dependent_launches(const std::s
       for (const auto &inst : insts) {
         std::vector<std::string> key;
         for (const auto &arg : inst) {
-          long nv;
-          key.push_back(int_expr_value(text, tl.pos, arg, nv, 0) ? std::to_string(nv) : arg);
+          key.push_back(constant_key(text, tl.pos, arg));
         }
         if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
           keys.push_back(key);
@@ -2972,6 +2999,9 @@ static std::vector<E> disp_order(const std::vector<E> &v, long pack, size_t widt
 std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<long, long>, DependentLaunch> &dl,
                                                           const std::string &orig) {
   std::vector<std::pair<long, std::string>> lines;
+  // A unit may specialize a class once, so the instances are compared by their argument values: a carried constant that
+  // evaluates to an argument another instance has (mmvq's calc_nwarps comparison, false) is the same specialization.
+  std::set<std::vector<std::string>> declared_specs;
   for (auto &kv : dl) {
     DependentLaunch &d = kv.second;
     for (const auto &inst : d.insts) {
@@ -3001,8 +3031,16 @@ std::vector<std::pair<long, std::string>> dependent_decls(std::map<std::pair<lon
       for (const auto &pr : d.wrapper)
         if (pr.first == inst) w = pr.second;
       size_t width = inst.size() + 1 - d.outer.names.size();
-      lines.push_back({at, "template <> struct " + d.dname + "<" + join(disp_order(inst, pk, width), ", ") + "> { static constexpr auto fn = &" + w +
-                               "; };\n"});
+      // The same launch inlined in two places (mmvq's launch lambda, one copy per case) names the same instance: one
+      // explicit specialization for the unit, since a class may be specialized once.
+      std::string spec = "template <> struct " + d.dname + "<" + join(disp_order(inst, pk, width), ", ") + "> { static constexpr auto fn = &" + w +
+                         "; };\n";
+      std::vector<std::string> spec_key{d.dname};
+      for (const auto &a : disp_order(inst, pk, width)) {
+        spec_key.push_back(constant_key(orig, 0, a));
+      }
+      if (!declared_specs.insert(spec_key).second) continue;
+      lines.push_back({at, spec});
     }
   }
   return lines;
@@ -4303,6 +4341,26 @@ struct CxCtx {
 };
 
 bool cx_eval(CxCtx &cx, const std::string &expr, long &value);
+bool cx_call_block(CxCtx &cx, const std::string &name, const std::vector<long> &args, long &value);
+
+// An enumerator name (GGML_TYPE_Q4_0, MMVQ_PARAMETERS_GB10) is a symbol: the evaluator compares symbols by identity.
+// A name that is a macro or a file constant has a value of its own and is not one.
+static long cx_symbol(const std::string &name) {
+  static std::map<std::string, long> symbols;
+  auto it = symbols.find(name);
+  if (it != symbols.end()) return it->second;
+  long v = 1000000000L + (long)symbols.size();
+  symbols[name] = v;
+  return v;
+}
+
+static bool cx_enumerator_name(const CxCtx &cx, const std::string &name) {
+  if (name.empty() || !(name[0] >= 'A' && name[0] <= 'Z')) return false;
+  for (char c : name)
+    if (!(isupper((unsigned char)c) || isdigit((unsigned char)c) || c == '_')) return false;
+  std::string out;
+  return !defined_macro(cx.text, name) && !file_constant_value(cx.text, name, out);
+}
 
 // The body of the single-return constexpr definition of `name` in the unit: its parameter names and return expression.
 // False when there is none, or when two definitions with a body exist (an overload set is not read here).
@@ -4383,7 +4441,7 @@ bool cx_tokenize(const std::string &s, std::vector<std::string> &toks, std::stri
     for (const char *op : two)
       if (s.compare(i, 2, op) == 0) { toks.push_back(op); i += 2; done = true; break; }
     if (done) continue;
-    if (std::string("()+-*/%<>!,").find((char)c) != std::string::npos) { toks.push_back(std::string(1, (char)c)); i++; continue; }
+    if (std::string("()+-*/%<>!,?:").find((char)c) != std::string::npos) { toks.push_back(std::string(1, (char)c)); i++; continue; }
     why = std::string("operator ") + (char)c;
     return false;
   }
@@ -4403,8 +4461,21 @@ struct CxParser {
   bool peek(const char *s) const { return p < t.size() && t[p] == s; }
 
   bool all(long &v) {
-    if (!or_(v)) return false;
+    if (!cond_(v)) return false;
     if (p != t.size()) return fail("trailing tokens in the expression");
+    return true;
+  }
+  // `c ? a : b`, the lowest precedence: both branches are read, the condition picks one.
+  bool cond_(long &v) {
+    if (!or_(v)) return false;
+    if (!peek("?")) return true;
+    p++;
+    long a, b;
+    if (!cond_(a)) return false;
+    if (!peek(":")) return fail("missing : in a conditional");
+    p++;
+    if (!cond_(b)) return false;
+    v = v ? a : b;
     return true;
   }
   bool or_(long &v) {
@@ -4464,7 +4535,7 @@ struct CxParser {
   bool primary(long &v) {
     if (peek("(")) {
       p++;
-      if (!or_(v)) return false;
+      if (!cond_(v)) return false;
       if (!peek(")")) return fail("missing ) in the expression");
       p++;
       return true;
@@ -4486,7 +4557,7 @@ struct CxParser {
       if (!peek(")")) {
         for (;;) {
           long a;
-          if (!or_(a)) return false;
+          if (!cond_(a)) return false;
           args.push_back(a);
           if (peek(",")) { p++; continue; }
           break;
@@ -4496,8 +4567,11 @@ struct CxParser {
       p++;
       std::vector<std::string> params;
       std::string body;
-      if (!find_cx_function(cx.text, tok, params, body))
-        return fail("call of " + tok + ": no constexpr function with a single return in the unit");
+      if (!find_cx_function(cx.text, tok, params, body)) {
+        // A body with statements (if, switch, local constants) is run by the statement evaluator below.
+        if (!cx_call_block(cx, tok, args, v)) return false;
+        return true;
+      }
       if (params.size() != args.size()) return fail("call of " + tok + " with the wrong number of arguments");
       if (cx.depth >= 8) return fail("constexpr calls nest deeper than 8");
       CxCtx sub{cx.text, cx.pos, {}, "", cx.depth + 1};
@@ -4514,6 +4588,7 @@ struct CxParser {
       if (!cx_eval(sub, val, v)) { if (cx.why.empty()) cx.why = sub.why; return false; }
       return true;
     }
+    if (cx_enumerator_name(cx, tok)) { v = cx_symbol(tok); return true; }
     return fail("name " + tok + " is not a template parameter, a block-local constant or a constexpr function");
   }
 };
@@ -4524,6 +4599,302 @@ bool cx_eval(CxCtx &cx, const std::string &expr, long &value) {
   if (!cx_tokenize(expr, toks, why)) { cx.why = why; return false; }
   CxParser ps{cx, toks, 0};
   return ps.all(value);
+}
+
+// The block-bodied constexpr definition of name in the unit: its parameter names, their default texts (empty when there is
+// none) and the text between the braces. False when there is none, or when two definitions exist.
+static bool find_cx_block(const std::string &text, const std::string &name, std::vector<std::string> &params,
+                          std::vector<std::string> &defaults, std::string &body) {
+  bool found = false;
+  for (long i = 0; i < (long)text.size();) {
+    long e = skip_literal(text, i);
+    if (e >= 0) { i = e; continue; }
+    if (!(ident_c((unsigned char)text[i]) && !(i > 0 && ident_c((unsigned char)text[i - 1])))) { i++; continue; }
+    long j = i;
+    while (j < (long)text.size() && ident_c((unsigned char)text[j])) j++;
+    if (text.compare((size_t)i, (size_t)(j - i), name) != 0) { i = j; continue; }
+    long k = j;
+    while (k < (long)text.size() && isspace((unsigned char)text[k])) k++;
+    if (k >= (long)text.size() || text[k] != '(') { i = j; continue; }
+    long d = 0, close = k;
+    for (; close < (long)text.size(); close++) {
+      if (text[close] == '(') d++;
+      else if (text[close] == ')') { d--; if (d == 0) break; }
+    }
+    if (close >= (long)text.size()) return false;
+    long b = close + 1;
+    while (b < (long)text.size() && isspace((unsigned char)text[b])) b++;
+    if (b >= (long)text.size() || text[b] != '{') { i = close + 1; continue; }
+    long eb = matching_brace(text, b);
+    if (eb < 0) return false;
+    if (found) return false;
+    found = true;
+    params.clear();
+    defaults.clear();
+    std::string list = strip(text.substr(k + 1, close - k - 1));
+    if (!list.empty() && list != "void") {
+      // Parameters split at the commas outside parentheses (a default may call a function).
+      std::vector<std::string> parts;
+      long depth = 0, start = 0;
+      for (long c = 0; c <= (long)list.size(); c++) {
+        if (c < (long)list.size()) {
+          if (list[c] == '(') depth++;
+          else if (list[c] == ')') depth--;
+          if (list[c] != ',' || depth != 0) continue;
+        }
+        parts.push_back(list.substr(start, c - start));
+        start = c + 1;
+      }
+      for (const std::string &raw : parts) {
+        std::string part = strip(raw);
+        size_t eq = part.find('=');
+        std::string left = eq == std::string::npos ? part : strip(part.substr(0, eq));
+        long pe = (long)left.size();
+        long ps = pe;
+        while (ps > 0 && ident_c((unsigned char)left[ps - 1])) ps--;
+        if (ps == pe) return false;
+        params.push_back(left.substr(ps, pe - ps));
+        defaults.push_back(eq == std::string::npos ? "" : strip(part.substr(eq + 1)));
+      }
+    }
+    body = text.substr(b + 1, eb - b - 1);
+    i = eb + 1;
+  }
+  return found;
+}
+
+// A constexpr body's tokens: identifiers and numbers, the two-character operators and single punctuation. Comments are dropped.
+static bool cx_block_tokens(const std::string &raw, std::vector<std::string> &toks, std::string &why) {
+  std::string s;
+  for (size_t i = 0; i < raw.size();) {
+    if (raw.compare(i, 2, "//") == 0) { while (i < raw.size() && raw[i] != '\n') i++; continue; }
+    if (raw.compare(i, 2, "/*") == 0) {
+      size_t e = raw.find("*/", i + 2);
+      if (e == std::string::npos) { why = "an unterminated comment"; return false; }
+      i = e + 2;
+      continue;
+    }
+    s.push_back(raw[i++]);
+  }
+  static const char *two[] = {"==", "!=", "<=", ">=", "&&", "||"};
+  for (size_t i = 0; i < s.size();) {
+    unsigned char c = (unsigned char)s[i];
+    if (isspace(c)) { i++; continue; }
+    if (ident_c(c)) {
+      size_t j = i;
+      while (j < s.size() && ident_c((unsigned char)s[j])) j++;
+      toks.push_back(s.substr(i, j - i));
+      i = j;
+      continue;
+    }
+    bool done = false;
+    for (const char *op : two)
+      if (s.compare(i, 2, op) == 0) { toks.push_back(op); i += 2; done = true; break; }
+    if (done) continue;
+    if (std::string("(){};=:,+-*/%<>!?").find((char)c) != std::string::npos) { toks.push_back(std::string(1, (char)c)); i++; continue; }
+    why = std::string("token ") + (char)c;
+    return false;
+  }
+  return true;
+}
+
+// The state of one run of a constexpr body: its tokens, the read position, and what the last return or break did.
+struct CxStmt {
+  const std::vector<std::string> &t;
+  size_t p;
+  bool returned;
+  bool broke;
+  long ret;
+  CxCtx *cx;
+};
+
+static bool cx_fail(CxStmt &st, const std::string &w) {
+  if (st.cx->why.empty()) st.cx->why = w;
+  return false;
+}
+
+// The expression from p to the first `stops` character outside parentheses (not consumed), its tokens joined by spaces.
+static std::string cx_expr_until(const std::vector<std::string> &t, size_t &p, const std::string &stops) {
+  std::string out;
+  long depth = 0;
+  while (p < t.size()) {
+    const std::string &k = t[p];
+    if (depth == 0 && k.size() == 1 && stops.find(k[0]) != std::string::npos) break;
+    if (k == "(") depth++;
+    else if (k == ")") depth--;
+    out += (out.empty() ? "" : " ") + k;
+    p++;
+  }
+  return out;
+}
+
+static bool cx_value(CxStmt &st, const std::string &expr, long &v) {
+  CxCtx sub{st.cx->text, st.cx->pos, st.cx->vars, "", st.cx->depth + 1};
+  if (!cx_eval(sub, expr, v)) {
+    if (st.cx->why.empty()) st.cx->why = sub.why;
+    return false;
+  }
+  return true;
+}
+
+// Runs the statement at st.p. A statement that is not live (an untaken branch, or after a return or break) is read, not run.
+static bool cx_exec(CxStmt &st, bool live) {
+  const auto &t = st.t;
+  if (st.p >= t.size()) return cx_fail(st, "a constexpr body ends early");
+  const std::string k = t[st.p];
+  if (k == "{") {
+    st.p++;
+    while (st.p < t.size() && t[st.p] != "}")
+      if (!cx_exec(st, live && !st.returned && !st.broke)) return false;
+    if (st.p >= t.size()) return cx_fail(st, "a constexpr block is not closed");
+    st.p++;
+    return true;
+  }
+  if (k == "if") {
+    st.p++;
+    if (st.p >= t.size() || t[st.p] != "(") return cx_fail(st, "if without (");
+    st.p++;
+    std::string c = cx_expr_until(t, st.p, ")");
+    if (st.p >= t.size()) return cx_fail(st, "if without )");
+    st.p++;
+    long v = 0;
+    if (live && !cx_value(st, c, v)) return false;
+    bool take = live && v != 0;
+    if (!cx_exec(st, live && take)) return false;
+    if (st.p < t.size() && t[st.p] == "else") {
+      st.p++;
+      return cx_exec(st, live && !take);
+    }
+    return true;
+  }
+  if (k == "switch") {
+    st.p++;
+    if (st.p >= t.size() || t[st.p] != "(") return cx_fail(st, "switch without (");
+    st.p++;
+    std::string s = cx_expr_until(t, st.p, ")");
+    if (st.p >= t.size()) return cx_fail(st, "switch without )");
+    st.p++;
+    long scrut = 0;
+    if (live && !cx_value(st, s, scrut)) return false;
+    if (st.p >= t.size() || t[st.p] != "{") return cx_fail(st, "switch without {");
+    // The matching brace: a depth count over the tokens from the open brace.
+    size_t close = st.p;
+    long d = 0;
+    for (; close < t.size(); close++) {
+      if (t[close] == "{") d++;
+      else if (t[close] == "}") { d--; if (d == 0) break; }
+    }
+    if (close >= t.size()) return cx_fail(st, "switch body is not closed");
+    // The label that matches, or default, at this switch's own level (labels in nested braces belong to nested switches).
+    size_t chosen = std::string::npos, dflt = std::string::npos;
+    d = 0;
+    for (size_t q = st.p + 1; q < close; q++) {
+      if (t[q] == "{" || t[q] == "(") d++;
+      else if (t[q] == "}" || t[q] == ")") d--;
+      else if (d == 0 && t[q] == "case" && live) {
+        size_t lp = q + 1;
+        std::string lab = cx_expr_until(t, lp, ":");
+        long lv = 0;
+        if (!cx_value(st, lab, lv)) return false;
+        if (lv == scrut && chosen == std::string::npos) chosen = q;
+      } else if (d == 0 && t[q] == "default") {
+        dflt = q;
+      }
+    }
+    size_t start = chosen != std::string::npos ? chosen : dflt;
+    if (live && start != std::string::npos) {
+      st.p = start;
+      while (st.p < close) {
+        if (t[st.p] == "case" || t[st.p] == "default") {
+          while (st.p < close && t[st.p] != ":") st.p++;
+          st.p++;
+          continue;
+        }
+        if (!cx_exec(st, !st.returned && !st.broke)) return false;
+      }
+      st.broke = false;
+    }
+    st.p = close + 1;
+    return true;
+  }
+  if (k == "return") {
+    st.p++;
+    std::string e = cx_expr_until(t, st.p, ";");
+    if (st.p >= t.size()) return cx_fail(st, "return without ;");
+    st.p++;
+    if (live) {
+      long v = 0;
+      if (!cx_value(st, e, v)) return false;
+      st.ret = v;
+      st.returned = true;
+    }
+    return true;
+  }
+  if (k == "break") {
+    if (st.p + 1 >= t.size() || t[st.p + 1] != ";") return cx_fail(st, "break without ;");
+    st.p += 2;
+    if (live) st.broke = true;
+    return true;
+  }
+  // A local constant: `const int n = expr;`, `constexpr bool b = expr;`, `const auto a = expr;`.
+  size_t q = st.p;
+  while (q < t.size() && (t[q] == "const" || t[q] == "constexpr" || t[q] == "static")) q++;
+  if (q + 2 < t.size() && (t[q] == "int" || t[q] == "bool" || t[q] == "long" || t[q] == "auto") && t[q + 2] == "=") {
+    std::string name = t[q + 1];
+    st.p = q + 3;
+    std::string e = cx_expr_until(t, st.p, ";");
+    if (st.p >= t.size()) return cx_fail(st, "a local constant without ;");
+    st.p++;
+    if (live) {
+      long v = 0;
+      if (!cx_value(st, e, v)) return false;
+      st.cx->vars[name] = v;
+    }
+    return true;
+  }
+  return cx_fail(st, "statement " + k + " is not read by the constexpr evaluator");
+}
+
+// A call of a block-bodied constexpr function of the unit with args (its defaulted parameters take the defaults), run in
+// a context of its own: the value of the body's return.
+bool cx_call_block(CxCtx &cx, const std::string &name, const std::vector<long> &args, long &value) {
+  std::vector<std::string> params, defaults;
+  std::string body, why;
+  if (!find_cx_block(cx.text, name, params, defaults, body))
+    return (cx.why = "call of " + name + ": no constexpr function in the unit"), false;
+  if (args.size() > params.size()) return (cx.why = "call of " + name + " with too many arguments"), false;
+  if (cx.depth >= 8) return (cx.why = "constexpr calls nest deeper than 8"), false;
+  CxCtx sub{cx.text, cx.pos, {}, "", cx.depth + 1};
+  for (size_t k = 0; k < params.size(); k++) {
+    long v = 0;
+    if (k < args.size()) {
+      v = args[k];
+    } else if (defaults[k].empty()) {
+      return (cx.why = "call of " + name + " without a value for " + params[k]), false;
+    } else if (!cx_eval(sub, defaults[k], v)) {
+      if (cx.why.empty()) cx.why = sub.why;
+      return false;
+    }
+    sub.vars[params[k]] = v;
+  }
+  std::vector<std::string> toks;
+  if (!cx_block_tokens("{" + body + "}", toks, why)) return (cx.why = "body of " + name + ": " + why), false;
+  CxStmt st{toks, 0, false, false, 0, &sub};
+  if (!cx_exec(st, true)) {
+    if (cx.why.empty()) cx.why = sub.why;
+    return false;
+  }
+  if (!st.returned) return (cx.why = name + " ends without a return"), false;
+  value = st.ret;
+  return true;
+}
+
+std::string constant_key(const std::string &text, long pos, const std::string &arg) {
+  long v = 0;
+  if (int_expr_value(text, pos, arg, v, 0)) return "#" + std::to_string(v);
+  CxCtx cx{text, pos, {}, "", 0};
+  if (cx_eval(cx, arg, v)) return "#" + std::to_string(v);
+  return arg;
 }
 
 // For one instance of the enclosing template at pos: 1 when every enclosing constexpr branch is taken, 0 when one is not
@@ -6168,6 +6539,16 @@ std::string inline_generic_lambdas(const std::string &text) {
       param = pns[0];
     }
     if (def_start < 0) break;
+    // The definition takes its qualifier with it (`const auto launch = [&](auto P) {...};` leaves no `const` behind).
+    for (const char *kw : {"constexpr", "const"}) {
+      long kl = (long)std::string(kw).size();
+      long back = def_start;
+      while (back > 0 && (ch(out, back - 1) == ' ' || ch(out, back - 1) == '\t')) back -= 1;
+      if (back - kl >= 0 && sl(out, back - kl, back) == kw && (back - kl == 0 || !ident_c(ch(out, back - kl - 1)))) {
+        def_start = back - kl;
+        break;
+      }
+    }
 
     // A fold over a pack: `(name(std::integral_constant<int, P>{}) || ...)`, where P is a pack of the enclosing template.
     // Its values are the literal template arguments of that template's one call (pack_values_at). The fold becomes one
