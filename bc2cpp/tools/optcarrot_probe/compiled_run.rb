@@ -295,7 +295,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources),
     # Every other real bc2cpp build integration in this repo sets this
     # (mruby-lcf-compiled/mrbgem.rake, mruby-rgss-compiled/mrbgem.rake,
-    # mruby-rpg2k-compiled/mrbgem.rake,
+    # mruby-rpg2k-compiled/mrbgem.rake, tools/bc2cpp/wio_registered_methods.rb,
     # even this same directory's own optcarrot_bc2cpp_coverage_report.rb for
     # its "shipped" run) -- this file was the one holdout, and it cost a real
     # CI failure: a method inside one of the still-compiled classes
