@@ -138,7 +138,7 @@ class CodeGen
 
   # LOADI_FIXNUM_RANGE: the narrowest Fixnum range of any shipped target (the
   # proof runs once, in the host diagnostic). mrb_int is 32-bit on
-  # Emscripten/Wio/PSP and word boxing (no build uses nan boxing) tags one bit:
+  # Emscripten and word boxing (no build uses nan boxing) tags one bit:
   # MRB_FIXNUM_MIN/MAX = (INT32_MIN>>1)..(INT32_MAX>>1) (mruby/boxing_word.h,
   # TYPED_FIXABLE in mruby/numeric.h).
   # Every LOADI form but LOADI32 runs SET_FIXNUM_VALUE (vm.c). LOADI32 runs

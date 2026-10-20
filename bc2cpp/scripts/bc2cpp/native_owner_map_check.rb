@@ -29,7 +29,7 @@ ROOT = File.expand_path('../..', __dir__)
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/nomethod_reviewed'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC_PATH = ENV['MRBC'] || 'mrbc'
@@ -61,7 +61,7 @@ ARM = %r{// NATIVE_OWNER_MAP :empty\? -- [^\n]*\n\s*if \(bc2cpp_owner_class_\d+\
 BY_NAME_ELSE = /bc2cpp_send\(M, r\d+, \d+, 0\)/
 
 if tool?(MRBC_PATH)
-  gems = NomethodReviewedProbe.wio_gems(ROOT)
+  gems = NomethodReviewedProbe.closed_gems(ROOT)
   native_srcs = core_native_srcs(MRUBY) + external_gem_native_srcs(ROOT)
   core_srcs = core_compiled_mrblib_srcs(ROOT)
   foreign = foreign_mrblib_srcs(ROOT)
@@ -75,9 +75,9 @@ if tool?(MRBC_PATH)
               'NATIVE_SRCS' => Shellwords.join(native_srcs),
               'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign),
               'ONLY_OWNERS' => (BC2CPP_CORE_OWNERS + %w[CxQueue CxHolder CxWrap]).join(','),
-              'BC2CPP_BUILD_NAME' => 'wio',
+              'BC2CPP_BUILD_NAME' => 'closed',
               'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
-      out, err, status = Open3.capture3(bc2cpp_wio_world_env(env.merge(extra_env)), RbConfig.ruby, File.join(tool_dir, 'bc2cpp.rb'), '--annotated',
+      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env.merge(extra_env)), RbConfig.ruby, File.join(tool_dir, 'bc2cpp.rb'), '--annotated',
                                         *(core_srcs + [path]))
       abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
       out

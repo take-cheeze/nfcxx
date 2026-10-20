@@ -10,7 +10,7 @@
 # site sits in (owners as in STATIC_DISPATCH_UNREGISTERED) and the name it
 # sends. bc2cpp.rb enforces the list on every closed-world run;
 # scripts/bc2cpp/nomethod_reviewed_check.rb re-proves it exactly in both
-# directions over a full (not hot-only) wio run of all three gems.
+# directions over a full (not hot-only) closed run of all three gems.
 # Regenerate with `MRBC=... ruby scripts/bc2cpp/nomethod_reviewed_update.rb`.
 require 'set'
 require_relative 'review_scope'

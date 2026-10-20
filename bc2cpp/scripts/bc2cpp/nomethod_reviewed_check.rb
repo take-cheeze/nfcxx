@@ -14,7 +14,7 @@
 #   - bc2cpp.rb itself aborts a closed-world run on an unreviewed site in an
 #     engine-owner method, lists a fixture program's sites without judging
 #     them, and marks nothing without the switch;
-#   - the real wio closed world: its hot-only codegen (what the build runs)
+#   - the real closed world: its hot-only codegen (what the build runs)
 #     passes the gate, and with every method compiled it has exactly the
 #     listed sites, no more and no fewer.
 #
@@ -24,7 +24,7 @@ require 'open3'
 require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 root = File.expand_path('../..', __dir__)
 mrbc = ENV['MRBC'] || 'mrbc'
@@ -115,15 +115,15 @@ ENGINE_WORLD = <<~'RUBY'
     end
   end
 RUBY
-gems_env = Shellwords.join(NomethodReviewedProbe.wio_gems(root).map { |n, d| "#{n}=#{d}" })
+gems_env = Shellwords.join(NomethodReviewedProbe.closed_gems(root).map { |n, d| "#{n}=#{d}" })
 generate = lambda do |world|
   Dir.mktmpdir do |dir|
     path = File.join(dir, 'cw_gate.rb')
     File.write(path, world)
     # The repo's sig/bc2cpp signatures describe the engine's classes; this fixture program has none of them.
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'cw_gate', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1', 'BC2CPP_SIG_DIRS' => '' }
-    env.merge!('BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env)
-    Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+    env.merge!('BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_BUILD_GEMS' => gems_env)
+    Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
   end
 end
 _out, err, status = generate.call(ENGINE_WORLD)
@@ -145,13 +145,13 @@ check.call('the gate judges that listing through a scope that includes the fixtu
            NomethodReviewed.violations(fixture_sites, [], scope: Set['CwCaller'], reviewed: Set[]) ==
              ['unreviewed dead fallback: CwCaller#talk -> cw_speak'])
 
-# -- the real wio closed world ------------------------------------------------------
+# -- the real closed world ------------------------------------------------------
 
-puts '== the wio closed world (mruby-lcf/rgss/rpg2k-compiled)'
+puts '== the closed world (mruby-lcf/rgss/rpg2k-compiled)'
 runs = NomethodReviewedProbe.runs(root, mrbc)
 runs[:hot].sort.each do |gem_name, (status, err)|
   n = NomethodReviewed.parse_listing(err).size
-  check.call("#{gem_name}: the real hot-only wio codegen passes the gate (#{n} site(s))", status.success?)
+  check.call("#{gem_name}: the real hot-only closed codegen passes the gate (#{n} site(s))", status.success?)
   err.scan(/^  (?:unreviewed dead fallback|stale NOMETHOD_REVIEWED entry).*$/) { |l| puts "    #{l.strip}" }
 end
 real = runs[:full]

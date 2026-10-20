@@ -7,7 +7,7 @@
 # 1. Model (CRuby, the real mruby-lcf reader): what LcfRowFlow::Model says `[]` returns for every
 #    schema position is a superset of what the reader returns, and the invariants the proof leans on
 #    hold (Array2D#[]= re-reads a foreign entry through the table's schema).
-# 2. Generated code: the real mruby-lcf mrblib plus fixtures, compiled under the wio closed world.
+# 2. Generated code: the real mruby-lcf mrblib plus fixtures, compiled under the closed world.
 #    Each positive shape gets an exact-class call and each refusal (subclass, reflection, singleton
 #    maker, dup, a mixed-class parameter, a block parameter, a Hash that looks like a row) keeps its
 #    guard or fallback.

@@ -11,7 +11,7 @@ module Bc2cppCollectionOpsMatrix
   OWNERS = %w[NsColl NsCollBox NsCollPlain NsCollConv NsCollAry NsCollStr NsCollFile].freeze # the element classes stay bytecode (their `==` would pull rgss arms)
 
   # Nothing here defines `- & | <<` (NsCollBox answers none), so all four helpers close in a world with mruby-array-ext,
-  # mruby-string-ext and mruby-io and no other `<<` definer (the wio gem list less mruby-enumerator's Yielder).
+  # mruby-string-ext and mruby-io and no other `<<` definer (the closed gem list less mruby-enumerator's Yielder).
   FIXTURE = <<~RUBY
     class NsCollBox
       def inspect = "collbox"

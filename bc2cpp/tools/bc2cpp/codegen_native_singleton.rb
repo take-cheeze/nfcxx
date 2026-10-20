@@ -19,8 +19,8 @@ require_relative 'native_singletons'
 #   1. The receiver register holds a stable class/module constant: a scoped path ConstructClassNames proves
 #      (constant_object_owner, as ADR 0259), or a bare top-level native class (File, Math, Time, IO) whose
 #      identity this file proves below.
-#   2. At least one native registration puts `name` on `<Const>.singleton` (the wio build scans both mruby-math and
-#      mruby-math-wio, each a C function), and every spelling of `name` in every native source is a registration
+#   2. At least one native registration puts `name` on `<Const>.singleton`, and every spelling of `name` in every
+#      native source is a registration
 #      NativeSingletons parsed (no alias, ROM entry or call by name).
 #   3. No Ruby defines `name` on that singleton class, and none anywhere aliases, hides or re-scopes it (the closed
 #      world's name-level facts: outside Ruby, unknown definers, visibility, dynamic installers), the closed world has no global

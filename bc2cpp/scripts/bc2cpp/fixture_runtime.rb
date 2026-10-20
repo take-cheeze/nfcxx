@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # Shared by bc2cpp registry fixtures and checks that compile with bc2cpp.rb
-# and run against a real mruby: generation (in the wio closed world: bc2cpp is closed-world only, ADR 0466), the C++ driver that
+# and run against a real mruby: generation (in the closed world: bc2cpp is closed-world only, ADR 0466), the C++ driver that
 # registers the compiled methods over the interpreted ones, and the run.
 #
 # Two mruby builds are used, both optional (a check prints SKIP without them):
@@ -20,7 +20,7 @@ require 'tmpdir'
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/shared_generation'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 require_relative 'cxx'
 
 module Bc2cppFixtureRuntime
@@ -111,7 +111,7 @@ module Bc2cppFixtureRuntime
     generate(source, dir, owner_variants: owners)
   end
 
-  # Runs bc2cpp.rb over `source` in the wio closed world with the real core
+  # Runs bc2cpp.rb over `source` in the closed world with the real core
   # sources (bc2cpp is closed-world only, ADR 0466); `only_owners` limits what
   # is compiled. Returns [code, stderr].
   # `path` places the fixture below `dir`: a path under 3rd/mruby/mrblib/ makes bc2cpp treat
@@ -142,10 +142,10 @@ module Bc2cppFixtureRuntime
         pairs.map { |name, text| File.join(dir, name).tap { |file| File.write(file, text) } }
       end
       natives = closed_world_native_srcs + write_outside.call(native)
-    env = bc2cpp_wio_world_env(env.merge(
+    env = bc2cpp_closed_world_probe_env(env.merge(
       'NATIVE_SRCS' => Shellwords.join(natives),
                  'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT) + write_outside.call(foreign)),
-      'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).merge(build_gems.to_h).except(*drop_gems).map { |n, d| "#{n}=#{d}" })
+      'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).merge(build_gems.to_h).except(*drop_gems).map { |n, d| "#{n}=#{d}" })
     ), ROOT)
       env['BC2CPP_COLLECTION_EXPORTS'] = '1' if Bc2cppFixtureRuntime.collection_exports_linked
     core_srcs = core ? core_compiled_mrblib_srcs(ROOT) : []

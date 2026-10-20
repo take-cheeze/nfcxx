@@ -27,7 +27,7 @@ require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/hot_methods'
 require_relative '../../tools/bc2cpp/wio_registered_methods'
 require_relative 'cxx'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 root = File.expand_path('../..', __dir__)
 failures = []
@@ -57,8 +57,8 @@ build = Struct.new(:name, :gems)
 specs = ->(flags) { BC2CPP_COMPILED_GEMS.keys.zip(flags).map { |n, f| spec.new(n, nil).tap { |s| s.enable_bc2cpp_hot_only if f } } }
 gem_count = BC2CPP_COMPILED_GEMS.size
 open_build = build.new('host', specs.call(Array.new(gem_count, false)))
-hot_build = build.new('wio', specs.call(Array.new(gem_count, true)))
-mixed = build.new('wio', specs.call([true, false] + Array.new(gem_count - 2, true)))
+hot_build = build.new('closed', specs.call(Array.new(gem_count, true)))
+mixed = build.new('closed', specs.call([true, false] + Array.new(gem_count - 2, true)))
 check.call('a build that did not opt in is not hot-only', !bc2cpp_hot_only_build?(open_build, env: {}))
 check.call('an opted-in build is, and passes the list', bc2cpp_hot_only_build?(hot_build, env: {}) &&
            bc2cpp_hot_only_env(spec.new('x', hot_build), env: {}) == { 'BC2CPP_HOT_METHODS' => BC2CPP_HOT_METHODS_PATH })
@@ -188,7 +188,7 @@ generate = lambda do |list_keys, only: nil, other: nil|
       env['BC2CPP_HOT_METHODS'] = File.join(dir, 'hot.txt')
       File.write(env['BC2CPP_HOT_METHODS'], list_keys.join("\n") + "\n")
     end
-    out, err, status = Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+    out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
     abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
     [out, err, File.read(File.join(dir, 'hot_world_decls.h'))]
   end

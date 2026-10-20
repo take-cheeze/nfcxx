@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Runs bc2cpp.rb the way a wio build's compiled-gem codegen task does
+# Runs bc2cpp.rb the way the closed build's compiled-gem codegen task does
 # (mruby-*-compiled/mrbgem.rake with bc2cpp_closed_world_env), for the
 # NOMETHOD_REVIEWED check and update scripts (docs/adr/0226).
 require 'open3'
@@ -13,18 +13,19 @@ require_relative 'proven_miss_reviewed'
 require_relative 'strict_hints'
 
 module NomethodReviewedProbe
-  # The wio build's gem list: build_config.rb's rpg_maker_gems for
-  # conf.name == 'wio', hal-wio-io, and every add_dependency they pull in.
-  WIO_CORE_GEMS = %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-numeric-ext mruby-range-ext
-                     mruby-fiber mruby-exit mruby-sprintf mruby-bigint mruby-pack mruby-string-ext mruby-struct
-                     mruby-metaprog mruby-enumerator].freeze
+  # The closed build's gem list: build_config.rb's rpg_maker_gems for
+  # conf.name == 'closed' (single-format, with mruby-compiler), the compiled
+  # gems, and every add_dependency they pull in.
+  CLOSED_CORE_GEMS = %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-numeric-ext mruby-range-ext
+                        mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random mruby-math mruby-time
+                        mruby-bigint mruby-compiler mruby-pack mruby-string-ext mruby-struct mruby-metaprog
+                        mruby-enumerator].freeze
 
   module_function
 
-  def wio_gems(root)
-    gems = WIO_CORE_GEMS.to_h { |g| [g, "#{root}/3rd/mruby/mrbgems/#{g}"] }
-    gems.merge!('hal-wio-io' => "#{root}/app/wio/hal-wio-io", 'mruby-math-wio' => "#{root}/app/wio/mruby-math-wio",
-                'mruby-stringio' => "#{root}/3rd/mruby-stringio", 'mruby-marshal' => "#{root}/3rd/mruby-marshal")
+  def closed_gems(root)
+    gems = CLOSED_CORE_GEMS.to_h { |g| [g, "#{root}/3rd/mruby/mrbgems/#{g}"] }
+    gems.merge!('mruby-stringio' => "#{root}/3rd/mruby-stringio", 'mruby-marshal' => "#{root}/3rd/mruby-marshal")
     %w[mruby-lcf mruby-rgss mruby-rpg2k].each { |g| gems[g] = "#{root}/#{g}" }
     BC2CPP_COMPILED_GEMS.each_key { |g| gems[g] = "#{root}/#{g}" }
     gems.transform_values { |d| File.expand_path(d) }
@@ -36,13 +37,13 @@ module NomethodReviewedProbe
   REVIEW_ABORT_END = /\A(?:Read each site: |Run the verify build over the real workloads, )/
 
   # [stdout, stderr, status] of one compiled gem's closed-world run.
-  # `hot_methods`: the list a real (hot-only) wio build passes; nil compiles
+  # `hot_methods`: the list a real (hot-only) closed build passes; nil compiles
   # every method, the superset the exact check needs. An unreviewed site fails
   # the run like a build; listing_run reads the listings of such a run.
   def run(gem_name, root, mrbc, hot_methods: nil)
     this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name)
     others = BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }
-    native_srcs = bc2cpp_rgss_native_srcs(root, 'wio') + core_native_srcs("#{root}/3rd/mruby") +
+    native_srcs = bc2cpp_rgss_native_srcs(root, 'closed') + core_native_srcs("#{root}/3rd/mruby") +
                   external_gem_native_srcs(root)
     Dir.mktmpdir('bc2cpp_nomethod_probe') do |tmp|
       env = {
@@ -52,8 +53,8 @@ module NomethodReviewedProbe
         'NATIVE_SRCS' => Shellwords.join(native_srcs),
         'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(root)),
         'SKIP_UNSUPPORTED' => '1',
-        'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_COLLECTION_EXPORTS' => '1',
-        'BC2CPP_BUILD_GEMS' => Shellwords.join(wio_gems(root).map { |n, d| "#{n}=#{d}" }),
+        'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_COLLECTION_EXPORTS' => '1',
+        'BC2CPP_BUILD_GEMS' => Shellwords.join(closed_gems(root).map { |n, d| "#{n}=#{d}" }),
         'BC2CPP_HOT_METHODS' => hot_methods
       }
       world = closed_world_mrblib_srcs(root, core_gems: hot_methods ? nil : :canonical)
@@ -111,7 +112,7 @@ module NomethodReviewedProbe
     start ? lines[start..].join : lines.last(25).join
   end
 
-  # Every site (one per bc2cpp_nomethod call) of a full wio run of all three
+  # Every site (one per bc2cpp_nomethod call) of a full closed run of all three
   # gems: {gem:, key:, self_receiver:}.
   def full_sites(root, mrbc)
     runs(root, mrbc, hot: false).fetch(:full)

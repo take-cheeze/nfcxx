@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Regenerates NOMETHOD_REVIEWED (tools/bc2cpp/nomethod_reviewed.rb) from a
-# full wio closed-world run of all three compiled gems (docs/adr/0226).
+# full closed closed-world run of all three compiled gems (docs/adr/0226).
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/nomethod_reviewed_update.rb [--write]
 #

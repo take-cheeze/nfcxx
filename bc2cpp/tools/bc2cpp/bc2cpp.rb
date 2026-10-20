@@ -1698,7 +1698,7 @@ if $PROGRAM_NAME == __FILE__
   #   - a Ruby `raise`: only because mruby is built with MRB_USE_CXX_EXCEPTION,
   #     so MRB_THROW is a real C++ `throw (mrb_jmpbuf*)` (mruby/throw.h). With
   #     setjmp/longjmp the destructor would not run. See docs/adr/0134 and
-  #     build_config.rb's wio section for why that configuration is required.
+  #     build_config.rb's closed stanza for why that configuration is required.
   # Nothing may escape the destructor (std::terminate during unwinding), so the
   # ensure body runs under mrb_protect_error, which also pops the callinfo stack
   # back (vm.c MRB_CATCH arm) and restores the GC arena. Registers live before

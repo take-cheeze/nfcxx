@@ -17,7 +17,7 @@
 # reads the ordinary iv_tbl and sees nil.
 #
 # `.singleton` owners are excluded too, conservatively (no DEFS/SCLASS
-# span-finding, as in strip_wio_bc2cpp_stubs.rb).
+# span-finding).
 require 'open3'
 require 'set'
 require 'shellwords'
@@ -25,7 +25,7 @@ require 'tmpdir'
 require 'fileutils'
 require_relative 'compiled_gems'
 require_relative 'shared_generation'
-require_relative 'wio_world_env'
+require_relative 'closed_world_env'
 
 module NeverCalledRegistrations
   SAFE_UNREGISTER_OWNER_RE = /\A(?:Game|RPG2k3?|LCF)(?:::|\z)/
@@ -59,7 +59,7 @@ module NeverCalledRegistrations
     # A hot-only build's world holds no core Ruby (compiled_gems.rb bc2cpp_closed_world_srcs).
     closed_world_srcs = closed_world_mrblib_srcs(repo_root, core_gems: hot_methods ? nil : :canonical)
     # The canonical, target-independent native source set (as in
-    # wio_registered_methods.rb and bc2cpp_wired_embedding_check.rb): every target
+    # bc2cpp_wired_embedding_check.rb): every target
     # shares one register.cxx per gem, so a target-specific set would make one
     # target's "never called" verdict unsound for the others.
     native_srcs = Dir["#{repo_root}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{repo_root}/3rd/mruby") +
@@ -87,7 +87,7 @@ module NeverCalledRegistrations
           'OTHER_OWNERS' => BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }.values.flat_map { |g| g[:owners] }.join(','),
         }
       end
-      results = SharedGeneration.run(tool: bc2cpp, srcs: closed_world_srcs, common_env: bc2cpp_wio_world_env(common, repo_root), unit_envs: units,
+      results = SharedGeneration.run(tool: bc2cpp, srcs: closed_world_srcs, common_env: bc2cpp_closed_world_probe_env(common, repo_root), unit_envs: units,
                                       extra_args: ['--annotated'])
       gem_names.zip(results).to_h do |gem_name, (out, err, status)|
         unless status.success?
@@ -100,8 +100,7 @@ module NeverCalledRegistrations
   end
 
   # owner/name/entry/arity/visibility for every compiled entry point, parsed
-  # from bc2cpp.rb's "== compiled entry points ==" section (same regex as
-  # wio_registered_methods.rb).
+  # from bc2cpp.rb's "== compiled entry points ==" section.
   def parse_compiled_entries(stderr)
     section = stderr.split('== compiled entry points ==', 2)[1]
     return [] unless section

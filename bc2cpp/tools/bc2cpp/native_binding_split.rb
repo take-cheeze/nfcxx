@@ -18,10 +18,9 @@ require_relative 'native_direct'
 # configuration that compiles it, and anything unproven is refused with a
 # reason.
 module NativeBindingSplit
-  CONFIGS = %w[host wio psp maix emscripten].freeze
+  CONFIGS = %w[host closed emscripten].freeze
   CONFIG_DEFINES = {
-    'host' => [], 'wio' => %w[WIO_TERMINAL], 'psp' => %w[PSP_BUILD], 'maix' => %w[MAIX_BUILD],
-    'emscripten' => %w[__EMSCRIPTEN__]
+    'host' => [], 'closed' => [], 'emscripten' => %w[__EMSCRIPTEN__]
   }.freeze
 
   # mrb_get_args format letter -> [C parameter types, Ruby argument kind].

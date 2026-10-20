@@ -7,7 +7,7 @@
 # annotations and signatures that contradict the inference, and the declarations whose signature would remove the most
 # by-name sends.
 #
-#   MRBC=path/to/mrbc ruby scripts/bc2cpp/type_check.rb                    # the engine (wio closed world), text
+#   MRBC=path/to/mrbc ruby scripts/bc2cpp/type_check.rb                    # the engine (closed world), text
 #   MRBC=... ruby scripts/bc2cpp/type_check.rb --format json --out tc.json
 #   MRBC=... ruby scripts/bc2cpp/type_check.rb --format tsv  --out tc.tsv
 #   MRBC=... ruby scripts/bc2cpp/type_check.rb --files app.rb lib/*.rb      # a program of your own

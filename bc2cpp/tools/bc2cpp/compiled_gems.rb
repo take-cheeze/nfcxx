@@ -81,7 +81,7 @@ BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = BC2CPP_CORE_MRBLIB_GEMS
 BC2CPP_FAIL_FAST_TYPE = false
 # Same, from 3rd/<name>/mrblib. mruby-marshal has no mrblib.
 BC2CPP_EXTERNAL_MRBLIB_GEMS = %w[mruby-stringio mruby-onig-regexp].freeze
-# The gem set the canonical (script, coverage report) world assumes: wio's,
+# The gem set the canonical (script, coverage report) world assumes: closed build's,
 # which has neither mruby-dir nor the Onigmo regexp gem (build_config.rb).
 BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS -
                               %w[mruby-dir mruby-onig-regexp]).freeze
@@ -302,7 +302,7 @@ end
 # drifted set fails silently, with different MONO/POLY conclusions per gem.
 #
 # `tts`: whether the build can have a RGSS::Tts backend (RgssTtsConfig, ADR
-# 0417). The canonical world is wio's, which cannot: Scene::Map#speak_message is
+# 0417). The canonical world is closed build's, which cannot: Scene::Map#speak_message is
 # then mruby-rpg2k/mrblib_limited/map_tts_off.rb, which mruby-rpg2k/mrbgem.rake
 # also swaps in for that build, and no Ruby names RGSS::Tts. A desktop world
 # keeps scene/map_tts.rb.

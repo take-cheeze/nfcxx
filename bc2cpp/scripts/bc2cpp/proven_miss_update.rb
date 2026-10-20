@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Regenerates PROVEN_MISS_REVIEWED (tools/bc2cpp/proven_miss_reviewed.rb) from a
-# full wio closed-world run of all three compiled gems (docs/adr/0275).
+# full closed closed-world run of all three compiled gems (docs/adr/0275).
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/proven_miss_update.rb [--write]
 #

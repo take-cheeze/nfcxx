@@ -8,7 +8,7 @@
 #            profiler.cxx and on mutants of it (a return that is not the yield, a self-changing yield, an escaping
 #            block, a wrong yield arity); a reviewed native entry is accepted only with the file's SHA-256; the Ruby
 #            body check on hand-compiled bodies (when MRBC is set);
-#   fixture  bc2cpp.rb on a small closed world (the wio world plus mruby-object-ext, for Kernel#tap/then): a
+#   fixture  bc2cpp.rb on a small closed world (the closed world plus mruby-object-ext, for Kernel#tap/then): a
 #            generic declaration proves a call's class (RETURN_CLASS_TABLE), natively (RGSS::Profiler.section/frame)
 #            and in Ruby (a program method, tap, then, yield_self), through nested blocks; the block's self is the
 #            caller's (BLOCK_SELF, through RBS_CHECKED_PARAMS); refused sites (a breaking block, an undeclared second
@@ -27,7 +27,7 @@ require 'tmpdir'
 require_relative '../../tools/bc2cpp/block_returns'
 require_relative '../../tools/bc2cpp/native_sigs'
 require_relative '../../tools/bc2cpp/rbs_signatures'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 ROOT = File.expand_path('../..', __dir__)
 failures = []
@@ -273,7 +273,7 @@ BAD_NATIVE = <<~C
   }
 C
 
-gems = NomethodReviewedProbe.wio_gems(ROOT).to_a + [['mruby-object-ext', File.join(ROOT, '3rd/mruby/mrbgems/mruby-object-ext')]]
+gems = NomethodReviewedProbe.closed_gems(ROOT).to_a + [['mruby-object-ext', File.join(ROOT, '3rd/mruby/mrbgems/mruby-object-ext')]]
 generate = lambda do |world, sigs, native_sigs: nil, native: nil|
   Dir.mktmpdir('bc2cpp-gb') do |dir|
     path = File.join(dir, 'gb_fixture.rb')
@@ -290,7 +290,7 @@ generate = lambda do |world, sigs, native_sigs: nil, native: nil|
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'gb_fixture', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
             'BC2CPP_SIG_DIRS' => File.join(dir, 'sig', 'bc2cpp'),
             'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
-    world_env = bc2cpp_wio_world_env(env, ROOT)
+    world_env = bc2cpp_closed_world_probe_env(env, ROOT)
     if native
       native_path = File.join(dir, 'gb_native.c')
       File.write(native_path, native)

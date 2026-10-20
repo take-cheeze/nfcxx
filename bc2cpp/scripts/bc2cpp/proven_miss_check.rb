@@ -14,7 +14,7 @@
 #     classes, rescued sends, inherited definitions or defined names;
 #   - bc2cpp.rb aborts on an unreviewed site in an engine-owner method; a fixture
 #     program's sites are listed, and judged here through a scope with its owners;
-#   - the real wio closed world has exactly the listed sites, in both
+#   - the real closed world has exactly the listed sites, in both
 #     directions, and its hot-only codegen passes the gate.
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/proven_miss_check.rb
@@ -24,7 +24,7 @@ require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/closed_world'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 root = File.expand_path('../..', __dir__)
 mrbc = ENV['MRBC'] || 'mrbc'
@@ -143,7 +143,7 @@ WORLD = <<~'RUBY'
     end
   end
 RUBY
-gems_env = Shellwords.join(NomethodReviewedProbe.wio_gems(root).map { |n, d| "#{n}=#{d}" })
+gems_env = Shellwords.join(NomethodReviewedProbe.closed_gems(root).map { |n, d| "#{n}=#{d}" })
 ENGINE_WORLD = <<~'RUBY'
   class PmPet
     def pm_beep; 1; end
@@ -162,9 +162,9 @@ generate = lambda do |world|
     File.write(path, world)
     # The repo's sig/bc2cpp signatures describe the engine's classes; this fixture program has none of them.
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'pm_fixture', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
-            'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_BUILD_GEMS' => gems_env,
+            'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_BUILD_GEMS' => gems_env,
             'BC2CPP_SIG_DIRS' => '' }
-    Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+    Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
   end
 end
 out, err, status = generate.call(WORLD)
@@ -194,12 +194,12 @@ check.call('in an engine-owner method bc2cpp.rb aborts and names the unreviewed 
            !status.success? && err.include?('unreviewed proven-class miss: Game::Shop#pm_fires -> pm_fresh_typo') &&
              NomethodReviewedProbe.review_abort?(status, err))
 
-# -- the real wio closed world ------------------------------------------------------
+# -- the real closed world ------------------------------------------------------
 
-puts '== the wio closed world (mruby-lcf/rgss/rpg2k-compiled)'
+puts '== the closed world (mruby-lcf/rgss/rpg2k-compiled)'
 runs = NomethodReviewedProbe.runs(root, mrbc)
 runs[:hot].sort.each do |gem_name, (hot_status, hot_err)|
-  check.call("#{gem_name}: the real hot-only wio codegen passes the gate", hot_status.success?)
+  check.call("#{gem_name}: the real hot-only closed codegen passes the gate", hot_status.success?)
   hot_err.scan(/^  (?:unreviewed proven-class miss|stale PROVEN_MISS_REVIEWED entry).*$/) { |l| puts "    #{l.strip}" }
 end
 real = runs[:proven_miss]
