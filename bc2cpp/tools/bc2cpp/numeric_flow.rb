@@ -384,6 +384,7 @@ module NumericFlow
       facts = slots.map { |name| oracle.ivar_fact_mask(irep, name) }
       # Provenance follows the ivar slots and the element block (one entry per register, ELEM_UNKNOWN in states).
       c = new(irep, oracle, opaque, nregs, slots, slot_of, facts, nregs + slots.size + nregs, writes)
+      c.elem_base = nregs + slots.size
       # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
       # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
       if oracle.respond_to?(:class_narrowing_active?) && oracle.class_narrowing_active?
@@ -406,7 +407,8 @@ module NumericFlow
     attr_reader :block_element
 
     # The element block starts right after the ivar slots (one entry per register; see states).
-    def elem_base = @pb - @nregs
+    # Where the element block starts; nil for a ctx built from a Hash, whose layout has no element block.
+    attr_accessor :elem_base
 
     def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
       @irep = irep
@@ -786,7 +788,7 @@ module NumericFlow
              end
       test = c.tb && (step.op == 'SEND' || step.op == 'SEND0') ? oracle.class_test(irep, index, insn, state) : nil
       out.fill(OTHER, a + 1, nregs - a - 1) if a + 1 < nregs
-      out.fill(ELEM_UNKNOWN, c.elem_base + a + 1, nregs - a - 1) if a + 1 < nregs
+      out.fill(ELEM_UNKNOWN, c.elem_base + a + 1, nregs - a - 1) if c.elem_base && a + 1 < nregs
       preserve = c.preserves && oracle.preserves_ivar_slots?(irep, index, insn, state)
       if preserve
         out.fill(0, pb, nregs) unless c.tb
@@ -796,7 +798,7 @@ module NumericFlow
       clobber_class_test_copies(out, c, a) if c.tb
       set_reg(out, a, mask, c)
       # ELEMENT (step 2): a block send's elements, when the oracle proves them (block_element_mask); else unknown.
-      out[c.elem_base + a] = oracle.block_element_mask(irep, index, insn, state) || ELEM_UNKNOWN if c.block_element && call == C_BLOCK
+      out[c.elem_base + a] = oracle.block_element_mask(irep, index, insn, state) || ELEM_UNKNOWN if c.block_element && c.elem_base && call == C_BLOCK
       record_class_test(out, state, a, test, c) if test
       return out
     end
@@ -894,7 +896,7 @@ module NumericFlow
     pb = c.pb
     out[pb + r] = 0
     # A new value has no known elements until a rule proves them (ELEMENT, see ELEM_UNKNOWN).
-    out[c.elem_base + r] = ELEM_UNKNOWN
+    out[c.elem_base + r] = ELEM_UNKNOWN if c.elem_base
     # Registers that mirrored the old value of r no longer do.
     code = c.nslots + 1 + r
     clear_provenance(out, pb, c.nregs, code)
