@@ -18,7 +18,7 @@ module NativeCoreResultSigs
   # { 'Array' => { 'to_a' => 'Array', ... }, ... }, frozen, read once per path. Only Array and String results.
   def kinds(path = PATH)
     @kinds ||= {}
-    @kinds[path] ||= load_kinds(path)
+    @kinds[path] ||= load_kinds(path, scalars: true)
   end
 
   # The method names that return a fresh Array on some core owner (CORE_ARRAY_RETURN_METHODS). A declaration

@@ -188,9 +188,9 @@ module NativeCoreDirect
                 }
                 return self;
               C
-    # String#size and #length are one function, mrb_str_size. Its RSTRING_CHAR_LEN is a string.c
-    # macro whose meaning follows MRB_UTF8_STRING, so the helper mirrors only the byte-length
-    # meaning (pinned by the :source check) and keeps the send for the UTF-8 meaning.
+    # String#size and #length are one function, mrb_str_size, whose RSTRING_CHAR_LEN follows
+    # MRB_UTF8_STRING. The helper mirrors it: the character count under UTF-8 (mrb_utf8_strlen,
+    # which RSTRING_CHAR_LEN itself calls), the byte length otherwise. The body is pinned by the :exact check.
     *%w[size length].map do |name|
       Entry.new(name: name, owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
                 expression: "bc2cpp_str_#{name}(M, recv)", helper: "bc2cpp_str_#{name}",
@@ -305,18 +305,20 @@ module NativeCoreDirect
       }
     CPP
     'bc2cpp_str_size' => <<~CPP,
+      extern "C" mrb_int mrb_utf8_strlen(const char* str, mrb_int byte_len);
       static inline mrb_value bc2cpp_str_size(mrb_state* M, mrb_value str) {
       #ifdef MRB_UTF8_STRING
-        return mrb_funcall(M, str, "size", 0);
+        return mrb_int_value(M, mrb_utf8_strlen(RSTRING_PTR(str), RSTRING_LEN(str)));
       #else
         return mrb_int_value(M, RSTRING_LEN(str));
       #endif
       }
     CPP
     'bc2cpp_str_length' => <<~CPP,
+      extern "C" mrb_int mrb_utf8_strlen(const char* str, mrb_int byte_len);
       static inline mrb_value bc2cpp_str_length(mrb_state* M, mrb_value str) {
       #ifdef MRB_UTF8_STRING
-        return mrb_funcall(M, str, "length", 0);
+        return mrb_int_value(M, mrb_utf8_strlen(RSTRING_PTR(str), RSTRING_LEN(str)));
       #else
         return mrb_int_value(M, RSTRING_LEN(str));
       #endif
