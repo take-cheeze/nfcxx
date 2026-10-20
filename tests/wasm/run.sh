@@ -14,6 +14,10 @@
 # data model of Emscripten's wasm32: pointers are i32). tests/wasm/emscripten.cjs checks its exports and layout, and the
 # tests must still give their results. NFCXX_WASM_EMSCRIPTEN=import adds --emscripten-import-memory (the memory is
 # imported as env.memory; the host provides it). Neither is combined with NFCXX_WASM_ASAN.
+# NFCXX_WASM_MEMORY64=1 emits every module with --memory64 (the LP64 IR, with a 64-bit memory: addresses are i64). The
+# tests must give the same results. A test with "// MEMORY64-TRAP" traps only under the mode (its address is outside the
+# 32-bit memory, which the default module wraps), so it runs under the mode and is skipped otherwise. The ASan and the
+# Emscripten modes are not combined with it.
 # Skipped, not failed, without node (set NODE to a binary) or without the Path B harness (scripts/setup-pathb.sh).
 cd "$(dirname "$0")/../.."
 root=$PWD; dir=$root/tests/wasm
@@ -22,10 +26,13 @@ node=${NODE:-$(command -v node || true)}
 asan=0; emscripten=0; mode_args=(); mode=plain
 if [ "${NFCXX_WASM_ASAN:-}" = 1 ]; then asan=1; mode_args=(--asan); mode=asan; fi
 ir_args=(--ir)                             # the front end's mode: LP64 by default
+memory64=0
+if [ "${NFCXX_WASM_MEMORY64:-}" = 1 ]; then memory64=1; mode_args=(--memory64); mode=memory64; fi
 if [ "${NFCXX_WASM_EMSCRIPTEN:-}" = 1 ]; then emscripten=1; mode_args=(--emscripten); mode=emscripten; fi
 if [ "${NFCXX_WASM_EMSCRIPTEN:-}" = import ]; then emscripten=1; mode_args=(--emscripten --emscripten-import-memory); mode=emscripten-import; fi
 [ $emscripten = 1 ] && ir_args=(--ir --freestanding --target linux_riscv32)   # ILP32, as wasm32
 [ $asan = 1 ] && [ $emscripten = 1 ] && { echo "tests/wasm: NFCXX_WASM_ASAN and NFCXX_WASM_EMSCRIPTEN are not combined" >&2; exit 2; }
+[ $memory64 = 1 ] && [ $asan = 1 -o $emscripten = 1 ] && { echo "tests/wasm: NFCXX_WASM_MEMORY64 is not combined with ASAN or EMSCRIPTEN" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0; skip=0
 for f in "$dir"/*.cpp; do
@@ -44,6 +51,11 @@ for f in "$dir"/*.cpp; do
     want=$aexpect
   fi
   trap_want=$(grep -c '^// TRAP' "$f")
+  mem64_trap=$(grep -c '^// MEMORY64-TRAP' "$f")
+  if [ "$mem64_trap" -gt 0 ]; then
+    if [ $memory64 = 0 ]; then echo "skip $n (// MEMORY64-TRAP: needs NFCXX_WASM_MEMORY64=1)"; skip=$((skip + 1)); continue; fi
+    trap_want=$((trap_want + 1))
+  fi
   refuse=$(sed -n 's|^// REFUSE: *||p' "$f" | head -1)
   if ! "$root/scripts/pathb-dump" "${ir_args[@]}" "$f" > "$tmp/$n.ir" 2> "$tmp/$n.front"; then
     echo "FAIL $n: front end: $(head -1 "$tmp/$n.front")"; fail=$((fail + 1)); continue

@@ -24,6 +24,11 @@
 # --asan and --emscripten are not combined. Without the arguments the module is byte-identical to the one before the
 # mode existed. docs/notes/pathb-wasm.md, "Emscripten".
 #
+# Usage with --memory64 (before the file): the LP64 module with the 64-bit linear memory of the memory64 proposal. The
+# memory is declared with an i64 limit, its data segments have i64 offsets, and a memory access takes its address as the
+# i64 pointer value, with no wrap to i32. The stack stays in the low 4 GB (its pointer is i32, as in the default module).
+# --asan and --emscripten are not combined with it. Without it the module is byte-identical to the one before the mode.
+#
 # Layout and representation. The IR's layout is LP64 (pointers 8 bytes) by default, and the emitter keeps it: a pointer
 # value is an i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Under --emscripten the
 # IR is ILP32 (pointers and long 4 bytes, the model of wasm32), and a pointer is an i32 that needs no wrap (see layout_model).
@@ -367,6 +372,7 @@ class Module_
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
+  attr_accessor :memory64   # the 64-bit memory (--memory64): memory addresses are i64 (see push_addr)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
   attr_accessor :alloc_index, :alloc_type   # asan: the function index and the type of malloc and free (name => ...)
 
@@ -904,31 +910,39 @@ class Fn
     raise Refused, "operand #{form_text(op)}"
   end
 
-  # Pushes an operand as the i32 address of memory.
-  def addr32(op)
+  # Pushes an operand as the address of memory: an i32 (the 32-bit linear memory), or under --memory64 an i64, which is
+  # the pointer value itself. A slot's address is computed as an i32 from the frame base (the stack is below 4 GB), and
+  # is extended to i64 under --memory64.
+  def push_addr(op)
     if op.is_a?(IRSym) && op.sig == "$"
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
       e(0x6a)
+      e(0xad) if @mod.memory64             # i64.extend_i32_u
     else
       push_op(op, ptr_wtype)
-      e(0xa7) if $ptr_bytes == 8           # i32.wrap_i64 (an i32 address needs no wrap)
+      e(0xa7) if $ptr_bytes == 8 && !@mod.memory64   # i32.wrap_i64 (an i32 address needs no wrap)
     end
   end
 
-  # The address of a memory access of size bytes, as an i32: in asan mode it is checked first (asan_addr).
+  # The address of a memory access of size bytes: in asan mode it is checked first (asan_addr).
   def mem_addr(op, size)
     if @asan
       asan_addr(op, size)
     else
-      addr32(op)
+      push_addr(op)
     end
+  end
+
+  # An integer constant of the memory's address width: the length of memory.copy, i64 under --memory64, else i32.
+  def mem_const(n)
+    e(@mod.memory64 ? 0x42 : 0x41); leb_s(n)
   end
 
   # asan: pushes the address of an access of size bytes after a call of the check, which traps on a violation. The
   # address goes through the scratch local, since the check takes it as an argument and the access needs it again.
   def asan_addr(op, size)
-    addr32(op)
+    push_addr(op)
     e(0x22); leb_u(@tmp32)                 # local.tee
     e(0x41); leb_s(size)
     e(0x10); leb_u(@mod.check_index)       # call the check: (address, size)
@@ -1401,7 +1415,7 @@ class Fn
       n = as_int(s[1])
       mem_addr(s[2], n)
       mem_addr(s[3], n)
-      e(0x41); leb_s(n)
+      mem_const(n)
       e(0xfc, 0x0a, 0x00, 0x00)            # memory.copy: destination, source, length
     when "eval"
       inner = s[1]
@@ -1884,9 +1898,9 @@ EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", 
 # is added only with a source that names both sides.
 EMSCRIPTEN_IMPORT_NAMES = {}
 
-USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [FILE.ir | -] > out.wasm\n"
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [--memory64] [FILE.ir | -] > out.wasm\n"
 
-def emit_module(src, asan = false, emscripten = false, import_memory = false)
+def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false)
   forms = parse_forms(tokenize(src))
   # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
   # takes ILP32 only). The model is set before any type is read.
@@ -1938,6 +1952,7 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false)
   mod.asan = asan
   mod.emscripten = emscripten
   mod.import_memory = import_memory
+  mod.memory64 = memory64
   mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
@@ -2031,7 +2046,7 @@ def encode_module(mod, bodies)
   unless mod.import_memory
     mem = []
     uleb(1, mem)
-    mem << 0x00
+    mem << (mod.memory64 ? 0x04 : 0x00)  # limits: memory64 (an i64 minimum) without a maximum, or i32 without one
     uleb(mod.pages, mem)
     section(5, mem, out)
   end
@@ -2122,7 +2137,7 @@ def encode_module(mod, bodies)
     dsec = []
     uleb(mod.segments.length, dsec)
     mod.segments.each do |addr, bytes|
-      dsec << 0x00 << 0x41                 # active, memory 0: the offset is an i32.const
+      dsec << 0x00 << (mod.memory64 ? 0x42 : 0x41)   # active, memory 0: the offset is an i64.const or an i32.const
       sleb(addr, dsec)
       dsec << 0x0b
       uleb(bytes.length, dsec)
@@ -2143,6 +2158,7 @@ def main(argv)
   asan = false
   emscripten = false
   import_memory = false
+  memory64 = false
   while !args.empty? && args.first.start_with?("--")
     flag = args.shift
     if flag == "--asan"
@@ -2151,6 +2167,8 @@ def main(argv)
       emscripten = true
     elsif flag == "--emscripten-import-memory"
       import_memory = true
+    elsif flag == "--memory64"
+      memory64 = true
     else
       $stderr.write(USAGE)
       return 1
@@ -2164,13 +2182,17 @@ def main(argv)
     $stderr.write("error: --asan and --emscripten are not combined (the shadow would sit where the heap begins)\n")
     return 1
   end
+  if memory64 && (asan || emscripten)
+    $stderr.write("error: --memory64 is not combined with --asan or --emscripten (their shadow and runtime are i32)\n")
+    return 1
+  end
   if import_memory && !emscripten
     $stderr.write("error: --emscripten-import-memory needs --emscripten\n")
     return 1
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src, asan, emscripten, import_memory)
+    bytes = emit_module(src, asan, emscripten, import_memory, memory64)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3
