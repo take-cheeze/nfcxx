@@ -39,6 +39,7 @@ covers say so.
 | [pathb-stage3.md](notes/pathb-stage3.md) | The IR-to-QBE emitter, translation validation, and the rounds of closed gaps (volatile, TLS, exceptions, dynamic init, bit-fields, VLAs). |
 | [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the ILP32 layout of wasm32 under `--emscripten` (i32 pointers), the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`). |
 | [realworld.md](notes/realworld.md) | tinyxml2, doctest, Lua, mruby built with nfcxx/nfcc, what each needed, `nfcc` options. |
+| [pathb-llvm.md](notes/pathb-llvm.md) | Path B from LLVM IR (`scripts/llvm-to-pathb.rb`): `clang -S -emit-llvm` text to nfcxx IR, with `nsw` checked and the other policy choices; 9 programs run against `// EXPECT:` and clang -O0 (`tests/llvm-pathb/run.sh`); what is refused. |
 | [pathb-cil.md](notes/pathb-cil.md) | Path B IR to CIL: C++ `try`/`catch` as CLR exceptions (spike), 19 of 62 IR test files translate, `tests/pathb-cil/run.sh`. |
 | [cil.md](notes/cil.md) | `NFCXX_BACKEND=cil`: C programs compiled to .NET 8 assemblies (QBE IL -> CIL -> ilasm), the shim for variadic calls, what is not supported, `tests/cil/run.sh`. |
 | [coreclr-gc.md](notes/coreclr-gc.md) | CoreCLR's workstation GC (34 translation units) compiled by nfcxx on both backends; the QBE rewrites it needed; what a link and run still needs. |
