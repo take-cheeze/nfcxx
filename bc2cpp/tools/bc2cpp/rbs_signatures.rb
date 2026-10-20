@@ -5,6 +5,7 @@ require_relative 'annotations'
 require_relative 'core_fact_sigs'
 require_relative 'native_sigs'
 require_relative 'rbs_optional_hint'
+require_relative 'rbs_ir_contracts'
 
 # RBS_SIGNATURES (docs/adr/0413): RBS files as a source of the same hints the `# bc2cpp:` comments give.
 #
@@ -387,37 +388,45 @@ module RbsSignatures
   end
 
   # Applied signatures have already been matched to the definition and its required arity.
-  def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0')
+  def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0', prepared: nil)
     require_relative 'bytecode_ir'
+    if prepared && !prepared.applied.equal?(applied)
+      raise ArgumentError, 'prepared IR contracts belong to another signature world'
+    end
     owner = applied.ir_owners[irep.label]
     return BytecodeIR::Types.new(irep, declared_const_elements: applied.ir_const_elements, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver) unless owner
 
-    lookup = ->(klass) { contract_owners(klass, superclass_of, included_modules: included_modules, prepended_modules: prepended_modules, unknown_mixins: unknown_mixins) }
-    owners = lookup.call(owner)
-    ivars = {}
-    owners.reverse_each do |owner|
-      applied.ir_ivar_types.each { |(decl_owner, name), types| ivars[name] = types if decl_owner == owner }
-    end
-    ivar_elements = {}
-    owners.reverse_each do |contract_owner|
-      applied.ir_ivar_types.each do |(decl_owner, name), _types|
-        next unless decl_owner == contract_owner
+    if prepared
+      ivars = prepared.ivars(owner)
+      ivar_elements = prepared.elements(owner)
+    else
+      lookup = ->(klass) { contract_owners(klass, superclass_of, included_modules: included_modules, prepended_modules: prepended_modules, unknown_mixins: unknown_mixins) }
+      owners = lookup.call(owner)
+      ivars = {}
+      owners.reverse_each do |owner|
+        applied.ir_ivar_types.each { |(decl_owner, name), types| ivars[name] = types if decl_owner == owner }
+      end
+      ivar_elements = {}
+      owners.reverse_each do |contract_owner|
+        applied.ir_ivar_types.each do |(decl_owner, name), _types|
+          next unless decl_owner == contract_owner
 
-        ivar_elements.delete(name)
-        elements = applied.ir_ivar_elements[[decl_owner, name]]
-        ivar_elements[name] = elements if elements
+          ivar_elements.delete(name)
+          elements = applied.ir_ivar_elements[[decl_owner, name]]
+          ivar_elements[name] = elements if elements
+        end
       end
     end
+    named_returns = prepared ? prepared.named_returns : applied.ir_named_returns.transform_keys { |klass, name| [klass.dup.freeze, name.dup.freeze].freeze }.freeze
     calls = {}
     irep.instructions.each_with_index do |insn, index|
       # A breaking block can replace the normal return type (ADR 0443).
       next unless %w[SSEND SSEND0].include?(insn.op)
 
-      target = owners.find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
-      types = applied.ir_named_returns[[target, insn.sym.to_s]] if target
+      target = prepared ? prepared.target(owner, insn.sym.to_s) : owners.find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
+      types = named_returns[[target, insn.sym.to_s]] if target
       calls[index] = types == :self ? Set[owner.to_sym].freeze : types if types
     end
-    named_returns = applied.ir_named_returns.transform_keys { |klass, name| [klass.dup.freeze, name.dup.freeze].freeze }.freeze
     resolver = lambda do |insn, receiver, refusal|
       if receiver.classes.size > 16
         refusal[:cause] ||= :call_receiver_union_cap
@@ -427,7 +436,7 @@ module RbsSignatures
       contracts = receiver.contracts.to_set
       failed = false
       receiver.classes.each do |klass|
-        target = lookup.call(klass.to_s).find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
+        target = prepared ? prepared.target(klass.to_s, insn.sym.to_s) : lookup.call(klass.to_s).find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
         unless target && named_returns.key?([target, insn.sym.to_s])
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
