@@ -409,7 +409,18 @@ class CodeGen
   # The class set `self` holds in the instance method whose body is +irep+ (the declared class and its descendants, or
   # the class alone when it has none), or nil when the body is shared, is not an instance method of a declared class,
   # or the hierarchy is not fully visible.
+  # The seeded receiver (ENTRY_SEEDS) must agree with the closed-world model below, or the answer is refused.
   def return_class_self_receiver(irep)
+    model = return_class_self_receiver_model(irep)
+    definition = @owner_of[irep.label]
+    seeded = definition && bytecode_ir_entry_seed_self_class(definition)
+    return model unless seeded
+    return nil unless model == numeric_class_bit(seeded)
+
+    model
+  end
+
+  def return_class_self_receiver_model(irep)
     definition = @owner_of[irep.label]
     owner = definition&.owner
     return nil unless definition && !definition.core && @closed_world.class_declared?(owner) &&

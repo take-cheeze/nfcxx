@@ -253,6 +253,12 @@ class ClosedWorld
     [@native_code_tokens, @ruby_tokens].any? { |files| files.each_value.any? { |tokens| tokens.include?(root) && tokens.include?(last) } }
   end
 
+  # The identifier tokens of each scanned native source ({ path => Set }) and of each foreign Ruby source. Read-only
+  # views for ENTRY_SEEDS, which must see exactly which outside files spell a name.
+  def native_token_files = @native_code_tokens
+
+  def foreign_ruby_token_files = @ruby_tokens
+
   # No const_set, remove_const or autoload anywhere and no global refusal: every constant binding is a visible
   # SETCONST/CLASS/MODULE or a scanned native/foreign definition (NUMERIC_CONSTANT_RANGES).
   def constants_static?
