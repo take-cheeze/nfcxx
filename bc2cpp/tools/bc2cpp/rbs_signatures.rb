@@ -63,9 +63,9 @@ module RbsSignatures
   end
 
   # The fact tables (CoreFactSigs::TABLES) are read by their own loaders and are not program signatures: some name
-  # methods with mrblib bodies (Kernel#to_enum, Proc#yield), which a declaration would hint.
-  def fact_table?(decl)
-    name = NativeSigs.table_of(decl)
+  # methods with mrblib bodies (Kernel#to_enum, Proc#yield), which a declaration would hint. `enclosing` as NativeSigs.table_of.
+  def fact_table?(decl, enclosing = [])
+    name = NativeSigs.table_of(decl, enclosing)
     !name.nil? && CoreFactSigs::TABLES.include?(NativeSigs.table(name))
   end
 
@@ -92,7 +92,7 @@ module RbsSignatures
                                     code: 'TC1002', message: "RBS syntax error: #{e.message.sub(/\A\S+:\d+:\d+\.\.\.\d+:\d+: /, '')}")
         next
       end
-      decls.each { |d| declaration(out, d, [], rel, NativeSigs.native?(d)) unless fact_table?(d) }
+      decls.each { |d| declaration(out, d, [], rel) }
     end
     out
   end
@@ -106,16 +106,29 @@ module RbsSignatures
     out.diagnostics << Diag.new(file: loc.file, line: loc.line, col: loc.col, severity: severity, code: code, message: message)
   end
 
-  def declaration(out, decl, scope, rel, native)
+  # `enclosing` lists the declarations +decl+ sits in, outermost first. Native and fact-table status belong to each
+  # node: its own marker, else the nearest enclosing one (NativeSigs.table_of), so a hand-owned member beside a tagged
+  # member of the same block stays a program hint. A fact table is skipped, but a class or module keeps its members
+  # that are not of a fact table.
+  def declaration(out, decl, scope, rel, enclosing = [])
+    native = NativeSigs.native?(decl, enclosing)
+    container = decl.is_a?(RBS::AST::Declarations::Class) || decl.is_a?(RBS::AST::Declarations::Module)
+    return if !container && fact_table?(decl, enclosing)
+
     case decl
     when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
       name = (scope + [decl.name.to_s.delete_prefix('::')]).join('::')
-      if decl.is_a?(RBS::AST::Declarations::Class) && decl.super_class && out.supers
+      chain = enclosing + [decl]
+      if decl.is_a?(RBS::AST::Declarations::Class) && decl.super_class && out.supers && !fact_table?(decl, enclosing)
         out.supers << SuperDecl.new(name: name, super_name: decl.super_class.name.to_s, scope: name.split('::')[0...-1],
                                     loc: loc_of(decl, rel, native))
       end
-      decl.members.each { |m| member(out, m, name, rel, native) }
-      decl.members.grep(RBS::AST::Declarations::Base).each { |inner| declaration(out, inner, [name], rel, native || NativeSigs.native?(inner)) }
+      decl.members.each do |m|
+        next if m.is_a?(RBS::AST::Declarations::Base) || fact_table?(m, chain)
+
+        member(out, m, name, rel, NativeSigs.native?(m, chain))
+      end
+      decl.members.grep(RBS::AST::Declarations::Base).each { |inner| declaration(out, inner, [name], rel, chain) }
     when RBS::AST::Declarations::Constant, RBS::AST::Declarations::TypeAlias, RBS::AST::Declarations::Interface
       diag(out, loc_of(decl, rel, native), 'info', 'TC1005', "#{decl.class.name.split('::').last} #{decl.name} is accepted but gives no hint")
     else
