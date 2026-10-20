@@ -213,7 +213,7 @@ if ENV['MRBC']
     sink = ->(facts) { facts['methods'].find { |method| method['owner'] == 'IrGraphSink' && method['name'] == 'ir_graph_forward' } }
     check.call('call graph forwards a complete argument union into another polymorphic name',
                sink.call(graph_on)['params'][0]['type'].split(' | ').sort == %w[Array Integer] &&
-                 sink.call(graph_on)['params'][0]['source'] == 'inferred:call-graph')
+                 sink.call(graph_on)['params'][0]['source'] == 'inferred:receiver-call-sites')
     check.call('disabled call graph leaves forwarding parameter unknown', sink.call(graph_off)['params'][0]['type'].nil?)
     check.call('graph argument facts feed independent IR returns', graph_on['ir_feedback'].any? { |row|
       row['owner'] == 'IrGraphSink' && row['kind'] == 'return' && row['status'] == 'inferred' && row['type'].split(' | ').sort == %w[Array Integer]

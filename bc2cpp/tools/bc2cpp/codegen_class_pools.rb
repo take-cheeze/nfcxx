@@ -223,6 +223,12 @@ class CodeGen
   # callers of a definition are the sites whose receiver classes dispatch to it (poly_arg_reads). Keyed like
   # @entry_cand: [irep label, k] => [name, mandatory arity]. A `super` naming the method is refused, because the
   # call-site index does not carry it as a site (CallSiteIndex.build does, by enclosing def).
+  # Keys of the argument pools that a polymorphic name holds. Their pool is codegen's only: type_facts reports the
+  # call-site and call-graph inference for these parameters, as it did before pools existed.
+  def poly_arg_pool_key?(key)
+    poly_arg_candidates.key?(key)
+  end
+
   def poly_arg_candidates
     @poly_arg_cand ||= compute_poly_arg_candidates
   end
