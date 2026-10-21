@@ -38,8 +38,7 @@ class CodeGen
     core_kind = native_core_declared_result(name, klass)
     if ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && @closed_world&.exact_instances_singleton_free? && @native_name_sources && core_kind
       entry = NativeCoreDirect::ENTRIES.find { |candidate| candidate.owner == klass && candidate.name == name }
-      pinned = NativeClassResults.core_result_pinned?(name, klass, @closed_world.native_paths_spelling(name))
-      return core_kind if pinned && entry && native_core_entry_safe?(entry)
+      return core_kind if entry && native_core_entry_safe?(entry)
     end
     kind = NativeResultFacts.kind(name, klass)
     return nil unless kind && @closed_world&.exact_instances_singleton_free?
