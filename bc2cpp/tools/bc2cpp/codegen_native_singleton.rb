@@ -120,7 +120,7 @@ module NativeSingletonCall
   # (A global refusal never reaches here: native_singleton_target asks ClosedWorld#native_singleton_name_refusal first.)
   # A bare top-level native class or module (`File`, `Math`, `Time`) the site's lexical scope cannot shadow:
   #   - the name is a StableClassConstants name (one native definition, no assignment, no const_set/
-  #     remove_const/autoload anywhere) and no native source binds it under another path;
+  #     remove_const anywhere) and no native source binds it under another path;
   #   - no class/module statement of the bytecode or of the outside Ruby nests a constant of that name in a
   #     scope the site can see: a lexical prefix of its owner, or any class or module on its owner's ancestor
   #     chain (the places a GETCONST searches before Object);

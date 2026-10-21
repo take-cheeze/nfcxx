@@ -16,7 +16,7 @@ class CodeGen
     !self.class.integer_constant_ranges.nil? && static_constant_world? && %w[+ - * /].all? { |op| numeric_op_native?(op) }
   end
 
-  # BC2CPP_NUMERIC_CONSTANTS=0 off, and every constant binding visible: no const_set, remove_const, autoload or
+  # BC2CPP_NUMERIC_CONSTANTS=0 off, and every constant binding visible: no const_set, remove_const or
   # const_missing, no global refusal.
   # Not memoized: @closed_world is swapped for the world of a core method (ADR 0264).
   def static_constant_world?
