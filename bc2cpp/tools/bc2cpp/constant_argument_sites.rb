@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 require_relative 'call_site_index'
+require_relative 'integer_constant_ranges'
 
 # CONSTANT_ARGUMENT_SITES (report only): for each method body, the call sites that pass constant arguments, whether every
 # call site passes one constant tuple, whether the body is pure by a conservative allowlist, and how many of its
@@ -12,26 +13,54 @@ require_relative 'call_site_index'
 # name => [:int, value] or a Symbol-or-nil value, the ConstantFacts values from ADR 0501). A value reaches a call through
 # the bytecode reaching definitions, so a MOVE chain is followed. Anything else is UNKNOWN.
 #
+# Four conditions make a verdict untrustworthy, and each is reported on its own row and counted in the summary:
+#   1. UNRESOLVED: a call the analysis cannot place by name (send/__send__/public_send with a computed name, method or
+#      define_method or alias_method with a computed name, ALIAS or UNDEF anywhere, method_missing defined, a to_enum
+#      site with a computed name). A method with one is not a single-tuple candidate. A literal target names only that
+#      method. A computed or global target makes every method unresolved.
+#   2. REDEFINED: a Ruby definition in the registry of a name a pure body sends. The sends' receivers are not known, so
+#      a redefinition of the name anywhere refuses purity (name-level; the owner is not checked here).
+#   3. OPERATOR GATE: an arithmetic or ordering op (ADD ... GE, and the + - * / % < > <= >= sends) needs
+#      IntegerConstantRanges.integer_ops_safe? and no redefinition of the name. Otherwise the body is refused as impure.
+#   4. MAY RAISE: a body with an op or send that can raise on some receiver (arithmetic, ordering, GETCONST, a send outside
+#      NON_RAISING_NAMES) is not pure, because a raising call is not a fold. It is reported in may_raise, not in impure.
+#
 # Call sites are matched by method name (CallSiteIndex), so a method is "called only with tuple T" only over its name's
 # sites. A computed-name site is kept as a caller of every name (CallSiteIndex.sites), which can only add sites.
 module ConstantArgumentSites
   UNKNOWN = :unknown
-  # Methods a pure body may send. Core operators and predicates; a program that redefines one is not checked here.
+  # Methods a pure body may send. Core operators and predicates; a redefinition of one is refused (condition 2).
   PURE_NAMES = Set.new(%w[+ - * / % == != < > <= >= ! nil? is_a? kind_of? instance_of? respond_to? zero? positive? negative? abs]).freeze
-  # Opcodes with no side effect of their own. GETCONST/GETMCNST may run const_missing, and the arithmetic and comparison
-  # opcodes may dispatch to a redefined operator; both are accepted here and reported as a caveat, not checked.
+  # Sends that cannot raise on any receiver: identity, equality and the type predicates. Every other pure name may raise
+  # (for example `+` on nil, `zero?` on a String), so a body that sends it is may_raise.
+  NON_RAISING_NAMES = Set.new(%w[! == != nil? is_a? kind_of? instance_of? respond_to?]).freeze
+  # The arithmetic and ordering names the operator gate covers (their ops are ARITH_OPS below).
+  ARITH_NAMES = Set.new(%w[+ - * / % < > <= >=]).freeze
+  # Opcodes with no side effect of their own and no way to raise. GETCONST/GETMCNST may run const_missing or raise NameError,
+  # so they are may_raise (see RAISING_OPS), not here.
   PURE_OPS = Set.new(%w[NOP MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADSELF LOADL STRING ENTER RETURN JMP JMPIF JMPNOT JMPNIL
-                        GETIV GETCONST GETMCNST GETUPVAR ADD SUB MUL DIV ADDI SUBI EQ LT LE GT GE NOT
-                        SEND SEND0 SEND1 SENDV]).freeze
-  SEND_OPS = %w[SEND SEND0 SEND1 SENDV].freeze
+                        GETIV GETUPVAR SEND SEND0 SEND1 SENDV]).freeze
+  # Arithmetic and ordering ops: gated (condition 3) and may raise on a non-numeric operand (condition 4).
+  ARITH_OPS = Set.new(%w[ADD SUB MUL DIV ADDI SUBI LT LE GT GE]).freeze
+  RAISING_OPS = Set.new(%w[GETCONST GETMCNST]).freeze
+  # Ops that dispatch to a method by name without a SEND (vm.c OP_EQ is `==`, OP_NOT is `!`). They are checked against the
+  # redefined names like a send, and they cannot raise.
+  DISPATCH_OPS = { 'EQ' => '==', 'NOT' => '!' }.freeze
+  # Every send opcode the call-site index reads (SEND0, SENDB, SSEND*), plus the two it does not list.
+  SEND_OPS = (CallSiteIndex::SEND_OPS + %w[SEND1 SENDV]).uniq.freeze
   JUMP_OPS = %w[JMPIF JMPNOT JMPNIL].freeze
   LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
+  # Sends that install or dispatch a method by a name the argument carries: their target is the first argument.
+  DYNAMIC_SENDS = %w[send __send__ public_send method instance_method define_method alias_method].freeze
 
   module_function
 
   # Summary and per-method rows for every method definition in +registry+ (name => [definitions]).
   def report(ireps, registry, constants: {})
     index = CallSiteIndex.build(ireps)
+    unresolved = unresolved_calls(ireps, registry, index)
+    redefined = redefined_names(registry)
+    gate_ok = operator_gate_ok?(registry, redefined)
     rows = []
     registry.each do |name, definitions|
       definitions.each do |definition|
@@ -42,22 +71,32 @@ module ConstantArgumentSites
         sites = CallSiteIndex.sites(index, name)
         tuples = sites.map { |irep, idx, dest, argc| argc && (1..argc).map { |k| value_at(irep, idx, dest + k, nil, constants) } }
         constant_tuples = tuples.select { |t| t && t.none?(UNKNOWN) }
-        single = !tuples.empty? && tuples.all? { |t| t && t.none?(UNKNOWN) } && tuples.uniq.size == 1
-        pure, impure_reasons = purity(body)
+        unresolved_reason = unresolved_reason_for(name, unresolved)
+        single = unresolved_reason.nil? && !tuples.empty? && tuples.all? { |t| t && t.none?(UNKNOWN) } && tuples.uniq.size == 1
+        verdict = purity(body, redefined, gate_ok)
+        pure = verdict[:impure].empty? && verdict[:may_raise].empty?
         decided = single && pure ? decided_jumps(body, tuples.first, constants) : nil
         rows << { name: name, owner: definition.owner, sites: sites.size, constant_sites: constant_tuples.size,
-                  single_tuple: single, tuple: single ? tuples.first : nil, pure: pure, impure: impure_reasons,
+                  unresolved: unresolved_reason, single_tuple: single, tuple: single ? tuples.first : nil,
+                  pure: pure, impure: verdict[:impure], may_raise: verdict[:may_raise],
                   jumps: decided && decided[:total], decided: decided && decided[:decided] }
       end
     end
     rows.sort_by! { |r| [r[:owner].to_s, r[:name].to_s] }
-    { rows: rows, summary: summary(rows) }
+    { rows: rows, summary: summary(rows, unresolved, redefined, gate_ok) }
   end
 
-  def summary(rows)
+  def summary(rows, unresolved, redefined, gate_ok)
     {
       methods: rows.size,
       with_constant_sites: rows.count { |r| r[:constant_sites].positive? },
+      unresolved_methods: rows.count { |r| r[:unresolved] },
+      unresolved_global: unresolved[:global].any?,
+      unresolved_names: unresolved[:names].keys.sort,
+      redefined_names: redefined.keys.sort,
+      operator_gate_closed: !gate_ok,
+      impure_methods: rows.count { |r| !r[:impure].empty? },
+      may_raise_methods: rows.count { |r| r[:impure].empty? && !r[:may_raise].empty? },
       single_tuple: rows.count { |r| r[:single_tuple] },
       pure: rows.count { |r| r[:pure] },
       pure_single_tuple: rows.count { |r| r[:pure] && r[:single_tuple] },
@@ -66,20 +105,83 @@ module ConstantArgumentSites
     }
   end
 
-  # [pure, reasons]: pure is true when every instruction is in PURE_OPS, every send names PURE_NAMES, and the body has no
-  # nested block (LAMBDA/BLOCK are not in PURE_OPS).
-  def purity(irep)
-    reasons = []
+  # Condition 1. { global: [reasons], names: { name => [reasons] } }: a dynamic or named-lookup send whose target is a
+  # literal names that method; one whose target is computed makes every method unresolved (global). ALIAS and UNDEF, a
+  # method_missing definition and a to_enum site with a computed name are global too: each can reach any name.
+  def unresolved_calls(ireps, registry, index)
+    global = []
+    names = Hash.new { |h, k| h[k] = [] }
+    ireps.each_value do |irep|
+      irep.each_with_op(*SEND_OPS) do |insn, idx|
+        sym = insn.sym
+        # SSEND/SENDB carry their name the same way; a super send names the enclosing def, which the index keys.
+        next unless DYNAMIC_SENDS.include?(sym)
+
+        target = CallSiteIndex.enum_target(irep, idx, insn, insn.reg.to_i + 1)
+        if target.nil?
+          global << "#{sym} with a computed name"
+        else
+          names[target] << "#{sym} #{target}"
+        end
+      end
+      irep.each_with_op('ALIAS', 'UNDEF') { global << 'alias or undef' }
+    end
+    global << 'method_missing defined' if registry.fetch('method_missing', []).any?(&:irep)
+    global << 'to_enum with a computed name' unless index.fetch(CallSiteIndex::UNKNOWN_TARGET, []).empty?
+    { global: global.uniq, names: names }
+  end
+
+  # The reason +name+ is unresolved, or nil. A global reason covers every name.
+  def unresolved_reason_for(name, unresolved)
+    return unresolved[:global].join('; ') if unresolved[:global].any?
+    return unresolved[:names][name].uniq.join('; ') if unresolved[:names].key?(name)
+
+    nil
+  end
+
+  # Condition 2: name => owners of its Ruby definitions in the registry, for the names a pure body may send.
+  def redefined_names(registry)
+    (PURE_NAMES | ARITH_NAMES).each_with_object({}) do |name, out|
+      owners = Array(registry[name]).select(&:irep).map { |d| d.owner.to_s }.uniq
+      out[name] = owners unless owners.empty?
+    end
+  end
+
+  # Condition 3: the Integer operator precondition (IntegerConstantRanges.integer_ops_safe?, with no included or prepended
+  # modules and no unknown mixins recorded here: the closed world's own facts are not passed in, see the check), and no
+  # redefinition of an arithmetic or ordering name.
+  def operator_gate_ok?(registry, redefined)
+    IntegerConstantRanges.integer_ops_safe?(registry, {}, {}, Set.new) && ARITH_NAMES.none? { |n| redefined.key?(n) }
+  end
+
+  # [verdict] with :impure (side effects, unsupported ops, redefined names, a closed operator gate) and :may_raise (ops or
+  # sends that can raise on some receiver). A body is pure when both lists are empty.
+  def purity(irep, redefined, gate_ok)
+    impure = []
+    may_raise = []
     BytecodeIR.for(irep).instructions.each do |ins|
       op = ins.op
       if SEND_OPS.include?(op)
         name = ins.source.sym
-        reasons << "send #{name}" unless PURE_NAMES.include?(name)
-      elsif !(op.match?(LOADI_OP) || PURE_OPS.include?(op))
-        reasons << op
+        if !PURE_NAMES.include?(name) then impure << "send #{name}"
+        elsif redefined.key?(name) then impure << "redefined #{name}"
+        elsif ARITH_NAMES.include?(name) && !gate_ok then impure << "operator gate #{name}"
+        elsif !NON_RAISING_NAMES.include?(name) then may_raise << "send #{name}"
+        end
+      elsif (name = DISPATCH_OPS[op])
+        impure << "redefined #{name}" if redefined.key?(name)
+      elsif ARITH_OPS.include?(op)
+        impure << "operator gate #{op}" unless gate_ok
+        may_raise << op
+      elsif RAISING_OPS.include?(op)
+        may_raise << op
+      elsif op.match?(LOADI_OP) || PURE_OPS.include?(op)
+        next
+      else
+        impure << op
       end
     end
-    [reasons.empty?, reasons.uniq]
+    { impure: impure.uniq, may_raise: may_raise.uniq }
   end
 
   # The jumps of +irep+ decided by parameters holding +tuple+ (one value per parameter): a jump is decided when the value of
