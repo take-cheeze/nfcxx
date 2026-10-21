@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir'
+require_relative 'native_constructor_sigs'
 
 # Construct, native-argument and super devirtualization targets.
 
@@ -23,28 +24,45 @@ require_relative 'bytecode_ir'
 # how each argument is unboxed before calling `fn`, which takes native
 # mrb_int/mrb_float; mrb_as_int/mrb_as_float raise the same TypeError they
 # raised inside `fn`.
-NATIVE_CONSTRUCT_TARGETS = {
-  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', class_owner: 'RGSS::Tone',
-              arity: 4, arg_type: :float },
-  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', class_owner: 'RGSS::Color',
-               arity: 4, arg_type: :float },
-  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', class_owner: 'RGSS::Rect',
-              arity: 4, arg_type: :int },
-  # Sprite: spr_init is `mrb_get_args(M, "|o", &vp)` plus a fixed body that
-  # rgss::sprite_new_direct (include/rgss_construct.hxx) reproduces. "|o" never
-  # coerces or raises, so there is no TypeError behavior to preserve.
+# Tone, Color, Rect and Bitmap rows are derived from their `bc2cpp:direct` overloads in
+# sig/bc2cpp/declarations.rbs#rgss_constructors (NativeConstructorSigs.construct_targets). Each class's
+# fn, class_fn, arity and arg_type come from that section and its audited source (the rule is stated there).
+# Rect's direct arity is 4, not the source's 0..4: the 0-argument form is a literal-argument direct overload, and
+# the direct arm does not fill defaults. Those counts go through OVERLOADED_CONSTRUCT.
+NATIVE_CONSTRUCT_TYPE_GUARDS = {
+  # Bitmap#initialize also accepts a String (file load), which the section's Ruby initialize dispatches on
+  # `kind_of? String` (not a native format, so the section cannot say it). `type_guard: :int` checks mrb_integer_p
+  # on every argument and falls back to mrb_funcall otherwise.
+  'Bitmap' => :int,
+}.freeze
+
+# Rows the section does not carry, listed by hand:
+#  - Sprite: spr_init is `mrb_get_args(M, "|o", &vp)` plus a fixed body that rgss::sprite_new_direct
+#    (include/rgss_construct.hxx) reproduces. The entry takes an object, which the section has no type for. "|o"
+#    never coerces or raises, so there is no TypeError behavior to preserve.
+#  - Table: table_init is `mrb_get_args(M, "i|ii", ...)`, but table_new_direct takes the argument count too, which
+#    the section cannot express. :table_dimensions names that count (codegen_send.rb emits it).
+NATIVE_CONSTRUCT_EXPLICIT = {
   'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', class_owner: 'RGSS::Sprite',
                 arity: [0, 1],
                 arg_type: :object },
-  # Bitmap: bmp_init_size is `mrb_get_args(M, "ii", ...)` + alloc_obj, which
-  # rgss::bitmap_new_direct reproduces. Bitmap#initialize also accepts a String
-  # (file load), so `type_guard: :int` checks mrb_integer_p on every argument and
-  # falls back to mrb_funcall otherwise.
-  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', class_owner: 'RGSS::Bitmap',
-                arity: 2, arg_type: :int, type_guard: :int },
   'Table' => { fn: 'rgss::table_new_direct', class_fn: 'rgss::native_table_class', class_owner: 'RGSS::Table',
                arity: [1, 2, 3], arg_type: :table_dimensions },
 }.freeze
+
+NATIVE_CONSTRUCT_TARGETS = begin
+  derived = NativeConstructorSigs.construct_targets.to_h do |key, row|
+    guard = NATIVE_CONSTRUCT_TYPE_GUARDS[key]
+    [key, guard ? row.merge(type_guard: guard) : row]
+  end
+  missing_guard = NATIVE_CONSTRUCT_TYPE_GUARDS.keys - derived.keys
+  raise "bc2cpp: type_guard for #{missing_guard.join(', ')}, which rgss_constructors does not derive" unless missing_guard.empty?
+
+  duplicated = derived.keys & NATIVE_CONSTRUCT_EXPLICIT.keys
+  raise "bc2cpp: #{duplicated.join(', ')} is both derived and listed by hand" unless duplicated.empty?
+
+  derived.merge(NATIVE_CONSTRUCT_EXPLICIT).freeze
+end
 
 # bc2cpp-COMPILED classes whose `Owner.new` may become bc2cpp_direct_alloc +
 # the compiled `#initialize` _impl (emit_direct_construct_decls), the compiled
