@@ -34,7 +34,8 @@ class CodeGen
 
     if insn.op == 'JMPNIL'
       return :taken if mask == NumericFlow::NIL
-      return :not_taken if (mask & NumericFlow::NIL).zero?
+      # OTHER is an unknown value that may be nil, so only a mask with neither NIL nor OTHER is never nil.
+      return :not_taken if (mask & (NumericFlow::NIL | NumericFlow::OTHER)).zero?
 
       return nil
     end
