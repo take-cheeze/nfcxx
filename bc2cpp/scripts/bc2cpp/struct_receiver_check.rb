@@ -65,4 +65,31 @@ check.call('the direct Struct.new block defs still register under their owner', 
 check.call('a join where Struct is the receiver on every arm is still recognized (never less)',
            members['Pt7'] == ['w'] && owner_of.call('both') == ['Pt7'])
 
+# FACTORY_READS (closed_world.rb): a read name keeps the factory proof only while its definitions are native. A
+# program `==` can store the constant it is handed (argument) or receives (receiver), and a later `.new` through
+# the stored reference would make a class the members proof never saw.
+def closed_world_of(suite, snippet)
+  suite.compile(snippet) do |ireps, root|
+    result = build_registry(ireps, root)
+    ClosedWorld.new(ireps: ireps, registry: result[0], class_decls: result[7], walked: result[8],
+                    native_paths: [], ruby_paths: [], module_names: result[11].to_set)
+  end
+end
+
+# `is_a?` is a SEND, so it reaches FACTORY_READS (`==` compiles to OP_EQ and always escapes).
+ESCAPING_ARGUMENT = "class Keeper\n  def is_a?(other)\n    $kept = other\n    true\n  end\nend\n" \
+                    "Pt = Struct.new(:x)\nKeeper.new.is_a?(Struct)\n$kept.new(:y)\n"
+ESCAPING_RECEIVER = "class Struct\n  def inspect\n    $kept = self\n    'Struct'\n  end\nend\n" \
+                    "Pt = Struct.new(:x)\nStruct.inspect\n$kept.new(:y)\n"
+# No program defines is_a? here, so the read name is native-only and the factory proof stands.
+NATIVE_READ = "Pt = Struct.new(:x)\nPt.new(:y).is_a?(Struct)\n"
+
+puts '-- FACTORY_READS (closed world)'
+check.call('a program is_a? handed a Struct as its argument makes the constant escape',
+           closed_world_of(suite, ESCAPING_ARGUMENT).global_refusal == :class_factory_escape)
+check.call('a Struct read by a program inspect that receives it (receiver side) makes the constant escape',
+           closed_world_of(suite, ESCAPING_RECEIVER).global_refusal == :class_factory_escape)
+check.call('a Struct read by a name no program defines keeps the closed world (control)',
+           closed_world_of(suite, NATIVE_READ).global_refusal != :class_factory_escape)
+
 suite.finish!

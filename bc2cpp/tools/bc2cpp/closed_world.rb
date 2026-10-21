@@ -11,6 +11,7 @@ require_relative 'native_direct'
 require_relative 'dynamic_names'
 require_relative 'loop_installers'
 require_relative 'scan_cache'
+require_relative 'send_names'
 
 # CLOSED_WORLD (docs/adr/0210, 0466): bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -28,9 +29,9 @@ class ClosedWorld
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
   MIXIN_SENDS = %w[include prepend extend].freeze
   # Sends that change a method's visibility by name (NATIVE_EXACT_DIRECT).
-  VISIBILITY_SENDS = %w[private public protected private_class_method public_class_method module_function].freeze
+  VISIBILITY_SENDS = SendNames::VISIBILITY_SENDS
   # Sends that rebind a constant a guard chain resolves.
-  CONST_REBINDERS = %w[const_set remove_const].freeze
+  CONST_REBINDERS = SendNames::CONST_REBINDERS
   # Constants whose `.new` makes a class (or members) the registry cannot see.
   CLASS_FACTORIES = %w[Class Module Struct Data].freeze
   SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
@@ -111,6 +112,7 @@ class ClosedWorld
     @probed_names = Set.new
     @outside_def_names = Set.new
     @freeze_possible = false
+    @factory_read_names = Set.new
     @frozen_constants = Set.new
     @memo = {}
     @desc_memo = {}
@@ -1174,6 +1176,8 @@ class ClosedWorld
         end
       end
     end
+    # A read name (scan_factory) can run a definition the scan only finishes seeing here.
+    global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
 
   # -- singleton classes (ADR 0280) --------------------------------------------
@@ -1362,7 +1366,9 @@ class ClosedWorld
   end
 
   # Sends that only compare or name a factory constant (`x.is_a?(Class)`,
-  # `when Struct`), never make anything with it.
+  # `when Struct`), never make anything with it. The constant may be the receiver or
+  # an argument, so the send's name must be native-only (checked after the scan,
+  # see scan_closed_world): a Ruby `==` or `is_a?` could store it.
   FACTORY_READS = %w[=== == != equal? is_a? kind_of? instance_of? name to_s inspect].freeze
 
   # `Struct.new(:a, ...)`, `Class.new(Base)`: the constant must feed one `new`
@@ -1370,19 +1376,23 @@ class ClosedWorld
   def scan_factory(irep, insns, idx, insn, const)
     reg = insn.reg.to_i
     send_idx = nil
-    compared = false
+    reads = []
     ((idx + 1)...insns.size).each do |j|
       ins = insns[j]
       break if ins.op.match?(STOP_OPS)
       next unless reads_register?(ins, reg)
 
       name = SEND_OPS.include?(ins.op) && ins.sym_token
-      next compared = true if FACTORY_READS.include?(name)
+      if FACTORY_READS.include?(name)
+        reads << name
+        next
+      end
 
       send_idx = j if name == 'new' && !ins.op.start_with?('SS') && ins.reg.to_i == reg
       break
     end
-    return if send_idx.nil? && compared
+    @factory_read_names.merge(reads)
+    return if send_idx.nil? && reads.any?
     return global!(:class_factory_escape) unless send_idx
     return global!(:class_factory_escape) if const == 'Data'
 

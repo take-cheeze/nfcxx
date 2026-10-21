@@ -4,6 +4,7 @@ require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
+require_relative 'send_names'
 
 # ALIAS_SITES (docs/adr/0474): `alias_method :new, :old` (or `alias new old`) written straight in a class
 # or module body of the engine, with literal names, runs once while the class is defined and copies the
@@ -30,7 +31,7 @@ module AliasSites
   NAME_SENDS = %w[__method__ binding].freeze
   # `private alias_method :a, :b` hands the alias's answer (`:a`) to a visibility send, which the registry
   # does not attribute; such a site is not recognized.
-  VISIBILITY_SENDS = %w[private public protected module_function private_class_method public_class_method].freeze
+  VISIBILITY_SENDS = SendNames::VISIBILITY_SENDS
 
   module_function
 

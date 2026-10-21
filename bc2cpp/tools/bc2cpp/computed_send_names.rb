@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'integer_constants'
 require_relative 'bytecode_ir_regions'
+require_relative 'send_names'
 
 # COMPUTED_SEND_EXPANSION (ADR 0303): the finite set of method names a computed-name
 # `send(name, ...)` can carry, when the program makes it provable.
@@ -92,7 +93,7 @@ module ComputedSendNames
   # mrb_const_set / mrb_define_class and a foreign Ruby source. A runtime const_set,
   # remove_const or autoload refuses every table (same hole list as IntegerConstants).
   module SymbolTables
-    CONST_REBINDERS = %w[const_set remove_const autoload].freeze
+    CONST_REBINDERS = SendNames::CONST_REBINDERS
 
     def self.analyze(ireps, native_paths, foreign_paths)
       return {} if native_paths.nil? || foreign_paths.nil?
