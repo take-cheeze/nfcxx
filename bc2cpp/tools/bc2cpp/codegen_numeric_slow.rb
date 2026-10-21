@@ -448,7 +448,7 @@ class CodeGen
       array: <<~CPP.chomp.gsub(/^(?=.)/, '    ')
         mrb_ensure_array_type(M, b);
         mrb_int total;
-        if (mrb_int_add_overflow(RARRAY_LEN(a), RARRAY_LEN(b), &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+        if (mrb_int_add_overflow(ary_size(a), ary_size(b), &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
         r = mrb_ary_new_capa(M, total);
         mrb_ary_concat(M, r, a);
         mrb_ary_concat(M, r, b);
@@ -488,7 +488,7 @@ class CodeGen
             r = mrb_ary_new(M);
           }
           else {
-            if (mrb_int_mul_overflow(RARRAY_LEN(a), times, &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+            if (mrb_int_mul_overflow(ary_size(a), times, &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
             r = mrb_ary_new_capa(M, total);
             if (total > 0) for (mrb_int i = 0; i < times; i++) mrb_ary_concat(M, r, a);
           }

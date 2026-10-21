@@ -471,7 +471,7 @@ class CodeGen
         size_t size = sizeof(Bc2cppResumeFrame) + sizeof(long long) * (size_t)nslots;
         Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_calloc(M, 1, size);
         f->nregs = nregs;
-        f->regs = RARRAY_PTR(regs);
+        f->regs = ary_items(regs);
         *frame = mrb_obj_value(mrb_data_object_alloc(M, bc2cpp_resume_frame_class(M), f, &bc2cpp_resume_frame_type));
         mrb_iv_set(M, *frame, bc2cpp_resume_regs_sym(M), regs);
         return f;

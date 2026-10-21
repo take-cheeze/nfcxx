@@ -127,7 +127,7 @@ module NativeCoreDirect
                 mrb_int i, j = 0;
                 mrb_int len = ARY_LEN(a);
                 mrb_ary_modify(mrb, a);
-                mrb_value *ptr = RARRAY_PTR(self);
+                mrb_value *ptr = ary_items(self);
                 for (i = 0; i < len; i++) {
                   if (!mrb_nil_p(ptr[i])) {
                     if (i != j) ptr[j] = ptr[i];
@@ -147,15 +147,15 @@ module NativeCoreDirect
                   return mrb_funcall_id(mrb, self, MRB_SYM(to_enum), 1, mrb_symbol_value(MRB_SYM(index)));
                 }
                 if (mrb_nil_p(blk)) {
-                  for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
-                    if (mrb_equal(mrb, RARRAY_PTR(self)[i], obj)) {
+                  for (mrb_int i = 0; i < ary_size(self); i++) {
+                    if (mrb_equal(mrb, ary_items(self)[i], obj)) {
                       return mrb_int_value(mrb, i);
                     }
                   }
                 }
                 else {
-                  for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
-                    mrb_value eq = mrb_yield(mrb, blk, RARRAY_PTR(self)[i]);
+                  for (mrb_int i = 0; i < ary_size(self); i++) {
+                    mrb_value eq = mrb_yield(mrb, blk, ary_items(self)[i]);
                     if (mrb_test(eq)) {
                       return mrb_int_value(mrb, i);
                     }
@@ -168,11 +168,11 @@ module NativeCoreDirect
               expression: 'bc2cpp_ary_svalue(M, recv)', helper: 'bc2cpp_ary_svalue',
               apis: [],
               checks: [['mrb_ary_svalue', <<~C, :exact]]),
-                switch (RARRAY_LEN(ary)) {
+                switch (ary_size(ary)) {
                 case 0:
                   return mrb_nil_value();
                 case 1:
-                  return RARRAY_PTR(ary)[0];
+                  return ary_items(ary)[0];
                 default:
                   return ary;
                 }
@@ -261,28 +261,28 @@ module NativeCoreDirect
   HAND_HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
       static inline mrb_value bc2cpp_ary_compact(mrb_state* M, mrb_value self) {
-        mrb_value ary = mrb_ary_new_capa(M, RARRAY_LEN(self));
-        for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
-          if (!mrb_nil_p(RARRAY_PTR(self)[i])) mrb_ary_push(M, ary, RARRAY_PTR(self)[i]);
+        mrb_value ary = mrb_ary_new_capa(M, ary_size(self));
+        for (mrb_int i = 0; i < ary_size(self); i++) {
+          if (!mrb_nil_p(ary_items(self)[i])) mrb_ary_push(M, ary, ary_items(self)[i]);
         }
         return ary;
       }
     CPP
     'bc2cpp_ary_index' => <<~CPP,
       static inline mrb_value bc2cpp_ary_index(mrb_state* M, mrb_value self, mrb_value obj) {
-        for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
-          if (mrb_equal(M, RARRAY_PTR(self)[i], obj)) return mrb_int_value(M, i);
+        for (mrb_int i = 0; i < ary_size(self); i++) {
+          if (mrb_equal(M, ary_items(self)[i], obj)) return mrb_int_value(M, i);
         }
         return mrb_nil_value();
       }
     CPP
     'bc2cpp_ary_svalue' => <<~CPP,
       static inline mrb_value bc2cpp_ary_svalue(mrb_state* M, mrb_value ary) {
-        switch (RARRAY_LEN(ary)) {
+        switch (ary_size(ary)) {
         case 0:
           return mrb_nil_value();
         case 1:
-          return RARRAY_PTR(ary)[0];
+          return ary_items(ary)[0];
         default:
           return ary;
         }

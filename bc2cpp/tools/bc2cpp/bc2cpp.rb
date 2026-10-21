@@ -1439,6 +1439,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
   puts '#include <mruby/array.h>'
+  puts '#include "mrb_array_access.hxx"'
   puts '#include <mruby/class.h>'
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
