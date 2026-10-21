@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'alias_sites'
 require_relative 'bytecode_ir'
 require_relative 'call_site_index'
 require_relative 'integer_constant_ranges'
@@ -14,16 +15,22 @@ require_relative 'integer_constant_ranges'
 # the bytecode reaching definitions, so a MOVE chain is followed. Anything else is UNKNOWN.
 #
 # Four conditions make a verdict untrustworthy, and each is reported on its own row and counted in the summary:
-#   1. UNRESOLVED: a call the analysis cannot place by name (send/__send__/public_send with a computed name, method or
-#      define_method or alias_method with a computed name, ALIAS or UNDEF anywhere, method_missing defined, a to_enum
-#      site with a computed name). A method with one is not a single-tuple candidate. A literal target names only that
-#      method. A computed or global target makes every method unresolved.
-#   2. REDEFINED: a Ruby definition in the registry of a name a pure body sends. The sends' receivers are not known, so
-#      a redefinition of the name anywhere refuses purity (name-level; the owner is not checked here).
-#   3. OPERATOR GATE: an arithmetic or ordering op (ADD ... GE, and the + - * / % < > <= >= sends) needs
-#      IntegerConstantRanges.integer_ops_safe? and no redefinition of the name. Otherwise the body is refused as impure.
-#   4. MAY RAISE: a body with an op or send that can raise on some receiver (arithmetic, ordering, GETCONST, a send outside
-#      NON_RAISING_NAMES) is not pure, because a raising call is not a fold. It is reported in may_raise, not in impure.
+# Four conditions are reported on their own rows and counted in the summary. Only the first decides whether a tuple is
+# complete; the other three decide purity (whether a call may be replaced), and never the jump decisions.
+#   1. UNRESOLVED: a call the analysis cannot place by name: send/__send__/public_send, method, define_method or
+#      alias_method with a computed name, a to_enum site with a computed name, or an alias AliasSites cannot decode. A
+#      literal target names only that method. An alias names both its new and its old name, since they run one body. A
+#      computed target makes every method unresolved. UNDEF adds no call target and method_missing answers only names no
+#      definition answers, so neither is a reason: a call a method_missing body makes is an ordinary call site, or a
+#      computed one (condition 1 again).
+#      A method with a reason is not a single-tuple candidate.
+#   2. REDEFINED (purity only): a Ruby definition in the registry of a name a pure body sends. The receivers of those
+#      sends are not known, so a redefinition refuses purity by name; the owner is not checked.
+#   3. OPERATOR GATE (purity only): an arithmetic or ordering op needs IntegerConstantRanges.integer_ops_safe? and no
+#      redefinition of its name. Otherwise the body is refused as impure.
+#   4. MAY RAISE (purity only): a body with an op or send that can raise on some receiver is not pure. It is reported in
+#      may_raise. A raising op does not change which branch a decided jump takes: the jump is reached only after the ops
+#      before it ran, and the untaken branch is not executed in either case.
 #
 # Call sites are matched by method name (CallSiteIndex), so a method is "called only with tuple T" only over its name's
 # sites. A computed-name site is kept as a caller of every name (CallSiteIndex.sites), which can only add sites.
@@ -75,7 +82,9 @@ module ConstantArgumentSites
         single = unresolved_reason.nil? && !tuples.empty? && tuples.all? { |t| t && t.none?(UNKNOWN) } && tuples.uniq.size == 1
         verdict = purity(body, redefined, gate_ok)
         pure = verdict[:impure].empty? && verdict[:may_raise].empty?
-        decided = single && pure ? decided_jumps(body, tuples.first, constants) : nil
+        # A jump's decision needs only a complete tuple: its tested value is a constant of the tuple or a literal on every
+        # path, and no op in the body changes that value. Purity is not needed to decide it.
+        decided = single ? decided_jumps(body, tuples.first, constants) : nil
         rows << { name: name, owner: definition.owner, sites: sites.size, constant_sites: constant_tuples.size,
                   unresolved: unresolved_reason, single_tuple: single, tuple: single ? tuples.first : nil,
                   pure: pure, impure: verdict[:impure], may_raise: verdict[:may_raise],
@@ -100,15 +109,16 @@ module ConstantArgumentSites
       single_tuple: rows.count { |r| r[:single_tuple] },
       pure: rows.count { |r| r[:pure] },
       pure_single_tuple: rows.count { |r| r[:pure] && r[:single_tuple] },
-      jumps_in_pure_single_tuple: rows.sum { |r| r[:jumps] || 0 },
-      jumps_decided: rows.sum { |r| r[:decided] || 0 }
+      jumps_in_single_tuple: rows.sum { |r| r[:jumps] || 0 },
+      jumps_decided: rows.sum { |r| r[:decided] || 0 },
+      jumps_decided_pure: rows.sum { |r| r[:pure] ? (r[:decided] || 0) : 0 }
     }
   end
 
   # Condition 1. { global: [reasons], names: { name => [reasons] } }: a dynamic or named-lookup send whose target is a
   # literal names that method; one whose target is computed makes every method unresolved (global). ALIAS and UNDEF, a
   # method_missing definition and a to_enum site with a computed name are global too: each can reach any name.
-  def unresolved_calls(ireps, registry, index)
+  def unresolved_calls(ireps, _registry, index)
     global = []
     names = Hash.new { |h, k| h[k] = [] }
     ireps.each_value do |irep|
@@ -117,6 +127,10 @@ module ConstantArgumentSites
         # SSEND/SENDB carry their name the same way; a super send names the enclosing def, which the index keys.
         next unless DYNAMIC_SENDS.include?(sym)
 
+        if sym == 'alias_method'
+          alias_unresolved(irep, idx, names, global)
+          next
+        end
         target = CallSiteIndex.enum_target(irep, idx, insn, insn.reg.to_i + 1)
         if target.nil?
           global << "#{sym} with a computed name"
@@ -124,11 +138,24 @@ module ConstantArgumentSites
           names[target] << "#{sym} #{target}"
         end
       end
-      irep.each_with_op('ALIAS', 'UNDEF') { global << 'alias or undef' }
+      irep.each_with_op('ALIAS') { |_insn, idx| alias_unresolved(irep, idx, names, global) }
     end
-    global << 'method_missing defined' if registry.fetch('method_missing', []).any?(&:irep)
     global << 'to_enum with a computed name' unless index.fetch(CallSiteIndex::UNKNOWN_TARGET, []).empty?
     { global: global.uniq, names: names }
+  end
+
+  # An alias makes two names reach one body: the new name, which calls can use with tuples the index does not key under the
+  # old name, and the old name, whose body the new name runs. Both are unresolved. An alias AliasSites cannot decode (not
+  # straight-line, or a computed name) could be either, so it is global.
+  def alias_unresolved(irep, idx, names, global)
+    site = AliasSites.site(irep, idx)
+    if site.nil?
+      global << 'alias with a name not decoded'
+      return
+    end
+
+    reason = "alias #{site.new_name} #{site.old_name}"
+    [site.new_name, site.old_name].each { |name| names[name] << reason }
   end
 
   # The reason +name+ is unresolved, or nil. A global reason covers every name.
