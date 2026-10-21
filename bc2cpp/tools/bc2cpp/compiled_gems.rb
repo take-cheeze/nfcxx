@@ -501,7 +501,8 @@ def bc2cpp_rpg_maker_gem_lines(text, name, root)
 end
 
 # The non-test add_dependency names of a mrbgem.rake. add_test_dependency is not built, so it is not followed.
-# A `Dir.exist?` modifier (mruby-marshal's metaprog) is evaluated; any other modifier raises.
+# A `Dir.exist?` modifier (mruby-marshal's metaprog) is evaluated, and an `unless %w[...].include?(build.name)`
+# modifier drops the gem for the closed build; any other modifier raises.
 def bc2cpp_rake_dependencies(dir, root)
   rake = File.join(dir, 'mrbgem.rake')
   raise "bc2cpp: #{rake} is missing; the closed-world gem closure is derived from it" unless File.file?(rake)
@@ -510,6 +511,9 @@ def bc2cpp_rake_dependencies(dir, root)
     match = line.match(/^\s*(?:spec\.)?add_dependency[ (]\s*['"](mruby-[\w-]+)['"]/) or next
     if (cond = line[/\bif\s+Dir\.exist\?\s+"\#\{MRUBY_ROOT\}\/mrbgems\/([\w-]+)"/, 1])
       next unless File.directory?(File.join(root, '3rd/mruby/mrbgems', cond))
+    elsif (excluded = line[/\bunless\s+%w\[([^\]]*)\]\.include\?\(build\.name\)/, 1])
+      # The closure is always the closed build's, so a gem its list names is left out.
+      next if excluded.split.include?('closed')
     elsif line.match?(/\b(?:if|unless)\b/)
       raise "bc2cpp: unsupported add_dependency condition in #{rake}: #{line.strip}"
     end
