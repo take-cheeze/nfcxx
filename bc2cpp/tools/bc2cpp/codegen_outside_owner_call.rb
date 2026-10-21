@@ -56,6 +56,7 @@ module OutsideOwnerCall
     return nil unless outside
 
     ruby = (@registry[name] || []).reject { |definition| definition.owner == '<native>' }.map(&:owner)
+    ruby += (self.class.core_hidden_defs || []).select { |definition| definition.name == name }.map(&:owner)
     return nil unless ruby.all? { |owner| owner.match?(OWNER_PATH) }
 
     owners = (outside | ruby).uniq.sort
@@ -133,7 +134,10 @@ module OutsideOwnerCall
     ruby = OutsideRubyOwners.scan(Array(@closed_world.ruby_paths))
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
 
-    owners = native | (map.computed - [NativeOwnerMap::UNKNOWN]) | ruby.names.fetch(name, Set.new) | ruby.wild
+    # Core Ruby definitions whose name a native also registers (mruby-io's IO.open, beside StringIO's native open) are
+    # moved out of the registry into core_hidden_defs, so the registry alone cannot name them.
+    hidden = (self.class.core_hidden_defs || []).select { |definition| definition.name == name }.map(&:owner)
+    owners = native | (map.computed - [NativeOwnerMap::UNKNOWN]) | ruby.names.fetch(name, Set.new) | ruby.wild | hidden
     return nil if owners.empty? || owners.any? { |owner| !owner.match?(OWNER_PATH) }
 
     owners.to_a.sort
