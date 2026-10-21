@@ -193,6 +193,7 @@ module NumericFlow
 
     c = Ctx.for_run(irep, oracle, opaque_regs, writes, program.rescue_only_targets)
     c.load_readers = table.load_readers if c.elide_load_copies
+    c.widened_slots = Array.new(c.nslots) if ENV['BC2CPP_NUMERIC_SLOT_UNIONS'] != '0'
     steps = table.steps
     nregs = c.nregs
     entry = Array.new(nregs, OTHER)
@@ -446,7 +447,7 @@ module NumericFlow
     # The element block starts right after the ivar slots (one entry per register; see states).
     # Where the element block starts; nil for a ctx built from a Hash, whose layout has no element block.
     attr_accessor :elem_base
-    attr_accessor :load_readers
+    attr_accessor :load_readers, :widened_slots
     attr_writer :elide_load_copies
 
     def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
@@ -1056,8 +1057,15 @@ module NumericFlow
     nregs = c.nregs
     k = 0
     facts = c.facts
+    widened = c.widened_slots
     while k < facts.size
-      out[nregs + k] |= facts[k]
+      value = out[nregs + k]
+      # Slot facts are fixed for a run; its last widened mask is already a fixed point of this union.
+      unless widened && value.is_a?(Integer) && (value.eql?(facts[k]) || value.eql?(widened[k]))
+        value |= facts[k]
+        out[nregs + k] = value
+        widened[k] = value if widened
+      end
       k += 1
     end
     pb = c.pb
