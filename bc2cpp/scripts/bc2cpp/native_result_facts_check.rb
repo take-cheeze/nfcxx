@@ -31,6 +31,8 @@ require_relative '../../tools/bc2cpp/closed_world'
 require_relative '../../tools/bc2cpp/closed_world_env'
 require_relative '../../tools/bc2cpp/codegen'
 require_relative '../../tools/bc2cpp/codegen_native_results'
+require_relative '../../tools/bc2cpp/codegen_numeric_proof'
+require_relative '../../tools/bc2cpp/codegen_class_pools'
 
 root = File.expand_path('../..', __dir__)
 failures = []
@@ -326,6 +328,89 @@ end)
 2500.times { |value| member_probe.numeric_receiver_class_bits((1 << 400) | (value << 20)) }
 check.call('member decoding cache stays bounded', member_probe.numeric_class_member_index[3].size == CodeGen::CLASS_MEMBER_CACHE_LIMIT)
 puts 'receiver member index growth, rollback, ordering and refusal checks passed'
+
+# Mask names preserve diagnostic order, including negative sign-extended masks and private bits.
+puts '-- mask diagnostic snapshots'
+mask_probe_class = Class.new(probe_class) do
+  def frozen_symbol_bit
+    @frozen_symbol_bit ||= numeric_class_bit('Symbol')
+  end
+
+  def legacy_numeric_mask_name(mask)
+    names = { NumericFlow::INT => 'INT', NumericFlow::FLT => 'FLT', NumericFlow::ARR => 'ARR',
+              NumericFlow::HSH => 'HSH', NumericFlow::STR => 'STR', NumericFlow::NIL => 'NIL',
+              NumericFlow::OTHER => 'OTHER', NumericFlow::RNG => 'RNG' }
+    found = names.filter_map { |bit, name| name if mask.anybits?(bit) }
+    @lcf_rows&.kinds&.each { |kind| found << @lcf_rows.name(kind.bit) if mask.anybits?(kind.bit) }
+    @frozen_tables&.each_shape_in(mask) { |shape| found << @frozen_tables.name(shape.bit) }
+    found << 'SYM' if frozen_symbol_bit && mask.anybits?(frozen_symbol_bit)
+    found.empty? ? 'NONE' : found.join('|')
+  end
+
+  def legacy_class_mask_name(mask)
+    parts = []
+    parts << 'CHECKED' if mask.anybits?(NumericFlow::CHECKED)
+    low = mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)
+    parts << legacy_numeric_mask_name(low) if low.nonzero?
+    (@numeric_class_bits || {}).each { |klass, bit| parts << klass if mask.anybits?(bit) }
+    @lcf_rows&.kinds&.each { |kind| parts << @lcf_rows.name(kind.bit) if mask.anybits?(kind.bit) }
+    parts.empty? ? 'NONE' : parts.join('|')
+  end
+end
+names_probe = mask_probe_class.new
+names_probe.numeric_class_bit('LaterAlphabetically')
+names_probe.numeric_class_bit('EarlierAlphabetically')
+# The Symbol slot is not registered until numeric_mask_name reads the low bits.
+check.call('the class snapshot follows lazy Symbol registration during numeric naming',
+           names_probe.class_mask_name(-1) == names_probe.legacy_class_mask_name(-1) &&
+           names_probe.class_mask_name(-1).end_with?('LaterAlphabetically|EarlierAlphabetically|Symbol'))
+kind = Struct.new(:bit).new(1 << 321)
+rows = Struct.new(:kinds) do
+  def name(_bit) = 'LCF_ROW'
+end.new([kind])
+shape = Struct.new(:bit).new(1 << 450)
+tables = Struct.new(:shape) do
+  def each_shape_in(mask)
+    yield shape if mask.anybits?(shape.bit)
+  end
+
+  def name(_bit) = 'PRIVATE_SHAPE'
+end.new(shape)
+names_probe.instance_variable_set(:@lcf_rows, rows)
+names_probe.instance_variable_set(:@frozen_tables, tables)
+mask_rng = Random.new(531)
+name_masks = [0, -1, -512, NumericFlow::CHECKED, NumericFlow::EXC, NumericFlow::ENUMERATOR, kind.bit, shape.bit,
+              NumericFlow::INT | kind.bit | shape.bit]
+name_masks.concat(Array.new(1000) { mask_rng.rand(-(1 << 480)...1 << 480) })
+check.call('primitive, class, LCF, private and randomized signed masks retain exact diagnostic text',
+           name_masks.all? do |mask|
+             names_probe.numeric_mask_name(mask) == names_probe.legacy_numeric_mask_name(mask) &&
+               names_probe.class_mask_name(mask) == names_probe.legacy_class_mask_name(mask)
+           end)
+name_snapshot = names_probe.native_result_class_bits
+new_name_bit = names_probe.numeric_class_bit('NewDiagnosticClass')
+check.call('a grown registry updates diagnostic names while leaving active snapshots untouched',
+           names_probe.class_mask_name(new_name_bit) == 'NewDiagnosticClass' &&
+           !name_snapshot.any? { |name, _| name == 'NewDiagnosticClass' })
+replacement_names = names_probe.instance_variable_get(:@numeric_class_bits).transform_keys do |name|
+  name == 'NewDiagnosticClass' ? 'ReplacementDiagnosticClass' : name
+end
+names_probe.instance_variable_set(:@numeric_class_bits, replacement_names)
+check.call('a replacement registry updates names even at unchanged size',
+           names_probe.class_mask_name(new_name_bit) == 'ReplacementDiagnosticClass')
+transient_bit = nil
+names_probe.without_probe_side_effects do
+  transient_bit = names_probe.numeric_class_bit('TransientDiagnosticClass')
+  check.call('probe-local names are visible inside the probe', names_probe.class_mask_name(transient_bit) == 'TransientDiagnosticClass')
+end
+check.call('probe rollback removes transient names from diagnostics', names_probe.class_mask_name(transient_bit) == 'NONE')
+check.call('a reused bit prints the post-rollback name',
+           names_probe.numeric_class_bit('RestoredDiagnosticClass') == transient_bit &&
+           names_probe.class_mask_name(transient_bit) == 'RestoredDiagnosticClass')
+mutable_name = names_probe.class_mask_name(transient_bit)
+mutable_name << '!'
+check.call('diagnostic strings remain independently mutable', names_probe.class_mask_name(transient_bit) == 'RestoredDiagnosticClass')
+check.call('primitive name table and entries are immutable', CodeGen::NUMERIC_MASK_NAMES.frozen? && CodeGen::NUMERIC_MASK_NAMES.all?(&:frozen?))
 
 # The pre-optimization algorithm is the reference for results, lookup order and class-bit allocation.
 reference = lambda do |cg, name, recv, classes|
