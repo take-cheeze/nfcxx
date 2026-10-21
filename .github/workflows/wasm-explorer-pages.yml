@@ -52,7 +52,7 @@ jobs:
       # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in pathb.yml
       PATHB_JOBS: "4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -65,7 +65,7 @@ jobs:
 
       - name: Restore the Path B harness
         id: harness
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/pathb
           key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
@@ -76,7 +76,7 @@ jobs:
 
       - name: Restore the mruby tool
         id: mruby
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/mruby-tool
           key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
@@ -89,7 +89,7 @@ jobs:
         run: node tools/wasm-explorer/build-static.cjs --out _site
 
       - name: Upload the site
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
@@ -107,4 +107,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

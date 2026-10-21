@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 90 # includes a cold compiler build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - uses: ./.github/actions/upstream-toolchain
@@ -58,7 +58,7 @@ jobs:
       UPSTREAM_ROUTES: ${{ matrix.route }}
       SURVEY_ROUTES: ${{ matrix.route }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - uses: ./.github/actions/upstream-toolchain
@@ -124,7 +124,7 @@ jobs:
       - name: Stage results and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-route-${{ matrix.route }}-${{ github.run_attempt }}
@@ -153,7 +153,7 @@ jobs:
       DEJAGNU_ROOT: /
       CLANG_TIDY_EXE: /usr/bin/clang-tidy-21
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native harness tools
         run: |
           sudo apt-get update
@@ -174,12 +174,12 @@ jobs:
         run: python3 tests/upstream/nightly-self-test.py
       - name: Set up sccache for the libc++ build
         if: matrix.suite == 'libcxx'
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: libc++ compiler cache identity
         if: matrix.suite == 'libcxx'
         id: compiler
         run: echo "id=$(sha256sum build/nightly/toolchain.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: matrix.suite == 'libcxx'
         with:
           path: build/testsuite-snapshots/libcxx-build-system
@@ -195,7 +195,7 @@ jobs:
       - name: Stage results and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-native-${{ matrix.suite }}-${{ github.run_attempt }}
@@ -207,13 +207,13 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - name: EDG Docker build cache identity
         id: key
         run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: 3rd/edg/build/gcc
@@ -231,14 +231,14 @@ jobs:
           fi
       - name: Save a completed build even when expectation checks fail
         if: always() && steps.cache.outputs.cache-hit != 'true' && hashFiles('3rd/edg/build/gcc/upstream-build-complete') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: 3rd/edg/build/gcc
           key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Stage comparison logs and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-edg-${{ github.run_attempt }}
@@ -260,7 +260,7 @@ jobs:
       SURVEY_ROUTES: ${{ matrix.route }}
       SURVEY_TIMEOUT: "60"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - uses: ./.github/actions/upstream-toolchain
@@ -288,7 +288,7 @@ jobs:
       - name: Stage results and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-extended-${{ matrix.suite }}-${{ matrix.route }}-${{ github.run_attempt }}

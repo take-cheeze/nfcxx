@@ -43,7 +43,7 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -61,7 +61,7 @@ jobs:
 
       - name: Restore the ESP32-C3 emulator
         id: qemu
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/espressif-qemu/build/qemu-system-riscv32
           key: espressif-qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/mcu-qemu.sh') }}
