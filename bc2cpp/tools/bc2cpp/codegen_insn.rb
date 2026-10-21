@@ -9,7 +9,7 @@ class CodeGen
   # proof rather than the output.
   #
   # The instruction's source line is kept in @insn_source while it compiles, so a gate marker can name the line
-  # its site is written on (SourceReview). A nested compile (an inlined block body) sets its own and restores ours.
+  # its site is written on (a gate marker's "file:line"). A nested compile (an inlined block body) sets its own and restores ours.
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
     saved = @insn_source
     @insn_source = [irep&.file, insn.lineno]

@@ -1,22 +1,14 @@
 # frozen_string_literal: true
 
 # NOMETHOD (docs/adr/0226): every guard-chain fallback the closed world proves dead (a `bc2cpp_nomethod` site,
-# ADR 0210) is a build error unless its source line carries a review annotation:
-#   # bc2cpp-reviewed: nomethod <called name> -- why the fallback is dead
-# on the site's line or the line above (SourceReview). Each annotated site was read and judged a defensive branch
-# the runtime rescues (see the ADR); a real bug is fixed, not annotated.
-#
-# Key: "<file>:<line> -> <called name>", the source line the send is written on. scripts/bc2cpp/source_review_check.rb
-# re-proves the annotations in both directions over a full (not hot-only) wio run of all three gems.
+# ADR 0210) is listed on stderr as "file:line -> called name", the source line the send is written on. No review
+# gate judges the listing any more (ADR 0522).
 require 'set'
 require_relative 'review_scope'
-require_relative 'source_review'
 
 module NomethodReviewed
-  # The marker names the send's source line ("file:line"), which SourceReview reads.
+  # The marker names the send's source line ("file:line").
   MARKER = %r{/\* CLOSED_WORLD nomethod: (self|recv)\.(\S+) @ (\S+) \*/}
-  # A by-name nomethod fallback and its marker, as compiled (the args up to the call's `);`).
-  DIRECT_RAISE_CALL = %r{bc2cpp_nomethod_named\((M, [^\n]*?)\); (/\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*/)}
   # GUARD_VIOLATION (ADR 0290): a guard whose else arm the closed world proves dead because
   # its register holds a stable class constant. Listed, not gated: which of these exist
   # depends on which callees compile (a hot-only build has sites a full one lacks), so no
@@ -80,42 +72,11 @@ module NomethodReviewed
     [file, line.to_i]
   end
 
-  # DIRECT_RAISE (ADR 0226): a reviewed site's by-name fallback calls bc2cpp_nomethod_raise_named, which raises the
-  # NoMethodError without dispatching, instead of bc2cpp_nomethod_named. Only the callee name changes, and the marker
-  # stays, so the gate still counts the site. A site without an annotation keeps the dispatching fallback.
-  def direct_raise(code)
-    return code unless code.include?('CLOSED_WORLD nomethod:')
-
-    code.gsub(DIRECT_RAISE_CALL) do
-      whole, args, marker = Regexp.last_match(0), Regexp.last_match(1), Regexp.last_match(2)
-      _recv, called, site = MARKER.match(marker).captures
-      file, line = split_site(site)
-      if SourceReview.annotated?(file, line, SourceReview.key('nomethod', called))
-        "bc2cpp_nomethod_raise_named(#{args}); #{marker}"
-      else
-        whole
-      end
-    end
-  end
-
   # The GUARD_VIOLATION keys of `compiled`, for the stderr listing.
   def violation_sites(compiled)
     compiled.flat_map do |m|
       m[:code].scan(VIOLATION_MARKER).map { |(called)| key(m[:owner], m[:name], called) }
     end
-  end
-
-  # Why this run's sites are unreviewed: a site whose source line carries no `nomethod <name>` annotation. `scope`:
-  # ReviewScope.for_build of the run (tools/bc2cpp/review_scope.rb); sites outside it are not the program judged.
-  def violations(sites, scope:)
-    ReviewScope.select(scope, sites).reject { |s| reviewed?(s) }.map do |s|
-      where = s[:file] == '?' ? 'no source line behind this send' : s[:site]
-      "unreviewed dead fallback: #{s[:key]} (#{where}; annotate it: # bc2cpp-reviewed: nomethod #{s[:called]} -- reason)"
-    end.uniq.sort
-  end
-
-  def reviewed?(site)
-    SourceReview.annotated?(site[:file], site[:line], SourceReview.key('nomethod', site[:called]))
   end
 
   # bc2cpp.rb's "  NOMETHOD <key>[ [self]]" stderr lines, back into sites.

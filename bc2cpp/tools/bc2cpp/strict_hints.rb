@@ -25,12 +25,10 @@
 # Policy: a hint is not a proof, so no proof gates the forcing; every violation the verify build finds
 # is a wrong or incomplete hint, fixed at its source.
 #
-# Every forced site carries `/* STRICT_HINT FAMILY: name @ file:line */`, is listed on stderr
-# (`STRICT_HINT_SITE file:line -> name (FAMILY)`) and must carry a review annotation on its source line
-# (`# bc2cpp-reviewed: strict_hint FAMILY name -- reason`, tools/bc2cpp/source_review.rb), the way NOMETHOD holds dead fallbacks.
+# Every forced site carries `/* STRICT_HINT FAMILY: name @ file:line */` and is listed on stderr
+# (`STRICT_HINT_SITE file:line -> name (FAMILY)`). No review gate judges the listing any more (ADR 0522).
 require 'set'
 require_relative 'review_scope'
-require_relative 'source_review'
 
 module StrictHints
   ENV_NAME = 'BC2CPP_STRICT_HINTS'
@@ -93,18 +91,6 @@ module StrictHints
       { key: key(site, called, family.downcase), site: site, file: file, line: line, called: called,
         family: family.downcase }
     end
-  end
-
-  # Why this run's sites are unreviewed: a forced site whose source line carries no `strict_hint <family> <name>`
-  # annotation. `scope`: ReviewScope.for_build of the run. Stale annotations are checked by source_review_check.rb.
-  def violations(sites, scope:)
-    ReviewScope.select(scope, sites).reject { |s| reviewed?(s) }.map do |s|
-      "unreviewed forced hint: #{s[:key]} (annotate it: # bc2cpp-reviewed: strict_hint #{s[:family]} #{s[:called]} -- reason)"
-    end.uniq.sort
-  end
-
-  def reviewed?(site)
-    SourceReview.annotated?(site[:file], site[:line], SourceReview.key('strict_hint', "#{site[:family]} #{site[:called]}"))
   end
 
   def family_counts(compiled)

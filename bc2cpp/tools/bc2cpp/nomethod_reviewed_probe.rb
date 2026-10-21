@@ -2,7 +2,7 @@
 
 # Runs bc2cpp.rb the way a wio build's compiled-gem codegen task does
 # (mruby-*-compiled/mrbgem.rake with bc2cpp_closed_world_env), for the
-# source_review_check and source_review_sites (docs/adr/0226, 0522).
+# (docs/adr/0226).
 require 'open3'
 require 'rbconfig'
 require 'shellwords'
@@ -120,20 +120,6 @@ module NomethodReviewedProbe
   # Every PROVEN_MISS site (ADR 0275) of the same full runs: {gem:, key:}.
   def full_proven_miss_sites(root, mrbc)
     runs(root, mrbc, hot: false).fetch(:proven_miss)
-  end
-
-  # Every review site of the engine's full runs and its hot-only runs, as source_review_migrate.rb reads them:
-  # {gate:, spec:, file:, line:} for nomethod, proven_miss and strict_hint (each spec is what its annotation names,
-  # SourceReview.key). A real hot-only build judges its own sites, which can differ from the full run's.
-  def review_sites(root, mrbc)
-    result = runs(root, mrbc, hot: true)
-    hot_listings = result.fetch(:hot).values.map { |_status, err| err }
-    nomethod = result.fetch(:full) + hot_listings.flat_map { |err| NomethodReviewed.parse_listing(err) }
-    proven = result.fetch(:proven_miss) + hot_listings.flat_map { |err| ProvenMiss.parse_listing(err) }
-    hints = result.fetch(:strict_hint) + hot_listings.flat_map { |err| StrictHints.parse_listing(err) }
-    nomethod.map { |s| { gate: 'nomethod', spec: s[:called], file: s[:file], line: s[:line] } }.uniq +
-      proven.map { |s| { gate: 'proven_miss', spec: "#{s[:kind]} #{s[:klass]}.#{s[:called]}", file: s[:file], line: s[:line] } }.uniq +
-      hints.map { |s| { gate: 'strict_hint', spec: "#{s[:family]} #{s[:called]}", file: s[:file], line: s[:line] } }.uniq
   end
 
   # The full runs (listing read past a review-gate abort), plus with `hot:` the real

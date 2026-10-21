@@ -24,8 +24,6 @@
 #   --all                    also print one info diagnostic per untyped parameter / return / ivar
 #   --scope engine|all       engine sources only (default) or the mruby core mrblib too
 #   --sig DIR                RBS signature directory (BC2CPP_SIG_DIRS; default sig/bc2cpp; docs/bc2cpp-type-check.md)
-#   TC1017 (ADR 0491, 0522)  an untyped engine constant with no review annotation on its line; judged on the engine run
-#                            only, a --files run has no gate
 #   --no-sends               skip the by-name send ranking (the fastest run)
 #   --what-if                estimate, per suggestion, how many by-name lines a signature removes (recompiles each
 #                            send once; several minutes on the engine)
@@ -43,7 +41,6 @@ require 'optparse'
 require 'tmpdir'
 require 'fileutils'
 require 'type_check_report'
-require 'constant_reviewed'
 
 ROOT = File.expand_path('../..', __dir__)
 
@@ -92,10 +89,7 @@ else
 end
 
 suggestions = opts[:sends] ? TypeCheckReport.suggestions(facts, rows, scope: opts[:scope]) : []
-# The TC1017 ratchet (ADR 0491, 0522): the engine's constants are judged by their review annotations; a --files run is not.
-constant_gate = !opts[:files]
-diags = TypeCheckReport.diagnostics(facts, suggestions, all: opts[:all], top: opts[:top], scope: opts[:scope],
-                                                       constant_gate: constant_gate)
+diags = TypeCheckReport.diagnostics(facts, suggestions, all: opts[:all], top: opts[:top], scope: opts[:scope])
 summary = TypeCheckReport.summary(facts, scope: opts[:scope])
 
 if opts[:emit_rbs]
