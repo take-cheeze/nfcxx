@@ -5,12 +5,12 @@
 # BC2CPP_COMPILED_GEMS compile. Each site names its compiled owner, and every owner a review judges is one of those
 # gems' owners. No review gate judges them any more (ADR 0522).
 #
-# On an engine closed-world build (psp, wio, maix, closed) a site is held to the lists when its compiled
+# On an engine closed-world build (closed) a site is held to the lists when its compiled
 # owner is an engine owner, matched exactly. Nothing is skipped on a real engine build: each gem's
 # ONLY_OWNERS is its BC2CPP_COMPILED_GEMS owners, and the only other owner compile_all emits is the
 # module whose module_function body a selected `X.singleton` copy shares (owner `X`), which the scope
 # includes; bc2cpp.rb aborts if an engine-owner run ever compiles an owner outside it. A fixture
-# program compiled with the wio world (classes such as TcUse) is not the program the lists review,
+# program compiled with the closed world (classes such as TcUse) is not the program the lists review,
 # so its sites are listed but not judged by them.
 #
 # Every other closed-world build is held to every owner: optcarrot-probe is a different program with no

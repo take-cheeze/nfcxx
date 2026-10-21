@@ -15,8 +15,8 @@ module BaseSection
   DECL = /^(?:class|module) .*?\n^end\n/m
 
   # Gem directory name to the table tag the section uses (base_<tag>). Listed rather than derived: a gem whose name does
-  # not give its tag (mruby-numeric-ext is base_numeric) would otherwise share one with another gem (mruby-math-wio is
-  # base_math-wio, not base_math). A gem missing from the table raises, so a new gem cannot silently join a block.
+  # not give its tag (mruby-numeric-ext is base_numeric) would otherwise share one with another gem. A gem missing from
+  # the table raises, so a new gem cannot silently join a block.
   TAGS = {
     'mruby-core' => 'base_mruby-core', 'mruby-dir' => 'base_dir', 'mruby-exit' => 'base_exit', 'mruby-fiber' => 'base_fiber', 'mruby-io' => 'base_io',
     'mruby-lcf' => 'base_lcf', 'mruby-marshal' => 'base_marshal', 'mruby-math' => 'base_math',

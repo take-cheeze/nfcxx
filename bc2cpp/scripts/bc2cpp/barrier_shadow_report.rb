@@ -7,7 +7,7 @@
 #
 #   1. synthetic handlers: the corner cases where the edge-derived sets differ
 #      from the address-range sets, printed as concrete examples;
-#   2. the real closed-world wio build with tools/bc2cpp/fixnum_barrier_shadow.rb
+#   2. the real closed-world build with tools/bc2cpp/fixnum_barrier_shadow.rb
 #      preloaded, comparing old and shadow answers for every barrier query.
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/barrier_shadow_report.rb
@@ -23,7 +23,7 @@ require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/fixnum_barrier_shadow'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 ROOT = File.expand_path('../..', __dir__)
 
@@ -66,15 +66,15 @@ env = {
   'ONLY_OWNERS' => BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }.join(','),
   'NATIVE_SRCS' => Shellwords.join(native_srcs),
   'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT)),
-  'BC2CPP_BUILD_NAME' => 'wio',
-  'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).map { |n, d| "#{n}=#{d}" })
+  'BC2CPP_BUILD_NAME' => 'closed',
+  'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).map { |n, d| "#{n}=#{d}" })
 }
 puts 'real closed-world build'
 Dir.mktmpdir do |dir|
   env['OUT_DIR'] = dir
   env['BC2CPP_BARRIER_SHADOW_REPORT'] = File.join(dir, 'report')
   cmd = [RbConfig.ruby, "-r#{ROOT}/tools/bc2cpp/fixnum_barrier_shadow.rb", "#{ROOT}/tools/bc2cpp/bc2cpp.rb", '--annotated', *srcs]
-  _out, err, status = Open3.capture3(bc2cpp_wio_world_env(env), *cmd)
+  _out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), *cmd)
   abort "bc2cpp.rb failed (exit #{status.exitstatus}):\n#{NomethodReviewedProbe.failure_tail(err)}" unless status.success?
 
   report = Dir[File.join(dir, 'report.*')].map { |f| File.read(f) }.max_by(&:size)

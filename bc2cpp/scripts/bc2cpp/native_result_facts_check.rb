@@ -28,7 +28,7 @@ require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
 require_relative '../../tools/bc2cpp/native_direct'
 require_relative '../../tools/bc2cpp/native_result_facts'
 require_relative '../../tools/bc2cpp/closed_world'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 require_relative '../../tools/bc2cpp/codegen'
 require_relative '../../tools/bc2cpp/codegen_native_results'
 
@@ -400,7 +400,7 @@ if ENV['MRBC']
   puts '-- generated code'
   require_relative 'fixture_runtime'
   mrbc = ENV['MRBC']
-  gems = NomethodReviewedProbe.wio_gems(root)
+  gems = NomethodReviewedProbe.closed_gems(root)
   native_srcs = rgss_srcs + core_native_srcs(File.join(root, '3rd/mruby')) + external_gem_native_srcs(root)
   generate = lambda do |source, name|
     Dir.mktmpdir do |dir|
@@ -408,9 +408,9 @@ if ENV['MRBC']
       File.write(path, source)
       env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => name, 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
               'NATIVE_SRCS' => Shellwords.join(native_srcs), 'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(root)),
-              'BC2CPP_BUILD_NAME' => 'wio',
+              'BC2CPP_BUILD_NAME' => 'closed',
               'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
-      out, err, status = Open3.capture3(bc2cpp_wio_world_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
+      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(root, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', path)
       abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
       out
     end

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # Prints the resolved LCF schema as JSON on stdout, for LcfSchemaOracle.
-# Loaded under CRuby only, exactly as mruby-lcf/gen_schema_blob.rb loads it: schema.rb is plain data plus two
+# Loaded under CRuby only: schema.rb is plain data plus two
 # edition-dependent defaults that lcf.rb defines, so nothing here reflects on the running program.
 #
 # Usage: ruby lcf_schema_dump.rb path/to/mruby-lcf/mrblib [--roots]

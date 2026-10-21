@@ -17,7 +17,7 @@ require 'stringio'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/shared_generation'
 require_relative '../../tools/bc2cpp/compiled_gems'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 ROOT = File.expand_path('../..', __dir__)
 TOOL = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
@@ -103,7 +103,7 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
         def make; Alpha.new(3); end
       end
     RUBY
-    common = bc2cpp_wio_world_env({ 'MRBC' => mrbc, 'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '' }, ROOT)
+    common = bc2cpp_closed_world_probe_env({ 'MRBC' => mrbc, 'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '' }, ROOT)
     units = [%w[Alpha Beta], %w[Beta Alpha]].map do |only, other|
       dir = FileUtils.mkdir_p(File.join(tmp, "unit-#{only}")).first
       { 'OUT_SYMBOL' => "u_#{only.downcase}", 'OUT_DIR' => dir, 'ONLY_OWNERS' => only, 'OTHER_OWNERS' => other }

@@ -81,7 +81,7 @@ BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = BC2CPP_CORE_MRBLIB_GEMS
 BC2CPP_FAIL_FAST_TYPE = false
 # Same, from 3rd/<name>/mrblib. mruby-marshal has no mrblib.
 BC2CPP_EXTERNAL_MRBLIB_GEMS = %w[mruby-stringio mruby-onig-regexp].freeze
-# The gem set the canonical (script, coverage report) world assumes: wio's,
+# The gem set the canonical (script, coverage report) world assumes: the closed build's,
 # which has neither mruby-dir nor the Onigmo regexp gem (build_config.rb).
 BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS -
                               %w[mruby-dir mruby-onig-regexp]).freeze
@@ -302,7 +302,7 @@ end
 # drifted set fails silently, with different MONO/POLY conclusions per gem.
 #
 # `tts`: whether the build can have a RGSS::Tts backend (RgssTtsConfig, ADR
-# 0417). The canonical world is wio's, which cannot: Scene::Map#speak_message is
+# 0417). The canonical world is the closed build's, which cannot: Scene::Map#speak_message is
 # then mruby-rpg2k/mrblib_limited/map_tts_off.rb, which mruby-rpg2k/mrbgem.rake
 # also swaps in for that build, and no Ruby names RGSS::Tts. A desktop world
 # keeps scene/map_tts.rb.
@@ -372,8 +372,8 @@ end
 # The standalone Optcarrot benchmark seals its host separately (ADR 0400).
 # bc2cpp compiles these builds only (docs/adr/0466); every other build, and any
 # build with a gem below, is the plain mruby build.
-# `closed` is maix's closed world built natively for CI (build_config.rb).
-BC2CPP_CLOSED_WORLD_BUILDS = %w[psp wio maix closed optcarrot-probe].freeze
+# `closed` is the closed world built natively for CI (build_config.rb).
+BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe].freeze
 # Gems that load or define Ruby at runtime; any of them opens the world.
 BC2CPP_OPEN_WORLD_GEMS = %w[
   mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs mruby-eval mruby-binding mruby-proc-binding

@@ -8,13 +8,13 @@
 #    included), which shapes make the world fact fail (a non-literal block to a rebinder, a computed-name send or a
 #    Method maker whose name is not proven, a Proc argument to define_method, a rebind name spelled, aliased or
 #    defined, a factory `new` with `&blk`, a method_missing forwarding by name, natives that rebind or name a
-#    rebinder), and the wio world: it fails only at enumerator.rb:322, Symbol#to_proc's send is proven, the rebound
+#    rebinder), and the closed world: it fails only at enumerator.rb:322, Symbol#to_proc's send is proven, the rebound
 #    blocks are mruby-enumerator's own `instance_eval { }` and `Fiber.new { }` blocks.
 # 2. The consumers (in-process CodeGen): BLOCK_SELF answers the creating method for a block handed to a native
 #    iterator when the fact holds, the per-site proof (which refuses it) when it does not, and never for a rebound
 #    block; a CodeGen without the build's scan refuses the fact; ClosedWorld#proven_miss? refuses `self` in a rebound
 #    block.
-# 3. Generated code (one closed-world generation in the wio world, which may rebind): blocks at rebinder sites are
+# 3. Generated code (one closed-world generation in the closed world, which may rebind): blocks at rebinder sites are
 #    not compiled, and every compiled block carries the entry check.
 # 4. Behaviour on real mruby (a full-core libmruby, Bc2cppFixtureRuntime.full_or_build): interpreted and compiled
 #    runs agree for literal blocks at instance_eval/instance_exec/class_eval/define_method/Class.new/Struct.new sites
@@ -167,21 +167,22 @@ Dir.mktmpdir do |dir|
   check.call("the rebinders' own implementation (vm.c) keeps the fact", w.holds?)
 end
 
-puts '-- the wio world'
+puts '-- the closed world'
 Dir.mktmpdir do |dir|
   srcs = closed_world_mrblib_srcs(ROOT)
-  gems = NomethodReviewedProbe.wio_gems(ROOT)
-  natives, outside_ruby = bc2cpp_closed_world_outside_srcs('wio', gems, ROOT)
+  # The closed build's mruby-compiler is there for its smoke probe only; no game Ruby reaches it.
+  gems = NomethodReviewedProbe.closed_gems(ROOT).reject { |name, _| name == 'mruby-compiler' }
+  natives, outside_ruby = bc2cpp_closed_world_outside_srcs('closed', gems, ROOT)
   natives = (natives + Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{ROOT}/3rd/mruby") + external_gem_native_srcs(ROOT)).uniq
   foreign = (outside_ruby + foreign_mrblib_srcs(ROOT)).map { |p| File.expand_path(p) }.uniq - srcs
-  ireps, root = compile_ireps(srcs, 'bsw_wio', dir)
-  outside, = compile_ireps(foreign.sort, 'bsw_wio_outside', dir)
+  ireps, root = compile_ireps(srcs, 'bsw_closed', dir)
+  outside, = compile_ireps(foreign.sort, 'bsw_closed_outside', dir)
   registry, superclass_of, = build_registry(ireps, root)
   w = BlockSelfWorld.analyze(ireps: ireps, outside_ireps: outside, native_paths: natives, method_labels: method_labels.call(registry),
                              superclass_of: superclass_of, root: ROOT)
   puts "    why: #{w.why}"
   w.failures.drop(1).each { |f| puts "    also: #{f}" }
-  check.call('the wio world may rebind, through enumerator.rb:322 only',
+  check.call('the closed world may rebind, through enumerator.rb:322 only',
              w.failures.size == 1 && w.why.start_with?('3rd/mruby/mrbgems/mruby-enumerator/mrblib/enumerator.rb:322:'))
   check.call("Symbol#to_proc's send (symbol.rb:5) is proven", w.failures.none? { |f| f.include?('symbol.rb') })
   site_lines = w.sites.map { |label, idx, name, _| "#{File.basename(ireps[label].file)}:#{ireps[label].instructions[idx].lineno} #{name}" }
@@ -272,7 +273,7 @@ DEFINE_SRC = <<~'RUBY'
   end
 RUBY
 
-puts '-- generated code (wio world: may rebind)'
+puts '-- generated code (closed world: may rebind)'
 code, = Dir.mktmpdir { |dir| Bc2cppFixtureRuntime.generate(SRC + DEFINE_SRC, dir, core: true, only_owners: %w[BswFx BswTarget BswImm]) }
 fn = ->(name) { code[/^mrb_value BswFx_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s }
 %w[via_exec via_eval via_class_eval via_lambda via_define via_class via_struct].each do |name|

@@ -2,9 +2,9 @@
 # encoding: UTF-8
 #
 # bc2cpp coverage report: regenerates tools/bc2cpp/bc2cpp.rb's whole-program
-# wio closed-world diagnostic (every owner across all three compiled gems --
+# closed-world diagnostic (every owner across all three compiled gems --
 # mruby-rpg2k-compiled/mruby-lcf-compiled/mruby-rgss-compiled -- combined,
-# with the actual wio gem set and outside-source proof inputs) and prints a small,
+# with the actual closed gem set and outside-source proof inputs) and prints a small,
 # stats-only summary: compiled-entry-point and
 # #error counts, a method-level coverage percentage (attempted vs. actually
 # compiled clean), and both the resolved AND the poisoned-to-unknown side of
@@ -41,7 +41,7 @@ ROOT = File.expand_path('../..', __dir__)
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/symbol_cache'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
-require_relative '../../tools/bc2cpp/wio_world_env'
+require_relative '../../tools/bc2cpp/closed_world_env'
 
 BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
 MRBC = ENV['MRBC'] || 'mrbc'
@@ -49,7 +49,7 @@ MRBC = ENV['MRBC'] || 'mrbc'
 REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH']
 
 srcs = closed_world_mrblib_srcs(ROOT)
-native_srcs = bc2cpp_rgss_native_srcs(ROOT, 'wio') + core_native_srcs("#{ROOT}/3rd/mruby") +
+native_srcs = bc2cpp_rgss_native_srcs(ROOT, 'closed') + core_native_srcs("#{ROOT}/3rd/mruby") +
               external_gem_native_srcs(ROOT)
 # INTEGER_CONSTANT_PROOF's own out-of-closed-world poison source -- see
 # foreign_mrblib_srcs (compiled_gems.rb) and bc2cpp.rb's own IntegerConstants
@@ -71,16 +71,16 @@ env = {
   'NATIVE_SRCS' => Shellwords.join(native_srcs),
   'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
   # The whole-program dispatch count is meaningful only under the same closed
-  # world that the wio compiled gems use. An unreviewed site fails this run as it
+  # world that the closed compiled gems use. An unreviewed site fails this run as it
   # fails a build.
-  'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_COLLECTION_EXPORTS' => '1',
-  'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.wio_gems(ROOT).map { |n, d| "#{n}=#{d}" }),
+  'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_COLLECTION_EXPORTS' => '1',
+  'BC2CPP_BUILD_GEMS' => Shellwords.join(NomethodReviewedProbe.closed_gems(ROOT).map { |n, d| "#{n}=#{d}" }),
 }
 env['BC2CPP_PROFILE_TIMINGS'] = '1' if ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
 cmd = [RbConfig.ruby, BC2CPP, '--annotated', *srcs].shelljoin
 Dir.mktmpdir do |dir|
   env['OUT_DIR'] = dir
-  @stdout, @stderr, status = Open3.capture3(bc2cpp_wio_world_env(env), cmd)
+  @stdout, @stderr, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), cmd)
   raise "bc2cpp.rb failed (exit #{status.exitstatus}):\n#{NomethodReviewedProbe.failure_tail(@stderr)}" unless status.success?
 end
 
@@ -101,7 +101,7 @@ Dir.mktmpdir do |dir|
   # its generated text carries the /*SO:*/ join tags, so it is measured apart from the untagged shipped.cxx.
   shipped_env = env.merge('OUT_SYMBOL' => 'coverage_report_shipped', 'SKIP_UNSUPPORTED' => '1', 'OUT_DIR' => dir,
                           'BC2CPP_SITE_ORIGIN_TABLE' => ENV['BC2CPP_COVERAGE_ORIGIN_TABLE'])
-  @shipped_stdout, @shipped_stderr, shipped_status = Open3.capture3(bc2cpp_wio_world_env(shipped_env), cmd)
+  @shipped_stdout, @shipped_stderr, shipped_status = Open3.capture3(bc2cpp_closed_world_probe_env(shipped_env), cmd)
   raise "bc2cpp.rb (SKIP_UNSUPPORTED=1) failed (exit #{shipped_status.exitstatus}):\n#{NomethodReviewedProbe.failure_tail(@shipped_stderr)}" unless shipped_status.success?
 end
 # BC2CPP_COVERAGE_KEEP_DIR: keep the shipped run's generated C++ (stdout, plus
@@ -203,7 +203,7 @@ end
 
 report = +''
 report << "bc2cpp coverage report\n"
-report << "(scripts/bc2cpp/coverage_report.rb; wio closed world, whole-program, all three\n"
+report << "(scripts/bc2cpp/coverage_report.rb; closed world, whole-program, all three\n"
 report << " gems' owners combined -- see that script's own header)\n\n"
 
 report << "compiled entry points (real build output -- clean, zero #error): #{clean_names.size}\n"
