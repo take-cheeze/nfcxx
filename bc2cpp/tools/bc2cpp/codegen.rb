@@ -170,6 +170,8 @@ class CodeGen
     @compiling_core = false
     @ir_inline_remaining = 512
     @registry = registry
+    # Structural bytecode answers survive probe rollback; emitted registrations do not (ADR 0528).
+    @block_capture_index = BlockCaptureIndex.new(@ireps, MAX_UPVAR_NEST_DEPTH, BLOCK_GIVEN_NAMES) unless ENV['BC2CPP_BLOCK_CAPTURE_INDEX'] == '0'
     @known_owners = Set.new(registry.values.flatten.map(&:owner))
     # FIBER_REACHABILITY_UNSAFE_SUPPORT: must exist before drop_unsafe_embeddings,
     # which reaches compile_method through compiles_clean?. See
