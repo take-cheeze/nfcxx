@@ -49,7 +49,7 @@ ensure
   previous.each { |key, value| ENV[key] = value }
 end
 
-FLOW_OFF = { 'BC2CPP_REGISTER_FLOW' => '0' }.freeze
+FLOW_OFF = { 'BC2CPP_REGISTER_FLOW' => '0', 'BC2CPP_PRUNE_ARMS' => '0' }.freeze
 STAGE_B = FLOW_OFF.merge('BC2CPP_PRUNE_ARMS' => '1').freeze
 
 plain = route_code.call(FLOW_OFF)
@@ -62,8 +62,10 @@ labels_defined = ->(code) { code.scan(/^  L(\d+):;$/).flatten.to_set }
 gotos_used = ->(code) { code.scan(/goto L(\d+);/).flatten.to_set }
 
 puts '== stage A'
-suite.check('with stage B off (unset and 0) the C++ is the same, so stage A changes no output',
-            plain == route_code.call(FLOW_OFF.merge('BC2CPP_PRUNE_ARMS' => '0')))
+suite.check('with stage B off (0) the unreachable arm keeps its text',
+            plain.include?('mrb_fixnum(r6), 1, &bc2cpp_z'))
+suite.check('stage B is on when the variable is unset (the default)',
+            route_code.call(FLOW_OFF.reject { |k, _| k == 'BC2CPP_PRUNE_ARMS' }) == pruned)
 suite.check('the stage A count is positive on the fixture',
             CodeGen.arm_prune_stats[:unreachable].to_i.positive?)
 
