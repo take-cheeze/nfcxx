@@ -15,6 +15,69 @@ check.call('opaque native expression remains unknown', IrNativeExpressionTypes.c
 check.call('native receiver return retains its actual class', IrNativeExpressionTypes.classes('recv', 'Array') == [:Array])
 check.call('native constructor parser handles parentheses in quotes', IrNativeExpressionTypes.classes('mrb_bool_value(strcmp("(", ")"))', 'Array') == [:TrueClass, :FalseClass])
 
+require_relative '../../tools/bc2cpp/codegen_return_classes'
+
+# The middle node's return stabilizes before its state-dependent effect does.
+context_harness = Class.new(IrContextResults) do
+  attr_reader :evaluations
+
+  def initialize(*args, **kwargs)
+    super
+    @evaluations = Hash.new(0)
+    @leaf_evaluations = nil
+  end
+
+  def evaluate_body(node)
+    @evaluations[node.body.label] += 1
+    child = case node.body.label
+            when 'root' then 'middle'
+            when 'middle' then 'leaf'
+            when 'leaf' then 'tail'
+            when 'tail' then 'end'
+            end
+    callee = child && add(Struct.new(:label).new(child), 1, [], {}, nil)
+    node.states = [[callee ? callee.mask : NumericFlow::STR]]
+    node.calls = {}
+    node.arrays = {}
+    case node.body.label
+    when 'root' then callee&.states&.dig(0, 0).to_i
+    when 'middle' then NumericFlow::INT
+    else NumericFlow::STR
+    end
+  end
+end
+run_context_harness = lambda do |reuse, rounds = 48, contexts = 512|
+  gen = Struct.new(:numeric_class_bit_count, :frozen_tables_model).new(0, nil)
+  engine = context_harness.new(gen, {}, max_rounds: rounds, max_contexts: contexts)
+  engine.instance_variable_set(:@reuse_evaluations, reuse)
+  root = engine.add(Struct.new(:label).new('root'), 1, [], {}, nil)
+  solved = engine.solve
+  nodes = engine.instance_variable_get(:@nodes).values
+  [solved, root.mask, nodes.map { |node| [node.body.label, node.mask, node.states, node.calls] }, engine.evaluations, nodes]
+end
+indexed, unindexed = run_context_harness.call(true), run_context_harness.call(false)
+check.call('dependency reuse preserves state-dependent effects with stable return masks', indexed.first(3) == unindexed.first(3) && indexed[1] == NumericFlow::STR)
+check.call('unchanged context dependencies skip real evaluations', indexed[3].values.sum < unindexed[3].values.sum)
+check.call('completed solves release dependency graphs', indexed[4].all? { |node| node.evaluation.nil? })
+generation_gen = Struct.new(:numeric_class_bit_count, :frozen_tables_model).new(0, nil)
+generation_engine = context_harness.new(generation_gen, {})
+generation_engine.instance_variable_set(:@reuse_evaluations, true)
+generation_node = generation_engine.add(Struct.new(:label).new('leaf'), 1, [], {}, nil)
+2.times { generation_engine.evaluate(generation_node) }
+check.call('unchanged generations reuse an evaluation', generation_engine.evaluations['leaf'] == 1)
+generation_gen.numeric_class_bit_count += 1
+generation_engine.evaluate(generation_node)
+check.call('numeric class registration invalidates an evaluation', generation_engine.evaluations['leaf'] == 2)
+generation_engine.shape_bit(IrContextResults::Shape.new(container: :Array, elements: [NumericFlow::STR].freeze))
+generation_engine.evaluate(generation_node)
+check.call('private shape registration invalidates an evaluation', generation_engine.evaluations['leaf'] == 3)
+(1..5).each do |rounds|
+  check.call("dependency reuse preserves #{rounds}-round graph outcomes", run_context_harness.call(true, rounds).first(3) == run_context_harness.call(false, rounds).first(3))
+end
+(1..3).each do |contexts|
+  check.call("dependency reuse preserves #{contexts}-node graph outcomes", run_context_harness.call(true, 48, contexts).first(3) == run_context_harness.call(false, 48, contexts).first(3))
+end
+
 unless ENV['MRBC']
   puts 'SKIP mrbc context fixtures (set MRBC)'
   exit
@@ -74,6 +137,7 @@ Dir.mktmpdir('ir-context-results') do |dir|
     TypeCheckFixture.report(dir, env: env, label: 'context fixture')
   end
   report = run.call
+  check.call('dependency reuse preserves the complete report', report == run.call('BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
   check.call('leaf evaluation reuse preserves the complete report', report == run.call('BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve the complete report', report == run.call('BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
   returns = report['ir_feedback'].select { |row| row['kind'] == 'return' }.to_h { |row| [[row['owner'], row['method']], row] }
@@ -98,11 +162,13 @@ Dir.mktmpdir('ir-context-results') do |dir|
   limited_report = run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1')
   check.call('leaf reuse preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
+  check.call('dependency reuse preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
   limited = limited_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a context budget never publishes a provisional keyword summary', limited['status'] == 'unknown')
   rounds_report = run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1')
   check.call('leaf reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
+  check.call('dependency reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
   rounds = rounds_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a round budget never publishes bottom as a return type', rounds['status'] == 'unknown')
   no_effect = run.call('BC2CPP_IR_EFFECT_SUMMARIES' => '0')['ir_feedback'].find { |row| row['method'] == 'effect_read' && row['kind'] == 'return' }
