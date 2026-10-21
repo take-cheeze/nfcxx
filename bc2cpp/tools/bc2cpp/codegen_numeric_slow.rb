@@ -195,7 +195,7 @@ class CodeGen
     return numeric_slow_open_source(key, head, float) unless closed
 
     # A build that links the Complex or Rational gem has more definers (or receivers) than the world scan lists
-    # (`/`, `+ *`, `< <= > >=`, `round`, `% -@`), so it keeps the by-name body.
+    # (`/`, `+ *`, `< <= > >=`, `round`), so it keeps the by-name body.
     "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{numeric_slow_open_source(key, head, float)}" \
       "#else\n#{closed}#endif\n"
   end
@@ -205,8 +205,8 @@ class CodeGen
   end
 
   # The closed form of helper `key`, or nil when its operator is not proven closed in this world (each key is
-  # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364, `% -@` ADR 0367,
-  # `- & | <<` ADR 0366, `zero?` ADR 0374).
+  # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364, `- & | <<` ADR 0366,
+  # `zero?` ADR 0374. `%` and `-@` have no closed form and keep the by-name body (ADR 0367).
   def numeric_slow_closed_source(key, head)
     op = NUMERIC_SLOW_KEYS.key(key)
     if NUMERIC_SLOW_ARITH.key?(key)
@@ -215,11 +215,6 @@ class CodeGen
       numeric_slow_closed_arith_source(key, op, NUMERIC_SLOW_ARITH.fetch(key).last, head)
     elsif NUMERIC_SLOW_CMP.key?(key)
       numeric_slow_closed_cmp?(op) ? numeric_slow_closed_cmp_source(head, op) : nil
-    elsif %w[mod neg].include?(key)
-      misc = numeric_slow_misc(op)
-      return nil unless misc
-
-      key == 'mod' ? numeric_slow_closed_mod_source(head, misc) : numeric_slow_closed_neg_source(head, misc)
     elsif key == 'zero'
       zero = numeric_slow_zero
       zero ? numeric_slow_closed_zero_source(head, zero) : nil
