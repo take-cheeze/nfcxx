@@ -21,9 +21,36 @@ module EnumeratorModel
   FILE_SUFFIX = '/mruby-enumerator/mrblib/enumerator.rb'
   # Kernel's Enumerator makers, from sig/bc2cpp/declarations.rbs#core_enumerators.
   NAMES = CoreFactSigs.enumerator_makers
+  MRUBY_ENUMERATOR_RB = File.expand_path('../../3rd/mruby/mrbgems/mruby-enumerator/mrblib/enumerator.rb', __dir__)
+  MRUBY_CLASS_C = File.expand_path('../../3rd/mruby/src/class.c', __dir__)
+
+  # Read at load time from mruby's sources; raises when 3rd/mruby is not checked out.
+  def self.source_text(path)
+    raise "bc2cpp: #{path} is missing (is 3rd/mruby checked out?)" unless File.file?(path)
+
+    File.read(path, encoding: 'UTF-8')
+  end
+
+  # [the module Kernel alias triple, the construction chain's names]. The chain is to_enum and its alias, the `new`
+  # the body sends to Enumerator, then the presyms Class#new's bytecode sends (class.c `new_syms`).
+  def self.source_construction
+    kernel = source_text(MRUBY_ENUMERATOR_RB)[/^module Kernel\n(.*?)^end$/m, 1] or
+      raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: no `module Kernel`"
+    to_enum_def = kernel[/^  def to_enum\(.*?^  end$/m] or raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: no Kernel#to_enum"
+    alias_match = kernel.match(/^  alias (\w+) (\w+)$/) or raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: no Kernel alias"
+    raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: the alias is not to_enum" unless alias_match[2] == 'to_enum'
+
+    presyms = source_text(MRUBY_CLASS_C).match(
+      /^MRB_PRESYM_DEFINE_VAR_AND_INITER\(new_syms, \d+, MRB_SYM\((\w+)\), MRB_SYM\((\w+)\)\)$/
+    ) or raise "bc2cpp: #{MRUBY_CLASS_C}: no Class#new presyms"
+    body_sends = to_enum_def.scan(/\b[A-Z]\w*\.(\w+)/).flatten.uniq
+    [['Kernel', alias_match[1], alias_match[2]].freeze,
+     ['to_enum', alias_match[1], *body_sends, presyms[1], presyms[2]].freeze]
+  end
+
   # Names the direct construction relies on: a definition of any of them outside mruby's own Ruby (or a second one inside)
   # withdraws the model.
-  CONSTRUCTION_NAMES = %w[to_enum enum_for new allocate initialize].freeze
+  KERNEL_ENUM_FOR_ALIAS, CONSTRUCTION_NAMES = source_construction
   CONSTRUCTION_OWNERS = %w[Enumerator Enumerator.singleton Class Module Object Object.singleton Kernel BasicObject
                            BasicObject.singleton Kernel.singleton].freeze
 
@@ -53,7 +80,7 @@ module EnumeratorModel
     return Result.new(false, 'enum_for is defined by a method') unless enum_for.empty?
 
     sites = alias_sites.select { |s| NAMES.include?(s[:new]) || NAMES.include?(s[:old]) }
-    unless sites.size == 1 && sites.first.values_at(:owner, :new, :old) == %w[Kernel enum_for to_enum] &&
+    unless sites.size == 1 && sites.first.values_at(:owner, :new, :old) == KERNEL_ENUM_FOR_ALIAS &&
            ireps[sites.first[:irep]].file.to_s.end_with?(FILE_SUFFIX)
       return Result.new(false, 'to_enum/enum_for are aliased elsewhere')
     end
