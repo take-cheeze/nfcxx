@@ -33,3 +33,19 @@ MRUBY_CONFIG="$root/build_config.rb" \
   rake
 
 echo "built $build_dir/closed/lib/libmruby.a"
+
+# mruby-rgss's lib.cxx includes shinonome.hxx, which its rake file writes into the RGSS build directory. The base
+# generator looks for it under closed/mrbgems/mruby-rgss (base_rbs_all.rb flags_for), so write it there as well.
+jis0208_table="${jis0208_table:-$root/.native-build-tables/JIS0208.TXT}"
+[ -f "$jis0208_table" ] || {
+  echo "error: missing $jis0208_table (scripts/native/build-without-nix.bash fetches it)" >&2
+  exit 1
+}
+rgss_dir="$build_dir/closed/mrbgems/mruby-rgss"
+mkdir -p "$rgss_dir"
+(cd "$rgss_dir" && jis0208_table="$jis0208_table" ruby "$root/mruby-rgss/gen_shinonome_data.rb" > /dev/null)
+echo "wrote $rgss_dir/shinonome.hxx"
+
+# The analysis overlay: presym IDs for every symbol the closed world's native sources name, and the Onigmo header
+# mruby-onig-regexp includes (analysis_headers.rb). Read by base_rbs_all.rb and native_fn_kinds.rb only.
+ruby "$root/scripts/bc2cpp/analysis_headers.rb" "$build_dir/closed"

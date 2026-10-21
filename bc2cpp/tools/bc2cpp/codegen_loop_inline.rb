@@ -274,7 +274,7 @@ class CodeGen
 
   # EACH_BLOCK_SUPPORT: the inlined loop for one `ary.each` region (nil if not
   # clean). Differences from times:
-  #   - LIVE length: `i < RARRAY_LEN(recv)` every iteration, as array.c does;
+  #   - LIVE length: `i < ary_size(recv)` every iteration, as array.c does;
   #     Array#each visits elements pushed during iteration. Elements via
   #     mrb_ary_ref.
   #   - An mrb_array_p guard (inline_receiver_guard). Unproven sites stay
@@ -300,7 +300,7 @@ class CodeGen
     out << "  {\n"
     out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each')
     out << "    for (mrb_int bc2cpp_each_i_#{addr} = 0; " \
-           "bc2cpp_each_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "bc2cpp_each_i_#{addr} < ary_size(#{recv_expr}); " \
            "++bc2cpp_each_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     entry = "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{addr})"
@@ -326,7 +326,7 @@ class CodeGen
     out << "      mrb_value #{row} = #{entry};\n"
     out << "      if (mrb_array_p(#{row})) {\n"
     n.times do |k|
-      out << "        if (RARRAY_LEN(#{row}) > #{k}) { r#{first_reg + k} = RARRAY_PTR(#{row})[#{k}]; }\n"
+      out << "        if (ary_size(#{row}) > #{k}) { r#{first_reg + k} = ary_items(#{row})[#{k}]; }\n"
     end
     out << "      } else {\n"
     out << "        r#{first_reg} = #{row};\n"
@@ -352,7 +352,7 @@ class CodeGen
     out << "  {\n"
     out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each_index')
     out << "    for (mrb_int bc2cpp_eachidx_i_#{addr} = 0; " \
-           "bc2cpp_eachidx_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "bc2cpp_eachidx_i_#{addr} < ary_size(#{recv_expr}); " \
            "++bc2cpp_eachidx_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_eachidx_i_#{addr});\n"
@@ -382,7 +382,7 @@ class CodeGen
     out << "    }\n"
     out << "    mrb_value bc2cpp_heval_values_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
     out << "    for (mrb_int bc2cpp_heval_i_#{addr} = 0; " \
-           "bc2cpp_heval_i_#{addr} < RARRAY_LEN(bc2cpp_heval_values_#{addr}); " \
+           "bc2cpp_heval_i_#{addr} < ary_size(bc2cpp_heval_values_#{addr}); " \
            "++bc2cpp_heval_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     out << "      r#{value_reg} = bc2cpp_ary_entry(M, bc2cpp_heval_values_#{addr}, bc2cpp_heval_i_#{addr});\n"
@@ -554,7 +554,7 @@ class CodeGen
     # each_with_index has no final assignment to skip, but a `break` in its block still sets the flag.
     out << "    mrb_bool bc2cpp_collect_broke_#{addr} = FALSE;\n" if meth != 'each_with_index' || body.include?("bc2cpp_collect_broke_#{addr}")
     out << "    for (mrb_int bc2cpp_collect_i_#{addr} = 0; " \
-           "bc2cpp_collect_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "bc2cpp_collect_i_#{addr} < ary_size(#{recv_expr}); " \
            "++bc2cpp_collect_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
@@ -644,7 +644,7 @@ class CodeGen
       out << "    mrb_value #{acc_var} = r#{region[:init_reg]};\n"
     end
     out << "    for (mrb_int bc2cpp_accum_i_#{addr} = 0; " \
-           "bc2cpp_accum_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "bc2cpp_accum_i_#{addr} < ary_size(#{recv_expr}); " \
            "++bc2cpp_accum_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
@@ -902,7 +902,7 @@ class CodeGen
       out << "    mrb_int bc2cpp_sym_acc_#{region[:sym_addr]} = 0;\n"
     end
     out << "    for (mrb_int bc2cpp_sym_i_#{region[:sym_addr]} = 0; " \
-           "bc2cpp_sym_i_#{region[:sym_addr]} < RARRAY_LEN(#{recv_expr}); " \
+           "bc2cpp_sym_i_#{region[:sym_addr]} < ary_size(#{recv_expr}); " \
            "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"
     out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
            "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
@@ -1040,9 +1040,9 @@ class CodeGen
     out << "  {\n"
     out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
     out << "    mrb_bool bc2cpp_sort_broke_#{addr} = FALSE;\n"
-    out << "    mrb_int bc2cpp_sort_n_#{addr} = RARRAY_LEN(#{recv_expr});\n"
+    out << "    mrb_int bc2cpp_sort_n_#{addr} = ary_size(#{recv_expr});\n"
     out << "    mrb_value bc2cpp_sort_keys_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_n_#{addr});\n"
-    out << "    for (mrb_int bc2cpp_sort_i_#{addr} = 0; bc2cpp_sort_i_#{addr} < RARRAY_LEN(#{recv_expr}); ++bc2cpp_sort_i_#{addr}) {\n"
+    out << "    for (mrb_int bc2cpp_sort_i_#{addr} = 0; bc2cpp_sort_i_#{addr} < ary_size(#{recv_expr}); ++bc2cpp_sort_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
@@ -1057,7 +1057,7 @@ class CodeGen
     # differ, and the native sort raises "array modified during sort" there anyway.
     out << "    #{break_label}:;\n"
     out << "    if (!bc2cpp_sort_broke_#{addr}) {\n"
-    out << "    mrb_int bc2cpp_sort_m_#{addr} = RARRAY_LEN(bc2cpp_sort_keys_#{addr});\n"
+    out << "    mrb_int bc2cpp_sort_m_#{addr} = ary_size(bc2cpp_sort_keys_#{addr});\n"
     out << "    mrb_value bc2cpp_sort_pairs_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
     out << "    for (mrb_int bc2cpp_sort_j_#{addr} = 0; bc2cpp_sort_j_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_j_#{addr}) {\n"
     out << "      mrb_value bc2cpp_sort_e_#{addr} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_j_#{addr});\n"

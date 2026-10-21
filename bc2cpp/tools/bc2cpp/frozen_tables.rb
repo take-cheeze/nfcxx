@@ -60,7 +60,7 @@ module FrozenTables
     end
 
     def each_shape_in(mask)
-      @shapes.each { |s| yield s if mask.anybits?(s.bit) }
+      @shapes.each { |s| yield s if mask[s.bit.bit_length - 1] == 1 }
     end
 
     def shape(bit)

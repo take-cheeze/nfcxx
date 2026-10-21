@@ -6,19 +6,14 @@ require_relative 'rbs_signatures'
 require_relative 'ir_yield_types'
 require_relative 'ir_block_captures'
 require_relative 'ir_rbs_block_types'
+require_relative 'core_hierarchy_sigs'
 
 module IrTypeFeedback
   # Not Ops::FRAME_EXIT: that set also holds STOP, which these block and method return kinds leave out.
   RETURN_OPS = %w[RETURN RETURN_BLK BREAK RETSELF RETNIL RETTRUE RETFALSE].freeze
   LITERAL_RETURNS = { 'RETNIL' => :NilClass, 'RETTRUE' => :TrueClass, 'RETFALSE' => :FalseClass }.freeze
-  CORE_PARENTS = {
-    Integer: :Numeric, Float: :Numeric, Numeric: :Object, String: :Object, Symbol: :Object,
-    Array: :Object, Hash: :Object, Range: :Object, Proc: :Object, NilClass: :Object,
-    TrueClass: :Object, FalseClass: :Object, Object: :BasicObject
-  }.freeze
-
-  CORE_MIXINS = { Array: [:Enumerable], Hash: [:Enumerable], Range: [:Enumerable],
-                  Numeric: [:Comparable], String: [:Comparable], Object: [:Kernel] }.freeze
+  # Core superclasses and mixins, read from sig/bc2cpp/declarations.rbs#core_hierarchy (fails if that section is empty).
+  CORE_PARENTS, CORE_MIXINS = CoreHierarchySigs.symbol_hierarchy
 
   module_function
 

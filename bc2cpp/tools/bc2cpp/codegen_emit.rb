@@ -23,7 +23,11 @@ class CodeGen
 
     @probing << label
     begin
-      result = with_fresh_method_state { compile_method(label) }
+      result = with_fresh_method_state do
+        # Specialization caches emitted clone text, so its probes must keep final-code optimization.
+        @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+        compile_method(label)
+      end
       @clean_cache[label] = !result[:code].include?('#error')
     ensure
       @probing.delete(label)
@@ -33,6 +37,7 @@ class CodeGen
   # Every ivar one compile_method call sets and clears for itself, with its
   # top-level value. A probe runs mid-way through another method's compile.
   METHOD_COMPILE_STATE = {
+    :@clean_probe => false,
     :@ir_inline_remaining => 512,
     :@ir_inline_stack => nil,
     :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
@@ -59,14 +64,18 @@ class CodeGen
     :@index_closed_build => nil
   }.freeze
 
+  METHOD_COMPILE_IVARS = METHOD_COMPILE_STATE.keys.freeze
+
   # Runs a nested compile against top-level state, then restores the caller's
   # state, so neither compile sees or clobbers the other's (ADR 0202).
   def with_fresh_method_state
-    saved = METHOD_COMPILE_STATE.keys.map { |ivar| instance_variable_get(ivar) }
+    saved = METHOD_COMPILE_IVARS.map { |ivar| instance_variable_get(ivar) }
     METHOD_COMPILE_STATE.each { |ivar, initial| instance_variable_set(ivar, initial) }
     yield
   ensure
-    METHOD_COMPILE_STATE.keys.zip(saved).each { |ivar, value| instance_variable_set(ivar, value) } if saved
+    if saved
+      METHOD_COMPILE_IVARS.each_with_index { |ivar, index| instance_variable_set(ivar, saved[index]) }
+    end
   end
 
   def embed_type(owner, ivar)

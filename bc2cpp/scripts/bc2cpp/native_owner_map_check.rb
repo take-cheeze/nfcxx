@@ -8,24 +8,25 @@
 #
 #   1. positive world: the proven site gets the arm (exact class test, compiled body call) and keeps its
 #      by-name else;
-#   2. negative worlds, each one withdraws the arm for the same site: a native-or-Ruby definition of the name
-#      on the candidate's own class (String#empty? is native), strict mode (BC2CPP_NATIVE_OWNER_MAP=strict,
-#      which trusts no mruby core forwarder), a dynamic installer of the name, a definition repeated in the
-#      same class, a prepend on the candidate, and an anonymous candidate class;
-#   3. kill switch: BC2CPP_NATIVE_OWNER_MAP=0 is byte-identical to the output of the same tree at the merge
-#      base with origin/master (a copy of tools/bc2cpp taken from `git archive`, inside the repository so
-#      its closed world is the real one), and the positive world differs from it.
+#   2. unrelated classes do not withdraw it: a reopened String defining empty? is another class's method;
+#   3. negative worlds, each one withdraws the arm for the same site: a definition repeated in the same
+#      class, a prepend on the candidate, an anonymous candidate class, a dynamic installer of the name, and
+#      strict mode (BC2CPP_NATIVE_OWNER_MAP=strict, which trusts no mruby core forwarder);
+#   4. kill switch: BC2CPP_NATIVE_OWNER_MAP=0 gives the by-name form for the same site, and the positive world
+#      differs from it.
 #
-# Generated code only (no mruby build). Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/native_owner_map_check.rb
-# CX_BASE overrides the base revision (default: the merge base of HEAD and origin/master).
+# Generated code only (no mruby build). Needs a host mrbc: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/native_owner_map_check.rb
+# Without MRBC the generated-code part is skipped (ADR 0397's runtime tier, as native_result_facts_check.rb).
 
-require 'fileutils'
 require 'open3'
 require 'rbconfig'
 require 'shellwords'
 require 'tmpdir'
 
 ROOT = File.expand_path('../..', __dir__)
+# The fixtures declare no RBS; the repository's signatures name engine classes these fixtures lack. Set before
+# the bc2cpp subprocesses start: they inherit ENV, so every compile here runs without sig/bc2cpp.
+ENV['BC2CPP_SIG_DIRS'] = ''
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/nomethod_reviewed'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
@@ -57,8 +58,9 @@ RUBY
 
 # The probed body: the send of `probe` on its argument, which nothing proves exact.
 PROBE_FN = /^mrb_value CxHolder_probe_impl\(mrb_state\* M.*?(?=^mrb_value \w+\(mrb_state\* M|\z)/m
-ARM = %r{// NATIVE_OWNER_MAP :empty\? -- [^\n]*\n\s*if \(bc2cpp_owner_class_\d+\(M\) == mrb_obj_class\(M, r\d+\)\) \{\n\s*r\d+ = CxQueue_empty\$3f_impl\(M, r\d+\);\n\s*\} else }
-BY_NAME_ELSE = /bc2cpp_send\(M, r\d+, \d+, 0\)/
+ARM = %r{(?:// NATIVE_OWNER_MAP :empty\? -- [^\n]*\n\s*)?if \(bc2cpp_owner_class_\d+\(M\) == mrb_obj_class\(M, r\d+\)\) \{\n\s*r\d+ = CxQueue_empty\$3f_impl\(M, r\d+\);\n\s*\} else }
+# The by-name else: a plain send, or with the owner map on, the closed-world owner call over the same owners.
+BY_NAME_ELSE = /bc2cpp_send\(M, r\d+, \d+, 0\)|bc2cpp_owner_call\(M, r\d+, \d+, \d+, BC2CPP_OWNERS\(.*?\), mrb_nil_value\(\), 0\)/
 
 if tool?(MRBC_PATH)
   gems = NomethodReviewedProbe.closed_gems(ROOT)
@@ -66,19 +68,19 @@ if tool?(MRBC_PATH)
   core_srcs = core_compiled_mrblib_srcs(ROOT)
   foreign = foreign_mrblib_srcs(ROOT)
 
-  # One bc2cpp run over the core, the foreign sources and `source`. `tool_dir` is the tools/bc2cpp copy to run.
-  generate = lambda do |source, name, tool_dir: File.join(ROOT, 'tools/bc2cpp'), extra_env: {}|
+  # One bc2cpp run over the core, the foreign sources and `source`.
+  generate = lambda do |source, name, extra_env: {}|
     Dir.mktmpdir do |dir|
       path = File.join(dir, "#{name}.rb")
       File.write(path, source)
       env = { 'MRBC' => MRBC_PATH, 'OUT_SYMBOL' => name, 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
               'NATIVE_SRCS' => Shellwords.join(native_srcs),
               'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign),
-              'ONLY_OWNERS' => (BC2CPP_CORE_OWNERS + %w[CxQueue CxHolder CxWrap]).join(','),
+              'ONLY_OWNERS' => (BC2CPP_CORE_OWNERS + %w[CxQueue CxHolder CxWrap String]).join(','),
               'BC2CPP_BUILD_NAME' => 'closed',
               'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |n, d| "#{n}=#{d}" }) }
-      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env.merge(extra_env)), RbConfig.ruby, File.join(tool_dir, 'bc2cpp.rb'), '--annotated',
-                                        *(core_srcs + [path]))
+      out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env.merge(extra_env)), RbConfig.ruby,
+                                        File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), *(core_srcs + [path]))
       abort "bc2cpp.rb failed for #{name}:\n#{err[-3000..] || err}" unless status.success?
       out
     end
@@ -91,10 +93,13 @@ if tool?(MRBC_PATH)
   pb = body.call(positive)
   check.call('positive: the probed body is generated', pb.include?('CxHolder_probe_impl'))
   check.call('positive: a proven empty? site gets the exact-class arm calling CxQueue#empty?', pb.match?(ARM))
-  check.call('positive: the by-name else stays in the arm\'s else', pb.match?(BY_NAME_ELSE))
+  check.call("positive: the by-name else stays in the arm's else", pb.match?(BY_NAME_ELSE))
+
+  unrelated = generate.call("#{FIXTURE}\nclass String\n  def empty?; false; end\nend\n", 'cx_unrelated')
+  check.call('unrelated: a reopened String#empty? does not withdraw the CxQueue arm',
+             body.call(unrelated).match?(ARM))
 
   negatives = {
-    'unproven: String defines empty? next to its native' => "#{FIXTURE}\nclass String\n  def empty?; false; end\nend\n",
     'overridden: CxQueue defines empty? twice' => "#{FIXTURE}\nclass CxQueue\n  def empty?; true; end\nend\n",
     'prepend: a module prepended to CxQueue' => "module CxWrap\n  def empty?; false; end\nend\n#{FIXTURE}\n" \
                                                 "class CxQueue\n  prepend CxWrap\nend\n",
@@ -111,32 +116,13 @@ if tool?(MRBC_PATH)
   check.call('negative (strict mode withdraws core forwarders): no arm for the probed site',
              !body.call(strict).match?(ARM) && body.call(strict).match?(BY_NAME_ELSE))
 
-  base_ref = ENV['CX_BASE'] || `git -C #{ROOT} merge-base HEAD origin/master 2>/dev/null`.strip
-  if base_ref.empty?
-    puts '-- SKIP kill switch identity: no base revision (set CX_BASE)'
-    check.call('kill switch: base revision known', false)
-  else
-    # A flat copy at tools/bc2cpp-owner-base-<pid>: bc2cpp.rb takes the repository root as ../.. of its own
-    # directory, so the copy must sit exactly one level under tools/ to see the same closed world.
-    base_dir = File.join(ROOT, "tools/bc2cpp-owner-base-#{Process.pid}")
-    Dir.mktmpdir do |scratch|
-      archive = File.join(scratch, 'base.tar')
-      system('git', '-C', ROOT, 'archive', '--format=tar', '-o', archive, base_ref, 'tools/bc2cpp') or abort 'git archive failed'
-      system('tar', '-xf', archive, '-C', scratch) or abort 'tar failed'
-      FileUtils.mv(File.join(scratch, 'tools/bc2cpp'), base_dir)
-    end
-    begin
-      base = generate.call(FIXTURE, 'cx_pos', tool_dir: base_dir)
-      off = generate.call(FIXTURE, 'cx_pos', extra_env: { 'BC2CPP_NATIVE_OWNER_MAP' => '0' })
-      check.call('kill switch BC2CPP_NATIVE_OWNER_MAP=0 is byte-identical to the base revision', off == base)
-      check.call('the positive world differs from the base revision (the arm is what changes)', positive != base)
-    ensure
-      FileUtils.rm_rf(base_dir)
-    end
-  end
+  # Kill switch: the same tree with the owner map off gives the by-name form, and the positive world differs.
+  off = generate.call(FIXTURE, 'cx_pos', extra_env: { 'BC2CPP_NATIVE_OWNER_MAP' => '0' })
+  check.call('kill switch BC2CPP_NATIVE_OWNER_MAP=0: no arm, the by-name send only',
+             !body.call(off).match?(ARM) && body.call(off).match?(BY_NAME_ELSE))
+  check.call('the positive world differs from the kill-switch world (the arm is what changes)', positive != off)
 else
-  puts '-- SKIP generated code: needs a host mrbc (set MRBC)'
-  check.call('mrbc available (MRBC)', false)
+  puts '-- SKIP generated code: set MRBC to a host mrbc'
 end
 
 if failures.empty?

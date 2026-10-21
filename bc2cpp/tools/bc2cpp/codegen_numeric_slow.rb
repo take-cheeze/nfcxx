@@ -29,6 +29,11 @@ class CodeGen
     extern "C" mrb_value mrb_bint_mul_ii(mrb_state*, mrb_int, mrb_int);
     extern "C" mrb_value mrb_as_bint(mrb_state*, mrb_value);
     #endif
+    // Whole bodies of Integer#% and Float#% (patches/mruby-expose-misc-bodies.patch, ADR 0367).
+    extern "C" mrb_value mrb_int_mod_impl(mrb_state*, mrb_value, mrb_value);
+    #ifndef MRB_NO_FLOAT
+    extern "C" mrb_value mrb_flo_mod_impl(mrb_state*, mrb_value, mrb_value);
+    #endif
     // mrb_bigint_p and mrb_float_p are FALSE in a build without them.
     static inline mrb_bool bc2cpp_slow_int_p(mrb_value v) { return mrb_integer_p(v) || mrb_bigint_p(v); }
     static inline mrb_bool bc2cpp_slow_num_p(mrb_value v) { return bc2cpp_slow_int_p(v) || mrb_float_p(v); }
@@ -206,7 +211,7 @@ class CodeGen
 
   # The closed form of helper `key`, or nil when its operator is not proven closed in this world (each key is
   # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364, `- & | <<` ADR 0366,
-  # `zero?` ADR 0374. `%` and `-@` have no closed form and keep the by-name body (ADR 0367).
+  # `zero?` ADR 0374, `%` ADR 0367. `-@` has no closed form and keeps the by-name body (ADR 0367).
   def numeric_slow_closed_source(key, head)
     op = NUMERIC_SLOW_KEYS.key(key)
     if NUMERIC_SLOW_ARITH.key?(key)
@@ -218,6 +223,8 @@ class CodeGen
     elsif key == 'zero'
       zero = numeric_slow_zero
       zero ? numeric_slow_closed_zero_source(head, zero) : nil
+    elsif key == 'mod'
+      numeric_slow_mod_direct? ? numeric_slow_closed_mod_source(head) : nil
     elsif numeric_slow_closed?(op)
       case key
       when 'div' then numeric_slow_closed_div_source(head)
@@ -441,7 +448,7 @@ class CodeGen
       array: <<~CPP.chomp.gsub(/^(?=.)/, '    ')
         mrb_ensure_array_type(M, b);
         mrb_int total;
-        if (mrb_int_add_overflow(RARRAY_LEN(a), RARRAY_LEN(b), &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+        if (mrb_int_add_overflow(ary_size(a), ary_size(b), &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
         r = mrb_ary_new_capa(M, total);
         mrb_ary_concat(M, r, a);
         mrb_ary_concat(M, r, b);
@@ -481,7 +488,7 @@ class CodeGen
             r = mrb_ary_new(M);
           }
           else {
-            if (mrb_int_mul_overflow(RARRAY_LEN(a), times, &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+            if (mrb_int_mul_overflow(ary_size(a), times, &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
             r = mrb_ary_new_capa(M, total);
             if (total > 0) for (mrb_int i = 0; i < times; i++) mrb_ary_concat(M, r, a);
           }
@@ -542,6 +549,44 @@ class CodeGen
 
   # int_div and flo_div with no Complex or Rational operand (the caller selects this form only when those gems'
   # macros are unset); any other receiver class answers `/` nowhere, which is what the dispatch raised.
+  # `%` (ADR 0367): Integer#% and Float#% are the exported whole bodies, so the helper calls them for an Integer or a
+  # Float receiver. Sound when those two are the only `%` definers that reach Integer or Float: no Ruby, module or
+  # singleton definer, and the only foreign one is String#% (mruby-sprintf), which the helper never calls for a
+  # receiver it does not own. The C symbols are the patch's, so a tree without it fails to link, not silently.
+  def numeric_slow_mod_direct?
+    return @numeric_slow_mod_direct if defined?(@numeric_slow_mod_direct)
+
+    @numeric_slow_mod_direct = numeric_slow_mod_proof
+  end
+
+  def numeric_slow_mod_proof
+    return false unless numeric_slow_closed_world? && numeric_slow_collection_ready?('%')
+    return false unless %w[Integer Float].all? { |name| @closed_world.core_constant_plain?(name, global_only: true) }
+
+    definers = call_facts_answers.definers('%')
+    return false if definers.nil? || definers[:singleton] || !definers[:class_native].empty?
+    return false unless definers[:ruby].empty? && definers[:modules].empty?
+    return false unless definers[:native].to_a.sort == %w[Float Integer]
+
+    definers[:foreign].subset?(Set['String'])
+  end
+
+  def numeric_slow_closed_mod_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+        if (bc2cpp_slow_int_p(a)) r = mrb_int_mod_impl(M, a, b);
+      #ifndef MRB_NO_FLOAT
+        else if (mrb_float_p(a)) r = mrb_flo_mod_impl(M, a, b);
+      #endif
+        else return mrb_funcall(M, a, "%", 1, b);
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
   def numeric_slow_closed_div_source(head)
     <<~CPP
       #{head}, mrb_value b) {

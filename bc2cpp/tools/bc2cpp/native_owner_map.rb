@@ -28,23 +28,28 @@ module NativeOwnerMap
     'nil_class' => 'NilClass', 'symbol_class' => 'Symbol', 'kernel_module' => 'Kernel'
   }.freeze
 
-  # Registration families. `name` and `owner` are argument indexes (the first is the mrb state);
-  # `suffix` is how the owner is recorded: nil for the instance table, '.singleton' for the
-  # class-object table, :both for a module_function (instance and class table).
+  # mrb_state fields that hold an instance rather than a class. The singleton of `mrb->top_self` is the main object's
+  # only: it is attributed to the instance's class, Object, with no singleton suffix. That is conservative: an exact
+  # Object arm then sees a native definition and is refused, which an exact arm needs for the main object anyway.
+  INSTANCE_FIELD_OWNERS = { 'top_self' => 'Object' }.freeze
+
+  # Registration families. `name`, `owner` and `fn` (the C function, where the family takes one) are argument indexes
+  # (the first is the mrb state); `suffix` is how the owner is recorded: nil for the instance table, '.singleton' for
+  # the class-object table, :both for a module_function (instance and class table).
   FAMILIES = {
-    'define_method' => { name: 2, owner: 1, suffix: nil },
-    'define_method_id' => { name: 2, owner: 1, suffix: nil },
+    'define_method' => { name: 2, owner: 1, suffix: nil, fn: 3 },
+    'define_method_id' => { name: 2, owner: 1, suffix: nil, fn: 3 },
     'define_method_raw' => { name: 2, owner: 1, suffix: nil },
-    'define_private_method' => { name: 2, owner: 1, suffix: nil },
-    'define_private_method_id' => { name: 2, owner: 1, suffix: nil },
-    'define_class_method' => { name: 2, owner: 1, suffix: '.singleton' },
-    'define_class_method_id' => { name: 2, owner: 1, suffix: '.singleton' },
-    'define_singleton_method' => { name: 2, owner: 1, suffix: '.singleton' },
-    'define_singleton_method_id' => { name: 2, owner: 1, suffix: '.singleton' },
-    'define_module_function' => { name: 2, owner: 1, suffix: :both },
-    'define_module_function_id' => { name: 2, owner: 1, suffix: :both },
-    'define_alias' => { name: 2, owner: 1, suffix: nil },
-    'define_alias_id' => { name: 2, owner: 1, suffix: nil },
+    'define_private_method' => { name: 2, owner: 1, suffix: nil, fn: 3 },
+    'define_private_method_id' => { name: 2, owner: 1, suffix: nil, fn: 3 },
+    'define_class_method' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
+    'define_class_method_id' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
+    'define_singleton_method' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
+    'define_singleton_method_id' => { name: 2, owner: 1, suffix: '.singleton', fn: 3 },
+    'define_module_function' => { name: 2, owner: 1, suffix: :both, fn: 3 },
+    'define_module_function_id' => { name: 2, owner: 1, suffix: :both, fn: 3 },
+    'define_alias' => { name: 2, owner: 1, suffix: nil, alias_of: 3 },
+    'define_alias_id' => { name: 2, owner: 1, suffix: nil, alias_of: 3 },
     'alias_method' => { name: 2, owner: 1, suffix: nil },
     'undef_method' => { name: 2, owner: 1, suffix: nil },
     'undef_method_id' => { name: 2, owner: 1, suffix: nil },
@@ -73,7 +78,7 @@ module NativeOwnerMap
   # owner is not a known class: the core's API forwarders and reflection primitives install a name the
   # Ruby program or a caller supplies, which the Ruby side's closed world already treats as a dynamic
   # install (unknown_defs). `verdict` refuses them unless the caller trusts that (core_dynamic_trusted:).
-  Result = Struct.new(:by_name, :computed, :computed_unknown, :core_dynamic_unknown, :refusals, :calls,
+  Result = Struct.new(:by_name, :computed, :computed_unknown, :core_dynamic_unknown, :refusals, :calls, :registrations, :aliases,
                       keyword_init: true)
 
   module_function
@@ -134,7 +139,7 @@ module NativeOwnerMap
   # defines; anything else is UNKNOWN.
   def owner_of(arg, vars)
     return vars[arg] || UNKNOWN if arg.match?(/\A\w+\z/)
-    return CORE_FIELD_OWNERS.fetch(Regexp.last_match(1), UNKNOWN) if arg.match(/\Amrb->(\w+)\z/)
+    return CORE_FIELD_OWNERS.fetch(Regexp.last_match(1)) { INSTANCE_FIELD_OWNERS.fetch(Regexp.last_match(1), UNKNOWN) } if arg.match(/\Amrb->(\w+)\z/)
     return unescape_c_string(Regexp.last_match(1)) if arg.match(CLASS_GET_RE)
     return Regexp.last_match(1) if arg.match(CLASS_GET_ID_RE)
     return unescape_c_string(Regexp.last_match(1)) if arg.match(DEFINE_CLASS_RE)
@@ -242,7 +247,7 @@ module NativeOwnerMap
   end
 
   def build(paths)
-    result = Result.new(by_name: Hash.new { |h, k| h[k] = Set.new }, computed: Set.new,
+    result = Result.new(by_name: Hash.new { |h, k| h[k] = Set.new }, computed: Set.new, registrations: [], aliases: [],
                         computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0)
     Array(paths).each do |path|
       text = NativeDirect.strip_comments(File.binread(path).force_encoding('UTF-8'))
@@ -270,7 +275,10 @@ module NativeOwnerMap
         end
         result.calls += 1
         owner = owner_of(args.fetch(spec[:owner], ''), vars_at.call(match.begin(0)))
-        owners = if spec[:suffix] == :both
+        instance = args.fetch(spec[:owner], '').strip == 'mrb->top_self'
+        owners = if instance
+                   [owner]
+                 elsif spec[:suffix] == :both
                    [owner, owner == UNKNOWN ? UNKNOWN : "#{owner}.singleton"]
                  elsif spec[:suffix] && owner != UNKNOWN
                    ["#{owner}#{spec[:suffix]}"]
@@ -278,6 +286,15 @@ module NativeOwnerMap
                    [owner]
                  end
         name = name_of(args.fetch(spec[:name], ''))
+        if spec[:alias_of] && name && !owners.include?(UNKNOWN)
+          original = name_of(args.fetch(spec[:alias_of], ''))
+          owners.each { |registered| result.aliases << [registered, name, original] } if original
+        end
+        if spec[:fn] && name && !owners.include?(UNKNOWN)
+          # `&f` is the address of the function `f`: the same body as `f` (mrb_define_method(..., &match_data_to_s, ...)).
+          fn = args.fetch(spec[:fn], '').strip.delete_prefix('&').strip
+          owners.each { |registered| result.registrations << [registered, name, fn.match?(/\A\w+\z/) ? fn : nil] }
+        end
         if name.nil?
           result.computed.merge(owners)
           if owners.include?(UNKNOWN)
@@ -297,12 +314,18 @@ module NativeOwnerMap
   # ROM method tables (MRB_MT_ENTRY in a `mrb_mt_entry NAME[] = { ... }` block) take the owner of the
   # MRB_MT_INIT_ROM / mrb_mt_init_rom call that installs NAME in the same file. Any entry outside such
   # a block, or whose table has no installer in this file, is UNKNOWN.
+  # The class a MRB_MT_INIT_ROM installs its table on: NativeRomOwners reads the variable's binding in the same function
+  # (define_class, a core field, a naming call), which covers the chained `mrb->x_class = x = mrb_define_class...` form.
+  def rom_installer_owner(text, pos, arg)
+    NativeRomOwners.owner_of(text, pos, arg.strip)
+  end
+
   def scan_rom_tables(text, vars_at, result)
     installers = Hash.new { |h, k| h[k] = Set.new }
     text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom)\s*\(/) do
       match = Regexp.last_match
       args, = call_args(text, match.end(0) - 1)
-      installers[args[2]] << owner_of(args[1].to_s, vars_at.call(match.begin(0))) if args && args.size >= 3
+      installers[args[2]] << rom_installer_owner(text, match.begin(0), args[1].to_s) if args && args.size >= 3
     end
     attributed = []
     text.scan(ROM_TABLE_RE) do
@@ -343,3 +366,6 @@ module NativeOwnerMap
     [:proven]
   end
 end
+
+# Loaded last: NativeRomOwners reads NativeOwnerMap's constants when it loads.
+require_relative 'native_rom_owners'

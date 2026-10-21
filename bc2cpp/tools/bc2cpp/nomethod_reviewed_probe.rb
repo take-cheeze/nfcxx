@@ -15,11 +15,9 @@ require_relative 'strict_hints'
 module NomethodReviewedProbe
   # The closed build's gem list: build_config.rb's rpg_maker_gems for
   # conf.name == 'closed' (single-format, with mruby-compiler), the compiled
-  # gems, and every add_dependency they pull in.
-  CLOSED_CORE_GEMS = %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-numeric-ext mruby-range-ext
-                        mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random mruby-math mruby-time
-                        mruby-bigint mruby-compiler mruby-pack mruby-string-ext mruby-struct mruby-metaprog
-                        mruby-enumerator].freeze
+  # gems, and every add_dependency they pull in. Derived by
+  # bc2cpp_closed_core_gems (compiled_gems.rb); order is not significant.
+  CLOSED_CORE_GEMS = bc2cpp_closed_core_gems.freeze
 
   module_function
 

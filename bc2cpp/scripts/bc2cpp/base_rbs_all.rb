@@ -16,6 +16,7 @@ require 'set'
 require 'optparse'
 require_relative 'base_rbs'
 require_relative 'base_rbs_native'
+require_relative '../../tools/bc2cpp/compiled_gems'
 
 module BaseRbsAll
   ROOT = File.expand_path('../..', __dir__)
@@ -80,21 +81,49 @@ module BaseRbsAll
   # out of its compiled set (compiled_gems.rb, BC2CPP_CORE_MRBLIB_EXCLUDED), so only the declarations describe it.
   CORE_RUBY = ['3rd/mruby/mrblib/10error.rb'].freeze
 
+  # The analysis overlay (analysis_headers.rb): its presym IDs cover every symbol the closed world's native sources name,
+  # so it goes ahead of the closed build's own include directory.
+  def analysis_flags(closed_build)
+    dir = File.join(closed_build, 'analysis', 'include')
+    File.directory?(dir) ? ["-I#{dir}"] : []
+  end
+
   def core_flags(closed_build)
     base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
-    closed_build ? base + ["-I#{closed_build}/include"] : base
+    base << '-DMRB_USE_BIGINT' # the closed build defines it on its compile lines, so the bodies match what is built
+    return base unless closed_build
+
+    analysis_flags(closed_build) + base + ["-I#{closed_build}/include"]
   end
 
   def flags_for(gem_dir, closed_build)
     name = File.basename(gem_dir)
     base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
+    base << '-DMRB_USE_BIGINT'
     base << "-I#{File.join(gem_dir, 'include')}"
     base += gem_includes(gem_dir).map { |dir| "-I#{dir}" }
     if closed_build
+      base = analysis_flags(closed_build) + base
       base << "-I#{closed_build}/include"
       base << "-I#{closed_build}/mrbgems/#{name}"
     end
     base
+  end
+
+  # The native sources the closed world reads (the list coverage_report.rb hands bc2cpp as NATIVE_SRCS), without test
+  # directories: a gem's test programs are not compiled into anything, and they name headers no build provides.
+  def closed_native_sources
+    srcs = bc2cpp_rgss_native_srcs(ROOT, 'closed') + core_native_srcs(MRUBY_ROOT) + external_gem_native_srcs(ROOT)
+    srcs.uniq.reject { |path| path.split('/').include?('test') }.sort
+  end
+
+  # The include flags for one native source: its gem's own (flags_for), or the core library's (core_flags) for the
+  # sources under 3rd/mruby/src. The gem is the directory above the source's src/ or core/ folder.
+  def source_flags(path, closed_build)
+    gem_dir = path[%r{\A(.*)/(?:src|core)/}, 1]
+    return core_flags(closed_build) if gem_dir.nil? || gem_dir == MRUBY_ROOT
+
+    flags_for(gem_dir, closed_build)
   end
 
   def run(out_dir, closed_build, jobs: BaseRbsWorkers::DEFAULT_JOBS)

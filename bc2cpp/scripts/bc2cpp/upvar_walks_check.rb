@@ -124,6 +124,28 @@ with_ireps.call(<<~RUBY) do |ireps, _top, gen|
     end
   end
 RUBY
+  state_keys = CodeGen::METHOD_COMPILE_STATE.keys
+  original = state_keys.map { |ivar| gen.instance_variable_get(ivar) }
+  sentinels = state_keys.map { Object.new }
+  state_keys.zip(sentinels).each { |ivar, value| gen.instance_variable_set(ivar, value) }
+  begin
+    begin
+      gen.with_fresh_method_state do
+        check.call('probe starts with every method-state default',
+                   CodeGen::METHOD_COMPILE_STATE.all? { |ivar, value| gen.instance_variable_get(ivar) == value })
+        gen.instance_variable_set(:@ir_inline_remaining, 17)
+        gen.with_fresh_method_state { gen.instance_variable_set(:@ir_inline_remaining, 3) }
+        check.call('nested probe restores its immediate caller', gen.instance_variable_get(:@ir_inline_remaining) == 17)
+        raise RuntimeError, 'probe restoration test'
+      end
+    rescue RuntimeError => error
+      raise unless error.message == 'probe restoration test'
+    end
+    check.call('exception restores all caller state objects',
+               state_keys.each_with_index.all? { |ivar, index| gen.instance_variable_get(ivar).equal?(sentinels[index]) })
+  ensure
+    state_keys.zip(original).each { |ivar, value| gen.instance_variable_set(ivar, value) }
+  end
   registry = gen.instance_variable_get(:@registry)
   baseline = CodeGen.new(ireps, registry, {})
   baseline.instance_variable_set(:@block_capture_index, nil)
@@ -134,6 +156,61 @@ RUBY
                gen.compiles_clean?(definition.irep) == baseline.compiles_clean?(definition.irep))
   end
   check.call('capture indexing preserves generated code after probes', gen.compile_all == baseline.compile_all)
+end
+
+# Probe-only text optimization must leave both eligibility and the eventual real emission unchanged.
+with_ireps.call(<<~RUBY) do |ireps, _top, gen|
+  class ProbeRegisterFlow
+    def initialize; @count = 1; end
+    def copy(value); unused = 2; copied = value; copied; end
+    def nested(value); copy(value); end
+    def dynamic; eval('1'); end
+  end
+RUBY
+  registry = gen.instance_variable_get(:@registry)
+  original_mode = ENV['BC2CPP_PROBE_REGISTER_FLOW']
+  begin
+    %i[ordinary error audit specialized].each do |scenario|
+      results = %w[0 1].map do |mode|
+        ENV['BC2CPP_PROBE_REGISTER_FLOW'] = mode
+        candidate = CodeGen.new(ireps, registry, {})
+        case scenario
+        when :error
+          candidate.singleton_class.prepend(Module.new do
+            def compile_insn(insn, *rest)
+              text = super
+              insn.op == 'RETURN' ? "  r1 = /* #error probe sentinel */ 0;\n" + text : text
+            end
+          end)
+        when :audit
+          candidate.singleton_class.prepend(Module.new do
+            def compile_insn(insn, *rest)
+              text = super
+              @runtime_installed_names = Set.new
+              text
+            end
+          end)
+        when :specialized
+          candidate.define_singleton_method(:entry_specialize_enabled?) { true }
+          candidate.define_singleton_method(:entry_specialize_plan) { {} }
+        end
+        calls = 0
+        trace = TracePoint.new(:call) do |event|
+          calls += 1 if event.defined_class == RegisterFlow.singleton_class && event.method_id == :optimize
+        end
+        answers = trace.enable do
+          registry.values.flatten.filter_map { |definition| [definition.irep, candidate.compiles_clean?(definition.irep)] if definition.irep }
+        end
+        [answers, calls, candidate.compile_all]
+      end
+      check.call("probe text shortcut preserves clean decisions (#{scenario})", results[0][0] == results[1][0])
+      check.call("probe text shortcut preserves final emitted code (#{scenario})", results[0][2] == results[1][2])
+      check.call("probe text shortcut #{scenario == :ordinary ? 'avoids discarded passes' : "retains #{scenario} passes"}",
+                 scenario == :ordinary ? results[1][1] < results[0][1] : results[0][1] == results[1][1])
+    end
+  ensure
+    ENV['BC2CPP_PROBE_REGISTER_FLOW'] = original_mode
+  end
 end
 
 puts '-- depth bound (MAX_UPVAR_NEST_DEPTH)'

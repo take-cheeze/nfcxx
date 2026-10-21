@@ -192,6 +192,8 @@ module NumericFlow
     return nil unless table.supported
 
     c = Ctx.for_run(irep, oracle, opaque_regs, writes, program.rescue_only_targets)
+    c.load_readers = table.load_readers if c.elide_load_copies
+    c.widened_slots = Array.new(c.nslots) if ENV['BC2CPP_NUMERIC_SLOT_UNIONS'] != '0'
     steps = table.steps
     nregs = c.nregs
     entry = Array.new(nregs, OTHER)
@@ -345,7 +347,7 @@ module NumericFlow
   Step = Struct.new(:op, :kind, :call, :silent, :branch, :a, :b, :ivar, :goto, :sym)
 
   # The flow's per-Program table: whether every op is modelled, and the Step of each instruction (nil when not).
-  Table = Struct.new(:supported, :steps)
+  Table = Struct.new(:supported, :steps, :load_readers)
 
   # NumericFlow's Step table for +program+, derived once from the program's facts and kept in the program's one
   # analysis slot (BytecodeIR::Program#numeric_flow_table). It holds bytecode facts only, never an oracle answer.
@@ -356,7 +358,14 @@ module NumericFlow
       decoded = program.decoded if supported
       operands = program.operands if supported
       steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index], operands[i.index]).freeze }.freeze if supported)
-      Table.new(supported, steps).freeze
+      readers = {}
+      steps&.each do |step|
+        next unless step.kind == K_MOVE && step.a != step.b
+
+        (readers[step.b] ||= []) << step.a
+      end
+      readers.transform_values! { |registers| registers.uniq.freeze }
+      Table.new(supported, steps, readers.freeze).freeze
     end
   end
 
@@ -402,7 +411,7 @@ module NumericFlow
     attr_reader :irep, :oracle, :opaque, :opq, :nregs, :slots, :nslots, :slot_of, :facts, :pb, :tb, :writes,
                 :tests, :test_ids, :const_quiet, :rescue_only, :context_edges, :self_mask, :block_send, :super_mask,
                 :preserves, :loadself, :keyword_mask, :keyword_presence, :array_mask, :hash_mask, :index_mask,
-                :aref_mask, :literal_class, :false_class, :class_eq_test, :note_class_test, :noreturn
+                :aref_mask, :literal_class, :false_class, :class_eq_test, :note_class_test, :noreturn, :elide_load_copies
 
     # The run of NumericFlow.states, asking the oracle what the old setup asked, in the same order.
     def self.for_run(irep, oracle, opaque, writes, rescue_only)
@@ -412,6 +421,7 @@ module NumericFlow
       facts = slots.map { |name| oracle.ivar_fact_mask(irep, name) }
       # Provenance follows the ivar slots and the element block (one entry per register, ELEM_UNKNOWN in states).
       c = new(irep, oracle, opaque, nregs, slots, slot_of, facts, nregs + slots.size + nregs, writes)
+      c.elide_load_copies = ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] != '0'
       c.elem_base = nregs + slots.size
       # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
       # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
@@ -437,8 +447,11 @@ module NumericFlow
     # The element block starts right after the ivar slots (one entry per register; see states).
     # Where the element block starts; nil for a ctx built from a Hash, whose layout has no element block.
     attr_accessor :elem_base
+    attr_accessor :load_readers, :widened_slots
+    attr_writer :elide_load_copies
 
     def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
+      @elide_load_copies = false
       @irep = irep
       @oracle = oracle
       @opaque = opaque
@@ -802,6 +815,17 @@ module NumericFlow
     a = step.a
     return state if a.nil? || a >= nregs
 
+    if c.elide_load_copies
+      case kind
+      when K_LOADI then return copy_reg_write(state, a, INT, c)
+      when K_LOADNIL then return copy_reg_write(state, a, NIL, c)
+      when K_STRING then return copy_reg_write(state, a, STR, c)
+      when K_LOADSELF then return copy_reg_write(state, a, c.loadself ? c.oracle.loadself_mask : OTHER, c)
+      when K_LOADL then return copy_reg_write(state, a, c.oracle.pool_mask(c.irep, insn), c)
+      when K_LITERAL then return copy_reg_write(state, a, literal_class_mask(insn, c), c)
+      end
+    end
+
     out = state.dup
     oracle = c.oracle
     irep = c.irep
@@ -917,6 +941,53 @@ module NumericFlow
     out
   end
 
+  # Equal class masks alone are insufficient: rewriting a value still invalidates aliases and tests.
+  def copy_reg_write(state, r, mask, c)
+    value = c.opq[r] ? OTHER : mask
+    if unchanged_reg_write?(state, r, value, c)
+      writes = c.writes
+      writes[r] = (writes[r] || 0) | value if writes
+      return state
+    end
+
+    out = state.dup
+    set_reg(out, r, mask, c)
+    out
+  end
+
+  def unchanged_reg_write?(state, r, value, c)
+    return false unless state[r].eql?(value) && state[c.pb + r].eql?(0)
+    return false if c.elem_base && !state[c.elem_base + r].eql?(ELEM_UNKNOWN)
+    return false if c.tb && !state[c.tb + r].eql?(0)
+
+    code = c.nslots + 1 + r
+    if c.load_readers
+      # Only MOVE installs a register provenance code in flow-created states.
+      c.load_readers.fetch(r, EMPTY).each do |reader|
+        return false if reader < c.nregs && state[c.pb + reader] == code
+      end
+    else
+      q = c.pb
+      last = q + c.nregs
+      while q < last
+        return false if state[q] == code
+
+        q += 1
+      end
+    end
+    if c.tb && !c.tests.empty?
+      q = c.tb
+      last = q + c.nregs
+      while q < last
+        id = state[q]
+        return false if id.positive? && c.tests.fetch(id - 1)[0].include?(code)
+
+        q += 1
+      end
+    end
+    true
+  end
+
   # Register +r+ (below nregs) now holds +mask+ (OTHER when a block captures it): nothing mirrors its old value any more.
   def set_reg(out, r, mask, c)
     value = c.opq[r] ? OTHER : mask
@@ -986,8 +1057,15 @@ module NumericFlow
     nregs = c.nregs
     k = 0
     facts = c.facts
+    widened = c.widened_slots
     while k < facts.size
-      out[nregs + k] |= facts[k]
+      value = out[nregs + k]
+      # Slot facts are fixed for a run; its last widened mask is already a fixed point of this union.
+      unless widened && value.is_a?(Integer) && (value.eql?(facts[k]) || value.eql?(widened[k]))
+        value |= facts[k]
+        out[nregs + k] = value
+        widened[k] = value if widened
+      end
       k += 1
     end
     pb = c.pb

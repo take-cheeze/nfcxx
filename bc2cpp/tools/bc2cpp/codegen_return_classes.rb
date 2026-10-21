@@ -342,7 +342,7 @@ class CodeGen
 
   # Sends that run a method body with a receiver other than the one it was found on. A body reached through an
   # UnboundMethod, or defined from a Method object, is not owned by one class any more.
-  POOL_SELF_REBINDING_SENDS = %w[instance_method public_instance_method bind bind_call unbind define_method].freeze
+  POOL_SELF_REBINDING_SENDS = %w[instance_method bind bind_call unbind define_method].freeze
 
   def pool_self_class_enabled?
     pool_self_class_refusal.nil?

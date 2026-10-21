@@ -48,7 +48,17 @@ module CoreExactDirect
   end
 
   TO_ENUM_DIRECT_NOTE = '// TO_ENUM_DIRECT :'
-  TO_ENUM_DIRECT_CLASSES = %w[Array Hash Range String].freeze
+  # The classes whose mruby core mrblib methods `return to_enum(` (3rd/mruby/mrblib, read at load time). Integer is
+  # named out: its to_enum bodies are not CORE_SELF_EXACT receivers (ADR 0381, ADR 0418).
+  TO_ENUM_DIRECT_CLASSES = begin
+    dir = File.expand_path('../../3rd/mruby/mrblib', __dir__)
+    raise "bc2cpp: #{dir} is missing (is 3rd/mruby checked out?)" unless Dir.exist?(dir)
+
+    Dir[File.join(dir, '*.rb')].sort.flat_map do |path|
+      File.read(path, encoding: 'UTF-8').scan(/^class (\w+)\n(.*?)^end$/m)
+          .select { |_name, body| body.include?('return to_enum(') }.map(&:first)
+    end.uniq.reject { |name| name == 'Integer' }.freeze
+  end
 
   # TO_ENUM_DIRECT (ADR 0418): `to_enum(:meth, *args)` / `enum_for` on a receiver proven exactly an Array, Hash, Range or
   # String builds the Enumerator the way Kernel#to_enum's body does, `Enumerator.new self, meth, *args`, without looking

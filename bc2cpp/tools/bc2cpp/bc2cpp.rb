@@ -28,6 +28,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
 require_relative 'registry'
+require_relative 'native_return_classes'
 require_relative 'lint_crosscheck'
 require_relative 'native_names'
 require_relative 'native_ivar_scopes'
@@ -95,6 +96,7 @@ require_relative 'codegen_array_new_inline'
 require_relative 'codegen_fixnum_proof'
 require_relative 'codegen_numeric_proof'
 require_relative 'codegen_numeric_args'
+require_relative 'codegen_param_fold'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
@@ -309,6 +311,8 @@ if $PROGRAM_NAME == __FILE__
     native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
     # NATIVE_OWNER_MAP (ADR 0397): every native source, not only those with a literal name registration.
     CodeGen.native_source_paths = native_paths
+    # NATIVE_RETURN_CLASSES (option B): empty unless BC2CPP_NATIVE_FN_KINDS names the native function kinds.
+    CodeGen.native_return_classes = NativeReturnClasses.table_for_env(native_paths)
     native_expression_devirt = NativeExpressionDevirt.analyze(native_paths)
     native_registered_expressions = NativeExpressionDevirt.analyze_exact_class_expressions(native_paths)
     warn "== generated native C-expression devirtualizations (#{native_expression_devirt.size}) =="
@@ -572,7 +576,8 @@ if $PROGRAM_NAME == __FILE__
   inferred_constant_classes = profile_call.call('single-assignment value constants') do
     infer_constructed_constant_classes(ireps, constant_assignment_sites, registry, container_constants, closed_world,
                                        native_name_sources: native_name_sources, included_modules: included_modules,
-                                       prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+                                       prepended_modules: prepended_modules, unknown_mixins: unknown_mixins,
+                                       class_decls: class_decls)
   end
   container_constants.merge!(inferred_constant_classes)
   warn "== single-assignment constructed constants (CLOSED_WORLD_VALUE_CONSTANT): #{inferred_constant_classes.size} =="
@@ -597,6 +602,18 @@ if $PROGRAM_NAME == __FILE__
       ireps, sites: constant_assignment_sites,
              poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
                        IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq),
+             operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes.map(&:to_sym).to_set
+    )
+  end
+  # Report only (CLASS_INTEGER_PROOF): the class rows get their own run, whose poison leaves out the foreign literal
+  # definitions and the bit-operator definitions the IR already binds (IntegerConstants.foreign_class_poison). The value
+  # run above keeps foreign_const_names, so codegen reads only what it read before.
+  ir_paths = ireps.each_value.filter_map { |irep| irep.file && File.expand_path(irep.file) }.to_set
+  class_facts = profile_call.call('BytecodeIR::ConstantFacts.analyze (class)') do
+    BytecodeIR::ConstantFacts.analyze(
+      ireps, sites: constant_assignment_sites,
+             poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
+                       IntegerConstants.foreign_class_poison((foreign_ruby_srcs + outside_ruby).uniq, ir_paths),
              operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes.map(&:to_sym).to_set
     )
   end
@@ -1225,7 +1242,7 @@ if $PROGRAM_NAME == __FILE__
       # Report only (CLASS_INTEGER_PROOF, ADR 0501 stage 4): codegen never reads it, so a build without BC2CPP_TYPE_FACTS is
       # unchanged. IntegerConstants.class_admitted is the oracle the constant typing check compares against.
       integer_class_constants: if closed_world.constants_static?
-                                 constant_facts.integer_class_names
+                                 class_facts.integer_class_names
                                else
                                  Set.new
                                end
@@ -1424,6 +1441,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
   puts '#include <mruby/array.h>'
+  puts '#include "mrb_array_access.hxx"'
   puts '#include <mruby/class.h>'
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'

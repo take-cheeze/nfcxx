@@ -61,7 +61,7 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
 # (core_compiled_mrblib_srcs), or the compiled body would replace a method of a
 # class that is never loaded.
 BC2CPP_CORE_MRBLIB_GEMS = %w[
-  mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-numeric-ext mruby-range-ext mruby-string-ext
+  mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-numeric-ext mruby-range-ext mruby-symbol-ext mruby-string-ext
   mruby-sprintf mruby-struct mruby-io mruby-dir mruby-enumerator
 ].freeze
 # Core mrblib files that stay outside the world (foreign sources):
@@ -90,12 +90,13 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
 BC2CPP_CORE_OWNERS = %w[
-  Array Comparable Dir Dir.singleton Enumerable Enumerator Enumerator::Enumerator.singleton Enumerator::Generator
+  Array Comparable Dir Dir.singleton Enumerable Enumerator Enumerator::Generator
   Enumerator::Yielder File File.singleton Float Hash IO IO.singleton Integer Kernel Numeric
   OnigMatchData OnigRegexp OnigRegexp.singleton Range String StringIO StringIO.singleton Struct Symbol
 ].freeze
 BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
+require 'prism'
 require_relative '../rgss_tts_config'
 
 BC2CPP_COMPILED_GEMS = {
@@ -248,7 +249,7 @@ BC2CPP_COMPILED_GEMS = {
 def core_native_srcs(mruby_root)
   Dir["#{mruby_root}/src/*.c"] +
     Dir["#{mruby_root}/mrbgems/mruby-{array-ext,hash-ext,enum-ext,io,dir," \
-        'numeric-ext,range-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint,' \
+        'numeric-ext,range-ext,symbol-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint,' \
         "binding,eval,metaprog,method,pack,proc-ext,string-ext,struct}/**/*.c"]
 end
 
@@ -402,6 +403,172 @@ def bc2cpp_build_config_closed_world_gems(text)
 end
 
 BC2CPP_CLOSED_WORLD_GEMS = bc2cpp_build_config_closed_world_gems(bc2cpp_build_config_text).freeze
+
+BC2CPP_GEMS_ROOT = File.expand_path('../..', __dir__)
+
+# CLOSED_CORE_GEMS (nomethod_reviewed_probe.rb) is derived, not listed: the core gems the closed build loads. Inputs are
+# rpg_maker_gems' conf.gem lines for 'closed' (build_config.rb, as a Prism AST), the compiled gems, and each reached
+# gem's non-test add_dependency edges, transitively. Every condition is evaluated or raises; nothing is guessed.
+def bc2cpp_find_def(node, name)
+  return node if node.is_a?(Prism::DefNode) && node.name == name
+
+  node.compact_child_nodes.each do |child|
+    found = bc2cpp_find_def(child, name)
+    return found if found
+  end
+  nil
+end
+
+def bc2cpp_gem_call_in?(node)
+  return true if node.is_a?(Prism::CallNode) && node.name == :gem
+
+  node.compact_child_nodes.any? { |child| bc2cpp_gem_call_in?(child) }
+end
+
+# A condition of rpg_maker_gems for build `name`: `locals` maps a local to its value node, or to a plain value
+# (bc2cpp, which the caller sets). Any shape not listed raises, so a misread condition cannot select gems silently.
+def bc2cpp_rpg_maker_pred(node, name, locals)
+  case node
+  when Prism::ParenthesesNode
+    bc2cpp_rpg_maker_pred(node.body.body.first, name, locals)
+  when Prism::AndNode
+    bc2cpp_rpg_maker_pred(node.left, name, locals) && bc2cpp_rpg_maker_pred(node.right, name, locals)
+  when Prism::LocalVariableReadNode
+    value = locals.fetch(node.name) { raise "bc2cpp: rpg_maker_gems reads unknown local #{node.name}" }
+    value.is_a?(Prism::Node) ? bc2cpp_rpg_maker_pred(value, name, locals) : value
+  when Prism::CallNode
+    receiver = node.receiver
+    arg = node.arguments&.arguments&.first
+    includes_build_name = node.name == :include? && receiver.is_a?(Prism::ArrayNode) &&
+                          arg.is_a?(Prism::CallNode) && arg.name == :name
+    if includes_build_name
+      receiver.elements.map(&:unescaped).include?(name)
+    elsif %i[== !=].include?(node.name) && receiver.is_a?(Prism::CallNode) && receiver.name == :name
+      (name == node.arguments.arguments.first.unescaped) == (node.name == :==)
+    else
+      raise "bc2cpp: unsupported rpg_maker_gems condition call #{node.name}"
+    end
+  else
+    raise "bc2cpp: unsupported rpg_maker_gems condition #{node.class}"
+  end
+end
+
+# The conf.gem lines of rpg_maker_gems that build `name` gets, as { gem name => dir } in source order.
+# bc2cpp is off here: the compiled gems come from BC2CPP_COMPILED_GEMS, the caller's list.
+def bc2cpp_rpg_maker_gem_lines(text, name, root)
+  defn = bc2cpp_find_def(Prism.parse(text).value, :rpg_maker_gems)
+  raise "bc2cpp: no rpg_maker_gems definition in #{BC2CPP_BUILD_CONFIG}" unless defn
+
+  locals = {}
+  (defn.body&.body || []).each { |s| locals[s.name] = s.value if s.is_a?(Prism::LocalVariableWriteNode) }
+  locals[:bc2cpp] = false
+  out = {}
+  walk = lambda do |stmts|
+    stmts&.body&.each do |s|
+      if s.is_a?(Prism::IfNode) || s.is_a?(Prism::UnlessNode)
+        next unless bc2cpp_gem_call_in?(s)
+
+        if s.is_a?(Prism::IfNode)
+          sub = s.subsequent
+          raise 'bc2cpp: elsif in rpg_maker_gems is unsupported' if sub.is_a?(Prism::IfNode)
+
+          walk.call(bc2cpp_rpg_maker_pred(s.predicate, name, locals) ? s.statements : sub&.statements)
+        else
+          walk.call(bc2cpp_rpg_maker_pred(s.predicate, name, locals) ? s.else_clause&.statements : s.statements)
+        end
+      elsif s.is_a?(Prism::CallNode) && s.name == :gem && s.receiver.is_a?(Prism::LocalVariableReadNode) &&
+            s.receiver.name == :conf
+        arg = s.arguments.arguments.first
+        if arg.is_a?(Prism::KeywordHashNode)
+          core = arg.elements.find { |e| e.key.unescaped == 'core' }
+          raise 'bc2cpp: conf.gem core: without a name in rpg_maker_gems' unless core
+
+          out[core.value.unescaped] = File.join(root, '3rd/mruby/mrbgems', core.value.unescaped)
+        elsif arg.is_a?(Prism::InterpolatedStringNode)
+          text = arg.parts.map { |p| p.is_a?(Prism::EmbeddedStatementsNode) ? '3rd/mruby' : p.unescaped }.join
+          path = File.expand_path(text, root)
+          out[File.basename(path)] = path
+        else
+          raise "bc2cpp: unsupported conf.gem argument #{arg.class} in rpg_maker_gems"
+        end
+      end
+    end
+  end
+  walk.call(defn.body)
+  raise "bc2cpp: rpg_maker_gems yields no gem for build '#{name}'" if out.empty?
+
+  out
+end
+
+# The non-test add_dependency names of a mrbgem.rake. add_test_dependency is not built, so it is not followed.
+# A `Dir.exist?` modifier (mruby-marshal's metaprog) is evaluated, and an `unless %w[...].include?(build.name)`
+# modifier drops the gem for the closed build; any other modifier raises.
+def bc2cpp_rake_dependencies(dir, root)
+  rake = File.join(dir, 'mrbgem.rake')
+  raise "bc2cpp: #{rake} is missing; the closed-world gem closure is derived from it" unless File.file?(rake)
+
+  File.read(rake, encoding: 'UTF-8').each_line.filter_map do |line|
+    match = line.match(/^\s*(?:spec\.)?add_dependency[ (]\s*['"](mruby-[\w-]+)['"]/) or next
+    if (cond = line[/\bif\s+Dir\.exist\?\s+"\#\{MRUBY_ROOT\}\/mrbgems\/([\w-]+)"/, 1])
+      next unless File.directory?(File.join(root, '3rd/mruby/mrbgems', cond))
+    elsif (excluded = line[/\bunless\s+%w\[([^\]]*)\]\.include\?\(build\.name\)/, 1])
+      # The closure is always the closed build's, so a gem its list names is left out.
+      next if excluded.split.include?('closed')
+    elsif line.match?(/\b(?:if|unless)\b/)
+      raise "bc2cpp: unsupported add_dependency condition in #{rake}: #{line.strip}"
+    end
+    match[1]
+  end
+end
+
+def bc2cpp_gem_dir(name, root)
+  dirs = [File.join(root, '3rd/mruby/mrbgems', name), File.join(root, name), File.join(root, '3rd', name)]
+  dirs.find { |d| File.file?(File.join(d, 'mrbgem.rake')) } ||
+    raise("bc2cpp: no mrbgem.rake for #{name} (is its submodule initialised?)")
+end
+
+# { name => dir } of `roots` and everything they reach. `extra` adds the edges a rake builds in Ruby.
+def bc2cpp_gem_closure(roots, root, extra = {})
+  table = {}
+  queue = roots.to_a
+  until queue.empty?
+    name, dir = queue.shift
+    next if table.key?(name)
+
+    table[name] = dir
+    (bc2cpp_rake_dependencies(dir, root) + extra.fetch(name, [])).each do |dep|
+      queue << [dep, bc2cpp_gem_dir(dep, root)]
+    end
+  end
+  table
+end
+
+# mruby-core-compiled names its deps in two loops, not literal add_dependency lines. Both loops must be present,
+# so a rewritten loop raises here rather than drifting from this mirror. dir and onig count only if the build has them.
+def bc2cpp_core_compiled_edges(root, build_names)
+  text = File.read(File.join(root, 'mruby-core-compiled/mrbgem.rake'), encoding: 'UTF-8')
+  literal = text[/%w\[([^\]]+)\]\.each \{ \|gem_name\| add_dependency gem_name \}/, 1]
+  raise 'bc2cpp: mruby-core-compiled/mrbgem.rake lost its add_dependency loop' unless literal
+  unless text.include?('(BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).each do |gem_name|') &&
+         text.include?('next if %w[mruby-dir mruby-onig-regexp].include?(gem_name) && spec.build.gems.none?')
+    raise 'bc2cpp: mruby-core-compiled/mrbgem.rake lost its mrblib loop'
+  end
+
+  literal.split + (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).reject do |gem|
+    %w[mruby-dir mruby-onig-regexp].include?(gem) && !build_names.include?(gem)
+  end
+end
+
+# The core gems (3rd/mruby/mrbgems) the closed build loads. Its build_config conf.gem lines and compiled gems are roots.
+def bc2cpp_closed_core_gems(root = BC2CPP_GEMS_ROOT)
+  lines = bc2cpp_rpg_maker_gem_lines(bc2cpp_build_config_text, 'closed', root)
+  roots = lines.merge(BC2CPP_COMPILED_GEMS.keys.to_h { |g| [g, File.join(root, g)] })
+  edges = { 'mruby-core-compiled' => bc2cpp_core_compiled_edges(root, lines.keys) }
+  core = bc2cpp_gem_closure(roots, root, edges).select { |_, dir| dir.start_with?("#{root}/3rd/mruby/mrbgems/") }.keys
+  raise 'bc2cpp: the closed build derives no core gems' if core.empty?
+
+  core.freeze
+end
 # Each closed-world target's own native host sources (the firmware/executable).
 BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'closed' => 'app/wio/src',
                                   'psp' => 'app/psp' }.freeze
