@@ -17,6 +17,8 @@ module NativeReturnKinds
     Entry.new(/\bmrb_float_value\s*\(/, 'Float'),
     Entry.new(/\bmrb_(?:str_new|str_new_cstr|str_new_static|str_buf_new|str_dup|str_cat|str_substr|str_resize|str_plus|format)\w*\s*\(/,
               'String'),
+    # mrb_obj_as_string returns the object's to_s converted to a String (rb_any_to_s when to_s is not one).
+    Entry.new(/\bmrb_(?:sym_str|obj_as_string)\s*\(/, 'String'),
     Entry.new(/\bmrb_(?:ary_new|ary_new_capa|ary_new_from_values|ary_dup)\s*\(/, 'Array'),
     Entry.new(/\bmrb_(?:hash_new|hash_new_capa|hash_dup)\s*\(/, 'Hash'),
     Entry.new(/\bmrb_symbol_value\s*\(/, 'Symbol')
