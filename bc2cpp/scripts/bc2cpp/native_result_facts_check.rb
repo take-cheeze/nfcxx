@@ -561,7 +561,7 @@ if ENV['MRBC']
   code = generate.call(singleton_world, 'nr_instances')
   read = body_of_impl.call(code, 'NrUse_read')
   check.call('a receiver proven NrPane-or-NrPaneB ignores the singleton `width` of NrScreen: the fallback is the proven-dead nomethod',
-             read.include?('/* CLOSED_WORLD nomethod: recv.width */') && !read.include?('kept: singleton_definer'))
+             read.match?(%r{/\* CLOSED_WORLD nomethod: recv\.width @ \S+:\d+ \*/}) && !read.include?('kept: singleton_definer'))
   read = body_of_impl.call(code, 'NrUse_read_open')
   check.call('an unproven receiver could be NrScreen itself: the singleton definer keeps the dispatch',
              read.match?(/bc2cpp_owner_call\([^\n]*BC2CPP_OWNERS\([^\n]*"NrScreen\.singleton"/) && !read.include?('bc2cpp_nomethod'))
@@ -574,7 +574,7 @@ if ENV['MRBC']
     end
   RUBY
   check.call('a method_missing class elsewhere does not block a receiver proven not to be one',
-             body_of_impl.call(ghost, 'NrUse_read').include?('/* CLOSED_WORLD nomethod: recv.width */'))
+             body_of_impl.call(ghost, 'NrUse_read').match?(%r{/\* CLOSED_WORLD nomethod: recv\.width @ \S+:\d+ \*/}))
   check.call('but it still blocks the unproven receiver',
              !body_of_impl.call(ghost, 'NrUse_read_open').include?('bc2cpp_nomethod'))
 
