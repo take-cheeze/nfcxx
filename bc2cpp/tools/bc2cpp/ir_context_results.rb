@@ -417,11 +417,6 @@ class IrContextResults
     if private_bits.nonzero? && (receiver & ~private_bits).zero? && argc.zero?
       if insn.sym == 'freeze'
         return receiver if @gen.send(:frozen_table_name_safe?, 'freeze', klass.to_s)
-      elsif klass == :Array && %w[first last sample].include?(insn.sym) && @gen.send(:frozen_table_name_safe?, insn.sym, klass.to_s)
-        return each_shape_in(private_bits).reduce(0) do |joined, shape|
-          values = insn.sym == 'first' ? shape.elements.first : insn.sym == 'last' ? shape.elements.last : shape.elements.empty? ? NumericFlow::NIL : shape.elements.reduce(0, :|)
-          joined | (values || NumericFlow::NIL)
-        end
       end
     end
     expression = @gen.bytecode_ir_native_expression_classes(insn.sym, klass.to_s, argc)

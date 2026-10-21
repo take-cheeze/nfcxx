@@ -10,20 +10,19 @@
 #
 # `site` rows are instructions whose emitted code can still reach a by-name call; `operand` is 0 for the
 # receiver (arithmetic: 1 for the right operand) and `origin` is the join of the nearest defining
-# instructions of that register, with an element read shown as `elem<container origin>`. `store` rows are
+# instructions of that register, with an element read (GETIDX) shown as `idx<container origin>`. `store` rows are
 # element writes (`[]=`, `<<`, `push` ...) whose container is an ivar read; `value_class_set` is the numeric
 # flow's class set of the stored value ("unmodelled" when the method has no flow states).
 # scripts/bc2cpp/element_site_report.rb aggregates it.
 module ElementSiteReport
   DYNAMIC = /bc2cpp_send\(|bc2cpp_getidx0?\(|bc2cpp_setidx\(|mrb_funcall|bc2cpp_slow_|bc2cpp_eqq\(/
-  # Sends that return one element of their receiver.
-  ELEMENT_READS = %w[first last max min sample pop shift fetch at dig [] min_by max_by detect find].freeze
   ELEMENT_STORES = %w[<< push []= unshift insert append].freeze
   ARITHMETIC = %w[ADD SUB MUL DIV LT LE GT GE EQ].freeze
   ROWS = {}
 
   # Join of the defining instructions of +reg+ at +idx+ as short tags: entry, ivar:name, const, call:name,
-  # scall:name (implicit self), upvar, fresh_lit, idx<..> / name<..> (an element of the origin inside).
+  # scall:name (implicit self), upvar, fresh_lit, idx<..> (an element of the origin inside). A method
+  # call is opaque here, whatever its name: only the index opcodes read an element.
   def element_origin(irep, idx, reg, depth = 0)
     defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
     return ['refused'] unless defs
@@ -35,12 +34,7 @@ module ElementSiteReport
       case insn.op
       when 'GETIDX', 'GETIDX0'
         depth < 2 ? element_origin(irep, d.index, insn.reg, depth + 1).map { |o| "idx<#{o}>" } : ['idx<deep>']
-      when 'SEND', 'SEND0'
-        if ELEMENT_READS.include?(insn.sym) && insn.n_spec.to_i <= 1 && depth < 2
-          element_origin(irep, d.index, insn.reg, depth + 1).map { |o| "#{insn.sym}<#{o}>" }
-        else
-          ["call:#{insn.sym}"]
-        end
+      when 'SEND', 'SEND0' then ["call:#{insn.sym}"]
       when 'SSEND', 'SSEND0' then ["scall:#{insn.sym}"]
       when 'GETIV' then ["ivar:#{insn.ivar}"]
       when 'GETCONST' then ['const']
