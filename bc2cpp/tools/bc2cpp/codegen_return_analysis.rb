@@ -8,6 +8,11 @@ require_relative 'codegen_declared_returns'
 require_relative 'bytecode_ir_returns'
 
 class CodeGen
+  class << self
+    # NATIVE_RETURN_CLASSES: name -> class, admitted from the native sources (native_return_classes.rb). Empty by default.
+    attr_accessor :native_return_classes
+  end
+
   # ---------------------------------------------------------------------------
   # FIXNUM_RETURN_PROOF (proof source 6): bare method names whose
   # SEND/SEND0/SSEND/SSEND0 provably leaves a Fixnum in the destination.
@@ -400,6 +405,17 @@ class CodeGen
         changed = true
       end
       break unless changed
+    end
+    # NATIVE_RETURN_CLASSES (option B): a name whose native registrations all return one class is admitted, with the
+    # Ruby definitions of the name (if any) proven to that class. A name the join already proved keeps its proof.
+    (self.class.native_return_classes || {}).each do |name, klass|
+      next if proven.key?(name) || @foreign_method_names.include?(name) || installed.include?(name)
+      next if @closed_world && !@closed_world.name_fully_visible?(name)
+
+      ruby_defs = (@registry[name] || []).select(&:irep)
+      next unless ruby_defs.all? { |d| class_return_sites_proven(d, ret_class_proof) == klass }
+
+      proven[name] = klass
     end
     @class_return_names = proven
   end

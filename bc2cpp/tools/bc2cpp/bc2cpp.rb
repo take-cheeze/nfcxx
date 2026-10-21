@@ -28,6 +28,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_constants'
 require_relative 'register_flow'
 require_relative 'registry'
+require_relative 'native_return_classes'
 require_relative 'lint_crosscheck'
 require_relative 'native_names'
 require_relative 'native_ivar_scopes'
@@ -307,6 +308,8 @@ if $PROGRAM_NAME == __FILE__
     native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
     # NATIVE_OWNER_MAP (ADR 0397): every native source, not only those with a literal name registration.
     CodeGen.native_source_paths = native_paths
+    # NATIVE_RETURN_CLASSES (option B): empty unless BC2CPP_NATIVE_FN_KINDS names the native function kinds.
+    CodeGen.native_return_classes = NativeReturnClasses.table_for_env(native_paths)
     native_expression_devirt = NativeExpressionDevirt.analyze(native_paths)
     native_registered_expressions = NativeExpressionDevirt.analyze_exact_class_expressions(native_paths)
     warn "== generated native C-expression devirtualizations (#{native_expression_devirt.size}) =="
