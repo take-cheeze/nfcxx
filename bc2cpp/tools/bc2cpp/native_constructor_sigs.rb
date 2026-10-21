@@ -4,6 +4,7 @@ require 'prism'
 require_relative 'native_direct'
 require_relative 'native_owner_map'
 require_relative 'native_core_result_sigs'
+require_relative 'ruby_parse_cache'
 
 # NativeConstructorSigs: the constructor overloads of sig/bc2cpp/declarations.rbs#rgss_constructors (OVERLOADED_CONSTRUCT,
 # docs/adr/0468), each audited against the source of the initialize it describes.
@@ -212,7 +213,7 @@ module NativeConstructorSigs
   def ruby_initialize(klass, sources, ruby)
     name = klass.split('::').last
     ruby.each do |path|
-      found = find_initialize(Prism.parse(File.read(path)).value, name)
+      found = find_initialize(RubyParseCache.parse(File.read(path), path).value, name)
       next unless found
 
       params = found.parameters
