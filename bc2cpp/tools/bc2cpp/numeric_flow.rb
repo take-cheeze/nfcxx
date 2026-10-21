@@ -69,6 +69,11 @@ module NumericFlow
   # Provenance, not a class (ADR 0370): the set came from a pool whose completeness is a runtime-checked claim. A mask
   # that carries it never equals a class bit, so every unguarded decoder refuses it; only CHECKED_POOL_EXACT reads it.
   CHECKED = 1 << (OBJECT_KIND_BASE - 1)
+  # The result of a blockless Enumerator maker (`map` with no block on an exact Array or Hash). It is a fixed bit, not
+  # a class bit from CodeGen#numeric_class_bit: no class name is attached, so every consumer that names a class from a
+  # bit refuses it and treats the value as unknown. Class bits are allocated below ENUMERATOR_BIT.
+  ENUMERATOR_BIT = OBJECT_KIND_BASE - 2
+  ENUMERATOR = 1 << ENUMERATOR_BIT
   # The type layer's literal classes (BytecodeIR::Types.literal_class) the flow has a bit for. Symbol, true and false
   # are closed-world class bits only the oracle names (literal_class_mask).
   LITERAL_CLASS_MASKS = { Integer: INT, Float: FLT, Array: ARR, Hash: HSH, String: STR, NilClass: NIL, Range: RNG }.freeze
