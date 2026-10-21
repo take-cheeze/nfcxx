@@ -142,8 +142,8 @@ module NumericFlow
   # Each answers OTHER (or false) when it proves nothing.
   #
   # Returns index -> state (an Array of masks, nil for an unreachable
-  # instruction), or nil when the irep is not modelled. Slots follow the
-  # nregs real registers, in ivar_slots order. +writes+, when given, receives for
+  # instruction), or nil when the irep is not modelled. Incoming state arrays are read-only and may be shared.
+  # Slots follow the nregs real registers, in ivar_slots order. +writes+, when given, receives for
   # each register the union of every value any instruction stores into it (what
   # a block created earlier may see when it runs later).
   #
@@ -153,7 +153,7 @@ module NumericFlow
   # (NumericFlow.table), keeps the run's facts in a Ctx with the oracle's optional methods looked up once, and joins
   # without allocating when nothing grows. It asks the
   # oracle the same questions, with the same arguments, in the same order as before; only its own bookkeeping changed.
-  def states(irep, oracle, opaque_regs, writes = nil)
+  def states(irep, oracle, opaque_regs, writes = nil, share_states: ENV['BC2CPP_NUMERIC_SHARE_STATES'] != '0')
     program = BytecodeIR.for(irep)
     return nil unless program.resolved?
     return nil if program.handlers? && !program.handlers_resolved?
@@ -212,7 +212,7 @@ module NumericFlow
         edge = step_raise_state(step, st, out, c)
         handlers.each do |target|
           old = ins[target]
-          merged = join_state(old, edge, pb)
+          merged = join_state(old, edge, pb, share_states)
           next if merged.equal?(old)
 
           ins[target] = merged
@@ -234,7 +234,7 @@ module NumericFlow
 
         s = step_thread_class_test(steps, step, i, s, edge, c) if c.tb
         old = ins[s]
-        merged = join_state(old, edge, pb)
+        merged = join_state(old, edge, pb, share_states)
         next if merged.equal?(old)
 
         ins[s] = merged
@@ -719,8 +719,10 @@ module NumericFlow
 
   # Masks join by union; a provenance survives only when both sides agree. +old+ itself when nothing changes, so a
   # caller tells growth by identity; nothing is allocated until the first entry that changes.
-  def join_state(old, new, prov_base)
-    return new.dup if old.nil?
+  # Flow-owned incoming states are read-only: transfers and edge refinements copy before mutation (ADR 0529).
+  # Standalone callers retain the copy on the first edge unless they explicitly share that invariant.
+  def join_state(old, new, prov_base, share_states = false)
+    return share_states ? new : new.dup if old.nil?
     # Equal states join to the old one (a union of equal masks, provenances that agree); Array#== finds that in C. A
     # nil entry is the exception: `nil | nil` is false, which the loop below reproduces.
     return old if old == new && !old.include?(nil)

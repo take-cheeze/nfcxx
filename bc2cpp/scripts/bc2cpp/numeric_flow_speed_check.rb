@@ -185,6 +185,114 @@ check.call('transfer: the call result, the frame above it and the slot widened',
 raised_state = NF.raise_state(FakeCall.new('SEND0', '1'), state, after, ctx)
 check.call('raise_state joins the widened state with the result', raised_state[1] == (NF::STR | OTHER))
 
+puts '-- shared incoming states (host)'
+# Freeze every input and output at the solver boundary; even a transient in-place write would fail here.
+module ReadonlyFlowInputs
+  def step_transfer(index, insn, step, state, ctx)
+    super(index, insn, step, state.freeze, ctx).freeze
+  end
+
+  def step_raise_state(step, before, after, ctx)
+    super(step, before.freeze, after.freeze, ctx).freeze
+  end
+
+  def step_refine_edge(step, index, target, state, ctx)
+    super(step, index, target, state.freeze, ctx)&.freeze
+  end
+
+  def join_state(old, incoming, prov_base, share_states = false)
+    super(old&.freeze, incoming.freeze, prov_base, share_states).freeze
+  end
+end
+NF.singleton_class.prepend(ReadonlyFlowInputs)
+
+class ClassLogOracle < LogOracle
+  Predicate = Struct.new(:mask) do
+    def narrow(value, truth) = truth ? value & mask : value & ~mask
+  end
+
+  def class_narrowing_active? = true
+  def class_test(_irep, _index, _insn, _state) = [0, Predicate.new(INT)]
+  def const_lookup_quiet? = true
+  def preserves_ivar_slots?(*_args) = true
+end
+
+class_body = [insn(0, 'GETIV', "R1\t@n"), insn(3, 'MOVE', "R2\tR1"), insn(6, 'SEND0', "R2\t:is_a?"),
+              insn(9, 'JMPNOT', "R2\t17"), insn(13, 'GETIV', "R3\t@n"), insn(16, 'RETURN', 'R3'),
+              insn(17, 'LOADNIL', 'R3 (nil)'), insn(19, 'RETURN', 'R3')]
+class_irep = Irep.new(label: 'shared-class', nregs: 6, instructions: class_body, catch_handlers: [], reps: [], pool: [])
+# Two targets receive exactly the same unrefined edge; rewriting either target must leave the other alone.
+split_body = [insn(0, 'JMPNOT', "R1\t9"), insn(4, 'LOADI_1', "R2\t(1)"), insn(6, 'JMP', '12'),
+              insn(9, 'LOADL', "R2\tL[0]"), insn(12, 'RETURN', 'R2')]
+split_irep = Irep.new(label: 'shared-split', nregs: 6, instructions: split_body, catch_handlers: [], reps: [], pool: [])
+handler_body = [insn(0, 'GETIV', "R1\t@n"), insn(3, 'SEND0', "R2\t:f"), insn(6, 'RETURN', 'R2'),
+                insn(8, 'EXCEPT', 'R3'), insn(10, 'RAISEIF', 'R3'), insn(12, 'RETURN', 'R1')]
+handler_irep = Irep.new(label: 'shared-handler', nregs: 6, instructions: handler_body,
+                        catch_handlers: [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 6, target: 8)],
+                        reps: [], pool: [])
+class_factory = lambda do
+  oracle = ClassLogOracle.new({ 1 => INT | NIL_, 3 => INT }, OTHER)
+  oracle.define_singleton_method(:ivar_entry_mask) { |_irep, name| note(:ivar_entry_mask, name) && (INT | NIL_) }
+  oracle
+end
+element_body = [insn(0, 'SENDB', "R2\t:map\tn=0"), insn(4, 'MOVE', "R1\tR2"), insn(7, 'RETURN', 'R1')]
+element_irep = Irep.new(label: 'shared-elements', nregs: 6, instructions: element_body, catch_handlers: [], reps: [], pool: [])
+element_factory = lambda do
+  oracle = LogOracle.new({}, INT)
+  oracle.define_singleton_method(:block_send_mask) { |*_args| NF::ARR }
+  oracle.define_singleton_method(:block_element_mask) { |*_args| INT }
+  oracle
+end
+context_factory = lambda do
+  oracle = LogOracle.new({ 1 => INT }, INT)
+  oracle.define_singleton_method(:context_enter_edges) { { 0 => [3] }.freeze }
+  oracle
+end
+cases = [
+  ['loop and ivar provenance', irep, Set.new, -> { LogOracle.new({ 1 => INT | NIL_, 3 => FLT }, INT) }],
+  ['captured registers', irep, Set['1', '2'], -> { LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT) }],
+  ['optional entry, rescue and ensure', enter_irep, Set.new, -> { LogOracle.new({ 1 => INT }, INT) }],
+  ['sibling branch isolation', split_irep, Set.new, -> { LogOracle.new({}, INT) }],
+  ['raising call, slots and EXCEPT/RAISEIF', handler_irep, Set.new, -> { LogOracle.new({}, FLT) }],
+  ['class-test slot narrowing', class_irep, Set.new, class_factory],
+  ['element block on block calls', element_irep, Set.new, element_factory],
+  ['context-specific ENTER edges', enter_irep, Set.new, context_factory]
+]
+cases.each do |name, body, opaque, factory|
+  shared_oracle = factory.call
+  copied_oracle = factory.call
+  shared_writes = {}
+  copied_writes = {}
+  shared = NF.states(body, shared_oracle, opaque, shared_writes, share_states: true)
+  copied = NF.states(body, copied_oracle, opaque, copied_writes, share_states: false)
+  check.call("#{name}: frozen-state results, writes and oracle order match copied edges",
+             shared && shared == copied && shared_writes == copied_writes && shared_oracle.log == copied_oracle.log)
+  if body.equal?(class_irep)
+    check.call('the class-test fixture narrows the shared slot on its truthy edge', shared[4][6] == INT)
+  elsif body.equal?(element_irep)
+    check.call('the block-call fixture carries its element mask to the successor', shared[1][9] == INT)
+  end
+end
+noop_body = Irep.new(label: 'shared-noop', nregs: 2, instructions: [insn(0, 'NOP', ''), insn(1, 'RETURN', 'R1')],
+                     catch_handlers: [], reps: [], pool: [])
+shared_noop = NF.states(noop_body, LogOracle.new({}, INT), Set.new, share_states: true)
+copied_noop = NF.states(noop_body, LogOracle.new({}, INT), Set.new, share_states: false)
+check.call('a read-only edge shares its first state only in sharing mode',
+           shared_noop[0].equal?(shared_noop[1]) && !copied_noop[0].equal?(copied_noop[1]))
+previous_sharing = ENV['BC2CPP_NUMERIC_SHARE_STATES']
+begin
+  ENV['BC2CPP_NUMERIC_SHARE_STATES'] = '0'
+  withdrawn = NF.states(noop_body, LogOracle.new({}, INT), Set.new)
+  check.call('the opt-out restores separate first-edge copies', !withdrawn[0].equal?(withdrawn[1]))
+ensure
+  previous_sharing ? ENV['BC2CPP_NUMERIC_SHARE_STATES'] = previous_sharing : ENV.delete('BC2CPP_NUMERIC_SHARE_STATES')
+end
+shared_edge = [INT, FLT, 0, 3].freeze
+check.call('explicit first-edge sharing retains the incoming state', NF.join_state(nil, shared_edge, 2, true).equal?(shared_edge))
+check.call('subsequent growth copies the shared edge without modifying it',
+           NF.join_state(shared_edge, [FLT, FLT, 0, 4], 2, true) == [INT | FLT, FLT, 0, 0] &&
+           shared_edge == [INT, FLT, 0, 3])
+
 if failures.empty?
   puts 'bc2cpp numeric flow speed check: PASS'
 else
