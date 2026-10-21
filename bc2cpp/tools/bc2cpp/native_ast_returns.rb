@@ -11,6 +11,7 @@
 #   - a conditional -> the join of its two arms; casts and parentheses are transparent;
 #   - anything else -> nil (unknown). A join of different kinds is nil.
 require 'json'
+require 'set'
 require_relative 'native_return_kinds'
 
 module NativeAstReturns
@@ -57,6 +58,7 @@ module NativeAstReturns
       @fns = fns
       @memo = {}
       @in_progress = {}
+      @narrowed = Set.new
     end
 
     def function_kind(name)
@@ -65,11 +67,86 @@ module NativeAstReturns
 
       fn = @fns[name] or return nil
       @in_progress[name] = true
-      returns = []
-      collect_returns(fn[:body], returns)
-      kind = NativeAstReturns.join(returns.map { |expr| value_kind(expr, fn[:body]) })
+      outer_narrowed = @narrowed
+      stmts = fn[:body]['inner'] || []
+      guards = valid_string_guards(stmts)
+      kinds = stmts.each_with_index.flat_map do |stmt, i|
+        @narrowed = guards.select { |_id, guard_at| guard_at < i }.keys.to_set
+        returns = []
+        collect_returns(stmt, returns)
+        returns.map { |expr| value_kind(expr, fn[:body]) }
+      end
+      kind = NativeAstReturns.join(kinds)
+      @narrowed = outer_narrowed
       @in_progress.delete(name)
       @memo[name] = kind
+    end
+
+    # A local tested by a guard `if (!(x.tt == MRB_TT_STRING)) { ...return...; }` at a top-level statement is a String
+    # after that statement, when no later statement assigns it (mrb_string_p is that comparison). Returns the locals'
+    # ids mapped to the index of their guard, first guard per local.
+    def valid_string_guards(stmts)
+      guards = {}
+      stmts.each_with_index do |stmt, i|
+        next unless stmt['kind'] == 'IfStmt' && stmt['inner'] && stmt['inner'].size >= 2
+
+        cond, body = stmt['inner'][0], stmt['inner'][1]
+        next unless string_test_negated?(cond) && contains_kind?(body, 'ReturnStmt')
+
+        id = tested_local(cond)
+        guards[id] = i if id && !guards.key?(id)
+      end
+      guards.select { |id, i| stmts[(i + 1)..].none? { |later| assigns?(later, id) } }
+    end
+
+    def string_test_negated?(cond)
+      node = cond
+      node = node['inner'].first while %w[ImplicitCastExpr ParenExpr].include?(node['kind']) && node['inner']
+      return false unless node['kind'] == 'UnaryOperator' && node['opcode'] == '!'
+
+      contains_enum?(node, 'MRB_TT_STRING')
+    end
+
+    def tested_local(cond)
+      found = nil
+      walk(cond) do |node|
+        decl = node['referencedDecl'] if node['kind'] == 'DeclRefExpr'
+        found ||= decl['id'] if decl && decl['kind'] == 'VarDecl'
+      end
+      found
+    end
+
+    def contains_enum?(node, name)
+      found = false
+      walk(node) do |n|
+        found ||= n['kind'] == 'DeclRefExpr' && n.dig('referencedDecl', 'kind') == 'EnumConstantDecl' &&
+                  n.dig('referencedDecl', 'name') == name
+      end
+      found
+    end
+
+    def contains_kind?(node, kind)
+      found = false
+      walk(node) { |n| found ||= n['kind'] == kind }
+      found
+    end
+
+    # `local = value` in either form: a built-in assignment, or the overloaded operator= a C++ struct copy becomes.
+    def assigns?(node, id)
+      found = false
+      walk(node) do |n|
+        target =
+          if n['kind'] == 'BinaryOperator' && n['opcode'] == '=' && n['inner']
+            n['inner'].first
+          elsif n['kind'] == 'CXXOperatorCallExpr' && n['inner'] && n['inner'].size >= 2
+            n['inner'][1]
+          end
+        next unless target
+
+        target = target['inner'].first while %w[ImplicitCastExpr ParenExpr].include?(target['kind']) && target['inner']
+        found ||= target['kind'] == 'DeclRefExpr' && target.dig('referencedDecl', 'id') == id
+      end
+      found
     end
 
     private
@@ -108,6 +185,8 @@ module NativeAstReturns
         decl = expr['referencedDecl'] or return nil
         return 'self' if decl['kind'] == 'ParmVarDecl' && decl['name'] == 'self'
         return nil unless decl['kind'] == 'VarDecl'
+        return 'String' if @narrowed.include?(decl['id'])
+
         local_kind(decl['id'], body, seen)
       else
         nil

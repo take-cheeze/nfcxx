@@ -4,7 +4,8 @@
 # Checks tools/bc2cpp/native_ast_returns.rb: the return kind of each function in a small C++ fixture, from the clang AST
 # (`clang -fsyntax-only -Xclang -ast-dump=json`). Covers a constructor, `self` (also through a copy), a local, a
 # conditional, a join of two kinds, a call to a function in the same file, a recursive cycle, and an identity call
-# (mrb_obj_freeze returns its value). Skips when clang is
+# (mrb_obj_freeze returns its value), and a string guard that narrows a local to String only where
+# no later statement reassigns it. Skips when clang is
 # not installed.
 #
 #   ruby scripts/bc2cpp/native_ast_returns_check.rb
@@ -36,12 +37,19 @@ FIXTURE = <<~CPP
   struct mrb_state;
   mrb_value mrb_obj_freeze(struct mrb_state *mrb, mrb_value self);
   mrb_value mrb_str_new(struct mrb_state *mrb, const char *p, int len);
+  enum { MRB_TT_STRING = 7 };
+  mrb_value get_thing(struct mrb_state *mrb);
+  mrb_value mrb_str_new_cstr(struct mrb_state *mrb, const char *s);
+  mrb_value guard_fn(struct mrb_state *mrb, mrb_value self) { mrb_value m = get_thing(mrb); if (!(m.v == MRB_TT_STRING)) { return mrb_str_new_cstr(mrb, 0); } return m; }
+  mrb_value guard_late_fn(struct mrb_state *mrb, mrb_value self) { mrb_value m = get_thing(mrb); if (!(m.v == MRB_TT_STRING)) { return mrb_str_new_cstr(mrb, 0); } m = get_thing(mrb); return m; }
+  mrb_value pre_fn(struct mrb_state *mrb, mrb_value self) { mrb_value m = get_thing(mrb); if (m.v == 1) { return m; } if (!(m.v == MRB_TT_STRING)) { return mrb_str_new_cstr(mrb, 0); } return m; }
   mrb_value frozen_fn(struct mrb_state *mrb, mrb_value self) { return mrb_obj_freeze(mrb, mrb_str_new(mrb, 0, 0)); }
 CPP
 
 EXPECTED = {
   'int_fn' => 'Integer', 'self_fn' => 'self', 'local_fn' => 'Array', 'cond_fn' => 'Integer',
-  'mixed_fn' => nil, 'call_fn' => 'Integer', 'rec_fn' => nil, 'frozen_fn' => 'String'
+  'mixed_fn' => nil, 'call_fn' => 'Integer', 'rec_fn' => nil, 'frozen_fn' => 'String',
+  'guard_fn' => 'String', 'guard_late_fn' => nil, 'pre_fn' => nil
 }.freeze
 
 failures = []

@@ -14,6 +14,8 @@ module NativeReturnKinds
     Entry.new(/\bmrb_nil_value\s*\(/, 'nil'),
     Entry.new(/\bmrb_(?:true_value|false_value|bool_value)\s*\(/, 'bool'),
     Entry.new(/\bmrb_(?:fixnum_value|int_value)\s*\(/, 'Integer'),
+    # Bignum constructors (MRB_USE_BIGINT): a bignum is an Integer instance.
+    Entry.new(/\bmrb_bint_new\w*\s*\(/, 'Integer'),
     Entry.new(/\bmrb_float_value\s*\(/, 'Float'),
     Entry.new(/\bmrb_(?:str_new|str_new_cstr|str_new_static|str_buf_new|str_dup|str_cat|str_substr|str_resize|str_plus|format)\w*\s*\(/,
               'String'),
