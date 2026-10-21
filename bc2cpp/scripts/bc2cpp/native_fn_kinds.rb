@@ -1,10 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# The return kind of every function in the native sources the base generator describes, for NativeReturnClasses
-# (BC2CPP_NATIVE_FN_KINDS). Each source is read by clang with the same include paths base_rbs_all.rb uses, so the
-# closed build's generated headers (presym IDs, shinonome.hxx) are visible; a file clang still cannot parse is listed
-# on stderr and keeps only the regex kinds.
+# The return kind of every function in the native sources the closed world reads, for NativeReturnClasses
+# (BC2CPP_NATIVE_FN_KINDS). Each source is read by clang with the include paths its gem gets (BaseRbsAll.source_flags),
+# so the closed build's generated headers (presym IDs, shinonome.hxx) and the analysis overlay (analysis_headers.rb) are
+# visible. A file clang still cannot parse is listed on stderr and keeps only the regex kinds.
 #
 #   ruby scripts/bc2cpp/native_fn_kinds.rb CLOSED_BUILD_DIR > fn_kinds.tsv
 #
@@ -17,17 +17,14 @@ require_relative 'base_rbs_all'
 module NativeFnKinds
   module_function
 
+  # [path, flags] for every source the table covers: the base generator's sources (the repo's gems, the mruby core
+  # gems and CORE_NATIVE), the core library's own C, and the closed world's NATIVE_SRCS. A source named twice keeps its
+  # first flags.
   def sources(closed_build)
-    core = BaseRbsAll::CORE_NATIVE.map do |name, rels|
-      [rels.map { |rel| File.join(BaseRbsAll::ROOT, rel) }, BaseRbsAll.core_flags(closed_build)]
-    end
-    gems = BaseRbsAll.gems.filter_map do |gem_dir|
-      natives = BaseRbsAll.native_sources(gem_dir)
-      next if natives.empty?
-
-      [natives, BaseRbsAll.flags_for(gem_dir, closed_build)]
-    end
-    core + gems
+    base = BaseRbsAll::CORE_NATIVE.values.flatten.map { |rel| File.join(BaseRbsAll::ROOT, rel) }
+    base += Dir[File.join(BaseRbsAll::MRUBY_ROOT, 'src', '*.c')]
+    BaseRbsAll.gems.each { |gem_dir| base += BaseRbsAll.native_sources(gem_dir) }
+    (base + BaseRbsAll.closed_native_sources).uniq.sort.map { |path| [path, BaseRbsAll.source_flags(path, closed_build)] }
   end
 
   # One pass over every source. external: kinds of functions of other files. Returns [kinds, self_indexes].
@@ -45,7 +42,7 @@ module NativeFnKinds
   end
 
   def run(closed_build)
-    files = sources(closed_build).flat_map { |paths, flags| paths.map { |path| [path, flags] } }
+    files = sources(closed_build)
     first_kinds, first_selves = pass(files, {})
     external = first_kinds.reject { |_fn, kind| kind.nil? }
     # A function returning its own self parameter is the receiver's class wherever it is called (see
