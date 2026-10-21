@@ -14,9 +14,17 @@ module NativeReturnKinds
     Entry.new(/\bmrb_nil_value\s*\(/, 'nil'),
     Entry.new(/\bmrb_(?:true_value|false_value|bool_value)\s*\(/, 'bool'),
     Entry.new(/\bmrb_(?:fixnum_value|int_value)\s*\(/, 'Integer'),
+    # Bignum constructors (MRB_USE_BIGINT): a bignum is an Integer instance.
+    # Bignum operations that return a value: each result is an Integer (a bignum or a fixnum). to_s (a String) and
+    # divmod (an Array) are left out, and so are the helpers that return C scalars.
+    Entry.new(/\bmrb_bint_(?:new_\w+|sqrt|add|sub|mul|div|mod|rem|pow|gcd|lcm|neg|abs|and|or|xor|lshift|rshift|copy|add_n|sub_n|mul_n|add_ii|sub_ii|mul_ii|rev|reduce|powm)\s*\(/, 'Integer'),
     Entry.new(/\bmrb_float_value\s*\(/, 'Float'),
     Entry.new(/\bmrb_(?:str_new|str_new_cstr|str_new_static|str_buf_new|str_dup|str_cat|str_substr|str_resize|str_plus|format)\w*\s*\(/,
               'String'),
+    # mrb_bint_to_s builds its digits with mrb_str_new (mruby-bigint: every return is a String).
+    Entry.new(/\bmrb_bint_to_s\s*\(/, 'String'),
+    # mrb_obj_as_string returns the object's to_s converted to a String (rb_any_to_s when to_s is not one).
+    Entry.new(/\bmrb_(?:sym_str|obj_as_string)\s*\(/, 'String'),
     Entry.new(/\bmrb_(?:ary_new|ary_new_capa|ary_new_from_values|ary_dup)\s*\(/, 'Array'),
     Entry.new(/\bmrb_(?:hash_new|hash_new_capa|hash_dup)\s*\(/, 'Hash'),
     Entry.new(/\bmrb_symbol_value\s*\(/, 'Symbol')
