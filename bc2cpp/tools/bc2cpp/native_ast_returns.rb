@@ -15,6 +15,8 @@ require_relative 'native_return_kinds'
 
 module NativeAstReturns
   UNKNOWN = :unknown
+  # Calls that return their value argument unchanged; `mrb_str_new_frozen` is mrb_obj_freeze over mrb_str_new.
+  IDENTITY_CALLS = %w[mrb_obj_freeze].freeze
 
   module_function
 
@@ -97,6 +99,10 @@ module NativeAstReturns
         NativeAstReturns.join([value_kind(yes, body, seen), value_kind(no, body, seen)])
       when 'CallExpr'
         callee = callee_name(expr) or return nil
+        # An identity call returns its value argument (mrb_obj_freeze(mrb, obj) is obj, frozen): the kind is the value's.
+        # The CallExpr's children are the callee, then the arguments: mrb_obj_freeze(mrb, obj) has the value at [2].
+        return value_kind(expr['inner'][2], body, seen) if IDENTITY_CALLS.include?(callee) && expr['inner'][2]
+
         NativeAstReturns.constructor_kind(callee) || function_kind(callee)
       when 'DeclRefExpr'
         decl = expr['referencedDecl'] or return nil

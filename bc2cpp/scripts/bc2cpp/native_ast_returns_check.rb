@@ -3,7 +3,8 @@
 
 # Checks tools/bc2cpp/native_ast_returns.rb: the return kind of each function in a small C++ fixture, from the clang AST
 # (`clang -fsyntax-only -Xclang -ast-dump=json`). Covers a constructor, `self` (also through a copy), a local, a
-# conditional, a join of two kinds, a call to a function in the same file, and a recursive cycle. Skips when clang is
+# conditional, a join of two kinds, a call to a function in the same file, a recursive cycle, and an identity call
+# (mrb_obj_freeze returns its value). Skips when clang is
 # not installed.
 #
 #   ruby scripts/bc2cpp/native_ast_returns_check.rb
@@ -32,11 +33,15 @@ FIXTURE = <<~CPP
   mrb_value mixed_fn(mrb_value self, int c) { return c ? mrb_fixnum_value(1) : mrb_nil_value(); }
   mrb_value call_fn(mrb_value self) { return int_fn(self); }
   mrb_value rec_fn(mrb_value self) { return rec_fn(self); }
+  struct mrb_state;
+  mrb_value mrb_obj_freeze(struct mrb_state *mrb, mrb_value self);
+  mrb_value mrb_str_new(struct mrb_state *mrb, const char *p, int len);
+  mrb_value frozen_fn(struct mrb_state *mrb, mrb_value self) { return mrb_obj_freeze(mrb, mrb_str_new(mrb, 0, 0)); }
 CPP
 
 EXPECTED = {
   'int_fn' => 'Integer', 'self_fn' => 'self', 'local_fn' => 'Array', 'cond_fn' => 'Integer',
-  'mixed_fn' => nil, 'call_fn' => 'Integer', 'rec_fn' => nil
+  'mixed_fn' => nil, 'call_fn' => 'Integer', 'rec_fn' => nil, 'frozen_fn' => 'String'
 }.freeze
 
 failures = []
