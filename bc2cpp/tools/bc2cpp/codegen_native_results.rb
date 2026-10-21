@@ -4,6 +4,7 @@ require_relative 'native_result_facts'
 require_relative 'native_class_results'
 require_relative 'native_core_result_sigs'
 require_relative 'core_blockless_iterator_sigs'
+require_relative 'core_hierarchy_sigs'
 require_relative 'numeric_flow'
 require_relative 'codegen_return_classes'
 
@@ -69,19 +70,23 @@ class CodeGen
     numeric_class_bit('TrueClass') | numeric_class_bit('FalseClass')
   end
 
-  # SEND/SEND0 with no block: the blockless overload of Enumerable#map and #collect (core_blockless_iterators) is an
-  # Enumerator. mruby's Enumerable#collect (3rd/mruby/mrblib/enum.rb, `alias map collect`) returns `to_enum(:collect)`
-  # without a block, and Array and Hash take that method. Gated: exact instances, no installed or program definition of
-  # the name, and the result is NumericFlow::ENUMERATOR, which names no class.
-  BLOCKLESS_ENUMERATOR_OWNERS = %w[Array Hash].freeze
-
+  # SEND/SEND0 with no block: a core block iterator of Enumerable (core_blockless_iterators) returns an Enumerator. The
+  # receiver is any exact core class that includes Enumerable (CoreHierarchySigs), and the argument count must be one the
+  # blockless declaration accepts. mruby's Enumerable iterators return `to_enum` when no block is given (ADR 0524).
+  # Gated: exact instances, no installed or program definition of the name, and the result is NumericFlow::ENUMERATOR,
+  # which names no class.
   def native_core_blockless_enumerator_result(insn, state)
     return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
+    return nil unless insn.op == 'SEND0' || insn.plain_fixed_argc?
     return nil unless @closed_world&.exact_instances_singleton_free?
 
     owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]
-    return nil unless BLOCKLESS_ENUMERATOR_OWNERS.include?(owner)
+    return nil unless owner && CoreHierarchySigs.hierarchy[1].fetch(owner, []).include?('Enumerable')
     return nil unless CoreBlocklessIteratorSigs.results.dig('Enumerable', insn.sym) == 'Enumerator'
+
+    argc = insn.op == 'SEND0' ? 0 : insn.argc
+    min, max = CoreBlocklessIteratorSigs.arity('Enumerable', insn.sym)
+    return nil unless argc && argc >= min && (max.nil? || argc <= max)
     return nil if symbol_installed_names.nil? || symbol_installed_names.include?(insn.sym)
     return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
 

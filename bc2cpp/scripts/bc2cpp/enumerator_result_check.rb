@@ -16,6 +16,7 @@ require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/numeric_flow'
 require_relative '../../tools/bc2cpp/core_blockless_iterator_sigs'
 require_relative '../../tools/bc2cpp/core_block_iterator_sigs'
+require_relative '../../tools/bc2cpp/core_hierarchy_sigs'
 require_relative '../../tools/bc2cpp/codegen_native_results'
 
 failures = []
@@ -30,8 +31,8 @@ HSH = NF::HSH
 INT = NF::INT
 
 # SEND0 takes no count operand; SEND carries n=0.
-def insn(op, sym, reg: 1)
-  args = op.end_with?('0') ? "R#{reg}\t:#{sym}" : "R#{reg}\t:#{sym}\tn=0"
+def insn(op, sym, reg: 1, argc: 0)
+  args = op.end_with?('0') ? "R#{reg}\t:#{sym}" : "R#{reg}\t:#{sym}\tn=#{argc}"
   Insn.new(lineno: 1, addr: 0, op: op, args: args, raw: "#{op} #{args}")
 end
 
@@ -105,6 +106,26 @@ check.call('the kill switch BC2CPP_NATIVE_CLASS_RESULTS=0 withdraws the claim',
 ENV.delete('BC2CPP_NATIVE_CLASS_RESULTS')
 check.call('native_core_class_result returns the bit for a blockless map',
            cg.native_core_class_result(insn('SEND0', 'map'), state_for(ARR)) == NF::ENUMERATOR)
+
+check.call('every declared blockless name answers Enumerator on Enumerable',
+           CoreBlocklessIteratorSigs.results['Enumerable'].values.all? { |k| k == 'Enumerator' })
+check.call('find_index is not declared (its blockless call with an argument is not an Enumerator)',
+           CoreBlocklessIteratorSigs.arity('Enumerable', 'find_index').nil?)
+check.call('arity: each_slice takes exactly one argument', CoreBlocklessIteratorSigs.arity('Enumerable', 'each_slice') == [1, 1])
+check.call('arity: each_entry takes any number', CoreBlocklessIteratorSigs.arity('Enumerable', 'each_entry') == [0, nil])
+check.call('a Range receiver is claimed (Range includes Enumerable)',
+           cg.native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(NF::RNG)) == NF::ENUMERATOR)
+check.call('a String receiver is refused (String does not include Enumerable)',
+           cg.native_core_blockless_enumerator_result(insn('SEND0', 'map'), state_for(NF::STR)).nil?)
+check.call('SEND0 each_slice (no argument) is refused: the arity needs one',
+           cg.native_core_blockless_enumerator_result(insn('SEND0', 'each_slice'), state_for(ARR)).nil?)
+check.call('SEND each_slice with one argument is claimed',
+           cg.native_core_blockless_enumerator_result(insn('SEND', 'each_slice', argc: 1), state_for(ARR)) == NF::ENUMERATOR)
+check.call('SEND map with one argument is refused (map takes none)',
+           cg.native_core_blockless_enumerator_result(insn('SEND', 'map', argc: 1), state_for(ARR)).nil?)
+check.call('a splat argument count is refused', cg.native_core_blockless_enumerator_result(
+  Insn.new(lineno: 1, addr: 0, op: 'SEND', args: "R1\t:map\tn=*", raw: 'SEND R1 :map n=*'), state_for(ARR)).nil?)
+check.call('a Hash receiver is claimed', cg.native_core_blockless_enumerator_result(insn('SEND0', 'select'), state_for(HSH)) == NF::ENUMERATOR)
 
 puts '== consumers refuse the bit'
 check.call('return_class_of_mask names no class for ENUMERATOR', cg.return_class_of_mask(NF::ENUMERATOR).nil?)
