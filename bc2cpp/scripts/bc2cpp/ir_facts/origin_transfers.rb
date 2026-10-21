@@ -179,6 +179,48 @@ check.call('a handler body is live: the join after it refuses', handler_live.rea
 check.call('without the handler the same body is dead and skipped',
            defs_of.call(program.call(handler_live.instructions.map(&:source)), 4, '1') == [0])
 
+sharing_flag = ENV['BC2CPP_IR_SHARED_DEFINITIONS']
+begin
+  ENV['BC2CPP_IR_SHARED_DEFINITIONS'] = '1'
+  shared_program = program.call([insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'RETURN', 'R1')])
+  query_reg = '1'.dup
+  shared = shared_program.reaching_definitions(1, query_reg, shared: true)
+  check.call('shared cache entries are reused and deeply frozen',
+             shared.equal?(shared_program.reaching_definitions(1, '1', shared: true)) && shared.frozen? &&
+             shared.all? { |definition| definition.frozen? && definition.reg.frozen? })
+  check.call('a shared query never freezes the caller register', !query_reg.frozen?)
+  mutable = shared_program.reaching_definitions(1, '1')
+  mutable.first.index = 99
+  mutable.first.reg << 'changed'
+  mutable.first.built = :changed
+  mutable.clear
+  check.call('public mutable results cannot poison shared snapshots',
+             shared_program.reaching_definitions(1, '1', shared: true).map { |definition| [definition.index, definition.reg, definition.built] } == [[0, '1', nil]])
+  opaque = Set['1']
+  check.call('shared mutable opaque query refuses its current register',
+             shared_program.reaching_definitions(1, '1', opaque_regs: opaque, shared: true).nil?)
+  opaque.clear
+  check.call('changing a mutable opaque set is observed by shared queries',
+             shared_program.reaching_definitions(1, '1', opaque_regs: opaque, shared: true).map(&:index) == [0])
+  cause = { cause: :existing }
+  check.call('shared diagnostic query keeps the first caller cause',
+             shared_program.reaching_definitions(1, '1', max_states: 0, refusal: cause, shared: true).nil? && cause == { cause: :existing })
+  fresh_cause = {}
+  shared_program.reaching_definitions(1, '1', max_states: 0, refusal: fresh_cause, shared: true)
+  check.call('shared capped query reports its own refusal', fresh_cause == { cause: :state_cap })
+  BytecodeIR::DATAFLOW_CACHE_SIZE.times { |index| shared_program.reaching_definitions(index + 2, '1', shared: true) }
+  check.call('shared cache saturation keeps answers and the original bound',
+             shared_program.reaching_definitions(1, '1', max_states: 401, shared: true).map(&:index) == [0] &&
+             shared_program.instance_variable_get(:@reaching_definitions_cache).size == BytecodeIR::DATAFLOW_CACHE_SIZE)
+  ENV['BC2CPP_IR_SHARED_DEFINITIONS'] = '0'
+  copied_program = program.call([insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'RETURN', 'R1')])
+  copies = 2.times.map { copied_program.reaching_definitions(1, '1', shared: true) }
+  check.call('sharing optout retains independent public copies',
+             copies.first == copies.last && !copies.first.equal?(copies.last) && !copies.first.first.equal?(copies.last.first))
+ensure
+  sharing_flag ? ENV['BC2CPP_IR_SHARED_DEFINITIONS'] = sharing_flag : ENV.delete('BC2CPP_IR_SHARED_DEFINITIONS')
+end
+
 # The Fixnum proof's audited lists are BytecodeIR's, not copies kept equal by a check.
 proof = File.read(File.expand_path('../../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
 check.call('FIXNUM_PROOF_STEP_OVER_OPS is WRITES_LEADING_REG_OPS itself',

@@ -14,7 +14,7 @@ class IrContextResults
   PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
                  'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
-  Node = Struct.new(:key, :has_callees, :arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
+  Node = Struct.new(:key, :revision, :evaluation, :has_callees, :arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
 
   class Oracle < CodeGen::ContextOracle
     attr_reader :calls
@@ -91,6 +91,7 @@ class IrContextResults
     @call_layouts = {}.compare_by_identity unless ENV['BC2CPP_IR_CALL_INDEX'] == '0'
     @binding_layouts = {}.compare_by_identity
     @class_cache = {}
+    @reuse_evaluations = ENV['BC2CPP_IR_CONTEXT_REEVALUATION'] != '0'
     @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
     native_rows = @gen.instance_variable_get(:@lcf_rows)&.mask.to_i
@@ -258,7 +259,11 @@ class IrContextResults
     # Even an existing node is a dependency: its states may change in a later round.
     @evaluating.has_callees = true if @evaluating
     key = [body.label, receiver, arguments, keywords.sort, root]
-    return @nodes[key] if @nodes.key?(key)
+    if @nodes.key?(key)
+      dependency = @nodes[key]
+      @dependencies[dependency] = dependency.revision if @dependencies
+      return dependency
+    end
     if @nodes.size >= @max_contexts
       @failed = true
       return nil
@@ -268,8 +273,10 @@ class IrContextResults
     key[3].each(&:freeze)
     key[3].freeze
     key.freeze
-    @nodes[key] = Node.new(key: key, body: body, receiver: receiver, arguments: key[2],
-                          keywords: keywords.dup.freeze, binding: binding, root: root, mask: 0)
+    node = @nodes[key] = Node.new(key: key, revision: 0, body: body, receiver: receiver, arguments: key[2],
+                                 keywords: keywords.dup.freeze, binding: binding, root: root, mask: 0)
+    @dependencies[node] = node.revision if @dependencies
+    node
   end
 
   def solve
@@ -282,6 +289,7 @@ class IrContextResults
         joined = node.mask | value
         if joined != node.mask
           node.mask = joined
+          node.revision += 1 if @reuse_evaluations
           @changed = true
         end
       end
@@ -289,9 +297,33 @@ class IrContextResults
       return true unless @changed
     end
     false
+  ensure
+    # Completed roots retain flow results, never another root's dependency graph.
+    @nodes.each_value { |node| node.evaluation = nil }
   end
 
   def evaluate(node)
+    return evaluate_uncached(node) unless @reuse_evaluations
+
+    classes, shapes = @gen.numeric_class_bit_count, @shapes.size
+    previous = node.evaluation
+    if previous && previous[1] == classes && previous[2] == shapes &&
+       previous[3].all? { |dependency, revision| dependency.revision == revision }
+      return previous[0]
+    end
+
+    old_states, old_calls, old_arrays = node.states, node.calls, node.arrays
+    @dependencies = {}.compare_by_identity
+    value = evaluate_uncached(node)
+    # Effects read callee states, not just return masks; both invalidate readers (ADR 0527).
+    node.revision += 1 if old_states != node.states || old_calls != node.calls || old_arrays != node.arrays
+    node.evaluation = [value, classes, shapes, @dependencies] unless @failed
+    value
+  ensure
+    @dependencies = nil
+  end
+
+  def evaluate_uncached(node)
     return evaluate_body(node) unless @leaf_evaluations
 
     classes, shapes = @gen.numeric_class_bit_count, @shapes.size
@@ -302,7 +334,7 @@ class IrContextResults
     node.has_callees = false
     value = evaluate_body(node)
     if !node.has_callees && !@failed && classes == @gen.numeric_class_bit_count && shapes == @shapes.size
-      @leaf_evaluations.remember(node.key, node, value, classes: @gen.numeric_class_bit_count, shapes: @shapes.size)
+      @leaf_evaluations.remember(node.key, node, value, classes: classes, shapes: shapes)
     end
     value
   ensure

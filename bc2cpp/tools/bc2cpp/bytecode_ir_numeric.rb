@@ -117,7 +117,7 @@ module BytecodeIR
       element = source.to_i + (literal_index % count)
       return nil if opaque.include?(element.to_s)
 
-      defs = program.reaching_definitions(origin, element.to_s, opaque_regs: opaque)
+      defs = program.reaching_definitions(origin, element.to_s, shared: true, opaque_regs: opaque)
       return nil unless defs && !defs.empty?
 
       defs.reduce(0) do |mask, definition|
@@ -136,7 +136,7 @@ module BytecodeIR
     # [index, insn] of the one instruction whose write of +reg+ reaches +index+ (MOVE chains followed when
     # +follow_moves+), or nil.
     def single_writer(program, index, reg, opaque, follow_moves:)
-      defs = program.reaching_definitions(index, reg.to_s, opaque_regs: opaque, follow_moves: follow_moves)
+      defs = program.reaching_definitions(index, reg.to_s, shared: true, opaque_regs: opaque, follow_moves: follow_moves)
       return nil unless defs && defs.size == 1 && !defs.first.entry?
 
       writer = program.instructions[defs.first.index].source
