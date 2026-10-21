@@ -603,6 +603,18 @@ if $PROGRAM_NAME == __FILE__
              operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes.map(&:to_sym).to_set
     )
   end
+  # Report only (CLASS_INTEGER_PROOF): the class rows get their own run, whose poison leaves out the foreign literal
+  # definitions and the bit-operator definitions the IR already binds (IntegerConstants.foreign_class_poison). The value
+  # run above keeps foreign_const_names, so codegen reads only what it read before.
+  ir_paths = ireps.each_value.filter_map { |irep| irep.file && File.expand_path(irep.file) }.to_set
+  class_facts = profile_call.call('BytecodeIR::ConstantFacts.analyze (class)') do
+    BytecodeIR::ConstantFacts.analyze(
+      ireps, sites: constant_assignment_sites,
+             poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
+                       IntegerConstants.foreign_class_poison((foreign_ruby_srcs + outside_ruby).uniq, ir_paths),
+             operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes.map(&:to_sym).to_set
+    )
+  end
   integer_constants =
     if closed_world.constants_static?
       constant_facts.fixnum_names
@@ -1228,7 +1240,7 @@ if $PROGRAM_NAME == __FILE__
       # Report only (CLASS_INTEGER_PROOF, ADR 0501 stage 4): codegen never reads it, so a build without BC2CPP_TYPE_FACTS is
       # unchanged. IntegerConstants.class_admitted is the oracle the constant typing check compares against.
       integer_class_constants: if closed_world.constants_static?
-                                 constant_facts.integer_class_names
+                                 class_facts.integer_class_names
                                else
                                  Set.new
                                end
