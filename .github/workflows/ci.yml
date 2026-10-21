@@ -23,7 +23,7 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -195,7 +195,7 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -206,7 +206,7 @@ jobs:
       # The interpreter of nfcpoly's Go backend (yaegi in a cgo library); without Go >= 1.24 tests/poly/run.sh skips Go.
       - name: Set up Go
         if: matrix.go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: lib/poly/go/go.mod
           cache-dependency-path: lib/poly/go/go.sum
@@ -224,7 +224,7 @@ jobs:
       # scripts/mrb runs nfcxx's scripts with this mruby, and every QBE-backend compile runs it, so each QBE job built it on
       # first use. setup-mruby.sh only checks that the executable exists, so the key holds the script, its config and mrb.
       - name: Restore the mruby tool
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/mruby-tool/bin/mruby
           key: mruby-tool-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}-${{ steps.key.outputs.host }}
@@ -234,7 +234,7 @@ jobs:
       # driver adds) and the toolchain.
       - name: Restore the nfcpoly interpreters
         if: matrix.interp
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/poly/${{ matrix.backend }}
@@ -245,7 +245,7 @@ jobs:
       # The Go library (scripts/setup-poly-go.sh: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
       - name: Restore the nfcpoly Go library
         if: matrix.go
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/poly-go
           key: nfcpoly-go-${{ runner.os }}-${{ hashFiles('scripts/setup-poly-go.sh', 'lib/poly/go/**') }}-${{ steps.key.outputs.go }}-${{ steps.key.outputs.host }}
@@ -271,7 +271,7 @@ jobs:
       - name: Restore libnfconnxsim.so
         id: onnxsim
         if: matrix.onnx
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/onnxsim/libnfconnxsim.so
@@ -288,14 +288,14 @@ jobs:
       # driver links (lib/ehshim, lib/asan, lib/cuda), the scripts and the compiler, the back end and the toolchain.
       - name: Restore the test programs
         if: matrix.suite
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/test-bin
           key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
 
       - name: .NET 8 SDK (the CIL backend's test programs run with dotnet)
         if: matrix.dotnet
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
 
@@ -317,7 +317,7 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -358,7 +358,7 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -385,7 +385,7 @@ jobs:
       NFCXX_BACKEND: ${{ matrix.backend }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -399,7 +399,7 @@ jobs:
           rake --version
 
       - name: ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .ccache
           key: ccache-macos-arm64-${{ hashFiles('scripts/setup-edg.sh', 'scripts/setup-qbe.sh', 'scripts/*.patch') }}-${{ github.run_id }}
@@ -442,7 +442,7 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
       # fetch-depth 0: the change check below diffs against the PR's base commit, which a shallow clone does not have.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
           fetch-depth: 0
@@ -459,7 +459,7 @@ jobs:
       # The key holds the pin, which setup-mrustc.sh has: a new mrustc commit changes the script.
       - name: Restore mrustc and its standard library
         id: mrustc
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/mrustc/src/bin/mrustc
@@ -475,7 +475,7 @@ jobs:
       # and compile them, the mrustc pin and the QBE and cproc revisions.
       - name: Restore the crates compiled through nfcxx
         id: crates
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/mrustc/nfcxx
           key: mrustc-nfcxx-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh', 'scripts/mrustc-nfcc.sh', 'scripts/mrustc-prep.rb', 'scripts/qbe-prep.rb', 'scripts/qbe-cc') }}-${{ steps.key.outputs.qbe }}

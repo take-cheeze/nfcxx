@@ -102,7 +102,7 @@ jobs:
       # the harness links with -flto, so do not oversubscribe it.
       PATHB_JOBS: "4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -119,7 +119,7 @@ jobs:
 
       - name: Restore the Path B harness
         id: harness
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/pathb
           key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
@@ -130,7 +130,7 @@ jobs:
 
       - name: Restore the mruby tool
         id: mruby
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/mruby-tool
           key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
@@ -180,7 +180,7 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -193,14 +193,14 @@ jobs:
         run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the Path B harness
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: build/pathb
           key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
           fail-on-cache-miss: true
 
       - name: Restore the mruby tool
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: build/mruby-tool
           key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}

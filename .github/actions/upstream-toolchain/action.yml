@@ -11,7 +11,7 @@ runs:
       with:
         cache-prefix: nightly-ubuntu26-v1-
         packages: gcc-15 g++-15 python3 python3-psutil ruby rake ripgrep curl clang-21
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       with:
         path: build/mruby-tool
         key: nightly-mruby-ubuntu26-v1-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
@@ -21,7 +21,7 @@ runs:
       id: key
       shell: bash
       run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       if: inputs.pathb == 'true'
       with:
         path: build/pathb
