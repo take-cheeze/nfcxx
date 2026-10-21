@@ -34,14 +34,9 @@ CHAINED_ARRAY_METHODS = %w[select reject map].freeze
 # return. Admitted only after core_array_return? confirms nothing in this
 # program redefines the name (so a future `def keys` withdraws the claim).
 # The names and their 3rd/mruby verification live in sig/bc2cpp/declarations.rbs#core_fresh_arrays.
-# Not here: to_a/dup (receiver-dependent), to_h (Hash), blockless sort_by
-# (CORE_ARRAY_CHAIN_NEEDS_BLOCK).
+# Not here: to_a/dup (receiver-dependent), to_h (Hash), sort_by (blockless it
+# is an Enumerator, and no block-only name is admitted here).
 CORE_ARRAY_RETURN_METHODS = NativeCoreResultSigs.fresh_array_names
-
-# CORE_ARRAY_CHAIN: a fresh Array only with a block: Array#sort_by and
-# Enumerable#sort_by (mruby-enum-ext) both `return to_enum(:sort_by) unless
-# block`.
-CORE_ARRAY_CHAIN_NEEDS_BLOCK = %w[sort_by].freeze
 
 # CORE_ARRAY_CHAIN: vetted bytecode overrides, by exact Owner#name (a bare name
 # here would defeat core_array_return?). mruby-rgss/mrblib/array_sort.rb
@@ -55,13 +50,9 @@ VETTED_ARRAY_RETURN_OVERRIDES = Set['Array#sort'].freeze
 # at all (uniq, sort_by live in mruby's mrblib) is fine too.
 # This rejects attr_reader/attr_accessor defs (real owner, no irep):
 # Game::State#map is one, so "no bytecode body" is not "cannot be redefined".
-def core_array_return?(name, block_carrying, registry)
+def core_array_return?(name, registry)
   vetted_by_name = VETTED_ARRAY_RETURN_OVERRIDES.any? { |o| o.end_with?("##{name}") }
-  if CORE_ARRAY_CHAIN_NEEDS_BLOCK.include?(name)
-    return false unless block_carrying
-  elsif !CORE_ARRAY_RETURN_METHODS.include?(name) && !vetted_by_name
-    return false
-  end
+  return false unless CORE_ARRAY_RETURN_METHODS.include?(name) || vetted_by_name
 
   (registry[name] || []).all? do |md|
     md.owner == '<native>' || VETTED_ARRAY_RETURN_OVERRIDES.include?("#{md.owner}##{md.name}")
@@ -103,7 +94,7 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
       next 'Array' if called == 'map' || traced == 'Array'
     end
     next 'Array' if annotated&.call(called)
-    next 'Array' if core_array_return?(called, block_carrying, registry)
+    next 'Array' if core_array_return?(called, registry)
     # ARRAY_RETURN_PROOF: non-block sends only (see ret_proof above).
     next 'Array' if !block_carrying && ret_proof&.call(called)
 
