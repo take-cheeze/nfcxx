@@ -70,12 +70,70 @@ with_ireps.call(SNIPPET) do |ireps, top_label, gen|
              gen.send(:block_upvar_needs, block2) == [[1, 1], [1, 2]])
   check.call('the top frame needs nothing from above it: every reference of its blocks lands in its own frame',
              gen.send(:block_upvar_needs, top) == [])
+  if ENV['BC2CPP_BLOCK_CAPTURE_INDEX'] != '0'
+    index = gen.instance_variable_get(:@block_capture_index)
+    first = gen.block_upvar_needs(block1)
+    check.call('capture snapshots are shared and deeply immutable',
+               first.equal?(gen.block_upvar_needs(block1)) && first.frozen? && first.all?(&:frozen?))
+    gen.without_probe_side_effects { gen.block_upvar_needs(block2) }
+    check.call('only structural capture snapshots survive probe rollback',
+               gen.instance_variable_get(:@block_capture_index).equal?(index) && first.equal?(gen.block_upvar_needs(block1)))
+    [block1, block2, top].each do |body|
+      indexed = gen.block_upvar_needs(body)
+      gen.instance_variable_set(:@block_capture_index, nil)
+      check.call('indexed captures match a fresh bounded walk', indexed == gen.block_upvar_needs(body))
+      gen.instance_variable_set(:@block_capture_index, index)
+    end
+  end
   all, written = refs_into.call(gen, block1)
   check.call('upvar_refs_into(block1): block1 and block2 reference the top frame (x, y, z); written x, y',
              all.to_a.sort == %w[1 2 3] && written.to_a.sort == %w[1 2])
   all, written = refs_into.call(gen, block2)
   check.call("upvar_refs_into(block2): it touches no register of block1, its parent (block2's refs go past it)",
              all.empty? && written.empty?)
+end
+
+with_ireps.call("def capture_block; [1].each { block_given? }; end") do |ireps, _top, gen|
+  body = ireps.values.find { |irep| gen.calls_block_given?(irep) }
+  index = BlockCaptureIndex.new(ireps, CodeGen::MAX_UPVAR_NEST_DEPTH, CodeGen::BLOCK_GIVEN_NAMES)
+  # Query deeper positions first to catch sparse depth-index mistakes.
+  [2, 0, 1, 16, 17].each do |depth|
+    [true, false].each do |given|
+      indexed = index.block_levels(body, depth, given: given)
+      saved = gen.instance_variable_get(:@block_capture_index)
+      gen.instance_variable_set(:@block_capture_index, nil)
+      original = gen.block_blk_needs(body, depth, given: given)
+      gen.instance_variable_set(:@block_capture_index, saved)
+      check.call("block needs preserve depth #{depth} and given #{given}", indexed == original)
+      check.call('block-level snapshots are immutable', indexed.nil? || indexed.frozen?)
+    end
+  end
+  check.call('block_given modeling modes remain separate', index.block_levels(body, given: true) != index.block_levels(body, given: false))
+  registry = gen.instance_variable_get(:@registry)
+  registry['block_given?'] << Struct.new(:irep).new('ruby-override')
+  check.call('a Ruby block_given? override withdraws modeled reads',
+             gen.block_blk_needs(body) == index.block_levels(body, given: false))
+end
+
+with_ireps.call(<<~RUBY) do |ireps, _top, gen|
+  class CaptureCompile
+    def initialize; @count = 1; end
+    def walk(value)
+      [1].each { [2].each { value += @count; yield if block_given? } }
+      value
+    end
+  end
+RUBY
+  registry = gen.instance_variable_get(:@registry)
+  baseline = CodeGen.new(ireps, registry, {})
+  baseline.instance_variable_set(:@block_capture_index, nil)
+  registry.values.flatten.each do |definition|
+    next unless definition.irep
+
+    check.call('capture indexing preserves real clean-probe decisions',
+               gen.compiles_clean?(definition.irep) == baseline.compiles_clean?(definition.irep))
+  end
+  check.call('capture indexing preserves generated code after probes', gen.compile_all == baseline.compile_all)
 end
 
 puts '-- depth bound (MAX_UPVAR_NEST_DEPTH)'
