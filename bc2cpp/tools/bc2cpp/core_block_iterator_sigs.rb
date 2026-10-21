@@ -17,6 +17,47 @@ module CoreBlockIteratorSigs
     @results[path] ||= load_results(path)
   end
 
+  # { 'Enumerable' => ['map', 'collect', 'filter_map'], ... }: the iterators whose Array elements are the block's own
+  # returns, declared as `-> Array[U]` with the block's `-> U` (`def map: [U] () { (untyped) -> U } -> Array[U]`).
+  # The element mask is read from these declarations, not from a list of names in codegen.
+  def block_return_elements(path = PATH)
+    @block_return_elements ||= {}
+    @block_return_elements[path] ||= load_block_return_elements(path)
+  end
+
+  # True when +name+ is declared as a block iterator and every owner that declares it takes its elements from the block.
+  def block_return_element?(name, path = PATH)
+    declaring = results(path).select { |_owner, names| names.key?(name) }.keys
+    return false if declaring.empty?
+
+    elements = block_return_elements(path)
+    declaring.all? { |owner| elements.fetch(owner, []).include?(name) }
+  end
+
+  def load_block_return_elements(path)
+    out = {}
+    NativeCoreResultSigs.parse_decls(path).each do |decl|
+      next unless decl.is_a?(RBS::AST::Declarations::Class) || decl.is_a?(RBS::AST::Declarations::Module)
+
+      owner = decl.name.to_s.delete_prefix('::')
+      names = out[owner] ||= Set.new
+      decl.members.each do |member|
+        next unless member.is_a?(RBS::AST::Members::MethodDefinition) && member.kind == :instance
+
+        method_type = member.overloads.first.method_type
+        next unless method_type.block&.type.is_a?(RBS::Types::Function)
+
+        ret = method_type.type.return_type
+        element = ret.is_a?(RBS::Types::ClassInstance) && ret.name.to_s.delete_prefix('::') == 'Array' && ret.args.size == 1 &&
+                  ret.args.first
+        block_ret = method_type.block.type.return_type
+        names << member.name.to_s if element.is_a?(RBS::Types::Variable) && block_ret.is_a?(RBS::Types::Variable) &&
+                                     element.name == block_ret.name
+      end
+    end
+    out.transform_values { |names| names.to_a.freeze }.freeze
+  end
+
   def load_results(path)
     out = {}
     NativeCoreResultSigs.parse_decls(path).each do |decl|
