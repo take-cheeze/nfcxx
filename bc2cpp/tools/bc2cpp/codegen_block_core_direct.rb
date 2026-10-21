@@ -184,7 +184,7 @@ module BlockCoreDirectFallback
     unguarded
   end
 
-  # Why a class gets no arm for a name: recorded only while block_send_why collects them (block_send_report.rb).
+  # Why a class gets no arm for a name: recorded only while block_send_why collects them (the block-send report writer).
   def block_core_refuse(klass, name, arity, reason)
     (@block_core_reasons ||= Hash.new { |hash, key| hash[key] = [] })[[name, arity]] << "#{klass}: #{reason}" if @block_core_why_on
     nil
