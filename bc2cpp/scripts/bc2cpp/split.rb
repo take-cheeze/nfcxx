@@ -35,7 +35,8 @@ CODEGEN = 'CodeGen'
 MAIN_GUARD = 'if $PROGRAM_NAME == __FILE__'
 
 # [first unit of the segment, target file]. nil keeps the segment in bc2cpp.rb;
-# :codegen is the CodeGen class, split by CODEGEN_CUTS.
+# :codegen is the CodeGen class, split by CODEGEN_CUTS. The names are units of the
+# pre-split monolith (34f728ae^), so they need not exist in the current sources.
 TOP_CUTS = [
   [:first, nil],
   ['MRBC', 'irep.rb'],
@@ -291,7 +292,8 @@ end
 def fingerprint(node, out = +'')
   out << node.class.name.split('::').last << '('
   node.deconstruct_keys(nil).each do |key, value|
-    next if key == :location
+    # node_id is a per-parse counter (Prism 1.x exposes it), so it never compares equal across parses.
+    next if key == :location || key == :node_id
 
     out << key.to_s << ':'
     fp_value(value, out)
@@ -383,11 +385,15 @@ def unit_id(node)
 end
 
 # Constants and methods a unit makes available, by bare name.
-def provides(node, dir)
+def provides(node, dir, seen = Set.new)
   names = Set.new
   target = require_target(node)
   if target && File.exist?(File.join(dir, target))
-    parse!(target, File.read(File.join(dir, target))).each { |n| names.merge(provides(n, dir)) }
+    # A require cycle (bytecode_ir <-> bytecode_ir_classes) would recurse forever; the names
+    # from its first visit are already in the caller's set.
+    return names unless seen.add?(target)
+
+    parse!(target, File.read(File.join(dir, target))).each { |n| names.merge(provides(n, dir, seen)) }
     return names
   end
   stack = [node]
