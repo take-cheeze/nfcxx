@@ -2,7 +2,7 @@
 
 # Runs bc2cpp.rb the way a wio build's compiled-gem codegen task does
 # (mruby-*-compiled/mrbgem.rake with bc2cpp_closed_world_env), for the
-# NOMETHOD_REVIEWED check and update scripts (docs/adr/0226).
+# (docs/adr/0226).
 require 'open3'
 require 'rbconfig'
 require 'shellwords'
@@ -30,8 +30,8 @@ module NomethodReviewedProbe
     gems.transform_values { |d| File.expand_path(d) }
   end
 
-  # The first line of each reviewed-list abort bc2cpp.rb prints (after every listing).
-  REVIEW_ABORT = /\Abc2cpp: \d+ (?:closed-world NOMETHOD_REVIEWED|STRICT_HINTS_REVIEWED|closed-world PROVEN_MISS_REVIEWED) violation\(s\) /
+  # The first line of each review-gate abort bc2cpp.rb prints (after every listing).
+  REVIEW_ABORT = /\Abc2cpp: \d+ (?:closed-world nomethod|closed-world proven-class miss) violation\(s\) /
   # The line each such abort ends with.
   REVIEW_ABORT_END = /\A(?:Read each site: |Run the verify build over the real workloads, )/
 
@@ -61,9 +61,9 @@ module NomethodReviewedProbe
     end
   end
 
-  # True when `status`/`stderr` is a run that failed only on the reviewed lists: exit 1, every
+  # True when `status`/`stderr` is a run that failed only on a review gate: exit 1, every
   # listing printed (the PROVEN_MISS listing is the last of them), and nothing after it but the
-  # reviewed-list abort blocks.
+  # review-gate abort blocks.
   def review_abort?(status, stderr)
     return false unless status.exitstatus == 1
 
@@ -95,14 +95,14 @@ module NomethodReviewedProbe
   def listing_run(gem_name, root, mrbc, hot_methods: nil)
     out, err, status = run(gem_name, root, mrbc, hot_methods: hot_methods)
     unless status.success? || review_abort?(status, err)
-      raise "#{gem_name}: bc2cpp.rb failed (not on a reviewed list):\n#{failure_tail(err)}"
+      raise "#{gem_name}: bc2cpp.rb failed (not on a review gate):\n#{failure_tail(err)}"
     end
 
     [out, err, status]
   end
 
   # The part of a failed run's stderr that says why: from its abort message (a line starting `bc2cpp:` or
-  # `[bc2cpp]`, e.g. an unreviewed site on a reviewed list, which fails any closed-world run as it fails a build) to the end,
+  # `[bc2cpp]`, e.g. an unreviewed site (no review annotation), which fails any closed-world run as it fails a build) to the end,
   # or the last 25 lines when there is none (an exception's backtrace).
   def failure_tail(stderr)
     lines = stderr.lines
@@ -122,8 +122,8 @@ module NomethodReviewedProbe
     runs(root, mrbc, hot: false).fetch(:proven_miss)
   end
 
-  # The full runs (listing read past a reviewed-list abort), plus with `hot:` the real
-  # build's hot-only runs held to NOMETHOD_REVIEWED: {full: sites, hot: {gem =>
+  # The full runs (listing read past a review-gate abort), plus with `hot:` the real
+  # build's hot-only runs: {full: sites, proven_miss: sites, strict_hint: sites, hot: {gem =>
   # [status, stderr]}}. Runs in parallel; each is one single-threaded Ruby.
   def runs(root, mrbc, hot: true)
     jobs = BC2CPP_COMPILED_GEMS.keys.map { |g| [g, :full] }
@@ -141,7 +141,10 @@ module NomethodReviewedProbe
     proven = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|
       ProvenMiss.parse_listing(err).map { |s| s.merge(gem: gem_name) }
     end
+    strict = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|
+      StrictHints.parse_listing(err).map { |s| s.merge(gem: gem_name) }
+    end
     hot_runs = results.select { |_, kind, _, _| kind == :hot }.to_h { |gem_name, _, err, status| [gem_name, [status, err]] }
-    { full: full, proven_miss: proven, hot: hot_runs }
+    { full: full, proven_miss: proven, strict_hint: strict, hot: hot_runs }
   end
 end

@@ -2196,8 +2196,8 @@ class CodeGen
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
     # The marker outlives SymbolCache's rewrite of the name; bc2cpp.rb reads it
-    # to hold every such site to NOMETHOD_REVIEWED (ADR 0226).
-    marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?)
+    # to hold every such site to its source-line annotation (ADR 0226).
+    marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?, site: insn_source_site)
     error = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
     extra_branches = singleton_branches + extra_branches
     return error if extra_branches.empty?
@@ -2240,7 +2240,7 @@ class CodeGen
   def strict_hint_line(d, recv, name, argv, family)
     args = ", #{argv.size}#{argv.map { |a| ", #{a}" }.join}"
     "r#{d} = bc2cpp_hint_violation_named(M, #{recv}, \"#{name}\", \"@@SITE@@ (#{family.upcase})\"#{args}); " \
-      "#{StrictHints.marker(family, name)}\n"
+      "#{StrictHints.marker(family, name, site: insn_source_site)}\n"
   end
 
   def strict_hint_enabled?(family)
@@ -2273,7 +2273,7 @@ class CodeGen
 
   # `base` is the chain's ordinary else (the block): only its terminal by-name send is replaced, so the
   # native and singleton arms in front of it keep answering their receivers, and a chain whose else is
-  # already `bc2cpp_nomethod` (a proven-dead arm, NOMETHOD_REVIEWED) is left alone: it has no send to force.
+  # already `bc2cpp_nomethod` (a proven-dead arm, an annotated NOMETHOD site) is left alone: it has no send to force.
   # `hinted: false` keeps the base (MONO_EMBED_GUARD without a hint naming the owner).
   # `listed:` (the candidate-set families) is the classes the chain or table names; see
   # ClosedWorld#answered_outside? for why a known class outside it keeps the dispatch (ADR 0428).
@@ -2316,7 +2316,7 @@ class CodeGen
   def unlisted_class_guards(name, listed, site, singleton_arms = nil)
     # HOT_ONLY leaves definers uncompiled, so they look unlisted for a reason a full
     # build would not have, and the dead fallback this creates could not be in
-    # NOMETHOD_REVIEWED, which is the full build's list (ADR 0226): keep the dispatch.
+    # NOMETHOD annotation (ADR 0226), which the full build judges: keep the dispatch.
     return nil if hot_only_active?
 
     instances, scoped, native_free, instance_scope = receiver_instance_scope(site, name)

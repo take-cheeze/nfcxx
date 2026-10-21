@@ -93,8 +93,8 @@ if list_bugs
 end
 puts
 
-# -- NOMETHOD_REVIEWED keys classified by the interface of the value they send to
-puts '== NOMETHOD_REVIEWED sites classified by the interface of their receiver'
+# -- NOMETHOD sites classified by the interface of the value they send to
+puts "== NOMETHOD sites classified by the interface of their receiver"
 nm = rows.select { |r| r['else'] == 'nomethod' && %w[SEND SEND0 SENDB].include?(r['op']) }
 keyed = nm.group_by { |r| "#{r['method']} -> #{r['name']}" }
 classify = lambda do |r|

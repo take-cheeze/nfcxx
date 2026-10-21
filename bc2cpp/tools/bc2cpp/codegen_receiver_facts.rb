@@ -180,7 +180,8 @@ class CodeGen
                                         exact_class, constant_owner, self_implicit)
     return '' unless klass && @closed_world.proven_miss?(name, klass, proven_miss_answered_names, kind, label: irep.label)
 
-    "  #{ProvenMiss.marker(name, kind, klass)}\n"
+    site = "#{irep.file}:#{irep.instructions[idx || site_idx]&.lineno || 0}"
+    "  #{ProvenMiss.marker(name, kind, klass, site: site)}\n"
   end
 
   # symbol_installed_names, plus the names of core Ruby definitions the registry hid because a native

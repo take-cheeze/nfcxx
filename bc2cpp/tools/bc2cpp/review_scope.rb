@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
-# REVIEW_SCOPE: which compiled methods the reviewed lists judge. NOMETHOD_REVIEWED (ADR 0226),
-# PROVEN_MISS_REVIEWED (ADR 0275) and STRICT_HINTS_REVIEWED (ADR 0419) are reviews of one program:
-# the engine, i.e. the methods the gems of BC2CPP_COMPILED_GEMS compile. Their keys are
-# "<compiled owner>#<compiled method> -> ...", and every owner they name is one of those gems' owners.
+# REVIEW_SCOPE: which compiled methods the review gates judge. NOMETHOD (ADR 0226), PROVEN_MISS (ADR 0275) and
+# STRICT_HINT (ADR 0419) sites are reviews of one program: the engine, i.e. the methods the gems of
+# BC2CPP_COMPILED_GEMS compile. Each site names its compiled owner, and every owner a review judges is one of those
+# gems' owners. No review gate judges them any more (ADR 0522).
 #
 # On an engine closed-world build (psp, wio, maix, closed) a site is held to the lists when its compiled
 # owner is an engine owner, matched exactly. Nothing is skipped on a real engine build: each gem's
@@ -42,14 +42,9 @@ module ReviewScope
     scope == ALL || scope.include?(owner)
   end
 
-  # The owner of a list key "<owner>#<method> -> ..." (owners never contain '#').
-  def key_owner(key)
-    key.split('#', 2).first
-  end
-
-  # The sites of `sites` ({key:, ...}) the scope judges.
+  # The sites of `sites` ({owner:, ...}, the compiled owner each site sits in) the scope judges.
   def select(scope, sites)
-    scope == ALL ? sites : sites.select { |s| scope.include?(key_owner(s[:key])) }
+    scope == ALL ? sites : sites.select { |s| scope.include?(s[:owner]) }
   end
 
   # Why an engine-owner run compiled an owner outside the scope (empty when it did not): a run whose
