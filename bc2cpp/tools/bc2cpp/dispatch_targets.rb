@@ -998,29 +998,35 @@ def infer_constructed_constant_classes(ireps, assignment_sites, registry, contai
                                        native_name_sources:, included_modules:, prepended_modules:, unknown_mixins:)
 
   known_owners = Set.new(registry.values.flatten.map(&:owner))
-  inferred = {}
-  assignment_sites.each do |site|
-    next unless closed_world.single_assignment_constant?(site[:name])
-    next unless site[:reg]
-    next if container_constants.key?(site[:name])
+  # Every site's own value class, nil when any gate refuses it. A bare name's sites are judged together: the name
+  # binds one of them at run time, so each site must construct the same class (ClosedWorld#static_constant_writes?
+  # keeps the write set closed). A name with one site is judged as before.
+  values = assignment_sites.map do |site|
+    next nil unless site[:reg] && !container_constants.key?(site[:name])
 
     irep = ireps[site[:irep]]
-    next unless irep
-
-    next unless assigned_from_new_send?(irep, site[:idx], site[:reg])
+    next nil unless irep && assigned_from_new_send?(irep, site[:idx], site[:reg])
 
     klass = trace_new_target(irep, site[:idx], site[:reg], nil, 0, nil, owner: site[:owner],
                              registry: registry, container_constants: container_constants,
                              known_owners: known_owners)
-    next unless klass.is_a?(String)
+    next nil unless klass.is_a?(String)
 
     if known_owners.include?(klass)
-      inferred[site[:name]] = klass
-    elsif (native = native_constructed_class(klass, registry, closed_world, native_name_sources: native_name_sources,
-                                             included_modules: included_modules,
-                                             prepended_modules: prepended_modules, unknown_mixins: unknown_mixins))
-      inferred[site[:name]] = native
+      klass
+    else
+      native_constructed_class(klass, registry, closed_world, native_name_sources: native_name_sources,
+                               included_modules: included_modules, prepended_modules: prepended_modules,
+                               unknown_mixins: unknown_mixins)
     end
+  end
+  inferred = {}
+  assignment_sites.zip(values).group_by { |site, _| site[:name].to_s.split('::').last }.each do |bare, group|
+    classes = group.map { |_, value| value }
+    next unless classes.none?(&:nil?) && classes.uniq.size == 1
+    next unless closed_world.static_constant_writes?(bare, group.size)
+
+    group.each { |site, value| inferred[site[:name]] = value }
   end
   inferred
 end

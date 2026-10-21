@@ -602,10 +602,16 @@ class ClosedWorld
   # site, no outside source writes the name, and the name is not a class
   # declaration. Dynamic constant mutation poisons all such facts.
   def single_assignment_constant?(name)
-    return false if @dynamic_constant_mutation || !name.is_a?(String)
+    return false unless name.is_a?(String)
 
-    simple = name.split('::').last
-    @constant_write_counts[simple] == 1 && !@class_constant_names.include?(simple) &&
+    static_constant_writes?(name.split('::').last, 1)
+  end
+
+  # The bare name's writes are exactly +count+ program SETCONST sites, and no class, deferred or outside write binds it.
+  def static_constant_writes?(simple, count)
+    return false if @dynamic_constant_mutation
+
+    @constant_write_counts[simple] == count && !@class_constant_names.include?(simple) &&
       !@deferred_constant_writes.include?(simple) && !@outside_constant_writes.include?(simple)
   end
 
