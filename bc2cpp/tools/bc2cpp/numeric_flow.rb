@@ -77,6 +77,29 @@ module NumericFlow
   # The type layer's literal classes (BytecodeIR::Types.literal_class) the flow has a bit for. Symbol, true and false
   # are closed-world class bits only the oracle names (literal_class_mask).
   LITERAL_CLASS_MASKS = { Integer: INT, Float: FLT, Array: ARR, Hash: HSH, String: STR, NilClass: NIL, Range: RNG }.freeze
+  # Every bit the codegen sites name: its constant name and the core class it stands for (nil for OTHER). A site
+  # takes only the classes it uses, by name, through NumericFlow.class_bits; omitting one is deliberate, so no site
+  # reads the whole table.
+  BIT_TABLE = {
+    INT => ['INT', 'Integer'], FLT => ['FLT', 'Float'], ARR => ['ARR', 'Array'], HSH => ['HSH', 'Hash'],
+    STR => ['STR', 'String'], NIL => ['NIL', 'NilClass'], OTHER => ['OTHER', nil], RNG => ['RNG', 'Range']
+  }.freeze
+
+  # { bit => class name } for the named classes, in the order given. Raises on a name the table lacks, so a typo
+  # fails at load time rather than dropping a class from a site.
+  def self.class_bits(*names)
+    names.to_h do |klass|
+      entry = BIT_TABLE.find { |_bit, (_const, name)| name == klass }
+      raise ArgumentError, "NumericFlow has no bit for #{klass.inspect}" unless entry
+
+      [entry[0], klass]
+    end.freeze
+  end
+
+  # [position, constant name] for every bit, ordered by position (the bit's index), as the mask printers name them.
+  def self.mask_names
+    BIT_TABLE.map { |bit, (const, _name)| [bit.bit_length - 1, const].freeze }.sort.freeze
+  end
 
   module_function
 

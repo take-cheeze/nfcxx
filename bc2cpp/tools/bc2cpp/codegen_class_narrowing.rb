@@ -47,9 +47,7 @@ class CodeGen
     end
   end
 
-  CLASS_TEST_CORE_BITS = { NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float', NumericFlow::ARR => 'Array',
-                           NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String', NumericFlow::RNG => 'Range',
-                           NumericFlow::NIL => 'NilClass' }.freeze
+  CLASS_TEST_CORE_BITS = NumericFlow.class_bits('Integer', 'Float', 'Array', 'Hash', 'String', 'Range', 'NilClass')
   # The mrb_state field holding each core class, for the run-time membership check.
   CLASS_TEST_CORE_FIELDS = { 'Integer' => 'integer_class', 'Float' => 'float_class', 'Array' => 'array_class',
                              'Hash' => 'hash_class', 'String' => 'string_class', 'Range' => 'range_class' }.freeze
