@@ -42,12 +42,14 @@ jobs:
           cp -r "$kept"/. "$out"/
           ls -la "$out"
           cd "$out"
-          ../../scripts/qbe-cc -c $probe.int.c -o kept.o > qbe-cc.log 2>&1; echo "qbe-cc exit $?" >> qbe-cc.log
-          ../cproc/cproc-qbe $probe.int.c > kept.ssa 2> cproc.log; echo "cproc exit $?" >> cproc.log
-          ../qbe/qbe kept.ssa > /dev/null 2> qbe.log; echo "qbe exit $?" >> qbe.log
+          cat -n $probe.int.c
+          ../../scripts/qbe-cc -c $probe.int.c -o kept.o > qbe-cc.log 2>&1 || true; echo "qbe-cc exit $?" >> qbe-cc.log
+          cat qbe-cc.log
+          ../cproc/cproc-qbe $probe.int.c > kept.ssa 2> cproc.log || true; echo "cproc exit $?" >> cproc.log
+          ../qbe/qbe kept.ssa > /dev/null 2> qbe.log || true; echo "qbe exit $?" >> qbe.log
           cc -E -undef -D__CPROC__ $probe.int.c > kept.pp.c 2> cpp.log; echo "cc -E exit $?" >> cpp.log
           cc --version | head -1 > cc-version.txt
-          cat qbe-cc.log qbe.log
+          cat cproc.log qbe.log
           cat -n kept.ssa | sed -n 1,40p
       - uses: actions/upload-artifact@v4
         if: always()
