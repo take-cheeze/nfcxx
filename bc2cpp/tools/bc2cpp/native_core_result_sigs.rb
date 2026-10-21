@@ -43,7 +43,9 @@ module NativeCoreResultSigs
 
   # Kinds are :fixnum (Integer, only with +scalars+), :float (Float, only with +scalars+) or a class name listed in
   # +classes+. Each method takes one overload and returns exactly one of those.
-  def load_kinds(path, scalars: false, classes: RESULT_CLASSES)
+  # +form+: a member may carry several overloads (the method-level union of a bare and a block form), and its kind is
+  # read from the one of that form: :block (takes a block) or :blockless. Without it every member is single-overload.
+  def load_kinds(path, scalars: false, classes: RESULT_CLASSES, form: nil)
     decls = parse_decls(path)
     out = {}
     decls.each do |decl|
@@ -52,18 +54,28 @@ module NativeCoreResultSigs
       klass = decl.name.to_s.delete_prefix('::')
       table = out[klass] ||= {}
       decl.members.each do |member|
-        unless member.is_a?(RBS::AST::Members::MethodDefinition) && member.overloads.size == 1
+        unless member.is_a?(RBS::AST::Members::MethodDefinition) && (member.overloads.size == 1 || form)
           raise "bc2cpp: #{path}: #{klass} members must be single-overload method definitions"
         end
 
-        table[member.name.to_s] = result_kind(member, klass, path, scalars: scalars, classes: classes)
+        overload = form ? form_overload(member, klass, path, form) : member.overloads.first
+        table[member.name.to_s] = result_kind(member, overload, klass, path, scalars: scalars, classes: classes)
       end
     end
     out.transform_values { |table| table.freeze }.freeze
   end
 
-  def result_kind(member, klass, path, scalars:, classes:)
-    ret = member.overloads.first.method_type.type.return_type
+  # The one overload of +form+ (:block or :blockless) of a member.
+  def form_overload(member, klass, path, form)
+    wanted = form == :block
+    matches = member.overloads.select { |o| o.method_type.block.nil? != wanted }
+    raise "bc2cpp: #{path}: #{klass}##{member.name} needs exactly one #{form} overload" unless matches.size == 1
+
+    matches.first
+  end
+
+  def result_kind(member, overload, klass, path, scalars:, classes:)
+    ret = overload.method_type.type.return_type
     name = ret.is_a?(RBS::Types::ClassInstance) ? ret.name.to_s.delete_prefix('::') : nil
     return :fixnum if scalars && name == 'Integer'
     return :float if scalars && name == 'Float'

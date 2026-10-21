@@ -148,7 +148,7 @@ class CodeGen
     @numeric_class_bits ||= {}
     @numeric_class_bits[klass] ||= begin
       bit = NumericFlow::CLASS_BIT_BASE + @numeric_class_bits.size
-      raise 'numeric class bits reached the CHECKED provenance bit (NumericFlow::CHECKED)' if bit >= NumericFlow::OBJECT_KIND_BASE - 1
+      raise 'numeric class bits reached NumericFlow::ENUMERATOR_BIT' if bit >= NumericFlow::ENUMERATOR_BIT
 
       1 << bit
     end

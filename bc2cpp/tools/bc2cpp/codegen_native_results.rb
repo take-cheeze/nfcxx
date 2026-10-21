@@ -3,6 +3,7 @@
 require_relative 'native_result_facts'
 require_relative 'native_class_results'
 require_relative 'native_core_result_sigs'
+require_relative 'core_blockless_iterator_sigs'
 require_relative 'numeric_flow'
 require_relative 'codegen_return_classes'
 
@@ -68,12 +69,33 @@ class CodeGen
     numeric_class_bit('TrueClass') | numeric_class_bit('FalseClass')
   end
 
+  # SEND/SEND0 with no block: the blockless overload of Enumerable#map and #collect (core_blockless_iterators) is an
+  # Enumerator. mruby's Enumerable#collect (3rd/mruby/mrblib/enum.rb, `alias map collect`) returns `to_enum(:collect)`
+  # without a block, and Array and Hash take that method. Gated: exact instances, no installed or program definition of
+  # the name, and the result is NumericFlow::ENUMERATOR, which names no class.
+  BLOCKLESS_ENUMERATOR_OWNERS = %w[Array Hash].freeze
+
+  def native_core_blockless_enumerator_result(insn, state)
+    return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
+    return nil unless @closed_world&.exact_instances_singleton_free?
+
+    owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]
+    return nil unless BLOCKLESS_ENUMERATOR_OWNERS.include?(owner)
+    return nil unless CoreBlocklessIteratorSigs.results.dig('Enumerable', insn.sym) == 'Enumerator'
+    return nil if symbol_installed_names.nil? || symbol_installed_names.include?(insn.sym)
+    return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
+
+    NumericFlow::ENUMERATOR
+  end
+
   # Only the exact-class oracle supplies this receiver: numeric masks alone
   # do not prove lookup reaches the built-in class's audited body.
   def native_core_class_result(insn, state)
     neq = native_core_neq_class_result(insn, state)
     return neq if neq
 
+    enumerator = native_core_blockless_enumerator_result(insn, state)
+    return enumerator if enumerator
     return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
 
     owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]

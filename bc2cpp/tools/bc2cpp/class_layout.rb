@@ -35,14 +35,8 @@ CHAINED_ARRAY_METHODS = %w[select reject map].freeze
 # program redefines the name (so a future `def keys` withdraws the claim).
 # The names and their 3rd/mruby verification live in sig/bc2cpp/declarations.rbs#core_fresh_arrays.
 # Not here: to_a/dup (receiver-dependent), to_h (Hash), blockless sort_by
-# (CORE_ARRAY_CHAIN_NEEDS_BLOCK), argless first/last (CORE_ARRAY_CHAIN_NEEDS_ARG).
+# (CORE_ARRAY_CHAIN_NEEDS_BLOCK).
 CORE_ARRAY_RETURN_METHODS = NativeCoreResultSigs.fresh_array_names
-
-# CORE_ARRAY_CHAIN: a fresh Array only with an explicit argument (n >= 1):
-# src/array.c mrb_ary_first/mrb_ary_last return an ELEMENT with no argument
-# and ary_subseq/mrb_ary_new_from_values with one. Neither is redefined in
-# this program.
-CORE_ARRAY_CHAIN_NEEDS_ARG = %w[first last].freeze
 
 # CORE_ARRAY_CHAIN: a fresh Array only with a block: Array#sort_by and
 # Enumerable#sort_by (mruby-enum-ext) both `return to_enum(:sort_by) unless
@@ -61,12 +55,10 @@ VETTED_ARRAY_RETURN_OVERRIDES = Set['Array#sort'].freeze
 # at all (uniq, sort_by live in mruby's mrblib) is fine too.
 # This rejects attr_reader/attr_accessor defs (real owner, no irep):
 # Game::State#map is one, so "no bytecode body" is not "cannot be redefined".
-def core_array_return?(name, block_carrying, registry, argc: 0)
+def core_array_return?(name, block_carrying, registry)
   vetted_by_name = VETTED_ARRAY_RETURN_OVERRIDES.any? { |o| o.end_with?("##{name}") }
   if CORE_ARRAY_CHAIN_NEEDS_BLOCK.include?(name)
     return false unless block_carrying
-  elsif CORE_ARRAY_CHAIN_NEEDS_ARG.include?(name)
-    return false unless argc >= 1
   elsif !CORE_ARRAY_RETURN_METHODS.include?(name) && !vetted_by_name
     return false
   end
@@ -99,8 +91,6 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     next nil unless called
 
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
-    # SEND0/SSEND0 print no `n=` field: absent means 0 args.
-    argc = pin.argc || 0
     if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
       # CHAINED_IVAR_RECEIVER: ClassLayout passes the class it has proven so far, so `@q = @q.reject { }` on an ivar
       # that every other store makes an Array is an Array store too (a plain trace cannot read the ivar).
@@ -113,7 +103,7 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
       next 'Array' if called == 'map' || traced == 'Array'
     end
     next 'Array' if annotated&.call(called)
-    next 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
+    next 'Array' if core_array_return?(called, block_carrying, registry)
     # ARRAY_RETURN_PROOF: non-block sends only (see ret_proof above).
     next 'Array' if !block_carrying && ret_proof&.call(called)
 

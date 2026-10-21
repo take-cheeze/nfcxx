@@ -11,47 +11,16 @@ require_relative 'bytecode_ir_containers'
 # devirtualized (`party.each { |a| a.dead? }`).
 #
 # Not a proof: the sweep sees only this program's bytecode, and an Array is
-# mutable through aliases (`party.actors.push(x)`). Mutations it can attribute
-# (ARRAY_ELEMENT_WRITERS on a receiver tracing to `GETIV @x` in the owner) are
-# checked; unattributable ones are a named residual. That is harmless because
-# every consumer re-checks `mrb_class_ptr(...) == mrb_obj_class(M, elem)` and
-# falls back to mrb_funcall. The table is never used to embed, pick a C type or
-# skip a check.
+# mutable through aliases and through library methods (`party.actors.push(x)`).
+# Mutations it can attribute (SETIDX `@x[i] = v` on a receiver tracing to
+# `GETIV @x` in the owner) are checked; every other mutation is a named residual.
+# That is harmless because every consumer re-checks `mrb_class_ptr(...) ==
+# mrb_obj_class(M, elem)` and falls back to mrb_funcall. The table is never used to
+# embed, pick a C type or skip a check.
 # A fixed point (ten passes, sticky UNKNOWN join), as in ClassLayout.
+# Core method names are not modelled here: an element-preserving or element-returning
+# library call is UNKNOWN, and the generic producer join decides everything else.
 # ---------------------------------------------------------------------------
-
-# ELEMENT_CLASS_SUPPORT: core methods whose result's elements are a subset (or
-# permutation) of the receiver's: compact, uniq, sort, reverse, dup (verified
-# in 3rd/mruby); plus first/last with an argument, take/drop, and block-carrying
-# select/reject (they push the element itself). dup is fine here because the
-# receiver is already known to be an Array. map/collect/flat_map replace
-# elements and have their own rule.
-ARRAY_ELEMENT_PRESERVING = %w[compact uniq sort reverse dup].freeze
-ARRAY_ELEMENT_PRESERVING_NEEDS_ARG = %w[first last take drop].freeze
-ARRAY_ELEMENT_PRESERVING_NEEDS_BLOCK = %w[select reject].freeze
-
-# ELEMENT_CLASS_SUPPORT: core methods returning one ELEMENT of the receiver:
-# `[]`/`at`/`fetch` with one argument (`a[i, n]`/`a[range]` return Arrays),
-# argless first/last (mrb_ary_first/mrb_ary_last), sample, min, max.
-ARRAY_ELEMENT_INDEXERS_NEEDS_ARG = %w[[] at fetch].freeze
-ARRAY_ELEMENT_INDEXERS_NO_ARG = %w[first last sample min max].freeze
-
-# ELEMENT_CLASS_SUPPORT: every in-place element writer. All must agree, or
-# `@a = []` followed by `@a.push(x)` would "prove" a class from the empty
-# literal.
-#   - push/<</unshift: every argument is an element;
-#   - insert: every argument after the index;
-#   - []=: with two arguments `v` is an element; three (splice) poisons;
-#   - concat/replace: the argument is an Array; recurse on it.
-# Any other listed writer, or an unmodeled shape, poisons the ivar.
-ARRAY_ELEMENT_WRITERS = %w[push << unshift insert []= concat replace fill collect! map! flatten! sort_by!].freeze
-
-# HASH_ELEMENT_SUPPORT: Hash VALUE writers only (the payoff is the value in
-# `hash.each { |k, v| v.foo }`). `h[k] = v` compiles to SETIDX (see
-# HashElementLayout.analyze); this list covers the explicit `h.[]=(k, v)` /
-# `h.store(k, v)` spellings (both hash_set, src/hash.c). No preserving-chain
-# rule; unmodeled shapes poison.
-HASH_ELEMENT_WRITERS = %w[[]= store].freeze
 
 # PRIMITIVE_ELEMENT_SUPPORT: element tags element_value_class returns for
 # literal primitives. `.known` strips them explicitly: consumers
@@ -112,7 +81,8 @@ def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   end
 end
 
-# ELEMENT_CLASS_SUPPORT: the SEND arm of the scan above.
+# ELEMENT_CLASS_SUPPORT: the SEND arm of the scan above. No core method name is
+# special here: a library call that could return an element is UNKNOWN.
 def send_element_class(irep, i, reg, insn, ctx, depth)
   # Same charset as compile_send's own name extraction (see its comment).
   name = insn.sym
@@ -127,35 +97,6 @@ def send_element_class(irep, i, reg, insn, ctx, depth)
   # definition of the name (else the call may reach another method).
   annotated = ctx[:annotated_element]&.call(name)
   return annotated if annotated
-
-  # A preserving chain yields the receiver's elements. SSEND has no receiver
-  # register to trace.
-  preserving =
-    ARRAY_ELEMENT_PRESERVING.include?(name) ||
-    (ARRAY_ELEMENT_PRESERVING_NEEDS_ARG.include?(name) && argc >= 1) ||
-    (ARRAY_ELEMENT_PRESERVING_NEEDS_BLOCK.include?(name) && block_carrying)
-  if preserving
-    return nil if self_recv
-
-    return array_element_source_scan(irep, i, reg, ctx, depth + 1)
-  end
-
-  # `map`/`collect` with a block: elements are the block's yielded values (see
-  # block_return_class). `flat_map` splices, so it is excluded.
-  if block_carrying && %w[map collect].include?(name) && argc.zero?
-    block_irep = adjacent_block_irep(irep, i, reg, ctx)
-    return nil unless block_irep
-
-    return block_return_class(block_irep, ctx, depth + 1)
-  end
-
-  if block_carrying && name == 'filter_map' && argc.zero?
-    block_irep = adjacent_block_irep(irep, i, reg, ctx)
-    return nil unless block_irep
-
-    input_class = array_element_source_scan(irep, i - 1, reg, ctx, depth + 1)
-    return filter_map_block_return_class(block_irep, ctx, depth + 1, input_class)
-  end
 
   # CHAINED_ACCESSOR_SUPPORT, element dimension (`@state.party.actors`): the
   # receiver resolves to class R, R defines the name as an :ivar_accessor, and
@@ -229,43 +170,6 @@ def block_return_class(block_irep, ctx, depth)
   # Its parameters are not method arguments: `mand: 0` disables the
   # argument-annotation terminal.
   irep_return_class(block_irep, ctx.merge(arg_classes: nil, mand: 0), depth)
-end
-
-# ELEMENT_CLASS_SUPPORT: filter_map drops falsy results, so nil/false exits
-# are ignored; every other RETURN must prove the same class.
-def filter_map_block_return_class(block_irep, ctx, depth, input_class)
-  return nil if depth > 8
-
-  found = nil
-  subctx = ctx.merge(arg_classes: nil, mand: 0)
-  program = BytecodeIR.for(block_irep)
-  program.each_with_op('RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE', 'BREAK', 'RETURN_BLK') do |insn, i|
-    # filter_map drops nil and false itself.
-    next if %w[RETNIL RETFALSE].include?(insn.op)
-    return nil unless insn.op == 'RETURN'
-
-    reg = insn.no_operands? ? '0' : insn.reg
-    sources = BytecodeIR.producers(block_irep, i, reg, through_handlers: true)
-    next if sources&.all? { |p| %w[LOADNIL LOADFALSE].include?(p.op) }
-
-    klass = element_value_class(block_irep, i, reg, subctx, depth + 1)
-    klass ||= input_class if block_mandatory_param_source?(block_irep, i, reg)
-    return nil unless klass && ctx[:known_owners].include?(klass)
-    return nil if found && found != klass
-
-    found = klass
-  end
-  found
-end
-
-# Every producer of the value read is an incoming mandatory parameter.
-def block_mandatory_param_source?(irep, idx, reg)
-  enter = irep.enter
-  mandatory = enter ? enter.enter_fields.first : 0
-  return false if mandatory.zero?
-
-  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true)
-  !sources.nil? && sources.all? { |p| p.entry? && p.reg.to_i.between?(1, mandatory) }
 end
 
 # ELEMENT_CLASS_SUPPORT: trace a register to a class the REGISTRY knows.
@@ -451,7 +355,7 @@ end
 #   1. trace_new_target (fresh `X.new`, known ivar, argument annotation,
 #      chained accessor);
 #   2. a `-> Klass` return annotation (ElementAnnotations);
-#   3. an indexer on an array with a known element class (`@actors[i]`), which
+#   3. an index read with a known element class (`@actors[i]`, GETIDX/AREF), which
 #      lets a self-referential reorder (`@a = order.map { |i| @a[i] }`) agree
 #      instead of poisoning.
 # 2 and 3 are joined over every producer of the register (element_producer_class).
@@ -579,7 +483,8 @@ class ArrayElementLayout
                     arg_classes: arg_classes, arg_elements: arg_elements, elements: elements,
                     annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
 
-            BytecodeIR.for(irep).each_with_op('SETIV', 'SEND', 'SEND0', 'SENDB', 'SETIDX') do |insn, idx|
+            # Library writers (`@x.push(v)`) are not modelled: see the header's residual note.
+            BytecodeIR.for(irep).each_with_op('SETIV', 'SETIDX') do |insn, idx|
               found = nil
               targets = nil
               if insn.op == 'SETIV'
@@ -593,17 +498,6 @@ class ArrayElementLayout
                 # NIL_TOLERANT_JOIN (element dimension): `@x = nil` says nothing about the
                 # elements; see ClassLayout.analyze.
                 next if found.nil? && nil_literal_write?(irep, idx, src_reg)
-              # SSEND/SSENDB excluded: their receiver is self, and the `^R` register is the
-              # destination.
-              elsif %w[SEND SEND0 SENDB].include?(insn.op)
-                name = insn.sym
-                next unless name && ARRAY_ELEMENT_WRITERS.include?(name)
-
-                recv = insn.reg
-                targets = mutated_ivar_targets(irep, idx, recv) & array_ivars
-                next if targets.empty?
-
-                found = written_element_class(irep, idx, insn, recv, name, ctx)
               elsif insn.op == 'SETIDX'
                 # ELEMENT_CLASS_SUPPORT: `@a[0] = x` is OP_SETIDX, not SEND :[]=.
                 # "SETIDX R4 (R5) (R6)" is `R[a][R[a+1]] = R[a+2]`: receiver R4, element R6.
@@ -657,7 +551,7 @@ class ArrayElementLayout
 end
 
 # ELEMENT_CLASS_SUPPORT: the ivars a mutation's receiver may name: the GETIV of
-# every producer of the register (through handler edges), so `(@x ||= []) << v`,
+# every producer of the register (through handler edges), so `(@x ||= [])[0] = v`,
 # whose receiver is `@x` or the fresh `[]` just stored into it, still counts as a
 # write to @x. Extra targets only add checks. Empty means "not attributed" (the
 # aliasing residual in this section's header), not "no mutation".
@@ -668,48 +562,9 @@ def mutated_ivar_targets(irep, idx, reg)
   sources.filter_map { |p| p.insn.ivar if p.op == 'GETIV' }.uniq
 end
 
-# ELEMENT_CLASS_SUPPORT: element class one in-place mutation writes, or nil
-# (poison). See ARRAY_ELEMENT_WRITERS for the argument layouts.
-def written_element_class(irep, idx, insn, recv, name, ctx)
-  # A splat call ("n=*") has no fixed register list, so it poisons.
-  return nil if insn.n_spec == '*'
-
-  argc = insn.n_spec.to_i
-  base = recv.to_i
-  arg_regs = (1..argc).map { |k| (base + k).to_s }
-
-  value_regs =
-    case name
-    when 'push', '<<', 'unshift' then arg_regs
-    when 'insert' then argc >= 2 ? arg_regs.drop(1) : nil
-    when '[]=' then argc == 2 ? [arg_regs.last] : nil
-    when 'concat', 'replace'
-      return nil unless argc == 1
-
-      # The argument is an Array: ask the same scan about it.
-      return array_element_source_scan(irep, idx, arg_regs.first, ctx, 1)
-    end
-  return nil if value_regs.nil? || value_regs.empty?
-
-  classes = value_regs.map { |r| element_value_class(irep, idx, r, ctx, 1) }
-  return nil if classes.any?(&:nil?) || classes.uniq.size != 1
-
-  classes.first
-end
-
-# HASH_ELEMENT_SUPPORT: value class written by `h[]=`/`h.store` (both
-# hash_set, src/hash.c, same (key, value) layout): arity must be 2; read the
-# second argument.
-def written_hash_element_class(irep, idx, insn, recv, ctx)
-  return nil unless insn.n_spec == '2'
-
-  val_reg = (recv.to_i + 2).to_s
-  element_value_class(irep, idx, val_reg, ctx, 1)
-end
-
 # HASH_ELEMENT_SUPPORT: "every VALUE of this Hash ivar is class X"
-# (HASH_ELEM_HINT). Narrower than ArrayElementLayout: values only, no
-# preserving-chain rule; unmodeled writers poison. Mirrors ArrayElementLayout's
+# (HASH_ELEM_HINT). Narrower than ArrayElementLayout: values only, and only SETIDX
+# (`h[k] = v`) writes are attributed. Mirrors ArrayElementLayout's
 # analyze/known/unknowns, kept as its own class rather than parameterized.
 class HashElementLayout
   UNKNOWN = ElementTableQueries::UNKNOWN
@@ -766,7 +621,8 @@ class HashElementLayout
                     arg_classes: arg_classes, elements: array_elements, hash_elements: hash_elements,
                     annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
 
-            BytecodeIR.for(irep).each_with_op('SETIV', 'SEND', 'SEND0', 'SENDB', 'SETIDX') do |insn, idx|
+            # Library writers (`@h.store(k, v)`) are not modelled: see the header's residual note.
+            BytecodeIR.for(irep).each_with_op('SETIV', 'SETIDX') do |insn, idx|
               found = nil
               targets = nil
               if insn.op == 'SETIV'
@@ -779,16 +635,6 @@ class HashElementLayout
                 found = hash_element_source_scan(irep, idx, src_reg, ctx)
                 # NIL_TOLERANT_JOIN (hash-value dimension); see ArrayElementLayout.analyze.
                 next if found.nil? && nil_literal_write?(irep, idx, src_reg)
-              # SSEND/SSENDB excluded, as in ArrayElementLayout.analyze.
-              elsif %w[SEND SEND0 SENDB].include?(insn.op)
-                name = insn.sym
-                next unless name && HASH_ELEMENT_WRITERS.include?(name)
-
-                recv = insn.reg
-                targets = mutated_ivar_targets(irep, idx, recv) & hash_ivars
-                next if targets.empty?
-
-                found = written_hash_element_class(irep, idx, insn, recv, ctx)
               elsif insn.op == 'SETIDX'
                 # `h[k] = v` is OP_SETIDX: "SETIDX R4 (R5) (R6)", receiver R4, value R6 (the
                 # key is not read).
@@ -905,15 +751,7 @@ def element_producer_class(irep, producer, ctx, depth)
   annotated = ctx[:annotated_ret_class]&.call(name)
   return annotated if annotated
 
-  argc = insn.argc || 0
   self_recv = %w[SSEND SSEND0 SSENDB].include?(insn.op)
-  indexer = (ARRAY_ELEMENT_INDEXERS_NEEDS_ARG.include?(name) && argc == 1) ||
-            (ARRAY_ELEMENT_INDEXERS_NO_ARG.include?(name) && argc.zero?)
-  if indexer && !self_recv
-    hit = array_element_source_scan(irep, i, producer.reg, ctx, depth + 1)
-    return hit if hit && hit != ArrayElementLayout::VACUOUS
-  end
-
   scoped = if self_recv
              sc = self_receiver_class(ctx)
              sc && class_scoped_return_class(sc, name, ctx, depth)
