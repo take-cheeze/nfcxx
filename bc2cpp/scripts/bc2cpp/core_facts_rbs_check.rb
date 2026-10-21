@@ -47,8 +47,12 @@ check.call('frame readers: block readers return bool, frame readers Binding',
            CoreFactSigs.block_given_names == %w[block_given? iterator?] && CoreFactSigs.frame_reading_names == %w[binding])
 check.call('enumerator makers load', CoreFactSigs.enumerator_makers == %w[to_enum enum_for])
 check.call('Proc call names load', CoreFactSigs.proc_call_names == %w[call yield [] ===])
-check.call('class-test owners keep the first-declaration order of names and owners',
-           CoreFactSigs.class_test_owners.keys == %w[is_a? kind_of? instance_of? nil? ! raise respond_to? class] &&
+# The names come from the RBS table itself, read through NativeCoreResultSigs.parse_decls (not through
+# class_test_owners' owner filter), so a name dropped or added by the reader, or a declaration the reader skips, shows up.
+rbs_class_test_names = NativeCoreResultSigs.parse_decls(CoreFactSigs::CLASS_TESTS_PATH)
+                                           .flat_map { |decl| decl.members.map { |member| member.name.to_s } }.uniq
+check.call('class-test owners keep the first-declaration order of names and owners, and cover every name the RBS table declares',
+           CoreFactSigs.class_test_owners.keys == rbs_class_test_names &&
              CoreFactSigs.class_test_owners['nil?'] == %w[Kernel NilClass])
 check.call('loaded facts are frozen',
            [CoreFactSigs.frame_readers, CoreFactSigs.enumerator_makers, CoreFactSigs.proc_call_names,
