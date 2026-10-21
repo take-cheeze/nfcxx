@@ -27,6 +27,9 @@ module CoreHierarchySigs
       includes = decl.members.grep(RBS::AST::Members::Include).map { |m| m.name.to_s.delete_prefix('::') }
       mixins[name] = includes.freeze unless includes.empty?
     end
+    # Every consumer assumes the core classes are declared; an empty section would be read as "no core classes".
+    raise "bc2cpp: #{path}: no core_hierarchy classes (the section is missing or empty)" if super_of.empty?
+
     [super_of.freeze, mixins.freeze]
   end
 
@@ -48,6 +51,13 @@ module CoreHierarchySigs
       name = super_of[name]
     end
     out.freeze
+  end
+
+  # hierarchy with Symbol names, for callers that key on symbols (IrTypeFeedback). BasicObject has no superclass entry.
+  def symbol_hierarchy
+    super_of, mixins = hierarchy
+    parents = super_of.each_with_object({}) { |(name, sup), out| out[name.to_sym] = sup.to_sym unless sup.nil? }
+    [parents.freeze, mixins.to_h { |name, mods| [name.to_sym, mods.map(&:to_sym).freeze] }.freeze]
   end
 
   # The superclass chain from +name+ up to, not including, +stop+ (which must be on it).
