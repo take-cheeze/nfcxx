@@ -6,8 +6,9 @@ class CodeGen
   # Owner/class pairs for frame-independent wrapper bodies that mirror these
   # mruby-rgss registrations. Keep exact owners here: NATIVE_SRCS records the
   # method name globally, while the runtime class guard selects the owner.
+  # `bitmap=` is not listed: NativeDirect::ENTRIES gives it the same entry
+  # point, and the generic NATIVE_DIRECT arms (codegen_native_direct.rb) emit it.
   NATIVE_WRAPPER_DIRECT_OWNERS = {
-    'bitmap=' => %w[RGSS::Sprite],
     'clear' => %w[RGSS::Bitmap],
     'rect' => %w[RGSS::Bitmap RGSS::Viewport],
     'fill_rect' => %w[RGSS::Bitmap],

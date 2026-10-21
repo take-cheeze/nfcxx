@@ -20,7 +20,6 @@ module ExactNativeWrappers
   end
 
   CALLS = {
-    'bitmap=' => { 'RGSS::Sprite' => [[1], ONE_VALUE.call('sprite_bitmap_set_direct')] },
     'text_size' => { 'RGSS::Bitmap' => [[1], ONE_VALUE.call('bitmap_text_size_direct')] },
     'fill_rect' => { 'RGSS::Bitmap' => [[5], lambda { |recv, argv|
       "rgss::bitmap_fill_rect_direct(M, #{recv}, #{argv.join(', ')})"
