@@ -11,6 +11,7 @@ require_relative 'native_direct'
 require_relative 'dynamic_names'
 require_relative 'loop_installers'
 require_relative 'scan_cache'
+require_relative 'send_names'
 
 # CLOSED_WORLD (docs/adr/0210, 0466): bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -28,9 +29,9 @@ class ClosedWorld
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
   MIXIN_SENDS = %w[include prepend extend].freeze
   # Sends that change a method's visibility by name (NATIVE_EXACT_DIRECT).
-  VISIBILITY_SENDS = %w[private public protected private_class_method public_class_method module_function].freeze
+  VISIBILITY_SENDS = SendNames::VISIBILITY_SENDS
   # Sends that rebind a constant a guard chain resolves.
-  CONST_REBINDERS = %w[const_set remove_const].freeze
+  CONST_REBINDERS = SendNames::CONST_REBINDERS
   # Constants whose `.new` makes a class (or members) the registry cannot see.
   CLASS_FACTORIES = %w[Class Module Struct Data].freeze
   SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
