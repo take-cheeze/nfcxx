@@ -185,6 +185,59 @@ check.call('transfer: the call result, the frame above it and the slot widened',
 raised_state = NF.raise_state(FakeCall.new('SEND0', '1'), state, after, ctx)
 check.call('raise_state joins the widened state with the result', raised_state[1] == (NF::STR | OTHER))
 
+puts '-- slot widening fixed points (host)'
+saved_slot_unions = ENV['BC2CPP_NUMERIC_SLOT_UNIONS']
+begin
+  [1 << 240, (1 << 260) | FLT, -1].each do |fact|
+    results = %w[0 1].map do |mode|
+      ENV['BC2CPP_NUMERIC_SLOT_UNIONS'] = mode
+      oracle = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
+      oracle.define_singleton_method(:ivar_entry_mask) { |_irep, name| note(:ivar_entry_mask, name) && (1 << 200) }
+      oracle.define_singleton_method(:ivar_fact_mask) { |_irep, name| note(:ivar_fact_mask, name) && fact }
+      written = {}
+      [NF.states(irep, oracle, Set.new, written), written, oracle.log]
+    end
+    check.call("slot union reuse preserves states, writes and oracle order for #{fact}", results[0] == results[1])
+  end
+ensure
+  ENV['BC2CPP_NUMERIC_SLOT_UNIONS'] = saved_slot_unions
+end
+[nil, false, true, INT.to_f].each do |invalid|
+  answers = [nil, [nil]].map do |cache|
+    context = NF::Ctx.new(nil, Object.new, Set.new, 1, ['n'], { 'n' => 1 }, [INT], 2, nil)
+    context.widened_slots = cache
+    input = [OTHER, invalid, 0]
+    begin
+      NF.refresh_slots(input, context)
+      input
+    rescue TypeError, NoMethodError => error
+      error.class
+    end
+  end
+  check.call("slot union reuse preserves malformed #{invalid.inspect} behavior", answers[0] == answers[1])
+end
+slot_contexts = 2.times.map { NF::Ctx.new(nil, Object.new, Set.new, 2, ['n'], { 'n' => 2 }, [(1 << 220) | INT], 3, nil) }
+slot_contexts[1].widened_slots = [nil]
+slot_states = 2.times.map { [INT, FLT, 1 << 200, 1, 0] }
+slot_sequence = [nil, nil, FLT, nil, 0, nil, -1, nil, 1 << 260, nil, nil]
+slot_matches = slot_sequence.all? do |replacement|
+  slot_states.each_with_index do |input, mode|
+    input[2] = replacement unless replacement.nil?
+    input[3] = 1
+    NF.refresh_slots(input, slot_contexts[mode])
+  end
+  slot_states[0] == slot_states[1] && slot_states[1][3, 2] == [0, 0]
+end
+check.call('repeated widening after slot rewrites preserves masks and provenance invalidation', slot_matches)
+mutable_facts = [1 << 200]
+manual_slots = NF::Ctx.new(nil, Object.new, Set.new, 2, ['n'], { 'n' => 2 }, mutable_facts, 3, nil)
+slot_input = [INT, FLT, INT, 1, 0]
+NF.refresh_slots(slot_input, manual_slots)
+mutable_facts[0] = 1 << 250
+NF.refresh_slots(slot_input, manual_slots)
+check.call('standalone contexts still observe mutated slot facts',
+           manual_slots.widened_slots.nil? && slot_input[2] == (INT | (1 << 200) | (1 << 250)))
+
 puts '-- unchanged load writes (host)'
 load_context = lambda do |writes, opaque = Set.new|
   context = NF::Ctx.new(nil, Object.new, opaque, 4, ['n'], { 'n' => 4 }, [INT], 9, writes)
