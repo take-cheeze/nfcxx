@@ -20,7 +20,7 @@ module BaseSection
   TAGS = {
     'mruby-core' => 'base_mruby-core', 'mruby-dir' => 'base_dir', 'mruby-exit' => 'base_exit', 'mruby-fiber' => 'base_fiber', 'mruby-io' => 'base_io',
     'mruby-lcf' => 'base_lcf', 'mruby-marshal' => 'base_marshal', 'mruby-math' => 'base_math',
-    'mruby-mvjs' => 'base_mvjs', 'mruby-numeric-ext' => 'base_numeric',
+    'mruby-math-wio' => 'base_math-wio', 'mruby-mvjs' => 'base_mvjs', 'mruby-numeric-ext' => 'base_numeric',
     'mruby-random' => 'base_random', 'mruby-rgss' => 'base_rgss', 'mruby-rpg2k' => 'base_rpg',
     'mruby-sprintf' => 'base_sprintf', 'mruby-stringio' => 'base_stringio', 'mruby-time' => 'base_time',
     'mruby-wolf' => 'base_wolf'
