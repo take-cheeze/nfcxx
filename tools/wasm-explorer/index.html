@@ -134,15 +134,23 @@
       <button role="tab" id="tab-wat" aria-selected="false" aria-controls="view-wat" data-tab="wat">WAT</button>
       <button role="tab" id="tab-ir" aria-selected="false" aria-controls="view-ir" data-tab="ir">IR</button>
       <button role="tab" id="tab-hex" aria-selected="false" aria-controls="view-hex" data-tab="hex">Bytes</button>
+      <button role="tab" id="tab-console" aria-selected="false" aria-controls="view-console" data-tab="console">Console</button>
     </div>
     <div class="view" id="view-module" role="tabpanel" aria-labelledby="tab-module">
       <div id="error" class="error" hidden></div>
       <div class="card">
         <h2>Run</h2>
         <button id="run" disabled>Run main()</button>
-        <p class="muted" style="margin:8px 0 0">Imports of the module are stubbed the way <code>tests/wasm/host.cjs</code> stubs them:
-          each returns its first argument plus one.</p>
+        <p class="muted" style="margin:8px 0 0">An import named like one of the browser bindings below is connected to it.
+          Any other import is stubbed the way <code>tests/wasm/host.cjs</code> stubs them: it returns its first argument plus one.</p>
         <div id="result" class="result" style="margin-top:10px"></div>
+      </div>
+      <div class="card">
+        <h2>Browser bindings</h2>
+        <table><thead><tr><th>import (module env)</th><th>C++ declaration</th><th>browser feature</th></tr></thead>
+          <tbody id="bindings"></tbody></table>
+        <p class="muted" style="margin:8px 0 0;font-size:12px">A string is read from the module's exported memory at the
+          pointer given (LP64 pointers are 64-bit, so the page reads them as BigInt).</p>
       </div>
       <div class="card">
         <h2>Module</h2>
@@ -163,7 +171,7 @@
       </div>
       <div class="card">
         <h2>Imports</h2>
-        <table><thead><tr><th>module</th><th>name</th><th>kind</th></tr></thead><tbody id="imports"></tbody></table>
+        <table><thead><tr><th>module</th><th>name</th><th>kind</th><th>provided by</th></tr></thead><tbody id="imports"></tbody></table>
       </div>
     </div>
     <div class="view" id="view-wat" role="tabpanel" aria-labelledby="tab-wat" hidden>
@@ -178,11 +186,17 @@
     <div class="view" id="view-hex" role="tabpanel" aria-labelledby="tab-hex" hidden>
       <pre id="hex" aria-label="Module bytes"></pre>
     </div>
+    <div class="view" id="view-console" role="tabpanel" aria-labelledby="tab-console" hidden>
+      <p class="muted" style="margin:0 0 8px;font-size:12px">Output of the browser bindings the module calls during Run.</p>
+      <pre id="console" aria-label="Console output"></pre>
+    </div>
   </section>
 </main>
 
+<script src="bindings.js"></script>
 <script>
 (() => {
+  const B = window.nfcxxBindings;
   "use strict";
 
   // Outside resources, pinned. Monaco is the editor, wabt turns the module into WebAssembly text.
@@ -199,6 +213,8 @@
     seq: 0,              // compile requests in flight; a response for an older one is dropped
     autoTimer: null,
   };
+  const titleAtLoad = document.title;
+
   let monaco = null;     // the monaco namespace, once loaded
   let editor = null;     // the Monaco editor, once created; else the textarea #fallback is the editor
 
@@ -295,7 +311,7 @@
     $("s-imports").textContent = String(imports.length);
     $("s-ms").textContent = ms.toFixed(0);
     fillTable("exports", exports.map((e) => [e.name, e.kind]));
-    fillTable("imports", imports.map((i) => [i.module, i.name, i.kind]));
+    fillTable("imports", imports.map((i) => [i.module, i.name, i.kind, B.bindingFor(i.name, i.kind) ? "browser binding" : "stub"]));
     $("hex").textContent = hexDump(bytes, 1024);
     blobLink("download", bytes, "application/wasm");
     $("download-wat").hidden = true;
@@ -307,23 +323,27 @@
   function run() {
     if (!state.current) return;
     clearRun();
-    const imports = {};
-    for (const imp of WebAssembly.Module.imports(state.current.module)) {
-      if (imp.kind !== "function") {
-        $("result").textContent = `import ${imp.module}.${imp.name} (${imp.kind}) is not provided by this page`;
-        return;
-      }
-      imports[imp.module] = imports[imp.module] || {};
-      imports[imp.module][imp.name] = (x) => (Number(x) | 0) + 1;
-    }
+    $("console").textContent = "";
+    let memory = null;
+    const ctx = B.makeContext({
+      write: (text) => {
+        $("console").textContent += text;
+      },
+      memory: () => memory,
+    });
     const out = $("result");
     try {
-      const instance = new WebAssembly.Instance(state.current.module, imports);
+      const instance = new WebAssembly.Instance(state.current.module, B.importsFor(state.current.module, ctx));
+      memory = instance.exports.memory || null;
       out.textContent = String(instance.exports.main());
     } catch (e) {
       out.textContent = (e instanceof WebAssembly.RuntimeError ? "trap: " : "") + String((e && e.message) || e);
       out.classList.add("trap");
+    } finally {
+      ctx.flush();
+      document.title = titleAtLoad;
     }
+    if (!$("console").textContent) $("console").textContent = "(no output)";
   }
 
   // ---- WAT, through wabt, loaded when first needed -------------------------------------------------------------------
@@ -482,7 +502,7 @@
     for (const b of document.querySelectorAll(".tabs button")) {
       b.setAttribute("aria-selected", String(b.dataset.tab === name));
     }
-    for (const v of ["module", "wat", "ir", "hex"]) {
+    for (const v of ["module", "wat", "ir", "hex", "console"]) {
       $("view-" + v).hidden = v !== name;
     }
     if (name === "wat") renderWat();
@@ -571,7 +591,22 @@
     }
   }
 
+  function fillBindings() {
+    const body = $("bindings");
+    body.textContent = "";
+    for (const [name, b] of Object.entries(B.BINDINGS)) {
+      const tr = document.createElement("tr");
+      for (const text of [name, b.decl, b.feature]) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+  }
+
   async function init() {
+    fillBindings();
     const server = await detectServer();
     state.live = !!server.live;
     if (!state.live) {
