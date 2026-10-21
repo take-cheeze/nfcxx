@@ -42,6 +42,7 @@ case $src in
   *N1720*) [ "$front" = 1 ] || exit 2 ;;
   *N1757*) exit 139 ;;
   *N1791*) exit 124 ;;
+  *N2634*) echo 'eccp: qbe-cc compilation of probe.int.c returned an exit status of 1' >&2; exit 129 ;;
 esac
 code=0
 case $src in *N1811*) code=1 ;; *N1984*) code=124 ;; *N1986*) code=139 ;; esac
@@ -50,7 +51,7 @@ chmod +x "$out"
 EOF
 chmod +x "$tmp/compiler"
 FEATURE_CXX="$tmp/compiler" FEATURE_ROUTES=gcc FEATURE_OUT="$tmp/results" tests/cpp-features/run.sh > "$tmp/log" 2>&1
-for status in pass frontend-rejected route-rejected compile-crash compile-timeout wrong-result run-timeout run-crash; do
+for status in pass frontend-rejected route-rejected backend-rejected compile-crash compile-timeout wrong-result run-timeout run-crash; do
   grep -q $'\t'"$status"$'\t' "$tmp/results/results.tsv" || { echo "missing $status" >&2; exit 1; }
 done
 if FEATURE_REQUIRE_PASS=1 FEATURE_CXX="$tmp/compiler" FEATURE_ROUTES=gcc FEATURE_OUT="$tmp/strict" tests/cpp-features/run.sh > /dev/null 2>&1; then
