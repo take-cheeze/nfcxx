@@ -5,6 +5,7 @@ require_relative 'core_hierarchy_sigs'
 require_relative 'integer_constants'
 require_relative 'irep_scans'
 require_relative 'native_sigs'
+require_relative 'rbs_parse_memo'
 
 # DECLARED_CONSTANT_CHECK (docs/adr/0455): RBS constant declarations, checked at every assignment.
 #
@@ -47,7 +48,7 @@ module DeclaredConstants
     require 'rbs'
     files.flat_map do |file|
       rel = display_root ? file.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : file
-      _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: rel, content: File.read(file)))
+      decls = RbsParseMemo.decls(rel, File.read(file))
       # Native declarations are checked by their own generators, not as the program's constants.
       collect(decls.reject { |decl| NativeSigs.native?(decl) }, [], rel, known_owners)
     rescue RBS::ParsingError

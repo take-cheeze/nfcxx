@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'native_sigs'
+require_relative 'rbs_parse_memo'
 
 # NativeCoreResultSigs: the result kind of built-in methods, read from RBS files under sig/bc2cpp/. It replaces the
 # hand-written NativeClassResults::EXACT_CORE_KINDS table with the same { class => { name => kind } } shape. A file
@@ -36,9 +37,7 @@ module NativeCoreResultSigs
   def parse_decls(path)
     return NativeSigs.decls(path) if NativeSigs.table?(path)
 
-    require 'rbs'
-    _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: File.basename(path), content: File.read(path)))
-    decls
+    RbsParseMemo.decls(File.basename(path), File.read(path))
   end
 
   # Kinds are :fixnum (Integer, only with +scalars+), :float (Float, only with +scalars+) or a class name listed in

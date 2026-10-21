@@ -6,6 +6,7 @@ require_relative 'record_hash'
 require_relative 'rbs_signatures'
 require_relative 'core_hierarchy_sigs'
 require_relative 'escape_analysis'
+require_relative 'rbs_parse_memo'
 
 # RBS_RECORD_TYPES (docs/adr/0454): an RBS record type on an ivar (`@ui: { battle: Game::Battle, ?win: Window }`)
 # is a CHECKED declaration that feeds the facts RECORD_HASH_PROOF (ADR 0285) produces.
@@ -65,7 +66,7 @@ module RbsRecordTypes
     files.each do |file|
       rel = display_root ? file.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : file
       begin
-        _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: rel, content: File.read(file)))
+        decls = RbsParseMemo.decls(rel, File.read(file))
       rescue RBS::ParsingError
         next # RbsSignatures reports it (TC1002)
       end
