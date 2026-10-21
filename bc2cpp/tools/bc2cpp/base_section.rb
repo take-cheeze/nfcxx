@@ -26,6 +26,7 @@ module BaseSection
     'mruby-lcf' => 'base_lcf', 'mruby-marshal' => 'base_marshal', 'mruby-math' => 'base_math',
     'mruby-array-ext' => 'base_array', 'mruby-enum-ext' => 'base_enum', 'mruby-hash-ext' => 'base_hash',
     'mruby-range-ext' => 'base_range', 'mruby-rpgvx' => 'base_rpgvx', 'mruby-rpgxp' => 'base_rpgxp',
+    'mruby-onig-regexp' => 'base_onig-regexp',
     'mruby-math-wio' => 'base_math-wio', 'mruby-mvjs' => 'base_mvjs', 'mruby-numeric-ext' => 'base_numeric',
     'mruby-random' => 'base_random', 'mruby-rgss' => 'base_rgss', 'mruby-rpg2k' => 'base_rpg',
     'mruby-sprintf' => 'base_sprintf', 'mruby-stringio' => 'base_stringio', 'mruby-time' => 'base_time',
