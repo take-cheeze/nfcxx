@@ -15,6 +15,7 @@ require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/core_fact_sigs'
 require_relative '../../tools/bc2cpp/core_hierarchy_sigs'
+require_relative '../../tools/bc2cpp/core_block_iterator_sigs'
 require_relative '../../tools/bc2cpp/rbs_signatures'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/native_names'
@@ -67,6 +68,28 @@ check.call('Proc calls: rejects a superclass line', rejects(:proc_call_names, "c
 check.call('class tests: rejects an owner outside the list', rejects(:class_test_owners, "class Object\n  def nil?: () -> bool\nend\n"))
 check.call('class tests: rejects a singleton method', rejects(:class_test_owners, "module Kernel\n  def self.nil?: () -> bool\nend\n"))
 check.call('class tests: rejects a rest parameter', rejects(:class_test_arities, "module Kernel\n  def raise: (*untyped) -> bot\nend\n"))
+
+def rejects_block_iterators(text)
+  Dir.mktmpdir do |dir|
+    path = File.join(dir, 'bad.rbs')
+    File.write(path, text)
+    CoreBlockIteratorSigs.load_results(path)
+    false
+  rescue RuntimeError
+    true
+  end
+end
+check.call('block iterators: loads the declared results',
+           CoreBlockIteratorSigs.results.fetch('Enumerable').fetch('group_by') == 'Hash' &&
+             CoreBlockIteratorSigs.results.fetch('Hash').fetch('reject') == 'Hash')
+check.call('block iterators: rejects a result other than Array or Hash',
+           rejects_block_iterators("module Enumerable\n  def map: () { (untyped) -> untyped } -> Integer\nend\n"))
+check.call('block iterators: rejects a missing block',
+           rejects_block_iterators("module Enumerable\n  def map: () -> Array[untyped]\nend\n"))
+check.call('block iterators: rejects a positional argument',
+           rejects_block_iterators("module Enumerable\n  def map: (Integer) { (untyped) -> untyped } -> Array[untyped]\nend\n"))
+check.call('block iterators: rejects a name declared twice',
+           rejects_block_iterators("module Enumerable\n  def map: () { (untyped) -> untyped } -> Array[untyped]\n  def map: () { (untyped) -> untyped } -> Array[untyped]\nend\n"))
 
 # 2. Against 3rd/mruby.
 # (required, optional) of a registration's aspec; nil for a form this check does not read.
@@ -129,6 +152,14 @@ if File.file?(File.join(MRUBY, 'src/kernel.c'))
   (makers - defined).each do |name|
     check.call("enumerators: Kernel##{name} is an alias of a modelled maker",
                defined.any? { |target| kernel.match?(/^  alias #{Regexp.escape(name)} #{Regexp.escape(target)}\n/) })
+  end
+
+  mrblib = Dir[File.join(MRUBY, '{mrblib,mrbgems/*/mrblib}/**/*.rb')].map { |path| File.binread(path) }
+  CoreBlockIteratorSigs.results.each do |owner, names|
+    names.each do |name, klass|
+      defined = mrblib.any? { |text| text.match?(/^\s*def #{Regexp.escape(name)}\(&(block|blk)\)/) }
+      check.call("block iterators: #{owner}##{name} has a block-taking mruby body (its #{klass} result is read from the body by the bc2cpp analysis)", defined)
+    end
   end
 
   proc_init = File.binread(File.join(MRUBY, 'src/proc.c'))[/^mrb_init_proc\(mrb_state \*mrb\)\n\{\n.*?^\}\n/m].to_s

@@ -4,7 +4,6 @@ require 'json'
 require 'set'
 require_relative 'receiver_proof_report_columns'
 require_relative 'type_check_rbs'
-require_relative 'constant_reviewed'
 
 # TYPE_CHECK (docs/adr/0412): turns the facts bc2cpp wrote (type_facts.rb) and, optionally, the receiver-proof rows
 # (BC2CPP_RECEIVER_PROOF_REPORT, ADR 0331) into the three outputs of scripts/bc2cpp/type_check.rb:
@@ -22,8 +21,6 @@ require_relative 'constant_reviewed'
 #   TC1007 error    an inferred IR may-set is disjoint from a nominal RBS return/ivar contract
 #   TC1008 warning  an inferred IR may-set partly overlaps the contract
 #   TC1016 error    an RBS `class C < S` whose S is not the program's superclass of C (ADR 0453)
-#   TC1017 error    an engine constant with no type that CONSTANT_REVIEWED does not list, or a listed one that is typed
-#                   or gone (the ratchet, ADR 0491; only when a list is given)
 #   TC2004 info     (--all) an IR query is unknown, with its refusal reason
 #   TC2001 info     (--all) a parameter has no type, with the reason bucket
 #   TC2002 info     (--all) a return has no type, with the reason bucket
@@ -143,8 +140,7 @@ module TypeCheckReport
 
   # ---------------------------------------------------------------------------------------------- diagnostics
 
-  # `constant_reviewed`: the Set of names the ratchet judges the constants by (ConstantReviewed.load), or nil for no gate.
-  def diagnostics(facts, suggestions, all: false, top: 20, scope: 'engine', constant_reviewed: nil)
+  def diagnostics(facts, suggestions, all: false, top: 20, scope: 'engine')
     out = []
     facts['contradictions'].each do |c|
       out << Diagnostic.new(file: c['file'], line: c['line'], col: c['col'], severity: 'error', code: 'TC1001',
@@ -185,12 +181,6 @@ module TypeCheckReport
       out << Diagnostic.new(file: row['file'], line: row['line'], col: row['col'], severity: possible ? 'warning' : 'error', code: possible ? 'TC1008' : 'TC1007',
                             message: "#{row['owner']}##{row['method']} #{row['kind'] == 'return' ? 'return' : row['detail']}: inferred #{row['type']} " \
                                      "#{possible ? 'may exceed' : 'falls outside'} RBS contract #{row['expected']}")
-    end
-    if constant_reviewed
-      ConstantReviewed.violations(facts['constants'], reviewed: constant_reviewed).each do |v|
-        out << Diagnostic.new(file: v[:file], line: v[:line], col: v[:col], severity: 'error', code: ConstantReviewed::CODE,
-                              message: v[:message])
-      end
     end
     suggestions.first(top).each_with_index do |s, rank|
       next unless s['file']

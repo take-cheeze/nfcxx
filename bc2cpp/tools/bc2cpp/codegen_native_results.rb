@@ -3,7 +3,6 @@
 require_relative 'native_result_facts'
 require_relative 'native_class_results'
 require_relative 'native_core_result_sigs'
-require_relative 'native_core_block_result_sigs'
 require_relative 'numeric_flow'
 require_relative 'codegen_return_classes'
 
@@ -55,22 +54,6 @@ class CodeGen
     NativeCoreResultSigs.kinds.dig(klass, name)
   end
 
-  # SENDB (a call with a block): the block form's result class (core_block_results). Only an exact core receiver
-  # whose name no installer or program definition can replace; the bare SEND keeps its own answer below.
-  def native_core_block_class_result(insn, state)
-    return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && @closed_world&.exact_instances_singleton_free?
-
-    owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]
-    kind = owner && NativeCoreBlockResultSigs.kinds.dig(owner, insn.sym)
-    return nil unless kind
-    return nil if symbol_installed_names.include?(insn.sym)
-    return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
-
-    native_result_bits(kind, true)
-  end
-
-  # Only the exact-class oracle supplies this receiver: numeric masks alone
-  # do not prove lookup reaches the built-in class's audited body.
   # BOOL (`!=`): mruby's BasicObject#!= is `!(self == other)`, and `!` answers true or false, so a `!=` send answers
   # one of the two boolean class bits whatever the receiver. Gated like the other core results: exact instances, and no
   # program definition or installer of `!=` or `!` (a program override of either would change the answer).
@@ -85,11 +68,12 @@ class CodeGen
     numeric_class_bit('TrueClass') | numeric_class_bit('FalseClass')
   end
 
+  # Only the exact-class oracle supplies this receiver: numeric masks alone
+  # do not prove lookup reaches the built-in class's audited body.
   def native_core_class_result(insn, state)
     neq = native_core_neq_class_result(insn, state)
     return neq if neq
 
-    return native_core_block_class_result(insn, state) if insn.op == 'SENDB'
     return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
 
     owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]

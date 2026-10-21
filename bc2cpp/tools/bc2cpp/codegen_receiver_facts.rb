@@ -180,7 +180,8 @@ class CodeGen
                                         exact_class, constant_owner, self_implicit)
     return '' unless klass && @closed_world.proven_miss?(name, klass, proven_miss_answered_names, kind, label: irep.label)
 
-    "  #{ProvenMiss.marker(name, kind, klass)}\n"
+    site = "#{irep.file}:#{irep.instructions[idx || site_idx]&.lineno || 0}"
+    "  #{ProvenMiss.marker(name, kind, klass, site: site)}\n"
   end
 
   # symbol_installed_names, plus the names of core Ruby definitions the registry hid because a native
@@ -262,12 +263,6 @@ class CodeGen
     # range, the handler-aware one follows its edges and still finds the one constant load.
     constant ||= insn && stable_constant_register(irep, idx, insn.reg, lexical_owner, through_handlers: true)
     !constant.nil? && (klass == constant || klass.to_s.end_with?("::#{constant}"))
-  end
-
-  # GUARD_VIOLATION: the `arg_index`th argument of the call is a stable class/module constant.
-  def constant_argument_proven?(irep, idx, lexical_owner, name, arg_index)
-    insn = proof_send_insn(irep, idx, name)
-    !insn.nil? && !stable_constant_register(irep, idx, (insn.reg.to_i + 1 + arg_index).to_s, lexical_owner).nil?
   end
 
   # GUARD_VIOLATION: the call's receiver is a stable class/module constant.
@@ -554,17 +549,36 @@ class CodeGen
   # ELEMENT (generic step 2): the class mask of the elements a `map`/`collect` call with a literal block returns, read
   # from the block's own returns (block_return_class). Nil unless no program definition has the name and the class
   # already has a bit: allocating one here would renumber the masks.
-  # GENERIC step 3: `map`/`collect` with a literal block returns an Array whatever the block returns (mruby's
-  # Enumerable#collect answers its `ary`). Any receiver whose map is Enumerable's; gated on no program definition or
-  # installer of the name, so a program `map` on any class withdraws it.
+  # GENERIC step 3: the result class of a block iterator called with a literal block (a SENDB), read from the core
+  # bodies that answer the name (block_core_index: mruby's own mrblib, e.g. enum.rb's collect, reject, group_by) with
+  # block_given, so the list of iterators is not written here. The union over those definitions bounds the result for
+  # any receiver, Hash's own reject included. Gated on no program definition or installer of the name and on no C
+  # method spelling it; core's `alias map collect` is no install (collect_installed_names skips core mrblib).
   def block_collection_result_mask(insn)
-    return nil unless %w[map collect].include?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
+    return nil unless insn.plain_fixed_argc? && insn.argc.zero?
     return nil unless @closed_world&.exact_instances_singleton_free?
     installed = symbol_installed_names
     return nil if installed.nil? || installed.include?(insn.sym)
     return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
+    return nil unless @closed_world.native_paths_spelling(insn.sym).empty?
+    return nil if self.class.core_result_opaque_defs&.any? { |_owner, method| method == insn.sym }
 
-    NumericFlow::ARR
+    @block_iterator_results ||= {}
+    return @block_iterator_results[insn.sym] if @block_iterator_results.key?(insn.sym)
+
+    definitions = block_core_index.select { |(_owner, method), _defs| method == insn.sym }.values.flatten.uniq
+    @block_iterator_results[insn.sym] = block_iterator_body_mask(definitions, insn.sym)
+  end
+
+  def block_iterator_body_mask(definitions, name)
+    return nil if definitions.empty?
+
+    definitions.reduce(0) do |mask, definition|
+      result = core_ruby_body_result(definition, NumericFlow::OTHER, true, call_name: name)
+      return nil unless result
+
+      mask | result
+    end
   end
 
   def block_element_class_mask(irep, index, insn)

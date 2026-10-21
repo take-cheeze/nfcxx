@@ -227,8 +227,24 @@ class CodeGen
   end
 
   def build_constructor_pool_candidates
-    found = { sites: Hash.new { |h, k| h[k] = [] }, broken: {}, open_argc: [], rooted: [], stats: Hash.new(0) }
+    found = constructor_site_scan
     @constructor_pool_stats = found[:stats]
+
+    (@registry['initialize'] || []).each do |d|
+      next unless d.irep
+
+      status, here = constructor_pool_status(d, found)
+      @constructor_pool_status[d.irep] = status
+      next unless status == :ok
+
+      (1..mandatory_arity(@ireps[d.irep])).each { |k| @constructor_pool_candidates[[d.irep, k]] = [here, k] }
+    end
+  end
+
+  # Every `new` and `super` in the closed world, sorted by what they can reach (see the header). ENTRY_SEEDS reads it
+  # too, so it is a method of its own; it has no effect on the pools themselves.
+  def constructor_site_scan
+    found = { sites: Hash.new { |h, k| h[k] = [] }, broken: {}, open_argc: [], rooted: [], stats: Hash.new(0) }
 
     @ireps.each_value do |irep|
       owner = entry_arg_body_owner[irep.label]
@@ -245,20 +261,12 @@ class CodeGen
       target = constructor_init_target(klass)
       found[:broken][target.irep] ||= "initialize aliased in #{klass}" if target
     end
-
-    (@registry['initialize'] || []).each do |d|
-      next unless d.irep
-
-      status, here = constructor_pool_status(d, found)
-      @constructor_pool_status[d.irep] = status
-      next unless status == :ok
-
-      (1..mandatory_arity(@ireps[d.irep])).each { |k| @constructor_pool_candidates[[d.irep, k]] = [here, k] }
-    end
+    found
   end
 
-  # [:ok, sites], or [why D is not a candidate, nil].
-  def constructor_pool_status(d, found)
+  # [:ok, sites], or [why D is not a candidate, nil]. +exempt+ names classes whose outside spelling the caller has
+  # accounted for (ENTRY_SEEDS); the pools never pass it.
+  def constructor_pool_status(d, found, exempt: nil)
     broken = found[:broken]
     return [broken[:all], nil] if broken[:all]
 
@@ -276,7 +284,7 @@ class CodeGen
 
     reach = constructor_reach(d)
     return [:hierarchy, nil] unless reach
-    return [:outside_name, nil] if reach.any? { |klass| @closed_world.outside_spells_class?(klass) }
+    return [:outside_name, nil] if reach.any? { |klass| !exempt&.include?(klass) && @closed_world.outside_spells_class?(klass) }
 
     # A call with fewer than mand or more than mand + opt positionals raises in ENTER (no rest parameter).
     enters = ->(argc) { argc.between?(mand, fields[2].to_i.positive? ? Float::INFINITY : mand + opt) }

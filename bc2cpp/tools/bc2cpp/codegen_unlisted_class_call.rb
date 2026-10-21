@@ -100,7 +100,7 @@ class CodeGen
     return nil if argv.size > FUNCALL_ARGC_MAX
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
-    marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?)
+    marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?, site: insn_source_site)
     "// UNLISTED_CLASS_NO_TARGET :#{name} (receiver exactly #{klass}): no definition on its lookup chain, only the NoMethodError\n" \
       "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
   end

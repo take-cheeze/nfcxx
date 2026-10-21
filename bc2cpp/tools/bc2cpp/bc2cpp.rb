@@ -99,6 +99,7 @@ require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
 require_relative 'codegen_entry_specialize'
 require_relative 'codegen_constructor_pools'
+require_relative 'codegen_entry_seeds'
 require_relative 'codegen_class_object_args'
 require_relative 'codegen_return_classes'
 require_relative 'codegen_block_returns'
@@ -1866,7 +1867,6 @@ if $PROGRAM_NAME == __FILE__
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
-    code = NomethodReviewed.direct_raise(code, m[:owner], m[:name])
     m[:code] = SymbolCache.rewrite(code, symbol_table)
   end
   # Fused single pass over the compiled methods: all of these closed-world diagnostic counts used to
@@ -1899,8 +1899,7 @@ if $PROGRAM_NAME == __FILE__
   warn "  NILABLE_RECEIVER sites: #{nilable_receiver}"
   nil_sites.uniq.sort.each { |k| warn "  NIL_RECEIVER_SITE #{k}" }
   warn ''
-  # NOMETHOD_REVIEWED (docs/adr/0226), STRICT_HINTS_REVIEWED (docs/adr/0419), PROVEN_MISS_REVIEWED (docs/adr/0275):
-  # every listing is printed first, then any unreviewed site fails the build. The update scripts read the listings
+  # NOMETHOD (docs/adr/0226) and PROVEN_MISS (docs/adr/0275) sites are listed on stderr; no review gate judges them (ADR 0522). The update scripts read the listings
   # of a run that fails only here (NomethodReviewedProbe.review_abort?).
   review_scope = ReviewScope.for_build(ENV['BC2CPP_BUILD_NAME'].to_s)
   leaked = ReviewScope.leaks(review_scope, only_owners, compiled)
@@ -1933,27 +1932,6 @@ if $PROGRAM_NAME == __FILE__
     outside = [nomethod_sites, hint_sites, miss_sites].sum { |l| l.size - ReviewScope.select(review_scope, l).size }
     warn "== review scope: engine owners; #{outside} listed site(s) outside the reviewed program ==" if outside.positive?
   end
-  review_failures = []
-  # No stale check (full builds): the per-gem probe (nomethod_reviewed_probe.rb) emits some fallbacks this whole-program
-  # build does not, so a listed key can be absent here yet present there. Unreviewed sites still fail.
-  violations = NomethodReviewed.violations(nomethod_sites, compiled, scope: review_scope, stale: false)
-  unless violations.empty?
-    review_failures << "bc2cpp: #{violations.size} closed-world NOMETHOD_REVIEWED violation(s) (docs/adr/0226):\n  " \
-                       "#{violations.join("\n  ")}\n" \
-                       'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
-                       'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp/nomethod_reviewed_update.rb).'
-  end
-  # Hints are judged at run time only: a runtime-checked declaration (%a{bc2cpp:hint}, ADR 0455) or a forced
-  # strict hint raises when its value is wrong, so the build does not reject an unlisted one.
-  miss_violations = ProvenMiss.violations(miss_sites, compiled, scope: review_scope,
-                                                                stale: !ENV['BC2CPP_HOT_METHODS'])
-  unless miss_violations.empty?
-    review_failures << "bc2cpp: #{miss_violations.size} closed-world PROVEN_MISS_REVIEWED violation(s) " \
-                       "(docs/adr/0275):\n  #{miss_violations.join("\n  ")}\n" \
-                       'Read each site: fix the missing method, or list defensive code in ' \
-                       'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp/proven_miss_update.rb).'
-  end
-  abort review_failures.join("\n") unless review_failures.empty?
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers, symbol_table)
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
