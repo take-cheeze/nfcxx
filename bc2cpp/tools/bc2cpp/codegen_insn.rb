@@ -478,17 +478,20 @@ class CodeGen
     when 'JMPNOT'
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
-      "  if (!mrb_test(r#{reg})) goto L#{target};\n"
+      decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
+        "  if (!mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPIF'
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
-      "  if (mrb_test(r#{reg})) goto L#{target};\n"
+      decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
+        "  if (mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPNIL'
       # "JMPNIL R3 024": jump if exactly nil (vm.c), for nil-specific tests like
       # `x.nil? ? a : b`.
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
-      "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
+      decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
+        "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
     when 'GETCONST'
       # "GETCONST R4 Integer": the VM resolves against the lexical scope chain
       # (mrb_vm_const_get), which compiled code does not have. A single lookup from
