@@ -8,6 +8,7 @@
 module NativeSigs
   FILE = File.expand_path('../../sig/bc2cpp/declarations.rbs', __dir__)
   MARKER = '# bc2cpp-native:'
+  MARK_WORD = 'bc2cpp-native:'
   MARK_LINE = /^bc2cpp-native: (\S+)$/.freeze
 
   module_function
@@ -16,7 +17,10 @@ module NativeSigs
   # (a member's block is its last entry); with no marker of its own a node takes the nearest enclosing marker.
   # RBS keeps the comment without its `#`.
   def table_of(node, enclosing = [])
-    [node, *enclosing.reverse].each do |n|
+    table = own_table(node)
+    return table if table
+
+    enclosing.reverse_each do |n|
       table = own_table(n)
       return table if table
     end
@@ -80,8 +84,13 @@ module NativeSigs
   end
 
   # The marker a node carries itself, or nil. Members and blocks both keep their comment.
+  # MARK_LINE needs this word on its line, so a comment without it cannot match; the test avoids the regex scan
+  # and its match string on every node of every walk.
   def own_table(node)
-    node.comment&.string.to_s[MARK_LINE, 1]
+    text = node.comment&.string
+    return nil unless text&.include?(MARK_WORD)
+
+    text[MARK_LINE, 1]
   end
 
   # The members of a block; a constant or type alias has none.
