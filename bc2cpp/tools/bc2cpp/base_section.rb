@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'set'
+
 # BaseSection: the base-stub part of sig/bc2cpp/declarations.rbs, from the generators' output. The part runs from the top
 # of the file to `# ---- block_types.rbs`. Its native blocks (a `# Native base RBS` header) are regenerated per tag by
 # scripts/bc2cpp/base_rbs_native.rb's output; its Ruby blocks (a `# Base RBS` header) are compared as declarations.
@@ -13,6 +15,8 @@ module BaseSection
   MARKER = /^# bc2cpp-native: (\S+)$/
   NATIVE_HEADER = /\A# Native base RBS/
   DECL = /^(?:class|module) .*?\n^end\n/m
+  MARKER_LINE = /^# bc2cpp-native: \S+\n/
+  STALE_DECL = /(?:#{MARKER_LINE})?#{DECL}/
 
   # Gem directory name to the table tag the section uses (base_<tag>). Listed rather than derived: a gem whose name does
   # not give its tag (mruby-numeric-ext is base_numeric) would otherwise share one with another gem. A gem missing from
@@ -52,8 +56,12 @@ module BaseSection
   # The committed section with each native block replaced by the generator's body for its tag. A tag with no body
   # is left as it is.
   def self.regenerate_native(section, gen_dir)
+    regenerate_native_bodies(section, native_bodies(gen_dir))
+  end
+
+  # regenerate_native with the bodies already keyed by tag.
+  def self.regenerate_native_bodies(section, bodies)
     lines = section.lines
-    bodies = native_bodies(gen_dir)
     starts = lines.each_index.select { |i| lines[i].match?(HEADER) }
     blocks = starts.each_with_index.map { |s, k| [s, starts[k + 1] || lines.size] }
     out = lines[0...starts.first].join
@@ -104,9 +112,62 @@ module BaseSection
 
   # The Ruby declarations the generator writes, one per top-level class or module.
   def self.generated_ruby_decls(gen_dir)
-    Dir[File.join(gen_dir, '*', 'ruby', '*.rbs')].sort.flat_map do |path|
-      File.read(path).scan(DECL).map { |d| d.strip + "\n" }
-    end.sort
+    generated_ruby_by_tag(gen_dir).values.flatten.sort
+  end
+
+  # The same declarations grouped by their table tag. The tag is what a committed declaration carries as its marker, so
+  # a regenerated one is written under the marker it would have had: unmarked, it would count as a program declaration.
+  def self.generated_ruby_by_tag(gen_dir)
+    by_tag = Hash.new { |h, k| h[k] = [] }
+    Dir[File.join(gen_dir, '*', 'ruby', '*.rbs')].sort.each do |path|
+      tag = tag_of(File.basename(File.dirname(File.dirname(path))))
+      File.read(path).scan(DECL).each { |d| by_tag[tag] << d.strip + "\n" }
+    end
+    by_tag
+  end
+
+  # The whole committed file with its base section regenerated and the rest left byte for byte. Running it again on its
+  # own output changes nothing, and the check passes on the result.
+  def self.regenerate(text, gen_dir)
+    regenerate_with(text, native_bodies(gen_dir), generated_ruby_by_tag(gen_dir))
+  end
+
+  # regenerate with the generator output already keyed by tag: native bodies, and Ruby declarations by tag.
+  def self.regenerate_with(text, bodies, by_tag)
+    section = section_of(text)
+    regenerate_ruby_by_tag(regenerate_native_bodies(section, bodies), by_tag) + text[section.length..]
+  end
+
+  # The Ruby declarations of a base section made to match the generator: a declaration the generator no longer writes is
+  # removed, and one it writes but the section lacks is appended in a new `# Base RBS` block, marked with its tag.
+  def self.regenerate_ruby(section, gen_dir)
+    regenerate_ruby_by_tag(section, generated_ruby_by_tag(gen_dir))
+  end
+
+  def self.regenerate_ruby_by_tag(section, by_tag)
+    wanted = by_tag.values.flatten.to_set
+    committed = ruby_decls(section).to_set
+    lines = section.lines
+    starts = lines.each_index.select { |i| lines[i].match?(HEADER) }
+    blocks = starts.each_with_index.map { |s, k| [s, starts[k + 1] || lines.size] }
+    out = lines[0...starts.first].join
+    blocks.each do |s, e|
+      block = lines[s...e]
+      unless block.first.match?(/\A# Base RBS/) && !block.first.match?(NATIVE_HEADER)
+        out << block.join
+        next
+      end
+      text = block.join.gsub(STALE_DECL) { |decl| wanted.include?(decl.sub(MARKER_LINE, '').strip + "\n") ? decl : '' }
+      next if text.scan(DECL).empty? && block.join.scan(DECL).any?
+
+      out << text
+    end
+    fresh = by_tag.sort_by { |tag, _| tag.to_s }.flat_map do |tag, decls|
+      decls.uniq.reject { |d| committed.include?(d) }.map { |d| "# bc2cpp-native: #{tag}\n#{d}" }
+    end
+    return out if fresh.empty?
+
+    out.sub(/\n*\z/, "\n\n") + "# Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.\n" + fresh.join + "\n"
   end
 
   # The first lines where two texts differ, for the failure message.

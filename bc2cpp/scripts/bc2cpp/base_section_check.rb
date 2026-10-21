@@ -6,8 +6,11 @@
 # lacks). Host plus the closed build's headers, a few minutes (base_rbs_all.rb preprocesses every native gem).
 #
 #   ruby scripts/bc2cpp/base_section_check.rb [--output DIR] CLOSED_BUILD_DIR [DECLARATIONS]
+#   ruby scripts/bc2cpp/base_section_check.rb --write CLOSED_BUILD_DIR [DECLARATIONS]
 #
-# DECLARATIONS defaults to sig/bc2cpp/declarations.rbs; a fixture passes a copy. See tools/bc2cpp/base_section.rb.
+# DECLARATIONS defaults to sig/bc2cpp/declarations.rbs; a fixture passes a copy. --write rewrites that file's base section
+# from the generators instead of checking it (the rest of the file is kept byte for byte). See tools/bc2cpp/base_section.rb
+# and scripts/bc2cpp/base_section_regen_check.rb.
 
 require 'open3'
 require 'optparse'
@@ -18,12 +21,15 @@ require_relative '../../tools/bc2cpp/base_section'
 ROOT = File.expand_path('../..', __dir__)
 GENERATOR = File.join(ROOT, 'scripts/bc2cpp/base_rbs_all.rb')
 output = nil
+write = false
 parser = OptionParser.new do |opts|
-  opts.banner = 'usage: base_section_check.rb [--output DIR] CLOSED_BUILD_DIR [DECLARATIONS]'
+  opts.banner = 'usage: base_section_check.rb [--output DIR | --write] CLOSED_BUILD_DIR [DECLARATIONS]'
   opts.on('--output DIR', 'Keep freshly generated base RBS in DIR') { |dir| output = File.expand_path(dir) }
+  opts.on('--write', 'Rewrite the base section of DECLARATIONS from the generators instead of checking it') { write = true }
 end
 parser.parse!(ARGV)
 abort parser.to_s unless (1..2).cover?(ARGV.size)
+abort 'base_section_check: --write and --output are exclusive' if write && output
 abort 'base_section_check: output directory must be absent or empty' if output && File.exist?(output) &&
                                                                         (!File.directory?(output) || !Dir.empty?(output))
 
@@ -38,6 +44,12 @@ Dir.mktmpdir('base-section-check') do |temporary|
   $stdout.write(out)
   $stderr.write(err)
   abort "base_section_check: base_rbs_all.rb failed (#{status})" unless status.success?
+
+  if write
+    File.write(declarations, BaseSection.regenerate(File.read(declarations), gen))
+    puts "base section check: rewrote the base section of #{declarations}"
+    exit 0
+  end
 
   regenerated = BaseSection.regenerate_native(committed, gen)
   committed_native = BaseSection.native_text(committed)
@@ -61,7 +73,8 @@ end
 if failures.empty?
   puts 'base section check: the committed base section matches the generators'
 else
-  warn "base section check: #{failures.size} problem(s); regenerate with scripts/bc2cpp/base_rbs_all.rb"
+  warn "base section check: #{failures.size} problem(s); rewrite the base section with " \
+       "ruby scripts/bc2cpp/base_section_check.rb --write #{ARGV[0]}"
   failures.each { |f| warn f }
   exit 1
 end
