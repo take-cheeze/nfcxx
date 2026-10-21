@@ -819,13 +819,19 @@ class CodeGen
       end
     when 'JMPNOT'
       reg = insn.reg
-      "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx), target) ||
+        "  if (!mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
     when 'JMPIF'
       reg = insn.reg
-      "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx), target) ||
+        "  if (mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
     when 'JMPNIL'
       reg = insn.reg
-      "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx), target) ||
+        "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{target};\n"
     else
       # BLOCK_BODY_INDEX_SUPPORT: `idx` is the instruction's real position in
       # block_irep.instructions (the emitters walk it in order, skipping only
