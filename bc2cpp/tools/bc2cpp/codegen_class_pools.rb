@@ -135,7 +135,9 @@ class CodeGen
   # The pooled class set of a GETCONST/GETMCNST: the join of what every definition it reads stores
   # (ADR 0301, scoped by ADR 0423). A name the numeric proof poisons has no pool; a read with no
   # proven definition falls back to the integer-constant proof, else OTHER.
-  CORE_CONTAINER_BITS = { Array: NumericFlow::ARR, Hash: NumericFlow::HSH, String: NumericFlow::STR }.freeze
+  # Keyed by class symbol, as constant_value_classes reports them.
+  CORE_CONTAINER_BITS = NumericFlow.class_bits('Array', 'Hash', 'String')
+                                   .to_h { |bit, klass| [klass.to_sym, bit] }.freeze
 
   def class_pool_const_mask(insn)
     name = insn.const_name

@@ -7,8 +7,7 @@ require_relative 'numeric_flow'
 # the exact-class flow proves holds only instances may ignore `.singleton` owners in ClosedWorld#refusal.
 class CodeGen
   # Core classes whose NumericFlow bits stand for instances of exactly that class.
-  INSTANCE_CORE_BITS = { NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float', NumericFlow::ARR => 'Array',
-                         NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String', NumericFlow::RNG => 'Range' }.freeze
+  INSTANCE_CORE_BITS = NumericFlow.class_bits('Integer', 'Float', 'Array', 'Hash', 'String', 'Range')
 
   # The exact classes (nil is an instance too, and adds none) the receiver of the SEND at +site+
   # holds, or nil when the flow proves less: an unmodelled value could be a class object.
