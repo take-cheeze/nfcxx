@@ -22,15 +22,17 @@ module CoreMethods
   # would switch those fast paths off, so it is compiled without being a registry
   # definition (bc2cpp.rb CORE_VISIBILITY).
   OPERATOR_NAMES = %w[+ - * / % ** & | ^ ~ << >> < <= > >= == != === <=> =~ !~ ! [] []= -@ +@ zero?].freeze
-  ENUMERATOR_WRAPPERS = %w[inspect size rewind feed next peek peek_values].freeze
 
   module_function
 
-  # These wrappers create no compiled closure. Their delegated callbacks may
-  # suspend, so every entry still requires the root context (ADR 0350).
+  # Admits an Enumerator method by its body alone, not by name: the body must come from
+  # mruby-enumerator's enumerator.rb and touch no block and no Fiber. In that file only
+  # inspect, size, rewind, feed, next, peek and peek_values pass (next_values names Fiber,
+  # the rest take a block). These wrappers create no compiled closure. Their delegated
+  # callbacks may suspend, so every entry still requires the root context (ADR 0350).
   def enumerator_wrapper?(definition, ireps)
     return false if ENV['BC2CPP_ENUMERATOR_WRAPPERS'] == '0'
-    return false unless definition && definition.owner == 'Enumerator' && ENUMERATOR_WRAPPERS.include?(definition.name)
+    return false unless definition && definition.owner == 'Enumerator'
 
     body = definition.irep && ireps[definition.irep]
     body && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb') &&
