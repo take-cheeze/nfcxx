@@ -20,6 +20,8 @@ SRC = <<~'RUBY'
     def array_chain; [Elem.new].select { |e| e }.reject { |e| e.nil? }.each { |e| e.zork }; end
     def hash_chain; { a: 1 }.select { |k, v| v }.reject { |k, v| v.nil? }.each { |k, v| v }; end
     def unknown_chain(x); x.select { |e| e }.reject { |e| e.nil? }.each { |e| e.zork }; end
+    def hash_map; { a: 1 }.map { |k, v| v }.each { |e| e.zork }; end
+    def unknown_map(x); x.map { |e| e }.each { |e| e.zork }; end
   end
   class Holder
     attr_reader :elems
@@ -74,6 +76,12 @@ Dir.mktmpdir do |dir|
              proven_array_source_scan(irep, idx, reg, registry), nil)
   irep, idx, reg = last_each.call(ireps, registry, 'Chains', 'unknown_chain')
   check.call('select/reject chain on an untyped argument stays unproven',
+             proven_array_source_scan(irep, idx, reg, registry), nil)
+  irep, idx, reg = last_each.call(ireps, registry, 'Chains', 'hash_map')
+  check.call('map on a Hash literal proves an Array (Enumerable#map)',
+             proven_array_source_scan(irep, idx, reg, registry), 'Array')
+  irep, idx, reg = last_each.call(ireps, registry, 'Chains', 'unknown_map')
+  check.call('map on an untyped argument stays unproven (a receiver may define its own map)',
              proven_array_source_scan(irep, idx, reg, registry), nil)
 
   class_layout = { 'Holder' => { 'elems' => 'Array' }, 'Base' => { 'elems' => 'Array' },

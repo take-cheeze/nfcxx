@@ -48,7 +48,7 @@ TOP_CUTS = [
   ['NativeConstructSchema', 'native_construct_schema.rb'],
   ['READ_ONLY_OPCODE_SKIP', 'ivar_layout.rb'],
   ['ArgTypes', 'annotations.rb'],
-  ['CHAINED_ARRAY_METHODS', 'class_layout.rb'],
+  ['BLOCK_RESULT_NAMES', 'class_layout.rb'],
   ['ARRAY_ELEMENT_PRESERVING', 'element_layouts.rb'],
   ['opaque_argument_position', 'diagnostics.rb'],
   ['NATIVE_CONSTRUCT_TARGETS', 'dispatch_targets.rb'],
