@@ -548,7 +548,10 @@ class CodeGen
     if flow_bodies
       flow_handlers = { regions: recognize_rescue_regions(irep).map { |r| r.slice(:begin_addr, :end_addr, :except_addr) },
                         glue_reads: rescue_glue_reads }
-      flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured, handlers: flow_handlers)
+      # Eligibility observes only #error. Keep the normal pass when it could remove one, or when its output is audited.
+      unless @clean_probe && !@runtime_installed_names && flow_bodies.none? { |text| text.include?('#error') }
+        flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured, handlers: flow_handlers)
+      end
       flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
     end
     @resumable.flat = false if @resumable

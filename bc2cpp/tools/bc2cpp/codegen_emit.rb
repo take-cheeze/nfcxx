@@ -23,7 +23,11 @@ class CodeGen
 
     @probing << label
     begin
-      result = with_fresh_method_state { compile_method(label) }
+      result = with_fresh_method_state do
+        # Specialization caches emitted clone text, so its probes must keep final-code optimization.
+        @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+        compile_method(label)
+      end
       @clean_cache[label] = !result[:code].include?('#error')
     ensure
       @probing.delete(label)
@@ -33,6 +37,7 @@ class CodeGen
   # Every ivar one compile_method call sets and clears for itself, with its
   # top-level value. A probe runs mid-way through another method's compile.
   METHOD_COMPILE_STATE = {
+    :@clean_probe => false,
     :@ir_inline_remaining => 512,
     :@ir_inline_stack => nil,
     :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
