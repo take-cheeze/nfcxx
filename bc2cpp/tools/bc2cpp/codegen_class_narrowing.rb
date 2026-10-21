@@ -2,6 +2,7 @@
 
 require_relative 'numeric_flow'
 require_relative 'core_fact_sigs'
+require_relative 'native_owner_map'
 
 # CLASS_NARROWING (ADR 0375): occurrence typing for the exact-class flow. A branch on the boolean of a class test
 # (`x.is_a?(C)`, `kind_of?`, `instance_of?`, `C === x` and so `case x when C`, `x.nil?` and `!x` as a value,
@@ -50,9 +51,11 @@ class CodeGen
   CLASS_TEST_CORE_BITS = { NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float', NumericFlow::ARR => 'Array',
                            NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String', NumericFlow::RNG => 'Range',
                            NumericFlow::NIL => 'NilClass' }.freeze
-  # The mrb_state field holding each core class, for the run-time membership check.
-  CLASS_TEST_CORE_FIELDS = { 'Integer' => 'integer_class', 'Float' => 'float_class', 'Array' => 'array_class',
-                             'Hash' => 'hash_class', 'String' => 'string_class', 'Range' => 'range_class' }.freeze
+  # The mrb_state field holding each core class, for the run-time membership check. NilClass has no entry: nil is
+  # tested with mrb_nil_p (class_narrowing_membership), so its nil_class field is never read here.
+  CLASS_TEST_CORE_FIELDS = NativeOwnerMap::CORE_FIELD_OWNERS.invert
+                                                            .slice(*(CLASS_TEST_CORE_BITS.values - ['NilClass']))
+                                                            .freeze
   # Superclass chains of the core classes a bit stands for (Object and above are never the tested class), from
   # sig/bc2cpp/declarations.rbs#core_hierarchy.
   CLASS_TEST_CORE_CHAIN = CLASS_TEST_CORE_BITS.values.to_h do |klass|
