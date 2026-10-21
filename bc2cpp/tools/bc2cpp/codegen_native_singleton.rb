@@ -2,6 +2,7 @@
 
 require 'prism'
 require 'set'
+require_relative 'ruby_parse_cache'
 require_relative 'native_singletons'
 
 # NATIVE_SINGLETON_CALL (docs/adr/0416): `Const.name(args)` where `Const` is a class or module object the
@@ -189,7 +190,7 @@ module NativeSingletonCall
       next unless File.file?(path)
 
       table = (@foreign_scopes[path] ||= begin
-        parsed = Prism.parse_file(path)
+        parsed = RubyParseCache.parse_file(path)
         return nil unless parsed.errors.empty?
 
         collector = ScopeCollector.new
