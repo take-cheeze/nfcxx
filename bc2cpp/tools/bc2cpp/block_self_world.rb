@@ -45,7 +45,7 @@ module BlockSelfWorld
   NAME_SENDS = Set.new(SendNames::FORWARDING_SENDS).freeze
   # String eval (mruby-eval): code no scan reads, so the fact fails on it.
   STRING_EVALS = Set['eval', 'instance_eval', 'class_eval', 'module_eval'].freeze
-  METHOD_MAKERS = Set['method', 'public_method', 'singleton_method', 'instance_method', 'public_instance_method'].freeze
+  METHOD_MAKERS = Set['method', 'singleton_method', 'instance_method'].freeze
   # Names whose presence among a computed send's names leaves that send's own names unproven.
   INDIRECT_NAMES = (NAME_SENDS | METHOD_MAKERS | Set['to_proc']).freeze
   SENDS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'].freeze

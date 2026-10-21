@@ -65,7 +65,7 @@ class ClosedWorld
   # PROVEN_MISS (ADR 0275): a name passed to one of these is probed for or looked up
   # by name, so a send of it is guarded, not a bug.
   PROBE_SENDS = %w[respond_to? respond_to_missing? method_defined? public_method_defined?
-                   private_method_defined? instance_method public_instance_method method public_method
+                   private_method_defined? instance_method method
                    instance_methods public_methods].freeze
   attr_reader :global_refusal, :native_paths, :ruby_paths
   # BLOCK_SELF_WORLD (ADR 0477): BlockSelfWorld's result, set by bc2cpp.rb once every Ruby source is read. Until

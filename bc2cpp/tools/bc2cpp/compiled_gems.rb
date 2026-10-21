@@ -90,7 +90,7 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
 BC2CPP_CORE_OWNERS = %w[
-  Array Comparable Dir Dir.singleton Enumerable Enumerator Enumerator::Enumerator.singleton Enumerator::Generator
+  Array Comparable Dir Dir.singleton Enumerable Enumerator Enumerator::Generator
   Enumerator::Yielder File File.singleton Float Hash IO IO.singleton Integer Kernel Numeric
   OnigMatchData OnigRegexp OnigRegexp.singleton Range String StringIO StringIO.singleton Struct Symbol
 ].freeze
