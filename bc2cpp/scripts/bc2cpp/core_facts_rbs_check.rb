@@ -167,6 +167,13 @@ end
 %w[select reject sort_by find_all partition group_by].each do |name|
   check.call("block iterators: #{name} does not take block-return elements", !CoreBlockIteratorSigs.block_return_element?(name))
 end
+# Array's own declarations type the receiver-element iterators; Enumerable's stay untyped (no self type in RBS).
+%w[select reject find_all sort_by].each do |name|
+  check.call("block iterators: Array##{name} yields the receiver's elements (RBS Elem)",
+             CoreBlockIteratorSigs.element_sources.dig('Array', name) == :receiver)
+end
+check.call('block iterators: Enumerable#select stays untyped (its elements are not declared)',
+           CoreBlockIteratorSigs.element_sources.fetch('Enumerable', {})['select'].nil?)
   CoreBlockIteratorSigs.results.each do |owner, names|
     names.each do |name, klass|
       defined = mrblib.any? { |text| text.match?(/^\s*def #{Regexp.escape(name)}\(&(block|blk)\)/) }
