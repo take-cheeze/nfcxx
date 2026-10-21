@@ -4,6 +4,7 @@ require 'set'
 require_relative 'bytecode_ir'
 require_relative 'ir_block_operands'
 require_relative 'core_hierarchy_sigs'
+require_relative 'send_names'
 
 # BLOCK_SELF_WORLD (docs/adr/0477): `self` inside a block is the self of the frame that created it, unless something
 # runs the block under another self. mruby has exactly one way to do that, mrb_yield_with_class and its siblings,
@@ -41,7 +42,7 @@ module BlockSelfWorld
   # `new` with a block on these classes (and their subclasses) runs the block as the new class's body
   # (class.c mrb_class_initialize / mrb_mod_initialize, struct.c mrb_struct_s_def); `Data.define` likewise (data.c).
   FACTORY_SENDS = { 'new' => Set['Class', 'Module', 'Struct'], 'define' => Set['Data'] }.freeze
-  NAME_SENDS = Set['send', '__send__', 'public_send'].freeze
+  NAME_SENDS = Set.new(SendNames::FORWARDING_SENDS).freeze
   # String eval (mruby-eval): code no scan reads, so the fact fails on it.
   STRING_EVALS = Set['eval', 'instance_eval', 'class_eval', 'module_eval'].freeze
   METHOD_MAKERS = Set['method', 'public_method', 'singleton_method', 'instance_method', 'public_instance_method'].freeze
