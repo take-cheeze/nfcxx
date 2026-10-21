@@ -122,6 +122,7 @@ class ClosedWorld
     scan_closed_world
     build_hierarchy
     build_method_missing
+    @opaque_touches = {} unless ENV['BC2CPP_CLOSED_OPACITY_INDEX'] == '0'
   end
 
   # nil when a fallback for `name` on a chain listing `listed` can only raise
@@ -1449,6 +1450,13 @@ class ClosedWorld
     return true unless @class_decls.key?(owner)
     return true if @rebound.include?(simple(owner)) || @dynamic_subclassed.include?(simple(owner))
 
+    # Touch scans are complete after construction; declaration and rebinding guards stay live.
+    return @opaque_touches.fetch(owner) { @opaque_touches[owner] = outside_class_touch?(owner) } if @opaque_touches
+
+    outside_class_touch?(owner)
+  end
+
+  def outside_class_touch?(owner)
     # Outside code reaches a class only through its path, so a file that could
     # create, reopen or subclass it names both the root and the last segment.
     # A native definition of a class the closed world declares is its source.
