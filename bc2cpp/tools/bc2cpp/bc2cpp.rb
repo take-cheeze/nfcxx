@@ -575,7 +575,8 @@ if $PROGRAM_NAME == __FILE__
   inferred_constant_classes = profile_call.call('single-assignment value constants') do
     infer_constructed_constant_classes(ireps, constant_assignment_sites, registry, container_constants, closed_world,
                                        native_name_sources: native_name_sources, included_modules: included_modules,
-                                       prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+                                       prepended_modules: prepended_modules, unknown_mixins: unknown_mixins,
+                                       class_decls: class_decls)
   end
   container_constants.merge!(inferred_constant_classes)
   warn "== single-assignment constructed constants (CLOSED_WORLD_VALUE_CONSTANT): #{inferred_constant_classes.size} =="
