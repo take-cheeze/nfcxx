@@ -16,6 +16,7 @@ require_relative 'native_return_kinds'
 
 module NativeAstReturns
   UNKNOWN = :unknown
+  SELF_KIND = 'self'
   # Calls that return their value argument unchanged; `mrb_str_new_frozen` is mrb_obj_freeze over mrb_str_new.
   IDENTITY_CALLS = %w[mrb_obj_freeze].freeze
   # Helpers whose result class is a contract of mruby's source rather than a proof here. class_name_str (class.c:391-401)
@@ -43,23 +44,41 @@ module NativeAstReturns
   def functions_of(root, source)
     fns = {}
     current = nil
-    visit = lambda do |node|
-      current = node['loc']['file'] if node.is_a?(Hash) && node['loc'].is_a?(Hash) && node['loc']['file']
-      if node['kind'] == 'FunctionDecl' && node['name'] && node['inner']
-        body = node['inner'].find { |c| c['kind'] == 'CompoundStmt' }
-        fns[node['name']] = { node: node, body: body, file: current } if body
-      elsif %w[NamespaceDecl LinkageSpecDecl].include?(node['kind']) && node['inner']
-        node['inner'].each { |child| visit.call(child) }
+    # clang prints a location's file only when it differs from the previous location printed, in print order over
+    # every node (locations and ranges, including nested ones). The file is tracked the same way: a declaration with
+    # no file of its own belongs to the last file named before it.
+    track = lambda do |node|
+      return unless node.is_a?(Hash)
+
+      [node['loc'], node.dig('range', 'begin'), node.dig('range', 'end')].each do |loc|
+        next unless loc.is_a?(Hash)
+
+        current = loc['file'] if loc['file']
+        current = loc.dig('spellingLoc', 'file') || current if loc['spellingLoc']
+        current = loc.dig('expansionLoc', 'file') || current if loc['expansionLoc']
       end
     end
-    root['inner'].each { |node| visit.call(node) }
+    visit = lambda do |node, top|
+      track.call(node)
+      if node['kind'] == 'FunctionDecl' && node['name'] && node['inner']
+        body = node['inner'].find { |c| c['kind'] == 'CompoundStmt' }
+        fns[node['name']] = { node: node, body: body, file: current } if body && top
+      end
+      (node['inner'] || []).each do |child|
+        visit.call(child, top && %w[NamespaceDecl LinkageSpecDecl TranslationUnitDecl].include?(node['kind']))
+      end
+    end
+    visit.call(root, true)
     fns.select { |_, f| f[:file] && File.expand_path(f[:file]) == File.expand_path(source) }
   end
 
   # The value of a ReturnStmt-like expression, followed through the TU.
   class Analyzer
-    def initialize(fns)
+    def initialize(fns, external = {})
       @fns = fns
+      # Kinds of functions defined in other translation units (a previous pass over the sources). A call to one of
+      # them takes its kind; `self` is the receiver of the other function, so it is not a kind here.
+      @external = external
       @memo = {}
       @in_progress = {}
       @narrowed = Set.new
@@ -69,7 +88,7 @@ module NativeAstReturns
       return @memo[name] if @memo.key?(name)
       return nil if @in_progress[name] # recursion: unknown, the caller's join is then nil (conservative)
 
-      fn = @fns[name] or return nil
+      fn = @fns[name] or return external_kind(name)
       @in_progress[name] = true
       outer_narrowed = @narrowed
       stmts = fn[:body]['inner'] || []
@@ -100,7 +119,37 @@ module NativeAstReturns
         id = tested_local(cond)
         guards[id] = i if id && !guards.key?(id)
       end
-      guards.select { |id, i| stmts[(i + 1)..].none? { |later| assigns?(later, id) } }
+      guards = guards.select { |id, i| stmts[(i + 1)..].none? { |later| assigns?(later, id) } }
+      # `if (mrb_obj_class(mrb, self) != mrb->string_class) return ...;` leaves self an exact String: a receiver whose
+      # class is not String returned above (String#to_s, class.c's String counterpart in string.c).
+      stmts.each_with_index do |stmt, i|
+        next unless stmt['kind'] == 'IfStmt' && stmt['inner'] && stmt['inner'].size >= 2
+
+        cond, body = stmt['inner'][0], stmt['inner'][1]
+        next unless self_class_test?(cond) && contains_kind?(body, 'ReturnStmt')
+
+        guards[SELF_GUARD] = i
+        break
+      end
+      guards
+    end
+
+    SELF_GUARD = 'self'
+
+    # `mrb_obj_class(mrb, self) != mrb->string_class` (or the equality), the class test a String body makes on self.
+    def self_class_test?(cond)
+      node = cond
+      node = node['inner'].first while %w[ImplicitCastExpr ParenExpr].include?(node['kind']) && node['inner']
+      return false unless node['kind'] == 'BinaryOperator' && %w[!= ==].include?(node['opcode'])
+
+      found_self = false
+      found_class = false
+      walk(node) do |n|
+        found_self ||= n['kind'] == 'DeclRefExpr' && n.dig('referencedDecl', 'kind') == 'ParmVarDecl' &&
+                       n.dig('referencedDecl', 'name') == 'self'
+        found_class ||= n['kind'] == 'MemberExpr' && n['name'] == 'string_class'
+      end
+      found_self && found_class
     end
 
     def string_test_negated?(cond)
@@ -155,6 +204,11 @@ module NativeAstReturns
 
     private
 
+    def external_kind(name)
+      kind = @external[name]
+      kind == SELF_KIND ? nil : kind
+    end
+
     def collect_returns(node, out)
       return unless node.is_a?(Hash)
       return if node['kind'] == 'LambdaExpr' || node['kind'] == 'BlockExpr'
@@ -189,6 +243,7 @@ module NativeAstReturns
         NativeAstReturns.constructor_kind(callee) || function_kind(callee)
       when 'DeclRefExpr'
         decl = expr['referencedDecl'] or return nil
+        return 'String' if decl['kind'] == 'ParmVarDecl' && decl['name'] == 'self' && @narrowed.include?(SELF_GUARD)
         return 'self' if decl['kind'] == 'ParmVarDecl' && decl['name'] == 'self'
         return nil unless decl['kind'] == 'VarDecl'
         return 'String' if @narrowed.include?(decl['id'])
@@ -237,9 +292,9 @@ module NativeAstReturns
   end
 
   # { 'function name' => kind-or-nil } for every function defined in +source+.
-  def analyze(root, source)
+  def analyze(root, source, external: {})
     fns = functions_of(root, source)
-    analyzer = Analyzer.new(fns)
+    analyzer = Analyzer.new(fns, external)
     fns.keys.sort.to_h { |name| [name, analyzer.function_kind(name)] }
   end
 end
