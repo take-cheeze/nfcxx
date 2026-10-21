@@ -27,24 +27,28 @@ jobs:
           FEATURE_OUT: build/dbg
           FEATURE_TIMEOUT: "900"
           NFCXX_KEEP_INTERMEDIATES: "1"
-        run: tests/cpp-features/run.sh || true
-      - name: Regenerate the front-end C and reproduce the back end
+        run: |
+          # A copy of the driver whose eccp call keeps the generated C (eccp -k).
+          sed 's/"\$eccp_bin" "\$std"/"$eccp_bin" --keep_gen_c "$std"/' nfcxx > nfcxx-dbg && chmod +x nfcxx-dbg
+          grep -c keep_gen_c nfcxx-dbg
+          FEATURE_CXX="$PWD/nfcxx-dbg" tests/cpp-features/run.sh || true
+      - name: Reproduce the back end on the kept C
         run: |
           set -x
           probe=cpp11-N2634-sfinae_expressions
-          src=$PWD/tests/cpp-features/cpp11/$probe.cpp
-          out=$PWD/build/dbg-c; mkdir -p "$out"
-          line=$(sed -n 's/^C++ prelinker: executing: [^ ]*eccp.sh //p' build/dbg/$probe/qbe/compile.log | head -1)
-          echo "prelinker args: $line" > "$out/args.txt"
-          (cd "$out" && eval "$PWD/../edg/bin/eccp --keep_gen_c $line") > "$out/eccp.log" 2>&1 || echo "eccp exit $?" >> "$out/eccp.log"
-          cp "$out"/*.int.c "$out/kept.int.c" 2>/dev/null || true
+          out=build/dbg-c; rm -rf "$out"; mkdir -p "$out"
+          kept=$(sed -n 's/.*intermediates kept in \([^ ]*\).*/\1/p' build/dbg/$probe/qbe/compile.log | head -1)
+          echo "kept dir: $kept" > "$out/kept.txt"
+          cp -r "$kept"/. "$out"/
+          ls -la "$out"
           cd "$out"
-          ../../scripts/qbe-cc -c kept.int.c -o kept.o > qbe-cc.log 2>&1; echo "qbe-cc exit $?" >> qbe-cc.log
-          ../cproc/cproc-qbe kept.int.c > kept.ssa 2> cproc.log; echo "cproc exit $?" >> cproc.log
+          ../../scripts/qbe-cc -c $probe.int.c -o kept.o > qbe-cc.log 2>&1; echo "qbe-cc exit $?" >> qbe-cc.log
+          ../cproc/cproc-qbe $probe.int.c > kept.ssa 2> cproc.log; echo "cproc exit $?" >> cproc.log
           ../qbe/qbe kept.ssa > /dev/null 2> qbe.log; echo "qbe exit $?" >> qbe.log
-          cc -E -undef -D__CPROC__ kept.int.c > kept.pp.c 2> cpp.log; echo "cc -E exit $?" >> cpp.log
+          cc -E -undef -D__CPROC__ $probe.int.c > kept.pp.c 2> cpp.log; echo "cc -E exit $?" >> cpp.log
           cc --version | head -1 > cc-version.txt
           cat qbe-cc.log qbe.log
+          cat -n kept.ssa | sed -n 1,40p
       - uses: actions/upload-artifact@v4
         if: always()
         with:
