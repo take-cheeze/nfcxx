@@ -250,6 +250,74 @@ Dir.mktmpdir do |dir|
   check.call('no class list and no self is not free', !world.send(:method_missing_free?, nil))
 end
 
+puts '-- finalized-world opacity touch cache'
+opacity_probe = Class.new(ClosedWorld) do
+  def initialize(touches:, **arguments)
+    @fixture_touches = touches
+    @touch_queries = 0
+    super(**arguments)
+  end
+
+  attr_reader :touch_queries
+
+  private
+
+  def scan_outside_ruby(paths)
+    super
+    @touches.concat(@fixture_touches)
+  end
+
+  def outside_class_touch?(owner)
+    @touch_queries += 1
+    super
+  end
+end
+opacity_flag = ENV['BC2CPP_CLOSED_OPACITY_INDEX']
+begin
+  make_opacity = lambda do |names, source = false|
+    declarations = %w[Pkg::Leaf Other::Leaf Solo].to_h { |name| [name, [{ super: :none, outer_nil: true }]] }
+    touches = names.empty? ? [] : [ClosedWorld::Touch.new('fixture', names.to_set, {}, '', source)]
+    opacity_probe.new(touches: touches, ireps: {}, registry: {}, class_decls: declarations,
+                      walked: Set.new, native_paths: [], ruby_paths: [])
+  end
+  %w[0 1].each do |mode|
+    ENV['BC2CPP_CLOSED_OPACITY_INDEX'] = mode
+    [[[], false, false], [%w[Pkg Leaf], false, true], [%w[Leaf], false, false],
+     [[TouchScan::WILD, 'Leaf'], false, true], [%w[Pkg Leaf], true, false]].each do |names, source, expected|
+      world = make_opacity.call(names, source)
+      2.times { check.call("opacity #{mode} preserves #{names.inspect}, source=#{source}", world.send(:opaque?, 'Pkg::Leaf') == expected) }
+      check.call("opacity #{mode} touch query count matches the cache setting", world.touch_queries == (mode == '1' ? 1 : 2))
+      if source
+        check.call('source-inclusive native touch queries retain source-only evidence', world.send(:touches_for, %w[Pkg Leaf], source: true).size == 1)
+      end
+      check.call('unrelated paths sharing a leaf stay separate', !world.send(:opaque?, 'Other::Leaf')) unless names.include?(TouchScan::WILD)
+      %w[Unknown Object Pkg::Leaf.singleton <native>].each do |owner|
+        check.call("opacity retains refusal for #{owner}", world.send(:opaque?, owner))
+      end
+    end
+    world = make_opacity.call(['Solo'])
+    check.call('single-segment paths retain their touch refusal', world.send(:opaque?, 'Solo'))
+  end
+  ENV['BC2CPP_CLOSED_OPACITY_INDEX'] = '1'
+  world = make_opacity.call([])
+  owner = +'Pkg::Leaf'
+  check.call('a closed declared owner warms a negative touch answer', !world.send(:opaque?, owner))
+  check.call('opacity caching does not freeze caller strings', !owner.frozen?)
+  owner.replace('Other::Leaf')
+  check.call('mutating a query string does not corrupt previous cache keys', !world.send(:opaque?, owner) && !world.send(:opaque?, 'Pkg::Leaf'))
+  world.instance_variable_get(:@rebound) << 'Leaf'
+  check.call('rebinding still refuses after a negative touch cache hit', world.send(:opaque?, 'Pkg::Leaf'))
+  world.instance_variable_get(:@rebound).clear
+  world.instance_variable_get(:@dynamic_subclassed) << 'Leaf'
+  check.call('dynamic subclasses still refuse after a negative touch cache hit', world.send(:opaque?, 'Pkg::Leaf'))
+  world.instance_variable_get(:@dynamic_subclassed).clear
+  world.instance_variable_get(:@class_decls).delete('Pkg::Leaf')
+  check.call('declaration removal is never hidden by a cached touch answer', world.send(:opaque?, 'Pkg::Leaf'))
+  check.call('touch answers do not leak between analysis worlds', make_opacity.call(%w[Pkg Leaf]).send(:opaque?, 'Pkg::Leaf') && !make_opacity.call([]).send(:opaque?, 'Pkg::Leaf'))
+ensure
+  opacity_flag ? ENV['BC2CPP_CLOSED_OPACITY_INDEX'] = opacity_flag : ENV.delete('BC2CPP_CLOSED_OPACITY_INDEX')
+end
+
 # -- Native result receiver snapshots ---------------------------------------------------------
 
 puts '-- native result receiver snapshots'
