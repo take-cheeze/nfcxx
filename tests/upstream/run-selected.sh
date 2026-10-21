@@ -52,7 +52,10 @@ while IFS=$'\t' read -r suite id std relative oracle review; do
         elif [ "$oracle" = stdout ] && ! cmp -s "$dir/host.out" "$dir/$route.out"; then status=output-mismatch; fi ;;
       124|137) status=compile-timeout ;;
       125|126|127) echo "cannot invoke route $route" >&2; exit 1 ;;
-      *) if [ "$compile" -gt 128 ]; then status=compile-crash; else status=compile-rejected; fi ;;
+      *) # eccp reports a failed C compile as 129 and prints the C compiler's status first: only a status above 128 is a crash.
+        backend=$(sed -n 's,.*returned an exit status of \([0-9][0-9]*\)$,\1,p' "$dir/$route-compile.log" | tail -1)
+        if [ "$compile" -gt 128 ] && { [ "$compile" -ne 129 ] || [ "${backend:-0}" -gt 128 ]; }; then status=compile-crash
+        else status=compile-rejected; fi ;;
     esac
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$suite" "$id" "$std" "$route" "$status" "$compile" "$run" >> "$out/results.tsv"
     [ "$status" = pass ] || fail=1

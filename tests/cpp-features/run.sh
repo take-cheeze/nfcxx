@@ -54,7 +54,12 @@ for source in tests/cpp-features/cpp*/*.cpp; do
       124|137) status=compile-timeout ;;
       125|126|127) echo "cannot invoke compiler for $route: see $dir/compile.log" >&2; exit 1 ;;
       *)
-        if [ "$compile" -gt 128 ]; then status=compile-crash
+        # eccp reports a failed C compile as 129 and prints the C compiler's own status first: 1 is a rejection
+        # by the back end, a status above 128 is a crash of it.
+        backend=$(sed -n 's,.*returned an exit status of \([0-9][0-9]*\)$,\1,p' "$dir/compile.log" | tail -1)
+        if [ "$compile" -gt 128 ] && [ "$compile" -ne 129 ]; then status=compile-crash
+        elif [ "$compile" = 129 ] && [ -n "$backend" ] && [ "$backend" -gt 128 ]; then status=compile-crash
+        elif [ "$compile" = 129 ] && [ -n "$backend" ]; then status=backend-rejected
         elif [ "$route" = host ]; then status=host-rejected
         else
           front=0
