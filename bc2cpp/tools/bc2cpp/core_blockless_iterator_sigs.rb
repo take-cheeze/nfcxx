@@ -3,8 +3,9 @@
 require_relative 'native_core_result_sigs'
 
 # CoreBlocklessIteratorSigs: the result class of core block iterators called WITHOUT a block (a SEND site), read from
-# sig/bc2cpp/declarations.rbs#core_blockless_iterators. A member's blockless overload gives the result class (Enumerator)
-# and the argument count the blockless call accepts. The block form is core_block_iterators (CoreBlockIteratorSigs).
+# sig/bc2cpp/declarations.rbs#core_blockless_iterators. Each member is the method-level union of its blockless overload
+# (the result class, Enumerator, and the argument count) and its block overload; a member with only one form is refused.
+# The block form's result is core_block_iterators (CoreBlockIteratorSigs) where that table declares it.
 module CoreBlocklessIteratorSigs
   PATH = NativeSigs.table('core_blockless_iterators')
 
@@ -12,15 +13,15 @@ module CoreBlocklessIteratorSigs
 
   # { 'Enumerable' => { 'map' => 'Enumerator', ... } }, frozen, read once per path.
   def results(path = PATH)
-    load(path)[:results]
+    tables(path)[:results]
   end
 
   # [min, max] positional arguments the blockless call of +name+ takes (max nil: any number), or nil when undeclared.
   def arity(owner, name, path = PATH)
-    load(path)[:arity].dig(owner, name)
+    tables(path)[:arity].dig(owner, name)
   end
 
-  def load(path)
+  def tables(path)
     @loaded ||= {}
     @loaded[path] ||= load_tables(path)
   end
@@ -39,6 +40,12 @@ module CoreBlocklessIteratorSigs
       decl.members.each do |member|
         unless member.is_a?(RBS::AST::Members::MethodDefinition) && member.kind == :instance
           raise "bc2cpp: #{path}: #{owner} members must be instance method definitions"
+        end
+
+        # Every member is the method-level union of its two forms: one blockless overload and one with a block.
+        forms = member.overloads.map { |o| o.method_type.block ? :block : :blockless }.sort
+        unless forms == %i[block blockless]
+          raise "bc2cpp: #{path}: #{owner}##{member.name} must declare one blockless and one block overload, not #{forms.join(' and ')}"
         end
 
         overload = NativeCoreResultSigs.form_overload(member, owner, path, :blockless)

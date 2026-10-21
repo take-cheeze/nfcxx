@@ -17,6 +17,7 @@ require_relative '../../tools/bc2cpp/numeric_flow'
 require_relative '../../tools/bc2cpp/core_blockless_iterator_sigs'
 require_relative '../../tools/bc2cpp/core_block_iterator_sigs'
 require_relative '../../tools/bc2cpp/core_hierarchy_sigs'
+require 'tempfile'
 require_relative '../../tools/bc2cpp/codegen_native_results'
 
 failures = []
@@ -126,6 +127,25 @@ check.call('SEND map with one argument is refused (map takes none)',
 check.call('a splat argument count is refused', cg.native_core_blockless_enumerator_result(
   Insn.new(lineno: 1, addr: 0, op: 'SEND', args: "R1\t:map\tn=*", raw: 'SEND R1 :map n=*'), state_for(ARR)).nil?)
 check.call('a Hash receiver is claimed', cg.native_core_blockless_enumerator_result(insn('SEND0', 'select'), state_for(HSH)) == NF::ENUMERATOR)
+
+puts '== union rule'
+check.call('every declared member is the union of a blockless and a block overload',
+           CoreBlocklessIteratorSigs.results['Enumerable'].keys.all? do |name|
+             decl = NativeSigs.decls(CoreBlocklessIteratorSigs::PATH).flat_map { |d| d.members }
+                              .select { |m| m.name.to_s == name }
+             decl.size == 1 && decl.first.overloads.map { |o| o.method_type.block ? :block : :blockless }.sort == %i[block blockless]
+           end)
+one_form = Tempfile.new(['one_form', '.rbs'])
+one_form.write("module Enumerable\n  def each_slice: (Integer n) -> Enumerator[untyped, untyped]\nend\n")
+one_form.close
+refused = begin
+  CoreBlocklessIteratorSigs.send(:load_tables, one_form.path)
+  false
+rescue RuntimeError => e
+  e.message.include?('one blockless and one block overload')
+end
+check.call('a member with only its blockless form is refused by the loader', refused)
+one_form.unlink
 
 puts '== consumers refuse the bit'
 check.call('return_class_of_mask names no class for ENUMERATOR', cg.return_class_of_mask(NF::ENUMERATOR).nil?)

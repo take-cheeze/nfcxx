@@ -3,6 +3,7 @@
 require_relative 'ir_rbs_block_types'
 require_relative 'core_block_param_sigs'
 require_relative 'core_fact_sigs'
+require_relative 'block_capture_index'
 
 # CodeGen: blocks that stay procs, and fiber safety.
 
@@ -52,6 +53,12 @@ class CodeGen
   MAX_UPVAR_NEST_DEPTH = 16
 
   def block_upvar_needs(irep)
+    return @block_capture_index.upvars(irep) if @block_capture_index
+
+    compute_block_upvar_needs(irep)
+  end
+
+  def compute_block_upvar_needs(irep)
     needs = []
     walked = BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }, max_depth: MAX_UPVAR_NEST_DEPTH) do |insn, depth|
       next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
@@ -92,6 +99,10 @@ class CodeGen
   # BLOCK_SEMANTICS (ADR 0266): `given: false` leaves out the `block_given?`
   # reads, which only test the block for nil and so need no synchronous callee.
   def block_blk_needs(irep, depth = 0, given: true)
+    if @block_capture_index
+      return @block_capture_index.block_levels(irep, depth, given: given && block_given_modelled?)
+    end
+
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
