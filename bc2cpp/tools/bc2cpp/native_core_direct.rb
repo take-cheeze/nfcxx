@@ -188,22 +188,6 @@ module NativeCoreDirect
                 }
                 return self;
               C
-    # String#size and #length are one function, mrb_str_size, whose RSTRING_CHAR_LEN follows
-    # MRB_UTF8_STRING. The helper mirrors it: the character count under UTF-8 (mrb_utf8_strlen,
-    # which RSTRING_CHAR_LEN itself calls), the byte length otherwise. The body is pinned by the :exact check.
-    *%w[size length].map do |name|
-      Entry.new(name: name, owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
-                expression: "bc2cpp_str_#{name}(M, recv)", helper: "bc2cpp_str_#{name}",
-                apis: [],
-                checks: [['mrb_str_size', <<~C, :exact],
-                  mrb_int len = RSTRING_CHAR_LEN(self);
-                  return mrb_int_value(mrb, len);
-                C
-                         ['string.c', <<~C, :source]])
-                  #else
-                  #define RSTRING_CHAR_LEN(s) RSTRING_LEN(s)
-                C
-    end,
     Entry.new(name: 'bytes', owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: 'bc2cpp_str_bytes(M, recv)', helper: 'bc2cpp_str_bytes',
               apis: [],
@@ -302,26 +286,6 @@ module NativeCoreDirect
         default:
           return ary;
         }
-      }
-    CPP
-    'bc2cpp_str_size' => <<~CPP,
-      extern "C" mrb_int mrb_utf8_strlen(const char* str, mrb_int byte_len);
-      static inline mrb_value bc2cpp_str_size(mrb_state* M, mrb_value str) {
-      #ifdef MRB_UTF8_STRING
-        return mrb_int_value(M, mrb_utf8_strlen(RSTRING_PTR(str), RSTRING_LEN(str)));
-      #else
-        return mrb_int_value(M, RSTRING_LEN(str));
-      #endif
-      }
-    CPP
-    'bc2cpp_str_length' => <<~CPP,
-      extern "C" mrb_int mrb_utf8_strlen(const char* str, mrb_int byte_len);
-      static inline mrb_value bc2cpp_str_length(mrb_state* M, mrb_value str) {
-      #ifdef MRB_UTF8_STRING
-        return mrb_int_value(M, mrb_utf8_strlen(RSTRING_PTR(str), RSTRING_LEN(str)));
-      #else
-        return mrb_int_value(M, RSTRING_LEN(str));
-      #endif
       }
     CPP
     'bc2cpp_str_bytes' => <<~CPP,
