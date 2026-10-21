@@ -63,8 +63,21 @@ module ConversionReturns
           "#{problems.join("\n")}"
   end
 
+  # The class of a literal default, which types its optional parameter; anything else stays untyped.
+  # Declaration only: the checker gives an optional parameter no hint (TC1005, docs/bc2cpp-type-check.md).
+  DEFAULT_TYPES = {
+    Prism::IntegerNode => 'Integer', Prism::FloatNode => 'Float', Prism::StringNode => 'String',
+    Prism::InterpolatedStringNode => 'String', Prism::SymbolNode => 'Symbol', Prism::ArrayNode => 'Array',
+    Prism::HashNode => 'Hash', Prism::TrueNode => 'bool', Prism::FalseNode => 'bool'
+  }.freeze
+
+  def default_type(node)
+    DEFAULT_TYPES.find { |klass, _| node.is_a?(klass) }&.last || 'untyped'
+  end
+
   # The RBS that declares each conversion method's return as a runtime-checked hint, or nil when there is none. The
-  # optional positional parameters are written as `?untyped`; the hint keeps the method's own arity.
+  # optional positional parameters are written as `?T`, T the class of their literal default (`?untyped` otherwise);
+  # the hint keeps the method's own arity.
   def rbs_text(paths)
     found = paths.flat_map { |path| found_in(path) }.reject { |f| parameter_problems(f.node).any? }
     return nil if found.empty?
@@ -72,8 +85,7 @@ module ConversionReturns
     by_owner = found.group_by { |f| [f.kind, f.owner] }
     by_owner.map do |(kind, owner), methods|
       body = methods.uniq { |f| f.node.name }.map do |f|
-        optional = f.node.parameters&.optionals&.size.to_i
-        params = Array.new(optional) { '?untyped' }.join(', ')
+        params = (f.node.parameters&.optionals || []).map { |param| "?#{default_type(param.value)}" }.join(', ')
         "  %a{bc2cpp:hint}\n  def #{f.node.name}: (#{params}) -> #{RETURNS.fetch(f.node.name)}\n"
       end.join
       "#{kind} #{owner}\n#{body}end\n"
