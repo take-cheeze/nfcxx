@@ -2,20 +2,16 @@
 # frozen_string_literal: true
 
 # CORE_MIXINS (docs/adr/0261): mruby's own Enumerable/Comparable as known
-# mixins, and the core Ruby methods bc2cpp inlines behind an exact receiver
-# guard (Numeric#positive?/#negative? on Integer/Float, Enumerable#min/#max on
-# an exact Array of Integers or non-NaN Floats).
+# mixins, and the definer scan (CoreMixins.definers_in) the source checks use.
+# The core Ruby methods that were inlined from a verified model (Numeric#
+# positive?/#negative?, Enumerable#min/#max) are no longer modelled, so they
+# keep the ordinary dispatch.
 #
-# 1. Host only: the model verifies a core tree that matches it, refuses one
-#    that does not (another definer, an alias, a native registration, a changed
-#    body), and matches the real 3rd/mruby when it is present.
+# 1. Host only: the definer scan reads one def, alias and define_method at a time.
 # 2. With MRBC: `include Enumerable` is a known ancestor unless the closed
-#    world declares its own; the inlines appear in a closed world and go away
-#    when anything on the receiver's ancestry redefines the name, when a
-#    prepend or dynamic installer could; a
+#    world declares its own; the four methods keep their dispatch; a
 #    module_function body whose blocks never look at self is called directly.
-# 3. With MRBC, BC2CPP_MRUBY_FULL and g++: values, exceptions and dispatch
-#    counts against the interpreter.
+# 3. With MRBC, BC2CPP_MRUBY_FULL and g++: values, exceptions against the interpreter.
 #
 # Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_FULL=dir] ruby scripts/bc2cpp/core_mixins_check.rb
 
@@ -72,62 +68,15 @@ sample = <<~RUBY
 RUBY
 found = CoreMixins.definers_in('x/mrblib/enum.rb', sample, 'min')
 check.call('a def is found with its enclosing module and normalized body',
-           found.one? && found.first.owner == 'Enumerable' && found.first.body == CoreMixins.normalize(CoreMixins::MIN_BODY.lines))
+           found.one? && found.first.owner == 'Enumerable' &&
+             found.first.body == 'def min(&block) flag = true result = nil self.each {|*val| val = val.__svalue if flag ' \
+                                 'result = val flag = false else if block result = val if block.call(val, result) < 0 else ' \
+                                 'result = val if (val <=> result) < 0 end end } result end')
 check.call('an alias of the name is a definer of its own',
            CoreMixins.definers_in('x.rb', sample, 'member?').map(&:alias_only) == [true])
 check.call('a singleton def is a different owner',
            CoreMixins.definers_in('x.rb', sample, 'positive?').map(&:owner).sort == ['Numeric', 'Numeric.singleton'])
 check.call('a longer name is not a definer of the shorter one', CoreMixins.definers_in('x.rb', sample, 'posi').empty?)
-
-Dir.mktmpdir do |dir|
-  write = lambda do |rel, text|
-    path = File.join(dir, rel)
-    FileUtils.mkdir_p(File.dirname(path))
-    File.write(path, text)
-    path
-  end
-  numeric = "class Numeric\n  def positive?\n    self > 0\n  end\n\n  def negative?\n    self < 0\n  end\nend\n"
-  enum = "module Enumerable\n#{CoreMixins::MIN_BODY.gsub(/^/, '  ')}\n#{CoreMixins::MAX_BODY.gsub(/^/, '  ')}end\n"
-  range = "class Range\n  def min(&block); end\n  def max(&block); end\nend\n"
-  core = lambda do |numeric_text: numeric, enum_text: enum, range_text: range, extra: nil|
-    paths = [write.call('3rd/mruby/mrbgems/mruby-numeric-ext/mrblib/numeric_ext.rb', numeric_text),
-             write.call('3rd/mruby/mrblib/enum.rb', enum_text),
-             write.call('3rd/mruby/mrbgems/mruby-range-ext/mrblib/range.rb', range_text)]
-    paths << write.call('3rd/mruby/mrbgems/mruby-other/mrblib/other.rb', extra) if extra
-    paths
-  end
-  natives = { 'min' => ['/x/3rd/mruby/mrbgems/mruby-time/src/time.c'] }
-  all = %w[positive? negative? min max].to_set
-  check.call('a core tree that matches the model verifies every method', CoreMixins.verified(core.call, natives) == all)
-  check.call('a changed body turns the method off',
-             !CoreMixins.verified(core.call(numeric_text: numeric.sub('self > 0', 'self >= 0')), natives).include?('positive?') &&
-               CoreMixins.verified(core.call(numeric_text: numeric.sub('self > 0', 'self >= 0')), natives).include?('negative?'))
-  check.call('a second Ruby definer turns it off',
-             !CoreMixins.verified(core.call(extra: "class Integer\n  def positive?; true; end\nend\n"), natives).include?('positive?'))
-  check.call('an alias of the name turns it off',
-             !CoreMixins.verified(core.call(extra: "class Array\n  alias min first\nend\n"), natives).include?('min') &&
-               CoreMixins.verified(core.call(extra: "class Array\n  alias min first\nend\n"), natives).include?('max'))
-  check.call('an unexpected native registration turns it off',
-             !CoreMixins.verified(core.call, natives.merge('min' => ['/x/mruby-rgss/src/lib.cxx'])).include?('min') &&
-               !CoreMixins.verified(core.call, natives.merge('positive?' => ['/x/anything.c'])).include?('positive?'))
-  check.call('the Range definers are part of the model (a missing one turns min off)',
-             !CoreMixins.verified(core.call(range_text: "class Range\nend\n"), natives).include?('min'))
-  check.call('no sources prove nothing', CoreMixins.verified(nil, natives).empty? && CoreMixins.verified(core.call, nil).empty?)
-end
-
-real = File.join(ROOT, '3rd/mruby/mrblib/enum.rb')
-if File.exist?(real)
-  require_relative '../../tools/bc2cpp/compiled_gems'
-  require_relative '../../tools/bc2cpp/bc2cpp'
-  native = core_native_srcs("#{ROOT}/3rd/mruby") + Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + external_gem_native_srcs(ROOT)
-  # Program-owned core files still participate in source-model verification.
-  ruby = (core_compiled_mrblib_srcs(ROOT) + foreign_mrblib_srcs(ROOT)).uniq
-  verified = CoreMixins.verified(ruby, extract_native_method_sources(native))
-  check.call('the real 3rd/mruby still matches every modelled method (review CoreMixins::METHODS when this fails)',
-             verified == Set.new(CoreMixins::METHODS.map(&:name)))
-else
-  puts '  SKIP the real 3rd/mruby is not checked out'
-end
 
 if ENV['MRBC']
   require_relative '../../tools/bc2cpp/bc2cpp'
@@ -168,58 +117,19 @@ if ENV['MRBC']
     check.call('a computed include stays an unknown mixin', unknown.include?('CmRuntime') && included['CmRuntime'].nil?)
   end
 
-  inlines = <<~RUBY
-    class CmProbe
-      def lo(a, b); [a, b].min; end
-      def hi(arr); arr.max; end
-      def sgn(x); x.positive? ? 1 : 0; end
-      def neg(x); x.negative? ? 1 : 0; end
-      def with_block(arr); arr.min { |a, b| b <=> a }; end
-    end
-  RUBY
-  markers = lambda do |code|
-    { min: code.include?('CORE_MIN_MAX :min'), max: code.include?('CORE_MIN_MAX :max'),
-      pos: code.include?('CORE_NUMERIC_SIGN :positive?'), neg: code.include?('CORE_NUMERIC_SIGN :negative?') }
-  end
-  world = lambda do |extra|
-    Dir.mktmpdir do |dir|
-      code, err = runtime.generate("#{extra}\n#{inlines}", dir)
-      [code, err]
-    end
-  end
-
   puts '-- generated code'
-  code, err = world.call('')
-  everything = { min: true, max: true, pos: true, neg: true }
-  check.call('a closed world with untouched core sources inlines all four', markers.call(code) == everything)
-  check.call('the build reports the verified methods',
-             err.include?("== core Ruby methods verified against the build's sources (CORE_MIXINS): max, min, negative?, positive? =="))
-  check.call('a block-taking min keeps its dispatch', !body_of.call(code, 'CmProbe_with_block').include?('CORE_MIN_MAX'))
-  check.call('the else arm is the ordinary dispatch', body_of.call(code, 'CmProbe_lo').match?(/if \(!bc2cpp_mm_\d+_done\) \{\n\s+r\d+ = bc2cpp_send\(/))
-  {
-    'class Array; def min; 0; end; end' => { min: false, max: true, pos: true, neg: true },
-    'class Array; def each; end; end' => { min: false, max: false, pos: true, neg: true },
-    'module Enumerable; def max; 1; end; end' => { min: true, max: false, pos: true, neg: true },
-    'class Integer; def positive?; true; end; end' => { min: true, max: true, pos: false, neg: true },
-    'class Numeric; def negative?; false; end; end' => { min: true, max: true, pos: true, neg: false },
-    'class Object; def positive?; true; end; end' => { min: true, max: true, pos: false, neg: true },
-    'module CmShadow; def max; 1; end; end; class Array; include CmShadow; end' =>
-      { min: true, max: false, pos: true, neg: true },
-    'module CmPre; def min; 1; end; end; class Array; prepend CmPre; end' =>
-      { min: false, max: false, pos: true, neg: true },
-    'class Integer; alias_method :positive?, :zero?; end' => { min: true, max: true, pos: false, neg: true },
-    # A literal class-body define_method is a definition like `def` (ADR 0288): it shadows only its own name.
-    'class Integer; define_method(:negative?) { true }; end' => { min: true, max: true, pos: true, neg: false },
-    'class Integer; define_method("negat" + "ive?") { true }; end' => { min: false, max: false, pos: false, neg: false },
-    'class Float; def >(o); false; end; end' => { min: true, max: true, pos: false, neg: true }
-  }.each do |extra, want|
-    code, = world.call(extra)
-    got = markers.call(code)
-    check.call("`#{extra}` #{want == got ? 'leaves exactly the unshadowed inlines' : "-> #{got}, want #{want}"}", got == want)
+  Dir.mktmpdir do |dir|
+    code, = runtime.generate(<<~RUBY, dir)
+      class CmProbe
+        def lo(a, b); [a, b].min; end
+        def hi(arr); arr.max; end
+        def sgn(x); x.positive? ? 1 : 0; end
+        def neg(x); x.negative? ? 1 : 0; end
+      end
+    RUBY
+    check.call('no core method is inlined: min, max, positive? and negative? keep the ordinary dispatch',
+               !code.include?('CORE_MIN_MAX') && !code.include?('CORE_NUMERIC_SIGN'))
   end
-  code, = world.call('class CmSub < Array; def each; yield 42; end; def min; 7; end; end')
-  check.call('a subclass of Array with its own each/min is not the exact-Array receiver, and shadows nothing on Array',
-             markers.call(code) == everything)
 
   puts '-- module_function bodies with blocks'
   Dir.mktmpdir do |dir|
@@ -364,9 +274,6 @@ if ENV['MRBC']
         dispatches = lambda do |label|
           at = compiled.index { |l| l.start_with?("#{label} =>") }
           at && compiled[at + 1][/dispatches=(\d+)/, 1].to_i
-        end
-        ['min of 50 Integers', 'max of 50 Integers', 'min of 50 Floats', 'max of 50 Floats', '5.positive?', '-1.5.negative?'].each do |label|
-          check.call("#{label} makes no dynamic dispatch", dispatches.call(label) == 0)
         end
         # The first call also resolves the constant once (the site cache).
         check.call('the module_function call with a block is a direct call',

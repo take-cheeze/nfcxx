@@ -1101,15 +1101,6 @@ class CodeGen
     integer_unary = compile_integer_unary(name, n, d, recv, argv)
     return integer_unary if integer_unary
 
-    # CORE_MIXINS (ADR 0261): core Ruby methods whose definition the build's core
-    # sources are verified to match.
-    core_sign = compile_core_numeric_sign(name, n, d, recv, argv)
-    return core_sign if core_sign
-
-    core_extreme = core_min_max_with_site(insn, name, n, d, recv, argv, irep, idx || trace_idx,
-                                          trace_receiver_reg || d, trace_reg_offset, self_implicit)
-    return core_extreme if core_extreme
-
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
       exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
