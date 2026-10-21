@@ -45,3 +45,7 @@ rgss_dir="$build_dir/closed/mrbgems/mruby-rgss"
 mkdir -p "$rgss_dir"
 (cd "$rgss_dir" && jis0208_table="$jis0208_table" ruby "$root/mruby-rgss/gen_shinonome_data.rb" > /dev/null)
 echo "wrote $rgss_dir/shinonome.hxx"
+
+# The analysis overlay: presym IDs for every symbol the closed world's native sources name, and the Onigmo header
+# mruby-onig-regexp includes (analysis_headers.rb). Read by base_rbs_all.rb and native_fn_kinds.rb only.
+ruby "$root/scripts/bc2cpp/analysis_headers.rb" "$build_dir/closed"
