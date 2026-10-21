@@ -572,6 +572,25 @@ module TypeFacts
     klass && stock_proof(ctx, 'freeze', klass) ? klass : nil
   end
 
+  # IO_OPEN_SAFE: the constant IO is the one native class (ClosedWorld#native_class_unshadowed?), and `open` on IO's
+  # singleton is mruby-io's io.rb definition. Its singleton comes before every other definer of IO.open, so the gate
+  # refuses any definer that could replace it: a Ruby `open` on IO.singleton (registry), a prepend or unknown mixin on
+  # it, or a non-core native `open`. `new` on IO must be stock (class_new_is_stock?), since io.rb's open is `self.new`.
+  def io_open_safe?(ctx)
+    world = ctx.gen.instance_variable_get(:@closed_world)
+    return false unless world && world.native_class_unshadowed?('IO')
+
+    native = ctx.gen.instance_variable_get(:@native_name_sources) || {}
+    included = ctx.included_modules || {}
+    prepended = ctx.prepended_modules || {}
+    unknown = ctx.unknown_mixins || []
+    return false if Array(native.fetch('open', [])).any? { |path| !path.match?(ClosedWorld::NATIVE_CORE) }
+    return false if (ctx.registry['open'] || []).any? { |d| d.owner == 'IO.singleton' }
+    return false if Array(prepended['IO.singleton']).any? || unknown.include?('IO.singleton')
+
+    class_new_is_stock?(ctx.registry, world, native, included, prepended, unknown)
+  end
+
   # The merge proof reads a Hash receiver's `merge`, which a singleton method on that very object could replace. The
   # closed world's exact-instance check (no singleton makers in the program) is the proof that none can exist.
   def singleton_free?(ctx)
@@ -610,6 +629,7 @@ module TypeFacts
     # producers above, so a row that already has a type does not change.
     int_classes = ctx.integer_class_constants || Set.new
     string_length_safe = string_length_safe?(ctx)
+    io_open_safe = io_open_safe?(ctx)
     integer_ops_safe = IntegerConstantRanges.integer_ops_safe?(ctx.registry, ctx.included_modules || {},
                                                               ctx.prepended_modules || {}, ctx.unknown_mixins || [])
     sums =DeclaredConstants.array_sum_names(ctx.ireps, Array(ctx.constant_sites), ctx.registry, classes,
@@ -684,6 +704,9 @@ module TypeFacts
         elsif int_classes.include?(bare)
           row['type'] = 'Integer'
           row['source'] = 'inferred:integer-class'
+        elsif DeclaredConstants.io_open_site?(irep, site[:idx], site[:reg], io_open_safe: io_open_safe)
+          row['type'] = 'IO'
+          row['source'] = 'inferred:io-open'
         elsif DeclaredConstants.bool_compare_site?(irep, site[:idx], site[:reg], string_length_safe: string_length_safe,
                                                                                integer_ops_safe: integer_ops_safe)
           row['type'] = 'bool'
