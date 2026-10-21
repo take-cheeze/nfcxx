@@ -36,7 +36,16 @@ module NativeReturnClasses
         info[:entries].each { |fn, name| rom << [info[:owner], name, fn] }
       end
     end
-    admit(NativeOwnerMap.build(paths), rom, kinds)
+    owner_map = NativeOwnerMap.build(paths)
+    # Define-family registrations carry their function too; a registration with no C function identifier has no body.
+    owner_map.registrations.each { |owner, name, fn| rom << [owner, name, fn] }
+    # An alias (define_alias / define_alias_id) is a registration of its name with the function of the name it copies,
+    # on the same owner. A copy of a name with no registration on that owner has no body here.
+    owner_map.aliases.each do |owner, name, original|
+      fn = owner_map.registrations.find { |ro, rn, _| ro == owner && rn == original }&.last
+      rom << [owner, name, fn]
+    end
+    admit(owner_map, rom, kinds)
   end
 
   # The admitted table for the NATIVE_SRCS paths. Empty unless BC2CPP_NATIVE_FN_KINDS names a TSV of `fn<TAB>class` rows
