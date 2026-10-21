@@ -124,6 +124,28 @@ with_ireps.call(<<~RUBY) do |ireps, _top, gen|
     end
   end
 RUBY
+  state_keys = CodeGen::METHOD_COMPILE_STATE.keys
+  original = state_keys.map { |ivar| gen.instance_variable_get(ivar) }
+  sentinels = state_keys.map { Object.new }
+  state_keys.zip(sentinels).each { |ivar, value| gen.instance_variable_set(ivar, value) }
+  begin
+    begin
+      gen.with_fresh_method_state do
+        check.call('probe starts with every method-state default',
+                   CodeGen::METHOD_COMPILE_STATE.all? { |ivar, value| gen.instance_variable_get(ivar) == value })
+        gen.instance_variable_set(:@ir_inline_remaining, 17)
+        gen.with_fresh_method_state { gen.instance_variable_set(:@ir_inline_remaining, 3) }
+        check.call('nested probe restores its immediate caller', gen.instance_variable_get(:@ir_inline_remaining) == 17)
+        raise RuntimeError, 'probe restoration test'
+      end
+    rescue RuntimeError => error
+      raise unless error.message == 'probe restoration test'
+    end
+    check.call('exception restores all caller state objects',
+               state_keys.each_with_index.all? { |ivar, index| gen.instance_variable_get(ivar).equal?(sentinels[index]) })
+  ensure
+    state_keys.zip(original).each { |ivar, value| gen.instance_variable_set(ivar, value) }
+  end
   registry = gen.instance_variable_get(:@registry)
   baseline = CodeGen.new(ireps, registry, {})
   baseline.instance_variable_set(:@block_capture_index, nil)
