@@ -609,12 +609,26 @@ if $PROGRAM_NAME == __FILE__
   # definitions and the bit-operator definitions the IR already binds (IntegerConstants.foreign_class_poison). The value
   # run above keeps foreign_const_names, so codegen reads only what it read before.
   ir_paths = ireps.each_value.filter_map { |irep| irep.file && File.expand_path(irep.file) }.to_set
+  # HASH_LOOKUP (report only, class run): Hash#[] must be stock, no non-core native `[]` on a Hash ancestor (an
+  # unresolved owner refuses, as CallFacts reads owners), and no instance singleton (the merge proof's gate). Integer
+  # keys need no eql?/hash proof: mruby hashes and compares a fixnum key without dispatch (3rd/mruby/src/hash.c).
+  hash_ancestors = CoreHierarchySigs.ancestors('Hash')
+  aref_regs, aref_opaque = NativeExpressionDevirt.class_registrations(native_name_sources.values.flatten.uniq)
+  aref_owners = aref_regs.to_h.fetch('[]', []).reject { |e| e[:path].match?(ClosedWorld::NATIVE_CORE) }
+                         .map { |e| e[:owner]&.fetch(:class_name, nil) } + aref_opaque.to_h.fetch('[]', [])
+  hash_lookup_safe = DeclaredConstants.stock_method?('[]', 'Hash', registry, included_modules, prepended_modules,
+                                                    unknown_mixins) &&
+                     aref_owners.none? { |owner| owner.nil? || hash_ancestors.include?(owner) } &&
+                     closed_world.exact_instances_singleton_free?
   class_facts = profile_call.call('BytecodeIR::ConstantFacts.analyze (class)') do
     BytecodeIR::ConstantFacts.analyze(
       ireps, sites: constant_assignment_sites,
              poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
                        IntegerConstants.foreign_class_poison((foreign_ruby_srcs + outside_ruby).uniq, ir_paths),
-             operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes.map(&:to_sym).to_set
+             operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes.map(&:to_sym).to_set,
+             hash_lookup_safe: hash_lookup_safe,
+             lookup_poisoned: IntegerConstants.native_defined_const_names((native_paths + outside_native).uniq) |
+                              IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq)
     )
   end
   integer_constants =
