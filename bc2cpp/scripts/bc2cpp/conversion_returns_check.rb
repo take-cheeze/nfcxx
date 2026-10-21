@@ -43,9 +43,14 @@ check.call('a singleton method is not a conversion',
 
 puts '== generated hints'
 text = rbs_of(["class A\n def to_s(base = 10); 'x'; end\n def to_hash; {}; end\nend\n"])
-check.call('a class method gets a runtime-checked hint with its optional arity',
-           text.include?("class A\n  %a{bc2cpp:hint}\n  def to_s: (?untyped) -> String\n"))
+check.call('a class method gets a runtime-checked hint with its optional arity, typed by its literal default',
+           text.include?("class A\n  %a{bc2cpp:hint}\n  def to_s: (?Integer) -> String\n"))
 check.call('to_hash returns Hash', text.include?('def to_hash: () -> Hash'))
+defaults = rbs_of(["class A\n def to_s(a = 'x', b = nil, c = [], d = {}, e = :s, f = true, g = 1.5); 'x'; end\nend\n"])
+check.call('each literal default types its optional parameter, and a non-literal one stays untyped',
+           defaults.include?('def to_s: (?String, ?untyped, ?Array, ?Hash, ?Symbol, ?bool, ?Float) -> String'))
+check.call('a default that is not a literal stays untyped',
+           rbs_of(["class A\n def to_s(a = Foo.new); 'x'; end\nend\n"]).include?('def to_s: (?untyped) -> String'))
 mod = rbs_of(["module M\n def to_str; 'x'; end\nend\n"])
 check.call('a module method is declared in a module', mod.start_with?("module M\n"))
 check.call('the generated RBS parses', begin
