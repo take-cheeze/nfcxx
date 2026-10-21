@@ -11,4 +11,7 @@ module SendNames
   CONST_REBINDERS = %w[const_set remove_const autoload].freeze
   # Constants whose `.new` makes a class (or members) the registry cannot see.
   CLASS_FACTORIES = %w[Class Module Struct Data].freeze
+  # Sends that forward a call to the method named by their first argument (`obj.send(:name, ...)`). A name
+  # they forward is only known from that argument, so an analysis reads it as a call to that method by name.
+  FORWARDING_SENDS = %w[send __send__ public_send].freeze
 end

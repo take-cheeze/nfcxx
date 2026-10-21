@@ -44,11 +44,19 @@ module BytecodeIR
     Fact = Struct.new(:classes, :value, :interval, keyword_init: true)
     # paths: full lexical path => Fact of that path's own alternatives. groups: bare name => Fact of every binding of the
     # name (what a read sees).
-    Result = Struct.new(:paths, :groups, keyword_init: true) do
+    # zero_divisors: bare names with a division by an exact zero somewhere in their bindings. Such a binding raises before
+    # it holds a value, so only integer_class_names leaves these out (the value and Fixnum sets are unchanged).
+    Result = Struct.new(:paths, :groups, :zero_divisors, keyword_init: true) do
       # Names a read may hold as a Fixnum: every binding is an Integer with an exact value or an interval, both of
       # which are inside the Fixnum margin by construction.
       def fixnum_names
         groups.select { |_, f| f.classes == Set[:Integer] && (f.value || f.interval) }.keys.to_set
+      end
+
+      # Names every binding of which is an Integer, whatever its size: the bignum-capable class proof (CLASS_INTEGER_PROOF,
+      # the type check's integer-class rows). An out-of-margin literal is an Integer class with no value, so it is here.
+      def integer_class_names
+        groups.select { |name, f| f.classes == Set[:Integer] && !zero_divisors.include?(name) }.keys.to_set
       end
 
       # bare name => exact Integer, for groups with one value.
@@ -109,7 +117,8 @@ module BytecodeIR
               end
         [path, own.freeze]
       end
-      Result.new(paths: paths.sort.to_h.freeze, groups: groups.freeze)
+      zero_divisors = by_bare.filter_map { |bare, lists| bare if lists.any? { |list| list && zero_divisor?(list, values) } }
+      Result.new(paths: paths.sort.to_h.freeze, groups: groups.freeze, zero_divisors: zero_divisors.to_set.freeze)
     end
 
     # Least fixpoint of one fact kind over the bare-name groups. +block+ gives a group's fact from its alternatives and
@@ -262,6 +271,18 @@ module BytecodeIR
         right = union_classes(node[3], known)
         integer = Set[:Integer]
         left && right && !left.empty? && !right.empty? && left.subset?(integer) && right.subset?(integer) ? integer : nil
+      end
+    end
+
+    # Whether some division in +alts+ has a divisor whose exact value is 0 (see Result#zero_divisors).
+    def zero_divisor?(alts, known)
+      alts.any? do |node|
+        case node[0]
+        when :freeze then zero_divisor?(node[1], known)
+        when :arith
+          (node[1] == 'DIV' && exact_of(node[3], known) == 0) || zero_divisor?(node[2], known) || zero_divisor?(node[3], known)
+        else false
+        end
       end
     end
 

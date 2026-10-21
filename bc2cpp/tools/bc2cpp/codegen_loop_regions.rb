@@ -364,6 +364,8 @@ class CodeGen
   #
   # For an Array receiver the block gets one element; the block's RESULT is
   # pushed when truthy. Not redefined anywhere here.
+  # Not derived from core_block_iterators: find and each_with_index are not RBS Array results, and the RBS's
+  # collect/find_all/partition/sort_by would widen it to names emit_collect_inline's case has no arm for.
   COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index filter_map].freeze
 
   # ACCUM_BLOCK_SUPPORT: inline any?/all?/none?/count (1-arg blocks) and
@@ -429,6 +431,8 @@ class CodeGen
   # a symbol proc (ensure_block), so there is nothing to inline or capture; each
   # element gets one call (emit_sym_inline). Same Array gate as
   # recognize_each_regions.
+  # Not derived from the RBS iterator tables: they declare 26 Enumerable names, emit_sym_inline handles only these
+  # nine, and each/any?/all?/none?/count are not declared in either table.
   SYM_BLOCK_METHODS = %w[each map select reject find any? all? none? count].freeze
 
   def recognize_sym_regions(irep, owner_name, mand, ivar_classes, arg_classes)
@@ -626,6 +630,7 @@ class CodeGen
   #     element) and max_by/min_by (1-arg key, called for every element); ties
   #     keep the first element, empty is nil.
   # Arity mismatches keep `#error`.
+  # RBS states sort_by alone and has no "sort" category; a /\Asort/ name filter would widen silently if RBS gains one.
   SORT_BLOCK_METHODS = %w[sort_by].freeze
 
   def recognize_sort_regions(irep, owner_name, mand, ivar_classes, arg_classes)
@@ -819,13 +824,19 @@ class CodeGen
       end
     when 'JMPNOT'
       reg = insn.reg
-      "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, offset), target) ||
+        "  if (!mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
     when 'JMPIF'
       reg = insn.reg
-      "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, offset), target) ||
+        "  if (mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
     when 'JMPNIL'
       reg = insn.reg
-      "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, offset), target) ||
+        "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{target};\n"
     else
       # BLOCK_BODY_INDEX_SUPPORT: `idx` is the instruction's real position in
       # block_irep.instructions (the emitters walk it in order, skipping only

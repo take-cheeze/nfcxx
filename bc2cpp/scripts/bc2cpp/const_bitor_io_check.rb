@@ -54,13 +54,18 @@ analysis = lambda do |source|
     rb = File.join(dir, 'fixture.rb')
     File.write(rb, source)
     ireps, root = compile_ireps([rb], 'const_bitor_io', dir)
-    registry, _superclass_of, _containers, included, prepended, unknown = build_registry(ireps, root)
+    registry, _superclass_of, _containers, included, prepended, unknown, _structs, _decls, _walked, _ivars, sites = build_registry(ireps, root)
     safe = IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
+    # The IR class proof (ADR 0501 stage 4), with the gates the build passes (bc2cpp.rb).
+    freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
+    ir = BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: safe,
+                                                  freeze_safe: freeze_safe, freeze_classes: Set.new)
     {
       safe: safe,
       exact: IntegerConstants.analyze(ireps, [], [], operators_safe: safe),
       values: IntegerConstants.analyze_values(ireps, IntegerConstants.analyze(ireps, [], [], operators_safe: safe)),
-      classes: IntegerConstants.class_admitted(ireps, [], [], operators_safe: safe)
+      classes: IntegerConstants.class_admitted(ireps, [], [], operators_safe: safe),
+      ir_classes: ir.integer_class_names
     }
   end
 end
@@ -106,6 +111,29 @@ check.call('CB_BIG_OR (a constant operand) is admitted by the bignum-capable cla
 # mrbc folds `1073741824 | 1` to one LOADI32, so the literal-only rule never sees the expression: it is a plain
 # out-of-margin literal, which the existing literal proofs already type (see docs/bc2cpp-type-check.md).
 check.call('CB_LIT_OR is folded to one out-of-margin literal: no exact value', pos[:values]['CB_LIT_OR'].nil?)
+check.call('the IR class proof admits every name the old class proof admits (positive)', (pos[:classes] - pos[:ir_classes].to_a).empty?)
+
+# Literal-only arithmetic outside the Fixnum margin: the old class proof refuses it (integer_constants.rb, class_admitted:
+# no exact value), so the names built on it are refused too. The IR class proof keeps them: an Integer operator on Integer
+# operands is an Integer under the operator gate, whatever the size. The type check is the only reader (report only).
+puts '== literal-only bignum arithmetic: IR class proof keeps what the old proof refuses'
+arith = <<~RUBY
+  module CbArith
+    CB_ADD = 4611686018427387904 + 1
+    CB_SUB = 9999999999 - 1
+    CB_CHAIN = CB_ADD + 1
+    CB_LOOK = CB_ADD
+  end
+RUBY
+ar = analysis.call(arith)
+only_ir = (ar[:ir_classes] - ar[:classes].to_a).to_a.sort
+check.call('the IR class proof admits CB_ADD, CB_SUB, CB_CHAIN and CB_LOOK, and the old one refuses them',
+           only_ir == %w[CB_ADD CB_CHAIN CB_LOOK CB_SUB])
+check.call('the old class proof admits no name the IR refuses (arith)', (ar[:classes] - ar[:ir_classes].to_a).empty?)
+ar_rows = typed_rows.call(arith)
+add_row = row_for.call(ar_rows, 'CB_ADD')
+check.call('CB_ADD is typed Integer by the class proof (inferred:integer-class)',
+           add_row && add_row['type'] == 'Integer' && add_row['source'] == 'inferred:integer-class')
 
 puts '== positive, end to end: rows'
 rows = typed_rows.call(positive)

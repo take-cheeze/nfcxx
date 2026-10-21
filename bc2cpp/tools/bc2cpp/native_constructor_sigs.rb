@@ -36,6 +36,41 @@ module NativeConstructorSigs
     end
   end
 
+  # NATIVE_CONSTRUCT_TARGETS rows (dispatch_targets.rb), keyed by the class's last segment, from the audited overloads.
+  # A row comes from a `bc2cpp:direct` overload whose every argument is a positional read (`int` / `float`, with an
+  # optional `=K`). codegen_send.rb's direct arm calls `fn` with exactly the arguments the call passes and fills no
+  # defaults, so a literal-argument form (Rect's empty form) or a count the function does not take is left to
+  # OVERLOADED_CONSTRUCT, which does fill them. Several accepted counts can come out of that rule only if the
+  # direct overloads name different counts; each class's direct overloads must agree on one function and one type.
+  DIRECT_READ = /\A(int|float)(?:=-?\d+(?:\.\d+)?)?\z/
+
+  def construct_targets(declared = table, root: ROOT)
+    raise "bc2cpp: #{PATH}: rgss_constructors declares no class (the section is missing or empty)" if declared.empty?
+
+    declared.each_with_object({}) do |(klass, overloads), rows|
+      direct = overloads.select do |o|
+        o[:path].first == :direct && o[:path][2].all? { |a| a.match?(DIRECT_READ) }
+      end
+      next if direct.empty?
+
+      fns = direct.map { |o| o[:path][1] }.uniq
+      types = direct.flat_map { |o| o[:path][2].map { |a| a[DIRECT_READ, 1] } }.uniq
+      counts = direct.map { |o| o[:path][2].size }.uniq.sort
+      raise "bc2cpp: #{PATH}: #{klass} direct overloads name #{fns.inspect}, one function is required" unless fns.size == 1
+      raise "bc2cpp: #{PATH}: #{klass} direct overloads read #{types.inspect}, one type is required" unless types.size == 1
+
+      leaf = klass.split('::').last
+      class_fn = "rgss::native_#{leaf.downcase}_class"
+      header = File.read(File.join(root, 'include/rgss_construct.hxx'))
+      raise "bc2cpp: #{PATH}: #{class_fn} is not declared in include/rgss_construct.hxx" unless header.include?("RClass* native_#{leaf.downcase}_class(void);")
+      raise "bc2cpp: #{PATH}: #{fns.first} is not declared in include/rgss_construct.hxx" unless header.match?(/\b#{Regexp.escape(fns.first.delete_prefix('rgss::'))}\(/)
+      raise "bc2cpp: #{PATH}: two classes map to the row key #{leaf}" if rows.key?(leaf)
+
+      rows[leaf] = { fn: fns.first, class_fn: class_fn, class_owner: klass,
+                     arity: counts.size == 1 ? counts.first : counts, arg_type: types.first.to_sym }
+    end
+  end
+
   # The gem-relative path (`mruby-rgss/mrblib/lib.rb`) of the Ruby initialize the audit read for `klass`, or nil. A
   # `compiled` overload calls the program's own initialize only when that is the definition the audit read.
   def ruby_source(klass)

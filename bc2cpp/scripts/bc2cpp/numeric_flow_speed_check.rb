@@ -185,6 +185,68 @@ check.call('transfer: the call result, the frame above it and the slot widened',
 raised_state = NF.raise_state(FakeCall.new('SEND0', '1'), state, after, ctx)
 check.call('raise_state joins the widened state with the result', raised_state[1] == (NF::STR | OTHER))
 
+puts '-- unchanged load writes (host)'
+load_context = lambda do |writes, opaque = Set.new|
+  context = NF::Ctx.new(nil, Object.new, opaque, 4, ['n'], { 'n' => 4 }, [INT], 9, writes)
+  context.elem_base = 5
+  context.narrowing(13, [[[3].freeze, Object.new]].freeze, {}, false)
+  context
+end
+clean_load = [OTHER, INT, OTHER, OTHER, INT] + Array.new(4, NF::ELEM_UNKNOWN) + Array.new(8, 0)
+clean_load.freeze
+load_writes = {}
+unchanged = NF.copy_reg_write(clean_load, 1, INT, load_context.call(load_writes))
+check.call('an unchanged load shares its frozen input and still records writes', unchanged.equal?(clean_load) && load_writes == { 1 => INT })
+[[1, FLT], [10, 1], [6, INT], [14, 1], [11, 3], [15, 1]].each do |slot, value|
+  input = clean_load.dup
+  input[slot] = value
+  input.freeze
+  actual_writes = {}
+  expected_writes = {}
+  expected = input.dup
+  NF.set_reg(expected, 1, INT, load_context.call(expected_writes))
+  actual = NF.copy_reg_write(input, 1, INT, load_context.call(actual_writes))
+  check.call("changed load metadata at #{slot} is copied and invalidated", !actual.equal?(input) && actual == expected && actual_writes == expected_writes)
+end
+opaque_input = clean_load.dup
+opaque_input[1] = OTHER
+opaque_input.freeze
+check.call('captured registers use the effective OTHER mask before deciding to share',
+           NF.copy_reg_write(opaque_input, 1, INT, load_context.call({}, Set['1'])).equal?(opaque_input))
+manual_load = load_context.call({})
+load_instruction = insn(0, 'LOADI_1', 'R1 (1)')
+manual_result = NF.transfer(0, load_instruction, clean_load, manual_load)
+check.call('standalone transfer contexts retain copied write results', !manual_result.equal?(clean_load) && manual_result == clean_load)
+hash_load = { irep: nil, oracle: Object.new, opaque: Set.new, nregs: 4, slots: ['n'],
+              slot_of: { 'n' => 4 }, facts: [INT], prov_base: 5, writes: {} }
+hash_input = ([OTHER, INT, OTHER, OTHER, INT] + Array.new(4, 0)).freeze
+hash_result = NF.transfer(0, load_instruction, hash_input, hash_load)
+check.call('legacy Hash transfer contexts retain copied write results', !hash_result.equal?(hash_input) && hash_result == hash_input)
+bottom_input = clean_load.dup
+bottom_input[1] = 0
+bottom_writes = {}
+check.call('an unchanged bottom write still creates its write-union entry',
+           NF.copy_reg_write(bottom_input.freeze, 1, 0, load_context.call(bottom_writes)).equal?(bottom_input) && bottom_writes == { 1 => 0 })
+load_random = Random.new(536)
+matches_loads = 1000.times.all? do
+  input = clean_load.dup
+  input[1] = [INT, FLT, OTHER, 1 << 250, -1].sample(random: load_random)
+  4.times do |register|
+    input[5 + register] = [INT, NF::ELEM_UNKNOWN].sample(random: load_random)
+    input[9 + register] = load_random.rand(7)
+    input[13 + register] = load_random.rand(2)
+  end
+  input.freeze
+  expected_writes, actual_writes = {}, {}
+  expected = input.dup
+  NF.set_reg(expected, 1, INT, load_context.call(expected_writes))
+  context = load_context.call(actual_writes)
+  context.load_readers = { 1 => (0...4).select { |register| input[9 + register] == 3 }.freeze }.freeze
+  actual = NF.copy_reg_write(input, 1, INT, context)
+  actual == expected && actual_writes == expected_writes
+end
+check.call('1,000 randomized load states preserve masks, elements, provenance, tests and writes', matches_loads)
+
 puts '-- shared incoming states (host)'
 # Freeze every input and output at the solver boundary; even a transient in-place write would fail here.
 module ReadonlyFlowInputs
@@ -248,7 +310,29 @@ context_factory = lambda do
   oracle.define_singleton_method(:context_enter_edges) { { 0 => [3] }.freeze }
   oracle
 end
+loads_factory = lambda do
+  oracle = LogOracle.new({}, INT)
+  oracle.define_singleton_method(:loadself_mask) { note(:loadself_mask) && NF::ARR }
+  oracle.define_singleton_method(:literal_class_mask) { |instruction| note(:literal_class_mask, instruction.op) && (1 << 200) }
+  oracle
+end
+loads_body = Irep.new(label: 'repeated-loads', nregs: 4, catch_handlers: [], reps: [],
+                     pool: ['text', { type: :float, value: '1.5' }], instructions: [
+  insn(0, 'LOADI_1', 'R1 (1)'), insn(1, 'LOADI_1', 'R1 (1)'),
+  insn(2, 'LOADSELF', 'R1 (R0)'), insn(3, 'LOADSELF', 'R1 (R0)'),
+  insn(4, 'LOADL', 'R1 L[1]'), insn(5, 'LOADL', 'R1 L[1]'),
+  insn(6, 'LOADSYM', 'R1 :value'), insn(7, 'LOADSYM', 'R1 :value'),
+  insn(8, 'STRING', 'R1 L[0]'), insn(9, 'STRING', 'R1 L[0]'),
+  insn(10, 'LOADNIL', 'R1 (nil)'), insn(11, 'LOADNIL', 'R1 (nil)'), insn(12, 'RETURN', 'R1')])
+alias_loads = Irep.new(label: 'load-alias-invalidation', nregs: 4, catch_handlers: [], reps: [], pool: [], instructions: [
+  insn(0, 'LOADI_1', 'R1 (1)'), insn(1, 'MOVE', 'R2 R1'), insn(2, 'MOVE', 'R2 R1'),
+  insn(3, 'LOADI_1', 'R1 (1)'), insn(4, 'RETURN', 'R2')])
+alias_plan = NF.table(BytecodeIR.for(alias_loads))
+check.call('the immutable load-reader index records MOVE destinations without duplicates',
+           alias_plan.load_readers == { 1 => [2] } && alias_plan.load_readers.frozen? && alias_plan.load_readers[1].frozen?)
 cases = [
+  ['repeated loads and oracle order', loads_body, Set.new, loads_factory],
+  ['same-class rewrite invalidates register aliases', alias_loads, Set.new, loads_factory],
   ['loop and ivar provenance', irep, Set.new, -> { LogOracle.new({ 1 => INT | NIL_, 3 => FLT }, INT) }],
   ['captured registers', irep, Set['1', '2'], -> { LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT) }],
   ['optional entry, rescue and ensure', enter_irep, Set.new, -> { LogOracle.new({ 1 => INT }, INT) }],
@@ -263,8 +347,15 @@ cases.each do |name, body, opaque, factory|
   copied_oracle = factory.call
   shared_writes = {}
   copied_writes = {}
-  shared = NF.states(body, shared_oracle, opaque, shared_writes, share_states: true)
-  copied = NF.states(body, copied_oracle, opaque, copied_writes, share_states: false)
+  previous_elision = ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION']
+  begin
+    ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] = '1'
+    shared = NF.states(body, shared_oracle, opaque, shared_writes, share_states: true)
+    ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] = '0'
+    copied = NF.states(body, copied_oracle, opaque, copied_writes, share_states: false)
+  ensure
+    previous_elision ? ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] = previous_elision : ENV.delete('BC2CPP_NUMERIC_LOAD_COPY_ELISION')
+  end
   check.call("#{name}: frozen-state results, writes and oracle order match copied edges",
              shared && shared == copied && shared_writes == copied_writes && shared_oracle.log == copied_oracle.log)
   if body.equal?(class_irep)

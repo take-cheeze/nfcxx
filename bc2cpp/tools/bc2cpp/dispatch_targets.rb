@@ -1,8 +1,91 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir'
+require_relative 'native_constructor_sigs'
+require_relative 'compiled_gems'
+require 'prism'
 
 # Construct, native-argument and super devirtualization targets.
+
+# Sources for the construct-target lists below. Each read happens at load time and raises when its
+# source is missing or yields nothing, so a moved or emptied file fails the load instead of silently
+# shrinking a list (the compiler would then devirtualize fewer sites, with no error).
+module DispatchTargetSources
+  ROOT = File.expand_path('../..', __dir__)
+
+  module_function
+
+  def read(rel)
+    path = File.join(ROOT, rel)
+    raise "bc2cpp: #{rel} is missing (dispatch_targets.rb derives a list from it)" unless File.file?(path)
+
+    text = File.read(path, encoding: 'UTF-8')
+    raise "bc2cpp: #{rel} is empty (dispatch_targets.rb derives a list from it)" if text.strip.empty?
+
+    text
+  end
+
+  # Full names of the classes whose body defines an instance `initialize` directly (not inside
+  # `class << self` or a method body) in the mrblib files matching `glob`.
+  def class_initializers(glob)
+    files = Dir[File.join(ROOT, glob)].sort
+    raise "bc2cpp: no Ruby sources match #{glob}" if files.empty?
+
+    found = {}
+    files.each do |file|
+      result = Prism.parse_file(file)
+      raise "bc2cpp: #{file}: #{result.errors.first.message}" unless result.errors.empty?
+
+      collect_initializers(result.value, nil, found)
+    end
+    found
+  end
+
+  def collect_initializers(node, scope, found)
+    case node
+    when Prism::ClassNode, Prism::ModuleNode
+      full = [scope, node.constant_path.slice].compact.join('::')
+      if node.is_a?(Prism::ClassNode) && node.body.is_a?(Prism::StatementsNode)
+        node.body.body.each do |stmt|
+          found[full] = true if stmt.is_a?(Prism::DefNode) && stmt.name == :initialize
+        end
+      end
+      collect_initializers(node.body, full, found) if node.body
+    when Prism::SingletonClassNode, Prism::DefNode
+      nil
+    else
+      node.compact_child_nodes.each { |child| collect_initializers(child, scope, found) }
+    end
+  end
+
+  # DIRECT_CONSTRUCT_TARGETS: the non-singleton owners mruby-rpg2k-compiled emits (compiled_gems.rb) that
+  # define #initialize in mruby-rpg2k's own mrblib.
+  def direct_construct_targets
+    owners = BC2CPP_COMPILED_GEMS.fetch('mruby-rpg2k-compiled').fetch(:owners)
+    initializers = class_initializers('mruby-rpg2k/mrblib/**/*.rb')
+    targets = owners.reject { |owner| owner.include?('.') }.select { |owner| initializers.key?(owner) }
+    raise 'bc2cpp: DIRECT_CONSTRUCT_TARGETS derived empty' if targets.empty?
+
+    targets.freeze
+  end
+
+  # DIRECT_CONSTRUCT_ACCESSOR_TARGETS: the owners with a `<Owner>_compiled_class` definition in
+  # register.cxx. The name is sanitize(owner) (codegen.rb: each ':' becomes '_'), so each definition is
+  # mapped back and must map forward to the same name, and name a DIRECT_CONSTRUCT_TARGETS owner.
+  def direct_construct_accessor_targets(targets)
+    names = read('mruby-rpg2k-compiled/src/register.cxx').scan(/^RClass\* (\w+)_compiled_class\(void\)\s*\{/).flatten
+    raise 'bc2cpp: register.cxx defines no *_compiled_class accessor' if names.empty?
+
+    names.map do |name|
+      owner = name.gsub('__', '::')
+      unless targets.include?(owner) && owner.tr(':', '_') == name
+        raise "bc2cpp: register.cxx accessor #{name} names no DIRECT_CONSTRUCT_TARGETS owner"
+      end
+
+      owner
+    end.freeze
+  end
+end
 
 # The typed-_impl calling convention models plain mandatory arguments only.
 # ENTER's aspec is m1:opt:rest:m2:key:kwrest:block; anything past m1
@@ -23,28 +106,45 @@ require_relative 'bytecode_ir'
 # how each argument is unboxed before calling `fn`, which takes native
 # mrb_int/mrb_float; mrb_as_int/mrb_as_float raise the same TypeError they
 # raised inside `fn`.
-NATIVE_CONSTRUCT_TARGETS = {
-  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', class_owner: 'RGSS::Tone',
-              arity: 4, arg_type: :float },
-  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', class_owner: 'RGSS::Color',
-               arity: 4, arg_type: :float },
-  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', class_owner: 'RGSS::Rect',
-              arity: 4, arg_type: :int },
-  # Sprite: spr_init is `mrb_get_args(M, "|o", &vp)` plus a fixed body that
-  # rgss::sprite_new_direct (include/rgss_construct.hxx) reproduces. "|o" never
-  # coerces or raises, so there is no TypeError behavior to preserve.
+# Tone, Color, Rect and Bitmap rows are derived from their `bc2cpp:direct` overloads in
+# sig/bc2cpp/declarations.rbs#rgss_constructors (NativeConstructorSigs.construct_targets). Each class's
+# fn, class_fn, arity and arg_type come from that section and its audited source (the rule is stated there).
+# Rect's direct arity is 4, not the source's 0..4: the 0-argument form is a literal-argument direct overload, and
+# the direct arm does not fill defaults. Those counts go through OVERLOADED_CONSTRUCT.
+NATIVE_CONSTRUCT_TYPE_GUARDS = {
+  # Bitmap#initialize also accepts a String (file load), which the section's Ruby initialize dispatches on
+  # `kind_of? String` (not a native format, so the section cannot say it). `type_guard: :int` checks mrb_integer_p
+  # on every argument and falls back to mrb_funcall otherwise.
+  'Bitmap' => :int,
+}.freeze
+
+# Rows the section does not carry, listed by hand:
+#  - Sprite: spr_init is `mrb_get_args(M, "|o", &vp)` plus a fixed body that rgss::sprite_new_direct
+#    (include/rgss_construct.hxx) reproduces. The entry takes an object, which the section has no type for. "|o"
+#    never coerces or raises, so there is no TypeError behavior to preserve.
+#  - Table: table_init is `mrb_get_args(M, "i|ii", ...)`, but table_new_direct takes the argument count too, which
+#    the section cannot express. :table_dimensions names that count (codegen_send.rb emits it).
+NATIVE_CONSTRUCT_EXPLICIT = {
   'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', class_owner: 'RGSS::Sprite',
                 arity: [0, 1],
                 arg_type: :object },
-  # Bitmap: bmp_init_size is `mrb_get_args(M, "ii", ...)` + alloc_obj, which
-  # rgss::bitmap_new_direct reproduces. Bitmap#initialize also accepts a String
-  # (file load), so `type_guard: :int` checks mrb_integer_p on every argument and
-  # falls back to mrb_funcall otherwise.
-  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', class_owner: 'RGSS::Bitmap',
-                arity: 2, arg_type: :int, type_guard: :int },
   'Table' => { fn: 'rgss::table_new_direct', class_fn: 'rgss::native_table_class', class_owner: 'RGSS::Table',
                arity: [1, 2, 3], arg_type: :table_dimensions },
 }.freeze
+
+NATIVE_CONSTRUCT_TARGETS = begin
+  derived = NativeConstructorSigs.construct_targets.to_h do |key, row|
+    guard = NATIVE_CONSTRUCT_TYPE_GUARDS[key]
+    [key, guard ? row.merge(type_guard: guard) : row]
+  end
+  missing_guard = NATIVE_CONSTRUCT_TYPE_GUARDS.keys - derived.keys
+  raise "bc2cpp: type_guard for #{missing_guard.join(', ')}, which rgss_constructors does not derive" unless missing_guard.empty?
+
+  duplicated = derived.keys & NATIVE_CONSTRUCT_EXPLICIT.keys
+  raise "bc2cpp: #{duplicated.join(', ')} is both derived and listed by hand" unless duplicated.empty?
+
+  derived.merge(NATIVE_CONSTRUCT_EXPLICIT).freeze
+end
 
 # bc2cpp-COMPILED classes whose `Owner.new` may become bc2cpp_direct_alloc +
 # the compiled `#initialize` _impl (emit_direct_construct_decls), the compiled
@@ -52,8 +152,9 @@ NATIVE_CONSTRUCT_TARGETS = {
 # #initialize and is re-checked at the call site; only the class-identity
 # accessor is implied (`class_fn`-style, guarding a reassigned constant).
 #
-# Hand-listed, not derived from compiled_gems.rb owners: each entry needs a
-# gem-init-captured RClass* and accessor function in that gem's register.cxx.
+# Derived (DispatchTargetSources.direct_construct_targets), not hand-listed. An
+# entry needs no accessor: a full build reads register.cxx's `*_compiled_class`
+# only for DIRECT_CONSTRUCT_ACCESSOR_TARGETS, and the rest use the owner-class cache.
 #
 # Soundness bar for an entry, re-checked live by compile_send:
 #   - no `self.new`/`self.allocate` anywhere for the class (checked against
@@ -73,11 +174,10 @@ NATIVE_CONSTRUCT_TARGETS = {
 # the closed world DEFINES (LEXICAL_CONSTRUCT_RESOLUTION), refusing
 # cross-level ambiguity either way.
 #
-# Classes whose #initialize has keywords only (Game::Vehicle, Game::Character,
-# ...) are still omitted: compile_send's positional arm does not handle them, and
-# compile_keyword_direct_construct is reached from a different call shape. An
-# #initialize with `= default` POSITIONAL arguments is no longer a reason to omit
-# a class -- POSITIONAL_OPTIONAL_CONSTRUCT pads the omitted positionals and passes
+# No #initialize arity filters the list. compile_send's positional arm refuses
+# keyword-declaring initializers (pure_mandatory_arity?), and
+# compile_keyword_direct_construct reaches them from its own call shape (Game::MoveRoute).
+# POSITIONAL_OPTIONAL_CONSTRUCT pads omitted `= default` positionals and passes
 # bc2cpp_given_opt, so the defaults stay inside mruby's own _impl.
 #
 # LISTING_GRANTS_NOTHING: an entry here only lets lexically_resolve_construct_target
@@ -85,65 +185,17 @@ NATIVE_CONSTRUCT_TARGETS = {
 # no custom self.new/self.allocate, an #initialize that compiles clean, a call
 # count inside [mand, mand+opt], and the owner emitted -- so a class listed here
 # that fails any of them simply keeps its dynamic dispatch. That is why the
-# entries below can be broad: they were derived from the build's own registry
-# (every class with a compiled #initialize that this gem emits) rather than
-# hand-picked, and the measurement decides which of them actually fire.
-DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
-                               Game::Switches Game::Timer Game::MessageConfig
-                               Game::Screen Game::ChipSet Game::Interpreter
-                               RPG2k::Scene::Menu RPG2k::Scene::DebugMenu
-                               RPG2k::Scene::ItemMenu Game::NumberInput
-                               Game::MoveRoute RPG2k::Scene::Map
-                               RPG2k::Scene::MapViewer
-                               RPG2k::Scene::ChipsetEditor
-                               RPG2k::Window
-                               Game::Battle
-                               Game::Actor Game::Actors Game::Battle::Combatant
-                               Game::Character
-                               Game::CommonEvent::CommonEventRecord
-                               Game::Enemy Game::EnemyAction Game::EnemyAi
-                               Game::Interpreter::BattleRequest
-                               Game::Interpreter::DiagnosticPosition
-                               Game::Interpreter::InnRequest
-                               Game::Interpreter::KeyInputAccepted
-                               Game::Interpreter::KeyInputRequest
-                               Game::Interpreter::NameInputRequest
-                               Game::Interpreter::ShopRequest
-                               Game::Message::PauseMarker
-                               Game::Message::ScanResult
-                               Game::Message::Segment
-                               Game::Message::SpeedMarker
-                               Game::Party Game::Picture Game::Rng
-                               Game::Shop Game::State Game::TextReveal
-                               Game::Troop Game::Variables Game::Vehicle
-                               Game::Weather
-                               RPG2k RPG2k::Scene::Base RPG2k::Scene::Battle
-                               RPG2k::Scene::EquipMenu
-                               RPG2k::Scene::EventResolver
-                               RPG2k::Scene::GameOver
-                               RPG2k::Scene::Map::LRUBitmapCache
-                               RPG2k::Scene::Map::MapEventState
-                               RPG2k::Scene::Map::MessageState
-                               RPG2k::Scene::Map::ShopQuantity
-                               RPG2k::Scene::Map::ShopState
-                               RPG2k::Scene::MapWorld RPG2k::Scene::Order
-                               RPG2k::Scene::SaveLoad RPG2k::Scene::SkillMenu
-                               RPG2k::Scene::StatusMenu RPG2k::Scene::Title
-                               RPG2k::Scene::VehicleWorld].freeze
+# derived entries can be broad: they are every class this gem emits that has an
+# #initialize, and the measurement decides which of them actually fire.
+DIRECT_CONSTRUCT_TARGETS = DispatchTargetSources.direct_construct_targets
 
-# The DIRECT_CONSTRUCT_TARGETS owners whose `<Owner>_compiled_class()` accessor
-# is hand-wired in mruby-rpg2k-compiled/src/register.cxx. A full build reads that
-# accessor for these; every other listed target uses the owner-class cache
-# (owner_class_ptr_expr), as a hot-only build does for all of them. Keep in step
-# with register.cxx: a listed owner missing from both is an undefined reference
-# at link time.
-DIRECT_CONSTRUCT_ACCESSOR_TARGETS = %w[Game::Transition Game::Map Game::Screen
-                                       Game::Switches Game::Timer Game::MessageConfig
-                                       Game::ChipSet Game::Interpreter Game::NumberInput
-                                       Game::MoveRoute Game::Battle
-                                       RPG2k::Scene::Map RPG2k::Scene::MapViewer
-                                       RPG2k::Scene::ChipsetEditor RPG2k::Scene::Menu
-                                       RPG2k::Scene::DebugMenu RPG2k::Scene::ItemMenu].freeze
+# The DIRECT_CONSTRUCT_TARGETS owners whose `<Owner>_compiled_class()` accessor is
+# defined in mruby-rpg2k-compiled/src/register.cxx (DispatchTargetSources.
+# direct_construct_accessor_targets). A full build reads that accessor for these;
+# every other listed target uses the owner-class cache (owner_class_ptr_expr), as a
+# hot-only build does for all of them. The accessor definitions are the source, so
+# a new one is picked up here; one naming no listed owner raises at load time.
+DIRECT_CONSTRUCT_ACCESSOR_TARGETS = DispatchTargetSources.direct_construct_accessor_targets(DIRECT_CONSTRUCT_TARGETS)
 
 # NATIVE_ARG_TARGETS (the Set after sanitize_c_ident below): human-vetted
 # "Owner#name" allowlist that moves a compiled method's mandatory argument

@@ -4,9 +4,7 @@ require_relative 'escape_analysis'
 
 # CodeGen: the escape analysis (ADR 0316) over this compiler's class facts.
 class CodeGen
-  ESCAPE_FLOW_CLASSES = { NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float', NumericFlow::ARR => 'Array',
-                          NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String', NumericFlow::NIL => 'NilClass',
-                          NumericFlow::RNG => 'Range' }.freeze
+  ESCAPE_FLOW_CLASSES = NumericFlow.class_bits('Integer', 'Float', 'Array', 'Hash', 'String', 'NilClass', 'Range')
 
   # The analyzer for this CodeGen, or nil when BC2CPP_ESCAPE_ANALYSIS=0 or no world was built (unit
   # checks that construct a CodeGen directly).
