@@ -16,7 +16,7 @@ module NomethodReviewedProbe
   # The closed build's gem list: build_config.rb's rpg_maker_gems for
   # conf.name == 'closed' (single-format, with mruby-compiler), the compiled
   # gems, and every add_dependency they pull in.
-  CLOSED_CORE_GEMS = %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-numeric-ext mruby-range-ext
+  CLOSED_CORE_GEMS = %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-numeric-ext mruby-range-ext mruby-symbol-ext
                         mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random mruby-math mruby-time
                         mruby-bigint mruby-compiler mruby-pack mruby-string-ext mruby-struct mruby-metaprog
                         mruby-enumerator].freeze
