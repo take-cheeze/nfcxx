@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'rbs_parse_memo'
+
 # NativeSigs: the built-in and RGSS method declarations, all in sig/bc2cpp/declarations.rbs. Each native table is a group
 # of declarations under a marker line directly above each one: `# bc2cpp-native: <table>`. A marker on a top-level block
 # covers its members; a member may carry its own marker, which takes precedence (docs/adr/0516). A table is read by its
@@ -76,8 +78,7 @@ module NativeSigs
   def parse
     @parse ||= begin
       require 'rbs'
-      _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: 'declarations.rbs', content: File.read(FILE)))
-      decls
+      RbsParseMemo.decls('declarations.rbs', File.read(FILE))
     rescue LoadError
       raise "bc2cpp: #{FILE} needs the rbs gem (gem install rbs)"
     end
