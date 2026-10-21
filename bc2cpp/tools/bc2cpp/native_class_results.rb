@@ -78,20 +78,6 @@ module NativeClassResults
     source && Array(digest).include?(Digest::SHA256.hexdigest(source))
   end
 
-  # compact delegates allocation to core Array; both complete bodies are pinned.
-  def core_result_pinned?(name, klass, paths)
-    if klass == 'Array' && name == 'compact'
-      relative = '3rd/mruby/mrbgems/mruby-array-ext/src/array.c'
-      path = paths.find { |candidate| source_matches?(candidate, relative) }
-      return false unless path
-
-      helper = path.delete_suffix('/mrbgems/mruby-array-ext/src/array.c') + '/src/array.c'
-      return source_matches?(helper, '3rd/mruby/src/array.c')
-    end
-    relative = klass == 'Array' ? '3rd/mruby/src/array.c' : '3rd/mruby/src/string.c'
-    paths.any? { |path| source_matches?(path, relative) }
-  end
-
   def kinds(name, paths, string_subclass_free: false)
     return nil if ENV['BC2CPP_NATIVE_CLASS_RESULTS'] == '0'
     return nil if name == '__num_to_a' && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'

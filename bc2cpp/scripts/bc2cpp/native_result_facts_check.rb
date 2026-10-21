@@ -444,6 +444,16 @@ tables = Struct.new(:shape) do
 
   def name(_bit) = 'PRIVATE_SHAPE'
 end.new(shape)
+# Exercise the real registry too: new shapes must immediately join signed-mask queries.
+require_relative '../../tools/bc2cpp/frozen_tables'
+registry = FrozenTables::Registry.new
+3.times { |n| registry.intern(:array, [NumericFlow::INT] * n, nil) }
+[0, -1, -512, *registry.shapes.map(&:bit)].each do |mask|
+  actual = []
+  registry.each_shape_in(mask) { |entry| actual << entry }
+  check.call("private shape membership matches intersection for #{mask}",
+             actual == registry.shapes.select { |entry| mask.anybits?(entry.bit) })
+end
 names_probe.instance_variable_set(:@lcf_rows, rows)
 names_probe.instance_variable_set(:@frozen_tables, tables)
 mask_rng = Random.new(531)

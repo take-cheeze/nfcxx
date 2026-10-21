@@ -82,12 +82,14 @@ module BaseRbsAll
 
   def core_flags(closed_build)
     base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
+    base << '-DMRB_USE_BIGINT' # the closed build defines it on its compile lines, so the bodies match what is built
     closed_build ? base + ["-I#{closed_build}/include"] : base
   end
 
   def flags_for(gem_dir, closed_build)
     name = File.basename(gem_dir)
     base = %w[3rd/mruby/include 3rd/uni-algo/include 3rd/lvgl 3rd/stb include].map { |d| "-I#{File.join(ROOT, d)}" }
+    base << '-DMRB_USE_BIGINT'
     base << "-I#{File.join(gem_dir, 'include')}"
     base += gem_includes(gem_dir).map { |dir| "-I#{dir}" }
     if closed_build

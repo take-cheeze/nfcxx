@@ -61,7 +61,7 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
 # (core_compiled_mrblib_srcs), or the compiled body would replace a method of a
 # class that is never loaded.
 BC2CPP_CORE_MRBLIB_GEMS = %w[
-  mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-numeric-ext mruby-range-ext mruby-string-ext
+  mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-numeric-ext mruby-range-ext mruby-symbol-ext mruby-string-ext
   mruby-sprintf mruby-struct mruby-io mruby-dir mruby-enumerator
 ].freeze
 # Core mrblib files that stay outside the world (foreign sources):
@@ -249,7 +249,7 @@ BC2CPP_COMPILED_GEMS = {
 def core_native_srcs(mruby_root)
   Dir["#{mruby_root}/src/*.c"] +
     Dir["#{mruby_root}/mrbgems/mruby-{array-ext,hash-ext,enum-ext,io,dir," \
-        'numeric-ext,range-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint,' \
+        'numeric-ext,range-ext,symbol-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint,' \
         "binding,eval,metaprog,method,pack,proc-ext,string-ext,struct}/**/*.c"]
 end
 
