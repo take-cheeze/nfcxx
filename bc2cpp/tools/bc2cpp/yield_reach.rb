@@ -5,6 +5,7 @@ require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'ir_block_operands'
 require_relative 'ir_symbol_flow'
+require_relative 'send_names'
 
 # YIELD_REACH (ADR 0283): a whole-program, by-name "may this code suspend the current Fiber?"
 # analysis over the ireps of a closed world. A compiled frame that sits between a Fiber's entry
@@ -22,7 +23,7 @@ require_relative 'ir_symbol_flow'
 # every definition, whatever the receiver.
 class YieldReach
   # Sends whose first argument is the name to call.
-  DYNAMIC_SENDS = %w[send __send__ public_send].freeze
+  DYNAMIC_SENDS = SendNames::FORWARDING_SENDS
   # Run a block or a string as arbitrary code. With a literal block the block is the edge; without
   # one the code is unknown.
   CODE_EVAL = %w[eval instance_eval class_eval module_eval].freeze

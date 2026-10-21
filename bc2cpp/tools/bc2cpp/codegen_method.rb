@@ -468,6 +468,8 @@ class CodeGen
     # `#error` check catches. Only the interior of a suppressed range (e.g. a
     # rescue region minus its begin_addr) loses its label.
     targets = jump_targets(irep) - (suppressed - glue_at.keys)
+    # ARM_PRUNE (codegen_arm_prune.rb): the instructions no edge reaches. Stage A only counts them.
+    arm_prune = arm_prune_analysis(irep, d)
     # BLKPUSH_YIELD_SUPPORT: set for this method's top-level loop only (cleared
     # after). emit_proc_fallback_fn manages its own value.
     # CORE_BLOCK_YIELD: with `&blk` declared, the BLKPUSH slot is that parameter's register.
@@ -512,6 +514,13 @@ class CodeGen
     flow_captured = RegisterFlow.captured_registers(irep) if !@resumable && prefix_at.empty? && RegisterFlow.enabled?
     flow_bodies = flow_captured && Array.new(irep.instructions.length, '')
     flow_labels = flow_captured && Array.new(irep.instructions.length, '')
+    # ARM_PRUNE stage B (BC2CPP_PRUNE_ARMS=1): the held-back text is restored unless the method has no other emitter that
+    # works per instruction (suppressed, glue, prefix, guarded, register-flow capture, resumable step).
+    arm_texts = {}
+    arm_prune_drop = arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !@resumable && !flow_captured &&
+                     suppressed.empty? && glue_at.empty? && prefix_at.empty? && guarded_inline[:at].empty? &&
+                     guarded_inline[:after].empty?
+    arm_prune_refuse(:ineligible) if arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !arm_prune_drop
     irep.instructions.each_with_index do |insn, idx|
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
       # first instruction: the guarded loop's `goto` would then jump back to the top and run the loop again.
@@ -523,6 +532,11 @@ class CodeGen
       jump_label = targets.include?(insn.addr) ? "  L#{insn.addr}:;\n" : ''
       # The guarded-inline prefix is part of this instruction's text, so the flow pass sees it as one unit.
       text = (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
+      if arm_prune_drop && arm_prune.include?(idx)
+        arm_texts[idx] = jump_label + text
+        out << "\x01ARM_PRUNE:#{idx}\x01"
+        next
+      end
       if flow_bodies
         flow_labels[idx] = "#{flow_labels[idx]}#{jump_label}"
         flow_bodies[idx] = text
@@ -530,6 +544,7 @@ class CodeGen
         out << jump_label << text
       end
     end
+    out = arm_prune_resolve(out, arm_texts) if arm_prune_drop && !arm_texts.empty?
     if flow_bodies
       flow_handlers = { regions: recognize_rescue_regions(irep).map { |r| r.slice(:begin_addr, :end_addr, :except_addr) },
                         glue_reads: rescue_glue_reads }

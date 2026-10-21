@@ -378,8 +378,30 @@ BC2CPP_OPEN_WORLD_GEMS = %w[
   mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs mruby-eval mruby-binding mruby-proc-binding
   mruby-bin-mirb mruby-bin-mruby mruby-bin-debugger
 ].freeze
-# The gems whose mrblib is the closed world itself.
-BC2CPP_CLOSED_WORLD_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
+# The gems whose mrblib is the closed world itself, read from build_config.rb's
+# rpg_maker_gems (the unconditional maker-gem lines; see bc2cpp_build_config_closed_world_gems).
+BC2CPP_BUILD_CONFIG = File.expand_path('../../build_config.rb', __dir__).freeze
+
+# The build_config.rb text, read at load time; a missing file is an error, never an empty list.
+def bc2cpp_build_config_text(path = BC2CPP_BUILD_CONFIG)
+  raise "bc2cpp: #{path} is missing; the closed-world gem list is derived from it" unless File.file?(path)
+
+  File.read(path, encoding: 'UTF-8')
+end
+
+# Top-level (2-space) `conf.gem "#{MRUBY_ROOT}/../../mruby-X"` lines of rpg_maker_gems. Lines under
+# `unless single_format_only` are indented 4 and the `-compiled` opt-ins end in `&closed_world`, so neither matches.
+def bc2cpp_build_config_closed_world_gems(text)
+  body = text[/^def rpg_maker_gems\(.*?\n(?=^end$)/m]
+  raise "bc2cpp: no rpg_maker_gems definition in #{BC2CPP_BUILD_CONFIG}" if body.nil?
+
+  gems = body.scan(/^  conf\.gem "\#\{MRUBY_ROOT\}\/\.\.\/\.\.\/(mruby-[a-z0-9-]+)"\s*$/).flatten
+  raise "bc2cpp: found no closed-world gem lines in #{BC2CPP_BUILD_CONFIG}" if gems.empty?
+
+  gems.freeze
+end
+
+BC2CPP_CLOSED_WORLD_GEMS = bc2cpp_build_config_closed_world_gems(bc2cpp_build_config_text).freeze
 # Each closed-world target's own native host sources (the firmware/executable).
 BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'closed' => 'app/wio/src',
                                   'psp' => 'app/psp' }.freeze
