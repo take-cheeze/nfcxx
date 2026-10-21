@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'call_facts'
+require_relative 'compiled_gems'
 
 # Debug report for errors the compiler can prove (ADR 0317): with BC2CPP_PROVABLE_ERROR_REPORT=<path>,
 # every send or operator of the engine ireps whose generated code can only raise is written as one TSV row.
@@ -20,7 +21,7 @@ require_relative 'call_facts'
 # one), dead (not reachable from the entry), probed (the name is passed to respond_to? and friends).
 module ProvableErrorReport
   ROWS = {}
-  ENGINE_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
+  ENGINE_GEMS = BC2CPP_CLOSED_WORLD_GEMS
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/
   ARITH = { 'ADD' => '+', 'SUB' => '-', 'MUL' => '*', 'DIV' => '/', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.freeze
   NUM = %w[Integer Float].freeze

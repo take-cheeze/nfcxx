@@ -32,8 +32,8 @@ class ClosedWorld
   VISIBILITY_SENDS = SendNames::VISIBILITY_SENDS
   # Sends that rebind a constant a guard chain resolves.
   CONST_REBINDERS = SendNames::CONST_REBINDERS
-  # Constants whose `.new` makes a class (or members) the registry cannot see.
-  CLASS_FACTORIES = %w[Class Module Struct Data].freeze
+  # Constants whose `.new` makes a class (or members) the registry cannot see (SendNames).
+  CLASS_FACTORIES = SendNames::CLASS_FACTORIES
   SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
   STOP_OPS = /\A(?:JMP|RETURN|BREAK|RAISE|STOP|EXEC)/
   C_STRING = /"((?:[^"\\\n]|\\.)*)"/
