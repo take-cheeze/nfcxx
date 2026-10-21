@@ -4,6 +4,7 @@ require_relative 'fixpoint'
 require_relative 'record_hash'
 require_relative 'ivar_poison_causes'
 require_relative 'native_core_result_sigs'
+require_relative 'core_block_iterator_sigs'
 
 # Steps 6f-bis and 6g: proven fresh Arrays and ivar classes.
 
@@ -14,21 +15,37 @@ require_relative 'native_core_result_sigs'
 # ---------------------------------------------------------------------------
 # INTERP_UNLOCK: when the static Array trace misses, the nearest write to the
 # register (following MOVEs) proves an Array when it is:
-#   - a block-carrying `select`/`reject`/`map` (CHAINED_ARRAY_METHODS);
+#   - a block-carrying call that block_result_array? confirms for its receiver;
 #   - a MONO method with a `-> Array` annotation (annotated_array_return);
 #   - a core method verified to return a fresh Array and not redefined in this
 #     program (core_array_return?).
 # Sound because of SKIP_UNSUPPORTED's per-method partitioning: a producer with
 # any gap drops the whole method to the interpreter.
 #
-# CORE_ARRAY_CHAIN block gate: these three count only from SENDB/SSENDB. A
-# blockless map/select/reject returns an Enumerator in mruby (enum.rb:
-# `return to_enum(...) unless block`), and an attr_reader is always a
-# blockless send; the bare-name rule misclassified `@map = map || state.map`
-# (Game::State#map is an attr_accessor) as Array.
-# select/reject preserve their receiver's collection class: a Hash result must
-# not enter an Array-only block region. Their hint requires an Array receiver.
-CHAINED_ARRAY_METHODS = %w[select reject map].freeze
+# BLOCK_RESULT_ARRAY: a block-form call answers an Array only as
+# core_block_iterators (declarations.rbs) declares for its exact receiver. The
+# bare name is not enough: a blockless map/select/reject is an Enumerator (enum.rb
+# `return to_enum(...) unless block`), an attr_reader is always blockless
+# (Game::State#map is an attr_accessor), and Hash#select keeps the Hash.
+# The names come from that table, so a new block iterator is a declaration, not code.
+BLOCK_RESULT_NAMES = CoreBlockIteratorSigs.results.values.flat_map(&:keys).to_set.freeze
+
+# BLOCK_RESULT_ARRAY: does `name` sent with a block to an exact `receiver_class`
+# answer an Array? Looked up as mruby does: the receiver's own entry, else
+# Enumerable's (Array defines none of these; Hash declares each Enumerable entry
+# it overrides, checked by core_facts_rbs_check). A program definition on the
+# receiver or on Enumerable would win that lookup, so it withdraws the claim.
+def block_result_array?(name, receiver_class, registry)
+  return false unless CoreBlockIteratorSigs::CLASSES.include?(receiver_class)
+
+  results = CoreBlockIteratorSigs.results
+  owner = results.fetch(receiver_class, {}).key?(name) ? receiver_class : 'Enumerable'
+  return false unless results.dig(owner, name) == 'Array'
+
+  (registry[name] || []).all? do |md|
+    md.owner == '<native>' || ![receiver_class, 'Enumerable'].include?(md.owner)
+  end
+end
 
 # CORE_ARRAY_CHAIN: core methods that return a fresh Array whenever they
 # return. Admitted only after core_array_return? confirms nothing in this
@@ -82,7 +99,7 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     next nil unless called
 
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
-    if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
+    if block_carrying && BLOCK_RESULT_NAMES.include?(called)
       # CHAINED_IVAR_RECEIVER: ClassLayout passes the class it has proven so far, so `@q = @q.reject { }` on an ivar
       # that every other store makes an Array is an Array store too (a plain trace cannot read the ivar).
       traced = receiver_class ? receiver_class.call(pin_idx, pin) : trace_new_target(irep, pin_idx, pin.reg, registry: registry)
@@ -91,7 +108,7 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
       # index, strictly before this one, so the recursion ends.
       traced ||= proven_array_source_scan(irep, pin_idx, pin.reg, registry, annotated, ret_proof,
                                           receiver_class: receiver_class)
-      next 'Array' if called == 'map' || traced == 'Array'
+      next 'Array' if block_result_array?(called, traced, registry)
     end
     next 'Array' if annotated&.call(called)
     next 'Array' if core_array_return?(called, registry)

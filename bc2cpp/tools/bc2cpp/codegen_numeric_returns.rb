@@ -282,6 +282,8 @@ class CodeGen
     return other unless builtin_class_send_safe?(name, owners)
 
     if bit.anybits?(NumericFlow::CONTAINERS)
+      # `count` stays name-keyed: Enumerable#count's INT result is not inferred from its body, because the
+      # numeric path does not reach the core-Ruby body analysis and the block-written accumulator is opaque.
       counted = name == 'count' ? bit != NumericFlow::STR : %w[size length].include?(name)
       return argc == 0 && counted ? NumericFlow::INT : other
     end

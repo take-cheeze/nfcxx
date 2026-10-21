@@ -162,6 +162,15 @@ if File.file?(File.join(MRUBY, 'src/kernel.c'))
     end
   end
 
+  # block_result_array? reads an Enumerable entry for Hash unless Hash declares the name, so every Enumerable entry
+  # that mruby's Hash defines itself must be declared under Hash too.
+  hash_defs = %w[mrblib/hash.rb mrbgems/mruby-hash-ext/mrblib/hash.rb].flat_map do |rel|
+    File.binread(File.join(MRUBY, rel)).scan(/^\s*(?:def|alias) ([A-Za-z_]\w*[!?]?)/).flatten
+  end
+  overridden = CoreBlockIteratorSigs.results.fetch('Enumerable', {}).keys & hash_defs
+  check.call("block iterators: Hash declares each Enumerable entry it overrides (#{overridden.join(', ')})",
+             overridden.all? { |name| CoreBlockIteratorSigs.results.fetch('Hash', {}).key?(name) })
+
   proc_init = File.binread(File.join(MRUBY, 'src/proc.c'))[/^mrb_init_proc\(mrb_state \*mrb\)\n\{\n.*?^\}\n/m].to_s
   proc_ext = File.binread(File.join(MRUBY, 'mrbgems/mruby-proc-ext/mrblib/proc.rb'))
   proc_ext_class = proc_ext[/^class Proc\n(.*?)^end\n/m, 1].to_s
