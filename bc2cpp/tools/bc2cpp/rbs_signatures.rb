@@ -5,6 +5,7 @@ require_relative 'annotations'
 require_relative 'core_fact_sigs'
 require_relative 'native_sigs'
 require_relative 'rbs_optional_hint'
+require_relative 'rbs_parse_memo'
 require_relative 'rbs_ir_contracts'
 
 # RBS_SIGNATURES (docs/adr/0413): RBS files as a source of the same hints the `# bc2cpp:` comments give.
@@ -86,7 +87,7 @@ module RbsSignatures
     files.each do |file|
       rel = display_root ? file.sub(%r{\A#{Regexp.escape(display_root)}/?}, '') : file
       begin
-        _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: rel, content: File.read(file)))
+        decls = RbsParseMemo.decls(rel, File.read(file))
       rescue RBS::ParsingError => e
         loc = e.location
         out.diagnostics << Diag.new(file: rel, line: loc ? loc.start_line : 1, col: loc ? loc.start_column + 1 : 1, severity: 'error',
