@@ -9,7 +9,7 @@ require_relative 'bytecode_ir'
 # these names. ADR 0276 introduced the rule for pooled numeric arguments, ADR 0279 shares it.
 module DynamicNames
   # Sends that turn a value into a method name (call it, fetch it, define it).
-  SENDS = %w[send __send__ public_send method public_method instance_method public_instance_method
+  SENDS = %w[send __send__ public_send method instance_method
              define_method define_singleton_method alias_method attr attr_reader attr_writer
              attr_accessor].freeze
 
