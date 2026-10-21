@@ -297,12 +297,18 @@ module NativeOwnerMap
   # ROM method tables (MRB_MT_ENTRY in a `mrb_mt_entry NAME[] = { ... }` block) take the owner of the
   # MRB_MT_INIT_ROM / mrb_mt_init_rom call that installs NAME in the same file. Any entry outside such
   # a block, or whose table has no installer in this file, is UNKNOWN.
+  # The class a MRB_MT_INIT_ROM installs its table on: NativeRomOwners reads the variable's binding in the same function
+  # (define_class, a core field, a naming call), which covers the chained `mrb->x_class = x = mrb_define_class...` form.
+  def rom_installer_owner(text, pos, arg)
+    NativeRomOwners.owner_of(text, pos, arg.strip)
+  end
+
   def scan_rom_tables(text, vars_at, result)
     installers = Hash.new { |h, k| h[k] = Set.new }
     text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom)\s*\(/) do
       match = Regexp.last_match
       args, = call_args(text, match.end(0) - 1)
-      installers[args[2]] << owner_of(args[1].to_s, vars_at.call(match.begin(0))) if args && args.size >= 3
+      installers[args[2]] << rom_installer_owner(text, match.begin(0), args[1].to_s) if args && args.size >= 3
     end
     attributed = []
     text.scan(ROM_TABLE_RE) do
@@ -343,3 +349,6 @@ module NativeOwnerMap
     [:proven]
   end
 end
+
+# Loaded last: NativeRomOwners reads NativeOwnerMap's constants when it loads.
+require_relative 'native_rom_owners'
