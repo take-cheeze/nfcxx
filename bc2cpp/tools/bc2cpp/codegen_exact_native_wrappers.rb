@@ -19,7 +19,9 @@ module ExactNativeWrappers
     ->(recv, argv) { "rgss::#{function}(M, #{recv}, #{argv[0]})" }
   end
 
-  CALLS = {
+  # Hand-written builders per owner. The generated table adds an owner with a one-argument
+  # mrb_value entry (CALLS below); an int, float or bool entry needs a guard this arm does not emit.
+  HAND_CALLS = {
     'text_size' => { 'RGSS::Bitmap' => [[1], ONE_VALUE.call('bitmap_text_size_direct')] },
     'fill_rect' => { 'RGSS::Bitmap' => [[5], lambda { |recv, argv|
       "rgss::bitmap_fill_rect_direct(M, #{recv}, #{argv.join(', ')})"
@@ -41,6 +43,13 @@ module ExactNativeWrappers
                  'RGSS::Sprite' => [[1], ONE_VALUE.call('sprite_tone_set_direct')],
                  'RGSS::Viewport' => [[1], ONE_VALUE.call('viewport_tone_set_direct')] }
   }.freeze
+
+  # name => owner => [arities, builder]: HAND_CALLS plus each owner NativeDirect::ENTRIES
+  # gives a single mrb_value argument, with the same one-argument builder.
+  CALLS = HAND_CALLS.to_h do |name, owners|
+    generated = NativeDirect::ENTRIES.fetch(name, {}).select { |owner, entry| !owners.key?(owner) && entry.kinds == [:value] }
+    [name, owners.merge(generated.transform_values { |entry| [[1], ONE_VALUE.call(entry.function)] })]
+  end.freeze
 
   # `draw_text` packs its arguments into an array the body parses itself.
   DRAW_TEXT_ARITIES = [2, 3, 5, 6].freeze
