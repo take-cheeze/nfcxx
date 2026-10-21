@@ -141,7 +141,11 @@ module Bc2cppFixtureRuntime
       write_outside = lambda do |pairs|
         pairs.map { |name, text| File.join(dir, name).tap { |file| File.write(file, text) } }
       end
-      natives = closed_world_native_srcs + write_outside.call(native)
+      # A core fixture links libmruby_core or the full-core build, neither of which has mruby-rgss, so its
+      # closed world leaves those sources out: a native-direct arm never names an rgss:: symbol it cannot link.
+      world = closed_world_native_srcs
+      world = world.reject { |path| path.include?('/mruby-rgss/src/') } if core
+      natives = world + write_outside.call(native)
     env = bc2cpp_closed_world_probe_env(env.merge(
       'NATIVE_SRCS' => Shellwords.join(natives),
                  'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT) + write_outside.call(foreign)),
