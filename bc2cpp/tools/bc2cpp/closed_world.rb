@@ -101,6 +101,11 @@ class ClosedWorld
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
     @class_constant_names = Set.new
+    # CLASS ops that declare a name (not the root-level reopen of native_class_unshadowed?).
+    @class_declared_names = Set.new
+    # Outside plain `mrb_define_class(_id)(mrb, "N", mrb->object_class)` per name: a define that finds N already
+    # bound to a class with that superclass returns it, so two of them bind one class (see native_class_unshadowed?).
+    @outside_plain_class_defines = Hash.new(0)
     @deferred_constant_writes = Set.new
     @dynamic_constant_mutation = false
     @basic_object_referenced = false
@@ -635,8 +640,33 @@ class ClosedWorld
 
   # NATIVE_CONSTRUCTED_CONSTANT: native_class_constant_stable?, and no program class of that simple name either. A
   # CLASS opcode binds its constant without a SETCONST, so the write counts above do not see a class declaration.
+  # Neither a root `class N` with no superclass (root_reopen?) nor outside writes that are all plain Object-superclass
+  # defines is a second binding (mruby returns the same class). docs/bc2cpp-type-check.md, "IO.open", has the details.
   def native_class_unshadowed?(full)
-    native_class_constant_stable?(full) && !@class_constant_names.include?(simple(full))
+    return false if @global_refusal || @dynamic_constant_mutation || !full.is_a?(String)
+
+    name = simple(full)
+    plain = @outside_plain_class_defines[name]
+    stable = native_class_constant_stable?(full) ||
+             (plain.positive? && @constant_write_counts[name].zero? && @outside_constant_write_counts[name] == plain)
+    stable && !@class_declared_names.include?(name)
+  end
+
+  # The root irep runs with the Object target class (no lexical class body), so `class N` there with no superclass
+  # (cbase and superclass registers loaded by LOADNIL, or the cbase from OCLASS) names Object::N. A class body's
+  # irep is a child of the root, and its `class N` names a nested constant, so it is not a root reopen.
+  def root_reopen?(irep, idx, insn)
+    root = irep.tree && !referenced_labels(irep.tree).include?(irep.label)
+    return false unless root
+
+    base = insn.reg.to_i
+    BytecodeIR.all_writers_reaching?(irep, idx, base) { |_j, w| %w[LOADNIL OCLASS].include?(w.op) } &&
+      BytecodeIR.all_writers_reaching?(irep, idx, base + 1) { |_j, w| w.op == 'LOADNIL' }
+  end
+
+  def referenced_labels(tree)
+    @referenced_labels ||= {}
+    @referenced_labels[tree.object_id] ||= tree.each_value.flat_map(&:reps).to_set
   end
 
   # A literal `Klass.new` has an exact-class result only while ordinary
@@ -843,6 +873,7 @@ class ClosedWorld
     @native_tokens.merge(file.fetch(:funcall_tokens))
     @native_other_literals.merge(file.fetch(:other_literals))
     file.fetch(:constant_writes).each { |name| note_outside_constant_write(name) }
+    file.fetch(:plain_class_defines).each { |name| @outside_plain_class_defines[name] += 1 }
     @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
     @outside_names.merge(file.fetch(:names))
     file.fetch(:names).each { |n| (@outside_name_paths[n] ||= Set.new) << path }
@@ -867,6 +898,7 @@ class ClosedWorld
     end
     names = Set.new
     constant_writes = []
+    plain_class_defines = []
     dynamic_constant_mutation = false
     refusals = []
     code_tokens = Set.new(text.scan(/[A-Za-z_]\w*/))
@@ -901,6 +933,10 @@ class ClosedWorld
           constant = args[position].to_s[/\bMRB_SYM\((\w+)\)/, 1] || args[position].to_s[/"(\w+)"/, 1]
           constant_writes << constant if constant
         end
+        if kind.match?(/\A(?:class)(?:_id)?\z/) && args[2].to_s.strip == 'mrb->object_class'
+          constant = args[1].to_s[/\bMRB_SYM\((\w+)\)/, 1] || args[1].to_s[/"(\w+)"/, 1]
+          plain_class_defines << constant if constant
+        end
         next
       end
       names.merge(literals)
@@ -926,6 +962,7 @@ class ClosedWorld
       funcall_tokens: native_funcall_names(text),
       other_literals: native_other_literals(text),
       constant_writes: constant_writes,
+      plain_class_defines: plain_class_defines,
       dynamic_constant_mutation: dynamic_constant_mutation,
       names: names.to_a,
       refusals: refusals,
@@ -1174,7 +1211,11 @@ class ClosedWorld
           scan_factory(irep, insns, idx, insn, const) if CLASS_FACTORIES.include?(const)
         when 'CLASS', 'MODULE'
           name = insn.sym_token
-          @class_constant_names << name.split('::').last if name
+          if name
+            bare = name.split('::').last
+            @class_constant_names << bare
+            @class_declared_names << bare unless insn.op == 'CLASS' && root_reopen?(irep, idx, insn)
+          end
         when 'SETCONST', 'SETMCNST'
           name = insn.const_name.to_s
           @rebound << name
