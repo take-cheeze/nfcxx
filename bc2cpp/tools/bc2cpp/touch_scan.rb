@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'compiled_gems'
+require_relative 'send_names'
 
 # CLOSED_WORLD touch analysis (docs/adr/0256): which constants can an outside
 # file (native C/C++ or foreign Ruby) CREATE, REOPEN, SUBCLASS or REBIND?
@@ -19,7 +20,7 @@ require_relative 'compiled_gems'
 # any root-segment requirement.
 module TouchScan
   WILD = '*'
-  CLASS_FACTORIES = %w[Class Module Struct Data].freeze
+  CLASS_FACTORIES = SendNames::CLASS_FACTORIES
 
   # `evidence` maps a name to the first construct that put it in a set. `symbols` maps each identifier a
   # native event argument spells to the local mrb_sym it names (native_facts).
