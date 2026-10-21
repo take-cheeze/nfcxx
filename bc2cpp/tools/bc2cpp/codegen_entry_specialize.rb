@@ -42,8 +42,8 @@ require_relative 'numeric_flow'
 # Gate: BC2CPP_SPECIALIZE=<file>, one line per method, `Owner#name param=Class ...` (`#` comments; the owner
 # of a class method is `Owner.singleton`). Unset, empty or `0` is off, and with it off nothing here runs and
 # the generated code is byte-identical to a build without this file. A line with no `param=Class` is an
-# identity clone: the specialized function is emitted under no assumption and not called, which is how
-# scripts/bc2cpp/entry_specialize_check.rb proves the clone path reproduces the generic body.
+# identity clone: the specialized function is emitted under no assumption and not called, and it must
+# reproduce the generic body.
 class CodeGen
   ENTRY_SPEC_ENV = 'BC2CPP_SPECIALIZE'
   ENTRY_SPEC_SUFFIX = '_spec'

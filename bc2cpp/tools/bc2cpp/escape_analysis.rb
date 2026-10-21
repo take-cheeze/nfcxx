@@ -74,8 +74,7 @@ module EscapeAnalysis
 
   # -- audited facts about native (C) methods, by name ------------------------------------------------
   # A name here is a claim about EVERY native definition of that name in the world;
-  # scripts/bc2cpp/escape_analysis_check.rb compares each name's registrations with NATIVE_MANIFEST so a
-  # new definition forces a new audit. mruby's iterators (each, map, times, inject, ...) are Ruby in
+  # Each name's registrations must match NATIVE_MANIFEST, so a new definition forces a new audit. mruby's iterators (each, map, times, inject, ...) are Ruby in
   # mrblib: they need no entry, their summaries are computed from bytecode.
 
   # Natives that take a block and either call it synchronously or never read it; none keeps it.
@@ -143,8 +142,7 @@ module EscapeAnalysis
     FORWARDING_SENDS = SendNames::FORWARDING_SENDS
 
     # mruby's own class tree for the classes the registry never declares (the natives and mrblib reopen
-    # them without a superclass), and the modules their C code includes. Checked against a real mruby by
-    # scripts/bc2cpp/escape_analysis_check.rb.
+    # them without a superclass), and the modules their C code includes. Must match a real mruby's class tree.
     BUILTIN_SUPERCLASS = {
       'Integer' => 'Numeric', 'Float' => 'Numeric', 'Numeric' => 'Object', 'Array' => 'Object', 'Hash' => 'Object',
       'String' => 'Object', 'Symbol' => 'Object', 'Range' => 'Object', 'Proc' => 'Object', 'NilClass' => 'Object',

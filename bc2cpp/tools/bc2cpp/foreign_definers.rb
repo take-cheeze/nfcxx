@@ -3,6 +3,7 @@
 require 'prism'
 require 'set'
 require_relative 'ruby_parse_cache'
+require_relative 'outside_ruby_owners'
 
 # FOREIGN_DEFINERS (docs/adr/0257): which method names outside Ruby (the build's
 # mrblib sources) defines, aliases, undefines or re-scopes on which class. The
@@ -14,10 +15,9 @@ require_relative 'ruby_parse_cache'
 # dynamic definition (a non-literal name, `class_eval`, `prepend`) marks the whole
 # class as wild so every name on it is treated as defined.
 module ForeignDefiners
-  DEFINERS = %w[define_method alias_method attr_reader attr_writer attr_accessor attr
-                remove_method undef_method public private protected].freeze
-  REOPENERS = %w[class_eval module_eval class_exec module_exec instance_eval instance_exec
-                 send __send__ public_send prepend refine].freeze
+  # Shared with OutsideRubyOwners so the two walks classify the same definers and reopeners.
+  DEFINERS = OutsideRubyOwners::DEFINERS
+  REOPENERS = OutsideRubyOwners::REOPENERS
 
   Result = Struct.new(:names, :wild)
 

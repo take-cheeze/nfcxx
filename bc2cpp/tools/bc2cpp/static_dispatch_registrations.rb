@@ -40,9 +40,8 @@
 #
 # Residual risk: a name assembled at runtime from data that appears nowhere as
 # a literal or fragment (read from a game file, then `send`) would be missed.
-# Nothing does that for an RPG2000/2003-internal class today, and
-# scripts/bc2cpp/static_dispatch_check.rb re-proves every listed name on every
-# run, so a new dynamic reference fails CI instead of shipping a NoMethodError.
+# Nothing does that for an RPG2000/2003-internal class today, and a listed name
+# must stay free of dynamic references, or it ships a NoMethodError.
 require 'set'
 require_relative 'bytecode_ir_ops'
 require 'tmpdir'

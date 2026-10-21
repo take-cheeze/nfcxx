@@ -23,8 +23,7 @@ class CodeGen
 
   # Classes whose Integer/Float bodies the numeric arms may call directly.
   NUMERIC_OP_OWNERS = %w[Integer Float Numeric].freeze
-  NUMERIC_MASK_NAMES = [[0, 'INT'], [1, 'FLT'], [2, 'ARR'], [3, 'HSH'],
-                        [4, 'STR'], [5, 'NIL'], [6, 'OTHER'], [7, 'RNG']].each(&:freeze).freeze
+  NUMERIC_MASK_NAMES = NumericFlow.mask_names
 
   # NumericFlow's view of this CodeGen's facts.
   class NumericOracle

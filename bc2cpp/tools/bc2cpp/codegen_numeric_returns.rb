@@ -224,8 +224,7 @@ class CodeGen
   end
 
   # Class each receiver bit stands for, when its core body is what a send runs.
-  NUMERIC_SEND_OWNERS = { NumericFlow::ARR => 'Array', NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String',
-                          NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float' }.freeze
+  NUMERIC_SEND_OWNERS = NumericFlow.class_bits('Array', 'Hash', 'String', 'Integer', 'Float')
   # Zero-argument sends on a numeric receiver whose result class is fixed.
   NUMERIC_TO_INT_SENDS = %w[to_i to_int floor ceil round truncate].freeze
   # Integer bit operators: an Integer for INT op INT (BITOP_RESULTS, ADR 0431). `<<` and `>>` are

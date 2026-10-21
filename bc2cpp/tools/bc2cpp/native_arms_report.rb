@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'call_facts'
+require_relative 'compiled_gems'
 
 # Debug report for the by-name sites a per-class native arm could remove (ADR 0323): with
 # BC2CPP_NATIVE_ARMS_REPORT=<path>, every explicit-receiver send whose final code still reaches a by-name call
@@ -18,7 +19,7 @@ require_relative 'call_facts'
 module NativeArmsReport
   ROWS = {}
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/
-  ENGINE_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
+  ENGINE_GEMS = BC2CPP_CLOSED_WORLD_GEMS
   CHAIN_FAMILIES = %w[TYPED IVAR_ACCESSOR MONO_EMBED_GUARD POLY_SMALL_N POLY_TABLE ELEMENT POLY].freeze
   @world = nil
   class << self
