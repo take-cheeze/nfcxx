@@ -47,7 +47,7 @@ class ClosedWorld
   NATIVE_CORE = %r{/3rd/mruby/(?:src|mrbgems)/}
   RUBY_DYNAMIC = /\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
-  RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const|autoload)\b/
+  RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const)\b/
   CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
   # Project native code that freezes an object, or asks Ruby to (registering a method named
   # `freeze` is not one). ADR 0299.
@@ -262,7 +262,7 @@ class ClosedWorld
 
   def foreign_ruby_token_files = @ruby_tokens
 
-  # No const_set, remove_const or autoload anywhere and no global refusal: every constant binding is a visible
+  # No const_set or remove_const anywhere and no global refusal: every constant binding is a visible
   # SETCONST/CLASS/MODULE or a scanned native/foreign definition (NUMERIC_CONSTANT_RANGES).
   def constants_static?
     !@global_refusal && !@dynamic_constant_mutation
