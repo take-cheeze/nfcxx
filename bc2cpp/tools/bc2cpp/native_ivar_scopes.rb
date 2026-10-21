@@ -25,7 +25,7 @@ module NativeIvarScopes
   # ADR 0370: what the audited natives (FILES, pinned by digest) put in a scoped slot. `setters` are the registered
   # setters that store their one argument unvalidated (`window_set_contents`: mrb_get_args "o" then
   # window_contents_set_direct); `classes` are the values the natives build themselves (window_init's 1x1 Bitmap).
-  # Every `mrb_iv_set` of the slot in FILES must be one of these (scripts/bc2cpp/setter_pools_check.rb).
+  # Every `mrb_iv_set` of the slot in FILES must be one of these.
   STORES = {
     'contents' => { setters: ['contents='].freeze, classes: ['RGSS::Bitmap'].freeze }.freeze
   }.freeze

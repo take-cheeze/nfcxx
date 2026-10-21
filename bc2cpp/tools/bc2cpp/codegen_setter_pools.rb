@@ -75,7 +75,7 @@ class CodeGen
   # The program spells `x=` as a String (a Symbol is a poisoned name already): evidence of a by-name call the sites
   # do not show. numeric_dynamically_named? would also refuse every `x=` once any send takes a computed name (mruby's
   # Symbol#to_proc does); that clause is a precision rule for the unchecked proofs. A composed name that stores
-  # outside the pool is a guard violation at the reader (scripts/bc2cpp/setter_pools_check.rb).
+  # outside the pool is a guard violation at the reader.
   def setter_spelled_as_literal?(setter)
     @setter_literal_names ||= DynamicNames.analyze(@ireps).first
     @setter_literal_names.include?(setter)

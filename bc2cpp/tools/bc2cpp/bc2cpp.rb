@@ -49,6 +49,7 @@ require_relative 'predicate_returns'
 require_relative 'conversion_returns'
 require_relative 'hot_methods'
 require_relative 'core_methods'
+require_relative 'core_fact_sigs'
 require_relative 'enumerator_model'
 
 require_relative 'integer_constants'
@@ -1485,7 +1486,15 @@ if $PROGRAM_NAME == __FILE__
     static bool bc2cpp_cfunc_proc_call_p(mrb_state* M, mrb_value recv, mrb_sym mid) {
       if (!MRB_PROC_CFUNC_P(mrb_proc_ptr(recv)) || mrb_obj_ptr(recv)->c != M->proc_class) return false;
       const char* name = mrb_sym_name(M, mid);
-      if (!name || !(!strcmp(name, "call") || !strcmp(name, "yield") || !strcmp(name, "[]") || !strcmp(name, "==="))) return false;
+  CPP
+  # The names are read from the RBS table the codegen also uses (CoreFactSigs.proc_call_names), so they cannot
+  # drift. Only `"` and `\` need escaping in a C string literal; `[]` and `===` are emitted as they are.
+  proc_call_strcmp_tests = CoreFactSigs.proc_call_names.map do |proc_call_name|
+    c_name = proc_call_name.gsub(/["\\]/) { |ch| "\\#{ch}" }
+    %(!strcmp(name, "#{c_name}"))
+  end
+  puts "  if (!name || !(#{proc_call_strcmp_tests.join(' || ')})) return false;"
+  puts <<~'CPP'
       // Only where the name is Proc's own bytecode method: without mruby-proc-ext
       // `===` is Object's, and `[]` may be missing altogether.
       struct RClass* found = M->proc_class;

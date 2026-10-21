@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
+require_relative 'core_hierarchy_sigs'
 
 # LOOP_INSTALLERS (docs/adr/0304): a class-body loop over a literal container whose body installs
 # attr_reader/attr_writer/attr_accessor names (`NAMES.each { |n| attr_accessor n }`, optcarrot's
@@ -33,11 +34,14 @@ require_relative 'define_method_sites'
 #   call that could).
 # DefineMethodSites.settle then keeps all of a send's expansions or none.
 module LoopInstallers
+  # Not read from core_block_iterators: that table declares no Hash#each/each_pair/each_value/each_key.
   ITERATORS = %w[each each_pair each_value each_key].freeze
   ATTR_SENDS = %w[attr_reader attr_writer attr_accessor].freeze
   # Methods the interpreter models on a container, and the classes whose reopening would change them.
   MODELED_METHODS = (ITERATORS + %w[[] []= key? has_key? freeze]).freeze
-  CORE_OWNERS = %w[Hash Array Enumerable Object Kernel BasicObject Module Class Comparable].freeze
+  # From core_hierarchy: the ancestry of the container and installer classes, plus every core mixin.
+  CORE_OWNERS = (%w[Hash Array Module Class].flat_map { |name| CoreHierarchySigs.ancestors(name) } +
+                 CoreHierarchySigs.hierarchy[1].values.flatten).uniq.freeze
   CALLS = %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB SENDV SENDVB SSENDV SSENDVB].freeze
   # Control flow that ends or splits the straight-line walk.
   FLOW_OPS = /\A(?:JMP|RETURN|RETNIL|RETSELF|RETTRUE|RETFALSE|BREAK|STOP|RAISE|ONERR|POPERR|EXCEPT|RESCUE)/

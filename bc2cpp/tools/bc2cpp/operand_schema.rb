@@ -4,8 +4,7 @@
 # straight from decoded bytes (insn_decoder.rb). OperandSchema.parse builds them
 # from operand text by the per-opcode kind list below, only for synthetic
 # instructions (Insn.synthetic); OperandSchema.to_text regenerates the text,
-# which is how scripts/bc2cpp/operand_schema_check.rb proves every schema entry
-# against the decoder's own operand text.
+# which must reproduce the decoder's own operand text for every schema entry.
 module OperandSchema
   # kind: one of KINDS. value: Integer for numeric kinds, String for names, an
   # [Integer, String] pair for :mcnst, an [n, nk] pair for :argc (nil = `*`).
