@@ -694,8 +694,6 @@ module TypeFacts
       end
     end
     seen.values
-  rescue StandardError
-    []
   end
 
   # ------------------------------------------------------------------------------------------------ annotations
