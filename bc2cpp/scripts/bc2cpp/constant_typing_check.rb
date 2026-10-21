@@ -184,10 +184,13 @@ analysis = lambda do |source|
     rb = File.join(dir, 'fixture.rb')
     File.write(rb, source)
     ireps, root = compile_ireps([rb], 'integer_arith', dir)
-    registry, _superclass_of, _containers, included, prepended, unknown = build_registry(ireps, root)
+    registry, _superclass_of, _containers, included, prepended, unknown, _structs, _decls, _walked, _ivars, sites = build_registry(ireps, root)
     safe = IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
     # FREEZE_SELF: the same owner-scoped proof the build passes (bc2cpp.rb), not a copy of it.
     freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
+    # The bytecode IR facts (ADR 0501 stages 2 and 4), with the gates the build passes (bc2cpp.rb).
+    ir = BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: safe,
+                                                  freeze_safe: freeze_safe, freeze_classes: Set.new)
     {
       safe: safe,
       freeze_safe: freeze_safe,
@@ -195,7 +198,10 @@ analysis = lambda do |source|
       refused: IntegerConstantRanges.analyze(ireps, [], [], operators_safe: false),
       # The exact-value proof with the operator gate bypassed, and with the gate as the program sets it.
       ints_ungated: IntegerConstants.analyze(ireps, [], [], operators_safe: true),
-      ints_gated: IntegerConstants.analyze(ireps, [], [], operators_safe: safe)
+      ints_gated: IntegerConstants.analyze(ireps, [], [], operators_safe: safe),
+      ir_ranges: ir.intervals,
+      ir_values: ir.values,
+      ir_fixnum: ir.fixnum_names
     }
   end
 end
@@ -204,6 +210,14 @@ end
 puts '== positive: literals and named constants (exact values and intervals)'
 pos = analysis.call(positive)
 check.call('the operators are the core ones (no Ruby definition on Integer)', pos[:safe])
+# ADR 0501 stage 2: the IR intervals and Fixnum names are the proofs' own. The exact-value proof also admits a literal-only
+# name outside the Fixnum margin (ZA_BIG, 1073741824), which the IR's Fixnum set leaves out on purpose: a Fixnum name is
+# inside the margin by construction.
+check.call('the IR intervals equal the interval proof (positive)', pos[:ir_ranges] == pos[:ranges])
+check.call('an IR Fixnum name the exact-value proof lacks has an interval (positive)',
+           (pos[:ir_fixnum] - pos[:ints_gated].to_set).all? { |name| pos[:ranges].key?(name) })
+check.call('the only exact-value name outside the IR Fixnum set is ZA_BIG (positive)',
+           (pos[:ints_gated].to_set - pos[:ir_fixnum]) == ['ZA_BIG'].to_set)
 check.call('ZA_SLOT (= 40 - 3) has the interval [37, 37]', pos[:ranges]['ZA_SLOT'] == [37, 37])
 check.call('ZA_COLS (= ZA_SLOT / ZA_STEP + 1) has the interval [13, 13]', pos[:ranges]['ZA_COLS'] == [13, 13])
 check.call('ZA_SPAN (= ZA_STEP * ZA_COLS) has the interval [39, 39]', pos[:ranges]['ZA_SPAN'] == [39, 39])
