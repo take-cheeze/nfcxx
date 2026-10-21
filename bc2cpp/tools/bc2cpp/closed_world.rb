@@ -111,6 +111,7 @@ class ClosedWorld
     @probed_names = Set.new
     @outside_def_names = Set.new
     @freeze_possible = false
+    @factory_read_names = Set.new
     @frozen_constants = Set.new
     @memo = {}
     @desc_memo = {}
@@ -1174,6 +1175,8 @@ class ClosedWorld
         end
       end
     end
+    # A read name (scan_factory) can run a definition the scan only finishes seeing here.
+    global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
 
   # -- singleton classes (ADR 0280) --------------------------------------------
@@ -1362,7 +1365,9 @@ class ClosedWorld
   end
 
   # Sends that only compare or name a factory constant (`x.is_a?(Class)`,
-  # `when Struct`), never make anything with it.
+  # `when Struct`), never make anything with it. The constant may be the receiver or
+  # an argument, so the send's name must be native-only (checked after the scan,
+  # see scan_closed_world): a Ruby `==` or `is_a?` could store it.
   FACTORY_READS = %w[=== == != equal? is_a? kind_of? instance_of? name to_s inspect].freeze
 
   # `Struct.new(:a, ...)`, `Class.new(Base)`: the constant must feed one `new`
@@ -1370,19 +1375,23 @@ class ClosedWorld
   def scan_factory(irep, insns, idx, insn, const)
     reg = insn.reg.to_i
     send_idx = nil
-    compared = false
+    reads = []
     ((idx + 1)...insns.size).each do |j|
       ins = insns[j]
       break if ins.op.match?(STOP_OPS)
       next unless reads_register?(ins, reg)
 
       name = SEND_OPS.include?(ins.op) && ins.sym_token
-      next compared = true if FACTORY_READS.include?(name)
+      if FACTORY_READS.include?(name)
+        reads << name
+        next
+      end
 
       send_idx = j if name == 'new' && !ins.op.start_with?('SS') && ins.reg.to_i == reg
       break
     end
-    return if send_idx.nil? && compared
+    @factory_read_names.merge(reads)
+    return if send_idx.nil? && reads.any?
     return global!(:class_factory_escape) unless send_idx
     return global!(:class_factory_escape) if const == 'Data'
 
