@@ -26,9 +26,12 @@ def set(*items) = Set.new(items)
 by_name = { 'to_i' => set('Integer', 'String'), 'to_f' => set('Float') }
 rom = [['Integer', 'to_i', 'self_i'], ['String', 'to_i', 'str_to_i'], ['Float', 'to_f', 'self_f']]
 kinds = { 'self_i' => 'self', 'str_to_i' => 'Integer', 'self_f' => 'self' }
-result = NativeReturnClasses.admit(map_of(by_name), rom, kinds)
+exact = set('Integer', 'Float')
+result = NativeReturnClasses.admit(map_of(by_name), rom, kinds, exact_self: exact)
 check.call('same class from every owner is admitted (self on an exact owner counts as that owner)',
            result[:admitted]['to_i'] == 'Integer')
+check.call('exact-self owners come from the sources: Integer and Float on numeric.c, never Struct',
+           NativeReturnClasses.exact_self_owners([File.expand_path('../../3rd/mruby/src/numeric.c', __dir__)]) == set('Float', 'Integer')) if File.file?(File.expand_path('../../3rd/mruby/src/numeric.c', __dir__))
 check.call('a self return on a non-exact owner is refused',
            NativeReturnClasses.admit(map_of({ 'x' => set('String') }), [['String', 'x', 'selfs']], { 'selfs' => 'self' })[:refused].first&.reason == :self_return_not_exact)
 check.call('an unproven body is refused',

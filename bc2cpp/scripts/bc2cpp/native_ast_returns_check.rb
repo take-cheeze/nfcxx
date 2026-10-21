@@ -4,7 +4,7 @@
 # Checks tools/bc2cpp/native_ast_returns.rb: the return kind of each function in a small C++ fixture, from the clang AST
 # (`clang -fsyntax-only -Xclang -ast-dump=json`). Covers a constructor, `self` (also through a copy), a local, a
 # conditional, a join of two kinds, a call to a function in the same file, a recursive cycle, and an identity call
-# (mrb_obj_freeze returns its value), and a string guard that narrows a local to String only where
+# (mrb_obj_freeze returns its self parameter, so the call takes the argument passed for it), and a string guard that narrows a local to String only where
 # no later statement reassigns it. Skips when clang is
 # not installed.
 #
@@ -35,7 +35,7 @@ FIXTURE = <<~CPP
   mrb_value call_fn(mrb_value self) { return int_fn(self); }
   mrb_value rec_fn(mrb_value self) { return rec_fn(self); }
   struct mrb_state;
-  mrb_value mrb_obj_freeze(struct mrb_state *mrb, mrb_value self);
+  mrb_value mrb_obj_freeze(struct mrb_state *mrb, mrb_value self) { return self; }
   mrb_value mrb_str_new(struct mrb_state *mrb, const char *p, int len);
   enum { MRB_TT_STRING = 7 };
   mrb_value get_thing(struct mrb_state *mrb);
@@ -56,7 +56,7 @@ CPP
 EXPECTED = {
   'int_fn' => 'Integer', 'self_fn' => 'self', 'local_fn' => 'Array', 'cond_fn' => 'Integer',
   'mixed_fn' => nil, 'call_fn' => 'Integer', 'rec_fn' => nil, 'frozen_fn' => 'String',
-  'guard_fn' => 'String', 'guard_late_fn' => nil, 'pre_fn' => nil, 'named_fn' => 'String', 'self_str_fn' => 'String'
+  'guard_fn' => 'String', 'guard_late_fn' => nil, 'pre_fn' => nil, 'named_fn' => 'String', 'self_str_fn' => 'String', 'mrb_obj_freeze' => 'self'
 }.freeze
 
 failures = []

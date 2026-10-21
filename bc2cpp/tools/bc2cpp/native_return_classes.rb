@@ -18,17 +18,41 @@ require_relative 'native_rom_owners'
 module NativeReturnClasses
   SELF = 'self'
 
-  # Owners whose allocator is undefined in numeric.c (MRB_UNDEF_ALLOCATOR): an instance is exactly that class.
-  EXACT_SELF_OWNERS = %w[Integer Float].freeze
-
-  Refusal = Struct.new(:name, :reason, :detail)
+  # Immediate instance types: an instance of such a class is a tagged value, so no subclass can have one.
+  IMMEDIATE_TYPES = %w[MRB_TT_INTEGER MRB_TT_FLOAT].freeze
 
   module_function
+
+  # The owners whose instances are exactly the owner (a `self` return is then that owner): an undefined allocator
+  # (MRB_UNDEF_ALLOCATOR) on the class AND an immediate instance type (MRB_SET_INSTANCE_TT). The allocator alone is not
+  # enough: Struct, Proc and Method undefine theirs, but Struct.new's subclasses have instances of their own.
+  def exact_self_owners(paths)
+    undef_owners = Set.new
+    immediate_owners = Set.new
+    paths.each do |path|
+      text = NativeDirect.strip_comments(File.binread(path).force_encoding('UTF-8'))
+      text.scan(/MRB_UNDEF_ALLOCATOR\s*\(\s*(\w+)\s*\)/) do
+        undef_owners << owner_at(text, Regexp.last_match.begin(0), Regexp.last_match(1))
+      end
+      text.scan(/MRB_SET_INSTANCE_TT\s*\(\s*(\w+)\s*,\s*(MRB_TT_\w+)\s*\)/) do
+        immediate_owners << owner_at(text, Regexp.last_match.begin(0), Regexp.last_match(1)) if IMMEDIATE_TYPES.include?(Regexp.last_match(2))
+      end
+    end
+    (undef_owners & immediate_owners).reject { |owner| owner == NativeRomOwners::UNKNOWN }.to_set
+  end
+
+  # The class a variable holds at +pos+ in +text+ (the ROM resolver's binding rules), or UNKNOWN.
+  def owner_at(text, pos, var)
+    NativeRomOwners.owner_of(text, pos, var)
+  end
+
+  Refusal = Struct.new(:name, :reason, :detail)
 
   # The table for one list of native sources. kinds: { fn => class | 'self' | nil }. Owners come from NativeOwnerMap
   # (which reads ROM tables through NativeRomOwners), and the ROM entries from the same sources.
   def from_paths(paths, kinds)
     rom = []
+    exact_self = exact_self_owners(paths)
     paths.each do |path|
       NativeRomOwners.analyze_file(path)[:tables].each_value do |info|
         next if info[:owner] == NativeRomOwners::UNKNOWN
@@ -45,7 +69,7 @@ module NativeReturnClasses
       fn = owner_map.registrations.find { |ro, rn, _| ro == owner && rn == original }&.last
       rom << [owner, name, fn]
     end
-    admit(owner_map, rom, kinds)
+    admit(owner_map, rom, kinds, exact_self: exact_self)
   end
 
   # The admitted table for the NATIVE_SRCS paths. Empty unless BC2CPP_NATIVE_FN_KINDS names a TSV of `fn<TAB>class` rows
@@ -55,7 +79,7 @@ module NativeReturnClasses
     return {} unless path && !path.empty?
 
     kinds = File.readlines(path, chomp: true).to_h do |line|
-      fn, kind = line.split("\t", 2)
+      fn, kind = line.split("\t")
       [fn, kind == 'unproven' || kind.nil? ? nil : kind]
     end
     from_paths(paths, kinds)[:admitted]
@@ -64,12 +88,12 @@ module NativeReturnClasses
   # owner_map: NativeOwnerMap::Result. rom: [[owner, name, fn]] for each ROM entry of the native sources.
   # kinds: { fn => class name | 'self' | nil }, where a missing fn has no body in the native sources.
   # Returns { admitted: { name => class }, refused: [Refusal] }.
-  def admit(owner_map, rom, kinds, core_dynamic_trusted: true)
+  def admit(owner_map, rom, kinds, core_dynamic_trusted: true, exact_self: Set.new)
     admitted = {}
     refused = []
     names = (owner_map.by_name.keys + rom.map { |_owner, name, _fn| name }).uniq.sort
     names.each do |name|
-      verdict = admit_name(owner_map, rom, kinds, name, core_dynamic_trusted: core_dynamic_trusted)
+      verdict = admit_name(owner_map, rom, kinds, name, core_dynamic_trusted: core_dynamic_trusted, exact_self: exact_self)
       if verdict.is_a?(Refusal)
         refused << verdict
       else
@@ -81,7 +105,7 @@ module NativeReturnClasses
 
   # The global guards match NativeOwnerMap.verdict: a computed registration with an unknown owner outside the core
   # could define any name, and a core one only where the core's own names are trusted (the default, as in codegen).
-  def admit_name(owner_map, rom, kinds, name, core_dynamic_trusted: true)
+  def admit_name(owner_map, rom, kinds, name, core_dynamic_trusted: true, exact_self: Set.new)
     return Refusal.new(name, :owner_unknown_somewhere, nil) if owner_map.computed_unknown
     return Refusal.new(name, :core_dynamic_unknown, nil) if owner_map.core_dynamic_unknown.positive? && !core_dynamic_trusted
     return Refusal.new(name, :native_prepend, nil) if owner_map.refusals[:native_prepend].positive?
@@ -110,7 +134,7 @@ module NativeReturnClasses
       if kind.nil? then return Refusal.new(name, :body_not_proven, "#{owner} via #{fn}") end
 
       if kind == SELF
-        next owner if EXACT_SELF_OWNERS.include?(owner)
+        next owner if exact_self.include?(owner)
 
         return Refusal.new(name, :self_return_not_exact, "#{owner} via #{fn}")
       end

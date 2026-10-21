@@ -17,8 +17,6 @@ require_relative 'native_return_kinds'
 module NativeAstReturns
   UNKNOWN = :unknown
   SELF_KIND = 'self'
-  # Calls that return their value argument unchanged; `mrb_str_new_frozen` is mrb_obj_freeze over mrb_str_new.
-  IDENTITY_CALLS = %w[mrb_obj_freeze].freeze
   # Helpers whose result class is a contract of mruby's source rather than a proof here. class_name_str (class.c:391-401)
   # returns the class path as a String, and builds the "#<Class:...>" String itself when mrb_class_path is nil; the
   # other mrb_class_path branches (mrb_sym_str, mrb_str_dup) are Strings. So Module#to_s is a String.
@@ -79,6 +77,7 @@ module NativeAstReturns
       # Kinds of functions defined in other translation units (a previous pass over the sources). A call to one of
       # them takes its kind; `self` is the receiver of the other function, so it is not a kind here.
       @external = external
+      @self_index = {}
       @memo = {}
       @in_progress = {}
       @narrowed = Set.new
@@ -102,8 +101,31 @@ module NativeAstReturns
       kind = NativeAstReturns.join(kinds)
       @narrowed = outer_narrowed
       @in_progress.delete(name)
+      @self_index[name] = self_param_index(fn[:node]) if kind == SELF_KIND
       @memo[name] = kind
     end
+
+    # Where the receiver sits among a function's parameters (0 is mrb): a function that returns its `self` parameter
+    # returns whatever argument the caller passes in that position. nil when it has no `self` parameter.
+    def self_param_index(node)
+      params = (node['inner'] || []).select { |child| child['kind'] == 'ParmVarDecl' }
+      index = params.index { |param| param['name'] == 'self' }
+      index
+    end
+
+    # The argument position a call's result is taken from when the callee returns its self parameter: the same-file
+    # analysis, or a kind a previous pass recorded for a function of another file ("self:N").
+    def identity_index(callee)
+      if @fns.key?(callee)
+        return nil unless function_kind(callee) == SELF_KIND
+
+        return @self_index[callee]
+      end
+      match = /\Aself:(\d+)\z/.match(@external[callee].to_s)
+      match && match[1].to_i
+    end
+
+    attr_reader :self_index
 
     # A local tested by a guard `if (!(x.tt == MRB_TT_STRING)) { ...return...; }` at a top-level statement is a String
     # after that statement, when no later statement assigns it (mrb_string_p is that comparison). Returns the locals'
@@ -206,7 +228,7 @@ module NativeAstReturns
 
     def external_kind(name)
       kind = @external[name]
-      kind == SELF_KIND ? nil : kind
+      kind == SELF_KIND || kind.to_s.start_with?('self:') ? nil : kind
     end
 
     def collect_returns(node, out)
@@ -236,9 +258,10 @@ module NativeAstReturns
         callee = callee_name(expr) or return nil
         return CONTRACT_KINDS[callee] if CONTRACT_KINDS.key?(callee)
 
-        # An identity call returns its value argument (mrb_obj_freeze(mrb, obj) is obj, frozen): the kind is the value's.
-        # The CallExpr's children are the callee, then the arguments: mrb_obj_freeze(mrb, obj) has the value at [2].
-        return value_kind(expr['inner'][2], body, seen) if IDENTITY_CALLS.include?(callee) && expr['inner'][2]
+        # A callee that returns its self parameter yields the argument passed for it: the CallExpr's children are the
+        # callee, then the arguments, so parameter N is argument N + 1.
+        index = identity_index(callee)
+        return value_kind(expr['inner'][index + 1], body, seen) if index && expr['inner'][index + 1]
 
         NativeAstReturns.constructor_kind(callee) || function_kind(callee)
       when 'DeclRefExpr'
@@ -292,10 +315,13 @@ module NativeAstReturns
   end
 
   # { 'function name' => kind-or-nil } for every function defined in +source+.
-  def analyze(root, source, external: {})
+  # self_index (optional, a Hash) receives the self-parameter position of each function that returns its self.
+  def analyze(root, source, external: {}, self_index: nil)
     fns = functions_of(root, source)
     analyzer = Analyzer.new(fns, external)
-    fns.keys.sort.to_h { |name| [name, analyzer.function_kind(name)] }
+    kinds = fns.keys.sort.to_h { |name| [name, analyzer.function_kind(name)] }
+    self_index&.merge!(analyzer.self_index)
+    kinds
   end
 end
 
