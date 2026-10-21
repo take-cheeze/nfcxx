@@ -23,6 +23,8 @@ class CodeGen
 
   # Classes whose Integer/Float bodies the numeric arms may call directly.
   NUMERIC_OP_OWNERS = %w[Integer Float Numeric].freeze
+  NUMERIC_MASK_NAMES = [[0, 'INT'], [1, 'FLT'], [2, 'ARR'], [3, 'HSH'],
+                        [4, 'STR'], [5, 'NIL'], [6, 'OTHER'], [7, 'RNG']].each(&:freeze).freeze
 
   # NumericFlow's view of this CodeGen's facts.
   class NumericOracle
@@ -257,10 +259,7 @@ class CodeGen
 
   # Class-set names for the diagnostic and the report, e.g. "INT|NIL".
   def numeric_mask_name(mask)
-    names = { NumericFlow::INT => 'INT', NumericFlow::FLT => 'FLT', NumericFlow::ARR => 'ARR',
-              NumericFlow::HSH => 'HSH', NumericFlow::STR => 'STR', NumericFlow::NIL => 'NIL',
-              NumericFlow::OTHER => 'OTHER', NumericFlow::RNG => 'RNG' }
-    found = names.filter_map { |bit, name| name if mask.anybits?(bit) }
+    found = NUMERIC_MASK_NAMES.filter_map { |position, name| name if mask[position] == 1 }
     @lcf_rows&.kinds&.each { |k| found << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
     @frozen_tables&.each_shape_in(mask) { |s| found << @frozen_tables.name(s.bit) }
     found << 'SYM' if frozen_symbol_bit && mask.anybits?(frozen_symbol_bit)
