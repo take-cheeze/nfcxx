@@ -7,6 +7,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
 require_relative 'core_hierarchy_sigs'
 require_relative 'core_defs'
+require_relative 'send_names'
 
 # ESCAPE_ANALYSIS (ADR 0316): one value-flow module for "does the value this instruction creates leave
 # the frame that made it?". Every claim is sound by construction. The default answer is "escapes", and a
@@ -73,8 +74,7 @@ module EscapeAnalysis
 
   # -- audited facts about native (C) methods, by name ------------------------------------------------
   # A name here is a claim about EVERY native definition of that name in the world;
-  # scripts/bc2cpp/escape_analysis_check.rb compares each name's registrations with NATIVE_MANIFEST so a
-  # new definition forces a new audit. mruby's iterators (each, map, times, inject, ...) are Ruby in
+  # Each name's registrations must match NATIVE_MANIFEST, so a new definition forces a new audit. mruby's iterators (each, map, times, inject, ...) are Ruby in
   # mrblib: they need no entry, their summaries are computed from bytecode.
 
   # Natives that take a block and either call it synchronously or never read it; none keeps it.
@@ -139,11 +139,10 @@ module EscapeAnalysis
     NAMING_SENDS = %w[define_method define_singleton_method alias_method].freeze
     # `obj.send(:define_method, :x) { }` names the installer in its first argument. A first argument that is
     # not a literal is the closed world's own residual (ClosedWorld reads direct installer sends only).
-    FORWARDING_SENDS = %w[send __send__ public_send].freeze
+    FORWARDING_SENDS = SendNames::FORWARDING_SENDS
 
     # mruby's own class tree for the classes the registry never declares (the natives and mrblib reopen
-    # them without a superclass), and the modules their C code includes. Checked against a real mruby by
-    # scripts/bc2cpp/escape_analysis_check.rb.
+    # them without a superclass), and the modules their C code includes. Must match a real mruby's class tree.
     BUILTIN_SUPERCLASS = {
       'Integer' => 'Numeric', 'Float' => 'Numeric', 'Numeric' => 'Object', 'Array' => 'Object', 'Hash' => 'Object',
       'String' => 'Object', 'Symbol' => 'Object', 'Range' => 'Object', 'Proc' => 'Object', 'NilClass' => 'Object',

@@ -5,9 +5,8 @@
 # 1. each fact file loads, and its loader rejects the malformed shapes it exists to keep out;
 # 2. the facts read from the RBS match the real 3rd/mruby sources (skipped, with a SKIP line, when the submodule is
 #    not checked out): the native registrations' owners and arities, the mrblib bodies, the Proc call_proc entries;
-# 3. bc2cpp_cfunc_proc_call_p (bc2cpp.rb) spells the same Proc names as sig/bc2cpp/declarations.rbs#core_proc_calls;
-# 4. RbsSignatures does not read the fact files as program signatures;
-# 5. the hierarchy helpers the generator's ancestor tables come from.
+# 3. RbsSignatures does not read the fact files as program signatures;
+# 4. the hierarchy helpers the generator's ancestor tables come from.
 #
 # Usage: ruby scripts/bc2cpp/core_facts_rbs_check.rb [--require-mruby]
 #   --require-mruby: a missing 3rd/mruby fails instead of skipping (the bc2cpp-build job, which checks it out).
@@ -47,8 +46,12 @@ check.call('frame readers: block readers return bool, frame readers Binding',
            CoreFactSigs.block_given_names == %w[block_given? iterator?] && CoreFactSigs.frame_reading_names == %w[binding])
 check.call('enumerator makers load', CoreFactSigs.enumerator_makers == %w[to_enum enum_for])
 check.call('Proc call names load', CoreFactSigs.proc_call_names == %w[call yield [] ===])
-check.call('class-test owners keep the first-declaration order of names and owners',
-           CoreFactSigs.class_test_owners.keys == %w[is_a? kind_of? instance_of? nil? ! raise respond_to? class] &&
+# The names come from the RBS table itself, read through NativeCoreResultSigs.parse_decls (not through
+# class_test_owners' owner filter), so a name dropped or added by the reader, or a declaration the reader skips, shows up.
+rbs_class_test_names = NativeCoreResultSigs.parse_decls(CoreFactSigs::CLASS_TESTS_PATH)
+                                           .flat_map { |decl| decl.members.map { |member| member.name.to_s } }.uniq
+check.call('class-test owners keep the first-declaration order of names and owners, and cover every name the RBS table declares',
+           CoreFactSigs.class_test_owners.keys == rbs_class_test_names &&
              CoreFactSigs.class_test_owners['nil?'] == %w[Kernel NilClass])
 check.call('loaded facts are frozen',
            [CoreFactSigs.frame_readers, CoreFactSigs.enumerator_makers, CoreFactSigs.proc_call_names,
@@ -162,6 +165,15 @@ if File.file?(File.join(MRUBY, 'src/kernel.c'))
     end
   end
 
+  # block_result_array? reads an Enumerable entry for Hash unless Hash declares the name, so every Enumerable entry
+  # that mruby's Hash defines itself must be declared under Hash too.
+  hash_defs = %w[mrblib/hash.rb mrbgems/mruby-hash-ext/mrblib/hash.rb].flat_map do |rel|
+    File.binread(File.join(MRUBY, rel)).scan(/^\s*(?:def|alias) ([A-Za-z_]\w*[!?]?)/).flatten
+  end
+  overridden = CoreBlockIteratorSigs.results.fetch('Enumerable', {}).keys & hash_defs
+  check.call("block iterators: Hash declares each Enumerable entry it overrides (#{overridden.join(', ')})",
+             overridden.all? { |name| CoreBlockIteratorSigs.results.fetch('Hash', {}).key?(name) })
+
   proc_init = File.binread(File.join(MRUBY, 'src/proc.c'))[/^mrb_init_proc\(mrb_state \*mrb\)\n\{\n.*?^\}\n/m].to_s
   proc_ext = File.binread(File.join(MRUBY, 'mrbgems/mruby-proc-ext/mrblib/proc.rb'))
   proc_ext_class = proc_ext[/^class Proc\n(.*?)^end\n/m, 1].to_s
@@ -177,18 +189,13 @@ else
   puts '  SKIP the real 3rd/mruby is not checked out'
 end
 
-# 3. The runtime's spelling of the Proc call names.
-runtime = File.read(File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'))[/static bool bc2cpp_cfunc_proc_call_p\(.*?\n    \}\n/m].to_s
-spelled = runtime[/if \(!name \|\| !\((.*?)\)\) return false;/, 1].to_s.scan(/!strcmp\(name, "([^"]+)"\)/).flatten
-check.call('bc2cpp_cfunc_proc_call_p spells exactly sig/bc2cpp/declarations.rbs#core_proc_calls', spelled == CoreFactSigs.proc_call_names)
-
-# 4. Not program signatures: RbsSignatures skips the fact tables and still reads the other native tables.
+# 3. Not program signatures: RbsSignatures skips the fact tables and still reads the other native tables.
 hierarchy_decls = NativeSigs.decls(CoreHierarchySigs::PATH)
 check.call('RbsSignatures skips the fact tables and still reads the other native tables',
            CoreFactSigs::TABLES.all? { |table| NativeSigs.decls(table).all? { |d| RbsSignatures.fact_table?(d) } } &&
            !hierarchy_decls.empty? && hierarchy_decls.none? { |d| RbsSignatures.fact_table?(d) })
 
-# 5. Hierarchy helpers.
+# 4. Hierarchy helpers.
 check.call('ancestors: Object, then Kernel, then BasicObject', CoreHierarchySigs.ancestors('Object') == %w[Object Kernel BasicObject])
 check.call('ancestors: Array mixes Enumerable in before Object', CoreHierarchySigs.ancestors('Array') == %w[Array Enumerable Object Kernel BasicObject])
 check.call('superclasses_below: Integer up to Object', CoreHierarchySigs.superclasses_below('Integer', 'Object') == %w[Integer Numeric])

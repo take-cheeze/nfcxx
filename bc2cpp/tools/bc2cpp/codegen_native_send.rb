@@ -2,12 +2,18 @@
 
 # CodeGen: sends devirtualized to native primitives.
 
+require_relative 'native_direct'
+
 class CodeGen
-  # Owner/class pairs for frame-independent wrapper bodies that mirror these
-  # mruby-rgss registrations. Keep exact owners here: NATIVE_SRCS records the
-  # method name globally, while the runtime class guard selects the owner.
-  NATIVE_WRAPPER_DIRECT_OWNERS = {
-    'bitmap=' => %w[RGSS::Sprite],
+  # Owners of the wrapper tables below come from NativeDirect::ENTRIES (the
+  # generated native_direct_table.rb). NATIVE_WRAPPER_OWNER_ORDER only fixes the
+  # order their arms are emitted in: an owner it lists keeps its place, and an
+  # owner the generated table adds follows them. Frame-independent wrapper
+  # bodies mirror these mruby-rgss registrations; the runtime class guard
+  # selects the owner, since NATIVE_SRCS records the method name globally.
+  # `bitmap=` is not listed: NativeDirect::ENTRIES gives it the same entry
+  # point, and the generic NATIVE_DIRECT arms (codegen_native_direct.rb) emit it.
+  NATIVE_WRAPPER_OWNER_ORDER = {
     'clear' => %w[RGSS::Bitmap],
     'rect' => %w[RGSS::Bitmap RGSS::Viewport],
     'fill_rect' => %w[RGSS::Bitmap],
@@ -34,39 +40,35 @@ class CodeGen
     'opacity=' => %w[RGSS::Sprite]
   }.freeze
 
-  NATIVE_WRAPPER_ZERO_ARG_DIRECT = {
-    'clear' => { 'RGSS::Bitmap' => 'bitmap_clear_direct' },
-    'rect' => { 'RGSS::Bitmap' => 'bitmap_rect_direct', 'RGSS::Viewport' => 'viewport_rect_direct' },
-    'width' => { 'RGSS::Bitmap' => 'bitmap_width_direct', 'RGSS::Rect' => 'rect_width_direct' },
-    'height' => { 'RGSS::Bitmap' => 'bitmap_height_direct', 'RGSS::Rect' => 'rect_height_direct' },
-    'x' => { 'RGSS::Rect' => 'rect_x_direct' },
-    'y' => { 'RGSS::Rect' => 'rect_y_direct' },
-    'red' => { 'RGSS::Color' => 'color_red_direct', 'RGSS::Tone' => 'tone_red_direct' },
-    'green' => { 'RGSS::Color' => 'color_green_direct', 'RGSS::Tone' => 'tone_green_direct' },
-    'blue' => { 'RGSS::Color' => 'color_blue_direct', 'RGSS::Tone' => 'tone_blue_direct' },
-    'alpha' => { 'RGSS::Color' => 'color_alpha_direct' },
-    'gray' => { 'RGSS::Tone' => 'tone_gray_direct' },
-    'disposed?' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window]
-      .to_h { |owner| [owner, 'disposed_direct'] },
-    'visible' => %w[RGSS::Sprite RGSS::Viewport RGSS::Plane].to_h { |owner| [owner, 'visible_direct'] },
-    'update' => {
-      'RGSS::Sprite' => 'sprite_update_direct',
-      'RGSS::Viewport' => 'viewport_update_direct',
-      'RGSS::Window' => 'window_update_direct'
-    }
-  }.freeze
+  # Multi-arity wrappers have no entry in the generated table; their owners stay as listed above.
+  NATIVE_WRAPPER_MULTI_ARITY = %w[fill_rect blt stretch_blt draw_text copy_blt text_size].freeze
 
-  NATIVE_WRAPPER_CLASS_ACCESSORS = {
-    'RGSS::Rect' => 'native_rect_class',
-    'RGSS::Color' => 'native_color_class',
-    'RGSS::Tone' => 'native_tone_class',
-    'RGSS::Bitmap' => 'native_bitmap_class',
-    'RGSS::Sprite' => 'native_sprite_class',
-    'RGSS::Viewport' => 'native_viewport_class',
-    'RGSS::Plane' => 'native_plane_class',
-    'RGSS::Tilemap' => 'native_tilemap_class',
-    'RGSS::Window' => 'native_window_class'
-  }.freeze
+  # The generated owners of a name, in `order` first, then the owners only the generated table lists.
+  def self.wrapper_owners(order, entries)
+    (order & entries.keys) + (entries.keys - order)
+  end
+
+  NATIVE_WRAPPER_DIRECT_OWNERS = NATIVE_WRAPPER_OWNER_ORDER.to_h do |name, order|
+    next [name, order] if NATIVE_WRAPPER_MULTI_ARITY.include?(name)
+
+    [name, wrapper_owners(order, NativeDirect::ENTRIES.fetch(name))]
+  end.freeze
+
+  # Zero-argument wrappers: the generated entries whose argument kinds are empty.
+  NATIVE_WRAPPER_ZERO_ARG_DIRECT = %w[clear rect width height x y red green blue alpha gray disposed? visible update]
+    .to_h do |name|
+      entries = NativeDirect::ENTRIES.fetch(name).select { |_owner, entry| entry.kinds.empty? }
+      owners = wrapper_owners(NATIVE_WRAPPER_OWNER_ORDER.fetch(name), entries)
+      [name, owners.to_h { |owner| [owner, entries.fetch(owner).function] }]
+    end.freeze
+
+  # Each wrapper class's accessor is native_<last segment, snake_case>_class (include/rgss_construct.hxx).
+  # RGSS::Table has a native_table_class accessor too, but it has no wrapper here and stays out.
+  NATIVE_WRAPPER_CLASS_ACCESSORS = %w[RGSS::Rect RGSS::Color RGSS::Tone RGSS::Bitmap RGSS::Sprite
+                                      RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window].to_h do |klass|
+    snake = klass.delete_prefix('RGSS::').gsub(/(?<!\A)([A-Z])/, '_\1').downcase
+    [klass, "native_#{snake}_class"]
+  end.freeze
 
   # LITERAL_EQQ_SUPPORT soundness gate, re-checked against this run's @registry:
   # both `#==` and `#===` must be MONO native. `LITERAL === arg` must reach

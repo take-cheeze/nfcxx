@@ -548,7 +548,7 @@ class CodeGen
     out = String.new
     out << "  {\n"
     out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
-    out << "    mrb_value bc2cpp_collect_acc_#{addr} = mrb_ary_new(M);\n" if %w[map select reject flat_map filter_map].include?(meth)
+    out << "    mrb_value bc2cpp_collect_acc_#{addr} = mrb_ary_new(M);\n" if %w[map select reject filter_map].include?(meth)
     out << "    mrb_value bc2cpp_collect_found_#{addr} = mrb_nil_value();\n" if meth == 'find'
     # each_with_index has no final assignment to skip, but a `break` in its block still sets the flag.
     out << "    mrb_bool bc2cpp_collect_broke_#{addr} = FALSE;\n" if meth != 'each_with_index' || body.include?("bc2cpp_collect_broke_#{addr}")
@@ -564,23 +564,6 @@ class CodeGen
     case meth
     when 'map'
       out << "      mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
-    when 'flat_map'
-      # INTERP_UNLOCK: mruby's flat_map (mruby-enum-ext enum.rb) pushes a yielded
-      # value whole unless it responds to `each`, else pushes its elements (one
-      # level). The same respond_to? test is used, but expansion goes through
-      # RARRAY_LEN only after an mrb_array_p tripwire: a Hash/Range yielder responds
-      # to `each` without being an Array, and RARRAY_LEN on it would misread memory.
-      # So yielding a non-Array each-responder raises here where the VM would
-      # expand it: a deliberate narrowing (the game's flat_map blocks yield Arrays).
-      out << "      if (mrb_test(mrb_funcall(M, #{result_var}, \"respond_to?\", 1, mrb_symbol_value(mrb_intern_cstr(M, \"each\"))))) {\n"
-      out << "      if (!mrb_array_p(#{result_var})) { #{inline_raise('TypeError', 'flat_map yielded non-Array')} }\n"
-      out << "      mrb_int bc2cpp_collect_fm_n_#{addr} = RARRAY_LEN(#{result_var});\n"
-      out << "      for (mrb_int bc2cpp_collect_fm_i_#{addr} = 0; bc2cpp_collect_fm_i_#{addr} < bc2cpp_collect_fm_n_#{addr}; ++bc2cpp_collect_fm_i_#{addr}) {\n"
-      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, bc2cpp_ary_entry(M, #{result_var}, bc2cpp_collect_fm_i_#{addr}));\n"
-      out << "      }\n"
-      out << "      } else {\n"
-      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
-      out << "      }\n"
     when 'select'
       out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, r#{param_reg});\n"
     when 'reject'
@@ -602,7 +585,7 @@ class CodeGen
     if meth != 'each_with_index'
       out << "    if (!bc2cpp_collect_broke_#{addr}) {\n"
       case meth
-      when 'map', 'select', 'reject', 'flat_map', 'filter_map'
+      when 'map', 'select', 'reject', 'filter_map'
         out << "    r#{dest_reg} = bc2cpp_collect_acc_#{addr};\n"
       when 'find'
         out << "    r#{dest_reg} = bc2cpp_collect_found_#{addr};\n"
@@ -1023,12 +1006,9 @@ class CodeGen
     out
   end
 
-  # SORT_BLOCK_SUPPORT: the inlined replacement for a sort-family region (nil if
+  # SORT_BLOCK_SUPPORT: the inlined replacement for a sort_by region (nil if
   # not clean).
-  # - `sort { |a, b| ... }`: returns nil (stays interpreted): the comparator runs
-  #   inside the native sort, which cannot be reproduced as a loop. Bare `sort`
-  #   is an ordinary SEND.
-  # - `sort_by`/`uniq` with a key block: a Schwartzian transform:
+  # - `sort_by` with a key block: a Schwartzian transform:
   #     1. keys[i] = block(elem[i]) (compile_collect_body_insn: `next` collects
   #        nil, `break` overrides via the broke flag);
   #     2. pairs[i] = [keys[i], i, elem[i]]; the index keeps the sort stable
@@ -1036,12 +1016,9 @@ class CodeGen
   #     3. sort pairs by (key, index) with mrb_cmp (public; -2 when
   #        incomparable, like the native sort);
   #     4. dest[i] = pairs[i][2].
-  #   `uniq` keeps the first element per key (drop adjacent equal keys,
-  #   mrb_cmp == 0, after the stable sort). All temporaries are fresh arrays;
+  #   All temporaries are fresh arrays;
   #   the receiver is only read.
   def emit_sort_inline(region, irep, d)
-    return nil if region[:method_name] == 'sort'
-
     block_irep = region[:block_irep]
     offset = irep.nregs
     dest_reg = region[:dest_reg]
@@ -1052,7 +1029,7 @@ class CodeGen
     iter_label = "Lbc2cpp_sort_iter_#{addr}"
     break_label = "Lbc2cpp_sort_end_#{addr}"
     result_var = "bc2cpp_sort_v_#{addr}"
-    # ELEMENT_CLASS_SUPPORT: a sort_by/uniq key block takes the element as R1.
+    # ELEMENT_CLASS_SUPPORT: a sort_by key block takes the element as R1.
     body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
                                                                   broke_flag: "bc2cpp_sort_broke_#{addr}", elem_reg: '1')
     return nil unless body
@@ -1112,22 +1089,9 @@ class CodeGen
     out << "      mrb_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_tmp_#{addr});\n"
     out << "    }\n"
     out << "    r#{dest_reg} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
-    if meth == 'uniq'
-      out << "    mrb_value bc2cpp_sort_lastk_#{addr} = mrb_nil_value();\n"
-      out << "    mrb_bool bc2cpp_sort_havek_#{addr} = FALSE;\n"
-      out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
-      out << "      mrb_value bc2cpp_sort_pu_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr});\n"
-      out << "      mrb_value bc2cpp_sort_ku_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pu_#{addr}, 0);\n"
-      out << "      mrb_int bc2cpp_sort_eq_#{addr} = (bc2cpp_sort_havek_#{addr} && mrb_cmp(M, bc2cpp_sort_ku_#{addr}, bc2cpp_sort_lastk_#{addr}) == 0) ? 1 : 0;\n"
-      out << "      if (!bc2cpp_sort_eq_#{addr}) { mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_sort_pu_#{addr}, 2)); }\n"
-      out << "      bc2cpp_sort_lastk_#{addr} = bc2cpp_sort_ku_#{addr};\n"
-      out << "      bc2cpp_sort_havek_#{addr} = TRUE;\n"
-      out << "    }\n"
-    else
-      out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
-      out << "      mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
-      out << "    }\n"
-    end
+    out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
+    out << "      mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
+    out << "    }\n"
     out << "    }\n"
     out << "  }\n"
     out

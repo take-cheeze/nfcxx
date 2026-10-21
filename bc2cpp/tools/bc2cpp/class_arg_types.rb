@@ -44,9 +44,8 @@ class ClassArgTypes
     #     per-owner maps are `Hash.new { |h, k| h[k] = {} }`.
     #   * `registry` -- the chained-accessor arm does `registry[name]&.find`, and
     #     a Hash default that INSERTS on a miss turns that read into a mutation.
-    #     scripts/bc2cpp/never_called_registrations_check.rb walks the registry
-    #     while calling this, and hit "can't add a new key into hash during
-    #     iteration" from registry.rb:95.
+    #     a walk of the registry while calling this raises "can't add a new key
+    #     into hash during iteration" (registry.rb:95).
     #
     # Both are copies, so this analysis never mutates a table the caller owns.
     layout_snapshot = class_layout.each_with_object({}) do |(owner, ivars), out|

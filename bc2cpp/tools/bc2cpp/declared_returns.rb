@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'native_sigs'
+require_relative 'rbs_parse_memo'
 
 # DECLARED_RETURN_CHECK (docs/adr/0455): the RBS return declarations a body is checked against.
 #
@@ -175,7 +176,7 @@ module DeclaredReturns
       end
     end
     Array(files).each do |file|
-      _buf, _dirs, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: file, content: File.read(file)))
+      decls = RbsParseMemo.decls(file, File.read(file))
       walk.call(decls, [])
     rescue RBS::ParsingError
       next # RbsSignatures.load reports it (TC1002)

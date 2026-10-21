@@ -95,21 +95,6 @@ module CoreExactDirect
     core_exact_direct_line(d, recv, name, argv, dynamic_dispatch_line(d, recv, name, argv))
   end
 
-  # compile_core_min_max with the receiver proof of this site, which compile_send builds only after it.
-  def core_min_max_with_site(insn, name, n, d, recv, argv, irep, site_idx, reg, offset, self_implicit)
-    site = core_extend_enabled? && !self_implicit && irep &&
-           exact_core_site(irep, site_idx, unshift_proof_reg(reg, offset), argv, offset, nil, recv: recv, name: name, dest: d)
-    return compile_core_min_max(insn, name, n, d, recv, argv) unless site
-
-    with_exact_core_site(site) { compile_core_min_max(insn, name, n, d, recv, argv) }
-  end
-
-  # The by-name send of an inline fast path's else arm, or the direct call when the receiver is proven.
-  def core_exact_else(d, recv, name, argv)
-    plain = dynamic_dispatch_line(d, recv, name, argv)
-    (core_exact_direct_line(d, recv, name, argv, plain) || plain).chomp
-  end
-
   # The compiled core definition a call to `name` with `arity` arguments and no block reaches on
   # an exact `klass`, or nil when anything else could answer or the body cannot run outside the
   # entry's guard.

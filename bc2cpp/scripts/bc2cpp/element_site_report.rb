@@ -87,8 +87,8 @@ ivar_sites.sort_by { |_, list| -list.size }.first(25).each do |name, list|
   puts format('%5<n>d  @%-20<name>s creations %-40<c>s writes %<w>s', n: list.size, name: name, c: show.(creations[name]), w: show.(writes[name]))
 end
 
-# `[a, b].max` / `.min`: the CORE_MIN_MAX inline keeps its by-name send for non-numeric elements; it can
-# only go when every element is proven Integer (a Float may be NaN).
+# `[a, b].max` / `.min`: these sends are the ordinary dispatch (no core inline). The report still sorts them by
+# whether every element is proven Integer (a Float may be NaN), as the input to a future inline.
 extremes = rows.select { |row| row[0] == 'extreme' }
 literal = extremes.select { |row| row[5] == 'literal' }
 all_integer = literal.select { |row| row[6].split(',').all?('INT') }

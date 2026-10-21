@@ -231,7 +231,7 @@ Dir.mktmpdir('type-check-run') do |dir|
     Dir.mkdir(work)
     result = TypeCheckRun.run(root: root, mrbc: File.expand_path(ENV.fetch('MRBC')), workdir: work,
                               sources: [source], sig_dirs: [sig], display_root: dir,
-                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode, 'BC2CPP_IR_PREPARED_CONTRACTS' => mode, 'BC2CPP_CALL_LOOKUP_INDEX' => mode })
+                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode, 'BC2CPP_IR_PREPARED_CONTRACTS' => mode, 'BC2CPP_CALL_LOOKUP_INDEX' => mode, 'BC2CPP_CLOSED_OPACITY_INDEX' => mode, 'BC2CPP_NUMERIC_LOAD_COPY_ELISION' => mode })
     [JSON.parse(File.read(result.facts_path)), File.read(result.rows_path), work]
   end
   baseline, optimized = results

@@ -15,17 +15,16 @@ require_relative 'ruby_parse_cache'
 # all MONO/POLY soundness needs, and calling a native function directly would
 # skip the ci frame mrb_funcall sets up for mrb_get_args.
 # ---------------------------------------------------------------------------
-# Inverse of mruby's presym OPERATORS table (lib/mruby/presym.rb):
-# MRB_OPSYM(cmp) is how C source spells `<=>`.
-OPSYM_TO_RUBY = {
-  'not' => '!', 'mod' => '%', 'and' => '&', 'mul' => '*', 'add' => '+',
-  'sub' => '-', 'div' => '/', 'lt' => '<', 'gt' => '>', 'xor' => '^',
-  'tick' => '`', 'or' => '|', 'neg' => '~', 'neq' => '!=', 'nmatch' => '!~',
-  'andand' => '&&', 'pow' => '**', 'plus' => '+@', 'minus' => '-@',
-  'lshift' => '<<', 'le' => '<=', 'eq' => '==', 'match' => '=~',
-  'ge' => '>=', 'rshift' => '>>', 'aref' => '[]', 'oror' => '||',
-  'cmp' => '<=>', 'eqq' => '===', 'aset' => '[]=',
-}.freeze
+# MRB_OPSYM(cmp) is how C source spells `<=>`. Inverted from mruby's own presym
+# table so the spellings track the vendored mruby; a missing submodule fails
+# here rather than falling back to a copied table (ruby-checks checks it out).
+PRESYM_RB = File.expand_path('../../3rd/mruby/lib/mruby/presym.rb', __dir__)
+raise "bc2cpp: #{PRESYM_RB} is missing; run `git submodule update --init 3rd/mruby`" unless File.file?(PRESYM_RB)
+
+require PRESYM_RB
+OPSYM_TO_RUBY = MRuby::Presym::OPERATORS.to_h { |ruby, sym| [sym, ruby] }.freeze
+# A duplicate symbol value would make the inversion silently drop an operator.
+raise 'bc2cpp: mruby presym OPERATORS values are not unique' unless OPSYM_TO_RUBY.size == MRuby::Presym::OPERATORS.size
 
 # mruby core registers most methods through ROM tables rather than literal
 # string names (src/symbol.c):

@@ -135,7 +135,9 @@ class CodeGen
   # The pooled class set of a GETCONST/GETMCNST: the join of what every definition it reads stores
   # (ADR 0301, scoped by ADR 0423). A name the numeric proof poisons has no pool; a read with no
   # proven definition falls back to the integer-constant proof, else OTHER.
-  CORE_CONTAINER_BITS = { Array: NumericFlow::ARR, Hash: NumericFlow::HSH, String: NumericFlow::STR }.freeze
+  # Keyed by class symbol, as constant_value_classes reports them.
+  CORE_CONTAINER_BITS = NumericFlow.class_bits('Array', 'Hash', 'String')
+                                   .to_h { |bit, klass| [klass.to_sym, bit] }.freeze
 
   def class_pool_const_mask(insn)
     name = insn.const_name
@@ -349,9 +351,12 @@ class CodeGen
     parts = []
     parts << 'CHECKED' if mask.anybits?(NumericFlow::CHECKED)
     parts << numeric_mask_name(mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)) if (mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)).nonzero?
-    (@numeric_class_bits || {}).each { |klass, bit| parts << klass if mask.anybits?(bit) }
+    # numeric_mask_name may register Symbol; take the append-only snapshot afterwards (ADR 0531).
+    native_result_class_bits.each do |klass, _bit, position|
+      parts << klass if position >= NumericFlow::CLASS_BIT_BASE && mask[position] == 1
+    end
     # LCF kinds (EXACT_LCF_ROWS) ride in this flow too.
-    @lcf_rows&.kinds&.each { |k| parts << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
+    @lcf_rows&.kinds&.each { |k| parts << @lcf_rows.name(k.bit) if mask[k.bit.bit_length - 1] == 1 }
     parts.empty? ? 'NONE' : parts.join('|')
   end
 end

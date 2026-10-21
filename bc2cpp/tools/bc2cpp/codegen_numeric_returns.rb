@@ -224,8 +224,7 @@ class CodeGen
   end
 
   # Class each receiver bit stands for, when its core body is what a send runs.
-  NUMERIC_SEND_OWNERS = { NumericFlow::ARR => 'Array', NumericFlow::HSH => 'Hash', NumericFlow::STR => 'String',
-                          NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float' }.freeze
+  NUMERIC_SEND_OWNERS = NumericFlow.class_bits('Array', 'Hash', 'String', 'Integer', 'Float')
   # Zero-argument sends on a numeric receiver whose result class is fixed.
   NUMERIC_TO_INT_SENDS = %w[to_i to_int floor ceil round truncate].freeze
   # Integer bit operators: an Integer for INT op INT (BITOP_RESULTS, ADR 0431). `<<` and `>>` are
@@ -282,6 +281,8 @@ class CodeGen
     return other unless builtin_class_send_safe?(name, owners)
 
     if bit.anybits?(NumericFlow::CONTAINERS)
+      # `count` stays name-keyed: Enumerable#count's INT result is not inferred from its body, because the
+      # numeric path does not reach the core-Ruby body analysis and the block-written accumulator is opaque.
       counted = name == 'count' ? bit != NumericFlow::STR : %w[size length].include?(name)
       return argc == 0 && counted ? NumericFlow::INT : other
     end

@@ -4,6 +4,7 @@ require 'prism'
 require_relative 'native_direct'
 require_relative 'native_owner_map'
 require_relative 'native_core_result_sigs'
+require_relative 'ruby_parse_cache'
 
 # NativeConstructorSigs: the constructor overloads of sig/bc2cpp/declarations.rbs#rgss_constructors (OVERLOADED_CONSTRUCT,
 # docs/adr/0468), each audited against the source of the initialize it describes.
@@ -32,6 +33,41 @@ module NativeConstructorSigs
       raise "bc2cpp: #{path}: constructor overloads disagree with their source:\n  #{problems.join("\n  ")}" unless problems.empty?
 
       declared
+    end
+  end
+
+  # NATIVE_CONSTRUCT_TARGETS rows (dispatch_targets.rb), keyed by the class's last segment, from the audited overloads.
+  # A row comes from a `bc2cpp:direct` overload whose every argument is a positional read (`int` / `float`, with an
+  # optional `=K`). codegen_send.rb's direct arm calls `fn` with exactly the arguments the call passes and fills no
+  # defaults, so a literal-argument form (Rect's empty form) or a count the function does not take is left to
+  # OVERLOADED_CONSTRUCT, which does fill them. Several accepted counts can come out of that rule only if the
+  # direct overloads name different counts; each class's direct overloads must agree on one function and one type.
+  DIRECT_READ = /\A(int|float)(?:=-?\d+(?:\.\d+)?)?\z/
+
+  def construct_targets(declared = table, root: ROOT)
+    raise "bc2cpp: #{PATH}: rgss_constructors declares no class (the section is missing or empty)" if declared.empty?
+
+    declared.each_with_object({}) do |(klass, overloads), rows|
+      direct = overloads.select do |o|
+        o[:path].first == :direct && o[:path][2].all? { |a| a.match?(DIRECT_READ) }
+      end
+      next if direct.empty?
+
+      fns = direct.map { |o| o[:path][1] }.uniq
+      types = direct.flat_map { |o| o[:path][2].map { |a| a[DIRECT_READ, 1] } }.uniq
+      counts = direct.map { |o| o[:path][2].size }.uniq.sort
+      raise "bc2cpp: #{PATH}: #{klass} direct overloads name #{fns.inspect}, one function is required" unless fns.size == 1
+      raise "bc2cpp: #{PATH}: #{klass} direct overloads read #{types.inspect}, one type is required" unless types.size == 1
+
+      leaf = klass.split('::').last
+      class_fn = "rgss::native_#{leaf.downcase}_class"
+      header = File.read(File.join(root, 'include/rgss_construct.hxx'))
+      raise "bc2cpp: #{PATH}: #{class_fn} is not declared in include/rgss_construct.hxx" unless header.include?("RClass* native_#{leaf.downcase}_class(void);")
+      raise "bc2cpp: #{PATH}: #{fns.first} is not declared in include/rgss_construct.hxx" unless header.match?(/\b#{Regexp.escape(fns.first.delete_prefix('rgss::'))}\(/)
+      raise "bc2cpp: #{PATH}: two classes map to the row key #{leaf}" if rows.key?(leaf)
+
+      rows[leaf] = { fn: fns.first, class_fn: class_fn, class_owner: klass,
+                     arity: counts.size == 1 ? counts.first : counts, arg_type: types.first.to_sym }
     end
   end
 
@@ -212,7 +248,7 @@ module NativeConstructorSigs
   def ruby_initialize(klass, sources, ruby)
     name = klass.split('::').last
     ruby.each do |path|
-      found = find_initialize(Prism.parse(File.read(path)).value, name)
+      found = find_initialize(RubyParseCache.parse(File.read(path), path).value, name)
       next unless found
 
       params = found.parameters

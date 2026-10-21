@@ -49,6 +49,7 @@ require_relative 'predicate_returns'
 require_relative 'conversion_returns'
 require_relative 'hot_methods'
 require_relative 'core_methods'
+require_relative 'core_fact_sigs'
 require_relative 'enumerator_model'
 
 require_relative 'integer_constants'
@@ -112,6 +113,8 @@ require_relative 'block_self_world'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_class_narrowing'
+require_relative 'codegen_decided_branch'
+require_relative 'codegen_arm_prune'
 require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
 require_relative 'codegen_setter_pools'
@@ -121,7 +124,6 @@ require_relative 'codegen_checked_send'
 require_relative 'lexical_consts'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_numeric_slow'
-require_relative 'codegen_numeric_slow_misc'
 require_relative 'codegen_numeric_slow_zero'
 require_relative 'codegen_index_closed'
 require_relative 'codegen_integer_tag_else'
@@ -767,11 +769,8 @@ if $PROGRAM_NAME == __FILE__
   # sets this to skip the allowlist; drop_unsafe_embeddings' other checks still
   # run.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  # CORE_MIXINS: the modelled core methods this build's core sources still match.
-  CodeGen.core_methods = CoreMixins.verified(foreign_ruby_srcs, native_name_sources)
   CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs, native_name_sources)
   warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
-  warn "== core Ruby methods verified against the build's sources (CORE_MIXINS): #{CodeGen.core_methods.to_a.sort.join(', ')} =="
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},
                                     Set.new, foreign_methods, nil, nil,
@@ -1223,11 +1222,10 @@ if $PROGRAM_NAME == __FILE__
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
       integer_constants: integer_constants, element_site_classes: element_site_classes,
       hash_element_site_classes: hash_element_site_classes, integer_constant_ranges: integer_constant_ranges,
-      # Report only (CLASS_INTEGER_PROOF): codegen never reads it, so a build without BC2CPP_TYPE_FACTS is unchanged.
+      # Report only (CLASS_INTEGER_PROOF, ADR 0501 stage 4): codegen never reads it, so a build without BC2CPP_TYPE_FACTS is
+      # unchanged. IntegerConstants.class_admitted is the oracle the constant typing check compares against.
       integer_class_constants: if closed_world.constants_static?
-                                 IntegerConstants.class_admitted(ireps, (native_paths + outside_native).uniq,
-                                                                 (foreign_ruby_srcs + outside_ruby).uniq,
-                                                                 operators_safe: operators_safe)
+                                 constant_facts.integer_class_names
                                else
                                  Set.new
                                end
@@ -1489,7 +1487,15 @@ if $PROGRAM_NAME == __FILE__
     static bool bc2cpp_cfunc_proc_call_p(mrb_state* M, mrb_value recv, mrb_sym mid) {
       if (!MRB_PROC_CFUNC_P(mrb_proc_ptr(recv)) || mrb_obj_ptr(recv)->c != M->proc_class) return false;
       const char* name = mrb_sym_name(M, mid);
-      if (!name || !(!strcmp(name, "call") || !strcmp(name, "yield") || !strcmp(name, "[]") || !strcmp(name, "==="))) return false;
+  CPP
+  # The names are read from the RBS table the codegen also uses (CoreFactSigs.proc_call_names), so they cannot
+  # drift. Only `"` and `\` need escaping in a C string literal; `[]` and `===` are emitted as they are.
+  proc_call_strcmp_tests = CoreFactSigs.proc_call_names.map do |proc_call_name|
+    c_name = proc_call_name.gsub(/["\\]/) { |ch| "\\#{ch}" }
+    %(!strcmp(name, "#{c_name}"))
+  end
+  puts "  if (!name || !(#{proc_call_strcmp_tests.join(' || ')})) return false;"
+  puts <<~'CPP'
       // Only where the name is Proc's own bytecode method: without mruby-proc-ext
       // `===` is Object's, and `[]` may be missing altogether.
       struct RClass* found = M->proc_class;
