@@ -10,7 +10,7 @@ require_relative 'codegen_decided_branch'
 # instruction reachable code can enter as dead.
 #
 # Stage A (always on) computes the set and counts it into CodeGen.arm_prune_stats; the C++ does not change.
-# Stage B (BC2CPP_PRUNE_ARMS=1) drops the text of those instructions in a method that passes the checks in
+# Stage B (on by default; BC2CPP_PRUNE_ARMS=0 turns it off) drops the text of those instructions in a method that passes the checks in
 # CodeGen#arm_prune_resolve, and keeps the whole method otherwise. CodeGen.arm_prune_refusals counts why.
 #
 # Only a method's own body is analysed: a block body's registers are offset into its enclosing frame, so its reachability
@@ -30,7 +30,7 @@ class CodeGen
   end
 
   def arm_prune_stage_b_enabled?
-    ENV['BC2CPP_PRUNE_ARMS'] == '1'
+    ENV['BC2CPP_PRUNE_ARMS'] != '0'
   end
 
   # The indices of the instructions of +irep+ (its own top-level body) that no edge reaches, or nil when the graph cannot be
