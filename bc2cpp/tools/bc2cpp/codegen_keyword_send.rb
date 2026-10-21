@@ -678,15 +678,15 @@ class CodeGen
       return <<~CPP
         // SPLAT n=* :call in a core body: a Proc is yielded to (CORE_PROC_CALL)
         if (mrb_proc_p(#{recv}) && mrb_class(M, #{recv}) == M->proc_class) {
-          r#{d} = bc2cpp_yield_argv(M, #{recv}, RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+          r#{d} = bc2cpp_yield_argv(M, #{recv}, ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));
         } else {
-          r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "call"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+          r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "call"), ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));
         }
       CPP
     end
     <<~CPP
       // SPLAT n=* :#{name} runtime-sized (not a literal), dynamic dispatch via mrb_funcall_argv
-      r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "#{name}"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+      r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "#{name}"), ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));
     CPP
   end
 

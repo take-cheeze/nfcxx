@@ -1180,7 +1180,7 @@ class CodeGen
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: R(dest+1) is a real Array, so
       # RARRAY_LEN/RARRAY_PTR go straight into mrb_funcall_with_block.
       out << "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-             "RARRAY_LEN(r#{region[:argv_reg]}), RARRAY_PTR(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
+             "ary_size(r#{region[:argv_reg]}), ary_items(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
     else
       argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
       if argv.empty?
