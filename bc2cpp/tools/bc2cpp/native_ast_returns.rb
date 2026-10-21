@@ -18,6 +18,10 @@ module NativeAstReturns
   UNKNOWN = :unknown
   # Calls that return their value argument unchanged; `mrb_str_new_frozen` is mrb_obj_freeze over mrb_str_new.
   IDENTITY_CALLS = %w[mrb_obj_freeze].freeze
+  # Helpers whose result class is a contract of mruby's source rather than a proof here. class_name_str (class.c:391-401)
+  # returns the class path as a String, and builds the "#<Class:...>" String itself when mrb_class_path is nil; the
+  # other mrb_class_path branches (mrb_sym_str, mrb_str_dup) are Strings. So Module#to_s is a String.
+  CONTRACT_KINDS = { 'class_name_str' => 'String' }.freeze
 
   module_function
 
@@ -176,6 +180,8 @@ module NativeAstReturns
         NativeAstReturns.join([value_kind(yes, body, seen), value_kind(no, body, seen)])
       when 'CallExpr'
         callee = callee_name(expr) or return nil
+        return CONTRACT_KINDS[callee] if CONTRACT_KINDS.key?(callee)
+
         # An identity call returns its value argument (mrb_obj_freeze(mrb, obj) is obj, frozen): the kind is the value's.
         # The CallExpr's children are the callee, then the arguments: mrb_obj_freeze(mrb, obj) has the value at [2].
         return value_kind(expr['inner'][2], body, seen) if IDENTITY_CALLS.include?(callee) && expr['inner'][2]

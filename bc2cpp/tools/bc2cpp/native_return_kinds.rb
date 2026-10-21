@@ -15,7 +15,9 @@ module NativeReturnKinds
     Entry.new(/\bmrb_(?:true_value|false_value|bool_value)\s*\(/, 'bool'),
     Entry.new(/\bmrb_(?:fixnum_value|int_value)\s*\(/, 'Integer'),
     # Bignum constructors (MRB_USE_BIGINT): a bignum is an Integer instance.
-    Entry.new(/\bmrb_bint_new\w*\s*\(/, 'Integer'),
+    # Bignum operations that return a value: each result is an Integer (a bignum or a fixnum). to_s (a String) and
+    # divmod (an Array) are left out, and so are the helpers that return C scalars.
+    Entry.new(/\bmrb_bint_(?:new_\w+|sqrt|add|sub|mul|div|mod|rem|pow|gcd|lcm|neg|abs|and|or|xor|lshift|rshift|copy|add_n|sub_n|mul_n|add_ii|sub_ii|mul_ii|rev|reduce|powm)\s*\(/, 'Integer'),
     Entry.new(/\bmrb_float_value\s*\(/, 'Float'),
     Entry.new(/\bmrb_(?:str_new|str_new_cstr|str_new_static|str_buf_new|str_dup|str_cat|str_substr|str_resize|str_plus|format)\w*\s*\(/,
               'String'),

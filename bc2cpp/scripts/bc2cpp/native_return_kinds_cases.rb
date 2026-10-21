@@ -13,6 +13,8 @@ module NativeReturnKindsCases
     check.call('a fixnum return is Integer', ret('{ return mrb_fixnum_value(x); }') == 'Integer')
     check.call('a str_new return is String', ret('{ return mrb_str_new_cstr(M, s); }') == 'String')
     check.call('a bignum constructor return is Integer', ret('{ return mrb_bint_new_uint64(M, v); }') == 'Integer')
+    check.call('a bignum sqrt return is Integer', ret('{ return mrb_bint_sqrt(M, v); }') == 'Integer')
+    check.call('a bignum to_s return is not classed', ret('{ return mrb_bint_to_s(M, v, 10); }') != 'Integer')
     check.call('a sym_str return is String', ret('{ return mrb_sym_str(M, sym); }') == 'String')
     check.call('an obj_as_string return is String', ret('{ return mrb_obj_as_string(M, obj); }') == 'String')
     check.call('a mrb_format return is String', ret('{ return mrb_format(M, "%d", x); }') == 'String')

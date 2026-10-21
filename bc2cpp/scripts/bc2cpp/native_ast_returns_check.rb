@@ -43,13 +43,15 @@ FIXTURE = <<~CPP
   mrb_value guard_fn(struct mrb_state *mrb, mrb_value self) { mrb_value m = get_thing(mrb); if (!(m.v == MRB_TT_STRING)) { return mrb_str_new_cstr(mrb, 0); } return m; }
   mrb_value guard_late_fn(struct mrb_state *mrb, mrb_value self) { mrb_value m = get_thing(mrb); if (!(m.v == MRB_TT_STRING)) { return mrb_str_new_cstr(mrb, 0); } m = get_thing(mrb); return m; }
   mrb_value pre_fn(struct mrb_state *mrb, mrb_value self) { mrb_value m = get_thing(mrb); if (m.v == 1) { return m; } if (!(m.v == MRB_TT_STRING)) { return mrb_str_new_cstr(mrb, 0); } return m; }
+  mrb_value class_name_str(struct mrb_state *mrb, mrb_value c);
+  mrb_value named_fn(struct mrb_state *mrb, mrb_value self) { return class_name_str(mrb, self); }
   mrb_value frozen_fn(struct mrb_state *mrb, mrb_value self) { return mrb_obj_freeze(mrb, mrb_str_new(mrb, 0, 0)); }
 CPP
 
 EXPECTED = {
   'int_fn' => 'Integer', 'self_fn' => 'self', 'local_fn' => 'Array', 'cond_fn' => 'Integer',
   'mixed_fn' => nil, 'call_fn' => 'Integer', 'rec_fn' => nil, 'frozen_fn' => 'String',
-  'guard_fn' => 'String', 'guard_late_fn' => nil, 'pre_fn' => nil
+  'guard_fn' => 'String', 'guard_late_fn' => nil, 'pre_fn' => nil, 'named_fn' => 'String'
 }.freeze
 
 failures = []
