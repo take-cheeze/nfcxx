@@ -8,7 +8,7 @@ require_relative 'numeric_flow'
 # Debug report (ADR 0331): with BC2CPP_RECEIVER_PROOF_REPORT=<path>, every engine explicit-receiver send whose
 # generated code holds a by-name line is written as one TSV row (the last compile of a site wins), with where its
 # receiver comes from and what would happen to the line if the receiver's class set were proven. It changes no
-# generated code; scripts/bc2cpp/receiver_proof_report.rb aggregates it.
+# generated code. The TSV is meant for offline aggregation.
 #
 # The what-if recompiles the one send (in a forked child, so the build is untouched) with the receiver forced to a
 # hypothetical class set and counts the by-name lines again, so "removed" is what the real consumers do with a
