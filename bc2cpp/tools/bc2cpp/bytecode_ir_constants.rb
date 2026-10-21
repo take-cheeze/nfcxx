@@ -141,7 +141,7 @@ module BytecodeIR
     def alternatives(irep, index, reg, policy, depth: 0)
       return nil if depth > 64
 
-      defs = BytecodeIR.for(irep).reaching_definitions(index, reg.to_s, origin_transfers: true)
+      defs = BytecodeIR.for(irep).reaching_definitions(index, reg.to_s, shared: true, origin_transfers: true)
       return nil unless defs && !defs.empty?
 
       nodes = defs.map do |definition|

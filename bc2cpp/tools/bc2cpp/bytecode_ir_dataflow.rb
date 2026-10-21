@@ -97,10 +97,12 @@ module BytecodeIR
     # +refusal+, when a Hash, receives `:cause` (the first reason the query
     # refused) and is otherwise not read: the answer is the same with or without it.
     #
+    # +shared+ lets read-only consumers borrow frozen cache entries. Fresh/uncacheable
+    # results retain the existing API; callers requesting sharing must not mutate any result.
     # +raiseif_nil+ (RETURN_SITES, ADR 0503): vm.c OP_RAISEIF falls through only when R(a) is nil, so a RAISEIF of
     # the register on a normal edge is itself its definition (the nil value), not a step over.
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
-                             through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false)
+                             through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false, shared: false)
       # Mutable opaque sets and refusal diagnostics belong to the caller; do not retain them.
       if refusal || (opaque_regs && !opaque_regs.frozen?)
         return compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
@@ -121,7 +123,11 @@ module BytecodeIR
 
         @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg.dup.freeze, d.built).freeze }&.freeze
       end
-      # Definitions have a mutable public API; each caller receives its own copies.
+      # Shared readers never mutate returned definitions; public callers keep fresh copies.
+      if shared
+        @share_reaching_definitions = ENV['BC2CPP_IR_SHARED_DEFINITIONS'] != '0' if @share_reaching_definitions.nil?
+        return @reaching_definitions_cache[key] if @share_reaching_definitions
+      end
       @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg.dup, d.built) }
     end
 
@@ -618,7 +624,7 @@ module BytecodeIR
   # Nil when the answer is not provable (a refusal, the method's entry value, or a definition whose instruction does
   # not write that register).
   def self.writers_reaching(irep, index, reg)
-    defs = reaching_definitions(irep, index, reg.to_s, origin_transfers: true)
+    defs = reaching_definitions(irep, index, reg.to_s, origin_transfers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.none?(&:entry?)
 
     defs.map do |definition|
@@ -641,7 +647,7 @@ module BytecodeIR
   # argument). A walk over the textually last writer answers for one arm of a join only; ask this for all of them.
   # Handler edges are crossed (through_handlers), so a read inside a rescue range is answered, not refused.
   def self.reaching_writer_indices(irep, index, reg)
-    defs = reaching_definitions(irep, index, reg, through_handlers: true)
+    defs = reaching_definitions(irep, index, reg, through_handlers: true, shared: true)
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     defs.map(&:index)

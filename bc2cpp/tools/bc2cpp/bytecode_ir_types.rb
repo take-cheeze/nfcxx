@@ -86,7 +86,7 @@ module BytecodeIR
       receiver = fact_at(index, reg, max_states: max_states)
       return nil unless receiver && receiver.classes == Set[:Array]
 
-      definitions = BytecodeIR.reaching_definitions(@irep, index, reg, origin_transfers: true, max_states: max_states)
+      definitions = BytecodeIR.reaching_definitions(@irep, index, reg, shared: true, origin_transfers: true, max_states: max_states)
       return nil unless definitions && !definitions.empty?
 
       elements = Set.new
@@ -144,7 +144,7 @@ module BytecodeIR
 
         # Inside a protected range the handler edges are followed instead of refused (RECORD_HASH_PROOF's mode).
         definitions = [false, true].lazy.filter_map do |through|
-          BytecodeIR.reaching_definitions(@irep, at, register, origin_transfers: true, through_handlers: through,
+          BytecodeIR.reaching_definitions(@irep, at, register, shared: true, origin_transfers: true, through_handlers: through,
                                                                 max_states: max_states)
         end.first
         return nil unless definitions && !definitions.empty?
@@ -221,7 +221,7 @@ module BytecodeIR
     end
 
     def compute_query(index, reg, use_declarations:, max_states:, refusal:)
-      definitions = BytecodeIR.reaching_definitions(@irep, index, reg, origin_transfers: true,
+      definitions = BytecodeIR.reaching_definitions(@irep, index, reg, shared: true, origin_transfers: true,
                                                     max_states: max_states, refusal: refusal)
       return nil unless definitions
       return unknown(refusal, :no_definition) if definitions.empty?
@@ -295,7 +295,7 @@ module BytecodeIR
     def lcf_row_field(definition, insn, register, max_states:, refusal:)
       key_register = insn.op == 'GETIDX0' ? nil : (insn.reg.to_i + 1)
       return nil unless key_register
-      key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, origin_transfers: true,
+      key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, shared: true, origin_transfers: true,
                                                  max_states: max_states, refusal: refusal)
       syms = key_defs&.map { |source| source.entry? ? nil : @irep.instructions[source.index] }
       unless syms && !syms.empty? && syms.all? { |producer| producer&.op == 'LOADSYM' }
@@ -329,7 +329,7 @@ module BytecodeIR
 
         contracts.merge(key.contracts)
       end
-      definitions = BytecodeIR.reaching_definitions(@irep, definition.index, register, origin_transfers: true,
+      definitions = BytecodeIR.reaching_definitions(@irep, definition.index, register, shared: true, origin_transfers: true,
                                                     max_states: max_states, refusal: refusal)
       return nil unless definitions && !definitions.empty?
 
