@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'numeric_flow'
 
 # DECIDED_BRANCH: a conditional jump whose tested register the NumericFlow state decides is emitted as an unconditional
@@ -26,6 +27,10 @@ class CodeGen
 
     mask = numeric_raw_mask(irep, idx, insn.reg.to_i, owner_def)
     return nil unless mask.is_a?(Integer) && mask.positive?
+    # A parameter's mask is built from the callers the flow sees, but a method installed by define_method is called by
+    # name, so an argument such as `x` in `{ |x| return n if x.nil? }` can be nil with no caller in view. Keep the test.
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
+    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     if insn.op == 'JMPNIL'
       return :taken if mask == NumericFlow::NIL
