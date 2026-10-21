@@ -24,6 +24,8 @@ module BaseSection
   TAGS = {
     'mruby-core' => 'base_mruby-core', 'mruby-dir' => 'base_dir', 'mruby-exit' => 'base_exit', 'mruby-fiber' => 'base_fiber', 'mruby-io' => 'base_io',
     'mruby-lcf' => 'base_lcf', 'mruby-marshal' => 'base_marshal', 'mruby-math' => 'base_math',
+    'mruby-array-ext' => 'base_array', 'mruby-enum-ext' => 'base_enum', 'mruby-hash-ext' => 'base_hash',
+    'mruby-range-ext' => 'base_range', 'mruby-rpgvx' => 'base_rpgvx', 'mruby-rpgxp' => 'base_rpgxp',
     'mruby-math-wio' => 'base_math-wio', 'mruby-mvjs' => 'base_mvjs', 'mruby-numeric-ext' => 'base_numeric',
     'mruby-random' => 'base_random', 'mruby-rgss' => 'base_rgss', 'mruby-rpg2k' => 'base_rpg',
     'mruby-sprintf' => 'base_sprintf', 'mruby-stringio' => 'base_stringio', 'mruby-time' => 'base_time',
@@ -110,9 +112,12 @@ module BaseSection
     text.scan(DECL).map { |d| d.strip + "\n" }.sort
   end
 
-  # The Ruby declarations the generator writes, one per top-level class or module.
+  # The Ruby declarations the generator writes, one per top-level class or module. No tag is needed to compare them, so a
+  # gem outside TAGS cannot fail the check; only the writer needs a tag (regenerate_ruby_by_tag).
   def self.generated_ruby_decls(gen_dir)
-    generated_ruby_by_tag(gen_dir).values.flatten.sort
+    Dir[File.join(gen_dir, '*', 'ruby', '*.rbs')].sort.flat_map do |path|
+      File.read(path).scan(DECL).map { |d| d.strip + "\n" }
+    end.sort
   end
 
   # The same declarations grouped by their table tag. The tag is what a committed declaration carries as its marker, so

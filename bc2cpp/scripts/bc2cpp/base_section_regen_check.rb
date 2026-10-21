@@ -142,6 +142,18 @@ regenerated = BaseSection.regenerate_with(committed, bodies, by_tag)
 check.call('the regenerated file is identical to the committed one', regenerated == committed)
 BaseSection.first_differences(committed, regenerated).each { |line| warn line } unless regenerated == committed
 
+puts 'the comparison needs no tag; every gem with Ruby sources has one'
+Dir.mktmpdir('base-section-regen') do |gen|
+  write_gen(gen, ruby: { 'mruby-not-in-table' => "class Unlisted\n  def y: () -> untyped\nend\n" })
+  check.call('a gem outside the tag table is compared, not refused',
+             BaseSection.generated_ruby_decls(gen) == ["class Unlisted\n  def y: () -> untyped\nend\n"])
+end
+require_relative '../../scripts/bc2cpp/base_rbs_all'
+abort 'base section regen check: 3rd/mruby is missing; the gem list needs it' unless File.directory?(File.join(ROOT, '3rd/mruby'))
+untagged = BaseRbsAll.gems.select { |gem| !BaseRbsAll.ruby_sources(gem).empty? }.map { |gem| File.basename(gem) }
+                      .reject { |name| BaseSection::TAGS.key?(name) }
+check.call("every repo gem with Ruby sources has a base section tag (#{untagged.join(', ')} missing)", untagged.empty?)
+
 if failures.empty?
   puts "base section regen check: #{checks} checks passed"
 else
