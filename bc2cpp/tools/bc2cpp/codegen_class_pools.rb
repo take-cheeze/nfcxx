@@ -356,7 +356,7 @@ class CodeGen
       parts << klass if position >= NumericFlow::CLASS_BIT_BASE && mask[position] == 1
     end
     # LCF kinds (EXACT_LCF_ROWS) ride in this flow too.
-    @lcf_rows&.kinds&.each { |k| parts << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
+    @lcf_rows&.kinds&.each { |k| parts << @lcf_rows.name(k.bit) if mask[k.bit.bit_length - 1] == 1 }
     parts.empty? ? 'NONE' : parts.join('|')
   end
 end
