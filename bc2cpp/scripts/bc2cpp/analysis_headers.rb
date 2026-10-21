@@ -79,12 +79,13 @@ module AnalysisHeaders
     include_dir = File.join(overlay, 'include')
     FileUtils.rm_rf(overlay)
     FileUtils.mkdir_p(include_dir)
+    # The Onigmo headers first: the scan preprocesses mruby-onig-regexp, which includes oniguruma.h.
+    write_onigmo(include_dir)
     sources = native_sources
     presyms = (closed_names(closed_build) + scan(sources, closed_build, overlay)).uniq.sort_by { |sym| [sym.size, sym] }
     presym = MRuby::Presym.new(Struct.new(:build_dir).new(overlay))
     FileUtils.mkdir_p(presym.header_dir)
     presym.write_id_header(presyms)
-    write_onigmo(include_dir)
     FileUtils.rm_rf(File.join(overlay, 'scan'))
     warn "analysis headers: #{presyms.size} presym IDs from #{sources.size} sources"
     overlay
