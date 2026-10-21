@@ -804,6 +804,7 @@ class CodeGen
       elem_hints = { '1' => rbs_class } if rbs_class
     end
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
+    arm_prune_block_analysis(block_irep, d, 0)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
