@@ -78,6 +78,23 @@ end
   check.call("dependency reuse preserves #{contexts}-node graph outcomes", run_context_harness.call(true, 48, contexts).first(3) == run_context_harness.call(false, 48, contexts).first(3))
 end
 
+binding_engine = IrContextResults.new(generation_gen, {})
+binding_engine.define_singleton_method(:binding_layout) do |_body|
+  [[2, 0, 0, 0, 0, 0, 1, 0], [], [], 0, true]
+end
+arguments = [NumericFlow::INT, NumericFlow::STR].freeze
+binding = binding_engine.bind(nil, arguments, {})
+check.call('fixed bindings retain argument masks and a nil block slot', binding.masks == [*arguments, NumericFlow::NIL])
+check.call('fixed bindings own frozen masks', binding.masks.frozen? && !binding.masks.equal?(arguments))
+check.call('fixed bindings have immutable empty entry edges', binding.enter_edges.empty? && binding.enter_edges.frozen?)
+binding_engine.bind(nil, [NumericFlow::STR, NumericFlow::INT], {})
+check.call('later fixed bindings preserve earlier masks', binding.masks == [*arguments, NumericFlow::NIL])
+[false, true].each do |root|
+  check.call("fixed bindings reject missing arguments (root=#{root})", binding_engine.bind(nil, [NumericFlow::INT], {}, root: root).nil?)
+  check.call("fixed bindings reject excess arguments (root=#{root})", binding_engine.bind(nil, [*arguments, NumericFlow::INT], {}, root: root).nil?)
+  check.call("fixed bindings reject keywords (root=#{root})", binding_engine.bind(nil, arguments, { 'x' => NumericFlow::INT }, root: root).nil?)
+end
+
 unless ENV['MRBC']
   puts 'SKIP mrbc context fixtures (set MRBC)'
   exit
@@ -137,6 +154,7 @@ Dir.mktmpdir('ir-context-results') do |dir|
     TypeCheckFixture.report(dir, env: env, label: 'context fixture')
   end
   report = run.call
+  check.call('fixed bindings preserve the complete report', report == run.call('BC2CPP_IR_FIXED_BINDINGS' => '0'))
   check.call('dependency reuse preserves the complete report', report == run.call('BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
   check.call('leaf evaluation reuse preserves the complete report', report == run.call('BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve the complete report', report == run.call('BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
@@ -165,7 +183,9 @@ Dir.mktmpdir('ir-context-results') do |dir|
   check.call('dependency reuse preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
   limited = limited_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a context budget never publishes a provisional keyword summary', limited['status'] == 'unknown')
+  check.call('fixed bindings preserve context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_FIXED_BINDINGS' => '0'))
   rounds_report = run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1')
+  check.call('fixed bindings preserve round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_FIXED_BINDINGS' => '0'))
   check.call('leaf reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
   check.call('dependency reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
