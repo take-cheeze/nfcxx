@@ -2,6 +2,7 @@
 
 require_relative 'bytecode_ir'
 require_relative 'numeric_flow'
+require_relative 'codegen_callee_return_fold'
 
 # DECIDED_BRANCH: a conditional jump whose tested register the NumericFlow state decides is emitted as an unconditional
 # `goto` (taken on every path) or as nothing (never taken), instead of `if (mrb_test(rN))`.
@@ -25,6 +26,11 @@ class CodeGen
   def decided_branch_outcome(insn, irep, owner_def, idx, reg_offset = 0)
     return nil unless decided_branch_enabled? && idx && reg_offset.zero? && DECIDED_BRANCH_OPS.include?(insn.op)
 
+    decided_branch_mask_outcome(insn, irep, owner_def, idx) || callee_return_outcome(insn, irep, idx)
+  end
+
+  # The outcome the NumericFlow mask decides (see the header), or nil.
+  def decided_branch_mask_outcome(insn, irep, owner_def, idx)
     mask = numeric_raw_mask(irep, idx, insn.reg.to_i, owner_def)
     return nil unless mask.is_a?(Integer) && mask.positive?
     # A parameter's mask is built from the callers the flow sees, but a method installed by define_method is called by
