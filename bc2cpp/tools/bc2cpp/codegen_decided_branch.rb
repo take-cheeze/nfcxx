@@ -16,6 +16,7 @@ require_relative 'codegen_callee_return_fold'
 # jump's target, so no arm is deleted and no jump-edge check is needed. BC2CPP_DECIDED_BRANCH=0 keeps every test.
 class CodeGen
   DECIDED_BRANCH_OPS = %w[JMPIF JMPNOT JMPNIL].freeze
+  RANGE_COMPARE_OPS = %w[LT LE GT GE].freeze
 
   def decided_branch_enabled?
     ENV['BC2CPP_DECIDED_BRANCH'] != '0'
@@ -25,6 +26,11 @@ class CodeGen
   # instruction names registers of the enclosing frame, which the state of +irep+ does not index.
   def decided_branch_outcome(insn, irep, owner_def, idx, reg_offset = 0)
     return nil unless decided_branch_enabled? && idx && reg_offset.zero? && DECIDED_BRANCH_OPS.include?(insn.op)
+
+    if range_compare_fold_enabled?
+      outcome = range_compare_outcome(insn, irep, owner_def, idx)
+      return outcome if outcome
+    end
 
     decided_branch_mask_outcome(insn, irep, owner_def, idx) || callee_return_outcome(insn, irep, idx)
   end
@@ -54,6 +60,48 @@ class CodeGen
 
     jumps = truthy == (insn.op == 'JMPIF')
     jumps ? :taken : :not_taken
+  end
+
+  # RANGE_COMPARE_FOLD (ADR 0318): a jump on a comparison's boolean is decided when the operands' intervals settle that
+  # comparison. The only writer may be the comparison, found through handler edges too, so no other value can reach.
+  # BC2CPP_RANGE_FOLD=1 turns it on.
+  def range_compare_fold_enabled?
+    ENV['BC2CPP_RANGE_FOLD'] == '1' && fixnum_intervals_on? && %w[< <= > >=].all? { |op| numeric_op_native?(op) }
+  end
+
+  def range_compare_outcome(insn, irep, owner_def, idx)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, origin_transfers: true, shared: true,
+                                                                     through_handlers: true)
+    return nil unless defs&.size == 1 && !defs.first.entry?
+
+    cmp_idx = defs.first.index
+    cmp = irep.instructions[cmp_idx]
+    return nil unless RANGE_COMPARE_OPS.include?(cmp.op) && cmp.reg == defs.first.reg
+
+    truth = range_compare_truth(cmp, irep, cmp_idx, owner_def)
+    return nil if truth.nil?
+
+    case insn.op
+    when 'JMPNIL' then :not_taken # a boolean is never nil
+    when 'JMPIF' then truth ? :taken : :not_taken
+    when 'JMPNOT' then truth ? :not_taken : :taken
+    end
+  end
+
+  # true or false when every pair of values the operand intervals allow gives that answer, else nil.
+  def range_compare_truth(cmp, irep, cmp_idx, owner_def)
+    left = fixnum_interval(irep, cmp_idx, cmp.reg, owner_def)
+    right = fixnum_interval(irep, cmp_idx, cmp.paren_reg, owner_def)
+    return nil unless left && right
+
+    lo1, hi1 = left
+    lo2, hi2 = right
+    case cmp.op
+    when 'LT' then hi1 < lo2 ? true : (lo1 >= hi2 ? false : nil)
+    when 'LE' then hi1 <= lo2 ? true : (lo1 > hi2 ? false : nil)
+    when 'GT' then lo1 > hi2 ? true : (hi1 <= lo2 ? false : nil)
+    when 'GE' then lo1 >= hi2 ? true : (hi1 < lo2 ? false : nil)
+    end
   end
 
   # The generated C++ for a decided jump to +target+ (a label name), or nil when the state does not decide it and the
