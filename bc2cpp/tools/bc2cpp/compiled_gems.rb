@@ -62,6 +62,7 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
 # class that is never loaded.
 BC2CPP_CORE_MRBLIB_GEMS = %w[
   mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-numeric-ext mruby-range-ext mruby-symbol-ext mruby-string-ext
+  mruby-compar-ext
   mruby-sprintf mruby-struct mruby-io mruby-dir mruby-enumerator
 ].freeze
 # Core mrblib files that stay outside the world (foreign sources):

@@ -28,7 +28,7 @@ module BaseSection
     'mruby-range-ext' => 'base_range', 'mruby-rpgvx' => 'base_rpgvx', 'mruby-rpgxp' => 'base_rpgxp',
     'mruby-onig-regexp' => 'base_onig-regexp',
     'mruby-math-wio' => 'base_math-wio', 'mruby-mvjs' => 'base_mvjs', 'mruby-numeric-ext' => 'base_numeric',
-    'mruby-random' => 'base_random', 'mruby-rgss' => 'base_rgss', 'mruby-rpg2k' => 'base_rpg',
+    'mruby-compar-ext' => 'base_compar', 'mruby-random' => 'base_random', 'mruby-rgss' => 'base_rgss', 'mruby-rpg2k' => 'base_rpg',
     'mruby-sprintf' => 'base_sprintf', 'mruby-stringio' => 'base_stringio', 'mruby-symbol-ext' => 'base_symbol',
     'mruby-time' => 'base_time',
     'mruby-wolf' => 'base_wolf'
