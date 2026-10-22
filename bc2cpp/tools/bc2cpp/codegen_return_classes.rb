@@ -143,6 +143,17 @@ class CodeGen
   end
 
   # The bit standing for "exactly +klass+", allocated on first use.
+  # The return-mask bit of the class the join proved for +name+ (class_return_names), or nil. Only a send, and only a
+  # class with a NumericFlow bit: an Integer, Float, String, Array, Hash or Range result.
+  def joined_send_class_bit(name, insn)
+    return nil if ENV['BC2CPP_JOINED_RETURN_MASKS'] == '0'
+    return nil unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op)
+
+    klass = class_return_names[name]
+    entry = klass && NumericFlow::BIT_TABLE.find { |_bit, (_const, cname)| cname == klass }
+    entry&.first
+  end
+
   def numeric_class_bit(klass)
     @numeric_class_bits ||= {}
     @numeric_class_bits[klass] ||= begin
@@ -502,6 +513,10 @@ class CodeGen
 
     native = state && %w[SEND SEND0].include?(insn.op) && native_result_flow_mask(name, state[insn.reg.to_i])
     return native if native
+    # NATIVE_RETURN_CLASSES: a name the join proves returns one class returns it for every receiver, so an unknown
+    # receiver's send has that class too.
+    joined = joined_send_class_bit(name, insn)
+    return joined if joined
     return NumericFlow::OTHER unless name == 'new' && %w[SEND SEND0].include?(insn.op)
 
     # Read the constructor input before its result joins another CFG path.
