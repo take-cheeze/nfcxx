@@ -26,8 +26,10 @@ module SealedInt16Locals
   RANGE = (-32_768..32_767)
   SIZE_SYM = 'size'
 
-  # One proven array: the ARRAY index, the register it was created in, its fixed size and its element values.
-  Proven = Struct.new(:index, :dst, :size, :values, :actions)
+  # One proven array: the ARRAY index, the register it was created in, its fixed size, its element values, its
+  # instruction actions, and `range`: the [lo, hi] hull of every value it ever holds (the ARRAY literals and every
+  # SETIDX literal). Every element an in-range read yields is in `range`, so the read is an int16 Fixnum.
+  Proven = Struct.new(:index, :dst, :size, :values, :actions, :range)
 
   module_function
 
@@ -99,7 +101,8 @@ module SealedInt16Locals
     end
     return nil if actions.empty?
 
-    Proven.new(i, dst, size, values, actions)
+    stored = values + actions.values.select { |a| a[:kind] == :set }.map { |a| a[:value] }
+    Proven.new(i, dst, size, values, actions, [stored.min, stored.max])
   end
 
   # Follow MOVE copies whose source reaches only array definitions: each copy is another alias of the array.
@@ -143,7 +146,7 @@ module SealedInt16Locals
       value = literal_value(irep, prog, j, receiver + 2)
       return nil unless index && index >= 0 && index < size && value && RANGE.cover?(value)
 
-      { kind: :set, dst: receiver, index: index, value_reg: receiver + 2 }
+      { kind: :set, dst: receiver, index: index, value_reg: receiver + 2, value: value }
     when 'SEND0'
       { kind: :size, dst: insn.regs[0].to_i } if insn.regs[0].to_i == reg && insn.sym == SIZE_SYM
     end

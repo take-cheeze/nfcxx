@@ -83,6 +83,9 @@ class CodeGen
       name = op == 'GETCONST' ? insn.const_name : insn.mcnst_name
       range = name && self.class.integer_constant_ranges[name]
       range || fixnum_interval_fail(why, "const:#{name}")
+    when 'GETIDX', 'GETIDX0'
+      # SEALED_INT16 (sealed_int16_locals.rb): an in-range read of a proven int16 array has the array's interval.
+      sealed_element_range(irep, j) || fixnum_interval_fail(why, op)
     when *FIXNUM_INTERVAL_OPS
       left = fixnum_interval(irep, j, insn.regs[0], owner_def, depth + 1, why)
       right = if %w[ADDI SUBI].include?(op)
