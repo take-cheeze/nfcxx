@@ -83,6 +83,9 @@ Dir.mktmpdir('sealed-int16-local') do |dir|
                sum3.include?('std::vector<int16_t>{ 1, 2, 3 }') && !sum3.include?('mrb_ary_new'))
     check.call('spill: the out-of-int16 store refuses the array (generic Array path)',
                !spill.include?('std::vector<int16_t>') && spill.include?('mrb_ary_new_from_values'))
+    # NUMERIC_INTERVAL_OPERANDS: the elements' int16 interval makes sum3's additions Fixnum operations.
+    check.call('sum3: the element reads are proven Fixnum (no mrb_funcall fallback on the additions)',
+               sum3.scan('operands proven Fixnum').size >= 2 && !sum3.include?('mrb_funcall(M, r3, "+"'))
   else
     check.call('switch off: no method is rewritten to a std::vector',
                !code.include?('std::vector<int16_t>'))

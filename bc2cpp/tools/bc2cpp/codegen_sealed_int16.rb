@@ -34,9 +34,19 @@ class CodeGen
     table = {}
     sealed_int16_plans_for(irep).each_with_index do |array, k|
       table[array.index] = { kind: :create, dst: array.dst, array: k, values: array.values, size: array.size }
-      array.actions.each { |j, action| table[j] = action.merge(array: k, size: array.size) }
+      array.actions.each { |j, action| table[j] = action.merge(array: k, size: array.size, range: array.range) }
     end
     table
+  end
+
+  # The [lo, hi] interval of the element that the sealed GETIDX / GETIDX0 at +j+ of +irep+ reads, or nil. Only an
+  # in-range literal read is a sealed element: an out-of-range read is nil, which has no interval. The same gates as
+  # emission apply, so the fact is never asserted for code that is not rewritten.
+  def sealed_element_range(irep, j)
+    action = sealed_int16_action(irep, j)
+    return nil unless action && action[:kind] == :get && action[:index] < action[:size]
+
+    action[:range]
   end
 
   # The C++ for one sealed action. Reads are at most one register, so the mrb_value copy stays consistent.
