@@ -715,6 +715,15 @@ class CodeGen
     "#{dst} = bc2cpp_#{kind}(M, #{args.join(', ')});\n"
   end
 
+# The else of an Array or Hash index arm (GETIDX with a static class): the shared getidx helper instead of a by-name
+# send at the site. Its own arms re-check the receiver and key, and its tail is the closed `[]` switch (INDEX_CLOSED),
+# so the by-name call moves into one helper. Keeps the `[]` send when the name is devirt-blocked (a runtime definer).
+def index_else_statement(d, s)
+  return "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});" if devirt_blocked_name?('[]')
+
+  outlined_index_call('getidx', "r#{d}", "r#{d}", "r#{s}").chomp
+end
+
   # GETIDX's generic tail, after any STRUCT_INDEX_CACHE branches. nil under
   # RUNTIME_DEF_DEVIRT_GUARD for `[]`: that chain must skip POLY_SMALL_N and
   # the shared helper does not, so the caller keeps the inline form.

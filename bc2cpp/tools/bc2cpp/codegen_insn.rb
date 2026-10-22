@@ -656,7 +656,7 @@ class CodeGen
         else
           # INTEGER_TAG_ELSE (ADR 0394): an exact Array receiver's non-fixnum key runs the Array body directly.
           direct = integer_tag_else_array_call('[]', exact, "r#{d}", ["r#{s}"])
-          by_name = direct ? "r#{d} = #{direct};" : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
+          by_name = direct ? "r#{d} = #{direct};" : index_else_statement(d, s)
           <<~CPP
             #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
               r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
@@ -673,7 +673,7 @@ class CodeGen
             if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
               r#{d} = mrb_hash_get(M, r#{d}, r#{s});
             } else {
-              r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+              #{index_else_statement(d, s)}
             }
           CPP
         end
