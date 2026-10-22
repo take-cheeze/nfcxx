@@ -299,6 +299,7 @@ class CodeGen
       initial[total_args] = 'bc2cpp_blk' if has_blk
       registers_start = out.length
       out << emit_register_initializers(irep.nregs, initial)
+      out << sealed_int16_declarations(irep)
       registers_end = out.length
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
