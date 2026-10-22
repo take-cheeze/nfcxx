@@ -172,6 +172,8 @@ require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
+# Last: its compile_method and compile_insn prepends must be outermost (docs/adr/0545).
+require_relative 'codegen_stack_tuples'
 
 if $PROGRAM_NAME == __FILE__
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
