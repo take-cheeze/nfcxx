@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check OUTSIDE_OWNER_CALL (docs/adr/0468) on a closed-world fixture: a guard chain whose else stayed a by-name send
+# Check OUTSIDE_OWNER_CALL on a closed-world fixture: a guard chain whose else stayed a by-name send
 # only because a core or native class also defines the name (`CLOSED_WORLD kept: core_or_native`) ends in a call
 # checked against every outside owner of the name, and answers as the interpreter does.
 #

@@ -8,7 +8,7 @@ require_relative 'annotation_contradictions'
 require_relative 'ir_type_feedback'
 require_relative 'ir_ivar_types'
 
-# TYPE_CHECK (docs/adr/0412): the types bc2cpp's whole-program inference settled on, as data.
+# TYPE_CHECK: the types bc2cpp's whole-program inference settled on, as data.
 #
 # bc2cpp.rb calls TypeFacts.collect at the point where every analysis has run (after the
 # annotation/proof contradiction check) when BC2CPP_TYPE_FACTS=<path> is set, and writes the result as
@@ -22,7 +22,7 @@ require_relative 'ir_ivar_types'
 #                      receiver-proof `why` of the argument when the run loaded it (no_candidate:<rule>, dropped:<kinds>)
 #            return    {type, source, reason}; reasons: the producers of the unresolved return sites
 #                      (send_result:<name>, ivar:@x, param, literal:..., unanalyzable:<why>)
-#   ivars    {type, element, source, reason}; reasons: the ADR 0382 poison buckets, plus `any` (two stores
+#   ivars    {type, element, source, reason}; reasons: the poison buckets, plus `any` (two stores
 #            disagree: inherent) and `opaque` (a store could not be traced), and the file:line of every
 #            unresolved store
 #   consts   {type, source}

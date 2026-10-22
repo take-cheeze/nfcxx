@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check BLOCK_RETURNS (tools/bc2cpp/block_returns.rb, codegen_block_returns.rb, docs/adr/0475): RBS declarations of
+# Check BLOCK_RETURNS: RBS declarations of
 # methods that return their block's value (`[T] (...) { (...) -> T } -> T`) or their receiver (`{ ... } -> self`).
 #
 #   host     the declaration shapes BlockReturns.classify accepts and the ones it reports; the native source scan on

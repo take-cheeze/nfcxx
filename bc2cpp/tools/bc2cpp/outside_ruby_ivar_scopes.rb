@@ -33,7 +33,7 @@ module OutsideRubyIvarScopes
     [global, scoped.reject { |name, _| global.include?(name) }.transform_values(&:freeze)]
   end
 
-  # The parse is RubyParseCache's (ADR 0416), shared with the other foreign-Ruby scans.
+  # The parse is RubyParseCache's, shared with the other foreign-Ruby scans.
   def scan_source(src, path)
     text_names = src.b.scan(/@([A-Za-z_][A-Za-z_0-9]*)/).flatten.to_set
     result = RubyParseCache.parse(src, path)

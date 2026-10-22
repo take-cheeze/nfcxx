@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# CodeGen: unbox a native entry point's arguments with the conversion mrb_get_args performs (ADR 0372).
+# CodeGen: unbox a native entry point's arguments with the conversion mrb_get_args performs.
 #
 # An RGSS binding is `T a; ...; mrb_get_args(M, "<fmt>", &a, ...); return entry(M, self, a, ...)` and
 # scripts/native/binding_split.rb refuses any body with a statement before the mrb_get_args call, so the call site that

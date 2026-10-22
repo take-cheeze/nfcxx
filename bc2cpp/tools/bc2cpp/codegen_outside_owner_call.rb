@@ -3,7 +3,7 @@
 require_relative 'native_owner_map'
 require_relative 'outside_ruby_owners'
 
-# OUTSIDE_OWNER_CALL (docs/adr/0468): the else of a closed-world guard chain that stayed a by-name send only
+# OUTSIDE_OWNER_CALL: the else of a closed-world guard chain that stayed a by-name send only
 # because a core, native or outside Ruby class also defines the name (`CLOSED_WORLD kept: core_or_native`).
 #
 # The closed world names every such class: NativeOwnerMap reads each native registration of the name and the class
@@ -11,7 +11,7 @@ require_relative 'outside_ruby_owners'
 # becomes a call checked against that list (bc2cpp_owner_call, symbol_cache.rb): the receiver's method is looked
 # up once, and
 #   - found on a listed owner: that method is called with the frame mruby's own dispatch pushes
-#     (mrb_funcall_with_method, the NATIVE_SINGLETON_CALL mechanism of ADR 0416, since a C function reads its
+#     (mrb_funcall_with_method, the NATIVE_SINGLETON_CALL mechanism, since a C function reads its
 #     arguments from the call frame), after the checks OP_SEND makes (visibility, argument count / aspec);
 #   - found nowhere: the NoMethodError dispatch raises (the receiver is proven method_missing-free);
 #   - found on any other owner: a closed-world violation is raised. That owner is a definer the closed world did
@@ -23,7 +23,7 @@ module OutsideOwnerCall
   # `to_s`, `[]`, `==` and the like have dozens; a list that long is no receiver fact.
   NAME_OWNER_SET_MAX = 16
 
-  # NAME_OWNER_SET (ADR 0468): the receiver of a send of `name` can only be an instance of a class that answers it
+  # NAME_OWNER_SET: the receiver of a send of `name` can only be an instance of a class that answers it
   # (anything else raises NoMethodError), and in the closed world every such class is named: the program's own Ruby
   # definitions (the registry, core Ruby included) and every outside one. So any by-name send of such a name becomes
   # the owner call over that whole set, wherever it is emitted (a chain's else, a bare send, the else of the

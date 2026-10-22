@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# BITOP_RESULTS (docs/adr/0431): `Integer & | ^ Integer` is claimed INT only for
+# BITOP_RESULTS: `Integer & | ^ Integer` is claimed INT only for
 # INT operands. `<<` and `>>` stay OTHER, and so does any operand of another class.
 #
 # Host only (no mrbc): the real CodeGen#numeric_send_on_number, driven directly and

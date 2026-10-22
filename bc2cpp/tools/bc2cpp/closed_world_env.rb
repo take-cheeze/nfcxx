@@ -5,7 +5,7 @@ require_relative 'compiled_gems'
 require_relative 'nomethod_reviewed'
 require_relative 'nomethod_reviewed_probe'
 
-# docs/adr/0466: bc2cpp compiles closed-world programs only, so every run names its build, the build's gem list and
+# bc2cpp compiles closed-world programs only, so every run names its build, the build's gem list and
 # the outside native and Ruby sources. This is the closed world the checks and tools compile a fixture or a
 # probe in: the real closed gem list, the core and gem natives, and every foreign mrblib. `env` wins over these
 # defaults, except a nil for one of the four closed-world inputs, which keeps the default (a run cannot drop one).

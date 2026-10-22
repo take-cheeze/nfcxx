@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'class_layout'
 
-# SUBTREE_DISPATCH (docs/adr/0453): "an instance of C or of any descendant of C", a receiver fact distinct from the
+# SUBTREE_DISPATCH: "an instance of C or of any descendant of C", a receiver fact distinct from the
 # exact-class facts ClassLayout, ClassAnnotations and the RBS class types give. Only the send devirtualization reads
 # it (codegen_subtree_dispatch.rb); embedding, constructor pools and element facts stay on exact facts.
 #

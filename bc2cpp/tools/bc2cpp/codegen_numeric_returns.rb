@@ -2,7 +2,7 @@
 
 require_relative 'numeric_flow'
 
-# CodeGen: NUMERIC_RETURN_PROOF (ADR 0276).
+# CodeGen: NUMERIC_RETURN_PROOF.
 #
 # What class set can a call to `name` return? FIXNUM_RETURN_PROOF answers "a
 # small Integer" for a name with ONE bytecode definition; this joins every
@@ -51,7 +51,7 @@ class CodeGen
       next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
       next if defs.empty?
       string_native = name == 'to_s' && native_result_name_kinds(name)
-      # The linked-source audit is stricter than the broad foreign-name census (ADR 0336).
+      # The linked-source audit is stricter than the broad foreign-name census.
       collection_native = NativeClassResults::ARRAY_TRANSFORMS.include?(name) && native_result_name_kinds(name)
       next if @foreign_method_names.include?(name) && !string_native && !collection_native
       next if aliased.include?(name) && !(string_native && native_struct_string_alias_safe?)
@@ -62,7 +62,7 @@ class CodeGen
     end
   end
 
-  # ADR 0333: a registry placeholder is not a runtime definition when the
+  # A registry placeholder is not a runtime definition when the
   # build's complete closed-world scan proves that no native defines the name.
   def return_table_definitions(name)
     definitions = @registry[name] || []
@@ -106,7 +106,7 @@ class CodeGen
 
   # The names the aliasing operations of the program spell (an irep with a computed operand keeps every Symbol it
   # loads). numeric_aliased_names takes every Symbol of an irep that aliases anything; a name whose every definition
-  # is an attr_reader of a checked pool (ADR 0370) is withdrawn only when an operation spells it, so
+  # is an attr_reader of a checked pool is withdrawn only when an operation spells it, so
   # `attr_reader :contents` next to `alias_method :a, :initialize` keeps its return fact. The fact carries
   # NumericFlow::CHECKED and so only ever reaches a class-tested arm; admit_checked_alias_names adds the name once
   # its pool has grown that provenance.
@@ -227,7 +227,7 @@ class CodeGen
   NUMERIC_SEND_OWNERS = NumericFlow.class_bits('Array', 'Hash', 'String', 'Integer', 'Float')
   # Zero-argument sends on a numeric receiver whose result class is fixed.
   NUMERIC_TO_INT_SENDS = %w[to_i to_int floor ceil round truncate].freeze
-  # Integer bit operators: an Integer for INT op INT (BITOP_RESULTS, ADR 0431). `<<` and `>>` are
+  # Integer bit operators: an Integer for INT op INT. `<<` and `>>` are
   # absent: no range proof bounds a shift, and a negative `>>` count shifts left.
   NUMERIC_BITOP_SENDS = %w[& | ^].freeze
 
@@ -244,7 +244,7 @@ class CodeGen
     lcf = lcf_new_mask(irep, index, insn) if name == 'new'
     return lcf if lcf
 
-    # A literal frozen in place: the kind of its slots (FROZEN_TABLES, ADR 0306).
+    # A literal frozen in place: the kind of its slots.
     table = name == 'freeze' && insn.op == 'SEND0' && frozen_table_freeze_site(irep, index)
     return (state[insn.reg.to_i] || 0).zero? ? 0 : table if table
 
@@ -306,7 +306,7 @@ class CodeGen
     NumericFlow::OTHER
   end
 
-  # BITOP_RESULTS (ADR 0431): INT means Integer (ADR 0279), so `Integer & | ^ Integer` is an
+  # BITOP_RESULTS: INT means Integer, so `Integer & | ^ Integer` is an
   # Integer, the class claim `arith` makes for `+`. Only INT op INT is claimed. Float has no
   # such operator and any other operand class stays OTHER. An unreached operand yields no value.
   def numeric_bitop_mask(bit, arg)

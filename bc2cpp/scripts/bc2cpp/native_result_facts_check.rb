@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NATIVE_RESULT_FACTS and INSTANCE_RECEIVER (docs/adr/0302).
+# NATIVE_RESULT_FACTS and INSTANCE_RECEIVER.
 #
 # 1. Host only: every fact in tools/bc2cpp/native_result_facts.rb against the RGSS native sources.
 #    The registration of (owner, name) is the pinned callee text, it is the only one, and every

@@ -64,7 +64,7 @@ class CodeGen
       numeric_native = numeric_native_direct_code(name, d, recv, irep, guard_proof_site, new_proof_reg, owner_def)
       return numeric_native if numeric_native
     end
-    # FREEZE_FOLD (ADR 0536): a predicate the receiver's class set or freeze state decides is a constant bool.
+    # FREEZE_FOLD: a predicate the receiver's class set or freeze state decides is a constant bool.
     if !self_implicit && guard_proof_site && !@call_block_expr
       freeze_fold = freeze_fold_code(name, d, irep, guard_proof_site, insn, new_proof_reg, owner_def)
       return freeze_fold if freeze_fold
@@ -96,7 +96,7 @@ class CodeGen
              "  }\n"
     end
 
-    # IO_PUTS_MODEL (ADR 0284): the target check stays because `$stderr` is reassigned in
+    # IO_PUTS_MODEL: the target check stays because `$stderr` is reassigned in
     # the closed world (ErrorReport.install); only the fallback is shared. A literal block
     # keeps the per-site dispatch, the one that carries it.
     if name == 'puts' && !self_implicit && n <= 14 && !@call_block_expr
@@ -123,7 +123,7 @@ class CodeGen
                                    method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
                  end
 
-    # EQQ_DIRECT (ADR 0293): a `===` receiver whose class the bytecode proves (a stable
+    # EQQ_DIRECT: a `===` receiver whose class the bytecode proves (a stable
     # class/module constant, an Integer constant or literal, a String/nil/true/false literal)
     # is decided by that class's own body, no dispatch and no tag switch. Inlined block bodies
     # carry the site in trace_idx/trace_reg_offset.
@@ -213,7 +213,7 @@ class CodeGen
       native_owner = native && (native[:class_owner] || known)
       native_constructor_safe = native && @closed_world&.standard_constructor_lookup? &&
                                 exact_constructor_chain?(native_owner)
-      # OVERLOADED_CONSTRUCT (ADR 0468): a class with declared constructor overloads picks one at the call site,
+      # OVERLOADED_CONSTRUCT: a class with declared constructor overloads picks one at the call site,
       # where the path below would leave a by-name `new`: a count its entry point does not take, or an argument
       # tag test (Bitmap's file-load form) the Fixnum proof does not settle.
       fixed_arity = native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
@@ -273,7 +273,7 @@ class CodeGen
           native_int_arg_probe("#{known}.new", *int_site, argv) if ENV['BC2CPP_NATIVE_INT_ARGS']
           if native_param_unbox_name?('_init_size')
             # Bitmap#initialize branches on `f.kind_of? String` (a dispatched test), so only the first argument keeps
-            # its tag test; _init_size then converts both as "ii" (ADR 0372).
+            # its tag test; _init_size then converts both as "ii".
             arg_checks = native_int_arg_proven?(*int_site, argv, 0) ? '' : "mrb_integer_p(#{argv[0]})"
             unbox_stmts, unboxed_argv = native_param_unbox_args(d, argv, [:int] * argv.size, unboxed: [0])
           else
@@ -366,7 +366,7 @@ class CodeGen
       generic_target = known && !listed_target && @closed_world&.stable_class_constant?(known) &&
                        stable_standard_constructor_class?(known)
       if known && (listed_target || generic_target)
-        # INHERITED_DIRECT_CONSTRUCT (ADR 0456): the initialize the ancestor chain resolves to, the class's own or
+        # INHERITED_DIRECT_CONSTRUCT: the initialize the ancestor chain resolves to, the class's own or
         # an ancestor's (direct_construct_init_def).
         init_def = direct_construct_init_def(known)
         # DIRECT_CONSTRUCT_TARGETS' soundness bar, checked live against this run's
@@ -537,7 +537,7 @@ class CodeGen
       end
     end
 
-    # EXACT_NATIVE_WRAPPER (ADR 0307): the guarded wrapper arms below with the class test proven.
+    # EXACT_NATIVE_WRAPPER: the guarded wrapper arms below with the class test proven.
     if !self_implicit && guard_proof_site && call_receiver.nil? && call_arguments.nil? &&
        (exact_wrapper = exact_native_wrapper_code(name, d, recv, argv, irep, guard_proof_site, drawing_proof_reg))
       return exact_wrapper
@@ -1088,7 +1088,7 @@ class CodeGen
         end
       end
     end
-    # NATIVE_EXACT_DIRECT (ADR 0281): `self` is exactly the enclosing class's instance or
+    # NATIVE_EXACT_DIRECT: `self` is exactly the enclosing class's instance or
     # class/module object, and the name is one of its RGSS natives.
     if target.nil? && self_implicit && lexical_self_ivar_accessor.nil? && @closed_world
       native_self_code = native_exact_direct_code(name, d, recv, argv, native_exact_self_owner(owner_def),
@@ -1141,26 +1141,26 @@ class CodeGen
       exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
                                                             owner: owner_def&.owner,
                                                             expected_class: known_class)
-      # RECORD_HASH_PROOF (ADR 0285): a literal-key read of a record Hash whose key only ever holds
+      # RECORD_HASH_PROOF: a literal-key read of a record Hash whose key only ever holds
       # fresh instances of one class is as exact as a `Klass.new` in this method.
       if exact_class.nil? && (record_class = record_hash_exact_class(irep, proof_idx, proof_reg))
         known_class = exact_class = record_class
         exact_via_record = true
       end
-      # LCF_ROW_FLOW (ADR 0294): the flow proves the receiver is exactly one LCF kind (or nil, which only
+      # LCF_ROW_FLOW: the flow proves the receiver is exactly one LCF kind (or nil, which only
       # raises for this name and is tested below).
       if exact_class.nil? && (lcf_receiver = lcf_exact_receiver(irep, proof_idx, proof_reg, owner_def, name))
         known_class = exact_class = lcf_receiver.first
         exact_via_lcf = true
         lcf_nilable = lcf_receiver.last
       end
-      # RETURN_CLASS_TABLE (ADR 0289): the receiver is a fresh instance of one class on every path,
+      # RETURN_CLASS_TABLE: the receiver is a fresh instance of one class on every path,
       # through a local, an ivar slot or a call whose name only returns such instances.
       if exact_class.nil? && (flow_class = exact_flow_user_class(irep, proof_idx, proof_reg))
         known_class = exact_class = flow_class
         exact_via_flow = true
       end
-      # EXACT_CORE_ARMS (ADR 0309): a core class the flow proves exact; only the TYPED guard below uses it.
+      # EXACT_CORE_ARMS: a core class the flow proves exact; only the TYPED guard below uses it.
       # EXACT_FLOW_RESULT_CLASS: when the receiver trace names no class at all (a call result such as
       # `h.keys`, `x.to_s`, `r.to_a`), the flow's proof supplies the class; the TYPED lookup below still decides
       # whether any direct target exists, so a class without one changes nothing.
@@ -1180,7 +1180,7 @@ class CodeGen
       end
     end
     # An RGSS native instance the flow proves exact (an ivar-held Bitmap, Sprite, Window ...) calls
-    # its registered entry point directly (ADR 0281's arm, ADR 0296's proof).
+    # its registered entry point directly.
     if target.nil? && !self_implicit && exact_via_flow && NATIVE_WRAPPER_CLASS_ACCESSORS.key?(exact_class) && irep && proof_idx
       native_exact = native_exact_direct_code(name, d, recv, argv, exact_class, legacy_int_proof: true,
                                               int_site: [irep, proof_idx, owner_def, trace_reg_offset])
@@ -1283,7 +1283,7 @@ class CodeGen
 
         check_owner = typed_guard_class || target.owner
         check = "#{owner_class_ptr_expr(check_owner)} == mrb_obj_class(M, #{recv})"
-        # EXACT_TYPED_UNGUARDED (ADR 0289): the receiver is proven to be exactly check_owner, so
+        # EXACT_TYPED_UNGUARDED: the receiver is proven to be exactly check_owner, so
         # the guard below can only be true and its fallback is dead.
         if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
           note = "  // EXACT_TYPED :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
@@ -1357,7 +1357,7 @@ class CodeGen
           return note + "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
-        # RECORD_HASH_PROOF (ADR 0285): the receiver is a record key that only holds fresh instances of
+        # RECORD_HASH_PROOF: the receiver is a record key that only holds fresh instances of
         # target.owner, so the guard can only be true.
         if irep && (idx || trace_idx) &&
            record_hash_exact_class(irep, idx || trace_idx, unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)) == target.owner
@@ -1426,7 +1426,7 @@ class CodeGen
              "#{kind} devirtualized to a direct #{storage} (no mrb_funcall) -- see " \
              "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
              "citation this reproduces exactly (a writer yields the assigned value).\n"
-      # EXACT_TYPED_UNGUARDED (ADR 0289): proven exactly `owner`, so the guard can only be true.
+      # EXACT_TYPED_UNGUARDED: proven exactly `owner`, so the guard can only be true.
       if exact_class && exact_class == owner && !via_element
         return "#{note.sub('receiver traced to', 'receiver proven exactly')}  " \
                "#{ivar_accessor_call_code(owner, recv, name, d, argv)}\n"
@@ -1450,7 +1450,7 @@ class CodeGen
       exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
       exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
                                                              exact_class, recv: recv, name: name, owner_def: owner_def, dest: d)
-      # CORE_SELF_EXACT (ADR 0381): a bare send on `self` in a compiled core body, receiver register 0.
+      # CORE_SELF_EXACT: a bare send on `self` in a compiled core body, receiver register 0.
       if self_implicit && irep && idx && trace_reg_offset.zero? && call_receiver.nil? && @closed_world.nil?
         exact_site = exact_core_site(irep, idx, 0, argv, 0, nil, recv: recv, name: name, owner_def: owner_def, dest: d)
         exact_site[:implicit_self] = true if exact_site
@@ -1492,7 +1492,7 @@ class CodeGen
         return native_code if native_code
       end
 
-      # NATIVE_SINGLETON_CALL (ADR 0418): `File.exist?` and the other native singleton functions of a stable
+      # NATIVE_SINGLETON_CALL: `File.exist?` and the other native singleton functions of a stable
       # constant, called through a per-site method cache instead of a by-name send.
       if !self_implicit && irep && constant_site_idx && @closed_world &&
          %w[SEND0 SEND].include?(irep.instructions[constant_site_idx].op)
@@ -1517,13 +1517,13 @@ class CodeGen
         return rest_code if rest_code
       end
 
-      # FLOW_CORE_DIRECT (ADR 0323): a flow-proven core receiver has no user class to chain for.
+      # FLOW_CORE_DIRECT: a flow-proven core receiver has no user class to chain for.
       flow_core = exact_site && with_exact_core_site(exact_site) { flow_core_direct_line(d, recv, name, argv) }
       return flow_core if flow_core
 
       cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
                                   trace_insn: insn, trace_reg_offset: trace_reg_offset)
-      # SUBTREE_DISPATCH (docs/adr/0453): a receiver hinted to one closed subtree dispatches over that subtree only.
+      # SUBTREE_DISPATCH: a receiver hinted to one closed subtree dispatches over that subtree only.
       unless self_implicit || via_element || known_class || exact_site
         subtree_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
         subtree = compile_subtree_dispatch(name, n, d, recv, argv, irep, idx || trace_idx, subtree_reg, owner_def,
@@ -1575,10 +1575,10 @@ class CodeGen
       line = with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }
       # CORE_EXACT_DIRECT: no dispatch is left, so the site is not a dynamic one to diagnose.
       return "  #{line}" if line.start_with?(CORE_EXACT_DIRECT_NOTE)
-      # TO_ENUM_DIRECT (ADR 0418): the Enumerator is built in place, the checked arm's else is a guard violation.
+      # TO_ENUM_DIRECT: the Enumerator is built in place, the checked arm's else is a guard violation.
       return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
 
-      # OUTSIDE_OWNER_CALL (ADR 0468): a bare send whose every answering class the closed world names.
+      # OUTSIDE_OWNER_CALL: a bare send whose every answering class the closed world names.
       bare = outside_owner_bare_line(d, recv, name, argv, cw_site)
       return "#{miss}  #{bare}" if bare
 
@@ -1929,7 +1929,7 @@ class CodeGen
   # not model. A proven fallback raises what dispatch would (bc2cpp_nomethod);
   # a refused one keeps dispatch and names the reason for the summary.
   def guarded_fallback_line(d, recv, name, argv, listed, site)
-    # INDEX_CLOSED (ADR 0365): the shared index helper's own chain, built outside any site.
+    # INDEX_CLOSED: the shared index helper's own chain, built outside any site.
     if site.equal?(INDEX_CLOSED_SITE) && (closed = index_closed_fallback(d, recv, name, argv, listed))
       return closed
     end
@@ -1956,7 +1956,7 @@ class CodeGen
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
     # The marker outlives SymbolCache's rewrite of the name; bc2cpp.rb reads it
-    # to hold every such site to its source-line annotation (ADR 0226).
+    # to hold every such site to its source-line annotation.
     marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?, site: insn_source_site)
     error = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
     extra_branches = singleton_branches
@@ -1965,7 +1965,7 @@ class CodeGen
     "#{extra_branches}{\n      #{error.chomp}\n    }\n"
   end
 
-  # SINGLETON_ARMS (ADR 0369): one identity arm per module whose `.singleton` definition answers `name`,
+  # SINGLETON_ARMS: one identity arm per module whose `.singleton` definition answers `name`,
   # so a chain whose only open reason is :singleton_definer can close its else. [modules, branches], or
   # nil when any singleton definer cannot be called directly (constant_object_send_code also proves the
   # singleton chain free of mixins and the name unrebound).
@@ -1985,7 +1985,7 @@ class CodeGen
     [modules, branches.join]
   end
 
-  # GUARD_VIOLATION (docs/adr/0290): the else arm of a guard whose test the closed world
+  # GUARD_VIOLATION: the else arm of a guard whose test the closed world
   # proves cannot fail. The marker keeps the name past SymbolCache's rewrite (as for
   # nomethod) and `@@SITE@@` becomes the enclosing `Owner#method` in bc2cpp.rb; the site's
   # arguments are kept only for -DBC2CPP_GUARD_VIOLATION_DISPATCH.
@@ -1995,7 +1995,7 @@ class CodeGen
       "#{NomethodReviewed.violation_marker(name)}\n"
   end
 
-  # STRICT_HINTS (docs/adr/0419): the else arm of a guard on a whole-program class hint, as an error.
+  # STRICT_HINTS: the else arm of a guard on a whole-program class hint, as an error.
   # Same marker rewrite as guard_violation_line; the STRICT_HINT comment keeps the site listed and gated.
   def strict_hint_line(d, recv, name, argv, family)
     args = ", #{argv.size}#{argv.map { |a| ", #{a}" }.join}"
@@ -2017,7 +2017,7 @@ class CodeGen
     @strict_hints_off = previous
   end
 
-  # The strict else line when `family` is on. Policy (ADR 0419): a hint is not a proof and a violation
+  # The strict else line when `family` is on. Policy: a hint is not a proof and a violation
   # is a wrong hint to fix, so no proof gates it. Core owners, singletons, literal-block sites and
   # argument lists the helper cannot carry keep the dispatch. `owner` is nil for a chain (POLY, table).
   def strict_hint_fallback(family, d, recv, name, argv, owner)
@@ -2036,7 +2036,7 @@ class CodeGen
   # already `bc2cpp_nomethod` (a proven-dead arm, an annotated NOMETHOD site) is left alone: it has no send to force.
   # `hinted: false` keeps the base (MONO_EMBED_GUARD without a hint naming the owner).
   # `listed:` (the candidate-set families) is the classes the chain or table names; see
-  # ClosedWorld#answered_outside? for why a known class outside it keeps the dispatch (ADR 0428).
+  # ClosedWorld#answered_outside? for why a known class outside it keeps the dispatch.
   def strict_hint_wrap(family, d, recv, name, argv, owner, hinted: true, listed: nil)
     base = yield
     return base unless hinted && strict_hint_fallback(family, d, recv, name, argv, owner)
@@ -2070,7 +2070,7 @@ class CodeGen
 
   # CLOSED_WORLD: the facts guarded_fallback_line needs about a call site --
   # the enclosing owner when the receiver is provably that method's own self.
-  # `trace_idx` (INLINED_UNLISTED_SITE, docs/adr/0386): the unshifted site of a send inside an inlined block
+  # `trace_idx`: the unshifted site of a send inside an inlined block
   # body, whose own `idx` is nil. It only adds `trace_insn`, the original instruction of that site, which
   # unlisted_class_call reads; every other consumer of the site keeps seeing the nil `insn`/`idx`.
   def closed_world_site(recv, irep, idx, owner_def, trace_idx: nil, trace_insn: nil, trace_reg_offset: 0)
@@ -2084,7 +2084,7 @@ class CodeGen
     # the send of its own name before trusting SSEND vs SEND.
     site = { self_owner: self_owner, insn: irep && idx && irep.instructions[idx], irep: irep, idx: idx }
     site[:trace_insn] = irep.instructions[trace_idx] if CodeGen.inlined_unlisted_site? && idx.nil? && irep && trace_idx
-    # LOOP_FLOW_POSITION (ADR 0398): an inlined body's send has the flow position of its unshifted site.
+    # LOOP_FLOW_POSITION: an inlined body's send has the flow position of its unshifted site.
     if idx.nil? && irep && trace_idx && trace_insn
       site[:flow] = loop_flow_position(irep, trace_idx, trace_insn, trace_reg_offset)
     end
@@ -2100,7 +2100,7 @@ class CodeGen
     !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && irep.instructions[d.index].op == 'LOADSELF' }
   end
 
-  # LOOP_FLOW_POSITION (docs/adr/0398): the flow position of a send compiled from an inlined loop body (compile_insn
+  # LOOP_FLOW_POSITION: the flow position of a send compiled from an inlined loop body (compile_insn
   # with the body's block irep, `irep`, its registers shifted by `reg_offset`). The proof's flow facts are indexed by
   # the unshifted register of one irep, so the send is judged at a position of an irep:
   #   - the receiver is a register the block itself defined: the block's flow at that send. A block activation starts

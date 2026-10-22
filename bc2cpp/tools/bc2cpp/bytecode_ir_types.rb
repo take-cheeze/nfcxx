@@ -3,7 +3,7 @@
 require_relative 'bytecode_ir_ops'
 
 module BytecodeIR
-  # Value classes, not representation/width proofs. See ADR 0440.
+  # Value classes, not representation/width proofs.
   class Types
     LITERAL_TYPES = {
       'LOADNIL' => :NilClass, 'LOADTRUE' => :TrueClass, 'LOADFALSE' => :FalseClass,
@@ -116,7 +116,7 @@ module BytecodeIR
     EXACT_EXTEND_OPS = { 'ARYPUSH' => :Array, 'ARYCAT' => :Array, 'HASHADD' => :Hash, 'HASHCAT' => :Hash,
                          'STRCAT' => :String }.freeze
 
-    # EXACT_LITERAL (ADR 0280): the Exact class every definition reaching the read of +reg+ at +index+ agrees on,
+    # EXACT_LITERAL: the Exact class every definition reaching the read of +reg+ at +index+ agrees on,
     # from literal writers only, or nil. No argument, signature, inferred or resolver fact enters: those bound a
     # class nominally, and these callers drop their class test. Integers come from LOADI* alone (a pool integer
     # can overflow a 32-bit mrb_int). +self_class+ is the caller's own proof of R0 and LOADSELF.

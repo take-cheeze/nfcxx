@@ -6,7 +6,7 @@ require_relative 'bytecode_ir'
 # Method names a computed-name send (`send("#{stem}=", v)`, `method(name)`, ...) could reach
 # although no call site spells them: the proofs that enumerate call sites (ArgTypes,
 # ENTRY_ARG_CALLSITE_PROOF, FIXNUM_RETURN_PROOF, the embedding of ivars a setter writes) refuse
-# these names. ADR 0276 introduced the rule for pooled numeric arguments, ADR 0279 shares it.
+# these names. The same rule covers pooled numeric arguments.
 module DynamicNames
   # Sends that turn a value into a method name (call it, fetch it, define it).
   SENDS = %w[send __send__ public_send method instance_method
@@ -14,7 +14,7 @@ module DynamicNames
              attr_accessor].freeze
 
   class << self
-    # DEFINE_METHOD_LOOPS (ADR 0469): [irep label, index] of each `define_method(n)` loop send the settled
+    # DEFINE_METHOD_LOOPS: [irep label, index] of each `define_method(n)` loop send the settled
     # registry defines => the names it installs (DefineMethodSites.loop_sites). Its name is not a literal at
     # the send, yet every name it can install is known. Empty until bc2cpp.rb sets it after settling.
     attr_writer :settled_sends

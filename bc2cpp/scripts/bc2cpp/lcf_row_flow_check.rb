@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# LCF_ROW_FLOW (docs/adr/0294): a receiver the class flow proves to be an LCF::Database, a table or a
+# LCF_ROW_FLOW: a receiver the class flow proves to be an LCF::Database, a table or a
 # row gets an exact-class direct call, and a field read gets its schema class.
 #
 # 1. Model (CRuby, the real mruby-lcf reader): what LcfRowFlow::Model says `[]` returns for every

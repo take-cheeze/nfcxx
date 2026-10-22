@@ -2,7 +2,7 @@
 
 require_relative 'nomethod_reviewed'
 
-# NILABLE_RECEIVER (ADR 0296): a receiver the class pools prove is nil or exactly one class K
+# NILABLE_RECEIVER: a receiver the class pools prove is nil or exactly one class K
 # (`@ui` holding a Hash literal and nil, `@interpreter` holding an Interpreter and nil) is tested
 # for nil once; the non-nil path is compiled as an exact-K receiver, so it needs neither a class
 # guard nor a by-name fallback. The nil path is the NoMethodError a nil dereference raises when no
@@ -41,7 +41,7 @@ module NilableReceiverSend
 
   # By-name dispatches in a piece of generated C++.
   def dispatch_count(code)
-    # OUTSIDE_OWNER_CALL (ADR 0468): the owner call still looks the method up at run time, so a variant that removes it
+    # OUTSIDE_OWNER_CALL: the owner call still looks the method up at run time, so a variant that removes it
     # is preferred exactly as one that removes a by-name send.
     code.scan(/\bmrb_funcall(?:_id|_with_block|_argv)?\(M,|\bbc2cpp_send\(M,|\bbc2cpp_funcall_argv\(|\bbc2cpp_owner_call(?:_named)?\(M,/).size
   end
@@ -70,7 +70,7 @@ module NilableReceiverSend
     { key: [irep.label, idx, reg], klass: klass, name: insn.sym, argv: (1..n).map { |k| "r#{reg + k}" } }
   end
 
-  # GETIDX / SETIDX (ADR 0439): an index on a receiver the flow leaves nilable, with no nil check dominating it (a
+  # GETIDX / SETIDX: an index on a receiver the flow leaves nilable, with no nil check dominating it (a
   # `return unless x`, `if x` or `x&.` narrows the register out of the mask first). Recorded once per site, for the
   # type check (TC1005). `reg` is the receiver register as exact_flow_mask reads it.
   def note_unguarded_index(irep, idx, insn, reg, name)

@@ -329,7 +329,7 @@ class IrContextResults
     old_states, old_calls, old_arrays = node.states, node.calls, node.arrays
     @dependencies = {}.compare_by_identity
     value = evaluate_uncached(node)
-    # Effects read callee states, not just return masks; both invalidate readers (ADR 0527).
+    # Effects read callee states, not just return masks; both invalidate readers.
     node.revision += 1 if old_states != node.states || old_calls != node.calls || old_arrays != node.arrays
     node.evaluation = [value, classes, shapes, @dependencies] unless @failed
     value

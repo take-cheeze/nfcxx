@@ -3,7 +3,7 @@
 require 'set'
 
 # Reader for the outside-world sources (mruby C, foreign Ruby) the closed-world
-# proofs scan (ADR 0262). A file that exists but cannot be read would silently
+# proofs scan. A file that exists but cannot be read would silently
 # under-collect a poison source, so it raises; a path that does not exist (an
 # uninitialized submodule) is not part of the build and contributes nothing.
 module SourceText

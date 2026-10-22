@@ -6,7 +6,7 @@ require_relative 'core_defs'
 require_relative 'define_method_sites'
 require_relative 'send_names'
 
-# ALIAS_SITES (docs/adr/0474): `alias_method :new, :old` (or `alias new old`) written straight in a class
+# ALIAS_SITES: `alias_method :new, :old` (or `alias new old`) written straight in a class
 # or module body of the engine, with literal names, runs once while the class is defined and copies the
 # method `old` names at that moment. To the registry it is a definition of `new` on that class:
 #

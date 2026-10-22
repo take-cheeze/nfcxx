@@ -5,7 +5,7 @@ require 'set'
 require_relative 'ruby_parse_cache'
 require_relative 'outside_ruby_owners'
 
-# FOREIGN_DEFINERS (docs/adr/0257): which method names outside Ruby (the build's
+# FOREIGN_DEFINERS: which method names outside Ruby (the build's
 # mrblib sources) defines, aliases, undefines or re-scopes on which class. The
 # closed world only knows such names globally (`foreign_method_names`), which
 # refuses `inspect` for Integer because Rational#inspect exists. NativeCoreDirect
@@ -21,7 +21,7 @@ module ForeignDefiners
 
   Result = Struct.new(:names, :wild)
 
-  # FOREIGN_DEFINERS_PER_LIST (ADR 0471): file list => [its stat key, Result]. One entry per list of files, so callers
+  # FOREIGN_DEFINERS_PER_LIST: file list => [its stat key, Result]. One entry per list of files, so callers
   # that alternate between lists (the closed world's outside Ruby, the same list without core sources, the frozen
   # tables' foreign list) no longer evict each other and rewalk every syntax tree on each switch.
   @cache = {}

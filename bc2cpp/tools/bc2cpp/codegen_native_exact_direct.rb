@@ -2,10 +2,10 @@
 
 require_relative 'native_direct'
 
-# NATIVE_EXACT_DIRECT (docs/adr/0281): a send whose receiver is proven to be
+# NATIVE_EXACT_DIRECT: a send whose receiver is proven to be
 # exactly one RGSS class instance or one class/module object calls the native's
-# frame-independent entry point (NativeDirect::ENTRIES, ADR 0263) with no
-# guard on the receiver and no dispatch fallback. ADR 0253's arms guard by
+# frame-independent entry point with no
+# guard on the receiver and no dispatch fallback. The arms guard by
 # class and keep the send as their else; here the receiver fact is a proof
 # (a stable constant, or `self` of an exact class), so the send disappears.
 #
@@ -25,8 +25,8 @@ module NativeExactDirect
   # The code for `recv.name(*argv)` where `recv` is exactly `owner` (an RGSS
   # class name, or "X.singleton" for the class or module object X), or nil.
   # `int_site` ([irep, call index, owner_def, register offset]) lets an :int argument that is provably a Fixnum drop
-  # its mrb_integer_p test and with it the by-name else (ADR 0296, 0318). Behind native_param_unbox_name? no :int/:float
-  # argument is tested at all: each is converted as mrb_get_args does (ADR 0372).
+  # its mrb_integer_p test and with it the by-name else. Behind native_param_unbox_name? no :int/:float
+  # argument is tested at all: each is converted as mrb_get_args does.
   def native_exact_direct_code(name, d, recv, argv, owner, int_site: nil, legacy_int_proof: false)
     return nil if @call_block_expr
 

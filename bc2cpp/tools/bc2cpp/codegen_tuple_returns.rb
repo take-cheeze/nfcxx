@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-# CodeGen: TUPLE_RETURN_FACTS (ADR 0311). `a, b = pair(x)` is `SEND; AREF; AREF`: when every definition of `pair`
+# CodeGen: TUPLE_RETURN_FACTS. `a, b = pair(x)` is `SEND; AREF; AREF`: when every definition of `pair`
 # returns a fresh literal `[e0, e1, ...]` of one length, each AREF reads the class set the flow proved for that
-# position. The producer and consumer conditions are `tuple_shape` and `tuple_aref_call`; the argument is in the ADR.
+# position. The producer and consumer conditions are `tuple_shape` and `tuple_aref_call`.
 class CodeGen
   TUPLE_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
   # Any other way out of a method: the result is not an Array literal.

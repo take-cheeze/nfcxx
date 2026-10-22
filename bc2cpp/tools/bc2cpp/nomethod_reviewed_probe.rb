@@ -2,7 +2,6 @@
 
 # Runs bc2cpp.rb the way the closed build's compiled-gem codegen task does
 # (mruby-*-compiled/mrbgem.rake with bc2cpp_closed_world_env), for the
-# (docs/adr/0226).
 require 'open3'
 require 'rbconfig'
 require 'shellwords'
@@ -113,7 +112,7 @@ module NomethodReviewedProbe
     runs(root, mrbc).fetch(:full)
   end
 
-  # Every PROVEN_MISS site (ADR 0275) of the same full runs: {gem:, key:}.
+  # Every PROVEN_MISS site of the same full runs: {gem:, key:}.
   def full_proven_miss_sites(root, mrbc)
     runs(root, mrbc).fetch(:proven_miss)
   end

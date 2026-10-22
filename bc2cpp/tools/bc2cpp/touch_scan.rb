@@ -4,7 +4,7 @@ require 'set'
 require_relative 'compiled_gems'
 require_relative 'send_names'
 
-# CLOSED_WORLD touch analysis (docs/adr/0256): which constants can an outside
+# CLOSED_WORLD touch analysis: which constants can an outside
 # file (native C/C++ or foreign Ruby) CREATE, REOPEN, SUBCLASS or REBIND?
 #
 # Every scan returns a Result:
@@ -155,7 +155,7 @@ module TouchScan
     native_classify(native_facts(text), decl_simples)
   end
 
-  # The part of native(text, ...) that reads the text, as plain data (ADR 0415): every event of the file in
+  # The part of native(text, ...) that reads the text, as plain data: every event of the file in
   # order as [kind, args, why] (a `->super` assignment as ['super', nil, why]), and the local mrb_sym value of
   # each identifier an event argument spells, so native_classify never needs the text.
   def self.native_facts(text)
@@ -240,7 +240,7 @@ module TouchScan
   # dup/clone of a class object copies the class. Only a receiver spelled as a
   # class is treated so: a plain value variable is assumed to be an instance,
   # the same assumption scan_closed_world makes for `dup` in the closed world's
-  # own Ruby (ADR 0256, "Residual assumption").
+  # own Ruby.
   def self.native_copy(expr, res, norm, why)
     native_hard(expr, res, norm, why) if expr.to_s.match?(/mrb_obj_value\s*\(|\bRClass\b|_(?:class|module)_(?:get|ptr)|->\s*\w+_class\b/)
   end

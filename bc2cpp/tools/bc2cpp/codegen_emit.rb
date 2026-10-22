@@ -39,32 +39,32 @@ class CodeGen
     :@ir_inline_stack => nil,
     :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
     :@block_fallback_active => false, :@blk_param_name => nil, :@blk_param_level => 0,
-    # NESTED_BLOCK_FORWARD (ADR 0330): the BLOCK_FALLBACK body's nesting depth,
+    # NESTED_BLOCK_FORWARD: the BLOCK_FALLBACK body's nesting depth,
     # which @blk_param_level is derived from. Scoped like @blk_param_level (the
     # two are saved and restored together), so it resets per method too.
     :@block_fallback_depth => 0,
-    # SUPER_NO_CALLER_BLOCK (ADR 0332): whole-program memos, not per-method state
+    # SUPER_NO_CALLER_BLOCK: whole-program memos, not per-method state
     # (they answer about every caller of a name, which is fixed once the ireps
     # are). nil is the "no memo yet" marker each writes with `||=`.
     :@super_no_caller_block => nil, :@block_carrying_callers => nil, :@superclass_closure => nil,
     :@block_ret_slot => nil, :@block_brk_slot => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
-    # LOOP_FLOW_POSITION (ADR 0398): the enclosing inlined loop's SENDB. Saved and restored around each inlined
+    # LOOP_FLOW_POSITION: the enclosing inlined loop's SENDB. Saved and restored around each inlined
     # body, so a nested compile of a callee must start without the caller's loop parent.
     :@inline_loop_parent => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
     :@compiling_core => false, :@resumable => nil,
     :@exact_core_site => nil, :@nonnil_receiver => nil,
-    # CHECKED_POOL_EXACT (ADR 0370): the one register its arm is being compiled under a class test for.
+    # CHECKED_POOL_EXACT: the one register its arm is being compiled under a class test for.
     :@checked_pool_override => nil,
-    # INDEX_CLOSED (ADR 0365): set while a shared index helper builds its chain; a probe compiled meanwhile must not see it.
+    # INDEX_CLOSED: set while a shared index helper builds its chain; a probe compiled meanwhile must not see it.
     :@index_closed_build => nil
   }.freeze
 
   METHOD_COMPILE_IVARS = METHOD_COMPILE_STATE.keys.freeze
 
   # Runs a nested compile against top-level state, then restores the caller's
-  # state, so neither compile sees or clobbers the other's (ADR 0202).
+  # state, so neither compile sees or clobbers the other's.
   def with_fresh_method_state
     saved = METHOD_COMPILE_IVARS.map { |ivar| instance_variable_get(ivar) }
     METHOD_COMPILE_STATE.each { |ivar, initial| instance_variable_set(ivar, initial) }
@@ -110,7 +110,7 @@ class CodeGen
   # mrb_define_method would make it public). A `.singleton` owner registers via
   # mrb_define_class_method; a private one via
   # bc2cpp_define_private_class_method (below).
-  # STATIC_DISPATCH_UNREGISTRATION (docs/adr/0203): entries in `unregistered` are
+  # STATIC_DISPATCH_UNREGISTRATION: entries in `unregistered` are
   # skipped: static_dispatch_registrations.rb proved no runtime lookup reaches
   # them, so the wrapper is dead, and with no dynamic lookup there is no
   # interpreted fallback to read iv_tbl.
@@ -181,7 +181,7 @@ class CodeGen
     out
   end
 
-  # CORE_BLOCK_GUARD (ADR 0269): the run-time half of core_block_guard. The bytecode of
+  # CORE_BLOCK_GUARD: the run-time half of core_block_guard. The bytecode of
   # every guarded method is kept in a hidden ivar of Object (no `@`, so no reflection
   # lists it), one slot per method index, and rooted by it for the state's lifetime.
   # mrb_exec_irep, called by the entry while the VM is still in the cfunc's own
@@ -446,7 +446,7 @@ class CodeGen
       out << "static const mrb_data_ivar #{sanitize(owner)}_ivar_slots[] = {\n"
       # Typed fields are listed with their kind: the runtime boxes a raw C value on
       # read and type-checks a store, so instance_variable_get/set,
-      # instance_variables, inspect, Marshal and dup see them (ADR 0261). The GC
+      # instance_variables, inspect, Marshal and dup see them. The GC
       # marks VALUE slots only.
       slots = ivars.keys
       slots.each do |name|
@@ -518,7 +518,7 @@ class CodeGen
   # Every emitted "mrb_ary_ref(M, ...)" becomes "bc2cpp_ary_entry(M, ...)"; the
   # real macro is `#define mrb_ary_ref(mrb, ary, n) mrb_ary_entry(ary, n)`
   # (mruby/array.h), so behavior is identical. It exists because mrb_ary_entry
-  # lives in libmruby.a and the build has no LTO (docs/adr/0133, 0135), so the
+  # lives in libmruby.a and the build has no LTO, so the
   # call could never be inlined. An unboxed element representation is not an
   # option: the GC marks elements through a real RArray (src/gc.c).
   # Emitted only when some compiled code calls it (checked on the output).
@@ -539,7 +539,7 @@ class CodeGen
     CPP
   end
 
-  # NUMERIC_OPERAND_PROOF helpers (ADR 0276): the core Integer/Float compare and
+  # NUMERIC_OPERAND_PROOF helpers: the core Integer/Float compare and
   # divide bodies for operands proven Integer or Float, so the sites need no
   # dynamic send. Emitted only when the output uses them.
   def emit_numeric_proof_helpers(compiled)
@@ -582,7 +582,7 @@ class CodeGen
     out
   end
 
-  # NATIVE_CORE_DIRECT (ADR 0257) mirrors of core natives whose bodies are
+  # NATIVE_CORE_DIRECT mirrors of core natives whose bodies are
   # static, emitted only for the ones the output calls. NativeCoreDirect::ENTRIES
   # pins each to the audited core body.
   def emit_native_core_helpers(compiled)
@@ -797,7 +797,7 @@ class CodeGen
     leaves.map { |label| compile_method(label) }
   end
 
-  # EMIT_UNIT (ADR 0264): Array and StringIO have definitions in both mruby's own
+  # EMIT_UNIT: Array and StringIO have definitions in both mruby's own
   # Ruby and an engine gem (mruby-rgss's Array#include?, mruby-lcf's
   # StringIO#ungetbyte), and each compiled gem is one translation unit that must
   # emit a symbol exactly once. The unit is read from the source file and the

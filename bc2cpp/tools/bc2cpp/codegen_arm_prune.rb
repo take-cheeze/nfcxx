@@ -14,7 +14,7 @@ require_relative 'codegen_decided_branch'
 # CodeGen#arm_prune_resolve, and keeps the whole method otherwise. CodeGen.arm_prune_refusals counts why.
 #
 # Only a method's own body is made into arm pruning (stage B). A block body is measured by stage A only, at the register offset
-# its emitter uses (arm_prune_block_analysis, ADR 0535).
+# its emitter uses.
 class CodeGen
   ARM_PRUNE_TERMINATORS = %w[RETURN RETURN_BLK STOP].freeze
   # A C++ declaration of an identifier: pruned text that declares one is kept, since live code could name it.
@@ -59,7 +59,7 @@ class CodeGen
     unreachable
   end
 
-  # Stage A for a block body (ADR 0535): the instructions of +block_irep+ that no edge reaches, under the register offset
+  # Stage A for a block body: the instructions of +block_irep+ that no edge reaches, under the register offset
   # +reg_offset+ its emitter uses for the body. Counted once per body (keyed by its label), since an inlined body is walked
   # by more than one emitter and in more than one owner. Changes no output.
   def arm_prune_block_analysis(block_irep, owner_def, reg_offset)

@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
-# STRICT_HINTS (docs/adr/0419): an opt-in tier that forces the whole-program class HINTS of a
+# STRICT_HINTS: an opt-in tier that forces the whole-program class HINTS of a
 # closed-world build. A guarded hint site is `if (class guard) direct-call else bc2cpp_send(...)`;
 # with BC2CPP_STRICT_HINTS=1 the else arm of the families below is `bc2cpp_hint_violation`, which
 # logs `[RPG2k] hint violation: <Class>#<name> at <Owner#method (FAMILY)>` to $stderr and raises
 # BC2cppHintViolation < NoMethodError, so no by-name send is left at the site and a wrong hint
-# fails loudly instead of costing speed. Default ON (ADR 0438): unset or empty selects `1`; `0` is the
+# fails loudly instead of costing speed. Default ON: unset or empty selects `1`; `0` is the
 # byte-identical baseline with the tier off.
 #
 # Families (BC2CPP_STRICT_HINTS=1 selects the first four, `all` every one; a comma list selects some):
@@ -17,16 +17,16 @@
 #   poly_small_n      the else arm of a POLY_SMALL_N / INHERITED_GUARD chain (the candidate set is the hint)
 #   poly_table        the else arm of an outlined POLY_TABLE
 #   interface_table   the else arm of an interface-table dispatch
-#   subtree           the else arm of a SUBTREE_TABLE / SUBTREE_DIRECT site (docs/adr/0453); only when listed by
+#   subtree           the else arm of a SUBTREE_TABLE / SUBTREE_DIRECT site; only when listed by
 #                     name or by `all`, never by `1`
 # Not forced: numeric arms (Float, Bignum and overflow promotion are legitimate flows on their
-# slow-path helpers) and the families docs/adr/0419 lists with their evidence.
+# slow-path helpers).
 #
 # Policy: a hint is not a proof, so no proof gates the forcing; every violation the verify build finds
 # is a wrong or incomplete hint, fixed at its source.
 #
 # Every forced site carries `/* STRICT_HINT FAMILY: name @ file:line */` and is listed on stderr
-# (`STRICT_HINT_SITE file:line -> name (FAMILY)`). No review gate judges the listing any more (ADR 0522).
+# (`STRICT_HINT_SITE file:line -> name (FAMILY)`). No review gate judges the listing any more.
 require 'set'
 require_relative 'review_scope'
 
@@ -34,7 +34,7 @@ module StrictHints
   ENV_NAME = 'BC2CPP_STRICT_HINTS'
   FAMILIES = %w[typed element ivar_accessor mono_embed poly_small_n poly_table interface_table subtree].freeze
   # `1` forces the families that read a receiver hint (layout, annotation, element); `all` adds the
-  # candidate-set chains and tables, whose receivers are not traced (docs/adr/0419).
+  # candidate-set chains and tables, whose receivers are not traced.
   DEFAULT_FAMILIES = %w[typed element ivar_accessor mono_embed].freeze
   MARKER = %r{/\* STRICT_HINT (\w+): (\S+) @ (\S+) \*/}
   LISTING = /^  STRICT_HINT_SITE (.+) -> (\S+) \((\w+)\)$/

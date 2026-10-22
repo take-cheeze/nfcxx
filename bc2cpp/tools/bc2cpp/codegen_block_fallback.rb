@@ -96,7 +96,7 @@ class CodeGen
   # Returns the sorted set of levels this frame must supply, with
   # block_upvar_needs' propagation (a child's l becomes l - 1 for l >= 1; a
   # child's l == 0 is a nested def's own block). nil means an unparsable BLKPUSH.
-  # BLOCK_SEMANTICS (ADR 0266): `given: false` leaves out the `block_given?`
+  # BLOCK_SEMANTICS: `given: false` leaves out the `block_given?`
   # reads, which only test the block for nil and so need no synchronous callee.
   def block_blk_needs(irep, depth = 0, given: true)
     if @block_capture_index
@@ -158,7 +158,7 @@ class CodeGen
   # between the fiber entry and the yield ("resuming dead fiber"; see
   # tools/optcarrot_probe/README.md). A method that calls Fiber.yield directly
   # gets an early `#error` stub, unless it is a Fiber.new root that compiles as a
-  # resumable step function (RESUMABLE_ROOTS, ADR 0273). Transitive callers are handled
+  # resumable step function. Transitive callers are handled
   # by compute_fiber_unsafe_methods.
   def calls_fiber_yield?(irep)
     BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
@@ -236,7 +236,7 @@ class CodeGen
       end
     end
 
-    # RESUMABLE_ROOTS (ADR 0273): the methods a Fiber.new block body calls directly on self.
+    # RESUMABLE_ROOTS: the methods a Fiber.new block body calls directly on self.
     # A root that qualifies is compiled as a resumable step function instead of refused.
     @fiber_roots = Set.new
     seeds.each do |label|
@@ -288,7 +288,7 @@ class CodeGen
     @fiber_unsafe_methods.merge(yield_reach_unsafe_methods(fiber_defs))
   end
 
-  # YIELD_REACH_UNSAFE_SUPPORT (ADR 0283): every method a Fiber.new body can reach by any call (explicit
+  # YIELD_REACH_UNSAFE_SUPPORT: every method a Fiber.new body can reach by any call (explicit
   # receivers, other classes, blocks, dynamic sends resolved by name) whose execution may suspend the
   # Fiber above its frame. A core iterator with a run-time guard decides per call instead.
   def yield_reach_unsafe_methods(fiber_defs)
@@ -343,7 +343,7 @@ class CodeGen
       block_label = irep.reps[block_irep_idx.to_i]
       block_irep = block_label && @ireps[block_label]
       next unless block_irep && block_fallback_safe?(block_irep)
-      # BLOCK_SELF_WORLD (ADR 0477): a rebinder runs this block under another self; the compiled body would read
+      # BLOCK_SELF_WORLD: a rebinder runs this block under another self; the compiled body would read
       # its creator's. It stays interpreted (with the method holding it).
       next if block_self_rebound?(block_label)
 
@@ -389,8 +389,8 @@ class CodeGen
       blk_needs = block_blk_needs(block_irep)
       # BLOCK_FALLBACK_YIELD_SUPPORT: `lv == 1` is this METHOD's block, which
       # the wrapper extracted. `lv == 2` with no `lv == 1` is the enclosing
-      # REGION's block: this block is itself nested (NESTED_BLOCK_FORWARD,
-      # ADR 0330), so uvenv(lv-1) resolves to its parent cfunc, which holds that
+      # REGION's block: this block is itself nested (NESTED_BLOCK_FORWARD),
+      # so uvenv(lv-1) resolves to its parent cfunc, which holds that
       # block in its own `bc2cpp_blk`. `blk_available` is therefore the caller's
       # needs_blk, not the method's -- see the nested recognize call below.
       needs_blk = blk_available && (blk_needs == [1] || blk_needs == [2]) &&
@@ -417,7 +417,7 @@ class CodeGen
   # (CoreBlockParamSigs). Returns { block parameter register => hint }, where a
   # hint is the class name (a STRICT_HINTS element hint, as before) for the shapes
   # this pass always had, and a SoftElementHint for the rest: those keep their
-  # by-name else arm until a verify build reviews them (docs/adr/0419).
+  # by-name else arm until a verify build reviews them.
   # The element class comes from the same scans as before (proven_element_class /
   # proven_hash_element_class, i.e. ArrayElementLayout's ivar facts, `Array[C]`
   # ivar and return signatures, and locals traced to them), so no new purity
@@ -631,7 +631,7 @@ class CodeGen
 
   def emit_proc_fallback_fn_body(region, d, fn_prefix)
     block_irep = region[:block_irep]
-    # BLOCK_SELF_WORLD (ADR 0477): every block or lambda body compiled here reads its creator's self; a rebound one
+    # BLOCK_SELF_WORLD: every block or lambda body compiled here reads its creator's self; a rebound one
     # never runs under it. The recognizers already skip these; this keeps any other caller from compiling one.
     return nil if !runtime_def_fallback_kind?(region[:kind]) && block_self_rebound?(block_irep.label)
     mand = mandatory_arity(block_irep)
@@ -688,7 +688,7 @@ class CodeGen
     # DEEP_UPVAR_CAPTURE_SUPPORT: this body's own captured set, which nested
     # regions may forward.
     #
-    # NESTED_BLOCK_FORWARD (ADR 0330): a nested region is entered from inside
+    # NESTED_BLOCK_FORWARD: a nested region is entered from inside
     # this body's cfunc, so the block it can forward is the one THIS body holds
     # (an `lv == 2` BLKPUSH resolves to its parent region), not the method's.
     # The DEPTH is fixed here, before the recursion: a child's level is this
@@ -696,7 +696,7 @@ class CodeGen
     saved_nested_depth = @block_fallback_depth
     @block_fallback_depth = fn_prefix ? @block_fallback_depth.to_i + 1 : 1
     # BLOCK_FALLBACK_YIELD_SUPPORT: the level a BLKPUSH in THIS body is matched
-    # against is this body's own nesting depth (NESTED_BLOCK_FORWARD, ADR 0330):
+    # against is this body's own nesting depth:
     # depth 1 reads the method's block, depth 2 its parent region's, and
     # uvenv(lv-1) is a different frame for each. Set here, before the nested
     # pass, so a child can derive its own level from it.
@@ -850,7 +850,7 @@ class CodeGen
     # it, caught here so it never reaches a call site.
     exits = kind == 'block_fallback' &&
             (BytecodeIR.for(block_irep).op?('BREAK') || BytecodeIR.for(block_irep).op?('RETURN_BLK'))
-    # BLOCK_DIRECT_ENTRY (ADR 0271): the entry replaces the cfunc wrapper for this block.
+    # BLOCK_DIRECT_ENTRY: the entry replaces the cfunc wrapper for this block.
     region[:direct_entry] = block_direct_entry?(region, kind, exits)
     region[:yield_free] = region[:direct_entry] && note_block_yield_free(region[:block_irep])
     if region[:direct_entry]
@@ -870,7 +870,7 @@ class CodeGen
       out << "  mrb_value bc2cpp_captured_self = bc2cpp_recv_self;\n"
     else
       out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_passed_self) {\n"
-      # BLOCK_SELF_WORLD (ADR 0477): the body runs under the captured self; a rebinder passing another one is a
+      # BLOCK_SELF_WORLD: the body runs under the captured self; a rebinder passing another one is a
       # closed-world violation (bc2cpp_block_self_check) unless the world proves no rebinder gets this block.
       out << (block_self_check? ? "  bc2cpp_block_self_check(M, bc2cpp_passed_self, \"#{fn_name}\");\n" : "  (void)bc2cpp_passed_self;\n")
       out << "  mrb_value bc2cpp_captured_self = mrb_proc_cfunc_env_get(M, 0);\n"
@@ -948,7 +948,7 @@ class CodeGen
     [fn_name, out]
   end
 
-  # BLOCK_DIRECT_ENTRY (ADR 0271): a block whose body neither breaks nor returns reads nothing from
+  # BLOCK_DIRECT_ENTRY: a block whose body neither breaks nor returns reads nothing from
   # the frame it is called in (those tokens are read from the calling cfunc's env), so a yield can
   # call it without pushing one. BC2CPP_BLOCK_DIRECT_ENTRY=0 keeps the cfunc wrapper everywhere.
   def block_direct_entry?(region, kind, exits)
@@ -1010,8 +1010,8 @@ class CodeGen
   # previous output.
   # BLOCK_SEMANTICS: `ret_token` / `brk_token` are the C++ expressions for the
   # method's return token and this site's break token (nil: the body has none).
-  # BLOCK_DIRECT_ENTRY (ADR 0271): `direct_entry` names the block's entry function; the proc is
-  # then built over bc2cpp_block_thunk with the entry and the YIELD_FREE flag (ADR 0283) as the two
+  # BLOCK_DIRECT_ENTRY: `direct_entry` names the block's entry function; the proc is
+  # then built over bc2cpp_block_thunk with the entry and the YIELD_FREE flag as the two
   # last env slots.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
                               ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false)
@@ -1083,8 +1083,8 @@ class CodeGen
                                               ret_token: ret_token, brk_token: brk_token,
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
                                               yield_free: region[:yield_free])
-    # ARG_SHAPES_BLOCK (ADR 0265): a top-level site whose call resolves to compiled code.
-    # BLOCK_ARM_REACH (ADR 0310): a block nested in an inlined loop body takes the same arms, shifted.
+    # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
+    # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
     direct = if inline_offset.nil?
                compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def)
              elsif owner_def && block_arm_reach?

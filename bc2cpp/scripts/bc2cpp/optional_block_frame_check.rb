@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # encoding: UTF-8
-# OPTIONAL_BLOCK_FRAME (ADR 0330): a method with an optional argument AND a
+# OPTIONAL_BLOCK_FRAME: a method with an optional argument AND a
 # `&block` (`def permutation(n = size, &block)`) extracts `bc2cpp_blk` in its
 # wrapper, exactly as `def each(&block)` does -- but frame_block_available?
 # only recognised the latter, so a BLOCK_FALLBACK region inside the former was

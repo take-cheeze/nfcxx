@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Run mrbc and build the whole Irep tree from its RITE binary (ADR 0249, 0251).
+# Run mrbc and build the whole Irep tree from its RITE binary.
 
 # MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
 # `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.

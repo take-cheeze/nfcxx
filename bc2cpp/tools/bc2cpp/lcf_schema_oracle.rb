@@ -4,7 +4,7 @@ require 'json'
 require 'open3'
 require 'set'
 
-# LCF_SCHEMA_ORACLE (docs/adr/0285): what `LCF::Array1D#[]` can return for a schema field, from the schema
+# LCF_SCHEMA_ORACLE: what `LCF::Array1D#[]` can return for a schema field, from the schema
 # data alone. mruby-lcf/mrblib/schema.rb is a static table (chunk id => {name:, type:, default:, elements:});
 # Array1D#[] decodes the stored bytes through LCF.to_rb, so the class of a read is fixed by the field's
 # `type` and, for an absent chunk, by its `default`, whatever any writer stores (LCF.encode turns every

@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 
-# Container shapes on the IR (ADR 0502): the literal that built the Array or Hash a register holds, the registers
+# Container shapes on the IR: the literal that built the Array or Hash a register holds, the registers
 # its elements and pairs came from, and the value class each producer of a register gives. RecordHash,
 # ArrayElementLayout / HashElementLayout and SEALED_HASH_IVAR read these instead of indexing irep.instructions.
 module BytecodeIR

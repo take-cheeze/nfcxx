@@ -3,7 +3,7 @@
 require 'fileutils'
 require 'set'
 
-# TYPE_CHECK_RBS (docs/adr/0414): the inferred types of a type-check run (type_facts.rb) as RBS files, so Steep,
+# TYPE_CHECK_RBS: the inferred types of a type-check run (type_facts.rb) as RBS files, so Steep,
 # TypeProf and RBS-aware editors can read what bc2cpp proved. `scripts/bc2cpp/type_check.rb --emit-rbs DIR` writes one
 # `.rbs` per class / module below DIR (Game::Actor -> DIR/Game/Actor.rbs).
 #

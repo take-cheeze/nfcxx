@@ -25,14 +25,14 @@ require_relative 'call_site_index'
 #     :nil_literal case in the contradiction check turned on.
 #   * it must not join two different classes into one. ClassLayout's join
 #     collapses any disagreement to UNKNOWN, and that stickiness is load-bearing
-#     (docs/adr/0139: dropping an UNKNOWN because a concrete type arrived first
-#     wrongly embedded ivars in Game::Screen and Game::State). Two call sites
+#     (dropping an UNKNOWN because a concrete type arrived first wrongly embedded
+#     ivars in Game::Screen and Game::State). Two call sites
 #     passing different classes mean the position is genuinely unknown, so this
 #     records nil rather than picking a winner.
 #   * it must not feed IvarLayout or ClassLayout. This table is a REPORTING and
 #     CHECKING artifact only. Feeding it into either analysis would make a new
-#     inference feed a fixed point that ADR 0139's order-independence argument
-#     was written about, for no proven benefit.
+#     inference feed a fixed point that must stay order-independent, for no
+#     proven benefit.
 class ClassArgTypes
   def self.analyze(ireps, registry, owner_of, class_layout = {}, container_constants = nil, call_sites: nil)
     call_sites ||= CallSiteIndex.build(ireps)

@@ -80,7 +80,7 @@ module BytecodeIR
       @source_list.equal?(irep.instructions) && @source_size == Array(@source_list).length
     end
 
-    # BYTECODE_IR_FACTS (ADR 0467): the per-instruction successor lists, frozen, index-aligned with #instructions:
+    # BYTECODE_IR_FACTS: the per-instruction successor lists, frozen, index-aligned with #instructions:
     # normal flow, which already carries OP_ENTER's edges into its optional-argument JMP table (#build_edges).
     # Analyses that walk the graph share this one Array instead of rebuilding it.
     def successor_lists
@@ -95,7 +95,7 @@ module BytecodeIR
     end
 
     # The one slot an analysis may use to keep a table it derives from this Program's facts: NumericFlow's
-    # per-instruction Step table (NumericFlow.table, ADR 0467). Nothing else is cached here, and nothing an oracle
+    # per-instruction Step table. Nothing else is cached here, and nothing an oracle
     # answers ever is.
     attr_accessor :numeric_flow_table
 

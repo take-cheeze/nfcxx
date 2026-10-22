@@ -5,7 +5,7 @@ require 'set'
 require_relative 'native_names'
 require_relative 'native_rom_extract'
 
-# Direct-call candidates for mruby core's native methods, from the clang AST (ADR 0257 / 0263).
+# Direct-call candidates for mruby core's native methods, from the clang AST.
 #
 #   clang -fsyntax-only -Xclang -ast-dump=json <flags> 3rd/mruby/src/array.c |
 #     ruby tools/bc2cpp/native_core_candidates.rb 3rd/mruby/src/array.c

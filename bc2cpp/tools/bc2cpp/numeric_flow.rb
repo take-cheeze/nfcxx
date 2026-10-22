@@ -5,7 +5,7 @@ require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_numeric'
 
-# NUMERIC_FLOW (ADR 0276): a forward dataflow over one irep that says which
+# NUMERIC_FLOW: a forward dataflow over one irep that says which
 # registers provably hold an Integer (fixnum or bigint), a Float, an exact
 # Array/Hash/String or nil at each instruction. It is the unguarded proof behind
 # dropping the dynamic-send else of the guarded arithmetic and compare arms; it
@@ -22,12 +22,12 @@ require_relative 'bytecode_ir_numeric'
 #   RNG   exactly ::Range; EXC a pending exception object (what EXCEPT reads); and the bits from 1 << 9 up: exactly one closed-world class each
 #         (CodeGen#numeric_class_bit). They enter through a proven `Klass.new`, a Range literal, or a true, false or
 #         Symbol literal (LOADTRUE, LOADFALSE, LOADSYM: TrueClass, FalseClass, Symbol) and reach other methods only
-#         through return values (ADR 0289) or the class pools. The Symbol bit also comes from a Symbol element of a
-#         frozen literal (FROZEN_TABLES, ADR 0424) and from a LOADSYM register (ADR 0429, the numeric oracle's
+#         through return values or the class pools. The Symbol bit also comes from a Symbol element of a
+#         frozen literal and from a LOADSYM register (the numeric oracle's
 #         literal_class_mask). FalseClass is the one falsy class bit: a truthiness
 #         test leaves it on the falsy edge only. The oracle's false_class_bit names it; an oracle that names none
 #         keeps every class bit on both edges (falsy_class_bits).
-# Bits from OBJECT_KIND_BASE up are object kinds the oracle names (LcfRowFlow, ADR 0294): each is
+# Bits from OBJECT_KIND_BASE up are object kinds the oracle names: each is
 # "exactly an instance of that kind" and truthy, like ARR. Unlike the class bits they ride through
 # pooled arguments, ivars and constants; what a bit means, and what `[]` on it returns, is the
 # oracle's (`index_mask`).
@@ -38,7 +38,7 @@ require_relative 'bytecode_ir_numeric'
 # Instance variables the compiler tracks ride along as extra registers past the
 # real ones ("slots"), so `@i = 0; ... @i + 1` and a loop-carried `@i += 1`
 # are ordinary dataflow. What another method may store into a slot is bounded by
-# the whole-program fact the oracle supplies (ADR 0276). A register loaded
+# the whole-program fact the oracle supplies. A register loaded
 # from a slot or copied from another register remembers it (its provenance)
 # until either changes, so `return unless @x` narrows the slot the test read and
 # `r ? r + 1 : 0` the variable behind the copy the test used, not only the
@@ -66,7 +66,7 @@ module NumericFlow
   # Bits a fact outside one method (argument, ivar, constant) may not carry: OTHER, Range, EXC and
   # every class bit. Only return values ship them across methods. Object kinds are not among them.
   OPAQUE = OTHER | (((1 << OBJECT_KIND_BASE) - 1) & (-1 << 7))
-  # Provenance, not a class (ADR 0370): the set came from a pool whose completeness is a runtime-checked claim. A mask
+  # Provenance, not a class: the set came from a pool whose completeness is a runtime-checked claim. A mask
   # that carries it never equals a class bit, so every unguarded decoder refuses it; only CHECKED_POOL_EXACT reads it.
   CHECKED = 1 << (OBJECT_KIND_BASE - 1)
   # The result of a blockless Enumerator maker (`map` with no block on an exact Array or Hash). It is a fixed bit, not
@@ -170,7 +170,7 @@ module NumericFlow
   # each register the union of every value any instruction stores into it (what
   # a block created earlier may see when it runs later).
   #
-  # NUMERIC_FLOW_SPEED (ADR 0467), NUMERIC_CLASSES (ADR 0500): the flow reads the irep's bytecode facts from its
+  # NUMERIC_FLOW_SPEED, NUMERIC_CLASSES: the flow reads the irep's bytecode facts from its
   # BytecodeIR::Program (successor lists, raise targets, rescue-only targets, the decode and operands, the instructions
   # the oracle is asked about, the literal-element proof) and derives its own Step table from them once
   # (NumericFlow.table), keeps the run's facts in a Ctx with the oracle's optional methods looked up once, and joins
@@ -231,7 +231,7 @@ module NumericFlow
       step = steps[i]
       out = step_transfer(i, insn, step, st, c)
       # Every instruction of a protected range may raise into its handler, where the registers
-      # are as they were at the raise (ADR 0289): the state before the op, widened by what a
+      # are as they were at the raise: the state before the op, widened by what a
       # callee can do, or after it.
       if (handlers = raises[i])
         edge = step_raise_state(step, st, out, c)
@@ -425,7 +425,7 @@ module NumericFlow
       c.elide_load_copies = ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] != '0'
       c.elide_result_copies = ENV['BC2CPP_NUMERIC_RESULT_COPY_ELISION'] != '0'
       c.elem_base = nregs + slots.size
-      # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
+      # CLASS_NARROWING: a third block of nregs entries after the provenance, one per register, naming the
       # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
       if oracle.respond_to?(:class_narrowing_active?) && oracle.class_narrowing_active?
         # A constant lookup runs Ruby only through const_missing; without one, `is_a?(Foo)` does not forget the ivars.
@@ -591,7 +591,7 @@ module NumericFlow
     target
   end
 
-  # CLASS_NARROWING (ADR 0375): the register tested by the branch holds the boolean of a class test, so on the edge
+  # CLASS_NARROWING: the register tested by the branch holds the boolean of a class test, so on the edge
   # where it is +truth+ the tested value and every variable it was copied from (the chain, recorded when the test
   # ran) is narrowed by the test's predicate. nil when no value can take the edge.
   def narrow_by_class_test(state, reg, truth, c)
@@ -764,7 +764,7 @@ module NumericFlow
 
   # Masks join by union; a provenance survives only when both sides agree. +old+ itself when nothing changes, so a
   # caller tells growth by identity; nothing is allocated until the first entry that changes.
-  # Flow-owned incoming states are read-only: transfers and edge refinements copy before mutation (ADR 0529).
+  # Flow-owned incoming states are read-only: transfers and edge refinements copy before mutation.
   # Standalone callers retain the copy on the first edge unless they explicitly share that invariant.
   def join_state(old, new, prov_base, share_states = false)
     return share_states ? new : new.dup if old.nil?
@@ -1056,7 +1056,7 @@ module NumericFlow
   end
 
   # Non-call ops that dispatch to Ruby the flow does not follow, with the same `self`
-  # (ADR 0276 addendum): an operator on a non-number, an index on anything but an exact
+  # an operator on a non-number, an index on anything but an exact
   # Array with an Integer index, interpolation, hash/array splat, range or constant lookup.
   SILENT_CALL_OPS = Set['ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'GETIDX', 'GETIDX0', 'SETIDX',
                         'STRCAT', 'HASH', 'HASHADD', 'HASHCAT', 'ARYCAT', 'ARYSPLAT', 'AREF', 'RANGE_INC',

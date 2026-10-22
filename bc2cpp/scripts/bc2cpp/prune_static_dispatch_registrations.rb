@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # encoding: UTF-8
 # Removes the hand-written register.cxx line for every compiled entry named in
-# tools/bc2cpp/static_dispatch_unregistered.rb (docs/adr/0203). The generated
+# tools/bc2cpp/static_dispatch_unregistered.rb. The generated
 # registration for BC2CPP_WIRED_EMBEDDINGS owners already skips those names
 # itself (bc2cpp.rb's emit_owner_registrations); this is the same for the
 # hand-maintained lines of every other owner. Needs no mrbc: a line is removed

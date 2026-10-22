@@ -6,7 +6,7 @@ require_relative 'bytecode_ir'
 # CodeGen: compile_method and jump targets.
 
 class CodeGen
-  # One inlined-loop kind (ADR 0152): `recognize`/`emit` are CodeGen methods,
+  # One inlined-loop kind: `recognize`/`emit` are CodeGen methods,
   # `anchor` is the region key the glue lands at (with :sendb_addr, the
   # addresses claimed and checked against the rescue range), and `context`
   # says the recognizer takes (owner, mand, ivar layout, annotated args).
@@ -19,7 +19,7 @@ class CodeGen
   # regions (#1909, RESCUE_INLINE_BLOCK_FIX in compile_method).
   INLINE_LOOP_PASSES = [
     InlineLoopPass.new(:recognize_times_regions, :emit_times_inline, :block_addr, false), # BLOCK_SUPPORT
-    InlineLoopPass.new(:recognize_step_regions, :emit_step_inline, :block_addr, false), # STEP_LOOP_SUPPORT (ADR 0273)
+    InlineLoopPass.new(:recognize_step_regions, :emit_step_inline, :block_addr, false), # STEP_LOOP_SUPPORT
     InlineLoopPass.new(:recognize_each_regions, :emit_each_inline, :block_addr, true), # EACH_BLOCK_SUPPORT
     InlineLoopPass.new(:recognize_each_index_regions, :emit_each_index_inline, :block_addr, true), # EACH_INDEX_SUPPORT
     InlineLoopPass.new(:recognize_hash_each_regions, :emit_hash_each_inline, :block_addr, true), # HASH_EACH_SUPPORT
@@ -39,13 +39,13 @@ class CodeGen
     # depends on.
     InlineLoopPass.new(:recognize_profiler_section_regions, :emit_profiler_section_inline, :block_addr, false),
     InlineLoopPass.new(:recognize_sort_regions, :emit_sort_inline, :block_addr, true), # SORT_BLOCK_SUPPORT
-    InlineLoopPass.new(:recognize_array_new_regions, :emit_array_new_inline, :block_addr, true) # ARRAY_NEW_BLOCK (ADR 0391)
+    InlineLoopPass.new(:recognize_array_new_regions, :emit_array_new_inline, :block_addr, true) # ARRAY_NEW_BLOCK
   ].freeze
 
-  # RESCUE_TRY_INLINE (ADR 0376): the passes a rescue try body runs.
+  # RESCUE_TRY_INLINE: the passes a rescue try body runs.
   RESCUE_TRY_INLINE_PASSES = (INLINE_LOOP_PASSES.map(&:recognize) - [:recognize_profiler_section_regions]).freeze
 
-  # RESCUE_PROFILER_INLINE (ADR 0391): the profiler pass joins them. ADR 0376 kept it out on the belief that the
+  # RESCUE_PROFILER_INLINE: the profiler pass joins them. It was kept out on the belief that the
   # block call it replaces closes the section when the body raises. It does not: prof_section/prof_frame
   # (mruby-rgss/src/profiler.cxx) call profiler_section_end/profiler_frame_end after mrb_yield_argv returns, with no
   # unwinding guard, so a raise skips the end call there exactly as it skips the inlined one.
@@ -57,7 +57,7 @@ class CodeGen
   end
 
   # INLINE_LOOP_PASSES over one scope: a region not in `claimed` is emitted, its addresses join
-  # `suppressed` and its code `glue_at`. `try_range` (emit_rescue_try_body, ADR 0376) filters the
+  # `suppressed` and its code `glue_at`. `try_range` filters the
   # whole-method regions to a protected range (rescue_try_inlinable?).
   def run_inline_loop_passes(irep, d, mand, claimed, suppressed, glue_at, try_range: nil, guarded: nil)
     return with_guarded_inline_sites { run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, guarded) } if guarded && !try_range
@@ -94,7 +94,7 @@ class CodeGen
           next
         end
 
-        # GUARDED_BLOCK_INLINE (ADR 0420): the send stays; the loop runs ahead of it behind a class test, once the
+        # GUARDED_BLOCK_INLINE: the send stays; the loop runs ahead of it behind a class test, once the
         # send's arms are known (guarded_inline_finish).
         if guarded_klass
           guarded[:pending] << { region: region, inlined: inlined, klass: guarded_klass, anchor: anchor,
@@ -112,12 +112,12 @@ class CodeGen
     @ir_inline_remaining = 512
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
-    # ADR 0264: mruby's own methods are compiled with no closed-world proof (the closed
+    # mruby's own methods are compiled with no closed-world proof (the closed
     # world is the engine's Ruby) and may bind statically only to core definitions.
     if d.core && @closed_world
       saved_world = @closed_world
       @closed_world = nil
-      # BLOCK_CORE_DIRECT (ADR 0270): the program-wide facts (no outside definer, no installer)
+      # BLOCK_CORE_DIRECT: the program-wide facts (no outside definer, no installer)
       # hold for core bodies too; only the static-binding proofs are withheld from them.
       @core_program_world = saved_world
       begin
@@ -217,8 +217,8 @@ class CodeGen
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
       # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
       # outright -- unless it is a Fiber.new root that qualifies as a resumable step
-      # function (RESUMABLE_ROOTS, ADR 0273), or its own body cannot suspend, in which
-      # case it compiles behind a run-time hand-off (FIBER_BODY_GUARD, ADR 0333).
+      # function, or its own body cannot suspend, in which
+      # case it compiles behind a run-time hand-off.
       plan = resumable_plan(label)
       if plan.is_a?(ResumablePlan)
         resumable = plan
@@ -238,7 +238,7 @@ class CodeGen
       end
     end
 
-    # ENTRY_GUARDED_SPECIALIZATION (ADR 0380): nil unless BC2CPP_SPECIALIZE names this method.
+    # ENTRY_GUARDED_SPECIALIZATION: nil unless BC2CPP_SPECIALIZE names this method.
     entry_spec = entry_specialization(label, d, irep, arg_names, arg_native_types,
                                       entry_specialization_eligibility(mandatory_ok: mandatory_ok, opt: opt, has_rest: has_rest, has_blk: has_blk,
                                                                        needs_blk_param: needs_blk_param, kw_table: kw_table, resumable: resumable,
@@ -511,14 +511,14 @@ class CodeGen
     end
     # RESUMABLE_ENTRY: the method's own instructions are the flat part of the step function.
     @resumable.flat = true if @resumable
-    # REGISTER_FLOW (ADR 0415): an ordinary method keeps each instruction's text
+    # REGISTER_FLOW: an ordinary method keeps each instruction's text
     # apart until the whole body exists, so dead copies can be dropped.
     flow_captured = RegisterFlow.captured_registers(irep) if !@resumable && prefix_at.empty? && RegisterFlow.enabled?
     flow_bodies = flow_captured && Array.new(irep.instructions.length, '')
     flow_labels = flow_captured && Array.new(irep.instructions.length, '')
     # ARM_PRUNE stage B (BC2CPP_PRUNE_ARMS=1): the held-back text is restored unless the method has no other emitter that
     # works per instruction (suppressed, glue, prefix, guarded, resumable step). Register flow's captured registers do not
-    # refuse it: they are pinned, and an unreachable write never runs, so a live read sees the same value (ADR 0535).
+    # refuse it: they are pinned, and an unreachable write never runs, so a live read sees the same value.
     arm_texts = {}
     arm_prune_drop = arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !@resumable &&
                      suppressed.empty? && glue_at.empty? && prefix_at.empty? && guarded_inline[:at].empty? &&
@@ -771,7 +771,7 @@ class CodeGen
     aspec << 'MRB_ARGS_REST()' if has_rest
     aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
-    # DECLARED_RETURN_GUARD (ADR 0455): a runtime-checked return declaration checks every value the body returns.
+    # DECLARED_RETURN_GUARD: a runtime-checked return declaration checks every value the body returns.
     out = declared_return_guard_wrap(label, out, impl_name)
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
@@ -822,7 +822,7 @@ class CodeGen
       unsupported: true, visibility: d.visibility }
   end
 
-  # CORE_BLOCK_GUARD (ADR 0269): the entry of a core method that touches a block first
+  # CORE_BLOCK_GUARD: the entry of a core method that touches a block first
   # checks whether a Fiber is running and, if so, lets the VM run the bytecode instead
   # (bc2cpp_core_interpreted). A compiled frame under a block that calls Fiber.yield
   # cannot be suspended, and a frame in the root context never is: a yield there is a
@@ -831,11 +831,11 @@ class CodeGen
   # An Enumerable method also needs an `each` that the core defines, since a block
   # captured by pointer must not outlive the frame (BLOCK_FALLBACK_UPVAR_SAFE_METHODS).
   # Returns { index:, prologue: } or nil for an unguarded method.
-  # FIBER_BODY_GUARD (ADR 0333): may this Fiber-reachable method compile behind a
+  # FIBER_BODY_GUARD: may this Fiber-reachable method compile behind a
   # run-time hand-off instead of staying interpreted?
   #
   # Only when its OWN body cannot suspend. `core_body_relaxable?` is YieldReach
-  # (ADR 0283) answering exactly that, and it is the same question CORE_BLOCK_GUARD
+  # answering exactly that, and it is the same question CORE_BLOCK_GUARD
   # already asks of a core body before narrowing its guard condition (below). The
   # yield that matters happens in the block the CALLER supplied, which is not
   # running inside this frame -- and it is not proved yield-free, because it cannot
@@ -876,7 +876,7 @@ class CodeGen
     return nil unless d.core && self.class.core_guarded&.include?(label)
 
     index = (@core_guard_index[label] ||= @core_guard_index.size)
-    # YIELD_REACH (ADR 0283): a body that cannot suspend a Fiber on its own stays compiled under one
+    # YIELD_REACH: a body that cannot suspend a Fiber on its own stays compiled under one
     # while the block it runs is provably yield-free too (checked per call, by its env flag).
     condition = if core_body_relaxable?(label)
                   '(M->c != M->root_c && !bc2cpp_block_yield_free(bc2cpp_entry_block(M)))'

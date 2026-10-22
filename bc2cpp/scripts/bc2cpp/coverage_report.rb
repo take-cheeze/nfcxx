@@ -190,7 +190,7 @@ errored = errored_names.size
 
 clean_names = compiled_names - errored_names
 synthesized_count = (compiled_names - attempted_names).size
-# CORE_DEFS (ADR 0264): the entries compiled from mruby's own Ruby. An owner both an engine gem and
+# CORE_DEFS: the entries compiled from mruby's own Ruby. An owner both an engine gem and
 # core sources define methods on (Array, StringIO) is attributed by where each method comes from.
 core_section = err[/== core-source compiled entry points \(\d+\) ==\n(.*?)(?=\n==|\z)/m, 1].to_s
 core_keys = core_section.lines.map(&:strip).reject(&:empty?).to_set
@@ -264,7 +264,7 @@ record_lines = section_lines(err, 'record hash slots (RECORD_HASH_PROOF)')
 report << "record-like Hash slots proven (RECORD_HASH_PROOF): #{record_lines.count { |l| l.start_with?('RECORD_HASH ') }} " \
           "accepted, #{record_lines.count { |l| l.start_with?('RECORD_HASH_REFUSED') }} refused\n"
 report << "  exact-class direct calls through a record key: #{@shipped_stdout.scan('record key holds only fresh').size}\n"
-# LCF_ROW_FLOW (ADR 0294): whether the LCF object-kind proof is on, the receivers it proved an exact class
+# LCF_ROW_FLOW: whether the LCF object-kind proof is on, the receivers it proved an exact class
 # (a direct call, no guard), and the untyped GETIDX sites still behind the generic class gate.
 lcf_state = err[/== LCF row flow \(LCF_ROW_FLOW\) ==\n  (.*)/, 1].to_s
 lcf_calls = @shipped_stdout.scan(%r{^\s*// LCF_ROW_FLOW :(\S+) -> (\S+)}).map(&:last).tally
@@ -300,7 +300,7 @@ report << "methods proven Fixnum-returning (FIXNUM_RETURN_PROOF): #{count(err, '
 # RETURN, or a second definition of its bare name anywhere (including in
 # mruby's own mrblib) removes the name and with it every loop it unblocked.
 report << "methods proven Array-returning (ARRAY_RETURN_PROOF): #{count(err, 'methods proven Array-returning (ARRAY_RETURN_PROOF)', placeholder: '(none)')}\n"
-# NUMERIC_OPERAND_PROOF (ADR 0276): whole-program class-set facts, by kind. Like
+# NUMERIC_OPERAND_PROOF: whole-program class-set facts, by kind. Like
 # the counts above they move silently with the Ruby sources: one write of a
 # String to an ivar drops the ivar, and every arithmetic site it fed regains its
 # dynamic-send else.
@@ -309,15 +309,15 @@ numeric_kinds = { 'NUMARG' => 'entry arguments', 'NUMIVAR' => 'instance variable
                   'NUMRET' => 'method names returning', 'NUMCONST' => 'constants', 'NUMTUPLE' => 'tuple-returning names' }
 report << "numeric operand facts (NUMERIC_OPERAND_PROOF): " \
           "#{numeric_kinds.map { |tag, what| "#{numeric_lines.count { |l| l.start_with?("#{tag} ") }} #{what}" }.join(', ')}\n"
-# RETURN_CLASS_TABLE (ADR 0294): names every call of which returns one exact class.
+# RETURN_CLASS_TABLE: names every call of which returns one exact class.
 report << "return-class table (RETURN_CLASS_TABLE): #{count(err, 'return class table (RETURN_CLASS_TABLE)')} names with one exact class\n"
-# CLASS_POOLS (ADR 0296, ADR 0301): ivar, argument and constant class sets carried across methods.
+# CLASS_POOLS: ivar, argument and constant class sets carried across methods.
 pool_lines = section_lines(err, 'class pools (CLASS_POOLS)')
 pool_lines = [] if pool_lines == ['(none)']
 report << "class pools (CLASS_POOLS): #{pool_lines.count { |l| l.start_with?('CLASSIVAR ') }} ivar pools, " \
           "#{pool_lines.count { |l| l.start_with?('CLASSARG ') }} argument pools, " \
           "#{pool_lines.count { |l| l.start_with?('CLASSCONST ') }} constant pools\n"
-# ADR 0279: typed (mrb_int, mrb_sym, mrb_bool) ivar slots given back to boxed slots because a writer
+# Typed (mrb_int, mrb_sym, mrb_bool) ivar slots given back to boxed slots because a writer
 # the compiler cannot type (attr_writer, computed setter, reflection) can reach them.
 boxed_lines = section_lines(err, 'typed slots demoted to boxed slots (foreign writers, ADR 0279)')
 boxed_lines = [] if boxed_lines == ['(none)']
@@ -495,7 +495,7 @@ end
 @shipped_stdout.scan(/^\s*\/\/ POLY :(\S+) --/).each { |match| poly_dynamic_names[match.first] += 1 }
 poly_dynamic_sites = poly_paths.sum { |path, count| path.start_with?('dynamic_') ? count : 0 }
 direct_new_sites = @shipped_stdout.scan(/^\s*\/\/ MONO :new -> /).size
-# Literal-block sends: BLOCK_CORE_DIRECT (ADR 0270) keeps the POLY marker of its dynamic else, so
+# Literal-block sends: BLOCK_CORE_DIRECT keeps the POLY marker of its dynamic else, so
 # those sites stay in the POLY counts below although the common receivers no longer dispatch.
 block_direct_sites = @shipped_stdout.scan(/^\s*\/\/ BLOCK_FALLBACK :.*direct call with the block/).size
 block_dynamic_sites = @shipped_stdout.scan(/^\s*\/\/ BLOCK_FALLBACK :.*dynamic dispatch/).size
@@ -505,8 +505,8 @@ report << "-- dynamic dispatch remaining (real shipped build, SKIP_UNSUPPORTED=1
 report << "cached bc2cpp_send/mrb_funcall_with_block sites, including guarded fallbacks: #{total_dispatch}\n"
 report << "  POLY-marked (receiver's runtime class genuinely decides): #{shipped_poly}\n"
 # Guarded arithmetic/compare arms: each carries a tag comment, and one that keeps
-# its dynamic-send else has a send in the lines after it (NUMERIC_OPERAND_PROOF,
-# ADR 0276, removes it where both operands are proven Integer/Float).
+# its dynamic-send else has a send in the lines after it (NUMERIC_OPERAND_PROOF
+# removes it where both operands are proven Integer/Float).
 guarded_tags = %w[FIXNUM_ARITHMETIC FIXNUM_COMPARE FLOAT_DIV_RECEIVER INTEGER_LSHIFT FIXNUM_SHIFT FIXNUM_BINARY INTEGER_UNARY]
 shipped_lines = @shipped_stdout.lines
 guarded_sites = Hash.new(0)
@@ -521,7 +521,7 @@ shipped_lines.each_with_index do |line, i|
   guarded_kept[tag] += 1 unless arm.any? { |l| l.include?('bc2cpp_slow_') }
 end
 numeric_proven_sites = @shipped_stdout.scan(%r{^\s*// NUMERIC_OPERAND_PROOF :}).size
-# NUMERIC_SLOW_PATH (ADR 0292): an arm's else is a typed helper call; the by-name call lives in the helper.
+# NUMERIC_SLOW_PATH: an arm's else is a typed helper call; the by-name call lives in the helper.
 slow_calls = Hash.new(0)
 @shipped_stdout.scan(/= bc2cpp_slow_([a-z]+)(?:_f)?\(M,/) { |(key)| slow_calls[key] += 1 }
 slow_helper_sends = 0
@@ -533,13 +533,13 @@ report << "  guarded numeric arms whose else is a NUMERIC_SLOW_PATH helper call:
 report << "    by-name calls held by those helpers (one per operand class they do not own): #{slow_helper_sends}\n"
 report << "  arms whose send NUMERIC_OPERAND_PROOF removed (operands proven Integer/Float): #{numeric_proven_sites}\n"
 report << "  direct :new constructor paths emitted (some retain guarded fallback): #{direct_new_sites}\n"
-# ADR 0294: a TYPED call behind a class guard with a dynamic-send fallback, against the same call when
+# A TYPED call behind a class guard with a dynamic-send fallback, against the same call when
 # the receiver is proven exactly that class.
 typed_guarded_sites = @shipped_stdout.scan(%r{^\s*// TYPED :}).size
 typed_exact_sites = @shipped_stdout.scan(%r{^\s*// EXACT_TYPED :}).size
 report << "  TYPED calls: #{typed_guarded_sites} behind a class guard with a send fallback, " \
           "#{typed_exact_sites} guard-free (EXACT_TYPED)\n"
-# ADR 0296: a receiver proven nil-or-one-class takes one nil test; its non-nil path is the exact call.
+# A receiver proven nil-or-one-class takes one nil test; its non-nil path is the exact call.
 nilable_sites = @shipped_stdout.scan(%r{^\s*// NILABLE_RECEIVER :}).size
 nil_arms = @shipped_stdout.scan(/\bbc2cpp_nil_receiver\(M,/).size
 index_exact = @shipped_stdout.scan(%r{^\s*// INDEX_EXACT }).size

@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
-# CodeGen: NUMERIC_CONSTANT_RANGES consumer (ADR 0318).
+# CodeGen: NUMERIC_CONSTANT_RANGES consumer.
 #
 # fixnum_interval answers "is register +reg+ at +idx+ a Fixnum whose value lies in a known interval", from integer
 # literals, constants with a proven interval (IntegerConstantRanges) and + - * / of those. An arithmetic result is a
-# Fixnum here only because its interval fits the narrowest target Fixnum range (ADR 0279 retired the unbounded rule).
+# Fixnum here only because its interval fits the narrowest target Fixnum range.
 # The walk is single-path with proven_fixnum_operand?'s barriers; every hop must dominate the read it feeds
 # (BytecodeIR.write_dominates?), so a join gives up.
 class CodeGen
@@ -18,12 +18,12 @@ class CodeGen
 
   # BC2CPP_NUMERIC_CONSTANTS=0 off, and every constant binding visible: no const_set, remove_const or
   # const_missing, no global refusal.
-  # Not memoized: @closed_world is swapped for the world of a core method (ADR 0264).
+  # Not memoized: @closed_world is swapped for the world of a core method.
   def static_constant_world?
     IntegerConstantRanges.enabled? && !@closed_world.nil? && @closed_world.constants_static? && const_missing_free?
   end
 
-  # NUMERIC_INTERVAL_OPERANDS (ADR 0326): the interval proof also vouches for operands of the Fixnum proof's consumers.
+  # NUMERIC_INTERVAL_OPERANDS: the interval proof also vouches for operands of the Fixnum proof's consumers.
   # BC2CPP_NUMERIC_INTERVALS=0 turns that off (the output is master's).
   def numeric_intervals_on?
     ENV['BC2CPP_NUMERIC_INTERVALS'] != '0' && fixnum_intervals_on?

@@ -4,7 +4,7 @@ require 'json'
 require 'set'
 require_relative 'native_direct'
 
-# Classification of the RGSS native bindings (ADR 0263): which
+# Classification of the RGSS native bindings: which
 # mrb_define_method / mrb_define_class_method / mrb_define_module_function
 # registrations bind a function that can run without the caller's frame, and
 # so can be split into a frame-independent `rgss::<function>_direct` entry

@@ -20,7 +20,7 @@ class ArgTypes
 
     registry.each do |name, defs|
       next unless defs.size == 1 # MONO names only -- see this class's own comment.
-      next if dynamic.include?(name) # a computed-name send can pass anything (ADR 0279)
+      next if dynamic.include?(name) # a computed-name send can pass anything
       next unless defs.first.irep # native-only definition -- no bytecode body to walk.
 
       irep = ireps.fetch(defs.first.irep)

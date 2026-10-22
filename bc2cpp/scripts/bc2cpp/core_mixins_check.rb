@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# CORE_MIXINS (docs/adr/0261): mruby's own Enumerable/Comparable as known
+# CORE_MIXINS: mruby's own Enumerable/Comparable as known
 # mixins, and the definer scan (CoreMixins.definers_in) the source checks use.
 # The core Ruby methods that were inlined from a verified model (Numeric#
 # positive?/#negative?, Enumerable#min/#max) are no longer modelled, so they

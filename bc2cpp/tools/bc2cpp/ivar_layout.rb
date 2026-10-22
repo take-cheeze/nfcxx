@@ -149,7 +149,7 @@ class IvarLayout
             # It must NOT excuse a contribution the analysis can read and finds
             # to be something else. That distinction is the whole safety
             # argument: `ary + ary` reads UNKNOWN here (an arithmetic write is
-            # never a Fixnum, ADR 0279), and readable_but_other steps over the
+            # never a Fixnum), and readable_but_other steps over the
             # ADD to the Array literal, so a declaration cannot admit the Array
             # field as Integer-or-nil. `readable_but_other` is exactly the set
             # the analysis has already resolved to a different concrete type.
@@ -186,7 +186,7 @@ class IvarLayout
   # joins to UNKNOWN from either side. The sweep has no fixed order across
   # methods, so dropping an UNKNOWN because a concrete type arrived first would
   # make the result order-dependent and unsound (it wrongly embedded ivars in
-  # Game::Screen and Game::State; see ADR 0139).
+  # Game::Screen and Game::State).
   #
   # NILABLE_EMBED_SUPPORT: the one non-unanimous join is NIL against
   # :fixnum, in either order, producing FIXNUM_NIL: both values are immediates,
@@ -259,7 +259,7 @@ class IvarLayout
   # representable, since nil and an mrb_int are both immediates. Commutative
   # in both arguments and absorbing on both sides, so the sweep's method order
   # cannot change the answer -- the same property `join`'s sticky-UNKNOWN rule
-  # above exists to guarantee (ADR 0139).
+  # above exists to guarantee.
   NULLABLE_PAIRS = [
     %i[fixnum nil_literal].freeze,
     %i[fixnum_nil nil_literal].freeze,
@@ -270,7 +270,7 @@ class IvarLayout
     NULLABLE_PAIRS.any? { |left, right| (a == left && b == right) || (a == right && b == left) }
   end
 
-  # A hop whose write does not dominate its read (ADR 0261): join every reaching definition.
+  # A hop whose write does not dominate its read: join every reaching definition.
   JOIN_BREAK = :join_break
 
   # A query already being answered (a loop-carried value): the identity of the
@@ -316,7 +316,7 @@ class IvarLayout
   end
 
   # `% & | ^` are Fixnum only when both operands are (they never leave the Fixnum range);
-  # a cyclic one is BOTTOM. ADD/SUB/MUL/ADDI/SUBI are never Fixnum (ADR 0279).
+  # a cyclic one is BOTTOM. ADD/SUB/MUL/ADDI/SUBI are never Fixnum.
   def self.fixnum_operands(left, right)
     fix = ->(t) { t == :fixnum || t == BOTTOM }
     return nil unless fix.call(left) && fix.call(right)
@@ -394,7 +394,7 @@ class IvarLayout
 
         next UNKNOWN
       when 'ADD', 'SUB', 'MUL', 'ADDI', 'SUBI'
-        # ADR 0279: the result can leave the Fixnum range, where Integer#+ (and the
+        # The result can leave the Fixnum range, where Integer#+ (and the
         # compiled arm) builds a bigint that a mrb_int field cannot hold. An
         # arithmetic write therefore keeps the ivar an ordinary :value slot.
         next UNKNOWN
@@ -439,8 +439,7 @@ class IvarLayout
 
   # Same guarantee as CodeGen#native_only_mono?, duplicated because that one
   # reads CodeGen's @registry. `fetch`, not `[]`: the default proc would insert
-  # `name` while analyze iterates the registry (a name can have no def since
-  # docs/adr/0203).
+  # `name` while analyze iterates the registry (a name can have no def).
   def self.native_only_mono?(registry, name)
     defs = registry.fetch(name) { return false }
     defs.size == 1 && defs.first.irep.nil?

@@ -4,7 +4,7 @@ require_relative 'native_ivar_scopes'
 require_relative 'numeric_flow'
 require_relative 'core_hierarchy_sigs'
 
-# CodeGen: NUMERIC_IVAR_PROOF (ADR 0276).
+# CodeGen: NUMERIC_IVAR_PROOF.
 #
 # What class set can `@name` hold? One whole-program fact per (family, name):
 # the join of the class sets of every value any SETIV stores, computed by the
@@ -35,8 +35,8 @@ require_relative 'core_hierarchy_sigs'
 # Fixnum-embedded fields keep their own guarantee: Integer, never unassigned.
 class CodeGen
   # `structural` is the part of `failed` that does not depend on a flow (a poisoned name, a wild family,
-  # an attr_writer), which the class pools of ADR 0295 reuse.
-  # `checked` (ADR 0370) is nil, or the stores outside the group's own SETIVs that its class pool may account for
+  # an attr_writer), which the class pools reuse.
+  # `checked` is nil, or the stores outside the group's own SETIVs that its class pool may account for
   # instead: { setters: [setter names], classes: [classes natives construct] }. The numeric proof ignores it.
   NumericIvarGroup = Struct.new(:family, :name, :mask, :sites, :readers, :failed, :structural, :checked)
 
@@ -239,7 +239,7 @@ class CodeGen
     end
   end
 
-  # SETTER_POOLS (ADR 0370): a group the numeric proof refuses only because an attr_writer or an audited native
+  # SETTER_POOLS: a group the numeric proof refuses only because an attr_writer or an audited native
   # writes it still has a class pool when every such store is a visible setter call or a class the audit names.
   def checked_pool_stores(group, native_family, wrote)
     return nil unless wrote || native_family
@@ -365,7 +365,7 @@ class CodeGen
   # the model, as for every embedded ivar). For each class K in the subtree:
   #   * the #initialize K resolves to (its own, else the superclass's) must
   #     assign the ivar on every path before `self` can reach other code
-  #     (BytecodeIR's INIT_ASSIGNED must-analysis, ADR 0261), where a `super`
+  #    , where a `super`
   #     counts as an assignment when the superclass assures it, and as harmless
   #     when the superclass's #initialize never lets `self` out;
   #   * K has exactly one #initialize, no prepend, no included module defining
@@ -391,7 +391,7 @@ class CodeGen
     end
   end
 
-  # A core body compiles with no closed world (ADR 0264): nothing is assured there, the same as
+  # A core body compiles with no closed world: nothing is assured there, the same as
   # numeric_ivar_prerequisites_missing?.
   def numeric_ivar_assured_uncached?(owner, ivar)
     return false if @closed_world.nil?

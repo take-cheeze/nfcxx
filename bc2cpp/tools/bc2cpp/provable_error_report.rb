@@ -5,7 +5,7 @@ require_relative 'bytecode_ir_ops'
 require_relative 'call_facts'
 require_relative 'compiled_gems'
 
-# Debug report for errors the compiler can prove (ADR 0317): with BC2CPP_PROVABLE_ERROR_REPORT=<path>,
+# Debug report for errors the compiler can prove: with BC2CPP_PROVABLE_ERROR_REPORT=<path>,
 # every send or operator of the engine ireps whose generated code can only raise is written as one TSV row.
 # It measures; it changes no generated code.
 #

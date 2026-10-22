@@ -6,7 +6,7 @@
 # docs/bc2cpp-dynamic-site-census.md). Each transfer has a positive case
 # (the walk answers through the op) and a negative case (the answer stays a
 # refusal). Codegen never passes origin_transfers:, so the default walk must
-# still refuse at these ops, except a plain JMPUW and a dead predecessor (ADR 0476).
+# still refuse at these ops, except a plain JMPUW and a dead predecessor.
 require_relative '../../../tools/bc2cpp/irep'
 require_relative '../../../tools/bc2cpp/bytecode_ir'
 
@@ -154,7 +154,7 @@ check.call('ENTER typed slots are origin-only: the default walk still answers th
 check.call('ENTER typed slots are origin-only: the default walk still answers the entry value for a local',
            defs_of.call(enter.call(full, nlocals: 9), 1, '7') == [:entry])
 
-# ADR 0476: two facts the default walk shares with the origin walk.
+# Two facts the default walk shares with the origin walk.
 # A predecessor no execution reaches supplies nothing to a live state.
 #   0: LOADI_1 R1   1: JMP -> 8   2: JMP -> 8 (dead)   3: LOADI_2 R1 (dead)   4: RETURN R1 (@8, the join)
 dead_join = program.call([

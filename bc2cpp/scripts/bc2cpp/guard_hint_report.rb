@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Aggregate the BC2CPP_GUARD_HINT_REPORT TSV (tools/bc2cpp/guard_hint_report.rb, ADR 0295):
+# Aggregate the BC2CPP_GUARD_HINT_REPORT TSV:
 # how many sites of each hint-based guard family end in a nomethod, a kept dispatch or no else,
 # and where the receiver register came from.
 #

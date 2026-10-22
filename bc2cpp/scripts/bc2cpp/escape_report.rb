@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Aggregate the BC2CPP_ESCAPE_REPORT TSV (tools/bc2cpp/escape_report.rb, ADR 0316): per creation kind,
+# Aggregate the BC2CPP_ESCAPE_REPORT TSV: per creation kind,
 # how many sites the shared escape analysis proves non-escaping, why the rest escape, and what that is
 # worth to each consumer. Given the shipped C++ of the same run, a second pass counts only the sites in
 # methods that ship (the ones the build actually contains).

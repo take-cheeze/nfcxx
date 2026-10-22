@@ -2,7 +2,7 @@
 
 require_relative 'native_direct'
 
-# NATIVE_DIRECT (docs/adr/0253): exact-class arms that call the RGSS natives'
+# NATIVE_DIRECT: exact-class arms that call the RGSS natives'
 # frame-independent entry points (include/rgss_construct.hxx), placed in the
 # else of a call site's guard chain. Every other receiver keeps the chain's
 # fallback: ordinary dispatch, or, in a closed world where the arms name every
@@ -11,7 +11,7 @@ require_relative 'native_direct'
 # Prepended to CodeGen, so it wraps guarded_fallback_line (codegen_send.rb)
 # without editing it.
 module NativeDirectFallback
-  # ADR 0358: the :int tag test of an arm wrapper is dropped when the Fixnum proof covers
+  # The :int tag test of an arm wrapper is dropped when the Fixnum proof covers
   # the argument (the same test codegen_send.rb and codegen_native_exact_direct.rb already
   # drop). BC2CPP_NATIVE_INT_GUARDS=0 is the control.
   def native_int_guard_needed?(int_site, argv, position)
@@ -113,7 +113,7 @@ module NativeDirectFallback
   end
 
   # POLY_DIAG: the arms cover every native class answering `name`, so the native
-  # definition no longer reaches a dispatch (ADR 0257).
+  # definition no longer reaches a dispatch.
   def native_direct_lifted?(name, arity)
     plan = native_direct_plan(name, arity, closed_world_site: !@closed_world.nil?)
     !plan.nil? && plan[:lift]
@@ -168,10 +168,10 @@ module NativeDirectFallback
       "  }\n"
   end
 
-  # EXACT_CORE_RECEIVER (ADR 0280): the receiver is a fresh `Klass.new`, so the class test is a
-  # fact. Behind native_param_unbox_name? each :int/:float argument is converted as mrb_get_args does (ADR 0372);
+  # EXACT_CORE_RECEIVER: the receiver is a fresh `Klass.new`, so the class test is a
+  # fact. Behind native_param_unbox_name? each :int/:float argument is converted as mrb_get_args does;
   # without it an integer argument that is not a Fixnum still takes the ordinary send, unless the Fixnum
-  # proof covers it, which drops the test and with it the by-name else (ADR 0358).
+  # proof covers it, which drops the test and with it the by-name else.
   def native_direct_exact_line(d, recv, name, argv, (owner, (function, kinds)), generic, int_site = nil)
     native_int_arg_probe("exact:#{owner}##{name}", *int_site, argv) if int_site && ENV['BC2CPP_NATIVE_INT_ARGS']
     note = "// NATIVE_DIRECT_EXACT :#{name} -- fresh #{owner} (unguarded proof) calls the shared native entry point\n"

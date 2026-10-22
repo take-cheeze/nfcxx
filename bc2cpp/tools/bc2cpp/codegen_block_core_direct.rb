@@ -5,17 +5,17 @@ require_relative 'core_defs'
 require_relative 'foreign_definers'
 require_relative 'native_expression_devirt'
 
-# BLOCK_CORE_DIRECT (docs/adr/0270): exact-builtin-class arms that call the compiled body of a
+# BLOCK_CORE_DIRECT: exact-builtin-class arms that call the compiled body of a
 # block-taking core method (Array#each, Hash#select, Integer#times, Enumerable#collect, ...)
 # directly, in front of the dynamic send of a literal-block site. The block is the RProc the
 # site already built; every receiver an arm does not name dispatches exactly as before.
 #
-# These bodies are not direct-call targets for the compiler at large (ADR 0269): the guard that
+# These bodies are not direct-call targets for the compiler at large: the guard that
 # hands a Fiber's frames to the bytecode lives in the registered entry, which a direct `_impl`
 # call skips. Each arm therefore repeats the entry's condition, `M->c == M->root_c`; the
 # `each_is_builtin` test of an Enumerable entry is a fact of the exact classes named here.
 #
-# Prepended to CodeGen like NativeCoreDirectFallback (ADR 0257), so it wraps
+# Prepended to CodeGen like NativeCoreDirectFallback, so it wraps
 # native_direct_dynamic_line (a site with no guard chain) and guarded_fallback_line (a chain's
 # else) without editing them.
 module BlockCoreDirectFallback
@@ -28,9 +28,9 @@ module BlockCoreDirectFallback
     'Range' => { guard: 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class', chain: %w[Range Enumerable] },
     'Integer' => { guard: 'mrb_integer_p(%<r>s)', chain: %w[Integer Numeric Comparable] }
   }.freeze
-  # BLOCK_ITERATOR_DIRECT (docs/adr/0472): the receivers a literal-block send gets arms for. String is a block
+  # BLOCK_ITERATOR_DIRECT: the receivers a literal-block send gets arms for. String is a block
   # receiver only (each_char, each_line, each_byte, ...): RECEIVERS also feeds the block-less exact-receiver and
-  # result proofs, which this ADR leaves as they are.
+  # result proofs, which are left unchanged.
   BLOCK_RECEIVERS = RECEIVERS.merge(
     'String' => { guard: 'mrb_string_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->string_class', chain: %w[String Comparable] }
   ).freeze
@@ -62,11 +62,11 @@ module BlockCoreDirectFallback
       return tail
     end
 
-    # EXACT_CORE_RECEIVER (ADR 0280): a proven exact class leaves one arm and no class test. The
-    # else stays: a Fiber's frames need a real callinfo to reach the bytecode (ADR 0269).
+    # EXACT_CORE_RECEIVER: a proven exact class leaves one arm and no class test. The
+    # else stays: a Fiber's frames need a real callinfo to reach the bytecode.
     site = exact_core_site_for(recv, name)
     exact = site ? arms.select { |arm| arm[:class] == site[:klass] } : []
-    # BLOCK_ITERATOR_DIRECT (ADR 0472): an Integer literal receiver (`3.times { }`) is an Integer in every world.
+    # BLOCK_ITERATOR_DIRECT: an Integer literal receiver (`3.times { }`) is an Integer in every world.
     literal = exact.empty? && arms.any? { |arm| arm[:class] == 'Integer' } && block_core_integer_literal?
     exact = arms.select { |arm| arm[:class] == 'Integer' } if literal
     exact_class = !exact.empty?
@@ -74,7 +74,7 @@ module BlockCoreDirectFallback
     sole_call = nil
     branches = arms.map do |arm|
       args, = direct_call_args(arm[:target], argv, arm[:impl])
-      # YIELD_REACH (ADR 0283): with a yield-free block and a body that cannot suspend a Fiber on its
+      # YIELD_REACH: with a yield-free block and a body that cannot suspend a Fiber on its
       # own, no yield can cross the callee's frame, so the root-context test is not needed.
       unguarded = block_core_arm_unguarded?(arm)
       tests = []
@@ -86,7 +86,7 @@ module BlockCoreDirectFallback
         "    #{call}\n" \
         '  } else '
     end.join
-    # BLOCK_ARM_REACH (ADR 0310): a proven class and a block that cannot reach a yield leave nothing
+    # BLOCK_ARM_REACH: a proven class and a block that cannot reach a yield leave nothing
     # for the dynamic else to answer.
     if sole_call
       return "// BLOCK_CORE_DIRECT :#{name} -- #{literal ? 'literal' : 'proven'} #{arms.first[:class]} receiver, yield-free block: " \
@@ -104,7 +104,7 @@ module BlockCoreDirectFallback
       "  }\n"
   end
 
-  # BLOCK_ITERATOR_DIRECT (ADR 0472): is the receiver of the literal-block send being compiled an Integer literal on
+  # BLOCK_ITERATOR_DIRECT: is the receiver of the literal-block send being compiled an Integer literal on
   # every reaching path? The registers are the send's own irep's (the parent irep of a block nested in an inlined
   # loop body, read unshifted).
   def block_core_integer_literal?
@@ -118,11 +118,11 @@ module BlockCoreDirectFallback
     exact_literal(irep, idx, region[:dest_reg])&.klass == :Integer
   end
 
-  # BLOCK_ITERATOR_DIRECT (ADR 0472): an implicit-self literal-block send (`loop { }`) whose only definition in the
+  # BLOCK_ITERATOR_DIRECT: an implicit-self literal-block send (`loop { }`) whose only definition in the
   # program is mruby's own Kernel body calls that compiled body. The proof is the whole world's, not the receiver's:
   # no Ruby, native or outside definition of the name anywhere and no installer (so no class answers it before
   # Kernel), and no BasicObject subclass (so every self includes Kernel). A yield-free block over a relaxable body
-  # leaves no else; otherwise the root-context test of ADR 0269 keeps the dynamic send for a Fiber's frames.
+  # leaves no else; otherwise the root-context test keeps the dynamic send for a Fiber's frames.
   def block_core_kernel_line(d, recv, name, argv, tail)
     return nil unless recv == 'self' && @call_block_region&.dig(:self_implicit) && !@self_class_unknown
 
@@ -286,7 +286,7 @@ module BlockCoreDirectFallback
     definition
   end
 
-  # compiles_clean? for a body whose entry carries the ADR 0269 guard: the guard is why that
+  # compiles_clean? for a body whose entry carries the root-context guard: the guard is why that
   # predicate says no, and the arms above supply it.
   def block_core_clean?(label)
     return @clean_cache[label] if @clean_cache.key?(label)

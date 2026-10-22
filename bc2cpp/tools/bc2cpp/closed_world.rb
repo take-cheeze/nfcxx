@@ -13,7 +13,7 @@ require_relative 'loop_installers'
 require_relative 'scan_cache'
 require_relative 'send_names'
 
-# CLOSED_WORLD (docs/adr/0210, 0466): bc2cpp compiles closed-world builds only, where the only Ruby that
+# CLOSED_WORLD: bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
 # native sources of the build's own gems (compiled_gems.rb enforces that). A
 # guard chain's by-name fallback can then call bc2cpp_nomethod, which raises
@@ -50,25 +50,25 @@ class ClosedWorld
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const)\b/
   CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
   # Project native code that freezes an object, or asks Ruby to (registering a method named
-  # `freeze` is not one). ADR 0299.
+  # `freeze` is not one).
   NATIVE_FREEZE = /\bmrb_obj_freeze\b|\bMRB_SET_FROZEN_FLAG\b|->\s*frozen\s*=(?!=)|
                    \bmrb_(?:funcall|check_funcall)\w*\s*\([^;]*(?:"freeze"|MRB_SYM\(freeze\))/x
   # What `x.freeze` leaves of a receiver that is one of these: a builtin value, never an instance of
-  # a user class (ADR 0299).
+  # a user class.
   FREEZE_LITERAL_WRITERS = %w[ARRAY ARRAY2 HASH STRING STRCAT RANGE_INC RANGE_EXC].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
-  # refusal already, see scan_send). ADR 0280.
+  # refusal already, see scan_send).
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
   # A project native that makes a singleton class by hand.
   NATIVE_SINGLETON = /\bmrb_singleton_class(?:_ptr|_clone)?\b|\bmrb_define_singleton_method(?:_id)?\b|\bmrb_obj_extend\b/
   RUBY_SINGLETON = /\b(?:#{SINGLETON_MAKERS.join('|')}|extend)\b|\bclass\s*<<|\bdef\s+(?!self\b)[a-z_]\w*\./
-  # PROVEN_MISS (ADR 0275): a name passed to one of these is probed for or looked up
+  # PROVEN_MISS: a name passed to one of these is probed for or looked up
   # by name, so a send of it is guarded, not a bug.
   PROBE_SENDS = %w[respond_to? respond_to_missing? method_defined? public_method_defined?
                    private_method_defined? instance_method method
                    instance_methods public_methods].freeze
   attr_reader :global_refusal, :native_paths, :ruby_paths
-  # BLOCK_SELF_WORLD (ADR 0477): BlockSelfWorld's result, set by bc2cpp.rb once every Ruby source is read. Until
+  # BLOCK_SELF_WORLD: BlockSelfWorld's result, set by bc2cpp.rb once every Ruby source is read. Until
   # then (and without it) every block counts as rebound.
   attr_accessor :block_self_world
 
@@ -94,7 +94,6 @@ class ClosedWorld
     @outside_owner_name = nil
     @ruby_paths = ruby_paths
     # Per outside file: the constants it can create, reopen, subclass or rebind
-    # (TouchScan, ADR 0256).
     @touches = []
     @unknown_defs = Set.new
     @unknown_def_sources = Hash.new { |h, k| h[k] = [] }
@@ -135,9 +134,9 @@ class ClosedWorld
   # nil when a fallback for `name` on a chain listing `listed` can only raise
   # NoMethodError, else why not. `self_owner` is the enclosing method's owner
   # when the receiver is its `self`; `installed` is CodeGen#symbol_installed_names.
-  # INSTANCE_RECEIVER (ADR 0302): `instances` names the exact classes the exact-class flow proves
+  # INSTANCE_RECEIVER: `instances` names the exact classes the exact-class flow proves
   # the receiver holds (nil allowed), none a class or module object (CodeGen#receiver_instances).
-  # CALL_FACTS (ADR 0317): `scoped` says `instances` is the whole receiver set, so only its classes need an
+  # CALL_FACTS: `scoped` says `instances` is the whole receiver set, so only its classes need an
   # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
   def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
               instance_scope: false, singleton_arms: nil)
@@ -158,7 +157,7 @@ class ClosedWorld
     nil
   end
 
-  # Source files of the Ruby `method_missing` definitions (lint cross-check, ADR 0368).
+  # Source files of the Ruby `method_missing` definitions.
   def method_missing_files
     @registry.fetch('method_missing', []).reject { |d| d.owner == '<native>' }.filter_map { |d| @ireps[d.irep]&.file }.uniq
   end
@@ -173,7 +172,7 @@ class ClosedWorld
     @unknown_defs.include?(name) || @outside_ruby_names.include?(name) || @outside_names.include?(name)
   end
 
-  # ESCAPE_ANALYSIS (ADR 0316): can an installer the registry cannot enumerate (computed names) define
+  # ESCAPE_ANALYSIS: can an installer the registry cannot enumerate (computed names) define
   # +name+? Outside Ruby sources are judged by the caller, which knows which ones it compiled itself.
   def unknown_definer?(name)
     @global_refusal ? true : @unknown_defs.include?(name)
@@ -207,13 +206,13 @@ class ClosedWorld
     (required - listed.to_set).to_a.sort
   end
 
-  # PROVEN_MISS (ADR 0275): a send of `name` to a receiver PROVEN to be `klass` (or, for
+  # PROVEN_MISS: a send of `name` to a receiver PROVEN to be `klass` (or, for
   # kind :lexical_self, a descendant) reaches no definition and no method_missing, so
   # it can only raise NoMethodError. `installed` is CodeGen#symbol_installed_names.
   # Every question defaults to "not a miss": the answer only ever adds a build error.
   # A module's or class object's `self` is never modelled here (instance_self?).
   # +label+ is the irep the send sits in: `self` there is its lexical owner unless a rebinder may run it under
-  # another object (BLOCK_SELF_WORLD, ADR 0477: a rebound block). Any other compiled block keeps its creator's self,
+  # another object. Any other compiled block keeps its creator's self,
   # by the world fact or, where that fails, by the entry check every compiled block body then carries.
   def proven_miss?(name, klass, installed, kind, label: nil)
     return false if @global_refusal || installed.nil? || installed.include?(name)
@@ -249,7 +248,7 @@ class ClosedWorld
     @module_names.include?(name)
   end
 
-  # CONSTRUCTOR_POOLS (ADR 0313): every declared class whose last path segment is +name+, the
+  # CONSTRUCTOR_POOLS: every declared class whose last path segment is +name+, the
   # classes a constant of that name can denote when no SETCONST binds a value to it.
   def classes_named(name)
     @by_simple.fetch(name, [])
@@ -281,7 +280,7 @@ class ClosedWorld
     !@global_refusal && !@dynamic_constant_mutation && class_constant?(name)
   end
 
-  # CALL_FACTS (ADR 0317): the classes (never modules) the closed world declares.
+  # CALL_FACTS: the classes (never modules) the closed world declares.
   def declared_class_names
     @class_decls.keys.select { |k| !k.include?('.') && !k.include?('<') }
   end
@@ -300,7 +299,7 @@ class ClosedWorld
     @unknown_defs.include?(name)
   end
 
-  # NATIVE_CLASS_ARMS (ADR 0323): a DEF the registry does not hold, as unknown_def?, but ignoring the ones that
+  # NATIVE_CLASS_ARMS: a DEF the registry does not hold, as unknown_def?, but ignoring the ones that
   # land on a class or module object (`class << Const; def x`, `alias_method` inside it). Those answer only
   # that object's own sends, so a receiver set of instance classes never reaches them.
   def instance_unknown_def?(name)
@@ -319,7 +318,7 @@ class ClosedWorld
     @class_object_bodies.include?(label)
   end
 
-  # NATIVE_DIRECT (ADR 0253): while a caller emits exact-class arms for every
+  # NATIVE_DIRECT: while a caller emits exact-class arms for every
   # native class answering `name` (CodeGen#guarded_fallback_line), the native
   # registrations no longer make the fallback's receiver unknowable.
   def with_native_arms(name)
@@ -330,7 +329,7 @@ class ClosedWorld
     @native_arms_name = previous
   end
 
-  # OUTSIDE_OWNER_CALL (ADR 0468): while a caller ends the chain's else in a call checked against every
+  # OUTSIDE_OWNER_CALL: while a caller ends the chain's else in a call checked against every
   # outside (core, native or outside Ruby) class that defines `name` (CodeGen#guarded_fallback_line), those
   # definitions no longer make the fallback's receiver unknowable; the Ruby-side gates still apply.
   def with_outside_owner_call(name)
@@ -341,7 +340,7 @@ class ClosedWorld
     @outside_owner_name = previous
   end
 
-  # SELF_NEW_LEAF (ADR 0468): `klass` and every class below it, when the closed world sees every one: the declared
+  # SELF_NEW_LEAF: `klass` and every class below it, when the closed world sees every one: the declared
   # subclasses (matched by last path segment, as the hierarchy is), and none made by `Class.new(klass)`, an outside
   # Ruby `class X < klass`, or an outside native source that spells the name (an `mrb_define_class` could subclass
   # it). nil when any of those may exist. A singleton method of `klass` runs with one of these as `self`, an instance
@@ -359,7 +358,7 @@ class ClosedWorld
     set.to_a.sort
   end
 
-  # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby
+  # NATIVE_CORE_DIRECT: nothing outside the registry (an outside Ruby
   # definition, alias, visibility change or prepend on `owner`, a dynamic
   # installer) can replace core `owner`'s native `name`.
   def core_native_arm_safe?(name, owner)
@@ -368,7 +367,7 @@ class ClosedWorld
     !ForeignDefiners.defines?(@ruby_paths, owner, name)
   end
 
-  # NATIVE_OWNER_MAP (ADR 0397): why the closed world does not allow an exact-class arm of `name` (nil when it
+  # NATIVE_OWNER_MAP: why the closed world does not allow an exact-class arm of `name` (nil when it
   # does), beyond the native definers the owner map checks. An arm calls a class's own definition for an object
   # of exactly that class, so a dynamic installer, an unknown or outside Ruby definer, a global refusal, or a
   # singleton maker (an object with a singleton class is not of its class's exact lookup) keeps the by-name
@@ -384,7 +383,7 @@ class ClosedWorld
     nil
   end
 
-  # NATIVE_EXACT_DIRECT (ADR 0281): nothing outside the registry can replace or
+  # NATIVE_EXACT_DIRECT: nothing outside the registry can replace or
   # hide the RGSS native `name` on the class it is registered for: it is spelled
   # only by the RGSS sources (so no outside Ruby, no other native), no dynamic
   # definer or visibility change (private, module_function ...) names it. The
@@ -395,7 +394,7 @@ class ClosedWorld
     !@unknown_defs.include?(name) && !@visibility_names.include?(name) && native_only_in?(name, path_fragment)
   end
 
-  # BLOCK_CORE_DIRECT (ADR 0270): like core_native_arm_safe?, for a method that mruby's own
+  # BLOCK_CORE_DIRECT: like core_native_arm_safe?, for a method that mruby's own
   # Ruby defines on `owner`. That Ruby is what the arm calls, so only an outside definer that
   # is not core source (an engine-side reopening, a dynamic installer) can replace it.
   def core_ruby_arm_safe?(name, owner)
@@ -415,7 +414,7 @@ class ClosedWorld
     @outside_names
   end
 
-  # STRICT_HINTS (ADR 0428): does a KNOWN receiver outside `listed` answer `name`? A definer the registry has
+  # STRICT_HINTS: does a KNOWN receiver outside `listed` answer `name`? A definer the registry has
   # but the chain does not list (uncompiled, an embedded accessor, a subclass), a
   # core or native definer, or a module's singleton definition (a class or module object is the receiver)
   # reaches the else arm of a candidate-set chain in a correct program, so the set is incomplete by design and
@@ -427,7 +426,7 @@ class ClosedWorld
     !required.subset?(listed.to_set)
   end
 
-  # KERNEL_DIRECT (ADR 0274): an implicit-self send of `name` reaches the audited
+  # KERNEL_DIRECT: an implicit-self send of `name` reaches the audited
   # Kernel/BasicObject native for every receiver. That needs the same name-level proof as
   # ownerless_native_dispatch_safe? plus a receiver that includes Kernel, which only a
   # BasicObject subclass lacks (the class may be declared, created or subclassed anywhere).
@@ -435,7 +434,7 @@ class ClosedWorld
     ownerless_native_dispatch_safe?(name) && basic_object_subclass_free?
   end
 
-  # BLOCK_ITERATOR_DIRECT (ADR 0472): an implicit-self send of `name` reaches mruby's own Kernel Ruby body (defined
+  # BLOCK_ITERATOR_DIRECT: an implicit-self send of `name` reaches mruby's own Kernel Ruby body (defined
   # in `kernel_file`) for every receiver: no computed definer can install the name, the only outside Ruby source that
   # spells a definition of it (by name, wherever it sits) is `kernel_file`, which defines it on Kernel alone and
   # reopens nothing dynamically, and every receiver includes Kernel. Native registrations and the program's own
@@ -467,7 +466,7 @@ class ClosedWorld
     supers.all? { |sup| sup == :none || sup.is_a?(String) } && supers.none? { |sup| sup.is_a?(String) && simple(sup) == 'BasicObject' }
   end
 
-  # BLOCK_PARAM_CALL (ADR 0274): no Ruby code in the build defines or installs `name`
+  # BLOCK_PARAM_CALL: no Ruby code in the build defines or installs `name`
   # and NilClass has no method_missing, so `nil.name` can only be a NoMethodError once the
   # native registrations are read (CodeGen#block_param_nil_call_dead?).
   def nil_call_free?(name)
@@ -476,7 +475,7 @@ class ClosedWorld
     !@mm_classes.include?('NilClass')
   end
 
-  # NIL_RECEIVER (ADR 0296): no foreign Ruby source defines, aliases or re-scopes +name+ on any of
+  # NIL_RECEIVER: no foreign Ruby source defines, aliases or re-scopes +name+ on any of
   # +owners+ (the classes and modules nil answers through), nothing defines it by a computed name,
   # and NilClass has no method_missing. Finer than nil_call_free?, which refuses a name any outside
   # class defines (`size`, `first` on Array).
@@ -513,7 +512,7 @@ class ClosedWorld
     end
   end
 
-  # LCF_ROW_FLOW (ADR 0294): no outside file can reopen, subclass or rebind `owner`, so a method
+  # LCF_ROW_FLOW: no outside file can reopen, subclass or rebind `owner`, so a method
   # lookup that ends at one of its registry definitions cannot be redirected by a native installer.
   def untouched_class?(owner)
     !@global_refusal && !opaque?(owner)
@@ -524,7 +523,7 @@ class ClosedWorld
     !@global_refusal && !opaque?(owner) && descendants(owner).empty?
   end
 
-  # CHA_SELF (ADR 0254): every class whose instances can be `owner` or descend
+  # CHA_SELF: every class whose instances can be `owner` or descend
   # from it, or nil when that set is not fully enumerable (opaque owner or
   # opaque descendant, global refusal). `wild` are descendants whose superclass
   # the walk could not resolve: they may sit under any class, so a caller
@@ -538,7 +537,7 @@ class ClosedWorld
     { descendants: sub, wild: @wild & sub }
   end
 
-  # ADR 0259: the superclass of a declared, non-opaque class: its full path, or
+  # The superclass of a declared, non-opaque class: its full path, or
   # :none for an implicit Object. nil when it cannot be named with certainty
   # (an unresolved or ambiguous superclass expression, or an opaque class).
   def class_parent(klass)
@@ -553,7 +552,7 @@ class ClosedWorld
     candidates.one? && (parent == supers.first || parent.end_with?("::#{supers.first}")) ? parent : nil
   end
 
-  # SUBTREE_DISPATCH (ADR 0453): class_parent, plus a superclass written as the full path of a declared class
+  # SUBTREE_DISPATCH: class_parent, plus a superclass written as the full path of a declared class
   # (`class Battle < RPG2k::Scene::Battle`), which class_parent refuses when several classes share its last segment.
   def declared_parent(klass)
     parent = class_parent(klass)
@@ -597,7 +596,7 @@ class ClosedWorld
     !@rebound.include?(simple(owner))
   end
 
-  # ADR 0259: `self` in a `def self.x` of a declared module is that module's
+  # `self` in a `def self.x` of a declared module is that module's
   # constant object. Only Kernel#clone copies a module's singleton methods, so
   # nothing else can run them with another self; a `clone` spelled anywhere in
   # the closed world or its outside sources refuses.
@@ -623,13 +622,13 @@ class ClosedWorld
       !@deferred_constant_writes.include?(simple) && !@outside_constant_writes.include?(simple)
   end
 
-  # INSTANCE_RECEIVER (ADR 0302): instances of the declared class are never class or module
+  # INSTANCE_RECEIVER: instances of the declared class are never class or module
   # objects (instance_self?, stated for `self`; an exact instance has the same property).
   def instance_class?(klass)
     instance_self?(klass)
   end
 
-  # NATIVE_RESULT_FACTS (ADR 0302): a class a native defines (RGSS::Rect) is what its constant
+  # NATIVE_RESULT_FACTS: a class a native defines (RGSS::Rect) is what its constant
   # names for the whole run. Exactly one outside write binds the simple name (the native
   # definition itself; a second define, const_set, const_remove or Ruby `Name =` makes two), no
   # bytecode SETCONST binds it, and no dynamic constant mutation exists.
@@ -695,7 +694,7 @@ class ClosedWorld
     !@global_refusal && @mm_classes.empty? && !@unknown_defs.include?(name) && !@outside_ruby_names.include?(name)
   end
 
-  # NATIVE_RESULT_FACTS (ADR 0302): name_fully_visible?, except that natives under
+  # NATIVE_RESULT_FACTS: name_fully_visible?, except that natives under
   # +path_fragment+ may define the name (the caller proves what each one returns).
   def name_visible_except_natives_in?(name, path_fragment)
     return false if @global_refusal || !@mm_classes.empty? || @unknown_defs.include?(name)
@@ -703,7 +702,7 @@ class ClosedWorld
     !@outside_names.include?(name) || native_only_in?(name, path_fragment)
   end
 
-  # Audited outside Ruby aliases may join a native return table (ADR 0334).
+  # Audited outside Ruby aliases may join a native return table.
   def native_return_sources_visible?(name, audited_ruby_paths = [])
     return false if @global_refusal || !@mm_classes.empty? || @unknown_defs.include?(name)
 
@@ -727,7 +726,7 @@ class ClosedWorld
     stable_class_constant?(owner) && !@unknown_defs.include?(name) && !@outside_names.include?(name)
   end
 
-  # ADR 0297: inherited_lookup_safe? for a name the RGSS natives register, judged on
+  # inherited_lookup_safe? for a name the RGSS natives register, judged on
   # the exact class's own lookup chain (`chain`: the class, its superclasses and
   # every mixin) instead of the global name. Every outside spelling must be a
   # registration NativeDirect parsed to a class, and none of those classes may sit
@@ -741,7 +740,7 @@ class ClosedWorld
     !registered.nil? && registered.none? { |native_owner| chain.include?(native_owner) }
   end
 
-  # ADR 0297: the registry's visibility for `name` is the one mruby ends up with.
+  # The registry's visibility for `name` is the one mruby ends up with.
   # build_registry follows `private`/`public` in the defining class body only; a
   # `private :name` that names an inherited method, or one sent dynamically, makes a
   # copy it never sees.
@@ -766,7 +765,7 @@ class ClosedWorld
     @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' || definition.owner.end_with?('.singleton') }
   end
 
-  # ADR 0299: no instance of a class the closed world defines can ever be frozen, so a store into
+  # No instance of a class the closed world defines can ever be frozen, so a store into
   # one of its embedded ivars needs no frozen check. Every route to a frozen user object is a
   # `freeze` (Ruby or native), and each is refused unless provably aimed at a builtin literal:
   # a send on anything else, `:freeze` or "freeze" spelled where a computed name could reach it
@@ -790,7 +789,7 @@ class ClosedWorld
     !@global_refusal && singleton_makers.empty?
   end
 
-  # NUMERIC_SLOW_CLOSED `%` (ADR 0367): the constant +name+ of a core class names that class in every scope
+  # NUMERIC_SLOW_CLOSED `%`: the constant +name+ of a core class names that class in every scope
   # core Ruby looks it up from: no bytecode binds it, no outside source rebinds it (the core's own definition is
   # the one write), and no nested class of that name is declared.
   # `global_only` asks about the top-level constant a C++ `mrb_class_get` reads: a class of that name nested in another
@@ -802,7 +801,7 @@ class ClosedWorld
       (global_only || @class_decls.keys.none? { |key| key != name && simple(key) == name })
   end
 
-  # IS_A_GUARD (ADR 0456): the constant path +written+ (`K` or `Root::K`, a GETCONST and at most one GETMCNST)
+  # IS_A_GUARD: the constant path +written+ (`K` or `Root::K`, a GETCONST and at most one GETMCNST)
   # names exactly the declared class K wherever it is evaluated, and every instance of K is exactly a K:
   #   * the root names one constant for the whole run: the closed world declares exactly one class or module of
   #     that simple name, at top level; no bytecode SETCONST writes the name and no dynamic constant mutation
@@ -871,7 +870,7 @@ class ClosedWorld
   # -- outside the closed world ------------------------------------------------
 
   # The facts are a function of the bytes alone, so ScanCache may store them; replaying them in order leaves the
-  # state a direct scan would (ADR 0415).
+  # state a direct scan would.
   def scan_native(paths)
     facts = ScanCache.fetch('closed_world.native', Array(paths)) { self.class.native_facts(paths) }
     facts.each { |file| apply_native_file(file) }
@@ -996,7 +995,7 @@ class ClosedWorld
       .grep(/\A[A-Z]/).flat_map { |s| s.split('::') }.uniq
   end
 
-  # The tokens an outside native source's funcall-family arguments name (YIELD_REACH, ADR 0283), plus the
+  # The tokens an outside native source's funcall-family arguments name, plus the
   # hooks the VM and core call implicitly.
   def self.native_funcall_names(text)
     names = Set.new(IMPLICIT_HOOKS)
@@ -1008,7 +1007,7 @@ class ClosedWorld
     names.to_a
   end
 
-  # The string literals of a native source that are not the name of a registration (SETTER_POOLS, ADR 0370).
+  # The string literals of a native source that are not the name of a registration.
   def self.native_other_literals(text)
     counts = Hash.new(0)
     text.scan(C_STRING) { |(lit)| counts[lit] += 1 }
@@ -1118,7 +1117,7 @@ class ClosedWorld
     }
   end
 
-  # YIELD_REACH (ADR 0283): the method names outside code can call back into Ruby by. Native code
+  # YIELD_REACH: the method names outside code can call back into Ruby by. Native code
   # names them in the funcall family (a variable name is one of the send-like natives, which the
   # yield analysis treats as seeds); foreign Ruby can call any identifier it spells.
   FUNCALL_CALL = /\bmrb_(?:funcall(?:_id|_argv|_with_block)?|check_funcall|obj_respond_to|respond_to)\s*\(([^;]*)/m
@@ -1128,7 +1127,7 @@ class ClosedWorld
                       to_hash to_proc to_i to_f to_int hash eql? equal? coerce exception message backtrace each
                       call].freeze
 
-  # SETTER_POOLS (ADR 0370): every string literal of an outside native source except the name a registration
+  # SETTER_POOLS: every string literal of an outside native source except the name a registration
   # (`mrb_define_method(M, cls, "x=", ...)`) gives, so a setter only a registration spells is not one native code calls.
   NATIVE_REGISTRATION_KINDS = %w[method class_method module_function].freeze
 
@@ -1154,7 +1153,7 @@ class ClosedWorld
 
   # Names outside code can call Ruby methods by: native funcall names and every identifier of the
   # foreign Ruby sources, minus the Ruby files the caller analyses itself (`except_files`).
-  # DEFINE_METHOD_SITES (ADR 0288): `define_method` in a class body still reaches mruby's own
+  # DEFINE_METHOD_SITES: `define_method` in a class body still reaches mruby's own
   # Module#define_method, so a recognized site installs exactly the method it spells. Anything
   # that could rename, wrap or intercept that send withdraws every site.
   def define_method_sites_trusted?
@@ -1163,7 +1162,7 @@ class ClosedWorld
     @define_method_trusted = !@global_refusal && !installer_intercepted?('define_method')
   end
 
-  # ALIAS_SITES (ADR 0474): the same question for `alias_method`, whose class-body sites the registry
+  # ALIAS_SITES: the same question for `alias_method`, whose class-body sites the registry
   # defines as copies of the method they name.
   def alias_method_trusted?
     return @alias_method_trusted if defined?(@alias_method_trusted)
@@ -1243,7 +1242,7 @@ class ClosedWorld
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
   end
 
-  # -- singleton classes (ADR 0280) --------------------------------------------
+  # -- singleton classes --------------------------------------------
 
   # Judged after the scan: class_constant? needs every SETCONST counted.
   def singleton_makers
@@ -1335,7 +1334,7 @@ class ClosedWorld
       return
     end
     return unless INSTALLER_SENDS.include?(name)
-    # LOOP_INSTALLERS (ADR 0304): the registry holds every name this send installs.
+    # LOOP_INSTALLERS: the registry holds every name this send installs.
     return if loop_installer_sites.include?([irep.label, idx])
 
     n = insn.argc
@@ -1546,7 +1545,7 @@ class ClosedWorld
     end
   end
 
-  # ADR 0256: a native file touches what it subclasses, mixes into or rebinds by
+  # A native file touches what it subclasses, mixes into or rebinds by
   # name. Any construct TouchScan cannot classify keeps the old rule, gated as
   # before on the file defining classes or constants at all.
   def record_native_touches(path, facts, defines_class, legacy_names)
@@ -1560,7 +1559,7 @@ class ClosedWorld
   end
 
   def build_hierarchy
-    # ADR 0402: a compact definition whose outer constant registry.rb resolved
+    # A compact definition whose outer constant registry.rb resolved
     # (outer_qualified) is named correctly and needs no refusal.
     global!(:qualified_class_definition) if @class_decls.values.flatten.any? { |d| !d[:outer_nil] && !d[:outer_qualified] }
     by_simple = Hash.new { |h, k| h[k] = [] }
@@ -1618,7 +1617,7 @@ class ClosedWorld
     end
   end
 
-  # SINGLETON_ARMS (ADR 0369): the modules whose `.singleton` definition of `name` a guard chain can
+  # SINGLETON_ARMS: the modules whose `.singleton` definition of `name` a guard chain can
   # answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
   # reached only by its own constant: no subclasses (module_object_self? also bars a class and any
   # `clone`, the one way to copy singleton methods). The caller proves the singleton chain has no mixin.

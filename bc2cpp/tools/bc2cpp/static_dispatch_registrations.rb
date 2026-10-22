@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 # STATIC_DISPATCH_UNREGISTRATION: the sound form of "a devirtualized method
-# does not need its mrb_define_method registration" (docs/adr/0203).
+# does not need its mrb_define_method registration".
 #
 # A registration exists only so mruby's dynamic method-table lookup can find
-# the compiled method. docs/adr/0198 rejected dropping it because "every call
+# the compiled method. Dropping it was rejected because "every call
 # site devirtualized" is a per-call-site property no pass tracked. This file
 # asks a stronger, name-level question with a default of "dynamic": can ANY
 # runtime lookup of this name happen? A name is eligible only when all of
@@ -25,8 +25,8 @@
 #      (`"#{field}="`), or ends in `=`/`?`/`!` with a dynamic base name.
 #   5. Everything outside the closed world, scanned as plain text: mruby core
 #      and core-gem mrblib (Enumerable calls `each`, ...), the external gems,
-#      every other maker gem's mrblib and every native source (both gaps from
-#      docs/adr/0195), every gem's test/, scripts/, tools/ (except
+#      every other maker gem's mrblib and every native source,
+#      every gem's test/, scripts/, tools/ (except
 #      tools/bc2cpp). Every identifier counts, plus MRB_SYM_Q/_B/_E(x).
 #   6. mruby's implicit protocol names (ALWAYS_DYNAMIC), as a backstop for 5.
 #
@@ -114,7 +114,7 @@ module StaticDispatchRegistrations
     \s*r\d+\ =\ bc2cpp_send\(M,\ [^,]+,\ (\d+),
   }x
 
-  # EMBED_GUARD_FALLBACK (docs/adr/0206): the names in `src`'s symbol table
+  # EMBED_GUARD_FALLBACK: the names in `src`'s symbol table
   # whose every use is the by-name fallback of a MONO_EMBED_GUARD for that
   # same method, on an owner nothing subclasses. The fallback runs only when
   # the receiver's class is not exactly the owner; with no subclass anywhere,
@@ -185,7 +185,7 @@ module StaticDispatchRegistrations
     ENV['MRBC'] = mrbc
     require_relative 'bc2cpp'
     Dir.mktmpdir('bc2cpp_static_dispatch') do |tmp|
-      # ADR 0264: the engine's own Ruby. Core mrblib stays an outside source here (its sends
+      # The engine's own Ruby. Core mrblib stays an outside source here (its sends
       # and names are dynamic references: outside_world_tokens), as before it was compiled.
       ireps, root = compile_ireps(closed_world_mrblib_srcs(repo_root, core_gems: nil), 'static_dispatch_probe', tmp)
       registry, superclass_of = build_registry(ireps, root)
@@ -233,7 +233,7 @@ module StaticDispatchRegistrations
   # Runs bc2cpp.rb for each compiled gem and the closed-world parse; returns
   # everything eligibility needs.
   def analyze(repo_root, mrbc, unregistered: STATIC_DISPATCH_UNREGISTERED)
-    # Every gem, from one shared analysis (SHARED_GENERATION, ADR 0464).
+    # Every gem, from one shared analysis.
     fresh = NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc)
     runs = GEMS.to_h do |gem|
       out, err = fresh.fetch(gem)
@@ -355,7 +355,7 @@ module StaticDispatchRegistrations
 
   # The receiver kind of every instruction of `irep` that sends (nil for the rest): [:const, Name] | :core (a
   # literal) | :self | :unknown. The kind is the one every definition reaching the receiver register agrees on
-  # (BytecodeIR.reaching_definitions, ADR 0508). A register a nested block writes (SETUPVAR) is opaque to that query,
+  # A register a nested block writes (SETUPVAR) is opaque to that query,
   # so its send is :unknown rather than the kind of the local write.
   def receiver_kinds(irep)
     # APOST writes a whole run of registers, which the query does not model: no receiver facts for this irep.

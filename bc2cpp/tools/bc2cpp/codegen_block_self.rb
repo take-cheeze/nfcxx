@@ -4,7 +4,7 @@ require 'set'
 require_relative 'block_self'
 require_relative 'block_self_world'
 
-# CodeGen: BLOCK_SELF (ADR 0456).
+# CodeGen: BLOCK_SELF.
 #
 # `self` inside a block is the self of the method that created it unless something runs the block with another
 # self: instance_eval/instance_exec, class_eval/class_exec, module_eval/module_exec (mrb_yield_with_class),
@@ -14,7 +14,7 @@ require_relative 'block_self_world'
 #   * a literal block argument: the BLOCK that makes it is the instruction right before the SENDB/SSENDB that
 #     takes it (plain fixed argc, block register dest + n + 1), so that call is the only code the Proc reaches;
 #   * taken by a call whose every possible callee only calls the Proc:
-#       - a call whose every callee is a checked block-return declaration (BLOCK_RETURNS, ADR 0475,
+#       - a call whose every callee is a checked block-return declaration (BLOCK_RETURNS,
 #         codegen_block_returns.rb: a Ruby plain yielder, or a native whose scan shows mrb_yield/mrb_yield_argv,
 #         which keep the Proc's self), such as `RGSS::Profiler.section/frame { }`;
 #       - otherwise every definition of the name (the registry's, and the interpreted core bodies the registry
@@ -30,7 +30,7 @@ class CodeGen
   class << self
     # name -> every bytecode MethodDef (interpreted core bodies included); names an uncompiled outside Ruby defines.
     attr_accessor :block_self_bodies, :block_self_unread_names
-    # BLOCK_SELF_WORLD (ADR 0477): BlockSelfWorld's result for this build's closed world (bc2cpp.rb).
+    # BLOCK_SELF_WORLD: BlockSelfWorld's result for this build's closed world (bc2cpp.rb).
     attr_accessor :block_self_world
   end
 
@@ -76,7 +76,7 @@ class CodeGen
       parent, creation = numeric_block_parents[cur]
       return [nil, 'no creating BLOCK'] unless parent
 
-      # BLOCK_SELF_WORLD (ADR 0477): when the world fact holds, only a rebound block leaves its creator's self.
+      # BLOCK_SELF_WORLD: when the world fact holds, only a rebound block leaves its creator's self.
       unless world
         why = block_self_site_why(parent, creation, cur)
         return [nil, why] if why

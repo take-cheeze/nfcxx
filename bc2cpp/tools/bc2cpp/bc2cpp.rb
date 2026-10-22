@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# A small mruby bytecode -> C++ AOT compiler (docs/adr/0139).
+# A small mruby bytecode -> C++ AOT compiler.
 #
 # Compiles method-body IREPs only; top-level and class-body IREPs stay on the
 # interpreter (mrb_load_irep), which defines the classes and installs the
@@ -15,7 +15,7 @@
 # dynamic dispatch.
 #
 # Input is mrbc's RITE binary (`-g`): irep.rb builds every Irep (tree, pool,
-# symbols, lv, instructions) from it, see ADR 0249 and ADR 0251.
+# symbols, lv, instructions) from it.
 
 require 'shellwords'
 require 'set'
@@ -171,25 +171,25 @@ require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
-# Last: its compile_method and compile_insn prepends must be outermost (docs/adr/0545).
+# Last: its compile_method and compile_insn prepends must be outermost.
 require_relative 'codegen_stack_tuples'
 
 if $PROGRAM_NAME == __FILE__
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
-  # without it they are stripped from stdout (CompactOutput, ADR 0463), the only default.
+  # without it they are stripped from stdout, the only default.
   annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
   type_check_only = ENV['BC2CPP_TYPE_CHECK_ONLY'] == '1'
   if type_check_only && ENV['BC2CPP_TYPE_FACTS'].to_s.empty?
     abort 'bc2cpp: BC2CPP_TYPE_CHECK_ONLY requires BC2CPP_TYPE_FACTS'
   end
-  # SHARED_GENERATION (ADR 0464): `--units PLAN` runs the analysis once and forks one generation per unit.
+  # SHARED_GENERATION: `--units PLAN` runs the analysis once and forks one generation per unit.
   shared_units, srcs = SharedGeneration.parse_argv(ARGV)
   abort 'bc2cpp: BC2CPP_TYPE_CHECK_ONLY cannot emit shared units' if type_check_only && shared_units
   if srcs.empty?
     raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
           '(env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)'
   end
-  # Closed world only (docs/adr/0466): checked before any work.
+  # Closed world only: checked before any work.
   missing_inputs = %w[BC2CPP_BUILD_NAME BC2CPP_BUILD_GEMS NATIVE_SRCS FOREIGN_RUBY_SRCS].reject { |key| ENV[key] }
   unless missing_inputs.empty?
     abort "bc2cpp: missing #{missing_inputs.join(', ')}: bc2cpp compiles closed-world programs only " \
@@ -231,13 +231,13 @@ if $PROGRAM_NAME == __FILE__
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = build_registry(ireps, root_label)
-  # ESCAPE_ANALYSIS (ADR 0316): callees are every definition of a name, so the registry is copied before
+  # ESCAPE_ANALYSIS: callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
-  # BLOCK_SELF (ADR 0456): every bytecode definition of a name, the interpreted core ones the filtering below drops
+  # BLOCK_SELF: every bytecode definition of a name, the interpreted core ones the filtering below drops
   # included, since a block handed to one of them runs under whatever self that body chooses.
   CodeGen.block_self_bodies = registry.transform_values { |defs| defs.select(&:irep) }
-  # CORE_DEFS (ADR 0264): a core-source definition a later one replaces is not the
+  # CORE_DEFS: a core-source definition a later one replaces is not the
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
   CodeGen.module_names = declared_modules
@@ -252,10 +252,10 @@ if $PROGRAM_NAME == __FILE__
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
   core_refused = CoreMethods.load_refused(CoreMethods::DEFAULT_PATH)
   core_ineligible = CoreMethods.excluded_labels(registry, ireps, core_refused)
-  # ADR 0338: an interpreted core replacement still intercepts inherited lookup.
+  # An interpreted core replacement still intercepts inherited lookup.
   CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
   CodeGen.core_result_installed_names = CoreRubyResults.installed_names(ireps)
-  # ENUMERATOR_MODEL (ADR 0418): read before the core filtering below drops the interpreted Kernel#to_enum.
+  # ENUMERATOR_MODEL: read before the core filtering below drops the interpreted Kernel#to_enum.
   CodeGen.enumerator_model = EnumeratorModel.analyze(registry, ireps, alias_sites)
   core_stale_refusals = CoreMethods.stale(registry, ireps, core_refused)
   core_bytecode = registry.values.flatten.count { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
@@ -265,7 +265,7 @@ if $PROGRAM_NAME == __FILE__
   registry.delete_if { |_, defs| defs.empty? }
   profile_phase.call('mrbc + parse + registry')
 
-  # CLOSED_WORLD (docs/adr/0210, docs/adr/0466): bc2cpp compiles closed-world programs only. A build that loads
+  # CLOSED_WORLD: bc2cpp compiles closed-world programs only. A build that loads
   # or defines Ruby at runtime uses the plain mruby build instead. The build's name, its gem list and the
   # outside native and Ruby sources are required inputs (checked above); without them there is no closed world.
   # Constructed before return/element analysis, which uses its method-lookup proof for inherited return classes.
@@ -293,7 +293,7 @@ if $PROGRAM_NAME == __FILE__
     warn ''
     LintCrosscheck.enforce!(repo_root, closed_world)
 
-  # DEFINE_METHOD_SITES (ADR 0288): the class-body `define_method(:x) { }` candidates the registry
+  # DEFINE_METHOD_SITES: the class-body `define_method(:x) { }` candidates the registry
   # collected stay definitions only in a closed world that trusts `define_method` itself.
   define_method_kept, define_method_dropped =
     DefineMethodSites.settle(registry, trusted: closed_world.define_method_sites_trusted?)
@@ -301,19 +301,19 @@ if $PROGRAM_NAME == __FILE__
     warn "== define_method sites (#{define_method_kept} registered as definitions, " \
          "#{define_method_dropped} left as installers) =="
   end
-  # ALIAS_SITES (ADR 0474): class-body aliases with literal names, as definitions of the new name.
+  # ALIAS_SITES: class-body aliases with literal names, as definitions of the new name.
   alias_kept, alias_dropped = AliasSites.settle(registry, ireps, closed: !closed_world.nil?,
                                                           method_trusted: closed_world&.alias_method_trusted? || false)
   if alias_kept + alias_dropped > 0
     warn "== alias sites (#{alias_kept} registered as definitions, #{alias_dropped} left as installers) =="
   end
-  # DEFINE_METHOD_LOOPS (ADR 0469): a settled loop send names only the methods it was expanded into.
+  # DEFINE_METHOD_LOOPS: a settled loop send names only the methods it was expanded into.
   DynamicNames.settled_sends = DefineMethodSites.loop_sites(registry)
 
   # NATIVE_SRCS: C/C++ sources to scan for mrb_define_method-family calls (see
   # extract_native_method_names). A required input (CLOSED_WORLD).
     native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
-    # NATIVE_OWNER_MAP (ADR 0397): every native source, not only those with a literal name registration.
+    # NATIVE_OWNER_MAP: every native source, not only those with a literal name registration.
     CodeGen.native_source_paths = native_paths
     # NATIVE_RETURN_CLASSES (option B): empty unless BC2CPP_NATIVE_FN_KINDS names the native function kinds.
     CodeGen.native_return_classes = NativeReturnClasses.table_for_env(native_paths)
@@ -368,7 +368,7 @@ if $PROGRAM_NAME == __FILE__
                                                      }))
   end
 
-  # CORE_VISIBILITY (ADR 0264): a core method is compiled and registered whenever it is
+  # CORE_VISIBILITY: a core method is compiled and registered whenever it is
   # eligible, but only one whose name no native method shares (and no fast-path
   # operator, and no guard) is a registry definition, i.e. a dispatch target. Every name-keyed
   # proof and inline path in the compiler models mruby's own method for the names
@@ -376,7 +376,7 @@ if $PROGRAM_NAME == __FILE__
   # core definition there would switch them off (FIXNUM_COMPARE, LITERAL ===,
   # ELEM_HINT through `compact`, ...). The others are emitted from CodeGen's
   # `core_hidden_defs`, without becoming candidates.
-  # A guarded method (CORE_BLOCK_GUARD, ADR 0269) is never a direct-call target either, so a
+  # A guarded method is never a direct-call target either, so a
   # registry definition of it would only turn every `each`/`map`/`select` proof off.
   core_guarded = CoreMethods.guarded_labels(registry.values.flatten, ireps)
   core_hidden_defs = []
@@ -403,7 +403,7 @@ if $PROGRAM_NAME == __FILE__
     warn "  #{mono ? 'MONO' : 'POLY'}  :#{name}  (#{defs.size} def#{'s' unless defs.size == 1}: #{owners})"
   end
 
-  # CORE_METHODS (ADR 0264): what the core mrblib did to the registry, once. Keyed on the
+  # CORE_METHODS: what the core mrblib did to the registry, once. Keyed on the
   # definition's source file, so a fixture that reopens a core class is not affected.
   if core_bytecode.positive? || !core_shadowed.empty?
     warn ''
@@ -432,7 +432,7 @@ if $PROGRAM_NAME == __FILE__
   warn '  (none inferred)' unless inferred_any
 
   annotations = profile_call.call('Annotations.extract') { Annotations.extract(ireps, registry) }
-  # RBS_SIGNATURES (docs/adr/0413): signature files feed the same three annotation tables. With no .rbs file nothing
+  # RBS_SIGNATURES: signature files feed the same three annotation tables. With no .rbs file nothing
   # here runs and nothing is printed.
   sig_applied = nil
   sig_class_annotations = nil
@@ -448,13 +448,13 @@ if $PROGRAM_NAME == __FILE__
                                       sig_element_annotations, class_decls: class_decls)
     # RBS_BLOCK_PARAM_HINT: the declared block types, read by block_fallback_rbs_param_class.
     CodeGen.rbs_block_signatures = sig_applied.ir_block_signatures
-    # DECLARED_RETURN_CHECK (ADR 0455): return declarations every body is checked against.
+    # DECLARED_RETURN_CHECK: return declarations every body is checked against.
     CodeGen.declared_returns = DeclaredReturns.from_signatures(sig_loaded, ireps, registry)
     CodeGen.declared_return_root = sig_root
     # DECLARED_RETURN_GUARD: a runtime-checked declaration (%a{bc2cpp:hint}) is a fact only because its compiled body
     # checks every return, and one no body can carry is an error.
     CodeGen.declared_return_hint_refusals = DeclaredReturns.hint_refusals(sig_loaded, ireps, registry)
-    # BLOCK_RETURNS (ADR 0475): `[T] ... { ... -> T } -> T` and `{ ... } -> self` declarations, checked with them.
+    # BLOCK_RETURNS: `[T] ... { ... -> T } -> T` and `{ ... } -> self` declarations, checked with them.
     CodeGen.block_returns = BlockReturns.from_signatures(sig_loaded)
     warn '== signature files (RBS_SIGNATURES) =='
     sig_loaded.files.each { |f| warn "  SIG_FILE #{f}" }
@@ -487,7 +487,7 @@ if $PROGRAM_NAME == __FILE__
   compiled_files = ireps.each_value.to_set { |irep| File.expand_path(irep.file.to_s) }
   CodeGen.block_self_unread_names =
     foreign_method_names(foreign_ruby_srcs.reject { |path| compiled_files.include?(File.expand_path(path)) })
-  # BLOCK_SELF_WORLD (ADR 0477): which blocks a rebinder may run under another self, and whether the world lets any
+  # BLOCK_SELF_WORLD: which blocks a rebinder may run under another self, and whether the world lets any
   # other Proc reach a rebinder. Every Ruby source of the closed world is read as bytecode: the outside ones this
   # build does not compile are compiled here for the analysis alone.
   CodeGen.block_self_world = profile_call.call('BlockSelfWorld.analyze') do
@@ -538,10 +538,10 @@ if $PROGRAM_NAME == __FILE__
   end
   warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
 
-  # RBS_CHECKED_PARAMS (docs/adr/0456): a class parameter type is kept only when every caller is proven to pass it.
+  # RBS_CHECKED_PARAMS: a class parameter type is kept only when every caller is proven to pass it.
   if sig_applied
     param_outside = RbsParamCheck.outside_call_names(native_paths, foreign_ruby_srcs, ireps.values.to_set(&:file))
-    # The `new` / `super` sites of each initialize (CONSTRUCTOR_POOLS, ADR 0313), from a CodeGen built only that far.
+    # The `new` / `super` sites of each initialize, from a CodeGen built only that far.
     param_constructors = CodeGen.new(ireps, registry, {}, {}, {}, {}, superclass_of, {}, {}, {}, {}, Set.new,
                                      foreign_methods, outside_world_tokens(native_paths + foreign_ruby_srcs),
                                      native_name_sources, included_modules, prepended_modules, unknown_mixins,
@@ -574,14 +574,14 @@ if $PROGRAM_NAME == __FILE__
   # The operator precondition both integer proofs share (IntegerConstantRanges.integer_ops_safe?): no Ruby
   # Integer#+ - * / == anywhere in the program.
   operators_safe = IntegerConstantRanges.integer_ops_safe?(registry, included_modules, prepended_modules, unknown_mixins)
-  # INTEGER_CONSTANT_PROOF (ADR 0466): a proven name lets GETCONST feed an unchecked mrb_fixnum, so the proof holds
+  # INTEGER_CONSTANT_PROOF: a proven name lets GETCONST feed an unchecked mrb_fixnum, so the proof holds
   # only where the closed world shows every constant binding static, and its poison scan covers the closed world's
   # outside sources (the target's host, every linked gem) as well as NATIVE_SRCS and FOREIGN_RUBY_SRCS.
-  # BYTECODE_CONSTANT_FACTS (ADR 0501): the class, value and Fixnum interval of every constant binding, derived on the
+  # BYTECODE_CONSTANT_FACTS: the class, value and Fixnum interval of every constant binding, derived on the
   # bytecode IR. It decides the constant sets below: the Fixnum-admitted names, the folded values and the intervals.
   freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included_modules, prepended_modules,
                                                 unknown_mixins)
-  # Frozen literal containers (ADR 0501 stage 3 input): a stock Array, Hash or String freeze answers its receiver too.
+  # Frozen literal containers: a stock Array, Hash or String freeze answers its receiver too.
   freeze_classes = %w[Array Hash String].select do |klass|
     DeclaredConstants.stock_method?('freeze', klass, registry, included_modules, prepended_modules, unknown_mixins)
   end.to_set
@@ -626,7 +626,7 @@ if $PROGRAM_NAME == __FILE__
       warn "== INTEGER_CONSTANT_PROOF off: constant bindings are not static (#{closed_world.global_refusal || 'dynamic constant mutation'}) =="
       Set.new
     end
-  # DECLARED_CONSTANT_CHECK (ADR 0455): RBS constant declarations, checked at every assignment, add the facts the two
+  # DECLARED_CONSTANT_CHECK: RBS constant declarations, checked at every assignment, add the facts the two
   # constant proofs give (INTEGER_CONSTANT_PROOF, CONST_CONTAINER).
   if sig_loaded
     outside_bound = IntegerConstants.native_defined_const_names(native_paths) |
@@ -663,7 +663,7 @@ if $PROGRAM_NAME == __FILE__
     warn "  IR_GROUP #{name} #{BytecodeIR::ConstantFacts.report_fields(fact).join(' ')}"
   end
 
-  # RECORD_HASH_PROOF (docs/adr/0285): needs the same outside-source picture as
+  # RECORD_HASH_PROOF: needs the same outside-source picture as
   # IntegerConstants and the closed world, which sees every writer.
   # The trusted tier classifies a writer with the tripwire-backed Array scan
   # the block recognizers already rely on; the default consumer tier is strict.
@@ -685,7 +685,7 @@ if $PROGRAM_NAME == __FILE__
   end
   record_hash.refused.sort.each { |name, why| warn "  RECORD_HASH_REFUSED  @#{name}  (#{why})" }
   warn ''
-  # RBS_RECORD_TYPES (docs/adr/0454): checked record declarations join the RECORD_HASH_PROOF table.
+  # RBS_RECORD_TYPES: checked record declarations join the RECORD_HASH_PROOF table.
   if sig_loaded
     RbsRecordTypes.drive(sig_loaded.files, sig_applied.diagnostics, ireps, registry, display_root: sig_root,
                          closed_world: closed_world, native_paths: native_paths, foreign_paths: foreign_ruby_srcs,
@@ -813,7 +813,7 @@ if $PROGRAM_NAME == __FILE__
   # RBS_SIGNATURES: a declared ivar class fills an ivar the analysis left unknown (guarded hint, like CLASS_HINT); an
   # inferred class is kept and a disagreement is a contradiction in the type check.
   RbsSignatures.seed_table(class_layout, sig_applied.ivar_classes) if sig_applied
-  # SUBTREE_DISPATCH (docs/adr/0453): "C or a descendant" receiver facts, read only by the send devirtualization.
+  # SUBTREE_DISPATCH: "C or a descendant" receiver facts, read only by the send devirtualization.
   CodeGen.subtree_facts = nil
   if SubtreeFacts.enabled?
     subtree_labels = {}
@@ -830,7 +830,7 @@ if $PROGRAM_NAME == __FILE__
   # annotation is otherwise consumed purely as a SEED into ClassLayout above, so
   # a wrong one silently becomes the fact it seeded. This is deliberately NOT
   # fed back into ClassLayout or IvarLayout: those are fixed points whose
-  # order-independence argument (docs/adr/0139) must not grow a new input.
+  # order-independence argument must not grow a new input.
   owner_of_registry = {}
   registry.each_value { |defs| defs.each { |d| owner_of_registry[d.irep] = d.owner if d.irep } }
   class_arg_types = profile_call.call('ClassArgTypes.analyze') do
@@ -889,7 +889,7 @@ if $PROGRAM_NAME == __FILE__
     opaque.sort.each { |n| warn "  CLASS_CANDIDATE_OPAQUE  #{n}" }
   end
 
-  # IVAR_POISON_CAUSES (ADR 0382): the same OPAQUE list bucketed by what the unresolved stores are.
+  # IVAR_POISON_CAUSES: the same OPAQUE list bucketed by what the unresolved stores are.
   warn ''
   warn '== ivar-class OPAQUE causes (an ivar counts once, in its first bucket; atoms count it once each) =='
   poison_lines, poison_buckets = IvarPoisonCauses.report(ivar_store_log, opaque, registry)
@@ -1093,7 +1093,7 @@ if $PROGRAM_NAME == __FILE__
       StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   end
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
-  # ENUMERATOR_MODEL (ADR 0418): the `Enumerator` constant Kernel#to_enum reads, proven apart from StableClassConstants (mruby's
+  # ENUMERATOR_MODEL: the `Enumerator` constant Kernel#to_enum reads, proven apart from StableClassConstants (mruby's
   # chain/lazy gems reopen the class, which that analysis counts as a second definition).
   if CodeGen.enumerator_model
     unstable = EnumeratorModel.constant_unstable_reason(ireps, root_label, native_paths, foreign_ruby_srcs)
@@ -1103,9 +1103,9 @@ if $PROGRAM_NAME == __FILE__
   warn "== enumerator model (ADR 0418): to_enum direct #{CodeGen.enumerator_model&.to_enum_direct ? 'proven' : 'refused'}" \
        "#{CodeGen.enumerator_model&.reason ? " (#{CodeGen.enumerator_model.reason})" : ''}, Enumerator constant " \
        "#{CodeGen.enumerator_model&.constant_stable ? 'stable' : 'not stable'} =="
-  # NATIVE_SINGLETON_CALL (ADR 0416): the native and outside-Ruby sources the proof must account for.
+  # NATIVE_SINGLETON_CALL: the native and outside-Ruby sources the proof must account for.
   CodeGen.native_singleton_inputs = { native: native_paths, ruby: foreign_ruby_srcs }
-  # COMPUTED_SEND_EXPANSION (ADR 0303): frozen Symbol tables a computed-name send may index.
+  # COMPUTED_SEND_EXPANSION: frozen Symbol tables a computed-name send may index.
   CodeGen.computed_send_tables = profile_call.call('ComputedSendNames::SymbolTables.analyze') do
     ComputedSendNames::SymbolTables.analyze(ireps, native_paths, foreign_ruby_srcs)
   end
@@ -1114,13 +1114,13 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
-  # Constants whose every writer is one frozen-or-literal container class (ADR 0501): a read is that class.
+  # Constants whose every writer is one frozen-or-literal container class: a read is that class.
   CodeGen.constant_value_classes = constant_facts.groups.filter_map do |name, fact|
     next unless fact.classes && fact.classes.size == 1 && %i[Array Hash String].include?(fact.classes.first)
 
     [name, fact.classes.first]
   end.to_h.freeze
-  # NUMERIC_CONSTANT_RANGES (ADR 0318) on the IR: the interval of each name (BYTECODE_CONSTANT_FACTS). The kill switch
+  # NUMERIC_CONSTANT_RANGES on the IR: the interval of each name (BYTECODE_CONSTANT_FACTS). The kill switch
   # BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
   integer_constant_ranges = IntegerConstantRanges.enabled? ? constant_facts.intervals : nil
   CodeGen.integer_constant_ranges = integer_constant_ranges
@@ -1184,7 +1184,7 @@ if $PROGRAM_NAME == __FILE__
                     closed_world: closed_world, outside_ivar_names: outside_ivars,
                     native_ivar_scopes: native_ivar_scopes,
                     nil_operator_names: nil_operators, outside_const_names: outside_consts)
-  # DECLARED_RETURN_CHECK (ADR 0455): a declaration with an unproven path aborts like RBS_SEED_CONTRADICTION; the
+  # DECLARED_RETURN_CHECK: a declaration with an unproven path aborts like RBS_SEED_CONTRADICTION; the
   # type check reports it (TC1010) with the signature diagnostics.
   DeclaredReturns.report(gen, sig_applied, abort_on_error: !ENV['BC2CPP_TYPE_FACTS'].to_s.then { |v| !v.empty? })
   warn '== typed slots demoted to boxed slots (foreign writers, ADR 0279) =='
@@ -1221,7 +1221,7 @@ if $PROGRAM_NAME == __FILE__
                         else
                           []
                         end
-  # TYPE_CHECK (docs/adr/0412): the report front-end reads the settled types as data; a build never sets this.
+  # TYPE_CHECK: the report front-end reads the settled types as data; a build never sets this.
   type_facts_path = ENV['BC2CPP_TYPE_FACTS']
   type_facts_path = nil if type_facts_path&.empty?
   if type_facts_path
@@ -1241,7 +1241,7 @@ if $PROGRAM_NAME == __FILE__
       constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
       integer_constants: integer_constants, element_site_classes: element_site_classes,
       hash_element_site_classes: hash_element_site_classes, integer_constant_ranges: integer_constant_ranges,
-      # Report only (CLASS_INTEGER_PROOF, ADR 0501 stage 4): codegen never reads it, so a build without BC2CPP_TYPE_FACTS is
+      # Report only: codegen never reads it, so a build without BC2CPP_TYPE_FACTS is
       # unchanged. IntegerConstants.class_admitted is the oracle the constant typing check compares against.
       integer_class_constants: if closed_world.constants_static?
                                  class_facts.integer_class_names
@@ -1292,35 +1292,35 @@ if $PROGRAM_NAME == __FILE__
     end.sort.each { |l| warn l }
   end
   warn ''
-  # NUMERIC_OPERAND_PROOF (ADR 0276): the whole-program facts behind the
+  # NUMERIC_OPERAND_PROOF: the whole-program facts behind the
   # dynamic-send-free arithmetic/compare arms.
   warn '== numeric operand facts (NUMERIC_OPERAND_PROOF) =='
   gen.numeric_facts_report.each { |l| warn l }
   warn ''
-  # LCF_ROW_FLOW (ADR 0294): whether the LCF object-kind proof is on, and why not.
+  # LCF_ROW_FLOW: whether the LCF object-kind proof is on, and why not.
   warn '== LCF row flow (LCF_ROW_FLOW) =='
   warn(gen.lcf_rows_model ? "  on (#{gen.lcf_rows_model.kinds.size} kinds)" : "  off: #{gen.lcf_rows_refusal}")
   warn ''
-  # FROZEN_TABLES (ADR 0306): frozen Array/Hash literals whose slot classes are tracked.
+  # FROZEN_TABLES: frozen Array/Hash literals whose slot classes are tracked.
   warn '== frozen tables (FROZEN_TABLES) =='
   warn(gen.frozen_tables_model ? "  on (#{gen.frozen_tables_model.shapes.size} shapes)" : "  off: #{gen.frozen_tables_refusal}")
   gen.frozen_tables_report.each { |l| warn l }
   warn ''
-  # RETURN_CLASS_TABLE (ADR 0289): names whose every definition returns one exact class.
+  # RETURN_CLASS_TABLE: names whose every definition returns one exact class.
   warn '== return class table (RETURN_CLASS_TABLE) =='
   gen.return_class_report.each { |l| warn l }
   warn ''
-  # CLASS_POOLS (ADR 0295): ivar and argument class sets pooled across methods.
+  # CLASS_POOLS: ivar and argument class sets pooled across methods.
   warn '== class pools (CLASS_POOLS) =='
   gen.class_pool_report.each { |l| warn l }
   warn ''
-  # POOL_DROP_REPORT (ADR 0382): why the ivar pools that are not there are not there.
+  # POOL_DROP_REPORT: why the ivar pools that are not there are not there.
   if ENV['BC2CPP_POOL_DROP_REPORT']
     warn '== class pools dropped: causes (POOL_DROP_REPORT) =='
     gen.pool_drop_report.each { |l| warn l }
     warn ''
   end
-  # CONSTRUCTOR_POOLS (ADR 0313): initialize arguments joined over every constructor site.
+  # CONSTRUCTOR_POOLS: initialize arguments joined over every constructor site.
   warn '== constructor pools (CONSTRUCTOR_POOLS) =='
   gen.constructor_pool_report.each { |l| warn l }
   warn ''
@@ -1341,21 +1341,21 @@ if $PROGRAM_NAME == __FILE__
   end
   compiled += gen.emit_synthesized_accessors(only_owners: only_owners)
   profile_phase.call('compile all methods')
-  # DECLARED_RETURN_GUARD (ADR 0455): the analysis trusted every runtime-checked declaration; abort unless this
+  # DECLARED_RETURN_GUARD: the analysis trusted every runtime-checked declaration; abort unless this
   # run compiled each one it owns with its guard (before SKIP_UNSUPPORTED could leave one interpreted and unchecked).
   guard_failures = DeclaredReturns.guard_failures(gen.declared_return_hints, compiled, only_owners, other_owners)
   unless guard_failures.empty?
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
   end
-  # TC1005 (ADR 0439): index ops on a receiver no nil check dominates, collected while the methods compiled.
+  # TC1005: index ops on a receiver no nil check dominates, collected while the methods compiled.
   if type_facts_path
     require_relative 'type_facts'
     TypeFacts.append_nilable_index(type_facts_path, gen.unguarded_index_sites, ENV['BC2CPP_TYPE_FACTS_ROOT'])
   end
 
   # Report diagnostics depend on real method compilation, guard checks and TC1005 above,
-  # but not translation-unit assembly or its sidecars (ADR 0517). Report writers run at exit.
+  # but not translation-unit assembly or its sidecars. Report writers run at exit.
   if type_check_only
     profile_phase.call('type-check report complete')
     exit 0
@@ -1376,7 +1376,7 @@ if $PROGRAM_NAME == __FILE__
     skipped_entries = skipped.map { |m| m[:entry] }.compact
   end
 
-  # CORE_INTERPRETED_REPORT (ADR 0371): every core-source bytecode method this run leaves
+  # CORE_INTERPRETED_REPORT: every core-source bytecode method this run leaves
   # interpreted, with the reason and the language features it uses.
   if core_bytecode.positive?
     unsupported = unsupported_core_codes.to_h do |m|
@@ -1453,7 +1453,7 @@ if $PROGRAM_NAME == __FILE__
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
   # call-site glue catches (mruby is built with MRB_USE_CXX_EXCEPTION). Always
   # emitted: a header-only struct with nothing to link.
-  # BLOCK_SEMANTICS (ADR 0266): each carries the token of the frame it unwinds
+  # BLOCK_SEMANTICS: each carries the token of the frame it unwinds
   # to, so a catch takes only its own.
   puts 'struct bc2cpp_block_break { mrb_value value; mrb_int token; };'
   # EXCEPTION_RETURN_SUPPORT: a DIFFERENT type from bc2cpp_block_break, so the
@@ -1697,7 +1697,7 @@ if $PROGRAM_NAME == __FILE__
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
   CPP
-  # IO_PUTS_MODEL (ADR 0284): one shared body for every explicit-receiver `puts`, so the
+  # IO_PUTS_MODEL: one shared body for every explicit-receiver `puts`, so the
   # by-name fallback exists once instead of once per site.
   puts <<~'IO_PUTS'
     static inline mrb_value bc2cpp_io_puts(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
@@ -1716,8 +1716,8 @@ if $PROGRAM_NAME == __FILE__
   #   - this file's bc2cpp_block_break / bc2cpp_method_return unwinding;
   #   - a Ruby `raise`: only because mruby is built with MRB_USE_CXX_EXCEPTION,
   #     so MRB_THROW is a real C++ `throw (mrb_jmpbuf*)` (mruby/throw.h). With
-  #     setjmp/longjmp the destructor would not run. See docs/adr/0134 and
-  #     build_config.rb's closed stanza for why that configuration is required.
+  #     setjmp/longjmp the destructor would not run. build_config.rb's closed
+  #     stanza says why that configuration is required.
   # Nothing may escape the destructor (std::terminate during unwinding), so the
   # ensure body runs under mrb_protect_error, which also pops the callinfo stack
   # back (vm.c MRB_CATCH arm) and restores the GC arena. Registers live before
@@ -1868,19 +1868,19 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
   print gen.emit_core_guard_helpers(compiled)
-  # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed (INDEX_CLOSED, ADR 0365).
+  # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed.
   gen.prepare_index_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
   # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method
-  # that compiles only when the closed world proves a fact a desktop build lacks (ADR 0426). It guards such a
+  # that compiles only when the closed world proves a fact a desktop build lacks. It guards such a
   # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.
   print gen.emit_skipped_entry_macros(skipped_entries)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
-  # GUARD_VIOLATION (ADR 0290): name the method a violation site sits in.
+  # GUARD_VIOLATION: name the method a violation site sits in.
   # Fuse the three per-method rewrite passes (@@SITE@@ substitution, DIRECT_RAISE, SymbolCache.rewrite) into one.
   compiled.each do |m|
     code = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
@@ -1916,7 +1916,7 @@ if $PROGRAM_NAME == __FILE__
   warn "  NILABLE_RECEIVER sites: #{nilable_receiver}"
   nil_sites.uniq.sort.each { |k| warn "  NIL_RECEIVER_SITE #{k}" }
   warn ''
-  # NOMETHOD (docs/adr/0226) and PROVEN_MISS (docs/adr/0275) sites are listed on stderr; no review gate judges them (ADR 0522). The update scripts read the listings
+  # NOMETHOD and PROVEN_MISS sites are listed on stderr; no review gate judges them. The update scripts read the listings
   # of a run that fails only here (NomethodReviewedProbe.review_abort?).
   review_scope = ReviewScope.for_build(ENV['BC2CPP_BUILD_NAME'].to_s)
   leaked = ReviewScope.leaks(review_scope, only_owners, compiled)
@@ -1936,7 +1936,7 @@ if $PROGRAM_NAME == __FILE__
     hint_sites.map { |s| s[:key] }.uniq.sort.each { |k| warn "  STRICT_HINT_SITE #{k}" }
     warn ''
   end
-  # DECLARED_RETURN_GUARD (ADR 0455): one forced check per exit wrapper of a runtime-checked return declaration.
+  # DECLARED_RETURN_GUARD: one forced check per exit wrapper of a runtime-checked return declaration.
   guard_sites = DeclaredReturns.guard_sites(compiled)
   warn "== declared return guards (DECLARED_RETURN_GUARD): #{guard_sites.size} bc2cpp_declared_return_violation =="
   guard_sites.uniq.sort.each { |k| warn "  DECLARED_RETURN_GUARD_SITE #{k}" }
@@ -1954,7 +1954,7 @@ if $PROGRAM_NAME == __FILE__
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
   # bc2cpp_send too), ahead of every function that calls them.
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
-  # NUMERIC_SLOW_PATH (ADR 0292): the by-name calls of the numeric arms' else live here once per helper.
+  # NUMERIC_SLOW_PATH: the by-name calls of the numeric arms' else live here once per helper.
   numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled), symbol_table)
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
@@ -2009,19 +2009,19 @@ if $PROGRAM_NAME == __FILE__
     warn "  #{m[:entry]} / #{m[:impl]}  (#{m[:owner]}##{m[:name]}, arity #{m[:arity]})#{vis}#{singleton_note}"
   end
 
-  # CORE_DEFS (ADR 0264): which of those bodies come from mruby's own Ruby, for the
+  # CORE_DEFS: which of those bodies come from mruby's own Ruby, for the
   # coverage report's engine/core split.
   core_entries = compiled.select { |m| m[:label] && CoreDefs.core_source?(ireps[m[:label]]&.file) }
   warn ''
   warn "== core-source compiled entry points (#{core_entries.size}) =="
   core_entries.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
 
-  # ARRAY_NEW_BLOCK (ADR 0391): `Array.new(n) { }` sites the closed world inlined, and why the others kept the call.
+  # ARRAY_NEW_BLOCK: `Array.new(n) { }` sites the closed world inlined, and why the others kept the call.
   warn ''
   warn '== Array.new block inlining (ARRAY_NEW_BLOCK) =='
   gen.array_new_report.sort.each { |reason, count| warn "  #{reason}: #{count}" }
 
-  # YIELD_REACH (ADR 0283): what the yield-free proof gave this build.
+  # YIELD_REACH: what the yield-free proof gave this build.
   yf = gen.yield_free_report(compiled.filter_map { |m| m[:label] })
   warn ''
   warn '== yield-free proof (YIELD_REACH) =='

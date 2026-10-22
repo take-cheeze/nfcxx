@@ -8,7 +8,7 @@ require_relative 'integer_constants'
 require_relative 'core_fact_sigs'
 require_relative 'bytecode_ir_regions'
 
-# ENUMERATOR_MODEL (docs/adr/0418): what the compiler may assume about mruby's Enumerator machinery,
+# ENUMERATOR_MODEL: what the compiler may assume about mruby's Enumerator machinery,
 # proven from the bytecode of the program rather than from names.
 #
 # TO_ENUM_DIRECT: mruby-enumerator defines `Kernel#to_enum(meth = :each, *args, **kwd)` as
@@ -73,7 +73,7 @@ module EnumeratorModel
     return Result.new(false, 'to_enum is not from mruby-enumerator') unless body && body.file.to_s.end_with?(FILE_SUFFIX)
     return Result.new(false, 'Kernel#to_enum has an unexpected body') unless to_enum_body?(body, ireps)
 
-    # ALIAS_SITES (ADR 0474): the registry also holds an engine-side `alias enum_for to_enum` as a definition;
+    # ALIAS_SITES: the registry also holds an engine-side `alias enum_for to_enum` as a definition;
     # the alias itself is judged by the site check below.
     own_alias = ->(d) { d.installer == :alias && ireps[d.site.first.first]&.file.to_s.end_with?(FILE_SUFFIX) }
     enum_for = (registry['enum_for'] || []).reject(&own_alias)

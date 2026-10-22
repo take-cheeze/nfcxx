@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # NumericFlow's Integer includes fixnums and bigints; the audited public
-# conversion preserves both without extracting an mrb_int (ADR 0357).
+# conversion preserves both without extracting an mrb_int.
 class CodeGen
   def numeric_conversion_entries(name)
     NativeCoreDirect::NUMERIC_CONVERSION_ENTRIES.select do |entry|

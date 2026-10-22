@@ -2,14 +2,14 @@
 
 require_relative 'computed_send_names'
 
-# COMPUTED_SEND_EXPANSION (ADR 0303): `send(name, args...)` whose name register provably holds one of a
+# COMPUTED_SEND_EXPANSION: `send(name, args...)` whose name register provably holds one of a
 # finite set of plain Symbols (ComputedSendNames) becomes a chain of direct calls, one per name,
 # each compiled as the literal-name send of the same site (so it inherits that name's own
 # visibility, arity and dispatch proofs). It is taken only when every arm is a direct call with no
 # by-name dispatch left in it; otherwise the site keeps its single computed send.
 #
 # The default arm is not a fallback: a Symbol outside the proven set is a proof violation
-# (ADR 0290), and the one non-Symbol value a table can yield, nil, raises the TypeError `send`
+# and the one non-Symbol value a table can yield, nil, raises the TypeError `send`
 # raises for it.
 module ComputedSend
   # Only `__send__`: `send`/`public_send` come from mruby-metaprog, which a build (or a test harness

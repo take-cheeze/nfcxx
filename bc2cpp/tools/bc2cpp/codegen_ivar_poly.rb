@@ -19,7 +19,7 @@ class CodeGen
   # @only_owners/@other_owners gate (no `_impl` for owners not emitted).
   POLY_SMALL_N_MAX = 16
 
-  # ADR 0259: a definition with optional parameters joins a chain (its `_impl`
+  # A definition with optional parameters joins a chain (its `_impl`
   # takes every optional, see direct_call_args); the table path keeps the
   # exact-arity rule, so the wider set is used only while it still fits a chain.
   def poly_small_n_targets(name, n)
@@ -217,7 +217,7 @@ class CodeGen
     end
   end
 
-  # The frozen test mrb_iv_set makes and a direct struct store would skip (ADR 0299), or nil when
+  # The frozen test mrb_iv_set makes and a direct struct store would skip, or nil when
   # the closed world proves no user object is ever frozen (ClosedWorld#user_objects_unfrozen?).
   # Inline flag test; only a frozen receiver pays for the out-of-line raise.
   def embedded_store_frozen_check(recv)
@@ -302,7 +302,7 @@ class CodeGen
   end
 
   # The chain, or past POLY_SMALL_N_MAX the table, so a name that outgrows the
-  # chain cap does not fall to plain dispatch (ADR 0261).
+  # chain cap does not fall to plain dispatch.
   def compile_poly_dispatch(name, d, recv, argv, n, closed_world_site: nil)
     compile_poly_small_n(name, d, recv, argv, n, closed_world_site: closed_world_site) ||
       compile_poly_table(name, d, recv, argv, n, closed_world_site: closed_world_site)
@@ -350,7 +350,7 @@ class CodeGen
       "  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
   end
 
-  # CHA_SELF (ADR 0254): `self.name` in a method of class C reaches C or one of
+  # CHA_SELF: `self.name` in a method of class C reaches C or one of
   # its descendants. When the closed world enumerates them all, the receiver's
   # class need not be compared: every descendant either resolves `name` to the
   # definition C's own lookup finds, or to one of a few overriders, and those
@@ -504,7 +504,7 @@ class CodeGen
     "#{head}  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
   end
 
-  # POLY_TABLE (ADR 0227): a name with more than POLY_SMALL_N_MAX candidates
+  # POLY_TABLE: a name with more than POLY_SMALL_N_MAX candidates
   # gets one file-scope table of {owner, `_impl`} rows shared by every site,
   # instead of a per-site chain. The site looks the receiver's class up and
   # calls the `_impl` it finds; any other class takes the same guarded fallback
@@ -697,7 +697,7 @@ class CodeGen
     end.join
   end
 
-  # OUTLINED_INDEX_OPS (ADR 0216): the generic part of an untyped GETIDX/
+  # OUTLINED_INDEX_OPS: the generic part of an untyped GETIDX/
   # GETIDX0/SETIDX (exact-class Array/Hash/String fast paths, and for GETIDX
   # INDEX_CHAIN's POLY_SMALL_N `#[]` chain) does not depend on the site, so it
   # is one static helper per file. STRUCT_INDEX_CACHE's literal-Symbol branches
@@ -800,7 +800,7 @@ end
   def build_index_helper(kind)
     fast = INDEX_FAST_PATHS.fetch(kind)
     name, argv = INDEX_CHAIN_ARGS.fetch(kind)
-    # INDEX_CLOSED (ADR 0365) when every class that can answer has an arm; else the by-name tail.
+    # INDEX_CLOSED when every class that can answer has an arm; else the by-name tail.
     body = index_helper_closed_source(fast, name, argv) || index_helper_open_source(kind, fast, name, argv)
     "// OUTLINED_INDEX_OPS -- #{kind.upcase}'s generic chain, see bc2cpp.rb's INDEX_HELPERS comment.\n" \
       "static mrb_value bc2cpp_#{kind}(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \

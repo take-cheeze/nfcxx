@@ -1,15 +1,15 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# The numbers of docs/bc2cpp-dynamic-site-census.md, "Follow-up: block loops inside a rescue range (ADR 0376)":
+# The numbers of docs/bc2cpp-dynamic-site-census.md, "Follow-up: block loops inside a rescue range":
 # `mrb_funcall_with_block` sites and generated line counts of two generated C++ files (the shipped pass of
 # scripts/bc2cpp/coverage_report.rb, BC2CPP_COVERAGE_KEEP_DIR), in total and for the methods whose protected
-# block loops ADR 0376 inlines. A method's functions are its entry, `_impl`, the try bodies, the block
+# block loops that bc2cpp inlines. A method's functions are its entry, `_impl`, the try bodies, the block
 # functions and the inlined-section functions the generator names after it.
 #
 #   ruby scripts/bc2cpp/rescue_inline_census.rb before/shipped.cxx after/shipped.cxx METHOD...
 #
-# The METHODs are `Scene::Map` method names, given as arguments: the static-dispatch proof (ADR 0203) counts every
+# The METHODs are `Scene::Map` method names, given as arguments: the static-dispatch proof counts every
 # identifier under scripts/ as a dynamic reference, so a list of engine method names must not live in this file.
 #
 # The before file is the same tree with BC2CPP_RESCUE_INLINE_BLOCKS=0 BC2CPP_EACH_SPREAD=0 (byte-identical to

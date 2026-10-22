@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# FOREIGN_DEFINERS_PER_LIST (docs/adr/0471): ForeignDefiners.scan keeps one entry per list of files, keyed and
+# FOREIGN_DEFINERS_PER_LIST: ForeignDefiners.scan keeps one entry per list of files, keyed and
 # checked by the files' stat key as before, and defines_any? asks about several owners from one scan. Host only,
 # well under a second:
 #   - callers alternating between two file lists walk each list once, not once per switch;

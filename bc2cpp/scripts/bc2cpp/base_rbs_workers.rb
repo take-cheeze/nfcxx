@@ -3,7 +3,7 @@
 require 'etc'
 require 'tmpdir'
 
-# Process isolation keeps per-file Clang ASTs and scanner state out of the parent (ADR 0488).
+# Process isolation keeps per-file Clang ASTs and scanner state out of the parent.
 module BaseRbsWorkers
   DEFAULT_JOBS = [Etc.nprocessors, 2].min
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check SHARED_GENERATION (tools/bc2cpp/shared_generation.rb, ADR 0464) at fixture size, in seconds: `bc2cpp.rb
+# Check SHARED_GENERATION at fixture size, in seconds: `bc2cpp.rb
 # --units PLAN` runs one analysis and forks one generation per unit. Two units that differ only in
 # ONLY_OWNERS/OTHER_OWNERS/OUT_* must give exactly the stdout, stderr and decls header of two separate runs; a plan
 # whose units differ in any other key is refused; and the build helper (Bc2cppCompiledGemGeneration) shares an

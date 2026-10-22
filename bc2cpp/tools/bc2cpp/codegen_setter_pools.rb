@@ -4,9 +4,9 @@ require_relative 'codegen_nilable_receiver'
 require_relative 'dynamic_names'
 require_relative 'numeric_flow'
 
-# CodeGen: SETTER_POOLS and CHECKED_POOL_EXACT (ADR 0370).
+# CodeGen: SETTER_POOLS and CHECKED_POOL_EXACT.
 #
-# The class pools of ADR 0295 refuse an ivar an attr_writer or an audited native writes (the value is the
+# The class pools refuse an ivar an attr_writer or an audited native writes (the value is the
 # caller's) and a setter's parameter whenever its name has several definitions. Every way to call `x=` is a
 # send named `x=`, so the one fact those stores need is the join of the class sets of the argument at every
 # such send (setter_pool_reads), under ENTRY_ARG_CALLSITE_PROOF's name rules minus the computed-name clause
@@ -16,7 +16,7 @@ require_relative 'numeric_flow'
 # The pools this builds carry NumericFlow::CHECKED, which no unguarded decoder accepts (each reads a class
 # only from a mask equal to one class bit). The one reader is CHECKED_POOL_EXACT: a SEND whose receiver is nil
 # or one class K by such a pool is compiled as an exact-K call behind a class test whose else is
-# bc2cpp_guard_violation (ADR 0290, 0359), so a writer the scan missed is a loud error and never an
+# bc2cpp_guard_violation, so a writer the scan missed is a loud error and never an
 # unchecked call. BC2CPP_SETTER_POOLS=0 restores the earlier output byte for byte.
 class CodeGen
   SETTER_POOL_NAME = /\A[A-Za-z_]\w*=\z/

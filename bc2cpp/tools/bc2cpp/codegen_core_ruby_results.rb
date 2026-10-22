@@ -3,7 +3,7 @@
 require_relative 'numeric_flow'
 require_relative 'core_defs'
 
-# ADR 0338: specialize the selected core bytecode, never infer a result from its name.
+# Specialize the selected core bytecode, never infer a result from its name.
 module CoreRubyResults
   EMPTY_SEEN = Set.new.freeze
   EMPTY_ARGUMENTS = [].freeze

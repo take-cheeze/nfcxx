@@ -2,7 +2,7 @@
 
 require_relative 'native_binding_split'
 
-# The source rewrite behind scripts/native/binding_split.rb (ADR 0263).
+# The source rewrite behind scripts/native/binding_split.rb.
 #
 # For a binding
 #

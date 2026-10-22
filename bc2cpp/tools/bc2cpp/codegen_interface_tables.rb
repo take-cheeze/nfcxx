@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# INTERFACE_TABLE (ADR 0328): shared, uniform adapters for exact-class implementations.
+# INTERFACE_TABLE: shared, uniform adapters for exact-class implementations.
 # A table changes dispatch shape; the existing closed-world proof still decides its miss.
 module InterfaceTables
   INTERFACE_TABLE_MIN = 5

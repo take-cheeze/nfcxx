@@ -9,7 +9,7 @@ require_relative 'core_hierarchy_sigs'
 require_relative 'core_defs'
 require_relative 'send_names'
 
-# ESCAPE_ANALYSIS (ADR 0316): one value-flow module for "does the value this instruction creates leave
+# ESCAPE_ANALYSIS: one value-flow module for "does the value this instruction creates leave
 # the frame that made it?". Every claim is sound by construction. The default answer is "escapes", and a
 # value is non-escaping only when every instruction that can see it is on the audited lists below: a
 # register copy, a branch test, a call whose every possible callee provably keeps neither that argument
@@ -417,7 +417,7 @@ module EscapeAnalysis
       insn = EscapeAnalysis.insn_at(irep, index)
       return failed(:no_destination) unless insn.reg
       return failed(:reflection) unless @world.reflective_sites.empty?
-      # A frozen literal is one persistent object shared by every load, not a fresh creation (ADR 0546).
+      # A frozen literal is one persistent object shared by every load, not a fresh creation.
       return failed(:frozen_literal) if insn.frozen_literal
 
       flow(irep, { index => { insn.reg => true } }, created_at: index, value_class: CREATED_CLASS[insn.op] || value_class)
@@ -430,7 +430,7 @@ module EscapeAnalysis
       cyclic([:summary, mdef.object_id, position]) { compute_summary(mdef, position) }
     end
 
-    # RBS_RECORD_TYPES' interprocedural scan (ADR 0454): may a call of +name+ keep its argument +k+? Callees
+    # RBS_RECORD_TYPES' interprocedural scan: may a call of +name+ keep its argument +k+? Callees
     # are every definition the name reaches (the by-name set); a native or unenumerable one keeps it. With
     # +klass+ the argument is known to be exactly an instance of that class, so each callee's own sends on it
     # resolve through that class's ancestry (the summary is computed and memoised per class).

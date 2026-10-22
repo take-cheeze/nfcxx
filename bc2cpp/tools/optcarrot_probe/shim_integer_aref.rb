@@ -1,4 +1,4 @@
-# Kept apart from shims.rb because compiled_run.rb also feeds this file to bc2cpp (ADR 0305).
+# Kept apart from shims.rb because compiled_run.rb also feeds this file to bc2cpp.
 unless 0.respond_to?(:[])
   class Integer
     def [](i)

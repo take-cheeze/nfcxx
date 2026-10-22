@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check CLASS_OBJECT_ARGS (docs/adr/0416): the receiver of a `klass.new(...)` that is a parameter of a method (read
+# Check CLASS_OBJECT_ARGS: the receiver of a `klass.new(...)` that is a parameter of a method (read
 # directly, or by a block through GETUPVAR) names the classes its callers pass, so one generic helper
 # (`def table(id, klass, name) klass.new(r, path) end`) no longer withdraws every initialize that takes two arguments.
 #

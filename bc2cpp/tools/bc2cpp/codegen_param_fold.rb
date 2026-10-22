@@ -2,10 +2,10 @@
 
 require 'set'
 
-# CodeGen: PARAM_FOLD (ADR 0540), behind BC2CPP_PARAM_FOLD=1.
+# CodeGen: PARAM_FOLD, behind BC2CPP_PARAM_FOLD=1.
 #
-# A decided-branch fold (ADR 0532) refuses a jump whose tested register reaches the method's entry: a method the flow
-# does not enumerate can be called with an argument no call site shows. The pooled entry mask (ADR 0276) is the join of
+# A decided-branch fold refuses a jump whose tested register reaches the method's entry: a method the flow
+# does not enumerate can be called with an argument no call site shows. The pooled entry mask is the join of
 # every call that can run the method only when nothing else can. That holds when the method's name is installed by a
 # plain `def` alone, no send computes its name, and no method_missing answers for its owner.
 class CodeGen

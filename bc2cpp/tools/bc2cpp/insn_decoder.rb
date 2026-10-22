@@ -29,7 +29,7 @@ module InsnDecoder
   OPERAND_BYTES = { 'B' => 1, 'S' => 2, 'W' => 3 }.freeze
   Operand = OperandSchema::Operand
 
-  # EXT1/EXT2/EXT3 are folded into the instruction they widen (ADR 0320), so no pass sees a prefix
+  # EXT1/EXT2/EXT3 are folded into the instruction they widen, so no pass sees a prefix
   # between a producer and its consumer. BC2CPP_EXT_PREFIX=0 keeps the prefix as its own Insn.
   def self.fold_ext_prefix? = ENV['BC2CPP_EXT_PREFIX'] != '0'
 
@@ -406,7 +406,7 @@ module InsnDecoder
     def build(name, values, next_pc, start, line_pc = start, debug_file = debug_file_at(line_pc))
       rest, operands = body(name, values, next_pc)
       op = name == 'ARRAY2' ? 'ARRAY' : name
-      # FSTRING (ADR 0546) is a STRING load of a frozen, persistent object: one op name for every pass that
+      # FSTRING is a STRING load of a frozen, persistent object: one op name for every pass that
       # reads String loads, with frozen_literal set for the passes that must not treat it as fresh.
       frozen = name == 'FSTRING'
       op = 'STRING' if frozen

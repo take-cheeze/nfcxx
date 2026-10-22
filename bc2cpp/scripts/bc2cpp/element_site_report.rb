@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Aggregate the BC2CPP_ELEMENT_REPORT TSV (tools/bc2cpp/element_site_report.rb, ADR 0312): of the
+# Aggregate the BC2CPP_ELEMENT_REPORT TSV: of the
 # instructions that can still reach a by-name call, how many read an element of a container, what that
 # container is, and whether the classes written into mutable ivar containers are known at all.
 #

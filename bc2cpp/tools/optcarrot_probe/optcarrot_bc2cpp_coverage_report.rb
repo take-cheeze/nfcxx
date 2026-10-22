@@ -42,8 +42,8 @@ end
 
 system(APPLY_SCRIPT, MRUBY_DIR, PARSER_DUMP_PATCH, exception: true) if Dir.exist?(MRUBY_DIR)
 
-# docs/adr/0466: bc2cpp compiles closed-world programs only: the probe compiles the sealed benchmark world
-# (tools/optcarrot_probe/sealed_build.rb, ADR 0400), whose outside sources are its build's mruby core and gems.
+# bc2cpp compiles closed-world programs only: the probe compiles the sealed benchmark world
+# whose outside sources are its build's mruby core and gems.
 world_dir = Dir.mktmpdir('optcarrot-world-')
 at_exit { FileUtils.rm_rf(world_dir) }
 srcs, world_env = OptcarrotSealedBuild.bc2cpp_world(ROOT, world_dir)

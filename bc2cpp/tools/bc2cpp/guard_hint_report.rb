@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Debug report for the hint-based guard families (ADR 0295): with BC2CPP_GUARD_HINT_REPORT=<path>,
+# Debug report for the hint-based guard families: with BC2CPP_GUARD_HINT_REPORT=<path>,
 # every explicit-receiver send compile_send handled is written as one TSV row (the last compile of
 # a site wins, since compiles_clean? probes compile methods early):
 #

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Mutation test for CLASS_POOLS / NILABLE_RECEIVER (docs/adr/0296). Each mutant is a copy of
+# Mutation test for CLASS_POOLS / NILABLE_RECEIVER. Each mutant is a copy of
 # tools/bc2cpp with one soundness condition broken; scripts/bc2cpp/class_pools_check.rb, run against
 # the mutant through BC2CPP_TOOL, must FAIL on the check that guards that condition. A mutant that
 # passes means the condition has no negative case.

@@ -13,9 +13,9 @@
 module SymbolCache
   STRING = /"(?:[^"\\\n]|\\.)*"/
   INTERN = /\bmrb_intern_(?:cstr|lit)\(M,\s*(#{STRING})\)/
-  # CHECKED_SEND (ADR 0299): codegen_checked_send.rb marks a by-name call that must do what
+  # CHECKED_SEND: codegen_checked_send.rb marks a by-name call that must do what
   # OP_SEND / OP_SSEND check and mrb_funcall does not; the slot carries the check's level.
-  # NATIVE_SINGLETON_CALL (ADR 0416): `bc2cpp_native_singleton_named` is an explicit-receiver by-name call whose
+  # NATIVE_SINGLETON_CALL: `bc2cpp_native_singleton_named` is an explicit-receiver by-name call whose
   # method the compiler proved to be one native singleton function; it keeps level 2 as its fallback is a
   # checked send, and gets a per-site method cache slot (BC2CPP_NSC_SLOT).
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
@@ -32,18 +32,18 @@ module SymbolCache
   class Table
     # CLOSED_WORLD: set once a bc2cpp_nomethod call is rewritten, so emit adds it.
     attr_accessor :nomethod_used
-    # GUARD_VIOLATION (ADR 0290): the same for bc2cpp_guard_violation.
+    # GUARD_VIOLATION: the same for bc2cpp_guard_violation.
     attr_accessor :violation_used
-    # STRICT_HINTS (ADR 0419): the same for bc2cpp_hint_violation.
+    # STRICT_HINTS: the same for bc2cpp_hint_violation.
     attr_accessor :hint_violation_used
-    # NIL_RECEIVER (ADR 0296): the same for bc2cpp_nil_receiver.
+    # NIL_RECEIVER: the same for bc2cpp_nil_receiver.
     attr_accessor :nil_receiver_used
-    # NATIVE_SINGLETON_CALL (ADR 0416): the same for bc2cpp_native_singleton.
+    # NATIVE_SINGLETON_CALL: the same for bc2cpp_native_singleton.
     attr_accessor :native_singleton_used
-    # OUTSIDE_OWNER_CALL (ADR 0468): the same for bc2cpp_owner_call.
+    # OUTSIDE_OWNER_CALL: the same for bc2cpp_owner_call.
     attr_accessor :owner_call_used
 
-    # CHECKED_SEND (ADR 0299): per slot, 0 plain, 1 argument count of an attr_reader, 2 that and
+    # CHECKED_SEND: per slot, 0 plain, 1 argument count of an attr_reader, 2 that and
     # the explicit-receiver visibility check.
     attr_reader :checks
 
@@ -231,7 +231,7 @@ module SymbolCache
     CPP
   end
 
-  # CHECKED_SEND (ADR 0299): what OP_SEND / OP_SSEND check before calling and mrb_funcall does not.
+  # CHECKED_SEND: what OP_SEND / OP_SSEND check before calling and mrb_funcall does not.
   # Level 2 is an explicit-receiver OP_SEND: a private or protected method raises NoMethodError
   # (vm.c vis_error, protected by the same kind_of test). Level 1 and 2 both raise ArgumentError for
   # a cfunc proc flagged MRB_PROC_NOARG (an attr_reader) called with arguments. An undefined
@@ -257,7 +257,7 @@ module SymbolCache
   CPP
   private_constant :CHECKED_SEND
 
-  # NATIVE_SINGLETON_CALL (ADR 0416): `Const.name(args)` where the compiler proved `name` is one C function
+  # NATIVE_SINGLETON_CALL: `Const.name(args)` where the compiler proved `name` is one C function
   # registered on the constant's singleton class (tools/bc2cpp/native_singletons.rb). The function reads its
   # arguments through mrb_get_args from the call frame, so it cannot be called bare; this runs the frame
   # mrb_funcall would push (mrb_funcall_with_method is funcall_with_block_m with the lookup done), once per site
@@ -319,7 +319,7 @@ module SymbolCache
   CPP
   private_constant :NATIVE_SINGLETON
 
-  # OUTSIDE_OWNER_CALL (ADR 0468): the else of a closed-world chain whose remaining receivers answer the name only
+  # OUTSIDE_OWNER_CALL: the else of a closed-world chain whose remaining receivers answer the name only
   # through outside (core, native or outside Ruby) definitions, every one of which the compiler named
   # (BC2CPP_OWNERS: class paths as mrb_class_name spells them, `.singleton` for a class object's own method).
   # The method is looked up once and checked against that list: a listed owner's method runs in the frame mruby's
@@ -430,7 +430,7 @@ module SymbolCache
   CPP
   private_constant :OWNER_CALL
 
-  # CLOSED_WORLD (docs/adr/0210): the else arm of a guard chain proven to list
+  # CLOSED_WORLD: the else arm of a guard chain proven to list
   # every class that answers the name, on a receiver with no method_missing.
   # mruby's own dispatch can only raise NoMethodError there; running it keeps
   # the error (message, args, call-depth and memory limits) exactly the same.
@@ -501,7 +501,7 @@ module SymbolCache
   CPP
   private_constant :NOMETHOD
 
-  # GUARD_VIOLATION (docs/adr/0290): the else arm of a guard whose register the
+  # GUARD_VIOLATION: the else arm of a guard whose register the
   # closed world proves holds a stable class constant. Unlike bc2cpp_nomethod it
   # never dispatches: reaching it means the proof is wrong, so it logs to $stderr
   # and raises a NoMethodError subclass (a rescue written for the old dispatch's
@@ -544,13 +544,13 @@ module SymbolCache
   CPP
   private_constant :GUARD_VIOLATION
 
-  # STRICT_HINTS (docs/adr/0419): the else arm of a guard on a whole-program class HINT, forced by
+  # STRICT_HINTS: the else arm of a guard on a whole-program class HINT, forced by
   # BC2CPP_STRICT_HINTS. A wrong hint is reached here with a correct program: log, then raise
   # BC2cppHintViolation < NoMethodError (a `rescue NoMethodError` sees it after the log line). Never
   # dispatches, never undefined behavior. -DBC2CPP_NOMETHOD_VERIFY aborts, naming class, name and site,
   # so CI can run real workloads and prove zero violations; -DBC2CPP_HINT_VIOLATION_DISPATCH restores
   # the by-name send (silently) to bisect a suspected wrong hint without regenerating.
-  # -DBC2CPP_HINT_VIOLATION_LOG (ADR 0428) is the survey mode of the verify build: every distinct
+  # -DBC2CPP_HINT_VIOLATION_LOG is the survey mode of the verify build: every distinct
   # (site, class, name) is printed once on stderr as `bc2cpp: HINT_VIOLATION_LOG: Class#name at site`
   # and the by-name send runs, so one workload run lists every wrong hint instead of stopping at the first.
   HINT_VIOLATION = <<~CPP
@@ -603,7 +603,7 @@ module SymbolCache
   CPP
   private_constant :HINT_VIOLATION
 
-  # NIL_RECEIVER (docs/adr/0296): the nil arm of a receiver the class pools prove is nil or one
+  # NIL_RECEIVER: the nil arm of a receiver the class pools prove is nil or one
   # class, for a name nil does not answer. It is a real program path (a nil dereference), so it
   # dispatches and lets mruby raise its own NoMethodError; only a dispatch that finds a method,
   # which means nil_unanswerable? was wrong, is an error of its own.

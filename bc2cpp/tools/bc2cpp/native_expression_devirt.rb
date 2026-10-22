@@ -25,7 +25,7 @@ module NativeExpressionDevirt
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
   # private to string.c (and calls a private UTF-8 helper), so String#size is
-  # NativeCoreDirect's audited row (ADR 0291), not an expression generated here.
+  # NativeCoreDirect's audited row, not an expression generated here.
   CLASS_EXPRESSION_MACROS = %w[ARY_LEN RSTR_LEN RSTRING_LEN].freeze
   PUBLIC_API_HEADERS = %w[
     mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h
@@ -76,7 +76,7 @@ module NativeExpressionDevirt
   end
 
   # The scans that read only `paths` (and, for the exact-class scan, the public API headers) are memoized across
-  # processes (ScanCache, ADR 0415); the bodies are scan_analyze and scan_exact_class_expressions.
+  # processes; the bodies are scan_analyze and scan_exact_class_expressions.
   def analyze(paths)
     ScanCache.fetch('native_expression_devirt.analyze', Array(paths)) { scan_analyze(paths) }
   end
@@ -264,7 +264,7 @@ module NativeExpressionDevirt
   REGISTRATION_CACHE = {}
 
   # Registrations of the ROM tables and mrb_define_method forms in `paths`,
-  # shared by analyze_exact_class_expressions and NativeCoreDirect (ADR 0257).
+  # shared by analyze_exact_class_expressions and NativeCoreDirect.
   # Keyed by file identity so an in-process caller that rewrites a source never
   # sees a stale scan.
   def class_registrations(paths)
@@ -278,7 +278,7 @@ module NativeExpressionDevirt
     end
   end
 
-  # NATIVE_PATH_REGISTRATIONS (ADR 0470): scan_class_registrations([path]) of one native source, scanned once per
+  # NATIVE_PATH_REGISTRATIONS: scan_class_registrations([path]) of one native source, scanned once per
   # source text rather than once per asked name (CodeGen#nil_unanswerable_refusal asks name by name, and the names
   # share their sources). The scan reads nothing but the path and its text, so the key is complete: the path and the
   # read_source String, which is a new object whenever the file's mtime or size changes. The two maps and their
@@ -298,7 +298,7 @@ module NativeExpressionDevirt
     maps
   end
 
-  # ADR 0415: the two maps of scan_class_registrations as plain Hashes, which is what ScanCache stores; the
+  # The two maps of scan_class_registrations as plain Hashes, which is what ScanCache stores; the
   # callers get them back with the access-creates-empty defaults the scan itself uses (registrations_from_plain).
   def plain_registrations(registrations, opaque_owners)
     [registrations.to_a.to_h, opaque_owners.to_a.to_h]

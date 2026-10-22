@@ -5,8 +5,8 @@ require 'set'
 require_relative 'receiver_proof_report_columns'
 require_relative 'type_check_rbs'
 
-# TYPE_CHECK (docs/adr/0412): turns the facts bc2cpp wrote (type_facts.rb) and, optionally, the receiver-proof rows
-# (BC2CPP_RECEIVER_PROOF_REPORT, ADR 0331) into the three outputs of scripts/bc2cpp/type_check.rb:
+# TYPE_CHECK: turns the facts bc2cpp wrote (type_facts.rb) and, optionally, the receiver-proof rows
+# into the three outputs of scripts/bc2cpp/type_check.rb:
 #
 #   text         a stable summary plus `file:line:col: severity: message [CODE]` diagnostics (what `tsc` and `ruby -c`
 #                print, so an editor's problem matcher reads them);
@@ -20,7 +20,7 @@ require_relative 'type_check_rbs'
 #   TC1004 warning  an annotation token bc2cpp ignores, or an annotation whose parameter count is not the method's
 #   TC1007 error    an inferred IR may-set is disjoint from a nominal RBS return/ivar contract
 #   TC1008 warning  an inferred IR may-set partly overlaps the contract
-#   TC1016 error    an RBS `class C < S` whose S is not the program's superclass of C (ADR 0453)
+#   TC1016 error    an RBS `class C < S` whose S is not the program's superclass of C
 #   TC2004 info     (--all) an IR query is unknown, with its refusal reason
 #   TC2001 info     (--all) a parameter has no type, with the reason bucket
 #   TC2002 info     (--all) a return has no type, with the reason bucket

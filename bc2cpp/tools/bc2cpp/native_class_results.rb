@@ -3,7 +3,7 @@
 require 'digest'
 require_relative 'source_text'
 
-# ADRs 0333–0336: all native spellings of a name must belong to pinned, audited files.
+# All native spellings of a name must belong to pinned, audited files.
 # A result fact joins successful returns; it never bypasses the original call.
 module NativeClassResults
   FILES = {
@@ -98,7 +98,7 @@ module NativeClassResults
       source = SourceText.read(path, 'native class results', binary: true)
       return nil unless source && Array(FILES.fetch(relative)).include?(Digest::SHA256.hexdigest(source))
     end
-    # File.join's single-component path returns its argument unchanged (ADR 0336).
+    # File.join's single-component path returns its argument unchanged.
     if name == 'join' && paths.any? { |path| path.end_with?('/mruby-io/src/file.c') }
       return nil unless string_subclass_free
     end

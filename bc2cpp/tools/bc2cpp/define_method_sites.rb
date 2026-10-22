@@ -3,12 +3,12 @@
 require 'set'
 require_relative 'bytecode_ir_ops'
 
-# DEFINE_METHOD_SITES (docs/adr/0288): `define_method(:name) { |a, b| ... }` written
+# DEFINE_METHOD_SITES: `define_method(:name) { |a, b| ... }` written
 # directly in a class or module body is an ordinary method definition to the registry,
 # provided the block is one a `def` could have spelled. Everything else stays a dynamic
 # installer that poisons its name (symbol_installed_names).
 #
-# DEFINE_METHOD_LOOPS (docs/adr/0469): the same send in the block of a class-body loop over a
+# DEFINE_METHOD_LOOPS: the same send in the block of a class-body loop over a
 # literal container (`%i[a b].each { |n| define_method(n) { n } }`) is one definition per name the
 # loop hands it. LoopInstallers runs the loop on the literal and asks #loop_body_captures whether the
 # body is method-shaped; #expand gives each expansion its own irep, with the loop variable it reads

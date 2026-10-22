@@ -2,7 +2,7 @@
 
 require_relative 'native_owner_map'
 
-# CodeGen: NATIVE_OWNER_MAP (docs/adr/0397). A by-name else gets, ahead of it, one exact-class arm per Ruby
+# CodeGen: NATIVE_OWNER_MAP. A by-name else gets, ahead of it, one exact-class arm per Ruby
 # definition of the name, when native_owner_map.rb proves no native definition of the name on that class.
 # BC2CPP_NATIVE_OWNER_MAP=0 emits none of it; =strict also refuses while mruby core registers computed names.
 class CodeGen
