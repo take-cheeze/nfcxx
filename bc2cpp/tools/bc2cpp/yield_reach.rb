@@ -35,13 +35,13 @@ class YieldReach
                      respond_to? parameters].freeze
   # A literal block given to these outlives the call: native code keeps it and runs it later from an
   # unrelated site (Hash default procs, Enumerator generators, define_method bodies).
-  STORING_CALLS = %w[new define_method define_singleton_method at_exit proc lambda].freeze
+  STORING_CALLS = %w[new define_method define_singleton_method proc lambda].freeze
   # Native reads that run a stored block.
   STORED_READS = %w[[] fetch dig default values_at fetch_values].freeze
   # Core methods whose computed send names a method some Symbol was converted for.
   CALLABLE_SEND_METHODS = %w[to_proc inject reduce].freeze
   # Symbol#to_proc and Method objects turn a method into a Proc value.
-  CALLABLE_MAKERS = %w[to_proc method instance_method public_method singleton_method].freeze
+  CALLABLE_MAKERS = %w[to_proc method instance_method singleton_method].freeze
   # Blocks handed to these constants' `new` receive an Enumerator::Yielder as their first argument.
   GENERATOR_CLASSES = %w[Enumerator Lazy Generator].freeze
   # What Enumerator::Yielder answers.

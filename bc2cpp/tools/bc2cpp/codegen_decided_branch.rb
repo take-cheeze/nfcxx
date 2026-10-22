@@ -30,11 +30,15 @@ class CodeGen
     # A parameter's mask is built from the callers the flow sees, but a method installed by define_method is called by
     # name, so an argument such as `x` in `{ |x| return n if x.nil? }` can be nil with no caller in view. Keep the test.
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
-    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+    return nil if defs.nil? || defs.empty?
+    # An entry value is the pooled proof only for a complete method (codegen_param_fold.rb, ADR 0540). The entry
+    # definition names the parameter's own register: a MOVE copy is followed back to it.
+    return nil unless defs.select(&:entry?).all? { |d| param_fold_proves_entry?(irep, d.reg, owner_def) }
 
     if insn.op == 'JMPNIL'
       return :taken if mask == NumericFlow::NIL
-      return :not_taken if (mask & NumericFlow::NIL).zero?
+      # OTHER is an unknown value that may be nil, so only a mask with neither NIL nor OTHER is never nil.
+      return :not_taken if (mask & (NumericFlow::NIL | NumericFlow::OTHER)).zero?
 
       return nil
     end

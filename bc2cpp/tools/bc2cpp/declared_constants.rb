@@ -630,6 +630,23 @@ module DeclaredConstants
     end
   end
 
+  # IO_OPEN (report-level): the value at +idx+ is a blockless `IO.open(...)`, on every path. The call is SEND or SEND0
+  # (a SENDB carries a block and is not this), named `open`, with the constant IO as its receiver. mruby-io's IO.open
+  # answers `self.new(*args)` when there is no block (io.rb: `return io unless block`), so it is an IO when io_open_safe
+  # (IO_OPEN_SAFE in type_facts) holds.
+  def io_open_site?(irep, idx, reg, io_open_safe:)
+    return false unless io_open_safe
+
+    BytecodeIR.all_writers_reaching?(irep, idx, reg) do |j, insn|
+      %w[SEND SEND0].include?(insn.op) && insn.sym == 'open' && io_constant_receiver?(irep, j, insn.reg)
+    end
+  end
+
+  # The value of +reg+ before +idx+ is the constant IO (GETCONST), on every path.
+  def io_constant_receiver?(irep, idx, reg)
+    BytecodeIR.all_writers_reaching?(irep, idx, reg) { |_j, insn| insn.op == 'GETCONST' && insn.const_name == 'IO' }
+  end
+
   # Prints the outcome, adds the diagnostics to the signature diagnostics and aborts a build on an error.
   def report(result, sig_applied, abort_on_error:)
     return if result.report.empty?

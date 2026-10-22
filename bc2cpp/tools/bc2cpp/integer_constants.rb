@@ -454,6 +454,30 @@ module IntegerConstants
     names
   end
 
+  # CLASS_INTEGER_PROOF's poison for foreign sources (the report-only class run, bc2cpp.rb). Unlike foreign_const_names,
+  # a foreign `NAME = <integer literal>` does not poison: it is an Integer definition, and the class proof needs no
+  # value. `NAME = A | B` over bare names does not poison either when its file is one the IR already binds, since the IR
+  # then reads that binding with the bit-operator rules; in any other file it poisons. A class/module name and any other
+  # right-hand side poison, as in foreign_const_names. `ir_paths` are the absolute paths of the compiled sources.
+  INTEGER_LITERAL_RHS = /\A\s*(?:0[xX][0-9a-fA-F_]+|-?\d[\d_]*)\s*(?:#.*)?\z/
+  BIT_OP_RHS = /\A\s*[A-Z][A-Za-z_0-9]*\s*[|&^]\s*[A-Z][A-Za-z_0-9]*\s*(?:#.*)?\z/
+
+  def self.foreign_class_poison(paths, ir_paths)
+    poisoned = Set.new
+    Array(paths).each do |path|
+      src = SourceText.read(path, 'IntegerConstants.foreign_class_poison') or next
+      ir_bound = ir_paths.include?(File.expand_path(path))
+      src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=([^=~\n]*)$/) do |name, rhs|
+        next if INTEGER_LITERAL_RHS.match?(rhs)
+        next if ir_bound && BIT_OP_RHS.match?(rhs)
+
+        poisoned << name
+      end
+      src.scan(/^\s*(?:class|module)\s+([A-Z][A-Za-z_0-9]*)/) { poisoned << Regexp.last_match(1) }
+    end
+    poisoned
+  end
+
   # Poison source 4: any `NAME =` at line start, whatever the right-hand side.
   # Over-collecting only costs a proof; under-collecting would be wrong.
   def self.foreign_const_names(paths)

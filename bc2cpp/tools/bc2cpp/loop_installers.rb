@@ -351,7 +351,7 @@ module LoopInstallers
       Cont.new(:hash, keys.map(&:name).zip(values).to_h, false)
     end
 
-    # A constant read can autoload or reach const_missing, so only a constant this walk set is
+    # A constant read can reach const_missing, so only a constant this walk set is
     # known; reading any other may run code.
     def get_const(insn)
       name = insn.const_name

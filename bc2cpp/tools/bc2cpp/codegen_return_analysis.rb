@@ -6,6 +6,7 @@ require_relative 'define_method_sites'
 require_relative 'alias_sites'
 require_relative 'codegen_declared_returns'
 require_relative 'bytecode_ir_returns'
+require_relative 'foreign_string_results'
 
 class CodeGen
   class << self
@@ -409,8 +410,8 @@ class CodeGen
     # NATIVE_RETURN_CLASSES (option B): a name whose native registrations all return one class is admitted, with the
     # Ruby definitions of the name (if any) proven to that class. A name the join already proved keeps its proof.
     (self.class.native_return_classes || {}).each do |name, klass|
-      next if proven.key?(name) || @foreign_method_names.include?(name) || installed.include?(name)
-      next if @closed_world && !@closed_world.name_fully_visible?(name)
+      next if proven.key?(name) || installed.include?(name)
+      next unless native_table_name_visible?(name, klass)
 
       ruby_defs = (@registry[name] || []).select(&:irep)
       next unless ruby_defs.all? { |d| class_return_sites_proven(d, ret_class_proof) == klass }
@@ -418,6 +419,17 @@ class CodeGen
       proven[name] = klass
     end
     @class_return_names = proven
+  end
+
+  # Whether the native table's +klass+ for +name+ may join the proof. A name an outside Ruby source defines joins only as
+  # a String the outside definitions are audited to return (ForeignStringResults); every other outside definition
+  # refuses the name, as does an unknown installer or a global refusal (ClosedWorld#name_visible_to_native_table?).
+  def native_table_name_visible?(name, klass)
+    return !@closed_world || @closed_world.name_visible_to_native_table?(name) unless @foreign_method_names.include?(name)
+    return false unless @closed_world && klass == 'String'
+
+    audited = ForeignStringResults.audited_string_paths(name, @closed_world.outside_ruby_paths_defining(name))
+    @closed_world.native_return_sources_visible?(name, audited)
   end
 
   # RETCLASS_SELF_CALL_SUPPORT result, for the diagnostic and ClassLayout's

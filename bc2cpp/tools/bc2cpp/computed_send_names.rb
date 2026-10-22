@@ -91,7 +91,7 @@ module ComputedSendNames
   # elements / values). Keyed by bare name like IntegerConstants, with its four poison sources:
   # a definition of another shape, a CLASS/MODULE of the name, a native mrb_define_const /
   # mrb_const_set / mrb_define_class and a foreign Ruby source. A runtime const_set,
-  # remove_const or autoload refuses every table (same hole list as IntegerConstants).
+  # remove_const refuses every table (same hole list as IntegerConstants).
   module SymbolTables
     CONST_REBINDERS = SendNames::CONST_REBINDERS
 
