@@ -701,7 +701,12 @@ module NumericFlow
     mask = state[reg]
     return state if mask.nil? || mask.zero?
 
-    sure, maybe = falsy_class_bits(c)
+    if c.false_class
+      sure = maybe = c.oracle.false_class_bit.to_i
+    else
+      sure = 0
+      maybe = CLASS_BITS
+    end
     narrowed = narrow_branch(branch, taken, mask, sure, maybe)
     return nil if narrowed.zero?
 
