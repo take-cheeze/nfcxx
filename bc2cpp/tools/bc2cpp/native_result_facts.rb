@@ -2,7 +2,7 @@
 
 require_relative 'native_core_result_sigs'
 
-# NATIVE_RESULT_FACTS (ADR 0302): what a call that returns from an RGSS native hands back, per exact
+# NATIVE_RESULT_FACTS: what a call that returns from an RGSS native hands back, per exact
 # receiver class. A fact pins the registration's callee text and the delegation chain down to the
 # function whose `return`s decide the kind; scripts/bc2cpp/native_result_facts_check.rb re-audits both.
 # The kind of each fact is declared in sig/bc2cpp/declarations.rbs#rgss_results, not here (see NativeResultFacts.kind).

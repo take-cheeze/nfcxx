@@ -2,7 +2,7 @@
 
 require_relative 'integer_constants'
 
-# NUMERIC_CONSTANT_RANGES (ADR 0318): bare constant names whose every definition is an Integer expression of known
+# NUMERIC_CONSTANT_RANGES: bare constant names whose every definition is an Integer expression of known
 # interval, with the hull of those intervals.
 #
 # IntegerConstants admits literals, aliases and ADD/SUB only, so `HEADER_H = LINE_H + Window::BORDER * 2` or

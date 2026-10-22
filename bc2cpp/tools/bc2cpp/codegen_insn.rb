@@ -3,7 +3,7 @@
 # CodeGen: compile_insn and comparisons.
 
 class CodeGen
-  # BC2CPP_FROZEN_LITERALS=0 compiles a frozen-literal STRING as the old fresh String (the pre-ADR 0546 output).
+  # BC2CPP_FROZEN_LITERALS=0 compiles a frozen-literal STRING as the old fresh String.
   def frozen_literals_enabled?
     ENV['BC2CPP_FROZEN_LITERALS'] != '0'
   end
@@ -120,7 +120,7 @@ class CodeGen
         lit = entry[:raw][/\.f\s*=\s*(.+)/, 1]
         "  r#{d} = mrb_float_value(M, #{lit});\n"
       elsif entry.is_a?(Hash) && entry[:type] == :bigint && entry[:digits].match?(/\A[0-9a-zA-Z]{1,255}\z/)
-        # LOADL_BIGINT (ADR 0260): rebuilt from its digits as OP_LOADL does, never
+        # LOADL_BIGINT: rebuilt from its digits as OP_LOADL does, never
         # from a 64-bit C constant a 32-bit mrb_int target could not hold.
         "#ifdef MRB_USE_BIGINT\n" \
           "  r#{d} = mrb_bint_new_str(M, \"#{entry[:digits]}\", #{entry[:digits].size}, #{entry[:base]});\n" \
@@ -134,7 +134,7 @@ class CodeGen
       idx = insn.pool_index.to_i
       entry = irep.pool.fetch(idx)
       if entry.is_a?(String) && insn.frozen_literal && frozen_literals_enabled?
-        # `# frozen_string_literal: true` (ADR 0546): the VM's persistent frozen String for these bytes,
+        # `# frozen_string_literal: true`: the VM's persistent frozen String for these bytes,
         # the object OP_FSTRING returns. The bytes are escaped one by one, so the length is exact.
         "  r#{d} = mrb_frozen_literal(M, #{c_string_literal(entry)}, #{entry.bytesize});\n"
       elsif entry.is_a?(String)
@@ -667,7 +667,7 @@ class CodeGen
         if exact && proven_index_operand?(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
           "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));\n"
         else
-          # INTEGER_TAG_ELSE (ADR 0394): an exact Array receiver's non-fixnum key runs the Array body directly.
+          # INTEGER_TAG_ELSE: an exact Array receiver's non-fixnum key runs the Array body directly.
           direct = integer_tag_else_array_call('[]', exact, "r#{d}", ["r#{s}"])
           by_name = direct ? "r#{d} = #{direct};" : index_else_statement(d, s)
           <<~CPP

@@ -7,7 +7,7 @@ require_relative 'source_text'
 # to "P::N" when the closed world, NATIVE_SRCS and FOREIGN_RUBY_SRCS give N
 # exactly one binding, P::N, that nothing reassigns, and no const_set,
 # remove_const or const_missing exists. A lookup of N that succeeds
-# can then only return P::N. See docs/adr/0203-bc2cpp-unique-class-names.md.
+# can then only return P::N.
 module UniqueClassNames
   BINDING_CALLS = [
     /mrb_define_(?:global_)?const(?:_id)?\s*\([^;]{0,200}/m,

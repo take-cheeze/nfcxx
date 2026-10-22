@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Checks for the bc2cpp shapes that used to stay on the interpreter (ADR 0260):
+# Checks for the bc2cpp shapes that used to stay on the interpreter:
 #
 #   JMPUW_RESCUE_SUPPORT   a `break` inside a rescue/ensure region
 #   RESCUE_JOIN_RETURN     `begin ... rescue ... end; out` (join RETURN of another register)

@@ -7,7 +7,7 @@ require_relative 'integer_constants'
 require_relative 'native_expression_devirt'
 require_relative 'core_hierarchy_sigs'
 
-# CodeGen: FROZEN_TABLES (docs/adr/0306). Feeds FrozenTables' kinds into the NumericFlow fixpoint:
+# CodeGen: FROZEN_TABLES. Feeds FrozenTables' kinds into the NumericFlow fixpoint:
 # `LITERAL.freeze` gets the kind of its literal, `table[i]` / `first` / `last` / `sample` / `size`
 # read the kind back.
 #
@@ -68,12 +68,12 @@ class CodeGen
   end
 
   # BC2CPP_LOADSYM_CLASS=0 turns off the Symbol bit of a LOADSYM register in the numeric flow and the Symbol class
-  # chain of a class test (ADR 0429); the output is then the output before that change.
+  # chain of a class test; the output is then the output before that change.
   def loadsym_class_enabled?
     ENV.fetch('BC2CPP_LOADSYM_CLASS', '1') != '0'
   end
 
-  # The Symbol bit a LOADSYM register carries in the numeric flow (ADR 0429): the same bit as frozen_symbol_bit, so
+  # The Symbol bit a LOADSYM register carries in the numeric flow: the same bit as frozen_symbol_bit, so
   # the register and a table slot name Symbol alike. nil (OTHER) when the switch is off, and when no bit was
   # allocated (BC2CPP_SYMBOL_CLASS=0, or frozen tables refused): the bit is never allocated here.
   def numeric_loadsym_bit
@@ -173,7 +173,7 @@ end
     return 'closed world refused globally' unless cw.global_refusal.nil?
     return 'instances may gain singleton methods' unless cw.exact_instances_singleton_free?
     return 'a method installer has a computed name' if symbol_installed_names.nil?
-    # The gates of ADR 0301's constant pools: a table is read through a constant and a `freeze` is folded.
+    # The gates of the constant pools: a table is read through a constant and a `freeze` is folded.
     return 'BC2CPP_CLASS_POOLS withdraws the exact-class proofs' unless class_pools_enabled?
     return 'a const_missing can answer a failed constant lookup' unless const_missing_free?
     return 'freeze is not only Kernel#freeze' unless kernel_freeze_only?
@@ -219,9 +219,9 @@ end
     [lit, at, container]
   end
 
-  # A slot whose value is `LITERAL.freeze` (BC2CPP_FREEZE_SLOT, ADR 0425). Kernel#freeze answers its receiver
+  # A slot whose value is `LITERAL.freeze`. Kernel#freeze answers its receiver
   # (frozen_table_name_safe? refuses an override), so the slot holds the container class of that literal.
-  # Only the class is claimed: the inner table's own slots are not followed (ADR 0425).
+  # Only the class is claimed: the inner table's own slots are not followed.
   def frozen_table_freeze_slot(irep, index, insn)
     return NumericFlow::OTHER if ENV['BC2CPP_FREEZE_SLOT'] == '0' || insn.sym != 'freeze'
 
@@ -299,7 +299,7 @@ end
   end
 
   # nil, or why a call of +name+ on a exactly-+klass+ (Array or Hash) literal may not be mruby's own
-  # method. Core natives are the semantics the shape rules assume (see the ADR); what can change them is a
+  # method. Core natives are the semantics the shape rules assume; what can change them is a
   # Ruby or native definition on the receiver's ancestors, an installer, a prepend or an unknown mixin.
   def frozen_table_name_refusal(name, klass)
     world = @closed_world

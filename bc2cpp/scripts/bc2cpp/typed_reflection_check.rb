@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Typed embedded ivars and reflection (docs/adr/0261). A typed slot (mrb_int,
+# Typed embedded ivars and reflection. A typed slot (mrb_int,
 # mrb_sym, mrb_bool, Integer-or-nil) is a raw C field of the RData payload.
 # The RData ivar descriptor used to list boxed slots only, so a typed ivar was
 # invisible to instance_variable_get/set, instance_variables, inspect, Marshal

@@ -1,13 +1,13 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Aggregate BC2CPP_NATIVE_ARMS_REPORT (tools/bc2cpp/native_arms_report.rb, ADR 0323): how many by-name sites a
+# Aggregate BC2CPP_NATIVE_ARMS_REPORT: how many by-name sites a
 # per-class native arm could remove, lever by lever, and which native entries would be missing.
 #
 #   BC2CPP_NATIVE_ARMS_REPORT=arms.tsv MRBC=<host mrbc> ruby scripts/bc2cpp/coverage_report.rb > /dev/null
 #   ruby scripts/bc2cpp/native_arms_report.rb arms.tsv [owner-regexp]
 #
-# Levers (ADR 0315's three proofs): (a) a def or alias inside `class << <Const>` installs on a class object,
+# Levers: (a) a def or alias inside `class << <Const>` installs on a class object,
 # (b) native and outside definers are resolved per class, (c) the listed classes are checked against the proven set S.
 # A lever only counts when S is bounded; an unproven receiver is not touched by any of them.
 

@@ -2,7 +2,7 @@
 
 require 'set'
 
-# CORE_MIXINS (docs/adr/0261): mruby's own Enumerable/Comparable as known mixins. The core Ruby methods bc2cpp once
+# CORE_MIXINS: mruby's own Enumerable/Comparable as known mixins. The core Ruby methods bc2cpp once
 # inlined from a verified model (Numeric#positive?/#negative?, Enumerable#min/#max) are no longer modelled: their
 # receivers run the ordinary dispatch. The definer scan below is still what core_compare.rb and the source checks use.
 module CoreMixins

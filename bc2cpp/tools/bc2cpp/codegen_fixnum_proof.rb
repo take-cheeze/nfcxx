@@ -15,13 +15,13 @@ class CodeGen
   #      entry: the C++ parameter is an mrb_int (fixnum_proof_entry_arg?).
   #   3. A GETIV of an ivar embedded as :fixnum: an mrb_int struct field whose
   #      every write is guarded by mrb_integer_p.
-  #   4. (retired, ADR 0279: an ADD/SUB/MUL/ADDI/SUBI result can leave the Fixnum range,
+  #   4. (retired: an ADD/SUB/MUL/ADDI/SUBI result can leave the Fixnum range,
   #      so it is an Integer -- see NumericFlow -- not a proven Fixnum.)
   #   5. GETCONST/GETMCNST of an IntegerConstants name.
   #   (6. FIXNUM_RETURN_PROOF and 7. ENTRY_ARG_CALLSITE_PROOF, below.)
   # MOVE chains are followed (`regs[a] = regs[b]`).
   #
-  # The proof asks BytecodeIR's reaching definitions (ADR 0476): the SET of
+  # The proof asks BytecodeIR's reaching definitions: the SET of
   # writes that can supply the register at the use, through joins and loops,
   # over the normal-flow CFG. Every one must prove. Entry points, all honoured:
   #   - goto targets: the CFG's predecessor lists (a join contributes each arm's
@@ -50,7 +50,7 @@ class CodeGen
   # enclosing frame), EXCEPT/RAISEIF/MATCHERR/JMPUW (exception edges), EXT*,
   # CALL, ERR, and any future opcode. A whitelist: an over-approximated write
   # only costs a proof, an under-approximated one is a wrong answer. It is
-  # BytecodeIR's audited list itself (ADR 0476), not a copy kept equal to it.
+  # BytecodeIR's audited list itself, not a copy kept equal to it.
   FIXNUM_PROOF_STEP_OVER_OPS = BytecodeIR::WRITES_LEADING_REG_OPS
 
   # Members of FIXNUM_PROOF_STEP_OVER_OPS whose leading register is READ, not
@@ -85,7 +85,7 @@ class CodeGen
   # number string. true only for an exact proof; false means "not provable",
   # not "not a Fixnum".
   #
-  # JOIN_REACHING_DEFS (ADR 0476): every definition of `reg` reaching the read
+  # JOIN_REACHING_DEFS: every definition of `reg` reaching the read
   # at `idx` must prove, through joins and loops (BytecodeIR's
   # reaching_definitions, which follows MOVE chains). Its barriers are this
   # proof's: an op outside the audited write list, a catch target or protected
@@ -183,7 +183,7 @@ class CodeGen
       !@fixnum_proof_skip_constants &&
         (@integer_constants.include?(insn.mcnst_name) || fixnum_interval_const?(insn.mcnst_name))
     when *FIXNUM_INTERVAL_OPS
-      # NUMERIC_INTERVAL_OPERANDS (ADR 0326): `HEADER_H * 3 + 2` is a Fixnum when its interval fits.
+      # NUMERIC_INTERVAL_OPERANDS: `HEADER_H * 3 + 2` is a Fixnum when its interval fits.
       !@fixnum_proof_skip_constants && numeric_intervals_on? &&
         !fixnum_interval_source(irep, j, insn, reg, owner_def, 0, nil).nil?
     when 'GETIDX', 'GETIDX0'
@@ -371,7 +371,7 @@ class CodeGen
   #     which poisons. A name computed from a String or an interpolation is not
   #     visible that way: numeric_dynamically_named? refuses every name a program
   #     spells as a string (and the setter `stem=` of one) once any computed-name
-  #     send exists (ADR 0279).
+  #     send exists.
   # So a call into M under name N can only be:
   #   (a) a bytecode SEND-family instruction naming `:N` -- enumerated;
   #   (b) symbol-mediated dispatch -- `:N` in a non-call opcode poisons N;
@@ -545,7 +545,7 @@ class CodeGen
       next unless name =~ /\A[A-Za-z_]/                # rule 4
       next if name == 'initialize'                     # rule 5
       next if poisoned.include?(name)                  # rule 7
-      next if numeric_dynamically_named?(name)         # rule 7b (ADR 0279)
+      next if numeric_dynamically_named?(name)         # rule 7b
 
       d = defs.first
       next unless d.irep
@@ -562,7 +562,7 @@ class CodeGen
 
       (1..mand).each { |k| cand[[d.irep, k]] = [here, k] }
     end
-    # CONSTRUCTOR_POOLS (ADR 0313): rule 5 refuses initialize by name; its sites are enumerated by class.
+    # CONSTRUCTOR_POOLS: rule 5 refuses initialize by name; its sites are enumerated by class.
     cand.merge!(constructor_pool_candidates)
   end
 

@@ -4,7 +4,7 @@
 # no gem hand-copies another's list: a drifted copy fails silently, with two
 # gems reaching different MONO/POLY conclusions for the same name.
 #
-# Cross-gem devirtualization (docs/adr/0139): each mrbgem.rake derives its
+# Cross-gem devirtualization: each mrbgem.rake derives its
 # OTHER_OWNERS/OTHER_DECLS_HEADER from the *other* entries here, so a direct
 # call can reference another gem's _impl through its *_decls.h without either
 # codegen step reading the other's output (that would be a circular Rake
@@ -19,7 +19,7 @@
 # REGISTRATION, emit_owner_registrations) for every entry of these classes in
 # `compiled` -- by compile_all's #error partition, exactly the entries that
 # compile clean -- so the equivalence holds by construction rather than by a
-# hand-written register.cxx kept in sync (which drifted before: see ADR 0139).
+# hand-written register.cxx kept in sync.
 # register.cxx calls it once, right after bc2cpp_set_instance_tts.
 # It must match the generated output; a hand mrb_define_method for the same name/aspec counts too.
 BC2CPP_WIRED_EMBEDDINGS = %w[
@@ -53,7 +53,7 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   Game::Message::ScanResult
 ].freeze
 
-# ADR 0264: mruby's own Ruby that joins the closed world as compiled input --
+# mruby's own Ruby that joins the closed world as compiled input --
 # 3rd/mruby/mrblib/*.rb plus the mrblib of these gems, in interpreter load order
 # (core mrblib, then gems). A class is spread over several gems' mrblib, so the
 # registry must see every definition of a name before a call to it can
@@ -74,7 +74,7 @@ BC2CPP_CORE_MRBLIB_GEMS = %w[
 #   would add two exact-class arms to every `.name` call chain for nothing.
 BC2CPP_CORE_MRBLIB_EXCLUDED = %w[mrbgems/mruby-io/mrblib/kernel.rb mrblib/10error.rb].freeze
 # Core mrblib gems whose Ruby is analysed as program, so their method names are known callers and not outside tokens
-# (ADR 0514). Only their C sources stay outside. Files in BC2CPP_CORE_MRBLIB_EXCLUDED stay foreign.
+# Only their C sources stay outside. Files in BC2CPP_CORE_MRBLIB_EXCLUDED stay foreign.
 BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = BC2CPP_CORE_MRBLIB_GEMS
 # FAIL_FAST_TYPE (compile-time): true defines BC2CPP_FAIL_FAST_TYPE in the compiled gems, so each closed-world
 # fallback (bc2cpp_nomethod) raises TypeError instead of dispatching by name. Off in every shipped build.
@@ -92,7 +92,7 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # source file: see emit_unit in bc2cpp.rb.
 # The classes core sources define methods on, read from the sources: the Ruby defs of the core and
 # external mrblib files (the owners mruby-core-compiled emits), and the C definitions of mruby's src/
-# and the core mrbgems' C, literal registrations and ROM tables alike (ADR 0264). Object is left out:
+# and the core mrbgems' C, literal registrations and ROM tables alike. Object is left out:
 # mruby-rpg2k/mrblib/main.rb defines engine methods on it that no compiled gem emits, so an Object owner
 # would claim them. A class also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
@@ -215,7 +215,7 @@ BC2CPP_COMPILED_GEMS = {
     # get wrong when adding an owner here:
     #
     # - `.singleton` owners are the `def self.x`/`class << self` methods of a
-    #   class or module (ADR 0139, ".singleton owner support"); they register
+    #   class or module; they register
     #   with mrb_define_class_method and never embed (class ivars live on a
     #   different object than any instance's iv_tbl).
     # - A compiled `#initialize` is required to allocate the RData payload. The
@@ -299,9 +299,9 @@ BC2CPP_COMPILED_GEMS = {
     out_symbol: 'rgss_compiled',
   },
   'mruby-core-compiled' => {
-    # ADR 0264: mruby's own Ruby (BC2CPP_CORE_MRBLIB_GEMS) compiled by the same
+    # mruby's own Ruby (BC2CPP_CORE_MRBLIB_GEMS) compiled by the same
     # pipeline. Every eligible method (CoreMethods: not Fiber-naming, lambda-building,
-    # conditional, shadowed or refused; ADR 0269 guards the block-taking ones) is
+    # conditional, shadowed or refused; the root-context guard covers the block-taking ones) is
     # emitted, and registered through the
     # generated bc2cpp_register_owner_methods (no hand register.cxx to drift)
     # after the core gems that define the bytecode it replaces. Array and
@@ -350,7 +350,7 @@ def external_gem_native_srcs(gems_root)
 end
 
 # The closed-world sources one build's codegen reads: the core mrblib of the gems the build really has, so an Array#each
-# defined by mruby's own Ruby is in the registry and a proof can name it (ADR 0484). Called from a codegen task, when the
+# defined by mruby's own Ruby is in the registry and a proof can name it. Called from a codegen task, when the
 # gem list is complete.
 def bc2cpp_closed_world_srcs(spec, gems_root)
   core_gems = spec.build.gems.map(&:name)
@@ -358,7 +358,7 @@ def bc2cpp_closed_world_srcs(spec, gems_root)
 end
 
 # mruby-rgss's native sources as the build compiles them: tts.cxx only where a
-# RGSS::Tts backend can exist (RgssTtsConfig, ADR 0417); the other builds compile
+# RGSS::Tts backend can exist; the other builds compile
 # tts_off.cxx, which registers nothing. A native registration
 # the build does not have must not shape the registry (bare-name POLY
 # collisions on `stop`/`speak`/`available?`), so it is left out of NATIVE_SRCS.
@@ -384,8 +384,7 @@ end
 # Party/Battle#rpg2003?). Shared here so the gems cannot drift apart: a
 # drifted set fails silently, with different MONO/POLY conclusions per gem.
 #
-# `tts`: whether the build can have a RGSS::Tts backend (RgssTtsConfig, ADR
-# 0417). The canonical world is the closed build's, which cannot: Scene::Map#speak_message is
+# `tts`: whether the build can have a RGSS::Tts backend (RgssTtsConfig). The canonical world is the closed build's, which cannot: Scene::Map#speak_message is
 # then mruby-rpg2k/mrblib_limited/map_tts_off.rb, which mruby-rpg2k/mrbgem.rake
 # also swaps in for that build, and no Ruby names RGSS::Tts. A desktop world
 # keeps scene/map_tts.rb.
@@ -449,11 +448,11 @@ def foreign_mrblib_srcs(gems_root)
     Dir["#{gems_root}/3rd/mruby-stringio/mrblib/**/*.rb"]
 end
 
-# CLOSED_WORLD (docs/adr/0210): the builds that ship RPG2000/2003 only
+# CLOSED_WORLD: the builds that ship RPG2000/2003 only
 # (build_config.rb's single_format_only). Their games carry no Ruby, so the
 # only Ruby that can run is the closed world plus the build's own gems.
-# The standalone Optcarrot benchmark seals its host separately (ADR 0400).
-# bc2cpp compiles these builds only (docs/adr/0466); every other build, and any
+# The standalone Optcarrot benchmark seals its host separately.
+# bc2cpp compiles these builds only; every other build, and any
 # build with a gem below, is the plain mruby build.
 # `closed` is the closed world built natively for CI (build_config.rb).
 BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe].freeze
@@ -749,7 +748,7 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
 end
 
 # The bc2cpp environment for `spec`'s build: its name and gem list. bc2cpp is
-# closed-world only (docs/adr/0466), so a build that is not a closed world is
+# closed-world only, so a build that is not a closed world is
 # an error here; build_config.rb adds the compiled gems to closed-world builds
 # only. Called from the codegen task, once every gem (dependencies included) is
 # in the build.
@@ -766,7 +765,7 @@ def bc2cpp_closed_world_env(spec, repo_root)
     'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" }) }
 end
 
-# SHARED_GENERATION (ADR 0464): the bc2cpp.rb run of compiled gem `spec` -- [environment, sources, generated file],
+# SHARED_GENERATION: the bc2cpp.rb run of compiled gem `spec` -- [environment, sources, generated file],
 # exactly what each *-compiled/mrbgem.rake used to build inline. Called from a codegen task, once the gem list is
 # complete.
 def bc2cpp_compiled_gem_job(spec, gems_root)

@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'numeric_flow'
 
-# CodeGen: ENTRY_GUARDED_SPECIALIZATION (docs/adr/0380).
+# CodeGen: ENTRY_GUARDED_SPECIALIZATION.
 #
 # A hot method whose parameter is monomorphic at run time (BC2CPP_TRACE_TYPES) but not provable from its
 # call sites gets a second body compiled under the ASSUMPTION that the listed parameters are exactly the
@@ -18,8 +18,8 @@ require_relative 'numeric_flow'
 # a Float, a singleton-bearing object) runs the generic body, which is unchanged. Every `_impl` caller, the
 # mrb_func_t wrapper and the registration reach the guard, because it sits in `_impl` itself.
 #
-# How the assumption reaches the compiler. The class pools of ADR 0295 hold, per (irep label, argument
-# position), the class set an argument may carry on entry; the exact-class flow of ADR 0289 reads them
+# How the assumption reaches the compiler. The class pools hold, per (irep label, argument
+# position), the class set an argument may carry on entry; the exact-class flow reads them
 # (class_pool_entry_mask) and every unguarded consumer (a by-name send on the argument becomes a direct call,
 # a Hash receiver a native body) reads the flow. The specialized body is the SAME irep compiled under a
 # clone label (`<label>~spec`) whose pool entries are the assumed masks, so every per-label memo (flow states,
@@ -49,7 +49,7 @@ class CodeGen
   ENTRY_SPEC_SUFFIX = '_spec'
 
   # class name -> NumericFlow mask, the C++ test of one argument (`%<v>s`), and whether the numeric flow
-  # (ADR 0276) may carry the mask too (it carries INT/FLT/ARR/HSH/STR/NIL, never a Range or a class bit).
+  # may carry the mask too (it carries INT/FLT/ARR/HSH/STR/NIL, never a Range or a class bit).
   ENTRY_SPEC_CORE = {
     'Integer' => { mask: NumericFlow::INT, test: 'mrb_fixnum_p(%<v>s)', numeric: true, fixnum: true },
     'Float' => { mask: NumericFlow::FLT, test: 'mrb_float_p(%<v>s)', numeric: true },
@@ -196,7 +196,7 @@ class CodeGen
       table[clone_label] = value
       keys << table
     end
-    # What the call sites already prove about this method's arguments (the pools of ADR 0276/0295/0370,
+    # What the call sites already prove about this method's arguments (the class and numeric pools,
     # the Fixnum entry proof) holds for the clone too: it is the same method. The assumptions then replace
     # their positions, since the guard fixes those to exactly the assumed class.
     pool_keys = []

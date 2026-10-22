@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Constant proofs (ADRs 0423, 0455): declared Array sums, declared values across joins, and lexical holders,
+# Constant proofs: declared Array sums, declared values across joins, and lexical holders,
 # superclasses and mixins across joins. Every fixture has its own compiled program; core-method replacements and
 # duplicate constant names must not change another fixture's world. Assertions retain their individual labels.
 #

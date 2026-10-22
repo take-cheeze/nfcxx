@@ -5,7 +5,7 @@
 # `closed_world_mrblib_srcs`/`NATIVE_SRCS` -- see tools/bc2cpp/
 # never_called_registrations.rb), which is exactly the same evidence
 # `Game::Character#front_tile` has. `front_tile` really is dead and its
-# `def` was deleted outright (docs/adr/0194). `#maker` is NOT dead: it is
+# `def` was deleted outright. `#maker` is NOT dead: it is
 # called from `mruby-lcf/test/lcf_test.rb`, `scripts/lcf/testbed_check.rb`
 # and `scripts/rpg2k3/battle_command_check.rb` -- real callers bc2cpp.rb's
 # own reachability scan has no visibility into at all, since it only ever

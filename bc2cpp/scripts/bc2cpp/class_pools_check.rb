@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check CLASS_POOLS and NILABLE_RECEIVER (docs/adr/0296): the exact-class flow of ADR 0289 reads
+# Check CLASS_POOLS and NILABLE_RECEIVER: the exact-class flow reads
 # an ivar and an argument across methods through whole-program pools, and a receiver that is nil or
 # exactly one class takes one nil test and then the exact path.
 #

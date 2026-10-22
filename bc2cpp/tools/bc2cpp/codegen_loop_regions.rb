@@ -69,19 +69,19 @@ class CodeGen
     traced = proven_array_source(irep, idx, dest_reg) if klass == 'Array' && traced != 'Array'
     return true if traced == klass
 
-    # GUARDED_BLOCK_INLINE (ADR 0420): an unproven receiver is asked at run time (guarded_inline_receiver?).
+    # GUARDED_BLOCK_INLINE: an unproven receiver is asked at run time (guarded_inline_receiver?).
     !traced && guarded_inline_receiver?(insn, klass)
   end
 
-  # BLOCK_SUPPORT (ADR 0147): inline `receiver.times { |i| BODY }` as a native
+  # BLOCK_SUPPORT: inline `receiver.times { |i| BODY }` as a native
   # `for` loop instead of building a Proc. mrb_proc_new would build a Proc with
   # no captured environment, while blocks close over outer locals; inlined, the
   # block body shares the method's `r0..rN`, so level-0 GETUPVAR/SETUPVAR are the
   # same variables and RETURN_BLK is a plain C++ return.
   # The loop counts in an mrb_int, so it is only Integer#times for a Fixnum receiver. A bignum runs Integer#times and
   # anything else raises NoMethodError (or answers `times` itself), so an unproven receiver is not inlined bare
-  # (ADR 0472): a receiver FIXNUM_OPERAND_PROOF proves is the plain loop; any other is a GUARDED_BLOCK_INLINE site
-  # (ADR 0420) whose loop runs behind mrb_integer_p, the send with its BLOCK_CORE_DIRECT arms as the else; without the
+  # a receiver FIXNUM_OPERAND_PROOF proves is the plain loop; any other is a GUARDED_BLOCK_INLINE site
+  # whose loop runs behind mrb_integer_p, the send with its BLOCK_CORE_DIRECT arms as the else; without the
   # guarded pass (a rescue try body, a resumable method) the send stays as it is.
   # Shape: `SENDB Ra :times n=0` right after `BLOCK R(a+1) I[k]` (the block
   # argument goes in the register after the destination for n=0), with I[k]
@@ -111,7 +111,7 @@ class CodeGen
     regions
   end
 
-  # ADR 0472: is the receiver of the `times` send at `idx` a Fixnum on every path (an Integer literal, or
+  # Is the receiver of the `times` send at `idx` a Fixnum on every path (an Integer literal, or
   # FIXNUM_OPERAND_PROOF for the method's own registers)?
   def times_fixnum_receiver?(irep, idx, dest_reg)
     return true if exact_literal(irep, idx, dest_reg)&.klass == :Integer
@@ -120,14 +120,14 @@ class CodeGen
     !owner_def.nil? && proven_fixnum_operand?(irep, idx, dest_reg, owner_def)
   end
 
-  # EACH_BLOCK_SUPPORT (ADR 0152): inline `ary.each { |x| ... }`. Same BLOCK +
+  # EACH_BLOCK_SUPPORT: inline `ary.each { |x| ... }`. Same BLOCK +
   # `SENDB`/`SSENDB Ra :each n=0` adjacency as times. `#each` has bytecode
   # definitions (Game::Actors, Game::Party, LCF::Array2D), so the receiver must
   # trace (trace_new_target) to exactly "Array". An SSENDB (self receiver) is
   # admitted only when the owner is Array itself. Anything unproven gives no
   # region.
   #
-  # EACH_SPREAD (ADR 0376): a 2..EACH_SPREAD_MAX parameter block gets `spread: n`; OP_ENTER spreads
+  # EACH_SPREAD: a 2..EACH_SPREAD_MAX parameter block gets `spread: n`; OP_ENTER spreads
   # an Array element over the parameters (vm.c). BC2CPP_EACH_SPREAD=0 keeps those blocks as calls.
   EACH_SPREAD_MAX = 8
 
@@ -570,8 +570,8 @@ class CodeGen
     regions
   end
 
-  # The native the call reaches is profiler.cxx's own function, checked to return its block's value (BLOCK_RETURNS,
-  # ADR 0475: the sig/bc2cpp declaration of RGSS::Profiler.section/frame, its source scan and the closed-world
+  # The native the call reaches is profiler.cxx's own function, checked to return its block's value (BLOCK_RETURNS:
+  # the sig/bc2cpp declaration of RGSS::Profiler.section/frame, its source scan and the closed-world
   # lookup conditions). The emitter replaces that function with profiler.cxx's primitives, so the one native source
   # must be that file.
   def profiler_native_lookup_safe?(meth)

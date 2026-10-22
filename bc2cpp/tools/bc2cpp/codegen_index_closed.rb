@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-# CodeGen: INDEX_CLOSED (ADR 0365). The by-name tail of the shared index helpers (bc2cpp_getidx, bc2cpp_getidx0,
-# bc2cpp_setidx, ADR 0216) becomes a class-tag switch over the native `[]` / `[]=` bodies plus a proven NoMethodError,
+# CodeGen: INDEX_CLOSED. The by-name tail of the shared index helpers (bc2cpp_getidx, bc2cpp_getidx0,
+# bc2cpp_setidx) becomes a class-tag switch over the native `[]` / `[]=` bodies plus a proven NoMethodError,
 # when CallFacts::Answers says every class that can answer the name is one the helper has an arm for.
 #
 # The native bodies are static in mruby and read the CALLING frame (mrb_get_args), which a shared helper does not have;
@@ -50,7 +50,7 @@ class CodeGen
                            '{ return table_get_impl(M, self, x, y, z); }'] },
       # `proc[x]` is mrb_funcall(proc, "[]", x) once `[]` is found on Proc (call_proc): mrb_funcall_with_method skips
       # the lookup and nothing else (src/vm.c's funcall_with_block_m). A cfunc-backed proc (a compiled block) cannot run
-      # OP_CALL from a compiled frame, so it is yielded to, as bc2cpp_funcall_argv does (BLOCK_SEMANTICS, ADR 0266).
+      # OP_CALL from a compiled frame, so it is yielded to, as bc2cpp_funcall_argv does.
       'Proc' => { file: 'src/proc.c', gem: nil, mt: nil, test: 'mrb_proc_p(recv)',
                   call: '(MRB_PROC_CFUNC_P(mrb_proc_ptr(recv)) && mrb_obj_ptr(recv)->c == M->proc_class) ? ' \
                          'bc2cpp_yield_argv(M, recv, 1, &bc2cpp_key) : mrb_proc_aref_impl(M, recv, 1, &bc2cpp_key)',
@@ -251,8 +251,8 @@ class CodeGen
     reason || plan
   end
 
-  # `members` less the classes of gems the build does not link (the host scan reads every core gem; ADR 0364 does the
-  # same for Time). nil when the name is unbounded or a removed class has a declared subclass.
+  # `members` less the classes of gems the build does not link (the host scan reads every core gem; Time is handled the same
+  # way). nil when the name is unbounded or a removed class has a declared subclass.
   def index_closed_members(answers, name, definers)
     members = answers.members(name)
     return nil if members.nil?

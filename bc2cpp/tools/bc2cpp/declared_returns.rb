@@ -4,7 +4,7 @@ require 'set'
 require_relative 'native_sigs'
 require_relative 'rbs_parse_memo'
 
-# DECLARED_RETURN_CHECK (docs/adr/0455): the RBS return declarations a body is checked against.
+# DECLARED_RETURN_CHECK: the RBS return declarations a body is checked against.
 #
 # A return declaration `-> Integer`, `-> Array`, `-> Array[C]`, `-> C` or `-> C?` (C a class the program defines) is a
 # claim about every return path of ONE definition. CodeGen#check_declared_returns (codegen_declared_returns.rb) verifies
@@ -17,7 +17,7 @@ require_relative 'rbs_parse_memo'
 #   :array    `Array`, `Array[T]`   every path is an Array; an element class stays the guarded seed it was
 #   :class    `C`, `C?`             every path is an instance of exactly C (`C?`: or nil)
 #
-# `%a{bc2cpp:hint}` marks a RUNTIME-CHECKED declaration (DECLARED_RETURN_GUARD, ADR 0455): a body the static check
+# `%a{bc2cpp:hint}` marks a RUNTIME-CHECKED declaration: a body the static check
 # cannot prove (a Hash read, an attr_reader, a database row) is compiled with a check of the returned value
 # (codegen_declared_returns.rb, declared_return_guard_wrap) that raises BC2cppHintViolation on a mismatch. The
 # declaration is then a fact like a statically checked one. A hinted declaration no compiled body can carry is a

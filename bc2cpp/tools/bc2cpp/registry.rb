@@ -141,12 +141,12 @@ def build_registry(ireps, root_label)
   class_decls = Hash.new { |h, k| h[k] = [] }
   module_body_ivar_labels = Hash.new { |h, k| h[k] = [] }
   walked = Set.new
-  # CORE_ALIASES (ADR 0269): every `alias new old` of a class body, in walk order.
+  # CORE_ALIASES: every `alias new old` of a class body, in walk order.
   alias_sites = []
-  # LOOP_INSTALLERS (ADR 0304): [irep label, index, namespace, visibility] of each container loop
+  # LOOP_INSTALLERS: [irep label, index, namespace, visibility] of each container loop
   # in a body whose block sends attr_*; settled once the walk has seen every definition.
   loop_sites = []
-  # ALIAS_SITES (ADR 0474): how many alias copies the walk made (names their ireps), and the def labels a
+  # ALIAS_SITES: how many alias copies the walk made (names their ireps), and the def labels a
   # branch can skip, computed on the first alias that asks.
   alias_seq = 0
   conditional_labels = nil
@@ -212,7 +212,7 @@ def build_registry(ireps, root_label)
         reg = insn.reg_token
         name = insn.sym
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
-        # ADR 0402: `class Outer::Name` / `module Outer::Name` (a compact definition)
+        # `class Outer::Name` / `module Outer::Name` (a compact definition)
         # is named by its resolved outer constant, not by the lexical namespace.
         outer_qualified = compact_outer_name(irep, idx, reg[/\d+/], namespace, module_names)
         opener_name = if outer_qualified
@@ -287,7 +287,7 @@ def build_registry(ireps, root_label)
         # into the wrong body (Game.clamp vs RPG2k::Scene::MapViewer#clamp). Adding a
         # def can only turn an unsound MONO into POLY, never lose a sound one.
         #
-        # I[c] is a real child irep, so it is recorded as `irep:` (docs/adr/0139);
+        # I[c] is a real child irep, so it is recorded as `irep:`;
         # with irep: nil the method could never become a compile target. That is safe
         # for every `d.irep` reader: natively_exposed? only compares against instance
         # owners from ivar_layout, never ".singleton" ones.
@@ -449,7 +449,7 @@ def build_registry(ireps, root_label)
           end
         end
       when 'SSENDB'
-        # DEFINE_METHOD_SITES (docs/adr/0288). Whether the program may trust the site is
+        # DEFINE_METHOD_SITES. Whether the program may trust the site is
         # decided after the closed world exists (demote_define_method_defs); until then
         # it is only a candidate that symbol_installed_names still counts as an installer.
         site = DefineMethodSites.site(irep, idx, ireps)
@@ -546,7 +546,7 @@ def build_registry(ireps, root_label)
       table = site[:kind] == 'include' ? included_modules : prepended_modules
       (table[site[:owner]] ||= []) << resolved
     elsif resolved.nil? && site[:kind] == 'include' && CoreMixins.core_mixin?(ref[:name])
-      # CORE_MIXINS (ADR 0261): no closed-world module of that name is in scope,
+      # CORE_MIXINS: no closed-world module of that name is in scope,
       # so the constant is mruby's own.
       (included_modules[site[:owner]] ||= []) << ref[:name]
     else
@@ -587,7 +587,7 @@ def resolve_superclass_ref(irep, before_idx, reg, namespace)
   end
 end
 
-# ADR 0402: the qualified name of a compact definition's outer constant, or nil.
+# The qualified name of a compact definition's outer constant, or nil.
 # `class Outer::Name` names its outer through a GETCONST (plus GETMCNST segments)
 # that is not the lexical self. A first segment at top level is taken as written.
 # Inside a namespace it resolves only to a module already walked in this file

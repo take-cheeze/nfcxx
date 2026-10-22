@@ -2,7 +2,7 @@
 
 require 'set'
 
-# CORE_DEFS (ADR 0264): what decides whether a definition from mruby's own Ruby
+# CORE_DEFS: what decides whether a definition from mruby's own Ruby
 # may be compiled and registered over the interpreter's. The registry walks a
 # class body as straight-line code; these two facts are where that is false.
 module CoreDefs
@@ -92,7 +92,7 @@ module CoreDefs
   # runs, and a `Fiber.yield` inside the block (the RGSS script host's
   # Graphics.update, an Enumerator#next) cannot cross it: mruby raises FiberError
   # for a yield through a C frame. The compiled entry of these "guarded" methods
-  # hands the call to the bytecode whenever a Fiber runs (CORE_BLOCK_GUARD, ADR 0269).
+  # hands the call to the bytecode whenever a Fiber runs.
   def touches_block?(irep, ireps)
     enter = irep.enter
     return true if enter && enter.enter_fields[6].to_i.positive?

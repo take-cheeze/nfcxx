@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# LINT_CROSSCHECK (ADR 0368): the closed-world lint (scripts/rpg2k/closed_world_lint.rb) and the
+# LINT_CROSSCHECK: the closed-world lint (scripts/rpg2k/closed_world_lint.rb) and the
 # ClosedWorld analysis scan the same Ruby by different means. A proof is only as trusted as the
 # agreement of the two, so a build that refuses to agree fails instead of shipping a closed form.
 # BC2CPP_LINT_CROSSCHECK=0 turns the check off.

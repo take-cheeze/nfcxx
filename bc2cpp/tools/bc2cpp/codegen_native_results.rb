@@ -8,7 +8,7 @@ require_relative 'core_hierarchy_sigs'
 require_relative 'numeric_flow'
 require_relative 'codegen_return_classes'
 
-# CodeGen: NATIVE_RESULT_FACTS (ADR 0302). A fact is used only for a receiver the exact-class flow
+# CodeGen: NATIVE_RESULT_FACTS. A fact is used only for a receiver the exact-class flow
 # proved, while lookup from that class provably reaches the registration (native_exact_owner_safe?).
 class CodeGen
   NATIVE_RESULT_CORE_CLASS_BITS = RETURN_CORE_CLASS.map { |bit, klass| [klass, bit, bit.bit_length - 1].freeze }.freeze
@@ -71,7 +71,7 @@ class CodeGen
 
   # SEND/SEND0 with no block: a core block iterator of Enumerable (core_blockless_iterators) returns an Enumerator. The
   # receiver is any exact core class that includes Enumerable (CoreHierarchySigs), and the argument count must be one the
-  # blockless declaration accepts. mruby's Enumerable iterators return `to_enum` when no block is given (ADR 0524).
+  # blockless declaration accepts. mruby's Enumerable iterators return `to_enum` when no block is given.
   # Gated: exact instances, no installed or program definition of the name, and the result is NumericFlow::ENUMERATOR,
   # which names no class.
   def native_core_blockless_enumerator_result(insn, state)

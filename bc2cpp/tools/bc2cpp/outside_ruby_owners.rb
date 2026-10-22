@@ -4,10 +4,10 @@ require 'prism'
 require 'set'
 require_relative 'ruby_parse_cache'
 
-# OUTSIDE_OWNER_CALL (docs/adr/0468): the class or module each outside Ruby source (the build's mrblib, mruby's own
+# OUTSIDE_OWNER_CALL: the class or module each outside Ruby source (the build's mrblib, mruby's own
 # Ruby included) defines a method name on, spelled as mruby's `mrb_class_name` spells it at run time: the full
 # lexical path (`class Foo; class Bar` is `Foo::Bar`), with `.singleton` for a definition on the class object (`def
-# self.x`, `class << self`, `module_function`, `define_singleton_method`). ForeignDefiners (ADR 0257) keeps only the
+# self.x`, `class << self`, `module_function`, `define_singleton_method`). ForeignDefiners keeps only the
 # last path segment and no singleton definitions, which is enough to refuse but not to name an owner.
 #
 # A definition whose owner cannot be named (a `def obj.x` on another object, a `class << expr` that is not `self`)

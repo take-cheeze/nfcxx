@@ -26,7 +26,7 @@ module CallFacts
   HOOK_NAMES = %w[method_missing respond_to_missing? initialize].freeze
 
   # The world Answers reads; nil fields make every question "unknown".
-  # instance_installed (NATIVE_CLASS_ARMS, ADR 0323) is installed without the names only a class object sees.
+  # instance_installed is installed without the names only a class object sees.
   World = Struct.new(:closed_world, :registry, :superclass_of, :included, :prepended, :unknown_mixins,
                      :native_sources, :installed, :instance_installed, :compiled_core, keyword_init: true)
 
@@ -92,7 +92,7 @@ module CallFacts
     end
 
     # What defines +name+: {ruby:, modules:, native:, foreign:, singleton:}, or nil when unbounded. +instance+
-    # ignores the definers and installs that only a class or module object sees (ADR 0323); only a question
+    # ignores the definers and installs that only a class or module object sees; only a question
     # about instances of non-Module classes may ask for it.
     def definers(name, instance: false)
       key = [name, instance]
@@ -102,7 +102,7 @@ module CallFacts
     end
 
     # The names' foreign Ruby definers (mruby's own Ruby the build links) that CodeGen compiled in this run
-    # (ADR 0371). A view next to `definers`, never merged into it: the foreign set still says who may
+    # A view next to `definers`, never merged into it: the foreign set still says who may
     # answer, this says whose body a helper may call directly.
     def foreign_definer?(name, owner)
       d = definers(name)
@@ -165,7 +165,7 @@ module CallFacts
       !unknown && anc.none? { |a| d[:native].include?(a) || d[:foreign].include?(a) || d[:modules].include?(a) }
     end
 
-    # NATIVE_CLASS_ARMS (ADR 0323): a send of +name+ to an instance of +klass+ can only reach a Ruby definition
+    # NATIVE_CLASS_ARMS: a send of +name+ to an instance of +klass+ can only reach a Ruby definition
     # of the registry, or none (a NoMethodError): the first definer on its lookup path is such a definition and
     # no native or outside Ruby definer sits at or before it. The Ruby side is judged by full class name, so a
     # namesake class elsewhere cannot stand in for a missing definition.
@@ -299,7 +299,7 @@ module CallFacts
       return nil unless foreign
       return nil if (ruby | native | foreign).intersect?(EVERYTHING)
 
-      # A native singleton method is only seen by a class or module object, never by an instance (ADR 0365).
+      # A native singleton method is only seen by a class or module object, never by an instance.
       class_native = class_registrations.fetch(name, []).to_set { |e| e[:owner] || '?' }
       { ruby: ruby, modules: modules, native: native, foreign: foreign, singleton: singleton, class_native: class_native }
     end

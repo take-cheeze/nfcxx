@@ -2,7 +2,7 @@
 
 require_relative 'bytecode_ir'
 
-# SELF_NEW_LEAF (docs/adr/0468): `new` whose receiver is `self` in a singleton method of class C (`new(...)`,
+# SELF_NEW_LEAF: `new` whose receiver is `self` in a singleton method of class C (`new(...)`,
 # `self.new(...)`), or `self.class` in an instance method of C (`self.class.new(...)`).
 #
 # Such a receiver is C or a class below it: a singleton method runs with any class that inherits it as `self`, an

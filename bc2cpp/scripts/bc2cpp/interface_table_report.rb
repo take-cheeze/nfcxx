@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Aggregate the BC2CPP_ITAB_REPORT TSV (tools/bc2cpp/interface_table_report.rb, ADR 0315): why the else arm of
+# Aggregate the BC2CPP_ITAB_REPORT TSV: why the else arm of
 # a guard chain still dispatches by name, whether the receiver's class set is proven (the precondition for any
 # per-class "interface table" cell), what each cell would be, and the per-name method-set sizes.
 #

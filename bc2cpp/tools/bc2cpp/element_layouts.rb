@@ -30,9 +30,9 @@ require_relative 'bytecode_ir_containers'
 PRIMITIVE_ELEMENT_CLASSES = %w[Integer Hash String Symbol].freeze
 
 # ELEMENT_CLASS_SUPPORT: element class of the Array in `reg` at `idx`, joined
-# over every producer of the register (join_element_producers, ADR 0502). nil
+# over every producer of the register. nil
 # is always safe: the caller poisons the ivar. The strict hint tier forces
-# ELEMENT hints (ADR 0419), so `@a = c ? [A.new] : [B.new]` must not read one arm.
+# ELEMENT hints, so `@a = c ? [A.new] : [B.new]` must not read one arm.
 def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   return nil if depth > 8
 
@@ -686,7 +686,7 @@ class HashElementLayout
 end
 
 # ---------------------------------------------------------------------------
-# The element scans read the IR (ADR 0502): each joins over every producer of
+# The element scans read the IR: each joins over every producer of
 # the register (BytecodeIR.producers, through handler edges). All producers must
 # classify and agree, and a VACUOUS one (an empty literal) agrees with any class.
 # A refused dataflow answers nil. A container literal counts only when nothing

@@ -5,7 +5,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_ops'
 require_relative 'native_expression_devirt'
 
-# BLOCK_PARAM_CALL (docs/adr/0274): `blk.call(...)` in a compiled core method where `blk`
+# BLOCK_PARAM_CALL: `blk.call(...)` in a compiled core method where `blk`
 # is that method's own `&blk` parameter. The value is nil or a Proc (vm.c ensure_block),
 # so the Proc arm of CORE_PROC_CALL is the whole story and its else can only be
 # nil's NoMethodError, which bc2cpp_nomethod raises without a cached send.

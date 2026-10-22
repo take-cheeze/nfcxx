@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# REGISTER_FLOW (docs/adr/0415): copy propagation and dead register-write
+# REGISTER_FLOW: copy propagation and dead register-write
 # removal over emitted instruction texts. Hand-built ireps with fixed answers
 # (what is dropped, what is rewritten, every refusal), then a generated fixture
 # whose output must shrink with the pass on and keep its dead lines with the

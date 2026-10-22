@@ -4,7 +4,7 @@ require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 
-# SYMBOL_FLOW (ADR 0450, ADR 0499): finite symbol sets for constant dispatch tables, for yield_reach.rb.
+# SYMBOL_FLOW: finite symbol sets for constant dispatch tables, for yield_reach.rb.
 #
 # A dynamic send `send(*TABLE[i])` may name any method, so yield_reach must assume the worst there. When every
 # value stored in TABLE is literal, the names the send can reach form a known finite set, and yield_reach records

@@ -2,7 +2,7 @@
 
 require_relative 'dynamic_names'
 
-# CodeGen: NUMERIC_ENTRY_ARG_PROOF (ADR 0276).
+# CodeGen: NUMERIC_ENTRY_ARG_PROOF.
 #
 # ENTRY_ARG_CALLSITE_PROOF with class sets instead of "Fixnum". A mandatory
 # argument register holds the join of what EVERY call site that can reach the

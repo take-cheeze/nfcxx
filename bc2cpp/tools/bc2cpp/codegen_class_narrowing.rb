@@ -4,7 +4,7 @@ require_relative 'numeric_flow'
 require_relative 'core_fact_sigs'
 require_relative 'native_owner_map'
 
-# CLASS_NARROWING (ADR 0375): occurrence typing for the exact-class flow. A branch on the boolean of a class test
+# CLASS_NARROWING: occurrence typing for the exact-class flow. A branch on the boolean of a class test
 # (`x.is_a?(C)`, `kind_of?`, `instance_of?`, `C === x` and so `case x when C`, `x.nil?` and `!x` as a value,
 # `x.respond_to?(:m)`, `x.class == C`) narrows the tested variable's class set on each edge, so the receivers
 # dominated by the test see a smaller proven set. NumericFlow keeps the bookkeeping (which register holds which test, aimed at which variables, and
@@ -68,7 +68,7 @@ class CodeGen
   CLASS_TEST_BITLESS_CORE = %w[Symbol TrueClass FalseClass Proc Exception StandardError].freeze
   # Stands for the class object `x.class` returns: not a test itself, the left side of `x.class == C`.
   CLASS_OF = Object.new.freeze
-  # More than this many classes and the set stops being a useful proof (ADR 0352 stops at eight for a receiver).
+  # More than this many classes and the set stops being a useful proof.
   CLASS_TEST_MAX_CLASSES = 16
   # The classes mruby's own natives register each tested name on (kernel.c, object.c, class.c), from
   # sig/bc2cpp/declarations.rbs#core_class_tests.
@@ -238,7 +238,7 @@ class CodeGen
     owner if owner && @closed_world.class_declared?(owner) && @closed_world.instance_class?(owner)
   end
 
-  # IS_A_GUARD (ADR 0456, RBS_CHECKED_PARAMS): the class K when the SEND at +index+ is `x.is_a?(K)` or
+  # IS_A_GUARD: the class K when the SEND at +index+ is `x.is_a?(K)` or
   # `x.kind_of?(K)` and a true answer makes x an instance of exactly K; else nil. NIL_NARROWING reads it on the true
   # edge of the branch on the SEND's result.
   #   * the name reaches only Kernel's native mrb_obj_is_kind_of (class_test_name_safe?: no Ruby, foreign, computed
@@ -267,7 +267,7 @@ class CodeGen
     !@closed_world.nil? && @closed_world.global_refusal.nil? && class_test_name_safe?('raise')
   end
 
-  # Symbol's chain (ADR 0429): the closed world has no class_parent for it, so without this a Symbol bit is unknown and
+  # Symbol's chain: the closed world has no class_parent for it, so without this a Symbol bit is unknown and
   # passes both edges of every kind_of test. Only a name class_test_constant admits reaches it, and none of those is
   # a superclass or a module of Symbol, so the verdict is exact. It is not in CLASS_TEST_CORE_CHAIN, which also
   # decides respond_to? (Symbol's native methods are not modelled there).
@@ -423,7 +423,7 @@ end
 
 # The run-time half of CLASS_NARROWING: where a test narrows its subject, the compiled code checks after the test
 # that the subject's class is in the set the proof assumes on the edge it took, and raises a guard violation
-# (ADR 0290) otherwise. A wrong closed-world fact then fails at the test, not as a call into the wrong body.
+# otherwise. A wrong closed-world fact then fails at the test, not as a call into the wrong body.
 module ClassNarrowingGuard
   def compile_send(insn, **kwargs)
     code = super

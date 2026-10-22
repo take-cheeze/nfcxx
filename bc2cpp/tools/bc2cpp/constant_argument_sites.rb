@@ -12,7 +12,7 @@ require_relative 'integer_constant_ranges'
 # conditional jumps the tuple would decide. Nothing is generated; the output is a report for a later value-specialization.
 #
 # A constant is an Integer literal (LOADI*), nil, true, false, a Symbol literal, or a constant named in +constants+ (a bare
-# name => [:int, value] or a Symbol-or-nil value, the ConstantFacts values from ADR 0501). A value reaches a call through
+# name => [:int, value] or a Symbol-or-nil value, the ConstantFacts values). A value reaches a call through
 # the bytecode reaching definitions, so a MOVE chain is followed. Anything else is UNKNOWN.
 #
 # Four conditions make a verdict untrustworthy, and each is reported on its own row and counted in the summary:
@@ -166,7 +166,7 @@ module ConstantArgumentSites
   end
 
   # The reason +name+ is unresolved, or nil. A global reason covers every name; a computed-name send covers the names
-  # DynamicNames spells (the same universe ArgTypes and the other call-site proofs refuse, ADR 0279).
+  # DynamicNames spells.
   def unresolved_reason_for(name, unresolved)
     return unresolved[:global].join('; ') if unresolved[:global].any?
 

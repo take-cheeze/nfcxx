@@ -8,8 +8,8 @@ require_relative 'core_hierarchy_sigs'
 require_relative 'escape_analysis'
 require_relative 'rbs_parse_memo'
 
-# RBS_RECORD_TYPES (docs/adr/0454): an RBS record type on an ivar (`@ui: { battle: Game::Battle, ?win: Window }`)
-# is a CHECKED declaration that feeds the facts RECORD_HASH_PROOF (ADR 0285) produces.
+# RBS_RECORD_TYPES: an RBS record type on an ivar (`@ui: { battle: Game::Battle, ?win: Window }`)
+# is a CHECKED declaration that feeds the facts RECORD_HASH_PROOF produces.
 #
 # Loader: every `@ivar: { ... }` (or `{ ... }?`) and `attr_reader/attr_accessor x: { ... }` in the signature
 # files. A field type is `untyped` (no check, no hint) or one RbsSignatures.value_classes_of can name (a class,
@@ -563,7 +563,7 @@ module RbsRecordTypes
       state.any? { |x| x >= lead && x <= hi && !(self_send && x == lead) }
     end
 
-    # A send that takes the Hash (INTERPROC, docs/adr/0454): not an escape when the Hash is a plain positional
+    # A send that takes the Hash: not an escape when the Hash is a plain positional
     # argument and, for every definition the name can reach, ESCAPE_ANALYSIS says the callee keeps none of
     # those arguments and the callee's parameter, scanned as one more alias of the Hash, passes these same
     # rules (its key writes join the checked stores). Anything else keeps the base rule (an escape).

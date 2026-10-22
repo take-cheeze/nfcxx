@@ -5,13 +5,13 @@ require_relative 'core_defs'
 require_relative 'define_method_sites'
 require_relative 'core_hierarchy_sigs'
 
-# LOOP_INSTALLERS (docs/adr/0304): a class-body loop over a literal container whose body installs
+# LOOP_INSTALLERS: a class-body loop over a literal container whose body installs
 # attr_reader/attr_writer/attr_accessor names (`NAMES.each { |n| attr_accessor n }`, optcarrot's
 # `OPTIONS.each_value { |o| o.each { |id, opt| next if opt[:shortcut]; attr_reader id } }`) is, to
 # the registry, the same fact as the literal `attr_reader :a, :b` it unrolls to.
 #
 # The names are not guessed from the container: the loop body is executed here, on the literal
-# value, by an interpreter that knows only a few pure operations (ADR 0210: a hint that is not
+# value, by an interpreter that knows only a few pure operations (a hint that is not
 # proved is not used). Anything it does not model refuses the loop, which then stays the dynamic
 # installer it was.
 #
@@ -22,7 +22,7 @@ require_relative 'core_hierarchy_sigs'
 # - the iterators, lookups and installers are mruby's own (#core_methods_untouched?).
 # - the interpreter refuses every opcode, receiver and branch it does not model (Interp).
 #
-# DEFINE_METHOD_LOOPS (docs/adr/0469): `define_method(n) { ... }` in such a loop is an installer the
+# DEFINE_METHOD_LOOPS: `define_method(n) { ... }` in such a loop is an installer the
 # interpreter models too. Each name it installs becomes a MethodDef(installer: :define_method) whose body is
 # a copy of the block (DefineMethodSites.expand) in which the loop variables the block reads are the Symbols
 # that iteration bound. Conditions on top of the ones above:

@@ -2,7 +2,7 @@
 
 require_relative 'bytecode_ir_resumable'
 
-# CodeGen: resumable compiled methods (ADR 0273). A method that reaches Fiber.yield cannot
+# CodeGen: resumable compiled methods. A method that reaches Fiber.yield cannot
 # keep its registers in C++ locals: the yield returns to the fiber's resumer, so everything
 # it needs lives in a heap frame and the method is compiled as a step function that a
 # bytecode driver calls again after each Fiber.yield.

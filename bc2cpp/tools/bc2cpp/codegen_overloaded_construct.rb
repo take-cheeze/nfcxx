@@ -2,7 +2,7 @@
 
 require_relative 'native_constructor_sigs'
 
-# OVERLOADED_CONSTRUCT (docs/adr/0468): `Klass.new(args)` for a native class whose constructor overloads
+# OVERLOADED_CONSTRUCT: `Klass.new(args)` for a native class whose constructor overloads
 # sig/bc2cpp/declarations.rbs#rgss_constructors declares (and NativeConstructorSigs audits against the C and Ruby source).
 #
 # The call site picks the overload: first by argument count, then by the argument classes the flow proves (a Fixnum

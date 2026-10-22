@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # encoding: UTF-8
-# Real-Range parity for MODULE_SUPER_SUPPORT (ADR 0329), measured on the SAME
+# Real-Range parity for MODULE_SUPER_SUPPORT, measured on the SAME
 # whole-program pass the coverage report counts: the five unhandled-SUPER
 # `#error`s this removes are mruby's own `Range#max`, `Range#min` (two sites
 # each) and `Range#to_a`, whose `super` reaches `Enumerable#max` / `#min` /

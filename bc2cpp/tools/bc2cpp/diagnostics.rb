@@ -103,7 +103,7 @@ def collect_static_call_target_names(ireps)
   ireps.each_value do |irep|
     (irep.instructions || []).each do |insn|
       case insn.op
-      # SENDB/SSENDB count too (docs/adr/0203): a method only called with a block
+      # SENDB/SSENDB count too: a method only called with a block
       # is still called.
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND', 'SENDB', 'SSENDB', 'LOADSYM'
         name = insn.sym

@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Debug report for element classes of mutable containers (ADR 0312): with BC2CPP_ELEMENT_REPORT=<path>,
+# Debug report for element classes of mutable containers: with BC2CPP_ELEMENT_REPORT=<path>,
 # compile_insn records, per instruction, two kinds of TSV row (the last compile of an instruction wins,
 # since compiles_clean? probes compile methods early). It changes no generated code.
 #
@@ -110,7 +110,7 @@ module ElementSiteReport
   end
 
   # Both flows are sound may-sets (OTHER = unknown), so the truth lies in their meet: the exact-class flow
-  # (class bits, return-class table; ADR 0289, 0296) and the numeric flow each know things the other does
+  # and the numeric flow each know things the other does
   # not. nil when neither models the method.
   def element_value_mask(irep, idx, reg, owner_def)
     exact = exact_flow_mask(irep, idx, reg.to_s)

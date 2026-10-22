@@ -5,9 +5,9 @@ require_relative 'irep'
 require_relative 'native_names'
 require_relative 'native_expression_devirt'
 
-# NATIVE_CORE_DIRECT (docs/adr/0257): exact-builtin-class arms that call a core
+# NATIVE_CORE_DIRECT: exact-builtin-class arms that call a core
 # native method's frame-independent body directly, the mruby-core counterpart of
-# NativeDirect's RGSS entry points (ADR 0253).
+# NativeDirect's RGSS entry points.
 #
 # A method is admitted only through a hand-audited entry below. The audit is
 # re-run against the real sources on every compile (`audit`): the ROM
@@ -203,7 +203,7 @@ module NativeCoreDirect
               C
   ].freeze
 
-  # KERNEL_DIRECT (docs/adr/0274): natives every object inherits, sent with an implicit
+  # KERNEL_DIRECT: natives every object inherits, sent with an implicit
   # self. No receiver class is guarded: the row is taken only while the name has no other
   # definition anywhere (CodeGen#kernel_direct_entry), so `owner` names the audited
   # registration. `internals` are declared in mruby/internal.h without MRB_API.

@@ -2,7 +2,7 @@
 
 require 'set'
 
-# GUARDED_BLOCK_INLINE (docs/adr/0420): the inlined block loops of codegen_loop_inline.rb for a receiver whose class is
+# GUARDED_BLOCK_INLINE: the inlined block loops of codegen_loop_inline.rb for a receiver whose class is
 # NOT proven. The loop is emitted behind a run-time exact-class test (the same test as BLOCK_CORE_DIRECT's arm), and
 # the ordinary BLOCK + SENDB code stays right behind it as the else, so every other receiver (a subclass, a singleton,
 # a Hash, nil, a user class) dispatches exactly as before. A receiver that passes the test runs the block body in the
@@ -11,13 +11,13 @@ require 'set'
 # What makes the inline loop the same as the dispatch it replaces is what makes the proven inline loop the same
 # (recognize_* in codegen_loop_regions.rb), plus the arm gate: block_core_arms(name, argc) names the class, which is
 # the proof that no Ruby definition, prepend, outside definer or dynamic installer can answer `name` on that class
-# (block_core_target). The root-context test of ADR 0269 is kept, so a Fiber's frames still reach the bytecode.
+# (block_core_target). The root-context test is kept, so a Fiber's frames still reach the bytecode.
 class CodeGen
   # The exact-class test of an unproven receiver, by the class the region's recognizer asked for.
   GUARDED_INLINE_TESTS = {
     'Array' => 'mrb_array_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->array_class',
     'Hash' => 'mrb_hash_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->hash_class',
-    # ADR 0472: a Fixnum (a bignum is MRB_TT_BIGINT and takes the send, which runs Integer#times).
+    # A Fixnum (a bignum is MRB_TT_BIGINT and takes the send, which runs Integer#times).
     'Integer' => 'mrb_integer_p(%<r>s)'
   }.freeze
 
@@ -53,7 +53,7 @@ class CodeGen
 
   # The arm gate, read where the send's own BLOCK_CORE_DIRECT arms are decided: block_core_arms(name, argc) names the
   # class when the compiled core body of that name is what the class answers with (no Ruby definition, prepend,
-  # unattributed mixin, outside definer, native registration or dynamic installer on the chain, ADR 0270). It is only
+  # unattributed mixin, outside definer, native registration or dynamic installer on the chain). It is only
   # READ from the cache the block-send wrapper filled for this very send, never computed here: computing it ahead of
   # the wrapper would change the context (and so the cached answer) other sends get it in.
   def guarded_inline_arm?(name, argc, klass)
@@ -63,7 +63,7 @@ class CodeGen
     guarded_plain_chain_arm?(name, argc, klass)
   end
 
-  # GUARDED_PLAIN_ARM (ADR 0483): the arm when no compiled body is named. A core Ruby method the closed world leaves
+  # GUARDED_PLAIN_ARM: the arm when no compiled body is named. A core Ruby method the closed world leaves
   # uncompiled (mruby's Array#each is ineligible, so it is in neither the registry nor core_hidden_defs) has no body for
   # block_core_arms to name, but the loop does not call that body: it replaces the send with the same iteration. What
   # it still needs is the rest of the arm's proof: no project definition, native, prepend, mixin or dynamic installer

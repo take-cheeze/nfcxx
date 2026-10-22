@@ -12,7 +12,7 @@
 #     "some other class".
 #   * pick a winner between two call sites that pass DIFFERENT classes. That is
 #     genuine heterogeneity, and ClassLayout's join collapses disagreement to
-#     UNKNOWN for a load-bearing reason (docs/adr/0139 wrongly embedded ivars in
+#     UNKNOWN for a load-bearing reason (dropping it wrongly embedded ivars in
 #     Game::Screen and Game::State when an UNKNOWN was dropped because a
 #     concrete type arrived first). This table records nil for such a slot
 #     instead, which is the conservative direction.
@@ -342,7 +342,7 @@ class ClassArgTypesTest < Minitest::Test
     assert_equal [0], sites['each'].map { |*, n| n }
   end
 
-  # ArgTypes already refuses every name spelled as a Symbol literal (DynamicNames, ADR 0279), so a literal to_enum
+  # ArgTypes already refuses every name spelled as a Symbol literal, so a literal to_enum
   # never produced an unsound fixnum fact; ClassArgTypes had no such guard, which is what the index closes.
   def test_arg_types_refuses_a_to_enum_target_either_way
     plain = irep('plain', [insn('LOADI_1', "R2\t(1)"), send_insn(1, 'set', 1)])

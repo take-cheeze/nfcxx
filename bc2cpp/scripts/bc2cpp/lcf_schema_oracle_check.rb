@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# LCF_SCHEMA_ORACLE (docs/adr/0285): the classes tools/bc2cpp/lcf_schema_oracle.rb derives from the
+# LCF_SCHEMA_ORACLE: the classes tools/bc2cpp/lcf_schema_oracle.rb derives from the
 # schema table must be what mruby-lcf/mrblib/lcf.rb really returns. The check loads the reader under
 # CRuby (as every scripts/**/*_check.rb does), then for every record schema (DATABASE's rows included) reads each field once
 # absent (the default / nil arm) and once after a `[]=` of a sample value (the decode arm), and

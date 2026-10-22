@@ -31,7 +31,7 @@ module SiteCensus
     lines.index { |l| l =~ /^(?:static )?mrb_value \w+_impl\(.*\{\s*$/ }
   end
 
-  # A helper written twice (ADR 0360, 0361) keeps its by-name form for builds that link Complex or Rational, which
+  # A helper written twice keeps its by-name form for builds that link Complex or Rational, which
   # the closed-world targets do not: the lines of that copy (up to its `#else`) are not live there.
   def open_form_mask(lines, first_method)
     open_form = false

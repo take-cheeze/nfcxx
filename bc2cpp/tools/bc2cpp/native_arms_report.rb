@@ -4,7 +4,7 @@ require 'set'
 require_relative 'call_facts'
 require_relative 'compiled_gems'
 
-# Debug report for the by-name sites a per-class native arm could remove (ADR 0323): with
+# Debug report for the by-name sites a per-class native arm could remove: with
 # BC2CPP_NATIVE_ARMS_REPORT=<path>, every explicit-receiver send whose final code still reaches a by-name call
 # is written as one TSV row (the last compile of a site wins). It changes no generated code.
 #
@@ -15,7 +15,7 @@ require_relative 'compiled_gems'
 # table or arm cell would be: ruby_direct, native_direct, native_core_direct, native_noentry (a native with no
 # frame-independent entry: the cell would be a send), error (the class does not answer), and so on. `gates`
 # are the whole-name ClosedWorld gates that fail today; `levers` are the same gates re-judged against S (the
-# per-class proofs ADR 0315 asks for). scripts/bc2cpp/native_arms_report.rb aggregates the rows.
+# per-class proofs). scripts/bc2cpp/native_arms_report.rb aggregates the rows.
 module NativeArmsReport
   ROWS = {}
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/

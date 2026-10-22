@@ -43,7 +43,7 @@ class CodeGen
     # name, so an argument such as `x` in `{ |x| return n if x.nil? }` can be nil with no caller in view. Keep the test.
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
     return nil if defs.nil? || defs.empty?
-    # An entry value is the pooled proof only for a complete method (codegen_param_fold.rb, ADR 0540). The entry
+    # An entry value is the pooled proof only for a complete method. The entry
     # definition names the parameter's own register: a MOVE copy is followed back to it.
     return nil unless defs.select(&:entry?).all? { |d| param_fold_proves_entry?(irep, d.reg, owner_def) }
 
@@ -62,7 +62,7 @@ class CodeGen
     jumps ? :taken : :not_taken
   end
 
-  # RANGE_COMPARE_FOLD (ADR 0318): a jump on a comparison's boolean is decided when the operands' intervals settle that
+  # RANGE_COMPARE_FOLD: a jump on a comparison's boolean is decided when the operands' intervals settle that
   # comparison. The only writer may be the comparison, found through handler edges too, so no other value can reach.
   # BC2CPP_RANGE_FOLD=1 turns it on.
   def range_compare_fold_enabled?

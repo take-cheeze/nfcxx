@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# CodeGen: inlined Integer#step / #upto / #downto loops (ADR 0273).
+# CodeGen: inlined Integer#step / #upto / #downto loops.
 
 class CodeGen
   STEP_LOOP_KINDS = {
@@ -62,7 +62,7 @@ class CodeGen
   end
 
   # A C++ `long long` expression for a loop operand, or nil if it is not provably an Integer.
-  # An Integer that may be a bignum (an arithmetic result, ADR 0279) goes into `guards` when
+  # An Integer that may be a bignum goes into `guards` when
   # the caller can test it at run time (STEP_LOOP_GUARD); a nil `guards` refuses it.
   def step_loop_operand(irep, region, reg, d, guards)
     literal = step_loop_literal(irep, region[:sendb_idx] - 1, reg)

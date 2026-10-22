@@ -31,7 +31,7 @@ module IrepScans
     BytecodeIR.for(self).walk_writers(from, reg, **options, &block)
   end
 
-  # JOIN_DOMINANCE (ADR 0261): walk_writers whose every hop must dominate the
+  # JOIN_DOMINANCE: walk_writers whose every hop must dominate the
   # read it feeds (BytecodeIR.write_dominates?); a hop that does not ends the
   # walk with nil. +use+ is the instruction the first hop feeds.
   def walk_dominating_writers(from, reg, use: from + 1, follow_moves: false, exhausted: nil, **options)

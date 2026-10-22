@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Self-test for tools/bc2cpp/lint_crosscheck.rb (ADR 0368): the real tree agrees with the lint
+# Self-test for tools/bc2cpp/lint_crosscheck.rb: the real tree agrees with the lint
 # baseline, and a lint offence or a lint/analysis disagreement is reported.
 
 require 'tmpdir'

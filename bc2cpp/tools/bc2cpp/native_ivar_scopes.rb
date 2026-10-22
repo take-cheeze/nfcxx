@@ -3,7 +3,7 @@
 require 'digest'
 require_relative 'native_names'
 
-# ADRs 0332/0337: audited native writes preserve their registered receiver family.
+# Audited native writes preserve their registered receiver family.
 # Only unrelated Ruby families may pool the same names.
 module NativeIvarScopes
   FILES = {
@@ -22,7 +22,7 @@ module NativeIvarScopes
     'height' => ['RGSS::Window']
   }.freeze
   NAMES = SCOPES.keys.freeze
-  # ADR 0370: what the audited natives (FILES, pinned by digest) put in a scoped slot. `setters` are the registered
+  # What the audited natives (FILES, pinned by digest) put in a scoped slot. `setters` are the registered
   # setters that store their one argument unvalidated (`window_set_contents`: mrb_get_args "o" then
   # window_contents_set_direct); `classes` are the values the natives build themselves (window_init's 1x1 Bitmap).
   # Every `mrb_iv_set` of the slot in FILES must be one of these.

@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
-# EXACT_CORE_RECEIVER (ADR 0280): an unguarded proof that a receiver is exactly an Array, Hash,
-# Range or String (or a fresh `Klass.new`), so the arms of ADR 0253/0257/0270 can drop their
+# EXACT_CORE_RECEIVER: an unguarded proof that a receiver is exactly an Array, Hash,
+# Range or String (or a fresh `Klass.new`), so the arms can drop their
 # class test. Nothing checks the class at run time, so only a literal or `*rest` write on every reaching path
-# counts (BytecodeIR::Types#exact_at; plus exact_flow_core_class, ADR 0289), and only while
+# counts, and only while
 # ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint or an annotation is a guarded fact and never
-# enters here. A compiled core body gets the literal proof only, as a checked proof (ADR 0359).
+# enters here. A compiled core body gets the literal proof only, as a checked proof.
 class CodeGen
   EXACT_LITERAL_CLASS = {
     'ARRAY' => 'Array', 'ARRAY2' => 'Array', 'HASH' => 'Hash', 'STRING' => 'String',
@@ -41,7 +41,7 @@ class CodeGen
     'Range' => 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class'
   }.freeze
 
-  # CORE_BODY_EXACT (ADR 0359): a compiled core body has no engine world, so its walk proof rests on
+  # CORE_BODY_EXACT: a compiled core body has no engine world, so its walk proof rests on
   # the program's. It is a checked proof: the site keeps a class test and a guard violation.
   def core_body_exact_class(irep, idx, reg, owner_def: nil)
     return nil unless core_body_exact_enabled? && irep && idx&.positive? && reg
@@ -50,9 +50,9 @@ class CodeGen
     klass if CORE_BODY_EXACT_TESTS.key?(klass)
   end
 
-  # CORE_SELF_EXACT (ADR 0381): inside a compiled body of Array, Hash, String or Range, `self` is exactly
+  # CORE_SELF_EXACT: inside a compiled body of Array, Hash, String or Range, `self` is exactly
   # that class once the program has no subclass of it (core_class_subclass_free?) and no singleton maker
-  # (core_body_exact_enabled?). The proof is checked at the site like every core-body proof (ADR 0359).
+  # (core_body_exact_enabled?). The proof is checked at the site like every core-body proof.
   # Only the method's own irep counts: a block can be run with a rebound self (instance_exec, define_method).
   def core_self_exact_class(irep, owner_def)
     return nil unless ENV['BC2CPP_CORE_SELF_EXACT'] != '0' && owner_def && irep && !@self_class_unknown
@@ -80,7 +80,7 @@ class CodeGen
   # the exact class of an argument register (nil when it is not a plain register or unproven).
   # `new_class` is the fresh `Klass.new` proof of compile_send (exact_new_receiver_class).
   # `owner_def` is carried so an arm wrapper can ask native_int_arg_proven? about an :int
-  # argument (ADR 0358); without it the wrapper cannot reach the Fixnum proof at all.
+  # argument; without it the wrapper cannot reach the Fixnum proof at all.
   def exact_core_site(irep, idx, receiver_reg, argv, reg_offset, new_class = nil, recv: nil, name: nil, owner_def: nil, dest: nil)
     if @closed_world&.exact_instances_singleton_free?
       klass = exact_core_value_class(irep, idx, receiver_reg) || new_class
@@ -97,7 +97,7 @@ class CodeGen
     checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def)
   end
 
-  # CORE_BODY_EXACT (ADR 0359): the receiver proof of a compiled core body. Only the receiver is
+  # CORE_BODY_EXACT: the receiver proof of a compiled core body. Only the receiver is
   # proven and with_exact_core_site tests it; no argument or Fixnum proof rides on it.
   def checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def = nil)
     return nil unless recv.to_s.match?(/\A(?:r\d+|self)\z/) && name && dest
@@ -135,7 +135,7 @@ class CodeGen
   CORE_BODY_EXACT_ARM = /unguarded proof|-- proven \w+ receiver/
 
   # The code is only valid for the proven class, so it sits behind the class test and the else is a
-  # loud error (ADR 0290).
+  # loud error.
   def checked_exact_code(site, code)
     return code unless site[:used] && code.is_a?(String) && code.match?(CORE_BODY_EXACT_ARM)
 

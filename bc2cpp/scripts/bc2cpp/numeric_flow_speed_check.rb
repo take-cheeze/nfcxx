@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NUMERIC_FLOW_SPEED (docs/adr/0467): NumericFlow reads an irep's bytecode facts from its BytecodeIR::Program and
+# NUMERIC_FLOW_SPEED: NumericFlow reads an irep's bytecode facts from its BytecodeIR::Program and
 # derives its Step table from them once (NumericFlow.table, kept in Program#numeric_flow_table); it caches nothing an
 # oracle answers. Host only, under a second:
 #   - the table is built once per Program and reused by every later run (the cache is hit), and there is no second

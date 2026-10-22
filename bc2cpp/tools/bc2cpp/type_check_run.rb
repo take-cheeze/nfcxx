@@ -7,7 +7,7 @@ require 'fileutils'
 require_relative 'compiled_gems'
 require_relative 'nomethod_reviewed_probe'
 
-# TYPE_CHECK (docs/adr/0412): runs bc2cpp.rb's analysis for scripts/bc2cpp/type_check.rb and the checks, and returns the
+# TYPE_CHECK: runs bc2cpp.rb's analysis for scripts/bc2cpp/type_check.rb and the checks, and returns the
 # facts file (type_facts.rb) and the receiver-proof rows it wrote. The generated C++ is discarded; nothing is compiled.
 module TypeCheckRun
   Result = Struct.new(:facts_path, :rows_path, :stderr_path, :status, keyword_init: true)

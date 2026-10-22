@@ -20,7 +20,7 @@ class CodeGen
       lambda_label = irep.reps[lambda_irep_idx.to_i]
       lambda_irep = lambda_label && @ireps[lambda_label]
       next unless lambda_irep && lambda_fallback_safe?(lambda_irep)
-      # BLOCK_SELF_WORLD (ADR 0477): `instance_exec(&->{ })` runs the lambda under another self.
+      # BLOCK_SELF_WORLD: `instance_exec(&->{ })` runs the lambda under another self.
       next if block_self_rebound?(lambda_label)
 
       # CONFINED_LAMBDA_UPVAR_SUPPORT: what does the body need captured

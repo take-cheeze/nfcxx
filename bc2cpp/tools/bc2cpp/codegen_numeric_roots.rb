@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # CodeGen: BC2CPP_NUMERIC_ROOTS=FILE writes, per guarded numeric operator whose operands NumericFlow could not prove,
-# the class set of each operand and the leaves it is computed from (ADR 0311). Measurement only: the generated code
+# the class set of each operand and the leaves it is computed from. Measurement only: the generated code
 # is byte-identical with it on.
 class CodeGen
   ROOT_ARITH = { 'ADD' => 1, 'SUB' => 1, 'MUL' => 1, 'DIV' => 1 }.freeze
@@ -227,7 +227,7 @@ class CodeGen
       recv = numeric_raw_mask(irep, i, src, owner_def)
       key = if op == 'GETIDX0' then '0'
             else
-              # Label only: the textually nearest writer, as before ADR 0509 (not a feed set).
+              # Label only: the textually nearest writer (not a feed set).
               kw = irep.last_writer_index(i - 1, (insn.reg.to_i + 1).to_s)
               kins = kw && irep.instructions[kw]
               kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
@@ -236,7 +236,7 @@ class CodeGen
       ["idx[#{key}]@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}<#{inner}>"]
     when 'AREF'
       src = insn.regs[1].to_i
-      # Label only, as the GETIDX key above (ADR 0509).
+      # Label only, as the GETIDX key above.
       w = irep.last_writer_index(i - 1, src.to_s)
       wi = w && irep.instructions[w]
       what = if wi.nil? then 'param'

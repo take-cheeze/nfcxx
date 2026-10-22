@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # The fixture, driver and C++ scenario of the `- & | <<` helper matrix of scripts/bc2cpp/numeric_slow_check.rb
-# (ADR 0366). Unlike the arithmetic matrices, the receivers and operands are built fresh for every call (a lambda
+# Unlike the arithmetic matrices, the receivers and operands are built fresh for every call (a lambda
 # each), because `<<` mutates its receiver and `Array#-` / `&` / `|` call a user `hash`, `eql?` and `==` that log.
 # Each case compares the closed helper called directly with the real operator, over: result or error (class and
 # message), the result's class, frozen-ness and identity with the receiver, the receiver and operand afterwards, the

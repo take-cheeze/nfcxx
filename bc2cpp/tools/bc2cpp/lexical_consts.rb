@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 
-# CodeGen: LEXICAL_CONST (ADR 0423).
+# CodeGen: LEXICAL_CONST.
 #
 # GETCONST and GETMCNST used to be keyed by the bare constant name, so every definition of a name
 # fed one pool: `TURN_LEFT` read in Game::Character (a frozen Hash) shared it with

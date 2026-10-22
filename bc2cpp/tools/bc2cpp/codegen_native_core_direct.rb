@@ -2,7 +2,7 @@
 
 require_relative 'native_core_direct'
 
-# NATIVE_CORE_DIRECT (docs/adr/0257): exact builtin-class arms that call a core
+# NATIVE_CORE_DIRECT: exact builtin-class arms that call a core
 # native's frame-independent body (NativeCoreDirect::ENTRIES) in front of a
 # dynamic send.
 #
@@ -23,7 +23,7 @@ module NativeCoreDirectFallback
     native_core_direct_wrap(d, recv, name, argv, super)
   end
 
-  # NATIVE_CORE_DIRECT_REST (ADR 0274): the audited Array native for a receiver that is the
+  # NATIVE_CORE_DIRECT_REST: the audited Array native for a receiver that is the
   # method's or block's own `*rest` parameter. ENTER (and every compiled entry, see
   # rest_only_callee?) builds that Array fresh, so it is an exact Array with no singleton
   # and the arm needs neither a guard nor the send. An entry whose argument needs a guard
@@ -31,7 +31,7 @@ module NativeCoreDirectFallback
   def rest_param_native_code(irep, idx, reg, name, d, recv, argv)
     return nil unless irep && idx && reg && !devirt_blocked_name?(name)
     # The rest Array is fresh, but a singleton maker in the world could still give it a singleton
-    # class before the call (ADR 0280).
+    # class before the call.
     return nil unless block_core_world&.exact_instances_singleton_free?
 
     entry = rest_param_native_entry(name, argv.size)
@@ -100,7 +100,7 @@ module NativeCoreDirectFallback
       world.core_native_arm_safe?(entry.name, entry.owner)
   end
 
-  # KERNEL_DIRECT (ADR 0274): the audited Kernel/BasicObject native for an implicit-self
+  # KERNEL_DIRECT: the audited Kernel/BasicObject native for an implicit-self
   # send, called with no dispatch. Nothing here can name a receiver class, so the proof
   # is by name: the native is the only definition anywhere in the build, and no
   # receiver can lack Kernel (ClosedWorld#kernel_native_dispatch_safe?). Core bodies
@@ -139,10 +139,10 @@ module NativeCoreDirectFallback
   def native_core_direct_wrap(d, recv, name, argv, tail)
     site = exact_core_site_for(recv, name)
     entries = native_core_entries(name, argv.size)
-    # An exact-literal receiver (ADR 0280) is never another builtin, so their arms are dead code.
+    # An exact-literal receiver is never another builtin, so their arms are dead code.
     entries = entries.select { |entry| entry.owner == site[:klass] } if site && CodeGen::EXACT_LITERAL_CLASS.value?(site[:klass])
     if entries.empty? || tail.include?('bc2cpp_nomethod')
-      # NATIVE_OWNER_MAP (ADR 0397): a chain with no audited native entry still gets the proven candidates' arms.
+      # NATIVE_OWNER_MAP: a chain with no audited native entry still gets the proven candidates' arms.
       arms = site || tail.include?('bc2cpp_nomethod') ? '' : native_owner_map_arms(d, recv, name, argv)
       return arms.empty? ? tail : "#{arms}{\n      #{tail.chomp}\n    }\n"
     end
@@ -157,7 +157,7 @@ module NativeCoreDirectFallback
     end.join
     proven = site && entries.any? { |entry| entry.owner == site[:klass] }
     what = proven ? "proven #{site[:klass]} receiver, argument guarded," : "exact #{entries.map(&:owner).uniq.join('/')} receiver"
-    # NATIVE_OWNER_MAP (ADR 0397): proven Ruby candidates' exact-class arms come ahead of the by-name else.
+    # NATIVE_OWNER_MAP: proven Ruby candidates' exact-class arms come ahead of the by-name else.
     arms = site ? '' : native_owner_map_arms(d, recv, name, argv)
     else_body = arms.empty? ? tail.chomp : "#{arms}{\n      #{tail.chomp}\n    }"
     "// NATIVE_CORE_DIRECT :#{name} -- #{what} calls the verified core body\n" \
@@ -166,7 +166,7 @@ module NativeCoreDirectFallback
       "  }\n"
   end
 
-  # EXACT_CORE_RECEIVER (ADR 0280): the entry whose owner the receiver provably is, when its
+  # EXACT_CORE_RECEIVER: the entry whose owner the receiver provably is, when its
   # argument guard is proven too; the send is then dead code.
   def native_core_exact_entry(entries, recv, name, argv)
     site = exact_core_site_for(recv, name)

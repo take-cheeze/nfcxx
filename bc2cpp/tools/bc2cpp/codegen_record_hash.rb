@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# CodeGen: RECORD_HASH_PROOF consumer (docs/adr/0285).
+# CodeGen: RECORD_HASH_PROOF consumer.
 
 class CodeGen
   # The single exact class every value stored under the record key(s) read by the GETIDX feeding

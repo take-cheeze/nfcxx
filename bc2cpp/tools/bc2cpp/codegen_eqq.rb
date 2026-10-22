@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# EQQ_DIRECT (ADR 0293): `===` and `is_a?`/`kind_of?` reach their mruby bodies by direct C
+# EQQ_DIRECT: `===` and `is_a?`/`kind_of?` reach their mruby bodies by direct C
 # calls instead of a by-name send wherever the receiver or the closed world decides them.
 class CodeGen
   # Every `===` the build can reach: Module (class.c mrb_mod_eqq), Range (range.c
@@ -44,7 +44,7 @@ class CodeGen
     case kind.first
     when :class
       # The tag test stays (a rebound constant is not a class); its else arm is GUARD_VIOLATION
-      # CLASS_EQQ (ADR 0290) when that proof holds for the site, else the by-name send.
+      # CLASS_EQQ when that proof holds for the site, else the by-name send.
       else_arm = if guard && constant_receiver_proven?(*guard, '===')
                    guard_violation_line(d, recv, '===', [arg], 'CLASS_EQQ')
                  else

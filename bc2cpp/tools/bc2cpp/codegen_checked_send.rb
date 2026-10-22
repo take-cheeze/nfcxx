@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
-# CHECKED_SEND (ADR 0299): the by-name call of a real SEND / SSEND instruction is an mrb_funcall,
+# CHECKED_SEND: the by-name call of a real SEND / SSEND instruction is an mrb_funcall,
 # which skips two checks the VM makes for that instruction: an explicit-receiver OP_SEND raises
 # NoMethodError for a private or protected method, and both opcodes raise ArgumentError for an
 # attr_reader called with arguments. This marks the call so SymbolCache gives it a slot that
 # bc2cpp_send checks (symbol_cache.rb, CHECKED_SEND); the direct, guarded and exact-class arms
-# are not by name and keep their own checks (ADR 0297).
+# are not by name and keep their own checks.
 #
 # Only a site that is the original instruction is marked: an operator fallback (OP_ADD's slow
 # path is not an OP_SEND, so mruby checks no visibility there), an inlined loop body and a
@@ -24,7 +24,7 @@ module CheckedSend
     code = code.gsub(/\bmrb_funcall\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(insn.sym)}",/) do
       "#{marker}(M, #{recv}, \"#{insn.sym}\","
     end
-    # OUTSIDE_OWNER_CALL (ADR 0468): the checked owner call takes the same level as an argument.
+    # OUTSIDE_OWNER_CALL: the checked owner call takes the same level as an argument.
     code.gsub(/\bbc2cpp_owner_call_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(insn.sym)}", 0,/) do
       "bc2cpp_owner_call_named(M, #{recv}, \"#{insn.sym}\", #{level == :explicit ? 2 : 1},"
     end

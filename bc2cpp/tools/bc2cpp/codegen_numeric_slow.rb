@@ -2,13 +2,13 @@
 
 require_relative 'core_hierarchy_sigs'
 
-# CodeGen: NUMERIC_SLOW_PATH (ADR 0292). The else of a guarded numeric arm is one typed helper per
+# CodeGen: NUMERIC_SLOW_PATH. The else of a guarded numeric arm is one typed helper per
 # operator that runs the C function the Integer/Float method (or vm.c's inline pair) runs for the
 # operand tags, and dispatches by name only for a class it does not own. What it cannot match
 # exactly (zero divisor, MRB_INT_MIN count, Float#%) stays on the by-name call.
 class CodeGen
   class << self
-    # CoreCompare::OPS the build's core sources still match (ADR 0362); nil proves nothing.
+    # CoreCompare::OPS the build's core sources still match; nil proves nothing.
     attr_accessor :core_compare
   end
 
@@ -70,7 +70,7 @@ class CodeGen
     builtin_class_send_safe?(name, owners + ['Float'])
   end
 
-  # NUMERIC_SLOW_CLOSED (ADR 0360, 0361, 0364, 0366): operators whose every definer in the build is on these classes,
+  # NUMERIC_SLOW_CLOSED: operators whose every definer in the build is on these classes,
   # which the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `- & | <<`
   # run bodies that mruby keeps static, which patches/mruby-expose-collection-op-bodies.patch exports; they also need
   # numeric_slow_collection_ready?.
@@ -119,7 +119,7 @@ class CodeGen
     members - timed
   end
 
-  # NUMERIC_SLOW_CLOSED_CMP (ADR 0362): `<` `<=` `>` `>=` are answered by the numeric natives, Comparable's Ruby
+  # NUMERIC_SLOW_CLOSED_CMP: `<` `<=` `>` `>=` are answered by the numeric natives, Comparable's Ruby
   # body (String, Symbol and any Numeric that is not an Integer or Float, through the mixin) and the Hash subset
   # tests. The helper mirrors the first two and keeps the by-name call for Hash; every other receiver is a proven
   # NoMethodError.
@@ -153,7 +153,7 @@ class CodeGen
   end
 
   # Comparable's `self <=> other` is mrb_cmp: it calls mrb_str_cmp for a String and dispatches `<=>` otherwise, and
-  # `cmp < 0` needs an Integer or nil answer, so no Ruby `<=>` may sit on the receivers' lookup (ADR 0362).
+  # `cmp < 0` needs an Integer or nil answer, so no Ruby `<=>` may sit on the receivers' lookup.
   def numeric_slow_spaceship_core?(answers)
     return false unless core_ancestry(*NUMERIC_SLOW_CMP_LOOKUP)
     return false unless NUMERIC_SLOW_CMP_LOOKUP.all? { |owner| @closed_world.core_native_arm_safe?('<=>', owner) }
@@ -210,8 +210,8 @@ class CodeGen
   end
 
   # The closed form of helper `key`, or nil when its operator is not proven closed in this world (each key is
-  # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364, `- & | <<` ADR 0366,
-  # `zero?` ADR 0374, `%` ADR 0367. `-@` has no closed form and keeps the by-name body (ADR 0367).
+  # independent: `+ *`, `< <= > >=`, `/`, `^ >> round`, `- & | <<`,
+  # `zero?`, `%`. `-@` has no closed form and keeps the by-name body.
   def numeric_slow_closed_source(key, head)
     op = NUMERIC_SLOW_KEYS.key(key)
     if NUMERIC_SLOW_ARITH.key?(key)
@@ -348,7 +348,7 @@ class CodeGen
     end
   end
 
-  # The by-name form of `+ - *` (ADR 0292).
+  # The by-name form of `+ - *`.
   def numeric_slow_arith_source(key, op, helper, head, float)
     # Two Integers are vm.c OP_MATH: the overflow goes to mrb_bint_*_ii (Integer#op's mrb_bint_* path
     # mishandles an MRB_INT_MIN operand on the 32-bit targets). Everything else the VM sends, so it is
@@ -387,7 +387,7 @@ class CodeGen
     CPP
   end
 
-  # NUMERIC_SLOW_CLOSED `+` and `*` (ADR 0361): Integer, bigint and Float take mrb_num_*, Integer#op's and Float#op's
+  # NUMERIC_SLOW_CLOSED `+` and `*`: Integer, bigint and Float take mrb_num_*, Integer#op's and Float#op's
   # body (a non-numeric operand is its TypeError); String and Array take the C++ of mrb_str_plus_m, mrb_str_times,
   # mrb_ary_plus and mrb_ary_times, built from the public entry points they call; no other class answers.
   def numeric_slow_closed_arith_source(key, op, helper, head)
@@ -497,7 +497,7 @@ class CodeGen
     }
   end
 
-  # CMP_CLOSED (ADR 0362). Integer and Float are num_lt & co.; a String, a Symbol and any other Numeric are
+  # CMP_CLOSED. Integer and Float are num_lt & co.; a String, a Symbol and any other Numeric are
   # Comparable's body, whose `<=>` is mrb_cmp's (the message names `.class`, hence %T, not num_lt's %t); a Hash keeps
   # the method, Ruby over `==` of its values; any other receiver answers `#{op}` nowhere.
   def numeric_slow_closed_cmp_source(head, op)
@@ -549,7 +549,7 @@ class CodeGen
 
   # int_div and flo_div with no Complex or Rational operand (the caller selects this form only when those gems'
   # macros are unset); any other receiver class answers `/` nowhere, which is what the dispatch raised.
-  # `%` (ADR 0367): Integer#% and Float#% are the exported whole bodies, so the helper calls them for an Integer or a
+  # `%`: Integer#% and Float#% are the exported whole bodies, so the helper calls them for an Integer or a
   # Float receiver. Sound when those two are the only `%` definers that reach Integer or Float: no Ruby, module or
   # singleton definer, and the only foreign one is String#% (mruby-sprintf), which the helper never calls for a
   # receiver it does not own. The C symbols are the patch's, so a tree without it fails to link, not silently.

@@ -8,7 +8,7 @@ require_relative 'rbs_optional_hint'
 require_relative 'rbs_parse_memo'
 require_relative 'rbs_ir_contracts'
 
-# RBS_SIGNATURES (docs/adr/0413): RBS files as a source of the same hints the `# bc2cpp:` comments give.
+# RBS_SIGNATURES: RBS files as a source of the same hints the `# bc2cpp:` comments give.
 #
 # Directories come from BC2CPP_SIG_DIRS (File::PATH_SEPARATOR list; an empty value switches the feature off). Unset, the
 # default is <repo>/sig/bc2cpp when it exists. With no .rbs file the compiler behaves exactly as before (nothing here
@@ -24,12 +24,12 @@ require_relative 'rbs_ir_contracts'
 #            unions, `untyped`, `void`, `bool`, `nil`, `self`, literal types, generics other than Array[]/Hash[], a class
 #            the program does not define, constants, aliases, interfaces, mixins, visibility, a method
 #            whose parameter count is not the definition's.
-#   ADR 0456 `def self.x` returns type constant-receiver calls (RBS_SINGLETON_RETURN); an ivar `T?` and a return
+#   `def self.x` returns type constant-receiver calls (RBS_SINGLETON_RETURN); an ivar `T?` and a return
 #            `C?` feed the nil-tolerant facts (rbs_optional_hint.rb); a class parameter is checked at every caller
 #            (rbs_param_check.rb).
 #   error    (TC1002) a parse error, an overloaded `def`, any declaration or member kind not listed above.
 # IR contracts separately retain nominal value classes for nullable, union, bool, nil and literal types;
-# matched arguments, ivars and call returns seed IR queries (ADR 0442), without changing hint kinds.
+# matched arguments, ivars and call returns seed IR queries, without changing hint kinds.
 # Receiver-relative self returns and runtime mixin lookup remain conditional reporting contracts.
 # A signature never overrides a `# bc2cpp:` comment: where both name a slot the comment wins and the difference is TC1006.
 module RbsSignatures
@@ -42,11 +42,11 @@ module RbsSignatures
   MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
-  # optional: for `T?`, T's own Type (RBS_OPTIONAL_HINT, docs/adr/0456); the `T?` Type itself stays kind :other.
+  # optional: for `T?`, T's own Type; the `T?` Type itself stays kind :other.
   Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, :optional,
                     keyword_init: true)
   Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, :supers, keyword_init: true)
-  # SUBTREE_DISPATCH (docs/adr/0453): a `class C < S` declaration, checked against the program's own superclass.
+  # SUBTREE_DISPATCH: a `class C < S` declaration, checked against the program's own superclass.
   SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
 
 
@@ -251,7 +251,7 @@ module RbsSignatures
     end
   end
 
-  # Nominal bounds for IR contracts, never exact-class or embedding proofs (ADR 0441).
+  # Nominal bounds for IR contracts, never exact-class or embedding proofs.
   def value_classes_of(t)
     values = case t
              when RBS::Types::ClassInstance
@@ -297,7 +297,7 @@ module RbsSignatures
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
   # Annotations / ClassAnnotations / ElementAnnotations.extract returned; comment slots win.
-  # `class_decls` (build_registry's): the program's class hierarchy, for SUBTREE_DISPATCH (docs/adr/0453). A class type
+  # `class_decls` (build_registry's): the program's class hierarchy, for SUBTREE_DISPATCH. A class type
   # naming a class with descendants is a subtree hint (subtree_ivars / subtree_args / subtree_returns), never the exact
   # one a class with none gives; an RBS `class C < S` must agree with the program's superclass of C (TC1016).
   def apply(loaded, ireps, registry, annotations, class_annotations, element_annotations, class_decls: nil)
@@ -421,7 +421,7 @@ module RbsSignatures
     named_returns = prepared ? prepared.named_returns : applied.ir_named_returns.transform_keys { |klass, name| [klass.dup.freeze, name.dup.freeze].freeze }.freeze
     calls = {}
     irep.instructions.each_with_index do |insn, index|
-      # A breaking block can replace the normal return type (ADR 0443).
+      # A breaking block can replace the normal return type.
       next unless %w[SSEND SSEND0].include?(insn.op)
 
       target = prepared ? prepared.target(owner, insn.sym.to_s) : owners.find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
@@ -478,7 +478,7 @@ module RbsSignatures
     visit.call(owner, Set.new, true) ? owners : []
   end
 
-  # SUBTREE_DISPATCH (docs/adr/0453): the declared classes some other declared class names as its superclass. A
+  # SUBTREE_DISPATCH: the declared classes some other declared class names as its superclass. A
   # superclass that is not itself a declared path stands for every declared class of its simple name (Ruby's lexical
   # constant lookup may reach any of them), so this over-approximates. Empty without a hierarchy.
   def based_classes(class_decls)
@@ -681,7 +681,7 @@ module RbsSignatures
       note(ap, iv.loc, 'info', 'TC1005',
            "#{iv.owner}##{iv.name}: #{t.text} is checked against the inference but not forced (an embedded slot needs a proof)")
     else
-      # A record type is RbsRecordTypes' (ADR 0454), which checks it and reports its own diagnostics.
+      # A record type is RbsRecordTypes', which checks it and reports its own diagnostics.
       return if t.text.start_with?('{')
       return if RbsOptionalHint.seed_ivar(ap, iv, name, known_owners)
 

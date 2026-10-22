@@ -417,7 +417,7 @@ module EscapeAnalysis
       insn = EscapeAnalysis.insn_at(irep, index)
       return failed(:no_destination) unless insn.reg
       return failed(:reflection) unless @world.reflective_sites.empty?
-      # A frozen literal is one persistent object shared by every load, not a fresh creation (ADR 0546).
+      # A frozen literal is one persistent object shared by every load, not a fresh creation.
       return failed(:frozen_literal) if insn.frozen_literal
 
       flow(irep, { index => { insn.reg => true } }, created_at: index, value_class: CREATED_CLASS[insn.op] || value_class)
@@ -430,7 +430,7 @@ module EscapeAnalysis
       cyclic([:summary, mdef.object_id, position]) { compute_summary(mdef, position) }
     end
 
-    # RBS_RECORD_TYPES' interprocedural scan (ADR 0454): may a call of +name+ keep its argument +k+? Callees
+    # RBS_RECORD_TYPES' interprocedural scan: may a call of +name+ keep its argument +k+? Callees
     # are every definition the name reaches (the by-name set); a native or unenumerable one keeps it. With
     # +klass+ the argument is known to be exactly an instance of that class, so each callee's own sends on it
     # resolve through that class's ancestry (the summary is computed and memoised per class).

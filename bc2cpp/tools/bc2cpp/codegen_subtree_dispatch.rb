@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'subtree_facts'
 
-# SUBTREE_DISPATCH (docs/adr/0453): a send whose receiver carries a SUBTREE(A) hint (subtree_facts.rb) is dispatched
+# SUBTREE_DISPATCH: a send whose receiver carries a SUBTREE(A) hint (subtree_facts.rb) is dispatched
 # over A's closed subtree instead of the name-wide POLY_SMALL_N chain or POLY_TABLE.
 #
 # For every class K in the subtree the closed-world lookup (closed_world_lookup_target) names the definition `N`

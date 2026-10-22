@@ -3,7 +3,7 @@
 require_relative 'fixpoint'
 require_relative 'numeric_flow'
 
-# CodeGen: NUMERIC_OPERAND_PROOF (ADR 0276).
+# CodeGen: NUMERIC_OPERAND_PROOF.
 #
 # FIXNUM_OPERAND_PROOF answers "is this register a small Integer", which is what
 # a bare `mrb_fixnum()` needs. This answers the weaker "is it an Integer (fixnum
@@ -78,7 +78,7 @@ class CodeGen
       @cg.numeric_upvar_mask(irep, insn)
     end
 
-    # A Symbol literal in a register carries the Symbol bit (ADR 0429), as it does in the exact-class run; the
+    # A Symbol literal in a register carries the Symbol bit, as it does in the exact-class run; the
     # consumers of the numeric masks are audited in docs/bc2cpp-symbol-class.md. TrueClass and FalseClass stay OTHER.
     def literal_class_mask(insn)
       insn.op == 'LOADSYM' ? @cg.numeric_loadsym_bit : nil
@@ -153,7 +153,7 @@ class CodeGen
     setup_numeric_returns
     setup_tuple_returns
     setup_numeric_consts
-    # The numeric flow reads the exact-class flow (NATIVE_RESULT_FACTS, ADR 0302), which reads
+    # The numeric flow reads the exact-class flow, which reads
     # none of the numeric pools, so it is final before the first numeric pass.
     compute_return_classes
     reset_numeric_flow!
@@ -284,7 +284,7 @@ class CodeGen
     lines.sort
   end
 
-  # The Fixnum tier of every ADD/SUB/MUL-family arm (ADR 0279): the result is
+  # The Fixnum tier of every ADD/SUB/MUL-family arm: the result is
   # stored as an immediate only when the C op did not overflow AND it is
   # FIXABLE (mrb_int is wider than a fixnum under word boxing, and a 32-bit
   # mrb_int leaves 31 bits), else mrb_num_* runs Integer#+ etc. and builds the

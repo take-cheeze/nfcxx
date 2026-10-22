@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# RBS_OPTIONAL_HINT (docs/adr/0456): a declared `T?` feeds the same "T or nil" facts an inferred one does.
+# RBS_OPTIONAL_HINT: a declared `T?` feeds the same "T or nil" facts an inferred one does.
 #
 # The facts it feeds are nil-tolerant by contract, so a `T?` declaration says no more than they already mean:
 #   * an ivar `@x: C?`, `@x: Array[C]?`, `@x: Hash[K, C]?` seeds ClassLayout (and its element tables) exactly like

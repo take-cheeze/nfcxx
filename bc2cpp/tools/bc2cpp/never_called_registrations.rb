@@ -45,7 +45,7 @@ module NeverCalledRegistrations
   end
 
   # run_bc2cpp_full for several gems: { gem_name => [stdout, stderr] }. The runs differ only in which owners they
-  # emit, so they share one analysis (SHARED_GENERATION, ADR 0464): what each returns is what its own run returns.
+  # emit, so they share one analysis: what each returns is what its own run returns.
   def run_bc2cpp_full_many(gem_names, repo_root, mrbc)
     return {} if gem_names.empty?
 
@@ -63,7 +63,7 @@ module NeverCalledRegistrations
                   external_gem_native_srcs(repo_root)
     # The Ruby half of the same outside world, as every *-compiled mrbgem.rake passes it (foreign_mrblib_srcs is
     # target-independent too). Without it the analyses that need both halves (INTEGER_CONSTANT_PROOF, the
-    # RBS_CHECKED_PARAMS caller scan, ADR 0456) see a different program than the build compiles.
+    # RBS_CHECKED_PARAMS caller scan) see a different program than the build compiles.
     foreign_ruby_srcs = foreign_mrblib_srcs(repo_root)
 
     bc2cpp = File.expand_path('bc2cpp.rb', __dir__)

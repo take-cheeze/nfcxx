@@ -188,7 +188,7 @@ analysis = lambda do |source|
     safe = IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
     # FREEZE_SELF: the same owner-scoped proof the build passes (bc2cpp.rb), not a copy of it.
     freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
-    # The bytecode IR facts (ADR 0501 stages 2 and 4), with the gates the build passes (bc2cpp.rb).
+    # The bytecode IR facts, with the gates the build passes (bc2cpp.rb).
     ir = BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: safe,
                                                   freeze_safe: freeze_safe, freeze_classes: Set.new)
     {
@@ -210,7 +210,7 @@ end
 puts '== positive: literals and named constants (exact values and intervals)'
 pos = analysis.call(positive)
 check.call('the operators are the core ones (no Ruby definition on Integer)', pos[:safe])
-# ADR 0501 stage 2: the IR intervals and Fixnum names are the proofs' own. The exact-value proof also admits a literal-only
+# The IR intervals and Fixnum names are the proofs' own. The exact-value proof also admits a literal-only
 # name outside the Fixnum margin (ZA_BIG, 1073741824), which the IR's Fixnum set leaves out on purpose: a Fixnum name is
 # inside the margin by construction.
 check.call('the IR intervals equal the interval proof (positive)', pos[:ir_ranges] == pos[:ranges])
@@ -237,7 +237,7 @@ check.call('ZA_SPAN is typed Integer', (r = row_for.call(rows, 'ZA_SPAN')) && r[
 half = row_for.call(rows, 'ZA_HALF')
 check.call('ZA_HALF (floor division) is typed Integer', half && half['type'] == 'Integer')
 range_only = row_for.call(rows, 'ZA_SLOT_RANGE')
-# The IR (ADR 0501) admits an interval-only name as a Fixnum constant, so its row comes from the integer-constant set.
+# The IR admits an interval-only name as a Fixnum constant, so its row comes from the integer-constant set.
 check.call('ZA_SLOT_RANGE (no single value, interval only) is typed Integer by inferred:integer-constant',
            range_only && range_only['type'] == 'Integer' && range_only['source'] == 'inferred:integer-constant')
 nonlit = row_for.call(rows, 'ZA_NONLIT')

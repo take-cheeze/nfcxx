@@ -113,7 +113,7 @@ class CodeGen
     end
   end
 
-  # PROVEN_MISS (ADR 0275): [kind, class] when this send's receiver class is proven by an
+  # PROVEN_MISS: [kind, class] when this send's receiver class is proven by an
   # unguarded fact (never a ClassLayout, annotation or element hint), else nil.
   def proven_receiver_class(irep, idx, reg, cw_site, exact_class, constant_owner, self_implicit)
     return [:fresh_new, exact_class] if exact_class
@@ -231,7 +231,7 @@ class CodeGen
     stable ? owner : nil
   end
 
-  # GUARD_VIOLATION (ADR 0290): the bare name of the stable class/module constant that
+  # GUARD_VIOLATION: the bare name of the stable class/module constant that
   # every definition of `reg` at SEND `idx` reads, or nil. StableClassConstants makes
   # the name denote one class object for the VM's life, so a guard that only tests
   # "is this class/module (that class)" cannot fail. Closed world only: the open
@@ -259,7 +259,7 @@ class CodeGen
   def new_receiver_constant_proven?(irep, idx, name, klass, lexical_owner)
     insn = klass && proof_send_insn(irep, idx, name)
     constant = insn && stable_constant_register(irep, idx, insn.reg, lexical_owner)
-    # NEW_IDENTITY_HANDLERS (ADR 0468): a `Klass.new` inside a begin/rescue body; the plain walk refuses a protected
+    # NEW_IDENTITY_HANDLERS: a `Klass.new` inside a begin/rescue body; the plain walk refuses a protected
     # range, the handler-aware one follows its edges and still finds the one constant load.
     constant ||= insn && stable_constant_register(irep, idx, insn.reg, lexical_owner, through_handlers: true)
     !constant.nil? && (klass == constant || klass.to_s.end_with?("::#{constant}"))
@@ -321,10 +321,10 @@ class CodeGen
   end
 
   # A module_function copy shares its instance method's irep but runs with the
-  # module object as self (ADR 0241 already passes it for the body's own bare
+  # module object as self (it already passes it for the body's own bare
   # calls), so the instance-owner proof is reusable only when the body neither
   # observes self nor ties itself to instance state: ivars, class variables,
-  # `super` or ARGARY, anywhere in its blocks too (ADR 0258, 0259).
+  # `super` or ARGARY, anywhere in its blocks too.
   MODULE_FUNCTION_INSTANCE_OPS = %w[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
 
   def module_function_copy_self_safe?(irep, owner)
@@ -356,7 +356,7 @@ class CodeGen
     klass
   end
 
-  # INHERITED_DIRECT_CONSTRUCT (ADR 0456): the Ruby `initialize` MethodDef an instance of +klass+ runs, or nil.
+  # INHERITED_DIRECT_CONSTRUCT: the Ruby `initialize` MethodDef an instance of +klass+ runs, or nil.
   # +klass+'s own single definition is the original direct-construct rule. Without one, the lookup walks the
   # superclass chain and answers the first class's definition when, for every class it passes:
   #   * the class is a declared class (not a module) with no unresolved mixin, and no included module defines
@@ -431,10 +431,10 @@ class CodeGen
     owner
   end
 
-  # MODULE_SINGLETON_SELF (ADR 0258): ClosedWorld#exact_class? has no answer for
+  # MODULE_SINGLETON_SELF: ClosedWorld#exact_class? has no answer for
   # a module (only classes are declared), so `def self.x` in a module M never
   # reached SINGLETON_LEXICAL_SELF under a closed world. ClosedWorld#module_object_self?
-  # proves self is M (ADR 0259); inherited_lookup_safe? covers outside reopening
+  # proves self is M; inherited_lookup_safe? covers outside reopening
   # and by-name installers.
   def module_singleton_self?(base, name)
     return false unless name && @closed_world&.module_object_self?(base)
@@ -444,7 +444,7 @@ class CodeGen
 
   # SINGLETON_LEXICAL_SELF: `self` in `def self.x` of X is X itself unless X is a
   # subclassed class or a declared module that never has its singleton methods
-  # cloned (ADR 0258, 0259), and X's own singleton def wins lookup.
+  # cloned, and X's own singleton def wins lookup.
   def lexical_self_singleton_owner(owner_def, name: nil)
     return nil unless owner_def && self_class(owner_def)
 
@@ -671,7 +671,7 @@ class CodeGen
     Array(@included_modules[owner]).empty?
   end
 
-  # MODULE_SUPER_SUPPORT (ADR 0329): the MethodDef that `super` in owner_def
+  # MODULE_SUPER_SUPPORT: the MethodDef that `super` in owner_def
   # actually reaches when the owner includes modules -- mruby searches
   # [class, included modules newest-first, superclass, ...], so the winner is
   # the first ancestor in that order carrying the name. Returns nil when the
@@ -708,9 +708,9 @@ class CodeGen
     found
   end
 
-  # MODULE_SUPER_SUPPORT (ADR 0329): can `super` reach this body directly?
+  # MODULE_SUPER_SUPPORT: can `super` reach this body directly?
   #
-  # compiles_clean? also refuses every CORE_BLOCK_GUARD body (ADR 0269), which
+  # compiles_clean? also refuses every CORE_BLOCK_GUARD body, which
   # is right for the existing direct-call sites but too strict here: that guard
   # lives in the method's ENTRY wrapper, and a `super` reaching the body is
   # already inside a compiled frame. The extra condition is core_body_relaxable?
@@ -758,7 +758,7 @@ class CodeGen
     nil
   end
 
-  # MODULE_SUPER_SUPPORT (ADR 0329): the C++ for `SUPER Rd n=N` when the target
+  # MODULE_SUPER_SUPPORT: the C++ for `SUPER Rd n=N` when the target
   # is reached THROUGH an included module -- `Range#max`'s `super` lands in
   # `Enumerable#max`, which reads the block, so the call must carry this frame's
   # block rather than the nil a bare `_impl` call passes.
@@ -789,7 +789,7 @@ class CodeGen
     "  r#{d_reg} = #{cpp_name(target.owner, target.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
   end
 
-  # ZSUPER_GENERAL_SUPPORT (ADR 0159): a bare `super` forwarding the current
+  # ZSUPER_GENERAL_SUPPORT: a bare `super` forwarding the current
   # method's arguments to a COMPILED superclass method. codegen_zsuper emits:
   #
   #   ARGARY R(a+1)  m1:0:0:0 (0)   # packs the CURRENT frame's regs[1..m1]
@@ -865,13 +865,12 @@ class CodeGen
     "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args});\n"
   end
 
-  # SUPER_NO_CALLER_BLOCK (ADR 0332): may `super` here become a direct `_impl`
+  # SUPER_NO_CALLER_BLOCK: may `super` here become a direct `_impl`
   # call with NO block?
   #
   # A compiled `_impl` has no block parameter, so OP_SUPER's forwarded block
-  # would be dropped -- correct only when no caller ever passes one. ADR 0146
-  # established that as a hand-vetted allowlist (SUPER_TARGETS), re-checked by
-  # hand on every entry. It is derived here instead: a block reaches a method
+  # would be dropped -- correct only when no caller ever passes one. It is derived here instead of from a
+  # hand-vetted allowlist (SUPER_TARGETS) re-checked by hand on every entry: a block reaches a method
   # only through a block-carrying send (SENDB/SSENDB, or `&expr` beside a plain
   # one), so if NO instruction in the build sends `name` with a block to a
   # receiver that can be an instance of this owner (or a subclass), none can
@@ -879,7 +878,7 @@ class CodeGen
   #
   # The scan is over every compiled irep's instructions, so a caller added later
   # is covered without touching a list. Anything it cannot read stays a refusal:
-  # a body compiled without the world (ADR 0264), a dynamic send whose receiver class is unproven, or a name
+  # a body compiled without the world, a dynamic send whose receiver class is unproven, or a name
   # something installs at runtime all leave the question open, and an open
   # question must keep the `#error` rather than assume the safe answer.
   def super_direct_call_allowed?(owner_def)

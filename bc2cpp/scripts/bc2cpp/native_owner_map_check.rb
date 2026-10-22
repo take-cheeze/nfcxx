@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # encoding: UTF-8
 #
-# Check NATIVE_OWNER_MAP (docs/adr/0397): a by-name send on a receiver of unknown class whose name has a
+# Check NATIVE_OWNER_MAP: a by-name send on a receiver of unknown class whose name has a
 # Ruby definition on a class the owner map proves free of native definitions of the name gets one
 # exact-class arm per such definition, calling its compiled body, ahead of the by-name else. The else
 # stays for every other receiver.
@@ -16,7 +16,7 @@
 #      differs from it.
 #
 # Generated code only (no mruby build). Needs a host mrbc: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/native_owner_map_check.rb
-# Without MRBC the generated-code part is skipped (ADR 0397's runtime tier, as native_result_facts_check.rb).
+# Without MRBC the generated-code part is skipped.
 
 require 'open3'
 require 'rbconfig'

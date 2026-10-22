@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# BLOCK_SELF_WORLD (docs/adr/0477): a block's `self` is its creating frame's self unless a rebinder runs it under
+# BLOCK_SELF_WORLD: a block's `self` is its creating frame's self unless a rebinder runs it under
 # another one.
 #
 # 1. The world analysis (MRBC; snippets compiled in-process, seconds): which literal blocks are REBOUND (nested ones
@@ -18,7 +18,7 @@
 #    not compiled, and every compiled block carries the entry check.
 # 4. Behaviour on real mruby (a full-core libmruby, Bc2cppFixtureRuntime.full_or_build): interpreted and compiled
 #    runs agree for literal blocks at instance_eval/instance_exec/class_eval/define_method/Class.new/Struct.new sites
-#    (before this ADR the compiled run read the creator's self), for each/map/Proc#call/yield/Fiber with a compiled
+#   , for each/map/Proc#call/yield/Fiber with a compiled
 #    block, and for objects, nil and Integers as the creator's self; a compiled block a rebinder receives as `&blk`
 #    raises the closed-world guard violation in the compiled run (the interpreted run rebinds it).
 #

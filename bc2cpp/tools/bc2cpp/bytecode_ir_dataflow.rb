@@ -26,7 +26,7 @@ module BytecodeIR
 
   # Ops that write at most the register in their leading operand and open no
   # entry point (ops.h, vm.c). CodeGen::FIXNUM_PROOF_STEP_OVER_OPS is this
-  # Set (ADR 0476). LOADI* is matched by prefix. Anything else refuses.
+  # Set. LOADI* is matched by prefix. Anything else refuses.
   WRITES_LEADING_REG_OPS = Set[
     'NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE',
     'GETGV', 'SETGV', 'GETSV', 'SETSV', 'GETIV', 'SETIV', 'GETCV', 'SETCV',
@@ -89,7 +89,7 @@ module BytecodeIR
     # target or a protected instruction refuses (RESCUE_SUPPORT compiles that
     # range apart, with re-initialised registers).
     #
-    # +through_handlers+ (RECORD_HASH_PROOF, ADR 0285) crosses handler edges
+    # +through_handlers+ crosses handler edges
     # instead of refusing at them: an instruction that can raise into a handler
     # contributes both the value it leaves (a completed write) and the value
     # it was entered with, since the raise happens before or after the write.
@@ -99,7 +99,7 @@ module BytecodeIR
     #
     # +shared+ lets read-only consumers borrow frozen cache entries. Fresh/uncacheable
     # results retain the existing API; callers requesting sharing must not mutate any result.
-    # +raiseif_nil+ (RETURN_SITES, ADR 0503): vm.c OP_RAISEIF falls through only when R(a) is nil, so a RAISEIF of
+    # +raiseif_nil+: vm.c OP_RAISEIF falls through only when R(a) is nil, so a RAISEIF of
     # the register on a normal edge is itself its definition (the nil value), not a step over.
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
                              through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false, shared: false)
@@ -163,7 +163,7 @@ module BytecodeIR
       all_pred_lists = all_preds && predecessor_lists(true)
 
       # Instructions some execution reaches (nil when a handler target does not resolve). A predecessor outside
-      # it supplies no value to a live state, so it is skipped in every mode (ADR 0476). A state that is itself
+      # it supplies no value to a live state, so it is skipped in every mode. A state that is itself
       # dead (a dead query, or a walk inside dead code) keeps every predecessor, as before.
       live = origin_reachable
       if origin_transfers && live
@@ -175,7 +175,7 @@ module BytecodeIR
       end
 
       # Per-index flags instead of address sets, and a flat (index, register) work stack: the walk allocates
-      # nothing per state but the seen entry (NUMERIC_FLOW_SPEED's lesson, ADR 0467). The answer is the same.
+      # nothing per state but the seen entry. The answer is the same.
       guarded = through_handlers ? nil : dataflow_guarded_at
       live_at = live && live_flags
       scalar_seen = ENV['BC2CPP_IR_SCALAR_SEEN'] != '0'
@@ -259,10 +259,10 @@ module BytecodeIR
 
     private :compute_reaching_definitions
 
-    # JOIN_DOMINANCE (ADR 0261): does the write at +w+ (ENTRY: the method's
+    # JOIN_DOMINANCE: does the write at +w+ (ENTRY: the method's
     # incoming value) supply +reg+ at +use+ on every path? True when no edge,
     # jump or exception, enters (w, use] from outside [w, use] and every op
-    # stepped over is on the audited write list (ADR 0198's region test).
+    # stepped over is on the audited write list.
     # A multi-write op (ADD, GETIDX0, SEND, BLKCALL, ...) writes above its
     # leading register on a fallback or callee frame: an op stepped over that
     # does so to +reg+ (origin_effect :callee_clobber), or writes +reg+ itself
@@ -312,7 +312,7 @@ module BytecodeIR
     # Ops that can hand `self` to code that reads its ivars.
     SELF_EXPOSING_OPS = Set['LOADSELF', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLOCK', 'LAMBDA', 'METHOD', 'EXEC', 'SCLASS'].freeze
 
-    # INIT_ASSIGNED (ADR 0261): on every path, is `@ivar` assigned before it is
+    # INIT_ASSIGNED: on every path, is `@ivar` assigned before it is
     # read, before the frame exits and before `self` can reach other code? A
     # zeroed typed slot would otherwise read 0/false where the ivar reads nil.
     # A forward must-analysis over normal and handler edges.
@@ -522,7 +522,7 @@ module BytecodeIR
     # covers it can run code on the way to its target, and a protected
     # predecessor is refused before this runs (the normal walk's guard, the
     # through_handlers walk's :unwinding_jump), so one that gets here is a
-    # plain jump (ADR 0476; CodeGen#jmpuw_plain_jump_at? asks the narrower
+    # plain jump (CodeGen#jmpuw_plain_jump_at? asks the narrower
     # question for emission).
     def dataflow_effect(insn, reg)
       effect_of(EffectEntry.for(insn), reg)

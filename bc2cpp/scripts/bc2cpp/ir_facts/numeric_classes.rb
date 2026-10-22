@@ -1,12 +1,12 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NUMERIC_CLASSES (docs/adr/0500): NumericFlow reads its instruction facts from the BytecodeIR::Program. Host only,
+# NUMERIC_CLASSES: NumericFlow reads its instruction facts from the BytecodeIR::Program. Host only,
 # under a second:
 #   - Program#operands decodes the second register and the ivar the flow reads, and a bare instruction decodes to
 #     the step the Program's table holds;
 #   - Program#exits lists the frame exits, and NumericClasses.exit_mask joins the reached ones only;
-#   - the literal-element proof (ADR 0354) answers from reaching definitions: a literal reaching the element's
+#   - the literal-element proof answers from reaching definitions: a literal reaching the element's
 #     register at the ARRAY, through joins and moves, is admitted; a call, a branch or a mutation between the ARRAY
 #     and the read, an argument, a captured register, an out-of-range index and a handler are refused.
 #

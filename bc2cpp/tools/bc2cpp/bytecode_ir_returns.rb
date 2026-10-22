@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 
-# RETURN_SITES (ADR 0503): how a body leaves its frame and where the values it returns come from, for the return
+# RETURN_SITES: how a body leaves its frame and where the values it returns come from, for the return
 # analyses (the Fixnum, Array and class return proofs, DECLARED_RETURN_CHECK and the exact-class return table).
 module BytecodeIR
   # How each exit op leaves the frame. RETURN_BLK is a plain return in a method body (methods are strict procs) and

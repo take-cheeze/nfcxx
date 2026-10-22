@@ -4,7 +4,7 @@ require 'set'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_returns'
 
-# NUMERIC_CLASSES (ADR 0500): the IR's side of NumericFlow. The flow reads every instruction fact from the
+# NUMERIC_CLASSES: the IR's side of NumericFlow. The flow reads every instruction fact from the
 # BytecodeIR::Program (decode, operands, edges, handler targets, frame exits) and answers the literal-element question
 # with the IR's reaching definitions and the type layer's literal classes, so no numeric analysis walks
 # `irep.instructions` itself.
@@ -86,7 +86,7 @@ module BytecodeIR
     # the fresh Array as it was built.
     QUIET_OPS = Set['NOP', 'MOVE', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM', 'LOADL', 'STRING'].freeze
 
-    # ELEMENT_LITERAL (ADR 0354, ADR 0500): the class mask of `GETIDX`/`GETIDX0` at +index+ when it reads a literal
+    # ELEMENT_LITERAL: the class mask of `GETIDX`/`GETIDX0` at +index+ when it reads a literal
     # position of an Array literal no Ruby could touch since it was built, from the definitions reaching that
     # position's register at the ARRAY; nil when not proven.
     def element_literal_mask(irep, index, opaque)

@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'core_mixins'
 
-# CORE_COMPARE (ADR 0362): mruby's Comparable#<, #<=, #> and #>= as a known body. bc2cpp_slow_lt & co. mirror it
+# CORE_COMPARE: mruby's Comparable#<, #<=, #> and #>= as a known body. bc2cpp_slow_lt & co. mirror it
 # for String and Symbol receivers, so a build whose core sources differ from the model keeps the by-name helper.
 # The model must match the real 3rd/mruby compar.rb: owner, file, normalized body, every other
 # definer, and the native registrations.

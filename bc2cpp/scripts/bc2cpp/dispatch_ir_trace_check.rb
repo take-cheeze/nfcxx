@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Dispatch-target traces answer from the bytecode IR (ADR 0508). Host only: every
+# Dispatch-target traces answer from the bytecode IR. Host only: every
 # irep is hand-built from instruction strings, so no mrbc is needed.
 #
 # 1. literal_container_class (SETCONST, CONST_CONTAINER_SUPPORT): a constant

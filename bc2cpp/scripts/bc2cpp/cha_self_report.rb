@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Aggregates the CHA_SELF site report (docs/adr/0254): how many self-receiver
+# Aggregates the CHA_SELF site report: how many self-receiver
 # sends a build has, by the construct compile_send chose and by what class
 # hierarchy analysis says about each, and by method name.
 #

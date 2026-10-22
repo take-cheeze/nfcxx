@@ -4,7 +4,7 @@ require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
 
-# BLOCK_SELF (ADR 0456): is a Ruby method a plain yielder, one that runs its block only through Proc#call?
+# BLOCK_SELF: is a Ruby method a plain yielder, one that runs its block only through Proc#call?
 #
 # The block register (1 + required + optional + rest + post + the keyword dict, from ENTER), every copy of it
 # (reaching definitions follow MOVEs), every captured slot a nested block reads it from (GETUPVAR) and every

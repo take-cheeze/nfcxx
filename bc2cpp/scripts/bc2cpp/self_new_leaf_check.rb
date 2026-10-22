@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check SELF_NEW_LEAF (docs/adr/0468): `new` on `self` in a singleton method of class C, and `self.class.new` in an
+# Check SELF_NEW_LEAF: `new` on `self` in a singleton method of class C, and `self.class.new` in an
 # instance method of C, construct directly. The receiver is one of the classes the method can be called on: C and its
 # subclasses, which the closed world lists. A leaf C makes the receiver exactly C (no guard); a C with known
 # subclasses gets one exact-class arm per class, each a direct allocation plus the initialize that class resolves to,

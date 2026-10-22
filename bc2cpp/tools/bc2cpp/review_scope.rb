@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
-# REVIEW_SCOPE: which compiled methods the review gates judge. NOMETHOD (ADR 0226), PROVEN_MISS (ADR 0275) and
-# STRICT_HINT (ADR 0419) sites are reviews of one program: the engine, i.e. the methods the gems of
+# REVIEW_SCOPE: which compiled methods the review gates judge. NOMETHOD, PROVEN_MISS and
+# STRICT_HINT sites are reviews of one program: the engine, i.e. the methods the gems of
 # BC2CPP_COMPILED_GEMS compile. Each site names its compiled owner, and every owner a review judges is one of those
-# gems' owners. No review gate judges them any more (ADR 0522).
+# gems' owners. No review gate judges them any more.
 #
 # On an engine closed-world build (closed) a site is held to the lists when its compiled
 # owner is an engine owner, matched exactly. Nothing is skipped on a real engine build: each gem's
