@@ -222,7 +222,8 @@ if $PROGRAM_NAME == __FILE__
   # CONVERSION_RETURNS: to_s, to_str, to_int, to_ary and to_hash take only optional positional parameters; their returns
   # are runtime-checked hints, declared in a generated signature file that joins the program's signatures.
   ConversionReturns.enforce!(srcs.select { |path| path.end_with?('.rb') })
-  conversion_sigs = ConversionReturns.write_sigs(srcs.select { |path| path.end_with?('.rb') })
+  # Mruby's own Ruby defining a native-named method (File#inspect) is hidden from the registry, so it gets no hint.
+  conversion_sigs = ConversionReturns.write_sigs(srcs.select { |path| path.end_with?('.rb') && !CoreDefs.core_source?(path) })
   ireps, root_label = compile_ireps(srcs, symbol, out_dir)
   order = dfs_order(ireps, root_label)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
