@@ -66,6 +66,39 @@ loop_body = [insn(0, 'LOADI_0', "R2\t(0)"), insn(2, 'JMPNOT', "R1\t15"), insn(6,
              insn(8, 'SEND0', "R4\t:f"), insn(11, 'GETIV', "R5\t@n"), insn(13, 'JMP', '2'), insn(15, 'RETURN', 'R2')]
 irep = Irep.new(label: 'speed', nregs: 6, instructions: loop_body, catch_handlers: [], reps: [], pool: [])
 
+puts '-- scalar truthiness facts (host)'
+false_bit = 1 << 240
+[false, true].each do |known_false|
+  [nil, 0, INT, NIL_, false_bit, INT | NIL_ | false_bit, 1 << 250, -1].each do |mask|
+    [NF::B_IF, NF::B_NOT, NF::B_NIL].each do |branch|
+      [false, true].each do |taken|
+        calls = []
+        oracle = Object.new
+        oracle.define_singleton_method(:false_class_bit) { calls << :false_class_bit; false_bit } if known_false
+        context = NF::Ctx.new(nil, oracle, Set.new, 1, [], {}, [], 1, nil)
+        input = [mask, 0].freeze
+        expected = input
+        unless mask.nil? || mask.zero?
+          narrowed = NF.narrow_branch(branch, taken, mask, known_false ? false_bit : 0,
+                                     known_false ? false_bit : NF::CLASS_BITS)
+          expected = narrowed.zero? ? nil : [narrowed, 0]
+        end
+        actual = NF.narrow_chain(input, 0, branch, taken, context, [])
+        check.call("truth narrowing and oracle calls match for #{[known_false, mask, branch, taken].inspect}",
+                   actual == expected && calls.size == (known_false && mask && !mask.zero? ? 1 : 0) && input == [mask, 0])
+      end
+    end
+  end
+end
+calls = []
+oracle = Object.new
+oracle.define_singleton_method(:false_class_bit) { calls << :false_class_bit; false_bit }
+context = NF::Ctx.new(nil, oracle, Set.new, 2, [], {}, [], 2, nil)
+input = [INT | NIL_ | false_bit, INT | NIL_ | false_bit, 2, 1].freeze
+check.call('cyclic provenance keeps one oracle query per visited register and preserves the input',
+           NF.narrow_chain(input, 0, NF::B_IF, true, context, []) == [INT, INT, 2, 1] &&
+           calls == [:false_class_bit, :false_class_bit] && input[0] == (INT | NIL_ | false_bit))
+
 puts '-- step table (host)'
 first = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
 states = NF.states(irep, first, Set.new)
