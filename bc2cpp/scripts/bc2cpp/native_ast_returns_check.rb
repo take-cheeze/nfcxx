@@ -63,6 +63,10 @@ FIXTURE = <<~CPP
   mrb_value assign_guard_fn(struct mrb_state *mrb, mrb_value self) { mrb_value v = get_thing(mrb); if (!(v.v == MRB_TT_STRING)) { v = mrb_str_new_cstr(mrb, 0); } return v; }
   mrb_value assign_nested_fn(struct mrb_state *mrb, mrb_value self, int c) { mrb_value v = get_thing(mrb); if (!(v.v == MRB_TT_STRING)) { if (c) { v = mrb_str_new_cstr(mrb, 0); } } return v; }
   mrb_value assign_twice_fn(struct mrb_state *mrb, mrb_value self) { mrb_value v = get_thing(mrb); if (!(v.v == MRB_TT_STRING)) { v = mrb_str_new_cstr(mrb, 0); v = get_thing(mrb); } return v; }
+  struct mrb_class *mrb_obj_class(struct mrb_state *mrb, mrb_value v);
+  mrb_value mrb_obj_value(struct mrb_class *p);
+  mrb_value class_fn(struct mrb_state *mrb, mrb_value self) { return mrb_obj_value(mrb_obj_class(mrb, self)); }
+  mrb_value class_other_fn(struct mrb_state *mrb, mrb_value self) { return mrb_obj_value(mrb_obj_class_of(mrb, self)); }
 CPP
 
 EXPECTED = {
@@ -75,7 +79,9 @@ EXPECTED = {
   'nil_escape_branch_fn' => nil, 'nil_copy_fn' => nil,
   # A string guard whose branch assigns the local: the one unconditional String assignment makes it a String after the
   # branch, a conditional or a second assignment does not.
-  'assign_guard_fn' => 'String', 'assign_nested_fn' => nil, 'assign_twice_fn' => nil
+  'assign_guard_fn' => 'String', 'assign_nested_fn' => nil, 'assign_twice_fn' => nil,
+  # mrb_obj_value of mrb_obj_class is a Class (a real class, class.c); of any other class-pointer call it is not proven.
+  'class_fn' => 'Class', 'class_other_fn' => nil
 }.freeze
 
 failures = []
