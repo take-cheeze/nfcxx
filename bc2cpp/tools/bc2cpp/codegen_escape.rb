@@ -2,7 +2,7 @@
 
 require_relative 'escape_analysis'
 
-# CodeGen: the escape analysis (ADR 0316) over this compiler's class facts.
+# CodeGen: the escape analysis over this compiler's class facts.
 class CodeGen
   ESCAPE_FLOW_CLASSES = NumericFlow.class_bits('Integer', 'Float', 'Array', 'Hash', 'String', 'NilClass', 'Range')
 
@@ -18,7 +18,7 @@ class CodeGen
     end
   end
 
-  # BLOCK_FALLBACK_PROVEN (ADR 0316): the BLOCK at +index+ is handed only to callees that keep neither it nor
+  # BLOCK_FALLBACK_PROVEN: the BLOCK at +index+ is handed only to callees that keep neither it nor
   # anything that reaches it, so the pointers it captures cannot outlive this frame. The by-name
   # allowlist (BLOCK_FALLBACK_UPVAR_SAFE_METHODS) is the other way in.
   def block_proven_to_stay?(irep, index)

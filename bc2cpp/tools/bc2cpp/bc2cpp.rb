@@ -231,7 +231,7 @@ if $PROGRAM_NAME == __FILE__
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = build_registry(ireps, root_label)
-  # ESCAPE_ANALYSIS (ADR 0316): callees are every definition of a name, so the registry is copied before
+  # ESCAPE_ANALYSIS: callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
   # BLOCK_SELF (ADR 0456): every bytecode definition of a name, the interpreted core ones the filtering below drops
@@ -356,7 +356,7 @@ if $PROGRAM_NAME == __FILE__
     alias_sites.each { |site| escape_aliases[site[:new]] << site[:old] }
     compiled_files = ireps.each_value.to_set(&:file)
     hidden_ruby_names = foreign_method_names(outside_ruby.reject { |path| compiled_files.include?(path) })
-    warn "== escape analysis (ADR 0316): #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
+    warn "== escape analysis: #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
          "Ruby this run does not compile =="
     EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
                                                      native_names: native_names,

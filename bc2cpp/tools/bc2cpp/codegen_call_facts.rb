@@ -2,7 +2,7 @@
 
 require_relative 'call_facts'
 
-# CodeGen: CALL_FACTS (ADR 0317). The receiver of `x.m2` after `x.m1` returned normally is an instance
+# CodeGen: CALL_FACTS. The receiver of `x.m2` after `x.m1` returned normally is an instance
 # of a class that answers `m1`; when only declared classes do, that set is a proven receiver set for the
 # guard chain of `m2` (ClosedWorld#refusal), with the same soundness conditions as INSTANCE_RECEIVER
 # (ADR 0302). BC2CPP_CALL_FACTS=0 turns it off.

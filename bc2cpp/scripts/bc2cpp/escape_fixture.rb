@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Ruby fixtures shared by scripts/bc2cpp/escape_analysis_check.rb and its mutation check (ADR 0316).
+# Ruby fixtures shared by scripts/bc2cpp/escape_analysis_check.rb and its mutation check.
 module EscapeFixture
   # The unit fixture: one method per escape route or confined shape, each holding exactly one creation
   # site the check picks by its op (`c_*` confined, `e_*` escapes). Compiled alone: the callees below are

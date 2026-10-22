@@ -4,7 +4,7 @@ require 'set'
 require_relative 'call_facts'
 require_relative 'refine_report_columns'
 
-# Debug report for CALL_FACTS (ADR 0317): with BC2CPP_REFINE_REPORT=<path>, every explicit-receiver send of the
+# Debug report for CALL_FACTS: with BC2CPP_REFINE_REPORT=<path>, every explicit-receiver send of the
 # generated code is written as one TSV row (the last compile of a site wins), with what the call facts prove
 # about its receiver and what that would do to its by-name dispatch. It changes no generated code.
 #

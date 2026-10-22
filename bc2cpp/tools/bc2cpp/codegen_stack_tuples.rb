@@ -10,7 +10,7 @@ require_relative 'escape_analysis'
 # the buffer is an ordinary local.
 #
 # A site is placed only when all of these hold (refusal is always the answer when unsure):
-#   escape        the ESCAPE_ANALYSIS verdict for the creation is non-escaping (ADR 0316)
+#   escape        the ESCAPE_ANALYSIS verdict for the creation is non-escaping
 #   closures      the irep builds no BLOCK or LAMBDA, which could read the frame's register by pointer
 #   cycle         the creation is not on a cycle, so one frame holds one instance of it
 #   elements      every element register's reaching definitions are immediate loads

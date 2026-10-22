@@ -9,7 +9,7 @@ require_relative 'core_hierarchy_sigs'
 require_relative 'core_defs'
 require_relative 'send_names'
 
-# ESCAPE_ANALYSIS (ADR 0316): one value-flow module for "does the value this instruction creates leave
+# ESCAPE_ANALYSIS: one value-flow module for "does the value this instruction creates leave
 # the frame that made it?". Every claim is sound by construction. The default answer is "escapes", and a
 # value is non-escaping only when every instruction that can see it is on the audited lists below: a
 # register copy, a branch test, a call whose every possible callee provably keeps neither that argument
