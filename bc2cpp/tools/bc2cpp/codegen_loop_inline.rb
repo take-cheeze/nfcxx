@@ -155,6 +155,7 @@ class CodeGen
     offset = irep.nregs
     break_dest = break_label ? region[:dest_reg] : nil
     label_prefix = "LBLK#{region[:block_addr]}#{region[:label_tag]}_"
+    arm_prune_block_analysis(block_irep, d, offset)
     compile_insn = lambda do |insn, i|
       if result_var
         compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
@@ -786,6 +787,7 @@ class CodeGen
     # the OUTER body's namespace, because its irep is the outer block's and its
     # labels are already claimed there.
     body_prefix = body_label_prefix
+    arm_prune_block_analysis(block_irep, d, offset)
 
     saved_nested = @inline_nested
     saved_blk_param_name = @blk_param_name
