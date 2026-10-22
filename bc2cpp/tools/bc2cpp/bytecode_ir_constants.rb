@@ -72,14 +72,20 @@ module BytecodeIR
     # The gates a build sets (bc2cpp.rb): operator_safe is IntegerConstantRanges.integer_ops_safe?, freeze_safe is
     # DeclaredConstants.stock_method?('freeze', 'Integer', ...). Without an operator gate no arithmetic is a fact; without
     # the freeze gate a frozen Integer is unknown.
-    Policy = Struct.new(:operators_safe, :freeze_safe, :freeze_classes, keyword_init: true)
+    # hash_lookup_safe is the `[]` proof of HASH_LOOKUP (class run only, see hash_lookup_tables): it is false in the
+    # value run, which then builds exactly the nodes it built before.
+    Policy = Struct.new(:operators_safe, :freeze_safe, :freeze_classes, :hash_lookup_safe, keyword_init: true)
 
     module_function
 
     # +ireps+: label => Irep. +sites+: the registry's constant_assignment_sites ({name:, irep:, idx:}); they name each
     # SETCONST by its full path. +poisoned+: bare names bound outside the bytecode (native, foreign Ruby).
-    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false, freeze_classes: Set.new)
-      policy = Policy.new(operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes)
+    # +lookup_poisoned+ (with the poison set) is every name a native or foreign definition may bind; a Hash table is
+    # read only for a name outside it. Only the class run passes hash_lookup_safe.
+    def analyze(ireps, sites:, poisoned:, operators_safe:, freeze_safe: false, freeze_classes: Set.new,
+                hash_lookup_safe: false, lookup_poisoned: Set.new)
+      policy = Policy.new(operators_safe: operators_safe, freeze_safe: freeze_safe, freeze_classes: freeze_classes,
+                          hash_lookup_safe: hash_lookup_safe)
       path_at = sites.to_h { |site| [[site[:irep], site[:idx]], site[:name]] }
       bindings = []
       poison = Set.new(poisoned)
@@ -96,6 +102,12 @@ module BytecodeIR
             alts = src ? alternatives(irep, idx, src, policy) : nil
             bindings << [path_at[[irep.label, idx]] || "::#{bare}", bare, alts]
           end
+        end
+      end
+      if policy.hash_lookup_safe
+        tables = hash_lookup_tables(bindings, poison | lookup_poisoned)
+        bindings = bindings.map do |path, bare, alts|
+          [path, bare, alts && resolve_lookups(alts, tables)]
         end
       end
       by_bare = Hash.new { |h, k| h[k] = [] }
@@ -168,6 +180,7 @@ module BytecodeIR
 
       op = insn.op
       return int_node(loadi_value(insn)) if op.match?(LOADI_OP)
+      return hash_node(irep, index, insn, policy, depth) if op == 'HASH' && policy.hash_lookup_safe
       return [:cls, LITERAL_CLASSES[op]].freeze if LITERAL_CLASSES.key?(op)
 
       case op
@@ -175,6 +188,7 @@ module BytecodeIR
       when 'GETCONST' then (name = insn.const_name) && [:alias, name].freeze
       when 'GETMCNST' then (name = insn.mcnst_name) && [:alias, name].freeze
       when *ARITH_OPS then policy.operators_safe ? arith_node(irep, index, insn, policy, depth) : nil
+      when 'GETIDX' then policy.hash_lookup_safe ? hash_lookup_node(irep, index, insn, policy, depth) : nil
       when 'SEND0'
         # Object#freeze answers its receiver, for the classes whose freeze is stock (freeze_classes; freeze_safe is
         # the Integer case). The node carries the classes it may answer for, and node_classes checks the receiver.
@@ -184,6 +198,8 @@ module BytecodeIR
         return nil if allowed.empty?
 
         receiver = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
+        return nil if receiver.nil? || (policy.hash_lookup_safe && !hash_frozen_in_place?(irep, index, receiver))
+
         receiver && [:freeze, receiver, allowed].freeze
       when 'SEND'
         name = BIT_OPS[insn.sym]
@@ -192,6 +208,93 @@ module BytecodeIR
         left = alternatives(irep, index, insn.reg, policy, depth: depth + 1)
         right = alternatives(irep, index, (insn.reg.to_i + 1).to_s, policy, depth: depth + 1)
         left && right ? [:arith, name, left, right].freeze : nil
+      end
+    end
+
+    # HASH_LOOKUP (class run only). A Hash literal is a node that carries its keys when every key is an exact Integer
+    # literal (no duplicate) and every value an Integer literal, read from the registers BytecodeIR's ContainerLiteral
+    # names. Otherwise its keys are nil and no lookup is proven from it. The index is kept for hash_frozen_in_place?.
+    def hash_node(irep, index, insn, policy, depth)
+      literal = BytecodeIR.for(irep).container_literal(index)
+      keys = literal && literal_hash_keys(irep, index, literal, policy, depth)
+      [:hash, keys, index].freeze
+    end
+
+    # The exact keys of a Hash literal, or nil. Each value must be an Integer literal node; a key must be an exact
+    # Integer (a bignum or out-of-margin key has no value to match a lookup against).
+    def literal_hash_keys(irep, index, literal, policy, depth)
+      keys = []
+      literal.key_regs.zip(literal.value_regs) do |key_reg, value_reg|
+        key = single_alternative(irep, index, key_reg, policy, depth)
+        value = single_alternative(irep, index, value_reg, policy, depth)
+        return nil unless key && key[0] == :int && key[1] && value && %i[int bigint].include?(value[0])
+
+        keys << key[1]
+      end
+      keys.uniq.size == keys.size ? keys.freeze : nil
+    end
+
+    # `R[k]` (GETIDX R(a) R(a+1)): the receiver is a bare constant name and the key an exact Integer literal. The node
+    # is resolved after every binding is known (resolve_lookups); the receiver name and key are kept until then.
+    def hash_lookup_node(irep, index, insn, policy, depth)
+      receiver = single_alternative(irep, index, insn.reg, policy, depth)
+      key = single_alternative(irep, index, (insn.reg.to_i + 1).to_s, policy, depth)
+      return nil unless receiver && receiver[0] == :alias && key && key[0] == :int && key[1]
+
+      [:hash_lookup, receiver[1], key[1]].freeze
+    end
+
+    def single_alternative(irep, index, reg, policy, depth)
+      list = alternatives(irep, index, reg, policy, depth: depth + 1)
+      list && list.size == 1 ? list[0] : nil
+    end
+
+    # The Hash literal a `.freeze` receives is frozen in place only when nothing between the literal and the freeze can
+    # run a method or copy the object (Program#quiet_span?, the container-literal proof). A receiver that is not a
+    # single Hash literal is not refused here; it is simply not a Hash table.
+    def hash_frozen_in_place?(irep, index, receiver)
+      return true unless receiver.size == 1 && receiver[0][0] == :hash
+
+      BytecodeIR.for(irep).quiet_span?(receiver[0][2], index)
+    end
+
+    # Per bare name, the exact keys of every binding when each binding is a frozen Hash literal (a single freeze node on
+    # one `:hash` node with keys). A name with a poison source, or a binding that is not such a literal, has no table.
+    def hash_lookup_tables(bindings, poison)
+      tables = {}
+      bindings.group_by { |_path, bare, _alts| bare }.each do |bare, rows|
+        next if poison.include?(bare)
+
+        found = rows.map { |_path, _bare, alts| frozen_hash_keys(alts) }
+        tables[bare] = found.freeze unless found.any?(&:nil?)
+      end
+      tables
+    end
+
+    def frozen_hash_keys(alts)
+      return nil unless alts&.size == 1
+
+      freeze = alts[0]
+      return nil unless freeze[0] == :freeze && freeze[2].include?(:Hash) && freeze[1].size == 1
+
+      hash = freeze[1][0]
+      hash[0] == :hash && hash[1] ? hash[1] : nil
+    end
+
+    # Replaces each resolvable `R[k]` by an Integer class node: every table of R holds k, and every table value is an
+    # Integer literal (frozen_hash_keys). An unresolved lookup stays a node no class rule answers, so it is unknown.
+    def resolve_lookups(list, tables)
+      list.map { |node| resolve_lookup(node, tables) }.uniq.freeze
+    end
+
+    def resolve_lookup(node, tables)
+      case node[0]
+      when :hash_lookup
+        found = tables[node[1]]
+        found && found.all? { |keys| keys.include?(node[2]) } ? [:cls, :Integer].freeze : node
+      when :freeze then [:freeze, resolve_lookups(node[1], tables), node[2]].freeze
+      when :arith then [:arith, node[1], resolve_lookups(node[2], tables), resolve_lookups(node[3], tables)].freeze
+      else node
       end
     end
 
@@ -262,6 +365,7 @@ module BytecodeIR
       case node[0]
       when :int, :bigint then Set[:Integer].freeze
       when :cls then Set[node[1]].freeze
+      when :hash then Set[:Hash].freeze
       when :alias then known[node[1]]
       when :freeze
         classes = union_classes(node[1], known)

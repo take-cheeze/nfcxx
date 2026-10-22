@@ -6,9 +6,9 @@
 module SendNames
   # Sends that change a method's visibility by name. A visibility send given an alias's answer hides it from
   # the registry, so both the closed world and ALIAS_SITES refuse to trust it.
-  VISIBILITY_SENDS = %w[private public protected private_class_method public_class_method module_function].freeze
-  # Sends that rebind a constant by name. `autoload` binds one lazily, so it rebinds like the others.
-  CONST_REBINDERS = %w[const_set remove_const autoload].freeze
+  VISIBILITY_SENDS = %w[private public protected module_function].freeze
+  # Sends that rebind a constant by name.
+  CONST_REBINDERS = %w[const_set remove_const].freeze
   # Constants whose `.new` makes a class (or members) the registry cannot see.
   CLASS_FACTORIES = %w[Class Module Struct Data].freeze
   # Sends that forward a call to the method named by their first argument (`obj.send(:name, ...)`). A name

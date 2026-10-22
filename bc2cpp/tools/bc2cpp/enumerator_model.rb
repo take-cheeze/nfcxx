@@ -121,7 +121,7 @@ module EnumeratorModel
   # Does the name `Enumerator` denote one class object for the life of the VM, as seen from Kernel#to_enum's body?
   # StableClassConstants refuses it because chain.rb and lazy.rb reopen `class Enumerator`; a reopening does not rebind
   # the constant. Required instead: every CLASS/MODULE statement naming it is in mruby's own Ruby (top level there),
-  # nothing assigns it, no native source defines it, and the program never calls const_set / remove_const / autoload.
+  # nothing assigns it, no native source defines it, and the program never calls const_set / remove_const.
   # Returns nil when stable, else the reason it is not.
   def constant_unstable_reason(ireps, root_label, native_paths, foreign_paths)
     return 'disabled' if ENV['BC2CPP_ENUMERATOR_MODEL'] == '0'

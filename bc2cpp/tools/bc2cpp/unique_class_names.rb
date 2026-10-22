@@ -6,7 +6,7 @@ require_relative 'source_text'
 # code, which reaches RGSS::Bitmap through `class Object; include RGSS; end`)
 # to "P::N" when the closed world, NATIVE_SRCS and FOREIGN_RUBY_SRCS give N
 # exactly one binding, P::N, that nothing reassigns, and no const_set,
-# remove_const, autoload or const_missing exists. A lookup of N that succeeds
+# remove_const or const_missing exists. A lookup of N that succeeds
 # can then only return P::N. See docs/adr/0203-bc2cpp-unique-class-names.md.
 module UniqueClassNames
   BINDING_CALLS = [

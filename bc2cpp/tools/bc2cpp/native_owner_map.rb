@@ -291,7 +291,8 @@ module NativeOwnerMap
           owners.each { |registered| result.aliases << [registered, name, original] } if original
         end
         if spec[:fn] && name && !owners.include?(UNKNOWN)
-          fn = args.fetch(spec[:fn], '').strip
+          # `&f` is the address of the function `f`: the same body as `f` (mrb_define_method(..., &match_data_to_s, ...)).
+          fn = args.fetch(spec[:fn], '').strip.delete_prefix('&').strip
           owners.each { |registered| result.registrations << [registered, name, fn.match?(/\A\w+\z/) ? fn : nil] }
         end
         if name.nil?

@@ -823,19 +823,22 @@ class CodeGen
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end
     when 'JMPNOT'
+      # The insn is unshifted and idx is its position in block_irep, so the decision reads block_irep's own state with
+      # block_irep's own register numbers. Only the emitted name needs the offset (compile_shifted_body_insn, which does
+      # shift the insn, keeps the offset guard).
       reg = insn.reg
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
-      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, offset), target) ||
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
         "  if (!mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
     when 'JMPIF'
       reg = insn.reg
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
-      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, offset), target) ||
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
         "  if (mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
     when 'JMPNIL'
       reg = insn.reg
       target = "#{label_prefix}#{insn.uint_operand.to_i}"
-      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, offset), target) ||
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
         "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{target};\n"
     else
       # BLOCK_BODY_INDEX_SUPPORT: `idx` is the instruction's real position in
