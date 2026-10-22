@@ -46,6 +46,10 @@ text = rbs_of(["class A\n def to_s(base = 10); 'x'; end\n def to_hash; {}; end\n
 check.call('a class method gets a runtime-checked hint with its optional arity, typed by its literal default',
            text.include?("class A\n  %a{bc2cpp:hint}\n  def to_s: (?Integer) -> String\n"))
 check.call('to_hash returns Hash', text.include?('def to_hash: () -> Hash'))
+check.call('inspect returns String, to_i Integer and to_f Float',
+           rbs_of(["class A\n def inspect; 'x'; end\n def to_i; 1; end\n def to_f; 1.0; end\nend\n"])
+             .then { |t| t.include?('def inspect: () -> String') && t.include?('def to_i: () -> Integer') && t.include?('def to_f: () -> Float') })
+check.call('a required parameter on inspect is refused', problems("class A\n def inspect(x); 'x'; end\nend\n") == ['a required parameter'])
 defaults = rbs_of(["class A\n def to_s(a = 'x', b = nil, c = [], d = {}, e = :s, f = true, g = 1.5); 'x'; end\nend\n"])
 check.call('each literal default types its optional parameter, and a non-literal one stays untyped',
            defaults.include?('def to_s: (?String, ?untyped, ?Array, ?Hash, ?Symbol, ?bool, ?Float) -> String'))

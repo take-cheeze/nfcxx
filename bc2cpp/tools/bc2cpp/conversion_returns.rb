@@ -5,15 +5,19 @@ require 'prism'
 require 'tmpdir'
 require_relative 'ruby_parse_cache'
 
-# ConversionReturns: the instance methods the language calls to convert an object (to_s for interpolation and join,
-# to_str, to_int, to_ary, to_hash for implicit conversions) return the class mruby expects. Such a method takes only
+# ConversionReturns: the instance methods of Ruby's type conversions (to_s, inspect, to_i, to_f for explicit ones; to_str,
+# to_int, to_ary, to_hash for the implicit ones the language calls) return the class Ruby expects. Such a method takes only
 # optional positional parameters, so a call the language makes with no arguments always reaches it.
 #
 # Its return is declared as a runtime-checked hint (%a{bc2cpp:hint}, ADR 0455): a method whose return the compiler can
 # prove is the declared class costs nothing, and any other value raises BC2cppHintViolation when it runs. A conversion
 # method with a required parameter, a rest parameter or a keyword is a build error, because the hint would not apply.
 module ConversionReturns
-  RETURNS = { to_s: 'String', to_str: 'String', to_int: 'Integer', to_ary: 'Array', to_hash: 'Hash' }.freeze
+  RETURNS = {
+    to_s: 'String', inspect: 'String', to_str: 'String',
+    to_i: 'Integer', to_int: 'Integer', to_f: 'Float',
+    to_ary: 'Array', to_hash: 'Hash'
+  }.freeze
 
   Found = Struct.new(:path, :owner, :kind, :node)
 
@@ -59,7 +63,7 @@ module ConversionReturns
     end
     return if problems.empty?
 
-    raise "bc2cpp: conversion methods take only optional positional parameters (to_s, to_str, to_int, to_ary, to_hash):\n" \
+    raise "bc2cpp: conversion methods take only optional positional parameters (#{RETURNS.keys.join(', ')}):\n" \
           "#{problems.join("\n")}"
   end
 

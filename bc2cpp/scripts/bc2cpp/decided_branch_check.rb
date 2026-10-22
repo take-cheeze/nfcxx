@@ -34,13 +34,13 @@ SOURCE = <<~'RUBY'
 RUBY
 
 # The generated C++ of Router#route, with the gate set to +gate+ ('1' or '0') for the duration of the block.
-route_code = lambda do |gate|
+route_code = lambda do |gate, source = SOURCE, name = 'route', owner = 'Router'|
   previous = ENV['BC2CPP_DECIDED_BRANCH']
   ENV['BC2CPP_DECIDED_BRANCH'] = gate
-  suite.compile(SOURCE) do |ireps, root|
+  suite.compile(source) do |ireps, root|
     registry = build_registry(ireps, root)[0]
     gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-    method = registry.fetch('route').find { |d| d.owner == 'Router' }
+    method = registry.fetch(name).find { |d| d.owner == owner }
     gen.compile_method(method.irep).fetch(:code)
   end
 ensure
@@ -69,5 +69,20 @@ puts '== gate'
 suite.check('BC2CPP_DECIDED_BRANCH=0 emits no DECIDED_BRANCH line', !off.include?('DECIDED_BRANCH'))
 suite.check('with the gate off all seven tests are emitted as before', tests.call(off) == 7)
 suite.check('with the gate on only the three undecided tests remain', tests.call(on) == 3)
+
+puts '== a nil test on an unknown value is never folded'
+# A value from an unmodelled send is OTHER in the mask: it may be nil, so `v.nil?` must keep its test.
+UNKNOWN_SOURCE = <<~'RUBY'
+  class Probe
+    def check(x)
+      v = x.zork
+      v.nil? ? 1 : 2
+    end
+  end
+RUBY
+probe = route_code.call('1', UNKNOWN_SOURCE, 'check', 'Probe')
+suite.check('the nil test on the unknown value is still emitted', probe.scan(/mrb_nil_p\(/).size >= 1)
+suite.check('no JMPNIL on the unknown value is folded not-taken',
+            !probe.match?(%r{// DECIDED_BRANCH JMPNIL R\d+: not taken}))
 
 suite.finish!

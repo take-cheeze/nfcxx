@@ -230,3 +230,24 @@ if ENV['MRBC']
 else
   puts 'SKIP real compiler fixture (set MRBC)'
 end
+
+
+# The printed arity remains the compatibility oracle for decoded classification.
+require_relative '../../tools/bc2cpp/irep'
+arity_spellings = (0..16).map { |count| "n=#{count}" } +
+                  %w[n=* n=0|nk=0 n=3|nk=2 n=3|nk=* n=*|nk=0 n=*|nk=2 n=*|nk=*]
+arity_spellings.each do |spelling|
+  instruction = Insn.synthetic('SEND', "R1 :arity_probe #{spelling}")
+  expected_plain = instruction.n_spec && instruction.n_spec != '*' && instruction.nk_spec.nil?
+  expected_splat = instruction.n_spec == '*' && instruction.nk_spec.nil?
+  check.call("decoded arity matches printed semantics for #{spelling}",
+             instruction.plain_fixed_argc? == expected_plain && instruction.pure_splat? == expected_splat)
+end
+zero_call = Insn.synthetic('SEND0', 'R1 :arity_probe')
+check.call('absent argc retains nil fixed-arity and false pure-splat results',
+           zero_call.plain_fixed_argc?.nil? && zero_call.pure_splat? == false)
+reinstalled_call = Insn.synthetic('SEND', 'R1 :arity_probe n=2')
+check.call('fixed argc is classified before operand replacement', reinstalled_call.plain_fixed_argc? == true)
+reinstalled_call.typed = OperandSchema.parse('SEND', 'R1 :arity_probe n=*')
+check.call('classification observes replacement operands without a stale memo',
+           reinstalled_call.plain_fixed_argc? == false && reinstalled_call.pure_splat? == true)

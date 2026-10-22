@@ -66,6 +66,39 @@ loop_body = [insn(0, 'LOADI_0', "R2\t(0)"), insn(2, 'JMPNOT', "R1\t15"), insn(6,
              insn(8, 'SEND0', "R4\t:f"), insn(11, 'GETIV', "R5\t@n"), insn(13, 'JMP', '2'), insn(15, 'RETURN', 'R2')]
 irep = Irep.new(label: 'speed', nregs: 6, instructions: loop_body, catch_handlers: [], reps: [], pool: [])
 
+puts '-- scalar truthiness facts (host)'
+false_bit = 1 << 240
+[false, true].each do |known_false|
+  [nil, 0, INT, NIL_, false_bit, INT | NIL_ | false_bit, 1 << 250, -1].each do |mask|
+    [NF::B_IF, NF::B_NOT, NF::B_NIL].each do |branch|
+      [false, true].each do |taken|
+        calls = []
+        oracle = Object.new
+        oracle.define_singleton_method(:false_class_bit) { calls << :false_class_bit; false_bit } if known_false
+        context = NF::Ctx.new(nil, oracle, Set.new, 1, [], {}, [], 1, nil)
+        input = [mask, 0].freeze
+        expected = input
+        unless mask.nil? || mask.zero?
+          narrowed = NF.narrow_branch(branch, taken, mask, known_false ? false_bit : 0,
+                                     known_false ? false_bit : NF::CLASS_BITS)
+          expected = narrowed.zero? ? nil : [narrowed, 0]
+        end
+        actual = NF.narrow_chain(input, 0, branch, taken, context, [])
+        check.call("truth narrowing and oracle calls match for #{[known_false, mask, branch, taken].inspect}",
+                   actual == expected && calls.size == (known_false && mask && !mask.zero? ? 1 : 0) && input == [mask, 0])
+      end
+    end
+  end
+end
+calls = []
+oracle = Object.new
+oracle.define_singleton_method(:false_class_bit) { calls << :false_class_bit; false_bit }
+context = NF::Ctx.new(nil, oracle, Set.new, 2, [], {}, [], 2, nil)
+input = [INT | NIL_ | false_bit, INT | NIL_ | false_bit, 2, 1].freeze
+check.call('cyclic provenance keeps one oracle query per visited register and preserves the input',
+           NF.narrow_chain(input, 0, NF::B_IF, true, context, []) == [INT, INT, 2, 1] &&
+           calls == [:false_class_bit, :false_class_bit] && input[0] == (INT | NIL_ | false_bit))
+
 puts '-- step table (host)'
 first = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
 states = NF.states(irep, first, Set.new)
@@ -184,6 +217,54 @@ check.call('transfer: the call result, the frame above it and the slot widened',
            after[1] == NF::STR && after[2] == OTHER && after[4] == (INT | OTHER) && after[5, 4].all?(&:zero?))
 raised_state = NF.raise_state(FakeCall.new('SEND0', '1'), state, after, ctx)
 check.call('raise_state joins the widened state with the result', raised_state[1] == (NF::STR | OTHER))
+
+puts '-- scalar result states (host)'
+scalar_instructions = [insn(0, 'GETCONST', "R1\t:Known"), insn(0, 'GETUPVAR', "R1\t0\t1"),
+                       insn(0, 'ARRAY', "R1\t0"), insn(0, 'HASH', "R1\t0"), insn(0, 'ARYPUSH', "R1\t1"),
+                       insn(0, 'ADD', "R1\t(R2)"), insn(0, 'ADDI', "R1\t1"), insn(0, 'DIV', "R1\t(R2)"),
+                       insn(0, 'GETIDX', "R1\t(R2)"), insn(0, 'AREF', "R1\tR2\t0"), insn(0, 'EXCEPT', 'R1'),
+                       insn(0, 'KEY_P', "R1\t:flag"), insn(0, 'KARG', "R1\t:flag"), insn(0, 'LAMBDA', "R1\tI[0]")]
+scalar_random = Random.new(539)
+scalar_matches = scalar_instructions.all? do |instruction|
+  method = Irep.new(label: "scalar-#{instruction.op}", nregs: 3,
+                    instructions: [instruction, insn(4, 'RETURN', 'R1')], catch_handlers: [], reps: [], pool: [])
+  40.times.all? do
+    input = Array.new(4) { [INT, FLT, OTHER, NF::ARR, 1 << 240, -1].sample(random: scalar_random) }
+    input += Array.new(3, NF::ELEM_UNKNOWN) + Array.new(3) { scalar_random.rand(3) }
+    input.freeze
+    outputs = [false, true].map do |share|
+      oracle = LogOracle.new({}, INT)
+      oracle.define_singleton_method(:upvar_mask) { |_irep, _insn| note(:upvar_mask) && INT }
+      written = {}
+      context = NF::Ctx.for_run(method, oracle, Set.new, written, Set.new)
+      context.elide_result_copies = share
+      output = NF.transfer(0, instruction, input, context)
+      [output, written, oracle.log]
+    end
+    outputs[0] == outputs[1]
+  end
+end
+check.call('scalar sharing preserves masks, metadata, writes and oracle order across 560 transfers', scalar_matches)
+constant_insn = scalar_instructions.first
+constant_method = Irep.new(label: 'constant-sharing', nregs: 3, instructions: [constant_insn, insn(4, 'RETURN', 'R1')],
+                           catch_handlers: [], reps: [], pool: [])
+constant_oracle = LogOracle.new({}, INT)
+constant_context = NF::Ctx.for_run(constant_method, constant_oracle, Set.new, {}, Set.new)
+constant_context.elide_result_copies = true
+constant_state = ([OTHER, OTHER, OTHER, INT] + Array.new(3, NF::ELEM_UNKNOWN) + Array.new(3, 0)).freeze
+quiet_constant = constant_context
+quiet_constant.narrowing(10, [], {}, true)
+quiet_state = (constant_state + Array.new(3, 0)).freeze
+check.call('a quiet unchanged constant shares its frozen incoming state',
+           NF.transfer(0, constant_insn, quiet_state, quiet_constant).equal?(quiet_state))
+constant_context = NF::Ctx.for_run(constant_method, constant_oracle, Set.new, {}, Set.new)
+constant_context.elide_result_copies = true
+constant_state_with_alias = constant_state.dup
+constant_state_with_alias[8] = 1
+constant_state_with_alias.freeze
+constant_result = NF.transfer(0, constant_insn, constant_state_with_alias, constant_context)
+check.call('a silent const lookup copies before slot/provenance invalidation',
+           !constant_result.equal?(constant_state_with_alias) && constant_result[8].zero? && constant_state_with_alias[8] == 1)
 
 puts '-- slot widening fixed points (host)'
 saved_slot_unions = ENV['BC2CPP_NUMERIC_SLOT_UNIONS']

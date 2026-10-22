@@ -245,6 +245,7 @@ module ParamTrace
       #include <mruby/value.h>
       #include <mruby/array.h>
       #include <mruby/hash.h>
+      #include "mrb_array_access.hxx"
       #define BC2CPP_PARAM_TRACE_MAX_CLASSES #{MAX_CLASSES}
       #define BC2CPP_ELEM_SAMPLE 8
       struct bc2cpp_param_cls_#{id} { struct RClass* real; char* name; unsigned long long count; };
@@ -284,11 +285,11 @@ module ParamTrace
       // container's element type is visible without walking it whole.
       static void bc2cpp_elem_record_#{id}(struct bc2cpp_param_site_#{id}* t, mrb_state* M, mrb_value v) {
         if (mrb_array_p(v)) {
-          mrb_int n = RARRAY_LEN(v);
+          mrb_int n = ary_size(v);
           for (mrb_int i = 0; i < n && i < BC2CPP_ELEM_SAMPLE; i++) bc2cpp_site_record_#{id}(&t[0], M, mrb_ary_ref(M, v, i));
         } else if (mrb_hash_p(v)) {
           mrb_value keys = mrb_hash_keys(M, v);
-          mrb_int n = RARRAY_LEN(keys);
+          mrb_int n = ary_size(keys);
           for (mrb_int i = 0; i < n && i < BC2CPP_ELEM_SAMPLE; i++) {
             mrb_value k = mrb_ary_ref(M, keys, i);
             bc2cpp_site_record_#{id}(&t[1], M, k);

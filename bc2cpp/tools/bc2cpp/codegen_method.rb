@@ -515,9 +515,10 @@ class CodeGen
     flow_bodies = flow_captured && Array.new(irep.instructions.length, '')
     flow_labels = flow_captured && Array.new(irep.instructions.length, '')
     # ARM_PRUNE stage B (BC2CPP_PRUNE_ARMS=1): the held-back text is restored unless the method has no other emitter that
-    # works per instruction (suppressed, glue, prefix, guarded, register-flow capture, resumable step).
+    # works per instruction (suppressed, glue, prefix, guarded, resumable step). Register flow's captured registers do not
+    # refuse it: they are pinned, and an unreachable write never runs, so a live read sees the same value (ADR 0535).
     arm_texts = {}
-    arm_prune_drop = arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !@resumable && !flow_captured &&
+    arm_prune_drop = arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !@resumable &&
                      suppressed.empty? && glue_at.empty? && prefix_at.empty? && guarded_inline[:at].empty? &&
                      guarded_inline[:after].empty?
     arm_prune_refuse(:ineligible) if arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !arm_prune_drop
@@ -533,8 +534,9 @@ class CodeGen
       # The guarded-inline prefix is part of this instruction's text, so the flow pass sees it as one unit.
       text = (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
       if arm_prune_drop && arm_prune.include?(idx)
-        arm_texts[idx] = jump_label + text
-        out << "\x01ARM_PRUNE:#{idx}\x01"
+        # A flow body keeps its '' slot until the decision below, so the pass never sees a dropped text.
+        arm_texts[idx] = [jump_label, text]
+        out << "\x01ARM_PRUNE:#{idx}\x01" unless flow_bodies
         next
       end
       if flow_bodies
@@ -544,7 +546,18 @@ class CodeGen
         out << jump_label << text
       end
     end
-    out = arm_prune_resolve(out, arm_texts) if arm_prune_drop && !arm_texts.empty?
+    if arm_prune_drop && !arm_texts.empty?
+      held = arm_texts.transform_values { |label, text| label + text }
+      if !flow_bodies
+        out = arm_prune_resolve(out, held)
+      elsif !arm_prune_decide(held)
+        # Refused: restore the held texts in their slots, as a method with no pruning would have them.
+        arm_texts.each do |idx, (label, text)|
+          flow_labels[idx] = "#{flow_labels[idx]}#{label}"
+          flow_bodies[idx] = text
+        end
+      end
+    end
     if flow_bodies
       flow_handlers = { regions: recognize_rescue_regions(irep).map { |r| r.slice(:begin_addr, :end_addr, :except_addr) },
                         glue_reads: rescue_glue_reads }

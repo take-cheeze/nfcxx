@@ -692,7 +692,7 @@ class CodeGen
     candidates.map do |owner, i|
       "else if (mrb_type(r#{d}) == MRB_TT_STRUCT && " \
         "mrb_obj_ptr(r#{d})->c == #{owner_class_ptr_expr(owner)}) {\n" \
-        "    r#{d} = (#{i} < RARRAY_LEN(r#{d})) ? RARRAY_PTR(r#{d})[#{i}] : mrb_nil_value();\n" \
+        "    r#{d} = (#{i} < ary_size(r#{d})) ? ary_items(r#{d})[#{i}] : mrb_nil_value();\n" \
         "  } "
     end.join
   end

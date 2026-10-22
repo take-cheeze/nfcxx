@@ -52,7 +52,7 @@ module TouchScan
   # the receiver may be a class held in a variable, so the file cannot be
   # classified by the constants it names.
   RUBY_REOPENERS = /(?:\.|&\.|::)\s*(?:class_eval|module_eval|instance_eval|class_exec|module_exec|
-                     instance_exec|define_method|define_singleton_method|const_set|remove_const|autoload|
+                     instance_exec|define_method|define_singleton_method|const_set|remove_const|
                      alias_method|instance_variable_set|extend|prepend|include|send|__send__|public_send|
                      singleton_class|remove_method|undef_method|refine|append_features|extend_object|
                      prepend_features)\b(?![?!])|
