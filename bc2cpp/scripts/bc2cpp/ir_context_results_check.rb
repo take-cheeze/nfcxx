@@ -78,6 +78,37 @@ end
   check.call("dependency reuse preserves #{contexts}-node graph outcomes", run_context_harness.call(true, 48, contexts).first(3) == run_context_harness.call(false, 48, contexts).first(3))
 end
 
+# Exercise state ownership independently of the compiler's inferred class registry.
+frame_engine = IrContextResults.new(generation_gen, {})
+frame_node = IrContextResults::Node.new(receiver: NumericFlow::STR)
+frame_body = Object.new
+frame_insn = Object.new
+frame_engine.define_singleton_method(:call_layout) { |*_args| @test_layout }
+[false, true].each do |implicit|
+  [-1, 0, 1, 3].each do |argc|
+    [[], [['x', 6], ['missing', 9]], [['x', 2], ['x', 6]]].each do |keyword_registers|
+      frame_engine.instance_variable_set(:@test_layout, [implicit, 1, argc, keyword_registers])
+      state = [NumericFlow::OTHER, NumericFlow::INT, 0, nil, NumericFlow::STR, nil, NumericFlow::FLT].freeze
+      frame_engine.instance_variable_set(:@frame_allocations, false)
+      baseline = frame_engine.frame(frame_node, frame_body, 0, frame_insn, state)
+      frame_engine.instance_variable_set(:@frame_allocations, true)
+      optimized = frame_engine.frame(frame_node, frame_body, 0, frame_insn, state)
+      check.call("frame masks preserve self=#{implicit} argc=#{argc} keywords=#{keyword_registers.size}", optimized == baseline)
+      changed = state.dup
+      changed[2] = NumericFlow::ARR
+      changed[6] = NumericFlow::HSH
+      again = frame_engine.frame(frame_node, frame_body, 0, frame_insn, changed)
+      check.call('later frame masks do not mutate earlier frames', optimized == baseline)
+      check.call('nonempty argument frames have separate storage', argc <= 0 || !optimized[1].equal?(again[1]))
+      check.call('nonempty keyword frames have separate storage', keyword_registers.empty? || !optimized[2].equal?(again[2]))
+      check.call('shared empty argument frame is immutable', argc.positive? || optimized[1].frozen?)
+      check.call('shared empty keyword frame is immutable', !keyword_registers.empty? || optimized[2].frozen?)
+    end
+  end
+end
+frame_engine.instance_variable_set(:@test_layout, nil)
+check.call('unresolved call layout still refuses a frame', frame_engine.frame(frame_node, frame_body, 0, frame_insn, []).nil?)
+
 unless ENV['MRBC']
   puts 'SKIP mrbc context fixtures (set MRBC)'
   exit
@@ -137,6 +168,7 @@ Dir.mktmpdir('ir-context-results') do |dir|
     TypeCheckFixture.report(dir, env: env, label: 'context fixture')
   end
   report = run.call
+  check.call('frame allocation elision preserves the complete report', report == run.call('BC2CPP_IR_FRAME_ALLOCATIONS' => '0'))
   check.call('dependency reuse preserves the complete report', report == run.call('BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
   check.call('leaf evaluation reuse preserves the complete report', report == run.call('BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve the complete report', report == run.call('BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
@@ -160,12 +192,14 @@ Dir.mktmpdir('ir-context-results') do |dir|
   baseline = without['ir_feedback'].find { |row| row['owner'] == 'ContextCases' && row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('context opt-out withdraws keyword result proof', baseline['status'] == 'unknown')
   limited_report = run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1')
+  check.call('frame allocation elision preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_FRAME_ALLOCATIONS' => '0'))
   check.call('leaf reuse preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
   check.call('dependency reuse preserves context-budget refusals', limited_report == run.call('BC2CPP_IR_CONTEXT_MAX_CONTEXTS' => '1', 'BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))
   limited = limited_report['ir_feedback'].find { |row| row['method'] == 'call_kw' && row['kind'] == 'return' }
   check.call('a context budget never publishes a provisional keyword summary', limited['status'] == 'unknown')
   rounds_report = run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1')
+  check.call('frame allocation elision preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_FRAME_ALLOCATIONS' => '0'))
   check.call('leaf reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_LEAF_EVALUATIONS' => '0'))
   check.call('structural indexes preserve round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0'))
   check.call('dependency reuse preserves round-budget refusals', rounds_report == run.call('BC2CPP_IR_CONTEXT_MAX_ROUNDS' => '1', 'BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))

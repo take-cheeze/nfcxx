@@ -11,6 +11,8 @@ class IrContextResults
   MAX_ROUNDS = 48
   MAX_CLASSES = 16
   CLASS_CACHE_LIMIT = 2048
+  EMPTY_FRAME_ARGUMENTS = [].freeze
+  EMPTY_FRAME_KEYWORDS = {}.freeze
   PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
                  'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
@@ -92,6 +94,7 @@ class IrContextResults
     @binding_layouts = {}.compare_by_identity
     @class_cache = {}
     @reuse_evaluations = ENV['BC2CPP_IR_CONTEXT_REEVALUATION'] != '0'
+    @frame_allocations = ENV['BC2CPP_IR_FRAME_ALLOCATIONS'] != '0'
     @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
     native_rows = @gen.instance_variable_get(:@lcf_rows)&.mask.to_i
@@ -372,8 +375,15 @@ class IrContextResults
 
     implicit, register, argc, keyword_registers = layout
     receiver = implicit ? node.receiver : state[register]
-    arguments = (1..argc).map { |position| state[register + position] || NumericFlow::OTHER }
-    keywords = {}
+    arguments = if !@frame_allocations
+                  (1..argc).map { |position| state[register + position] || NumericFlow::OTHER }
+                elsif argc <= 0
+                  EMPTY_FRAME_ARGUMENTS
+                else
+                  Array.new(argc) { |position| state[register + position + 1] || NumericFlow::OTHER }
+                end
+    # Only empty containers are shared; inferred masks remain local to this frame.
+    keywords = @frame_allocations && keyword_registers.empty? ? EMPTY_FRAME_KEYWORDS : {}
     keyword_registers.each { |name, value_register| keywords[name] = state[value_register] || NumericFlow::OTHER }
     [receiver, arguments, keywords]
   end
