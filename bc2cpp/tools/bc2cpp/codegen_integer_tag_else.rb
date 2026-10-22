@@ -52,7 +52,7 @@ class CodeGen
     direct = integer_tag_else_array_call('[]=', exact, "r#{d}", ["r#{idx_reg}", "r#{val}"])
     return "r#{d} = #{direct};" if direct
 
-    "r#{d} = mrb_funcall(M, r#{d}, \"[]=\", 2, r#{idx_reg}, r#{val});"
+    index_set_else_statement(d, idx_reg, val)
   end
 
   # Why the closed world does not prove the Array body answers `name` on an exact Array receiver, or nil when it does.
