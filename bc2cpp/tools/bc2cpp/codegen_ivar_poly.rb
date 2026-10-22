@@ -703,12 +703,6 @@ class CodeGen
   # is one static helper per file. STRUCT_INDEX_CACHE's literal-Symbol branches
   # stay inline ahead of the call (a Struct never matches the Array/Hash/String
   # arms, so the order is unobservable), as do the TYPED/static-receiver paths.
-  INDEX_HELPERS = {
-    'getidx' => 'mrb_value recv, mrb_value key',
-    'getidx0' => 'mrb_value recv',
-    'setidx' => 'mrb_value recv, mrb_value idx, mrb_value val'
-  }.freeze
-
   # `dst = bc2cpp_<kind>(M, args...);`, building the helper on first use.
   def outlined_index_call(kind, dst, *args)
     index_helper_code(kind)
@@ -765,9 +759,11 @@ end
     end
   end
 
-  # The inline fast paths of each helper; the rest is the chain, by-name or INDEX_CLOSED.
-  INDEX_FAST_PATHS = {
-    'getidx' => <<~CPP,
+  # One row per index helper kind (the shared, site-independent part of GETIDX, GETIDX0 and SETIDX): the C parameters
+  # of the helper, the method name and argument shapes its chain dispatches, and the inline fast path that comes before
+  # the chain. INDEX_CLOSED and the by-name tail are built from the row (build_index_helper).
+  INDEX_KINDS = {
+    'getidx' => { params: 'mrb_value recv, mrb_value key', name: '[]', argv: ['key'], fast: <<~CPP },
       if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {
         return bc2cpp_ary_entry(M, recv, mrb_integer(key));
       } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
@@ -777,7 +773,7 @@ end
         return mrb_str_aref(M, recv, key, mrb_undef_value());
       }
     CPP
-    'getidx0' => <<~CPP,
+    'getidx0' => { params: 'mrb_value recv', name: '[]', argv: ['mrb_fixnum_value(0)'], fast: <<~CPP },
       if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class) {
         return bc2cpp_ary_entry(M, recv, 0);
       } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
@@ -785,7 +781,7 @@ end
       }
     CPP
     # The fast paths leave the assigned value in the register, the fallback whatever `[]=` returned (vm.c's OP_SETIDX).
-    'setidx' => <<~CPP
+    'setidx' => { params: 'mrb_value recv, mrb_value idx, mrb_value val', name: '[]=', argv: %w[idx val], fast: <<~CPP }
       if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(idx)) {
         mrb_ary_set(M, recv, mrb_integer(idx), val);
         return val;
@@ -796,8 +792,10 @@ end
     CPP
   }.freeze
 
-  INDEX_CHAIN_ARGS = { 'getidx' => ['[]', ['key']], 'getidx0' => ['[]', ['mrb_fixnum_value(0)']],
-                       'setidx' => ['[]=', %w[idx val]] }.freeze
+  # The views the helper code reads: the C parameters, the chain's name and argument shapes, the fast paths.
+  INDEX_HELPERS = INDEX_KINDS.transform_values { |row| row[:params] }.freeze
+  INDEX_CHAIN_ARGS = INDEX_KINDS.transform_values { |row| [row[:name], row[:argv]] }.freeze
+  INDEX_FAST_PATHS = INDEX_KINDS.transform_values { |row| row[:fast] }.freeze
 
   def build_index_helper(kind)
     fast = INDEX_FAST_PATHS.fetch(kind)
