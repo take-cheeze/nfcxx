@@ -685,6 +685,13 @@ class ClosedWorld
     !@global_refusal && @mm_classes.empty? && !@unknown_defs.include?(name) && !@outside_names.include?(name)
   end
 
+  # NATIVE_RETURN_CLASSES: NativeReturnClasses.admit already accounts for every native registration of the name (each
+  # owner has one proven ROM entry, no computed or unknown owner), so a native spelling of it is not a gap here. What
+  # remains is a Ruby definition the caller checks itself, an installer, a method_missing hook or a global refusal.
+  def name_visible_to_native_table?(name)
+    !@global_refusal && @mm_classes.empty? && !@unknown_defs.include?(name) && !@outside_ruby_names.include?(name)
+  end
+
   # NATIVE_RESULT_FACTS (ADR 0302): name_fully_visible?, except that natives under
   # +path_fragment+ may define the name (the caller proves what each one returns).
   def name_visible_except_natives_in?(name, path_fragment)
