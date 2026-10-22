@@ -4,6 +4,7 @@ require 'set'
 require_relative 'alias_sites'
 require_relative 'bytecode_ir'
 require_relative 'call_site_index'
+require_relative 'dynamic_names'
 require_relative 'integer_constant_ranges'
 
 # CONSTANT_ARGUMENT_SITES (report only): for each method body, the call sites that pass constant arguments, whether every
@@ -20,9 +21,10 @@ require_relative 'integer_constant_ranges'
 #   1. UNRESOLVED: a call the analysis cannot place by name: send/__send__/public_send, method, define_method or
 #      alias_method with a computed name, a to_enum site with a computed name, or an alias AliasSites cannot decode. A
 #      literal target names only that method. An alias names both its new and its old name, since they run one body. A
-#      computed target makes every method unresolved. UNDEF adds no call target and method_missing answers only names no
-#      definition answers, so neither is a reason: a call a method_missing body makes is an ordinary call site, or a
-#      computed one (condition 1 again).
+#      computed target names every method DynamicNames.universe spells (a Symbol or identifier String literal, and the
+#      setters once any name is computed). A to_enum site with a computed name and an undecodable alias stay global.
+#      UNDEF adds no call target and method_missing answers only names no definition answers, so neither is a reason:
+#      a call a method_missing body makes is an ordinary call site, or a computed one (condition 1 again).
 #      A method with a reason is not a single-tuple candidate.
 #   2. REDEFINED (purity only): a Ruby definition in the registry of a name a pure body sends. The receivers of those
 #      sends are not known, so a redefinition refuses purity by name; the owner is not checked.
@@ -102,6 +104,7 @@ module ConstantArgumentSites
       unresolved_methods: rows.count { |r| r[:unresolved] },
       unresolved_global: unresolved[:global].any?,
       unresolved_names: unresolved[:names].keys.sort,
+      computed_dynamic_names: unresolved[:dynamic].size,
       redefined_names: redefined.keys.sort,
       operator_gate_closed: !gate_ok,
       impure_methods: rows.count { |r| !r[:impure].empty? },
@@ -115,14 +118,17 @@ module ConstantArgumentSites
     }
   end
 
-  # Condition 1. { global: [reasons], names: { name => [reasons] } }: a dynamic or named-lookup send whose target is a
-  # literal names that method; one whose target is computed makes every method unresolved (global). ALIAS and UNDEF, a
-  # method_missing definition and a to_enum site with a computed name are global too: each can reach any name.
+  # Condition 1. { global:, names: { name => [reasons] }, computed:, dynamic: Set }: a dynamic send whose target is a
+  # literal names that method. One whose target is computed can reach only a name DynamicNames.universe
+  # spells (see unresolved_reason_for), so its reasons and that set are kept apart from the global ones. An alias
+  # AliasSites cannot decode and a to_enum site with a computed name can reach any name, so they stay global.
   def unresolved_calls(ireps, _registry, index)
     global = []
     names = Hash.new { |h, k| h[k] = [] }
+    computed = []
     ireps.each_value do |irep|
-      irep.each_with_op(*SEND_OPS) do |insn, idx|
+      # The splat ops (SENDV/SENDVB/SSENDV/SSENDVB) carry the name the same way, so every op DynamicNames reads is scanned.
+      irep.each_with_op(*(SEND_OPS | BytecodeIR::Ops::SEND_FAMILY.to_a)) do |insn, idx|
         sym = insn.sym
         # SSEND/SENDB carry their name the same way; a super send names the enclosing def, which the index keys.
         next unless DYNAMIC_SENDS.include?(sym)
@@ -133,7 +139,7 @@ module ConstantArgumentSites
         end
         target = CallSiteIndex.enum_target(irep, idx, insn, insn.reg.to_i + 1)
         if target.nil?
-          global << "#{sym} with a computed name"
+          computed << "#{sym} with a computed name"
         else
           names[target] << "#{sym} #{target}"
         end
@@ -141,7 +147,8 @@ module ConstantArgumentSites
       irep.each_with_op('ALIAS') { |_insn, idx| alias_unresolved(irep, idx, names, global) }
     end
     global << 'to_enum with a computed name' unless index.fetch(CallSiteIndex::UNKNOWN_TARGET, []).empty?
-    { global: global.uniq, names: names }
+    dynamic = computed.empty? ? Set.new : DynamicNames.universe(ireps).to_set
+    { global: global.uniq, names: names, computed: computed.uniq, dynamic: dynamic }
   end
 
   # An alias makes two names reach one body: the new name, which calls can use with tuples the index does not key under the
@@ -158,12 +165,14 @@ module ConstantArgumentSites
     [site.new_name, site.old_name].each { |name| names[name] << reason }
   end
 
-  # The reason +name+ is unresolved, or nil. A global reason covers every name.
+  # The reason +name+ is unresolved, or nil. A global reason covers every name; a computed-name send covers the names
+  # DynamicNames spells (the same universe ArgTypes and the other call-site proofs refuse, ADR 0279).
   def unresolved_reason_for(name, unresolved)
     return unresolved[:global].join('; ') if unresolved[:global].any?
-    return unresolved[:names][name].uniq.join('; ') if unresolved[:names].key?(name)
 
-    nil
+    reasons = unresolved[:names].key?(name) ? unresolved[:names][name].dup : []
+    reasons.concat(unresolved[:computed]) if unresolved[:dynamic].include?(name)
+    reasons.empty? ? nil : reasons.uniq.join('; ')
   end
 
   # Condition 2: name => owners of its Ruby definitions in the registry, for the names a pure body may send.
