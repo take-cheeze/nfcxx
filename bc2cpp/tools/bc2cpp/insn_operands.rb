@@ -149,12 +149,15 @@ module InsnOperands
     OperandSchema.argc_text(spec)
   end
 
+  # Explicit nk=0 is still a keyword call; use the presence flag, not its count.
   def pure_splat?
-    n_spec == '*' && nk_spec.nil?
+    spec = argc_operand
+    !!(spec && spec[0].nil? && spec[2])
   end
 
   def plain_fixed_argc?
-    n_spec && n_spec != '*' && nk_spec.nil?
+    spec = argc_operand
+    spec && !spec[0].nil? && !!spec[2]
   end
 
   def block_index
