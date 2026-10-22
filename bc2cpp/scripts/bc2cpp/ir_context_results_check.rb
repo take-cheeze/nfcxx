@@ -182,9 +182,9 @@ Dir.mktmpdir('ir-context-results') do |dir|
   File.write(File.join(dir, 'fixture.rb'), source)
   run = lambda do |extra_env = {}|
     env = { 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_STRICT_HINTS' => '0' }.merge(extra_env)
-    TypeCheckFixture.report(dir, env: env, label: 'context fixture')
+    TypeCheckFixture.facts_report(dir, env: env, label: 'context fixture')
   end
-  report = run.call
+  report = TypeCheckFixture.report(dir, env: { 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_STRICT_HINTS' => '0' }, label: 'context CLI fixture')
   check.call('frame allocation elision preserves the complete report', report == run.call('BC2CPP_IR_FRAME_ALLOCATIONS' => '0'))
   check.call('fixed bindings preserve the complete report', report == run.call('BC2CPP_IR_FIXED_BINDINGS' => '0'))
   check.call('dependency reuse preserves the complete report', report == run.call('BC2CPP_IR_CONTEXT_REEVALUATION' => '0'))

@@ -564,8 +564,8 @@ class CodeGen
     if flow_bodies
       flow_handlers = { regions: recognize_rescue_regions(irep).map { |r| r.slice(:begin_addr, :end_addr, :except_addr) },
                         glue_reads: rescue_glue_reads }
-      # Eligibility observes only #error. Keep the normal pass when it could remove one, or when its output is audited.
-      unless @clean_probe && !@runtime_installed_names && flow_bodies.none? { |text| text.include?('#error') }
+      # Reports and eligibility observe #error, not register cleanup. Keep error-bearing and audited texts on the regular pass.
+      unless (@clean_probe || @report_only_text) && !@runtime_installed_names && flow_bodies.none? { |text| text.include?('#error') }
         flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured, handlers: flow_handlers)
       end
       flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
@@ -595,7 +595,7 @@ class CodeGen
     end
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
-    out = drop_unused_nil_registers(out, registers_start...registers_end) unless @resumable
+    out = drop_unused_nil_registers(out, registers_start...registers_end) unless @resumable || (@report_only_text && !@runtime_installed_names)
     out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
