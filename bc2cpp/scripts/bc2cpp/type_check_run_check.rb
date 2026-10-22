@@ -247,7 +247,7 @@ Dir.mktmpdir('type-check-run') do |dir|
 
   require_relative 'type_check_fixture'
   begin
-    TypeCheckFixture.facts_report(dir, files: [source], env: { 'BC2CPP_SIG_DIRS' => sig }, label: 'invalid signature fixture')
+    TypeCheckFixture.render_report(optimized[0], label: 'invalid signature fixture')
     raise 'direct fixture reporting accepted signature contradictions'
   rescue RuntimeError => e
     raise unless e.message.include?('failed (1)') && e.message.include?('TC1010')

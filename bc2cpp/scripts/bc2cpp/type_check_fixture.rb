@@ -26,7 +26,6 @@ module TypeCheckFixture
     end
 
     require_relative '../../tools/bc2cpp/type_check_run'
-    require_relative '../../tools/bc2cpp/type_check_report'
 
     root = File.expand_path('../..', __dir__)
     directory = File.expand_path(directory)
@@ -37,12 +36,17 @@ module TypeCheckFixture
         TypeCheckRun.run(root: root, mrbc: mrbc, workdir: work, sources: sources, sends: false,
                          display_root: directory, extra_env: env)
       end
-      facts = JSON.parse(File.read(result.facts_path))
-      diagnostics = TypeCheckReport.diagnostics(facts, [])
-      status = TypeCheckReport.exit_status(diagnostics)
-      raise "#{label} failed (#{status}):\n#{diagnostics.map(&:to_s).join("\n")}" unless status.zero?
-
-      JSON.parse(TypeCheckReport.json(facts, [], diagnostics, TypeCheckReport.summary(facts)))
+      render_report(JSON.parse(File.read(result.facts_path)), label: label)
     end
+  end
+
+  def self.render_report(facts, label: 'type-check fixture')
+    require_relative '../../tools/bc2cpp/type_check_report'
+
+    diagnostics = TypeCheckReport.diagnostics(facts, [])
+    status = TypeCheckReport.exit_status(diagnostics)
+    raise "#{label} failed (#{status}):\n#{diagnostics.map(&:to_s).join("\n")}" unless status.zero?
+
+    JSON.parse(TypeCheckReport.json(facts, [], diagnostics, TypeCheckReport.summary(facts)))
   end
 end
