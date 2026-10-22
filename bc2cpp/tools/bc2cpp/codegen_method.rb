@@ -300,6 +300,7 @@ class CodeGen
       registers_start = out.length
       out << emit_register_initializers(irep.nregs, initial)
       registers_end = out.length
+      out << stack_tuple_declarations(irep)
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
         # allocate the struct before any embedded SETIV.
@@ -523,6 +524,7 @@ class CodeGen
                      guarded_inline[:after].empty?
     arm_prune_refuse(:ineligible) if arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !arm_prune_drop
     irep.instructions.each_with_index do |insn, idx|
+      stack_tuple_visit(irep, idx, suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr))
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
       # first instruction: the guarded loop's `goto` would then jump back to the top and run the loop again.
       out << guarded_inline[:after][insn.addr] if !flow_bodies && guarded_inline[:after].key?(insn.addr)
