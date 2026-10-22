@@ -724,6 +724,15 @@ def index_else_statement(d, s)
   outlined_index_call('getidx', "r#{d}", "r#{d}", "r#{s}").chomp
 end
 
+# The else of an Array or Hash `[]=` arm (SETIDX with a static class): bc2cpp_setidx, whose arms repeat the same tests
+# and return the value as the []= send does, so the site has no by-name send of its own. Keeps the send when `[]=`
+# is devirt-blocked by a runtime definer.
+def index_set_else_statement(d, idx_reg, val)
+  return "r#{d} = mrb_funcall(M, r#{d}, \"[]=\", 2, r#{idx_reg}, r#{val});" if devirt_blocked_name?('[]=')
+
+  outlined_index_call('setidx', "r#{d}", "r#{d}", "r#{idx_reg}", "r#{val}").chomp
+end
+
   # GETIDX's generic tail, after any STRUCT_INDEX_CACHE branches. nil under
   # RUNTIME_DEF_DEVIRT_GUARD for `[]`: that chain must skip POLY_SMALL_N and
   # the shared helper does not, so the caller keeps the inline form.

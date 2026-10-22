@@ -779,7 +779,7 @@ class CodeGen
               mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
               r#{d} = r#{val};
             } else {
-              r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+              #{index_set_else_statement(d, idx_reg, val)}
             }
           CPP
         end
