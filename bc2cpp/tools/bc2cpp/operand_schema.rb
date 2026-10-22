@@ -68,7 +68,7 @@ module OperandSchema
     'ARYCAT' => RP, 'STRCAT' => RP, 'HASHCAT' => RP,
     'AREF' => %i[reg reg int].freeze, 'ASET' => %i[reg reg int].freeze,
     'APOST' => %i[reg int int].freeze,
-    'SYMBOL' => %i[reg pool].freeze, 'STRING' => %i[reg pool].freeze,
+    'SYMBOL' => %i[reg pool].freeze, 'STRING' => %i[reg pool].freeze, 'FSTRING' => %i[reg pool].freeze,
     'CLASS' => RS, 'MODULE' => RS,
     'ERR' => %i[rest].freeze,
     'DEBUG' => %i[int int int].freeze

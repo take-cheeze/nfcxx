@@ -3,6 +3,11 @@
 # CodeGen: compile_insn and comparisons.
 
 class CodeGen
+  # BC2CPP_FROZEN_LITERALS=0 compiles a frozen-literal STRING as the old fresh String (the pre-ADR 0546 output).
+  def frozen_literals_enabled?
+    ENV['BC2CPP_FROZEN_LITERALS'] != '0'
+  end
+
   # `idx` is the instruction's position in irep.instructions (for the backward
   # proofs). `reg_offset` is non-zero only for compile_block_body_insn's shifted
   # registers and is undone with unshift_proof_reg wherever a register reaches a
@@ -128,7 +133,11 @@ class CodeGen
       d = insn.reg
       idx = insn.pool_index.to_i
       entry = irep.pool.fetch(idx)
-      if entry.is_a?(String)
+      if entry.is_a?(String) && insn.frozen_literal && frozen_literals_enabled?
+        # `# frozen_string_literal: true` (ADR 0546): the VM's persistent frozen String for these bytes,
+        # the object OP_FSTRING returns. The bytes are escaped one by one, so the length is exact.
+        "  r#{d} = mrb_frozen_literal(M, #{c_string_literal(entry)}, #{entry.bytesize});\n"
+      elsif entry.is_a?(String)
         "  r#{d} = mrb_str_new_cstr(M, #{c_string_literal(entry)});\n"
       else
         "  #error STRING references a non-string pool entry (#{entry[:type]}) -- not in this prototype's supported subset\n"

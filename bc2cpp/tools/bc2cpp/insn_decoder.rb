@@ -22,7 +22,7 @@ module InsnDecoder
     GT:B GE:B ARRAY:BB ARRAY2:BBB ARYCAT:B ARYPUSH:BB ARYSPLAT:B AREF:BBB ASET:BBB APOST:BBB INTERN:B
     SYMBOL:BB STRING:BB STRCAT:B HASH:BB HASHADD:BB HASHCAT:B LAMBDA:BB BLOCK:BB METHOD:BB RANGE_INC:B
     RANGE_EXC:B OCLASS:B CLASS:BB MODULE:BB EXEC:BB DEF:BB TDEF:BBB SDEF:BBB ALIAS:BB UNDEF:B SCLASS:B
-    TCLASS:B DEBUG:BBB ERR:B EXT1:Z EXT2:Z EXT3:Z STOP:Z
+    TCLASS:B DEBUG:BBB ERR:B EXT1:Z EXT2:Z EXT3:Z STOP:Z FSTRING:BB
   ].map { |entry| entry.split(':') }.freeze
 
   EXT_WIDTH = { 'EXT1' => 1, 'EXT2' => 2, 'EXT3' => 3 }.freeze
@@ -43,7 +43,7 @@ module InsnDecoder
     LOADI8 LOADINEG LOADI16 LOADI32 LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
     LOADI_7 LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE GETCONST SETCONST GETMCNST SETMCNST GETUPVAR
     SETUPVAR GETIDX GETIDX0 SETIDX JMPNOT JMPNIL SSEND0 SSENDB ARGARY RETURN RETURN_BLK BLKPUSH LAMBDA
-    METHOD RANGE_INC RANGE_EXC ADDILV SUBILV ARYCAT ARYPUSH ARYSPLAT INTERN SYMBOL STRING STRCAT HASHADD
+    METHOD RANGE_INC RANGE_EXC ADDILV SUBILV ARYCAT ARYPUSH ARYSPLAT INTERN SYMBOL STRING FSTRING STRCAT HASHADD
     HASHCAT OCLASS MODULE SCLASS TCLASS EXCEPT RESCUE RAISEIF MATCHERR
   ].freeze
   SEPS = (TWO_TABS.to_h { |n| [n, "\t\t"] }
@@ -379,7 +379,7 @@ module InsnDecoder
       when 'AREF', 'ASET' then ["R#{a}\tR#{b}\t#{c}#{lv_comment(a, b)}", [r(a), r(b), i(c)]]
       when 'APOST' then ["R#{a}\t#{b}\t#{c}#{lv_comment(a)}", [r(a), i(b), i(c)]]
       when 'SYMBOL' then ["R#{a}\tL[#{b}]\t; #{pool_str(b)}#{lv_comment(a)}", [r(a), Operand.new(:pool, b)]]
-      when 'STRING'
+      when 'STRING', 'FSTRING'
         str = pool_str(b)
         ["R#{a}\tL[#{b}]#{str.empty? ? '' : "\t; #{str}"}#{lv_comment(a)}", [r(a), Operand.new(:pool, b)]]
       when 'CLASS', 'MODULE' then ["R#{a}\t:#{sym(b)}#{lv_comment(a)}", [r(a), sym_op(b)]]
@@ -406,14 +406,19 @@ module InsnDecoder
     def build(name, values, next_pc, start, line_pc = start, debug_file = debug_file_at(line_pc))
       rest, operands = body(name, values, next_pc)
       op = name == 'ARRAY2' ? 'ARRAY' : name
+      # FSTRING (ADR 0546) is a STRING load of a frozen, persistent object: one op name for every pass that
+      # reads String loads, with frozen_literal set for the passes that must not treat it as fresh.
+      frozen = name == 'FSTRING'
+      op = 'STRING' if frozen
+      printed = frozen ? name : op
       lineno = line_at(line_pc, debug_file)
       raise "bc2cpp: no line info for #{op} at #{line_pc}" if lineno.negative?
 
       # The disassembly is line-oriented: a pool string with a newline is cut there.
       # scrub: a binary pool string (mruby-wolf's data.rb) is not valid UTF-8.
-      first = "#{op}#{sep_for(name, values)}#{rest}".scrub.split("\n", 2).first
-      insn = Insn.new(lineno: lineno, addr: start, op: op, args: first.delete_prefix(op).strip,
-                      raw: (format('%5d %03d ', lineno, start) + first).rstrip)
+      first = "#{printed}#{sep_for(name, values)}#{rest}".scrub.split("\n", 2).first
+      insn = Insn.new(lineno: lineno, addr: start, op: op, args: first.delete_prefix(printed).strip,
+                      raw: (format('%5d %03d ', lineno, start) + first).rstrip, frozen_literal: frozen)
       insn.typed = operands
       insn
     end
