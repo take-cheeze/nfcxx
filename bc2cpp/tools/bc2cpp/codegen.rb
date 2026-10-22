@@ -85,6 +85,7 @@ class CodeGen
                   unknown_mixins = Set.new, analysis_only: false, native_expression_devirt: {},
                   native_registered_expressions: {}, closed_world: nil, outside_ivar_names: nil,
                   nil_operator_names: nil, outside_const_names: nil, native_ivar_scopes: {})
+    @report_only_text = ENV['BC2CPP_TYPE_CHECK_ONLY'] == '1' && ENV['BC2CPP_TYPE_CHECK_TEXT_PASSES'] != '0'
     @ireps = ireps
     # NUMERIC_OPERAND_PROOF: ivar names spelled by sources outside the
     # closed world, and operators they define on NilClass. nil means the scan did

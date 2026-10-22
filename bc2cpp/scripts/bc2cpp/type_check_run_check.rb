@@ -231,7 +231,7 @@ Dir.mktmpdir('type-check-run') do |dir|
     Dir.mkdir(work)
     result = TypeCheckRun.run(root: root, mrbc: File.expand_path(ENV.fetch('MRBC')), workdir: work,
                               sources: [source], sig_dirs: [sig], display_root: dir,
-                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode, 'BC2CPP_IR_SCALAR_SEEN' => mode, 'BC2CPP_CORE_RUBY_QUERY_SCRATCH' => mode, 'BC2CPP_IR_FRAME_ALLOCATIONS' => mode, 'BC2CPP_IR_FIXED_BINDINGS' => mode, 'BC2CPP_IR_PREPARED_CONTRACTS' => mode, 'BC2CPP_CALL_LOOKUP_INDEX' => mode, 'BC2CPP_CLOSED_OPACITY_INDEX' => mode, 'BC2CPP_NUMERIC_LOAD_COPY_ELISION' => mode, 'BC2CPP_PROBE_REGISTER_FLOW' => mode, 'BC2CPP_NUMERIC_SLOT_UNIONS' => mode, 'BC2CPP_IR_QUERY_KEYS' => mode, 'BC2CPP_NUMERIC_RESULT_COPY_ELISION' => mode })
+                              extra_env: { 'BC2CPP_TYPE_CHECK_ONLY' => mode, 'BC2CPP_TYPE_CHECK_TEXT_PASSES' => mode, 'BC2CPP_IR_SCALAR_SEEN' => mode, 'BC2CPP_CORE_RUBY_QUERY_SCRATCH' => mode, 'BC2CPP_IR_FRAME_ALLOCATIONS' => mode, 'BC2CPP_IR_FIXED_BINDINGS' => mode, 'BC2CPP_IR_PREPARED_CONTRACTS' => mode, 'BC2CPP_CALL_LOOKUP_INDEX' => mode, 'BC2CPP_CLOSED_OPACITY_INDEX' => mode, 'BC2CPP_NUMERIC_LOAD_COPY_ELISION' => mode, 'BC2CPP_PROBE_REGISTER_FLOW' => mode, 'BC2CPP_NUMERIC_SLOT_UNIONS' => mode, 'BC2CPP_IR_QUERY_KEYS' => mode, 'BC2CPP_NUMERIC_RESULT_COPY_ELISION' => mode })
     [JSON.parse(File.read(result.facts_path)), File.read(result.rows_path), work]
   end
   baseline, optimized = results
@@ -244,5 +244,13 @@ Dir.mktmpdir('type-check-run') do |dir|
   raise 'nilable index collection was skipped' unless optimized[0].key?('nilable_index')
   raise 'baseline did not emit the C++ sidecar' unless File.exist?(File.join(baseline[2], 'type_check_decls.h'))
   raise 'report-only mode emitted a C++ sidecar' if File.exist?(File.join(optimized[2], 'type_check_decls.h'))
+
+  require_relative 'type_check_fixture'
+  begin
+    TypeCheckFixture.render_report(optimized[0], label: 'invalid signature fixture')
+    raise 'direct fixture reporting accepted signature contradictions'
+  rescue RuntimeError => e
+    raise unless e.message.include?('failed (1)') && e.message.include?('TC1010')
+  end
 end
 puts 'type-check pipeline facts, receiver rows, diagnostics and emission checks passed'
