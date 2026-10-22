@@ -186,6 +186,10 @@ class CodeGen
       # NUMERIC_INTERVAL_OPERANDS (ADR 0326): `HEADER_H * 3 + 2` is a Fixnum when its interval fits.
       !@fixnum_proof_skip_constants && numeric_intervals_on? &&
         !fixnum_interval_source(irep, j, insn, reg, owner_def, 0, nil).nil?
+    when 'GETIDX', 'GETIDX0'
+      # SEALED_INT16 (sealed_int16_locals.rb): an in-range read of a proven int16 array is a Fixnum (its interval
+      # is the int16 hull of the array's stored values).
+      numeric_intervals_on? && !sealed_element_range(irep, j).nil?
     when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
       # FIXNUM_RETURN_PROOF (source 6): see compute_fixnum_return_names. SENDB/SSENDB
       # are excluded: a `break` in the caller's block becomes the send's result.
