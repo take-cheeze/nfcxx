@@ -582,7 +582,7 @@ class CodeGen
   end
 
   def block_element_class_mask(irep, index, insn)
-    return nil unless %w[map collect].include?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
+    return nil unless CoreBlockIteratorSigs.block_return_element?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
     return nil unless @closed_world&.exact_instances_singleton_free?
     return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
 
