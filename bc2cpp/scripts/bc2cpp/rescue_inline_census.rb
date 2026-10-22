@@ -13,8 +13,7 @@
 # identifier under scripts/ as a dynamic reference, so a list of engine method names must not live in this file.
 #
 # The before file is the same tree with BC2CPP_RESCUE_INLINE_BLOCKS=0 BC2CPP_EACH_SPREAD=0 (byte-identical to
-# the base commit's output); run both with and without BC2CPP_HOT_METHODS=tools/bc2cpp/hot_methods.txt for the
-# full and the hot-only world.
+# the base commit's output).
 
 OWNER = 'RPG2k__Scene__Map'
 DEFINITION = /^(?:static )?(?:mrb_value|void|int|bool) (\w+)\([^;]*\)\s*\{$/

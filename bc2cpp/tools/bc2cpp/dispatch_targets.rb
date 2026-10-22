@@ -192,8 +192,7 @@ DIRECT_CONSTRUCT_TARGETS = DispatchTargetSources.direct_construct_targets
 # The DIRECT_CONSTRUCT_TARGETS owners whose `<Owner>_compiled_class()` accessor is
 # defined in mruby-rpg2k-compiled/src/register.cxx (DispatchTargetSources.
 # direct_construct_accessor_targets). A full build reads that accessor for these;
-# every other listed target uses the owner-class cache (owner_class_ptr_expr), as a
-# hot-only build does for all of them. The accessor definitions are the source, so
+# every other listed target uses the owner-class cache (owner_class_ptr_expr). The accessor definitions are the source, so
 # a new one is picked up here; one naming no listed owner raises at load time.
 DIRECT_CONSTRUCT_ACCESSOR_TARGETS = DispatchTargetSources.direct_construct_accessor_targets(DIRECT_CONSTRUCT_TARGETS)
 

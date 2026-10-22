@@ -73,10 +73,10 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
              raises.call(SharedGeneration::Error) do
                SharedGeneration.run(tool: TOOL, srcs: [], common_env: { 'ONLY_OWNERS' => 'A' }, unit_envs: [{}])
              end)
-  groups = lambda do |hot|
+  groups = lambda do |differ|
     jobs = BC2CPP_COMPILED_GEMS.keys.each_with_index.map do |name, i|
       env = { 'NATIVE_SRCS' => 'x', 'ONLY_OWNERS' => name, 'OUT_DIR' => "/b/#{name}" }
-      env['BC2CPP_HOT_METHODS'] = 'h' if hot && i.zero?
+      env['SKIP_UNSUPPORTED'] = '0' if differ && i.zero?
       [env, %w[a.rb], "/b/#{name}/gen.cpp"]
     end
     jobs.group_by { |env, srcs, _| [env.reject { |k, _| SharedGeneration::UNIT_KEYS.include?(k) }, srcs] }.size

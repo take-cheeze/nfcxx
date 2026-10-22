@@ -11,7 +11,7 @@ module NomethodReviewed
   MARKER = %r{/\* CLOSED_WORLD nomethod: (self|recv)\.(\S+) @ (\S+) \*/}
   # GUARD_VIOLATION (ADR 0290): a guard whose else arm the closed world proves dead because
   # its register holds a stable class constant. Listed, not gated: which of these exist
-  # depends on which callees compile (a hot-only build has sites a full one lacks), so no
+  # depends on which callees compile, so no
   # two-way list can be exact; the proof is the gate.
   VIOLATION_MARKER = %r{/\* CLOSED_WORLD guard-violation: (\S+) \*/}
   # NIL_RECEIVER (ADR 0296): the nil arm of a receiver the class pools prove is nil or one class.

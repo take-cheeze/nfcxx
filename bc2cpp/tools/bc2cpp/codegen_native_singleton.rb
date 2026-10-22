@@ -81,7 +81,6 @@ module NativeSingletonCall
           elsif candidate.visibility != :public then :not_public
           elsif candidate.irep.nil? then :no_irep
           elsif !pure_mandatory_or_optional_arity?(@ireps.fetch(candidate.irep)) then :arity_shape
-          elsif hot_only_excluded?(candidate.irep) then :hot_only
           elsif !constant_object_candidate_clean?(candidate.irep) then constant_object_unclean_reason(candidate.irep)
           elsif @only_owners && !@only_owners.include?(candidate.owner) && !@other_owners&.include?(candidate.owner) then :owner_not_emitted
           else :other

@@ -22,11 +22,9 @@ class CodeGen
   # unrestricted (unit checks); the driver sets it for a real gem build.
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in
   # storage order); nil proves nothing.
-  # hot_only_excluded: irep labels BC2CPP_HOT_METHODS leaves out (ADR 0214); nil
-  # or empty excludes nothing. Class-level so every probing CodeGen sees it.
   class << self
     attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
-                  :integer_constant_values, :integer_constant_ranges, :constant_value_classes, :hot_only_excluded,
+                  :integer_constant_values, :integer_constant_ranges, :constant_value_classes,
                   :module_names, :core_hidden_defs,
                   :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names, :build_gem_names,
                   :enumerator_model, :native_singleton_inputs,
@@ -458,15 +456,6 @@ class CodeGen
       # plain iv_tbl implementation; mrb_iv_get/mrb_iv_set now route those through
       # the RData slot descriptor too. Interpreted Ruby methods use the same API.
       safe = ivars.reject do |name, _|
-        excluded_access = self.class.hot_only_excluded && @registry.values.flatten.any? do |definition|
-          next false unless definition.irep && self.class.hot_only_excluded.include?(definition.irep)
-          next false unless definition.owner == owner || strict_subclass?(definition.owner, owner)
-
-          irep_subtree_touches_ivar?(definition.irep, name)
-        end
-        # An excluded method reads the ordinary iv_tbl, so no compiled sibling
-        # may move that field into the compiler-managed payload.
-        next true if excluded_access
 
         reader_native = natively_exposed?(owner, name)
         writer_native = natively_exposed?(owner, "#{name}=")

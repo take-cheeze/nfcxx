@@ -124,7 +124,7 @@ module Bc2cppFixtureRuntime
   # `skip_unsupported: false` drops SKIP_UNSUPPORTED, so a method the compiler
   # refuses keeps its `#error` in the output instead of being dropped whole --
   # what a check that asserts on a refusal needs.
-  def generate(source, dir, only_owners: nil, hot_methods: nil, path: 'fixture.rb', extra: [],
+  def generate(source, dir, only_owners: nil, path: 'fixture.rb', extra: [],
                native: [], foreign: [], build_gems: [], drop_gems: [], core: false, skip_unsupported: true, owner_variants: nil)
     src = File.join(dir, path)
     FileUtils.mkdir_p(File.dirname(src))
@@ -133,7 +133,7 @@ module Bc2cppFixtureRuntime
       File.join(dir, extra_path).tap { |file| FileUtils.mkdir_p(File.dirname(file)) && File.write(file, text) }
     end
     env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'fixture', 'OUT_DIR' => dir,
-            'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_HOT_METHODS' => hot_methods }
+            'BC2CPP_SELF_REGISTERING' => '1' }
     env['SKIP_UNSUPPORTED'] = '1' if skip_unsupported
     only_owners = BC2CPP_CORE_OWNERS + only_owners if core && only_owners
     env['ONLY_OWNERS'] = only_owners.join(',') if only_owners
