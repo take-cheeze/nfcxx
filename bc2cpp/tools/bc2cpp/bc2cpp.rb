@@ -144,6 +144,7 @@ require_relative 'codegen_block_fallback'
 require_relative 'codegen_yield_free'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
+require_relative 'codegen_sealed_int16'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
 require_relative 'codegen_eqq'
@@ -1457,6 +1458,11 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
   puts '#include <mruby/array.h>'
+  # SEALED_INT16 (sealed_int16_locals.rb): std::vector<int16_t> locals, only when the switch is on.
+  if SealedInt16Locals.enabled?
+    puts '#include <cstdint>'
+    puts '#include <vector>'
+  end
   puts '#include "mrb_array_access.hxx"'
   puts '#include <mruby/class.h>'
   # mrb_range_new for RANGE_INC/RANGE_EXC.
