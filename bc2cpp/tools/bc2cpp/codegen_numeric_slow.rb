@@ -29,7 +29,7 @@ class CodeGen
     extern "C" mrb_value mrb_bint_mul_ii(mrb_state*, mrb_int, mrb_int);
     extern "C" mrb_value mrb_as_bint(mrb_state*, mrb_value);
     #endif
-    // Whole bodies of Integer#% and Float#% (patches/mruby-expose-misc-bodies.patch, ADR 0367).
+    // Whole bodies of Integer#% and Float#% (the pinned fork commit (mruby-expose-misc-bodies, docs/patch-fork-tracking.md), ADR 0367).
     extern "C" mrb_value mrb_int_mod_impl(mrb_state*, mrb_value, mrb_value);
     #ifndef MRB_NO_FLOAT
     extern "C" mrb_value mrb_flo_mod_impl(mrb_state*, mrb_value, mrb_value);
@@ -72,7 +72,7 @@ class CodeGen
 
   # NUMERIC_SLOW_CLOSED (ADR 0360, 0361, 0364, 0366): operators whose every definer in the build is on these classes,
   # which the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `- & | <<`
-  # run bodies that mruby keeps static, which patches/mruby-expose-collection-op-bodies.patch exports; they also need
+  # run bodies that mruby keeps static, which the pinned fork commit (mruby-expose-collection-op-bodies, docs/patch-fork-tracking.md) exports; they also need
   # numeric_slow_collection_ready?.
   NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String],
                           '*' => %w[Integer Float Array String], '^' => %w[Integer NilClass TrueClass FalseClass],

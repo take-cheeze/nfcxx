@@ -12,7 +12,7 @@
 #
 # BC2CPP_INTEGER_TAG_ELSE=0 restores the by-name else byte-for-byte.
 class CodeGen
-  # name => [exported body, C prototype], the bodies patches/mruby-expose-index-bodies.patch exports.
+  # name => [exported body, C prototype], the bodies the pinned fork commit (mruby-expose-index-bodies, docs/patch-fork-tracking.md) exports.
   INTEGER_TAG_ELSE_BODIES = {
     '[]' => ['mrb_ary_aget1_impl', 'mrb_value mrb_ary_aget1_impl(mrb_state*, mrb_value, mrb_value)'],
     '[]=' => ['mrb_ary_aset2_impl', 'mrb_value mrb_ary_aset2_impl(mrb_state*, mrb_value, mrb_value, mrb_value)']
@@ -82,7 +82,7 @@ class CodeGen
     names = @integer_tag_else_bodies_used
     return '' if names.nil? || names.empty?
 
-    out = +"// INTEGER_TAG_ELSE (ADR 0394): exported by patches/mruby-expose-index-bodies.patch\n"
+    out = +"// INTEGER_TAG_ELSE (ADR 0394): exported by the pinned fork commit (mruby-expose-index-bodies, docs/patch-fork-tracking.md)\n"
     out << "extern \"C\" #{names.sort.map { |n| INTEGER_TAG_ELSE_BODIES.fetch(n)[1] }.map { |d| "#{d};" }.join("\nextern \"C\" ")}\n\n"
     out
   end

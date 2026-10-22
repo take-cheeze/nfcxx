@@ -481,35 +481,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       end
     VERIFY
   RUBY
-  # The generated C++ depends on this repo's own mruby patches, not just on
-  # upstream mruby: bc2cpp's VM_UNWIND_RESTORE helper reads
-  # `M->errinfo`/`M->errinfo_ci_depth`, which only patches/mruby-dollar-bang-
-  # scoped.patch adds to mrb_state (cmake/build-mruby.cmake applies it for the
-  # real build). Applying only the module-function patch -- what this used to
-  # do -- left `register.cxx` uncompilable ("'mrb_state' has no member named
-  # 'errinfo'"), so the probe could not link at all. Same set the real build
-  # uses, so the probe's mruby is the mruby bc2cpp is written against.
-  # mruby-vm-goto-table-void.patch: vm.c's computed-goto table is `const void *`; the C++ build (vm-cxx.cxx, EDG) needs
-  # `void *` for `goto *`. Same dispatch, only the element type changes.
-  # mruby-cxx-novolatile.patch: error.c's `volatile int err` in the C++ exception path; cproc (nfcxx's qbe backend)
-  # cannot store to a volatile object. The C++ exception path does not longjmp, so the volatile is not needed.
-  # mruby-rdata-ivar-slots.patch is required, not optional: without it the
-  # interpreted PPU reads embedded ivars out of an empty iv_tbl and crashes.
-  %w[
-    mruby-colon3-assign-setmcnst.patch
-    mruby-dollar-bang-scoped.patch
-    mruby-defined-keyword.patch
-    mruby-module-function-scope.patch
-    mruby-parser-dump-back-nth-ref.patch
-    mruby-nomemoryerror-reentrant-alloc.patch
-    mruby-gc-type-live-counts.patch
-    mruby-rdata-ivar-slots.patch
-    mruby-cxx-novolatile.patch
-    mruby-vm-goto-table-void.patch
-  ].each do |patch|
-    path = File.join(ROOT, 'patches', patch)
-    system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY, path, exception: true)
-  end
+  # The generated C++ depends on this repo's own mruby patches (M->errinfo for
+  # VM_UNWIND_RESTORE, the rdata ivar slots, the goto-table element type). They
+  # live in the pinned 3rd/mruby fork commit, so the probe builds that tree as
+  # pinned and applies nothing here.
   # nix's dev shell exports LD=ld, and mruby's Linker takes its command
   # straight from the environment (build/command.rb:193, `ENV['LD'] || 'ld'`).
   # Raw `ld` adds no -lc and no startfiles, so the host mrbc's link dies with

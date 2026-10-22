@@ -6,14 +6,15 @@
 # The RData ivar descriptor used to list boxed slots only, so a typed ivar was
 # invisible to instance_variable_get/set, instance_variables, inspect, Marshal
 # and dup: a read gave nil, a write went to a table nothing read. The
-# descriptor now lists every slot with its kind, and the runtime (patches/
-# mruby-rdata-ivar-slots.patch) boxes on read and type-checks on write.
+# descriptor now lists every slot with its kind, and the runtime (the
+# mruby-rdata-ivar-slots change in the pinned 3rd/mruby fork) boxes on read and
+# type-checks on write.
 #
 # A typed slot is also zeroed, so an ivar some path reads before #initialize
 # assigns it would read 0/false where an unset ivar reads nil; such an ivar
 # stays a boxed slot (ivar_assigned_before_exposure?).
 #
-# 1. Host only: the kind table covers every slot type, the patch declares the
+# 1. Host only: the kind table covers every slot type, the pinned mruby declares the
 #    same enumerators, and the generated descriptor lists typed slots.
 # 2. With MRBC, BC2CPP_MRUBY_CORE and g++: a fixture runs against the patched
 #    mruby through the C ivar API, interpreted and compiled.
@@ -33,16 +34,17 @@ end
 ROOT = File.expand_path('../..', __dir__)
 
 puts '-- kinds (host)'
-patch = File.read(File.join(ROOT, 'patches/mruby-rdata-ivar-slots.patch'))
+mruby = File.join(ROOT, '3rd/mruby')
+patch = File.read(File.join(mruby, 'include/mruby/data.h')) + File.read(File.join(mruby, 'src/gc.c'))
 check.call('every slot type has a descriptor kind', CodeGen::TYPE_OPS.keys.sort == CodeGen::RDATA_IVAR_KIND.keys.sort)
-check.call('the patch declares each kind the generator names',
-           CodeGen::RDATA_IVAR_KIND.values.all? { |kind| patch.include?("+  #{kind}") })
+check.call('the pinned mruby declares each kind the generator names',
+           CodeGen::RDATA_IVAR_KIND.values.all? { |kind| patch.include?("  #{kind}") })
 check.call('the value kind is the zero of the enum, so a two-field descriptor entry stays boxed',
-           patch.include?('+  MRB_DATA_IVAR_VALUE = 0,'))
+           patch.include?('  MRB_DATA_IVAR_VALUE = 0,'))
 check.call('the patch lays out the int-or-nil slot as the generator does',
-           patch.include?('+struct mrb_data_int_or_nil {') && patch.include?('+  mrb_bool present;') &&
-             patch.include?('+  mrb_int value;'))
-check.call('the patch tells the GC to skip typed slots', patch.include?('!= MRB_DATA_IVAR_VALUE) continue;'))
+           patch.include?('struct mrb_data_int_or_nil {') && patch.include?('  mrb_bool present;') &&
+             patch.include?('  mrb_int value;'))
+check.call('the pinned mruby tells the GC to skip typed slots', patch.include?('!= MRB_DATA_IVAR_VALUE) continue;'))
 
 if ENV['MRBC']
   require_relative 'fixture_runtime'

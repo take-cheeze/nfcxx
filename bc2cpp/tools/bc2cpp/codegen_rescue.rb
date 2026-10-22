@@ -279,7 +279,7 @@ class CodeGen
       next unless shared_i
       # DEFINED_CONST_RESCUE_SUPPORT: the success path must land on `STRING
       # R<exc_reg> L[n]` (codegen_defined_const's "constant" push,
-      # patches/mruby-defined-keyword.patch), which overwrites r<exc_reg>. That makes
+      # the pinned fork commit (mruby-defined-keyword, docs/patch-fork-tracking.md)), which overwrites r<exc_reg>. That makes
       # the try body's result dead on success; anything else is unverified.
       if handler[:kind] == :defined_const
         next unless shared_i.op == 'STRING' && shared_i.reg == exc_reg
@@ -506,7 +506,7 @@ class CodeGen
 
   # DEFINED_CONST_RESCUE_SUPPORT: the other shape behind a "catch type: rescue"
   # entry: this repo's `defined?(CONST)` / `defined?(A::B)` / `defined?(::B)`
-  # (patches/mruby-defined-keyword.patch; upstream codegen_defined returns nil).
+  # (the pinned fork commit (mruby-defined-keyword, docs/patch-fork-tracking.md); upstream codegen_defined returns nil).
   # It has no RESCUE and no RAISEIF, e.g. RPG2k::Scene::Map#try_open_debug_menu:
   #
   #   catch type: rescue   begin: 0051 end: 0057 target: 0060

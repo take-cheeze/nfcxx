@@ -378,7 +378,7 @@ class CodeGen
 
   RDATA_IVAR_HASH_EMPTY = 0xFFFF
 
-  # enum mrb_data_ivar_kind (patches/mruby-rdata-ivar-slots.patch) per TYPE_OPS key.
+  # enum mrb_data_ivar_kind (the pinned fork commit (mruby-rdata-ivar-slots, docs/patch-fork-tracking.md)) per TYPE_OPS key.
   RDATA_IVAR_KIND = {
     value: 'MRB_DATA_IVAR_VALUE', fixnum: 'MRB_DATA_IVAR_INT', symbol: 'MRB_DATA_IVAR_SYMBOL',
     bool: 'MRB_DATA_IVAR_BOOL', fixnum_nil: 'MRB_DATA_IVAR_INT_OR_NIL'
@@ -386,7 +386,7 @@ class CodeGen
 
   # RDATA_IVAR_HASH: open-addressing index (FNV-1a 32 of the "@name", linear
   # probing, half full) over a descriptor, so rdata_ivar_find in
-  # patches/mruby-rdata-ivar-slots.patch stops scanning every slot per access.
+  # the pinned fork commit (mruby-rdata-ivar-slots, docs/patch-fork-tracking.md) stops scanning every slot per access.
   def rdata_ivar_hash(names)
     raise "too many RData ivar slots (#{names.size})" if names.size >= RDATA_IVAR_HASH_EMPTY
 

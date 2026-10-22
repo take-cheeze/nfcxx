@@ -64,10 +64,10 @@ Getting there took:
    to load, for two regex-literal constants) -- solved by pulling in
    `3rd/mruby-onig-regexp`, which this project already vendors for its own
    build.
-4. **A real mruby core fix**, `../../patches/mruby-module-function-scope.patch`,
+4. **A real mruby core fix**, the pinned fork commit (mruby-module-function-scope),
    applied to `3rd/mruby` the same way (and with the same script,
-   `scripts/apply_mruby_patch.bash`) as this project's other
-   `patches/mruby-*.patch` files, and wired into the project's real build via
+   the pinned fork commit as this project's other
+   the pinned fork commits files, and wired into the project's real build via
    `cmake/build-mruby.cmake` -- this one is not probe-only. Bare
    `module_function` (the "everything defined from here on becomes a module
    function" scope form, called with no arguments) was a literal no-op stub
@@ -87,7 +87,7 @@ Getting there took:
    stub, since CRuby's true semantics require installing a *second* method
    (a public singleton copy) alongside the original, not just resolving one
    more visibility state.
-5. **A second real mruby core fix**, `../../patches/mruby-parser-dump-back-nth-ref.patch`,
+5. **A second real mruby core fix**, the pinned fork commit (mruby-parser-dump-back-nth-ref),
    also wired into `cmake/build-mruby.cmake`. `mrbc -v`'s own parse-tree dump
    printed garbage -- including, for optcarrot's real
    `lib/optcarrot/opt.rb:74` (`$1`/`$'`), an invalid UTF-8 byte -- for a
@@ -612,7 +612,7 @@ for `Array#last` reading a stale cached pointer from one `mrb_val_union(r3)`
 call while a different call for the identical `r3`, moments later, correctly
 returns the array's real, current pointer; that is a bc2cpp code-generation
 defect, not anything specific to Fiber adjacency, this repo's ivar-embedding
-work, or `patches/mruby-nomemoryerror-reentrant-alloc.patch` (checked and
+work, or the pinned fork commit (mruby-nomemoryerror-reentrant-alloc) (checked and
 ruled out, along with the pre-session `bc2cpp.rb`, as explained in
 `compiled_run.rb`'s own comment). `compiled_run.rb` now excludes
 `Optcarrot::CPU`/`NES`/`Video`/`APU` from `ONLY_OWNERS` too, alongside the
@@ -1308,8 +1308,8 @@ these.
 ## Files
 
 - `build_bundle.rb` -- assembles a single runnable mruby script: applies
-  `patches/mruby-module-function-scope.patch` to `3rd/mruby` (via
-  `scripts/apply_mruby_patch.bash`, idempotent -- a safety net; the real
+  the pinned fork commit (mruby-module-function-scope) to `3rd/mruby` (via
+  the pinned fork commit, idempotent -- a safety net; the real
   build order below applies it before building mruby, not after), then
   concatenates `3rd/optcarrot`'s 9 core files (in the real dependency order,
   `require_relative` lines stripped since the concatenation IS the loading)
@@ -1325,7 +1325,7 @@ these.
   source as its own closed world and prints the method-level coverage
   breakdown above (`MRBC=path/to/host/mrbc ruby
   tools/optcarrot_probe/bc2cpp_probe.rb`). Self-applies
-  `patches/mruby-parser-dump-back-nth-ref.patch` to `3rd/mruby` as a safety
+  the pinned fork commit (mruby-parser-dump-back-nth-ref) to `3rd/mruby` as a safety
   net, same caveat as `build_bundle.rb`'s own patch step (only actually
   fixes anything if MRBC hasn't been built yet from this checkout).
 - `mruby_build_config.rb` -- the `MRUBY_CONFIG` used to build a probe-only
@@ -1333,8 +1333,8 @@ these.
   part of the project's real build.
 - `compiled_run.rb` -- builds an isolated bc2cpp-enabled mruby and runs the
   headless checksum benchmark; build artifacts stay in a temporary directory.
-- `../../patches/mruby-module-function-scope.patch`,
-  `../../patches/mruby-parser-dump-back-nth-ref.patch` -- see points 4 and 5
+- the pinned fork commit (mruby-module-function-scope),
+  the pinned fork commit (mruby-parser-dump-back-nth-ref) -- see points 4 and 5
   above; both *are* part of the project's real build.
 
 ## Reproducing
@@ -1346,12 +1346,9 @@ git submodule update --init --depth 1 3rd/mruby 3rd/mruby-onig-regexp 3rd/optcar
 # Also needs gperf (the vendored mruby regenerates its keyword table with it)
 # and a C++ driver for the generated gem.
 
-# The probe applies the mruby patches its generated code needs itself (its
-# VM_UNWIND_RESTORE helper reads mrb_state::errinfo, which only
-# patches/mruby-dollar-bang-scoped.patch adds), so a bare host mrbc is enough
-# to RUN the bundle below; only the manual b/c2cpp runs need these two:
-./scripts/apply_mruby_patch.bash 3rd/mruby "$(pwd)/patches/mruby-module-function-scope.patch"
-./scripts/apply_mruby_patch.bash 3rd/mruby "$(pwd)/patches/mruby-parser-dump-back-nth-ref.patch"
+# 3rd/mruby is the pinned take-cheeze/mruby fork commit, which already carries
+# the mruby patches the generated code needs (docs/patch-fork-tracking.md), so
+# nothing is applied here.
 cd 3rd/mruby
 MRUBY_CONFIG=$(pwd)/../../tools/optcarrot_probe/mruby_build_config.rb rake -j"$(nproc)"
 cd -

@@ -5,7 +5,7 @@
 # when CallFacts::Answers says every class that can answer the name is one the helper has an arm for.
 #
 # The native bodies are static in mruby and read the CALLING frame (mrb_get_args), which a shared helper does not have;
-# patches/mruby-expose-index-bodies.patch exports each as a function that takes its arguments. The generator trusts an
+# the pinned fork commit (mruby-expose-index-bodies, docs/patch-fork-tracking.md) exports each as a function that takes its arguments. The generator trusts an
 # arm only after reading the sources the build compiles: the registration, the wrapper that calls the exported body,
 # and, where the arm calls a public function directly (Hash, String), the method body it stands for.
 class CodeGen
@@ -195,7 +195,7 @@ class CodeGen
     end
     return '' if decls.empty? && !helpers.include?('INDEX_CLOSED')
 
-    out = +"// INDEX_CLOSED (ADR 0365): exported by patches/mruby-expose-index-bodies.patch, or by mruby-rgss/src/lib.cxx.\n"
+    out = +"// INDEX_CLOSED (ADR 0365): exported by the pinned fork commit (mruby-expose-index-bodies, docs/patch-fork-tracking.md), or by mruby-rgss/src/lib.cxx.\n"
     decls.each { |decl, weak| out << "extern \"C\" #{weak}#{decl};\n" }
     out << "\n"
     out << INDEX_CLASS_PRELUDE if helpers.include?('bc2cpp_class_inherits(') || helpers.include?('bc2cpp_struct_class_p(')

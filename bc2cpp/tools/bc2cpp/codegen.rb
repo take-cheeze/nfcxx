@@ -499,7 +499,7 @@ class CodeGen
 
   # TYPED_SLOT_INTERPRETED_ACCESS: a method left on the interpreter reaches a
   # typed slot through the RData ivar descriptor, which boxes on every read and
-  # type-checks on every write (patches/mruby-rdata-ivar-slots.patch). Such an
+  # type-checks on every write (the pinned fork commit (mruby-rdata-ivar-slots, docs/patch-fork-tracking.md)). Such an
   # ivar stays a plain :value slot instead.
   def demote_typed_ivars_read_by_interpreter(layout)
     typed = layout.flat_map { |owner, ivars| ivars.filter_map { |name, type| [owner, name] if type != :value } }

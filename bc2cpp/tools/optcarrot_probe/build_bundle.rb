@@ -37,8 +37,6 @@ ROOT = File.expand_path('../..', __dir__)
 PROBE_DIR = __dir__
 OPTCARROT_DIR = File.join(ROOT, '3rd/optcarrot')
 MRUBY_DIR = File.join(ROOT, '3rd/mruby')
-MODFUNC_PATCH = File.join(ROOT, 'patches/mruby-module-function-scope.patch')
-APPLY_SCRIPT = File.join(ROOT, 'scripts/apply_mruby_patch.bash')
 
 out_file = ARGV[0] or abort "usage: #{$PROGRAM_NAME} OUT_FILE"
 
@@ -50,7 +48,6 @@ unless Dir.exist?(File.join(MRUBY_DIR, 'include'))
   abort "#{MRUBY_DIR} is empty -- run `git submodule update --init 3rd/mruby` first"
 end
 
-system(APPLY_SCRIPT, MRUBY_DIR, MODFUNC_PATCH, exception: true)
 
 # Real require_relative order from 3rd/optcarrot/lib/optcarrot.rb, with
 # opt.rb spliced in where cpu.rb's and ppu.rb's own require_relative "opt"

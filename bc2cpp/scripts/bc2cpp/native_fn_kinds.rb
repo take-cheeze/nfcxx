@@ -29,7 +29,6 @@ module NativeFnKinds
   JOBS_ENV = 'BC2CPP_TABLE_JOBS'
   # A worker's peak is ~2 GB on the largest source (mruby-rgss/src/lib.cxx), so four fit where the CPUs do.
   DEFAULT_JOBS = [Etc.nprocessors, 4].min
-  PATCH_LIST = File.join(BaseRbsAll::ROOT, 'scripts', 'mruby', 'standalone_prep.bash')
 
   module_function
 
@@ -43,22 +42,15 @@ module NativeFnKinds
     (base + BaseRbsAll.closed_native_sources).uniq.sort.map { |path| [path, BaseRbsAll.source_flags(path, closed_build)] }
   end
 
-  # The mruby patches standalone_prep.bash applies to 3rd/mruby, by name. The sources must carry them: the closed build
-  # compiles the patched tree, and an unpatched tree parses differently (symbol.c's table, profiler.cxx's counters).
-  def mruby_patch_names
-    text = File.read(PATCH_LIST, encoding: 'UTF-8')
-    listed = text[/for p in (.*?); do/m, 1] or raise "no mruby patch list in #{PATCH_LIST}"
-    listed.delete('\\').split
-  end
-
-  # The patches that are not applied. The test is the one apply_mruby_patch.bash makes (GNU patch, reverse dry run): a
-  # patch that applies in reverse is in the tree, offsets and fuzz included.
+  # The mruby checkout must be the commit the superproject pins: the pinned fork commit carries every patch the closed
+  # build needs, so an unpinned tree parses differently (symbol.c's table, profiler.cxx's counters). Returns the
+  # mismatch as a message, or nothing.
   def missing_patches
-    mruby = BaseRbsAll::MRUBY_ROOT
-    mruby_patch_names.reject do |name|
-      patch = File.join(BaseRbsAll::ROOT, 'patches', "#{name}.patch")
-      system('patch', '-p1', '-R', '-N', '--dry-run', '-s', in: patch, chdir: mruby, out: File::NULL, err: File::NULL)
-    end
+    pinned = `git -C #{BaseRbsAll::ROOT} ls-files -s 3rd/mruby`.split[1]
+    head = `git -C #{BaseRbsAll::MRUBY_ROOT} rev-parse HEAD`.strip
+    return [] if pinned == head
+
+    ["3rd/mruby at #{head[0, 7]}, expected the pinned #{pinned.to_s[0, 7]}"]
   end
 
   # Digest of the analyzer's own sources: a change to the analysis invalidates every cached result.
@@ -129,7 +121,7 @@ module NativeFnKinds
   def run(closed_build, cache_dir:)
     missing = missing_patches
     unless missing.empty?
-      raise "mruby patches not applied: #{missing.join(', ')} (run scripts/bc2cpp/closed_build.bash, which applies them)"
+      raise "mruby checkout is not the pinned fork commit: #{missing.join(', ')} (run git submodule update --init 3rd/mruby)"
     end
 
     FileUtils.mkdir_p(cache_dir)
