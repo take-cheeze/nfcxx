@@ -89,11 +89,94 @@ BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_G
 # that no compiled gem emits, so an Object owner would claim them). A class
 # also owned by an engine gem (Array, StringIO) is split per definition by
 # source file: see emit_unit in bc2cpp.rb.
-BC2CPP_CORE_OWNERS = %w[
-  Array Comparable Dir Dir.singleton Enumerable Enumerator Enumerator::Generator
-  Enumerator::Yielder File File.singleton Float Hash IO IO.singleton Integer Kernel Numeric
-  OnigMatchData OnigRegexp OnigRegexp.singleton Range String StringIO StringIO.singleton Struct Symbol
-].freeze
+# The classes core sources define methods on, read from the sources: the Ruby defs of the core and
+# external mrblib files (the owners mruby-core-compiled emits), and the C definitions of mruby's src/
+# and the core mrbgems' C, literal registrations and ROM tables alike (ADR 0264). Object is left out:
+# mruby-rpg2k/mrblib/main.rb defines engine methods on it that no compiled gem emits, so an Object owner
+# would claim them. A class also owned by an engine gem (Array, StringIO) is split per definition by
+# source file: see emit_unit in bc2cpp.rb.
+require 'prism'
+BC2CPP_OWNER_SOURCE_ROOT = File.expand_path('../../3rd', __dir__).freeze
+# mrb->X_class fields that core binds to a named class.
+BC2CPP_STATE_CLASS_FIELDS = {
+  'object_class' => 'Object', 'basic_class' => 'BasicObject', 'module_class' => 'Module', 'class_class' => 'Class',
+  'kernel_module' => 'Kernel', 'comparable_module' => 'Comparable', 'enumerable_module' => 'Enumerable',
+  'proc_class' => 'Proc', 'string_class' => 'String', 'array_class' => 'Array', 'hash_class' => 'Hash',
+  'float_class' => 'Float', 'integer_class' => 'Integer', 'symbol_class' => 'Symbol', 'range_class' => 'Range',
+  'nil_class' => 'NilClass', 'true_class' => 'TrueClass', 'false_class' => 'FalseClass',
+  'exception_class' => 'Exception', 'numeric_class' => 'Numeric', 'fiber_class' => 'Fiber',
+}.freeze
+
+def bc2cpp_mrblib_files(gem)
+  roots = [File.join(BC2CPP_OWNER_SOURCE_ROOT, 'mruby/mrbgems', gem), File.join(BC2CPP_OWNER_SOURCE_ROOT, gem)]
+  roots.flat_map { |root| Dir[File.join(root, '**/mrblib/**/*.rb')] }.sort
+end
+
+# Owners of Ruby definitions: a `def` directly in a class, module or `class << self` body, or `def self.`.
+def bc2cpp_ruby_definition_owners
+  owners = Set.new
+  (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).each do |gem|
+    bc2cpp_mrblib_files(gem).each do |path|
+      next if BC2CPP_CORE_MRBLIB_EXCLUDED.any? { |excluded| path.end_with?(excluded) }
+
+      walk = lambda do |node, scope, singleton|
+        next unless node
+
+        case node
+        when Prism::ClassNode, Prism::ModuleNode
+          walk.(node.body, scope + [node.constant_path.slice], false)
+        when Prism::SingletonClassNode
+          walk.(node.body, scope, true) if node.expression.is_a?(Prism::SelfNode) && !scope.empty?
+        when Prism::DefNode
+          if node.receiver.nil?
+            owners << (singleton ? "#{scope.join('::')}.singleton" : scope.join('::')) unless scope.empty?
+          elsif node.receiver.is_a?(Prism::SelfNode) && !scope.empty?
+            owners << "#{scope.join('::')}.singleton"
+          elsif node.receiver.is_a?(Prism::ConstantReadNode) || node.receiver.is_a?(Prism::ConstantPathNode)
+            owners << "#{node.receiver.slice}.singleton"
+          end
+        else
+          node.compact_child_nodes.each { |child| walk.(child, scope, singleton) }
+        end
+      end
+      walk.(Prism.parse(File.read(path)).value, [], false)
+    end
+  end
+  owners
+end
+
+# Owners of C definitions: the class each mrb_define_method* / mrb_define_class_method* / ROM table
+# (MRB_MT_INIT_ROM) is bound to, resolved through the variable that holds the class.
+def bc2cpp_c_definition_owners
+  owners = Set.new
+  c_files = Dir[File.join(BC2CPP_OWNER_SOURCE_ROOT, 'mruby/src/*.c')] +
+            BC2CPP_CORE_MRBLIB_GEMS.flat_map { |gem| Dir[File.join(BC2CPP_OWNER_SOURCE_ROOT, 'mruby/mrbgems', gem, '**/*.c')] }
+  c_files.reject { |path| path =~ %r{test|\.orig} }.sort.each do |path|
+    src = File.read(path, encoding: 'BINARY')
+    bound = {}
+    src.scan(/\b(\w+)\s*=\s*mrb_define_(?:class|module)(?:_id|_under|_under_id)?\s*\(\s*mrb\s*,\s*(?:\w+\s*,\s*)?(?:"(\w+)"|MRB_SYM\((\w+)\))/) do |var, literal, sym|
+      bound[var] = literal || sym
+    end
+    src.scan(/\b(\w+)\s*=\s*mrb_(?:class|module)_get(?:_id)?\s*\(\s*mrb\s*,\s*"(\w+)"/) { |var, name| bound[var] ||= name }
+    resolve = lambda do |ref|
+      field = ref[/\Amrb->(\w+)\z/, 1]
+      field ? BC2CPP_STATE_CLASS_FIELDS[field] : bound[ref]
+    end
+    src.scan(/MRB_MT_INIT_ROM\(\s*mrb\s*,\s*([\w>-]+)\s*,/) do |(ref)|
+      owners << resolve.(ref) if resolve.(ref)
+    end
+    src.scan(/mrb_define_(?:method|method_id|method_raw|module_function|module_function_id)\s*\(\s*mrb\s*,\s*([\w>-]+)\s*,/) do |(ref)|
+      owners << resolve.(ref) if resolve.(ref)
+    end
+    src.scan(/mrb_define_(?:class_method|class_method_id)\s*\(\s*mrb\s*,\s*([\w>-]+)\s*,/) do |(ref)|
+      owners << "#{resolve.(ref)}.singleton" if resolve.(ref)
+    end
+  end
+  owners
+end
+
+# Sorted, so the list does not depend on the order the sources happen to be read in.
+BC2CPP_CORE_OWNERS = (bc2cpp_ruby_definition_owners + bc2cpp_c_definition_owners - %w[Object]).to_a.sort.freeze
 BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
 require 'prism'
