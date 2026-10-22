@@ -7,7 +7,7 @@ require_relative 'bytecode_ir'
 require_relative 'foreign_definers'
 require_relative 'core_hierarchy_sigs'
 
-# CALL_FACTS (ADR 0317): what a call that returned normally says about its receiver.
+# CALL_FACTS: what a call that returned normally says about its receiver.
 #
 # After `r.m(...)` returns, the object in `r` answered `m`, so a later use of the same value (a copy of
 # the register, a local) can only be an instance of a class that answers `m`. Flow is the forward "must"

@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Debug report for the shared escape analysis (ADR 0316): with BC2CPP_ESCAPE_REPORT=<path>, every
+# Debug report for the shared escape analysis: with BC2CPP_ESCAPE_REPORT=<path>, every
 # creation site in the closed world (LAMBDA, BLOCK, ARRAY, HASH, STRING, `new`) and every `initialize`
 # gets one TSV row. It changes no generated code; scripts/bc2cpp/escape_report.rb aggregates it.
 #

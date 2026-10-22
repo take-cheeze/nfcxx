@@ -137,7 +137,7 @@ class ClosedWorld
   # when the receiver is its `self`; `installed` is CodeGen#symbol_installed_names.
   # INSTANCE_RECEIVER (ADR 0302): `instances` names the exact classes the exact-class flow proves
   # the receiver holds (nil allowed), none a class or module object (CodeGen#receiver_instances).
-  # CALL_FACTS (ADR 0317): `scoped` says `instances` is the whole receiver set, so only its classes need an
+  # CALL_FACTS: `scoped` says `instances` is the whole receiver set, so only its classes need an
   # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
   def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
               instance_scope: false, singleton_arms: nil)
@@ -173,7 +173,7 @@ class ClosedWorld
     @unknown_defs.include?(name) || @outside_ruby_names.include?(name) || @outside_names.include?(name)
   end
 
-  # ESCAPE_ANALYSIS (ADR 0316): can an installer the registry cannot enumerate (computed names) define
+  # ESCAPE_ANALYSIS: can an installer the registry cannot enumerate (computed names) define
   # +name+? Outside Ruby sources are judged by the caller, which knows which ones it compiled itself.
   def unknown_definer?(name)
     @global_refusal ? true : @unknown_defs.include?(name)
@@ -281,7 +281,7 @@ class ClosedWorld
     !@global_refusal && !@dynamic_constant_mutation && class_constant?(name)
   end
 
-  # CALL_FACTS (ADR 0317): the classes (never modules) the closed world declares.
+  # CALL_FACTS: the classes (never modules) the closed world declares.
   def declared_class_names
     @class_decls.keys.select { |k| !k.include?('.') && !k.include?('<') }
   end
