@@ -31,6 +31,9 @@ module NativeAstReturns
   # returns the class path as a String, and builds the "#<Class:...>" String itself when mrb_class_path is nil; the
   # other mrb_class_path branches (mrb_sym_str, mrb_str_dup) are Strings. So Module#to_s is a String.
   CONTRACT_KINDS = { 'class_name_str' => 'String' }.freeze
+  # mrb_obj_class returns mrb_class_real(...) (class.c), a real class with no singleton or iclass wrapper, so
+  # mrb_obj_value of its result is a Class whatever the receiver is (Kernel#class, kernel.c mrb_obj_class_m).
+  REAL_CLASS_FNS = %w[mrb_obj_class].freeze
 
   module_function
 
@@ -536,6 +539,7 @@ module NativeAstReturns
       when 'CallExpr'
         callee = callee_name(expr) or return nil
         return CONTRACT_KINDS[callee] if CONTRACT_KINDS.key?(callee)
+        return 'Class' if callee == 'mrb_obj_value' && real_class_call?(expr['inner'][1])
 
         # A callee that returns its self parameter yields the argument passed for it: the CallExpr's children are the
         # callee, then the arguments, so parameter N is argument N + 1.
@@ -616,6 +620,12 @@ module NativeAstReturns
       callee = callee['inner'].first while callee && callee['inner'] && callee['kind'] != 'DeclRefExpr'
       decl = callee && callee['referencedDecl']
       decl && decl['kind'] == 'FunctionDecl' ? decl['name'] : nil
+    end
+
+    # Whether +node+ is a call to a REAL_CLASS_FNS function, through any casts.
+    def real_class_call?(node)
+      node = NativeAstReturns.strip(node)
+      node && node['kind'] == 'CallExpr' && REAL_CLASS_FNS.include?(callee_name(node))
     end
   end
 
