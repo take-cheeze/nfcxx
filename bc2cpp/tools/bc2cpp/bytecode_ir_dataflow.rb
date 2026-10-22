@@ -112,10 +112,12 @@ module BytecodeIR
       end
 
       @reaching_definitions_cache ||= {}
-      opaque_key = opaque_regs&.map { |r| r.dup.freeze }&.sort&.freeze
-      key = [index, reg.to_s.dup.freeze, opaque_key, follow_moves, max_states, through_handlers, origin_transfers,
-             raiseif_nil]
+      @compact_dataflow_keys = ENV['BC2CPP_IR_QUERY_KEYS'] != '0' if @compact_dataflow_keys.nil?
+      opaque_key = reaching_opaque_key(opaque_regs)
+      key = [index, @compact_dataflow_keys ? reg.to_s : reg.to_s.dup.freeze, opaque_key, follow_moves, max_states,
+             through_handlers, origin_transfers, raiseif_nil]
       unless @reaching_definitions_cache.key?(key)
+        key[1] = key[1].dup.freeze if @compact_dataflow_keys
         result = compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
                                              max_states: max_states, through_handlers: through_handlers,
                                              origin_transfers: origin_transfers, raiseif_nil: raiseif_nil)
@@ -130,6 +132,23 @@ module BytecodeIR
       end
       @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg.dup, d.built) }
     end
+
+    # Only deeply immutable Sets can reuse a snapshot by identity. Other frozen containers may still hold mutable strings.
+    def reaching_opaque_key(opaque_regs)
+      return nil unless opaque_regs
+      return opaque_regs.map { |r| r.dup.freeze }.sort.freeze unless @compact_dataflow_keys
+
+      @opaque_reg_keys ||= {}.compare_by_identity
+      return @opaque_reg_keys[opaque_regs] if @opaque_reg_keys.key?(opaque_regs)
+
+      key = opaque_regs.map { |r| r.dup.freeze }.sort.freeze
+      if @opaque_reg_keys.size < DATAFLOW_CACHE_SIZE && opaque_regs.instance_of?(Set) && opaque_regs.frozen? &&
+         opaque_regs.all? { |register| register.is_a?(String) && register.frozen? }
+        @opaque_reg_keys[opaque_regs] = key
+      end
+      key
+    end
+    private :reaching_opaque_key
 
     def compute_reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
                                      through_handlers: false, origin_transfers: false, refusal: nil, raiseif_nil: false)
