@@ -4,9 +4,8 @@
 # ARM_PRUNE (tools/bc2cpp/codegen_arm_prune.rb). Stage A counts the instructions no edge reaches, in a graph where a
 # decided jump keeps only its taken edge, and leaves the C++ unchanged. Stage B (BC2CPP_PRUNE_ARMS=1) drops that text
 # from a method it can prove safe. The fixture has two instructions the decided folds make unreachable (`r += 1 if y`
-# with y nil, and the jump that skips it). Stage B needs register flow off (BC2CPP_REGISTER_FLOW=0), because a method
-# that register flow captures is refused, so the check sets it for its own compiles. Needs MRBC; without it the check
-# prints SKIP and exits 0.
+# with y nil, and the jump that skips it). The check sets BC2CPP_REGISTER_FLOW=0 for its own compiles; the flow-on
+# compiles are in arm_prune_capture_check.rb. Needs MRBC; without it the check prints SKIP and exits 0.
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/arm_prune_check.rb
 

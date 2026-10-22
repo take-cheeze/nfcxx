@@ -245,6 +245,7 @@ module ParamTrace
       #include <mruby/value.h>
       #include <mruby/array.h>
       #include <mruby/hash.h>
+      #include "mrb_array_access.hxx"
       #define BC2CPP_PARAM_TRACE_MAX_CLASSES #{MAX_CLASSES}
       #define BC2CPP_ELEM_SAMPLE 8
       struct bc2cpp_param_cls_#{id} { struct RClass* real; char* name; unsigned long long count; };

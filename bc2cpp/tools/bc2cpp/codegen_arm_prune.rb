@@ -118,15 +118,22 @@ class CodeGen
     (0...insns.size).to_set - seen
   end
 
-  # Stage B's decision for the text it held back: true when the pruned text may be dropped. A declaration in it would be
-  # a name live code could still use, so the method is kept whole.
-  def arm_prune_resolve(out, texts)
+  # Stage B's decision for the held-back texts +texts+ ({ index => text }): true when they may be dropped, and counted
+  # as dropped. A declaration in them would be a name live code could still use, so the method keeps them.
+  def arm_prune_decide(texts)
     if texts.values.any? { |text| arm_prune_declares_outside_block?(text) }
       arm_prune_refuse(:declaration)
-      return out.gsub(ARM_PRUNE_MARKER) { texts.fetch(Regexp.last_match(1).to_i) }
+      return false
     end
 
     self.class.arm_prune_stats[:dropped] += texts.size
+    true
+  end
+
+  # Stage B on a marker-based body: the held-back texts are dropped from +out+, or restored in place when refused.
+  def arm_prune_resolve(out, texts)
+    return out.gsub(ARM_PRUNE_MARKER) { texts.fetch(Regexp.last_match(1).to_i) } unless arm_prune_decide(texts)
+
     out.gsub(ARM_PRUNE_MARKER, '')
   end
 
