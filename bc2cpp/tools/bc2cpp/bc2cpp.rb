@@ -48,7 +48,6 @@ require_relative 'proven_miss_reviewed'
 require_relative 'strict_hints'
 require_relative 'predicate_returns'
 require_relative 'conversion_returns'
-require_relative 'hot_methods'
 require_relative 'core_methods'
 require_relative 'core_fact_sigs'
 require_relative 'enumerator_model'
@@ -404,21 +403,6 @@ if $PROGRAM_NAME == __FILE__
     warn "  #{mono ? 'MONO' : 'POLY'}  :#{name}  (#{defs.size} def#{'s' unless defs.size == 1}: #{owners})"
   end
 
-  # HOT_ONLY (ADR 0214): set before the first CodeGen, since the probes' embedding
-  # and return proofs depend on which bodies compile. Every gem's run reads the
-  # same list and registry, so all agree on which `_impl`s exist.
-  if ENV['BC2CPP_HOT_METHODS']
-    hot_methods = HotMethods.load(ENV['BC2CPP_HOT_METHODS'])
-    CodeGen.hot_only_excluded = HotMethods.excluded_labels(registry, hot_methods)
-    # A core method that is compiled without being a registry definition is excluded like any other.
-    core_hidden_defs.each { |d| CodeGen.hot_only_excluded << d.irep unless hot_methods.include?(HotMethods.key(d)) }
-    bytecode_methods = registry.values.flatten.count(&:irep)
-    warn ''
-    warn "== hot-only (BC2CPP_HOT_METHODS): #{hot_methods.size} listed, #{CodeGen.hot_only_excluded.size} of " \
-         "#{bytecode_methods} bytecode methods excluded =="
-    HotMethods.stale(registry, hot_methods).each { |k| warn "  STALE #{k}" }
-  end
-
   # CORE_METHODS (ADR 0264): what the core mrblib did to the registry, once. Keyed on the
   # definition's source file, so a fixture that reopens a core class is not affected.
   if core_bytecode.positive? || !core_shadowed.empty?
@@ -468,9 +452,8 @@ if $PROGRAM_NAME == __FILE__
     CodeGen.declared_returns = DeclaredReturns.from_signatures(sig_loaded, ireps, registry)
     CodeGen.declared_return_root = sig_root
     # DECLARED_RETURN_GUARD: a runtime-checked declaration (%a{bc2cpp:hint}) is a fact only because its compiled body
-    # checks every return, so its body compiles in a hot-only build too, and one no body can carry is an error.
+    # checks every return, and one no body can carry is an error.
     CodeGen.declared_return_hint_refusals = DeclaredReturns.hint_refusals(sig_loaded, ireps, registry)
-    CodeGen.declared_returns.select(&:hint).each { |e| CodeGen.hot_only_excluded&.delete(e.label) }
     # BLOCK_RETURNS (ADR 0475): `[T] ... { ... -> T } -> T` and `{ ... } -> self` declarations, checked with them.
     CodeGen.block_returns = BlockReturns.from_signatures(sig_loaded)
     warn '== signature files (RBS_SIGNATURES) =='
@@ -1406,19 +1389,6 @@ if $PROGRAM_NAME == __FILE__
     report.each { |l| warn "  #{l}" }
   end
 
-  # HOT_ONLY: listed methods that still did not compile run as bytecode; name
-  # them so a profile regeneration can see it.
-  if hot_methods
-    compiled_keys = compiled.to_set { |m| "#{m[:owner]}##{m[:name]}" }
-    lost = registry.values.flatten.select do |d|
-      d.irep && (!only_owners || only_owners.include?(d.owner)) && hot_methods.include?(HotMethods.key(d)) &&
-        !compiled_keys.include?(HotMethods.key(d))
-    end
-    warn ''
-    warn "== hot-only: listed but not compiled (#{lost.size}) =="
-    lost.map { |d| HotMethods.key(d) }.uniq.sort.each { |k| warn "  NOT_COMPILED #{k}" }
-  end
-
   CompactOutput.capture_stdout unless annotated
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
@@ -1903,7 +1873,6 @@ if $PROGRAM_NAME == __FILE__
   gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
-  print gen.emit_hot_only_registration_stubs(compiled, only_owners: only_owners)
   # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method
   # that compiles only when the closed world proves a fact a desktop build lacks (ADR 0426). It guards such a
   # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.

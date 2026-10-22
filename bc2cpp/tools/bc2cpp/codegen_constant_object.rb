@@ -29,7 +29,7 @@ class CodeGen
     return argc_error if argc_error
 
     return nil unless pure_mandatory_or_optional_arity?(irep) && n.between?(mandatory_arity(irep), mandatory_arity(irep) + optional_arity(irep))
-    return nil if hot_only_excluded?(label) || !constant_object_candidate_clean?(label)
+    return nil unless constant_object_candidate_clean?(label)
     return nil if copied && !module_function_copy_self_safe?(irep, candidate.copy_owner)
     return nil unless !@only_owners || @only_owners.include?(singleton_owner) || @other_owners&.include?(singleton_owner)
 

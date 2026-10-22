@@ -501,7 +501,7 @@ class CodeGen
     target = (@registry[name] || []).find do |definition|
       definition.owner == owner && definition.irep == copy.copy_irep
     end
-    return nil unless target && !hot_only_excluded?(copy.copy_irep)
+    return nil unless target
     return nil if devirt_blocked_name?(name)
 
     target
@@ -724,7 +724,7 @@ class CodeGen
   # target is statically the module's own method on the receiver's own class, so
   # reaching the body does not bypass that check for any other receiver.
   def module_super_body_usable?(label)
-    return false if hot_only_excluded?(label) || resumable_method?(label)
+    return false if resumable_method?(label)
     return true unless self.class.core_guarded&.include?(label)
 
     core_body_relaxable?(label)

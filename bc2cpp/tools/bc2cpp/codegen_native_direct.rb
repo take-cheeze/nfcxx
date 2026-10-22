@@ -104,7 +104,10 @@ module NativeDirectFallback
     return false if registered.nil? || registered.empty?
 
     ruby_owned = @registry.fetch(name, []).reject { |definition| definition.owner == '<native>' }.map(&:owner)
-    registered.all? { |owner| specs.key?(owner) && (covered.include?(owner) || ruby_owned.include?(owner)) } &&
+    # A module_function also answers on the module object (`Graphics.update`), which no class-level arm names: the
+    # chain's else still reaches that receiver, so its fallback cannot be the proven-dead raise.
+    registered.none? { |owner| owner.end_with?('.singleton') } &&
+      registered.all? { |owner| specs.key?(owner) && (covered.include?(owner) || ruby_owned.include?(owner)) } &&
       @closed_world.native_only_in?(name, '/mruby-rgss/src/') &&
       @closed_world.native_subclass_free?(registered.to_a)
   end

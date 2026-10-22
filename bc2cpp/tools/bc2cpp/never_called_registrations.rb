@@ -40,15 +40,13 @@ module NeverCalledRegistrations
   end
 
   # Same run as `run_bc2cpp`, returning [generated C++ (stdout), stderr].
-  # `hot_methods`: a hot-only build's list (ADR 0214). nil runs the full compile
-  # and clears any inherited BC2CPP_HOT_METHODS, so these analyses never see one.
-  def run_bc2cpp_full(gem_name, repo_root, mrbc, hot_methods: nil)
-    run_bc2cpp_full_many([gem_name], repo_root, mrbc, hot_methods: hot_methods).fetch(gem_name)
+  def run_bc2cpp_full(gem_name, repo_root, mrbc)
+    run_bc2cpp_full_many([gem_name], repo_root, mrbc).fetch(gem_name)
   end
 
   # run_bc2cpp_full for several gems: { gem_name => [stdout, stderr] }. The runs differ only in which owners they
   # emit, so they share one analysis (SHARED_GENERATION, ADR 0464): what each returns is what its own run returns.
-  def run_bc2cpp_full_many(gem_names, repo_root, mrbc, hot_methods: nil)
+  def run_bc2cpp_full_many(gem_names, repo_root, mrbc)
     return {} if gem_names.empty?
 
     gem_names.each do |gem_name|
@@ -56,8 +54,7 @@ module NeverCalledRegistrations
 
       raise "never_called_registrations: no such compiled gem #{gem_name.inspect} in tools/bc2cpp/compiled_gems.rb"
     end
-    # A hot-only build's world holds no core Ruby (compiled_gems.rb bc2cpp_closed_world_srcs).
-    closed_world_srcs = closed_world_mrblib_srcs(repo_root, core_gems: hot_methods ? nil : :canonical)
+    closed_world_srcs = closed_world_mrblib_srcs(repo_root, core_gems: :canonical)
     # The canonical, target-independent native source set (as in
     # the wired-embedding registration above): every target
     # shares one register.cxx per gem, so a target-specific set would make one
@@ -76,7 +73,6 @@ module NeverCalledRegistrations
         'NATIVE_SRCS' => Shellwords.join(native_srcs),
         'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_ruby_srcs),
         'SKIP_UNSUPPORTED' => '1',
-        'BC2CPP_HOT_METHODS' => hot_methods,
       }
       units = gem_names.map do |gem_name|
         dir = FileUtils.mkdir_p(File.join(tmp, gem_name)).first

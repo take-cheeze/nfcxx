@@ -289,7 +289,6 @@ module BlockCoreDirectFallback
   # compiles_clean? for a body whose entry carries the ADR 0269 guard: the guard is why that
   # predicate says no, and the arms above supply it.
   def block_core_clean?(label)
-    return false if hot_only_excluded?(label)
     return @clean_cache[label] if @clean_cache.key?(label)
     return false if @probing.include?(label)
 

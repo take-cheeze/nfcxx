@@ -81,6 +81,8 @@ class ClosedWorld
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
+    # Names a native module_function or singleton method defines: a constant receiver answers them (Graphics.update).
+    @native_singleton_names = Set.new
     @native_tokens = Set.new
     @native_other_literals = Set.new
     @ruby_tokens = {}
@@ -142,6 +144,7 @@ class ClosedWorld
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
+    return :core_or_native if @native_singleton_names.include?(name)
     return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) &&
                               @outside_owner_name != name && !(scoped && native_free)
 
@@ -413,7 +416,7 @@ class ClosedWorld
   end
 
   # STRICT_HINTS (ADR 0428): does a KNOWN receiver outside `listed` answer `name`? A definer the registry has
-  # but the chain does not list (uncompiled, excluded by a hot-only build, an embedded accessor, a subclass), a
+  # but the chain does not list (uncompiled, an embedded accessor, a subclass), a
   # core or native definer, or a module's singleton definition (a class or module object is the receiver)
   # reaches the else arm of a candidate-set chain in a correct program, so the set is incomplete by design and
   # the arm is not a wrong hint.
@@ -883,6 +886,7 @@ class ClosedWorld
     file.fetch(:plain_class_defines).each { |name| @outside_plain_class_defines[name] += 1 }
     @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
     @outside_names.merge(file.fetch(:names))
+    @native_singleton_names.merge(file.fetch(:singleton_names))
     file.fetch(:names).each { |n| (@outside_name_paths[n] ||= Set.new) << path }
     file.fetch(:refusals).each { |reason| global!(reason) }
     @clone_sent = true if file.fetch(:clone_sent)
@@ -904,6 +908,7 @@ class ClosedWorld
       tok.start_with?('/') ? ' ' : tok
     end
     names = Set.new
+    singleton_names = Set.new
     constant_writes = []
     plain_class_defines = []
     dynamic_constant_mutation = false
@@ -948,6 +953,8 @@ class ClosedWorld
       end
       names.merge(literals)
       names.merge(tokens)
+      # A method on the object itself (module_function, class and singleton methods): a constant receiver answers it.
+      singleton_names.merge(literals) if kind.match?(/\A(?:module_function|class_method|singleton_method)/)
       # The name argument (after mrb and the class) must be spelled out.
       args = bc2cpp_c_call_args(body)
       [args[2], (args[3] if kind == 'alias')].compact.each do |arg|
@@ -972,6 +979,7 @@ class ClosedWorld
       plain_class_defines: plain_class_defines,
       dynamic_constant_mutation: dynamic_constant_mutation,
       names: names.to_a,
+      singleton_names: singleton_names.to_a,
       refusals: refusals,
       clone_sent: !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING),
       freeze_possible: !path.match?(NATIVE_CORE) && text.match?(NATIVE_FREEZE),

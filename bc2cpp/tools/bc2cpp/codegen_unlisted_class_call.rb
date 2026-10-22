@@ -111,7 +111,7 @@ class CodeGen
     argc_error = static_argc_error_code(target, irep, n, d)
     return argc_error if argc_error
 
-    return nil unless poly_arity_fits?(irep, n, true) && !hot_only_excluded?(target.irep) && compiles_clean?(target.irep)
+    return nil unless poly_arity_fits?(irep, n, true) && compiles_clean?(target.irep)
     return nil unless !@only_owners || @only_owners.include?(target.owner) || @other_owners&.include?(target.owner)
 
     impl = cpp_name(target.owner, target.name) + '_impl'

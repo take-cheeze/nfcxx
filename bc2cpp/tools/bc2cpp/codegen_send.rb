@@ -1952,18 +1952,6 @@ class CodeGen
       singleton_arms, singleton_branches = arms
       reason = refuse.call(listed, singleton_arms)
     end
-    extra_branches = ''
-    if reason == :unlisted_class
-      extra = unlisted_class_guards(name, listed, site, singleton_arms)
-      if extra
-        extra_branches = extra.map do |klass|
-          arm = unlisted_class_call(klass, name, d, recv, argv, site)&.chomp&.gsub("\n", "\n      ") || dispatch.chomp
-          "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{arm}\n    } else "
-        end.join
-        listed += extra
-        reason = refuse.call(listed, singleton_arms)
-      end
-    end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
@@ -1971,7 +1959,7 @@ class CodeGen
     # to hold every such site to its source-line annotation (ADR 0226).
     marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?, site: insn_source_site)
     error = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
-    extra_branches = singleton_branches + extra_branches
+    extra_branches = singleton_branches
     return error if extra_branches.empty?
 
     "#{extra_branches}{\n      #{error.chomp}\n    }\n"
@@ -1982,7 +1970,7 @@ class CodeGen
   # nil when any singleton definer cannot be called directly (constant_object_send_code also proves the
   # singleton chain free of mixins and the name unrebound).
   def singleton_arm_branches(name, d, recv, argv)
-    return nil if hot_only_active? || ENV['BC2CPP_SINGLETON_ARMS'] == '0'
+    return nil if ENV['BC2CPP_SINGLETON_ARMS'] == '0'
 
     modules = @closed_world.singleton_arm_modules(name)
     return nil if modules.nil? || modules.size > UNLISTED_CLASS_GUARDS_MAX
@@ -2078,29 +2066,7 @@ class CodeGen
                      guarded: true) == owner
   end
 
-  # UNLISTED_CLASS_GUARDS: a definer class the chain leaves out (its definition
-  # is not a direct-call candidate: arity, unclean body, ...) still answers the
-  # name, so it gets its own exact-class branch that dispatches; the remaining
-  # `else` is then provably an error. Only for declared, stable classes (a
-  # module owner has no class to compare), and a bounded number of them.
   UNLISTED_CLASS_GUARDS_MAX = 8
-
-  def unlisted_class_guards(name, listed, site, singleton_arms = nil)
-    # HOT_ONLY leaves definers uncompiled, so they look unlisted for a reason a full
-    # build would not have, and the dead fallback this creates could not be in
-    # NOMETHOD annotation (ADR 0226), which the full build judges: keep the dispatch.
-    return nil if hot_only_active?
-
-    instances, scoped, native_free, instance_scope = receiver_instance_scope(site, name)
-    installed = instance_scope ? symbol_instance_installed_names : symbol_installed_names
-    extra = @closed_world.unlisted_classes(name, listed, site[:self_owner], installed, instances: instances,
-                                                                           scoped: scoped, native_free: native_free,
-                                                                           instance_scope: instance_scope)
-    return nil if extra.empty? || extra.size > UNLISTED_CLASS_GUARDS_MAX
-    return nil unless extra.all? { |klass| @closed_world.class_declared?(klass) && @closed_world.stable_class_constant?(klass) }
-
-    extra
-  end
 
   # CLOSED_WORLD: the facts guarded_fallback_line needs about a call site --
   # the enclosing owner when the receiver is provably that method's own self.

@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require 'set'
-require_relative 'hot_methods'
 require_relative 'core_defs'
 
 # CORE_METHODS (ADR 0264): every method of mruby's own Ruby (compiled_gems.rb
@@ -39,8 +38,21 @@ module CoreMethods
       !CoreDefs.touches_block?(body, ireps) && !CoreDefs.references_fiber?(body, ireps)
   end
 
+  # The listed "Owner#name" keys of core_refused.txt. Raises on a line that is not one entry.
   def load_refused(path = DEFAULT_PATH)
-    HotMethods.load(path)
+    File.readlines(path, chomp: true).each_with_index.with_object(Set.new) do |(line, i), set|
+      entry = line.strip
+      next if entry.empty? || entry.start_with?('#')
+
+      entry = entry.split(/\s+#/, 2).first
+      raise ArgumentError, "#{path}:#{i + 1}: not an Owner#name entry: #{line.inspect}" unless entry.match?(/\A[A-Z][\w:]*(?:\.singleton)?#\S+\z/)
+
+      set << entry
+    end
+  end
+
+  def key(method_def)
+    "#{method_def.owner}##{method_def.name}"
   end
 
   # Irep labels of the core-source definitions in `registry` that must not be
@@ -63,7 +75,7 @@ module CoreMethods
   # excluded_labels and the interpreted report, so the two cannot disagree.
   def exclusion_reason(definition, ireps, refused, conditional)
     irep = ireps.fetch(definition.irep)
-    return 'refused (core_refused.txt)' if refused.include?(HotMethods.key(definition))
+    return 'refused (core_refused.txt)' if refused.include?(CoreMethods.key(definition))
     return 'conditional def' if conditional.include?(definition.irep)
     return 'mruby-enumerator (Fiber machinery)' if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps)
     return 'builds a lambda' if CoreDefs.builds_lambda?(irep, ireps)
@@ -115,7 +127,7 @@ module CoreMethods
   # Refused entries no core-source method answers to (renamed or removed).
   def stale(registry, ireps, refused)
     known = registry.values.flatten.select { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
-                    .to_set { |d| HotMethods.key(d) }
+                    .to_set { |d| CoreMethods.key(d) }
     refused.reject { |k| known.include?(k) }.sort
   end
 end

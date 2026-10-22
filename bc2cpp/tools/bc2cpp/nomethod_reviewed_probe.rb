@@ -35,10 +35,8 @@ module NomethodReviewedProbe
   REVIEW_ABORT_END = /\A(?:Read each site: |Run the verify build over the real workloads, )/
 
   # [stdout, stderr, status] of one compiled gem's closed-world run.
-  # `hot_methods`: the list a real (hot-only) closed build passes; nil compiles
-  # every method, the superset the exact check needs. An unreviewed site fails
-  # the run like a build; listing_run reads the listings of such a run.
-  def run(gem_name, root, mrbc, hot_methods: nil)
+  # An unreviewed site fails the run like a build; listing_run reads the listings of such a run.
+  def run(gem_name, root, mrbc)
     this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name)
     others = BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }
     native_srcs = bc2cpp_rgss_native_srcs(root, 'closed') + core_native_srcs("#{root}/3rd/mruby") +
@@ -53,9 +51,8 @@ module NomethodReviewedProbe
         'SKIP_UNSUPPORTED' => '1',
         'BC2CPP_BUILD_NAME' => 'closed', 'BC2CPP_COLLECTION_EXPORTS' => '1',
         'BC2CPP_BUILD_GEMS' => Shellwords.join(closed_gems(root).map { |n, d| "#{n}=#{d}" }),
-        'BC2CPP_HOT_METHODS' => hot_methods
       }
-      world = closed_world_mrblib_srcs(root, core_gems: hot_methods ? nil : :canonical)
+      world = closed_world_mrblib_srcs(root, core_gems: :canonical)
       Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), '--annotated', *world)
     end
   end
@@ -91,8 +88,8 @@ module NomethodReviewedProbe
 
   # [stdout, stderr, status] of `run`, raising unless it succeeded or failed only on the reviewed
   # lists (review_abort?): the listings of such a run are complete.
-  def listing_run(gem_name, root, mrbc, hot_methods: nil)
-    out, err, status = run(gem_name, root, mrbc, hot_methods: hot_methods)
+  def listing_run(gem_name, root, mrbc)
+    out, err, status = run(gem_name, root, mrbc)
     unless status.success? || review_abort?(status, err)
       raise "#{gem_name}: bc2cpp.rb failed (not on a review gate):\n#{failure_tail(err)}"
     end
@@ -113,37 +110,33 @@ module NomethodReviewedProbe
   # Every site (one per bc2cpp_nomethod call) of a full closed run of all three
   # gems: {gem:, key:, self_receiver:}.
   def full_sites(root, mrbc)
-    runs(root, mrbc, hot: false).fetch(:full)
+    runs(root, mrbc).fetch(:full)
   end
 
   # Every PROVEN_MISS site (ADR 0275) of the same full runs: {gem:, key:}.
   def full_proven_miss_sites(root, mrbc)
-    runs(root, mrbc, hot: false).fetch(:proven_miss)
+    runs(root, mrbc).fetch(:proven_miss)
   end
 
-  # The full runs (listing read past a review-gate abort), plus with `hot:` the real
-  # build's hot-only runs: {full: sites, proven_miss: sites, strict_hint: sites, hot: {gem =>
-  # [status, stderr]}}. Runs in parallel; each is one single-threaded Ruby.
-  def runs(root, mrbc, hot: true)
+  # The full runs (listing read past a review-gate abort): {full: sites, proven_miss: sites, strict_hint: sites}.
+  # Runs in parallel; each is one single-threaded Ruby.
+  def runs(root, mrbc)
     jobs = BC2CPP_COMPILED_GEMS.keys.map { |g| [g, :full] }
-    jobs += BC2CPP_COMPILED_GEMS.keys.map { |g| [g, :hot] } if hot
     results = jobs.map do |gem_name, kind|
       Thread.new do
-        hot_methods = kind == :hot ? BC2CPP_HOT_METHODS_PATH : nil
-        _out, err, status = kind == :full ? listing_run(gem_name, root, mrbc) : run(gem_name, root, mrbc, hot_methods: hot_methods)
+        _out, err, status = listing_run(gem_name, root, mrbc)
         [gem_name, kind, err, status]
       end
     end.map(&:value)
-    full = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|
+    full = results.flat_map do |gem_name, _, err, _|
       NomethodReviewed.parse_listing(err).map { |s| s.merge(gem: gem_name) }
     end
-    proven = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|
+    proven = results.flat_map do |gem_name, _, err, _|
       ProvenMiss.parse_listing(err).map { |s| s.merge(gem: gem_name) }
     end
-    strict = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|
+    strict = results.flat_map do |gem_name, _, err, _|
       StrictHints.parse_listing(err).map { |s| s.merge(gem: gem_name) }
     end
-    hot_runs = results.select { |_, kind, _, _| kind == :hot }.to_h { |gem_name, _, err, status| [gem_name, [status, err]] }
-    { full: full, proven_miss: proven, strict_hint: strict, hot: hot_runs }
+    { full: full, proven_miss: proven, strict_hint: strict }
   end
 end

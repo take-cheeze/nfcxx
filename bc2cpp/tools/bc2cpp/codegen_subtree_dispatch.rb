@@ -27,7 +27,6 @@ class CodeGen
   # The code for the site, or nil to leave it to the name-wide chains.
   def compile_subtree_dispatch(name, n, d, recv, argv, irep, proof_idx, proof_reg, owner_def, site)
     return nil unless subtree_dispatch_enabled? && @closed_world && site && !@call_block_expr
-    return nil if hot_only_active?
 
     root = subtree_receiver_root(irep, proof_idx, proof_reg, owner_def)
     if root.nil? && ENV['BC2CPP_SUBTREE_DEBUG'] && CodeGen.subtree_facts.ivars[owner_def&.owner]
