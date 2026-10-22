@@ -91,6 +91,23 @@ def lcf_file_array_read?(irep, pin_idx, pin, receiver_class)
   LcfFileFields.array_field?(file_class, keys.first.insn.sym.to_s)
 end
 
+# LCF_FILE_FIELDS join: `@x = unit[:key] || []` stores a register with two reaching definitions, and neither dominates
+# the store, so proven_array_source_scan's single-writer walk finds nothing. Every definition being an Array (an ARRAY
+# allocation, or a schema Array read off an exact LCF file) makes the join an Array.
+def array_join_source?(irep, idx, reg, receiver_class)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true)
+  return false if defs.nil? || defs.size < 2
+
+  defs.all? do |defn|
+    next false if defn.entry?
+
+    insn = irep.instructions[defn.index]
+    next true if %w[ARRAY ARRAY2].include?(insn.op)
+
+    insn.op == 'GETIDX' && lcf_file_array_read?(irep, defn.index, insn, receiver_class)
+  end
+end
+
 # ARRAY_RETURN_PROOF: `ret_proof` is an optional second oracle ("a call to
 # this name leaves an Array"), beside the `-> Array` annotation. nil keeps the
 # old behavior (ClassLayout's SETIV call has no CodeGen). See
@@ -205,6 +222,7 @@ class ClassLayout
             end
             found ||= proven_array_source_scan(irep, idx, src_reg, registry, annotated_array_return,
                                                array_ret_proof, receiver_class: receiver_class)
+            found ||= 'Array' if array_join_source?(irep, idx, src_reg, receiver_class)
 
             # NIL_TOLERANT_JOIN: `@x = nil` (LOADNIL Rn; SETIV @x Rn) is evidence of
             # nothing, so it is skipped rather than joined. Poisoning on it would kill
