@@ -178,6 +178,7 @@ module BytecodeIR
       # nothing per state but the seen entry (NUMERIC_FLOW_SPEED's lesson, ADR 0467). The answer is the same.
       guarded = through_handlers ? nil : dataflow_guarded_at
       live_at = live && live_flags
+      scalar_seen = ENV['BC2CPP_IR_SCALAR_SEEN'] != '0'
       seen = {}
       states = 0
       defs = Set.new
@@ -185,10 +186,18 @@ module BytecodeIR
       until work.empty?
         r = work.pop
         i = work.pop
-        seen_here = (seen[i] ||= {})
-        next if seen_here.key?(r)
+        seen_here = seen[i]
+        if scalar_seen && !seen_here.is_a?(Hash)
+          next if seen_here.eql?(r)
 
-        seen_here[r] = true
+          # Most instructions are visited for one register; promote only on a second.
+          seen[i] = seen_here ? { seen_here => true, r => true } : r
+        else
+          seen_here ||= (seen[i] = {})
+          next if seen_here.key?(r)
+
+          seen_here[r] = true
+        end
         states += 1
         return refused(refusal, :state_cap) if states > max_states
         return refused(refusal, :opaque_reg) if opaque_regs&.include?(r)
