@@ -12,12 +12,14 @@
 # `unproven`. Two passes: the second sees the kinds of functions of other files, so a helper defined in another
 # source resolves (NativeAstReturns' `external`).
 #
-# Time: a file's clang dump and its JSON parse dominate (the dump of a source that includes the RGSS headers is ~0.9 GB),
-# so each file runs in its own worker (BC2CPP_TABLE_JOBS, default 2: a worker holds one parsed dump), and each file's
-# result is cached under CLOSED/analysis/kinds-cache, keyed on the file, its flags, the analyzer's own sources and, for
-# the second pass, the external kinds. A cached run re-parses only what changed.
+# Time: a file's clang dump and its JSON parse dominate (the dump of a source that includes the RGSS headers is ~0.9 GB;
+# the analysis itself is a small share), so each file runs in its own worker (BC2CPP_TABLE_JOBS, default: the CPUs up to
+# 4). Each file's result is cached under CLOSED/analysis/kinds-cache, keyed on the file, its flags, the analyzer's own
+# sources and, for the second pass, the external kinds. A second-pass file that looks up none of the external names the
+# first pass added keeps its first-pass result, so it is not parsed again. A cached run re-parses only what changed.
 
 require 'digest'
+require 'etc'
 require 'fileutils'
 require_relative 'base_rbs_all'
 require_relative 'base_rbs_native'
@@ -25,7 +27,8 @@ require_relative 'base_rbs_workers'
 
 module NativeFnKinds
   JOBS_ENV = 'BC2CPP_TABLE_JOBS'
-  DEFAULT_JOBS = 2
+  # A worker's peak is ~2 GB on the largest source (mruby-rgss/src/lib.cxx), so four fit where the CPUs do.
+  DEFAULT_JOBS = [Etc.nprocessors, 4].min
   PATCH_LIST = File.join(BaseRbsAll::ROOT, 'scripts', 'mruby', 'standalone_prep.bash')
 
   module_function
@@ -65,16 +68,18 @@ module NativeFnKinds
     Digest::SHA256.hexdigest(files.map { |file| Digest::SHA256.file(file).hexdigest }.join)
   end
 
-  # One file's (kinds, self-index) under the given external kinds: the clang dump, read once.
+  # One file's (kinds, self-index, external lookups) under the given external kinds: the clang dump, read once.
   def analyze_file(path, flags, external)
     own_self = {}
-    kinds = BaseRbsNative.ast_function_kinds(path, flags, external, own_self)
-    [kinds, own_self]
+    refs = Set.new
+    kinds = BaseRbsNative.ast_function_kinds(path, flags, external, own_self, refs)
+    [kinds, own_self, refs]
   end
 
-  # One pass over every source. Results come from the cache where it holds them; the rest run in workers. Returns
-  # [kinds, self_indexes], merged in path order (the first non-nil kind of a name wins).
-  def pass(files, external, cache_dir:, jobs:)
+  # One pass over every source: the per-file results, in path order. Results come from the cache where it holds them, or
+  # from `reuse` (the first pass) when the file looks up none of the external names this pass adds, so its analysis
+  # cannot change (a first-pass lookup that differed would be one of those names). The rest run in workers.
+  def pass_results(files, external, cache_dir:, jobs:, reuse: nil)
     external_digest = external.empty? ? '' : Digest::SHA256.hexdigest(external.sort.to_s)
     base = [analyzer_digest, external_digest]
     keys = files.map do |path, flags|
@@ -82,9 +87,14 @@ module NativeFnKinds
     end
     results = Array.new(files.size)
     todo = files.each_index.reject do |index|
+      if reuse && (reuse[index][2] & external.keys).empty?
+        results[index] = reuse[index]
+        next true
+      end
       next false unless cache_dir && File.file?(File.join(cache_dir, keys[index]))
 
       results[index] = Marshal.load(File.binread(File.join(cache_dir, keys[index]))) # rubocop:disable Security/MarshalLoad
+      true
     end
     # The largest dumps first, so the workers finish together.
     todo = todo.sort_by { |index| -File.size(files[index][0]) }
@@ -98,9 +108,14 @@ module NativeFnKinds
 
       File.binwrite(File.join(cache_dir, keys[index]), Marshal.dump(result))
     end
+    results
+  end
+
+  # The per-file results of a pass, merged into [kinds, self_indexes] (the first non-nil kind of a name wins).
+  def merge(results)
     kinds = {}
     selves = {}
-    results.each do |file_kinds, own_self|
+    results.each do |file_kinds, own_self, _refs|
       file_kinds.each { |fn, kind| kinds[fn] = kind if kinds[fn].nil? }
       own_self.each { |fn, index| selves[fn] = index unless selves.key?(fn) }
     end
@@ -119,12 +134,13 @@ module NativeFnKinds
 
     FileUtils.mkdir_p(cache_dir)
     files = sources(closed_build)
-    first_kinds, first_selves = pass(files, {}, cache_dir: cache_dir, jobs: jobs)
+    first = pass_results(files, {}, cache_dir: cache_dir, jobs: jobs)
+    first_kinds, first_selves = merge(first)
     external = first_kinds.reject { |_fn, kind| kind.nil? }
     # A function returning its own self parameter is the receiver's class wherever it is called (see
     # NativeAstReturns' identity rule), so a second-pass caller sees it as `self:N` for argument N.
     first_selves.each { |fn, index| external[fn] = "self:#{index}" if external[fn] == 'self' }
-    second_kinds, second_selves = pass(files, external, cache_dir: cache_dir, jobs: jobs)
+    second_kinds, second_selves = merge(pass_results(files, external, cache_dir: cache_dir, jobs: jobs, reuse: first))
     second_kinds.sort.map do |fn, kind|
       index = second_selves[fn]
       [fn, kind.nil? ? 'unproven' : kind, index.nil? ? '' : index].join("\t")

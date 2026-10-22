@@ -354,7 +354,7 @@ module BaseRbsNative
 
   # Return kinds the clang AST gives the functions of one source (NativeAstReturns). A file clang cannot parse keeps
   # the regex kinds, and says so.
-  def ast_function_kinds(path, flags, external = {}, self_index = nil)
+  def ast_function_kinds(path, flags, external = {}, self_index = nil, external_refs = nil)
     lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
     out, err, status = Open3.capture3('clang', *lang, '-fsyntax-only', '-Xclang', '-ast-dump=json', *flags, path)
     unless status.success?
@@ -362,7 +362,8 @@ module BaseRbsNative
       return {}
     end
 
-    NativeAstReturns.analyze(JSON.parse(out.force_encoding(Encoding::UTF_8)), path, external: external, self_index: self_index)
+    NativeAstReturns.analyze(JSON.parse(out.force_encoding(Encoding::UTF_8)), path, external: external, self_index: self_index,
+                                                                                 external_refs: external_refs)
   end
 
   def preprocess(path, flags)
