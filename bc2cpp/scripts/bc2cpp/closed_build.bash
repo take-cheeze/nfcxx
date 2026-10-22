@@ -11,7 +11,7 @@
 # Usage:
 #   scripts/bc2cpp/closed_build.bash [BUILD_DIR, default ./build-closed-bc2cpp]
 #
-# Needs on PATH: ruby, rake, a native C/C++ compiler, bison, gperf, curl and
+# Needs on PATH: ruby, rake, a native C/C++ compiler, bison, gperf and
 # python3 (scripts/mruby/standalone_prep.bash). No cross toolchain. Writes
 # BUILD_DIR/closed/lib/libmruby.a and the bootstrap BUILD_DIR/host mrbc.
 set -euo pipefail
