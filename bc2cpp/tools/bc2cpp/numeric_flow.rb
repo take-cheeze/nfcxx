@@ -344,7 +344,7 @@ module NumericFlow
   # (BytecodeIR::Decoded: op, cond, goto) so the worklist reads one struct; the rest is the flow's own reading.
   # +a+ is the leading register where the op's rule reads it (nil otherwise), +b+ the second register the op reads
   # (MOVE's source, the parenthesised operand, SETIV's value).
-  Step = Struct.new(:op, :kind, :call, :silent, :branch, :a, :b, :ivar, :goto, :sym)
+  Step = Struct.new(:op, :kind, :call, :silent, :branch, :a, :b, :ivar, :goto, :sym, :result_write)
 
   # The flow's per-Program table: whether every op is modelled, and the Step of each instruction (nil when not).
   Table = Struct.new(:supported, :steps, :load_readers)
@@ -402,6 +402,7 @@ module NumericFlow
     step.ivar = operands.ivar if step.kind == K_GETIV
     step.b = operands.b
     step.sym = ARITH_OPS[op] || IMM_ARITH_OPS[op]
+    step.result_write = RESULT_WRITE_KINDS.include?(step.kind)
     step
   end
 
@@ -422,6 +423,7 @@ module NumericFlow
       # Provenance follows the ivar slots and the element block (one entry per register, ELEM_UNKNOWN in states).
       c = new(irep, oracle, opaque, nregs, slots, slot_of, facts, nregs + slots.size + nregs, writes)
       c.elide_load_copies = ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] != '0'
+      c.elide_result_copies = ENV['BC2CPP_NUMERIC_RESULT_COPY_ELISION'] != '0'
       c.elem_base = nregs + slots.size
       # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
       # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
@@ -448,10 +450,12 @@ module NumericFlow
     # Where the element block starts; nil for a ctx built from a Hash, whose layout has no element block.
     attr_accessor :elem_base
     attr_accessor :load_readers, :widened_slots
+    attr_accessor :elide_result_copies
     attr_writer :elide_load_copies
 
     def initialize(irep, oracle, opaque, nregs, slots, slot_of, facts, prov_base, writes)
       @elide_load_copies = false
+      @elide_result_copies = false
       @irep = irep
       @oracle = oracle
       @opaque = opaque
@@ -697,7 +701,12 @@ module NumericFlow
     mask = state[reg]
     return state if mask.nil? || mask.zero?
 
-    sure, maybe = falsy_class_bits(c)
+    if c.false_class
+      sure = maybe = c.oracle.false_class_bit.to_i
+    else
+      sure = 0
+      maybe = CLASS_BITS
+    end
     narrowed = narrow_branch(branch, taken, mask, sure, maybe)
     return nil if narrowed.zero?
 
@@ -826,6 +835,21 @@ module NumericFlow
       end
     end
 
+    if step.result_write
+      mask = result_mask(index, insn, step, state, c)
+      if c.elide_result_copies
+        out = copy_reg_write(state, a, mask, c)
+      else
+        out = state.dup
+        set_reg(out, a, mask, c)
+      end
+      if step_silent_call?(step, state, c)
+        out = out.dup if out.equal?(state)
+        refresh_slots(out, c)
+      end
+      return out
+    end
+
     out = state.dup
     oracle = c.oracle
     irep = c.irep
@@ -876,43 +900,16 @@ module NumericFlow
         out[pb + a] = c.nslots + 1 + src
         copy_class_test(out, state, a, src, c) if c.tb
       end
-    when K_KARG
-      set_reg(out, a, c.keyword_mask ? oracle.keyword_mask(insn) : OTHER, c)
-    when K_KEY_P
-      set_reg(out, a, c.keyword_presence ? oracle.keyword_presence(insn) : OTHER, c)
-    when K_CONST
-      set_reg(out, a, oracle.const_mask(insn), c)
-    when K_GETUPVAR
-      set_reg(out, a, oracle.upvar_mask(irep, insn), c)
     when K_GETIV
       slot = c.slot_of[step.ivar]
       set_reg(out, a, slot ? state[slot] : OTHER, c)
       out[pb + a] = slot - nregs + 1 if slot && !c.opq[a]
-    when K_EXCEPT
-      set_reg(out, a, c.rescue_only.include?(index) ? EXC : EXC | NIL, c)
     when K_RESCUE
       # Reads the exception in its first register, writes the match flag to its second.
       b = step.b
       set_reg(out, b, OTHER, c) if b < nregs
-    when K_RANGE
-      set_reg(out, a, RNG, c)
-    when K_ARRAY
-      set_reg(out, a, c.array_mask ? oracle.array_mask(irep, index, insn, state) : ARR, c)
-    when K_HASH
-      set_reg(out, a, c.hash_mask ? oracle.hash_mask(irep, index, insn, state) : HSH, c)
     when K_STRING
       set_reg(out, a, STR, c)
-    when K_KEEPS
-      keep = KEEPS_CLASS.fetch(step.op)
-      set_reg(out, a, state[a] == keep ? keep : OTHER, c)
-    when K_ARITH
-      b = step.b
-      sym = step.sym
-      ok = oracle.op_native?(sym) && b < nregs
-      set_reg(out, a, ok ? arith(state[a], state[b], oracle.nil_raises?(sym)) : OTHER, c)
-    when K_IMM
-      sym = step.sym
-      set_reg(out, a, oracle.op_native?(sym) ? arith(state[a], INT, oracle.nil_raises?(sym)) : OTHER, c)
     when K_IMM_LV
       sym = step.sym
       # R[b], R[b+1] are working space for the fallback method call.
@@ -920,15 +917,6 @@ module NumericFlow
       set_reg(out, b, OTHER, c) if b < nregs
       set_reg(out, b + 1, OTHER, c) if b + 1 < nregs
       set_reg(out, a, oracle.op_native?(sym) ? arith(state[a], INT, oracle.nil_raises?(sym)) : OTHER, c)
-    when K_DIV
-      b = step.b
-      ok = oracle.op_native?('/') && b < nregs
-      set_reg(out, a, ok ? arith(state[a], state[b], oracle.nil_raises?('/')) : OTHER, c)
-    when K_GETIDX
-      literal = BytecodeIR::NumericClasses.element_literal_mask(irep, index, c.opaque)
-      set_reg(out, a, literal || (c.index_mask ? oracle.index_mask(irep, index, insn, state) : OTHER), c)
-    when K_AREF
-      set_reg(out, a, c.aref_mask ? oracle.aref_mask(irep, index, insn, state) : OTHER, c)
     when K_EQ
       # `x.class == C`: the class-of boolean meets a class constant, which makes it the instance_of test of x.
       id = c.tb ? state[c.tb + a].to_i : 0
@@ -939,6 +927,56 @@ module NumericFlow
     end
     refresh_slots(out, c) if step_silent_call?(step, state, c)
     out
+  end
+
+  RESULT_WRITE_KINDS = Set[K_KARG, K_KEY_P, K_CONST, K_GETUPVAR, K_EXCEPT, K_RANGE, K_ARRAY, K_HASH,
+                           K_KEEPS, K_ARITH, K_IMM, K_DIV, K_GETIDX, K_AREF, K_OTHER].freeze
+
+  def result_mask(index, insn, step, state, c)
+    a = step.a
+    nregs = c.nregs
+    oracle = c.oracle
+    irep = c.irep
+    case step.kind
+    when K_KARG
+      c.keyword_mask ? oracle.keyword_mask(insn) : OTHER
+    when K_KEY_P
+      c.keyword_presence ? oracle.keyword_presence(insn) : OTHER
+    when K_CONST
+      oracle.const_mask(insn)
+    when K_GETUPVAR
+      oracle.upvar_mask(irep, insn)
+    when K_EXCEPT
+      c.rescue_only.include?(index) ? EXC : EXC | NIL
+    when K_RANGE
+      RNG
+    when K_ARRAY
+      c.array_mask ? oracle.array_mask(irep, index, insn, state) : ARR
+    when K_HASH
+      c.hash_mask ? oracle.hash_mask(irep, index, insn, state) : HSH
+    when K_KEEPS
+      keep = KEEPS_CLASS.fetch(step.op)
+      state[a] == keep ? keep : OTHER
+    when K_ARITH
+      b = step.b
+      sym = step.sym
+      ok = oracle.op_native?(sym) && b < nregs
+      ok ? arith(state[a], state[b], oracle.nil_raises?(sym)) : OTHER
+    when K_IMM
+      sym = step.sym
+      oracle.op_native?(sym) ? arith(state[a], INT, oracle.nil_raises?(sym)) : OTHER
+    when K_DIV
+      b = step.b
+      ok = oracle.op_native?('/') && b < nregs
+      ok ? arith(state[a], state[b], oracle.nil_raises?('/')) : OTHER
+    when K_GETIDX
+      literal = BytecodeIR::NumericClasses.element_literal_mask(irep, index, c.opaque)
+      literal || (c.index_mask ? oracle.index_mask(irep, index, insn, state) : OTHER)
+    when K_AREF
+      c.aref_mask ? oracle.aref_mask(irep, index, insn, state) : OTHER
+    when K_OTHER
+      OTHER
+    end
   end
 
   # Equal class masks alone are insufficient: rewriting a value still invalidates aliases and tests.

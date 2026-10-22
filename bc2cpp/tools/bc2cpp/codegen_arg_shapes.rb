@@ -383,7 +383,7 @@ module ArgShapeCalls
       next unless code
 
       "    case #{k}: {\n" \
-        "#{locals.each_with_index.map { |l, i| "      mrb_value #{l} = RARRAY_PTR(#{ary})[#{i}];\n" }.join}" \
+        "#{locals.each_with_index.map { |l, i| "      mrb_value #{l} = ary_items(#{ary})[#{i}];\n" }.join}" \
         "#{code.lines.map { |line| "      #{line}" }.join}" \
         "      break;\n    }\n"
     end
@@ -394,11 +394,11 @@ module ArgShapeCalls
       "(mrb_ary length), dynamic dispatch for any other length\n" \
       "  {\n" \
       "    mrb_value #{ary} = r#{args_reg};\n" \
-      "    switch (RARRAY_LEN(#{ary})) {\n" \
+      "    switch (ary_size(#{ary})) {\n" \
       "#{arms.join}" \
       "    default:\n" \
-      "      r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, \"#{name}\"), RARRAY_LEN(#{ary}), " \
-      "RARRAY_PTR(#{ary}));\n" \
+      "      r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, \"#{name}\"), ary_size(#{ary}), " \
+      "ary_items(#{ary}));\n" \
       "    }\n" \
       "  }\n"
   end

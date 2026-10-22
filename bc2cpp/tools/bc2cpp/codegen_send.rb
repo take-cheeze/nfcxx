@@ -64,6 +64,11 @@ class CodeGen
       numeric_native = numeric_native_direct_code(name, d, recv, irep, guard_proof_site, new_proof_reg, owner_def)
       return numeric_native if numeric_native
     end
+    # FREEZE_FOLD (ADR 0536): a predicate the receiver's class set or freeze state decides is a constant bool.
+    if !self_implicit && guard_proof_site && !@call_block_expr
+      freeze_fold = freeze_fold_code(name, d, irep, guard_proof_site, insn, new_proof_reg, owner_def)
+      return freeze_fold if freeze_fold
+    end
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_enter = irep&.enter
@@ -775,7 +780,7 @@ class CodeGen
               mrb_fixnum(#{length}) <= 10) {
             mrb_int bc2cpp_slice_start = mrb_fixnum(#{start});
             mrb_int bc2cpp_slice_length = mrb_fixnum(#{length});
-            mrb_int bc2cpp_slice_array_length = RARRAY_LEN(#{recv});
+            mrb_int bc2cpp_slice_array_length = ary_size(#{recv});
             if (bc2cpp_slice_start < 0 && bc2cpp_slice_start >= -bc2cpp_slice_array_length) {
               bc2cpp_slice_start += bc2cpp_slice_array_length;
             }
@@ -790,7 +795,7 @@ class CodeGen
                 r#{d} = mrb_ary_new(M);
               } else {
                 r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_length,
-                    RARRAY_PTR(#{recv}) + bc2cpp_slice_start);
+                    ary_items(#{recv}) + bc2cpp_slice_start);
               }
             }
           } else {
@@ -1008,9 +1013,9 @@ class CodeGen
               mrb_fixnum(#{start}) == 0 && mrb_fixnum_p(#{length}) && mrb_fixnum(#{length}) >= 0) {
             mrb_value bc2cpp_slice_receiver = #{recv};
             mrb_int bc2cpp_slice_len = mrb_fixnum(#{length});
-            mrb_int bc2cpp_array_len = RARRAY_LEN(bc2cpp_slice_receiver);
+            mrb_int bc2cpp_array_len = ary_size(bc2cpp_slice_receiver);
             if (bc2cpp_slice_len > bc2cpp_array_len) bc2cpp_slice_len = bc2cpp_array_len;
-            r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_len, RARRAY_PTR(bc2cpp_slice_receiver));
+            r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_len, ary_items(bc2cpp_slice_receiver));
             mrb_ary_splice(M, bc2cpp_slice_receiver, 0, bc2cpp_slice_len, mrb_undef_value());
           } else {
             #{fallback.chomp}

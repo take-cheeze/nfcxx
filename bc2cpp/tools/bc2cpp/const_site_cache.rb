@@ -16,7 +16,7 @@ require_relative 'scan_cache'
 #       constant gets reassigned, nor defined by a native (mrb_define_class /
 #       mrb_define_const / mrb_const_set) or foreign Ruby source compiled into
 #       the same VM; and
-#   (c) lives in a program that never calls const_set / remove_const / autoload,
+#   (c) lives in a program that never calls const_set / remove_const,
 #       the other ways a constant table changes.
 # (`const_get` only reads, and `const_missing` only runs on a FAILED lookup,
 # which is never cached, so neither matters.) The name then denotes one class
@@ -25,7 +25,7 @@ require_relative 'scan_cache'
 # are absent (a unit check building a CodeGen directly) (b) cannot be proven and
 # nothing is cached.
 module StableClassConstants
-  DYNAMIC_MUTATION = /\b(?:const_set|remove_const|autoload)\b/
+  DYNAMIC_MUTATION = /\b(?:const_set|remove_const)\b/
 
   module_function
 
@@ -77,7 +77,7 @@ end
 #    code (the same trust the owner-class cache already rests on). A bare name
 #    defined by more than one distinct native site is refused.
 # 2. After that, the constant can only be rebound by SETCONST/SETMCNST,
-#    const_set, remove_const or autoload (3rd/mruby/src/variable.c) -- the
+#    const_set or remove_const (3rd/mruby/src/variable.c) -- the
 #    same bare-name-keyed poisoning StableClassConstants already applies.
 # 3. A Ruby `class Symbol` reopening (closed world or foreign, e.g.
 #    3rd/mruby/mrblib/symbol.rb) reuses the existing class via OP_CLASS and

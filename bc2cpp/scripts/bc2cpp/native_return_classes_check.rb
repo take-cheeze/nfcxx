@@ -8,7 +8,10 @@
 #   ruby scripts/bc2cpp/native_return_classes_check.rb
 
 require 'set'
+require 'fileutils'
+require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_return_classes'
+require_relative '../../tools/bc2cpp/foreign_string_results'
 
 failures = []
 check = lambda do |name, ok|
@@ -47,6 +50,23 @@ check.call('an unresolved computed registration on the owner refuses the name',
            NativeReturnClasses.admit(map_of({ 'c' => set('String') }, computed: set('String')), [['String', 'c', 'f']], { 'f' => 'String' })[:refused].first&.reason == :computed_registration_on_owner)
 check.call('an unknown computed registration outside the core refuses every name',
            NativeReturnClasses.admit(map_of({ 'v' => set('String') }, computed_unknown: true), [['String', 'v', 'f']], { 'f' => 'String' })[:admitted].empty?)
+
+benchmark = File.expand_path('../../3rd/mruby/mrbgems/mruby-benchmark/mrblib/benchmark.rb', __dir__)
+if File.file?(benchmark)
+  check.call('an audited outside to_s is admitted for String; the same file is not audited for inspect',
+             ForeignStringResults.audited_string_paths('to_s', [benchmark]) == [benchmark] &&
+             ForeignStringResults.audited_string_paths('inspect', [benchmark]).empty?)
+  Dir.mktmpdir do |dir|
+    # A copy at the audited path with other content: the digest no longer matches, so the audit does not count it.
+    edited = File.join(dir, '3rd/mruby/mrbgems/mruby-benchmark/mrblib/benchmark.rb')
+    FileUtils.mkdir_p(File.dirname(edited))
+    File.write(edited, File.read(benchmark) + "\n# edited\n")
+    check.call('an audited file whose digest changed is not counted as a String result',
+               ForeignStringResults.audited_string_paths('to_s', [edited]).empty?)
+  end
+end
+check.call('a path no audit lists is never counted',
+           ForeignStringResults.audited_string_paths('to_s', ['/x/3rd/mruby/src/unlisted.rb']).empty?)
 
 if failures.empty?
   puts 'native return classes: all checks passed'

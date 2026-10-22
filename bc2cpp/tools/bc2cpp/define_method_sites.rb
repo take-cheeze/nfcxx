@@ -26,7 +26,7 @@ module DefineMethodSites
   # Ops that depend on the lexical class the body is compiled under rather than on `self`.
   DEFINITION_OPS = %w[TCLASS TDEF SDEF DEF METHOD CLASS MODULE SCLASS EXEC ALIAS UNDEF].freeze
   # Sends that read the frame of the method they run in; a proc method has its own.
-  FRAME_SENDS = %w[block_given? iterator? binding local_variables __method__ caller caller_locations].freeze
+  FRAME_SENDS = %w[block_given? iterator? binding local_variables __method__ caller].freeze
 
   module_function
 

@@ -158,6 +158,22 @@ if File.file?(File.join(MRUBY, 'src/kernel.c'))
   end
 
   mrblib = Dir[File.join(MRUBY, '{mrblib,mrbgems/*/mrblib}/**/*.rb')].map { |path| File.binread(path) }
+# The element mask reads these from the declarations (block_return_element?): a block-return element is an Array
+# whose type argument is the block's return variable, so only those iterators are named here.
+%w[map collect filter_map].each do |name|
+  check.call("block iterators: #{name} takes its elements from the block (RBS block-return variable)",
+             CoreBlockIteratorSigs.block_return_element?(name))
+end
+%w[select reject sort_by find_all partition group_by].each do |name|
+  check.call("block iterators: #{name} does not take block-return elements", !CoreBlockIteratorSigs.block_return_element?(name))
+end
+# Array's own declarations type the receiver-element iterators; Enumerable's stay untyped (no self type in RBS).
+%w[select reject find_all sort_by].each do |name|
+  check.call("block iterators: Array##{name} yields the receiver's elements (RBS Elem)",
+             CoreBlockIteratorSigs.element_sources.dig('Array', name) == :receiver)
+end
+check.call('block iterators: Enumerable#select stays untyped (its elements are not declared)',
+           CoreBlockIteratorSigs.element_sources.fetch('Enumerable', {})['select'].nil?)
   CoreBlockIteratorSigs.results.each do |owner, names|
     names.each do |name, klass|
       defined = mrblib.any? { |text| text.match?(/^\s*def #{Regexp.escape(name)}\(&(block|blk)\)/) }

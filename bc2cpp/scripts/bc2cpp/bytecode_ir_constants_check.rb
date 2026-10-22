@@ -74,9 +74,19 @@ check.call('String literal: class String, no value, no interval',
            (f = fact_of.call(result, 'Fx::NAME')) && f.classes == Set[:String] && f.value.nil? && f.interval.nil?)
 check.call('Array literal: class Array',
            fact_of.call(result, 'Fx::LIST')&.classes == Set[:Array])
-# `.freeze` is not modelled yet (stage 1): the writer is an unknown SEND0, so the binding has no class, no value.
-check.call('frozen literal: freeze is not modelled, so the binding has no class and no value (never a wrong class)',
+# A literal's `.freeze` answers its receiver when the container freeze is stock (freeze_classes): the class is Array and
+# there is no value, since an Array is not an Integer.
+check.call('frozen literal: a stock Array#freeze answers its receiver, so the binding is Array with no value',
            fact_of.call(result, 'Fx::FROZEN')&.classes == Set[:Array] && fact_of.call(result, 'Fx::FROZEN')&.value.nil?)
+# A constructed value (`Color.new(...)`) is not modelled: the receiver is a class constant, whose name is poisoned by its
+# CLASS op, so the binding has no class. It stays unknown until class identity is modelled (ADR 0536).
+constructed = analyze.call(<<~RUBY)
+  module Ct
+    CLR = Foo.new(1)
+  end
+RUBY
+check.call('constructed value: Foo.new has no class (unknown, never a wrong class until class identity is modelled)',
+           fact_of.call(constructed, 'Ct::CLR')&.classes.nil?)
 check.call('Range literal: class Range', fact_of.call(result, 'Fx::RANGE')&.classes == Set[:Range])
 check.call('Float literal: class Float, no value', (f = fact_of.call(result, 'Fx::FLOAT')) && f.classes == Set[:Float] && f.value.nil?)
 check.call('Integer#freeze is the identity when stock: FZ = BASE.freeze is 32 with interval [32, 32]',

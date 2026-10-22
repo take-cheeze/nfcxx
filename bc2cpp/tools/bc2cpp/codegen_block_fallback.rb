@@ -804,6 +804,7 @@ class CodeGen
       elem_hints = { '1' => rbs_class } if rbs_class
     end
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
+    arm_prune_block_analysis(block_irep, d, 0)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
@@ -1180,7 +1181,7 @@ class CodeGen
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: R(dest+1) is a real Array, so
       # RARRAY_LEN/RARRAY_PTR go straight into mrb_funcall_with_block.
       out << "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-             "RARRAY_LEN(r#{region[:argv_reg]}), RARRAY_PTR(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
+             "ary_size(r#{region[:argv_reg]}), ary_items(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
     else
       argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
       if argv.empty?

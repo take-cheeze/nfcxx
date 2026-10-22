@@ -44,7 +44,7 @@ module BlockParamCall
     "  // BLOCK_PARAM_CALL_SPLAT :call -- receiver is the method's own &block (nil or a Proc): a Proc is " \
       "yielded to with the splatted Array, nil raises NoMethodError\n" \
       "  if (mrb_proc_p(#{recv})) {\n" \
-      "    r#{d} = bc2cpp_yield_argv(M, #{recv}, RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));\n" \
+      "    r#{d} = bc2cpp_yield_argv(M, #{recv}, ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));\n" \
       "  } else {\n" \
       "    r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"call\");\n" \
       "  }\n"

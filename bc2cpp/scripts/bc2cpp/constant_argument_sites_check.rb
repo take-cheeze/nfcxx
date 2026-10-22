@@ -90,6 +90,8 @@ dyn_one = literal[:rows].find { |r| r[:name] == 'dyn_one' }
 suite.check('a send with a literal target names that method as unresolved', dyn_one[:unresolved].to_s.include?('send dyn_one'))
 suite.check('a method with a literal dynamic target is not a single-tuple candidate', !dyn_one[:single_tuple])
 
+# A computed target names only what DynamicNames.universe spells: a name the program never spells (pure_one here) is not
+# reached by it, so the method stays a candidate. A spelled name and the setter of one are refused.
 computed = report_of.call(<<~'RUBY')
   class DynC
     def pure_one(x)
@@ -104,11 +106,47 @@ computed = report_of.call(<<~'RUBY')
   end
 RUBY
 computed_pure = computed[:rows].find { |r| r[:name] == 'pure_one' }
-suite.check('a computed dynamic target makes every method unresolved', computed[:summary][:unresolved_global])
-suite.check('pure_one with a computed target is not a single-tuple candidate', !computed_pure[:single_tuple])
-suite.check('the computed target is reported on pure_one', computed_pure[:unresolved].to_s.include?('computed name'))
+suite.check('a computed target does not make every method unresolved', !computed[:summary][:unresolved_global])
+suite.check('a computed target does not reach a name the program never spells', computed_pure[:unresolved].nil?)
+suite.check('pure_one, a name no computed send spells, stays a single-tuple candidate', computed_pure[:single_tuple])
 
-mm = report_of.call(<<~'RUBY')
+spelled = report_of.call(<<~'RUBY')
+  class DynS
+    def pure_one(x)
+      if x then 1 else 2 end
+    end
+    def run(s)
+      send(s, 1)
+    end
+    def go
+      keep = :pure_one
+      pure_one(3)
+    end
+  end
+RUBY
+spelled_pure = spelled[:rows].find { |r| r[:name] == 'pure_one' }
+suite.check('a computed target still refuses a name the program spells', !spelled_pure[:single_tuple])
+suite.check('the computed target is reported on the spelled name', spelled_pure[:unresolved].to_s.include?('computed name'))
+suite.check('the spelled-name refusal is not global', !spelled[:summary][:unresolved_global])
+
+setter = report_of.call(<<~'RUBY')
+  class DynT
+    def val=(x)
+      x
+    end
+    def run(s)
+      send(s, 1)
+    end
+    def go
+      keep = :val
+      self.val = 3
+    end
+  end
+RUBY
+setter_row = setter[:rows].find { |r| r[:name] == 'val=' }
+suite.check('a computed target refuses the setter of a spelled name', setter_row[:unresolved].to_s.include?('computed name'))
+
+mm =report_of.call(<<~'RUBY')
   class Mm
     def pure_one(x)
       if x then 1 else 2 end
@@ -122,7 +160,73 @@ mm = report_of.call(<<~'RUBY')
   end
 RUBY
 mm_pure = mm[:rows].find { |r| r[:name] == 'pure_one' }
-suite.check('a method_missing definition makes every method unresolved', mm_pure[:unresolved].to_s.include?('method_missing'))
+suite.check('a method_missing definition is not a reason: pure_one is unresolved for no reason', mm_pure[:unresolved].nil?)
+suite.check('a method_missing definition leaves pure_one a single-tuple candidate', mm_pure[:single_tuple])
+
+undef_src = report_of.call(<<~'RUBY')
+  class Ud
+    def pure_one(x)
+      if x then 1 else 2 end
+    end
+    def gone
+      1
+    end
+    undef_method :gone
+    def run
+      pure_one(3)
+    end
+  end
+RUBY
+ud = undef_src[:rows].find { |r| r[:name] == 'pure_one' }
+suite.check('an UNDEF is not a reason: pure_one stays a single-tuple candidate', ud[:single_tuple] && ud[:unresolved].nil?)
+
+alias_src = report_of.call(<<~'RUBY')
+  class Al
+    def pure_one(x)
+      if x then 1 else 2 end
+    end
+    alias pure_alias pure_one
+    def run
+      pure_alias(3)
+    end
+  end
+RUBY
+al = alias_src[:rows].find { |r| r[:name] == 'pure_one' }
+suite.check('an alias makes the old name unresolved, so pure_one is no single-tuple candidate', !al[:single_tuple] && al[:unresolved].to_s.include?('alias'))
+suite.check('an alias does not make an unrelated method unresolved', alias_src[:rows].none? { |r| r[:name] == 'run' && r[:unresolved] })
+
+# The jump decision needs a complete tuple only: an impure body (an ivar write) with one constant tuple still has its jump decided.
+impure_jump = report_of.call(<<~'RUBY')
+  class Ij
+    def impure_jump(x)
+      @seen = x
+      if x then 1 else 2 end
+    end
+    def run
+      impure_jump(3)
+    end
+  end
+RUBY
+ij = impure_jump[:rows].find { |r| r[:name] == 'impure_jump' }
+suite.check('an impure body with one tuple is not pure', !ij[:pure])
+suite.check('its jump is still decided by the single tuple', ij[:jumps] == 1 && ij[:decided] == 1)
+suite.check('the pure-only summary does not count it', impure_jump[:summary][:jumps_decided_pure] == 0 && impure_jump[:summary][:jumps_decided] == 1)
+
+# A may-raise body (x + 1 before the branch) with one tuple: the branch is still decided.
+raise_jump = report_of.call(<<~'RUBY')
+  class Rj
+    def raise_jump(x)
+      y = x + 1
+      if x then y else 2 end
+    end
+    def run
+      raise_jump(3)
+    end
+  end
+RUBY
+rj = raise_jump[:rows].find { |r| r[:name] == 'raise_jump' }
+suite.check('a may-raise body is not pure', !rj[:pure] && !rj[:may_raise].empty?)
+suite.check('its jump is decided by the single tuple despite may_raise', rj[:jumps] == 1 && rj[:decided] == 1)
 
 puts '== condition 2: redefined pure name'
 redef = report_of.call(<<~'RUBY')

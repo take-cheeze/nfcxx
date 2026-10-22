@@ -980,7 +980,7 @@ class CodeGen
         "reproduced via the `mrb_method_missing` it tail-calls -- always raises NoMethodError)\n" \
         "  mrb_method_missing(M, mrb_obj_to_sym(M, r1), self,\n" \
         "                     mrb_array_p(r2)\n" \
-        "                       ? mrb_ary_new_from_values(M, RARRAY_LEN(r2), RARRAY_PTR(r2))\n" \
+        "                       ? mrb_ary_new_from_values(M, ary_size(r2), ary_items(r2))\n" \
         "                       : mrb_ary_new(M));\n"
     end
   end

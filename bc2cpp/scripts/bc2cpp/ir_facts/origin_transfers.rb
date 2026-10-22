@@ -221,6 +221,61 @@ ensure
   sharing_flag ? ENV['BC2CPP_IR_SHARED_DEFINITIONS'] = sharing_flag : ENV.delete('BC2CPP_IR_SHARED_DEFINITIONS')
 end
 
+query_key_flag = ENV['BC2CPP_IR_QUERY_KEYS']
+begin
+  query_results = %w[0 1].map do |mode|
+    ENV['BC2CPP_IR_QUERY_KEYS'] = mode
+    key_program = program.call([insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'RETURN', 'R1')])
+    reg = '1'.dup
+    before = key_program.reaching_definitions(1, reg, shared: true)
+    reg.replace('9')
+    check.call("query keys isolate the caller register in mode #{mode}",
+               key_program.reaching_definitions(1, '1', shared: true) == before && !reg.frozen?)
+    first = Set['2', '3'].freeze
+    reordered = Set['3', '2'].freeze
+    a = key_program.reaching_definitions(1, '1', opaque_regs: first, shared: true)
+    b = key_program.reaching_definitions(1, '1', opaque_regs: reordered, shared: true)
+    check.call("opaque-set order remains canonical in mode #{mode}", a.equal?(b))
+    mutable_program = program.call([insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'RETURN', 'R1')])
+    mutable_member = '1'.dup
+    identity_set = Set.new.compare_by_identity
+    identity_set << mutable_member
+    identity_set.freeze
+    poisoned = mutable_program.reaching_definitions(1, mutable_member, opaque_regs: identity_set, shared: true)
+    mutable_member.replace('2')
+    recovered = mutable_program.reaching_definitions(1, '1', opaque_regs: identity_set, shared: true)
+    check.call("frozen identity sets still observe mutable members in mode #{mode}",
+               poisoned.nil? && recovered&.map(&:index) == [0])
+    array_program = program.call([insn(0, 'LOADI_1', 'R1 (1)'), insn(2, 'RETURN', 'R1')])
+    mutable_array_member = '1'.dup
+    array = [mutable_array_member].freeze
+    blocked = array_program.reaching_definitions(1, '1', opaque_regs: array, shared: true)
+    mutable_array_member.replace('2')
+    unblocked = array_program.reaching_definitions(1, '1', opaque_regs: array, shared: true)
+    check.call("frozen arrays still observe mutable members in mode #{mode}", blocked.nil? && unblocked&.map(&:index) == [0])
+    if mode == '1'
+      memo = key_program.instance_variable_get(:@opaque_reg_keys)
+      check.call('only deeply immutable sets enter the snapshot identity memo',
+                 memo.key?(first) && memo.key?(reordered) &&
+                 !mutable_program.instance_variable_get(:@opaque_reg_keys).key?(identity_set) &&
+                 !array_program.instance_variable_get(:@opaque_reg_keys).key?(array))
+      key = memo[first]
+      key_program.reaching_definitions(1, '1', opaque_regs: first, shared: true)
+      check.call('immutable opaque snapshots are reused and deeply frozen',
+                 memo[first].equal?(key) && key.frozen? && key.all?(&:frozen?))
+      BytecodeIR::DATAFLOW_CACHE_SIZE.times do |index|
+        key_program.reaching_definitions(1, '1', opaque_regs: Set[(index + 10).to_s].freeze, shared: true)
+      end
+      check.call('opaque snapshot memo stays bounded without losing old entries',
+                 memo.size == BytecodeIR::DATAFLOW_CACHE_SIZE && memo[first].equal?(key))
+    end
+    [before, a, b, poisoned, recovered, blocked, unblocked]
+  end
+  check.call('compact query keys preserve reaching definitions across both modes', query_results[0] == query_results[1])
+ensure
+  query_key_flag ? ENV['BC2CPP_IR_QUERY_KEYS'] = query_key_flag : ENV.delete('BC2CPP_IR_QUERY_KEYS')
+end
+
 # The Fixnum proof's audited lists are BytecodeIR's, not copies kept equal by a check.
 proof = File.read(File.expand_path('../../../tools/bc2cpp/codegen_fixnum_proof.rb', __dir__))
 check.call('FIXNUM_PROOF_STEP_OVER_OPS is WRITES_LEADING_REG_OPS itself',

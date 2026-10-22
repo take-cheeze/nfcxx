@@ -995,7 +995,8 @@ end
 # resulting receiver fact remains guarded at dispatch; a custom constructor
 # returning another class therefore takes the ordinary fallback.
 def infer_constructed_constant_classes(ireps, assignment_sites, registry, container_constants, closed_world,
-                                       native_name_sources:, included_modules:, prepended_modules:, unknown_mixins:)
+                                       native_name_sources:, included_modules:, prepended_modules:, unknown_mixins:,
+                                       class_decls: {})
 
   known_owners = Set.new(registry.values.flatten.map(&:owner))
   # Every site's own value class, nil when any gate refuses it. A bare name's sites are judged together: the name
@@ -1020,15 +1021,72 @@ def infer_constructed_constant_classes(ireps, assignment_sites, registry, contai
                                unknown_mixins: unknown_mixins)
     end
   end
+  # CONSTANT_SITE_SCOPE: the sites are grouped by qualified name, so a site's class is judged by its own binding. The
+  # other sites of the same bare name only matter when a bare read from this site can reach them; they must sit in
+  # scopes that cannot reach it (constant_scopes_unrelated?). The write count is still the bare name's, so the write
+  # set stays closed.
+  by_bare = assignment_sites.zip(values).group_by { |site, _| site[:name].to_s.split('::').last }
   inferred = {}
-  assignment_sites.zip(values).group_by { |site, _| site[:name].to_s.split('::').last }.each do |bare, group|
+  assignment_sites.zip(values).group_by { |site, _| site[:name] }.each do |full, group|
     classes = group.map { |_, value| value }
     next unless classes.none?(&:nil?) && classes.uniq.size == 1
-    next unless closed_world.static_constant_writes?(bare, group.size)
+
+    bare = full.split('::').last
+    siblings = by_bare.fetch(bare)
+    next unless closed_world.static_constant_writes?(bare, siblings.size)
+
+    owner = group.first.first[:owner]
+    next unless siblings.all? do |site, _|
+      site[:name] == full ||
+        constant_scopes_unrelated?(owner, site[:owner], class_decls: class_decls, included_modules: included_modules,
+                                                        prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+    end
 
     group.each { |site, value| inferred[site[:name]] = value }
   end
   inferred
+end
+
+# CONSTANT_SCOPE_UNRELATED: true only when a bare-name read in scope +a+ can never resolve to a constant defined in
+# +b+, and the reverse. Ruby's lookup visits the lexical chain, then the ancestors of the innermost scope (superclasses,
+# included and prepended modules, Object and what Object mixes in). A pair is related when one scope encloses the
+# other, or one is among the other's ancestors. Any scope whose ancestry cannot be modelled (a superclass that is
+# unresolved or reopened with different superclasses, a mixin the registry could not resolve) is related, never
+# guessed. The `<`-scopes and singleton scopes are not in class_decls, so they stay unmodelled.
+def constant_scopes_unrelated?(a, b, class_decls:, included_modules:, prepended_modules:, unknown_mixins:)
+  return false unless a.is_a?(String) && b.is_a?(String)
+  return false if a == b || a.start_with?("#{b}::") || b.start_with?("#{a}::")
+
+  reach_a = constant_lookup_scopes(a, class_decls, included_modules, prepended_modules, unknown_mixins)
+  reach_b = constant_lookup_scopes(b, class_decls, included_modules, prepended_modules, unknown_mixins)
+  return false unless reach_a && reach_b
+
+  !reach_a.include?(b) && !reach_b.include?(a)
+end
+
+# The scopes a bare-name lookup from +klass+ visits after its lexical chain, or nil when the ancestry is unmodelled.
+# A name with no class_decls entry is a module (or Object itself, or a core class), which ends the chain.
+def constant_lookup_scopes(klass, class_decls, included_modules, prepended_modules, unknown_mixins)
+  scopes = Set.new
+  work = [klass]
+  until work.empty?
+    scope = work.shift
+    next if scopes.include?(scope)
+    return nil if unknown_mixins.include?(scope)
+
+    scopes << scope
+    work.concat(Array(included_modules[scope]), Array(prepended_modules[scope]))
+    supers = class_decls.fetch(scope, []).map { |decl| decl[:super] }.uniq
+    next if supers.empty?
+    return nil unless supers.size == 1
+
+    case supers.first
+    when String then work << supers.first
+    when :none then work << 'Object'
+    else return nil
+    end
+  end
+  scopes
 end
 
 # NATIVE_CONSTRUCTED_CONSTANT: the full name of the native class `klass` (a bare `Color` or `RGSS::Color`) when a

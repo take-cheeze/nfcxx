@@ -232,7 +232,11 @@ module NativeAstReturns
       @nonnil = Set.new
       @field_memo = {}
       @field_in_progress = {}
+      # The names looked up in +external+ (each lookup's callee). A file's result depends on +external+ only through them.
+      @external_refs = Set.new
     end
+
+    attr_reader :external_refs
 
     def function_kind(name)
       return @memo[name] if @memo.key?(name)
@@ -277,6 +281,7 @@ module NativeAstReturns
 
         return @self_index[callee]
       end
+      @external_refs << callee
       match = /\Aself:(\d+)\z/.match(@external[callee].to_s)
       match && match[1].to_i
     end
@@ -405,6 +410,7 @@ module NativeAstReturns
     private
 
     def external_kind(name)
+      @external_refs << name
       kind = @external[name]
       kind == SELF_KIND || kind.to_s.start_with?('self:') ? nil : kind
     end
@@ -615,12 +621,14 @@ module NativeAstReturns
 
   # { 'function name' => kind-or-nil } for every function defined in +source+.
   # self_index (optional, a Hash) receives the self-parameter position of each function that returns its self.
-  def analyze(root, source, external: {}, self_index: nil)
+  # external_refs (optional, a Set) receives the names the analysis looked up in +external+.
+  def analyze(root, source, external: {}, self_index: nil, external_refs: nil)
     unit = translation_unit(root, source)
     fns = unit[:fns]
     analyzer = Analyzer.new(fns, external, FieldIndex.new(unit[:records], fns, root))
     kinds = fns.keys.sort.to_h { |name| [name, analyzer.function_kind(name)] }
     self_index&.merge!(analyzer.self_index)
+    external_refs&.merge(analyzer.external_refs)
     kinds
   end
 end
