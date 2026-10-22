@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Aggregates BC2CPP_REFINE_REPORT:
+# Aggregates BC2CPP_REFINE_REPORT (tools/bc2cpp/refine_report.rb):
 #
 #   BC2CPP_CALL_FACTS=0 BC2CPP_REFINE_REPORT=refine.tsv MRBC=... ruby scripts/bc2cpp/coverage_report.rb
 #   ruby scripts/bc2cpp/refine_report.rb refine.tsv [--list-bugs]

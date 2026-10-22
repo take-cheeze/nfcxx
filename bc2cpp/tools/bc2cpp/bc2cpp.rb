@@ -356,7 +356,7 @@ if $PROGRAM_NAME == __FILE__
     alias_sites.each { |site| escape_aliases[site[:new]] << site[:old] }
     compiled_files = ireps.each_value.to_set(&:file)
     hidden_ruby_names = foreign_method_names(outside_ruby.reject { |path| compiled_files.include?(path) })
-    warn "== escape analysis (ADR 0316): #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
+    warn "== escape analysis: #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
          "Ruby this run does not compile =="
     EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
                                                      native_names: native_names,
