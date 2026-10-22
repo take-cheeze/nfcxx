@@ -5,6 +5,8 @@ require_relative 'core_defs'
 
 # ADR 0338: specialize the selected core bytecode, never infer a result from its name.
 module CoreRubyResults
+  EMPTY_SEEN = Set.new.freeze
+  EMPTY_ARGUMENTS = [].freeze
   INSTALLERS = %w[alias_method define_method define_singleton_method undef_method remove_method].freeze
 
   def self.installed_names(ireps)
@@ -110,23 +112,29 @@ module CoreRubyResults
 end
 
 class CodeGen
-  def core_ruby_class_result(irep, index, insn, state, seen: Set.new, name_results: true)
+  def core_ruby_class_result(irep, index, insn, state, seen: nil, name_results: true)
+    scratch = ENV['BC2CPP_CORE_RUBY_QUERY_SCRATCH'] != '0'
+    seen ||= scratch ? CoreRubyResults::EMPTY_SEEN : Set.new
     return nil if ENV['BC2CPP_CORE_RUBY_RESULTS'] == '0'
     return nil unless %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB].include?(insn.op)
     return nil unless insn.sym && (%w[SEND0 SSEND0].include?(insn.op) || insn.plain_fixed_argc?)
     argc = %w[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
     return nil if argc.positive? && ENV['BC2CPP_CORE_RUBY_POSITIONAL_RESULTS'] == '0'
 
-    arguments = (1..argc).map { |arg| state[insn.reg.to_i + arg] || NumericFlow::OTHER }
+    arguments = if scratch
+                  argc.zero? ? CoreRubyResults::EMPTY_ARGUMENTS : Array.new(argc) { |arg| state[insn.reg.to_i + arg + 1] || NumericFlow::OTHER }
+                else
+                  (1..argc).map { |arg| state[insn.reg.to_i + arg] || NumericFlow::OTHER }
+                end
 
     receiver = state[insn.reg.to_i]
     receiver &= ~NumericFlow::NIL if receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::NIL) && nil_unanswerable?(insn.sym)
-    core_bits = RETURN_CORE_CLASS.keys.reduce(0, :|)
+    core_bits = scratch ? RETURN_CORE_MASK : RETURN_CORE_CLASS.keys.reduce(0, :|)
     classes = if receiver.is_a?(Integer) && receiver.positive? && (receiver & ~core_bits).zero?
                 RETURN_CORE_CLASS.select { |bit, _klass| receiver.anybits?(bit) }
-              else {}
+              else scratch ? nil : {}
               end
-    return name_results ? core_ruby_name_result(irep, index, insn, arguments) : nil if classes.empty?
+    return name_results ? core_ruby_name_result(irep, index, insn, arguments) : nil if !classes || classes.empty?
     if (classes.size > 1 && ENV['BC2CPP_CORE_RUBY_RECEIVER_UNIONS'] == '0') ||
        classes.values.any? { |klass| !BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain) }
       return name_results ? core_ruby_name_result(irep, index, insn, arguments) : nil

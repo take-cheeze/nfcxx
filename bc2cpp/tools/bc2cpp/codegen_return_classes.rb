@@ -21,6 +21,7 @@ class CodeGen
   RETURN_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
   # Classes with bits of their own in NumericFlow: a `Klass.new` of one of them gets no class bit.
   RETURN_CORE_CLASS = NumericFlow.class_bits('Array', 'Hash', 'String', 'Range')
+  RETURN_CORE_MASK = RETURN_CORE_CLASS.keys.reduce(0, :|)
   RETURN_BITLESS_CLASSES = %w[Array Hash String Range Integer Float NilClass Symbol TrueClass FalseClass].freeze
 
   # NumericFlow's oracle for the exact-class run: captured locals and literals pool nothing; arguments,
