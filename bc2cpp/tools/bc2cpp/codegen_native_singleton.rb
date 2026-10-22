@@ -5,12 +5,12 @@ require 'set'
 require_relative 'ruby_parse_cache'
 require_relative 'native_singletons'
 
-# NATIVE_SINGLETON_CALL (docs/adr/0416): `Const.name(args)` where `Const` is a class or module object the
+# NATIVE_SINGLETON_CALL: `Const.name(args)` where `Const` is a class or module object the
 # program cannot rebind and `name` is one C function a native source registers on that constant's singleton
 # class (File.exist?, Math.sin, Time.now, Graphics.snap_to_bitmap ...).
 #
-# These functions read their arguments with mrb_get_args from the call frame, so unlike the RGSS entry points of
-# ADR 0263 they cannot be called bare. The generated code instead runs the frame mrb_funcall would push, with
+# These functions read their arguments with mrb_get_args from the call frame, so unlike the RGSS entry points,
+# they cannot be called bare. The generated code instead runs the frame mrb_funcall would push, with
 # the lookup done once per site (bc2cpp_native_singleton, symbol_cache.rb): the function, its frame, its
 # argument-count checks, its backtrace entry and every error text are the interpreter's own. What the proof
 # removes is the by-name lookup (two of them: the CHECKED_SEND probe and mrb_funcall's) and the
@@ -18,7 +18,7 @@ require_relative 'native_singletons'
 #
 # The proof, all of which must hold (anything else keeps today's send):
 #   1. The receiver register holds a stable class/module constant: a scoped path ConstructClassNames proves
-#      (constant_object_owner, as ADR 0259), or a bare top-level native class (File, Math, Time, IO) whose
+#     , or a bare top-level native class (File, Math, Time, IO) whose
 #      identity this file proves below.
 #   2. At least one native registration puts `name` on `<Const>.singleton`, and every spelling of `name` in every
 #      native source is a registration
@@ -240,7 +240,7 @@ module NativeSingletonCall
 end
 
 class ClosedWorld
-  # NATIVE_SINGLETON_CALL (ADR 0416): why the build's Ruby or its installers might give +name+ another body than
+  # NATIVE_SINGLETON_CALL: why the build's Ruby or its installers might give +name+ another body than
   # the native registration, or nil when nothing can: no definition in the registry but the native placeholder,
   # none in the outside Ruby, no unplaceable DEF, no visibility change, no global refusal.
   def native_singleton_name_refusal(name)

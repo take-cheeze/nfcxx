@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# CLOSED_WORLD_CONSTANT_OBJECT (ADR 0259): a send whose receiver is a stable
+# CLOSED_WORLD_CONSTANT_OBJECT: a send whose receiver is a stable
 # class/module constant resolves to the singleton method mruby's lookup finds
 # for that class object, instead of dispatching by name.
 class CodeGen

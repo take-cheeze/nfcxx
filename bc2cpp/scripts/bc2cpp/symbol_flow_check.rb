@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Unit checks for IrSymbolFlow (tools/bc2cpp/ir_symbol_flow.rb, ADR 0450, ADR 0493): the finite name set of a
+# Unit checks for IrSymbolFlow: the finite name set of a
 # constant dispatch table, and the premises that reject a table which could hold a non-literal name. Each fixture
 # is compiled by mrbc and analysed as a closed world.
 #
@@ -84,7 +84,7 @@ outside_writer = LITERAL_TABLE + <<~'EOS_FIXTURE'
 EOS_FIXTURE
 check.call('a table written from a second method is rejected (P1)', universe_of(suite, outside_writer, 'TABLE').nil?)
 
-# Each of these lets :evil into the table where the premises do not look (ADR 0499 lists the ones ADR 0450's walk missed).
+# Each of these lets :evil into the table where the premises do not look.
 argument = LITERAL_TABLE.sub('send(*TABLE[code])', 'fill(TABLE); send(*TABLE[code])')
 check.call('a table passed as an argument is rejected (P2)', universe_of(suite, argument, 'TABLE').nil?)
 receiver = LITERAL_TABLE.sub('send(*TABLE[code])', 'TABLE.push([:evil]); send(*TABLE[code])')

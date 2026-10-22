@@ -9,7 +9,7 @@ require_relative 'ruby_parse_cache'
 # to_int, to_ary, to_hash for the implicit ones the language calls) return the class Ruby expects. Such a method takes only
 # optional positional parameters, so a call the language makes with no arguments always reaches it.
 #
-# Its return is declared as a runtime-checked hint (%a{bc2cpp:hint}, ADR 0455): a method whose return the compiler can
+# Its return is declared as a runtime-checked hint: a method whose return the compiler can
 # prove is the declared class costs nothing, and any other value raises BC2cppHintViolation when it runs. A conversion
 # method with a required parameter, a rest parameter or a keyword is a build error, because the hint would not apply.
 module ConversionReturns

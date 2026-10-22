@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# CodeGen: the Integer-tag test on a native entry point's :int argument (ADR 0318).
+# CodeGen: the Integer-tag test on a native entry point's :int argument.
 #
 # `Bitmap.new(w, h)` and the NativeDirect entries whose kinds say :int test `mrb_integer_p` on every such argument and
 # keep the by-name send as the else. This file answers the question every site asks, "is this register provably a
@@ -20,7 +20,7 @@ module NativeIntArgs
   end
 
   # True when argument +position+ of the call is a register the Fixnum proof covers at the call.
-  # +legacy+: the caller already used the Fixnum proof before ADR 0318 (the exact-flow arm), which the kill switch keeps.
+  # +legacy+: the caller already used the Fixnum proof (the exact-flow arm), which the kill switch keeps.
   def native_int_arg_proven?(irep, proof_idx, owner_def, reg_offset, argv, position, legacy: false)
     on = native_int_args_on? && static_constant_world?
     return false unless on || legacy
@@ -35,7 +35,7 @@ module NativeIntArgs
     return true if fixnum_interval(irep, proof_idx, shifted.to_s, owner_def)
 
     # A constant leaf is the interval's to prove: INTEGER_CONSTANT_PROOF's name scan misses a native definition
-    # (ADR 0318), so it does not vouch for one here.
+    # so it does not vouch for one here.
     @fixnum_proof_skip_constants = true
     begin
       proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def)

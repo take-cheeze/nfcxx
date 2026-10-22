@@ -3,7 +3,7 @@
 
 # Reports whether the Fixnum proof's exception barriers (ctx[:catch_targets],
 # ctx[:protected]) could be derived from BytecodeIR handler edges without
-# changing a decision (ADR 0250 addendum "Barrier shadow"):
+# changing a decision:
 #
 #   1. synthetic handlers: the corner cases where the edge-derived sets differ
 #      from the address-range sets, printed as concrete examples;

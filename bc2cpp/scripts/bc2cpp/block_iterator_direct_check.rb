@@ -2,7 +2,7 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-# BLOCK_ITERATOR_DIRECT (docs/adr/0472): literal-block iterator sends call the compiled block-taking body directly.
+# BLOCK_ITERATOR_DIRECT: literal-block iterator sends call the compiled block-taking body directly.
 #
 #   generated code (needs a host mrbc; one closed-world generation per world variant, seconds)
 #     - an implicit-self `loop { }` calls Kernel#loop's compiled body, behind the root-context test unless the block
@@ -10,9 +10,9 @@
 #     - `s.each_char { }` / `s.each_line { }` on an unproven receiver get an exact-String arm, the dynamic send its else;
 #       a program String#each_char withdraws the arm;
 #     - an Integer literal receiver (`2.times { }` nested in an inlined loop) keeps no dynamic else;
-#     - the Array/Hash/Range arms (ADR 0270) and the guarded loops (ADR 0420) are unchanged: an unproven receiver keeps
+#     - the Array/Hash/Range arms and the guarded loops are unchanged: an unproven receiver keeps
 #       its class tests and the dynamic send as the else;
-#     - BC2CPP_BLOCK_CORE_DIRECT=0 removes every arm of this ADR with the others.
+#     - BC2CPP_BLOCK_CORE_DIRECT=0 removes every arm of this change with the others.
 #   behaviour (needs a full-core libmruby, see Bc2cppFixtureRuntime.full_or_build)
 #     - compiled and interpreted runs print the same for each with break/next/return, each over an array mutated
 #       during iteration, map/select/reject/any?/all?/reduce, Integer#times (literal and nested), Hash#each/each_key,
@@ -88,7 +88,7 @@ SRC = <<~'RUBY'
   end
 RUBY
 
-# A site inside a rescue range lives in the extracted try function (ADR 0262's fell-off-the-end raise ends it).
+# A site inside a rescue range lives in the extracted try function.
 def code_of(code, name)
   code[/^mrb_value BiFx_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s +
     code.scan(/^static mrb_value BiFx_#{name}_impl_rescue_try\w*\(.*?fell off the end of its body"\);\n\}/m).join
@@ -119,7 +119,7 @@ code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true
 %w[lp lp_value lp_return lp_next lp_stop lp_drain lp_raise].each do |name|
   check.call("#{name}: loop { } calls the compiled Kernel#loop", code_of(code, name).include?(KERNEL_LOOP))
 end
-# The else is the site's send: by name, or the owner call of ADR 0468 when the closed world names every owner.
+# The else is the site's send: by name, or the owner call when the closed world names every owner.
 ELSE_SEND = '(?:mrb_funcall_with_block|bc2cpp_owner_call)\\('
 check.call('lp: a block with a break keeps the root-context test, the send its else',
            code_of(code, 'lp').match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = Kernel_loop_impl\(M, self, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}M, self, /m))

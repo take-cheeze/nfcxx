@@ -7,9 +7,9 @@ require_relative 'ir_block_operands'
 require_relative 'ir_symbol_flow'
 require_relative 'send_names'
 
-# YIELD_REACH (ADR 0283): a whole-program, by-name "may this code suspend the current Fiber?"
+# YIELD_REACH: a whole-program, by-name "may this code suspend the current Fiber?"
 # analysis over the ireps of a closed world. A compiled frame that sits between a Fiber's entry
-# and a Fiber.yield breaks mruby's fiber switch (ADR 0269), so a frame whose execution provably
+# and a Fiber.yield breaks mruby's fiber switch, so a frame whose execution provably
 # cannot reach a yield above it is safe under any Fiber. Every question defaults to "may yield".
 #
 # Per node (method, block or class-body irep) it computes
@@ -110,7 +110,7 @@ class YieldReach
     @sound && @nb.key?(label) && !@nb[label]
   end
 
-  # #builds_enumerator? (FIBER_BODY_GUARD, ADR 0333): does this method hand a
+  # #builds_enumerator?: does this method hand a
   # literal block to `Enumerator.new` / `Lazy.new` / `Generator.new`? Those blocks
   # are generators -- mruby-enumerator runs them on a Fiber (CoreDefs.fiber_gem?)
   # -- so the method cannot compile behind a hand-off from its own entry: the

@@ -5,7 +5,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'escape_analysis'
 
-# STACK_TUPLES (docs/adr/0545): an Array literal of 1..8 immediates that never leaves its frame keeps its elements in a
+# STACK_TUPLES: an Array literal of 1..8 immediates that never leaves its frame keeps its elements in a
 # C++ array of mrb_value, not in an mruby Array. An immediate (fixnum, nil, true, false, symbol) needs no GC root, so
 # the buffer is an ordinary local.
 #
@@ -59,7 +59,7 @@ class CodeGen
 
     analyzer = escape_analyzer or return {}
     @stack_tuple_where = irep.label
-    # A closure could read the frame's registers by pointer (ADR 0545, closures).
+    # A closure could read the frame's registers by pointer.
     unless EscapeAnalysis.op_sites(irep, EscapeAnalysis::CLOSURE_OPS).empty?
       refuse(:closure_in_irep)
       return {}

@@ -3,13 +3,13 @@
 require 'set'
 require_relative 'numeric_flow'
 
-# FROZEN_TABLES (docs/adr/0306): element classes for an Array or Hash that is a frozen literal.
+# FROZEN_TABLES: element classes for an Array or Hash that is a frozen literal.
 #
 # A literal `[1, 2, 3].freeze` / `{ 8 => 0 }.freeze` has no writer after the `freeze`, so its slots are
 # whatever the literal stored and no alias or escape analysis is needed: the table itself is the
 # proof. Each distinct shape (container, per-slot class sets, literal keys) is one NumericFlow object
 # kind, so the shape rides pooled constants, arguments, ivars and return values like an LCF kind
-# (ADR 0294) and `recv[i]` / `recv.first` read the shape back.
+# and `recv[i]` / `recv.first` read the shape back.
 #
 # A slot's class set is syntactic (literal ops only), never a flow result, so it cannot depend on the
 # fixpoint it feeds. OTHER stays OTHER: the shape only narrows what the literal states.

@@ -5,7 +5,7 @@ require_relative 'block_send_report_columns'
 require_relative 'receiver_proof_report_columns'
 require_relative 'numeric_flow'
 
-# Debug report (ADR 0331): with BC2CPP_RECEIVER_PROOF_REPORT=<path>, every engine explicit-receiver send whose
+# Debug report: with BC2CPP_RECEIVER_PROOF_REPORT=<path>, every engine explicit-receiver send whose
 # generated code holds a by-name line is written as one TSV row (the last compile of a site wins), with where its
 # receiver comes from and what would happen to the line if the receiver's class set were proven. It changes no
 # generated code. The TSV is meant for offline aggregation.

@@ -19,7 +19,7 @@ require_relative 'bytecode_ir'
 # reaches it, MOVE chains followed), `ambiguous` (several definitions reach it through a join or a loop),
 # `refused` (the dataflow cannot prove the set) or `none` (no definition). `category` is the origin of the
 # single definition for `exact`; for `ambiguous` it is the may-set of the definitions' origins (sorted, distinct,
-# joined by `|`, ADR 0379: the receiver is one of them); for `refused` it is the first refusal cause; `-` for
+# joined by `|`; the receiver is one of them); for `refused` it is the first refusal cause; `-` for
 # `none`. `definition` is that writer as `OP@index` (`entry` for the method's incoming value), comma-separated
 # for an `ambiguous` row.
 #
@@ -149,7 +149,7 @@ module SiteOriginTable
       rhs = text ? assignment_rhs(text, definition.reg) : []
       if rhs.any?
         # Producers inside one instruction (a fast path and its dispatch): agreeing ones give the origin. When they
-        # differ, the writing instruction still says what kind of value it leaves, whichever arm ran (ADR 0379).
+        # differ, the writing instruction still says what kind of value it leaves, whichever arm ran.
         producers = rhs.map { |value| SiteCensus.origin_of([], 0, value, nil, [], 0) }.uniq
         return producers.first if producers.size == 1
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check ScanCache (tools/bc2cpp/scan_cache.rb, ADRs 0415 and 0462): the disk memo of the scans that read only the
+# Check ScanCache: the disk memo of the scans that read only the
 # outside-world sources. A stored result must be returned only for the exact inputs and scanner sources it was
 # computed from, must never change what the scan returns, and every cache fault (an unreadable entry, an entry stored
 # under another key, a value or directory that cannot be stored) must stop the run. It is always on; the checks turn

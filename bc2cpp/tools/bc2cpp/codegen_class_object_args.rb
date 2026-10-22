@@ -3,9 +3,9 @@
 require 'set'
 require_relative 'irep_arity'
 
-# CLASS_OBJECT_ARGS (ADR 0416): a `klass.new` whose receiver is a parameter of a method (or a captured one) names the
+# CLASS_OBJECT_ARGS: a `klass.new` whose receiver is a parameter of a method (or a captured one) names the
 # class constants its callers pass, so a generic `klass.new` helper no longer withdraws every initialize that takes
-# its argument count (constructor_new_site). Conditions and soundness argument: the ADR; each is a negative in
+# its argument count (constructor_new_site). Each condition is a negative in
 # scripts/bc2cpp/class_object_args_check.rb. BC2CPP_CLASS_OBJECT_ARGS=0 turns it off.
 class CodeGen
   CLASS_OBJECT_ARGS_DEPTH = 3
@@ -60,7 +60,7 @@ class CodeGen
       index, level = writer.upvar_ref
       return nil unless index
 
-      # No send of the build can write a local by name (CAPTURED_LOCAL_CLASS's precondition, ADR 0308).
+      # No send of the build can write a local by name.
       return nil unless captured_local_class_enabled?
 
       ancestor, = captured_local_frame(irep, level)
@@ -126,8 +126,7 @@ class CodeGen
   end
 
   # Can code outside the analysed bytecode call +name+: a native funcall or a foreign Ruby identifier names it, or an
-  # outside native source spells it as anything but a registration's name. The call-name test of SETTER_POOLS (ADR
-  # 0370); a name that is only a C identifier is not one (ENTRY_ARG_CALLSITE_PROOF's blunter token rule refuses it).
+  # outside native source spells it as anything but a registration's name. The call-name test of SETTER_POOLS; a name that is only a C identifier is not one (ENTRY_ARG_CALLSITE_PROOF's blunter token rule refuses it).
   def class_object_called_outside?(name)
     @class_object_outside_names ||= @closed_world.outside_call_names(@ireps.values.to_set(&:file))
     @class_object_outside_names.include?(name) || @closed_world.outside_native_literal?(name)

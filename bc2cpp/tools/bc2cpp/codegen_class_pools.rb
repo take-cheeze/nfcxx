@@ -3,12 +3,12 @@
 require_relative 'numeric_flow'
 require_relative 'core_hierarchy_sigs'
 
-# CodeGen: CLASS_POOLS (ADR 0295).
+# CodeGen: CLASS_POOLS.
 #
 # RETURN_CLASS_TABLE's flow (codegen_return_classes.rb) knows nothing outside the method, so an ivar
 # read in another method than the one that wrote it, and an argument read in the callee, were
 # unknown. These pools carry the exact-class bits (a proven `Klass.new`, ARR/HSH/STR/RNG) and
-# NIL across methods the way ADR 0276's pools carry INT/FLT, with the same admission:
+# NIL across methods the way the numeric pools carry INT/FLT, with the same admission:
 #
 #   * ivar pools reuse NumericIvarGroup's structure: one pool per (family, name), keyed by the
 #     group, joined over every SETIV of the family. A group the numeric proof refuses before any
@@ -20,14 +20,14 @@ require_relative 'core_hierarchy_sigs'
 #   * argument pools reuse entry_arg_candidates: a mandatory argument of a name with one
 #     definition, called only from visible, non-computed, same-arity sites, holds the join of the
 #     class sets those sites pass.
-#   * constant pools (ADR 0301) reuse NumericConstGroup: one pool per bare constant name, the join of
+#   * constant pools reuse NumericConstGroup: one pool per bare constant name, the join of
 #     the class sets its SETCONST sites store, for a name every definition of which is visible and no
 #     const_missing can answer.
 #
 # A pool is a least fixpoint of may-sets that only grows and is dropped for good when a site
 # stores a value the flow cannot name (OTHER, a pending exception) or sits in an irep it does not
 # model. A class bit says "exactly this class", so everything also needs
-# ClosedWorld#exact_instances_singleton_free? (ADR 0280).
+# ClosedWorld#exact_instances_singleton_free?.
 class CodeGen
   # Bits a pool may not carry: unmodelled values and a pending exception object.
   CLASS_POOL_UNSHIPPABLE = NumericFlow::OTHER | NumericFlow::EXC
@@ -43,7 +43,7 @@ class CodeGen
       if !group.structural
         @class_ivar_pools[key] = 0
       elsif (stores = checked_group_stores(group))
-        # SETTER_POOLS (ADR 0370): the setter calls and audited natives are this group's other writers.
+        # SETTER_POOLS: the setter calls and audited natives are this group's other writers.
         @class_ivar_pools[key] = stores[:classes].reduce(NumericFlow::CHECKED) { |mask, klass| mask | numeric_class_bit(klass) }
         @checked_pools_used = true
       end
@@ -66,7 +66,7 @@ class CodeGen
   end
 
   # BC2CPP_CLASS_POOLS=0 turns the pools off. A Marshal.load can build an object of any class with
-  # ivars of its own choosing, which no site scan sees; like ADR 0276/0279/0285 the default models
+  # ivars of its own choosing, which no site scan sees; the default models
   # hostile bytes as outside the closed world, and =strict withdraws the pools whenever any Ruby
   # in the build can reach `Marshal`.
   def class_pools_enabled?
@@ -84,8 +84,8 @@ class CodeGen
     end
   end
 
-  # The class set register +reg+ holds when the instruction at +idx+ reads it (the exact-class flow
-  # of ADR 0289): 0 when the instruction is unreached, nil when the irep is not modelled or a
+  # The class set register +reg+ holds when the instruction at +idx+ reads it (the exact-class flow):
+  # 0 when the instruction is unreached, nil when the irep is not modelled or a
   # nested block may write the register.
   def return_class_raw_mask(irep, idx, reg)
     states = return_class_states(irep)
@@ -133,7 +133,7 @@ class CodeGen
   end
 
   # The pooled class set of a GETCONST/GETMCNST: the join of what every definition it reads stores
-  # (ADR 0301, scoped by ADR 0423). A name the numeric proof poisons has no pool; a read with no
+  # A name the numeric proof poisons has no pool; a read with no
   # proven definition falls back to the integer-constant proof, else OTHER.
   # Keyed by class symbol, as constant_value_classes reports them.
   CORE_CONTAINER_BITS = NumericFlow.class_bits('Array', 'Hash', 'String')
@@ -351,7 +351,7 @@ class CodeGen
     parts = []
     parts << 'CHECKED' if mask.anybits?(NumericFlow::CHECKED)
     parts << numeric_mask_name(mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)) if (mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)).nonzero?
-    # numeric_mask_name may register Symbol; take the append-only snapshot afterwards (ADR 0531).
+    # numeric_mask_name may register Symbol; take the append-only snapshot afterwards.
     native_result_class_bits.each do |klass, _bit, position|
       parts << klass if position >= NumericFlow::CLASS_BIT_BASE && mask[position] == 1
     end
@@ -361,7 +361,7 @@ class CodeGen
   end
 end
 
-# CodeGen: the nil half of a pooled class set (ADR 0296).
+# CodeGen: the nil half of a pooled class set.
 class CodeGen
   # Classes whose methods nil answers: itself and what it inherits (declarations.rbs#core_hierarchy), each with the names the ROM
   # scan gives it (CoreHierarchySigs::SCAN_SPELLINGS: "Nil", "Basic_object").
@@ -391,8 +391,8 @@ class CodeGen
     @nil_unanswerable[name] = compute_nil_unanswerable(name)
   end
 
-  # NATIVE_CLASS_ARMS (ADR 0323): nil_unanswerable? with the installs only a class object sees left out; nil is
-  # an instance of a non-Module class, as every set a lever of that ADR judges.
+  # NATIVE_CLASS_ARMS: nil_unanswerable? with the installs only a class object sees left out; nil is
+  # an instance of a non-Module class.
   def nil_unanswerable_for_instances?(name)
     @nil_unanswerable_instances ||= {}
     return @nil_unanswerable_instances[name] if @nil_unanswerable_instances.key?(name)

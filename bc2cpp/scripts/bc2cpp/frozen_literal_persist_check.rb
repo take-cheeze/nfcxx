@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Behaviour oracle for persistent frozen string literals (ADR 0546): a `# frozen_string_literal: true` literal is
+# Behaviour oracle for persistent frozen string literals: a `# frozen_string_literal: true` literal is
 # the VM's one persistent frozen String for its bytes, in interpreted and bc2cpp-compiled code alike.
 #
 #   1. run (full-core mruby), interpreted against compiled: the magic-comment class answers the same on both sides

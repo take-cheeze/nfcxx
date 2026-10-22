@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# DECLARED_RETURN_GUARD (docs/adr/0455): a `%a{bc2cpp:hint}` return declaration is checked at run time by its
+# DECLARED_RETURN_GUARD: a `%a{bc2cpp:hint}` return declaration is checked at run time by its
 # compiled body and is then a fact. Host only (no mrbc, no build), on a CodeGen with hand-set state:
 #
 # 1. the wrapped body: a hinted `-> Integer` and `-> C` (and `C?`) check every value the method returns (the exit

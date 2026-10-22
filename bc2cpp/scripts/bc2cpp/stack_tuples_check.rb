@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Behaviour and placement oracle for the stack tuple arrays (docs/adr/0545): a literal Array of immediates that never
+# Behaviour and placement oracle for the stack tuple arrays: a literal Array of immediates that never
 # leaves its frame keeps its elements in a C++ buffer. Three halves:
 #
 #   1. placement: each method in POSITIVE has its buffer in the generated code (`mrb_value bc2cpp_tup<N>[k]`) and no

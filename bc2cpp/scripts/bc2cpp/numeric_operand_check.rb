@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NUMERIC_OPERAND_PROOF (docs/adr/0276): guarded arithmetic and compare arms lose
+# NUMERIC_OPERAND_PROOF: guarded arithmetic and compare arms lose
 # their dynamic-send else when both operands are PROVEN Integer/Float, and keep it
 # for every operand a proof cannot cover.
 #

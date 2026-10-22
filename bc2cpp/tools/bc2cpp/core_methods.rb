@@ -3,12 +3,12 @@
 require 'set'
 require_relative 'core_defs'
 
-# CORE_METHODS (ADR 0264): every method of mruby's own Ruby (compiled_gems.rb
+# CORE_METHODS: every method of mruby's own Ruby (compiled_gems.rb
 # BC2CPP_CORE_MRBLIB_GEMS) that compiles clean is compiled, except the ones that
 # stay bytecode by decision: a definition a later one replaces, one a
 # conditional can skip, one that names the Fiber class or builds a lambda (CoreDefs),
 # and the `Owner#name` entries of core_refused.txt. A method that touches a block
-# compiles behind the Fiber guard of ADR 0269 (guarded_labels). An excluded definition is
+# compiles behind the Fiber guard (guarded_labels). An excluded definition is
 # dropped from the registry (bc2cpp.rb), so it is neither compiled nor a dispatch
 # target, and the interpreter's method answers it exactly as before.
 module CoreMethods
@@ -28,7 +28,7 @@ module CoreMethods
   # mruby-enumerator's enumerator.rb and touch no block and no Fiber. In that file only
   # inspect, size, rewind, feed, next, peek and peek_values pass (next_values names Fiber,
   # the rest take a block). These wrappers create no compiled closure. Their delegated
-  # callbacks may suspend, so every entry still requires the root context (ADR 0350).
+  # callbacks may suspend, so every entry still requires the root context.
   def enumerator_wrapper?(definition, ireps)
     return false if ENV['BC2CPP_ENUMERATOR_WRAPPERS'] == '0'
     return false unless definition && definition.owner == 'Enumerator'
@@ -101,7 +101,7 @@ module CoreMethods
     irep.reps.compact.reduce(irep.instructions.to_set(&:op)) { |acc, child| acc | all_ops(ireps.fetch(child), ireps) }
   end
 
-  # One line per core-source bytecode definition the build keeps interpreted (ADR 0371).
+  # One line per core-source bytecode definition the build keeps interpreted.
   # `unsupported` maps "Owner#name" to the compiler's own #error reason for definitions the
   # exclusion rules let through but codegen cannot express.
   def interpreted_report(defs, ireps, refused, unsupported = {})

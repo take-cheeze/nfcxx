@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check ADR 0516 steps 1 to 4: native table membership is per member, read by NativeSigs and RbsSignatures.
+# Check native table membership, steps 1 to 4: it is per member, read by NativeSigs and RbsSignatures.
 #
 #   1. a fixture block with one tagged and one untagged member: NativeSigs.select_table keeps the tagged member only, the
 #      block header stays, a block with no member of the table is skipped, a block with no members keeps its marker;

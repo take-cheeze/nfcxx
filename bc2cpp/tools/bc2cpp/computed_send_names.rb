@@ -5,7 +5,7 @@ require_relative 'integer_constants'
 require_relative 'bytecode_ir_regions'
 require_relative 'send_names'
 
-# COMPUTED_SEND_EXPANSION (ADR 0303): the finite set of method names a computed-name
+# COMPUTED_SEND_EXPANSION: the finite set of method names a computed-name
 # `send(name, ...)` can carry, when the program makes it provable.
 #
 # Two sources, both read off reaching definitions of the name register (BytecodeIR), so a join

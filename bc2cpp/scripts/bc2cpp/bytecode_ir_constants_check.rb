@@ -79,7 +79,7 @@ check.call('Array literal: class Array',
 check.call('frozen literal: a stock Array#freeze answers its receiver, so the binding is Array with no value',
            fact_of.call(result, 'Fx::FROZEN')&.classes == Set[:Array] && fact_of.call(result, 'Fx::FROZEN')&.value.nil?)
 # A constructed value (`Color.new(...)`) is not modelled: the receiver is a class constant, whose name is poisoned by its
-# CLASS op, so the binding has no class. It stays unknown until class identity is modelled (ADR 0536).
+# CLASS op, so the binding has no class. It stays unknown until class identity is modelled.
 constructed = analyze.call(<<~RUBY)
   module Ct
     CLR = Foo.new(1)

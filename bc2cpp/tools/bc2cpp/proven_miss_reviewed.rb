@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
-# PROVEN_MISS (docs/adr/0275): a send whose receiver class is proven
+# PROVEN_MISS: a send whose receiver class is proven
 # (a fresh `Klass.new`, an instance literal, a lexical instance `self`, a class
 # constant) and whose chain answers the name by neither a definition nor
 # method_missing can only raise NoMethodError. Each site is listed on stderr as
-# "file:line -> name (kind Class)". No review gate judges the listing any more (ADR 0522).
+# "file:line -> name (kind Class)". No review gate judges the listing any more.
 # Class hints (ClassLayout, annotations, element hints) are guarded facts and
 # never make a site of this kind.
 #

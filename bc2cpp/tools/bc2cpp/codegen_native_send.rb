@@ -127,7 +127,7 @@ class CodeGen
   end
 
   # OWNERLESS_NATIVE_DISPATCH: the primitive gate; with the closed world in view (every engine body; a core
-  # body compiles with it withheld, ADR 0264) it also proves no external Ruby definition or dynamic installer can
+  # body compiles with it withheld) it also proves no external Ruby definition or dynamic installer can
   # replace this method.
   def ownerless_native_dispatch_safe?(name)
     native_only_mono?(name) && (!@closed_world || @closed_world.ownerless_native_dispatch_safe?(name))
@@ -166,7 +166,7 @@ class CodeGen
   # Guarded direct C++ for one NATIVE_PRIMITIVE_SEND_ARITY name, or an exact-class
   # expression generated from registered native C methods. The per-method
   # soundness notes are at compile_send's call site.
-  # `proof` is [irep, site index] of the call (GUARD_VIOLATION, ADR 0290), nil without one.
+  # `proof` is [irep, site index] of the call, nil without one.
   def compile_native_primitive_send(name, d, recv, argv, proof: nil)
     if @native_registered_expressions.key?(name) && name != 'to_s'
       return compile_native_registered_expression(name, d, recv, argv)
@@ -189,7 +189,7 @@ class CodeGen
       return dynamic_dispatch_line(d, recv, name, argv) unless eqq_name_unrebound?('===')
 
       outlined_eqq_call("r#{d}", recv, argv.first)
-      # CLASS_EQQ (ADR 0290) lives in compile_eqq_direct: a stable constant receiver never reaches here
+      # CLASS_EQQ lives in compile_eqq_direct: a stable constant receiver never reaches here
       # while the world proves `===`, and a rebound one takes the shared helper.
     when '!='
       # NEQ_UNCONDITIONAL: `!=` is a hand-written bytecode RProc in class.c bob_init
@@ -211,7 +211,7 @@ class CodeGen
   end
 
   # INTEGER_UNARY: an Integer runs Numeric#-@ (`0 - self`), Numeric#zero? (`self == 0`),
-  # both Ruby in libmruby, and int_round (`self`); see docs/adr/0200.
+  # both Ruby in libmruby, and int_round (`self`).
   INTEGER_UNARY_OPS = {
     '-@' => ['mrb_int_value(M, -mrb_integer(%<r>s))', ' && mrb_integer(%<r>s) != MRB_INT_MIN'],
     'zero?' => ['mrb_bool_value(mrb_integer(%<r>s) == 0)', ''],
@@ -301,7 +301,7 @@ class CodeGen
 
     fallback = registered_expression_fallback(d, recv, name, argv, fallback)
 
-    # EXACT_CORE_RECEIVER (ADR 0280, ADR 0301): a proven exact class takes its own arm without the tag
+    # EXACT_CORE_RECEIVER: a proven exact class takes its own arm without the tag
     # test, or none when no registration is its own (the arms' classes are all other ones).
     site = exact_core_site_for(recv, name)
     if site

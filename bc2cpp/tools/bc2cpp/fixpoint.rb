@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# FIXPOINT_BOUNDS (ADR 0465): the whole-program fixed points run under a hard round limit. One round is the block;
+# FIXPOINT_BOUNDS: the whole-program fixed points run under a hard round limit. One round is the block;
 # it returns true when something changed. The loop ends when a round changes nothing. A round limit reached while
 # rounds still change is a build error that names the analysis and the loop; the partial result is never used.
 #

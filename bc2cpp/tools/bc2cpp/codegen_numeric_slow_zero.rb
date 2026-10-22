@@ -2,9 +2,9 @@
 
 require_relative 'core_misc'
 
-# NUMERIC_SLOW_CLOSED `zero?` (ADR 0374). Numeric#zero? is Ruby (`self == 0`, mruby-numeric-ext), so the helper kept a
+# NUMERIC_SLOW_CLOSED `zero?`. Numeric#zero? is Ruby (`self == 0`, mruby-numeric-ext), so the helper kept a
 # by-name call for every receiver that is not a Float. Its definers are that one Ruby method and, on class objects,
-# mruby-io's File.zero? / FileTest.zero?; the first is a compiled core body this run may call (the ADR 0371 view), the
+# mruby-io's File.zero? / FileTest.zero?; the first is a compiled core body this run may call, the
 # second raises the ArgumentError of its own first statement for the zero arguments the helper always passes.
 class CodeGen
   # Where Integer, Float and Numeric reach a `zero?` definer; Integer and Float have none of their own.
@@ -62,7 +62,7 @@ class CodeGen
     { target: target, file: file }
   end
 
-  # The one compiled Numeric#zero?, behind the ADR 0371 conditions: the foreign definer the scan saw is the one
+  # The one compiled Numeric#zero?, behind the conditions below: the foreign definer the scan saw is the one
   # compiled here, the lookup chains of Integer, Float and Numeric reach it with no project, native, prepended,
   # outside or computed definer in between, and its body is yield-free (a direct call skips the entry's Fiber guard).
   def numeric_slow_zero_target(answers)

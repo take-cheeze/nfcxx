@@ -4,7 +4,7 @@ require_relative 'declared_constants'
 require_relative 'declared_returns'
 require_relative 'codegen_sealed_containers'
 
-# CodeGen: DECLARED_RETURN_CHECK (docs/adr/0455).
+# CodeGen: DECLARED_RETURN_CHECK.
 #
 # Modular checking of RBS return declarations (DeclaredReturns entries): assume every declaration, check every body
 # against them, abort when one fails. Then the declarations are a sound addition to the greatest fixpoints:
@@ -25,7 +25,7 @@ require_relative 'codegen_sealed_containers'
 # Every path must prove: :fixnum by fixnum_proof_source? / proven_fixnum_operand?, :array by trace_new_target ==
 # Array or proven_array_source, :class by trace_new_target == C (the exact class; `C?` also takes nil paths, and an
 # `@h[k]` read of a sealed Hash ivar whose stored values are all exactly C, SEALED_HASH_IVAR in
-# codegen_sealed_containers.rb, ADR 0456). A path the checker cannot prove is a TC1010 error at its Ruby file:line.
+# codegen_sealed_containers.rb). A path the checker cannot prove is a TC1010 error at its Ruby file:line.
 #
 # The closed-world preconditions of the proofs hold for the name-level fact (declared_return_facts): every registry
 # definition of the name has a bytecode body and the same declaration; no native or foreign Ruby defines it; no alias,
@@ -113,7 +113,7 @@ class CodeGen
       return ['info', "POLY `#{name}` is not fully visible to the closed world (checked per definition)"]
     end
 
-    # FIXNUM_RETURN_PROOF's own precondition (ADR 0279): it refuses any name a program spells as a literal.
+    # FIXNUM_RETURN_PROOF's own precondition: it refuses any name a program spells as a literal.
     if entries.first.kind == :fixnum && numeric_dynamically_named?(name)
       return ['info', "`#{name}` is spelled as a literal name, which FIXNUM_RETURN_PROOF refuses"]
     end
@@ -136,7 +136,7 @@ class CodeGen
   def check_declared_returns
     @declared_return_diagnostics = []
     @declared_return_report = []
-    # The proofs run on the closed world's outside-source scan, a required bc2cpp input (ADR 0466).
+    # The proofs run on the closed world's outside-source scan, a required bc2cpp input.
     if @foreign_method_names.nil? && !declared_return_entries.empty?
       raise 'DECLARED_RETURN_CHECK: no outside-source scan; bc2cpp compiles closed-world programs only (ADR 0466)'
     end
@@ -355,7 +355,7 @@ class CodeGen
                                                           @unknown_mixins)
   end
 
-  # The writer at `w` is a reaching definition already; every deeper hop must dominate (ADR 0198).
+  # The writer at `w` is a reaching definition already; every deeper hop must dominate.
   def declared_hop_dominance(ir, w)
     ->(w_idx, use_idx, hop) { (w_idx == w && use_idx == w + 1) || return_write_dominates?(ir, w_idx, use_idx, hop) }
   end

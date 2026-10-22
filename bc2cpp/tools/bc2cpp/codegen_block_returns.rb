@@ -22,7 +22,7 @@ module BlockReturns
   RubyDef = Struct.new(:owner, :irep, :ireps, :source, keyword_init: true)
 end
 
-# CodeGen: BLOCK_RETURNS (docs/adr/0475), the use of the declarations block_returns.rb reads and checks.
+# CodeGen: BLOCK_RETURNS, the use of the declarations block_returns.rb reads and checks.
 #
 # A call site `recv.m(args) { ... }` (SENDB/SSENDB, plain fixed argc, the block a dominating literal BLOCK) gets the
 # declaration's result when every method the call can run is a checked declaration of the same shape:
@@ -30,7 +30,7 @@ end
 #     the constant C (straight-line constant path, lexically resolved), C and its enclosing constants keep their
 #     identity, one native source spells the name and it is the scanned one, no Ruby definition sits on C or its
 #     singleton, no prepend or unresolved mixin on either, and no installer, alias or opaque core definition can
-#     rename or replace it (the conditions PROFILER_RESULTS used for RGSS::Profiler, ADR 0344);
+#     rename or replace it;
 #   * otherwise by name: every bytecode definition of the name anywhere (program, mruby's own Ruby, outside Ruby
 #     sources, aliases included) is a checked declaration of one shape, no native registers it, nothing installs,
 #     aliases, undefines or method_missing-answers it.

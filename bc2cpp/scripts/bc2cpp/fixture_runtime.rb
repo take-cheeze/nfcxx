@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # Shared by bc2cpp registry fixtures and checks that compile with bc2cpp.rb
-# and run against a real mruby: generation (in the closed world: bc2cpp is closed-world only, ADR 0466), the C++ driver that
+# and run against a real mruby: generation, the C++ driver that
 # registers the compiled methods over the interpreted ones, and the run.
 #
 # Two mruby builds are used, both optional (a check prints SKIP without them):
@@ -28,7 +28,7 @@ module Bc2cppFixtureRuntime
   # BC2CPP_TOOL names another bc2cpp.rb (a mutant copy, scripts/bc2cpp/class_pools_mutation_check.rb).
   BC2CPP = ENV.fetch('BC2CPP_TOOL') { File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb') }
 
-  # The `- & | <<` helpers call exported gem bodies (ADR 0366), which a core-only libmruby lacks: fixtures link one by
+  # The `- & | <<` helpers call exported gem bodies, which a core-only libmruby lacks: fixtures link one by
   # default, so generation leaves those helpers by name unless a check that runs against the full-core build opts in.
   @collection_exports_linked = false
 
@@ -105,14 +105,14 @@ module Bc2cppFixtureRuntime
     end
   end
 
-  # Owner selection is an emission-only unit key (ADR 0464); every other input is shared explicitly.
+  # Owner selection is an emission-only unit key; every other input is shared explicitly.
   # Results live only in this call's caller, with no cross-world or cross-process cache.
   def generate_owner_variants(source, dir, owners)
     generate(source, dir, owner_variants: owners)
   end
 
   # Runs bc2cpp.rb over `source` in the closed world with the real core
-  # sources (bc2cpp is closed-world only, ADR 0466); `only_owners` limits what
+  # sources; `only_owners` limits what
   # is compiled. Returns [code, stderr].
   # `path` places the fixture below `dir`: a path under 3rd/mruby/mrblib/ makes bc2cpp treat
   # it as mruby's own Ruby (CoreDefs.core_source?), so a check can exercise the core-only proofs.
@@ -199,7 +199,7 @@ module Bc2cppFixtureRuntime
   end
 
   # One bc2cpp.rb run over `argv` with `env`, as a subprocess: [stdout, stderr, status].
-  # Fixture checks read the generated C++'s proof comments, so every run asks for them (--annotated, ADR 0463).
+  # Fixture checks read the generated C++'s proof comments, so every run asks for them.
   def generator_run(env, argv)
     Open3.capture3(env, RbConfig.ruby, BC2CPP, '--annotated', *argv)
   end

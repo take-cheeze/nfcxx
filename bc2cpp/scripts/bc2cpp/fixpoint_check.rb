@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check FIXPOINT_BOUNDS (tools/bc2cpp/fixpoint.rb, ADR 0465): a bounded fixed point stops at the first round that
+# Check FIXPOINT_BOUNDS: a bounded fixed point stops at the first round that
 # changes nothing, and a round limit reached while rounds still change is an error naming the analysis and the loop,
 # never a silently kept partial result. Also checks that the whole-program fixed points run under it. Seconds; needs
 # no mruby build.

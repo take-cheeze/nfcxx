@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-# UNLISTED_CLASS_CALL (docs/adr/0259, 0297): the arm of an UNLISTED_CLASS_GUARDS
-# branch (docs/adr/0252). The receiver is exactly `klass`, so the send reaches
+# UNLISTED_CLASS_CALL: the arm of an UNLISTED_CLASS_GUARDS
+# branch. The receiver is exactly `klass`, so the send reaches
 # whatever mruby's lookup finds from that class; the arm is that definition's
 # direct call, the error its dispatch raises, or nil to keep the dispatch.
 class CodeGen
@@ -33,7 +33,7 @@ class CodeGen
 
   # The chain of `klass` is walked only through registry definitions when nothing else on it can answer `name`:
   # exact_chain_lookup_safe? (ClosedWorld) accepts the names only RGSS natives define, and this also accepts a
-  # name whose every outside Ruby and native definer is named (outside_owner_call_owners, ADR 0468) and none of
+  # name whose every outside Ruby and native definer is named and none of
   # them is on the chain. Then the lookup from klass resolves to a Ruby definition the registry already places,
   # so closed_world_lookup_target answers it exactly. Any unnamed definer, unknown definition or unstable class
   # refuses, as before.
@@ -65,7 +65,7 @@ class CodeGen
     chain
   end
 
-  # The instruction whose visibility the VM checks: the site's own, or (INLINED_UNLISTED_SITE, ADR 0386) the
+  # The instruction whose visibility the VM checks: the site's own, or the
   # original SEND/SSEND an inlined block body was compiled from. Either is trusted only when its symbol is
   # the name being compiled (both callers check), so a synthetic send never borrows a neighbour's opcode.
   def unlisted_site_insn(site)

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# PARAM_FOLD (tools/bc2cpp/codegen_param_fold.rb, ADR 0540): with BC2CPP_PARAM_FOLD=1 a decided jump on a parameter is
+# PARAM_FOLD: with BC2CPP_PARAM_FOLD=1 a decided jump on a parameter is
 # folded when the method is complete, so the pooled call-site mask decides it. The fixtures are:
 #   - a complete method whose only callers pass Integers: `if x` folds to goto (gate on), keeps its test (gate off);
 #   - the same method with a define_method of the same name elsewhere: the test is kept with the gate on;

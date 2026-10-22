@@ -3,7 +3,7 @@
 require 'digest'
 require_relative '../../tools/bc2cpp/native_direct'
 
-# The audit behind NATIVE_PARAM_UNBOX (docs/adr/0372), as a library so the check and its mutation check share it.
+# The audit behind NATIVE_PARAM_UNBOX, as a library so the check and its mutation check share it.
 #
 # A call site may convert a native entry point's :int/:float/:bool arguments itself, with no tag test and no by-name
 # else, only when

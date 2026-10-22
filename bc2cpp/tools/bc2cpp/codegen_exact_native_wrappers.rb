@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-# EXACT_NATIVE_WRAPPER (docs/adr/0307): a send of an RGSS wrapper whose receiver the exact-class
+# EXACT_NATIVE_WRAPPER: a send of an RGSS wrapper whose receiver the exact-class
 # flow proves is exactly one RGSS native class (an ivar pool, a constructor result, a call whose
-# name only returns that class: ADR 0289/0296/0301) calls the wrapper's frame-independent body with
+# name only returns that class) calls the wrapper's frame-independent body with
 # no class test and no dispatch.
 #
 # compile_send's native-wrapper arms (codegen_send.rb) guard the same body with
@@ -73,7 +73,7 @@ module ExactNativeWrappers
     native_wrapper_owner_safe?(name, klass) ? klass : nil
   end
 
-  # compile_send tries NATIVE_EXACT_DIRECT (ADR 0281, a stricter name proof) on the flow class for a zero-argument
+  # compile_send tries NATIVE_EXACT_DIRECT on the flow class for a zero-argument
   # wrapper before its guarded arm; this call is for what that refuses. The other names meet their hint arm first.
   def exact_native_direct_covers?(name, klass)
     entry = NativeDirect::ENTRIES.dig(name, klass)

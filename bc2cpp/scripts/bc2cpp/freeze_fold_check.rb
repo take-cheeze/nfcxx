@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# FREEZE_FOLD (tools/bc2cpp/codegen_freeze_fold.rb, ADR 0536): `nil?`, `is_a?`, `kind_of?` and `frozen?` whose answer the
+# FREEZE_FOLD: `nil?`, `is_a?`, `kind_of?` and `frozen?` whose answer the
 # NumericFlow class set proves are emitted as a bool. BC2CPP_FREEZE_FOLD=1 turns it on; unset or 0 emits the send as before.
 #
 # 1. Host (CRuby, no mrbc): the frozen? mask rule on a hand-built frozen table shape, with the kernel audit stubbed.

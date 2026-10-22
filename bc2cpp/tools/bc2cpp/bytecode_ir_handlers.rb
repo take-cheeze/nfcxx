@@ -45,7 +45,7 @@ module BytecodeIR
       end
     end
 
-    # BYTECODE_IR_FACTS (ADR 0467): instruction index => the frozen, distinct handler targets it may raise into, in
+    # BYTECODE_IR_FACTS: instruction index => the frozen, distinct handler targets it may raise into, in
     # handler declaration order; an index outside every range has no key. Frozen.
     def raise_targets
       @raise_targets ||= handler_edges.group_by(&:src)

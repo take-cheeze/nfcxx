@@ -135,7 +135,7 @@ class CodeGen
     "#{note}  #{call}\n"
   end
 
-  # KEYWORDLESS_CALL (ADR 0258): a send with no keyword pairs to the one
+  # KEYWORDLESS_CALL: a send with no keyword pairs to the one
   # definition of a name whose parameters include keywords. Every keyword is
   # then "not passed", which compile_keyword_call already lowers (given = 0), so
   # the omitted-defaults call needs no dispatch. Declines whenever the ordinary
@@ -161,7 +161,7 @@ class CodeGen
     return call if self_implicit && site&.dig(:self_owner) == target.owner && @closed_world&.exact_class?(target.owner)
 
     check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
-    # KEYWORDLESS_FALLBACK (ADR 0386): the keywordless call is an ordinary send of `name` with `argv`, so the
+    # KEYWORDLESS_FALLBACK: the keywordless call is an ordinary send of `name` with `argv`, so the
     # else arm is MONO_EMBED_GUARD's: the closed world's proven fallback (nomethod / unlisted-class arms) or,
     # when it cannot prove the chain, the same by-name dispatch as before.
     fallback = keywordless_fallback? ? guarded_fallback_line(d, recv, name, argv, [target.owner], site) : dynamic_dispatch_line(d, recv, name, argv)
@@ -248,7 +248,7 @@ class CodeGen
                                        name:, d:, n:, recv:, argv:, kw_names:, kw_val_exprs:)
     return nil unless name == 'new' && irep && idx
 
-    # KEYWORD_IMPLICIT_NEW (ADR 0426): a bare `new(a, k: v)` in a class method has the class object for its receiver,
+    # KEYWORD_IMPLICIT_NEW: a bare `new(a, k: v)` in a class method has the class object for its receiver,
     # exactly as the positional path knows it (implicit_singleton_self_class). Unlike a `Const.new` site, a subclass
     # reaches this one by inheriting the class method, and the guard-miss arm below cannot build its object (the
     # keywords travel as a trailing positional Hash, which a keyword #initialize does not take from a funcall). So
@@ -364,7 +364,7 @@ class CodeGen
                  "mrb_symbol_value(mrb_intern_cstr(M, \"#{kn}\")), #{kw_val_exprs[k]});\n"
     end
     # GUARD_VIOLATION: a stable class constant cannot have been reassigned, so the miss is an error.
-    # SELF_NEW_LEAF (ADR 0468): `self` of a singleton method of a class the closed world proves a leaf is that class
+    # SELF_NEW_LEAF: `self` of a singleton method of a class the closed world proves a leaf is that class
     # object itself, whatever its constant names now, so the miss is an error too.
     leaf_self = self_implicit && @closed_world&.known_subclasses(known) == [known]
     else_arm = if argv.size < FUNCALL_ARGC_MAX &&

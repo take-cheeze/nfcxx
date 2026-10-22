@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Debug report for CHA_SELF (ADR 0254): with BC2CPP_CHA_REPORT=<path>, every
+# Debug report for CHA_SELF: with BC2CPP_CHA_REPORT=<path>, every
 # self-receiver send compile_send handled is written as one TSV row (the last
 # compile of a site wins, since compiles_clean? probes compile methods early):
 #

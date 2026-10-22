@@ -56,7 +56,7 @@ analysis = lambda do |source|
     ireps, root = compile_ireps([rb], 'const_bitor_io', dir)
     registry, _superclass_of, _containers, included, prepended, unknown, _structs, _decls, _walked, _ivars, sites = build_registry(ireps, root)
     safe = IntegerConstantRanges.integer_ops_safe?(registry, included, prepended, unknown)
-    # The IR class proof (ADR 0501 stage 4), with the gates the build passes (bc2cpp.rb).
+    # The IR class proof, with the gates the build passes (bc2cpp.rb).
     freeze_safe = DeclaredConstants.stock_method?('freeze', 'Integer', registry, included, prepended, unknown)
     ir = BytecodeIR::ConstantFacts.analyze(ireps, sites: sites, poisoned: Set.new, operators_safe: safe,
                                                   freeze_safe: freeze_safe, freeze_classes: Set.new)

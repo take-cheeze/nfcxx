@@ -5,7 +5,7 @@ require 'open3'
 require 'rbconfig'
 require 'tmpdir'
 
-# SHARED_GENERATION (ADR 0464): one whole-program analysis for several generations of the same program.
+# SHARED_GENERATION: one whole-program analysis for several generations of the same program.
 #
 # The compiled gems of a build (mruby-lcf/rpg2k/rgss/core-compiled, tools/bc2cpp/compiled_gems.rb) run bc2cpp.rb over
 # the same sources with the same environment except for the keys in UNIT_KEYS: which owners a run emits, the owners

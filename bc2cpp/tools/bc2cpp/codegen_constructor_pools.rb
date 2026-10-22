@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir_ops'
 
-# CodeGen: CONSTRUCTOR_POOLS (ADR 0313).
+# CodeGen: CONSTRUCTOR_POOLS.
 #
 # ENTRY_ARG_CALLSITE_PROOF and the argument pools refuse `initialize` (rule 5): no SEND names it, so its
 # call sites cannot be enumerated by name. They can by class: the initialize D a class K runs is a fact of
@@ -18,8 +18,8 @@ require_relative 'bytecode_ir_ops'
 # D becomes a candidate, in the shape ENTRY_ARG_CALLSITE_PROOF's candidates have so the numeric, Fixnum and
 # class pools read it unchanged, only when nothing else can enter it:
 #
-#   * a `new` whose receiver is not provably a constant, rooted or a parameter of class constants (CLASS_OBJECT_ARGS,
-#     ADR 0416) could build any class. It withdraws every D
+#   * a `new` whose receiver is not provably a constant, rooted or a parameter of class constants (CLASS_OBJECT_ARGS)
+#     could build any class. It withdraws every D
 #     it can get past ENTER for (mand <= argc <= mand + opt, any count with a rest parameter), all of them when
 #     the count is unknown (splat, keyword);
 #   * no `:new`/`:initialize` Symbol, keyword or computed name (an `alias_method :x, :initialize` in a class
@@ -51,7 +51,7 @@ class CodeGen
     @constructor_pool_candidates
   end
 
-  # RBS_CHECKED_PARAMS (ADR 0456): every site that can enter the initialize body +label+, as
+  # RBS_CHECKED_PARAMS: every site that can enter the initialize body +label+, as
   # [[irep, index, receiver register, positional argc, owner], ...] (argument k is register receiver + k), or
   # [nil, why] when something the closed world cannot enumerate may enter it. :no_sites is the empty list: no
   # `new` or `super` reaches the body. Only positions 1..mandatory are entry-site facts (see the header).
@@ -370,7 +370,7 @@ class CodeGen
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
     classes = constructor_named_classes(irep, idx, insn) unless insn.op.start_with?('SS')
     if classes.nil? && !insn.op.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
-      # CLASS_OBJECT_ARGS (ADR 0416): the receiver is a parameter every caller passes class constants for.
+      # CLASS_OBJECT_ARGS: the receiver is a parameter every caller passes class constants for.
       classes = via_param
       stats[:param_named] += 1
     end

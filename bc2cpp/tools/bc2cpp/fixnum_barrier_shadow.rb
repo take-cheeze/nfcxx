@@ -2,7 +2,7 @@
 
 # Shadow decision procedure for the exception-flow barriers of the Fixnum proof
 # (ctx[:catch_targets], ctx[:protected]), derived from
-# BytecodeIR handler edges. See ADR 0250 addendum "Barrier shadow".
+# BytecodeIR handler edges.
 #
 # Preload with `ruby -r fixnum_barrier_shadow bc2cpp.rb ...`: it prepends
 # hooks onto CodeGen that re-run every barrier consumer with the shadow sets

@@ -2,7 +2,7 @@
 
 require_relative 'bytecode_ir'
 
-# Bytecode-only captures, shared across probes within one CodeGen (ADR 0528).
+# Bytecode-only captures, shared across probes within one CodeGen.
 class BlockCaptureIndex
   def initialize(ireps, max_depth, block_given_names)
     @ireps = ireps

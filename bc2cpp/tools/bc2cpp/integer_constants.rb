@@ -18,7 +18,6 @@ require_relative 'scan_cache'
 #   2. a CLASS/MODULE naming it (OP_CLASS binds the constant itself);
 #   3. a native mrb_define_const / mrb_define_global_const /
 #      mrb_define_const_id / mrb_const_set / mrb_define_class
-#      (native_defined_const_names; ADR 0324);
 #   4. a definition in a foreign Ruby source sharing the VM
 #      (foreign_mrblib_srcs, compiled_gems.rb).
 # A name with no integer definition is never admitted, so an unseen constant

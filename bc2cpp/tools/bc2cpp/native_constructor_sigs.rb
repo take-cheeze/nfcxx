@@ -6,8 +6,8 @@ require_relative 'native_owner_map'
 require_relative 'native_core_result_sigs'
 require_relative 'ruby_parse_cache'
 
-# NativeConstructorSigs: the constructor overloads of sig/bc2cpp/declarations.rbs#rgss_constructors (OVERLOADED_CONSTRUCT,
-# docs/adr/0468), each audited against the source of the initialize it describes.
+# NativeConstructorSigs: the constructor overloads of sig/bc2cpp/declarations.rbs#rgss_constructors (OVERLOADED_CONSTRUCT),
+# each audited against the source of the initialize it describes.
 #
 # An overload is { req: [type...], opt: [type...], path: [:direct, fn, [arg...]] | [:compiled], else: bool } with
 # type :num (Integer | Float, what mrb_get_args "i"/"f" convert), :str (String, "z"/"s"/"S") or :boolish (boolish,

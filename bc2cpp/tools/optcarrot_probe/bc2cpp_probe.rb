@@ -10,12 +10,12 @@
 # tools/optcarrot_probe/README.md for what this is and isn't.
 #
 # MRBC must be built from a 3rd/mruby checkout with
-# patches/mruby-parser-dump-back-nth-ref.patch applied -- unpatched, mrbc's
+# the pinned fork commit (mruby-parser-dump-back-nth-ref) applied -- unpatched, mrbc's
 # own `-v` disassembly dump crashes outright on optcarrot's real
 # lib/optcarrot/opt.rb:74 (a `$'`/`$1` use), which this script cannot work
 # around from the outside (the crash is inside mrbc's own process, before
 # any output reaches this script). See that patch's own preamble.
-# patches/mruby-module-function-scope.patch is NOT needed for this script
+# the pinned fork commit (mruby-module-function-scope) is NOT needed for this script
 # specifically (verified) -- mrbc only compiles here, never runs the
 # result, so that runtime-only gap never gets exercised.
 #
@@ -44,8 +44,8 @@ end
 # anything if it runs BEFORE MRBC itself was built from this checkout (a
 # rebuild picks the patch up; an already-built MRBC binary does not).
 
-# docs/adr/0466: bc2cpp compiles closed-world programs only: the probe compiles the sealed benchmark world
-# (tools/optcarrot_probe/sealed_build.rb, ADR 0400), whose outside sources are its build's mruby core and gems.
+# bc2cpp compiles closed-world programs only: the probe compiles the sealed benchmark world
+# whose outside sources are its build's mruby core and gems.
 world_dir = Dir.mktmpdir('optcarrot-world-')
 at_exit { FileUtils.rm_rf(world_dir) }
 srcs, world_env = OptcarrotSealedBuild.bc2cpp_world(ROOT, world_dir)

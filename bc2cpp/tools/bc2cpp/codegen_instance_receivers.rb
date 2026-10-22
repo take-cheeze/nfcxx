@@ -2,7 +2,7 @@
 
 require_relative 'numeric_flow'
 
-# CodeGen: INSTANCE_RECEIVER (ADR 0302). A `.singleton` definer answers a class or module object only,
+# CodeGen: INSTANCE_RECEIVER. A `.singleton` definer answers a class or module object only,
 # and no instance has a singleton method (ClosedWorld#exact_instances_singleton_free?), so a receiver
 # the exact-class flow proves holds only instances may ignore `.singleton` owners in ClosedWorld#refusal.
 class CodeGen

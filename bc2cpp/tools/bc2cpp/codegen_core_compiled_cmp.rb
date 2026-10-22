@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
-# CORE_COMPILED_DEFINERS (docs/adr/0371): the compiled core Ruby of this run as a view of its own, next
-# to the registry, which deliberately holds no core definition (ADR 0264 finding 1: every name-keyed fast
+# CORE_COMPILED_DEFINERS: the compiled core Ruby of this run as a view of its own, next
+# to the registry, which deliberately holds no core definition (every name-keyed fast
 # path needs the registry to hold only the native definition of a name). The view answers one question:
 # is the foreign Ruby definer of `name` on `owner` a method this run compiled, so a helper may call its
 # `_impl` instead of dispatching by name?
 #
-# First consumer: the Hash arm of the `< <= > >=` helpers (ADR 0362 left it a by-name call because
+# First consumer: the Hash arm of the `< <= > >=` helpers (it was left a by-name call because
 # `Hash#<` is Ruby over `all?`, `key?` and `==`).
 class CodeGen
   CORE_COMPILED_HASH_CMP = %w[< <= > >=].freeze
@@ -33,8 +33,8 @@ class CodeGen
   # for free: the compiled body must be the one definition Hash's lookup reaches (the chain walk of
   # block_core_target refuses a project definition, a native registration, a prepend, an outside definer
   # or a computed installer), a clean `_impl` this link emits, and provably yield-free (no `==` of a stored
-  # value can suspend a Fiber), because a direct call skips the entry's Fiber guard (ADR 0269) and the
-  # helper has no block to relax it with (ADR 0283).
+  # value can suspend a Fiber), because a direct call skips the entry's Fiber guard and the
+  # helper has no block to relax it with.
   def core_compiled_hash_cmp_target(op)
     return nil unless core_compiled_cmp_enabled? && CORE_COMPILED_HASH_CMP.include?(op)
 

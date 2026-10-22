@@ -6,7 +6,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'ivar_layout'
 
-# RECORD_HASH_PROOF (docs/adr/0285): per-key value classes of a record-like
+# RECORD_HASH_PROOF: per-key value classes of a record-like
 # Hash held in an instance variable.
 #
 # A record slot is an ivar NAME (`@ui`), analysed across the whole closed
@@ -29,7 +29,7 @@ module RecordHash
     attr_accessor :table, :readers, :pool
 
     # BC2CPP_RECORD_HASH_TIER=trusted lets writers classified by the Array
-    # block-recognizer scan (tripwire-backed, ADR 0198) count too; the default
+    # block-recognizer scan count too; the default
     # admits only proofs.
     def consumer_tier
       ENV['BC2CPP_RECORD_HASH_TIER'] == 'trusted' ? :trusted : :strict
@@ -175,7 +175,7 @@ module RecordHash
 
   # Call-site pooling for the Symbol a method parameter can hold: every call
   # site of a single-definition method is enumerated (ENTRY_ARG_CALLSITE_PROOF's
-  # admission, ADR 0261 rules 1-8), so `def f(scroll_key: nil)` resolves to the
+  # admission), so `def f(scroll_key: nil)` resolves to the
   # Symbols its callers pass.
   class KeyPool
     ENTER_POSITIONAL_ONLY = ->(fields) { fields[1..].all?(&:zero?) }

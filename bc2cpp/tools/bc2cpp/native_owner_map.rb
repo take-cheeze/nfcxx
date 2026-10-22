@@ -5,7 +5,7 @@ require_relative 'native_names'
 require_relative 'native_direct'
 require_relative 'irep'
 
-# NATIVE_OWNER_MAP (docs/adr/0397): for each method name, the classes some native C registration
+# NATIVE_OWNER_MAP: for each method name, the classes some native C registration
 # defines it on, with the class expression each call names. A poly chain that calls a Ruby body
 # directly for each candidate class is sound only when no native registration of the name lands on
 # one of those classes (a native def on the same class is the live method). `verdict` answers that
@@ -177,7 +177,7 @@ module NativeOwnerMap
 
         signature = text[prev...start]
         if signature.match?(TRANSPARENT_BLOCK_RE)
-          # OUTSIDE_OWNER_CALL (ADR 0468): a C++ namespace or `extern "C"` block holds functions, not a body.
+          # OUTSIDE_OWNER_CALL: a C++ namespace or `extern "C"` block holds functions, not a body.
           inner = start + 1
           scopes.concat(block_scopes(text[inner...i], vars).map { |from, to, scope| [from + inner, to + inner, scope] })
         else
@@ -192,7 +192,7 @@ module NativeOwnerMap
   # The owners of the `RClass *` variables a function body declares and assigns, plus its `RClass *`
   # parameters (which keep the file's owner for them). A declared variable whose assignments disagree,
   # or one of whose right-hand sides is not a known class, is UNKNOWN. `a = B = C` gives `a` B's value.
-  # OUTSIDE_OWNER_CALL (ADR 0468): a right-hand side may name another variable of the same body
+  # OUTSIDE_OWNER_CALL: a right-hand side may name another variable of the same body
   # (`RClass* m = mrb_define_module(M, "RGSS"); RClass* color = mrb_define_class_under(M, m, "Color", ...)`),
   # so the owners are settled to a fixed point over the body's own variables; and a variable assigned once
   # from an expression this map cannot read is the class a core field names when the body stores it there
@@ -257,7 +257,7 @@ module NativeOwnerMap
       scopes = block_scopes(typed, file_vars)
       vars_at = ->(pos) { scopes.find { |from, to, _| pos.between?(from, to) }&.last || file_vars }
       # Calls are read from `typed`, the text the scopes were built on, so a position names the same block
-      # in both (`struct RClass *` -> `RClass *` shortens the text; ADR 0468).
+      # in both.
       typed.scan(CALL_RE) do
         match = Regexp.last_match
         family = match[1]

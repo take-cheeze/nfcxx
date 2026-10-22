@@ -3,7 +3,7 @@
 require 'shellwords'
 require_relative 'numeric_flow'
 
-# FREEZE_FOLD (ADR 0536 consumer): `nil?`, `is_a?`, `kind_of?`, `instance_of?` and `frozen?` whose answer the NumericFlow
+# FREEZE_FOLD: `nil?`, `is_a?`, `kind_of?`, `instance_of?` and `frozen?` whose answer the NumericFlow
 # class set of the receiver proves are emitted as their bool, with no dispatch. BC2CPP_FREEZE_FOLD=1 turns it on; the
 # default is off, so the output is unchanged.
 #

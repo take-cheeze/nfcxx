@@ -30,12 +30,12 @@ class CodeGen
                   :enumerator_model, :native_singleton_inputs,
                   :rbs_block_signatures
 
-    # INLINED_UNLISTED_SITE (docs/adr/0386): kill switch BC2CPP_INLINED_UNLISTED=0.
+    # INLINED_UNLISTED_SITE: kill switch BC2CPP_INLINED_UNLISTED=0.
     def inlined_unlisted_site?
       ENV['BC2CPP_INLINED_UNLISTED'] != '0'
     end
 
-    # LOOP_FLOW_POSITION (docs/adr/0398): kill switch BC2CPP_LOOP_FLOW_POSITION=0 (byte-identical to master).
+    # LOOP_FLOW_POSITION: kill switch BC2CPP_LOOP_FLOW_POSITION=0 (byte-identical to master).
     def loop_flow_position?
       ENV['BC2CPP_LOOP_FLOW_POSITION'] != '0'
     end
@@ -86,15 +86,15 @@ class CodeGen
                   native_registered_expressions: {}, closed_world: nil, outside_ivar_names: nil,
                   nil_operator_names: nil, outside_const_names: nil, native_ivar_scopes: {})
     @ireps = ireps
-    # NUMERIC_OPERAND_PROOF (ADR 0276): ivar names spelled by sources outside the
+    # NUMERIC_OPERAND_PROOF: ivar names spelled by sources outside the
     # closed world, and operators they define on NilClass. nil means the scan did
     # not run; the proofs that need them then prove nothing.
     @outside_ivar_names = outside_ivar_names
     @native_ivar_scopes = native_ivar_scopes
     @nil_operator_names = nil_operator_names
     @outside_const_names = outside_const_names
-    # CLOSED_WORLD: the build's ClosedWorld (closed_world.rb); every bc2cpp run has one (ADR 0466). It is nil only
-    # while a core body compiles (ADR 0264), in the analysis-only probe, and in unit fixtures.
+    # CLOSED_WORLD: the build's ClosedWorld (closed_world.rb); every bc2cpp run has one. It is nil only
+    # while a core body compiles, in the analysis-only probe, and in unit fixtures.
     @closed_world = closed_world
     # ENTRY_ARG_CALLSITE_PROOF: identifier tokens from NATIVE_SRCS and
     # FOREIGN_RUBY_SRCS (outside_world_tokens). nil means the scan did not run;
@@ -143,7 +143,7 @@ class CodeGen
     # EXCEPTION_BREAK_SUPPORT: true only while compiling a BLOCK_FALLBACK body;
     # BREAK then throws bc2cpp_block_break instead of returning.
     @block_fallback_active = false
-    # BLOCK_SEMANTICS (ADR 0266): the env slots of the BLOCK_FALLBACK body being
+    # BLOCK_SEMANTICS: the env slots of the BLOCK_FALLBACK body being
     # compiled that hold the method's return token and the call site's break
     # token (nil: this block has none). Saved and restored like @blk_param_name.
     @block_ret_slot = nil
@@ -159,16 +159,16 @@ class CodeGen
     # body's nesting depth below its method (codegen.c counts scopes up to the
     # method scope, so a direct child block has lv == 1). Other lv keep `#error`.
     @blk_param_level = 0
-    # NESTED_BLOCK_FORWARD (ADR 0330): the BLOCK_FALLBACK body's nesting depth,
+    # NESTED_BLOCK_FORWARD: the BLOCK_FALLBACK body's nesting depth,
     # which @blk_param_level is derived from (a nested body's `lv == 2` BLKPUSH
     # resolves against its parent region, not the method). Reset per method with
     # the rest of METHOD_COMPILE_STATE.
     @block_fallback_depth = 0
-    # ADR 0264: true while compiling a method of mruby's own Ruby (see core_targets).
+    # True while compiling a method of mruby's own Ruby (see core_targets).
     @compiling_core = false
     @ir_inline_remaining = 512
     @registry = registry
-    # Structural bytecode answers survive probe rollback; emitted registrations do not (ADR 0528).
+    # Structural bytecode answers survive probe rollback; emitted registrations do not.
     @block_capture_index = BlockCaptureIndex.new(@ireps, MAX_UPVAR_NEST_DEPTH, BLOCK_GIVEN_NAMES) unless ENV['BC2CPP_BLOCK_CAPTURE_INDEX'] == '0'
     @known_owners = Set.new(registry.values.flatten.map(&:owner))
     # FIBER_REACHABILITY_UNSAFE_SUPPORT: must exist before drop_unsafe_embeddings,
@@ -195,7 +195,7 @@ class CodeGen
     registry.each_value do |defs|
       defs.each { |d| @owner_of[d.irep] = d if d.irep }
     end
-    # CORE_VISIBILITY (ADR 0264): compiled, but never a dispatch candidate.
+    # CORE_VISIBILITY: compiled, but never a dispatch candidate.
     (self.class.core_hidden_defs || []).each { |d| @owner_of[d.irep] = d if d.irep }
     @core_guard_index = {}
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
@@ -239,8 +239,8 @@ class CodeGen
     # and otherwise falls back to the `#error`-free BLOCK_FALLBACK, so
     # compiles_clean? answers are unchanged.
     @array_return_names = Set.new
-    # RBS_CHECKED_PARAMS (ADR 0456): `analysis_only == :constructor_sites` builds just the tables
-    # constructor_pool_candidates reads (CONSTRUCTOR_POOLS, ADR 0313); none of them is a layout or a proof table.
+    # RBS_CHECKED_PARAMS: `analysis_only == :constructor_sites` builds just the tables
+    # constructor_pool_candidates reads; none of them is a layout or a proof table.
     return if analysis_only == :constructor_sites
 
     # ARRAY_RETURN_IVAR_HINT: `analysis_only` builds just enough to answer
@@ -287,7 +287,7 @@ class CodeGen
       compute_fixnum_return_names
       break if @entry_arg_fixnum == before_args && @fixnum_return_names == before_rets
     end
-    # DECLARED_RETURN_CHECK (ADR 0455): every seeded declaration against the final sets.
+    # DECLARED_RETURN_CHECK: every seeded declaration against the final sets.
     check_declared_returns
     # NUMERIC_OPERAND_PROOF reads the sets above; drop flows memoized by the
     # compile probes that ran with weaker facts.
@@ -321,7 +321,7 @@ class CodeGen
     )
   end
 
-  # INIT_ASSIGNED (ADR 0261): the slots whose zeroed state reads as a value.
+  # INIT_ASSIGNED: the slots whose zeroed state reads as a value.
   # fixnum_nil is left out: its zero state is nil.
   ZEROED_READS_AS_VALUE = %i[fixnum symbol bool].freeze
 
@@ -338,7 +338,7 @@ class CodeGen
     end
   end
 
-  # ADR 0279: a typed slot only holds its type; the runtime (rdata_ivar_store) and the
+  # A typed slot only holds its type; the runtime (rdata_ivar_store) and the
   # synthesized attr_writer raise TypeError for anything else, where the interpreter would
   # store the value. So an ivar keeps a typed slot only when every writer is one the compiler
   # sees and has typed: no reflection or foreign source spells it, no computed
@@ -376,7 +376,7 @@ class CodeGen
   # [names, reflective]: ivar names some source outside the typed analysis writes or reads by
   # name (native/foreign source, a '@name' Symbol/String literal, a block run under another
   # self), and the reason when a write by computed name could reach any ivar (nil otherwise).
-  # Marshal.load of bytes outside the closed world stays outside the model, as in ADR 0276.
+  # Marshal.load of bytes outside the closed world stays outside the model.
   def foreign_written_ivar_facts
     @foreign_written_ivar_facts ||= begin
       saved = @numeric_ivar_disabled
@@ -727,7 +727,7 @@ class CodeGen
     defs.first
   end
 
-  # ADR 0264: inside a core method only core definitions (and the native placeholders that
+  # Inside a core method only core definitions (and the native placeholders that
   # keep a name POLY) are static call targets; mruby's own code never binds an engine method.
   def core_targets(defs)
     return defs unless @compiling_core && defs

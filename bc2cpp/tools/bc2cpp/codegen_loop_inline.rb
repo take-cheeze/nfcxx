@@ -170,7 +170,7 @@ class CodeGen
     saved_nested = @inline_nested
     saved_blk_param_name = @blk_param_name
     saved_blk_param_level = @blk_param_level
-    # LOOP_FLOW_POSITION (docs/adr/0398): the method's SENDB of this body, where a GETUPVAR-read receiver is judged.
+    # LOOP_FLOW_POSITION: the method's SENDB of this body, where a GETUPVAR-read receiver is judged.
     saved_loop_parent = @inline_loop_parent
     @inline_loop_parent = { block_irep: block_irep, irep: irep, idx: irep.index_of_addr(region[:sendb_addr]) }
     @blk_param_name = 'bc2cpp_blk' if forwarded_blk
@@ -221,7 +221,7 @@ class CodeGen
     "mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"#{exc_class}\")), \"bc2cpp: #{message}\");"
   end
 
-  # The tail of a generated function whose every path RETURNs (ADR 0262): a
+  # The tail of a generated function whose every path RETURNs: a
   # compiler that let control fall off the end raises instead of returning nil.
   def fell_off_end(where)
     "  #{inline_raise('RuntimeError', "#{where} fell off the end of its body")}\n"
@@ -233,7 +233,7 @@ class CodeGen
   end
 
   # A tripwire, not a fallback: the recognizer's gate should make it unreachable,
-  # and mrb_funcall cannot pass a block (why ADR 0147 rejected proc-wrapping).
+  # and mrb_funcall cannot pass a block.
   def inline_receiver_guard(predicate, recv_expr, expected)
     "    if (!#{predicate}(#{recv_expr})) { #{inline_raise('TypeError', "expected #{expected}")} }\n"
   end
@@ -501,7 +501,7 @@ class CodeGen
     out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(bc2cpp_range_e_#{addr});\n"
     out << "    mrb_bool bc2cpp_range_x_#{addr} = mrb_range_excl_p(M, #{recv});\n"
     # The step is at the iteration label, not in the header, so an end at MRB_INT_MAX cannot
-    # wrap; an end between the Fixnum and mrb_int ranges boxes through mrb_int_value (ADR 0279).
+    # wrap; an end between the Fixnum and mrb_int ranges boxes through mrb_int_value.
     out << "    for (mrb_int bc2cpp_range_i_#{addr} = bc2cpp_range_a_#{addr}; " \
            "bc2cpp_range_x_#{addr} ? bc2cpp_range_i_#{addr} < bc2cpp_range_z_#{addr} : bc2cpp_range_i_#{addr} <= bc2cpp_range_z_#{addr};) {\n"
     out << inline_block_frame(block_irep, offset)
@@ -719,7 +719,7 @@ class CodeGen
     addr = region[:block_addr]
     meth = region[:method_name]
     # A nested section's address is relative to its own (block) irep, so it can equal the enclosing section's: the
-    # irep label keeps the two functions apart (ADR 0391; a frame at 13 holding a section at 13 redefined one name).
+    # irep label keeps the two functions apart.
     fn_name = "#{cpp_name(d.owner, d.name)}_profiler_#{meth}_#{addr}#{reg_offset ? "_in_#{irep.label}" : ''}"
     # File-scope code for the body function. The top-level pass has no buffer of
     # its own, so it lands in @inline_nested_pre (already wired ahead of this

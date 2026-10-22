@@ -4,7 +4,7 @@ require 'set'
 require_relative 'native_direct'
 require_relative 'native_names'
 
-# NATIVE_SINGLETON_CALL (docs/adr/0416): which native sources register `name` as a singleton method of
+# NATIVE_SINGLETON_CALL: which native sources register `name` as a singleton method of
 # which class or module, read from the C/C++ registrations themselves.
 #
 # NativeDirect.registered_owners answers the same question for the RGSS sources and the

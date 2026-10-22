@@ -3,7 +3,7 @@
 require 'digest'
 require 'fileutils'
 
-# A disk memo of the scans that read only the outside-world sources (mruby C and gem C/C++), ADR 0415 and ADR 0462.
+# A disk memo of the scans that read only the outside-world sources (mruby C and gem C/C++).
 # Every generator run starts a new process and repeats those scans over the same files, so the result of a scan is
 # stored under a digest of everything it reads and is loaded instead of recomputed. It is always on, with no
 # environment switch: the entries live in DEFAULT_DIR (the repository's own git-ignored build/ directory). A check
@@ -27,7 +27,6 @@ module ScanCache
   class Error < RuntimeError; end
 
   # The key holds no environment because a cached scan may not read any: ENV read while a scan computes is an Error.
-  # (ADR 0415 rule 2, enforced.)
   module EnvGuard
     %i[[] fetch key? has_key? include? member? assoc values_at slice to_h to_hash each each_pair select filter reject
        filter_map map keys values].each do |name|
@@ -41,7 +40,7 @@ module ScanCache
     end
   end
 
-  # An in-process memo with the same keys (ADR 0416). nil (the default) leaves it off.
+  # An in-process memo with the same keys. nil (the default) leaves it off.
   class << self
     attr_accessor :memory, :directory_override
 

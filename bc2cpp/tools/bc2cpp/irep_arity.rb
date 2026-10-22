@@ -131,9 +131,9 @@ end
 #   - `step`: this program's domain `def step` methods take no block and no
 #     `.step {` call site exists, so only Numeric#step is reachable.
 #   - `upto`, `downto`: no program definition takes a block; Integer/String#upto
-#     yield synchronously (STEP_LOOP_GUARD's fallback, ADR 0287).
+#     yield synchronously.
 #   - `each_line`: String#each_line (mrblib/string.rb) and IO/StringIO#each, which
-#     it aliases, only `block.call` while they run (BLOCK_ITERATOR_DIRECT, ADR 0472).
+#     it aliases, only `block.call` while they run.
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if

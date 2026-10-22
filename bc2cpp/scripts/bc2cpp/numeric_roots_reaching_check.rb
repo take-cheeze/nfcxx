@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# NUMERIC_ROOTS (docs/adr/0509): CodeGen#numeric_root_leaves takes the leaves of a register from the reaching
+# NUMERIC_ROOTS: CodeGen#numeric_root_leaves takes the leaves of a register from the reaching
 # definitions (BytecodeIR.reaching_definitions), not from the textually nearest writer plus every later loop
 # writer. Each case below states the answer of the textual walk it replaced, which was wrong:
 #   - a join: the textually nearest writer is the else branch, and the then branch's write is lost;

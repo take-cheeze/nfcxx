@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Writes generated/bc2cpp/rgss_direct.rbs from NativeDirect::GENERATED, the RGSS direct entry points (ADR 0263). The table
+# Writes generated/bc2cpp/rgss_direct.rbs from NativeDirect::GENERATED, the RGSS direct entry points. The table
 # stays the source of truth for each binding's argument kinds; this file is derived from it. Run with --check to fail
 # when the committed file is stale.
 #

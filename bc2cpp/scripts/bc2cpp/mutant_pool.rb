@@ -14,7 +14,7 @@ require 'rbconfig'
 module Bc2cppMutantPool
   Result = Struct.new(:out, :success, :stopped)
 
-  # A mutant is a copy of tools/bc2cpp alone, so the lint cross-check (ADR 0368) cannot find
+  # A mutant is a copy of tools/bc2cpp alone, so the lint cross-check cannot find
   # scripts/rpg2k/closed_world_lint.rb beside it; the check owns that agreement, the mutant does not.
   MUTANT_ENV = { 'BC2CPP_LINT_CROSSCHECK' => '0' }.freeze
 

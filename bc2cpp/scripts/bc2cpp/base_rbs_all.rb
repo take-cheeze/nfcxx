@@ -74,7 +74,7 @@ module BaseRbsAll
   end
 
   # Shared third-party headers the gems include, and the closed build's generated headers for this gem.
-  # mruby's own native sources outside every gem: error.c defines the exception hierarchy (ADR-free; the classes are
+  # mruby's own native sources outside every gem: error.c defines the exception hierarchy (the classes are
   # native registrations with superclasses, which the base section declares as `class X < Y`).
   CORE_NATIVE = { 'mruby-core' => ['3rd/mruby/src/error.c'] }.freeze
   # mruby's Ruby-defined exception classes: NameError, NoMethodError and StopIteration. The closed world leaves this file

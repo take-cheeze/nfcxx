@@ -5,7 +5,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'dynamic_names'
 
-# SEALED_HASH_IVAR (docs/adr/0456, third step): `@h[k]` is exactly C or nil when the Hash in `@h` never leaves the
+# SEALED_HASH_IVAR: `@h[k]` is exactly C or nil when the Hash in `@h` never leaves the
 # ivar and every Hash ever stored there was a literal whose values are all exactly C.
 #
 # ElementLayout's element facts are guarded hints (a mutation through an alias it cannot attribute is a named

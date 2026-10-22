@@ -5,12 +5,12 @@ require_relative 'call_facts'
 # CodeGen: CALL_FACTS. The receiver of `x.m2` after `x.m1` returned normally is an instance
 # of a class that answers `m1`; when only declared classes do, that set is a proven receiver set for the
 # guard chain of `m2` (ClosedWorld#refusal), with the same soundness conditions as INSTANCE_RECEIVER
-# (ADR 0302). BC2CPP_CALL_FACTS=0 turns it off.
+# BC2CPP_CALL_FACTS=0 turns it off.
 class CodeGen
   # Larger sets stop being a useful proof: the chain would list most of the program.
   CALL_FACTS_MAX_CLASSES = 32
 
-  # Not memoized: a core method's body compiles with @closed_world swapped out (ADR 0264).
+  # Not memoized: a core method's body compiles with @closed_world swapped out.
   def call_facts_enabled?
     ENV['BC2CPP_CALL_FACTS'] != '0' && !@closed_world.nil? && !@native_name_sources.nil? &&
       @closed_world.global_refusal.nil? && @closed_world.exact_instances_singleton_free?
@@ -36,7 +36,7 @@ class CodeGen
   # The declared classes the receiver register of the SEND at +site+ must be an instance of because an
   # earlier call on the same value returned, or nil. Every fact is a name some call answered, and the
   # set is the classes that can answer all of them.
-  # LOOP_FLOW_POSITION (docs/adr/0398): the [irep, idx, insn] flow position of a site: its own, or for a send
+  # LOOP_FLOW_POSITION: the [irep, idx, insn] flow position of a site: its own, or for a send
   # in an inlined loop body the unshifted position `closed_world_site` attached. Nil when there is none.
   def site_flow_position(site)
     return [site[:irep], site[:idx], site[:insn]] if site[:idx]
@@ -76,7 +76,7 @@ class CodeGen
     classes.all? { |k| answers.native_free?(k, name) }
   end
 
-  # NATIVE_CLASS_ARMS (ADR 0323): BC2CPP_NATIVE_CLASS_ARMS=0 turns it off. Same world conditions as CALL_FACTS.
+  # NATIVE_CLASS_ARMS: BC2CPP_NATIVE_CLASS_ARMS=0 turns it off. Same world conditions as CALL_FACTS.
   def native_class_arms_enabled?
     ENV['BC2CPP_NATIVE_CLASS_ARMS'] != '0' && !@closed_world.nil? && !@native_name_sources.nil? &&
       @closed_world.global_refusal.nil? && @closed_world.exact_instances_singleton_free?
@@ -109,7 +109,7 @@ class CodeGen
     (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::NIL)) && !nil_unanswerable_for_instances?(name)
   end
 
-  # NATIVE_ARM_COVER (ADR 0378): a class counts as native free when an exact-class native arm for it was emitted
+  # NATIVE_ARM_COVER: a class counts as native free when an exact-class native arm for it was emitted
   # ahead of this fallback (`with_native_arms_emitted`, the zero-argument RGSS wrappers), so a receiver of exactly
   # that class takes the arm and never reaches the else. BC2CPP_NATIVE_ARM_COVER=0 turns it off.
   def native_class_free?(name, classes)

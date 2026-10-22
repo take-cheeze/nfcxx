@@ -2,7 +2,7 @@
 
 require_relative 'core_fact_sigs'
 
-# ARG_SHAPES (docs/adr/0265): direct calls for the argument shapes the
+# ARG_SHAPES: direct calls for the argument shapes the
 # mandatory/optional-only gates leave to dispatch. Callee side: a rest
 # parameter (`def f(a, *r)`) and a block parameter (`&blk`, or a `yield`). Caller
 # side: a literal block on a resolved callee, and a splat whose length is known
@@ -18,7 +18,7 @@ module ArgShapeCalls
   # Names that read the calling frame's state and that compiled code does not
   # model: a compiled callee that calls one sees the caller's frame, not its own.
   # `block_given?` and its alias `iterator?` (one cfunc in kernel.c) are modelled
-  # (BLOCK_SEMANTICS, ADR 0266): they read the `bc2cpp_blk` parameter, see
+  # they read the `bc2cpp_blk` parameter, see
   # compile_block_given.
   # Kernel methods reading the caller's block or whole frame (sig/bc2cpp/declarations.rbs#core_frame_readers).
   BLOCK_GIVEN_NAMES = CoreFactSigs.block_given_names
@@ -277,7 +277,7 @@ module ArgShapeCalls
   # threaded through; the result is accepted only when every direct call in it
   # went through direct_call_args (so carries the block) and no block-less
   # dynamic call remains.
-  # `inline_offset` is the register shift of a block nested in an inlined loop body (ADR 0310).
+  # `inline_offset` is the register shift of a block nested in an inlined loop body.
   def compile_direct_block_send(region, block_expr, owner_def, inline_offset: nil)
     with_private_poly_diag_cache { compile_direct_block_send_body(region, block_expr, owner_def, inline_offset) }
   end
@@ -330,7 +330,7 @@ module ArgShapeCalls
 
   # Every `_impl` call of the code carries the block. The count is exact when no attempt was
   # dropped; a compile that built an arm chain twice and kept one counts the dropped calls too,
-  # so BLOCK_ARM_REACH (ADR 0310) also accepts code whose live calls are each covered, by name,
+  # so BLOCK_ARM_REACH also accepts code whose live calls are each covered, by name,
   # by a direct_call_args call.
   def direct_block_code?(code, direct_calls, direct_impls = nil)
     return false if direct_calls.zero?
@@ -346,7 +346,7 @@ module ArgShapeCalls
     live_by_name.sum { |_, count| count } == live_calls && live_by_name.all? { |name, count| count <= direct_impls[name] }
   end
 
-  # BC2CPP_BLOCK_ARM_REACH=0 returns every part of ADR 0310 to the earlier output.
+  # BC2CPP_BLOCK_ARM_REACH=0 returns every part of the block arm reach to the earlier output.
   def block_arm_reach?
     ENV['BC2CPP_BLOCK_ARM_REACH'] != '0'
   end

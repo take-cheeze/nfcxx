@@ -4,7 +4,7 @@ require 'set'
 require_relative 'lcf_schema_oracle'
 require_relative 'numeric_flow'
 
-# LCF_ROW_FLOW (docs/adr/0294): the kinds of object an LCF file reads out of itself, as extra bits of
+# LCF_ROW_FLOW: the kinds of object an LCF file reads out of itself, as extra bits of
 # NumericFlow's class-set lattice, and what `[]` on each returns.
 #
 #   FILE(LCF::Database)  exactly a Database (made by `LCF::Database.new`)

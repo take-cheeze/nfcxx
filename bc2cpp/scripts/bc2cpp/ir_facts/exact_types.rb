@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# EXACT_LITERAL (ADR 0280): BytecodeIR::Types#exact_at, the exact-class proof of the exact-receiver, `===`, `times`
+# EXACT_LITERAL: BytecodeIR::Types#exact_at, the exact-class proof of the exact-receiver, `===`, `times`
 # and literal-block sites, on hand-built bytecode. Every reaching definition must be a literal (or the `*rest` slot)
 # of one class; a container op keeps the class only of the container it extends.
 #

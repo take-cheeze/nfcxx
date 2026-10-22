@@ -2,7 +2,7 @@
 
 require_relative 'core_hierarchy_sigs'
 
-# ARRAY_NEW_BLOCK (docs/adr/0391): `Array.new(n) { |i| BODY }` as an inlined loop.
+# ARRAY_NEW_BLOCK: `Array.new(n) { |i| BODY }` as an inlined loop.
 #
 # The send is a block-carrying native constructor: Class#new allocates, then Array#initialize
 # (3rd/mruby/src/array.c `mrb_ary_init`, "|oo&") sizes the array with `mrb_as_int` and fills slot i with the

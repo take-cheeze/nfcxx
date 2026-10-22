@@ -1,4 +1,4 @@
-# Fiber, external-enumeration and block-control probes for the compiled core (docs/adr/0269).
+# Fiber, external-enumeration and block-control probes for the compiled core.
 #
 # Run by scripts/bc2cpp/core_mrbtest.rb under the interpreted and the compiled full-core
 # mruby; the two outputs must be identical. Every line is `name: result` with the class and

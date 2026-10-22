@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# IR_BLOCK_OPERANDS (docs/adr/0504): the block and yield analyses read registers through BytecodeIR reaching
+# IR_BLOCK_OPERANDS: the block and yield analyses read registers through BytecodeIR reaching
 # definitions. Real mrbc fixtures for the shapes the textual-predecessor walks answered wrongly: a join, a block
 # reached through a local, a nested block's SETUPVAR and the receiver of `x[i]`.
 #

@@ -7,7 +7,7 @@ require_relative 'irep_scans'
 require_relative 'native_sigs'
 require_relative 'rbs_parse_memo'
 
-# DECLARED_CONSTANT_CHECK (docs/adr/0455): RBS constant declarations, checked at every assignment.
+# DECLARED_CONSTANT_CHECK: RBS constant declarations, checked at every assignment.
 #
 #   FOO: Integer        every SETCONST/SETMCNST binding the bare name FOO evaluates to one Fixnum: an integer literal,
 #                       a proven or declared Integer constant, or ADD/SUB/MUL/DIV/ADDI/SUBI of those whose exact value

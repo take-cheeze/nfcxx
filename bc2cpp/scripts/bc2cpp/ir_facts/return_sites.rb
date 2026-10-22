@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# RETURN_SITES (docs/adr/0503): the exits of a body, the bodies and exits nested in it, and the definitions a
+# RETURN_SITES: the exits of a body, the bodies and exits nested in it, and the definitions a
 # returned register comes from (BytecodeIR::Program#return_sources), on hand-built instruction lists. Host only.
 #
 # Usage: ruby scripts/bc2cpp/ir_facts_check.rb

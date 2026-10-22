@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# JOIN_DOMINANCE (docs/adr/0261): a backward register walk takes the textually
+# JOIN_DOMINANCE: a backward register walk takes the textually
 # nearest writer, which a join can skip. `x = h[k] || []` reads the literal
 # while the register may hold h[k]. Every walk whose answer feeds an
 # unguarded consumer must therefore prove that the write it found is the only
@@ -221,7 +221,7 @@ check.call('`(v.m? && x) ? g(v) : nil`: a later argument copy of v is non-nil at
 check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_nil.call(ternary, 3, '4'))
 check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
            !NilNarrowing.non_nil?(irep_of(ternary), 12, '7', ->(_name) { false }))
-# b = blk; c = b; return unless c; use(blk)  -- available copies (ADR 0505): a test of c narrows every copy of it.
+# b = blk; c = b; return unless c; use(blk)  -- available copies: a test of c narrows every copy of it.
 chain = [insn(0, 'MOVE', "R2\tR1"), insn(3, 'MOVE', "R3\tR2"), insn(6, 'JMPIF', "R3\t12"), insn(10, 'RETNIL', ''),
          insn(12, 'RETURN', 'R1')]
 check.call('a test narrows the register its copy was copied from, two copies back', non_nil.call(chain, 4, '1'))

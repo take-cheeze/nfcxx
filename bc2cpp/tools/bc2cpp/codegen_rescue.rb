@@ -34,7 +34,7 @@ class CodeGen
     !BytecodeIR.for(irep).handlers?
   end
 
-  # JMPUW_RESCUE_SUPPORT (ADR 0260): vm.c's OP_JMPUW only consults an ENSURE
+  # JMPUW_RESCUE_SUPPORT: vm.c's OP_JMPUW only consults an ENSURE
   # handler that covers it and whose range the target leaves; otherwise it is a
   # plain jump. The rescue recognizers count JMPUW as a branch, so one leaving a
   # try body still rejects that region.
@@ -315,7 +315,7 @@ class CodeGen
     regions
   end
 
-  # RESCUE_LIVE_OUT (ADR 0260): the try body is its own function, so locals it
+  # RESCUE_LIVE_OUT: the try body is its own function, so locals it
   # writes (any local for an unmodelled op) or that a block created outside the
   # range touches are passed by reference, not copied. Temporaries stay copies:
   # only the connector is live across the region. Returns register numbers.
@@ -584,7 +584,7 @@ class CodeGen
     end
   end
 
-  # RESCUE_TRY_INLINE kill switch (ADR 0376): BC2CPP_RESCUE_INLINE_BLOCKS=0 keeps block calls.
+  # RESCUE_TRY_INLINE kill switch: BC2CPP_RESCUE_INLINE_BLOCKS=0 keeps block calls.
   def rescue_inline_blocks_enabled?
     ENV['BC2CPP_RESCUE_INLINE_BLOCKS'] != '0'
   end
@@ -693,7 +693,7 @@ class CodeGen
       local_suppressed.merge((nregion[:begin_addr]..nregion[:end_addr]).to_a)
       local_suppressed << nregion[:except_addr]
     end
-    # RESCUE_TRY_INLINE (ADR 0376): the named inliners run before the block-call fallback, as in
+    # RESCUE_TRY_INLINE: the named inliners run before the block-call fallback, as in
     # compile_method. Only compile_method sets `inline_mand`: the inliners assume a method irep,
     # not a block body's own rescue. A resumable method's loops belong to its step function.
     out = String.new

@@ -122,7 +122,7 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
   # let the scan reach an older, overwritten result on a reused register.
   # JOIN_DOMINANCE: the source must be the only value the register can hold.
   irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |pin, pin_idx|
-    # RECORD_HASH_PROOF (ADR 0285): `@slot[:key]` on a record Hash whose key only ever holds an Array.
+    # RECORD_HASH_PROOF: `@slot[:key]` on a record Hash whose key only ever holds an Array.
     next 'Array' if pin.op == 'GETIDX' && RecordHash.array_read?(irep, pin_idx, tier: RecordHash.consumer_tier)
     # LCF_FILE_FIELDS (lcf_file_fields.rb): `unit[:key]` on an exact LCF file whose schema field is an Array.
     next 'Array' if pin.op == 'GETIDX' && lcf_file_array_read?(irep, pin_idx, pin, receiver_class)

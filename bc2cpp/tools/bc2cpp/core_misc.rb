@@ -4,7 +4,7 @@ require 'set'
 require_relative 'core_mixins'
 
 # CORE_MISC: the Kernel natives and forwarding function that the String arm of `%` once mirrored (is_a? and sprintf,
-# sprintf.rb). The `%` and `-@` entries (ADR 0367) are gone, so their helpers run the by-name dispatch and nothing
+# sprintf.rb). The `%` and `-@` entries are gone, so their helpers run the by-name dispatch and nothing
 # compiled reads the pins below. `function_body` is also read by codegen_numeric_slow_zero.rb.
 module CoreMisc
   # Kernel#is_a? and Kernel#sprintf, each a single native definer, and the forwarding function the patch adds.

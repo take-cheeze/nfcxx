@@ -24,7 +24,7 @@ class CodeGen
   #   2. N is not in foreign_method_names: stricter than MONO on purpose, since
   #      a wrong proof is an unchecked mrb_fixnum() (UB), not a wrong call. Nor is it
   #      renamed by alias/define_method, or a name a computed-name send could build
-  #      (numeric_dynamically_named?): another body could then answer under N (ADR 0279).
+  #      (numeric_dynamically_named?): another body could then answer under N.
   #   3. The body is return-analyzable (fixnum_return_analyzable?): no catch
   #      handlers, no child ireps, at least one RETURN.
   #   4. Every return site proves (fixnum_return_sites_proven?) against the
@@ -57,7 +57,7 @@ class CodeGen
 
       d = defs.first
       next if @foreign_method_names.include?(name)
-      # ADR 0279: a computed-name send/define_method/alias can install another body under N.
+      # A computed-name send/define_method/alias can install another body under N.
       next if aliased.include?(name) || numeric_dynamically_named?(name)
 
       # ADMISSION VARIANT B: a MONO attr_reader/attr_accessor whose ivar is embedded
@@ -84,7 +84,7 @@ class CodeGen
     # Greatest fixpoint from every candidate. Variant B accessors are seeded and
     # never re-examined, but are visible to the bytecode candidates' proofs (a
     # method returning `other.code`).
-    # DECLARED_RETURN_CHECK (ADR 0455): checked declarations are seeded the same way (check_declared_returns).
+    # DECLARED_RETURN_CHECK: checked declarations are seeded the same way (check_declared_returns).
     declared = declared_return_facts(:fixnum)
     cand.reject! { |n, _| declared.include?(n) }
     @fixnum_return_names = Set.new(cand.keys) | accessors | declared
@@ -170,7 +170,7 @@ class CodeGen
       cand[name] = d
     end
 
-    declared = declared_return_facts(:array) # DECLARED_RETURN_CHECK (ADR 0455), as for Fixnum returns
+    declared = declared_return_facts(:array) # DECLARED_RETURN_CHECK, as for Fixnum returns
     cand.reject! { |n, _| declared.include?(n) }
     @array_return_names = Set.new(cand.keys) | declared
     loop do
@@ -209,7 +209,7 @@ class CodeGen
     end
   end
 
-  # RETCLASS_SELF_CALL_SUPPORT (ADR 0194): "every return path of this MONO method
+  # RETCLASS_SELF_CALL_SUPPORT: "every return path of this MONO method
   # holds an instance of exactly THIS class", so an implicit self-call can feed
   # ClassLayout.analyze's SETIV arm like `@x = Klass.new`. Same MONO admission as
   # ARRAY_RETURN_PROOF. RETCLASS_NILABLE_JOIN widens it to agreeing POLY names.
@@ -217,7 +217,7 @@ class CodeGen
   # depend on another's, so this GROWS from empty (a name is added once every
   # return site traces to the same class), like ClassLayout's sweep. Terminates:
   # the set only grows.
-  # RETCLASS_NILABLE_JOIN (ADR 0199): the fact is "K or nil", the contract every
+  # RETCLASS_NILABLE_JOIN: the fact is "K or nil", the contract every
   # ClassLayout hint already has (NIL_TOLERANT_JOIN), so a nil source is no evidence.
   def class_return_sites_proven(d, ret_class_proof)
     irep = @ireps[d.irep]
@@ -240,7 +240,7 @@ class CodeGen
 
           writer, r = src
           # The writer itself is a reaching definition already; every deeper
-          # hop (a `.new`/`.dup`/accessor receiver) must dominate (ADR 0198).
+          # hop (a `.new`/`.dup`/accessor receiver) must dominate.
           dominated = lambda do |w_idx, use_idx, hop_reg|
             (w_idx == writer && use_idx == writer + 1) || return_write_dominates?(irep, w_idx, use_idx, hop_reg)
           end
@@ -263,7 +263,7 @@ class CodeGen
   end
 
   # RETCLASS_NILABLE_JOIN: the definitions of `reg` reaching `idx` (`:nil` or `[writer_idx, reg]`), or nil if a path
-  # is unaccounted for (BytecodeIR.return_sources, RETURN_SITES, ADR 0503).
+  # is unaccounted for.
   def return_value_sources(irep, idx, reg)
     BytecodeIR.return_sources(irep, idx, reg, max_states: fixnum_proof_max_states(irep))
   end
@@ -289,14 +289,13 @@ class CodeGen
   end
 
   # symbol_installed_names, counting only the name an `alias_method` installs, not the one it copies from
-  # (ARRAY_NEW_BLOCK, ADR 0391: Window's `alias_method :_rgss1_initialize, :initialize` does not touch Array).
   def symbol_installed_destinations
     return @symbol_installed_destinations if defined?(@symbol_installed_destinations)
 
     @symbol_installed_destinations = collect_installed_names(skip_class_object: false, destinations_only: true)
   end
 
-  # NATIVE_CLASS_ARMS (ADR 0323): symbol_installed_names without the installs that land on a class or module
+  # NATIVE_CLASS_ARMS: symbol_installed_names without the installs that land on a class or module
   # object (`class << Const; alias_method ...`), which no instance of a proven set can see. nil when
   # symbol_installed_names is.
   def symbol_instance_installed_names
@@ -309,7 +308,7 @@ class CodeGen
     names = Set.new
     children = @ireps.values.flat_map(&:reps).compact.to_set
     @ireps.each do |label, irep|
-      # ADR 0264: mruby's own Ruby is outside this closed world (the aliases in its
+      # mruby's own Ruby is outside this closed world (the aliases in its
       # mrblib rename core methods, not the engine's), as it was before it became
       # compiled input. The root irep spans every file, so it is always scanned.
       next if children.include?(label) && CoreDefs.core_source?(irep.file)
@@ -318,7 +317,7 @@ class CodeGen
       irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'ALIAS', 'UNDEF'
-          # ALIAS_SITES (ADR 0474): a settled class-body alias is a registry definition of its new name.
+          # ALIAS_SITES: a settled class-body alias is a registry definition of its new name.
           next if insn.op == 'ALIAS' && AliasSites.settled?(@registry, label, idx)
 
           names << insn.sym unless scoped
@@ -326,16 +325,16 @@ class CodeGen
           return nil if NAME_INSTALLER_SENDS.include?(insn.sym)
         when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
-          # DEFINE_METHOD_SITES (ADR 0288): the registry defines this one, so it names nothing unknown.
+          # DEFINE_METHOD_SITES: the registry defines this one, so it names nothing unknown.
           next if insn.sym == 'define_method' && DefineMethodSites.settled?(@registry, irep, idx, @ireps)
-          # ALIAS_SITES (ADR 0474): so is a settled class-body alias_method, and it leaves `old` as it was.
+          # ALIAS_SITES: so is a settled class-body alias_method, and it leaves `old` as it was.
           next if insn.sym == 'alias_method' && AliasSites.settled?(@registry, label, idx)
 
           syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
           return nil unless syms && !syms.empty?
 
           # An implicit-receiver installer in a class-object body acts on that body's own cref.
-          # destinations_only (ADR 0391): `alias_method :new, :old` installs `new` and leaves `old` as it was.
+          # destinations_only: `alias_method :new, :old` installs `new` and leaves `old` as it was.
           syms = syms.first(1) if destinations_only && insn.sym == 'alias_method'
           names.merge(syms) unless scoped && insn.op.start_with?('SSEND')
         end
@@ -389,7 +388,7 @@ class CodeGen
       cand[name] = defs
     end
 
-    proven = declared_return_facts(:class).dup # DECLARED_RETURN_CHECK (ADR 0455): seeded, checked separately
+    proven = declared_return_facts(:class).dup # DECLARED_RETURN_CHECK: seeded, checked separately
     ret_class_proof = lambda do |n, owner|
       proven[n] if self_call_reaches_def?(n, owner)
     end
@@ -438,7 +437,7 @@ class CodeGen
     @class_return_names || {}
   end
 
-  # ARRAY_RETURN_PROOF's control-flow guard (ADR 0198). The backward scans walk
+  # ARRAY_RETURN_PROOF's control-flow guard. The backward scans walk
   # the instruction array linearly and see only the textually preceding writer,
   # not the other predecessors of a join. At a receiver site that is backed by
   # the mrb_array_p tripwire; for a claim about EVERY return path it is unsound:

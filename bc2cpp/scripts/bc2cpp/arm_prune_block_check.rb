@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# ARM_PRUNE stage A for block bodies (tools/bc2cpp/codegen_arm_prune.rb, ADR 0535). The fixture's block bodies are walked
+# ARM_PRUNE stage A for block bodies. The fixture's block bodies are walked
 # by the standalone block emitter at register offset 0, where a decided jump is decided: the body of `decided_in_block`
 # has its `r = 1 if x` arm unreachable (x is nil), and the body of `ret_in_block` has the jump after its RETURN_BLK
 # unreachable. Stage A only counts them, so the generated C++ is the same with the measurement on or off.

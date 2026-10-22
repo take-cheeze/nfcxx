@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Ranks the producers behind the by-name sends left in the shipped C++ (ADR 0309).
+# Ranks the producers behind the by-name sends left in the shipped C++.
 #
 #   mkdir -p /tmp/keep
 #   MRBC=<host mrbc> BC2CPP_SEND_ROOT_REPORT=/tmp/keep/rows.tsv BC2CPP_COVERAGE_KEEP_DIR=/tmp/keep \

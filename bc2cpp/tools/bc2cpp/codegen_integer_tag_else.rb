@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-# CodeGen: INTEGER_TAG_ELSE (ADR 0394). The by-name else of an Integer-tag guard on an index argument, where the receiver
-# is already proven to be exactly an Array (INDEX_EXACT, ADR 0296), becomes a direct call to the native Array body the
-# closed world answers `[]` / `[]=` with (INDEX_CLOSED, ADR 0365). The guard tests the INDEX, not the receiver, so
+# CodeGen: INTEGER_TAG_ELSE. The by-name else of an Integer-tag guard on an index argument, where the receiver
+# is already proven to be exactly an Array, becomes a direct call to the native Array body the
+# closed world answers `[]` / `[]=` with. The guard tests the INDEX, not the receiver, so
 # the else runs for a receiver of exact class Array with a key that is not a fixnum (a Range, a String, a Float, nil).
 #
 # The direct call is taken only when no other definer can answer the name on Array: the name's definers are bounded

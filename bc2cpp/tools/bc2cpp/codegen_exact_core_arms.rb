@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-# CodeGen: EXACT_CORE_ARMS (ADR 0309).
+# CodeGen: EXACT_CORE_ARMS.
 #
-# The exact-class flow (ADR 0289, 0296) proves a receiver is exactly an Array, Hash, String or
+# The exact-class flow proves a receiver is exactly an Array, Hash, String or
 # Range, and the NATIVE_CORE_DIRECT arms already trust it (exact_core_value_class). Two older arms
 # kept a class test and a by-name else for such a receiver anyway: the inline Array push family
 # and the TYPED call of a core class's own compiled body. They take the same proof here.

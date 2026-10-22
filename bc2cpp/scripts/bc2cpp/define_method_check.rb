@@ -1,9 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# DEFINE_METHOD_LOOPS (docs/adr/0469): a `define_method` that runs while a class body is defined is an
-# ordinary method definition whose body is the block: `define_method(:x) { }` in the body (ADR 0288, now
-# also with a `return`), and `define_method(n) { }` in a class-body loop over a literal container, once per
+# DEFINE_METHOD_LOOPS: a `define_method` that runs while a class body is defined is an
+# ordinary method definition whose body is the block: `define_method(:x) { }` in the body (including one with a `return`), and `define_method(n) { }` in a class-body loop over a literal container, once per
 # name, with the loop variable the block reads compiled as that iteration's Symbol. Everything else stays
 # a dynamic installer.
 #

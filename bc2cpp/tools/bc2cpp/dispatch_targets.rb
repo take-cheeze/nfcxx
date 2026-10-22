@@ -302,7 +302,7 @@ NATIVE_ARG_TARGETS = Set[
   'RPG2k::Scene::Battle#refresh_battle_list_arrows',
 ].freeze
 
-# SUPER_SUPPORT (ADR 0146): human-vetted "Owner#name" allowlist for compiling
+# SUPER_SUPPORT: human-vetted "Owner#name" allowlist for compiling
 # `super`/`super(...)`, because soundness depends on whole-program facts
 # compile_insn cannot re-derive per site:
 #   - Block forwarding: OP_SUPER always forwards the current method's block
@@ -313,7 +313,7 @@ NATIVE_ARG_TARGETS = Set[
 #   - No include/prepend between the caller and the superclass: OP_SUPER
 #     follows CI_TARGET_CLASS(ci - 1)->super, which passes through an ICLASS
 #     per included module, so a module's same-named method would win over
-#     "jump to @superclass_of". Now also checked mechanically (ADR 0158).
+#     "jump to @superclass_of". Now also checked mechanically.
 #   - The target must compile clean (super_target gates on compiles_clean?).
 # Supported shapes: `super parent` (SUPER n=1 into RPG2k::Scene::Base#
 # initialize) and bare `super` in a zero-parameter method (SUPER n=0).
@@ -321,7 +321,7 @@ NATIVE_ARG_TARGETS = Set[
 # Object#method_missing/#respond_to_missing? on LCF::Sections/Array1D/File):
 # there is no bytecode `_impl` to call; see ZSUPER_NATIVE_TARGETS for those.
 # A zsuper in a method with parameters (`ARGARY` + `SUPER n=*`) is the other
-# shape, not matched by the `n=(\d+)` parse (ADR 0159).
+# shape, not matched by the `n=(\d+)` parse.
 SUPER_TARGETS = Set[
   'RPG2k::Scene::Battle#initialize',
   'RPG2k::Scene::DebugMenu#initialize',
@@ -529,7 +529,7 @@ def trace_new_target(irep, idx, reg, *rest, dominated: nil, guarded: false, **op
   return trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, guarded: guarded, **opts) if dominated && !dominated.is_a?(JoinDominance)
 
   # A guarded consumer re-checks the class at run time, so a join costs it a compare. The mode is an argument of
-  # this trace only: a trace nested in it (a callback, a return proof) asks for its own mode (ADR 0508).
+  # this trace only: a trace nested in it (a callback, a return proof) asks for its own mode.
   if guarded
     klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: nil, guarded: true, **opts)
     return klass || trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: true)
@@ -541,7 +541,7 @@ def trace_new_target(irep, idx, reg, *rest, dominated: nil, guarded: false, **op
   trace_new_target_reaching(irep, idx, reg, rest, opts, guarded: false)
 end
 
-# JOIN_DOMINANCE (ADR 0261): every hop of the walk must dominate the read it
+# JOIN_DOMINANCE: every hop of the walk must dominate the read it
 # feeds; a hop that does not ends the walk and trace_new_target_reaching then
 # accepts only a unanimous answer over the reaching definitions.
 class JoinDominance
@@ -590,7 +590,7 @@ def trace_new_target_reaching(irep, idx, reg, rest, opts, guarded:)
 end
 
 # `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
-# accept every hop, so no hop can skip past a join (ADR 0198).
+# accept every hop, so no hop can skip past a join.
 def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
                       known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
@@ -628,7 +628,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
     when 'MOVE'
       next IrepScans.follow(insn.regs[1])
     when 'GETIDX', 'GETIDX0'
-      # RBS_RECORD_TYPES (ADR 0454): a literal-key read of a checked record key, for guarded consumers only.
+      # RBS_RECORD_TYPES: a literal-key read of a checked record key, for guarded consumers only.
       if insn.op == 'GETIDX' && !resolving_new && path.empty? && guarded && defined?(RbsRecordTypes) &&
          (record_hint = RbsRecordTypes.read_hint(irep, i))
         return record_hint
@@ -659,7 +659,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
         nil
       end
       # An unguarded alias must dominate this GETIDX: a join the alias skips would name the argument on one path
-      # only (ADR 0508). A guarded consumer keeps the join-blind alias, as its recv_class does.
+      # only. A guarded consumer keeps the join-blind alias, as its recv_class does.
       arg_reg = if guarded
                   irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: ->(last) { last }, &alias_probe)
                 else
@@ -938,10 +938,9 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # into `reg` on ONE side of the branch, so the register has two incoming
       # definitions and the walk would otherwise keep going past the literal
       # to an older, unrelated write (or off the top of the body to the
-      # argument). ADR 0191 added this opcode to the read-only skip set, which is
-      # correct for soundness of the skip but loses the literal: ADR 0191
-      # verified that had zero measurable effect, because no `x || []` receiver
-      # was reachable then.
+      # argument). This opcode is in the read-only skip set, which is correct
+      # for soundness of the skip but loses the literal (no `x || []` receiver
+      # was reachable then).
       #
       # The merge is admitted ONLY when the other (branch-taken) side is
       # provably the same container class, or provably nil:
@@ -957,8 +956,8 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       merged = container_phi_merge(irep, i, cur)
       return merged if merged
 
-      # Unproven: fall through to the LEAD_READ_ONLY behaviour ADR 0191
-      # established, which is to keep walking backwards past this read.
+      # Unproven: fall through to the LEAD_READ_ONLY behaviour, which is to
+      # keep walking backwards past this read.
     else
       return nil
     end
@@ -1142,7 +1141,7 @@ def container_phi_merge(irep, at, reg)
   return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   # The literal arm and the taken edge meet at the jump's target only in this shape. The definitions reaching that
-  # join cover both arms and every other predecessor of it; the definitions before the branch do not (ADR 0508).
+  # join cover both arms and every other predecessor of it; the definitions before the branch do not.
   return nil unless BytecodeIR.for(irep).decoded[at]&.goto == at + 2
 
   lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
@@ -1160,7 +1159,7 @@ def container_phi_merge(irep, at, reg)
   lit_class if agree
 end
 
-# RBS_SINGLETON_RETURN (docs/adr/0456): `Klass.m(...)` has a constant receiver, which the walk does not trace to a
+# RBS_SINGLETON_RETURN: `Klass.m(...)` has a constant receiver, which the walk does not trace to a
 # class. When `m` has exactly one definition in the whole program (natives included) and that definition is a
 # `def self.m` with a declared `-> C`, every call that does not raise NoMethodError runs that body, whatever the
 # receiver, so the result is C or nil (the ret_class contract). `key?`: the registry may insert on a miss.
@@ -1183,7 +1182,7 @@ end
 # CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` holds a fresh Array/Hash/Range
 # literal on every path, optionally frozen (`ARRAY R1 2` / `SEND0 R1 :freeze` /
 # `SETCONST NAME R1`). Every reaching definition must give the same class, so
-# `X = c ? [] : {}` has none (ADR 0508). `.freeze` is accepted only directly on
+# `X = c ? [] : {}` has none. `.freeze` is accepted only directly on
 # such a literal, never as a general passthrough: RGSS::Transition#freeze is an
 # unrelated override with a different return value.
 def literal_container_class(irep, idx, reg)
@@ -1234,7 +1233,7 @@ end
 # {type: :symbol, name: "bar"}, or nil (compile_send keeps POLY dispatch).
 def trace_eqq_literal_receiver(irep, idx, reg)
   # Every definition reaching the receiver must load the same literal: a join with a call on one arm leaves
-  # no literal (ADR 0508). An argument or block-entry definition is not a literal either.
+  # no literal. An argument or block-entry definition is not a literal either.
   defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
   return nil if defs.nil? || defs.empty?
 

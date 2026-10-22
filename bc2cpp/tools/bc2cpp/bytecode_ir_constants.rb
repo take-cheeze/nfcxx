@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 
-# BYTECODE_CONSTANT_FACTS (ADR 0501): the class, value and Fixnum interval of every constant binding, computed on
+# BYTECODE_CONSTANT_FACTS: the class, value and Fixnum interval of every constant binding, computed on
 # BytecodeIR.
 #
 # Each SETCONST / SETMCNST writes one register. Its reaching definitions (BytecodeIR::Program#reaching_definitions,

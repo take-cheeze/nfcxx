@@ -2,11 +2,11 @@
 
 require_relative 'numeric_flow'
 
-# CodeGen: CAPTURED_LOCAL_CLASS (ADR 0308).
+# CodeGen: CAPTURED_LOCAL_CLASS.
 #
 # A block's GETUPVAR is the defining frame's register: the class set is that frame's state at the creating BLOCK/LAMBDA
 # joined with every value stored into the register since (numeric_upvar_mask's argument, for class bits). A class belongs
-# to the variable, not to its aliases, so ADR 0296's refusal of element classes does not apply. Only a write by name
+# to the variable, not to its aliases, so the element-class refusal does not apply. Only a write by name
 # (Binding#local_variable_set, eval) could bypass the flow, so the proof is off when a build can reach one.
 class CodeGen
   # Sends that can store into a local without a SETUPVAR the flow could see.

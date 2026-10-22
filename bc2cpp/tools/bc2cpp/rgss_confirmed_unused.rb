@@ -3,7 +3,7 @@
 # The hand-vetted exception to never_called_registrations.rb excluding
 # `mruby-rgss-compiled`'s owners wholesale (they are the RGSS scripting API a
 # game's own scripts call, invisible to static analysis). **This Set is empty
-# on purpose** (ADR 0195): all 29 "never called" entries for this gem failed
+# on purpose**: all 29 "never called" entries for this gem failed
 # the bar below. Kept so a genuinely new candidate has a bar to clear.
 #
 # A "never called" RGSS entry is still needed if any of these holds:

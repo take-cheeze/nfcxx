@@ -6,7 +6,7 @@ require_relative 'ir_block_operands'
 require_relative 'core_hierarchy_sigs'
 require_relative 'send_names'
 
-# BLOCK_SELF_WORLD (docs/adr/0477): `self` inside a block is the self of the frame that created it, unless something
+# BLOCK_SELF_WORLD: `self` inside a block is the self of the frame that created it, unless something
 # runs the block under another self. mruby has exactly one way to do that, mrb_yield_with_class and its siblings,
 # reached only through the rebinders: instance_eval/instance_exec, class_eval/class_exec, module_eval/module_exec
 # (vm.c eval_under, object-ext), define_method/define_singleton_method (the block becomes a method body), and `new` on

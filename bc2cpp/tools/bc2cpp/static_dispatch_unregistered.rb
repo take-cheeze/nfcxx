@@ -4,7 +4,7 @@
 # NOT emitted: every one is proven, by tools/bc2cpp/static_dispatch_
 # registrations.rb, to be a name no runtime method-table lookup can ever reach
 # -- every real caller is a direct `Owner_name_impl(...)` call in generated
-# C++. See docs/adr/0203 for the proof and its stated residual risk.
+# C++.
 #
 # Read by bc2cpp.rb's emit_owner_registrations (generated registration for
 # BC2CPP_WIRED_EMBEDDINGS owners), by scripts/bc2cpp/prune_static_dispatch_registrations.rb

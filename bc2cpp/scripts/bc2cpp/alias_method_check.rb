@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# ALIAS_SITES (docs/adr/0474): `alias_method :new, :old` / `alias new old` written straight in a class body,
+# ALIAS_SITES: `alias_method :new, :old` / `alias new old` written straight in a class body,
 # with literal names, is a definition of `new` on that class: a copy of `old`'s body as the walk last saw it
 # on that class, or a definition with no body the compiler knows (native, core, inherited `old`). A settled
 # site installs nothing at run time; any other alias stays a dynamic installer.

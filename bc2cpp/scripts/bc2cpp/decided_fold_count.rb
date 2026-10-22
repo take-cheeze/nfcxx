@@ -1,9 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Counts the decided-branch folds (ADR 0532) in a closed-world generated tree, and checks them against the tests the
+# Counts the decided-branch folds in a closed-world generated tree, and checks them against the tests the
 # build removes. The generated C++ carries a `DECIDED_BRANCH` marker per fold only when bc2cpp runs with --annotated: the
-# default output strips `//` comments (CompactOutput, ADR 0463), so run the generator with --annotated to count markers.
+# default output strips `//` comments, so run the generator with --annotated to count markers.
 #
 #   ruby scripts/bc2cpp/decided_fold_count.rb GEN_DIR
 #   ruby scripts/bc2cpp/decided_fold_count.rb GEN_DIR_FOLDS_ON GEN_DIR_FOLDS_OFF

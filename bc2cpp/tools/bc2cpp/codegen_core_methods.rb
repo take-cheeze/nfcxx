@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # CodeGen: the ancestry walk that proves a class's lookup path for the numeric helpers (see
-# numeric_slow_spaceship_core?, ADR 0362). No core method is inlined from a verified model here any more.
+# numeric_slow_spaceship_core?). No core method is inlined from a verified model here any more.
 class CodeGen
   # `classes`, what they mix in, then Object, Kernel and BasicObject; nil when one
   # has an unknown mixin or a prepend that could sit ahead of the modelled method.

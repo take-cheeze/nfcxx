@@ -2,7 +2,7 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-# Check ADR 0262 (generated side): code the compiler proves unreachable raises
+# Check the generated side: code the compiler proves unreachable raises
 # instead of carrying on.
 #
 #   - a function whose every path RETURNs ends in a "fell off the end" raise,

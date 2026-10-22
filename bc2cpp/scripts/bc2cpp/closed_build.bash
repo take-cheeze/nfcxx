@@ -41,7 +41,7 @@ ruby "$root/scripts/bc2cpp/analysis_headers.rb" "$build_dir/closed"
 ruby "$root/scripts/bc2cpp/native_fn_kinds.rb" "$build_dir/closed" > "$build_dir/closed/analysis/fn-kinds.tsv"
 echo "wrote $build_dir/closed/analysis/fn-kinds.tsv"
 
-# Phase 2 regenerates the code with the table (BC2CPP_NATIVE_FN_KINDS, ADR 0537). rake does not track the variable, so
+# Phase 2 regenerates the code with the table. rake does not track the variable, so
 # the generated sources are removed and rake writes them again; their objects follow.
 find "$build_dir/closed" -name '*_gen.cpp' -delete
 export BC2CPP_NATIVE_FN_KINDS="$build_dir/closed/analysis/fn-kinds.tsv"

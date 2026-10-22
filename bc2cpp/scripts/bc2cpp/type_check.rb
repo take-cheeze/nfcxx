@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# bc2cpp type check (docs/adr/0412, docs/bc2cpp-type-check.md): a REPORT-ONLY, TypeScript-like gradual check built on
+# bc2cpp type check: a REPORT-ONLY, TypeScript-like gradual check built on
 # bc2cpp's own whole-program inference. It runs the analysis (the same one a build runs, without compiling any C++),
 # then prints for every method / ivar / constant the type the analysis proved or the reason it could not, the
 # annotations and signatures that contradict the inference, and the declarations whose signature would remove the most

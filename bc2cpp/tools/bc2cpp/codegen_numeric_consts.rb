@@ -2,7 +2,7 @@
 
 require_relative 'numeric_flow'
 
-# CodeGen: NUMERIC_CONSTANT_PROOF (ADR 0276).
+# CodeGen: NUMERIC_CONSTANT_PROOF.
 #
 # What class set can constant `NAME` hold? INTEGER_CONSTANT_PROOF admits a name
 # only when every definition is an Integer literal (or an alias/sum of such), so
@@ -12,7 +12,7 @@ require_relative 'numeric_flow'
 # join of the class sets its SETCONST/SETMCNST sites store, a least fixpoint with
 # the other numeric facts (a constant can be defined from another).
 #
-# Keyed by const_group_key: the qualified definition a read reaches (LEXICAL_CONST, ADR 0423), or
+# Keyed by const_group_key: the qualified definition a read reaches, or
 # the bare name when that model is off. A name is tracked only when EVERY definition of it is
 # visible: a CLASS/MODULE naming it, a native mrb_define_const family call, or a foreign Ruby
 # definition (outside_const_names) poisons its bare name, and a site in an irep the flow cannot
@@ -22,7 +22,7 @@ require_relative 'numeric_flow'
 class CodeGen
   NumericConstGroup = Struct.new(:name, :mask, :sites, :readers, :failed, :structural)
 
-  # BC2CPP_LEXICAL_CONST=0 keys every constant by its bare name, the model before ADR 0423.
+  # BC2CPP_LEXICAL_CONST=0 keys every constant by its bare name (the earlier model).
   def lexical_consts_enabled?
     return @lexical_consts_enabled if defined?(@lexical_consts_enabled)
 

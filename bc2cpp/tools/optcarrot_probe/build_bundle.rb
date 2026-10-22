@@ -15,7 +15,7 @@
 # concatenation IS the loading.
 #
 # Running the bundle also needs 3rd/mruby patched with
-# patches/mruby-module-function-scope.patch (applied here, idempotent) --
+# the pinned fork commit (mruby-module-function-scope) (applied here, idempotent) --
 # without it, optcarrot's own driver.rb/palette.rb/driver/misc.rb (bare
 # `module_function`) fail to load with a NoMethodError vendored mruby never
 # implemented that scope form for. See that patch's own preamble, and

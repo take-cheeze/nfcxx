@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# CodeGen: the `- & | <<` helpers close their by-name else (ADR 0366). Array#-, #& and #|, String#<< and IO#<< are
+# CodeGen: the `- & | <<` helpers close their by-name else. Array#-, #& and #|, String#<< and IO#<< are
 # `static` in mruby-array-ext, mruby-string-ext and mruby-io; the pinned fork commit (mruby-expose-collection-op-bodies, docs/patch-fork-tracking.md)
 # exports each as `<name>_impl`, called by the method's own wrapper after its argument parsing, and the closed
 # helpers call the same function. Everything below proves that the tree bc2cpp scanned really has those exports and

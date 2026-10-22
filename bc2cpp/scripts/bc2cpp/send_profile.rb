@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Single-class send profile (docs/adr/0486): joins the receiver-trace dumps (BC2CPP_TRACE_RECV_OUT) with the
+# Single-class send profile: joins the receiver-trace dumps (BC2CPP_TRACE_RECV_OUT) with the
 # site list of the instrumented build, and writes the by-name sites that saw one receiver class.
 #
 #   ruby scripts/bc2cpp/send_profile.rb --build BUILD_DIR [--min-hits N] [--out FILE] DUMP [...]

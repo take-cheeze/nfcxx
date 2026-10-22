@@ -3,7 +3,7 @@
 require_relative 'yield_reach'
 require_relative 'core_methods'
 
-# CodeGen: the yield-free proof (ADR 0283). YieldReach answers, per irep, whether anything above
+# CodeGen: the yield-free proof. YieldReach answers, per irep, whether anything above
 # its compiled frame can suspend the current Fiber; the queries below turn that into the facts the
 # emitters need.
 class CodeGen

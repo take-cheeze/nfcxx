@@ -4,7 +4,7 @@ require_relative 'rbs_parse_memo'
 
 # NativeSigs: the built-in and RGSS method declarations, all in sig/bc2cpp/declarations.rbs. Each native table is a group
 # of declarations under a marker line directly above each one: `# bc2cpp-native: <table>`. A marker on a top-level block
-# covers its members; a member may carry its own marker, which takes precedence (docs/adr/0516). A table is read by its
+# covers its members; a member may carry its own marker, which takes precedence. A table is read by its
 # own loader (NativeSigs.decls), and a native declaration is not a program hint: its C function or mruby body is checked
 # by its own generator, not by a method the program defines. Program declarations carry no marker.
 module NativeSigs

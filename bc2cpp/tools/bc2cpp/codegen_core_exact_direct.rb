@@ -2,14 +2,14 @@
 
 require_relative 'codegen_block_core_direct'
 
-# CORE_EXACT_DIRECT (docs/adr/0314): a send with no block whose receiver is proven an exact
-# Array, Hash, Range or Integer (ADR 0280) and whose name that class answers with a
-# compiled mruby core body (hidden from the registry, ADR 0264; possibly guarded, ADR 0269) is a
+# CORE_EXACT_DIRECT: a send with no block whose receiver is proven an exact
+# Array, Hash, Range or Integer and whose name that class answers with a
+# compiled mruby core body is a
 # direct `_impl` call. Nothing else could answer: the receiver's class is a fact, so the by-name
 # send has no receiver left to dispatch for.
 #
 # The body of a guarded method may only run in a Fiber's frames when it provably cannot suspend one
-# whatever it is given (YIELD_REACH `nb`, ADR 0283); a call has no block of its own, so that is
+# whatever it is given; a call has no block of its own, so that is
 # the whole condition and the entry's root-context test is not needed.
 #
 # BC2CPP_CORE_EXTEND=0 turns every emission of this file off.
@@ -49,7 +49,7 @@ module CoreExactDirect
 
   TO_ENUM_DIRECT_NOTE = '// TO_ENUM_DIRECT :'
   # The classes whose mruby core mrblib methods `return to_enum(` (3rd/mruby/mrblib, read at load time). Integer is
-  # named out: its to_enum bodies are not CORE_SELF_EXACT receivers (ADR 0381, ADR 0418).
+  # named out: its to_enum bodies are not CORE_SELF_EXACT receivers.
   TO_ENUM_DIRECT_CLASSES = begin
     dir = File.expand_path('../../3rd/mruby/mrblib', __dir__)
     raise "bc2cpp: #{dir} is missing (is 3rd/mruby checked out?)" unless Dir.exist?(dir)
@@ -60,7 +60,7 @@ module CoreExactDirect
     end.uniq.reject { |name| name == 'Integer' }.freeze
   end
 
-  # TO_ENUM_DIRECT (ADR 0418): `to_enum(:meth, *args)` / `enum_for` on a receiver proven exactly an Array, Hash, Range or
+  # TO_ENUM_DIRECT: `to_enum(:meth, *args)` / `enum_for` on a receiver proven exactly an Array, Hash, Range or
   # String builds the Enumerator the way Kernel#to_enum's body does, `Enumerator.new self, meth, *args`, without looking
   # the name up. EnumeratorModel proves Kernel#to_enum is the program's only to_enum/enum_for and that nothing replaces
   # the construction chain; the constant must be stable and no runtime installer may name the involved methods.
@@ -96,7 +96,7 @@ module CoreExactDirect
     CPP
   end
 
-  # FLOW_CORE_DIRECT (ADR 0323): the direct call of an exact-receiver site that would otherwise get a guard
+  # FLOW_CORE_DIRECT: the direct call of an exact-receiver site that would otherwise get a guard
   # chain over user classes (a name some project class also defines). The receiver is exactly the core
   # class, so those arms are dead and the compiled core body is the only candidate.
   def flow_core_direct_line(d, recv, name, argv)

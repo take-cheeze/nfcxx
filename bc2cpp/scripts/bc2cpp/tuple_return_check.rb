@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# TUPLE_RETURN_FACTS (docs/adr/0311): `a, b = pair(x)` reads the elements of the Array a call returned.
+# TUPLE_RETURN_FACTS: `a, b = pair(x)` reads the elements of the Array a call returned.
 # When every definition of `pair` ends in a literal `[e0, e1, ...]` of one length, that Array is fresh and
 # nobody else holds it, so AREF's result has the class set the flow proved for that position, and a
 # guarded arithmetic arm on it loses its by-name else.
