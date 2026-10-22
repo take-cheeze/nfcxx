@@ -34,6 +34,10 @@ class CodeGen
     if @resumable && (resumable_code = resumable_intercept(insn, irep, owner_def, idx, reg_offset))
       return resumable_code
     end
+    # SEALED_INT16 (sealed_int16_locals.rb): a proven int16 array's instructions go to its std::vector.
+    if (sealed = sealed_int16_action(irep, idx))
+      return sealed_int16_code(sealed, insn)
+    end
 
     case insn.op
     when 'ENTER'
@@ -665,7 +669,7 @@ class CodeGen
         else
           # INTEGER_TAG_ELSE (ADR 0394): an exact Array receiver's non-fixnum key runs the Array body directly.
           direct = integer_tag_else_array_call('[]', exact, "r#{d}", ["r#{s}"])
-          by_name = direct ? "r#{d} = #{direct};" : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
+          by_name = direct ? "r#{d} = #{direct};" : index_else_statement(d, s)
           <<~CPP
             #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
               r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
@@ -682,7 +686,7 @@ class CodeGen
             if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
               r#{d} = mrb_hash_get(M, r#{d}, r#{s});
             } else {
-              r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+              #{index_else_statement(d, s)}
             }
           CPP
         end
@@ -788,7 +792,7 @@ class CodeGen
               mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
               r#{d} = r#{val};
             } else {
-              r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+              #{index_set_else_statement(d, idx_reg, val)}
             }
           CPP
         end

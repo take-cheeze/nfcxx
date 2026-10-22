@@ -11,6 +11,9 @@ class IrContextResults
   MAX_ROUNDS = 48
   MAX_CLASSES = 16
   CLASS_CACHE_LIMIT = 2048
+  EMPTY_FRAME_ARGUMENTS = [].freeze
+  EMPTY_FRAME_KEYWORDS = {}.freeze
+  FIXED_BINDING_EDGES = {}.freeze
   PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
                  'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
@@ -92,6 +95,8 @@ class IrContextResults
     @binding_layouts = {}.compare_by_identity
     @class_cache = {}
     @reuse_evaluations = ENV['BC2CPP_IR_CONTEXT_REEVALUATION'] != '0'
+    @frame_allocations = ENV['BC2CPP_IR_FRAME_ALLOCATIONS'] != '0'
+    @fixed_bindings = ENV['BC2CPP_IR_FIXED_BINDINGS'] != '0'
     @leaf_evaluations = IrContextLeafEvaluations.new unless ENV['BC2CPP_IR_LEAF_EVALUATIONS'] == '0'
     native_tables = @gen.frozen_tables_model&.mask.to_i
     native_rows = @gen.instance_variable_get(:@lcf_rows)&.mask.to_i
@@ -211,9 +216,17 @@ class IrContextResults
     layout = binding_layout(body)
     return nil unless layout
 
-    fields, names, required_names, index = layout
+    fields, names, required_names, index, fixed = layout
     required, optional, rest, post, key_count, keydict = fields
     return nil if arguments.size < required + post || rest.zero? && arguments.size > required + optional + post
+    if @fixed_bindings && fixed
+      return nil unless keywords.empty?
+
+      # A fixed positional frame has no optional edges or keyword slots.
+      values = arguments.dup
+      values << NumericFlow::NIL
+      return CallContextArguments::Binding.new(masks: values.freeze, enter_edges: FIXED_BINDING_EDGES)
+    end
     return nil unless root || (required_names - keywords.keys).empty?
     return nil unless root || keydict.positive? || (keywords.keys - names).empty?
     return nil unless keywords.empty? || key_count.positive? || keydict.positive?
@@ -241,7 +254,7 @@ class IrContextResults
     fields = body.enter&.enter_fields
     return nil unless fields&.size == 8 && fields.all? { |value| value.is_a?(Integer) && value >= 0 }
 
-    _required, optional, rest, _post, _key_count, keydict, block, extra = fields
+    _required, optional, rest, post, key_count, keydict, block, extra = fields
     return nil if extra != 0 || rest > 1 || keydict > 1 || block > 1
 
     index = body.instructions.index(body.enter)
@@ -252,7 +265,8 @@ class IrContextResults
     end
     names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
     optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
-    [fields.dup.freeze, names, (names - optional_names).freeze, index].freeze
+    fixed = optional.zero? && rest.zero? && post.zero? && key_count.zero? && keydict.zero? && names.empty?
+    [fields.dup.freeze, names, (names - optional_names).freeze, index, fixed].freeze
   end
 
   def add(body, receiver, arguments, keywords, binding, root: false)
@@ -372,8 +386,15 @@ class IrContextResults
 
     implicit, register, argc, keyword_registers = layout
     receiver = implicit ? node.receiver : state[register]
-    arguments = (1..argc).map { |position| state[register + position] || NumericFlow::OTHER }
-    keywords = {}
+    arguments = if !@frame_allocations
+                  (1..argc).map { |position| state[register + position] || NumericFlow::OTHER }
+                elsif argc <= 0
+                  EMPTY_FRAME_ARGUMENTS
+                else
+                  Array.new(argc) { |position| state[register + position + 1] || NumericFlow::OTHER }
+                end
+    # Only empty containers are shared; inferred masks remain local to this frame.
+    keywords = @frame_allocations && keyword_registers.empty? ? EMPTY_FRAME_KEYWORDS : {}
     keyword_registers.each { |name, value_register| keywords[name] = state[value_register] || NumericFlow::OTHER }
     [receiver, arguments, keywords]
   end

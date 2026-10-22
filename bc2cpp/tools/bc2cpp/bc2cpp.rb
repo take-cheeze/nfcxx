@@ -144,6 +144,7 @@ require_relative 'codegen_block_fallback'
 require_relative 'codegen_yield_free'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
+require_relative 'codegen_sealed_int16'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
 require_relative 'codegen_eqq'
@@ -171,6 +172,8 @@ require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
+# Last: its compile_method and compile_insn prepends must be outermost (docs/adr/0545).
+require_relative 'codegen_stack_tuples'
 
 if $PROGRAM_NAME == __FILE__
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
@@ -1457,6 +1460,11 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
   puts '#include <mruby/array.h>'
+  # SEALED_INT16 (sealed_int16_locals.rb): std::vector<int16_t> locals, only when the switch is on.
+  if SealedInt16Locals.enabled?
+    puts '#include <cstdint>'
+    puts '#include <vector>'
+  end
   puts '#include "mrb_array_access.hxx"'
   puts '#include <mruby/class.h>'
   # mrb_range_new for RANGE_INC/RANGE_EXC.
