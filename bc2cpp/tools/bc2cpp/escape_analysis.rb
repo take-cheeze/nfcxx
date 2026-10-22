@@ -417,6 +417,8 @@ module EscapeAnalysis
       insn = EscapeAnalysis.insn_at(irep, index)
       return failed(:no_destination) unless insn.reg
       return failed(:reflection) unless @world.reflective_sites.empty?
+      # A frozen literal is one persistent object shared by every load, not a fresh creation (ADR 0546).
+      return failed(:frozen_literal) if insn.frozen_literal
 
       flow(irep, { index => { insn.reg => true } }, created_at: index, value_class: CREATED_CLASS[insn.op] || value_class)
     end

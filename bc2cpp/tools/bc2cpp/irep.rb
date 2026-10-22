@@ -79,7 +79,7 @@ end
 # One decoded instruction. `args` is the disassembly's operand text, kept only
 # for diagnostics and comments; every pass reads the typed operands through
 # InsnOperands (see OperandSchema).
-Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
+Insn = Struct.new(:lineno, :addr, :op, :args, :raw, :frozen_literal, keyword_init: true) do
   include InsnOperands
 
   # An Insn for code the compiler synthesizes (no disassembly line behind it).
