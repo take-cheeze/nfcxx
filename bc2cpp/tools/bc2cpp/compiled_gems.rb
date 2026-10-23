@@ -81,10 +81,9 @@ BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = BC2CPP_CORE_MRBLIB_GEMS
 BC2CPP_FAIL_FAST_TYPE = false
 # Same, from 3rd/<name>/mrblib. mruby-marshal has no mrblib.
 BC2CPP_EXTERNAL_MRBLIB_GEMS = %w[mruby-stringio mruby-onig-regexp].freeze
-# The gem set the canonical (script, coverage report) world assumes: the closed build's,
-# which has neither mruby-dir nor the Onigmo regexp gem (build_config.rb).
-BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS -
-                              %w[mruby-dir mruby-onig-regexp]).freeze
+# The gem set the canonical (script, coverage report) world assumes: the closed build's, which is the
+# sealed desktop host's gem set (build_config.rb), so it includes mruby-dir and the Onigmo regexp gem.
+BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).freeze
 # The classes core sources define methods on: the owners mruby-core-compiled
 # emits, except Object (mruby-rpg2k/mrblib/main.rb defines engine methods on it
 # that no compiled gem emits, so an Object owner would claim them). A class
@@ -651,9 +650,8 @@ def bc2cpp_closed_core_gems(root = BC2CPP_GEMS_ROOT)
 
   core.freeze
 end
-# Each closed-world target's own native host sources (the firmware/executable).
-BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'closed' => 'app/wio/src',
-                                  'psp' => 'app/psp' }.freeze
+# The closed world's own native host sources: the sealed desktop host's (src/main.cxx and its engine).
+BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'closed' => 'src' }.freeze
 # mruby-compiler entry points that turn a string or file into running Ruby.
 BC2CPP_SOURCE_LOADER_CALL = /\b(?:mrb_load_n?string(?:_cxt)?|mrb_load_file(?:_cxt)?|mrb_load_exec|
                                mrb_parse_n?string|mrb_parse_file|mrb_load_detect_file_cxt)\s*\(([^;]*)/mx
