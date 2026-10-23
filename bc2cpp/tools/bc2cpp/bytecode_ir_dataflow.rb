@@ -701,8 +701,9 @@ module BytecodeIR
     defs = reaching_definitions(irep, index, reg.to_s, origin_transfers: true, shared: true)
     return nil unless defs && !defs.empty? && defs.none?(&:entry?)
 
+    program = self.for(irep)
     defs.map do |definition|
-      insn = irep.instructions[definition.index]
+      insn = program.source_at(definition.index)
       return nil unless insn.reg == definition.reg
 
       [definition.index, insn]

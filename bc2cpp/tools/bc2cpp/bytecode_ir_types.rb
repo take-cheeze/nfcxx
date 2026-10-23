@@ -152,7 +152,7 @@ module BytecodeIR
         return nil unless definitions && !definitions.empty?
 
         definitions.each do |definition|
-          insn = definition.entry? ? nil : @irep.instructions[definition.index]
+          insn = definition.entry? ? nil : ir_program.source_at(definition.index)
           if insn && insn.reg == definition.reg && (container = EXACT_EXTEND_OPS[insn.op])
             required << container
             work << [definition.index, definition.reg]
@@ -230,8 +230,8 @@ module BytecodeIR
 
       source = definitions.any? do |definition|
         definition.entry? || definition.built == :arg ||
-          (%w[GETIV GETCONST GETMCNST KARG GETUPVAR].include?(@irep.instructions[definition.index].op) ||
-           ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %w[GETIDX GETIDX0 AREF].include?(@irep.instructions[definition.index].op))
+          (%w[GETIV GETCONST GETMCNST KARG GETUPVAR].include?(ir_program.source_at(definition.index).op) ||
+           ENV['BC2CPP_IR_ELEMENT_TYPES'] != '0' && %w[GETIDX GETIDX0 AREF].include?(ir_program.source_at(definition.index).op))
       end
       if source && @source_resolver && (resolved = @source_resolver.call(index, reg))
         if resolved.is_a?(Fact)
@@ -259,7 +259,7 @@ module BytecodeIR
             contracts.merge(result.contracts) if result
           end
           if !values && @call_resolver && !definition.entry?
-            insn = @irep.instructions[definition.index]
+            insn = ir_program.source_at(definition.index)
             if %w[SEND SEND0].include?(insn.op) && insn.reg == definition.reg
               receiver = query(definition.index, insn.reg, use_declarations: true, max_states: max_states, refusal: refusal)
               result = receiver && @call_resolver.call(insn, receiver, refusal)
@@ -268,7 +268,7 @@ module BytecodeIR
             end
           end
         end
-        return unknown(refusal, definition.entry? ? :entry_value : "unknown:#{@irep.instructions[definition.index].op}") unless values && !values.empty?
+        return unknown(refusal, definition.entry? ? :entry_value : "unknown:#{ir_program.source_at(definition.index).op}") unless values && !values.empty?
 
         types.merge(values)
       end
@@ -286,7 +286,7 @@ module BytecodeIR
       if definition.entry? || definition.built == :arg
         return [@declared_args[definition.reg] || @declared_optional_args[definition.reg], "argument:R#{definition.reg}"]
       end
-      insn = @irep.instructions[definition.index]
+      insn = ir_program.source_at(definition.index)
       return [nil, nil] unless insn.reg == definition.reg
 
       case insn.op
@@ -306,7 +306,7 @@ module BytecodeIR
       return nil unless key_register
       key_defs = BytecodeIR.reaching_definitions(@irep, definition.index, key_register.to_s, shared: true, origin_transfers: true,
                                                  max_states: max_states, refusal: refusal)
-      syms = key_defs&.map { |source| source.entry? ? nil : @irep.instructions[source.index] }
+      syms = key_defs&.map { |source| source.entry? ? nil : ir_program.source_at(source.index) }
       unless syms && !syms.empty? && syms.all? { |producer| producer&.op == 'LOADSYM' }
         return unknown(refusal, :lcf_non_literal_key)
       end
@@ -322,7 +322,7 @@ module BytecodeIR
     def indexed_definition(definition, max_states:, refusal:)
       return nil if ENV['BC2CPP_IR_ELEMENT_TYPES'] == '0'
 
-      insn = @irep.instructions[definition.index]
+      insn = ir_program.source_at(definition.index)
       return nil unless %w[GETIDX GETIDX0].include?(insn.op) && insn.reg == definition.reg
 
       register = insn.op == 'GETIDX0' ? insn.regs[1] : insn.reg
@@ -360,7 +360,7 @@ module BytecodeIR
       elsif source.built == :rest
         rest_element_bound(source.reg)
       else
-        element_bound_of(@irep.instructions[source.index])
+        element_bound_of(ir_program.source_at(source.index))
       end
     end
 
@@ -398,12 +398,12 @@ module BytecodeIR
     def compute_rest_array_private(reg)
       aliases = Set[reg.to_i]
       loop do
-        grew = @irep.instructions.any? do |insn|
+        grew = ir_program.each_source.any? do |insn, _index|
           insn.op == 'MOVE' && aliases.include?(insn.regs[1].to_i) && aliases.add?(insn.regs[0].to_i)
         end
         break unless grew
       end
-      @irep.instructions.none? { |insn| rest_array_unsafe_use?(insn, aliases) }
+      ir_program.each_source.none? { |insn, _index| rest_array_unsafe_use?(insn, aliases) }
     end
 
     def rest_array_unsafe_use?(insn, aliases)
@@ -427,7 +427,7 @@ module BytecodeIR
       return @inferred_args[definition.reg] if definition.built == :block && @inferred_args.key?(definition.reg)
       return ENTER_TYPES[definition.built] if definition.built
 
-      insn = @irep.instructions[definition.index]
+      insn = ir_program.source_at(definition.index)
       return nil unless insn.reg == definition.reg
       return keyword_definition_types(insn) if insn.op == 'KARG'
       return @inferred_calls[definition.index] if BytecodeIR::Ops::SEND.include?(insn.op)
@@ -461,8 +461,12 @@ module BytecodeIR
       definition = defaults.first
       return nil if definition.entry? || definition.built
 
-      insn = irep.instructions[definition.index]
+      insn = BytecodeIR.for(irep).source_at(definition.index)
       insn.reg == definition.reg ? literal_class(insn, irep.pool) : nil
+    end
+
+    def ir_program
+      BytecodeIR.for(@irep)
     end
 
     def unknown(refusal, cause)

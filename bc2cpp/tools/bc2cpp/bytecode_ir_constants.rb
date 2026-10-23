@@ -90,7 +90,7 @@ module BytecodeIR
       bindings = []
       poison = Set.new(poisoned)
       ireps.each_value do |irep|
-        irep.instructions.each_with_index do |insn, idx|
+        BytecodeIR.for(irep).each_source do |insn, idx|
           case insn.op
           when 'CLASS', 'MODULE'
             poison << insn.sym_token if insn.sym_token
@@ -175,7 +175,7 @@ module BytecodeIR
 
     # The node a writer at +index+ gives to +reg+, or nil when the writer is not a modelled literal or operator.
     def node_of(irep, index, reg, policy, depth)
-      insn = irep.instructions[index]
+      insn = BytecodeIR.for(irep).source_at(index)
       return nil unless insn.reg == reg.to_s
 
       op = insn.op
