@@ -10,6 +10,9 @@ class IrContextResults
   MAX_CONTEXTS = 512
   MAX_ROUNDS = 48
   MAX_CLASSES = 16
+  MAX_SHAPE_PATH_STATES = 4096
+  SHAPE_PRESERVING_OPS = Set['MOVE', 'NOP', 'LOADNIL', 'LOADSYM', 'LOADTRUE', 'LOADFALSE',
+                             'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
   CLASS_CACHE_LIMIT = 2048
   EMPTY_FRAME_ARGUMENTS = [].freeze
   EMPTY_FRAME_KEYWORDS = {}.freeze
@@ -509,11 +512,36 @@ class IrContextResults
     origin = definitions.first.index
     shape = node.arrays[origin]
     return nil unless shape && shape.container == receivers.first && shape.elements && shape.elements.all? { |mask| mask.is_a?(Integer) && !mask.anybits?(NumericFlow::OTHER | NumericFlow::EXC | NumericFlow::CHECKED) }
-    corridor = body.instructions[origin + 1...index]
-    return nil unless corridor.all? { |op| %w[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE].include?(op.op) || BytecodeIR::Ops::LOADI_OPS.include?(op.op) } &&
-                      BytecodeIR.for(body).linear_corridor?(origin, index)
+    return nil unless frozen_shape_preserved?(body, origin, index)
 
     shape_bit(shape)
+  end
+
+  # No permitted instruction can mutate or expose an alias. Allocation re-entry
+  # would mix distinct objects at one origin; handlers require a separate proof.
+  def frozen_shape_preserved?(body, origin, index)
+    paths = (@frozen_shape_paths ||= {})
+    key = [body, origin, index]
+    return paths[key] if paths.key?(key)
+
+    program = BytecodeIR.for(body)
+    paths[key] = false
+    return false unless program.resolved? && !program.handlers?
+
+    seen = Set.new
+    work = program.successors_of(origin).dup
+    until work.empty?
+      current = work.pop
+      next unless seen.add?(current)
+      return false if seen.size > MAX_SHAPE_PATH_STATES || current == origin
+      next if current == index
+
+      op = program.source_at(current).op
+      return false unless SHAPE_PRESERVING_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
+
+      work.concat(program.successors_of(current))
+    end
+    paths[key] = seen.include?(index)
   end
 
   def shape_bit(shape)

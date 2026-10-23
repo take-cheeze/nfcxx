@@ -16,6 +16,49 @@ check.call('native receiver return retains its actual class', IrNativeExpression
 check.call('native constructor parser handles parentheses in quotes', IrNativeExpressionTypes.classes('mrb_bool_value(strcmp("(", ")"))', 'Array') == [:TrueClass, :FalseClass])
 
 require_relative '../../tools/bc2cpp/codegen_return_classes'
+require_relative '../../tools/bc2cpp/irep'
+
+# Instruction addresses equal indices, so branch targets name CFG nodes directly.
+shape_body = lambda do |specs, handlers = []|
+  Irep.new(label: "shape_#{specs.hash}", nlocals: 4, nregs: 12, reps: [], catch_handlers: handlers,
+           instructions: specs.each_with_index.map do |(op, args), index|
+             Insn.new(lineno: 1, addr: index, op: op, args: args)
+           end)
+end
+shape_gen = Struct.new(:numeric_class_bit_count, :frozen_tables_model).new(0, nil)
+shape_engine = IrContextResults.new(shape_gen, {})
+allocation = ['ARRAY', "R4\t1"]
+freeze_call = ['SEND0', "R4\t:freeze"]
+check_shape_path = lambda do |message, specs, expected, handlers = []|
+  body = shape_body.call(specs, handlers)
+  target = specs.index(freeze_call)
+  result = shape_engine.frozen_shape_preserved?(body, 0, target)
+  check.call(message, result == expected)
+  check.call("#{message} (cached)", shape_engine.frozen_shape_preserved?(body, 0, target) == expected)
+end
+check_shape_path.call('linear moves retain shapes', [allocation, ['MOVE', "R5\tR4"], freeze_call], true)
+check_shape_path.call('branch joins preserve aliases', [allocation, ['JMPNOT', "R1\t4"], ['MOVE', "R5\tR4"],
+                                                       ['JMP', '5'], ['MOVE', "R5\tR4"], freeze_call], true)
+check_shape_path.call('pure backedges retain shapes', [allocation, ['JMPNOT', "R1\t5"], ['MOVE', "R5\tR4"],
+                                                     ['LOADFALSE', 'R1'], ['JMP', '1'], freeze_call], true)
+check_shape_path.call('unreachable mutations do not affect shapes', [allocation, ['JMP', '3'],
+                                                                  ['ARYPUSH', "R4\tR1\t1"], freeze_call], true)
+check_shape_path.call('allocation re-entry refuses shapes', [allocation, ['JMPIF', "R1\t0"], freeze_call], false)
+check_shape_path.call('unresolved branch targets refuse shapes', [allocation, ['JMPIF', "R1\t99"], freeze_call], false)
+check_shape_path.call('a mutation on an exiting branch still conservatively refuses shapes',
+                     [allocation, ['JMPNOT', "R1\t4"], ['ARYPUSH', "R4\tR1\t1"], ['RETURN', 'R4'], freeze_call], false)
+[
+  ['ARYPUSH', "R5\tR1\t1"], ['HASHADD', "R5\t1"], ['SETIDX', 'R5'],
+  ['SEND0', "R8\t:unknown"], ['SETIV', '@saved R5'], ['SETUPVAR', "R5\t1\t0"],
+  ['BLOCK', "R8\tI(0)"], ['LAMBDA', "R8\tI(0)"], ['UNMODELLED', 'R5']
+].each do |effect|
+  check_shape_path.call("#{effect.first} through an alias or unrelated receiver refuses shapes",
+                       [allocation, ['MOVE', "R5\tR4"], ['JMPNOT', "R1\t4"], effect, freeze_call], false)
+end
+handler = CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 2, target: 2)
+check_shape_path.call('handler edges refuse shapes', [allocation, ['NOP', ''], freeze_call], false, [handler])
+check_shape_path.call('shape CFG budget exhaustion refuses shapes',
+                     [allocation] + Array.new(IrContextResults::MAX_SHAPE_PATH_STATES) { ['NOP', ''] } + [freeze_call], false)
 
 # The middle node's return stabilizes before its state-dependent effect does.
 context_harness = Class.new(IrContextResults) do
@@ -148,6 +191,27 @@ Dir.mktmpdir('ir-context-results') do |dir|
       def never(value); never(value); end
       def array(value); [value].freeze; end
       def build_hash(value); { answer: value }.freeze; end
+      def branch_array(value, flag)
+        values = [value]
+        if flag; selected = values; else; selected = values; end
+        selected.freeze
+      end
+      def loop_array(value, flag)
+        values = [value]
+        while flag; selected = values; flag = false; end
+        values.freeze
+      end
+      def branch_hash(value, flag)
+        values = { answer: value }
+        if flag; selected = values; else; selected = values; end
+        selected.freeze
+      end
+      def changed_array(value, flag)
+        values = [value]
+        selected = values
+        selected[0] = 1 if flag
+        values.freeze
+      end
       def pure_a(value); pure_b(value); end
       def pure_b(value); value; end
       def opaque_writer(value); @state = value; end
@@ -169,6 +233,11 @@ Dir.mktmpdir('ir-context-results') do |dir|
       def call_never; never(1); end
       def call_array; array('element')[0]; end
       def call_hash; build_hash(1)[:answer]; end
+      def call_branch_array; branch_array('element', true)[0]; end
+      def call_branch_array_int; branch_array(1, false)[0]; end
+      def call_loop_array; loop_array('element', true)[0]; end
+      def call_branch_hash; branch_hash(1, true)[:answer]; end
+      def call_changed_array; changed_array('element', true)[0]; end
       def call_absent; array('element')[8]; end
       def call_native; [].empty?; end
       def call_dynamic(other); other.identity(1); end
@@ -208,7 +277,9 @@ Dir.mktmpdir('ir-context-results') do |dir|
                'call_post' => ['String'], 'call_default' => ['Integer'], 'call_given' => ['Symbol'], 'call_kw' => ['String'],
                'call_kw_default' => ['Symbol'], 'call_kw_given' => ['Integer'],
                'call_recursive' => ['String'], 'call_mutual' => ['Symbol'], 'call_array' => ['String'],
-               'call_hash' => %w[Integer nil], 'call_absent' => ['nil'], 'effect_read' => ['Symbol'], 'call_native' => ['bool'] }
+               'call_hash' => %w[Integer nil], 'call_branch_array' => ['String'], 'call_branch_array_int' => ['Integer'],
+               'call_loop_array' => ['String'],
+               'call_branch_hash' => %w[Integer nil], 'call_absent' => ['nil'], 'effect_read' => ['Symbol'], 'call_native' => ['bool'] }
   expected.each do |name, types|
     row = returns[['ContextCases', name]]
     check.call("independent #{name}: #{row.inspect}", row['status'] == 'inferred' && row['type'].split(' | ').sort == types.sort)
@@ -216,6 +287,7 @@ Dir.mktmpdir('ir-context-results') do |dir|
   check.call('a recursive component with no return stays unknown', returns[['ContextCases', 'call_never']]['status'] == 'unknown')
   check.call('an unknown explicit receiver does not inherit lexical self target', returns[['ContextCases', 'call_dynamic']]['status'] == 'unknown')
   check.call('a mutable array parameter gains no frozen element shape', returns[['ContextCases', 'later_element']]['status'] == 'unknown')
+  check.call('an alias mutation withdraws the original element shape', returns[['ContextCases', 'call_changed_array']]['status'] == 'unknown')
   check.call('an actual writer does not preserve the previous Symbol-only field', returns[['ContextCases', 'effect_write']]['type'] != 'Symbol')
   check.call('native inventory distinguishes audited bool forms', report['native_direct_forms'].any? { |row| row['type'] == 'bool' })
 
@@ -240,7 +312,9 @@ Dir.mktmpdir('ir-context-results') do |dir|
   check.call('a round budget never publishes bottom as a return type', rounds['status'] == 'unknown')
   no_effect = run.call('BC2CPP_IR_EFFECT_SUMMARIES' => '0')['ir_feedback'].find { |row| row['method'] == 'effect_read' && row['kind'] == 'return' }
   check.call('effect opt-out withdraws preserved slot refinement', no_effect['type'] != 'Symbol')
-  no_shape = run.call('BC2CPP_IR_CONTEXT_SHAPES' => '0')['ir_feedback'].find { |row| row['method'] == 'call_array' && row['kind'] == 'return' }
-  check.call('shape opt-out withdraws parameter-built frozen elements', no_shape['status'] == 'unknown')
+  %w[call_array call_branch_array call_branch_array_int call_loop_array call_branch_hash].each do |method|
+    no_shape = run.call('BC2CPP_IR_CONTEXT_SHAPES' => '0')['ir_feedback'].find { |row| row['method'] == method && row['kind'] == 'return' }
+    check.call("shape opt-out withdraws parameter-built frozen elements for #{method}", no_shape['status'] == 'unknown')
+  end
 end
 puts 'context result checks passed'
