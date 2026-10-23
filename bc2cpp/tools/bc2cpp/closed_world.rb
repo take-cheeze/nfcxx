@@ -1482,10 +1482,9 @@ class ClosedWorld
     @registry.each_value { |defs| defs.each { |d| registered << d.irep if d.irep } }
     children = @ireps.values.flat_map(&:reps).compact.to_set
     @ireps.each do |label, irep|
-      insns = irep.instructions
       own_source = !(children.include?(label) && CoreDefs.core_source?(irep.file))
       BytecodeIR.for(irep).each_source do |insn, idx|
-        scan_singleton_maker(irep, insns, idx, insn) if own_source
+        scan_singleton_maker(irep, idx, insn) if own_source
         case insn.op
         when 'TDEF', 'SDEF'
           child = irep.reps[insn.block_index]
@@ -1496,7 +1495,7 @@ class ClosedWorld
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
           scan_probe_send(irep, idx, insn) if PROBE_SENDS.include?(insn.sym)
-          scan_send(irep, insns, idx, insn)
+          scan_send(irep, idx, insn)
         when 'UNDEF'
           @removed_names << insn.sym
         when 'LOADSYM'
@@ -1537,7 +1536,7 @@ class ClosedWorld
     return nil unless writers
 
     bodies = writers.map do |writer|
-      method = irep.instructions[writer]
+      method = BytecodeIR.for(irep).source_at(writer)
       return nil unless method.op == 'METHOD' && method.block_index
 
       child = irep.reps[method.block_index]
@@ -1559,7 +1558,7 @@ class ClosedWorld
   # constructor_pools_refusal (codegen_constructor_pools.rb) names the makers it refuses over.
   public :singleton_makers
 
-  def scan_singleton_maker(irep, insns, idx, insn)
+  def scan_singleton_maker(irep, idx, insn)
     case insn.op
     when 'SDEF', 'SCLASS'
       @singleton_opens << [irep, idx, insn]
@@ -1621,12 +1620,12 @@ class ClosedWorld
     @loop_installer_sites ||= LoopInstallers.sites(@registry)
   end
 
-  def scan_send(irep, insns, idx, insn)
+  def scan_send(irep, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
     scan_freeze_send(irep, idx, insn) if name == 'freeze'
-    scan_visibility_send(irep, insns, idx, insn) if VISIBILITY_SENDS.include?(name)
-    scan_removal_send(irep, insns, idx, insn) if REMOVER_SENDS.include?(name) || NAME_FORWARDERS.include?(name)
+    scan_visibility_send(irep, idx, insn) if VISIBILITY_SENDS.include?(name)
+    scan_removal_send(irep, idx, insn) if REMOVER_SENDS.include?(name) || NAME_FORWARDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
       global!(:dynamic_install)
@@ -1693,7 +1692,7 @@ class ClosedWorld
 
   # `private :a, :b` / `private def a`: the names it hides. Any other argument
   # shape could name anything.
-  def scan_visibility_send(irep, insns, idx, insn)
+  def scan_visibility_send(irep, idx, insn)
     n = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : insn.argc
     return if n&.zero?
 
@@ -1706,20 +1705,22 @@ class ClosedWorld
   # remains usable only at its adjacent load: register flow does not prove aliases
   # cannot mutate it. Definition ops return their Symbol name in the receiver register.
   def argument_name_sets(irep, idx, insn, n, definitions: false, strings: false)
+    program = BytecodeIR.for(irep)
     (1..n).map do |position|
       reg = (insn.reg.to_i + position).to_s
       defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, origin_transfers: true)
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
       names = defs.map do |definition|
-        writer = BytecodeIR.for(irep).source_at(definition.index)
+        writer = program.source_at(definition.index)
         case writer.op
         when 'LOADSYM' then writer.sym_token
         when 'DEF', 'TDEF', 'SDEF' then writer.sym_token if definitions
         when 'STRING'
           next unless strings && definition.index == idx - n + position - 1
-          next unless BytecodeIR.for(irep).linear_corridor?(definition.index, idx, include_handlers: true)
-          next unless irep.instructions[definition.index + 1...idx].all? { |op| %w[LOADSYM STRING MOVE].include?(op.op) }
+          next unless program.linear_corridor?(definition.index, idx, include_handlers: true)
+          gap = (definition.index + 1...idx)
+          next unless gap.all? { |k| %w[LOADSYM STRING MOVE].include?(program.source_at(k).op) }
 
           irep.pool[writer.pool_index.to_i]
         end
@@ -1732,7 +1733,7 @@ class ClosedWorld
 
   # REMOVED_NAMES: preserve each argument's alternatives separately: only the first
   # argument of a forwarding send selects the operation, while the rest name methods.
-  def scan_removal_send(irep, _insns, idx, insn)
+  def scan_removal_send(irep, idx, insn)
     sets = insn.argc && argument_name_sets(irep, idx, insn, insn.argc, strings: true)
     if REMOVER_SENDS.include?(insn.sym)
       return @dynamic_removal = true unless sets
