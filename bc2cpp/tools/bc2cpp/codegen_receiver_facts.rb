@@ -311,6 +311,10 @@ class CodeGen
     # A forward edge from before this write into the send's block could
     # bypass the receiver value; edges from later code already execute it.
     return nil if branch_edges.any? { |source, target| source < ref.root_index && target > ref.root_index && target <= idx }
+    # A loop back-edge from after the send can carry a second write of dest_reg into it, which the backward walk
+    # cannot see; a single reaching definition (following back-edges) is the only write that can be the receiver.
+    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg.to_s)
+    return nil unless defs&.size == 1 && !defs.first.entry?
 
     ref.name && ([ref.name] + ref.segments).join('::')
   end
