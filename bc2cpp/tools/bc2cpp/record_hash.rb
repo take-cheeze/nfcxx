@@ -132,7 +132,7 @@ module RecordHash
           insn = d.insn
           if insn.op == 'LOADSYM' then [insn.sym]
           elsif insn.op == 'KARG' then pool&.keyword(irep, insn, depth)
-          elsif for_write && (NON_SYMBOL_OPS.include?(insn.op) || insn.op.start_with?('LOADI')) then []
+          elsif for_write && (NON_SYMBOL_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)) then []
           end
         end
       return nil if found.nil?
@@ -604,7 +604,7 @@ module RecordHash
       if op == 'ARRAY' && insn.regs.size == 2 # ARRAY2: reads Rb..Rb+c-1
         count = insn.typed.last.value
         return escape('array element') if state.any? { |x| x >= others.first && x < others.first + count }
-      elsif !WRITE_LEAD_ONLY.include?(op) && !op.start_with?('LOADI')
+      elsif !WRITE_LEAD_ONLY.include?(op) && !BytecodeIR::Ops::LOADI_OPS.include?(op)
         hi = read_span(insn, lead)
         return escape("operand of #{op}") if state.any? { |x| x >= lead && x <= hi }
       end
@@ -680,7 +680,7 @@ module RecordHash
       insn = BytecodeIR.for(irep).source_at(d)
       return nil unless %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
 
-      path = irep.constant_path(d - 1, insn.reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY)
+      path = BytecodeIR.for(irep).constant_path(d - 1, insn.reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY)
       return nil unless path&.root == :const && path.segments.empty? && %w[Array Hash String].include?(path.name)
       return nil unless @closed_world.stable_constant_identity?(path.name) && @closed_world.standard_constructor_lookup?
       return nil unless (@registry['new'] || []).all? { |md| md.owner == '<native>' }

@@ -1254,7 +1254,7 @@ def eqq_literal_of(irep, definition)
     # Same extraction as LOADSYM's codegen (stops before a local-name comment).
     name = insn.sym_token
     name ? { type: :symbol, name: name } : nil
-  when /^LOADI/
+  when BytecodeIR::Ops::LOADI_OPS
     # Same two literal shapes as LOADI's codegen.
     lit = insn.paren_value || insn.imm_operand
     lit ? { type: :fixnum, value: lit } : nil

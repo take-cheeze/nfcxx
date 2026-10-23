@@ -198,7 +198,7 @@ module SiteOriginTable
       when 'GETIV' then 'ivar_read'
       when 'GETIDX', 'GETIDX0', 'AREF' then 'indexed_result'
       when 'GETUPVAR' then 'captured_upvar'
-      when 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADL', 'ARRAY', 'ARRAY2', 'HASH', 'STRING', /\ALOADI/
+      when 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADL', 'ARRAY', 'ARRAY2', 'HASH', 'STRING', BytecodeIR::Ops::LOADI_OPS
         'literal_or_fresh'
       when CALL_RESULT_OPS then 'call_result'
       else 'other'

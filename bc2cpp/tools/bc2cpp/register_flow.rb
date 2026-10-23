@@ -324,7 +324,7 @@ class RegisterFlow
   end
 
   def pure_write_op?(op)
-    BytecodeIR::Ops::PURE_LOAD.include?(op) || op.start_with?('LOADI')
+    BytecodeIR::Ops::PURE_LOAD.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
   end
 
   # --- liveness -------------------------------------------------------------
@@ -376,7 +376,7 @@ class RegisterFlow
       dropped.merge(fresh)
     end
     dropped.each do |i|
-      Stats["dropped #{@insns[i].op.start_with?('LOADI') ? 'LOADI' : @insns[i].op}"] += 1
+      Stats["dropped #{BytecodeIR::Ops::LOADI_OPS.include?(@insns[i].op) ? 'LOADI' : @insns[i].op}"] += 1
       @texts[i] = ''
     end
   end

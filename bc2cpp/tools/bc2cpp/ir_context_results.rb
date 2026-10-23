@@ -508,7 +508,7 @@ class IrContextResults
     shape = node.arrays[origin]
     return nil unless shape && shape.container == receivers.first && shape.elements && shape.elements.all? { |mask| mask.is_a?(Integer) && !mask.anybits?(NumericFlow::OTHER | NumericFlow::EXC | NumericFlow::CHECKED) }
     corridor = body.instructions[origin + 1...index]
-    return nil unless corridor.all? { |op| %w[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE].include?(op.op) || op.op.start_with?('LOADI') } &&
+    return nil unless corridor.all? { |op| %w[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE].include?(op.op) || BytecodeIR::Ops::LOADI_OPS.include?(op.op) } &&
                       BytecodeIR.for(body).linear_corridor?(origin, index)
 
     shape_bit(shape)
@@ -585,7 +585,7 @@ class IrContextResults
           inputs = context.states[call_index]
           inputs.nil? || readonly?(context, callee, call_index, instruction, inputs, nested)
         else
-          PURE_OPS.include?(instruction.op) || instruction.op.match?(/\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/)
+          PURE_OPS.include?(instruction.op) || BytecodeIR::Ops::LOADI_OPS.include?(instruction.op)
         end
       end
     end

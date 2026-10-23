@@ -353,7 +353,7 @@ module CallFacts
 
       insns = irep.instructions
       return nil if insns.empty?
-      return nil unless insns.all? { |i| NumericFlow::SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
+      return nil unless insns.all? { |i| NumericFlow::SUPPORTED_OPS.include?(i.op) || BytecodeIR::Ops::LOADI_OPS.include?(i.op) }
 
       n = [irep.nregs.to_i, 1].max
       raises = program.raise_targets

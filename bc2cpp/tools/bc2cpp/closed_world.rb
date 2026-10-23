@@ -940,6 +940,36 @@ class ClosedWorld
     Array(paths).map { |path| native_file_facts(path) }
   end
 
+  # The text a native file's identifiers come from: comments removed, and string literals that contain whitespace
+  # dropped (prose such as a help string naming "Game directory"). A class name passed to mrb_class_get or
+  # mrb_const_get is a whitespace-free literal, so those are kept.
+  def self.native_code_text(text)
+    out = +''
+    i = 0
+    while i < text.length
+      c = text[i]
+      nxt = text[i + 1]
+      if c == '/' && nxt == '/'
+        i = text.index("\n", i) || text.length
+      elsif c == '/' && nxt == '*'
+        close = text.index('*/', i + 2)
+        i = close ? close + 2 : text.length
+      elsif c == '"' || c == "'"
+        j = i + 1
+        while j < text.length && text[j] != c
+          j += text[j] == '\\' ? 2 : 1
+        end
+        lit = text[i..j] || ''
+        out << (lit.match?(/\s/) ? ' ' : lit)
+        i = j + 1
+      else
+        out << c
+        i += 1
+      end
+    end
+    out
+  end
+
   def self.native_file_facts(path)
     # Drop comments, keeping string and char literals (a "//" inside one).
     source = File.binread(path)
@@ -952,7 +982,7 @@ class ClosedWorld
     plain_class_defines = []
     dynamic_constant_mutation = false
     refusals = []
-    code_tokens = Set.new(text.scan(/[A-Za-z_]\w*/))
+    code_tokens = Set.new(native_code_text(text).scan(/[A-Za-z_]\w*/))
     dynamic = text.match?(NATIVE_DYNAMIC)
     defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
     unless path.match?(NATIVE_CORE)
@@ -1248,7 +1278,7 @@ class ClosedWorld
           note_unknown_def(insn.sym, insn.op == 'TDEF' ? irep.label : nil) unless registered.include?(child)
         when 'DEF'
           sym = insn.sym_token
-          method = insns[0...idx].reverse.find { |i| i.op == 'METHOD' }
+          method = BytecodeIR::Window.find_preceding(insns, idx) { |i| i.op == 'METHOD' }
           child = method && irep.reps[method.block_index.to_i]
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
@@ -1259,7 +1289,7 @@ class ClosedWorld
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
-          @probed_names << sym if insns[idx + 1, 3].any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
+          @probed_names << sym if BytecodeIR::Window.following(insns, idx, 3).any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
           const = insn.const_name
@@ -1439,14 +1469,13 @@ class ClosedWorld
   # EXT prefix of a wide operand; nil when anything else feeds an argument.
   def preceding_name_args(insns, idx, n)
     syms = []
-    (idx - 1).downto(0) do |i|
+    BytecodeIR::Window.each_preceding(insns, idx) do |insn, _|
       break if syms.size == n
 
-      op = insns[i].op
-      next if op.start_with?('EXT')
-      return nil unless %w[LOADSYM DEF].include?(op)
+      next if insn.op.start_with?('EXT')
+      return nil unless %w[LOADSYM DEF].include?(insn.op)
 
-      syms.unshift(insns[i].sym_token)
+      syms.unshift(insn.sym_token)
     end
     syms if syms.size == n
   end
@@ -1455,7 +1484,7 @@ class ClosedWorld
   def literal_syms(insns, idx, n)
     return [] if n.zero?
 
-    run = insns[(idx - n).clamp(0, idx)...idx]
+    run = BytecodeIR::Window.preceding(insns, idx, n)
     return nil unless run.size == n && run.all? { |i| i.op == 'LOADSYM' }
 
     run.map { |i| i.sym_token }
@@ -1494,7 +1523,7 @@ class ClosedWorld
 
   # 15+ arguments arrive packed: `ARRAY Ra k` right before an `n=*` send.
   def packed_syms(insns, idx, insn)
-    arr = idx.positive? && insns[idx - 1]
+    arr = BytecodeIR::Window.previous(insns, idx)
     return nil unless insn.pure_splat? && arr && arr.op == 'ARRAY'
 
     k = arr.uint_operand.to_i
@@ -1513,8 +1542,7 @@ class ClosedWorld
     reg = insn.reg.to_i
     send_idx = nil
     reads = []
-    ((idx + 1)...insns.size).each do |j|
-      ins = insns[j]
+    BytecodeIR::Window.each_following(insns, idx) do |ins, j|
       break if ins.op.match?(STOP_OPS)
       next unless reads_register?(ins, reg)
 
@@ -1532,10 +1560,9 @@ class ClosedWorld
     return global!(:class_factory_escape) unless send_idx
     return global!(:class_factory_escape) if const == 'Data'
 
-    between = insns[(idx + 1)...send_idx]
     case const
     when 'Struct'
-      between.each do |i|
+      BytecodeIR::Window.each_following(insns, idx, send_idx) do |i, _|
         next unless i.op == 'LOADSYM'
 
         s = i.sym_token
@@ -1548,7 +1575,7 @@ class ClosedWorld
       return if n.zero?
 
       sup = "R#{reg.to_i + 1}"
-      writer = between.reverse.find { |i| i.reg_token == sup }
+      writer = BytecodeIR::Window.find_preceding(insns, send_idx, idx + 1) { |i| i.reg_token == sup }
       base = writer && %w[GETCONST GETMCNST].include?(writer.op) && writer.const_name
       return global!(:class_factory_escape) unless base
 

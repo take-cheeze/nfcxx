@@ -341,8 +341,6 @@ module DeclaredConstants
   # Range#to_a answers a fresh Array or raises (CodeGen#range_to_a_safe? holds the stock-method condition). The
   # receiver of the to_a is the dominating RANGE_INC / RANGE_EXC, and each endpoint is the dominating writer of its
   # register before that range instruction.
-  LITERAL_INTEGER_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
-
   def range_to_a_source?(irep, idx, reg)
     j, call, recv = dominating_writer(irep, idx, reg)
     return false unless call&.op == 'SEND0' && call.sym == 'to_a'
@@ -369,7 +367,7 @@ module DeclaredConstants
     _j, insn = dominating_writer(irep, idx, reg)
     return nil unless insn
     return :String if insn.op == 'STRING'
-    return :Integer if LITERAL_INTEGER_OP.match?(insn.op)
+    return :Integer if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
 
     nil
   end
@@ -538,7 +536,7 @@ module DeclaredConstants
       entries = @entries[irep.label] ||= IntegerConstants.const_entry_addrs(irep)
       irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                            follow_moves: true) do |insn, j, cur|
-        if insn.op.start_with?('LOADI')
+        if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
           v = loadi(insn)
           next v && fixnum([v, v])
         end

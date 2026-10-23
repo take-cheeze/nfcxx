@@ -775,7 +775,7 @@ class YieldReach
 
   # An op that only defines its leading register does not read it.
   def written_here?(insn, reg)
-    insn.regs.first == reg && !LEAD_READERS.include?(insn.op) && !insn.op.start_with?('SET')
+    insn.regs.first == reg && !LEAD_READERS.include?(insn.op) && !BytecodeIR::Ops::SET_OPS.include?(insn.op)
   end
 
   def send_keeps?(node, program, insn, idx, &holds)

@@ -319,7 +319,7 @@ module RbsRecordTypes
     when 'LOADL'
       entry = irep.pool[insn.pool_index]
       entry.is_a?(Hash) && entry[:type] == :float ? 'Float' : (entry.is_a?(Hash) ? 'Integer' : nil)
-    else insn.op.start_with?('LOADI') ? 'Integer' : nil
+    else BytecodeIR::Ops::LOADI_OPS.include?(insn.op) ? 'Integer' : nil
     end
   end
 

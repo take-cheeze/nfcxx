@@ -58,7 +58,6 @@ module ConstantArgumentSites
   DISPATCH_OPS = { 'EQ' => '==', 'NOT' => '!' }.freeze
   # Every send opcode the call-site index reads (SEND0, SENDB, SSEND*), plus the two it does not list.
   SEND_OPS = (CallSiteIndex::SEND_OPS + %w[SEND1 SENDV]).uniq.freeze
-  LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
   # Sends that install or dispatch a method by a name the argument carries: their target is the first argument.
   DYNAMIC_SENDS = %w[send __send__ public_send method instance_method define_method alias_method].freeze
 
@@ -211,7 +210,7 @@ module ConstantArgumentSites
         may_raise << op
       elsif RAISING_OPS.include?(op)
         may_raise << op
-      elsif op.match?(LOADI_OP) || PURE_OPS.include?(op)
+      elsif BytecodeIR::Ops::LOADI_OPS.include?(op) || PURE_OPS.include?(op)
         next
       else
         impure << op
@@ -274,7 +273,7 @@ module ConstantArgumentSites
     return UNKNOWN if insn.nil?
 
     op = insn.op
-    if op.match?(LOADI_OP)
+    if BytecodeIR::Ops::LOADI_OPS.include?(op)
       value = integer_literal(insn)
       return value.nil? ? UNKNOWN : [:int, value]
     end

@@ -227,6 +227,8 @@ module IrTypeFeedback
                           }
                         end
       inferred_args = {}
+      inferred_keywords = {}
+      inferred_rest_elements = {}
       if ENV['BC2CPP_IR_ARGUMENT_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_argument_classes)
         enter = irep.enter&.enter_fields
         mandatory = enter ? enter[0].to_i : 0
@@ -242,13 +244,35 @@ module IrTypeFeedback
             inferred_args[position.to_s] = classes if classes
           end
         end
+        # Rest elements, required keywords and the block: the same complete call-site joins the report rows use.
+        # Registers follow ENTER (req:opt:rest:post:key:kdict:block); the joins refuse post, keyword-rest and
+        # keyword shapes they do not cover. A declared block signature keeps its optional block (type_facts).
+        optional = enter ? enter[1].to_i : 0
+        rest = enter ? enter[2].to_i : 0
+        if rest.positive? && ctx.gen.respond_to?(:bytecode_ir_rest_argument_classes)
+          classes = ctx.gen.bytecode_ir_rest_argument_classes(definition)
+          inferred_rest_elements[(mandatory + optional + 1).to_s] = classes if classes
+        end
+        if ctx.gen.respond_to?(:bytecode_ir_keyword_argument_classes)
+          irep.each_with_op('KARG') do |insn, _index|
+            name = insn.sym.to_s
+            classes = ctx.gen.bytecode_ir_keyword_argument_classes(definition, name)
+            inferred_keywords[name] = classes if classes
+          end
+        end
+        declared_block = ctx.signature_contracts&.ir_block_signatures&.[]([definition.owner.to_s, definition.name.to_s])
+        if !declared_block && ctx.gen.respond_to?(:bytecode_ir_block_proc_classes) && ctx.gen.bytecode_ir_block_proc_classes(definition)
+          inferred_args[(mandatory + optional + rest + 1).to_s] = Set[:Proc]
+        end
       end
       analysis = if applied
                    RbsSignatures.ir_types(applied, irep, prepared: prepared, superclass_of: ctx.superclass_of || {}, included_modules: ctx.included_modules || {},
-                                          prepended_modules: ctx.prepended_modules || {}, unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver,
+                                          prepended_modules: ctx.prepended_modules || {}, unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new, inferred_args: inferred_args, inferred_calls: inferred_calls,
+                                          inferred_keywords: inferred_keywords, inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver,
                                           subclasses: subclasses, method_missing_classes: method_missing_classes, removed: removed,
                                           includer_candidates: includer_candidates)
-                 else BytecodeIR::Types.new(irep, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver)
+                 else BytecodeIR::Types.new(irep, inferred_args: inferred_args, inferred_calls: inferred_calls, inferred_keywords: inferred_keywords,
+                                            inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver)
                  end
       owners = prepared ? prepared.owners(definition.owner) : RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {},
                                             included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
