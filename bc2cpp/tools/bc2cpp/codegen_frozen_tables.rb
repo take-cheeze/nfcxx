@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 require 'shellwords'
 require_relative 'foreign_definers'
 require_relative 'frozen_tables'
@@ -207,7 +209,7 @@ end
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
     at = defs.first.index
-    lit = irep.instructions[at]
+    lit = BytecodeIR.for(irep).source_at(at)
     return nil unless %w[ARRAY HASH].include?(lit.op) && lit.regs.size == 1
     # The literal's own `.freeze`, back to back: any other instruction in between could hand the
     # still-mutable array to code that changes its slots.
@@ -241,7 +243,7 @@ end
     defs = BytecodeIR.reaching_definitions(irep, at, reg.to_s)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
-    writer = irep.instructions[defs.first.index]
+    writer = BytecodeIR.for(irep).source_at(defs.first.index)
     return writer.sym&.to_sym if writer.op == 'LOADSYM'
 
     writer.op.start_with?('LOADI') ? frozen_table_loadi(writer) : nil
@@ -249,7 +251,7 @@ end
 
   # The Integer a LOADI* op loads: `LOADI_n` / `LOADI__1` print it in parentheses, the others as an operand.
   def frozen_table_loadi(writer)
-    return IntegerConstants.loadi_value(writer) if writer.imm_operand
+    return IntegerConstants.loadi_value(writer) if BytecodeIR::OperandModel.imm_operand(writer)
 
     text = writer.paren_value
     text&.match?(/\A-?\d+\z/) ? text.to_i : nil
@@ -261,7 +263,7 @@ end
     defs = BytecodeIR.reaching_definitions(irep, at, reg)
     return NumericFlow::OTHER unless defs && defs.size == 1 && !defs.first.entry?
 
-    writer = irep.instructions[defs.first.index]
+    writer = BytecodeIR.for(irep).source_at(defs.first.index)
     case writer.op
     when /\ALOADI/ then NumericFlow::INT
     when 'LOADL' then frozen_table_pool_mask(irep, writer)

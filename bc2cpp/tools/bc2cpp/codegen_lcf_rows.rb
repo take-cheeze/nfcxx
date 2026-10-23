@@ -210,7 +210,7 @@ class CodeGen
     defs = BytecodeIR.reaching_definitions(irep, index, key_reg.to_s)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
-    writer = irep.instructions[defs.first.index]
+    writer = BytecodeIR.for(irep).source_at(defs.first.index)
     writer.op == 'LOADSYM' ? writer.sym&.to_sym : nil
   end
 end

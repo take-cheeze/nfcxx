@@ -51,6 +51,12 @@ module RbsSignatures
                                                                includer_candidates: @includer_candidates, prepended_modules: @prepended_modules)
     end
 
+    # MODULE_OWNER: the owner's receivers are its includers' instances (RbsSignatures.module_receiver_classes), not a
+    # bounded subclass set; RbsSignatures.self_call_types adds the same-name guard for those.
+    def module_owner?(owner)
+      !@includer_candidates.nil? && !@includer_candidates.call(owner).nil?
+    end
+
     def owners(owner)
       @owners[owner] ||= RbsSignatures.contract_owners(owner, @superclass_of, included_modules: @included_modules,
                                                     prepended_modules: @prepended_modules, unknown_mixins: @unknown_mixins).map { |name| name.dup.freeze }.freeze

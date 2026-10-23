@@ -54,6 +54,13 @@ module BytecodeIR
       insn.uint_operand
     end
 
+    # The signed literal right after the leading register, as printed (`R1 -5`), as a String (Insn#imm_operand).
+    # LOADI_0..LOADI_7 and LOADI__1 have no second operand (the value is in the opcode), so they read nil.
+    def imm_operand(insn)
+      second = insn.typed[1]
+      reg(insn) && second&.kind == :int ? second.value.to_s : nil
+    end
+
     # `R1 R2 3` as [source register, literal] (Insn#src_and_literal).
     def src_and_literal(insn)
       insn.src_and_literal

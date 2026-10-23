@@ -20,12 +20,17 @@ class CodeGen
 
     @probing << label
     begin
+      cycles = @guard_cycles
       result = with_fresh_method_state do
         # Specialization caches emitted clone text, so its probes must keep final-code optimization.
         @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
         compile_method(label)
       end
-      @clean_cache[label] = !result[:code].include?('#error')
+      clean = !result[:code].include?('#error')
+      # Not memoized when a guard answered from an in-progress probe: the answer is then
+      # conditional on that probe's stack, not on this label alone.
+      @clean_cache[label] = clean if cycles == @guard_cycles
+      clean
     ensure
       @probing.delete(label)
     end

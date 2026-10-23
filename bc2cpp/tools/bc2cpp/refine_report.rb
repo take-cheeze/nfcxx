@@ -131,7 +131,7 @@ module RefineReport
         uses[i] = keys.first
       end
       names = Hash.new { |h, k| h[k] = Set.new }
-      uses.each { |i, key| names[find.call(key)] << irep.instructions[i].sym }
+      uses.each { |i, key| names[find.call(key)] << program.source_at(i).sym }
       uses.transform_values { |key| names[find.call(key)].to_a.sort }
     end
   end
@@ -139,7 +139,7 @@ module RefineReport
   def refine_report_rows(rows)
     rows.filter_map do |row|
       irep = @ireps[row[:label]]
-      real = irep.instructions[row[:site]]
+      real = BytecodeIR.for(irep).source_at(row[:site])
       next unless irep && real && %w[SEND SEND0 SENDB].include?(real.op) && real.sym == row[:name]
 
       reg = real.reg.to_i

@@ -100,8 +100,9 @@ class CodeGen
 
   # nil when the BLOCK at +creation+ in +parent+ is a literal block argument of a call that only calls it.
   def block_self_site_why(parent, creation, child)
-    block = parent.instructions[creation]
-    send = parent.instructions[creation + 1]
+    program = BytecodeIR.for(parent)
+    block = program.source_at(creation)
+    send = program.source_at(creation + 1)
     where = "#{parent.file}:#{block.lineno}"
     return "the block at #{where} is a lambda" unless block.op == 'BLOCK'
     unless send && %w[SENDB SSENDB].include?(send.op) && send.plain_fixed_argc? &&

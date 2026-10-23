@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: BC2CPP_NUMERIC_ROOTS=FILE writes, per guarded numeric operator whose operands NumericFlow could not prove,
 # the class set of each operand and the leaves it is computed from. Measurement only: the generated code
 # is byte-identical with it on.
@@ -44,7 +46,7 @@ class CodeGen
         next if NumericFlow.numeric?(mask)
 
         leaves = @tuple_sites[name].flat_map do |irep, idx, d, _n|
-          numeric_root_leaves(irep, idx, irep.instructions[idx].reg.to_i + pos, d)
+          numeric_root_leaves(irep, idx, BytecodeIR.for(irep).source_at(idx).reg.to_i + pos, d)
         end
         CodeGen.numeric_root_lines[[:tuple, name, pos]] =
           ['TUPLE', name, pos, numeric_mask_name(mask), leaves.uniq.join('|')].join("\t").gsub(/[\r\n]/, ' ')
@@ -61,6 +63,20 @@ class CodeGen
     @numeric_root_lines ||= {}.tap do |lines|
       at_exit { File.write(ENV.fetch("BC2CPP_NUMERIC_ROOTS"), "#{lines.values.join("\n")}\n") }
     end
+  end
+
+  # The writer a report label names for +reg+ as read by +use+: the instruction every reaching definition shares,
+  # :entry when the value comes from the frame, or :unknown when the query refuses or the writers disagree.
+  def numeric_label_source(irep, use, reg)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s)
+    return :unknown if defs.nil? || defs.empty?
+    return :entry if defs.all?(&:entry?)
+    return :unknown if defs.any?(&:entry?)
+
+    program = BytecodeIR.for(irep)
+    sources = defs.map { |d| program.source_at(d.index) }
+    first = sources.first
+    sources.all? { |s| s.op == first.op && s.sym == first.sym } ? first : :unknown
   end
 
   # The non-numeric leaves of +reg+ as read by instruction +at+. Its writers are the reaching definitions
@@ -82,7 +98,7 @@ class CodeGen
         next
       end
       defs.each do |d|
-        writer = d.entry? ? nil : irep.instructions[d.index]
+        writer = d.entry? ? nil : BytecodeIR.for(irep).source_at(d.index)
         if writer.nil? || !numeric_root_writer?(writer)
           next unless numeric_root_param?(irep, d.reg.to_i)
 
@@ -227,29 +243,24 @@ class CodeGen
       recv = numeric_raw_mask(irep, i, src, owner_def)
       key = if op == 'GETIDX0' then '0'
             else
-              # Label only: names the key's textually nearest writer in the idx[...] leaf; no branch reads it.
-              kw = irep.last_writer_index(i - 1, (insn.reg.to_i + 1).to_s)
-              kins = kw && irep.instructions[kw]
+              # Label only: the shared writer of the key register (not a feed set).
+              kins = numeric_label_source(irep, i, insn.reg.to_i + 1)
+              kins = nil unless kins.is_a?(Insn)
               kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
             end
       inner = numeric_root_nest('') { numeric_root_leaves(irep, i, src, owner_def).first(2).join('+') }
       ["idx[#{key}]@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}<#{inner}>"]
     when 'AREF'
       src = insn.regs[1].to_i
-      # Every writer reaching the index read: each join arm is named, `param` is the method entry, and `unproven`
-      # is a refused or unreachable read (the leaf is diagnostic only, see numeric_root_leaves).
-      defs = BytecodeIR.reaching_definitions(irep, i, src.to_s, through_handlers: true)
-      what = if defs.nil? || defs.empty? then 'unproven'
-             else
-               defs.map do |d|
-                 next 'param' if d.entry?
-
-                 w = irep.instructions[d.index]
-                 w.op.start_with?('SEND', 'SSEND') ? "send:#{w.sym}" : w.op
-               end.uniq.join('|')
+      # Label only, as the GETIDX key above.
+      wi = numeric_label_source(irep, i, src)
+      what = if wi == :entry then 'param'
+             elsif !wi.is_a?(Insn) then '?'
+             elsif wi.op.start_with?('SEND', 'SSEND') then "send:#{wi.sym}"
+             else wi.op
              end
       ["aref<#{what}>"]
-    when 'GETIV' then ["iv:#{insn.args[/@\w+/]}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
+    when 'GETIV' then ["iv:#{insn.ivar && "@#{insn.ivar}"}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
     when 'GETCONST', 'GETMCNST'
       cname = insn.const_name || insn.mcnst_name
       key = const_group_key(insn)

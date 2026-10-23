@@ -75,7 +75,7 @@ module IrepScans
     return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
     names = defs.map do |definition|
-      insn = instructions[definition.index]
+      insn = BytecodeIR.for(self).source_at(definition.index)
       case insn.op
       when 'GETCONST' then insn.const_name
       when 'GETMCNST'

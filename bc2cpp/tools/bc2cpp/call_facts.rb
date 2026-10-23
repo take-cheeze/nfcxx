@@ -351,7 +351,7 @@ module CallFacts
       return nil unless program.resolved?
       return nil if program.handlers? && !program.handlers_resolved?
 
-      insns = irep.instructions
+      insns = program.each_source.map { |source, _index| source }
       return nil if insns.empty?
       return nil unless insns.all? { |i| NumericFlow::SUPPORTED_OPS.include?(i.op) || BytecodeIR::Ops::LOADI_OPS.include?(i.op) }
 

@@ -116,7 +116,7 @@ module SelfNewConstruct
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
-    source = irep.instructions[defs.first.index]
+    source = BytecodeIR.for(irep).source_at(defs.first.index)
     return nil unless source && source.sym == 'class' && %w[SEND0 SEND SSEND0 SSEND].include?(source.op) &&
                       source.n_spec.to_i.zero? && !source.nk_spec
     return nil unless source.op.start_with?('SSEND') || self_register?(irep, defs.first.index, source.reg)

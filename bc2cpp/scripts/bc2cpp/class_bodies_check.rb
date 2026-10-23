@@ -70,4 +70,65 @@ SOURCE
              BytecodeIR.class_body_path(deep_body, top, 'Outer::Deep') == 'TopLevel')
 end
 
+# Hand-built CFGs exercise flows Ruby's structural class syntax does not emit.
+# Their CLASS reads the outer-scope register exactly as a compiled opener does.
+def scope_irep(ops, handlers: [])
+  instructions = ops.each_with_index.map do |(op, args), index|
+    args = "#{args} (nil)" if op == 'LOADNIL'
+    Insn.new(lineno: 1, addr: index, op: op, args: args, raw: "#{op} #{args}")
+  end
+  Irep.new(label: "scope-#{ops.hash}", instructions: instructions, catch_handlers: handlers,
+           nregs: 8, nlocals: 3, reps: [], pool: [])
+end
+
+scope_path = lambda do |ops, namespace = 'Outer', handlers = []|
+  body = scope_irep(ops, handlers: handlers)
+  # A proximity scan would silently pick one side of a join.
+  def body.last_writer(*) = raise('class scope must use reaching definitions')
+  index = body.instructions.index { |instruction| instruction.op == 'CLASS' }
+  BytecodeIR.class_body_path(body, index, namespace)
+end
+
+check.call('scope follows a MOVE from lexical nil',
+           scope_path.call([['LOADNIL', 'R1'], ['MOVE', 'R2 R1'], ['CLASS', 'R2 :Child']]) == 'Outer::Child')
+check.call('scope follows a MOVE from explicit root',
+           scope_path.call([['OCLASS', 'R1'], ['MOVE', 'R2 R1'], ['CLASS', 'R2 :Child']]) == 'Child')
+
+joined = [['JMPIF', 'R1 3'], ['LOADNIL', 'R2'], ['JMP', '4'], ['LOADNIL', 'R2'], ['CLASS', 'R2 :Child']]
+check.call('equal lexical scopes agree at a join', scope_path.call(joined) == 'Outer::Child')
+mixed = joined.map(&:dup)
+mixed[3] = ['OCLASS', 'R2']
+check.call('lexical and explicit-root scopes disagree inside a namespace', scope_path.call(mixed).nil?)
+check.call('lexical and explicit-root scopes agree at top level', scope_path.call(mixed, nil) == 'Child')
+unknown = joined.map(&:dup)
+unknown[1] = ['GETCONST', 'R2 :Other']
+check.call('an unknown branch cannot borrow the following lexical scope', scope_path.call(unknown).nil?)
+
+looped = [['LOADNIL', 'R2'], ['JMPIF', 'R1 5'], ['LOADNIL', 'R2'], ['NOP', ''], ['JMP', '1'], ['CLASS', 'R2 :Child']]
+check.call('loop-carried lexical scope agrees with its entry', scope_path.call(looped) == 'Outer::Child')
+looped[2] = ['OCLASS', 'R2']
+check.call('a disagreeing loop write refuses the lexical path', scope_path.call(looped).nil?)
+check.call('the same loop scopes agree at top level', scope_path.call(looped, nil) == 'Child')
+
+check.call('an entry scope has no proven class path', scope_path.call([['CLASS', 'R2 :Child']]).nil?)
+check.call('an overwritten scope is unknown',
+           scope_path.call([['LOADNIL', 'R2'], ['GETUPVAR', 'R2 1 0'], ['CLASS', 'R2 :Child']]).nil?)
+check.call('the actual final lexical overwrite wins',
+           scope_path.call([['GETCONST', 'R2 :Other'], ['LOADNIL', 'R2'], ['CLASS', 'R2 :Child']]) == 'Outer::Child')
+
+handler = CatchHandler.new(type: :rescue, begin_addr: 1, end_addr: 2, target: 3)
+protected = [['LOADNIL', 'R2'], ['SEND', 'R4 :risky n=0'], ['JMP', '4'], ['LOADNIL', 'R2'], ['CLASS', 'R2 :Child']]
+check.call('handler and normal lexical scopes agree', scope_path.call(protected, 'Outer', [handler]) == 'Outer::Child')
+protected[3] = ['OCLASS', 'R2']
+check.call('a disagreeing handler scope refuses the lexical path', scope_path.call(protected, 'Outer', [handler]).nil?)
+check.call('handler root and lexical scopes agree at top level', scope_path.call(protected, nil, [handler]) == 'Child')
+protected[3] = ['GETCONST', 'R2 :Other']
+check.call('an unknown handler scope refuses every path', scope_path.call(protected, nil, [handler]).nil?)
+
+captured = scope_irep([['LOADNIL', 'R2'], ['BLOCK', 'R4 I[0]'], ['CLASS', 'R2 :Child']])
+child = scope_irep([['SETUPVAR', 'R1 2 0']])
+captured.reps = [child.label]
+captured.tree = { captured.label => captured, child.label => child }
+check.call('a closure may overwrite the outer-scope register', BytecodeIR.class_body_path(captured, 2, 'Outer').nil?)
+
 suite.finish!

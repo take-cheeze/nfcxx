@@ -239,7 +239,7 @@ class IvarLayout
       defs.each do |d|
         next if d.entry?
 
-        insn = irep.instructions[d.index]
+        insn = BytecodeIR.for(irep).source_at(d.index)
         # An arithmetic site is never a Fixnum (see the ADD arm of trace_type), so it is unreadable: the question
         # moves to the value it overwrote (the ADD's own register, before the ADD).
         if ARITHMETIC_OPS.include?(insn.op)

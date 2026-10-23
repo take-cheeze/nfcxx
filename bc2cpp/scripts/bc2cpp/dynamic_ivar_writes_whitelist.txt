@@ -1,0 +1,9 @@
+# Methods whose instance_variable_set call (a run-time name) is treated as storing no Proc, for the yield analysis's
+# instance-variable fact (tools/bc2cpp/yield_reach.rb, proc_free_ivar?). Without a listed site the analysis assumes such a
+# write can store any value, so no instance variable is proven non-Proc.
+# Each line is "path method", the path from the gem directory (as predicate_whitelist.txt keys it).
+#
+# mruby-optcarrot-benchmark: the probe bundle's Optcarrot::Config and Optcarrot::Opt copy option values
+# (instance_variable_set(:"@#{id}", value)). Their values come from the option defaults and the command line, which
+# are strings, numbers, symbols and booleans, never Procs. A change to the option sources must revisit this line.
+mruby-optcarrot-benchmark/mrblib/benchmark.rb initialize

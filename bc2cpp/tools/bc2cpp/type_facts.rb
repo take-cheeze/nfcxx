@@ -180,16 +180,36 @@ module TypeFacts
     declared_block = ctx.signature_contracts&.ir_block_signatures&.[]([d.owner.to_s, d.name.to_s])
     block_proc = !declared_block && gen.respond_to?(:bytecode_ir_block_proc_classes) && gen.bytecode_ir_block_proc_classes(d)
     block_row = block_proc ? { 'type' => 'Proc', 'source' => 'inferred:receiver-call-sites' } : nil
+    block_yield = declared_block ? nil : block_yield_row(gen, d, params)
     {
       'owner' => d.owner, 'name' => d.name, 'file' => relative(ctx, irep.file), 'line' => line, 'col' => col,
       'scope' => scope_of(irep.file), 'req' => mand, 'opt' => opt, 'rest' => rest.positive?, 'key' => key,
       'kdict' => kdict.positive?,
       'visibility' => d.visibility&.to_s, 'params' => params, 'optional_params' => optional_params, 'keyword_params' => keyword_params,
-      'rest_param' => rest_row, 'block_param' => block_row, 'return' => return_row(ctx, gen, d, irep, mono),
+      'rest_param' => rest_row, 'block_param' => block_row, 'block_yield' => block_yield,
+      'return' => return_row(ctx, gen, d, irep, mono),
       'annotated' => !!(ctx.annotations[d.irep] || ctx.class_annotations[d.irep] || ctx.element_annotations[d.irep] ||
                        ctx.signature_arg_types&.[](d.irep)&.any? || ctx.signature_contracts&.ir_optional_types&.[](d.irep)&.any? ||
                        ctx.signature_contracts&.ir_keyword_types&.[](d.irep)&.any?)
     }
+  end
+
+  # The block type a yielder's own yield sites prove (BlockYieldTypes): { 'arity', 'params', 'source' } when typed,
+  # { 'reason' } when the method yields but is not typed, nil when it yields nothing.
+  def block_yield_row(gen, d, params)
+    return nil unless gen.respond_to?(:bytecode_ir_yield_block_types)
+
+    # Only an inferred parameter type is a proof here; a declared one is the author's claim.
+    param_classes = params.filter_map do |param|
+      next unless param['type'] && param['source'].to_s.start_with?('inferred:')
+
+      [param['pos'], param['type'].split(' | ')]
+    end.to_h
+    types = gen.bytecode_ir_yield_block_types(d, param_classes)
+    return nil unless types
+    return { 'reason' => types[:reason] } if types[:reason]
+
+    { 'arity' => types[:arity], 'params' => types[:params], 'source' => 'inferred:yield-sites' }
   end
 
   def param_row(ctx, gen, d, irep, k, name, mono, ndefs, sites)
@@ -345,6 +365,9 @@ module TypeFacts
     # The IR's exits minus STOP: it ends the program, not the body, and the grep this replaces never matched it.
     ops = BytecodeIR.for(irep).exits.map(&:op).reject { |o| o == 'STOP' }
     return nil if ops.empty? || ops.any? { |o| %w[RETURN RETURN_BLK BREAK].include?(o) }
+    # A `return` in a nested block (RETURN_BLK) leaves this method with the block's value. That exit is not in this
+    # body's exit list, so the body's own RETNIL would otherwise stand for the whole method.
+    return nil if BytecodeIR.nested_exit?(irep, :block_return)
 
     kinds = ops.map { |o| { 'RETSELF' => 'self', 'RETNIL' => 'nil', 'RETTRUE' => 'bool', 'RETFALSE' => 'bool' }[o] }.uniq
     kinds.size == 1 ? kinds.first : nil
@@ -492,7 +515,7 @@ module TypeFacts
           row['type'] = cls.to_s
           row['source'] = (ctx.signature_origins && ctx.signature_origins[[owner, "@#{name}"]]) || 'inferred:class-layout'
         elsif row['embedded']
-          row['type'] = row['embedded']
+          row['type'] = IvarCandidates.with_nil(candidates, gen, owner, name, row['embedded'])
           row['source'] = 'inferred:ivar-layout'
         end
         if row['type'].nil? && (seed = ctx.signature_ivars && ctx.signature_ivars[[owner, "@#{name}"]]) &&

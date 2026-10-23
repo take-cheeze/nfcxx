@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 require_relative 'numeric_flow'
 require_relative 'core_fact_sigs'
 require_relative 'native_owner_map'
@@ -247,7 +249,7 @@ class CodeGen
   #     that names exactly the declared class K, which nothing inherits from (ClosedWorld#is_a_guard_constant?).
   # Not class_narrowing_enabled?: this runs before the code generator's tables exist, and needs none of them.
   def is_a_guard_class(irep, index)
-    insn = irep&.instructions&.[](index)
+    insn = irep && BytecodeIR.for(irep).source_at(index)
     return nil unless insn && insn.op == 'SEND' && %w[is_a? kind_of?].include?(insn.sym)
     return nil unless insn.n_spec == '1' && insn.nk_spec.nil?
     return nil unless @closed_world && @closed_world.global_refusal.nil? && class_test_name_safe?(insn.sym)
@@ -261,7 +263,7 @@ class CodeGen
   # after it is reached only by a jump. class_narrowing_noreturn_call?'s rule, without the flag that gates the
   # code generator's CLASS_NARROWING.
   def raise_never_returns?(irep, index)
-    insn = irep&.instructions&.[](index)
+    insn = irep && BytecodeIR.for(irep).source_at(index)
     return false unless insn && %w[SSEND SSEND0].include?(insn.op) && insn.sym == 'raise'
 
     !@closed_world.nil? && @closed_world.global_refusal.nil? && class_test_name_safe?('raise')
@@ -450,7 +452,7 @@ module ClassNarrowingGuard
     site = kwargs[:idx] || kwargs[:trace_idx]
     return nil unless irep && site
 
-    original = irep.instructions[site]
+    original = BytecodeIR.for(irep).source_at(site)
     return nil unless original && original.op == insn.op && original.sym == insn.sym
 
     test = class_test_for(irep, site, original)
@@ -467,7 +469,7 @@ module ClassNarrowingGuard
     return nil unless class_narrowing_enabled?
 
     # The flow records the subject when it reaches the instruction: make sure it has run.
-    exact_flow_mask(irep, idx, irep.instructions[idx].reg)
+    exact_flow_mask(irep, idx, BytecodeIR.for(irep).source_at(idx).reg)
     mask_reg = (@class_test_subjects || {})[[irep.label, idx]]
     return nil unless mask_reg
 
@@ -478,7 +480,7 @@ module ClassNarrowingGuard
 
   # The instance_of test the EQ at +idx+ stands for, rebuilt from its constant operand.
   def class_eq_site_test(irep, idx)
-    insn = irep.instructions[idx]
+    insn = BytecodeIR.for(irep).source_at(idx)
     klass = class_test_constant(irep, idx, insn.paren_reg.to_i)
     klass && class_test_object(:instance_of, klass)
   end

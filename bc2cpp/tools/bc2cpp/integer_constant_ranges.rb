@@ -52,7 +52,7 @@ module IntegerConstantRanges
     class_names = Set.new
     ireps.each_value do |irep|
       entries = IntegerConstants.const_entry_addrs(irep)
-      irep.instructions.each_with_index do |insn, i|
+      BytecodeIR.for(irep).each_source do |insn, i|
         case insn.op
         when 'SETCONST', 'SETMCNST'
           name = insn.const_name
@@ -151,7 +151,7 @@ module IntegerConstantRanges
     value = case insn.op
             when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
             when 'LOADI__1' then -1
-            else insn.imm_operand&.to_i
+            else BytecodeIR::OperandModel.imm_operand(insn)&.to_i
             end
     value if value && value >= FIXNUM_MIN && value <= FIXNUM_MAX
   end
@@ -161,7 +161,7 @@ module IntegerConstantRanges
 
     left = source_kind(irep, idx, cur, entries, freeze_safe: freeze_safe)
     right = if %w[ADDI SUBI].include?(insn.op)
-              imm = insn.imm_operand
+              imm = BytecodeIR::OperandModel.imm_operand(insn)
               imm && [:literal, imm.to_i]
             else
               insn.regs[1] && source_kind(irep, idx, insn.regs[1], entries, freeze_safe: freeze_safe)
