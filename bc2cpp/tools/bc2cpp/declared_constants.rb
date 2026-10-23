@@ -249,14 +249,22 @@ module DeclaredConstants
     bad && "element #{bad} of the literal is not proven #{entry.elem}"
   end
 
-  # The nearest writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil. Linear on purpose:
-  # it is reached only through frozen_array_source?, whose JOIN_DOMINANCE trace refuses a join between that writer and
-  # the freeze, so the nearest writer is the only one that reaches it.
+  # The single writer of +reg+ reaching +idx+, as [index, instruction], or nil. A join (several writers), a refusal and
+  # the method entry all give nil (BytecodeIR.writers_reaching), so no textually nearest writer is consulted. A SEND0
+  # `freeze` is walked through, never returned (Object#freeze answers its receiver); +seen+ ends a freeze in a loop.
   def literal_writer(irep, idx, reg)
-    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, _cur|
-      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+    seen = Set[]
+    index = idx
+    loop do
+      writers = BytecodeIR.writers_reaching(irep, index, reg.to_s)
+      return nil unless writers&.length == 1
 
-      [j, insn]
+      writer_index, insn = writers.first
+      return [writer_index, insn] unless insn.op == 'SEND0' && insn.sym == 'freeze'
+      return nil unless seen.add?(writer_index)
+
+      index = writer_index
+      reg = insn.reg
     end
   end
 

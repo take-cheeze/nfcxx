@@ -227,7 +227,7 @@ class CodeGen
       recv = numeric_raw_mask(irep, i, src, owner_def)
       key = if op == 'GETIDX0' then '0'
             else
-              # Label only: the textually nearest writer (not a feed set).
+              # Label only: names the key's textually nearest writer in the idx[...] leaf; no branch reads it.
               kw = irep.last_writer_index(i - 1, (insn.reg.to_i + 1).to_s)
               kins = kw && irep.instructions[kw]
               kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
@@ -236,12 +236,17 @@ class CodeGen
       ["idx[#{key}]@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}<#{inner}>"]
     when 'AREF'
       src = insn.regs[1].to_i
-      # Label only, as the GETIDX key above.
-      w = irep.last_writer_index(i - 1, src.to_s)
-      wi = w && irep.instructions[w]
-      what = if wi.nil? then 'param'
-             elsif wi.op.start_with?('SEND', 'SSEND') then "send:#{wi.sym}"
-             else wi.op
+      # Every writer reaching the index read: each join arm is named, `param` is the method entry, and `unproven`
+      # is a refused or unreachable read (the leaf is diagnostic only, see numeric_root_leaves).
+      defs = BytecodeIR.reaching_definitions(irep, i, src.to_s, through_handlers: true)
+      what = if defs.nil? || defs.empty? then 'unproven'
+             else
+               defs.map do |d|
+                 next 'param' if d.entry?
+
+                 w = irep.instructions[d.index]
+                 w.op.start_with?('SEND', 'SSEND') ? "send:#{w.sym}" : w.op
+               end.uniq.join('|')
              end
       ["aref<#{what}>"]
     when 'GETIV' then ["iv:#{insn.args[/@\w+/]}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
