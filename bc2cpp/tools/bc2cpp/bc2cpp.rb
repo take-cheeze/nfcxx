@@ -355,9 +355,10 @@ if $PROGRAM_NAME == __FILE__
     escape_aliases = Hash.new { |h, k| h[k] = [] }
     alias_sites.each { |site| escape_aliases[site[:new]] << site[:old] }
     compiled_files = ireps.each_value.to_set(&:file)
-    hidden_ruby_names = foreign_method_names(outside_ruby.reject { |path| compiled_files.include?(path) })
+    hidden_ruby = foreign_method_owners(outside_ruby.reject { |path| compiled_files.include?(path) })
+    hidden_ruby_names = hidden_ruby.names
     warn "== escape analysis: #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
-         "Ruby this run does not compile =="
+         "Ruby this run does not compile (#{hidden_ruby.owners.size} owner-scoped) =="
     EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
                                                      native_names: native_names,
                                                      native_owners: CodeGen::NATIVE_OWNER_MAP_CACHE[native_paths] ||=
@@ -365,8 +366,12 @@ if $PROGRAM_NAME == __FILE__
                                                      superclass_of: superclass_of, included: included_modules,
                                                      prepended: prepended_modules, unknown_mixins: unknown_mixins,
                                                      modules: declared_modules, struct_classes: struct_member_lists.keys,
+                                                     hidden_owners: hidden_ruby,
                                                      invisible: lambda { |name|
-                                                       hidden_ruby_names.include?(name) || closed_world.unknown_definer?(name)
+                                                       # A name only plain class-body defs make is judged per receiver class (hidden_owners).
+                                                       hidden_ruby.global ||
+                                                         (hidden_ruby_names.include?(name) && !hidden_ruby.owners.key?(name)) ||
+                                                         closed_world.unknown_definer?(name)
                                                      }))
   end
 
