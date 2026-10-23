@@ -164,9 +164,13 @@ module EscapeAnalysis
   # interpreted is still a callee). +native_names+ nil means the native sources were not scanned, so every
   # name may have a native definition. +aliases+: new name => [old names] from the ALIAS op. +invisible+
   # says whether some definer outside the ireps (an outside Ruby source, a computed installer) can make
-  # that name; such a name has no enumerable definitions.
+  # that name; such a name has no enumerable definitions. +hidden_owners+ (a HiddenRubyOwners) lets a name
+  # that only plain class-body defs outside the ireps make be relevant to defs_for on the classes that
+  # can reach it; defs_named (no receiver class) still refuses such a name.
   class World
     DEF_OPS = Set['TDEF', 'SDEF', 'DEF'].freeze
+    # The hidden-owner token that makes every receiver a possible callee (see mixin_defines?).
+    UNCONDITIONAL = '*'
     CONST_READS = Set['GETCONST', 'GETMCNST'].freeze
     # Sends that make a method from a name computed at run time. A literal name is modelled below; any
     # other makes every callee set unknowable (`dynamic`).
@@ -201,9 +205,13 @@ module EscapeAnalysis
     attr_reader :ireps, :aliases, :dynamic_sites, :reflective_sites
 
     def initialize(ireps:, defs:, native_names: nil, native_owners: nil, aliases: {}, superclass_of: {}, included: {},
-                   prepended: {}, unknown_mixins: Set.new, modules: Set.new, struct_classes: Set.new, invisible: nil)
+                   prepended: {}, unknown_mixins: Set.new, modules: Set.new, struct_classes: Set.new, invisible: nil,
+                   hidden_owners: nil)
       @ireps = ireps
       @invisible = invisible
+      @hidden_owners = hidden_owners&.owners || {}
+      @hidden_wild = hidden_owners ? hidden_owners.wild.to_a : []
+      @hidden_mixins = hidden_owners ? hidden_owners.mixins : Set.new
       @native_names = native_names
       @native_owners = native_owners
       @superclass_of = superclass_of
@@ -226,14 +234,16 @@ module EscapeAnalysis
     end
 
     # Definitions a call of +name+ can reach, or nil when the world cannot enumerate them.
-    def defs_named(name, seen = Set.new)
+    def defs_named(name, seen = Set.new, class_aware: false)
       return nil unless @dynamic_sites.empty?
       return nil if @invisible&.call(name)
+      # Without a receiver class no hidden definition can be placed, so any hidden owner refuses the name.
+      return nil if !class_aware && !hidden_owners_for(name).empty?
       return [] unless seen.add?(name)
 
       list = @defs.fetch(name, []).dup
       Array(@aliases.fetch(name, [])).each do |old|
-        more = defs_named(old, seen) or return nil
+        more = defs_named(old, seen, class_aware: class_aware) or return nil
 
         list.concat(more)
       end
@@ -268,30 +278,82 @@ module EscapeAnalysis
     # +exact+, else it or any subclass; a module name means any includer). Every class or module the
     # hierarchy tables cannot place leaves the answer at all definitions of the name.
     def defs_for(name, klasses, exact)
-      list = defs_named(name)
-      return list if list.nil? || klasses.nil? || klasses.empty?
+      list = defs_named(name, class_aware: true)
+      return nil if list.nil?
+
+      hidden = hidden_owners_for(name)
+      return nil if hidden.include?(UNCONDITIONAL)
+
+      # Each early answer below is the whole name list. With a hidden owner present that list is not the
+      # callee set, so it becomes unknown (nil) rather than a superset that might miss the hidden def.
+      unrefined = hidden.empty? ? list : nil
+      return unrefined if klasses.nil? || klasses.empty?
 
       # A class whose ancestry the tables cannot place may sit under any class, so no override is excluded.
-      return list if !exact && known_classes.any? { |c| mro(c).nil? }
+      return unrefined if !exact && known_classes.any? { |c| mro(c).nil? }
 
       chains = []
       klasses.each do |klass|
         if exact
-          chains << (mro(klass) or return list)
+          chains << (mro(klass) or return unrefined)
         else
           ([klass] + descendants(klass)).each do |c|
             next if c == klass && module_name?(klass)
 
-            chains << (mro(c) or return list)
+            chains << (mro(c) or return unrefined)
           end
         end
       end
-      return list if chains.empty?
+      return unrefined if chains.empty?
+      return nil if hidden.any? { |owner| hidden_owner_reaches?(owner, chains, exact) }
 
       chains.flat_map { |chain| first_owner_defs(list, chain) }.uniq | list.select { |d| d.owner.start_with?('<') }
     end
 
     private
+
+    # The hidden owners a call of +name+ can reach through its alias closure: the plain class bodies
+    # that define it outside the ireps, every wild owner, and UNCONDITIONAL when a compiled module that a hidden
+    # `include` names defines it. Empty when nothing outside the ireps can define the name.
+    def hidden_owners_for(name)
+      out = []
+      alias_closure(name).each do |n|
+        own = @hidden_owners[n]
+        next if own.nil? && @hidden_wild.empty?
+
+        out.concat(own.to_a) if own
+        out.concat(@hidden_wild)
+        out << UNCONDITIONAL if mixin_defines?(n)
+      end
+      out.uniq
+    end
+
+    def alias_closure(name, seen = Set.new)
+      return seen unless seen.add?(name)
+
+      Array(@aliases.fetch(name, [])).each { |old| alias_closure(old, seen) }
+      seen
+    end
+
+    # A hidden `include M` may give any class a compiled module M, which this world's ancestry tables
+    # do not know. A compiled module of that simple name that defines +name+ therefore makes the
+    # name unconditional.
+    def mixin_defines?(name)
+      return false if @hidden_mixins.empty?
+
+      @defs.fetch(name, []).any? { |d| @modules.include?(d.owner) && @hidden_mixins.include?(d.owner.split('::').last) }
+    end
+
+    # May a hidden definition owned by +owner+ sit on one of +chains+ (the receiver classes' ancestries)?
+    # Names are compared by their last segment, which is an over-approximation: a lexical `class A::B`
+    # is recorded as B. An owner the tables cannot place may be a hidden subclass of a receiver class,
+    # so it is reachable for a receiver set (not exact).
+    def hidden_owner_reaches?(owner, chains, exact)
+      return true if !exact && mro(owner).nil?
+
+      simple = owner.split('::').last
+      chains.any? { |chain| chain.any? { |entry| entry.split('::').last == simple } }
+    end
 
     def module_name?(name)
       @modules.include?(name) || BUILTIN_INCLUDES.values.flatten.include?(name)
@@ -460,8 +522,8 @@ module EscapeAnalysis
 
     CREATED_CLASS = { 'LAMBDA' => 'Proc', 'BLOCK' => 'Proc', 'ARRAY' => 'Array', 'HASH' => 'Hash',
                       'STRING' => 'String', 'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range' }.freeze
-    # A subset of Ops::SEND: the `new` check covers only these two forms.
-    NEW_SENDS = Set['SEND', 'SENDB'].freeze
+    # The `new` check covers the argument-less form too (SEND0, `Keeper.new`), which the IR files apart from SEND.
+    NEW_SENDS = Set['SEND0', 'SEND', 'SENDB'].freeze
 
     # The value written to the leading register of the instruction at +index+: a LAMBDA, BLOCK, ARRAY, HASH,
     # STRING or the result of a `new` send (then +value_class+ is the constructed class when known).
