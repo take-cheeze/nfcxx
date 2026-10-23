@@ -182,7 +182,13 @@ module EscapeAnalysis
     'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
     # Both registrations (profiler.cxx, real and WIO stub) read the name with "S&" and copy it into a std::string
     # key (profiler_section_end); the block is NATIVE_BLOCK_NO_CAPTURE. A non-String name is inspected (%Y).
-    'section' => { args: [0], recv: %w[inspect to_s], files: %w[mruby-rgss/src/profiler.cxx] }
+    'section' => { args: [0], recv: %w[inspect to_s], files: %w[mruby-rgss/src/profiler.cxx] },
+    # pack.c reads the template once (prepare_tmpl: mrb_get_args "S" into a stack struct) and builds copies.
+    # Only an exact String is proven: other classes reach mrb_ensure_string_type, which inspects them (%Y).
+    # A template reaches the element conversions (to_int, to_f) only as an element of the receiver, a store
+    # the analysis already rejects for that object.
+    'pack' => { args: [0], recv: [], only: %w[String], files: %w[3rd/mruby/mrbgems/mruby-pack/src/pack.c] },
+    'unpack' => { args: [0], recv: [], only: %w[String], files: %w[3rd/mruby/mrbgems/mruby-pack/src/pack.c] }
   }.freeze
   # Receiver names that invoke a Proc (a `uses` entry the consumers turn into a direct call).
   PROC_CALLS = Set['call', '[]', '==='].freeze
@@ -1186,6 +1192,8 @@ module EscapeAnalysis
     def native_arg_ok?(name, k, value_class)
       entry = NATIVE_ARG_OK[name]
       return false unless entry && entry[:args].include?(k) && @world.native_files_audited?(name, entry[:files])
+      # +only+: the audit holds for these exact argument classes alone (see the NATIVE_ARG_OK entry).
+      return false if entry[:only] && !entry[:only].include?(value_class)
       return false unless @native_arg_busy.add?(name)
 
       begin
