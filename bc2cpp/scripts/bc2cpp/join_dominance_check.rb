@@ -359,6 +359,19 @@ if ENV['MRBC']
     code[/^mrb_value #{fn}_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
   end
 
+  # Inline loops over `loop_var` (bc2cpp_each_i / bc2cpp_heach_i) that are not behind their GUARDED_BLOCK_INLINE
+  # exact-class test: the nearest comment above a loop names its guard.
+  loop_starts = lambda do |chunk, loop_var|
+    starts = []
+    chunk.scan(/^\s*for \(mrb_int #{loop_var}_\d+ = 0/) { starts << Regexp.last_match.begin(0) }
+    starts
+  end
+  unguarded_loops = lambda do |chunk, loop_var|
+    loop_starts.call(chunk, loop_var).reject do |pos|
+      chunk[0...pos].scan(%r{^\s*// .*$}).last.to_s.include?('GUARDED_BLOCK_INLINE')
+    end
+  end
+
   puts '-- generated code (closed world)'
   Dir.mktmpdir do |dir|
     code, = runtime.generate(<<~RUBY, dir)
@@ -406,10 +419,16 @@ if ENV['MRBC']
         end
       end
     RUBY
-    check.call('`(h[k] || []).each` is not inlined (the receiver may not be an Array)',
-               !body_of.call(code, 'JdProbe_orarr').include?('inlined #each') &&
-                 body_of.call(code, 'JdProbe_orarr').include?('BLOCK_FALLBACK :each'))
-    check.call('`(h[k] || {}).each` is not inlined as a Hash walk', !body_of.call(code, 'JdProbe_orhash').match?(/bc2cpp_each|hash_each/))
+    # The receiver may not be an Array, so its inline walk is only the GUARDED_BLOCK_INLINE arm behind the exact-class
+    # test, and the send stays as the other arm. (An unguarded walk would be the wrong answer here.)
+    orarr = body_of.call(code, 'JdProbe_orarr')
+    check.call('`(h[k] || []).each` is inlined only behind an exact-Array test (the receiver may not be an Array)',
+               loop_starts.call(orarr, 'bc2cpp_each_i').any? && unguarded_loops.call(orarr, 'bc2cpp_each_i').empty? &&
+                 orarr.include?('BLOCK_FALLBACK :each'))
+    orhash = body_of.call(code, 'JdProbe_orhash')
+    check.call('`(h[k] || {}).each` walks a Hash only behind an exact-Hash test',
+               loop_starts.call(orhash, 'bc2cpp_heach_i').any? && unguarded_loops.call(orhash, 'bc2cpp_heach_i').empty? &&
+                 orhash.include?('GUARDED_BLOCK_INLINE :each -- exact Hash receiver'))
     check.call('an array built on the straight path is still inlined',
                body_of.call(code, 'JdProbe_straight').include?('inlined #each'))
     check.call('`x = h[k] || Foo.new; x.bar` is not an unguarded exact-class call',
