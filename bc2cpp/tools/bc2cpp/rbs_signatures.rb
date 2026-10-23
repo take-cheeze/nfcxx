@@ -449,6 +449,14 @@ module RbsSignatures
       contracts = receiver.contracts.to_set
       failed = false
       receiver.classes.each do |klass|
+        # The class's own chain is checked before its receiver bound: a chain contract_owners refuses (a module reached
+        # twice) has no owners, so it reports call_contract_missing, not call_receiver_unbounded.
+        found = target.call(klass.to_s, insn.sym.to_s)
+        unless found && named_returns.key?([found, insn.sym.to_s])
+          refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
+          failed = true
+          break
+        end
         # SELF_CALL_JOIN: a declared receiver is a nominal bound, so its dispatch joins every bounded subclass, as for self.
         bounded = prepared ? prepared.receivers(klass.to_s) : self_receivers(klass.to_s, lookup: lookup, subclasses: subclasses, method_missing_classes: method_missing_classes)
         unless bounded

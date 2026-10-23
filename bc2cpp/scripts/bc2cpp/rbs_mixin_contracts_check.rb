@@ -80,7 +80,7 @@ dup_world = { superclass_of: shared, included_modules: { 'Child' => ['M'], 'Base
 dup_applied = applied(ir_methods: [['M', 'm'], ['Base', 'm']], returns: { ['M', 'm'] => Set[:Symbol], ['Base', 'm'] => Set[:Integer] },
                       owner: 'Use', arg_types: { '1' => Set[:Child] })
 dup_fact, dup_refusal = result_fact(dup_world, dup_applied)
-check('duplicate include refuses the call instead of returning M#m (Symbol)', dup_fact.nil? && dup_refusal[:cause] == 'call_receiver_unbounded:Child#m')
+check('duplicate include refuses the call instead of returning M#m (Symbol)', dup_fact.nil? && dup_refusal[:cause] == 'call_contract_missing:Child#m')
 check('duplicate include yields no contract at all', !dup_fact&.declared?)
 
 # Refused: a cycle through modules, and an unknown mixin, supply no contract.
