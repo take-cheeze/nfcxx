@@ -84,6 +84,6 @@ module IrYieldTypes
     return false unless body.enter&.enter_fields == [argc, 0, 0, 0, 0, 0, 0, 0]
     return false unless body.instructions.size <= MAX_INSTRUCTIONS
 
-    body.instructions.all? { |insn| PURE_OPS.include?(insn.op) || insn.op.match?(/\ALOADI_[0-7]\z/) }
+    body.instructions.all? { |insn| PURE_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_SLOT.include?(insn.op) }
   end
 end

@@ -365,7 +365,7 @@ class IvarLayout
       case insn.op
       when 'MOVE'
         next IrepScans.follow(insn.regs[1])
-      when /^LOADI/
+      when BytecodeIR::Ops::LOADI_OPS
         next :fixnum
       when 'LOADSYM'
         # A Symbol is as safe to embed as a Fixnum: an mrb_sym is an interned id, not a

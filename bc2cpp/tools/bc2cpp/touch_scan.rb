@@ -166,11 +166,16 @@ module TouchScan
       events << [m[1], args, "#{m[0].strip.chomp('(')}(#{args.join(',').strip[0, 50]})"]
     end
     symbols = {}
-    events.each do |_kind, args, _why|
+    events.each do |kind, args, _why|
       Array(args).each do |arg|
         name = arg.to_s.strip
         symbols[name] = symbol_variable(name, text) if name.match?(IDENTIFIER)
       end
+      next unless kind.match?(/\Afuncall/)
+
+      name = Array(args)[2].to_s.strip
+      values = string_variable_values(name, text) if name.match?(IDENTIFIER)
+      symbols[string_key(name)] = values if values
     end
     { events: events, symbols: symbols }
   end
@@ -254,9 +259,22 @@ module TouchScan
   end
 
   def self.native_funcall(args, res, norm, why)
-    mid = native_literal(args[2], res)
-    return res.give_up(why) unless mid
+    mids = funcall_names(args[2], res)
+    return res.give_up(why) unless mids
 
+    mids.each { |mid| native_funcall_name(mid, args, res, norm, why) }
+  end
+
+  # The method names a funcall's name argument can be: one literal, or the literal set of a `const char*` local.
+  def self.funcall_names(expr, res)
+    set = res.symbols[string_key(expr.to_s.strip)]
+    return set.to_a if set.is_a?(Set) && !set.empty?
+
+    mid = native_literal(expr, res)
+    mid && [mid]
+  end
+
+  def self.native_funcall_name(mid, args, res, norm, why)
     case mid
     when 'new', 'allocate' then native_instantiate(args[1], res, norm, why)
     when 'dup', 'clone' then native_copy(args[1], res, norm, why)
@@ -265,6 +283,23 @@ module TouchScan
   end
 
   # An identifier is looked up in res.symbols, which native_facts filled for every event argument.
+  # The key a local holding a string set is stored under in the symbols table, apart from its mrb_sym value.
+  def self.string_key(name) = "\0string:#{name}"
+
+  # The string literals a `const char*` local can take: every literal in its one declaration's right-hand side
+  # (the branches of a C conditional, or nullptr). A conditional yields one of its branch values, so the
+  # literals there are a superset of the values the local takes. A call in the right-hand side makes the value
+  # unknown, so it yields nil.
+  def self.string_variable_values(name, text)
+    decls = text.scan(/\bconst\s+char\s*\*\s*#{Regexp.escape(name)}\s*=\s*([^;]*);/).flatten
+    return nil unless decls.size == 1
+
+    rhs = decls.first
+    return nil if rhs.include?('(')
+
+    Set.new(rhs.scan(/"((?:[^"\\]|\\.)*)"/).flatten)
+  end
+
   def self.native_literal(expr, res = nil)
     m = expr.to_s.match(NATIVE_SYM)
     return m[1] || m[2] || m[3] if m

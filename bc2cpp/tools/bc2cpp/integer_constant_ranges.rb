@@ -127,12 +127,12 @@ module IntegerConstantRanges
   # be the load that writes the register: control reaching it runs that load.
   def self.source_kind(irep, idx, reg, entries, freeze_safe: false)
     barrier = lambda do |insn, cur|
-      load_here = insn.reg == cur.to_s && (LOADS.include?(insn.op) || insn.op.start_with?('LOADI'))
+      load_here = insn.reg == cur.to_s && (LOADS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op))
       entries.include?(insn.addr) && !load_here
     end
     irep.walk_writers(idx - 1, reg.to_s, barrier: barrier, follow_moves: true) do |insn, j, cur|
       next IrepScans::KEEP if freeze_safe && insn.op == 'SEND0' && insn.sym == 'freeze'
-      if insn.op.start_with?('LOADI')
+      if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
         value = literal(insn)
         next value.nil? ? nil : [:literal, value]
       end

@@ -651,9 +651,8 @@ def bc2cpp_closed_core_gems(root = BC2CPP_GEMS_ROOT)
 
   core.freeze
 end
-# Each closed-world target's own native host sources (the firmware/executable).
-BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'closed' => 'app/wio/src',
-                                  'psp' => 'app/psp' }.freeze
+# The closed world's own native host sources: the sealed desktop host's (src/main.cxx and its engine).
+BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'closed' => 'src' }.freeze
 # mruby-compiler entry points that turn a string or file into running Ruby.
 BC2CPP_SOURCE_LOADER_CALL = /\b(?:mrb_load_n?string(?:_cxt)?|mrb_load_file(?:_cxt)?|mrb_load_exec|
                                mrb_parse_n?string|mrb_parse_file|mrb_load_detect_file_cxt)\s*\(([^;]*)/mx
@@ -671,6 +670,22 @@ def bc2cpp_c_call_args(text)
     tok == ',' && depth.zero? ? args << +'' : args.last << tok
   end
   args
+end
+
+# A host source as a sealed build compiles it: the `#else` arm of `#ifdef RPG2K_SEALED_HOST` is dropped, so
+# a loader call there (the desktop `--script` path) is unreachable. Only that macro is honoured; every other
+# conditional is kept, so the guard still sees its code.
+def bc2cpp_sealed_host_text(text)
+  stack = []
+  text.each_line.reject do |line|
+    case line
+    when /\A\s*#\s*ifdef\s+RPG2K_SEALED_HOST\b/ then stack.push(:sealed); false
+    when /\A\s*#\s*if/ then stack.push(:other); false
+    when /\A\s*#\s*else\b/ then stack[-1] = :sealed_dead if stack.last == :sealed; stack.last == :sealed_dead
+    when /\A\s*#\s*endif\b/ then stack.pop; false
+    else stack.include?(:sealed_dead)
+    end
+  end.join
 end
 
 def bc2cpp_host_native_srcs(build_name, repo_root)
@@ -711,7 +726,7 @@ def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cp
   # every host call must compile a fixed literal that defines nothing.
   if gems.key?('mruby-compiler')
     host_srcs.each do |path|
-      text = File.read(path, encoding: 'BINARY')
+      text = bc2cpp_sealed_host_text(File.read(path, encoding: 'BINARY'))
       text.scan(BC2CPP_SOURCE_LOADER_CALL) do |(args)|
         source = bc2cpp_c_call_args(args)[1].to_s.strip
         literal = source[/\A"((?:[^"\\]|\\.)*)"\z/m, 1] ||

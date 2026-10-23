@@ -393,14 +393,15 @@ module RbsSignatures
   end
 
   # Applied signatures have already been matched to the definition and its required arity.
-  def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0', prepared: nil,
+  def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, inferred_keywords: {}, inferred_rest_elements: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0', prepared: nil,
                subclasses: nil, method_missing_classes: Set.new, removed: nil, includer_candidates: nil)
     require_relative 'bytecode_ir'
     if prepared && !prepared.applied.equal?(applied)
       raise ArgumentError, 'prepared IR contracts belong to another signature world'
     end
     owner = applied.ir_owners[irep.label]
-    return BytecodeIR::Types.new(irep, declared_const_elements: applied.ir_const_elements, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver) unless owner
+    return BytecodeIR::Types.new(irep, declared_const_elements: applied.ir_const_elements, inferred_calls: inferred_calls, inferred_args: inferred_args,
+                                 inferred_keywords: inferred_keywords, inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver) unless owner
 
     if prepared
       ivars = prepared.ivars(owner)
@@ -466,7 +467,8 @@ module RbsSignatures
                          declared_optional_args: applied.ir_optional_types.fetch(irep.label, {}), declared_keywords: applied.ir_keyword_types.fetch(irep.label, {}),
                          declared_arg_elements: applied.ir_arg_elements.fetch(irep.label, {}),
                          declared_const_elements: applied.ir_const_elements,
-                         declared_ivars: ivars, declared_ivar_elements: ivar_elements, declared_calls: calls, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
+                         declared_ivars: ivars, declared_ivar_elements: ivar_elements, declared_calls: calls, inferred_calls: inferred_calls, inferred_args: inferred_args,
+                         inferred_keywords: inferred_keywords, inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
   end
 
   # SELF_RECEIVERS: the classes an implicit-self send in a method of +owner+ can dispatch on, or nil when they are open.

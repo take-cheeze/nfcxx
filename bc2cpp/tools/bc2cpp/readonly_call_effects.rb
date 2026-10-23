@@ -4,7 +4,7 @@ require_relative 'numeric_flow'
 
 # No admitted instruction can call Ruby, allocate an object, or mutate an ivar.
 module ReadonlyCallEffects
-  OPS = Set['ENTER', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADT', 'LOADF', 'GETIV',
+  OPS = Set['ENTER', 'MOVE', 'LOADSELF', 'LOADNIL', 'GETIV',
             'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
 
   def self.safe?(body)
@@ -14,7 +14,7 @@ module ReadonlyCallEffects
     program = BytecodeIR.for(body)
     return false unless program.resolved? && !program.handlers?
 
-    body.instructions.all? { |insn| OPS.include?(insn.op) || insn.op.match?(/\ALOADI(?:_\d+|16|32)?\z/) }
+    body.instructions.all? { |insn| OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_SLOT_OR_WIDE.include?(insn.op) }
   end
 end
 

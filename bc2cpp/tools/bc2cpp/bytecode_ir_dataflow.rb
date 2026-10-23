@@ -347,6 +347,46 @@ module BytecodeIR
       end
     end
 
+    # GETIV indexes of +ivar+ that a path from the method entry reaches with no SETIV of +ivar+ before them in this
+    # body: the reads that may see the slot's nil. A frozen Set, or nil when the flow is not fully modelled, so the
+    # caller keeps every read. Only this body is seen, so a SEND never counts as a store (the callee may not store).
+    # A handler edge carries the state before its source, since the source may raise before its own store.
+    def unstored_ivar_reads(ivar)
+      @unstored_ivar_reads ||= {}
+      @unstored_ivar_reads.fetch(ivar.to_s) { @unstored_ivar_reads[ivar.to_s] = compute_unstored_ivar_reads(ivar.to_s) }
+    end
+
+    def compute_unstored_ivar_reads(name)
+      normal = instruction_predecessors(include_handlers: false) or return nil
+      return nil unless handlers_resolved?
+
+      raised_from = Hash.new { |h, k| h[k] = [] }
+      handler_edges.each { |edge| raised_from[edge.target] << edge.src }
+      # Greatest fixpoint: every entry starts as stored, and a path that reaches an instruction unstored clears it.
+      stored_in = Array.new(@instructions.length, true)
+      stored_out = Array.new(@instructions.length, true)
+      changed = true
+      while changed
+        changed = false
+        @instructions.each do |instruction|
+          i = instruction.index
+          incoming = normal[i].map { |p| p == ENTRY ? false : stored_out[p] }
+          incoming.concat(raised_from[i].map { |src| stored_in[src] })
+          in_i = incoming.empty? || incoming.all?
+          out_i = in_i || (instruction.source.op == 'SETIV' && instruction.source.ivar.to_s == name)
+          next if stored_in[i] == in_i && stored_out[i] == out_i
+
+          stored_in[i] = in_i
+          stored_out[i] = out_i
+          changed = true
+        end
+      end
+      @instructions.filter_map do |instruction|
+        i = instruction.index
+        i if instruction.source.op == 'GETIV' && instruction.source.ivar.to_s == name && !stored_in[i]
+      end.to_set.freeze
+    end
+
     # True when +index+'s value of +reg+ can only come from definitions for
     # which the block answers true (nil when the query refuses, so callers
     # cannot mistake a refusal for "no").

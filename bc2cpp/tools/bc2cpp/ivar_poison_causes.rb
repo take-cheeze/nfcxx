@@ -19,7 +19,7 @@ require_relative 'bytecode_ir_ops'
 #   unreadable:<cause>           reaching definitions refused (BytecodeIR's refusal cause)
 module IvarPoisonCauses
   LITERALS = {
-    'LOADT' => 'bool', 'LOADF' => 'bool', 'LOADTRUE' => 'bool', 'LOADFALSE' => 'bool', 'LOADL' => 'numeric',
+    'LOADTRUE' => 'bool', 'LOADFALSE' => 'bool', 'LOADL' => 'numeric',
     'LOADSYM' => 'symbol', 'STRING' => 'string', 'STRCAT' => 'string', 'LOADNIL' => 'nil', 'LOADSELF' => 'self',
     'GETIDX' => 'getidx', 'GETIDX0' => 'getidx', 'GETUPVAR' => 'upvar', 'GETGV' => 'gv', 'GETCV' => 'cv',
     'LAMBDA' => 'proc', 'BLOCK' => 'proc', 'METHOD' => 'proc', 'HASH' => 'hash', 'ARRAY' => 'array', 'ARRAY2' => 'array',
@@ -72,7 +72,7 @@ module IvarPoisonCauses
 
       return classify(irep, defn.index, insn.regs[1], mand, method_name, registry, depth + 1)
     end
-    return ['integer', nil] if op.start_with?('LOADI')
+    return ['integer', nil] if BytecodeIR::Ops::LOADI_OPS.include?(op)
     return ['getiv', insn.ivar.to_s] if op == 'GETIV'
     return [LITERALS.fetch(op), nil] if LITERALS.key?(op)
     return ["call:#{call_kind(insn.sym, registry)}", insn.sym.to_s] if CALLS.include?(op) && insn.sym
