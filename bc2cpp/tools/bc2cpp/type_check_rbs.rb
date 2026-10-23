@@ -11,8 +11,9 @@ require 'set'
 #   * every class / module the program defines that is not in CRuby's core RBS, with its superclass (reopened core
 #     classes are not redeclared; only their methods the core RBS lacks are written);
 #   * `def name: (T, T, ?untyped, *untyped, **untyped) ?{ (*untyped) -> untyped } -> R` per method: the mandatory
-#     parameters carry the inferred / declared type or `untyped`; optional, rest and keyword parameters are `untyped`
-#     (bc2cpp does not infer them); every method accepts an optional block (the facts do not know which methods yield);
+#     parameters carry the inferred / declared type or `untyped`; an optional parameter carries its declared type or
+#     its call-site join (`?T`, `untyped` unless every reaching call passes it); rest and keyword parameters are
+#     `untyped`; every method accepts an optional block (the facts do not know which methods yield);
 #   * `@ivar: T` per ivar and `NAME: T` per constant with a type, `untyped` otherwise;
 #   * `def self.x` for singleton methods; `private` for private methods;
 #   * a one-line `# bc2cpp: return from FILE:LINE (...)` above each method, naming the IR exit that decided its return
@@ -69,7 +70,10 @@ module TypeCheckRbs
 
   def method_line(m, declared, singleton: false)
     positional = m['params'].map { |p| rbs_type(p['type'], declared) }
-    positional.concat((0...m['opt'].to_i).map { |index| '?'+rbs_type(Array(m['optional_params'])[index]&.[]('type'), declared) })
+    positional.concat((0...m['opt'].to_i).map do |index|
+      type = rbs_type(Array(m['optional_params'])[index]&.[]('type'), declared)
+      type.include?(' | ') ? "?(#{type})" : "?#{type}"
+    end)
     positional << '*untyped' if m['rest']
     keywords = Array(m['keyword_params'])
     keywords.each { |param| positional << "#{param['required'] ? '' : '?'}#{param['name']}: #{rbs_type(param['type'], declared)}" }

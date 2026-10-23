@@ -19,6 +19,15 @@ def mandatory_arity(irep)
   enter.enter_fields.first
 end
 
+# Mandatory and optional positionals only: rest, post, keyword, keyword-rest and block fields must be zero. Such a
+# def binds argument k to R[k] exactly when k was passed (vm.c OP_ENTER), so a call-site join can describe it.
+def optional_positionals_only?(irep)
+  enter = irep.enter
+  return true unless enter
+
+  enter.enter_fields[2..].all?(&:zero?)
+end
+
 # KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: can this def receive `nk`
 # keyword pairs packed into one trailing positional Hash, with `total`
 # positionals? (see compile_keyword_hash_positional_send). Sound when ENTER has
