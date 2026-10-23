@@ -231,7 +231,7 @@ module IrSymbolFlow
 
       insn = program.instructions[n].source
       out << n if reads(irep, insn).include?(reg.to_i)
-      kills = (KILLS_LEAD.include?(insn.op) || insn.op.start_with?('LOADI')) && insn.reg == reg
+      kills = (KILLS_LEAD.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)) && insn.reg == reg
       work.concat(kills ? program.raise_targets.fetch(n, []) : program.successors_of(n, include_handlers: true))
     end
     out

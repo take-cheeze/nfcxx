@@ -63,6 +63,19 @@ ZERO_ARG_SEND = Set['SEND0', 'SSEND0'].freeze
     # Ops that write their leading register from their operands alone: no call, no implicit read.
     PURE_LOAD = Set['MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE'].freeze
 
+    # Opcode-name sets from insn_decoder.rb's FORMATS table (the authoritative op list). They replace
+    # start_with?('LOADI') / start_with?('SET') and the LOADI regexes at their call sites.
+    # The 13 table names starting with LOADI.
+    LOADI_OPS = Set['LOADI8', 'LOADINEG', 'LOADI__1', 'LOADI_0', 'LOADI_1', 'LOADI_2', 'LOADI_3', 'LOADI_4',
+                    'LOADI_5', 'LOADI_6', 'LOADI_7', 'LOADI16', 'LOADI32'].freeze
+    # The one-byte-immediate forms LOADI_0..LOADI_7 of the same table.
+    LOADI_SLOT = Set['LOADI_0', 'LOADI_1', 'LOADI_2', 'LOADI_3', 'LOADI_4', 'LOADI_5', 'LOADI_6', 'LOADI_7'].freeze
+    # LOADI_SLOT plus LOADI16 and LOADI32: what /\ALOADI(?:_\d+|16|32)?\z/ matches among the table names.
+    # LOADI8, LOADINEG and LOADI__1 are not in it.
+    LOADI_SLOT_OR_WIDE = (LOADI_SLOT | %w[LOADI16 LOADI32]).freeze
+    # The 8 table names starting with SET (SETGV SETSV SETIV SETCV SETCONST SETMCNST SETUPVAR SETIDX).
+    SET_OPS = Set['SETGV', 'SETSV', 'SETIV', 'SETCV', 'SETCONST', 'SETMCNST', 'SETUPVAR', 'SETIDX'].freeze
+
     # Operand-widening prefixes `mrbc -v` lists as instructions of their own.
     EXT = Set['EXT1', 'EXT2', 'EXT3'].freeze
   end

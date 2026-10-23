@@ -350,6 +350,78 @@ keyword_values[:k2] = nil
 check.call('a site without a literal keyword value refuses the keyword join', keyword_join.call.nil?)
 puts 'rest, block and keyword call-site joins passed'
 
+# Body analysis (BytecodeIR::Types) consumes the joins as ir_type_feedback passes them. Synthetic ireps: no mrbc.
+require_relative '../../tools/bc2cpp/irep_arity'
+body_irep = lambda do |instructions|
+  Irep.new(label: 'body', nlocals: 4, nregs: 8, instructions: instructions.map { |op, text| Insn.new(lineno: 1, addr: 0, op: op, args: text) })
+end
+body_fact = lambda do |instructions, index, reg, **inputs|
+  BytecodeIR::Types.new(body_irep.call(instructions), **inputs).fact_at(index, reg)&.classes
+end
+rest_body = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['GETIDX0', 'R2 R1[0]'], ['RETURN', 'R2']]
+check.call('rest element receiver sees the joined element type (with nil for an absent index)',
+           body_fact.call(rest_body, 2, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] }) == Set[:NilClass, :Integer, :String])
+check.call('rest element receiver stays untyped without a join', body_fact.call(rest_body, 2, '2').nil?)
+rest_copy = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['MOVE', 'R3 R1'], ['GETIDX0', 'R2 R3[0]'], ['RETURN', 'R2']]
+check.call('a MOVE copy read only by element reads keeps the join',
+           body_fact.call(rest_copy, 3, '2', inferred_rest_elements: { '1' => Set[:Integer] }) == Set[:NilClass, :Integer])
+rest_mutated = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['MOVE', 'R3 R1'], ['SEND', 'R3 :push n=1'],
+                ['GETIDX0', 'R2 R1[0]'], ['RETURN', 'R2']]
+check.call('a body that calls a method on the rest array (or a copy) refuses the element join',
+           body_fact.call(rest_mutated, 4, '2', inferred_rest_elements: { '1' => Set[:Integer] }).nil?)
+keyword_body = [['ENTER', '0:0:0:0:1:0:0:0 (0x0)'], ['KARG', 'R3 :key'], ['RETURN', 'R3']]
+check.call('required keyword reads its joined type',
+           body_fact.call(keyword_body, 2, '3', inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])
+check.call('required keyword stays untyped without a join', body_fact.call(keyword_body, 2, '3').nil?)
+declared_keyword = BytecodeIR::Types.new(body_irep.call(keyword_body), declared_keywords: { 'key' => Set[:Symbol] },
+                                         inferred_keywords: { 'key' => Set[:String, :Integer] }).fact_at(2, '3')
+check.call('a declared keyword type wins over the call-site join', declared_keyword.classes == Set[:Symbol] && declared_keyword.declared?)
+block_body = [['ENTER', '0:0:0:0:0:0:1:0 (0x0)'], ['SEND', 'R1 :call n=0']]
+check.call('a block called with .call is a Proc when every caller passes a literal block',
+           body_fact.call(block_body, 1, '1', inferred_args: { '1' => Set[:Proc] }) == Set[:Proc])
+check.call('a block without the join keeps its nominal Proc-or-nil bound', body_fact.call(block_body, 1, '1') == Set[:Proc, :NilClass])
+
+# End to end through the codegen joins: a poisoned name (a splatted or dynamic caller) refuses the rest join, so the
+# body sees nothing; the same name with a plain caller gives the join; BC2CPP_IR_ARGUMENT_TYPES=0 withdraws it.
+class RestBodyHarness < ArgumentHarness
+  attr_accessor :gather_sites
+
+  def initialize(rest_irep, caller_classes)
+    super({ 'Left' => Rest }, [], caller_classes)
+    @ireps = { 'rest_def' => rest_irep }
+  end
+
+  def entry_arg_call_index = [{ 'gather' => @gather_sites }, @poisoned]
+end
+# One required parameter and a rest parameter: the rest register is R2 (mandatory + optional + 1), its element R3.
+rest_irep = Irep.new(label: 'rest_def', nlocals: 4, nregs: 8, instructions: [
+  Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: '1:0:1:0:0:0:0:0 (0x0)'),
+  Insn.new(lineno: 1, addr: 4, op: 'GETIDX0', args: 'R3 R2[0]'),
+  Insn.new(lineno: 1, addr: 8, op: 'RETURN', args: 'R3')
+])
+caller = ReceiverBody.new([Insn.new(lineno: 1, addr: 0, op: 'SEND', args: 'R2 :gather n=1')])
+end_to_end = RestBodyHarness.new(rest_irep, { [caller, 2] => Set[:Left], [caller, 4] => Set[:Integer] })
+end_to_end.gather_sites = [[caller, 0, 2, 2]]
+rest_join_of = -> { end_to_end.bytecode_ir_rest_argument_classes(Rest) }
+body_element = lambda do |join|
+  inputs = join ? { inferred_rest_elements: { '2' => join } } : {}
+  BytecodeIR::Types.new(rest_irep, **inputs).fact_at(2, '3')&.classes
+end
+check.call('codegen rest join reaches the body as the element type',
+           rest_join_of.call == Set[:Integer] && body_element.call(rest_join_of.call) == Set[:NilClass, :Integer])
+end_to_end.poisoned << 'gather'
+check.call('a poisoned (splat or dynamic) caller refuses the rest join and so the body element type',
+           rest_join_of.call.nil? && body_element.call(rest_join_of.call).nil?)
+end_to_end.poisoned.clear
+ENV['BC2CPP_IR_ARGUMENT_TYPES'] = '0'
+begin
+  check.call('BC2CPP_IR_ARGUMENT_TYPES=0 withdraws the rest join at the codegen boundary', rest_join_of.call.nil?)
+ensure
+  ENV.delete('BC2CPP_IR_ARGUMENT_TYPES')
+end
+check.call('the codegen join is restored once the switch is off', rest_join_of.call == Set[:Integer])
+puts 'body consumes call-site joins (rest element, required keyword, Proc block) passed'
+
 if ENV['MRBC']
   require_relative '../../tools/bc2cpp/type_check_rbs'
   rest_block_source = <<~SOURCE

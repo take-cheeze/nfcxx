@@ -46,7 +46,8 @@ module EscapeReport
       origin = CoreDefs.core_source?(irep.file) ? 'core' : 'engine'
       irep.instructions.each_with_index do |insn, i|
         kind = site_kind(irep, i, insn) or next
-        verdict = analyzer.creation(irep, i, value_class: constructed_class(world, irep, i, insn))
+        lexical = owner_of[irep.label]&.split('#', 2)&.first
+        verdict = analyzer.creation(irep, i, value_class: constructed_class(codegen, world, irep, i, insn, lexical))
         today = TODAY[[irep.label, insn.addr]] || LAMBDA_REGIONS[[irep.label, insn.addr]] || '-'
         rows << ['site', "#{irep.label}:#{i}", owner, origin, insn.op, kind, verdict.escapes? ? 'escapes' : 'confined',
                  verdict.escapes? ? verdict.reason : '-', verdict.uses.count { |u| u.kind == :call }, today,
@@ -106,12 +107,31 @@ module EscapeReport
     world.instance_variable_get(:@defs).fetch('initialize', []).select(&:irep)
   end
 
-  # The class a `Const.new` constructs when the world declares that constant as a class.
-  def self.constructed_class(world, irep, index, insn)
+  # The class a `Const.new` constructs. Two sources, and they must agree:
+  #   - the bare written name, when the hierarchy tables declare that exact name (the original rule);
+  #   - the receiver the compiler proves to be one stable class constant (constant_object_owner, the proof
+  #     CONSTRUCTOR_EXACT_CONSTANT uses): it resolves the name lexically from +lexical+ and requires its binding
+  #     to be stable, so the constant denotes that class for the VM's life. This is what resolves a bare
+  #     `Rect.new` inside `class RPG2k::Window` to RGSS::Rect.
+  # A name the closed world binds more than once (`Outer::Reset = Rebound` after `class Reset`) is no fixed
+  # class, so the lookup refuses it whatever the declared table says. A name only one source gives is taken;
+  # when both give different classes it refuses too. A receiver neither proves (a variable, `self.class`) stays unknown.
+  def self.constructed_class(codegen, world, irep, index, insn, lexical)
     return nil unless %w[SEND0 SEND SENDB].include?(insn.op) && insn.sym == 'new'
 
     name = irep.agreed_constant_name(index, insn.reg)
-    name if name && world.class_known?(name)
+    closed = codegen&.instance_variable_get(:@closed_world)
+    bound = name && lexical && codegen.send(:resolve_class_constant_name, name, lexical)
+    return nil if bound && !closed&.stable_constant_identity?(bound)
+
+    named = name if name && world.class_known?(name)
+    proved = codegen && lexical && (codegen.send(:constant_object_owner, irep, index, insn.reg, lexical) ||
+                                    codegen.send(:constant_object_owner, irep, index, insn.reg, lexical, through_handlers: true))
+    proved = nil unless proved && world.class_known?(proved)
+    return named if proved.nil?
+    return proved if named.nil? || named == proved
+
+    nil
   end
 
   # The classes the class flow gives the receiver of the send a BLOCK is passed to ("-" when none).

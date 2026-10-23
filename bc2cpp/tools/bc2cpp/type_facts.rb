@@ -432,7 +432,7 @@ module TypeFacts
       "send_result:#{w.sym}#{definer_kind(ctx, w.sym)}"
     elsif w.op == 'GETIV'
       "ivar:@#{w.ivar}"
-    elsif w.op.start_with?('LOADI')
+    elsif BytecodeIR::Ops::LOADI_OPS.include?(w.op)
       'literal:Integer'
     else
       PRODUCERS[w.op] || "op:#{w.op}"
