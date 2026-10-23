@@ -1219,3 +1219,5 @@ module EscapeAnalysis
     end
   end
 end
+
+require_relative 'escape_immediate_ivars'
