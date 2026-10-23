@@ -50,10 +50,10 @@ module CoreDefs
       end
       next if spans.empty?
 
-      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, _index|
+      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, index|
         next unless spans.any? { |from, to| from < insn.addr && insn.addr < to }
 
-        label = def_body_label(irep, insn)
+        label = def_body_label(irep, insn, index)
         out << label if label
       end
     end
@@ -122,10 +122,10 @@ module CoreDefs
   end
 
   # The child irep a TDEF/SDEF names, or, for the unfused DEF, the METHOD before it.
-  def def_body_label(irep, insn)
+  # +idx+ is the index of +insn+ in +irep+.
+  def def_body_label(irep, insn, idx)
     return irep.reps[insn.block_index] unless insn.op == 'DEF'
 
-    idx = irep.instructions.index(insn)
     method_idx = irep.previous_real_index(idx - 1)
     method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
     method_insn && method_insn.op == 'METHOD' ? irep.reps[method_insn.block_index] : nil

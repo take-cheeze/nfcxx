@@ -65,7 +65,7 @@ module IvarCandidates
   def reflective_access(ireps)
     names = Set.new
     ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         case insn.op
         when 'LOADSYM'
           return ALL_NAMES if REFLECTIVE_NAMES.include?(insn.sym.to_s)

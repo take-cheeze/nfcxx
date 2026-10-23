@@ -28,8 +28,7 @@ class IrBlockCaptures
     facts = definitions.map do |definition|
       return nil if definition.entry?
 
-      # Live read: BytecodeIR.for caches the child's Program, and the capture check edits the child's list in place.
-      instruction = @child.instructions[definition.index]
+      instruction = BytecodeIR.for(@child).source_at(definition.index)
       return nil unless instruction.op == 'GETUPVAR'
 
       slot, level = instruction.upvar_ref
