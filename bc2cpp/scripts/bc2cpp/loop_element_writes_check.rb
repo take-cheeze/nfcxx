@@ -18,7 +18,7 @@ require 'tmpdir'
 
 TOOLS = ENV['BC2CPP_TOOL'] ? File.dirname(ENV['BC2CPP_TOOL']) : File.expand_path('../../tools/bc2cpp', __dir__)
 %w[irep bytecode_ir numeric_flow codegen dynamic_names codegen_numeric_proof codegen_numeric_args codegen_captured_locals
-   codegen_class_object_args codegen_fixnum_proof codegen_send].each { |file| require File.join(TOOLS, file) }
+   codegen_class_object_args codegen_fixnum_proof codegen_send codegen_loop_regions].each { |file| require File.join(TOOLS, file) }
 
 failures = []
 check = lambda do |what, condition|
@@ -137,6 +137,29 @@ if ENV['MRBC']
       [key, [body, send_index.call(body, name)]]
     end
     expect_decisions(check, 'compiled', CodeGen.allocate, compiled)
+  end
+end
+
+if ENV['MRBC']
+  # A Hash parameter written after an inlined block call: the back-edge write reaches the call, so the call's
+  # captured container is no longer the host parameter (inline_hash_capture_hints).
+  Dir.mktmpdir('hash-capture') do |directory|
+    annotation = Struct.new(:arg_containers, :arg_elements)
+    capture = lambda do |source|
+      path = File.join(directory, 'fixture.rb')
+      File.write(path, source)
+      ireps = load_ireps(run_mrbc([path], 'hash_capture', directory)).first
+      host = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'SENDB' && i.sym == 'each' } }
+      sendb = host.instructions.find { |i| i.op == 'SENDB' && i.sym == 'each' }
+      block = ireps.values.find { |irep| irep.instructions.any? { |i| i.op == 'GETUPVAR' } }
+      gen = CodeGen.allocate
+      gen.instance_variable_set(:@element_annotations, { host.label => annotation.new(['Hash', nil], ['Symbol', nil]) })
+      gen.send(:inline_hash_capture_hints, host, { block_irep: block, sendb_addr: sendb.addr })
+    end
+    check.call('a Hash parameter written after the block call in the loop is not a capture',
+               capture.call("def host(h, n)\n  while n > 0\n    [1].each { |x| h[x] }\n    h = []\n    n -= 1\n  end\nend\n").empty?)
+    check.call('a Hash parameter read straight-line before the block call is still captured',
+               !capture.call("def host(h, n)\n  [1].each { |x| h[x] }\n  n\nend\n").empty?)
   end
 end
 
