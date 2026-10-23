@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: emitters of inlined block loops.
 
 class CodeGen
@@ -179,7 +181,7 @@ class CodeGen
     body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
     compile_all = lambda do
-      block_irep.instructions.each_with_index do |insn, i|
+      BytecodeIR.for(block_irep).each_source do |insn, i|
         next if insn.op == 'ENTER'
 
         body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
@@ -805,7 +807,7 @@ class CodeGen
     @inline_nested = nested
     body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
-    block_irep.instructions.each_with_index do |insn, i|
+    BytecodeIR.for(block_irep).each_source do |insn, i|
       next if insn.op == 'ENTER'
 
       # `L<addr>:;` -- the colon makes it a label and the trailing semicolon the
