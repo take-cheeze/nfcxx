@@ -540,7 +540,7 @@ module EscapeAnalysis
     # The registry owns a def by its lexical class; one inside a block (Class.new { def ... }) lands on
     # a class chosen at run time, so it also counts under an owner that every class can reach.
     def scan_definition_op(irep, idx, insn, known, in_closure)
-      label = CoreDefs.def_body_label(irep, insn)
+      label = CoreDefs.def_body_label(irep, insn, idx)
       return @dynamic_sites << [irep.label, idx, insn.op] if label.nil?
       return unless in_closure || !known[insn.sym].include?(label)
 

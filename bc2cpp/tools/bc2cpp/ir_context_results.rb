@@ -265,8 +265,8 @@ class IrContextResults
     index = body.enter_index
     return nil unless index
     if optional.positive?
-      jumps = body.instructions[index + 1, optional + 1]
-      return nil unless jumps&.size == optional + 1 && jumps.all? { |insn| insn.op == 'JMP' }
+      program = BytecodeIR.for(body)
+      return nil unless (index + 1..index + optional + 1).all? { |table| program.source_at(table)&.op == 'JMP' }
     end
     names = BytecodeIR.for(body).instructions_with_op('KARG').map { |insn| insn.sym.to_s.dup.freeze }.uniq.freeze
     optional_names = BytecodeIR.for(body).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.uniq
