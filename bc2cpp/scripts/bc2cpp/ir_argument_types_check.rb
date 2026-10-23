@@ -3,6 +3,7 @@
 
 require 'set'
 require_relative '../../tools/bc2cpp/ir_argument_types'
+require_relative '../../tools/bc2cpp/irep'
 
 Definition = Struct.new(:name, :irep)
 left = Definition.new('accept', 'left')
@@ -85,7 +86,7 @@ harness.world.safe = false
 check.call('singleton mutation withdraws API fact', harness.bytecode_ir_argument_classes(left, 1).nil?)
 
 Instruction = Struct.new(:op)
-ReceiverBody = Struct.new(:instructions)
+ReceiverBody = Struct.new(:instructions, :nlocals, :catch_handlers)
 class ReceiverHarness < CodeGen
   attr_accessor :self_mask
   def bytecode_ir_source_classes(_body, _index, _register) = Set[:String]
@@ -94,7 +95,7 @@ class ReceiverHarness < CodeGen
 end
 receiver_harness = ReceiverHarness.new
 receiver_harness.self_mask = Set[:Left]
-implicit_body = ReceiverBody.new([Instruction.new('SSEND')])
+implicit_body = ReceiverBody.new([Insn.new(lineno: 1, addr: 0, op: 'SSEND', args: '')])
 check.call('implicit call uses lexical self rather than polluted output register',
            receiver_harness.bytecode_ir_argument_receiver_classes(implicit_body, 0, 2) == Set[:Left])
 receiver_harness.self_mask = nil
