@@ -396,7 +396,7 @@ class CodeGen
       needs_blk = blk_available && (blk_needs == [1] || blk_needs == [2]) &&
                   (synchronous || block_blk_needs(block_irep, given: false) == [])
 
-      region = { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
+      region = { block_addr: insn.addr, block_index: idx, sendb_addr: paired.addr, dest_reg: dest_reg,
                  block_irep: block_irep, name: name, n: n,
                  self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk,
                  parent_irep: irep }
@@ -621,6 +621,11 @@ class CodeGen
   # filled by emit_rproc_construction.
   # A runtime-def/EXEC body's self is its receiver, not an instance of d.owner
   # (nested blocks inherit that), so self-ivar codegen must not assume d.owner.
+  # { body `_impl` name => [region, ...] } of every body emitted here (see block_yielders.rb). Read after codegen.
+  def proc_fallback_origins
+    @proc_fallback_origins || {}
+  end
+
   def emit_proc_fallback_fn(region, d, fn_prefix = nil)
     saved_self_class_unknown = @self_class_unknown
     @self_class_unknown = saved_self_class_unknown || runtime_def_fallback_kind?(region[:kind])
@@ -666,6 +671,9 @@ class CodeGen
     # own address space.
     fn_name = "#{fn_prefix || cpp_name(d.owner, d.name)}_#{region[:kind] || 'block_fallback'}_#{region[:block_addr]}"
     impl_name = "#{fn_name}_impl"
+    # BLOCK_YIELDERS: the region each body `_impl` was emitted for, read by the BC2CPP_TRACE_TYPES join (see
+    # block_yielders.rb). Recording only: nothing emitted reads it. A name recorded twice is not joined.
+    (@proc_fallback_origins ||= Hash.new { |h, k| h[k] = [] })[impl_name] << region
 
     # NESTED_BLOCK_FALLBACK_SUPPORT: recursively run recognize ->
     # emit_proc_fallback_fn -> emit_block_fallback_glue on regions nested in this
