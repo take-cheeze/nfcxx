@@ -259,7 +259,7 @@ class IrContextResults
     _required, optional, rest, post, key_count, keydict, block, extra = fields
     return nil if extra != 0 || rest > 1 || keydict > 1 || block > 1
 
-    index = body.instructions.index(body.enter)
+    index = body.enter_index
     return nil unless index
     if optional.positive?
       jumps = body.instructions[index + 1, optional + 1]
@@ -424,7 +424,7 @@ class IrContextResults
       definitions = BytecodeIR.reaching_definitions(body, index, key_register.to_s, origin_transfers: true)
       return nil unless definitions&.size == 1 && !definitions.first.entry?
 
-      producer = body.instructions[definitions.first.index]
+      producer = BytecodeIR.for(body).source_at(definitions.first.index)
       return nil unless producer.op == 'LOADSYM'
 
       keyword_registers << [producer.sym.to_s.dup.freeze, key_register + 1].freeze
@@ -582,7 +582,7 @@ class IrContextResults
       next false unless context.states
 
       nested = seen.dup.add(key)
-      callee.instructions.each_with_index.all? do |instruction, call_index|
+      BytecodeIR.for(callee).each_source.all? do |instruction, call_index|
         if NO_BLOCK_SEND.include?(instruction.op)
           inputs = context.states[call_index]
           inputs.nil? || readonly?(context, callee, call_index, instruction, inputs, nested)
