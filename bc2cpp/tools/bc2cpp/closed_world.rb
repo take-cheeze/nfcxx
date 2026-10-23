@@ -351,16 +351,42 @@ class ClosedWorld
   # it). nil when any of those may exist. A singleton method of `klass` runs with one of these as `self`, an instance
   # method of `klass` with an instance of one of them.
   def known_subclasses(klass)
-    return nil if @global_refusal || !@wild.empty? || !@class_decls.key?(klass) || @rebound.include?(simple(klass))
+    return nil unless @class_decls.key?(klass)
 
-    set = Set[klass] | descendants(klass)
-    return nil unless set.all? { |k| @class_decls.key?(k) }
+    bounded_subclasses(klass, Set[klass] | descendants(klass))
+  end
+
+  # RECEIVER_BOUND: known_subclasses for a receiver the RBS contract resolver reads. A core class the program does not
+  # declare (`class Child < Array`, no `class Array`) is bounded too, by the program classes that name it as their
+  # superclass (@undeclared_children); CoreHierarchySigs must list it. Other callers keep known_subclasses.
+  def known_receiver_subclasses(klass)
+    return known_subclasses(klass) if @class_decls.key?(klass)
+    return nil unless CoreHierarchySigs.declared_class?(klass)
+
+    set = Set[klass]
+    @undeclared_children[klass].each { |child| set |= Set[child] | descendants(child) }
+    bounded_subclasses(klass, set)
+  end
+
+  def bounded_subclasses(klass, set)
+    return nil if @global_refusal || !@wild.empty? || @rebound.include?(simple(klass))
+    return nil unless set.all? { |k| @class_decls.key?(k) || k == klass }
 
     names = set.map { |k| simple(k) }.to_set
     return nil if names.any? { |n| @dynamic_subclassed.include?(n) || @outside_ruby_supers.include?(n) }
     return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
 
     set.to_a.sort
+  end
+
+  # CORE_REDEFINED: may the program define +name+ on +owner+ itself? True when a program source outside the core
+  # mrblib (a Ruby definition, a native or unknown definer, a refusal) may, so a core contract for it is not trusted.
+  def program_may_define?(owner, name)
+    @program_defines ||= {}
+    @program_defines.fetch([owner, name]) do
+      @program_defines[[owner, name]] = @global_refusal || invisibly_definable?(name) ||
+                                        ForeignDefiners.defines?(@ruby_paths.reject { |path| CoreDefs.core_source?(path) }, owner, name)
+    end
   end
 
   # NATIVE_CORE_DIRECT: nothing outside the registry (an outside Ruby
@@ -1571,6 +1597,9 @@ class ClosedWorld
     @class_decls.each_key { |c| by_simple[simple(c)] << c }
     @by_simple = by_simple
     @children = Hash.new { |h, k| h[k] = Set.new }
+    # Program classes whose superclass the program does not declare (`class Child < Array`): the superclass is named
+    # as written, and known_subclasses reads them for an undeclared core root.
+    @undeclared_children = Hash.new { |h, k| h[k] = Set.new }
     # A superclass the walk could not resolve could be any class.
     @wild = Set.new
     @class_decls.each do |klass, decls|
@@ -1580,7 +1609,12 @@ class ClosedWorld
         when String
           # Constant lookup is lexical then by ancestry: any class of that
           # simple name may be the one meant.
-          by_simple[simple(d[:super])].each { |parent| @children[parent] << klass unless parent == klass }
+          parents = by_simple[simple(d[:super])]
+          if parents.empty?
+            @undeclared_children[d[:super]] << klass unless d[:super] == klass
+          else
+            parents.each { |parent| @children[parent] << klass unless parent == klass }
+          end
         end
       end
     end

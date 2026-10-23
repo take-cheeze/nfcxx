@@ -6,14 +6,16 @@ module RbsSignatures
   # One settled signature/hierarchy world; inferred arguments and query state stay per method.
   class IrContracts
     EMPTY = {}.freeze
-    attr_reader :applied, :named_returns
+    attr_reader :applied, :named_returns, :core_redefined
 
     # subclasses: ClosedWorld#known_subclasses (nil when the receiver set is open); method_missing_classes: the
-    # classes whose dispatch may reach a method_missing.
+    # classes whose dispatch may reach a method_missing; core_redefined: ClosedWorld#program_may_define? (nil: a core
+    # root is never typed).
     def initialize(applied, superclass_of:, included_modules:, prepended_modules:, unknown_mixins:, subclasses: nil,
-                   method_missing_classes: Set.new)
+                   method_missing_classes: Set.new, core_redefined: nil)
       @applied = applied
       @subclasses = subclasses
+      @core_redefined = core_redefined
       @method_missing_classes = method_missing_classes.to_set.freeze
       @superclass_of = superclass_of.transform_values { |parent| parent.is_a?(String) ? parent.dup.freeze : parent }.freeze
       @included_modules = included_modules.transform_values { |owners| Array(owners).map { |owner| owner.dup.freeze }.freeze }.freeze

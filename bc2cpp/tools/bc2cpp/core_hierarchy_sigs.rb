@@ -75,6 +75,12 @@ module CoreHierarchySigs
     out.freeze
   end
 
+  # Whether +name+ is a core class (a `class` line of the section). A core module (Kernel, Enumerable) is not.
+  def declared_class?(name)
+    super_of, = hierarchy
+    super_of.key?(name)
+  end
+
   # The classes declared with +name+ as their superclass, in file order.
   def subclasses(name)
     super_of, = hierarchy

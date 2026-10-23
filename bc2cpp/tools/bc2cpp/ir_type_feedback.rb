@@ -188,13 +188,14 @@ module IrTypeFeedback
     applied = ctx.signature_contracts
     # The closed world bounds implicit-self receivers (RbsSignatures.self_receivers); without one they are open.
     closed = ctx.gen.instance_variable_get(:@closed_world)
-    subclasses = ->(klass) { closed&.known_subclasses(klass) }
+    subclasses = ->(klass) { closed&.known_receiver_subclasses(klass) }
     method_missing_classes = closed ? closed.method_missing_classes : Set.new
+    core_redefined = closed && ->(owner, name) { closed.program_may_define?(owner, name) }
     prepared = if applied && ENV['BC2CPP_IR_PREPARED_CONTRACTS'] != '0'
                  RbsSignatures::IrContracts.new(applied, superclass_of: ctx.superclass_of || {},
                                                included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
                                                unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new,
-                                               subclasses: subclasses, method_missing_classes: method_missing_classes)
+                                               subclasses: subclasses, method_missing_classes: method_missing_classes, core_redefined: core_redefined)
                end
     ctx.registry.values.flatten.select(&:irep).uniq(&:irep).each do |definition|
       irep = ctx.ireps[definition.irep]
@@ -237,7 +238,7 @@ module IrTypeFeedback
       analysis = if applied
                    RbsSignatures.ir_types(applied, irep, prepared: prepared, superclass_of: ctx.superclass_of || {}, included_modules: ctx.included_modules || {},
                                           prepended_modules: ctx.prepended_modules || {}, unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver,
-                                          subclasses: subclasses, method_missing_classes: method_missing_classes)
+                                          subclasses: subclasses, method_missing_classes: method_missing_classes, core_redefined: core_redefined)
                  else BytecodeIR::Types.new(irep, inferred_args: inferred_args, inferred_calls: inferred_calls, source_resolver: source_resolver)
                  end
       owners = prepared ? prepared.owners(definition.owner) : RbsSignatures.contract_owners(definition.owner, ctx.superclass_of || {},
