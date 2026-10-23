@@ -531,6 +531,9 @@ module BytecodeIR
     EMPTY_TARGETS = [].freeze
 
     # Indices reached from +starts+ (inclusive) over normal successors and the handler edges (#raise_targets).
+    # A block, when given, is called with (index, normal successors) for each reached index and returns the normal
+    # successors to follow instead: an analysis refines a branch this way (a decided jump keeps one edge). Handler
+    # edges are not refined. Every index it returns must be a valid instruction index.
     def forward_reachable(starts)
       seen = Set.new
       work = starts.dup
@@ -538,11 +541,14 @@ module BytecodeIR
         i = work.pop
         next unless seen.add?(i)
 
-        @instructions[i].successors.each { |s| work << s }
+        normal = @instructions[i].successors
+        (block_given? ? yield(i, normal) : normal).each { |s| work << s }
         raise_targets.fetch(i, EMPTY_TARGETS).each { |t| work << t }
       end
       seen.freeze
     end
+    # Public for codegen_arm_prune.rb, which refines the successors of decided jumps through the block form.
+    public :forward_reachable
 
     # vm.c OP_ENTER binds the arguments to R[1..req+opt] as passed, so a passed argument is its entry value.
     # The one exception is R[1] without keywords: argc==14 with a keyword hash packs the arguments into an
