@@ -260,7 +260,7 @@ class CodeGen
              else wi.op
              end
       ["aref<#{what}>"]
-    when 'GETIV' then ["iv:#{insn.args[/@\w+/]}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
+    when 'GETIV' then ["iv:#{insn.ivar && "@#{insn.ivar}"}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
     when 'GETCONST', 'GETMCNST'
       cname = insn.const_name || insn.mcnst_name
       key = const_group_key(insn)
