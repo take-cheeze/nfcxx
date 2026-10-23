@@ -438,15 +438,28 @@ module TypeFacts
     "unanalyzable:#{e.class}"
   end
 
-  # The nearest textual writer of the returned register (IrepScans#walk_writers), for a body the flow cannot read.
+  # The producer of the value `reg` holds at `idx`, when every reaching definition (BytecodeIR.reaching_definitions:
+  # joins, loops, MOVEs followed) names the same producer. A join of different producers is 'unreadable', never the
+  # textually last arm's. A frame value keeps its self/param label.
   def textual_producer(ctx, irep, idx, reg)
     enter = irep.enter
     mand = enter ? enter.enter_fields.first.to_i : 0
-    found = irep.walk_writers(idx - 1, reg.to_s, skip_ops: ['BLOCK'], follow_moves: true,
-                                                 exhausted: ->(last) { last == '0' ? 'self' : (last.to_i <= mand ? 'param' : 'unreadable') }) do |w, _i, _r|
-      producer_of(ctx, w)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    return 'unreadable' if defs.nil? || defs.empty?
+
+    program = BytecodeIR.for(irep)
+    producers = defs.map do |d|
+      next entry_producer(d.reg.to_s, mand) if d.entry?
+
+      producer_of(ctx, program.source_at(d.index))
     end
-    found.is_a?(String) ? found : 'unreadable'
+    producers.uniq.size == 1 ? producers.first : 'unreadable'
+  end
+
+  def entry_producer(reg, mand)
+    return 'self' if reg == '0'
+
+    reg.to_i <= mand ? 'param' : 'unreadable'
   end
 
   def producer_of(ctx, w)
@@ -601,15 +614,20 @@ module TypeFacts
   FREEZE_SELF_LITERALS = { 'literal:Integer' => 'Integer', 'literal:String' => 'String', 'literal:Array' => 'Array',
                            'literal:Hash' => 'Hash' }.freeze
 
+  # Every reaching definition of the receiver must be a freeze of the same literal, so no other arm can supply the value.
   def freeze_self_type(ctx, irep, idx, reg)
-    found = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
-      insn.op == 'SEND0' && insn.sym == 'freeze' ? [j, cur] : false
-    end
-    return nil unless found.is_a?(Array)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
-    j, cur = found
-    klass = FREEZE_SELF_LITERALS[textual_producer(ctx, irep, j, cur)]
-    klass && stock_proof(ctx, 'freeze', klass) ? klass : nil
+    program = BytecodeIR.for(irep)
+    klasses = defs.map do |d|
+      freeze = program.source_at(d.index)
+      next nil unless freeze.op == 'SEND0' && freeze.sym == 'freeze'
+
+      FREEZE_SELF_LITERALS[textual_producer(ctx, irep, d.index, freeze.reg)]
+    end
+    klass = klasses.first
+    klass && klasses.all?(klass) && stock_proof(ctx, 'freeze', klass) ? klass : nil
   end
 
   # IO_OPEN_SAFE: the constant IO is the one native class (ClosedWorld#native_class_unshadowed?), and `open` on IO's
