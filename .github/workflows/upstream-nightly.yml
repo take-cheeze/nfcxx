@@ -10,6 +10,10 @@ on:
         description: Include weekly GCC/Microsoft-origin object surveys and the full EDG tree
         type: boolean
         default: false
+      native_only:
+        description: Run only the native suite jobs and their merge (skip toolchain, routes, EDG and extended)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,6 +39,7 @@ env:
 
 jobs:
   toolchain:
+    if: ${{ !inputs.native_only }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90 # includes a cold compiler build
     steps:
@@ -47,6 +52,7 @@ jobs:
 
   routes:
     needs: toolchain
+    if: ${{ !inputs.native_only }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     strategy:
@@ -254,6 +260,7 @@ jobs:
           if-no-files-found: error
 
   edg:
+    if: ${{ !inputs.native_only }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
@@ -297,7 +304,7 @@ jobs:
           if-no-files-found: error
 
   extended:
-    if: github.event.schedule == '23 17 * * 0' || inputs.extended == true
+    if: ${{ !inputs.native_only && (github.event.schedule == '23 17 * * 0' || inputs.extended == true) }}
     needs: toolchain
     runs-on: ubuntu-26.04
     timeout-minutes: 90
