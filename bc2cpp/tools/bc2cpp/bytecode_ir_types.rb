@@ -273,8 +273,8 @@ module BytecodeIR
       Fact.new(classes: types.freeze, declared: !contracts.empty?, contracts: contracts.to_a.sort.freeze).freeze
     end
 
-    # A required keyword's value is its call-site join, unless the signature declares that keyword: then nil, so
-    # declared_definition supplies the declared type (a declared bound wins over an inferred one).
+    # A keyword's value is its call-site join (an optional one's join already holds the default's class), unless the
+    # signature declares that keyword: then nil, so declared_definition supplies the declared type.
     def keyword_definition_types(insn)
       name = insn.sym.to_s
       @declared_keywords.key?(name) ? nil : @inferred_keywords[name]
@@ -441,6 +441,22 @@ module BytecodeIR
       pool_index = insn.pool_index
       entry = pool_index && pool && pool[pool_index]
       entry.is_a?(Hash) ? POOL_TYPES[entry[:type]] : nil
+    end
+
+    # The class an omitted optional keyword binds, or nil. The default code falls through to the join right after the
+    # KARG at +karg_index+, so the definitions reaching that join are the KARG value and the default's writer. Only one
+    # literal writer gives a class: a call, a local copy or a branch with several defaults is nil.
+    def self.optional_keyword_default_class(irep, karg_index, reg)
+      definitions = BytecodeIR.reaching_definitions(irep, karg_index + 1, reg, shared: true, origin_transfers: true,
+                                                                              max_states: DATAFLOW_MAX_STATES)
+      defaults = definitions&.reject { |definition| !definition.entry? && definition.index == karg_index }
+      return nil unless defaults&.size == 1
+
+      definition = defaults.first
+      return nil if definition.entry? || definition.built
+
+      insn = irep.instructions[definition.index]
+      insn.reg == definition.reg ? literal_class(insn, irep.pool) : nil
     end
 
     def unknown(refusal, cause)

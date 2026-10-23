@@ -61,20 +61,22 @@ module IrArgumentTypes
     Set[:Proc].freeze
   end
 
-  # Required keyword: the join of the value passed for it at every reaching site. +value+ returns the classes of
-  # that site's keyword value, or nil when the site does not pass it as a literal keyword pair.
-  def keyword_classes(definition, sites, receiver:, target:, value:)
+  # Keyword: the join of the value passed for it at every reaching site. +value+ returns the classes of that site's
+  # keyword value, or nil when that site refuses the join. Required (+default+ nil): every site must pass the key as a
+  # literal pair, so +value+ never returns empty classes. Optional: +default+ is the default's classes, joined in
+  # because an omitting site binds it; +value+ returns empty classes for such a site.
+  def keyword_classes(definition, sites, receiver:, target:, value:, default: nil)
     reached = reaching_sites(definition, sites, receiver: receiver, target: target)
     return nil unless reached && !reached.empty?
 
     joined = Set.new
     reached.each do |irep, index, register, argc|
       values = value.call(irep, index, register, argc)
-      return nil unless values && !values.empty?
+      return nil unless values && (default || !values.empty?)
 
       joined.merge(values)
     end
-    joined.freeze
+    default ? joined.merge(default).freeze : joined.freeze
   end
 
   # The sites that can reach +definition+, as [irep, index, register, argc]. Nil when any site's receiver set or
