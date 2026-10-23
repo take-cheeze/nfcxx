@@ -383,7 +383,7 @@ module IntegerConstants
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
     # LOADI_0..LOADI_7 and LOADI__1 carry the value in the opcode name; imm_operand is nil for them.
-    return Regexp.last_match(1).to_i if insn.op.match(/\ALOADI_([0-7])\z/)
+    return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == 'LOADI__1'
 
     tok = insn.imm_operand

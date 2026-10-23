@@ -330,7 +330,7 @@ module RecordHash
             # `send(:ui)` / `&:ui` / `method(:ui)` would call a reader without a visible call site.
             poison(insn.sym, 'reader named as a Symbol') if @readers.include?(insn.sym) && !installer_args.include?(i)
           elsif BytecodeIR::Ops::CALL.include?(insn.op) && REFLECTION_SENDS.include?(insn.sym)
-            literal = insn.op.end_with?('0') ? nil : literal_ivar_arg(irep, i, insn)
+            literal = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? nil : literal_ivar_arg(irep, i, insn)
             literal ? poison(literal, "reflection #{insn.sym}") : (@global ||= "computed #{insn.sym}")
           end
         end

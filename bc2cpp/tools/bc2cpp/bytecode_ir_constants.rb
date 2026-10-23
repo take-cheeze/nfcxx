@@ -179,7 +179,7 @@ module BytecodeIR
       return nil unless insn.reg == reg.to_s
 
       op = insn.op
-      return int_node(loadi_value(insn)) if op.match?(LOADI_OP)
+      return int_node(loadi_value(insn)) if BytecodeIR::Ops::LOADI_OPS.include?(op)
       return hash_node(irep, index, insn, policy, depth) if op == 'HASH' && policy.hash_lookup_safe
       return [:cls, LITERAL_CLASSES[op]].freeze if LITERAL_CLASSES.key?(op)
 
@@ -335,7 +335,7 @@ module BytecodeIR
     end
 
     def loadi_value(insn)
-      return Regexp.last_match(1).to_i if insn.op.match(/\ALOADI_([0-7])\z/)
+      return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
       return -1 if insn.op == 'LOADI__1'
 
       insn.imm_operand&.to_i

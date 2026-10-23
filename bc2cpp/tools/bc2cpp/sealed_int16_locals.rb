@@ -159,7 +159,7 @@ module SealedInt16Locals
 
   # The value a LOADI-family instruction loads (the same decode as BytecodeIR::ConstantFacts#loadi_value).
   def loadi_value(insn)
-    return Regexp.last_match(1).to_i if insn.op.match(/\ALOADI_([0-7])\z/)
+    return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == 'LOADI__1'
 
     insn.imm_operand&.to_i

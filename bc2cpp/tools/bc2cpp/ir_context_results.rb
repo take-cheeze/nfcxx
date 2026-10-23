@@ -414,7 +414,7 @@ class IrContextResults
   def build_call_layout(body, index, insn)
     return nil unless NO_BLOCK_SEND.include?(insn.op)
 
-    argc = insn.op.end_with?('0') ? 0 : insn.argc
+    argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : insn.argc
     return nil unless argc && insn.nk_spec != '*'
 
     register = insn.reg.to_i
@@ -486,7 +486,7 @@ class IrContextResults
       return @gen.frozen_table_send_mask(tables, insn.sym, argc) if other.zero?
     end
     explicit = insn.dup
-    explicit.op = insn.op.end_with?('0') ? 'SEND0' : 'SEND'
+    explicit.op = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 'SEND0' : 'SEND'
     inputs = state.dup
     inputs[insn.reg.to_i] = mask(Set[klass])
     result = @gen.send(:return_class_send_mask, body, index, explicit, inputs) || NumericFlow::OTHER

@@ -50,7 +50,7 @@ module LexicalConsts
   end
 
   def string_argument?(insn)
-    return false if insn.op.end_with?('0') # SEND0 / SSEND0 carry no arguments
+    return false if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) # SEND0 / SSEND0 carry no arguments
 
     insn.n_spec != '0' || !insn.nk_spec.nil?
   end

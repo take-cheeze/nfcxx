@@ -40,7 +40,7 @@ class ClosedWorld
   NAME_BINDING_OPS = Set['ALIAS', 'UNDEF', 'LOADSYM'].freeze
   # Writers of a class body's lexical scope: nil at top level (LOADNIL) or Object (OCLASS).
   CLASS_SCOPE_WRITERS = Set['LOADNIL', 'OCLASS'].freeze
-  STOP_OPS = /\A(?:JMP|RETURN|BREAK|RAISE|STOP|EXEC)/
+  STOP_OPS = BytecodeIR::Ops::STOP_PREFIX_OPS
   C_STRING = /"((?:[^"\\\n]|\\.)*)"/
   # Native code that asks Ruby to define, alias or eval by name.
   NATIVE_DYNAMIC = /"(?:define_method|define_singleton_method|attr_reader|attr_writer|attr_accessor|attr|
@@ -1363,7 +1363,7 @@ class ClosedWorld
       # Class-body include/prepend is separately represented by build_registry
       # (or marked unknown_mixins); runtime mixin changes are not.
       class_body_mixin = %w[include prepend].include?(name) && @walked.include?(irep.label) &&
-                         insn.op.start_with?('SSEND')
+                         BytecodeIR::Ops::SELF_SEND.include?(insn.op)
       global!(:dynamic_mixin) unless class_body_mixin
 
       return
@@ -1377,10 +1377,11 @@ class ClosedWorld
     return global!(:dynamic_install) unless syms
 
     # build_registry only attributes a self-implicit attr_* in a class body.
-    trusted = name.start_with?('attr') && @walked.include?(irep.label) && insn.op.start_with?('SSEND')
+    self_send = BytecodeIR::Ops::SELF_SEND.include?(insn.op)
+    trusted = name.start_with?('attr') && @walked.include?(irep.label) && self_send
     return if trusted
 
-    scoped_label = insn.op.start_with?('SSEND') ? irep.label : nil
+    scoped_label = self_send ? irep.label : nil
     syms.each do |s|
       note_unknown_def(s, scoped_label)
       note_unknown_def("#{s}=", scoped_label)
@@ -1404,7 +1405,7 @@ class ClosedWorld
     return if CoreDefs.core_source?(irep.file) # mruby's own Ruby: builtin values only
 
     constant = nil
-    harmless = insn.op.start_with?('SEND') && insn.argc.to_i.zero? &&
+    harmless = BytecodeIR::Ops::SEND_PREFIX_OPS.include?(insn.op) && insn.argc.to_i.zero? &&
                irep.walk_dominating_writers(idx - 1, insn.reg.to_s, use: idx, follow_moves: true) do |writer|
                  case writer.op
                  when *FREEZE_LITERAL_WRITERS then true
@@ -1420,7 +1421,7 @@ class ClosedWorld
   # `private :a, :b` / `private def a`: the names it hides. Any other argument
   # shape could name anything.
   def scan_visibility_send(insns, idx, insn)
-    n = insn.op.end_with?('0') ? 0 : insn.argc
+    n = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : insn.argc
     return if n&.zero?
 
     syms = n ? preceding_name_args(insns, idx, n) : packed_syms(insns, idx, insn)
@@ -1434,7 +1435,7 @@ class ClosedWorld
     BytecodeIR::Window.each_preceding(insns, idx) do |insn, _|
       break if syms.size == n
 
-      next if insn.op.start_with?('EXT')
+      next if BytecodeIR::Ops::EXT.include?(insn.op)
       return nil unless %w[LOADSYM DEF].include?(insn.op)
 
       syms.unshift(insn.sym_token)
@@ -1474,7 +1475,7 @@ class ClosedWorld
     send_idx = nil
     reads = []
     BytecodeIR::Window.each_following(insns, idx) do |ins, j|
-      break if ins.op.match?(STOP_OPS)
+      break if STOP_OPS.include?(ins.op)
       next unless reads_register?(ins, reg)
 
       name = SEND_OPS.include?(ins.op) && ins.sym_token
@@ -1483,7 +1484,7 @@ class ClosedWorld
         next
       end
 
-      send_idx = j if name == 'new' && !ins.op.start_with?('SS') && ins.reg.to_i == reg
+      send_idx = j if name == 'new' && !BytecodeIR::Ops::SELF_SEND.include?(ins.op) && ins.reg.to_i == reg
       break
     end
     @factory_read_names.merge(reads)
@@ -1515,14 +1516,14 @@ class ClosedWorld
   end
 
   # Ops that only write their first register (any source is spelled out).
-  PURE_WRITES = /\A(?:LOAD\w*|GET(?:CONST|GV|IV|SV|CV|UPVAR)|MOVE|STRING|LAMBDA|BLOCK|METHOD|TCLASS|OCLASS)\z/
+  PURE_WRITES = BytecodeIR::Ops::PURE_WRITE_OPS
 
   # Could `ins` read register `reg`? Over-approximate: a spelled-out operand,
   # or the window after its first register that sends and packing ops use.
   def reads_register?(ins, reg)
     first = ins.reg&.to_i
     return true if (first ? ins.regs.drop(1) : ins.regs).include?(reg.to_s)
-    return false if first.nil? || ins.op.match?(PURE_WRITES)
+    return false if first.nil? || PURE_WRITES.include?(ins.op)
 
     count = ins.argc || ins.uint_operand || 1
     count = 15 if ins.n_spec == '*'

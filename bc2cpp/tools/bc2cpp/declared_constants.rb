@@ -577,7 +577,7 @@ module DeclaredConstants
     def loadi(insn)
       case insn.op
       when 'LOADI__1' then -1
-      when /\ALOADI_(\d)\z/ then Regexp.last_match(1).to_i
+      when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
       else IntegerConstants.loadi_value(insn)
       end
     end

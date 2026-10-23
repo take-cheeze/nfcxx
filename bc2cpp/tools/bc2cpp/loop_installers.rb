@@ -47,9 +47,9 @@ module LoopInstallers
   # SEND and SEND0 alone: an explicit receiver and no block (SSEND forms take self, SENDB/SSENDB pass a block).
   PLAIN_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND - BytecodeIR::Ops::SELF_SEND).freeze
   # Control flow that ends or splits the straight-line walk.
-  FLOW_OPS = /\A(?:JMP|RETURN|RETNIL|RETSELF|RETTRUE|RETFALSE|BREAK|STOP|RAISE|ONERR|POPERR|EXCEPT|RESCUE)/
+  FLOW_OPS = BytecodeIR::Ops::FLOW_PREFIX_OPS
   ARITH_OPS = %w[ADD SUB MUL DIV EQ LT LE GT GE ADDI SUBI].freeze
-  LOAD_TRUTHY = /\A(?:LOADI|LOADL|STRING)/
+  LOAD_TRUTHY = BytecodeIR::Ops::LOAD_TRUTHY_OPS
   ATTR_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
   # A name define_method installs, or a Symbol an expansion loads: an identifier, optionally ending in ?, ! or =.
   METHOD_NAME = /\A[A-Za-z_][A-Za-z0-9_]*[?!=]?\z/
@@ -219,7 +219,7 @@ module LoopInstallers
       insns = @irep.instructions
       limit = insns.size
       insns.each_with_index do |insn, i|
-        limit = i if insn.op.match?(FLOW_OPS) && i < limit
+        limit = i if FLOW_OPS.include?(insn.op) && i < limit
         target = insn.branch_target
         next unless target
 

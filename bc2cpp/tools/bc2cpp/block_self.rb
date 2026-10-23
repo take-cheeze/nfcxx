@@ -50,7 +50,7 @@ module BlockSelf
     irep.instructions.each_with_index do |insn, idx|
       op = insn.op
       return "forwards its block (#{op})" if FORWARDING_OPS.include?(op)
-      next if op.start_with?('LOAD') || WRITE_ONLY_OPS.include?(op)
+      next if BytecodeIR::Ops::LOAD_PREFIX_OPS.include?(op) || WRITE_ONLY_OPS.include?(op)
 
       reads = reads_of(irep, insn)
       return "reads registers it cannot list (#{op})" if reads.nil?
@@ -103,13 +103,13 @@ module BlockSelf
     op = insn.op
     regs = insn.regs
     if BytecodeIR::Ops::SEND.include?(op)
-      no_args = op.end_with?('0')
+      no_args = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(op)
       return nil unless insn.reg && (no_args || insn.plain_fixed_argc?)
 
       d = insn.reg.to_i
-      n = (no_args ? 0 : insn.argc.to_i) + (op.end_with?('B') ? 1 : 0)
+      n = (no_args ? 0 : insn.argc.to_i) + (BytecodeIR::Ops::B_SUFFIX_OPS.include?(op) ? 1 : 0)
       args = (1..n).map { |k| [(d + k).to_s, :argument] }
-      return op.start_with?('SSEND') ? args : [[d.to_s, :receiver]] + args
+      return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d.to_s, :receiver]] + args
     end
     if op == 'BLKCALL'
       # `yield`'s call (vm.c OP_BLKCALL): runs R(a) as a block, under its own self, with R(a+1..a+n).
