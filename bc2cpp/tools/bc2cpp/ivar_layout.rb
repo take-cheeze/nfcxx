@@ -81,9 +81,7 @@ class IvarLayout
         next if d.owner.end_with?('.singleton')
 
         if d.irep
-          ireps.fetch(d.irep).instructions.each do |insn|
-            next unless %w[GETIV SETIV].include?(insn.op)
-
+          BytecodeIR.for(ireps.fetch(d.irep)).each_with_op('GETIV', 'SETIV') do |insn, _index|
             name = insn.ivar
             ivars[d.owner] << name if name
           end
