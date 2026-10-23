@@ -159,8 +159,8 @@ module TypeFacts
       { 'pos' => mand + position, 'name' => names[mand + position - 1].to_s,
         'type' => types && BytecodeIR::Types.type_name(types), 'source' => types ? 'signature' : nil }
     end
-    optional_keywords = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KEY_P' }.to_set
-    keyword_params = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.uniq.map do |name|
+    optional_keywords = BytecodeIR.for(irep).instructions_with_op('KEY_P').filter_map { |insn| insn.sym.to_s }.to_set
+    keyword_params = BytecodeIR.for(irep).instructions_with_op('KARG').filter_map { |insn| insn.sym.to_s }.uniq.map do |name|
       types = ctx.signature_contracts&.ir_keyword_types&.dig(d.irep, name)
       { 'name' => name, 'required' => !optional_keywords.include?(name),
         'type' => types && BytecodeIR::Types.type_name(types), 'source' => types ? 'signature' : nil }

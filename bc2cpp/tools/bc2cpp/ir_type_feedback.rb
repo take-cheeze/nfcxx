@@ -9,8 +9,10 @@ require_relative 'ir_rbs_block_types'
 require_relative 'core_hierarchy_sigs'
 
 module IrTypeFeedback
-  # Not Ops::FRAME_EXIT: that set also holds STOP, which these block and method return kinds leave out.
-  RETURN_OPS = %w[RETURN RETURN_BLK BREAK RETSELF RETNIL RETTRUE RETFALSE].freeze
+  # FRAME_EXIT without STOP: a STOP is not a return kind for these block and method rows.
+  RETURN_OPS = (BytecodeIR::Ops::FRAME_EXIT - ['STOP']).freeze
+  # Sends with an explicit receiver in R(a): the SSEND forms take self implicitly.
+  EXPLICIT_RECEIVER_SENDS = (BytecodeIR::Ops::SEND - %w[SSEND SSEND0 SSENDB]).freeze
   LITERAL_RETURNS = { 'RETNIL' => :NilClass, 'RETTRUE' => :TrueClass, 'RETFALSE' => :FalseClass }.freeze
   # Core superclasses and mixins, read from sig/bc2cpp/declarations.rbs#core_hierarchy (fails if that section is empty).
   CORE_PARENTS, CORE_MIXINS = CoreHierarchySigs.symbol_hierarchy
@@ -42,7 +44,7 @@ module IrTypeFeedback
     return [] if ENV['BC2CPP_IR_BLOCK_TYPES'] == '0'
 
     insn = parent.instructions[index]
-    return [] unless %w[SENDB SSENDB].include?(insn.op) && insn.plain_fixed_argc?
+    return [] unless BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && insn.plain_fixed_argc?
 
     definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true)
     return [] unless definitions&.size == 1 && !definitions.first.entry?
@@ -106,7 +108,7 @@ module IrTypeFeedback
     child.instructions.each_with_index do |instruction, position|
       kind = if RETURN_OPS.include?(instruction.op) then 'block_return'
              elsif instruction.op == 'SETIV' then 'block_ivar_store'
-             elsif %w[SEND SEND0 SENDB].include?(instruction.op) then 'block_receiver'
+             elsif EXPLICIT_RECEIVER_SENDS.include?(instruction.op) then 'block_receiver'
              end
       next unless kind
 
@@ -126,7 +128,7 @@ module IrTypeFeedback
       exits << fact if kind == 'block_return'
     end
     if !exits.empty? && exits.none?(&:nil?) && Array(child.catch_handlers).empty? &&
-       child.instructions.none? { |instruction| %w[RETURN_BLK BREAK].include?(instruction.op) }
+       !BytecodeIR.for(child).op?('RETURN_BLK', 'BREAK')
       returned = BytecodeIR::Types::Fact.new(classes: exits.reduce(Set.new) { |set, fact| set | fact.classes },
                                           declared: exits.any?(&:declared?), contracts: exits.flat_map(&:contracts).uniq.sort)
       if binding && callback_inputs_fit
@@ -195,9 +197,7 @@ module IrTypeFeedback
 
       inferred_calls = {}
       if ENV['BC2CPP_IR_CALL_RESULTS'] != '0' && ctx.gen.respond_to?(:bytecode_ir_call_result_classes)
-        irep.instructions.each_with_index do |insn, index|
-          next unless BytecodeIR::Ops::SEND.include?(insn.op)
-
+        irep.each_with_op(*BytecodeIR::Ops::SEND) do |_insn, index|
           classes = ctx.gen.bytecode_ir_call_result_classes(irep, index)
           contextual = ctx.gen.bytecode_ir_context_results&.call_classes(irep, index) if ctx.gen.respond_to?(:bytecode_ir_context_results)
           classes = contextual if contextual && (!classes || contextual.subset?(classes))
@@ -232,9 +232,9 @@ module IrTypeFeedback
       irep.instructions.each_with_index do |insn, index|
         kind = if RETURN_OPS.include?(insn.op) then 'return'
                elsif insn.op == 'SETIV' then 'ivar_store'
-               elsif %w[SEND SEND0 SENDB].include?(insn.op) then 'receiver'
+               elsif EXPLICIT_RECEIVER_SENDS.include?(insn.op) then 'receiver'
                end
-        rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis, prepared: prepared)) if %w[SENDB SSENDB].include?(insn.op)
+        rows.concat(iterator_block_rows(ctx, definition, irep, index, analysis, prepared: prepared)) if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
         next unless kind
 
         refusal = {}

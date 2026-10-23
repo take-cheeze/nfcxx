@@ -17,6 +17,8 @@ module BytecodeIR
     CALL = (SEND | ['SUPER']).freeze
     # Every op whose callee frame starts at R(a) and may overwrite R(a) and above.
     CALLEE_FRAME = (CALL | %w[EXEC BLKCALL]).freeze
+    # The SEND and SSEND forms that take a block argument (trailing B); block producers are matched against these.
+    BLOCK_SEND = Set.new(SEND.select { |op| op.end_with?('B') }).freeze
 
     # Ops whose leading register is only READ and which may fall through (vm.c tests or raises on R(a));
     # SETUPVAR stores R(a) into an enclosing frame.
