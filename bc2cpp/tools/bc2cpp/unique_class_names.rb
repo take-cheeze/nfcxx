@@ -1,4 +1,6 @@
 # frozen_string_literal: true
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 require_relative 'native_expression_devirt'
 require_relative 'source_text'
 
@@ -124,7 +126,7 @@ module UniqueClassNames
     paths = bytecode_class_paths(ireps, root_label, modules)
     assigned = Set.new
     ireps.each_value do |irep|
-      irep.instructions.each do |insn|
+      BytecodeIR.for(irep).each_source do |insn|
         case insn.op
         when 'SETCONST' then assigned << insn.const_name
         when 'SETMCNST' then assigned << insn.mcnst_name
