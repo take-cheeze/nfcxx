@@ -60,6 +60,41 @@ short_text, _short_summary = ParamTrace.instrument(short, 'fixture', short_infos
 check.call('a function with no register line of its own gets no parameter hit',
            !short_text.include?('bc2cpp_param_hit_fixture(M, 0, it)'))
 
+# The receiver of a singleton method is a `self` site (kind self, index 0) ahead of its parameters, keyed by the
+# class object; an instance method has none. The site is not a positional parameter: x stays `req` index 1.
+singleton_src = <<~CPP
+  mrb_value Foo_make_impl(mrb_state* M, mrb_value self, mrb_value n) {
+    mrb_value r0 = self;
+    return n;
+  }
+  mrb_value Foo_plain_impl(mrb_state* M, mrb_value self, mrb_value n) {
+    mrb_value r0 = self;
+    return n;
+  }
+CPP
+singleton_infos = {
+  'Foo_make_impl' => { method: 'Foo.singleton#make', mand: 1, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call,
+                       ret: 'none', singleton: true },
+  'Foo_plain_impl' => { method: 'Foo#plain', mand: 1, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call,
+                        ret: 'none', singleton: false }
+}
+singleton_text, singleton_summary = ParamTrace.instrument(singleton_src, 'fixture', singleton_infos)
+self_sites = singleton_summary[:sites].select { |s| s[:kind] == 'self' }
+check.call('a singleton method gets one self site, keyed by the method and named self',
+           self_sites.size == 1 && self_sites.first[:method] == 'Foo.singleton#make' && self_sites.first[:index] == 0 &&
+             self_sites.first[:meta].split("\t").values_at(5, 6) == %w[self none:self])
+check.call('the self hit is recorded through bc2cpp_self_hit with the receiver before the parameter hit',
+           singleton_text.include?('bc2cpp_self_hit_fixture(M, 0, self);') &&
+             singleton_text.include?('bc2cpp_param_hit_fixture(M, 1, n);') &&
+             singleton_text.index('bc2cpp_self_hit_fixture(M, 0, self);') < singleton_text.index('bc2cpp_param_hit_fixture(M, 1, n);'))
+check.call('an instance method gets no self site and its parameter stays site 0',
+           singleton_summary[:sites].none? { |s| s[:method] == 'Foo#plain' && s[:kind] == 'self' } &&
+             singleton_text.include?('bc2cpp_param_hit_fixture(M, 2, n);'))
+check.call('the self hit helper keys the site by the class object and names non-classes as one bucket',
+           singleton_text.include?('static inline void bc2cpp_self_hit_fixture(mrb_state* M, unsigned site, mrb_value v)') &&
+             singleton_text.include?('(mrb_class_p(v) || mrb_module_p(v)) ? mrb_class_ptr(v) : NULL') &&
+             singleton_text.include?('"(non-class)"'))
+
 if failures.empty?
   puts 'param trace return check: PASS'
 else
