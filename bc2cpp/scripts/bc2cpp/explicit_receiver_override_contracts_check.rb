@@ -8,6 +8,8 @@
 #   * an override in a subclass joins its contract with the owner's (Symbol | Integer), never Symbol alone;
 #   * a send whose receivers do not override keeps the owner's contract;
 #   * a declared receiver with no closed-world bound (an outside subclass may exist) is untyped;
+#   * a name the program may undefine or remove (ClosedWorld#method_removed?) has no contract on an explicit receiver
+#     (section g), on either path; an unrelated removed name keeps the join;
 #   * a declared core class is a receiver too (CORE_ROOT, docs/bc2cpp-ir-feedback.md): Array#size keeps its core
 #     Integer with no program subclass, with a program subclass that does not override it, and is untyped when a
 #     subclass overrides it or the program defines it on Array itself. Object, with core subclasses, stays untyped.
@@ -50,17 +52,17 @@ NOT_REDEFINED = ->(_owner, _name) { false }
 
 # The fact of the send's result (R1 at the RETURN), on the prepared path and on the direct path.
 def results(applied_world, subclasses:, method_missing_classes: Set.new, superclass_of: HIERARCHY, core_redefined: NOT_REDEFINED,
-            sym: 'greet')
+            sym: 'greet', removed: nil)
   world = { superclass_of: superclass_of, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new }
   prepared = RbsSignatures::IrContracts.new(applied_world, **world, subclasses: subclasses,
                                                            method_missing_classes: method_missing_classes, core_redefined: core_redefined)
   prepared_refusal = {}
-  prepared_result = RbsSignatures.ir_types(applied_world, explicit_call_irep('use', sym), prepared: prepared)
+  prepared_result = RbsSignatures.ir_types(applied_world, explicit_call_irep('use', sym), prepared: prepared, removed: removed)
                                  .fact_at(2, '1', refusal: prepared_refusal)
   direct_refusal = {}
   direct_result = RbsSignatures.ir_types(applied_world, explicit_call_irep('use', sym), **world, subclasses: subclasses,
                                                                                  method_missing_classes: method_missing_classes,
-                                                                                 core_redefined: core_redefined)
+                                                                                 core_redefined: core_redefined, removed: removed)
                                 .fact_at(2, '1', refusal: direct_refusal)
   [prepared_result, direct_result, direct_refusal]
 end
@@ -150,6 +152,17 @@ _, open_core_direct, open_core_refusal = results(core_plain, subclasses: ->(_kla
 check('core root with no closed-world bound is untyped', declared_classes(open_core_direct).nil?)
 check('core root with no closed-world bound records call_receiver_unbounded:Array#size',
       open_core_refusal[:cause] == 'call_receiver_unbounded:Array#size')
+
+# (g) A removed name gets no declared contract on an explicit receiver, though every class has one (fixture (a)).
+# The refusal is the same on the prepared and direct paths; an unrelated removal keeps the join.
+removed_fact, removed_direct, removed_refusal = results(overridden, subclasses: bounded, removed: ->(name) { name == 'greet' })
+check('removed name: an explicit receiver is untyped on both paths', declared_classes(removed_fact).nil? && declared_classes(removed_direct).nil?)
+check('removed name: the explicit receiver records call_removed:greet', removed_refusal[:cause] == 'call_removed:greet')
+other_fact, other_direct, = results(overridden, subclasses: bounded, removed: ->(name) { name == 'other' })
+check('removed other name: greet keeps its join on an explicit receiver (Symbol | Integer)',
+      declared_classes(other_fact) == Set[:Symbol, :Integer] && declared_classes(other_direct) == Set[:Symbol, :Integer])
+computed_fact, computed_direct, = results(overridden, subclasses: bounded, removed: ->(_name) { true })
+check('computed removal refuses every explicit receiver name', declared_classes(computed_fact).nil? && declared_classes(computed_direct).nil?)
 
 if $failures.empty?
   puts 'explicit receiver override contract checks passed'
