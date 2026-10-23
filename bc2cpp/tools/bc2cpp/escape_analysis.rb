@@ -166,11 +166,12 @@ module EscapeAnalysis
 
     attr_reader :ireps, :aliases, :dynamic_sites, :reflective_sites
 
-    def initialize(ireps:, defs:, native_names: nil, aliases: {}, superclass_of: {}, included: {}, prepended: {},
-                   unknown_mixins: Set.new, modules: Set.new, struct_classes: Set.new, invisible: nil)
+    def initialize(ireps:, defs:, native_names: nil, native_owners: nil, aliases: {}, superclass_of: {}, included: {},
+                   prepended: {}, unknown_mixins: Set.new, modules: Set.new, struct_classes: Set.new, invisible: nil)
       @ireps = ireps
       @invisible = invisible
       @native_names = native_names
+      @native_owners = native_owners
       @superclass_of = superclass_of
       @included = included
       @prepended = prepended
@@ -207,6 +208,21 @@ module EscapeAnalysis
 
     def native_name?(name)
       @native_names.nil? || @native_names.include?(name)
+    end
+
+    # The ancestry of +klass+ (nil when the tables cannot place it), for native_free_on?.
+    def ancestry(klass)
+      mro(klass)
+    end
+
+    # Is +name+ provably free of native definitions on every class in +chain+ (an exact receiver's
+    # ancestry)? Only NativeOwnerMap's own proof counts: an unresolved owner refuses it. Core computed-name
+    # installs are trusted as the codegen trusts them: a Ruby dynamic install makes this world's
+    # dynamic_sites or invisible names, and defs_named then cannot enumerate the name at all.
+    def native_free_on?(name, chain)
+      return false if @native_owners.nil?
+
+      NativeOwnerMap.verdict(@native_owners, name, chain, core_dynamic_trusted: true).first == :proven
     end
 
     # Can the hierarchy tables place the class +name+?
@@ -419,8 +435,25 @@ module EscapeAnalysis
       return failed(:reflection) unless @world.reflective_sites.empty?
       # A frozen literal is one persistent object shared by every load, not a fresh creation.
       return failed(:frozen_literal) if insn.frozen_literal
+      # `new` runs the constructor with the new object as self, so the constructor must not keep it.
+      if %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
+        return failed(:initialize_unknown) unless value_class
+        return failed(:initialize_keeps_self) unless initialize_keeps_no_self?(value_class)
+      end
 
       flow(irep, { index => { insn.reg => true } }, created_at: index, value_class: CREATED_CLASS[insn.op] || value_class)
+    end
+
+    # Does the constructor of +klass+ keep no reference to self? BasicObject#initialize is mrb_do_nothing
+    # (3rd/mruby src/class.c, bob_rom_entries), which keeps neither its arguments nor self; any other
+    # native initialize on the ancestry refuses, and so does an opaque or installed one.
+    def initialize_keeps_no_self?(klass)
+      chain = @world.ancestry(klass)
+      list = chain && @world.defs_for('initialize', [klass], true)
+      return false if list.nil? || installer?(list) || !opaque_defs(list).empty?
+      return false if @world.native_name?('initialize') && !@world.native_free_on?('initialize', chain - ['BasicObject'])
+
+      list.none? { |d| captures?(d, [:self]) }
     end
 
     # true when +mdef+ may keep its +position+ ([:self], [:arg, k] or [:block]) or it cannot be shown.
@@ -718,7 +751,9 @@ module EscapeAnalysis
       reg_held = ->(r) { r && s.include?(r.to_s) }
       list = callees(run, i, name, recv, receiver_held: recv.nil? ? s.include?('0') : reg_held.call(recv))
       if recv.nil? ? s.include?('0') : reg_held.call(recv)
-        result = receiver_result(name, list)
+        # The exact class's ancestry, when callees resolved by it (the same test as in callees).
+        chain = recv && reg_held.call(recv) && run.value_class ? @world.ancestry(run.value_class) : nil
+        result = receiver_result(name, list, chain)
         return reject(run, insn, :send_receiver, s) unless result
 
         run.uses << Use.new(index: i, kind: :call, name: name, reg: recv.to_s) if recv && PROC_CALLS.include?(name)
@@ -769,12 +804,15 @@ module EscapeAnalysis
 
     # :fresh / :self when no definition in +list+ keeps the receiver, else nil. A native counts only
     # through NATIVE_RECEIVER_OK; the rest is each bytecode definition's [:self] summary.
-    def receiver_result(name, list)
+    # +chain+: the ancestry of an exact receiver class, when the caller knows it. A name with no native
+    # definition on that chain cannot be the native the by-name veto is for, so the veto does not apply.
+    def receiver_result(name, list, chain = nil)
       return nil if list.nil? || installer?(list)
 
       table = NATIVE_RECEIVER_OK[name]
       opaque = opaque_defs(list)
-      return nil if table.nil? && (list.empty? || @world.native_name?(name) || !opaque.empty?)
+      native_free = chain && @world.native_free_on?(name, chain)
+      return nil if table.nil? && (list.empty? || (@world.native_name?(name) && !native_free) || !opaque.empty?)
       return nil if list.any? { |d| !opaque.include?(d) && captures?(d, [:self]) }
 
       table || :fresh
