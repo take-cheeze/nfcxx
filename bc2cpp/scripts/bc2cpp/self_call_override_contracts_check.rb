@@ -10,7 +10,8 @@
 #     chain, and a core ancestor owner each leave the send untyped;
 #   * a name the program undefines or removes (ClosedWorld#method_removed?) is untyped;
 #   * a module owner is bounded by its includers: two bounded includers join, an unknown includer, a prepend, or
-#     no closed-world candidates leave the send untyped.
+#     no closed-world candidates leave the send untyped;
+#   * the inferred call result of a removed name (section g) is untyped on the direct and context-results paths.
 # The pipeline part (MRBC) runs the same shapes through the real analysis, with the declared contract isolated
 # (BC2CPP_IR_CALL_RESULTS=0), so the refusal is what the type reports.
 #
@@ -160,6 +161,87 @@ check('receivers of a bounded module are its includers and their descendants',
       RbsSignatures.self_receivers('M', lookup: ->(k) { { 'M' => %w[M], 'A' => %w[A M], 'B' => %w[B M] }.fetch(k, []) },
                                    subclasses: module_subclasses, method_missing_classes: Set.new,
                                    includer_candidates: module_candidates, prepended_modules: {}) == %w[A B])
+
+# (g) The inferred call result (BC2CPP_IR_CALL_RESULTS, the default) of a send of a removed name. The send of `greet`
+# takes the body join of its target, stubbed to Integer; the removal scan is the real ClosedWorld. Covers
+# CodeGen#bytecode_ir_call_result_classes and IrContextResults#dispatch.
+require_relative '../../tools/bc2cpp/codegen_return_classes'
+require_relative '../../tools/bc2cpp/closed_world'
+require_relative '../../tools/bc2cpp/ir_context_results'
+
+# A CodeGen over a real ClosedWorld. The return-class oracle answers the body join: Integer for every send.
+class InferredCallHarness < CodeGen
+  Oracle = Struct.new(:mask) do
+    def send_mask(_irep, _index, _insn, _state) = mask
+  end
+
+  def initialize(closed_world, body_join: NumericFlow::INT)
+    @foreign_method_names = Set.new
+    @native_results_ready = @rc_scoped_ready = true
+    @closed_world = closed_world
+    @oracle = Oracle.new(body_join)
+  end
+
+  def return_class_states(_irep) = { 1 => [] }
+  def return_class_table_oracle(_irep) = @oracle
+  # IrContextResults reads these at construction; no frozen tables or extra numeric classes in this world.
+  def frozen_tables_model = nil
+  def numeric_class_bit_count = 0
+end
+
+# A frame whose receiver is unknown falls back to bytecode_ir_call_result_classes, so the context path reaches the
+# direct result only through this stub.
+class InferredContextHarness < IrContextResults
+  def frame(_node, _body, _index, _insn, _state) = [NumericFlow::OTHER, [], {}]
+end
+
+def call_irep(name)
+  instructions = [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, 'SEND', "R1 :#{name} n=0"), insn(2, 'RETURN', 'R1')]
+  Irep.new(label: 'use', instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
+end
+
+# A body that undefines `name` with a literal name (LOADSYM before the send), or with a computed name (a MOVE).
+def remover_irep(label, load:)
+  instructions = [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, load, load == 'LOADSYM' ? 'R1 :greet' : 'R1 R2'),
+                  insn(2, 'SEND', 'R0 :undef_method n=1'), insn(3, 'RETURN', 'R0')]
+  Irep.new(label: label, instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
+end
+
+def removal_world(*ireps)
+  ClosedWorld.new(ireps: ireps.to_h { |irep| [irep.label, irep] }, registry: {}, class_decls: {}, walked: Set.new,
+                  native_paths: [], ruby_paths: [])
+end
+
+def direct_result(world, name, join: NumericFlow::INT)
+  InferredCallHarness.new(world, body_join: join).bytecode_ir_call_result_classes(call_irep(name), 1)
+end
+
+def context_result(world, name)
+  gen = InferredCallHarness.new(world)
+  InferredContextHarness.new(gen, {}).send(:dispatch, nil, call_irep(name), 1, call_irep(name).instructions[1], {})
+end
+
+literal_world = removal_world(call_irep('use'), remover_irep('zap', load: 'LOADSYM'))
+check('inferred: a call of a name removed in a subclass has no body-inferred result (direct path)',
+      direct_result(literal_world, 'greet').nil?)
+check('inferred: the context-results send of a removed name is unknown, not the body join',
+      context_result(literal_world, 'greet') == NumericFlow::OTHER)
+
+plain_world = removal_world(call_irep('use'))
+check('inferred: with no removal the body join stays (Integer, direct path)',
+      direct_result(plain_world, 'greet') == Set[:Integer])
+check('inferred: with no removal the body join stays (Integer, context path)',
+      context_result(plain_world, 'greet') == NumericFlow::INT)
+
+# The literal removal above names `greet`: another name keeps its join.
+check('inferred: an unrelated removal keeps the join (Integer) for another name',
+      direct_result(literal_world, 'other') == Set[:Integer] && context_result(literal_world, 'other') == NumericFlow::INT)
+
+computed_world = removal_world(call_irep('use'), remover_irep('zap', load: 'MOVE'))
+check('inferred: a computed removal refuses every name (greet)', direct_result(computed_world, 'greet').nil?)
+check('inferred: a computed removal refuses every name (any other name)', direct_result(computed_world, 'other').nil?)
+check('inferred: a computed removal refuses the context-results send too',
+      context_result(computed_world, 'greet') == NumericFlow::OTHER)
 
 # Pipeline part: the same shapes through the real analysis, where the closed world bounds the receivers (needs MRBC).
 unless ENV['MRBC']

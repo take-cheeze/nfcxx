@@ -550,12 +550,17 @@ class CodeGen
     @core_new_exact[klass] = stable_standard_constructor_class?(klass) ? true : false
   end
 
+  # The removed-name scan (ClosedWorld#method_removed?) that refuses a self-call's declared contract
+  # (RbsSignatures.ir_types). A body-inferred result is no proof either: the body may not be the one that runs.
+  def bytecode_ir_name_removed?(name) = @closed_world.method_removed?(name.to_s)
+
   # IR callers consume only complete, unguarded facts from the settled oracles.
   def bytecode_ir_call_result_classes(irep, index)
     return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
 
     insn = irep.instructions[index]
     return nil unless BytecodeIR::Ops::SEND.include?(insn.op)
+    return nil if bytecode_ir_name_removed?(insn.sym)
 
     state = return_class_states(irep)&.[](index)
     return nil unless state

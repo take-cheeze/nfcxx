@@ -438,6 +438,8 @@ class IrContextResults
 
     receiver, arguments, keywords = input
     return 0 if receiver == 0 || arguments.any?(&:zero?) || keywords.values.any?(&:zero?)
+    # Unknown, not the body's join: a removed name's body may not be the one that runs (CodeGen#bytecode_ir_name_removed?).
+    return NumericFlow::OTHER if @gen.bytecode_ir_name_removed?(insn.sym)
 
     receivers = classes(receiver)
     unless receivers && receivers.size <= MAX_CLASSES
