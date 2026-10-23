@@ -295,7 +295,7 @@ module RbsRecordTypes
     return scanner_class if scanner_class
 
     insn = irep.instructions[index]
-    if %w[SEND SEND0 SENDB].include?(insn.op) && insn.sym == 'new'
+    if BytecodeIR::Ops::COUNTED_SEND.include?(insn.op) && insn.sym == 'new'
       klass = trace_new_target(irep, index + 1, insn.reg, nil, 0, nil, owner: ctx[:owner_of][irep.label],
                                                                        registry: ctx[:registry],
                                                                        container_constants: ctx[:container_constants],
@@ -315,7 +315,7 @@ module RbsRecordTypes
     when 'LOADTRUE' then 'TrueClass'
     when 'LOADFALSE' then 'FalseClass'
     when 'LOADNIL' then 'NilClass'
-    when 'RANGE_INC', 'RANGE_EXC' then 'Range'
+    when *BytecodeIR::Ops::RANGE_BUILD then 'Range'
     when 'LOADL'
       entry = irep.pool[insn.pool_index]
       entry.is_a?(Hash) && entry[:type] == :float ? 'Float' : (entry.is_a?(Hash) ? 'Integer' : nil)
@@ -558,7 +558,7 @@ module RbsRecordTypes
     # Does the send read a register holding the Hash? A self send (SSEND*) only writes self into its leading
     # register, so the Hash there is dropped, not passed.
     def held_call?(insn, state, lead)
-      self_send = insn.op.start_with?('SS')
+      self_send = BytecodeIR::Ops::SELF_SEND.include?(insn.op)
       hi = read_span(insn, lead)
       state.any? { |x| x >= lead && x <= hi && !(self_send && x == lead) }
     end
@@ -568,8 +568,8 @@ module RbsRecordTypes
     # those arguments and the callee's parameter, scanned as one more alias of the Hash, passes these same
     # rules (its key writes join the checked stores). Anything else keeps the base rule (an escape).
     def call_step(insn, state, lead, held_args)
-      return escape("receiver of #{insn.sym}") if !insn.op.start_with?('SS') && state.include?(lead)
-      return escape("passed to #{insn.sym} with a block") if insn.op.end_with?('B')
+      return escape("receiver of #{insn.sym}") if !BytecodeIR::Ops::SELF_SEND.include?(insn.op) && state.include?(lead)
+      return escape("passed to #{insn.sym} with a block") if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
       return escape("passed to #{insn.sym} past the scan depth") if @depth >= INTERPROC_DEPTH
 
       world = @escape_world or return escape("passed to #{insn.sym} (no escape analysis world)")
@@ -596,11 +596,11 @@ module RbsRecordTypes
     # 0-based positional argument indices that hold the Hash, or nil when it sits anywhere else in the window
     # (a splat, a keyword, the block) or the argument layout is not a plain count.
     def held_positions(insn, state, lead)
-      n = %w[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
+      n = BytecodeIR::Ops::ZERO_ARG_SEND.include?(insn.op) ? 0 : insn.argc
       spec = insn.argc_operand
       return nil if n.nil? || (spec && (spec[1].nil? || spec[1].to_i.positive?))
 
-      block = insn.op.end_with?('B') ? lead + n + 1 : nil
+      block = BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) ? lead + n + 1 : nil
       return nil if block && state.include?(block)
 
       found = (1..n).select { |j| state.include?(lead + j) }.map { |j| j - 1 }

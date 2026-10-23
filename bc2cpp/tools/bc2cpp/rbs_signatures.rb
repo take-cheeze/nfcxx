@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'annotations'
+require_relative 'bytecode_ir_ops'
 require_relative 'core_fact_sigs'
 require_relative 'native_sigs'
 require_relative 'rbs_optional_hint'
@@ -48,6 +49,8 @@ module RbsSignatures
   Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, :supers, keyword_init: true)
   # SUBTREE_DISPATCH: a `class C < S` declaration, checked against the program's own superclass.
   SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
+  # The self sends that take no block: a breaking block can replace the return type of only these.
+  SELF_SENDS_NO_BLOCK = ((BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND) & BytecodeIR::Ops::SELF_SEND).freeze
 
 
   module_function
@@ -362,8 +365,8 @@ module RbsSignatures
             [register, type.value_classes] if type.value_classes
           end.to_h.freeze
         end
-        runtime_keywords = runtime.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.to_set
-        runtime_optional = runtime.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KEY_P' }.to_set
+        runtime_keywords = BytecodeIR.for(runtime).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.to_set
+        runtime_optional = BytecodeIR.for(runtime).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.to_set
         if runtime_keywords == (sig.keywords || {}).keys.to_set && runtime_keywords - runtime_optional == (sig.required_keywords || Set.new)
           ap.ir_keyword_types[d.irep] = (sig.keywords || {}).filter_map { |name, type| [name, type.value_classes] if type.value_classes }.to_h.freeze
         end
@@ -420,10 +423,8 @@ module RbsSignatures
     end
     named_returns = prepared ? prepared.named_returns : applied.ir_named_returns.transform_keys { |klass, name| [klass.dup.freeze, name.dup.freeze].freeze }.freeze
     calls = {}
-    irep.instructions.each_with_index do |insn, index|
-      # A breaking block can replace the normal return type.
-      next unless %w[SSEND SSEND0].include?(insn.op)
-
+    # A breaking block can replace the normal return type.
+    irep.each_with_op(*SELF_SENDS_NO_BLOCK) do |insn, index|
       target = prepared ? prepared.target(owner, insn.sym.to_s) : owners.find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
       types = named_returns[[target, insn.sym.to_s]] if target
       calls[index] = types == :self ? Set[owner.to_sym].freeze : types if types

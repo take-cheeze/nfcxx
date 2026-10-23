@@ -110,15 +110,11 @@ module DeclaredConstants
     bindings = Hash.new { |h, k| h[k] = [] }
     class_named = Set.new
     ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
-        case insn.op
-        when 'SETCONST', 'SETMCNST'
-          bare = insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name
-          bindings[bare] << [irep, idx, insn, qualified_at[[irep.label, idx]]] if bare
-        when 'CLASS', 'MODULE'
-          class_named << insn.sym_token
-        end
+      irep.each_with_op('SETCONST', 'SETMCNST') do |insn, idx|
+        bare = insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name
+        bindings[bare] << [irep, idx, insn, qualified_at[[irep.label, idx]]] if bare
       end
+      irep.each_with_op('CLASS', 'MODULE') { |insn, _idx| class_named << insn.sym_token }
     end
     # Without the outside-world scan every name may be bound elsewhere: the evaluator then reads literals only.
     blocked = poisoned ? poisoned | class_named : nil
@@ -352,7 +348,7 @@ module DeclaredConstants
     return false unless call&.op == 'SEND0' && call.sym == 'to_a'
 
     k, range = dominating_writer(irep, j, recv)
-    return false unless range && %w[RANGE_INC RANGE_EXC].include?(range.op) && range.reg
+    return false unless range && BytecodeIR::Ops::RANGE_BUILD.include?(range.op) && range.reg
 
     lo = literal_kind(irep, k, range.reg)
     hi = literal_kind(irep, k, (range.reg.to_i + 1).to_s)
@@ -497,7 +493,6 @@ module DeclaredConstants
   # binding of that name: all must evaluate, and none may be bound outside the bytecode (`blocked`). An interval, not a
   # value, so `TEXT_COLOR` bound to 0 in one class and 1 in another still reads as a Fixnum.
   class Evaluator
-    OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
     MAX_DEPTH = 16
     MIN = -1_073_741_824 # CodeGen::LOADI_FIXNUM_MIN / MAX: the narrowest Fixnum of any shipped target
     MAX = 1_073_741_823
@@ -551,7 +546,7 @@ module DeclaredConstants
         case insn.op
         when 'GETCONST' then name_value(insn.const_name, visiting)
         when 'GETMCNST' then name_value(insn.mcnst_name, visiting)
-        when *OPS then arithmetic(irep, j, insn, cur, visiting, depth)
+        when *BytecodeIR::Ops::INT_ARITH then arithmetic(irep, j, insn, cur, visiting, depth)
         end
       end
     end
@@ -560,7 +555,7 @@ module DeclaredConstants
     # never called; DIV is Integer#/ (floored), and a divisor interval holding 0 is refused (ZeroDivisionError).
     def arithmetic(irep, j, insn, cur, visiting, depth)
       left = value(irep, j, cur, visiting, depth + 1)
-      right = if %w[ADDI SUBI].include?(insn.op)
+      right = if BytecodeIR::Ops::IMM_ARITH.include?(insn.op)
                 (i = insn.imm_operand&.to_i) && [i, i]
               elsif insn.regs[1]
                 value(irep, j, insn.regs[1], visiting, depth + 1)
@@ -630,6 +625,9 @@ module DeclaredConstants
     end
   end
 
+  # SEND and SEND0 without a block: the sends an IO.open call can be.
+  BLOCKLESS_SEND = (BytecodeIR::Ops::COUNTED_SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
+
   # IO_OPEN (report-level): the value at +idx+ is a blockless `IO.open(...)`, on every path. The call is SEND or SEND0
   # (a SENDB carries a block and is not this), named `open`, with the constant IO as its receiver. mruby-io's IO.open
   # answers `self.new(*args)` when there is no block (io.rb: `return io unless block`), so it is an IO when io_open_safe
@@ -638,7 +636,7 @@ module DeclaredConstants
     return false unless io_open_safe
 
     BytecodeIR.all_writers_reaching?(irep, idx, reg) do |j, insn|
-      %w[SEND SEND0].include?(insn.op) && insn.sym == 'open' && io_constant_receiver?(irep, j, insn.reg)
+      BLOCKLESS_SEND.include?(insn.op) && insn.sym == 'open' && io_constant_receiver?(irep, j, insn.reg)
     end
   end
 

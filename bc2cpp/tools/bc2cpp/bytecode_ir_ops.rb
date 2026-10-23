@@ -17,6 +17,16 @@ module BytecodeIR
     CALL = (SEND | ['SUPER']).freeze
     # Every op whose callee frame starts at R(a) and may overwrite R(a) and above.
     CALLEE_FRAME = (CALL | %w[EXEC BLKCALL]).freeze
+    # The self-receiver forms: R(a) is overwritten with self and no register receiver is passed.
+    SELF_SEND = Set['SSEND', 'SSEND0', 'SSENDB', 'SSENDV', 'SSENDVB'].freeze
+    # The sends that pass a block (the B forms).
+    BLOCK_SEND = Set['SENDB', 'SSENDB', 'SENDVB', 'SSENDVB'].freeze
+    # The plain sends (SEND, SEND0, SENDB): arguments are a count, not a splat array as in SENDV.
+    COUNTED_SEND = (SEND - SELF_SEND).freeze
+    # Every send whose receiver is a register (the name prefix SEND, splat forms included).
+    REGISTER_RECEIVER_SEND = (SEND_FAMILY - SELF_SEND).freeze
+    # The zero-argument forms of SEND and SSEND.
+    ZERO_ARG_SEND = Set['SEND0', 'SSEND0'].freeze
 
     # Ops whose leading register is only READ and which may fall through (vm.c tests or raises on R(a));
     # SETUPVAR stores R(a) into an enclosing frame.
@@ -24,6 +34,12 @@ module BytecodeIR
     # READS_LEAD plus the frame exits that return R(a): every op whose leading register operand is read and never
     # written, so a backward writer walk may step over it.
     LEAD_READ_ONLY = (READS_LEAD | %w[RETURN RETURN_BLK BREAK]).freeze
+
+    # A Range built from two endpoint registers.
+    RANGE_BUILD = Set['RANGE_INC', 'RANGE_EXC'].freeze
+    # Integer arithmetic with vm.c's integer arms; the I forms take an immediate second operand.
+    INT_ARITH = Set['ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI'].freeze
+    IMM_ARITH = Set['ADDI', 'SUBI'].freeze
 
     # Ops that leave the frame.
     FRAME_EXIT = Set['RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'].freeze
