@@ -7,6 +7,7 @@ require_relative 'annotations'
 require_relative 'annotation_contradictions'
 require_relative 'ir_type_feedback'
 require_relative 'ir_ivar_types'
+require_relative 'ivar_candidates'
 
 # TYPE_CHECK: the types bc2cpp's whole-program inference settled on, as data.
 #
@@ -461,6 +462,7 @@ module TypeFacts
     end
     bucket_of = {}
     ctx.poison_buckets.each { |bucket, names| names.each { |n| bucket_of[n] = bucket } }
+    candidates = IvarCandidates.index(ctx, gen)
     rows = []
     ctx.ivar_layout.each do |owner, ivars|
       ivars.each do |name, embed|
@@ -470,7 +472,7 @@ module TypeFacts
         row['file'], row['line'], row['col'] = loc ? [loc['file'], loc['line'], loc['col']] : [nil, 0, 1]
         row['scope'] = scope_of(loc && loc['file'])
         row['embedded'] = INT_TYPES[embed] if INT_TYPES.key?(embed)
-        cls = (ctx.class_layout_raw[owner] || {})[name]
+        cls = IvarCandidates.type(candidates, gen, owner, name)
         if cls && cls != ClassLayout::UNKNOWN
           row['type'] = cls.to_s
           row['source'] = (ctx.signature_origins && ctx.signature_origins[[owner, "@#{name}"]]) || 'inferred:class-layout'
