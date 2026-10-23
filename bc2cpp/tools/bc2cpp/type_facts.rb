@@ -515,7 +515,7 @@ module TypeFacts
           row['type'] = cls.to_s
           row['source'] = (ctx.signature_origins && ctx.signature_origins[[owner, "@#{name}"]]) || 'inferred:class-layout'
         elsif row['embedded']
-          row['type'] = row['embedded']
+          row['type'] = IvarCandidates.with_nil(candidates, gen, owner, name, row['embedded'])
           row['source'] = 'inferred:ivar-layout'
         end
         if row['type'].nil? && (seed = ctx.signature_ivars && ctx.signature_ivars[[owner, "@#{name}"]]) &&

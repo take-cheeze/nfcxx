@@ -75,7 +75,8 @@ end
 # Real Irep and Insn objects, so BytecodeIR::Program answers which reads are store-first. A method is
 # { label => [owner, [insn, ...], found, catch_handlers, definer_label] }; definer_label is the method whose body
 # the irep belongs to (its own label unless the irep is a block of that method).
-def real_candidate(methods, gen, owner, name)
+# The index over real instructions (see real_candidate). Its nil answers come from the same per-path analysis.
+def real_index(methods, gen)
   ireps = {}
   owners = {}
   store_log = {}
@@ -87,8 +88,11 @@ def real_candidate(methods, gen, owner, name)
   ctx = Struct.new(:ireps, :store_log).new(ireps, store_log)
   gen.owner_of.merge!(owners)
   real_nil_write = ->(irep, idx, _reg) { idx.positive? && irep.instructions[idx - 1].op == 'LOADNIL' }
-  index = IvarCandidates.index(ctx, gen, nil_write: real_nil_write)
-  IvarCandidates.type(index, gen, owner, name)
+  IvarCandidates.index(ctx, gen, nil_write: real_nil_write)
+end
+
+def real_candidate(methods, gen, owner, name)
+  IvarCandidates.type(real_index(methods, gen), gen, owner, name)
 end
 
 set = lambda { |reg| StubInsn.new('SETIV', :x, [reg]) }
@@ -230,6 +234,24 @@ check.call('a computed-name send keeps nil on the store-first read',
   check.call("#{label} keeps nil on the store-first read",
              real_candidate(store_program.call(extra), gen, 'Foo', 'x') == 'Bar | nil')
 end
+
+# The embedded layout (IvarLayout) types a slot by every store, so the nil a read before the first store sees is added
+# by with_nil on top of that type. These use the same per-path reads as the class-layout candidates above.
+gen = FakeGen.new
+check.call('an embedded type read before its first store adds nil',
+           IvarCandidates.with_nil(real_index(read_first, gen), gen, 'Foo', 'x', 'Integer') == 'Integer | nil')
+gen = FakeGen.new
+check.call('an embedded type stored before every read keeps its type',
+           IvarCandidates.with_nil(real_index(store_first, gen), gen, 'Foo', 'x', 'Integer') == 'Integer')
+gen = FakeGen.new
+check.call('an embedded bool read after a conditional store adds nil',
+           IvarCandidates.with_nil(real_index(conditional, gen), gen, 'Foo', 'x', 'bool') == 'bool | nil')
+gen = FakeGen.new
+check.call('an embedded type that already admits nil is not widened again',
+           IvarCandidates.with_nil(real_index(read_first, gen), gen, 'Foo', 'x', 'Integer?') == 'Integer?')
+gen = FakeGen.new(assured: { ['Foo', 'x'] => true })
+check.call('an embedded type read only in an assured owner keeps its type',
+           IvarCandidates.with_nil(real_index(read_first, gen), gen, 'Foo', 'x', 'Integer') == 'Integer')
 
 if ENV['MRBC']
   source = <<~RUBY
