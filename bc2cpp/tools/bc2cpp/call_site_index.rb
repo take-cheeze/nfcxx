@@ -57,29 +57,97 @@ class CallSiteIndex
       by_name['each'] << [irep, idx, dest + 1, 0]
       return
     end
-    target = enum_target(irep, idx, insn, dest + 1)
-    by_name[target || UNKNOWN_TARGET] << [irep, idx, dest + 1, forwarded]
+    targets = enum_targets(irep, idx, insn, dest + 1)
+    (targets || [UNKNOWN_TARGET]).each do |target|
+      by_name[target] << [irep, idx, dest + 1, forwarded]
+    end
   end
 
-  # The literal method name of the site, or nil. Only a straight-line LOADSYM counts: a jump landing between
-  # the symbol and the send (`cond ? :a : :b`) leaves several writers, of which a backward walk sees one.
+  # A singleton name for consumers whose contract cannot represent alternatives.
   def self.enum_target(irep, idx, insn, reg)
-    packed = insn.n_spec == '*'
-    # Packed: `[:meth, ...] + *args` is LOADSYM R; ARRAY R n; ARYCAT/ARYPUSH R ...
-    writer = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |w, i, _r|
-      case w.op
-      when 'LOADSYM' then ([w, i] if w.sym)
-      when 'ARYCAT', 'ARYPUSH' then packed ? IrepScans::KEEP : nil
-      when 'ARRAY' then packed && w.uint_operand.to_i.positive? ? IrepScans::KEEP : nil
+    names = enum_targets(irep, idx, insn, reg)
+    names.first if names && names.size == 1
+  end
+
+  # Every possible literal Symbol name, or nil when any reaching value is unknown.
+  def self.enum_targets(irep, idx, insn, reg)
+    return packed_enum_targets(irep, idx, reg.to_s) if insn.n_spec == '*'
+
+    symbol_targets(irep, idx, reg)
+  end
+
+  def self.symbol_targets(irep, idx, reg)
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg.to_s)
+    return nil unless writers
+
+    names = writers.map do |index|
+      writer = irep.instructions[index]
+      case writer.op
+      when 'LOADSYM' then writer.sym
+      when 'SYMBOL'
+        value = irep.pool[writer.pool_index]
+        value if value.is_a?(String)
       end
     end
-    return nil unless writer.is_a?(Array)
+    names.all?(String) ? names.uniq : nil
+  end
 
-    sym_insn, sym_index = writer
-    # The name is the LOADSYM's on every path only if nothing enters the run after it, a jump or a catch handler.
-    return nil unless BytecodeIR.for(irep).linear_corridor?(sym_index, idx, include_handlers: true)
+  # A fresh nonempty prefix retains its head across append instructions only while
+  # no alias can expose it (including a closure read during ARYCAT's to_a callback).
+  def self.packed_enum_targets(irep, idx, reg)
+    program = BytecodeIR.for(irep)
+    at = idx
+    origin = nil
+    idx.times do
+      writers = BytecodeIR.reaching_definitions(irep, at, reg, follow_moves: false, through_handlers: true)
+      return nil unless writers && writers.size == 1 && !writers.first.entry?
 
-    sym_insn.sym
+      writer = writers.first.index
+      source = irep.instructions[writer]
+      if source.op == 'ARRAY'
+        origin = writer
+        break
+      end
+      return nil unless %w[ARYCAT ARYPUSH].include?(source.op) && source.reg == reg
+
+      at = writer
+    end
+    return nil unless origin && program.linear_corridor?(origin, idx, include_handlers: true)
+
+    literal = program.container_literal(origin)
+    return nil unless literal && literal.kind == :array && literal.count.positive?
+    return nil if packed_register_captured?(irep, reg)
+    return nil unless (origin + 1...idx).all? do |index|
+      source = irep.instructions[index]
+      if %w[ARYCAT ARYPUSH].include?(source.op)
+        source.reg == reg
+      elsif source.op == 'NOP'
+        true
+      else
+        quiet = %w[MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE STRING SYMBOL GETUPVAR].include?(source.op) ||
+                BytecodeIR::Ops::LOADI_OPS.include?(source.op)
+        quiet && !source.regs.include?(reg)
+      end
+    end
+
+    symbol_targets(irep, origin, literal.base.to_s)
+  end
+
+  def self.packed_register_captured?(irep, reg)
+    return false if Array(irep.reps).empty?
+    return true unless irep.tree
+
+    captured = false
+    lookup = ->(label) { irep.tree.fetch(label) }
+    Array(irep.reps).each do |label|
+      BytecodeIR.each_nested_insn(lookup.call(label), lookup) do |source, depth|
+        next unless %w[GETUPVAR SETUPVAR].include?(source.op)
+
+        index, level = source.upvar_ref
+        captured = true if index.to_s == reg && level == depth
+      end
+    end
+    captured
   end
 
   # irep label -> name of its nearest enclosing `def` body (the irep itself when it is one), from the
