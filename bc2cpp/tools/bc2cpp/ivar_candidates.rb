@@ -2,7 +2,6 @@
 
 require 'set'
 require_relative 'bytecode_ir'
-require_relative 'bytecode_ir_containers'
 require_relative 'class_layout'
 
 # IVAR_CANDIDATE: the type type_facts writes for a ClassLayout-traced ivar. Every member of the numeric family shares
@@ -66,7 +65,7 @@ module IvarCandidates
   def reflective_access(ireps)
     names = Set.new
     ireps.each_value do |irep|
-      BytecodeIR.for(irep).each_source do |insn, idx|
+      irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'LOADSYM'
           return ALL_NAMES if REFLECTIVE_NAMES.include?(insn.sym.to_s)
@@ -111,7 +110,7 @@ module IvarCandidates
       defs = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + offset).to_s, through_handlers: true)
       return nil unless defs
 
-      writers = defs.map { |df| df.entry? ? nil : BytecodeIR.for(irep).source_at(df.index) }
+      writers = defs.map { |df| df.entry? ? nil : irep.instructions[df.index] }
       return nil unless writers.all? { |writer| writer&.op == 'LOADSYM' }
 
       syms = writers.map { |writer| writer.sym.to_s }.uniq
