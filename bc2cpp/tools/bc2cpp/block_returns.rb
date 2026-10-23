@@ -4,6 +4,7 @@ require 'digest'
 require 'set'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
+require_relative 'bytecode_ir_containers'
 require_relative 'block_self'
 require_relative 'native_block_returns_reviewed'
 require_relative 'native_sigs'
@@ -125,14 +126,14 @@ module BlockReturns
     proc_def = lambda do |df|
       next df.reg.to_s == blk if df.entry?
 
-      irep.instructions[df.index].op == 'BLKPUSH'
+      BytecodeIR.for(irep).source_at(df.index).op == 'BLKPUSH'
     end
     holds_proc = lambda do |idx, reg|
       defs = definitions(irep, program, idx, reg)
       defs && !defs.empty? && defs.all? { |df| proc_def.call(df) }
     end
     reachable(irep, program, holds_proc).sort.each do |idx|
-      insn = irep.instructions[idx]
+      insn = BytecodeIR.for(irep).source_at(idx)
       line = "line #{insn.lineno}"
       case insn.op
       when 'BLKCALL'
@@ -186,9 +187,9 @@ module BlockReturns
     handlers = program.handler_edges
     until stack.empty?
       idx = stack.pop
-      next if idx.nil? || idx >= irep.instructions.size || !seen.add?(idx)
+      next if idx.nil? || idx >= BytecodeIR.for(irep).size || !seen.add?(idx)
 
-      insn = irep.instructions[idx]
+      insn = BytecodeIR.for(irep).source_at(idx)
       succ = program.successor_lists[idx]
       target = insn.branch_target && program.address_to_index[insn.branch_target]
       if BytecodeIR::CONDITIONAL_BRANCHES.include?(insn.op) && target && holds_proc.call(idx, insn.reg)
@@ -215,7 +216,7 @@ module BlockReturns
 
         return "returns R#{df.reg} as passed in"
       end
-      writer = irep.instructions[df.index]
+      writer = BytecodeIR.for(irep).source_at(df.index)
       case entry.kind
       when :self
         next if writer.op == 'LOADSELF'

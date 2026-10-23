@@ -2,6 +2,7 @@
 
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_receivers'
+require_relative 'bytecode_ir_containers'
 require_relative 'native_constructor_sigs'
 require_relative 'compiled_gems'
 require 'prism'
@@ -1139,7 +1140,7 @@ def assigned_from_new_send?(irep, idx, reg)
 end
 
 def container_phi_merge(irep, at, reg)
-  lit = irep.instructions[at + 1]
+  lit = BytecodeIR.for(irep).source_at(at + 1)
   return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   # The literal arm and the taken edge meet at the jump's target only in this shape. The definitions reaching that
@@ -1151,7 +1152,7 @@ def container_phi_merge(irep, at, reg)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
   agree = defs.all? do |d|
-    case irep.instructions[d.index].op
+    case BytecodeIR.for(irep).source_at(d.index).op
     when 'LOADNIL' then true
     when 'ARRAY', 'ARRAY2' then lit_class == 'Array'
     when 'HASH' then lit_class == 'Hash'
@@ -1200,7 +1201,7 @@ end
 def literal_container_definition_class(irep, definition, path)
   return nil if definition.entry?
 
-  insn = irep.instructions[definition.index]
+  insn = BytecodeIR.for(irep).source_at(definition.index)
   return nil unless insn.reg == definition.reg
 
   case insn.op
@@ -1248,7 +1249,7 @@ end
 def eqq_literal_of(irep, definition)
   return nil if definition.entry?
 
-  insn = irep.instructions[definition.index]
+  insn = BytecodeIR.for(irep).source_at(definition.index)
   return nil unless insn.reg == definition.reg
 
   case insn.op

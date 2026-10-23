@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 
 # Argument shapes and block/lambda/def fallback safety of an irep.
 
@@ -55,7 +56,7 @@ def keyword_join_shape?(irep, name)
   _mand, _opt, _rest, _post, kw, kwrest = irep.enter.enter_fields.map(&:to_i)
   return false unless kw.positive? && kwrest.zero?
 
-  irep.instructions.any? { |insn| insn.op == 'KARG' && insn.sym.to_s == name }
+  BytecodeIR.for(irep).instructions_with_op('KARG').any? { |insn| insn.sym.to_s == name }
 end
 
 # KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: can this def receive `nk`
@@ -291,6 +292,15 @@ end
 # register: an end-anchored `/(\d+)\s*$/` returns nil there, and `nil.to_i` is
 # a silent `goto L0`.
 
+# The +count+ source instructions from +start+, or nil unless all of them exist. Array#[start, count] clamps at the
+# end instead, so a short run would reach the callers' JMP-table checks as a shorter list.
+def instruction_run(irep, start, count)
+  program = BytecodeIR.for(irep)
+  return nil unless start >= 0 && start + count <= program.size
+
+  (start...start + count).map { |index| program.source_at(index) }
+end
+
 def optional_arg_table(irep)
   enter = irep.enter
   return [0, nil, nil] unless enter
@@ -303,8 +313,8 @@ def optional_arg_table(irep)
   return [0, nil, nil] unless opt.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
 
   enter_idx = irep.enter_index
-  jmps = irep.instructions[enter_idx + 1, opt + 1]
-  return [opt, nil, nil] unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
+  jmps = instruction_run(irep, enter_idx + 1, opt + 1)
+  return [opt, nil, nil] unless jmps && jmps.all? { |i| i.op == 'JMP' }
 
   [opt, jmps.map(&:addr), jmps.map { |i| i.jmp_addr }]
 end
@@ -319,8 +329,8 @@ def optional_block_arg_table(irep)
   _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
   return nil unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.positive?
 
-  jmps = irep.instructions[irep.enter_index + 1, opt + 1]
-  return nil unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
+  jmps = instruction_run(irep, irep.enter_index + 1, opt + 1)
+  return nil unless jmps && jmps.all? { |i| i.op == 'JMP' }
 
   [opt, jmps.map(&:addr), jmps.map(&:jmp_addr)]
 end
