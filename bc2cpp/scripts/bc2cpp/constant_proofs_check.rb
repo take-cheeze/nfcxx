@@ -252,5 +252,8 @@ check.call('a loop back-edge write refuses the straight-line receiver constant',
            receiver_at_send.call("def probe(c)\n  x = Alpha\n  while c\n    x.foo\n    x = Beta\n  end\nend\n") == [nil, nil])
 check.call('a straight-line receiver constant still resolves',
            receiver_at_send.call("def probe(c)\n  x = Alpha\n  x.foo\nend\n") == ['Alpha', 'Alpha'])
+# A send inside a rescue range must still resolve: the reaching-definition query runs through handler edges.
+check.call('a receiver constant inside a rescue range still resolves',
+           receiver_at_send.call("def probe(c)\n  x = Alpha\n  begin\n    x.foo\n  rescue StandardError\n    nil\n  end\nend\n").first == 'Alpha')
 
 suite.finish!

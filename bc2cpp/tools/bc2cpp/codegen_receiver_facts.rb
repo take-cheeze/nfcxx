@@ -313,7 +313,8 @@ class CodeGen
     return nil if branch_edges.any? { |source, target| source < ref.root_index && target > ref.root_index && target <= idx }
     # A loop back-edge from after the send can carry a second write of dest_reg into it, which the backward walk
     # cannot see; a single reaching definition (following back-edges) is the only write that can be the receiver.
-    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg.to_s)
+    # Handler edges are crossed: without through_handlers a send inside a rescue/ensure range is refused (:query_guarded).
+    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg.to_s, through_handlers: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     ref.name && ([ref.name] + ref.segments).join('::')
