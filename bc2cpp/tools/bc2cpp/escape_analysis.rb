@@ -103,6 +103,7 @@ module EscapeAnalysis
                     3rd/mruby/mrbgems/mruby-binding/src/binding.c 3rd/mruby/mrbgems/mruby-method/src/method.c
                     3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c 3rd/mruby/mrbgems/mruby-task/src/task.c
                     3rd/mruby/mrbgems/mruby-socket/src/socket.c],
+    'raise' => %w[3rd/mruby/src/kernel.c],
     'to_s' => %w[3rd/mruby/src/numeric.c 3rd/mruby/src/hash.c 3rd/mruby/src/object.c 3rd/mruby/src/array.c
                  3rd/mruby/src/kernel.c 3rd/mruby/src/class.c 3rd/mruby/src/range.c 3rd/mruby/src/string.c
                  3rd/mruby/src/error.c 3rd/mruby/src/symbol.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
@@ -123,7 +124,10 @@ module EscapeAnalysis
     '<<' => :self, 'push' => :self, 'unshift' => :self,
     'class' => :fresh, 'is_a?' => :fresh, 'kind_of?' => :fresh, 'instance_of?' => :fresh, 'frozen?' => :fresh,
     'respond_to?' => :fresh, 'respond_to_missing?' => :fresh, 'hash' => :fresh,
-    'instance_variable_get' => :fresh, 'inspect' => :fresh, 'to_s' => :self
+    'instance_variable_get' => :fresh, 'inspect' => :fresh, 'to_s' => :self,
+    # mrb_f_raise (kernel.c) reads only its arguments and never returns self. Its arguments are kept (the
+    # exception and its message), so raise has no NATIVE_ARG_OK entry.
+    'raise' => :fresh
   }.freeze
   # Ruby methods a native calls with its own receiver as self, by name. respond_to? calls
   # respond_to_missing? on self when the method is absent, so that callee must keep no self either.
