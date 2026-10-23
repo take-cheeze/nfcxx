@@ -42,15 +42,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: cases (QBE backend)
-            run: NFCXX_BACKEND=qbe tests/run.sh
-          - name: cases (gcc backend)
-            run: NFCXX_BACKEND=gcc tests/run.sh
-          - name: C++11 and C++14 language feature probes (qbe and gcc)
+          - name: cases (QBE and gcc backends)
+            run: |
+              NFCXX_BACKEND=qbe tests/run.sh
+              NFCXX_BACKEND=gcc tests/run.sh
+          - name: C++11 and C++14 language feature probes (qbe and gcc), mruby scripts
             run: |
               tests/cpp-features/self-test.sh
               tests/upstream/self-test.sh
               FEATURE_ROUTES="qbe gcc" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
+              tests/mruby/run.sh
           - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
             dotnet: true
             run: |
@@ -58,7 +59,7 @@ jobs:
               scripts/setup-pathb.sh
               tests/cil/run.sh
               tests/pathb-cil/run.sh
-          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
+          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism, float-to-integer
             run: |
               tests/lib/run.sh
               tests/target/run.sh
@@ -67,16 +68,13 @@ jobs:
               tests/c/run.sh
               tests/c/cc-mode.sh
               tests/cxx-driver/run.sh
-          - name: determinism, float-to-integer
-            run: |
               tests/determinism/run.sh
               tests/float-to-int/run.sh
-          - name: real-world tinyxml2 and nlohmann/json
+          - name: real-world tinyxml2, nlohmann/json, and {fmt}
             run: |
               tests/realworld/run.sh
               tests/realworld/run_json.sh
-          - name: real-world {fmt}
-            run: tests/realworld/run_fmt.sh
+              tests/realworld/run_fmt.sh
           - name: multi-TU, modules, EH shim, nfceval
             run: |
               tests/multi-tu/run.sh
@@ -86,12 +84,10 @@ jobs:
               tests/eval/run.sh
           # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1; tests/ehshim/unwind_members.cpp). gcc: gcc's
           # landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj).
-          - name: EH unwinder (gcc backend, NFCXX_EH_UNWIND=1)
+          - name: EH unwinder (gcc and qbe backends, NFCXX_EH_UNWIND=1)
             run: |
               NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/ehshim/run.sh
               NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/c/run.sh
-          - name: EH unwinder (qbe backend, NFCXX_EH_UNWIND=1)
-            run: |
               NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/ehshim/run.sh
               NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/c/run.sh
           # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
@@ -115,30 +111,18 @@ jobs:
             run: NFCXX_BACKEND=qbe tests/ast/run.sh
           - name: nfcast engine and tier (gcc backend)
             run: NFCXX_BACKEND=gcc tests/ast/run.sh
-          - name: uop core (QBE backend)
+          - name: uop core and numpy (QBE backend)
             onnx: true
             suite: uop
             group: core
             backend: qbe
-            run: UOP_ONLY="test test_ut test_shaping" NFCXX_BACKEND=qbe tests/uop/run.sh
-          - name: uop numpy (QBE backend)
-            onnx: true
-            suite: uop
-            group: numpy
-            backend: qbe
-            run: UOP_ONLY="test_np np_compat" NFCXX_BACKEND=qbe tests/uop/run.sh
-          - name: uop onnx (QBE backend)
+            run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop onnx and runtimes (QBE backend)
             onnx: true
             suite: uop
             group: onnx
             backend: qbe
-            run: UOP_ONLY="test_nn test_onnx test_sym test_grad" NFCXX_BACKEND=qbe tests/uop/run.sh
-          - name: uop runtimes (QBE backend)
-            onnx: true
-            suite: uop
-            group: runtimes
-            backend: qbe
-            run: UOP_ONLY="test_ort test_tinygrad test_cgen" NFCXX_BACKEND=qbe tests/uop/run.sh
+            run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=qbe tests/uop/run.sh
           - name: uop poly languages (QBE backend)
             go: true
             onnx: true
@@ -147,30 +131,18 @@ jobs:
             group: poly
             backend: qbe
             run: NFCXX_BACKEND=qbe tests/uop/run_poly.sh
-          - name: uop core (gcc backend)
+          - name: uop core and numpy (gcc backend)
             onnx: true
             suite: uop
             group: core
             backend: gcc
-            run: UOP_ONLY="test test_ut test_shaping" NFCXX_BACKEND=gcc tests/uop/run.sh
-          - name: uop numpy (gcc backend)
-            onnx: true
-            suite: uop
-            group: numpy
-            backend: gcc
-            run: UOP_ONLY="test_np np_compat" NFCXX_BACKEND=gcc tests/uop/run.sh
-          - name: uop onnx (gcc backend)
+            run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: uop onnx and runtimes (gcc backend)
             onnx: true
             suite: uop
             group: onnx
             backend: gcc
-            run: UOP_ONLY="test_nn test_onnx test_sym test_grad" NFCXX_BACKEND=gcc tests/uop/run.sh
-          - name: uop runtimes (gcc backend)
-            onnx: true
-            suite: uop
-            group: runtimes
-            backend: gcc
-            run: UOP_ONLY="test_ort test_tinygrad test_cgen" NFCXX_BACKEND=gcc tests/uop/run.sh
+            run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=gcc tests/uop/run.sh
           - name: uop poly languages (gcc backend)
             go: true
             onnx: true
@@ -179,12 +151,10 @@ jobs:
             group: poly
             backend: gcc
             run: NFCXX_BACKEND=gcc tests/uop/run_poly.sh
-          - name: mruby scripts
-            run: tests/mruby/run.sh
-          - name: C++ PTX emitter (build)
-            run: make -C tools/pathb-ptx-emit
-          - name: GPU kernel on the PTX interpreter
-            run: tests/gpu/run_interp.sh
+          - name: C++ PTX emitter (build) and GPU kernel on the PTX interpreter
+            run: |
+              make -C tools/pathb-ptx-emit
+              tests/gpu/run_interp.sh
           - name: AddressSanitizer (gcc and qbe backends)
             run: |
               tests/asan/run.sh
@@ -336,11 +306,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: cases (QBE backend)
-            run: NFCXX_BACKEND=qbe tests/run.sh
-          - name: cases (gcc backend)
-            run: NFCXX_BACKEND=gcc tests/run.sh
-          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
+          - name: cases (QBE and gcc backends)
+            run: |
+              NFCXX_BACKEND=qbe tests/run.sh
+              NFCXX_BACKEND=gcc tests/run.sh
+          # float-to-int checks the x87 helpers of be/nfcxx_ldrt.c, which exist only on x86-64, so it stays off this runner.
+          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism
             run: |
               tests/lib/run.sh
               tests/target/run.sh
@@ -349,9 +320,7 @@ jobs:
               tests/c/run.sh
               tests/c/cc-mode.sh
               tests/cxx-driver/run.sh
-          # float-to-int checks the x87 helpers of be/nfcxx_ldrt.c, which exist only on x86-64, so it stays off this runner.
-          - name: determinism
-            run: tests/determinism/run.sh
+              tests/determinism/run.sh
     name: arm64 ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
