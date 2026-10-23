@@ -6,7 +6,7 @@
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 # Two build settings are not nfcxx's concern and are set here: the system include and library directories are
 # multiarch paths that tcc's defaults do not list, and the memory checker (lib/bcheck.c) is left out because it
-# uses __malloc_hook, which glibc 2.34 removed. A QBE failure that is not yet fixed is reported as xfail below.
+# uses __malloc_hook, which glibc 2.34 removed.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=d348a9a51d32cece842b7885d27a411436d7887b   # TinyCC tag release_0_9_27
@@ -34,10 +34,6 @@ for b in $backends; do
     echo "FAIL $b tinycc: configure"; tail -3 "$tmp/$b.conf"; fail=1; continue
   fi
   if ! out=$(cd "$d" && NFCXX_BACKEND=$b make -j4 CC="$root/nfcc" BCHECK_O= 2>&1); then
-    if [ "$b" = qbe ] && grep -q "base types of pointer assignment" <<<"$out"; then
-      echo "xfail qbe tinycc: cproc rejects unsigned char * where gcc only warns (tccelf.c; docs/notes/realworld.md)"
-      continue
-    fi
     echo "FAIL $b tinycc (build)"; grep -E "error" <<<"$out" | head -5; fail=1; continue
   fi
   if ! out=$(cd "$d" && make -C tests/tests2 2>&1); then

@@ -375,13 +375,13 @@ the way its makefile says, with `nfcc` as the C compiler, and runs its own `test
 and run by the new `tcc` and compared with its `.expect`). The build is in a scratch copy of the tree.
 
 - **gcc backend: passes.** The whole compiler and `libtcc1.a` build, and all 84 `tests2` programs match.
-- **qbe backend: xfail.** Every file but `tccelf.c` compiles. `tccelf.c` line 174 passes `unsigned char *` (`s->link->data
-  + sym->st_name`) to a `const char *` parameter. gcc accepts it with a `-Wpointer-sign` warning, and cproc stops with
-  `base types of pointer assignment must be compatible or void` (`3rd/cproc/expr.c`, `pointeecompatible`). Fixing it means
-  relaxing cproc's check for signedness of `char` pointees (a change in the cproc fork) or rewriting the argument, which
-  needs types that `qbe-prep.rb` does not have.
+- **qbe backend: passes.** `tccelf.c` passes an `unsigned char *` to a `const char *` parameter. gcc accepts that with a
+  `-Wpointer-sign` warning, and cproc rejected it (`base types of pointer assignment must be compatible or void`). cproc now
+  accepts char pointees that differ only in signedness (`3rd/cproc` commit `08619b9`, branch `claude/char-pointer-sign` in
+  `take-cheeze/cproc`, regression test `test/char-pointer-sign.c`). The pin is the same commit.
 - Two build settings that are not nfcxx's: the multiarch include and library directories are passed to `configure`
   (`--sysincludepaths`, `--libpaths`, `--crtprefix`), and the memory checker `lib/bcheck.c` is left out (`BCHECK_O=`), because
   it uses `__malloc_hook`, which glibc 2.34 removed.
 - The `_Float32x` / `_Float64x` gap that the first QBE attempt hit (glibc's `stdlib.h` under `_GNU_SOURCE`) is fixed in
   `qbe-prep.rb`; see `docs/README.md`.
+- cproc's own suite: 201 tests, one (`test/compatible-function-types.c`) fails with and without this change.
