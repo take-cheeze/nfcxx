@@ -19,6 +19,7 @@
 # Usage: MRBC=path/to/host/mrbc BC2CPP_MRUBY_FULL=path/to/build ruby scripts/bc2cpp/placement_harness_check.rb
 
 require 'fileutils'
+require 'shellwords'
 require 'tmpdir'
 require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/inframe_placement'
@@ -121,6 +122,7 @@ TRIPWIRE_CPP = <<~CPP
   #include <cstdlib>
   static char* bc2cpp_stack_top = nullptr;
   static size_t tripwire_hits = 0;
+  static uintptr_t tripwire_here = 0;
   struct TripScan { const char* here; };
   static bool in_dead_stack(const void* q, const char* here) {
     uintptr_t p = (uintptr_t)q, h = (uintptr_t)here, top = (uintptr_t)bc2cpp_stack_top;
@@ -147,8 +149,14 @@ TRIPWIRE_CPP = <<~CPP
   static __attribute__((noinline)) size_t tripwire_scan(mrb_state* M) {
     volatile char marker = 0;
     TripScan s{ const_cast<const char*>(&marker) };
+    tripwire_here = (uintptr_t)&marker;
     tripwire_hits = 0;
+    // GC off for the walk: mrb_objspace_each_objects runs a full GC first, which would traverse a dangling
+    // reference found in the heap and read the dead frame's memory.
+    mrb_bool gc_was_disabled = M->gc.disabled;
+    M->gc.disabled = TRUE;
     mrb_objspace_each_objects(M, scan_object, &s);
+    M->gc.disabled = gc_was_disabled;
     return tripwire_hits;
   }
 CPP
@@ -183,14 +191,21 @@ CPP
 
 SELFTEST_BODY = <<~CPP
   #{TRIPWIRE_CPP}
-  // The planted object lives in this frame, 8 KiB below the scenario, and is dead once this returns.
-  static __attribute__((noinline)) void plant_dangling(mrb_state* M, mrb_value holder) {
-    volatile char pad[8192];
-    pad[0] = 0;
+  static uintptr_t planted_addr = 0;
+  // Holds the object one frame below plant_dangling, so it sits at least 8 KiB below the scenario, deeper than
+  // the scanner's own frame (a few hundred bytes), whatever the compiler's frame layout.
+  static __attribute__((noinline)) void hold_dangling(mrb_state* M, mrb_value holder) {
     struct RObject frame_object = {};
     frame_object.tt = MRB_TT_OBJECT;
     frame_object.c = M->object_class;
+    planted_addr = (uintptr_t)&frame_object;
     mrb_iv_set(M, holder, mrb_intern_lit(M, "@leak"), mrb_obj_value(&frame_object));
+  }
+  static __attribute__((noinline)) void plant_dangling(mrb_state* M, mrb_value holder) {
+    volatile char pad[8192];
+    pad[0] = 0;
+    hold_dangling(M, holder);
+    pad[1] = 0;
   }
   static int scenario(mrb_state* M) {
     volatile char top_marker = 0;
@@ -199,7 +214,8 @@ SELFTEST_BODY = <<~CPP
     mrb_gc_protect(M, holder);
     plant_dangling(M, holder);
     size_t hits = tripwire_scan(M);
-    std::printf("selftest tripwire planted=1 detected=%zu\\n", hits);
+    std::printf("selftest planted=%llx here=%llx top=%llx detected=%zu\\n", (unsigned long long)planted_addr,
+                (unsigned long long)tripwire_here, (unsigned long long)(uintptr_t)bc2cpp_stack_top, hits);
     std::fflush(stdout);
     // The planted reference is dead memory: no later GC (mrb_close included) may traverse it.
     std::_Exit(0);
@@ -253,7 +269,7 @@ Dir.mktmpdir('placement-harness') do |root|
     sanitized = Bc2cppCxx.system(*sanitizer, probe, '-o', File.join(root, 'probe')) &&
                 system(File.join(root, 'probe'), out: File::NULL, err: File::NULL)
     if sanitized
-      ENV['BC2CPP_CXXFLAGS'] = sanitizer.join(' ')
+      ENV['BC2CPP_CXXFLAGS'] = (sanitizer + Shellwords.split(ENV.fetch('BC2CPP_CXXFLAGS', ''))).join(' ')
       puts 'info  runtime gates built with -fsanitize=address,undefined'
     else
       skip.call('sanitizers: the toolchain cannot build and run -fsanitize=address,undefined; runtime gates run without them')
@@ -301,10 +317,15 @@ Dir.mktmpdir('placement-harness') do |root|
     self_built, self_results = Bc2cppFixtureRuntime.run(self_dir, self_err, [], SELFTEST_BODY,
                                                         build: build, full: true, vms: [false], envs: [native])
     self_output, = self_built ? self_results[0] : ['', false]
-    detected = self_output[/selftest tripwire planted=1 detected=(\d+)/, 1]&.to_i
-    check.call('the self-test builds and runs', self_built)
+    m = self_output.match(/selftest planted=(\h+) here=(\h+) top=(\h+) detected=(\d+)/)
+    planted, here, top, detected = m ? [m[1].to_i(16), m[2].to_i(16), m[3].to_i(16), m[4].to_i] : [0, 0, 0, 0]
+    check.call('the self-test builds and runs', self_built && !m.nil?)
+    # The scan covers [top - 8 MiB, here). A planted address outside it is a harness error, reported as such.
+    in_window = planted.positive? && planted < here && planted + (8 << 20) >= top
+    puts "     planted=0x#{planted.to_s(16)} scanner=0x#{here.to_s(16)} top=0x#{top.to_s(16)} (window [top-8MiB, scanner))"
+    check.call('the planted object lies inside the range the tripwire scans', self_built && in_window)
     check.call('the tripwire detects the planted dangling stack reference (detected=1)', self_built && detected == 1)
-    puts self_output.lines.last(5).join unless self_built && detected == 1
+    puts self_output.lines.last(5).join unless self_built && in_window && detected == 1
   end
 
   # E. The heap-vs-stack differential needs a placement that exists.
