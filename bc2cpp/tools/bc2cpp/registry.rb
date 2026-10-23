@@ -2,6 +2,7 @@
 
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir_containers'
+require_relative 'bytecode_ir_numeric'
 require_relative 'core_mixins'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
@@ -37,71 +38,90 @@ def receiver_source(irep, use, reg)
   irep.last_writer(use - 1, reg.to_s)
 end
 
-# STRUCT_MEMBERS_ANALYSIS: `Const = Struct.new(:a, :b, ...)` (with or without
-# a block, keyword_init or not) stores member i at array index i: mruby-struct
-# struct.c writes mrb_ary_set(self, i, ...) for the i-th __members__ entry, and
-# MRB_TT_STRUCT is RArray-backed (value.h), so RARRAY_PTR/LEN work directly.
-#
-# Returns `[owner, [member names in declared order]]` or nil when anything is
-# not confidently recognized (anonymous Struct, receiver not a bare `Struct`
-# GETCONST on every path, LOADSYM scan count mismatch). A miss only means GETIDX keeps
-# dynamic dispatch for that owner.
-#
-# Two argument shapes: n <= CALL_MAXARGS members in consecutive LOADSYM
-# registers, or more (`n=*`) packed into one ARRAY first.
-def detect_struct_new_members(irep, idx, insn, namespace)
-  name = insn.sym
-  return nil unless name == 'new'
+# Struct layout needs one agreed Symbol at each position; native accessors may
+# conservatively include several names for a position whose branch arms differ.
+def struct_new_receiver?(irep, idx, insn)
+  return false unless BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new' && insn.reg
 
-  d = insn.reg
-  return nil unless d
-
-  source = receiver_source(irep, idx, d)
-  struct_recv = source&.op == 'GETCONST' && source.const_name == 'Struct'
-  return nil unless struct_recv
-
-  # The Struct's name comes from a SETCONST right after the call on the same
-  # register; an unnamed Struct.new is left unrecognized.
-  next_insn = BytecodeIR.for(irep).source_at(idx + 1)
-  struct_name = if next_insn && next_insn.op == 'SETCONST'
-                  next_insn.const_name if next_insn.reg_operand == d.to_s
-                end
-  return nil unless struct_name
-
-  owner = namespace ? "#{namespace}::#{struct_name}" : struct_name
-
-  scan_from = idx - 1
-  if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
-    return nil unless BytecodeIR.for(irep).source_at(scan_from)&.op == 'BLOCK'
-
-    scan_from -= 1
+  definitions = BytecodeIR.reaching_definitions(irep, idx, insn.reg, origin_transfers: true, through_handlers: true)
+  definitions && !definitions.empty? && definitions.all? do |definition|
+    source = !definition.entry? && BytecodeIR.for(irep).source_at(definition.index)
+    source && source.op == 'GETCONST' && source.const_name == 'Struct'
   end
+end
 
-  # `keyword_init:` is Struct.new's only keyword; skip its (key, value) pair.
-  nk = insn.nk_spec.to_i
-  scan_from -= 2 * nk
-  return nil if scan_from < 0 && nk.positive?
+def struct_new_member_sets(irep, idx, insn)
+  return nil unless insn.n_spec && insn.nk_spec != '*'
 
-  pos = insn.n_spec
-  return nil unless pos
+  program = BytecodeIR.for(irep)
+  use = idx
+  if insn.n_spec == '*'
+    definitions = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + 1).to_s,
+                                                 origin_transfers: true, through_handlers: true)
+    return nil unless definitions&.size == 1 && !definitions.first.entry?
 
-  if pos == '*'
-    array_insn = scan_from >= 0 ? BytecodeIR.for(irep).source_at(scan_from) : nil
-    return nil unless array_insn&.op == 'ARRAY'
+    use = definitions.first.index
+    literal = program.container_literal(use)
+    return nil unless literal&.kind == :array && program.linear_corridor?(use, idx, include_handlers: true)
+    # A fresh packed array cannot escape or change between construction and use.
+    return nil unless (use + 1...idx).all? do |at|
+      op = program.source_at(at).op
+      %w[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE BLOCK].include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
+    end
 
-    n = array_insn.uint_operand
-    return nil unless n
-
-    scan_from -= 1
+    registers = literal.value_regs
   else
-    n = pos.to_i
-    return nil if n.zero?
+    registers = (1..insn.argc.to_i).map { |position| (insn.reg.to_i + position).to_s }
   end
+  return nil if registers.empty?
 
-  members = irep.preceding_run('LOADSYM', scan_from, limit: n).map(&:sym_token)
-  return nil unless members.size == n && members.all?
+  registers.map do |register|
+    definitions = BytecodeIR.reaching_definitions(irep, use, register, origin_transfers: true, through_handlers: true)
+    return nil unless definitions && !definitions.empty?
 
-  [owner, members]
+    names = definitions.map do |definition|
+      source = !definition.entry? && program.source_at(definition.index)
+      return nil unless source && source.op == 'LOADSYM' && source.sym
+
+      source.sym
+    end
+    names.to_set
+  end
+end
+
+# Alternate entries can store another constructor's result into the same constant.
+def struct_new_owner(irep, idx, insn, namespace)
+  program = BytecodeIR.for(irep)
+  assignment = program.source_at(idx + 1)
+  return nil unless assignment&.op == 'SETCONST' && assignment.reg_operand == insn.reg.to_s &&
+                    program.linear_corridor?(idx, idx + 1, include_handlers: true)
+
+  name = assignment.const_name
+  name && (namespace ? "#{namespace}::#{name}" : name)
+end
+
+def register_struct_member_defs(registry, owner, sets)
+  sets&.each do |names|
+    names.each do |member|
+      [member, "#{member}="].each do |name|
+        registry[name] << MethodDef.new(name: name, owner: owner, irep: nil, visibility: :public)
+      end
+    end
+  end
+end
+
+# STRUCT_MEMBERS_ANALYSIS: member i is storage index i, so a union of different
+# Symbols cannot define one layout. Anonymous owners retain dynamic indexing.
+def detect_struct_new_members(irep, idx, insn, namespace)
+  return nil unless struct_new_receiver?(irep, idx, insn)
+
+  owner = struct_new_owner(irep, idx, insn, namespace)
+  return nil unless owner
+
+  sets = struct_new_member_sets(irep, idx, insn)
+  return nil unless sets && sets.all? { |names| names.size == 1 }
+
+  [owner, sets.map(&:first)]
 end
 
 # ---------------------------------------------------------------------------
@@ -365,6 +385,10 @@ def build_registry(ireps, root_label)
           # Additive only: returns nil for anything but a SETCONST-named Struct.new.
           found = detect_struct_new_members(irep, idx, insn, namespace)
           struct_member_lists[found[0]] = found[1] if found
+          if struct_new_receiver?(irep, idx, insn)
+            owner = struct_new_owner(irep, idx, insn, namespace) || "<struct:#{label}:#{idx}>"
+            register_struct_member_defs(registry, owner, struct_new_member_sets(irep, idx, insn))
+          end
         end
         register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == 'SSEND'
         if %w[include prepend].include?(name)
@@ -481,8 +505,7 @@ def build_registry(ireps, root_label)
         d = insn.reg
         # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
         # miss.
-        source = receiver_source(irep, idx, d)
-        next unless source&.op == 'GETCONST' && source.const_name == 'Struct'
+        next unless struct_new_receiver?(irep, idx, insn)
 
         # The block operand is the BLOCK right before the SENDB (codegen emits it
         # there).
@@ -495,26 +518,9 @@ def build_registry(ireps, root_label)
         block_label = irep.reps[block_idx.to_i]
         next unless block_label
 
-        # The owner name comes from a SETCONST right after the SENDB. An unnamed
-        # Struct still gets a placeholder owner: soundness only needs a distinct
-        # owner so `defs.size == 1` sees more than one definition.
-        next_insn = BytecodeIR.for(irep).source_at(idx + 1)
-        struct_name = if next_insn && next_insn.op == 'SETCONST'
-                         next_insn.const_name if next_insn.reg_operand == d.to_s
-                       end
-        owner = struct_name ? (namespace ? "#{namespace}::#{struct_name}" : struct_name) : "<struct:#{label}:#{idx}>"
+        owner = struct_new_owner(irep, idx, insn, namespace) || "<struct:#{label}:#{idx}>"
 
-        # Member names are LOADSYM'd right before the ARRAY that packs the splat.
-        # Struct installs a reader and a writer for each (struct.c), like
-        # attr_accessor.
-        array_insn = BytecodeIR.for(irep).source_at(idx - 2)
-        if array_insn && array_insn.op == 'ARRAY'
-          n = array_insn.uint_operand.to_i
-          irep.preceding_run('LOADSYM', idx - 3, limit: n).map(&:sym_token).each do |m|
-            registry[m] << MethodDef.new(name: m, owner: owner, irep: nil, visibility: :public)
-            registry["#{m}="] << MethodDef.new(name: "#{m}=", owner: owner, irep: nil, visibility: :public)
-          end
-        end
+        register_struct_member_defs(registry, owner, struct_new_member_sets(irep, idx, insn))
 
         # Walk the block body like a class body, so its defs get real ireps.
         walk.call(block_label, owner)
