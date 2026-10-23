@@ -1418,7 +1418,7 @@ class ClosedWorld
     name = insn.sym
     @clone_sent = true if name == 'clone'
     scan_freeze_send(irep, idx, insn) if name == 'freeze'
-    scan_visibility_send(insns, idx, insn) if VISIBILITY_SENDS.include?(name)
+    scan_visibility_send(irep, insns, idx, insn) if VISIBILITY_SENDS.include?(name)
     scan_removal_send(irep, insns, idx, insn) if REMOVER_SENDS.include?(name) || NAME_FORWARDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
@@ -1438,7 +1438,8 @@ class ClosedWorld
     return if loop_installer_sites.include?([irep.label, idx])
 
     n = insn.argc
-    syms = n ? literal_syms(insns, idx, n) : packed_syms(insns, idx, insn)
+    sets = n && argument_name_sets(irep, idx, insn, n)
+    syms = n ? sets&.flatten : packed_syms(insns, idx, insn)
     return global!(:dynamic_install) unless syms
 
     # build_registry only attributes a self-implicit attr_* in a class body.
@@ -1485,27 +1486,41 @@ class ClosedWorld
 
   # `private :a, :b` / `private def a`: the names it hides. Any other argument
   # shape could name anything.
-  def scan_visibility_send(insns, idx, insn)
+  def scan_visibility_send(irep, insns, idx, insn)
     n = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : insn.argc
     return if n&.zero?
 
-    syms = n ? preceding_name_args(insns, idx, n) : packed_syms(insns, idx, insn)
+    sets = n && argument_name_sets(irep, idx, insn, n, definitions: true)
+    syms = n ? sets&.flatten : packed_syms(insns, idx, insn)
     syms ? @visibility_names.merge(syms) : @dynamic_visibility = true
   end
 
-  # The n names LOADSYM'd (or `def`ed) right before the send at idx, skipping the
-  # EXT prefix of a wide operand; nil when anything else feeds an argument.
-  def preceding_name_args(insns, idx, n)
-    syms = []
-    BytecodeIR::Window.each_preceding(insns, idx) do |insn, _|
-      break if syms.size == n
+  # Every reaching argument value must have a finite immutable name set. A String
+  # remains usable only at its adjacent load: register flow does not prove aliases
+  # cannot mutate it. Definition ops return their Symbol name in the receiver register.
+  def argument_name_sets(irep, idx, insn, n, definitions: false, strings: false)
+    (1..n).map do |position|
+      reg = (insn.reg.to_i + position).to_s
+      defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, origin_transfers: true)
+      return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
-      next if BytecodeIR::Ops::EXT.include?(insn.op)
-      return nil unless %w[LOADSYM DEF].include?(insn.op)
+      names = defs.map do |definition|
+        writer = BytecodeIR.for(irep).source_at(definition.index)
+        case writer.op
+        when 'LOADSYM' then writer.sym_token
+        when 'DEF', 'TDEF', 'SDEF' then writer.sym_token if definitions
+        when 'STRING'
+          next unless strings && definition.index == idx - n + position - 1
+          next unless BytecodeIR.for(irep).linear_corridor?(definition.index, idx, include_handlers: true)
+          next unless irep.instructions[definition.index + 1...idx].all? { |op| %w[LOADSYM STRING MOVE].include?(op.op) }
 
-      syms.unshift(insn.sym_token)
+          irep.pool[writer.pool_index.to_i]
+        end
+      end
+      return nil unless names.all?(String)
+
+      names.uniq
     end
-    syms if syms.size == n
   end
 
   # The n Symbol arguments LOADSYM'd right before the send at idx, or nil.
@@ -1518,34 +1533,18 @@ class ClosedWorld
     run.map { |i| i.sym_token }
   end
 
-  # The names of the +n+ arguments before +idx+ when each is a Symbol or String literal, else nil.
-  def literal_names(irep, insns, idx, n)
-    return [] if n.zero?
-
-    run = insns[(idx - n).clamp(0, idx)...idx]
-    return nil unless run.size == n
-
-    names = run.map do |i|
-      case i.op
-      when 'LOADSYM' then i.sym_token
-      when 'STRING' then irep.pool[i.pool_index.to_i]
-      end
-    end
-    names.all?(String) ? names : nil
-  end
-
-  # REMOVED_NAMES: `undef_method NAME`, `remove_method NAME` and the same through `send`/`__send__`/`public_send`
-  # (the name is the argument after the remover). A computed name or target may be any method, so it marks every name.
-  def scan_removal_send(irep, insns, idx, insn)
-    names = insn.argc && literal_names(irep, insns, idx, insn.argc)
+  # REMOVED_NAMES: preserve each argument's alternatives separately: only the first
+  # argument of a forwarding send selects the operation, while the rest name methods.
+  def scan_removal_send(irep, _insns, idx, insn)
+    sets = insn.argc && argument_name_sets(irep, idx, insn, insn.argc, strings: true)
     if REMOVER_SENDS.include?(insn.sym)
-      return @dynamic_removal = true unless names
+      return @dynamic_removal = true unless sets
 
-      @removed_names.merge(names)
-    elsif !names || NAME_FORWARDERS.include?(names.first)
+      @removed_names.merge(sets.flatten)
+    elsif !sets || sets.first&.any? { |name| NAME_FORWARDERS.include?(name) }
       @dynamic_removal = true
-    elsif REMOVER_SENDS.include?(names.first)
-      @removed_names.merge(names.drop(1))
+    elsif sets.first&.any? { |name| REMOVER_SENDS.include?(name) }
+      @removed_names.merge(sets.drop(1).flatten)
     end
   end
 
