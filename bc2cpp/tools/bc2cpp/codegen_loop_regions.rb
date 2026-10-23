@@ -689,9 +689,10 @@ class CodeGen
       upvar, level = insn.upvar_ref
       next unless level.zero?
 
-      # Only a register no instruction wrote can still be a host parameter.
-      root = host_ir.copy_root(call_idx - 1, upvar.to_s)
-      arg_pos = root && root.writer.nil? ? root.reg.to_i : nil
+      # Only the frame entry can be the host parameter at the call: a write on any reaching path, including a loop
+      # back-edge from after the call, refuses it.
+      defs = host_ir.reaching_definitions(call_idx, upvar.to_s)
+      arg_pos = defs&.size == 1 && defs.first.entry? ? defs.first.reg.to_i : nil
       next unless arg_pos && arg_pos.between?(1, mandatory)
       next unless elements.arg_containers&.[](arg_pos - 1) == 'Hash'
 
