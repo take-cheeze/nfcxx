@@ -21,14 +21,20 @@ module BytecodeIR
   end
 
   # The qualified name of the CLASS/MODULE at +idx+ when its outer scope is
-  # visible in the IR: LOADNIL (the lexical +namespace+, nil at top level) or
+  # agreed by every reaching definition in the IR: LOADNIL (the lexical +namespace+, nil at top level) or
   # OCLASS (`class ::Name`). Nil otherwise; a constant-path outer is resolved
   # by the caller.
   def self.class_body_path(irep, idx, namespace)
     insn = irep.instructions[idx]
-    case irep.last_writer(idx - 1, insn.reg)&.op
-    when 'LOADNIL' then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
-    when 'OCLASS' then insn.sym
+    definitions = reaching_definitions(irep, idx, insn.reg, through_handlers: true, origin_transfers: true)
+    return nil if definitions.nil? || definitions.empty? || definitions.any?(&:entry?)
+
+    paths = definitions.map do |definition|
+      case self.for(irep).source_at(definition.index).op
+      when 'LOADNIL' then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
+      when 'OCLASS' then insn.sym
+      end
     end
+    paths.first if paths.first && paths.uniq.size == 1
   end
 end
