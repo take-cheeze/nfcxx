@@ -414,8 +414,7 @@ class YieldReach
 
     @ireps.each_value.all? do |irep|
       program = BytecodeIR.for(irep)
-      irep.instructions.each_index.all? do |j|
-        src = program.source_at(j)
+      program.each_source.all? do |src, j|
         next true unless src.op == 'SETIV' && src.ivar.to_s == name
 
         non_proc_value?(irep, j, src.regs.first, 1)
