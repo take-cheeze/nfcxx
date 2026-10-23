@@ -92,6 +92,14 @@ class ClosedWorld
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
+    # NATIVE_INCLUDE: what non-core natives can include (native_include_facts). `open` when a native include or
+    # method name is computed; `names` the modules a native includes by a spelled lookup; `alias` the names of a
+    # native that binds a constant to a value that could be a module object.
+    @outside_include_open = false
+    @outside_include_names = Set.new
+    @outside_alias_names = Set.new
+    # (function, parameter index) pairs a native dispatches a method name through (native_include_facts).
+    @outside_include_helpers = []
     # Names a native module_function or singleton method defines: a constant receiver answers them (Graphics.update).
     @native_singleton_names = Set.new
     @native_tokens = Set.new
@@ -138,6 +146,7 @@ class ClosedWorld
     @desc_memo = {}
     @native_paths = native_paths
     scan_native(native_paths)
+    @outside_include_open ||= !helper_names_enumerable?
     scan_outside_ruby(ruby_paths)
     scan_closed_world
     build_hierarchy
@@ -415,11 +424,14 @@ class ClosedWorld
     @includer_memo[mod] = includer_candidates_uncached(mod)
   end
 
+  # A non-core native source that only defines or looks up a module's name (mrb_define_module, module_function) cannot
+  # include it: native_file_facts names every include a non-core native can make (see native_include_facts). A foreign
+  # Ruby source that spells the name stays refused, since its include sites are not classified.
   def includer_candidates_uncached(mod)
     return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || @rebound.include?(simple(mod))
 
     name = simple(mod)
-    return nil if @native_code_tokens.each_value.any? { |tokens| tokens.include?(name) }
+    return nil if @outside_include_open || @outside_include_names.include?(name) || @outside_alias_names.include?(name)
     return nil if @ruby_tokens.each_value.any? { |tokens| tokens.include?(name) }
 
     declared_class_names
@@ -930,6 +942,49 @@ class ClosedWorld
     @outside_constant_write_counts[name] += 1
   end
 
+  # NATIVE_HELPER: every (function, parameter) a native dispatches a computed method name through must receive an
+  # enumerable name at every call in the outside natives, and the function must never be used except as a call (no
+  # pointer to it). Otherwise a caller may pass `include`, so the includers of every module are open.
+  def helper_names_enumerable?
+    @outside_include_helpers.all? do |fn, index, static, home|
+      # A static function is reached only from its own file. Otherwise a file that neither calls, declares nor defines
+      # `fn(...)` cannot reach it: a use of the word there is another name (a local, a member), so it is not checked.
+      paths = static ? [home] : @native_paths
+      paths.all? do |path|
+        !File.binread(path).gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ').match?(/\b#{Regexp.escape(fn)}\s*\([^;{}]*\)\s*[;{]/m) ||
+          helper_calls_enumerable?(path, fn, index)
+      end
+    end
+  end
+
+  def helper_calls_enumerable?(path, fn, index)
+    text = File.binread(path).gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ')
+    blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
+    symbols = nil
+    blanked.to_enum(:scan, /\b#{Regexp.escape(fn)}\b/).map { Regexp.last_match }.all? do |m|
+      # A member access (`x.fn(`, `x->fn(`) is not a call to a free helper.
+      next true if m.begin(0).positive? && text[0...m.begin(0)].match?(/(?:\.|->)\s*\z/)
+      # A symbol spelled by a macro (MRB_SYM(fn)) names the method, not the function.
+      next true if text[0...m.begin(0)].match?(/MRB_(?:OP)?SYM\(\s*\z/)
+
+      rest = text[m.end(0)..]
+      open_paren = rest[/\A\s*\(/]
+      next false unless open_paren # a use that is not a call (a pointer to the function) could pass any name
+
+      after = rest[open_paren.size..]
+      line_start = m.begin(0).positive? ? (text.rindex("\n", m.begin(0) - 1) || -1) + 1 : 0
+      prefix = text[line_start...m.begin(0)]
+      # A definition has a return type before its name on its line, and a body after its parameter list.
+      next true if prefix.match?(/\A\s*(?:(?:static|inline|extern|const|virtual)\s+)*[\w:<>]+[\s\*&]+\z/) &&
+                   after.match?(/\A[^;{]*\)\s*(?:const\s*)?\{/)
+
+      symbols ||= ClosedWorld.native_local_symbols(text)
+      arg = bc2cpp_c_call_args(after).to_a[index].to_s.strip
+      words = (m2 = arg.match(NATIVE_SPELLED_NAME)) ? [m2[1] || m2[2] || m2[3]] : symbols[arg]
+      words && words.none? { |word| INCLUDE_METHOD_NAMES.include?(word) }
+    end
+  end
+
   def global!(reason)
     @global_refusal ||= reason
   end
@@ -952,6 +1007,10 @@ class ClosedWorld
     file.fetch(:plain_class_defines).each { |name| @outside_plain_class_defines[name] += 1 }
     @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
     @outside_names.merge(file.fetch(:names))
+    @outside_include_open ||= file.fetch(:include_open)
+    @outside_include_names.merge(file.fetch(:include_names))
+    @outside_alias_names.merge(file.fetch(:alias_names))
+    @outside_include_helpers.concat(file.fetch(:include_helpers).map { |fn, index, static| [fn, index, static, path] })
     @native_singleton_names.merge(file.fetch(:singleton_names))
     file.fetch(:names).each { |n| (@outside_name_paths[n] ||= Set.new) << path }
     file.fetch(:refusals).each { |reason| global!(reason) }
@@ -1057,6 +1116,8 @@ class ClosedWorld
         dynamic = true unless arg.match?(/\A\s*(?:#{C_STRING}|#{MRB_SYM_TOKEN_RE})\s*\z/o)
       end
     end
+    include_open, include_names, alias_names, include_helpers =
+      path.match?(NATIVE_CORE) ? [false, [], [], []] : native_include_facts(text, code_tokens)
     refusals << :outside_dynamic_definition if dynamic && !path.match?(NATIVE_CORE)
     # Struct members named by C strings (mruby-marshal checks for Struct).
     dynamic ||= text.match?(/"Struct"|MRB_SYM\(Struct\)/)
@@ -1082,8 +1143,126 @@ class ClosedWorld
       singleton_maker: !path.match?(NATIVE_CORE) && text.match?(NATIVE_SINGLETON),
       defines_class: defines_class,
       touch: TouchScan.native_facts(text),
-      legacy_names: native_legacy_names(text)
+      legacy_names: native_legacy_names(text),
+      include_open: include_open,
+      include_names: include_names,
+      alias_names: alias_names,
+      include_helpers: include_helpers
     }
+  end
+
+  # NATIVE_INCLUDE: what one non-core native source can do to a module's includers. Returns [open, names, alias_names].
+  #  * open: the source may include a module the scan cannot name. That is an include-family call (mrb_include_module,
+  #    mrb_prepend_module, mrb_extend_*) whose module argument is not a spelled lookup; a funcall whose method name is
+  #    computed or is include/prepend/extend; or the spelling of one of those method names (a native `include` method).
+  #    Every module is then open (ClosedWorld#includer_candidates_uncached).
+  #  * names: the last path segment of each module a spelled lookup (mrb_module_get "N") passes to an include-family call.
+  #  * alias_names: the identifiers of the source, when it writes a constant to a value that could be a module object
+  #    (any const write whose value is not a literal). A constant alias of a module is then seen by name.
+  # A native that only defines or looks up a module's name (mrb_define_module, module_function) matches none of these.
+  INCLUDE_METHOD_NAMES = %w[include prepend extend].freeze
+  NATIVE_INCLUDE_WORD = /"(?:include|prepend|extend)"|MRB_SYM\((?:include|prepend|extend)\)/
+  NATIVE_INCLUDE_CALL = /\bmrb_\w*(?:include|prepend|extend)\w*\s*\(([^;]*)/m
+  NATIVE_DISPATCH_CALL = /\bmrb_(?:funcall(?:_id|_argv|_with_block)?|check_funcall)\s*\(([^;]*)/m
+  NATIVE_CONST_WRITE = /\bmrb_(?:const_set|define_global_const|define_const(?:_id)?)\s*\(([^;]*)/m
+  NATIVE_MODULE_LOOKUP = /\bmrb_(?:module_get|class_get|const_get)(?:_id)?\s*\(/
+  # A method name spelled out in full: a C string, MRB_SYM / MRB_OPSYM, or an interned literal.
+  NATIVE_SPELLED_NAME = /\A(?:"([^"]*)"|MRB_(?:OP)?SYM\((\w+)\)|mrb_intern_(?:lit|cstr|static)\s*\(\s*\w+\s*,\s*"([^"]*)"\s*\))\z/
+  NATIVE_LITERAL_VALUE = /\A\s*(?:mrb_(?:fixnum|float|int|bool|true|false|nil|str|cstr|ary|hash)\w*\s*\(|-?\d|"|true\b|false\b|nil\b)/
+
+  # NATIVE_LOCAL_SYMBOL: a local that names a method, bound once to its spelled names: `mrb_sym NAME = mrb_intern_lit(M,
+  # "x")` (or MRB_SYM), or `const char* NAME = c ? "a" : "b"` (a ternary of literals; nullptr adds no name). NAME
+  # resolves only when every occurrence in the source is that declaration, a dispatch's name argument, or an `if (NAME)`
+  # test. A parameter, an assignment or an alias of NAME is another occurrence, so it is not resolved and stays open.
+  NATIVE_LOCAL_SYMBOL = /(?:\bmrb_sym\s+|\bconst\s+char\s*\*\s*|\bchar\s*\*\s*)(\w+)\s*=\s*([^;]+);/
+  NATIVE_NO_NAME = /\A(?:nullptr|NULL|0)\z/
+
+  # The values of a (possibly nested) ternary: `c1 ? a : c2 ? b : d` gives a, b, d. A bare expression is its own value.
+  def self.ternary_values(expr)
+    pieces = expr.split('?')
+    return [expr.strip] if pieces.size == 1
+
+    values = pieces[1..].map { |piece| piece.split(':').first.to_s.strip }
+    values << pieces.last.split(':').last.to_s.strip
+  end
+
+  def self.native_local_symbols(text)
+    blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
+    dispatched = Hash.new(0)
+    text.to_enum(:scan, NATIVE_DISPATCH_CALL).map { Regexp.last_match }.each do |md|
+      arg = bc2cpp_c_call_args(md[1])[2].to_s.strip
+      dispatched[arg] += 1 if arg.match?(/\A\w+\z/)
+    end
+    symbols = {}
+    text.to_enum(:scan, NATIVE_LOCAL_SYMBOL).map { Regexp.last_match }.each do |md|
+      name = md[1]
+      branches = ternary_values(md[2])
+      next unless branches.all? { |b| b.match?(NATIVE_NO_NAME) || b.match?(NATIVE_SPELLED_NAME) }
+
+      tests = blanked.scan(/\bif\s*\(\s*#{name}\s*\)/).size
+      next if blanked.scan(/\b#{name}\b/).size != 1 + dispatched[name] + tests
+
+      symbols[name] = branches.reject { |b| b.match?(NATIVE_NO_NAME) }.map { |b| (m = b.match(NATIVE_SPELLED_NAME))[1] || m[2] || m[3] }
+    end
+    symbols
+  end
+
+  # The function a dispatch at offset +at+ sits in, when that function takes parameter +param+: [function, index].
+  # The enclosing function is the last definition header before the dispatch (C and C++ do not nest functions), so a
+  # dispatch whose enclosing function does not declare +param+ (a lambda, a macro) answers nil and stays open.
+  NATIVE_DEFINITION = /(?<!\w)(?!(?:if|for|while|switch|catch|return|sizeof)\b)(\w+)\s*\(([^()]*)\)\s*(?:const\s*)?\{/
+  def self.native_helper_param(text, at, param)
+    defn = text[0...at].to_enum(:scan, NATIVE_DEFINITION).map { Regexp.last_match }.last
+    return nil unless defn
+
+    params = defn[2].split(',').map(&:strip)
+    index = params.index { |p| p.match?(/\b#{Regexp.escape(param)}\s*(?:\[\s*\])?\z/) }
+    return nil unless index
+
+    # Internal linkage (`static`) keeps the function to its own file.
+    line = text[(text.rindex("\n", defn.begin(0)) || -1) + 1...defn.begin(0)]
+    [defn[1], index, line.match?(/\bstatic\b/)]
+  end
+
+  def self.native_include_facts(text, code_tokens)
+    open = text.match?(NATIVE_INCLUDE_WORD)
+    names = Set.new
+    alias_possible = false
+    text.scan(NATIVE_INCLUDE_CALL) do |(body)|
+      module_arg = bc2cpp_c_call_args(body).last.to_s
+      spelled = module_arg.match(/"([A-Za-z_][\w:]*)"|MRB_SYM\(([A-Za-z_]\w*)\)/)
+      if spelled && module_arg.match?(NATIVE_MODULE_LOOKUP)
+        names << (spelled[1] || spelled[2]).split('::').last
+      else
+        open = true
+      end
+    end
+    symbols = native_local_symbols(text)
+    helpers = Set.new
+    text.to_enum(:scan, NATIVE_DISPATCH_CALL).map { Regexp.last_match }.each do |md|
+      # The method name is enumerable when it is spelled out (a literal, a MRB_SYM / MRB_OPSYM, an interned literal,
+      # a local bound to one of those, or a ternary between them); anything else is computed and could be `include`.
+      name_arg = bc2cpp_c_call_args(md[1])[2].to_s.strip
+      # A ternary names its two branches; its condition is not the name.
+      ternary_values(name_arg).each do |branch|
+        branch = branch.strip
+        m = branch.match(NATIVE_SPELLED_NAME) || branch.sub(/\A\(\s*/, '').sub(/\s*\)\z/, '').match(NATIVE_SPELLED_NAME)
+        words = m ? [m[1] || m[2] || m[3]] : symbols[branch]
+        # A spelled include, prepend or extend is refused by NATIVE_INCLUDE_WORD, so an enumerable name needs no check here.
+        if words
+          next
+        elsif (helper = branch.match?(/\A\w+\z/) && native_helper_param(text, md.begin(0), branch))
+          # A parameter of an enclosing helper: its callers' names are checked (ClosedWorld#helper_names_enumerable?).
+          helpers << helper
+        else
+          open = true
+        end
+      end
+    end
+    text.scan(NATIVE_CONST_WRITE) do |(body)|
+      alias_possible = true unless bc2cpp_c_call_args(body).last.to_s.match?(NATIVE_LITERAL_VALUE)
+    end
+    [open, names.to_a, alias_possible ? code_tokens.to_a : [], helpers.to_a]
   end
 
   # The names a legacy touch spells (TouchScan's fallback), in the order of the text.
@@ -1438,7 +1617,7 @@ class ClosedWorld
     name = insn.sym
     @clone_sent = true if name == 'clone'
     scan_freeze_send(irep, idx, insn) if name == 'freeze'
-    scan_visibility_send(insns, idx, insn) if VISIBILITY_SENDS.include?(name)
+    scan_visibility_send(irep, insns, idx, insn) if VISIBILITY_SENDS.include?(name)
     scan_removal_send(irep, insns, idx, insn) if REMOVER_SENDS.include?(name) || NAME_FORWARDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
@@ -1458,7 +1637,8 @@ class ClosedWorld
     return if loop_installer_sites.include?([irep.label, idx])
 
     n = insn.argc
-    syms = n ? literal_syms(insns, idx, n) : packed_syms(insns, idx, insn)
+    sets = n && argument_name_sets(irep, idx, insn, n)
+    syms = n ? sets&.flatten : packed_syms(insns, idx, insn)
     return global!(:dynamic_install) unless syms
 
     # build_registry only attributes a self-implicit attr_* in a class body.
@@ -1505,27 +1685,41 @@ class ClosedWorld
 
   # `private :a, :b` / `private def a`: the names it hides. Any other argument
   # shape could name anything.
-  def scan_visibility_send(insns, idx, insn)
+  def scan_visibility_send(irep, insns, idx, insn)
     n = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : insn.argc
     return if n&.zero?
 
-    syms = n ? preceding_name_args(insns, idx, n) : packed_syms(insns, idx, insn)
+    sets = n && argument_name_sets(irep, idx, insn, n, definitions: true)
+    syms = n ? sets&.flatten : packed_syms(insns, idx, insn)
     syms ? @visibility_names.merge(syms) : @dynamic_visibility = true
   end
 
-  # The n names LOADSYM'd (or `def`ed) right before the send at idx, skipping the
-  # EXT prefix of a wide operand; nil when anything else feeds an argument.
-  def preceding_name_args(insns, idx, n)
-    syms = []
-    BytecodeIR::Window.each_preceding(insns, idx) do |insn, _|
-      break if syms.size == n
+  # Every reaching argument value must have a finite immutable name set. A String
+  # remains usable only at its adjacent load: register flow does not prove aliases
+  # cannot mutate it. Definition ops return their Symbol name in the receiver register.
+  def argument_name_sets(irep, idx, insn, n, definitions: false, strings: false)
+    (1..n).map do |position|
+      reg = (insn.reg.to_i + position).to_s
+      defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true, origin_transfers: true)
+      return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
-      next if BytecodeIR::Ops::EXT.include?(insn.op)
-      return nil unless %w[LOADSYM DEF].include?(insn.op)
+      names = defs.map do |definition|
+        writer = BytecodeIR.for(irep).source_at(definition.index)
+        case writer.op
+        when 'LOADSYM' then writer.sym_token
+        when 'DEF', 'TDEF', 'SDEF' then writer.sym_token if definitions
+        when 'STRING'
+          next unless strings && definition.index == idx - n + position - 1
+          next unless BytecodeIR.for(irep).linear_corridor?(definition.index, idx, include_handlers: true)
+          next unless irep.instructions[definition.index + 1...idx].all? { |op| %w[LOADSYM STRING MOVE].include?(op.op) }
 
-      syms.unshift(insn.sym_token)
+          irep.pool[writer.pool_index.to_i]
+        end
+      end
+      return nil unless names.all?(String)
+
+      names.uniq
     end
-    syms if syms.size == n
   end
 
   # The n Symbol arguments LOADSYM'd right before the send at idx, or nil.
@@ -1538,34 +1732,18 @@ class ClosedWorld
     run.map { |i| i.sym_token }
   end
 
-  # The names of the +n+ arguments before +idx+ when each is a Symbol or String literal, else nil.
-  def literal_names(irep, insns, idx, n)
-    return [] if n.zero?
-
-    run = insns[(idx - n).clamp(0, idx)...idx]
-    return nil unless run.size == n
-
-    names = run.map do |i|
-      case i.op
-      when 'LOADSYM' then i.sym_token
-      when 'STRING' then irep.pool[i.pool_index.to_i]
-      end
-    end
-    names.all?(String) ? names : nil
-  end
-
-  # REMOVED_NAMES: `undef_method NAME`, `remove_method NAME` and the same through `send`/`__send__`/`public_send`
-  # (the name is the argument after the remover). A computed name or target may be any method, so it marks every name.
-  def scan_removal_send(irep, insns, idx, insn)
-    names = insn.argc && literal_names(irep, insns, idx, insn.argc)
+  # REMOVED_NAMES: preserve each argument's alternatives separately: only the first
+  # argument of a forwarding send selects the operation, while the rest name methods.
+  def scan_removal_send(irep, _insns, idx, insn)
+    sets = insn.argc && argument_name_sets(irep, idx, insn, insn.argc, strings: true)
     if REMOVER_SENDS.include?(insn.sym)
-      return @dynamic_removal = true unless names
+      return @dynamic_removal = true unless sets
 
-      @removed_names.merge(names)
-    elsif !names || NAME_FORWARDERS.include?(names.first)
+      @removed_names.merge(sets.flatten)
+    elsif !sets || sets.first&.any? { |name| NAME_FORWARDERS.include?(name) }
       @dynamic_removal = true
-    elsif REMOVER_SENDS.include?(names.first)
-      @removed_names.merge(names.drop(1))
+    elsif sets.first&.any? { |name| REMOVER_SENDS.include?(name) }
+      @removed_names.merge(sets.drop(1).flatten)
     end
   end
 

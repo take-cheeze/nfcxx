@@ -8,6 +8,8 @@
 #   ruby scripts/bc2cpp/ir_facts_check.rb
 require_relative '../../../tools/bc2cpp/irep'
 require_relative '../../../tools/bc2cpp/bytecode_ir'
+require_relative '../../../tools/bc2cpp/codegen_exact_receiver'
+require_relative '../../../tools/bc2cpp/codegen_step_loop'
 
 require_relative '../check_support'
 require_relative '../ir_instruction_fixtures'
@@ -62,5 +64,43 @@ check.call('LOADSELF is self_class on the caller\'s proof', klass.call(entry.exa
 pool = BytecodeIR::Types.new(Irep.new(label: 't', instructions: [insn(0, 'LOADL', "R1\tL[0]"), insn(3, 'RETURN', 'R1')],
                                       catch_handlers: [], nlocals: 4, pool: [{ type: :int64, value: 1 << 40 }]))
 check.call('LOADL of a pool integer has no exact class', pool.exact_at(1, '1').nil?)
+
+# The step-loop consumer requires one literal value, not merely Integer class agreement.
+generator = CodeGen.allocate
+step_body = lambda do |rows, handlers = []|
+  Irep.new(label: 'step', instructions: rows.each_with_index.map { |(op, args), i| insn(i, op, args) },
+           catch_handlers: handlers, nlocals: 1, nregs: 8, reps: [], pool: [])
+end
+step_value = lambda do |body|
+  generator.step_loop_literal(body, body.instructions.size - 2, '2')
+end
+moved = step_body.call([['LOADI_2', 'R5 (2)'], ['MOVE', 'R3 R5'], ['MOVE', 'R2 R3'], ['RETURN', 'R2']])
+check.call('step literal follows MOVE chains', step_value.call(moved) == 2)
+joined = [['JMPNOT', 'R1 3'], ['LOADI_2', 'R2 (2)'], ['JMP', '4'], ['LOADI_2', 'R2 (2)'], ['RETURN', 'R2']]
+check.call('step literal accepts equal values across a join', step_value.call(step_body.call(joined)) == 2)
+different = joined.map(&:dup)
+different[3] = ['LOADI_3', 'R2 (3)']
+check.call('step literal refuses different Integer values across a join', step_value.call(step_body.call(different)).nil?)
+different[3] = ['LOADNIL', 'R2 (nil)']
+check.call('step literal refuses a non-Integer arm', step_value.call(step_body.call(different)).nil?)
+loop_rows = [['LOADI_2', 'R2 (2)'], ['JMPNOT', 'R1 4'], ['NOP', ''], ['JMP', '1'], ['RETURN', 'R2']]
+check.call('step literal survives a preserving loop', step_value.call(step_body.call(loop_rows)) == 2)
+loop_rows[2] = ['LOADI_3', 'R2 (3)']
+check.call('step literal refuses a loop that changes its value', step_value.call(step_body.call(loop_rows)).nil?)
+check.call('step literal refuses an entry value', step_value.call(step_body.call([['NOP', ''], ['RETURN', 'R2']])).nil?)
+handler = CatchHandler.new(type: :rescue, begin_addr: 1, end_addr: 3, target: 4)
+rescued = [['LOADI_2', 'R2 (2)'], ['NOP', ''], ['NOP', ''], ['JMP', '4'], ['RETURN', 'R2']]
+check.call('step literal follows handler paths that preserve its value', step_value.call(step_body.call(rescued, [handler])) == 2)
+rescued[2] = ['LOADI_3', 'R2 (3)']
+check.call('step literal refuses different values on handler paths', step_value.call(step_body.call(rescued, [handler])).nil?)
+limit = CodeGen::STEP_LOOP_LITERAL_MAX
+[0, limit, -limit, limit + 1, -limit - 1].each do |value|
+  expected = value.abs <= limit ? value : nil
+  body = step_body.call([['LOADI32', "R2 #{value}"], ['RETURN', 'R2']])
+  check.call("step literal keeps the cross-target fixnum boundary #{value}", step_value.call(body) == expected)
+end
+large = step_body.call([['LOADL', 'R2 L[0]'], ['RETURN', 'R2']])
+large.pool = [{ type: :int64, raw: '.i64=1099511627776' }]
+check.call('step literal refuses pool integers', step_value.call(large).nil?)
 
 suite.finish!
