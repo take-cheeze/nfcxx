@@ -44,9 +44,16 @@ module BytecodeIR
     end
   end
 
-  # Value classes of a literal producer, spelled as the layout tables spell them.
-  LITERAL_VALUE_CLASSES = Types::LITERAL_TYPES.transform_values(&:to_s).freeze
-  POOL_VALUE_CLASSES = Types::POOL_TYPES.transform_values(&:to_s).freeze
+  # Value classes of a literal producer, spelled as the layout tables spell them. Read on first use: this file
+  # can load while Types is still loading (bytecode_ir.rb -> here, from inside bytecode_ir_types.rb).
+  def self.literal_value_classes
+    @literal_value_classes ||= Types::LITERAL_TYPES.transform_values(&:to_s).freeze
+  end
+
+  def self.pool_value_classes
+    @pool_value_classes ||= Types::POOL_TYPES.transform_values(&:to_s).freeze
+  end
+
   LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
 
   class Program
@@ -91,11 +98,12 @@ module BytecodeIR
       insn = source_at(index)
       return nil unless insn
       return 'Integer' if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
-      return LITERAL_VALUE_CLASSES[insn.op] if LITERAL_VALUE_CLASSES.key?(insn.op)
+      literal = Program.literal_value_classes
+      return literal[insn.op] if literal.key?(insn.op)
       return nil unless insn.op == 'LOADL'
 
       entry = insn.pool_index && pool && pool[insn.pool_index]
-      entry.is_a?(Hash) ? POOL_VALUE_CLASSES[entry[:type]] : nil
+      entry.is_a?(Hash) ? Program.pool_value_classes[entry[:type]] : nil
     end
 
     # Yields [source, index] from +start+ while each instruction is entered only from the one before it (normal or
