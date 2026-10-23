@@ -7,7 +7,7 @@
 #      built by nfcc: its configure rejects nfcc's probes. The preprocessor sdcpp is the host build, found on PATH.
 #   3. Compile every support/regression/tests/*.c that the reference accepts for -mmcs51 with both compilers, and
 #      compare the assembly byte for byte.
-# NFCXX_BACKEND=gcc is the only back end checked here: the qbe back end is not run.
+#   NFCXX_BACKEND=gcc|qbe   (default: both)
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 ver=4.6.0
@@ -46,14 +46,8 @@ fi
 ref=$work/sdcc-ref/sdcc
 mkdir -p "$(dirname "$ref")" && cp src/sdcc "$ref" || exit 1
 
-# The nfcc build: the compiler proper (src/), objects from scratch.
-make -C src clean > /dev/null 2>&1
-if ! NFCXX_BACKEND=gcc make -C src -j"$jobs" sdcc CC="$root/nfcc" > "$work/sdcc-nfcc-build.log" 2>&1; then
-  echo "FAIL sdcc: nfcc build of src/sdcc"; grep -m5 -E "error|Error" "$work/sdcc-nfcc-build.log"; exit 1
-fi
-nfc=$src/src/sdcc
-
 # Compare the assembly. The preprocessor is the host build in support/cpp/gcc (see above).
+base_path=$PATH
 export PATH=$src/support/cpp/gcc:$src/bin:$PATH
 export SDCC_HOME=$src
 tests=$src/support/regression/tests
@@ -61,6 +55,7 @@ fwk=$src/support/regression/fwk/include
 dev=$src/device/include
 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
 compare_one() {
+  # $nfc: the nfcc-built compiler of the back end being checked; the variables are exported before the call.
   f=$1; b=$(basename "$f" .c)
   if ! timeout 120 "$ref" -mmcs51 --std-c99 -I"$fwk" -I"$dev" -S -o "$out/h-$b.asm" "$f" > /dev/null 2>&1; then
     echo "skip $b (reference rejects it)"; return 0
@@ -74,9 +69,19 @@ compare_one() {
 export -f compare_one
 export ref nfc fwk dev out
 # Every test the reference accepts for mcs51, in name order (the list is fixed, so a run is repeatable).
-results=$(ls "$tests"/*.c | xargs -P"$jobs" -I{} bash -c 'compare_one "$@"' _ {})
-same=$(grep -c '^same ' <<<"$results"); skip=$(grep -c '^skip ' <<<"$results"); bad=$(grep -c '^FAIL ' <<<"$results")
-grep '^FAIL ' <<<"$results" | head -20
-echo "sdcc mcs51: $same compared identical, $skip skipped (reference rejects), $bad differ or fail"
-[ "$bad" -eq 0 ] && [ "$same" -gt 0 ] || fail=1
+backends=${NFCXX_BACKEND:-"gcc qbe"}
+for b in $backends; do
+  # The nfcc build: the compiler proper (src/), objects from scratch, on this back end.
+  make -C src clean > /dev/null 2>&1
+  # The build uses the original PATH: the support/cpp/gcc wrappers (as, cpp) are for the comparison below.
+  if ! PATH=$base_path NFCXX_BACKEND=$b make -C src -j"$jobs" sdcc CC="$root/nfcc" > "$work/sdcc-nfcc-$b.log" 2>&1; then
+    echo "FAIL $b sdcc: nfcc build of src/sdcc"; grep -m5 -E "error|Error" "$work/sdcc-nfcc-$b.log"; fail=1; continue
+  fi
+  export nfc=$src/src/sdcc
+  results=$(ls "$tests"/*.c | xargs -P"$jobs" -I{} bash -c 'compare_one "$@"' _ {})
+  same=$(grep -c '^same ' <<<"$results"); skip=$(grep -c '^skip ' <<<"$results"); bad=$(grep -c '^FAIL ' <<<"$results")
+  grep '^FAIL ' <<<"$results" | head -20
+  echo "$b sdcc mcs51: $same compared identical, $skip skipped (reference rejects), $bad differ or fail"
+  if [ "$bad" -ne 0 ] || [ "$same" -eq 0 ]; then fail=1; fi
+done
 exit $fail
