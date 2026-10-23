@@ -26,8 +26,10 @@ module NilableReceiverSend
     return plain if plain.include?('#error') || inner.include?('#error')
 
     nil_arm = nilable_nil_arm(insn, recv, plan[:name], plan[:argv])
-    # Only worth a nil test when the non-nil path sheds dispatches the plain code keeps.
-    return plain unless dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain) ||
+    # Only worth a nil test when the non-nil path sheds dispatches the plain code keeps, or when the
+    # receiver is nil-or-Array: the non-nil path is then the Array dispatch itself (no class guard).
+    return plain unless plan[:klass] == 'Array' ||
+                        dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain) ||
                         (EXACT_MARK.match?(inner) && !EXACT_MARK.match?(plain))
 
     body = inner.lines.map { |line| line.strip.empty? ? line : "  #{line}" }.join
