@@ -388,7 +388,9 @@ class ClassArgTypesTest < Minitest::Test
     # `to_enum(:set, *r)`: LOADSYM R2; ARRAY R2 1; MOVE R3 R9; ARYCAT R2 (R3); SSEND R1 n=*.
     packed = irep('packed', [insn('LOADSYM', "R2\t:set"), insn('ARRAY', "R2\t1"), insn('MOVE', "R3\tR9"),
                              insn('ARYCAT', "R2\t(R3)"), insn('SSEND', "R1\t:to_enum\tn=*")])
-    assert_equal [nil], CallSiteIndex.build({ 'e' => packed })['set'].map { |*, n| n }
+    index = CallSiteIndex.build({ 'e' => packed })
+    assert_empty index['set']
+    assert_equal [nil], CallSiteIndex.sites(index, 'set').map { |*, n| n }
     with_tracer_answering('A') do
       assert_equal [nil], class_types_for('plain' => direct_caller, 'enum' => packed)
       assert_equal ['A'], class_types_for('plain' => direct_caller, 'enum' => enum_caller(name: 'other'))
@@ -421,7 +423,7 @@ class ClassArgTypesTest < Minitest::Test
     with_tracer_answering('A') { assert_equal [nil], class_types_for('plain' => direct_caller, 'packed' => packed) }
   end
 
-  def test_to_enum_with_a_conditional_name_is_not_taken_for_one_literal
+  def test_to_enum_with_a_conditional_name_records_every_literal
     # `to_enum(c ? :set : :other, 1)`: the nearest LOADSYM of R2 is :other, but a jump lands between it and the send.
     branch = Irep.new(label: 'cond', instructions: [
       Insn.new(lineno: 0, addr: 0, op: 'JMPNOT', args: "R7\t010", raw: 'JMPNOT R7 010'),
@@ -432,9 +434,10 @@ class ClassArgTypesTest < Minitest::Test
       Insn.new(lineno: 0, addr: 15, op: 'SSEND', args: "R1\t:to_enum\tn=2", raw: '')
     ])
     index = CallSiteIndex.build({ 'e' => branch })
-    assert_nil index['set'].first
-    assert_nil index['other'].first
-    refute_empty index[CallSiteIndex::UNKNOWN_TARGET]
+    assert_equal [1], index['set'].map { |*, n| n }
+    assert_equal [1], index['other'].map { |*, n| n }
+    assert_empty index[CallSiteIndex::UNKNOWN_TARGET]
+    assert_empty CallSiteIndex.sites(index, 'unrelated')
   end
 
   def test_block_form_to_enum_still_forwards_only_the_positional_arguments

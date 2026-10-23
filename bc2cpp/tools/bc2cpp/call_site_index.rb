@@ -57,29 +57,36 @@ class CallSiteIndex
       by_name['each'] << [irep, idx, dest + 1, 0]
       return
     end
-    target = enum_target(irep, idx, insn, dest + 1)
-    by_name[target || UNKNOWN_TARGET] << [irep, idx, dest + 1, forwarded]
+    targets = enum_targets(irep, idx, insn, dest + 1)
+    (targets || [UNKNOWN_TARGET]).each do |target|
+      by_name[target] << [irep, idx, dest + 1, forwarded]
+    end
   end
 
-  # The literal method name of the site, or nil. Only a straight-line LOADSYM counts: a jump landing between
-  # the symbol and the send (`cond ? :a : :b`) leaves several writers, of which a backward walk sees one.
+  # A singleton name for consumers whose contract cannot represent alternatives.
   def self.enum_target(irep, idx, insn, reg)
-    packed = insn.n_spec == '*'
-    # Packed: `[:meth, ...] + *args` is LOADSYM R; ARRAY R n; ARYCAT/ARYPUSH R ...
-    writer = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |w, i, _r|
-      case w.op
-      when 'LOADSYM' then ([w, i] if w.sym)
-      when 'ARYCAT', 'ARYPUSH' then packed ? IrepScans::KEEP : nil
-      when 'ARRAY' then packed && w.uint_operand.to_i.positive? ? IrepScans::KEEP : nil
+    names = enum_targets(irep, idx, insn, reg)
+    names.first if names && names.size == 1
+  end
+
+  # Every possible literal Symbol name, or nil when any reaching value is unknown.
+  # Packed arrays require a separate alias/mutation proof; their element writers alone are insufficient.
+  def self.enum_targets(irep, idx, insn, reg)
+    return nil if insn.n_spec == '*'
+
+    writers = BytecodeIR.reaching_writer_indices(irep, idx, reg.to_s)
+    return nil unless writers
+
+    names = writers.map do |index|
+      writer = irep.instructions[index]
+      case writer.op
+      when 'LOADSYM' then writer.sym
+      when 'SYMBOL'
+        value = irep.pool[writer.pool_index]
+        value if value.is_a?(String)
       end
     end
-    return nil unless writer.is_a?(Array)
-
-    sym_insn, sym_index = writer
-    # The name is the LOADSYM's on every path only if nothing enters the run after it, a jump or a catch handler.
-    return nil unless BytecodeIR.for(irep).linear_corridor?(sym_index, idx, include_handlers: true)
-
-    sym_insn.sym
+    names.all?(String) ? names.uniq : nil
   end
 
   # irep label -> name of its nearest enclosing `def` body (the irep itself when it is one), from the
