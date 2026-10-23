@@ -33,6 +33,16 @@ CLASS_MODULE = Set['CLASS', 'MODULE'].freeze
 INDEX_READ = Set['GETIDX', 'GETIDX0'].freeze
 # Ops that make a Proc from a literal block body of the current irep.
 LITERAL_PROC = Set['BLOCK', 'LAMBDA'].freeze
+# The self-receiver forms, including the splat forms. Named apart from SELF_SEND, whose membership is the master set.
+SELF_SEND_FAMILY = Set['SSEND', 'SSEND0', 'SSENDB', 'SSENDV', 'SSENDVB'].freeze
+# The sends that pass a block, splat forms included. Named apart from BLOCK_SEND, whose membership is the master set.
+BLOCK_SEND_FAMILY = Set['SENDB', 'SSENDB', 'SENDVB', 'SSENDVB'].freeze
+# The plain sends (SEND, SEND0, SENDB): arguments are a count, not a splat array as in SENDV.
+COUNTED_SEND = (SEND - SELF_SEND_FAMILY).freeze
+# Every send whose receiver is a register (the name prefix SEND, splat forms included).
+REGISTER_RECEIVER_SEND = (SEND_FAMILY - SELF_SEND_FAMILY).freeze
+# The zero-argument forms of SEND and SSEND.
+ZERO_ARG_SEND = Set['SEND0', 'SSEND0'].freeze
 
     # Ops whose leading register is only READ and which may fall through (vm.c tests or raises on R(a));
     # SETUPVAR stores R(a) into an enclosing frame.
@@ -40,6 +50,12 @@ LITERAL_PROC = Set['BLOCK', 'LAMBDA'].freeze
     # READS_LEAD plus the frame exits that return R(a): every op whose leading register operand is read and never
     # written, so a backward writer walk may step over it.
     LEAD_READ_ONLY = (READS_LEAD | %w[RETURN RETURN_BLK BREAK]).freeze
+
+    # A Range built from two endpoint registers.
+    RANGE_BUILD = Set['RANGE_INC', 'RANGE_EXC'].freeze
+    # Integer arithmetic with vm.c's integer arms; the I forms take an immediate second operand.
+    INT_ARITH = Set['ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI'].freeze
+    IMM_ARITH = Set['ADDI', 'SUBI'].freeze
 
     # Ops that leave the frame.
     FRAME_EXIT = Set['RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'].freeze
