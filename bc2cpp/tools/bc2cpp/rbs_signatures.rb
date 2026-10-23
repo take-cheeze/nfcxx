@@ -40,8 +40,8 @@ module RbsSignatures
   end
   # native: the declaration is in a native signature file (NativeSigs), not a program declaration.
   Loc = Struct.new(:file, :line, :col, :native)
-  # args: one Type per required positional parameter; ret: Type or nil
-  MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, keyword_init: true)
+  # args: one Type per required positional parameter; ret: Type or nil; rest_type: the Type of `*T` or nil
+  MethodSig = Struct.new(:owner, :name, :args, :optional_args, :keywords, :required_keywords, :ret, :loc, :type_params, :argument_types, :return_type, :block_type, :type_param_bounds, :callback_supported, :rest_type, keyword_init: true)
   IvarSig = Struct.new(:owner, :name, :type, :loc, keyword_init: true)
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
   # optional: for `T?`, T's own Type; the `T?` Type itself stays kind :other.
@@ -183,7 +183,8 @@ module RbsSignatures
     args = fn.required_positionals.map { |p| type_of(p.type) }
     extras = []
     extras << 'optional parameters' unless fn.optional_positionals.empty?
-    extras << 'a rest parameter' if fn.rest_positionals
+    # A `*T` with a class set types the elements in the body (ir_rest_elements), so it is a hint, not a bare rest.
+    extras << 'a rest parameter' if fn.rest_positionals && !value_classes_of(fn.rest_positionals.type)
     extras << 'trailing parameters' unless fn.trailing_positionals.empty?
     extras << 'keyword parameters' unless fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords
     extras << 'a block type' if mt.block
@@ -199,7 +200,8 @@ module RbsSignatures
                                                                argument_types: fn.required_positionals.map(&:type).freeze,
                                                                return_type: fn.return_type, block_type: mt.block,
                                                                type_param_bounds: mt.type_params.to_h { |param| [param.name.to_s, param.upper_bound_type || param.default_type] }.freeze,
-                                                               callback_supported: fn.optional_positionals.empty? && !fn.rest_positionals && fn.trailing_positionals.empty? && fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords)
+                                                               callback_supported: fn.optional_positionals.empty? && !fn.rest_positionals && fn.trailing_positionals.empty? && fn.required_keywords.empty? && fn.optional_keywords.empty? && !fn.rest_keywords,
+                                                               rest_type: fn.rest_positionals && type_of(fn.rest_positionals.type))
     key = [owner, m.name.to_s]
     out.methods[key] = out.methods.key?(key) ? merge_method_sig(out.methods[key], fresh) : fresh
   end
@@ -296,7 +298,7 @@ module RbsSignatures
 
   # --------------------------------------------------------------------------------------------- applying
 
-  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based, keyword_init: true)
+  Applied = Struct.new(:ivar_classes, :ivar_elements, :ivar_hash_elements, :origins, :locs, :diagnostics, :ivar_sigs, :ir_arg_types, :ir_return_types, :ir_named_returns, :ir_ivar_types, :ir_owners, :ir_methods, :ir_arg_elements, :ir_ivar_elements, :ir_const_elements, :ir_optional_types, :ir_keyword_types, :ir_rest_elements, :ir_block_signatures, :subtree_ivars, :subtree_args, :subtree_returns, :based, keyword_init: true)
 
   # Merges the signatures into the three comment-annotation tables (irep label -> struct), in place, and returns what
   # the ivar seeds and the diagnostics are. `annotations`, `class_annotations` and `element_annotations` are what
@@ -308,7 +310,7 @@ module RbsSignatures
     known_owners = registry.values.flatten.map(&:owner).to_set
     ap = Applied.new(ivar_classes: Hash.new { |h, k| h[k] = {} }, ivar_elements: Hash.new { |h, k| h[k] = {} },
                      ivar_hash_elements: Hash.new { |h, k| h[k] = {} }, origins: {}, locs: {}, diagnostics: loaded.diagnostics.dup,
-                     ivar_sigs: loaded.ivars, ir_block_signatures: {}, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_const_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
+                     ivar_sigs: loaded.ivars, ir_block_signatures: {}, ir_optional_types: {}, ir_keyword_types: {}, ir_rest_elements: {}, ir_arg_types: {}, ir_arg_elements: {}, ir_ivar_elements: {}, ir_const_elements: {}, ir_return_types: {}, ir_named_returns: {}, ir_ivar_types: {},
                      ir_methods: registry.values.flatten.map { |d| [d.owner, d.name.to_s].freeze }.to_set.freeze,
                      ir_owners: registry.values.flatten.select(&:irep).group_by(&:irep).filter_map do |label, defs|
                        owners = defs.map(&:owner).uniq
@@ -365,6 +367,13 @@ module RbsSignatures
 
             [register, type.value_classes] if type.value_classes
           end.to_h.freeze
+        end
+        # `*T` types the rest register (after the optional ones) of a positional-only rest, the layout the call-site
+        # join accepts (irep_arity.rb rest_positional_shape?). The optional count must match, as for optional types.
+        fields = runtime.enter&.enter_fields&.map(&:to_i) || []
+        if sig.rest_type&.value_classes && Array(sig.optional_args).size == optional_count && fields[2].to_i.positive? &&
+           fields[3].to_i.zero? && fields[4].to_i.zero? && fields[5].to_i.zero?
+          ap.ir_rest_elements[d.irep] = { (mand + optional_count + 1).to_s => sig.rest_type.value_classes }.freeze
         end
         runtime_keywords = BytecodeIR.for(runtime).instructions_with_op('KARG').map { |insn| insn.sym.to_s }.to_set
         runtime_optional = BytecodeIR.for(runtime).instructions_with_op('KEY_P').map { |insn| insn.sym.to_s }.to_set
@@ -480,7 +489,7 @@ module RbsSignatures
     end
     BytecodeIR::Types.new(irep, declared_args: applied.ir_arg_types.fetch(irep.label, {}),
                          declared_optional_args: applied.ir_optional_types.fetch(irep.label, {}), declared_keywords: applied.ir_keyword_types.fetch(irep.label, {}),
-                         declared_arg_elements: applied.ir_arg_elements.fetch(irep.label, {}),
+                         declared_arg_elements: applied.ir_arg_elements.fetch(irep.label, {}), declared_rest_elements: applied.ir_rest_elements.fetch(irep.label, {}),
                          declared_const_elements: applied.ir_const_elements,
                          declared_ivars: ivars, declared_ivar_elements: ivar_elements, declared_calls: calls, inferred_calls: inferred_calls, inferred_args: inferred_args,
                          inferred_keywords: inferred_keywords, inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)

@@ -25,7 +25,8 @@ module BytecodeIR
 
     # inferred_args: positional registers, plus the block register (a Proc join); inferred_keywords: required keyword
     # name => join; inferred_rest_elements: rest register => element join. Each is a call-site join (IrTypeFeedback).
-    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, inferred_keywords: {}, inferred_rest_elements: {}, declared_arg_elements: {}, declared_ivar_elements: {}, declared_const_elements: {}, source_resolver: nil, call_resolver: nil, argument_facts: {})
+    # declared_rest_elements: rest register => the T of a signature's `*T`.
+    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, inferred_keywords: {}, inferred_rest_elements: {}, declared_arg_elements: {}, declared_rest_elements: {}, declared_ivar_elements: {}, declared_const_elements: {}, source_resolver: nil, call_resolver: nil, argument_facts: {})
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @argument_facts = argument_facts.to_h do |reg, fact|
@@ -59,6 +60,7 @@ module BytecodeIR
       @inferred_keywords = inferred_keywords.to_h { |name, types| [name.to_s, types.to_set.dup.freeze] }.freeze
       @inferred_rest_elements = inferred_rest_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
       @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @declared_rest_elements = declared_rest_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
       @declared_ivar_elements = declared_ivar_elements.to_h { |name, types| [name.to_s.delete_prefix('@'), types.to_set.dup.freeze] }.freeze
       @declared_const_elements = declared_const_elements.to_h { |name, type| [name.to_s, Set[type.to_sym]] }.freeze
       @source_resolver = source_resolver
@@ -356,7 +358,7 @@ module BytecodeIR
       if source.entry? || source.built == :arg
         [@declared_arg_elements[source.reg], "element:argument:R#{source.reg}"]
       elsif source.built == :rest
-        [rest_element_bound(source.reg), nil]
+        rest_element_bound(source.reg)
       else
         element_bound_of(@irep.instructions[source.index])
       end
@@ -371,11 +373,15 @@ module BytecodeIR
       end
     end
 
-    # The call-site join of a rest parameter's elements, kept only while the body cannot change the array (see
-    # rest_array_private?): a mutated or escaping array may hold any element.
+    # The element bound of a rest parameter and its contract. The call-site join holds only while the body cannot
+    # change the array (rest_array_private?); otherwise the signature's `*T` stands in. With both, the join wins, as
+    # for a required parameter (definition_types before declared_definition).
     def rest_element_bound(reg)
-      bound = @inferred_rest_elements[reg]
-      bound if bound && rest_array_private?(reg)
+      joined = @inferred_rest_elements[reg]
+      return [joined, nil] if joined && rest_array_private?(reg)
+
+      declared = @declared_rest_elements[reg]
+      declared ? [declared, "element:argument:R#{reg}"] : [nil, nil]
     end
 
     # Ops that observe the frame's locals without naming the register: a closure captures them, ARGARY packs the

@@ -382,6 +382,29 @@ rest_mutated = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['MOVE', 'R3 R1'], ['SEND', 
                 ['GETIDX0', 'R2 R1[0]'], ['RETURN', 'R2']]
 check.call('a body that calls a method on the rest array (or a copy) refuses the element join',
            body_fact.call(rest_mutated, 4, '2', inferred_rest_elements: { '1' => Set[:Integer] }).nil?)
+# A signature's `*T` (declared_rest_elements) types the element read where the call-site join is withheld: the join is
+# used only while the body cannot change the array, and the declared T stands in otherwise. With both, the join wins, as
+# for a required parameter (definition_types before declared_definition). A declared bound is not a body fact for the
+# undeclared query (`at`), which exact consumers use.
+declared_rest = lambda do |instructions, index, reg, **inputs|
+  BytecodeIR::Types.new(body_irep.call(instructions), **inputs).fact_at(index, reg)
+end
+declared_only = declared_rest.call(rest_body, 2, '2', declared_rest_elements: { '1' => Set[:Integer] })
+check.call('a declared *Integer rest read in the body is Integer (nil for an absent index), and is declared',
+           declared_only&.classes == Set[:NilClass, :Integer] && declared_only.declared?)
+check.call('a declared rest element is not visible to the undeclared query',
+           BytecodeIR::Types.new(body_irep.call(rest_body), declared_rest_elements: { '1' => Set[:Integer] }).at(2, '2').nil?)
+check.call('a mutated rest with a declared *Integer takes only the declaration: the call-site join String is not added',
+           declared_rest.call(rest_mutated, 4, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] },
+                              declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer])
+rest_captured = [['ENTER', '0:0:1:0:0:0:0:0 (0x0)'], ['LAMBDA', 'R3 I[0]'], ['GETIDX0', 'R2 R1[0]'], ['RETURN', 'R2']]
+check.call('a closure capturing the rest withdraws the join, and the declared *Integer types the read',
+           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] },
+                              declared_rest_elements: { '1' => Set[:Integer] })&.classes == Set[:NilClass, :Integer] &&
+           declared_rest.call(rest_captured, 3, '2', inferred_rest_elements: { '1' => Set[:Integer, :String] }).nil?)
+check.call('a declared *String with a private join of Integer: the join is read, as for a required parameter',
+           declared_rest.call(rest_body, 2, '2', inferred_rest_elements: { '1' => Set[:Integer] },
+                              declared_rest_elements: { '1' => Set[:String] })&.classes == Set[:NilClass, :Integer])
 keyword_body = [['ENTER', '0:0:0:0:1:0:0:0 (0x0)'], ['KARG', 'R3 :key'], ['RETURN', 'R3']]
 check.call('required keyword reads its joined type',
            body_fact.call(keyword_body, 2, '3', inferred_keywords: { 'key' => Set[:String, :Integer] }) == Set[:String, :Integer])
@@ -454,6 +477,55 @@ ensure
   ENV.delete('BC2CPP_IR_ARGUMENT_TYPES')
 end
 check.call('the codegen join is restored once the switch is off', rest_join_of.call == Set[:Integer])
+# The signature side, host only: RbsSignatures reads `*T` into the body as declared_rest_elements at the register after
+# the required and optional positionals, and only for a positional-only rest (no post, keyword or keyword-rest).
+require 'tmpdir'
+require_relative '../../tools/bc2cpp/rbs_signatures'
+SigDef = Struct.new(:owner, :name, :irep, :visibility)
+sig_methods = { 'typed_rest' => [0, 0, 1, 0, '(*Integer) -> untyped'], 'untyped_rest' => [0, 0, 1, 0, '(*untyped) -> untyped'],
+                'mixed_rest' => [1, 0, 1, 0, '(String, *Integer) -> untyped'],
+                'post_rest' => [0, 0, 1, 1, '(*Integer, String) -> untyped'] }
+sig_ireps = {}
+sig_registry = {}
+sig_source = +"class RestSig\n"
+sig_methods.each do |name, (mand, opt, rest, post, type)|
+  label = "sig_#{name}"
+  rest_reg = mand + opt + 1
+  sig_source << "  def #{name}: #{type}\n"
+  sig_ireps[label] = Irep.new(label: label, nlocals: 4, nregs: 8, instructions: [
+    Insn.new(lineno: 1, addr: 0, op: 'ENTER', args: "#{mand}:#{opt}:#{rest}:#{post}:0:0:0:0 (0x0)"),
+    Insn.new(lineno: 1, addr: 4, op: 'GETIDX0', args: "R#{rest_reg + 1} R#{rest_reg}[0]"),
+    Insn.new(lineno: 1, addr: 8, op: 'RETURN', args: "R#{rest_reg + 1}")
+  ])
+  sig_registry[name] = [SigDef.new('RestSig', name, label, nil)]
+end
+sig_source << "end\n"
+Dir.mktmpdir('rest-signature-fixture') do |dir|
+  File.write(File.join(dir, 'rest.rbs'), sig_source)
+  loaded = RbsSignatures.load([dir], display_root: dir)
+  applied = RbsSignatures.apply(loaded, sig_ireps, sig_registry, {}, {}, {})
+  body_of = lambda do |name, **inputs|
+    irep = sig_ireps["sig_#{name}"]
+    analysis = RbsSignatures.ir_types(applied, irep, **inputs)
+    analysis.fact_at(2, (irep.enter.enter_fields[0].to_i + irep.enter.enter_fields[1].to_i + 2).to_s)
+  end
+  typed = body_of.call('typed_rest')
+  check.call('a signature `*Integer` types the body element read as Integer (declared, nil for an absent index)',
+             typed&.classes == Set[:NilClass, :Integer] && typed.declared?)
+  check.call('the TC1005 "accepted but give no hint" note no longer names a `*T` rest',
+             loaded.diagnostics.none? { |d| d.message.start_with?('RestSig#typed_rest:') && d.message.include?('a rest parameter') } &&
+             loaded.diagnostics.any? { |d| d.message.start_with?('RestSig#untyped_rest:') && d.message.include?('a rest parameter') })
+  check.call('a signature `*untyped` gives the body no element type', body_of.call('untyped_rest').nil?)
+  mixed = body_of.call('mixed_rest')
+  check.call('a `*Integer` after a required parameter types the rest element, not the required one',
+             mixed&.classes == Set[:NilClass, :Integer] && mixed.declared?)
+  check.call('a rest followed by a post parameter gives no declared element type (the layout is not the one ENTER fills)',
+             body_of.call('post_rest').nil?)
+  joined = body_of.call('typed_rest', inferred_rest_elements: { '1' => Set[:Integer] })
+  check.call('a signature `*Integer` and a complete private join of Integer read Integer',
+             joined&.classes == Set[:NilClass, :Integer])
+end
+
 puts 'body consumes call-site joins (rest element, required keyword, Proc block) passed'
 
 if ENV['MRBC']

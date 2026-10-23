@@ -41,7 +41,7 @@ end
 def applied(ir_methods:, returns:, owner:)
   RbsSignatures::Applied.new(
     ir_methods: ir_methods.to_set, ir_named_returns: returns, ir_owners: { 'use' => owner },
-    ir_arg_types: { 'use' => {} }, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_elements: {},
+    ir_arg_types: { 'use' => {} }, ir_optional_types: {}, ir_keyword_types: {}, ir_arg_elements: {}, ir_rest_elements: {},
     ir_const_elements: {}, ir_return_types: {}, ir_ivar_types: {}, ir_ivar_elements: {}
   )
 end

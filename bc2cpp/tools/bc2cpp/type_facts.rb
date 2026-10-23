@@ -171,8 +171,8 @@ module TypeFacts
         'type' => (types || inferred) && BytecodeIR::Types.type_name(types || inferred),
         'source' => types ? 'signature' : inferred ? 'inferred:receiver-call-sites' : nil }
     end
-    # Rest element and block parameter: call-site joins only. No declared rest type exists; a declared block
-    # signature keeps its optional block, so the inferred Proc is withheld there.
+    # Rest element and block parameter: call-site joins only. A declared `*T` is a body fact (BytecodeIR::Types), so it
+    # has no row here. A declared block signature keeps its optional block, so the inferred Proc is withheld there.
     rest_classes = rest.positive? && gen.respond_to?(:bytecode_ir_rest_argument_classes) ? gen.bytecode_ir_rest_argument_classes(d) : nil
     rest_row = rest.positive? ? { 'type' => rest_classes && BytecodeIR::Types.type_name(rest_classes),
                                   'source' => rest_classes ? 'inferred:receiver-call-sites' : nil } : nil
