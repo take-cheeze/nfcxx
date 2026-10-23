@@ -180,9 +180,22 @@ Dir.mktmpdir('ir-context-results') do |dir|
     end
   RUBY
   File.write(File.join(dir, 'fixture.rb'), source)
-  run = lambda do |extra_env = {}|
-    env = { 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_STRICT_HINTS' => '0' }.merge(extra_env)
-    TypeCheckFixture.facts_report(dir, env: env, label: 'context fixture')
+  controls = [
+    { 'BC2CPP_IR_FRAME_ALLOCATIONS' => '0' }, { 'BC2CPP_IR_FIXED_BINDINGS' => '0' },
+    { 'BC2CPP_IR_CONTEXT_REEVALUATION' => '0' }, { 'BC2CPP_IR_LEAF_EVALUATIONS' => '0' },
+    { 'BC2CPP_IR_BINDING_INDEX' => '0', 'BC2CPP_IR_CALL_INDEX' => '0', 'BC2CPP_CLASS_MEMBER_INDEX' => '0' }
+  ]
+  variants = controls + [{ 'BC2CPP_IR_CONTEXT_RESULTS' => '0' }]
+  %w[BC2CPP_IR_CONTEXT_MAX_CONTEXTS BC2CPP_IR_CONTEXT_MAX_ROUNDS].each do |budget|
+    base = { budget => '1' }
+    variants += [base] + controls.map { |control| base.merge(control) }
+  end
+  variants += [{ 'BC2CPP_IR_EFFECT_SUMMARIES' => '0' }, { 'BC2CPP_IR_CONTEXT_SHAPES' => '0' }]
+  reports = nil
+  run = lambda do |extra_env|
+    reports ||= TypeCheckFixture.shared_reports(dir, variants: variants,
+      env: { 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_STRICT_HINTS' => '0' }, label: 'context fixture')
+    reports.fetch(extra_env)
   end
   report = TypeCheckFixture.report(dir, env: { 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_STRICT_HINTS' => '0' }, label: 'context CLI fixture')
   check.call('frame allocation elision preserves the complete report', report == run.call('BC2CPP_IR_FRAME_ALLOCATIONS' => '0'))

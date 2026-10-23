@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
 require_relative 'fixpoint'
 require_relative 'record_hash'
 require_relative 'ivar_poison_causes'
@@ -102,7 +103,7 @@ def array_join_source?(irep, idx, reg, receiver_class)
     next false if defn.entry?
 
     insn = irep.instructions[defn.index]
-    next true if %w[ARRAY ARRAY2].include?(insn.op)
+    next true if BytecodeIR::Ops::ARRAY_ALLOC.include?(insn.op)
 
     insn.op == 'GETIDX' && lcf_file_array_read?(irep, defn.index, insn, receiver_class)
   end
@@ -127,12 +128,12 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     # LCF_FILE_FIELDS (lcf_file_fields.rb): `unit[:key]` on an exact LCF file whose schema field is an Array.
     next 'Array' if pin.op == 'GETIDX' && lcf_file_array_read?(irep, pin_idx, pin, receiver_class)
 
-    next nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
+    next nil unless BytecodeIR::Ops::SEND.include?(pin.op)
 
     called = pin.sym
     next nil unless called
 
-    block_carrying = %w[SENDB SSENDB].include?(pin.op)
+    block_carrying = BytecodeIR::Ops::BLOCK_SEND.include?(pin.op)
     if block_carrying && BLOCK_RESULT_NAMES.include?(called)
       # CHAINED_IVAR_RECEIVER: ClassLayout passes the class it has proven so far, so `@q = @q.reject { }` on an ivar
       # that every other store makes an Array is an Array store too (a plain trace cannot read the ivar).
