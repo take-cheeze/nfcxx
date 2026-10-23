@@ -45,20 +45,12 @@ class CodeGen
     regions
   end
 
-  # The integer a register holds at the call (instruction `from + 1`) if the LOADI that
-  # wrote it dominates the call (BytecodeIR.write_dominates?, catch-handler edges included),
-  # else nil.
+  # Every reaching literal must agree, including through aliases and handler edges.
+  # The shared exact proof excludes pool integers; the limit keeps every target's fixnum range.
   def step_loop_literal(irep, from, reg)
-    writer_index = irep.last_writer_index(from, reg)
-    return nil unless writer_index
-
-    writer = irep.instructions[writer_index]
-    return nil unless writer.op.start_with?('LOADI')
-
-    value = (writer.paren_value || writer.imm_operand)&.to_i
-    return nil unless value&.abs&.<=(STEP_LOOP_LITERAL_MAX)
-
-    BytecodeIR.write_dominates?(irep, writer_index, from + 1, reg) ? value : nil
+    fact = exact_literal(irep, from + 1, reg)
+    value = fact&.value if fact&.klass == :Integer
+    value if value && value.abs <= STEP_LOOP_LITERAL_MAX
   end
 
   # A C++ `long long` expression for a loop operand, or nil if it is not provably an Integer.
