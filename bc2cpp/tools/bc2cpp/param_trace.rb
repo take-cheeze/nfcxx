@@ -36,6 +36,8 @@ require_relative 'else_trace'
 # scripts/bc2cpp/trace_types.rb report reads it, together with an ElseTrace dump.
 module ParamTrace
   MAX_CLASSES = 8
+  # Elements (Array) or entries (Hash) sampled per container hit. The rest are counted as overflow, never dropped.
+  ELEM_SAMPLE = 32
   # The impl header: `mrb_value Foo_bar_impl(mrb_state* M, mrb_value self, <params>) {`.
   HEADER_RE = /\A(?:static )?mrb_value ([\w$]+_impl)\(mrb_state\* M, mrb_value self((?:, [^,()]+)*)\) \{\s*\z/
   BARG_RE = /\Abc2cpp_barg(\d+)\z/
@@ -273,7 +275,7 @@ module ParamTrace
       #include <mruby/hash.h>
       #include "mrb_array_access.hxx"
       #define BC2CPP_PARAM_TRACE_MAX_CLASSES #{MAX_CLASSES}
-      #define BC2CPP_ELEM_SAMPLE 8
+      #define BC2CPP_ELEM_SAMPLE #{ELEM_SAMPLE}
       struct bc2cpp_param_cls_#{id} { struct RClass* real; char* name; unsigned long long count; };
       struct bc2cpp_param_site_#{id} { unsigned long long calls; unsigned long long overflow; unsigned ncls; struct bc2cpp_param_cls_#{id} cls[BC2CPP_PARAM_TRACE_MAX_CLASSES]; };
       static struct bc2cpp_param_site_#{id} bc2cpp_param_sites_#{id}[#{nsites}];
@@ -326,20 +328,25 @@ module ParamTrace
         }
         s->cls[i].count++;
       }
-      // Samples the elements of an Array or the keys/values of a Hash one level deep, so a
-      // container's element type is visible without walking it whole.
+      // Samples the first BC2CPP_ELEM_SAMPLE elements of an Array (entries of a Hash), one level deep. The
+      // unsampled tail goes to overflow, so its slot is never read as complete.
       static void bc2cpp_elem_record_#{id}(struct bc2cpp_param_site_#{id}* t, mrb_state* M, mrb_value v) {
         if (mrb_array_p(v)) {
           mrb_int n = ary_size(v);
-          for (mrb_int i = 0; i < n && i < BC2CPP_ELEM_SAMPLE; i++) bc2cpp_site_record_#{id}(&t[0], M, mrb_ary_ref(M, v, i));
+          mrb_int m = n < BC2CPP_ELEM_SAMPLE ? n : BC2CPP_ELEM_SAMPLE;
+          for (mrb_int i = 0; i < m; i++) bc2cpp_site_record_#{id}(&t[0], M, mrb_ary_ref(M, v, i));
+          t[0].overflow += n - m;
         } else if (mrb_hash_p(v)) {
           mrb_value keys = mrb_hash_keys(M, v);
           mrb_int n = ary_size(keys);
-          for (mrb_int i = 0; i < n && i < BC2CPP_ELEM_SAMPLE; i++) {
+          mrb_int m = n < BC2CPP_ELEM_SAMPLE ? n : BC2CPP_ELEM_SAMPLE;
+          for (mrb_int i = 0; i < m; i++) {
             mrb_value k = mrb_ary_ref(M, keys, i);
             bc2cpp_site_record_#{id}(&t[1], M, k);
             bc2cpp_site_record_#{id}(&t[2], M, mrb_hash_get(M, v, k));
           }
+          t[1].overflow += n - m;
+          t[2].overflow += n - m;
         }
       }
       static void bc2cpp_elem_dump_#{id}(FILE* f, const char* site_tag, const char* class_tag, const char* symbol, unsigned site, struct bc2cpp_param_site_#{id}* t) {

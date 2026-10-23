@@ -98,7 +98,8 @@ module TraceTypes
           rets[[f[1], f[2].to_i]] or next
           rets[[f[1], f[2].to_i]][:classes][f[3]] += f[4].to_i
         when 'PARAM_ELEM_SITE'
-          # Element rows: role is array (Array elements), key or value (Hash entries), sampled up to 8 per container.
+          # Element rows: role is array (Array elements), key or value (Hash entries), sampled up to 32 per container;
+          # the rest is in the overflow column.
           key = ids[[f[1], f[2].to_i]] or next
           e = elems[[:param, key, f[3]]] ||= { calls: 0, overflow: 0, classes: Hash.new(0) }
           e[:calls] += f[4].to_i
