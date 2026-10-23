@@ -502,18 +502,20 @@ if $PROGRAM_NAME == __FILE__
   # BLOCK_SELF_WORLD: which blocks a rebinder may run under another self, and whether the world lets any
   # other Proc reach a rebinder. Every Ruby source of the closed world is read as bytecode: the outside ones this
   # build does not compile are compiled here for the analysis alone.
-  CodeGen.block_self_world = profile_call.call('BlockSelfWorld.analyze') do
-    unread = (foreign_ruby_srcs + outside_ruby).map { |path| File.expand_path(path) }.uniq.sort
-                                              .reject { |path| compiled_files.include?(path) }
-    outside_ireps = {}
-    refusal = nil
-    unless unread.empty?
-      begin
-        outside_ireps, = compile_ireps(unread, "#{symbol}_block_self_world", out_dir)
-      rescue StandardError => e
-        refusal = "an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
-      end
+  # The Ruby sources this build does not compile, as bytecode. BlockSelfWorld and UniqueClassNames both read them.
+  unread = (foreign_ruby_srcs + outside_ruby).map { |path| File.expand_path(path) }.uniq.sort
+                                            .reject { |path| compiled_files.include?(path) }
+  outside_ireps = {}
+  outside_root = nil
+  refusal = nil
+  unless unread.empty?
+    begin
+      outside_ireps, outside_root = compile_ireps(unread, "#{symbol}_block_self_world", out_dir)
+    rescue StandardError => e
+      refusal = "an outside Ruby source does not compile (#{e.message.lines.first&.strip})"
     end
+  end
+  CodeGen.block_self_world = profile_call.call('BlockSelfWorld.analyze') do
     method_labels = {}
     CodeGen.block_self_bodies.each { |name, defs| defs.each { |d| method_labels[d.irep] = [d.owner, name] } }
     BlockSelfWorld.analyze(ireps: ireps, outside_ireps: outside_ireps, native_paths: (native_paths + outside_native).uniq,
@@ -528,7 +530,8 @@ if $PROGRAM_NAME == __FILE__
   UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
     UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs,
                              superclass_of: superclass_of, included: included_modules,
-                             prepended: prepended_modules, unknown_mixins: unknown_mixins)
+                             prepended: prepended_modules, unknown_mixins: unknown_mixins,
+                             ruby_sources: refusal ? nil : { ireps: outside_ireps, root: outside_root })
   end
   UniqueClassNames.object_mixins = Array(included_modules['Object'])
   if (dump = ENV['BC2CPP_LEXICAL_DUMP']) # for scripts/bc2cpp checks of the constant lookup: the facts as JSON
