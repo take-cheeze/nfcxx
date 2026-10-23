@@ -116,7 +116,7 @@ class CodeGen
             next
           end
 
-          literal = RETURN_FOLD_LITERALS[irep.instructions[source[0]].op]
+          literal = RETURN_FOLD_LITERALS[BytecodeIR.for(irep).source_at(source[0]).op]
           return nil unless literal
 
           kinds << literal

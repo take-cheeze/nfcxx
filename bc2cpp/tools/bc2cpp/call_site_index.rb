@@ -80,8 +80,9 @@ class CallSiteIndex
     writers = BytecodeIR.reaching_writer_indices(irep, idx, reg.to_s)
     return nil unless writers
 
+    program = BytecodeIR.for(irep)
     names = writers.map do |index|
-      writer = irep.instructions[index]
+      writer = program.source_at(index)
       case writer.op
       when 'LOADSYM' then writer.sym
       when 'SYMBOL'
@@ -103,7 +104,7 @@ class CallSiteIndex
       return nil unless writers && writers.size == 1 && !writers.first.entry?
 
       writer = writers.first.index
-      source = irep.instructions[writer]
+      source = program.source_at(writer)
       if source.op == 'ARRAY'
         origin = writer
         break
@@ -118,7 +119,7 @@ class CallSiteIndex
     return nil unless literal && literal.kind == :array && literal.count.positive?
     return nil if packed_register_captured?(irep, reg)
     return nil unless (origin + 1...idx).all? do |index|
-      source = irep.instructions[index]
+      source = program.source_at(index)
       if %w[ARYCAT ARYPUSH].include?(source.op)
         source.reg == reg
       elsif source.op == 'NOP'
@@ -166,7 +167,7 @@ class CallSiteIndex
           body_name[child] = insn.sym if child && insn.sym
         when 'DEF'
           mi = irep.previous_real_index(idx - 1)
-          meth = mi >= 0 ? irep.instructions[mi] : nil
+          meth = mi >= 0 ? BytecodeIR.for(irep).source_at(mi) : nil
           next unless meth && meth.op == 'METHOD' && insn.paren_reg == meth.reg
 
           child = irep.reps[meth.block_index]

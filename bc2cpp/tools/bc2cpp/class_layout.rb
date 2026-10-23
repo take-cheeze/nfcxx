@@ -102,7 +102,7 @@ def array_join_source?(irep, idx, reg, receiver_class)
   defs.all? do |defn|
     next false if defn.entry?
 
-    insn = irep.instructions[defn.index]
+    insn = BytecodeIR.for(irep).source_at(defn.index)
     next true if BytecodeIR::Ops::ARRAY_ALLOC.include?(insn.op)
 
     insn.op == 'GETIDX' && lcf_file_array_read?(irep, defn.index, insn, receiver_class)
