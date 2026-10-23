@@ -44,6 +44,41 @@ check.call('return of Foo#baz wrapped with its static fact', rets.any? { |r| r[:
 check.call('return ordinals are distinct per function', rets.map { |r| r[:meta] }.uniq.size == rets.size)
 check.call('the recorder is declared before the first use', text.index('bc2cpp_ret_hit_fixture(mrb_state') < text.index('return bc2cpp_ret_hit_fixture(M, 0'))
 
+# An #ifdef/#else pair that opens a brace in each arm (codegen's MRB_USE_COMPLEX and MRB_NO_FLOAT splits) must not
+# leave the wrap open: only one arm is compiled, so the depth is the arm's, and the function after it keeps its own
+# return. Left open, the wrap of Foo#arms runs on into Foo#after and records Foo#after's value under Foo#arms.
+arms_src = <<~CPP
+  mrb_value Foo_arms_impl(mrb_state* M, mrb_value self) {
+    mrb_value r0 = self;
+  #ifdef MRB_USE_COMPLEX
+    if (r0 == 1) {
+  #else
+    if (r0 == 2) {
+  #endif
+      r0 = r0;
+    } else {
+      r0 = r0;
+    }
+    return r0;
+  }
+  mrb_value Foo_after_impl(mrb_state* M, mrb_value self) {
+    mrb_value r0 = self;
+    return r0;
+  }
+CPP
+arms_infos = {
+  'Foo_arms_impl' => { method: 'Foo#arms', mand: 0, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call, ret: 'none' },
+  'Foo_after_impl' => { method: 'Foo#after', mand: 0, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call, ret: 'none' }
+}
+arms_text, arms_summary = ParamTrace.instrument(arms_src, 'fixture', arms_infos)
+arms_rets = arms_summary[:rets]
+after_id = arms_rets.find { |r| r[:meta].include?('Foo#after') }&.fetch(:id)
+check.call('the arms of an #ifdef/#else pair do not leak the wrap into the next function',
+           arms_rets.count { |r| r[:meta].include?('Foo#arms') } == 1 && after_id == 1 &&
+             arms_text.include?('return bc2cpp_ret_hit_fixture(M, 0, r0);') &&
+             arms_text.include?('return bc2cpp_ret_hit_fixture(M, 1, r0);') &&
+             arms_text.scan('bc2cpp_ret_hit_fixture(M, ').size == 2)
+
 # A short body must not reach into the next function: the register line search stops at the closing brace.
 short = <<~CPP
   mrb_value Foo_short_impl(mrb_state* M, mrb_value self, mrb_value it) {

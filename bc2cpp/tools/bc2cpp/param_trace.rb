@@ -128,6 +128,8 @@ module ParamTrace
   end
 
   RETURN_RE = /\breturn ([^;]+);/
+  # A preprocessor conditional line; group 1 is its directive.
+  PP_RE = /\A\s*#\s*(ifdef|ifndef|if|elif|else|endif)\b/
   # A C++ lambda inside a generated body: its own `return` answers the lambda, not the method.
   LAMBDA_RE = /\[(?:&|=)?\]\s*\(/
 
@@ -137,9 +139,26 @@ module ParamTrace
     depth = lines[start].count('{') - lines[start].count('}')
     lambda_depth = nil
     ordinal = 0
+    arms = [] # per open #if: [depth at the #if, depth at the end of the arm before its #else]
     k = start + 1
     while k < lines.size && depth.positive?
       line = lines[k]
+      if (pp = PP_RE.match(line))
+        # Every arm of a conditional is in the text but only one is compiled, so an arm's braces must not add to the
+        # next arm's. Counting them all leaves the depth too high for an `#ifdef`/`#else` pair that opens a brace in
+        # each arm, and the wrap then runs on into the following functions (see the `return` attribution check).
+        case pp[1]
+        when 'if', 'ifdef', 'ifndef' then arms << [depth, nil]
+        when 'else', 'elif'
+          if (arm = arms.last)
+            arm[1] = depth
+            depth = arm[0]
+          end
+        when 'endif' then arms.pop
+        end
+        k += 1
+        next
+      end
       opens = line.count('{')
       closes = line.count('}')
       if lambda_depth.nil? && line.match?(LAMBDA_RE)
