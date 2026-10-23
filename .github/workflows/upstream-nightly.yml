@@ -214,7 +214,7 @@ jobs:
         if: matrix.suite == 'libcxx'
         run: tests/upstream/setup-libcxx.sh
       - name: Collect native compatibility observations
-        timeout-minutes: ${{ matrix.suite == 'libcxx' && 45 || 30 }}
+        timeout-minutes: ${{ (matrix.suite == 'libcxx' || matrix.suite == 'libstdcxx') && 60 || 30 }}
         env:
           SUITE: ${{ matrix.suite }}
         run: python3 tests/upstream/nightly-native.py "$SUITE" "build/nightly/$SUITE" --shard "${{ matrix.shard }}/${{ matrix.shards }}"
