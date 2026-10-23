@@ -313,13 +313,21 @@ module NativeConstructorSigs
   # The body text of the C function `mrb_define_method(M, <var of klass>, "name", fn, ...)` registers: a lambda's
   # own braces, or the definition of the named function in the same sources.
   def registered_body(klass, name, sources)
+    needle = "\"#{name}\""
     sources.each do |path|
-      text = NativeDirect.strip_comments(File.binread(path).force_encoding('UTF-8'))
-      vars = NativeDirect.class_variables(text, NativeDirect.sibling_param_owners(path))
+      text = stripped(path)
+      # The name is a whole argument, so its literal must occur in the file; a file without it (or without any
+      # mrb_define_method) has no registration to match and never needs its class table (see class_vars).
+      next unless text.include?('mrb_define_method') && text.include?(needle)
+
+      vars = nil
       text.scan(/\bmrb_define_method\s*\(/) do
         open = Regexp.last_match.end(0) - 1
         args, = NativeOwnerMap.call_args(text, open)
-        next unless args && args.size >= 4 && args[2] == "\"#{name}\"" && vars[args[1]] == klass
+        next unless args && args.size >= 4 && args[2] == needle
+
+        vars ||= class_vars(path, text)
+        next unless vars[args[1]] == klass
 
         fn = args[3]
         # A lambda's body has top-level commas of its own, so it is read from the text, not from the split.
@@ -330,6 +338,20 @@ module NativeConstructorSigs
       end
     end
     nil
+  end
+
+  # The comment-stripped text of a source file. Keyed by its bytes, so a changed file is never served stale text.
+  def stripped(path)
+    raw = File.binread(path).force_encoding('UTF-8')
+    @stripped ||= {}
+    @stripped[raw] ||= NativeDirect.strip_comments(raw)
+  end
+
+  # NativeDirect.class_variables of a stripped source. Both its inputs are the key: the text and the sibling owners.
+  def class_vars(path, text)
+    owners = NativeDirect.sibling_param_owners(path)
+    @class_vars ||= {}
+    @class_vars[[text, owners]] ||= NativeDirect.class_variables(text, owners)
   end
 
   def lambda_body(text)
