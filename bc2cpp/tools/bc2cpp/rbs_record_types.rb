@@ -558,7 +558,7 @@ module RbsRecordTypes
     # Does the send read a register holding the Hash? A self send (SSEND*) only writes self into its leading
     # register, so the Hash there is dropped, not passed.
     def held_call?(insn, state, lead)
-      self_send = BytecodeIR::Ops::SELF_SEND.include?(insn.op)
+      self_send = BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
       hi = read_span(insn, lead)
       state.any? { |x| x >= lead && x <= hi && !(self_send && x == lead) }
     end
@@ -568,8 +568,8 @@ module RbsRecordTypes
     # those arguments and the callee's parameter, scanned as one more alias of the Hash, passes these same
     # rules (its key writes join the checked stores). Anything else keeps the base rule (an escape).
     def call_step(insn, state, lead, held_args)
-      return escape("receiver of #{insn.sym}") if !BytecodeIR::Ops::SELF_SEND.include?(insn.op) && state.include?(lead)
-      return escape("passed to #{insn.sym} with a block") if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
+      return escape("receiver of #{insn.sym}") if !BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) && state.include?(lead)
+      return escape("passed to #{insn.sym} with a block") if BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
       return escape("passed to #{insn.sym} past the scan depth") if @depth >= INTERPROC_DEPTH
 
       world = @escape_world or return escape("passed to #{insn.sym} (no escape analysis world)")
@@ -600,7 +600,7 @@ module RbsRecordTypes
       spec = insn.argc_operand
       return nil if n.nil? || (spec && (spec[1].nil? || spec[1].to_i.positive?))
 
-      block = BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) ? lead + n + 1 : nil
+      block = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op) ? lead + n + 1 : nil
       return nil if block && state.include?(block)
 
       found = (1..n).select { |j| state.include?(lead + j) }.map { |j| j - 1 }

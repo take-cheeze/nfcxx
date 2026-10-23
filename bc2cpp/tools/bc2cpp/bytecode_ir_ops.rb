@@ -17,16 +17,24 @@ module BytecodeIR
     CALL = (SEND | ['SUPER']).freeze
     # Every op whose callee frame starts at R(a) and may overwrite R(a) and above.
     CALLEE_FRAME = (CALL | %w[EXEC BLKCALL]).freeze
-    # The self-receiver forms: R(a) is overwritten with self and no register receiver is passed.
-    SELF_SEND = Set['SSEND', 'SSEND0', 'SSENDB', 'SSENDV', 'SSENDVB'].freeze
-    # The sends that pass a block (the B forms).
-    BLOCK_SEND = Set['SENDB', 'SSENDB', 'SENDVB', 'SSENDVB'].freeze
-    # The plain sends (SEND, SEND0, SENDB): arguments are a count, not a splat array as in SENDV.
-    COUNTED_SEND = (SEND - SELF_SEND).freeze
-    # Every send whose receiver is a register (the name prefix SEND, splat forms included).
-    REGISTER_RECEIVER_SEND = (SEND_FAMILY - SELF_SEND).freeze
-    # The zero-argument forms of SEND and SSEND.
-    ZERO_ARG_SEND = Set['SEND0', 'SSEND0'].freeze
+# Sends that pass a block proc (the BLOCK instruction before them).
+BLOCK_SEND = Set['SENDB', 'SSENDB'].freeze
+# Sends whose receiver is self (the implicit-self form of each SEND variant).
+SELF_SEND = Set['SSEND', 'SSEND0', 'SSENDB'].freeze
+# Ops that write R(a) with the class a following METHOD/DEF defines into (vm.c OP_TCLASS, OP_SCLASS).
+TARGET_CLASS = Set['TCLASS', 'SCLASS'].freeze
+# Ops that allocate a fresh Array into R(a).
+ARRAY_ALLOC = Set['ARRAY', 'ARRAY2'].freeze
+# The self-receiver forms, including the splat forms. Named apart from SELF_SEND, whose membership is the master set.
+SELF_SEND_FAMILY = Set['SSEND', 'SSEND0', 'SSENDB', 'SSENDV', 'SSENDVB'].freeze
+# The sends that pass a block, splat forms included. Named apart from BLOCK_SEND, whose membership is the master set.
+BLOCK_SEND_FAMILY = Set['SENDB', 'SSENDB', 'SENDVB', 'SSENDVB'].freeze
+# The plain sends (SEND, SEND0, SENDB): arguments are a count, not a splat array as in SENDV.
+COUNTED_SEND = (SEND - SELF_SEND_FAMILY).freeze
+# Every send whose receiver is a register (the name prefix SEND, splat forms included).
+REGISTER_RECEIVER_SEND = (SEND_FAMILY - SELF_SEND_FAMILY).freeze
+# The zero-argument forms of SEND and SSEND.
+ZERO_ARG_SEND = Set['SEND0', 'SSEND0'].freeze
 
     # Ops whose leading register is only READ and which may fall through (vm.c tests or raises on R(a));
     # SETUPVAR stores R(a) into an enclosing frame.

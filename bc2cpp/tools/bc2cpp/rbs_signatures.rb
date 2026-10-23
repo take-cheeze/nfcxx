@@ -50,7 +50,7 @@ module RbsSignatures
   # SUBTREE_DISPATCH: a `class C < S` declaration, checked against the program's own superclass.
   SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
   # The self sends that take no block: a breaking block can replace the return type of only these.
-  SELF_SENDS_NO_BLOCK = ((BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND) & BytecodeIR::Ops::SELF_SEND).freeze
+  SELF_SENDS_NO_BLOCK = ((BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND_FAMILY) & BytecodeIR::Ops::SELF_SEND_FAMILY).freeze
 
 
   module_function

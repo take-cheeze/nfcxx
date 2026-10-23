@@ -626,7 +626,7 @@ module DeclaredConstants
   end
 
   # SEND and SEND0 without a block: the sends an IO.open call can be.
-  BLOCKLESS_SEND = (BytecodeIR::Ops::COUNTED_SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
+  BLOCKLESS_SEND = (BytecodeIR::Ops::COUNTED_SEND - BytecodeIR::Ops::BLOCK_SEND_FAMILY).freeze
 
   # IO_OPEN (report-level): the value at +idx+ is a blockless `IO.open(...)`, on every path. The call is SEND or SEND0
   # (a SENDB carries a block and is not this), named `open`, with the constant IO as its receiver. mruby-io's IO.open
