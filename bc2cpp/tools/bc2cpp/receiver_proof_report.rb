@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_ops'
 require_relative 'block_send_report_columns'
 require_relative 'receiver_proof_report_columns'
@@ -376,8 +377,8 @@ module ReceiverProofReport
     return ['no_states'] unless states
 
     kinds = []
-    irep.instructions.each_with_index do |insn, idx|
-      next unless states[idx] && %w[RETURN RETURN_BLK RETSELF RETTRUE RETFALSE BREAK STOP].include?(insn.op)
+    BytecodeIR.for(irep).each_with_op('RETURN', 'RETURN_BLK', 'RETSELF', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP') do |insn, idx|
+      next unless states[idx]
 
       mask = insn.reg ? states[idx][insn.reg.to_i] || NumericFlow::OTHER : NumericFlow::OTHER
       next unless mask.anybits?(NumericFlow::OTHER)
