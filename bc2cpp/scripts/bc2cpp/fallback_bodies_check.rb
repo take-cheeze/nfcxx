@@ -21,7 +21,12 @@ require 'open3'
 require 'rbconfig'
 require 'set'
 require 'tmpdir'
+# The fixture program defines none of the engine's classes, which sig/bc2cpp/declarations.rbs declares, so the
+# shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
 require_relative '../../tools/bc2cpp/bc2cpp'
+require_relative 'fixture_runtime'
 require_relative 'cxx'
 require_relative '../../tools/bc2cpp/closed_world_env'
 
@@ -314,25 +319,44 @@ RUBY
 FIXTURE_METHODS = %w[big neg masked scan handler_sees after_use guard count nested_times times_local ens_break
                      block_rescue nested_rescue].freeze
 
-def fixture(mrbc, source)
+# The fixture is compiled in the block-core world (core: true): the `times` inlining the checks name needs the compiled
+# core Integer#times, which a bare fixture CodeGen does not have. A method's helpers (block fallbacks, rescue
+# bodies) are emitted before its header, so each top-level C++ block goes to the method its first code line names.
+def fixture(source)
   Dir.mktmpdir do |dir|
-    path = File.join(dir, 'fb.rb')
-    File.write(path, source)
-    ireps, root_label = compile_ireps(path, 'bc2cpp_fb', dir)
-    registry = build_registry(ireps, root_label)[0]
-    gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-    codes = registry.to_a.each_with_object({}) do |(name, defs), acc|
-      defs.dup.each do |d|
-        acc[name] = gen.compile_method(d.irep).fetch(:code) if d.owner == 'Fb' && d.irep
-      end
+    code, = Bc2cppFixtureRuntime.generate(source, dir, core: true, only_owners: %w[Fb], skip_unsupported: false)
+    names = code.scan(%r{^// Fb#(\S+) \(compiled from irep}).flatten.uniq
+    codes = names.to_h { |name| [name, +''] }
+    # The symbol table the closed world names symbols by (bc2cpp_sym(M, i) is names[i]).
+    symbols = code[/bc2cpp_sym_names\[\d+\] = \{(.*?)\};/m, 1].to_s.scan(/"([^"]*)"/).flatten
+    top_level_blocks(code).each do |block|
+      first = block.each_line.find { |line| !line.start_with?('//') && !line.strip.empty? }.to_s
+      owner = names.select { |name| first.match?(/\bFb_#{Regexp.escape(name)}(?![A-Za-z0-9])/) }.max_by(&:length)
+      codes[owner] << block if owner
     end
-    yield codes
+    yield codes, symbols
   end
+end
+
+# The file cut before each column-0 line that starts a new definition at brace depth 0.
+def top_level_blocks(code)
+  blocks = []
+  current = []
+  depth = 0
+  code.each_line do |line|
+    if depth.zero? && line.match?(/\A[^\s\/}]/) && current.any? { |l| l.match?(/\A[^\s\/]/) }
+      blocks << current.join
+      current = []
+    end
+    current << line
+    depth += line.count('{') - line.count('}')
+  end
+  blocks << current.join
 end
 
 mrbc = ENV['MRBC'] || 'mrbc'
 if system(mrbc, '--version', out: File::NULL, err: File::NULL) || system(mrbc, '-h', out: File::NULL, err: File::NULL)
-  fixture(mrbc, SOURCE) do |code|
+  fixture(SOURCE) do |code, symbols|
     FIXTURE_METHODS.each do |name|
       check.call("#{name} compiles with no #error", !code.fetch(name).include?('#error'))
     end
@@ -341,8 +365,9 @@ if system(mrbc, '--version', out: File::NULL, err: File::NULL) || system(mrbc, '
                code.fetch('big').include?('mrb_bint_new_str(M, "100000000", 9, 16)') &&
                  code.fetch('big').include?('#ifdef MRB_USE_BIGINT'))
     check.call('a negative bigint literal keeps its sign in the base', code.fetch('neg').include?('"100000000", 9, -16)'))
+    range_error = symbols.index('RangeError')
     check.call('the bigint fallback raises the VM RangeError',
-               code.fetch('big').include?('mrb_intern_lit(M, "RangeError")), "integer overflow"'))
+               range_error && code.fetch('big').include?("mrb_exc_get_id(M, bc2cpp_sym(M, #{range_error})), \"integer overflow\""))
     check.call('a body writing a local aliases it in the try body',
                code.fetch('after_use').include?('mrb_value& r') && code.fetch('after_use').include?('&r'))
     check.call('the handler-visible local is aliased too', code.fetch('handler_sees').include?('mrb_value& r'))
@@ -350,12 +375,16 @@ if system(mrbc, '--version', out: File::NULL, err: File::NULL) || system(mrbc, '
     check.call('a nested rescue passes the alias down', code.fetch('nested_rescue').include?('_nested'))
     check.call('a rescue join on RETURN of another register is a real region', code.fetch('scan').include?('_rescue_try'))
     check.call('the block reaches the try body of a yielding method', code.fetch('guard').include?('bc2cpp_blk'))
-    check.call('a parameterless times block is inlined', code.fetch('count').include?('Lbc2cpp_times_iter_') &&
-                 !code.fetch('count').include?('BLOCK_FALLBACK'))
+    # GUARDED_BLOCK_INLINE: an Integer receiver runs the inline loop, and the block fallback is only the other-receiver
+    # arm, emitted after the inline arm's jump to the guarded end.
+    count = code.fetch('count')
+    check.call('a parameterless times block is inlined',
+               count.include?('Lbc2cpp_times_iter_') &&
+               (!count.include?('BLOCK_FALLBACK') || count.index('BLOCK_FALLBACK') > count.index('goto Lbc2cpp_guarded_end')))
     check.call('a parameterless times block binds no counter',
                !code.fetch('count').match?(/= mrb_fixnum_value\(bc2cpp_times_i_/))
   end
-  fixture(mrbc, "class Fb\n def t(n); s = 0; n.times { |i| s += i }; s; end\nend\n") do |code|
+  fixture("class Fb\n def t(n); s = 0; n.times { |i| s += i }; s; end\nend\n") do |code|
     check.call('a one-parameter times block still binds the counter',
                code.fetch('t').match?(/= mrb_fixnum_value\(bc2cpp_times_i_/))
   end
