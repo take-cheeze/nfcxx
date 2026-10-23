@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 
 # This is a caller-local protocol, not a global block or exact-dispatch proof.
 module IrYieldTypes
@@ -16,7 +17,7 @@ module IrYieldTypes
   def summarize(ctx, parent, index, analysis)
     return nil if ENV['BC2CPP_IR_YIELD_TYPES'] == '0'
 
-    call = parent.instructions[index]
+    call = BytecodeIR.for(parent).source_at(index)
     return nil unless BytecodeIR::Ops::BLOCK_SEND.include?(call.op) && call.plain_fixed_argc?
 
     argc = call.argc
@@ -50,7 +51,7 @@ module IrYieldTypes
         # No argument packing, arity coercion, escaped Proc, or outer lexical yield.
         return nil unless instruction.first_of(:int)&.value == count
         definitions = BytecodeIR.reaching_definitions(body, position, instruction.reg, origin_transfers: true)
-        producer = definitions&.size == 1 && !definitions.first.entry? && body.instructions[definitions.first.index]
+        producer = definitions&.size == 1 && !definitions.first.entry? && BytecodeIR.for(body).source_at(definitions.first.index)
         return nil unless producer && producer.op == 'BLKPUSH' && producer.argary_spec == [argc, 0, 0, 0] && producer.first_of(:plit)&.value.to_s == '0'
 
         count.times do |slot|
@@ -75,15 +76,15 @@ module IrYieldTypes
     definitions = BytecodeIR.reaching_definitions(parent, index, register.to_s, origin_transfers: true)
     return nil unless definitions&.size == 1 && !definitions.first.entry?
 
-    producer = parent.instructions[definitions.first.index]
+    producer = BytecodeIR.for(parent).source_at(definitions.first.index)
     producer.op == 'BLOCK' ? ireps[Array(parent.reps)[producer.block_index.to_i]] : nil
   end
 
   def protocol_body?(body, argc)
     return false unless body && Array(body.reps).empty? && Array(body.catch_handlers).empty?
     return false unless body.enter&.enter_fields == [argc, 0, 0, 0, 0, 0, 0, 0]
-    return false unless body.instructions.size <= MAX_INSTRUCTIONS
+    return false unless BytecodeIR.for(body).size <= MAX_INSTRUCTIONS
 
-    body.instructions.all? { |insn| PURE_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_SLOT.include?(insn.op) }
+    BytecodeIR.for(body).each_source.all? { |insn, _index| PURE_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_SLOT.include?(insn.op) }
   end
 end

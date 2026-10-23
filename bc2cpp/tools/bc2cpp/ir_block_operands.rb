@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 
 # IR_BLOCK_OPERANDS: what a send's block operand, a receiver or an argument register holds, answered by
 # BytecodeIR reaching definitions instead of the instruction textually before the read. Every query counts nested
@@ -16,7 +17,7 @@ module IrBlockOperands
 
   # Definitions of +reg+ reaching the read at +index+, or nil when the IR cannot list them.
   def definitions(irep, index, reg, follow_moves: true)
-    return nil unless index.is_a?(Integer) && index.between?(0, irep.instructions.length - 1)
+    return nil unless index.is_a?(Integer) && index.between?(0, BytecodeIR.for(irep).size - 1)
 
     defs = BytecodeIR.reaching_definitions(irep, index, reg.to_s, follow_moves: follow_moves, through_handlers: true,
                                                                   origin_transfers: true)
@@ -40,7 +41,7 @@ module IrBlockOperands
   # Labels of the literal blocks the block operand of the send at +index+ can be, when every reaching definition is a
   # BLOCK/LAMBDA of +irep+; nil otherwise (a forwarded block, a stored Proc, nil, or an unprovable operand).
   def literal_block_labels(irep, index)
-    insn = irep.instructions[index]
+    insn = BytecodeIR.for(irep).source_at(index)
     return nil unless insn && BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
 
     reg = block_register(insn) or return nil
@@ -48,7 +49,7 @@ module IrBlockOperands
     labels = defs.map do |df|
       return nil if df.entry?
 
-      writer = irep.instructions[df.index]
+      writer = BytecodeIR.for(irep).source_at(df.index)
       return nil unless LITERAL_BLOCK_OPS.include?(writer.op) && writer.block_index
 
       Array(irep.reps)[writer.block_index.to_i] or return nil
@@ -68,7 +69,7 @@ module IrBlockOperands
     names = defs.map do |df|
       return nil if df.entry?
 
-      writer = irep.instructions[df.index]
+      writer = BytecodeIR.for(irep).source_at(df.index)
       return nil unless CONST_LOADS.include?(writer.op)
 
       writer.const_name.to_s
@@ -79,7 +80,7 @@ module IrBlockOperands
   # Do all definitions reaching +index+ come from writers whose op satisfies the block? false when unprovable.
   def all_writers?(irep, index, reg)
     defs = definitions(irep, index, reg) or return false
-    defs.all? { |df| !df.entry? && yield(irep.instructions[df.index]) }
+    defs.all? { |df| !df.entry? && yield(BytecodeIR.for(irep).source_at(df.index)) }
   end
 
   # Can an execution reach instruction +index+ (normal or handler edges)? true when the edges do not resolve.

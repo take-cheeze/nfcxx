@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 
 # Capture facts apply only during a proven synchronous, nonescaping invocation.
 class IrBlockCaptures
@@ -27,6 +28,7 @@ class IrBlockCaptures
     facts = definitions.map do |definition|
       return nil if definition.entry?
 
+      # Live read: BytecodeIR.for caches the child's Program, and the capture check edits the child's list in place.
       instruction = @child.instructions[definition.index]
       return nil unless instruction.op == 'GETUPVAR'
 
@@ -52,8 +54,9 @@ class IrBlockCaptures
     return false unless BytecodeIR.for(@parent).resolved? && BytecodeIR.for(@child).resolved?
     return false unless BytecodeIR.for(@child).instructions.all? { |instruction| PURE_OPS.include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op) }
 
-    call = @parent.instructions[@call_index]
-    producer = @parent.instructions[producer_index]
+    parent = BytecodeIR.for(@parent)
+    call = parent.source_at(@call_index)
+    producer = parent.source_at(producer_index)
     return false unless call && BytecodeIR::Ops::BLOCK_SEND.include?(call.op) && call.plain_fixed_argc?
     return false unless producer&.op == 'BLOCK' && ireps[Array(@parent.reps)[producer.block_index.to_i]].equal?(@child)
 
@@ -62,7 +65,9 @@ class IrBlockCaptures
     return false unless definitions&.size == 1 && definitions.first.index == producer_index
 
     # Straight-line transport prevents another invocation or escape before this call.
-    corridor = @parent.instructions[(producer_index + 1)...@call_index]
-    corridor.all? { |instruction| %w[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op) }
+    (producer_index + 1...@call_index).all? do |index|
+      instruction = parent.source_at(index)
+      %w[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op)
+    end
   end
 end
