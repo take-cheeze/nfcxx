@@ -142,10 +142,30 @@ module IvarCandidates
     return nil if entry.nil? || (entry[:classes].empty? && !entry[:unresolved])
     return ClassLayout::UNKNOWN if entry[:unresolved]
 
-    # Reflection can read the slot from any body, so no assurance clears nil for a reflected name.
-    reflected = index[:reflective] == ALL_NAMES || index[:reflective].include?(name)
-    nilable = reflected || entry[:nil_store] ||
-              entry[:read_owners].any? { |reader| !gen.numeric_ivar_assured?(reader, name) }
+    nilable = nil_reachable?(index, gen, owner, name)
     (entry[:classes].sort + (nilable ? ['nil'] : [])).join(' | ')
+  end
+
+  # True when some read of +name+ may see the slot's nil: a reflected name, a `@x = nil` store, a read that is not
+  # store-first (see store_first?) in a reader numeric_ivar_assured? does not clear, or a body the scan cannot read.
+  # Reflection can read the slot from any body, so no assurance clears nil for a reflected name.
+  def nil_reachable?(index, gen, owner, name)
+    name = name.to_s
+    return true if index[:opaque].include?(name)
+
+    entry = index[:table][[gen.numeric_family(owner), name]]
+    return true if entry.nil?
+
+    reflected = index[:reflective] == ALL_NAMES || index[:reflective].include?(name)
+    reflected || entry[:nil_store] || entry[:read_owners].any? { |reader| !gen.numeric_ivar_assured?(reader, name) }
+  end
+
+  # The embedded layout's type (+classes+, a type string such as `bool` or `Integer?`) with the nil that nil_reachable?
+  # adds. IvarLayout joins every SETIV of the ivar, so +classes+ is right; it knows nothing of a read before the first
+  # store, which type() would add. A type that already admits nil is returned as it is.
+  def with_nil(index, gen, owner, name, classes)
+    return classes if classes.split(' | ').include?('nil') || classes.end_with?('?')
+
+    nil_reachable?(index, gen, owner, name) ? "#{classes} | nil" : classes
   end
 end

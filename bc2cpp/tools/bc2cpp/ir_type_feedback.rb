@@ -324,7 +324,9 @@ module IrTypeFeedback
                   'contracts' => fact&.contracts || [], 'reason' => refusal[:cause]&.to_s }
         exits << fact if kind == 'return'
       end
-      next if exits.empty? || exits.any?(&:nil?)
+      # A nested block's `return` (RETURN_BLK, refused above) is also a value the method returns. The exits here are
+      # the body's own, so a body with such a block has no complete return fact: record none.
+      next if exits.empty? || exits.any?(&:nil?) || BytecodeIR.nested_exit?(irep, :block_return)
 
       classes = exits.reduce(Set.new) { |set, fact| set | fact.classes }.freeze
       contracts = exits.flat_map(&:contracts).uniq.sort.freeze

@@ -92,4 +92,85 @@ check.call('a Struct read by a program inspect that receives it (receiver side) 
 check.call('a Struct read by a name no program defines keeps the closed world (control)',
            closed_world_of(suite, NATIVE_READ).global_refusal != :class_factory_escape)
 
+puts '-- FACTORY_FLOW (closed world)'
+class_fixture = <<~RUBY
+  class FactoryBaseA; end
+  class FactoryBaseB; end
+  class FactoryUnrelated; end
+  def factory_flow(flag)
+    factory = Class
+    base = flag ? FactoryBaseA : FactoryBaseB
+    copy = factory
+    copy.new(base)
+    nil
+  end
+RUBY
+world = closed_world_of(suite, class_fixture)
+check.call('MOVE factory and superclass joins keep a finite closed world', world.global_refusal.nil?)
+check.call('both incoming superclasses are marked dynamically subclassed',
+           !world.native_subclass_free?(['FactoryBaseA']) && !world.native_subclass_free?(['FactoryBaseB']))
+check.call('the superclass join leaves unrelated classes subclass-free', world.native_subclass_free?(['FactoryUnrelated']))
+
+world = closed_world_of(suite, <<~RUBY)
+  def factory_members(flag)
+    factory = Struct
+    name = flag ? :flow_left : :flow_right
+    copy = factory
+    copy.new(name)
+    factory.new(:flow_second)
+    nil
+  end
+RUBY
+check.call('a Struct alias can feed multiple constructors with joined member names', world.global_refusal.nil?)
+check.call('every possible member and writer is recorded',
+           %w[flow_left flow_left= flow_right flow_right= flow_second flow_second=].all? { |name| world.unknown_def?(name) })
+check.call('unrelated names are not treated as generated members', !world.unknown_def?('flow_unused'))
+
+world = closed_world_of(suite, 'Class.new; nil')
+check.call('Class.new without a superclass records the implicit Object subclass',
+           world.global_refusal.nil? && !world.native_subclass_free?(['Object']))
+
+safe = {
+  'dead factory load' => 'Struct; nil',
+  'joined factory receiver' => 'factory = flag ? Class : Class; factory.new(Object); nil',
+  'superclass loaded before factory' => 'base = Object; factory = Class; factory.new(base); nil',
+  'overwritten alias' => 'factory = Struct; factory = nil; $factory_kept = factory; nil',
+  'native read through an alias' => 'factory = Struct; factory.inspect; nil',
+  'conditional uses' => 'factory = Struct; if flag; factory.new(:flow_a); else; factory.new(:flow_b); end; nil',
+  'loop uses' => 'factory = Class; while flag; factory.new(Object); flag = false; end; nil',
+  'member overwrite' => 'name = :flow_old; name = :flow_new; Struct.new(name); nil'
+}
+safe.each do |label, code|
+  world = closed_world_of(suite, "def factory_safe(flag); #{code}; end")
+  check.call("#{label} does not escape", world.global_refusal.nil?)
+  if label == 'member overwrite'
+    check.call('only the reaching member name is recorded',
+               world.unknown_def?('flow_new') && !world.unknown_def?('flow_old'))
+  end
+end
+
+unsafe = {
+  'escape after a native read' => 'factory = Struct; factory.inspect; $factory_kept = factory; nil',
+  'escape after construction' => 'factory = Struct; factory.new(:flow_a); $factory_kept = factory; nil',
+  'escape on another branch' => 'factory = Struct; if flag; factory.new(:flow_a); else; $factory_kept = factory; end; nil',
+  'capture by a block' => 'factory = Struct; [1].map { factory.new(:flow_a) }; nil',
+  'unknown superclass arm' => 'base = flag ? unknown_base : Object; Class.new(base); nil',
+  'unknown member arm' => 'name = flag ? unknown_name : :flow_a; Struct.new(name); nil',
+  'packed members' => 'names = [:flow_a]; Struct.new(*names); nil',
+  'factory as constructor argument' => 'factory = Class; factory.new(factory); nil',
+  'handler escape' => 'factory = Struct; begin; factory.new(:flow_a); rescue; $factory_kept = factory; end; nil',
+  'Data constructor' => 'Data.new(:flow_a); nil'
+}
+unsafe.each do |label, code|
+  world = closed_world_of(suite, "def factory_unsafe(flag); #{code}; end")
+  check.call("#{label} conservatively refuses", world.global_refusal == :class_factory_escape)
+end
+
+suite.compile('factory = Class; copy = factory; copy.new(Object); nil') do |ireps, root|
+  body = ireps.fetch(root)
+  index = body.instructions.index { |i| i.op == 'GETCONST' && i.const_name == 'Class' }
+  check.call('an exhausted alias budget refuses instead of returning partial uses',
+             FactoryFlow.uses(body, index, body.instructions[index].reg, max_aliases: 0).nil?)
+end
+
 suite.finish!

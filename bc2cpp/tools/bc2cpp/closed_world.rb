@@ -13,6 +13,7 @@ require_relative 'dynamic_names'
 require_relative 'loop_installers'
 require_relative 'scan_cache'
 require_relative 'send_names'
+require_relative 'factory_flow'
 require_relative 'bytecode_ir_ops'
 
 # CLOSED_WORLD: bc2cpp compiles closed-world builds only, where the only Ruby that
@@ -41,7 +42,6 @@ class ClosedWorld
   NAME_BINDING_OPS = Set['ALIAS', 'UNDEF', 'LOADSYM'].freeze
   # Writers of a class body's lexical scope: nil at top level (LOADNIL) or Object (OCLASS).
   CLASS_SCOPE_WRITERS = Set['LOADNIL', 'OCLASS'].freeze
-  STOP_OPS = BytecodeIR::Ops::STOP_PREFIX_OPS
   C_STRING = /"((?:[^"\\\n]|\\.)*)"/
   # Native code that asks Ruby to define, alias or eval by name.
   NATIVE_DYNAMIC = /"(?:define_method|define_singleton_method|attr_reader|attr_writer|attr_accessor|attr|
@@ -1305,8 +1305,7 @@ class ClosedWorld
           note_unknown_def(insn.sym, insn.op == 'TDEF' ? irep.label : nil) unless registered.include?(child)
         when 'DEF'
           sym = insn.sym_token
-          method = BytecodeIR::Window.find_preceding(insns, idx) { |i| i.op == 'METHOD' }
-          child = method && irep.reps[method.block_index.to_i]
+          child = def_method_body(irep, idx, insn)
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
           scan_send(irep, insns, idx, insn)
@@ -1321,7 +1320,7 @@ class ClosedWorld
         when 'GETCONST', 'GETMCNST'
           const = insn.const_name
           @basic_object_referenced = true if const == 'BasicObject'
-          scan_factory(irep, insns, idx, insn, const) if CLASS_FACTORIES.include?(const)
+          scan_factory(irep, idx, insn, const) if CLASS_FACTORIES.include?(const)
         when 'CLASS', 'MODULE'
           name = insn.sym_token
           if name
@@ -1339,6 +1338,27 @@ class ClosedWorld
     end
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
+  end
+
+  # DEF reads the method value from R[a+1], independently of intervening METHODs.
+  # A join must agree on one body: registration of another body elsewhere proves no attribution here.
+  def def_method_body(irep, index, insn)
+    register = insn.reg
+    return nil unless register
+
+    writers = BytecodeIR.reaching_writer_indices(irep, index, (register.to_i + 1).to_s)
+    return nil unless writers
+
+    bodies = writers.map do |writer|
+      method = irep.instructions[writer]
+      return nil unless method.op == 'METHOD' && method.block_index
+
+      child = irep.reps[method.block_index]
+      return nil unless child
+
+      child
+    end.uniq
+    bodies.first if bodies.size == 1
   end
 
   # -- singleton classes --------------------------------------------
@@ -1563,66 +1583,60 @@ class ClosedWorld
   # see scan_closed_world): a Ruby `==` or `is_a?` could store it.
   FACTORY_READS = %w[=== == != equal? is_a? kind_of? instance_of? name to_s inspect].freeze
 
-  # `Struct.new(:a, ...)`, `Class.new(Base)`: the constant must feed one `new`
-  # directly, whose members/superclass are then recorded.
-  def scan_factory(irep, insns, idx, insn, const)
-    reg = insn.reg.to_i
-    send_idx = nil
-    reads = []
-    BytecodeIR::Window.each_following(insns, idx) do |ins, j|
-      break if STOP_OPS.include?(ins.op)
-      next unless reads_register?(ins, reg)
+  # Every use of every MOVE alias must be a native-only read or a constructor whose
+  # generated members/superclasses are known. A safe first use does not license later escapes.
+  def scan_factory(irep, idx, insn, const)
+    uses = FactoryFlow.uses(irep, idx, insn.reg)
+    return global!(:class_factory_escape) unless uses
 
-      name = SEND_OPS.include?(ins.op) && ins.sym_token
-      if FACTORY_READS.include?(name)
-        reads << name
+    uses.each do |use, register|
+      call = BytecodeIR.for(irep).source_at(use)
+      return global!(:class_factory_escape) unless SEND_OPS.include?(call.op)
+
+      if FACTORY_READS.include?(call.sym)
+        @factory_read_names << call.sym
         next
       end
-
-      send_idx = j if name == 'new' && !BytecodeIR::Ops::SELF_SEND.include?(ins.op) && ins.reg.to_i == reg
-      break
-    end
-    @factory_read_names.merge(reads)
-    return if send_idx.nil? && reads.any?
-    return global!(:class_factory_escape) unless send_idx
-    return global!(:class_factory_escape) if const == 'Data'
-
-    case const
-    when 'Struct'
-      BytecodeIR::Window.each_following(insns, idx, send_idx) do |i, _|
-        next unless i.op == 'LOADSYM'
-
-        s = i.sym_token
-        note_unknown_def(s, nil)
-        note_unknown_def("#{s}=", nil)
+      unless call.sym == 'new' && BytecodeIR::Ops::RECEIVER_SEND.include?(call.op) && call.reg == register
+        return global!(:class_factory_escape)
       end
-    when 'Class'
-      n = insns[send_idx].argc
-      return global!(:class_factory_escape) if n.nil?
-      return if n.zero?
+      return global!(:class_factory_escape) if const == 'Data'
 
-      sup = "R#{reg.to_i + 1}"
-      writer = BytecodeIR::Window.find_preceding(insns, send_idx, idx + 1) { |i| i.reg_token == sup }
-      base = writer && %w[GETCONST GETMCNST].include?(writer.op) && writer.const_name
-      return global!(:class_factory_escape) unless base
+      argc = BytecodeIR::Ops::ZERO_ARG_SEND.include?(call.op) ? 0 : (call.argc if call.plain_fixed_argc?)
+      case const
+      when 'Struct'
+        return global!(:class_factory_escape) unless argc
 
-      @dynamic_subclassed << base
+        argc.times do |argument|
+          names = factory_argument_names(irep, use, call.reg.to_i + argument + 1, %w[LOADSYM])
+          return global!(:class_factory_escape) unless names
+
+          names.each do |name|
+            note_unknown_def(name, nil)
+            note_unknown_def("#{name}=", nil)
+          end
+        end
+      when 'Class'
+        return global!(:class_factory_escape) unless argc && argc <= 1
+
+        bases = argc.zero? ? Set['Object'] :
+                factory_argument_names(irep, use, call.reg.to_i + 1, %w[GETCONST GETMCNST])
+        return global!(:class_factory_escape) unless bases
+
+        @dynamic_subclassed.merge(bases)
+      end
     end
   end
 
-  # Ops that only write their first register (any source is spelled out).
-  PURE_WRITES = BytecodeIR::Ops::PURE_WRITE_OPS
+  def factory_argument_names(irep, index, register, ops)
+    names = Set.new
+    known = every_definition?(irep, index, register.to_s) do |writer, definition|
+      next false unless writer.reg == definition.reg && ops.include?(writer.op)
 
-  # Could `ins` read register `reg`? Over-approximate: a spelled-out operand,
-  # or the window after its first register that sends and packing ops use.
-  def reads_register?(ins, reg)
-    first = ins.reg&.to_i
-    return true if (first ? ins.regs.drop(1) : ins.regs).include?(reg.to_s)
-    return false if first.nil? || PURE_WRITES.include?(ins.op)
-
-    count = ins.argc || ins.uint_operand || 1
-    count = 15 if ins.n_spec == '*'
-    reg.between?(first, first + (2 * count) + 2)
+      name = writer.op == 'LOADSYM' ? writer.sym : writer.const_name
+      name && names.add(name)
+    end
+    names if known
   end
 
   # -- the class hierarchy -----------------------------------------------------
