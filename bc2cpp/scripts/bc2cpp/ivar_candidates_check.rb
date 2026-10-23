@@ -7,6 +7,8 @@ ROOT = File.expand_path('../..', __dir__)
 TOOLS = ENV['BC2CPP_TOOLS_DIR'] || File.join(ROOT, 'tools/bc2cpp')
 $LOAD_PATH.unshift(TOOLS)
 require 'ivar_candidates'
+require 'irep'
+require 'bytecode_ir'
 
 failures = []
 check = lambda do |label, condition|
@@ -16,13 +18,15 @@ end
 
 # Stand-ins for the settled compiler and the ctx fields the index reads. Each store and read is a plain instruction
 # in an irep labelled by its method; `found` is what ClassLayout's store_log would hold for a traced store.
-Insn = Struct.new(:op, :ivar, :regs)
-Irep = Struct.new(:insns) do
+StubInsn = Struct.new(:op, :ivar, :regs, :sym)
+StubIrep = Struct.new(:insns) do
+  def instructions = insns
+
   def each_with_op(*ops)
     insns.each_with_index { |insn, idx| yield insn, idx if ops.include?(insn.op) }
   end
 end
-Definer = Struct.new(:owner)
+Definer = Struct.new(:owner, :irep)
 
 class FakeGen
   attr_reader :family, :owner_of
@@ -46,8 +50,8 @@ def scene(methods)
   owners = {}
   store_log = {}
   methods.each do |label, (owner, insns, found)|
-    ireps[label] = Irep.new(insns)
-    owners[label] = Definer.new(owner) if owner
+    ireps[label] = StubIrep.new(insns)
+    owners[label] = Definer.new(owner, label) if owner
     (found || {}).each { |idx, cls| store_log[[owner, label, idx]] = [:x, cls, nil, nil, 0, nil] }
   end
   [ireps, owners, store_log]
@@ -56,17 +60,40 @@ end
 # The stub for nil_literal_write?: a SETIV fed directly by LOADNIL is a nil store.
 NIL_WRITE = ->(irep, idx, _reg) { idx.positive? && irep.insns[idx - 1].op == 'LOADNIL' }
 
+# The stubbed ireps carry no BytecodeIR, so the store-first oracle answers nil (every read counts) here. The cases
+# that exercise the real per-path dataflow are in real_candidate below.
+NO_PROOF = ->(_irep, _name) { nil }
+
 def candidate(methods, gen, owner, name)
   ireps, owners, store_log = scene(methods)
   ctx = Struct.new(:ireps, :store_log).new(ireps, store_log)
   gen.owner_of.merge!(owners)
-  index = IvarCandidates.index(ctx, gen, nil_write: NIL_WRITE)
+  index = IvarCandidates.index(ctx, gen, nil_write: NIL_WRITE, unstored_reads: NO_PROOF)
   IvarCandidates.type(index, gen, owner, name)
 end
 
-set = lambda { |reg| Insn.new('SETIV', :x, [reg]) }
-get = Insn.new('GETIV', :x, ['1'])
-load_nil = Insn.new('LOADNIL', nil, ['2'])
+# Real Irep and Insn objects, so BytecodeIR::Program answers which reads are store-first. A method is
+# { label => [owner, [insn, ...], found, catch_handlers, definer_label] }; definer_label is the method whose body
+# the irep belongs to (its own label unless the irep is a block of that method).
+def real_candidate(methods, gen, owner, name)
+  ireps = {}
+  owners = {}
+  store_log = {}
+  methods.each do |label, (klass, insns, found, handlers, definer_label)|
+    ireps[label] = Irep.new(label: label, instructions: insns, catch_handlers: handlers || [])
+    owners[label] = Definer.new(klass, definer_label || label)
+    (found || {}).each { |idx, cls| store_log[[klass, label, idx]] = [:x, cls, nil, nil, 0, nil] }
+  end
+  ctx = Struct.new(:ireps, :store_log).new(ireps, store_log)
+  gen.owner_of.merge!(owners)
+  real_nil_write = ->(irep, idx, _reg) { idx.positive? && irep.instructions[idx - 1].op == 'LOADNIL' }
+  index = IvarCandidates.index(ctx, gen, nil_write: real_nil_write)
+  IvarCandidates.type(index, gen, owner, name)
+end
+
+set = lambda { |reg| StubInsn.new('SETIV', :x, [reg]) }
+get = StubInsn.new('GETIV', :x, ['1'])
+load_nil = StubInsn.new('LOADNIL', nil, ['2'])
 
 # The reported case: #set stores, #get reads, and nothing assures that #get runs after a store.
 gen = FakeGen.new
@@ -114,6 +141,64 @@ check.call('a store in a block with no owner makes the ivar opaque',
 gen = FakeGen.new
 check.call('an ivar with no traced store has no class-layout candidate',
            candidate({ 2 => ['Foo', [get], nil] }, gen, 'Foo', 'x').nil?)
+
+# Per-path read-before-store on real instructions. Each read is in a method nothing assures, so nil is added exactly
+# when some read of @x may run before any store in its own method.
+def insn(addr, op, args) = Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
+
+gen = FakeGen.new
+store_first = { 1 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'GETIV', "R3\t@x"),
+                              insn(6, 'RETURN', 'R3')], { 1 => 'Bar' }] }
+check.call('a method that stores before reading adds no nil',
+           real_candidate(store_first, gen, 'Foo', 'x') == 'Bar')
+
+gen = FakeGen.new
+read_first = { 1 => ['Foo', [insn(0, 'GETIV', "R3\t@x"), insn(2, 'LOADI_1', "R2\t(1)"), insn(4, 'SETIV', "@x\tR2"),
+                             insn(6, 'RETURN', 'R3')], { 2 => 'Bar' }] }
+check.call('a method that reads before storing adds nil',
+           real_candidate(read_first, gen, 'Foo', 'x') == 'Bar | nil')
+
+gen = FakeGen.new
+# JMPNOT at 0 skips the store at 4 and reaches the read at 8 unstored.
+conditional = { 1 => ['Foo', [insn(0, 'JMPNOT', "R1\t8"), insn(4, 'SETIV', "@x\tR2"), insn(8, 'GETIV', "R3\t@x"),
+                              insn(12, 'RETURN', 'R3')], { 1 => 'Bar' }] }
+check.call('a read after a conditional store adds nil',
+           real_candidate(conditional, gen, 'Foo', 'x') == 'Bar | nil')
+
+gen = FakeGen.new
+# #reader calls #setter, which may store: the call does not prove the store, so the read keeps nil.
+self_call = {
+  1 => ['Foo', [insn(0, 'SEND0', "R2\t:set_x"), insn(4, 'GETIV', "R3\t@x"), insn(6, 'RETURN', 'R3')], nil],
+  2 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'RETURN', 'R2')], { 1 => 'Bar' }]
+}
+check.call('a read after a self-call that may store adds nil',
+           real_candidate(self_call, gen, 'Foo', 'x') == 'Bar | nil')
+
+gen = FakeGen.new
+# The rescue edge leaves the state before the SETIV at 2 (it may raise before storing): the handler's read is unstored.
+handler = { 1 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'RETURN', 'R2'),
+                          insn(6, 'GETIV', "R3\t@x"), insn(8, 'RETURN', 'R3')], { 1 => 'Bar' }, [
+                            CatchHandler.new(type: :rescue, begin_addr: 2, end_addr: 4, target: 6)
+                          ]] }
+check.call('a read in a rescue handler of the store adds nil', real_candidate(handler, gen, 'Foo', 'x') == 'Bar | nil')
+
+gen = FakeGen.new
+# A block's own store does not prove a read in that block: its frame can be entered before the method stores.
+block_read = {
+  1 => ['Foo', [insn(0, 'RETNIL', '')], nil],
+  2 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"), insn(4, 'GETIV', "R3\t@x"),
+                insn(6, 'RETURN', 'R3')], { 1 => 'Bar' }, nil, 1]
+}
+check.call('a read in a block of the method keeps nil after its own store',
+           real_candidate(block_read, gen, 'Foo', 'x') == 'Bar | nil')
+
+gen = FakeGen.new
+# remove_instance_variable anywhere can clear the slot between the store and the read, so no read is store-first.
+reflective = { 1 => ['Foo', [insn(0, 'LOADI_1', "R2\t(1)"), insn(2, 'SETIV', "@x\tR2"),
+                             insn(4, 'SEND', "R2\t:remove_instance_variable\tn=1"), insn(8, 'GETIV', "R3\t@x"),
+                             insn(10, 'RETURN', 'R3')], { 1 => 'Bar' }] }
+check.call('a reflective ivar removal voids the store-first proof',
+           real_candidate(reflective, gen, 'Foo', 'x') == 'Bar | nil')
 
 if ENV['MRBC']
   source = <<~RUBY
