@@ -123,7 +123,8 @@ module NativeCallbacks
         args = m && m[2].split(',').map(&:strip)
         next unless params && args.size == params.size
 
-        piece = body.gsub(/\b\w+\b/) { |w| params.include?(w) ? args[params.index(w)] : w }.gsub(/\s*##\s*/, '')
+        # Several functions in one expansion (DEFINE_SWITCHER) each start a line, which the function scan needs.
+        piece = body.gsub(/\b\w+\b/) { |w| params.include?(w) ? args[params.index(w)] : w }.gsub(/\s*##\s*/, '').gsub(/\}\s*/, "}\n")
         next_text << piece.gsub(/\b(#{generator_names})\s*\(/) { "\n#{Regexp.last_match(1)}(" } << "\n"
       end
       # An invocation line is expanded next round, so it stays out of the text the function scan reads.
