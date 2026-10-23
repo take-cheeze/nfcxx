@@ -596,6 +596,23 @@ class CodeGen
   end
 
   def argument_classes_at_sites(definition, position, read:, optional:)
+    irep = @ireps[definition.irep]
+    return nil unless irep && (optional ? optional_positionals_only?(irep) : pure_mandatory_arity?(irep))
+
+    mandatory = mandatory_arity(irep)
+    accepted = mandatory..(optional ? mandatory + optional_arity(irep) : mandatory)
+    return nil unless position.between?(1, accepted.end)
+
+    sites = reaching_call_sites(definition)
+    return nil unless sites
+
+    IrArgumentTypes.classes(definition, position, sites, arity: accepted, **call_site_lookups(read),
+                            argument: ->(body, index, register) { read ? read.call(body, index, register) : bytecode_ir_source_classes(body, index, register) })
+  end
+
+  # Every call site of the name, or nil when the name is dynamic, foreign, outside-referenced or poisoned: the
+  # precondition of every call-site join. A def's name is never a call site of its own (ENTRY_ARG_DEF_OPS).
+  def reaching_call_sites(definition)
     return nil if ENV['BC2CPP_IR_ARGUMENT_TYPES'] == '0'
     return nil unless @foreign_method_names && @outside_tokens && @closed_world&.exact_instances_singleton_free?
     return nil unless @native_results_ready && @rc_scoped_ready
@@ -605,23 +622,80 @@ class CodeGen
     return nil unless name.match?(/\A[A-Za-z_]/) && name != 'initialize'
     return nil if numeric_dynamically_named?(name)
 
-    irep = @ireps[definition.irep]
-    return nil unless irep && (optional ? optional_positionals_only?(irep) : pure_mandatory_arity?(irep))
-
-    mandatory = mandatory_arity(irep)
-    accepted = mandatory..(optional ? mandatory + optional_arity(irep) : mandatory)
-    return nil unless position.between?(1, accepted.end)
-
     sites, poisoned = entry_arg_call_index
     return nil if poisoned.include?(name) || sites[name].empty?
 
-    IrArgumentTypes.classes(definition, position, sites[name], arity: accepted,
-                            receiver: ->(body, index, register) {
-                              implicit = read && %w[SSEND SSEND0 SSENDB].include?(body.instructions[index].op)
-                              read && !implicit ? read.call(body, index, register) : bytecode_ir_argument_receiver_classes(body, index, register)
-                            },
-                            argument: ->(body, index, register) { read ? read.call(body, index, register) : bytecode_ir_source_classes(body, index, register) },
-                            target: ->(method, klass) { closed_world_exact_target(method, klass) })
+    sites[name]
+  end
+
+  def call_site_lookups(read)
+    { receiver: ->(body, index, register) {
+        implicit = read && %w[SSEND SSEND0 SSENDB].include?(body.instructions[index].op)
+        read && !implicit ? read.call(body, index, register) : bytecode_ir_argument_receiver_classes(body, index, register)
+      },
+      target: ->(method, klass) { closed_world_exact_target(method, klass) } }
+  end
+
+  # Rest parameter element type (`*rest`). A keyword-carrying site is refused: its pairs sit in the positional slots
+  # the join reads, so the element values would not be the positionals the def binds.
+  def bytecode_ir_rest_argument_classes(definition)
+    irep = @ireps[definition.irep]
+    return nil unless irep && rest_positional_shape?(irep)
+
+    sites = reaching_call_sites(definition)
+    return nil unless sites
+
+    IrArgumentTypes.rest_classes(definition, sites, **call_site_lookups(nil), fixed: mandatory_arity(irep) + optional_arity(irep),
+                                 minimum: mandatory_arity(irep),
+                                 argument: ->(body, index, register) { bytecode_ir_source_classes(body, index, register) },
+                                 admit: ->(body, index) { body.instructions[index].nk_spec.nil? })
+  end
+
+  # Block parameter: Set[:Proc] when every reaching call passes a literal block or lambda. A site that passes no
+  # block binds nil; a SENDB whose keyword pairs are dynamic (`nk=*`) has no fixed block slot, so it refuses.
+  def bytecode_ir_block_proc_classes(definition)
+    irep = @ireps[definition.irep]
+    return nil unless irep && block_param_shape?(irep)
+
+    sites = reaching_call_sites(definition)
+    return nil unless sites
+
+    IrArgumentTypes.block_proc(definition, sites, **call_site_lookups(nil),
+                               proc_value: ->(body, index, register, argc) {
+                                 insn = body.instructions[index]
+                                 nk = insn.nk_spec
+                                 next false unless %w[SENDB SSENDB].include?(insn.op) && (nk.nil? || nk.match?(/\A\d+\z/))
+
+                                 # Keyword pairs (key, value) follow the positionals; the block is the slot after them.
+                                 block = register + argc + 2 * nk.to_i + 1
+                                 BytecodeIR.all_writers_reaching?(body, index, block.to_s) { |_, writer| %w[LAMBDA BLOCK].include?(writer.op) }
+                               })
+  end
+
+  # Required keyword `name`: the value at every reaching call. Keyword pairs are flat registers after the positionals
+  # (compile_keyword_send), so the key is read as a LOADSYM and the value at the send itself.
+  def bytecode_ir_keyword_argument_classes(definition, name)
+    irep = @ireps[definition.irep]
+    return nil unless irep && keyword_required_shape?(irep, name)
+
+    sites = reaching_call_sites(definition)
+    return nil unless sites
+
+    IrArgumentTypes.keyword_classes(definition, sites, **call_site_lookups(nil),
+                                    value: ->(body, index, register, argc) {
+                                      nk = body.instructions[index].nk_spec
+                                      next nil unless nk&.match?(/\A\d+\z/) && nk.to_i.positive?
+
+                                      pairs = (0...nk.to_i).map do |k|
+                                        [literal_symbol_write(body, index, (register + argc + 1 + 2 * k).to_s), register + argc + 2 + 2 * k]
+                                      end
+                                      next nil if pairs.any? { |key, _| key.nil? }
+
+                                      matches = pairs.select { |key, _| key == name }
+                                      next nil unless matches.size == 1
+
+                                      bytecode_ir_source_classes(body, index, matches.first.last.to_s)
+                                    })
   end
 
   def bytecode_ir_call_graph_argument_classes(definition, position)

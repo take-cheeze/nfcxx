@@ -295,3 +295,194 @@ check.call('a site that reaches only another body is not a caller of this def',
                                                              .bytecode_ir_optional_argument_classes(opt_left, 2) == Set[:Integer])
 check.call('optional join is immutable', opt_harness.bytecode_ir_optional_argument_classes(opt_left, 2).frozen?)
 puts 'optional-positional call-site joins passed'
+
+# Rest, block and required keyword joins. The argument lambdas read per-register values, so each site names its own
+# registers; +reach+ says which sites are callers of the def.
+Rest = Definition.new('gather', 'rest_def')
+rest_sites = [[:r1, 0, 2, 3], [:r2, 0, 2, 1]]
+rest_values = { [:r1, 4] => Set[:Integer], [:r1, 5] => Set[:String], [:r2, 3] => Set[:Float] }
+rest_targets = { 'Left' => Rest }
+rest_receivers = { r1: Set[:Left], r2: Set[:Left] }
+rest_join = lambda do |sites = rest_sites, admit: ->(_body, _index) { true }, fixed: 1, minimum: 1|
+  IrArgumentTypes.rest_classes(Rest, sites, receiver: ->(body, _index, _reg) { rest_receivers[body] },
+                               target: ->(_name, klass) { rest_targets[klass] },
+                               argument: ->(body, _index, reg) { rest_values[[body, reg]] },
+                               fixed: fixed, minimum: minimum, admit: admit)
+end
+check.call('rest join is the union of every extra argument over the reaching sites',
+           rest_join.call == Set[:Integer, :String])
+check.call('rest with no reaching site passing an extra argument gives no element type',
+           rest_join.call([[:r2, 0, 2, 1]]).nil?)
+check.call('rest refuses a site below the mandatory count', rest_join.call([[:r1, 0, 2, 0]]).nil?)
+check.call('rest refuses a site its admit rejects (keyword-carrying call)',
+           rest_join.call(admit: ->(body, _index) { body != :r2 }).nil?)
+rest_values.delete([:r1, 5])
+check.call('rest refuses one unknown extra value', rest_join.call.nil?)
+rest_values[[:r1, 5]] = Set[:String]
+rest_receivers[:r2] = nil
+check.call('rest refuses an unknown receiver of any site', rest_join.call.nil?)
+rest_receivers[:r2] = Set[:Left]
+check.call('rest result is immutable', rest_join.call.frozen?)
+
+block_sites = [[:b1, 0, 2, 1], [:b2, 0, 2, 0]]
+Block = Definition.new('yield_later', 'block_def')
+block_targets = { 'Left' => Block }
+block_receivers = { b1: Set[:Left], b2: Set[:Left] }
+block_proc = lambda do |verdicts|
+  IrArgumentTypes.block_proc(Block, block_sites, receiver: ->(body, _index, _reg) { block_receivers[body] },
+                             target: ->(_name, klass) { block_targets[klass] },
+                             proc_value: ->(body, _index, _reg, _argc) { verdicts[body] })
+end
+check.call('block is Proc when every reaching site passes a Proc', block_proc.call({ b1: true, b2: true }) == Set[:Proc])
+check.call('one site without a Proc refuses the block join', block_proc.call({ b1: true, b2: false }).nil?)
+check.call('no reaching site gives no block fact', IrArgumentTypes.block_proc(Block, [], receiver: ->(*) { Set[:Left] },
+                                                                              target: ->(*) { nil }, proc_value: ->(*) { true }).nil?)
+
+keyword_values = { k1: Set[:String], k2: Set[:Integer] }
+keyword_sites = [[:k1, 0, 2, 1], [:k2, 0, 2, 1]]
+keyword_join = lambda do |sites = keyword_sites|
+  IrArgumentTypes.keyword_classes(Rest, sites, receiver: ->(_body, _index, _reg) { Set[:Left] },
+                                  target: ->(_name, _klass) { Rest },
+                                  value: ->(body, _index, _reg, _argc) { keyword_values[body] })
+end
+check.call('keyword join is the union of the value at every site', keyword_join.call == Set[:String, :Integer])
+keyword_values[:k2] = nil
+check.call('a site without a literal keyword value refuses the keyword join', keyword_join.call.nil?)
+puts 'rest, block and keyword call-site joins passed'
+
+if ENV['MRBC']
+  require_relative '../../tools/bc2cpp/type_check_rbs'
+  rest_block_source = <<~SOURCE
+    class RkdRest
+      def rkd_rest(*items)
+        items
+      end
+    end
+    class RkdRestNone
+      def rkd_rest_none(value, *items)
+        items
+      end
+    end
+    class RkdRestSplat
+      def rkd_rest_splat(*items)
+        items
+      end
+    end
+    class RkdRestKw
+      def rkd_rest_kw(*items)
+        items
+      end
+    end
+    class RkdBlock
+      def rkd_block(&blk)
+        blk
+      end
+    end
+    class RkdBlockMissing
+      def rkd_block_missing(value, &blk)
+        blk
+      end
+    end
+    class RkdBlockVar
+      def rkd_block_var(&blk)
+        blk
+      end
+    end
+    class RkdKw
+      def rkd_kw(value, key:)
+        key
+      end
+    end
+    class RkdKwMissing
+      def rkd_kw_missing(value, key:)
+        key
+      end
+    end
+    class RkdKwSplat
+      def rkd_kw_splat(value, key:)
+        key
+      end
+    end
+    class RkdKwOpt
+      def rkd_kw_opt(value, flag: nil)
+        flag
+      end
+    end
+    class RkdMain
+      def rkd_run(list)
+        RkdRest.new.rkd_rest(1, "two")
+        RkdRest.new.rkd_rest(3)
+        RkdRestNone.new.rkd_rest_none(1)
+        RkdRestNone.new.rkd_rest_none(2)
+        RkdRestSplat.new.rkd_rest_splat(1, 2)
+        RkdRestSplat.new.rkd_rest_splat(*list)
+        RkdRestKw.new.rkd_rest_kw(1, 2)
+        RkdRestKw.new.rkd_rest_kw(3, k: 4)
+        RkdBlock.new.rkd_block { 1 }
+        RkdBlock.new.rkd_block { 2 }
+        RkdBlockMissing.new.rkd_block_missing(1) { 3 }
+        RkdBlockMissing.new.rkd_block_missing(2)
+        pr = proc { 4 }
+        RkdBlockVar.new.rkd_block_var(&pr)
+        RkdKw.new.rkd_kw(1, key: "v")
+        RkdKw.new.rkd_kw(2, key: 3)
+        RkdKwMissing.new.rkd_kw_missing(1, key: "v")
+        RkdKwMissing.new.rkd_kw_missing(2, other: 3)
+        RkdKwSplat.new.rkd_kw_splat(1, key: "v")
+        h = { key: 2 }
+        RkdKwSplat.new.rkd_kw_splat(1, **h)
+        RkdKwOpt.new.rkd_kw_opt(2)
+      end
+    end
+  SOURCE
+  Dir.mktmpdir('rest-kw-block-fixture') do |dir|
+    File.write(File.join(dir, 'fixture.rb'), rest_block_source)
+    report = File.join(dir, 'facts.json')
+    facts = TypeCheckFixture.report(dir, env: { 'BC2CPP_SIG_DIRS' => '' }, out: report, label: 'rest/kw/block fixture')
+    row = lambda do |owner, name|
+      facts.fetch('methods').find { |method| method['owner'] == owner && method['name'] == name }
+    end
+    rest_type = ->(owner, name) { row.call(owner, name)&.dig('rest_param', 'type') }
+    check.call('rest joins the extra arguments of every caller (Array[T] element)',
+               rest_type.call('RkdRest', 'rkd_rest') == 'Integer | String' &&
+                 row.call('RkdRest', 'rkd_rest')['rest_param']['source'] == 'inferred:receiver-call-sites')
+    check.call('rest with only fixed-count callers stays untyped', rest_type.call('RkdRestNone', 'rkd_rest_none').nil?)
+    check.call('a splatted caller poisons the rest join', rest_type.call('RkdRestSplat', 'rkd_rest_splat').nil?)
+    check.call('a keyword-carrying caller refuses the rest join', rest_type.call('RkdRestKw', 'rkd_rest_kw').nil?)
+    check.call('block is Proc when every caller passes a literal block',
+               row.call('RkdBlock', 'rkd_block')['block_param'] == { 'type' => 'Proc', 'source' => 'inferred:receiver-call-sites' })
+    check.call('a caller without a block refuses the block join', row.call('RkdBlockMissing', 'rkd_block_missing')['block_param'].nil?)
+    check.call('a caller passing a non-literal proc refuses the block join', row.call('RkdBlockVar', 'rkd_block_var')['block_param'].nil?)
+    kw = ->(owner, name) { row.call(owner, name)['keyword_params'].find { |param| param['name'] == 'key' } }
+    check.call('required keyword joins the value passed at every caller',
+               kw.call('RkdKw', 'rkd_kw')['type'] == 'String | Integer' && kw.call('RkdKw', 'rkd_kw')['required'] == true &&
+                 kw.call('RkdKw', 'rkd_kw')['source'] == 'inferred:receiver-call-sites')
+    check.call('a caller that omits the required keyword refuses its join', kw.call('RkdKwMissing', 'rkd_kw_missing')['type'].nil?)
+    check.call('a double-splatted caller refuses the keyword join', kw.call('RkdKwSplat', 'rkd_kw_splat')['type'].nil?)
+    opt = row.call('RkdKwOpt', 'rkd_kw_opt')['keyword_params'].find { |param| param['name'] == 'flag' }
+    check.call('optional keyword stays untyped', opt['required'] == false && opt['type'].nil?)
+    # The emitted names are CRuby core classes, which the writer declares; pass them as its declared set.
+    line = ->(owner, name) { TypeCheckRbs.method_line(row.call(owner, name), Set['Integer', 'String']) }
+    check.call('candidate RBS writes the rest element type as *(T)', line.call('RkdRest', 'rkd_rest').include?('(*(Integer | String))'))
+    check.call('candidate RBS writes the required block for a Proc block param',
+               line.call('RkdBlock', 'rkd_block').include?(' { (*untyped) -> untyped } -> ') &&
+                 !line.call('RkdBlock', 'rkd_block').include?('?{'))
+    check.call('candidate RBS keeps the block optional when no caller passes a literal block',
+               line.call('RkdBlockVar', 'rkd_block_var').include?('?{'))
+    check.call('candidate RBS writes the required keyword type', line.call('RkdKw', 'rkd_kw').include?('key: String | Integer'))
+    check.call('candidate RBS keeps an optional keyword untyped', line.call('RkdKwOpt', 'rkd_kw_opt').include?('?flag: untyped'))
+  end
+  Dir.mktmpdir('rest-kw-block-off') do |dir|
+    File.write(File.join(dir, 'fixture.rb'), rest_block_source)
+    off = TypeCheckFixture.report(dir, env: { 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_IR_ARGUMENT_TYPES' => '0' }, label: 'rest/kw/block off')
+    methods = off.fetch('methods')
+    check.call('BC2CPP_IR_ARGUMENT_TYPES=0 restores untyped rest, keyword and block',
+               methods.select { |m| m['owner'].start_with?('Rkd') }.all? do |m|
+                 (m['rest_param'].nil? || m['rest_param']['type'].nil?) && m['block_param'].nil? &&
+                   m['keyword_params'].all? { |p| p['type'].nil? }
+               end)
+  end
+  puts 'rest, block and keyword call-site joins (compiler fixture) passed'
+else
+  puts 'SKIP rest, block and keyword compiler fixture (set MRBC)'
+end
