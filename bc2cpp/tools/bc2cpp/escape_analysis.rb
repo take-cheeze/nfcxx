@@ -438,7 +438,7 @@ module EscapeAnalysis
       @defs.each { |name, list| list.each { |d| known[name] << d.irep if d.irep } }
       closure_bodies = Set.new
       @ireps.each_value do |irep|
-        EscapeAnalysis.op_sites(irep, CLOSURE_OPS).each { |insn, _| closure_bodies << irep.reps[insn.block_index.to_i] }
+        BytecodeIR::Tree.child_labels(irep, CLOSURE_OPS).each { |_, label| closure_bodies << label }
       end
       @ireps.each_value do |irep|
         EscapeAnalysis.op_sites(irep, SCANNED_OPS).each do |insn, idx|
@@ -988,10 +988,7 @@ module EscapeAnalysis
 
     # [[closure instruction index, child irep]] of +irep+.
     def closure_children(irep)
-      EscapeAnalysis.op_sites(irep, CLOSURE_OPS).filter_map do |insn, j|
-        child = @world.ireps[irep.reps[insn.block_index.to_i]]
-        [j, child] if child
-      end
+      BytecodeIR::Tree.children(irep, @world.ireps, CLOSURE_OPS)
     end
 
     # Reads (GETUPVAR/BLKPUSH) inside +irep+'s closure subtree that resolve to the frame +irep+ is a closure
@@ -999,16 +996,15 @@ module EscapeAnalysis
     # out of that frame. A SETUPVAR only writes the frame's register, so it is no read.
     def subtree_refs(irep, depth, chain)
       refs = []
-      EscapeAnalysis.op_sites(irep, REF_OPS).each do |insn, j|
-        if insn.op == 'GETUPVAR'
-          idx, level = insn.upvar_ref
-          refs << { kind: :up, idx: idx, irep: irep, index: j, dest: insn.reg, chain: chain } if level == depth
-        elsif insn.paren_value.to_i == depth + 1
-          refs << { kind: :blk, irep: irep, index: j, dest: insn.reg, chain: chain }
+      BytecodeIR::Tree.each_subtree(irep, @world.ireps, CLOSURE_OPS, depth, chain) do |node, d, c|
+        BytecodeIR.for(node).each_with_op(*REF_OPS) do |insn, j|
+          if insn.op == 'GETUPVAR'
+            idx, level = insn.upvar_ref
+            refs << { kind: :up, idx: idx, irep: node, index: j, dest: insn.reg, chain: c } if level == d
+          elsif insn.paren_value.to_i == d + 1
+            refs << { kind: :blk, irep: node, index: j, dest: insn.reg, chain: c }
+          end
         end
-      end
-      closure_children(irep).each do |ci, child|
-        refs.concat(subtree_refs(child, depth + 1, chain + [[irep, ci]]))
       end
       refs
     end
