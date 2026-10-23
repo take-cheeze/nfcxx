@@ -204,12 +204,12 @@ module InsnOperands
     @uint_operand = reg && second && %i[int addr].include?(second.kind) && second.value >= 0 ? second.value : nil
   end
 
-  # Signed literal right after the leading register, as printed (`R1 -5`).
+  # Signed literal right after the leading register, as printed (`R1 -5`). The read is defined once, in
+  # BytecodeIR::OperandModel.imm_operand; this memoizes it per instruction.
   def imm_operand
     return @imm_operand if defined?(@imm_operand)
 
-    second = typed[1]
-    @imm_operand = reg && second&.kind == :int ? second.value.to_s : nil
+    @imm_operand = BytecodeIR::OperandModel.imm_operand(self)
   end
 
   # `R1 R2 3`: [source register, literal] as Strings.

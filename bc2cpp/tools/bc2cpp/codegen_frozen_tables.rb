@@ -251,7 +251,7 @@ end
 
   # The Integer a LOADI* op loads: `LOADI_n` / `LOADI__1` print it in parentheses, the others as an operand.
   def frozen_table_loadi(writer)
-    return IntegerConstants.loadi_value(writer) if writer.imm_operand
+    return IntegerConstants.loadi_value(writer) if BytecodeIR::OperandModel.imm_operand(writer)
 
     text = writer.paren_value
     text&.match?(/\A-?\d+\z/) ? text.to_i : nil

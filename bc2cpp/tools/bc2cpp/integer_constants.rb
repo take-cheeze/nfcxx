@@ -251,7 +251,7 @@ module IntegerConstants
         args = insn.regs
         left = const_source_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
-                  immediate = insn.imm_operand
+                  immediate = BytecodeIR::OperandModel.imm_operand(insn)
                   next nil unless immediate
 
                   immediate.to_i
@@ -347,7 +347,7 @@ module IntegerConstants
         args = insn.regs
         left = literal_value_kind(irep, j, cur, entries)
         right = if %w[ADDI SUBI].include?(insn.op)
-                  immediate = insn.imm_operand
+                  immediate = BytecodeIR::OperandModel.imm_operand(insn)
                   next nil unless immediate
 
                   immediate.to_i
@@ -382,7 +382,7 @@ module IntegerConstants
     return insn.op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(insn.op)
     return -1 if insn.op == 'LOADI__1'
 
-    tok = insn.imm_operand
+    tok = BytecodeIR::OperandModel.imm_operand(insn)
     return nil unless tok
 
     value = tok.to_i
