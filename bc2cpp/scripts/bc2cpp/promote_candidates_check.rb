@@ -9,9 +9,13 @@
 # Checks: a dry run writes nothing; existing declarations are never changed; untyped and undeclared members are skipped
 # and listed; a candidate carrying base-section lines is refused; a target without the block_types line is refused;
 # a target that does not parse is refused; a write adds the absent members, leaves the base section byte for byte and
-# parses again; a second write changes nothing.
+# parses again; a second write changes nothing. With --proofs (the TC1011 verdicts of bc2cpp's declared-constant check):
+# a constant the check rejects is skipped, an Integer or Array constant without a verdict is skipped, other constants
+# are not gated, a verdict file for another directory or of another shape is refused, and the write leaves the target
+# unchanged when the file is refused.
 
 require 'digest'
+require 'json'
 require 'open3'
 require 'rbconfig'
 require 'tmpdir'
@@ -202,6 +206,119 @@ Dir.mktmpdir('promote-candidates') do |root|
   check.call('a second write exits 0 and reports nothing to promote',
              status5.success? && out5.include?('nothing to promote; the target is unchanged'))
   check.call('a second write changes nothing', File.read(target) == written)
+end
+
+puts 'fixture: constant proofs (--proofs)'
+PROOF_TARGET = "# ---- block_types.rbs\nclass Game::Actor\n  def existing: () -> Integer\nend\n"
+PROOF_CANDIDATES = {
+  'Game/Actor.rbs' => <<~RBS
+    class Game::Actor
+      LIMIT: Integer
+      RATE: Integer
+      SLOTS: Integer
+      WIDE: Integer
+      TITLE: String
+      ITEMS: Array[Integer]
+    end
+  RBS
+}.freeze
+PROOF_VERDICTS = {
+  'Game::Actor::LIMIT' => nil,
+  'Game::Actor::WIDE' => nil,
+  'Game::Actor::RATE' => 'Game::Actor::RATE: Integer (candidate.rbs:3): the assigned value is not a proven Fixnum expression'
+}.freeze
+Dir.mktmpdir('promote-candidates-proofs') do |root|
+  target = File.join(root, 'declarations.rbs')
+  File.write(target, PROOF_TARGET)
+  candidates = write_candidates(root, PROOF_CANDIDATES)
+  proofs_path = File.join(root, 'proofs.json')
+  File.write(proofs_path, JSON.generate('version' => 1, 'candidates' => 'rbs-suggestions', 'verdicts' => PROOF_VERDICTS))
+  label = target
+
+  verdicts = PromoteCandidates.load_proofs(proofs_path, candidates)
+  check.call('load_proofs returns the verdicts keyed by constant name', verdicts == PROOF_VERDICTS)
+
+  bare = PromoteCandidates.plan(File.read(target), candidates, target_label: label)
+  check.call('without proofs every absent constant is added as before (RATE: Integer, SLOTS: Integer)',
+             bare.text.include?('  RATE: Integer') && bare.text.include?('  SLOTS: Integer'))
+
+  plan = PromoteCandidates.plan(File.read(target), candidates, target_label: label, proofs: verdicts)
+  text = plan.text
+  check.call('a constant the check accepts is added (LIMIT: Integer, WIDE: Integer)',
+             text.include?('  LIMIT: Integer') && text.include?('  WIDE: Integer'))
+  check.call('a constant the check rejects (TC1011) is not written (RATE: Integer is absent)', !text.include?('RATE: Integer'))
+  check.call('an Integer constant with no verdict is not written (SLOTS: Integer is absent)', !text.include?('SLOTS: Integer'))
+  check.call('an Array constant with no verdict is not written (ITEMS is absent)', !text.include?('ITEMS'))
+  check.call('a String constant is not gated by the proofs (TITLE: String is added)', text.include?('  TITLE: String'))
+  check.call('the rejected constant is listed with its TC1011 reason',
+             plan.skipped.any? { |what, why| what == 'Game::Actor::RATE' && why.start_with?('TC1011: ') && why.include?('not a proven Fixnum expression') })
+  check.call('the unverdicted Integer constant is listed with a no-proof reason',
+             plan.skipped.any? { |what, why| what == 'Game::Actor::SLOTS' && why.start_with?('no proof fact: Game::Actor::SLOTS') })
+  check.call('the base section stays byte for byte the same', base_of(text) == base_of(PROOF_TARGET))
+
+  Dir.mktmpdir('promote-candidates-proofs-bad') do |dir|
+    wrong_dir = File.join(dir, 'proofs.json')
+    File.write(wrong_dir, JSON.generate('version' => 1, 'candidates' => 'other-dir', 'verdicts' => PROOF_VERDICTS))
+    refused = begin
+      PromoteCandidates.load_proofs(wrong_dir, candidates)
+      nil
+    rescue PromoteCandidates::Refusal => e
+      e.message
+    end
+    check.call('a proofs file written for another candidate directory is refused', refused.to_s.include?('was written for "other-dir"'))
+
+    wrong_version = File.join(dir, 'version.json')
+    File.write(wrong_version, JSON.generate('version' => 2, 'candidates' => 'rbs-suggestions', 'verdicts' => {}))
+    refused = begin
+      PromoteCandidates.load_proofs(wrong_version, candidates)
+      nil
+    rescue PromoteCandidates::Refusal => e
+      e.message
+    end
+    check.call('a proofs file of another version is refused', refused.to_s.include?('not a version 1 constant proofs file'))
+
+    not_json = File.join(dir, 'broken.json')
+    File.write(not_json, '{ "verdicts": ')
+    refused = begin
+      PromoteCandidates.load_proofs(not_json, candidates)
+      nil
+    rescue PromoteCandidates::Refusal => e
+      e.message
+    end
+    check.call('a proofs file that is not JSON is refused, not ignored', refused.to_s.include?('cannot be read as a constant proofs file'))
+
+    bad_verdict = File.join(dir, 'bad-verdict.json')
+    File.write(bad_verdict, JSON.generate('version' => 1, 'candidates' => 'rbs-suggestions', 'verdicts' => { 'A::B' => 3 }))
+    refused = begin
+      PromoteCandidates.load_proofs(bad_verdict, candidates)
+      nil
+    rescue PromoteCandidates::Refusal => e
+      e.message
+    end
+    check.call('a verdict that is neither null nor a message is refused', refused.to_s.include?('not a version 1 constant proofs file'))
+  end
+
+  before_cli = snapshot(root)
+  out, err, status = Open3.capture3(RbConfig.ruby, CLI, '--proofs', proofs_path, '--target', target, candidates)
+  check.call('the dry run with --proofs exits 0 and prints no error', status.success? && err.empty?)
+  check.call('the dry run with --proofs names the proofs file', out.include?("constants: checked against #{proofs_path} (TC1011)"))
+  check.call('the dry run with --proofs lists the TC1011 skip', out.include?('skip  Game::Actor::RATE: TC1011: '))
+  check.call('the dry run with --proofs writes nothing', snapshot(root) == before_cli)
+  out_none, _err_none, _status_none = Open3.capture3(RbConfig.ruby, CLI, '--target', target, candidates)
+  check.call('the dry run without --proofs says constants are not checked', out_none.include?('constants: not checked against TC1011 (no --proofs)'))
+
+  before_bad = File.read(target)
+  broken_proofs = File.join(root, 'broken-proofs.json')
+  File.write(broken_proofs, '{ "verdicts": ')
+  _bad_out, bad_err, bad_status = Open3.capture3(RbConfig.ruby, CLI, '--write', '--proofs', broken_proofs, '--target', target, candidates)
+  check.call('a write with an unreadable proofs file exits 1 and says why', bad_status.exitstatus == 1 && bad_err.include?('promote_candidates: refused'))
+  check.call('a refused proofs file leaves the target unchanged', File.read(target) == before_bad)
+
+  _w_out, w_err, w_status = Open3.capture3(RbConfig.ruby, CLI, '--write', '--proofs', proofs_path, '--target', target, candidates)
+  written = File.read(target)
+  check.call('the write with --proofs exits 0 and the file parses', w_status.success? && w_err.empty? && PromoteCandidates.verify(written).nil?)
+  check.call('the written file has the accepted constants and not the rejected one',
+             written.include?('  LIMIT: Integer') && !written.include?('RATE: Integer') && !written.include?('SLOTS: Integer'))
 end
 
 if failures.empty?
