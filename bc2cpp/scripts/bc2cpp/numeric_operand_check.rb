@@ -517,6 +517,14 @@ if ENV['MRBC']
       end
     end
 
+    # A compact body is outside the lexical model (LexicalConsts), so its bare NQ_MIX read has no definition
+    # to name: the name another scope binds to a String keeps the send here.
+    class NqBox::NqKid
+      def nq_bare_mix
+        NQ_MIX + 1
+      end
+    end
+
     class NqBase
       def initialize
         @nq_shared = 0
@@ -679,7 +687,10 @@ if ENV['MRBC']
   check.call('NEG: an ivar that instance_variable_set can write keeps its send', kept.call('NqBox#nq_refl_use'))
   check.call('constants defined from constants, `*`, `+` and `/` prove as Integer/Float',
              proven.call('NqBox#nq_const_use') && proven.call('NqBox#nq_ratio_use'))
-  check.call('NEG: a constant name another scope binds to a String keeps its send', kept.call('NqBox#nq_mix_const'))
+  check.call('a qualified constant read proves from its own definition, not another scope binding the name to a String',
+             proven.call('NqBox#nq_mix_const'))
+  check.call('NEG: a bare constant name read from a compact scope, another scope binds to a String, keeps its send',
+             kept.call('NqBox::NqKid#nq_bare_mix'))
   check.call('a method with a rescue clause has facts: both paths leave an Integer', proven.call('NqBox#nq_rescued'))
   check.call('NEG: a rescued region that may leave a String keeps its send', kept.call('NqBox#nq_rescued_str'))
   check.call('a `return` inside a block joins the method result: Integer either way', proven.call('NqBox#nq_block_ret_use'))
