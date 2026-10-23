@@ -14,6 +14,7 @@ require 'set'
 path = ARGV.fetch(0) { abort 'usage: bc2cpp_escape_report.rb escape.tsv [shipped.cxx]' }
 rows = File.readlines(path, chomp: true).map { |line| line.split("\t", -1) }
 all_sites = rows.select { |r| r[0] == 'site' }
+ivars = rows.select { |r| r[0] == 'ivars' }
 selves = rows.select { |r| r[0] == 'self' }
 shipped = ARGV[1] && File.read(ARGV[1], encoding: 'BINARY').scan(%r{^// (\S+#\S+) \(compiled from irep}).flatten.to_set
 
@@ -60,6 +61,16 @@ def containers(sites)
   end
 end
 
+# The `ivars` rows (tools/bc2cpp/escape_immediate_ivars.rb): confined `new` sites by whether every ivar store that
+# can reach the object is provably immediate. Reasons are grouped with the labels and counts taken out.
+def ivar_table(ivars, title)
+  immediate = ivars.count { |r| r[7] == 'immediate' }
+  puts "-- #{title}: #{ivars.size} confined object sites; immediate-only ivars: #{immediate}; " \
+       "not immediate (a heap store or unenumerated): #{ivars.size - immediate}"
+  why = ivars.reject { |r| r[7] == 'immediate' }.map { |r| r[8].gsub(/\S*:\d+\)?/, '').squeeze(' ').strip }
+  why.tally.sort_by { |_, n| -n }.first(12).each { |reason, n| puts format('     %6d  %s', n, reason) }
+end
+
 table(all_sites, 'every irep of the closed world')
 puts
 puts '-- why sites escape (kind, reason), top 24 --'
@@ -69,6 +80,7 @@ end
 puts
 lambdas_and_blocks(all_sites)
 containers(all_sites)
+ivar_table(ivars, 'object ivars, every irep')
 
 if shipped
   in_shipped = all_sites.select { |r| shipped.include?(r[2]) }
@@ -77,6 +89,7 @@ if shipped
   table(in_shipped, 'shipped methods')
   lambdas_and_blocks(in_shipped)
   containers(in_shipped)
+  ivar_table(ivars.select { |r| shipped.include?(r[2]) }, 'object ivars, shipped methods')
 end
 
 puts
