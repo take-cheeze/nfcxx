@@ -449,7 +449,7 @@ if system(mrbc, '--version', out: File::NULL, err: File::NULL) || system(mrbc, '
       binary = File.join(dir, 'fb')
       flags = bigint ? ['-DMRB_USE_BIGINT'] : []
       built = Bc2cppCxx.system('-std=c++17', '-fexceptions', '-DMRB_USE_CXX_EXCEPTION', '-DMRB_NO_GEMS', '-w', *flags,
-                     "-I#{dir}", "-I#{core}/include", "-I#{ROOT}/3rd/mruby/include", File.join(dir, 'main.cpp'),
+                     "-I#{dir}", "-I#{core}/include", "-I#{ROOT}/3rd/mruby/include", "-I#{ROOT}/include", File.join(dir, 'main.cpp'),
                      "#{core}/lib/libmruby_core.a", '-lm', '-o', binary)
       check.call('the fixture compiles against real mruby', built)
       if built
