@@ -54,7 +54,7 @@ class IrBlockCaptures
 
     call = @parent.instructions[@call_index]
     producer = @parent.instructions[producer_index]
-    return false unless call && %w[SENDB SSENDB].include?(call.op) && call.plain_fixed_argc?
+    return false unless call && BytecodeIR::Ops::BLOCK_SEND.include?(call.op) && call.plain_fixed_argc?
     return false unless producer&.op == 'BLOCK' && ireps[Array(@parent.reps)[producer.block_index.to_i]].equal?(@child)
 
     block_reg = (call.reg.to_i + call.argc + 1).to_s

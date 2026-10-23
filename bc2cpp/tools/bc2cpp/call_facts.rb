@@ -342,7 +342,7 @@ module CallFacts
 
     CALLS = BytecodeIR::Ops::CALLEE_FRAME
     NO_WRITE = NumericFlow::NO_WRITE_OPS
-    REFINING = %w[SEND SEND0 SENDB].freeze
+    REFINING = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::SELF_SEND).freeze
 
     # Index -> state (nil when unreached), or nil when the irep is not modelled. +opaque+ are the
     # registers a nested block can write (their value is not the one a call saw).
