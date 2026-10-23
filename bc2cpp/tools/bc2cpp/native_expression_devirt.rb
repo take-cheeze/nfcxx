@@ -759,13 +759,21 @@ module NativeExpressionDevirt
     normalized.match?(/\bmrb_get_\w+\s*\(|\b\w+\s*->\s*c\s*->\s*(?:ci|stack)\b/)
   end
 
+  # One compiled pattern per macro name: macro_calls runs for every name on
+  # every native source, so building the Regexp each time is pure overhead.
+  MACRO_CALL_PATTERNS = {}
+
+  def macro_call_pattern(macro)
+    MACRO_CALL_PATTERNS[macro] ||= /\b#{Regexp.escape(macro)}\s*\(/
+  end
+
   def macro_calls(source, macro)
     calls = []
     # The regex below cannot match without the literal, and its `\b` prefix
     # makes the unguarded scan of every native source slow.
     return calls unless source.include?(macro)
 
-    source.to_enum(:scan, /\b#{Regexp.escape(macro)}\s*\(/).each do
+    source.to_enum(:scan, macro_call_pattern(macro)).each do
       opening = Regexp.last_match.end(0) - 1
       arguments, = split_call_arguments(source, opening)
       calls << arguments if arguments
