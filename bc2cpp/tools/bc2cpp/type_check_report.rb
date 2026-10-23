@@ -290,7 +290,7 @@ module TypeCheckReport
     section.call('untyped ivars by reason (stage:ADR 0382 bucket)', s['ivar_reasons'], 14)
     feedback = Array(facts['ir_feedback']).select { |row| scope == 'all' || row['scope'] == scope }
     unless feedback.empty?
-      section.call('IR queries left unknown by reason', tally(feedback.select { |row| row['status'] == 'unknown' }.map { |row| row['reason'] }), 12)
+      out << unknown_reason_ranking(facts, scope: scope, limit: 12)
       out << "-- inferred RBS return suggestions (top #{top}) --\n"
       TypeCheckRbs.inferred_return_suggestions(facts, scope: scope).first(top).each do |row|
         out << "  #{row['owner']}##{row['method']} -> #{row['type']}\n"
@@ -309,6 +309,35 @@ module TypeCheckReport
       end
     end
     out
+  end
+
+  # Unknown IR queries grouped by refusal reason, most frequent first (ties by name). Each group keeps the files it
+  # hits, most frequent first, so the top reason names the next producer worth modeling and where it occurs.
+  def unknown_reasons(facts, scope: 'engine')
+    counts = Hash.new { |h, reason| h[reason] = Hash.new(0) }
+    Array(facts['ir_feedback']).each do |row|
+      next unless row['status'] == 'unknown' && (scope == 'all' || row['scope'] == scope)
+
+      reason = row['reason'].to_s.empty? ? '(none)' : row['reason']
+      counts[reason][row['file'] || '-'] += 1
+    end
+    counts.map do |reason, files|
+      { 'reason' => reason, 'count' => files.values.sum, 'files' => files.sort_by { |file, n| [-n, file] } }
+    end.sort_by { |group| [-group['count'], group['reason']] }
+  end
+
+  def unknown_reason_ranking(facts, scope: 'engine', limit: 12)
+    groups = unknown_reasons(facts, scope: scope)
+    out = +"-- IR queries left unknown, ranked by reason (count; files hit) --\n"
+    out << "       (none)\n" if groups.empty?
+    groups.first(limit).each do |group|
+      out << format("%6d  %s\n", group['count'], group['reason'])
+      shown = group['files'].first(3).map { |file, n| "#{file} (#{n})" }
+      more = group['files'].size - shown.size
+      out << "        in #{shown.join(', ')}#{", +#{more} more" if more.positive?}\n"
+    end
+    out << "       (+#{groups.size - limit} more reasons)\n" if groups.size > limit
+    out << "\n"
   end
 
   def tsv(facts, scope: 'engine')
