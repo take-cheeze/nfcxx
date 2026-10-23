@@ -32,6 +32,13 @@ def outcomes(suite, directory, exit_code):
     return dict(sorted(counts.items()))
 
 
+def log_tail(path, lines=40):
+    try:
+        return '\n'.join(path.read_text(errors='replace').splitlines()[-lines:])
+    except OSError:
+        return '(runner.log unavailable)'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('suite', choices=['gcc', 'clang', 'libcxx', 'libstdcxx', 'llvm-test-suite'])
@@ -55,7 +62,10 @@ def main():
     try:
         counts = outcomes(args.suite, result, rc)
     except (ValueError, KeyError, OSError) as error:
-        raise SystemExit(f'Incomplete native run: {error}')
+        message = f'Incomplete native run: {error}'
+        if rc != 0 or not any(result.glob('*')):
+            message += f'\n--- last 40 lines of {out / "runner.log"} (exit {rc}) ---\n' + log_tail(out / 'runner.log')
+        raise SystemExit(message)
     summary = {'suite': args.suite, 'policy': 'observational; no reviewed CI baseline yet',
                'native_exit': rc, 'outcomes': counts}
     (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
