@@ -155,6 +155,14 @@ poly = GuardHarness.new(poly_defs, ireps.merge('L5' => Irep.new(label: 'L5', ins
 check.call('a POLY name declared on one definition only adds no fact (every definition must carry the check)',
            poly.declared_return_refusal('count')&.first == 'info' && !poly.declared_return_facts(:fixnum).include?('count'))
 
+outside = GuardHarness.new(defs, ireps)
+outside.instance_variable_get(:@foreign_method_names) << 'count'
+check.call('a hint whose name an outside definition also defines needs no guard (no fact relies on it)',
+           outside.declared_return_refusal('count')&.first == 'info' &&
+           !outside.declared_return_hints.map(&:name).include?('count'))
+check.call('a hint with a fact still needs its guard',
+           GuardHarness.new(defs, ireps).declared_return_hints.map(&:name).include?('count'))
+
 puts '-- refusals (host)'
 Dir.mktmpdir do |dir|
   File.write(File.join(dir, 't.rbs'), <<~RBS)

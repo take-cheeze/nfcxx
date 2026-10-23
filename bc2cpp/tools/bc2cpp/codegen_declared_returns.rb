@@ -54,9 +54,11 @@ class CodeGen
     @declared_return_entries ||= (self.class.declared_returns || []).select { |e| @ireps[e.label] }
   end
 
-  # The runtime-checked declarations (DECLARED_RETURN_GUARD).
+  # The runtime-checked declarations that need their compiled check (DECLARED_RETURN_GUARD). A hint whose name admits
+  # no fact (refused as info: another definition outside the program also defines it, such as native `inspect`) is
+  # relied on by nothing, so its body keeps no check and the build does not require one. An error refusal still does.
   def declared_return_hints
-    declared_return_entries.select(&:hint)
+    declared_return_entries.select { |e| e.hint && declared_return_refusal(e.name)&.first != 'info' }
   end
 
   # The runtime-checked declaration of the body `label` compiles, or nil.
