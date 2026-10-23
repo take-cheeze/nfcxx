@@ -15,6 +15,7 @@ require 'set'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative '../../tools/bc2cpp/compiled_gems'
+require_relative '../../tools/bc2cpp/type_facts'
 
 suite = FixtureCheck.new('freeze_fold_check')
 
@@ -36,6 +37,22 @@ suite.check('an Integer (maybe a bignum) is not folded', cg.send(:freeze_fold_fr
 suite.check('a table mixed with OTHER is not folded', cg.send(:freeze_fold_frozen, table.bit | NF::OTHER).nil?)
 cg.define_singleton_method(:freeze_fold_frozen_safe?) { false }
 suite.check('a refused Kernel#frozen? audit keeps every send', cg.send(:freeze_fold_frozen, table.bit).nil?)
+
+puts '== freeze self producer (host)'
+# TypeFacts.textual_producer names the producer of a value only when every reaching definition agrees.
+def fold_insn(addr, op, args) = Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
+def fold_irep(list) = Irep.new(label: 'fold', nregs: 10, reps: [], pool: ['s'], catch_handlers: [], nlocals: 2,
+                               instructions: list)
+# r = c ? "s" : 1; r.freeze -- the textually last arm is the Integer literal, but the String arm reaches the freeze.
+join = fold_irep([fold_insn(0, 'JMPNOT', "R1\t3"), fold_insn(1, 'STRING', "R2\tL[0]"), fold_insn(2, 'JMP', '4'),
+                  fold_insn(3, 'LOADI_1', "R2\t(1)"), fold_insn(4, 'SEND0', "R2\t:freeze")])
+suite.check('a join of a String and an Integer has no literal producer',
+            TypeFacts.textual_producer(nil, join, 4, 2) == 'unreadable')
+single = fold_irep([fold_insn(0, 'STRING', "R2\tL[0]"), fold_insn(1, 'SEND0', "R2\t:freeze")])
+suite.check('a straight-line String keeps its literal producer',
+            TypeFacts.textual_producer(nil, single, 1, 2) == 'literal:String')
+param = fold_irep([fold_insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), fold_insn(1, 'SEND0', "R1\t:freeze")])
+suite.check('a frame argument is a param, not a literal', TypeFacts.textual_producer(nil, param, 1, 1) == 'param')
 
 puts '== gate (host)'
 previous = ENV.fetch('BC2CPP_FREEZE_FOLD', nil)
