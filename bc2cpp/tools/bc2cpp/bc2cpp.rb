@@ -365,7 +365,7 @@ if $PROGRAM_NAME == __FILE__
     warn "== escape analysis: #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
          "Ruby this run does not compile (#{hidden_ruby.owners.size} owner-scoped) =="
     EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
-                                                     native_names: native_names,
+                                                     native_names: native_names, native_files: native_name_sources,
                                                      native_owners: CodeGen::NATIVE_OWNER_MAP_CACHE[native_paths] ||=
                                                        NativeOwnerMap.build(native_paths),
                                                      superclass_of: superclass_of, included: included_modules,
