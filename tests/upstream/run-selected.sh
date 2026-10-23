@@ -6,6 +6,7 @@ root=$PWD; snapshot=$root/build/testsuite-snapshots
 out=${UPSTREAM_OUT:-$snapshot/selected-results}
 routes=${UPSTREAM_ROUTES:-'qbe gcc pathb'}
 manifest=${UPSTREAM_MANIFEST:-tests/upstream/reviewed.tsv}
+xfail_list=${UPSTREAM_XFAIL:-tests/upstream/xfail.tsv}
 host=${HOST_CXX:-g++}; limit=${UPSTREAM_TIMEOUT:-60}
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 mkdir "$out/.lock" 2>/dev/null || { echo "results already in use: $out" >&2; exit 1; }
@@ -57,8 +58,15 @@ while IFS=$'\t' read -r suite id std relative oracle review; do
         if [ "$compile" -gt 128 ] && { [ "$compile" -ne 129 ] || [ "${backend:-0}" -gt 128 ]; }; then status=compile-crash
         else status=compile-rejected; fi ;;
     esac
+    # A known failure is listed in the xfail manifest with the status it must have: that status is reported as xfail,
+    # a pass is xpass (a failure, so the entry gets removed), and any other status stays a failure.
+    expected=$(awk -F'\t' -v s="$suite" -v i="$id" -v r="$route" '$1==s && $2==i && $3==r {print $4; exit}' "$xfail_list")
+    if [ -n "$expected" ]; then
+      if [ "$status" = "$expected" ]; then status=xfail
+      elif [ "$status" = pass ]; then status=xpass; fi
+    fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$suite" "$id" "$std" "$route" "$status" "$compile" "$run" >> "$out/results.tsv"
-    [ "$status" = pass ] || fail=1
+    case $status in pass|xfail) ;; *) fail=1 ;; esac
     echo "$suite $id $route: $status"
   done
 done < "$manifest"
