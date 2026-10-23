@@ -18,6 +18,7 @@
 # Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_CORE=dir] ruby scripts/bc2cpp/fallback_bodies_check.rb
 
 require 'open3'
+require 'shellwords'
 require 'rbconfig'
 require 'set'
 require 'tmpdir'
@@ -408,8 +409,11 @@ if system(mrbc, '--version', out: File::NULL, err: File::NULL) || system(mrbc, '
         out
       end
 
+      # The binary links libmruby_core.a, which has no mruby-rgss: leave its natives out of the scan, as
+      # Bc2cppFixtureRuntime.generate does for a core fixture, so no native-direct arm names an rgss:: symbol.
+      core_natives = Bc2cppFixtureRuntime.closed_world_native_srcs.reject { |path| path.include?('/mruby-rgss/src/') }
       env = { 'MRBC' => mrbc, 'OUT_SYMBOL' => 'bc2cpp_fb', 'OUT_DIR' => dir, 'SKIP_UNSUPPORTED' => '1',
-              'BC2CPP_SELF_REGISTERING' => '1' }
+              'BC2CPP_SELF_REGISTERING' => '1', 'NATIVE_SRCS' => Shellwords.join(core_natives) }
       out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), '--annotated', src,
                                         chdir: ROOT)
       abort "bc2cpp.rb failed:\n#{err[-3000..] || err}" unless status.success?
