@@ -1,8 +1,16 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: ensure and rescue regions.
 
 class CodeGen
+  # The instructions whose byte address lies in +range+, in program order. The IR has no address-range query;
+  # Irep#instructions_at selects the same way, so this is its IR-backed equivalent.
+  def insns_in_addr_range(irep, range)
+    BytecodeIR.for(irep).each_source.filter_map { |insn, _| insn if range.cover?(insn.addr) }
+  end
+
   # JMPUW_SUPPORT: is every OP_JMPUW in this irep a plain OP_JMP?
   # mrbc emits JMPUW for loop `break`/`next` (LOOP_NORMAL), `redo` and `retry`
   # (codegen.c), with or without an ensure. vm.c's OP_JMPUW:
@@ -103,11 +111,11 @@ class CodeGen
     return nil unless exc_reg
 
     # Find this handler's own terminating `RAISEIF Rx` (same register).
-    after = irep.instructions_at((t + 1)..)
+    after = insns_in_addr_range(irep, (t + 1)..)
     raiseif = after.find { |i| i.op == 'RAISEIF' && i.regs.first == exc_reg }
     return nil unless raiseif
 
-    body = irep.instructions_at((t + 1)...raiseif.addr)
+    body = insns_in_addr_range(irep, (t + 1)...raiseif.addr)
     # The ensure body must only fall off its end: a RETURN would have to return
     # from the method, not the destructor's lambda, and BREAK/BLOCK/SENDB/LAMBDA
     # could throw a C++ exception out of a destructor that may already be running
@@ -325,7 +333,7 @@ class CodeGen
     e = region[:end_addr]
     written = Set.new
     touched = Set.new
-    irep.instructions.each do |i|
+    BytecodeIR.for(irep).each_source do |i, _|
       inside = (b..e).cover?(i.addr)
       if inside
         regs = rescue_insn_written_regs(i)
@@ -453,7 +461,7 @@ class CodeGen
     loop do
       # The class name: a GETCONST root then GETMCNST segments, all reading and
       # writing the root's register; anything else is rejected.
-      getconst_i = irep.instructions[clause_idx]
+      getconst_i = BytecodeIR.for(irep).source_at(clause_idx)
       return nil unless getconst_i && getconst_i.op == 'GETCONST'
       cls_reg = getconst_i.reg
       cls_name = getconst_i.const_name
@@ -469,7 +477,7 @@ class CodeGen
       end
       seg_idx = clause_idx + 1 + segments.size
 
-      rescue_i, jmpif_i, jmp_i = irep.instructions[seg_idx, 3]
+      rescue_i, jmpif_i, jmp_i = Array.new(3) { |k| BytecodeIR.for(irep).source_at(seg_idx + k) }
       return nil unless rescue_i && jmpif_i && jmp_i
       return nil unless rescue_i.op == 'RESCUE' && rescue_i.regs == [exc_reg, cls_reg]
       return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.reg == cls_reg
@@ -542,8 +550,8 @@ class CodeGen
   # classic fields are nil and unused by the emitters.
   def recognize_defined_const_handler(irep, except_i, exc_reg, b, e)
     idx = irep.index_of_addr(except_i.addr)
-    seq = irep.instructions[idx + 1, 2]
-    return nil unless seq && seq.size == 2
+    seq = [BytecodeIR.for(irep).source_at(idx + 1), BytecodeIR.for(irep).source_at(idx + 2)]
+    return nil unless seq.all?
 
     loadnil_i, jmp_i = seq
     return nil unless loadnil_i.op == 'LOADNIL' && loadnil_i.reg == exc_reg
@@ -553,7 +561,7 @@ class CodeGen
     # The handler only runs forward into the join.
     return nil unless join_addr > jmp_i.addr
 
-    body = irep.instructions_at(b...e)
+    body = insns_in_addr_range(irep, b...e)
     head, *rest = body
     return nil unless head
     case head.op
@@ -645,7 +653,7 @@ class CodeGen
   # file is captured by value, as for NESTED_RESCUE_SUPPORT.
   def rescue_entry_saved_fields(irep, region)
     refs = rescue_ref_regs(irep, region)
-    saved = if irep.instructions_at(0...region[:begin_addr]).all? { |insn| insn.op == 'ENTER' }
+    saved = if insns_in_addr_range(irep, 0...region[:begin_addr]).all? { |insn| insn.op == 'ENTER' }
               []
             else
               (1...irep.nregs).reject { |i| refs.include?(i) }.map do |i|
@@ -777,7 +785,7 @@ class CodeGen
                    (local_suppressed.to_a - local_glue_at.keys)
     saved_blk_param_name = @blk_param_name
     @blk_param_name = 'bc2cpp_blk' if extra_fields.any? { |f| f[:name] == 'bc2cpp_blk' }
-    irep.instructions_at(range).each do |insn|
+    insns_in_addr_range(irep, range).each do |insn|
       idx = irep.index_of_addr(insn.addr)
       next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
 

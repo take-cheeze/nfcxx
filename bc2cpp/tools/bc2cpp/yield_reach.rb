@@ -6,6 +6,7 @@ require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'ir_block_operands'
 require_relative 'ir_symbol_flow'
+require_relative 'predicate_returns'
 require_relative 'send_names'
 
 # YIELD_REACH: a whole-program, by-name "may this code suspend the current Fiber?"
@@ -97,9 +98,23 @@ class YieldReach
     @storing_blocks = []
     @isolated = Hash.new { |h, k| h[k] = [] }
     @sealed = false
-    build_nodes
-    scan_all
-    solve
+    @analyzed = false
+  end
+
+  # The scan and the fixpoint run on the first query, not at construction: a fact the scan asks of the code generator
+  # (its argument types, see CodeGen#build_yield_reach) is only available once the generator is ready.
+  def analyze!
+    return if @analyzed || @analyzing
+
+    @analyzing = true
+    begin
+      build_nodes
+      scan_all
+      solve
+      @analyzed = true
+    ensure
+      @analyzing = false
+    end
   end
 
   def sound? = @sound
@@ -346,9 +361,89 @@ class YieldReach
   # `pr[1]` runs a Proc like `pr.call(1)`; the index ops do not say what the receiver (R(a)) is.
   def note_index_read(node, program, insn, idx)
     recv = insn.reg
-    non_proc = recv && IrBlockOperands.all_writers?(node.irep, idx, recv) { |w| NON_PROC_WRITERS.include?(w.op) }
+    non_proc = recv && non_proc_value?(node.irep, idx, recv)
     node.proc_call = true unless non_proc
   end
+
+  # Every reaching definition of +reg+ at +index+ produces a value that is never a Proc: a literal, the result of
+  # `Array#*` on an array literal (an Array or a String), or an instance variable whose every write is such a value
+  # (proc_free_ivar?). Proves the absence of a Proc, which is all a receiver check needs. A cycle is not proven.
+  def non_proc_value?(irep, index, reg, depth = 0)
+    return false if depth > 8
+
+    defs = IrBlockOperands.definitions(irep, index, reg) or return false
+    defs.all? do |df|
+      next false if df.entry?
+
+      src = BytecodeIR.for(irep).source_at(df.index)
+      NON_PROC_WRITERS.include?(src.op) ||
+        (src.op == 'GETIV' && proc_free_ivar?(src.ivar.to_s)) ||
+        ((src.op == 'SEND' || src.op == 'MUL') && array_times?(irep, df.index, src))
+    end
+  end
+
+  # `[...] * x` on an array literal, where no Ruby method named `*` can replace Array#*. Its result is an Array or a
+  # String (Array#join), neither a Proc.
+  # OP_MUL (`*` on a non-numeric receiver) is a send of `*`, so it is judged as one.
+  def array_times?(irep, index, src)
+    times = src.op == 'MUL' || src.sym == '*'
+    times && @defs_by_name.fetch('*', []).empty? && non_proc_value_array?(irep, index, src.reg)
+  end
+
+  def non_proc_value_array?(irep, index, reg)
+    defs = IrBlockOperands.definitions(irep, index, reg) or return false
+    defs.all? do |df|
+      !df.entry? && BytecodeIR::Ops::ARRAY_ALLOC.include?(BytecodeIR.for(irep).source_at(df.index).op)
+    end
+  end
+
+  # An instance variable name whose every write in the program stores a value that is never a Proc. A write the
+  # program makes by name at run time (instance_variable_set) is outside the program's own writes, so it disables the
+  # fact for every name unless the site is listed in the reviewed whitelist (DYNAMIC_IVAR_WRITES_WHITELIST).
+  def proc_free_ivar?(name)
+    @proc_free_ivars ||= {}
+    return @proc_free_ivars[name] if @proc_free_ivars.key?(name)
+
+    @proc_free_ivars[name] = false # a cycle through this name is not proven
+    @proc_free_ivars[name] = compute_proc_free_ivar(name)
+  end
+
+  def compute_proc_free_ivar(name)
+    return false if @opaque_names.nil? || @opaque_names.include?(name) || @opaque_names.include?("@#{name}")
+    return false if dynamic_ivar_writes_unlisted?
+
+    @ireps.each_value.all? do |irep|
+      program = BytecodeIR.for(irep)
+      irep.instructions.each_index.all? do |j|
+        src = program.source_at(j)
+        next true unless src.op == 'SETIV' && src.ivar.to_s == name
+
+        non_proc_value?(irep, j, src.regs.first, 1)
+      end
+    end
+  end
+
+  def dynamic_ivar_writes_unlisted?
+    return @dynamic_ivar_writes_unlisted unless @dynamic_ivar_writes_unlisted.nil?
+
+    @dynamic_ivar_writes_unlisted = @nodes.each_value.any? do |n|
+      n.calls.include?('instance_variable_set') && !dynamic_ivar_whitelisted?(n)
+    end
+  end
+
+  # A site is listed by its gem-relative file and the name of the method that contains it (see
+  # scripts/bc2cpp/dynamic_ivar_writes_whitelist.txt).
+  def dynamic_ivar_whitelisted?(node)
+    method = node
+    method = @nodes[method.parent] while method && method.kind != :method && method.parent
+    return false unless method&.kind == :method
+
+    DYNAMIC_IVAR_WRITES_WHITELIST.include?("#{PredicateReturns.relative(node.irep.file.to_s)} #{method.name}")
+  end
+
+  DYNAMIC_IVAR_WRITES_WHITELIST = File.readlines(
+    File.expand_path('../../scripts/bc2cpp/dynamic_ivar_writes_whitelist.txt', __dir__), chomp: true
+  ).map { |line| line.sub(/\s*#.*\z/, '').strip }.reject(&:empty?).to_set.freeze
 
   def seed_unknown_yield(node)
     return unless node.yield_unknown
@@ -526,7 +621,8 @@ class YieldReach
       @reasons[:eval] += 1
     elsif BLOCK_EXEC.include?(name)
       node.unknown_call = true unless lit_block
-    elsif PROC_CALLS.include?(name)
+    elsif PROC_CALLS.include?(name) && !(name == 'yield' && recv_const == 'Fiber')
+      # `Fiber.yield` (the `yield` here) runs no Proc: scan_fiber_call already marked the suspension.
       recv = explicit ? classify_reg(node, program, idx, dest) : [:unknown]
       if recv.first == :forward
         node.invokes = true
@@ -1219,6 +1315,16 @@ class YieldReach
     node.lit.any? do |c|
       b = @nodes[c]
       !b.fiber_body && ((crossable.include?(c) && @own[c]) || nested_crossable_yielder?(b, crossable))
+    end
+  end
+
+  # Every public query runs the analysis first. A query made while it runs (@analyzing) passes straight through.
+  public
+  (public_instance_methods(false) - %i[analyze! sound?]).each do |query|
+    original = instance_method(query)
+    define_method(query) do |*args, **kwargs, &block|
+      analyze!
+      original.bind_call(self, *args, **kwargs, &block)
     end
   end
 end

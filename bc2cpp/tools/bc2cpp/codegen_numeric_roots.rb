@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: BC2CPP_NUMERIC_ROOTS=FILE writes, per guarded numeric operator whose operands NumericFlow could not prove,
 # the class set of each operand and the leaves it is computed from. Measurement only: the generated code
 # is byte-identical with it on.
@@ -44,7 +46,7 @@ class CodeGen
         next if NumericFlow.numeric?(mask)
 
         leaves = @tuple_sites[name].flat_map do |irep, idx, d, _n|
-          numeric_root_leaves(irep, idx, irep.instructions[idx].reg.to_i + pos, d)
+          numeric_root_leaves(irep, idx, BytecodeIR.for(irep).source_at(idx).reg.to_i + pos, d)
         end
         CodeGen.numeric_root_lines[[:tuple, name, pos]] =
           ['TUPLE', name, pos, numeric_mask_name(mask), leaves.uniq.join('|')].join("\t").gsub(/[\r\n]/, ' ')
@@ -82,7 +84,7 @@ class CodeGen
         next
       end
       defs.each do |d|
-        writer = d.entry? ? nil : irep.instructions[d.index]
+        writer = d.entry? ? nil : BytecodeIR.for(irep).source_at(d.index)
         if writer.nil? || !numeric_root_writer?(writer)
           next unless numeric_root_param?(irep, d.reg.to_i)
 
@@ -229,7 +231,7 @@ class CodeGen
             else
               # Label only: the textually nearest writer (not a feed set).
               kw = irep.last_writer_index(i - 1, (insn.reg.to_i + 1).to_s)
-              kins = kw && irep.instructions[kw]
+              kins = kw && BytecodeIR.for(irep).source_at(kw)
               kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
             end
       inner = numeric_root_nest('') { numeric_root_leaves(irep, i, src, owner_def).first(2).join('+') }
@@ -238,7 +240,7 @@ class CodeGen
       src = insn.regs[1].to_i
       # Label only, as the GETIDX key above.
       w = irep.last_writer_index(i - 1, src.to_s)
-      wi = w && irep.instructions[w]
+      wi = w && BytecodeIR.for(irep).source_at(w)
       what = if wi.nil? then 'param'
              elsif wi.op.start_with?('SEND', 'SSEND') then "send:#{wi.sym}"
              else wi.op

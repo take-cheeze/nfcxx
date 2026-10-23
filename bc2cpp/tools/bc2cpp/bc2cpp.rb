@@ -1441,7 +1441,8 @@ if $PROGRAM_NAME == __FILE__
     ParamTrace.capture_stdout(
       symbol,
       ParamTrace.method_infos(compiled, ireps: ireps, registry: registry, arg_types: arg_types,
-                                        class_arg_types: class_arg_types, annotations: annotations, gen: gen)
+                                        class_arg_types: class_arg_types, annotations: annotations, gen: gen),
+      BlockYielders.table(gen)
     )
   end
 

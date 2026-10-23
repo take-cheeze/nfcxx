@@ -10,13 +10,14 @@ require 'set'
 # What is written:
 #   * every class / module the program defines that is not in CRuby's core RBS, with its superclass (reopened core
 #     classes are not redeclared; only their methods the core RBS lacks are written);
-#   * `def name: (T, T, ?untyped, *untyped, **untyped) ?{ (*untyped) -> untyped } -> R` per method: the mandatory
+#   * `def name: (T, T, ?untyped, *untyped, **untyped) ?{ (T, untyped) -> untyped } -> R` per method: the mandatory
 #     parameters carry the inferred / declared type or `untyped`; an optional parameter carries its declared type or
 #     its call-site join (`?T`, `untyped` unless every reaching call passes it); a rest parameter is `*T` (the join of
 #     its extra arguments, Array[T] in the body) and a required keyword is `k: T` (the join of its value), each only
 #     from complete call-site joins, else `untyped`; optional keywords stay `?untyped`; a block is required (`{ }`)
-#     when every reaching call passes a literal block, else optional (`?{ }`), since the facts do not know which
-#     methods yield;
+#     when every reaching call passes a literal block, else optional (`?{ }`). Its parameters are the classes the
+#     yield sites prove (BLOCK_YIELD_TYPES, `{ (T1, untyped) -> untyped }`), `{ (*untyped) -> untyped }` when they are
+#     not proven, and the block's return is always `untyped`;
 #   * `@ivar: T` per ivar and `NAME: T` per constant with a type, `untyped` otherwise;
 #   * `def self.x` for singleton methods; `private` for private methods;
 #   * a one-line `# bc2cpp: return from FILE:LINE (...)` above each method, naming the IR exit that decided its return
@@ -90,8 +91,27 @@ module TypeCheckRbs
     ret = 'void' if m['name'] == 'initialize'
     ret = "(#{ret})" if ret.include?(' | ') # an unparenthesised union reads as an overload separator
     # A block every reaching call passes is required; otherwise the block stays optional.
-    block = m.dig('block_param', 'type') == 'Proc' ? '{ (*untyped) -> untyped }' : '?{ (*untyped) -> untyped }'
-    "def #{singleton ? 'self.' : ''}#{m['name']}: (#{positional.join(', ')}) #{block} -> #{ret}"
+    required = m.dig('block_param', 'type') == 'Proc'
+    block = block_type(m, declared, required)
+    line = "def #{singleton ? 'self.' : ''}#{m['name']}: (#{positional.join(', ')}) #{block} -> #{ret}"
+    return line if valid_member?(line)
+
+    # A typed block that does not parse must not cost the method its line: fall back to the untyped block.
+    "def #{singleton ? 'self.' : ''}#{m['name']}: (#{positional.join(', ')}) #{block_type(m, declared, required, typed: false)} -> #{ret}"
+  end
+
+  # `{ (T1, ..., Tn) -> untyped }` when the yield sites prove the classes of the n yielded arguments (BLOCK_YIELD_TYPES),
+  # with `untyped` for each position they do not; `{ (*untyped) -> untyped }` otherwise. The return is untyped: the
+  # yield sites say nothing about what the block returns.
+  def block_type(m, declared, required, typed: true)
+    open = required ? '{' : '?{'
+    yields = typed ? m['block_yield'] : nil
+    params = if yields && yields['arity']
+               yields['params'].map { |classes| rbs_type(classes.join(' | '), declared) }
+             end
+    return "#{open} (*untyped) -> untyped }" unless params
+
+    "#{open} (#{params.join(', ')}) -> untyped }"
   end
 
   # Shown contracts are bounded so one method's provenance stays on one comment line.

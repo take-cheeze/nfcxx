@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: keyword and splat sends.
 
 class CodeGen
@@ -19,7 +21,7 @@ class CodeGen
   # literal_symbol_write: is every write of `reg` that reaches instruction `use` a `LOADSYM` of one name? That name,
   # else nil. Shared by compile_keyword_send and splat_hash_literal_pairs.
   def literal_symbol_write(irep, use, reg)
-    writers = BytecodeIR.reaching_writer_indices(irep, use, reg)&.map { |i| irep.instructions[i] }
+    writers = BytecodeIR.reaching_writer_indices(irep, use, reg)&.map { |i| BytecodeIR.for(irep).source_at(i) }
     return nil unless writers&.all? { |w| w.op == 'LOADSYM' }
 
     names = writers.map { |w| w.sym_token&.sub(/\A:/, '') }.uniq
@@ -569,7 +571,7 @@ class CodeGen
     universe = keyword_never_defined_universe
     return nil if universe.nil?
 
-    send_insn = irep.instructions[idx]
+    send_insn = BytecodeIR.for(irep).source_at(idx)
     return nil unless send_insn && send_insn.op == 'SEND'
 
     recv_reg = d.to_i
@@ -577,7 +579,7 @@ class CodeGen
     write_index = sole_reaching_write(irep, idx, recv_reg.to_s)
     return nil unless write_index
 
-    write = irep.instructions[write_index]
+    write = BytecodeIR.for(irep).source_at(write_index)
     return nil unless write.op == 'GETCONST'
 
     const_name = write.const_name
@@ -619,7 +621,7 @@ class CodeGen
     write_index = sole_reaching_write(irep, idx, reg)
     return nil unless write_index
 
-    insn = irep.instructions[write_index]
+    insn = BytecodeIR.for(irep).source_at(write_index)
     return nil unless %w[ARRAY ARRAY2].include?(insn.op)
 
     n = insn.uint_operand
@@ -640,7 +642,7 @@ class CodeGen
     write_index = sole_reaching_write(irep, idx, reg)
     return nil unless write_index
 
-    insn = irep.instructions[write_index]
+    insn = BytecodeIR.for(irep).source_at(write_index)
     return nil unless insn.op == 'HASH'
 
     n = insn.uint_operand
