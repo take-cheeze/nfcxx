@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 require_relative 'bytecode_ir_ops'
 
 # DEFINE_METHOD_SITES: `define_method(:name) { |a, b| ... }` written
@@ -33,12 +35,13 @@ module DefineMethodSites
   # Site for the `define_method` SSENDB at insns[idx] of +irep+, or nil unless it has the
   # exact shape mrbc emits for `define_method(:sym) { ... }` in a body.
   def site(irep, idx, ireps)
-    insn = irep.instructions[idx]
+    program = BytecodeIR.for(irep)
+    insn = program.source_at(idx)
     return nil unless insn.op == 'SSENDB' && insn.sym == 'define_method' && insn.plain_fixed_argc? && insn.argc == 1
     return nil if idx < 2
 
-    name_insn = irep.instructions[idx - 2]
-    block_insn = irep.instructions[idx - 1]
+    name_insn = program.source_at(idx - 2)
+    block_insn = program.source_at(idx - 1)
     base = insn.reg.to_i
     return nil unless name_insn.op == 'LOADSYM' && name_insn.reg.to_i == base + 1 && name_insn.sym_token
     return nil unless block_insn.op == 'BLOCK' && block_insn.reg.to_i == base + 2 && block_insn.block_index
@@ -60,7 +63,7 @@ module DefineMethodSites
   # +captures+ (a Set, loop expansions only) admits a GETUPVAR of the frame that created the block (level
   # 0, in the body itself) and collects the register it reads; without it every upvar past the body refuses.
   def method_shaped?(body, ireps, captures: nil)
-    first = body.instructions.first
+    first = BytecodeIR.for(body).source_at(0)
     return false unless first&.op == 'ENTER'
     return false unless first.enter_fields[1..].all?(&:zero?)
 
@@ -70,7 +73,7 @@ module DefineMethodSites
   # +depth+ counts blocks between +body+ and +irep+ (0 for +body+ itself). An upvar of depth
   # c names the frame c + 1 levels up, so c < depth stays inside +body+.
   def self_contained?(irep, ireps, depth, captures = nil)
-    irep.instructions.each do |insn|
+    BytecodeIR.for(irep).each_source do |insn, _index|
       next if insn.op == 'RETURN_BLK' && depth.zero?
       return false if FRAME_ESCAPES.include?(insn.op) || DEFINITION_OPS.include?(insn.op)
       return false if BytecodeIR::Ops::SEND.include?(insn.op) && FRAME_SENDS.include?(insn.sym)
@@ -103,7 +106,7 @@ module DefineMethodSites
   def expand(ireps, label, captures, seq)
     body = ireps.fetch(label)
     clone_label = "#{label}~dm#{seq}"
-    insns = body.instructions.map do |insn|
+    insns = BytecodeIR.for(body).each_source.map do |insn, _index|
       next insn unless insn.op == 'GETUPVAR'
 
       index, level = insn.upvar_ref
@@ -126,7 +129,7 @@ module DefineMethodSites
   # range spans it, so it is not conditional, repeated or skipped by a rescue.
   def straight_line?(irep, site_insn)
     at = site_insn.addr
-    irep.instructions.none? do |insn|
+    BytecodeIR.for(irep).each_source.none? do |insn, _index|
       target = insn.branch_target
       target && ([insn.addr, target].min..[insn.addr, target].max).cover?(at)
     end && (irep.catch_handlers || []).none? { |h| (h.begin_addr...h.end_addr).cover?(at) || h.target == at }

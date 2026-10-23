@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 require_relative 'bytecode_ir_ops'
 require_relative 'ir_block_operands'
 require_relative 'core_hierarchy_sigs'
@@ -223,7 +224,7 @@ module BlockSelfWorld
     def nil_block?(irep, idx, insn)
       reg = BlockSelfWorld.block_register(insn)
       defs = reg && BlockSelfWorld.definitions(irep, idx, reg)
-      defs && !defs.empty? && defs.all? { |df| !df.entry? && irep.instructions[df.index].op == 'LOADNIL' }
+      defs && !defs.empty? && defs.all? { |df| !df.entry? && BytecodeIR.for(irep).source_at(df.index).op == 'LOADNIL' }
     end
 
     def mark_rebound(label, ireps)
@@ -310,7 +311,7 @@ module BlockSelfWorld
       found = defs.map do |df|
         next :unknown if df.entry?
 
-        writer = irep.instructions[df.index]
+        writer = BytecodeIR.for(irep).source_at(df.index)
         case writer.op
         when 'LOADNIL' then 'Object'
         when 'GETCONST', 'GETMCNST' then writer.const_name.to_s.split('::').last
@@ -352,7 +353,7 @@ module BlockSelfWorld
       defs.each_with_object(Set.new) do |df, out|
         return :unknown if df.entry?
 
-        w = irep.instructions[df.index]
+        w = BytecodeIR.for(irep).source_at(df.index)
         count = w.typed.find { |operand| operand.kind == :int }&.value.to_i
         source = w.regs.size >= 2 ? w.regs[1] : reg
         found = case w.op
@@ -379,7 +380,7 @@ module BlockSelfWorld
     end
 
     def writer_names(irep, index, ireps, parents)
-      insn = irep.instructions[index]
+      insn = BytecodeIR.for(irep).source_at(index)
       case insn.op
       when 'LOADSYM' then Set[insn.sym]
       when 'LOADSELF' then entry_names(irep, '0', ireps)
@@ -407,7 +408,7 @@ module BlockSelfWorld
       return :unknown if setupvar_target?(frame, index, ireps)
 
       out = Set.new
-      frame.instructions.each_with_index do |w, j|
+      BytecodeIR.for(frame).each_source do |w, j|
         next unless w.reg == index.to_s && writes_leading?(w)
 
         found = w.op == 'MOVE' ? names_at(frame, j, w.regs[1], ireps, parents) : writer_names(frame, j, ireps, parents)
@@ -467,7 +468,7 @@ module BlockSelfWorld
 
           next
         end
-        w = irep.instructions[df.index]
+        w = BytecodeIR.for(irep).source_at(df.index)
         case w.op
         when 'LOADSYM' then out << w.sym
         when 'LOADNIL', 'BLOCK', 'LAMBDA' then next
@@ -495,7 +496,7 @@ module BlockSelfWorld
       return false unless frame && index
       return false if setupvar_target?(frame, index, ireps)
 
-      writers = frame.instructions.each_with_index.select { |w, _| w.reg == index.to_s && writes_leading?(w) }
+      writers = BytecodeIR.for(frame).each_source.select { |w, _| w.reg == index.to_s && writes_leading?(w) }
       !writers.empty? && writers.all? do |w, j|
         case w.op
         when 'LOADNIL', 'BLOCK', 'LAMBDA' then true

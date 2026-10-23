@@ -50,6 +50,7 @@ require_relative 'never_called_registrations'
 require_relative 'static_dispatch_unregistered'
 require_relative 'symbol_cache'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
@@ -276,9 +277,7 @@ module StaticDispatchRegistrations
     dynamic = Set.new(ALWAYS_DYNAMIC)
     fragments = Set.new
     ireps.each_value do |irep|
-      irep.instructions.each do |insn|
-        next unless insn.op == 'SUPER'
-
+      BytecodeIR.for(irep).instructions_with_op('SUPER').each do
         up = method_of[irep.label]
         dynamic << body_of[up][1] if up
       end
@@ -309,7 +308,7 @@ module StaticDispatchRegistrations
     # with the method. Names are only ever added, so both fixpoints converge.
     sends = lambda do |irep, into|
       grew = false
-      irep.instructions.each do |insn|
+      BytecodeIR.for(irep).each_source do |insn, _index|
         name = if SEND_OPS.include?(insn.op) then insn.sym
                else IMPLICIT_DISPATCH_NAMES[insn.op]
                end
@@ -361,7 +360,7 @@ module StaticDispatchRegistrations
     # APOST writes a whole run of registers, which the query does not model: no receiver facts for this irep.
     apost = BytecodeIR.for(irep).op?('APOST')
     opaque = BytecodeIR.own_upvar_written_regs(irep)
-    irep.instructions.each_with_index.map do |insn, index|
+    BytecodeIR.for(irep).each_source.map do |insn, index|
       next nil unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
       next :self if BytecodeIR::Ops::SELF_SEND.include?(insn.op)
       next :unknown if apost
@@ -383,7 +382,7 @@ module StaticDispatchRegistrations
     # Only R0 is a known value at entry; an argument or a caller's local is not.
     return definition.reg == '0' ? :self : :unknown if definition.entry?
 
-    insn = irep.instructions[definition.index]
+    insn = BytecodeIR.for(irep).source_at(definition.index)
     case insn.op
     when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
     when 'LOADSELF' then :self
@@ -476,9 +475,7 @@ module StaticDispatchRegistrations
         next unless m.nil? || names.include?(body_of[m][1])
 
         bodies << m if m
-        irep.instructions.each do |insn|
-          next unless SEND_OPS.include?(insn.op)
-
+        BytecodeIR.for(irep).instructions_with_op(*SEND_OPS).each do |insn|
           name = insn.sym
           grew = true if name && names.add?(name)
         end

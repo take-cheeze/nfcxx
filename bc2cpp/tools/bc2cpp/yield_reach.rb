@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 require_relative 'ir_block_operands'
 require_relative 'ir_symbol_flow'
 require_relative 'send_names'
@@ -125,11 +126,12 @@ class YieldReach
     irep = @ireps[label]
     return false unless irep
 
-    irep.instructions.each_with_index.any? do |insn, idx|
-      next false unless insn.op == 'SENDB' && GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
+    BytecodeIR.for(irep).each_with_op('SENDB') do |insn, idx|
+      next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
 
-      !literal_block_child(irep, idx).nil?
+      return true unless literal_block_child(irep, idx).nil?
     end
+    false
   end
 
   # The raw answer, also for a world the proof does not cover (a closed world with a global refusal): the
@@ -183,7 +185,7 @@ class YieldReach
     @super_of = {}
     @module_names = Set.new
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         record_class_decl(irep, insn, idx) if BytecodeIR::Ops::CLASS_MODULE.include?(insn.op)
         next unless insn.block_index
 
@@ -225,7 +227,7 @@ class YieldReach
     sups = defs.map do |df|
       next :unknown if df.entry?
 
-      w = irep.instructions[df.index]
+      w = BytecodeIR.for(irep).source_at(df.index)
       case w.op
       when 'LOADNIL' then :object
       when 'GETCONST', 'GETMCNST' then w.const_name
@@ -237,11 +239,11 @@ class YieldReach
 
   # Name of the class or module an EXEC opens: the CLASS/MODULE op that loaded its register.
   def class_of_exec(irep, exec)
-    idx = irep.instructions.index { |i| i.equal?(exec) }
+    idx = BytecodeIR.for(irep).instructions.index { |i| i.source.equal?(exec) }
     return nil unless idx
 
     (idx - 1).downto([idx - 4, 0].max) do |k|
-      i = irep.instructions[k]
+      i = BytecodeIR.for(irep).source_at(k)
       return i.sym if BytecodeIR::Ops::CLASS_MODULE.include?(i.op) && i.reg == exec.reg
     end
     nil
@@ -285,7 +287,7 @@ class YieldReach
       irep = node.irep
       enter = irep.enter
       node.invokes = true if enter && enter.enter_fields[6].to_i.positive?
-      irep.instructions.each_with_index do |insn, idx|
+      program.each_source do |insn, idx|
         op = insn.op
         node.calls << OP_NAMES[op] if OP_NAMES[op] && !insn.block_index
         case op
@@ -326,8 +328,8 @@ class YieldReach
   def mark_generators
     @nodes.each_value do |node|
       irep = node.irep
-      irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op == 'SENDB' && insn.sym == 'new'
+      BytecodeIR.for(irep).each_with_op('SENDB') do |insn, idx|
+        next unless insn.sym == 'new'
         next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
 
         child = literal_block_child(irep, idx)
@@ -557,7 +559,7 @@ class YieldReach
 
   # `inject(:sym)` / `inject(init, :sym)` name the method to call; a block form names none.
   def note_inject_symbol(node, program, idx, dest, name)
-    insn = node.irep.instructions[idx]
+    insn = BytecodeIR.for(node.irep).source_at(idx)
     return if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) || insn.argc == 0
     return unless dest
 
@@ -576,7 +578,7 @@ class YieldReach
     elsif name == 'new' && recv_const == 'Enumerator'
       kind, ref = dest ? classify_reg(node, program, idx, dest.to_i + 2) : [:unknown]
       @enum_names << ref if kind == :sym
-      @enum_all = true if kind != :sym && node.irep.instructions[idx].n_spec.to_i >= 2
+      @enum_all = true if kind != :sym && BytecodeIR.for(node.irep).source_at(idx).n_spec.to_i >= 2
     end
   end
 
@@ -628,7 +630,7 @@ class YieldReach
     @writers ||= {}.compare_by_identity
     @writers[irep] ||= begin
       map = Hash.new { |h, k| h[k] = [] }
-      irep.instructions.each_with_index do |i, n|
+      BytecodeIR.for(irep).each_source do |i, n|
         r = i.reg
         map[r.to_i] << n if r && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
       end
@@ -663,13 +665,13 @@ class YieldReach
   def classify_definition(node, df, elem0, fallback, depth, seen = nil)
     irep = node.irep
     # The origin walk answers a slot ENTER stores (the block, R1) with ENTER itself.
-    if df.entry? || irep.instructions[df.index].op == 'ENTER'
+    if df.entry? || BytecodeIR.for(irep).source_at(df.index).op == 'ENTER'
       return [[:forward]] if df.reg.to_i == block_reg_of(irep)
       return [[:param, 1]] if df.reg.to_s == '1' && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
 
       return [[:unknown]]
     end
-    w = irep.instructions[df.index]
+    w = BytecodeIR.for(irep).source_at(df.index)
     case w.op
     when 'MOVE' then classify_kinds(node, df.index, w.regs[1], elem0: elem0, fallback: fallback, depth: depth + 1, seen: seen)
     when 'BLOCK', 'LAMBDA' then [[:lit, irep.reps[w.block_index]]]
@@ -713,7 +715,7 @@ class YieldReach
   # Does the node, or a block below it, assign register +index+ (by write or SETUPVAR)?
   def writes_reg?(node, index)
     return true unless writers_of(node.irep)[index].empty?
-    return true if node.irep.instructions.any? { |i| i.op == 'SETUPVAR' && i.upvar_ref&.first == index }
+    return true if BytecodeIR.for(node.irep).instructions_with_op('SETUPVAR').any? { |i| i.upvar_ref&.first == index }
 
     BytecodeIR.own_upvar_written_regs(node.irep).include?(index.to_s)
   end
@@ -721,8 +723,8 @@ class YieldReach
   # Every write of register +index+ in the method (and every SETUPVAR of it below) is a MOVE of
   # the block register, so the register always holds the block.
   def only_block_writes?(method, index, bp)
-    writers = method.irep.instructions.select do |i|
-      i.reg == index.to_s && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
+    writers = BytecodeIR.for(method.irep).each_source.filter_map do |i, _|
+      i if i.reg == index.to_s && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
     end
     if writers.empty?
       return false unless index == bp
@@ -740,7 +742,7 @@ class YieldReach
   def literal_symbol_arg(node, program, idx, dest)
     return nil unless dest
 
-    kind, ref = classify_reg(node, program, idx, dest.to_i + 1, elem0: node.irep.instructions[idx].n_spec == '*')
+    kind, ref = classify_reg(node, program, idx, dest.to_i + 1, elem0: BytecodeIR.for(node.irep).source_at(idx).n_spec == '*')
     kind == :sym ? ref : nil
   end
 
@@ -763,7 +765,7 @@ class YieldReach
   def scan_keeps(node, &holds)
     irep = node.irep
     program = BytecodeIR.for(irep)
-    irep.instructions.each_with_index do |insn, idx|
+    program.each_source do |insn, idx|
       op = insn.op
       next if NEUTRAL_OPS.include?(op)
 
@@ -808,7 +810,7 @@ class YieldReach
     irep = node.irep
     kinds = classify_definition(node, BytecodeIR::Definition.new(BytecodeIR::ENTRY, reg.to_s), false, false, 0)
     writers_of(irep)[reg.to_i].each do |i|
-      w = irep.instructions[i]
+      w = BytecodeIR.for(irep).source_at(i)
       found = if w.op == 'MOVE'
                 classify_kinds(node, i, w.regs[1], fallback: true, seen: seen)
               else
@@ -833,8 +835,8 @@ class YieldReach
       child = @nodes[label]
       next unless child
 
-      child.irep.instructions.each_with_index do |insn, i|
-        out << [child, i, insn.reg] if insn.op == 'SETUPVAR' && insn.upvar_ref == [reg, depth]
+      BytecodeIR.for(child.irep).each_with_op('SETUPVAR') do |insn, i|
+        out << [child, i, insn.reg] if insn.upvar_ref == [reg, depth]
       end
       upvar_stores(child, reg, depth + 1, out)
     end
