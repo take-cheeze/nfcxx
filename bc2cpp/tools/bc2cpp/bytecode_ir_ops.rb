@@ -21,10 +21,18 @@ module BytecodeIR
 BLOCK_SEND = Set['SENDB', 'SSENDB'].freeze
 # Sends whose receiver is self (the implicit-self form of each SEND variant).
 SELF_SEND = Set['SSEND', 'SSEND0', 'SSENDB'].freeze
+# Sends whose receiver is R(a): the complement of SELF_SEND within SEND.
+RECEIVER_SEND = (SEND - SELF_SEND).freeze
 # Ops that write R(a) with the class a following METHOD/DEF defines into (vm.c OP_TCLASS, OP_SCLASS).
 TARGET_CLASS = Set['TCLASS', 'SCLASS'].freeze
 # Ops that allocate a fresh Array into R(a).
 ARRAY_ALLOC = Set['ARRAY', 'ARRAY2'].freeze
+# Ops that open a class or module body by name (`CLASS R :Name`, `MODULE R :Name`).
+CLASS_MODULE = Set['CLASS', 'MODULE'].freeze
+# Index reads R(a) = R(b)[...]: an index op, not a method send, so no SEND set holds it.
+INDEX_READ = Set['GETIDX', 'GETIDX0'].freeze
+# Ops that make a Proc from a literal block body of the current irep.
+LITERAL_PROC = Set['BLOCK', 'LAMBDA'].freeze
 # The self-receiver forms, including the splat forms. Named apart from SELF_SEND, whose membership is the master set.
 SELF_SEND_FAMILY = Set['SSEND', 'SSEND0', 'SSENDB', 'SSENDV', 'SSENDVB'].freeze
 # The sends that pass a block, splat forms included. Named apart from BLOCK_SEND, whose membership is the master set.

@@ -20,6 +20,7 @@ require_relative 'type_check_rbs'
 #   TC1004 warning  an annotation token bc2cpp ignores, or an annotation whose parameter count is not the method's
 #   TC1007 error    an inferred IR may-set is disjoint from a nominal RBS return/ivar contract
 #   TC1008 warning  an inferred IR may-set partly overlaps the contract
+#   TC1009 info     as TC1008, but --trace runtime evidence observed only contract classes for that return
 #   TC1016 error    an RBS `class C < S` whose S is not the program's superclass of C
 #   TC2004 info     (--all) an IR query is unknown, with its refusal reason
 #   TC2001 info     (--all) a parameter has no type, with the reason bucket
@@ -177,7 +178,12 @@ module TypeCheckReport
       next unless %w[mismatch possible_mismatch].include?(row['status'])
       possible = row['status'] == 'possible_mismatch'
 
-
+      if possible && row['provenance'] == 'trace'
+        out << Diagnostic.new(file: row['file'], line: row['line'], col: row['col'], severity: 'info', code: 'TC1009',
+                              message: "#{row['owner']}##{row['method']} return: inferred #{row['type']} may exceed RBS contract #{row['expected']}; " \
+                                       "a trace run observed only #{row['trace_classes'].join(' | ')} (evidence, not proof)")
+        next
+      end
       out << Diagnostic.new(file: row['file'], line: row['line'], col: row['col'], severity: possible ? 'warning' : 'error', code: possible ? 'TC1008' : 'TC1007',
                             message: "#{row['owner']}##{row['method']} #{row['kind'] == 'return' ? 'return' : row['detail']}: inferred #{row['type']} " \
                                      "#{possible ? 'may exceed' : 'falls outside'} RBS contract #{row['expected']}")

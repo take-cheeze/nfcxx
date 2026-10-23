@@ -165,14 +165,26 @@ module TypeFacts
     optional_keywords = BytecodeIR.for(irep).instructions_with_op('KEY_P').filter_map { |insn| insn.sym.to_s }.to_set
     keyword_params = BytecodeIR.for(irep).instructions_with_op('KARG').filter_map { |insn| insn.sym.to_s }.uniq.map do |name|
       types = ctx.signature_contracts&.ir_keyword_types&.dig(d.irep, name)
-      { 'name' => name, 'required' => !optional_keywords.include?(name),
-        'type' => types && BytecodeIR::Types.type_name(types), 'source' => types ? 'signature' : nil }
+      required = !optional_keywords.include?(name)
+      inferred = (types || !required || !gen.respond_to?(:bytecode_ir_keyword_argument_classes)) ? nil : gen.bytecode_ir_keyword_argument_classes(d, name)
+      { 'name' => name, 'required' => required,
+        'type' => (types || inferred) && BytecodeIR::Types.type_name(types || inferred),
+        'source' => types ? 'signature' : inferred ? 'inferred:receiver-call-sites' : nil }
     end
+    # Rest element and block parameter: call-site joins only. No declared rest type exists; a declared block
+    # signature keeps its optional block, so the inferred Proc is withheld there.
+    rest_classes = rest.positive? && gen.respond_to?(:bytecode_ir_rest_argument_classes) ? gen.bytecode_ir_rest_argument_classes(d) : nil
+    rest_row = rest.positive? ? { 'type' => rest_classes && BytecodeIR::Types.type_name(rest_classes),
+                                  'source' => rest_classes ? 'inferred:receiver-call-sites' : nil } : nil
+    declared_block = ctx.signature_contracts&.ir_block_signatures&.[]([d.owner.to_s, d.name.to_s])
+    block_proc = !declared_block && gen.respond_to?(:bytecode_ir_block_proc_classes) && gen.bytecode_ir_block_proc_classes(d)
+    block_row = block_proc ? { 'type' => 'Proc', 'source' => 'inferred:receiver-call-sites' } : nil
     {
       'owner' => d.owner, 'name' => d.name, 'file' => relative(ctx, irep.file), 'line' => line, 'col' => col,
       'scope' => scope_of(irep.file), 'req' => mand, 'opt' => opt, 'rest' => rest.positive?, 'key' => key,
       'kdict' => kdict.positive?,
-      'visibility' => d.visibility&.to_s, 'params' => params, 'optional_params' => optional_params, 'keyword_params' => keyword_params, 'return' => return_row(ctx, gen, d, irep, mono),
+      'visibility' => d.visibility&.to_s, 'params' => params, 'optional_params' => optional_params, 'keyword_params' => keyword_params,
+      'rest_param' => rest_row, 'block_param' => block_row, 'return' => return_row(ctx, gen, d, irep, mono),
       'annotated' => !!(ctx.annotations[d.irep] || ctx.class_annotations[d.irep] || ctx.element_annotations[d.irep] ||
                        ctx.signature_arg_types&.[](d.irep)&.any? || ctx.signature_contracts&.ir_optional_types&.[](d.irep)&.any? ||
                        ctx.signature_contracts&.ir_keyword_types&.[](d.irep)&.any?)

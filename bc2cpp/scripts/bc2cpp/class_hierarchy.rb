@@ -1,21 +1,31 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Class hierarchy and own method names of Ruby sources, for trace_types.rb candidates (--hierarchy).
+# Class hierarchy, mixins and own method names of Ruby sources, for trace_types.rb candidates and the runtime evidence
+# gate (--hierarchy of trace_types.rb and rbs_suggestion_trace_check.rb).
 #
 #   ruby scripts/bc2cpp/class_hierarchy.rb SRC.rb... > hierarchy.tsv
 #
-# Rows: `SUPER<TAB>Class<TAB>Superclass` for each `class Class < Superclass`, and `DEF<TAB>Class<TAB>method` for each
-# instance method the class body defines. Names are the lexical constant paths (`Game::Actor`), a superclass is resolved
-# against the classes the sources define (nesting first, then the top level); an unresolvable superclass is left as
-# written. Reads source only: bytecode is what bc2cpp uses (superclass_of, registry.rb), so this is an approximation
-# for the review-only candidates, not a proof input.
+# Rows:
+#   CLASS / MODULE<TAB>Name                     each `class` / `module` the sources define
+#   SUPER<TAB>Class<TAB>Superclass              each explicit `class Class < Superclass`
+#   INCLUDE / PREPEND<TAB>Owner<TAB>Module      each mixin, in the order Ruby applies them (`include A, B` gives B, A)
+#   DEF<TAB>Owner<TAB>method                    each instance method the body defines: `def`, define_method, alias,
+#                                               attr_*. `*` stands for a computed name, so any method may be defined.
+# Names are the lexical constant paths (`Game::Actor`). A superclass or mixin is resolved against the classes and
+# modules the sources define (nesting first, then the top level); an unresolvable name is left as written. Top-level
+# mixins and defs belong to Object. A mixin or def inside `class << self` is a singleton one and is not recorded.
+# Reads source only: bytecode is what bc2cpp uses (superclass_of, registry.rb), so this is an approximation for the
+# review-only candidates, not a proof input. `class_eval` with a string and `included` hooks are not read.
 
 require 'prism'
 require 'set'
 
 module ClassHierarchy
-  Decl = Struct.new(:name, :super_expr, :nest, :defs)
+  Decl = Struct.new(:name, :kind, :super_expr, :nest)
+  MIXINS = { include: 'INCLUDE', prepend: 'PREPEND' }.freeze
+  # The calls that define a method under the names they are given. attr_writer defines `name=` only.
+  NAMED_DEFS = %i[define_method alias_method attr attr_reader attr_writer attr_accessor].freeze
 
   module_function
 
@@ -30,54 +40,87 @@ module ClassHierarchy
     end
   end
 
-  def scan(path, decls)
+  def scan(path, decls, defs, mixins)
     tree = Prism.parse_file(path).value
-    walk(tree, [], decls)
+    walk(tree, [], decls, defs, mixins, singleton: false)
   end
 
-  def walk(node, nest, decls)
+  def walk(node, nest, decls, defs, mixins, singleton: false)
     case node
-    when Prism::ClassNode
+    when Prism::ClassNode, Prism::ModuleNode
       name = const_path(node.constant_path)
       full = (nest + [name]).join('::')
-      decl = (decls[full] ||= Decl.new(full, nil, nest.dup, []))
-      decl.super_expr = const_path(node.superclass) if node.superclass
-      inner = nest + [name]
-      node.body&.then { |b| walk(b, inner, decls) }
+      kind = node.is_a?(Prism::ClassNode) ? :class : :module
+      decl = (decls[full] ||= Decl.new(full, kind, nil, nest.dup))
+      decl.super_expr = const_path(node.superclass) if node.is_a?(Prism::ClassNode) && node.superclass
+      node.body&.then { |b| walk(b, nest + [name], decls, defs, mixins) }
       return
-    when Prism::ModuleNode
-      name = const_path(node.constant_path)
-      inner = nest + [name]
-      node.body&.then { |b| walk(b, inner, decls) }
+    when Prism::SingletonClassNode
+      node.body&.then { |b| walk(b, nest, decls, defs, mixins, singleton: true) }
       return
-    when Prism::DefNode
-      # `def self.x` is a singleton method, not an instance method of the class.
-      owner = nest.join('::')
-      decls[owner]&.defs&.push(node.name.to_s) if decls[owner] && node.receiver.nil?
     end
-    node.compact_child_nodes.each { |child| walk(child, nest, decls) }
+    unless singleton
+      owner = nest.empty? ? 'Object' : nest.join('::')
+      case node
+      when Prism::DefNode
+        # `def self.x` is a singleton method, not an instance method of the class.
+        defs[owner] << node.name.to_s if node.receiver.nil?
+      when Prism::AliasMethodNode
+        defs[owner] << literal_or_wild(node.new_name)
+      when Prism::CallNode
+        record_call(node, owner, nest, defs, mixins) if node.receiver.nil?
+      end
+    end
+    node.compact_child_nodes.each { |child| walk(child, nest, decls, defs, mixins, singleton: singleton) }
   end
 
-  def resolve(known, decl)
-    expr = decl.super_expr
-    return nil unless expr
+  # A mixin call adds a row for its owner; a definer call adds the name it defines, or `*` when the name is computed.
+  def record_call(node, owner, nest, defs, mixins)
+    args = node.arguments&.arguments || []
+    if MIXINS.key?(node.name)
+      args.reverse_each { |arg| mixins[owner] << [MIXINS.fetch(node.name), arg.slice.gsub(/\s+/, ' '), nest] }
+    elsif NAMED_DEFS.include?(node.name)
+      targets = %i[define_method alias_method].include?(node.name) ? args.first(1) : args
+      targets.each do |arg|
+        name = literal_or_wild(arg)
+        if name == '*'
+          defs[owner] << name
+          next
+        end
+        defs[owner] << name unless node.name == :attr_writer
+        defs[owner] << "#{name}=" if %i[attr_writer attr_accessor].include?(node.name)
+      end
+    end
+  end
+
+  def literal_or_wild(node)
+    node.is_a?(Prism::SymbolNode) || node.is_a?(Prism::StringNode) ? node.unescaped : '*'
+  end
+
+  def resolve_name(known, nest, expr)
     return expr.delete_prefix('::') if expr.start_with?('::')
 
     # Lexical lookup: the innermost enclosing namespace first, then the top level.
-    scopes = (decl.nest.length.downto(0)).map { |i| (decl.nest[0, i] + [expr]).join('::') }
+    scopes = (nest.length.downto(0)).map { |i| (nest[0, i] + [expr]).join('::') }
     scopes.find { |c| known.include?(c) } || expr
   end
 
   def rows(paths)
     decls = {}
-    paths.each { |path| scan(path, decls) }
+    defs = Hash.new { |h, k| h[k] = [] }
+    mixins = Hash.new { |h, k| h[k] = [] }
+    paths.each { |path| scan(path, decls, defs, mixins) }
     known = decls.keys.to_set
-    decls.values.flat_map do |d|
-      out = []
-      out << ['SUPER', d.name, resolve(known, d)] if d.super_expr
-      out.concat(d.defs.uniq.map { |m| ['DEF', d.name, m] })
-      out
+    out = []
+    decls.each_value do |d|
+      out << [d.kind == :module ? 'MODULE' : 'CLASS', d.name]
+      out << ['SUPER', d.name, resolve_name(known, d.nest, d.super_expr)] if d.super_expr
     end
+    mixins.each do |owner, list|
+      list.each { |kind, expr, nest| out << [kind, owner, resolve_name(known, nest, expr)] }
+    end
+    defs.each { |owner, names| names.uniq.each { |m| out << ['DEF', owner, m] } }
+    out
   end
 end
 

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
+
 # Argument shapes and block/lambda/def fallback safety of an irep.
 
 def pure_mandatory_arity?(irep)
@@ -26,6 +28,33 @@ def optional_positionals_only?(irep)
   return true unless enter
 
   enter.enter_fields[2..].all?(&:zero?)
+end
+
+# Rest, keyword and block shapes for the call-site joins. Each one leaves the other kinds out: a join reads one slot
+# of the call, and post, keyword-rest and keyword fields move that slot.
+def rest_positional_shape?(irep)
+  return false unless irep.enter
+
+  _mand, _opt, rest, post, kw, kwrest = irep.enter.enter_fields.map(&:to_i)
+  rest.positive? && post.zero? && kw.zero? && kwrest.zero?
+end
+
+def block_param_shape?(irep)
+  return false unless irep.enter
+
+  _mand, _opt, _rest, post, kw, kwrest, block = irep.enter.enter_fields.map(&:to_i)
+  block.positive? && post.zero? && kw.zero? && kwrest.zero?
+end
+
+# A required keyword `name`: KARG without a KEY_P guard. Keyword-rest and positional-only defs are excluded.
+def keyword_required_shape?(irep, name)
+  return false unless irep.enter
+
+  _mand, _opt, _rest, _post, kw, kwrest = irep.enter.enter_fields.map(&:to_i)
+  return false unless kw.positive? && kwrest.zero?
+
+  irep.instructions.any? { |insn| insn.op == 'KARG' && insn.sym.to_s == name } &&
+    irep.instructions.none? { |insn| insn.op == 'KEY_P' && insn.sym.to_s == name }
 end
 
 # KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: can this def receive `nk`
@@ -168,7 +197,7 @@ end
 def block_fallback_safe?(block_irep)
   return false unless pure_mandatory_arity?(block_irep) || rest_only_block?(block_irep)
 
-  block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
+  !BytecodeIR.for(block_irep).op?(*BLOCK_FALLBACK_UNSAFE_OPS)
 end
 
 # LAMBDA_FALLBACK_SUPPORT: the LAMBDA counterpart of block_fallback_safe?,
@@ -194,7 +223,7 @@ LAMBDA_FALLBACK_UNSAFE_OPS = %w[
 def lambda_fallback_safe?(lambda_irep)
   return false unless pure_mandatory_arity?(lambda_irep)
 
-  lambda_irep.instructions.none? { |insn| LAMBDA_FALLBACK_UNSAFE_OPS.include?(insn.op) }
+  !BytecodeIR.for(lambda_irep).op?(*LAMBDA_FALLBACK_UNSAFE_OPS)
 end
 
 # RUNTIME_DEF_FALLBACK_SUPPORT (SDEF_FALLBACK / SCLASS_FALLBACK+EXEC_FALLBACK):
@@ -324,9 +353,7 @@ def keyword_arg_table(irep)
 
   order = []
   required = {}
-  irep.instructions.each do |insn|
-    next unless insn.op == 'KEY_P' || insn.op == 'KARG'
-
+  irep.each_with_op('KEY_P', 'KARG') do |insn, _index|
     sym = insn.sym_token
     next unless sym
 

@@ -298,23 +298,65 @@ module TraceTypes
 
     attr_reader :interfaces
 
-    def initialize(supers, defs)
+    def initialize(supers, defs, includes: {}, prepends: {}, modules: Set.new, names: Set.new)
       @supers = supers
       @defs = defs
+      @includes = includes
+      @prepends = prepends
+      @modules = modules
+      @names = names
       @interfaces = {}
     end
 
+    # The rows class_hierarchy.rb writes. Mixin lists are in application order.
     def self.read(path)
       supers = {}
       defs = Hash.new { |h, k| h[k] = [] }
+      includes = Hash.new { |h, k| h[k] = [] }
+      prepends = Hash.new { |h, k| h[k] = [] }
+      modules = Set.new
+      names = Set.new
       File.foreach(path) do |raw|
         kind, owner, value = raw.chomp.split("\t", 3)
         case kind
         when 'SUPER' then supers[owner] = value
         when 'DEF' then defs[owner] << value
+        when 'INCLUDE' then includes[owner] << value
+        when 'PREPEND' then prepends[owner] << value
+        when 'CLASS' then names << owner
+        when 'MODULE'
+          names << owner
+          modules << owner
         end
       end
-      new(supers, defs)
+      new(supers, defs, includes: includes, prepends: prepends, modules: modules, names: names)
+    end
+
+    # Whether the hierarchy names +name+ as a class or a module (a name it does not name may still be a core one).
+    def program?(name)
+      @names.include?(name) || @supers.key?(name)
+    end
+
+    def module?(name)
+      @modules.include?(name)
+    end
+
+    def superclass(name)
+      @supers[name]
+    end
+
+    def includes(name)
+      @includes.fetch(name, [])
+    end
+
+    def prepends(name)
+      @prepends.fetch(name, [])
+    end
+
+    # Whether the body of +name+ defines +method+. A `*` row (a computed name) may define any method.
+    def defines?(name, method)
+      names = @defs.fetch(name, [])
+      names.include?(method) || names.include?('*')
     end
 
     def chain(name)
@@ -333,10 +375,11 @@ module TraceTypes
       first unless first.nil? || OBJECT_ROOTS.include?(first)
     end
 
-    # Method names every observed class answers, inherited ones included. `initialize` is never a shared interface.
+    # Method names every observed class answers, inherited ones included. `initialize` is never a shared interface, and
+    # a `*` row names no method.
     def shared_methods(names)
       sets = names.map { |n| chain(n).flat_map { |c| @defs.fetch(c, []) }.to_set }
-      sets.reduce(:&).to_a.reject { |m| m == 'initialize' }.sort
+      sets.reduce(:&).to_a.reject { |m| m == 'initialize' || m == '*' }.sort
     end
 
     # Names the RBS interface for a method set. The same set gets the same name, so declarations are shared.
@@ -378,6 +421,47 @@ module TraceTypes
       end
     end
     [params, rets]
+  end
+
+  # The element rows (PARAM_ELEM_*, RETURN_ELEM_*) merged the way read_dumps merges the sites they belong to:
+  # { params: { [method, kind, index, name] => { role => slot } }, returns: { method => { role => slot } } }, where a
+  # slot is { calls:, overflow:, classes: Hash } and role is array (Array elements), key or value (Hash entries).
+  def self.read_elements(paths)
+    params = {}
+    returns = {}
+    paths.each do |path|
+      pids = {}   # this dump's [sym, id] => PARAM_SITE key
+      rids = {}   # this dump's [sym, id] => method
+      File.foreach(path) do |raw|
+        f = raw.chomp.split("\t", -1)
+        case f[0]
+        when 'PARAM_SITE' then pids[[f[1], f[2].to_i]] = [f[5], f[8], f[9].to_i, f[10]]
+        when 'RETURN_SITE' then rids[[f[1], f[2].to_i]] = f[5]
+        when 'PARAM_ELEM_SITE'
+          key = pids[[f[1], f[2].to_i]] or next
+          merge_elem(elem_slot(params, key, f[3]), f[4].to_i, f[5].to_i)
+        when 'PARAM_ELEM_CLASS'
+          key = pids[[f[1], f[2].to_i]] or next
+          elem_slot(params, key, f[3])[:classes][f[4]] += f[5].to_i
+        when 'RETURN_ELEM_SITE'
+          method = rids[[f[1], f[2].to_i]] or next
+          merge_elem(elem_slot(returns, method, f[3]), f[4].to_i, f[5].to_i)
+        when 'RETURN_ELEM_CLASS'
+          method = rids[[f[1], f[2].to_i]] or next
+          elem_slot(returns, method, f[3])[:classes][f[4]] += f[5].to_i
+        end
+      end
+    end
+    { params: params, returns: returns }
+  end
+
+  def self.elem_slot(table, key, role)
+    ((table[key] ||= {})[role] ||= { calls: 0, overflow: 0, classes: Hash.new(0) })
+  end
+
+  def self.merge_elem(slot, calls, overflow)
+    slot[:calls] += calls
+    slot[:overflow] += overflow
   end
 
   def self.candidates(params, rets, hierarchy = nil)

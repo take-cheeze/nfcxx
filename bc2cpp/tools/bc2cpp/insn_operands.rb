@@ -1,11 +1,18 @@
 # frozen_string_literal: true
 
+require 'set'
+require_relative 'bytecode_ir'
 require_relative 'operand_schema'
 
 # Insn accessors over OperandSchema's typed operands. Nothing here reads the
 # disassembly text: the operand list is parsed once per instruction and every
 # accessor is a lookup by operand kind.
 module InsnOperands
+  # Unconditional jumps, whose address operand is the target (jmp_addr). Conditional jumps are BRANCH_OPS.
+  JMP_ADDR_OPS = Set['JMP', 'JMPUW'].freeze
+  # Ops whose first operand names an upvar slot (upvar_ref): `R(a) index level`.
+  UPVAR_REF_OPS = Set['GETUPVAR', 'SETUPVAR'].freeze
+
   # The typed operand list. An instruction the schema cannot parse is a schema
   # gap, so it raises instead of answering nil to every question.
   def typed
@@ -174,7 +181,7 @@ module InsnOperands
 
   # Target address of a branch op, nil for every other op.
   def branch_target
-    return nil unless %w[JMP JMPUW JMPIF JMPNOT JMPNIL].include?(op)
+    return nil unless BytecodeIR::BRANCH_OPS.include?(op)
 
     first_kind(:addr)&.value
   end
@@ -186,7 +193,7 @@ module InsnOperands
   end
 
   def jmp_addr
-    op == 'JMP' || op == 'JMPUW' ? first_kind(:addr).value : 0
+    JMP_ADDR_OPS.include?(op) ? first_kind(:addr).value : 0
   end
 
   # Non-negative integer right after the leading register (`R1 3`).
@@ -231,7 +238,7 @@ module InsnOperands
     return @upvar_ref if defined?(@upvar_ref)
 
     ints = typed.select { |operand| operand.kind == :int }.map(&:value)
-    @upvar_ref = %w[GETUPVAR SETUPVAR].include?(op) && ints.length == 2 ? ints : nil
+    @upvar_ref = UPVAR_REF_OPS.include?(op) && ints.length == 2 ? ints : nil
   end
 
   def enter_fields

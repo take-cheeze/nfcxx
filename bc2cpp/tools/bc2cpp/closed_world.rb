@@ -12,6 +12,7 @@ require_relative 'dynamic_names'
 require_relative 'loop_installers'
 require_relative 'scan_cache'
 require_relative 'send_names'
+require_relative 'bytecode_ir_ops'
 
 # CLOSED_WORLD: bc2cpp compiles closed-world builds only, where the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -34,7 +35,11 @@ class ClosedWorld
   CONST_REBINDERS = SendNames::CONST_REBINDERS
   # Constants whose `.new` makes a class (or members) the registry cannot see (SendNames).
   CLASS_FACTORIES = SendNames::CLASS_FACTORIES
-  SEND_OPS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].freeze
+  SEND_OPS = BytecodeIR::Ops::SEND
+  # Ops whose operand names a method (ALIAS, UNDEF) or a symbol that may be one (LOADSYM).
+  NAME_BINDING_OPS = Set['ALIAS', 'UNDEF', 'LOADSYM'].freeze
+  # Writers of a class body's lexical scope: nil at top level (LOADNIL) or Object (OCLASS).
+  CLASS_SCOPE_WRITERS = Set['LOADNIL', 'OCLASS'].freeze
   STOP_OPS = /\A(?:JMP|RETURN|BREAK|RAISE|STOP|EXEC)/
   C_STRING = /"((?:[^"\\\n]|\\.)*)"/
   # Native code that asks Ruby to define, alias or eval by name.
@@ -662,7 +667,7 @@ class ClosedWorld
     return false unless root
 
     base = insn.reg.to_i
-    BytecodeIR.all_writers_reaching?(irep, idx, base) { |_j, w| %w[LOADNIL OCLASS].include?(w.op) } &&
+    BytecodeIR.all_writers_reaching?(irep, idx, base) { |_j, w| CLASS_SCOPE_WRITERS.include?(w.op) } &&
       BytecodeIR.all_writers_reaching?(irep, idx, base + 1) { |_j, w| w.op == 'LOADNIL' }
   end
 
@@ -1186,8 +1191,8 @@ class ClosedWorld
     return true if @outside_name_paths.fetch(name, []).any? { |path| !path.match?(NATIVE_CORE) }
 
     @ireps.each_value.any? do |irep|
-      irep.instructions.any? do |insn|
-        (%w[ALIAS UNDEF LOADSYM].include?(insn.op) && insn.typed.any? { |operand| operand.value.to_s == name })
+      BytecodeIR.for(irep).instructions_with_op(*NAME_BINDING_OPS).any? do |insn|
+        insn.typed.any? { |operand| operand.value.to_s == name }
       end
     end
   end
