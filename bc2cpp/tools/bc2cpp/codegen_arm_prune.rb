@@ -55,7 +55,7 @@ class CodeGen
 
     self.class.arm_prune_stats[:methods] += 1
     self.class.arm_prune_stats[:unreachable] += unreachable.size
-    self.class.arm_prune_stats[:instructions] += irep.instructions.size
+    self.class.arm_prune_stats[:instructions] += BytecodeIR.for(irep).size
     unreachable
   end
 
@@ -71,9 +71,9 @@ class CodeGen
     unreachable = arm_prune_reachable(block_irep, owner_def, reg_offset)
     self.class.arm_prune_stats[:blocks] += 1
     if unreachable
-      self.class.arm_prune_blocks[key] = { unreachable: unreachable, instructions: block_irep.instructions.size }
+      self.class.arm_prune_blocks[key] = { unreachable: unreachable, instructions: BytecodeIR.for(block_irep).size }
       self.class.arm_prune_stats[:block_unreachable] += unreachable.size
-      self.class.arm_prune_stats[:block_instructions] += block_irep.instructions.size
+      self.class.arm_prune_stats[:block_instructions] += BytecodeIR.for(block_irep).size
     else
       self.class.arm_prune_blocks[key] = nil
       self.class.arm_prune_stats[:block_refused] += 1
@@ -86,8 +86,7 @@ class CodeGen
     prog = BytecodeIR.for(irep)
     return arm_prune_refuse(:unresolved_graph) unless prog.handlers_resolved?
 
-    insns = irep.instructions
-    addr_idx = insns.each_with_index.to_h { |insn, i| [insn.addr, i] }
+    addr_idx = prog.address_to_index
     handler_succ = Hash.new { |h, k| h[k] = [] }
     prog.handler_edges.each { |edge| handler_succ[edge.src] << edge.target }
     entry_targets = jump_targets(irep).filter_map { |addr| addr_idx[addr] }
@@ -96,10 +95,10 @@ class CodeGen
     work = [0]
     until work.empty?
       i = work.pop
-      next if i.nil? || i >= insns.size || seen.include?(i)
+      next if i.nil? || i >= prog.size || seen.include?(i)
 
       seen << i
-      insn = insns[i]
+      insn = prog.source_at(i)
       succ =
         case insn.op
         when 'JMP', 'JMPUW' then [jump_target.call(insn.jmp_addr)]
@@ -115,7 +114,7 @@ class CodeGen
 
       work.concat(succ.compact, handler_succ[i])
     end
-    (0...insns.size).to_set - seen
+    (0...prog.size).to_set - seen
   end
 
   # Stage B's decision for the held-back texts +texts+ ({ index => text }): true when they may be dropped, and counted

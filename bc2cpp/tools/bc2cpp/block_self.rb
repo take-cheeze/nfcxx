@@ -47,7 +47,7 @@ module BlockSelf
       defs.any? { |df| proc_def?(irep, df, frames, blk) }
     end
     slots = frames.last[1]
-    irep.instructions.each_with_index do |insn, idx|
+    program.each_source do |insn, idx|
       op = insn.op
       return "forwards its block (#{op})" if FORWARDING_OPS.include?(op)
       next if BytecodeIR::Ops::LOAD_PREFIX_OPS.include?(op) || WRITE_ONLY_OPS.include?(op)
@@ -86,7 +86,7 @@ module BlockSelf
   def proc_def?(irep, df, frames, blk)
     return df.reg.to_s == blk if df.entry?
 
-    insn = irep.instructions[df.index]
+    insn = BytecodeIR.for(irep).source_at(df.index)
     case insn.op
     when 'BLKPUSH' then true
     when 'GETUPVAR'

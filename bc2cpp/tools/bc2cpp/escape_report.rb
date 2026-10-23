@@ -6,6 +6,10 @@
 #
 #   site  irep_label:index  owner#method  engine|core  op  kind  verdict  reason  uses  today
 #   self  irep_label        owner#method  engine|core  initialize  self  verdict  -  0  -
+#   ivars irep_label:index  owner#method  engine|core  op  object  confined  immediate|not_immediate  why  class  -
+#
+# An `ivars` row (confined `new` sites only) says whether every ivar store reaching the object is provably immediate
+# (escape_immediate_ivars.rb).
 #
 # `kind` is `lambda`, `block:<callee name>`, `array`, `hash`, `string` or `object`. `today` says what the
 # compiler does with the site without the analysis: `rproc` (a BLOCK_FALLBACK RProc is built),
@@ -47,11 +51,17 @@ module EscapeReport
       irep.instructions.each_with_index do |insn, i|
         kind = site_kind(irep, i, insn) or next
         lexical = owner_of[irep.label]&.split('#', 2)&.first
-        verdict = analyzer.creation(irep, i, value_class: constructed_class(codegen, world, irep, i, insn, lexical))
+        klass = constructed_class(codegen, world, irep, i, insn, lexical)
+        verdict = analyzer.creation(irep, i, value_class: klass)
         today = TODAY[[irep.label, insn.addr]] || LAMBDA_REGIONS[[irep.label, insn.addr]] || '-'
         rows << ['site', "#{irep.label}:#{i}", owner, origin, insn.op, kind, verdict.escapes? ? 'escapes' : 'confined',
                  verdict.escapes? ? verdict.reason : '-', verdict.uses.count { |u| u.kind == :call }, today,
                  receiver_classes(analyzer, irep, i, insn)].join("\t")
+        # Only a confined `new` gets an ivars row: creation refuses any `new` whose constructed class is unknown.
+        next unless kind == 'object' && !verdict.escapes?
+
+        immediate, detail = analyzer.object_ivar_stores(irep, i, klass)
+        rows << ['ivars', "#{irep.label}:#{i}", owner, origin, insn.op, kind, 'confined', immediate, detail, klass, '-'].join("\t")
       end
     end
     world.reflective_sites.each { |label, idx| rows << ['reflective', "#{label}:#{idx}", owner_of[label] || '?', '', '', '', '', '', 0, ''].join("\t") }

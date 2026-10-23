@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
 require_relative 'fixpoint'
 require_relative 'numeric_flow'
 require_relative 'ir_argument_types'
@@ -242,6 +243,8 @@ class CodeGen
     setup_block_return_dependencies
     setup_class_pools
     numeric_return_candidates.each do |name|
+      next if bytecode_ir_name_removed?(name)
+
       @rc_return[name] = 0
       @rc_send_ireps[name].merge(return_call_labels(name))
     end
@@ -280,6 +283,7 @@ class CodeGen
     admitted = false
     @rc_checked_alias_names.each do |name|
       next if @rc_return.key?(name) || @rc_admitted_alias_names.include?(name) || !checked_accessor_name?(name)
+      next if bytecode_ir_name_removed?(name)
 
       @rc_admitted_alias_names << name
       @rc_return[name] = 0
@@ -492,6 +496,8 @@ class CodeGen
   def return_class_send_mask(irep, index, insn, state = nil)
     name = insn.sym
     return NumericFlow::OTHER unless name
+    # A removed name's body may not be the one that runs: the same refusal as bytecode_ir_call_result_classes.
+    return NumericFlow::OTHER if @closed_world && bytecode_ir_name_removed?(name)
 
     ruby_result = state && core_ruby_class_result(irep, index, insn, state)
     return ruby_result if ruby_result
@@ -558,7 +564,7 @@ class CodeGen
   def bytecode_ir_call_result_classes(irep, index)
     return nil unless @foreign_method_names && @closed_world&.exact_instances_singleton_free? && @native_results_ready && @rc_scoped_ready
 
-    insn = irep.instructions[index]
+    insn = BytecodeIR.for(irep).source_at(index)
     return nil unless BytecodeIR::Ops::SEND.include?(insn.op)
     return nil if bytecode_ir_name_removed?(insn.sym)
 
@@ -635,7 +641,7 @@ class CodeGen
 
   def call_site_lookups(read)
     { receiver: ->(body, index, register) {
-        implicit = read && %w[SSEND SSEND0 SSENDB].include?(body.instructions[index].op)
+        implicit = read && %w[SSEND SSEND0 SSENDB].include?(BytecodeIR.for(body).source_at(index).op)
         read && !implicit ? read.call(body, index, register) : bytecode_ir_argument_receiver_classes(body, index, register)
       },
       target: ->(method, klass) { closed_world_exact_target(method, klass) } }
@@ -653,7 +659,7 @@ class CodeGen
     IrArgumentTypes.rest_classes(definition, sites, **call_site_lookups(nil), fixed: mandatory_arity(irep) + optional_arity(irep),
                                  minimum: mandatory_arity(irep),
                                  argument: ->(body, index, register) { bytecode_ir_source_classes(body, index, register) },
-                                 admit: ->(body, index) { body.instructions[index].nk_spec.nil? })
+                                 admit: ->(body, index) { BytecodeIR.for(body).source_at(index).nk_spec.nil? })
   end
 
   # Block parameter: Set[:Proc] when every reaching call passes a literal block or lambda. A site that passes no
@@ -667,7 +673,7 @@ class CodeGen
 
     IrArgumentTypes.block_proc(definition, sites, **call_site_lookups(nil),
                                proc_value: ->(body, index, register, argc) {
-                                 insn = body.instructions[index]
+                                 insn = BytecodeIR.for(body).source_at(index)
                                  nk = insn.nk_spec
                                  next false unless %w[SENDB SSENDB].include?(insn.op) && (nk.nil? || nk.match?(/\A\d+\z/))
 
@@ -687,14 +693,15 @@ class CodeGen
     sites = reaching_call_sites(definition)
     return nil unless sites
 
-    karg = irep.instructions.index { |insn| insn.op == 'KARG' && insn.sym.to_s == name }
-    optional = irep.instructions.any? { |insn| insn.op == 'KEY_P' && insn.sym.to_s == name }
-    default = optional ? BytecodeIR::Types.optional_keyword_default_class(irep, karg, irep.instructions[karg].reg) : nil
+    program = BytecodeIR.for(irep)
+    karg = program.each_source.find { |insn, _index| insn.op == 'KARG' && insn.sym.to_s == name }&.last
+    optional = program.instructions_with_op('KEY_P').any? { |insn| insn.sym.to_s == name }
+    default = optional ? BytecodeIR::Types.optional_keyword_default_class(irep, karg, program.source_at(karg).reg) : nil
     return nil if optional && !default
 
     IrArgumentTypes.keyword_classes(definition, sites, **call_site_lookups(nil), default: default && Set[default],
                                     value: ->(body, index, register, argc) {
-                                      insn = body.instructions[index]
+                                      insn = BytecodeIR.for(body).source_at(index)
                                       nk = insn.nk_spec
                                       # No keyword token (nk_spec nil) passes no keyword when the positional count is fixed,
                                       # or absent (SEND0); a splatted count may carry a keyword hash, so it refuses.
@@ -738,7 +745,7 @@ class CodeGen
   end
 
   def bytecode_ir_argument_receiver_classes(irep, index, register)
-    if %w[SSEND SSEND0 SSENDB].include?(irep.instructions[index].op)
+    if %w[SSEND SSEND0 SSENDB].include?(BytecodeIR.for(irep).source_at(index).op)
       bytecode_ir_mask_classes(return_class_self_receiver(irep))
     else
       bytecode_ir_source_classes(irep, index, register)

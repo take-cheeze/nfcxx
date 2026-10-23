@@ -342,6 +342,11 @@ module EscapeAnalysis
       !mro(name).nil?
     end
 
+    # A placed class that is not a module: an instance of it is exactly that class (no includer of a module can be one).
+    def plain_class?(name)
+      class_known?(name) && !module_name?(name)
+    end
+
     # Definitions a call of +name+ can reach on a receiver of class +klass+ (exactly that class when
     # +exact+, else it or any subclass; a module name means any includer). Every class or module the
     # hierarchy tables cannot place leaves the answer at all definitions of the name.
@@ -596,7 +601,7 @@ module EscapeAnalysis
 
     # The value written to the leading register of the instruction at +index+: a LAMBDA, BLOCK, ARRAY, HASH,
     # STRING or the result of a `new` send (then +value_class+ is the constructed class when known).
-    def creation(irep, index, value_class: nil)
+    def creation(irep, index, value_class: nil, self_klass: nil)
       insn = EscapeAnalysis.insn_at(irep, index)
       return failed(:no_destination) unless insn.reg
       return failed(:reflection) unless @world.reflective_sites.empty?
@@ -608,7 +613,9 @@ module EscapeAnalysis
         return failed(:initialize_keeps_self) unless initialize_keeps_no_self?(value_class)
       end
 
-      flow(irep, { index => { insn.reg => true } }, created_at: index, value_class: CREATED_CLASS[insn.op] || value_class)
+      flow(irep, { index => { insn.reg => true } }, created_at: index,
+                                                   value_class: CREATED_CLASS[insn.op] || value_class,
+                                                   self_klass: self_klass)
     end
 
     # Does the constructor of +klass+ keep no reference to self? BasicObject#initialize is mrb_do_nothing
@@ -649,8 +656,9 @@ module EscapeAnalysis
     end
 
     # Does the closure BLOCK/LAMBDA at irep[index] leave its frame?
-    def closure_escapes?(irep, index)
-      cyclic([:closure, irep.label, index]) { creation(irep, index).escapes? }
+    # +self_klass+: the frame's self class when the frame is a method body given one (see block_captures_as?).
+    def closure_escapes?(irep, index, self_klass = nil)
+      cyclic([:closure, irep.label, index, self_klass]) { creation(irep, index, self_klass: self_klass).escapes? }
     end
 
     private
@@ -695,6 +703,37 @@ module EscapeAnalysis
       end
     end
 
+    # [:self_keep] of +mdef+ for a receiver of exactly +klass+: its implicit-self sends resolve on that class (see
+    # callees), so a Ruby method is judged on the definitions its receiver class reaches, not every one of the name.
+    # The exact class is the receiver's own (a held register of the caller), so this is only as sound as that class.
+    def self_captures_as?(mdef, klass)
+      return captures?(mdef, [:self_keep]) unless plain_body?(mdef) && @world.plain_class?(klass)
+
+      cyclic([:self_as, mdef.object_id, klass]) do
+        irep = body_irep(mdef)
+        irep.nil? ||
+          flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true, value_class: klass).escapes?
+      end
+    end
+
+    # [:block] of +mdef+ for a receiver of exactly +klass+: self is that class, so the body's own calls on self (the
+    # Enumerable bodies' self.each) resolve on it. Only plain `def`s: a module_function copy or an installed body has
+    # another self, so those keep the by-name summary.
+    def block_captures_as?(mdef, klass)
+      return captures?(mdef, [:block]) unless plain_body?(mdef) && @world.plain_class?(klass)
+
+      cyclic([:block_as, mdef.object_id, klass]) do
+        irep = body_irep(mdef)
+        irep.nil? || block_captured?(irep, self_klass: klass)
+      end
+    end
+
+    # A `def` in a class or module body: its self is an instance of the class it is reached through. A scoped def
+    # (Class.new { def }), an installed or module_function body, or a singleton one has another self.
+    def plain_body?(mdef)
+      mdef.kind.nil? && mdef.installer.nil? && !mdef.owner.start_with?('<') && !mdef.owner.end_with?('.singleton')
+    end
+
     def body_irep(mdef)
       return nil if mdef.installer
 
@@ -724,7 +763,7 @@ module EscapeAnalysis
     end
 
     # The block of a method is born at BLKPUSH (level 0) and, with a block parameter, in its local.
-    def block_captured?(irep)
+    def block_captured?(irep, self_klass: nil)
       fields = irep.enter ? irep.enter.enter_fields : []
       sources = EscapeAnalysis.op_sites(irep, BLKPUSH).filter_map { |insn, j| j if insn.paren_value.to_i.zero? }
       starts = {}
@@ -737,7 +776,8 @@ module EscapeAnalysis
       end
       return false if starts.empty? && sources.empty? && !nested_block_reads?(irep)
 
-      flow(irep, starts, block_sources: sources, block_tracked: true, value_class: 'Proc').escapes?
+      flow(irep, starts, block_sources: sources, block_tracked: true, value_class: 'Proc',
+                         self_klass: self_klass).escapes?
     end
 
     def nested_block_reads?(irep)
@@ -748,15 +788,16 @@ module EscapeAnalysis
     # Per-run state shared by the transfer functions.
     # returns: the frame may hand the value back as its result (RETSELF / RETURN of a holding register); the
     # exit is recorded in returned instead of escaping. Only the method's own frame is run that way.
+    # self_klass: the exact class of register 0 (self) when it is not tracked (see block_captures_as?).
     Run = Struct.new(:irep, :reasons, :uses, :self_tracked, :params, :block_slot, :value_class, :returns,
-                     :returned, keyword_init: true)
+                     :returned, :self_klass, keyword_init: true)
 
     # +starts+: { instruction index => { register => true } }. With +created_at+ the start index is the
     # creating instruction and the value enters its SUCCESSORS (and again whenever it runs); otherwise the
     # state holds on entry to that index. +block_sources+: BLKPUSH indices that introduce the value;
     # +block_tracked+: the value is a method's block, so closures that BLKPUSH it from a nested level see it.
     def flow(irep, starts, created_at: nil, self_tracked: false, block_sources: [], block_tracked: false,
-             value_class: nil, returns: false)
+             value_class: nil, returns: false, self_klass: nil)
       prog = BytecodeIR.for(irep)
       return failed(:cfg_unresolved) unless prog.resolved?
       return failed(:handlers_unresolved) unless prog.handlers_resolved?
@@ -764,7 +805,8 @@ module EscapeAnalysis
       insns = prog.instructions
       params = parameter_count(irep)
       run = Run.new(irep: irep, reasons: [], uses: [], self_tracked: self_tracked, params: params,
-                    block_slot: (params + 1).to_s, value_class: value_class, returns: returns, returned: false)
+                    block_slot: (params + 1).to_s, value_class: value_class, returns: returns, returned: false,
+                    self_klass: self_klass)
       state = Array.new(insns.size)
       work = []
       seed = lambda do |index, regs|
@@ -947,11 +989,15 @@ module EscapeAnalysis
     def send_site(run, i, insn, s, name, recv:, args:, dest:, block: nil)
       out = s - [dest.to_s]
       reg_held = ->(r) { r && s.include?(r.to_s) }
-      list = callees(run, i, name, recv, receiver_held: recv.nil? ? s.include?('0') : reg_held.call(recv))
-      if recv.nil? ? s.include?('0') : reg_held.call(recv)
-        # The exact class's ancestry, when callees resolved by it (the same test as in callees).
-        chain = recv && reg_held.call(recv) && run.value_class ? @world.ancestry(run.value_class) : nil
-        result = receiver_result(name, list, chain)
+      held = recv.nil? ? s.include?('0') : reg_held.call(recv)
+      klasses = receiver_klasses(run, i, recv, held)
+      list = callees(run, name, recv, klasses)
+      if held
+        # The exact class's ancestry, when callees resolved by it (the same test as in callees). A self-tracked run
+        # is a summary of one method for receivers of exactly run.value_class (see self_captures_as?).
+        exact = run.value_class && (recv ? reg_held.call(recv) : run.self_tracked)
+        chain = exact ? @world.ancestry(run.value_class) : nil
+        result = receiver_result(name, list, chain, exact ? run.value_class : nil)
         return reject(run, insn, :send_receiver, s) unless result
 
         run.uses << Use.new(index: i, kind: :call, name: name, reg: recv.to_s) if recv && PROC_CALLS.include?(name)
@@ -968,7 +1014,8 @@ module EscapeAnalysis
         run.uses << Use.new(index: i, kind: :pass_arg, name: name, reg: r.to_s)
       end
       if reg_held.call(block)
-        return reject(run, insn, :send_block, s) if block_captured_by_name?(name, list)
+        klass = klasses&.size == 1 ? klasses.first : nil
+        return reject(run, insn, :send_block, s) if block_captured_by_name?(name, list, klass)
 
         run.uses << Use.new(index: i, kind: :pass_block, name: name, reg: block.to_s)
       end
@@ -978,14 +1025,26 @@ module EscapeAnalysis
     # Definitions the call can reach: by the receiver's class when something proves it (the tracked
     # value's own class, the compiler's class flow, the class whose method this is for an implicit
     # self), else every definition of the name. nil when the world cannot enumerate them.
-    def callees(run, index, name, recv, receiver_held:)
-      if recv.nil?
+    def callees(run, name, recv, klasses)
+      if recv.nil? && klasses.nil?
         owner = run.self_tracked ? nil : @self_class&.call(run.irep)
         return @world.defs_for(name, owner && [owner], false)
       end
-      return @world.defs_for(name, [run.value_class], true) if receiver_held && run.value_class
 
-      @world.defs_for(name, @receiver_classes&.call(run.irep, index, recv), true)
+      @world.defs_for(name, klasses, true)
+    end
+
+    # The classes a call's receiver is, exactly, when the run proves them: the tracked value (a held register of
+    # value_class; self of a self-tracked run), self of a run given its class (self_klass), else the class flow.
+    # nil when unknown. An implicit-self call (recv nil) with neither is the owner-based callee set in callees.
+    def receiver_klasses(run, index, recv, receiver_held)
+      if recv.nil?
+        return run.self_tracked ? (run.value_class && [run.value_class]) : (run.self_klass && [run.self_klass])
+      end
+      return [run.value_class] if receiver_held && run.value_class
+      return [run.self_klass] if recv == 0 && run.self_klass
+
+      @receiver_classes&.call(run.irep, index, recv)
     end
 
     def reject(run, insn, why, s)
@@ -1008,8 +1067,8 @@ module EscapeAnalysis
     # through NATIVE_RECEIVER_OK; the rest is each bytecode definition's [:self] summary.
     # +chain+: the ancestry of an exact receiver class, when the caller knows it. A name with no native
     # definition on that chain cannot be the native the by-name veto is for, so the veto does not apply.
-    def receiver_result(name, list, chain = nil)
-      result = name_receiver_result(name, list, chain)
+    def receiver_result(name, list, chain = nil, klass = nil)
+      result = name_receiver_result(name, list, chain, NATIVE_RECEIVER_OK[name], klass)
       return nil if result.nil?
 
       # Each callback is checked by name with no callbacks of its own, so the check cannot recurse.
@@ -1021,14 +1080,15 @@ module EscapeAnalysis
 
     # +table+: the natives' receiver fact (NATIVE_RECEIVER_OK by default; a callback named by NATIVE_ARG_OK
     # passes its own audited fact).
-    def name_receiver_result(name, list, chain, table = NATIVE_RECEIVER_OK[name])
+    # +klass+: the receiver's exact class when it is the tracked value (then the bodies' summaries are per class).
+    def name_receiver_result(name, list, chain, table = NATIVE_RECEIVER_OK[name], klass = nil)
       return nil if list.nil? || installer?(list)
 
       opaque = opaque_defs(list)
       native_free = chain && @world.native_free_on?(name, chain)
       return nil if table.nil? && (list.empty? || (@world.native_name?(name) && !native_free) || !opaque.empty?)
       bytecode = list.reject { |d| opaque.include?(d) }
-      return nil if bytecode.any? { |d| captures?(d, [:self_keep]) }
+      return nil if bytecode.any? { |d| klass ? self_captures_as?(d, klass) : captures?(d, [:self_keep]) }
 
       # A bytecode definition that returns its receiver makes the result the receiver too.
       return :self if table == :self || bytecode.any? { |d| returns_self?(d) }
@@ -1081,14 +1141,15 @@ module EscapeAnalysis
       !name_receiver_result(name, list, nil, table).nil?
     end
 
-    def block_captured_by_name?(name, list)
+    # +klass+: the receiver's one exact class, when known (then each callee is judged on that class).
+    def block_captured_by_name?(name, list, klass = nil)
       return true if list.nil? || installer?(list)
 
       opaque = opaque_defs(list)
       natives = @world.native_name?(name) || !opaque.empty?
       return true if (natives || list.empty?) && !NATIVE_BLOCK_NO_CAPTURE.include?(name)
 
-      list.any? { |d| !opaque.include?(d) && captures?(d, [:block]) }
+      list.any? { |d| !opaque.include?(d) && (klass ? block_captures_as?(d, klass) : captures?(d, [:block])) }
     end
 
     # -- closures that can see the value ---------------------------------------------------------------
@@ -1117,10 +1178,12 @@ module EscapeAnalysis
     end
 
     def closure_reason(irep, ci, child, refs, run)
-      return :captured_by_escaping_closure if closure_escapes?(irep, ci)
+      return :captured_by_escaping_closure if closure_escapes?(irep, ci, run.self_klass)
 
       refs.each do |ref|
-        return :captured_by_escaping_closure if ref[:chain].any? { |(owner, index)| closure_escapes?(owner, index) }
+        return :captured_by_escaping_closure if ref[:chain].any? do |(owner, index)|
+          closure_escapes?(owner, index, owner.equal?(irep) ? run.self_klass : nil)
+        end
 
         verdict = flow(ref[:irep], { ref[:index] => { ref[:dest] => true } }, created_at: ref[:index],
                        value_class: run.value_class)
@@ -1156,3 +1219,5 @@ module EscapeAnalysis
     end
   end
 end
+
+require_relative 'escape_immediate_ivars'

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'json'
 require 'rbs'
 require 'set'
 
@@ -12,7 +13,10 @@ require 'set'
 #   * a member whose required parameter, keyword, return, ivar or constant type is `untyped`, or names a type that
 #     neither the target nor CRuby's core RBS declares, is skipped and listed. Optional, rest and block parts are not
 #     checked: the emitter writes `untyped` there for every method;
-#   * a new class whose superclass is undeclared is skipped as a whole.
+#   * a new class whose superclass is undeclared is skipped as a whole;
+#   * with a proofs file (load_proofs, bc2cpp's BC2CPP_CONSTANT_PROOF_CANDIDATES run), a constant the TC1011 check
+#     rejects is skipped, and so is an Integer or Array constant the proofs file does not cover. Constants the check
+#     never reads (other classes) need no verdict.
 # Promoted members are appended after the last section under a `# ---- promoted candidates: DIR` heading, as reopened
 # `class` / `module` blocks. The base section (everything before `# ---- block_types.rbs`) is generator output and is
 # never written. The result must parse with RBS before it is written, and the written file is parsed again.
@@ -20,6 +24,10 @@ module PromoteCandidates
   class Refusal < StandardError; end
 
   END_MARKER = '# ---- block_types.rbs'
+  PROOFS_VERSION = 1
+  # The constant types DECLARED_CONSTANT_CHECK reads (DeclaredConstants.entry_for), so a missing verdict for one of
+  # them means the proofs file does not cover it.
+  PROOF_CHECKED = %w[Integer Array].freeze
   # Lines only the base generators write: a candidate carrying one would land in the base section.
   BASE_MARKER = /^# (?:bc2cpp-native: |Base RBS|Native base RBS|---- base stubs|---- block_types\.rbs)/
   DATE = /\d{4}-\d{2}-\d{2}/
@@ -128,6 +136,24 @@ module PromoteCandidates
     nil
   rescue RBS::ParsingError => e
     e.message
+  end
+
+  # The verdicts of a proofs file written by bc2cpp for CANDIDATE_DIR: {constant name => TC1011 message, or nil when the
+  # check accepts the constant}. Raises Refusal for a file that is not one, or was written for another directory.
+  def load_proofs(path, candidate_dir)
+    data = JSON.parse(File.read(path))
+    dirname = File.basename(File.expand_path(candidate_dir))
+    unless data.is_a?(Hash) && data['version'] == PROOFS_VERSION && data['verdicts'].is_a?(Hash) &&
+           data['verdicts'].all? { |name, verdict| name.is_a?(String) && (verdict.nil? || verdict.is_a?(String)) }
+      raise Refusal, "#{path} is not a version #{PROOFS_VERSION} constant proofs file"
+    end
+    unless data['candidates'] == dirname
+      raise Refusal, "#{path} was written for #{data['candidates'].inspect}, not #{dirname}"
+    end
+
+    data['verdicts']
+  rescue Errno::ENOENT, Errno::EACCES, JSON::ParserError => e
+    raise Refusal, "#{path} cannot be read as a constant proofs file (#{e.message})"
   end
 
   # The post-write check: the file as it is on disk must still parse.
@@ -247,7 +273,7 @@ module PromoteCandidates
   end
 
   # Plans the promotion of CANDIDATE_DIR into TARGET_TEXT. Raises Refusal on any condition that must stop the whole run.
-  def plan(target_text, candidate_dir, target_label: 'target')
+  def plan(target_text, candidate_dir, target_label: 'target', proofs: nil)
     dirname = File.basename(File.expand_path(candidate_dir))
     cut = target_text.index(END_MARKER)
     raise Refusal, "#{target_label} has no `#{END_MARKER}` line, so its base section cannot be told apart" unless cut
@@ -283,7 +309,7 @@ module PromoteCandidates
         result.skipped << ["#{dirname}/#{rel}", "#{decl.class.name.split('::').last} declarations are not promoted"]
       end
       candidate_classes(decls).each do |full, decl|
-        block = promote_class(full, decl, index, declared, result, provenance)
+        block = promote_class(full, decl, index, declared, result, provenance, proofs)
         blocks << block if block
       end
     end
@@ -300,8 +326,20 @@ module PromoteCandidates
     result
   end
 
+  # Why a candidate constant must not be promoted under the proofs, or nil. DECLARED_CONSTANT_CHECK rejects a declared
+  # constant whose assignment the proof does not cover (TC1011), so the verdict is the check's own.
+  def proof_problem(full, name, member, proofs)
+    key = "#{full}::#{name}"
+    return (proofs[key] ? "TC1011: #{proofs[key]}" : nil) if proofs.key?(key)
+
+    type = member.type
+    return nil unless type.is_a?(RBS::Types::ClassInstance) && PROOF_CHECKED.include?(name_string(type.name))
+
+    "no proof fact: #{key} is not in the proofs file (was it written for this candidate directory?)"
+  end
+
   # Adds the absent, typeable members of one candidate class to the plan. Returns its block, or nil when nothing is added.
-  def promote_class(full, decl, index, declared, result, provenance)
+  def promote_class(full, decl, index, declared, result, provenance, proofs = nil)
     kind = decl.is_a?(RBS::AST::Declarations::Module) ? :module : :class
     superclass = kind == :class && decl.super_class ? name_string(decl.super_class.name) : nil
     entry = index.entry(full)
@@ -347,6 +385,13 @@ module PromoteCandidates
         if item.problem
           result.skipped << [item.label, item.problem]
           next
+        end
+        if proofs && item.key.first == :const
+          problem = proof_problem(full, item.key[1], member, proofs)
+          if problem
+            result.skipped << [item.label, problem]
+            next
+          end
         end
         unless valid_line?(item.line)
           result.skipped << [item.label, 'the rendered declaration does not parse']

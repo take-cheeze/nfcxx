@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'core_fact_sigs'
+require_relative 'bytecode_ir_regions'
 
 # ARG_SHAPES: direct calls for the argument shapes the
 # mandatory/optional-only gates leave to dispatch. Callee side: a rest
@@ -87,7 +88,7 @@ module ArgShapeCalls
   # no frame-reading self call, at any block depth.
   def block_transparent_callee?(irep, seen = Set.new.compare_by_identity)
     return true unless seen.add?(irep)
-    return false if irep.instructions.any? { |insn| %w[SUPER ARGARY].include?(insn.op) }
+    return false if BytecodeIR.for(irep).op?('SUPER', 'ARGARY')
     return false unless (self_call_targets(irep) & FRAME_READING_NAMES).empty?
 
     (irep.reps || []).all? do |label|
@@ -100,7 +101,7 @@ module ArgShapeCalls
   # signature and the call sites must agree on this one predicate.
   def yields_block_param?(irep, regions = nil)
     return false unless pure_mandatory_arity?(irep)
-    return true if irep.instructions.any? { |insn| insn.op == 'BLKPUSH' && insn.paren_value == '0' }
+    return true if BytecodeIR.for(irep).instructions_with_op('BLKPUSH').any? { |insn| insn.paren_value == '0' }
     return true if block_given_modelled? && block_given_reads?(irep)
 
     (regions || recognize_block_fallback_regions(irep, blk_available: true)).any? { |region| region[:needs_blk] }
@@ -297,7 +298,7 @@ module ArgShapeCalls
     irep = region[:parent_irep]
     return nil unless irep && owner_def
 
-    idx = irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
+    idx = BytecodeIR.for(irep).instructions.index { |instruction| instruction.addr == region[:sendb_addr] }
     return nil unless idx
 
     offset = inline_offset || 0

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'bytecode_ir_regions'
 
 # CodeGen: NUMERIC_CONSTANT_PROOF.
 #
@@ -53,7 +54,7 @@ class CodeGen
 
     poisoned = Set.new(@outside_const_names)
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_with_op('CLASS', 'MODULE', 'SETCONST', 'SETMCNST', 'GETCONST', 'GETMCNST') do |insn, idx|
         case insn.op
         when 'CLASS', 'MODULE'
           poisoned << insn.sym_token

@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'bytecode_ir_containers'
+require_relative 'bytecode_ir_regions'
 
 # CodeGen: NUMERIC_RETURN_PROOF.
 #
@@ -32,8 +34,8 @@ class CodeGen
     @numeric_return_send_ireps = Hash.new { |h, k| h[k] = Set.new }
     numeric_return_candidates.each { |name| @numeric_return[name] = 0 }
     @ireps.each_value do |irep|
-      irep.instructions.each do |insn|
-        next unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op) && @numeric_return.key?(insn.sym)
+      BytecodeIR.for(irep).each_with_op('SEND', 'SEND0', 'SSEND', 'SSEND0') do |insn, _index|
+        next unless @numeric_return.key?(insn.sym)
 
         @numeric_return_send_ireps[insn.sym] << irep.label
       end
@@ -92,13 +94,13 @@ class CodeGen
     @numeric_aliased_names ||= begin
       names = Set.new
       @ireps.each_value do |irep|
-        insns = irep.instructions
-        aliasing = insns.any? do |i|
+        program = BytecodeIR.for(irep)
+        aliasing = program.each_source.any? do |i, _index|
           i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
         end
         next unless aliasing
 
-        insns.each { |i| names << i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') }
+        program.each_with_op('ALIAS', 'LOADSYM') { |i, _index| names << i.sym if i.sym }
       end
       names.freeze
     end
@@ -112,9 +114,9 @@ class CodeGen
   # its pool has grown that provenance.
   def aliased_operand_name_set
     @aliased_operand_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
-      next unless irep.instructions.any? { |i| i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
+      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
 
-      names.merge(aliased_operand_names(irep) || irep.instructions.filter_map { |i| i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') })
+      names.merge(aliased_operand_names(irep) || BytecodeIR.for(irep).instructions_with_op('ALIAS', 'LOADSYM').filter_map { |i| i.sym if i.sym })
     end
   end
 
@@ -130,7 +132,8 @@ class CodeGen
   # The names an irep's aliasing operations spell, or nil when one of them takes a name that is not a Symbol literal.
   def aliased_operand_names(irep)
     names = Set.new
-    irep.instructions.each_with_index do |insn, idx|
+    program = BytecodeIR.for(irep)
+    program.each_source do |insn, idx|
       if insn.op == 'ALIAS'
         names << insn.sym
         old = insn.first_of(:name)&.value
@@ -140,7 +143,7 @@ class CodeGen
 
         # Every name that can reach each argument, not only the textually last arm of a join.
         literal = (1..count).all? do |k|
-          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + k).to_s)&.map { |i| irep.instructions[i] }
+          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg.to_i + k).to_s)&.map { |i| program.source_at(i) }
           next false unless sources&.all? { |w| w.op == 'LOADSYM' && w.sym }
 
           sources.each { |w| names << w.sym }

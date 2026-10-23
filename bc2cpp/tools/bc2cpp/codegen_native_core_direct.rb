@@ -59,7 +59,7 @@ module NativeCoreDirectFallback
   # irep that builds it (rest and mandatory parameters only). A rewrite of the slot, in the
   # irep or a nested block, is another definition (or refuses the query), so it is not this case.
   def rest_param_receiver?(irep, idx, reg)
-    return false unless idx.between?(0, irep.instructions.length - 1)
+    return false unless idx.between?(0, BytecodeIR.for(irep).size - 1)
 
     enter = irep.enter
     return false unless enter && (@owner_of.key?(irep.label) || rest_only_block?(irep))

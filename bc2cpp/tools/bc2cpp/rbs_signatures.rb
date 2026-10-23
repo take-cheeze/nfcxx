@@ -455,6 +455,11 @@ module RbsSignatures
         refusal[:cause] ||= :call_receiver_union_cap
         next nil
       end
+      # REMOVED: a name some class may undefine has no declared contract on any receiver (self_call_types refuses it too).
+      if removed&.call(insn.sym.to_s)
+        refusal[:cause] ||= "call_removed:#{insn.sym}"
+        next nil
+      end
       classes = Set.new
       contracts = receiver.contracts.to_set
       failed = false
