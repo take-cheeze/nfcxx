@@ -46,15 +46,16 @@ def block_param_shape?(irep)
   block.positive? && post.zero? && kw.zero? && kwrest.zero?
 end
 
-# A required keyword `name`: KARG without a KEY_P guard. Keyword-rest and positional-only defs are excluded.
-def keyword_required_shape?(irep, name)
+# A keyword `name` the call-site joins type: a KARG with kwrest zero. Required when no KEY_P guards it; optional when
+# one does, and then the default falls through to that KARG (see Types.optional_keyword_default_class).
+# Keyword-rest and positional-only defs are excluded.
+def keyword_join_shape?(irep, name)
   return false unless irep.enter
 
   _mand, _opt, _rest, _post, kw, kwrest = irep.enter.enter_fields.map(&:to_i)
   return false unless kw.positive? && kwrest.zero?
 
-  irep.instructions.any? { |insn| insn.op == 'KARG' && insn.sym.to_s == name } &&
-    irep.instructions.none? { |insn| insn.op == 'KEY_P' && insn.sym.to_s == name }
+  irep.instructions.any? { |insn| insn.op == 'KARG' && insn.sym.to_s == name }
 end
 
 # KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: can this def receive `nk`
