@@ -108,13 +108,20 @@ class CodeGen
   # Name of the call whose result register +src+ the AREF at +index+ reads, when nothing sits between them.
   def tuple_aref_call(irep, index, src)
     program = BytecodeIR.for(irep)
-    j = index - 1
-    j -= 1 while j >= 0 && program.source_at(j).op == 'AREF' && program.source_at(j).reg != src &&
-                  program.source_at(j).src_and_literal&.first == src
-    call = j >= 0 ? program.source_at(j) : nil
-    return nil unless call && TUPLE_CALL_OPS.include?(call.op) && call.reg == src && call.sym
+    writers = BytecodeIR::reaching_writer_indices(irep, index, src)
+    return nil unless writers&.size == 1
 
-    preds = BytecodeIR.for(irep).instruction_predecessors(include_handlers: true)
+    j = writers.first
+    call = program.source_at(j)
+    return nil unless TUPLE_CALL_OPS.include?(call.op) && call.reg == src && call.sym
+
+    # Only AREFs of src may sit between the call and the destructure: any other op could mutate the array.
+    return nil unless ((j + 1)...index).all? do |k|
+      insn = program.source_at(k)
+      insn.op == 'AREF' && insn.reg != src && insn.src_and_literal&.first == src
+    end
+
+    preds = program.instruction_predecessors(include_handlers: true)
     return nil unless preds && ((j + 1)..index).all? { |k| preds[k].to_a == [k - 1] }
 
     call.sym
