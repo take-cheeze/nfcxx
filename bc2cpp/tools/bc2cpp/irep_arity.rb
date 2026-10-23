@@ -28,6 +28,33 @@ def optional_positionals_only?(irep)
   enter.enter_fields[2..].all?(&:zero?)
 end
 
+# Rest, keyword and block shapes for the call-site joins. Each one leaves the other kinds out: a join reads one slot
+# of the call, and post, keyword-rest and keyword fields move that slot.
+def rest_positional_shape?(irep)
+  return false unless irep.enter
+
+  _mand, _opt, rest, post, kw, kwrest = irep.enter.enter_fields.map(&:to_i)
+  rest.positive? && post.zero? && kw.zero? && kwrest.zero?
+end
+
+def block_param_shape?(irep)
+  return false unless irep.enter
+
+  _mand, _opt, _rest, post, kw, kwrest, block = irep.enter.enter_fields.map(&:to_i)
+  block.positive? && post.zero? && kw.zero? && kwrest.zero?
+end
+
+# A required keyword `name`: KARG without a KEY_P guard. Keyword-rest and positional-only defs are excluded.
+def keyword_required_shape?(irep, name)
+  return false unless irep.enter
+
+  _mand, _opt, _rest, _post, kw, kwrest = irep.enter.enter_fields.map(&:to_i)
+  return false unless kw.positive? && kwrest.zero?
+
+  irep.instructions.any? { |insn| insn.op == 'KARG' && insn.sym.to_s == name } &&
+    irep.instructions.none? { |insn| insn.op == 'KEY_P' && insn.sym.to_s == name }
+end
+
 # KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: can this def receive `nk`
 # keyword pairs packed into one trailing positional Hash, with `total`
 # positionals? (see compile_keyword_hash_positional_send). Sound when ENTER has

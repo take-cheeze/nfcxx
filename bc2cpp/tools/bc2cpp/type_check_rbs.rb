@@ -12,8 +12,11 @@ require 'set'
 #     classes are not redeclared; only their methods the core RBS lacks are written);
 #   * `def name: (T, T, ?untyped, *untyped, **untyped) ?{ (*untyped) -> untyped } -> R` per method: the mandatory
 #     parameters carry the inferred / declared type or `untyped`; an optional parameter carries its declared type or
-#     its call-site join (`?T`, `untyped` unless every reaching call passes it); rest and keyword parameters are
-#     `untyped`; every method accepts an optional block (the facts do not know which methods yield);
+#     its call-site join (`?T`, `untyped` unless every reaching call passes it); a rest parameter is `*T` (the join of
+#     its extra arguments, Array[T] in the body) and a required keyword is `k: T` (the join of its value), each only
+#     from complete call-site joins, else `untyped`; optional keywords stay `?untyped`; a block is required (`{ }`)
+#     when every reaching call passes a literal block, else optional (`?{ }`), since the facts do not know which
+#     methods yield;
 #   * `@ivar: T` per ivar and `NAME: T` per constant with a type, `untyped` otherwise;
 #   * `def self.x` for singleton methods; `private` for private methods;
 #   * a one-line `# bc2cpp: return from FILE:LINE (...)` above each method, naming the IR exit that decided its return
@@ -74,7 +77,11 @@ module TypeCheckRbs
       type = rbs_type(Array(m['optional_params'])[index]&.[]('type'), declared)
       type.include?(' | ') ? "?(#{type})" : "?#{type}"
     end)
-    positional << '*untyped' if m['rest']
+    if m['rest']
+      # RBS `*T` declares the rest parameter's elements: the body sees Array[T].
+      element = rbs_type(m.dig('rest_param', 'type'), declared)
+      positional << (element == 'untyped' ? '*untyped' : "*#{element.include?(' | ') ? "(#{element})" : element}")
+    end
     keywords = Array(m['keyword_params'])
     keywords.each { |param| positional << "#{param['required'] ? '' : '?'}#{param['name']}: #{rbs_type(param['type'], declared)}" }
     positional << '**untyped' if m['kdict'] || keywords.empty? && m['key'].to_i.positive?
@@ -82,7 +89,9 @@ module TypeCheckRbs
     ret = 'self' if m['return']['type'] == 'self'
     ret = 'void' if m['name'] == 'initialize'
     ret = "(#{ret})" if ret.include?(' | ') # an unparenthesised union reads as an overload separator
-    "def #{singleton ? 'self.' : ''}#{m['name']}: (#{positional.join(', ')}) ?{ (*untyped) -> untyped } -> #{ret}"
+    # A block every reaching call passes is required; otherwise the block stays optional.
+    block = m.dig('block_param', 'type') == 'Proc' ? '{ (*untyped) -> untyped }' : '?{ (*untyped) -> untyped }'
+    "def #{singleton ? 'self.' : ''}#{m['name']}: (#{positional.join(', ')}) #{block} -> #{ret}"
   end
 
   # Shown contracts are bounded so one method's provenance stays on one comment line.
