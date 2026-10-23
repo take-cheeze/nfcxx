@@ -128,6 +128,47 @@ module EscapeAnalysis
   # Ruby methods a native calls with its own receiver as self, by name. respond_to? calls
   # respond_to_missing? on self when the method is absent, so that callee must keep no self either.
   NATIVE_RECEIVER_CALLBACKS = { 'respond_to?' => %w[respond_to_missing?] }.freeze
+
+  # Natives that keep none of the ARGUMENT at the listed positions. files: every file that registers the name
+  # among NATIVE_SRCS, plus the audited files (a NATIVE_SRCS registration elsewhere refuses the name, see
+  # native_files_audited?; the generated *-compiled register.cxx files are not NATIVE_SRCS). recv: Ruby or
+  # native methods the natives call with the argument as receiver, judged by NATIVE_RECEIVER_OK or the
+  # receiver field here, plus the user summaries. arg: [name, position] pairs the natives call with the
+  # argument as an argument. Set#eql? is a C alias of Set#== (set.c), covered by the == entry.
+  NATIVE_ARG_OK = {
+    # complex.c, rational.c and numeric.c call mrb_equal(arg, self), so the argument is the receiver of
+    # `==`. The others compare elements, ivars or identity, never the argument itself.
+    '==' => {
+      args: [0], recv: %w[==],
+      files: %w[3rd/mruby/mrbgems/mruby-complex/src/complex.c 3rd/mruby/mrbgems/mruby-data/src/data.c
+                3rd/mruby/mrbgems/mruby-fiber/src/fiber.c 3rd/mruby/mrbgems/mruby-method/src/method.c
+                3rd/mruby/mrbgems/mruby-rational/src/rational.c 3rd/mruby/mrbgems/mruby-set/src/set.c
+                3rd/mruby/mrbgems/mruby-struct/src/struct.c 3rd/mruby/mrbgems/mruby-time/src/time.c
+                3rd/mruby/src/array.c 3rd/mruby/src/class.c 3rd/mruby/src/hash.c 3rd/mruby/src/numeric.c
+                3rd/mruby/src/proc.c 3rd/mruby/src/range.c 3rd/mruby/src/string.c 3rd/mruby/src/symbol.c
+                3rd/mruby-onig-regexp/src/mruby_onig_regexp.c mruby-rgss/src/lib.cxx]
+    },
+    # Identity only (bob_rom_entries: mrb_obj_equal_m).
+    'equal?' => { args: [0], recv: [], files: %w[3rd/mruby/src/class.c] },
+    # Numeric#eql? (num_eql) calls mrb_equal(self, arg), so the argument is the argument of `==`. The rest
+    # compare elements or ivars. receiver: no eql? native keeps its receiver, so key? may hand it to eql?.
+    'eql?' => {
+      args: [0], recv: [], arg: [['==', 0]], receiver: :fresh,
+      files: %w[3rd/mruby/mrbgems/mruby-data/src/data.c 3rd/mruby/mrbgems/mruby-method/src/method.c
+                3rd/mruby/mrbgems/mruby-set/src/set.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
+                3rd/mruby/mrbgems/mruby-time/src/time.c 3rd/mruby/src/array.c 3rd/mruby/src/hash.c
+                3rd/mruby/src/kernel.c 3rd/mruby/src/numeric.c 3rd/mruby/src/proc.c 3rd/mruby/src/range.c
+                3rd/mruby/src/string.c]
+    },
+    # The only Ruby callback is to_s, reached through ensure_class_type's %v when the argument is not a class.
+    # Its result is copied into the message, never kept.
+    'is_a?' => { args: [0], recv: %w[to_s], files: %w[3rd/mruby/src/kernel.c] },
+    'kind_of?' => { args: [0], recv: %w[to_s], files: %w[3rd/mruby/src/kernel.c] },
+    'instance_of?' => { args: [0], recv: %w[to_s], files: %w[3rd/mruby/src/kernel.c] },
+    # mrb_hash_has_key hashes the probe (hash, receiver = key) and compares it (eql?, receiver = key).
+    'key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
+    'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] }
+  }.freeze
   # Receiver names that invoke a Proc (a `uses` entry the consumers turn into a direct call).
   PROC_CALLS = Set['call', '[]', '==='].freeze
 
@@ -171,6 +212,8 @@ module EscapeAnalysis
     DEF_OPS = Set['TDEF', 'SDEF', 'DEF'].freeze
     # The hidden-owner token that makes every receiver a possible callee (see mixin_defines?).
     UNCONDITIONAL = '*'
+    # The repository root: NATIVE_ARG_OK's file lists are repo-relative.
+    NATIVE_ROOT = File.expand_path('../..', __dir__)
     CONST_READS = Set['GETCONST', 'GETMCNST'].freeze
     # Sends that make a method from a name computed at run time. A literal name is modelled below; any
     # other makes every callee set unknowable (`dynamic`).
@@ -204,15 +247,17 @@ module EscapeAnalysis
 
     attr_reader :ireps, :aliases, :dynamic_sites, :reflective_sites
 
-    def initialize(ireps:, defs:, native_names: nil, native_owners: nil, aliases: {}, superclass_of: {}, included: {},
-                   prepended: {}, unknown_mixins: Set.new, modules: Set.new, struct_classes: Set.new, invisible: nil,
-                   hidden_owners: nil)
+    def initialize(ireps:, defs:, native_names: nil, native_files: nil, native_owners: nil, aliases: {},
+                   superclass_of: {}, included: {}, prepended: {}, unknown_mixins: Set.new, modules: Set.new,
+                   struct_classes: Set.new, invisible: nil, hidden_owners: nil)
       @ireps = ireps
       @invisible = invisible
       @hidden_owners = hidden_owners&.owners || {}
       @hidden_wild = hidden_owners ? hidden_owners.wild.to_a : []
       @hidden_mixins = hidden_owners ? hidden_owners.mixins : Set.new
       @native_names = native_names
+      # name => the NATIVE_SRCS files that register it (extract_native_method_sources). nil: no audit possible.
+      @native_files = native_files
       @native_owners = native_owners
       @superclass_of = superclass_of
       @included = included
@@ -252,6 +297,14 @@ module EscapeAnalysis
 
     def native_name?(name)
       @native_names.nil? || @native_names.include?(name)
+    end
+
+    # Does every NATIVE_SRCS registration of +name+ sit in one of the +audited+ files (NATIVE_ARG_OK)?
+    def native_files_audited?(name, audited)
+      registered = @native_files&.fetch(name, nil)
+      return false if registered.nil? || registered.empty?
+
+      registered.all? { |path| audited.include?(path.delete_prefix("#{NATIVE_ROOT}/")) }
     end
 
     # The ancestry of +klass+ (nil when the tables cannot place it), for native_free_on?.
@@ -518,6 +571,7 @@ module EscapeAnalysis
       @stack = []
       @floor = NONE
       @refs = {}
+      @native_arg_busy = Set.new
     end
 
     CREATED_CLASS = { 'LAMBDA' => 'Proc', 'BLOCK' => 'Proc', 'ARRAY' => 'Array', 'HASH' => 'Hash',
@@ -568,7 +622,7 @@ module EscapeAnalysis
     def name_captures_arg?(name, k, klass: nil)
       return true unless @world.reflective_sites.empty?
 
-      arg_captured_by_name?(name, k, @world.defs_named(name), klass)
+      arg_captured_by_name?(name, k, @world.defs_named(name), klass, value_class: klass)
     end
 
     # Does the closure BLOCK/LAMBDA at irep[index] leave its frame?
@@ -859,7 +913,9 @@ module EscapeAnalysis
       end
       args.each_with_index do |r, k|
         next unless reg_held.call(r)
-        return reject(run, insn, :send_argument, s) if arg_captured_by_name?(name, k, list)
+        if arg_captured_by_name?(name, k, list, value_class: run.value_class)
+          return reject(run, insn, :send_argument, s)
+        end
 
         run.uses << Use.new(index: i, kind: :pass_arg, name: name, reg: r.to_s)
       end
@@ -915,10 +971,11 @@ module EscapeAnalysis
       callbacks_ok ? result : nil
     end
 
-    def name_receiver_result(name, list, chain)
+    # +table+: the natives' receiver fact (NATIVE_RECEIVER_OK by default; a callback named by NATIVE_ARG_OK
+    # passes its own audited fact).
+    def name_receiver_result(name, list, chain, table = NATIVE_RECEIVER_OK[name])
       return nil if list.nil? || installer?(list)
 
-      table = NATIVE_RECEIVER_OK[name]
       opaque = opaque_defs(list)
       native_free = chain && @world.native_free_on?(name, chain)
       return nil if table.nil? && (list.empty? || (@world.native_name?(name) && !native_free) || !opaque.empty?)
@@ -927,12 +984,49 @@ module EscapeAnalysis
       table || :fresh
     end
 
-    # No native has an audited argument fact: a name with a native definition keeps every argument.
-    def arg_captured_by_name?(name, k, list, klass = nil)
-      return true if list.nil? || list.empty? || installer?(list) || @world.native_name?(name)
-      return true unless opaque_defs(list).empty?
+    # A name with a native definition keeps every argument unless NATIVE_ARG_OK audits that position (see
+    # native_arg_ok?). The <native> definitions in +list+ are those natives, so they are not the opaque veto.
+    # +value_class+: the exact class of the argument, when known. It only narrows the Ruby callbacks a native
+    # makes with the argument (native_arg_ok?); the argument's own summaries keep +klass+ as before.
+    def arg_captured_by_name?(name, k, list, klass = nil, value_class: nil)
+      return true if list.nil? || installer?(list)
+      # An audited native may have an empty list: defs_for drops the <native> definitions by ancestry, so an
+      # empty list means no Ruby callee of the name.
+      return true if @world.native_name?(name) ? !native_arg_ok?(name, k, value_class) : list.empty?
+      return true unless opaque_defs(list).all? { |d| native_def?(d) }
 
-      list.any? { |d| klass ? arg_captured_as?(d, k, klass) : captures?(d, [:arg, k]) }
+      list.any? { |d| !native_def?(d) && (klass ? arg_captured_as?(d, k, klass) : captures?(d, [:arg, k])) }
+    end
+
+    def native_def?(mdef)
+      mdef.owner == '<native>'
+    end
+
+    # Argument +k+ of every native of +name+ is kept by none of them (NATIVE_ARG_OK), and each Ruby method the
+    # natives call with it keeps nothing. Callbacks on the argument resolve on +value_class+ when it is known
+    # (the argument is exactly that class), else on every definition of the name. A callback cycle refuses.
+    def native_arg_ok?(name, k, value_class)
+      entry = NATIVE_ARG_OK[name]
+      return false unless entry && entry[:args].include?(k) && @world.native_files_audited?(name, entry[:files])
+      return false unless @native_arg_busy.add?(name)
+
+      begin
+        return false unless entry[:recv].all? { |callback| callback_receiver_ok?(callback, value_class) }
+
+        # The argument is an argument of +callback+ here; that call's receiver is some other value.
+        entry.fetch(:arg, []).all? do |callback, pos|
+          !arg_captured_by_name?(callback, pos, @world.defs_named(callback), nil, value_class: value_class)
+        end
+      ensure
+        @native_arg_busy.delete(name)
+      end
+    end
+
+    # True when no method +name+ reaches on a receiver of +value_class+ keeps that receiver (nil: any definition).
+    def callback_receiver_ok?(name, value_class)
+      table = NATIVE_RECEIVER_OK[name] || NATIVE_ARG_OK.dig(name, :receiver)
+      list = value_class ? @world.defs_for(name, [value_class], true) : @world.defs_named(name)
+      !name_receiver_result(name, list, nil, table).nil?
     end
 
     def block_captured_by_name?(name, list)
