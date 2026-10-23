@@ -20,7 +20,8 @@
 #   * a rest parameter's extra arguments: the `rest` row is the Array of them, and its elements (the `array` role)
 #     are checked against the declared T of `*T`. A rest row whose class is not Array is undecided;
 #   * the elements of a parameter or return declared Array[T] or Hash[K, V] (the PARAM_ELEM_* and RETURN_ELEM_* rows);
-#   * singleton methods, `def self.x`, against the trace key `Owner.singleton#x`;
+#   * singleton methods, `def self.x`, against the trace key `Owner.singleton#x`, and the receiver of each one (the
+#     `self` site, the class object it ran on) against Owner: the class itself or a subclass that --hierarchy reaches;
 #   * a module method, against the observations of each class that includes the module (the mixins come from
 #     --hierarchy). Without --hierarchy those observations are counted as undecided;
 #   * a module method, against the singleton observations of each class that extends the module (the EXTEND rows of
@@ -39,8 +40,9 @@
 # Not compared, and counted in the summary where it applies: a site with no calls; an overflowed site, whose class table
 # was full so its classes are unknown (counted once over the whole trace, whether or not a candidate declares it);
 # block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, and the emitter
-# declares a block type as untyped); ivars and constants (not traced); the receiver of a singleton method (self is not
-# traced).
+# declares a block type as untyped); ivars and constants (not traced); the receiver of a singleton method whose class
+# lookup is not complete (a module owner, a non-class receiver, a program class without --hierarchy): counted as
+# undecided, never a contradiction.
 #
 # A class is a contradiction only when the lookup order it is checked against is complete: a core class (mruby's
 # hierarchy from CoreHierarchySigs), or a program class whose superclass chain reaches a core class through --hierarchy.
@@ -76,7 +78,8 @@ module RbsSuggestionTrace
   # by_param: method => param_key => site (see param_key); rets: method => site; param_elems: method => param_key =>
   # role => site; ret_elems: method => role => site; overflowed: the sites and element slots, of any kind, whose class
   # table overflowed; impls: method => the implementation functions (`fn`) that ran under it.
-  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls)
+  # self_sites: method => the receiver (`self` site) of a singleton method, merged over the dumps.
+  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls, :self_sites)
   Result = Struct.new(:findings, :stats)
 
   module_function
@@ -139,7 +142,12 @@ module RbsSuggestionTrace
                  element_tables.sum { |table| table.sum { |_, roles| roles.count { |_, slot| slot[:overflow].positive? } } }
 
     by_param = {}
+    self_sites = {}
     params.each do |(method, kind, index, name), site|
+      if kind == 'self'
+        merge_site((self_sites[method] ||= new_site), site)
+        next
+      end
       key = param_key(kind, index, name) or next
 
       merge_site(((by_param[method] ||= {})[key] ||= new_site), site)
@@ -151,7 +159,7 @@ module RbsSuggestionTrace
       target = ((param_elems[method] ||= {})[key] ||= {})
       roles.each { |role, slot| merge_site(target[role] ||= new_site, slot) }
     end
-    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps))
+    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps), self_sites)
   end
 
   # method => the implementation functions (the `fn` field, index 6) of the PARAM_SITE and RETURN_SITE rows with calls.
@@ -402,6 +410,7 @@ module RbsSuggestionTrace
       next unless decidable_key?(defs, sig.key, obs, stats)
 
       compare_sig(sig, sig.key, obs, ctx, findings, stats)
+      compare_self(sig, obs, ctx, findings, stats) if sig.singleton
       next unless classes[sig.owner] == :module && !sig.singleton
 
       observers.fetch(sig.name, []).uniq.each do |klass|
@@ -483,6 +492,32 @@ module RbsSuggestionTrace
     check_elements(sig, 'return', sig.ret, obs.ret_elems[key], ctx, findings, stats, via, self_owner)
   end
 
+  # The receiver of `def Owner.x`: the class object the method ran on, which is Owner or a subclass of it. Undecided
+  # (counted, not compared) when the lookup cannot place the class: a module owner (only the module itself can be its
+  # receiver, but the candidate does not say so), a non-class receiver, or a class the hierarchy cannot read.
+  def compare_self(sig, obs, ctx, findings, stats)
+    site = obs.self_sites[sig.key]
+    if site.nil? || site[:calls].zero?
+      stats[:self_unreached] += 1
+      return
+    end
+    if site[:overflow].positive?
+      stats[:self_overflowed] += 1
+      return
+    end
+    stats[:self_sites] += 1
+    bad = site[:classes].filter_map do |observed, count|
+      verdict = observed == '(non-class)' ? :unknown : class_verdict(observed, sig.owner, ctx)
+      stats[:self_undecided_classes] += 1 if verdict == :unknown
+      [observed, count] if verdict == :contradiction
+    end
+    return if bad.empty?
+
+    seen = bad.map { |observed, count| "#{observed} (#{count})" }.join(', ')
+    findings << "#{sig.file}:#{sig.line}: #{sig.label} self (receiver) declared singleton(#{sig.owner}), but the trace " \
+                "observed #{seen} [TRACE_CONTRADICTION]"
+  end
+
   def check_param(sig, label, type, site, roles, ctx, findings, stats, via, self_owner)
     check_observed(sig, label, type, site, ctx, findings, stats, via, self_owner)
     check_elements(sig, label, type, roles, ctx, findings, stats, via, self_owner)
@@ -562,6 +597,8 @@ module RbsSuggestionTrace
       "#{s[:undecided_classes]} class(es) undecided, " \
       "#{s[:mixin_undecided]} mixin observation(s) undecided, #{s[:extend_sites]} extend site(s) compared, " \
       "#{s[:extend_undecided]} extend observation(s) cannot decide, #{s[:rest_not_array]} rest row(s) not an Array, " \
+      "#{s[:self_sites]} singleton receiver(s) compared, #{s[:self_undecided_classes]} receiver class(es) undecided, " \
+      "#{s[:self_unreached]} singleton receiver(s) unreached, #{s[:self_overflowed]} overflowed receiver(s) skipped, " \
       "#{result.findings.size} contradiction(s)"
   end
 
@@ -795,6 +832,40 @@ module RbsSuggestionTrace
       r = run(candidates, [singleton_ok])
       check.call('a singleton method the trace admits has no findings and is counted as compared',
                  r.findings.empty? && r.stats[:singleton_methods] == 1 && r.stats[:sites] == 2)
+
+      # The receiver of `def self.build` is the class object it ran on (the `self` site). It must be Game::Base or a
+      # subclass the hierarchy reaches; a class outside it is a contradiction, and anything the hierarchy cannot place
+      # (no --hierarchy, a non-class receiver, an overflowed site) is counted, never a failure.
+      self_methods = [method_fact('Game::Base.singleton', 'build', ['Integer'], 'Integer')]
+      self_hier = File.join(tmp, 'self_hierarchy.tsv')
+      File.write(self_hier, "SUPER\tGame::Child\tGame::Base\nSUPER\tGame::Loner\tNumeric\n")
+      self_candidates = File.join(tmp, 'self_candidates')
+      write_candidates(self_candidates, self_methods, classes: ['Game::Base'])
+      build_rows = ->(receivers, overflow = 0) do
+        kind_rows(0, 'Game::Base.singleton#build', 'self', 0, 'self', receivers.values.sum, overflow, receivers) +
+          return_rows(1, 'Game::Base.singleton#build', 2, 0, 'Integer' => 2)
+      end
+      self_file = lambda do |name, rows|
+        path = File.join(tmp, "#{name}.tsv")
+        File.write(path, rows.join("\n") << "\n")
+        path
+      end
+      r = run(self_candidates, [self_file.call('self_ok', build_rows.call('Game::Base' => 1, 'Game::Child' => 1))], hierarchy_path: self_hier)
+      check.call('a singleton receiver that is the owner or a reachable subclass has no findings and is compared',
+                 r.findings.empty? && r.stats[:self_sites] == 1 && r.stats[:self_undecided_classes] == 0)
+      r = run(self_candidates, [self_file.call('self_bad', build_rows.call('Game::Loner' => 2))], hierarchy_path: self_hier)
+      check.call('a singleton receiver whose complete chain misses the owner is a contradiction',
+                 r.findings.one? { |line| line.include?('Game::Base.build self (receiver) declared singleton(Game::Base)') && line.include?('observed Game::Loner (2)') })
+      r = run(self_candidates, [self_file.call('self_nohier', build_rows.call('Game::Child' => 2))])
+      check.call('without --hierarchy a subclass receiver is undecided, not a failure',
+                 r.findings.empty? && r.stats[:self_undecided_classes] == 1 && r.stats[:self_sites] == 1)
+      r = run(self_candidates, [self_file.call('self_nonclass', build_rows.call('(non-class)' => 2))], hierarchy_path: self_hier)
+      check.call('a non-class receiver is undecided, not compared as a class name',
+                 r.findings.empty? && r.stats[:self_undecided_classes] == 1)
+      r = run(self_candidates, [self_file.call('self_overflow', build_rows.call({ 'Game::Base' => 8 }, 3))], hierarchy_path: self_hier)
+      check.call('an overflowed receiver is skipped and counted', r.findings.empty? && r.stats[:self_overflowed] == 1 && r.stats[:self_sites] == 0)
+      r = run(self_candidates, [self_file.call('self_none', return_rows(1, 'Game::Base.singleton#build', 2, 0, 'Integer' => 2))], hierarchy_path: self_hier)
+      check.call('a singleton method with no receiver row is counted as unreached', r.findings.empty? && r.stats[:self_unreached] == 1)
 
       # Element rows are checked against Array[T] and Hash[K, V]: the `value` role against V, the `key` role against K.
       element_bad = File.join(tmp, 'element_bad.tsv')
