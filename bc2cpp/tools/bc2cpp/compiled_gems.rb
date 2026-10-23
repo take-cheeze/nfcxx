@@ -81,9 +81,10 @@ BC2CPP_PROGRAM_CORE_MRBLIB_GEMS = BC2CPP_CORE_MRBLIB_GEMS
 BC2CPP_FAIL_FAST_TYPE = false
 # Same, from 3rd/<name>/mrblib. mruby-marshal has no mrblib.
 BC2CPP_EXTERNAL_MRBLIB_GEMS = %w[mruby-stringio mruby-onig-regexp].freeze
-# The gem set the canonical (script, coverage report) world assumes: the closed build's, which is the
-# sealed desktop host's gem set (build_config.rb), so it includes mruby-dir and the Onigmo regexp gem.
-BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).freeze
+# The gem set the canonical (script, coverage report) world assumes: the closed build's,
+# which has neither mruby-dir nor the Onigmo regexp gem (build_config.rb).
+BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS -
+                              %w[mruby-dir mruby-onig-regexp]).freeze
 # The classes core sources define methods on: the owners mruby-core-compiled
 # emits, except Object (mruby-rpg2k/mrblib/main.rb defines engine methods on it
 # that no compiled gem emits, so an Object owner would claim them). A class
