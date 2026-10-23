@@ -460,15 +460,17 @@ module RbsSignatures
   end
 
   # Match mruby lookup order; unknown/cyclic paths supply no inherited contracts.
+  # A module reached twice (two include paths, or one the superclass already includes) is refused: Ruby keeps
+  # it at its first insertion, which depends on load order the static links do not record.
   def contract_owners(owner, superclass_of, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new)
     owners = []
     visit = lambda do |current, active, inherit|
       return true unless current.is_a?(String)
-      return false if active.include?(current) || unknown_mixins.include?(current)
+      return false if active.include?(current) || unknown_mixins.include?(current) || owners.include?(current)
 
       active = active.dup.add(current)
       Array(prepended_modules[current]).reverse_each { |mod| return false unless visit.call(mod, active, false) }
-      owners << current unless owners.include?(current)
+      owners << current
       Array(included_modules[current]).reverse_each { |mod| return false unless visit.call(mod, active, false) }
       return true unless inherit
 
