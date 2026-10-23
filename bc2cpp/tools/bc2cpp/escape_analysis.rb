@@ -859,7 +859,8 @@ module EscapeAnalysis
       end
       args.each_with_index do |r, k|
         next unless reg_held.call(r)
-        return reject(run, insn, :send_argument, s) if arg_captured_by_name?(name, k, list)
+        # A held register is this run's one tracked object, so its class is run.value_class (see arg_captured_as?).
+        return reject(run, insn, :send_argument, s) if arg_captured_by_name?(name, k, list, run.value_class)
 
         run.uses << Use.new(index: i, kind: :pass_arg, name: name, reg: r.to_s)
       end
