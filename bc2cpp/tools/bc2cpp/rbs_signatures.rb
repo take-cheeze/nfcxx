@@ -446,8 +446,10 @@ module RbsSignatures
                                  includer_candidates: includer_candidates, prepended_modules: prepended_modules)
       target = ->(klass, name) { lookup.call(klass).find { |candidate| applied.ir_methods.include?([candidate, name]) } }
     end
+    module_owner = prepared ? prepared.module_owner?(owner) : !includer_candidates.nil? && !includer_candidates.call(owner).nil?
     irep.each_with_op(*SELF_SENDS_NO_BLOCK) do |insn, index|
-      types = self_call_types(receivers, insn.sym.to_s, target: target, named_returns: named_returns, core_redefined: core_redefined, removed: removed)
+      types = self_call_types(receivers, insn.sym.to_s, target: target, named_returns: named_returns, core_redefined: core_redefined,
+                                                        removed: removed, module_owner: module_owner)
       calls[index] = types if types
     end
     resolver = lambda do |insn, receiver, refusal|
@@ -570,9 +572,12 @@ module RbsSignatures
   # as does a program definition of +name+ on the contract's owner (core_redefined is ClosedWorld#program_may_define?).
   # `removed` (a name predicate, ClosedWorld#method_removed?) refuses a name some class may undefine: its dispatch then
   # reaches no contract.
-  def self_call_types(receivers, name, target:, named_returns:, core_redefined: nil, removed: nil)
+  def self_call_types(receivers, name, target:, named_returns:, core_redefined: nil, removed: nil, module_owner: false)
     return nil unless receivers
     return nil if removed&.call(name)
+    # MODULE_NAME_FREE: a module's receivers are its includers' instances, and a same-named method a native or foreign
+    # Ruby source defines on one of them is not in the registry. The name must be defined by no program source there.
+    return nil if module_owner && core_redefined && receivers.any? { |klass| core_redefined.call(klass, name) }
 
     root = receivers.find { |klass| CoreHierarchySigs.declared_class?(klass) }
     if root
