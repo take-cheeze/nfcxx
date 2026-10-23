@@ -33,13 +33,18 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   def enter
     return @enter if defined?(@enter)
 
-    @enter = instructions.find { |insn| insn.op == 'ENTER' }
+    @enter = BytecodeIR.for(self).instructions_with_op('ENTER').first
   end
 
   def enter_index
     return @enter_index if defined?(@enter_index)
 
-    @enter_index = instructions.index { |insn| insn.op == 'ENTER' }
+    @enter_index = nil
+    each_with_op('ENTER') do |_insn, index|
+      @enter_index = index
+      break
+    end
+    @enter_index
   end
 
   # mrbc -v prints EXT1/EXT2/EXT3 as their own lines widening the next

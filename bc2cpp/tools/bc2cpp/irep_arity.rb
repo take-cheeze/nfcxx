@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
+
 # Argument shapes and block/lambda/def fallback safety of an irep.
 
 def pure_mandatory_arity?(irep)
@@ -195,7 +197,7 @@ end
 def block_fallback_safe?(block_irep)
   return false unless pure_mandatory_arity?(block_irep) || rest_only_block?(block_irep)
 
-  block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
+  !BytecodeIR.for(block_irep).op?(*BLOCK_FALLBACK_UNSAFE_OPS)
 end
 
 # LAMBDA_FALLBACK_SUPPORT: the LAMBDA counterpart of block_fallback_safe?,
@@ -221,7 +223,7 @@ LAMBDA_FALLBACK_UNSAFE_OPS = %w[
 def lambda_fallback_safe?(lambda_irep)
   return false unless pure_mandatory_arity?(lambda_irep)
 
-  lambda_irep.instructions.none? { |insn| LAMBDA_FALLBACK_UNSAFE_OPS.include?(insn.op) }
+  !BytecodeIR.for(lambda_irep).op?(*LAMBDA_FALLBACK_UNSAFE_OPS)
 end
 
 # RUNTIME_DEF_FALLBACK_SUPPORT (SDEF_FALLBACK / SCLASS_FALLBACK+EXEC_FALLBACK):
@@ -351,9 +353,7 @@ def keyword_arg_table(irep)
 
   order = []
   required = {}
-  irep.instructions.each do |insn|
-    next unless insn.op == 'KEY_P' || insn.op == 'KARG'
-
+  irep.each_with_op('KEY_P', 'KARG') do |insn, _index|
     sym = insn.sym_token
     next unless sym
 
