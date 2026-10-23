@@ -7,6 +7,7 @@ require 'fileutils'
 require_relative '../../tools/bc2cpp/type_check_run'
 require_relative '../../tools/bc2cpp/type_check_report'
 require_relative '../../tools/bc2cpp/bc2cpp'
+require_relative 'type_check_variants_cases'
 
 # A cached refusal must be invalidated when its bit becomes a registered shape.
 generator = Object.new
