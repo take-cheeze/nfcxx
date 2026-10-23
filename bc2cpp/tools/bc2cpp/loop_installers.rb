@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
 require_relative 'core_hierarchy_sigs'
@@ -42,7 +43,9 @@ module LoopInstallers
   # From core_hierarchy: the ancestry of the container and installer classes, plus every core mixin.
   CORE_OWNERS = (%w[Hash Array Module Class].flat_map { |name| CoreHierarchySigs.ancestors(name) } +
                  CoreHierarchySigs.hierarchy[1].values.flatten).uniq.freeze
-  CALLS = %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB SENDV SENDVB SSENDV SSENDVB].freeze
+  CALLS = BytecodeIR::Ops::SEND_FAMILY
+  # SEND and SEND0 alone: an explicit receiver and no block (SSEND forms take self, SENDB/SSENDB pass a block).
+  PLAIN_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND - BytecodeIR::Ops::SELF_SEND).freeze
   # Control flow that ends or splits the straight-line walk.
   FLOW_OPS = /\A(?:JMP|RETURN|RETNIL|RETSELF|RETTRUE|RETFALSE|BREAK|STOP|RAISE|ONERR|POPERR|EXCEPT|RESCUE)/
   ARITH_OPS = %w[ADD SUB MUL DIV EQ LT LE GT GE ADDI SUBI].freeze
@@ -297,7 +300,7 @@ module LoopInstallers
 
     # `X = [...].freeze` leaves the value as it was; any other call may do anything to its operands.
     def call(insn)
-      return generic_call(insn) unless %w[SEND SEND0].include?(insn.op) && insn.sym == 'freeze' && insn.argc.to_i.zero? &&
+      return generic_call(insn) unless PLAIN_SEND.include?(insn.op) && insn.sym == 'freeze' && insn.argc.to_i.zero? &&
                                        get(insn.reg).is_a?(Cont)
 
       nil

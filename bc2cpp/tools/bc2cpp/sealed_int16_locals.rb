@@ -45,10 +45,7 @@ module SealedInt16Locals
     prog = BytecodeIR.for(irep)
     claimed = Set.new
     proven = []
-    (0...prog.size).each do |i|
-      insn = prog.source_at(i)
-      next unless insn&.op == 'ARRAY'
-
+    prog.each_with_op('ARRAY') do |insn, i|
       array = prove(irep, prog, i, insn)
       next unless array
       next if array.actions.keys.any? { |j| claimed.include?(j) }
@@ -110,10 +107,7 @@ module SealedInt16Locals
     changed = true
     while changed
       changed = false
-      (0...prog.size).each do |j|
-        insn = prog.source_at(j)
-        next unless insn&.op == 'MOVE'
-
+      prog.each_with_op('MOVE') do |insn, j|
         dst, src = insn.regs.first(2).map(&:to_i)
         next unless aliases.include?(src) && !aliases.include?(dst)
 

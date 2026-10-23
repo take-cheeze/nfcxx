@@ -2,12 +2,13 @@
 
 require_relative 'core_fact_sigs'
 require_relative 'bytecode_ir_numeric'
+require_relative 'bytecode_ir_ops'
 
 # Shared index for analyses that need to visit every call to one method name.
 # Build once per bc2cpp invocation rather than rescanning all instructions for
 # every monomorphic name.
 class CallSiteIndex
-  SEND_OPS = %w[SEND0 SEND SENDB SSEND0 SSEND SSENDB].freeze
+  SEND_OPS = BytecodeIR::Ops::SEND.to_a.freeze
   # Kernel#to_enum / enum_for (sig/bc2cpp/declarations.rbs#core_enumerators): `to_enum(:meth, *args)` later runs `meth(*args)` on
   # the receiver, so the site is a caller of `meth` although no SEND spells it.
   ENUM_SENDS = CoreFactSigs.enumerator_makers
