@@ -390,6 +390,7 @@ class CodeGen
   # 7). Any other opcode naming something raises (ENTRY_ARG_CLASSIFIED_OPS),
   # fail-loud.
   #
+  # UNDEF (`undef NAME`) removes a method, not a call: like ALIAS it poisons its name.
   # ALIAS is a definition opcode, not a call (vm.c OP_ALIAS:
   # `mrb_alias_method(mrb, target, irep->syms[a], irep->syms[b])`), so it is in
   # the same category as DEF/SDEF/TDEF and poisons its name. It became reachable
@@ -452,7 +453,7 @@ class CodeGen
   ENTRY_ARG_CLASSIFIED_OPS = Set[
     'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB',
     'DEF', 'SDEF', 'TDEF', 'LOADSYM', 'KARG', 'KEY_P', 'CLASS', 'MODULE',
-    'ALIAS', 'ARGARY', 'BLKPUSH', 'ENTER', 'GETMCNST'
+    'ALIAS', 'UNDEF', 'ARGARY', 'BLKPUSH', 'ENTER', 'GETMCNST'
   ].freeze
 
   # irep label -> the MethodDef whose body it is, following `reps` into nested

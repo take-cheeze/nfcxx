@@ -44,9 +44,14 @@ class ClosedWorld
   C_STRING = /"((?:[^"\\\n]|\\.)*)"/
   # Native code that asks Ruby to define, alias or eval by name.
   NATIVE_DYNAMIC = /"(?:define_method|define_singleton_method|attr_reader|attr_writer|attr_accessor|attr|
-                     alias_method|module_eval|class_eval|instance_eval|include|extend|prepend)"|
-                    MRB_SYM\((?:define_method|define_singleton_method|attr_\w+|alias_method|\w+_eval)\)|
-                    \bmrb_alias_method\b/x
+                     alias_method|module_eval|class_eval|instance_eval|include|extend|prepend|
+                     undef_method|remove_method)"|
+                    MRB_SYM\((?:define_method|define_singleton_method|attr_\w+|alias_method|\w+_eval|
+                     undef_method|remove_method)\)|
+                    \bmrb_(?:alias_method|undef_method|remove_method|include_module|prepend_module)\b/x
+  # REMOVED_NAMES: sends that remove a method by name. `send` and friends forward their first argument as the name.
+  REMOVER_SENDS = %w[undef_method remove_method].freeze
+  NAME_FORWARDERS = %w[send __send__ public_send].freeze
   # mruby core's own computed definitions only ever run for a Ruby-level
   # attr_*/define_method/alias/Struct.new, which scan_closed_world tracks.
   NATIVE_CORE = %r{/3rd/mruby/(?:src|mrbgems)/}
@@ -122,6 +127,9 @@ class ClosedWorld
     @dynamic_subclassed = Set.new
     @probed_names = Set.new
     @outside_def_names = Set.new
+    # REMOVED_NAMES: literal names undefined or removed by the program; @dynamic_removal when one is computed.
+    @removed_names = Set.new
+    @dynamic_removal = false
     @freeze_possible = false
     @factory_read_names = Set.new
     @frozen_constants = Set.new
@@ -361,6 +369,33 @@ class ClosedWorld
     return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
 
     set.to_a.sort
+  end
+
+  # REMOVED_NAMES: could the program undefine or remove method +name+ in some class? The scan does not attribute a
+  # removal to a class, so any removal of the name counts, whichever class it sits in.
+  def method_removed?(name)
+    @dynamic_removal || @removed_names.include?(name)
+  end
+
+  # MODULE_INCLUDERS: the classes a module's includers are drawn from (the declared classes), or nil when an includer
+  # may be one the program does not declare: the world is open (known_subclasses), the module is rebound, or a native
+  # or outside Ruby source names it (an `include` there is not in the registry). The caller checks each candidate's
+  # ancestor chain (RbsSignatures.self_receivers), which the registry records for every declared class.
+  def known_includer_candidates(mod)
+    @includer_memo ||= {}
+    return @includer_memo[mod] if @includer_memo.key?(mod)
+
+    @includer_memo[mod] = includer_candidates_uncached(mod)
+  end
+
+  def includer_candidates_uncached(mod)
+    return nil if @global_refusal || !@wild.empty? || !module_declared?(mod) || @rebound.include?(simple(mod))
+
+    name = simple(mod)
+    return nil if @native_code_tokens.each_value.any? { |tokens| tokens.include?(name) }
+    return nil if @ruby_tokens.each_value.any? { |tokens| tokens.include?(name) }
+
+    declared_class_names
   end
 
   # NATIVE_CORE_DIRECT: nothing outside the registry (an outside Ruby
@@ -1248,6 +1283,8 @@ class ClosedWorld
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
           scan_send(irep, insns, idx, insn)
+        when 'UNDEF'
+          @removed_names << insn.sym
         when 'LOADSYM'
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
@@ -1355,6 +1392,7 @@ class ClosedWorld
     @clone_sent = true if name == 'clone'
     scan_freeze_send(irep, idx, insn) if name == 'freeze'
     scan_visibility_send(insns, idx, insn) if VISIBILITY_SENDS.include?(name)
+    scan_removal_send(irep, insns, idx, insn) if REMOVER_SENDS.include?(name) || NAME_FORWARDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
       global!(:dynamic_install)
@@ -1451,6 +1489,37 @@ class ClosedWorld
     return nil unless run.size == n && run.all? { |i| i.op == 'LOADSYM' }
 
     run.map { |i| i.sym_token }
+  end
+
+  # The names of the +n+ arguments before +idx+ when each is a Symbol or String literal, else nil.
+  def literal_names(irep, insns, idx, n)
+    return [] if n.zero?
+
+    run = insns[(idx - n).clamp(0, idx)...idx]
+    return nil unless run.size == n
+
+    names = run.map do |i|
+      case i.op
+      when 'LOADSYM' then i.sym_token
+      when 'STRING' then irep.pool[i.pool_index.to_i]
+      end
+    end
+    names.all?(String) ? names : nil
+  end
+
+  # REMOVED_NAMES: `undef_method NAME`, `remove_method NAME` and the same through `send`/`__send__`/`public_send`
+  # (the name is the argument after the remover). A computed name or target may be any method, so it marks every name.
+  def scan_removal_send(irep, insns, idx, insn)
+    names = insn.argc && literal_names(irep, insns, idx, insn.argc)
+    if REMOVER_SENDS.include?(insn.sym)
+      return @dynamic_removal = true unless names
+
+      @removed_names.merge(names)
+    elsif !names || NAME_FORWARDERS.include?(names.first)
+      @dynamic_removal = true
+    elsif REMOVER_SENDS.include?(names.first)
+      @removed_names.merge(names.drop(1))
+    end
   end
 
   # 15+ arguments arrive packed: `ARRAY Ra k` right before an `n=*` send.
