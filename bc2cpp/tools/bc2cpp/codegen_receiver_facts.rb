@@ -729,6 +729,27 @@ class CodeGen
     found
   end
 
+  # block_core_clean? for a module-super target. A target still being probed is answered
+  # "not clean" here, and the probe that asked is then left unmemoized (@guard_cycles). Without
+  # that, a caller probed inside the target's own compile would memoize "unclean" for itself.
+  # The probe is run without its registrations (counters, symbol and slot tables), which the
+  # final compile must meet in its own order; only the answer and the cycle bump are kept.
+  def module_super_block_clean?(label)
+    if @probing.include?(label) && !@clean_cache.key?(label)
+      @guard_cycles += 1
+      return false
+    end
+    bumped = false
+    clean = without_probe_side_effects do
+      before = @guard_cycles
+      answer = block_core_clean?(label)
+      bumped = @guard_cycles != before
+      answer
+    end
+    @guard_cycles += 1 if bumped
+    clean
+  end
+
   # MODULE_SUPER_SUPPORT: can `super` reach this body directly?
   #
   # compiles_clean? also refuses every CORE_BLOCK_GUARD body, which
@@ -746,6 +767,9 @@ class CodeGen
   # reaching the body does not bypass that check for any other receiver.
   def module_super_body_usable?(label)
     return false if resumable_method?(label)
+    # The direct call names this body's `_impl`, which SKIP_UNSUPPORTED drops when the body has a #error:
+    # the caller then keeps its own #error (left interpreted) rather than calling a function not emitted.
+    return false unless module_super_block_clean?(label)
     return true unless self.class.core_guarded&.include?(label)
 
     core_body_relaxable?(label)

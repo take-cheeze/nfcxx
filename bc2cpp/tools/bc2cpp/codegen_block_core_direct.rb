@@ -294,8 +294,11 @@ module BlockCoreDirectFallback
 
     @probing << label
     begin
+      cycles = @guard_cycles
       result = with_fresh_method_state { compile_method(label) }
-      @clean_cache[label] = !result[:code].include?('#error')
+      clean = !result[:code].include?('#error')
+      @clean_cache[label] = clean if cycles == @guard_cycles
+      clean
     ensure
       @probing.delete(label)
     end
