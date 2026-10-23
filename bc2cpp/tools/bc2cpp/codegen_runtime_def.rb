@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: lambda, runtime def and exec fallbacks.
 
 class CodeGen
@@ -101,8 +103,7 @@ class CodeGen
 
     mand = mandatory_arity(lambda_irep)
     sites = []
-    insns = irep.instructions
-    insns.each_with_index do |insn, i|
+    BytecodeIR.for(irep).each_source do |insn, i|
       next if insn.equal?(lambda_insn)
       next unless insn.mentions_reg?(d)
 
@@ -130,10 +131,10 @@ class CodeGen
   # which overwrites it" holds on every execution.
   # Returns { send_addr:, dest_reg:, n: } or nil.
   def lambda_confined_call_consumes?(irep, i, t)
-    insns = irep.instructions
+    program = BytecodeIR.for(irep)
     targets = jump_targets(irep)
-    ((i + 1)...insns.size).each do |j|
-      nxt = insns[j]
+    ((i + 1)...program.size).each do |j|
+      nxt = program.source_at(j)
       if %w[SEND SEND0].include?(nxt.op) &&
          nxt.reg == t.to_s && nxt.sym == 'call' && nxt.nk_spec.nil? && nxt.n_spec != '*'
         # A catch handler entering the run reaches the call without the MOVE (BytecodeIR's handler edges).
@@ -254,7 +255,7 @@ class CodeGen
     #
     # Anything else is nil ("unknown").
     (1..n).map do |k|
-      insn = irep.instructions[idx - n + k - 1]
+      insn = BytecodeIR.for(irep).source_at(idx - n + k - 1)
       return nil unless insn && insn.op == 'LOADSYM'
 
       return nil unless insn.operand_kinds == %i[reg sym] && insn.reg.to_i == dest + k
@@ -278,7 +279,7 @@ class CodeGen
   # runtime singleton patch; that is a general limitation, not introduced here.
   def class_body_installed_names(body)
     names = Set.new
-    body.instructions.each_with_index do |insn, idx|
+    BytecodeIR.for(body).each_source do |insn, idx|
       case insn.op
       when 'TDEF'
         return nil unless insn.def_child_index

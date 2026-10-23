@@ -3,6 +3,7 @@
 require_relative 'site_census'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 
 # Exact receiver origins for the site census (see docs/bc2cpp-dynamic-site-census.md).
 #
@@ -122,7 +123,7 @@ module SiteOriginTable
 
     # The writer as `OP@index` (`entry` for the method's incoming value).
     def definition_name(irep, definition)
-      definition.entry? ? 'entry' : "#{irep.instructions[definition.index].op}@#{definition.index}"
+      definition.entry? ? 'entry' : "#{BytecodeIR.for(irep).source_at(definition.index).op}@#{definition.index}"
     end
 
     # The origins a join can merge: each reaching definition's category, sorted and distinct, joined by `|`. The
@@ -135,7 +136,7 @@ module SiteOriginTable
     def category(irep, definition)
       return entry_category(irep, definition.reg) if definition.entry?
 
-      insn = irep.instructions[definition.index]
+      insn = BytecodeIR.for(irep).source_at(definition.index)
       return 'self' if insn.op == 'LOADSELF'
 
       # ENTER's typed definitions (rest, keyword hash, block, R1, post arguments) are the method's own parameters;

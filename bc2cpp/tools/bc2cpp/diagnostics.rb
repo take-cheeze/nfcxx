@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # Steps 6e and 6h: annotation candidates and static call targets (diagnostic only).
 
 # ---------------------------------------------------------------------------
@@ -54,7 +56,7 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       # Diagnostic only: an opaque argument used directly by fixnum-fastpath
       # arithmetic/comparison. Annotating it changes no output (trace_type only
       # reaches arguments from SETIV traces); it documents intent.
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         regs = case insn.op
                when 'ADD', 'SUB', 'MUL', 'EQ', 'LT', 'LE', 'GT', 'GE'
                  [insn.reg, insn.paren_reg]
@@ -101,7 +103,7 @@ IMPLICIT_DISPATCH_NAMES = {
 def collect_static_call_target_names(ireps)
   names = Set.new
   ireps.each_value do |irep|
-    (irep.instructions || []).each do |insn|
+    BytecodeIR.for(irep).each_source do |insn, _index|
       case insn.op
       # SENDB/SSENDB count too: a method only called with a block
       # is still called.

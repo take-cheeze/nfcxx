@@ -54,7 +54,7 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
 
   def previous_real_index(from)
     index = from
-    index -= 1 while index >= 0 && EXT_OPS.include?(instructions[index]&.op)
+    index -= 1 while index >= 0 && EXT_OPS.include?(BytecodeIR.for(self).source_at(index)&.op)
     index
   end
 
@@ -62,7 +62,7 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   # is +reg+ (digits), i.e. the write a register read at from + 1 sees.
   def last_writer(from, reg)
     index = last_writer_index(from, reg)
-    index && instructions[index]
+    index && BytecodeIR.for(self).source_at(index)
   end
 
   def last_writer_index(from, reg)

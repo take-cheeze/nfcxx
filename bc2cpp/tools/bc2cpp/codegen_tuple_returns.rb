@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: TUPLE_RETURN_FACTS. `a, b = pair(x)` is `SEND; AREF; AREF`: when every definition of `pair`
 # returns a fresh literal `[e0, e1, ...]` of one length, each AREF reads the class set the flow proved for that
 # position. The producer and consumer conditions are `tuple_shape` and `tuple_aref_call`.
@@ -56,7 +58,6 @@ class CodeGen
     program = BytecodeIR.for(irep)
     return nil unless program.resolved? && !program.handlers?
 
-    insns = irep.instructions
     return nil if program.op?(*TUPLE_FOREIGN_RETURN_OPS) || tuple_block_returns?(irep)
 
     arrays = {}
@@ -66,7 +67,7 @@ class CodeGen
       return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
       defs.each do |df|
-        array = insns[df.index]
+        array = program.source_at(df.index)
         n = array.op == 'ARRAY' ? array.uint_operand : nil
         return nil unless n && array.reg == reg && tuple_walk_to_return(program, df.index, reg) == r
 
@@ -106,10 +107,11 @@ class CodeGen
 
   # Name of the call whose result register +src+ the AREF at +index+ reads, when nothing sits between them.
   def tuple_aref_call(irep, index, src)
-    insns = irep.instructions
+    program = BytecodeIR.for(irep)
     j = index - 1
-    j -= 1 while j >= 0 && insns[j].op == 'AREF' && insns[j].reg != src && insns[j].src_and_literal&.first == src
-    call = j >= 0 ? insns[j] : nil
+    j -= 1 while j >= 0 && program.source_at(j).op == 'AREF' && program.source_at(j).reg != src &&
+                  program.source_at(j).src_and_literal&.first == src
+    call = j >= 0 ? program.source_at(j) : nil
     return nil unless call && TUPLE_CALL_OPS.include?(call.op) && call.reg == src && call.sym
 
     preds = BytecodeIR.for(irep).instruction_predecessors(include_handlers: true)
@@ -137,7 +139,7 @@ class CodeGen
     @tuple_returns.each do |name, masks|
       joined = masks.dup
       @tuple_sites[name].each do |irep, idx, d, _n|
-        first = irep.instructions[idx].reg.to_i
+        first = BytecodeIR.for(irep).source_at(idx).reg.to_i
         joined.each_index do |j|
           raw = numeric_raw_mask(irep, idx, first + j, d)
           joined[j] |= tuple_position_mask(raw)
