@@ -108,8 +108,8 @@ if ENV['MRBC']
                after.call('bm1').scan('RGSS__Bitmap_initialize_impl(').size == 1 && untested.call('bm1'))
     check.call('rc0: the empty form passes the zero fields', after.call('rc0').include?('rgss::rect_new_direct(M, ') &&
                                                             after.call('rc0').match?(/rect_new_direct\(M, [^,]+, 0, 0, 0, 0\)/))
-    check.call('rc4: Rect.new(x, y, w, h) inside begin/rescue: the class test misses into a guard violation, not a by-name new',
-               body.call('rc4').include?('rgss::rect_new_direct(') && body.call('rc4').include?('bc2cpp_guard_violation(') &&
+    check.call('rc4: Rect.new(x, y, w, h) inside begin/rescue: a direct construct with no identity guard, not a by-name new',
+               body.call('rc4').include?('rgss::rect_new_direct(') && !body.call('rc4').include?('bc2cpp_guard_violation(') &&
                  !body.call('rc4').include?('bc2cpp_send('))
     check.call('tn2: Tone with two arguments fills the declared defaults', after.call('tn2').match?(/tone_new_direct\(M, [^,]+, \w+, \w+, 0, 0\)/))
     check.call('cl0: Color.new fills 0, 0, 0, 255', after.call('cl0').match?(/color_new_direct\(M, [^,]+, 0, 0, 0, 255\)/))
