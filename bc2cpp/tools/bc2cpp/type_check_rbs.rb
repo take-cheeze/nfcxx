@@ -11,10 +11,13 @@ require 'set'
 #   * every class / module the program defines that is not in CRuby's core RBS, with its superclass (reopened core
 #     classes are not redeclared; only their methods the core RBS lacks are written);
 #   * `def name: (T, T, ?untyped, *untyped, **untyped) ?{ (*untyped) -> untyped } -> R` per method: the mandatory
-#     parameters carry the inferred / declared type or `untyped`; optional, rest and keyword parameters are `untyped`
-#     (bc2cpp does not infer them); every method accepts an optional block (the facts do not know which methods yield);
+#     parameters carry the inferred / declared type or `untyped`; an optional parameter carries its declared type or
+#     its call-site join (`?T`, `untyped` unless every reaching call passes it); rest and keyword parameters are
+#     `untyped`; every method accepts an optional block (the facts do not know which methods yield);
 #   * `@ivar: T` per ivar and `NAME: T` per constant with a type, `untyped` otherwise;
-#   * `def self.x` for singleton methods; `private` for private methods.
+#   * `def self.x` for singleton methods; `private` for private methods;
+#   * a one-line `# bc2cpp: return from FILE:LINE (...)` above each method, naming the IR exit that decided its return
+#     (docs/bc2cpp-ir-feedback.md). Comments only: the parsed types do not change.
 # A type that names a class the program and the core RBS do not declare becomes `untyped`; `Array` / `Hash` / `Range`
 # without arguments become `Array[untyped]` ...; nilable `T?` stays. Nothing is guessed: no type, `untyped`.
 #
@@ -67,7 +70,10 @@ module TypeCheckRbs
 
   def method_line(m, declared, singleton: false)
     positional = m['params'].map { |p| rbs_type(p['type'], declared) }
-    positional.concat((0...m['opt'].to_i).map { |index| '?'+rbs_type(Array(m['optional_params'])[index]&.[]('type'), declared) })
+    positional.concat((0...m['opt'].to_i).map do |index|
+      type = rbs_type(Array(m['optional_params'])[index]&.[]('type'), declared)
+      type.include?(' | ') ? "?(#{type})" : "?#{type}"
+    end)
     positional << '*untyped' if m['rest']
     keywords = Array(m['keyword_params'])
     keywords.each { |param| positional << "#{param['required'] ? '' : '?'}#{param['name']}: #{rbs_type(param['type'], declared)}" }
@@ -77,6 +83,51 @@ module TypeCheckRbs
     ret = 'void' if m['name'] == 'initialize'
     ret = "(#{ret})" if ret.include?(' | ') # an unparenthesised union reads as an overload separator
     "def #{singleton ? 'self.' : ''}#{m['name']}: (#{positional.join(', ')}) ?{ (*untyped) -> untyped } -> #{ret}"
+  end
+
+  # Shown contracts are bounded so one method's provenance stays on one comment line.
+  PROVENANCE_CONTRACTS = 3
+
+  # IR return rows keyed by [owner, name, file, def line]. An exit belongs to the nearest preceding `def` of the same
+  # owner, name and file, so overloads that share a name keep their own exits.
+  def return_rows_by_method(facts)
+    def_lines = Hash.new { |h, k| h[k] = [] }
+    facts['methods'].each { |m| def_lines[[m['owner'], m['name'], m['file']]] << m['line'].to_i }
+    rows = Hash.new { |h, k| h[k] = [] }
+    Array(facts['ir_feedback']).each do |row|
+      next unless row['kind'] == 'return'
+
+      key = [row['owner'], row['method'], row['file']]
+      start = def_lines.fetch(key, []).select { |line| line <= row['line'].to_i }.max
+      rows[[*key, start]] << row if start
+    end
+    rows
+  end
+
+  # The deciding exit is the first return row, or the first contract-dependent one for a derived return.
+  def provenance_comment(m, rows_by_method)
+    source = m['return']['source']
+    rows = rows_by_method.fetch([m['owner'], m['name'], m['file'], m['line'].to_i], [])
+    deciding = rows.first
+    deciding = rows.find { |row| row['status'] == 'declared' } || deciding if source == 'derived:contracts'
+    where = deciding ? "#{deciding['file']}:#{deciding['line']}" : "def at #{m['file']}:#{m['line']}"
+    label = case source
+            when 'inferred:bytecode-ir' then 'inferred'
+            when 'derived:contracts' then derived_label(m['return']['contracts'])
+            when 'inferred:return-analysis' then 'inferred: return-analysis'
+            when nil then 'untyped'
+            else "declared: #{source}" # signature or annotation
+            end
+    label += "; #{deciding['status']}" if deciding && %w[mismatch possible_mismatch].include?(deciding['status'])
+    "# bc2cpp: return from #{where} (#{label})"
+  end
+
+  def derived_label(contracts)
+    names = Array(contracts)
+    return 'derived' if names.empty?
+
+    extra = names.size - PROVENANCE_CONTRACTS
+    "derived: contracts #{names.first(PROVENANCE_CONTRACTS).join(', ')}#{extra.positive? ? ", +#{extra} more" : ''}"
   end
 
   def valid_member?(line)
@@ -115,6 +166,7 @@ module TypeCheckRbs
     kind_of = classes.to_h { |c| [c['name'], c] }
     members = Hash.new { |h, k| h[k] = { methods: [], ivars: [], consts: [] } }
     skipped = []
+    returns = return_rows_by_method(facts)
     facts['methods'].each do |m|
       next unless scope == 'all' || m['scope'] == scope
 
@@ -156,7 +208,7 @@ module TypeCheckRbs
           skipped << ['unparseable method', "#{owner}#{singleton ? '.' : '#'}#{m['name']}"]
           next
         end
-        (m['visibility'] == 'private' ? priv : pub) << line
+        (m['visibility'] == 'private' ? priv : pub).concat([provenance_comment(m, returns), line])
         method_count += 1
       end
       members[owner][:ivars].sort_by { |i| i['name'] }.each do |i|
