@@ -39,7 +39,7 @@ module CheckedSend
     return nil unless irep && idx && insn.sym && kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil?
     return nil if insn.n_spec == '*' || insn.nk_spec
 
-    original = irep.instructions[idx]
+    original = BytecodeIR.for(irep).source_at(idx)
     return nil unless original && original.op == insn.op && original.sym == insn.sym
 
     if EXPLICIT_OPS.include?(insn.op) && !kwargs[:self_implicit]

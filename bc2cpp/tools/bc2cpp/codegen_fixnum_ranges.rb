@@ -53,7 +53,7 @@ class CodeGen
       ctx[:protected].include?(insn.addr) ||
         !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI'))
     end
-    use_insn = idx >= 0 && irep.instructions[idx]
+    use_insn = idx >= 0 && BytecodeIR.for(irep).source_at(idx)
     return fixnum_interval_fail(why, 'barrier') if !use_insn || unaudited.call(use_insn, cur)
 
     read = idx

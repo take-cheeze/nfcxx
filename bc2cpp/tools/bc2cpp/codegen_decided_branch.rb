@@ -75,7 +75,7 @@ class CodeGen
     return nil unless defs&.size == 1 && !defs.first.entry?
 
     cmp_idx = defs.first.index
-    cmp = irep.instructions[cmp_idx]
+    cmp = BytecodeIR.for(irep).source_at(cmp_idx)
     return nil unless RANGE_COMPARE_OPS.include?(cmp.op) && cmp.reg == defs.first.reg
 
     truth = range_compare_truth(cmp, irep, cmp_idx, owner_def)

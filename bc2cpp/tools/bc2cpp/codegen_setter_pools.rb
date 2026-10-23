@@ -108,7 +108,7 @@ class CodeGen
     until stack.empty?
       cur = stack.pop
       next unless cur && seen.add?(cur.label)
-      return true if cur.instructions.any? { |insn| insn.op == op }
+      return true if BytecodeIR.for(cur).op?(op)
 
       cur.reps.each { |label| stack << @ireps[label] }
     end

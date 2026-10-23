@@ -56,7 +56,7 @@ module ComputedSend
     count = insn.n_spec.to_i
     return nil unless count.between?(1, CodeGen::FUNCALL_ARGC_MAX)
 
-    original = irep.instructions[idx]
+    original = BytecodeIR.for(irep).source_at(idx)
     return nil unless original && original.addr == insn.addr && original.op == insn.op && original.sym == insn.sym
     return nil unless computed_send_kernel?(insn.sym) && computed_send_world_static?
 
