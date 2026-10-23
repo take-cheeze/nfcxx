@@ -16,7 +16,6 @@ require_relative 'codegen_decided_branch'
 # Only a method's own body is made into arm pruning (stage B). A block body is measured by stage A only, at the register offset
 # its emitter uses.
 class CodeGen
-  ARM_PRUNE_TERMINATORS = %w[RETURN RETURN_BLK STOP].freeze
   # A C++ declaration of an identifier: pruned text that declares one is kept, since live code could name it.
   ARM_PRUNE_DECLARATION = /\b(?:mrb_\w+|int|unsigned|long|bool|double|float|size_t|auto|char)\b\s*[*&]?\s*\w+\s*(?:=|;|\[)/
   ARM_PRUNE_MARKER = /\x01ARM_PRUNE:(\d+)\x01/
@@ -82,39 +81,39 @@ class CodeGen
 
   # The graph walk shared by a method body and a block body. +reg_offset+ is the register shift of the emitter; a decided
   # jump is only decided at offset 0 (decided_branch_outcome). Returns the unreachable indices, or nil after a refusal.
+  # Normal and handler edges come from BytecodeIR (Program#forward_reachable). Local here: a decided conditional jump
+  # keeps only its taken edge, and ENTER's edges (see the ENTER arm).
   def arm_prune_reachable(irep, owner_def, reg_offset)
     prog = BytecodeIR.for(irep)
     return arm_prune_refuse(:unresolved_graph) unless prog.handlers_resolved?
 
-    addr_idx = prog.address_to_index
-    handler_succ = Hash.new { |h, k| h[k] = [] }
-    prog.handler_edges.each { |edge| handler_succ[edge.src] << edge.target }
-    entry_targets = jump_targets(irep).filter_map { |addr| addr_idx[addr] }
-    jump_target = ->(addr) { addr_idx.fetch(addr, :unresolved) }
-    seen = Set.new
-    work = [0]
-    until work.empty?
-      i = work.pop
-      next if i.nil? || i >= prog.size || seen.include?(i)
-
-      seen << i
+    size = prog.size
+    entry_targets = prog.branch_targets.filter_map { |addr| prog.address_to_index[addr] }
+    unresolved = false
+    reached = prog.forward_reachable(size.zero? ? [] : [0]) do |i, normal|
       insn = prog.source_at(i)
-      succ =
-        case insn.op
-        when 'JMP', 'JMPUW' then [jump_target.call(insn.jmp_addr)]
-        when 'JMPIF', 'JMPNOT', 'JMPNIL'
-          outcome = decided_branch_outcome(insn, irep, owner_def, i, reg_offset)
-          taken = outcome == :not_taken ? [] : [jump_target.call(insn.uint_operand.to_i)]
-          taken + (outcome == :taken ? [] : [i + 1])
-        when *ARM_PRUNE_TERMINATORS then []
-        when 'ENTER' then [i + 1, *entry_targets]
-        else [i + 1]
+      goto = prog.decoded[i].goto
+      case insn.op
+      when 'ENTER'
+        # ENTER may land on any branch target, not only on the IR's optional-argument JMP table (not used here).
+        [i + 1, *entry_targets].select { |j| j < size }
+      when *BytecodeIR::CONDITIONAL_BRANCHES
+        outcome = decided_branch_outcome(insn, irep, owner_def, i, reg_offset)
+        unresolved ||= goto.nil? && outcome != :not_taken
+        case outcome
+        when :taken then [goto].compact
+        when :not_taken then [i + 1].select { |j| j < size }
+        else normal
         end
-      return arm_prune_refuse(:unresolved_graph) if succ.include?(:unresolved)
-
-      work.concat(succ.compact, handler_succ[i])
+      else
+        # JMP and JMPUW: the IR edge is the branch target; an unresolved target is refused, as it always was.
+        unresolved ||= goto.nil? && BytecodeIR::BRANCH_OPS.include?(insn.op)
+        normal
+      end
     end
-    (0...prog.size).to_set - seen
+    return arm_prune_refuse(:unresolved_graph) if unresolved
+
+    (0...size).to_set - reached
   end
 
   # Stage B's decision for the held-back texts +texts+ ({ index => text }): true when they may be dropped, and counted
