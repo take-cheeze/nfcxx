@@ -1,14 +1,15 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Checks the BC2CPP_TRACE_TYPES return tracing (tools/bc2cpp/param_trace.rb) on a generated-C++ fixture:
+# Checks the BC2CPP_TRACE_TYPES return and ivar tracing (tools/bc2cpp/param_trace.rb) on a generated-C++ fixture:
 # every `return` of a traced `_impl` is wrapped in bc2cpp_ret_hit_<sym>, the lambda inside a body is left
-# alone, and the static return fact rides in the site's meta row.
+# alone, and the static return fact rides in the site's meta row. A GETIV marker becomes an ivar hit.
 #
 #   ruby scripts/bc2cpp/param_trace_return_check.rb
 
 $LOAD_PATH.unshift(File.expand_path('../../tools/bc2cpp', __dir__))
 require 'param_trace'
+require 'codegen_insn'
 
 failures = []
 check = ->(name, ok) { failures << name unless ok }
@@ -59,6 +60,56 @@ short_infos = {
 short_text, _short_summary = ParamTrace.instrument(short, 'fixture', short_infos)
 check.call('a function with no register line of its own gets no parameter hit',
            !short_text.include?('bc2cpp_param_hit_fixture(M, 0, it)'))
+
+# GETIV markers (codegen_insn.rb ivar_trace_marker): a marker after a read in a traced _impl becomes an ivar hit, named
+# by its owner class and ivar; a marker in an untraced function stays a comment, so it is never a hit with no row.
+ivar_src = <<~CPP
+  mrb_value Foo_get_impl(mrb_state* M, mrb_value self) {
+    mrb_value r0 = self;
+    mrb_value r1 = mrb_iv_get(M, self, mrb_intern_cstr(M, "@hp"));
+    /*BC2CPP_IVAR_HIT Foo @hp r1*/
+    return r1;
+  }
+  mrb_value Stray_impl(mrb_state* M, mrb_value self) {
+    mrb_value r0 = self;
+    mrb_value r1 = mrb_iv_get(M, self, mrb_intern_cstr(M, "@x"));
+    /*BC2CPP_IVAR_HIT Stray @x r1*/
+    return r1;
+  }
+CPP
+ivar_infos = {
+  'Foo_get_impl' => { method: 'Foo#get', mand: 0, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call, ret: 'none' }
+}
+ivar_text, ivar_summary = ParamTrace.instrument(ivar_src, 'fixture', ivar_infos)
+ivars = ivar_summary[:ivars]
+check.call('a marker in a traced _impl is rewritten into a hit on its register, in place',
+           ivar_text.include?("mrb_value r1 = mrb_iv_get(M, self, mrb_intern_cstr(M, \"@hp\"));\n  bc2cpp_ivar_hit_fixture(M, 0, r1);\n"))
+check.call('one ivar site, named by its owner and ivar', ivars.size == 1 && ivars.first[:owner] == 'Foo' && ivars.first[:ivar] == '@hp')
+check.call('a marker in an untraced function stays a comment and is not a site',
+           ivar_text.include?('/*BC2CPP_IVAR_HIT Stray @x r1*/') && ivars.size == 1)
+check.call('the ivar site table and its dump rows are generated', ivar_text.include?('bc2cpp_ivar_sites_fixture[1]') &&
+           ivar_text.include?('"IVAR_SITE\\t%s') && ivar_text.include?('"IVAR_CLASS\\t%s') && ivar_text.include?('"Foo\\011@hp"'))
+
+# Without any marker the ivar table is empty and the output has no hit call (the untraced output is unchanged otherwise).
+plain_text, plain_summary = ParamTrace.instrument(src, 'fixture', infos)
+check.call('a file with no ivar marker has no ivar sites and no ivar hit call',
+           plain_summary[:ivars].empty? && !plain_text.include?('bc2cpp_ivar_hit_fixture(M, '))
+
+# The codegen side: a marker only for a known, non-singleton owner under BC2CPP_TRACE_TYPES=1, so the untraced output
+# is byte-identical.
+gen = CodeGen.allocate
+traced = ENV['BC2CPP_TRACE_TYPES']
+begin
+  ENV['BC2CPP_TRACE_TYPES'] = '1'
+  check.call('a GETIV of a known class leaves its marker under BC2CPP_TRACE_TYPES=1',
+             gen.send(:ivar_trace_marker, 'Foo', 'hp', 3) == "  /*BC2CPP_IVAR_HIT Foo @hp r3*/\n")
+  check.call('a singleton owner or an unknown class leaves no marker',
+             gen.send(:ivar_trace_marker, 'Foo.singleton', 'hp', 3).empty? && gen.send(:ivar_trace_marker, nil, 'hp', 3).empty?)
+  ENV.delete('BC2CPP_TRACE_TYPES')
+  check.call('without BC2CPP_TRACE_TYPES=1 no marker is emitted', gen.send(:ivar_trace_marker, 'Foo', 'hp', 3).empty?)
+ensure
+  traced ? ENV['BC2CPP_TRACE_TYPES'] = traced : ENV.delete('BC2CPP_TRACE_TYPES')
+end
 
 if failures.empty?
   puts 'param trace return check: PASS'

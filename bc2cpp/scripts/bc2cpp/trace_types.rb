@@ -488,6 +488,30 @@ module TraceTypes
     { params: params, returns: returns }
   end
 
+  # The IVAR rows (a traced GETIV read, see param_trace.rb) merged by owner class and ivar name, across the dumps:
+  # { [owner, "@name"] => { calls:, overflow:, classes: Hash } }. A dump without IVAR rows (one from before they were
+  # recorded) contributes nothing.
+  def self.read_ivars(paths)
+    ivars = {}
+    paths.each do |path|
+      ids = {}   # this dump's [sym, id] => key
+      File.foreach(path) do |raw|
+        f = raw.chomp.split("\t", -1)
+        case f[0]
+        when 'IVAR_SITE'
+          key = [f[5], f[6]]
+          ids[[f[1], f[2].to_i]] = key
+          site = ivars[key] ||= { calls: 0, overflow: 0, classes: Hash.new(0) }
+          site[:calls] += f[3].to_i
+          site[:overflow] += f[4].to_i
+        when 'IVAR_CLASS'
+          ids.fetch([f[1], f[2].to_i], nil)&.then { |key| ivars[key][:classes][f[3]] += f[4].to_i }
+        end
+      end
+    end
+    ivars
+  end
+
   def self.elem_slot(table, key, role)
     ((table[key] ||= {})[role] ||= { calls: 0, overflow: 0, classes: Hash.new(0) })
   end

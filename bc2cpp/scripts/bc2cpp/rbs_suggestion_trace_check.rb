@@ -26,7 +26,10 @@
 #   * a module method, against the singleton observations of each class that extends the module (the EXTEND rows of
 #     --hierarchy), as the singleton method of that class. A class whose extend cannot be read (a dynamic one) is
 #     counted as undecided, never a contradiction.
-#   * an overloaded method, by the decidability rule below.
+#   * an overloaded method, by the decidability rule below;
+#   * an ivar read (`@x`, a traced GETIV), against the `@x: T` the candidate declares in the class that reads it. The
+#     class is the one the read's method is defined in (IVAR rows), so a class without its own declaration is
+#     undeclared, and a module's ivar is never decided (it belongs to whichever class includes the module).
 # Overloaded methods. A method key is every candidate definition of `Owner#name` (a reopened class gives two `def`s,
 # an RBS method gives several overloads). It is compared as one method only when both hold:
 #   (1) every definition declares the same signature (the same RBS method type), so whichever one ran, the declared
@@ -39,8 +42,8 @@
 # Not compared, and counted in the summary where it applies: a site with no calls; an overflowed site, whose class table
 # was full so its classes are unknown (counted once over the whole trace, whether or not a candidate declares it);
 # block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, and the emitter
-# declares a block type as untyped); ivars and constants (not traced); the receiver of a singleton method (self is not
-# traced).
+# declares a block type as untyped); constants (a read names the constant as written, not the scope that resolved it,
+# so no candidate `NAME: T` can be matched to it); the receiver of a singleton method (self is not traced).
 #
 # A class is a contradiction only when the lookup order it is checked against is complete: a core class (mruby's
 # hierarchy from CoreHierarchySigs), or a program class whose superclass chain reaches a core class through --hierarchy.
@@ -59,6 +62,8 @@ require 'core_hierarchy_sigs'
 
 module RbsSuggestionTrace
   Error = Class.new(StandardError)
+  # A `@x: T` declaration, with the file and line of the candidate it is in.
+  Ivar = Struct.new(:type, :file, :line)
   # optional: the types of the optional positionals; rest: the type of `*T` or nil; keywords: [name, type] pairs;
   # signature: the RBS method type text, which the overload rule compares between definitions.
   Sig = Struct.new(:owner, :name, :params, :ret, :file, :line, :singleton, :optional, :rest, :keywords, :signature) do
@@ -76,39 +81,45 @@ module RbsSuggestionTrace
   # by_param: method => param_key => site (see param_key); rets: method => site; param_elems: method => param_key =>
   # role => site; ret_elems: method => role => site; overflowed: the sites and element slots, of any kind, whose class
   # table overflowed; impls: method => the implementation functions (`fn`) that ran under it.
-  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls)
+  # ivars: [owner, "@name"] => { calls:, overflow:, classes: } (TraceTypes::Candidates.read_ivars).
+  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls, :ivars)
   Result = Struct.new(:findings, :stats)
 
   module_function
 
   # ---- the candidate side -------------------------------------------------------------------------------------------
 
-  # [class name => :class | :module, [Sig]] for every .rbs under dir. One Sig per declared overload of each definition, so
-  # the definitions of one key are all listed; compare decides which of them can be compared (see the header).
+  # [class name => :class | :module, [Sig], class name => { "@ivar" => Ivar }] for every .rbs under dir. One Sig per declared
+  # overload of each definition, so the definitions of one key are all listed; compare decides which of them can be
+  # compared (see the header).
   def read_candidates(dir)
     files = Dir.glob(File.join(dir, '**', '*.rbs')).sort
     raise Error, "#{dir}: no .rbs files" if files.empty?
 
     classes = {}
     sigs = []
+    ivars = Hash.new { |h, k| h[k] = {} }
     files.each do |path|
       begin
         _buffer, _directives, decls = RBS::Parser.parse_signature(File.read(path))
       rescue RBS::ParsingError => e
         raise Error, "#{path}: #{e.message}"
       end
-      walk(decls, '', path, classes, sigs)
+      walk(decls, '', path, classes, sigs, ivars)
     end
-    [classes, sigs]
+    [classes, sigs, ivars]
   end
 
-  def walk(nodes, owner, file, classes, sigs)
+  def walk(nodes, owner, file, classes, sigs, ivars)
     nodes.each do |node|
       case node
       when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
         name = [owner, node.name.to_s.delete_prefix('::')].reject(&:empty?).join('::')
         classes[name] = node.is_a?(RBS::AST::Declarations::Class) ? :class : :module
-        walk(node.members, name, file, classes, sigs)
+        walk(node.members, name, file, classes, sigs, ivars)
+      when RBS::AST::Members::InstanceVariable
+        # `@x: T` in a class or module body; an ivar outside one (no owner) is not a candidate this check reads.
+        ivars[owner][node.name.to_s] = Ivar.new(node.type, file, node.location.start_line) unless owner.empty?
       when RBS::AST::Members::MethodDefinition
         # `def self?.x` names both an instance and a singleton method, so it is not compared.
         next unless %i[instance singleton].include?(node.kind)
@@ -134,8 +145,10 @@ module RbsSuggestionTrace
     params, rets = TraceTypes::Candidates.read_dumps(dumps)
     elems = TraceTypes::Candidates.read_elements(dumps)
     element_tables = [elems[:params], elems[:returns]]
+    ivars = TraceTypes::Candidates.read_ivars(dumps)
     overflowed = params.count { |_, site| site[:overflow].positive? } +
                  rets.count { |_, site| site[:overflow].positive? } +
+                 ivars.count { |_, site| site[:overflow].positive? } +
                  element_tables.sum { |table| table.sum { |_, roles| roles.count { |_, slot| slot[:overflow].positive? } } }
 
     by_param = {}
@@ -151,7 +164,7 @@ module RbsSuggestionTrace
       target = ((param_elems[method] ||= {})[key] ||= {})
       roles.each { |role, slot| merge_site(target[role] ||= new_site, slot) }
     end
-    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps))
+    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps), ivars)
   end
 
   # method => the implementation functions (the `fn` field, index 6) of the PARAM_SITE and RETURN_SITE rows with calls.
@@ -388,11 +401,12 @@ module RbsSuggestionTrace
 
   # ---- the comparison -----------------------------------------------------------------------------------------------
 
-  def compare(classes, sigs, obs, hierarchy)
+  def compare(classes, sigs, obs, hierarchy, ivar_decls = {})
     ctx = Ctx.new(classes, hierarchy)
     findings = []
     stats = Hash.new(0)
     stats[:overflowed] = obs.overflowed
+    compare_ivars(classes, ivar_decls, obs, ctx, findings, stats)
     observers = observers_by_name(obs)
     singletons = singleton_observers_by_name(obs)
     sigs.group_by(&:key).each_value do |defs|
@@ -434,6 +448,37 @@ module RbsSuggestionTrace
       end
     end
     Result.new(findings, stats)
+  end
+
+  # Ivar reads (see the header). An ivar read of Owner is compared with the declaration in Owner's own candidate, which
+  # is the type the candidate gives the ivar of that class (the stores of its numeric family, see ivar_candidates.rb).
+  # A module's ivar, or an owner with no declaration for the ivar, is not decided: a declared `untyped` is no check.
+  def compare_ivars(classes, ivar_decls, obs, ctx, findings, stats)
+    obs.ivars.each do |(owner, ivar), site|
+      next if site[:calls].zero? || site[:overflow].positive?
+
+      if classes[owner] == :module
+        stats[:ivar_undecided] += 1
+        next
+      end
+      decl = ivar_decls.fetch(owner, {})[ivar]
+      if decl.nil?
+        stats[:ivar_undeclared] += 1
+        next
+      end
+
+      stats[:ivar_sites] += 1
+      bad = site[:classes].filter_map do |observed, count|
+        verdict = type_verdict(observed, decl.type, nil, ctx)
+        stats[:undecided_classes] += 1 if verdict == :unknown
+        [observed, count] if verdict == :contradiction
+      end
+      next if bad.empty?
+
+      seen = bad.map { |observed, count| "#{observed} (#{count})" }.join(', ')
+      findings << "#{decl.file}:#{decl.line}: #{owner} #{ivar} (ivar) declared #{decl.type}, but the trace observed " \
+                  "#{seen} [TRACE_CONTRADICTION]"
+    end
   end
 
   # The overload rule (see the header): true when the observations under +key+ may be compared with the signature the
@@ -548,10 +593,10 @@ module RbsSuggestionTrace
   end
 
   def run(dir, dumps, hierarchy_path: nil)
-    classes, sigs = read_candidates(dir)
+    classes, sigs, ivars = read_candidates(dir)
     obs = read_observed(dumps)
     hierarchy = hierarchy_path && TraceTypes::Candidates::Hierarchy.read(hierarchy_path)
-    compare(classes, sigs, obs, hierarchy)
+    compare(classes, sigs, obs, hierarchy, ivars)
   end
 
   def summary(result)
@@ -562,6 +607,8 @@ module RbsSuggestionTrace
       "#{s[:undecided_classes]} class(es) undecided, " \
       "#{s[:mixin_undecided]} mixin observation(s) undecided, #{s[:extend_sites]} extend site(s) compared, " \
       "#{s[:extend_undecided]} extend observation(s) cannot decide, #{s[:rest_not_array]} rest row(s) not an Array, " \
+      "#{s[:ivar_sites]} ivar site(s) compared, #{s[:ivar_undeclared]} ivar site(s) undeclared, " \
+      "#{s[:ivar_undecided]} ivar site(s) in a module cannot decide, " \
       "#{result.findings.size} contradiction(s)"
   end
 
@@ -605,13 +652,23 @@ module RbsSuggestionTrace
       'return' => { 'type' => ret, 'source' => 'inferred:bytecode-ir', 'reason' => nil }, 'visibility' => 'public' }
   end
 
-  # The candidates the emitter writes for these facts: the same files `type_check.rb --emit-rbs` produces.
-  def write_candidates(dir, methods, classes: [], modules: [])
+  # The candidates the emitter writes for these facts: the same files `type_check.rb --emit-rbs` produces. ivars is
+  # [owner, "@name", type] triples, written as `@name: type` in the owner's body.
+  def write_candidates(dir, methods, classes: [], modules: [], ivars: [])
     require 'type_check_rbs'
     facts = { 'classes' => classes.map { |n| { 'name' => n, 'kind' => 'class', 'superclass' => nil } } +
                            modules.map { |n| { 'name' => n, 'kind' => 'module', 'superclass' => nil } },
-              'methods' => methods, 'ivars' => [], 'constants' => [] }
+              'methods' => methods,
+              'ivars' => ivars.map { |owner, name, type| { 'owner' => owner, 'name' => name, 'type' => type, 'scope' => 'engine' } },
+              'constants' => [] }
     TypeCheckRbs.emit(facts, dir, scope: 'engine')
+  end
+
+  # An IVAR_SITE of one owner class and ivar name, with its IVAR_CLASS rows (the rows param_trace.rb writes).
+  def ivar_rows(id, owner, ivar, calls, overflow, classes)
+    rows = ["IVAR_SITE\tfx\t#{id}\t#{calls}\t#{overflow}\t#{owner}\t#{ivar}"]
+    classes.each { |klass, count| rows << "IVAR_CLASS\tfx\t#{id}\t#{klass}\t#{count}" }
+    rows
   end
 
   def param_rows(id, method, index, calls, overflow, classes, fn = 'fn')
@@ -991,6 +1048,45 @@ module RbsSuggestionTrace
       r = run(union_dir, [union])
       check.call('an RBS method with disagreeing overloads is skipped and counted',
                  r.findings.empty? && r.stats[:overloaded_skipped] == 1)
+
+      # Ivar reads: the candidate `@x: T` of the class the read is in. Declared in Box: @hp Integer, @name String,
+      # @maybe Integer?, @any untyped. Walk is a module, Game::Hero has no candidate. Only the declared ones are compared.
+      ivar_dir = File.join(tmp, 'ivars')
+      write_candidates(ivar_dir, [method_fact('Box', 'hp', [], 'Integer')], classes: ['Box'], modules: ['Walk'],
+                                                                        ivars: [['Box', '@hp', 'Integer'], ['Box', '@name', 'String'],
+                                                                                ['Box', '@maybe', 'Integer?'], ['Box', '@any', 'untyped'],
+                                                                                ['Walk', '@tag', 'Integer']])
+      ivar_bad = File.join(tmp, 'ivar_bad.tsv')
+      File.write(ivar_bad, (ivar_rows(0, 'Box', '@hp', 2, 0, 'String' => 2) +
+                            ivar_rows(1, 'Box', '@name', 1, 0, 'String' => 1)).join("\n") << "\n")
+      r = run(ivar_dir, [ivar_bad])
+      check.call('an ivar read observed as String against `@hp: Integer` is a contradiction, the matching ivar is not',
+                 r.findings.one? { |line| line.include?('Box @hp (ivar) declared Integer') && line.include?('observed String (2)') } &&
+                 r.findings.first.start_with?(File.join(ivar_dir, 'Box.rbs') + ':') && r.stats[:ivar_sites] == 2)
+
+      ivar_ok = File.join(tmp, 'ivar_ok.tsv')
+      File.write(ivar_ok, (ivar_rows(0, 'Box', '@hp', 2, 0, 'Integer' => 2) +
+                           ivar_rows(1, 'Box', '@maybe', 2, 0, 'NilClass' => 1, 'Integer' => 1) +
+                           ivar_rows(2, 'Box', '@any', 1, 0, 'String' => 1) +
+                           ivar_rows(3, 'Box', '@hp', 0, 0, {})).join("\n") << "\n")
+      r = run(ivar_dir, [ivar_ok])
+      check.call('ivar reads the declared types admit (nil in a nilable, anything under untyped) have no findings',
+                 r.findings.empty? && r.stats[:ivar_sites] == 3)
+
+      ivar_skip = File.join(tmp, 'ivar_skip.tsv')
+      File.write(ivar_skip, (ivar_rows(0, 'Box', '@missing', 2, 0, 'Integer' => 2) +
+                             ivar_rows(1, 'Game::Hero', '@hp', 2, 0, 'String' => 2) +
+                             ivar_rows(2, 'Walk', '@tag', 2, 0, 'String' => 2) +
+                             ivar_rows(3, 'Box', '@hp', 2, 1, 'String' => 2)).join("\n") << "\n")
+      r = run(ivar_dir, [ivar_skip])
+      check.call('an ivar with no declaration, a class with no candidate, and a module ivar are not decided and not failures',
+                 r.findings.empty? && r.stats[:ivar_undeclared] == 2 && r.stats[:ivar_undecided] == 1 && r.stats[:ivar_sites] == 0)
+      check.call('an overflowed ivar read is not compared and is counted with the overflowed sites',
+                 r.stats[:overflowed] == 1)
+
+      # A dump without IVAR rows (one written before they were recorded) reads the same as before.
+      r = run(candidates, [consistent])
+      check.call('a dump with no IVAR rows adds no ivar observations', r.stats[:ivar_sites] == 0 && r.stats[:ivar_undeclared] == 0)
 
       cli_bad = Open3.capture3(RbConfig.ruby, __FILE__, candidates, contradict)
       check.call('the CLI exits 1 on a contradiction and names it',
