@@ -455,7 +455,7 @@ end
 # bc2cpp compiles these builds only; every other build, and any
 # build with a gem below, is the plain mruby build.
 # `closed` is the closed world built natively for CI (build_config.rb).
-BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe].freeze
+BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe wio].freeze
 # Gems that load or define Ruby at runtime; any of them opens the world.
 BC2CPP_OPEN_WORLD_GEMS = %w[
   mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs mruby-eval mruby-binding mruby-proc-binding
