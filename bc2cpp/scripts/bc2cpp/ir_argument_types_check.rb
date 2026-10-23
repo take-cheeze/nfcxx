@@ -348,6 +348,19 @@ end
 check.call('keyword join is the union of the value at every site', keyword_join.call == Set[:String, :Integer])
 keyword_values[:k2] = nil
 check.call('a site without a literal keyword value refuses the keyword join', keyword_join.call.nil?)
+keyword_values[:k1] = Set[]
+check.call('a required keyword join refuses a site that omits the key', keyword_join.call.nil?)
+# Optional: an omitting site returns empty classes and the default joins in; an unknown site still refuses.
+optional_values = { k1: Set[:String], k2: Set[] }
+optional_join = lambda do |default|
+  IrArgumentTypes.keyword_classes(Rest, keyword_sites, receiver: ->(*) { Set[:Left] }, target: ->(*) { Rest },
+                                  value: ->(body, *) { optional_values[body] }, default: default)
+end
+check.call('optional keyword join adds the default class to the passed values', optional_join.call(Set[:NilClass]) == Set[:String, :NilClass])
+optional_values[:k1] = Set[]
+check.call('optional keyword join with every site omitting is the default class', optional_join.call(Set[:NilClass]) == Set[:NilClass])
+optional_values[:k1] = nil
+check.call('optional keyword join refuses an unknown site', optional_join.call(Set[:NilClass]).nil?)
 puts 'rest, block and keyword call-site joins passed'
 
 # Body analysis (BytecodeIR::Types) consumes the joins as ir_type_feedback passes them. Synthetic ireps: no mrbc.
@@ -376,6 +389,27 @@ check.call('required keyword stays untyped without a join', body_fact.call(keywo
 declared_keyword = BytecodeIR::Types.new(body_irep.call(keyword_body), declared_keywords: { 'key' => Set[:Symbol] },
                                          inferred_keywords: { 'key' => Set[:String, :Integer] }).fact_at(2, '3')
 check.call('a declared keyword type wins over the call-site join', declared_keyword.classes == Set[:Symbol] && declared_keyword.declared?)
+# Optional keyword `flag` in the layout mrbc emits: KEY_P, a JMPIF over the default, the default, a JMP to the join
+# after KARG. The read is the last instruction, so its reaching definitions are the KARG value and the default.
+optional_fact = lambda do |default, **inputs|
+  karg = 4 + default.size # ENTER, KEY_P, JMPIF, default..., JMP, then KARG
+  insns = [['ENTER', '0:0:0:0:1:0:0:0 (0x0)'], ['KEY_P', 'R3 :flag'], ['JMPIF', "R3 #{4 * karg}"]] + default +
+          [['JMP', (4 * (karg + 1)).to_s], ['KARG', 'R3 :flag'], ['KEYEND', ''], ['RETURN', 'R3']]
+  irep = Irep.new(label: 'body', nlocals: 4, nregs: 8, instructions: insns.each_with_index.map do |(op, args), i|
+    Insn.new(lineno: 1, addr: 4 * i, op: op, args: args)
+  end)
+  BytecodeIR::Types.new(irep, **inputs).fact_at(insns.size - 1, '3')&.classes
+end
+check.call('optional keyword reads its join, which holds the passed class and the literal default class',
+           optional_fact.call([['LOADI_1', 'R3 (1)']], inferred_keywords: { 'flag' => Set[:Integer] }) == Set[:Integer])
+check.call('a joined default class (omitted site) is read with the passed class',
+           optional_fact.call([['LOADNIL', 'R3 (0)']], inferred_keywords: { 'flag' => Set[:String, :NilClass] }) == Set[:String, :NilClass])
+check.call('optional keyword with a literal default stays untyped without a join', optional_fact.call([['LOADI_1', 'R3 (1)']]).nil?)
+check.call('optional keyword with a non-literal default stays untyped even with the join absent',
+           optional_fact.call([['SEND0', 'R3 :to_s']]).nil?)
+check.call('a declared optional keyword type wins over the join',
+           optional_fact.call([['LOADSYM', 'R3 :x']], declared_keywords: { 'flag' => Set[:Symbol] },
+                                                      inferred_keywords: { 'flag' => Set[:Integer] }) == Set[:Symbol])
 block_body = [['ENTER', '0:0:0:0:0:0:1:0 (0x0)'], ['SEND', 'R1 :call n=0']]
 check.call('a block called with .call is a Proc when every caller passes a literal block',
            body_fact.call(block_body, 1, '1', inferred_args: { '1' => Set[:Proc] }) == Set[:Proc])
@@ -480,6 +514,26 @@ if ENV['MRBC']
         flag
       end
     end
+    class RkdKwOptLit
+      def rkd_kw_opt_lit(value, flag: 1)
+        flag
+      end
+    end
+    class RkdKwOptExpr
+      def rkd_kw_opt_expr(value, flag: value.to_s)
+        flag
+      end
+    end
+    class RkdKwOptOmit
+      def rkd_kw_opt_omit(value, flag: nil)
+        flag
+      end
+    end
+    class RkdKwOptSplat
+      def rkd_kw_opt_splat(value, flag: 1)
+        flag
+      end
+    end
     class RkdMain
       def rkd_run(list)
         RkdRest.new.rkd_rest(1, "two")
@@ -504,6 +558,15 @@ if ENV['MRBC']
         h = { key: 2 }
         RkdKwSplat.new.rkd_kw_splat(1, **h)
         RkdKwOpt.new.rkd_kw_opt(2)
+        RkdKwOptLit.new.rkd_kw_opt_lit(1, flag: 2)
+        RkdKwOptLit.new.rkd_kw_opt_lit(2, flag: 3)
+        RkdKwOptExpr.new.rkd_kw_opt_expr(1, flag: "x")
+        RkdKwOptExpr.new.rkd_kw_opt_expr(2, flag: "y")
+        RkdKwOptOmit.new.rkd_kw_opt_omit(1, flag: 2)
+        RkdKwOptOmit.new.rkd_kw_opt_omit(2)
+        opt_h = { flag: 2 }
+        RkdKwOptSplat.new.rkd_kw_opt_splat(1, flag: 2)
+        RkdKwOptSplat.new.rkd_kw_opt_splat(2, **opt_h)
       end
     end
   SOURCE
@@ -531,8 +594,15 @@ if ENV['MRBC']
                  kw.call('RkdKw', 'rkd_kw')['source'] == 'inferred:receiver-call-sites')
     check.call('a caller that omits the required keyword refuses its join', kw.call('RkdKwMissing', 'rkd_kw_missing')['type'].nil?)
     check.call('a double-splatted caller refuses the keyword join', kw.call('RkdKwSplat', 'rkd_kw_splat')['type'].nil?)
-    opt = row.call('RkdKwOpt', 'rkd_kw_opt')['keyword_params'].find { |param| param['name'] == 'flag' }
-    check.call('optional keyword stays untyped', opt['required'] == false && opt['type'].nil?)
+    opt = ->(owner, name) { row.call(owner, name)['keyword_params'].find { |param| param['name'] == 'flag' } }
+    check.call('optional keyword joins its literal default when every caller omits it',
+               opt.call('RkdKwOpt', 'rkd_kw_opt') == { 'name' => 'flag', 'required' => false, 'type' => 'nil', 'source' => 'inferred:receiver-call-sites' })
+    check.call('optional keyword with literal default joins the passed class (same class as the default)',
+               opt.call('RkdKwOptLit', 'rkd_kw_opt_lit') == { 'name' => 'flag', 'required' => false, 'type' => 'Integer', 'source' => 'inferred:receiver-call-sites' })
+    check.call('an omitting caller joins the default class with the passed classes',
+               opt.call('RkdKwOptOmit', 'rkd_kw_opt_omit')['type'].split(' | ').sort == %w[Integer nil])
+    check.call('optional keyword with a non-literal default stays untyped', opt.call('RkdKwOptExpr', 'rkd_kw_opt_expr')['type'].nil?)
+    check.call('a splat-keyword caller refuses the optional keyword join', opt.call('RkdKwOptSplat', 'rkd_kw_opt_splat')['type'].nil?)
     # The emitted names are CRuby core classes, which the writer declares; pass them as its declared set.
     line = ->(owner, name) { TypeCheckRbs.method_line(row.call(owner, name), Set['Integer', 'String']) }
     check.call('candidate RBS writes the rest element type as *(T)', line.call('RkdRest', 'rkd_rest').include?('(*(Integer | String))'))
@@ -542,7 +612,9 @@ if ENV['MRBC']
     check.call('candidate RBS keeps the block optional when no caller passes a literal block',
                line.call('RkdBlockVar', 'rkd_block_var').include?('?{'))
     check.call('candidate RBS writes the required keyword type', line.call('RkdKw', 'rkd_kw').include?('key: String | Integer'))
-    check.call('candidate RBS keeps an optional keyword untyped', line.call('RkdKwOpt', 'rkd_kw_opt').include?('?flag: untyped'))
+    check.call('candidate RBS writes an optional keyword type', line.call('RkdKwOptLit', 'rkd_kw_opt_lit').include?('?flag: Integer'))
+    check.call('candidate RBS keeps an optional keyword with a non-literal default untyped',
+               line.call('RkdKwOptExpr', 'rkd_kw_opt_expr').include?('?flag: untyped'))
   end
   Dir.mktmpdir('rest-kw-block-off') do |dir|
     File.write(File.join(dir, 'fixture.rb'), rest_block_source)

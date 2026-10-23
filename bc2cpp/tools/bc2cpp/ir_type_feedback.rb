@@ -230,7 +230,7 @@ module IrTypeFeedback
             inferred_args[position.to_s] = classes if classes
           end
         end
-        # Rest elements, required keywords and the block: the same complete call-site joins the report rows use.
+        # Rest elements, keywords and the block: the same complete call-site joins the report rows use.
         # Registers follow ENTER (req:opt:rest:post:key:kdict:block); the joins refuse post, keyword-rest and
         # keyword shapes they do not cover. A declared block signature keeps its optional block (type_facts).
         optional = enter ? enter[1].to_i : 0

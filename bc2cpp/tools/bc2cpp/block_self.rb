@@ -65,7 +65,7 @@ module BlockSelf
       end
     end
     # Captured slots for the nested blocks: every register this frame may write a Proc into.
-    irep.instructions.each_with_index do |insn, idx|
+    program.each_with_op('MOVE', 'BLKPUSH', 'GETUPVAR') do |insn, idx|
       next unless insn.reg
 
       slots << insn.reg if case insn.op
