@@ -152,7 +152,7 @@ module SealedInt16Locals
     return nil unless producers&.size == 1 && !producers.first.entry?
 
     insn = producers.first.insn
-    return nil unless insn&.op&.match?(/\ALOADI/)
+    return nil unless BytecodeIR::Ops::LOADI_OPS.include?(insn&.op)
 
     loadi_value(insn)
   end
