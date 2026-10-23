@@ -194,17 +194,20 @@ module StaticDispatchRegistrations
     end
   end
 
-  def outside_world_files(repo_root)
+  # closed_only: the closed world's own program. Ruby test files, scripts/ and
+  # tools/ are not linked into the shipped closed binary, so they add no
+  # lookups to it. Native test sources stay: they are compiled into it.
+  def outside_world_files(repo_root, closed_only: false)
     closed = closed_world_mrblib_srcs(repo_root, core_gems: nil).map { |p| File.expand_path(p) }.to_set
     # scripts/ and the CI workflows are scanned whatever their extension: the
     # boot checks feed inline Ruby (heredocs in *.bash) to the real binary's
     # `--script`, which runs it inside the same VM.
     ruby = foreign_mrblib_srcs(repo_root) +
            Dir["#{repo_root}/mruby-*/mrblib/**/*.rb"] +
-           Dir["#{repo_root}/mruby-*/test/**/*.rb"] +
-           Dir["#{repo_root}/scripts/**/*"].select { |p| File.file?(p) } +
-           Dir["#{repo_root}/.github/**/*"].select { |p| File.file?(p) } +
-           Dir["#{repo_root}/tools/**/*.rb"].reject { |p| p.include?('/tools/bc2cpp/') }
+           (closed_only ? [] : Dir["#{repo_root}/mruby-*/test/**/*.rb"] +
+                               Dir["#{repo_root}/scripts/**/*"].select { |p| File.file?(p) } +
+                               Dir["#{repo_root}/tools/**/*.rb"].reject { |p| p.include?('/tools/bc2cpp/') }) +
+           Dir["#{repo_root}/.github/**/*"].select { |p| File.file?(p) }
     native_glob = '*.{c,cc,cpp,cxx,h,hh,hpp,hxx,inc}'
     native = Dir["#{repo_root}/{src,app,include}/**/#{native_glob}"] +
              Dir["#{repo_root}/mruby-*/{src,include}/**/#{native_glob}"] +
@@ -215,8 +218,8 @@ module StaticDispatchRegistrations
     [(ruby.map { |p| File.expand_path(p) }.to_set - closed).to_a.sort, native.map { |p| File.expand_path(p) }.uniq.sort]
   end
 
-  def outside_world_tokens(repo_root)
-    ruby, native = outside_world_files(repo_root)
+  def outside_world_tokens(repo_root, closed_only: false)
+    ruby, native = outside_world_files(repo_root, closed_only: closed_only)
     tokens = Set.new
     (ruby + native).each do |path|
       text = File.read(path, encoding: 'BINARY')
@@ -233,7 +236,7 @@ module StaticDispatchRegistrations
 
   # Runs bc2cpp.rb for each compiled gem and the closed-world parse; returns
   # everything eligibility needs.
-  def analyze(repo_root, mrbc, unregistered: STATIC_DISPATCH_UNREGISTERED)
+  def analyze(repo_root, mrbc, unregistered: STATIC_DISPATCH_UNREGISTERED, closed_only: false)
     # Every gem, from one shared analysis.
     fresh = NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc)
     runs = GEMS.to_h do |gem|
@@ -292,7 +295,7 @@ module StaticDispatchRegistrations
       dynamic.merge(c_literals(r[:gen], exempt: embed_guard_fallback_only(r[:gen], subclassed)))
              .merge(c_literals(r[:hand]))
     end
-    dynamic.merge(outside_world_tokens(repo_root))
+    dynamic.merge(outside_world_tokens(repo_root, closed_only: closed_only))
 
     # Which bytecode can run. No method body -- compiled or not -- runs as
     # bytecode except after a dynamic lookup of its own name: a direct C++ call
@@ -505,18 +508,30 @@ end
 if $PROGRAM_NAME == __FILE__
   repo_root = File.expand_path('../..', __dir__)
   mrbc = ENV['MRBC'] || 'mrbc'
-  analysis = StaticDispatchRegistrations.analyze(repo_root, mrbc)
+  # --closed-only: the list only the closed build uses (see static_dispatch_unregistered_closed.rb).
+  closed_only = ARGV.include?('--closed-only')
+  analysis = StaticDispatchRegistrations.analyze(repo_root, mrbc, closed_only: closed_only)
   list = StaticDispatchRegistrations.eligible(analysis)
   warn "registered compiled entries: #{analysis[:registered].size}, statically-dispatched-only: #{list.size}"
   list.sort_by { |m| [m[:owner], m[:name]] }.each { |m| puts "#{m[:owner]}##{m[:name]}\t#{m[:entry]}\t#{m[:gem]}" }
 
   if ARGV.include?('--write')
-    path = File.join(__dir__, 'static_dispatch_unregistered.rb')
-    src = File.read(path)
     keys = list.map { |m| "#{m[:owner]}##{m[:name]}" }.uniq.sort
+    # Dropping scan sources can only make names eligible, never fewer, so the
+    # closed list must contain everything the full scan proves right now. Compare
+    # against a fresh full-scan run, not the committed list, which can be stale.
+    if closed_only
+      full_keys = StaticDispatchRegistrations.eligible(StaticDispatchRegistrations.analyze(repo_root, mrbc))
+                                             .map { |m| "#{m[:owner]}##{m[:name]}" }.to_set
+      missing = full_keys - keys
+      abort "closed-only list does not contain #{missing.size} name(s) the full scan proves" unless missing.empty?
+    end
+    const, file = closed_only ? %w[STATIC_DISPATCH_UNREGISTERED_CLOSED static_dispatch_unregistered_closed.rb]
+                              : %w[STATIC_DISPATCH_UNREGISTERED static_dispatch_unregistered.rb]
+    path = File.join(__dir__, file)
+    src = File.read(path)
     body = keys.empty? ? 'Set[].freeze' : "Set[\n#{keys.map { |k| "  #{k.inspect}," }.join("\n")}\n].freeze"
-    File.write(path, src.sub(/^STATIC_DISPATCH_UNREGISTERED = Set\[.*?\]\.freeze$/m,
-                             "STATIC_DISPATCH_UNREGISTERED = #{body}"))
+    File.write(path, src.sub(/^#{const} = Set\[.*?\]\.freeze$/m, "#{const} = #{body}"))
     warn "wrote #{keys.size} name(s) to #{path}"
   end
 end

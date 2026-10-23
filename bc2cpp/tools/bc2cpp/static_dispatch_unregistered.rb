@@ -12,6 +12,7 @@
 # to any name here would ship a NoMethodError, so no such reference may be added. Regenerate with
 # `MRBC=... ruby tools/bc2cpp/static_dispatch_registrations.rb --write`.
 require 'set'
+require_relative 'static_dispatch_unregistered_closed'
 
 STATIC_DISPATCH_UNREGISTERED = Set[
   "Game::Actors#known_invalid?",
@@ -555,3 +556,8 @@ STATIC_DISPATCH_UNREGISTERED = Set[
   "RPG2k::Scene::Title#play_cursor_se",
   "RPG2k::Scene::Title#refresh_cursor",
 ].freeze
+
+# The list for a build: only the closed build drops the closed-only names.
+def static_dispatch_unregistered_for(build_name)
+  build_name == 'closed' ? STATIC_DISPATCH_UNREGISTERED_CLOSED : STATIC_DISPATCH_UNREGISTERED
+end

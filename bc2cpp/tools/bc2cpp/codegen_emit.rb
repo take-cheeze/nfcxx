@@ -114,7 +114,8 @@ class CodeGen
   # skipped: static_dispatch_registrations.rb proved no runtime lookup reaches
   # them, so the wrapper is dead, and with no dynamic lookup there is no
   # interpreted fallback to read iv_tbl.
-  def emit_owner_registrations(compiled, owners, unregistered: STATIC_DISPATCH_UNREGISTERED)
+  def emit_owner_registrations(compiled, owners,
+                               unregistered: static_dispatch_unregistered_for(ENV['BC2CPP_BUILD_NAME']))
     by_owner = compiled.group_by { |m| m[:owner] }
     targets = owners.select { |o| by_owner.key?(o) }
 
