@@ -1305,8 +1305,7 @@ class ClosedWorld
           note_unknown_def(insn.sym, insn.op == 'TDEF' ? irep.label : nil) unless registered.include?(child)
         when 'DEF'
           sym = insn.sym_token
-          method = BytecodeIR::Window.find_preceding(insns, idx) { |i| i.op == 'METHOD' }
-          child = method && irep.reps[method.block_index.to_i]
+          child = def_method_body(irep, idx, insn)
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
           scan_send(irep, insns, idx, insn)
@@ -1339,6 +1338,27 @@ class ClosedWorld
     end
     # A read name (scan_factory) can run a definition the scan only finishes seeing here.
     global!(:class_factory_escape) unless @factory_read_names.all? { |name| ownerless_native_dispatch_safe?(name) }
+  end
+
+  # DEF reads the method value from R[a+1], independently of intervening METHODs.
+  # A join must agree on one body: registration of another body elsewhere proves no attribution here.
+  def def_method_body(irep, index, insn)
+    register = insn.reg
+    return nil unless register
+
+    writers = BytecodeIR.reaching_writer_indices(irep, index, (register.to_i + 1).to_s)
+    return nil unless writers
+
+    bodies = writers.map do |writer|
+      method = irep.instructions[writer]
+      return nil unless method.op == 'METHOD' && method.block_index
+
+      child = irep.reps[method.block_index]
+      return nil unless child
+
+      child
+    end.uniq
+    bodies.first if bodies.size == 1
   end
 
   # -- singleton classes --------------------------------------------
