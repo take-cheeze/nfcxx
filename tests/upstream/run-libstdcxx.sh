@@ -13,6 +13,12 @@ mkdir -p "$out"; out=$(cd "$out" && pwd)
 test ! -e "$out/started" || { echo "choose a fresh LIBSTDCXX_SUITE_OUT" >&2; exit 1; }
 date -u +%FT%TZ > "$out/started"
 mkdir "$out/parallel"
+if [ -n "${SUITE_SHARD:-}" ]; then
+  [ "$#" -eq 0 ] || { echo 'SUITE_SHARD selects the runtest arguments' >&2; exit 1; }
+  python3 tests/upstream/nightly-native.py libstdcxx-plan "$base/gcc/libstdc++-v3/testsuite" "$SUITE_SHARD" > "$out/shard.json"
+  mapfile -t shard_args < <(python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["args"]))' < "$out/shard.json")
+  set -- "${shard_args[@]}"
+fi
 export PATH="$dejagnu/usr/bin:/usr/bin:/bin:$PATH"
 export LD_LIBRARY_PATH="$dejagnu/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GCC_RUNTEST_PARALLELIZE_DIR=$out/parallel

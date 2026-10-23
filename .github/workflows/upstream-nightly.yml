@@ -141,14 +141,40 @@ jobs:
         include:
           - suite: gcc
             source: gcc
+            shard: 1
+            shards: 1
           - suite: clang
             source: clang
+            shard: 1
+            shards: 1
           - suite: libstdcxx
             source: gcc
+            shard: 1
+            shards: 3
+          - suite: libstdcxx
+            source: gcc
+            shard: 2
+            shards: 3
+          - suite: libstdcxx
+            source: gcc
+            shard: 3
+            shards: 3
           - suite: libcxx
             source: clang
+            shard: 1
+            shards: 3
+          - suite: libcxx
+            source: clang
+            shard: 2
+            shards: 3
+          - suite: libcxx
+            source: clang
+            shard: 3
+            shards: 3
           - suite: llvm-test-suite
             source: llvm-test-suite
+            shard: 1
+            shards: 1
     env:
       DEJAGNU_ROOT: /
       CLANG_TIDY_EXE: /usr/bin/clang-tidy-21
@@ -191,14 +217,38 @@ jobs:
         timeout-minutes: ${{ matrix.suite == 'libcxx' && 45 || 30 }}
         env:
           SUITE: ${{ matrix.suite }}
-        run: python3 tests/upstream/nightly-native.py "$SUITE" "build/nightly/$SUITE"
+        run: python3 tests/upstream/nightly-native.py "$SUITE" "build/nightly/$SUITE" --shard "${{ matrix.shard }}/${{ matrix.shards }}"
       - name: Stage results and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: upstream-native-${{ matrix.suite }}-${{ github.run_attempt }}
+          name: upstream-native-${{ matrix.suite }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: build/nightly-artifact
+          retention-days: 14
+          if-no-files-found: error
+
+  native-merge:
+    needs: native
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: upstream-native-*-${{ github.run_attempt }}
+          path: build/native-shards
+      - name: Merge native shard outcomes
+        run: python3 tests/upstream/nightly-native.py merge build/native-shards build/nightly/native-merged
+      - name: Stage results and job summary
+        if: always()
+        run: python3 tests/upstream/nightly-artifacts.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: upstream-native-merged-${{ github.run_attempt }}
           path: build/nightly-artifact
           retention-days: 14
           if-no-files-found: error

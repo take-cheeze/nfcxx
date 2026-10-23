@@ -12,11 +12,14 @@ cp tests/upstream/git-snapshots.tsv "$out/"
 extra=()
 tidy=${CLANG_TIDY_EXE:-$base/clang-tidy/usr/lib/llvm-21/bin/clang-tidy}
 if [ -x "$tidy" ]; then extra+=(--param "clang-tidy-executable=$tidy"); fi
+# Lexical order keeps lit's round-robin shard split identical on every runner.
+shard=()
+if [ -n "${SUITE_SHARD:-}" ]; then shard=(--order lexical --num-shards "${SUITE_SHARD%/*}" --run-shard "${SUITE_SHARD#*/}"); fi
 date -u +%FT%TZ > "$out/started"
 rc=0
 "${SUITE_PYTHON:-/usr/bin/python3}" "$base/clang/llvm/utils/lit/lit.py" -sv -j "${SUITE_JOBS:-8}" \
   --timeout "${SUITE_TIMEOUT:-120}" --output "$out/results.json" \
-  "$base/libcxx-build-system/libcxx/test" "${extra[@]}" "$@" > "$out/harness.log" 2>&1 || rc=$?
+  "$base/libcxx-build-system/libcxx/test" "${extra[@]}" "${shard[@]}" "$@" > "$out/harness.log" 2>&1 || rc=$?
 date -u +%FT%TZ > "$out/completed"
 echo "libc++ native results: $out/results.json"
 exit "$rc"
