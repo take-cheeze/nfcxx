@@ -191,11 +191,20 @@ module IrTypeFeedback
     subclasses = ->(klass) { closed&.known_receiver_subclasses(klass) }
     method_missing_classes = closed ? closed.method_missing_classes : Set.new
     core_redefined = closed && ->(owner, name) { closed.program_may_define?(owner, name) }
+    # A name the program may undefine or remove has no self-call contract (ClosedWorld#method_removed?).
+    removed = closed && ->(name) { closed.method_removed?(name) }
+    # A module owner's receivers are its includers' instances (RbsSignatures.module_receiver_classes). An includer
+    # the declared classes miss (a singleton class's `include`) is still a key of included_modules.
+    includer_candidates = closed && lambda do |mod|
+      classes = closed.known_includer_candidates(mod)
+      classes && (classes | (ctx.included_modules || {}).keys.reject { |name| closed.module_declared?(name) })
+    end
     prepared = if applied && ENV['BC2CPP_IR_PREPARED_CONTRACTS'] != '0'
                  RbsSignatures::IrContracts.new(applied, superclass_of: ctx.superclass_of || {},
                                                included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
                                                unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new,
-                                               subclasses: subclasses, method_missing_classes: method_missing_classes, core_redefined: core_redefined)
+                                               subclasses: subclasses, method_missing_classes: method_missing_classes, core_redefined: core_redefined,
+                                               includer_candidates: includer_candidates)
                end
     ctx.registry.values.flatten.select(&:irep).uniq(&:irep).each do |definition|
       irep = ctx.ireps[definition.irep]
@@ -236,7 +245,7 @@ module IrTypeFeedback
             inferred_args[position.to_s] = classes if classes
           end
         end
-        # Rest elements, required keywords and the block: the same complete call-site joins the report rows use.
+        # Rest elements, keywords and the block: the same complete call-site joins the report rows use.
         # Registers follow ENTER (req:opt:rest:post:key:kdict:block); the joins refuse post, keyword-rest and
         # keyword shapes they do not cover. A declared block signature keeps its optional block (type_facts).
         optional = enter ? enter[1].to_i : 0
@@ -261,7 +270,8 @@ module IrTypeFeedback
                    RbsSignatures.ir_types(applied, irep, prepared: prepared, superclass_of: ctx.superclass_of || {}, included_modules: ctx.included_modules || {},
                                           prepended_modules: ctx.prepended_modules || {}, unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new, inferred_args: inferred_args, inferred_calls: inferred_calls,
                                           inferred_keywords: inferred_keywords, inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver,
-                                          subclasses: subclasses, method_missing_classes: method_missing_classes, core_redefined: core_redefined)
+                                          subclasses: subclasses, method_missing_classes: method_missing_classes, core_redefined: core_redefined, removed: removed,
+                                          includer_candidates: includer_candidates)
                  else BytecodeIR::Types.new(irep, inferred_args: inferred_args, inferred_calls: inferred_calls, inferred_keywords: inferred_keywords,
                                             inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver)
                  end

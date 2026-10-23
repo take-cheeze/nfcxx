@@ -165,7 +165,7 @@ module NilNarrowing
 
   # `MOVE dest src`: dest takes src's facts and becomes a copy of src and of every register src is a copy of.
   def move(env, state, out, p)
-    dest, src = env[:prog].instruction_at(p).source.regs
+    dest, src = BytecodeIR::OperandModel.move(env[:prog].instruction_at(p).source).to_a
     return out unless dest && src && dest != src
 
     out << dest if state.include?(src)
@@ -187,7 +187,10 @@ module NilNarrowing
 
     prog = env[:prog]
     send = prog.instruction_at(p - 1).source
-    return [] unless send.op == 'SEND' && IS_A_NAMES.include?(send.sym) && send.reg == tested
+    return [] unless send.op == 'SEND'
+
+    call = BytecodeIR::OperandModel.send_call(send)
+    return [] unless IS_A_NAMES.include?(call.name) && call.receiver == tested
 
     klass = guard.is_a_class(env[:irep], p - 1) or return []
     before = env[:states][p - 1]
@@ -208,13 +211,16 @@ module NilNarrowing
       return nil if d.goto.nil? || d.goto == p + 1
 
       taken = i == d.goto
-      return insn.reg if d.cond == BytecodeIR::COND_IF ? taken : !taken
+      return BytecodeIR::OperandModel.test_reg(insn) if d.cond == BytecodeIR::COND_IF ? taken : !taken
 
       return nil
     end
-    return nil unless RECEIVER_CALLS.include?(d.op) && insn.sym && env[:nil_unanswerable].call(insn.sym)
+    return nil unless RECEIVER_CALLS.include?(d.op)
+
+    call = BytecodeIR::OperandModel.send_call(insn)
+    return nil unless call.name && env[:nil_unanswerable].call(call.name)
 
     # The receiver register itself now holds the call's result: only its copies keep the receiver.
-    insn.reg
+    call.receiver
   end
 end

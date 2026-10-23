@@ -22,12 +22,15 @@
 #   * the elements of a parameter or return declared Array[T] or Hash[K, V] (the PARAM_ELEM_* and RETURN_ELEM_* rows);
 #   * singleton methods, `def self.x`, against the trace key `Owner.singleton#x`;
 #   * a module method, against the observations of each class that includes the module (the mixins come from
-#     --hierarchy). Without --hierarchy those observations are counted as undecided.
+#     --hierarchy). Without --hierarchy those observations are counted as undecided;
+#   * a module method, against the singleton observations of each class that extends the module (the EXTEND rows of
+#     --hierarchy), as the singleton method of that class. A class whose extend cannot be read (a dynamic one) is
+#     counted as undecided, never a contradiction.
 # Not compared, and counted in the summary where it applies: a site with no calls; an overflowed site, whose class table
 # was full so its classes are unknown (counted once over the whole trace, whether or not a candidate declares it);
 # block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, and the emitter
 # declares a block type as untyped); ivars and constants (not traced); the receiver of a singleton method (self is not
-# traced); a singleton method reached through `extend` (the hierarchy rows record no `extend`); an overloaded method.
+# traced); an overloaded method.
 #
 # A class is a contradiction only when the lookup order it is checked against is complete: a core class (mruby's
 # hierarchy from CoreHierarchySigs), or a program class whose superclass chain reaches a core class through --hierarchy.
@@ -171,6 +174,18 @@ module RbsSuggestionTrace
     out
   end
 
+  # method name => the classes whose singleton method of that name was observed (the `Owner.singleton#name` keys).
+  def singleton_observers_by_name(obs)
+    out = Hash.new { |h, k| h[k] = [] }
+    (obs.by_param.keys + obs.rets.keys).uniq.each do |key|
+      klass, name = key.split('#', 2)
+      next if name.nil? || !klass.end_with?('.singleton')
+
+      out[name] << klass.delete_suffix('.singleton')
+    end
+    out
+  end
+
   # ---- class membership ---------------------------------------------------------------------------------------------
 
   def same_class?(observed, declared)
@@ -240,6 +255,49 @@ module RbsSuggestionTrace
     :accepted
   end
 
+  # The singleton lookup order of a class as [label, kind] pairs. `Name.singleton` is the class's own singleton methods
+  # (SDEF rows), placed first; the modules it extends follow, last applied first (EXTEND rows), then the superclass's
+  # singleton lookup. A dynamic extend is an unknown entry in front of the extended modules.
+  def singleton_lookup(name, hierarchy, path = [])
+    return [["#{name}.singleton", :unknown]] if path.include?(name)
+
+    path += [name]
+    return [["#{name}.singleton", :unknown]] unless hierarchy.program?(name)
+
+    head = hierarchy.unknown_singleton?(name) ? [['(dynamic extend)', :unknown]] : []
+    extended = hierarchy.extends(name).reverse.flat_map { |m| lookup(m, hierarchy, path) }
+    rest = if (sup = hierarchy.superclass(name))
+             singleton_lookup(sup, hierarchy, path)
+           else
+             [['(no superclass row)', :unknown]]
+           end
+    [["#{name}.singleton", :program]] + head + extended + rest
+  end
+
+  # Where an observation of `klass.singleton#name` lands for the module method +sig+, over singleton_lookup. The same
+  # verdicts as mixin_status: :accepted when the module is reached before any other definer of the name, :not_included
+  # when a program singleton in front of it defines the name (an own `def self.x` shadows the extended module), and
+  # :undecided when something in front is unknown, or the module is absent and the lookup is unreadable.
+  def singleton_status(klass, sig, ctx)
+    return :undecided unless ctx.hierarchy
+
+    order = singleton_lookup(klass, ctx.hierarchy)
+    at = order.index { |label, _| label == sig.owner }
+    return order.any? { |_, kind| kind == :unknown } ? :undecided : :not_included if at.nil?
+
+    front = order.take(at)
+    return :undecided unless front.all? { |_, kind| kind == :program }
+    return :not_included if front.any? { |label, _| singleton_defines?(label, sig.name, ctx.hierarchy) }
+
+    :accepted
+  end
+
+  def singleton_defines?(label, method, hierarchy)
+    return hierarchy.singleton_defines?(label.delete_suffix('.singleton'), method) if label.end_with?('.singleton')
+
+    hierarchy.defines?(label, method)
+  end
+
   # :class only for a class the candidate or mruby names as a class; a module is never decided.
   def declared_kind(name, ctx)
     return :class if core?(name)
@@ -305,6 +363,7 @@ module RbsSuggestionTrace
     stats = Hash.new(0)
     stats[:overflowed] = obs.overflowed
     observers = observers_by_name(obs)
+    singletons = singleton_observers_by_name(obs)
     sigs.each do |sig|
       stats[:methods] += 1
       stats[:singleton_methods] += 1 if sig.singleton
@@ -322,49 +381,63 @@ module RbsSuggestionTrace
           stats[:mixin_undecided] += 1
         end
       end
+      # The module's method is a singleton method of each class that extends it. Its self is that class object, so a
+      # `self` return is not the module's.
+      singletons.fetch(sig.name, []).uniq.each do |klass|
+        case singleton_status(klass, sig, ctx)
+        when :accepted
+          stats[:extend_sites] += 1
+          compare_sig(sig, "#{klass}.singleton##{sig.name}", obs, ctx, findings, stats,
+                      via: "#{klass}.singleton", self_owner: nil)
+        when :undecided
+          stats[:extend_undecided] += 1
+        end
+      end
     end
     Result.new(findings, stats)
   end
 
   # Compares the parameters, the returns and their elements under the trace key +key+ (the method's own key, or a class
-  # that includes a module method, named by `via`).
-  def compare_sig(sig, key, obs, ctx, findings, stats, via: nil)
+  # that includes a module method, named by `via`). self_owner is the class a `self` return means (see type_verdict):
+  # the owner of an instance method, none for a singleton method or a method run as one.
+  def compare_sig(sig, key, obs, ctx, findings, stats, via: nil, self_owner: sig.singleton ? nil : sig.owner)
     sites = obs.by_param[key] || {}
     elems = obs.param_elems[key] || {}
     required = sig.params.size
     sig.params.each_with_index do |type, i|
       index = i + 1
       check_param(sig, "parameter #{index}", type, sites[['req', index]], elems[['req', index]],
-                  ctx, findings, stats, via)
+                  ctx, findings, stats, via, self_owner)
     end
     # Optional positionals follow the required ones in the C parameter list (the `_impl` takes mand + opt, then rest).
     sig.optional.each_with_index do |type, i|
       index = required + i + 1
       check_param(sig, "parameter #{index}", type, sites[['opt', index]], elems[['opt', index]],
-                  ctx, findings, stats, via)
+                  ctx, findings, stats, via, self_owner)
     end
     if sig.rest
       index = required + sig.optional.size + 1
       check_rest(sig, "parameter #{index} (rest)", sig.rest, sites[['rest', index]], elems[['rest', index]], ctx, findings,
-                 stats, via)
+                 stats, via, self_owner)
     end
     sig.keywords.each do |name, type|
-      check_param(sig, "keyword #{name}", type, sites[['kw', name]], elems[['kw', name]], ctx, findings, stats, via)
+      check_param(sig, "keyword #{name}", type, sites[['kw', name]], elems[['kw', name]], ctx, findings, stats, via,
+                  self_owner)
     end
     return if sig.name == 'initialize'
 
-    check_observed(sig, 'return', sig.ret, obs.rets[key], ctx, findings, stats, via)
-    check_elements(sig, 'return', sig.ret, obs.ret_elems[key], ctx, findings, stats, via)
+    check_observed(sig, 'return', sig.ret, obs.rets[key], ctx, findings, stats, via, self_owner)
+    check_elements(sig, 'return', sig.ret, obs.ret_elems[key], ctx, findings, stats, via, self_owner)
   end
 
-  def check_param(sig, label, type, site, roles, ctx, findings, stats, via)
-    check_observed(sig, label, type, site, ctx, findings, stats, via)
-    check_elements(sig, label, type, roles, ctx, findings, stats, via)
+  def check_param(sig, label, type, site, roles, ctx, findings, stats, via, self_owner)
+    check_observed(sig, label, type, site, ctx, findings, stats, via, self_owner)
+    check_elements(sig, label, type, roles, ctx, findings, stats, via, self_owner)
   end
 
   # The rest row is the Array of the extra arguments (ENTER builds it fresh per call), so its own class is not the
   # declared type: `*T` is checked against its elements. Any other class means the index is not this rest parameter.
-  def check_rest(sig, label, type, site, roles, ctx, findings, stats, via)
+  def check_rest(sig, label, type, site, roles, ctx, findings, stats, via, self_owner)
     if site.nil? || site[:calls].zero?
       stats[:unreached] += 1
       return
@@ -378,10 +451,10 @@ module RbsSuggestionTrace
     slot = roles && roles['array']
     return if slot.nil? || slot[:calls].zero? || slot[:overflow].positive?
 
-    compare_site(sig, "#{label} element (array)", type, slot, ctx, findings, stats, via, :element_sites)
+    compare_site(sig, "#{label} element (array)", type, slot, ctx, findings, stats, via, :element_sites, self_owner)
   end
 
-  def check_observed(sig, label, type, site, ctx, findings, stats, via)
+  def check_observed(sig, label, type, site, ctx, findings, stats, via, self_owner)
     if site.nil? || site[:calls].zero?
       stats[:unreached] += 1
       return
@@ -389,25 +462,25 @@ module RbsSuggestionTrace
     # An overflowed site has classes nobody recorded. It is counted once, for the whole trace, in the summary.
     return if site[:overflow].positive?
 
-    compare_site(sig, label, type, site, ctx, findings, stats, via, :sites)
+    compare_site(sig, label, type, site, ctx, findings, stats, via, :sites, self_owner)
   end
 
-  def check_elements(sig, label, type, roles, ctx, findings, stats, via)
+  def check_elements(sig, label, type, roles, ctx, findings, stats, via, self_owner)
     return if roles.nil?
 
     element_types(type).each do |role, elem_type|
       site = roles[role]
       next if site.nil? || site[:calls].zero? || site[:overflow].positive?
 
-      compare_site(sig, "#{label} element (#{role})", elem_type, site, ctx, findings, stats, via, :element_sites)
+      compare_site(sig, "#{label} element (#{role})", elem_type, site, ctx, findings, stats, via, :element_sites,
+                   self_owner)
     end
   end
 
-  def compare_site(sig, label, type, site, ctx, findings, stats, via, counter)
+  def compare_site(sig, label, type, site, ctx, findings, stats, via, counter, self_owner)
     return if type.is_a?(RBS::Types::Bases::Any) || type.is_a?(RBS::Types::Bases::Void)
 
     stats[counter] += 1
-    self_owner = sig.singleton ? nil : sig.owner
     bad = site[:classes].filter_map do |observed, count|
       verdict = type_verdict(observed, type, self_owner, ctx)
       stats[:undecided_classes] += 1 if verdict == :unknown
@@ -433,7 +506,8 @@ module RbsSuggestionTrace
     "rbs suggestion trace check: #{s[:methods]} method(s) (#{s[:singleton_methods]} singleton), #{s[:sites]} site(s) " \
       "compared, #{s[:element_sites]} element slot(s), #{s[:mixin_sites]} mixin site(s), #{s[:unreached]} unreached, " \
       "#{s[:overflowed]} overflowed site(s) skipped, #{s[:undecided_classes]} class(es) undecided, " \
-      "#{s[:mixin_undecided]} mixin observation(s) undecided, #{s[:rest_not_array]} rest row(s) not an Array, " \
+      "#{s[:mixin_undecided]} mixin observation(s) undecided, #{s[:extend_sites]} extend site(s) compared, " \
+      "#{s[:extend_undecided]} extend observation(s) cannot decide, #{s[:rest_not_array]} rest row(s) not an Array, " \
       "#{result.findings.size} contradiction(s)"
   end
 
@@ -535,7 +609,8 @@ module RbsSuggestionTrace
       method_fact('Box', 'take_walker', ['Walk'], 'Integer'),
       method_fact('Box', 'opt_pick', ['Integer'], 'Integer', optional: ['Integer']),
       method_fact('Box', 'spread', ['Integer'], 'Integer', rest: 'Integer'),
-      method_fact('Box', 'named', ['Integer'], 'Integer', keywords: [['charged', 'Integer', true], ['bonus', 'String', false]])
+      method_fact('Box', 'named', ['Integer'], 'Integer', keywords: [['charged', 'Integer', true], ['bonus', 'String', false]]),
+      method_fact('Helpers', 'tag', ['Integer'], 'Integer')
     ]
     hierarchy = <<~TSV
       SUPER\tGame::Sprite\tNumeric
@@ -552,9 +627,21 @@ module RbsSuggestionTrace
       SUPER\tGame::Stranger\tNumeric
     TSV
 
+    extend_hierarchy = <<~TSV
+      MODULE\tHelpers
+      CLASS\tGame::Hero
+      EXTEND\tGame::Hero\tHelpers
+      CLASS\tGame::Walker
+      EXTEND\tGame::Walker\tHelpers
+      EXTEND\tGame::Walker\t*
+      CLASS\tGame::Shadow
+      EXTEND\tGame::Shadow\tHelpers
+      SDEF\tGame::Shadow\ttag
+    TSV
+
     Dir.mktmpdir('rbs-suggestion-trace') do |tmp|
       candidates = File.join(tmp, 'candidates')
-      write_candidates(candidates, methods, classes: ['Game::Actor'], modules: ['Walk'])
+      write_candidates(candidates, methods, classes: ['Game::Actor'], modules: ['Walk', 'Helpers'])
       put_text = File.read(File.join(candidates, 'Box.rbs'))
       check.call('the emitted candidate declares the Integer parameter', put_text.include?('def put: (Integer)'))
       check.call('a nilable parameter is emitted nilable', put_text.include?('def find: (Integer?)'))
@@ -767,6 +854,35 @@ module RbsSuggestionTrace
                             param_rows(1, 'Game::Walker#step', 1, 2, 0, 'Integer' => 2)).join("\n") << "\n")
       r = run(candidates, [mixin_ok], hierarchy_path: mixin_path)
       check.call('an including class the trace admits has no findings', r.findings.empty? && r.stats[:mixin_sites] == 1)
+
+      # A module method is a singleton method of each class that extends it (EXTEND rows). Game::Hero extends Helpers,
+      # Game::Walker's extend is a computed module (cannot decide), and Game::Shadow defines `tag` on its own singleton.
+      extend_hier = File.join(tmp, 'extend_hierarchy.tsv')
+      File.write(extend_hier, extend_hierarchy)
+      extend_ok = File.join(tmp, 'extend_ok.tsv')
+      File.write(extend_ok, (param_rows(0, 'Game::Hero.singleton#tag', 1, 2, 0, 'Integer' => 2) +
+                             return_rows(1, 'Game::Hero.singleton#tag', 2, 0, 'Integer' => 2)).join("\n") << "\n")
+      r = run(candidates, [extend_ok], hierarchy_path: extend_hier)
+      check.call('an extended module method is compared as the singleton method of the extending class: an admitted trace has no findings',
+                 r.findings.empty? && r.stats[:extend_sites] == 1 && r.stats[:sites] == 2)
+      extend_bad = File.join(tmp, 'extend_bad.tsv')
+      File.write(extend_bad, param_rows(0, 'Game::Hero.singleton#tag', 1, 2, 0, 'String' => 2).join("\n") << "\n")
+      r = run(candidates, [extend_bad], hierarchy_path: extend_hier)
+      check.call('an observed String on the extending class against the extended module method declared Integer is a contradiction',
+                 r.findings.one? { |line| line.include?('Helpers#tag parameter 1 (on Game::Hero.singleton) declared Integer') && line.include?('observed String (2)') })
+      extend_dyn = File.join(tmp, 'extend_dynamic.tsv')
+      File.write(extend_dyn, param_rows(0, 'Game::Walker.singleton#tag', 1, 2, 0, 'String' => 2).join("\n") << "\n")
+      r = run(candidates, [extend_dyn], hierarchy_path: extend_hier)
+      check.call('a class with a dynamic extend cannot decide: the same kind of observation is not a failure',
+                 r.findings.empty? && r.stats[:extend_undecided] == 1 && r.stats[:extend_sites] == 0)
+      r = run(candidates, [extend_bad])
+      check.call('without --hierarchy an extended observation cannot decide, not a failure',
+                 r.findings.empty? && r.stats[:extend_undecided] == 1 && r.stats[:extend_sites] == 0)
+      extend_shadow = File.join(tmp, 'extend_shadow.tsv')
+      File.write(extend_shadow, param_rows(0, 'Game::Shadow.singleton#tag', 1, 2, 0, 'String' => 2).join("\n") << "\n")
+      r = run(candidates, [extend_shadow], hierarchy_path: extend_hier)
+      check.call('a class that defines the singleton method itself is not evidence for the extended module',
+                 r.findings.empty? && r.stats[:extend_sites] == 0 && r.stats[:extend_undecided] == 0)
 
       cli_bad = Open3.capture3(RbConfig.ruby, __FILE__, candidates, contradict)
       check.call('the CLI exits 1 on a contradiction and names it',

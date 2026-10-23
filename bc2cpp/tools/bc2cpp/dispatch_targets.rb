@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_receivers'
 require_relative 'native_constructor_sigs'
 require_relative 'compiled_gems'
 require 'prism'
@@ -604,10 +605,10 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
   # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see
   # IvarLayout.trace_type's RESCUE arm): `b`, the SECOND token, is a write; `a` is
   # a read, so RESCUE is skipped unless it writes the followed register.
-  rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+  rescue_write = ->(insn, cur) { BytecodeIR::Receivers::RESCUE.include?(insn.op) && insn.regs[1] == cur }
   # JMPIF/JMPNOT stay visible for CONTAINER_PHI_MERGE below; the rest of
-  # LEAD_READ_ONLY only reads its register.
-  skip_ops = ['RESCUE', *(BytecodeIR::Ops::LEAD_READ_ONLY - %w[JMPIF JMPNOT])]
+  # LEAD_READ_ONLY only reads its register (see BytecodeIR::Receivers::SKIP_OPS).
+  skip_ops = BytecodeIR::Receivers::SKIP_OPS
   # Never written: an incoming argument (register N is argument N for N <=
   # mand). Only a class annotation can name its class; pooling call sites is
   # unsound for POLY names.
@@ -625,18 +626,19 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
     end
 
     case insn.op
-    when 'MOVE'
+    when BytecodeIR::Receivers::COPY
       next IrepScans.follow(insn.regs[1])
-    when 'GETIDX', 'GETIDX0'
+    when BytecodeIR::Ops::INDEX_READ
       # RBS_RECORD_TYPES: a literal-key read of a checked record key, for guarded consumers only.
-      if insn.op == 'GETIDX' && !resolving_new && path.empty? && guarded && defined?(RbsRecordTypes) &&
+      if BytecodeIR::Receivers::INDEX_READ_IN_PLACE.include?(insn.op) && !resolving_new && path.empty? && guarded &&
+         defined?(RbsRecordTypes) &&
          (record_hint = RbsRecordTypes.read_hint(irep, i))
         return record_hint
       end
       return nil unless element_annotations && class_layout && registry
 
       # GETIDX overwrites its receiver register; GETIDX0 has a separate source.
-      recv_reg = if insn.op == 'GETIDX'
+      recv_reg = if BytecodeIR::Receivers::INDEX_READ_IN_PLACE.include?(insn.op)
                    cur
                  else
                    insn.regs[1]
@@ -682,7 +684,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       end
       md = registry['[]']&.find { |candidate| candidate.owner == recv_class && candidate.irep }
       return md && element_annotations[md.irep]&.ret_class
-    when 'SEND0', 'SEND'
+    when BytecodeIR::Receivers::PLAIN_SEND
       return nil if resolving_new || !path.empty?
 
       # Same charset as compile_send's name extraction.
@@ -762,7 +764,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
 
         return hint
       end
-    when 'SSEND0', 'SSEND'
+    when BytecodeIR::Receivers::SELF_SEND
       # RETCLASS_SELF_CALL_SUPPORT: an implicit-receiver call has no receiver
       # register (and a bare `new(...)` here is an instance method, not Class#new),
       # so the only evidence is `ret_class_proof` (compute_class_return_names); nil
@@ -777,7 +779,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
       # would only end this iteration and the walk would continue past the answer.
       # `owner`: CodeGen#self_call_reaches_def? (never method_missing).
       return ret_class_proof.call(name, owner)
-    when 'SENDB'
+    when BytecodeIR::Receivers::BLOCK_NEW_SEND
       # BLOCK_CARRYING_NEW: `Klass.new(...) { ... }` compiles to SENDB. A block
       # passed to #initialize does not change which class `.new` allocates, so set
       # `resolving_new` like the blockless case and share the GETCONST walk.
@@ -790,44 +792,44 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
 
       resolving_new = true
     # Same register: SEND overwrites its receiver register with the result.
-    when 'GETIV'
+    when BytecodeIR::Receivers::IVAR_READ
       return nil if resolving_new || !path.empty?
 
       ivar = insn.ivar
       klass = ivar_classes && ivar_classes[ivar]
       return known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
-    when 'GETUPVAR'
+    when BytecodeIR::Receivers::UPVAR_READ
       return nil if resolving_new || !path.empty?
 
       return nil unless insn.upvar_ref&.last&.zero?
 
       capture_class = capture_hints&.dig(irep.label, insn.reg.to_i, :container_class)
       capture_class
-    when 'ARRAY', 'ARRAY2'
+    when BytecodeIR::Ops::ARRAY_ALLOC
       # EACH_BLOCK_SUPPORT: an ARRAY literal is always an Array (vm.c OP_ARRAY). Only
       # valid at the end of a trace: during a `.new` chain or constant path the
       # register belongs to another expression.
       return nil if resolving_new || !path.empty?
 
       return 'Array'
-    when 'HASH'
+    when BytecodeIR::Receivers::HASH_LITERAL
       # HASH_EACH_SUPPORT: a HASH literal is always a Hash (vm.c OP_HASH); same
       # end-of-trace gating.
       return nil if resolving_new || !path.empty?
 
       return 'Hash'
-    when 'RANGE_INC', 'RANGE_EXC'
+    when BytecodeIR::Ops::RANGE_BUILD
       # INTERP_UNLOCK: RANGE_INC/RANGE_EXC always create a Range (vm.c,
       # mrb_range_new); same end-of-trace gating.
       return nil if resolving_new || !path.empty?
 
       return 'Range'
-    when 'GETMCNST'
+    when BytecodeIR::Receivers::CONST_PATH_SEGMENT
       # CONST_CONTAINER_SUPPORT: collecting a segment is harmless either way; what
       # happens with `path` is decided at GETCONST.
       # Not `$`-anchored: a trailing "; R6:name" comment would end up in the segment.
       path.unshift(insn.mcnst_name)
-    when 'GETCONST'
+    when BytecodeIR::Receivers::CONST_READ
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
       const_name = insn.const_name
@@ -933,7 +935,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
 
       path.unshift(const_name)
       return path.join('::')
-    when 'JMPNOT', 'JMPIF'
+    when BytecodeIR::Receivers::COND_JUMP
       # CONTAINER_PHI_MERGE: `x || []` / `x && {}` writes a container literal
       # into `reg` on ONE side of the branch, so the register has two incoming
       # definitions and the walk would otherwise keep going past the literal
