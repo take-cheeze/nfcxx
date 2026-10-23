@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
 require_relative 'numeric_flow'
 require_relative 'core_hierarchy_sigs'
 
@@ -77,7 +78,7 @@ class CodeGen
     return false if @closed_world.outside_ruby_token?('Marshal')
 
     @ireps.each_value.none? do |irep|
-      irep.instructions.any? do |insn|
+      BytecodeIR.for(irep).each_source.any? do |insn, _index|
         (insn.op == 'GETCONST' && insn.const_name == 'Marshal') || (insn.op == 'GETMCNST' && insn.mcnst_name == 'Marshal') ||
           insn.sym == 'Marshal'
       end
@@ -243,7 +244,7 @@ class CodeGen
     enclosing = CallSiteIndex.enclosing_def_names(@ireps)
     super_names = Set.new
     @ireps.each_value do |irep|
-      next unless irep.instructions.any? { |insn| insn.op == CallSiteIndex::SUPER_OP }
+      next unless BytecodeIR.for(irep).op?(CallSiteIndex::SUPER_OP)
 
       name = enclosing[irep.label]
       return cand unless name # a super outside any named def: no name to refuse
@@ -318,7 +319,7 @@ class CodeGen
   # (SSEND*, return_class_self_receiver), else the flow's receiver register. [] when the flow has not reached
   # it (mask 0), nil when a class is not nameable (OTHER, EXC, NIL, a non-exact class).
   def site_receiver_classes(irep, idx, recv)
-    insn = irep.instructions[idx]
+    insn = BytecodeIR.for(irep).source_at(idx)
     mask = if %w[SSEND SSEND0 SSENDB].include?(insn.op)
              return_class_self_receiver(irep)
            else

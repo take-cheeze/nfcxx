@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
 require_relative 'native_result_facts'
 require_relative 'native_class_results'
 require_relative 'native_core_result_sigs'
@@ -126,8 +127,9 @@ class CodeGen
     return false unless Array(@prepended_modules['Struct']).empty? && !@unknown_mixins.include?('Struct')
 
     @ireps.each_value do |irep|
-      aliasing = irep.instructions.any? { |insn| insn.op == 'ALIAS' || insn.sym == 'alias_method' }
-      irep.instructions.each do |insn|
+      program = BytecodeIR.for(irep)
+      aliasing = program.each_source.any? { |insn, _index| insn.op == 'ALIAS' || insn.sym == 'alias_method' }
+      program.each_source do |insn, _index|
         return false if %w[UNDEF ALIAS].include?(insn.op) && insn.sym == 'inspect'
         next unless aliasing && insn.sym == 'to_s' && %w[ALIAS LOADSYM].include?(insn.op)
 

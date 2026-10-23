@@ -22,7 +22,7 @@ module IrTypeFeedback
   def callback_binding(ctx, definition, parent, index, analysis, prepared: nil)
     return nil if ENV['BC2CPP_IR_RBS_BLOCK_TYPES'] == '0' || !ctx.signature_contracts
 
-    insn = parent.instructions[index]
+    insn = BytecodeIR.for(parent).source_at(index)
     receiver = insn.op == 'SSENDB' ? Set[definition.owner.to_sym] : analysis.fact_at(index, insn.reg)&.classes
     return nil unless receiver&.size == 1
 
@@ -43,13 +43,13 @@ module IrTypeFeedback
   def iterator_block_rows(ctx, definition, parent, index, analysis, prepared: nil)
     return [] if ENV['BC2CPP_IR_BLOCK_TYPES'] == '0'
 
-    insn = parent.instructions[index]
+    insn = BytecodeIR.for(parent).source_at(index)
     return [] unless BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && insn.plain_fixed_argc?
 
     definitions = BytecodeIR.reaching_definitions(parent, index, (insn.reg.to_i + insn.argc + 1).to_s, origin_transfers: true)
     return [] unless definitions&.size == 1 && !definitions.first.entry?
 
-    producer = parent.instructions[definitions.first.index]
+    producer = BytecodeIR.for(parent).source_at(definitions.first.index)
     child = ctx.ireps[Array(parent.reps)[producer.block_index.to_i]] if producer.op == 'BLOCK'
     fields = child&.enter&.enter_fields
     return [] unless child&.file && fields && fields.drop(1).all?(&:zero?) && fields.first.between?(0, 8)
@@ -105,7 +105,7 @@ module IrTypeFeedback
                                   parent_analysis: analysis, ireps: ctx.ireps, invocation_safe: invocation_safe)
     block_analysis = BytecodeIR::Types.new(child, argument_facts: bounds, source_resolver: captures.method(:fact_at))
     exits = []
-    child.instructions.each_with_index do |instruction, position|
+    BytecodeIR.for(child).each_source do |instruction, position|
       kind = if RETURN_OPS.include?(instruction.op) then 'block_return'
              elsif instruction.op == 'SETIV' then 'block_ivar_store'
              elsif EXPLICIT_RECEIVER_SENDS.include?(instruction.op) then 'block_receiver'
@@ -279,7 +279,7 @@ module IrTypeFeedback
                                             included_modules: ctx.included_modules || {}, prepended_modules: ctx.prepended_modules || {},
                                             unknown_mixins: ctx.gen.instance_variable_get(:@unknown_mixins) || Set.new)
       exits = []
-      irep.instructions.each_with_index do |insn, index|
+      BytecodeIR.for(irep).each_source do |insn, index|
         kind = if RETURN_OPS.include?(insn.op) then 'return'
                elsif insn.op == 'SETIV' then 'ivar_store'
                elsif EXPLICIT_RECEIVER_SENDS.include?(insn.op) then 'receiver'

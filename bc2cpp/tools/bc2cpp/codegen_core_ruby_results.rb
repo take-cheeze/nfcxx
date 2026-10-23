@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
 require_relative 'numeric_flow'
 require_relative 'core_defs'
 
@@ -14,7 +15,7 @@ module CoreRubyResults
     ireps.each_value do |body|
       next unless CoreDefs.core_source?(body.file)
 
-      body.instructions.each_with_index do |insn, index|
+      BytecodeIR.for(body).each_source do |insn, index|
         next unless insn.op.include?('SEND') && INSTALLERS.include?(insn.sym)
         return nil unless insn.plain_fixed_argc? && insn.argc.positive?
 
@@ -276,7 +277,7 @@ class CodeGen
   # returns also need a context-sensitive child flow, which is not modelled here.
   def core_ruby_result_exits_safe?(irep, caller: false)
     forbidden = caller ? %w[BREAK] : %w[BREAK RETURN_BLK]
-    return false if irep.instructions.any? { |insn| forbidden.include?(insn.op) }
+    return false if BytecodeIR.for(irep).op?(*forbidden)
 
     irep.reps.all? { |label| core_ruby_result_exits_safe?(@ireps.fetch(label), caller: caller) }
   end
