@@ -447,15 +447,21 @@ module RbsSignatures
       contracts = receiver.contracts.to_set
       failed = false
       receiver.classes.each do |klass|
-        target = prepared ? prepared.target(klass.to_s, insn.sym.to_s) : lookup.call(klass.to_s).find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
-        unless target && named_returns.key?([target, insn.sym.to_s])
+        # SELF_CALL_JOIN: a declared receiver is a nominal bound, so its dispatch joins every bounded subclass, as for self.
+        bounded = prepared ? prepared.receivers(klass.to_s) : self_receivers(klass.to_s, lookup: lookup, subclasses: subclasses, method_missing_classes: method_missing_classes)
+        unless bounded
+          refusal[:cause] ||= "call_receiver_unbounded:#{klass}##{insn.sym}"
+          failed = true
+          break
+        end
+        types = self_call_types(bounded, insn.sym.to_s, target: target, named_returns: named_returns)
+        unless types
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
           break
         end
-        types = named_returns.fetch([target, insn.sym.to_s])
-        classes.merge(types == :self ? Set[klass] : types)
-        contracts << "call-result:#{target}##{insn.sym}".freeze
+        classes.merge(types)
+        bounded.each { |candidate| contracts << "call-result:#{target.call(candidate, insn.sym.to_s)}##{insn.sym}".freeze }
       end
       next nil if failed
 
