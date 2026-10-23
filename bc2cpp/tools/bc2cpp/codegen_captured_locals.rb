@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
 require_relative 'numeric_flow'
 
 # CodeGen: CAPTURED_LOCAL_CLASS.
@@ -63,7 +64,7 @@ class CodeGen
     return false if names.any? { |name| !@closed_world.native_paths_spelling(name).empty? || @closed_world.outside_ruby_token?(name) }
 
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         sym = insn.sym
         next unless sym
 

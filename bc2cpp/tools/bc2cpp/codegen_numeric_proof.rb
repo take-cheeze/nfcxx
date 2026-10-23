@@ -2,6 +2,7 @@
 
 require_relative 'fixpoint'
 require_relative 'numeric_flow'
+require_relative 'bytecode_ir_regions'
 
 # CodeGen: NUMERIC_OPERAND_PROOF.
 #
@@ -193,9 +194,7 @@ class CodeGen
     @numeric_block_parents ||= begin
       map = {}
       @ireps.each_value do |parent|
-        parent.instructions.each_with_index do |insn, idx|
-          next unless %w[BLOCK LAMBDA].include?(insn.op)
-
+        BytecodeIR.for(parent).each_with_op(*BytecodeIR::Ops::LITERAL_PROC) do |insn, idx|
           child = parent.reps[insn.block_index.to_i]
           map[child] = [parent, idx] if child
         end

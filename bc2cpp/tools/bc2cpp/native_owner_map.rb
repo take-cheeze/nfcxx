@@ -4,6 +4,7 @@ require 'set'
 require_relative 'native_names'
 require_relative 'native_direct'
 require_relative 'irep'
+require_relative 'scan_cache'
 
 # NATIVE_OWNER_MAP: for each method name, the classes some native C registration
 # defines it on, with the class expression each call names. A poly chain that calls a Ruby body
@@ -247,67 +248,113 @@ module NativeOwnerMap
   end
 
   def build(paths)
-    result = Result.new(by_name: Hash.new { |h, k| h[k] = Set.new }, computed: Set.new, registrations: [], aliases: [],
-                        computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0)
-    Array(paths).each do |path|
-      text = NativeDirect.strip_comments(File.binread(path).force_encoding('UTF-8'))
-      # `struct RClass *x` is the same variable as `RClass *x` for the owner table.
-      typed = text.gsub(/struct\s+RClass\s*\*/, 'RClass *')
-      file_vars = NativeDirect.class_variables(typed, NativeDirect.sibling_param_owners(path))
-      scopes = block_scopes(typed, file_vars)
-      vars_at = ->(pos) { scopes.find { |from, to, _| pos.between?(from, to) }&.last || file_vars }
-      # Calls are read from `typed`, the text the scopes were built on, so a position names the same block
-      # in both.
-      typed.scan(CALL_RE) do
-        match = Regexp.last_match
-        family = match[1]
-        args, close = call_args(typed, match.end(0) - 1)
-        next if args.nil? || definition?(typed, match.begin(0), close)
+    result = new_result
+    Array(paths).each { |path| merge_file(result, file_result(path)) }
+    result
+  end
 
-        if family == 'prepend_module'
-          result.refusals[path.include?('/3rd/mruby/') ? :core_prepend : :native_prepend] += 1
-          next
-        end
-        spec = FAMILIES[family]
-        unless spec
-          result.refusals[:native_unparsed_form] += 1 if family.match?(DEFINER_LIKE)
-          next
-        end
-        result.calls += 1
-        owner = owner_of(args.fetch(spec[:owner], ''), vars_at.call(match.begin(0)))
-        instance = args.fetch(spec[:owner], '').strip == 'mrb->top_self'
-        owners = if instance
-                   [owner]
-                 elsif spec[:suffix] == :both
-                   [owner, owner == UNKNOWN ? UNKNOWN : "#{owner}.singleton"]
-                 elsif spec[:suffix] && owner != UNKNOWN
-                   ["#{owner}#{spec[:suffix]}"]
-                 else
-                   [owner]
-                 end
-        name = name_of(args.fetch(spec[:name], ''))
-        if spec[:alias_of] && name && !owners.include?(UNKNOWN)
-          original = name_of(args.fetch(spec[:alias_of], ''))
-          owners.each { |registered| result.aliases << [registered, name, original] } if original
-        end
-        if spec[:fn] && name && !owners.include?(UNKNOWN)
-          # `&f` is the address of the function `f`: the same body as `f` (mrb_define_method(..., &match_data_to_s, ...)).
-          fn = args.fetch(spec[:fn], '').strip.delete_prefix('&').strip
-          owners.each { |registered| result.registrations << [registered, name, fn.match?(/\A\w+\z/) ? fn : nil] }
-        end
-        if name.nil?
-          result.computed.merge(owners)
-          if owners.include?(UNKNOWN)
-            if path.include?('/3rd/mruby/') then result.core_dynamic_unknown += 1
-            else result.computed_unknown = true
-            end
-          end
-        else
-          result.by_name[name].merge(owners)
-        end
-      end
-      scan_rom_tables(typed, vars_at, result)
+  def new_result
+    Result.new(by_name: Hash.new { |h, k| h[k] = Set.new }, computed: Set.new, registrations: [], aliases: [],
+               computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0)
+  end
+
+  # A file's Result is a function of the file and the sibling sources scan_file reads, so ScanCache stores it under
+  # those inputs. It is stored as plain data (Sets and the default-proc Hash do not dump); merge_file folds the files in
+  # order, which is the Result one pass over them builds.
+  def file_result(path)
+    plain = ScanCache.fetch('native_owner_map.file', [path, *NativeDirect.sibling_sources(path)], cache_absent: false) do
+      to_plain(scan_file(path))
     end
+    from_plain(plain)
+  end
+
+  def merge_file(result, file)
+    file.by_name.each { |name, owners| result.by_name[name].merge(owners) }
+    result.computed.merge(file.computed)
+    result.computed_unknown ||= file.computed_unknown
+    result.core_dynamic_unknown += file.core_dynamic_unknown
+    file.refusals.each { |reason, count| result.refusals[reason] += count }
+    result.calls += file.calls
+    result.registrations.concat(file.registrations)
+    result.aliases.concat(file.aliases)
+  end
+
+  def to_plain(result)
+    Result.new(by_name: result.by_name.transform_values(&:to_a), computed: result.computed.to_a,
+               computed_unknown: result.computed_unknown, core_dynamic_unknown: result.core_dynamic_unknown,
+               refusals: result.refusals.to_h, calls: result.calls, registrations: result.registrations,
+               aliases: result.aliases)
+  end
+
+  def from_plain(plain)
+    by_name = Hash.new { |h, k| h[k] = Set.new }
+    plain.by_name.each { |name, owners| by_name[name] = Set.new(owners) }
+    Result.new(by_name: by_name, computed: Set.new(plain.computed), registrations: plain.registrations,
+               aliases: plain.aliases, computed_unknown: plain.computed_unknown,
+               core_dynamic_unknown: plain.core_dynamic_unknown, refusals: Hash.new(0).merge(plain.refusals),
+               calls: plain.calls)
+  end
+
+  # One file's registrations, in the order its calls appear, as a Result of its own.
+  def scan_file(path)
+    result = new_result
+    text = NativeDirect.strip_comments(File.binread(path).force_encoding('UTF-8'))
+    # `struct RClass *x` is the same variable as `RClass *x` for the owner table.
+    typed = text.gsub(/struct\s+RClass\s*\*/, 'RClass *')
+    file_vars = NativeDirect.class_variables(typed, NativeDirect.sibling_param_owners(path))
+    scopes = block_scopes(typed, file_vars)
+    vars_at = ->(pos) { scopes.find { |from, to, _| pos.between?(from, to) }&.last || file_vars }
+    # Calls are read from `typed`, the text the scopes were built on, so a position names the same block
+    # in both.
+    typed.scan(CALL_RE) do
+      match = Regexp.last_match
+      family = match[1]
+      args, close = call_args(typed, match.end(0) - 1)
+      next if args.nil? || definition?(typed, match.begin(0), close)
+
+      if family == 'prepend_module'
+        result.refusals[path.include?('/3rd/mruby/') ? :core_prepend : :native_prepend] += 1
+        next
+      end
+      spec = FAMILIES[family]
+      unless spec
+        result.refusals[:native_unparsed_form] += 1 if family.match?(DEFINER_LIKE)
+        next
+      end
+      result.calls += 1
+      owner = owner_of(args.fetch(spec[:owner], ''), vars_at.call(match.begin(0)))
+      instance = args.fetch(spec[:owner], '').strip == 'mrb->top_self'
+      owners = if instance
+                 [owner]
+               elsif spec[:suffix] == :both
+                 [owner, owner == UNKNOWN ? UNKNOWN : "#{owner}.singleton"]
+               elsif spec[:suffix] && owner != UNKNOWN
+                 ["#{owner}#{spec[:suffix]}"]
+               else
+                 [owner]
+               end
+      name = name_of(args.fetch(spec[:name], ''))
+      if spec[:alias_of] && name && !owners.include?(UNKNOWN)
+        original = name_of(args.fetch(spec[:alias_of], ''))
+        owners.each { |registered| result.aliases << [registered, name, original] } if original
+      end
+      if spec[:fn] && name && !owners.include?(UNKNOWN)
+        # `&f` is the address of the function `f`: the same body as `f` (mrb_define_method(..., &match_data_to_s, ...)).
+        fn = args.fetch(spec[:fn], '').strip.delete_prefix('&').strip
+        owners.each { |registered| result.registrations << [registered, name, fn.match?(/\A\w+\z/) ? fn : nil] }
+      end
+      if name.nil?
+        result.computed.merge(owners)
+        if owners.include?(UNKNOWN)
+          if path.include?('/3rd/mruby/') then result.core_dynamic_unknown += 1
+          else result.computed_unknown = true
+          end
+        end
+      else
+        result.by_name[name].merge(owners)
+      end
+    end
+    scan_rom_tables(typed, vars_at, result)
     result
   end
 

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: FIXNUM_OPERAND_PROOF and entry-argument facts.
 
 class CodeGen
@@ -106,7 +108,7 @@ class CodeGen
 
     # The use itself must be an audited op outside a protected range: that range
     # compiles into a separate function with re-initialized registers.
-    use_insn = idx >= 0 && irep.instructions[idx]
+    use_insn = idx >= 0 && BytecodeIR.for(irep).source_at(idx)
     return false unless use_insn
     return false if ctx[:protected].include?(use_insn.addr) ||
                     !(FIXNUM_PROOF_STEP_OVER_OPS.include?(use_insn.op) || use_insn.op.start_with?('LOADI'))
@@ -116,7 +118,7 @@ class CodeGen
       if definition.entry?
         fixnum_proof_entry_arg?(irep, definition.reg, owner_def)
       else
-        fixnum_proof_source?(irep, definition.index, irep.instructions[definition.index], definition.reg, owner_def,
+        fixnum_proof_source?(irep, definition.index, BytecodeIR.for(irep).source_at(definition.index), definition.reg, owner_def,
                              depth)
       end
     end || false
@@ -126,7 +128,7 @@ class CodeGen
   # per instruction); the cap grows with the body so a long straight-line
   # method keeps its proofs, and stays linear in it.
   def fixnum_proof_max_states(irep)
-    [BytecodeIR::DATAFLOW_MAX_STATES, 2 * irep.instructions.length].max
+    [BytecodeIR::DATAFLOW_MAX_STATES, 2 * BytecodeIR.for(irep).size].max
   end
 
   # Predecessor map: index -> indices control can come from (-1 = method entry),
@@ -491,7 +493,7 @@ class CodeGen
       owner_of_body = entry_arg_body_owner
       @ireps.each_value do |irep|
         owner = owner_of_body[irep.label]
-        irep.instructions.each_with_index do |insn, i|
+        BytecodeIR.for(irep).each_source do |insn, i|
           name = insn.sym
           next unless name
 

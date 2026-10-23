@@ -7,11 +7,13 @@
 #   ruby scripts/bc2cpp/promote_candidates.rb CANDIDATE_DIR                  # dry run
 #   ruby scripts/bc2cpp/promote_candidates.rb --write CANDIDATE_DIR          # apply the diff
 #   ruby scripts/bc2cpp/promote_candidates.rb --target FILE CANDIDATE_DIR    # another target (default sig/bc2cpp/declarations.rbs)
+#   ruby scripts/bc2cpp/promote_candidates.rb --proofs PROOFS.json CANDIDATE_DIR              # skip constants TC1011 rejects
 #
 # Only absent methods, ivars and constants are added; nothing before `# ---- block_types.rbs` is touched; `--write`
-# parses the result again and exits 1 if it no longer parses. The rules are in tools/bc2cpp/promote_candidates.rb
-# and docs/bc2cpp-promote-candidates.md. Exit status: 0 done (or nothing to add), 1 refused or the write did not parse,
-# 2 usage.
+# parses the result again and exits 1 if it no longer parses. `--proofs` is the TC1011 verdict file bc2cpp writes for
+# the candidate directory (BC2CPP_CONSTANT_PROOF_CANDIDATES); without it constants are not checked against the proof.
+# The rules are in tools/bc2cpp/promote_candidates.rb and docs/bc2cpp-promote-candidates.md. Exit status: 0 done (or
+# nothing to add), 1 refused or the write did not parse, 2 usage.
 
 require 'optparse'
 require_relative '../../tools/bc2cpp/promote_candidates'
@@ -22,6 +24,7 @@ parser = OptionParser.new do |o|
   o.banner = 'usage: promote_candidates.rb [--write] [--target FILE] CANDIDATE_DIR'
   o.on('--write', 'Apply the diff to the target (default: dry run)') { options[:write] = true }
   o.on('--target FILE', 'Signature file to promote into') { |v| options[:target] = v }
+  o.on('--proofs FILE', 'TC1011 verdicts for the candidates (bc2cpp BC2CPP_CONSTANT_PROOF_OUT)') { |v| options[:proofs] = v }
 end
 parser.parse!(ARGV)
 unless ARGV.size == 1
@@ -35,13 +38,15 @@ label = target.delete_prefix("#{ROOT}/")
 dirname = File.basename(File.expand_path(candidate_dir))
 
 begin
-  result = PromoteCandidates.plan(File.read(target), candidate_dir, target_label: label)
+  proofs = PromoteCandidates.load_proofs(options[:proofs], candidate_dir) if options[:proofs]
+  result = PromoteCandidates.plan(File.read(target), candidate_dir, target_label: label, proofs: proofs)
 rescue PromoteCandidates::Refusal => e
   warn "promote_candidates: refused: #{e.message}"
   exit 1
 end
 
 puts "promote candidates: #{dirname} -> #{label}"
+puts(options[:proofs] ? "  constants: checked against #{options[:proofs]} (TC1011)" : '  constants: not checked against TC1011 (no --proofs)')
 result.added.each { |class_name, line| puts "  add   #{class_name}  #{line}" }
 result.skipped.each { |what, reason| puts "  skip  #{what}: #{reason}" }
 puts "  summary: #{result.added.size} to add, #{result.skipped.size} skipped, #{result.already} already declared"

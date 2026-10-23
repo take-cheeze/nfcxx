@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
 require_relative 'source_text'
 require_relative 'scan_cache'
 
@@ -35,7 +37,7 @@ module StableClassConstants
     class_defs = Hash.new(0)
     assigned = Set.new
     ireps.each_value do |irep|
-      irep.instructions.each do |insn|
+      BytecodeIR.for(irep).each_source do |insn|
         case insn.op
         when 'CLASS', 'MODULE'
           name = insn.sym_token
@@ -134,7 +136,7 @@ module StableClassConstants
 
     assigned = Set.new
     ireps.each_value do |irep|
-      irep.instructions.each do |insn|
+      BytecodeIR.for(irep).each_source do |insn|
         case insn.op
         when 'SETCONST'
           assigned << insn.const_name

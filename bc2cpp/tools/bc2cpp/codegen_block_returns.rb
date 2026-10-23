@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'tmpdir'
+require_relative 'bytecode_ir_containers'
 require_relative 'block_returns'
 require_relative 'codegen_return_classes'
 require_relative 'foreign_definers'
@@ -142,7 +143,7 @@ class CodeGen
         end
         alias_sites.each do |site|
           body = ireps[site[:irep]]
-          next unless body && body.instructions.none? { |insn| insn.branch_target }
+          next unless body && BytecodeIR.for(body).branch_target_addrs.empty?
 
           out[site[:old]].select { |d| d.owner == site[:owner] }.each do |d|
             out[site[:new]] << BlockReturns::RubyDef.new(owner: d.owner, irep: d.irep, ireps: ireps, source: "#{path} (alias)")
@@ -303,7 +304,7 @@ class CodeGen
     return if block_return_entries.empty?
 
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, index|
+      BytecodeIR.for(irep).each_source do |insn, index|
         entry, body = block_return_site(irep, index, insn)
         next unless entry&.kind == :block_value
 

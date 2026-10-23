@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_containers'
 require_relative 'bytecode_ir_ops'
 
 # CodeGen: CONSTRUCTOR_POOLS.
@@ -166,8 +167,8 @@ class CodeGen
     @constructor_aliased = Set.new
     string_spelled = false
     @ireps.each do |label, irep|
-      insns = irep.instructions
-      insns.each_with_index do |insn, idx|
+      program = BytecodeIR.for(irep)
+      program.each_source do |insn, idx|
         return 'explicit initialize call' if insn.sym == 'initialize' && BytecodeIR::Ops::SEND.include?(insn.op)
 
         string_spelled ||= insn.op == 'STRING' && %w[new initialize].include?(irep.pool[insn.pool_index.to_i])
@@ -176,7 +177,7 @@ class CodeGen
         names = [insn.sym, (insn.first_of(:name)&.value if insn.op == 'ALIAS')].compact
         next unless names.any? { |name| %w[new initialize].include?(name) }
 
-        klass = constructor_alias_class(label, insn, insns, idx)
+        klass = constructor_alias_class(label, insn, program, idx)
         return "#{insn.op} :#{names.join('/')} names new/initialize" unless klass
 
         @constructor_aliased << klass
@@ -188,7 +189,7 @@ class CodeGen
   end
 
   # The class whose body aliases its initialize under another name, or nil for any other use.
-  def constructor_alias_class(label, insn, insns, idx)
+  def constructor_alias_class(label, insn, program, idx)
     klass = constructor_body_classes[label]
     return nil unless klass
 
@@ -196,8 +197,9 @@ class CodeGen
     return (insn.first_of(:name)&.value == 'initialize' && other.call(insn.sym) ? klass : nil) if insn.op == 'ALIAS'
     return nil unless insn.op == 'LOADSYM' && insn.sym == 'initialize'
 
-    call = insns[idx + 1]
-    prior = idx.positive? ? insns[idx - 1] : nil
+    # The neighbours keep the raw index window (idx +/- 1, nil past either end), so they stay source_at reads.
+    call = program.source_at(idx + 1)
+    prior = idx.positive? ? program.source_at(idx - 1) : nil
     alias_call = call&.op == 'SSEND' && call.sym == 'alias_method' && call.plain_fixed_argc? && call.argc == 2 &&
                  call.reg.to_i + 2 == insn.reg.to_i && prior&.op == 'LOADSYM' && prior.reg.to_i == call.reg.to_i + 1 &&
                  other.call(prior.sym)
@@ -248,7 +250,7 @@ class CodeGen
 
     @ireps.each_value do |irep|
       owner = entry_arg_body_owner[irep.label]
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         if insn.op == 'SUPER'
           constructor_super_site(irep, idx, insn, owner, found)
         elsif BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym == 'new'
@@ -423,7 +425,7 @@ class CodeGen
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s, through_handlers: true)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
-    send = irep.instructions[defs.first.index]
+    send = BytecodeIR.for(irep).source_at(defs.first.index)
     return nil unless irep.label == owner.irep && send.sym == 'class'
     return owner.owner if send.op == 'SSEND0'
     return nil unless send.op == 'SEND0'
@@ -441,7 +443,7 @@ class CodeGen
     names = defs.map do |definition|
       next nil if definition.entry?
 
-      writer = irep.instructions[definition.index]
+      writer = BytecodeIR.for(irep).source_at(definition.index)
       case writer.op
       when 'GETCONST' then writer.const_name
       when 'GETMCNST' then writer.mcnst_name

@@ -73,7 +73,7 @@ module IrSymbolFlow
       ctx.params = { writer => params }
       universe = Set.new
       ok = writes.all? do |label, idx| # P3
-        set = values_at(ctx, label, idx, setidx_value_reg(ireps[label].instructions[idx]), Set.new)
+        set = values_at(ctx, label, idx, setidx_value_reg(BytecodeIR.for(ireps[label]).source_at(idx)), Set.new)
         set && universe.merge(set)
       end
       result[const] = universe.freeze if ok
@@ -88,16 +88,16 @@ module IrSymbolFlow
     consts = defs.map do |d|
       return nil if d.entry?
 
-      insn = irep.instructions[d.index]
+      insn = BytecodeIR.for(irep).source_at(d.index)
       next :nil if insn.op == 'LOADNIL'
       return nil unless insn.op == 'ARYCAT'
 
       onto = reaching(irep, d.index, insn.reg) or return nil
-      return nil unless onto.all? { |o| !o.entry? && irep.instructions[o.index].op == 'LOADNIL' }
+      return nil unless onto.all? { |o| !o.entry? && BytecodeIR.for(irep).source_at(o.index).op == 'LOADNIL' }
 
       get = single_def(irep, d.index, (insn.reg.to_i + 1).to_s, 'GETIDX') or return nil
-      getc = single_def(irep, get, irep.instructions[get].reg, 'GETCONST') or return nil
-      irep.instructions[getc].const_name or return nil
+      getc = single_def(irep, get, BytecodeIR.for(irep).source_at(get).reg, 'GETCONST') or return nil
+      BytecodeIR.for(irep).source_at(getc).const_name or return nil
     end
     found = consts.reject { |c| c == :nil }.uniq
     found.size == 1 ? found.first : nil
@@ -108,7 +108,7 @@ module IrSymbolFlow
     defs = reaching(irep, idx, reg)
     return nil unless defs&.size == 1 && !defs.first.entry?
 
-    irep.instructions[defs.first.index].op == op ? defs.first.index : nil
+    BytecodeIR.for(irep).source_at(defs.first.index).op == op ? defs.first.index : nil
   end
 
   # Reaching definitions across handler edges. The cap scales with the irep so a long class body still answers.
@@ -181,10 +181,10 @@ module IrSymbolFlow
   # any other way: as another operand or a send's receiver, copied by MOVE, or captured by a nested block. An
   # element a GETIDX reads from it may only be splatted (ARYCAT's source), which copies it.
   def table_uses(irep, idx)
-    reg = irep.instructions[idx].reg
+    reg = BytecodeIR.for(irep).source_at(idx).reg
     uses = reg && value_reads(irep, idx, reg) or return nil
     uses.each_with_object([]) do |n, writes|
-      insn = irep.instructions[n]
+      insn = BytecodeIR.for(irep).source_at(n)
       return nil unless insn.reg == reg
 
       case insn.op
@@ -198,7 +198,7 @@ module IrSymbolFlow
   def element_reads_splat_only?(irep, idx, reg)
     uses = value_reads(irep, idx, reg) or return false
     uses.all? do |n|
-      insn = irep.instructions[n]
+      insn = BytecodeIR.for(irep).source_at(n)
       insn.op == 'ARYCAT' && insn.reg.to_i + 1 == reg.to_i
     end
   end
@@ -317,7 +317,7 @@ module IrSymbolFlow
     calls = index[:sends][name]
     return nil if calls.empty? || calls.any? { |label, _| label != class_label }
 
-    insns = calls.map { |label, idx| ctx.ireps[label].instructions[idx] }
+    insns = calls.map { |label, idx| BytecodeIR.for(ctx.ireps[label]).source_at(idx) }
     return nil unless insns.all?(&:plain_fixed_argc?)
 
     arities = insns.map(&:argc).uniq
@@ -368,7 +368,7 @@ module IrSymbolFlow
 
   # The symbol set the instruction at n of irep label produces, or nil.
   def definition_values(ctx, label, n, visiting)
-    insn = ctx.ireps[label].instructions[n]
+    insn = BytecodeIR.for(ctx.ireps[label]).source_at(n)
     reg = insn.reg.to_i
     case insn.op
     when 'LOADSYM' then insn.sym ? Set[insn.sym] : nil

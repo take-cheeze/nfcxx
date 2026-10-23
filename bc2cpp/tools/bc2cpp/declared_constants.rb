@@ -26,7 +26,9 @@ require_relative 'rbs_parse_memo'
 module DeclaredConstants
   Entry = Struct.new(:name, :bare, :kind, :cls, :text, :loc, :elem, keyword_init: true)
   ELEMENT_CLASSES = %w[Integer Float String Symbol].freeze
-  Result = Struct.new(:integer_names, :containers, :elements, :diagnostics, :report, :locs, keyword_init: true)
+  # first_errors: {entry name => the first error message of that entry} (see verdicts).
+  Result = Struct.new(:integer_names, :containers, :elements, :diagnostics, :report, :locs, :first_errors,
+                      keyword_init: true)
   CODE = 'TC1011'
   KILL_ENV = 'BC2CPP_DECLARED_CONSTANTS'
 
@@ -103,7 +105,7 @@ module DeclaredConstants
   def check(entries, ireps, registry, sites, _integer_constants, poisoned, container_constants, display_root,
             plus_safe:, range_safe:)
     result = Result.new(integer_names: Set.new, containers: {}, elements: {}, diagnostics: [], report: [],
-                        locs: entries.map(&:loc))
+                        locs: entries.map(&:loc), first_errors: {})
     return result if entries.empty?
 
     qualified_at = sites.to_h { |s| [[s[:irep], s[:idx]], s[:name]] }
@@ -125,9 +127,9 @@ module DeclaredConstants
     entries.each do |entry|
       diag = lambda do |severity, where, message|
         file, line, col = where || [entry.loc.file, entry.loc.line, entry.loc.col]
-        result.diagnostics << { file: file, line: line, col: col, severity: severity, code: CODE,
-                                message: "#{entry.name}: #{entry.text} (#{entry.loc.file}:#{entry.loc.line}): " \
-                                         "#{message}" }
+        text = "#{entry.name}: #{entry.text} (#{entry.loc.file}:#{entry.loc.line}): #{message}"
+        result.diagnostics << { file: file, line: line, col: col, severity: severity, code: CODE, message: text }
+        result.first_errors[entry.name] ||= text if severity == 'error'
       end
       own, unresolved = bindings[entry.bare].partition { |_i, _x, _n, q| q == entry.name }
       unresolved = unresolved.select { |_i, _x, insn, q| q.nil? || insn.op == 'SETMCNST' }
@@ -153,6 +155,14 @@ module DeclaredConstants
       result.report << "  DECLARED_CONST #{entry.name}: #{entry.text}: #{status}"
     end
     result
+  end
+
+  # The TC1011 verdict of each entry as if it were declared: {name => the error message, or nil when the check
+  # accepts it}. Runs check itself, so the verdict is the check's; promote_candidates reads it (--proofs).
+  def verdicts(entries, ireps, registry, sites, poisoned, container_constants, display_root, plus_safe:, range_safe:)
+    result = check(entries, ireps, registry, sites, Set.new, poisoned, container_constants, display_root,
+                   plus_safe: plus_safe, range_safe: range_safe)
+    entries.to_h { |entry| [entry.name, result.first_errors[entry.name]] }
   end
 
   # Records the fact for a checked entry; true when it was fed.

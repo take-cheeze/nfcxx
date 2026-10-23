@@ -120,8 +120,8 @@ module RefineReport
       parent = Hash.new { |h, k| h[k] = k }
       find = ->(k) { parent[k] == k ? k : (parent[k] = find.call(parent[k])) }
       uses = {}
-      irep.instructions.each_with_index do |insn, i|
-        next unless %w[SEND SEND0 SENDB].include?(insn.op) && insn.sym
+      program.each_with_op('SEND', 'SEND0', 'SENDB') do |insn, i|
+        next unless insn.sym
 
         defs = program.reaching_definitions(i, insn.reg, opaque_regs: opaque)
         next if defs.nil? || defs.empty?

@@ -205,7 +205,7 @@ class CodeGen
     unless supported
       # Not modelled: emit `#error` rather than a signature that disagrees with what
       # callers pass.
-      code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
+      code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n" \
              "#error #{d.owner}##{d.name} has non-mandatory arguments (optional/rest/keyword/block) -- not in this prototype's supported subset\n\n"
       return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
                arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
@@ -231,7 +231,7 @@ class CodeGen
                  else
                    calls_fiber_yield?(irep) ? 'calls Fiber.yield directly' : 'is reachable from a Fiber.new block'
                  end
-        code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
+        code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n" \
                "#error #{d.owner}##{d.name} #{reason} -- not in this prototype's supported subset\n\n"
         return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
                  arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
@@ -245,7 +245,7 @@ class CodeGen
                                                                        fiber_guarded: fiber_guarded, needs_return_catch: needs_return_catch,
                                                                        block_fallback_regions: block_fallback_regions))
     out = String.new
-    out << "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n"
+    out << "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n"
     # Not `static`: another gem's generated code may call it (OTHER_DECLS_HEADER;
     # see emit_decls_header).
     # Mandatory parameter types come from arg_native_types; `self` is never
@@ -514,8 +514,8 @@ class CodeGen
     # REGISTER_FLOW: an ordinary method keeps each instruction's text
     # apart until the whole body exists, so dead copies can be dropped.
     flow_captured = RegisterFlow.captured_registers(irep) if !@resumable && prefix_at.empty? && RegisterFlow.enabled?
-    flow_bodies = flow_captured && Array.new(irep.instructions.length, '')
-    flow_labels = flow_captured && Array.new(irep.instructions.length, '')
+    flow_bodies = flow_captured && Array.new(BytecodeIR.for(irep).size, '')
+    flow_labels = flow_captured && Array.new(BytecodeIR.for(irep).size, '')
     # ARM_PRUNE stage B (BC2CPP_PRUNE_ARMS=1): the held-back text is restored unless the method has no other emitter that
     # works per instruction (suppressed, glue, prefix, guarded, resumable step). Register flow's captured registers do not
     # refuse it: they are pinned, and an unreachable write never runs, so a live read sees the same value.
@@ -524,7 +524,7 @@ class CodeGen
                      suppressed.empty? && glue_at.empty? && prefix_at.empty? && guarded_inline[:at].empty? &&
                      guarded_inline[:after].empty?
     arm_prune_refuse(:ineligible) if arm_prune_stage_b_enabled? && arm_prune && !arm_prune.empty? && !arm_prune_drop
-    irep.instructions.each_with_index do |insn, idx|
+    BytecodeIR.for(irep).each_source do |insn, idx|
       stack_tuple_visit(irep, idx, suppressed.include?(insn.addr) || glue_at.key?(insn.addr) || guarded_inline[:at].key?(insn.addr))
       # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
       # first instruction: the guarded loop's `goto` would then jump back to the top and run the loop again.
@@ -601,7 +601,7 @@ class CodeGen
     out << runtime_def_devirt_audit(out)
     if entry_spec
       # The specialized function goes ahead of `_impl`, after this method's header line.
-      header = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n"
+      header = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n"
       at = out.index(header) + header.length
       out = out[0...at] + entry_spec[:code] + out[at..]
     end
@@ -816,7 +816,7 @@ class CodeGen
   def resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, reason)
     warn "bc2cpp: resumable: #{d.owner}##{d.name} stays interpreted: #{reason}" if (@resumable_warned ||= Set.new).add?(label)
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name, arity: arg_names.size,
-      code: "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
+      code: "// #{d.owner}##{d.name} (compiled from irep #{label}, #{BytecodeIR.for(irep).size} insns)\n" \
             "#error #{d.owner}##{d.name} is a Fiber.new root that cannot be compiled resumable: #{reason} -- " \
             "not in this prototype's supported subset\n\n",
       unsupported: true, visibility: d.visibility }

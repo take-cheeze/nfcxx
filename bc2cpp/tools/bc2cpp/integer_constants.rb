@@ -65,7 +65,7 @@ module IntegerConstants
     poisoned = Set.new
     ireps.each_value do |irep|
       entries = const_entry_addrs(irep)
-      irep.instructions.each_with_index do |insn, i|
+      BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST', 'CLASS', 'MODULE') do |insn, i|
         case insn.op
         when 'SETCONST', 'SETMCNST'
           name = insn.const_name
@@ -219,11 +219,7 @@ module IntegerConstants
   # of the five pc-moving JMP* opcodes (as in fixnum_proof_edge_sources) plus
   # every catch handler target.
   def self.const_entry_addrs(irep)
-    addrs = Set.new
-    irep.instructions.each do |insn|
-      target = insn.branch_target
-      addrs << target if target
-    end
+    addrs = Set.new(BytecodeIR.for(irep).branch_target_addrs)
     (irep.catch_handlers || []).each { |ch| addrs << ch.target }
     addrs
   end
@@ -436,7 +432,7 @@ module IntegerConstants
   def self.defined_name_universe(ireps, native_paths, foreign_paths)
     names = Set.new
     ireps.each_value do |irep|
-      irep.instructions.each do |insn|
+      BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST', 'CLASS', 'MODULE') do |insn, _index|
         case insn.op
         when 'SETCONST'
           names << insn.const_name

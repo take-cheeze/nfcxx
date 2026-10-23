@@ -20,15 +20,18 @@ require_relative 'else_trace'
 #
 #   * a method's required, optional (only when the call supplied it), rest and keyword parameters;
 #     a NATIVE_ARG_TARGETS parameter (mrb_int/mrb_sym/mrb_bool) is boxed for the count;
-#   * the positional parameters of a block that has its own `_impl` (BLOCK_FALLBACK, lambda, proc).
+#   * the positional parameters of a block that has its own `_impl` (BLOCK_FALLBACK, lambda, proc);
+#   * the receiver of a singleton method (`def self.x`, `def Owner.x`, the defs of a `class << self`), as a
+#     `self` site (kind `self`). Its runtime class is the class object itself, not its metaclass, so the
+#     site is keyed by that class and named by its path (see bc2cpp_self_hit_*).
 #
 # Not covered, and counted as such in the dump: a block inlined into its caller's loop (INLINE_LOOP:
 # each/map/times ...), where the parameter is a register of the enclosing function, resumable
 # `_step` bodies, and rescue-extracted try bodies.
 #
 # Each binary keeps, per parameter, its call count and up to MAX_CLASSES distinct runtime classes (the
-# real class, so a singleton class counts as its class), and appends to the file named by
-# BC2CPP_TRACE_TYPES_OUT (stderr when unset) at exit. Every row carries the statically proven fact
+# real class, so a singleton class counts as its class; a `self` site names the class object instead), and
+# appends to the file named by BC2CPP_TRACE_TYPES_OUT (stderr when unset) at exit. Every row carries the statically proven fact
 # for the parameter that this bc2cpp run computed, so the dump is self-contained.
 # scripts/bc2cpp/trace_types.rb report reads it, together with an ElseTrace dump.
 module ParamTrace
@@ -83,7 +86,8 @@ module ParamTrace
         facts[k] << "annot=#{ann.args[k - 1]}" if ann && k <= mand && ann.args[k - 1]
       end
       infos[m[:impl]] = { method: "#{m[:owner]}##{m[:name]}", mand: mand, opt: opt, rest: rest.to_i.positive?,
-                          mono: mono, defs: defs.size, facts: facts, ret: return_fact(m[:name], gen) }
+                          mono: mono, defs: defs.size, facts: facts, ret: return_fact(m[:name], gen),
+                          singleton: m[:owner].to_s.end_with?('.singleton') }
     end
   end
 
@@ -179,6 +183,14 @@ module ParamTrace
       given_opt = params.any? { |_, n| n == 'bc2cpp_given_opt' }
       kw_given = params.filter_map { |_, n| n[KW_GIVEN_RE, 1] }
       method = info ? info[:method] : "(#{fn})"
+      if info && info[:singleton]
+        # The receiver of `def self.x` is the class it ran on. Not a positional parameter, so no index.
+        id = sites.size
+        static = 'none:self'
+        meta = [method, fn, 'method', 'self', 0, 'self', static].join("\t")
+        sites << { id: id, fn: fn, meta: meta, kind: 'self', index: 0, name: 'self', method: method, static: static }
+        stmts << "bc2cpp_self_hit_#{ElseTrace.ident(symbol)}(M, #{id}, self);"
+      end
       params.each do |ctype, name|
         next if ctype.include?('*') || !BOX.key?(ctype)
 
@@ -290,6 +302,25 @@ module ParamTrace
           const char* n = mrb_obj_classname(M, v);
           s->cls[s->ncls].real = real;
           s->cls[s->ncls].name = strdup(n ? n : "?");
+          s->cls[s->ncls].count = 0;
+          i = s->ncls++;
+        }
+        s->cls[i].count++;
+      }
+      // The receiver of a singleton method. The site is keyed by the class object itself (mrb_class of a class is
+      // its metaclass, which would name every singleton receiver `Class`). A value that is not a class or module
+      // goes in one "(non-class)" bucket, which the gate cannot place, so it is never compared as a class name.
+      static inline void bc2cpp_self_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
+        struct bc2cpp_param_site_#{id}* s = &bc2cpp_param_sites_#{id}[site];
+        struct RClass* c = (mrb_class_p(v) || mrb_module_p(v)) ? mrb_class_ptr(v) : NULL;
+        unsigned i = 0;
+        s->calls++;
+        while (i < s->ncls && s->cls[i].real != c) i++;
+        if (i == s->ncls) {
+          if (s->ncls == BC2CPP_PARAM_TRACE_MAX_CLASSES) { s->overflow++; return; }
+          const char* n = c ? mrb_class_name(M, c) : NULL;
+          s->cls[s->ncls].real = c;
+          s->cls[s->ncls].name = strdup(n ? n : "(non-class)");
           s->cls[s->ncls].count = 0;
           i = s->ncls++;
         }

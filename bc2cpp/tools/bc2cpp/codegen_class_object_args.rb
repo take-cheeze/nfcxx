@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_containers'
 require_relative 'irep_arity'
 
 # CLASS_OBJECT_ARGS: a `klass.new` whose receiver is a parameter of a method (or a captured one) names the
@@ -40,7 +41,7 @@ class CodeGen
       found = if definition.entry?
                 class_object_param_values(irep, definition.reg, depth, active)
               else
-                class_object_writer_values(irep, irep.instructions[definition.index], depth, active)
+                class_object_writer_values(irep, BytecodeIR.for(irep).source_at(definition.index), depth, active)
               end
       return nil unless found
 
@@ -143,7 +144,7 @@ class CodeGen
       next unless seen.add?(label)
 
       irep = @ireps[label] or return true
-      return true if irep.instructions.any? { |insn| insn.op == 'SUPER' }
+      return true if BytecodeIR.for(irep).op?('SUPER')
 
       stack.concat(Array(irep.reps))
     end
@@ -162,7 +163,7 @@ class CodeGen
     sites = Hash.new { |h, k| h[k] = [] }
     poisoned = Set.new
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, i|
+      BytecodeIR.for(irep).each_source do |insn, i|
         name = insn.sym
         next unless name
         next if CLASS_OBJECT_DEFINING_OPS.include?(insn.op)
@@ -204,8 +205,8 @@ class CodeGen
     return false if BytecodeIR.own_upvar_written_regs(ancestor).include?(reg)
 
     program = BytecodeIR.for(ancestor)
-    ancestor.instructions.each_index.none? do |i|
-      op = ancestor.instructions[i].op
+    program.each_source.none? do |insn, i|
+      op = insn.op
       op != 'ENTER' && !NumericFlow::NO_WRITE_OPS.include?(op) && program.may_write_at?(i, reg)
     end
   end

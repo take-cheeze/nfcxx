@@ -224,11 +224,9 @@ module ConstantArgumentSites
   def decided_jumps(irep, tuple, constants)
     total = 0
     decided = 0
-    BytecodeIR.for(irep).instructions.each_with_index do |ins, idx|
-      next unless BytecodeIR::CONDITIONAL_BRANCHES.include?(ins.op)
-
+    BytecodeIR.for(irep).each_with_op(*BytecodeIR::CONDITIONAL_BRANCHES) do |ins, idx|
       total += 1
-      value = value_at(irep, idx, ins.source.reg.to_i, tuple, constants)
+      value = value_at(irep, idx, ins.reg.to_i, tuple, constants)
       decided += 1 unless value == UNKNOWN
     end
     { total: total, decided: decided }
