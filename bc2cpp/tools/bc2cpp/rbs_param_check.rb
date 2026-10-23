@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 require_relative 'call_site_index'
 require_relative 'dynamic_names'
 require_relative 'native_names'
@@ -145,9 +146,7 @@ module RbsParamCheck
   # Both names of every `alias new old` (an ALIAS instruction; `alias_method` spells Symbols, DynamicNames).
   def alias_names(ireps)
     ireps.each_value.with_object(Set.new) do |irep, names|
-      irep.instructions.each do |insn|
-        next unless insn.op == 'ALIAS'
-
+      irep.each_with_op('ALIAS') do |insn, _index|
         names << insn.sym if insn.sym
         old = insn.first_of(:name)&.value
         names << old if old
@@ -235,7 +234,7 @@ module RbsParamCheck
     sites, = gen.constructor_entry_sites(d.irep)
     sites.reject do |irep, idx, _dest, _argc, _owner|
       insn = irep.instructions[idx]
-      next false unless insn.sym == 'new' && insn.op.start_with?('SEND')
+      next false unless insn.sym == 'new' && BytecodeIR::Ops::REGISTER_RECEIVER_SEND.include?(insn.op)
 
       klass = trace_new_target(irep, idx + 1, insn.reg, {}, 0, nil, owner: ctx[:owner_of][irep.label])
       target = klass && gen.constructor_init_target(klass)
@@ -393,9 +392,10 @@ module RbsParamCheck
       ivar_why(ctx, irep, insn.ivar, cls, depth)
     when 'GETUPVAR'
       upvar_why(ctx, irep, insn, cls)
-    when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+    when *BytecodeIR::Ops::SEND
       name = insn.sym
-      return new_why(ctx, irep, definition.index, cls) if name == 'new' && insn.op.start_with?('SEND')
+      return new_why(ctx, irep, definition.index, cls) if name == 'new' &&
+                                                          BytecodeIR::Ops::REGISTER_RECEIVER_SEND.include?(insn.op)
 
       entry, body = ctx[:constructor_entries]&.block_return_site(irep, definition.index, insn)
       return block_value_why(ctx, body, name, cls, depth) if entry&.kind == :block_value

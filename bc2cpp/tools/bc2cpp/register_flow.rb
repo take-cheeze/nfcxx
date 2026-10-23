@@ -384,9 +384,7 @@ class RegisterFlow
   # --- copy propagation -------------------------------------------------------
 
   def propagate_copies
-    @insns.each_index do |i|
-      next unless @insns[i].op == 'MOVE'
-
+    @program.each_with_op('MOVE') do |_insn, i|
       match = /\A  r(\d+) = r(\d+);\n\z/.match(@texts[i]) or next
       dest = match[1].to_i
       src = match[2].to_i
