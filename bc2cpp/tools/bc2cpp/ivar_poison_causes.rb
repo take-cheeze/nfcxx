@@ -65,7 +65,7 @@ module IvarPoisonCauses
 
       return ['param:optional', "r#{pos}"]
     end
-    insn = irep.instructions[defn.index]
+    insn = BytecodeIR.for(irep).source_at(defn.index)
     op = insn.op
     if op == 'MOVE'
       return ['unreadable', 'move'] if depth > 6 || insn.regs[1].nil?

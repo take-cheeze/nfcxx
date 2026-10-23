@@ -122,7 +122,7 @@ module LexicalConsts
         irep = @ireps.fetch(label)
         body = {}
         BytecodeIR.class_bodies(irep, 'CLASS', 'MODULE', 'SCLASS').each do |idx, child|
-          body[child] = body_scope(irep, idx, irep.instructions[idx], parent)
+          body[child] = body_scope(irep, idx, BytecodeIR.for(irep).source_at(idx), parent)
         end
         irep.reps.each { |child| stack << [child, body.fetch(child, parent)] }
       end
