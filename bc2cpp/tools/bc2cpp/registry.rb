@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
 require_relative 'core_mixins'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
@@ -7,6 +8,9 @@ require_relative 'alias_sites'
 require_relative 'loop_installers'
 
 # Step 6: the whole-program class/method registry.
+
+# Implicit-self sends that take no block: SELF_SEND minus the block form.
+SSEND_NO_BLOCK_OPS = (BytecodeIR::Ops::SELF_SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
 
 # The instructions that supply +reg+ to the read at +use+ on every path (BytecodeIR.reaching_definitions, MOVEs
 # followed), or nil when the IR cannot prove that set: a refused query, or a value from the frame's entry.
@@ -66,7 +70,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   owner = namespace ? "#{namespace}::#{struct_name}" : struct_name
 
   scan_from = idx - 1
-  if %w[SENDB SSENDB].include?(insn.op)
+  if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
     return nil unless irep.instructions[scan_from]&.op == 'BLOCK'
 
     scan_from -= 1
@@ -204,8 +208,8 @@ def build_registry(ireps, root_label)
          respond_to_missing?].include?(method_name) ? :private : default_visibility
     end
 
-    irep.each_with_op('CLASS', 'MODULE', 'SCLASS', 'SETCONST', 'ALIAS', 'TDEF', 'SDEF', 'DEF', 'SEND0', 'SEND',
-                      'SSEND0', 'SSEND', 'SENDB', 'SSENDB') do |insn, idx|
+    irep.each_with_op('CLASS', 'MODULE', 'SCLASS', 'SETCONST', 'ALIAS', 'TDEF', 'SDEF', 'DEF',
+                      *BytecodeIR::Ops::SEND) do |insn, idx|
       case insn.op
       when 'CLASS', 'MODULE'
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
@@ -326,7 +330,7 @@ def build_registry(ireps, root_label)
 
         opener_idx = irep.previous_real_index(method_idx - 1)
         opener_insn = opener_idx >= 0 ? irep.instructions[opener_idx] : nil
-        next unless opener_insn && %w[TCLASS SCLASS].include?(opener_insn.op)
+        next unless opener_insn && BytecodeIR::Ops::TARGET_CLASS.include?(opener_insn.op)
 
         opener_reg = opener_insn.reg_token
         next unless opener_reg == reg
@@ -371,7 +375,7 @@ def build_registry(ireps, root_label)
           mixin_owner = namespace || 'Object'
           self_reg = insn.reg
           mixin_n = insn.argc
-          recognized = %w[SSEND SSEND0].include?(insn.op) && mixin_n == 1 && self_reg
+          recognized = SSEND_NO_BLOCK_OPS.include?(insn.op) && mixin_n == 1 && self_reg
           ref = recognized ? resolve_mixin_ref(irep, idx, (self_reg.to_i + 1).to_s) : nil
           if ref
             mixin_sites << { owner: mixin_owner, kind: name, namespace: namespace, ref: ref }
