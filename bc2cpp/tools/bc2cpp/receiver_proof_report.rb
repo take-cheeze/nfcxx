@@ -111,7 +111,7 @@ module ReceiverProofReport
     owner = kwargs[:owner_def]
     owner_name = owner ? "#{owner.owner}##{owner.name}" : '-'
     argc = (insn.n_spec || '0').to_i
-    where = "#{irep.file.to_s.sub(%r{.*/(mruby-)}, '\\1')}:#{irep.instructions[site]&.lineno}"
+    where = "#{irep.file.to_s.sub(%r{.*/(mruby-)}, '\\1')}:#{BytecodeIR.for(irep).source_at(site)&.lineno}"
     source, detail, mask_h = reg ? rp_source(irep, site, reg) : ['other', 'no_reg', nil]
     why = mask_h && mask_h[:why] || '-'
     percls, pc_classes, pc_mask = mask_h && mask_h[:percls] || ['-', [], 0]

@@ -206,7 +206,7 @@ module SendRootReport
         after = return_class_raw_mask(irep, d.index + 1, d.reg)
         next [] unless after.nil? || after.anybits?(CodeGen::CLASS_POOL_UNSHIPPABLE)
 
-        insn = irep.instructions[d.index]
+        insn = BytecodeIR.for(irep).source_at(d.index)
         # The state after a literal is its own class set; a blocked `after` here is the join at a following branch target.
         next [] if insn.op.start_with?('LOADI') || %w[LOADNIL ARRAY ARRAY2 HASH STRING LOADTRUE LOADFALSE LOADSYM RANGE_INC RANGE_EXC].include?(insn.op)
 

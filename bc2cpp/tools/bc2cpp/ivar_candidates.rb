@@ -110,7 +110,8 @@ module IvarCandidates
       defs = BytecodeIR.reaching_definitions(irep, idx, (insn.reg.to_i + offset).to_s, through_handlers: true)
       return nil unless defs
 
-      writers = defs.map { |df| df.entry? ? nil : irep.instructions[df.index] }
+      program = BytecodeIR.for(irep)
+      writers = defs.map { |df| df.entry? ? nil : program.source_at(df.index) }
       return nil unless writers.all? { |writer| writer&.op == 'LOADSYM' }
 
       syms = writers.map { |writer| writer.sym.to_s }.uniq

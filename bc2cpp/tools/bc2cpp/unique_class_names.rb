@@ -230,11 +230,8 @@ module UniqueClassNames
     written = Set.new
     [ireps, ruby_ireps].each do |set|
       set.each_value do |irep|
-        irep.instructions.each do |insn|
-          case insn.op
-          when 'SETCONST' then written << insn.const_name
-          when 'SETMCNST' then written << insn.mcnst_name
-          end
+        BytecodeIR.for(irep).each_with_op('SETCONST', 'SETMCNST') do |insn, _index|
+          written << (insn.op == 'SETCONST' ? insn.const_name : insn.mcnst_name)
         end
       end
     end
@@ -294,7 +291,7 @@ module UniqueClassNames
 
   def constant_rebinding_dynamic?(ireps, ruby_ireps, native_paths)
     (ireps.each_value.to_a + ruby_ireps.each_value.to_a).any? do |irep|
-      irep.instructions.any? { |insn| constant_rebinding_insn?(insn) }
+      BytecodeIR.for(irep).each_source.any? { |insn, _index| constant_rebinding_insn?(insn) }
     end || Array(native_paths).any? do |path|
       next false if path.include?('/3rd/mruby/') || !File.file?(path)
 

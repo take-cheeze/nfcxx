@@ -114,12 +114,13 @@ class RegisterFlow
 
   def initialize(irep, texts, captured, handlers = nil)
     @irep = irep
-    @insns = irep.instructions
+    @program = BytecodeIR.for(irep)
+    # Instruction wrappers: every use here reads only op, addr, length or each_index.
+    @insns = @program.instructions
     @original = texts
     @texts = texts.dup
     @captured = captured
     @handlers = handlers
-    @program = BytecodeIR.for(irep)
   end
 
   def run
