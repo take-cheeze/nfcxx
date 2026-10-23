@@ -8,8 +8,13 @@ module RbsSignatures
     EMPTY = {}.freeze
     attr_reader :applied, :named_returns
 
-    def initialize(applied, superclass_of:, included_modules:, prepended_modules:, unknown_mixins:)
+    # subclasses: ClosedWorld#known_subclasses (nil when the receiver set is open); method_missing_classes: the
+    # classes whose dispatch may reach a method_missing.
+    def initialize(applied, superclass_of:, included_modules:, prepended_modules:, unknown_mixins:, subclasses: nil,
+                   method_missing_classes: Set.new)
       @applied = applied
+      @subclasses = subclasses
+      @method_missing_classes = method_missing_classes.to_set.freeze
       @superclass_of = superclass_of.transform_values { |parent| parent.is_a?(String) ? parent.dup.freeze : parent }.freeze
       @included_modules = included_modules.transform_values { |owners| Array(owners).map { |owner| owner.dup.freeze }.freeze }.freeze
       @prepended_modules = prepended_modules.transform_values { |owners| Array(owners).map { |owner| owner.dup.freeze }.freeze }.freeze
@@ -31,6 +36,15 @@ module RbsSignatures
       @inherited_ivars = {}
       @inherited_elements = {}
       @targets = Hash.new { |hash, owner| hash[owner] = {} }
+      @receivers = {}
+    end
+
+    # SELF_RECEIVERS: memoized RbsSignatures.self_receivers for the owner's implicit-self sends.
+    def receivers(owner)
+      return @receivers[owner] if @receivers.key?(owner)
+
+      @receivers[owner] = RbsSignatures.self_receivers(owner, lookup: ->(klass) { owners(klass) }, subclasses: @subclasses,
+                                                               method_missing_classes: @method_missing_classes)
     end
 
     def owners(owner)

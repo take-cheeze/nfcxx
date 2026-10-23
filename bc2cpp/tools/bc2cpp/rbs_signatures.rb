@@ -4,6 +4,7 @@ require 'set'
 require_relative 'annotations'
 require_relative 'bytecode_ir_ops'
 require_relative 'core_fact_sigs'
+require_relative 'core_hierarchy_sigs'
 require_relative 'native_sigs'
 require_relative 'rbs_optional_hint'
 require_relative 'rbs_parse_memo'
@@ -392,7 +393,8 @@ module RbsSignatures
   end
 
   # Applied signatures have already been matched to the definition and its required arity.
-  def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0', prepared: nil)
+  def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0', prepared: nil,
+               subclasses: nil, method_missing_classes: Set.new)
     require_relative 'bytecode_ir'
     if prepared && !prepared.applied.equal?(applied)
       raise ArgumentError, 'prepared IR contracts belong to another signature world'
@@ -423,11 +425,18 @@ module RbsSignatures
     end
     named_returns = prepared ? prepared.named_returns : applied.ir_named_returns.transform_keys { |klass, name| [klass.dup.freeze, name.dup.freeze].freeze }.freeze
     calls = {}
-    # A breaking block can replace the normal return type.
+    # SELF_CALL_JOIN: an implicit-self send dispatches on the receiver's class, so its result joins the contract of
+    # every class self_receivers bounds, not only the owner's. A breaking block can replace the normal return type.
+    if prepared
+      receivers = prepared.receivers(owner)
+      target = ->(klass, name) { prepared.target(klass, name) }
+    else
+      receivers = self_receivers(owner, lookup: lookup, subclasses: subclasses, method_missing_classes: method_missing_classes)
+      target = ->(klass, name) { lookup.call(klass).find { |candidate| applied.ir_methods.include?([candidate, name]) } }
+    end
     irep.each_with_op(*SELF_SENDS_NO_BLOCK) do |insn, index|
-      target = prepared ? prepared.target(owner, insn.sym.to_s) : owners.find { |candidate| applied.ir_methods.include?([candidate, insn.sym.to_s]) }
-      types = named_returns[[target, insn.sym.to_s]] if target
-      calls[index] = types == :self ? Set[owner.to_sym].freeze : types if types
+      types = self_call_types(receivers, insn.sym.to_s, target: target, named_returns: named_returns)
+      calls[index] = types if types
     end
     resolver = lambda do |insn, receiver, refusal|
       if receiver.classes.size > 16
@@ -457,6 +466,47 @@ module RbsSignatures
                          declared_arg_elements: applied.ir_arg_elements.fetch(irep.label, {}),
                          declared_const_elements: applied.ir_const_elements,
                          declared_ivars: ivars, declared_ivar_elements: ivar_elements, declared_calls: calls, inferred_calls: inferred_calls, inferred_args: inferred_args, source_resolver: source_resolver, call_resolver: call_results ? resolver : nil)
+  end
+
+  # SELF_RECEIVERS: the classes an implicit-self send in a method of +owner+ can dispatch on, or nil when they are open.
+  # `subclasses` is ClosedWorld#known_subclasses (nil for a module and any subclass from outside the program); a core
+  # ancestor is refused too, since core instances are undeclared receivers. See docs/bc2cpp-ir-feedback.md.
+  def self_receivers(owner, lookup:, subclasses:, method_missing_classes:)
+    return nil unless subclasses
+    return nil if core_receiver_owners.include?(owner) || lookup.call(owner).empty?
+
+    classes = subclasses.call(owner)
+    return nil unless classes&.include?(owner)
+
+    classes.each do |klass|
+      return nil if method_missing_classes.include?(klass) || !lookup.call(klass).include?(owner)
+    end
+    classes
+  end
+
+  # Every ancestor of a core class: an instance of one of them is a receiver the program's own hierarchy does not list.
+  def core_receiver_owners
+    @core_receiver_owners ||= begin
+      super_of, = CoreHierarchySigs.hierarchy
+      super_of.keys.flat_map { |name| CoreHierarchySigs.ancestors(name) }.to_set.freeze
+    end
+  end
+
+  # SELF_CALL_JOIN: the declared result of an implicit-self send over its receiver classes. Each class contributes the
+  # contract its own dispatch reaches (`:self` answers that class). nil when the receivers are open or any one lacks a
+  # declared contract, so the send stays untyped rather than taking a partial join.
+  def self_call_types(receivers, name, target:, named_returns:)
+    return nil unless receivers
+
+    types = Set.new
+    receivers.each do |klass|
+      found = target.call(klass, name)
+      return nil unless found && named_returns.key?([found, name])
+
+      declared = named_returns[[found, name]]
+      types.merge(declared == :self ? Set[klass.to_sym] : declared)
+    end
+    types.freeze
   end
 
   # Match mruby lookup order; unknown/cyclic paths supply no inherited contracts.
