@@ -614,15 +614,20 @@ module TypeFacts
   FREEZE_SELF_LITERALS = { 'literal:Integer' => 'Integer', 'literal:String' => 'String', 'literal:Array' => 'Array',
                            'literal:Hash' => 'Hash' }.freeze
 
+  # Every reaching definition of the receiver must be a freeze of the same literal, so no other arm can supply the value.
   def freeze_self_type(ctx, irep, idx, reg)
-    found = irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
-      insn.op == 'SEND0' && insn.sym == 'freeze' ? [j, cur] : false
-    end
-    return nil unless found.is_a?(Array)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
-    j, cur = found
-    klass = FREEZE_SELF_LITERALS[textual_producer(ctx, irep, j, cur)]
-    klass && stock_proof(ctx, 'freeze', klass) ? klass : nil
+    program = BytecodeIR.for(irep)
+    klasses = defs.map do |d|
+      freeze = program.source_at(d.index)
+      next nil unless freeze.op == 'SEND0' && freeze.sym == 'freeze'
+
+      FREEZE_SELF_LITERALS[textual_producer(ctx, irep, d.index, freeze.reg)]
+    end
+    klass = klasses.first
+    klass && klasses.all?(klass) && stock_proof(ctx, 'freeze', klass) ? klass : nil
   end
 
   # IO_OPEN_SAFE: the constant IO is the one native class (ClosedWorld#native_class_unshadowed?), and `open` on IO's

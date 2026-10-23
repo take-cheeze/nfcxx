@@ -54,6 +54,12 @@ suite.check('a straight-line String keeps its literal producer',
 param = fold_irep([fold_insn(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'), fold_insn(1, 'SEND0', "R1\t:freeze")])
 suite.check('a frame argument is a param, not a literal', TypeFacts.textual_producer(nil, param, 1, 1) == 'param')
 
+# r = c ? foo : "a".freeze; r.freeze -- the inner freeze is the nearest textual one, but foo's result reaches the outer.
+arm = fold_irep([fold_insn(0, 'JMPNOT', "R1\t3"), fold_insn(1, 'SEND0', "R2\t:foo"), fold_insn(2, 'JMP', '5'),
+                 fold_insn(3, 'STRING', "R2\tL[0]"), fold_insn(4, 'SEND0', "R2\t:freeze"), fold_insn(5, 'SEND0', "R2\t:freeze")])
+suite.check('a freeze reached through another arm names no literal class',
+            TypeFacts.send(:freeze_self_type, nil, arm, 5, 2).nil?)
+
 puts '== gate (host)'
 previous = ENV.fetch('BC2CPP_FREEZE_FOLD', nil)
 begin
