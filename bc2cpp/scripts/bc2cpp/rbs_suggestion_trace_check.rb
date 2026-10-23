@@ -30,7 +30,10 @@
 #   * an overloaded method, by the decidability rule below;
 #   * an ivar read (`@x`, a traced GETIV), against the `@x: T` the candidate declares in the class that reads it. The
 #     class is the one the read's method is defined in (IVAR rows), so a class without its own declaration is
-#     undeclared, and a module's ivar is never decided (it belongs to whichever class includes the module).
+#     undeclared, and a module's ivar is never decided (it belongs to whichever class includes the module);
+#   * a constant read (GETCONST, GETMCNST), against the `NAME: T` the candidate declares in the scope the read resolved to
+#     (CONST rows). The owner is the one the closed-world lexical analysis proved (LexicalConsts), so a read it did not
+#     prove is counted as unresolved, and a resolved owner with no declaration is counted as undeclared. Neither is compared.
 # Overloaded methods. A method key is every candidate definition of `Owner#name` (a reopened class gives two `def`s,
 # an RBS method gives several overloads). It is compared as one method only when both hold:
 #   (1) every definition declares the same signature (the same RBS method type), so whichever one ran, the declared
@@ -43,10 +46,9 @@
 # Not compared, and counted in the summary where it applies: a site with no calls; an overflowed site, whose class table
 # was full so its classes are unknown (counted once over the whole trace, whether or not a candidate declares it);
 # block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, and the emitter
-# declares a block type as untyped); constants (a read names the constant as written, not the scope that resolved it,
-# so no candidate `NAME: T` can be matched to it); the receiver of a singleton method whose class lookup is not
+# declares a block type as untyped); the receiver of a singleton method whose class lookup is not
 # complete (a module owner, a non-class receiver, a program class without --hierarchy): counted as undecided, never a
-# contradiction.
+# contradiction. A constant read the analysis did not resolve is counted, never compared.
 #
 # A class is a contradiction only when the lookup order it is checked against is complete: a core class (mruby's
 # hierarchy from CoreHierarchySigs), or a program class whose superclass chain reaches a core class through --hierarchy.
@@ -67,6 +69,8 @@ module RbsSuggestionTrace
   Error = Class.new(StandardError)
   # A `@x: T` declaration, with the file and line of the candidate it is in.
   Ivar = Struct.new(:type, :file, :line)
+  # A `NAME: T` constant declaration, with the file and line of the candidate it is in. Keyed by `Owner::NAME`.
+  Const = Struct.new(:type, :file, :line)
   # optional: the types of the optional positionals; rest: the type of `*T` or nil; keywords: [name, type] pairs;
   # signature: the RBS method type text, which the overload rule compares between definitions.
   Sig = Struct.new(:owner, :name, :params, :ret, :file, :line, :singleton, :optional, :rest, :keywords, :signature) do
@@ -86,7 +90,8 @@ module RbsSuggestionTrace
   # table overflowed; impls: method => the implementation functions (`fn`) that ran under it.
   # ivars: [owner, "@name"] => { calls:, overflow:, classes: } (TraceTypes::Candidates.read_ivars).
   # self_sites: method => the receiver (`self` site) of a singleton method, merged over the dumps.
-  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls, :ivars, :self_sites)
+  # consts: { resolved: "Owner::NAME" => slot, unresolved: "NAME" => slot } (TraceTypes::Candidates.read_consts).
+  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls, :ivars, :self_sites, :consts)
   Result = Struct.new(:findings, :stats)
 
   module_function
@@ -103,27 +108,32 @@ module RbsSuggestionTrace
     classes = {}
     sigs = []
     ivars = Hash.new { |h, k| h[k] = {} }
+    consts = {}
     files.each do |path|
       begin
         _buffer, _directives, decls = RBS::Parser.parse_signature(File.read(path))
       rescue RBS::ParsingError => e
         raise Error, "#{path}: #{e.message}"
       end
-      walk(decls, '', path, classes, sigs, ivars)
+      walk(decls, '', path, classes, sigs, ivars, consts)
     end
-    [classes, sigs, ivars]
+    [classes, sigs, ivars, consts]
   end
 
-  def walk(nodes, owner, file, classes, sigs, ivars)
+  def walk(nodes, owner, file, classes, sigs, ivars, consts)
     nodes.each do |node|
       case node
       when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
         name = [owner, node.name.to_s.delete_prefix('::')].reject(&:empty?).join('::')
         classes[name] = node.is_a?(RBS::AST::Declarations::Class) ? :class : :module
-        walk(node.members, name, file, classes, sigs, ivars)
+        walk(node.members, name, file, classes, sigs, ivars, consts)
       when RBS::AST::Members::InstanceVariable
         # `@x: T` in a class or module body; an ivar outside one (no owner) is not a candidate this check reads.
         ivars[owner][node.name.to_s] = Ivar.new(node.type, file, node.location.start_line) unless owner.empty?
+      when RBS::AST::Declarations::Constant
+        # `NAME: T` in a module body (or at the top level, owner ''), the scope the constant is defined in.
+        name = node.name.to_s.delete_prefix('::')
+        consts[[owner, name].reject(&:empty?).join('::')] = Const.new(node.type, file, node.location.start_line)
       when RBS::AST::Members::MethodDefinition
         # `def self?.x` names both an instance and a singleton method, so it is not compared.
         next unless %i[instance singleton].include?(node.kind)
@@ -150,9 +160,12 @@ module RbsSuggestionTrace
     elems = TraceTypes::Candidates.read_elements(dumps)
     element_tables = [elems[:params], elems[:returns]]
     ivars = TraceTypes::Candidates.read_ivars(dumps)
+    consts = TraceTypes::Candidates.read_consts(dumps)
+    const_slots = consts[:resolved].values + consts[:unresolved].values
     overflowed = params.count { |_, site| site[:overflow].positive? } +
                  rets.count { |_, site| site[:overflow].positive? } +
                  ivars.count { |_, site| site[:overflow].positive? } +
+                 const_slots.count { |site| site[:overflow].positive? } +
                  element_tables.sum { |table| table.sum { |_, roles| roles.count { |_, slot| slot[:overflow].positive? } } }
 
     by_param = {}
@@ -173,7 +186,7 @@ module RbsSuggestionTrace
       target = ((param_elems[method] ||= {})[key] ||= {})
       roles.each { |role, slot| merge_site(target[role] ||= new_site, slot) }
     end
-    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps), ivars, self_sites)
+    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps), ivars, self_sites, consts)
   end
 
   # method => the implementation functions (the `fn` field, index 6) of the PARAM_SITE and RETURN_SITE rows with calls.
@@ -410,12 +423,41 @@ module RbsSuggestionTrace
 
   # ---- the comparison -----------------------------------------------------------------------------------------------
 
-  def compare(classes, sigs, obs, hierarchy, ivar_decls = {})
+  # A constant read (see the header). Only a read the analysis resolved to Owner::NAME is compared, with the `NAME: T` the
+  # candidate declares in Owner; an unresolved read is counted (once per name as written), and a resolved owner with no
+  # declaration is undeclared. An overflowed read is counted with the overflowed sites and never compared.
+  def compare_consts(const_decls, obs, ctx, findings, stats)
+    obs.consts[:unresolved].each_value { |site| stats[:const_unresolved] += 1 if site[:calls].positive? }
+    obs.consts[:resolved].each do |key, site|
+      next if site[:calls].zero? || site[:overflow].positive?
+
+      decl = const_decls[key]
+      if decl.nil?
+        stats[:const_undeclared] += 1
+        next
+      end
+
+      stats[:const_sites] += 1
+      bad = site[:classes].filter_map do |observed, count|
+        verdict = type_verdict(observed, decl.type, nil, ctx)
+        stats[:undecided_classes] += 1 if verdict == :unknown
+        [observed, count] if verdict == :contradiction
+      end
+      next if bad.empty?
+
+      seen = bad.map { |observed, count| "#{observed} (#{count})" }.join(', ')
+      findings << "#{decl.file}:#{decl.line}: #{key} (constant) declared #{decl.type}, but the trace observed " \
+                  "#{seen} [TRACE_CONTRADICTION]"
+    end
+  end
+
+  def compare(classes, sigs, obs, hierarchy, ivar_decls = {}, const_decls = {})
     ctx = Ctx.new(classes, hierarchy)
     findings = []
     stats = Hash.new(0)
     stats[:overflowed] = obs.overflowed
     compare_ivars(classes, ivar_decls, obs, ctx, findings, stats)
+    compare_consts(const_decls, obs, ctx, findings, stats)
     observers = observers_by_name(obs)
     singletons = singleton_observers_by_name(obs)
     sigs.group_by(&:key).each_value do |defs|
@@ -629,10 +671,10 @@ module RbsSuggestionTrace
   end
 
   def run(dir, dumps, hierarchy_path: nil)
-    classes, sigs, ivars = read_candidates(dir)
+    classes, sigs, ivars, consts = read_candidates(dir)
     obs = read_observed(dumps)
     hierarchy = hierarchy_path && TraceTypes::Candidates::Hierarchy.read(hierarchy_path)
-    compare(classes, sigs, obs, hierarchy, ivars)
+    compare(classes, sigs, obs, hierarchy, ivars, consts)
   end
 
   def summary(result)
@@ -645,6 +687,8 @@ module RbsSuggestionTrace
       "#{s[:extend_undecided]} extend observation(s) cannot decide, #{s[:rest_not_array]} rest row(s) not an Array, " \
       "#{s[:ivar_sites]} ivar site(s) compared, #{s[:ivar_undeclared]} ivar site(s) undeclared, " \
       "#{s[:ivar_undecided]} ivar site(s) in a module cannot decide, " \
+      "#{s[:const_sites]} constant site(s) compared, #{s[:const_undeclared]} constant site(s) undeclared, " \
+      "#{s[:const_unresolved]} constant name(s) unresolved, " \
       "#{s[:self_sites]} singleton receiver(s) compared, #{s[:self_undecided_classes]} receiver class(es) undecided, " \
       "#{s[:self_unreached]} singleton receiver(s) unreached, #{s[:self_overflowed]} overflowed receiver(s) skipped, " \
       "#{result.findings.size} contradiction(s)"
@@ -691,14 +735,14 @@ module RbsSuggestionTrace
   end
 
   # The candidates the emitter writes for these facts: the same files `type_check.rb --emit-rbs` produces. ivars is
-  # [owner, "@name", type] triples, written as `@name: type` in the owner's body.
-  def write_candidates(dir, methods, classes: [], modules: [], ivars: [])
+  # [owner, "@name", type] triples, written as `@name: type` in the owner's body; consts the same for `NAME: type`.
+  def write_candidates(dir, methods, classes: [], modules: [], ivars: [], consts: [])
     require 'type_check_rbs'
     facts = { 'classes' => classes.map { |n| { 'name' => n, 'kind' => 'class', 'superclass' => nil } } +
                            modules.map { |n| { 'name' => n, 'kind' => 'module', 'superclass' => nil } },
               'methods' => methods,
               'ivars' => ivars.map { |owner, name, type| { 'owner' => owner, 'name' => name, 'type' => type, 'scope' => 'engine' } },
-              'constants' => [] }
+              'constants' => consts.map { |owner, name, type| { 'owner' => owner, 'name' => name, 'type' => type, 'scope' => 'engine' } } }
     TypeCheckRbs.emit(facts, dir, scope: 'engine')
   end
 
@@ -706,6 +750,14 @@ module RbsSuggestionTrace
   def ivar_rows(id, owner, ivar, calls, overflow, classes)
     rows = ["IVAR_SITE\tfx\t#{id}\t#{calls}\t#{overflow}\t#{owner}\t#{ivar}"]
     classes.each { |klass, count| rows << "IVAR_CLASS\tfx\t#{id}\t#{klass}\t#{count}" }
+    rows
+  end
+
+  # A CONST_SITE of one read, named by the owner it resolved to (nil when unproven, the `-` row) and the name as written,
+  # with its CONST_CLASS rows (the rows param_trace.rb writes).
+  def const_rows(id, owner, written, calls, overflow, classes)
+    rows = ["CONST_SITE\tfx\t#{id}\t#{calls}\t#{overflow}\t#{owner || '-'}\t#{written}"]
+    classes.each { |klass, count| rows << "CONST_CLASS\tfx\t#{id}\t#{klass}\t#{count}" }
     rows
   end
 
@@ -1155,6 +1207,52 @@ module RbsSuggestionTrace
                  r.findings.empty? && r.stats[:ivar_undeclared] == 2 && r.stats[:ivar_undecided] == 1 && r.stats[:ivar_sites] == 0)
       check.call('an overflowed ivar read is not compared and is counted with the overflowed sites',
                  r.stats[:overflowed] == 1)
+
+      # Constant reads, against the `NAME: T` of the scope they resolved to. Box declares LIMIT: Integer, NAME: String and
+      # MAYBE: Integer?; Game::Hero (nested, so its key is the qualified scope) declares LIMIT: Integer. A read the analysis
+      # did not resolve (`-`) has no declaration to compare with and is counted, not decided.
+      const_dir = File.join(tmp, 'consts')
+      write_candidates(const_dir, [method_fact('Box', 'hp', [], 'Integer')], classes: ['Box'],
+                       consts: [['Box', 'LIMIT', 'Integer'], ['Box', 'NAME', 'String'], ['Box', 'MAYBE', 'Integer?']])
+      File.write(File.join(const_dir, 'Hero.rbs'), "module Game\n  class Hero\n    LIMIT: Integer\n  end\nend\n")
+
+      # A resolved read observed as Integer under `Box::NAME: String` is a contradiction; the agreeing `Box::LIMIT` is not.
+      const_bad = File.join(tmp, 'const_bad.tsv')
+      File.write(const_bad, (const_rows(0, 'Box::NAME', 'NAME', 2, 0, 'Integer' => 2) +
+                             const_rows(1, 'Box::LIMIT', 'LIMIT', 1, 0, 'Integer' => 1)).join("\n") << "\n")
+      r = run(const_dir, [const_bad])
+      check.call('a resolved constant observed as Integer under `NAME: String` is a contradiction, the agreeing one is not',
+                 r.findings.one? { |line| line.include?('Box::NAME (constant) declared String') && line.include?('observed Integer (2)') } &&
+                 r.findings.first.start_with?(File.join(const_dir, 'Box.rbs') + ':') && r.stats[:const_sites] == 2)
+
+      # A resolved read that agrees: the declared type, nil in a nilable, and a constant of a nested scope (Game::Hero::LIMIT).
+      const_ok = File.join(tmp, 'const_ok.tsv')
+      File.write(const_ok, (const_rows(0, 'Box::LIMIT', 'LIMIT', 2, 0, 'Integer' => 2) +
+                            const_rows(1, 'Box::MAYBE', 'MAYBE', 2, 0, 'NilClass' => 1, 'Integer' => 1) +
+                            const_rows(2, 'Game::Hero::LIMIT', 'LIMIT', 2, 0, 'Integer' => 2) +
+                            const_rows(3, 'Box::LIMIT', 'LIMIT', 0, 0, {})).join("\n") << "\n")
+      r = run(const_dir, [const_ok])
+      check.call('constant reads the declared types admit (nested scope, nil in a nilable) have no findings',
+                 r.findings.empty? && r.stats[:const_sites] == 3 && r.stats[:const_unresolved] == 0)
+
+      # The unresolved read (`-`) is undecided even though its observed class contradicts Box::LIMIT's declaration. An
+      # undeclared resolved constant and an overflowed read are counted, never compared.
+      const_skip = File.join(tmp, 'const_skip.tsv')
+      File.write(const_skip, (const_rows(0, nil, 'LIMIT', 2, 0, 'String' => 2) +
+                              const_rows(1, 'Box::GONE', 'GONE', 2, 0, 'Integer' => 2) +
+                              const_rows(2, 'Game::Hero::NOPE', 'NOPE', 1, 0, 'Integer' => 1) +
+                              const_rows(3, 'Box::LIMIT', 'LIMIT', 2, 1, 'String' => 2)).join("\n") << "\n")
+      r = run(const_dir, [const_skip])
+      check.call('an unresolved read, an undeclared constant and an overflowed read are counted and never failures',
+                 r.findings.empty? && r.stats[:const_unresolved] == 1 && r.stats[:const_undeclared] == 2 &&
+                   r.stats[:const_sites] == 0 && r.stats[:overflowed] == 1)
+
+      # A dump with no CONST rows (one written before they were recorded) adds no constant observations.
+      const_old = File.join(tmp, 'const_old.tsv')
+      File.write(const_old, param_rows(0, 'Box#hp', 1, 1, 0, 'Integer' => 1).join("\n") << "\n")
+      r = run(const_dir, [const_old])
+      check.call('a dump with no CONST rows adds no constant observations',
+                 r.findings.empty? && r.stats[:const_sites] == 0 && r.stats[:const_undeclared] == 0 && r.stats[:const_unresolved] == 0)
 
       # A dump without IVAR rows (one written before they were recorded) reads the same as before.
       r = run(candidates, [consistent])
