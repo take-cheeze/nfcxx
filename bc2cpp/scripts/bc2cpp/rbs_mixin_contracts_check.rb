@@ -58,7 +58,10 @@ end
 hierarchy = { 'Child' => 'Base', 'Base' => :none }
 owners = RbsSignatures.contract_owners('Child', hierarchy, included_modules: { 'Child' => ['M'] })
 check('single include path keeps Ruby order (Child, M, Base, Object)', owners == %w[Child M Base Object])
-world = { superclass_of: hierarchy, included_modules: { 'Child' => ['M'] }, prepended_modules: {}, unknown_mixins: Set.new }
+# The closed world bounds declared receivers (a declared Child may be any program subclass of Child); Child is a leaf.
+closed = ->(klass) { { 'Child' => %w[Child], 'Base' => %w[Base Child] }[klass] }
+world = { superclass_of: hierarchy, included_modules: { 'Child' => ['M'] }, prepended_modules: {}, unknown_mixins: Set.new,
+          subclasses: closed }
 contracts = RbsSignatures::IrContracts.new(applied(ir_methods: [['M', 'm']], returns: { ['M', 'm'] => Set[:Symbol] }, owner: 'Use'),
                                            **world)
 check('module-declared contract is found through the include', contracts.target('Child', 'm') == 'M')
@@ -72,7 +75,8 @@ check('prepend and nested include follow mixin order', nested == %w[Wrap Child G
 shared = { 'Child' => 'Base', 'Base' => :none }
 dup_owners = RbsSignatures.contract_owners('Child', shared, included_modules: { 'Child' => ['M'], 'Base' => ['M'] })
 check('module reached through two include paths supplies no contract', dup_owners.empty?)
-dup_world = { superclass_of: shared, included_modules: { 'Child' => ['M'], 'Base' => ['M'] }, prepended_modules: {}, unknown_mixins: Set.new }
+dup_world = { superclass_of: shared, included_modules: { 'Child' => ['M'], 'Base' => ['M'] }, prepended_modules: {}, unknown_mixins: Set.new,
+              subclasses: closed }
 dup_applied = applied(ir_methods: [['M', 'm'], ['Base', 'm']], returns: { ['M', 'm'] => Set[:Symbol], ['Base', 'm'] => Set[:Integer] },
                       owner: 'Use', arg_types: { '1' => Set[:Child] })
 dup_fact, dup_refusal = result_fact(dup_world, dup_applied)
@@ -97,6 +101,11 @@ check('module call result records its call-result dependency',
 unknown_applied = applied(ir_methods: [['M', 'm']], returns: { ['M', 'm'] => Set[:Symbol] }, owner: 'Use')
 unknown_fact, unknown_refusal = result_fact(world, unknown_applied)
 check('unknown receiver is not assumed to be the single contract owner', unknown_fact.nil? && unknown_refusal[:cause].to_s.start_with?('unknown:'))
+
+# Refused: a declared receiver with no closed-world bound may be an outside subclass, so its module contract is untyped.
+open_world = world.merge(subclasses: nil)
+open_fact, open_refusal = result_fact(open_world, accepted_applied)
+check('declared receiver with no closed-world bound is untyped', open_fact.nil? && open_refusal[:cause] == 'call_receiver_unbounded:Child#m')
 
 if $failures.empty?
   puts 'host mixin and receiver contract checks passed'
