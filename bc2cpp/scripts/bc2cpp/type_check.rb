@@ -29,6 +29,8 @@
 #                            send once; several minutes on the engine)
 #   --emit-rbs DIR           write the inferred types as RBS files below DIR (docs/bc2cpp-type-check.md)
 #   --emit-rbs-suggestions DIR  write reviewable candidates with independently inferred IR returns
+#   --trace FILE             trace candidates (scripts/bc2cpp/trace_types.rb candidates): runtime evidence that
+#                            downgrades a possible_mismatch return to TC1009 (tools/bc2cpp/ir_trace_evidence.rb)
 #   -q                       no summary: diagnostics only
 #
 # Exit status: 0 clean, 1 when a declared type contradicts the inference or a signature cannot be used, 2 when the
@@ -41,6 +43,7 @@ require 'optparse'
 require 'tmpdir'
 require 'fileutils'
 require 'type_check_report'
+require 'ir_trace_evidence'
 
 ROOT = File.expand_path('../..', __dir__)
 
@@ -61,6 +64,7 @@ parser = OptionParser.new do |o|
   o.on('--what-if') { opts[:what_if] = true }
   o.on('--emit-rbs DIR') { |v| opts[:emit_rbs] = v }
   o.on('--emit-rbs-suggestions DIR') { |v| opts[:emit_rbs_suggestions] = v }
+  o.on('--trace FILE') { |v| opts[:trace] = v }
   o.on('-q') { opts[:quiet] = true }
 end
 rest = parser.parse(ARGV)
@@ -88,6 +92,7 @@ else
   end
 end
 
+facts = IrTraceEvidence.annotate(facts, File.read(opts[:trace])) if opts[:trace]
 suggestions = opts[:sends] ? TypeCheckReport.suggestions(facts, rows, scope: opts[:scope]) : []
 diags = TypeCheckReport.diagnostics(facts, suggestions, all: opts[:all], top: opts[:top], scope: opts[:scope])
 summary = TypeCheckReport.summary(facts, scope: opts[:scope])
