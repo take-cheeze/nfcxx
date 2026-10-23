@@ -50,6 +50,10 @@ SOURCE = <<~RUBY
     def self.make(a); new(a); end
   end
   SN_ANON = Class.new(SnOpen)
+  flow_base = $sn_factory_branch ? SnOpen : SnOpen
+  flow_factory = Class
+  flow_copy = flow_factory
+  SN_FLOW_ANON = flow_copy.new(flow_base)
 RUBY
 OWNERS = %w[SnLeaf SnLeaf.singleton SnBase SnBase.singleton SnKid SnOpen SnOpen.singleton].freeze
 
@@ -91,6 +95,7 @@ Dir.mktmpdir('self-new-leaf') do |dir|
           "o = SnKid.make(1).again; [o.class, o.a]",
           "o = SnOpen.make(1); [o.class, o.a]",
           "o = SN_ANON.make(2); [o.class == SN_ANON, o.a]",
+          "o = SN_FLOW_ANON.make(3); [o.class == SN_FLOW_ANON, o.a]",
         };
         for (const char* src : rows) {
           mrb_value v = eval(M, src);
@@ -107,6 +112,8 @@ Dir.mktmpdir('self-new-leaf') do |dir|
       check.call('built and ran', built)
       check.call('runtime parity, interpreted against compiled', !sections['compiled'].to_a.empty? &&
                                                                   sections['compiled'] == sections['interpreted'])
+      check.call('a factory alias with a joined superclass builds the anonymous subclass',
+                 sections['compiled'].to_a.any? { |l| l.include?('SN_FLOW_ANON.make(3); [o.class == SN_FLOW_ANON, o.a] => [true, 3]') })
       check.call('the kid that inherits make builds a kid', sections['compiled'].to_a.any? { |l| l.include?('SnKid.make(1); [o.class, o.a] => [SnKid, 10]') })
       warn output unless failures.empty?
     else
