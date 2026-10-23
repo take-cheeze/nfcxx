@@ -72,7 +72,7 @@ module IvarPoisonCauses
 
       return classify(irep, defn.index, insn.regs[1], mand, method_name, registry, depth + 1)
     end
-    return ['integer', nil] if op.start_with?('LOADI')
+    return ['integer', nil] if BytecodeIR::Ops::LOADI_OPS.include?(op)
     return ['getiv', insn.ivar.to_s] if op == 'GETIV'
     return [LITERALS.fetch(op), nil] if LITERALS.key?(op)
     return ["call:#{call_kind(insn.sym, registry)}", insn.sym.to_s] if CALLS.include?(op) && insn.sym

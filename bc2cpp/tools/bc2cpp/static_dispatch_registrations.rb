@@ -387,7 +387,7 @@ module StaticDispatchRegistrations
     case insn.op
     when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
     when 'LOADSELF' then :self
-    else insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
+    else BytecodeIR::Ops::LOADI_OPS.include?(insn.op) || LITERAL_OPS.include?(insn.op) ? :core : :unknown
     end
   end
 

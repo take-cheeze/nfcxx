@@ -354,7 +354,7 @@ module NumericFlow
   def table(program)
     program.numeric_flow_table ||= begin
       instructions = program.instructions
-      supported = instructions.all? { |i| SUPPORTED_OPS.include?(i.op) || i.op.start_with?('LOADI') }
+      supported = instructions.all? { |i| SUPPORTED_OPS.include?(i.op) || BytecodeIR::Ops::LOADI_OPS.include?(i.op) }
       decoded = program.decoded if supported
       operands = program.operands if supported
       steps = (instructions.map { |i| NumericFlow.decode_step(i.source, decoded[i.index], operands[i.index]).freeze }.freeze if supported)
@@ -396,7 +396,7 @@ module NumericFlow
     step.a = decoded.reg
     step.call = CALL_KINDS[op]
     step.kind = if step.call then K_CALL
-                elsif op.start_with?('LOADI') then K_LOADI
+                elsif BytecodeIR::Ops::LOADI_OPS.include?(op) then K_LOADI
                 else STEP_KINDS.fetch(op, K_OTHER)
                 end
     step.ivar = operands.ivar if step.kind == K_GETIV

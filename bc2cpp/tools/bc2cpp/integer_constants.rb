@@ -238,7 +238,7 @@ module IntegerConstants
     irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                          follow_moves: true) do |insn, j, cur|
       # The value rides along so arithmetic on a register-held literal (`2 * M3`) can be evaluated.
-      next(loadi_value(insn) || :literal) if insn.op.start_with?('LOADI')
+      next(loadi_value(insn) || :literal) if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
 
       case insn.op
       when 'GETCONST'
@@ -335,7 +335,7 @@ module IntegerConstants
   def self.literal_value_kind(irep, idx, reg, entries)
     irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
                                          follow_moves: true) do |insn, j, cur|
-      if insn.op.start_with?('LOADI')
+      if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
         value = loadi_value(insn)
         next value.nil? ? nil : [:literal, value]
       end

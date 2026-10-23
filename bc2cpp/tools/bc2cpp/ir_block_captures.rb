@@ -50,7 +50,7 @@ class IrBlockCaptures
     return false unless @call_index.is_a?(Integer) && producer_index.is_a?(Integer) && producer_index < @call_index
     return false unless Array(@parent.catch_handlers).empty? && Array(@child.catch_handlers).empty? && Array(@child.reps).empty?
     return false unless BytecodeIR.for(@parent).resolved? && BytecodeIR.for(@child).resolved?
-    return false unless BytecodeIR.for(@child).instructions.all? { |instruction| PURE_OPS.include?(instruction.op) || instruction.op.match?(/\ALOADI_[0-7]\z/) }
+    return false unless BytecodeIR.for(@child).instructions.all? { |instruction| PURE_OPS.include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op) }
 
     call = @parent.instructions[@call_index]
     producer = @parent.instructions[producer_index]
@@ -63,6 +63,6 @@ class IrBlockCaptures
 
     # Straight-line transport prevents another invocation or escape before this call.
     corridor = @parent.instructions[(producer_index + 1)...@call_index]
-    corridor.all? { |instruction| %w[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || instruction.op.match?(/\ALOADI_[0-7]\z/) }
+    corridor.all? { |instruction| %w[MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADI LOADI16 LOADI32 LOADINEG LOADL STRING].include?(instruction.op) || BytecodeIR::Ops::LOADI_SLOT.include?(instruction.op) }
   end
 end
