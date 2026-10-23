@@ -52,7 +52,7 @@ module IntegerConstantRanges
     class_names = Set.new
     ireps.each_value do |irep|
       entries = IntegerConstants.const_entry_addrs(irep)
-      irep.instructions.each_with_index do |insn, i|
+      BytecodeIR.for(irep).each_source do |insn, i|
         case insn.op
         when 'SETCONST', 'SETMCNST'
           name = insn.const_name

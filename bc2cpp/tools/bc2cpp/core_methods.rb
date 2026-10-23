@@ -98,7 +98,7 @@ module CoreMethods
   end
 
   def all_ops(irep, ireps)
-    irep.reps.compact.reduce(irep.instructions.to_set(&:op)) { |acc, child| acc | all_ops(ireps.fetch(child), ireps) }
+    irep.reps.compact.reduce(BytecodeIR.for(irep).instructions.to_set(&:op)) { |acc, child| acc | all_ops(ireps.fetch(child), ireps) }
   end
 
   # One line per core-source bytecode definition the build keeps interpreted.
