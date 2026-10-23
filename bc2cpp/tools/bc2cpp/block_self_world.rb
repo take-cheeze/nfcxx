@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_ops'
 require_relative 'ir_block_operands'
 require_relative 'core_hierarchy_sigs'
 require_relative 'send_names'
@@ -48,7 +49,10 @@ module BlockSelfWorld
   METHOD_MAKERS = Set['method', 'singleton_method', 'instance_method'].freeze
   # Names whose presence among a computed send's names leaves that send's own names unproven.
   INDIRECT_NAMES = (NAME_SENDS | METHOD_MAKERS | Set['to_proc']).freeze
-  SENDS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'].freeze
+  SENDS = BytecodeIR::Ops::SEND
+  # Ops that WRITES_LEADING_REG_OPS lists but that do not write R(a): stores, branches, returns and no-ops.
+  LEAD_NOT_WRITTEN = Set['SETGV', 'SETSV', 'SETIV', 'SETCV', 'SETCONST', 'SETMCNST', 'SETIDX', 'JMP', 'JMPIF',
+                         'JMPNOT', 'JMPNIL', 'RETURN', 'RETURN_BLK', 'BREAK', 'STOP', 'DEBUG', 'NOP'].freeze
   # The rebinders' own implementations and the VM that runs them: the only natives allowed to run a Proc under a self
   # they choose. vm.c: yield, instance_eval/module_eval (eval_under), send, Proc#call and the top-level run; class.c:
   # Class.new/Module.new and define_method; load.c: runs a loaded irep under the top self (not a block); proc.c: Proc.new;
@@ -172,7 +176,7 @@ module BlockSelfWorld
 
     def scan_send(irep, idx, insn, ireps, parents, compiled)
       name = insn.sym
-      if STRING_EVALS.include?(name) && !%w[SENDB SSENDB].include?(insn.op) && (name == 'eval' || insn.argc != 0)
+      if STRING_EVALS.include?(name) && !BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && (name == 'eval' || insn.argc != 0)
         return fail!(irep, insn, "evaluates a String with #{name} (code this analysis cannot read)")
       end
       kind = if REBIND_NAMES.include?(name) then [:rebinder, name]
@@ -188,7 +192,7 @@ module BlockSelfWorld
       end
       return if what == :plain
 
-      block = %w[SENDB SSENDB].include?(insn.op)
+      block = BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
       labels = block && BlockSelfWorld.literal_block_labels(irep, idx)
       if labels
         if compiled
@@ -232,7 +236,8 @@ module BlockSelfWorld
     # `new`/`define` on a receiver that may be a class factory: anything but a constant naming a class known not to
     # derive from Class/Module/Struct/Data (by its declaration or sig/bc2cpp/declarations.rbs#core_hierarchy) and never assigned.
     def factory_send?(irep, idx, insn)
-      return true if insn.op.start_with?('SS')
+      # Only SEND-family ops reach here (scan_irep dispatches on SENDS), so SELF_SEND is the SS-prefixed ones.
+      return true if BytecodeIR::Ops::SELF_SEND.include?(insn.op)
 
       factories = FACTORY_SENDS.fetch(insn.sym)
       const = IrBlockOperands.constant_name(irep, idx, insn.reg)
@@ -414,9 +419,7 @@ module BlockSelfWorld
     end
 
     def writes_leading?(insn)
-      BytecodeIR::WRITES_LEADING_REG_OPS.include?(insn.op) &&
-        !%w[SETGV SETSV SETIV SETCV SETCONST SETMCNST SETIDX JMP JMPIF JMPNOT JMPNIL RETURN RETURN_BLK BREAK STOP
-            DEBUG NOP].include?(insn.op)
+      BytecodeIR::WRITES_LEADING_REG_OPS.include?(insn.op) && !LEAD_NOT_WRITTEN.include?(insn.op)
     end
 
     # Does a block nested (at any depth) in +frame+ store into its local +index+?
@@ -440,7 +443,7 @@ module BlockSelfWorld
         ireps.each_value do |irep|
           irep.each_with_op(*SENDS) do |insn, idx|
             return :unknown if insn.sym == 'to_proc'
-            next unless %w[SENDB SSENDB].include?(insn.op)
+            next unless BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
             next if BlockSelfWorld.literal_block_label(irep, idx)
 
             found = block_operand_symbols(irep, idx, insn, ireps, parents)

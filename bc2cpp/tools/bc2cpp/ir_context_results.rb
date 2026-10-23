@@ -16,6 +16,8 @@ class IrContextResults
   FIXED_BINDING_EDGES = {}.freeze
   PURE_OPS = Set['ENTER', 'NOP', 'MOVE', 'LOADSELF', 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM',
                  'GETIV', 'RETURN', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  # SEND and SSEND forms without a block argument (Ops::BLOCK_SEND removed).
+  NO_BLOCK_SEND = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
   Shape = Struct.new(:container, :elements, keyword_init: true)
   Node = Struct.new(:key, :revision, :evaluation, :has_callees, :arrays, :body, :receiver, :arguments, :keywords, :binding, :root, :mask, :states, :calls, keyword_init: true)
 
@@ -410,7 +412,7 @@ class IrContextResults
 
   # Keyword names depend only on reaching bytecode definitions, never on context masks.
   def build_call_layout(body, index, insn)
-    return nil unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op)
+    return nil unless NO_BLOCK_SEND.include?(insn.op)
 
     argc = insn.op.end_with?('0') ? 0 : insn.argc
     return nil unless argc && insn.nk_spec != '*'
@@ -579,7 +581,7 @@ class IrContextResults
 
       nested = seen.dup.add(key)
       callee.instructions.each_with_index.all? do |instruction, call_index|
-        if %w[SEND SEND0 SSEND SSEND0].include?(instruction.op)
+        if NO_BLOCK_SEND.include?(instruction.op)
           inputs = context.states[call_index]
           inputs.nil? || readonly?(context, callee, call_index, instruction, inputs, nested)
         else
