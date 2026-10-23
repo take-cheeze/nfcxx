@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 require_relative 'core_mixins'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
@@ -18,7 +19,7 @@ def reaching_sources(irep, use, reg)
   defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s)
   return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
-  defs.map { |d| irep.instructions[d.index] }
+  defs.map { |d| BytecodeIR.for(irep).source_at(d.index) }
 end
 
 # The receiver instruction of a read at +use+ of +reg+: the one definition every reaching source shares (same op,
@@ -61,7 +62,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
 
   # The Struct's name comes from a SETCONST right after the call on the same
   # register; an unnamed Struct.new is left unrecognized.
-  next_insn = irep.instructions[idx + 1]
+  next_insn = BytecodeIR.for(irep).source_at(idx + 1)
   struct_name = if next_insn && next_insn.op == 'SETCONST'
                   next_insn.const_name if next_insn.reg_operand == d.to_s
                 end
@@ -71,7 +72,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
 
   scan_from = idx - 1
   if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
-    return nil unless irep.instructions[scan_from]&.op == 'BLOCK'
+    return nil unless BytecodeIR.for(irep).source_at(scan_from)&.op == 'BLOCK'
 
     scan_from -= 1
   end
@@ -85,7 +86,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   return nil unless pos
 
   if pos == '*'
-    array_insn = scan_from >= 0 ? irep.instructions[scan_from] : nil
+    array_insn = scan_from >= 0 ? BytecodeIR.for(irep).source_at(scan_from) : nil
     return nil unless array_insn&.op == 'ARRAY'
 
     n = array_insn.uint_operand
@@ -320,7 +321,7 @@ def build_registry(ireps, root_label)
         # previous_real_index steps over the interposed EXT lines.
         reg = insn.reg_token
         method_idx = irep.previous_real_index(idx - 1)
-        method_insn = method_idx >= 0 ? irep.instructions[method_idx] : nil
+        method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
         next unless method_insn && method_insn.op == 'METHOD'
 
         method_reg = method_insn.reg
@@ -329,7 +330,7 @@ def build_registry(ireps, root_label)
         next unless insn.paren_reg == method_reg
 
         opener_idx = irep.previous_real_index(method_idx - 1)
-        opener_insn = opener_idx >= 0 ? irep.instructions[opener_idx] : nil
+        opener_insn = opener_idx >= 0 ? BytecodeIR.for(irep).source_at(opener_idx) : nil
         next unless opener_insn && BytecodeIR::Ops::TARGET_CLASS.include?(opener_insn.op)
 
         opener_reg = opener_insn.reg_token
@@ -391,7 +392,7 @@ def build_registry(ireps, root_label)
         # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
         packed = insn.n_spec == '*'
         if packed
-          arr = idx.positive? && irep.instructions[idx - 1]
+          arr = idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
           n = arr && arr.op == 'ARRAY' ? arr.uint_operand.to_i : -1
           raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0
         end
@@ -485,7 +486,7 @@ def build_registry(ireps, root_label)
 
         # The block operand is the BLOCK right before the SENDB (codegen emits it
         # there).
-        block_insn = irep.instructions[idx - 1]
+        block_insn = BytecodeIR.for(irep).source_at(idx - 1)
         next unless block_insn && block_insn.op == 'BLOCK'
 
         block_idx = block_insn.block_index
@@ -497,7 +498,7 @@ def build_registry(ireps, root_label)
         # The owner name comes from a SETCONST right after the SENDB. An unnamed
         # Struct still gets a placeholder owner: soundness only needs a distinct
         # owner so `defs.size == 1` sees more than one definition.
-        next_insn = irep.instructions[idx + 1]
+        next_insn = BytecodeIR.for(irep).source_at(idx + 1)
         struct_name = if next_insn && next_insn.op == 'SETCONST'
                          next_insn.const_name if next_insn.reg_operand == d.to_s
                        end
@@ -506,7 +507,7 @@ def build_registry(ireps, root_label)
         # Member names are LOADSYM'd right before the ARRAY that packs the splat.
         # Struct installs a reader and a writer for each (struct.c), like
         # attr_accessor.
-        array_insn = irep.instructions[idx - 2]
+        array_insn = BytecodeIR.for(irep).source_at(idx - 2)
         if array_insn && array_insn.op == 'ARRAY'
           n = array_insn.uint_operand.to_i
           irep.preceding_run('LOADSYM', idx - 3, limit: n).map(&:sym_token).each do |m|

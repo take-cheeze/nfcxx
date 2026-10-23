@@ -3,6 +3,7 @@
 require 'json'
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 require_relative 'annotations'
 require_relative 'annotation_contradictions'
 require_relative 'ir_type_feedback'
@@ -69,7 +70,7 @@ module TypeFacts
   def def_position(ctx, d, source_lines)
     irep = ctx.ireps[d.irep]
     enter = irep&.enter
-    line = enter ? enter.lineno : irep&.instructions&.first&.lineno
+    line = enter ? enter.lineno : (irep && BytecodeIR.for(irep).source_at(0)&.lineno)
     return [0, 1] unless line&.positive?
 
     [line, column_of(source_lines.call(irep.file), line, /\bdef\s+(?:self\.)?#{Regexp.escape(d.name.to_s)}\b/, 0)]
@@ -388,7 +389,7 @@ module TypeFacts
     # Only frame exits name a cause, so the exit list visits the same instructions in the same order.
     BytecodeIR.for(irep).exits.each do |ex|
       idx = ex.index
-      insn = irep.instructions[idx]
+      insn = BytecodeIR.for(irep).source_at(idx)
       case insn.op
       when 'RETURN'
         srcs = gen.respond_to?(:return_value_sources, true) ? gen.send(:return_value_sources, irep, idx, insn.reg) : nil
@@ -399,7 +400,7 @@ module TypeFacts
         srcs.each do |s|
           if s == :nil then causes << 'literal:nil'
           else
-            w = irep.instructions[s.first]
+            w = BytecodeIR.for(irep).source_at(s.first)
             causes << producer_of(ctx, w)
           end
         end
@@ -469,7 +470,7 @@ module TypeFacts
       end
     end
     ctx.store_log.each do |(owner, _label, idx), (ivar, found, irep, _reg, _mand, mname)|
-      insn = irep.instructions[idx]
+      insn = BytecodeIR.for(irep).source_at(idx)
       loc = { 'file' => relative(ctx, irep.file), 'line' => insn.lineno,
               'col' => column_of(reader.call(irep.file), insn.lineno, /@#{Regexp.escape(ivar.to_s)}\b/, 0), 'method' => mname }
       sites[[owner, ivar.to_s]] << loc.merge('resolved' => !found.nil?) unless found
@@ -684,7 +685,7 @@ module TypeFacts
 
       bare = name.split('::').last
       row = seen[name] ||= { 'name' => name, 'owner' => site[:owner], 'type' => nil, 'source' => nil, 'reason' => nil,
-                             'file' => relative(ctx, irep.file), 'line' => irep.instructions[site[:idx]].lineno, 'col' => 1,
+                             'file' => relative(ctx, irep.file), 'line' => BytecodeIR.for(irep).source_at(site[:idx]).lineno, 'col' => 1,
                              'scope' => scope_of(irep.file) }
       next if row['type']
 

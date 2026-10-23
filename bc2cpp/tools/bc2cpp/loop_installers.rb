@@ -2,6 +2,8 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
+require_relative 'bytecode_ir_regions'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
 require_relative 'core_hierarchy_sigs'
@@ -72,12 +74,12 @@ module LoopInstallers
 
   # True when the SENDB at insns[idx] is a loop whose block tree sends an attr_* installer or define_method.
   def candidate?(irep, idx, ireps)
-    insn = irep.instructions[idx]
+    insn = BytecodeIR.for(irep).source_at(idx)
     return false unless insn.op == 'SENDB' && ITERATORS.include?(insn.sym)
 
     return false if idx.zero?
 
-    block = irep.instructions[idx - 1]
+    block = BytecodeIR.for(irep).source_at(idx - 1)
     return false unless block.op == 'BLOCK' && block.block_index
 
     label = irep.reps[block.block_index]
@@ -198,7 +200,7 @@ module LoopInstallers
     def run
       out = []
       limit = straight_line_limit
-      @irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(@irep).each_source do |insn, idx|
         break if idx >= limit
 
         out << loop_site(insn, idx) if @sites.key?(idx)
@@ -216,13 +218,11 @@ module LoopInstallers
     # First index the walk cannot treat as straight-line: a branch, a return, a handler, or any
     # instruction a branch lands on (a loop back edge makes the site run more than once).
     def straight_line_limit
-      insns = @irep.instructions
-      limit = insns.size
-      insns.each_with_index do |insn, i|
-        limit = i if FLOW_OPS.include?(insn.op) && i < limit
-        target = insn.branch_target
-        next unless target
-
+      prog = BytecodeIR.for(@irep)
+      limit = prog.size
+      prog.each_with_op(*FLOW_OPS) { |_, i| limit = i if i < limit }
+      # Min over the landing indices, so the set's order does not matter.
+      prog.branch_target_addrs.each do |target|
         landing = @irep.index_of_addr(target)
         limit = [limit, landing].min if landing
       end
@@ -421,17 +421,17 @@ module LoopInstallers
 
     def call_block(block, args)
       irep = @ireps[block.label] or refuse('a missing block body')
-      insns = irep.instructions
-      first = insns.first
+      prog = BytecodeIR.for(irep)
+      first = prog.source_at(0)
       refuse('a block without plain parameters') unless first&.op == 'ENTER' && first.enter_fields[0] == args.size &&
                                                         first.enter_fields[1..].all?(&:zero?)
       regs = {}
       args.each_with_index { |v, i| regs[i + 1] = v }
       defines = []
       pc = 1
-      while pc < insns.size
+      while pc < prog.size
         refuse('too many steps') if (@steps += 1) > STEP_LIMIT
-        insn = insns[pc]
+        insn = prog.source_at(pc)
         pc = exec(irep, insn, pc, regs, defines)
         return close_frame(regs, defines) if pc.nil?
       end

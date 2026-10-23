@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'integer_constants'
 require_relative 'bytecode_ir_regions'
+require_relative 'bytecode_ir_containers'
 require_relative 'send_names'
 
 # COMPUTED_SEND_EXPANSION: the finite set of method names a computed-name
@@ -32,7 +33,7 @@ module ComputedSendNames
     nilable = false
     sources = Set.new
     defs.each do |definition|
-      insn = irep.instructions[definition.index]
+      insn = BytecodeIR.for(irep).source_at(definition.index)
       case insn.op
       when 'LOADSYM', 'SYMBOL'
         literal = symbol_literal(irep, insn) or return nil
@@ -75,7 +76,7 @@ module ComputedSendNames
 
     receivers = reaching(irep, index, insn.reg) or return nil
     sets = receivers.map do |definition|
-      load = irep.instructions[definition.index]
+      load = BytecodeIR.for(irep).source_at(definition.index)
       bare = case load.op
              when 'GETCONST', 'GETMCNST' then load.const_name
              end
@@ -124,7 +125,7 @@ module ComputedSendNames
 # Also a name spelled as data (`send(:remove_const, ...)`, `send("const_set", ...)`).
 def self.rebinder?(ireps)
   ireps.each_value.any? do |irep|
-    irep.instructions.any? do |insn|
+    BytecodeIR.for(irep).each_source.any? do |insn, _|
       name = case insn.op
              when 'STRING', 'SYMBOL' then irep.pool[insn.pool_index.to_i]
              else insn.sym
@@ -139,13 +140,13 @@ end
       frozen = ComputedSendNames.reaching(irep, idx, reg)
       return nil unless frozen&.size == 1
 
-      call = irep.instructions[frozen.first.index]
+      call = BytecodeIR.for(irep).source_at(frozen.first.index)
       return nil unless %w[SEND SEND0].include?(call.op) && call.sym == 'freeze' && call.n_spec.to_i.zero? && !call.nk_spec
 
       literal = ComputedSendNames.reaching(irep, frozen.first.index, call.reg)
       return nil unless literal&.size == 1
 
-      container = irep.instructions[literal.first.index]
+      container = BytecodeIR.for(irep).source_at(literal.first.index)
       case container.op
       when 'ARRAY' then element_names(irep, literal.first.index, container.reg.to_i, container.uint_operand.to_i, 1, 0)
       when 'HASH' then element_names(irep, literal.first.index, container.reg.to_i, container.uint_operand.to_i * 2, 2, 1)
@@ -161,7 +162,7 @@ end
       (offset...count).step(stride) do |k|
         defs = ComputedSendNames.reaching(irep, at, (first + k).to_s) or return nil
         defs.each do |definition|
-          insn = irep.instructions[definition.index]
+          insn = BytecodeIR.for(irep).source_at(definition.index)
           return nil unless %w[LOADSYM SYMBOL].include?(insn.op)
 
           literal = ComputedSendNames.symbol_literal(irep, insn) or return nil
