@@ -91,7 +91,7 @@ class CallSiteIndex
     parent = {}
     ireps.each_value do |irep|
       (irep.reps || []).each { |child| parent[child] = irep.label }
-      irep.instructions.each_with_index do |insn, idx|
+      irep.each_with_op('TDEF', 'SDEF', 'DEF') do |insn, idx|
         case insn.op
         when 'TDEF', 'SDEF'
           child = irep.reps[insn.block_index]
