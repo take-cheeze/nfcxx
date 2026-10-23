@@ -15,28 +15,31 @@ def check(name, condition)
   puts "ok #{name}"
 end
 
-child = Irep.new(label: 'block', nlocals: 2, instructions: [instruction(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'),
-  instruction(1, 'GETUPVAR', "R2\t1\t0"), instruction(2, 'MOVE', "R3\tR2"), instruction(3, 'RETURN', 'R3')])
-parent = Irep.new(label: 'method', nlocals: 2, reps: ['block'], instructions: [
-  instruction(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), instruction(1, 'LOADSYM', 'R1 :captured'),
-  instruction(2, 'ARRAY', "R2\t0"), instruction(3, 'BLOCK', "R3\tI[0]"),
-  instruction(4, 'SENDB', "R2\t:map\tn=0"), instruction(5, 'RETURN', 'R2')])
-tree = { 'method' => parent, 'block' => child }
-parent.tree = tree
-child.tree = tree
-build = lambda do |**options|
+# BytecodeIR.for caches a Program per irep and the bytecode never changes after loading, so each case gets a fresh
+# child (and tree) instead of editing one child's list in place.
+build = lambda do |second, **options|
+  child = Irep.new(label: 'block', nlocals: 2, instructions: [instruction(0, 'ENTER', '1:0:0:0:0:0:0:0 (0x0)'),
+    second, instruction(2, 'MOVE', "R3\tR2"), instruction(3, 'RETURN', 'R3')])
+  parent = Irep.new(label: 'method', nlocals: 2, reps: ['block'], instructions: [
+    instruction(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), instruction(1, 'LOADSYM', 'R1 :captured'),
+    instruction(2, 'ARRAY', "R2\t0"), instruction(3, 'BLOCK', "R3\tI[0]"),
+    instruction(4, 'SENDB', "R2\t:map\tn=0"), instruction(5, 'RETURN', 'R2')])
+  tree = { 'method' => parent, 'block' => child }
+  parent.tree = tree
+  child.tree = tree
   IrBlockCaptures.new(parent: parent, child: child, producer_index: 3, call_index: 4,
                       parent_analysis: BytecodeIR::Types.new(parent), ireps: tree, **options)
 end
-check('arbitrary block calls lack a synchronous invocation proof', build.call.fact_at(3, '3').nil?)
-fact = build.call(invocation_safe: true).fact_at(3, '3')
+stable = instruction(1, 'GETUPVAR', "R2\t1\t0")
+check('arbitrary block calls lack a synchronous invocation proof', build.call(stable).fact_at(3, '3').nil?)
+fact = build.call(stable, invocation_safe: true).fact_at(3, '3')
 check('immediate stable capture survives a block MOVE', fact && fact.classes == Set[:Symbol] && !fact.declared?)
-child.instructions[1] = instruction(1, 'GETUPVAR', "R2\t1\t1")
-check('non-immediate environment remains unknown', build.call(invocation_safe: true).fact_at(3, '3').nil?)
-child.instructions[1] = instruction(1, 'SETUPVAR', "R2\t1\t0")
-check('a block capture writer is refused', build.call(invocation_safe: true).fact_at(3, '3').nil?)
-child.instructions[1] = instruction(1, 'SEND0', "R2\t:opaque")
-check('opaque effects in the block are refused', build.call(invocation_safe: true).fact_at(3, '3').nil?)
+check('non-immediate environment remains unknown',
+      build.call(instruction(1, 'GETUPVAR', "R2\t1\t1"), invocation_safe: true).fact_at(3, '3').nil?)
+check('a block capture writer is refused',
+      build.call(instruction(1, 'SETUPVAR', "R2\t1\t0"), invocation_safe: true).fact_at(3, '3').nil?)
+check('opaque effects in the block are refused',
+      build.call(instruction(1, 'SEND0', "R2\t:opaque"), invocation_safe: true).fact_at(3, '3').nil?)
 puts 'block capture checks passed'
 
 if ENV['MRBC']

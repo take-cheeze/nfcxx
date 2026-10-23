@@ -1731,16 +1731,6 @@ class ClosedWorld
     end
   end
 
-  # The n Symbol arguments LOADSYM'd right before the send at idx, or nil.
-  def literal_syms(irep, idx, n)
-    return [] if n.zero?
-
-    run = BytecodeIR.for(irep).run_of_op_ending(idx - 1, 'LOADSYM', limit: n)
-    return nil unless run.size == n
-
-    run.map { |i| i.sym_token }
-  end
-
   # REMOVED_NAMES: preserve each argument's alternatives separately: only the first
   # argument of a forwarding send selects the operation, while the rest name methods.
   def scan_removal_send(irep, idx, insn)
@@ -1765,13 +1755,54 @@ class ClosedWorld
     @probed_names.merge(names)
   end
 
-  # 15+ arguments arrive packed: `ARRAY Ra k` right before an `n=*` send.
+  # 15+ arguments arrive packed: `ARRAY Ra k` builds the array in Ra from R[a]..R[a+k-1] (OP_ARRAY, vm.c), and the
+  # `n=*` send reads it from R[insn.reg + 1]. The array is proven by flow: its only reaching definition is that
+  # ARRAY, its only read is the splat send (FactoryFlow.uses follows MOVEs, so any other read could mutate or
+  # escape it), and each element has exactly one reaching LOADSYM. Anything else is nil (dynamic).
   def packed_syms(irep, idx, insn)
-    arr = BytecodeIR.for(irep).previous(idx)
-    return nil unless insn.pure_splat? && arr && arr.op == 'ARRAY'
+    return nil unless insn.pure_splat?
 
-    k = arr.uint_operand.to_i
-    k.positive? ? literal_syms(irep, idx - 1, k) : nil
+    program = BytecodeIR.for(irep)
+    source_idx, source = sole_definition(irep, idx, (insn.reg.to_i + 1).to_s)
+    return nil unless source
+
+    # `*names` with a variable: `LOADNIL Ra; ARYCAT Ra (Rb)` copies the packed array into a fresh one, so the
+    # ARYCAT is the splat's only reader of the packed array.
+    if source.op == 'ARYCAT'
+      base = sole_definition(irep, source_idx, source.reg)&.last
+      return nil unless base&.op == 'LOADNIL'
+
+      copied = source.regs[1]
+      arr_idx, arr = sole_definition(irep, source_idx, copied)
+      return nil unless arr&.op == 'ARRAY'
+
+      expected = [source_idx, copied]
+    else
+      arr_idx, arr = source_idx, source
+      return nil unless arr.op == 'ARRAY'
+
+      expected = [idx, (insn.reg.to_i + 1).to_s]
+    end
+    uses = FactoryFlow.uses(irep, arr_idx, arr.reg)
+    return nil unless uses && uses.size == 1 && uses.first == expected
+
+    literal = program.container_literal(arr_idx)
+    return nil unless literal&.kind == :array && literal.count.positive?
+
+    (0...literal.count).map do |offset|
+      _element_idx, writer = sole_definition(irep, arr_idx, (literal.base + offset).to_s)
+      return nil unless writer&.op == 'LOADSYM'
+
+      writer.sym_token
+    end
+  end
+
+  # The one non-entry instruction that writes +reg+ at +use+, as [index, instruction], or nil.
+  def sole_definition(irep, use, reg)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s, through_handlers: true, origin_transfers: true)
+    return nil unless defs && defs.size == 1 && !defs.first.entry?
+
+    [defs.first.index, BytecodeIR.for(irep).source_at(defs.first.index)]
   end
 
   # Sends that only compare or name a factory constant (`x.is_a?(Class)`,

@@ -231,46 +231,74 @@ module DeclaredConstants
     end
   end
 
-  # `Array[T]`: a frozen `[...]` literal (ARRAY, not ARRAY2 / ARYPUSH) whose element registers each prove exactly T
-  # at the literal. Frozen, so no later write can change the element classes read back.
+  # `Array[T]`: every value that reaches the assignment is a frozen `[...]` literal (ARRAY, not ARRAY2 / ARYPUSH)
+  # whose element registers each prove exactly T at that literal. Frozen, so no later write can change the element
+  # classes read back. Each reaching freeze is checked, so a join of literals of different element types is refused.
   def element_failure(entry, irep, idx, src, registry, container_constants)
-    return 'the declared element type needs a frozen array literal (`[...].freeze`)' unless
-      frozen_array_source?(irep, idx, src, registry, container_constants)
+    freezes = frozen_array_defs(irep, idx, src, registry, container_constants)
+    return 'the declared element type needs a frozen array literal (`[...].freeze`)' unless freezes
 
-    literal_index, literal = literal_writer(irep, idx, src)
-    return 'the frozen array is not an array literal' unless literal&.op == 'ARRAY' && literal.uint_operand
-
-    types = BytecodeIR::Types.new(irep)
     want = Set[entry.elem.to_sym]
-    bad = (0...literal.uint_operand).find do |offset|
-      fact = types.fact_at(literal_index, (literal.reg.to_i + offset).to_s)
-      fact.nil? || fact.classes != want
+    types = BytecodeIR::Types.new(irep)
+    freezes.each do |freeze_idx, freeze|
+      literal_index, literal = literal_writer(irep, freeze_idx, freeze.reg)
+      return 'the frozen array is not an array literal' unless literal&.op == 'ARRAY' && literal.uint_operand
+
+      bad = (0...literal.uint_operand).find do |offset|
+        fact = types.fact_at(literal_index, (literal.reg.to_i + offset).to_s)
+        fact.nil? || fact.classes != want
+      end
+      return "element #{bad} of the literal is not proven #{entry.elem}" if bad
     end
-    bad && "element #{bad} of the literal is not proven #{entry.elem}"
+    nil
   end
 
-  # The nearest writer of +reg+ before +idx+ that is not `.freeze`, as [index, instruction], or nil. Linear on purpose:
-  # it is reached only through frozen_array_source?, whose JOIN_DOMINANCE trace refuses a join between that writer and
-  # the freeze, so the nearest writer is the only one that reaches it.
+  # The single writer of +reg+ reaching +idx+, as [index, instruction], or nil. A join (several writers), a refusal and
+  # the method entry all give nil (BytecodeIR.writers_reaching), so no textually nearest writer is consulted. A SEND0
+  # `freeze` is walked through, never returned (Object#freeze answers its receiver); +seen+ ends a freeze in a loop.
   def literal_writer(irep, idx, reg)
-    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, _cur|
-      next IrepScans::KEEP if insn.op == 'SEND0' && insn.sym == 'freeze'
+    seen = Set[]
+    index = idx
+    loop do
+      writers = BytecodeIR.writers_reaching(irep, index, reg.to_s)
+      return nil unless writers&.length == 1
 
-      [j, insn]
+      writer_index, insn = writers.first
+      return [writer_index, insn] unless insn.op == 'SEND0' && insn.sym == 'freeze'
+      return nil unless seen.add?(writer_index)
+
+      index = writer_index
+      reg = insn.reg
     end
   end
 
-  # `[...].freeze` / `X.dup.freeze`: Object#freeze answers its receiver (no program `freeze`).
+  # `[...].freeze` / `X.dup.freeze`: Object#freeze answers its receiver (no program `freeze`). Every value reaching
+  # +reg+ at +idx+ must be such a freeze of a proven Array: [index, instruction] per reaching freeze, or nil. A write
+  # that is not a freeze, or the frame entry, on any path refuses (the nearest freeze alone would miss the others).
+  def frozen_array_defs(irep, idx, reg, registry, container_constants)
+    return nil if (registry['freeze'] || []).any?(&:irep)
+
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+    program = BytecodeIR.for(irep)
+    freezes = []
+    defs.each do |d|
+      insn = program.source_at(d.index)
+      return nil unless insn.op == 'SEND0' && insn.sym == 'freeze'
+
+      proven = trace_new_target(irep, d.index, insn.reg, nil, 0, nil, registry: registry,
+                                                                      container_constants: container_constants) == 'Array' ||
+               !proven_array_source_scan(irep, d.index, insn.reg, registry).nil?
+      return nil unless proven
+
+      freezes << [d.index, insn]
+    end
+    freezes
+  end
+
   def frozen_array_source?(irep, idx, reg, registry, container_constants)
-    return false if (registry['freeze'] || []).any?(&:irep)
-
-    irep.walk_writers(idx - 1, reg.to_s, follow_moves: true) do |insn, j, cur|
-      next false unless insn.op == 'SEND0' && insn.sym == 'freeze'
-
-      trace_new_target(irep, j, cur, nil, 0, nil, registry: registry,
-                                                  container_constants: container_constants) == 'Array' ||
-        !proven_array_source_scan(irep, j, cur, registry).nil?
-    end || false
+    !frozen_array_defs(irep, idx, reg, registry, container_constants).nil?
   end
 
   # ARRAY_SUM (type_facts const_rows): `(A + B).freeze` whose two operands both prove Array. Array#+ answers a fresh

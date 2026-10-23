@@ -252,16 +252,20 @@ class YieldReach
     sups.size == 1 ? sups.first : :unknown
   end
 
-  # Name of the class or module an EXEC opens: the CLASS/MODULE op that loaded its register.
+  # Name of the class or module an EXEC opens: the only writer of its register reaching the EXEC, when it is a
+  # CLASS/MODULE op. A join with another writer, or the method entry, leaves it unknown.
   def class_of_exec(irep, exec)
-    idx = BytecodeIR.for(irep).instructions.index { |i| i.source.equal?(exec) }
+    program = BytecodeIR.for(irep)
+    idx = program.instructions.index { |i| i.source.equal?(exec) }
     return nil unless idx
 
-    (idx - 1).downto([idx - 4, 0].max) do |k|
-      i = BytecodeIR.for(irep).source_at(k)
-      return i.sym if BytecodeIR::Ops::CLASS_MODULE.include?(i.op) && i.reg == exec.reg
-    end
-    nil
+    writers = BytecodeIR::reaching_writer_indices(irep, idx, exec.reg)
+    return nil unless writers&.size == 1
+
+    writer = program.source_at(writers.first)
+    return nil unless BytecodeIR::Ops::CLASS_MODULE.include?(writer.op) && writer.reg == exec.reg
+
+    writer.sym
   end
 
   def enclosing_class(node)

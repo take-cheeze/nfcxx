@@ -113,7 +113,7 @@ module IrSymbolFlow
 
   # Reaching definitions across handler edges. The cap scales with the irep so a long class body still answers.
   def reaching(irep, idx, reg, follow_moves: true)
-    cap = [BytecodeIR::DATAFLOW_MAX_STATES, irep.instructions.size * 4].max
+    cap = [BytecodeIR::DATAFLOW_MAX_STATES, BytecodeIR.for(irep).size * 4].max
     BytecodeIR.reaching_definitions(irep, idx, reg.to_s, through_handlers: true, follow_moves: follow_moves,
                                                          max_states: cap)
   end

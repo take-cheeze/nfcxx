@@ -18,8 +18,12 @@ end
 
 # Stand-ins for the settled compiler and the ctx fields the index reads. Each store and read is a plain instruction
 # in an irep labelled by its method; `found` is what ClassLayout's store_log would hold for a traced store.
-StubInsn = Struct.new(:op, :ivar, :regs, :sym)
-StubIrep = Struct.new(:insns) do
+# The stubs answer what BytecodeIR::Program needs to build: they hold no branch, so no address resolves one.
+StubInsn = Struct.new(:op, :ivar, :regs, :sym) do
+  def addr = nil
+  def branch_target = nil
+end
+StubIrep = Struct.new(:insns, :nlocals, :catch_handlers) do
   def instructions = insns
 
   def each_with_op(*ops)
