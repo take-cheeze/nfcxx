@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_ops'
+require_relative 'ir_symbol_flow'
 
 module BytecodeIR
   # Value classes, not representation/width proofs.
@@ -22,7 +23,9 @@ module BytecodeIR
       def declared? = declared
     end
 
-    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, declared_arg_elements: {}, declared_ivar_elements: {}, declared_const_elements: {}, source_resolver: nil, call_resolver: nil, argument_facts: {})
+    # inferred_args: positional registers, plus the block register (a Proc join); inferred_keywords: required keyword
+    # name => join; inferred_rest_elements: rest register => element join. Each is a call-site join (IrTypeFeedback).
+    def initialize(irep, declared_args: {}, declared_optional_args: {}, declared_keywords: {}, declared_ivars: {}, declared_calls: {}, inferred_calls: {}, inferred_args: {}, inferred_keywords: {}, inferred_rest_elements: {}, declared_arg_elements: {}, declared_ivar_elements: {}, declared_const_elements: {}, source_resolver: nil, call_resolver: nil, argument_facts: {})
       @irep = irep
       required = irep.enter&.enter_fields&.first.to_i
       @argument_facts = argument_facts.to_h do |reg, fact|
@@ -53,6 +56,8 @@ module BytecodeIR
       @declared_calls = declared_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
       @inferred_calls = inferred_calls.to_h { |index, types| [index, types.to_set.dup.freeze] }.freeze
       @inferred_args = inferred_args.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
+      @inferred_keywords = inferred_keywords.to_h { |name, types| [name.to_s, types.to_set.dup.freeze] }.freeze
+      @inferred_rest_elements = inferred_rest_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
       @declared_arg_elements = declared_arg_elements.to_h { |reg, types| [reg.to_s, types.to_set.dup.freeze] }.freeze
       @declared_ivar_elements = declared_ivar_elements.to_h { |name, types| [name.to_s.delete_prefix('@'), types.to_set.dup.freeze] }.freeze
       @declared_const_elements = declared_const_elements.to_h { |name, type| [name.to_s, Set[type.to_sym]] }.freeze
@@ -92,18 +97,13 @@ module BytecodeIR
       elements = Set.new
       contracts = receiver.contracts.to_set
       definitions.each do |source|
-        if source.entry? || source.built == :arg
-          bound = @declared_arg_elements[source.reg]
-          contract = "element:argument:R#{source.reg}"
-        else
-          bound, contract = element_bound_of(@irep.instructions[source.index])
-        end
+        bound, contract = element_source_bound(source)
         return nil unless bound && !bound.empty?
 
         elements.merge(bound)
-        contracts << contract
+        contracts << contract if contract
       end
-      Fact.new(classes: elements.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
+      Fact.new(classes: elements.freeze, declared: !contracts.empty?, contracts: contracts.to_a.sort.freeze).freeze
     end
 
     # The exact runtime class of a register read (+klass+, a Symbol) and, when every source is the same Integer
@@ -273,6 +273,13 @@ module BytecodeIR
       Fact.new(classes: types.freeze, declared: !contracts.empty?, contracts: contracts.to_a.sort.freeze).freeze
     end
 
+    # A required keyword's value is its call-site join, unless the signature declares that keyword: then nil, so
+    # declared_definition supplies the declared type (a declared bound wins over an inferred one).
+    def keyword_definition_types(insn)
+      name = insn.sym.to_s
+      @declared_keywords.key?(name) ? nil : @inferred_keywords[name]
+    end
+
     def declared_definition(definition)
       if definition.entry? || definition.built == :arg
         return [@declared_args[definition.reg] || @declared_optional_args[definition.reg], "argument:R#{definition.reg}"]
@@ -335,18 +342,24 @@ module BytecodeIR
 
       elements = Set[:NilClass]
       definitions.each do |source|
-        if source.entry? || source.built == :arg
-          bound = @declared_arg_elements[source.reg]
-          contract = "element:argument:R#{source.reg}"
-        else
-          bound, contract = element_bound_of(@irep.instructions[source.index])
-        end
+        bound, contract = element_source_bound(source)
         return nil unless bound && !bound.empty?
 
         elements.merge(bound)
-        contracts << contract.freeze
+        contracts << contract.freeze if contract
       end
-      Fact.new(classes: elements.freeze, declared: true, contracts: contracts.to_a.sort.freeze).freeze
+      Fact.new(classes: elements.freeze, declared: !contracts.empty?, contracts: contracts.to_a.sort.freeze).freeze
+    end
+
+    # The element bound one reaching definition of an array register gives, with its contract (nil when inferred).
+    def element_source_bound(source)
+      if source.entry? || source.built == :arg
+        [@declared_arg_elements[source.reg], "element:argument:R#{source.reg}"]
+      elsif source.built == :rest
+        [rest_element_bound(source.reg), nil]
+      else
+        element_bound_of(@irep.instructions[source.index])
+      end
     end
 
     # The declared element bound of a receiver written by an ivar or constant read, with its provenance.
@@ -358,12 +371,59 @@ module BytecodeIR
       end
     end
 
+    # The call-site join of a rest parameter's elements, kept only while the body cannot change the array (see
+    # rest_array_private?): a mutated or escaping array may hold any element.
+    def rest_element_bound(reg)
+      bound = @inferred_rest_elements[reg]
+      bound if bound && rest_array_private?(reg)
+    end
+
+    # Ops that observe the frame's locals without naming the register: a closure captures them, ARGARY packs the
+    # rest array for a zero-argument super, and binding/eval reach any local by name.
+    REST_ARRAY_OBSERVERS = %w[LAMBDA BLOCK ARGARY].freeze
+
+    # Every register holding the rest array (MOVE copies, flow-insensitive) may be read only as the receiver of an
+    # element read (GETIDX, GETIDX0). Any other read can store a non-join element, so the join is withheld.
+    def rest_array_private?(reg)
+      @rest_private ||= {}
+      @rest_private.fetch(reg) { @rest_private[reg] = compute_rest_array_private(reg) }
+    end
+
+    def compute_rest_array_private(reg)
+      aliases = Set[reg.to_i]
+      loop do
+        grew = @irep.instructions.any? do |insn|
+          insn.op == 'MOVE' && aliases.include?(insn.regs[1].to_i) && aliases.add?(insn.regs[0].to_i)
+        end
+        break unless grew
+      end
+      @irep.instructions.none? { |insn| rest_array_unsafe_use?(insn, aliases) }
+    end
+
+    def rest_array_unsafe_use?(insn, aliases)
+      return true if REST_ARRAY_OBSERVERS.include?(insn.op)
+      return true if BytecodeIR::Ops::SEND.include?(insn.op) && %w[binding eval].include?(insn.sym.to_s)
+
+      reads = IrSymbolFlow.reads(@irep, insn).select { |reg| aliases.include?(reg) }
+      return false if reads.empty?
+
+      case insn.op
+      when 'MOVE' then false
+      when 'GETIDX0' then reads != [insn.regs[1].to_i]
+      when 'GETIDX' then reads != [insn.reg.to_i]
+      else true
+      end
+    end
+
     def definition_types(definition)
       return @inferred_args[definition.reg] if definition.entry? || definition.built == :arg
+      # A block join (Proc) replaces the nominal Proc-or-nil bound of the block slot.
+      return @inferred_args[definition.reg] if definition.built == :block && @inferred_args.key?(definition.reg)
       return ENTER_TYPES[definition.built] if definition.built
 
       insn = @irep.instructions[definition.index]
       return nil unless insn.reg == definition.reg
+      return keyword_definition_types(insn) if insn.op == 'KARG'
       return @inferred_calls[definition.index] if BytecodeIR::Ops::SEND.include?(insn.op)
 
       type = Types.literal_class(insn, @irep.pool)
