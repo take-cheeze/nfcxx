@@ -1,8 +1,8 @@
 name: Real-world
 
 # The larger real-world builds of docs/notes/realworld.md: doctest (hosted C++, gcc backend), Lua 5.4 (C input mode
-# and its own makefile through nfcc) and mruby (its rake build with nfcc as the compiler, bootstrapped: the QBE-compiled
-# parser and VM run during the build), optcarrot, and the CoreCLR GC's compile on both backends. Each one clones its pinned
+# and its own makefile through nfcc), mruby (its rake build with nfcc as the compiler, bootstrapped: the QBE-compiled
+# parser and VM run during the build), TinyCC (its own makefile through nfcc, then its tests2 suite), optcarrot, and the CoreCLR GC's compile on both backends. Each one clones its pinned
 # upstream commit into build/realworld. tinyxml2 stays
 # in the main CI job. Run only when a change can affect the compilers they exercise. Runs on demand too.
 on:
@@ -76,6 +76,9 @@ jobs:
 
       - name: mruby rake build with nfcc (both backends)
         run: tests/realworld/run_mruby.sh
+
+      - name: TinyCC 0.9.27 built with its own makefile and nfcc, then its tests2 suite (both backends)
+        run: tests/realworld/run_tinycc.sh
 
       - name: optcarrot benchmark on an nfcc-built mruby (both backends, checksum 59662)
         run: tests/realworld/run_optcarrot.sh
