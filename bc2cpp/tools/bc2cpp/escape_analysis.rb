@@ -105,6 +105,10 @@ module EscapeAnalysis
                     3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c 3rd/mruby/mrbgems/mruby-task/src/task.c
                     3rd/mruby/mrbgems/mruby-socket/src/socket.c],
     'raise' => %w[3rd/mruby/src/kernel.c],
+    # kernel.c:683 (kernel_rom_entries, MRB_MT_INIT_ROM at kernel.c:721) -> mrb_obj_freeze, kernel.c:356: flags and
+    # returns the receiver. mruby-rgss-compiled/src/register.cxx:542 is Graphics' singleton freeze (not NATIVE_SRCS):
+    # Ruby body mruby-rgss/mrblib/lib.rb:1644, returns nil, keeps no receiver.
+    'freeze' => %w[3rd/mruby/src/kernel.c mruby-rgss-compiled/src/register.cxx],
     'to_s' => %w[3rd/mruby/src/numeric.c 3rd/mruby/src/hash.c 3rd/mruby/src/object.c 3rd/mruby/src/array.c
                  3rd/mruby/src/kernel.c 3rd/mruby/src/class.c 3rd/mruby/src/range.c 3rd/mruby/src/string.c
                  3rd/mruby/src/error.c 3rd/mruby/src/symbol.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
@@ -126,6 +130,9 @@ module EscapeAnalysis
     'class' => :fresh, 'is_a?' => :fresh, 'kind_of?' => :fresh, 'instance_of?' => :fresh, 'frozen?' => :fresh,
     'respond_to?' => :fresh, 'respond_to_missing?' => :fresh, 'hash' => :fresh,
     'instance_variable_get' => :fresh, 'inspect' => :fresh, 'to_s' => :self,
+    # mrb_obj_freeze returns its receiver (NATIVE_MANIFEST has the registrations). Graphics.freeze returns nil,
+    # which :self over-approximates; a Ruby `freeze` that keeps self still escapes (name_receiver_result).
+    'freeze' => :self,
     # mrb_f_raise (kernel.c) reads only its arguments and never returns self. Its arguments are kept (the
     # exception and its message), so raise has no NATIVE_ARG_OK entry.
     'raise' => :fresh
