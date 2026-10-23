@@ -4,6 +4,7 @@
 #   // X86-ONLY: reason          depends on the x86-64 target; skipped on every other host.
 #   // X86-ONLY-LINUX: reason    depends on the x86-64 long double layout of the Linux front end; skipped on non-x86-64
 #                                Linux only (macOS arm64 runs it).
+#   // PATHB-SKIP: reason        the case needs a type or form that Path B (NFCXX_PATH=b) refuses by design; skipped there only.
 #   // NFCXX-FLAGS: flags        extra nfcxx driver flags for this test (word-split), e.g. --dialect=clang.
 #   // MACOS-XFAIL-<backend>: reason   a documented macOS-only failure of that backend: reported as xfail on Darwin. A pass
 #                                there is an XPASS and fails the run, so the marker gets removed.
@@ -16,6 +17,9 @@ for f in tests/cases/*.cpp; do
   fi
   if linuxonly=$(sed -n 's,^// X86-ONLY-LINUX: *\(.*\),\1,p' "$f" | head -1); [ -n "$linuxonly" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" != x86_64 ]; then
     echo "skip $f (x86-64 Linux only: $linuxonly)"; continue
+  fi
+  if pathbskip=$(sed -n 's,^// PATHB-SKIP: *\(.*\),\1,p' "$f" | head -1); [ -n "$pathbskip" ] && [ "${NFCXX_PATH:-}" = b ]; then
+    echo "skip $f (Path B: $pathbskip)"; continue
   fi
   xf=""
   [ "$(uname -s)" = Darwin ] && xf=$(sed -n "s,^// MACOS-XFAIL-$be: *,,p" "$f" | head -1)
