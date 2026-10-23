@@ -195,23 +195,43 @@ class CodeGen
     @proven_miss_answered_names = names && (names | (self.class.core_hidden_defs || []).map(&:name))
   end
 
-  # Diagnostic-only: identify the nearest producer behind an unresolved
-  # receiver, following register copies without changing the type proof.
+  # Diagnostic-only: identify the producers behind an unresolved receiver, following register copies without
+  # changing the type proof. Every producer that reaches the use is reported (`join:a.b` at a join), so a join is
+  # not named by the arm that happens to come last in the instruction order. A query the IR refuses keeps the
+  # textual walk's answer, the nearest writer before the use.
   def receiver_trace_origin(irep, idx, dest_reg)
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
+    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg.to_s)
+    return receiver_origin_by_walk(irep, idx, dest_reg) if defs.nil? || defs.empty?
+
+    labels = defs.map { |definition| receiver_definition_origin(irep, definition) }.uniq.sort
+    labels.size == 1 ? labels.first : "join:#{labels.join('.')}"
+  end
+
+  def receiver_definition_origin(irep, definition)
+    return (definition.reg.to_s == '0' ? 'self_register' : 'incoming_or_unwritten_register') if definition.entry?
+
+    receiver_producer_origin(irep.instructions[definition.index])
+  end
+
+  def receiver_origin_by_walk(irep, idx, dest_reg)
     at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
     irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
-      case insn.op
-      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source'
-      when 'GETIV' then 'get_ivar'
-      when 'GETIDX', 'GETIDX0' then 'indexed_result'
-      when 'GETUPVAR' then 'captured_upvar'
-      when 'GETCONST', 'GETMCNST' then 'constant_lookup'
-      when *BytecodeIR::Ops::SEND then 'send_result'
-      when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
-      else "write_#{insn.op.downcase}"
-      end
+      insn.op == 'MOVE' ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
+    end
+  end
+
+  # The label of a non-copy writer; a MOVE is followed by the caller, never labelled here.
+  def receiver_producer_origin(insn)
+    case insn.op
+    when 'GETIV' then 'get_ivar'
+    when 'GETIDX', 'GETIDX0' then 'indexed_result'
+    when 'GETUPVAR' then 'captured_upvar'
+    when 'GETCONST', 'GETMCNST' then 'constant_lookup'
+    when *BytecodeIR::Ops::SEND then 'send_result'
+    when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
+    else "write_#{insn.op.downcase}"
     end
   end
 
