@@ -3,8 +3,9 @@
 require 'stringio'
 require_relative 'else_trace'
 
-# PARAM_TRACE: opt-in runtime classes of the parameters of compiled methods and blocks, and of the values
-# their `return` statements hand back (RETURN_SITE rows).
+# PARAM_TRACE: opt-in runtime classes of the parameters of compiled methods and blocks, of the values
+# their `return` statements hand back (RETURN_SITE rows), and of the values an ivar read hands back
+# (IVAR_SITE rows, one per owner class and ivar name).
 #
 # Off unless BC2CPP_TRACE_TYPES=1 is set; the unset output is byte-identical to a build without this
 # file (bc2cpp.rb does not even require it). Set, bc2cpp's stdout is rewritten after codegen (nothing
@@ -43,6 +44,8 @@ module ParamTrace
   KWARG_RE = /\Abc2cpp_kwarg_([\w$]+)\z/
   KW_GIVEN_RE = /\Abc2cpp_kw_given_([\w$]+)\z/
   REG0_RE = /\A\s*mrb_value r0 = self;/
+  # Left by codegen after a GETIV (codegen_insn.rb ivar_trace_marker): the owner class, the ivar and its register.
+  IVAR_MARKER_RE = %r{\A\s*/\*BC2CPP_IVAR_HIT (\S+) (@\S+) r(\d+)\*/\s*\z}
   REG0_WINDOW = 12
   # C parameter type => the expression that boxes it back to an mrb_value (TYPE_OPS[...][:box]).
   BOX = { 'mrb_value' => '%s', 'mrb_int' => 'mrb_fixnum_value(%s)', 'mrb_sym' => 'mrb_symbol_value(%s)',
@@ -156,6 +159,7 @@ module ParamTrace
     fns = []
     sites = []
     rets = []
+    ivars = []
     ident = ElseTrace.ident(symbol)
     skipped = Hash.new(0)
     lines.each_with_index do |l, i|
@@ -232,10 +236,17 @@ module ParamTrace
 
       fns << { id: fnid, fn: fn, method: method, block: block }
       wrap_returns(lines, i, rets, ident, method, fn, block, info && info[:ret])
+      # A marker is rewritten only in a function that is traced, so one left in an untraced body stays a comment.
+      (i + 1...close).each do |x|
+        mk = IVAR_MARKER_RE.match(lines[x]) or next
+        vid = ivars.size
+        ivars << { id: vid, owner: mk[1], ivar: mk[2] }
+        lines[x] = "  bc2cpp_ivar_hit_#{ident}(M, #{vid}, r#{mk[3]});\n"
+      end
       lines[j] = "  bc2cpp_param_enter_#{ident}(#{fnid}); #{stmts.join(' ')} #{lines[j].lstrip}"
       sites.last(stmts.size).each { |s| s[:fnid] = fnid }
     end
-    summary = { fns: fns, sites: sites, rets: rets, skipped: skipped,
+    summary = { fns: fns, sites: sites, rets: rets, ivars: ivars, skipped: skipped,
                 untraced_methods: infos.keys.size - fns.count { |f| !f[:block] } }
     [header(symbol, fns, sites, summary) + lines.join, summary]
   end
@@ -246,6 +257,9 @@ module ParamTrace
     nsites = [sites.size, 1].max
     nrets = [rets.size, 1].max
     nfns = [fns.size, 1].max
+    ivars = summary[:ivars]
+    nivars = [ivars.size, 1].max
+    ivarmeta = ivars.empty? ? '""' : ivars.map { |v| ElseTrace.c_string("#{v[:owner]}\t#{v[:ivar]}") }.join(",\n  ")
     meta = sites.empty? ? '""' : sites.map { |s| ElseTrace.c_string(s[:meta]) }.join(",\n  ")
     retmeta = rets.empty? ? '""' : rets.map { |r| ElseTrace.c_string(r[:meta]) }.join(",\n  ")
     fnmeta = fns.empty? ? '""' : fns.map { |f| ElseTrace.c_string([f[:method], f[:fn], f[:block] ? 'block' : 'method'].join("\t")) }.join(",\n  ")
@@ -345,6 +359,14 @@ module ParamTrace
             fprintf(f, "%s\\t%s\\t%u\\t%s\\t%s\\t%llu\\n", class_tag, symbol, site, roles[r], s->cls[j].name, s->cls[j].count);
         }
       }
+      // One site per owner class and ivar name: the value a traced GETIV read hands back.
+      static struct bc2cpp_param_site_#{id} bc2cpp_ivar_sites_#{id}[#{nivars}];
+      static const char* const bc2cpp_ivar_meta_#{id}[#{nivars}] = {
+        #{ivarmeta}
+      };
+      static inline void bc2cpp_ivar_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
+        bc2cpp_site_record_#{id}(&bc2cpp_ivar_sites_#{id}[site], M, v);
+      }
       static inline void bc2cpp_param_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
         bc2cpp_site_record_#{id}(&bc2cpp_param_sites_#{id}[site], M, v);
         bc2cpp_elem_record_#{id}(&bc2cpp_param_elem_#{id}[site * 3], M, v);
@@ -378,6 +400,12 @@ module ParamTrace
           for (unsigned j = 0; j < s->ncls; j++)
             fprintf(f, "RETURN_CLASS\\t%s\\t%u\\t%s\\t%llu\\n", "#{symbol}", i, s->cls[j].name, s->cls[j].count);
         }
+        for (unsigned i = 0; i < #{ivars.size}; i++) {
+          struct bc2cpp_param_site_#{id}* s = &bc2cpp_ivar_sites_#{id}[i];
+          fprintf(f, "IVAR_SITE\\t%s\\t%u\\t%llu\\t%llu\\t%s\\n", "#{symbol}", i, s->calls, s->overflow, bc2cpp_ivar_meta_#{id}[i]);
+          for (unsigned j = 0; j < s->ncls; j++)
+            fprintf(f, "IVAR_CLASS\\t%s\\t%u\\t%s\\t%llu\\n", "#{symbol}", i, s->cls[j].name, s->cls[j].count);
+        }
         for (unsigned i = 0; i < #{sites.size}; i++) bc2cpp_elem_dump_#{id}(f, "PARAM_ELEM_SITE", "PARAM_ELEM_CLASS", "#{symbol}", i, &bc2cpp_param_elem_#{id}[i * 3]);
         for (unsigned i = 0; i < #{rets.size}; i++) bc2cpp_elem_dump_#{id}(f, "RETURN_ELEM_SITE", "RETURN_ELEM_CLASS", "#{symbol}", i, &bc2cpp_ret_elem_#{id}[i * 3]);
         if (f != stderr) fclose(f);
@@ -398,7 +426,7 @@ module ParamTrace
       next if $!
 
       text, summary = instrument(buf.string, symbol, infos)
-      warn "== PARAM_TRACE: #{summary[:sites].size} parameters and #{summary[:rets].size} returns of #{summary[:fns].size} functions instrumented in #{symbol} " \
+      warn "== PARAM_TRACE: #{summary[:sites].size} parameters, #{summary[:rets].size} returns and #{summary[:ivars].size} ivar reads of #{summary[:fns].size} functions instrumented in #{symbol} " \
            "(skipped: #{summary[:skipped].map { |k, v| "#{k} #{v}" }.join(', ').then { |s| s.empty? ? 'none' : s }}) =="
       real.write(text)
     end

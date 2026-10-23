@@ -8,6 +8,15 @@ class CodeGen
     ENV['BC2CPP_FROZEN_LITERALS'] != '0'
   end
 
+  # BC2CPP_TRACE_TYPES=1 only: after a GETIV of a known class, a marker line that ParamTrace rewrites into a hit
+  # (see param_trace.rb). Off by default, so the untraced output is unchanged. A singleton owner gets none: the
+  # candidates declare an ivar on the class, not on its singleton.
+  def ivar_trace_marker(klass, ivar, reg)
+    return '' unless ENV['BC2CPP_TRACE_TYPES'] == '1' && klass && !klass.end_with?('.singleton')
+
+    "  /*BC2CPP_IVAR_HIT #{klass} @#{ivar} r#{reg}*/\n"
+  end
+
   # `idx` is the instruction's position in irep.instructions (for the backward
   # proofs). `reg_offset` is non-zero only for compile_block_body_insn's shifted
   # registers and is undone with unshift_proof_reg wherever a register reaches a
@@ -178,9 +187,9 @@ class CodeGen
       if code.nil?
         "  #error GETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
       elsif type
-        "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n  #{code}\n"
+        "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n  #{code}\n#{ivar_trace_marker(klass, ivar, d)}"
       else
-        "  #{code}\n"
+        "  #{code}\n#{ivar_trace_marker(klass, ivar, d)}"
       end
     when 'SETIV'
       ivar = insn.ivar
