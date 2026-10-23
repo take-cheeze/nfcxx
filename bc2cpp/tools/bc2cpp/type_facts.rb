@@ -7,6 +7,7 @@ require_relative 'annotations'
 require_relative 'annotation_contradictions'
 require_relative 'ir_type_feedback'
 require_relative 'ir_ivar_types'
+require_relative 'ivar_candidates'
 
 # TYPE_CHECK: the types bc2cpp's whole-program inference settled on, as data.
 #
@@ -161,8 +162,8 @@ module TypeFacts
         'type' => (types || inferred) && BytecodeIR::Types.type_name(types || inferred),
         'source' => types ? 'signature' : inferred ? 'inferred:receiver-call-sites' : nil }
     end
-    optional_keywords = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KEY_P' }.to_set
-    keyword_params = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.uniq.map do |name|
+    optional_keywords = BytecodeIR.for(irep).instructions_with_op('KEY_P').filter_map { |insn| insn.sym.to_s }.to_set
+    keyword_params = BytecodeIR.for(irep).instructions_with_op('KARG').filter_map { |insn| insn.sym.to_s }.uniq.map do |name|
       types = ctx.signature_contracts&.ir_keyword_types&.dig(d.irep, name)
       required = !optional_keywords.include?(name)
       inferred = (types || !required || !gen.respond_to?(:bytecode_ir_keyword_argument_classes)) ? nil : gen.bytecode_ir_keyword_argument_classes(d, name)
@@ -475,6 +476,7 @@ module TypeFacts
     end
     bucket_of = {}
     ctx.poison_buckets.each { |bucket, names| names.each { |n| bucket_of[n] = bucket } }
+    candidates = IvarCandidates.index(ctx, gen)
     rows = []
     ctx.ivar_layout.each do |owner, ivars|
       ivars.each do |name, embed|
@@ -484,7 +486,7 @@ module TypeFacts
         row['file'], row['line'], row['col'] = loc ? [loc['file'], loc['line'], loc['col']] : [nil, 0, 1]
         row['scope'] = scope_of(loc && loc['file'])
         row['embedded'] = INT_TYPES[embed] if INT_TYPES.key?(embed)
-        cls = (ctx.class_layout_raw[owner] || {})[name]
+        cls = IvarCandidates.type(candidates, gen, owner, name)
         if cls && cls != ClassLayout::UNKNOWN
           row['type'] = cls.to_s
           row['source'] = (ctx.signature_origins && ctx.signature_origins[[owner, "@#{name}"]]) || 'inferred:class-layout'

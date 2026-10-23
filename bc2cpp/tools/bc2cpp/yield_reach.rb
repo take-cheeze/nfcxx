@@ -181,7 +181,7 @@ class YieldReach
     @module_names = Set.new
     @ireps.each_value do |irep|
       irep.instructions.each_with_index do |insn, idx|
-        record_class_decl(irep, insn, idx) if %w[CLASS MODULE].include?(insn.op)
+        record_class_decl(irep, insn, idx) if BytecodeIR::Ops::CLASS_MODULE.include?(insn.op)
         next unless insn.block_index
 
         child = irep.reps[insn.block_index]
@@ -239,7 +239,7 @@ class YieldReach
 
     (idx - 1).downto([idx - 4, 0].max) do |k|
       i = irep.instructions[k]
-      return i.sym if %w[CLASS MODULE].include?(i.op) && i.reg == exec.reg
+      return i.sym if BytecodeIR::Ops::CLASS_MODULE.include?(i.op) && i.reg == exec.reg
     end
     nil
   end
@@ -308,7 +308,7 @@ class YieldReach
           child = irep.reps[insn.block_index]
           node.bodies << child if child
         end
-        note_index_read(node, program, insn, idx) if %w[GETIDX GETIDX0].include?(op)
+        note_index_read(node, program, insn, idx) if BytecodeIR::Ops::INDEX_READ.include?(op)
         fiber_classified += scan_send(node, program, insn, idx) if BytecodeIR::Ops::SEND.include?(op)
       end
     end
@@ -360,10 +360,10 @@ class YieldReach
 
     op = insn.op
     dest = insn.reg
-    explicit = %w[SEND SEND0 SENDB].include?(op)
+    explicit = BytecodeIR::Ops::RECEIVER_SEND.include?(op)
     recv_const = explicit && dest ? const_receiver(irep, idx, dest) : nil
     fiber_recv = recv_const == 'Fiber'
-    has_block = %w[SENDB SSENDB].include?(op)
+    has_block = BytecodeIR::Ops::BLOCK_SEND.include?(op)
     lit_block, forward = classify_send_block(node, program, insn, idx) if has_block
     consumed = fiber_recv ? scan_fiber_call(node, name, lit_block) : 0
     if name == 'yield' && explicit && !fiber_recv
@@ -536,7 +536,7 @@ class YieldReach
 
   # Every definition reaching this read is a literal: a parameter can keep its incoming Proc on another path.
   def literal_proc_receiver?(node, _program, idx, reg)
-    reg && IrBlockOperands.all_writers?(node.irep, idx, reg) { |w| %w[BLOCK LAMBDA].include?(w.op) }
+    reg && IrBlockOperands.all_writers?(node.irep, idx, reg) { |w| BytecodeIR::Ops::LITERAL_PROC.include?(w.op) }
   end
 
   def note_callable(node, program, idx, dest, name)
@@ -555,7 +555,7 @@ class YieldReach
   # `inject(:sym)` / `inject(init, :sym)` name the method to call; a block form names none.
   def note_inject_symbol(node, program, idx, dest, name)
     insn = node.irep.instructions[idx]
-    return if insn.op == 'SENDB' || insn.op == 'SSENDB' || insn.argc == 0
+    return if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) || insn.argc == 0
     return unless dest
 
     n = insn.n_spec == '*' ? nil : insn.n_spec.to_i
@@ -783,7 +783,7 @@ class YieldReach
     pos = insn.n_spec == '*' ? 1 : insn.n_spec.to_i
     kw = insn.nk_spec.nil? ? 0 : (insn.nk_spec == '*' ? 1 : insn.nk_spec.to_i * 2)
     return true if (1..(pos + kw)).any? { |k| may_hold?(node, program, idx, dest.to_i + k, &holds) }
-    return false unless %w[SEND SEND0 SENDB].include?(insn.op)
+    return false unless BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op)
 
     may_hold?(node, program, idx, dest, &holds) &&
       !PROC_CALLS.include?(insn.sym) && !PROC_HARMLESS.include?(insn.sym) && !YIELDER_MESSAGES.include?(insn.sym)
