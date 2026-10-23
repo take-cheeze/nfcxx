@@ -67,6 +67,10 @@ check.call('a join where Struct is the receiver on every arm is still recognized
 
 puts '-- STRUCT_MEMBERS ordered register flow'
 member_source = <<~RUBY
+  class FlowImplicitHost
+    Struct
+    Record = new(:flow_implicit)
+  end
   flag = true
   first = :flow_first
   second = :flow_second
@@ -120,6 +124,7 @@ has_owner = ->(name, owner) { registry.fetch(name, []).any? { |definition| defin
   end
 end
 check.call('block methods retain their Struct owner', has_owner.call('flow_body', 'FlowBlock'))
+check.call('implicit new after reading Struct does not invent a Struct layout', !members.key?('FlowImplicitHost::Record') && !has_owner.call('flow_implicit', 'FlowImplicitHost::Record'))
 check.call('equal Symbol branch arms preserve one positional layout', members['FlowSame'] == ['flow_same'])
 check.call('an alternate entry to SETCONST cannot name one branch layout', !members.key?('FlowAlternate') &&
            !has_owner.call('flow_alt_right', 'FlowAlternate'))
@@ -156,6 +161,16 @@ bad_handler = Irep.new(label: 'unresolved_struct_handler', nlocals: 2, nregs: 8,
                        ])
 check.call('an unresolved receiver query never falls back to its nearest GETCONST',
            !struct_new_receiver?(bad_handler, 2, bad_handler.instructions[2]))
+%w[SSEND SSEND0 SSENDB].each do |op|
+  implicit = Irep.new(label: "implicit_struct_#{op}", nlocals: 2, nregs: 8, reps: [], catch_handlers: [],
+                      instructions: [
+                        Insn.new(addr: 0, op: 'GETCONST', args: "R4\tStruct"),
+                        Insn.new(addr: 1, op: 'LOADSYM', args: "R5\t:flow_stale"),
+                        Insn.new(addr: 2, op: op, args: "R4\t:new\tn=1"),
+                        Insn.new(addr: 3, op: 'SETCONST', args: "Foo\tR4")
+                      ])
+  check.call("#{op} ignores stale Struct in the call frame receiver slot", !struct_new_receiver?(implicit, 2, implicit.instructions[2]))
+end
 
 # FACTORY_READS (closed_world.rb): a read name keeps the factory proof only while its definitions are native. A
 # program `==` can store the constant it is handed (argument) or receives (receiver), and a later `.new` through

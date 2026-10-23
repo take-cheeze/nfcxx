@@ -41,7 +41,7 @@ end
 # Struct layout needs one agreed Symbol at each position; native accessors may
 # conservatively include several names for a position whose branch arms differ.
 def struct_new_receiver?(irep, idx, insn)
-  return false unless insn.sym == 'new' && insn.reg
+  return false unless BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new' && insn.reg
 
   definitions = BytecodeIR.reaching_definitions(irep, idx, insn.reg, origin_transfers: true, through_handlers: true)
   definitions && !definitions.empty? && definitions.all? do |definition|
