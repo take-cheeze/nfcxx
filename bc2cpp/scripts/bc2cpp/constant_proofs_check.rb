@@ -121,6 +121,19 @@ same = declared.call("c = Time.now.year > 0\nC3 = (c ? [1] : [2]).freeze\n", "C3
 check.call('C3 = (c ? [1] : [2]).freeze is refused the same way, though both arms are Integer literals',
            same[:errors].any? { |m| m.include?(gate) })
 
+# Every reaching value must be a frozen literal: a freeze on one arm only, or a freeze of a different element type on
+# the other arm, must not be judged by the nearest freeze alone.
+one_arm = declared.call("c = Time.now.year > 0\nt = Time.now.year.to_s\nt = [1].freeze if c\nC7 = t\n", "C7: Array[Integer]\n")
+check.call('C7 refuses a String reaching the constant beside a frozen Integer arm',
+           one_arm[:errors].any? { |m| m.include?('a frozen array literal') })
+symbol_first = declared.call("c = Time.now.year > 0\nt = [:a].freeze\nt = [1].freeze if c\nC10 = t\n", "C10: Array[Integer]\n")
+check.call('C10 refuses a Symbol literal reaching the constant beside an Integer literal',
+           symbol_first[:errors].any? { |m| m.include?('not proven Integer') })
+moved = declared.call("t = [1].freeze\nC8 = t\n", "C8: Array[Integer]\n")
+check.call('C8 = t, a frozen Integer literal through a move, passes', moved[:errors].empty?)
+both_int = declared.call("c = Time.now.year > 0\nt = [1].freeze\nt = [2].freeze if c\nC9 = t\n", "C9: Array[Integer]\n")
+check.call('C9 passes when every reaching freeze is an Integer literal', both_int[:errors].empty?)
+
 puts '== frozen_at? on a join'
 frozen = declared.call("c = Time.now.year > 0\nF1 = (c ? [1].freeze : [2])\nF2 = (c ? [2] : [1].freeze)\n", '')
 f1 = setconst_of.call(frozen[:ireps], 'F1')
