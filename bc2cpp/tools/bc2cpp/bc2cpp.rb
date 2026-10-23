@@ -360,6 +360,8 @@ if $PROGRAM_NAME == __FILE__
          "Ruby this run does not compile =="
     EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
                                                      native_names: native_names,
+                                                     native_owners: CodeGen::NATIVE_OWNER_MAP_CACHE[native_paths] ||=
+                                                       NativeOwnerMap.build(native_paths),
                                                      superclass_of: superclass_of, included: included_modules,
                                                      prepended: prepended_modules, unknown_mixins: unknown_mixins,
                                                      modules: declared_modules, struct_classes: struct_member_lists.keys,
