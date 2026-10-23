@@ -166,4 +166,68 @@ b = fact_of.call(of, 'Of::B')
 check.call('an intermediate outside the Fixnum margin has no value and no interval (B = A + A)',
            b && b.value.nil? && b.interval.nil? && b.classes == Set[:Integer])
 
+# Program#constant_path answers from reaching definitions when no barrier is given: a join of two constants is
+# refused, where the textually nearest arm (the old answer) was Hash.
+puts '-- constant_path through reaching definitions'
+constant_path_source = <<~RUBY
+  class CpJoin
+    def pick(c)
+      (c ? Array : Hash).new
+    end
+
+    def plain
+      Array.new
+    end
+
+    def qualified
+      Fx::Inner.new
+    end
+
+    def loop_scope(n)
+      x = Outer
+      while n > 0
+        x = x::Inner
+        n -= 1
+      end
+      x.new
+    end
+  end
+RUBY
+
+suite.compile(constant_path_source) do |ireps, root|
+  registry = build_registry(ireps, root)[0]
+  # The receiver of the method's one `new` send, read as the send's constant path (as strict_new_class does).
+  path_of_new = lambda do |name|
+    md = registry.fetch(name).find { |d| d.owner == 'CpJoin' }
+    irep = ireps.fetch(md.irep)
+    idx = irep.instructions.index { |i| %w[SEND SEND0 SENDB].include?(i.op) && i.sym == 'new' }
+    [irep, idx, irep.instructions[idx].reg]
+  end
+
+  irep, idx, reg = path_of_new.call('pick')
+  check.call('a join of Array and Hash has no constant path (the textual walk answered Hash)',
+             BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY).nil?)
+
+  irep, idx, reg = path_of_new.call('plain')
+  plain = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s)
+  check.call('a single GETCONST is its own constant path (Array, no segments, unqualified)',
+             plain && plain.root == :const && plain.name == 'Array' && plain.segments.empty? && !plain.qualified)
+
+  irep, idx, reg = path_of_new.call('qualified')
+  qualified = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s)
+  check.call('Fx::Inner is rooted at Fx with the Inner segment, qualified',
+             qualified && qualified.name == 'Fx' && qualified.segments == ['Inner'] && qualified.qualified)
+
+  irep, idx, reg = path_of_new.call('loop_scope')
+  check.call('a scope rebound inside a loop has no constant path (Outer on entry, Outer::Inner after one pass)',
+             BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s).nil?)
+
+  # Barrier callers (codegen_receiver_facts) keep the textual walk: their barrier ops are the proof.
+  irep, idx, reg = path_of_new.call('pick')
+  barrier = BytecodeIR.for(irep).constant_path(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY,
+                                                                  barrier: %w[JMPUW])
+  check.call('a barrier caller keeps the textual walk (nearest arm Hash; codegen asks every definition itself)',
+             barrier&.name == 'Hash')
+end
+
 suite.finish!

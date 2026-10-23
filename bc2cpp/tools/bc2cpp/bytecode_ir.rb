@@ -58,6 +58,7 @@ module BytecodeIR
     attr_reader :nlocals
 
     def initialize(irep)
+      @irep = irep
       @source_list = irep.instructions
       @source_size = Array(@source_list).length
       @nlocals = irep.nlocals&.to_i
