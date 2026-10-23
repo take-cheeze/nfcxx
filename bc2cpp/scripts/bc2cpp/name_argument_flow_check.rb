@@ -85,6 +85,38 @@ end
   end
 end
 
+# A probe's name is the value reaching its argument, not a Symbol loaded near it.
+{
+  'moved probe' => ['name = :hidden; alias_name = name; respond_to? alias_name', %w[hidden]],
+  'overwritten probe' => ['name = :stale; name = :hidden; respond_to? name', %w[hidden]],
+  'adjacent probe' => ['respond_to?(:hidden)', %w[hidden]]
+}.each do |label, (body, names)|
+  world_for.call("class Probe; #{body}; end") do |world|
+    suite.check(label, names.all? { |name| world.probed_name?(name) } && !world.probed_name?('unrelated'))
+    suite.check('overwritten probe excludes stale name', !world.probed_name?('stale')) if label.start_with?('overwritten')
+  end
+end
+
+# A Symbol loaded near a probe but not passed to it is not probed (the window rule's over-approximation).
+world_for.call('class Probe; near = :hidden; x = :other; respond_to? x; end') do |world|
+  suite.check('a nearby Symbol that is not the probe name stays unprobed', !world.probed_name?('hidden') && world.probed_name?('other'))
+end
+
+# More than one possible name at a probe is not a single proven Symbol: every miss is kept.
+[
+  'name = flag ? :left : :right; method_defined? name',
+  'name = :left; while flag; name = :right; end; respond_to? name',
+  'name = :left; begin; risky; rescue; name = :right; end; respond_to? name',
+  'name = flag ? :known : computed; respond_to? name',
+  'name = "known"; respond_to? name',
+  'respond_to?',
+  'name = :known; callback { name = computed }; method_defined? name'
+].each do |body|
+  world_for.call("class Probe; #{body}; end") do |world|
+    suite.check("unknown probe name makes every miss unprovable: #{body}", world.probed_name?('unrelated'))
+  end
+end
+
 # Bytecode can re-enter a textually adjacent send without reloading its String.
 # Mutating an alias leaves the String's register definition unchanged.
 ops = [
