@@ -11,7 +11,8 @@
 #   * a name the program undefines or removes (ClosedWorld#method_removed?) is untyped;
 #   * a module owner is bounded by its includers: two bounded includers join, an unknown includer, a prepend, or
 #     no closed-world candidates leave the send untyped;
-#   * the inferred call result of a removed name (section g) is untyped on the direct and context-results paths.
+#   * the inferred call result of a removed name (section g) is untyped on the direct and context-results paths;
+#   * the return-class oracle (section h) refuses a send of a removed name, so no proven return class comes from it.
 # The pipeline part (MRBC) runs the same shapes through the real analysis, with the declared contract isolated
 # (BC2CPP_IR_CALL_RESULTS=0), so the refusal is what the type reports.
 #
@@ -201,8 +202,8 @@ def call_irep(name)
 end
 
 # A body that undefines `name` with a literal name (LOADSYM before the send), or with a computed name (a MOVE).
-def remover_irep(label, load:)
-  instructions = [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, load, load == 'LOADSYM' ? 'R1 :greet' : 'R1 R2'),
+def remover_irep(label, load:, name: 'greet')
+  instructions = [insn(0, 'ENTER', '0:0:0:0:0:0:0:0 (0x0)'), insn(1, load, load == 'LOADSYM' ? "R1 :#{name}" : 'R1 R2'),
                   insn(2, 'SEND', 'R0 :undef_method n=1'), insn(3, 'RETURN', 'R0')]
   Irep.new(label: label, instructions: instructions, catch_handlers: [], nregs: 4, nlocals: 1, reps: [], pool: [])
 end
@@ -242,6 +243,36 @@ check('inferred: a computed removal refuses every name (greet)', direct_result(c
 check('inferred: a computed removal refuses every name (any other name)', direct_result(computed_world, 'other').nil?)
 check('inferred: a computed removal refuses the context-results send too',
       context_result(computed_world, 'greet') == NumericFlow::OTHER)
+
+# (h) The return-class oracle (CodeGen#return_class_send_mask, keyed by name in @rc_return). A method whose return is a
+# send of a removed name keeps the body join in its own return class unless the send itself is refused. The table
+# holds Integer for `greet`; the send reads it only when no class may undefine `greet`.
+class ReturnTableHarness < CodeGen
+  def initialize(closed_world, table)
+    @foreign_method_names = Set.new
+    @native_results_ready = @rc_scoped_ready = true
+    @closed_world = closed_world
+    @rc_return = table
+  end
+
+  def frozen_tables_model = nil
+  def numeric_class_bit_count = 0
+end
+
+def return_table_mask(world, name)
+  gen = ReturnTableHarness.new(world, { 'greet' => NumericFlow::INT })
+  gen.send(:return_class_send_mask, call_irep(name), 1, call_irep(name).instructions[1])
+end
+
+check('return oracle: with no removal the send of greet keeps its class (Integer)',
+      return_table_mask(plain_world, 'greet') == NumericFlow::INT)
+check('return oracle: a send of a name removed in a subclass is refused (OTHER)',
+      return_table_mask(literal_world, 'greet') == NumericFlow::OTHER)
+check('return oracle: a computed removal refuses every name (OTHER for greet)',
+      return_table_mask(computed_world, 'greet') == NumericFlow::OTHER)
+other_world = removal_world(call_irep('use'), remover_irep('zap', load: 'LOADSYM', name: 'other'))
+check('return oracle: an unrelated removal keeps the send of greet (Integer)',
+      return_table_mask(other_world, 'greet') == NumericFlow::INT)
 
 # Pipeline part: the same shapes through the real analysis, where the closed world bounds the receivers (needs MRBC).
 unless ENV['MRBC']

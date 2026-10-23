@@ -242,6 +242,8 @@ class CodeGen
     setup_block_return_dependencies
     setup_class_pools
     numeric_return_candidates.each do |name|
+      next if bytecode_ir_name_removed?(name)
+
       @rc_return[name] = 0
       @rc_send_ireps[name].merge(return_call_labels(name))
     end
@@ -280,6 +282,7 @@ class CodeGen
     admitted = false
     @rc_checked_alias_names.each do |name|
       next if @rc_return.key?(name) || @rc_admitted_alias_names.include?(name) || !checked_accessor_name?(name)
+      next if bytecode_ir_name_removed?(name)
 
       @rc_admitted_alias_names << name
       @rc_return[name] = 0
@@ -492,6 +495,8 @@ class CodeGen
   def return_class_send_mask(irep, index, insn, state = nil)
     name = insn.sym
     return NumericFlow::OTHER unless name
+    # A removed name's body may not be the one that runs: the same refusal as bytecode_ir_call_result_classes.
+    return NumericFlow::OTHER if @closed_world && bytecode_ir_name_removed?(name)
 
     ruby_result = state && core_ruby_class_result(irep, index, insn, state)
     return ruby_result if ruby_result
