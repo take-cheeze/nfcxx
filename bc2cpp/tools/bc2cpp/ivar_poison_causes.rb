@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_ops'
+
 # IVAR_POISON_CAUSES: diagnostic only. ClassLayout.analyze joins every SETIV of an ivar; one store whose
 # value trace_new_target cannot name poisons the ivar to UNKNOWN (the `== ivar-class candidates split: OPAQUE ==` list).
 # This classifies each unresolved store by what produced its value and buckets every OPAQUE ivar by those causes, so the
@@ -24,7 +26,7 @@ module IvarPoisonCauses
     'RANGE_INC' => 'range', 'RANGE_EXC' => 'range', 'GETCONST' => 'getconst', 'GETMCNST' => 'getconst',
     'OCLASS' => 'getconst', 'CLASS' => 'class_body', 'MODULE' => 'class_body', 'EXEC' => 'class_body'
   }.freeze
-  CALLS = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB SUPER ARYCAT ARYPUSH].freeze
+  CALLS = (BytecodeIR::Ops::CALL | %w[ARYCAT ARYPUSH]).freeze
   # A literal that is an immediate (or nil): no registry class names it, so no class hint can ever hold it.
   IMMEDIATE_ATOMS = %w[integer numeric bool symbol nil].freeze
   # Buckets in priority order: an ivar is counted once, in the first bucket one of its unresolved stores falls in.

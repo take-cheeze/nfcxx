@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_ops'
 
 # NIL_NARROWING: the registers that cannot hold nil at an instruction, because every path
 # to it passes a test or a call that only a non-nil value survives.
@@ -41,7 +42,8 @@ module NilNarrowing
   # The truthy edge of these is where an `is_a?` result held true (JMPNIL tests nil, not truth).
   TRUTH_TESTS = %w[JMPIF JMPNOT].freeze
   IS_A_NAMES = %w[is_a? kind_of?].freeze
-  RECEIVER_CALLS = %w[SEND SEND0 SENDB].freeze
+  # Sends with an explicit receiver: the SEND family minus the self-receiver forms (SSEND*), which nil can answer too.
+  RECEIVER_CALLS = (BytecodeIR::Ops::SEND - BytecodeIR::Ops::SELF_SEND).freeze
 
   # True when +reg+ (digits) cannot be nil on entry to instruction +idx+ of +irep+. +nil_unanswerable+ is a callable
   # answering whether nil cannot answer a method name (nil: no call narrows); +class_guard+ an object answering
