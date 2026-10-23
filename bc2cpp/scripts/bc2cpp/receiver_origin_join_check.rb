@@ -27,13 +27,23 @@ SNIPPET = <<~RUBY
     x = nil
     x.to_s
   end
+  def rescued(a)
+    x = nil
+    begin
+      x = a
+      raise 'z' if a
+    rescue
+      x = 1
+    end
+    x.to_s
+  end
 RUBY
 
 # The origin label of each method's `to_s` receiver, computed while the fixture is compiled.
 origins = suite.compile(SNIPPET) do |ireps, root|
   registry = build_registry(ireps, root)[0]
   gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
-  %w[probe single].to_h do |name|
+  %w[probe single rescued].to_h do |name|
     irep = ireps.fetch(registry.fetch(name).first.irep)
     insn, idx = irep.instructions.each_with_index.find do |candidate, _|
       BytecodeIR::Ops::SEND.include?(candidate.op) && candidate.sym == 'to_s'
@@ -46,5 +56,8 @@ puts '-- RECEIVER_ORIGIN (join-aware POLY_DIAG origin)'
 check.call('a join names both producers that reach the use, sorted',
            origins['probe'] == 'join:incoming_or_unwritten_register.write_loadnil')
 check.call('a receiver with one producer keeps its single label', origins['single'] == 'write_loadnil')
+# The rescue body is a guarded region the reaching-definitions query refuses, so the walk's label is marked unproven.
+check.call('a refused query (rescue region) is labelled unproven, not a complete single producer',
+           origins['rescued'] == 'unproven.write_loadi_1')
 
 suite.finish!

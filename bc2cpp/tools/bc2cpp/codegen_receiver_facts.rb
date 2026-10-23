@@ -197,13 +197,14 @@ class CodeGen
 
   # Diagnostic-only: identify the producers behind an unresolved receiver, following register copies without
   # changing the type proof. Every producer that reaches the use is reported (`join:a.b` at a join), so a join is
-  # not named by the arm that happens to come last in the instruction order. A query the IR refuses keeps the
-  # textual walk's answer, the nearest writer before the use.
+  # not named by the arm that happens to come last in the instruction order. A query the IR refuses (a guarded
+  # region such as a rescue body) is not a complete answer: its textual-walk label is prefixed `unproven.`.
   def receiver_trace_origin(irep, idx, dest_reg)
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
     defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg.to_s)
-    return receiver_origin_by_walk(irep, idx, dest_reg) if defs.nil? || defs.empty?
+    return "unproven.#{receiver_origin_by_walk(irep, idx, dest_reg)}" if defs.nil?
+    return receiver_origin_by_walk(irep, idx, dest_reg) if defs.empty?
 
     labels = defs.map { |definition| receiver_definition_origin(irep, definition) }.uniq.sort
     labels.size == 1 ? labels.first : "join:#{labels.join('.')}"

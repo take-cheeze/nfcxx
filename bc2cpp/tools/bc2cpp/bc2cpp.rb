@@ -24,6 +24,7 @@ type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __F
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shared_generation'
+require_relative 'inframe_placement'
 
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
@@ -178,6 +179,7 @@ require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 require_relative 'codegen_stack_tuples'
 
 if $PROGRAM_NAME == __FILE__
+  InFramePlacement.refuse_if_requested!
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
   # without it they are stripped from stdout, the only default.
   annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
