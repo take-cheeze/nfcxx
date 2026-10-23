@@ -680,7 +680,7 @@ module RecordHash
       insn = BytecodeIR.for(irep).source_at(d)
       return nil unless %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
 
-      path = irep.constant_path(d - 1, insn.reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY)
+      path = BytecodeIR.for(irep).constant_path(d - 1, insn.reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY)
       return nil unless path&.root == :const && path.segments.empty? && %w[Array Hash String].include?(path.name)
       return nil unless @closed_world.stable_constant_identity?(path.name) && @closed_world.standard_constructor_lookup?
       return nil unless (@registry['new'] || []).all? { |md| md.owner == '<native>' }
