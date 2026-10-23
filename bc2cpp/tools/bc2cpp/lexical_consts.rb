@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_ops'
 
 # CodeGen: LEXICAL_CONST.
 #
@@ -22,6 +23,8 @@ module LexicalConsts
   STRING_EVAL_SENDS = %w[class_eval module_eval instance_eval].freeze
   # The ops collect_definitions reads besides the sends: the class bodies and the constant writes.
   DEFINITION_OPS = %w[CLASS MODULE SETCONST SETMCNST].freeze
+  # The send-to-self ops (SSEND and its splat forms). Within SEND_FAMILY this is exactly the SS-prefixed ops.
+  SELF_SEND_FAMILY = (BytecodeIR::Ops::SELF_SEND | %w[SSENDV SSENDVB]).freeze
 
   # read_keys: GETCONST/GETMCNST insn (by identity) -> qualified name of the definition it reads.
   # site_keys: SETCONST insn (by identity) -> qualified name it defines, nil when its scope is unknown.
@@ -174,7 +177,7 @@ module LexicalConsts
     def collect_mixin(scope, irep, idx, insn)
       recv = reg_number(insn)
       # SSEND is a send to self, so its receiver register is not read; a SEND needs every writer to be LOADSELF.
-      on_self = insn.op.start_with?('SSEND') || (recv && all_writers?(irep, idx, recv) { |_j, w| w.op == 'LOADSELF' })
+      on_self = SELF_SEND_FAMILY.include?(insn.op) || (recv && all_writers?(irep, idx, recv) { |_j, w| w.op == 'LOADSELF' })
       # One constant on every arm: `include(c ? A : B)` names no single module.
       names = recv && BytecodeIR.writers_reaching(irep, idx, (recv.to_i + 1).to_s)&.map do |_j, w|
         w.op == 'GETCONST' ? w.const_name : nil

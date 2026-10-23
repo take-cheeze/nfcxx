@@ -359,11 +359,11 @@ module StaticDispatchRegistrations
   # so its send is :unknown rather than the kind of the local write.
   def receiver_kinds(irep)
     # APOST writes a whole run of registers, which the query does not model: no receiver facts for this irep.
-    apost = irep.instructions.any? { |insn| insn.op == 'APOST' }
+    apost = BytecodeIR.for(irep).op?('APOST')
     opaque = BytecodeIR.own_upvar_written_regs(irep)
     irep.instructions.each_with_index.map do |insn, index|
       next nil unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
-      next :self if insn.op.start_with?('SS')
+      next :self if BytecodeIR::Ops::SELF_SEND.include?(insn.op)
       next :unknown if apost
 
       receiver_kind_at(irep, index, insn.reg, opaque)
