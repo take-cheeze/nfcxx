@@ -905,6 +905,36 @@ class ClosedWorld
     Array(paths).map { |path| native_file_facts(path) }
   end
 
+  # The text a native file's identifiers come from: comments removed, and string literals that contain whitespace
+  # dropped (prose such as a help string naming "Game directory"). A class name passed to mrb_class_get or
+  # mrb_const_get is a whitespace-free literal, so those are kept.
+  def self.native_code_text(text)
+    out = +''
+    i = 0
+    while i < text.length
+      c = text[i]
+      nxt = text[i + 1]
+      if c == '/' && nxt == '/'
+        i = text.index("\n", i) || text.length
+      elsif c == '/' && nxt == '*'
+        close = text.index('*/', i + 2)
+        i = close ? close + 2 : text.length
+      elsif c == '"' || c == "'"
+        j = i + 1
+        while j < text.length && text[j] != c
+          j += text[j] == '\\' ? 2 : 1
+        end
+        lit = text[i..j] || ''
+        out << (lit.match?(/\s/) ? ' ' : lit)
+        i = j + 1
+      else
+        out << c
+        i += 1
+      end
+    end
+    out
+  end
+
   def self.native_file_facts(path)
     # Drop comments, keeping string and char literals (a "//" inside one).
     source = File.binread(path)
@@ -917,7 +947,7 @@ class ClosedWorld
     plain_class_defines = []
     dynamic_constant_mutation = false
     refusals = []
-    code_tokens = Set.new(text.scan(/[A-Za-z_]\w*/))
+    code_tokens = Set.new(native_code_text(text).scan(/[A-Za-z_]\w*/))
     dynamic = text.match?(NATIVE_DYNAMIC)
     defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
     unless path.match?(NATIVE_CORE)
