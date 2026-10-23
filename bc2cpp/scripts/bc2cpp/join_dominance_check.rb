@@ -360,15 +360,20 @@ if ENV['MRBC']
   end
 
   # Inline loops over `loop_var` (bc2cpp_each_i / bc2cpp_heach_i) that are not behind their GUARDED_BLOCK_INLINE
-  # exact-class test: the nearest comment above a loop names its guard.
+  # exact-class test. A comment alone is not a guard: the nearest comment above a loop must be GUARDED_BLOCK_INLINE
+  # and the `if` line directly under it must be the exact-class test (`M->c == M->root_c` plus an
+  # mrb_array_p / mrb_hash_p test on the receiver). The loop's own `if (!mrb_array_p ...)` assert is not the guard.
   loop_starts = lambda do |chunk, loop_var|
     starts = []
     chunk.scan(/^\s*for \(mrb_int #{loop_var}_\d+ = 0/) { starts << Regexp.last_match.begin(0) }
     starts
   end
+  guard_if = /\A\s*if \(M->c == M->root_c && mrb_(?:array|hash)_p\(\w+\)/
   unguarded_loops = lambda do |chunk, loop_var|
     loop_starts.call(chunk, loop_var).reject do |pos|
-      chunk[0...pos].scan(%r{^\s*// .*$}).last.to_s.include?('GUARDED_BLOCK_INLINE')
+      lines = chunk[0...pos].lines
+      comment = lines.rindex { |l| l.match?(%r{\A\s*// }) }
+      comment && lines[comment].include?('GUARDED_BLOCK_INLINE') && lines[comment + 1].to_s.match?(guard_if)
     end
   end
 
