@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'compiled_gems'
+require_relative 'bytecode_ir_containers'
 require_relative 'touch_scan'
 require_relative 'core_hierarchy_sigs'
 require_relative 'foreign_definers'
@@ -1296,7 +1297,7 @@ class ClosedWorld
     @ireps.each do |label, irep|
       insns = irep.instructions
       own_source = !(children.include?(label) && CoreDefs.core_source?(irep.file))
-      insns.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         scan_singleton_maker(irep, insns, idx, insn) if own_source
         case insn.op
         when 'TDEF', 'SDEF'
@@ -1396,7 +1397,7 @@ class ClosedWorld
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
     return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
 
-    defs.all? { |definition| yield irep.instructions[definition.index], definition }
+    defs.all? { |definition| yield BytecodeIR.for(irep).source_at(definition.index), definition }
   end
 
   # No SETCONST binds a value to the name, so it can only name a class or module.

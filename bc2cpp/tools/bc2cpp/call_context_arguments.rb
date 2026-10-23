@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'bytecode_ir_containers'
 
 # Mirrors strict OP_ENTER positional binding. Only the optional initializer slot
 # selected by argc runs; omitted slots remain unknown until initialized.
@@ -23,14 +24,17 @@ module CallContextArguments
     masks.concat(Array.new(optional - supplied, NumericFlow::OTHER))
     masks << NumericFlow::ARR if rest.positive?
     masks.concat(arguments.last(post)) if post.positive?
-    index = body.instructions.index(body.enter)
+    # Irep#enter is the first ENTER, so its index is the position of the first ENTER.
+    index = nil
+    BytecodeIR.for(body).each_with_op('ENTER') { |_insn, i| index ||= i }
     return nil unless index
 
     edges = {}
     if optional.positive?
       target = index + supplied + 1
-      return nil unless body.instructions[index + 1, optional + 1]&.all? { |insn| insn.op == 'JMP' }
-      return nil unless body.instructions[index + 1, optional + 1].size == optional + 1
+      # A run cut short by the end of the irep leaves a missing slot, which fails the JMP check like a non-JMP does.
+      program = BytecodeIR.for(body)
+      return nil unless (index + 1...(index + optional + 2)).all? { |k| program.source_at(k)&.op == 'JMP' }
 
       edges[index] = [target]
     end

@@ -10,6 +10,8 @@
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/lexical_consts'
+require_relative '../../tools/bc2cpp/codegen_insn'
+require_relative '../../tools/bc2cpp/codegen_numeric_consts'
 
 suite = FixtureCheck.new('lexical_const_check')
 suite.require_mrbc!
@@ -114,5 +116,61 @@ check.call('a splatted class_eval argument may be a string: the whole world is u
 
 unstatic = analyze.call("class A1; V = 1; def f; V; end; end\n", static: false)
 check.call('non-static constants (const_set and friends) make the whole world unresolved', unstatic[:read_keys].zero?)
+
+# The trace marker (codegen_insn.rb const_trace_marker) names the owner the same analysis resolved, or `-` when the
+# closed world does not prove it (no closed world, or a non-static one). Untraced, no marker at all.
+puts '== trace marker'
+closed_world = Class.new do
+  def initialize(static) = @static = static
+  def constants_static? = @static
+end
+markers = lambda do |source, static: true, closed: true, traced: true|
+  suite.compile(source) do |ireps, _root|
+    gen = CodeGen.allocate
+    gen.instance_variable_set(:@ireps, ireps)
+    gen.instance_variable_set(:@closed_world, closed ? closed_world.new(static) : nil)
+    previous = ENV['BC2CPP_TRACE_TYPES']
+    traced ? ENV['BC2CPP_TRACE_TYPES'] = '1' : ENV.delete('BC2CPP_TRACE_TYPES')
+    begin
+      ireps.values.flat_map do |irep|
+        irep.instructions.filter_map do |insn|
+          marker = gen.send(:const_trace_marker, insn) if CodeGen::CONST_READ_OPS.include?(insn.op)
+          marker unless marker.nil? || marker.empty?
+        end
+      end
+    ensure
+      previous ? ENV['BC2CPP_TRACE_TYPES'] = previous : ENV.delete('BC2CPP_TRACE_TYPES')
+    end
+  end
+end
+marker_source = <<~RUBY
+  module Game
+    class Character
+      TURN_LEFT = { 8 => 4 }.freeze
+      def turn_left; TURN_LEFT[1]; end
+    end
+    class MoveRoute
+      TURN_LEFT = 17
+      def mr; TURN_LEFT; end
+    end
+    def self.outer; Character::TURN_LEFT; end
+  end
+RUBY
+resolved = markers.call(marker_source)
+# Four reads: TURN_LEFT in each class, Character (GETCONST) and Character::TURN_LEFT (GETMCNST) in Game.outer.
+starts = ->(list, prefix) { list.count { |m| m.start_with?(prefix) } }
+check.call('a read the analysis resolves names its owner: Game::Character and Game::MoveRoute TURN_LEFT',
+           starts.call(resolved, '  /*BC2CPP_CONST_HIT Game::Character::TURN_LEFT TURN_LEFT r') == 2 &&
+             starts.call(resolved, '  /*BC2CPP_CONST_HIT Game::MoveRoute::TURN_LEFT TURN_LEFT r') == 1 &&
+             starts.call(resolved, '  /*BC2CPP_CONST_HIT Game::Character Character r') == 1)
+check.call('every constant read (GETCONST and GETMCNST) has exactly one marker',
+           resolved.size == 4 && resolved.all? { |m| m.end_with?("*/\n") })
+unproven = markers.call(marker_source, static: false)
+check.call('a non-static closed world proves no owner: every read is `-`, still traced',
+           unproven.size == 4 && unproven.all? { |m| m.include?('/*BC2CPP_CONST_HIT - ') })
+no_world = markers.call(marker_source, closed: false)
+check.call('a compile with no closed world (a core body) proves no owner', no_world.all? { |m| m.include?('CONST_HIT - ') })
+untraced = markers.call(marker_source, traced: false)
+check.call('without BC2CPP_TRACE_TYPES=1 no marker is emitted', untraced.empty?)
 
 suite.finish!

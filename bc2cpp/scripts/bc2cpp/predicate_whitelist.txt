@@ -38,6 +38,10 @@ mruby-mvjs/mrblib/mz.rb MZ#render_skip_enabled?
 mruby-mvjs/mrblib/mz.rb MZ#runtime_available?
 mruby-mvjs/mrblib/mz.rb MZ#shop_shot_ready?
 mruby-numeric-ext/mrblib/numeric_ext.rb Numeric#nonzero?
+mruby-optcarrot-benchmark/mrblib/benchmark.rb Optcarrot::APU::Pulse#active?
+mruby-optcarrot-benchmark/mrblib/benchmark.rb Optcarrot::APU::Triangle#active?
+mruby-optcarrot-benchmark/mrblib/benchmark.rb Optcarrot::NES#save_fps_history?
+mruby-optcarrot-benchmark/mrblib/benchmark.rb Optcarrot::PPU#active?
 mruby-proc-ext/test/proc.rb Object#enable_debug_info?
 mruby-rgss/mrblib/error_report.rb RGSS::ErrorReport#installed?
 mruby-rgss/mrblib/lib.rb RGSS::Audio#midi_available?

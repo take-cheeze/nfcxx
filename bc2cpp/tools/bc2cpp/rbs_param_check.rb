@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 require_relative 'call_site_index'
 require_relative 'dynamic_names'
 require_relative 'native_names'
@@ -93,7 +94,7 @@ module RbsParamCheck
           dropped = true
           drop(ctx, d.irep, pos)
           bad.each do |irep, idx, why|
-            diags << diag(display(ctx, irep.file), irep.instructions[idx].lineno.to_i, 1, 'TC1013',
+            diags << diag(display(ctx, irep.file), BytecodeIR.for(irep).source_at(idx).lineno.to_i, 1, 'TC1013',
                           "#{sig.owner}##{sig.name} parameter #{pos + 1}: argument not proven #{cls} (#{why}); " \
                           "declared at #{sig.loc.file}:#{sig.loc.line}")
           end
@@ -205,7 +206,7 @@ module RbsParamCheck
     end
 
     irep, idx, = callers(ctx, name).find { |_irep, _idx, _dest, argc| argc.nil? }
-    "a packed (splat) or keyword caller at #{display(ctx, irep.file)}:#{irep.instructions[idx].lineno}" if irep
+    "a packed (splat) or keyword caller at #{display(ctx, irep.file)}:#{BytecodeIR.for(irep).source_at(idx).lineno}" if irep
   end
 
   # An initialize is entered by `Klass.new` and `super`, never by a SEND of its name. CONSTRUCTOR_POOLS
@@ -233,7 +234,7 @@ module RbsParamCheck
     gen = ctx[:constructor_entries]
     sites, = gen.constructor_entry_sites(d.irep)
     sites.reject do |irep, idx, _dest, _argc, _owner|
-      insn = irep.instructions[idx]
+      insn = BytecodeIR.for(irep).source_at(idx)
       next false unless insn.sym == 'new' && BytecodeIR::Ops::REGISTER_RECEIVER_SEND.include?(insn.op)
 
       klass = trace_new_target(irep, idx + 1, insn.reg, {}, 0, nil, owner: ctx[:owner_of][irep.label])
@@ -332,7 +333,7 @@ module RbsParamCheck
                                         class_guard: ctx[:class_guard])
 
     "#{nilable.why}, and no test or call nil cannot answer proves R#{reg} non-nil at " \
-      "#{display(ctx, irep.file)}:#{irep.instructions[idx].lineno} (NIL_NARROWING)"
+      "#{display(ctx, irep.file)}:#{BytecodeIR.for(irep).source_at(idx).lineno} (NIL_NARROWING)"
   end
 
   # IS_A_GUARD (NIL_NARROWING): every path to `idx` passes a true `x.is_a?(cls)` of the value `reg` holds, so it is
@@ -373,7 +374,7 @@ module RbsParamCheck
   end
 
   def writer_why(ctx, irep, definition, cls, depth)
-    insn = irep.instructions[definition.index]
+    insn = BytecodeIR.for(irep).source_at(definition.index)
     case insn.op
     when 'LOADSELF'
       owner = ctx[:self_of][irep.label]
@@ -427,7 +428,7 @@ module RbsParamCheck
     ctx[:ivar_active] << key
     found = sites.each do |site_irep, idx, reg|
       why = trace(ctx, site_irep, idx, reg.to_s, cls, depth + 1)
-      break "@#{name} = (#{why}) at #{display(ctx, site_irep.file)}:#{site_irep.instructions[idx].lineno}" if why
+      break "@#{name} = (#{why}) at #{display(ctx, site_irep.file)}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
     end
     ctx[:ivar_active].delete(key)
     result = found.is_a?(String) ? found : nil
@@ -460,7 +461,7 @@ module RbsParamCheck
 
     reg = index.to_s
     prog = BytecodeIR.for(frame)
-    if BytecodeIR.own_upvar_written_regs(frame).include?(reg) || frame.instructions.any? { |i| prog.may_write?(i, reg) }
+    if BytecodeIR.own_upvar_written_regs(frame).include?(reg) || prog.each_source.any? { |i, _| prog.may_write?(i, reg) }
       return "#{where}: R#{reg} of #{ctx[:self_of][label]}##{ctx[:method_name][label]} is reassigned"
     end
 
@@ -472,7 +473,7 @@ module RbsParamCheck
   def block_value_why(ctx, body, name, cls, depth)
     BytecodeIR.for(body).exits.each do |ex|
       idx = ex.index
-      insn = body.instructions[idx]
+      insn = BytecodeIR.for(body).source_at(idx)
       return "the block of #{name} at #{display(ctx, body.file)}:#{insn.lineno} exits by #{insn.op}" unless ex.op == 'RETURN'
 
       why = trace(ctx, body, idx, insn.reg, cls, depth + 1)
@@ -487,7 +488,7 @@ module RbsParamCheck
     return "#{overrides.map(&:owner).join(', ')} define new" unless overrides.empty?
 
     owner = ctx[:owner_of][irep.label]
-    found = trace_new_target(irep, idx + 1, irep.instructions[idx].reg, {}, 0, nil, owner: owner)
+    found = trace_new_target(irep, idx + 1, BytecodeIR.for(irep).source_at(idx).reg, {}, 0, nil, owner: owner)
     found == cls ? nil : "`new` of #{found || 'an unresolved constant'}"
   end
 

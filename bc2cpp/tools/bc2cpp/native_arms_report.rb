@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_containers'
 require_relative 'call_facts'
 require_relative 'compiled_gems'
 
@@ -196,12 +197,13 @@ module NativeArmsReport
     @ireps.each do |label, irep|
       next if children.include?(label) && CoreDefs.core_source?(irep.file)
 
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         case insn.op
         when 'ALIAS', 'UNDEF'
           sites[insn.sym] << "#{irep.file}:#{insn.lineno}"
         when 'DEF'
-          method = irep.instructions[0...idx].reverse.find { |i| i.op == 'METHOD' }
+          method = nil
+          BytecodeIR.for(irep).each_with_op('METHOD') { |m, mi| method = m if mi < idx }
           child = method && irep.reps[method.block_index.to_i]
           sites[insn.sym_token] << "#{irep.file}:#{insn.lineno}" unless child && registered.include?(child)
         when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'

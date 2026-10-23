@@ -513,6 +513,32 @@ module TraceTypes
     ivars
   end
 
+  # The CONST rows (a constant read, see param_trace.rb) merged by the owner the read resolved to: { resolved: { "Owner::NAME"
+  # => { calls:, overflow:, classes: } }, unresolved: { "NAME" (as written) => site } }. A row whose owner is `-` is a read
+  # the closed-world analysis did not prove. A dump without CONST rows contributes nothing.
+  def self.read_consts(paths)
+    resolved = {}
+    unresolved = {}
+    paths.each do |path|
+      ids = {}   # this dump's [sym, id] => [owner or nil, written, slot]
+      File.foreach(path) do |raw|
+        f = raw.chomp.split("\t", -1)
+        case f[0]
+        when 'CONST_SITE'
+          owner = f[5] == '-' ? nil : f[5]
+          slot = owner ? (resolved[owner] ||= { calls: 0, overflow: 0, classes: Hash.new(0) }) : nil
+          slot ||= (unresolved[f[6]] ||= { calls: 0, overflow: 0, classes: Hash.new(0) })
+          ids[[f[1], f[2].to_i]] = slot
+          slot[:calls] += f[3].to_i
+          slot[:overflow] += f[4].to_i
+        when 'CONST_CLASS'
+          ids.fetch([f[1], f[2].to_i], nil)&.then { |slot| slot[:classes][f[3]] += f[4].to_i }
+        end
+      end
+    end
+    { resolved: resolved, unresolved: unresolved }
+  end
+
   def self.elem_slot(table, key, role)
     ((table[key] ||= {})[role] ||= { calls: 0, overflow: 0, classes: Hash.new(0) })
   end

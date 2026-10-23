@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # Debug report for the shared escape analysis: with BC2CPP_ESCAPE_REPORT=<path>, every
 # creation site in the closed world (LAMBDA, BLOCK, ARRAY, HASH, STRING, `new`) and every `initialize`
 # gets one TSV row. It changes no generated code; scripts/bc2cpp/escape_report.rb aggregates it.
@@ -48,7 +50,7 @@ module EscapeReport
     ireps.each_value do |irep|
       owner = owner_of[irep.label] || '?'
       origin = CoreDefs.core_source?(irep.file) ? 'core' : 'engine'
-      irep.instructions.each_with_index do |insn, i|
+      BytecodeIR.for(irep).each_source do |insn, i|
         kind = site_kind(irep, i, insn) or next
         lexical = owner_of[irep.label]&.split('#', 2)&.first
         klass = constructed_class(codegen, world, irep, i, insn, lexical)
@@ -146,7 +148,7 @@ module EscapeReport
 
   # The classes the class flow gives the receiver of the send a BLOCK is passed to ("-" when none).
   def self.receiver_classes(analyzer, irep, index, insn)
-    call = irep.instructions[index + 1]
+    call = BytecodeIR.for(irep).source_at(index + 1)
     return '-' unless insn.op == 'BLOCK' && call && %w[SENDB SSENDB].include?(call.op) && call.op == 'SENDB'
 
     Array(analyzer.receiver_classes.call(irep, index + 1, call.reg)).join(',').then { |s| s.empty? ? '-' : s }
@@ -160,7 +162,7 @@ module EscapeReport
     when 'STRING' then 'string'
     when 'SEND0', 'SEND', 'SENDB' then 'object' if insn.sym == 'new' && insn.n_spec != '*'
     when 'BLOCK'
-      call = irep.instructions[index + 1]
+      call = BytecodeIR.for(irep).source_at(index + 1)
       call && %w[SENDB SSENDB].include?(call.op) ? "block:#{call.sym}" : 'block:?'
     end
   end

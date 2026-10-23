@@ -504,7 +504,12 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   FileUtils.rm_rf(File.join(gems_dir, 'optcarrot-benchmark'))
   FileUtils.rm_rf(File.join(gems_dir, 'mruby-onig-regexp/src'))
   FileUtils.rm_f(Dir[File.join(gems_dir, 'mruby-onig-regexp/gem_init.{c,pi,o}')])
-  rake_env = ENV.to_h.merge('MRUBY_CONFIG' => config)
+  # The mruby build runs its own Ruby processes. Under `bundle exec` (which bc2cpp needs) they would inherit this
+  # bundle's RUBYOPT, RUBYLIB and BUNDLE_*/BUNDLER_* and fail to resolve the mruby tree's own gems. Open3 merges this
+  # hash into the inherited environment, so a dropped variable is set to nil (unset), not left out.
+  rake_env = ENV.to_h.to_h do |key, value|
+    [key, key.start_with?('BUNDLE') || %w[RUBYOPT RUBYLIB].include?(key) ? nil : value]
+  end.merge('MRUBY_CONFIG' => config)
   rake_env['LD'] = rake_env['CC'] || 'cc'
   tasks = %w[verify_optcarrot_world link_optcarrot]
   output, status = Open3.capture2e(rake_env, 'rake', *tasks, "-j#{Etc.nprocessors}", chdir: MRUBY)

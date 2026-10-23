@@ -27,9 +27,33 @@ class CodeGen
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
     saved = @insn_source
     @insn_source = [irep&.file, insn.lineno]
-    compile_insn_op(insn, irep, owner_def, idx, reg_offset)
+    code = compile_insn_op(insn, irep, owner_def, idx, reg_offset)
+    CONST_READ_OPS.include?(insn.op) ? code + const_trace_marker(insn) : code
   ensure
     @insn_source = saved
+  end
+
+  CONST_READ_OPS = %w[GETCONST GETMCNST].freeze
+
+  # BC2CPP_TRACE_TYPES=1 only: after a constant read, a marker that ParamTrace rewrites into a constant hit (see
+  # param_trace.rb). It names the owner the read resolved to (LexicalConsts' `Owner::NAME`), or `-` when the read is not
+  # proven, and the name as written. Off by default, so the untraced output is unchanged.
+  def const_trace_marker(insn)
+    return '' unless ENV['BC2CPP_TRACE_TYPES'] == '1'
+
+    written = insn.op == 'GETMCNST' ? insn.mcnst_name : insn.const_name
+    "  /*BC2CPP_CONST_HIT #{const_read_owner(insn) || '-'} #{written} r#{insn.reg}*/\n"
+  end
+
+  # The owner a read resolves to, from the same analysis the closed world uses (codegen_numeric_consts.rb). Nil
+  # without a closed-world proof (a core body compiles with none), and for a read the analysis refuses. A read
+  # compiled from a shifted copy of its insn (an inlined block) is a new object, so it is refused too. Its own memo:
+  # the first caller of lexical_const_info fixes its closed-world state, and a trace must not change that.
+  def const_read_owner(insn)
+    return nil unless @closed_world && lexical_consts_enabled?
+
+    @trace_const_info ||= LexicalConsts.analyze(@ireps, static: @closed_world.constants_static?)
+    @trace_const_info.read_keys[insn]
   end
 
   # "file:line" of the instruction being compiled; "?:0" when nothing names a source line (a synthetic instruction),
