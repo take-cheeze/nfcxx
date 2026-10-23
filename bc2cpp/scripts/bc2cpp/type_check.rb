@@ -31,6 +31,8 @@
 #   --emit-rbs-suggestions DIR  write reviewable candidates with independently inferred IR returns
 #   --trace FILE             trace candidates (scripts/bc2cpp/trace_types.rb candidates): runtime evidence that
 #                            downgrades a possible_mismatch return to TC1009 (tools/bc2cpp/ir_trace_evidence.rb)
+#   --iterate N              feed accepted return suggestions back as --sig for up to N rounds (off by default);
+#                            with --emit-rbs-suggestions, writes the set only once it has converged
 #   -q                       no summary: diagnostics only
 #
 # Exit status: 0 clean, 1 when a declared type contradicts the inference or a signature cannot be used, 2 when the
@@ -44,6 +46,7 @@ require 'tmpdir'
 require 'fileutils'
 require 'type_check_report'
 require 'ir_trace_evidence'
+require 'type_check_iterate'
 
 ROOT = File.expand_path('../..', __dir__)
 
@@ -65,34 +68,51 @@ parser = OptionParser.new do |o|
   o.on('--emit-rbs DIR') { |v| opts[:emit_rbs] = v }
   o.on('--emit-rbs-suggestions DIR') { |v| opts[:emit_rbs_suggestions] = v }
   o.on('--trace FILE') { |v| opts[:trace] = v }
+  o.on('--iterate N', Integer) { |v| opts[:iterate] = v }
   o.on('-q') { opts[:quiet] = true }
 end
 rest = parser.parse(ARGV)
 opts[:files] = rest if opts[:files]
 abort 'type_check: --files needs at least one Ruby file' if opts[:files]&.empty?
 
-if opts[:facts]
-  facts = JSON.parse(File.read(opts[:facts]))
-  rows = TypeCheckReport.load_rows(opts[:rows])
-else
+abort 'type_check: --iterate needs a round count of at least 1' if opts[:iterate] && opts[:iterate] < 1
+abort 'type_check: --iterate runs the analysis, so it cannot be combined with --facts' if opts[:iterate] && opts[:facts]
+
+# One analysis under the given signature directories (nil: the default); returns [facts, rows].
+analyse = lambda do |sig_dirs|
   require 'type_check_run'
   mrbc = ENV['MRBC'] || 'mrbc'
   Dir.mktmpdir('bc2cpp_type_check') do |dir|
     work = opts[:keep] ? FileUtils.mkdir_p(opts[:keep]).first : dir
     begin
       result = TypeCheckRun.run(root: ROOT, mrbc: mrbc, workdir: work, sources: opts[:files], sends: opts[:sends],
-                                what_if: opts[:what_if], sig_dirs: opts[:sig], display_root: opts[:files] ? Dir.pwd : ROOT,
+                                what_if: opts[:what_if], sig_dirs: sig_dirs, display_root: opts[:files] ? Dir.pwd : ROOT,
                                 tools_dir: TOOLS)
     rescue RuntimeError => e
       warn "type_check: #{e.message}"
       exit 2
     end
-    facts = JSON.parse(File.read(result.facts_path))
-    rows = opts[:sends] ? TypeCheckReport.load_rows(result.rows_path) : []
+    [JSON.parse(File.read(result.facts_path)), opts[:sends] ? TypeCheckReport.load_rows(result.rows_path) : []]
   end
 end
 
+iterated = nil
+if opts[:facts]
+  facts = JSON.parse(File.read(opts[:facts]))
+  rows = TypeCheckReport.load_rows(opts[:rows])
+elsif opts[:iterate]
+  require 'rbs_signatures'
+  base = opts[:sig] || RbsSignatures.dirs_from_env(ROOT)
+  iterated = TypeCheckIterate.iterate(limit: opts[:iterate], scope: opts[:scope]) do |candidates|
+    analyse.call(candidates ? [*base, candidates] : opts[:sig])
+  end
+  facts, rows = iterated.analysis
+else
+  facts, rows = analyse.call(opts[:sig])
+end
+# Trace evidence applies to whichever facts this run ends with (fresh, iterated or --facts).
 facts = IrTraceEvidence.annotate(facts, File.read(opts[:trace])) if opts[:trace]
+
 suggestions = opts[:sends] ? TypeCheckReport.suggestions(facts, rows, scope: opts[:scope]) : []
 diags = TypeCheckReport.diagnostics(facts, suggestions, all: opts[:all], top: opts[:top], scope: opts[:scope])
 summary = TypeCheckReport.summary(facts, scope: opts[:scope])
@@ -104,7 +124,17 @@ if opts[:emit_rbs]
        "#{emitted[:skipped].empty? ? '' : " (#{emitted[:skipped].size} skipped: #{emitted[:skipped].first(3).map(&:last).join(', ')})"}"
 end
 
-if opts[:emit_rbs_suggestions]
+if iterated
+  state = iterated.converged ? 'converged' : "did not converge within #{opts[:iterate]} round(s)"
+  warn "type_check: return suggestions #{state} after #{iterated.rounds} round(s) (#{iterated.accepted.size} accepted)"
+  if opts[:emit_rbs_suggestions] && iterated.converged
+    emitted = TypeCheckRbs.emit(iterated.candidate_facts, opts[:emit_rbs_suggestions], scope: opts[:scope])
+    warn "type_check: wrote #{emitted[:files].size} converged RBS suggestion file(s) to #{opts[:emit_rbs_suggestions]} (review before using as contracts)"
+    emitted[:skipped].each { |reason, target| warn "type_check: skipped #{target}: #{reason}" }
+  elsif opts[:emit_rbs_suggestions]
+    warn 'type_check: no candidates written; raise --iterate until the suggestions converge'
+  end
+elsif opts[:emit_rbs_suggestions]
   require 'type_check_rbs'
   emitted = TypeCheckRbs.emit(TypeCheckRbs.suggestion_facts(facts, scope: opts[:scope]), opts[:emit_rbs_suggestions], scope: opts[:scope])
   warn "type_check: wrote #{emitted[:files].size} RBS suggestion file(s) to #{opts[:emit_rbs_suggestions]} (review before using as contracts)"

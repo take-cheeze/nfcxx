@@ -83,18 +83,51 @@ module EscapeAnalysis
     'section' => %w[mruby-rgss/src/profiler.cxx],
     'select' => %w[3rd/mruby/mrbgems/mruby-io/src/io.c],
     'count' => %w[3rd/mruby/mrbgems/mruby-string-ext/src/string.c],
-    'index' => %w[3rd/mruby/src/array.c 3rd/mruby/src/string.c]
+    'index' => %w[3rd/mruby/src/array.c 3rd/mruby/src/string.c],
+    'class' => %w[3rd/mruby/src/kernel.c],
+    'is_a?' => %w[3rd/mruby/src/kernel.c],
+    'kind_of?' => %w[3rd/mruby/src/kernel.c],
+    'instance_of?' => %w[3rd/mruby/src/kernel.c],
+    'frozen?' => %w[3rd/mruby/src/kernel.c],
+    'respond_to?' => %w[3rd/mruby/src/kernel.c],
+    'respond_to_missing?' => %w[3rd/mruby/src/kernel.c],
+    'hash' => %w[3rd/mruby/src/kernel.c 3rd/mruby/src/numeric.c 3rd/mruby/src/proc.c 3rd/mruby/src/string.c
+                 3rd/mruby/mrbgems/mruby-complex/src/complex.c 3rd/mruby/mrbgems/mruby-rational/src/rational.c
+                 3rd/mruby/mrbgems/mruby-set/src/set.c 3rd/mruby/mrbgems/mruby-time/src/time.c],
+    'instance_variable_get' => %w[3rd/mruby/mrbgems/mruby-metaprog/src/metaprog.c],
+    'inspect' => %w[3rd/mruby/src/numeric.c 3rd/mruby/src/hash.c 3rd/mruby/src/object.c 3rd/mruby/src/array.c
+                    3rd/mruby/src/kernel.c 3rd/mruby/src/class.c 3rd/mruby/src/range.c 3rd/mruby/src/string.c
+                    3rd/mruby/src/error.c 3rd/mruby/src/symbol.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
+                    3rd/mruby/mrbgems/mruby-fiber/src/fiber.c 3rd/mruby/mrbgems/mruby-time/src/time.c
+                    3rd/mruby/mrbgems/mruby-data/src/data.c 3rd/mruby/mrbgems/mruby-set/src/set.c
+                    3rd/mruby/mrbgems/mruby-binding/src/binding.c 3rd/mruby/mrbgems/mruby-method/src/method.c
+                    3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c 3rd/mruby/mrbgems/mruby-task/src/task.c
+                    3rd/mruby/mrbgems/mruby-socket/src/socket.c],
+    'to_s' => %w[3rd/mruby/src/numeric.c 3rd/mruby/src/hash.c 3rd/mruby/src/object.c 3rd/mruby/src/array.c
+                 3rd/mruby/src/kernel.c 3rd/mruby/src/class.c 3rd/mruby/src/range.c 3rd/mruby/src/string.c
+                 3rd/mruby/src/error.c 3rd/mruby/src/symbol.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
+                 3rd/mruby/mrbgems/mruby-fiber/src/fiber.c 3rd/mruby/mrbgems/mruby-time/src/time.c
+                 3rd/mruby/mrbgems/mruby-data/src/data.c 3rd/mruby/mrbgems/mruby-set/src/set.c
+                 3rd/mruby/mrbgems/mruby-method/src/method.c 3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c
+                 3rd/mruby/mrbgems/mruby-test-inline-struct/test/inline.c mruby-rgss/src/lib.cxx]
   }.freeze
 
   # Natives that do not keep their RECEIVER. :fresh = the result is a new value or an element, never the
-  # receiver; :self = the result may be the receiver itself (so it joins the tracked set).
+  # receiver; :self = the result may be the receiver itself (so it joins the tracked set). String#to_s
+  # returns self (mrb_str_to_s), which is why to_s is :self.
   NATIVE_RECEIVER_OK = {
     'call' => :fresh, '[]' => :fresh, '===' => :fresh, 'arity' => :fresh, 'lambda?' => :fresh,
     'nil?' => :fresh, '!' => :fresh, '==' => :fresh, 'equal?' => :fresh, 'size' => :fresh,
     'length' => :fresh, 'empty?' => :fresh, 'first' => :fresh, 'last' => :fresh, 'include?' => :fresh,
     'key?' => :fresh, 'has_key?' => :fresh, 'pop' => :fresh, 'shift' => :fresh, '[]=' => :fresh,
-    '<<' => :self, 'push' => :self, 'unshift' => :self
+    '<<' => :self, 'push' => :self, 'unshift' => :self,
+    'class' => :fresh, 'is_a?' => :fresh, 'kind_of?' => :fresh, 'instance_of?' => :fresh, 'frozen?' => :fresh,
+    'respond_to?' => :fresh, 'respond_to_missing?' => :fresh, 'hash' => :fresh,
+    'instance_variable_get' => :fresh, 'inspect' => :fresh, 'to_s' => :self
   }.freeze
+  # Ruby methods a native calls with its own receiver as self, by name. respond_to? calls
+  # respond_to_missing? on self when the method is absent, so that callee must keep no self either.
+  NATIVE_RECEIVER_CALLBACKS = { 'respond_to?' => %w[respond_to_missing?] }.freeze
   # Receiver names that invoke a Proc (a `uses` entry the consumers turn into a direct call).
   PROC_CALLS = Set['call', '[]', '==='].freeze
 
@@ -134,6 +167,7 @@ module EscapeAnalysis
   # that name; such a name has no enumerable definitions.
   class World
     DEF_OPS = Set['TDEF', 'SDEF', 'DEF'].freeze
+    CONST_READS = Set['GETCONST', 'GETMCNST'].freeze
     # Sends that make a method from a name computed at run time. A literal name is modelled below; any
     # other makes every callee set unknowable (`dynamic`).
     NAMING_SENDS = %w[define_method define_singleton_method alias_method].freeze
@@ -347,7 +381,7 @@ module EscapeAnalysis
       @ireps.each_value do |irep|
         EscapeAnalysis.op_sites(irep, SCANNED_OPS).each do |insn, idx|
           if (BytecodeIR::Ops::SEND.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)) ||
-             (%w[GETCONST GETMCNST].include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
+             (CONST_READS.include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
             @reflective_sites << [irep.label, idx]
           end
           if DEF_OPS.include?(insn.op) && insn.sym
@@ -426,6 +460,8 @@ module EscapeAnalysis
 
     CREATED_CLASS = { 'LAMBDA' => 'Proc', 'BLOCK' => 'Proc', 'ARRAY' => 'Array', 'HASH' => 'Hash',
                       'STRING' => 'String', 'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range' }.freeze
+    # A subset of Ops::SEND: the `new` check covers only these two forms.
+    NEW_SENDS = Set['SEND', 'SENDB'].freeze
 
     # The value written to the leading register of the instruction at +index+: a LAMBDA, BLOCK, ARRAY, HASH,
     # STRING or the result of a `new` send (then +value_class+ is the constructed class when known).
@@ -436,7 +472,7 @@ module EscapeAnalysis
       # A frozen literal is one persistent object shared by every load, not a fresh creation.
       return failed(:frozen_literal) if insn.frozen_literal
       # `new` runs the constructor with the new object as self, so the constructor must not keep it.
-      if %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
+      if NEW_SENDS.include?(insn.op) && insn.sym == 'new'
         return failed(:initialize_unknown) unless value_class
         return failed(:initialize_keeps_self) unless initialize_keeps_no_self?(value_class)
       end
@@ -807,6 +843,17 @@ module EscapeAnalysis
     # +chain+: the ancestry of an exact receiver class, when the caller knows it. A name with no native
     # definition on that chain cannot be the native the by-name veto is for, so the veto does not apply.
     def receiver_result(name, list, chain = nil)
+      result = name_receiver_result(name, list, chain)
+      return nil if result.nil?
+
+      # Each callback is checked by name with no callbacks of its own, so the check cannot recurse.
+      callbacks_ok = NATIVE_RECEIVER_CALLBACKS.fetch(name, []).all? do |callback|
+        name_receiver_result(callback, @world.defs_named(callback), nil)
+      end
+      callbacks_ok ? result : nil
+    end
+
+    def name_receiver_result(name, list, chain)
       return nil if list.nil? || installer?(list)
 
       table = NATIVE_RECEIVER_OK[name]
