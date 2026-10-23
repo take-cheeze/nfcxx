@@ -2,6 +2,7 @@
 
 require_relative 'site_census'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_ops'
 
 # Exact receiver origins for the site census (see docs/bc2cpp-dynamic-site-census.md).
 #
@@ -80,6 +81,9 @@ module SiteOriginTable
   end
 
   module Writer
+    # Call ops whose result is a call result: the SEND family, SUPER and BLKCALL.
+    CALL_RESULT_OPS = (BytecodeIR::Ops::CALL | ['BLKCALL']).freeze
+
     module_function
 
     def write(path)
@@ -181,7 +185,7 @@ module SiteOriginTable
     # every other op.
     def result_category(op)
       case op
-      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLKCALL' then 'call_result'
+      when CALL_RESULT_OPS then 'call_result'
       when 'ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI', 'EQ', 'LT', 'LE', 'GT', 'GE' then 'operator_result'
       when 'GETIDX', 'GETIDX0', 'AREF' then 'indexed_result'
       end
@@ -196,7 +200,7 @@ module SiteOriginTable
       when 'GETUPVAR' then 'captured_upvar'
       when 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADL', 'ARRAY', 'ARRAY2', 'HASH', 'STRING', /\ALOADI/
         'literal_or_fresh'
-      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLKCALL' then 'call_result'
+      when CALL_RESULT_OPS then 'call_result'
       else 'other'
       end
     end

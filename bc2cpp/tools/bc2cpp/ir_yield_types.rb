@@ -17,7 +17,7 @@ module IrYieldTypes
     return nil if ENV['BC2CPP_IR_YIELD_TYPES'] == '0'
 
     call = parent.instructions[index]
-    return nil unless %w[SENDB SSENDB].include?(call.op) && call.plain_fixed_argc?
+    return nil unless BytecodeIR::Ops::BLOCK_SEND.include?(call.op) && call.plain_fixed_argc?
 
     argc = call.argc
     child = literal_block(ctx.ireps, parent, index, call.reg.to_i + argc + 1)
@@ -42,7 +42,8 @@ module IrYieldTypes
 
       targets << "yield:#{target.owner}##{target.name}"
       callee = BytecodeIR::Types.new(body, argument_facts: actuals.each_with_index.to_h { |fact, slot| [(slot + 1).to_s, fact] })
-      yields = body.instructions.each_with_index.select { |insn, _position| insn.op == 'BLKCALL' }
+      yields = []
+      body.each_with_op('BLKCALL') { |insn, position| yields << [insn, position] }
       return nil if yields.empty?
 
       yields.each do |instruction, position|

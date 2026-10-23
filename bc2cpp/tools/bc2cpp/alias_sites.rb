@@ -27,7 +27,7 @@ module AliasSites
 
   # Ops a copy cannot carry: `super` and `__method__` answer the original name in an aliased method
   # (mruby's MRB_PROC_ALIAS), a compiled copy registered under `new` would answer `new`.
-  NAME_OPS = %w[SUPER ARGARY].freeze
+  NAME_OPS = Set['SUPER', 'ARGARY'].freeze
   NAME_SENDS = %w[__method__ binding].freeze
   # `private alias_method :a, :b` hands the alias's answer (`:a`) to a visibility send, which the registry
   # does not attribute; such a site is not recognized.

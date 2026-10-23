@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir_ops'
 
 # CORE_DEFS: what decides whether a definition from mruby's own Ruby
 # may be compiled and registered over the interpreter's. The registry walks a
@@ -85,7 +86,7 @@ module CoreDefs
   end
 
   # Opcodes that build or forward a block, and the ENTER block field.
-  BLOCK_OPS = %w[BLKPUSH BLOCK LAMBDA SENDB SSENDB].freeze
+  BLOCK_OPS = (BytecodeIR::Ops::BLOCK_SEND | %w[BLKPUSH BLOCK LAMBDA]).freeze
 
   # Does the method body (or a block or lambda nested in it) take, build, yield to or
   # forward a block? Such a compiled frame stays on the C++ stack while the block

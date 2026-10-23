@@ -1132,7 +1132,7 @@ end
 # the walk and proves the class expression itself.
 def assigned_from_new_send?(irep, idx, reg)
   irep.walk_writers(idx - 1, reg.to_s, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, follow_moves: true) do |insn|
-    %w[SEND SEND0 SENDB].include?(insn.op) && insn.sym == 'new'
+    BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new'
   end || false
 end
 
