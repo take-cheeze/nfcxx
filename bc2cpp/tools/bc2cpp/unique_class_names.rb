@@ -113,8 +113,10 @@ module UniqueClassNames
       !facts[:unknown_mixins].include?(mod)
   end
 
+  # ruby_sources: { ireps:, root: } for the Ruby sources the build does not compile, as bytecode (bc2cpp.rb). Without
+  # it, a native-only class is not admitted: its writes in those sources are unknown.
   def analyze(ireps, root_label, native_paths, foreign_paths, superclass_of: {}, included: {}, prepended: {},
-              unknown_mixins: Set.new)
+              unknown_mixins: Set.new, ruby_sources: nil)
     UniqueClassNames.lexical = nil
     return {} unless native_paths && foreign_paths
 
@@ -168,7 +170,8 @@ module UniqueClassNames
     top_level, nested = foreign_class_names(foreign_paths)
     closed_top = defined.reject { |n| n.include?('::') }
     foreign_classes = top_level.reject { |name, sup| closed_top.include?(name) || sup.nil? }
-    foreign = foreign_rebound_names(foreign_paths) | nested | (top_level.keys.to_set - closed_top - foreign_classes.keys)
+    rebound_text = foreign_rebound_names(foreign_paths)
+    foreign = rebound_text | nested | (top_level.keys.to_set - closed_top - foreign_classes.keys)
     defined |= foreign_classes.keys.to_set
     superclass_of = superclass_of.merge(foreign_classes)
     unknown_mixins = unknown_mixins.to_set | foreign_classes.keys
@@ -182,7 +185,7 @@ module UniqueClassNames
       prepended: prepended,
       unknown_mixins: unknown_mixins.to_set
     }
-    paths.each_with_object({}) do |(name, defs), out|
+    table = paths.each_with_object({}) do |(name, defs), out|
       next unless defs.size == 1 && defs.first.is_a?(String)
       next if defs.first.split('::').any? { |segment| assigned.include?(segment) || foreign.include?(segment) }
       # A top-level module (`module LCF`) is reachable from every lexical scope through Object: its one binding is
@@ -198,6 +201,116 @@ module UniqueClassNames
       end
       out[name] = defs.first if agree
     end
+    native_only_classes(ireps, root_label, native_paths, ruby_sources, paths, defined, native_classes, native_refused,
+                        bindings, top_level, nested, rebound_text).each { |name, full| table[name] = full }
+    table
+  end
+
+  # NATIVE_ONLY_CLASS: a class or module that one native binding defines and that no other binding of the closed world
+  # can reach, so its bare name denotes that class for the whole run (the same claim the bytecode table makes).
+  # Admitted only when:
+  #   - exactly one native binding names it, and it is a class/module definition (kind 2), at one full path P;
+  #   - the closed world has no bytecode or Ruby class/module statement of that bare name, and no `:unknown` one;
+  #   - nothing writes that bare name: no SETCONST/SETMCNST in the bytecode or in the Ruby sources this build reads as
+  #     bytecode (ruby_sources), and no foreign text assignment or text class/module statement names it;
+  #   - the scope of P is itself a unique native scope (unique_native_scope?), so P is not reached through a rebound
+  #     module;
+  #   - no constant mutation the closed world cannot see: a const_set/remove_const/eval send or LOADSYM, a string
+  #     instance_eval/class_eval/module_eval, or a native mrb_const_set/remove with a computed name or mrb_load_*
+  #     anywhere (constant_rebinding_dynamic?). The core's own C sources are trusted, as in the closed-world scan.
+  # Without ruby_sources (the Ruby sources did not compile) nothing is admitted.
+  def native_only_classes(ireps, root_label, native_paths, ruby_sources, paths, defined, native_classes, native_refused,
+                          bindings, top_level, nested, rebound_text)
+    return {} unless ruby_sources && ruby_sources[:ireps] && native_paths
+    ruby_ireps = ruby_sources[:ireps]
+    return {} if constant_rebinding_dynamic?(ireps, ruby_ireps, native_paths)
+
+    written = Set.new
+    [ireps, ruby_ireps].each do |set|
+      set.each_value do |irep|
+        irep.instructions.each do |insn|
+          case insn.op
+          when 'SETCONST' then written << insn.const_name
+          when 'SETMCNST' then written << insn.mcnst_name
+          end
+        end
+      end
+    end
+    return {} if written.include?(nil)
+
+    ruby_defs = ruby_ireps.empty? ? {} : bytecode_class_paths(ruby_ireps, ruby_sources[:root])
+    definitions = Hash.new { |hash, name| hash[name] = Set.new }
+    defined.each { |full| definitions[full.split('::').last] << full }
+    unknown = Set.new
+    [paths, ruby_defs].each do |class_table|
+      class_table.each do |key, list|
+        bare = key.to_s.split('::').last
+        unknown << bare unless list.all?(String)
+        list.grep(String) { |full| definitions[bare] << full }
+      end
+    end
+    text_classes = top_level.keys.to_set | nested
+    context = { definitions: definitions, unknown: unknown, refused: native_refused, text: text_classes,
+                written: written, rebound: rebound_text }
+
+    admitted = {}
+    native_classes.group_by { |full| full.split('::').last }.each do |name, fulls|
+      next unless fulls.size == 1
+      full = fulls.first
+      list = bindings[name]
+      next unless list.size == 1 && list.first[3] == 2
+      next if paths.key?(name) || unknown.include?(name) || native_refused.include?(name)
+      next if text_classes.include?(name) || rebound_text.include?(name) || written.include?(name)
+      next unless definitions[name] == Set[full]
+
+      scope = full.delete_suffix("::#{name}")
+      admitted[name] = full if scope == full || unique_native_scope?(scope, context)
+    end
+    admitted
+  end
+
+  # A scope a native-only class is reached through: one definition, never written, and itself reached through a
+  # unique scope. depth bounds a cyclic or deep chain (refused).
+  def unique_native_scope?(full, context, depth = 0)
+    bare = full.split('::').last
+    return false if depth > 8 || context[:unknown].include?(bare) || context[:refused].include?(bare) ||
+                    context[:text].include?(bare) || context[:rebound].include?(bare) || context[:written].include?(bare)
+    return false unless context[:definitions][bare] == Set[full]
+
+    scope = full.delete_suffix("::#{bare}")
+    scope == full || unique_native_scope?(scope, context, depth + 1)
+  end
+
+  # A send or symbol that can rebind a constant by name the closed-world scan does not model: const_set, remove_const,
+  # a string eval (eval, or instance_eval/class_eval/module_eval with an argument and no block), in bytecode, or a
+  # native mrb_const_set/remove whose name is not a literal, or mrb_load_string/nstring/file, outside the core's C.
+  CONST_REBINDING_SENDS = %w[const_set remove_const eval].freeze
+  STRING_EVAL_SENDS = %w[instance_eval class_eval module_eval].freeze
+  NATIVE_CONST_WRITE = /\bmrb_const_(?:set|remove)\s*\(([^;]*)\)\s*;/
+  NATIVE_CONST_LITERAL = /\bmrb_intern_(?:lit|cstr|static)\s*\(|\bMRB_SYM\(/
+  NATIVE_LOAD = /\bmrb_load_(?:string|nstring|file)\s*\(/
+
+  def constant_rebinding_dynamic?(ireps, ruby_ireps, native_paths)
+    (ireps.each_value.to_a + ruby_ireps.each_value.to_a).any? do |irep|
+      irep.instructions.any? { |insn| constant_rebinding_insn?(insn) }
+    end || Array(native_paths).any? do |path|
+      next false if path.include?('/3rd/mruby/') || !File.file?(path)
+
+      text = File.read(path, encoding: 'UTF-8')
+      text.match?(NATIVE_LOAD) || text.scan(NATIVE_CONST_WRITE).any? { |(args)| !args.match?(NATIVE_CONST_LITERAL) }
+    end
+  end
+
+  def constant_rebinding_insn?(insn)
+    name = case insn.op
+           when 'LOADSYM' then insn.sym_token.to_s
+           when *BytecodeIR::Ops::SEND then insn.sym.to_s
+           end
+    return false unless name
+
+    return true if CONST_REBINDING_SENDS.include?(name)
+
+    STRING_EVAL_SENDS.include?(name) && !BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) && insn.argc != 0
   end
 
   # Names a foreign Ruby source assigns (`NAME = value`): the binding changes, so the name is refused.
