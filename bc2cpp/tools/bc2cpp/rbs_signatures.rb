@@ -394,11 +394,12 @@ module RbsSignatures
 
   # Applied signatures have already been matched to the definition and its required arity.
   def ir_types(applied, irep, superclass_of: {}, included_modules: {}, prepended_modules: {}, unknown_mixins: Set.new, inferred_calls: {}, inferred_args: {}, inferred_keywords: {}, inferred_rest_elements: {}, source_resolver: nil, call_results: ENV['BC2CPP_IR_CALL_RESULTS'] != '0', prepared: nil,
-               subclasses: nil, method_missing_classes: Set.new, removed: nil, includer_candidates: nil)
+               subclasses: nil, method_missing_classes: Set.new, core_redefined: nil, removed: nil, includer_candidates: nil)
     require_relative 'bytecode_ir'
     if prepared && !prepared.applied.equal?(applied)
       raise ArgumentError, 'prepared IR contracts belong to another signature world'
     end
+    core_redefined = prepared.core_redefined if prepared
     owner = applied.ir_owners[irep.label]
     return BytecodeIR::Types.new(irep, declared_const_elements: applied.ir_const_elements, inferred_calls: inferred_calls, inferred_args: inferred_args,
                                  inferred_keywords: inferred_keywords, inferred_rest_elements: inferred_rest_elements, source_resolver: source_resolver) unless owner
@@ -437,7 +438,7 @@ module RbsSignatures
       target = ->(klass, name) { lookup.call(klass).find { |candidate| applied.ir_methods.include?([candidate, name]) } }
     end
     irep.each_with_op(*SELF_SENDS_NO_BLOCK) do |insn, index|
-      types = self_call_types(receivers, insn.sym.to_s, target: target, named_returns: named_returns, removed: removed)
+      types = self_call_types(receivers, insn.sym.to_s, target: target, named_returns: named_returns, core_redefined: core_redefined, removed: removed)
       calls[index] = types if types
     end
     resolver = lambda do |insn, receiver, refusal|
@@ -464,7 +465,7 @@ module RbsSignatures
           failed = true
           break
         end
-        types = self_call_types(bounded, insn.sym.to_s, target: target, named_returns: named_returns)
+        types = self_call_types(bounded, insn.sym.to_s, target: target, named_returns: named_returns, core_redefined: core_redefined)
         unless types
           refusal[:cause] ||= "call_contract_missing:#{klass}##{insn.sym}"
           failed = true
@@ -486,13 +487,13 @@ module RbsSignatures
   end
 
   # SELF_RECEIVERS: the classes an implicit-self send in a method of +owner+ can dispatch on, or nil when they are open.
-  # `subclasses` is ClosedWorld#known_subclasses (nil for a module and any subclass from outside the program); a core
-  # ancestor is refused too, since core instances are undeclared receivers. A module owner is bounded by its includers
-  # (module_receiver_classes) when `includer_candidates` (ClosedWorld#known_includer_candidates) gives their candidates.
-  # See docs/bc2cpp-ir-feedback.md.
+  # `subclasses` is ClosedWorld#known_subclasses (nil for a module and any subclass from outside the program). A core
+  # ancestor is refused unless it is a core leaf (CORE_LEAF below); a core ancestor with core subclasses has instances
+  # the program does not list. A module owner is bounded by its includers (module_receiver_classes) when
+  # `includer_candidates` (ClosedWorld#known_includer_candidates) gives their candidates. See docs/bc2cpp-ir-feedback.md.
   def self_receivers(owner, lookup:, subclasses:, method_missing_classes:, includer_candidates: nil, prepended_modules: {})
     return nil unless subclasses
-    return nil if core_receiver_owners.include?(owner) || lookup.call(owner).empty?
+    return nil if lookup.call(owner).empty? || (core_receiver_owners.include?(owner) && !core_leaf?(owner))
 
     candidates = includer_candidates&.call(owner)
     classes = if candidates
@@ -541,13 +542,30 @@ module RbsSignatures
     end
   end
 
+  # CORE_LEAF: a core class with no core subclass. Its instances are its own plus the program's subclasses, which
+  # ClosedWorld#known_subclasses bounds; an ancestor with core subclasses has instances the program does not list.
+  def core_leaf?(owner)
+    CoreHierarchySigs.declared_class?(owner) && CoreHierarchySigs.subclasses(owner).empty?
+  end
+
   # SELF_CALL_JOIN: the declared result of an implicit-self send over its receiver classes. Each class contributes the
   # contract its own dispatch reaches (`:self` answers that class). nil when the receivers are open or any one lacks a
-  # declared contract, so the send stays untyped rather than taking a partial join. `removed` (a name predicate,
-  # ClosedWorld#method_removed?) refuses a name some class may undefine: its dispatch then reaches no contract.
-  def self_call_types(receivers, name, target:, named_returns:, removed: nil)
+  # declared contract, so the send stays untyped rather than taking a partial join.
+  # CORE_CONTRACT: a core root (see core_leaf?) keeps its core contract only when every class in the set dispatches to
+  # that same contract: a program subclass or reopen that defines +name+ leaves the send untyped (the override rule),
+  # as does a program definition of +name+ on the contract's owner (core_redefined is ClosedWorld#program_may_define?).
+  # `removed` (a name predicate, ClosedWorld#method_removed?) refuses a name some class may undefine: its dispatch then
+  # reaches no contract.
+  def self_call_types(receivers, name, target:, named_returns:, core_redefined: nil, removed: nil)
     return nil unless receivers
     return nil if removed&.call(name)
+
+    root = receivers.find { |klass| CoreHierarchySigs.declared_class?(klass) }
+    if root
+      found = target.call(root, name)
+      return nil unless found && core_redefined && !core_redefined.call(found, name)
+      return nil unless receivers.all? { |klass| target.call(klass, name) == found }
+    end
 
     types = Set.new
     receivers.each do |klass|
