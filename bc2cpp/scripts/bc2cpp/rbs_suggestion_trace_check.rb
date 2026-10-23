@@ -45,8 +45,8 @@
 # installed a second implementation under the same key. A definition the candidates do not list is invisible to both.
 # Not compared, and counted in the summary where it applies: a site with no calls; an overflowed site, whose class table
 # was full so its classes are unknown (counted once over the whole trace, whether or not a candidate declares it);
-# block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, and the emitter
-# declares a block type as untyped); the receiver of a singleton method whose class lookup is not
+# block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, so the gate has no
+# method to compare them with; the candidate's `{ (T1..Tn) -> untyped }` is proven by BLOCK_YIELD_TYPES, not traced); the receiver of a singleton method whose class lookup is not
 # complete (a module owner, a non-class receiver, a program class without --hierarchy): counted as undecided, never a
 # contradiction. A constant read the analysis did not resolve is counted, never compared.
 #

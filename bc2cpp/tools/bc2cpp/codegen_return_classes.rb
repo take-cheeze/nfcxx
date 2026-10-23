@@ -10,6 +10,7 @@ require_relative 'readonly_call_effects'
 require_relative 'call_context_arguments'
 require_relative 'bytecode_ir_ops'
 require_relative 'bytecode_ir_returns'
+require_relative 'block_yield_types'
 
 # CodeGen: RETURN_CLASS_TABLE.
 #
@@ -681,6 +682,29 @@ class CodeGen
                                  block = register + argc + 2 * nk.to_i + 1
                                  BytecodeIR.all_writers_reaching?(body, index, block.to_s) { |_, writer| %w[LAMBDA BLOCK].include?(writer.op) }
                                })
+  end
+
+  # BLOCK_YIELD_TYPES: the classes a Ruby yielder passes to its block at its yield sites (nil when it yields nothing,
+  # { reason: } when it is not typed). +param_classes+ maps a required position to the classes its inferred parameter
+  # row proves (type_facts.rb); a yielded value that is still that parameter's entry value takes them.
+  def bytecode_ir_yield_block_types(definition, param_classes = {})
+    irep = @ireps[definition.irep]
+    return nil unless irep
+
+    BlockYieldTypes.proven(irep, @ireps, value_class: lambda do |body, index, register|
+      yielded_param_classes(body, index, register, param_classes) || bytecode_ir_source_classes(body, index, register)
+    end)
+  end
+
+  # The classes of a required positional that the value at +index+ still is (only its entry value reaches it), else nil.
+  def yielded_param_classes(irep, index, register, param_classes)
+    defs = BytecodeIR.for(irep).reaching_definitions(index, register.to_s, through_handlers: true)
+    return nil unless defs && !defs.empty? && defs.all?(&:entry?)
+
+    positions = defs.map { |df| df.reg.to_i }.uniq
+    return nil unless positions.one?
+
+    param_classes[positions.first]
   end
 
   # Keyword `name`: the value at every reaching call. Keyword pairs are flat registers after the positionals
