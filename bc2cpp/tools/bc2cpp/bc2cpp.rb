@@ -641,11 +641,30 @@ if $PROGRAM_NAME == __FILE__
       warn "== INTEGER_CONSTANT_PROOF off: constant bindings are not static (#{closed_world.global_refusal || 'dynamic constant mutation'}) =="
       Set.new
     end
+  outside_bound = IntegerConstants.native_defined_const_names(native_paths) |
+                  IntegerConstants.foreign_const_names(foreign_ruby_srcs)
+  # PROMOTE_PROOF: the TC1011 verdict DECLARED_CONSTANT_CHECK would give each constant of a candidate directory if it
+  # were declared (scripts/bc2cpp/promote_candidates.rb --proofs). Read before the declared containers below are merged,
+  # as the check itself reads them. Only the verdict file is written; the program's own diagnostics are unchanged.
+  if (candidate_dir = ENV['BC2CPP_CONSTANT_PROOF_CANDIDATES']) && !candidate_dir.empty?
+    proof_out = ENV['BC2CPP_CONSTANT_PROOF_OUT'].to_s
+    abort 'bc2cpp: BC2CPP_CONSTANT_PROOF_CANDIDATES needs BC2CPP_CONSTANT_PROOF_OUT' if proof_out.empty?
+
+    require 'json'
+    candidate_files = Dir.glob(File.join(candidate_dir, '**', '*.rbs')).sort
+    verdicts = DeclaredConstants.verdicts(
+      DeclaredConstants.load(candidate_files, candidate_dir, registry.values.flatten.map(&:owner).to_set),
+      ireps, registry, constant_assignment_sites, outside_bound, container_constants, candidate_dir,
+      plus_safe: DeclaredConstants.array_sum_safe?(registry, superclass_of, prepended_modules, unknown_mixins),
+      range_safe: DeclaredConstants.range_to_a_safe?(registry, included_modules, prepended_modules, unknown_mixins)
+    )
+    File.write(proof_out, "#{JSON.pretty_generate('version' => 1, 'candidates' => File.basename(File.expand_path(candidate_dir)),
+                                                  'verdicts' => verdicts)}\n")
+    warn "== PROMOTE_PROOF: #{verdicts.size} candidate constant(s) -> #{proof_out} =="
+  end
   # DECLARED_CONSTANT_CHECK: RBS constant declarations, checked at every assignment, add the facts the two
   # constant proofs give (INTEGER_CONSTANT_PROOF, CONST_CONTAINER).
   if sig_loaded
-    outside_bound = IntegerConstants.native_defined_const_names(native_paths) |
-                        IntegerConstants.foreign_const_names(foreign_ruby_srcs)
     declared_constants = DeclaredConstants.check(
       DeclaredConstants.load(sig_loaded.files, sig_root, registry.values.flatten.map(&:owner).to_set),
       ireps, registry, constant_assignment_sites, integer_constants, outside_bound, container_constants, sig_root,
