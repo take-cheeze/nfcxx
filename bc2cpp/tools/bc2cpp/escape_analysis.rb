@@ -134,6 +134,7 @@ module EscapeAnalysis
   # that name; such a name has no enumerable definitions.
   class World
     DEF_OPS = Set['TDEF', 'SDEF', 'DEF'].freeze
+    CONST_READS = Set['GETCONST', 'GETMCNST'].freeze
     # Sends that make a method from a name computed at run time. A literal name is modelled below; any
     # other makes every callee set unknowable (`dynamic`).
     NAMING_SENDS = %w[define_method define_singleton_method alias_method].freeze
@@ -347,7 +348,7 @@ module EscapeAnalysis
       @ireps.each_value do |irep|
         EscapeAnalysis.op_sites(irep, SCANNED_OPS).each do |insn, idx|
           if (BytecodeIR::Ops::SEND.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)) ||
-             (%w[GETCONST GETMCNST].include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
+             (CONST_READS.include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
             @reflective_sites << [irep.label, idx]
           end
           if DEF_OPS.include?(insn.op) && insn.sym
@@ -426,6 +427,8 @@ module EscapeAnalysis
 
     CREATED_CLASS = { 'LAMBDA' => 'Proc', 'BLOCK' => 'Proc', 'ARRAY' => 'Array', 'HASH' => 'Hash',
                       'STRING' => 'String', 'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range' }.freeze
+    # A subset of Ops::SEND: the `new` check covers only these two forms.
+    NEW_SENDS = Set['SEND', 'SENDB'].freeze
 
     # The value written to the leading register of the instruction at +index+: a LAMBDA, BLOCK, ARRAY, HASH,
     # STRING or the result of a `new` send (then +value_class+ is the constructed class when known).
@@ -436,7 +439,7 @@ module EscapeAnalysis
       # A frozen literal is one persistent object shared by every load, not a fresh creation.
       return failed(:frozen_literal) if insn.frozen_literal
       # `new` runs the constructor with the new object as self, so the constructor must not keep it.
-      if %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
+      if NEW_SENDS.include?(insn.op) && insn.sym == 'new'
         return failed(:initialize_unknown) unless value_class
         return failed(:initialize_keeps_self) unless initialize_keeps_no_self?(value_class)
       end
