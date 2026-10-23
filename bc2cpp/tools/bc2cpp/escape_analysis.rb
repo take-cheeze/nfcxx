@@ -171,7 +171,10 @@ module EscapeAnalysis
     'instance_of?' => { args: [0], recv: %w[to_s], files: %w[3rd/mruby/src/kernel.c] },
     # mrb_hash_has_key hashes the probe (hash, receiver = key) and compares it (eql?, receiver = key).
     'key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
-    'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] }
+    'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
+    # Both registrations (profiler.cxx, real and WIO stub) read the name with "S&" and copy it into a std::string
+    # key (profiler_section_end); the block is NATIVE_BLOCK_NO_CAPTURE. A non-String name is inspected (%Y).
+    'section' => { args: [0], recv: %w[inspect to_s], files: %w[mruby-rgss/src/profiler.cxx] }
   }.freeze
   # Receiver names that invoke a Proc (a `uses` entry the consumers turn into a direct call).
   PROC_CALLS = Set['call', '[]', '==='].freeze
