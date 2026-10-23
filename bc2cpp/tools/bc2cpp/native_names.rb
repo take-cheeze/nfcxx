@@ -141,6 +141,223 @@ def foreign_method_names(paths)
 end
 
 # ---------------------------------------------------------------------------
+# ESCAPE_ANALYSIS's owner-aware view of the foreign Ruby definitions above. A
+# name defined only by plain `def`s in lexical class bodies (or at top level)
+# is relevant to a receiver only when one of those classes is in its ancestry,
+# so `initialize` no longer hides from every class. Everything the scan cannot
+# attribute keeps the name-level refusal of foreign_method_names:
+#   - a def whose owner is a module (a hidden `include` can put it anywhere), a
+#     singleton class, a block or another def's body; a `def self.x`;
+#   - an alias, an attr or a literal define_method (name-level, as before).
+# Refused for every name (`global`): a computed-name definer outside a plain
+# class body or top level (a block, a module, a singleton class, an explicit
+# receiver), a string or block-less eval, a send of a definer name, a mixin
+# whose argument is not a constant (outside a forwarding `def include`), and a
+# file the parser refuses. A computed-name definer in a plain class body is a
+# wild owner: it may define any name on that class. `include`/`prepend`/`extend`
+# in hidden Ruby record the module's simple name; see World#mixin_defines?.
+# ---------------------------------------------------------------------------
+HiddenRubyOwners = Struct.new(:names, :owners, :wild, :mixins, :global)
+
+class HiddenRubyOwnerScan < Prism::Visitor
+  DEFINER_CALLS = %w[define_method define_singleton_method alias_method attr attr_reader attr_writer attr_accessor].freeze
+  EVAL_CALLS = %w[class_eval module_eval instance_eval class_exec module_exec instance_exec eval].freeze
+  MIXIN_CALLS = %w[include prepend extend].freeze
+  SEND_CALLS = %w[send __send__ public_send].freeze
+  DEFINING_CALLS = (DEFINER_CALLS + EVAL_CALLS + MIXIN_CALLS + %w[alias undef]).freeze
+
+  attr_reader :owners, :unowned, :wild, :mixins, :global
+
+  def initialize
+    super
+    # Innermost last: [:class, full_name], [:module, full_name] or [:unknown]. Empty at top level.
+    @stack = []
+    @owners = Hash.new { |hash, key| hash[key] = Set.new }
+    @unowned = Set.new
+    @wild = Set.new
+    @mixins = Set.new
+    @global = false
+    @forwarding = 0
+  end
+
+  def visit_class_node(node)
+    enter_body(node, :class) { visit_child_nodes(node) }
+  end
+
+  def visit_module_node(node)
+    enter_body(node, :module) { visit_child_nodes(node) }
+  end
+
+  def visit_singleton_class_node(node)
+    push([:unknown]) { visit_child_nodes(node) }
+  end
+
+  def visit_block_node(node)
+    push([:unknown]) { visit_child_nodes(node) }
+  end
+
+  def visit_lambda_node(node)
+    push([:unknown]) { visit_child_nodes(node) }
+  end
+
+  def visit_def_node(node)
+    name = node.name.to_s
+    if node.receiver
+      @unowned << name
+    else
+      record_def(name)
+    end
+    # A def inside a def body defines on whatever class runs it.
+    forwarding = node.receiver.nil? && MIXIN_CALLS.include?(name)
+    @forwarding += 1 if forwarding
+    push([:unknown]) { visit_child_nodes(node) }
+  ensure
+    @forwarding -= 1 if forwarding
+  end
+
+  def visit_alias_method_node(node)
+    name = literal_name(node.new_name)
+    name ? @unowned << name : @global = true
+    visit_child_nodes(node)
+  end
+
+  def visit_call_node(node)
+    name = node.name.to_s
+    args = node.arguments&.arguments || []
+    if DEFINER_CALLS.include?(name)
+      definer_call(name, node, args)
+    elsif EVAL_CALLS.include?(name)
+      # A string or non-block body is opaque; a block's own defs are scoped by visit_block_node.
+      @global = true unless node.block.is_a?(Prism::BlockNode)
+    elsif MIXIN_CALLS.include?(name)
+      mixin_call(args)
+    elsif SEND_CALLS.include?(name) && args.first && DEFINING_CALLS.include?(literal_name(args.first))
+      @global = true
+    end
+    visit_child_nodes(node)
+  end
+
+  private
+
+  def literal_name(node)
+    case node
+    when Prism::SymbolNode, Prism::StringNode then node.unescaped
+    end
+  end
+
+  def enter_body(node, kind, &block)
+    path = node.constant_path
+    parent = @stack.last
+    scope = if path.is_a?(Prism::ConstantReadNode) && (parent.nil? || parent[0] != :unknown)
+              prefix = parent ? "#{parent[1]}::" : ''
+              [kind, "#{prefix}#{path.name}"]
+            else
+              [:unknown]
+            end
+    push(scope, &block)
+  end
+
+  def push(scope)
+    @stack.push(scope)
+    yield
+  ensure
+    @stack.pop
+  end
+
+  def record_def(name)
+    scope = @stack.last
+    case scope&.first
+    when nil then @owners[name] << 'Object' # a top-level def is a private method on Object
+    when :class then @owners[name] << scope[1]
+    else @unowned << name
+    end
+  end
+
+  # define_method(name), alias_method(new, old), attr_*(names). Literal names are name-level.
+  def definer_call(name, node, args)
+    name_args = case name
+                when 'define_method', 'define_singleton_method' then args.first(1)
+                when 'alias_method' then args.first(2)
+                else args
+                end
+    accessor = %w[attr_writer attr_accessor].include?(name)
+    name_args.each do |arg|
+      literal = literal_name(arg)
+      if literal
+        @unowned << literal
+        @unowned << "#{literal}=" if accessor
+      else
+        computed_definer(name, node, arg)
+      end
+    end
+  end
+
+  # A computed name could be any name, so it is wild on the plain class body that makes it, and global anywhere
+  # else: a block, a module, a singleton class, an explicit receiver (the owner is not attributable there).
+  def computed_definer(name, node, arg)
+    prefix = computed_prefix(arg)
+    @unowned << prefix if prefix
+    scope = @stack.last
+    if node.receiver.nil? && name != 'define_singleton_method' && scope.nil?
+      @wild << 'Object'
+    elsif node.receiver.nil? && name != 'define_singleton_method' && scope&.first == :class
+      @wild << scope[1]
+    else
+      @global = true
+    end
+  end
+
+  def computed_prefix(node)
+    return nil unless node.respond_to?(:parts)
+
+    first = node.parts.first
+    prefix = first.unescaped if first.is_a?(Prism::StringNode)
+    prefix unless prefix.nil? || prefix.empty?
+  end
+
+  # `def include(*modules); Object.include(*modules); end` (mruby's toplevel-ext) forwards its callers' values.
+  # Every call of include is scanned in turn (a constant is a mixin, anything else is global), so a parameter
+  # forwarded here is no new source.
+  def mixin_call(args)
+    args.each do |arg|
+      next if arg.is_a?(Prism::SelfNode) # `extend self` in a module: its defs are already name-level
+
+      if arg.is_a?(Prism::ConstantReadNode) || arg.is_a?(Prism::ConstantPathNode)
+        @mixins << arg.slice.split('::').last
+      elsif @forwarding.positive? && forwarded_parameter?(arg)
+        next
+      else
+        @global = true
+      end
+    end
+  end
+
+  def forwarded_parameter?(arg)
+    expression = arg.is_a?(Prism::SplatNode) ? arg.expression : arg
+    expression.is_a?(Prism::LocalVariableReadNode)
+  end
+end
+
+# The owner-aware scan of the foreign Ruby defs. A file the parser refuses makes everything global.
+def foreign_method_owners(paths)
+  names = foreign_method_names(paths)
+  scan = HiddenRubyOwnerScan.new
+  global = false
+  Array(paths).each do |path|
+    src = SourceText.read(path, 'foreign_method_owners') or next
+    parsed = RubyParseCache.parse(src, path)
+    if parsed.errors.empty?
+      parsed.value.accept(scan)
+    else
+      global = true
+    end
+  end
+  owners = {}
+  scan.owners.each { |name, set| owners[name] = set unless scan.unowned.include?(name) }
+  HiddenRubyOwners.new(names, owners, scan.wild, scan.mixins, global || scan.global)
+end
+
+# ---------------------------------------------------------------------------
 # ENTRY_ARG_CALLSITE_PROOF's out-of-closed-world poison source: can anything
 # outside the closed world CALL this name? A `mrb_funcall(M, obj,
 # "tile_color", ...)` in C++ or a call in 3rd/mruby/mrblib is a site whose

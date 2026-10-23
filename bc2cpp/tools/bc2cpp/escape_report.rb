@@ -108,7 +108,7 @@ module EscapeReport
 
   # The class a `Const.new` constructs when the world declares that constant as a class.
   def self.constructed_class(world, irep, index, insn)
-    return nil unless %w[SEND SENDB].include?(insn.op) && insn.sym == 'new'
+    return nil unless %w[SEND0 SEND SENDB].include?(insn.op) && insn.sym == 'new'
 
     name = irep.agreed_constant_name(index, insn.reg)
     name if name && world.class_known?(name)
@@ -128,7 +128,7 @@ module EscapeReport
     when 'ARRAY' then 'array'
     when 'HASH' then 'hash'
     when 'STRING' then 'string'
-    when 'SEND', 'SENDB' then 'object' if insn.sym == 'new' && insn.n_spec != '*'
+    when 'SEND0', 'SEND', 'SENDB' then 'object' if insn.sym == 'new' && insn.n_spec != '*'
     when 'BLOCK'
       call = irep.instructions[index + 1]
       call && %w[SENDB SSENDB].include?(call.op) ? "block:#{call.sym}" : 'block:?'
