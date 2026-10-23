@@ -298,22 +298,29 @@ module TraceTypes
 
     attr_reader :interfaces
 
-    def initialize(supers, defs, includes: {}, prepends: {}, modules: Set.new, names: Set.new)
+    def initialize(supers, defs, includes: {}, prepends: {}, modules: Set.new, names: Set.new, extends: {}, sdefs: {},
+                   dynamic: Set.new)
       @supers = supers
       @defs = defs
       @includes = includes
       @prepends = prepends
       @modules = modules
       @names = names
+      @extends = extends
+      @sdefs = sdefs
+      @dynamic = dynamic
       @interfaces = {}
     end
 
-    # The rows class_hierarchy.rb writes. Mixin lists are in application order.
+    # The rows class_hierarchy.rb writes. Mixin and extend lists are in application order.
     def self.read(path)
       supers = {}
       defs = Hash.new { |h, k| h[k] = [] }
       includes = Hash.new { |h, k| h[k] = [] }
       prepends = Hash.new { |h, k| h[k] = [] }
+      extends = Hash.new { |h, k| h[k] = [] }
+      sdefs = Hash.new { |h, k| h[k] = [] }
+      dynamic = Set.new
       modules = Set.new
       names = Set.new
       File.foreach(path) do |raw|
@@ -323,13 +330,22 @@ module TraceTypes
         when 'DEF' then defs[owner] << value
         when 'INCLUDE' then includes[owner] << value
         when 'PREPEND' then prepends[owner] << value
+        when 'EXTEND'
+          # A `*` module is one the sources cannot name, so the lookup is unknown past it. A `*` owner (see
+          # class_hierarchy.rb) is an extend of an unknown class, which makes every class's singleton lookup unknown.
+          value == '*' ? dynamic << owner : extends[owner] << value
+        when 'SDEF'
+          # A `*` owner is a `def obj.x` on a receiver the sources cannot name: any class may answer x.
+          dynamic << owner if owner == '*'
+          sdefs[owner] << value
         when 'CLASS' then names << owner
         when 'MODULE'
           names << owner
           modules << owner
         end
       end
-      new(supers, defs, includes: includes, prepends: prepends, modules: modules, names: names)
+      new(supers, defs, includes: includes, prepends: prepends, modules: modules, names: names, extends: extends,
+                        sdefs: sdefs, dynamic: dynamic)
     end
 
     # Whether the hierarchy names +name+ as a class or a module (a name it does not name may still be a core one).
@@ -351,6 +367,23 @@ module TraceTypes
 
     def prepends(name)
       @prepends.fetch(name, [])
+    end
+
+    # The modules extended into +name+ (and `class << self` includes), in application order.
+    def extends(name)
+      @extends.fetch(name, [])
+    end
+
+    # Whether the singleton lookup of +name+ may hold something the sources do not name: a dynamic extend of it, or any
+    # unknown receiver's singleton def. Such a lookup cannot be read as complete.
+    def unknown_singleton?(name)
+      @dynamic.include?(name) || @dynamic.include?('*')
+    end
+
+    # Whether the `class << self` body or `def self.` of +name+ defines +method+. A `*` row names any method.
+    def singleton_defines?(name, method)
+      names = @sdefs.fetch(name, [])
+      names.include?(method) || names.include?('*')
     end
 
     # Whether the body of +name+ defines +method+. A `*` row (a computed name) may define any method.

@@ -166,7 +166,7 @@ module TypeFacts
     keyword_params = BytecodeIR.for(irep).instructions_with_op('KARG').filter_map { |insn| insn.sym.to_s }.uniq.map do |name|
       types = ctx.signature_contracts&.ir_keyword_types&.dig(d.irep, name)
       required = !optional_keywords.include?(name)
-      inferred = (types || !required || !gen.respond_to?(:bytecode_ir_keyword_argument_classes)) ? nil : gen.bytecode_ir_keyword_argument_classes(d, name)
+      inferred = (types || !gen.respond_to?(:bytecode_ir_keyword_argument_classes)) ? nil : gen.bytecode_ir_keyword_argument_classes(d, name)
       { 'name' => name, 'required' => required,
         'type' => (types || inferred) && BytecodeIR::Types.type_name(types || inferred),
         'source' => types ? 'signature' : inferred ? 'inferred:receiver-call-sites' : nil }

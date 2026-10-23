@@ -359,16 +359,42 @@ class ClosedWorld
   # it). nil when any of those may exist. A singleton method of `klass` runs with one of these as `self`, an instance
   # method of `klass` with an instance of one of them.
   def known_subclasses(klass)
-    return nil if @global_refusal || !@wild.empty? || !@class_decls.key?(klass) || @rebound.include?(simple(klass))
+    return nil unless @class_decls.key?(klass)
 
-    set = Set[klass] | descendants(klass)
-    return nil unless set.all? { |k| @class_decls.key?(k) }
+    bounded_subclasses(klass, Set[klass] | descendants(klass))
+  end
+
+  # RECEIVER_BOUND: known_subclasses for a receiver the RBS contract resolver reads. A core class the program does not
+  # declare (`class Child < Array`, no `class Array`) is bounded too, by the program classes that name it as their
+  # superclass (@undeclared_children); CoreHierarchySigs must list it. Other callers keep known_subclasses.
+  def known_receiver_subclasses(klass)
+    return known_subclasses(klass) if @class_decls.key?(klass)
+    return nil unless CoreHierarchySigs.declared_class?(klass)
+
+    set = Set[klass]
+    @undeclared_children[klass].each { |child| set |= Set[child] | descendants(child) }
+    bounded_subclasses(klass, set)
+  end
+
+  def bounded_subclasses(klass, set)
+    return nil if @global_refusal || !@wild.empty? || @rebound.include?(simple(klass))
+    return nil unless set.all? { |k| @class_decls.key?(k) || k == klass }
 
     names = set.map { |k| simple(k) }.to_set
     return nil if names.any? { |n| @dynamic_subclassed.include?(n) || @outside_ruby_supers.include?(n) }
     return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
 
     set.to_a.sort
+  end
+
+  # CORE_REDEFINED: may the program define +name+ on +owner+ itself? True when a program source outside the core
+  # mrblib (a Ruby definition, a native or unknown definer, a refusal) may, so a core contract for it is not trusted.
+  def program_may_define?(owner, name)
+    @program_defines ||= {}
+    @program_defines.fetch([owner, name]) do
+      @program_defines[[owner, name]] = @global_refusal || invisibly_definable?(name) ||
+                                        ForeignDefiners.defines?(@ruby_paths.reject { |path| CoreDefs.core_source?(path) }, owner, name)
+    end
   end
 
   # REMOVED_NAMES: could the program undefine or remove method +name+ in some class? The scan does not attribute a
@@ -1278,7 +1304,7 @@ class ClosedWorld
           note_unknown_def(insn.sym, insn.op == 'TDEF' ? irep.label : nil) unless registered.include?(child)
         when 'DEF'
           sym = insn.sym_token
-          method = insns[0...idx].reverse.find { |i| i.op == 'METHOD' }
+          method = BytecodeIR::Window.find_preceding(insns, idx) { |i| i.op == 'METHOD' }
           child = method && irep.reps[method.block_index.to_i]
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
@@ -1289,7 +1315,7 @@ class ClosedWorld
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
-          @probed_names << sym if insns[idx + 1, 3].any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
+          @probed_names << sym if BytecodeIR::Window.following(insns, idx, 3).any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
           const = insn.const_name
@@ -1469,14 +1495,13 @@ class ClosedWorld
   # EXT prefix of a wide operand; nil when anything else feeds an argument.
   def preceding_name_args(insns, idx, n)
     syms = []
-    (idx - 1).downto(0) do |i|
+    BytecodeIR::Window.each_preceding(insns, idx) do |insn, _|
       break if syms.size == n
 
-      op = insns[i].op
-      next if op.start_with?('EXT')
-      return nil unless %w[LOADSYM DEF].include?(op)
+      next if insn.op.start_with?('EXT')
+      return nil unless %w[LOADSYM DEF].include?(insn.op)
 
-      syms.unshift(insns[i].sym_token)
+      syms.unshift(insn.sym_token)
     end
     syms if syms.size == n
   end
@@ -1485,7 +1510,7 @@ class ClosedWorld
   def literal_syms(insns, idx, n)
     return [] if n.zero?
 
-    run = insns[(idx - n).clamp(0, idx)...idx]
+    run = BytecodeIR::Window.preceding(insns, idx, n)
     return nil unless run.size == n && run.all? { |i| i.op == 'LOADSYM' }
 
     run.map { |i| i.sym_token }
@@ -1524,7 +1549,7 @@ class ClosedWorld
 
   # 15+ arguments arrive packed: `ARRAY Ra k` right before an `n=*` send.
   def packed_syms(insns, idx, insn)
-    arr = idx.positive? && insns[idx - 1]
+    arr = BytecodeIR::Window.previous(insns, idx)
     return nil unless insn.pure_splat? && arr && arr.op == 'ARRAY'
 
     k = arr.uint_operand.to_i
@@ -1543,8 +1568,7 @@ class ClosedWorld
     reg = insn.reg.to_i
     send_idx = nil
     reads = []
-    ((idx + 1)...insns.size).each do |j|
-      ins = insns[j]
+    BytecodeIR::Window.each_following(insns, idx) do |ins, j|
       break if ins.op.match?(STOP_OPS)
       next unless reads_register?(ins, reg)
 
@@ -1562,10 +1586,9 @@ class ClosedWorld
     return global!(:class_factory_escape) unless send_idx
     return global!(:class_factory_escape) if const == 'Data'
 
-    between = insns[(idx + 1)...send_idx]
     case const
     when 'Struct'
-      between.each do |i|
+      BytecodeIR::Window.each_following(insns, idx, send_idx) do |i, _|
         next unless i.op == 'LOADSYM'
 
         s = i.sym_token
@@ -1578,7 +1601,7 @@ class ClosedWorld
       return if n.zero?
 
       sup = "R#{reg.to_i + 1}"
-      writer = between.reverse.find { |i| i.reg_token == sup }
+      writer = BytecodeIR::Window.find_preceding(insns, send_idx, idx + 1) { |i| i.reg_token == sup }
       base = writer && %w[GETCONST GETMCNST].include?(writer.op) && writer.const_name
       return global!(:class_factory_escape) unless base
 
@@ -1670,6 +1693,9 @@ class ClosedWorld
     @class_decls.each_key { |c| by_simple[simple(c)] << c }
     @by_simple = by_simple
     @children = Hash.new { |h, k| h[k] = Set.new }
+    # Program classes whose superclass the program does not declare (`class Child < Array`): the superclass is named
+    # as written, and known_subclasses reads them for an undeclared core root.
+    @undeclared_children = Hash.new { |h, k| h[k] = Set.new }
     # A superclass the walk could not resolve could be any class.
     @wild = Set.new
     @class_decls.each do |klass, decls|
@@ -1679,7 +1705,12 @@ class ClosedWorld
         when String
           # Constant lookup is lexical then by ancestry: any class of that
           # simple name may be the one meant.
-          by_simple[simple(d[:super])].each { |parent| @children[parent] << klass unless parent == klass }
+          parents = by_simple[simple(d[:super])]
+          if parents.empty?
+            @undeclared_children[d[:super]] << klass unless d[:super] == klass
+          else
+            parents.each { |parent| @children[parent] << klass unless parent == klass }
+          end
         end
       end
     end

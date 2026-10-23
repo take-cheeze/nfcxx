@@ -82,6 +82,54 @@ Tempfile.create(['mixins', '.rb']) do |src|
   check.call('a computed define_method name records a wildcard', defs['Game::Actor'].include?('*'))
 end
 
+EXTEND_SOURCE = <<~RUBY
+  module Helpers; def tag; end; end
+  module Extra; end
+  module Game
+    class Hero
+      extend Helpers, Extra
+      extend self
+      extend Util.make
+      def self.hook; end
+      class << self
+        def build; end
+        include Extra
+        extend Helpers
+        define_method(:made) {}
+        prepend Helpers
+      end
+      def setup; extend Helpers; end
+    end
+  end
+  extend Helpers
+  Other.extend Helpers
+RUBY
+
+Tempfile.create(['extend', '.rb']) do |src|
+  src.write(EXTEND_SOURCE)
+  src.flush
+  rows = ClassHierarchy.rows([src.path])
+  extends = rows.select { |k, o, _| k == 'EXTEND' && o == 'Game::Hero' }.map(&:last)
+  sdefs = rows.select { |k, *| k == 'SDEF' }.map { |_, o, m| [o, m] }
+
+  check.call('extend A, B is recorded in application order (B then A)', extends.index('Extra') < extends.index('Helpers'))
+  check.call('extend self records the extending class itself', extends.include?('Game::Hero'))
+  check.call('a computed extend argument records a wildcard module', extends.include?('*'))
+  check.call('a class-body include in class << self is an extend of the class', extends.count('Extra') == 2)
+  check.call('an extend inside class << self extends only the singleton class, so it is not recorded',
+             extends.count('Helpers') == 1)
+  check.call('a prepend in class << self records a wildcard (its place in the lookup is not read)',
+             extends.count('*') == 3)
+  check.call('an extend inside a def is dynamic: it records a wildcard for the owner', rows.include?(['EXTEND', 'Game::Hero', '*']))
+  check.call('a top-level extend belongs to main, so it has no row', rows.none? { |k, o, _| k == 'EXTEND' && o == 'Object' })
+  check.call('an explicit receiver extend is an unknown class, a global wildcard row', rows.include?(['EXTEND', '*', '*']))
+  check.call('a def self.x and a class << self def are singleton rows',
+             sdefs.include?(['Game::Hero', 'hook']) && sdefs.include?(['Game::Hero', 'build']) &&
+             sdefs.include?(['Game::Hero', 'made']))
+  check.call('a singleton def is not an instance method row', rows.none? { |k, o, m| k == 'DEF' && o == 'Game::Hero' && %w[hook build].include?(m) })
+  check.call('the instance method of the same class is still a DEF row', rows.include?(['DEF', 'Game::Hero', 'setup']))
+end
+
 if failures.empty?
   puts 'class hierarchy check: PASS'
 else

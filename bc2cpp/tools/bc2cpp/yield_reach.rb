@@ -59,9 +59,12 @@ class YieldReach
   OPERATOR_NAMES = %w[+ - * / % ** == != < <= > >= <=> === =~ !~ [] []= << >> ! & | ^ ~ +@ -@].freeze
   # Ops that copy a value without keeping or running it, or read it only as a condition.
   NEUTRAL_OPS = %w[MOVE GETUPVAR BLKPUSH BLKCALL JMPIF JMPNOT JMPNIL ENTER NOP STOP].freeze
-  # Ops whose leading register is only read.
-  LEAD_READERS = %w[SETIV SETGV SETCV SETCONST SETMCNST SETUPVAR SETSV RETURN RETURN_BLK BREAK JMPIF JMPNOT
-                    JMPNIL ASET SETIDX ARYPUSH HASHADD RAISEIF].freeze
+  # Ops that read their leading register and never define it. It is BytecodeIR::Ops::LEAD_READ_ONLY with two
+  # deliberate differences: MATCHERR is left out (writers_of counts it as a writer, the conservative answer),
+  # and the stores and in-place appends are added (they read R(a) and define nothing in it; LEAD_READ_ONLY
+  # is audited against the walk-over semantics, so it does not list them).
+  LEAD_READERS = (BytecodeIR::Ops::LEAD_READ_ONLY - ['MATCHERR'] +
+                  %w[SETIV SETGV SETCV SETCONST SETMCNST SETSV SETIDX ASET ARYPUSH HASHADD]).freeze
   NON_WRITERS = %w[JMP JMPUW STOP RETSELF].freeze
 
   Node = Struct.new(:label, :irep, :kind, :name, :parent, :owner, :calls, :lit, :bodies, :seed, :native,

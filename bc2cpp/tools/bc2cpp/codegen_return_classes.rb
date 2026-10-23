@@ -677,19 +677,31 @@ class CodeGen
                                })
   end
 
-  # Required keyword `name`: the value at every reaching call. Keyword pairs are flat registers after the positionals
-  # (compile_keyword_send), so the key is read as a LOADSYM and the value at the send itself.
+  # Keyword `name`: the value at every reaching call. Keyword pairs are flat registers after the positionals
+  # (compile_keyword_send), so the key is read as a LOADSYM and the value at the send itself. An optional keyword
+  # joins the class of its literal default, which an omitting call binds; a non-literal default refuses the join.
   def bytecode_ir_keyword_argument_classes(definition, name)
     irep = @ireps[definition.irep]
-    return nil unless irep && keyword_required_shape?(irep, name)
+    return nil unless irep && keyword_join_shape?(irep, name)
 
     sites = reaching_call_sites(definition)
     return nil unless sites
 
-    IrArgumentTypes.keyword_classes(definition, sites, **call_site_lookups(nil),
+    karg = irep.instructions.index { |insn| insn.op == 'KARG' && insn.sym.to_s == name }
+    optional = irep.instructions.any? { |insn| insn.op == 'KEY_P' && insn.sym.to_s == name }
+    default = optional ? BytecodeIR::Types.optional_keyword_default_class(irep, karg, irep.instructions[karg].reg) : nil
+    return nil if optional && !default
+
+    IrArgumentTypes.keyword_classes(definition, sites, **call_site_lookups(nil), default: default && Set[default],
                                     value: ->(body, index, register, argc) {
-                                      nk = body.instructions[index].nk_spec
-                                      next nil unless nk&.match?(/\A\d+\z/) && nk.to_i.positive?
+                                      insn = body.instructions[index]
+                                      nk = insn.nk_spec
+                                      # No keyword token (nk_spec nil) passes no keyword when the positional count is fixed,
+                                      # or absent (SEND0); a splatted count may carry a keyword hash, so it refuses.
+                                      if nk.nil? && (insn.argc_operand.nil? || insn.argc.is_a?(Integer))
+                                        next optional ? Set[] : nil
+                                      end
+                                      next nil unless nk&.match?(/\A\d+\z/)
 
                                       pairs = (0...nk.to_i).map do |k|
                                         [literal_symbol_write(body, index, (register + argc + 1 + 2 * k).to_s), register + argc + 2 + 2 * k]
@@ -697,6 +709,7 @@ class CodeGen
                                       next nil if pairs.any? { |key, _| key.nil? }
 
                                       matches = pairs.select { |key, _| key == name }
+                                      next Set[] if matches.empty? && optional
                                       next nil unless matches.size == 1
 
                                       bytecode_ir_source_classes(body, index, matches.first.last.to_s)

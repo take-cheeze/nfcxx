@@ -424,6 +424,11 @@ def outside_ivar_names(paths)
   end
 end
 
+# Owner argument: a local or an mrb_state class field (`mrb->array_class`), resolved as in NativeOwnerMap
+# (CORE_FIELD_OWNERS). Bare-identifier-only matching left mruby-pack's `pack` unregistered. The private and
+# singleton families take the same argument: Kernel's private `exit` and top_self's singleton `to_s` were unseen.
+NATIVE_OWNER_ARG_RE = /(?:mrb->)?\w+/
+
 def extract_native_method_names(src_paths)
   ScanCache.fetch('native_names.extract_native_method_names', Array(src_paths), cache_absent: false) do
     names = Set.new
@@ -437,7 +442,7 @@ def extract_native_method_names(src_paths)
   Array(src_paths).each do |path|
     src = SourceText.read(path, 'extract_native_method_names') or next
     # Multi-line call shapes match too; the regex ignores newlines between args.
-    src.scan(/mrb_define_(?:method|class_method|module_function)\s*\(\s*\w+\s*,\s*\w+\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
+    src.scan(/mrb_define_(?:method|class_method|module_function|private_method|singleton_method)\s*\(\s*\w+\s*,\s*#{NATIVE_OWNER_ARG_RE}\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
       names << unescape_c_string(name.first)
     end
 
@@ -448,7 +453,7 @@ def extract_native_method_names(src_paths)
     # mrb_define_method_id(mrb, klass, MRB_SYM(name)/MRB_OPSYM(op), func, aspec)
     # (and the _class_method_id/_module_function_id siblings) -- the direct-call
     # form some core mrbgems (mruby-task, ...) use instead of a ROM table.
-    src.scan(/mrb_define_(?:method|class_method|module_function)_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/) do |tok|
+    src.scan(/mrb_define_(?:method|class_method|module_function|private_method|singleton_method)_id\s*\(\s*\w+\s*,\s*#{NATIVE_OWNER_ARG_RE}\s*,\s*#{MRB_SYM_TOKEN_RE}/) do |tok|
       names << resolve_mrb_sym_token(tok[0], tok[1])
     end
 
@@ -458,7 +463,7 @@ def extract_native_method_names(src_paths)
     # needs a `<native>` entry) could never fire for it. Only the literal-token
     # calls (Class#new, BasicObject#!=, Proc#call/[]) are matchable; the rest pass
     # runtime values.
-    src.scan(/mrb_define_method_raw\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/) do |tok|
+    src.scan(/mrb_define_method_raw\s*\(\s*\w+\s*,\s*#{NATIVE_OWNER_ARG_RE}\s*,\s*#{MRB_SYM_TOKEN_RE}/) do |tok|
       names << resolve_mrb_sym_token(tok[0], tok[1])
     end
   end
