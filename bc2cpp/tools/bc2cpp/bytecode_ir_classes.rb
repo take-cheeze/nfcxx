@@ -11,8 +11,9 @@ module BytecodeIR
   # that register is not its body.
   def self.class_bodies(irep, *ops)
     bodies = {}
+    program = self.for(irep)
     irep.each_with_op(*ops) do |insn, idx|
-      exec = irep.instructions[idx + 1]
+      exec = program.source_at(idx + 1)
       next unless exec&.op == 'EXEC' && exec.reg_token == insn.reg_token
 
       bodies[idx] = irep.reps[exec.block_index]
@@ -25,12 +26,13 @@ module BytecodeIR
   # OCLASS (`class ::Name`). Nil otherwise; a constant-path outer is resolved
   # by the caller.
   def self.class_body_path(irep, idx, namespace)
-    insn = irep.instructions[idx]
+    program = self.for(irep)
+    insn = program.source_at(idx)
     definitions = reaching_definitions(irep, idx, insn.reg, through_handlers: true, origin_transfers: true)
     return nil if definitions.nil? || definitions.empty? || definitions.any?(&:entry?)
 
     paths = definitions.map do |definition|
-      case self.for(irep).source_at(definition.index).op
+      case program.source_at(definition.index).op
       when 'LOADNIL' then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
       when 'OCLASS' then insn.sym
       end
