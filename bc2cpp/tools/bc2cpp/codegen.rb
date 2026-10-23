@@ -216,6 +216,9 @@ class CodeGen
     @direct_alloc_used = false
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
+    # Bumped when module_super_block_clean? meets a label already being probed. A probe that saw a bump
+    # answered from an in-progress probe, so its answer is not memoized (see compiles_clean?).
+    @guard_cycles = 0
     # ATTR_STRUCT_DEVIRT: [owner, ivar] pairs embedded only because a synthesized
     # struct-aware accessor (emit_ivar_accessor_pair) replaces the native attr_*
     # one. Filled by drop_unsafe_embeddings, read by emit_synthesized_accessors.
