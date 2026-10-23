@@ -139,7 +139,7 @@ class CodeGen
       d = insn.reg
       # Small immediates print parenthesized ("R6\t(3)"); LOADI8/16/32 print bare
       # ("R1\t128").
-      lit = insn.paren_value || insn.imm_operand
+      lit = insn.paren_value || BytecodeIR::OperandModel.imm_operand(insn)
       "  r#{d} = mrb_fixnum_value(#{lit});\n"
     when 'LOADL'
       # "LOADL R5 L[0]": a pool literal (vm.c OP_LOADL). Only FLOAT is modelled:
@@ -231,7 +231,7 @@ class CodeGen
       end
     when 'ADDI'
       d = insn.reg
-      lit = insn.imm_operand
+      lit = BytecodeIR::OperandModel.imm_operand(insn)
       # FIXNUM_OPERAND_PROOF: the immediate is a Fixnum, so only the destination
       # needs proving.
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
@@ -291,7 +291,7 @@ class CodeGen
       end
     when 'SUBI'
       d = insn.reg
-      lit = insn.imm_operand
+      lit = BytecodeIR::OperandModel.imm_operand(insn)
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
       else
