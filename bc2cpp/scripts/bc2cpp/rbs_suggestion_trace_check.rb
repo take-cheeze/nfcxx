@@ -13,8 +13,12 @@
 # unreadable input.
 #
 # Compared:
-#   * each required positional parameter (trace kind `req`, index = position) and each method return, except
-#     `initialize` (Ruby discards its value);
+#   * each positional parameter, required (trace kind `req`) or optional (`opt`), matched by position, and each method
+#     return, except `initialize` (Ruby discards its value);
+#   * each keyword parameter, required (`kwreq`) or optional (`kwopt`), matched by name (the C parameter is
+#     bc2cpp_kwarg_NAME); a value is traced only where it was given, so both kinds are real arguments;
+#   * a rest parameter's extra arguments: the `rest` row is the Array of them, and its elements (the `array` role)
+#     are checked against the declared T of `*T`. A rest row whose class is not Array is undecided;
 #   * the elements of a parameter or return declared Array[T] or Hash[K, V] (the PARAM_ELEM_* and RETURN_ELEM_* rows);
 #   * singleton methods, `def self.x`, against the trace key `Owner.singleton#x`;
 #   * a module method, against the observations of each class that includes the module (the mixins come from
@@ -24,8 +28,9 @@
 #     counted as undecided, never a contradiction.
 # Not compared, and counted in the summary where it applies: a site with no calls; an overflowed site, whose class table
 # was full so its classes are unknown (counted once over the whole trace, whether or not a candidate declares it);
-# optional, rest, keyword and block parameters; ivars and constants (not traced); the receiver of a singleton method
-# (self is not traced); an overloaded method.
+# block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, and the emitter
+# declares a block type as untyped); ivars and constants (not traced); the receiver of a singleton method (self is not
+# traced); an overloaded method.
 #
 # A class is a contradiction only when the lookup order it is checked against is complete: a core class (mruby's
 # hierarchy from CoreHierarchySigs), or a program class whose superclass chain reaches a core class through --hierarchy.
@@ -43,7 +48,8 @@ require 'core_hierarchy_sigs'
 
 module RbsSuggestionTrace
   Error = Class.new(StandardError)
-  Sig = Struct.new(:owner, :name, :params, :ret, :file, :line, :singleton) do
+  # optional: the types of the optional positionals; rest: the type of `*T` or nil; keywords: [name, type] pairs.
+  Sig = Struct.new(:owner, :name, :params, :ret, :file, :line, :singleton, :optional, :rest, :keywords) do
     # The trace key of the method: `Owner#name`, or `Owner.singleton#name` for `def self.name`.
     def key
       singleton ? "#{owner}.singleton##{name}" : "#{owner}##{name}"
@@ -55,7 +61,7 @@ module RbsSuggestionTrace
   end
   Ctx = Struct.new(:classes, :hierarchy)
   Ancestry = Struct.new(:names, :complete)
-  # by_param: method => index => site (required parameters); rets: method => site; param_elems: method => index =>
+  # by_param: method => param_key => site (see param_key); rets: method => site; param_elems: method => param_key =>
   # role => site; ret_elems: method => role => site; overflowed: the sites and element slots, of any kind, whose class
   # table overflowed.
   Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed)
@@ -95,8 +101,11 @@ module RbsSuggestionTrace
         next if node.overloads.size != 1 || !%i[instance singleton].include?(node.kind)
 
         fn = node.overloads.first.method_type.type
+        keywords = fn.required_keywords.map { |name, param| [name.to_s, param.type] } +
+                   fn.optional_keywords.map { |name, param| [name.to_s, param.type] }
         sigs << Sig.new(owner, node.name.to_s, fn.required_positionals.map(&:type), fn.return_type, file,
-                        node.location.start_line, node.kind == :singleton)
+                        node.location.start_line, node.kind == :singleton, fn.optional_positionals.map(&:type),
+                        fn.rest_positionals&.type, keywords)
       end
     end
   end
@@ -104,7 +113,7 @@ module RbsSuggestionTrace
   # ---- the trace side -----------------------------------------------------------------------------------------------
 
   # The dumps merged by what each site is (TraceTypes::Candidates.read_dumps and read_elements), with the element roles
-  # of the required parameters and of the returns.
+  # of the parameters and of the returns.
   def read_observed(dumps)
     params, rets = TraceTypes::Candidates.read_dumps(dumps)
     elems = TraceTypes::Candidates.read_elements(dumps)
@@ -114,19 +123,32 @@ module RbsSuggestionTrace
                  element_tables.sum { |table| table.sum { |_, roles| roles.count { |_, slot| slot[:overflow].positive? } } }
 
     by_param = {}
-    params.each do |(method, kind, index, _name), site|
-      next unless kind == 'req'
+    params.each do |(method, kind, index, name), site|
+      key = param_key(kind, index, name) or next
 
-      merge_site(((by_param[method] ||= {})[index] ||= new_site), site)
+      merge_site(((by_param[method] ||= {})[key] ||= new_site), site)
     end
     param_elems = {}
-    elems[:params].each do |(method, kind, index, _name), roles|
-      next unless kind == 'req'
+    elems[:params].each do |(method, kind, index, name), roles|
+      key = param_key(kind, index, name) or next
 
-      target = ((param_elems[method] ||= {})[index] ||= {})
+      target = ((param_elems[method] ||= {})[key] ||= {})
       roles.each { |role, slot| merge_site(target[role] ||= new_site, slot) }
     end
     Observed.new(by_param, rets, param_elems, elems[:returns], overflowed)
+  end
+
+  # A keyword's C parameter is bc2cpp_kwarg_NAME (KWARG_RE in tools/bc2cpp/param_trace.rb). It is keyed by name whatever
+  # its kind, so kwreq and kwopt rows of one keyword merge. Block-body rows (block_arg) name no method: no key.
+  KWARG_LABEL = /\Abc2cpp_kwarg_([\w$]+)\z/
+
+  def param_key(kind, index, name)
+    case kind
+    when 'req', 'opt', 'rest' then [kind, index]
+    when 'kwreq', 'kwopt'
+      kw = name[KWARG_LABEL, 1]
+      kw && ['kw', kw]
+    end
   end
 
   def new_site
@@ -376,20 +398,60 @@ module RbsSuggestionTrace
   end
 
   # Compares the parameters, the returns and their elements under the trace key +key+ (the method's own key, or a class
-  # that includes a module method, named by `via`).
-  # self_owner is the class a `self` return means (see type_verdict): the owner of an instance method, none for a singleton
-  # method or a method run as one.
+  # that includes a module method, named by `via`). self_owner is the class a `self` return means (see type_verdict):
+  # the owner of an instance method, none for a singleton method or a method run as one.
   def compare_sig(sig, key, obs, ctx, findings, stats, via: nil, self_owner: sig.singleton ? nil : sig.owner)
+    sites = obs.by_param[key] || {}
+    elems = obs.param_elems[key] || {}
+    required = sig.params.size
     sig.params.each_with_index do |type, i|
       index = i + 1
-      label = "parameter #{index}"
-      check_observed(sig, label, type, (obs.by_param[key] || {})[index], ctx, findings, stats, via, self_owner)
-      check_elements(sig, label, type, (obs.param_elems[key] || {})[index], ctx, findings, stats, via, self_owner)
+      check_param(sig, "parameter #{index}", type, sites[['req', index]], elems[['req', index]],
+                  ctx, findings, stats, via, self_owner)
+    end
+    # Optional positionals follow the required ones in the C parameter list (the `_impl` takes mand + opt, then rest).
+    sig.optional.each_with_index do |type, i|
+      index = required + i + 1
+      check_param(sig, "parameter #{index}", type, sites[['opt', index]], elems[['opt', index]],
+                  ctx, findings, stats, via, self_owner)
+    end
+    if sig.rest
+      index = required + sig.optional.size + 1
+      check_rest(sig, "parameter #{index} (rest)", sig.rest, sites[['rest', index]], elems[['rest', index]], ctx, findings,
+                 stats, via, self_owner)
+    end
+    sig.keywords.each do |name, type|
+      check_param(sig, "keyword #{name}", type, sites[['kw', name]], elems[['kw', name]], ctx, findings, stats, via,
+                  self_owner)
     end
     return if sig.name == 'initialize'
 
     check_observed(sig, 'return', sig.ret, obs.rets[key], ctx, findings, stats, via, self_owner)
     check_elements(sig, 'return', sig.ret, obs.ret_elems[key], ctx, findings, stats, via, self_owner)
+  end
+
+  def check_param(sig, label, type, site, roles, ctx, findings, stats, via, self_owner)
+    check_observed(sig, label, type, site, ctx, findings, stats, via, self_owner)
+    check_elements(sig, label, type, roles, ctx, findings, stats, via, self_owner)
+  end
+
+  # The rest row is the Array of the extra arguments (ENTER builds it fresh per call), so its own class is not the
+  # declared type: `*T` is checked against its elements. Any other class means the index is not this rest parameter.
+  def check_rest(sig, label, type, site, roles, ctx, findings, stats, via, self_owner)
+    if site.nil? || site[:calls].zero?
+      stats[:unreached] += 1
+      return
+    end
+    return if site[:overflow].positive?
+
+    unless site[:classes].keys.all? { |klass| klass == 'Array' }
+      stats[:rest_not_array] += 1
+      return
+    end
+    slot = roles && roles['array']
+    return if slot.nil? || slot[:calls].zero? || slot[:overflow].positive?
+
+    compare_site(sig, "#{label} element (array)", type, slot, ctx, findings, stats, via, :element_sites, self_owner)
   end
 
   def check_observed(sig, label, type, site, ctx, findings, stats, via, self_owner)
@@ -445,7 +507,8 @@ module RbsSuggestionTrace
       "compared, #{s[:element_sites]} element slot(s), #{s[:mixin_sites]} mixin site(s), #{s[:unreached]} unreached, " \
       "#{s[:overflowed]} overflowed site(s) skipped, #{s[:undecided_classes]} class(es) undecided, " \
       "#{s[:mixin_undecided]} mixin observation(s) undecided, #{s[:extend_sites]} extend site(s) compared, " \
-      "#{s[:extend_undecided]} extend observation(s) cannot decide, #{result.findings.size} contradiction(s)"
+      "#{s[:extend_undecided]} extend observation(s) cannot decide, #{s[:rest_not_array]} rest row(s) not an Array, " \
+      "#{result.findings.size} contradiction(s)"
   end
 
   # The core hierarchy is parsed lazily, by RBS 4 (Gemfile); RBS 3 reads it as a syntax error.
@@ -478,9 +541,13 @@ module RbsSuggestionTrace
 
   # ---- the fixture self-test ----------------------------------------------------------------------------------------
 
-  def method_fact(owner, name, params, ret)
-    { 'owner' => owner, 'name' => name, 'scope' => 'engine', 'params' => params.map { |t| { 'type' => t } }, 'opt' => 0,
-      'optional_params' => [], 'rest' => false, 'keyword_params' => [], 'kdict' => false, 'key' => 0,
+  # keywords: [name, type, required] triples, as the emitter reads keyword_params.
+  def method_fact(owner, name, params, ret, optional: [], rest: nil, keywords: [])
+    { 'owner' => owner, 'name' => name, 'scope' => 'engine', 'params' => params.map { |t| { 'type' => t } },
+      'opt' => optional.size, 'optional_params' => optional.map { |t| { 'type' => t } },
+      'rest' => !rest.nil?, 'rest_param' => rest && { 'type' => rest },
+      'keyword_params' => keywords.map { |n, t, req| { 'name' => n, 'type' => t, 'required' => req } },
+      'kdict' => false, 'key' => 0,
       'return' => { 'type' => ret, 'source' => 'inferred:bytecode-ir', 'reason' => nil }, 'visibility' => 'public' }
   end
 
@@ -495,6 +562,14 @@ module RbsSuggestionTrace
 
   def param_rows(id, method, index, calls, overflow, classes)
     rows = ["PARAM_SITE\tfx\t#{id}\t#{calls}\t#{overflow}\t#{method}\tfn\tmethod\treq\t#{index}\tv\tnone:mono"]
+    classes.each { |klass, count| rows << "PARAM_CLASS\tfx\t#{id}\t#{klass}\t#{count}" }
+    rows
+  end
+
+  # A PARAM_SITE of any kind (req, opt, rest, kwreq, kwopt); name is the Ruby name, or bc2cpp_kwarg_NAME for a keyword.
+  # Positional arguments only: a braceless `'Integer' => n` hash must stay a positional argument.
+  def kind_rows(id, method, kind, index, name, calls, overflow, classes)
+    rows = ["PARAM_SITE\tfx\t#{id}\t#{calls}\t#{overflow}\t#{method}\tfn\tmethod\t#{kind}\t#{index}\t#{name}\tnone:mono"]
     classes.each { |klass, count| rows << "PARAM_CLASS\tfx\t#{id}\t#{klass}\t#{count}" }
     rows
   end
@@ -532,6 +607,9 @@ module RbsSuggestionTrace
       method_fact('Box', 'bucket', [], 'Array[Integer]'),
       method_fact('Walk', 'step', ['Integer'], 'Integer'),
       method_fact('Box', 'take_walker', ['Walk'], 'Integer'),
+      method_fact('Box', 'opt_pick', ['Integer'], 'Integer', optional: ['Integer']),
+      method_fact('Box', 'spread', ['Integer'], 'Integer', rest: 'Integer'),
+      method_fact('Box', 'named', ['Integer'], 'Integer', keywords: [['charged', 'Integer', true], ['bonus', 'String', false]]),
       method_fact('Helpers', 'tag', ['Integer'], 'Integer')
     ]
     hierarchy = <<~TSV
@@ -570,6 +648,9 @@ module RbsSuggestionTrace
       check.call('a singleton method is emitted as def self.', put_text.include?('def self.make: (Integer)'))
       check.call('an element type is emitted as Array[T]', put_text.include?('def pack: (Array[Integer])'))
       check.call('a module candidate is emitted as a module', File.read(File.join(candidates, 'Walk.rbs')).include?('module Walk'))
+      check.call('an optional parameter is emitted as ?T, a rest parameter as *T and a keyword as k: T',
+                 put_text.include?('def opt_pick: (Integer, ?Integer)') && put_text.include?('def spread: (Integer, *Integer)') &&
+                 put_text.include?('def named: (Integer, charged: Integer, ?bonus: String)'))
 
       hier_path = File.join(tmp, 'hierarchy.tsv')
       File.write(hier_path, hierarchy)
@@ -689,6 +770,66 @@ module RbsSuggestionTrace
       r = run(candidates, [element_ok])
       check.call('elements the containers admit have no findings and are counted as element slots',
                  r.findings.empty? && r.stats[:element_sites] == 3)
+
+      # Optional, rest and keyword parameters. An optional row exists only where the call passed the argument, so it is
+      # evidence. A rest row is the Array of the extra arguments, whose elements are the `array` role. A keyword row is
+      # named bc2cpp_kwarg_NAME, and its kwreq and kwopt rows are one keyword's values.
+      optional_bad = File.join(tmp, 'optional_bad.tsv')
+      File.write(optional_bad, (param_rows(0, 'Box#opt_pick', 1, 2, 0, 'Integer' => 2) +
+                                kind_rows(1, 'Box#opt_pick', 'opt', 2, 'v', 2, 0, 'String' => 2)).join("\n") << "\n")
+      r = run(candidates, [optional_bad])
+      check.call('an optional argument observed as String against a declared ?Integer is a contradiction',
+                 r.findings.one? { |line| line.include?('Box#opt_pick parameter 2 declared Integer') && line.include?('observed String (2)') })
+
+      optional_ok = File.join(tmp, 'optional_ok.tsv')
+      File.write(optional_ok, (param_rows(0, 'Box#opt_pick', 1, 2, 0, 'Integer' => 2) +
+                               kind_rows(1, 'Box#opt_pick', 'opt', 2, 'v', 2, 0, 'Integer' => 2) +
+                               kind_rows(2, 'Box#opt_pick', 'req', 2, 'v', 1, 0, 'String' => 1)).join("\n") << "\n")
+      r = run(candidates, [optional_ok])
+      check.call('an optional argument of the declared type is admitted; a required row at its index is not evidence for it',
+                 r.findings.empty? && r.stats[:sites] == 2)
+
+      rest_bad = File.join(tmp, 'rest_bad.tsv')
+      File.write(rest_bad, (param_rows(0, 'Box#spread', 1, 2, 0, 'Integer' => 2) +
+                            kind_rows(1, 'Box#spread', 'rest', 2, 'rest', 2, 0, 'Array' => 2) +
+                            elem_rows('PARAM', 1, 'array', 3, 0, 'Integer' => 2, 'String' => 1)).join("\n") << "\n")
+      r = run(candidates, [rest_bad])
+      check.call('a rest element observed as String against a declared *Integer is a contradiction',
+                 r.findings.one? { |line| line.include?('Box#spread parameter 2 (rest) element (array) declared Integer') &&
+                                          line.include?('observed String (1)') })
+
+      rest_ok = File.join(tmp, 'rest_ok.tsv')
+      File.write(rest_ok, (param_rows(0, 'Box#spread', 1, 2, 0, 'Integer' => 2) +
+                           kind_rows(1, 'Box#spread', 'rest', 2, 'rest', 2, 0, 'Array' => 2) +
+                           elem_rows('PARAM', 1, 'array', 3, 0, 'Integer' => 3)).join("\n") << "\n")
+      r = run(candidates, [rest_ok])
+      check.call('rest elements the declared *Integer admits have no findings, and are counted as element slots',
+                 r.findings.empty? && r.stats[:element_sites] == 1)
+
+      rest_not_array = File.join(tmp, 'rest_not_array.tsv')
+      File.write(rest_not_array, (kind_rows(0, 'Box#spread', 'rest', 2, 'rest', 2, 0, 'Integer' => 2) +
+                                  elem_rows('PARAM', 0, 'array', 2, 0, 'String' => 2)).join("\n") << "\n")
+      r = run(candidates, [rest_not_array])
+      check.call('a rest row that is not an Array is not this parameter, so its elements are not compared',
+                 r.findings.empty? && r.stats[:rest_not_array] == 1 && r.stats[:element_sites] == 0)
+
+      keyword_bad = File.join(tmp, 'keyword_bad.tsv')
+      File.write(keyword_bad, (param_rows(0, 'Box#named', 1, 2, 0, 'Integer' => 2) +
+                               kind_rows(1, 'Box#named', 'kwreq', 0, 'bc2cpp_kwarg_charged', 2, 0, 'String' => 2) +
+                               kind_rows(2, 'Box#named', 'kwopt', 0, 'bc2cpp_kwarg_bonus', 1, 0, 'Integer' => 1)).join("\n") << "\n")
+      r = run(candidates, [keyword_bad])
+      check.call('a required keyword observed as String against `charged: Integer` is a contradiction',
+                 r.findings.one? { |line| line.include?('Box#named keyword charged declared Integer') && line.include?('observed String (2)') })
+      check.call('an optional keyword observed as Integer against `?bonus: String` is a contradiction',
+                 r.findings.one? { |line| line.include?('Box#named keyword bonus declared String') && line.include?('observed Integer (1)') })
+
+      keyword_ok = File.join(tmp, 'keyword_ok.tsv')
+      File.write(keyword_ok, (param_rows(0, 'Box#named', 1, 2, 0, 'Integer' => 2) +
+                              kind_rows(1, 'Box#named', 'kwreq', 0, 'bc2cpp_kwarg_charged', 2, 0, 'Integer' => 2) +
+                              kind_rows(2, 'Box#named', 'kwopt', 0, 'bc2cpp_kwarg_bonus', 1, 0, 'String' => 1)).join("\n") << "\n")
+      r = run(candidates, [keyword_ok])
+      check.call('keyword values the declared types admit have no findings, and are counted as sites',
+                 r.findings.empty? && r.stats[:sites] == 3)
 
       # A module method is observed through the classes that include the module (--hierarchy), and a module-declared type
       # is admitted by a class that includes it.

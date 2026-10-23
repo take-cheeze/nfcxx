@@ -19,7 +19,7 @@ require_relative 'bytecode_ir_ops'
 #   unreadable:<cause>           reaching definitions refused (BytecodeIR's refusal cause)
 module IvarPoisonCauses
   LITERALS = {
-    'LOADT' => 'bool', 'LOADF' => 'bool', 'LOADTRUE' => 'bool', 'LOADFALSE' => 'bool', 'LOADL' => 'numeric',
+    'LOADTRUE' => 'bool', 'LOADFALSE' => 'bool', 'LOADL' => 'numeric',
     'LOADSYM' => 'symbol', 'STRING' => 'string', 'STRCAT' => 'string', 'LOADNIL' => 'nil', 'LOADSELF' => 'self',
     'GETIDX' => 'getidx', 'GETIDX0' => 'getidx', 'GETUPVAR' => 'upvar', 'GETGV' => 'gv', 'GETCV' => 'cv',
     'LAMBDA' => 'proc', 'BLOCK' => 'proc', 'METHOD' => 'proc', 'HASH' => 'hash', 'ARRAY' => 'array', 'ARRAY2' => 'array',

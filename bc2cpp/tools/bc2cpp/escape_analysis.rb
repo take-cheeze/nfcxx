@@ -25,11 +25,12 @@ require_relative 'send_names'
 #   3. returned, stored (ivar, global, constant, upvar, array, hash, range), raised, read by a closure
 #      that escapes, handed to an unknown or by-name send -> escapes
 #
-# Callee positions: [:self], [:arg, k], [:block]. A summary says whether the callee "captures" (keeps,
-# returns or loses track of) that position. Callees are found by NAME over every definition in the
-# world, so the answer holds for any receiver class. Mutual recursion is assumed non-capturing only
-# while it is being decided (co-inductive); a non-capturing result that rests on such an assumption is
-# not memoised unless the assumed frame itself finishes non-capturing.
+# Callee positions: [:self], [:self_keep], [:arg, k], [:block]. A summary says whether the callee "captures"
+# (keeps, returns or loses track of) that position. [:self_keep] is [:self] except that the receiver may
+# leave as the call's result; returns_self? says whether it does, so the caller tracks the result.
+# Callees are found by NAME over every definition in the world, so the answer holds for any receiver class.
+# Mutual recursion is assumed non-capturing only while it is being decided (co-inductive); a non-capturing
+# result that rests on such an assumption is not memoised unless the assumed frame itself finishes non-capturing.
 module EscapeAnalysis
   # BC2CPP_ESCAPE_ANALYSIS=0 returns every consumer to the earlier output.
   def self.enabled?
@@ -61,8 +62,8 @@ module EscapeAnalysis
   # kind :call = a Proc invocation with the value as receiver; :pass_arg / :pass_block = handed to `name`.
   Use = Struct.new(:index, :kind, :name, :reg, keyword_init: true)
   # reasons: [[symbol, instruction address]]; empty = the value does not escape. tracked: every register
-  # of the analysed frame that may hold it.
-  Verdict = Struct.new(:reasons, :uses, :tracked, keyword_init: true) do
+  # of the analysed frame that may hold it. returned: a `returns` flow handed the value back as its result.
+  Verdict = Struct.new(:reasons, :uses, :tracked, :returned, keyword_init: true) do
     def escapes?
       !reasons.empty?
     end
@@ -103,6 +104,7 @@ module EscapeAnalysis
                     3rd/mruby/mrbgems/mruby-binding/src/binding.c 3rd/mruby/mrbgems/mruby-method/src/method.c
                     3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c 3rd/mruby/mrbgems/mruby-task/src/task.c
                     3rd/mruby/mrbgems/mruby-socket/src/socket.c],
+    'raise' => %w[3rd/mruby/src/kernel.c],
     'to_s' => %w[3rd/mruby/src/numeric.c 3rd/mruby/src/hash.c 3rd/mruby/src/object.c 3rd/mruby/src/array.c
                  3rd/mruby/src/kernel.c 3rd/mruby/src/class.c 3rd/mruby/src/range.c 3rd/mruby/src/string.c
                  3rd/mruby/src/error.c 3rd/mruby/src/symbol.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c
@@ -123,7 +125,10 @@ module EscapeAnalysis
     '<<' => :self, 'push' => :self, 'unshift' => :self,
     'class' => :fresh, 'is_a?' => :fresh, 'kind_of?' => :fresh, 'instance_of?' => :fresh, 'frozen?' => :fresh,
     'respond_to?' => :fresh, 'respond_to_missing?' => :fresh, 'hash' => :fresh,
-    'instance_variable_get' => :fresh, 'inspect' => :fresh, 'to_s' => :self
+    'instance_variable_get' => :fresh, 'inspect' => :fresh, 'to_s' => :self,
+    # mrb_f_raise (kernel.c) reads only its arguments and never returns self. Its arguments are kept (the
+    # exception and its message), so raise has no NATIVE_ARG_OK entry.
+    'raise' => :fresh
   }.freeze
   # Ruby methods a native calls with its own receiver as self, by name. respond_to? calls
   # respond_to_missing? on self when the method is absent, so that callee must keep no self either.
@@ -167,7 +172,10 @@ module EscapeAnalysis
     'instance_of?' => { args: [0], recv: %w[to_s], files: %w[3rd/mruby/src/kernel.c] },
     # mrb_hash_has_key hashes the probe (hash, receiver = key) and compares it (eql?, receiver = key).
     'key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
-    'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] }
+    'has_key?' => { args: [0], recv: %w[hash eql?], files: %w[3rd/mruby/src/hash.c] },
+    # Both registrations (profiler.cxx, real and WIO stub) read the name with "S&" and copy it into a std::string
+    # key (profiler_section_end); the block is NATIVE_BLOCK_NO_CAPTURE. A non-String name is inspected (%Y).
+    'section' => { args: [0], recv: %w[inspect to_s], files: %w[mruby-rgss/src/profiler.cxx] }
   }.freeze
   # Receiver names that invoke a Proc (a `uses` entry the consumers turn into a direct call).
   PROC_CALLS = Set['call', '[]', '==='].freeze
@@ -491,7 +499,7 @@ module EscapeAnalysis
       @defs.each { |name, list| list.each { |d| known[name] << d.irep if d.irep } }
       closure_bodies = Set.new
       @ireps.each_value do |irep|
-        EscapeAnalysis.op_sites(irep, CLOSURE_OPS).each { |insn, _| closure_bodies << irep.reps[insn.block_index.to_i] }
+        BytecodeIR::Tree.child_labels(irep, CLOSURE_OPS).each { |_, label| closure_bodies << label }
       end
       @ireps.each_value do |irep|
         EscapeAnalysis.op_sites(irep, SCANNED_OPS).each do |insn, idx|
@@ -608,11 +616,19 @@ module EscapeAnalysis
       list.none? { |d| captures?(d, [:self]) }
     end
 
-    # true when +mdef+ may keep its +position+ ([:self], [:arg, k] or [:block]) or it cannot be shown.
+    # true when +mdef+ may keep its +position+ ([:self], [:self_keep], [:arg, k] or [:block]) or it cannot be shown.
     def captures?(mdef, position)
       return true unless @world.reflective_sites.empty?
 
       cyclic([:summary, mdef.object_id, position]) { compute_summary(mdef, position) }
+    end
+
+    # true when +mdef+ may return its receiver as its result on some path. Inside a cycle it is assumed true:
+    # the caller then tracks the call's result, which only adds reasons, so the answer is never too small.
+    def returns_self?(mdef)
+      return true unless @world.reflective_sites.empty?
+
+      cyclic([:summary, mdef.object_id, :self_returns], assume: true) { compute_summary(mdef, [:self_returns]) }
     end
 
     # RBS_RECORD_TYPES' interprocedural scan: may a call of +name+ keep its argument +k+? Callees
@@ -632,15 +648,15 @@ module EscapeAnalysis
 
     private
 
-    # Memoised boolean "bad" (captures / escapes). A key found on the stack is assumed good (false); a
-    # result computed under such an assumption is kept only if it is bad (monotone: the assumption can
-    # only remove reasons) or the assumed frame is this one.
-    def cyclic(key)
+    # Memoised boolean "bad" (captures / escapes). A key found on the stack is assumed good (false) unless
+    # +assume+ says otherwise; a result computed under such an assumption is kept only if it is bad
+    # (monotone: the assumption can only remove reasons) or the assumed frame is this one.
+    def cyclic(key, assume: false)
       return @memo[key] if @memo.key?(key)
 
       if (at = @stack.index(key))
         @floor = [@floor, at].min
-        return false
+        return assume
       end
       return true if @stack.size >= MAX_DEPTH
 
@@ -662,6 +678,10 @@ module EscapeAnalysis
       irep = body_irep(mdef) or return true
       case position[0]
       when :self then flow(irep, { 0 => { '0' => true } }, self_tracked: true).escapes?
+      when :self_keep then flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true).escapes?
+      when :self_returns
+        verdict = flow(irep, { 0 => { '0' => true } }, self_tracked: true, returns: true)
+        verdict.escapes? || verdict.returned == true
       when :arg then arg_captured?(irep, position[1])
       when :block then block_captured?(irep)
       else true
@@ -719,14 +739,17 @@ module EscapeAnalysis
 
     # -- the frame flow ------------------------------------------------------------------------------
     # Per-run state shared by the transfer functions.
-    Run = Struct.new(:irep, :reasons, :uses, :self_tracked, :params, :block_slot, :value_class, keyword_init: true)
+    # returns: the frame may hand the value back as its result (RETSELF / RETURN of a holding register); the
+    # exit is recorded in returned instead of escaping. Only the method's own frame is run that way.
+    Run = Struct.new(:irep, :reasons, :uses, :self_tracked, :params, :block_slot, :value_class, :returns,
+                     :returned, keyword_init: true)
 
     # +starts+: { instruction index => { register => true } }. With +created_at+ the start index is the
     # creating instruction and the value enters its SUCCESSORS (and again whenever it runs); otherwise the
     # state holds on entry to that index. +block_sources+: BLKPUSH indices that introduce the value;
     # +block_tracked+: the value is a method's block, so closures that BLKPUSH it from a nested level see it.
     def flow(irep, starts, created_at: nil, self_tracked: false, block_sources: [], block_tracked: false,
-             value_class: nil)
+             value_class: nil, returns: false)
       prog = BytecodeIR.for(irep)
       return failed(:cfg_unresolved) unless prog.resolved?
       return failed(:handlers_unresolved) unless prog.handlers_resolved?
@@ -734,7 +757,7 @@ module EscapeAnalysis
       insns = prog.instructions
       params = parameter_count(irep)
       run = Run.new(irep: irep, reasons: [], uses: [], self_tracked: self_tracked, params: params,
-                    block_slot: (params + 1).to_s, value_class: value_class)
+                    block_slot: (params + 1).to_s, value_class: value_class, returns: returns, returned: false)
       state = Array.new(insns.size)
       work = []
       seed = lambda do |index, regs|
@@ -767,7 +790,9 @@ module EscapeAnalysis
         s = state[i]
         ever.merge(s)
         out = step(run, i, insns[i].source, s)
-        return Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever) unless run.reasons.empty?
+        unless run.reasons.empty?
+          return Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever, returned: run.returned)
+        end
 
         out = out | [insns[i].source.reg] if i == created_at
         insns[i].successors.each { |succ| seed.call(succ, out.to_a) }
@@ -778,7 +803,7 @@ module EscapeAnalysis
 
       ever.merge(Array(starts.values.flat_map(&:keys)))
       read_by_closures(run, ever, block_tracked: block_tracked)
-      Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever)
+      Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever, returned: run.returned)
     end
 
     def failed(reason)
@@ -805,7 +830,12 @@ module EscapeAnalysis
       return s - [lead] if KILLS_LEAD.include?(op)
 
       if STORES_LEAD.key?(op)
-        escape.call(STORES_LEAD[op]) if held.call(insn.reg_operand)
+        # Only a `returns` flow may hand the receiver back (the caller tracks the result); elsewhere it escapes.
+        if op == 'RETURN' && run.returns
+          run.returned = true if held.call(insn.reg_operand)
+        elsif held.call(insn.reg_operand)
+          escape.call(STORES_LEAD[op])
+        end
         return s
       end
 
@@ -813,7 +843,11 @@ module EscapeAnalysis
       when 'MOVE' then s - [lead] | (held.call(insn.regs[1]) ? [lead] : [])
       when 'LOADSELF' then s - [lead] | (s.include?('0') ? [lead] : [])
       when 'RETSELF'
-        escape.call(:returned) if s.include?('0')
+        if s.include?('0') && run.returns
+          run.returned = true
+        elsif s.include?('0')
+          escape.call(:returned)
+        end
         s
       when 'RESCUE'
         escape.call(:rescue_operand) if held.call(insn.regs[0]) || held.call(insn.regs[1])
@@ -981,7 +1015,11 @@ module EscapeAnalysis
       opaque = opaque_defs(list)
       native_free = chain && @world.native_free_on?(name, chain)
       return nil if table.nil? && (list.empty? || (@world.native_name?(name) && !native_free) || !opaque.empty?)
-      return nil if list.any? { |d| !opaque.include?(d) && captures?(d, [:self]) }
+      bytecode = list.reject { |d| opaque.include?(d) }
+      return nil if bytecode.any? { |d| captures?(d, [:self_keep]) }
+
+      # A bytecode definition that returns its receiver makes the result the receiver too.
+      return :self if table == :self || bytecode.any? { |d| returns_self?(d) }
 
       table || :fresh
     end
@@ -1084,10 +1122,7 @@ module EscapeAnalysis
 
     # [[closure instruction index, child irep]] of +irep+.
     def closure_children(irep)
-      EscapeAnalysis.op_sites(irep, CLOSURE_OPS).filter_map do |insn, j|
-        child = @world.ireps[irep.reps[insn.block_index.to_i]]
-        [j, child] if child
-      end
+      BytecodeIR::Tree.children(irep, @world.ireps, CLOSURE_OPS)
     end
 
     # Reads (GETUPVAR/BLKPUSH) inside +irep+'s closure subtree that resolve to the frame +irep+ is a closure
@@ -1095,16 +1130,15 @@ module EscapeAnalysis
     # out of that frame. A SETUPVAR only writes the frame's register, so it is no read.
     def subtree_refs(irep, depth, chain)
       refs = []
-      EscapeAnalysis.op_sites(irep, REF_OPS).each do |insn, j|
-        if insn.op == 'GETUPVAR'
-          idx, level = insn.upvar_ref
-          refs << { kind: :up, idx: idx, irep: irep, index: j, dest: insn.reg, chain: chain } if level == depth
-        elsif insn.paren_value.to_i == depth + 1
-          refs << { kind: :blk, irep: irep, index: j, dest: insn.reg, chain: chain }
+      BytecodeIR::Tree.each_subtree(irep, @world.ireps, CLOSURE_OPS, depth, chain) do |node, d, c|
+        BytecodeIR.for(node).each_with_op(*REF_OPS) do |insn, j|
+          if insn.op == 'GETUPVAR'
+            idx, level = insn.upvar_ref
+            refs << { kind: :up, idx: idx, irep: node, index: j, dest: insn.reg, chain: c } if level == d
+          elsif insn.paren_value.to_i == d + 1
+            refs << { kind: :blk, irep: node, index: j, dest: insn.reg, chain: c }
+          end
         end
-      end
-      closure_children(irep).each do |ci, child|
-        refs.concat(subtree_refs(child, depth + 1, chain + [[irep, ci]]))
       end
       refs
     end
