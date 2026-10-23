@@ -19,6 +19,7 @@ require 'fileutils'
 require 'open3'
 require_relative 'base_rbs_all'
 require_relative 'base_rbs_native'
+require_relative '../../tools/bc2cpp/scan_cache'
 
 # mruby's presym writer, loaded from the submodule without its build system: the writer's `_pp` progress lines and
 # `relative_path` names are build-system helpers this script does not need.
@@ -64,12 +65,19 @@ module AnalysisHeaders
     MRuby::Presym.new(Struct.new(:build_dir).new(closed_build)).read_list
   end
 
-  def write_onigmo(include_dir)
-    onigmo = Open3.capture2('tar', '-xzOf', ONIGMO_TARBALL, ONIGMO_MEMBER)
-    status = onigmo.last
-    raise "tar failed reading #{ONIGMO_TARBALL}" unless status.success?
+  # The member is a pure function of the tarball's bytes, so the extraction is keyed on the tarball's digest
+  # (ScanCache); a changed tarball is a new key.
+  def onigmo_header
+    ScanCache.fetch('analysis_headers.onigmo_h', [ONIGMO_TARBALL]) do
+      onigmo = Open3.capture2('tar', '-xzOf', ONIGMO_TARBALL, ONIGMO_MEMBER)
+      raise "tar failed reading #{ONIGMO_TARBALL}" unless onigmo.last.success?
 
-    File.binwrite(File.join(include_dir, 'onigmo.h'), onigmo.first)
+      onigmo.first
+    end
+  end
+
+  def write_onigmo(include_dir)
+    File.binwrite(File.join(include_dir, 'onigmo.h'), onigmo_header)
     # mruby_onig_regexp.c includes <oniguruma.h>, the name the system library installs; the bundled header is onigmo.h.
     File.write(File.join(include_dir, 'oniguruma.h'), "#include \"onigmo.h\"\n")
   end
