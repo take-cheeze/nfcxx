@@ -18,6 +18,10 @@
 # Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_CORE=dir BC2CPP_MRUBY_FULL=dir BC2CPP_MRUBY_FULL32=dir
 #         BC2CPP_MRBC32=mrbc32] ruby scripts/bc2cpp/lcf_row_flow_check.rb
 
+# The fixture program defines none of the engine's classes, which sig/bc2cpp/declarations.rbs declares, so the
+# shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
 require 'set'
 require 'stringio'
 require 'tmpdir'
@@ -293,7 +297,7 @@ HOST = <<~'RUBY'
     end
     def helper_name(i); row_name(@db[:player][i]); end
     def row_name(row); row[:name]; end
-    def has_rows?; @db.rpg2003?; end
+    def has_rows?; @db.rpg2003? ? true : false; end
     def shared_a; shared_name(@db[:player][1]); end
     def shared_b; shared_name({ name: 'h' }); end
     def shared_name(row); row[:name]; end
@@ -328,7 +332,7 @@ HOST = <<~'RUBY'
   end
 RUBY
 
-extra = %w[lcf.rb lcf_file.rb schema.rb].map { |f| ["lcf/#{f}", File.read(File.join(MRBLIB, f))] }
+extra = %w[lcf.rb lcf_file.rb schema.rb].map { |f| ["mruby-lcf/mrblib/#{f}", File.read(File.join(MRBLIB, f))] }
 LCF_OWNERS = %w[LCF::File LCF::Database LCF::Array1D LCF::Array2D LCF::Sections].freeze
 runtime = Bc2cppFixtureRuntime
 

@@ -21,6 +21,10 @@
 #
 # Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_CORE=dir] ruby scripts/bc2cpp/typed_reflection_check.rb
 
+# The fixture program defines none of the engine's classes, which sig/bc2cpp/declarations.rbs declares, so the
+# shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/codegen'
 require_relative '../../tools/bc2cpp/codegen_emit'
@@ -68,7 +72,7 @@ if ENV['MRBC']
     end
 
     class TrLate
-      def initialize; @a = 1; end
+      def initialize; @tl_a = 1; end
       def read; @b; end
       def write; @b = 7; end
     end
@@ -88,8 +92,10 @@ if ENV['MRBC']
     check.call('the descriptor count and index cover all five', code.include?('TrMixed_ivar_slots, 5, sizeof(TrMixed_ivars), TrMixed_ivar_hash, 15 };') ||
                                                                  code.match?(/TrMixed_ivar_slots, 5, sizeof\(TrMixed_ivars\), TrMixed_ivar_hash, \d+ \};/))
     fields = code[/struct TrLate_ivars \{\n(.*?)\n\};/m, 1].to_s
+    # @tl_a, not @a: any native source spelling @a (mruby-metaprog's doc comments do) makes the name outside-spelled,
+    # which demotes its typed slot by design (demote_typed_ivars_foreign_writable). The name must be one no source spells.
     check.call('an ivar assigned outside #initialize is a boxed slot (an unset read is nil)',
-               fields.include?('mrb_value ivar_b;') && fields.include?('mrb_int ivar_a;'))
+               fields.include?('mrb_value ivar_b;') && fields.include?('mrb_int ivar_tl_a;'))
   end
 
   core = runtime.core

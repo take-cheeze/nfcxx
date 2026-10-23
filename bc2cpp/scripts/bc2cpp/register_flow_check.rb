@@ -8,6 +8,10 @@
 # kill switch BC2CPP_REGISTER_FLOW=0, and, when a patched mruby core is
 # available (BC2CPP_MRUBY_CORE), an interpreted-vs-compiled differential run.
 # Without MRBC only the hand-built shapes run (host-only CI job).
+# The fixture program defines none of the engine's classes, which sig/bc2cpp/declarations.rbs declares, so the
+# shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
 require 'fileutils'
 require 'open3'
 require 'rbconfig'
@@ -448,7 +452,7 @@ Dir.mktmpdir do |dir|
       CPP
       binary = File.join(dir, "rf_#{label}")
       built = Bc2cppCxx.system('-std=c++17', '-fexceptions', '-DMRB_USE_CXX_EXCEPTION', '-DMRB_NO_GEMS', '-w',
-                               "-I#{dir}", "-I#{core}/include", "-I#{ROOT}/3rd/mruby/include", "-I#{ROOT}/mruby-rgss/src",
+                               "-I#{dir}", "-I#{core}/include", "-I#{ROOT}/3rd/mruby/include", "-I#{ROOT}/include", "-I#{ROOT}/mruby-rgss/src",
                                File.join(dir, "main_#{label}.cpp"), "#{core}/lib/libmruby_core.a", '-lm', '-o', binary)
       check.call("the #{label} fixture compiles against real mruby", built)
       [label, built ? binary : nil]

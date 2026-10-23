@@ -23,6 +23,10 @@
 # Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_FULL=dir BC2CPP_MRUBY_CORE=dir BC2CPP_FULL_BUILD_DIR=dir BC2CPP_MRUBY_FULL32=dir
 #         BC2CPP_MRBC32=mrbc32 BC2CPP_MRUBY_NOBIGINT=dir] ruby scripts/bc2cpp/tuple_return_check.rb
 
+# The fixture program defines none of the engine's classes, which sig/bc2cpp/declarations.rbs declares, so the
+# shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
 require 'set'
 require 'tmpdir'
 require_relative 'fixture_runtime'
@@ -405,8 +409,11 @@ if ENV['MRBC']
 
   plus_code, = generate.call(FIXTURE_PLUS)
   plus_chunk = with_blocks.call(plus_code, 'TqPlus#tq_plus_use')
+  # The else arm dispatches: a runtime class test calls the reopened Integer#+ directly (POLY_SMALL_N), with the
+  # owner call as the fallback. The fixnum tier stays inline, as mruby's own OP_ADD does for fixnum operands.
   check.call('NEG: a reopened Integer#+ keeps the dispatch although the position is Integer',
-             !plus_chunk.include?('NUMERIC_OPERAND_PROOF') && plus_chunk.include?('bc2cpp_send(M, r'))
+             !plus_chunk.include?('NUMERIC_OPERAND_PROOF') && plus_chunk.include?('Integer_$2b_impl(M') &&
+               plus_chunk.include?('bc2cpp_owner_call(M, r'))
   mm_code, mm_err = generate.call(FIXTURE_MM)
   check.call('NEG: a method_missing anywhere in the world disables the fact',
              with_blocks.call(mm_code, 'TqMm#tq_mm_use').match?(retained_tag) && mm_err.lines.grep(/NUMTUPLE /).empty?)
