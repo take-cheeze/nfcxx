@@ -821,7 +821,7 @@ module EscapeAnalysis
     # The registers holding the value after +insn+; appends to run.reasons when it escapes.
     def step(run, i, insn, s)
       op = insn.op
-      lead = insn.reg
+      lead = BytecodeIR::OperandModel.reg(insn)
       escape = ->(why) { run.reasons << [why, insn.addr] }
       held = ->(r) { s.include?(r.to_s) }
       window = ->(from, count) { (0...count).any? { |k| held.call(from.to_i + k) } }
@@ -832,15 +832,15 @@ module EscapeAnalysis
       if STORES_LEAD.key?(op)
         # Only a `returns` flow may hand the receiver back (the caller tracks the result); elsewhere it escapes.
         if op == 'RETURN' && run.returns
-          run.returned = true if held.call(insn.reg_operand)
-        elsif held.call(insn.reg_operand)
+          run.returned = true if held.call(BytecodeIR::OperandModel.reg_operand(insn))
+        elsif held.call(BytecodeIR::OperandModel.reg_operand(insn))
           escape.call(STORES_LEAD[op])
         end
         return s
       end
 
       case op
-      when 'MOVE' then s - [lead] | (held.call(insn.regs[1]) ? [lead] : [])
+      when 'MOVE' then s - [lead] | (held.call(BytecodeIR::OperandModel.move(insn).src) ? [lead] : [])
       when 'LOADSELF' then s - [lead] | (s.include?('0') ? [lead] : [])
       when 'RETSELF'
         if s.include?('0') && run.returns
@@ -850,28 +850,30 @@ module EscapeAnalysis
         end
         s
       when 'RESCUE'
-        escape.call(:rescue_operand) if held.call(insn.regs[0]) || held.call(insn.regs[1])
-        s - [insn.regs[1]]
+        operands = BytecodeIR::OperandModel.regs(insn)
+        escape.call(:rescue_operand) if held.call(operands[0]) || held.call(operands[1])
+        s - [operands[1]]
       when 'ARGARY'
         escape.call(:stored_array) if s.any? { |r| r.to_i.between?(1, run.params) }
         s - [lead]
       when 'BLKPUSH'
-        s - [lead] | (insn.paren_value.to_i.zero? && held.call(run.block_slot) ? [lead] : [])
+        s - [lead] | (BytecodeIR::OperandModel.paren_value(insn).to_i.zero? && held.call(run.block_slot) ? [lead] : [])
       when *BINARY_NAMES.keys
         send_site(run, i, insn, s, BINARY_NAMES[op], recv: lead, args: [lead.to_i + 1], dest: lead)
       when 'ADDI', 'SUBI'
         send_site(run, i, insn, s, op == 'ADDI' ? '+' : '-', recv: lead, args: [], dest: lead)
       when 'ADDILV', 'SUBILV'
         # R[b], R[b+1] are the scratch window of the method-call fallback: written, never read.
-        scratch = [insn.regs[1], (insn.regs[1].to_i + 1).to_s]
+        second = BytecodeIR::OperandModel.regs(insn)[1]
+        scratch = [second, (second.to_i + 1).to_s]
         send_site(run, i, insn, s, op == 'ADDILV' ? '+' : '-', recv: lead, args: [], dest: lead) - scratch
       when 'GETIDX' then send_site(run, i, insn, s, '[]', recv: lead, args: [lead.to_i + 1], dest: lead)
-      when 'GETIDX0' then send_site(run, i, insn, s, '[]', recv: insn.regs[1], args: [], dest: lead)
+      when 'GETIDX0' then send_site(run, i, insn, s, '[]', recv: BytecodeIR::OperandModel.regs(insn)[1], args: [], dest: lead)
       when 'SETIDX'
         send_site(run, i, insn, s, '[]=', recv: lead, args: [lead.to_i + 1, lead.to_i + 2], dest: lead)
       when *BytecodeIR::Ops::SEND then send_op(run, i, insn, s)
       when 'BLKCALL'
-        escape.call(:block_call_argument) if window.call(lead.to_i + 1, insn.uint_operand.to_i)
+        escape.call(:block_call_argument) if window.call(lead.to_i + 1, BytecodeIR::OperandModel.uint_operand(insn).to_i)
         run.uses << Use.new(index: i, kind: :call, name: 'call', reg: lead) if held.call(lead)
         s - [lead]
       when 'SUPER'
@@ -879,23 +881,24 @@ module EscapeAnalysis
         escape.call(:super_window) if window.call(lead, positional + kw + 2) || s.include?('0')
         s - [lead]
       when 'ARRAY'
-        three = insn.src_and_literal
-        escape.call(:stored_array) if window.call(three ? three[0] : lead, three ? three[1].to_i : insn.uint_operand.to_i)
+        three = BytecodeIR::OperandModel.src_and_literal(insn)
+        escape.call(:stored_array) if window.call(three ? three[0] : lead,
+                                                  three ? three[1].to_i : BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s - [lead]
       when 'ARYCAT', 'HASHCAT', 'ARYSPLAT'
         escape.call(:spread_operand) if window.call(lead, 2)
         s - [lead]
       when 'ARYPUSH'
-        escape.call(:stored_array) if window.call(lead.to_i + 1, insn.uint_operand.to_i)
+        escape.call(:stored_array) if window.call(lead.to_i + 1, BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s
       when 'HASH'
-        escape.call(:stored_hash) if window.call(lead, 2 * insn.uint_operand.to_i)
+        escape.call(:stored_hash) if window.call(lead, 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s - [lead]
       when 'HASHADD'
-        escape.call(:stored_hash) if window.call(lead.to_i + 1, 2 * insn.uint_operand.to_i)
+        escape.call(:stored_hash) if window.call(lead.to_i + 1, 2 * BytecodeIR::OperandModel.uint_operand(insn).to_i)
         s
       when 'APOST'
-        s - (0..insn.typed[2].value).map { |k| (lead.to_i + k).to_s }
+        s - (0..BytecodeIR::OperandModel.post_count(insn)).map { |k| (lead.to_i + k).to_s }
       when 'STRCAT'
         # A String operand is copied; anything else is converted by its own to_s.
         escape.call(:string_operand) if held.call(lead.to_i + 1) && run.value_class != 'String'
@@ -913,20 +916,22 @@ module EscapeAnalysis
     # -- sends ---------------------------------------------------------------------------------------
     # [positional slots, keyword slots] after the receiver; `n=*` packs the arguments in one slot.
     def argument_slots(insn)
-      n = insn.n_spec
-      nk = insn.nk_spec
+      spec = BytecodeIR::OperandModel.argc_spec(insn)
+      n = spec.positional
+      nk = spec.keyword
       [n.nil? ? 0 : (n == '*' ? 1 : n.to_i), nk.nil? ? 0 : (nk == '*' ? 1 : 2 * nk.to_i)]
     end
 
     def send_op(run, i, insn, s)
-      a = insn.reg.to_i
+      call = BytecodeIR::OperandModel.send_call(insn)
+      a = call.receiver.to_i
       positional, kw = argument_slots(insn)
-      spread = insn.n_spec == '*'
+      spread = BytecodeIR::OperandModel.argc_spec(insn).positional == '*'
       unpacked = spread ? [a + 1] : []
       unpacked += ((a + positional + 1)..(a + positional + kw)).to_a
       return reject(run, insn, :spread_or_keyword_argument, s) if unpacked.any? { |r| s.include?(r.to_s) }
 
-      send_site(run, i, insn, s, insn.sym, recv: insn.op.start_with?('SS') ? nil : a,
+      send_site(run, i, insn, s, call.name, recv: insn.op.start_with?('SS') ? nil : a,
                 args: spread ? [] : (1..positional).map { |k| a + k }, dest: a,
                 block: insn.op.end_with?('B') ? a + positional + kw + 1 : nil)
     end
