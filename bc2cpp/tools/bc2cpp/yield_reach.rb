@@ -526,7 +526,8 @@ class YieldReach
       @reasons[:eval] += 1
     elsif BLOCK_EXEC.include?(name)
       node.unknown_call = true unless lit_block
-    elsif PROC_CALLS.include?(name)
+    elsif PROC_CALLS.include?(name) && !(name == 'yield' && recv_const == 'Fiber')
+      # `Fiber.yield` (the `yield` here) runs no Proc: scan_fiber_call already marked the suspension.
       recv = explicit ? classify_reg(node, program, idx, dest) : [:unknown]
       if recv.first == :forward
         node.invokes = true
