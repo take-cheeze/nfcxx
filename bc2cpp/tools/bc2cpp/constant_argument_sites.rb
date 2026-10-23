@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'alias_sites'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_ops'
 require_relative 'call_site_index'
 require_relative 'dynamic_names'
 require_relative 'integer_constant_ranges'
@@ -47,8 +48,8 @@ module ConstantArgumentSites
   ARITH_NAMES = Set.new(%w[+ - * / % < > <= >=]).freeze
   # Opcodes with no side effect of their own and no way to raise. GETCONST/GETMCNST may run const_missing or raise NameError,
   # so they are may_raise (see RAISING_OPS), not here.
-  PURE_OPS = Set.new(%w[NOP MOVE LOADNIL LOADTRUE LOADFALSE LOADSYM LOADSELF LOADL STRING ENTER RETURN JMP JMPIF JMPNOT JMPNIL
-                        GETIV GETUPVAR SEND SEND0 SEND1 SENDV]).freeze
+  PURE_OPS = Set.new(BytecodeIR::Ops::PURE_LOAD.to_a + BytecodeIR::CONDITIONAL_BRANCHES +
+                     %w[NOP STRING ENTER RETURN JMP GETIV GETUPVAR SEND SEND0 SEND1 SENDV]).freeze
   # Arithmetic and ordering ops: gated (condition 3) and may raise on a non-numeric operand (condition 4).
   ARITH_OPS = Set.new(%w[ADD SUB MUL DIV ADDI SUBI LT LE GT GE]).freeze
   RAISING_OPS = Set.new(%w[GETCONST GETMCNST]).freeze
@@ -57,7 +58,6 @@ module ConstantArgumentSites
   DISPATCH_OPS = { 'EQ' => '==', 'NOT' => '!' }.freeze
   # Every send opcode the call-site index reads (SEND0, SENDB, SSEND*), plus the two it does not list.
   SEND_OPS = (CallSiteIndex::SEND_OPS + %w[SEND1 SENDV]).uniq.freeze
-  JUMP_OPS = %w[JMPIF JMPNOT JMPNIL].freeze
   LOADI_OP = /\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/
   # Sends that install or dispatch a method by a name the argument carries: their target is the first argument.
   DYNAMIC_SENDS = %w[send __send__ public_send method instance_method define_method alias_method].freeze
@@ -226,7 +226,7 @@ module ConstantArgumentSites
     total = 0
     decided = 0
     BytecodeIR.for(irep).instructions.each_with_index do |ins, idx|
-      next unless JUMP_OPS.include?(ins.op)
+      next unless BytecodeIR::CONDITIONAL_BRANCHES.include?(ins.op)
 
       total += 1
       value = value_at(irep, idx, ins.source.reg.to_i, tuple, constants)
