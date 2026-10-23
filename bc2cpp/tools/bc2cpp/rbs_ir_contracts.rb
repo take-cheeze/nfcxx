@@ -9,11 +9,12 @@ module RbsSignatures
     attr_reader :applied, :named_returns
 
     # subclasses: ClosedWorld#known_subclasses (nil when the receiver set is open); method_missing_classes: the
-    # classes whose dispatch may reach a method_missing.
+    # classes whose dispatch may reach a method_missing; includer_candidates: ClosedWorld#known_includer_candidates.
     def initialize(applied, superclass_of:, included_modules:, prepended_modules:, unknown_mixins:, subclasses: nil,
-                   method_missing_classes: Set.new)
+                   method_missing_classes: Set.new, includer_candidates: nil)
       @applied = applied
       @subclasses = subclasses
+      @includer_candidates = includer_candidates
       @method_missing_classes = method_missing_classes.to_set.freeze
       @superclass_of = superclass_of.transform_values { |parent| parent.is_a?(String) ? parent.dup.freeze : parent }.freeze
       @included_modules = included_modules.transform_values { |owners| Array(owners).map { |owner| owner.dup.freeze }.freeze }.freeze
@@ -44,7 +45,8 @@ module RbsSignatures
       return @receivers[owner] if @receivers.key?(owner)
 
       @receivers[owner] = RbsSignatures.self_receivers(owner, lookup: ->(klass) { owners(klass) }, subclasses: @subclasses,
-                                                               method_missing_classes: @method_missing_classes)
+                                                               method_missing_classes: @method_missing_classes,
+                                                               includer_candidates: @includer_candidates, prepended_modules: @prepended_modules)
     end
 
     def owners(owner)
