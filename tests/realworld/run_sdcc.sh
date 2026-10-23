@@ -8,6 +8,11 @@
 #   3. Compile every support/regression/tests/*.c that the reference accepts for -mmcs51 with both compilers, and
 #      compare the assembly byte for byte.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
+# Known difference (xfail): on the qbe back end bug1714204 is not byte-identical. SDCC's ast2iCode (src/SDCCicode.c,
+# case '+') passes two geniCodeRValue() calls as the unsequenced arguments of geniCodeAdd(). gcc emits the right operand
+# first and cproc/QBE the left, so the same instructions get different temporary numbers. With that order fixed in a
+# build-tree copy, the qbe assembly matches the reference byte for byte. The source is upstream, so it is not patched here.
+# A match on that leg fails the step (XPASS): remove the entry then.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 ver=4.6.0
@@ -54,8 +59,10 @@ tests=$src/support/regression/tests
 fwk=$src/support/regression/fwk/include
 dev=$src/device/include
 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
+xfail_test=bug1714204; xfail_be=qbe   # the known difference above
 compare_one() {
   # $nfc: the nfcc-built compiler of the back end being checked; the variables are exported before the call.
+  # $backend: the back end being checked.
   f=$1; b=$(basename "$f" .c)
   if ! timeout 120 "$ref" -mmcs51 --std-c99 -I"$fwk" -I"$dev" -S -o "$out/h-$b.asm" "$f" > /dev/null 2>&1; then
     echo "skip $b (reference rejects it)"; return 0
@@ -63,11 +70,16 @@ compare_one() {
   if ! timeout 120 "$nfc" -mmcs51 --std-c99 -I"$fwk" -I"$dev" -S -o "$out/n-$b.asm" "$f" > "$out/n-$b.log" 2>&1; then
     echo "FAIL nfcc rejects $b"; return 1
   fi
-  if cmp -s "$out/h-$b.asm" "$out/n-$b.asm"; then echo "same $b"; return 0; fi
+  known=0; [ "$b" = "$xfail_test" ] && [ "$backend" = "$xfail_be" ] && known=1
+  if cmp -s "$out/h-$b.asm" "$out/n-$b.asm"; then
+    if [ $known -eq 1 ]; then echo "FAIL xpass $b ($backend): now identical; remove the xfail entry in run_sdcc.sh"; return 1; fi
+    echo "same $b"; return 0
+  fi
+  if [ $known -eq 1 ]; then echo "xfail $b ($backend): unsequenced operands in SDCCicode.c, see the header"; return 0; fi
   echo "FAIL assembly differs: $b"; return 1
 }
 export -f compare_one
-export ref nfc fwk dev out
+export ref nfc fwk dev out xfail_test xfail_be
 # Every test the reference accepts for mcs51, in name order (the list is fixed, so a run is repeatable).
 backends=${NFCXX_BACKEND:-"gcc qbe"}
 for b in $backends; do
@@ -77,11 +89,12 @@ for b in $backends; do
   if ! PATH=$base_path NFCXX_BACKEND=$b make -C src -j"$jobs" sdcc CC="$root/nfcc" > "$work/sdcc-nfcc-$b.log" 2>&1; then
     echo "FAIL $b sdcc: nfcc build of src/sdcc"; grep -m5 -E "error|Error" "$work/sdcc-nfcc-$b.log"; fail=1; continue
   fi
-  export nfc=$src/src/sdcc
+  export nfc=$src/src/sdcc backend=$b
   results=$(ls "$tests"/*.c | xargs -P"$jobs" -I{} bash -c 'compare_one "$@"' _ {})
   same=$(grep -c '^same ' <<<"$results"); skip=$(grep -c '^skip ' <<<"$results"); bad=$(grep -c '^FAIL ' <<<"$results")
+  xfail=$(grep -c '^xfail ' <<<"$results")
   grep '^FAIL ' <<<"$results" | head -20
-  echo "$b sdcc mcs51: $same compared identical, $skip skipped (reference rejects), $bad differ or fail"
+  echo "$b sdcc mcs51: $same compared identical, $xfail known difference (xfail), $skip skipped (reference rejects), $bad differ or fail"
   if [ "$bad" -ne 0 ] || [ "$same" -eq 0 ]; then fail=1; fi
 done
 exit $fail
