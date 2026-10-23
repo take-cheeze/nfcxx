@@ -232,4 +232,28 @@ check.call('U in C4 resolves when both arms include B4 (a module that does not d
            mixin_agree.include?(['GETCONST', 'U', 'U']))
 
 
+# The receiver of a send is a constant on every path only when one write reaches it. A loop back-edge from after the
+# send can carry a second write (`x = Beta`), which the straight-line walk alone cannot see.
+receiver_at_send = lambda do |source|
+  gen = CodeGen.allocate
+  answers = []
+  compile.call(source) do |ireps, _root, _dir|
+    ireps.each_value do |irep|
+      irep.instructions.each_with_index do |insn, idx|
+        next unless insn.op.start_with?('SEND') && insn.sym == 'foo'
+
+        answers << [gen.send(:straight_line_constant_name, irep, idx, insn.reg), irep.agreed_constant_name(idx, insn.reg.to_s)]
+      end
+    end
+  end
+  answers.first
+end
+check.call('a loop back-edge write refuses the straight-line receiver constant',
+           receiver_at_send.call("def probe(c)\n  x = Alpha\n  while c\n    x.foo\n    x = Beta\n  end\nend\n") == [nil, nil])
+check.call('a straight-line receiver constant still resolves',
+           receiver_at_send.call("def probe(c)\n  x = Alpha\n  x.foo\nend\n") == ['Alpha', 'Alpha'])
+# A send inside a rescue range must still resolve: the reaching-definition query runs through handler edges.
+check.call('a receiver constant inside a rescue range still resolves',
+           receiver_at_send.call("def probe(c)\n  x = Alpha\n  begin\n    x.foo\n  rescue StandardError\n    nil\n  end\nend\n").first == 'Alpha')
+
 suite.finish!
