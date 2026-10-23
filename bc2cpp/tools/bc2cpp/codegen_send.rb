@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: compile_send and const/owner caches.
 require_relative 'strict_hints'
 
@@ -1478,7 +1480,7 @@ class CodeGen
       end
 
       if !self_implicit && irep && constant_site_idx && @closed_world &&
-         %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[constant_site_idx].op)
+         %w[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         constant_owner = constant_object_owner(irep, constant_site_idx,
                                                unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                owner_def&.owner)
@@ -1495,7 +1497,7 @@ class CodeGen
       # NATIVE_SINGLETON_CALL: `File.exist?` and the other native singleton functions of a stable
       # constant, called through a per-site method cache instead of a by-name send.
       if !self_implicit && irep && constant_site_idx && @closed_world &&
-         %w[SEND0 SEND].include?(irep.instructions[constant_site_idx].op)
+         %w[SEND0 SEND].include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
         singleton_code = native_singleton_call_code(name, n, d, recv, argv, irep, constant_site_idx,
                                                     unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                     owner_def&.owner, constant_owner)
@@ -2082,8 +2084,8 @@ class CodeGen
     end
     # The instruction is kept for unlisted_class_call, which checks that it is
     # the send of its own name before trusting SSEND vs SEND.
-    site = { self_owner: self_owner, insn: irep && idx && irep.instructions[idx], irep: irep, idx: idx }
-    site[:trace_insn] = irep.instructions[trace_idx] if CodeGen.inlined_unlisted_site? && idx.nil? && irep && trace_idx
+    site = { self_owner: self_owner, insn: irep && idx && BytecodeIR.for(irep).source_at(idx), irep: irep, idx: idx }
+    site[:trace_insn] = BytecodeIR.for(irep).source_at(trace_idx) if CodeGen.inlined_unlisted_site? && idx.nil? && irep && trace_idx
     # LOOP_FLOW_POSITION: an inlined body's send has the flow position of its unshifted site.
     if idx.nil? && irep && trace_idx && trace_insn
       site[:flow] = loop_flow_position(irep, trace_idx, trace_insn, trace_reg_offset)
@@ -2097,7 +2099,7 @@ class CodeGen
     return false unless reg && irep && idx
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: true)
-    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && irep.instructions[d.index].op == 'LOADSELF' }
+    !defs.nil? && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADSELF' }
   end
 
   # LOOP_FLOW_POSITION: the flow position of a send compiled from an inlined loop body (compile_insn
@@ -2114,7 +2116,7 @@ class CodeGen
   def loop_flow_position(irep, trace_idx, trace_insn, reg_offset)
     return nil unless CodeGen.loop_flow_position?
 
-    original = irep.instructions[trace_idx]
+    original = BytecodeIR.for(irep).source_at(trace_idx)
     unless original && original.addr == trace_insn.addr && original.op == trace_insn.op &&
            original.sym == trace_insn.sym && %w[SEND SEND0].include?(original.op) &&
            original.reg && trace_insn.reg && original.reg.to_i + reg_offset.to_i == trace_insn.reg.to_i
@@ -2134,11 +2136,11 @@ class CodeGen
                                                                     opaque_regs: fixnum_proof_ctx(irep)[:upvars])
     return loop_flow_refuse(irep, trace_idx, :unproven_definition) if defs.nil? || defs.empty?
 
-    writers = defs.map { |d| d.index.negative? ? nil : irep.instructions[d.index] }
+    writers = defs.map { |d| d.index.negative? ? nil : BytecodeIR.for(irep).source_at(d.index) }
     # The receiver holds the loop element (the block's parameter R1, possibly copied: its definition is the entry
     # value, index ENTRY, or the ENTER that binds it) and the body writes R1 again.
     element = defs.any? do |d|
-      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || irep.instructions[d.index].op == 'ENTER')
+      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || BytecodeIR.for(irep).source_at(d.index).op == 'ENTER')
     end
     if element && loop_element_reassigned?(irep)
       return loop_flow_refuse(irep, trace_idx, :element_reassigned)
@@ -2166,7 +2168,7 @@ class CodeGen
   end
 
   def loop_flow_accept(irep, trace_idx, path, position)
-    CodeGen::LOOP_FLOW_ACCEPTED[[irep.label, trace_idx, path, irep.instructions[trace_idx]&.sym]] = true
+    CodeGen::LOOP_FLOW_ACCEPTED[[irep.label, trace_idx, path, BytecodeIR.for(irep).source_at(trace_idx)&.sym]] = true
     position
   end
 
@@ -2198,7 +2200,7 @@ class CodeGen
     @loop_element_reassigned ||= {}.compare_by_identity
     @loop_element_reassigned.fetch(irep) do
       @loop_element_reassigned[irep] = BytecodeIR.own_upvar_written_regs(irep).include?(LOOP_ELEMENT_REG) ||
-                                       irep.instructions.any? do |i|
+                                       BytecodeIR.for(irep).each_source.any? do |i, _|
                                          i.reg.to_s == LOOP_ELEMENT_REG && i.op != 'ENTER' &&
                                            !NumericFlow::NO_WRITE_OPS.include?(i.op)
                                        end
@@ -2207,7 +2209,7 @@ class CodeGen
 
   # Counted once per (body, position, reason): compile_send runs on a site more than once.
   def loop_flow_refuse(irep, trace_idx, reason)
-    CodeGen::LOOP_FLOW_REFUSALS[[irep.label, trace_idx, reason, irep.instructions[trace_idx]&.sym]] = true
+    CodeGen::LOOP_FLOW_REFUSALS[[irep.label, trace_idx, reason, BytecodeIR.for(irep).source_at(trace_idx)&.sym]] = true
     nil
   end
 

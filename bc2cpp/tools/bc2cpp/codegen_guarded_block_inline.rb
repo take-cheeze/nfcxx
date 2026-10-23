@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 require 'set'
 
 # GUARDED_BLOCK_INLINE: the inlined block loops of codegen_loop_inline.rb for a receiver whose class is
@@ -88,7 +90,7 @@ class CodeGen
   def guarded_inline_finish(irep, guarded)
     guarded[:pending].each do |pending|
       region = pending[:region]
-      insn = irep.instructions[irep.index_of_addr(region[:sendb_addr])]
+      insn = BytecodeIR.for(irep).source_at(irep.index_of_addr(region[:sendb_addr]))
       argc = insn.argc_text.to_s[/n=(\d+)/, 1]&.to_i
       glue = argc && guarded_inline_arm?(insn.sym, argc, pending[:klass]) &&
              guarded_inline_glue(region, irep, pending[:inlined], pending[:klass], guarded[:after])
@@ -119,14 +121,14 @@ class CodeGen
   def guarded_inline_glue(region, irep, inlined, klass, after_at)
     recv = "r#{region[:dest_reg]}"
     send_idx = irep.index_of_addr(region[:sendb_addr])
-    after = irep.instructions[send_idx + 1]
+    after = BytecodeIR.for(irep).source_at(send_idx + 1)
     return nil unless after
 
     (@guarded_inline_done ||= Set.new) << [irep.label, region[:sendb_addr]]
     label = "Lbc2cpp_guarded_end_#{region[:sendb_addr]}"
     after_at[after.addr] = "  #{label}:;\n"
     test = format(GUARDED_INLINE_TESTS.fetch(klass), r: recv)
-    "  // GUARDED_BLOCK_INLINE :#{irep.instructions[send_idx].sym} -- exact #{klass} receiver runs " \
+    "  // GUARDED_BLOCK_INLINE :#{BytecodeIR.for(irep).source_at(send_idx).sym} -- exact #{klass} receiver runs " \
       "the block body inline; any other receiver takes the send below\n" \
       "  if (M->c == M->root_c && #{test}) {\n#{inlined}    goto #{label};\n  }\n"
   end
