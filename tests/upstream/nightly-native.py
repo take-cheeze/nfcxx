@@ -137,13 +137,15 @@ def merge_main(root, out):
         suite = json.loads(path.read_text()).get('suite')
         if suite in found:
             found[suite].append(path)
-    missing = [suite for suite in SUITES if not found[suite]]
+    # Only the sharded suites must be complete; a failed single-shard suite is reported by its own job.
+    missing = [suite for suite in SHARDED if not found[suite]]
     if missing:
         raise SystemExit(f'Incomplete native merge: no summaries for {", ".join(missing)}')
     merged = {}
     try:
         for suite in SUITES:
-            merged[suite] = merge_suite(suite, found[suite])
+            if found[suite]:
+                merged[suite] = merge_suite(suite, found[suite])
     except (ValueError, KeyError, OSError) as error:
         raise SystemExit(f'Incomplete native merge: {error}')
     for suite, summary in merged.items():
