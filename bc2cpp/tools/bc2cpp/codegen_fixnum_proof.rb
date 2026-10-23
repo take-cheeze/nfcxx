@@ -273,9 +273,12 @@ class CodeGen
     return true if static_indexable_class(irep, idx, reg, owner_def) == 'Game::Variables'
     return false unless owner_def.owner == 'Game::Variables'
 
-    irep.walk_writers(idx - 1, reg.to_s, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, follow_moves: true) do |insn|
-      insn.op == 'LOADSELF'
-    end || false
+    # Every value reaching the read must be self: a join with any other writer, or the frame entry, refuses.
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    return false if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+    program = BytecodeIR.for(irep)
+    defs.all? { |d| program.source_at(d.index).op == 'LOADSELF' }
   end
 
   def guarded_integer_binary_range(op, left, right)
