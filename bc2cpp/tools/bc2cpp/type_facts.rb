@@ -365,6 +365,9 @@ module TypeFacts
     # The IR's exits minus STOP: it ends the program, not the body, and the grep this replaces never matched it.
     ops = BytecodeIR.for(irep).exits.map(&:op).reject { |o| o == 'STOP' }
     return nil if ops.empty? || ops.any? { |o| %w[RETURN RETURN_BLK BREAK].include?(o) }
+    # A `return` in a nested block (RETURN_BLK) leaves this method with the block's value. That exit is not in this
+    # body's exit list, so the body's own RETNIL would otherwise stand for the whole method.
+    return nil if BytecodeIR.nested_exit?(irep, :block_return)
 
     kinds = ops.map { |o| { 'RETSELF' => 'self', 'RETNIL' => 'nil', 'RETTRUE' => 'bool', 'RETFALSE' => 'bool' }[o] }.uniq
     kinds.size == 1 ? kinds.first : nil
@@ -512,7 +515,7 @@ module TypeFacts
           row['type'] = cls.to_s
           row['source'] = (ctx.signature_origins && ctx.signature_origins[[owner, "@#{name}"]]) || 'inferred:class-layout'
         elsif row['embedded']
-          row['type'] = row['embedded']
+          row['type'] = IvarCandidates.with_nil(candidates, gen, owner, name, row['embedded'])
           row['source'] = 'inferred:ivar-layout'
         end
         if row['type'].nil? && (seed = ctx.signature_ivars && ctx.signature_ivars[[owner, "@#{name}"]]) &&
