@@ -510,6 +510,23 @@ jobs:
         if: steps.rust-changes.outputs.changed == 'true'
         run: tests/realworld/run_mrustc.sh clap regex serde-json batch
 
+  # The upstream harness scripts and their offline self-test (tests/upstream): syntax of every script and the native
+  # merge and collection logic, in under a minute. Not a required check; the nightly workflow runs the real suites.
+  upstream-harness:
+    name: upstream harness self-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Syntax of the upstream scripts and Python
+        run: |
+          for f in tests/upstream/*.sh; do bash -n "$f"; done
+          python3 -m py_compile tests/upstream/*.py
+
+      - name: Native harness self-test
+        run: python3 tests/upstream/nightly-self-test.py
+
   # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
   # the build, every test group, the Linux arm64 tests, the macOS suites and the mrustc suite passed. if: always() stops a
   # skipped dependency from skipping this job.
