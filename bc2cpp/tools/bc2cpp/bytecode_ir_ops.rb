@@ -17,6 +17,18 @@ module BytecodeIR
     CALL = (SEND | ['SUPER']).freeze
     # Every op whose callee frame starts at R(a) and may overwrite R(a) and above.
     CALLEE_FRAME = (CALL | %w[EXEC BLKCALL]).freeze
+    # Sends that take a block register after their arguments (vm.c OP_SENDB, OP_SSENDB).
+    BLOCK_SEND = Set['SENDB', 'SSENDB'].freeze
+    # Sends with no receiver register: the implicit-self forms.
+    SELF_SEND = Set['SSEND', 'SSEND0', 'SSENDB'].freeze
+    # Sends whose receiver is R(a): the complement of SELF_SEND within SEND.
+    RECEIVER_SEND = (SEND - SELF_SEND).freeze
+    # Ops that open a class or module body by name (`CLASS R :Name`, `MODULE R :Name`).
+    CLASS_MODULE = Set['CLASS', 'MODULE'].freeze
+    # Index reads R(a) = R(b)[...]: an index op, not a method send, so no SEND set holds it.
+    INDEX_READ = Set['GETIDX', 'GETIDX0'].freeze
+    # Ops that make a Proc from a literal block body of the current irep.
+    LITERAL_PROC = Set['BLOCK', 'LAMBDA'].freeze
 
     # Ops whose leading register is only READ and which may fall through (vm.c tests or raises on R(a));
     # SETUPVAR stores R(a) into an enclosing frame.
