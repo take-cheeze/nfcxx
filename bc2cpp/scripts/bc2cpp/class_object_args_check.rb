@@ -290,7 +290,7 @@ if ENV['MRBC'] && runtime.compiler?
   off_code, off_err = gen.call(HELPER, 'BC2CPP_CLASS_OBJECT_ARGS' => '0')
   check.call('the kill switch brings the unresolved site back', off_err.include?('unresolved new with 2 arguments'))
   off_count = body.call(off_code, 'CoaVictim_count_impl')
-  check.call('and the class test returns', off_count&.include?('bc2cpp_send'))
+  check.call('and the class test returns', off_count&.include?('MRB_TT_HASH'))
 
   # A caller that hands the helper a class it computed keeps every constructor withdrawn.
   dynamic = HELPER + <<~RUBY
@@ -301,7 +301,7 @@ if ENV['MRBC'] && runtime.compiler?
   RUBY
   dyn_code, = gen.call(dynamic.sub('%w[CoaRec', '%w[CoaRec'))
   dyn_count = body.call(dyn_code, 'CoaVictim_count_impl')
-  check.call('a class passed through another parameter still resolves when its callers are constants', dyn_count && !dyn_count.include?('bc2cpp_send'))
+  check.call('a class passed through another parameter still resolves when its callers are constants', dyn_count && !dyn_count.include?('bc2cpp_send') && !dyn_count.include?('MRB_TT_HASH'))
   computed = HELPER + <<~RUBY
     class CoaDyn < CoaRec
       def pick; build 4, [CoaOne, CoaTwo].first, :d; end
@@ -309,7 +309,7 @@ if ENV['MRBC'] && runtime.compiler?
   RUBY
   comp_code, comp_err = gen.call(computed)
   check.call('a computed class argument keeps the site unresolved', comp_err.include?('unresolved new with 2 arguments'))
-  check.call('and keeps the unrelated constructor unpooled', body.call(comp_code, 'CoaVictim_count_impl')&.include?('bc2cpp_send'))
+  check.call('and keeps the unrelated constructor unpooled', body.call(comp_code, 'CoaVictim_count_impl')&.include?('MRB_TT_HASH'))
   symbolic = HELPER + <<~RUBY
     class CoaSym < CoaRec
       def go; send(:build, 5, CoaOne, :e); end
