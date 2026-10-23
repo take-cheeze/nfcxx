@@ -586,6 +586,16 @@ class CodeGen
   # Exhaustive entry admission is retained; only the single-definition rule
   # is replaced by stable receiver-specific lookup. These facts never seed codegen.
   def bytecode_ir_argument_classes(definition, position, read: nil)
+    argument_classes_at_sites(definition, position, read: read, optional: false)
+  end
+
+  # Optional positionals (R[mandatory + 1 .. mandatory + optional]). Refused unless every reaching call passes the
+  # position: a call that omits it binds the default, so the call-site join says nothing about the parameter.
+  def bytecode_ir_optional_argument_classes(definition, position)
+    argument_classes_at_sites(definition, position, read: nil, optional: true)
+  end
+
+  def argument_classes_at_sites(definition, position, read:, optional:)
     return nil if ENV['BC2CPP_IR_ARGUMENT_TYPES'] == '0'
     return nil unless @foreign_method_names && @outside_tokens && @closed_world&.exact_instances_singleton_free?
     return nil unless @native_results_ready && @rc_scoped_ready
@@ -596,15 +606,16 @@ class CodeGen
     return nil if numeric_dynamically_named?(name)
 
     irep = @ireps[definition.irep]
-    return nil unless irep && pure_mandatory_arity?(irep)
+    return nil unless irep && (optional ? optional_positionals_only?(irep) : pure_mandatory_arity?(irep))
 
-    arity = mandatory_arity(irep)
-    return nil unless position.between?(1, arity)
+    mandatory = mandatory_arity(irep)
+    accepted = mandatory..(optional ? mandatory + optional_arity(irep) : mandatory)
+    return nil unless position.between?(1, accepted.end)
 
     sites, poisoned = entry_arg_call_index
     return nil if poisoned.include?(name) || sites[name].empty?
 
-    IrArgumentTypes.classes(definition, position, sites[name], arity: arity,
+    IrArgumentTypes.classes(definition, position, sites[name], arity: accepted,
                             receiver: ->(body, index, register) {
                               implicit = read && %w[SSEND SSEND0 SSENDB].include?(body.instructions[index].op)
                               read && !implicit ? read.call(body, index, register) : bytecode_ir_argument_receiver_classes(body, index, register)
