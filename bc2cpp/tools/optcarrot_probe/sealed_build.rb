@@ -18,7 +18,8 @@ module OptcarrotSealedBuild
     end
     gems['mruby-onig-regexp'] = OptcarrotOnigAliases.prepare(root, temp)
     gems['optcarrot-compiled'] = compiled_gem
-    benchmark = gems['optcarrot-benchmark'] = File.join(temp, 'benchmark')
+    # The mruby- prefix keeps the bundle's path gem-relative, so its predicates can be keyed in predicate_whitelist.txt.
+    benchmark = gems['optcarrot-benchmark'] = File.join(temp, 'mruby-optcarrot-benchmark')
     FileUtils.mkdir_p([File.join(benchmark, 'mrblib'), File.join(benchmark, 'src')])
     bundle = File.join(benchmark, 'mrblib/benchmark.rb')
     system(RbConfig.ruby, File.join(root, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
