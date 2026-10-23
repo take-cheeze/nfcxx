@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 require_relative 'call_facts'
 require_relative 'compiled_gems'
 
@@ -98,7 +99,7 @@ module ProvableErrorReport
     return 'dead' unless program.reachable_from(0).include?(idx)
     return 'probed' if @closed_world.instance_variable_get(:@probed_names).include?(name)
     return 'rescue' if rescue_covered_labels.include?(irep.label) ||
-                       program.handler_protected_addrs(inclusive_end: true).include?(irep.instructions[idx].addr)
+                       program.handler_protected_addrs(inclusive_end: true).include?(program.source_at(idx).addr)
     return 'conditional' if owner_def.nil? || owner_def.irep != irep.label
     return 'conditional' unless program.every_path_reaches?(0, idx)
 
@@ -144,7 +145,7 @@ module ProvableErrorReport
       next unless ENGINE_GEMS.include?(error_gem(irep)) || ENV['BC2CPP_PROVABLE_ERROR_ALL_GEMS']
 
       owner_def = owners[irep.label]
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         if BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym
           out.concat(error_send_rows(answers, irep, idx, insn, owner_def))
         elsif ARITH.key?(insn.op)

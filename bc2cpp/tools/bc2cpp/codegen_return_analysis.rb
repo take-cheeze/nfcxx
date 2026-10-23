@@ -6,6 +6,7 @@ require_relative 'define_method_sites'
 require_relative 'alias_sites'
 require_relative 'codegen_declared_returns'
 require_relative 'bytecode_ir_returns'
+require_relative 'bytecode_ir_containers'
 require_relative 'foreign_string_results'
 
 class CodeGen
@@ -314,7 +315,7 @@ class CodeGen
       next if children.include?(label) && CoreDefs.core_source?(irep.file)
 
       scoped = skip_class_object && @closed_world&.class_object_body?(label)
-      irep.instructions.each_with_index do |insn, idx|
+      BytecodeIR.for(irep).each_source do |insn, idx|
         case insn.op
         when 'ALIAS', 'UNDEF'
           # ALIAS_SITES: a settled class-body alias is a registry definition of its new name.

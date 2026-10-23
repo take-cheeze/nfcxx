@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # Debug report for element classes of mutable containers: with BC2CPP_ELEMENT_REPORT=<path>,
 # compile_insn records, per instruction, two kinds of TSV row (the last compile of an instruction wins,
 # since compiles_clean? probes compile methods early). It changes no generated code.
@@ -30,7 +32,7 @@ module ElementSiteReport
     defs.flat_map do |d|
       next ['entry'] if d.entry?
 
-      insn = irep.instructions[d.index]
+      insn = BytecodeIR.for(irep).source_at(d.index)
       case insn.op
       when 'GETIDX', 'GETIDX0'
         depth < 2 ? element_origin(irep, d.index, insn.reg, depth + 1).map { |o| "idx<#{o}>" } : ['idx<deep>']
@@ -80,7 +82,7 @@ module ElementSiteReport
   # that is not a literal, since then the contents come from elsewhere). nil stores hold nothing.
   def record_ivar_creation(insn, irep, owner_def, idx, owner)
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.regs.first)
-    return if defs&.all? { |d| !d.entry? && irep.instructions[d.index].op == 'LOADNIL' }
+    return if defs&.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADNIL' }
 
     masks = defs ? defs.map { |d| literal_contents_mask(irep, d, owner_def) } : [NumericFlow::OTHER]
     mask = masks.include?(nil) ? nil : masks.reduce(0, :|)
@@ -94,7 +96,7 @@ module ElementSiteReport
   def literal_contents_mask(irep, definition, owner_def)
     return NumericFlow::OTHER if definition.entry?
 
-    lit = irep.instructions[definition.index]
+    lit = BytecodeIR.for(irep).source_at(definition.index)
     case lit.op
     when 'LOADNIL' then 0
     when 'ARRAY', 'ARRAY2'

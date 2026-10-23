@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: RECORD_HASH_PROOF consumer.
 
 class CodeGen
@@ -13,7 +15,7 @@ class CodeGen
     return nil if defs.nil? || defs.empty?
 
     slots = defs.flat_map do |d|
-      return nil if d.entry? || irep.instructions[d.index].op != 'GETIDX'
+      return nil if d.entry? || BytecodeIR.for(irep).source_at(d.index).op != 'GETIDX'
 
       RecordHash.read_slots(irep, d.index) or return nil
     end
@@ -47,7 +49,7 @@ class CodeGen
     classes = defs.map do |d|
       next nil if d.entry?
 
-      writer = irep.instructions[d.index]
+      writer = BytecodeIR.for(irep).source_at(d.index)
       case writer.op
       when 'ARRAY' then 'Array'
       when 'HASH' then 'Hash'

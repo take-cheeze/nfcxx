@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 
 # CORE_DEFS: what decides whether a definition from mruby's own Ruby
 # may be compiled and registered over the interpreter's. The registry walks a
@@ -126,7 +127,7 @@ module CoreDefs
 
     idx = irep.instructions.index(insn)
     method_idx = irep.previous_real_index(idx - 1)
-    method_insn = method_idx >= 0 ? irep.instructions[method_idx] : nil
+    method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
     method_insn && method_insn.op == 'METHOD' ? irep.reps[method_insn.block_index] : nil
   end
 end
