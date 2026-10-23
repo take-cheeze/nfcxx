@@ -65,6 +65,37 @@ packed = [['LOADSYM', 'R2 :first'], ['ARRAY', 'R2 1'], ['MOVE', 'R8 R2'],
 index = enum_index(enum_fixture(packed))
 suite.check('packed array passed through an alias is conservative',
             index['first'].empty? && index[CallSiteIndex::UNKNOWN_TARGET].size == 1)
+fresh = [['LOADSYM', 'R2 :gsub'], ['ARRAY', 'R2 1'], ['MOVE', 'R3 R8'],
+         ['ARYCAT', 'R2 (R3)'], ['SSEND', 'R1 :to_enum n=*']]
+index = enum_index(enum_fixture(fresh))
+suite.check('fresh appended prefix retains target without global fanout',
+            index['gsub'].size == 1 && index['gsub'].first.last.nil? && index[CallSiteIndex::UNKNOWN_TARGET].empty?)
+aliased = fresh.map(&:dup)
+aliased.insert(2, ['MOVE', 'R9 R2'])
+suite.check('even an unconsumed alias refuses packed ownership proof',
+            enum_index(enum_fixture(aliased))[CallSiteIndex::UNKNOWN_TARGET].size == 1)
+pushed = fresh.map(&:dup)
+pushed[3] = ['ARYPUSH', 'R2 1']
+suite.check('pushing onto fresh nonempty prefix preserves target', enum_index(enum_fixture(pushed))['gsub'].size == 1)
+empty = fresh.map(&:dup)
+empty[1] = ['ARRAY', 'R2 0']
+suite.check('empty packed prefix cannot prove first element',
+            enum_index(enum_fixture(empty))[CallSiteIndex::UNKNOWN_TARGET].size == 1)
+escaped = fresh.map(&:dup)
+escaped.insert(2, ['SETIV', ':saved R2'])
+suite.check('stored packed prefix keeps unknown fanout',
+            enum_index(enum_fixture(escaped))[CallSiteIndex::UNKNOWN_TARGET].size == 1)
+callback = fresh.map(&:dup)
+callback.insert(2, ['SSEND0', 'R7 :callback'])
+suite.check('intervening call keeps packed prefix unknown',
+            enum_index(enum_fixture(callback))[CallSiteIndex::UNKNOWN_TARGET].size == 1)
+captured = enum_fixture(fresh)
+child = enum_fixture([['GETUPVAR', 'R1 2 0']])
+child.label = 'capture'
+captured.reps = [child.label]
+captured.tree = { captured.label => captured, child.label => child }
+suite.check('closure read refuses to_a callback alias risk',
+            enum_index(captured)[CallSiteIndex::UNKNOWN_TARGET].size == 1)
 irep = enum_fixture([['SSEND0', 'R1 :enum_for']])
 suite.check('default target remains each with no arguments', enum_index(irep)['each'] == [[irep, 0, 2, 0]])
 irep = enum_fixture([['LOADSYM', 'R2 :first'], ['SSEND', 'R1 :enum_for n=1|nk=1']])
@@ -80,6 +111,12 @@ if compiler_available
     suite.check('binary compiler join records every target', %w[first second].all? { |name| index[name].size == 1 })
     suite.check('binary compiler join preserves forwarded arity', %w[first second].all? { |name| index[name].first.last == 1 })
     suite.check('binary compiler join has no unknown fanout', index[CallSiteIndex::UNKNOWN_TARGET].empty?)
+  end
+  suite.compile('def gsub(*args, &block); return to_enum(:gsub, *args) if args.length == 1 && !block; end') do |ireps|
+    index = CallSiteIndex.build(ireps)
+    suite.check('binary core gsub packed idiom retains exact target', index['gsub'].size == 1)
+    suite.check('binary core gsub packed idiom does not poison sealed contracts', index[CallSiteIndex::UNKNOWN_TARGET].empty?)
+    suite.check('binary core gsub packed idiom retains unknown forwarded arity', index['gsub'].first&.last.nil?)
   end
 else
   puts '  SKIP binary compiler fixture: set MRBC or put mrbc on PATH'

@@ -389,8 +389,8 @@ class ClassArgTypesTest < Minitest::Test
     packed = irep('packed', [insn('LOADSYM', "R2\t:set"), insn('ARRAY', "R2\t1"), insn('MOVE', "R3\tR9"),
                              insn('ARYCAT', "R2\t(R3)"), insn('SSEND', "R1\t:to_enum\tn=*")])
     index = CallSiteIndex.build({ 'e' => packed })
-    assert_empty index['set']
-    assert_equal [nil], CallSiteIndex.sites(index, 'set').map { |*, n| n }
+    assert_equal [nil], index['set'].map { |*, n| n }
+    assert_empty index[CallSiteIndex::UNKNOWN_TARGET]
     with_tracer_answering('A') do
       assert_equal [nil], class_types_for('plain' => direct_caller, 'enum' => packed)
       assert_equal ['A'], class_types_for('plain' => direct_caller, 'enum' => enum_caller(name: 'other'))

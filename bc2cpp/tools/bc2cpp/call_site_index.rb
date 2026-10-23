@@ -70,10 +70,13 @@ class CallSiteIndex
   end
 
   # Every possible literal Symbol name, or nil when any reaching value is unknown.
-  # Packed arrays require a separate alias/mutation proof; their element writers alone are insufficient.
   def self.enum_targets(irep, idx, insn, reg)
-    return nil if insn.n_spec == '*'
+    return packed_enum_targets(irep, idx, reg.to_s) if insn.n_spec == '*'
 
+    symbol_targets(irep, idx, reg)
+  end
+
+  def self.symbol_targets(irep, idx, reg)
     writers = BytecodeIR.reaching_writer_indices(irep, idx, reg.to_s)
     return nil unless writers
 
@@ -87,6 +90,64 @@ class CallSiteIndex
       end
     end
     names.all?(String) ? names.uniq : nil
+  end
+
+  # A fresh nonempty prefix retains its head across append instructions only while
+  # no alias can expose it (including a closure read during ARYCAT's to_a callback).
+  def self.packed_enum_targets(irep, idx, reg)
+    program = BytecodeIR.for(irep)
+    at = idx
+    origin = nil
+    idx.times do
+      writers = BytecodeIR.reaching_definitions(irep, at, reg, follow_moves: false, through_handlers: true)
+      return nil unless writers && writers.size == 1 && !writers.first.entry?
+
+      writer = writers.first.index
+      source = irep.instructions[writer]
+      if source.op == 'ARRAY'
+        origin = writer
+        break
+      end
+      return nil unless %w[ARYCAT ARYPUSH].include?(source.op) && source.reg == reg
+
+      at = writer
+    end
+    return nil unless origin && program.linear_corridor?(origin, idx, include_handlers: true)
+
+    literal = program.container_literal(origin)
+    return nil unless literal && literal.kind == :array && literal.count.positive?
+    return nil if packed_register_captured?(irep, reg)
+    return nil unless (origin + 1...idx).all? do |index|
+      source = irep.instructions[index]
+      if %w[ARYCAT ARYPUSH].include?(source.op)
+        source.reg == reg
+      elsif source.op == 'NOP'
+        true
+      else
+        quiet = %w[MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE STRING SYMBOL GETUPVAR].include?(source.op) ||
+                BytecodeIR::Ops::LOADI_OPS.include?(source.op)
+        quiet && !source.regs.include?(reg)
+      end
+    end
+
+    symbol_targets(irep, origin, literal.base.to_s)
+  end
+
+  def self.packed_register_captured?(irep, reg)
+    return false if Array(irep.reps).empty?
+    return true unless irep.tree
+
+    captured = false
+    lookup = ->(label) { irep.tree.fetch(label) }
+    Array(irep.reps).each do |label|
+      BytecodeIR.each_nested_insn(lookup.call(label), lookup) do |source, depth|
+        next unless %w[GETUPVAR SETUPVAR].include?(source.op)
+
+        index, level = source.upvar_ref
+        captured = true if index.to_s == reg && level == depth
+      end
+    end
+    captured
   end
 
   # irep label -> name of its nearest enclosing `def` body (the irep itself when it is one), from the
