@@ -149,7 +149,7 @@ module IntegerConstantRanges
   # LOADI__1 carry no operand, so IntegerConstants.loadi_value cannot read them.
   def self.literal(insn)
     value = case insn.op
-            when /\ALOADI_(\d)\z/ then Regexp.last_match(1).to_i
+            when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
             when 'LOADI__1' then -1
             else insn.imm_operand&.to_i
             end

@@ -148,7 +148,7 @@ module BytecodeIR
       program.linear_corridor?(origin, index) &&
         ((origin + 1)...index).all? do |k|
           op = program.instructions[k].op
-          QUIET_OPS.include?(op) || op.start_with?('LOADI')
+          QUIET_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
         end
     end
 
@@ -156,7 +156,7 @@ module BytecodeIR
       op = insn.op
       return -1 if op == 'LOADI__1'
       return -insn.uint_operand if op == 'LOADINEG' && insn.uint_operand
-      return op.delete_prefix('LOADI_').to_i if op.match?(/\ALOADI_[0-7]\z/)
+      return op.delete_prefix('LOADI_').to_i if BytecodeIR::Ops::LOADI_SLOT.include?(op)
       return insn.imm_operand.to_i if %w[LOADI8 LOADI16 LOADI32].include?(op) && insn.imm_operand
 
       nil

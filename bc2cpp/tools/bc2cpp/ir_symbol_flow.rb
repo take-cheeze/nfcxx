@@ -27,7 +27,7 @@ require_relative 'bytecode_ir'
 # The universe of a table is the union of the sets of its stored values.
 module IrSymbolFlow
   # Loads of a symbol, integer, nil, boolean or self: the values a literal table can hold.
-  LITERAL_LOAD = /\ALOAD(SYM|I\w*|L|NIL|T|F|SELF|TRUE|FALSE)\z/.freeze
+  LITERAL_LOAD = BytecodeIR::Ops::LOAD_PREFIX_OPS
   # Core methods that add their arguments to their receiver.
   MUTATORS = %w[<< push].freeze
   # Core container methods that store values other than through MUTATORS: their arguments are not followed.
@@ -264,7 +264,7 @@ module IrSymbolFlow
     regs = insn.regs.map(&:to_i)
     a = regs.first
     case insn.op
-    when /\ALOAD/, 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETUPVAR', 'STRING', 'SYMBOL', 'LAMBDA',
+    when *BytecodeIR::Ops::LOAD_PREFIX_OPS, 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETUPVAR', 'STRING', 'SYMBOL', 'LAMBDA',
          'BLOCK', 'METHOD', 'OCLASS', 'TCLASS', 'TDEF', 'ENTER', 'NOP', 'STOP', 'JMP', 'JMPUW' then []
     when 'MOVE', 'AREF', 'GETIDX0' then regs.drop(1)
     when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'SETGV', 'SETSV', 'SETIV', 'SETCV',
@@ -278,13 +278,13 @@ module IrSymbolFlow
     when 'HASH' then element_regs(insn, 2)
     when *BytecodeIR::Ops::SEND
       # R[a] (the receiver), then n arguments or one splat Array, then the block for the B forms.
-      args = if insn.op.end_with?('0') then 0
+      args = if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) then 0
              elsif insn.plain_fixed_argc? then insn.argc
              elsif insn.pure_splat? then 1
              end
       return (a...[irep.nregs.to_i, a + 1].max).to_a unless args
 
-      (a..(a + args + (insn.op.end_with?('B') ? 1 : 0))).to_a
+      (a..(a + args + (BytecodeIR::Ops::B_SUFFIX_OPS.include?(insn.op) ? 1 : 0))).to_a
     else regs.empty? ? [] : (regs.min...[irep.nregs.to_i, regs.max + 1].max).to_a
     end
   end

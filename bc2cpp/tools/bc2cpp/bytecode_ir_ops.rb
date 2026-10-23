@@ -78,5 +78,33 @@ ZERO_ARG_SEND = Set['SEND0', 'SSEND0'].freeze
 
     # Operand-widening prefixes `mrbc -v` lists as instructions of their own.
     EXT = Set['EXT1', 'EXT2', 'EXT3'].freeze
+
+    # Name-test sets: each is the exact membership, over InsnDecoder::FORMATS, of an op-name test that used to
+    # be a string prefix, suffix or regex. The SSEND/SS prefixes reuse SELF_SEND and the EXT prefix reuses EXT.
+    # Every table name starting with LOAD (start_with?('LOAD'); also `/\ALOAD/` and the LITERAL_LOAD regex).
+    LOAD_PREFIX_OPS = Set['LOADL', 'LOADI8', 'LOADINEG', 'LOADI__1', 'LOADI_0', 'LOADI_1', 'LOADI_2', 'LOADI_3',
+                          'LOADI_4', 'LOADI_5', 'LOADI_6', 'LOADI_7', 'LOADI16', 'LOADI32', 'LOADSYM', 'LOADNIL',
+                          'LOADSELF', 'LOADTRUE', 'LOADFALSE'].freeze
+    # The ops that write their leading register from their operands alone (the PURE_WRITES regex): the LOAD
+    # family plus MOVE, the GET* reads, STRING, LAMBDA, BLOCK, METHOD, TCLASS and OCLASS.
+    PURE_WRITE_OPS = Set['MOVE', 'GETGV', 'GETSV', 'GETIV', 'GETCV', 'GETCONST', 'GETUPVAR', 'STRING', 'LAMBDA',
+                         'BLOCK', 'METHOD', 'OCLASS', 'TCLASS', 'LOADL', 'LOADI8', 'LOADINEG', 'LOADI__1',
+                         'LOADI_0', 'LOADI_1', 'LOADI_2', 'LOADI_3', 'LOADI_4', 'LOADI_5', 'LOADI_6', 'LOADI_7',
+                         'LOADI16', 'LOADI32', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE'].freeze
+    # Every name starting with JMP, RETURN, BREAK, RAISE, STOP or EXEC (the closed-world STOP_OPS regex).
+    STOP_PREFIX_OPS = Set['JMP', 'JMPIF', 'JMPNOT', 'JMPNIL', 'JMPUW', 'RAISEIF', 'RETURN', 'RETURN_BLK', 'BREAK',
+                          'EXEC', 'STOP'].freeze
+    # Every name starting with a flow-changing prefix (the loop_installers FLOW_OPS regex).
+    FLOW_PREFIX_OPS = Set['JMP', 'JMPIF', 'JMPNOT', 'JMPNIL', 'JMPUW', 'EXCEPT', 'RESCUE', 'RAISEIF', 'RETURN',
+                          'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'].freeze
+    # Literal-producing names for the loop_installers LOAD_TRUTHY regex: LOADI*, LOADL and STRING.
+    LOAD_TRUTHY_OPS = Set['LOADL', 'LOADI8', 'LOADINEG', 'LOADI__1', 'LOADI_0', 'LOADI_1', 'LOADI_2', 'LOADI_3',
+                          'LOADI_4', 'LOADI_5', 'LOADI_6', 'LOADI_7', 'LOADI16', 'LOADI32', 'STRING'].freeze
+    # Every name starting with SEND (start_with?('SEND')): the register-receiver sends, without the SENDV splat forms.
+    SEND_PREFIX_OPS = Set['SEND', 'SEND0', 'SENDB'].freeze
+    # Every name ending in 0 (end_with?('0')). The table's LOADI_0 and GETIDX0 match too.
+    ZERO_SUFFIX_OPS = Set['LOADI_0', 'GETIDX0', 'SSEND0', 'SEND0'].freeze
+    # Every name ending in B (end_with?('B')). SUB matches too, so this is a name test, not a block-send set.
+    B_SUFFIX_OPS = Set['SSENDB', 'SENDB', 'SUB'].freeze
   end
 end

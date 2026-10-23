@@ -262,7 +262,7 @@ module ConstantArgumentSites
   def integer_literal(insn)
     case insn.op
     when 'LOADI__1' then -1
-    when /\ALOADI_([0-7])\z/ then Regexp.last_match(1).to_i
+    when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
     when 'LOADI8', 'LOADI16', 'LOADI32', 'LOADINEG'
       value = insn.imm_operand&.to_i
       value && insn.op == 'LOADINEG' ? -value.abs : value

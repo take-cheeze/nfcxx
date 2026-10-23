@@ -189,7 +189,7 @@ module BytecodeIR
     def integer_literal(insn)
       case insn.op
       when 'LOADI__1' then -1
-      when /\ALOADI_([0-7])\z/ then Regexp.last_match(1).to_i
+      when BytecodeIR::Ops::LOADI_SLOT then insn.op.delete_prefix('LOADI_').to_i
       when 'LOADI', 'LOADI8', 'LOADI16', 'LOADI32', 'LOADINEG'
         value = insn.imm_operand&.to_i
         value && insn.op == 'LOADINEG' ? -value.abs : value
@@ -434,7 +434,7 @@ module BytecodeIR
     # or nil when the op is not a literal. Shared with NumericClasses' element proof.
     def self.literal_class(insn, pool)
       op = insn.op
-      return :Integer if op.match?(/\ALOADI(?:8|16|32|NEG|__1|_[0-7])\z/)
+      return :Integer if BytecodeIR::Ops::LOADI_OPS.include?(op)
       return LITERAL_TYPES[op] if LITERAL_TYPES.key?(op)
       return nil unless op == 'LOADL'
 

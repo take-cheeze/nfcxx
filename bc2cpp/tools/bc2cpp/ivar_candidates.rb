@@ -86,7 +86,7 @@ module IvarCandidates
     return nil unless REFLECTIVE_NAMES.include?(sym)
     return ALL_NAMES if REFLECTIVE_WRITES.include?(sym)
     if EVAL_SENDS.include?(sym)
-      return insn.op.end_with?('B') ? Set.new : ALL_NAMES
+      return BytecodeIR::Ops::B_SUFFIX_OPS.include?(insn.op) ? Set.new : ALL_NAMES
     end
 
     if NAME_DISPATCH.include?(sym)

@@ -90,7 +90,7 @@ module BytecodeIR
     def literal_class(index, pool)
       insn = source_at(index)
       return nil unless insn
-      return 'Integer' if insn.op.match?(LOADI_OP)
+      return 'Integer' if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
       return LITERAL_VALUE_CLASSES[insn.op] if LITERAL_VALUE_CLASSES.key?(insn.op)
       return nil unless insn.op == 'LOADL'
 
@@ -123,7 +123,7 @@ module BytecodeIR
 
       (from + 1...to).all? do |k|
         insn = @instructions[k].source
-        next false unless QUIET_OPS.include?(insn.op) || insn.op.match?(LOADI_OP)
+        next false unless QUIET_OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
 
         @instructions[k].successors.all? { |s| s > from && s <= to }
       end

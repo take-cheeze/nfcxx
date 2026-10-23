@@ -414,7 +414,7 @@ module BytecodeIR
     # being a handler edge (refused below).
     def dataflow_steps_over?(insn)
       op = insn.op
-      BytecodeIR::Ops::READS_LEAD.include?(op) || WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
+      BytecodeIR::Ops::READS_LEAD.include?(op) || WRITES_LEADING_REG_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
     end
 
     # Origin-only transfers (SiteOriginTable's walk; codegen never passes origin_transfers:, so its answers
@@ -575,7 +575,7 @@ module BytecodeIR
         op = insn.op
         lead = insn.reg
         new(BytecodeIR::Ops::READS_LEAD.include?(op) || op == 'JMPUW', BytecodeIR.written_run(insn),
-            ORIGIN_FRAME_OPS.include?(op), WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI'),
+            ORIGIN_FRAME_OPS.include?(op), WRITES_LEADING_REG_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op),
             BytecodeIR::Ops::CALLEE_FRAME.include?(op), lead, lead&.to_i).freeze
       end
     end
