@@ -98,12 +98,12 @@ module BytecodeIR
       insn = source_at(index)
       return nil unless insn
       return 'Integer' if BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
-      literal = Program.literal_value_classes
+      literal = BytecodeIR.literal_value_classes
       return literal[insn.op] if literal.key?(insn.op)
       return nil unless insn.op == 'LOADL'
 
       entry = insn.pool_index && pool && pool[insn.pool_index]
-      entry.is_a?(Hash) ? Program.pool_value_classes[entry[:type]] : nil
+      entry.is_a?(Hash) ? BytecodeIR.pool_value_classes[entry[:type]] : nil
     end
 
     # Yields [source, index] from +start+ while each instruction is entered only from the one before it (normal or
