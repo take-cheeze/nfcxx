@@ -135,6 +135,8 @@ class ClosedWorld
     @outside_constant_write_counts = Hash.new(0)
     @dynamic_subclassed = Set.new
     @probed_names = Set.new
+    # Set when a probe send's name is not one proven Symbol: any miss could then be the probed one.
+    @dynamic_probe = false
     @outside_def_names = Set.new
     # REMOVED_NAMES: literal names undefined or removed by the program; @dynamic_removal when one is computed.
     @removed_names = Set.new
@@ -233,6 +235,12 @@ class ClosedWorld
   # kind :lexical_self, a descendant) reaches no definition and no method_missing, so
   # it can only raise NoMethodError. `installed` is CodeGen#symbol_installed_names.
   # Every question defaults to "not a miss": the answer only ever adds a build error.
+  # PROBE_SENDS: a name passed to a probe is guarded, not a bug (see PROVEN_MISS). An unproven probe name
+  # is conservative: the build keeps every proven miss, since the probed name could be any of them.
+  def probed_name?(name)
+    @dynamic_probe || @probed_names.include?(name)
+  end
+
   # A module's or class object's `self` is never modelled here (instance_self?).
   # +label+ is the irep the send sits in: `self` there is its lexical owner unless a rebinder may run it under
   # another object. Any other compiled block keeps its creator's self,
@@ -240,7 +248,7 @@ class ClosedWorld
   def proven_miss?(name, klass, installed, kind, label: nil)
     return false if @global_refusal || installed.nil? || installed.include?(name)
     return false if @unknown_defs.include?(name) || @outside_names.include?(name) ||
-                    @outside_def_names.include?(name) || @probed_names.include?(name)
+                    @outside_def_names.include?(name) || probed_name?(name)
     return false if %w[method_missing respond_to_missing? initialize].include?(name)
 
     reason, required = required_classes(name, kind != :constant_object)
@@ -1487,6 +1495,7 @@ class ClosedWorld
           child = def_method_body(irep, idx, insn)
           note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
+          scan_probe_send(irep, idx, insn) if PROBE_SENDS.include?(insn.sym)
           scan_send(irep, insns, idx, insn)
         when 'UNDEF'
           @removed_names << insn.sym
@@ -1494,7 +1503,6 @@ class ClosedWorld
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
           @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
-          @probed_names << sym if BytecodeIR::Window.following(insns, idx, 3).any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
           const = insn.const_name
@@ -1735,6 +1743,15 @@ class ClosedWorld
     elsif sets.first&.any? { |name| REMOVER_SENDS.include?(name) }
       @removed_names.merge(sets.drop(1).flatten)
     end
+  end
+
+  # The name a probe sends about is its first argument. A single proven Symbol there is probed; any other
+  # name (a join, a computed String, no argument) makes every miss unprovable, see probed_name?.
+  def scan_probe_send(irep, idx, insn)
+    names = insn.argc&.positive? ? argument_name_sets(irep, idx, insn, 1)&.first : nil
+    return @dynamic_probe = true unless names&.size == 1
+
+    @probed_names.merge(names)
   end
 
   # 15+ arguments arrive packed: `ARRAY Ra k` builds the array in Ra from R[a]..R[a+k-1] (OP_ARRAY, vm.c), and the

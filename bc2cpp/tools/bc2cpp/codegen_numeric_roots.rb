@@ -65,6 +65,20 @@ class CodeGen
     end
   end
 
+  # The writer a report label names for +reg+ as read by +use+: the instruction every reaching definition shares,
+  # :entry when the value comes from the frame, or :unknown when the query refuses or the writers disagree.
+  def numeric_label_source(irep, use, reg)
+    defs = BytecodeIR.reaching_definitions(irep, use, reg.to_s)
+    return :unknown if defs.nil? || defs.empty?
+    return :entry if defs.all?(&:entry?)
+    return :unknown if defs.any?(&:entry?)
+
+    program = BytecodeIR.for(irep)
+    sources = defs.map { |d| program.source_at(d.index) }
+    first = sources.first
+    sources.all? { |s| s.op == first.op && s.sym == first.sym } ? first : :unknown
+  end
+
   # The non-numeric leaves of +reg+ as read by instruction +at+. Its writers are the reaching definitions
   # (BytecodeIR.reaching_definitions: joins, loops and handler edges; MOVEs followed), and each writer's own
   # operands are queried the same way. A refused query is a leaf of its own: the writes are unknown, not none.
@@ -229,9 +243,9 @@ class CodeGen
       recv = numeric_raw_mask(irep, i, src, owner_def)
       key = if op == 'GETIDX0' then '0'
             else
-              # Label only: the textually nearest writer (not a feed set).
-              kw = irep.last_writer_index(i - 1, (insn.reg.to_i + 1).to_s)
-              kins = kw && BytecodeIR.for(irep).source_at(kw)
+              # Label only: the shared writer of the key register (not a feed set).
+              kins = numeric_label_source(irep, i, insn.reg.to_i + 1)
+              kins = nil unless kins.is_a?(Insn)
               kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
             end
       inner = numeric_root_nest('') { numeric_root_leaves(irep, i, src, owner_def).first(2).join('+') }
@@ -239,9 +253,9 @@ class CodeGen
     when 'AREF'
       src = insn.regs[1].to_i
       # Label only, as the GETIDX key above.
-      w = irep.last_writer_index(i - 1, src.to_s)
-      wi = w && BytecodeIR.for(irep).source_at(w)
-      what = if wi.nil? then 'param'
+      wi = numeric_label_source(irep, i, src)
+      what = if wi == :entry then 'param'
+             elsif !wi.is_a?(Insn) then '?'
              elsif wi.op.start_with?('SEND', 'SSEND') then "send:#{wi.sym}"
              else wi.op
              end

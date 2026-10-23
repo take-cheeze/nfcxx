@@ -14,7 +14,9 @@ module ReadonlyCallEffects
     program = BytecodeIR.for(body)
     return false unless program.resolved? && !program.handlers?
 
-    body.instructions.all? { |insn| OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_SLOT_OR_WIDE.include?(insn.op) }
+    program.each_source.all? do |insn, _index|
+      OPS.include?(insn.op) || BytecodeIR::Ops::LOADI_SLOT_OR_WIDE.include?(insn.op)
+    end
   end
 end
 
