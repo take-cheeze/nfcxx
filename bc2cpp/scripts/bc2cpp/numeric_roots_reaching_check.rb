@@ -87,6 +87,16 @@ got = leaves(roots_gen, param_join, 5, 1)
 check.call('the join reports both the foo write and the entry value of R1 (param:noowner without an owner)',
            got.any? { |l| l.start_with?('send:foo@') } && got.include?('param:noowner'))
 
+puts '-- report label source (host)'
+# The label names the writer every reaching definition shares: a join of two different writers names none.
+label_join = irep_of([insn(0, 'JMPNOT', "R1\t8"), insn(3, 'SEND0', "R2\t:foo"), insn(7, 'JMP', '9'),
+                      insn(8, 'LOADI_1', "R2\t(1)"), insn(9, 'MOVE', "R5\tR2"), insn(10, 'RETURN', 'R5')])
+gen = roots_gen
+check.call('a join of different writers has no label source',
+           gen.numeric_label_source(label_join, 4, 2) == :unknown)
+check.call('a parameter read is an entry label source',
+           gen.numeric_label_source(irep_of([insn(0, 'MOVE', "R5\tR2"), insn(1, 'RETURN', 'R5')]), 0, 2) == :entry)
+
 if ENV['MRBC'] && !ENV['MRBC'].empty?
   puts '-- compiled Ruby (MRBC)'
   SRC = <<~'RUBY'
