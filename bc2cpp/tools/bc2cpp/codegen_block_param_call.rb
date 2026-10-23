@@ -53,18 +53,18 @@ module BlockParamCall
   # `yield *args` compiles to BLKPUSH + `call`: every definition is a BLKPUSH, which raises
   # LocalJumpError for a nil block (codegen_insn), so the receiver is a Proc.
   def blkpush_receiver?(irep, idx, reg)
-    return false unless idx.between?(0, irep.instructions.length - 1)
+    return false unless idx.between?(0, BytecodeIR.for(irep).size - 1)
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg)
     return false if defs.nil? || defs.empty?
 
-    defs.none?(&:entry?) && defs.all? { |definition| irep.instructions[definition.index].op == 'BLKPUSH' }
+    defs.none?(&:entry?) && defs.all? { |definition| BytecodeIR.for(irep).source_at(definition.index).op == 'BLKPUSH' }
   end
 
   # Every definition of the register at `idx` is the block a method was entered with,
   # in that method or (through GETUPVAR) an enclosing one, and nothing rewrites it.
   def block_param_receiver?(irep, idx, reg)
-    return false unless idx.between?(0, irep.instructions.length - 1)
+    return false unless idx.between?(0, BytecodeIR.for(irep).size - 1)
 
     defs = BytecodeIR.reaching_definitions(irep, idx, reg)
     return false unless defs&.size == 1
@@ -73,7 +73,7 @@ module BlockParamCall
     if definition.entry?
       block_param_incoming_slot?(irep, definition.reg)
     else
-      insn = irep.instructions[definition.index]
+      insn = BytecodeIR.for(irep).source_at(definition.index)
       return false unless insn.op == 'GETUPVAR' && insn.upvar_ref
 
       slot, level = insn.upvar_ref
@@ -122,10 +122,10 @@ module BlockParamCall
     copies = block_param_writers(irep, copy)
     return false unless copies.size == 1
 
-    move = irep.instructions[copies.first]
+    move = BytecodeIR.for(irep).source_at(copies.first)
     return false unless move.op == 'MOVE' && move.regs[1] == incoming
 
-    return true if copies.first == 1 && irep.instructions[0].op == 'ENTER'
+    return true if copies.first == 1 && BytecodeIR.for(irep).source_at(0).op == 'ENTER'
 
     irep.each_with_op('BLOCK', 'LAMBDA') do |_insn, i|
       return false unless BytecodeIR.write_dominates?(irep, copies.first, i, copy)
@@ -136,9 +136,8 @@ module BlockParamCall
   # Indices of the instructions that store to `reg` (any use of it as a leading operand
   # other than the tests that only read it).
   def block_param_writers(irep, reg)
-    irep.instructions.each_index.select do |i|
-      insn = irep.instructions[i]
-      insn.reg == reg && !BytecodeIR::Ops::READS_LEAD.include?(insn.op)
+    BytecodeIR.for(irep).each_source.filter_map do |insn, i|
+      i if insn.reg == reg && !BytecodeIR::Ops::READS_LEAD.include?(insn.op)
     end
   end
 

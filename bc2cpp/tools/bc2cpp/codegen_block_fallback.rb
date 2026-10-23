@@ -437,7 +437,7 @@ class CodeGen
     return {} unless fields && fields.drop(1).all?(&:zero?)
 
     idx = irep.index_of_addr(region[:sendb_addr])
-    insn = idx && irep.instructions[idx]
+    insn = idx && BytecodeIR.for(irep).source_at(idx)
     return {} unless insn&.op == 'SENDB'
 
     shapes = CoreBlockParamSigs.shapes.select do |(klass, name), shape|
@@ -495,7 +495,7 @@ class CodeGen
     return nil unless fields.first.positive?
 
     idx = irep.index_of_addr(region[:sendb_addr])
-    insn = idx && irep.instructions[idx]
+    insn = idx && BytecodeIR.for(irep).source_at(idx)
     return nil unless insn&.op == (region[:self_implicit] ? 'SSENDB' : 'SENDB')
 
     name = insn.sym.to_s
@@ -805,7 +805,7 @@ class CodeGen
     end
     body << "  // RBS_BLOCK_PARAM_HINT :#{region[:name]} parameter 1 -> #{rbs_class}\n" if rbs_class
     arm_prune_block_analysis(block_irep, d, 0)
-    block_irep.instructions.each_with_index do |insn, idx|
+    BytecodeIR.for(block_irep).each_source do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
 
