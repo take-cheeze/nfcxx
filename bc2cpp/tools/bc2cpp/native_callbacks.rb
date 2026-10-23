@@ -19,9 +19,13 @@ module NativeCallbacks
             strncat strtol strtoll strtoul strtod malloc calloc realloc free snprintf sprintf printf fprintf vsnprintf
             fputs fwrite fflush putchar puts abs labs floor ceil fabs sqrt pow fmod exp log log10 sin cos isnan isinf
             isdigit isspace isalpha isalnum isupper islower tolower toupper assert abort exit qsort getenv
-            va_start va_arg va_end malloc_trim _finite _isnan getsegmentdata _NSGetMachExecuteHeader].freeze
-  # Compiler intrinsics (`__builtin_*`) and C++ keywords that look like calls (`throw (x)`) in the C++ sources.
-  INTRINSIC = /\A(__|throw\z|catch\z|try\z)/
+            va_start va_arg va_end malloc_trim _finite _isnan getsegmentdata _NSGetMachExecuteHeader
+            fgetc feof fputc putc fstat gmtime localtime time clock_gettime close opendir readdir closedir
+            waitpid strerror strftime offsetof timespec_get _copysign].freeze
+  # Compiler intrinsics (`__builtin_*`, SSE `_mm_*`) and C++ keywords that look like calls (`throw (x)`).
+  INTRINSIC = /\A(__|_mm_|throw\z|catch\z|try\z)/
+  # The mruby entry points that call a method named at run time.
+  DISPATCH = /\Amrb_(funcall|check_funcall|yield|send)\w*\z/
 
   Entry = Struct.new(:callbacks, :unresolved, :complete)
   # One C body: +code+ keeps string literals (their tokens are callbacks), +skel+ blanks them so that call and
@@ -57,7 +61,9 @@ module NativeCallbacks
   def functions(skel)
     found = []
     pos = 0
-    while (m = /^[^;{}#]*?\b(\w+)\s*\([^;{}]*\)\s*\{/m.match(skel, pos))
+    # The parameter list allows one level of parentheses (a function-pointer parameter) and no more, so a match
+    # cannot run from a preceding invocation such as `GEN(a, b)` through to the next definition's parameters.
+    while (m = /^[^;{}#]*?\b(\w+)\s*\((?:[^;{}()]|\([^;{}()]*\))*\)\s*\{/m.match(skel, pos))
       open = m.end(0) - 1
       depth = 0
       close = open
@@ -84,11 +90,50 @@ module NativeCallbacks
         Body.new(name, path, code[range], skel[range], false)
       end
       macros = strip_comments(raw).scan(/^[ \t]*#[ \t]*define[ \t]+(\w+)\([^)\n]*\)((?:[^\n]*\\\n)*[^\n]*)/)
-      bodies + macros.map do |name, body|
+      bodies + generated(path, raw, code) + macros.map do |name, body|
         body = body.gsub("\\\n", '  ')
         Body.new(name, path, body, blank_strings(body), true)
       end
     end
+  end
+
+  # The functions a file-local generator macro defines when invoked at top level, such as hash.c's DEFINE_ACCESSOR:
+  # the invocation's arguments are substituted into the macro body and its `##` joins applied, and the result is
+  # indexed as ordinary C. Nested generator invocations expand in turn. An invocation the scan cannot read (continued
+  # lines, nested parentheses in its arguments, an argument count that differs) defines nothing, so the names it
+  # would define stay unresolved and the closures reaching them incomplete.
+  def generated(path, raw, code)
+    generators = {}
+    strip_comments(raw).scan(/^[ \t]*#[ \t]*define[ \t]+(\w+)\(([^)\n]*)\)((?:[^\n]*\\\n)*[^\n]*)/) do |name, params, body|
+      generators[name] = [params.split(',').map(&:strip), body.gsub("\\\n", ' ')]
+    end
+    return [] if generators.empty?
+
+    invocation = /^[ \t]*(\w+)\(([^\n()]*)\)[ \t]*$/
+    generator_names = generators.keys.join('|')
+    text = code.lines.select { |line| (m = invocation.match(line)) && generators.key?(m[1]) }.join
+    expanded = +''
+    4.times do
+      break if text.empty?
+
+      next_text = +''
+      text.each_line do |line|
+        m = invocation.match(line)
+        params, body = m && generators[m[1]]
+        args = m && m[2].split(',').map(&:strip)
+        next unless params && args.size == params.size
+
+        piece = body.gsub(/\b\w+\b/) { |w| params.include?(w) ? args[params.index(w)] : w }.gsub(/\s*##\s*/, '')
+        next_text << piece.gsub(/\b(#{generator_names})\s*\(/) { "\n#{Regexp.last_match(1)}(" } << "\n"
+      end
+      # An invocation line is expanded next round, so it stays out of the text the function scan reads.
+      invoking = next_text.lines.select { |line| (m = invocation.match(line)) && generators.key?(m[1]) }
+      expanded << (next_text.lines - invoking).join
+      text = invoking.join
+    end
+
+    skel = blank_strings(expanded)
+    functions(skel).map { |name, range| Body.new(name, path, expanded[range], skel[range], false) }
   end
 
   # Native registrations of +paths+ as [[ruby name, C function name]], plus alias pairs [new name, old name].
@@ -108,6 +153,20 @@ module NativeCallbacks
       end
     end
     [regs, aliases]
+  end
+
+  # The text between the parenthesis at +open+ and its match.
+  def balanced_args(text, open)
+    depth = 0
+    close = open
+    while close < text.size
+      depth += 1 if text[close] == '('
+      depth -= 1 if text[close] == ')'
+      break if depth.zero?
+
+      close += 1
+    end
+    text[(open + 1)...close]
   end
 
   def resolve_name(token)
@@ -160,6 +219,16 @@ module NativeCallbacks
 
       body.code.scan(/"(?:[^"\\\n]|\\.)*"/) { |s| callbacks << s[1...-1] }
       body.code.scan(MRB_SYM_TOKEN_RE) { |m, n| callbacks << resolve_mrb_sym_token(m, n) }
+      # A dispatch call names its method at run time unless the argument list spells the name. Such a call can reach
+      # any method, which the literal tokens cannot bound, so the closure is incomplete.
+      body.code.to_enum(:scan, /\b(\w+)\s*\(/).map { Regexp.last_match }.each do |m|
+        next unless DISPATCH.match?(m[1])
+
+        args = balanced_args(body.code, m.end(0) - 1)
+        # A yield runs a block, a dynamic callee with no name to spell, so it is always unbounded here.
+        named = args.match?(/"|MRB_(SYM|OPSYM|SYM_[QBE])\(/)
+        unresolved << "#{m[1]}(dynamic callee)" if m[1].include?('yield') || !named
+      end
       body.skel.scan(/(->|\.)?\s*\b([A-Za-z_]\w*)\b(\s*\()?/) do |member, id, call|
         next if KEYWORDS.include?(id)
 
