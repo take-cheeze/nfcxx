@@ -22,6 +22,10 @@
 #
 # Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_CORE=dir] ruby scripts/bc2cpp/numeric_operand_check.rb
 
+# The fixture program defines none of the engine's classes, which sig/bc2cpp/declarations.rbs declares, so the
+# shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/irep'
