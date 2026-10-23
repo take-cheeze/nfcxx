@@ -97,9 +97,23 @@ class YieldReach
     @storing_blocks = []
     @isolated = Hash.new { |h, k| h[k] = [] }
     @sealed = false
-    build_nodes
-    scan_all
-    solve
+    @analyzed = false
+  end
+
+  # The scan and the fixpoint run on the first query, not at construction: a fact the scan asks of the code generator
+  # (its argument types, see CodeGen#build_yield_reach) is only available once the generator is ready.
+  def analyze!
+    return if @analyzed || @analyzing
+
+    @analyzing = true
+    begin
+      build_nodes
+      scan_all
+      solve
+      @analyzed = true
+    ensure
+      @analyzing = false
+    end
   end
 
   def sound? = @sound
@@ -1220,6 +1234,16 @@ class YieldReach
     node.lit.any? do |c|
       b = @nodes[c]
       !b.fiber_body && ((crossable.include?(c) && @own[c]) || nested_crossable_yielder?(b, crossable))
+    end
+  end
+
+  # Every public query runs the analysis first. A query made while it runs (@analyzing) passes straight through.
+  public
+  (public_instance_methods(false) - %i[analyze! sound?]).each do |query|
+    original = instance_method(query)
+    define_method(query) do |*args, **kwargs, &block|
+      analyze!
+      original.bind_call(self, *args, **kwargs, &block)
     end
   end
 end
