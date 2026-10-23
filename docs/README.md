@@ -172,11 +172,10 @@ the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap`
   preprocessor options are rejected (`tests/c/cc-mode.sh`, `realworld.md`).
 - qbe-compiled mruby uses the portable `switch` dispatch, not computed goto (`realworld.md`; `tests/realworld/run_mruby.sh`);
   so does QuickJS (`scripts/quickjs-cproc.patch`, `poly.md`).
-- `-D_GNU_SOURCE` (or `#define _GNU_SOURCE`) plus `#include <stdlib.h>` or `<math.h>` fails on qbe with `declaration has no type
-  specifier`: glibc then declares `strtof32x`, `acosf32x` and friends with the types `_Float32x` and `_Float64x`, whose typedefs
-  `qbe-prep.rb` drops without mapping them (it maps `_Float32` and `_Float64`; `_Float64x` is `long double` here). Checked by hand
-  with a three-line C file on both back ends (qbe fails, gcc compiles); QuickJS, whose CMake build defines the macro, is built
-  without it (`poly.md`). No test asserts the failure.
+- `-D_GNU_SOURCE` plus `#include <stdlib.h>` or `<math.h>` used to fail on qbe with `declaration has no type specifier`.
+  glibc declares `strtof32x`, `acosf32x` and friends with `_Float32x` and `_Float64x`. `qbe-prep.rb` now maps `_Float32x` to
+  `double`, `_Float64x` to `long double` and `_Float128x` to the 16-byte `_Float128` struct, and the `f32x`/`f64x`/`f128x`
+  literal suffixes follow them. Regression case: `tests/cases/qbe_floatnx_gnu_source.cpp`.
 - QuickJS needed three more constructs that cproc rejects, patched in the throwaway checkout (`scripts/quickjs-cproc.patch`):
   `_Atomic` (`quickjs-c-atomics.h`, replaced by libatomic's sized functions chosen with `_Generic`; `Atomics` results are checked
   for every element size by `tests/poly/run.sh`), `return f();` of a `void` call inside a `void` function, and the spelling

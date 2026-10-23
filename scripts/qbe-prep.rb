@@ -147,13 +147,18 @@ FLOAT_TYPE = {
   '_Float64' => 'double',
   '__bf16' => 'struct __nfcxx_half16',
   '_Float128' => 'struct __nfcxx_float128',
+  # glibc's <bits/floatn.h> on x86-64: _Float32x is double, _Float64x is long double (x87), _Float128x is _Float128.
+  # glibc declares strtof32x, acosf32x, ... with these types whenever _GNU_SOURCE is defined.
+  '_Float32x' => 'double',
+  '_Float64x' => 'long double',
+  '_Float128x' => 'struct __nfcxx_float128',
 }
-DROP_TYPEDEF = FLOAT_TYPE.keys + ['_Float32x', '_Float64x', '_Float128x']
+DROP_TYPEDEF = FLOAT_TYPE.keys
 FLOAT_DECL = {
   'struct __nfcxx_half16' => 'struct __nfcxx_half16 { unsigned short bits; };',
   'struct __nfcxx_float128' => 'struct __nfcxx_float128 { _Alignas(16) unsigned long bits[2]; };',
 }
-FLOAT_SUFFIXES = ['f16', 'f32', 'f64', 'f128']
+FLOAT_SUFFIXES = ['f16', 'f32', 'f64', 'f128', 'f32x', 'f64x', 'f128x']
 
 # Python: FLOAT_LIT.fullmatch(text) with r'(\.?\d[\d.]*(?:[eE][+-]?\d+)?)(f16|f32|f64|f128)'.
 # Returns [body, suffix] or nil.
@@ -1468,20 +1473,24 @@ def main(argv)
     end
 
     # 4. Floating literals of the types above: f32/f64 drop the suffix; f16/f128 in parentheses become
-    # the bit pattern as a brace initializer.
+    # the bit pattern as a brace initializer. The glibc x forms (f32x is double, f64x is long double, f128x is
+    # _Float128 on x86-64, <bits/floatn.h>) follow their types: f32x and f64x keep the suffix's C type, f128x
+    # the bit pattern.
     if c == NUM_CODE && (fl = float_lit(tk.text(i)))
       body, suffix = fl
       paren = tk.punct?(i - 1, '(') && tk.punct?(i + 1, ')')
       if suffix == 'f32'
         edits << [tk.start(i), tk.stop(i), body + 'f']
-      elsif suffix == 'f64'
+      elsif suffix == 'f64' || suffix == 'f32x'
         edits << [tk.start(i), tk.stop(i), body]
+      elsif suffix == 'f64x'
+        edits << [tk.start(i), tk.stop(i), body + 'L']
       elsif suffix == 'f16' && paren
         # the binary16 value, rounded from the decimal literal, as a cast of its exact double
         edits << [tk.start(i - 1), tk.stop(i + 1), '((_Float16)' + half_literal(ieee_bits(body, 10, 5)) + ')']
         i += 2
         next
-      elsif suffix == 'f128' && paren
+      elsif (suffix == 'f128' || suffix == 'f128x') && paren
         bits = ieee_bits(body, 112, 15)
         edits << [tk.start(i - 1), tk.stop(i + 1),
                   '{ { 0x' + hex_pad(bits & ((1 << 64) - 1), 16) + 'UL, 0x' + hex_pad(bits >> 64, 16) + 'UL } }']

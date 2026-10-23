@@ -367,3 +367,21 @@ Projects with no dependencies and their own tests, to find the next gaps: a smal
 another header-only library. Doctest and {fmt} stay on the gcc backend (see the decisions above); nlohmann/json runs on both.
 mruby (C) now builds and runs on both backends through `nfcc`; see "What remains" above. Another C project that
 uses autoconf (`./configure CC=nfcc`) would be the next test of the `cc`-compatibility of `nfcc`.
+
+## TinyCC: a C compiler as a check
+
+[TinyCC](https://repo.or.cz/tinycc.git) 0.9.27 (LGPL-2.1), commit `d348a9a5`. `tests/realworld/run_tinycc.sh` builds it
+the way its makefile says, with `nfcc` as the C compiler, and runs its own `tests2` suite (84 programs, each compiled
+and run by the new `tcc` and compared with its `.expect`). The build is in a scratch copy of the tree.
+
+- **gcc backend: passes.** The whole compiler and `libtcc1.a` build, and all 84 `tests2` programs match.
+- **qbe backend: xfail.** Every file but `tccelf.c` compiles. `tccelf.c` line 174 passes `unsigned char *` (`s->link->data
+  + sym->st_name`) to a `const char *` parameter. gcc accepts it with a `-Wpointer-sign` warning, and cproc stops with
+  `base types of pointer assignment must be compatible or void` (`3rd/cproc/expr.c`, `pointeecompatible`). Fixing it means
+  relaxing cproc's check for signedness of `char` pointees (a change in the cproc fork) or rewriting the argument, which
+  needs types that `qbe-prep.rb` does not have.
+- Two build settings that are not nfcxx's: the multiarch include and library directories are passed to `configure`
+  (`--sysincludepaths`, `--libpaths`, `--crtprefix`), and the memory checker `lib/bcheck.c` is left out (`BCHECK_O=`), because
+  it uses `__malloc_hook`, which glibc 2.34 removed.
+- The `_Float32x` / `_Float64x` gap that the first QBE attempt hit (glibc's `stdlib.h` under `_GNU_SOURCE`) is fixed in
+  `qbe-prep.rb`; see `docs/README.md`.
