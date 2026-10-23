@@ -157,8 +157,10 @@ module TypeFacts
     optional_params = (1..opt).map do |position|
       register = (mand + position).to_s
       types = ctx.signature_contracts&.ir_optional_types&.dig(d.irep, register)
+      inferred = (types || !gen.respond_to?(:bytecode_ir_optional_argument_classes)) ? nil : gen.bytecode_ir_optional_argument_classes(d, mand + position)
       { 'pos' => mand + position, 'name' => names[mand + position - 1].to_s,
-        'type' => types && BytecodeIR::Types.type_name(types), 'source' => types ? 'signature' : nil }
+        'type' => (types || inferred) && BytecodeIR::Types.type_name(types || inferred),
+        'source' => types ? 'signature' : inferred ? 'inferred:receiver-call-sites' : nil }
     end
     optional_keywords = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KEY_P' }.to_set
     keyword_params = irep.instructions.filter_map { |insn| insn.sym.to_s if insn.op == 'KARG' }.uniq.map do |name|

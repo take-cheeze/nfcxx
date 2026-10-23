@@ -19,6 +19,9 @@
 
 require 'shellwords'
 require 'set'
+require_relative 'type_check_variants'
+type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __FILE__
+TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shared_generation'
 
@@ -179,12 +182,14 @@ if $PROGRAM_NAME == __FILE__
   # without it they are stripped from stdout, the only default.
   annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
   type_check_only = ENV['BC2CPP_TYPE_CHECK_ONLY'] == '1'
+  abort 'bc2cpp: --type-check-variants requires report-only mode' if type_check_variants && !type_check_only
   if type_check_only && ENV['BC2CPP_TYPE_FACTS'].to_s.empty?
     abort 'bc2cpp: BC2CPP_TYPE_CHECK_ONLY requires BC2CPP_TYPE_FACTS'
   end
   # SHARED_GENERATION: `--units PLAN` runs the analysis once and forks one generation per unit.
   shared_units, srcs = SharedGeneration.parse_argv(ARGV)
   abort 'bc2cpp: BC2CPP_TYPE_CHECK_ONLY cannot emit shared units' if type_check_only && shared_units
+  abort 'bc2cpp: cannot combine --units and --type-check-variants' if shared_units && type_check_variants
   if srcs.empty?
     raise "usage: bc2cpp.rb [#{ANNOTATED_FLAG}] [#{SharedGeneration::FLAG} PLAN] file1.rb [file2.rb ...]  " \
           '(env: MRBC, OUT_SYMBOL, OUT_DIR, ONLY_OWNERS)'
@@ -360,6 +365,8 @@ if $PROGRAM_NAME == __FILE__
          "Ruby this run does not compile =="
     EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
                                                      native_names: native_names,
+                                                     native_owners: CodeGen::NATIVE_OWNER_MAP_CACHE[native_paths] ||=
+                                                       NativeOwnerMap.build(native_paths),
                                                      superclass_of: superclass_of, included: included_modules,
                                                      prepended: prepended_modules, unknown_mixins: unknown_mixins,
                                                      modules: declared_modules, struct_classes: struct_member_lists.keys,
@@ -710,6 +717,12 @@ if $PROGRAM_NAME == __FILE__
                        fixnum_nil_ivars)
   end
   profile_phase.call('initial ivar layout')
+
+  if type_check_variants
+    TypeCheckVariants.fork_variants(type_check_variants)
+    # A child's phase timings exclude time spent waiting for earlier variants.
+    profile_started = profile_last = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   known_owners = registry.values.flatten.map(&:owner).uniq
   class_annotations = sig_class_annotations || profile_call.call('ClassAnnotations.extract') do

@@ -7,19 +7,16 @@
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/constant_typing_check.rb
 
-require 'json'
-require 'open3'
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/bc2cpp'
+require_relative 'type_check_fixture'
 
 unless ENV['MRBC'] && File.executable?(ENV['MRBC'])
   puts 'SKIP constant_typing_check: MRBC is not set to a host mrbc'
   exit 0
 end
 
-ROOT = File.expand_path('../..', __dir__)
-TYPE_CHECK = File.join(ROOT, 'scripts/bc2cpp/type_check.rb')
 failures = []
 check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
@@ -27,18 +24,21 @@ check = lambda do |what, condition|
 end
 
 # Empty signatures make fixture diagnostics meaningful: engine-only declarations do not belong to these programs.
-typed_rows = lambda do |source|
+typed_rows = lambda do |source, cli: false|
   Dir.mktmpdir('constant-typing') do |dir|
     rb = File.join(dir, 'fixture.rb')
     out = File.join(dir, 'facts.json')
     sig = File.join(dir, 'sig')
     Dir.mkdir(sig)
     File.write(rb, source)
-    stdout, stderr, status = Open3.capture3(RbConfig.ruby, TYPE_CHECK, '--files', rb, '--sig', sig,
-                                          '--no-sends', '--format', 'json', '--out', out, '-q')
-    raise "type_check failed (#{status.exitstatus}):\n#{stdout}#{stderr}" unless status.success?
-
-    JSON.parse(File.read(out)).fetch('constants')
+    report = if cli
+               TypeCheckFixture.report(dir, files: [rb], options: ['--sig', sig], out: out,
+                                       label: 'constant typing')
+             else
+               TypeCheckFixture.facts_report(dir, files: [rb], env: { 'BC2CPP_SIG_DIRS' => sig },
+                                             label: 'constant typing')
+             end
+    report.fetch('constants')
   end
 end
 container_rows = lambda do |rows|
@@ -120,7 +120,7 @@ RUBY
 puts '== shared end-to-end positives: containers and integer arithmetic'
 # This unknown receiver adds no method definitions, so it cannot withdraw the positive proofs.
 unknown_merge = "X_MERGE = $unproven.merge({ b: 2 })\n"
-positive_rows = typed_rows.call(BASE + positive + frozen + unknown_merge)
+positive_rows = typed_rows.call(BASE + positive + frozen + unknown_merge, cli: true)
 
 puts '== positives: stock owners, a foreign Ruby freeze'
 rows = container_rows.call(positive_rows)

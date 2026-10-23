@@ -251,3 +251,47 @@ check.call('fixed argc is classified before operand replacement', reinstalled_ca
 reinstalled_call.typed = OperandSchema.parse('SEND', 'R1 :arity_probe n=*')
 check.call('classification observes replacement operands without a stale memo',
            reinstalled_call.plain_fixed_argc? == false && reinstalled_call.pure_splat? == true)
+
+# Optional positionals: `def accept(a, b = nil)` (mandatory 1, optional 1). A call-site join is complete only when
+# every reaching call passes the position: a call that omits it binds the default. Position p is read at register
+# site + p, so position 2 of a call with receiver register 2 is register 4.
+class OptionalArgumentHarness < ArgumentHarness
+  attr_accessor :optional_count, :optional_shape
+
+  def optional_arity(_irep) = @optional_count
+  def optional_positionals_only?(_irep) = @optional_shape
+end
+opt_left = Definition.new('accept', 'opt_left')
+opt_right = Definition.new('accept', 'opt_right')
+opt_classes = { [:a, 2] => Set[:Left], [:b, 2] => Set[:Left], [:c, 2] => Set[:Left],
+                [:a, 3] => Set[:Integer], [:b, 3] => Set[:String],
+                [:a, 4] => Set[:Integer], [:b, 4] => Set[:Float] }
+build_optional = lambda do |sites|
+  OptionalArgumentHarness.new({ 'Left' => opt_left, 'Right' => opt_right }, sites, opt_classes).tap do |h|
+    h.optional_count = 1
+    h.optional_shape = true
+  end
+end
+opt_sites = [[:a, 0, 2, 2], [:b, 0, 2, 2]]
+opt_harness = build_optional.call(opt_sites)
+check.call('optional position joins the values of calls that all pass it',
+           opt_harness.bytecode_ir_optional_argument_classes(opt_left, 2) == Set[:Integer, :Float])
+check.call('mandatory position of an optional def joins over the same complete sites',
+           opt_harness.bytecode_ir_optional_argument_classes(opt_left, 1) == Set[:Integer, :String])
+check.call('a position past the accepted counts is refused',
+           opt_harness.bytecode_ir_optional_argument_classes(opt_left, 3).nil?)
+check.call('the required-only API still refuses sites that pass more than its arity',
+           opt_harness.bytecode_ir_argument_classes(opt_left, 1).nil?)
+check.call('a reaching call that omits the optional withdraws its join (the default may be bound)',
+           build_optional.call(opt_sites + [[:c, 0, 2, 1]]).bytecode_ir_optional_argument_classes(opt_left, 2).nil?)
+check.call('a reaching call with more arguments than the def accepts withdraws the join',
+           build_optional.call([[:a, 0, 2, 2], [:b, 0, 2, 3]]).bytecode_ir_optional_argument_classes(opt_left, 2).nil?)
+check.call('rest, keyword or block shapes are not optional-positional joins',
+           build_optional.call(opt_sites).tap { |h| h.optional_shape = false }.bytecode_ir_optional_argument_classes(opt_left, 2).nil?)
+check.call('a single calling site gives its own value',
+           build_optional.call([[:a, 0, 2, 2]]).bytecode_ir_optional_argument_classes(opt_left, 2) == Set[:Integer])
+check.call('a site that reaches only another body is not a caller of this def',
+           build_optional.call([[:a, 0, 2, 2], [:c, 0, 2, 1]]).tap { |h| opt_classes[[:c, 2]] = Set[:Right] }
+                                                             .bytecode_ir_optional_argument_classes(opt_left, 2) == Set[:Integer])
+check.call('optional join is immutable', opt_harness.bytecode_ir_optional_argument_classes(opt_left, 2).frozen?)
+puts 'optional-positional call-site joins passed'
