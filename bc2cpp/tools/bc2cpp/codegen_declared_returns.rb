@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 require_relative 'declared_constants'
 require_relative 'declared_returns'
 require_relative 'codegen_sealed_containers'
@@ -195,7 +197,7 @@ class CodeGen
     breaks = declared_subtree_breaks?(irep)
     out = []
     flag = lambda do |ir, idx, why|
-      line = ir.instructions[idx]&.lineno || 0
+      line = BytecodeIR.for(ir).source_at(idx)&.lineno || 0
       out << declared_return_diag(declared_return_relative(ir.file), line, 1, 'error',
                                   "#{entry.key}: declared -> #{entry.text} (#{entry.loc.file}:#{entry.loc.line}), " \
                                   "but #{why}")
@@ -240,7 +242,7 @@ class CodeGen
     unless sources
       return nil if declared_whole_value_proven?(entry, d, ir, idx, reg)
 
-      return "the value returned at line #{ir.instructions[idx].lineno} has a definition the checker cannot follow " \
+      return "the value returned at line #{BytecodeIR.for(ir).source_at(idx).lineno} has a definition the checker cannot follow " \
              '(an argument, a rescue edge, a block-written local or an unaudited instruction)'
     end
     sources.each do |src|
@@ -250,7 +252,7 @@ class CodeGen
         return 'a path returns nil'
       end
       w, r = src
-      writer = ir.instructions[w]
+      writer = BytecodeIR.for(ir).source_at(w)
       if breaks && %w[SENDB SSENDB].include?(writer.op)
         return "a block passed to `#{writer.sym}` (line #{writer.lineno}) may `break`, replacing the call's value"
       end
@@ -277,7 +279,7 @@ class CodeGen
 
   # nil when the write of `r` at `w` proves the declaration, else why not.
   def declared_source_failure(entry, d, ir, w, r)
-    writer = ir.instructions[w]
+    writer = BytecodeIR.for(ir).source_at(w)
     what = "the value written at line #{writer.lineno} (#{writer.op}#{writer.sym ? " :#{writer.sym}" : ''})"
     case entry.kind
     when :fixnum
@@ -323,7 +325,7 @@ class CodeGen
     traced = declared_traced_class(nil, d, ir, w + 1, r, declared_hop_dominance(ir, w))
     return 'Array' if traced == 'Array' || declared_array_scan(d, ir, w + 1, r)
 
-    writer = ir.instructions[w]
+    writer = BytecodeIR.for(ir).source_at(w)
     return traced unless writer.op == 'ADD' && depth < FIXNUM_PROOF_MAX_DEPTH && declared_array_plus_safe?
 
     sources = return_value_sources(ir, w, writer.reg)

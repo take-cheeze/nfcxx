@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: receiver, owner and super-target facts.
 
 require_relative 'bytecode_ir_ops'
@@ -11,7 +13,7 @@ class CodeGen
   def rescued_exception_receiver?(irep, idx, dest_reg)
     return false unless irep && !idx.nil?
 
-    addr = irep.instructions[idx]&.addr
+    addr = BytecodeIR.for(irep).source_at(idx)&.addr
     return false unless addr
 
     # RESCUE reads its first register and writes its second; the caught
@@ -173,14 +175,14 @@ class CodeGen
     reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     exact_class ||= exact_new_class_at(irep, site_idx, reg, owner_def) unless self_implicit
     constant_owner = nil
-    if !self_implicit && idx && %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[idx].op)
+    if !self_implicit && idx && %w[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(idx).op)
       constant_owner = constant_object_owner(irep, idx, reg, owner_def&.owner)
     end
     kind, klass = proven_receiver_class(irep, site_idx, reg, closed_world_site(recv, irep, idx, owner_def),
                                         exact_class, constant_owner, self_implicit)
     return '' unless klass && @closed_world.proven_miss?(name, klass, proven_miss_answered_names, kind, label: irep.label)
 
-    site = "#{irep.file}:#{irep.instructions[idx || site_idx]&.lineno || 0}"
+    site = "#{irep.file}:#{BytecodeIR.for(irep).source_at(idx || site_idx)&.lineno || 0}"
     "  #{ProvenMiss.marker(name, kind, klass, site: site)}\n"
   end
 
@@ -212,7 +214,7 @@ class CodeGen
   def receiver_definition_origin(irep, definition)
     return (definition.reg.to_s == '0' ? 'self_register' : 'incoming_or_unwritten_register') if definition.entry?
 
-    receiver_producer_origin(irep.instructions[definition.index])
+    receiver_producer_origin(BytecodeIR.for(irep).source_at(definition.index))
   end
 
   def receiver_origin_by_walk(irep, idx, dest_reg)
@@ -239,7 +241,7 @@ class CodeGen
   # instance. A branch edge that can bypass the constant write invalidates it.
   def constant_object_owner(irep, idx, dest_reg, lexical_owner, through_handlers: false)
     return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
-                      idx < irep.instructions.length && dest_reg
+                      idx < BytecodeIR.for(irep).size && dest_reg
 
     written = straight_line_constant_name(irep, idx, dest_reg) ||
               irep.agreed_constant_name(idx, dest_reg.to_s, through_handlers: through_handlers)
@@ -258,7 +260,7 @@ class CodeGen
   # world keeps its fallbacks.
   def stable_constant_register(irep, idx, reg, lexical_owner, through_handlers: false)
     return nil unless @closed_world && @closed_world.global_refusal.nil? && guard_violation_enabled? &&
-                      @call_block_expr.nil? && irep && idx && reg && idx < irep.instructions.length
+                      @call_block_expr.nil? && irep && idx && reg && idx < BytecodeIR.for(irep).size
 
     name = irep.agreed_constant_name(idx, reg.to_s, through_handlers: through_handlers)
     return name if name && !name.include?('::') && CodeGen.stable_class_constants&.include?(name)
@@ -270,7 +272,7 @@ class CodeGen
   # The explicit-receiver SEND at `idx` of `irep` when it is the call `name` being compiled,
   # so its own receiver/argument registers can be asked about.
   def proof_send_insn(irep, idx, name)
-    insn = irep && idx && irep.instructions[idx]
+    insn = irep && idx && BytecodeIR.for(irep).source_at(idx)
     insn if insn && %w[SEND SEND0].include?(insn.op) && insn.sym == name
   end
 
@@ -353,7 +355,7 @@ class CodeGen
 
     [irep, *BytecodeIR.nested_bodies(irep)].none? do |body|
       BytecodeIR.for(body).op?(*MODULE_FUNCTION_INSTANCE_OPS) ||
-        body.instructions.any? { |insn| insn.mentions_reg?(0) || insn.upvar_ref&.first&.zero? }
+        BytecodeIR.for(body).each_source.any? { |insn, _| insn.mentions_reg?(0) || insn.upvar_ref&.first&.zero? }
     end
   end
 
@@ -822,15 +824,15 @@ class CodeGen
   def zsuper_forward_plan(owner_def, irep, idx)
     return nil unless owner_def && irep && idx
 
-    instructions = irep.instructions
+    program = BytecodeIR.for(irep)
 
     # (1) The adjacent ARGARY + SUPER pair (`SUPER R(a)` + `ARGARY R(a+1)`). An
     # interposed EXT declines.
-    argary_idx = instructions[idx]&.op == 'ARGARY' ? idx : idx - 1
+    argary_idx = program.source_at(idx)&.op == 'ARGARY' ? idx : idx - 1
     return nil if argary_idx.negative?
 
-    argary = instructions[argary_idx]
-    super_insn = instructions[argary_idx + 1]
+    argary = program.source_at(argary_idx)
+    super_insn = program.source_at(argary_idx + 1)
     return nil unless argary && super_insn
     return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
 
@@ -1017,11 +1019,11 @@ class CodeGen
     # (2) The adjacent pair codegen_zsuper emits (`SUPER R(a)` + `ARGARY R(a+1)`;
     # OP_SUPER reads the packed argument from regs[a+1]). `idx - 1` must not go
     # negative: Ruby would index from the end of the list.
-    argary_idx = irep.instructions[idx]&.op == 'ARGARY' ? idx : idx - 1
+    argary_idx = BytecodeIR.for(irep).source_at(idx)&.op == 'ARGARY' ? idx : idx - 1
     return nil if argary_idx.negative?
 
-    argary = irep.instructions[argary_idx]
-    super_insn = irep.instructions[argary_idx + 1]
+    argary = BytecodeIR.for(irep).source_at(argary_idx)
+    super_insn = BytecodeIR.for(irep).source_at(argary_idx + 1)
     return nil unless argary && super_insn
     # Strict adjacency: an interposed EXT declines.
     return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'

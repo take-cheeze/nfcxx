@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_containers'
+
 # CodeGen: recognizers of inlinable block-loop regions.
 
 require_relative 'bytecode_ir_regions'
@@ -596,11 +598,11 @@ class CodeGen
   # The two-instruction `GETCONST R<r> RGSS` / `GETMCNST R<r> (R<r>)::Profiler`
   # occupying the two slots immediately before index `block_idx` (the BLOCK).
   def receiver_pair_before?(irep, block_idx, reg)
-    mcnst = irep.instructions[block_idx - 1]
+    mcnst = BytecodeIR.for(irep).source_at(block_idx - 1)
     return false unless mcnst && mcnst.op == 'GETMCNST'
     return false unless mcnst.reg == reg.to_s && mcnst.paren_reg == reg.to_s && mcnst.mcnst_name == 'Profiler'
 
-    const = irep.instructions[block_idx - 2]
+    const = BytecodeIR.for(irep).source_at(block_idx - 2)
     const && const.op == 'GETCONST' && const.reg == reg.to_s && const.const_name == 'RGSS'
   end
 
@@ -610,7 +612,7 @@ class CodeGen
   # those two instructions, so a STRING left over from an earlier statement in
   # the method can never be mistaken for this call's name.
   def profiler_section_literal(irep, idx, reg)
-    insn = irep.instructions[idx - 2]
+    insn = BytecodeIR.for(irep).source_at(idx - 2)
     return nil unless insn && insn.op == 'STRING' && insn.reg == reg
 
     pool_idx = insn.pool_index
