@@ -1,14 +1,16 @@
 # frozen_string_literal: true
 
+require 'set'
 require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_ops'
 
 # IR_BLOCK_OPERANDS: what a send's block operand, a receiver or an argument register holds, answered by
 # BytecodeIR reaching definitions instead of the instruction textually before the read. Every query counts nested
 # blocks' SETUPVAR writes, crosses handler edges and uses the origin walk's RESCUE/EXCEPT/ENTER model (a slot ENTER
 # stores is defined by the ENTER), and a refused query is nil: each caller states what nil means.
 module IrBlockOperands
-  BLOCK_SENDS = %w[SENDB SSENDB].freeze
-  LITERAL_BLOCK_OPS = %w[BLOCK LAMBDA].freeze
+  LITERAL_BLOCK_OPS = Set['BLOCK', 'LAMBDA'].freeze
+  CONST_LOADS = Set['GETCONST', 'GETMCNST'].freeze
 
   module_function
 
@@ -39,7 +41,7 @@ module IrBlockOperands
   # BLOCK/LAMBDA of +irep+; nil otherwise (a forwarded block, a stored Proc, nil, or an unprovable operand).
   def literal_block_labels(irep, index)
     insn = irep.instructions[index]
-    return nil unless insn && BLOCK_SENDS.include?(insn.op)
+    return nil unless insn && BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
 
     reg = block_register(insn) or return nil
     defs = definitions(irep, index, reg) or return nil
@@ -67,7 +69,7 @@ module IrBlockOperands
       return nil if df.entry?
 
       writer = irep.instructions[df.index]
-      return nil unless %w[GETCONST GETMCNST].include?(writer.op)
+      return nil unless CONST_LOADS.include?(writer.op)
 
       writer.const_name.to_s
     end.uniq
