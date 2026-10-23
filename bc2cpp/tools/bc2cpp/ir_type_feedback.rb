@@ -214,10 +214,19 @@ module IrTypeFeedback
                         end
       inferred_args = {}
       if ENV['BC2CPP_IR_ARGUMENT_TYPES'] != '0' && ctx.gen.respond_to?(:bytecode_ir_argument_classes)
-        (1..irep.enter&.enter_fields&.first.to_i).each do |position|
+        enter = irep.enter&.enter_fields
+        mandatory = enter ? enter[0].to_i : 0
+        (1..mandatory).each do |position|
           classes = ctx.gen.bytecode_ir_argument_classes(definition, position)
           classes ||= ctx.gen.bytecode_ir_call_graph_argument_classes(definition, position) if ctx.gen.respond_to?(:bytecode_ir_call_graph_argument_classes)
           inferred_args[position.to_s] = classes if classes
+        end
+        # Optional registers: only a complete call-site join, where every reaching call passed the argument.
+        if ctx.gen.respond_to?(:bytecode_ir_optional_argument_classes)
+          ((mandatory + 1)..(mandatory + (enter ? enter[1].to_i : 0))).each do |position|
+            classes = ctx.gen.bytecode_ir_optional_argument_classes(definition, position)
+            inferred_args[position.to_s] = classes if classes
+          end
         end
       end
       analysis = if applied
