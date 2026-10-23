@@ -266,6 +266,12 @@ if ENV['MRBC']
 
     module NqOther
       NQ_MIX = "s"
+
+      class NqLex
+        def nq_lex_mix
+          NQ_MIX + 1
+        end
+      end
     end
 
     class NqBox
@@ -517,8 +523,9 @@ if ENV['MRBC']
       end
     end
 
-    # A compact body is outside the lexical model (LexicalConsts), so its bare NQ_MIX read has no definition
-    # to name: the name another scope binds to a String keeps the send here.
+    # A compact `class A::B` body is :unknown to the lexical model (LexicalConsts), so its bare NQ_MIX read is never
+    # resolved and keeps its send. This is not a resolution test: in CRuby the read raises NameError, because
+    # NqOther is not in the compact body's cref. The resolving NEG is NqOther::NqLex#nq_lex_mix.
     class NqBox::NqKid
       def nq_bare_mix
         NQ_MIX + 1
@@ -689,8 +696,10 @@ if ENV['MRBC']
              proven.call('NqBox#nq_const_use') && proven.call('NqBox#nq_ratio_use'))
   check.call('a qualified constant read proves from its own definition, not another scope binding the name to a String',
              proven.call('NqBox#nq_mix_const'))
-  check.call('NEG: a bare constant name read from a compact scope, another scope binds to a String, keeps its send',
+  check.call('NEG: a bare constant read from a compact `class A::B` body (unresolved, NameError in CRuby) keeps its send',
              kept.call('NqBox::NqKid#nq_bare_mix'))
+  check.call('NEG: a bare NQ_MIX lexically inside `module NqOther` resolves to its String and keeps its send',
+             kept.call('NqOther::NqLex#nq_lex_mix'))
   check.call('a method with a rescue clause has facts: both paths leave an Integer', proven.call('NqBox#nq_rescued'))
   check.call('NEG: a rescued region that may leave a String keeps its send', kept.call('NqBox#nq_rescued_str'))
   check.call('a `return` inside a block joins the method result: Integer either way', proven.call('NqBox#nq_block_ret_use'))
@@ -734,7 +743,7 @@ if ENV['MRBC']
   else
     puts '-- fixture on real mruby, interpreted and compiled'
     Dir.mktmpdir do |dir|
-      owners = %w[NqBox NqWriter NqBase NqSub NqLatePar NqSizeShadow NqHidden NqDrv NqConfig NqOther]
+      owners = %w[NqBox NqWriter NqBase NqSub NqLatePar NqSizeShadow NqHidden NqDrv NqConfig NqOther NqOther::NqLex]
       _code, err = runtime.generate(fixture, dir, only_owners: owners)
       body = <<~CPP
         static mrb_value nq_new(mrb_state* M, const char* klass) {

@@ -96,6 +96,19 @@ if ENV['MRBC']
     # which demotes its typed slot by design (demote_typed_ivars_foreign_writable). The name must be one no source spells.
     check.call('an ivar assigned outside #initialize is a boxed slot (an unset read is nil)',
                fields.include?('mrb_value ivar_b;') && fields.include?('mrb_int ivar_tl_a;'))
+    # @a is spelled by mruby-metaprog's native doc comments, so the name is outside the typed analysis. Straight-line
+    # Fixnum @a would be a typed slot; demote_typed_ivars_foreign_writable must keep it boxed (:value) for that reason.
+    spelled, = runtime.generate(<<~RUBY, dir)
+      class TrSpelled
+        def initialize; @a = 1; end
+        def read; @a; end
+      end
+    RUBY
+    spelled_fields = spelled[/struct TrSpelled_ivars \{\n(.*?)\n\};/m, 1].to_s
+    spelled_slots = spelled[/TrSpelled_ivar_slots\[\] = \{\n(.*?)\n\};/m, 1].to_s
+    check.call('a name a native source spells (@a) stays a :value slot, not the typed slot it would otherwise be',
+               spelled_fields.include?('mrb_value ivar_a;') && !spelled_fields.include?('mrb_int ivar_a;') &&
+                 spelled_slots.include?('{ "@a", offsetof(TrSpelled_ivars, ivar_a), MRB_DATA_IVAR_VALUE }'))
   end
 
   core = runtime.core
