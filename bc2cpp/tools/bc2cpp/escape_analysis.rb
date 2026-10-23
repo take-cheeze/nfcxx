@@ -684,6 +684,34 @@ module EscapeAnalysis
       cyclic([:closure, irep.label, index, self_klass]) { creation(irep, index, self_klass: self_klass).escapes? }
     end
 
+    # The method's own block, for BlockYielders: a method whose closures read its block from a nested level is refused
+    # (the block could be yielded from there). Otherwise the uses of the block: a `yield` is a :call use.
+    def method_block_verdict(irep)
+      return failed(:nested_block_reads) if nested_block_reads?(irep)
+
+      block_verdict(irep)
+    end
+
+    # The verdict on a method's own block (see block_captured?): its uses are the calls made on it, so a `yield` is a
+    # :call use.
+    def block_verdict(irep, self_klass: nil)
+      fields = irep.enter ? irep.enter.enter_fields : []
+      sources = EscapeAnalysis.op_sites(irep, BLKPUSH).filter_map { |insn, j| j if insn.paren_value.to_i.zero? }
+      starts = {}
+      local = nil
+      if fields[6].to_i.positive?
+        return failed(:block_param_kept) if fields[4].to_i.positive? || fields[5].to_i.positive?
+
+        local = (1 + fields[0].to_i + fields[1].to_i + fields[2].to_i + fields[3].to_i).to_s
+        starts[0] = { local => true }
+      end
+      if starts.empty? && sources.empty? && !nested_block_reads?(irep)
+        return Verdict.new(reasons: [], uses: [], tracked: Set.new)
+      end
+
+      flow(irep, starts, block_sources: sources, block_tracked: true, value_class: 'Proc', self_klass: self_klass)
+    end
+
     private
 
     # Memoised boolean "bad" (captures / escapes). A key found on the stack is assumed good (false) unless
@@ -789,20 +817,7 @@ module EscapeAnalysis
 
     # The block of a method is born at BLKPUSH (level 0) and, with a block parameter, in its local.
     def block_captured?(irep, self_klass: nil)
-      fields = irep.enter ? irep.enter.enter_fields : []
-      sources = EscapeAnalysis.op_sites(irep, BLKPUSH).filter_map { |insn, j| j if insn.paren_value.to_i.zero? }
-      starts = {}
-      local = nil
-      if fields[6].to_i.positive?
-        return true if fields[4].to_i.positive? || fields[5].to_i.positive?
-
-        local = (1 + fields[0].to_i + fields[1].to_i + fields[2].to_i + fields[3].to_i).to_s
-        starts[0] = { local => true }
-      end
-      return false if starts.empty? && sources.empty? && !nested_block_reads?(irep)
-
-      flow(irep, starts, block_sources: sources, block_tracked: true, value_class: 'Proc',
-                         self_klass: self_klass).escapes?
+      block_verdict(irep, self_klass: self_klass).escapes?
     end
 
     def nested_block_reads?(irep)

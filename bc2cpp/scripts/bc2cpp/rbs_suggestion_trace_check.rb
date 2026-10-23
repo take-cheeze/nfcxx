@@ -30,7 +30,16 @@
 #   * an overloaded method, by the decidability rule below;
 #   * an ivar read (`@x`, a traced GETIV), against the `@x: T` the candidate declares in the class that reads it. The
 #     class is the one the read's method is defined in (IVAR rows), so a class without its own declaration is
-#     undeclared, and a module's ivar is never decided (it belongs to whichever class includes the module).
+#     undeclared, and a module's ivar is never decided (it belongs to whichever class includes the module);
+#   * a block parameter, against the `{ (T1, ..., Tn) -> U }` block type the candidate declares for the method that
+#     yields to the block (the BLOCK_YIELD rows of the dump, see tools/bc2cpp/block_yielders.rb). The join is taken only
+#     when the dump decided it (one yielding method, no escape, no dynamic dispatch), and the declared block is plain:
+#     n required positionals, with n the body's own plain parameter count. Only then is the i-th yielded argument the
+#     i-th parameter. A block with no declared type, an optional/rest/keyword block type, or an arity mismatch is
+#     counted and not compared;
+#   * a constant read (GETCONST, GETMCNST), against the `NAME: T` the candidate declares in the scope the read resolved to
+#     (CONST rows). The owner is the one the closed-world lexical analysis proved (LexicalConsts), so a read it did not
+#     prove is counted as unresolved, and a resolved owner with no declaration is counted as undeclared. Neither is compared.
 # Overloaded methods. A method key is every candidate definition of `Owner#name` (a reopened class gives two `def`s,
 # an RBS method gives several overloads). It is compared as one method only when both hold:
 #   (1) every definition declares the same signature (the same RBS method type), so whichever one ran, the declared
@@ -42,11 +51,10 @@
 # installed a second implementation under the same key. A definition the candidates do not list is invisible to both.
 # Not compared, and counted in the summary where it applies: a site with no calls; an overflowed site, whose class table
 # was full so its classes are unknown (counted once over the whole trace, whether or not a candidate declares it);
-# block parameters (a block body's rows are keyed by its impl, not by the method that yields to it, and the emitter
-# declares a block type as untyped); constants (a read names the constant as written, not the scope that resolved it,
-# so no candidate `NAME: T` can be matched to it); the receiver of a singleton method whose class lookup is not
+# block parameters whose body has no single yielding method in the dump (a BLOCK_YIELD row with no key, or none at all
+# in a dump written before those rows), counted as undecided; the receiver of a singleton method whose class lookup is not
 # complete (a module owner, a non-class receiver, a program class without --hierarchy): counted as undecided, never a
-# contradiction.
+# contradiction. A constant read the analysis did not resolve is counted, never compared.
 #
 # A class is a contradiction only when the lookup order it is checked against is complete: a core class (mruby's
 # hierarchy from CoreHierarchySigs), or a program class whose superclass chain reaches a core class through --hierarchy.
@@ -67,9 +75,13 @@ module RbsSuggestionTrace
   Error = Class.new(StandardError)
   # A `@x: T` declaration, with the file and line of the candidate it is in.
   Ivar = Struct.new(:type, :file, :line)
+  # A `NAME: T` constant declaration, with the file and line of the candidate it is in. Keyed by `Owner::NAME`.
+  Const = Struct.new(:type, :file, :line)
   # optional: the types of the optional positionals; rest: the type of `*T` or nil; keywords: [name, type] pairs;
   # signature: the RBS method type text, which the overload rule compares between definitions.
-  Sig = Struct.new(:owner, :name, :params, :ret, :file, :line, :singleton, :optional, :rest, :keywords, :signature) do
+  # block: the RBS::Types::Block of the declared overload (nil when it declares none), compared for block parameters.
+  Sig = Struct.new(:owner, :name, :params, :ret, :file, :line, :singleton, :optional, :rest, :keywords, :signature,
+                   :block) do
     # The trace key of the method: `Owner#name`, or `Owner.singleton#name` for `def self.name`.
     def key
       singleton ? "#{owner}.singleton##{name}" : "#{owner}##{name}"
@@ -86,7 +98,12 @@ module RbsSuggestionTrace
   # table overflowed; impls: method => the implementation functions (`fn`) that ran under it.
   # ivars: [owner, "@name"] => { calls:, overflow:, classes: } (TraceTypes::Candidates.read_ivars).
   # self_sites: method => the receiver (`self` site) of a singleton method, merged over the dumps.
-  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls, :ivars, :self_sites)
+  # block_sites: block body `_impl` => { index => site } of its block_arg parameters; block_joins: body => the BLOCK_YIELD
+  # join (key, arity, reason), or nil key when the dumps disagree; block_yielded: trace key => [[body, arity]] of the
+  # bodies whose join is decided (the yielding method).
+  # consts: { resolved: "Owner::NAME" => slot, unresolved: "NAME" => slot } (TraceTypes::Candidates.read_consts).
+  Observed = Struct.new(:by_param, :rets, :param_elems, :ret_elems, :overflowed, :impls, :ivars, :self_sites,
+                        :block_sites, :block_joins, :block_yielded, :consts)
   Result = Struct.new(:findings, :stats)
 
   module_function
@@ -103,27 +120,32 @@ module RbsSuggestionTrace
     classes = {}
     sigs = []
     ivars = Hash.new { |h, k| h[k] = {} }
+    consts = {}
     files.each do |path|
       begin
         _buffer, _directives, decls = RBS::Parser.parse_signature(File.read(path))
       rescue RBS::ParsingError => e
         raise Error, "#{path}: #{e.message}"
       end
-      walk(decls, '', path, classes, sigs, ivars)
+      walk(decls, '', path, classes, sigs, ivars, consts)
     end
-    [classes, sigs, ivars]
+    [classes, sigs, ivars, consts]
   end
 
-  def walk(nodes, owner, file, classes, sigs, ivars)
+  def walk(nodes, owner, file, classes, sigs, ivars, consts)
     nodes.each do |node|
       case node
       when RBS::AST::Declarations::Class, RBS::AST::Declarations::Module
         name = [owner, node.name.to_s.delete_prefix('::')].reject(&:empty?).join('::')
         classes[name] = node.is_a?(RBS::AST::Declarations::Class) ? :class : :module
-        walk(node.members, name, file, classes, sigs, ivars)
+        walk(node.members, name, file, classes, sigs, ivars, consts)
       when RBS::AST::Members::InstanceVariable
         # `@x: T` in a class or module body; an ivar outside one (no owner) is not a candidate this check reads.
         ivars[owner][node.name.to_s] = Ivar.new(node.type, file, node.location.start_line) unless owner.empty?
+      when RBS::AST::Declarations::Constant
+        # `NAME: T` in a module body (or at the top level, owner ''), the scope the constant is defined in.
+        name = node.name.to_s.delete_prefix('::')
+        consts[[owner, name].reject(&:empty?).join('::')] = Const.new(node.type, file, node.location.start_line)
       when RBS::AST::Members::MethodDefinition
         # `def self?.x` names both an instance and a singleton method, so it is not compared.
         next unless %i[instance singleton].include?(node.kind)
@@ -135,7 +157,7 @@ module RbsSuggestionTrace
                      fn.optional_keywords.map { |name, param| [name.to_s, param.type] }
           sigs << Sig.new(owner, node.name.to_s, fn.required_positionals.map(&:type), fn.return_type, file,
                           node.location.start_line, node.kind == :singleton, fn.optional_positionals.map(&:type),
-                          fn.rest_positionals&.type, keywords, method_type.to_s)
+                          fn.rest_positionals&.type, keywords, method_type.to_s, method_type.block)
         end
       end
     end
@@ -150,16 +172,25 @@ module RbsSuggestionTrace
     elems = TraceTypes::Candidates.read_elements(dumps)
     element_tables = [elems[:params], elems[:returns]]
     ivars = TraceTypes::Candidates.read_ivars(dumps)
+    consts = TraceTypes::Candidates.read_consts(dumps)
+    const_slots = consts[:resolved].values + consts[:unresolved].values
     overflowed = params.count { |_, site| site[:overflow].positive? } +
                  rets.count { |_, site| site[:overflow].positive? } +
                  ivars.count { |_, site| site[:overflow].positive? } +
+                 const_slots.count { |site| site[:overflow].positive? } +
                  element_tables.sum { |table| table.sum { |_, roles| roles.count { |_, slot| slot[:overflow].positive? } } }
 
     by_param = {}
     self_sites = {}
+    block_sites = {}
     params.each do |(method, kind, index, name), site|
       if kind == 'self'
         merge_site((self_sites[method] ||= new_site), site)
+        next
+      end
+      if kind == 'block_arg'
+        # A block body's row names its impl as the method, `(fn)`: the body is the key, not a method.
+        merge_site(((block_sites[method[1...-1]] ||= {})[index] ||= new_site), site)
         next
       end
       key = param_key(kind, index, name) or next
@@ -173,7 +204,27 @@ module RbsSuggestionTrace
       target = ((param_elems[method] ||= {})[key] ||= {})
       roles.each { |role, slot| merge_site(target[role] ||= new_site, slot) }
     end
-    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps), ivars, self_sites)
+    joins = read_block_joins(dumps)
+    yielded = Hash.new { |h, k| h[k] = [] }
+    joins.each { |fn, join| yielded[join[:key]] << [fn, join[:arity]] if join[:key] && join[:reason] == 'ok' }
+    Observed.new(by_param, rets, param_elems, elems[:returns], overflowed, read_impls(dumps), ivars, self_sites,
+                 block_sites, joins, yielded, consts)
+  end
+
+  # body `_impl` => { key:, arity:, reason: } from the BLOCK_YIELD rows (`-` is nil). The same body in two dumps with
+  # different joins has no key: it is not decided. A dump with no BLOCK_YIELD rows gives none.
+  def read_block_joins(dumps)
+    joins = {}
+    dumps.each do |path|
+      File.foreach(path) do |raw|
+        f = raw.chomp.split("\t", -1)
+        next unless f[0] == 'BLOCK_YIELD' && f.size >= 6
+
+        join = { key: f[3] == '-' ? nil : f[3], arity: f[4] == '-' ? nil : f[4].to_i, reason: f[5] }
+        joins[f[2]] = joins.key?(f[2]) && joins[f[2]] != join ? { key: nil, arity: nil, reason: 'conflict' } : join
+      end
+    end
+    joins
   end
 
   # method => the implementation functions (the `fn` field, index 6) of the PARAM_SITE and RETURN_SITE rows with calls.
@@ -410,12 +461,42 @@ module RbsSuggestionTrace
 
   # ---- the comparison -----------------------------------------------------------------------------------------------
 
-  def compare(classes, sigs, obs, hierarchy, ivar_decls = {})
+  # A constant read (see the header). Only a read the analysis resolved to Owner::NAME is compared, with the `NAME: T` the
+  # candidate declares in Owner; an unresolved read is counted (once per name as written), and a resolved owner with no
+  # declaration is undeclared. An overflowed read is counted with the overflowed sites and never compared.
+  def compare_consts(const_decls, obs, ctx, findings, stats)
+    obs.consts[:unresolved].each_value { |site| stats[:const_unresolved] += 1 if site[:calls].positive? }
+    obs.consts[:resolved].each do |key, site|
+      next if site[:calls].zero? || site[:overflow].positive?
+
+      decl = const_decls[key]
+      if decl.nil?
+        stats[:const_undeclared] += 1
+        next
+      end
+
+      stats[:const_sites] += 1
+      bad = site[:classes].filter_map do |observed, count|
+        verdict = type_verdict(observed, decl.type, nil, ctx)
+        stats[:undecided_classes] += 1 if verdict == :unknown
+        [observed, count] if verdict == :contradiction
+      end
+      next if bad.empty?
+
+      seen = bad.map { |observed, count| "#{observed} (#{count})" }.join(', ')
+      findings << "#{decl.file}:#{decl.line}: #{key} (constant) declared #{decl.type}, but the trace observed " \
+                  "#{seen} [TRACE_CONTRADICTION]"
+    end
+  end
+
+  def compare(classes, sigs, obs, hierarchy, ivar_decls = {}, const_decls = {})
     ctx = Ctx.new(classes, hierarchy)
     findings = []
     stats = Hash.new(0)
     stats[:overflowed] = obs.overflowed
     compare_ivars(classes, ivar_decls, obs, ctx, findings, stats)
+    count_block_joins(obs, stats)
+    compare_consts(const_decls, obs, ctx, findings, stats)
     observers = observers_by_name(obs)
     singletons = singleton_observers_by_name(obs)
     sigs.group_by(&:key).each_value do |defs|
@@ -426,6 +507,7 @@ module RbsSuggestionTrace
 
       compare_sig(sig, sig.key, obs, ctx, findings, stats)
       compare_self(sig, obs, ctx, findings, stats) if sig.singleton
+      compare_block_params(sig, obs, ctx, findings, stats)
       next unless classes[sig.owner] == :module && !sig.singleton
 
       observers.fetch(sig.name, []).uniq.each do |klass|
@@ -488,6 +570,54 @@ module RbsSuggestionTrace
       seen = bad.map { |observed, count| "#{observed} (#{count})" }.join(', ')
       findings << "#{decl.file}:#{decl.line}: #{owner} #{ivar} (ivar) declared #{decl.type}, but the trace observed " \
                   "#{seen} [TRACE_CONTRADICTION]"
+    end
+  end
+
+  # Block bodies, counted over the whole dump: a body with a decided join, one whose join names no single yielder (or a
+  # dump written before BLOCK_YIELD rows), and a reached body the dump never joined.
+  def count_block_joins(obs, stats)
+    obs.block_joins.each_value do |join|
+      stats[:block_decided] += 1 if join[:key] && join[:reason] == 'ok'
+      stats[:block_undecided] += 1 unless join[:key] && join[:reason] == 'ok'
+    end
+    obs.block_sites.each do |fn, sites|
+      next if obs.block_joins.key?(fn) || sites.values.all? { |site| site[:calls].zero? }
+
+      stats[:block_unjoined] += 1
+    end
+  end
+
+  # The block parameters of a method's block, for the yielding method's own key (see the header). Each yielded body is
+  # compared only where the candidate declares the block: a plain `{ (T1, .., Tn) -> U }` whose n is the body's
+  # parameter count. A block with no declared block type is counted (block_undeclared), any other shape is counted
+  # (block_shape_skipped) and never compared.
+  def compare_block_params(sig, obs, ctx, findings, stats)
+    obs.block_yielded.fetch(sig.key, []).each do |fn, arity|
+      block = sig.block
+      if block.nil?
+        stats[:block_undeclared] += 1
+        next
+      end
+      fun = block.type
+      declared = fun.required_positionals.map(&:type)
+      plain = fun.optional_positionals.empty? && fun.rest_positionals.nil? && fun.trailing_positionals.empty? &&
+              fun.required_keywords.empty? && fun.optional_keywords.empty? && fun.rest_keywords.nil?
+      unless plain && declared.size == arity
+        stats[:block_shape_skipped] += 1
+        next
+      end
+
+      declared.each_with_index do |type, i|
+        index = i + 1
+        site = obs.block_sites.fetch(fn, {})[index]
+        if site.nil? || site[:calls].zero?
+          stats[:block_unreached] += 1
+          next
+        end
+        next if site[:overflow].positive?
+
+        compare_site(sig, "block parameter #{index}", type, site, ctx, findings, stats, nil, :block_sites, nil)
+      end
     end
   end
 
@@ -629,10 +759,10 @@ module RbsSuggestionTrace
   end
 
   def run(dir, dumps, hierarchy_path: nil)
-    classes, sigs, ivars = read_candidates(dir)
+    classes, sigs, ivars, consts = read_candidates(dir)
     obs = read_observed(dumps)
     hierarchy = hierarchy_path && TraceTypes::Candidates::Hierarchy.read(hierarchy_path)
-    compare(classes, sigs, obs, hierarchy, ivars)
+    compare(classes, sigs, obs, hierarchy, ivars, consts)
   end
 
   def summary(result)
@@ -645,8 +775,14 @@ module RbsSuggestionTrace
       "#{s[:extend_undecided]} extend observation(s) cannot decide, #{s[:rest_not_array]} rest row(s) not an Array, " \
       "#{s[:ivar_sites]} ivar site(s) compared, #{s[:ivar_undeclared]} ivar site(s) undeclared, " \
       "#{s[:ivar_undecided]} ivar site(s) in a module cannot decide, " \
+      "#{s[:const_sites]} constant site(s) compared, #{s[:const_undeclared]} constant site(s) undeclared, " \
+      "#{s[:const_unresolved]} constant name(s) unresolved, " \
       "#{s[:self_sites]} singleton receiver(s) compared, #{s[:self_undecided_classes]} receiver class(es) undecided, " \
       "#{s[:self_unreached]} singleton receiver(s) unreached, #{s[:self_overflowed]} overflowed receiver(s) skipped, " \
+      "#{s[:block_sites]} block parameter(s) compared, #{s[:block_decided]} block body(ies) with one yielder, " \
+      "#{s[:block_undecided]} block body(ies) undecided, #{s[:block_unjoined]} block body(ies) with no join row, " \
+      "#{s[:block_undeclared]} block(s) with no declared block type, #{s[:block_shape_skipped]} block(s) of another shape, " \
+      "#{s[:block_unreached]} block parameter(s) unreached, " \
       "#{result.findings.size} contradiction(s)"
   end
 
@@ -691,14 +827,14 @@ module RbsSuggestionTrace
   end
 
   # The candidates the emitter writes for these facts: the same files `type_check.rb --emit-rbs` produces. ivars is
-  # [owner, "@name", type] triples, written as `@name: type` in the owner's body.
-  def write_candidates(dir, methods, classes: [], modules: [], ivars: [])
+  # [owner, "@name", type] triples, written as `@name: type` in the owner's body; consts the same for `NAME: type`.
+  def write_candidates(dir, methods, classes: [], modules: [], ivars: [], consts: [])
     require 'type_check_rbs'
     facts = { 'classes' => classes.map { |n| { 'name' => n, 'kind' => 'class', 'superclass' => nil } } +
                            modules.map { |n| { 'name' => n, 'kind' => 'module', 'superclass' => nil } },
               'methods' => methods,
               'ivars' => ivars.map { |owner, name, type| { 'owner' => owner, 'name' => name, 'type' => type, 'scope' => 'engine' } },
-              'constants' => [] }
+              'constants' => consts.map { |owner, name, type| { 'owner' => owner, 'name' => name, 'type' => type, 'scope' => 'engine' } } }
     TypeCheckRbs.emit(facts, dir, scope: 'engine')
   end
 
@@ -706,6 +842,14 @@ module RbsSuggestionTrace
   def ivar_rows(id, owner, ivar, calls, overflow, classes)
     rows = ["IVAR_SITE\tfx\t#{id}\t#{calls}\t#{overflow}\t#{owner}\t#{ivar}"]
     classes.each { |klass, count| rows << "IVAR_CLASS\tfx\t#{id}\t#{klass}\t#{count}" }
+    rows
+  end
+
+  # A CONST_SITE of one read, named by the owner it resolved to (nil when unproven, the `-` row) and the name as written,
+  # with its CONST_CLASS rows (the rows param_trace.rb writes).
+  def const_rows(id, owner, written, calls, overflow, classes)
+    rows = ["CONST_SITE\tfx\t#{id}\t#{calls}\t#{overflow}\t#{owner || '-'}\t#{written}"]
+    classes.each { |klass, count| rows << "CONST_CLASS\tfx\t#{id}\t#{klass}\t#{count}" }
     rows
   end
 
@@ -1156,9 +1300,133 @@ module RbsSuggestionTrace
       check.call('an overflowed ivar read is not compared and is counted with the overflowed sites',
                  r.stats[:overflowed] == 1)
 
+      # Constant reads, against the `NAME: T` of the scope they resolved to. Box declares LIMIT: Integer, NAME: String and
+      # MAYBE: Integer?; Game::Hero (nested, so its key is the qualified scope) declares LIMIT: Integer. A read the analysis
+      # did not resolve (`-`) has no declaration to compare with and is counted, not decided.
+      const_dir = File.join(tmp, 'consts')
+      write_candidates(const_dir, [method_fact('Box', 'hp', [], 'Integer')], classes: ['Box'],
+                       consts: [['Box', 'LIMIT', 'Integer'], ['Box', 'NAME', 'String'], ['Box', 'MAYBE', 'Integer?']])
+      File.write(File.join(const_dir, 'Hero.rbs'), "module Game\n  class Hero\n    LIMIT: Integer\n  end\nend\n")
+
+      # A resolved read observed as Integer under `Box::NAME: String` is a contradiction; the agreeing `Box::LIMIT` is not.
+      const_bad = File.join(tmp, 'const_bad.tsv')
+      File.write(const_bad, (const_rows(0, 'Box::NAME', 'NAME', 2, 0, 'Integer' => 2) +
+                             const_rows(1, 'Box::LIMIT', 'LIMIT', 1, 0, 'Integer' => 1)).join("\n") << "\n")
+      r = run(const_dir, [const_bad])
+      check.call('a resolved constant observed as Integer under `NAME: String` is a contradiction, the agreeing one is not',
+                 r.findings.one? { |line| line.include?('Box::NAME (constant) declared String') && line.include?('observed Integer (2)') } &&
+                 r.findings.first.start_with?(File.join(const_dir, 'Box.rbs') + ':') && r.stats[:const_sites] == 2)
+
+      # A resolved read that agrees: the declared type, nil in a nilable, and a constant of a nested scope (Game::Hero::LIMIT).
+      const_ok = File.join(tmp, 'const_ok.tsv')
+      File.write(const_ok, (const_rows(0, 'Box::LIMIT', 'LIMIT', 2, 0, 'Integer' => 2) +
+                            const_rows(1, 'Box::MAYBE', 'MAYBE', 2, 0, 'NilClass' => 1, 'Integer' => 1) +
+                            const_rows(2, 'Game::Hero::LIMIT', 'LIMIT', 2, 0, 'Integer' => 2) +
+                            const_rows(3, 'Box::LIMIT', 'LIMIT', 0, 0, {})).join("\n") << "\n")
+      r = run(const_dir, [const_ok])
+      check.call('constant reads the declared types admit (nested scope, nil in a nilable) have no findings',
+                 r.findings.empty? && r.stats[:const_sites] == 3 && r.stats[:const_unresolved] == 0)
+
+      # The unresolved read (`-`) is undecided even though its observed class contradicts Box::LIMIT's declaration. An
+      # undeclared resolved constant and an overflowed read are counted, never compared.
+      const_skip = File.join(tmp, 'const_skip.tsv')
+      File.write(const_skip, (const_rows(0, nil, 'LIMIT', 2, 0, 'String' => 2) +
+                              const_rows(1, 'Box::GONE', 'GONE', 2, 0, 'Integer' => 2) +
+                              const_rows(2, 'Game::Hero::NOPE', 'NOPE', 1, 0, 'Integer' => 1) +
+                              const_rows(3, 'Box::LIMIT', 'LIMIT', 2, 1, 'String' => 2)).join("\n") << "\n")
+      r = run(const_dir, [const_skip])
+      check.call('an unresolved read, an undeclared constant and an overflowed read are counted and never failures',
+                 r.findings.empty? && r.stats[:const_unresolved] == 1 && r.stats[:const_undeclared] == 2 &&
+                   r.stats[:const_sites] == 0 && r.stats[:overflowed] == 1)
+
+      # A dump with no CONST rows (one written before they were recorded) adds no constant observations.
+      const_old = File.join(tmp, 'const_old.tsv')
+      File.write(const_old, param_rows(0, 'Box#hp', 1, 1, 0, 'Integer' => 1).join("\n") << "\n")
+      r = run(const_dir, [const_old])
+      check.call('a dump with no CONST rows adds no constant observations',
+                 r.findings.empty? && r.stats[:const_sites] == 0 && r.stats[:const_undeclared] == 0 && r.stats[:const_unresolved] == 0)
+
       # A dump without IVAR rows (one written before they were recorded) reads the same as before.
       r = run(candidates, [consistent])
       check.call('a dump with no IVAR rows adds no ivar observations', r.stats[:ivar_sites] == 0 && r.stats[:ivar_undeclared] == 0)
+
+      # Block parameters. The yielding method's declared block is compared with the bodies its BLOCK_YIELD row joins
+      # (key = the method, arity = the body's plain parameter count). A body with no join row, an undecided join, an
+      # undeclared block or another block shape is counted, never a failure.
+      block_dir = File.join(tmp, 'blocks')
+      Dir.mkdir(block_dir)
+      File.write(File.join(block_dir, 'Box.rbs'), <<~RBS)
+        class Box
+          def each_item: () { (Integer) -> untyped } -> void
+          def each_pair2: () { (Integer, String) -> untyped } -> void
+          def each_plain: () -> void
+          def each_opt: () { (Integer, ?String) -> untyped } -> void
+          def each_two: () { (Integer, String) -> untyped } -> void
+        end
+      RBS
+      block_rows = ->(fn, index, calls, overflow, classes) do
+        rows = ["PARAM_SITE\tfx\t0\t#{calls}\t#{overflow}\t(#{fn})\t#{fn}\tblock\tblock_arg\t#{index}\tbc2cpp_barg#{index}\tnone:block"]
+        classes.each { |klass, count| rows << "PARAM_CLASS\tfx\t0\t#{klass}\t#{count}" }
+        rows
+      end
+      join_row = ->(fn, key, arity, reason) { "BLOCK_YIELD\tfx\t#{fn}\t#{key || '-'}\t#{arity || '-'}\t#{reason}" }
+      block_file = lambda do |name, rows|
+        path = File.join(tmp, "#{name}.tsv")
+        File.write(path, rows.join("\n") << "\n")
+        path
+      end
+
+      r = run(block_dir, [block_file.call('block_ok', [join_row.call('B_each_item', 'Box#each_item', 1, 'ok')] +
+                                                  block_rows.call('B_each_item', 1, 3, 0, 'Integer' => 3))])
+      check.call('a block parameter the yielding method declares Integer, observed Integer, has no findings and is compared',
+                 r.findings.empty? && r.stats[:block_sites] == 1 && r.stats[:block_decided] == 1)
+
+      r = run(block_dir, [block_file.call('block_bad', [join_row.call('B_each_item', 'Box#each_item', 1, 'ok')] +
+                                                   block_rows.call('B_each_item', 1, 2, 0, 'String' => 2))])
+      check.call('a block parameter observed as String under the yielding method declared Integer is a contradiction',
+                 r.findings.one? { |line| line.include?('Box#each_item block parameter 1 declared Integer') && line.include?('observed String (2)') })
+
+      # Two yielded arguments: index 2 is compared with the second declared type, and an observed value under another
+      # method's block is not evidence for this one (each_item's body is joined to each_item only).
+      r = run(block_dir, [block_file.call('block_pair', [join_row.call('B_pair', 'Box#each_pair2', 2, 'ok')] +
+                                                     block_rows.call('B_pair', 1, 2, 0, 'Integer' => 2) +
+                                                     block_rows.call('B_pair', 2, 2, 0, 'Integer' => 2) +
+                                                     [join_row.call('B_other', 'Box#each_item', 1, 'ok')] +
+                                                     block_rows.call('B_other', 1, 2, 0, 'Integer' => 2))])
+      check.call('a block parameter is compared with its own yielder: the second parameter against String is a contradiction',
+                 r.findings.one? { |line| line.include?('Box#each_pair2 block parameter 2 declared String') && line.include?('observed Integer (2)') })
+
+      # A non-unique or escaped body: the dump could not decide its yielder, so an observation against any declared type
+      # is not compared.
+      %w[not_unique block_escapes yielder_passes_block dynamic_name].each do |reason|
+        r = run(block_dir, [block_file.call("block_#{reason}", [join_row.call('B_undecided', nil, nil, reason)] +
+                                                             block_rows.call('B_undecided', 1, 2, 0, 'String' => 2))])
+        check.call("a body whose yielder is undecided (#{reason}) is counted, not compared",
+                   r.findings.empty? && r.stats[:block_undecided] == 1 && r.stats[:block_sites] == 0)
+      end
+
+      # Old dump: block rows without BLOCK_YIELD rows reads as before, counted as unjoined.
+      r = run(block_dir, [block_file.call('block_old', block_rows.call('B_each_item', 1, 2, 0, 'String' => 2))])
+      check.call('a dump without BLOCK_YIELD rows adds no block findings and counts the bodies as unjoined',
+                 r.findings.empty? && r.stats[:block_unjoined] == 1 && r.stats[:block_sites] == 0)
+
+      # The declared block is absent, or not plain (an optional positional), or its arity differs from the body's.
+      r = run(block_dir, [block_file.call('block_no_decl', [join_row.call('B_plain', 'Box#each_plain', 1, 'ok')] +
+                                                       block_rows.call('B_plain', 1, 2, 0, 'String' => 2))])
+      check.call('a yielder with no declared block type is counted, not compared', r.findings.empty? && r.stats[:block_undeclared] == 1)
+      r = run(block_dir, [block_file.call('block_shape', [join_row.call('B_opt', 'Box#each_opt', 1, 'ok')] +
+                                                      block_rows.call('B_opt', 1, 2, 0, 'String' => 2))])
+      check.call('an optional block type is counted as another shape, not compared', r.findings.empty? && r.stats[:block_shape_skipped] == 1)
+      r = run(block_dir, [block_file.call('block_arity', [join_row.call('B_arity', 'Box#each_two', 1, 'ok')] +
+                                                       block_rows.call('B_arity', 1, 2, 0, 'Integer' => 2))])
+      check.call('a body of another arity than the declared block is counted, not compared',
+                 r.findings.empty? && r.stats[:block_shape_skipped] == 1 && r.stats[:block_sites] == 0)
+
+      # An observed nil under a non-nilable declared block parameter is a contradiction only through a decided join.
+      r = run(block_dir, [block_file.call('block_nil', [join_row.call('B_each_item', 'Box#each_item', 1, 'ok')] +
+                                                   block_rows.call('B_each_item', 1, 1, 0, 'NilClass' => 1))])
+      check.call('a nil yielded to a non-nilable declared block parameter is a contradiction',
+                 r.findings.one? { |line| line.include?('Box#each_item block parameter 1 declared Integer') && line.include?('observed NilClass (1)') })
 
       cli_bad = Open3.capture3(RbConfig.ruby, __FILE__, candidates, contradict)
       check.call('the CLI exits 1 on a contradiction and names it',

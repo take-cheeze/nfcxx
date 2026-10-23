@@ -2,10 +2,13 @@
 
 require 'stringio'
 require_relative 'else_trace'
+require_relative 'block_yielders'
 
 # PARAM_TRACE: opt-in runtime classes of the parameters of compiled methods and blocks, of the values
-# their `return` statements hand back (RETURN_SITE rows), and of the values an ivar read hands back
-# (IVAR_SITE rows, one per owner class and ivar name).
+# their `return` statements hand back (RETURN_SITE rows), of the values an ivar read hands back
+# (IVAR_SITE rows, one per owner class and ivar name), of the values a constant read hands back
+# (CONST_SITE rows, one per constant read, named by the owner it resolved to), and of the method that yields to
+# each block body (BLOCK_YIELD rows, see block_yielders.rb).
 #
 # Off unless BC2CPP_TRACE_TYPES=1 is set; the unset output is byte-identical to a build without this
 # file (bc2cpp.rb does not even require it). Set, bc2cpp's stdout is rewritten after codegen (nothing
@@ -46,6 +49,9 @@ module ParamTrace
   REG0_RE = /\A\s*mrb_value r0 = self;/
   # Left by codegen after a GETIV (codegen_insn.rb ivar_trace_marker): the owner class, the ivar and its register.
   IVAR_MARKER_RE = %r{\A\s*/\*BC2CPP_IVAR_HIT (\S+) (@\S+) r(\d+)\*/\s*\z}
+  # Left after a GETCONST/GETMCNST (codegen_insn.rb const_trace_marker): the resolved owner key (`-` when unproven),
+  # the name as written and the register.
+  CONST_MARKER_RE = %r{\A\s*/\*BC2CPP_CONST_HIT (\S+) (\S+) r(\d+)\*/\s*\z}
   REG0_WINDOW = 12
   # C parameter type => the expression that boxes it back to an mrb_value (TYPE_OPS[...][:box]).
   BOX = { 'mrb_value' => '%s', 'mrb_int' => 'mrb_fixnum_value(%s)', 'mrb_sym' => 'mrb_symbol_value(%s)',
@@ -154,12 +160,14 @@ module ParamTrace
   end
 
   # Rewrites generated C++; returns [instrumented_text, summary]. `infos` is method_infos' result.
-  def instrument(cpp, symbol, infos)
+  # block_yields: { body `_impl` => BlockYielders::Join } (the BLOCK_YIELD rows of the dump; see block_yielders.rb).
+  def instrument(cpp, symbol, infos, block_yields = {})
     lines = cpp.lines
     fns = []
     sites = []
     rets = []
     ivars = []
+    consts = []
     ident = ElseTrace.ident(symbol)
     skipped = Hash.new(0)
     lines.each_with_index do |l, i|
@@ -238,15 +246,20 @@ module ParamTrace
       wrap_returns(lines, i, rets, ident, method, fn, block, info && info[:ret])
       # A marker is rewritten only in a function that is traced, so one left in an untraced body stays a comment.
       (i + 1...close).each do |x|
-        mk = IVAR_MARKER_RE.match(lines[x]) or next
-        vid = ivars.size
-        ivars << { id: vid, owner: mk[1], ivar: mk[2] }
-        lines[x] = "  bc2cpp_ivar_hit_#{ident}(M, #{vid}, r#{mk[3]});\n"
+        if (mk = IVAR_MARKER_RE.match(lines[x]))
+          vid = ivars.size
+          ivars << { id: vid, owner: mk[1], ivar: mk[2] }
+          lines[x] = "  bc2cpp_ivar_hit_#{ident}(M, #{vid}, r#{mk[3]});\n"
+        elsif (mk = CONST_MARKER_RE.match(lines[x]))
+          cid = consts.size
+          consts << { id: cid, key: mk[1], written: mk[2] }
+          lines[x] = "  bc2cpp_const_hit_#{ident}(M, #{cid}, r#{mk[3]});\n"
+        end
       end
       lines[j] = "  bc2cpp_param_enter_#{ident}(#{fnid}); #{stmts.join(' ')} #{lines[j].lstrip}"
       sites.last(stmts.size).each { |s| s[:fnid] = fnid }
     end
-    summary = { fns: fns, sites: sites, rets: rets, ivars: ivars, skipped: skipped,
+    summary = { fns: fns, sites: sites, rets: rets, ivars: ivars, consts: consts, skipped: skipped, block_yields: block_yields,
                 untraced_methods: infos.keys.size - fns.count { |f| !f[:block] } }
     [header(symbol, fns, sites, summary) + lines.join, summary]
   end
@@ -260,9 +273,19 @@ module ParamTrace
     ivars = summary[:ivars]
     nivars = [ivars.size, 1].max
     ivarmeta = ivars.empty? ? '""' : ivars.map { |v| ElseTrace.c_string("#{v[:owner]}\t#{v[:ivar]}") }.join(",\n  ")
+    consts = summary[:consts]
+    nconsts = [consts.size, 1].max
+    constmeta = consts.empty? ? '""' : consts.map { |c| ElseTrace.c_string("#{c[:key]}\t#{c[:written]}") }.join(",\n  ")
     meta = sites.empty? ? '""' : sites.map { |s| ElseTrace.c_string(s[:meta]) }.join(",\n  ")
     retmeta = rets.empty? ? '""' : rets.map { |r| ElseTrace.c_string(r[:meta]) }.join(",\n  ")
     fnmeta = fns.empty? ? '""' : fns.map { |f| ElseTrace.c_string([f[:method], f[:fn], f[:block] ? 'block' : 'method'].join("\t")) }.join(",\n  ")
+    # One BLOCK_YIELD row per block body: the method that yields to it, or the reason it has none.
+    block_yields = summary[:block_yields]
+    yield_lines = fns.select { |f| f[:block] }.map do |f|
+      join = block_yields.fetch(f[:fn]) { BlockYielders::Join.new(key: nil, arity: nil, reason: :no_origin) }
+      row = ['BLOCK_YIELD', symbol, f[:fn], join.key || '-', join.arity || '-', join.reason].join("\t") + "\n"
+      "fputs(#{ElseTrace.c_string(row)}, f);"
+    end
     <<~CPP
       // BC2CPP_TRACE_TYPES -- see tools/bc2cpp/param_trace.rb.
       #include <stdio.h>
@@ -367,6 +390,14 @@ module ParamTrace
       static inline void bc2cpp_ivar_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
         bc2cpp_site_record_#{id}(&bc2cpp_ivar_sites_#{id}[site], M, v);
       }
+      // One site per constant read: the owner it resolved to (`-` when unproven) and the name as written.
+      static struct bc2cpp_param_site_#{id} bc2cpp_const_sites_#{id}[#{nconsts}];
+      static const char* const bc2cpp_const_meta_#{id}[#{nconsts}] = {
+        #{constmeta}
+      };
+      static inline void bc2cpp_const_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
+        bc2cpp_site_record_#{id}(&bc2cpp_const_sites_#{id}[site], M, v);
+      }
       static inline void bc2cpp_param_hit_#{id}(mrb_state* M, unsigned site, mrb_value v) {
         bc2cpp_site_record_#{id}(&bc2cpp_param_sites_#{id}[site], M, v);
         bc2cpp_elem_record_#{id}(&bc2cpp_param_elem_#{id}[site * 3], M, v);
@@ -386,6 +417,7 @@ module ParamTrace
         for (unsigned i = 0; i < #{fns.size}; i++) entries += bc2cpp_param_entries_#{id}[i];
         for (unsigned i = 0; i < #{sites.size}; i++) if (bc2cpp_param_sites_#{id}[i].calls) used++;
         fprintf(f, "PARAM_TRACE_SYMBOL\\t%s\\tfns\\t%u\\tparams\\t%u\\tparams_hit\\t%u\\tentries\\t%llu\\tuntraced_methods\\t%d\\tinlined_blocks_not_traced\\t1\\n", "#{symbol}", (unsigned)#{fns.size}, (unsigned)#{sites.size}, used, entries, #{summary[:untraced_methods]});
+        #{yield_lines.join("\n        ")}
         for (unsigned i = 0; i < #{fns.size}; i++)
           if (bc2cpp_param_entries_#{id}[i]) fprintf(f, "PARAM_FN\\t%s\\t%u\\t%llu\\t%s\\n", "#{symbol}", i, bc2cpp_param_entries_#{id}[i], bc2cpp_param_fnmeta_#{id}[i]);
         for (unsigned i = 0; i < #{sites.size}; i++) {
@@ -406,6 +438,12 @@ module ParamTrace
           for (unsigned j = 0; j < s->ncls; j++)
             fprintf(f, "IVAR_CLASS\\t%s\\t%u\\t%s\\t%llu\\n", "#{symbol}", i, s->cls[j].name, s->cls[j].count);
         }
+        for (unsigned i = 0; i < #{consts.size}; i++) {
+          struct bc2cpp_param_site_#{id}* s = &bc2cpp_const_sites_#{id}[i];
+          fprintf(f, "CONST_SITE\\t%s\\t%u\\t%llu\\t%llu\\t%s\\n", "#{symbol}", i, s->calls, s->overflow, bc2cpp_const_meta_#{id}[i]);
+          for (unsigned j = 0; j < s->ncls; j++)
+            fprintf(f, "CONST_CLASS\\t%s\\t%u\\t%s\\t%llu\\n", "#{symbol}", i, s->cls[j].name, s->cls[j].count);
+        }
         for (unsigned i = 0; i < #{sites.size}; i++) bc2cpp_elem_dump_#{id}(f, "PARAM_ELEM_SITE", "PARAM_ELEM_CLASS", "#{symbol}", i, &bc2cpp_param_elem_#{id}[i * 3]);
         for (unsigned i = 0; i < #{rets.size}; i++) bc2cpp_elem_dump_#{id}(f, "RETURN_ELEM_SITE", "RETURN_ELEM_CLASS", "#{symbol}", i, &bc2cpp_ret_elem_#{id}[i * 3]);
         if (f != stderr) fclose(f);
@@ -417,7 +455,7 @@ module ParamTrace
   # Called from bc2cpp.rb before the first output line, BEFORE ElseTrace.capture_stdout when both are on:
   # at_exit handlers run last-in first-out, so ElseTrace instruments the untouched text first (its
   # ELSE_SITE line numbers stay those of the plain output) and this runs on its result.
-  def capture_stdout(symbol, infos)
+  def capture_stdout(symbol, infos, block_yields = {})
     real = $stdout
     buf = StringIO.new
     $stdout = buf
@@ -425,8 +463,9 @@ module ParamTrace
       $stdout = real
       next if $!
 
-      text, summary = instrument(buf.string, symbol, infos)
-      warn "== PARAM_TRACE: #{summary[:sites].size} parameters, #{summary[:rets].size} returns and #{summary[:ivars].size} ivar reads of #{summary[:fns].size} functions instrumented in #{symbol} " \
+      text, summary = instrument(buf.string, symbol, infos, block_yields)
+      warn "== PARAM_TRACE: #{summary[:sites].size} parameters, #{summary[:rets].size} returns, #{summary[:ivars].size} ivar reads and " \
+           "#{summary[:consts].size} constant reads of #{summary[:fns].size} functions instrumented in #{symbol} " \
            "(skipped: #{summary[:skipped].map { |k, v| "#{k} #{v}" }.join(', ').then { |s| s.empty? ? 'none' : s }}) =="
       real.write(text)
     end

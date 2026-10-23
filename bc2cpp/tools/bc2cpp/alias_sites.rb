@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
 require_relative 'send_names'
@@ -38,7 +39,7 @@ module AliasSites
   # The alias at insns[idx] of +irep+, or nil unless it is `alias new old` or `alias_method :new, :old` with
   # an implicit receiver, literal Symbols in the argument registers, run once per execution of the body.
   def site(irep, idx)
-    insn = irep.instructions[idx]
+    insn = BytecodeIR.for(irep).source_at(idx)
     found =
       case insn.op
       when 'ALIAS'
@@ -54,11 +55,12 @@ module AliasSites
     return nil unless insn.sym == 'alias_method' && insn.plain_fixed_argc? && insn.argc == 2 && idx >= 2
 
     base = insn.reg.to_i
-    new_insn, old_insn = irep.instructions[idx - 2, 2]
+    new_insn = BytecodeIR.for(irep).source_at(idx - 2)
+    old_insn = BytecodeIR.for(irep).source_at(idx - 1)
     return nil unless new_insn.op == 'LOADSYM' && new_insn.reg.to_i == base + 1 && new_insn.sym_token
     return nil unless old_insn.op == 'LOADSYM' && old_insn.reg.to_i == base + 2 && old_insn.sym_token
 
-    following = irep.instructions[idx + 1]
+    following = BytecodeIR.for(irep).source_at(idx + 1)
     return nil if following && BytecodeIR::Ops::SEND.include?(following.op) && VISIBILITY_SENDS.include?(following.sym)
 
     Site.new(new_name: new_insn.sym_token, old_name: old_insn.sym_token)
@@ -88,7 +90,7 @@ module AliasSites
   end
 
   def name_free?(irep, ireps)
-    irep.instructions.none? do |insn|
+    BytecodeIR.for(irep).each_source.none? do |insn, _|
       NAME_OPS.include?(insn.op) || (BytecodeIR::Ops::SEND.include?(insn.op) && NAME_SENDS.include?(insn.sym)) ||
         (insn.op == 'LOADSYM' && NAME_SENDS.include?(insn.sym_token))
     end && irep.reps.compact.all? { |child| ireps[child] && name_free?(ireps[child], ireps) }
@@ -121,7 +123,7 @@ module AliasSites
         next false unless d.installer == :alias
 
         label, idx = d.site.first
-        keyword = ireps.fetch(label).instructions[idx].op == 'ALIAS'
+        keyword = BytecodeIR.for(ireps.fetch(label)).source_at(idx).op == 'ALIAS'
         !(closed && (keyword || method_trusted)) || defs.any? { |o| !o.equal?(d) && o.owner == d.owner }
       end
       kept += defs.count { |d| d.installer == :alias } - doomed.size

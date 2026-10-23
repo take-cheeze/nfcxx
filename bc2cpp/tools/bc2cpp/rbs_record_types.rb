@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_containers'
 require_relative 'record_hash'
 require_relative 'rbs_signatures'
 require_relative 'core_hierarchy_sigs'
@@ -294,7 +295,7 @@ module RbsRecordTypes
     scanner_class = LITERAL_CLASS.call(irep, index)
     return scanner_class if scanner_class
 
-    insn = irep.instructions[index]
+    insn = BytecodeIR.for(irep).source_at(index)
     if BytecodeIR::Ops::COUNTED_SEND.include?(insn.op) && insn.sym == 'new'
       klass = trace_new_target(irep, index + 1, insn.reg, nil, 0, nil, owner: ctx[:owner_of][irep.label],
                                                                        registry: ctx[:registry],
@@ -306,7 +307,7 @@ module RbsRecordTypes
   end
 
   LITERAL_CLASS = lambda do |irep, d|
-    insn = irep.instructions[d]
+    insn = BytecodeIR.for(irep).source_at(d)
     case insn.op
     when 'ARRAY' then 'Array'
     when 'HASH' then 'Hash'
@@ -350,7 +351,7 @@ module RbsRecordTypes
   def site_loc(irep, idx, root)
     file = irep.file.to_s
     file = file.sub(%r{\A#{Regexp.escape(root)}/?}, '') if root
-    RbsSignatures::Loc.new(file, irep.instructions[idx]&.lineno.to_i, 1)
+    RbsSignatures::Loc.new(file, BytecodeIR.for(irep).source_at(idx)&.lineno.to_i, 1)
   end
 
   # The guarded receiver hint of the GETIDX at +index+: the one class every record key it can read declares.
@@ -436,7 +437,7 @@ module RbsRecordTypes
       end
       @where = nil
       %i[gets calls].each do |kind|
-        @sites[kind].each { |irep, i| alias_scan(irep, i, irep.instructions[i].reg.to_i) }
+        @sites[kind].each { |irep, i| alias_scan(irep, i, BytecodeIR.for(irep).source_at(i).reg.to_i) }
       end
       @literals.each { |irep, d| literal_scan(irep, d) }
       if @literals.empty? && @errors.empty?
@@ -481,12 +482,12 @@ module RbsRecordTypes
     end
 
     def store_ok?(irep, i)
-      insn = irep.instructions[i]
+      insn = BytecodeIR.for(irep).source_at(i)
       defs = BytecodeIR.reaching_definitions(irep, i, insn.regs.first, through_handlers: true)
       return fail!('store source not provable') if defs.nil? || defs.empty?
 
       defs.each do |d|
-        src = d.entry? ? nil : irep.instructions[d.index]
+        src = d.entry? ? nil : BytecodeIR.for(irep).source_at(d.index)
         if src&.op == 'LOADNIL'
           @nil_stores << [irep, i]
         elsif src&.op == 'HASH'
@@ -549,7 +550,7 @@ module RbsRecordTypes
       return escape("#{name} of the Hash with itself") if state.include?(lead + 1)
 
       defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1).to_s, through_handlers: true)
-      nil_operand = defs && !defs.empty? && defs.all? { |d| !d.entry? && irep.instructions[d.index].op == 'LOADNIL' }
+      nil_operand = defs && !defs.empty? && defs.all? { |d| !d.entry? && BytecodeIR.for(irep).source_at(d.index).op == 'LOADNIL' }
       return escape("#{name} against a value other than nil") unless nil_operand
 
       state.reject { |x| x >= lead }.to_set
@@ -654,7 +655,7 @@ module RbsRecordTypes
       return escape("#{insn.sym} of the Hash itself") if state.include?(lead + 1)
 
       defs = BytecodeIR.reaching_definitions(irep, k, (lead + 1).to_s, through_handlers: true)
-      lit = defs&.size == 1 && !defs.first.entry? && irep.instructions[defs.first.index]
+      lit = defs&.size == 1 && !defs.first.entry? && BytecodeIR.for(irep).source_at(defs.first.index)
       return escape("non-literal #{insn.sym}") unless lit && lit.op == 'HASH' && lit.uint_operand
 
       base = lit.reg.to_i

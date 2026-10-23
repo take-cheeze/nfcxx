@@ -1,9 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Checks the BC2CPP_TRACE_TYPES return and ivar tracing (tools/bc2cpp/param_trace.rb) on a generated-C++ fixture:
+# Checks the BC2CPP_TRACE_TYPES return, ivar and constant tracing (tools/bc2cpp/param_trace.rb) on a generated-C++ fixture:
 # every `return` of a traced `_impl` is wrapped in bc2cpp_ret_hit_<sym>, the lambda inside a body is left
-# alone, and the static return fact rides in the site's meta row. A GETIV marker becomes an ivar hit.
+# alone, and the static return fact rides in the site's meta row. A GETIV marker becomes an ivar hit, a GETCONST or
+# GETMCNST marker a constant hit.
 #
 #   ruby scripts/bc2cpp/param_trace_return_check.rb
 
@@ -107,6 +108,61 @@ begin
              gen.send(:ivar_trace_marker, 'Foo.singleton', 'hp', 3).empty? && gen.send(:ivar_trace_marker, nil, 'hp', 3).empty?)
   ENV.delete('BC2CPP_TRACE_TYPES')
   check.call('without BC2CPP_TRACE_TYPES=1 no marker is emitted', gen.send(:ivar_trace_marker, 'Foo', 'hp', 3).empty?)
+ensure
+  traced ? ENV['BC2CPP_TRACE_TYPES'] = traced : ENV.delete('BC2CPP_TRACE_TYPES')
+end
+
+# CONST markers (codegen_insn.rb const_trace_marker): a marker after a constant read in a traced _impl becomes a constant
+# hit, one site per read, named by the owner it resolved to (`-` when unproven) and the name as written. An untraced
+# function keeps the comment, and the untraced output has no constant table row.
+const_src = <<~CPP
+  mrb_value Foo_lim_impl(mrb_state* M, mrb_value self) {
+    mrb_value r0 = self;
+    mrb_value r1 = mrb_const_get(M, self, mrb_intern_cstr(M, "LIMIT"));
+    /*BC2CPP_CONST_HIT Game::Foo::LIMIT LIMIT r1*/
+    mrb_value r2 = mrb_const_get(M, self, mrb_intern_cstr(M, "MAX"));
+    /*BC2CPP_CONST_HIT - MAX r2*/
+    return r1;
+  }
+  mrb_value Stray_impl(mrb_state* M, mrb_value self) {
+    mrb_value r0 = self;
+    mrb_value r1 = mrb_const_get(M, self, mrb_intern_cstr(M, "ZZ"));
+    /*BC2CPP_CONST_HIT Stray::ZZ ZZ r1*/
+    return r1;
+  }
+CPP
+const_infos = {
+  'Foo_lim_impl' => { method: 'Foo#lim', mand: 0, opt: 0, rest: false, mono: true, defs: 1, facts: facts.call, ret: 'none' }
+}
+const_text, const_summary = ParamTrace.instrument(const_src, 'fixture', const_infos)
+const_sites = const_summary[:consts]
+check.call('a constant marker in a traced _impl is rewritten into a hit on its register, in place',
+           const_text.include?("mrb_value r1 = mrb_const_get(M, self, mrb_intern_cstr(M, \"LIMIT\"));\n  bc2cpp_const_hit_fixture(M, 0, r1);\n") &&
+             const_text.include?("  bc2cpp_const_hit_fixture(M, 1, r2);\n"))
+check.call('two constant sites, one per read, named by the resolved owner (or `-`) and the name as written',
+           const_sites.size == 2 && const_sites[0][:key] == 'Game::Foo::LIMIT' && const_sites[0][:written] == 'LIMIT' &&
+             const_sites[1][:key] == '-' && const_sites[1][:written] == 'MAX')
+check.call('a constant marker in an untraced function stays a comment and is not a site',
+           const_text.include?('/*BC2CPP_CONST_HIT Stray::ZZ ZZ r1*/') && const_sites.size == 2)
+check.call('the constant site table and its dump rows are generated',
+           const_text.include?('bc2cpp_const_sites_fixture[2]') && const_text.include?('"CONST_SITE\\t%s') &&
+             const_text.include?('"CONST_CLASS\\t%s') && const_text.include?('"Game::Foo::LIMIT\\011LIMIT"') &&
+             const_text.include?('"-\\011MAX"'))
+plain_const_text, plain_const_summary = ParamTrace.instrument(src, 'fixture', infos)
+check.call('a file with no constant marker has no constant sites and no constant hit call',
+           plain_const_summary[:consts].empty? && !plain_const_text.include?('bc2cpp_const_hit_fixture(M, ') &&
+             plain_const_text.include?('bc2cpp_const_sites_fixture[1]'))
+
+# The codegen side of the constant marker: only under BC2CPP_TRACE_TYPES=1, and `-` without a closed-world proof.
+read = Struct.new(:op, :const_name, :mcnst_name, :reg).new('GETCONST', 'LIMIT', nil, 4)
+scoped = Struct.new(:op, :const_name, :mcnst_name, :reg).new('GETMCNST', nil, 'MAX', 5)
+begin
+  ENV['BC2CPP_TRACE_TYPES'] = '1'
+  check.call('a constant read without a closed world leaves an unproven marker (the written name, the register)',
+             gen.send(:const_trace_marker, read) == "  /*BC2CPP_CONST_HIT - LIMIT r4*/\n" &&
+               gen.send(:const_trace_marker, scoped) == "  /*BC2CPP_CONST_HIT - MAX r5*/\n")
+  ENV.delete('BC2CPP_TRACE_TYPES')
+  check.call('without BC2CPP_TRACE_TYPES=1 no constant marker is emitted', gen.send(:const_trace_marker, read).empty?)
 ensure
   traced ? ENV['BC2CPP_TRACE_TYPES'] = traced : ENV.delete('BC2CPP_TRACE_TYPES')
 end
