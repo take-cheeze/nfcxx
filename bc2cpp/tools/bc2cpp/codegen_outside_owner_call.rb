@@ -156,6 +156,20 @@ module OutsideOwnerCall
       "#{@call_block_expr || 'mrb_nil_value()'}, #{argv.size}#{args}); /* CLOSED_WORLD owner-call: #{name} */"
   end
 
+  # BLOCK_OWNER_CALL: a by-name block send (`mrb_funcall_with_block`) as the owner call with the block as `blk`, or
+  # nil when NAME_OWNER_SET names no owners. Both calls run vm.c's funcall_with_block_m (ensure_block, the block in
+  # the pushed frame, a break or exception unwinding the same way); the owner call only checks the method its one
+  # lookup finds against the list. Level 0: mrb_funcall_with_block checks no visibility or arity either.
+  def block_owner_call_line(dest, recv, name, argv, blk)
+    owners = argv.size <= CodeGen::FUNCALL_ARGC_MAX && name_owner_set(name)
+    return nil unless owners
+
+    args = argv.map { |arg| ", #{arg}" }.join
+    list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
+    "#{dest} = bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), #{blk}, " \
+      "#{argv.size}#{args}); /* CLOSED_WORLD owner-call: #{name} */"
+  end
+
   # The sorted owners of every outside definition of `name`, or nil when one cannot be named.
   def outside_owner_call_owners(name, allow_empty: false)
     @outside_owner_call_owners ||= {}

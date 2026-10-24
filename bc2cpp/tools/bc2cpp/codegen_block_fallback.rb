@@ -1122,8 +1122,13 @@ class CodeGen
         out << "#{indent}  r#{dest_reg} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, #{args});\n"
         out << "#{indent}} else\n"
       end
-      out << "#{indent}r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, #{name}, #{argv.size}, #{args}, " \
-             "mrb_obj_value(#{rproc_var}));\n"
+      owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "mrb_obj_value(#{rproc_var})")
+      out << if owner_call
+               "#{indent}#{owner_call}\n"
+             else
+               "#{indent}r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, #{name}, #{argv.size}, #{args}, " \
+                 "mrb_obj_value(#{rproc_var}));\n"
+             end
     end
     if region[:needs_brk]
       out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
@@ -1227,7 +1232,10 @@ class CodeGen
              "ary_size(r#{region[:argv_reg]}), ary_items(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
     else
       argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
-      if argv.empty?
+      owner_call = block_owner_call_line("r#{dest_reg}", recv, region[:name], argv, "r#{region[:blk_reg]}")
+      if owner_call
+        out << "  #{owner_call}\n"
+      elsif argv.empty?
         out << "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
                "r#{region[:blk_reg]});\n"
       else

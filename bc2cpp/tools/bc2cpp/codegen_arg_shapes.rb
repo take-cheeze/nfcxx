@@ -227,6 +227,9 @@ module ArgShapeCalls
   def dynamic_dispatch_line(d, recv, name, argv)
     return super unless @call_block_expr
 
+    owner_call = block_owner_call_line("r#{d}", recv, name, argv, @call_block_expr)
+    return "#{owner_call}\n" if owner_call
+
     args = argv.empty? ? 'NULL' : 'bc2cpp_blk_argv'
     call = "r#{d} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{name}\"), #{argv.size}, #{args}, " \
            "#{@call_block_expr});"

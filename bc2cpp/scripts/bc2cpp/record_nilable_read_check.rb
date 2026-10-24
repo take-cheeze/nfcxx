@@ -94,10 +94,12 @@ exact_size = ->(body) { body.to_s.include?('CLOSED_WORLD_NATIVE_EXACT :size') }
 
 check.call('`@ui[:k] || []` is an exact Array for size', exact_size.call(on['Scene#total']))
 check.call('without the read it keeps its class chain', !exact_size.call(off['Scene#total']))
+# The by-name block send, or its owner call carrying the block (BLOCK_OWNER_CALL).
+by_name_block = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS\([^)]*\), (?!mrb_nil_value\(\))/
 check.call('`(@ui[:k] || []).each` drops its guard and by-name fallback',
-           !on['Scene#each_sprite'].include?('mrb_funcall_with_block') &&
+           !on['Scene#each_sprite'].match?(by_name_block) &&
            !on['Scene#each_sprite'].include?('GUARDED_BLOCK_INLINE'))
-check.call('without the read `each` keeps its fallback', off['Scene#each_sprite'].include?('mrb_funcall_with_block'))
+check.call('without the read `each` keeps its fallback', off['Scene#each_sprite'].match?(by_name_block))
 check.call('`return 0 unless x` narrows the read to Array', exact_size.call(on['Scene#guarded']))
 check.call('an unnarrowed read keeps its nil test (NILABLE_RECEIVER) before the exact Array body',
            on['Scene#plain'].include?('NILABLE_RECEIVER :size -- receiver is nil or exactly Array') &&

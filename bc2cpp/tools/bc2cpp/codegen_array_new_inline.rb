@@ -41,6 +41,14 @@ class CodeGen
   # (declarations.rbs#core_hierarchy).
   ARRAY_NEW_CHAIN_OWNERS = (CoreHierarchySigs.superclasses_below('Array', nil) | CoreHierarchySigs.ancestors('Class')).freeze
 
+  # The world the proof reads. A core body (`Array#transpose`'s `Array.new(n) { }`) is compiled with @closed_world
+  # withheld, but every clause here is a program-wide fact (the constant's identity, the constructor chain, who
+  # defines Array#initialize), as BLOCK_CORE_DIRECT reads them for core bodies; the loop binds to nothing but
+  # mruby's own Array construction, which a core body may.
+  def array_new_world
+    @closed_world || @core_program_world
+  end
+
   def array_new_inline_enabled?
     ENV['BC2CPP_ARRAY_NEW_INLINE'] != '0'
   end
@@ -84,14 +92,14 @@ class CodeGen
   # Anything else is not an Array.new site, so it is not counted.
   # true, false (not an Array.new site), or the refusal reason String.
   def array_new_receiver_constant?(irep, idx, insn, owner_name)
-    return false unless @closed_world && straight_line_constant_name(irep, idx, insn.reg, skip_blocks: true) == 'Array'
+    return false unless array_new_world && straight_line_constant_name(irep, idx, insn.reg, skip_blocks: true) == 'Array'
 
     array_new_world_refusal(owner_name) || true
   end
 
   def array_new_world_refusal(owner_name)
     return 'receiver_not_toplevel_array' unless resolve_class_constant_name('Array', owner_name) == 'Array'
-    return 'array_constant_unstable' unless @closed_world.stable_constant_identity?('Array')
+    return 'array_constant_unstable' unless array_new_world.stable_constant_identity?('Array')
     return 'construction_replaceable' unless array_new_construction_unreplaced?
 
     array_initialize_refusal
@@ -105,7 +113,7 @@ class CodeGen
   end
 
   def array_new_construction_unreplaced?
-    return false unless @closed_world.standard_constructor_lookup? && exact_constructor_chain?('Array')
+    return false unless array_new_world.standard_constructor_lookup? && exact_constructor_chain?('Array')
 
     %w[new allocate].all? do |name|
       (@registry[name] || []).none? do |definition|
@@ -127,8 +135,8 @@ class CodeGen
   # definer, a prepended or unresolved module on Array, a runtime installer of the name, or another native
   # registration of it on Array. Array's own definition comes first in its lookup, so its ancestors do not matter.
   def array_native_refusal(name)
-    return "#{name}_outside_definer" if @closed_world.nil? || @closed_world.global_refusal ||
-                                        !@closed_world.core_native_arm_safe?(name, 'Array')
+    world = array_new_world
+    return "#{name}_outside_definer" if world.nil? || world.global_refusal || !world.core_native_arm_safe?(name, 'Array')
     return "#{name}_array_mixin" unless Array(@prepended_modules['Array']).empty? && !@unknown_mixins.include?('Array')
 
     installed = symbol_installed_destinations
@@ -163,7 +171,7 @@ class CodeGen
   end
 
   def array_natives_unspelled?(name)
-    @closed_world.native_paths_spelling(name).all? do |path|
+    array_new_world.native_paths_spelling(name).all? do |path|
       path.end_with?('/src/array.c') || !File.read(path, encoding: 'BINARY').match?(/array_class|"Array"|MRB_SYM\(Array\)/)
     end
   end

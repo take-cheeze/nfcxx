@@ -117,7 +117,10 @@ ensure
 end
 
 KERNEL_LOOP = 'Kernel_loop_impl(M, self, '
-DYNAMIC = 'mrb_funcall_with_block('
+# The dynamic else an unproven receiver keeps: mrb_funcall_with_block, or the owner call carrying the block
+# (BLOCK_OWNER_CALL). BY_NAME is the unchecked by-name send alone, which a fully proven site must not keep.
+DYNAMIC = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS\([^)]*\), (?!mrb_nil_value\(\))/
+BY_NAME = 'mrb_funcall_with_block('
 
 # Keep the baseline bytecode and C++ for runtime; BC2CPP_CXXFLAGS only affects its C++ compilation.
 baseline_dir = Dir.mktmpdir('bc2cpp-iterator')
@@ -132,14 +135,14 @@ ELSE_SEND = '(?:mrb_funcall_with_block|bc2cpp_owner_call)\\('
 check.call('lp: a block with a break keeps the root-context test, the send its else',
            code_of(code, 'lp').match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = Kernel_loop_impl\(M, self, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}M, self, /m))
 check.call('lp_drain: a yield-free block leaves no dynamic send',
-           code_of(code, 'lp_drain').include?('no dynamic send') && !code_of(code, 'lp_drain').include?(DYNAMIC))
+           code_of(code, 'lp_drain').include?('no dynamic send') && !code_of(code, 'lp_drain').include?(BY_NAME))
 chars = code_of(code, 'chars')
 check.call('chars: an unproven each_char receiver gets an exact-String arm with the send as its else',
            chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}/m))
 check.call('str_lines: each_line gets the String arm', code_of(code, 'str_lines').include?('String_each_line_impl(M, '))
 # A `!`/`?` name is spelled with `$` in C++ (`Array_reject$21_impl`); the arm check must still count those calls.
 check.call('rej_bang: reject! calls the compiled Array body, no by-name send left',
-           code_of(code, 'rej_bang').include?('Array_reject$21_impl(M, ') && !code_of(code, 'rej_bang').include?(DYNAMIC))
+           code_of(code, 'rej_bang').include?('Array_reject$21_impl(M, ') && !code_of(code, 'rej_bang').include?(BY_NAME))
 # IO#each_line is an alias in mruby-io's Ruby, never a registry definition: the owner call must still name IO.
 lines_owner = code_of(code, 'str_lines')[/BC2CPP_OWNERS\(([^)]*)\)[^;]*; \/\* CLOSED_WORLD owner-call: each_line/, 1]
 check.call('str_lines: an owner-call else lists IO, whose each_line is a core alias',
@@ -153,26 +156,26 @@ check.call('tm_nested: the Integer literal receiver of the inner times keeps no 
 tm = code_of(code, 'tm')
 check.call('tm: an unproven receiver runs the inlined loop behind a Fixnum test, the send with its Integer arm as the else',
            tm.match?(/GUARDED_BLOCK_INLINE :times .*\n\s+if \(M->c == M->root_c && mrb_integer_p\(r\d+\)\) \{\n/) &&
-           tm.include?('Integer_times_impl(M, ') && tm.include?(DYNAMIC))
+           tm.include?('Integer_times_impl(M, ') && tm.match?(DYNAMIC))
 check.call('tm_literal: an Integer literal receiver is the plain loop of ADR 0147',
            code_of(code, 'tm_literal').include?('bc2cpp_times_i_') && !code_of(code, 'tm_literal').include?('GUARDED_BLOCK_INLINE') &&
-           !code_of(code, 'tm_literal').include?(DYNAMIC))
+           !code_of(code, 'tm_literal').include?(BY_NAME))
 red = code_of(code, 'red')
 check.call('red: an unproven receiver runs the inlined fold behind an Array test, the send as the else',
            red.match?(/GUARDED_BLOCK_INLINE :reduce .*\n\s+if \(M->c == M->root_c && mrb_array_p\(r\d+\)/) &&
-             red.include?(DYNAMIC))
+             red.match?(DYNAMIC))
 check.call('red_sym, red_var: a Symbol or unproven initial value (Enumerable#inject takes a Symbol as the operator) ' \
            'keeps the send', %w[red_sym red_var red_lit_sym].none? { |m| code_of(code, m).include?('bc2cpp_accum_') })
 ix = code_of(code, 'idx')
 check.call('idx: an unproven receiver runs the inlined index loop behind an Array test, the send as the else ' \
            '(Array#index is array.c\'s own native)',
            ix.match?(/GUARDED_BLOCK_INLINE :index .*\n\s+if \(M->c == M->root_c && mrb_array_p\(r\d+\)/) &&
-             ix.include?(DYNAMIC))
+             ix.match?(DYNAMIC))
 check.call('idx_lit: a literal Array receiver is the plain index loop, no send',
-           code_of(code, 'idx_lit').include?('bc2cpp_accum_') && !code_of(code, 'idx_lit').include?(DYNAMIC))
+           code_of(code, 'idx_lit').include?('bc2cpp_accum_') && !code_of(code, 'idx_lit').include?(BY_NAME))
 user = code_of(code, 'user_each')
 check.call('user_each: an unproven receiver keeps the exact-class arms and the dynamic send as the else',
-           user.include?('Array_each_impl(M, ') && user.include?(DYNAMIC))
+           user.include?('Array_each_impl(M, ') && user.match?(DYNAMIC))
 check.call('no arm of this ADR is an unchecked fallback: every #error-free body compiles', !code.include?('#error'))
 
 puts '-- world proofs withdraw the arms'
