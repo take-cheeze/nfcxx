@@ -12,6 +12,7 @@
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
 # The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe): no patch files are applied.
+# The pin is 3332bc1 on branch nfcxx/align-large: nfcxx-patched plus data alignments above 127 (Rust #[repr(align(128))]).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu)   # macOS has no nproc
