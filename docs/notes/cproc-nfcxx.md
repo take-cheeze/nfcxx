@@ -189,7 +189,33 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 - **Calls of a function whose body is `{ return C; }`** (C an integer constant) are C when the arguments have no
   side effects: gcc inlines such a function and folds what depends on it -- the kernel's `pmd_trans_huge()` is 0
   without transparent huge pages, and the call it guards names a function this configuration does not have. The
-  call has no effect to keep (the body only returns C); an argument with a side effect keeps the call.
+  call has no effect to keep (the body only returns C); an argument with a side effect keeps the call. Likewise a
+  call of a function whose body is `{}` is nothing (`__apply_fineibt()` without CFI; `noinline` too, as gcc finds
+  such a function const and drops the call), and `x & 0` is 0 when `x` has no effect (`S_DAX`,
+  `ARCH_PAGE_TABLE_SYNC_MASK`). A weak function is not folded (the link may take another definition), nor a
+  `noipa` one (qbe-prep.rb's `__nfcxx_keep(&x)`, whose call keeps a volatile local in memory).
+
+- **Dead code names nothing** under `-p`: a block cproc's own constant folding leaves unreachable is marked
+  (`# nfcxx:dead` after its label) and what only it names is not referenced, as QBE drops the block -- a static
+  function called only there is not emitted (`create_huge_pmd()`). The `.hidden`/`.weak` directive of a symbol
+  the unit only declares stays only if the final assembly names it (`#nfcxx:ifused`, qbe-cc): gas would otherwise
+  make an undefined symbol of a declaration whose last use QBE dropped (`if (0 && ...)` under
+  `#pragma GCC visibility`).
+
+- **Flexible array member initializers** of a static object, the outermost struct's last member (the kernel's
+  `init_mm.cpu_bitmap`): the object is sizeof the struct plus the array's initializers, byte for byte gcc's.
+  Refused for an automatic object (gcc too) and for a compound literal.
+
+- **`aligned` as gcc reads it**: on an object it is the object's alignment even below the type's
+  (`DEFINE_PER_CPU_PAGE_ALIGNED` of the 16 KiB-aligned `struct irq_stack`; `_Alignas` cannot weaken it), and
+  `__alignof__` of an object is the object's; on a function, up to 16 on x86-64, where QBE aligns every function
+  (`__function_aligned`); its argument is looked up in the declaration's scope (a block-scope enum constant).
+
+- **Static initializers gcc takes as constants**: an address cast to a 64-bit integer plus and minus constants
+  (`TOP_OF_INIT_STACK`), and a converted negative constant under a range designator.
+
+- **`__builtin_extract_return_addr`**: the identity, on x86-64 only (pointer authentication can make it differ on
+  aarch64).
 
 - **GNU attributes that change what a declaration means** are taken or refused, never ignored as the hints and
   diagnostics are: `mode` on an enum (QI/byte, HI, SI, DI/word/pointer: the integer type of that size, as gcc

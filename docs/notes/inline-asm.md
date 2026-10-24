@@ -35,22 +35,23 @@ and the thunk:
 
 ```
 nfcxx_asm_thunk.0:
-	pushq %rbx               # a callee-saved register holds the slot pointer
-	subq  $8, %rsp           # keep %rsp 16-aligned for any call in the template
+	pushq %rbx               # a callee-saved register holds the slot pointer; %rsp is 16-aligned again
 	movq  %rdi, %rbx
 	movq  0(%rbx), %rax      # load fed operands
 	movq  8(%rbx), %rcx
 	addq %rcx, %rax          # the template, operands substituted
 	movq  %rax, 0(%rbx)      # store outputs back
-	addq  $8, %rsp
 	popq  %rbx
 	ret
 ```
 
 The slot pointer lives in a callee-saved register (rbx, then r12–r15) so the template may clobber anything caller-saved;
 the call already tells QBE that caller-saved registers and memory are clobbered. A callee-saved register the asm clobbers
-(or a callee-saved fixed operand) is push/popped in the thunk. Early-clobber (`&`) is automatically satisfied, since every
-operand has its own register and the values round-trip through the slot.
+(or a callee-saved fixed operand) is push/popped in the thunk, and with an even number of pushes 8 bytes more keep %rsp
+16-aligned for a call in the template. An operand the constraint leaves to the compiler takes a caller-saved register,
+or, when the asm clobbers them all (the kernel's `call_on_stack()`, which calls a function from the template), a
+callee-saved one the thunk preserves. Early-clobber (`&`) is automatically satisfied, since every operand has its own
+register and the values round-trip through the slot.
 
 ## Supported (x86_64 only)
 
@@ -120,7 +121,7 @@ Each of these raises a compile error rather than quietly producing wrong code:
 - Any target other than x86_64; the CIL backend and Mach-O (`qbe-cc` withholds `-a` there).
 - SSE/floating operands (`x`, `v`, `Yz`, …).
 - Operands in a file-scope `asm`.
-- More register operands than the caller-saved pool holds.
+- More register operands than the free registers hold (one callee-saved register stays for the slot pointer).
 
 ## Testing
 
