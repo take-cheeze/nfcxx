@@ -7,14 +7,17 @@ struct Pod { int a, b; };
 extern thread_local int counter;
 extern thread_local Pod pod;
 extern thread_local std::string name;
+extern thread_local std::string folded;
 int bump_counter();
 static int check(int id) {
   counter += id;
   pod.a += id;
   name += std::to_string(id);
+  folded += std::to_string(id);
   int b = bump_counter();
-  bool good = b == 101 + id && counter == 101 + id && pod.a == 1 + id && pod.b == 2 && name == "tl-name" + std::to_string(id);
-  std::printf("t%d counter %d pod %d/%d name %s%s\n", id, counter, pod.a, pod.b, name.c_str(), good ? "" : " BAD");
+  bool good = b == 101 + id && counter == 101 + id && pod.a == 1 + id && pod.b == 2 && name == "tl-name" + std::to_string(id) &&
+              folded == "folded" + std::to_string(id);
+  std::printf("t%d counter %d pod %d/%d name %s %s%s\n", id, counter, pod.a, pod.b, name.c_str(), folded.c_str(), good ? "" : " BAD");
   return good ? 0 : 1;
 }
 int main() {

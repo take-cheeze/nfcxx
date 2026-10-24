@@ -64,6 +64,23 @@ with the uses from g++ against nfcxx's object (with EDG's `libC.a`), on both bac
   implicit abi_tags only when it mangled the variable itself, and the routines' names are made from the variable's
   name earlier (`get_mangled_variable_name`, EDG fork branch `nfcxx/tls-abi-tag`).
 
+`tls_def.cpp` also defines `folded`, a `std::string` from a literal.
+
+## thread_local initialization
+
+The address of a `thread_local` object is not a constant ([expr.const]): an initializer that stores it, like
+`std::string`'s pointer to its own buffer or a `constexpr` constructor that keeps `this`, is a dynamic
+initialization, per thread, and `constinit` rejects it. g++ does this. EDG folded such initializers into a static
+image with `&self`, which C rejects ("initializer element is not constant", both backends), because it marked the
+variable `is_thread_local` only at the end of the declaration, after the initializer was folded; it now marks it
+before (`mark_thread_local_before_initializer`, `src/decls.c`).
+
+A file-scope `static __thread` variable with an initializer (GNU's spelling) got a tentative declaration before its
+definition in the generated C, a redefinition in C23 (gcc 15's default) and for cproc. EDG already left that
+declaration out for `thread_local`; it now does so for `__thread` too (`is_put_out_as_thread_local`,
+`src/c_gen_be.c`). Both fixes are on the EDG fork branch `nfcxx/tls-init`. `tests/cases/thread_local_init.cpp`
+covers namespace-scope, `static`, static data member and block-scope variables on two threads.
+
 ## Known front end limitation seen on the way
 
 The operands of an overloaded `operator<<` chain are not evaluated left to right in the generated C

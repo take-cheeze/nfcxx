@@ -5,8 +5,9 @@
 struct Pod { int a, b; };
 thread_local int counter = 100;
 thread_local Pod pod = {1, 2};
-// A call the compiler cannot evaluate at compile time: an initializer that C++20 constant evaluation can fold makes
-// EDG emit a static image whose pointer refers to the thread-local itself, which C rejects (docs/notes/realworld.md).
+// A call, and a literal that constant evaluation could fold: the address of a thread_local is not a constant, so both
+// are dynamic initializations with a _ZTH function, as with g++ (docs/notes/multi-tu.md).
 std::string make_name() { return std::string("tl-") + "name"; }
 thread_local std::string name = make_name();
+thread_local std::string folded = "folded";
 int bump_counter() { return ++counter; }
