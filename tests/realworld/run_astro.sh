@@ -176,8 +176,8 @@ done
 # BIGNUM=gmp (the Makefile default, real bignums) when <gmp.h> is installed, else BIGNUM=wrap (fixnums only); its Prism is the commit sample/koruby_precise pins (not sample/naruby's). The regex engine is
 # sample/astrogre as two shared objects (libastrogre.so, koruby_regex.so) that koruby loads at run time: AVX2, built with the
 # gcc backend for both (x86-64 only). Both backends build the interpreter and run tests/realworld/koruby_test.rb, whose
-# output must equal CRuby's (koruby_test.expected); with gmp, koruby_big_test.rb (bignums) too (koruby_big_test.expected). The AOT bake is not run here: it compiles hundreds of SD_*.c files
-# (about 8 minutes on qbe).
+# output must equal CRuby's (koruby_test.expected); with gmp, koruby_big_test.rb (bignums) too (koruby_big_test.expected). The AOT bake is not run here: it compiles thousands of SD_*.c files
+# (6 minutes on gcc, 10 to 19 on qbe, 4 cores: docs/notes/astro.md).
 patch_once() {  # patch_once FILE OLD NEW: replace the one occurrence of OLD in FILE, or stop
   ruby -e 'f, o, n = ARGV; s = File.read(f); unless s.scan(o).size == 1 then warn "patch: #{o.inspect} not found once in #{f}"; exit 1 end; File.write(f, s.sub(o) { n })' -- "$@"
 }
