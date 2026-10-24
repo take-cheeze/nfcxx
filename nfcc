@@ -19,7 +19,7 @@
 #              gcc backend: -march=* and the ISA options -msse*, -mavx*, -mfma, -mbmi*, -mpopcnt, -mlzcnt, -mf16c,
 #              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (qbe: ignored)
 #              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (qbe: ignored)
-#              gcc backend: -fno-jump-tables and -fno-crossjumping, given to the C compile (qbe: ignored)
+#              gcc backend: -fno-jump-tables, and -fno-crossjumping when the host gcc is GNU gcc, given to the C compile (qbe: ignored)
 #   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
 #              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
@@ -115,6 +115,11 @@ asm=0        # -S
 asf=()       # -Wa,* (assembler options)
 optlvl=-O2      # gcc backend: last -O option (-O2 when none)
 dbg=()       # gcc backend: -g options, in order
+gnu_gcc=
+host_is_gnu_gcc() {  # whether the gcc backend's host compiler is GNU gcc (on macOS "gcc" is Apple clang); asked once, when first needed
+  if [ -z "$gnu_gcc" ]; then gcc --version 2>&1 | grep -q 'Free Software Foundation' && gnu_gcc=1 || gnu_gcc=0; fi
+  [ "$gnu_gcc" = 1 ]
+}
 isa=()       # gcc backend: -march and the ISA -m options (-msse*, -mavx*, ...), given to the C compile
 # -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
 # would be dropped silently, so it is an error.
@@ -184,7 +189,9 @@ for ((i = 0; i < n; i++)); do
     --param=*) isa+=("$a") ;;
     # -fno-jump-tables and -fno-crossjumping (ASTro's code store passes both) only steer gcc's code generation: gcc gets them;
     # QBE makes no jump tables and does no cross jumping.
-    -fno-jump-tables|-fno-crossjumping) isa+=("$a") ;;
+    # -fno-crossjumping is GNU gcc only (clang stops with "unknown argument"), so it goes to the host compiler only when that is gcc.
+    -fno-jump-tables) isa+=("$a") ;;
+    -fno-crossjumping) host_is_gnu_gcc && isa+=("$a") ;;
     --param) need; isa+=("$a" "${args[++i]}") ;;
     -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) ;;
     -m*) die "$a is not supported" ;;
