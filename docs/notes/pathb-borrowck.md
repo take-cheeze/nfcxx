@@ -473,7 +473,10 @@ A trusted summary may return a pointer into one argument's declared memory regio
 `from-arg` takes a zero-based argument index, a nonnegative byte offset, and `shared` or
 `exclusive`. The returned pointee must fit wholly inside that argument's region. Shared results
 require a `read` or `write` source; exclusive results require `write`. `value`, `init`, and `consume`
-sources are refused. An ordinary `call` cannot discard the required returned-loan identity.
+sources are refused. A result pointer to `const`, such as `(ptr (const int))`, grants no writes,
+so its alias must be `shared`. Its width comes from the unqualified pointee. The checker, the
+QBE emitter, and the emitter oracle validate this identically. An ordinary `call` cannot discard
+the required returned-loan identity.
 
 `root` requires a direct local place or constant offset. For a result derived from an existing
 loan, use `(parent "P")` instead; the actual source must preserve that parent's identity and
@@ -564,8 +567,8 @@ The search is a verification loop, not a separate analysis:
 A function with no surviving candidate keeps the plain analysis, and calls to it are still refused.
 So inference cannot accept anything the verifier would reject. It can only fail to find a
 summary. Pointee types come from the parameter types with `const` removed; `void` pointees,
-aggregates without semantic layouts, `const` pointer results, and by-value aggregates are not
-inferred. `consume` is never inferred, because it would assert an ownership policy that the body
+aggregates without semantic layouts, and by-value aggregates are not inferred. A `const` pointer
+result tries only `read`/`shared`, then `write`/`shared`. `consume` is never inferred, because it would assert an ownership policy that the body
 alone does not establish. Mutually recursive functions get no summary and need explicit ones.
 
 The order chooses one summary when several verify. `read` is preferred, and `init` over `write`,
@@ -577,6 +580,8 @@ allows it, even if the body only reads, so callers can write through the result.
 A returned alias normally needs `call-borrow` to name its loan. The C++ frontend emits a plain
 `call` instead. When a plain `call` matches a returned-alias summary and its source argument is a
 direct local place or constant offset, the checker creates a root loan for that call site. The
+source can also be a register defined once by a pointer `bitcast` of such a place. That is the
+qualification conversion C++ inserts when it passes `&s` to a pointer-to-`const` parameter. The
 loan is named `&CALLEE#N` and has the summary's permission and range, so
 
 ```text
@@ -650,6 +655,9 @@ removed.
 `tests/pathb-borrow/contracts/layouts.cpp` checks a reader of a padded nested struct through the
 frontend's layout records and is refused once they are removed, with identical QBE either way.
 `nolayouts.cpp` lists struct shapes that must get no record.
+`contracts/const_alias.cpp` infers a shared summary for a `const int *` result. A variant that
+writes the source while holding the result reports `loan-conflict`. The fixtures
+`returned/const_*.ir` cover the shared, conflicting, and refused exclusive forms.
 Array-indexing fixtures in `tests/pathb-borrow/index` cover dynamic reads, weak writes, loans and
 shared loans of arrays, use after scope, and refusals. The C++ cases `cpp/array_*.cpp` check a
 range-based `for`, an indexed loop, an uninitialized element, and a dangling array pointer.
