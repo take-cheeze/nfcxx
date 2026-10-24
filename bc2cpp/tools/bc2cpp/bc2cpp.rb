@@ -1920,6 +1920,7 @@ if $PROGRAM_NAME == __FILE__
   # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed.
   gen.prepare_index_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
+  gen.reserve_numeric_slow_ruby_arm_slots
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
   # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method

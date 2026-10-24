@@ -44,6 +44,15 @@ class CodeGen
              ['io_lshift', 'mrb_io_lshift_impl', 'mrb_io_lshift_impl(mrb, io, mrb_get_arg1(mrb))']]
   }.freeze
 
+  # The owner-class cache is printed before the helpers are generated, so the arms' slots are numbered first.
+  def reserve_numeric_slow_ruby_arm_slots
+    NUMERIC_SLOW_RUBY_ARM_OPS.each do |name|
+      next unless numeric_slow_closed?(name)
+
+      numeric_slow_ruby_arms(name).each { |arm| owner_class_fn_name(arm[:owner]) }
+    end
+  end
+
   # True for an operator without exported bodies; else the proof above, memoized per operator.
   def numeric_slow_collection_ready?(name)
     return true unless NUMERIC_SLOW_NATIVES.key?(name)
@@ -137,6 +146,24 @@ class CodeGen
     CPP
   end
 
+  # NUMERIC_SLOW_RUBY_ARM: the compiled body of each Ruby definer, ahead of the native type tests so a Ruby
+  # subclass of a native owner reaches its own override. The class is the cached owner pointer (nullptr when the
+  # constant is not defined, which skips the arm); a kind test, so a subclass without an override is covered too.
+  def numeric_slow_ruby_arm_source(name)
+    (numeric_slow_ruby_arms(name) || []).map do |arm|
+      <<~CPP
+        // NUMERIC_SLOW_RUBY_ARM :#{name} -- the compiled #{arm[:owner]}##{name}, no by-name call
+          if (struct RClass* bc2cpp_owner = #{owner_class_ptr_expr(arm[:owner])}) {
+            if (mrb_obj_is_kind_of(M, a, bc2cpp_owner)) {
+              int ai = mrb_gc_arena_save(M);
+              mrb_value r = #{arm[:impl]}(M, #{(['a'] + arm[:args]).join(', ')});
+              #{NUMERIC_SLOW_DONE}
+            }
+          }
+      CPP
+    end.join
+  end
+
   # int_lshift (any count the method accepts: mrb_as_int coerces it), Array#<< with one operand (mrb_ary_push_m is
   # mrb_ary_push), String#<< and IO#<< (the exported bodies). IO is the class and its subclasses (File), not an
   # exact class test.
@@ -169,7 +196,7 @@ class CodeGen
           }
           #{NUMERIC_SLOW_DONE}
         }
-        if (mrb_array_p(a)) {
+      #{numeric_slow_ruby_arm_source('<<')}  if (mrb_array_p(a)) {
           mrb_ary_push(M, a, b);
           return a;
         }

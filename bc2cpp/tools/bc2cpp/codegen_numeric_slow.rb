@@ -93,10 +93,57 @@ class CodeGen
     answers = call_facts_answers
     definers = answers.definers(name)
     return false if definers.nil? || definers[:singleton]
-    return false unless %i[ruby foreign modules].all? { |kind| definers[kind].empty? }
+    return false unless %i[foreign modules].all? { |kind| definers[kind].empty? }
+
+    ruby = numeric_slow_ruby_owners(name, definers[:ruby])
+    return false unless ruby
 
     members = numeric_slow_members(answers, name)
-    !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, owners) }
+    !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, owners + ruby) }
+  end
+
+  # NUMERIC_SLOW_RUBY_ARM: operators whose closed form carries a direct-call arm per Ruby definer.
+  NUMERIC_SLOW_RUBY_ARM_OPS = %w[<<].freeze
+
+  # The Ruby definers of `name` as extra candidate owners: [] for none, nil when one has no arm.
+  def numeric_slow_ruby_owners(name, ruby)
+    return [] if ruby.empty?
+    return nil unless NUMERIC_SLOW_RUBY_ARM_OPS.include?(name)
+
+    arms = numeric_slow_ruby_arms(name)
+    arms && arms.map { |arm| arm[:owner] }.sort == ruby.to_a.sort ? arms.map { |arm| arm[:owner] } : nil
+  end
+
+  # { owner:, impl:, args: } per Ruby definition of `name`, or nil. Each must be the one public, clean, yield-free
+  # compiled definition on its owner (a direct call skips the entry's Fiber guard), and no owner may inherit another,
+  # so the order of the arms cannot pick a superclass body over a subclass override.
+  def numeric_slow_ruby_arms(name)
+    @numeric_slow_ruby_arms ||= {}
+    @numeric_slow_ruby_arms.fetch(name) { @numeric_slow_ruby_arms[name] = numeric_slow_ruby_arms_proof(name) }
+  end
+
+  def numeric_slow_ruby_arms_proof(name)
+    return nil unless @yield_reach && @closed_world.visibility_stable?(name)
+    return nil if devirt_blocked_name?(name) || symbol_installed_names.nil? || symbol_installed_names.include?(name)
+
+    defs = @registry[name] || []
+    owners = defs.map(&:owner)
+    return nil if defs.empty? || owners.uniq.size != owners.size
+
+    answers = call_facts_answers
+    defs.map do |d|
+      return nil unless d.irep && d.visibility == :public && !d.owner.end_with?('.singleton')
+      return nil unless compiles_clean?(d.irep) && @yield_reach.yield_free?(d.irep)
+
+      ancestors, unknown = answers.ancestors(d.owner)
+      return nil if unknown || (ancestors & (owners - [d.owner])).any?
+
+      impl = "#{cpp_name(d.owner, d.name)}_impl"
+      args, = direct_call_args(d, ['b'], impl)
+      return nil unless args
+
+      { owner: d.owner, impl: impl, args: args }
+    end
   end
 
   # `klass` is an owner, or a class whose whole lookup path is known and runs through an owner: with no Ruby, module
@@ -552,6 +599,15 @@ class CodeGen
     definers[:foreign].subset?(Set['String'])
   end
 
+  # Every class that answers `%` inherits Integer, Float or String (the arms below), so any other receiver is a proven
+  # NoMethodError instead of a by-name call.
+  def numeric_slow_mod_fallback
+    answers = call_facts_answers
+    members = numeric_slow_members(answers, '%')
+    closed = !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, %w[Integer Float String]) }
+    closed ? 'return bc2cpp_nomethod_named(M, a, "%", 1, b);' : 'return mrb_funcall(M, a, "%", 1, b);'
+  end
+
   def numeric_slow_closed_mod_source(head)
     <<~CPP
       #{head}, mrb_value b) {
@@ -562,7 +618,7 @@ class CodeGen
         else if (mrb_float_p(a)) r = mrb_flo_mod_impl(M, a, b);
       #endif
         else if (mrb_string_p(a)) r = mrb_str_mod_impl(M, a, b);
-        else return mrb_funcall(M, a, "%", 1, b);
+        else #{numeric_slow_mod_fallback}
         #{NUMERIC_SLOW_DONE}
       }
 
