@@ -111,7 +111,11 @@ class CodeGen
     return nil unless NUMERIC_SLOW_RUBY_ARM_OPS.include?(name)
 
     arms = numeric_slow_ruby_arms(name)
-    arms && arms.map { |arm| arm[:owner] }.sort == ruby.to_a.sort ? arms.map { |arm| arm[:owner] } : nil
+    return nil unless arms
+
+    # CallFacts answers name classes by their simple name, the registry by the full one.
+    simple = arms.map { |arm| arm[:owner].split('::').last }
+    simple.sort == ruby.to_a.map { |owner| owner.split('::').last }.sort ? simple : nil
   end
 
   # { owner:, impl:, args: } per Ruby definition of `name`, or nil. Each must be the one public, clean, yield-free
@@ -126,8 +130,10 @@ class CodeGen
     return nil unless @yield_reach && @closed_world.visibility_stable?(name)
     return nil if devirt_blocked_name?(name) || symbol_installed_names.nil? || symbol_installed_names.include?(name)
 
-    defs = @registry[name] || []
-    owners = defs.map(&:owner)
+    # The `<native>` placeholder stands for the native definers, which the helper's own arms and the collection
+    # proof cover.
+    defs = (@registry[name] || []).reject { |d| d.owner == '<native>' }
+    owners = defs.map { |d| d.owner.split('::').last }
     return nil if defs.empty? || owners.uniq.size != owners.size
 
     answers = call_facts_answers
@@ -135,8 +141,9 @@ class CodeGen
       return nil unless d.irep && d.visibility == :public && !d.owner.end_with?('.singleton')
       return nil unless compiles_clean?(d.irep) && @yield_reach.yield_free?(d.irep)
 
-      ancestors, unknown = answers.ancestors(d.owner)
-      return nil if unknown || (ancestors & (owners - [d.owner])).any?
+      own = d.owner.split('::').last
+      ancestors, unknown = answers.ancestors(own)
+      return nil if unknown || (ancestors & (owners - [own])).any?
 
       impl = "#{cpp_name(d.owner, d.name)}_impl"
       args, = direct_call_args(d, ['b'], impl)
