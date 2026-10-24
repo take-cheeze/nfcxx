@@ -147,10 +147,10 @@ for b in $backends; do
 done
 
 # ---- koruby_precise: ASTro's CRuby-compatible Ruby (26,000-line runtime, Prism, zlib, libyaml, a regex engine in astrogre). ----
-# BIGNUM=wrap (no GMP); its Prism is the commit sample/koruby_precise pins (not sample/naruby's). The regex engine is
+# BIGNUM=gmp (the Makefile default, real bignums) when <gmp.h> is installed, else BIGNUM=wrap (fixnums only); its Prism is the commit sample/koruby_precise pins (not sample/naruby's). The regex engine is
 # sample/astrogre as two shared objects (libastrogre.so, koruby_regex.so) that koruby loads at run time: AVX2, built with the
 # gcc backend for both (x86-64 only). Both backends build the interpreter and run tests/realworld/koruby_test.rb, whose
-# output must equal CRuby's (koruby_test.expected). The AOT bake is not run here: it compiles hundreds of SD_*.c files
+# output must equal CRuby's (koruby_test.expected); with gmp, koruby_big_test.rb (bignums) too (koruby_big_test.expected). The AOT bake is not run here: it compiles hundreds of SD_*.c files
 # (about 8 minutes on qbe).
 patch_once() {  # patch_once FILE OLD NEW: replace the one occurrence of OLD in FILE, or stop
   ruby -e 'f, o, n = ARGV; s = File.read(f); unless s.scan(o).size == 1 then warn "patch: #{o.inspect} not found once in #{f}"; exit 1 end; File.write(f, s.sub(o) { n })' -- "$@"
@@ -180,6 +180,9 @@ if ! out=$(cd "$ag" && "$root/nfcc" -I. -I../../runtime -O2 -mavx2 -fPIC -shared
       -Wl,-rpath,"$ag" -o koruby_regex.so 2>&1); then
   echo "FAIL astro koruby_precise: the regex engine (astrogre) build blocked: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; exit 1
 fi
+# gmp.h may live in a multiarch directory (Debian: /usr/include/x86_64-linux-gnu), so ask the compiler.
+if echo '#include <gmp.h>' | cc -E -x c - >/dev/null 2>&1; then bignum=1; libgmp=-lgmp; bname=gmp
+else bignum=2; libgmp=; bname=wrap; fi
 for b in $backends; do
   export NFCXX_BACKEND=$b
   t=$tmp/kp-$b; mkdir -p "$t/sample"; cp -r "$tmp/ag/lib" "$tmp/ag/runtime" "$t/"; cp -r "$tmp/ag/sample/astrogre" "$tmp/ag/sample/koruby_precise" "$t/sample/"
@@ -190,7 +193,7 @@ for b in $backends; do
   # QBE keeps it and the program crashes in DISPATCH_node_def.
   patch_once "$t/lib/astrogen.rb" '#define ASTRO_LAZY_ARGS(x) (x)->head.dispatcher' '#define ASTRO_LAZY_ARGS(x) ((x) ? (x)->head.dispatcher : NULL)' || { fail=1; continue; }
   cflags=(-I. -I./prism/include -I"$r" -DBARUBY_GC=5 -DASTRO_DEBUG=0 -DKORUBY_SRC_DIR="\"$d\"" -DASTRO_RUNTIME_DIR="\"$r\""
-          -DASTRO_PRISM_INC_DIR="\"$d/prism/include\"" -DKORB_BIGNUM=2 -DKORUBY_GC_SRC="\"$r/precise_gc/gc_copy.c\"" -DPATH_MAX=4096)
+          -DASTRO_PRISM_INC_DIR="\"$d/prism/include\"" -DKORB_BIGNUM=$bignum -DKORUBY_GC_SRC="\"$r/precise_gc/gc_copy.c\"" -DPATH_MAX=4096)
   [ -e /usr/include/zlib.h ] && cflags+=(-DKORB_HAVE_ZLIB) && libz=-lz || libz=
   [ -e /usr/include/yaml.h ] && cflags+=(-DKORB_HAVE_YAML) && liby=-lyaml || liby=
   if [ $b = qbe ]; then
@@ -229,7 +232,7 @@ for b in $backends; do
   if [ $cfail = 1 ]; then
     echo "FAIL $b astro koruby_precise: compile: $(cat "$tmp"/kp-$b-*.log | grep -m1 -E 'error')"; fail=1; continue
   fi
-  if ! out=$(cd "$d" && "$root/nfcc" -rdynamic -o koruby_precise main.o node.o korb_runtime.o parse.o gc_common.o gc_copy.o prism/build/libprism.a -ldl -lm -lcrypt $libz $liby 2>&1); then
+  if ! out=$(cd "$d" && "$root/nfcc" -rdynamic -o koruby_precise main.o node.o korb_runtime.o parse.o gc_common.o gc_copy.o prism/build/libprism.a -ldl -lm -lcrypt $libz $liby $libgmp 2>&1); then
     echo "FAIL $b astro koruby_precise: link: $(grep -m1 -E 'error|undefined' <<<"$out" || head -1 <<<"$out")"; fail=1; continue
   fi
   cp "$kd/koruby_regex.so" "$d/"
@@ -237,6 +240,12 @@ for b in $backends; do
   if [ $rc -ne 0 ] || [ "$got" != "$(cat "$root/tests/realworld/koruby_test.expected")" ]; then
     echo "FAIL $b astro koruby_precise: built, but koruby_test.rb gave rc=$rc and differs from CRuby's output:"; diff <(echo "$got") "$root/tests/realworld/koruby_test.expected" | head -6; fail=1; continue
   fi
-  echo "ok   $b astro koruby_precise: built (BIGNUM=wrap); koruby_test.rb prints what CRuby prints"
+  if [ $bname = gmp ]; then
+    got=$(cd "$d" && timeout 300 ./koruby_precise "$root/tests/realworld/koruby_big_test.rb" 2>&1); rc=$?
+    if [ $rc -ne 0 ] || [ "$got" != "$(cat "$root/tests/realworld/koruby_big_test.expected")" ]; then
+      echo "FAIL $b astro koruby_precise: built with gmp, but koruby_big_test.rb gave rc=$rc and differs from CRuby's output:"; diff <(echo "$got") "$root/tests/realworld/koruby_big_test.expected" | head -10; fail=1; continue
+    fi
+  fi
+  echo "ok   $b astro koruby_precise: built (BIGNUM=$bname); koruby_test.rb$([ $bname = gmp ] && echo ' and koruby_big_test.rb') print what CRuby prints"
 done
 exit $fail
