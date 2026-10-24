@@ -78,8 +78,9 @@ if [ $update = 0 ]; then
   [ "$g" = 3 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm markers)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 3"; fail=1; }
 fi
 # Borrow facts (tier 0 of docs/notes/borrowck-plan.md, section 1.3): tests/pathb-ir/borrow/*.cpp are printed with
-# NFCXX_PATHB_BORROW=1 and compared with the golden of the same name. The flag only adds (decl ...), (scope-end ...) and
-# (rref-arg ...) forms, so with those removed the output must equal the default output (checked for each program).
+# NFCXX_PATHB_BORROW=1 and compared with the golden of the same name. The flag only adds (decl ...), (scope-end ...),
+# (rref-arg ...) forms and one top-level (borrow-layout ...) line per struct, so with those removed the output must equal
+# the default output (checked for each program).
 for f in tests/pathb-ir/borrow/*.cpp; do
   n=$(basename "$f" .cpp)
   if ! NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$f" > "$tmp/borrow_$n.ir" 2> "$tmp/borrow_$n.err"; then
@@ -89,7 +90,7 @@ for f in tests/pathb-ir/borrow/*.cpp; do
   if diff -u "tests/pathb-ir/borrow/$n.ir" "$tmp/borrow_$n.ir" > "$tmp/borrow_$n.diff"; then echo "ok   $f (NFCXX_PATHB_BORROW=1)"
   else echo "DIFF $f (NFCXX_PATHB_BORROW=1)"; head -40 "$tmp/borrow_$n.diff"; fail=1; fi
   scripts/pathb-dump --ir "$f" > "$tmp/default_$n.ir" 2>/dev/null
-  if perl -0pe 's/\s*\((decl|scope-end|rref-arg) [^()\n]*\)//g' "$tmp/borrow_$n.ir" | cmp -s - "$tmp/default_$n.ir"; then
+  if perl -0pe 's/\s*\((decl|scope-end|rref-arg) [^()\n]*\)//g; s/^\(borrow-layout [^\n]*\n//mg' "$tmp/borrow_$n.ir" | cmp -s - "$tmp/default_$n.ir"; then
     echo "ok   $f (without the fact forms: the default output)"
   else echo "FAIL $f: the flag changes more than the fact forms"; fail=1; fi
 done
