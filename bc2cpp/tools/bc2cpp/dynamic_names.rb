@@ -21,11 +21,6 @@ module DynamicNames
   # literal used any other way is a stem already.
   PROBE_SENDS = %w[respond_to?].freeze
   PROBE_HOOKS = %w[respond_to? respond_to_missing?].freeze
-  # VISIBILITY_ONLY: likewise a literal whose every use is a name argument of `public`/`private`/`protected` sent to
-  # self in a class body (self is the Module there): Module#public and its siblings (class.c mrb_mod_visibility) only
-  # change the named method's visibility and return the module, so the name is neither called nor handed on. Left
-  # out while no Ruby defines, aliases or spells the three names. BC2CPP_VISIBILITY_LITERALS=0 keeps them stems.
-  VISIBILITY_ONLY_SENDS = %w[public private protected].freeze
 
   class << self
     # DEFINE_METHOD_LOOPS: [irep label, index] of each `define_method(n)` loop send the settled
@@ -214,19 +209,11 @@ module DynamicNames
   def self.analyze(ireps)
     stems = Set.new
     probes = Set.new
-    visibility = Set.new
     computed = false
-    parents = exec_parents(ireps)
     ireps.each_value do |irep|
       program = BytecodeIR.for(irep)
       program.each_with_op('LOADSYM', 'STRING', *BytecodeIR::Ops::SEND_FAMILY) do |insn, idx|
-        if insn.op == 'LOADSYM' && insn.sym
-          sink = if probe_only?(irep, idx, insn) then probes
-                 elsif visibility_only?(irep, idx, insn, parents) then visibility
-                 else stems
-                 end
-          sink << insn.sym
-        end
+        (probe_only?(irep, idx, insn) ? probes : stems) << insn.sym if insn.op == 'LOADSYM' && insn.sym
         if insn.op == 'STRING'
           entry = irep.pool[insn.pool_index.to_i]
           stems << entry if entry.is_a?(String) && entry.match?(/\A[A-Za-z_]\w*[?!=]?\z/)
@@ -242,7 +229,6 @@ module DynamicNames
       end
     end
     stems.merge(probes) if probe_hooks_touched?(ireps, stems)
-    stems.merge(visibility) if probe_hooks_touched?(ireps, stems, VISIBILITY_ONLY_SENDS)
     [stems, computed]
   end
 
@@ -266,22 +252,6 @@ module DynamicNames
     end
   end
 
-  # Every use of the LOADSYM's value is a name argument of a plain self `public`/`private`/`protected` send in a class
-  # body (+parents+ is exec_parents). VISIBILITY_ONLY above.
-  def self.visibility_only?(irep, idx, insn, parents)
-    return false if ENV['BC2CPP_VISIBILITY_LITERALS'] == '0'
-    return false unless parents[irep.label].is_a?(Array)
-
-    program = BytecodeIR.for(irep)
-    uses = FactoryFlow.uses(irep, idx, insn.reg.to_s) or return false
-    uses = uses.reject { |use, reg| self_send_slot?(program.source_at(use), reg) }
-    !uses.empty? && uses.all? do |use, reg|
-      send = program.source_at(use)
-      send.op == 'SSEND' && VISIBILITY_ONLY_SENDS.include?(send.sym) && send.plain_fixed_argc? &&
-        (send.reg.to_i + 1..send.reg.to_i + send.argc.to_i).cover?(reg.to_i)
-    end
-  end
-
   # vm.c OP_SSEND/SSEND0/SSENDB set R[a] = self before dispatching, so a value in a self send's R[a] is
   # overwritten there, never read: FactoryFlow's register-level reads count it, and it is no use.
   def self.self_send_slot?(insn, reg)
@@ -290,8 +260,8 @@ module DynamicNames
 
   # Whether the program could route a probe's name into Ruby: it defines or aliases respond_to? or
   # respond_to_missing?, or spells either as a literal (define_method(:respond_to_missing?), send(:respond_to?, ...)).
-  def self.probe_hooks_touched?(ireps, stems, hooks = PROBE_HOOKS)
-    return true if hooks.any? { |name| stems.include?(name) }
+  def self.probe_hooks_touched?(ireps, stems)
+    return true if PROBE_HOOKS.any? { |name| stems.include?(name) }
 
     ireps.each_value.any? do |irep|
       found = false
@@ -301,7 +271,7 @@ module DynamicNames
                 when 'DEF' then [insn.sym_token]
                 else [insn.sym]
                 end
-        found ||= names.any? { |n| hooks.include?(n.to_s) }
+        found ||= names.any? { |n| PROBE_HOOKS.include?(n.to_s) }
       end
       found
     end
