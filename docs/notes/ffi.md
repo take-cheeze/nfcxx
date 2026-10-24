@@ -1,6 +1,6 @@
 # nfcffi: calling C compiled at run time (`lib/ffi`)
 
-Status: **Milestones 1 to 5 (variadic calls), experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
+Status: **Milestones 1 to 6 (Python through nfcpoly), experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
 loaded; its functions, and the C library's, are called through C++ function types written at the call site. The
 design is DragonFFI's idea (a C library called from a host at run time, without writing bindings by hand), without
 its header parser and without libffi.
@@ -124,6 +124,27 @@ lib.callable("vec_add");   // false: a struct by value
   use `only` for the functions you need. A function declared in the header but defined nowhere fails the `dlopen`
   (`RTLD_NOW`), so every referenced function must be defined by the header's libraries or by `source`.
 
+## Python (Milestone 6)
+
+`lib/ffi/nfcffi_poly.{hpp,cpp}` binds the library into an `nfcpoly::Context` (`nfcffi::bind_poly(ctx)`), so Python, and
+every other language nfcpoly has, can load a header and call it:
+
+```cpp
+nfcpoly::Context ctx;
+nfcffi::bind_poly(ctx);
+ctx.eval<long long>("python", "lib = ffi_load('/abs/dyn.h', src_text, ['add_int'])\nlib.call('add_int', [4, 5])");   // 9
+```
+
+- `ffi_load(header, source, [names])` returns an `FfiLibrary`. The names are optional (the default wraps every callable
+  function of the header; a function that does not compile in the wrappers fails the whole load, so name what you need).
+- `lib.call(name, [args])` and `lib.callable(name)`. An argument is an integer, a boolean, a float, a string (a C string
+  for the call), nil (a null pointer, or 0), or an array of integers 0..255 (the bytes of a struct or union).
+- A result is an integer, a float, nil (a null pointer), or an array of bytes (a struct or union). A pointer result is its
+  address as an integer.
+- Errors reach the script as script errors (an `Error` of the library is a `RuntimeError`-like error in each language).
+- Test: `tests/ffi/poly_host.cpp`, with CPython (`python3-config`); `tests/ffi/run.sh` builds it when the CPython
+  development files are present and skips it otherwise.
+
 ## Not yet
 
 - **ABI.** The checks above cover the SysV x86-64 cases the tests use. Other targets are not covered.
@@ -137,4 +158,4 @@ lib.callable("vec_add");   // false: a struct by value
 3. (done) Calls by name: kinds per declaration, wrappers compiled with the header, `Library::call` with `Value`s.
 4. (done) Structs and unions by value, as bytes with the C layout.
 5. (done) Variadic calls: a wrapper per sequence of extra argument kinds, compiled on first use.
-6. A Python binding through `nfcpoly`, which already runs Python from C++ (`docs/notes/poly.md`).
+6. (done) Python through `nfcpoly` (`nfcffi_poly.cpp`): `ffi_load` and `FfiLibrary.call`, with the same argument rules.

@@ -103,6 +103,10 @@ std::string abstract_type(const std::string& t) {
 }  // namespace
 
 std::vector<Declaration> Ffi::declarations(const std::string& file, Dialect dialect) const {
+  // The tool's output goes to a log in the cache directory: the directory must exist before the tool runs.
+  std::string err = build::ensure_cache_dir(cache_);
+  if (!err.empty()) throw Error("nfcffi: " + err);
+
   // Every file the source includes, not only the primary one: the front end reads NFCXX_DECL_ALL.
   std::vector<std::string> args{"/bin/sh", "-c", "NFCXX_DECL_ALL=1 exec \"$0\" \"$@\"", decl_tool_};
   if (dialect == Dialect::C) args.push_back("--c");
