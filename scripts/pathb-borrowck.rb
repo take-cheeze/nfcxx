@@ -1,4 +1,5 @@
 # Local lifetime analysis for annotated Path B IR. Run with scripts/mrb.
+# --infer-loan-ends enables conservative last-use inference; default uses explicit ends.
 # Exit 0: supported local checks passed; 1: lifetime error; 2: malformed IR;
 # 3: unsupported analysis. This is not full Rust or C++ borrow checking.
 class BadIR < StandardError; end
@@ -138,7 +139,8 @@ end
 class LocalLifetime
   attr_reader :errors
 
-  def initialize(f)
+  def initialize(f, infer_loan_ends = false)
+    @infer_loan_ends = infer_loan_ends
     raise BadIR, 'function header' unless f.length >= 4 && bh(f[2]) == 'ret' && bh(f[3]) == 'params'
     @name = bname(f[1])
     @slots = {}
@@ -334,13 +336,29 @@ class LocalLifetime
     nil
   end
 
+  def record_loan_values(values)
+    if @record_uses
+      values.each do |v|
+        id = nil
+        id = v[5..-1] if v.start_with?('loan:')
+        id = v[8..-1] if v.start_with?('expired:')
+        @record_uses << id if id && !@record_uses.include?(id)
+      end
+    end
+    values
+  end
+
+  def record_loan_definition(id)
+    @record_defs << id if @record_defs && !@record_defs.include?(id)
+  end
+
   def value(x, state)
     if x.is_a?(IRSym)
       return ['local:' + x.name] if x.sig == '$'
       return ['external']
     end
     if x.is_a?(String)
-      return state['value:' + x] || ['unknown'] if x.start_with?('%')
+      return record_loan_values(state['value:' + x] || ['unknown']) if x.start_with?('%')
       return []
     end
     raise BadIR, 'operand form' unless x.is_a?(Array)
@@ -351,6 +369,7 @@ class LocalLifetime
     when 'borrow'
       id = bname(x[2])
       loan = @loans[id]
+      record_loan_definition(id)
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
       access('local:' + loan[0], state, true, loan[1])
       state['loan:' + id] = ['active']
@@ -359,6 +378,7 @@ class LocalLifetime
       id = bname(x[2])
       loan = @loans[id]
       parent = loan[2]
+      record_loan_definition(id)
       sources = value(x[5], state)
       allowed = ['loan:' + parent, 'expired:' + parent]
       raise BorrowRefused, 'reborrow source must preserve declared parent identity' if sources.empty? || sources.any? { |p| !allowed.include?(p) }
@@ -372,7 +392,7 @@ class LocalLifetime
       places = value(x[2], state)
       places.each { |p| access(p, state, true) }
       if bh(x[1]) == 'ptr'
-        places.flat_map { |p| state['pointer:' + storage(p).to_s] || ['unknown'] }.uniq
+        record_loan_values(places.flat_map { |p| state['pointer:' + storage(p).to_s] || ['unknown'] }.uniq)
       else
         []
       end
@@ -422,6 +442,7 @@ class LocalLifetime
       origins = ['local:' + name]
       @loans.each do |id, loan|
         next unless loan[0] == name
+        record_loan_definition(id)
         diagnostic('scope-end-with-loan', id) if state['loan:' + id].include?('active')
         origins << 'loan:' + id
         state['loan:' + id] = ['ended']
@@ -431,9 +452,13 @@ class LocalLifetime
       raise BadIR, 'loan-end form' unless x[1].is_a?(IRStr)
       id = bname(x[1])
       raise BadIR, "unknown loan #{id}" unless @loans.key?(id)
-      diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
+      record_loan_definition(id)
+      status = state['loan:' + id]
+      valid = status == ['active'] || (@infer_loan_ends && status.all? { |s| ['active', 'inferred-ended'].include?(s) })
+      diagnostic('inactive-loan', id) unless valid
       @loans.each_key do |child|
         next unless @ancestors[child].include?(id)
+        record_loan_definition(child)
         diagnostic('loan-end-with-child', id) if state['loan:' + child].include?('active')
         state['loan:' + child] = ['ended']
         invalidate_pointers(state, ['loan:' + child], 'expired:' + child)
@@ -479,8 +504,7 @@ class LocalLifetime
     state
   end
 
-  def run
-    return if @entry.nil?
+  def initial_state
     initial = {}
     @slots.each_key { |s| initial['life:' + s] = ['dead']; initial['pointer:' + s] = ['unknown'] }
     @params.each do |p, name, pointer|
@@ -488,20 +512,35 @@ class LocalLifetime
       initial['life:' + name] = ['uninitialized'] if @slots[name]
     end
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
-    incoming = { @entry => initial }
+    initial
+  end
+
+  def expire_dead_loans(state, needed)
+    @loans.each_key do |id|
+      status = state['loan:' + id]
+      next if needed.include?(id) || !status.include?('active')
+      state['loan:' + id] = status.map { |s| s == 'active' ? 'inferred-ended' : s }.uniq.sort
+      invalidate_pointers(state, ['loan:' + id], 'expired:' + id)
+    end
+    state
+  end
+
+  def solve(expire = false)
+    incoming = { @entry => initial_state }
     queue = [@entry]
     until queue.empty?
       id = queue.shift
       out = transfer(@nodes[id][0], incoming[id].dup)
       @nodes[id][1].each do |succ|
+        edge = expire ? expire_dead_loans(out.dup, @needed[succ]) : out
         old = incoming[succ]
-        merged = out.dup
+        merged = edge.dup
         if old
-          (old.keys + out.keys).uniq.each do |k|
+          (old.keys + edge.keys).uniq.each do |k|
             # Missing register definitions cannot acquire provenance from just
             # one predecessor. Slot entries exist on every path.
             a = old[k] || ['unknown']
-            b = out[k] || ['unknown']
+            b = edge[k] || ['unknown']
             merged[k] = (a + b).uniq.sort
           end
         end
@@ -511,20 +550,65 @@ class LocalLifetime
         end
       end
     end
+    incoming
+  end
+
+  # Recover uses from converged provenance first, without shrinking lifetimes.
+  # This prevents tentative expiry from hiding a later use. Creation and
+  # explicit end kill demands for the previous instance of a static loan ID.
+  def infer_needed_loans(incoming)
+    uses = {}
+    defs = {}
+    incoming.each do |id, state|
+      @record_uses = []
+      @record_defs = []
+      transfer(@nodes[id][0], state.dup)
+      uses[id] = @record_uses
+      defs[id] = @record_defs
+    end
+    @record_uses = nil
+    @record_defs = nil
+    @needed = Array.new(@nodes.length) { [] }
+    changed = true
+    while changed
+      changed = false
+      incoming.keys.reverse_each do |id|
+        after = @nodes[id][1].flat_map { |succ| @needed[succ] }.uniq
+        before = (uses[id] + (after - defs[id])).uniq
+        # A child can remain usable only while its ancestor chain remains live.
+        before = before.flat_map { |loan| [loan] + @ancestors[loan] }.uniq.sort
+        if @needed[id] != before
+          @needed[id] = before
+          changed = true
+        end
+      end
+    end
+  end
+
+  def run
+    return if @entry.nil?
+    incoming = solve
+    if @infer_loan_ends
+      infer_needed_loans(incoming)
+      incoming = solve(true)
+    end
     @report = true
     incoming.each { |id, s| transfer(@nodes[id][0], s.dup) }
   end
 end
 
 begin
-  raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb FILE.ir' unless ARGV.length == 1
-  forms = parse_forms(tokenize(File.read(ARGV[0])))
+  args = ARGV.dup
+  infer = args[0] == '--infer-loan-ends'
+  args.shift if infer
+  raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] FILE.ir' unless args.length == 1
+  forms = parse_forms(tokenize(File.read(args[0])))
   raise BadIR, 'missing ir-module' unless bh(forms[0]) == 'ir-module'
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
   errors = []
   functions.each do |f|
-    checker = LocalLifetime.new(f)
+    checker = LocalLifetime.new(f, infer)
     checker.run
     errors.concat(checker.errors)
   end

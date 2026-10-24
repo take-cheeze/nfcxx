@@ -1,0 +1,7 @@
+(ir-module "inferred" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params (param %9 "external" (ptr int)) (param %8 "flag" bool))
+(slot "x" int 4 4) (slot "p" (ptr int) 8 8)
+(decl $"x" val) (store int $"x" (const int 1))
+(decl $"p" ref) (store (ptr int) $"p" %9) (loop (body (let %0 (ptr int) (borrow (ptr int) "a" exclusive $"x"))
+(let %1 (ptr int) (load (ptr int) $"p")) (let %2 int (load int %1))(store (ptr int) $"p" %0) (if %8 (then (continue)) (else (break)))))(return (const int 0))
+)

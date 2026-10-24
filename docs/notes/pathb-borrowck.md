@@ -68,7 +68,8 @@ error. Access through an ended loan is an error even through an older pointer co
 active loans are unioned at CFG joins, so a loan ended on only one incoming path still constrains
 accesses at the join. Local names and internal provenance tokens occupy distinct namespaces.
 
-Loan ends are **explicit**, not inferred from last use. IDs may execute repeatedly in a loop
+By default, loan ends are **explicit**. The opt-in inference mode below can shorten them.
+IDs may execute repeatedly in a loop
 if each iteration ends the loan before the next creation; old pointer copies remain expired.
 Field-sensitive overlap and loans on external storage are still refused. Ordinary C++ references
 do not automatically acquire shared or exclusive loan semantics. Neither frontend emits these
@@ -101,8 +102,45 @@ active children.
 
 Ending a parent with a possibly active descendant is an error. It also expires descendant pointer
 copies so neither reactivating the parent nor reusing a static loan ID in a loop revives them.
-Loan ends remain explicit; this is not non-lexical lifetime inference. The QBE emitter and its
-oracle erase `reborrow` to the source pointer, preserving runtime code generation.
+The default mode requires explicit loan ends. The QBE emitter and its oracle erase `reborrow`
+to the source pointer, preserving runtime code generation.
+
+## Inferred loan ends (opt-in)
+
+```sh
+scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends example.ir
+```
+
+This mode shortens local loan lifetimes to their last possible use, without changing the input IR
+or generated code. For example, this is accepted with inference and rejected in explicit mode:
+
+```text
+(let %0 (ptr int) (borrow (ptr int) "L" exclusive $"x"))
+(let %1 int (load int %0))
+(store int $"x" (const int 2))
+```
+
+If a later statement uses `%0`, the direct store remains a conflict. Copies and pointer-slot
+loads retain the original loan's demand. A live child keeps all its ancestors live, and finishing
+a child can restore parent access while the parent is still needed later.
+
+The checker first solves forward provenance without shortening loans. It then records loan uses
+and definitions from those converged states and solves backward demand on the CFG. Loan creation
+kills demand for the previous instance of its static ID; explicit ends and storage ends are also
+boundaries. The final forward pass expires active loans separately on each edge where the successor
+has no demand. Expiry invalidates pointer copies, preventing old loop-iteration pointers from being
+revived by another creation of the same ID.
+
+Branch successors can therefore release different loans, while joins and backedges preserve loans
+that might still be used. The demand set includes reference copies, even when their destination is
+unused. Joined provenance and the per-loan demand model are conservative: this is not path-sensitive
+reference-carrier liveness, dead-code elimination, or a complete implementation of Rust NLL.
+
+Explicit `loan-end` remains a hard boundary. An end after an inferred expiry is accepted, but an
+explicit early end still invalidates later uses, and ending twice is still an error. Inference cannot
+bypass uninitialized borrows, permission checks, local-address returns, or unsupported-operation
+refusals. A dangling use can be diagnosed as an inactive loan after inferred expiry rather than as
+use-after-scope. Source locations and language-level region contracts remain future work.
 
 ## Refusals and limits
 
@@ -117,8 +155,8 @@ refused. Escapes never establish initialization. Unannotated functions are refus
 silently checked using function-wide storage lifetimes.
 
 Rust moves, C++ destructor interpretation, exception cleanup analysis, container invalidation,
-interior mutability, inferred non-lexical loan ends, and cross-function region inference are not
-implemented. `rref-arg` does not mean that an ordinary C++ moved-from value is dead.
+interior mutability and cross-function region inference are not implemented. `rref-arg` does not
+mean that an ordinary C++ moved-from value is dead.
 
 ## Rust frontend boundary
 
@@ -138,7 +176,10 @@ Run `tests/pathb-borrow/run.sh`. The suite checks exact diagnostics and exit sta
 IR, and checks real C++ lowering for accepted code, partial initialization, and dangling pointers.
 The C++ IR must also remain accepted by the QBE emitter. Tests include branch joins, pointer aliases,
 backedges, zero-iteration loops, redeclarations, local-address returns, and explicit refusals.
-The explicit-loan and reborrow cases cover permissions, overlapping loans, copies, branch joins,
+Paired fixtures in `tests/pathb-borrow/inferred` check both explicit and inferred results, including
+last-use release, future-use conflicts, branch-specific release, backedges, stored pointers, and
+parent/child demands. Refusal cases are also run with inference enabled. The explicit-loan and
+reborrow cases cover permissions, overlapping loans, copies, branch joins,
 loop iterations, parent restoration, nested children, shared siblings, and invalid parent graphs. A native execution check verifies that loan metadata erasure leaves the QBE output
 unchanged and that the emitter agrees with its oracle. The Path B CI workflow runs this suite
 alongside the stage 1/2 tests.
