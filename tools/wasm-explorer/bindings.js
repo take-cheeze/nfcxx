@@ -104,6 +104,11 @@
         crypto.getRandomValues(readBytes(ctx.mem, buf, n));
         return Number(n);
       } },
+    memcmp: { decl: "int memcmp(const void* a, const void* b, size_t n);", feature: "compares the bytes in memory",
+      fn: (ctx, a, b, n) => compareBytes(ctx, a, b, n) },
+    bcmp: { decl: "int bcmp(const void* a, const void* b, size_t n);",
+      feature: "compares the bytes in memory (Rust's slice and str equality)",
+      fn: (ctx, a, b, n) => compareBytes(ctx, a, b, n) },
     strlen: { decl: "size_t strlen(const char* s);", feature: "the length of the C string in memory",
       fn: (ctx, s) => {
         const view = new Uint8Array(ctx.mem().buffer);
@@ -127,6 +132,14 @@
         throw new Exit(Number(status) | 0);
       } },
   };
+
+  // memcmp: the sign of the first differing byte (unsigned), or 0.
+  function compareBytes(ctx, a, b, n) {
+    const x = readBytes(ctx.mem, a, n);
+    const y = readBytes(ctx.mem, b, n);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+    return 0;
+  }
 
   // Thrown by the exit binding through the module's frames; a run that catches it reports the status as its result.
   class Exit extends Error {

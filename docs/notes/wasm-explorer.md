@@ -55,7 +55,7 @@ its standards or empty (the front end's default), and `mode` is one of its modes
 | --- | --- | --- | --- |
 | `c++` | `pathb-dump --ir` (EDG, C++23 by default) | `c++17`, `c++20`, `c++23` | all |
 | `c` | `pathb-dump --ir -std=cNN` (EDG in C mode, `--gcc`, C17 by default) | `c89`, `c99`, `c11`, `c17`, `c23` | all |
-| `rust` | `rustc --crate-type=cdylib --emit=llvm-ir -C opt-level=1 -C panic=abort -C overflow-checks=on`, then `llvm-to-pathb.rb --wasm` | editions `2015`, `2018`, `2021` (default), `2024` | `lp64`, `asan` |
+| `rust` | `rustc --crate-type=cdylib -C opt-level=1 -C panic=abort -C overflow-checks=on -C lto=fat -C save-temps`, `llvm-dis` of the module after LTO, then `llvm-to-pathb.rb --wasm` | editions `2015`, `2018`, `2021` (default), `2024` | `lp64`, `asan` |
 | `go` | `tinygo build -o prog.ll -gc=leaking -scheduler=none -panic=trap -opt=1`, a `main()` wrapper, then `llvm-to-pathb.rb --wasm` | none | `lp64`, `asan` |
 | `llvm` | `llvm-to-pathb.rb` (`pathb-llvm.md`: the subset of `clang -S -emit-llvm` it reads) | none | `lp64`, `asan` |
 | `ir` | none: the source is the IR (`pathb-stage2.md`, section 6); lines that start with `;` are blanked first | none | `lp64`, `asan` |
@@ -66,8 +66,13 @@ compiler's (`host_sys_includes c`, `gcc -x c`), not the C++ library's. LLVM IR a
 (`llvm-to-pathb.rb` writes the x86-64 one), so the `emscripten` mode, whose IR is ILP32 from EDG's `linux_riscv32`
 target, is not theirs.
 
-**Rust** is compiled by rustc (`RUSTC`, else `rustc` on PATH; CI pins 1.97.0) to LLVM IR at `-O1`, with overflow
-checks on, as a `#![no_std]` `#![no_main]` crate: `main` is an `extern "C"` function that the page calls, the browser
+**Rust** is compiled by rustc (`RUSTC`, else `rustc` on PATH; CI pins 1.97.0) at `-O1`, with overflow checks on and
+fat LTO. The crate's own LLVM IR (`--emit=llvm-ir`) is not enough: it calls `core`'s non-generic functions (`str::split`
+calls `memchr`), which live in `core`'s compiled library, not in the crate. LTO links the parts of `core` that the program
+uses into one module; rustc keeps it with `-C save-temps` (`<crate>.<crate>.<hash>-cgu.0.rcgu.bc`), and the `llvm-dis` of
+rustc's own LLVM (`rustup component add llvm-tools`; `LLVM_DIS` names another) turns it into text. What is left
+external is the program's bindings and libc's `memcmp`/`bcmp`, which are bindings too. The crate is `#![no_std]`
+`#![no_main]`: `main` is an `extern "C"` function that the page calls, the browser
 bindings are `extern "C"` declarations, and a panic (an overflow, an index out of range) calls a function of `core` that
 the module does not have, a stub, after which the code traps (`unreachable`). Enums, slices, iterators, closures, trait
 objects (`dyn`) and function pointers work. `-O0` is not used: its code keeps unwinding edges (`invoke`, `resume`),
@@ -99,15 +104,20 @@ and a rate limit, which are not in this change.
 
 ## The page
 
-- **Editor**: Monaco 0.52.2 from `cdn.jsdelivr.net/npm/monaco-editor@0.52.2`, with highlighting for the language (C++
-  and C are Monaco's, the IR uses its Scheme mode, LLVM IR a small Monarch tokenizer in the page), diagnostics as
-  markers, and Ctrl+Enter. If the CDN cannot be reached, the page uses a plain textarea.
+- **Editor**: Monaco 0.52.2 from `cdn.jsdelivr.net/npm/monaco-editor@0.52.2`, with highlighting for the language (C++,
+  C, Rust and Go are Monaco's, the IR uses its Scheme mode, LLVM IR a small Monarch tokenizer in the page) and
+  diagnostics as markers. If the CDN cannot be reached, the page uses a plain textarea.
+- **Ctrl+Enter** (Cmd+Enter on a Mac; Ctrl+Enter works there too) compiles and then runs `main`, in the editor and in
+  the textarea. Compile (the button), a change of the options and "auto" only compile. Any compile cancels a pending
+  automatic one, so the text an example puts in the editor is compiled once.
+- **Console**, under the editor: Run (calls `main` the way `tests/wasm/host.cjs` does: an import without a binding
+  returns its first argument plus one), the result (`main`'s value, `exit N`, or the trap's message), Clear, and the
+  output of the last run (the bindings' output: `log_*`, `puts`, `putchar`, `write`, Go's `println` and `fmt`).
 - **Options**: the language, the standard and the mode (both filled for the language: a choice the new language also
   has is kept), and "auto" (compile 0.7 s after an edit; live only). The examples are grouped by language, and picking
   one sets its language. Changing the language loads its first example unless the source was edited, so an edited
   source can be compiled as C and as C++.
-- **Module** tab: size, exports, imports, the bytes, the `.wasm` download, and Run, which calls `main` the way
-  `tests/wasm/host.cjs` does (imports return their first argument plus one; a trap prints its message).
+- **Module** tab: the browser bindings, size, exports, imports, the bytes and the `.wasm` download.
 - **WAT** tab: the module as WebAssembly text, converted with `wabt` 1.0.37 (`cdn.jsdelivr.net/npm/wabt@1.0.37`), loaded
   when the tab is first opened, with a `.wat` download.
 - **IR** and **Bytes** tabs: the mid-level IR text, and a hex dump of the first KB.
@@ -120,8 +130,10 @@ and a rate limit, which are not in this change.
 from `expect` in `examples/index.json` or if a compile fails. It writes `_site/`: `index.html`, `examples/` (the sources
 and the manifest), `builds/<id>.json` (the sources, IR, wasm and diagnostics per mode), and `.nojekyll`.
 
-On a static host the page reads the manifest and the builds. An example's source gets its prebuilt result (and the
-default standard only), matched by the source and the language. Any other source gets a message that it needs the
+On a static host the page reads the manifest and the examples' sources at start, and an example's build
+(`builds/<id>.json`) only when it is compiled: `go-fmt`'s is about 4.7 MB. An example's source gets its prebuilt result
+(and the default standard only), matched by the source and the language. A mode whose IR is the same as an earlier
+mode's (`asan` and `lp64` share theirs) stores it once (`irFrom`). Any other source gets a message that it needs the
 local server. A permalink to an example works.
 
 The workflow builds the harness and the mruby tool as `pathb.yml` does, runs the static build (on pull requests too,
@@ -152,8 +164,10 @@ setup, in the repository's settings (Secrets and variables > Actions), and on th
 
 ## Checks
 
-- `build-static.cjs` is the check for the examples: 7 examples (C++ and C) x 3 modes and 4 (Rust, Go, LLVM IR and IR)
-  x 2 modes, each run and compared with its expected result (and output, where `index.json` states one). The Rust and
+- `build-static.cjs` is the check for the examples: 9 examples (C++ and C) x 3 modes and 10 (Rust, Go, LLVM IR and IR)
+  x 2 modes, each run and compared with its expected result (and output, where `index.json` states one). The new
+  examples' results were worked out by hand and, for C, checked against `gcc` (`c-function-pointers` 1140,
+  `c-goto` 933). The Rust and
   Go results were also checked by hand: the Rust example's arithmetic (95 + 24), and the Go one's printed values (95,
   37) and status (132). The C++ results were also checked against `g++ -O0` (modulo 256, the
   process status), the C one against `gcc -std=c11`, and the LLVM IR one against `gcc` of the C it was written from (`clang-18 -O0`
@@ -218,7 +232,7 @@ and input events.
 | --- | --- | --- |
 | Editor with highlighting and diagnostics | done | Monaco, from the CDN. |
 | Compile on edit, and on demand | done | Auto on the live server only. |
-| Examples | done (11) | Each checked in every mode of its language at build time. |
+| Examples | done (19) | Each checked in every mode of its language at build time. |
 | Several languages | done (6) | C++, C, Rust, Go, LLVM IR, the IR. See "Languages". |
 | Options: standard, emitter mode | done | `pipeline.cjs` takes them. |
 | Run the output | done | `main`; imports bound to browser features (see "Browser bindings"), others stubbed. |
