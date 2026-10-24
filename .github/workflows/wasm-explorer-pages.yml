@@ -138,3 +138,82 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+
+  # A preview of the site on Cloudflare Pages, for each pull request (and each push): the site the build job made and
+  # checked, deployed to the branch's preview URL, which a comment on the pull request gives (one comment, updated by
+  # every run). It needs, in the repository settings:
+  #   secrets   CLOUDFLARE_API_TOKEN   (an API token with the permission Account > Cloudflare Pages > Edit)
+  #             CLOUDFLARE_ACCOUNT_ID
+  #   variable  CLOUDFLARE_PAGES_PROJECT (optional; default nfcxx-wasm-explorer; created on the first run if missing)
+  # Without the secrets (a fork's pull request has none) the job does nothing.
+  preview:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'nfcxx-wasm-explorer' }}
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      WRANGLER: wrangler@4.148.0
+    steps:
+      - name: Check for the Cloudflare secrets
+        id: secrets
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID: no preview."
+          fi
+
+      - name: Download the site
+        if: steps.secrets.outputs.ok == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: github-pages
+          path: artifact
+
+      - name: Deploy the preview
+        if: steps.secrets.outputs.ok == 'true'
+        id: deploy
+        run: |
+          mkdir site && tar -xf artifact/artifact.tar -C site
+          # the project, on the first run (an existing one makes this fail, which is fine)
+          npx --yes "$WRANGLER" pages project create "$PROJECT" --production-branch main > /dev/null 2>&1 || true
+          export WRANGLER_OUTPUT_FILE_PATH="$RUNNER_TEMP/wrangler.json"
+          npx --yes "$WRANGLER" pages deploy site --project-name "$PROJECT" --branch "$BRANCH" \
+            --commit-hash "$SHA" --commit-dirty=true
+          # the URLs, from wrangler's machine-readable output (one JSON object per line)
+          node -e '
+            const lines = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+            const d = lines.map((l) => JSON.parse(l)).find((o) => o.type === "pages-deploy-detailed");
+            if (!d) { console.error("wrangler wrote no deployment"); process.exit(1); }
+            const out = [`url=${d.url}`, `alias=${d.alias || d.url}`].join("\n") + "\n";
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, out);
+            console.log(out);
+          ' "$WRANGLER_OUTPUT_FILE_PATH"
+
+      - name: Comment the preview URL on the pull request
+        if: steps.secrets.outputs.ok == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          URL: ${{ steps.deploy.outputs.url }}
+          ALIAS: ${{ steps.deploy.outputs.alias }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker="<!-- wasm-explorer-preview -->"
+          body="$marker
+          **wasm explorer preview** (Cloudflare Pages): $ALIAS
+
+          This commit (\`${SHA:0:7}\`): $URL"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null
+          fi

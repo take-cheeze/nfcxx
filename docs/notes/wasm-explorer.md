@@ -128,6 +128,21 @@ The workflow builds the harness and the mruby tool as `pathb.yml` does, runs the
 without deploying), and deploys from `main`. The one-time repository setting is Settings > Pages > Source: GitHub
 Actions.
 
+**Previews on Cloudflare Pages.** The workflow's `preview` job deploys the same site, the one the build job checked, to
+Cloudflare Pages for every pull request (and every push), with `wrangler pages deploy --branch <branch>` (wrangler
+pinned, from npm). The branch's preview URL (`https://<branch>.<project>.pages.dev`) and the commit's own URL go into one
+comment on the pull request, which each run updates. The URLs are read from wrangler's machine-readable output
+(`WRANGLER_OUTPUT_FILE_PATH`), not from its log. One-time setup, in the repository's settings:
+
+| Setting | Kind | Value |
+| --- | --- | --- |
+| `CLOUDFLARE_API_TOKEN` | secret | a Cloudflare API token with Account > Cloudflare Pages > Edit |
+| `CLOUDFLARE_ACCOUNT_ID` | secret | the Cloudflare account's ID |
+| `CLOUDFLARE_PAGES_PROJECT` | variable (optional) | the Pages project; default `nfcxx-wasm-explorer`, created by the first run |
+
+Without the secrets the job does nothing, so a pull request from a fork (which gets no secrets) builds and checks the site
+without a preview. A push to `main` deploys the project's production branch, beside GitHub Pages.
+
 ## Checks
 
 - `build-static.cjs` is the check for the examples: 7 examples (C++ and C) x 3 modes and 4 (Rust, Go, LLVM IR and IR)
