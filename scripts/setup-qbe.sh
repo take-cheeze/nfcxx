@@ -11,6 +11,8 @@
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
+# The pin is 9f706f5, on the fork's branch nfcxx-stmt-expr: the earlier pin (4030e86) plus GNU statement expressions ({ ... }),
+# which ASTro's baruby_precise needs (docs/notes/astro.md).
 # The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe): no patch files are applied.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)

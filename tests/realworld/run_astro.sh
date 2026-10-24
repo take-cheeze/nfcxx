@@ -88,8 +88,8 @@ fi
 
 # ---- baruby_precise: Ruby subset on a precise GC, needs Prism (the Ruby parser, C). ----
 # libprism at the commit sample/naruby pins (baruby_precise's prism is a symlink to naruby's), built by nfcc on both
-# backends; baruby_precise itself on the gcc backend only: its UNWRAP and WITH_CHILD_CHAIN macros are GNU statement
-# expressions ({ ... }), which cproc does not support (docs/notes/astro.md), so qbe is a documented SKIP.
+# backends, then baruby_precise on both. Its UNWRAP and WITH_CHILD_CHAIN macros are GNU statement expressions ({ ... }), which
+# cproc has since the pin 9f706f5; the one _Atomic(int) of astro_jit.c is patched out on qbe (docs/notes/astro.md).
 ppin=09d9ac3d6cc93a049144ad057b0feb3013081690   # ruby/prism, what ko1/astro pins for sample/naruby
 psrc=$work/prism-09d9ac3
 if [ ! -d "$psrc/.git" ]; then
@@ -114,12 +114,15 @@ for b in $backends; do
   got=$(NFCXX_BACKEND=$b "$root/nfcc" -I"$psrc/include" "$pl/v.c" -L"$pl/build" -Wl,-rpath="$pl/build" -lprism -o "$pl/v" 2>&1 && "$pl/v" 2>&1)
   if ! [[ $got =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then echo "FAIL $b astro prism: libprism built, pm_version() gave '$got'"; fail=1; continue; fi
   echo "ok   $b astro prism: libprism $got built by nfcc and loaded"
-  if [ $b = qbe ]; then
-    echo "SKIP qbe astro baruby_precise: cproc has no GNU statement expressions ({ ... }), which its UNWRAP macro needs (docs/notes/astro.md)"
-    continue
-  fi
   t=$tmp/bp-$b; mkdir -p "$t/sample"; cp -r "$src/lib" "$src/runtime" "$t/"; cp -r "$src/sample/baruby_precise" "$t/sample/"
   d=$t/sample/baruby_precise; rm -f "$d/prism"; mkdir -p "$d/prism"; ln -s "$psrc/include" "$d/prism/include"; ln -s "$pl/build" "$d/prism/build"
+  if [ $b = qbe ]; then
+    # cproc has no _Atomic (cproc's own error). astro_jit.c has one _Atomic(int) field and reads and writes it only through
+    # atomic_load_explicit / atomic_store_explicit, so those become the sized builtins of cproc's atomic support.
+    sed -i -e 's|#include <stdatomic.h>|#define memory_order_acquire __ATOMIC_ACQUIRE\n#define memory_order_release __ATOMIC_RELEASE\n#define atomic_load_explicit(p, mo) __atomic_load_n((p), (mo))\n#define atomic_store_explicit(p, v, mo) __atomic_store_n((p), (v), (mo))|' \
+           -e 's|_Atomic(int) stop_flag;|int stop_flag;|' "$d/astro_jit.c"
+    grep -q '_Atomic' "$d/astro_jit.c" && { echo "FAIL $b astro baruby_precise: the _Atomic patch no longer applies (astro_jit.c changed)"; fail=1; continue; }
+  fi
   sed -i -E 's/\bit\./_1./g; s/#\{it\}/#{_1}/g' "$t/lib/astrogen.rb" "$d/baruby_gen.rb"
   sed -i 's/build_allocator_decl}\.join(";\\n")/build_allocator_decl}.join("\\n")/' "$t/lib/astrogen.rb"
   out=$(cd "$d" && ruby -I ../../lib -r ./baruby_gen -e 'ASTroGen.start([], node_def_class: BaRubyNodeDef)' 2>&1 | grep -v 'warning:')
