@@ -58,6 +58,24 @@
  			fprintf(f, "\tmovaps %%xmm%d, %d(%%rbp)\n", n, o);
  	}
  	for (r=amd64_sysv_rclob; r<&amd64_sysv_rclob[NCLR_SYSV]; r++)
+--- a/amd64/isel.c
++++ b/amd64/isel.c
+@@ -132,7 +132,14 @@
+ 			cc = (Con){.type = CBits};
+ 			cc.bits.i = c->bits.i;
+ 			r3 = newcon(&cc, fn);
+-			emit(Oadd, Kl, r1, r2, r3);
++			if (c->bits.i < INT32_MIN || c->bits.i > INT32_MAX) {
++				/* nfcxx: an offset an add cannot take as an
++				 * immediate (the kernel's _end + 2^31) */
++				Ref r4 = newtmp("isel", Kl, fn);
++				emit(Oadd, Kl, r1, r2, r4);
++				emit(Ocopy, Kl, r4, r3, R);
++			} else
++				emit(Oadd, Kl, r1, r2, r3);
+ 		} else
+ 			r2 = r1;
+ 		if (T.apple && (c->sym.type & SThr)) {
 --- a/emit.c
 +++ b/emit.c
 @@ -195,6 +195,15 @@

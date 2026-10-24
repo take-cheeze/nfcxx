@@ -288,7 +288,7 @@
  };
  
  struct switchcases {
-@@ -522,21 +621,34 @@
+@@ -522,21 +621,35 @@
  	struct array *asanopen;
  };
  
@@ -304,6 +304,7 @@
  
  struct func *mkfunc(struct decl *, char *, struct type *, struct scope *);
 +struct decl *funcclone(struct decl *, struct expr *);
++void funcalloc(struct func *, struct decl *);   /* the storage of an automatic object */
 +/* cproc -G, GNU cleanup semantics (qbe.c): the cleanup of a block-scope object runs when it leaves its scope */
 +extern bool gnucleanup;
 +size_t funccleanmark(struct func *);
@@ -324,7 +325,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +658,10 @@
+@@ -546,6 +659,10 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -972,7 +973,19 @@
  			declcleanup = NULL;
  			if (d->u.obj.cleanup && s == &filescope)
  				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
-@@ -1201,8 +1504,14 @@
+@@ -1181,6 +1484,11 @@
+ 					error(&tok.loc, "object '%s' with block scope and %s linkage cannot have initializer", name, d->linkage == LINKEXTERN ? "external" : "internal");
+ 				if (d->defined)
+ 					error(&tok.loc, "object '%s' redefined", name);
++				/* an automatic object has its storage before its initializer is parsed: a statement expression in it
++				 * is lowered as it is parsed, and may take the object's address (the kernel's
++				 * COMPLETION_INITIALIZER_ONSTACK(fwork.done) in the initializer of fwork) */
++				if (f && d->u.obj.storage == SDAUTO && !d->type->incomplete && !(d->type->prop & PROPVM))
++					funcalloc(f, d);
+ 				init = parseinit(s, d->type);
+ 				hasinit = true;
+ 			} else if (sc & SCEXTERN) {
+@@ -1201,8 +1509,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -988,7 +1001,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1522,43 @@
+@@ -1213,12 +1527,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1033,7 +1046,7 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1268,3 +1608,127 @@
+@@ -1268,3 +1613,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }
@@ -2534,6 +2547,15 @@
  static void emitvalue(struct value *);
  
  static void
+@@ -1544,7 +1589,7 @@
+ 	f->end = end;
+ }
+ 
+-static void
++void
+ funcalloc(struct func *f, struct decl *d)
+ {
+ 	enum instkind op;
 @@ -1631,6 +1676,76 @@
  	}
  }
@@ -3203,11 +3225,14 @@
  void
  funcinit(struct func *func, struct decl *d, struct init *init, bool hasinit)
  {
-@@ -2577,8 +3125,15 @@
+@@ -2576,9 +3124,17 @@
+ 	unsigned long long offset = 0, max = 0;
  	size_t i, w;
  
- 	funcalloc(func, d);
+-	funcalloc(func, d);
 -	if (d->u.obj.cleanup)
++	if (!d->value)   /* allocated before its initializer was parsed (decl.c) */
++		funcalloc(func, d);
 +	if (d->u.obj.cleanup && gnucleanup) {
 +		struct ehobj *o = arrayadd(&func->cleanups, sizeof(*o));
 +
@@ -3220,7 +3245,7 @@
  	if (!hasinit)
  		return;
  	for (; init; init = init->next) {
-@@ -2627,7 +3182,7 @@
+@@ -2627,7 +3183,7 @@
  		funcjmp(f, defaultlabel);
  		return;
  	}
@@ -3229,7 +3254,7 @@
  		funcjmp(f, c->body);
  		return;
  	}
-@@ -2636,7 +3191,12 @@
+@@ -2636,7 +3192,12 @@
  	label[2] = mkblock("switch_gt");
  
  	key = mkintconst(c->node.key);
@@ -3243,7 +3268,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3204,829 @@
+@@ -2644,17 +3205,829 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -4075,7 +4100,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4294,12 @@
+@@ -2922,6 +4295,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -4088,7 +4113,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4312,7 @@
+@@ -2934,7 +4313,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -4097,7 +4122,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4322,7 @@
+@@ -2944,6 +4323,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -4105,7 +4130,7 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4454,18 @@
+@@ -3075,6 +4455,18 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
