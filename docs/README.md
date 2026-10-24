@@ -38,7 +38,8 @@ covers say so.
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
 | [pathb-stage3.md](notes/pathb-stage3.md) | The IR-to-QBE emitter, translation validation, and the rounds of closed gaps (volatile, TLS, exceptions, dynamic init, bit-fields, VLAs). |
-| [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the ILP32 layout of wasm32 under `--emscripten` (i32 pointers), the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`). |
+| [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the ILP32 layout of wasm32 under `--emscripten` (i32 pointers), the 64-bit memory under `--memory64`, the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`, with the Emscripten glue of emcc when it is installed). |
+| [wasm-explorer.md](notes/wasm-explorer.md) | The wasm explorer page (`tools/wasm-explorer/`): compile C++ to wasm on a local server, run the module in the page; Compiler Explorer feature coverage; memory64 (wasm64) as a change to the emitter. |
 | [realworld.md](notes/realworld.md) | tinyxml2, doctest, Lua, mruby built with nfcxx/nfcc, what each needed, `nfcc` options. |
 | [pathb-llvm.md](notes/pathb-llvm.md) | Path B from LLVM IR (`scripts/llvm-to-pathb.rb`): `clang -S -emit-llvm` text to nfcxx IR, with `nsw` checked and the other policy choices; 9 programs run against `// EXPECT:` and clang -O0 (`tests/llvm-pathb/run.sh`); what is refused. |
 | [pathb-cil.md](notes/pathb-cil.md) | Path B IR to CIL: C++ `try`/`catch` as CLR exceptions (spike), 19 of 62 IR test files translate, `tests/pathb-cil/run.sh`. |
@@ -171,11 +172,10 @@ the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap`
   preprocessor options are rejected (`tests/c/cc-mode.sh`, `realworld.md`).
 - qbe-compiled mruby uses the portable `switch` dispatch, not computed goto (`realworld.md`; `tests/realworld/run_mruby.sh`);
   so does QuickJS (`scripts/quickjs-cproc.patch`, `poly.md`).
-- `-D_GNU_SOURCE` (or `#define _GNU_SOURCE`) plus `#include <stdlib.h>` or `<math.h>` fails on qbe with `declaration has no type
-  specifier`: glibc then declares `strtof32x`, `acosf32x` and friends with the types `_Float32x` and `_Float64x`, whose typedefs
-  `qbe-prep.rb` drops without mapping them (it maps `_Float32` and `_Float64`; `_Float64x` is `long double` here). Checked by hand
-  with a three-line C file on both back ends (qbe fails, gcc compiles); QuickJS, whose CMake build defines the macro, is built
-  without it (`poly.md`). No test asserts the failure.
+- `-D_GNU_SOURCE` plus `#include <stdlib.h>` or `<math.h>` used to fail on qbe with `declaration has no type specifier`.
+  glibc declares `strtof32x`, `acosf32x` and friends with `_Float32x` and `_Float64x`. `qbe-prep.rb` now maps `_Float32x` to
+  `double`, `_Float64x` to `long double` and `_Float128x` to the 16-byte `_Float128` struct, and the `f32x`/`f64x`/`f128x`
+  literal suffixes follow them. Regression case: `tests/cases/qbe_floatnx_gnu_source.cpp`.
 - QuickJS needed three more constructs that cproc rejects, patched in the throwaway checkout (`scripts/quickjs-cproc.patch`):
   `_Atomic` (`quickjs-c-atomics.h`, replaced by libatomic's sized functions chosen with `_Generic`; `Atomics` results are checked
   for every element size by `tests/poly/run.sh`), `return f();` of a `void` call inside a `void` function, and the spelling

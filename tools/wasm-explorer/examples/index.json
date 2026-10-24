@@ -1,0 +1,40 @@
+[
+  {
+    "id": "loop",
+    "title": "Loop and arithmetic",
+    "file": "loop.cpp",
+    "expect": 385
+  },
+  {
+    "id": "struct-pointer",
+    "title": "Struct array and pointer",
+    "file": "struct-pointer.cpp",
+    "expect": 300
+  },
+  {
+    "id": "recursion",
+    "title": "Recursion",
+    "file": "recursion.cpp",
+    "expect": 610
+  },
+  {
+    "id": "sieve",
+    "title": "Sieve of primes below 100",
+    "file": "sieve.cpp",
+    "expect": 25
+  },
+  {
+    "id": "browser-bindings",
+    "title": "Browser bindings: console, timer, random, title",
+    "file": "browser-bindings.cpp",
+    "expect": 3,
+    "output": "hello from wasm\n42\n1099511627776\n2.5\n1\n"
+  },
+  {
+    "id": "stdout",
+    "title": "Standard output: puts, putchar, write",
+    "file": "stdout.cpp",
+    "expect": 0,
+    "output": "hello from puts\nputchar: abc\nwrite to fd 1\n[stderr] to stderr\n"
+  }
+]

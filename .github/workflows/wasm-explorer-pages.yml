@@ -1,0 +1,110 @@
+name: wasm explorer (GitHub Pages)
+
+# Builds the wasm explorer's static site (tools/wasm-explorer/build-static.cjs) and deploys it to GitHub Pages. The
+# compiler runs here, in CI: the Path B harness and the mruby tool are built as in pathb.yml, and each example is
+# compiled ahead of time in every mode and checked against its expected result, so a broken example fails this job.
+# The page on Pages cannot compile other code (it has no server); it shows the example builds.
+#
+# One-time repository setting: Settings > Pages > Build and deployment > Source: "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/wasm-explorer/**"
+      - "be/**"
+      - "3rd/edg"
+      - "scripts/pathb-*"
+      - "scripts/setup-pathb.sh"
+      - "scripts/setup-edg.sh"
+      - "scripts/host-sys.sh"
+      - "scripts/mrb"
+      - "scripts/setup-mruby.sh"
+      - "scripts/mruby-tool-config.rb"
+      - ".github/workflows/wasm-explorer-pages.yml"
+  pull_request:
+    paths:
+      - "tools/wasm-explorer/**"
+      - "be/**"
+      - "3rd/edg"
+      - "scripts/pathb-*"
+      - "scripts/setup-pathb.sh"
+      - "scripts/setup-edg.sh"
+      - "scripts/host-sys.sh"
+      - "scripts/mrb"
+      - "scripts/setup-mruby.sh"
+      - "scripts/mruby-tool-config.rb"
+      - ".github/workflows/wasm-explorer-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in pathb.yml
+      PATHB_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install the build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ruby rake
+
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      - name: Restore the mruby tool
+        id: mruby
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+
+      - name: Build the mruby interpreter
+        if: steps.mruby.outputs.cache-hit != 'true'
+        run: scripts/setup-mruby.sh
+
+      - name: Build the static site (compiles and checks every example in every mode)
+        run: node tools/wasm-explorer/build-static.cjs --out _site
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

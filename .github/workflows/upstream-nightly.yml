@@ -10,6 +10,10 @@ on:
         description: Include weekly GCC/Microsoft-origin object surveys and the full EDG tree
         type: boolean
         default: false
+      native_only:
+        description: Run only the native suite jobs and their merge (skip toolchain, routes, EDG and extended)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,10 +39,11 @@ env:
 
 jobs:
   toolchain:
+    if: ${{ !inputs.native_only }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90 # includes a cold compiler build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - uses: ./.github/actions/upstream-toolchain
@@ -47,6 +52,7 @@ jobs:
 
   routes:
     needs: toolchain
+    if: ${{ !inputs.native_only }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     strategy:
@@ -58,7 +64,7 @@ jobs:
       UPSTREAM_ROUTES: ${{ matrix.route }}
       SURVEY_ROUTES: ${{ matrix.route }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - uses: ./.github/actions/upstream-toolchain
@@ -124,7 +130,7 @@ jobs:
       - name: Stage results and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-route-${{ matrix.route }}-${{ github.run_attempt }}
@@ -141,19 +147,45 @@ jobs:
         include:
           - suite: gcc
             source: gcc
+            shard: 1
+            shards: 1
           - suite: clang
             source: clang
+            shard: 1
+            shards: 1
           - suite: libstdcxx
             source: gcc
+            shard: 1
+            shards: 3
+          - suite: libstdcxx
+            source: gcc
+            shard: 2
+            shards: 3
+          - suite: libstdcxx
+            source: gcc
+            shard: 3
+            shards: 3
           - suite: libcxx
             source: clang
+            shard: 1
+            shards: 3
+          - suite: libcxx
+            source: clang
+            shard: 2
+            shards: 3
+          - suite: libcxx
+            source: clang
+            shard: 3
+            shards: 3
           - suite: llvm-test-suite
             source: llvm-test-suite
+            shard: 1
+            shards: 1
     env:
       DEJAGNU_ROOT: /
       CLANG_TIDY_EXE: /usr/bin/clang-tidy-21
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native harness tools
         run: |
           sudo apt-get update
@@ -174,12 +206,12 @@ jobs:
         run: python3 tests/upstream/nightly-self-test.py
       - name: Set up sccache for the libc++ build
         if: matrix.suite == 'libcxx'
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
       - name: libc++ compiler cache identity
         if: matrix.suite == 'libcxx'
         id: compiler
         run: echo "id=$(sha256sum build/nightly/toolchain.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: matrix.suite == 'libcxx'
         with:
           path: build/testsuite-snapshots/libcxx-build-system
@@ -188,32 +220,57 @@ jobs:
         if: matrix.suite == 'libcxx'
         run: tests/upstream/setup-libcxx.sh
       - name: Collect native compatibility observations
-        timeout-minutes: ${{ matrix.suite == 'libcxx' && 45 || 30 }}
+        timeout-minutes: ${{ (matrix.suite == 'libcxx' || matrix.suite == 'libstdcxx') && 60 || 30 }}
         env:
           SUITE: ${{ matrix.suite }}
-        run: python3 tests/upstream/nightly-native.py "$SUITE" "build/nightly/$SUITE"
+        run: python3 tests/upstream/nightly-native.py "$SUITE" "build/nightly/$SUITE" --shard "${{ matrix.shard }}/${{ matrix.shards }}"
       - name: Stage results and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: upstream-native-${{ matrix.suite }}-${{ github.run_attempt }}
+          name: upstream-native-${{ matrix.suite }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: build/nightly-artifact
+          retention-days: 14
+          if-no-files-found: error
+
+  native-merge:
+    needs: native
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: upstream-native-*-${{ github.run_attempt }}
+          path: build/native-shards
+      - name: Merge native shard outcomes
+        run: python3 tests/upstream/nightly-native.py merge build/native-shards build/nightly/native-merged
+      - name: Stage results and job summary
+        if: always()
+        run: python3 tests/upstream/nightly-artifacts.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: upstream-native-merged-${{ github.run_attempt }}
           path: build/nightly-artifact
           retention-days: 14
           if-no-files-found: error
 
   edg:
+    if: ${{ !inputs.native_only }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - name: EDG Docker build cache identity
         id: key
         run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: 3rd/edg/build/gcc
@@ -231,14 +288,14 @@ jobs:
           fi
       - name: Save a completed build even when expectation checks fail
         if: always() && steps.cache.outputs.cache-hit != 'true' && hashFiles('3rd/edg/build/gcc/upstream-build-complete') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: 3rd/edg/build/gcc
           key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Stage comparison logs and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-edg-${{ github.run_attempt }}
@@ -247,7 +304,7 @@ jobs:
           if-no-files-found: error
 
   extended:
-    if: github.event.schedule == '23 17 * * 0' || inputs.extended == true
+    if: ${{ !inputs.native_only && (github.event.schedule == '23 17 * * 0' || inputs.extended == true) }}
     needs: toolchain
     runs-on: ubuntu-26.04
     timeout-minutes: 90
@@ -260,7 +317,7 @@ jobs:
       SURVEY_ROUTES: ${{ matrix.route }}
       SURVEY_TIMEOUT: "60"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - uses: ./.github/actions/upstream-toolchain
@@ -288,7 +345,7 @@ jobs:
       - name: Stage results and job summary
         if: always()
         run: python3 tests/upstream/nightly-artifacts.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-extended-${{ matrix.suite }}-${{ matrix.route }}-${{ github.run_attempt }}

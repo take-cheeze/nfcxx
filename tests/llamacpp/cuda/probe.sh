@@ -17,11 +17,15 @@ fi
 mkdir -p "$out/logs"
 export root out src cuda llama
 export NFCXX_BACKEND=gcc
+# The FlashAttention type combinations as ggml/cmake/common.cmake defines them by default: only f16-f16 is compiled.
+fa=(); for k in q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16; do for v in q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16; do
+  on=0; [ "$k-$v" = f16-f16 ] && on=1; fa+=("-DGGML_CUDA_FA_$(echo "${k}_${v}" | tr a-z A-Z)=$on"); done; done
+export fa_flags="${fa[*]}"
 list=${FILES:-$(cd "$src" && find . -name '*.cu' | sort)}
 echo "$list" | xargs -P "${JOBS:-8}" -I{} bash -c '
   f="{}"; n=$(echo "$f" | sed "s|^\./||; s|/|__|g")
   d=$(mktemp -d "$root/build/probe/tmp.XXXX")
-  TMPDIR=$d timeout 2400 "$root/nfcxx" -c -std=c++17 -DGGML_USE_CUDA -I"$root/lib/cuda/host" -I"$cuda/include" -I"$cuda/include/cccl" \
+  TMPDIR=$d timeout 2400 "$root/nfcxx" -c -std=c++17 -DGGML_USE_CUDA $fa_flags -I"$root/lib/cuda/host" -I"$cuda/include" -I"$cuda/include/cccl" \
     -I"$llama/ggml/include" -I"$llama/ggml/src" -I"$llama/ggml/src/ggml-cuda" "$src/$f" -o "$d/o.o" \
     > "$out/logs/$n.log" 2>&1
   echo $? > "$out/logs/$n.rc"; rm -rf "$d"'

@@ -24,7 +24,7 @@ runs:
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ${{ inputs.packages }}
 
     - name: Set up sccache
-      uses: mozilla-actions/sccache-action@v0.0.9
+      uses: mozilla-actions/sccache-action@v0.0.11
 
     # The key holds everything the build reads: the submodule revisions and the scripts/patches/sources that
     # setup-*.sh use. build/ holds absolute paths, so every job keeps the same checkout path (GITHUB_WORKSPACE).
@@ -37,7 +37,7 @@ runs:
 
     - name: Restore the EDG front end
       id: edg
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           build/edg
@@ -52,7 +52,7 @@ runs:
     - name: Restore QBE and cproc
       id: qbe
       if: inputs.qbe == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           build/qbe

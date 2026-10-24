@@ -52,12 +52,16 @@ Results are TSV, with a log directory per probe and route. Statuses are:
 | `frontend-rejected` | Both the route and Path A `--emit-c` reject it. |
 | `route-rejected` | Route fails but Path A `--emit-c` succeeds; inspect logs for backend, linker, or Path B front-end differences. |
 | `host-rejected` | Host comparison compiler rejects it. |
-| `compile-crash`, `frontend-crash`, `run-crash` | Exit status greater than 128 (signal convention). |
+| `backend-rejected` | The C back end (`qbe-cc`) rejected the C that the front end generated: eccp reports this as 129, and the C compiler's own status (1) is in the log. |
+| `compile-crash`, `frontend-crash`, `run-crash` | Exit status greater than 128 (signal convention). A back-end crash is `compile-crash` too, when the log shows a status above 128. |
 | `compile-timeout`, `frontend-timeout`, `run-timeout` | GNU timeout's 124 or forced-kill 137. |
 
 A separate Path A front-end pass cannot prove that a failure is in Path B's
 backend. Logs retain the evidence for manual review. Investigate signals and
 infrastructure failures before updating the published matrix.
+
+The C++17 milestone has 12 probes (`cpp17/`), one per paper. The N4266 probe covers only the namespace
+attribute: the front end rejects attributes on enumerators, so that part is a known gap, not a passing probe.
 
 The parser covers all 246 rows (41/10/40/58/34/44/19 for C++11/14/17/20/23/26/29).
 C++17 onward, vendor cross-checks and next-mode reruns for upstream partial

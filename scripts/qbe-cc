@@ -46,7 +46,18 @@ if [ $compile = 0 ]; then
   asan=(); [ -z "${NFCXX_ASAN:-}" ] || asan=(-fsanitize=address)
   # macOS: libc++ instead of libstdc++, and no libatomic (the sized atomics come from clang's runtime).
   if [ "$(uname -s)" = Darwin ]; then libs=(-lc++ -lm); else libs=(-latomic -lstdc++ -lm); fi
-  exec ${CCBIN[@]+"${CCBIN[@]}"} "$@" ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"}
+  # NFCXX_EH_UNWIND=1 (nfcxx's gate, nfcxx): the program's unwinder flag is 1. The gcc backend gets it from its
+  # objects (lib/ehshim/nfcxx_eh_unwind.h); the cproc objects cannot (no weak definitions), so a flag object is linked in.
+  ehflag=(); ehdir=""
+  if [ "${NFCXX_EH_UNWIND:-}" = 1 ]; then
+    ehdir=$(mktemp -d); printf 'int __nfcxx_eh_unwind_frames = 1;\n' > "$ehdir/flag.c"
+    ${CCBIN[@]+"${CCBIN[@]}"} -c "$ehdir/flag.c" -o "$ehdir/flag.o"
+    ehflag=("$ehdir/flag.o")
+  fi
+  st=0
+  ${CCBIN[@]+"${CCBIN[@]}"} "$@" ${ehflag[@]+"${ehflag[@]}"} ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"} || st=$?
+  [ -z "$ehdir" ] || rm -rf "$ehdir"
+  exit $st
 fi
 if [ -z "$src" ]; then
   exec ${CCBIN[@]+"${CCBIN[@]}"} "$@"
@@ -111,6 +122,10 @@ t=$(trace_start)
 prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
 # Mach-O targets: qbe-prep.rb lists constructors in __mod_init_func with the "_" label prefix
 macho=(); [ $macos = 1 ] && macho=(--macho)
+# The fence stub is mfence on x86-64 and dmb ish on arm64. The target is arm64 on an arm64 host and in the macOS cross
+# (NFCXX_MACOS_SYSROOT, from any host, where QBE gets -t arm64_apple).
+arm64=(); case "$(uname -m)" in arm64|aarch64) arm64=(--arm64) ;; esac
+[ -z "${NFCXX_MACOS_SYSROOT:-}" ] || arm64=(--arm64)
 # qbe-prep.rb changes only the forms named in its header, and all of them contain one of these tokens. With
 # none present (and no CR, which it would normalize), its output is its input and the tail is empty, so the
 # file goes through unchanged. Under mruby the scan costs minutes on a multi-MB file (unicode_name_fsm: 11 MB).
@@ -119,7 +134,7 @@ if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -
    ! grep -q "$(printf '\r')" "$tmp/pp.c"; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
-  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${macho[@]+"${macho[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${macho[@]+"${macho[@]}"} ${arm64[@]+"${arm64[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
 fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
