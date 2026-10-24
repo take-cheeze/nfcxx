@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Move a C compile to the qbe backend when that is safe, keep the gcc backend's object otherwise. nfcc runs this when
+# NFCXX_QBE_TRY is set on the gcc backend (docs/notes/linux-kernel.md):
+#   NFCXX_QBE_TRY="PATTERN ..."   shell patterns matched against the source path ('*' = every C file)
+#   NFCXX_QBE_LOG=FILE            one line per tried file: "qbe SRC", or "gcc SRC: reason"
+# 1. The compile runs as asked (the gcc backend, NFCXX_GCC_PASSTHROUGH): its object and dependency file are the
+#    fallback, and its object is the reference.
+# 2. For a "-c SRC.c -o OBJ" compile matching a pattern, the same compile runs on the qbe backend with
+#    NFCXX_QBE_KERNEL=1 (only the options that path honours are accepted; -mno-sse is checked).
+# 3. The qbe object replaces the gcc one only if it matches it: the same global and weak definitions (name, binding,
+#    type, kind of section, visibility), no undefined symbol the gcc object does not also need (with NFCXX_QBE_KSYMS,
+#    unless the gcc-built kernel defines it), no reference from lasting code to init code (or an undefined symbol)
+#    that gcc's object makes only from init code, and the same special (non-text, non-data) allocated sections, but
+#    for extra ones known to be harmless (below). Anything else keeps the gcc object.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+nfcc=$root/nfcc
+patterns=$NFCXX_QBE_TRY
+log=${NFCXX_QBE_LOG:-/dev/null}
+
+NFCXX_QBE_TRY= "$nfcc" "$@" || exit $?
+
+# a single-source compile to an object?
+compile=0 src="" obj="" qargs=() args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  a=${args[i]}
+  case $a in
+    -c) compile=1; qargs+=("$a") ;;
+    -S|-E|-M|-MM) exit 0 ;;
+    -o) obj=${args[++i]} ;;
+    -o?*) obj=${a#-o} ;;
+    -MD|-MMD|-MP|-Wp,-MD,*|-Wp,-MMD,*) ;;      # the gcc run wrote the dependency file
+    -MF|-MT|-MQ) ((i++)) ;;
+    -MF?*|-MT?*|-MQ?*) ;;
+    *.c) [ -z "$src" ] || exit 0; src=$a; qargs+=("$a") ;;
+    *) qargs+=("$a") ;;
+  esac
+done
+[ $compile = 1 ] && [ -n "$src" ] && [ -n "$obj" ] || exit 0
+match=0
+set -f   # the patterns are split on blanks, not expanded against the current directory
+for p in $patterns; do
+  # shellcheck disable=SC2053
+  [[ $src == $p ]] && { match=1; break; }
+done
+set +f
+[ $match = 1 ] || exit 0
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+note() { printf '%s\n' "$1" >> "$log"; }
+if ! NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 NFCXX_GCC_PASSTHROUGH= NFCXX_QBE_TRY= \
+     "$nfcc" "${qargs[@]}" -o "$tmp/q.o" 2> "$tmp/err"; then
+  why=$(grep -m1 -E 'error|refuse|forbid|not supported' "$tmp/err" || head -n1 "$tmp/err")
+  note "gcc $src: $(cut -c1-200 <<<"${why:-the qbe compile failed without a message}")"
+  exit 0
+fi
+
+# symbols: "name binding type section-kind visibility" for globals and weak symbols; undefined ones separately. The
+# tail of an objdump -t line is "SIZE [.hidden|.protected|.internal] NAME".
+syms() {
+  objdump -t "$1" | awk -F'\t' 'NF >= 2 {
+      head = $1; nt = split($2, tail, " "); name = tail[nt]; vis = nt > 2 ? tail[2] : "default"
+      bind = substr(head, 18, 1); weak = substr(head, 19, 1); kind = substr(head, 24, 1)
+      n = split(head, f, " "); sec = f[n]
+      if (sec == "*UND*") { print "U " name; next }   # objdump gives an undefined symbol no binding flag
+      if (bind != "g" && bind != "u" && weak != "w") next
+      if (sec ~ /^\.text(\.(unlikely|hot|startup))?$/) sec = "text"
+      else if (sec ~ /^\.(data|bss|rodata)(\.rel(\.ro)?(\.local)?)?$|^\.rodata\.(str|cst)/) sec = "data"
+      else if (sec == "*COM*") sec = "common"
+      print "D " name " " (weak == "w" ? "weak" : "global") " " kind " " sec " " vis
+    }' | sort -u
+}
+# allocated sections other than the ordinary text and data ones (.init.text, .initcall6.init, __param, ...)
+specials() {
+  readelf -SW "$1" | awk '/^ *\[ *[0-9]+\]/ {
+      sub(/^ *\[ *[0-9]+\] */, ""); name = $1; flags = $7
+      if (flags !~ /A/) next
+      if (name ~ /^\.(text|data|bss|rodata)(\.|$)/ && name !~ /^\.(data|text|rodata)\.\./) next
+      if (name ~ /^\.(eh_frame|note|comment|group)/) next
+      print name }' | sort -u
+}
+# references from code and data that stays after boot (not .init.*, .exit.*, .meminit.*, .ref.*, .head.text) to a
+# symbol: "init NAME" when NAME is in such a section or undefined here (it may be elsewhere's init code), else
+# "other NAME". With NFCXX_QBE_INITSYMS (the init symbols of a gcc-built kernel, scripts/linux-qemu.sh) an undefined
+# symbol is init code only when it is listed. The kernel's modpost refuses a reference from lasting code to init code;
+# gcc's always_inline helpers leave none, cproc's out-of-line copies can (memblock_alloc in .text calling the __init
+# memblock_alloc_try_nid).
+refs() {
+  { [ -z "${NFCXX_QBE_INITSYMS:-}" ] || { echo "@@INITLIST"; sed 's/^/@@INIT /' "$NFCXX_QBE_INITSYMS"; }
+    readelf -SW "$1"; echo "@@SYMS"; readelf -sW "$1"; echo "@@RELS"; readelf -rW "$1"; } | awk '
+    function initlike(n) { return n ~ /^\.(init|exit|meminit|memexit)(\.|$)/ }
+    function lasting(n) { return !(initlike(n) || n ~ /^\.(ref|head|discard|debug|eh_frame|note|comment)(\.|$)/ || n ~ /^\.rela?\./) }
+    /^@@INITLIST/ { haveinit = 1; next }
+    /^@@INIT / { initsym[$2] = 1; next }
+    /^@@SYMS/ { mode = 1; next }
+    /^@@RELS/ { mode = 2; next }
+    mode == 0 && /^ *\[ *[0-9]+\]/ { line = $0; sub(/^ *\[ */, "", line); split(line, f, /[] ]+/); secname[f[1]] = f[2]; next }
+    mode == 1 && $1 ~ /^[0-9]+:$/ && NF >= 8 { ndx[$8] = $7; next }
+    mode == 2 && /^Relocation section/ { src = $3; gsub(/[\x27]/, "", src); sub(/^\.rela?/, "", src); next }
+    mode == 2 && $1 ~ /^[0-9a-f]+$/ && NF >= 5 && lasting(src) {
+      n = $5
+      if (initlike(n)) { print "init " n; next }
+      if (!(n in ndx)) { print "other " n; next }
+      # an undefined symbol: init code if the gcc-built kernel has it in an init section (NFCXX_QBE_INITSYMS), or if
+      # there is no such list
+      if (ndx[n] == "UND" ? !haveinit || (n in initsym) : initlike(secname[ndx[n]])) print "init " n; else print "other " n
+    }' | sort -u
+}
+# Code in .head.text (the kernel's __head: head64.c) runs identity-mapped, before the kernel's page tables, and its
+# C depends on how gcc addresses symbols (absolute for &sym, which fixup_pointer corrects; rip-relative loads), which
+# the objects cannot show: it stays on gcc. QBE's GOT loads become absolute addresses in the kernel's link, and a
+# kernel with head64.c from QBE did not print its banner.
+if readelf -SW "$obj" | grep -q ' \.head\.text '; then note "gcc $src: code in .head.text (runs before the kernel's mapping) stays on gcc"; exit 0; fi
+syms "$obj" > "$tmp/g.syms"; syms "$tmp/q.o" > "$tmp/q.syms"
+specials "$obj" > "$tmp/g.sec"; specials "$tmp/q.o" > "$tmp/q.sec"
+grep '^D ' "$tmp/g.syms" > "$tmp/g.def"; grep '^D ' "$tmp/q.syms" > "$tmp/q.def"
+if ! cmp -s "$tmp/g.def" "$tmp/q.def"; then
+  note "gcc $src: definitions differ: $(diff "$tmp/g.def" "$tmp/q.def" | grep '^[<>]' | head -2 | tr '\n' ' ')"
+  exit 0
+fi
+# _GLOBAL_OFFSET_TABLE_ comes with QBE's @GOTPCREL loads; the linker relaxes them (the kernel's linker script
+# checks that no GOT is left)
+# With NFCXX_QBE_KSYMS (the symbols a gcc-built kernel defines, scripts/linux-qemu.sh), a symbol the kernel defines is
+# not missing: the qbe object calls memset where gcc's object inlined it.
+comm -13 <(grep '^U ' "$tmp/g.syms") <(grep '^U ' "$tmp/q.syms") | grep -vx 'U _GLOBAL_OFFSET_TABLE_' > "$tmp/extra"
+if [ -n "${NFCXX_QBE_KSYMS:-}" ]; then
+  awk 'NR == FNR { have[$1] = 1; next } !($2 in have)' "$NFCXX_QBE_KSYMS" "$tmp/extra" > "$tmp/extra.k" && mv "$tmp/extra.k" "$tmp/extra"
+fi
+extra=$(head -3 "$tmp/extra" | tr '\n' ' ')
+if [ -n "$extra" ]; then note "gcc $src: qbe object needs more symbols: $extra"; exit 0; fi
+# a reference from lasting code to init (or unknown) code that gcc's object makes only from init code, or not at all
+refs "$obj" | awk '{print $2}' | sort -u > "$tmp/g.refs"; refs "$tmp/q.o" | awk '$1 == "init" {print $2}' | sort -u > "$tmp/q.init"
+mismatch=$(comm -23 "$tmp/q.init" "$tmp/g.refs" | head -3 | tr '\n' ' ')
+if [ -n "$mismatch" ]; then note "gcc $src: lasting code references init code where gcc's object does not: $mismatch"; exit 0; fi
+# A special section gcc's object has must be there, but for the alternatives and .discard.*: without them the qbe
+# object's code just has no instruction to patch (gcc inlined bitmap_weight() and its popcnt alternative where the
+# qbe object calls it). One only the qbe object has is taken when having it is harmless:
+# .discard.* (the link drops it), the alternatives of code that is there (.altinstructions and the code they patch
+# in), and init data (.init.rodata, .init.data: freed after boot; the check above refuses lasting code that refers to
+# init code) -- code gcc's object dropped after inlining can leave them. Any other (an initcall, a kernel parameter,
+# an exported symbol) would change what the kernel does.
+harmless='^\.(discard\..*|altinstructions|altinstr_replacement|altinstr_aux|init\.rodata|init\.data)$'
+optional='^\.(discard\..*|altinstructions|altinstr_replacement|altinstr_aux)$'
+if ! cmp -s "$tmp/g.sec" "$tmp/q.sec" &&
+   { comm -23 "$tmp/g.sec" "$tmp/q.sec" | grep -qvE "$optional" || comm -13 "$tmp/g.sec" "$tmp/q.sec" | grep -qvE "$harmless"; }; then
+  note "gcc $src: sections differ: $(diff "$tmp/g.sec" "$tmp/q.sec" | grep '^[<>]' | head -3 | tr '\n' ' ')"
+  exit 0
+fi
+cp "$tmp/q.o" "$obj" && note "qbe $src"

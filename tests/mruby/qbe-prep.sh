@@ -263,10 +263,11 @@ void f(char *a, char *b, unsigned long n, double x, unsigned long u, unsigned v,
 }
 EOF
 both builtins
-expect builtins out 'static int __nfcxx_popcountll('
-expect builtins out 'static int __nfcxx_ctz('
+# the bit-counting built-ins stay: cproc lowers and folds them
+expect builtins out '__builtin_popcountll(w)'
+expect builtins out '__builtin_ctz(v)'
 expect builtins out 'void *memmove(void *, const void *, unsigned long);'
-expect builtins out 'static int __nfcxx_clz('
+expect builtins out '__builtin_clzl(u)'
 cat >"$tmp/edge/atomics.c" <<'EOF'
 void f(void *p, int *e) {
   __atomic_load_1(p, 5); __atomic_load_2(p, 5); __atomic_load_4(p, 5); __atomic_load_8(p, 5); __atomic_load_16(p, 5);
@@ -328,7 +329,7 @@ expect volatile+c out '__nfcxx_keep(&inner);'
 expect volatile+c out '__nfcxx_keep(&blk2);'
 expect volatile+c out '__nfcxx_keep(&nested);'
 expect volatile+c out '__nfcxx_keep(&one);'
-expect volatile+c out 'static void __nfcxx_keep(void *p) { }'
+expect volatile+c out 'static __attribute__((noipa)) void __nfcxx_keep(void *p) { }'
 cat >"$tmp/edge/alloca.c" <<'EOF'
 extern void *alloca (unsigned long);
 void *alloca(unsigned long);
@@ -536,8 +537,8 @@ if [ $changed -eq 0 ] || [ $total -lt 60 ]; then
 fi
 if [ $errors -lt 8 ]; then echo "FAIL qbe-prep: only $errors refusal cases compared"; fail=1; fi
 for m in 'struct __nfcxx_half16 {' 'struct __nfcxx_float128 {' '{ 0x' 'UL, 0x' '_Alignas(' '__attribute__((__aligned__(' \
-         '__nfcxx_int3();' '__nfcxx_mulov_ul(' '__nfcxx_ovx_' '__nfcxx_addov_' '__nfcxx_popcount' '__builtin_alloca(' \
-         '__nfcxx_keep(&' 'unsigned long __atomic_fetch_add_' 'memcpy(void *' '__nfcxx_clzl' '1.5f;'; do
+         '__nfcxx_int3();' '__nfcxx_mulov_ul(' '__nfcxx_ovx_' '__nfcxx_addov_' '__builtin_alloca(' \
+         '__nfcxx_keep(&' 'unsigned long __atomic_fetch_add_' 'memcpy(void *' '1.5f;'; do
   grep -qF -e "$m" "$tmp/all.out" || { echo "FAIL qbe-prep: no input produced '$m'"; fail=1; }
 done
 for m in '.init_array' '.set ' '.globl ' '.weak _ZTH' '__nfcxx_int3,@function' '.quad '; do
