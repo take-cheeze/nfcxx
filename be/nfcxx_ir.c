@@ -38,13 +38,22 @@ USING_NAMESPACE_EDG
 /* ================================================================ text buffers */
 
 /* A growable text buffer. While it is begun, nf_out points at it. Buffers nest: begin saves the
-   previous nf_out and end restores it. */
+   previous nf_out and end restores it. A buffer is in memory, or (ir_buf_open_file) in an unlinked temporary file. */
 struct ir_buf {
   FILE *f;
   char *data;
   size_t len;
   FILE *saved;
+  int in_file;
 };
+
+/* A failed write: a memory stream that could not grow (malloc failed), a full disk, or a closed output. The IR would be
+   cut short, so the front end stops with an error instead of printing what it has. */
+static void ir_write_failed(void)
+{
+  fprintf(stderr, "nfcxx_ir: writing the IR failed (out of memory, or the output could not be written)\n");
+  exit(EXIT_FAILURE);
+}
 
 static void ir_buf_open(ir_buf *b)
 {
@@ -54,6 +63,22 @@ static void ir_buf_open(ir_buf *b)
     abort();
   }
   b->saved = NULL;
+  b->in_file = 0;
+}
+
+/* A buffer for text too large to keep in memory (the module's functions: hundreds of MB for a large CUDA unit, on top
+   of the front end's own memory). */
+static void ir_buf_open_file(ir_buf *b)
+{
+  b->f = tmpfile();
+  if (b->f == NULL) {
+    fprintf(stderr, "nfcxx_ir: tmpfile failed\n");
+    abort();
+  }
+  b->data = NULL;
+  b->len = 0;
+  b->saved = NULL;
+  b->in_file = 1;
 }
 
 static void ir_buf_begin(ir_buf *b)
@@ -64,15 +89,24 @@ static void ir_buf_begin(ir_buf *b)
 
 static void ir_buf_end(ir_buf *b)
 {
-  fflush(b->f);
+  if (fflush(b->f) != 0 || ferror(b->f)) ir_write_failed();
   nf_out = b->saved;
 }
 
 /* Write the buffered text to out. */
 static void ir_buf_write(ir_buf *b, FILE *out)
 {
-  fflush(b->f);
-  if (b->len > 0) fwrite(b->data, 1, b->len, out);
+  if (fflush(b->f) != 0 || ferror(b->f)) ir_write_failed();
+  if (b->in_file) {
+    char chunk[65536];
+    size_t n;
+    if (fseek(b->f, 0, SEEK_SET) != 0) ir_write_failed();
+    while ((n = fread(chunk, 1, sizeof chunk, b->f)) > 0) fwrite(chunk, 1, n, out);
+    if (ferror(b->f) || fseek(b->f, 0, SEEK_END) != 0) ir_write_failed();
+  } else if (b->len > 0) {
+    fwrite(b->data, 1, b->len, out);
+  }
+  if (ferror(out)) ir_write_failed();
 }
 
 static void ir_buf_close(ir_buf *b)
@@ -6003,7 +6037,7 @@ void nfcxx_ir_back_end(void)
   ir_buf_open(&ir_out_globals);
   ir_buf_open(&ir_out_types);
   ir_buf_open(&ir_out_data);
-  ir_buf_open(&ir_out_funcs);
+  ir_buf_open_file(&ir_out_funcs);
   ir_mod.n = 0;
 
   /* A weakref variable first: its target is then printed as the weak declaration the weakref makes it. */
@@ -6065,6 +6099,6 @@ void nfcxx_ir_back_end(void)
   ir_buf_write(&ir_out_globals, stdout);
   ir_buf_write(&ir_out_data, stdout);
   ir_buf_write(&ir_out_funcs, stdout);
-  fflush(stdout);
+  if (fflush(stdout) != 0 || ferror(stdout)) ir_write_failed();
   if (getenv("NFCXX_PATHB_STATS") != NULL) ir_print_stats();
 }

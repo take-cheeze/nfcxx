@@ -61,7 +61,7 @@ cudatmp=""
 # (scripts/pathb-dump), the IR-to-PTX emitter (tools/pathb-ptx-emit) and ptxas for NFCXX_SM (default 75). The kernels
 # are split into modules within NFCXX_CUDA_MAX_CONST_BYTES (65536: ptxas's limit on constant data) and
 # NFCXX_CUDA_MAX_PTX_LINES; each module is one cubin (a file that fits has one). The cubins are embedded at the end of
-# the host copy with a registration tail (scripts/cuda-embed.rb), so the one object holds the host code and its device
+# the host copy with a registration tail (pathb-ptx-emit --embed), so the one object holds the host code and its device
 # images. A file with no kernel gets no device image.
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
@@ -180,7 +180,7 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
     # The groups are independent: assemble them NFCXX_PTXAS_JOBS at a time (default 4; each ptxas is ~170 MB at 8 kernels).
     ls "$groups"/g*.ptx | xargs -P "${NFCXX_PTXAS_JOBS:-4}" -I{} sh -c 'f=$1; "$2" -arch=sm_$3 "$f" -o "${f%.ptx}.cubin"' _ {} "$ptxas" "$sm" || exit $?
   fi
-  "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
+  "$root/build/pathb-ptx-emit" --embed --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
 }
 # A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
 # <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the

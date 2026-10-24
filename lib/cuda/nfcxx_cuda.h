@@ -3,7 +3,7 @@
 // the arguments into the kernel's parameter types and launches the kernel's device code. Link with -lcudart.
 //
 // The device code of a .cu file is built by the driver (scripts/cuda-rewrite.rb --device, scripts/pathb-ptx-emit.rb,
-// ptxas) and appended to the host copy as a registration tail (scripts/cuda-embed.rb): a static object whose
+// ptxas) and appended to the host copy as a registration tail (pathb-ptx-emit --embed): a static object whose
 // constructor loads the image with cudaLibraryLoadData and maps each kernel's host address to its cudaKernel_t.
 // The qualifiers are empty: a kernel is an ordinary function on the host side. Kernels must return void.
 #ifndef NFCXX_CUDA_H

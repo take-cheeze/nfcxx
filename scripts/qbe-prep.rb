@@ -48,7 +48,7 @@
 #     becomes `.set X, Y`. EDG uses these for thread_local initialization aliases
 #     (`_ZTHx = __tls_init`). A `_ZTHx` alias is marked `.weak` when its `_ZTWx` wrapper is weak
 #     (COMDAT), as gcc does.
-#     The device image block of scripts/cuda-embed.rb (a local data symbol that .incbin's a file) is re-emitted
+#     The device image block of pathb-ptx-emit --embed (a local data symbol that .incbin's a file) is re-emitted
 #     the same way (image_asm?).
 #   * `__attribute__((__constructor__))` on a function declaration (EDG's static initializers, `__sti_*`)
 #     is removed from the C, and the function is listed in `.init_array` in the assembly tail, so the
@@ -1208,7 +1208,7 @@ def long_double_literal?(text)
   k == n && (text.include?('.') || text.include?('e') || text.include?('E'))
 end
 
-# The device image block of scripts/cuda-embed.rb: a local data symbol that .incbin's the module's file. Only these lines
+# The device image block of pathb-ptx-emit --embed: a local data symbol that .incbin's the module's file. Only these lines
 # (and the label and the .incbin path) pass; any other top-level asm is refused as before.
 IMAGE_ASM_PREFIXES = ['.local __nfcxx_image', '.type __nfcxx_image', '.size __nfcxx_image', '.incbin "']
 def image_asm?(text)
@@ -1411,7 +1411,7 @@ def main(argv)
           next
         end
         if tk.depth(i) == 0 && tk.pdepth(i) == 0 && image_asm?(text)
-          # a device image (scripts/cuda-embed.rb): the .incbin block goes to the tail, as it is
+          # a device image (pathb-ptx-emit --embed): the .incbin block goes to the tail, as it is
           die "qbe-prep: device image block with --macho is not supported" if macho
           text.split("\n").each { |l| tail << "\t#{l}" }
           edits << [stmt_start, stmt_end, '']
