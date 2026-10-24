@@ -1491,9 +1491,10 @@ class CodeGen
       constant_ops = @call_block_expr ? %w[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %w[SEND0 SEND SSEND0 SSEND]
       if !self_implicit && irep && constant_site_idx && @closed_world &&
          constant_ops.include?(BytecodeIR.for(irep).source_at(constant_site_idx).op)
+        # A send inside a rescue or ensure range reads its receiver through the handler edges.
         constant_owner = constant_object_owner(irep, constant_site_idx,
                                                unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
-                                               owner_def&.owner)
+                                               owner_def&.owner, through_handlers: true)
         constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
         return constant_code if constant_code
 

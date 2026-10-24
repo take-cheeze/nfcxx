@@ -72,7 +72,7 @@ module NativeCoreResultSigsCases
       'Integer' => 'Numeric', 'Float' => 'Numeric', 'String' => 'Object', 'Symbol' => 'Object',
       'Array' => 'Object', 'Hash' => 'Object', 'Range' => 'Object', 'Proc' => 'Object',
       'Exception' => 'Object', 'StandardError' => 'Exception', 'Struct' => 'Object', 'IO' => 'Object',
-      'Time' => 'Object', 'Dir' => 'Object', 'OnigMatchData' => 'Object'
+      'File' => 'IO', 'Time' => 'Object', 'Dir' => 'Object', 'OnigMatchData' => 'Object'
     }.freeze
     audited_mixins = {
       'Object' => %w[Kernel], 'Numeric' => %w[Comparable], 'String' => %w[Comparable],
