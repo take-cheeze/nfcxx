@@ -2,7 +2,8 @@ name: CUDA
 
 # CUDA library checks (docs/notes/gpu.md): a .cu file that includes cuBLAS and cuDNN is compiled through nfcxx and
 # nfcxx-cuda and linked with -lcublas -lcudnn -lcudart (tests/cuda/libs/run.sh). The libraries come from NVIDIA's
-# PyPI wheels (scripts/fetch-cuda-libs.sh); nothing runs on a GPU. Runs only when a change can affect the CUDA path:
+# PyPI wheels (scripts/fetch-cuda-libs.sh); and the driver API through cudart (tests/cuda/driver/run.sh,
+# docs/notes/cuda-driver.md). Nothing runs on a GPU. Runs only when a change can affect the CUDA path:
 # the CUDA sources, the rewriters, the device pass and its harness, the driver, or the workflow itself.
 # Runs on demand too (workflow_dispatch).
 on:
@@ -18,6 +19,9 @@ on:
       - "scripts/setup-pathb.sh"
       - "scripts/fetch-cuda-libs.sh"
       - "scripts/fetch-cudart-wheel.sh"
+      - "scripts/cuda-driver-shim"
+      - "scripts/cuda-driver-wrap.sh"
+      - "nfcc"
       - "scripts/mrb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
@@ -37,6 +41,9 @@ on:
       - "scripts/setup-pathb.sh"
       - "scripts/fetch-cuda-libs.sh"
       - "scripts/fetch-cudart-wheel.sh"
+      - "scripts/cuda-driver-shim"
+      - "scripts/cuda-driver-wrap.sh"
+      - "nfcc"
       - "scripts/mrb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
@@ -85,6 +92,9 @@ jobs:
 
       - name: CUDA library link (cuBLAS, cuDNN, cudart through nfcxx and nfcxx-cuda)
         run: tests/cuda/libs/run.sh
+
+      - name: CUDA driver API through cudart (--cuda-driver=cudart)
+        run: tests/cuda/driver/run.sh
 
       - name: sccache stats
         if: always()
