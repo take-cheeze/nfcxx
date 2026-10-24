@@ -1091,11 +1091,14 @@ class CodeGen
                                               yield_free: region[:yield_free])
     # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
     # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
+    stack_expr = stack_block_expr(region)
     direct = if inline_offset.nil?
-               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def)
+               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, stack_expr: stack_expr)
              elsif owner_def && block_arm_reach?
-               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, inline_offset: inline_offset)
+               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, inline_offset: inline_offset,
+                                                                                         stack_expr: stack_expr)
              end
+    ctor, direct = stack_block_glue(region, rproc_var, ctor, direct) if direct && stack_expr && direct.include?(stack_expr)
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), #{direct ? 'direct call with the block' : 'dynamic dispatch'}\n"
@@ -1131,6 +1134,37 @@ class CodeGen
     end
     out << "  }\n"
     out
+  end
+
+  # STACK_BLOCK (docs/bc2cpp-stack-blocks.md): a direct-entry block may be built in the frame instead of on the
+  # heap. The forwarded frame block (`needs_blk`) is left out: the heap env is what keeps that value rooted.
+  def stack_block_expr(region)
+    return nil unless stack_blocks? && region[:direct_entry] && !region[:needs_blk]
+
+    "bc2cpp_blk_stack_#{region[:block_addr]}.value()"
+  end
+
+  # The arms took the frame-local block: build it over the env array, and build the heap RProc only where the
+  # remaining code still dispatches (the by-name else), when it runs.
+  def stack_block_glue(region, rproc_var, ctor, direct)
+    addr = region[:block_addr]
+    heap_line = ctor[/^ *struct RProc\* #{rproc_var} = (mrb_proc_new_cfunc_with_env\(M, \w+, (\d+), bc2cpp_blk_env_#{addr}\));\n/]
+    return [ctor, direct] unless heap_line
+
+    alloc = Regexp.last_match(1)
+    len = Regexp.last_match(2)
+    heap_ref = "mrb_obj_value(#{rproc_var})"
+    lines = "    Bc2cppStackBlock bc2cpp_blk_stack_#{addr}(M, #{len}, bc2cpp_blk_env_#{addr});\n"
+    if direct.include?(heap_ref)
+      lines << "    auto bc2cpp_blk_heap_#{addr} = [&]() { return mrb_obj_value(#{alloc}); };\n"
+      direct = direct.gsub(heap_ref, "bc2cpp_blk_heap_#{addr}()")
+    end
+    [ctor.sub(heap_line, lines), direct]
+  end
+
+  # BC2CPP_STACK_BLOCKS=0 builds every block on the heap again.
+  def stack_blocks?
+    ENV['BC2CPP_STACK_BLOCKS'] != '0'
   end
 
   # EXPLICIT_BLOCK_ARG_SUPPORT: `ary.select(&:defending)`, `ary.each(&proc_var)`,
