@@ -67,8 +67,8 @@ placeholders, and each device module is registered with the runtime.
 - **Device image.** `cuda-rewrite --device` extracts the file's `__global__` and `__device__` functions into a
   device-only translation unit, with `threadIdx.x`, `blockIdx.x`, `blockDim.x`, `gridDim.x` (and y, z) rewritten to the
   intrinsic calls `__nfcxx_tid_x()` and the rest. `scripts/pathb-dump --ir` lowers it, `tools/pathb-ptx-emit`
-  lowers the IR to PTX, and `ptxas -arch=sm_$NFCXX_SM` (default 75) assembles it. `scripts/cuda-embed.rb` then appends
-  a registration tail to the host copy: the cubin as a byte array, the table of host function to entry name (the
+  lowers the IR to PTX, and `ptxas -arch=sm_$NFCXX_SM` (default 75) assembles it. `pathb-ptx-emit --embed` then appends
+  a registration tail to the host copy: the cubin (an assembler `.incbin` of the file), the table of host function to entry name (the
   kernel's IR function, the name itself or `_Z<len><name>`), and a static object whose constructor calls
   `cudaLibraryLoadData` and `cudaLibraryGetKernel` before `main`.
 - **Modules.** One PTX module cannot hold a large kernel set: ptxas caps the constant data of a module at 64 KB, and a
@@ -80,7 +80,7 @@ placeholders, and each device module is registered with the runtime.
   emitted when a function uses them), and the helper functions are `.func`s, not `.visible`, so a helper in two
   modules is allowed. A kernel over the budget on its own is refused (exit 3). A `.global` that two modules would both
   need cannot be split, and is refused. The driver budgets are `NFCXX_CUDA_MAX_CONST_BYTES` (default 65536) and
-  `NFCXX_CUDA_MAX_PTX_LINES` (default 60000). Each group is one cubin, and `scripts/cuda-embed.rb --groups=DIR` embeds
+  `NFCXX_CUDA_MAX_PTX_LINES` (default 60000). Each group is one cubin, and `pathb-ptx-emit --embed --groups=DIR` embeds
   them with a kernel table per module; the runtime registry maps each host address to its kernel in whichever module
   holds it. A file that fits one module has one group. `tests/cuda/groups/run.sh` forces a split and checks the results.
 

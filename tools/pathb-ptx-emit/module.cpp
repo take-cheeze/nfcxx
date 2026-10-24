@@ -267,7 +267,7 @@ std::string plan_module(const std::string &src, const std::string &sm, const std
   if (fns.empty()) throw BadIR("no function in the IR");
 
   // A listed kernel is named as the source names it (cuda-rewrite.rb --kernels writes plain names). A C++ function's IR
-  // name is its Itanium mangled name, so a plain name matches by the rule scripts/cuda-embed.rb uses.
+  // name is its Itanium mangled name, so a plain name matches by the rule --embed uses (embed.cpp).
   std::vector<std::string> kernels;
   for (const std::string &k : kernels_in) {
     std::vector<std::string> hits;

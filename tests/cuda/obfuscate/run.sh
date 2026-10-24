@@ -49,7 +49,7 @@ check "C++ rewriter matches the Ruby reference" bash -c 'cmp -s "$1" "$2" && cmp
 check "off by default" bash -c 'grep -q ob_scale_kernel "$1" && ! grep -q __nfcxx_kn_ "$2"' _ "$out/plain.kernels" "$out/dev_plain.cpp"
 
 # 5. Device side: the IR, the PTX entries and the embedded kernel table carry the new names only. The entry of a C++
-# kernel is its mangled name (_Z<len><name>...), as cuda-embed.rb matches it.
+# kernel is its mangled name (_Z<len><name>...), as pathb-ptx-emit --embed matches it.
 if [ -x "$root/build/pathb/cmake/bin/cpfe" ]; then
   "$root/scripts/pathb-dump" --ir --freestanding "$out/dev_a.cpp" > "$out/a.ir"
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$out/a.kernels"
@@ -58,7 +58,7 @@ if [ -x "$root/build/pathb/cmake/bin/cpfe" ]; then
   check "PTX entries are the new names" present '\.visible \.entry (_Z[0-9]+)?__nfcxx_kn_' "$out/a.ptx"
   # The table: a stand-in cubin (the table is the same whatever the image holds).
   head -c 256 /dev/urandom > "$out/stand_in.cubin"
-  "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$out/stand_in.cubin" "$out/a.ir" "$out/a.kernels" > "$out/tail.cpp"
+  "$root/build/pathb-ptx-emit" --embed "$out/stand_in.cubin" "$out/a.ir" "$out/a.kernels" > "$out/tail.cpp"
   check "kernel table free of the names" absent "$names" "$out/tail.cpp"
   check "kernel table has the new entries" present '"_Z[0-9]+__nfcxx_kn_' "$out/tail.cpp"
 else

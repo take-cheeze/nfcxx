@@ -5,7 +5,7 @@
 #
 # Checks: the rewrite matches its golden files; unsupported launch forms are refused (exit 3); mul2.cu compiles
 # and links through nfcxx, its device code is built by the driver (tools/cuda-rewrite --device, pathb-ptx-emit,
-# ptxas, cuda-embed), and the program runs the kernels and checks the results. Expected output: "launch: no error"
+# ptxas, pathb-ptx-emit --embed), and the program runs the kernels and checks the results. Expected output: "launch: no error"
 # and "mul2: 1000 elements, 0 mismatches". (Before the device pipeline, the launch returned an error: the kernel was
 # not registered with the runtime.) docs/notes/gpu.md, "CUDA source".
 set -euo pipefail

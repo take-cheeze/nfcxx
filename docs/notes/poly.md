@@ -572,7 +572,7 @@ None of these is covered by a test unless stated.
   - `fmt.Print*` and `println` write to the process's standard output; a script cannot capture or redirect them from the host side.
   - Under AddressSanitizer the Go-only host is clean on both back ends (`tests/poly/asan-go.sh`); valgrind needs the suppression
     file and is much weaker (below).
-- Not done: compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as `scripts/cuda-embed.rb` does for GPU
+- Not done: compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as `pathb-ptx-emit --embed` does for GPU
   images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep.rb` handles it for C inputs only, which is
   why mruby and Lua are patched).
 - `setup-poly.sh`, `setup-poly-lua.sh` and `setup-poly-js.sh` fetch mruby, Lua and QuickJS-NG from GitHub at their pins (mruby also
