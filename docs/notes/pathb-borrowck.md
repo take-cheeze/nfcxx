@@ -517,7 +517,8 @@ The search is a verification loop, not a separate analysis:
    then `write`, only when a diagnostic names its region `*%N`. A diagnostic that names no argument
    region, or a refusal, ends the search with no summary.
 3. A pointer result tries each argument region and each aligned offset in turn. Its source
-   argument tries `read`/`shared`, then `write`/`exclusive`, then `write`/`shared`.
+   argument tries `write`/`exclusive` first, because a pointer to non-`const` lets the caller
+   write through it. It then tries `read`/`shared`, then `write`/`shared`.
 4. The first candidate whose body has no diagnostics is kept.
 
 A function with no surviving candidate keeps the plain analysis, and calls to it are still refused.
@@ -528,11 +529,29 @@ inferred. `consume` is never inferred, because it would assert an ownership poli
 alone does not establish. Mutually recursive functions get no summary and need explicit ones.
 
 The order chooses one summary when several verify. `read` is preferred, and `init` over `write`,
-so a callee that only stores gets `init`. A returned alias from a read-only body is `shared`, which
-lets a caller read the result but not write through it.
+so a callee that only stores gets `init`. A returned alias is `exclusive` whenever the body
+allows it, even if the body only reads, so callers can write through the result.
 
-The C++ frontend emits plain `call` for pointer results, while a returned alias requires
-`call-borrow`, which limits this mode on lowered C++ today.
+## Implicit returned loans
+
+A returned alias normally needs `call-borrow` to name its loan. The C++ frontend emits a plain
+`call` instead. When a plain `call` matches a returned-alias summary and its source argument is a
+direct local place or constant offset, the checker creates a root loan for that call site. The
+loan is named `&CALLEE#N` and has the summary's permission and range, so
+
+```text
+(let %0 (ptr int) (call (ptr int) &"pick" $"x"))
+```
+
+checks like `(call-borrow (ptr int) "&pick#1" root &"pick" $"x")`. Lowered C++ has no `loan-end`
+facts, so these loans require `--infer-loan-ends`; without it the function is refused. A source
+whose provenance is only known by dataflow, such as a pointer loaded from a slot, still needs an
+explicit `call-borrow` with a declared parent.
+
+Together with `--infer-summaries` and the temporary facts, a lowered C++ program can be checked
+end to end with no annotations except struct layouts. `tests/pathb-borrow/contracts/aliases.cpp`
+passes `bump(second(&s))` through an implicit exclusive loan. A variant that writes `s.b` while it
+still holds the alias reports `loan-conflict`.
 
 ## Refusals and limits
 
@@ -582,6 +601,8 @@ Call fixtures cover preconditions, aliasing, scalar signatures, initialization, 
 consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
 cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
 contracts, and inferred last-use release.
+Implicit-loan fixtures in `tests/pathb-borrow/inferred/implicit_*` cover last use, future
+conflicts, dangling results, and loops, in both loan modes.
 Summary-inference fixtures in `tests/pathb-borrow/summaries` cover each inferred effect,
 alias offsets and permissions, recursion, caller misuse, and functions left without a summary. A
 lowered C++ program is checked with inferred summaries, and fails once its initializing call is

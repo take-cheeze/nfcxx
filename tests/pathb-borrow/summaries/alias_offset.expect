@@ -1,3 +1,3 @@
 0
-inferred: (call-effects "second" (returns (ptr int) (from-arg 0 4 shared)) (nothrow) (noescape) (closed) (args (read (struct "Pair"))))
+inferred: (call-effects "second" (returns (ptr int) (from-arg 0 4 exclusive)) (nothrow) (noescape) (closed) (args (write (struct "Pair"))))
 ok: local lifetime checks passed (supported subset only)

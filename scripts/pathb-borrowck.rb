@@ -354,6 +354,7 @@ class LocalLifetime
     @drops = {}
     @register_types = {}
     @symbols = {}
+    @implicit_loans = {}
     scan = lambda do |x|
       @symbols[x.name] = true if x.is_a?(IRSym) && x.sig == '$'
       return unless x.is_a?(Array)
@@ -397,6 +398,20 @@ class LocalLifetime
           raise BadIR, 'call-borrow parent form'
         end
       end
+      # A plain call to a returned-alias contract whose source is a direct place
+      # gets an implicit root loan for this call site, so lowered C++ needs no
+      # call-borrow form. Its end must come from last-use inference.
+      if bh(x) == 'call' && x.length >= 3 && x[2].is_a?(IRSym) && x[2].sig == '&'
+        summary = @call_effects.lookup(x[2].name)
+        a = summary && summary[:alias]
+        place = a && x.length - 3 == summary[:args].length ? direct_place(x[3 + a[:arg]]) : nil
+        if place && bh(x[1]) == 'ptr'
+          id = '&' + x[2].name + '#' + (@implicit_loans.length + 1).to_s
+          raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
+          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], x[1][1], x[1][1]]
+          @implicit_loans[x.object_id] = id
+        end
+      end
       if bh(x) == 'reborrow'
         raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
         id = bname(x[2])
@@ -407,6 +422,9 @@ class LocalLifetime
     end
     scan.call(f)
     raise BorrowRefused, 'no local declaration facts; use NFCXX_PATHB_BORROW=1' unless @has_facts
+    if !@implicit_loans.empty? && !@infer_loan_ends
+      raise BorrowRefused, 'returned aliases from plain calls need call-borrow or --infer-loan-ends'
+    end
     f.drop(4).each do |x|
       if bh(x) == 'slot'
         raise BadIR, 'slot form' unless x.length == 5
@@ -979,6 +997,7 @@ class LocalLifetime
     summary = @call_effects.lookup(x[2].name)
     raise BorrowRefused, 'calls require lifetime/effect contracts' unless summary
     raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
+    returned_id ||= @implicit_loans[x.object_id] if summary[:alias]
     raise BorrowRefused, 'returned aliases require call-borrow' if summary[:alias] && !returned_id
     args = x.drop(3)
     raise BadIR, 'call arity disagrees with its effect contract' unless args.length == summary[:args].length
@@ -1516,7 +1535,8 @@ class SummaryInference
       if desc.nil?
         [['value']]
       elsif a && a[0] == i
-        [%w[read shared], %w[write exclusive], %w[write shared]]
+        # A pointer to non-const lets the caller write through the result.
+        [%w[write exclusive], %w[read shared], %w[write shared]]
       else
         [['read'], ['init'], ['write']]
       end
