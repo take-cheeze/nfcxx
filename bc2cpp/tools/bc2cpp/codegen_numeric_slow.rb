@@ -50,6 +50,7 @@ class CodeGen
 
   NUMERIC_SLOW_ARITH = { 'add' => ['+', 'mrb_num_add'], 'sub' => ['-', 'mrb_num_sub'],
                          'mul' => ['*', 'mrb_num_mul'] }.freeze
+  NUMERIC_SLOW_TIME_IMPL = { 'add' => 'mrb_time_plus_impl', 'sub' => 'mrb_time_minus_impl' }.freeze
   NUMERIC_SLOW_CMP = { 'lt' => '<', 'le' => '<=', 'gt' => '>', 'ge' => '>=' }.freeze
   NUMERIC_SLOW_BITS = { 'and' => ['&', 'mrb_bint_and'], 'or' => ['|', 'mrb_bint_or'],
                         'xor' => ['^', 'mrb_bint_xor'] }.freeze
@@ -74,9 +75,9 @@ class CodeGen
   # which the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `- & | <<`
   # run bodies that mruby keeps static, which the pinned fork commit (mruby-expose-collection-op-bodies, docs/patch-fork-tracking.md) exports; they also need
   # numeric_slow_collection_ready?.
-  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String],
+  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String Time],
                           '*' => %w[Integer Float Array String], '^' => %w[Integer NilClass TrueClass FalseClass],
-                          '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array],
+                          '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array Time],
                           '&' => %w[Integer NilClass TrueClass FalseClass Array],
                           '|' => %w[Integer NilClass TrueClass FalseClass Array],
                           '<<' => %w[Integer Array String IO] }.freeze
@@ -399,6 +400,11 @@ class CodeGen
     # `-` has no String arm (String#- does not exist), so that receiver falls to the proven NoMethodError.
     string_arm = arms[:string] ? "\n  else if (mrb_string_p(a)) {\n#{arms[:string]}\n  }" : ''
     extern = key == 'sub' ? numeric_slow_extern('mrb_ary_ext_sub_impl') : ''
+    # Time#+ and Time#- are the exported bodies of mruby-time (their wrappers call them after argument parsing), and
+    # a Time subclass inherits them, so one kind check covers every receiver that answers the operator.
+    time_impl = NUMERIC_SLOW_TIME_IMPL[key]
+    time_arm = time_impl ? "\n        else if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, \"Time\"))) {\n          r = #{time_impl}(M, a, b);\n        }" : ''
+    extern += numeric_slow_extern(time_impl) if time_impl
     <<~CPP
       #{extern}#{head}, mrb_value b) {
       #{numeric_slow_int_pair_source(key)}
@@ -415,7 +421,7 @@ class CodeGen
       #endif#{string_arm}
         else if (mrb_array_p(a)) {
       #{arms.fetch(:array)}
-        }
+        }#{time_arm}
         else {
           return bc2cpp_nomethod_named(M, a, "#{op}", 1, b);
         }
