@@ -32,10 +32,18 @@ class CodeGen
   SEALED_HASH_LOAD_OPS = %w[NOP MOVE LOADL LOADSYM LOADNIL LOADSELF LOADTRUE LOADFALSE GETIV GETCONST GETUPVAR
                             STRING].freeze
   SEALED_HASH_WINDOW = 16
+  # Frame exits that read no register: the stored Hash's register dies there unread.
+  SEALED_HASH_EXITS = %w[RETNIL RETTRUE RETFALSE RETSELF].freeze
   # Ruby methods that reach an object without a reference, and the one native source allowed to spell each (its
   # registration).
   SEALED_HASH_REFLECTION = { 'instance_variable_get' => 'mruby-metaprog/src/metaprog.c',
                              'each_object' => 'mruby-objectspace/src/mruby_objectspace.c' }.freeze
+  # SEALED_HASH_STORES: native Hash methods a read may call, as [name, argc]. Each answers a new object or a scalar,
+  # never the Hash itself, and none stores into it, so no second reference to the Hash comes out of them.
+  SEALED_HASH_READ_SENDS = [['keys', 0], ['values', 0], ['size', 0], ['length', 0], ['empty?', 0], ['key?', 1],
+                            ['has_key?', 1], ['include?', 1], ['member?', 1]].freeze
+  # The classes whose Ruby definitions could answer those names on a Hash.
+  SEALED_HASH_ANCESTORS = %w[Hash Enumerable Object Kernel BasicObject].freeze
 
   # nil when the GETIDX at +w+ of +irep+ reads a sealed Hash ivar whose values are exactly +cls+, else why not.
   # +prove+ is called as (irep, index, register) for each stored value and answers nil or why it is not +cls+.
@@ -60,6 +68,11 @@ class CodeGen
       why = sealed_hash_store_failure(site_irep, idx, reg, cls, prove)
       return "@#{name} = (#{why}) at #{site_irep.file}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
     end
+    # SEALED_HASH_STORES: `@h[k] = v` stores v into the one Hash the slot holds.
+    sealed_hash_index_stores(name).each do |site_irep, idx, value|
+      why = prove.call(site_irep, idx, value)
+      return "@#{name}[k] = (#{why}) at #{site_irep.file}:#{BytecodeIR.for(site_irep).source_at(idx).lineno}" if why
+    end
     nil
   end
 
@@ -79,15 +92,69 @@ class CodeGen
     accessor = (@registry[name] || []).find { |d| d.kind == :ivar_accessor }
     return "#{accessor.owner} has an attr reader `#{name}`" if accessor
 
+    stores = []
     @ireps.each_value do |ir|
       BytecodeIR.for(ir).each_with_op('GETIV') do |insn, g|
         next unless insn.ivar == name
         next if sealed_hash_getiv_consumed?(ir, g)
+        next if sealed_hash_stores? && sealed_hash_getiv_stores(ir, g, stores)
 
         return "the read at #{ir.file}:#{insn.lineno} is used other than as `@#{name}[k]`"
       end
     end
+    (@sealed_hash_index_stores ||= {})[name] = stores
     nil
+  end
+
+  # SEALED_HASH_STORES: the `@name[k] = v` sites, as [irep, index, value register]; filled by the name check.
+  def sealed_hash_index_stores(name)
+    @sealed_hash_index_stores ||= {}
+    @sealed_hash_index_stores.fetch(name, [])
+  end
+
+  # BC2CPP_SEALED_HASH_STORES=0 keeps the literal-only rule.
+  def sealed_hash_stores?
+    return @sealed_hash_stores if defined?(@sealed_hash_stores)
+
+    @sealed_hash_stores = ENV['BC2CPP_SEALED_HASH_STORES'] != '0' && nil_unanswerable?('[]=') &&
+                          SEALED_HASH_READ_SENDS.all? { |name, _| sealed_hash_read_send_native?(name) }
+  end
+
+  # Only a native answers +name+ on a Hash: no Ruby definition on its ancestors, nothing prepended or mixed into
+  # Hash, and nil cannot answer it (an unassigned slot raises).
+  def sealed_hash_read_send_native?(name)
+    (@registry[name] || []).none? { |d| SEALED_HASH_ANCESTORS.include?(d.owner) } &&
+      Array(@prepended_modules['Hash']).empty? && !@unknown_mixins.include?('Hash') && nil_unanswerable?(name)
+  end
+
+  # SEALED_HASH_STORES: the GETIV at +g+ is only read as the receiver of `[]`, `[]=` (its stores are appended to
+  # +stores+) or a SEALED_HASH_READ_SENDS send, through its copies in this frame and never by a block.
+  def sealed_hash_getiv_stores(irep, g, stores)
+    reg = BytecodeIR.for(irep).source_at(g).reg
+    return false unless reg && !fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+
+    uses = FactoryFlow.uses(irep, g, reg) or return false
+    program = BytecodeIR.for(irep)
+    found = []
+    ok = uses.all? do |use, r|
+      insn = program.source_at(use)
+      next false if fixnum_proof_ctx(irep)[:upvars].include?(r.to_s)
+
+      case insn.op
+      when 'GETIDX' then insn.reg == r.to_s
+      when 'SETIDX'
+        recv, key, value = insn.regs
+        next false unless recv == r.to_s && value && ![key, value].include?(r.to_s)
+
+        found << [irep, use, value]
+      when 'SEND', 'SEND0'
+        argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+        insn.reg == r.to_s && SEALED_HASH_READ_SENDS.include?([insn.sym, argc])
+      else false
+      end
+    end
+    stores.concat(found) if ok
+    ok
   end
 
   # No instance_variable_get the closed world cannot see, and no each_object.
@@ -158,6 +225,7 @@ class CodeGen
   # After the SETIV at +s+, +reg+ is overwritten before anything reads it.
   def sealed_hash_dead_after?(irep, s, reg)
     sealed_hash_straight_line(irep, s + 1) do |insn|
+      next :done if SEALED_HASH_EXITS.include?(insn.op) || (sealed_hash_empty_literal?(insn) && insn.reg == reg)
       next :fail unless sealed_hash_load_op?(insn.op)
       next :fail if insn.op == 'MOVE' && insn.regs[1] == reg
       next :done if insn.reg == reg
@@ -172,10 +240,16 @@ class CodeGen
   def sealed_hash_straight_line(irep, start)
     BytecodeIR.for(irep).straight_line(start, SEALED_HASH_WINDOW) do |insn, _k|
       verdict = yield insn
-      return true if verdict == :done && (insn.op == 'GETIDX' || sealed_hash_load_op?(insn.op))
+      return true if verdict == :done && (insn.op == 'GETIDX' || sealed_hash_load_op?(insn.op) ||
+                                          SEALED_HASH_EXITS.include?(insn.op) || sealed_hash_empty_literal?(insn))
       return false if verdict == :fail || !sealed_hash_load_op?(insn.op)
     end
     false
+  end
+
+  # `HASH Ra 0` / `ARRAY Ra 0`: writes R[a], reads no register.
+  def sealed_hash_empty_literal?(insn)
+    %w[HASH ARRAY].include?(insn.op) && insn.typed.size == 2 && insn.typed[1].value.to_i.zero?
   end
 
   def sealed_hash_load_op?(op)
