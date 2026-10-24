@@ -12,6 +12,7 @@
 #   -MD -MMD -MF f -MT t -MQ t -MP   dependency file from the host preprocessor (gcc -M/-MM), with -c
 #   honoured:  -std=* (C only), -ansi, -D -U -I -isystem -iquote -idirafter -include -imacros, -x c, -x none,
 #              -l -L -Wl,* -Xlinker -shared -static -rdynamic -pie -no-pie -s -nostdlib -pthread -o
+#              --bundle-libs, --bundle-exclude=*, --bundle-only=* (the libraries copied into the output: docs/notes/bundle.md)
 #              -Wa,* (given to the assembler); -Wp,-D/-U/-I<arg>, -Wp,-isystem/-iquote/-idirafter/-include/-imacros,<arg>
 #              and -Wp,-MD/-MMD,<file>, -Wp,-MF/-MT/-MQ,<arg>, -Wp,-MP (as the options without the -Wp,)
 #              gcc backend: -O0 -O1 -O2 -O3 -Os -Og (-O2 when none is given) and -g, -g0..-g3, -ggdb, -gdwarf-N
@@ -75,6 +76,7 @@ add_arg() {   # add_arg ARG DEPTH: ARG, or the arguments in the response file it
 }
 for a in "$@"; do add_arg "$a" 0; done
 set -- "${expanded[@]+"${expanded[@]}"}"
+source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcc" "$@"   # --bundle-libs (docs/notes/bundle.md)
 
 # Queries first: they take no input files.
 if [ $# -eq 0 ]; then die "no input files"; fi

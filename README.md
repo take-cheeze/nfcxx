@@ -23,6 +23,8 @@ tests/lib/run.sh          # freestanding library tests (both backends)
 tests/builtins/run.sh     # compiler builtin probes (docs/notes/builtins.md)
 ./nfcxx -shared x.cpp -o x.so # shared object; lib/eval/ evaluates C++ snippets at run time (docs/notes/eval.md)
 tests/eval/run.sh         # nfceval library and -shared (both backends)
+./nfcxx --bundle-libs x.cpp -o x # copy libstdc++, libgcc_s and the program's own .so files into x (also -shared, nfcc; docs/notes/bundle.md)
+tests/bundle/run.sh       # nfcbundle: bundled executables and shared objects run without their libraries (both backends)
 scripts/setup-poly.sh     # mruby built with C++ exceptions for lib/poly (NFCXX_BACKEND=qbe|gcc; needs ruby + rake once)
 scripts/setup-poly-lua.sh # Lua 5.4 built with C++ exceptions for lib/poly (Python uses the system python3-dev)
 scripts/setup-poly-js.sh  # QuickJS-NG (plain C, patched for cproc) for lib/poly
