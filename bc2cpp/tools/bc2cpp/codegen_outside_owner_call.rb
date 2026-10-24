@@ -75,7 +75,7 @@ module OutsideOwnerCall
     return base unless owners
 
     lifted = @closed_world.with_outside_owner_call(name) { super }
-    error = %r{r#{d} = bc2cpp_nomethod_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(name)}"[^\n]*?\); /\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ \*/}
+    error = %r{r#{d} = bc2cpp_nomethod_named\(M, #{Regexp.escape(recv)}, "#{Regexp.escape(name)}"[^\n]*?\); /\* CLOSED_WORLD nomethod: (?:self|recv)\.\S+ @ \S+ \*/}
     # Another gate still keeps the else: the site dispatches by name, under that gate's reason.
     return lifted unless lifted.match?(error)
 

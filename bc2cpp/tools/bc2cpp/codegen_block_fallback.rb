@@ -730,7 +730,7 @@ class CodeGen
       next if nested_suppressed.include?(nregion[:sendb_addr])
 
       nested_suppressed << nregion[:sendb_addr]
-      nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion)
+      nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion, owner_def: d)
     end
 
     # RUNTIME_DEF_FALLBACK_SUPPORT: a `def` inside an EXEC-opened class body
@@ -1168,13 +1168,16 @@ class CodeGen
         n = insn.n_spec.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
                      blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
-                     self_implicit: insn.op == 'SSENDB' }
+                     self_implicit: insn.op == 'SSENDB', parent_irep: irep }
       end
     end
     regions
   end
 
-  def emit_explicit_block_arg_glue(region)
+  def emit_explicit_block_arg_glue(region, owner_def: nil)
+    direct = emit_explicit_block_arg_direct(region, owner_def)
+    return direct if direct
+
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     out = String.new
@@ -1204,6 +1207,34 @@ class CodeGen
     out
   end
 
+  # EXPLICIT_BLOCK_ARG_DIRECT: a fixed-arity `&expr` site whose call resolves to compiled code
+  # (ARG_SHAPES_BLOCK). The `_impl` gets the block as the VM's OP_SENDB would hand it on:
+  # ensure_block's to_proc conversion runs first, once, before any arm or by-name else.
+  # See docs/bc2cpp-explicit-block-args.md.
+  def emit_explicit_block_arg_direct(region, owner_def)
+    return nil unless explicit_block_arg_direct? && owner_def && region[:n].is_a?(Integer)
+
+    blk = "bc2cpp_ebarg_blk_#{region[:sendb_addr]}"
+    direct = compile_direct_block_send(region, blk, owner_def)
+    return nil unless direct
+
+    out = String.new
+    out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- &expr converted as OP_SENDB does (ensure_block), " \
+           "direct call with the block\n"
+    out << "  {\n"
+    out << "    mrb_value #{blk} = r#{region[:blk_reg]};\n"
+    out << "    if (!mrb_nil_p(#{blk}) && !mrb_proc_p(#{blk})) " \
+           "#{blk} = mrb_type_convert(M, #{blk}, MRB_TT_PROC, mrb_intern_lit(M, \"to_proc\"));\n"
+    out << direct.lines.map { |line| "  #{line}" }.join
+    out << "  }\n"
+    out
+  end
+
+  # BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT=0 keeps every `&expr` site on mrb_funcall_with_block.
+  def explicit_block_arg_direct?
+    ENV['BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT'] != '0'
+  end
+
   # RESCUE_BODY_BLOCK_SUPPORT: the shared BLOCK_FALLBACK/EXPLICIT_BLOCK_ARG
   # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
   # Takes recognized region lists (the caller chooses the scope), mutates the
@@ -1225,7 +1256,7 @@ class CodeGen
       next if suppressed.include?(region[:sendb_addr])
 
       suppressed << region[:sendb_addr]
-      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region)
+      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region, owner_def: d)
     end
     pre
   end
