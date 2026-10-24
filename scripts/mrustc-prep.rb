@@ -493,9 +493,18 @@ def main(argv)
     out << rewrite_line(line)
   end
   tail = ''
+  versioned = 0
   labels.each do |n, label|
+    # A versioned label (`cfgetispeed@GLIBC_2.2.5`, libc 0.2.189) is not a symbol name in an instruction: the jump goes to
+    # a local alias that `.symver` binds to that version.
+    target = label
+    if label.index('@')
+      target = "__nfcxx_versioned_#{versioned}"
+      versioned += 1
+      tail << ".symver #{target}, #{label}\n"
+    end
     # The target is weak too: a label whose symbol is absent (sysctl, on glibc 2.32 and later) only matters if it is called.
-    tail << ".weak #{label}\n.weak #{n}\n.type #{n},@function\n#{n}:\n\tjmp #{label}@PLT\n"
+    tail << ".weak #{target}\n.weak #{n}\n.type #{n},@function\n#{n}:\n\tjmp #{target}@PLT\n"
   end
   fail_with("init_array object without its initialiser: #{init_pending.keys.join(' ')}") unless init_pending.empty?
   init_entries.each do |sec, f|
