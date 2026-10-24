@@ -617,8 +617,9 @@ EOC
     if grep -q '^qbe kinit2.c$' qbe.log; then ok "qbe-try: NFCXX_QBE_INITSYMS names the init symbols"
     else bad "qbe-try: NFCXX_QBE_INITSYMS names the init symbols" "$(tr '\n' '|' < qbe.log)"; fi
   fi
-  # an assembly source with another suffix keeps its -x language (the kernel's "-x assembler-with-cpp /dev/null" probe)
-  if out=$("$nfcc" -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null 2>&1) && grep -q "GNU assembler" <<<"$out"; then
+  # an assembly source with another suffix keeps its -x language (the kernel's "-x assembler-with-cpp /dev/null" probe);
+  # the assembler answers --version as GNU as or, on macOS, as clang's integrated assembler
+  if out=$("$nfcc" -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null 2>&1) && grep -qE "GNU assembler|clang version" <<<"$out"; then
     ok "-x assembler-with-cpp /dev/null reaches the assembler"
   else bad "-x assembler-with-cpp /dev/null reaches the assembler" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
   # -MMD on an assembly source writes the dependency file (kbuild's fixdep reads it)
