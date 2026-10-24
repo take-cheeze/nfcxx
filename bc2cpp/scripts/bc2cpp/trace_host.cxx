@@ -22,6 +22,8 @@
 #include <mruby/string.h>
 #include <mruby/variable.h>
 
+#include "bc2cpp_entry.hxx"
+
 // mruby-rgss/src/lib.cxx: hands the display to the RGSS natives (Graphics.width
 // etc.).
 extern "C" void rgss_set_display(mrb_state* M, lv_display_t* display);
@@ -71,7 +73,7 @@ bool report_exception(mrb_state* M, const char* where) {
 }
 
 void print_scene(mrb_state* M, mrb_value game, long frame) {
-  mrb_value name = mrb_funcall(M, game, "current_scene_name", 0);
+  mrb_value name = bc2cpp_entry_RPG2k_current_scene_name(M, game);
   fprintf(stdout, "TRACE_HOST frame=%ld scene=%s\n", frame,
           mrb_string_p(name) ? RSTRING_PTR(name) : "?");
   fflush(stdout);
@@ -136,11 +138,16 @@ int main(int argc, char** argv) {
   mrb_gc_register(M, game);
   fprintf(stdout, "TRACE_HOST game=RPG2k dir=%s frames=%ld\n", game_dir,
           frames);
+  // BC2CPP_ENTRY (include/bc2cpp_entry.hxx): whether main_loop and
+  // current_scene_name call their compiled bodies directly.
+  fprintf(stdout, "TRACE_HOST entry main_loop=%s current_scene_name=%s\n",
+          BC2CPP_ENTRY_RPG2k_main_loop ? "direct" : "by-name",
+          BC2CPP_ENTRY_RPG2k_current_scene_name ? "direct" : "by-name");
 
   for (long frame = 0; frame < frames; ++frame) {
     if (frame % 50 == 0)
       print_scene(M, game, frame);
-    mrb_funcall(M, game, "main_loop", 0);
+    bc2cpp_entry_RPG2k_main_loop(M, game);
     if (M->exc) {
       const bool clean = report_exception(M, "main_loop");
       fprintf(stdout, "TRACE_HOST stopped frame=%ld reason=%s\n", frame,
