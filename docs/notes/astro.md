@@ -163,6 +163,37 @@ Found while building the samples above. Not reported yet; each has a short fix. 
    `ASTRO_LOADER_SUPPORTED` is 0 (no `__linux__`, no architecture backend, or `-DASTRO_ARCH_FORCE_NONE`). Add the two stubs
    (return `false`) to that branch.
 
+## ASTroGen under mruby
+
+`ASTRO_GEN=mruby tests/realworld/run_astro.sh` runs the generator on the repo's mruby (`scripts/mrb`) instead of CRuby, so
+generating `node_*.c` / `node_head.h` needs no CRuby. `scripts/astrogen-mruby` takes the arguments of the `ruby` command it
+replaces (`-I dir -r lib -e code`); mruby has no `require`, so it concatenates `scripts/mruby-astrogen.rb` (the shim), the
+generator sources (with their `require` lines blanked, the `if __FILE__ == $0` self-test cut) and the code into one script.
+The upstream sources are not edited. When CRuby is present the script also runs it and `cmp`s every generated file: calc (9
+files), luastro (10), baruby_precise (11), astrogre (9) and koruby_precise (12) are byte-identical, on both backends.
+
+What the tool mruby (core plus `mruby-onig-regexp`, no `mruby-struct`/`-metaprog`) lacked, found by running it:
+
+| Missing | Used for | Shim |
+| --- | --- | --- |
+| `optparse` | `ASTroGen.parse_opt` | a 15-line `OptionParser` with `on('--x=[A]')` / `parse!` |
+| `Struct` | `GenTask` | `Class.new` + `attr_accessor` (no `instance_variable_set`, no `eval`) |
+| `send` (only `__send__`) | `send("build_#{task.name}")` | `Object#send` |
+| `File.readlines`, `File.write` | reading node.def, writing the output | on `File.open`; lines keep their `"\n"` |
+| `Array#to_set` | `compute_slot_count` | `Set.new(self)` (`mruby-set` is there) |
+| `instance_variable_get` | `sample.instance_variable_get(:@prefix_args)`, twice | one name answered, any other raises |
+| `ENV` | `koruby_gen.rb` (`KORUBY_POOL`, `KORUBY_FLINK`) | an empty Hash: those switches cannot be set under mruby |
+| `require` | `astrogen`, `lua_gen`, ... | the wrapper concatenates; `-r` follows `require 'x'` found under `-I` |
+
+One mruby bug, worked around by a `sed` in the wrapper: `super` inside an endless method (`def node? = children? ? false : super`,
+four in `koruby_gen.rb`) raises `TypeError: can't convert false into "Proc"`, so `def m = ... super` becomes `def m; ...; end`.
+Heredocs (`<<~`), `Regexp`, `String#%`, `format`, endless `def`, `&.`, `_1` and the rest of what the generator uses worked as is.
+
+Speed: ASTroGen is fast either way. calc: 0.09 s CRuby 3.3 vs 0.04 s mruby; koruby_precise (the biggest, 12 files):
+0.16 s CRuby vs 0.29 s mruby (start-up included; one run each, not a benchmark). Not verified: other samples, and generating on a host without CRuby
+end to end (calc and luastro need none; Prism's templates and the node.def patches of baruby_precise / koruby_precise in
+`run_astro.sh` still use CRuby, and the script stops there when it is missing).
+
 ## Not done
 
 - The other 25 samples.
@@ -171,5 +202,4 @@ Found while building the samples above. Not reported yet; each has a short fix. 
 - Compiling `sample/astrogre`'s AVX2 code on qbe: cproc cannot compile the intrinsics, so the regex engine is a gcc-backend
   shared object in both runs.
 - `astro_build.c`'s `--build` (standalone executables) and the tiered JIT daemon.
-- Running ASTroGen under the repo's mruby instead of CRuby (`lib/astrogen.rb` needs only `optparse`).
 - Feeding ASTro's hashing and specialization into `lib/ast` (`ast.md`), the idea this note started from.
