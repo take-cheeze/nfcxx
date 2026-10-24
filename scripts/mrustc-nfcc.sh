@@ -89,8 +89,24 @@ while IFS= read -r t; do
   for crate in $crates; do [ "$base" = "lib$crate.rlib.o" ] && replaced=1; done
   [ -z "$replaced" ] && std_objs+=("$t")
 done < <(tr -d '"' < "$tmp/prog_cmd.txt" | tr ' ' '\n' | grep '\.rlib\.o$' || true)
+# The libraries: `-l NAME`, `-L DIR`, and the native archives that build scripts made (blake3's assembly, zstd and
+# mimalloc's C in mold 3), which mrustc names by path. The rlib objects' functions call into them through weak
+# trampolines (section "Trampolines have weak targets" of docs/notes/mrustc-frontend.md), so a missing archive is
+# not a link error but a call to address 0. A weak reference does not pull a member out of an archive either, so
+# each archive symbol that the objects built here reference weakly is made undefined (-u) for the link. For the same
+# reason a shared library is linked whether or not a strong reference needs it (--no-as-needed): mold 3 calls
+# libz only through weak trampolines, and with --as-needed libz.so was not a dependency.
 libs=()
-while IFS= read -r t; do libs+=("$t"); done < <(tr -d '"' < "$tmp/prog_cmd.txt" | tr ' ' '\n' | awk 'prev == "-l" { print "-l" $0 } { prev = $0 }' || true)
+while IFS= read -r t; do libs+=("$t"); done < <(tr -d '"' < "$tmp/prog_cmd.txt" | tr ' ' '\n' |
+  awk 'prev == "-l" || prev == "-L" { print prev $0 } /\.a$/ && prev != "-o" { print } { prev = $0 }' || true)
+archives=()
+for t in ${libs[@]+"${libs[@]}"}; do case $t in *.a) archives+=("$t") ;; esac; done
+if [ ${#archives[@]} -gt 0 ]; then
+  while IFS= read -r s; do libs=("-Wl,-u,$s" "${libs[@]}"); done < <(
+    comm -12 <(nm "$tmp/prog.o" "$tmp/prog.tail.o" ${core_objs[@]+"${core_objs[@]}"} 2>/dev/null | awk '$1 == "w" { print $2 }' | sort -u) \
+             <(nm --defined-only -g "${archives[@]}" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u))
+fi
+[ ${#libs[@]} -eq 0 ] || libs=(-Wl,--push-state,--no-as-needed "${libs[@]}" -Wl,--pop-state)
 grep -q '\.rlib\.o' "$tmp/prog_cmd.txt" || { echo "mrustc-nfcc: no standard library objects in $tmp/prog_cmd.txt" >&2; exit 1; }
 "$root/scripts/qbe-cc" -o "$out" "$tmp/prog.o" "$tmp/prog.tail.o" ${core_objs[@]+"${core_objs[@]}"} \
   ${std_objs[@]+"${std_objs[@]}"} ${libs[@]+"${libs[@]}"}

@@ -219,3 +219,60 @@ The undefined value is `UNDEF`, the constant `0xdeaddead` (`parse.c`). Those are
   `UNDEF` bytes are never read by a consumer, so the program's output does not depend on them. This is dead by
   construction for this site, not a general argument: the same shape in another function would need its own check.
   The root is mrustc's C, which leaves the union's unused tail unwritten; a fix would zero it in mrustc's output.
+
+## 7. mold 3
+
+mold 3.0.0 (rui314/mold, the Rust rewrite; `cargo vendor` of its lock file, x86-64 only:
+`--no-default-features --features x86_64`) builds in two ways. `tests/realworld/run_mrustc_mold.sh` checks the first,
+and with `--pipeline` the second too.
+
+- **mrustc's minicargo, gcc codegen.** mrustc needed the 20 fixes of rows 22 to 41 of `NFCXX-FIXES.md` on branch
+  `nfcxx/mold3`:
+  - minicargo: git dependencies from the vendor directory, workspace `default-members` and `version.workspace`, the
+    `cargo::` build-script syntax;
+  - `asm!` template pieces built by macros, and the operand modifiers `x l h y z` (portable-atomic);
+  - typeck: nested associated type bounds, a fuzzy inherent method match that waits, defaults and inference of
+    omitted const arguments, a renamed method generic in the placeholder matcher, raw pointers never deref-coercing,
+    custom receivers (`self: &mut &mut Self`), closures keeping bounds on const generics (rayon, either, cc, zstd-safe);
+  - lifetime inference of `impl Trait` in trait methods, async block captures;
+  - generic statics evaluated per instantiation, lifted statics made global (mold's `Target` constants);
+  - an impl parameter fixed by a later bound (rayon's `flat_map_iter`);
+  - a cap on the paths of `MIR_Validate_ValState` (mold's lib crate reached 13.8 GB without it, about 1.2 GB with it).
+
+  The binary links a C program, a C++ program with threads and exceptions, and mrustc itself (231 MB, 3.3 s on 4
+  cores).
+- **nfcxx's pipeline.** Every crate of the link but portable-atomic goes through `mrustc-prep.rb`, cproc and QBE.
+  portable-atomic's inline asm (`cmpxchg16b`, `lock btr`) is not rewritten, so its gcc object is linked. The build
+  takes about 20 minutes once mrustc's C exists. The binary is 77 MB, and QBE peaks at about 760 MB. What it needed:
+  - asm labels with a symbol version (`.symver`), and the barrier and prefetch asm forms (section 2);
+  - QBE (branch `nfcxx/align-large`):
+    - data alignments above 127;
+    - a parallel move table that grows;
+    - aggregates aligned on more than 16 as return pads, parameter copies and stack arguments. The alloc opcode was
+      computed from the alignment and overflowed into another instruction; stack arguments are placed as gcc does
+      since 4.6;
+  - cproc (branch `nfcxx/align-type`): QBE types carry a struct's over-alignment, member padding and size. A
+    `#[repr(align(128))]` value (crossbeam's `CachePadded`) was laid out as 8 bytes, and crossbeam-epoch's
+    `Global::new` crashed;
+  - `qbe-prep.rb`: the `__aligned__(N),` trailing comma on a struct's closing line;
+  - `mrustc-nfcc.sh`, the link:
+    - the native archives that build scripts make (blake3's assembly, zstd, mimalloc) were dropped. Since the
+      crates call them through weak trampolines, the build ran and called address 0 (`--build-id` hashes with
+      blake3);
+    - a weak reference does not pull an archive member, so each archive symbol referenced weakly is passed as `-u`;
+    - libraries are linked `--no-as-needed`, since libz was referenced only weakly and was dropped.
+
+  The binary links the C program, with uncompressed, zlib and zstd debug sections, and the C++ program (same output).
+  It also links mrustc with an output byte-identical to the gcc-built mold's, in 8.2 s, but only with
+  `RUST_MIN_STACK=8388608` (see the gap below).
+- **Gaps.**
+  - **Stack size.** QBE gives mrustc's C much larger frames than gcc: 88 KB against about 10 KB for one of the rayon
+    `join` closures over mold's 2 KB `HyperLogLog`. QBE's slot coalescing skips slots whose address escapes, and
+    mrustc's C takes the address of nearly every aggregate local. rayon's recursion then overflows the 2 MiB worker
+    stacks on large links (mrustc's), while small links fit. The workaround is a larger `RUST_MIN_STACK` (8 MiB is
+    enough for mrustc). The fix would be lifetimes for escaping slots in QBE, or mrustc's C scoping its locals.
+  - **portable-atomic** stays gcc-built (general inline asm).
+  - **mold-wrapper.so.** mold's build script writes `mold-wrapper.so` (for `mold -run`) beside the first ancestor
+    directory named `build`, which is the repository root here. The test removes it.
+  - **Time.** The mrustc build of mold's two crates is most of the hour of a cold run; `MIR_Validate_ValState` is
+    about 20 minutes of each.
