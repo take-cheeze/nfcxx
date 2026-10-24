@@ -74,7 +74,7 @@ if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/
 if [ $cl_ok = 1 ]; then
   clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
   clprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class fence usm_align; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class fence usm_align compute_units; do
     if ! clbuild $t; then echo "opencl    $t: FAIL (build)"; grep -v prelinker "$out/cl_$t.log" | head -3; fail=1; continue; fi
     "$out/cl_$t" > "$out/cl_$t.out" 2> "$out/cl_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "OpenCL runtime" "$out/cl_$t.err"; then clprobe=0; break; fi
@@ -137,7 +137,7 @@ if command -v spirv-val >/dev/null && [ -f /usr/include/level_zero/ze_api.h ] &&
 if [ $lz_ok = 1 ]; then
   lzbuild() { "$root/scripts/sycl-build.sh" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
   lzprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class usm_align; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class usm_align compute_units; do
     if ! lzbuild $t; then echo "level-zero $t: FAIL (build)"; grep -v prelinker "$out/lz_$t.log" | head -3; fail=1; continue; fi
     "$out/lz_$t" > "$out/lz_$t.out" 2> "$out/lz_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "Level Zero runtime" "$out/lz_$t.err"; then lzprobe=0; break; fi
