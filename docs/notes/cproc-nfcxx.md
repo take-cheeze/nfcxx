@@ -29,6 +29,18 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   They appertain to the declared entity; `aligned` among them raises its alignment, the rest are parsed and ignored as
   before.
 
+- **GNU `section` and `used`** are applied wherever they appear in a declaration (specifiers, after a pointer, after the
+  declarator; adjacent string literals concatenate, as in the kernel's `".initcall" "6" ".init"`). A function goes to
+  `section "NAME" "ax"`, an object to `"a"` when const and `"aw"` otherwise, as gcc chooses.
+
+- **Kernel options** (for nfcc's `NFCXX_QBE_KERNEL`, docs/notes/linux-kernel.md): `-u` makes plain `char` unsigned
+  (`-funsigned-char`), `-W` makes wide literals `unsigned short` (`-fshort-wchar`), `-z` zeroes automatic objects that
+  have no initializer (`-ftrivial-auto-var-init=zero`).
+
+- **`-p`: drop unreferenced internal functions and data**, as gcc does at `-O`. cproc writes its IL to a temporary file
+  and prunes it at the end: an item is live when it is exported, has a section, is `used` (`# nfcxx:keep`), or is
+  referenced (`$name`) by a live item. Type definitions and other top-level lines are kept.
+
 ## Known gaps (still refused)
 
 - Global and local register variables (`register long x asm("rsp")`): a C variable bound to a physical register, which

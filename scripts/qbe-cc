@@ -14,6 +14,7 @@ qbe=${QBE:-$root/build/qbe/qbe}
 source "$(dirname "$0")/trace.sh"
 
 compile=0 asm=0 out="" src="" cppflags=() asflags=()
+kcproc=() nofp=0   # NFCXX_QBE_KERNEL (nfcc): cproc options for the kernel's -f options, and whether -mno-sse was given
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   a=${args[i]}
@@ -25,9 +26,24 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     -D?*|-I?*|-U?*|-std=*|-ansi|-iquote?*|-isystem?*|-idirafter?*|-include?*|-imacros?*) cppflags+=("$a") ;;
     -D|-I|-U) cppflags+=("$a${args[++i]}") ;;
     -isystem|-iquote|-idirafter|-include|-imacros) cppflags+=("$a" "${args[++i]}") ;;
+    -nostdinc|-undef) cppflags+=("$a") ;;
+    # NFCXX_QBE_KERNEL: nfcc passes only the kernel options this path honours (nfcc's qbekernel). The preprocessor gets
+    # them all, since gcc derives predefined macros from them (__SSE__, __CHAR_UNSIGNED__, __code_model_kernel__ ...).
+    -f*|-m*)
+      if [ -n "${NFCXX_QBE_KERNEL:-}" ]; then
+        cppflags+=("$a")
+        case $a in
+          -funsigned-char) kcproc+=(-u) ;;
+          -fshort-wchar) kcproc+=(-W) ;;
+          -ftrivial-auto-var-init=zero) kcproc+=(-z) ;;
+          -mno-sse|-mno-sse2|-mno-80387|-msoft-float) nofp=1 ;;
+        esac
+      fi ;;
     *.c) src=$a ;;
   esac
 done
+# the kernel's headers define far more static inline functions than a file uses: drop the unreferenced ones (cproc -p)
+[ -z "${NFCXX_QBE_KERNEL:-}" ] || kcproc+=(-p)
 
 if [ $compile = 0 ] && [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend (scripts/cil-cc): the link is cil-link.rb over the translation units' fragments (docs/notes/cil.md).
@@ -93,7 +109,12 @@ if [ $macos = 1 ]; then
     darwin+=(-D__TARGETCONDITIONALS__)
   fi
 fi
-if [ -n "${NFCXX_C_INPUT:-}" ]; then
+if [ -n "${NFCXX_QBE_KERNEL:-}" ]; then
+  # The Linux kernel (nfcc's NFCXX_QBE_KERNEL): preprocessed exactly as gcc preprocesses it, with gcc's predefined
+  # macros and the kernel's options, so cproc sees the same translation unit as the gcc backend's reference object.
+  # The kernel needs gcc's identity (compiler_types.h stops on "Unknown compiler" without __GNUC__).
+  ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
+elif [ -n "${NFCXX_C_INPUT:-}" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
   # glibc picks its ABI from __x86_64__ (gnu/stubs-32.h otherwise), gcc's stddef.h needs
   # __SIZE_TYPE__, limits.h needs __INT_MAX__. So pre-define the host target's macros, but not the
@@ -147,7 +168,7 @@ if [ $macos = 0 ] && [ -z "${NFCXX_CIL:-}" ]; then asmarg=(-a "$tmp/asm.s"); : >
 # true/false/nullptr/bool are C23 keywords; before C23 (the default, and the gnu* dialects) they are ordinary
 # identifiers, which is how the Linux kernel's headers use them. cproc -c re-enables the keyword meaning.
 for a in ${cppflags[@]+"${cppflags[@]}"}; do case $a in -std=c23|-std=c2x|-std=gnu23|-std=gnu2x) cprocarg+=(-c) ;; esac; done
-"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} ${asmarg[@]+"${asmarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
+"$cproc" ${cprocarg[@]+"${cprocarg[@]}"} ${kcproc[@]+"${kcproc[@]}"} ${asmarg[@]+"${asmarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 if [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend: the QBE IL becomes a fragment for the link (scripts/qbe2cil.rb); no assembler, no weak symbols.
@@ -161,6 +182,13 @@ t=$(trace_start)
 qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_apple); fi
 "$qbe" ${qbetarget[@]+"${qbetarget[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
 trace_end "$t" "qbe (IL to assembly)" qbe-backend
+# -mno-sse (NFCXX_QBE_KERNEL): QBE has no switch to avoid SSE and x87, so the code it wrote is checked instead (the
+# inline-asm thunks are the program's own instructions, as with gcc, and are appended later).
+if [ $nofp = 1 ] && grep -nE '%[xyz]mm[0-9]|%st\b|%st\(|^[[:space:]]+f[a-z]+[[:space:]]' "$tmp/out.s" > "$tmp/fp.txt"; then
+  echo "qbe-cc: $src: the code QBE generated uses SSE or x87 registers, which -mno-sse forbids:" >&2
+  head -3 "$tmp/fp.txt" >&2
+  exit 1
+fi
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
 # assembly too, so the link merges the per-object copies as gcc does.
 t=$(trace_start)

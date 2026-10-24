@@ -214,6 +214,39 @@ EOF
     NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -funsigned-char" "funsigned-char" -funsigned-char -c util.c -o rej.o
     NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -mno-sse" "mno-sse" -mno-sse -c util.c -o rej.o
   fi
+  # 7c. NFCXX_QBE_KERNEL=1 (the qbe side of the kernel build): the kernel options the qbe path honours are accepted and
+  # honoured, -mno-sse is checked, unreferenced static functions are dropped; NFCXX_QBE_TRY moves a compile to qbe only
+  # when the objects match (docs/notes/linux-kernel.md)
+  if [ $b = qbe ] && [ "$(uname -m)" = x86_64 ]; then
+    K=(-fno-PIE -mno-red-zone -mno-sse -mno-80387 -funsigned-char -fshort-wchar -ftrivial-auto-var-init=zero)
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" uchar.c -o kuchar 2>/dev/null && ./kuchar; then ok "kernel mode: -funsigned-char honoured"
+    else bad "kernel mode: -funsigned-char honoured" "char stayed signed or the compile failed"; fi
+    cat > kzero.c <<'EOC'
+__attribute__((noinline)) static int dirty(void) { volatile int a[64]; for (int i = 0; i < 64; i++) a[i] = 0x55; return a[7]; }
+__attribute__((noinline)) static int fresh(void) { int a[64]; int s = 0; for (int i = 0; i < 64; i++) s |= a[i]; return s; }
+int main(void) { dirty(); return fresh(); }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kzero.c -o kzero 2>/dev/null && ./kzero; then ok "kernel mode: -ftrivial-auto-var-init=zero honoured"
+    else bad "kernel mode: -ftrivial-auto-var-init=zero honoured" "an uninitialized local was not zero"; fi
+    printf 'double h(double x) { return x * 3; }\n' > kfp.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kfp.c -o kfp.o 2>&1); then bad "kernel mode: SSE code refused under -mno-sse" "was accepted"
+    elif grep -q "SSE or x87" <<<"$out"; then ok "kernel mode: SSE code refused under -mno-sse"
+    else bad "kernel mode: SSE code refused under -mno-sse" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    printf 'extern int not_in_this_program(void);\nstatic inline int unused(void) { return not_in_this_program(); }\nint used(void) { return 1; }\n' > kinl.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kinl.c -o kinl.o 2>/dev/null && ! nm kinl.o | grep -q not_in_this_program; then
+      ok "kernel mode: unreferenced static inline functions dropped"
+    else bad "kernel mode: unreferenced static inline functions dropped" "$(nm kinl.o 2>&1 | head -3 | tr '\n' ' ')"; fi
+    NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
+    # qbe-try: an integer file moves to qbe; a file cproc cannot compile keeps the gcc object
+    printf 'int sq(int a) { return a * a; }\n' > kmove.c
+    printf 'int inc(int a) { return ({ a + 1; }); }\n' > kstay.c
+    rm -f qbe.log
+    for f in kmove kstay; do
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -fno-PIE -mno-sse -c $f.c -o $f.o
+    done
+    if grep -q '^qbe kmove.c$' qbe.log && grep -q '^gcc kstay.c: ' qbe.log && [ -s kstay.o ]; then ok "qbe-try: moves what matches, keeps gcc otherwise"
+    else bad "qbe-try: moves what matches, keeps gcc otherwise" "$(tr '\n' '|' < qbe.log)"; fi
+  fi
   # an assembly source with another suffix keeps its -x language (the kernel's "-x assembler-with-cpp /dev/null" probe)
   if out=$("$nfcc" -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null 2>&1) && grep -q "GNU assembler" <<<"$out"; then
     ok "-x assembler-with-cpp /dev/null reaches the assembler"

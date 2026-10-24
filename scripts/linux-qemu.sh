@@ -8,6 +8,9 @@
 #   KCC=nfcc  nfcc builds every C file (CC=nfcc): its gcc backend with NFCXX_GCC_PASSTHROUGH=1, so the kernel's codegen
 #             options (-mcmodel=kernel, -mno-red-zone, -mno-sse, ...) reach gcc. The boot banner must then name nfcc.
 #             This is the starting point for moving files to the qbe backend (docs/notes/linux-kernel.md).
+#   QBE_TRY="PATTERN ..."  with KCC=nfcc: try each matching C file on the qbe backend too, and keep the qbe object when
+#             it matches the gcc one (scripts/qbe-try); '*' tries every file. The build goes to DIR/out-nfcc-qbe, and
+#             DIR/qbe-try.log says, file by file, which backend's object is in the kernel and why.
 # Needs gcc, make, bc, bison, flex, libelf-dev, libssl-dev, cpio, curl, qemu-system-x86 and busybox-static
 # (Debian/Ubuntu package names). The kernel is 6.8 from the Ubuntu archive, since kernel.org is not reachable from
 # every sandbox; LINUX_URL overrides the tarball (it must unpack to linux-6.8/), BUSYBOX the busybox binary.
@@ -35,6 +38,14 @@ fi
 
 # One pristine source tree, an output tree per compiler (O=), so the gcc and nfcc builds do not mix.
 src=$dir/src/linux-6.8 out=$dir/out-$kcc
+tag=$kcc
+if [ -n "${QBE_TRY:-}" ]; then
+  [ "$kcc" = nfcc ] || { echo "linux-qemu: QBE_TRY needs KCC=nfcc" >&2; exit 2; }
+  tag=nfcc-qbe out=$dir/out-nfcc-qbe
+  export NFCXX_QBE_TRY=$QBE_TRY NFCXX_QBE_LOG=$dir/qbe-try.log
+  rm -f "$NFCXX_QBE_LOG"
+  rm -rf "$out"   # every object must go through qbe-try, so nothing is reused from an earlier build
+fi
 kmake() { make -C "$src" O="$out" ARCH=x86_64 CC="$cc" "$@"; }
 mkdir -p "$out"
 kmake -s tinyconfig
@@ -47,7 +58,7 @@ kmake -s tinyconfig
   --enable DEVTMPFS --enable DEVTMPFS_MOUNT --enable MULTIUSER
 kmake -s olddefconfig
 kmake -s -j"$(nproc)" bzImage
-cp "$out/arch/x86/boot/bzImage" "$dir/bzImage-$kcc"
+cp "$out/arch/x86/boot/bzImage" "$dir/bzImage-$tag"
 
 # The initramfs is busybox plus one /init script; busybox --install creates the applet links the script uses.
 root=$dir/initramfs
@@ -68,10 +79,10 @@ chmod +x "$root/init"
 
 accel=tcg
 [ -w /dev/kvm ] && accel=kvm
-log=$dir/boot-$kcc.log
+log=$dir/boot-$tag.log
 set +e
 timeout 300 qemu-system-x86_64 -accel "$accel" -m 256 -nographic -no-reboot \
-  -kernel "$dir/bzImage-$kcc" -initrd "$dir/initramfs.cpio" -append "console=ttyS0 panic=-1" > "$log" 2>&1
+  -kernel "$dir/bzImage-$tag" -initrd "$dir/initramfs.cpio" -append "console=ttyS0 panic=-1" > "$log" 2>&1
 status=$?
 set -e
 cat "$log"
@@ -84,4 +95,7 @@ if [ "$kcc" = nfcc ] && ! grep -q "Linux version .*(nfcc " "$log"; then
   echo "linux-qemu: the kernel booted but its banner does not name nfcc, see $log" >&2
   exit 1
 fi
-echo "linux-qemu: booted ($accel, KCC=$kcc), kernel $dir/bzImage-$kcc"
+if [ -n "${QBE_TRY:-}" ]; then
+  echo "linux-qemu: $(grep -c '^qbe ' "$NFCXX_QBE_LOG") of $(wc -l < "$NFCXX_QBE_LOG") C files tried are in the kernel from the qbe backend ($NFCXX_QBE_LOG)"
+fi
+echo "linux-qemu: booted ($accel, KCC=$kcc${QBE_TRY:+, QBE_TRY}), kernel $dir/bzImage-$tag"

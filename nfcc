@@ -93,6 +93,9 @@ if [ $# -eq 1 ] && [ "$1" = -v ]; then exec "$host" -v; fi
 # understands every -d*, -P, -C, -Wp,* ... option, and there is no code generation to get wrong. So does
 # -fsyntax-only (a check that writes no object; rake builds use `-Wp,-v - -fsyntax-only` to learn the
 # header search path): the host front end answers it.
+# NFCXX_QBE_TRY (gcc backend): scripts/qbe-try runs the compile, then moves it to the qbe backend when the qbe object
+# matches the gcc one (docs/notes/linux-kernel.md)
+if [ -n "${NFCXX_QBE_TRY:-}" ] && [ "$backend" = gcc ]; then exec "$root/scripts/qbe-try" "$@"; fi
 for a in "$@"; do
   case $a in -E|-M|-MM|-MG|-fsyntax-only) exec "$host" "$@" ;; esac
 done
@@ -118,6 +121,26 @@ isa=()       # gcc backend: -march and the ISA -m options (-msse*, -mavx*, ...),
 # program that builds on one builds on the other. The Linux kernel's build needs it (-mcmodel=kernel, -mno-red-zone,
 # -mno-sse, ...): docs/notes/linux-kernel.md.
 gccf=()
+# NFCXX_QBE_KERNEL=1 with the qbe backend: the Linux kernel's options that the qbe path honours are accepted and given
+# to qbe-cc (kqf), the rest are still refused. Honoured by cproc: -funsigned-char, -fshort-wchar,
+# -ftrivial-auto-var-init=zero; by construction (QBE has no stack protector, jump tables, red-zone use, null-check or
+# overflow assumptions, and writes PIC code that a non-PIE link takes): the rest of the list. -mno-sse and the other
+# no-floating-point options are checked: qbe-cc refuses a translation unit whose QBE code touches SSE or x87 registers.
+# docs/notes/linux-kernel.md.
+kqf=()
+qbekernel() {
+  [ "$backend" = qbe ] && [ -n "${NFCXX_QBE_KERNEL:-}" ] || return 1
+  case $1 in
+    -funsigned-char|-fshort-wchar|-ftrivial-auto-var-init=zero|-ffreestanding|-fno-PIE|-fno-pie|-fno-PIC|-fno-pic|\
+    -fno-stack-protector|-fno-jump-tables|-fno-delete-null-pointer-checks|-fno-strict-overflow|-fno-strict-aliasing|-fwrapv|\
+    -fcf-protection=none|-fno-asynchronous-unwind-tables|-fconserve-stack|-fno-common|-falign-functions=*|-falign-jumps=*|\
+    -falign-loops=*|-falign-labels=*|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
+    -fno-optimize-sibling-calls|-fstrict-flex-arrays=*|-fomit-frame-pointer|-fno-omit-frame-pointer|-fmacro-prefix-map=*|\
+    -m64|-mcmodel=kernel|-mno-red-zone|-mtune=*|-mpreferred-stack-boundary=3|-mskip-rax-setup|-mno-sse|-mno-sse2|-mno-mmx|\
+    -mno-3dnow|-mno-avx|-mno-80387|-mno-fp-ret-in-387|-msoft-float) kqf+=("$1") ;;
+    *) return 1 ;;
+  esac
+}
 gcconly() { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ] || return 1; gccf+=("$1"); }
 # -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
 # would be dropped silently, so it is an error.
@@ -143,6 +166,7 @@ n=${#args[@]}
 need() { [ $((i + 1)) -lt $n ] || die "option '${args[i]}' requires an argument"; }
 for ((i = 0; i < n; i++)); do
   a=${args[i]}
+  qbekernel "$a" && continue
   case $a in
     -c) mode=compile ;;
     -S) asm=1 ;;
@@ -267,7 +291,7 @@ compile_one() {
   fi
   local what=-c; [ $asm = 0 ] || what=-S
   if [ $backend = qbe ] || [ $backend = cil ]; then
-    NFCXX_C_INPUT=1 "$qcc" $what "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
+    NFCXX_C_INPUT=1 "$qcc" $what "${kqf[@]+"${kqf[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
     gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
         "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"

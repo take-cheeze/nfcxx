@@ -38,3 +38,59 @@ Two fixes apply to every build: an assembly input given with `-x assembler`/`-x 
 the dependency file (kbuild's `fixdep` reads one for every `.S`).
 
 `tests/c/cc-mode.sh` covers the mode (section 7b) and the two fixes.
+
+## Moving files to QBE: `NFCXX_QBE_TRY`
+
+```
+KCC=nfcc QBE_TRY='*' scripts/linux-qemu.sh     # try every C file on qbe; DIR/qbe-try.log has the outcome per file
+```
+
+With `NFCXX_QBE_TRY="PATTERN ..."` on the gcc backend, nfcc hands each compile to `scripts/qbe-try`:
+
+1. The compile runs as asked on the gcc backend. Its object is the fallback and the reference, and its dependency file
+   is the one kbuild reads.
+2. A `-c SRC.c -o OBJ` compile whose source matches a pattern runs again on the qbe backend with `NFCXX_QBE_KERNEL=1`.
+3. The qbe object replaces the gcc one only if it matches it: the same global and weak definitions (name, binding,
+   type, kind of section), no undefined symbol the gcc object does not also need, and the same special allocated
+   sections (`.init.text`, `.initcall6.init`, `__param`, ...). Otherwise the gcc object stays. Either way one line goes
+   to `NFCXX_QBE_LOG`: `qbe SRC`, or `gcc SRC: reason` (the first error, or what differed).
+
+The kernel then has to boot. The log is the migration's to-do list: sorted by reason, it says which missing feature
+keeps the most files on gcc.
+
+### `NFCXX_QBE_KERNEL=1`: the kernel's options on the qbe backend
+
+The qbe backend still refuses every option it cannot honour. In this mode it accepts the ones it can:
+
+- honoured by cproc: `-funsigned-char` (cproc `-u`), `-fshort-wchar` (`-W`: wide literals are `unsigned short`),
+  `-ftrivial-auto-var-init=zero` (`-z`: automatic objects without an initializer are zeroed);
+- true of QBE's code by construction: `-mno-red-zone` (QBE reserves its frame with `subq` and never addresses below
+  `%rsp`), `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`,
+  `-fno-strict-aliasing`, `-fno-common`, `-fno-PIE` (QBE writes PIC code, which a non-PIE link takes; the linker relaxes
+  its `@GOTPCREL` loads, and the kernel's linker script checks no GOT is left), and the alignment and tuning options;
+- checked: `-mno-sse`, `-mno-80387` and the other no-floating-point options. QBE has no such switch, so `qbe-cc` refuses
+  a translation unit whose QBE code names an SSE or x87 register or an x87 instruction. Inline asm is the program's own,
+  as with gcc. QBE's variadic prologue saves `%xmm0`-`%xmm7`, so a file that defines a variadic function stays on gcc.
+
+The translation unit is preprocessed exactly as gcc preprocesses it (gcc's predefined macros and all of the kernel's
+options), so cproc sees the same code as the reference object, and cproc runs with `-p`: unreferenced internal
+functions and data are dropped, as gcc does. The kernel's headers define hundreds of static inline functions per file,
+and keeping the unused ones would leave references to symbols this configuration does not have.
+
+### Status (tinyconfig, Linux 6.8)
+
+615 C files are tried; 3 move, among them `arch/x86/lib/misc.c`, which is linked into `vmlinux`, and the kernel boots.
+What keeps the rest on gcc, by the number of files whose first error it is:
+
+| files | reason |
+| ----: | ------ |
+| 426 | the global register variable `register unsigned long current_stack_pointer asm("rsp")` (`asm/asm.h`) |
+|  85 | `aligned` (65) and `packed` (20) attributes in positions cproc does not take yet |
+|  51 | the `asm` keyword (GNU C; cproc knows `__asm__`) |
+|  20 | `-m16`: the real-mode boot code, which stays on gcc |
+|   9 | `__builtin_choose_expr` |
+|   8 | `-fno-function-sections`, `-foptimize-sibling-calls` (2) not yet accepted |
+|   3 | data symbols: QBE gives them no `@object` type, so the definitions differ |
+
+Each fix exposes the next first error, and statement expressions (`({ ... })`, used by `min`, `max`, `container_of`)
+and volatile accesses (`READ_ONCE`) are expected behind these.
