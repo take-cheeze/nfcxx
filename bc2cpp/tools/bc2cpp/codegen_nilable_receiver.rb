@@ -27,8 +27,9 @@ module NilableReceiverSend
 
     nil_arm = nilable_nil_arm(insn, recv, plan[:name], plan[:argv])
     # Only worth a nil test when the non-nil path sheds dispatches the plain code keeps, or when the
-    # receiver is nil-or-Array: the non-nil path is then the Array dispatch itself (no class guard).
-    return plain unless plan[:klass] == 'Array' ||
+    # receiver is nil-or-Array and the nil arm does not dispatch by name (nil answers `inspect`, so its arm
+    # would add a send): the non-nil path is then the Array push itself, with no class guard.
+    return plain unless (plan[:klass] == 'Array' && dispatch_count(nil_arm).zero?) ||
                         dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain) ||
                         (EXACT_MARK.match?(inner) && !EXACT_MARK.match?(plain))
 
