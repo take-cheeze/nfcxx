@@ -61,6 +61,9 @@ class CodeGen
   def guarded_inline_arm?(name, argc, klass)
     arms = @block_core_arms && @block_core_arms[[name, argc]]
     return true if !arms.nil? && arms.any? { |arm| arm[:class] == klass }
+    # GUARDED_NATIVE_ARM: Array#index is mruby's native loop, which the region's recognizer already proved
+    # (array_native_index?).
+    return array_native_index? if klass == 'Array' && name == 'index' && argc&.zero?
 
     guarded_plain_chain_arm?(name, argc, klass)
   end
