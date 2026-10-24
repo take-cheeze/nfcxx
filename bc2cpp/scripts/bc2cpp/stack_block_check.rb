@@ -7,8 +7,8 @@
 # heap RProc is built only where the code still dispatches by name.
 #
 #   generated code (needs a host mrbc)
-#     - `a.each { }` on an unproven receiver: the Array arm takes the stack block, the Hash/Range arms and the
-#       owner-call else build the heap RProc on demand;
+#     - `a.each { }` on an unproven receiver: the Array and Hash arms take the stack block, the Range arm (Range#each
+#       passes its block on) and the owner-call else build the heap RProc on demand;
 #     - a block that yields to the frame's own block (`needs_blk`) and a callee that passes its block on keep the
 #       heap RProc;
 #     - BC2CPP_STACK_BLOCKS=0 builds every block on the heap.
@@ -74,8 +74,10 @@ sum = code_of(code, 'sum')
 check.call('sum: the Array arm runs the compiled Array#each with the frame-local block',
            sum.match?(/Bc2cppStackBlock bc2cpp_blk_stack_(\d+)\(M, \d+, bc2cpp_blk_env_\1\);/) &&
              sum.match?(/Array_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/))
-check.call('sum: the other arms and the else build the heap RProc only when they run',
-           sum.include?('auto bc2cpp_blk_heap_') && sum.match?(/Hash_each_impl\(M, r\d+, bc2cpp_blk_heap_\d+\(\)\)/) &&
+check.call('sum: the Hash arm takes it too, Range#each (which passes its block on) and the else build the heap RProc ' \
+           'only when they run',
+           sum.include?('auto bc2cpp_blk_heap_') && sum.match?(/Hash_each_impl\(M, r\d+, bc2cpp_blk_stack_\d+\.value\(\)\)/) &&
+             sum.match?(/Range_each_impl\(M, r\d+, bc2cpp_blk_heap_\d+\(\)\)/) &&
              !sum.match?(/struct RProc\* bc2cpp_blk_proc_\d+ = mrb_proc_new_cfunc_with_env/))
 check.call('fwd: a block that yields to the frame block (needs_blk) keeps the heap RProc',
            !code_of(code, 'fwd').include?('Bc2cppStackBlock'))
