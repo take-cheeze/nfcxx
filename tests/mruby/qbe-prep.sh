@@ -92,12 +92,14 @@ int pi1 __attribute__((aligned(64))) = 3, pi2 __attribute__((aligned(16)));
 int plain[4];
 char *ptrs[3] , other[2] __attribute__((__aligned__(4)));
 int tricky(int a[4] __attribute__((__aligned__(8))));
+struct CP { long x; } __attribute__((__aligned__(128),));
 EOF
 both aligned
 expect aligned out 'static char _Alignas(16) buf[40]'
 expect aligned out '_Alignas(16) char b[32];'
 expect aligned out '_Alignas(16) char b[0x20];'
 expect aligned out 'double _Alignas(32) m[2][3]'
+expect aligned out '_Alignas(128) long x;'
 expect aligned out 'struct S2 { _Alignas(16) char b[30]; }'
 expect aligned out 'struct S3 { _Alignas(16) int b[8]; }'
 expect aligned out 'struct S6 { unsigned f : 3; int g; } __attribute__((__aligned__(16)));'
