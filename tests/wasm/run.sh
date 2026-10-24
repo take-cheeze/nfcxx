@@ -71,13 +71,19 @@ for f in "$dir"/*.cpp; do
     trap_want=$((trap_want + 1))
   fi
   refuse=$(sed -n 's|^// REFUSE: *||p' "$f" | head -1)
-  if ! "$root/scripts/pathb-dump" "${ir_args[@]}" "$f" > "$tmp/$n.ir" 2> "$tmp/$n.front"; then
+  # a refusal names the function and the source line (NFCXX_IR_LOC: the IR's (loc ...) statements); the test's
+  # directory is left out of the line, so that a REFUSE text can name it as FILE:LINE
+  loc=0; [ -n "$refuse" ] && loc=1
+  if ! NFCXX_IR_LOC=$loc "$root/scripts/pathb-dump" "${ir_args[@]}" "$f" > "$tmp/$n.ir" 2> "$tmp/$n.front"; then
     echo "FAIL $n: front end: $(head -1 "$tmp/$n.front")"; fail=$((fail + 1)); continue
   fi
   if [ -n "$refuse" ]; then
     if "$root/scripts/mrb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$tmp/$n.ir" > "$tmp/$n.wasm" 2> "$tmp/$n.err"; then
       echo "FAIL $n: emitted a module, expected a refusal"; fail=$((fail + 1))
-    elif grep -qF "refused: $refuse" "$tmp/$n.err" || grep -qF "$refuse" "$tmp/$n.err"; then
+      continue
+    fi
+    sed -i "s|$(dirname "$f")/||g" "$tmp/$n.err"
+    if grep -qF "refused: $refuse" "$tmp/$n.err" || grep -qF "$refuse" "$tmp/$n.err"; then
       echo "ok   $n (refused: $(head -1 "$tmp/$n.err"))"; pass=$((pass + 1))
     else
       echo "FAIL $n: refusal text was: $(head -1 "$tmp/$n.err")"; fail=$((fail + 1))

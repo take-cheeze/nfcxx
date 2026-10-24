@@ -118,6 +118,10 @@
   .error[hidden] { display: none; }
   .result { font-size: 22px; font-weight: 650; }
   .result.trap { color: var(--bad); }
+  /* how a run ended, after its output: the explanation of a trap and its stack, or a timeout */
+  .run-note { display: block; margin-top: 6px; color: var(--bad); }
+  .run-note .muted { color: var(--muted); }
+  .error .hint-line { display: block; margin-top: 6px; color: var(--muted); font-size: 13px; }
   .muted { color: var(--muted); }
   a { color: var(--accent); }
 </style>
@@ -224,6 +228,8 @@
   const MONACO_BASE = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs";
   const WABT_URL = "https://cdn.jsdelivr.net/npm/wabt@1.0.37/index.js";
   const AUTO_DELAY = 700;   // ms after the last edit before an automatic compile (live server only)
+  const RUN_TIMEOUT = 10000;   // ms a run may take before it is stopped (main runs in a worker, so the page stays up)
+  const MAX_OUTPUT = 1 << 20;  // characters of a run's output kept; the rest is dropped (a program printing forever)
 
   // The source languages, as pipeline.cjs LANGUAGES names them: the standards the front end takes (Rust's are its
   // editions), the modes (the languages that go through LLVM IR, and the IR text, are LP64), and the editor's language.
@@ -251,7 +257,8 @@
     live: false,         // the local server answers the compile API; false on a static host
     examples: [],        // [{id, title, file, language, expect}] from examples/index.json
     builds: {},          // static only: id -> a promise of the prebuilt example (builds/<id>.json), fetched when needed
-    current: null,       // the last successful compile: { bytes, module, wat? }
+    current: null,       // the last successful compile: { bytes, module, names, wat? }
+    run: null,           // the run in progress: { worker, timer }
     seq: 0,              // compile requests in flight; a response for an older one is dropped
     autoTimer: null,
   };
@@ -291,6 +298,43 @@
     const box = $("error");
     box.hidden = !message;
     box.textContent = message ? `${stage}: ${message}` : "";
+    const hint = message && stage !== "front-end" ? refusalHint(message) : null;
+    if (hint) {
+      const h = document.createElement("span");
+      h.className = "hint-line";
+      h.textContent = hint;
+      box.appendChild(h);
+    }
+  }
+
+  // What to do about a construct the wasm emitter (or llvm-to-pathb.rb) refuses: the first entry whose pattern the
+  // message matches. The emitter compiles a subset (docs/notes/pathb-wasm.md); these are the refusals met most.
+  const REFUSAL_HINTS = [
+    [/__curr_eh_stack_entry|__cxa_|typeinfo for|exception/, "C++ exceptions (throw, try) are not supported, and "
+      + "neither is the hosted C++ library that uses them (std::vector, std::string, iostream): use arrays and the "
+      + "browser bindings."],
+    [/variadic/, "printf and other variadic functions are not supported: print with puts, putchar or the log_* "
+      + "bindings (the Browser bindings card)."],
+    [/bitfield/, "this bit-field use is not lowered yet: an unsigned field with masks and shifts is."],
+    [/aggregate (argument|parameter|result|type)|value of the struct type/, "structs passed or returned by value are "
+      + "not supported here: pass a pointer to the struct instead."],
+    [/variable-length array|alloca under --asan|bounds with a run-time limit/, "an array whose size is known only at "
+      + "run time is not supported (in this mode): give it a constant size."],
+    [/jump out of the loop|goto|label "/, "this goto (into or out of a loop) is not lowered: use break, continue or "
+      + "a flag."],
+    [/switch fallthrough|before the first case label/, "a case that falls into the next one is not lowered: end each "
+      + "case with break (or return)."],
+    [/static object @"(stdout|stderr|stdin|errno)/, "the C library's globals (stdout, errno) do not exist in the "
+      + "module: use puts or the log_* bindings."],
+    [/takes the name of an export of --emscripten/, "the Emscripten mode exports this name itself: rename the "
+      + "function."],
+    [/wide string/, "wide strings (L\"...\") are not lowered: use a char string."],
+    [/float of|integer of|long double|x87/, "long double, __int128 and other types wider than 64 bits are not "
+      + "supported: use double and long long."],
+  ];
+  function refusalHint(message) {
+    const h = REFUSAL_HINTS.find(([re]) => re.test(message));
+    return h ? h[1] : null;
   }
 
   // ---- the module ---------------------------------------------------------------------------------------------------
@@ -331,6 +375,7 @@
     a.hidden = false;
   }
   function clearModule() {
+    stopRun(null);
     state.current = null;
     $("run").disabled = true;
     clearRun();
@@ -343,9 +388,10 @@
     $("download").hidden = true;
     $("download-wat").hidden = true;
   }
-  function describe(bytes, ms) {
+  function describe(bytes, ms, names) {
     const module = new WebAssembly.Module(bytes);   // throws on a malformed module: a bug, shown as an error
-    state.current = { bytes, module };
+    stopRun(null);
+    state.current = { bytes, module, names: names || {} };
     const exports = WebAssembly.Module.exports(module);
     const imports = WebAssembly.Module.imports(module);
     $("s-size").textContent = String(bytes.length);
@@ -358,39 +404,160 @@
     blobLink("download", bytes, "application/wasm");
     $("download-wat").hidden = true;
     const hasMain = exports.some((e) => e.name === "main" && e.kind === "function");
+    state.current.hasMain = hasMain;
     $("run").disabled = !hasMain;
     $("result").textContent = hasMain ? "" : "the module has no main export";
   }
 
-  function runMain() {
-    if (!state.current) return;
-    clearRun();
-    $("console").textContent = "";
-    let memory = null;
-    const ctx = B.makeContext({
-      write: (text) => {
-        $("console").textContent += text;
-      },
-      memory: () => memory,
-    });
-    const out = $("result");
-    try {
-      const instance = new WebAssembly.Instance(state.current.module,
-        B.importsFor(state.current.module, ctx, state.current.bytes));
-      memory = instance.exports.memory || null;
-      out.textContent = String(instance.exports.main());
-    } catch (e) {
-      if (e instanceof B.Exit) {
-        out.textContent = `exit ${e.status}`;   // the exit binding (C's exit, Go's os.Exit) ended the run
-      } else {
-        out.textContent = (e instanceof WebAssembly.RuntimeError ? "trap: " : "") + String((e && e.message) || e);
-        out.classList.add("trap");
+  // main() runs in a worker, so that a program that never returns (an infinite loop) does not freeze the page: Run
+  // becomes Stop while it runs, and a run that takes over RUN_TIMEOUT is stopped. The worker loads bindings.js, runs
+  // main with nfcxxBindings.runMain, and posts the output, the title and how the run ended.
+  const WORKER_SOURCE = `
+    importScripts(BINDINGS_URL);
+    onmessage = (e) => {
+      const B = self.nfcxxBindings;
+      const bytes = e.data.bytes;
+      let buf = "", sent = 0, last = performance.now();
+      const post = () => {
+        if (buf) postMessage({ type: "write", text: buf });
+        buf = "";
+        last = performance.now();
+      };
+      const sink = {
+        write(text) {
+          if (sent >= MAX_OUTPUT) return;
+          if (sent + text.length > MAX_OUTPUT) text = text.slice(0, MAX_OUTPUT - sent) + "\\n(output truncated)\\n";
+          sent += text.length;
+          buf += text;
+          if (buf.length > 8192 || performance.now() - last > 50) post();
+        },
+        title(text) { postMessage({ type: "title", text }); },
+      };
+      let out;
+      try {
+        out = B.runMain(new WebAssembly.Module(bytes), bytes, sink);
+      } catch (err) {
+        out = { kind: "error", result: String((err && err.message) || err) };
       }
-    } finally {
-      ctx.flush();
-      document.title = titleAtLoad;
+      post();
+      postMessage({ type: "done", out });
+    };`;
+  let workerUrl = null;
+  function makeWorker() {
+    if (!workerUrl) {
+      const bindingsUrl = new URL("bindings.js", location.href).href;
+      const text = `const BINDINGS_URL = ${JSON.stringify(bindingsUrl)}; const MAX_OUTPUT = ${MAX_OUTPUT};`
+        + WORKER_SOURCE;
+      workerUrl = URL.createObjectURL(new Blob([text], { type: "text/javascript" }));
+    }
+    return new Worker(workerUrl);
+  }
+
+  function consoleWrite(text) {
+    const c = $("console");
+    if (c.textContent.length < MAX_OUTPUT + 64) c.append(text);
+    c.scrollTop = c.scrollHeight;
+  }
+  // A note after the run's output: what ended it, and the wasm stack, demangled with the compile's names.
+  function consoleNote(lines) {
+    const note = document.createElement("span");
+    note.className = "run-note";
+    lines.forEach((l, i) => {
+      if (i) note.append("\n");
+      if (typeof l === "string") note.append(l);
+      else {
+        const m = document.createElement("span");
+        m.className = "muted";
+        m.textContent = l.muted;
+        note.append(m);
+      }
+    });
+    $("console").append(note);
+    $("console").scrollTop = $("console").scrollHeight;
+  }
+  function frameLines(frames, names) {
+    const shown = (frames || []).filter((f) => !/^(__asan_|__nfcxx_go_main$)/.test(f)).slice(0, 12);
+    return shown.map((f) => ({ muted: "  at " + (names[f] || f) }));
+  }
+
+  function setRunning(on) {
+    $("run").textContent = on ? "Stop" : "Run";
+    $("run").title = on ? "Stop the program" : "Run main() of the last module compiled";
+    $("run").disabled = !on && !(state.current && state.current.hasMain);
+  }
+  // Ends the run in progress, if any; reason (a string) is reported as its result, null ends it silently.
+  function stopRun(reason) {
+    const run = state.run;
+    if (!run) return;
+    state.run = null;
+    clearTimeout(run.timer);
+    run.worker.terminate();
+    document.title = titleAtLoad;
+    setRunning(false);
+    if (reason) finishRun(run, { kind: reason === "timeout" ? "timeout" : "stopped",
+      result: reason === "timeout" ? "timed out" : "stopped" });
+  }
+  function finishRun(run, out) {
+    const res = $("result");
+    res.textContent = out.result;
+    res.classList.toggle("trap", out.kind !== "value" && out.kind !== "exit");
+    const names = run.names;
+    if (out.kind === "trap") {
+      consoleNote([out.result + (out.explain ? ": " + out.explain : ""), ...frameLines(out.frames, names)]);
+    } else if (out.kind === "asan" || out.kind === "abort") {
+      consoleNote([out.kind === "abort" ? "abort() called" : "stopped at the bad access",
+        ...frameLines(out.frames, names)]);
+    } else if (out.kind === "timeout") {
+      consoleNote([`main() did not return in ${RUN_TIMEOUT / 1000} s, so it was stopped: an infinite loop, or a `
+        + "Rust panic handler that loops (call abort instead)?"]);
+    } else if (out.kind === "error") {
+      consoleNote([out.result]);
     }
     if (!$("console").textContent) $("console").textContent = "(no output)";
+  }
+
+  function runMain() {
+    if (state.run) return stopRun("stopped");   // the button is Stop while a run is in progress
+    const cur = state.current;
+    if (!cur) return;
+    clearRun();
+    $("console").textContent = "";
+    let worker;
+    try {
+      worker = makeWorker();
+    } catch (e) {
+      // no worker (a page opened from a file: URL in some browsers): run here, without the timeout
+      const out = B.runMain(cur.module, cur.bytes, { write: consoleWrite, title: (t) => { document.title = t; } });
+      document.title = titleAtLoad;
+      return finishRun({ names: cur.names }, out);
+    }
+    const run = { worker, names: cur.names, timer: setTimeout(() => stopRun("timeout"), RUN_TIMEOUT) };
+    state.run = run;
+    setRunning(true);
+    worker.onmessage = (e) => {
+      if (state.run !== run) return;
+      const m = e.data;
+      if (m.type === "write") consoleWrite(m.text);
+      else if (m.type === "title") document.title = m.text;
+      else if (m.type === "done") {
+        state.run = null;
+        clearTimeout(run.timer);
+        worker.terminate();
+        document.title = titleAtLoad;
+        setRunning(false);
+        finishRun(run, m.out);
+      }
+    };
+    worker.onerror = (e) => {
+      if (state.run !== run) return;
+      e.preventDefault();
+      state.run = null;
+      clearTimeout(run.timer);
+      worker.terminate();
+      setRunning(false);
+      finishRun(run, { kind: "error", result: "the run's worker failed: " + (e.message || "bindings.js did not load") });
+    };
+    worker.postMessage({ bytes: cur.bytes });
   }
 
   // ---- WAT, through wabt, loaded when first needed -------------------------------------------------------------------
@@ -522,7 +689,7 @@
     showError("", "");
     try {
       const bytes = Uint8Array.from(atob(data.wasm), (c) => c.charCodeAt(0));
-      describe(bytes, ms);
+      describe(bytes, ms, data.names);
     } catch (e) {
       clearModule();
       showError("browser", "the module did not load: " + ((e && e.message) || e));

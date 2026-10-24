@@ -368,6 +368,9 @@ static int ir_trap_overflow;
    emitter can name the place of a failing check, and (unreachable missing-return) for a function that is left without a
    value. Without it the output is as before. ir_loc_file/ir_loc_line: the last location printed in this function. */
 static int ir_ubsan;
+/* 1 when only the (loc "FILE" LINE) statements are wanted, with no change to the checks: NFCXX_IR_LOC=1 (the wasm
+   explorer, so that a refusal of the emitter names a source line). NFCXX_IR_SANITIZE implies it. */
+static int ir_loc;
 static char *ir_loc_file;
 static unsigned long ir_loc_line;
 
@@ -5427,7 +5430,7 @@ static void ir_loc_stmt(a_statement_ptr s, int d)
   a_boolean at_end = FALSE;
   char *q, *o;
   const char *c;
-  if (!ir_ubsan || s == NULL || s->position.seq == 0) return;
+  if (!ir_loc || s == NULL || s->position.seq == 0) return;
   if (conv_seq_to_file_and_line(s->position.seq, &fname, &full, &line, &at_end) == NULL || fname == NULL) return;
   if (ir_loc_file != NULL && strcmp(ir_loc_file, fname) == 0 && ir_loc_line == (unsigned long)line) return;
   free(ir_loc_file);
@@ -6044,6 +6047,10 @@ void nfcxx_ir_back_end(void)
     const char *sz = getenv("NFCXX_IR_SANITIZE");
     ir_ubsan = sz != NULL && sz[0] != 0;
     if (ir_ubsan && (strstr(sz, "undefined") != NULL || strstr(sz, "signed-integer-overflow") != NULL)) ir_trap_overflow = 1;
+  }
+  {
+    const char *lc = getenv("NFCXX_IR_LOC");
+    ir_loc = ir_ubsan || (lc != NULL && strcmp(lc, "1") == 0);
   }
   {
     const char *bf = getenv("NFCXX_PATHB_BORROW");

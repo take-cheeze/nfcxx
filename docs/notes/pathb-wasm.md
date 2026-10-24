@@ -10,6 +10,9 @@ scripts/mrb scripts/pathb-wasm-emit.rb prog.ir > prog.wasm
 node tests/wasm/host.cjs prog.wasm          # runs main, prints its result (or "trap")
 ```
 
+`--names` adds the custom `name` section (function names: the imports, the IR's functions, and the `--asan` runtime's),
+so that an engine's stack trace names the functions (`at _Z4deepi (wasm://...)`); the wasm explorer uses it.
+
 `tests/wasm/run.sh` does this for each `tests/wasm/*.cpp`. Each test has its expected result in `// EXPECT: N`
 (the `g++ -O0` result, except `calls.cpp`, whose import is a stub), or `// TRAP` (main traps), or `// REFUSE: TEXT`
 (the emitter refuses with TEXT). The suite skips, rather than fails, without node. `NFCXX_WASM_ASAN=1` runs every
@@ -347,7 +350,11 @@ leaves it (its label stack entry is the switch's), and `continue` goes to the en
 
 ## What is refused (the next steps)
 
-Each refusal names the node on stderr and exits with status 3. None is dropped silently.
+Each refusal names the node on stderr and exits with status 3. None is dropped silently. A refusal inside a function
+names the function, and the source line of the statement when the IR has `(loc ...)` statements (`NFCXX_IR_LOC=1` of
+`pathb-dump`): `refused: variadic call (in _Z4showi, at prog.cpp:6)`. A global or a `data` form that is refused is
+refused only when the module uses it (an unused `std::float16_t` constant of a header does not stop the module). The
+top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped.
 
 - General `goto` and labels in a body that also has a `loop` or a `switch`, or a label inside a nested statement, and a
   switch whose arm falls into the next non-empty one. The structurizer that `pathb-stage2.md` section 2 asks for is
@@ -377,7 +384,8 @@ initializer, a struct with a pointer to another global, a string read through a 
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
 (`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested
 switches on a long selector, and a return in each arm. `refuse_switch_fallthrough.cpp` and `refuse_global.cpp` check the
-two refusals. `goto_dispatch.cpp` checks the dispatch lowering, `function_pointers.cpp` the function table, and `checked_arith.ir` (hand-written IR, emitted in the
+two refusals, and `refuse_located.cpp` the function and line a refusal names (the suite dumps a `REFUSE` test with
+`NFCXX_IR_LOC=1`). `goto_dispatch.cpp` checks the dispatch lowering, `function_pointers.cpp` the function table, and `checked_arith.ir` (hand-written IR, emitted in the
 LP64 modes) checks the checked arithmetic at the edges of each width through `checked_arith.cjs`. Node instantiates a
 module only after validating it, so a malformed
 module fails the test. `tests/wasm/frames.cpp` makes 1000 calls with 256 bytes of locals each: the frames must be released

@@ -134,7 +134,9 @@ Pointer and aggregate addressing has no C-level expression:
   are not checked.
 
 - `(loc "FILE" LINE)`, `(likely)`, `(unlikely)`: statements that generate no code. `loc` is printed only under
-  `NFCXX_IR_SANITIZE` (`-fsanitize=`): the source position of the statements that follow, which a failing check reports.
+  `NFCXX_IR_SANITIZE` (`-fsanitize=`), or under `NFCXX_IR_LOC=1`: the source position of the statements that follow,
+  which a failing check reports, and which a refusal of the wasm emitter names (`docs/notes/pathb-wasm.md`). Without
+  either variable the IR is the same as before.
   `(likely)`/`(unlikely)` is the first statement of an `if` arm that has `[[likely]]`/`[[unlikely]]`; a consumer may use it for
   block layout and must otherwise ignore it. `(unreachable missing-return)` is `(unreachable)` for a function left without a
   value, printed under the same variable. See `ubsan.md`.
