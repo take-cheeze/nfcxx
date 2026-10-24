@@ -50,6 +50,25 @@ if "$nfcxx" "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -Wl,--whole-archive -o "$tmp/wl_r
 else
   ok "-Wl,--whole-archive is refused"
 fi
+# find_package(Torch)'s form: -Wl,--no-as-needed,LIB -Wl,--as-needed keeps LIB in DT_NEEDED although the program does
+# not reference it (one --no-as-needed for the whole link; the library stays an input in place). ELF only.
+if [ "$(uname -s)" != Darwin ]; then
+  mkdir -p "$tmp/nan"
+  printf 'int unused_by_main(void) { return 1; }\n' > "$tmp/nan/u.c"
+  if cc -shared -fPIC "$tmp/nan/u.c" -o "$tmp/nan/libunused.so" &&
+     out=$("$nfcxx" "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -Wl,--no-as-needed,"$tmp/nan/libunused.so" -Wl,--as-needed \
+             -Wl,-rpath,"$tmp/nan" -o "$tmp/wl_nan" 2>&1); then
+    if readelf -dW "$tmp/wl_nan" | grep -q 'NEEDED.*libunused.so' && "$tmp/wl_nan"; then
+      ok "-Wl,--no-as-needed,LIB ... -Wl,--as-needed keeps LIB (find_package(Torch))"
+    else bad "-Wl,--no-as-needed,LIB keeps LIB" "$(readelf -dW "$tmp/wl_nan" | grep NEEDED | tr '\n' ' ')"; fi
+  else bad "-Wl,--no-as-needed,LIB (link)" "$(head -3 <<<"$out" | tr '\n' ' ')"; fi
+  # CMake 4's linker dependency file: a relative path the link writes (it does not exist yet), from the build directory.
+  mkdir -p "$tmp/depdir/CMakeFiles/t.dir"
+  if out=$(cd "$tmp/depdir" && "$nfcxx" -Wl,--dependency-file=CMakeFiles/t.dir/link.d "$tmp/src/wl.cpp" "$tmp/src/a.cpp" \
+             -o "$tmp/wl_dep" 2>&1) && [ -s "$tmp/depdir/CMakeFiles/t.dir/link.d" ]; then
+    ok "-Wl,--dependency-file=RELATIVE is written where CMake reads it"
+  else bad "-Wl,--dependency-file=RELATIVE" "$(head -3 <<<"$out" | tr '\n' ' ')"; fi
+fi
 if [ -x "$tmp/main" ]; then
   "$tmp/main"; got=$?
   [ "$got" -eq 42 ] && ok "-isystem header is used (exit 42)" || bad "-isystem header is used" "exit $got, want 42"
