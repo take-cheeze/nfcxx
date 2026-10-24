@@ -217,14 +217,16 @@ t=$(trace_start)
 # Mach-O: QBE's Apple targets prefix every label with "_" (T.assym), so the names are looked up with it.
 symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
-"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
+# --marked: the inline-asm side file, where cproc already wrote the .weak of hand-written C's weak attribute
+marked=(); [ ${#asmarg[@]} -eq 0 ] || marked=(--marked="$tmp/asm.s")
+"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} ${marked[@]+"${marked[@]}"} "$tmp/prep.c" "$tmp/out.s"
 # Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
 # __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
 # that text (weak-symbols.rb gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
 if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
   if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
      grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
-    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input "$tmp/pp.weak.c" "$tmp/out.s"
+    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input ${marked[@]+"${marked[@]}"} "$tmp/pp.weak.c" "$tmp/out.s"
   fi
 fi
 cat "$tmp/tail.s" >> "$tmp/out.s"

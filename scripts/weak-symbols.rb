@@ -159,7 +159,8 @@ def attribute_weak?(text, a)
   group = text[i, j - i + 1]
   # no "weak" substring in the group, no word: the common case (aligned, always_inline, ...)
   return false if group.index("weak").nil?
-  has_word?(group, "weak") || has_word?(group, "__weak__")
+  return :edg if has_word?(group, "__weak__")
+  has_word?(group, "weak") ? :hand : false
 end
 
 # Declarations and definitions are delimited by ; { } at top level; each chunk that mentions __weak__
@@ -171,6 +172,8 @@ end
 # an "extern template" class that way (GNU89 meaning: the out-of-line copy lives in another translation unit,
 # for libstdc++'s std::allocator<char> that is libstdc++ itself), while a C99 compiler such as cproc makes it a
 # strong definition in every object that uses it.
+# The value of each name is :edg (EDG's __weak__, as the Python original finds it) or :hand (only hand-written C's
+# __attribute__((weak))).
 def weak_names(text, extern_inline)
   names = {}
   pos = 0
@@ -183,15 +186,17 @@ def weak_names(text, extern_inline)
     end
     w = (nw && na) ? (nw < na ? nw : na) : (nw || na)
     break if w.nil?
+    how = w == nw ? :edg : attribute_weak?(text, w)
     b, e = chunk_around(text, w)
     s = strip_attributes(text[b, e - b])
     q = s.index("=")
     s = s[0, q] if q
     n = first_call_name(s)
     if n
-      names[n] = true
+      names[n] = :edg if names[n] != :edg && how == :edg
+      names[n] ||= how
     else
-      identifiers(s).each { |x| names[x] = true }
+      identifiers(s).each { |x| names[x] = :edg if how == :edg; names[x] ||= how }
     end
     pos = e + 1
     nw = text.index("__weak__", pos) if nw && nw < pos
@@ -206,12 +211,22 @@ def weak_names(text, extern_inline)
       chunk = text[b, e - b]
       if has_word?(chunk, "extern") && !has_word?(chunk, "static")
         n = first_call_name(strip_attributes(chunk))
-        names[n] = true if n
+        names[n] = :edg if n
       end
       pos = e + 1
     end
   end
-  names.keys
+  names
+end
+
+# The names the assembly already marks weak (".weak NAME" lines; cproc writes them for hand-written C's weak).
+def weak_marked(asm)
+  marked = {}
+  asm.each_line do |l|
+    t = l.strip
+    marked[t[6, t.size - 6]] = true if t[0, 6] == ".weak "
+  end
+  marked
 end
 
 # Labels at the start of a line: ^([A-Za-z_.$][\w.$]*):
@@ -242,6 +257,9 @@ extern_inline = true
 # --sym-prefix=P: the target's prefix on every label (QBE's Apple targets prefix "_", so a Mach-O label is __Z5f for the C name
 # _Z5f). The directive line names the label the assembly defines, so the names are looked up with the prefix. Empty elsewhere.
 SYM_PREFIX_OPT = "--sym-prefix="
+# --marked=FILE: more assembly whose .weak lines count as already written (cproc's inline-asm side file, appended later)
+MARKED_OPT = "--marked="
+marked_path = nil
 prefix = ""
 # Mach-O (the prefixed mode): the Apple assembler rejects ".weak", and a weak definition is ".weak_definition".
 weak_directive = ".weak "
@@ -250,6 +268,8 @@ while args.first && args.first[0, 2] == "--"
   opt = args.shift
   if opt == "--c-input"
     extern_inline = false
+  elsif opt[0, MARKED_OPT.size] == MARKED_OPT
+    marked_path = opt[MARKED_OPT.size, opt.size - MARKED_OPT.size]
   elsif opt[0, SYM_PREFIX_OPT.size] == SYM_PREFIX_OPT
     prefix = opt[SYM_PREFIX_OPT.size, opt.size - SYM_PREFIX_OPT.size]
     weak_directive = ".weak_definition "
@@ -259,7 +279,12 @@ c_path, asm_path = args
 text = File.open(c_path, "rb") { |f| f.read }
 asm = File.open(asm_path, "rb") { |f| f.read }
 defs = defined_labels(asm)
-weak = weak_names(text, extern_inline).map { |n| prefix + n }.select { |n| defs[n] }.sort
+# A name only hand-written C's __attribute__((weak)) marks gets no second .weak where cproc already wrote one (x86-64 ELF,
+# its inline-asm side file); elsewhere (Mach-O) this line is the only one. EDG's names are taken as the original does.
+marked = weak_marked(asm)
+weak_marked(File.open(marked_path, "rb") { |f| f.read }).each_key { |k| marked[k] = true } if marked_path && File.exist?(marked_path)
+weak = weak_names(text, extern_inline).select { |n, how| how == :edg || !marked[prefix + n] }.keys
+weak = weak.map { |n| prefix + n }.select { |n| defs[n] }.sort
 unless weak.empty?
   File.open(asm_path, "ab") do |f|
     f.write("\n" + weak.map { |n| "#{weak_directive}#{n}\n" }.join)
