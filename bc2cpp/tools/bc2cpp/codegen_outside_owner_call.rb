@@ -102,6 +102,25 @@ module OutsideOwnerCall
       "  #{line}"
   end
 
+  # HELPER_OWNER_CALL: a shared helper's last-resort `mrb_funcall(M, x, "name", n, args...)` (the numeric slow
+  # paths' else, `bc2cpp_eqq`'s default arm) is the same by-name send, so it becomes the owner call over the name's
+  # whole owner set when NAME_OWNER_SET names one. Level 0: mrb_funcall checks neither visibility nor arity, nor
+  # does the helper's operator site (CheckedSend never sees it).
+  HELPER_FUNCALL = /\bmrb_funcall\(M, (\w+), "([^"]+)", (\d+)((?:, \w+)*)\)/
+
+  def helper_owner_calls(code)
+    code.gsub(HELPER_FUNCALL) do
+      call = Regexp.last_match
+      recv, name, argc, args = call.captures
+      owners = argc.to_i <= CodeGen::FUNCALL_ARGC_MAX && args.count(',') == argc.to_i && name_owner_set(name)
+      next call[0] unless owners
+
+      list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
+      "bc2cpp_owner_call_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), #{argc}#{args}) " \
+        "/* CLOSED_WORLD owner-call: #{name} */"
+    end
+  end
+
   # `r = bc2cpp_owner_call_named(M, recv, "name", LEVEL, BC2CPP_OWNERS(...), blk, argc, args...)`. LEVEL is the
   # OP_SEND check level CheckedSend fills in for a real SEND instruction (0 for any other site); SymbolCache turns
   # the name into its slot.

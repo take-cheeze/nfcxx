@@ -233,7 +233,8 @@ module RbsParamCheck
   def constructor_sites(ctx, d)
     gen = ctx[:constructor_entries]
     sites, = gen.constructor_entry_sites(d.irep)
-    sites.reject do |irep, idx, _dest, _argc, _owner|
+    sites.reject do |irep, site_idx, _dest, _argc, _owner|
+      idx = gen.constructor_site_send_index(irep, site_idx)
       insn = BytecodeIR.for(irep).source_at(idx)
       next false unless insn.sym == 'new' && BytecodeIR::Ops::REGISTER_RECEIVER_SEND.include?(insn.op)
 

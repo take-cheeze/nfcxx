@@ -237,7 +237,7 @@ class CodeGen
     used = texts.flat_map { |t| t.scan(/\bbc2cpp_slow_([a-z]+)(_f)?\(M,/) }.uniq
     return '' if used.empty?
 
-    NUMERIC_SLOW_PRELUDE + used.sort.map { |key, float| numeric_slow_source(key, float ? true : false) }.join
+    helper_owner_calls(NUMERIC_SLOW_PRELUDE + used.sort.map { |key, float| numeric_slow_source(key, float ? true : false) }.join)
   end
 
   # How many sites call each helper, for the stderr summary.

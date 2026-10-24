@@ -24,7 +24,7 @@ require_relative 'native_owner_map'
 #                  definitions or in an outside Ruby source defines `initialize` on Array (core_native_arm_safe?),
 #                  Array has no prepended or unresolved module, no runtime installer names `initialize`, and no
 #                  native registration other than mruby's src/array.c defines or undefines `initialize` on Array
-#                  (array_new_natives_untouched?).
+#                  (array_native_refusal).
 #   shape          one argument (the size; `Array.new(n, obj) { }` ignores obj and stays a call), a block of 0 or
 #                  1 mandatory parameters and no optional/rest shape, a block that does not forward the method's
 #                  own block.
@@ -120,31 +120,39 @@ class CodeGen
 
   # nil when Array#initialize is mruby's own native, else the reason it may not be.
   def array_initialize_refusal
-    return 'initialize_outside_definer' if @closed_world.global_refusal || !@closed_world.core_native_arm_safe?('initialize', 'Array')
-    return 'initialize_array_mixin' unless Array(@prepended_modules['Array']).empty? && !@unknown_mixins.include?('Array')
-
-    installed = symbol_installed_destinations
-    return 'initialize_installed' if installed.nil? || installed.include?('initialize')
-
-    definitions = (@registry['initialize'] || []) + (self.class.core_hidden_defs || []).select { |d| d.name == 'initialize' }
-    return 'initialize_defined_on_array' if definitions.any? { |definition| definition.owner == 'Array' }
-
-    'initialize_native_spelled' unless array_new_natives_untouched?
+    array_native_refusal('initialize')
   end
 
-  # A native registration of `initialize` on Array other than mruby's own (src/array.c, the one relied on) would
-  # replace it with C code no Ruby analysis sees. NATIVE_OWNER_MAP reads the registrations; with it off, any
-  # other native source that spells `initialize` and names the Array class refuses.
-  def array_new_natives_untouched?
+  # nil when Array#`name` is mruby's own native (src/array.c), else the reason it may not be: an outside or core Ruby
+  # definer, a prepended or unresolved module on Array, a runtime installer of the name, or another native
+  # registration of it on Array. Array's own definition comes first in its lookup, so its ancestors do not matter.
+  def array_native_refusal(name)
+    return "#{name}_outside_definer" if @closed_world.nil? || @closed_world.global_refusal ||
+                                        !@closed_world.core_native_arm_safe?(name, 'Array')
+    return "#{name}_array_mixin" unless Array(@prepended_modules['Array']).empty? && !@unknown_mixins.include?('Array')
+
+    installed = symbol_installed_destinations
+    return "#{name}_installed" if installed.nil? || installed.include?(name)
+
+    definitions = (@registry[name] || []) + (self.class.core_hidden_defs || []).select { |d| d.name == name }
+    return "#{name}_defined_on_array" if definitions.any? { |definition| definition.owner == 'Array' }
+
+    "#{name}_native_spelled" unless array_natives_untouched?(name)
+  end
+
+  # A native registration of `name` on Array other than mruby's own (src/array.c, the one relied on) would replace it
+  # with C code no Ruby analysis sees. NATIVE_OWNER_MAP reads the registrations; with it off, any other native source
+  # that spells `name` and names the Array class refuses.
+  def array_natives_untouched?(name)
     paths = self.class.native_source_paths
     mode = native_owner_map_mode
-    return array_new_natives_unspelled? unless paths && mode
+    return array_natives_unspelled?(name) unless paths && mode
 
     others = paths.reject { |path| mruby_core_array_source?(path) }
     return false if others.size == paths.size
 
     map = (ARRAY_NEW_OWNER_MAP_CACHE[others] ||= NativeOwnerMap.build(others))
-    NativeOwnerMap.verdict(map, 'initialize', ['Array'], core_dynamic_trusted: mode == :trusted) == [:proven]
+    NativeOwnerMap.verdict(map, name, ['Array'], core_dynamic_trusted: mode == :trusted) == [:proven]
   end
 
   ARRAY_NEW_OWNER_MAP_CACHE = {}
@@ -154,8 +162,8 @@ class CodeGen
     File.basename(path) == 'array.c' && File.exist?(File.join(File.dirname(path), '../include/mruby.h'))
   end
 
-  def array_new_natives_unspelled?
-    @closed_world.native_paths_spelling("initialize").all? do |path|
+  def array_natives_unspelled?(name)
+    @closed_world.native_paths_spelling(name).all? do |path|
       path.end_with?('/src/array.c') || !File.read(path, encoding: 'BINARY').match?(/array_class|"Array"|MRB_SYM\(Array\)/)
     end
   end

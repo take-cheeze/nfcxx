@@ -539,6 +539,154 @@ module NativeCoreDirect
               C
   ].freeze
 
+  # RESULT_ONLY: natives whose result class is a fact (CodeGen#native_result_kind) but which no call site calls
+  # directly: their bodies are static, so nothing outside their unit links to them. Audited like ENTRIES, down to the
+  # allocation that fixes the result's class; `expression` is nil.
+  RESULT_ENTRIES = [
+    # ary_new_capa allocates from M->array_class.
+    Entry.new(name: '+', owner: 'Array', arity: 1, arg: :array, aspec: 'MRB_ARGS_REQ(1)', expression: nil, apis: [],
+              checks: [['mrb_ary_plus', <<~C, :exact],
+                struct RArray *a1 = mrb_ary_ptr(self);
+                const mrb_value *ptr;
+                mrb_int blen;
+
+                mrb_get_args(mrb, "a", &ptr, &blen);
+                ary_check_too_big(mrb, ARY_LEN(a1), blen);
+                mrb_int len1 = ARY_LEN(a1);
+                struct RArray *a2 = ary_new_capa(mrb, len1 + blen);
+                array_copy(ARY_PTR(a2), ARY_PTR(a1), len1);
+                array_copy(ARY_PTR(a2) + len1, ptr, blen);
+                ARY_SET_LEN(a2, len1+blen);
+
+                return mrb_obj_value(a2);
+              C
+                       ['ary_new_capa', <<~C, :source]]),
+                static struct RArray*
+                ary_new_capa(mrb_state *mrb, mrb_int capa)
+                {
+                  ary_check_too_big(mrb, capa, 0);
+
+                  size_t blen = capa * sizeof(mrb_value);
+                  struct RArray *a = MRB_OBJ_ALLOC(mrb, MRB_TT_ARRAY, mrb->array_class);
+              C
+    # With one argument ary_subtract_internal returns the mrb_ary_new it pushed into (ary_subtract_body's ctx->result
+    # is the same object; MRB_ENSURE re-raises on failure), which is mrb_ary_new_capa's ary_new_capa.
+    Entry.new(name: '-', owner: 'Array', arity: 1, arg: :array, aspec: 'MRB_ARGS_REQ(1)', expression: nil, apis: [],
+              checks: [['ary_sub', <<~C, :exact],
+                mrb_value other;
+                mrb_get_args(mrb, "A", &other);
+                return mrb_ary_ext_sub_impl(mrb, self, other);
+              C
+                       ['mrb_ary_ext_sub_impl', <<~C, :source],
+                mrb_value
+                mrb_ary_ext_sub_impl(mrb_state *mrb, mrb_value self, mrb_value other)
+                {
+                  return ary_subtract_internal(mrb, self, 1, &other);
+                }
+              C
+                       ['ary_subtract_internal', <<~C, :source],
+                static mrb_value
+                ary_subtract_internal(mrb_state *mrb, mrb_value self, mrb_int argc, const mrb_value *argv)
+                {
+                  if (argc == 0) {
+                    return mrb_ary_dup(mrb, self);
+                  }
+
+                  mrb_int total_len = ary_get_array_args(mrb, argc, &argv);
+
+                  mrb_value result = mrb_ary_new(mrb);
+
+                  if (total_len > SET_OP_HASH_THRESHOLD) {
+                    /* Create shared copies to protect elements during khash operations */
+                    mrb_value *argv_copies = (mrb_value *)mrb_alloca(mrb, sizeof(mrb_value) * argc);
+                    for (mrb_int i = 0; i < argc; i++) {
+                      argv_copies[i] = mrb_ary_make_shared_copy(mrb, argv[i]);
+                    }
+
+                    ary_set_t set_struct;
+                    ary_set_t *set = &set_struct;
+                    ary_init_temp_set(mrb, set, total_len);
+
+                    struct ary_subtract_ctx ctx = { set, self, result, argv_copies, argc };
+                    MRB_ENSURE(mrb, result, ary_subtract_body, &ctx) {
+                      ary_destroy_temp_set(mrb, set);
+                    }
+                  }
+                  else {
+                    int ai = mrb_gc_arena_save(mrb);
+                    for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+                      mrb_value p = RARRAY_PTR(self)[i];
+                      mrb_gc_protect(mrb, p); // p may be removed from self by mrb_equal()
+                      mrb_bool found = FALSE;
+                      for (mrb_int j = 0; j < argc; j++) {
+                        for (mrb_int k = 0; k < RARRAY_LEN(argv[j]); k++) {
+                          if (mrb_equal(mrb, p, RARRAY_PTR(argv[j])[k])) {
+                            found = TRUE;
+                            break;
+                          }
+                        }
+                        if (found) break;
+                      }
+                      if (!found) {
+                        mrb_ary_push(mrb, result, p);
+                      }
+                      mrb_gc_arena_restore(mrb, ai);
+                    }
+                  }
+
+                  return result;
+                }
+              C
+                       ['ary_subtract_body', <<~C, :source],
+                static mrb_value
+                ary_subtract_body(mrb_state *mrb, void *data)
+                {
+                  struct ary_subtract_ctx *ctx = (struct ary_subtract_ctx *)data;
+
+                  for (mrb_int i = 0; i < ctx->argc; i++) {
+                    ary_populate_temp_set(mrb, ctx->set, ctx->argv[i]);
+                  }
+
+                  int ai = mrb_gc_arena_save(mrb);
+                  for (mrb_int i = 0; i < RARRAY_LEN(ctx->self); i++) {
+                    mrb_value p = RARRAY_PTR(ctx->self)[i];
+                    mrb_gc_protect(mrb, p); // p may be removed from self by kh_get(ary_set, ...)
+                    khiter_t k = kh_get(ary_set, mrb, ctx->set, p);
+                    if (kh_is_end(ctx->set, k)) {  /* key doesn't exist in any ary */
+                      mrb_ary_push(mrb, ctx->result, p);
+                    }
+                    mrb_gc_arena_restore(mrb, ai);
+                  }
+
+                  return ctx->result;
+                }
+              C
+                       ['mrb_ary_new', <<~C, :source, '../../../src/array.c'],
+                MRB_API mrb_value
+                mrb_ary_new(mrb_state *mrb)
+                {
+                  return mrb_ary_new_capa(mrb, 0);
+                }
+              C
+                       ['mrb_ary_new_capa', <<~C, :source, '../../../src/array.c'],
+                MRB_API mrb_value
+                mrb_ary_new_capa(mrb_state *mrb, mrb_int capa)
+                {
+                  struct RArray *a = ary_new_capa(mrb, capa);
+                  return mrb_obj_value(a);
+                }
+              C
+                       ['ary_new_capa', <<~C, :source, '../../../src/array.c']])
+                static struct RArray*
+                ary_new_capa(mrb_state *mrb, mrb_int capa)
+                {
+                  ary_check_too_big(mrb, capa, 0);
+
+                  size_t blen = capa * sizeof(mrb_value);
+                  struct RArray *a = MRB_OBJ_ALLOC(mrb, MRB_TT_ARRAY, mrb->array_class);
+              C
+  ].freeze
+
   # INHERITED_CORE_DIRECT: Kernel and BasicObject natives an exact core receiver reaches through its ancestry
   # (CodeGen#inherited_core_entry decides that nothing earlier in the lookup can answer). `owner` names the audited
   # registration, not the receiver's class.
@@ -808,7 +956,8 @@ module NativeCoreDirect
     files = Array(paths).select { |path| File.file?(path) }
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
-    headers = (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES + KERNEL_ANY_RECEIVER_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
+    headers = (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
+     KERNEL_ANY_RECEIVER_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
     key += headers.map(&:first).uniq.map do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
@@ -823,7 +972,8 @@ module NativeCoreDirect
   def audit_files(files)
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
-    (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES + KERNEL_ANY_RECEIVER_ENTRIES).to_h do |entry|
+    (ENTRIES + RESULT_ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES +
+     KERNEL_ANY_RECEIVER_ENTRIES).to_h do |entry|
       [entry, audit_entry(entry, registrations, opaque_owners, include_dir)]
     end
   end

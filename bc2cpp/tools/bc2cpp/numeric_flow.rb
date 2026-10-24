@@ -160,6 +160,9 @@ module NumericFlow
   #   pool_mask(irep, insn)                class set of a LOADL
   #   index_mask(irep, index, insn, state) class set of a GETIDX/GETIDX0 result (optional)
   #   aref_mask(irep, index, insn, state)  class set of an AREF result (optional; TUPLE_RETURN_FACTS)
+  #   operator_mask(irep, index, insn, symbol, state)
+  #                                        class set of an ADD/SUB/MUL the native body does not run (optional;
+  #                                        OPERATOR_SENDS)
   #   op_native?(symbol)                   `+ - * /` are the core Integer/Float bodies
   #   nil_raises?(symbol)                  nil answers `symbol` only by raising
   # Each answers OTHER (or false) when it proves nothing.
@@ -412,7 +415,8 @@ module NumericFlow
     attr_reader :irep, :oracle, :opaque, :opq, :nregs, :slots, :nslots, :slot_of, :facts, :pb, :tb, :writes,
                 :tests, :test_ids, :const_quiet, :rescue_only, :context_edges, :self_mask, :block_send, :super_mask,
                 :preserves, :loadself, :keyword_mask, :keyword_presence, :array_mask, :hash_mask, :index_mask,
-                :aref_mask, :literal_class, :false_class, :class_eq_test, :note_class_test, :noreturn, :elide_load_copies
+                :aref_mask, :operator_mask, :literal_class, :false_class, :class_eq_test, :note_class_test, :noreturn,
+                :elide_load_copies
 
     # The run of NumericFlow.states, asking the oracle what the old setup asked, in the same order.
     def self.for_run(irep, oracle, opaque, writes, rescue_only)
@@ -483,6 +487,7 @@ module NumericFlow
       @hash_mask = oracle.respond_to?(:hash_mask)
       @index_mask = oracle.respond_to?(:index_mask)
       @aref_mask = oracle.respond_to?(:aref_mask)
+      @operator_mask = oracle.respond_to?(:operator_mask)
       @literal_class = oracle.respond_to?(:literal_class_mask)
       @false_class = oracle.respond_to?(:false_class_bit)
       @class_eq_test = oracle.respond_to?(:class_eq_test)
@@ -960,8 +965,11 @@ module NumericFlow
     when K_ARITH
       b = step.b
       sym = step.sym
-      ok = oracle.op_native?(sym) && b < nregs
-      ok ? arith(state[a], state[b], oracle.nil_raises?(sym)) : OTHER
+      if oracle.op_native?(sym) && b < nregs
+        arith(state[a], state[b], oracle.nil_raises?(sym))
+      else
+        c.operator_mask ? oracle.operator_mask(irep, index, insn, sym, state) : OTHER
+      end
     when K_IMM
       sym = step.sym
       oracle.op_native?(sym) ? arith(state[a], INT, oracle.nil_raises?(sym)) : OTHER

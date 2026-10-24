@@ -605,6 +605,7 @@ class CodeGen
   #     exits as in recognize_accum_regions); `break v` overrides via the
   #     broke flag; empty arrays get the defaults.
   #   - count: a fixnum tally, no early exit; `break v` overrides.
+  #   - index: nil default, the first truthy result exits with its index (array.c mrb_ary_index_m).
   #   - reduce/inject(init): the accumulator is seeded ONCE from R(dest+1)
   #     before the loop, bound to param 1 with the element in param 2, and
   #     replaced by the yielded value. Reading init before the loop makes a
@@ -642,6 +643,8 @@ class CodeGen
       out << "    mrb_value bc2cpp_accum_res_#{addr} = mrb_true_value();\n"
     when 'count'
       out << "    mrb_int bc2cpp_accum_n_#{addr} = 0;\n"
+    when 'index'
+      out << "    mrb_value bc2cpp_accum_res_#{addr} = mrb_nil_value();\n"
     when 'reduce', 'inject'
       out << "    mrb_value #{acc_var} = r#{region[:init_reg]};\n"
     end
@@ -667,6 +670,9 @@ class CodeGen
       out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_false_value(); goto #{break_label}; }\n"
     when 'count'
       out << "      if (mrb_test(#{result_var})) ++bc2cpp_accum_n_#{addr};\n"
+    when 'index'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_fixnum_value(bc2cpp_accum_i_#{addr}); " \
+             "goto #{break_label}; }\n"
     when 'reduce', 'inject'
       out << "      #{acc_var} = #{result_var};\n"
     end
@@ -674,7 +680,7 @@ class CodeGen
     out << "    #{break_label}:;\n"
     out << "    if (!bc2cpp_accum_broke_#{addr}) {\n"
     case meth
-    when 'any?', 'all?', 'none?'
+    when 'any?', 'all?', 'none?', 'index'
       out << "    r#{dest_reg} = bc2cpp_accum_res_#{addr};\n"
     when 'count'
       out << "    r#{dest_reg} = mrb_fixnum_value(bc2cpp_accum_n_#{addr});\n"

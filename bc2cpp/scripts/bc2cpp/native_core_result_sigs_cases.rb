@@ -53,7 +53,7 @@ module NativeCoreResultSigsCases
   end
 
   def self.run(check)
-    audited = { 'Array' => { 'to_a' => 'Array', 'compact' => 'Array', 'join' => 'String' }, 'String' => { 'bytes' => 'Array', 'size' => :fixnum, 'length' => :fixnum }, 'Integer' => { 'to_s' => 'String', 'to_i' => :fixnum, 'inspect' => 'String' } }.freeze
+    audited = { 'Array' => { 'to_a' => 'Array', 'compact' => 'Array', 'join' => 'String', '+' => 'Array', '-' => 'Array' }, 'String' => { 'bytes' => 'Array', 'size' => :fixnum, 'length' => :fixnum }, 'Integer' => { 'to_s' => 'String', 'to_i' => :fixnum, 'inspect' => 'String' } }.freeze
 
     check.call('loaded table equals the audited entries', NativeCoreResultSigs.kinds == audited)
     check.call('table is frozen', NativeCoreResultSigs.kinds.frozen? && NativeCoreResultSigs.kinds['Array'].frozen?)
@@ -71,12 +71,13 @@ module NativeCoreResultSigsCases
       'NilClass' => 'Object', 'TrueClass' => 'Object', 'FalseClass' => 'Object', 'Numeric' => 'Object',
       'Integer' => 'Numeric', 'Float' => 'Numeric', 'String' => 'Object', 'Symbol' => 'Object',
       'Array' => 'Object', 'Hash' => 'Object', 'Range' => 'Object', 'Proc' => 'Object',
-      'Exception' => 'Object', 'StandardError' => 'Exception', 'Struct' => 'Object'
+      'Exception' => 'Object', 'StandardError' => 'Exception', 'Struct' => 'Object', 'IO' => 'Object',
+      'Time' => 'Object', 'Dir' => 'Object', 'OnigMatchData' => 'Object'
     }.freeze
     audited_mixins = {
       'Object' => %w[Kernel], 'Numeric' => %w[Comparable], 'String' => %w[Comparable],
       'Symbol' => %w[Comparable], 'Array' => %w[Enumerable], 'Hash' => %w[Enumerable],
-      'Range' => %w[Enumerable], 'Struct' => %w[Enumerable]
+      'Range' => %w[Enumerable], 'Struct' => %w[Enumerable], 'IO' => %w[Enumerable], 'Time' => %w[Comparable]
     }.freeze
 
     hierarchy_super, hierarchy_mixins = CoreHierarchySigs.load

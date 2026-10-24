@@ -377,10 +377,12 @@ class CodeGen
   #   - none?: true default, first truthy result exits with false;
   #   - count: tally of truthy results;
   #   - reduce/inject(init): init is in R(dest+1) (checked by register), the
-  #     accumulator goes through the block's two params.
+  #     accumulator goes through the block's two params;
+  #   - index: nil default, the first truthy result exits with its index. Array#index is native (array.c
+  #     mrb_ary_index_m, the same loop), so the site also needs array_native_refusal('index') to be nil.
   # No-init `reduce` (n=0) stays out (empty-array/seeding semantics). Arity
   # mismatches keep `#error`.
-  ACCUM_BLOCK_METHODS = %w[any? all? none? count].freeze
+  ACCUM_BLOCK_METHODS = %w[any? all? none? count index].freeze
   ACCUM_FOLD_METHODS = %w[reduce inject].freeze
 
   def recognize_accum_regions(irep, owner_name, mand, ivar_classes, arg_classes)
@@ -400,6 +402,8 @@ class CodeGen
       is_fold = accum_kind.call(insn) == :fold
       want_arity = is_fold ? 2 : 1
       next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+      next if is_fold && !fold_init_not_symbol?(irep, idx, dest_reg.to_i + 1)
+      next if insn.sym == 'index' && !array_native_index?
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
@@ -409,6 +413,19 @@ class CodeGen
                                                    owner_name) }
     end
     regions
+  end
+
+  # Enumerable#inject takes a Symbol last argument as the operator and drops the block (`reduce(:+) { }` sums), so
+  # a fold is a loop only for an initial value proven not to be a Symbol.
+  def fold_init_not_symbol?(irep, idx, reg)
+    @exact_literal_types ||= {}.compare_by_identity
+    classes = (@exact_literal_types[irep] ||= BytecodeIR::Types.new(irep)).at(idx, reg)
+    !classes.nil? && !classes.empty? && !classes.include?(:Symbol)
+  end
+
+  def array_native_index?
+    @array_native_index = array_native_refusal('index').nil? if @array_native_index.nil?
+    @array_native_index
   end
 
   def recognize_collect_regions(irep, owner_name, mand, ivar_classes, arg_classes)
