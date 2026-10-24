@@ -205,8 +205,17 @@ module ArgShapeCalls
                   "return mrb_ary_new_from_values(M, #{extra.size}, bc2cpp_rest); }()"
               end
     end
-    head.insert(mand + (rest ? 1 : positional_optional_count(t_irep)), @call_block_expr || 'mrb_nil_value()') if takes_block_param?(t_irep)
+    head.insert(mand + (rest ? 1 : positional_optional_count(t_irep)), direct_call_block(target)) if takes_block_param?(t_irep)
     [head, note]
+  end
+
+  # STACK_BLOCK: a compiled program callee that only calls its block takes the frame-local RProc, as a core arm's
+  # does (stack_block_args): its body reaches the block only through bc2cpp_yield_argv.
+  def direct_call_block(target)
+    return 'mrb_nil_value()' unless @call_block_expr
+    return @call_block_expr unless @call_block_stack_expr && stack_block_callee?(target.irep)
+
+    @call_block_stack_expr
   end
 
   def positional_optional_count(irep)
