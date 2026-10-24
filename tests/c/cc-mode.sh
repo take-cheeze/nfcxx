@@ -196,6 +196,32 @@ EOF
   rejects "unknown option" "frobnicate" --frobnicate -c util.c -o rej.o
   rejects "no input" "no input" -c -o rej.o
   rejects "-MD without -c" "needs -c" -MD util.c -o rej.o
+  # 7b. NFCXX_GCC_PASSTHROUGH=1 (the Linux kernel's build, docs/notes/linux-kernel.md): on the gcc backend the options
+  # QBE cannot honour reach gcc, in command-line order; on the qbe backend they are still refused.
+  printf 'int main(void) { char c = (char)200; return c > 0 ? 0 : 1; }\n' > uchar.c
+  printf 'int g; int *p(void) { return &g; }\n' > pic.c
+  if [ $b = gcc ]; then
+    if NFCXX_GCC_PASSTHROUGH=1 "$nfcc" -funsigned-char uchar.c -o uchar 2>/dev/null && ./uchar; then
+      ok "passthrough: -funsigned-char reaches gcc"
+    else bad "passthrough: -funsigned-char reaches gcc" "char stayed signed or the compile failed"; fi
+    # gcc takes the last of -fno-PIE ... -fPIC (the kernel's vDSO relies on it): no absolute 32-bit relocation
+    if [ "$(uname -m)" = x86_64 ]; then
+      if NFCXX_GCC_PASSTHROUGH=1 "$nfcc" -fno-PIE -mcmodel=kernel -fPIC -mcmodel=small -c pic.c -o pic.o 2>/dev/null &&
+         ! readelf -rW pic.o | grep -q 'R_X86_64_32S\? '; then ok "passthrough: codegen options keep their order"
+      else bad "passthrough: codegen options keep their order" "$(readelf -rW pic.o 2>&1 | grep R_X86 | head -2 | tr '\n' ' ')"; fi
+    fi
+  else
+    NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -funsigned-char" "funsigned-char" -funsigned-char -c util.c -o rej.o
+    NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -mno-sse" "mno-sse" -mno-sse -c util.c -o rej.o
+  fi
+  # an assembly source with another suffix keeps its -x language (the kernel's "-x assembler-with-cpp /dev/null" probe)
+  if out=$("$nfcc" -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null 2>&1) && grep -q "GNU assembler" <<<"$out"; then
+    ok "-x assembler-with-cpp /dev/null reaches the assembler"
+  else bad "-x assembler-with-cpp /dev/null reaches the assembler" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+  # -MMD on an assembly source writes the dependency file (kbuild's fixdep reads it)
+  printf '#include "dep.h"\n.globl x\nx: ret\n' > depa.S; : > dep.h
+  if "$nfcc" -Wp,-MMD,depa.d -c depa.S -o depa.o 2>/dev/null && grep -q 'dep\.h' depa.d; then ok "-MMD on assembly writes the dependency file"
+  else bad "-MMD on assembly writes the dependency file" "no depa.d naming dep.h"; fi
   # 8. mixed-type overflow builtins (qbe-prep lowers them on the qbe backend; gcc has them natively)
   cat > mix.c <<'EOC'
 int main(void) {

@@ -32,7 +32,7 @@ tests/poly/run.sh         # nfcpoly: evaluate Ruby, Lua, Python, JavaScript, Go 
 tests/ast/run.sh          # nfcast (lib/ast): the self-specializing AST interpreter with inlining of small functions and a tier for hot numeric kernels, checked against a real Lua 5.4 (both backends; docs/notes/ast.md)
 scripts/sycl-build.sh prog.cpp -o prog  # SYCL 2020 subset (lib/sycl): kernels to WGSL, run through WebGPU; --cpu for plain loops (docs/notes/sycl-webgpu.md)
 tests/sycl/run.sh         # SYCL programs on the host path and on WebGPU (Chromium/SwiftShader through Playwright), traps and refusals
-scripts/linux-qemu.sh     # minimal x86_64 Linux 6.8 (tinyconfig) + busybox initramfs, booted under qemu-system-x86_64 (build/linux-qemu)
+scripts/linux-qemu.sh     # minimal x86_64 Linux 6.8 (tinyconfig) + busybox initramfs, booted under qemu-system-x86_64; KCC=nfcc builds it with nfcc (docs/notes/linux-kernel.md)
 scripts/setup-pathb.sh    # Path B harness (own back end on EDG's IL); then tests/pathb{,-ir,-qbe}/run.sh (docs/notes/pathb-stage3.md)
 ./nfcxx -c a.cpp -o a.o; ./nfcxx a.o b.o -o x # separate compilation (docs/notes/multi-tu.md)
 tests/multi-tu/run.sh     # several translation units sharing libstdc++ templates (both backends)
