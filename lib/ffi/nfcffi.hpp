@@ -8,6 +8,7 @@
 //
 // The shared object is built with `nfcxx -shared` (C input) and cached by a hash of its source and options, as nfceval does.
 #pragma once
+#include <cstddef>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -83,6 +84,18 @@ class Module {
   void* handle_ = nullptr;
 };
 
+// A function declared in a header, as the front end reads it (docs/notes/ffi.md, "Declarations").
+struct Declaration {
+  std::string name;
+  std::string return_type;               // a C type, e.g. "const char *" or "size_t"
+  std::vector<std::string> params;       // C types; "@" marks where the name goes: "int (*@)(const void *, const void *)"
+  bool variadic = false;                 // a trailing "..."
+  bool overloaded = false;               // C++ overloads share the name (C has one function per name)
+
+  // The declaration of parameter I with NAME ("int (*cmp)(const void *, const void *)"); an empty NAME gives the abstract type.
+  std::string param_decl(std::size_t i, const std::string& name) const;
+};
+
 // The compiler and its options. Compiling the same source with the same options reuses the shared object in the cache.
 class Ffi {
  public:
@@ -92,9 +105,17 @@ class Ffi {
   Ffi& add_flag(std::string flag);           // -I..., -D..., --backend=...
   Ffi& set_cache_dir(std::string dir);       // default $NFCFFI_CACHE, else $TMPDIR/nfcffi-cache-<uid>
   Ffi& set_compile_timeout(unsigned seconds);  // 0 disables; default 300
+  Ffi& set_decl_tool(std::string path);        // scripts/libclang-cursors; default <repo>/scripts/libclang-cursors
 
   // Compiles SOURCE (C) into a shared object and loads it. Throws CompileError when the source does not compile.
   Module compile(const std::string& source) const;
+
+  // The functions declared in FILE and in the headers it includes (with their signatures), in the order the front end
+  // lists them. CXX reads the file as C++ (overloads come out flagged); the default reads it as C. Reads the front end of the
+  // libclang shim: build with scripts/setup-libclang-edg.sh. Throws Error when the tool cannot be run, CompileError when the
+  // file does not parse.
+  enum class Dialect { C, Cxx };
+  std::vector<Declaration> declarations(const std::string& file, Dialect dialect = Dialect::C) const;
 
   const std::string& driver() const { return driver_; }
   const std::string& cache_dir() const { return cache_; }
@@ -103,6 +124,7 @@ class Ffi {
   std::string driver_;
   std::string cache_;
   std::vector<std::string> flags_;
+  std::string decl_tool_;
   unsigned timeout_ = 300;
 };
 

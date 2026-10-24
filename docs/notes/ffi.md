@@ -1,6 +1,6 @@
 # nfcffi: calling C compiled at run time (`lib/ffi`)
 
-Status: **Milestone 1, experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
+Status: **Milestones 1 and 2, experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
 loaded; its functions, and the C library's, are called through C++ function types written at the call site. The
 design is DragonFFI's idea (a C library called from a host at run time, without writing bindings by hand), without
 its header parser and without libffi.
@@ -51,14 +51,43 @@ pointer, a small struct returned in a register, a host function called back from
 the C library, which gcc compiled: `div` and `ldiv` (struct returns in registers), `qsort` with a host comparator,
 `strlen`; a missing symbol and a compile error give `Error` and `CompileError`; a moved `Module`; the cache.
 
-## Not yet (Milestones 2 and 3, see the plan)
+## Declarations (Milestone 2)
 
-- **No declarations from headers.** Nothing parses a header; the signature comes from the C++ caller. The libclang
-  front end (`libclang-edg.md`) lists declarations of the primary file only and no types, so `cdef` needs a type
-  walk in `be/nfcxx_decl.c` first.
+`Ffi::declarations(file, dialect)` lists the functions a source declares, with their signatures, read from the
+front end (`scripts/libclang-cursors`, the libclang-edg shim's cpfe):
+
+```cpp
+for (const nfcffi::Declaration& d : ffi.declarations("/usr/include/string.h")) {
+  // d.name "strlen", d.return_type "size_t", d.param_decl(0, "s") "const char *s"
+}
+```
+
+- **Records.** `be/nfcxx_decl.c` writes one `sig` record after each free function's record: its return type, a
+  variadic flag and each parameter type spelled as a C declaration with `@` where the name goes (`int (*@)(int)`).
+  The printer is EDG's type IL (qualifiers, typedef names, enums, `_Bool`, `long double`, function pointers, arrays
+  decayed to pointers in parameters). `scripts/libclang-cursors --c` reads the file as C (the default for
+  `Dialect::C`); `Dialect::Cxx` reads it as C++, where overloads are listed and flagged `overloaded`.
+- **Headers.** `NFCXX_DECL_ALL=1` lists the declarations of every file the source includes, system headers too, not
+  only the primary file. `Ffi::declarations` sets it.
+- **Spelling in C vs C++.** C keeps a top-level `const` (`char * const p`); C++ drops it. C drops `restrict`. Array
+  sizes are not kept (`int (*)[]`); the ABI is the same. An anonymous struct or enum has no spelling, so its function
+  is listed without a signature, and `declarations` omits it.
+- **Scope.** Free functions only: members, functions in namespaces and templates are not returned. Macros are not
+  seen (the preprocessed text is what the front end reads). The C library's `div` is the global C function, not the
+  namespace-std overload that C++ mode also declares.
+- **The libclang shim** skips `sig` records (`lib/libclang-edg/clang_edg.c`); its differential test is unchanged.
+- **Tests.** `tests/ffi/host.cpp` checks the spellings of `tests/ffi/decls.h` (qualifiers, arrays, function pointers,
+  typedef and enum names, `_Bool`, variadic, empty prototypes), the C library's headers (`strlen`, `qsort`, `div`,
+  `snprintf`), an overload set in C++ mode, a header that does not parse, and a missing tool. `tests/ffi/run.sh` builds
+  the front end when it is missing (`scripts/setup-libclang-edg.sh`, a few minutes).
+
+## Not yet (Milestone 3, see the plan)
+
 - **No dynamic calls.** Without a signature in the caller there is no way to call a function by name with runtime
-  types. That needs the per-function wrapper and a type descriptor, which in turn need the type walk.
-- **Variadic functions** (`printf`) cannot be spelled as `R(A...)`; the call site would need a fixed signature per use.
+  types. The plan is a generated `void wrap(void** args, void* ret)` per declaration, compiled with the module; the
+  `sig` spellings have the `@` placeholders it needs.
+- **Variadic functions** (`printf`) cannot be spelled as `R(A...)`; calls through the declaration would need an
+  explicit fixed signature per use.
 - **ABI.** The checks above cover the SysV x86-64 cases the tests use. Other targets and the struct classes
   (non-trivial copy or destructor, which C does not have) are not covered.
 - **Host and module compiler.** The module must be built by the same nfcxx backend as the host for C++ types to match;
@@ -67,9 +96,8 @@ the C library, which gcc compiled: `div` and `ldiv` (struct returns in registers
 ## Plan
 
 1. (done) The C++ API over the compile and cache path, with the tests above.
-2. Declarations from headers: extend `be/nfcxx_decl.c` with parameter and return types for function declarations,
-   and list the declarations of the headers the source includes, not only the primary file. Then `cdef(header)` and
-   `Module::functions()` list names and signatures.
-3. Dynamic calls: for each function, a generated `void wrap(void** args, void* ret)` with the types from the
-   declarations, and a call by name with values of runtime type (the `Value` of nfcpoly is a model).
+2. (done) Declarations from headers: typed `sig` records, `Ffi::declarations`, C and C++ dialects.
+3. Dynamic calls: for each declaration, a generated `void wrap(void** args, void* ret)` with the declared types, and a
+   call by name with values of runtime type (the `Value` of nfcpoly is a model). Needs the wrapper TU to include the
+   header, so the names come from `declarations` and the types from the header itself.
 4. A Python binding through `nfcpoly`, which already runs Python from C++ (`docs/notes/poly.md`).

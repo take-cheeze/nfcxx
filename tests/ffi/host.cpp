@@ -114,6 +114,85 @@ void check_errors(const nfcffi::Ffi& ffi) {
   CHECK(m.function<int(void)>("present")() == 1);
 }
 
+// Finds NAME among the declarations, or returns an empty one (name "") when it is absent.
+nfcffi::Declaration find(const std::vector<nfcffi::Declaration>& ds, const std::string& name) {
+  for (const nfcffi::Declaration& d : ds) {
+    if (d.name == name) return d;
+  }
+  return nfcffi::Declaration();
+}
+
+// The signatures the front end reads from headers (lib/ffi declarations, docs/notes/ffi.md).
+void check_declarations(const nfcffi::Ffi& ffi, const std::string& dir) {
+  std::vector<nfcffi::Declaration> ds = ffi.declarations(dir + "/decls.h");
+  nfcffi::Declaration add = find(ds, "add");
+  CHECK(add.return_type == "int" && add.params.size() == 2 && !add.variadic && !add.overloaded);
+  CHECK(add.param_decl(0, "a") == "int a" && add.param_decl(1, "") == "int");
+
+  nfcffi::Declaration name = find(ds, "name");
+  CHECK(name.return_type == "const char *");
+  CHECK(name.param_decl(0, "s") == "const char *s" && name.param_decl(1, "n") == "unsigned long n");
+
+  nfcffi::Declaration vec = find(ds, "vec_add");
+  CHECK(vec.return_type == "Vec2" && vec.param_decl(1, "b") == "Vec2 b");
+
+  nfcffi::Declaration pair = find(ds, "pair_make");
+  CHECK(pair.return_type == "Pair" && pair.params.size() == 1);
+
+  nfcffi::Declaration sort = find(ds, "sort");
+  CHECK(sort.params.size() == 4 && sort.param_decl(0, "") == "void *");
+  CHECK(sort.param_decl(1, "n") == "size_t n");
+  CHECK(sort.param_decl(3, "cmp") == "int (*cmp)(const void *, const void *)");
+
+  nfcffi::Declaration printf_like = find(ds, "printf_like");
+  CHECK(printf_like.variadic && printf_like.params.size() == 1);
+
+  nfcffi::Declaration noargs = find(ds, "noargs");
+  CHECK(noargs.return_type == "int" && noargs.params.empty() && !noargs.variadic);
+
+  CHECK(find(ds, "pick").return_type == "enum Color");
+  CHECK(find(ds, "flag").return_type == "_Bool" && find(ds, "flag").param_decl(0, "b") == "_Bool b");
+  CHECK(find(ds, "alloc").return_type == "void *");
+  CHECK(find(ds, "takes_array").param_decl(0, "xs") == "int *xs");
+  CHECK(find(ds, "takes_array").param_decl(1, "p") == "char * const p");  // C keeps the top-level const
+  CHECK(find(ds, "call_back").param_decl(0, "f") == "int (*f)(int)");
+
+  // The C library's headers: the same reader, with the functions gcc compiled.
+  std::vector<nfcffi::Declaration> libc = ffi.declarations(dir + "/libc_decls.h");
+  nfcffi::Declaration strlen_d = find(libc, "strlen");
+  CHECK(strlen_d.return_type == "size_t" && strlen_d.param_decl(0, "s") == "const char *s");
+  nfcffi::Declaration qsort_d = find(libc, "qsort");
+  CHECK(qsort_d.param_decl(3, "cmp") == "__compar_fn_t cmp");
+  CHECK(find(libc, "snprintf").variadic);
+  // The global div is the C one; the C++ overload in namespace std is not a free function, so it is not listed.
+  CHECK(find(libc, "div").return_type == "div_t" && !find(libc, "div").overloaded);
+  CHECK(find(libc, "strlen").overloaded == false);
+
+  // Two global declarations with one name: an overload set (C++ headers), flagged so the caller can skip it.
+  std::vector<nfcffi::Declaration> ovl = ffi.declarations(dir + "/overloads.h", nfcffi::Ffi::Dialect::Cxx);
+  CHECK(ovl.size() == 2 && ovl[0].overloaded && ovl[1].overloaded);
+  CHECK(ovl[1].param_decl(0, "a") == "double a");
+
+  // Errors: a file that does not parse, and a missing tool.
+  bool parse_error = false;
+  try {
+    ffi.declarations(dir + "/bad_decls.h");
+  } catch (const nfcffi::Error&) {
+    parse_error = true;
+  }
+  CHECK(parse_error);
+
+  bool no_tool = false;
+  nfcffi::Ffi missing_tool;
+  missing_tool.set_decl_tool("/nonexistent/libclang-cursors");
+  try {
+    missing_tool.declarations(dir + "/decls.h");
+  } catch (const nfcffi::Error&) {
+    no_tool = true;
+  }
+  CHECK(no_tool);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -139,6 +218,7 @@ int main(int argc, char** argv) {
 
   check_process();
   check_errors(ffi);
+  check_declarations(ffi, argv[1]);
 
   std::printf("%s: %d of %d checks passed\n", failures ? "FAILED" : "ok", checks - failures, checks);
   return failures ? 1 : 0;

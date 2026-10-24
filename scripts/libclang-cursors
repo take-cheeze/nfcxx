@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # libclang-edg: list the declarations of one C++ file as tab-separated records (format: be/nfcxx_decl.c).
 # Runs the libclang-edg front end (build/libclang-edg, from scripts/setup-libclang-edg.sh) with the same host
-# library and GNU options as scripts/pathb-dump. Usage: scripts/libclang-cursors [-std=c++NN] [-Idir] [-Dmacro] file.cpp
+# library and GNU options as scripts/pathb-dump. Usage: scripts/libclang-cursors [--c | -std=c++NN] [-Idir] [-Dmacro] file.cpp   (--c: C mode, for C headers)
 # The libclang shim (lib/libclang-edg) runs this script; LIBCLANG_EDG_CPFE and LIBCLANG_EDG_BASE override the paths.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -10,9 +10,10 @@ base=${LIBCLANG_EDG_BASE:-$root/build/libclang-edg/edg-base}
 [ -x "$cpfe" ] || { echo "libclang-cursors: front end not built; run scripts/setup-libclang-edg.sh" >&2; exit 2; }
 
 source "$root/scripts/host-sys.sh"
-std=--c++23; files=(); user_opts=()
+std=--c++23; files=(); user_opts=(); c_mode=0
 for arg in "$@"; do
   case $arg in
+    --c) c_mode=1 ;;
     -std=c++*) std=--c++${arg#-std=c++} ;;
     -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;
     -D?*|-U?*) user_opts+=("$arg") ;;
@@ -30,7 +31,12 @@ for file in "${files[@]}"; do
   f=$(realpath "$file")
   stem=$(basename "$f" .cpp)
   ti=$base/$stem.ti; had_ti=0; [ -e "$ti" ] && had_ti=1
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} -tused ${user_opts[@]+"${user_opts[@]}"} "${sys_inc[@]}" --sys_include="$base/include" "$f") || status=$?
+  if [ $c_mode = 1 ]; then
+    lang=(--c)
+  else
+    lang=("$std" --g++ -tused)
+  fi
+  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "${lang[@]}" --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${user_opts[@]+"${user_opts[@]}"} "${sys_inc[@]}" --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status
