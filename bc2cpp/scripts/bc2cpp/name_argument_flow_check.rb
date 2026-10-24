@@ -88,8 +88,8 @@ end
 # 15+ arguments arrive packed in one ARRAY: the array's only read must be the splat, and each element one Symbol.
 packed = (1..15).map { |i| ":p#{i}" }.join(', ')
 {
-  'moved packed visibility' => "names = [#{packed}]; alias_names = names; private *alias_names",
-  'adjacent packed visibility' => "private *[#{packed}]"
+  'moved packed visibility' => "names = [#{packed}]; alias_names = names; private(*alias_names)",
+  'adjacent packed visibility' => "private(*[#{packed}])"
 }.each do |label, body|
   world_for.call("class Probe; #{body}; end") do |world|
     suite.check(label, (1..15).all? { |i| !world.visibility_stable?("p#{i}") } && world.visibility_stable?('unrelated'))
@@ -97,9 +97,9 @@ packed = (1..15).map { |i| ":p#{i}" }.join(', ')
 end
 
 [
-  "names = [#{packed.sub(':p8', 'flag ? :p8 : :q8')}]; private *names",
-  "names = [#{packed}]; names << :extra; private *names",
-  "names = [#{packed}]; private *names; names << :extra"
+  "names = [#{packed.sub(':p8', 'flag ? :p8 : :q8')}]; private(*names)",
+  "names = [#{packed}]; names << :extra; private(*names)",
+  "names = [#{packed}]; private(*names); names << :extra"
 ].each do |body|
   world_for.call("class Probe; #{body}; end") do |world|
     suite.check("unknown packed visibility: #{body[0, 40]}", !world.visibility_stable?('unrelated'))
