@@ -41,6 +41,18 @@ else
   check('mruby core sources are present (3rd/mruby)', false)
 end
 
+puts '== the hand-audited entries against the native sources the closed world compiles with'
+# These pin bodies across mruby core and its gems (Array#compact is mruby-array-ext's), so they are audited against the
+# whole native source set; a drifted body would otherwise just stop being used.
+require_relative '../../tools/bc2cpp/compiled_gems'
+hand_paths = bc2cpp_rgss_native_srcs(root, 'closed') + core_native_srcs(File.join(root, '3rd/mruby')) +
+             external_gem_native_srcs(root)
+hand_result = NativeCoreDirect.audit(hand_paths)
+(NativeCoreDirect::HAND_ENTRIES + NativeCoreDirect::KERNEL_ENTRIES + NativeCoreDirect::NUMERIC_CONVERSION_ENTRIES).each do |entry|
+  reason = hand_result[entry]
+  check("#{entry.owner}##{entry.name}/#{entry.arity} verifies#{reason ? " (#{reason})" : ''}", reason.nil?)
+end
+
 puts '== the committed files'
 check('core_direct.rbs matches the table (native_core_direct_sigs.rb --check)',
       system('ruby', File.join(root, 'scripts/bc2cpp/native_core_direct_sigs.rb'), '--check', out: File::NULL))

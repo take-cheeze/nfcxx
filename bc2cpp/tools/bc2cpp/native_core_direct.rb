@@ -29,6 +29,8 @@ module NativeCoreDirect
   ARG_GUARDS = {
     none: nil,
     integer: 'mrb_integer_p(%<a>s)',
+    # 'A' only type-checks (mrb_ensure_array_type), so any Array passes through as is.
+    array: 'mrb_array_p(%<a>s)',
     nil_or_string: '(mrb_nil_p(%<a>s) || mrb_string_p(%<a>s))'
   }.freeze
 
@@ -50,6 +52,7 @@ module NativeCoreDirect
 
     def call(recv, argv)
       expression.gsub('recv', recv).gsub('ARG0', argv.first.to_s).gsub('ARG1', argv[1].to_s)
+                .gsub('ARG2', argv[2].to_s).gsub('ARG3', argv[3].to_s)
     end
   end
 
@@ -127,7 +130,7 @@ module NativeCoreDirect
                 mrb_int i, j = 0;
                 mrb_int len = ARY_LEN(a);
                 mrb_ary_modify(mrb, a);
-                mrb_value *ptr = ary_items(self);
+                mrb_value *ptr = RARRAY_PTR(self);
                 for (i = 0; i < len; i++) {
                   if (!mrb_nil_p(ptr[i])) {
                     if (i != j) ptr[j] = ptr[i];
@@ -147,15 +150,15 @@ module NativeCoreDirect
                   return mrb_funcall_id(mrb, self, MRB_SYM(to_enum), 1, mrb_symbol_value(MRB_SYM(index)));
                 }
                 if (mrb_nil_p(blk)) {
-                  for (mrb_int i = 0; i < ary_size(self); i++) {
-                    if (mrb_equal(mrb, ary_items(self)[i], obj)) {
+                  for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+                    if (mrb_equal(mrb, RARRAY_PTR(self)[i], obj)) {
                       return mrb_int_value(mrb, i);
                     }
                   }
                 }
                 else {
-                  for (mrb_int i = 0; i < ary_size(self); i++) {
-                    mrb_value eq = mrb_yield(mrb, blk, ary_items(self)[i]);
+                  for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+                    mrb_value eq = mrb_yield(mrb, blk, RARRAY_PTR(self)[i]);
                     if (mrb_test(eq)) {
                       return mrb_int_value(mrb, i);
                     }
@@ -163,16 +166,174 @@ module NativeCoreDirect
                 }
                 return mrb_nil_value();
               C
+    # ary_modify is static, so the call is a mirror in emit_native_core_helpers: the block-less arm, with the public
+    # mrb_ary_modify (ary_modify plus a write barrier) in place of ary_modify.
+    Entry.new(name: 'delete', owner: 'Array', arity: 1, arg: :none, aspec: 'MRB_ARGS_REQ(1)',
+              expression: 'bc2cpp_ary_delete(M, recv, ARG0)', helper: 'bc2cpp_ary_delete',
+              apis: [%w[mruby/array.h mrb_ary_modify], %w[mruby.h mrb_equal], %w[mruby.h mrb_gc_protect]],
+              checks: [['mrb_ary_delete', <<~C, :exact]]),
+                mrb_value obj, blk;
+                mrb_get_args(mrb, "o&", &obj, &blk);
+                struct RArray *ary = RARRAY(self);
+                mrb_value ret = obj;
+                int ai = mrb_gc_arena_save(mrb);
+                mrb_int i = 0;
+                mrb_int j = 0;
+                for (; i < ARY_LEN(ary); i++) {
+                  mrb_value elem = ARY_PTR(ary)[i];
+                  if (mrb_equal(mrb, elem, obj)) {
+                    mrb_gc_arena_restore(mrb, ai);
+                    mrb_gc_protect(mrb, elem);
+                    ret = elem;
+                    continue;
+                  }
+                  if (i != j) {
+                    if (j >= ARY_LEN(ary)) {
+                      mrb_raise(mrb, E_RUNTIME_ERROR, "array modified during delete");
+                    }
+                    ary_modify(mrb, ary);
+                    ARY_PTR(ary)[j] = elem;
+                  }
+                  j++;
+                }
+                if (i == j) {
+                  if (mrb_nil_p(blk)) return mrb_nil_value();
+                  return mrb_yield(mrb, blk, obj);
+                }
+                ARY_SET_LEN(ary, j);
+                return ret;
+              C
+    # A bulk push of N values is N single pushes: the frozen check and the final contents are the same, only
+    # the capacity growth differs. mrb_ary_push_m itself is static.
+    Entry.new(name: 'push', owner: 'Array', arity: 2, arg: :none, aspec: 'MRB_ARGS_ANY()',
+              expression: '(mrb_ary_push(M, recv, ARG0), mrb_ary_push(M, recv, ARG1), recv)',
+              apis: [%w[mruby/array.h mrb_ary_push]],
+              checks: [['mrb_ary_push_m', <<~C, :exact]]),
+                mrb_int argc = mrb_get_argc(mrb);
+                if (argc == 1) {
+                  mrb_ary_push(mrb, self, mrb_get_argv(mrb)[0]);
+                  return self;
+                }
+                struct RArray *a = mrb_ary_ptr(self);
+                mrb_int len = ARY_LEN(a);
+                mrb_int len2 = len + argc;
+                ary_modify(mrb, a);
+                if (ARY_CAPA(a) < len2) {
+                  ary_expand_capa(mrb, a, len2);
+                }
+                const mrb_value *argv = mrb_get_argv(mrb);
+                array_copy(ARY_PTR(a)+len, argv, argc);
+                ARY_SET_LEN(a, len2);
+                while (argc--) {
+                  mrb_field_write_barrier_value(mrb, (struct RBasic*)a, *argv);
+                  argv++;
+                }
+                return self;
+              C
+    Entry.new(name: 'push', owner: 'Array', arity: 3, arg: :none, aspec: 'MRB_ARGS_ANY()',
+              expression: '(mrb_ary_push(M, recv, ARG0), mrb_ary_push(M, recv, ARG1), mrb_ary_push(M, recv, ARG2), recv)',
+              apis: [%w[mruby/array.h mrb_ary_push]],
+              checks: [['mrb_ary_push_m', <<~C, :exact]]),
+                mrb_int argc = mrb_get_argc(mrb);
+                if (argc == 1) {
+                  mrb_ary_push(mrb, self, mrb_get_argv(mrb)[0]);
+                  return self;
+                }
+                struct RArray *a = mrb_ary_ptr(self);
+                mrb_int len = ARY_LEN(a);
+                mrb_int len2 = len + argc;
+                ary_modify(mrb, a);
+                if (ARY_CAPA(a) < len2) {
+                  ary_expand_capa(mrb, a, len2);
+                }
+                const mrb_value *argv = mrb_get_argv(mrb);
+                array_copy(ARY_PTR(a)+len, argv, argc);
+                ARY_SET_LEN(a, len2);
+                while (argc--) {
+                  mrb_field_write_barrier_value(mrb, (struct RBasic*)a, *argv);
+                  argv++;
+                }
+                return self;
+              C
+    Entry.new(name: 'push', owner: 'Array', arity: 4, arg: :none, aspec: 'MRB_ARGS_ANY()',
+              expression: '(mrb_ary_push(M, recv, ARG0), mrb_ary_push(M, recv, ARG1), mrb_ary_push(M, recv, ARG2), mrb_ary_push(M, recv, ARG3), recv)',
+              apis: [%w[mruby/array.h mrb_ary_push]],
+              checks: [['mrb_ary_push_m', <<~C, :exact]]),
+                mrb_int argc = mrb_get_argc(mrb);
+                if (argc == 1) {
+                  mrb_ary_push(mrb, self, mrb_get_argv(mrb)[0]);
+                  return self;
+                }
+                struct RArray *a = mrb_ary_ptr(self);
+                mrb_int len = ARY_LEN(a);
+                mrb_int len2 = len + argc;
+                ary_modify(mrb, a);
+                if (ARY_CAPA(a) < len2) {
+                  ary_expand_capa(mrb, a, len2);
+                }
+                const mrb_value *argv = mrb_get_argv(mrb);
+                array_copy(ARY_PTR(a)+len, argv, argc);
+                ARY_SET_LEN(a, len2);
+                while (argc--) {
+                  mrb_field_write_barrier_value(mrb, (struct RBasic*)a, *argv);
+                  argv++;
+                }
+                return self;
+              C
+    Entry.new(name: 'replace', owner: 'Array', arity: 1, arg: :array, aspec: 'MRB_ARGS_REQ(1)',
+              expression: '(mrb_ary_replace(M, recv, ARG0), recv)',
+              apis: [%w[mruby/array.h mrb_ary_replace]],
+              checks: [['mrb_ary_replace_m', <<~C, :exact]]),
+                mrb_value other;
+                mrb_get_args(mrb, "A", &other);
+                mrb_ary_replace(mrb, self, other);
+                return self;
+              C
+    # Only an exact String reaches the arm, and for one mrb_str_to_s returns the receiver itself.
+    Entry.new(name: 'to_s', owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'recv',
+              apis: [],
+              checks: [['mrb_str_to_s', <<~C, :exact]]),
+                if (mrb_obj_class(mrb, self) != mrb->string_class) {
+                  return mrb_str_dup(mrb, self);
+                }
+                return self;
+              C
+    # The two below read their argument with "i"; the Integer guard (a fixnum, not a bigint) is the case where
+    # mrb_as_int is just mrb_integer, and every other argument keeps the send.
+    Entry.new(name: 'getbyte', owner: 'String', arity: 1, arg: :integer, aspec: 'MRB_ARGS_REQ(1)',
+              expression: 'bc2cpp_str_getbyte(M, recv, ARG0)', helper: 'bc2cpp_str_getbyte',
+              apis: [],
+              checks: [['mrb_str_getbyte', <<~C, :exact]]),
+                mrb_int pos;
+                mrb_get_args(mrb, "i", &pos);
+                if (pos < 0)
+                  pos += RSTRING_LEN(str);
+                if (pos < 0 ||  RSTRING_LEN(str) <= pos)
+                  return mrb_nil_value();
+                return mrb_fixnum_value((unsigned char)RSTRING_PTR(str)[pos]);
+              C
+    Entry.new(name: 'to_i', owner: 'String', arity: 1, arg: :integer, aspec: 'MRB_ARGS_ANY()',
+              expression: 'bc2cpp_str_to_i(M, recv, ARG0)', helper: 'bc2cpp_str_to_i',
+              apis: [%w[mruby/string.h mrb_str_to_integer], %w[mruby.h mrb_raisef]],
+              checks: [['mrb_str_to_i', <<~C, :exact]]),
+                mrb_int base = 10;
+                mrb_get_args(mrb, "|i", &base);
+                if (base < 0 || 36 < base) {
+                  mrb_raisef(mrb, E_ARGUMENT_ERROR, "illegal radix %i", base);
+                }
+                return mrb_str_to_integer(mrb, self, base, FALSE);
+              C
     # mrb_ary_svalue is static, so the call is a mirror in emit_native_core_helpers.
     Entry.new(name: '__svalue', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: 'bc2cpp_ary_svalue(M, recv)', helper: 'bc2cpp_ary_svalue',
               apis: [],
               checks: [['mrb_ary_svalue', <<~C, :exact]]),
-                switch (ary_size(ary)) {
+                switch (RARRAY_LEN(ary)) {
                 case 0:
                   return mrb_nil_value();
                 case 1:
-                  return ary_items(ary)[0];
+                  return RARRAY_PTR(ary)[0];
                 default:
                   return ary;
                 }
@@ -261,28 +422,76 @@ module NativeCoreDirect
   HAND_HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
       static inline mrb_value bc2cpp_ary_compact(mrb_state* M, mrb_value self) {
-        mrb_value ary = mrb_ary_new_capa(M, ary_size(self));
-        for (mrb_int i = 0; i < ary_size(self); i++) {
-          if (!mrb_nil_p(ary_items(self)[i])) mrb_ary_push(M, ary, ary_items(self)[i]);
+        mrb_value ary = mrb_ary_new_capa(M, RARRAY_LEN(self));
+        for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+          if (!mrb_nil_p(RARRAY_PTR(self)[i])) mrb_ary_push(M, ary, RARRAY_PTR(self)[i]);
         }
         return ary;
       }
     CPP
     'bc2cpp_ary_index' => <<~CPP,
       static inline mrb_value bc2cpp_ary_index(mrb_state* M, mrb_value self, mrb_value obj) {
-        for (mrb_int i = 0; i < ary_size(self); i++) {
-          if (mrb_equal(M, ary_items(self)[i], obj)) return mrb_int_value(M, i);
+        for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+          if (mrb_equal(M, RARRAY_PTR(self)[i], obj)) return mrb_int_value(M, i);
         }
         return mrb_nil_value();
       }
     CPP
+    'bc2cpp_ary_delete' => <<~CPP,
+      static inline mrb_value bc2cpp_ary_delete(mrb_state* M, mrb_value self, mrb_value obj) {
+        struct RArray *ary = RARRAY(self);
+        mrb_value ret = obj;
+        int ai = mrb_gc_arena_save(M);
+        mrb_int i = 0;
+        mrb_int j = 0;
+        for (; i < ARY_LEN(ary); i++) {
+          mrb_value elem = ARY_PTR(ary)[i];
+          if (mrb_equal(M, elem, obj)) {
+            mrb_gc_arena_restore(M, ai);
+            mrb_gc_protect(M, elem);
+            ret = elem;
+            continue;
+          }
+          if (i != j) {
+            if (j >= ARY_LEN(ary)) {
+              mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "array modified during delete");
+            }
+            mrb_ary_modify(M, ary);
+            ARY_PTR(ary)[j] = elem;
+          }
+          j++;
+        }
+        if (i == j) return mrb_nil_value();
+        ARY_SET_LEN(ary, j);
+        return ret;
+      }
+    CPP
+    'bc2cpp_str_getbyte' => <<~CPP,
+      static inline mrb_value bc2cpp_str_getbyte(mrb_state* M, mrb_value str, mrb_value pos_value) {
+        mrb_int pos = mrb_integer(pos_value);
+        if (pos < 0)
+          pos += RSTRING_LEN(str);
+        if (pos < 0 || RSTRING_LEN(str) <= pos)
+          return mrb_nil_value();
+        return mrb_fixnum_value((unsigned char)RSTRING_PTR(str)[pos]);
+      }
+    CPP
+    'bc2cpp_str_to_i' => <<~CPP,
+      static inline mrb_value bc2cpp_str_to_i(mrb_state* M, mrb_value self, mrb_value base_value) {
+        mrb_int base = mrb_integer(base_value);
+        if (base < 0 || 36 < base) {
+          mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "ArgumentError")), "illegal radix %i", base);
+        }
+        return mrb_str_to_integer(M, self, base, FALSE);
+      }
+    CPP
     'bc2cpp_ary_svalue' => <<~CPP,
       static inline mrb_value bc2cpp_ary_svalue(mrb_state* M, mrb_value ary) {
-        switch (ary_size(ary)) {
+        switch (RARRAY_LEN(ary)) {
         case 0:
           return mrb_nil_value();
         case 1:
-          return ary_items(ary)[0];
+          return RARRAY_PTR(ary)[0];
         default:
           return ary;
         }

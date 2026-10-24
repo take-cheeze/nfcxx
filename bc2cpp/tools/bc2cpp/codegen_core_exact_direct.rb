@@ -102,7 +102,8 @@ module CoreExactDirect
   def flow_core_direct_line(d, recv, name, argv)
     return nil unless ENV['BC2CPP_NATIVE_CLASS_ARMS'] != '0' && exact_core_site_for(recv, name)
 
-    core_exact_direct_line(d, recv, name, argv, dynamic_dispatch_line(d, recv, name, argv))
+    core_exact_direct_line(d, recv, name, argv, dynamic_dispatch_line(d, recv, name, argv)) ||
+      flow_native_core_exact_line(d, recv, name, argv)
   end
 
   # The compiled core definition a call to `name` with `arity` arguments and no block reaches on
