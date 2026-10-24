@@ -843,14 +843,12 @@ class CodeGen
            "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}" \
            "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
     out << errinfo_scope_line(block_irep)
-    registers_start = out.length
     out << emit_register_initializers(block_irep.nregs, arg_names)
-    registers_end = out.length
     out << body
     out << fell_off_end(impl_name)
     out << "}\n\n"
 
-    out = drop_unused_nil_registers(out, registers_start...registers_end)
+    out = drop_dead_statements(drop_unused_registers(out))
 
     kind = region[:kind] || 'block_fallback'
     # BLOCK_SEMANTICS: a break or return of a strict proc (Kernel#lambda over

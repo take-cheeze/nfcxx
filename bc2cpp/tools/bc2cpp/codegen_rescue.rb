@@ -799,7 +799,8 @@ class CodeGen
     @blk_param_name = saved_blk_param_name
     out << fell_off_end(try_name)
     out << "}\n\n"
-    out
+    # The nested try bodies above are in +out+ too, so a shared name is only ever kept.
+    @resumable ? out : drop_dead_statements(drop_unused_registers(out))
   end
 
   # RESCUE_SUPPORT: glue at begin_addr replacing [begin_addr, end_addr]: run the

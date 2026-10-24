@@ -1826,9 +1826,14 @@ class CodeGen
 
   # Resolve the complete owner path before probing, just as the inline lookup
   # did. Scope values remain on the mruby arena; no constant values are cached.
-  def emit_const_scope_helpers
+  # With +used+ (the rest of the emitted text), a helper only a discarded body
+  # named is left out; the indices stay as assigned.
+  def emit_const_scope_helpers(used = nil)
     out = String.new
+    called = used && helper_calls(used, 'bc2cpp_const_scope_')
     (@const_scope_helpers || {}).each do |owner_path, slot|
+      next if called && !called.include?(slot[:index])
+
       out << "static mrb_value bc2cpp_const_scope_#{slot[:index]}(mrb_state* M, mrb_sym name) {\n"
       current = 'mrb_obj_value(M->object_class)'
       owner_path.each_with_index do |seg, i|
@@ -1851,8 +1856,10 @@ class CodeGen
   # nothing). Only a class/module value is stored. Keyed on the mrb_state* with
   # its own reset, dropped by each compiled gem's gem_final via
   # bc2cpp_reset_const_site_cache(); always emitted so gem_final can call it.
-  def emit_const_site_cache
+  # +used+ as for emit_const_scope_helpers: the slots stay sized for every index.
+  def emit_const_site_cache(used = nil)
     entries = (@const_site_cache || {}).values
+    called = used && helper_calls(used, 'bc2cpp_cconst_')
     count = [entries.size, 1].max
     out = +"// CONST_SITE_CACHE -- see tools/bc2cpp/const_site_cache.rb.\n"
     out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
@@ -1864,6 +1871,8 @@ class CodeGen
            "}\n"
     entries.each do |slot|
       i = slot[:index]
+      next if called && !called.include?(i)
+
       out << "static mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
              "  if (bc2cpp_cconst_state != M) {\n" \
              "    bc2cpp_reset_const_site_cache();\n" \
@@ -1880,6 +1889,11 @@ class CodeGen
              "}\n"
     end
     out
+  end
+
+  # The indices of the numbered helpers +prefix+<N> that +text+ calls.
+  def helper_calls(text, prefix)
+    text.scan(/\b#{prefix}(\d+)\(/).to_set { |(n)| n.to_i }
   end
 
   # mruby's variadic mrb_funcall/mrb_funcall_id copy into a fixed

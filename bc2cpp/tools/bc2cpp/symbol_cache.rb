@@ -190,6 +190,15 @@ module SymbolCache
     checked = table.checks.any? { |check| check.to_i.positive? }
     checks = (0...[table.size, 1].max).map { |slot| table.checks[slot].to_i }.join(', ')
     <<~CPP
+      // BC2CPP_NOIPA: GCC's noipa keeps a slow-path call in place (see bc2cpp_nomethod). Clang has no such
+      // attribute and warns on it. maybe_unused: a translation unit may call only some of these helpers.
+      #ifndef BC2CPP_NOIPA
+      #if defined(__clang__)
+      #define BC2CPP_NOIPA [[maybe_unused]]
+      #else
+      #define BC2CPP_NOIPA [[gnu::noipa, maybe_unused]]
+      #endif
+      #endif
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
       static mrb_sym bc2cpp_syms[#{[table.size, 1].max}] = {};
@@ -463,10 +472,10 @@ module SymbolCache
     }
     // Typed as returning so GCC keeps the call site in place: a known-noreturn
     // call is moved to the end of its function, which costs more than it saves.
-    [[gnu::noipa]] static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i) {
       bc2cpp_nomethod_argv(M, recv, i, 0, nullptr);
     }
-    [[gnu::noipa]] static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
@@ -487,10 +496,10 @@ module SymbolCache
     #endif
       mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "undefined method '%n' for %T", mid, recv);
     }
-    [[gnu::noipa]] static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i) {
       bc2cpp_nomethod_raise_argv(M, recv, i, 0, nullptr);
     }
-    [[gnu::noipa]] static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
@@ -528,7 +537,7 @@ module SymbolCache
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
     }
     // Typed as returning, like bc2cpp_nomethod, so GCC keeps the call in place.
-    [[gnu::noipa]] static mrb_value bc2cpp_guard_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_guard_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
     #ifdef BC2CPP_GUARD_VIOLATION_DISPATCH
       mrb_value argv[16];
       va_list ap;
@@ -572,7 +581,7 @@ module SymbolCache
       struct RClass* klass = mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, mrb_str_plus(M, mrb_str_new_lit(M, "hint violation: "), msg)));
     }
-    [[gnu::noipa]] static mrb_value bc2cpp_hint_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_hint_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
     #ifdef BC2CPP_HINT_VIOLATION_LOG
       {
         static struct { const char* site; struct RClass* klass; mrb_sym mid; } seen[1024];
@@ -614,10 +623,10 @@ module SymbolCache
       mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")),
                  "bc2cpp: closed-world proof violated: nil#%n was proven undefined but dispatched", mid);
     }
-    [[gnu::noipa]] static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i) {
       bc2cpp_nil_receiver_argv(M, recv, i, 0, nullptr);
     }
-    [[gnu::noipa]] static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+    BC2CPP_NOIPA static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);
