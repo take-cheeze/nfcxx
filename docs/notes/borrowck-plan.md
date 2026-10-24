@@ -9,8 +9,9 @@ byte-range loan conflicts. Optional nested struct layouts make aggregate borrowi
 explicit local drop obligations and guarded consumption are tracked. Closed non-throwing call
 contracts model bounded reads, mutation, initialization, and owner consumption. Explicit returned
 loans can alias one bounded argument region with a declared parent and permission. Summaries of functions
-defined in the module are verified against their bodies. Frontend fact emission, summary inference,
-source-language ownership policy, general lifetime signatures, and unwind cleanup
+defined in the module are verified against their bodies, and opt-in summary inference finds
+summaries for the rest. The C++ frontend prints declaration facts, including temporaries, and
+struct layout records. Pointer arithmetic, source-language ownership policy, general lifetime signatures, and unwind cleanup
 remain planned. The historical design below was written against `origin/main` at
 `265991b`. Every claim about the code cites a file and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
 

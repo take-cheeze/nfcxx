@@ -122,13 +122,12 @@ for effects in tests/pathb-borrow/contracts/*.effects; do
 done
 # Inferred summaries let callers of lowered C++ callees be checked without
 # annotations. Dropping the initializing call must expose the uninitialized use.
-layouts=tests/pathb-borrow/contracts/inferred.layouts
-NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/inferred.cpp > "$tmp/inferred0.ir"
+# The frontend prints the (borrow-layout ...) records of the structs involved.
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/inferred.cpp > "$tmp/inferred0.layout.ir"
+grep -Fqx '(borrow-layout (struct "Pair") 8 4 (field "a" 0 int) (field "b" 4 int))' "$tmp/inferred0.layout.ir" ||
+  { echo "FAIL inferred.cpp: no borrow-layout record for Pair"; exit 1; }
 sed '/^  init_pair(&s, 2);$/d' tests/pathb-borrow/contracts/inferred.cpp > "$tmp/uninit.cpp"
-NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/uninit.cpp" > "$tmp/uninit0.ir" 2>/dev/null
-for name in inferred0 uninit0; do
-  { head -1 "$tmp/$name.ir"; cat "$layouts"; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.layout.ir"
-done
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/uninit.cpp" > "$tmp/uninit0.layout.ir" 2>/dev/null
 for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
   scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/inferred0.layout.ir" > "$tmp/out"
   grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL inferred.cpp ($options)"; cat "$tmp/out"; exit 1; }
@@ -162,8 +161,7 @@ sed 's/^  bump(second(&s));$/  int *b = second(\&s); s.b = 9; bump(b);/' "$alias
 for name in aliases aliases_held; do
   src=$aliases
   [ "$name" = aliases ] || src=$tmp/$name.cpp
-  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/$name.0.ir"
-  { head -1 "$tmp/$name.0.ir"; cat "$layouts"; tail -n +2 "$tmp/$name.0.ir"; } > "$tmp/$name.ir"
+  NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$src" > "$tmp/$name.ir"
 done
 scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $aliases"; cat "$tmp/out"; exit 1; }
@@ -182,6 +180,33 @@ scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/aliases.ir" > "$tmp/alias
 cc "$tmp/aliases.s" -o "$tmp/aliases"
 "$tmp/aliases" || { echo "FAIL $aliases runtime: expected 0"; exit 1; }
 echo "ok   implicit returned loans for lowered C++ calls, held-alias mutant, and native execution"
+pass=$((pass + 1))
+# The frontend's (borrow-layout ...) records let a reader of a padded struct be
+# summarized and checked. Without them the summary is not found, and the records
+# never change generated code. Structs a record cannot describe get none.
+lay=tests/pathb-borrow/contracts/layouts.cpp
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$lay" > "$tmp/lay.ir"
+grep -v '^(borrow-layout ' "$tmp/lay.ir" > "$tmp/lay_bare.ir"
+cmp -s "$tmp/lay.ir" "$tmp/lay_bare.ir" && { echo "FAIL $lay: no borrow-layout records"; exit 1; }
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay.ir" > "$tmp/out"
+grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $lay"; cat "$tmp/out"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay_bare.ir" > "$tmp/out" 2>&1 || rc=$?
+[ "$rc" = 3 ] || { echo "FAIL $lay without records: expected exit 3, got $rc"; cat "$tmp/out"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay_bare.ir" > "$tmp/lay_bare.qbe"
+cmp "$tmp/lay.qbe" "$tmp/lay_bare.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay-oracle.qbe"
+cmp "$tmp/lay.qbe" "$tmp/lay-oracle.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/lay.qbe" -o "$tmp/lay.s"
+cc "$tmp/lay.s" -o "$tmp/lay"
+"$tmp/lay" || { echo "FAIL $lay runtime: expected 0"; exit 1; }
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/nolayouts.cpp > "$tmp/nolay.ir"
+grep '^(borrow-layout ' "$tmp/nolay.ir" > "$tmp/nolay.layouts" || true
+printf '%s\n' '(borrow-layout (struct "Plain") 16 8 (field "z" 0 int) (field "next" 8 (ptr (const (struct "Plain")))))' |
+  cmp - "$tmp/nolay.layouts" || { echo "FAIL nolayouts.cpp records"; cat "$tmp/nolay.layouts"; exit 1; }
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nolay.ir" > /dev/null
+echo "ok   frontend borrow-layout records, record-less mutant, unsupported structs, and native execution"
 pass=$((pass + 1))
 # Call-argument temporaries get (decl ... temp) facts around their full expression,
 # so a recursive callee gets a summary. An uninitialized argument is still found.

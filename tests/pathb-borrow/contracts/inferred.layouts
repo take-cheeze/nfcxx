@@ -1,1 +1,0 @@
-(borrow-layout (struct "Pair") 8 4 (field "a" 0 int) (field "b" 4 int))

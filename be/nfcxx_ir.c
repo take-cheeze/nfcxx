@@ -931,6 +931,8 @@ static const char *ir_global_op(a_variable_ptr var)
   return op;
 }
 
+static void ir_layout_note(a_type_ptr t);
+
 /* Stack slot operand for an object of the current function, created on first use. */
 /* al: the object's own alignment (alignas / aligned attribute included), or 0 for the type's. */
 static const char *ir_slot_op(const void *key, const char *base, a_type_ptr t, unsigned long al)
@@ -943,6 +945,7 @@ static const char *ir_slot_op(const void *key, const char *base, a_type_ptr t, u
     nf_put_type(t);
     fprintf(nf_out, " %lu %lu)", ir_size_of(t), al != 0 ? al : ir_align_of(t));
     ir_buf_end(&ir_slot_buf);
+    ir_layout_note(t);
   }
   return op;
 }
@@ -961,6 +964,7 @@ static ir_val ir_temp(a_type_ptr t)
   nf_put_type(t);
   fprintf(nf_out, " %lu %lu)", ir_size_of(t), ir_align_of(t));
   ir_buf_end(&ir_slot_buf);
+  ir_layout_note(t);
   ir_tmp_note(op);
   return ir_mk_addr((char *)op, t, 0);
 }
@@ -993,6 +997,159 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
    other state is created, so the default output is unchanged. */
 
 static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end) and (rref-arg) facts */
+
+/* (borrow-layout (struct "N") SIZE ALIGN (field "F" OFF TYPE)...): which bytes of a struct are fields, so a borrow of
+   the whole struct does not require its padding initialized (docs/notes/pathb-borrowck.md, "Semantic struct layouts").
+   Printed at the end of the module for each struct a slot holds or points to, and for the structs among its fields. A
+   struct with a field the checker does not describe (a base class, bit-field, array, union, long double, ...) gets no
+   record, and the checker then requires all of its bytes, as for any struct without one. */
+static ir_tab ir_layout_tab;
+
+typedef struct ir_layout_rec {
+  char *name;  /* the type text, (struct "N") */
+  char *text;  /* the whole record */
+  char **deps; /* the type texts of the structs held by value */
+  int ndeps;
+  int skip;    /* 1: a copy of an earlier record, 2: not printed */
+} ir_layout_rec;
+static ir_layout_rec *ir_layout_recs;
+static int ir_layout_n, ir_layout_cap;
+
+static const char *ir_layout_prims[] = {"bool", "char", "signed_char", "unsigned_char", "short", "unsigned_short", "int",
+                                        "unsigned_int", "long", "unsigned_long", "long_long", "unsigned_long_long",
+                                        "float", "double", NULL};
+
+static int ir_layout_struct(a_type_ptr t);
+
+/* The field type text of t, or NULL when the checker would not accept it. */
+static char *ir_layout_field_type(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  char *txt;
+  int i;
+  if (s->kind == tk_pointer) return ir_capture_type(s, 1);
+  if (s->kind == tk_class || s->kind == tk_struct) return ir_layout_struct(s) ? ir_capture_type(s, 1) : NULL;
+  if (s->kind != tk_integer && s->kind != tk_float) return NULL;
+  txt = ir_capture_type(s, 1);
+  for (i = 0; ir_layout_prims[i] != NULL; i++)
+    if (strcmp(txt, ir_layout_prims[i]) == 0) return txt;
+  return NULL;
+}
+
+/* Add the record of struct s, or return 0 when it has none. */
+static int ir_layout_record(a_type_ptr s)
+{
+  a_class_type_supplement_ptr extra = s->variant.class_struct_union.extra_info;
+  char *name = ir_capture_type(s, 1), *fields = (char *)"", *ft;
+  char *deps[256];
+  int ndeps = 0;
+  unsigned long size = ir_size_of(s), align = ir_align_of(s), end = 0;
+  a_field_ptr f;
+  ir_layout_rec *r;
+  if (strncmp(name, "(struct \"", 9) != 0 || size == 0 || size > 4096 || align == 0 || size % align != 0) return 0;
+  if (extra != NULL && extra->direct_base_classes != NULL) return 0;
+  for (f = s->variant.class_struct_union.field_list; f != NULL; f = f->next) {
+    unsigned long off = (unsigned long)f->offset, fa;
+    a_type_ptr fs = skip_typerefs(f->type);
+    a_field_ptr g;
+    if (f->is_bit_field || f->is_optimized_empty_class || f->source_corresp.name == NULL || f->source_corresp.name[0] == '\0') return 0;
+    /* the members of a lambda's captured pack share one name */
+    for (g = s->variant.class_struct_union.field_list; g != f; g = g->next)
+      if (g->source_corresp.name != NULL && strcmp(g->source_corresp.name, f->source_corresp.name) == 0) return 0;
+    if ((ft = ir_layout_field_type(f->type)) == NULL) return 0;
+    fa = ir_align_of(f->type);
+    if (off < end || off % fa != 0 || align < fa || off + ir_size_of(f->type) > size) return 0;
+    end = off + ir_size_of(f->type);
+    if (fs->kind == tk_class || fs->kind == tk_struct) {
+      if (ndeps >= 256) return 0;
+      deps[ndeps++] = ft;
+    }
+    fields = ir_fmt("%s (field \"%s\" %lu %s)", fields, f->source_corresp.name, off, ft);
+  }
+  if (ir_layout_n >= ir_layout_cap) {
+    ir_layout_cap = ir_layout_cap ? ir_layout_cap * 2 : 64;
+    ir_layout_recs = (ir_layout_rec *)realloc(ir_layout_recs, (size_t)ir_layout_cap * sizeof *ir_layout_recs);
+    if (ir_layout_recs == NULL) abort();
+  }
+  r = &ir_layout_recs[ir_layout_n++];
+  r->name = name;
+  r->text = ir_fmt("(borrow-layout %s %lu %lu%s)\n", name, size, align, fields);
+  r->ndeps = ndeps;
+  r->deps = (char **)malloc((size_t)(ndeps ? ndeps : 1) * sizeof *r->deps);
+  if (r->deps == NULL) abort();
+  memcpy(r->deps, deps, (size_t)ndeps * sizeof *deps);
+  r->skip = 0;
+  return 1;
+}
+
+/* 1 when struct t has a record. A struct holds no struct by value that holds it, so the records of its fields are
+   added before its own. */
+static int ir_layout_struct(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  const char *seen = ir_tab_find(&ir_layout_tab, s);
+  int ok;
+  if (seen != NULL) return seen[0] == '1';
+  ok = ir_layout_record(s);
+  ir_tab_put(&ir_layout_tab, s, ok ? "1" : "0");
+  return ok;
+}
+
+/* 1 when no printed record is named n. */
+static int ir_layout_dropped(const char *n)
+{
+  int i;
+  for (i = 0; i < ir_layout_n; i++)
+    if (ir_layout_recs[i].skip == 2 && strcmp(ir_layout_recs[i].name, n) == 0) return 1;
+  return 0;
+}
+
+/* Print the records into the types section. Distinct types can print with one name (a local struct of each instance of
+   a function template): their records are printed once when they agree, else none is, and then no record of a struct
+   holding one either. */
+static void ir_layout_flush(void)
+{
+  int i, j, changed = 1;
+  for (i = 0; i < ir_layout_n; i++) {
+    for (j = 0; j < i; j++) {
+      if (strcmp(ir_layout_recs[i].name, ir_layout_recs[j].name) != 0) continue;
+      if (strcmp(ir_layout_recs[i].text, ir_layout_recs[j].text) == 0) {
+        if (ir_layout_recs[i].skip == 0) ir_layout_recs[i].skip = 1;
+      } else {
+        ir_layout_recs[i].skip = ir_layout_recs[j].skip = 2;
+      }
+    }
+  }
+  while (changed) {
+    changed = 0;
+    for (i = 0; i < ir_layout_n; i++) {
+      if (ir_layout_recs[i].skip == 2) continue;
+      for (j = 0; j < ir_layout_recs[i].ndeps; j++) {
+        if (ir_layout_dropped(ir_layout_recs[i].deps[j])) {
+          ir_layout_recs[i].skip = 2;
+          changed = 1;
+          break;
+        }
+      }
+    }
+  }
+  ir_buf_begin(&ir_out_types);
+  for (i = 0; i < ir_layout_n; i++) {
+    /* a copy of a record whose name another record dropped is dropped too */
+    if (ir_layout_recs[i].skip == 0 && !ir_layout_dropped(ir_layout_recs[i].name)) fputs(ir_layout_recs[i].text, nf_out);
+  }
+  ir_buf_end(&ir_out_types);
+}
+
+/* Note the layout of a slot's type t: a struct, or a pointer to one. */
+static void ir_layout_note(a_type_ptr t)
+{
+  a_type_ptr s;
+  if (!ir_borrow || t == NULL) return;
+  s = skip_typerefs(t);
+  if (s->kind == tk_pointer) s = skip_typerefs(s->variant.pointer.type);
+  if (s->kind == tk_class || s->kind == tk_struct) (void)ir_layout_struct(s);
+}
 
 /* The locals declared so far and still open, most recent first. A block end closes the ones declared inside it; a return
    closes all of them. Only declared variables are closed, so a local declared after a return is not named before its decl. */
@@ -6362,6 +6519,7 @@ void nfcxx_ir_back_end(void)
     }
   }
 
+  if (ir_borrow) ir_layout_flush();
   nf_out = stdout;
   /* The scalar sizes are EDG's for the target. A consumer that assumes a layout (the QBE emitter: LP64) checks them. */
   fprintf(stdout, "(ir-module \"%s\" (layout (short %lu) (int %lu) (long %lu) (long_long %lu) (pointer %lu) (float %lu) (double %lu) (long_double %lu)))\n",

@@ -288,8 +288,21 @@ semantic aggregate borrow. Missing metadata retains the conservative physical-by
 Both QBE emitters validate the descriptor graph and emit no code for it. Removing metadata produces
 identical QBE and native behavior. Layout records are trusted frontend contracts: validation checks
 internal consistency, not correspondence with Rust or C++ source or completeness against a source
-type. Neither frontend emits these records or ownership loan/transfer forms yet. Source-language
-drop, active-member, and trait rules remain separate work.
+type. Source-language drop, active-member, and trait rules remain separate work.
+
+With `NFCXX_PATHB_BORROW=1` the C++ frontend prints a record, once per module, for each struct
+that a slot holds or points to, and for the structs nested in those. The records go after the
+module header. A struct gets a record only if every non-static data member is a named scalar
+(`bool`, the `char` and integer types, `float` or `double`; an enum prints as its underlying
+type), a pointer, or a struct that itself gets a record, and is naturally aligned within its
+object. A struct with a base class, a bit-field, an array, a union, a `long double`, a
+`[[no_unique_address]]` member, an anonymous member, or two members of one name (a lambda's
+captured pack) gets none, and the checker keeps requiring all of its bytes. Distinct types that
+print under one name, such as a local struct in each instance of a function template, share a
+record when their records agree. Otherwise neither gets one, and neither does any struct that
+holds one. A record the frontend prints therefore never makes the checker refuse. On the 93
+corpus programs that get records, checker results are the same with the records removed.
+Neither frontend emits ownership loan/transfer forms yet.
 
 ## Explicit drop-state contracts
 
@@ -549,7 +562,7 @@ whose provenance is only known by dataflow, such as a pointer loaded from a slot
 explicit `call-borrow` with a declared parent.
 
 Together with `--infer-summaries` and the temporary facts, a lowered C++ program can be checked
-end to end with no annotations except struct layouts. `tests/pathb-borrow/contracts/aliases.cpp`
+end to end with no annotations. `tests/pathb-borrow/contracts/aliases.cpp`
 passes `bump(second(&s))` through an implicit exclusive loan. A variant that writes `s.b` while it
 still holds the alias reports `loan-conflict`.
 
@@ -607,6 +620,9 @@ Summary-inference fixtures in `tests/pathb-borrow/summaries` cover each inferred
 alias offsets and permissions, recursion, caller misuse, and functions left without a summary. A
 lowered C++ program is checked with inferred summaries, and fails once its initializing call is
 removed.
+`tests/pathb-borrow/contracts/layouts.cpp` checks a reader of a padded nested struct through the
+frontend's layout records and is refused once they are removed, with identical QBE either way.
+`nolayouts.cpp` lists struct shapes that must get no record.
 Verified-summary fixtures cover each argument effect, nested and recursive contracted calls,
 argument reborrows, returned alias offsets and permissions, closed and noescape violations,
 missing outputs or consumption, and malformed signatures.
