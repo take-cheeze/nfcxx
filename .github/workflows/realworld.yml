@@ -89,6 +89,9 @@ jobs:
       - name: CoreCLR workstation GC, 34 translation units (both backends; docs/notes/coreclr-gc.md)
         run: tests/realworld/run_coreclr_gc.sh
 
+      - name: ASTro (ko1/astro) calc and luastro built by nfcc, Code Store compiling its SD_*.c through nfcc (both backends)
+        run: tests/realworld/run_astro.sh
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats
