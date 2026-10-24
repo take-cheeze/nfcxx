@@ -38,7 +38,9 @@ class CodeGen
     def ivar_entry_mask(irep, name) = @cg.class_pool_ivar_entry_mask(irep, name)
     def ivar_fact_mask(irep, name) = @cg.class_pool_ivar_fact_mask(irep, name)
     def upvar_mask(irep, insn) = @cg.class_upvar_mask(irep, insn)
-    def index_mask(irep, index, insn, state) = @cg.exact_lcf_index_mask(irep, index, insn, state)
+    def index_mask(irep, index, insn, state)
+      @cg.record_index_mask(irep, index, insn) || @cg.exact_lcf_index_mask(irep, index, insn, state)
+    end
     # ELEMENT (generic step 2): the element class mask of a map/collect result, or nil (unknown).
     def block_element_mask(irep, index, insn, _state) = @cg.block_element_class_mask(irep, index, insn)
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
