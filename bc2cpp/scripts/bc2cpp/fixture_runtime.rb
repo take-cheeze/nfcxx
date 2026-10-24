@@ -289,6 +289,10 @@ module Bc2cppFixtureRuntime
         }
         int rc = scenario(M);
         mrb_close(M);
+        // As each compiled gem's gem_final: the next VM may reuse this one's mrb_state address, which the
+        // symbol and constant-site caches key on.
+        bc2cpp_reset_symbol_cache();
+        bc2cpp_reset_const_site_cache();
         if (with_compiled) bc2cpp_reset_owner_classes();
         return rc;
       }
