@@ -80,15 +80,20 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
 
 - **Inline asm `p` operands and `%a`** (docs/notes/inline-asm.md), and symbol immediates with an offset (`&s.member`).
 
-- **`packed` after a struct body with bit-fields**, when packing moves nothing (the kernel's `desc_struct`): every
-  member is where gcc's packed layout puts it, and each bit-field's unit (cproc reads and writes a bit-field through a
-  unit of its type's size; gcc only the bytes it spans) lies inside the packed struct and shares no byte with a member
-  that is not a bit-field. Only the alignment and tail padding change. Other packed bit-fields are still refused.
+- **`packed` after a struct body with bit-fields**, when packing moves nothing (the kernel's `desc_struct` and
+  `orc_entry`): every member is where gcc's packed layout puts it, so only the alignment and tail padding change. cproc
+  reads and writes a bit-field through a unit of its type's size, gcc only the bytes it spans; a bit-field whose unit
+  would reach past the packed struct or into a member that is not a bit-field moves to the smallest integer unit of
+  its signedness that holds its bits (`unsigned sp_reg:4` in a byte). Its value converts and promotes alike, since
+  cproc promotes a bit-field by its width. Other packed bit-fields are still refused.
 
 - **GNU leniencies the kernel relies on**: a keyword as an attribute name (`__attribute__((const))`), an empty member
   declaration (`T *lock; ;` in cleanup.h's guards), a `;` at file scope, `return f();` with `f` void in a void function
   (a non-void value is still an error), and `__builtin_memset`, `__builtin_memcpy`, `__builtin_str{cpy,ncpy,cat,ncat,
   cmp,ncmp}` as calls of the library functions.
+
+- **Unreachable asm**: thunks are written only for blocks reachable from the function's start, and a constant
+  `switch`/`if` condition is a plain jump (docs/notes/inline-asm.md).
 
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 

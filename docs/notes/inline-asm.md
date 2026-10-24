@@ -95,6 +95,14 @@ reported only if pruning keeps the function. Each thunk is written to the side f
 naming its function, and the thunks of dropped functions are removed with them -- their text can name symbols the
 program does not have (`call __put_user_4`).
 
+## Asm that cannot be reached
+
+Each thunk, its symbol operands and a deferred refusal are kept with the block of the asm statement, and the function
+writes out only those of the blocks reachable from its start. A constant `switch` or `if` condition jumps straight to
+its target, so the kernel's `cmpxchg`, which switches on `sizeof(*ptr)`, has no thunk for its `cmpxchgb` case when the
+operand is 8 bytes wide (it would not even assemble: `%rsi` with a `b` suffix); asm after a `return` or `break` is
+dropped. QBE removes the unreachable blocks, and with them the calls of the thunks left out.
+
 ## Not yet supported (refused, never miscompiled)
 
 Each of these raises a compile error rather than quietly producing wrong code:

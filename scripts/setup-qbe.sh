@@ -37,7 +37,9 @@ patch -s -p1 -d "$root/build/cproc" --batch < "$root/scripts/cproc-nfcxx.patch" 
 sed -i.bak 's/NPm = 64,/NPm = 1024,/' "$root/build/qbe/rega.c" && rm -f "$root/build/qbe/rega.c.bak"
 grep -q 'NPm = 1024,' "$root/build/qbe/rega.c" || { echo "setup-qbe: NPm not found in rega.c" >&2; exit 1; }
 # scripts/qbe-nfcxx.patch: QBE changes not yet commits of the fork: ELF .type/.size for data objects, as gcc writes
-# them (docs/notes/linux-kernel.md: the kernel build compares the qbe backend's objects with gcc's).
+# them (docs/notes/linux-kernel.md: the kernel build compares the qbe backend's objects with gcc's), and -n, no
+# floating-point registers in integer code (the kernel's -mno-sse: slot-to-slot moves through %rax, no %xmm saves in
+# a variadic prologue).
 patch -s -p1 -d "$root/build/qbe" --batch < "$root/scripts/qbe-nfcxx.patch" || { echo "setup-qbe: qbe-nfcxx.patch failed" >&2; exit 1; }
 make -C "$root/build/qbe" -j"$jobs" CC="$cc_wrap" >/dev/null
 # cproc on Apple arm64 names its target "aarch64-apple-darwin" (configure takes host and target from the compiler otherwise,

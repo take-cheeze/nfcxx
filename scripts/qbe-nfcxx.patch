@@ -1,3 +1,54 @@
+--- a/all.h
++++ b/all.h
+@@ -472,6 +472,7 @@
+ /* main.c */
+ extern Target T;
+ extern char debug['Z'+1];
++extern int nofp;   /* -n (nfcxx): no floating-point registers in integer code (the Linux kernel's -mno-sse) */
+ 
+ /* util.c */
+ typedef enum {
+--- a/amd64/emit.c
++++ b/amd64/emit.c
+@@ -520,6 +520,18 @@
+ 			break;
+ 		}
+ 		if (rtype(i.to) == RSlot
++		&& (t0 == RSlot || t0 == RMem)
++		&& nofp && KBASE(i.cls) == 0) {
++			/* -n: no %xmm15; %rax, saved below the frame (the
++			 * slots are %rbp-relative under -n, emitfn) */
++			fputs("\tpushq %rax\n", e->f);
++			i.arg[1] = TMP(RAX);
++			emitf("mov%k %0, %1", &i, e);
++			emitf("mov%k %1, %=", &i, e);
++			fputs("\tpopq %rax\n", e->f);
++			break;
++		}
++		if (rtype(i.to) == RSlot
+ 		&& (t0 == RSlot || t0 == RMem)) {
+ 			i.cls = KWIDE(i.cls) ? Kd : Ks;
+ 			i.arg[1] = TMP(XMM0+15);
+@@ -683,7 +695,7 @@
+ 		fputs("\t.cfi_startproc\n", f);
+ 	ehfnbegin(fn, f);
+ 	fputs("\tendbr64\n", f);
+-	if (!fn->leaf || fn->vararg || fn->dynalloc) {
++	if (!fn->leaf || fn->vararg || fn->dynalloc || nofp) {
+ 		e->fp = RBP;
+ 		fputs("\tpushq %rbp\n\tmovq %rsp, %rbp\n", f);
+ 		if (unw)
+@@ -697,7 +709,9 @@
+ 		o = -176;
+ 		for (r=amd64_sysv_rsave; r<&amd64_sysv_rsave[6]; r++, o+=8)
+ 			fprintf(f, "\tmovq %%%s, %d(%%rbp)\n", rname[*r][0], o);
+-		for (n=0; n<8; ++n, o+=16)
++		/* -n: no caller passes floating-point arguments
++		 * (the kernel's -mno-sse), so none are saved */
++		for (n=0; n<8 && !nofp; ++n, o+=16)
+ 			fprintf(f, "\tmovaps %%xmm%d, %d(%%rbp)\n", n, o);
+ 	}
+ 	for (r=amd64_sysv_rclob; r<&amd64_sysv_rclob[NCLR_SYSV]; r++)
 --- a/emit.c
 +++ b/emit.c
 @@ -195,6 +195,15 @@
@@ -16,3 +67,40 @@
  		break;
  	case DZ:
  		if (zero != -1)
+--- a/main.c
++++ b/main.c
+@@ -5,6 +5,7 @@
+ 
+ Target T;
+ 
++int nofp;
+ char debug['Z'+1] = {
+ 	['P'] = 0, /* parsing */
+ 	['M'] = 0, /* memory optimization */
+@@ -137,7 +138,7 @@
+ 
+ 	T = Deftgt;
+ 	outf = stdout;
+-	while ((c = getopt(ac, av, "hd:o:t:")) != -1)
++	while ((c = getopt(ac, av, "hd:no:t:")) != -1)
+ 		switch (c) {
+ 		case 'd':
+ 			for (; *optarg; optarg++)
+@@ -146,6 +147,9 @@
+ 					dbg = 1;
+ 				}
+ 			break;
++		case 'n':
++			nofp = 1;
++			break;
+ 		case 'o':
+ 			if (strcmp(optarg, "-") != 0) {
+ 				outf = fopen(optarg, "w");
+@@ -177,6 +181,7 @@
+ 			fprintf(hf, "%s [OPTIONS] {file.ssa, -}\n", av[0]);
+ 			fprintf(hf, "\t%-11s prints this help\n", "-h");
+ 			fprintf(hf, "\t%-11s output to file\n", "-o file");
++			fprintf(hf, "\t%-11s no floating-point registers in integer code\n", "-n");
+ 			fprintf(hf, "\t%-11s generate for a target among:\n", "-t <target>");
+ 			fprintf(hf, "\t%-11s ", "");
+ 			for (t=tlist, sep=""; *t; t++, sep=", ") {

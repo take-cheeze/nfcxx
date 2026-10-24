@@ -262,14 +262,38 @@ int main(void) { return toplevel_answer + toplevel_two(); }
 EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" ktop.c -o ktop 2>/dev/null && { ./ktop; [ $? = 42 ]; }; then ok "kernel mode: file-scope asm"
     else bad "kernel mode: file-scope asm" "wrong result or the compile failed"; fi
-    # a packed struct whose bit-fields packing would move, or whose units would reach past the struct: refused
+    # a packed struct whose bit-fields packing would move, or whose bytes no narrower unit holds: refused
     printf 'struct m { char c; unsigned x: 4; int y; } __attribute__((packed));\nstruct m v;\n' > kpk1.c
-    printf 'struct s { unsigned char a; unsigned b: 4; } __attribute__((packed));\nstruct s v;\n' > kpk2.c
+    printf 'struct s { unsigned char a; unsigned b: 20; } __attribute__((packed));\nstruct s v;\n' > kpk2.c
     for f in kpk1 kpk2; do
       if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c $f.c -o $f.o 2>&1); then bad "kernel mode: packed bit-fields refused ($f)" "was accepted"
       elif grep -q "bit-fields in a packed struct are not supported" <<<"$out"; then ok "kernel mode: packed bit-fields refused ($f)"
       else bad "kernel mode: packed bit-fields refused ($f)" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     done
+    # asm that cannot be reached (the kernel's cmpxchg switches on sizeof(*ptr): its cmpxchgb case would not assemble
+    # with an 8-byte operand, and an if (0) with an operand no constant satisfies) is neither emitted nor refused
+    cat > kdead.c <<'EOC'
+static inline long xchg_sz(void *p, long v, int sz) {
+	switch (sz) {
+	case 1: { unsigned char r; __asm__ volatile("xchgb %0, %1" : "=q"(r), "+m"(*(char *)p) : "0"((unsigned char)v)); return r; }
+	case 8: { long r = v; __asm__ volatile("xchgq %0, %1" : "+r"(r), "+m"(*(long *)p)); return r; }
+	}
+	return 0;
+}
+long cell = 5;
+long *ptr = &cell;
+int main(void) {
+	long old;
+	switch (sizeof(*ptr)) {
+	case 1: __asm__("cmpxchgb %1, %0" : "+m"(cell) : "q"(ptr)); break;
+	case 8: old = xchg_sz(&cell, 42, 8); break;
+	}
+	if (0) __asm__("movl %1, %%eax" : : "i"(1 << (old & 7)));
+	return cell == 42 && old == 5 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kdead.c -o kdead 2>/dev/null && { ./kdead; [ $? = 42 ]; }; then ok "kernel mode: unreachable asm dropped"
+    else bad "kernel mode: unreachable asm dropped" "wrong result or the compile failed"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -289,6 +313,18 @@ EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtins_overflow_matrix.c" -o kov 2>/dev/null && { ./kov; [ $? = 42 ]; }; then
       ok "kernel mode: overflow built-ins match gcc for every type mix"
     else bad "kernel mode: overflow built-ins match gcc for every type mix" "wrong results or the compile failed"; fi
+    # -mno-sse: QBE's slot-to-slot moves go through %rax (qbe -n), and a variadic function saves no %xmm registers
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/spill_rotation.c" -o kspill 2>/dev/null && { ./kspill; [ $? = 42 ]; }; then
+      ok "kernel mode: spilled values moved without SSE"
+    else bad "kernel mode: spilled values moved without SSE" "wrong result or the compile failed"; fi
+    cat > kva.c <<'EOC'
+typedef __builtin_va_list va_list;
+static long sum(int n, ...) { va_list ap; long s = 0; __builtin_va_start(ap, n); for (int i = 0; i < n; i++) s += i & 1 ? __builtin_va_arg(ap, long) : *__builtin_va_arg(ap, int *); __builtin_va_end(ap); return s; }
+long (*volatile fp)(int, ...) = sum;
+int main(void) { int a = 10, b = 4; return fp(9, &a, 1L, &b, 2L, &a, 3L, &b, 4L, &a) == 48 ? 42 : 1; }
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kva.c -o kva 2>/dev/null && { ./kva; [ $? = 42 ]; }; then ok "kernel mode: variadic function without SSE"
+    else bad "kernel mode: variadic function without SSE" "wrong result or the compile failed"; fi
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" "$root/tests/c/builtin_bitcount.c" -o kbits 2>/dev/null && { ./kbits; [ $? = 42 ]; }; then
       ok "kernel mode: bit-counting built-ins"
     else bad "kernel mode: bit-counting built-ins" "wrong results or the compile failed"; fi

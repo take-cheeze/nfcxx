@@ -185,7 +185,9 @@ fi
 t=$(trace_start)
 # A cross check from a non-Darwin host: QBE's default target there is ELF, so the Apple arm64 target is named.
 qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_apple); fi
-"$qbe" ${qbetarget[@]+"${qbetarget[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
+# -mno-sse: qbe -n moves integers between stack slots through %rax, not %xmm15 (scripts/qbe-nfcxx.patch)
+qbenofp=(); [ $nofp = 0 ] || qbenofp=(-n)
+"$qbe" ${qbetarget[@]+"${qbetarget[@]}"} ${qbenofp[@]+"${qbenofp[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
 trace_end "$t" "qbe (IL to assembly)" qbe-backend
 # -mno-sse (NFCXX_QBE_KERNEL): QBE has no switch to avoid SSE and x87, so the code it wrote is checked instead (the
 # inline-asm thunks are the program's own instructions, as with gcc, and are appended later).

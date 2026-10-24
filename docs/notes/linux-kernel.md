@@ -70,7 +70,10 @@ The qbe backend still refuses every option it cannot honour. In this mode it acc
   its `@GOTPCREL` loads, and the kernel's linker script checks no GOT is left), and the alignment and tuning options;
 - checked: `-mno-sse`, `-mno-80387` and the other no-floating-point options. QBE has no such switch, so `qbe-cc` refuses
   a translation unit whose QBE code names an SSE or x87 register or an x87 instruction. Inline asm is the program's own,
-  as with gcc. QBE's variadic prologue saves `%xmm0`-`%xmm7`, so a file that defines a variadic function stays on gcc.
+  as with gcc. With `-mno-sse` qbe-cc runs `qbe -n` (scripts/qbe-nfcxx.patch): QBE moves an integer between two stack
+  slots through `%rax` (saved and restored around the move, the function keeping an `%rbp` frame) instead of
+  `%xmm15`, and a variadic function's prologue saves no `%xmm` registers (no caller passes floating-point arguments;
+  a `va_arg` of a floating type would be floating-point code, which the check refuses).
 
 The translation unit is preprocessed exactly as gcc preprocesses it (gcc's predefined macros and all of the kernel's
 options, linemarkers kept so errors name the header), so cproc sees the same code as the reference object, and cproc

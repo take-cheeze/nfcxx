@@ -458,7 +458,7 @@
  			if (m) {
  				m->offset = ALIGNDOWN(t->size - !!b->bits, mt.type->size);
  				m->bits.before = (t->size - m->offset) * 8 - b->bits;
-@@ -928,6 +1001,66 @@
+@@ -928,6 +1001,108 @@
  		t->align = align;
  }
  
@@ -488,35 +488,77 @@
 +}
 +
 +/*
-+struct S { ... } __attribute__((packed)) with bit-fields (the kernel's desc_struct: u16 base1: 8, type: 4, ...). gcc packs
-+bit-fields bit by bit, accessing only the bytes a field spans; cproc accesses a bit-field through a unit of its type's
-+size. So this is taken only when the packed layout is the natural one (packing moves no member, b->packmoves) and every
-+bit-field's unit lies inside the packed struct and overlaps no other member than bit-fields: then only the alignment and
-+the tail padding change. Anything else is refused.
++struct S { ... } __attribute__((packed)) with bit-fields (the kernel's desc_struct: u16 base1: 8, type: 4, ...; its
++orc_entry: s16, s16, unsigned sp_reg: 4, ... in 6 bytes). gcc packs bit-fields bit by bit and accesses only the bytes a
++field spans; cproc accesses a bit-field through a unit of its type's size. So this is taken only when the packed layout
++is the natural one (packing moves no member, b->packmoves): then only the alignment and the tail padding change. A
++bit-field whose unit would reach past the packed struct or into a member that is not a bit-field moves to the smallest
++integer unit of its signedness that holds its bits (the field keeps its place, and its value converts and promotes
++alike: cproc promotes a bit-field by its width). Anything else is refused.
 +*/
++static struct type *
++bitunittype(struct type *t, unsigned long long size)
++{
++	bool s = t->u.arith.issigned;
++
++	switch (size) {
++	case 1: return s ? &typeschar : &typeuchar;
++	case 2: return s ? &typeshort : &typeushort;
++	case 4: return s ? &typeint : &typeuint;
++	case 8: return s ? &typelong : &typeulong;
++	}
++	return NULL;
++}
++
++/* whether the unit [off, off + size) of bit-field m lies inside the struct and shares no byte with a plain member */
++static bool
++bitunitfits(struct type *t, struct member *m, unsigned long long off, unsigned long long size, unsigned long long end)
++{
++	struct member *n;
++
++	if (off + size > end)
++		return false;
++	for (n = t->u.structunion.members; n; n = n->next) {
++		if (n == m || n->bits.before || n->bits.after || !n->type->size)
++			continue;
++		if (n->offset < off + size && off < n->offset + n->type->size)
++			return false;
++	}
++	return true;
++}
++
 +static void
 +structpackbits(struct type *t, struct structbuilder *b)
 +{
-+	struct member *m, *n;
-+	unsigned long long size;
++	struct member *m;
++	unsigned long long size, end, pos, width, u;
 +	int align = 1;
 +
 +	if (t->kind != TYPESTRUCT || b->packmoves)
 +		error(&tok.loc, "bit-fields in a packed struct are not supported (packing would move a member)");
 +	size = (b->packbits + 7) / 8;
-+	for (m = t->u.structunion.members; m; m = m->next) {
++	for (m = t->u.structunion.members; m; m = m->next)
 +		if (m->align > align)
 +			align = m->align;
++	end = ALIGNUP(size, align);
++	for (m = t->u.structunion.members; m; m = m->next) {
 +		if (!m->bits.before && !m->bits.after)
 +			continue;
-+		if (m->offset + m->type->size > ALIGNUP(size, align))
-+			error(&tok.loc, "bit-fields in a packed struct are not supported (bit-field '%s' would be accessed past the end)", m->name);
-+		for (n = t->u.structunion.members; n; n = n->next) {
-+			if (n->bits.before || n->bits.after)
-+				continue;
-+			if (n->offset < m->offset + m->type->size && m->offset < n->offset + n->type->size && n->type->size)
-+				error(&tok.loc, "bit-fields in a packed struct are not supported (bit-field '%s' shares bytes with '%s')", m->name, n->name);
-+		}
++		if (bitunitfits(t, m, m->offset, m->type->size, end))
++			continue;
++		pos = m->offset * 8ull + m->bits.before;
++		width = m->type->size * 8ull - m->bits.before - m->bits.after;
++		if (m->type->kind == TYPEBOOL || m->type->kind == TYPEENUM)
++			u = 0;
++		else
++			for (u = 1; u < m->type->size && (pos % 8 + width > u * 8 || !bitunitfits(t, m, pos / 8, u, end)); u *= 2)
++				;
++		if (!u || u >= m->type->size)
++			error(&tok.loc, "bit-fields in a packed struct are not supported (bit-field '%s' would be accessed past the end or with another member)", m->name);
++		m->type = bitunittype(m->type, u);
++		m->offset = pos / 8;
++		m->bits.before = pos % 8;
++		m->bits.after = u * 8 - width - pos % 8;
 +	}
 +	t->size = size;
 +	t->align = align;
@@ -525,7 +567,7 @@
  static bool
  staticassert(struct scope *s)
  {
-@@ -957,12 +1090,15 @@
+@@ -957,12 +1132,15 @@
  	struct qualtype base, mt;
  	char *name;
  	unsigned long long width;
@@ -542,7 +584,7 @@
  	if (!base.type)
  		error(&tok.loc, "no type in struct member declaration");
  	if (tok.kind == TSEMICOLON) {
-@@ -977,9 +1113,15 @@
+@@ -977,9 +1155,15 @@
  			width = intconstexpr(s, false);
  			addmember(b, base, NULL, 0, width);
  		} else {
@@ -558,7 +600,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1204,16 @@
+@@ -1062,6 +1246,16 @@
  	return d;
  }
  
@@ -575,7 +617,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1222,7 @@
+@@ -1070,7 +1264,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -584,7 +626,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,6 +1240,9 @@
+@@ -1088,6 +1282,9 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -594,7 +636,7 @@
  	int allowfunc = !f;
  	struct decl *d, *prior;
  	enum declkind kind;
-@@ -1096,10 +1251,30 @@
+@@ -1096,10 +1293,30 @@
  
  	if (staticassert(s))
  		return true;
@@ -625,7 +667,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1284,18 @@
+@@ -1109,16 +1326,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -647,7 +689,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1312,34 @@
+@@ -1135,6 +1354,34 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -682,7 +724,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1349,15 @@
+@@ -1144,10 +1391,15 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -700,7 +742,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,6 +1367,8 @@
+@@ -1157,6 +1409,8 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -709,7 +751,7 @@
  			if (d->u.obj.align < align)
  				d->u.obj.align = align;
  			d->u.obj.cleanup = declcleanup;
-@@ -1201,6 +1413,7 @@
+@@ -1201,6 +1455,7 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -717,7 +759,7 @@
  			d->value = mkglobal(d);
  			d->u.func.inlinedefn = d->linkage == LINKEXTERN && fs & FUNCINLINE && !(sc & SCEXTERN) && (!prior || prior->u.func.inlinedefn);
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
-@@ -1213,7 +1426,9 @@
+@@ -1213,7 +1468,9 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1407,7 +1449,18 @@
  
 --- a/qbe.c
 +++ b/qbe.c
-@@ -85,7 +85,8 @@
+@@ -81,11 +81,19 @@
+ 	} phi;
+ 	struct jump jump;
+ 
++	/* inline asm (funcasm): the thunks of the asm statements in this block, their symbol operands (struct value *), and
++	 * a refusal deferred under cproc -p. emitfunc writes them out only for a block that can be reached: the kernel's
++	 * cmpxchg switches on sizeof(*ptr), and the asm of a case never taken may not even assemble */
++	struct array thunks, asmrefs;
++	char *lazyerror;
++	bool reach;
++
+ 	struct block *next;
  };
  
  struct switchcase {
@@ -1417,16 +1470,7 @@
  	struct block *body;
  };
  
-@@ -105,6 +106,8 @@
- 	unsigned asanblocks;   /* -fsanitize=address: the blocks begun so far, for numbering them */
- 	struct array asanjmps;   /* -fsanitize=address: the calls of setjmp (struct asanjmp), poisoned in asanfinish */
- 	struct array ehobjs;     /* nfcxx's cleanup attribute: the objects (struct ehobj, in declaration order; ehcleanupobj) */
-+	char *lazyerror;   /* cproc -p: a refusal deferred until pruning shows whether the function is kept (funcasm) */
-+	struct array asmrefs;   /* the globals (struct value *) its asm names as immediates: "# nfcxx:ref" lines in its IL */
- };
- 
- /* a block-scope object with a cleanup attribute: the cleanup function and the object's address */
-@@ -142,13 +145,21 @@
+@@ -142,13 +150,21 @@
  static const int ptrclass = 'l';
  
  void
@@ -1452,7 +1496,25 @@
  	c->body = b;
  }
  
-@@ -1631,6 +1642,61 @@
+@@ -165,6 +181,9 @@
+ 	b->label.u.name = name;
+ 	b->label.id = ++id;
+ 	b->insts = (struct array){0};
++	b->thunks = b->asmrefs = (struct array){0};
++	b->lazyerror = NULL;
++	b->reach = false;
+ 	b->jump.kind = JUMP_NONE;
+ 	b->phi.res.kind = VALUE_NONE;
+ 	b->next = NULL;
+@@ -251,6 +270,7 @@
+ 
+ static void emittype(struct type *);
+ static void emitname(struct value *);
++static void funcasmout(struct func *);
+ static void emitvalue(struct value *);
+ 
+ static void
+@@ -1631,6 +1651,61 @@
  	}
  }
  
@@ -1514,7 +1576,7 @@
  static struct value *
  funcstore(struct func *f, struct type *t, enum typequal tq, struct lvalue lval, struct value *v)
  {
-@@ -1640,8 +1706,11 @@
+@@ -1640,8 +1715,11 @@
  	struct qbetype qt;
  	int bits;
  
@@ -1527,7 +1589,7 @@
  	if (tq & QUALCONST)
  		error(&tok.loc, "cannot store to 'const' object");
  	tp = t->prop;
-@@ -1682,6 +1751,19 @@
+@@ -1682,6 +1760,19 @@
  	return r;
  }
  
@@ -1547,16 +1609,7 @@
  static struct value *
  funcload(struct func *f, struct type *t, struct lvalue lval)
  {
-@@ -1715,6 +1797,8 @@
- 	f->start = f->end = mkblock("start");
- 	f->lastid = 0;
- 	f->ehobjs = (struct array){0};
-+	f->lazyerror = NULL;
-+	f->asmrefs = (struct array){0};
- 	f->asan = (struct array){0};
- 	f->asanfile = NULL;
- 	f->asanrets = (struct array){0};
-@@ -1785,6 +1869,31 @@
+@@ -1785,6 +1876,31 @@
  	f->end = b;
  }
  
@@ -1588,7 +1641,23 @@
  void
  funcjmp(struct func *f, struct block *l)
  {
-@@ -1881,6 +1990,28 @@
+@@ -1803,6 +1919,15 @@
+ 
+ 	if (b->jump.kind)
+ 		return;
++	if (v->kind == VALUE_INTCONST && (!t || t->prop & PROPINT || t->kind == TYPEPOINTER)) {
++		/* a constant condition: the other way is not an edge, so what only it reaches is unreachable (emitfunc) */
++		unsigned long long c = v->u.i;
++
++		if (t && t->size < 8)
++			c &= (1ull << t->size * 8) - 1;
++		funcjmp(f, c ? l1 : l2);
++		return;
++	}
+ 	if (t) {
+ 		assert(t->prop & PROPSCALAR);
+ 		/*
+@@ -1881,6 +2006,28 @@
  	return f->gotos.vals[idx].p;
  }
  
@@ -1617,7 +1686,7 @@
  static struct lvalue
  funclval(struct func *f, struct expr *e)
  {
-@@ -1896,6 +2027,8 @@
+@@ -1896,6 +2043,8 @@
  		d = e->u.ident.decl;
  		if (d->kind != DECLOBJECT && d->kind != DECLFUNC)
  			error(&tok.loc, "identifier '%s' is not an object or function", d->name);
@@ -1626,7 +1695,7 @@
  		if (d == f->namedecl) {
  			fputs("data ", stdout);
  			emitname(d->value);
-@@ -2136,6 +2269,141 @@
+@@ -2136,6 +2285,141 @@
  	return funcexpr(f, e);
  }
  
@@ -1768,7 +1837,7 @@
  struct value *
  funcexpr(struct func *f, struct expr *e)
  {
-@@ -2154,10 +2422,20 @@
+@@ -2154,10 +2438,20 @@
  
  	calcvla(f, e->type);
  	switch (e->kind) {
@@ -1790,7 +1859,7 @@
  		case DECLCONST:  return d->value;
  		default:
  			fatal("unimplemented declaration kind %d", d->kind);
-@@ -2182,10 +2460,10 @@
+@@ -2182,10 +2476,10 @@
  	case EXPRBITFIELD:
  	case EXPRCOMPOUND:
  		lval = funclval(f, e);
@@ -1803,7 +1872,7 @@
  		t = e->type;
  		if (t->prop & PROPSOFT) {
  			/* the old value is copied out first: the store overwrites the object that l addresses */
-@@ -2209,7 +2487,8 @@
+@@ -2209,7 +2503,8 @@
  			if (t->base->kind == TYPEARRAY && t->base->size == 0) {
  				r = t->base->u.array.size;
  			} else {
@@ -1813,7 +1882,7 @@
  			}
  		} else if (t->prop & PROPINT) {
  			r = mkintconst(1);
-@@ -2277,7 +2556,7 @@
+@@ -2277,7 +2572,7 @@
  			return lval.addr;
  		case TMUL:
  			r = funcexpr(f, e->base);
@@ -1822,7 +1891,7 @@
  		case TSUB:
  			r = funcexpr(f, e->base);
  			if (e->type->prop & PROPSOFT)
-@@ -2439,6 +2718,32 @@
+@@ -2439,6 +2734,32 @@
  		return funcexpr(f, e);
  	case EXPRBUILTIN:
  		switch (e->u.builtin.kind) {
@@ -1855,7 +1924,7 @@
  		case BUILTINVASTART:
  			l = funcvalistaddr(f, e->base);
  			funcinst(f, IVASTART, 0, l, NULL);
-@@ -2627,7 +2932,7 @@
+@@ -2627,7 +2948,7 @@
  		funcjmp(f, defaultlabel);
  		return;
  	}
@@ -1864,7 +1933,7 @@
  		funcjmp(f, c->body);
  		return;
  	}
-@@ -2636,7 +2941,12 @@
+@@ -2636,7 +2957,12 @@
  	label[2] = mkblock("switch_gt");
  
  	key = mkintconst(c->node.key);
@@ -1878,19 +1947,44 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,7 +2954,7 @@
+@@ -2644,17 +2970,782 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
 -	casesearch(f, class, v, c->node.child[1], defaultlabel, c->node.key + 1, max);
 +	casesearch(f, class, v, c->node.child[1], defaultlabel, c->hi + 1, max);
++}
++
++/* the case of a constant controlling value, by the test casesearch makes (v - lo <= hi - lo, in the class's width) */
++static struct switchcase *
++casefind(struct switchcase *c, unsigned long long v, unsigned long long mask)
++{
++	struct switchcase *r;
++
++	if (!c)
++		return NULL;
++	if ((v - c->node.key & mask) <= (c->hi - c->node.key & mask))
++		return c;
++	if ((r = casefind(c->node.child[0], v, mask)))
++		return r;
++	return casefind(c->node.child[1], v, mask);
  }
  
  void
-@@ -2653,6 +2963,689 @@
- 	casesearch(f, qbetype(c->type).base, v, c->root, defaultlabel, 0, -1);
- }
- 
+ funcswitch(struct func *f, struct value *v, struct switchcases *c, struct block *defaultlabel)
+ {
+-	casesearch(f, qbetype(c->type).base, v, c->root, defaultlabel, 0, -1);
++	int class = qbetype(c->type).base;
++
++	if (v->kind == VALUE_INTCONST) {   /* switch (sizeof(*ptr)): straight to the case, the others unreachable */
++		struct switchcase *k = casefind(c->root, v->u.i, class == 'w' ? 0xffffffffull : -1ull);
++
++		funcjmp(f, k ? k->body : defaultlabel);
++		return;
++	}
++	casesearch(f, class, v, c->root, defaultlabel, 0, -1);
++}
++
 +/*
 +GNU extended inline assembly, lowered the way Cranelift's rustc backend lowers asm!: each statement becomes an
 +out-of-line function (a "thunk") written as assembly to a side file (main's -a), and the call site passes a pointer to a
@@ -2041,7 +2135,7 @@
 +letters' ranges, or the address of a function or static object ("i" and "s": the kernel's "i"(&symbol), "i"(func)).
 +A symbol named only here is kept alive under cproc -p by an IL comment in the function (asmrefs) that references it.
 +*/
-+static struct func *asmfunc;   /* the function of the asm statement being lowered (funcasm) */
++static struct block *asmblock;   /* the block of the asm statement being lowered (funcasm) */
 +
 +static bool
 +asmimm(struct expr *e, const char *alt, struct asmrec *rec)
@@ -2077,7 +2171,7 @@
 +		return false;
 +	rec->immsym = asmglobalname(d->value);
 +	rec->imm = off;
-+	arrayaddptr(&asmfunc->asmrefs, d->value);   /* kept alive by the function, not by the file (cproc -p) */
++	arrayaddptr(&asmblock->asmrefs, d->value);   /* kept alive by the function, not by the file (cproc -p) */
 +	return true;
 +}
 +
@@ -2516,10 +2610,11 @@
 +}
 +
 +/*
-+An asm statement. The thunk is written to a temporary file and copied to the side file only once it is complete,
-+after a "#nfcxx:owner NAME" line naming the function, so cproc -p can drop the thunks of the functions it drops.
-+Under -p a refusal is deferred: error() jumps back here, the function records it (lazyerror, written into its IL), and
-+it is reported only if pruning keeps the function -- the kernel's always_inline helpers ask for "i"(1 << (nr & 7)),
++An asm statement. The thunk is written to a temporary file and kept with its block once it is complete; emitfunc
++writes the thunks of the blocks that can be reached to the side file, after a "#nfcxx:owner NAME" line naming the
++function, so cproc -p can drop the thunks of the functions it drops. Under -p a refusal is deferred: error() jumps
++back here, the block records it (lazyerror), and it is reported only if the block can be reached (emitfunc writes it
++into the function's IL) and pruning keeps the function -- the kernel's always_inline helpers ask for "i"(1 << (nr & 7)),
 +satisfiable only after inlining, in functions that are dead without it.
 +*/
 +void
@@ -2527,22 +2622,25 @@
 +{
 +	jmp_buf jb, *savedjmp = errorjmp;
 +	FILE *real = asmout, *th = NULL;
-+	char name[256], buf[4096];
++	struct block *b = f->end;
++	char buf[4096];
 +	size_t n;
 +
++	if (b->jump.kind)   /* after a jump, return or break: never run (funcinst drops the call too) */
++		return;
 +	if (real && !(th = tmpfile()))
 +		fatal("tmpfile:");
 +	asmout = th;
-+	asmfunc = f;
++	asmblock = b;
 +	if (prune) {
 +		if (setjmp(jb)) {
 +			errorjmp = savedjmp;
 +			asmout = real;
 +			if (th)
 +				fclose(th);
-+			if (!f->lazyerror) {
-+				f->lazyerror = xmalloc(strlen(errorbuf) + 1);
-+				strcpy(f->lazyerror, errorbuf);
++			if (!b->lazyerror) {
++				b->lazyerror = xmalloc(strlen(errorbuf) + 1);
++				strcpy(b->lazyerror, errorbuf);
 +			}
 +			return;
 +		}
@@ -2552,11 +2650,9 @@
 +	errorjmp = savedjmp;
 +	asmout = real;
 +	if (th) {
-+		valuename(f->decl->value, name, sizeof name);
-+		fprintf(real, "#nfcxx:owner %s\n", name);
 +		rewind(th);
 +		while ((n = fread(buf, 1, sizeof buf, th)) > 0)
-+			fwrite(buf, 1, n, real);
++			arrayaddbuf(&b->thunks, buf, n);
 +		fclose(th);
 +	}
 +}
@@ -2572,12 +2668,71 @@
 +	if (!asmout)
 +		error(&tok.loc, "inline assembly is only supported on x86_64 ELF (cproc -a)");
 +	fprintf(asmout, "#nfcxx:keep\n\t.text\n%s\n", text);
-+}
-+
+ }
+ 
  /* emit */
  
++/*
++The inline asm of the blocks that can be reached from the start (block->reach): each thunk to the side file after a
++"#nfcxx:owner NAME" line, the symbols the thunks name as "# nfcxx:ref" lines in the function's IL, and the first
++deferred refusal as "# nfcxx:error" (reported by cproc -p if the function is kept, main.c ilprune). Called inside the
++function's braces. QBE drops the unreachable blocks, and with them the calls of the thunks left out.
++*/
++static void
++funcasmout(struct func *f)
++{
++	struct array stack = {0};
++	struct block *b;
++	struct value **r;
++	char name[256];
++	bool erred = false;
++	size_t i;
++
++	f->start->reach = true;
++	arrayaddptr(&stack, f->start);
++	while (stack.len) {
++		stack.len -= sizeof(b);
++		b = *(struct block **)((char *)stack.val + stack.len);
++		for (i = 0; i < 2; ++i) {
++			struct block *s;
++
++			switch (b->jump.kind) {
++			case JUMP_NONE: s = i == 0 ? b->next : NULL; break;   /* falls through to the next block */
++			case JUMP_JMP:  s = i == 0 ? b->jump.blk[0] : NULL; break;
++			case JUMP_JNZ:  s = b->jump.blk[i]; break;
++			default:        s = NULL;
++			}
++			if (s && !s->reach) {
++				s->reach = true;
++				arrayaddptr(&stack, s);
++			}
++		}
++	}
++	free(stack.val);
++	valuename(f->decl->value, name, sizeof name);
++	for (b = f->start; b; b = b->next) {
++		if (!b->reach)
++			continue;
++		if (b->lazyerror && !erred) {
++			printf("# nfcxx:error %s\n", b->lazyerror);
++			erred = true;
++		}
++		arrayforeach(&b->asmrefs, r) {
++			fputs("# nfcxx:ref ", stdout);
++			emitname(*r);
++			putchar('\n');
++		}
++		if (b->thunks.len && asmout) {
++			fprintf(asmout, "#nfcxx:owner %s\n", name);
++			fwrite(b->thunks.val, 1, b->thunks.len, asmout);
++		}
++	}
++}
++
  static void
-@@ -2922,6 +3915,11 @@
+ emitname(struct value *v)
+ {
+@@ -2922,6 +4013,11 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -2589,21 +2744,15 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2944,6 +3942,13 @@
+@@ -2944,6 +4040,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
-+	if (f->lazyerror)   /* reported by cproc -p if this function is kept (main.c ilprune) */
-+		printf("# nfcxx:error %s\n", f->lazyerror);
-+	for (size_t r = 0; r < f->asmrefs.len / sizeof(void *); ++r) {   /* what its thunks name, live when it is */
-+		fputs("# nfcxx:ref ", stdout);
-+		emitname(((struct value **)f->asmrefs.val)[r]);
-+		putchar('\n');
-+	}
++	funcasmout(f);
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4080,17 @@
+@@ -3075,6 +4172,17 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
