@@ -5,8 +5,8 @@
 # (`clang -fsyntax-only -Xclang -ast-dump=json`). Covers a constructor, `self` (also through a copy), a local, a
 # conditional, a join of two kinds, a call to a function in the same file, a recursive cycle, and an identity call
 # (mrb_obj_freeze returns its self parameter, so the call takes the argument passed for it), and a string guard that narrows a local to String only where
-# no later statement reassigns it. Skips when clang is
-# not installed.
+# no later statement reassigns it. With `optional: true` (the base declarations' mode) a join of K and nil is `K?`;
+# every other function keeps its kind. Skips when clang is not installed.
 #
 #   ruby scripts/bc2cpp/native_ast_returns_check.rb
 
@@ -84,6 +84,12 @@ EXPECTED = {
   'class_fn' => 'Class', 'class_other_fn' => nil
 }.freeze
 
+# What `optional: true` changes: a K-or-nil join, through a conditional or a field's stores, is `K?`.
+OPTIONAL = {
+  'mixed_fn' => 'Integer?', 'nil_unnarrowed_fn' => 'String?', 'nil_store_branch_fn' => 'String?',
+  'nil_escape_branch_fn' => 'String?'
+}.freeze
+
 failures = []
 Dir.mktmpdir('native_ast_returns_check') do |dir|
   source = File.join(dir, 'fixture.cxx')
@@ -97,6 +103,12 @@ Dir.mktmpdir('native_ast_returns_check') do |dir|
     failures << "#{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
   end
   failures << "functions found #{kinds.keys.sort.inspect}, expected #{EXPECTED.keys.sort.inspect}" unless kinds.keys.sort == EXPECTED.keys.sort
+
+  optional = NativeAstReturns.analyze(JSON.parse(ast), source, optional: true)
+  EXPECTED.merge(OPTIONAL).each do |fn, want|
+    got = optional[fn]
+    failures << "optional #{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+  end
 end
 
 if failures.empty?
