@@ -1,6 +1,15 @@
 --- a/cc.h
 +++ b/cc.h
-@@ -504,6 +504,13 @@
+@@ -338,6 +338,8 @@
+ 
+ void tokeninit(void);
+ int tokenget(const void *, size_t);
++int iscident(enum tokenkind);
++extern bool stdc23;
+ void tokenprint(const struct token *, FILE *);
+ char *tokenstr(enum tokenkind);
+ char *tokencheck(const struct token *, enum tokenkind, const char *);
+@@ -504,6 +506,13 @@
  
  void stmt(struct func *, struct scope *);
  
@@ -14,7 +23,7 @@
  /* backend */
  
  struct gotolabel {
-@@ -546,6 +553,8 @@
+@@ -546,6 +555,8 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -23,6 +32,142 @@
  void funcinit(struct func *, struct decl *, struct init *, bool);
  
  void emitfunc(struct func *, bool);
+--- a/decl.c
++++ b/decl.c
+@@ -187,7 +187,7 @@
+ 	tag = 0;
+ 	t = NULL;
+ 	et = NULL;
+-	if (tok.kind >= TIDENT) {
++	if (iscident(tok.kind)) {
+ 		tag = tokenstr(tok.kind);
+ 		next();
+ 	}
+@@ -263,7 +263,7 @@
+ 		}
+ 		max = 0;
+ 		min = 0;
+-		for (value = 0; tok.kind >= TIDENT; ++value) {
++		for (value = 0; iscident(tok.kind); ++value) {
+ 			name = tokenstr(tok.kind);
+ 			next();
+ 			attr(NULL, 0);
+@@ -492,7 +492,7 @@
+ 			break;
+ 
+ 		default:
+-			if (op < TIDENT || t || ts)
++			if (!iscident(op) || t || ts)
+ 				goto done;
+ 			d = scopegetdecl(s, tokenstr(tok.kind), 1);
+ 			if (!d || d->kind != DECLTYPE)
+@@ -614,6 +614,12 @@
+ 	if (name)
+ 		*name = NULL;
+ 	a.kind = 0;
++	/* GNU attributes between the pointer and the declarator name, e.g. void * __attribute__((...)) f() -- they
++	 * appertain to the declared entity (the kernel's __must_check, __user and friends sit here) */
++	while (tok.kind == T__ATTRIBUTE__)
++		gnuattr(&a, align ? ATTRALIGNED : 0);
++	if (align && (a.kind & ATTRALIGNED) && a.align > *align)
++		*align = a.align;
+ 	ptr = result->next;
+ 	switch (tok.kind) {
+ 	case TLPAREN:
+@@ -624,7 +630,7 @@
+ 			case TLPAREN:
+ 				break;
+ 			default:
+-				if (tok.kind >= TIDENT && !istypename(s, tokenstr(tok.kind)))
++				if (iscident(tok.kind) && !istypename(s, tokenstr(tok.kind)))
+ 					break;
+ 				goto func;
+ 			}
+@@ -634,7 +640,7 @@
+ 		allowedattr = -1;
+ 		break;
+ 	default:
+-		if (tok.kind >= TIDENT) {
++		if (iscident(tok.kind)) {
+ 			if (!name)
+ 				error(&tok.loc, "identifier not allowed in abstract declarator");
+ 			*name = tokenstr(tok.kind);
+@@ -1088,6 +1094,7 @@
+ 	struct init *init;
+ 	bool hasinit;
+ 	char *name, *asmname;
++	int specalign;
+ 	int allowfunc = !f;
+ 	struct decl *d, *prior;
+ 	enum declkind kind;
+@@ -1116,9 +1123,11 @@
+ 		/* XXX 6.7p2 error unless in function parameter/struct/union, or tag/enum members are declared */
+ 		return true;
+ 	}
++	specalign = align;
+ 	for (;;) {
+ 		declcleanup = NULL;
+-		qt = declarator(s, base, &name, NULL, &funcscope, false);
++		align = specalign;   /* the declaration's _Alignas, raised per declarator by a trailing aligned attribute */
++		qt = declarator(s, base, &name, &align, &funcscope, false);
+ 		t = qt.type;
+ 		tq = qt.qual;
+ 		if (consume(T__ASM__)) {
+@@ -1144,10 +1153,15 @@
+ 			error(&tok.loc, "'%s' redeclared with different kind", name);
+ 		switch (kind) {
+ 		case DECLTYPE:
+-			if (align)
+-				error(&tok.loc, "typedef '%s' declared with alignment specifier", name);
+ 			if (asmname)
+ 				error(&tok.loc, "typedef '%s' declared with assembler label", name);
++			if (align > t->align) {
++				/* an aligned attribute on a typedef raises the alignment of a copy of the type (GNU) */
++				struct type *nt = xmalloc(sizeof *nt);
++				*nt = *t;
++				nt->align = align;
++				t = nt;
++			}
+ 			if (!prior)
+ 				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
+ 			else if (!typesame(prior->type, t) || prior->qual != tq)
+--- a/expr.c
++++ b/expr.c
+@@ -831,11 +831,15 @@
+ 		break;
+ 	case TTRUE:
+ 	case TFALSE:
++		if (!stdc23)
++			goto identref;   /* before C23, true/false are ordinary identifiers (macros or enum constants) */
+ 		e = mkexpr(EXPRCONST, &typebool, NULL);
+ 		e->u.constant.u = tok.kind == TTRUE;
+ 		next();
+ 		break;
+ 	case TNULLPTR:
++		if (!stdc23)
++			goto identref;
+ 		e = mkexpr(EXPRCONST, &typenullptr, NULL);
+ 		e->u.constant.u = 0;
+ 		next();
+@@ -849,7 +853,8 @@
+ 		e = generic(s);
+ 		break;
+ 	default:
+-		if (tok.kind >= TIDENT) {
++	identref:
++		if (iscident(tok.kind)) {
+ 			d = scopegetdecl(s, tokenstr(tok.kind), 1);
+ 			if (!d)
+ 				error(&tok.loc, "undeclared identifier: %s", tokenstr(tok.kind));
+@@ -1398,7 +1403,7 @@
+ 			if (t->kind != TYPESTRUCT && t->kind != TYPEUNION)
+ 				error(&tok.loc, "'%s' operator must be applied to pointer to struct/union", tokenstr(op));
+ 			next();
+-			if (tok.kind < TIDENT)
++			if (!iscident(tok.kind))
+ 				error(&tok.loc, "expected identifier after '%s' operator", tokenstr(op));
+ 			lvalue = op == TARROW || r->base->lvalue;
+ 			offset = 0;
 --- a/main.c
 +++ b/main.c
 @@ -18,7 +18,7 @@
@@ -34,17 +179,20 @@
  
  	argv0 = progname(argv[0], "cproc-qbe");
  	asanon = getenv("NFCXX_ASAN") != NULL;
-@@ -29,6 +29,9 @@
+@@ -29,6 +29,12 @@
  	case 't':
  		target = EARGF(usage());
  		break;
 +	case 'a':
 +		asmfile = EARGF(usage());
 +		break;
++	case 'c':
++		stdc23 = true;   /* treat true/false/nullptr/bool as C23 keywords, not identifiers */
++		break;
  	case 'o':
  		output = EARGF(usage());
  		break;
-@@ -38,6 +41,9 @@
+@@ -38,6 +44,9 @@
  
  	targinit(target);
  
@@ -54,7 +202,7 @@
  	if (output && !freopen(output, "w", stdout))
  		fatal("open %s:", output);
  
-@@ -74,5 +80,10 @@
+@@ -74,5 +83,10 @@
  	fflush(stdout);
  	if (ferror(stdout))
  		fatal("write failed");
@@ -65,104 +213,25 @@
 +	}
  	return 0;
  }
---- a/stmt.c
-+++ b/stmt.c
-@@ -6,6 +6,22 @@
- #include "util.h"
- #include "cc.h"
+--- a/pp.c
++++ b/pp.c
+@@ -563,14 +563,14 @@
+ 	struct token *t;
  
-+/* An asm section separator. The scanner lexes adjacent colons (as in "":::"memory") as a single TCOLONCOLON, so a
-+ * '::' is consumed as one colon here and left as a TCOLON for the next call. Returns false when no separator is next. */
-+static bool
-+asmsep(void)
-+{
-+	if (tok.kind == TCOLONCOLON) {
-+		tok.kind = TCOLON;
-+		return true;
-+	}
-+	if (tok.kind == TCOLON) {
-+		next();
-+		return true;
-+	}
-+	return false;
-+}
-+
- /* 6.8.1 Labeled statements */
- static bool
- label(struct func *f, struct scope *s)
-@@ -319,7 +335,70 @@
- 		expect(TSEMICOLON, "after 'return' statement");
- 		break;
+ 	do t = rawnext();
+-	while (expand(t) || t->kind == TNEWLINE && !(ppflags & PPNEWLINE));
++	while (expand(t) || t->kind == TNEWLINE && !(ppflags & PPNEWLINE) || t->kind == ALIAS__EXTENSION__);
+ 	tok = *t;
  
--	case T__ASM__:
--		error(&tok.loc, "inline assembly is not yet supported");
-+	case T__ASM__: {
-+		/* GNU extended asm: __asm__ [volatile] ( template [: outputs [: inputs [: clobbers]]] ) ; */
-+		struct asmoperand out[16], in[16];
-+		char *clob[16], *template;
-+		unsigned nout = 0, nin = 0, nclob = 0;
-+		bool isvol = false;
-+		struct stringlit lit;
-+
-+		next();
-+		while (tok.kind == TVOLATILE || tok.kind == TINLINE) {
-+			if (tok.kind == TVOLATILE)
-+				isvol = true;
-+			next();
-+		}
-+		if (tok.kind == TGOTO)
-+			error(&tok.loc, "'asm goto' is not yet supported");
-+		expect(TLPAREN, "after 'asm'");
-+		tokencheck(&tok, TSTRINGLIT, "for asm template");
-+		stringconcat(&lit, true);
-+		template = lit.data;
-+		/* outputs, then inputs: each is [ [symbol] ] "constraint" ( operand ) */
-+		for (unsigned sect = 0; sect < 2 && asmsep(); ++sect) {
-+			struct asmoperand *ops = sect == 0 ? out : in;
-+			unsigned *n = sect == 0 ? &nout : &nin;
-+			while (tok.kind == TLBRACK || tok.kind == TSTRINGLIT) {
-+				char *sym = NULL;
-+				if (consume(TLBRACK)) {
-+					sym = expect(TIDENT, "for asm operand name");
-+					expect(TRBRACK, "after asm operand name");
-+				}
-+				tokencheck(&tok, TSTRINGLIT, "for asm operand constraint");
-+				stringconcat(&lit, true);
-+				if (*n == 16)
-+					error(&tok.loc, "too many asm operands");
-+				ops[*n].constraint = lit.data;
-+				ops[*n].symname = sym;
-+				expect(TLPAREN, "before asm operand");
-+				ops[*n].expr = assignexpr(s);
-+				expect(TRPAREN, "after asm operand");
-+				++*n;
-+				if (!consume(TCOMMA))
-+					break;
-+			}
-+		}
-+		/* clobbers */
-+		if (asmsep()) {
-+			while (tok.kind == TSTRINGLIT) {
-+				stringconcat(&lit, true);
-+				if (nclob == 16)
-+					error(&tok.loc, "too many asm clobbers");
-+				clob[nclob++] = lit.data;
-+				if (!consume(TCOMMA))
-+					break;
-+			}
-+		}
-+		if (tok.kind == TCOLON || tok.kind == TCOLONCOLON)
-+			error(&tok.loc, "'asm goto' is not yet supported");
-+		expect(TRPAREN, "after asm");
-+		expect(TSEMICOLON, "after asm statement");
-+		if (f)
-+			funcasm(f, template, out, nout, in, nin, clob, nclob, isvol);
-+		else
-+			error(&tok.loc, "file-scope asm is not yet supported");
-+		break;
-+	}
- 	}
- }
+ 	/* keyword aliases */
+ 	switch (tok.kind) {
+ 	case ALIAS_ALIGNAS:       tok.kind = TALIGNAS;       break;
+ 	case ALIAS_ALIGNOF:       tok.kind = TALIGNOF;       break;
+-	case ALIAS_BOOL:          tok.kind = TBOOL;          break;
++	case ALIAS_BOOL:          if (stdc23) tok.kind = TBOOL;  break;   /* else 'bool' stays an identifier (iscident) */
+ 	case ALIAS__INLINE:
+ 	case ALIAS__INLINE__:     tok.kind = TINLINE;        break;
+ 	case ALIAS__SIGNED:
 --- a/qbe.c
 +++ b/qbe.c
 @@ -2653,6 +2653,397 @@
@@ -563,3 +632,176 @@
  /* emit */
  
  static void
+--- a/stmt.c
++++ b/stmt.c
+@@ -6,6 +6,22 @@
+ #include "util.h"
+ #include "cc.h"
+ 
++/* An asm section separator. The scanner lexes adjacent colons (as in "":::"memory") as a single TCOLONCOLON, so a
++ * '::' is consumed as one colon here and left as a TCOLON for the next call. Returns false when no separator is next. */
++static bool
++asmsep(void)
++{
++	if (tok.kind == TCOLONCOLON) {
++		tok.kind = TCOLON;
++		return true;
++	}
++	if (tok.kind == TCOLON) {
++		next();
++		return true;
++	}
++	return false;
++}
++
+ /* 6.8.1 Labeled statements */
+ static bool
+ label(struct func *f, struct scope *s)
+@@ -40,7 +56,7 @@
+ 		asancase(f, s->switchcases);
+ 		break;
+ 	default:
+-		if (tok.kind < TIDENT)
++		if (!iscident(tok.kind))
+ 			return false;
+ 		name = tokenstr(tok.kind);
+ 		if (!peek(TCOLON))
+@@ -319,7 +335,70 @@
+ 		expect(TSEMICOLON, "after 'return' statement");
+ 		break;
+ 
+-	case T__ASM__:
+-		error(&tok.loc, "inline assembly is not yet supported");
++	case T__ASM__: {
++		/* GNU extended asm: __asm__ [volatile] ( template [: outputs [: inputs [: clobbers]]] ) ; */
++		struct asmoperand out[16], in[16];
++		char *clob[16], *template;
++		unsigned nout = 0, nin = 0, nclob = 0;
++		bool isvol = false;
++		struct stringlit lit;
++
++		next();
++		while (tok.kind == TVOLATILE || tok.kind == TINLINE) {
++			if (tok.kind == TVOLATILE)
++				isvol = true;
++			next();
++		}
++		if (tok.kind == TGOTO)
++			error(&tok.loc, "'asm goto' is not yet supported");
++		expect(TLPAREN, "after 'asm'");
++		tokencheck(&tok, TSTRINGLIT, "for asm template");
++		stringconcat(&lit, true);
++		template = lit.data;
++		/* outputs, then inputs: each is [ [symbol] ] "constraint" ( operand ) */
++		for (unsigned sect = 0; sect < 2 && asmsep(); ++sect) {
++			struct asmoperand *ops = sect == 0 ? out : in;
++			unsigned *n = sect == 0 ? &nout : &nin;
++			while (tok.kind == TLBRACK || tok.kind == TSTRINGLIT) {
++				char *sym = NULL;
++				if (consume(TLBRACK)) {
++					sym = expect(TIDENT, "for asm operand name");
++					expect(TRBRACK, "after asm operand name");
++				}
++				tokencheck(&tok, TSTRINGLIT, "for asm operand constraint");
++				stringconcat(&lit, true);
++				if (*n == 16)
++					error(&tok.loc, "too many asm operands");
++				ops[*n].constraint = lit.data;
++				ops[*n].symname = sym;
++				expect(TLPAREN, "before asm operand");
++				ops[*n].expr = assignexpr(s);
++				expect(TRPAREN, "after asm operand");
++				++*n;
++				if (!consume(TCOMMA))
++					break;
++			}
++		}
++		/* clobbers */
++		if (asmsep()) {
++			while (tok.kind == TSTRINGLIT) {
++				stringconcat(&lit, true);
++				if (nclob == 16)
++					error(&tok.loc, "too many asm clobbers");
++				clob[nclob++] = lit.data;
++				if (!consume(TCOMMA))
++					break;
++			}
++		}
++		if (tok.kind == TCOLON || tok.kind == TCOLONCOLON)
++			error(&tok.loc, "'asm goto' is not yet supported");
++		expect(TRPAREN, "after asm");
++		expect(TSEMICOLON, "after asm statement");
++		if (f)
++			funcasm(f, template, out, nout, in, nin, clob, nclob, isvol);
++		else
++			error(&tok.loc, "file-scope asm is not yet supported");
++		break;
++	}
+ 	}
+ }
+--- a/token.c
++++ b/token.c
+@@ -13,6 +13,29 @@
+ static struct map tokmap;  /* maps string to token */
+ static struct array tokstr;  /* maps token to string */
+ 
++/* C23 keyword constants/types (true, false, nullptr, bool) are plain identifiers before C23 (C11/C17 and the gnu*
++ * dialects), where <stdbool.h>/<stddef.h> provide them as macros or the program declares its own. stdc23 (cproc -c)
++ * re-enables the keyword meaning; the Linux kernel builds as gnu11 and relies on the identifier meaning. */
++bool stdc23;
++
++/* whether a token may be used as an ordinary identifier here: a real identifier, or -- before C23 -- one of the
++ * lowercase C23 keyword spellings. tokenstr() still yields the spelling, so no separate name tracking is needed. */
++int
++iscident(enum tokenkind kind)
++{
++	if (kind >= TIDENT)
++		return 1;
++	if (!stdc23)
++		switch (kind) {
++		case ALIAS_BOOL:   /* lowercase "bool"; "_Bool" is TBOOL and stays a keyword */
++		case TTRUE: case TFALSE: case TNULLPTR:
++			return 1;
++		default:
++			break;
++		}
++	return 0;
++}
++
+ void
+ tokeninit(void)
+ {
+@@ -140,7 +163,7 @@
+ 	char want[64], got[64];
+ 
+ 	if (kind == TPPIDENT || kind == TIDENT) {
+-		if (t->kind < kind) {
++		if (kind == TIDENT ? !iscident(t->kind) : t->kind < kind) {
+ 			strcpy(want, "identifier");
+ 			goto err;
+ 		}
+--- a/tokens.h
++++ b/tokens.h
+@@ -63,7 +63,7 @@
+ TOKEN(TALIGNAS,       "alignas")
+ TOKEN(TALIGNOF,       "alignof")
+ TOKEN(TAUTO,          "auto")
+-TOKEN(TBOOL,          "bool")
++TOKEN(TBOOL,          "_Bool")
+ TOKEN(TBREAK,         "break")
+ TOKEN(TCASE,          "case")
+ TOKEN(TCHAR,          "char")
+@@ -138,7 +138,7 @@
+ /* keyword aliases */
+ TOKEN(ALIAS_ALIGNAS,       "_Alignas")
+ TOKEN(ALIAS_ALIGNOF,       "_Alignof")
+-TOKEN(ALIAS_BOOL,          "_Bool")
++TOKEN(ALIAS_BOOL,          "bool")   /* lowercase; the C23 keyword only under -c, else an identifier */
+ TOKEN(ALIAS_STATIC_ASSERT, "_Static_assert")
+ TOKEN(ALIAS_THREAD_LOCAL,  "_Thread_local")
+ 
+@@ -152,3 +152,4 @@
+ TOKEN(ALIAS__TYPEOF__,     "__typeof__")
+ TOKEN(ALIAS__VOLATILE__,   "__volatile__")  /* XXX: what needs this? */
+ TOKEN(ALIAS__ASM,          "__asm")
++TOKEN(ALIAS__EXTENSION__,  "__extension__")  /* a pedantry marker: dropped by the scanner */

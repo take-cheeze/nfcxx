@@ -144,6 +144,9 @@ cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t
 # and the CIL backend have no path, so -a is withheld there and cproc then refuses any asm instead of miscompiling it).
 asmarg=()
 if [ $macos = 0 ] && [ -z "${NFCXX_CIL:-}" ]; then asmarg=(-a "$tmp/asm.s"); : > "$tmp/asm.s"; fi
+# true/false/nullptr/bool are C23 keywords; before C23 (the default, and the gnu* dialects) they are ordinary
+# identifiers, which is how the Linux kernel's headers use them. cproc -c re-enables the keyword meaning.
+for a in ${cppflags[@]+"${cppflags[@]}"}; do case $a in -std=c23|-std=c2x|-std=gnu23|-std=gnu2x) cprocarg+=(-c) ;; esac; done
 "$cproc" ${cprocarg[@]+"${cprocarg[@]}"} ${asmarg[@]+"${asmarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 if [ -n "${NFCXX_CIL:-}" ]; then

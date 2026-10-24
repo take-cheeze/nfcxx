@@ -6,7 +6,7 @@ an **out-of-line thunk** emitted as assembly text, and the call site passes a po
 operand values. The thunk owns register allocation — it loads the inputs from the slot into the registers the
 constraints ask for, runs the template, and stores the outputs back — so the QBE IL only ever sees an ordinary call.
 
-This is the `funcasm` function in cproc's `qbe.c` (applied to the build copy by `scripts/cproc-inline-asm.patch`).
+This is the `funcasm` function in cproc's `qbe.c` (applied to the build copy by `scripts/cproc-nfcxx.patch`).
 `scripts/qbe-cc` passes `-a FILE`; cproc writes the thunks there and the script appends them to the assembly, after the
 weak-symbol pass, as local functions.
 
