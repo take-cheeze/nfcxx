@@ -25,7 +25,7 @@ for src in tests/pathb-borrow/cpp/*.cpp; do
   scripts/mrb scripts/pathb-borrowck.rb "$tmp/source.ir" > "$tmp/out" 2>&1 || rc=$?
   want=$(sed -n 's,^// EXIT: ,,p' "$src")
   pattern=$(sed -n 's,^// DIAG: ,,p' "$src")
-  if [ "$rc" != "$want" ] || ! rg -q -- "$pattern" "$tmp/out"; then
+  if [ "$rc" != "$want" ] || ! grep -Fq -- "$pattern" "$tmp/out"; then
     echo "FAIL $src: expected exit $want, got $rc"
     cat "$tmp/out"
     exit 1
