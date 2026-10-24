@@ -512,6 +512,52 @@ class BorrowLayouts
   end
 end
 
+# Closed summaries are trusted contracts, not a verification of callee bodies.
+# Keep this validator synchronized across the three standalone IR tools.
+class BorrowCallEffects
+  def initialize(forms, layouts, bad, refused)
+    @entries = {}
+    forms.each do |f|
+      next unless f.is_a?(Array) && f[0] == 'call-effects'
+      unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
+             f[2].is_a?(Array) && f[2][0] == 'returns' && f[2].length == 2 &&
+             f[6].is_a?(Array) && f[6][0] == 'args'
+        raise bad, 'call-effects form'
+      end
+      name = f[1].to_s
+      raise bad, "duplicate call effects #{name}" if @entries.key?(name)
+      unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
+        raise refused, 'call contracts require nothrow, noescape, and closed effects'
+      end
+      result = f[2][1]
+      unless result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
+        raise refused, 'call effects support only void or scalar results'
+      end
+      args = f[6].drop(1)
+      args.each do |arg|
+        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
+          raise bad, 'call argument effect form'
+        end
+        ty = arg[1]
+        if arg[0] == 'value'
+          unless ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
+            raise refused, 'value effects require nonpointer scalar arguments'
+          end
+        elsif ty.is_a?(Array) && ty[0] == 'struct' && !layouts.lookup(ty)
+          raise refused, 'call aggregate effects require semantic layouts'
+        else
+          layouts.field_type(ty, [])
+        end
+      end
+      @entries[name] = {result: result, args: args}
+    end
+  end
+
+  def lookup(name)
+    @entries[name]
+  end
+end
+
 # ------------------------------------------------------------------ types
 # A type is an Array standing for the Python tuple: ["int", size, signed, bool], ["float", size], ["ptr", pointee|nil],
 # ["array", n, elem], ["agg", head, name], ["fn"], ["void"].
@@ -3048,7 +3094,8 @@ def emit_module(text, do_prune = true, ld_trap = false)
   forms = parse_forms(tokenize(text))
   raise BadIR, "the input is not an (ir-module ...) IR text" if forms.empty? || head_of(forms[0]) != "ir-module"
   check_layout(forms[0])
-  BorrowLayouts.new(forms, BadIR, Refused)
+  semantic_layouts = BorrowLayouts.new(forms, BadIR, Refused)
+  BorrowCallEffects.new(forms, semantic_layouts, BadIR, Refused)
   forms = stub_long_double(forms) if ld_trap
   mod = Module_.new
   all_forms = forms
@@ -3081,7 +3128,7 @@ def emit_module(text, do_prune = true, ld_trap = false)
     elsif h == "alias"
       name, target, kind, weak = alias_parts(f)
       mod.out << "#{ALIAS_MARK}#{kind} #{qsym(name)} #{qsym(target)}#{weak ? " weak" : ""}"
-    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk" && h != "borrow-layout"
+    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk" && h != "borrow-layout" && h != "call-effects"
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end

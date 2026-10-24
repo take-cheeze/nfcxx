@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
@@ -129,5 +129,33 @@ rc=0
 "$tmp/semantic" || rc=$?
 [ "$rc" = 7 ] || { echo "FAIL semantic layout runtime: expected 7, got $rc"; exit 1; }
 echo "ok   semantic layout padding proof, metadata erasure, oracle, and native execution"
+pass=$((pass + 1))
+# Contract metadata must not replace or erase actual calls. Link audited C
+# helpers and validate their observed scalar results in both checker modes.
+call_ir=tests/mruby/pathb-edge/call_effects_facts.ir
+for mode in explicit inferred; do
+  options=()
+  [ "$mode" = explicit ] || options=(--infer-loan-ends)
+  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$call_ir" > "$tmp/call-check"
+done
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$call_ir" > "$tmp/calls.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$call_ir" > "$tmp/call-oracle.qbe"
+cmp "$tmp/calls.qbe" "$tmp/call-oracle.qbe"
+sed '/^(call-effects /d' "$call_ir" > "$tmp/uncontracted.ir"
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/uncontracted.ir" > "$tmp/uncontracted-check" 2>&1 || rc=$?
+if [ "$rc" != 3 ] || ! grep -Fq 'calls require lifetime/effect contracts' "$tmp/uncontracted-check"; then
+  echo "FAIL uncontracted call: expected refusal, got $rc"
+  cat "$tmp/uncontracted-check"
+  exit 1
+fi
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/uncontracted.ir" > "$tmp/uncontracted.qbe"
+cmp "$tmp/calls.qbe" "$tmp/uncontracted.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/calls.qbe" -o "$tmp/calls.s"
+cc "$tmp/calls.s" tests/pathb-borrow/native/call_effects.c -o "$tmp/calls"
+rc=0
+"$tmp/calls" || rc=$?
+[ "$rc" = 7 ] || { echo "FAIL contracted native calls: expected 7, got $rc"; exit 1; }
+echo "ok   actual contracted calls, metadata erasure, oracle, and native execution"
 pass=$((pass + 1))
 echo "pass $pass fail 0"
