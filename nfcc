@@ -101,6 +101,9 @@ if [ $# -eq 1 ] && [ "$1" = -v ]; then exec "$host" -v; fi
 # understands every -d*, -P, -C, -Wp,* ... option, and there is no code generation to get wrong. So does
 # -fsyntax-only (a check that writes no object; rake builds use `-Wp,-v - -fsyntax-only` to learn the
 # header search path): the host front end answers it.
+# NFCXX_QBE_TRY (gcc backend): scripts/qbe-try runs the compile, then moves it to the qbe backend when the qbe object
+# matches the gcc one (docs/notes/linux-kernel.md)
+if [ -n "${NFCXX_QBE_TRY:-}" ] && [ "$backend" = gcc ]; then exec "$root/scripts/qbe-try" "$@"; fi
 for a in "$@"; do
   case $a in -E|-M|-MM|-MG|-fsyntax-only) exec "$host" "$@" ;; esac
 done
@@ -125,6 +128,33 @@ host_is_gnu_gcc() {  # whether the gcc backend's host compiler is GNU gcc (on ma
   [ "$gnu_gcc" = 1 ]
 }
 isa=()       # gcc backend: -march and the ISA -m options (-msse*, -mavx*, ...), given to the C compile
+# NFCXX_GCC_PASSTHROUGH=1 with the gcc backend: the options QBE cannot honour but gcc can (codegen -m options,
+# -ffreestanding, -funsigned-char, -fno-PIE, --param ...) go to gcc unchanged, in command-line order, instead of being
+# refused; every -f option goes to gcc, the harmless ones too. Without it both backends refuse the same options, so a
+# program that builds on one builds on the other. The Linux kernel's build needs it (-mcmodel=kernel, -mno-red-zone,
+# -mno-sse, ...): docs/notes/linux-kernel.md.
+gccf=()
+# NFCXX_QBE_KERNEL=1 with the qbe backend: the Linux kernel's options that the qbe path honours are accepted and given
+# to qbe-cc (kqf), the rest are still refused. Honoured by cproc: -funsigned-char, -fshort-wchar,
+# -ftrivial-auto-var-init=zero; by construction (QBE has no stack protector, jump tables, red-zone use, null-check or
+# overflow assumptions, and writes PIC code that a non-PIE link takes): the rest of the list. -mno-sse and the other
+# no-floating-point options are checked: qbe-cc refuses a translation unit whose QBE code touches SSE or x87 registers.
+# docs/notes/linux-kernel.md.
+kqf=()
+qbekernel() {
+  [ "$backend" = qbe ] && [ -n "${NFCXX_QBE_KERNEL:-}" ] || return 1
+  case $1 in
+    -funsigned-char|-fshort-wchar|-ftrivial-auto-var-init=zero|-ffreestanding|-fno-PIE|-fno-pie|-fno-PIC|-fno-pic|\
+    -fno-stack-protector|-fno-jump-tables|-fno-delete-null-pointer-checks|-fno-strict-overflow|-fno-strict-aliasing|-fwrapv|\
+    -fcf-protection=none|-fno-asynchronous-unwind-tables|-fconserve-stack|-fno-common|-falign-functions=*|-falign-jumps=*|\
+    -falign-loops=*|-falign-labels=*|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
+    -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|-fomit-frame-pointer|-fno-omit-frame-pointer|-fmacro-prefix-map=*|\
+    -m64|-mcmodel=kernel|-mno-red-zone|-mtune=*|-mpreferred-stack-boundary=3|-mskip-rax-setup|-mno-sse|-mno-sse2|-mno-mmx|\
+    -mno-3dnow|-mno-avx|-mno-80387|-mno-fp-ret-in-387|-msoft-float) kqf+=("$1") ;;
+    *) return 1 ;;
+  esac
+}
+gcconly() { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ] || return 1; gccf+=("$1"); }
 # -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
 # would be dropped silently, so it is an error.
 wp_option() {
@@ -149,6 +179,7 @@ n=${#args[@]}
 need() { [ $((i + 1)) -lt $n ] || die "option '${args[i]}' requires an argument"; }
 for ((i = 0; i < n; i++)); do
   a=${args[i]}
+  qbekernel "$a" && continue
   case $a in
     -c) mode=compile ;;
     -S) asm=1 ;;
@@ -183,11 +214,13 @@ for ((i = 0; i < n; i++)); do
     -O?*) die "unknown optimisation option '$a'" ;;
     -g|-g?*) dbg+=("$a") ;;   # gcc validates the rest; QBE writes no debug info
     -pipe|-v|-time) ;;
-    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); picf+=("$a") ;;   # QBE output is already PIC (GOT-relative); gcc needs the flag
-    -m32|-mx32|-m16|-miamcu) die "$a is not supported (x86-64 only)" ;;
+    # QBE output is already PIC (GOT-relative); gcc needs the flag, in command-line order with the other codegen options
+    # (gcc takes the last of -fno-PIE ... -fPIC, as the kernel's vDSO build relies on)
+    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); gcconly "$a" || picf+=("$a") ;;
+    -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
-    -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) isa+=("$a") ;;
+    -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) gcconly "$a" || isa+=("$a") ;;
     # --param name=value: gcc's inlining and optimisation tuning knobs (ASTro's code store passes early-inlining-insns). They
     # change no meaning, only how hard gcc optimises, so the gcc backend gets them and QBE, which has no such knobs, ignores them.
     --param=*) isa+=("$a") ;;
@@ -197,17 +230,22 @@ for ((i = 0; i < n; i++)); do
     -fno-jump-tables) isa+=("$a") ;;
     -fno-crossjumping) host_is_gnu_gcc && isa+=("$a") ;;
     --param) need; isa+=("$a" "${args[++i]}") ;;
-    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) ;;
-    -m*) die "$a is not supported" ;;
-    -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) ;;
+    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || : ;;
+    -m*) gcconly "$a" || die "$a is not supported" ;;
+    -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gcconly "$a" || : ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
-    -ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fassociative-math|-freciprocal-math|-fno-signed-zeros|-fno-math-errno) die "$a is not supported (changes floating-point semantics)" ;;
+    -ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fassociative-math|-freciprocal-math|-fno-signed-zeros|-fno-math-errno) gcconly "$a" || die "$a is not supported (changes floating-point semantics)" ;;
     -funsigned-char|-fshort-enums|-fpack-struct*|-ftrapv|-fgnu89-inline|-fms-extensions|-fplan9-extensions|-fno-signed-char|-fshort-wchar|-fshort-double|-fno-short-double|-fleading-underscore|-fno-leading-underscore|-fnon-call-exceptions|-fcheck-pointer-bounds|-fsigned-bitfields|-funsigned-bitfields|-fno-asm|-fno-gnu-keywords|-ffreestanding|-fhosted|-fopenacc*|-fgnu-tm|-fcilkplus|-fsplit-stack|-fgnu-unique|-fno-gnu-unique|-fstack-reuse=*|-fno-zero-initialized-in-bss|-fgraphite*|-fsel-sched*|-fcall-used-*|-fcall-saved-*|-ffixed-*|-finstrument-functions*|-fwhole-program|-fplugin*|-fdump-*|-fchecking*)
-        die "$a is not supported (it changes semantics or code generation that this pipeline cannot honour)" ;;
+        gcconly "$a" || die "$a is not supported (it changes semantics or code generation that this pipeline cannot honour)" ;;
     -f*)
-        [[ ${a#-f} == @($fok) ]] || die "$a is not supported (not in nfcc's list of harmless -f options)" ;;
+        # With NFCXX_GCC_PASSTHROUGH every -f option goes to gcc, the harmless ones too: gcc's own defaults (a
+        # distribution's -fstack-protector-strong, -fPIE, -fcf-protection) would otherwise stand where the build turned
+        # them off.
+        if [[ ${a#-f} == @($fok) ]]; then gcconly "$a" || :; else gcconly "$a" || die "$a is not supported (not in nfcc's list of harmless -f options)"; fi ;;
     @*) die "response files ($a) are not supported" ;;
     -) inputs+=("c:-") ;;
+    --param=*) gcconly "$a" || die "$a is not supported" ;;
+    --param) need; gcconly "$a" && gccf+=("${args[++i]}") || die "$a is not supported" ;;
     -*) die "unsupported option '$a'" ;;
     *.c|*.i)
         case $lang in assembler|assembler-with-cpp) inputs+=("s:$a") ;; *) inputs+=("c:$a") ;; esac ;;
@@ -238,11 +276,21 @@ compile_one() {
   local kind=$1 src=$2 obj=$3 base
   base=$(basename "$src"); base=${base%.*}
   if [ "$kind" = s ]; then
+    # -x assembler / assembler-with-cpp is kept: without it a source with another suffix (the kernel's
+    # "-x assembler-with-cpp /dev/null" probe) would be taken for a linker input.
+    local xl=(); case $lang in assembler|assembler-with-cpp) xl=(-x "$lang") ;; esac
+    # -MD/-MMD on assembly: the host compiler writes the dependency file itself (kbuild's fixdep reads it)
+    local dep=()
+    if [ -n "$depmode" ] && [ $asm = 0 ]; then
+      local df=$dfile tg=("${dts[@]+"${dts[@]}"}")
+      [ -n "$df" ] || { if [ "$sawout" = 1 ]; then df=${obj%.*}.d; else df=$base.d; fi; }
+      dep=("$depmode" -MF "$df" "${tg[@]+"${tg[@]}"}"); [ $dp = 0 ] || dep+=(-MP)
+    fi
     if [ $asm = 1 ]; then   # -S on assembly: only .S (assembler-with-cpp) has anything to do, the preprocessing
       [[ $src == *.S ]] || [ "$lang" = assembler-with-cpp ] || die "-S: $src is assembly already"
-      "$host" -S "${pp[@]+"${pp[@]}"}" "$src" -o "$obj"; return
+      "$host" -S "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" "${xl[@]+"${xl[@]}"}" "$src" -o "$obj"; return
     fi
-    "$host" -c "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "$src" -o "$obj"; return
+    "$host" -c "${gccf[@]+"${gccf[@]}"}" "${dep[@]+"${dep[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${xl[@]+"${xl[@]}"}" "$src" -o "$obj"; return
   fi
   local csrc=$src extra=()
   if [ "$src" = - ]; then
@@ -260,14 +308,14 @@ compile_one() {
     fi
     [ ${#tg[@]} -gt 0 ] || tg=(-MT "$obj")
     [ "$src" = - ] || "$host" "$opt" -MF "$df" "${tg[@]}" $([ $dp = 1 ] && echo -MP) \
-        "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" ||
+        "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" ||
       die "dependency generation failed for $src"
   fi
   local what=-c; [ $asm = 0 ] || what=-S
   if [ $backend = qbe ] || [ $backend = cil ]; then
-    NFCXX_C_INPUT=1 "$qcc" $what "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
+    NFCXX_C_INPUT=1 "$qcc" $what "${kqf[@]+"${kqf[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
-    gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${pp[@]+"${pp[@]}"}" \
+    gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
         "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
   fi
 }
