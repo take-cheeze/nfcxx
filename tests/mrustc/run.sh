@@ -40,6 +40,9 @@ MRUSTC_NFCC_CRATES=all check time tests/mrustc/time.rs $'slept at least 30ms: tr
 MRUSTC_NFCC_CRATES=all check net tests/mrustc/net.rs $'loopback: true\ntcp reply: pong:ping\npeer loopback: true\nudp: datagram from loopback: true\nrefused: ConnectionRefused'
 MRUSTC_NFCC_CRATES=all check signals tests/mrustc/signals.rs "hits 20"
 MRUSTC_NFCC_CRATES=all check dlopen tests/mrustc/dlopen.rs $'strlen via dlsym: 5\nopened libm: true\ncos(0) = 1\nclosed: true\nmissing is null: true\nerror names the library: true'
+# Inline asm, outlined into helpers the host C compiler builds (mrustc-prep.rb): named and allocated registers, a
+# pointer operand, a byte output, a 16-byte compare-exchange.
+check asm tests/mrustc/asm.rs "42 0xf2 false true (3, 4) true false 5 6"
 MRUSTC_NFCC_CRATES=all check checked tests/mrustc/checked.rs $'None\nSome(12)\nNone\nNone\nNone\nNone\nNone\nSome(200)\nNone\nNone\nNone\nNone\nNone\nSome(170141183460469231731687303715884105728)\n(127, false)\n(0, true)\n(-2147483648, true)\n-2147483648 246\n-32768 255\nSome(16384)\n3486784401 20'
 
 echo "pass $pass fail $fail"

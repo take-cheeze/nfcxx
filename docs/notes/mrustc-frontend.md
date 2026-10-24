@@ -67,7 +67,7 @@ list was found by rerunning, and a census of each construct sized what was left.
 | Inline asm: `pause`, `xgetbv`, `cpuid` | 3 forms | matched by their text with the operand names kept (they differ per crate, e.g. `var401`); `pause` is a no-op hint and becomes `;`; the other two call helpers in the tail (x86-64, System V) |
 | Inline asm: the empty compiler barrier with a `"+r"` or `"+q"` operand (`/* %0 */`), `prefetcht0 [%0]` (crossbeam, rayon) | 2 forms | `;`: cproc emits no reordering across calls, and a prefetch is a hint |
 | Asm labels with a symbol version (`asm("memcpy@GLIBC_2.2.5")`) | mold 3's crates | the tail jumps to a local alias made with `.symver` |
-| Other inline asm (portable-atomic's `cmpxchg16b`, `lock btr`) | portable-atomic 1.15 | not rewritten: the crate stays gcc-built (left out of `MRUSTC_NFCC_CRATES`) |
+| Other inline asm (portable-atomic's `cmpxchg16b` loops, `lock bt*`, `lock neg`) | 62 statements (portable-atomic 1.15) | outlined: the statement moves unchanged into a weak helper of an `asm.c` file, which takes a pointer to each variable its operands name, declares it again (with its `register ... asm("REG")` binding), runs the asm and stores it back. `mrustc-nfcc.sh` builds the file with the host cc and joins it to the tail object. The block's register variables become plain locals, and the statement a call with their addresses. Operands must be variables of scalar or pointer type (`tests/mrustc/asm.rs`) |
 | glibc's `strerror_r` redirect, `__asm__ ("" "__xpg_strerror_r")` | 1 | dropped: libcore only declares the function |
 | Weak data: `__attribute__((weak)) union {…} NAME;` and `T NAME __attribute__((weak));` | 312 names (libcore) | the names go to `weak.txt`; `objcopy --weaken-symbols` in `scripts/mrustc-nfcc.sh` |
 | Weak references: `extern char __attribute__((weak)) NAME[0];` | 2 (std) | the same, on an undefined symbol |
@@ -85,7 +85,7 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 
 ## 3. Checks
 
-- `tests/mrustc/run.sh` (fifteen cases, about 40 seconds once the crates are cached; the first run of `vec_sum_all`
+- `tests/mrustc/run.sh` (sixteen cases, about 40 seconds once the crates are cached; the first run of `vec_sum_all`
   builds all of them, a few minutes). It runs in CI as the `mrustc` job, which is part of `build-and-test`:
   - `hello` prints `Hello, world!`; `vec_sum` prints `55 10`; `vec_sum_core` (`MRUSTC_NFCC_CORE=1`) and `vec_sum_all`
     (`MRUSTC_NFCC_CRATES=all`) print the same;
@@ -95,7 +95,9 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
   - also on the all-crates build: `time` (`Instant`, `SystemTime`, `sleep`, `Duration` formatting), `net` (a TCP echo
     over loopback with a server thread, a UDP datagram, a refused connection), `signals` (a handler installed with
     `signal` and raised with `raise`), `dlopen` (`dlopen`, `dlsym`, `dlclose`, `dlerror` on libc and libm), and
-    `checked` (checked, overflowing, wrapping and saturating arithmetic at several widths).
+    `checked` (checked, overflowing, wrapping and saturating arithmetic at several widths);
+  - `asm` (inline asm outlined into helpers: named and allocated registers, a pointer operand, a byte output, a 16-byte
+    compare-exchange).
   Each expected output was also produced by mrustc's gcc-built standard library, and checked against Rust's semantics.
   Two results mrustc gets wrong are left out (section 4).
 
@@ -128,7 +130,9 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
 ## 4. What is not done, and what the numbers say
 
 - **The system is still gcc's.** The objects are nfcxx's, but the linker driver (`cc`), the assembler (`as`, which
-  QBE's output goes through) and glibc, libgcc_s, libm and the rest come from the host.
+  QBE's output goes through) and glibc, libgcc_s, libm and the rest come from the host. So do the helpers that
+  outlined inline asm runs in (section 2): the host cc compiles them, as it is the only compiler here that takes
+  GNU asm operands.
 - **Not exercised:** panics that unwind through more than one frame of user code, `std::fs` beyond the `fsio` case,
   the `libtest` and `proc_macro` crates (section 4 below), and the 16-byte atomics (no program reaches them). `time`,
   networking, signals, `dlopen` and checked arithmetic are now covered (section 3).
@@ -241,9 +245,9 @@ and with `--pipeline` the second too.
 
   The binary links a C program, a C++ program with threads and exceptions, and mrustc itself (231 MB, 3.3 s on 4
   cores).
-- **nfcxx's pipeline.** Every crate of the link but portable-atomic goes through `mrustc-prep.rb`, cproc and QBE.
-  portable-atomic's inline asm (`cmpxchg16b`, `lock btr`) is not rewritten, so its gcc object is linked. The build
-  takes about 20 minutes once mrustc's C exists. The binary is 77 MB, and QBE peaks at about 760 MB. What it needed:
+- **nfcxx's pipeline.** Every crate of the link goes through `mrustc-prep.rb`, cproc and QBE, portable-atomic's
+  inline asm outlined (section 2). The build takes about 7 minutes once mrustc's C exists (20 before cproc copied
+  structs with `blit`, below). The binary is 77 MB. What it needed:
   - asm labels with a symbol version (`.symver`), and the barrier and prefetch asm forms (section 2);
   - QBE (branch `nfcxx/align-large`):
     - data alignments above 127;
@@ -254,6 +258,10 @@ and with `--pipeline` the second too.
   - cproc (branch `nfcxx/align-type`): QBE types carry a struct's over-alignment, member padding and size. A
     `#[repr(align(128))]` value (crossbeam's `CachePadded`) was laid out as 8 bytes, and crossbeam-epoch's
     `Global::new` crashed;
+  - cproc (branch `nfcxx/blit`): a struct copy larger than 16 bytes is one QBE `blit`. It was a load, a store and two
+    address adds per alignment unit: 4096 instructions for each copy of mold's 2 KB `HyperLogLog`, whose chains of
+    address temporaries were spilled. A test function with that value had a 34.9 KB frame (18.6 KB with `blit`, 14.5 KB
+    with gcc), and rayon's recursion overflowed its 2 MiB worker stacks when this mold linked mrustc;
   - `qbe-prep.rb`: the `__aligned__(N),` trailing comma on a struct's closing line;
   - `mrustc-nfcc.sh`, the link:
     - the native archives that build scripts make (blake3's assembly, zstd, mimalloc) were dropped. Since the
@@ -263,15 +271,15 @@ and with `--pipeline` the second too.
     - libraries are linked `--no-as-needed`, since libz was referenced only weakly and was dropped.
 
   The binary links the C program, with uncompressed, zlib and zstd debug sections, and the C++ program (same output).
-  It also links mrustc with an output byte-identical to the gcc-built mold's, in 8.2 s, but only with
-  `RUST_MIN_STACK=8388608` (see the gap below).
+  It also links mrustc, with the default thread stacks, to an output byte-identical to the gcc-built mold's, in 8.9 s
+  (3.6 s for the gcc-built mold on the same 4 cores).
 - **Gaps.**
-  - **Stack size.** QBE gives mrustc's C much larger frames than gcc: 88 KB against about 10 KB for one of the rayon
-    `join` closures over mold's 2 KB `HyperLogLog`. QBE's slot coalescing skips slots whose address escapes, and
-    mrustc's C takes the address of nearly every aggregate local. rayon's recursion then overflows the 2 MiB worker
-    stacks on large links (mrustc's), while small links fit. The workaround is a larger `RUST_MIN_STACK` (8 MiB is
-    enough for mrustc). The fix would be lifetimes for escaping slots in QBE, or mrustc's C scoping its locals.
-  - **portable-atomic** stays gcc-built (general inline asm).
+  - **Stack size.** QBE's frames are still larger than gcc's (18.6 KB against 14.5 KB in the test function above):
+    QBE's slot coalescing skips slots whose address escapes, and mrustc's C takes the address of nearly every
+    aggregate local. Lifetimes for escaping slots in QBE, or mrustc's C scoping its locals, would close the rest.
+  - **Speed.** The link of mrustc takes 2.5 times as long as with the gcc-built mold.
+  - **Outlined asm** costs a call per statement, and needs operands that are variables (an expression operand is
+    left for cproc, which refuses it).
   - **mold-wrapper.so.** mold's build script writes `mold-wrapper.so` (for `mold -run`) beside the first ancestor
     directory named `build`, which is the repository root here. The test removes it.
   - **Time.** The mrustc build of mold's two crates is most of the hour of a cold run; `MIR_Validate_ValState` is

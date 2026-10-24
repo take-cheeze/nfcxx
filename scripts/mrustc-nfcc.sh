@@ -43,13 +43,22 @@ nfcxx_compile() {
   # Not -undef: that makes glibc drop every GNU attribute (aligned, packed, weak), which the rewrites rely on. qbe-cc
   # preprocesses again, with -undef, and the file then has no headers left to undefine anything.
   cc -E -P -D__CPROC__ "$c" > "$tmp/$name.pp.c"
-  "$root/scripts/mrb" "$root/scripts/mrustc-prep.rb" "$tmp/$name.pp.c" "$tmp/$name.prep.c" "$tmp/$name.tail.s" "$tmp/$name.weak"
+  "$root/scripts/mrb" "$root/scripts/mrustc-prep.rb" "$tmp/$name.pp.c" "$tmp/$name.prep.c" "$tmp/$name.tail.s" "$tmp/$name.weak" \
+    "$tmp/$name.asm.c"
   NFCXX_C_INPUT=1 "$root/scripts/qbe-cc" -c "$tmp/$name.prep.c" -o "$dir/$name.o"
   if [ -s "$tmp/$name.weak" ]; then
     objcopy --weaken-symbols="$tmp/$name.weak" "$dir/$name.o" "$tmp/$name.weakened.o"
     mv "$tmp/$name.weakened.o" "$dir/$name.o"
   fi
-  cc -c "$tmp/$name.tail.s" -o "$dir/$name.tail.o"
+  # The inline asm that mrustc-prep.rb outlined (helpers around each asm statement, which cproc cannot compile) is
+  # built by the host C compiler and joined to the tail object.
+  if [ -s "$tmp/$name.asm.c" ]; then
+    cc -c "$tmp/$name.tail.s" -o "$tmp/$name.tail0.o"
+    cc -O1 -c "$tmp/$name.asm.c" -o "$tmp/$name.asm.o"
+    ld -r "$tmp/$name.tail0.o" "$tmp/$name.asm.o" -o "$dir/$name.tail.o"
+  else
+    cc -c "$tmp/$name.tail.s" -o "$dir/$name.tail.o"
+  fi
 }
 
 # The program: mrustc writes the C (<out>.c) and the gcc command line that links it (<out>_cmd.txt); the gcc binary
@@ -68,6 +77,16 @@ if [ "$crates" = all ]; then
   crates=$(tr -d '"' < "$tmp/prog_cmd.txt" | tr ' ' '\n' | grep '\.rlib\.o$' | sed -e 's|.*/lib||' -e 's|\.rlib\.o$||' | tr '\n' ' ')
 fi
 cache=$root/build/mrustc/nfcxx
+# The objects also depend on cproc and QBE: a cache made by other binaries is emptied. The binaries' hash is kept, not
+# their times, since scripts/setup-qbe.sh rebuilds them (to the same bytes) on every run.
+if [ -n "$crates" ]; then
+  mkdir -p "$cache"
+  stamp=$(cat "${CPROC_QBE:-$root/build/cproc/cproc-qbe}" "${QBE:-$root/build/qbe/qbe}" | sha256sum | cut -d' ' -f1)
+  if [ "$(cat "$cache/toolchain.sha256" 2>/dev/null)" != "$stamp" ]; then
+    rm -f "$cache"/*.o
+    echo "$stamp" > "$cache/toolchain.sha256"
+  fi
+fi
 core_objs=()
 for crate in $crates; do
   c=$std/lib$crate.rlib.c

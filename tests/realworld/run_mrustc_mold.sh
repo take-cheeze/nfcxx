@@ -4,8 +4,8 @@
 # lock file, every crate's C through gcc (mrustc's own backend). The binary must report its version and link a program
 # that prints the expected output. Needs scripts/setup-mrustc.sh, cargo (cargo vendor) and network access; a cold run
 # takes about an hour on 4 cores (mold's two crates are most of it). docs/notes/mrustc-frontend.md, "mold 3".
-# With --pipeline, mold is then built again with every crate but portable-atomic (whose inline asm cproc cannot take)
-# through nfcxx's pipeline (scripts/mrustc-nfcc.sh, cproc and QBE; about 20 minutes more, needs scripts/setup-qbe.sh),
+# With --pipeline, mold is then built again with every crate through nfcxx's pipeline (scripts/mrustc-nfcc.sh, cproc
+# and QBE, the inline asm outlined; about 7 minutes more, needs scripts/setup-qbe.sh),
 # and that binary must link the same program, and a C program with compressed debug sections (zlib, zstd).
 #   tests/realworld/run_mrustc_mold.sh [--pipeline]
 set -euo pipefail
@@ -49,9 +49,8 @@ readelf -p .comment "$work/hello" | grep -q 'mold 3.0.0' || { echo "FAIL mold: h
 echo "ok   mold 3.0.0 (minicargo, x86_64): links a C program"
 
 [ "${1:-}" = --pipeline ] || exit 0
-# The crates of mold's link, as mrustc's link command names their objects (lib<crate>.rlib.o), but portable-atomic.
-crates=$(tr -d '"' < "$out/mold_cmd.txt" | tr ' ' '\n' | grep '\.rlib\.o$' | sed -e 's|.*/lib||' -e 's|\.rlib\.o$||' |
-  grep -v '^portable_atomic' | tr '\n' ' ')
+# The crates of mold's link, as mrustc's link command names their objects (lib<crate>.rlib.o).
+crates=$(tr -d '"' < "$out/mold_cmd.txt" | tr ' ' '\n' | grep '\.rlib\.o$' | sed -e 's|.*/lib||' -e 's|\.rlib\.o$||' | tr '\n' ' ')
 ext() { local f; f=$(ls "$out"/lib"$1"-*.rlib | head -1); echo "$2=$f"; }
 # The binary and the library are both crate `mold`; minicargo tags the binary, as it is passed here when its log
 # has the command (a run with nothing to rebuild does not print it, and the tag does not reach the binary's C).
@@ -70,8 +69,6 @@ nbin=$work/nbin
 mkdir -p "$nbin"
 ln -sf "$work/mold-nfcc" "$nbin/ld.mold"
 "$work/mold-nfcc" --version | grep -q '^mold 3.0.0 ' || { echo "FAIL mold (pipeline): --version"; exit 1; }
-# QBE's frames are larger than gcc's (it does not share the stack slots of aggregates whose address is taken), and
-# rayon's recursion overflows its 2 MiB worker stacks on large links (mrustc's: 8 MiB is enough). A small link fits.
 for c in none zlib zstd; do
   rm -f "$work/hello-$c"
   PATH=$nbin:$PATH cc -g -fuse-ld=mold -Wl,--compress-debug-sections=$c "$work/hello.c" -lm -o "$work/hello-$c"
@@ -81,4 +78,4 @@ for c in none zlib zstd; do
   [ $c = none ] || readelf -t "$work/hello-$c" | grep -A3 '\.debug_info' | grep -q COMPRESSED ||
     { echo "FAIL mold (pipeline): hello-$c has no compressed .debug_info"; exit 1; }
 done
-echo "ok   mold 3.0.0 (nfcxx pipeline, all crates but portable-atomic): links a C program, compressed debug sections"
+echo "ok   mold 3.0.0 (nfcxx pipeline, every crate): links a C program, compressed debug sections"

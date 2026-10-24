@@ -15,7 +15,8 @@
 #   * mrustc's placeholders for intrinsics it does not implement, `({ if (!"MSG") ; else __assert_fail (...); })`,
 #     as the conditional expression they are equivalent to. `__PRETTY_FUNCTION__` becomes `__func__`.
 #   * Inline asm libcore uses (`pause`, `xgetbv`, `cpuid`): `pause` is dropped, the other two call helpers of the tail.
-#     glibc's redirect of strerror_r is dropped (libcore only declares it).
+#     glibc's redirect of strerror_r is dropped (libcore only declares it). Any other asm statement whose operands are
+#     variables is outlined into a helper of the asm.c output, which the host C compiler builds (asm_outline).
 #   * An extern function whose symbol is named by an asm label, `extern T ZRG...(...)` then `asm("__rust_alloc");`:
 #     the label leaves the C, and the tail defines the mangled name as a jump to it (weak, so every object may carry
 #     it). Only functions; a label on anything else stops the rewrite. ELF only: no leading underscore on symbols.
@@ -24,7 +25,7 @@
 #     object as the definition).
 #
 # The script uses no regular expressions, so it runs on the self-built mruby (scripts/mrb), as qbe-prep.rb does.
-# Usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt
+# Usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt [asm.c]
 
 IDENT_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
 
@@ -364,6 +365,172 @@ def asm_rewrite(code)
   end
   nil
 end
+# ---- General inline asm: outlined into a helper that the host C compiler builds -------------------------------------
+# cproc has no inline asm. An asm statement that the rewrites above do not know (portable-atomic's cmpxchg16b loops
+# and `lock bt*`, `lock neg`) moves, unchanged, into a function of a C file that scripts/mrustc-nfcc.sh compiles with
+# the host cc and links into the crate's tail object. The function takes a pointer to each variable the operands name,
+# declares the variable again (with its `register ... asm("REG")` binding when it had one), runs the asm, and stores
+# the variables back. The statement becomes a call that passes their addresses. Only operands that are variables of
+# scalar or pointer type are outlined; another statement is left for cproc to refuse. The helpers are weak, named by a
+# hash of their text, so crates with the same statement share one.
+
+# Scalar types a helper can declare (pointer types are declared `void *`; their width is all an `"r"` operand sees).
+ASM_SCALARS = %w[uint8_t uint16_t uint32_t uint64_t int8_t int16_t int32_t int64_t uintptr_t intptr_t size_t
+                 RUST_BOOL RUST_CHAR float double]
+ASM_HELPER_PRELUDE = "#include <stdint.h>\n#include <stddef.h>\ntypedef uint8_t RUST_BOOL;\ntypedef uint32_t RUST_CHAR;\n"
+
+# The type of a declaration line ` TYPE NAME;` (or `  TYPE NAME,` / `  TYPE NAME` in a parameter list), as
+# [name, type], or nil.
+def asm_decl(line)
+  s = line.strip
+  s = s.byteslice(0, s.bytesize - 1).rstrip if s.end_with?(';') || s.end_with?(',')
+  return nil if s.empty? || s.index('(') || s.index('=') || s.index('[') || s.index('{') || s.index('"')
+  name = trailing_ident(s)
+  return nil if name.nil? || name.bytesize == s.bytesize
+  type = s.byteslice(0, s.bytesize - name.bytesize).strip
+  return nil if type.empty? || type.start_with?('return') || type.start_with?('goto')
+  [name, type]
+end
+
+# A block-local ` T NAME = INIT;` with T a scalar or pointer type (mrustc's `uintptr_t asm_anon_0 = 0;`), as
+# [name, type], or nil. Assignments (` var5 = ...;`, ` x._0 = ...;`) have no type before the name.
+def asm_decl_init(line)
+  s = line.strip
+  eq = s.index(' = ')
+  return nil if eq.nil? || !s.end_with?(';')
+  d = asm_decl(s.byteslice(0, eq) + ';')
+  return nil if d.nil? || asm_helper_type(d[1]).nil? || d[1].index('.') || d[1].start_with?('*')
+  d
+end
+
+# ` register T NAME asm("REG") = INIT;` as [T, NAME, REG, INIT], or nil.
+def asm_register_decl(code)
+  return nil unless code.start_with?('register ') && code.end_with?(';')
+  at = code.index(' asm("')
+  return nil if at.nil?
+  q = code.index('")', at + 6)
+  return nil if q.nil?
+  head = code.byteslice(9, at - 9).strip
+  name = trailing_ident(head)
+  return nil if name.nil?
+  type = head.byteslice(0, head.bytesize - name.bytesize).strip
+  reg = code.byteslice(at + 6, q - at - 6)
+  rest = code.byteslice(q + 2, code.bytesize - q - 2).strip
+  init = nil
+  if rest.start_with?('=')
+    init = rest.byteslice(1, rest.bytesize - 2).strip
+  elsif rest != ';'
+    return nil
+  end
+  [type, name, reg, init]
+end
+
+# The type a helper declares a variable with, or nil when it cannot.
+def asm_helper_type(type)
+  return 'void *' if type.end_with?('*')
+  ASM_SCALARS.include?(type) ? type : nil
+end
+
+# The operand expressions of an asm statement `__asm__ __volatile__(TEMPLATE : OUTS : INS : CLOBBERS);`, or nil when
+# it is not of that form. Strings are skipped, so ':' ',' '(' ')' in the template or in constraints do not count.
+def asm_operands(code)
+  start = code.index('__asm__')
+  return nil if start.nil? || start != 0
+  open = code.index('(')
+  return nil if open.nil?
+  head = code.byteslice(7, open - 7).strip
+  return nil unless head == '' || head == '__volatile__' || head == 'volatile'
+  return nil unless code.end_with?(');')
+  body = code.byteslice(open + 1, code.bytesize - open - 3)
+  sections = [[]]
+  cur = ''
+  depth = 0
+  i = 0
+  n = body.bytesize
+  while i < n
+    c = body.byteslice(i, 1)
+    if c == '"'
+      j = i + 1
+      while j < n
+        d = body.byteslice(j, 1)
+        if d == '\\'
+          j += 2
+          next
+        end
+        break if d == '"'
+        j += 1
+      end
+      return nil if j >= n
+      cur << body.byteslice(i, j - i + 1)
+      i = j + 1
+      next
+    end
+    if c == '(' then depth += 1
+    elsif c == ')' then depth -= 1
+    end
+    if depth == 0 && (c == ':' || c == ',')
+      sections.last << cur.strip
+      cur = ''
+      sections << [] if c == ':'
+    else
+      cur << c
+    end
+    i += 1
+  end
+  return nil if depth != 0
+  sections.last << cur.strip
+  return nil if sections.size < 2 || sections.size > 4   # no `asm goto` labels
+  exprs = []
+  sections[1..2].to_a.each do |sec|
+    sec.each do |op|
+      next if op.empty?
+      return nil unless op.start_with?('"') || op.start_with?('[')
+      a = op.index('(')
+      return nil if a.nil? || !op.end_with?(')')
+      e = op.byteslice(a + 1, op.bytesize - a - 2).strip
+      return nil if e.empty? || trailing_ident(e) != e || '0123456789'.index(e.byteslice(0, 1))
+      exprs << e unless exprs.include?(e)
+    end
+  end
+  exprs
+end
+
+# FNV-1a of a string, as 8 hex digits.
+def asm_hash(s)
+  h = 2166136261
+  s.each_byte { |b| h = ((h ^ b) * 16777619) & 0xffffffff }
+  r = h.to_s(16)
+  '0' * (8 - r.bytesize) + r
+end
+
+# The call that replaces asm statement `code`, and the helper's definition, as [call, helper name, definition], or nil.
+# `types` maps a variable to its C type, `regs` a register variable to its register.
+def asm_outline(code, types, regs)
+  vars = asm_operands(code)
+  return nil if vars.nil? || vars.empty?
+  params = []
+  decls = []
+  backs = []
+  vars.each_with_index do |v, k|
+    t = types[v]
+    return nil if t.nil?
+    ht = asm_helper_type(t)
+    return nil if ht.nil?
+    params << "#{ht} *__nfcxx_p#{k}"
+    if regs.key?(v)
+      decls << "\tregister #{ht} #{v} asm(\"#{regs[v]}\") = *__nfcxx_p#{k};"
+    else
+      decls << "\t#{ht} #{v} = *__nfcxx_p#{k};"
+    end
+    backs << "\t*__nfcxx_p#{k} = #{v};"
+  end
+  text = "(#{params.join(', ')})\n{\n#{decls.join("\n")}\n\t#{code}\n#{backs.join("\n")}\n}\n"
+  name = "__nfcxx_asm_#{asm_hash(text)}"
+  defn = "__attribute__((weak)) void #{name}#{text}"
+  call = "#{name}(#{vars.map { |v| '&' + v }.join(', ')});"
+  [call, name, defn, vars.size]
+end
+
 # The helpers those rewrites call, declared at the top of the output (before the prelude's typedefs, so plain types).
 ASM_HELPER_DECLS = [
   'extern unsigned long __nfcxx_xgetbv (unsigned int);',
@@ -439,8 +606,8 @@ def data_asm_label(line)
 end
 
 def main(argv)
-  if argv.size != 4
-    $stderr.puts "usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt"
+  if argv.size != 4 && argv.size != 5
+    $stderr.puts "usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt [asm.c]"
     exit 2
   end
   src = File.open(argv[0], 'rb') { |f| f.read } || ''
@@ -451,6 +618,10 @@ def main(argv)
   packed = false  # inside a `#pragma pack(push, 1)` region
   init_pending = {}   # init_array object name -> its section, until its initialiser is seen
   init_entries = []   # [section, function] pairs
+  asm_types = {}      # variable -> its C type, from the declarations seen so far (see asm_outline)
+  asm_regs = {}       # register variable -> its register
+  asm_protos = []     # prototypes of the outlined asm helpers
+  asm_defs = {}       # helper name -> definition
   # Data objects named by an asm label (see data_asm_label): renamed throughout the file, before the rewrite below.
   lines = src.split("\n", -1)
   renames = {}
@@ -483,7 +654,29 @@ def main(argv)
       out << ';'   # the declaration keeps its ';'
       next
     end
+    d = asm_decl(line) || asm_decl_init(line)
+    asm_types[d[0]] = d[1] unless d.nil?
+    rd = asm_register_decl(code)
+    unless rd.nil?
+      # A register variable of an asm block: a plain local here (cproc has no register bindings, and the helper takes
+      # its address); the helper binds it to its register again.
+      t, n, reg, init = rd
+      asm_types[n] = t
+      asm_regs[n] = reg
+      line = " #{t} #{n}" + (init.nil? ? '' : " = #{init}") + ';'
+    end
     asm = asm_rewrite(code)
+    if asm.nil? && code.start_with?('__asm__')
+      o = asm_outline(code, asm_types, asm_regs)
+      unless o.nil?
+        call, hname, defn, nargs = o
+        unless asm_defs.key?(hname)
+          asm_defs[hname] = defn
+          asm_protos << "extern void #{hname}(#{(['void *'] * nargs).join(', ')});"
+        end
+        asm = ' ' + call
+      end
+    end
     line = asm unless asm.nil?
     line += "\n" + WIDE_ATOMIC_HELPERS if line == WIDE_ATOMIC_TYPEDEF
     # cproc ignores #pragma, so the struct in a packed region gets the attribute after its keyword, where cproc
@@ -520,7 +713,12 @@ def main(argv)
   tail << ".text\n"
   File.open(argv[3], "wb") { |f| f.write(weak.map { |n| n + "\n" }.join) }
   tail << ASM_HELPER_TAIL
+  out = out[0, ASM_HELPER_DECLS.size] + asm_protos + out[ASM_HELPER_DECLS.size, out.size - ASM_HELPER_DECLS.size] unless asm_protos.empty?
   File.open(argv[1], 'wb') { |f| f.write(out.join("\n")) }
+  unless argv[4].nil?
+    File.open(argv[4], 'wb') { |f| f.write(asm_defs.empty? ? '' : ASM_HELPER_PRELUDE + asm_defs.values.join("\n")) }
+  end
+  fail_with("inline asm outlined but no asm.c output given") if argv[4].nil? && !asm_defs.empty?
   # A non-executable stack for the object (without the note, ld makes the program's stack executable).
   tail << ".section .note.GNU-stack,\"\",@progbits\n"
   File.open(argv[2], 'wb') { |f| f.write(tail) }
