@@ -182,6 +182,11 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   visibility of the external declarations that follow, `visibility` attributes aside), diagnostics and hints
   (`GCC diagnostic`, `once`, `STDC`, `GCC unroll`, ...) are ignored, and any other (`pack`, `weak`, ...) is refused.
 
+- **Calls of a function whose body is `{ return C; }`** (C an integer constant) are C when the arguments have no
+  side effects: gcc inlines such a function and folds what depends on it -- the kernel's `pmd_trans_huge()` is 0
+  without transparent huge pages, and the call it guards names a function this configuration does not have. The
+  call has no effect to keep (the body only returns C); an argument with a side effect keeps the call.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is

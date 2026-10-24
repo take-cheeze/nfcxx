@@ -441,6 +441,31 @@ EOC
     if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kpack.c -o kpack.o 2>&1); then bad "kernel mode: #pragma pack refused" "was accepted"
     elif grep -q "unsupported #pragma pack" <<<"$out"; then ok "kernel mode: #pragma pack refused"
     else bad "kernel mode: #pragma pack refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # a call of a function whose body is { return C; } is C when its arguments have no side effects, as gcc's
+    # inlined and folded call (it links without copy_huge_pmd, which nothing defines); with a side effect it runs
+    cat > kconst.c <<'EOC'
+/* the kernel's pmd_trans_huge() without transparent huge pages: { return 0; }, and a call it guards names a function
+ * this configuration does not have */
+typedef struct { unsigned long pmd; } pmd_t;
+int copy_huge_pmd(pmd_t *);
+static inline int pmd_trans_huge(pmd_t pmd) { return 0; }
+static inline int always_one(void) { return 1; }
+static int calls;
+static int counted(void) { ++calls; return 0; }
+static inline int ignores(int x) { return 5; }
+int walk(pmd_t *p) {
+	if (pmd_trans_huge(*p))
+		return copy_huge_pmd(p);
+	return always_one() + 1;
+}
+int main(void) {
+	pmd_t p = { 3 };
+	int r = walk(&p) + ignores(counted());   /* an argument with a side effect: the call stays, and it runs */
+	return r == 7 && calls == 1 ? 42 : 1;
+}
+EOC
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kconst.c -o kconst 2>/dev/null && { ./kconst; [ $? = 42 ]; }; then ok "kernel mode: calls of constant functions fold"
+    else bad "kernel mode: calls of constant functions fold" "wrong result or the link failed"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -520,6 +545,12 @@ EOC
     if grep -q '^qbe ksec.c$' qbe-.discard.addressable.log && grep -q '^gcc ksec.c: sections differ: > .initcall6.init' qbe-.initcall6.init.log
     then ok "qbe-try: an extra harmless section is taken, an extra initcall is not"
     else bad "qbe-try: an extra harmless section is taken, an extra initcall is not" "$(cat qbe-*.log | tr '\n' '|')"; fi
+    # code in .head.text (the kernel's __head, identity-mapped early boot code) stays on gcc
+    printf 'int __attribute__((section(".head.text"))) early(int x) { return x + 1; }\n' > khead.c
+    rm -f qbe.log
+    NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c khead.c -o khead.o
+    if grep -q '^gcc khead.c: code in .head.text' qbe.log; then ok "qbe-try: .head.text stays on gcc"
+    else bad "qbe-try: .head.text stays on gcc" "$(tr '\n' '|' < qbe.log)"; fi
     # with the init symbols of a gcc-built kernel (NFCXX_QBE_INITSYMS), an undefined symbol not among them is not init
     rm -f qbe.log; printf 'memblock_alloc_try_nid\n' > initsyms.txt
     NFCXX_QBE_INITSYMS=$PWD/initsyms.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log \
