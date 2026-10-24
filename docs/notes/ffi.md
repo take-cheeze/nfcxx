@@ -1,6 +1,6 @@
 # nfcffi: calling C compiled at run time (`lib/ffi`)
 
-Status: **Milestones 1 to 6, plus long double and 128-bit integers, experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
+Status: **Milestones 1 to 7 (callbacks), experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
 loaded; its functions, and the C library's, are called through C++ function types written at the call site. The
 design is DragonFFI's idea (a C library called from a host at run time, without writing bindings by hand), without
 its header parser and without libffi.
@@ -114,7 +114,8 @@ lib.callable("vec_add");   // false: a struct by value
 - **Long double and 128-bit integers** travel as bytes, like a struct: `Value::of_bytes` of `sizeof` bytes (the x87
   80-bit format in the first ten bytes of a `long double`). Tested in `tests/ffi/wide.h`.
 - **Not callable** (listed by `declarations`, `callable` is false): overload sets, and any other kind the table lists as
-  `x` (for example other float kinds). Calling them throws `Error`.
+  `x` (for example other float kinds). Calling them throws `Error`. A callback with a struct, a variadic signature or a
+  pointer-to-pointer result is a plain pointer: pass a C function pointer, not a host callable.
 - **Value.** `Value::of_signed`, `of_unsigned`, `of_float`, `of_pointer`, `of_bytes(p, n)`; the accessors throw `Error`
   on another kind.
 - **Tests.** `tests/ffi/host.cpp` `check_library` (variadic: `snprintf` with integer, string and double extras, and a
@@ -125,6 +126,25 @@ lib.callable("vec_add");   // false: a struct by value
 - **Limits.** The whole header goes into one translation unit, so one wrapper that does not compile fails the load:
   use `only` for the functions you need. A function declared in the header but defined nowhere fails the `dlopen`
   (`RTLD_NOW`), so every referenced function must be defined by the header's libraries or by `source`.
+
+## Callbacks (Milestone 7)
+
+A parameter that is a pointer to a function with scalar parameters and result (`iufp`, result also `v`, not variadic) has
+kind `c`. The front end writes a `cb` record for it (`be/nfcxx_decl.c`, `nf_emit_cb`): the callback's result, its kinds
+and its parameters. A callback that is variadic, or has a struct parameter, keeps kind `p` (a plain pointer).
+
+- **Trampolines.** For each callback parameter the generated C has a context variable, a raw-pointer variable and a
+  trampoline with the callback's declared signature. The trampoline stores its arguments canonically (`long long`,
+  `unsigned long long`, `double`, `void *`), calls the host dispatcher `nfcffi_host_dispatch` with its context, and
+  returns the result converted to the declared type.
+- **The argument.** A host callable is passed as `Value::of_callable(fn)`; `fn` takes the arguments as `Value`s and
+  returns a `Value`. A C function pointer is passed as `Value::of_pointer` and goes straight through. `Value()` with
+  an integer 0 (or a null pointer) is nil. The wrapper picks the trampoline when the context is set, and the raw
+  pointer otherwise.
+- **Exceptions.** A callable's exception cannot cross the C frames, so the dispatcher catches it and `Library::call`
+  rethrows the first one after the C call returns.
+- **Tests.** `tests/ffi/host.cpp` `check_library` (callbacks): a callable that multiplies, a callable that writes into a
+  host list, an int/double callback, a nil callback, a wrong-kind argument, and an exception rethrown.
 
 ## Python (Milestone 6)
 
@@ -160,4 +180,5 @@ ctx.eval<long long>("python", "lib = ffi_load('/abs/dyn.h', src_text, ['add_int'
 3. (done) Calls by name: kinds per declaration, wrappers compiled with the header, `Library::call` with `Value`s.
 4. (done) Structs and unions by value, as bytes with the C layout.
 5. (done) Variadic calls: a wrapper per sequence of extra argument kinds, compiled on first use.
+   (done) Long double and 128-bit integers, as bytes. (done) Callbacks: a host callable behind a function pointer.
 6. (done) Python through `nfcpoly` (`nfcffi_poly.cpp`): `ffi_load` and `FfiLibrary.call`, with the same argument rules.
