@@ -141,7 +141,7 @@ void nf_put_unqualified_type(a_type_ptr type)
           type->variant.array.is_template_dependent_size_array) {
         fputs("?", nf_out);
       } else {
-        fprintf(nf_out, "%lu", (unsigned long)type->variant.array.variant.number_of_elements);
+        fprintf(nf_out, "%llu", (unsigned long long)type->variant.array.variant.number_of_elements);
       }
       fputc(' ', nf_out);
       nf_put_type(type->variant.array.element_type);
@@ -251,7 +251,7 @@ void nf_put_constant(a_constant_ptr constant)
           fprintf(nf_out, "(unsupported-base %d)", (int)constant->variant.address.kind);
           break;
       }
-      fprintf(nf_out, " %ld)", (long)constant->variant.address.offset);
+      fprintf(nf_out, " %lld)", (long long)constant->variant.address.offset);
       break;
     }
     case ck_aggregate: {
@@ -336,8 +336,8 @@ static void nf_put_expr(an_expr_node_ptr expr)
       fputc(')', nf_out);
       return;
     default:
-      if (nfcxx_enk_name(expr->kind) != NULL) {
-        fprintf(nf_out, "(unsupported %s)", nfcxx_enk_name(expr->kind));
+      if (nfcxx_enk_name((an_expr_node_kind)expr->kind) != NULL) {
+        fprintf(nf_out, "(unsupported %s)", nfcxx_enk_name((an_expr_node_kind)expr->kind));
       } else {
         fprintf(nf_out, "(unsupported enk-%d)", (int)expr->kind);
       }

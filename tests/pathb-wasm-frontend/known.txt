@@ -1,0 +1,10 @@
+# Files whose IR is allowed to differ between the native front end and the browser one, with the reason. The test
+# reports them as "known" (and fails if one of them stops differing, so that the entry is removed).
+#
+# _Float16 conversions: the browser build does its floating point with SoftFloat (setup-pathb.sh), the native one with
+# the host's types. A double -> _Float16 conversion that overflows or is inexact is folded by SoftFloat (to the
+# correctly rounded value: +-Infinity, 65504.0) and kept as a run-time conversion by the native build, or, in a static
+# initializer, folded to 0.0 there: f16_folds in float16_golden.inc, whose expected bits (gcc's) are the browser
+# build's (+-Infinity). The native result is the wrong one.
+tests/c/float16_gen.c
+tests/c/float16_ops.c
