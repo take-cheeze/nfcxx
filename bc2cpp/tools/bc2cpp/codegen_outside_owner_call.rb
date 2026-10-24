@@ -155,7 +155,8 @@ module OutsideOwnerCall
     return nil if mode == :strict && (map.core_dynamic_unknown.positive? || map.refusals[:core_prepend].positive?)
 
     native = map.by_name.fetch(name, Set.new)
-    return nil if native.include?(NativeOwnerMap::UNKNOWN)
+    native = factory_unknown_dropped(name, paths, native) if native.include?(NativeOwnerMap::UNKNOWN)
+    return nil if native.nil? || native.include?(NativeOwnerMap::UNKNOWN)
 
     ruby = OutsideRubyOwners.scan(Array(owner_call_world.ruby_paths))
     return nil if ruby.unknown.include?(name) || ruby.unknown.include?(:all)
@@ -173,6 +174,35 @@ module OutsideOwnerCall
     return nil if owners.empty? || owners.any? { |owner| !owner.match?(OWNER_PATH) }
 
     owners.to_a.sort
+  end
+
+  # FACTORY_UNKNOWN_NAMES: native files whose registrations on a computed class only ever land on a class their own
+  # factory makes, with exactly the names they register there. mruby-struct's make_struct gives each Struct.new
+  # class singleton `new`, `[]` and `members`; mruby-data's Data.define gives its class `new` and `members`.
+  FACTORY_UNKNOWN_NAMES = {
+    '/3rd/mruby/mrbgems/mruby-struct/src/struct.c' => %w[[] members new].freeze,
+    '/3rd/mruby/mrbgems/mruby-data/src/data.c' => %w[members new].freeze
+  }.freeze
+
+  # `native` without its UNKNOWN owner when only the factory files above contribute it and the world proves no
+  # factory-made class exists (ClosedWorld#factory_class_free?), else nil. A factory file whose UNKNOWN names drift
+  # from the table (a new registration on a computed class) keeps the UNKNOWN.
+  def factory_unknown_dropped(name, paths, native)
+    return nil unless owner_call_world.factory_class_free?
+
+    sources = paths.select { |path| native_unknown_names(path).include?(name) }
+    factory = sources.all? do |path|
+      key = FACTORY_UNKNOWN_NAMES.keys.find { |suffix| File.expand_path(path).end_with?(suffix) }
+      key && native_unknown_names(path).sort == FACTORY_UNKNOWN_NAMES.fetch(key).sort
+    end
+    factory && !sources.empty? ? native - [NativeOwnerMap::UNKNOWN] : nil
+  end
+
+  # The names `path` registers on a class the owner map cannot name.
+  def native_unknown_names(path)
+    @native_unknown_names ||= {}
+    @native_unknown_names[path] ||= NativeOwnerMap.build([path]).by_name
+                                                  .select { |_, owners| owners.include?(NativeOwnerMap::UNKNOWN) }.keys
   end
 
   def program_core_ruby_paths
