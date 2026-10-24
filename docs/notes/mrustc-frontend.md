@@ -26,10 +26,10 @@ the program, and each crate of MRUSTC_NFCC_CRATES (cached as build/mrustc/nfcxx/
 `scripts/mrustc-nfcc.sh prog.rs -o prog` builds the program. `MRUSTC_NFCC_CRATES` names the crates to compile through
 nfcxx (`core alloc std`, or `all`); `MRUSTC_NFCC_CORE=1` is `core` alone. A crate is rebuilt when its C file or the
 rewrite scripts are newer than its object. `scripts/setup-mrustc.sh` builds mrustc and the 1.90 standard library into
-`build/mrustc/src` (pinned commit `f9dea5d4` on take-cheeze/mrustc branch `nfcxx/mold3`: upstream `d85e86b` plus the
+`build/mrustc/src` (pinned commit `417733f9` on take-cheeze/mrustc branch `nfcxx/lifted-private`: upstream `d85e86b` plus the
 fixes in that branch's `NFCXX-FIXES.md`, rows 22 to 41 being the ones mold 3 needed, section 7; from the mrustc
 `build-1.90.0.sh` steps, with `MRUSTC_REPO` to override the repository). The census and the rewrites were re-run on this
-pin: `tests/mrustc/run.sh` (15 of 15) and `tests/realworld/run_mrustc.sh regex` pass. The driver takes `MRUSTC` and
+pin: `tests/mrustc/run.sh` (16 of 16) and `tests/realworld/run_mrustc.sh regex` pass. The driver takes `MRUSTC` and
 `MRUSTC_STD` to use another build. The edition defaults to 2021.
 
 Three choices in the first step matter:
@@ -231,7 +231,7 @@ mold 3.0.0 (rui314/mold, the Rust rewrite; `cargo vendor` of its lock file, x86-
 and with `--pipeline` the second too.
 
 - **mrustc's minicargo, gcc codegen.** mrustc needed the 20 fixes of rows 22 to 41 of `NFCXX-FIXES.md` on branch
-  `nfcxx/mold3`:
+  `nfcxx/mold3` (and its follow-up `nfcxx/lifted-private`):
   - minicargo: git dependencies from the vendor directory, workspace `default-members` and `version.workspace`, the
     `cargo::` build-script syntax;
   - `asm!` template pieces built by macros, and the operand modifiers `x l h y z` (portable-atomic);
@@ -239,7 +239,7 @@ and with `--pipeline` the second too.
     omitted const arguments, a renamed method generic in the placeholder matcher, raw pointers never deref-coercing,
     custom receivers (`self: &mut &mut Self`), closures keeping bounds on const generics (rayon, either, cc, zstd-safe);
   - lifetime inference of `impl Trait` in trait methods, async block captures;
-  - generic statics evaluated per instantiation, lifted statics made global (mold's `Target` constants);
+  - generic statics evaluated per instantiation, lifted statics always emitted (mold's `Target` constants; a first version made them global, and glob re-exports then imported core's into alloc);
   - an impl parameter fixed by a later bound (rayon's `flat_map_iter`);
   - a cap on the paths of `MIR_Validate_ValState` (mold's lib crate reached 13.8 GB without it, about 1.2 GB with it).
 

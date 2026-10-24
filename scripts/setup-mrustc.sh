@@ -8,11 +8,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD; work=$root/build/mrustc; src=$work/src
-# take-cheeze/mrustc, branch nfcxx/mold3: nfcxx/patches 2dfe9ccb (the tracking branch: nfcxx/fixes, upstream
-# thepowersgang/mrustc d85e86b plus nfcxx's fixes, plus the open bug PRs) and the fixes that build mold 3 (bugs 22 to 41 of
-# NFCXX-FIXES.md, one commit each). MRUSTC_REPO overrides the repository.
+# take-cheeze/mrustc, branch nfcxx/lifted-private: nfcxx/patches (the tracking branch: nfcxx/fixes, upstream
+# thepowersgang/mrustc d85e86b plus nfcxx's fixes, plus the open bug PRs, with the fixes that build mold 3: bugs 22 to 41
+# of NFCXX-FIXES.md, one commit each) and bug 41 redone so that lifted statics stay private. MRUSTC_REPO overrides the
+# repository.
 url=${MRUSTC_REPO:-https://github.com/take-cheeze/mrustc}
-pin=f9dea5d4
+pin=417733f9
 jobs=${PARLEVEL:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
 
 if [ "${FORCE:-}" != 1 ] && [ -x "$src/bin/mrustc" ] && [ -f "$src/output-1.90.0/libstd.rlib.o" ]; then
