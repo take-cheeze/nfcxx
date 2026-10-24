@@ -454,6 +454,12 @@ def foreign_mrblib_srcs(gems_root)
     Dir["#{gems_root}/3rd/mruby-stringio/mrblib/**/*.rb"]
 end
 
+# CORE_COMPARE: every core mrbgem's mrblib, program core included. foreign_mrblib_srcs leaves out
+# mruby-hash-ext, but its Hash subset tests are the other Ruby definers of `< <= > >=` the operator model expects.
+def core_mrbgem_mrblib_srcs(gems_root)
+  Dir["#{gems_root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"]
+end
+
 # CLOSED_WORLD: the builds that ship RPG2000/2003 only
 # (build_config.rb's single_format_only). Their games carry no Ruby, so the
 # only Ruby that can run is the closed world plus the build's own gems.

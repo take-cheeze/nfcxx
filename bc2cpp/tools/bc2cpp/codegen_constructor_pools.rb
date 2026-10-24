@@ -29,15 +29,20 @@ require_relative 'bytecode_ir_ops'
 #   * D's class and every class running D has a plain declared-class chain to Object (an Exception subclass is
 #     built by `raise`), is not opaque, and no native or foreign Ruby source spells its root and last segment.
 #
-# Only positions 1..mand are candidates: positions past them are optional parameters whose default code may
-# read a later one. A keyword or post-mandatory parameter leaves D out.
+# Positions 1..mand are candidates. An optional position mand+k is one only under CONSTRUCTOR_OPTIONALS (see
+# constructor_optional_positions): every default is a literal load, so no default code reads a later argument's
+# ENTER slot, and only the sites that pass position mand+k contribute to it. A post-mandatory parameter leaves D out.
 #
 # BC2CPP_CONSTRUCTOR_POOLS=0 turns it off.
 class CodeGen
   # Ops that name a method without calling it, so the name can reach a body with arguments nobody sees.
   CONSTRUCTOR_NAMING_OPS = %w[LOADSYM ALIAS KARG KEY_P].freeze
 
-  # [irep label, mandatory argument position] => [sites, position], as entry_arg_candidates.
+  # Ops a CONSTRUCTOR_OPTIONALS default may consist of: each writes its leading register and reads none.
+  CONSTRUCTOR_LITERAL_DEFAULT_OPS = (BytecodeIR::Ops::LOADI_OPS | Set['LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADSYM', 'LOADL',
+                                                                    'STRING']).freeze
+
+  # [irep label, argument position] => [sites, position], as entry_arg_candidates.
   def constructor_pool_candidates
     return @constructor_pool_candidates if defined?(@constructor_pool_candidates)
 
@@ -63,8 +68,47 @@ class CodeGen
     status = @constructor_pool_status[label]
     return [[], nil] if status == :no_sites
     return [nil, status || 'not an initialize of a declared class'] unless status == :ok
+    # A zero-argument `new` is no site here (constructor_new_site), so an initialize without mandatory positions
+    # has entries the list would miss.
+    return [nil, 'only optional positions are pooled'] if mandatory_arity(@ireps[label]).zero?
 
     [@constructor_pool_candidates.fetch([label, 1]).first, nil]
+  end
+
+  # BC2CPP_CTOR_OPTIONALS=0 pools mandatory positions only (the rule before CONSTRUCTOR_OPTIONALS).
+  def constructor_optionals_enabled?
+    ENV.fetch('BC2CPP_CTOR_OPTIONALS', '1') != '0'
+  end
+
+  # CONSTRUCTOR_OPTIONALS: the optional positions mand+1..mand+opt of +irep+, or [] unless each default is one literal
+  # load into its own register. vm.c OP_ENTER jumps past the defaults of the passed positions (the JMP table after it),
+  # so an omitted position's register holds its default from then on and a passed one's holds the argument; a default
+  # that read a register could see a later position's slot before ENTER's caller value or its own default is there.
+  def constructor_optional_positions(irep)
+    return [] unless constructor_optionals_enabled?
+
+    mand = mandatory_arity(irep)
+    opt, _table, targets = optional_arg_table(irep)
+    return [] unless opt.positive? && targets
+
+    program = BytecodeIR.for(irep)
+    starts = targets.map { |addr| program.address_to_index[addr] }
+    return [] unless starts.all? && starts.each_cons(2).all? { |a, b| a < b }
+
+    literal = (0...opt).all? do |i|
+      (starts[i]...starts[i + 1]).all? do |j|
+        insn = program.source_at(j)
+        CONSTRUCTOR_LITERAL_DEFAULT_OPS.include?(insn.op) && insn.reg.to_i == mand + 1 + i
+      end
+    end
+    literal ? (mand + 1..mand + opt).to_a : []
+  end
+
+  # Does a site pass its arguments with literal keywords (CONSTRUCTOR_KEYWORDS)? For an initialize without keyword
+  # parameters vm.c OP_ENTER appends those keywords as one more positional Hash, which an optional position takes.
+  def constructor_keyword_site?(site)
+    irep, idx, = site
+    !constructor_keyword_argc(BytecodeIR.for(irep).source_at(idx)).nil?
   end
 
   # The class whose instance `self` is in the body +label+ (blocks included), or nil.
@@ -239,7 +283,24 @@ class CodeGen
       @constructor_pool_status[d.irep] = status
       next unless status == :ok
 
-      (1..mandatory_arity(@ireps[d.irep])).each { |k| @constructor_pool_candidates[[d.irep, k]] = [here, k] }
+      irep = @ireps[d.irep]
+      (1..mandatory_arity(irep)).each { |k| @constructor_pool_candidates[[d.irep, k]] = [here, k] }
+      constructor_optional_candidates(d, irep, here)
+    end
+  end
+
+  # CONSTRUCTOR_OPTIONALS: optional position k pools the sites that pass it (positional argc >= k); a site that omits
+  # it runs the default instead. Nothing is added when no site passes k, or when a keyword site can put its Hash there.
+  def constructor_optional_candidates(d, irep, here)
+    positions = constructor_optional_positions(irep)
+    return if positions.empty?
+
+    fields = irep.enter.enter_fields.map(&:to_i)
+    return if fields[4..5].all?(&:zero?) && here.any? { |site| constructor_keyword_site?(site) }
+
+    positions.each do |k|
+      passing = here.select { |(_ir, _i, _recv, argc, _own)| argc >= k }
+      @constructor_pool_candidates[[d.irep, k]] = [passing, k] unless passing.empty?
     end
   end
 
@@ -281,7 +342,8 @@ class CodeGen
     # CONSTRUCTOR_KEYWORDS: keyword parameters (fields 4 and 5) leave positions 1..mand alone (vm.c OP_ENTER keeps the
     # caller's keywords in a separate kdict register when the callee accepts any), so only a post-mandatory parameter
     # is still refused. With the switch off the old rule refuses all three.
-    return [:arity, nil] unless mand.positive? && fields[3].to_i.zero? && (constructor_keywords_enabled? || fields[4..5].all? { |f| f.to_i.zero? })
+    return [:arity, nil] unless (mand.positive? || constructor_optional_positions(irep).any?) && fields[3].to_i.zero? &&
+                                (constructor_keywords_enabled? || fields[4..5].all? { |f| f.to_i.zero? })
     return [broken[d.irep], nil] if broken[d.irep]
 
     reach = constructor_reach(d)
@@ -298,7 +360,9 @@ class CodeGen
     return ['new with a splat or keyword', nil] if rooted.any? { |_root, argc, _site| argc.nil? }
 
     here = (found[:sites][d.irep] + rooted.map(&:last)).select { |(_ir, _i, _recv, argc, _own)| enters.call(argc) }
-    return [:no_sites, nil] if here.empty?
+    # :no_sites means no Ruby `new`/`super` enters D at all (ENTRY_SEEDS relies on it). A zero-argument `new` is never
+    # a site, so without mandatory positions an empty list proves no such thing.
+    return [(mand.zero? ? 'no site passes an argument' : :no_sites), nil] if here.empty?
 
     [:ok, here]
   end
