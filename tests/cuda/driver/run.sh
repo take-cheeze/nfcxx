@@ -28,26 +28,33 @@ ok "cuda-driver-shim: $(grep -c '^X(' "$(dirname "$shim")/nfcxx_cudrv_table.inc"
 fake=$tmp/fake; mkdir -p "$fake/lib64"; ln -s "$(cd "$cuda/include" && pwd)" "$fake/include"
 gcc -shared -fPIC $d/fakecudart.c -Wl,-soname,libcudart.so.12 -o "$fake/lib64/libcudart.so.12" &&
   ln -s libcudart.so.12 "$fake/lib64/libcudart.so" || { bad "stand-in libcudart"; exit 1; }
-gcc -c -DCUDA_API_PER_THREAD_DEFAULT_STREAM -I"$cuda/include" $d/drv_ptds.c -o "$tmp/drv_ptds.o" || { bad "drv_ptds.c"; exit 1; }
-check() {  # check NAME EXE
-  local out
-  out=$("$2" 2>&1)
-  if [ "$out" != "$(cat $d/expected.txt)" ]; then bad "$1" "$(diff $d/expected.txt <(echo "$out"))"; return; fi
-  case $(readelf -dW "$2" | grep NEEDED) in *libcuda.so*) bad "$1: needs libcuda" ;; *) ok "$1" ;; esac
-}
-if out=$(gcc -I"$cuda/include" $d/drv.c "$tmp/drv_ptds.o" "$shim" -L"$fake/lib64" -lcudart -Wl,-rpath,"$fake/lib64" -o "$tmp/gcc" 2>&1); then
-  check "gcc with the shim archive" "$tmp/gcc"
-else bad "gcc with the shim archive (build)" "$out"; fi
-for be in $backends; do
-  if out=$(CUDA_HOME=$fake NFCXX_BACKEND=$be ./nfcc --cuda-driver=cudart -I"$cuda/include" $d/drv.c "$tmp/drv_ptds.o" -lcuda \
-             -Wl,-rpath,"$fake/lib64" -o "$tmp/nfcc-$be" 2>&1); then check "nfcc $be --cuda-driver=cudart" "$tmp/nfcc-$be"
-  else bad "nfcc $be --cuda-driver=cudart (build)" "$out"; fi
-  if [ -x "${EDG_BUILD:-build/edg}/bin/eccp" ]; then
-    if out=$(CUDA_HOME=$fake NFCXX_BACKEND=$be ./nfcxx -I"$cuda/include" $d/drv.cpp "$tmp/drv_ptds.o" -lcuda \
-               -o "$tmp/nfcxx-$be" 2>&1); then check "nfcxx $be (the default)" "$tmp/nfcxx-$be"
-    else bad "nfcxx $be (the default; build)" "$out"; fi
-  fi
-done
+# drv.c and expected.txt are the 12.9 headers' calls and versions (cuCtxCreate takes 3 arguments there, 4 in 13.x;
+# cuEventElapsedTime_v2 is new in 12.8): other headers run the cases below only.
+hver=$(sed -n 's/^#define CUDA_VERSION \([0-9]*\).*/\1/p' "$cuda/include/cuda.h")
+if [ "$hver" = 12090 ]; then
+  gcc -c -DCUDA_API_PER_THREAD_DEFAULT_STREAM -I"$cuda/include" $d/drv_ptds.c -o "$tmp/drv_ptds.o" || { bad "drv_ptds.c"; exit 1; }
+  check() {  # check NAME EXE
+    local out
+    out=$("$2" 2>&1)
+    if [ "$out" != "$(cat $d/expected.txt)" ]; then bad "$1" "$(diff $d/expected.txt <(echo "$out"))"; return; fi
+    case $(readelf -dW "$2" | grep NEEDED) in *libcuda.so*) bad "$1: needs libcuda" ;; *) ok "$1" ;; esac
+  }
+  if out=$(gcc -I"$cuda/include" $d/drv.c "$tmp/drv_ptds.o" "$shim" -L"$fake/lib64" -lcudart -Wl,-rpath,"$fake/lib64" -o "$tmp/gcc" 2>&1); then
+    check "gcc with the shim archive" "$tmp/gcc"
+  else bad "gcc with the shim archive (build)" "$out"; fi
+  for be in $backends; do
+    if out=$(CUDA_HOME=$fake NFCXX_BACKEND=$be ./nfcc --cuda-driver=cudart -I"$cuda/include" $d/drv.c "$tmp/drv_ptds.o" -lcuda \
+               -Wl,-rpath,"$fake/lib64" -o "$tmp/nfcc-$be" 2>&1); then check "nfcc $be --cuda-driver=cudart" "$tmp/nfcc-$be"
+    else bad "nfcc $be --cuda-driver=cudart (build)" "$out"; fi
+    if [ -x "${EDG_BUILD:-build/edg}/bin/eccp" ]; then
+      if out=$(CUDA_HOME=$fake NFCXX_BACKEND=$be ./nfcxx -I"$cuda/include" $d/drv.cpp "$tmp/drv_ptds.o" -lcuda \
+                 -o "$tmp/nfcxx-$be" 2>&1); then check "nfcxx $be (the default)" "$tmp/nfcxx-$be"
+      else bad "nfcxx $be (the default; build)" "$out"; fi
+    fi
+  done
+else
+  echo "skip the stand-in runtime cases (cuda.h is $hver; they are written for 12090)"
+fi
 # --cuda-driver=libcuda keeps libcuda (a stub of it here, as the toolkit's lib64/stubs/libcuda.so).
 mkdir -p "$fake/lib64/stubs"
 gcc -shared -fPIC $d/stub.c -Wl,-soname,libcuda.so.1 -o "$fake/lib64/stubs/libcuda.so" || bad "libcuda stub"
@@ -79,9 +86,9 @@ else
   echo "skip CMake (no cmake)"
 fi
 # -c: no link, nothing to replace.
-if out=$(./nfcc --cuda-driver=cudart -c -I"$cuda/include" $d/drv.c -o "$tmp/drv.o" 2>&1) && [ -f "$tmp/drv.o" ]; then ok "nfcc --cuda-driver=cudart -c"
+if out=$(./nfcc --cuda-driver=cudart -c -I"$cuda/include" $d/real.c -o "$tmp/drv.o" 2>&1) && [ -f "$tmp/drv.o" ]; then ok "nfcc --cuda-driver=cudart -c"
 else bad "nfcc --cuda-driver=cudart -c" "$out"; fi
-out=$(./nfcc --cuda-driver=nvidia -c $d/drv.c -o "$tmp/x.o" 2>&1; echo "rc=$?")
+out=$(./nfcc --cuda-driver=nvidia -c -I"$cuda/include" $d/real.c -o "$tmp/x.o" 2>&1; echo "rc=$?")
 case $out in *"cudart or libcuda"*"rc=2"*) ok "an unknown --cuda-driver is refused" ;; *) bad "unknown --cuda-driver" "$out" ;; esac
 
 # The real libcudart.

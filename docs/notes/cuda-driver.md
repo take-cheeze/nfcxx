@@ -38,7 +38,7 @@ gcc app.c $(scripts/cuda-driver-shim $CUDA_HOME/include) -L$CUDA_HOME/lib64 -lcu
 ```
 
 The PyPI wheel directory of `scripts/fetch-cuda-libs.sh` works as the toolkit. Test: `tests/cuda/driver/run.sh` (CI:
-cuda.yml).
+cuda.yml); on a GPU, `tests/cuda/gpu/run.sh` (by hand).
 
 ## How
 
@@ -70,7 +70,10 @@ it is too old for the version. `cuGetErrorString` and `cuGetErrorName` fall back
   `cuCtxCreate` and `cuCtxCreate_v4`, both `cuDeviceGetUuid` and `cuEventElapsedTime` versions, `cuLaunchKernel` with
   eleven arguments (five on the stack), a function the "driver" is too old for, one it lacks (twice: one lookup), and
   `cuStreamQuery`/`cuMemcpy` per-thread; the output is `expected.txt`. Built by gcc with the archive, by nfcc with
-  `--cuda-driver=cudart` and by nfcxx with the default, both backends each.
+  `--cuda-driver=cudart` and by nfcxx with the default, both backends each. These cases run with the 12.9 headers only
+  (`CUDA_VERSION` 12090), the ones `drv.c` and `expected.txt` are written for: the versions asked for differ with other
+  headers, 12.6 has no `cuEventElapsedTime_v2`, and 13.x's `cuCtxCreate` takes four arguments. Other headers skip them
+  and run the rest.
 - `--cuda-driver=libcuda` keeps libcuda (`DT_NEEDED` libcuda.so.1, from a stub like the toolkit's `lib64/stubs`).
 - A CMake project (`cmake/`) that links `CUDA::cuda_driver`, configured with nfcc as its C compiler: by default the
   link needs libcudart.so.12 and not libcuda.so.1 and the calls reach the (stand-in) runtime; with
@@ -85,9 +88,38 @@ it is too old for the version. `cuGetErrorString` and `cuGetErrorName` fall back
 Checked by hand: the same CMake project with libcuda kept cannot start without a driver ("libcuda.so.1: cannot open
 shared object file"); through libcudart it prints `cuInit CUDA_ERROR_NO_DEVICE devices none` with the real libcudart.
 
-Not run: a real driver on a GPU. The session that wrote this had none, so the success path through the real libcudart
-and libcuda.so.1 is covered by the stand-in only. A stand-in libcuda.so.1 was tried and does not work: libcudart needs
-the driver's private export tables (`cuGetExportTable`) before it hands out an entry point.
+On a GPU (RTX 5050, sm_120, driver 615.71 with CUDA 13.4 support; by hand): `tests/cuda/driver/run.sh` passes with the
+12.9 PyPI toolkit (all 14 cases; `cuInit CUDA_SUCCESS` with the real libcudart, plain and bundled) and with the 12.6 and
+13.4 toolkits (the real-libcudart cases, `libcudart_static` included: 462 and 526 shim functions).
+`tests/cuda/gpu/run.sh` ("cuBLAS and cuDNN on a GPU" below) runs cuBLAS and cuDNN through the shim. A stand-in
+libcuda.so.1 was tried and does not work: libcudart needs the driver's private export tables (`cuGetExportTable`)
+before it hands out an entry point, so the success path needs a real driver.
+
+## cuBLAS and cuDNN on a GPU (`tests/cuda/gpu/run.sh`, by hand)
+
+`blas_dnn.c` makes driver calls (`cuInit`, `cuDeviceGetName`, `cuDeviceGetAttribute`, `cuCtxGetCurrent`,
+`cuMemGetInfo`), a cuBLAS SGEMM (257x65x129) and a cuDNN convolution (`cudnnConvolutionForward`, the algorithm
+`cudnnGetConvolutionForwardAlgorithm_v7` picks), each checked against a CPU reference, and is linked with
+`-lcublas -lcudnn -lcudart -lcuda`. Built by gcc (the reference, which needs libcuda.so.1), by nfcc (gcc backend) and by
+nfcxx (both backends):
+
+- the program runs on the GPU and the nfcc and nfcxx builds do not need libcuda.so.1;
+- with the driver hidden (bwrap binds `libcuda.so*` and `libnvidia*.so*` to `/dev/null`) the nfcc and nfcxx builds start
+  and report `cuInit CUDA_ERROR_NO_DEVICE`; the gcc build cannot start;
+- bundled (`--bundle-libs --bundle-stubs`, `bundle.md`), with cuDNN's dlopen'ed libraries and libcublasLt as files
+  beside the stubs, it runs in a sandbox without the toolkit and with the system's cuDNN, cuBLAS, cudart and libstdc++
+  hidden: glibc, libgcc_s and the driver only (60 MB with CUDA 13.4 and cuDNN 9.27, 105 MB with the 12.9 wheels).
+
+Run with CUDA 13.4 and the system cuDNN, and with the 12.9 PyPI toolkit (`CUDA_HOME=` and `CUDNN_INCLUDE=`/
+`CUDNN_LIB=` its `include` and `lib64`). Two things the bundle needs, both from cuDNN's `dlopen`s (`bundle.md`,
+"Plugins and stubs"): libcublasLt is excluded from the bundle (`--bundle-exclude`), because cuDNN dlopens it by name
+and looks its functions up in that handle, which a stub cannot answer; and cuDNN's libraries are copied under every
+name (`libcudnn_graph.so.9.27.0` as well as `.so.9`), because cuDNN asks for the full version first and would
+otherwise take a system cuDNN of the same version, built for another CUDA major, which asks for another libcublasLt.
+
+nfcc with the QBE backend cannot compile `cuda_runtime.h`: `crt/host_defines.h` stops with "UNKNOWN COMPILER: please
+provide a CUDA compatible definition for '__align__'" (it knows gcc, clang, MSVC and a few others, and cproc defines
+none of their macros). Programs that use only `cuda.h` (`real.c`, `drv.c`) build there.
 
 ## Limits
 

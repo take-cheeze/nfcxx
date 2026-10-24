@@ -1,0 +1,7 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "both" (returns void) (nothrow) (noescape) (closed) (args (init int) (read int)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4)
+
+(decl $"x" val) (store int $"x" (const int 7))(eval (call void &"both" $"x" $"x"))(return (const int 0))
+)

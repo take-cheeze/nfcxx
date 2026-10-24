@@ -233,12 +233,83 @@ class BorrowLayouts
   end
 end
 
+# Closed summaries are trusted contracts, not a verification of callee bodies.
+# Keep this validator synchronized across the three standalone IR tools.
+class BorrowCallEffects
+  def initialize(forms, layouts, bad, refused)
+    @entries = {}
+    forms.each do |f|
+      next unless f.is_a?(Array) && f[0] == 'call-effects'
+      unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
+             f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
+             f[6].is_a?(Array) && f[6][0] == 'args'
+        raise bad, 'call-effects form'
+      end
+      name = f[1].to_s
+      raise bad, "duplicate call effects #{name}" if @entries.key?(name)
+      unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
+        raise refused, 'call contracts require nothrow, noescape, and closed effects'
+      end
+      result = f[2][1]
+      alias_result = f[2][2]
+      unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
+        raise refused, 'call effects support only void or scalar results'
+      end
+      args = f[6].drop(1)
+      args.each do |arg|
+        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
+          raise bad, 'call argument effect form'
+        end
+        ty = arg[1]
+        if arg[0] == 'value'
+          unless ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
+            raise refused, 'value effects require nonpointer scalar arguments'
+          end
+        elsif ty.is_a?(Array) && ty[0] == 'struct' && !layouts.lookup(ty)
+          raise refused, 'call aggregate effects require semantic layouts'
+        else
+          layouts.field_type(ty, [])
+        end
+      end
+      if alias_result
+        unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+               alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
+               %w[shared exclusive].include?(alias_result[3])
+          raise bad, 'returned alias contract form'
+        end
+        index = layouts.number(alias_result[1])
+        offset = layouts.number(alias_result[2])
+        source = args[index]
+        unless source && %w[read write].include?(source[0])
+          raise refused, 'returned aliases require a read or write source argument'
+        end
+        if alias_result[3] == 'exclusive' && source[0] != 'write'
+          raise refused, 'exclusive returned aliases require a write source argument'
+        end
+        width = layouts.field_type(result[1], [])[:size]
+        if offset + width > layouts.field_type(source[1], [])[:size]
+          raise refused, 'returned alias range escapes its source argument'
+        end
+        alias_result = {arg: index, offset: offset, kind: alias_result[3]}
+      elsif result.is_a?(Array)
+        raise refused, 'call effects support only void or scalar results'
+      end
+      @entries[name] = {result: result, args: args, alias: alias_result}
+    end
+  end
+
+  def lookup(name)
+    @entries[name]
+  end
+end
+
 class LocalLifetime
   attr_reader :errors
 
-  def initialize(f, infer_loan_ends = false, semantic_layouts = nil)
+  def initialize(f, infer_loan_ends = false, semantic_layouts = nil, call_effects = nil)
     @infer_loan_ends = infer_loan_ends
     @layouts = semantic_layouts || BorrowLayouts.new([], BadIR, BorrowRefused)
+    @call_effects = call_effects || BorrowCallEffects.new([], @layouts, BadIR, BorrowRefused)
     raise BadIR, 'function header' unless f.length >= 4 && bh(f[2]) == 'ret' && bh(f[3]) == 'params'
     @name = bname(f[1])
     @slots = {}
@@ -253,8 +324,14 @@ class LocalLifetime
     @declared = {}
     @loans = {}
     @drops = {}
+    @register_types = {}
     scan = lambda do |x|
       return unless x.is_a?(Array)
+      if %w[param let set].include?(bh(x)) && x.length == 4 && x[1].is_a?(String)
+        ty = bh(x) == 'param' ? x[3] : x[2]
+        list = (@register_types[x[1]] ||= [])
+        list << ty unless list.any? { |old| same_type?(old, ty) }
+      end
       if bh(x) == 'decl' && x[1].is_a?(IRSym) && x[1].sig == '$'
         @declared[x[1].name] = true
       end
@@ -265,6 +342,29 @@ class LocalLifetime
         place = direct_place(x[4])
         raise BorrowRefused, 'borrow requires a direct local place or constant field offset; use reborrow with an explicit parent' unless place
         @loans[id] = [place[0], x[3], nil, place[1], x[1][1], x[1][1]]
+      end
+      if bh(x) == 'call-borrow'
+        unless x.length >= 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) &&
+               x[4].is_a?(IRSym) && x[4].sig == '&'
+          raise BadIR, 'call-borrow form'
+        end
+        summary = @call_effects.lookup(x[4].name)
+        raise BorrowRefused, 'call-borrow requires a returned alias contract' unless summary && summary[:alias]
+        raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
+        a = summary[:alias]
+        source = x[5 + a[:arg]]
+        raise BadIR, 'call arity disagrees with its effect contract' unless x.length - 5 == summary[:args].length
+        id = bname(x[2])
+        raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
+        if x[3] == 'root'
+          place = direct_place(source)
+          raise BorrowRefused, 'root returned aliases require a direct local place' unless place
+          @loans[id] = [place[0], a[:kind], nil, place[1] + a[:offset], x[1][1], x[1][1]]
+        elsif bh(x[3]) == 'parent' && x[3].length == 2 && x[3][1].is_a?(IRStr)
+          @loans[id] = [nil, a[:kind], bname(x[3][1]), expression_offset(source) + a[:offset], x[1][1], x[1][1]]
+        else
+          raise BadIR, 'call-borrow parent form'
+        end
       end
       if bh(x) == 'reborrow'
         raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
@@ -464,13 +564,17 @@ class LocalLifetime
     @view_ids[pair]
   end
 
-  def write_memory(root, off, width, state, provenance = nil)
+  def forget_pointer_values(root, off, width, state)
     prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
     state.keys.each do |key|
       next unless key.start_with?(prefix)
       parts = key.split(':')
       state[key] = ['unknown'] if overlaps(off, width, parts[2].to_i, parts[3].to_i)
     end
+  end
+
+  def write_memory(root, off, width, state, provenance = nil)
+    forget_pointer_values(root, off, width, state)
     width.times do |i|
       key = byte_key(root, off + i)
       state[key] = (state[key] || ['dead']).map { |s| s == 'dead' ? s : 'initialized' }.uniq.sort
@@ -570,12 +674,7 @@ class LocalLifetime
       guarded[key] = ['initialized']
     end
     access(place, guarded, true, 'exclusive', width, d[:type])
-    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
-    state.each do |key, values|
-      next unless key.start_with?(prefix)
-      parts = key.split(':')
-      record_loan_values(values) if overlaps(off, width, parts[2].to_i, parts[3].to_i)
-    end
+    record_memory_loan_values(root, off, width, state)
     width.times do |i|
       key = byte_key(root, off + i)
       state[key] = if flags == ['live']
@@ -724,6 +823,157 @@ class LocalLifetime
     @record_defs << id if @record_defs && !@record_defs.include?(id)
   end
 
+  def record_memory_loan_values(root, off, width, state)
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.each do |key, values|
+      next unless key.start_with?(prefix)
+      parts = key.split(':')
+      record_loan_values(values) if overlaps(off, width, parts[2].to_i, parts[3].to_i)
+    end
+  end
+
+  def scalar_abi_class(ty)
+    return 's' if ty == 'float'
+    return 'd' if ty == 'double'
+    return nil unless ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
+    BorrowLayouts::PRIMITIVES[ty] <= 4 ? 'w' : 'l'
+  end
+
+  def check_memory_argument_abi(arg)
+    return if arg.is_a?(IRSym)
+    return check_memory_argument_abi(arg[1]) if bh(arg) == 'offset'
+    actual = @register_types[arg] || []
+    unless !actual.empty? && actual.all? { |t| bh(t) == 'ptr' || scalar_abi_class(t) == 'l' }
+      raise BorrowRefused, 'memory call argument does not have a pointer ABI class'
+    end
+  end
+
+  def check_value_argument(arg, ty)
+    actual = bh(arg) == 'const' ? [arg[1]] : (@register_types[arg] || [])
+    if actual.empty? || actual.any? { |t| scalar_abi_class(t) != scalar_abi_class(ty) }
+      raise BorrowRefused, 'value call argument ABI class disagrees with its contract'
+    end
+  end
+
+  def apply_call_output(root, off, width, ty, state, initialize)
+    required = semantic_bytes(root, off, ty) || (0...width).to_a
+    mask = {}
+    required.each { |i| mask[i] = true }
+    forget_pointer_values(root, off, width, state)
+    width.times do |i|
+      key = byte_key(root, off + i)
+      if mask[i]
+        state[key] = state[key].map { |v| v == 'dead' ? v : 'initialized' }.uniq.sort if initialize
+      else
+        # A typed mutation/construction does not promise to preserve or define
+        # padding, even when the caller had initialized those bytes earlier.
+        state[key] = state[key].map { |v| v == 'dead' ? v : 'uninitialized' }.uniq.sort
+      end
+    end
+  end
+
+  def apply_call(x, state, returned_id = nil)
+    unless x.length >= 3 && x[2].is_a?(IRSym) && x[2].sig == '&'
+      raise BorrowRefused, 'contracted calls require direct function symbols'
+    end
+    summary = @call_effects.lookup(x[2].name)
+    raise BorrowRefused, 'calls require lifetime/effect contracts' unless summary
+    raise BadIR, 'call return type disagrees with its effect contract' unless same_type?(x[1], summary[:result])
+    raise BorrowRefused, 'returned aliases require call-borrow' if summary[:alias] && !returned_id
+    args = x.drop(3)
+    raise BadIR, 'call arity disagrees with its effect contract' unless args.length == summary[:args].length
+    resolved = []
+    args.each_with_index do |arg, i|
+      mode, ty = summary[:args][i]
+      origins = value(arg, state)
+      if mode == 'value'
+        raise BorrowRefused, 'value call argument carries pointer provenance' unless origins.empty?
+        check_value_argument(arg, ty)
+        resolved << [mode, ty, []]
+        next
+      end
+      raise BorrowRefused, 'memory call arguments require known local provenance' if origins.empty? || origins.any? { |p| !address(p) }
+      check_memory_argument_abi(arg)
+      if mode != 'read' && origins.length != 1
+        raise BorrowRefused, 'mutating call arguments require one known local place'
+      end
+      places = origins.map do |p|
+        root, off, own = address(p)
+        width = type_width(ty, root, off)
+        check_range(root, off, width)
+        semantic_bytes(root, off, ty)
+        [p, root, off, width, own]
+      end
+      resolved << [mode, ty, places]
+    end
+    # Summaries do not prescribe an evaluation order within the callee. Reject
+    # overlapping mutation footprints before any postcondition can initialize,
+    # overwrite, or consume memory that another argument still needs.
+    resolved.each_with_index do |left, i|
+      resolved.drop(i + 1).each do |right|
+        next if left[0] == 'read' && right[0] == 'read'
+        left[2].each do |a|
+          right[2].each do |b|
+            if a[1] == b[1] && overlaps(a[2], a[3], b[2], b[3])
+              raise BorrowRefused, 'overlapping mutating call arguments require an aliasing contract'
+            end
+          end
+        end
+      end
+    end
+    resolved.each do |mode, ty, places|
+      places.each do |origin, root, off, width, own|
+        case mode
+        when 'read'
+          access(origin, state, true, nil, width, ty)
+          record_memory_loan_values(root, off, width, state)
+        when 'write'
+          # A mutation requires an existing initialized value and preserves its
+          # ownership identity; its resulting pointer contents are unknown.
+          access(origin, state, true, 'exclusive', width, ty)
+          record_memory_loan_values(root, off, width, state)
+          # The access is mutable even when its input representation is read.
+          if own && @loans[own][1] == 'shared'
+            diagnostic('write-through-shared-loan', own)
+          end
+          apply_call_output(root, off, width, ty, state, false)
+        when 'init'
+          access(origin, state, false, nil, width, ty)
+          track_drop_write(root, off, width, state)
+          apply_call_output(root, off, width, ty, state, true)
+        when 'consume'
+          raise BorrowRefused, 'consume calls require an unborrowed owned place' if own
+          match = @drops.find do |id, d|
+            d[:root] == root && d[:off] == off && d[:width] == width && same_type?(d[:type], ty)
+          end
+          raise BorrowRefused, 'consume call has no matching drop obligation' unless match
+          drop_event(['drop-state', IRStr.new(match[0].bytes)], state)
+        end
+      end
+    end
+    return [] unless returned_id
+    loan = @loans[returned_id]
+    a = summary[:alias]
+    sources = resolved[a[:arg]][2]
+    raise BorrowRefused, 'returned alias requires one known source place' unless sources.length == 1
+    origin = sources[0][0]
+    parent = loan[2]
+    if parent && base_origin(origin) != 'loan:' + parent
+      raise BorrowRefused, 'returned alias source must preserve declared parent identity'
+    end
+    projected = project(origin, a[:offset])
+    actual = address(projected)
+    unless actual && actual[0] == loan[0] && actual[1] == loan[3] && (parent || actual[2].nil?)
+      raise BorrowRefused, 'returned alias source does not match its declared range'
+    end
+    record_loan_definition(returned_id)
+    diagnostic('loan-already-active', returned_id) if state['loan:' + returned_id].include?('active')
+    diagnostic('exclusive-reborrow-of-shared', returned_id) if parent && loan[1] == 'exclusive' && @loans[parent][1] == 'shared'
+    access(projected, state, true, loan[1], loan[4], loan[5])
+    state['loan:' + returned_id] = ['active']
+    ['loan:' + returned_id]
+  end
+
   def value(x, state)
     if x.is_a?(IRSym)
       return ['local:' + x.name] if x.sig == '$'
@@ -802,8 +1052,10 @@ class LocalLifetime
       raise BorrowRefused, 'pointer cast without provenance' if bh(x[1]) == 'ptr' && v.empty?
       raise BorrowRefused, 'pointer-to-integer cast' if bh(x[1]) != 'ptr' && !v.empty?
       v
+    when 'call-borrow'
+      apply_call(['call', x[1], x[4]] + x.drop(5), state, bname(x[2]))
     when 'call'
-      raise BorrowRefused, 'calls require lifetime/effect contracts'
+      apply_call(x, state)
     else
       # Arithmetic on addresses would erase provenance. Restrict this first
       # increment to scalar arithmetic and conversions on non-pointer values.
@@ -1029,11 +1281,12 @@ begin
     end
   end
   semantic_layouts = BorrowLayouts.new(forms, BadIR, BorrowRefused)
+  call_effects = BorrowCallEffects.new(forms, semantic_layouts, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
   errors = []
   functions.each do |f|
-    checker = LocalLifetime.new(f, infer, semantic_layouts)
+    checker = LocalLifetime.new(f, infer, semantic_layouts, call_effects)
     checker.run
     errors.concat(checker.errors)
   end
