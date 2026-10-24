@@ -230,6 +230,21 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   CHECK(lib.call("call_back", {Value::of_pointer(reinterpret_cast<const void*>(&twice_fn)), Value::of_signed(21)})
             .as_signed() == 42);  // the C code calls a host function through a pointer
 
+  // long double and 128-bit integers: callable, as the bytes of the value.
+  nfcffi::Library wide = ffi.load(dir + "/wide.h", read_text(dir + "/wide_impl.c"));
+  CHECK(wide.callable("twice_ld") && wide.callable("twice_i128"));
+  long double ld = 1.25L;
+  Value ldr = wide.call("twice_ld", {Value::of_bytes(&ld, sizeof ld)});
+  long double ldout = 0;
+  CHECK(ldr.as_bytes().size() == sizeof(long double));
+  std::memcpy(&ldout, ldr.as_bytes().data(), sizeof ldout);
+  CHECK(ldout == 2.5L);
+  __int128 wide128 = (static_cast<__int128>(1) << 100) + 7;
+  Value wide128r = wide.call("twice_i128", {Value::of_bytes(&wide128, sizeof wide128)});
+  __int128 wide128out = 0;
+  std::memcpy(&wide128out, wide128r.as_bytes().data(), sizeof wide128out);
+  CHECK(wide128out == wide128 * 2);
+
   // Variadic functions: the extra arguments are passed by their promoted kinds (integer, double, pointer).
   nfcffi::Library vlib = ffi.load(dir + "/var.h", "", {"snprintf"});
   CHECK(vlib.callable("snprintf"));
