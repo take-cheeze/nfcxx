@@ -965,8 +965,13 @@ module NumericFlow
     when K_ARITH
       b = step.b
       sym = step.sym
-      if oracle.op_native?(sym) && b < nregs
-        arith(state[a], state[b], oracle.nil_raises?(sym))
+      recv = state[a]
+      # A receiver that can be no number runs no native arithmetic (OPERATOR_SENDS); one not reached yet (0) is
+      # answered there too, so a pool still growing is not dropped by the numeric join.
+      if c.operator_mask && recv.is_a?(Integer) && !recv.negative? && (recv & NUM).zero?
+        oracle.operator_mask(irep, index, insn, sym, state)
+      elsif oracle.op_native?(sym) && b < nregs
+        arith(recv, state[b], oracle.nil_raises?(sym))
       else
         c.operator_mask ? oracle.operator_mask(irep, index, insn, sym, state) : OTHER
       end

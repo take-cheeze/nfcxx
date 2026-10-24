@@ -121,6 +121,10 @@ puts '== shared end-to-end positives: containers and integer arithmetic'
 # This unknown receiver adds no method definitions, so it cannot withdraw the positive proofs.
 unknown_merge = "X_MERGE = $unproven.merge({ b: 2 })\n"
 positive_rows = typed_rows.call(BASE + positive + frozen + unknown_merge, cli: true)
+# The integer-constant and interval proofs, without EXACT_ARITH's class pools answering first.
+ENV['BC2CPP_EXACT_ARITH'] = '0'
+integer_rows = typed_rows.call(BASE + positive + frozen + unknown_merge, cli: true)
+ENV.delete('BC2CPP_EXACT_ARITH')
 
 puts '== positives: stock owners, a foreign Ruby freeze'
 rows = container_rows.call(positive_rows)
@@ -237,7 +241,7 @@ puts '== floor division: -7 / 2 is -4 (mrb_div_int floors), not -3'
 check.call('ZA_HALF has the interval [-4, -4]', pos[:ranges]['ZA_HALF'] == [-4, -4])
 
 puts '== positive, end to end: arithmetic typed Integer'
-rows = positive_rows
+rows = integer_rows
 slot = row_for.call(rows, 'ZA_SLOT')
 check.call('ZA_SLOT is typed Integer', slot && slot['type'] == 'Integer')
 check.call('ZA_SPAN is typed Integer', (r = row_for.call(rows, 'ZA_SPAN')) && r['type'] == 'Integer')
@@ -247,6 +251,9 @@ range_only = row_for.call(rows, 'ZA_SLOT_RANGE')
 # The IR admits an interval-only name as a Fixnum constant, so its row comes from the integer-constant set.
 check.call('ZA_SLOT_RANGE (no single value, interval only) is typed Integer by inferred:integer-constant',
            range_only && range_only['type'] == 'Integer' && range_only['source'] == 'inferred:integer-constant')
+exact = row_for.call(positive_rows, 'ZA_SLOT_RANGE')
+check.call('with EXACT_ARITH the class pool types ZA_SLOT_RANGE Integer first',
+           exact && exact['type'] == 'Integer' && exact['source'] == 'inferred:class-pool')
 nonlit = row_for.call(rows, 'ZA_NONLIT')
 check.call('ZA_NONLIT (non-literal operand) stays untyped', nonlit && nonlit['type'].nil?)
 big = row_for.call(rows, 'ZA_BIG')
@@ -324,7 +331,7 @@ check.call('ZF_SPAN (= (ZF_STEP * 13).freeze) has the interval [39, 39]', fr[:ra
 check.call('ZF_HALF (= (-7 / 2).freeze) has the interval [-4, -4]', fr[:ranges]['ZF_HALF'] == [-4, -4])
 check.call('ZF_ZERO (divisor interval holds 0) has no interval', !fr[:ranges].key?('ZF_ZERO'))
 check.call('ZF_NONLIT (a send operand) has no interval', !fr[:ranges].key?('ZF_NONLIT'))
-rows = positive_rows
+rows = integer_rows
 slot = row_for.call(rows, 'ZF_SLOT')
 check.call('ZF_SLOT is typed Integer by inferred:integer-constant end to end (ADR 0501)',
            slot && slot['type'] == 'Integer' && slot['source'] == 'inferred:integer-constant')

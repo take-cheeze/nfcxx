@@ -232,7 +232,8 @@ module SendRootReport
     if d.name == 'initialize'
       constructor_pool_candidates
       return "ctor:off:#{@constructor_pool_refusal.to_s.sub(/ at .*|\d+ arguments.*/, '')}" if @constructor_pool_refusal
-      return 'ctor:optional_position' if pos > mand
+      # CONSTRUCTOR_OPTIONALS makes some optional positions candidates; those fall through to pool_dropped.
+      return 'ctor:optional_position' if pos > mand && !@constructor_pool_candidates.key?([irep.label, pos])
 
       status = @constructor_pool_status[irep.label]
       return "ctor:#{status.to_s.sub(/\d+ arguments.*|at .*/, '').strip}" if status && status != :ok
@@ -240,7 +241,8 @@ module SendRootReport
       return 'ctor:pool_dropped'
     end
     defs = @registry[d.name] || []
-    return 'method:poly' if defs.size != 1
+    # A POLY_ARG_POOLS candidate is admitted; its pool was dropped by what its sites pass.
+    return poly_arg_candidates.key?([irep.label, pos]) ? 'method:poly_pool_dropped' : 'method:poly' if defs.size != 1
     return 'method:foreign_spelling' if @foreign_method_names.include?(d.name)
     return 'method:outside_token' if @outside_tokens.include?(d.name)
     return 'method:weird_name' unless d.name =~ /\A[A-Za-z_]/

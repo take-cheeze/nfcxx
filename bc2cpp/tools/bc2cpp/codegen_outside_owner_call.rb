@@ -20,8 +20,10 @@ require_relative 'outside_ruby_owners'
 # method_missing) still decide whether the site may close; this lifts only the outside-definer refusal.
 module OutsideOwnerCall
   # NAME_OWNER_SET: at most this many classes may answer a name for its by-name sends to become the owner call.
-  # `to_s`, `[]`, `==` and the like have dozens; a list that long is no receiver fact.
-  NAME_OWNER_SET_MAX = 16
+  # `==` and the like have dozens; a list that long is no receiver fact. 32 takes `to_s`, `inspect`, `dispose` and
+  # `update` (19 to 28 owners in the closed build): the call still checks the owner it finds, once per owner and
+  # site (bc2cpp_owner_set keeps 32 seen owners).
+  NAME_OWNER_SET_MAX = 32
 
   # NAME_OWNER_SET: the receiver of a send of `name` can only be an instance of a class that answers it
   # (anything else raises NoMethodError), and in the closed world every such class is named: the program's own Ruby
@@ -29,10 +31,27 @@ module OutsideOwnerCall
   # the owner call over that whole set, wherever it is emitted (a chain's else, a bare send, the else of the
   # registered-expression and NATIVE_OWNER_MAP arms). A block send keeps its by-name call.
   def dynamic_dispatch_line(d, recv, name, argv)
-    owners = !@call_block_expr && argv.size <= CodeGen::FUNCALL_ARGC_MAX && name_owner_set(name)
-    return super unless owners
+    callable = !@call_block_expr && argv.size <= CodeGen::FUNCALL_ARGC_MAX
+    owners = callable && name_owner_set(name)
+    return "#{outside_owner_call_line(d, recv, name, argv, owners)}\n" if owners
+    return name_owner_nomethod_line(d, recv, name, argv) if callable && name_owner_set_empty?(name)
 
-    "#{outside_owner_call_line(d, recv, name, argv, owners)}\n"
+    super
+  end
+
+  # NAME_OWNER_SET_EMPTY: every gate of name_owner_set_decide passed and no class answers `name` at all (no Ruby,
+  # core, native or outside definition, no native placeholder, no method_missing hook), so the send can only raise
+  # NoMethodError: the proven nomethod (bc2cpp_nomethod dispatches once to raise mruby's own error, and reports a
+  # violated proof if a method answered).
+  def name_owner_set_empty?(name)
+    name_owner_set(name)
+    @name_owner_empty&.include?(name) || false
+  end
+
+  def name_owner_nomethod_line(d, recv, name, argv)
+    args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
+    marker = NomethodReviewed.marker(name, self_receiver: recv == 'self', site: insn_source_site)
+    "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
   end
 
   # Every class or module (`.singleton` for a class object) whose definition of `name` a lookup can find, or nil when
@@ -60,6 +79,9 @@ module OutsideOwnerCall
     return nil unless ruby.all? { |owner| owner.match?(OWNER_PATH) }
 
     owners = (outside | ruby).uniq.sort
+    if owners.empty? && (@registry[name] || []).none? { |definition| definition.owner == '<native>' }
+      (@name_owner_empty ||= Set.new) << name
+    end
     owners.empty? || owners.size > NAME_OWNER_SET_MAX ? nil : owners
   end
 
@@ -74,8 +96,11 @@ module OutsideOwnerCall
 
   def guarded_fallback_line(d, recv, name, argv, listed, site)
     base = super
-    # The by-name else became the owner call over the whole name owner set: not a kept dispatch.
-    return base.sub(%r{ /\* CLOSED_WORLD kept: \w+ \*/}, '') if base.include?('bc2cpp_owner_call_named(')
+    # The by-name else became the owner call over the whole name owner set, or its proven nomethod when the set is
+    # empty: not a kept dispatch.
+    if base.include?('bc2cpp_owner_call_named(') || base.include?('bc2cpp_nomethod_named(')
+      return base.sub(%r{ /\* CLOSED_WORLD kept: \w+ \*/}, '')
+    end
     return base unless @closed_world && site && base.include?('/* CLOSED_WORLD kept: core_or_native */')
 
     owners = outside_owner_call_owners(name)

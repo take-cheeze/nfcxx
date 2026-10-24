@@ -724,6 +724,11 @@ def literal_element_class(irep, literal, ctx, depth)
 end
 
 # One producer's class for element_value_class.
+# ELEMENT_PICK_SENDS: core sends that, without arguments, return one element of an Array receiver (first, last) or
+# the one their block picks (find, detect, min_by, max_by). A hint only: a Ruby redefinition is a named residual the
+# guarded consumers re-check, like every other ELEMENT_CLASS_SUPPORT fact. BC2CPP_ELEMENT_PICKS=0 turns it off.
+ELEMENT_PICK_SENDS = %w[first last find detect min_by max_by].freeze
+
 def element_producer_class(irep, producer, ctx, depth)
   insn = producer.insn
   i = producer.index
@@ -752,6 +757,11 @@ def element_producer_class(irep, producer, ctx, depth)
   return annotated if annotated
 
   self_recv = BytecodeIR::Ops::SELF_SEND.include?(insn.op)
+  # ELEMENT_PICK_SENDS: `a.first`, `a.find { }` return one element of the Array (or nil, which consumers guard).
+  if !self_recv && ELEMENT_PICK_SENDS.include?(name) && (insn.argc || 0).zero? && ENV['BC2CPP_ELEMENT_PICKS'] != '0'
+    hit = array_element_source_scan(irep, i, producer.reg, ctx, depth + 1)
+    return hit if hit && hit != ArrayElementLayout::VACUOUS
+  end
   scoped = if self_recv
              sc = self_receiver_class(ctx)
              sc && class_scoped_return_class(sc, name, ctx, depth)
