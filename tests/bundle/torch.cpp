@@ -15,12 +15,15 @@ int main() {
   y.backward();
   std::cout << "grad " << lin->weight.grad().sizes() << "\n";
   std::cout << "cuda available " << torch::cuda::is_available() << " devices " << int(torch::cuda::device_count()) << "\n";  // an int8_t
-#ifdef __EDG__
-  // nfcxx: a plain throw inside libc10 (gcc's __cxa_throw) cannot be caught by EDG's handlers (docs/notes/eh-shim.md),
-  // so the CUDA tensor is only made when there is a GPU.
-  if (torch::cuda::is_available()) std::cout << "on cuda " << torch::ones({2}).to(torch::kCUDA) << "\n";
-  else std::cout << "no GPU\n";
-#else
+  // c10::Error is thrown by libc10 with a plain throw (__cxa_throw); with nfcxx the EH shim hands it to this handler
+  // (docs/notes/eh-shim.md). The bad reshape throws everywhere, the CUDA tensor only without a GPU.
+  try {
+    (void)torch::ones({2}).reshape({3});
+    std::cout << "reshape: no error\n";
+  } catch (const c10::Error &e) {
+    std::string w = e.what();
+    std::cout << "c10::Error caught: " << w.substr(0, w.find('\n')) << "\n";
+  }
   try {
     auto c = torch::ones({2}).to(torch::kCUDA);
     std::cout << "on cuda " << c << "\n";
@@ -28,7 +31,6 @@ int main() {
     std::string w = e.what();
     std::cout << "c10::Error caught: " << w.substr(0, w.find('\n')) << "\n";
   }
-#endif
   // The libraries libtorch and cuDNN dlopen when a GPU asks for them: load each here (T_DLOPEN, space separated).
   if (const char *list = std::getenv("T_DLOPEN")) {
     std::istringstream is(list);

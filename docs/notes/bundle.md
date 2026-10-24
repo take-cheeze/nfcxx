@@ -100,9 +100,8 @@ Two things only this case needed:
 - **Stubs**, for `libtorch_cuda_linalg.so` and cuDNN's libraries, which name libtorch_cpu, libtorch_cuda, libc10 and
   libstdc++ in DT_NEEDED.
 
-The nfcxx build cannot catch an exception thrown with a plain `throw` inside libtorch (`c10::Error` from gcc's
-`__cxa_throw`; `eh-shim.md`), so `torch.cpp` makes the CUDA tensor only when a GPU is present when `__EDG__` is
-defined. With `NFCXX_BACKEND=qbe` the program links and runs as with the gcc backend (`cuda available 1 devices 1`, the
+`torch.cpp` catches the `c10::Error`s libc10 throws with a plain `throw` (a bad `reshape`, and the CUDA tensor without a GPU) in
+both builds: the EH shim gives them to EDG's handlers (`eh-shim.md`, "Exceptions thrown by gcc-compiled code"). With `NFCXX_BACKEND=qbe` the program links and runs as with the gcc backend (`cuda available 1 devices 1`, the
 CUDA tensor, normal and bundled). It did not link before: the `thread_local` wrapper of
 `c10::impl::raw_local_dispatch_key_set` refers to its init function `_ZTH...`, which libc10 does not define (the variable
 needs no dynamic initialization), and the reference was strong on QBE. It is weak now, as gcc makes it (`multi-tu.md`).
