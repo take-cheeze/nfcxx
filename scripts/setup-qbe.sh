@@ -24,6 +24,9 @@ for p in qbe cproc; do
   cp -r "$root/3rd/$p" "$root/build/$p"
   rm -rf "$root/build/$p/.git"
 done
+# scripts/cproc-extension-keyword.patch: the __extension__ keyword (a pedantry marker, dropped by the scanner); the Linux
+# kernel's headers put it in front of every 64-bit typedef. Not yet a commit of the fork, so it is applied to the copy.
+patch -s -p1 -d "$root/build/cproc" --batch < "$root/scripts/cproc-extension-keyword.patch" || { echo "setup-qbe: cproc patch failed" >&2; exit 1; }
 # rega.c holds at most NPm (64) copies in one parallel move, the copies a block edge needs (phi operands, call
 # arguments). A join with more (regex_automata 0.4.18, built by mrustc from the 1.13 regex crate) stops QBE with
 # "no more pm slots". The array is static, so 1024 costs nothing. A fork commit would be the proper home for this.
