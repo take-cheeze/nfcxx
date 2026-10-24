@@ -14,7 +14,7 @@ qbe=${QBE:-$root/build/qbe/qbe}
 source "$(dirname "$0")/trace.sh"
 # NFCXX_QBE_PREP_RB, NFCXX_WEAK_SYMBOLS_RB: other copies of the two mruby scripts (tests/mruby/qbe-asm.sh runs the oracle ports).
 
-compile=0 asm=0 out="" src="" cppflags=() asflags=()
+compile=0 asm=0 pic=0 out="" src="" cppflags=() asflags=()
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   a=${args[i]}
@@ -22,6 +22,8 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     -c) compile=1 ;;
     -S) compile=1; asm=1 ;;   # stop at the assembly QBE wrote (-o - is stdout)
     -Wa,*) asflags+=("$a") ;;
+    -fPIC|-fpic) pic=1 ;;   # code for a shared object: QBE -p (thread-local symbols by initial exec, not local exec)
+    -fno-PIC|-fno-pic) pic=0 ;;
     -o) out=${args[++i]} ;;
     -D?*|-I?*|-U?*|-std=*|-ansi|-iquote?*|-isystem?*|-idirafter?*|-include?*|-imacros?*) cppflags+=("$a") ;;
     -D|-I|-U) cppflags+=("$a${args[++i]}") ;;
@@ -158,6 +160,7 @@ fi
 t=$(trace_start)
 # A cross check from a non-Darwin host: QBE's default target there is ELF, so the Apple arm64 target is named.
 qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_apple); fi
+[ $pic = 0 ] || qbetarget+=(-p)
 "$qbe" ${qbetarget[@]+"${qbetarget[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
 trace_end "$t" "qbe (IL to assembly)" qbe-backend
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
@@ -166,14 +169,15 @@ t=$(trace_start)
 # Mach-O: QBE's Apple targets prefix every label with "_" (T.assym), so the names are looked up with it.
 symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
-"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
+"$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} --tail="$tmp/tail.s" "$tmp/prep.c" "$tmp/out.s"
 # Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
 # __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
-# that text (weak-symbols.rb gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
+# that text (weak-symbols.rb gives .weak to the ones the assembly defines, and to the functions it only calls). Run only
+# when a weak attribute is there.
 if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
   if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
      grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
-    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input "$tmp/pp.weak.c" "$tmp/out.s"
+    "$(dirname "$0")/mrb" "${NFCXX_WEAK_SYMBOLS_RB:-$(dirname "$0")/weak-symbols.rb}" --c-input --tail="$tmp/tail.s" "$tmp/pp.weak.c" "$tmp/out.s"
   fi
 fi
 cat "$tmp/tail.s" >> "$tmp/out.s"

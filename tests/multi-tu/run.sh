@@ -3,7 +3,8 @@
 # inline functions and inline or static-member variables, linked into one program. C++ requires the link to
 # merge those entities across the objects (COMDAT) and keep the others unique; see docs/notes/multi-tu.md.
 # Built per backend: one command with every source, separate objects (-c) linked afterwards by nfcxx (in both
-# orders), and a mix of sources and objects. Also a minimal std::string pair (the original report).
+# orders), and a mix of sources and objects. Also a minimal std::string pair (the original report), and thread-local
+# variables defined in a shared library (-c -fPIC, -shared) that a program links against.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
@@ -37,5 +38,9 @@ for be in $backends; do
   build "$be separate objects (reverse order)" "$tmp/rev-$be" "${rev[@]}"
   build "$be sources and objects" "$tmp/mix-$be" $d/main.cpp $d/a.cpp "${objs[@]:2:2}"
   build "$be string pair objects" "$tmp/pairobj-$be" "${objs[@]:4:2}"
+  if out=$(./nfcxx -c -fPIC $d/tls_lib.cpp -o "$tmp/tls_lib-$be.o" 2>&1 &&
+           ./nfcxx -shared "$tmp/tls_lib-$be.o" -o "$tmp/libtls-$be.so" 2>&1); then
+    build "$be thread-locals in a shared library" "$tmp/tls-$be" $d/tls_main.cpp "$tmp/libtls-$be.so" -Wl,-rpath,"$tmp" -lpthread
+  else echo "FAIL $be thread-locals in a shared library (build)"; head -10 <<<"$out"; fail=1; fi
 done
 exit $fail
