@@ -57,6 +57,9 @@ module RecordHash
   # Producers of a value that is provably not a Symbol; a key from one of them
   # can never alias a Symbol key.
   NON_SYMBOL_OPS = Set['LOADNIL', 'LOADTRUE', 'LOADFALSE', 'STRING', 'ARRAY', 'HASH', 'LOADL'].freeze
+  # Owners whose method a plain Hash receiver reaches.
+  HASH_LOOKUP_OWNERS = %w[Hash Object Kernel BasicObject Enumerable].freeze
+  UPDATE_SENDS = %w[update merge!].freeze
   STATE_LIMIT = 4000
   POOL_DEPTH = 4
   INF = Float::INFINITY
@@ -567,6 +570,7 @@ module RecordHash
         insn.ivar == @name ? state : escape("stored to @#{insn.ivar}")
       when 'SEND'
         return delete_step(irep, k, insn, state, lead) if insn.sym == 'delete' && state.include?(lead)
+        return update_step(irep, k, insn, state, lead) if UPDATE_SENDS.include?(insn.sym) && state.include?(lead)
 
         generic_step(insn, state, lead)
       else
@@ -591,8 +595,81 @@ module RecordHash
       return @native_hash_delete if defined?(@native_hash_delete)
 
       @native_hash_delete =
-        (@registry['delete'] || []).none? { |d| %w[Hash Object Kernel BasicObject Enumerable].include?(d.owner) } &&
+        (@registry['delete'] || []).none? { |d| HASH_LOOKUP_OWNERS.include?(d.owner) } &&
         @closed_world.core_ruby_arm_safe?('delete', 'Hash')
+    end
+
+    # `h.update({k: v, ...})` / `merge!` with no block and one fresh Symbol-keyed literal: mruby-hash-ext's
+    # merge! hands it to the native __merge, which stores each pair (mrb_hash_merge) and returns the receiver,
+    # so the call is one store per pair and its result register still holds the Hash.
+    def update_step(irep, k, insn, state, lead)
+      return escape("Hash##{insn.sym} may be redefined") unless core_hash_update?
+      return escape("#{insn.sym} arity") unless insn.argc == 1 && insn.argc_operand[1].to_i.zero?
+      return escape("#{insn.sym} of the Hash itself") if state.include?(lead + 1)
+
+      pairs = adjacent_hash_pairs(irep, k, lead + 1) or return escape("#{insn.sym} argument is not a fresh Hash literal")
+      pairs.each do |index, key, value|
+        keys = RecordHash.literal_keys(irep, index, key) or return escape("non-literal key in #{insn.sym}")
+        @stores << [keys, irep, index, value]
+      end
+      return nil unless scan_captures(irep, lead)
+
+      state.reject { |x| x >= lead }.to_set | [lead]
+    end
+
+    # [writer index, key reg, value reg] of every pair of the Hash literal register +reg+ holds at +k+: one
+    # HASH and the HASHADD chunks mrbc splits a long literal into, in a region nothing else enters, leaves or
+    # reads +reg+ in (so no alias of the literal can add a pair or see it before the call). Else nil.
+    def adjacent_hash_pairs(irep, k, reg)
+      prog = BytecodeIR.for(irep)
+      chain = []
+      at = k
+      loop do
+        sources = BytecodeIR.producers(irep, at, reg.to_s)
+        return nil unless sources&.size == 1 && !sources.first.entry? && sources.first.reg.to_i == reg
+
+        index = sources.first.index
+        insn = prog.source_at(index)
+        if insn.op == 'HASHADD'
+          chain.unshift([index, insn])
+          at = index
+        elsif insn.op == 'HASH' && (literal = prog.container_literal(index))
+          chain.unshift([index, insn])
+          start = index
+          pairs = literal.key_regs.zip(literal.value_regs).map { |key, value| [index, key, value.to_i] }
+          chain.drop(1).each do |add_index, add|
+            count = add.uint_operand or return nil
+            count.times { |i| pairs << [add_index, (reg + 1 + 2 * i).to_s, reg + 2 + 2 * i] }
+          end
+          chained = chain.map(&:first).to_set
+          (start + 1...k).each do |i|
+            return nil unless prog.instruction_at(i).successors.all? { |s| s > start && s <= k }
+            return nil if !chained.include?(i) && reads_reg?(prog.source_at(i), reg)
+          end
+          return pairs
+        else
+          return nil
+        end
+      end
+    end
+
+    # Does +insn+ read +reg+, as an explicit operand or through its leading register's range (read_span)?
+    def reads_reg?(insn, reg)
+      lead = insn.reg&.to_i
+      explicit = (lead ? insn.regs.drop(1) : insn.regs).map(&:to_i)
+      return true if explicit.include?(reg)
+      return false if lead.nil? || WRITE_LEAD_ONLY.include?(insn.op) || BytecodeIR::Ops::LOADI_OPS.include?(insn.op)
+
+      lead <= reg && reg <= read_span(insn, lead)
+    end
+
+    def core_hash_update?
+      return @core_hash_update if defined?(@core_hash_update)
+
+      @core_hash_update = %w[update merge! __merge].all? do |name|
+        (@registry[name] || []).all? { |d| d.core || !HASH_LOOKUP_OWNERS.include?(d.owner) } &&
+          @closed_world.core_ruby_arm_safe?(name, 'Hash') && !@closed_world.invisibly_definable?(name)
+      end
     end
 
     def generic_step(insn, state, lead)
