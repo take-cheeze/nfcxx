@@ -129,8 +129,28 @@ class CodeGen
     group.checked
   end
 
-  def checked_group_reads(group)
-    group.checked[:setters].flat_map { |setter| setter_pool_reads(setter) }
+  # The setter-call argument reads that may store into +family+'s slot. SETTER_RECEIVER_FILTER: a site whose
+  # receiver classes (site_receiver_classes) all reach a definition outside +family+ writes another class's slot, and
+  # one whose receiver no path has reached yet writes nothing so far; both are left out of this pass (the pools rebuild
+  # these reads on every growth pass, so a site whose classes grow comes back). BC2CPP_SETTER_RECEIVER_FILTER=0
+  # keeps every site.
+  def checked_group_reads(group, family)
+    group.checked[:setters].flat_map do |setter|
+      reads = setter_pool_reads(setter)
+      next reads if ENV['BC2CPP_SETTER_RECEIVER_FILTER'] == '0'
+
+      reads.select { |irep, idx, reg| setter_site_may_reach?(setter, family, irep, idx, reg.to_i - 1) }
+    end
+  end
+
+  def setter_site_may_reach?(setter, family, irep, idx, recv)
+    classes = site_receiver_classes(irep, idx, recv)
+    return true if classes.nil?
+
+    classes.any? do |klass|
+      target = closed_world_exact_target(setter, klass.to_s, accessor: true)
+      target.nil? || numeric_family(target.owner) == family
+    end
   end
 
   # One line per setter a pool depends on that was refused, and why (an admitted one shows as a CHECKED pool).
