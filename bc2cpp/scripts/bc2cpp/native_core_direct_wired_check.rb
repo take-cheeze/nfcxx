@@ -48,7 +48,8 @@ require_relative '../../tools/bc2cpp/compiled_gems'
 hand_paths = bc2cpp_rgss_native_srcs(root, 'closed') + core_native_srcs(File.join(root, '3rd/mruby')) +
              external_gem_native_srcs(root)
 hand_result = NativeCoreDirect.audit(hand_paths)
-(NativeCoreDirect::HAND_ENTRIES + NativeCoreDirect::KERNEL_ENTRIES + NativeCoreDirect::NUMERIC_CONVERSION_ENTRIES).each do |entry|
+(NativeCoreDirect::HAND_ENTRIES + NativeCoreDirect::KERNEL_ENTRIES + NativeCoreDirect::NUMERIC_CONVERSION_ENTRIES +
+ NativeCoreDirect::INHERITED_ENTRIES).each do |entry|
   reason = hand_result[entry]
   check("#{entry.owner}##{entry.name}/#{entry.arity} verifies#{reason ? " (#{reason})" : ''}", reason.nil?)
 end

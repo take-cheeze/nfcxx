@@ -33,6 +33,8 @@ module NativeCoreDirect
     # 'A' only type-checks (mrb_ensure_array_type), so any Array passes through as is.
     array: 'mrb_array_p(%<a>s)',
     two_integers: 'mrb_integer_p(%<a>s) && mrb_integer_p(%<b>s)',
+    # 'c' accepts exactly these (class_ptr_p); anything else raises TypeError through the send.
+    class_or_module: '(mrb_class_p(%<a>s) || mrb_sclass_p(%<a>s) || mrb_module_p(%<a>s))',
     nil_or_string: '(mrb_nil_p(%<a>s) || mrb_string_p(%<a>s))'
   }.freeze
 
@@ -537,6 +539,69 @@ module NativeCoreDirect
               C
   ].freeze
 
+  # INHERITED_CORE_DIRECT: Kernel and BasicObject natives an exact core receiver reaches through its ancestry
+  # (CodeGen#inherited_core_entry decides that nothing earlier in the lookup can answer). `owner` names the audited
+  # registration, not the receiver's class.
+  INHERITED_ENTRIES = [
+    Entry.new(name: 'nil?', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_false_value()', apis: [],
+              checks: [['mrb_false', 'return mrb_false_value();', :exact]]),
+    Entry.new(name: 'class', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_obj_value(mrb_obj_class(M, recv))', apis: [],
+              checks: [['mrb_obj_class_m', 'return mrb_obj_value(mrb_obj_class(mrb, self));', :exact]]),
+    Entry.new(name: 'dup', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_obj_dup(M, recv)', apis: [%w[mruby.h mrb_obj_dup]],
+              checks: [['mrb_obj_dup', <<~C, :exact, 'class.c']]),
+                if (mrb_immediate_p(obj)) {
+                  return obj;
+                }
+                if (mrb_sclass_p(obj)) {
+                  mrb_raise(mrb, E_TYPE_ERROR, "can't dup singleton class");
+                }
+                struct RBasic *p = mrb_obj_alloc(mrb, mrb_type(obj), mrb_obj_class(mrb, obj));
+                mrb_value dup = mrb_obj_value(p);
+                init_copy(mrb, dup, obj);
+                return dup;
+              C
+    Entry.new(name: 'equal?', owner: 'BasicObject', arity: 1, arg: :none, aspec: 'MRB_ARGS_REQ(1)',
+              expression: 'mrb_bool_value(mrb_obj_equal(M, recv, ARG0))', apis: [%w[mruby.h mrb_obj_equal]],
+              checks: [['mrb_obj_equal_m', <<~C, :exact]]),
+                mrb_value arg = mrb_get_arg1(mrb);
+                return mrb_bool_value(mrb_obj_equal(mrb, self, arg));
+              C
+    Entry.new(name: 'is_a?', owner: 'Kernel', arity: 1, arg: :class_or_module, aspec: 'MRB_ARGS_REQ(1)',
+              expression: 'mrb_bool_value(mrb_obj_is_kind_of(M, recv, mrb_class_ptr(ARG0)))',
+              apis: [%w[mruby.h mrb_obj_is_kind_of]],
+              checks: [['mrb_obj_is_kind_of_m', <<~C, :exact]]),
+                struct RClass *c;
+                mrb_get_args(mrb, "c", &c);
+                return mrb_bool_value(mrb_obj_is_kind_of(mrb, self, c));
+              C
+    Entry.new(name: 'kind_of?', owner: 'Kernel', arity: 1, arg: :class_or_module, aspec: 'MRB_ARGS_REQ(1)',
+              expression: 'mrb_bool_value(mrb_obj_is_kind_of(M, recv, mrb_class_ptr(ARG0)))',
+              apis: [%w[mruby.h mrb_obj_is_kind_of]],
+              checks: [['mrb_obj_is_kind_of_m', <<~C, :exact]]),
+                struct RClass *c;
+                mrb_get_args(mrb, "c", &c);
+                return mrb_bool_value(mrb_obj_is_kind_of(mrb, self, c));
+              C
+    Entry.new(name: 'frozen?', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_bool_value(mrb_immediate_p(recv) || mrb_frozen_p(mrb_basic_ptr(recv)))', apis: [],
+              checks: [['mrb_obj_frozen', 'return mrb_bool_value(mrb_immediate_p(self) || mrb_frozen_p(mrb_basic_ptr(self)));', :exact]]),
+    Entry.new(name: 'freeze', owner: 'Kernel', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_obj_freeze(M, recv)', apis: [%w[mruby.h mrb_obj_freeze]],
+              checks: [['mrb_obj_freeze', <<~C, :exact]])
+                if (!mrb_immediate_p(self)) {
+                  struct RBasic *b = mrb_basic_ptr(self);
+                  if (!mrb_frozen_p(b)) {
+                    b->frozen = 1;
+                    if (b->c->tt == MRB_TT_SCLASS) b->c->frozen = 1;
+                  }
+                }
+                return self;
+              C
+  ].freeze
+
   # The C text of each helper, emitted once per output that calls it.
   HAND_HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
@@ -734,7 +799,7 @@ module NativeCoreDirect
     files = Array(paths).select { |path| File.file?(path) }
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
-    headers = (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
+    headers = (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
     key += headers.map(&:first).uniq.map do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
@@ -749,7 +814,9 @@ module NativeCoreDirect
   def audit_files(files)
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
-    (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES).to_h { |entry| [entry, audit_entry(entry, registrations, opaque_owners, include_dir)] }
+    (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES).to_h do |entry|
+      [entry, audit_entry(entry, registrations, opaque_owners, include_dir)]
+    end
   end
 
   def audit_entry(entry, registrations, opaque_owners, include_dir)

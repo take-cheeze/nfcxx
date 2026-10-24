@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'native_core_direct'
+require_relative 'core_hierarchy_sigs'
 
 # NATIVE_CORE_DIRECT: exact builtin-class arms that call a core
 # native's frame-independent body (NativeCoreDirect::ENTRIES) in front of a
@@ -176,7 +177,71 @@ module NativeCoreDirectFallback
     return nil if devirt_blocked_name?(name)
 
     exact = native_core_exact_entry(native_core_entries(name, argv.size), recv, name, argv)
-    exact && exact_code_line(d, recv, argv, exact)
+    return exact_code_line(d, recv, argv, exact) if exact
+
+    site = exact_core_site_for(recv, name)
+    inherited = site && inherited_core_entry(site[:klass], name, argv.size)
+    inherited && inherited_code_line(d, recv, name, argv, inherited, site[:klass])
+  end
+
+  # INHERITED_CORE_DIRECT: the audited Kernel/BasicObject native an exact `klass` receiver reaches for `name`, or nil.
+  # Lookup walks the class, its mixins, then its superclasses (CoreHierarchySigs.ancestors), so the native answers only
+  # when nothing earlier in that walk defines the name: no native registration, no compiled or outside Ruby definition,
+  # no prepend or project mixin that defines it, and no runtime installer of the name.
+  def inherited_core_entry(klass, name, arity)
+    @inherited_core_entries ||= {}
+    key = [klass, name, arity]
+    return @inherited_core_entries[key] if @inherited_core_entries.key?(key)
+
+    @inherited_core_entries[key] = inherited_core_entry_uncached(klass, name, arity)
+  end
+
+  def inherited_core_entry_uncached(klass, name, arity)
+    world = block_core_world
+    return nil unless world && @native_name_sources && !devirt_blocked_name?(name)
+
+    entry = NativeCoreDirect::INHERITED_ENTRIES.find { |e| e.name == name && e.arity == arity }
+    return nil unless entry && CoreHierarchySigs.declared_class?(klass)
+
+    paths = @native_name_sources.values.flatten.uniq
+    return nil unless NativeCoreDirect.verified?(paths, entry)
+
+    installed = symbol_installed_names
+    return nil if installed.nil? || installed.include?(name)
+
+    chain = CoreHierarchySigs.ancestors(klass)
+    at = chain.index(entry.owner)
+    return nil unless at
+
+    lookup = chain[0..at]
+    registrations, opaque = NativeExpressionDevirt.class_registrations(paths)
+    # An unattributed registration of the name could be on any class in the walk.
+    return nil unless opaque.fetch(name, []).empty?
+
+    natives = registrations.fetch(name, []).map { |g| g[:owner] && g[:owner][:class_name] }
+    return nil if natives.any? { |owner| owner.nil? || (lookup.include?(owner) && owner != entry.owner) }
+
+    defs = @registry[name] || []
+    mixins = lookup.flat_map { |a| Array(@included_modules[a]) + Array(@prepended_modules[a]) } - chain
+    return nil if defs.any? { |definition| lookup.include?(definition.owner) || mixins.include?(definition.owner) }
+    return nil if mixins.any? { |mod| !Array(@included_modules[mod]).empty? || !Array(@prepended_modules[mod]).empty? }
+    return nil if lookup.any? { |a| !Array(@prepended_modules[a]).empty? || @unknown_mixins.include?(a) }
+    return nil unless lookup.all? { |a| world.core_native_arm_safe?(name, a) }
+
+    entry
+  end
+
+  def inherited_code_line(d, recv, name, argv, entry, klass)
+    note = "// INHERITED_CORE_DIRECT :#{name} -- exact #{klass} receiver reaches #{entry.owner}##{name} first in its " \
+           "lookup; verified core body, no dispatch\n"
+    arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
+    return "#{note}  r#{d} = #{entry.call(recv, argv)};\n" unless arg_guard
+
+    "#{note}  if (#{format(arg_guard, a: argv.first, b: argv[1])}) {\n" \
+      "    r#{d} = #{entry.call(recv, argv)};\n" \
+      "  } else {\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv).chomp}\n" \
+      "  }\n"
   end
 
   # EXACT_CORE_RECEIVER: the entry whose owner the receiver provably is, when its
