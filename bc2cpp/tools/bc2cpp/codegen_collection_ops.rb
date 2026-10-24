@@ -17,17 +17,20 @@ class CodeGen
             %w[FalseClass false_and src/object.c], %w[Array ary_intersection mrbgems/mruby-array-ext/src/array.c]],
     '|' => [%w[Integer int_or src/numeric.c], %w[NilClass false_or src/object.c], %w[TrueClass true_or src/object.c],
             %w[FalseClass false_or src/object.c], %w[Array ary_union mrbgems/mruby-array-ext/src/array.c]],
+    '-@' => [%w[Numeric num_uminus src/numeric.c], %w[String str_uminus mrbgems/mruby-string-ext/src/string.c]],
     '<<' => [%w[Integer int_lshift src/numeric.c], %w[Array mrb_ary_push_m src/array.c],
              %w[String str_concat_m mrbgems/mruby-string-ext/src/string.c], %w[IO io_lshift mrbgems/mruby-io/src/io.c]]
   }.freeze
   # The gems whose natives the closed form calls: a build without one cannot have the exported body to link.
-  NUMERIC_SLOW_COLLECTION_GEMS = { '+' => %w[mruby-time], '-' => %w[mruby-array-ext mruby-time],
+  NUMERIC_SLOW_COLLECTION_GEMS = { '-@' => %w[mruby-string-ext], '+' => %w[mruby-time], '-' => %w[mruby-array-ext mruby-time],
                                    '&' => %w[mruby-array-ext], '|' => %w[mruby-array-ext],
                                    '<<' => %w[mruby-string-ext mruby-io] }.freeze
 
   # [wrapper function, exported body, the call the wrapper must make]: the wrapper stays the method, so the export
   # is the method's body only while the wrapper calls it.
   NUMERIC_SLOW_EXPORTS = {
+    '-@' => [['num_uminus', 'mrb_num_uminus_impl', 'mrb_num_uminus_impl(mrb, self)'],
+             ['str_uminus', 'mrb_str_uminus_impl', 'mrb_str_uminus_impl(mrb, str)']],
     '+' => [['time_plus', 'mrb_time_plus_impl', 'mrb_time_plus_impl(mrb, self, mrb_get_arg1(mrb))']],
     '-' => [['ary_sub', 'mrb_ary_ext_sub_impl', 'mrb_ary_ext_sub_impl(mrb, self, other)'],
             ['time_minus', 'mrb_time_minus_impl', 'mrb_time_minus_impl(mrb, self, mrb_get_arg1(mrb))']],
@@ -76,13 +79,17 @@ class CodeGen
   def numeric_slow_export?(path, function, impl, call)
     text = File.read(path, encoding: 'BINARY')
     wrapper = text[/^static mrb_value\n#{Regexp.escape(function)}\(mrb_state \*mrb, mrb_value \w+\)\n\{.*?^\}\n/m].to_s
-    text.match?(/^mrb_value\n#{Regexp.escape(impl)}\(mrb_state \*mrb, mrb_value \w+, mrb_value \w+\)\n\{/) && wrapper.include?(call)
+    text.match?(/^mrb_value\n#{Regexp.escape(impl)}\(mrb_state \*mrb(?:, mrb_value \w+)+\)\n\{/) && wrapper.include?(call)
   end
 
   private
 
   def numeric_slow_extern(impl)
     "extern \"C\" mrb_value #{impl}(mrb_state*, mrb_value, mrb_value);\n"
+  end
+
+  def numeric_slow_extern_unary(impl)
+    "extern \"C\" mrb_value #{impl}(mrb_state*, mrb_value);\n"
   end
 
   # `-` has no String arm; Array#- is mruby-array-ext's body for an Array operand (mrb_get_args "A").

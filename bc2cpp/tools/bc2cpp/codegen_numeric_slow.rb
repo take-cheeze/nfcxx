@@ -80,7 +80,7 @@ class CodeGen
                           '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array Time],
                           '&' => %w[Integer NilClass TrueClass FalseClass Array],
                           '|' => %w[Integer NilClass TrueClass FalseClass Array],
-                          '<<' => %w[Integer Array String IO] }.freeze
+                          '<<' => %w[Integer Array String IO], '-@' => %w[Integer Float Numeric String] }.freeze
 
   # `members` is CallFacts::Answers' set of every class that may answer `name`; it is nil for a name
   # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners). `owners` are the
@@ -226,6 +226,8 @@ class CodeGen
       zero ? numeric_slow_closed_zero_source(head, zero) : nil
     elsif key == 'mod'
       numeric_slow_mod_direct? ? numeric_slow_closed_mod_source(head) : nil
+    elsif key == 'neg'
+      numeric_slow_closed?(op) ? numeric_slow_closed_neg_source(head) : nil
     elsif numeric_slow_closed?(op)
       case key
       when 'div' then numeric_slow_closed_div_source(head)
@@ -294,36 +296,7 @@ class CodeGen
     elsif %w[lshift rshift].include?(key)
       numeric_slow_shift_source(key, head)
     elsif key == 'neg'
-      # Numeric#-@ is `0 - self`, evaluated by OP_SUB: an Integer overflows into mrb_bint_sub_ii (not
-      # Integer#-, whose MRB_INT_MIN operand is wrong in the bigint core), a bigint takes Integer#-, a
-      # Float the inline 0 - float (so -0.0 stays +0.0).
-      float_arm = float ? "\n#ifndef MRB_NO_FLOAT\n  if (mrb_float_p(a)) {\n    int ai = mrb_gc_arena_save(M);\n    " \
-                          "mrb_value r = mrb_float_value(M, (mrb_float)0 - mrb_float(a));\n    " \
-                          "mrb_gc_arena_restore(M, ai);\n    mrb_gc_protect(M, r);\n    return r;\n  }\n#endif" : ''
-      <<~CPP
-        #{head}) {
-        #ifdef MRB_USE_BIGINT
-          if (mrb_integer_p(a)) {
-            mrb_int x = mrb_integer(a), z;
-            if (!mrb_int_sub_overflow(0, x, &z)) return mrb_int_value(M, z);
-            int ai = mrb_gc_arena_save(M);
-            mrb_value r = mrb_bint_sub_ii(M, 0, x);
-            mrb_gc_arena_restore(M, ai);
-            mrb_gc_protect(M, r);
-            return r;
-          }
-          if (mrb_bigint_p(a)) {
-            int ai = mrb_gc_arena_save(M);
-            mrb_value r = mrb_num_sub(M, mrb_fixnum_value(0), a);
-            mrb_gc_arena_restore(M, ai);
-            mrb_gc_protect(M, r);
-            return r;
-          }
-        #endif#{float_arm}
-          return mrb_funcall(M, a, "-@", 0);
-        }
-
-      CPP
+      numeric_slow_neg_source(head, float, "  return mrb_funcall(M, a, \"-@\", 0);\n")
     elsif key == 'zero'
       # Numeric#zero? is `self == 0`; a Float compares as the VM's inline (Float, Integer) pair.
       <<~CPP
@@ -714,6 +687,51 @@ class CodeGen
       }
 
     CPP
+  end
+
+  # Numeric#-@ is `0 - self`, evaluated by OP_SUB: an Integer overflows into mrb_bint_sub_ii (not
+  # Integer#-, whose MRB_INT_MIN operand is wrong in the bigint core), a bigint takes Integer#-, a
+  # Float the inline 0 - float (so -0.0 stays +0.0). `fallback` is the last arm for any other receiver.
+  def numeric_slow_neg_source(head, float, fallback)
+    float_arm = float ? "\n#ifndef MRB_NO_FLOAT\n  if (mrb_float_p(a)) {\n    int ai = mrb_gc_arena_save(M);\n    " \
+                        "mrb_value r = mrb_float_value(M, (mrb_float)0 - mrb_float(a));\n    " \
+                        "mrb_gc_arena_restore(M, ai);\n    mrb_gc_protect(M, r);\n    return r;\n  }\n#endif" : ''
+    <<~CPP
+      #{head}) {
+      #ifdef MRB_USE_BIGINT
+        if (mrb_integer_p(a)) {
+          mrb_int x = mrb_integer(a), z;
+          if (!mrb_int_sub_overflow(0, x, &z)) return mrb_int_value(M, z);
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r = mrb_bint_sub_ii(M, 0, x);
+          mrb_gc_arena_restore(M, ai);
+          mrb_gc_protect(M, r);
+          return r;
+        }
+        if (mrb_bigint_p(a)) {
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r = mrb_num_sub(M, mrb_fixnum_value(0), a);
+          mrb_gc_arena_restore(M, ai);
+          mrb_gc_protect(M, r);
+          return r;
+        }
+      #endif#{float_arm}
+      #{fallback}}
+
+    CPP
+  end
+
+  # Closed `-@`: an Integer or Float takes the inline arms above; a String takes String#-@'s exported body and any
+  # other Numeric takes Numeric#-@'s, both reached only after numeric_slow_closed? proves the owners cover every
+  # definer. Anything else is a proven NoMethodError.
+  def numeric_slow_closed_neg_source(head)
+    fallback = <<~CPP.gsub(/^(?=.)/, '  ')
+      if (mrb_string_p(a)) return mrb_str_uminus_impl(M, a);
+      if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) return mrb_num_uminus_impl(M, a);
+      return bc2cpp_nomethod_named(M, a, "-@", 0);
+    CPP
+    numeric_slow_extern_unary('mrb_num_uminus_impl') + numeric_slow_extern_unary('mrb_str_uminus_impl') +
+      numeric_slow_neg_source(head, true, fallback)
   end
 
   # int_lshift / int_rshift for an Integer count; MRB_INT_MIN, a Float or bigint count keep the method.
