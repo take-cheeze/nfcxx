@@ -1,0 +1,8 @@
+(ir-module "summaries" (layout (pointer 8) (int 4)))
+(function "even" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param) (let %1 int (call int &"odd" %0)) (return %1))
+(function "odd" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param) (let %1 int (call int &"even" %0)) (return %1))
+(function "main" (ret int) (params)
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 3)) (let %0 int (call int &"even" $"x")) (scope-end $"x") (return %0))

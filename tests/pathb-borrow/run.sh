@@ -66,6 +66,24 @@ for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pa
     pass=$((pass + 1))
   done
 done
+# Summary inference is opt-in; each fixture runs with it in both loan modes.
+for src in tests/pathb-borrow/summaries/*.ir; do
+  for mode in explicit inferred; do
+    options=(--infer-summaries)
+    [ "$mode" = explicit ] || options+=(--infer-loan-ends)
+    expected=${src%.ir}.expect
+    want=$(head -1 "$expected")
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
+      echo "FAIL $src ($mode): expected exit $want, got $rc"
+      cat "$tmp/out"
+      exit 1
+    fi
+    echo "ok   $src ($mode)"
+    pass=$((pass + 1))
+  done
+done
 # Real C++ lowering already emits decl/scope-end facts. Compare the checker
 # against source expectations, and require accepted IR to remain emit-able.
 for src in tests/pathb-borrow/cpp/*.cpp; do
@@ -102,6 +120,41 @@ for effects in tests/pathb-borrow/contracts/*.effects; do
   echo "ok   $effects against lowered C++ bodies"
   pass=$((pass + 1))
 done
+# Inferred summaries let callers of lowered C++ callees be checked without
+# annotations. Dropping the initializing call must expose the uninitialized use.
+layouts=tests/pathb-borrow/contracts/inferred.layouts
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/inferred.cpp > "$tmp/inferred0.ir"
+sed '/^  init_pair(&s, 2);$/d' tests/pathb-borrow/contracts/inferred.cpp > "$tmp/uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/uninit.cpp" > "$tmp/uninit0.ir" 2>/dev/null
+for name in inferred0 uninit0; do
+  { head -1 "$tmp/$name.ir"; cat "$layouts"; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.layout.ir"
+done
+for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/inferred0.layout.ir" > "$tmp/out"
+  grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL inferred.cpp ($options)"; cat "$tmp/out"; exit 1; }
+  rc=0
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/uninit0.layout.ir" > "$tmp/out" 2>&1 || rc=$?
+  if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: s' "$tmp/out"; then
+    echo "FAIL inferred.cpp without init_pair ($options): expected exit 1, got $rc"
+    cat "$tmp/out"
+    exit 1
+  fi
+done
+# Printed summaries are ordinary contracts: pasted back, they check without inference.
+{ head -1 "$tmp/inferred0.layout.ir"
+  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/inferred0.layout.ir" | sed -n 's/^inferred: //p'
+  tail -n +2 "$tmp/inferred0.layout.ir"; } > "$tmp/pasted.ir"
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/pasted.ir" > "$tmp/out"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted-oracle.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted.qbe"
+cmp "$tmp/pasted.qbe" "$tmp/pasted-oracle.qbe"
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/inferred0.layout.ir" > "$tmp/inferred.qbe"
+cmp "$tmp/inferred.qbe" "$tmp/pasted.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/inferred.qbe" -o "$tmp/inferred.s"
+cc "$tmp/inferred.s" -o "$tmp/inferred"
+"$tmp/inferred" || { echo "FAIL inferred.cpp runtime: expected 0"; exit 1; }
+echo "ok   inferred summaries for lowered C++ callees, mutant, and native execution"
+pass=$((pass + 1))
 # Checking facts and value-transfer policy must not change native execution.
 # Loan erasure and replacing explicit transfers with loads must yield the same QBE.
 for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir tests/mruby/pathb-edge/move_facts.ir tests/mruby/pathb-edge/field_move_facts.ir tests/mruby/pathb-edge/drop_state_facts.ir; do
