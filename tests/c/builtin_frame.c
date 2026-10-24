@@ -1,4 +1,5 @@
 // EXPECT: 42
+// X86-ONLY-qbe: cproc lowers __builtin_return_address and __builtin_frame_address with x86-64 helpers and refuses them elsewhere
 // __builtin_return_address(0) and __builtin_frame_address(0) (the kernel's _RET_IP_), and __builtin_offsetof with an
 // index that is not constant (its container_of(node, struct latch_tree_node, node[idx]))
 struct node { int x; };

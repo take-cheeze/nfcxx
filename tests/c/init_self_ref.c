@@ -1,4 +1,5 @@
 // EXPECT: 42
+// X86-ONLY-qbe: the offsets beyond 32 bits are the x86-64 encoding this checks; QBE's arm64 backend writes them as an add immediate the assembler rejects (add x0, x0, #2147483648)
 // An automatic object whose initializer takes its address in a statement expression (the kernel's
 // COMPLETION_INITIALIZER_ONSTACK), and an external symbol plus an offset beyond 32 bits (the kernel's __pa_symbol(_end):
 // QBE loaded it from the GOT and added the offset as an immediate, which x86 cannot encode; for a local symbol it wrote
