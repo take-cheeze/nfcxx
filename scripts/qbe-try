@@ -8,8 +8,9 @@
 # 2. For a "-c SRC.c -o OBJ" compile matching a pattern, the same compile runs on the qbe backend with
 #    NFCXX_QBE_KERNEL=1 (only the options that path honours are accepted; -mno-sse is checked).
 # 3. The qbe object replaces the gcc one only if it matches it: the same global and weak definitions (name, binding,
-#    type, kind of section, visibility), no undefined symbol the gcc object does not also need, and the same special
-#    (non-text, non-data) allocated sections. Anything else keeps the gcc object.
+#    type, kind of section, visibility), no undefined symbol the gcc object does not also need, no reference from
+#    lasting code to init code (or an undefined symbol) that gcc's object makes only from init code, and the same
+#    special (non-text, non-data) allocated sections. Anything else keeps the gcc object.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 nfcc=$root/nfcc
@@ -77,6 +78,26 @@ specials() {
       if (name ~ /^\.(eh_frame|note|comment|group)/) next
       print name }' | sort -u
 }
+# references from code and data that stays after boot (not .init.*, .exit.*, .meminit.*, .ref.*, .head.text) to a
+# symbol: "init NAME" when NAME is in such a section or undefined here (it may be elsewhere's init code), else
+# "other NAME". The kernel's modpost refuses a reference from lasting code to init code; gcc's always_inline helpers
+# leave none, cproc's out-of-line copies can (memblock_alloc in .text calling the __init memblock_alloc_try_nid).
+refs() {
+  { readelf -SW "$1"; echo "@@SYMS"; readelf -sW "$1"; echo "@@RELS"; readelf -rW "$1"; } | awk '
+    function initlike(n) { return n ~ /^\.(init|exit|meminit|memexit)(\.|$)/ }
+    function lasting(n) { return !(initlike(n) || n ~ /^\.(ref|head|discard|debug|eh_frame|note|comment)(\.|$)/ || n ~ /^\.rela?\./) }
+    /^@@SYMS/ { mode = 1; next }
+    /^@@RELS/ { mode = 2; next }
+    mode == 0 && /^ *\[ *[0-9]+\]/ { line = $0; sub(/^ *\[ */, "", line); split(line, f, /[] ]+/); secname[f[1]] = f[2]; next }
+    mode == 1 && $1 ~ /^[0-9]+:$/ && NF >= 8 { ndx[$8] = $7; next }
+    mode == 2 && /^Relocation section/ { src = $3; gsub(/[\x27]/, "", src); sub(/^\.rela?/, "", src); next }
+    mode == 2 && $1 ~ /^[0-9a-f]+$/ && NF >= 5 && lasting(src) {
+      n = $5
+      if (initlike(n)) { print "init " n; next }
+      if (!(n in ndx)) { print "other " n; next }
+      if (ndx[n] == "UND" || initlike(secname[ndx[n]])) print "init " n; else print "other " n
+    }' | sort -u
+}
 syms "$obj" > "$tmp/g.syms"; syms "$tmp/q.o" > "$tmp/q.syms"
 specials "$obj" > "$tmp/g.sec"; specials "$tmp/q.o" > "$tmp/q.sec"
 grep '^D ' "$tmp/g.syms" > "$tmp/g.def"; grep '^D ' "$tmp/q.syms" > "$tmp/q.def"
@@ -86,6 +107,10 @@ if ! cmp -s "$tmp/g.def" "$tmp/q.def"; then
 fi
 extra=$(comm -13 <(grep '^U ' "$tmp/g.syms") <(grep '^U ' "$tmp/q.syms") | head -3 | tr '\n' ' ')
 if [ -n "$extra" ]; then note "gcc $src: qbe object needs more symbols: $extra"; exit 0; fi
+# a reference from lasting code to init (or unknown) code that gcc's object makes only from init code, or not at all
+refs "$obj" | awk '{print $2}' | sort -u > "$tmp/g.refs"; refs "$tmp/q.o" | awk '$1 == "init" {print $2}' | sort -u > "$tmp/q.init"
+mismatch=$(comm -23 "$tmp/q.init" "$tmp/g.refs" | head -3 | tr '\n' ' ')
+if [ -n "$mismatch" ]; then note "gcc $src: lasting code references init code where gcc's object does not: $mismatch"; exit 0; fi
 if ! cmp -s "$tmp/g.sec" "$tmp/q.sec"; then
   note "gcc $src: sections differ: $(diff "$tmp/g.sec" "$tmp/q.sec" | grep '^[<>]' | head -3 | tr '\n' ' ')"
   exit 0

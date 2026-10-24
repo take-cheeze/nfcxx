@@ -391,6 +391,18 @@ EOC
     done
     if grep -q '^qbe kmove.c$' qbe.log && grep -q '^gcc kstay.c: ' qbe.log && [ -s kstay.o ]; then ok "qbe-try: moves what matches, keeps gcc otherwise"
     else bad "qbe-try: moves what matches, keeps gcc otherwise" "$(tr '\n' '|' < qbe.log)"; fi
+    # an always_inline helper of __init code only goes to .init.text with it (gcc inlines it there); one that code in
+    # two init sections calls stays in .text and would be lasting code calling __init code, which gcc's inlined copies
+    # are not and the kernel's modpost refuses: that file stays on gcc
+    printf 'void *alloc_try(long) __attribute__((section(".init.text")));\nstatic inline __attribute__((always_inline)) void *alloc(long n) { return alloc_try(n); }\n__attribute__((section(".init.text"))) void *boot(void) { return alloc(4); }\nstatic __attribute__((section(".init.text"))) int unused_init(void) { return 1; }\n' > kinit.c
+    sed 's/^static __attribute__((section(".init.text"))) int unused_init.*/__attribute__((section(".meminit.text"))) void *later(void) { return alloc(8); }/' kinit.c > kinit2.c
+    rm -f qbe.log
+    for f in kinit kinit2; do
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c $f.c -o $f.o
+    done
+    if grep -q '^qbe kinit.c$' qbe.log && grep -q '^gcc kinit2.c: lasting code references init code' qbe.log &&
+       ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc"
+    else bad "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc" "$(tr '\n' '|' < qbe.log)"; fi
   fi
   # an assembly source with another suffix keeps its -x language (the kernel's "-x assembler-with-cpp /dev/null" probe)
   if out=$("$nfcc" -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null 2>&1) && grep -q "GNU assembler" <<<"$out"; then

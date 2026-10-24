@@ -52,7 +52,10 @@ With `NFCXX_QBE_TRY="PATTERN ..."` on the gcc backend, nfcc hands each compile t
 2. A `-c SRC.c -o OBJ` compile whose source matches a pattern runs again on the qbe backend with `NFCXX_QBE_KERNEL=1`.
 3. The qbe object replaces the gcc one only if it matches it: the same global and weak definitions (name, binding,
    type, kind of section), no undefined symbol the gcc object does not also need, and the same special allocated
-   sections (`.init.text`, `.initcall6.init`, `__param`, ...). Otherwise the gcc object stays. Either way one line goes
+   sections (`.init.text`, `.initcall6.init`, `__param`, ...), and no reference from lasting code (not `.init.*`,
+   `.exit.*`, `.meminit.*`, `.ref.*`, `.head.text`) to init code or to an undefined symbol that gcc's object makes only
+   from init code (the kernel's modpost refuses lasting code that calls `__init` code; gcc's inlined `always_inline`
+   helpers make none, cproc's out-of-line copies can). Otherwise the gcc object stays. Either way one line goes
    to `NFCXX_QBE_LOG`: `qbe SRC`, or `gcc SRC: reason` (the first error, or what differed).
 
 The kernel then has to boot. The log is the migration's to-do list: sorted by reason, it says which missing feature

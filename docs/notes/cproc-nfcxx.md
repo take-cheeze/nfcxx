@@ -38,8 +38,11 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   have no initializer (`-ftrivial-auto-var-init=zero`).
 
 - **`-p`: drop unreferenced internal functions and data**, as gcc does at `-O`. cproc writes its IL to a temporary file
-  and prunes it at the end: an item is live when it is exported, has a section, is `used` (`# nfcxx:keep`), or is
-  referenced (`$name`) by a live item. Type definitions and other top-level lines are kept.
+  and prunes it at the end: an item is live when it is exported, is `used` (`# nfcxx:keep`), or is referenced
+  (`$name`) by a live item; a section alone does not keep it (gcc drops an unreferenced static `__init` function).
+  Type definitions and other top-level lines are kept. An internal function that is only called, and only from
+  functions in one init section, goes to that section, where gcc's inlined copy would be (the kernel's
+  `always_inline` `memblock_alloc`, which calls `__init` code).
 
 - **GNU statement expressions** `({ ... })`. cproc emits statements as it parses them but evaluates expressions later,
   from trees, so the statements are parsed into a chain of blocks that is not part of the function yet (`funcdetach`),
@@ -138,6 +141,11 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   constant 0; cproc took any array of size 0 for a variable-length one.
 
 - **`aligned` below a member's alignment** is ignored unless the struct is packed, as gcc does.
+
+- **More GNU C**: local labels (`__label__`), `packed` before a struct body (laid out as one after it, bit-fields
+  included), `__builtin_isdigit` (C locale, folded as gcc does), `__builtin_prefetch` (the address evaluated), the
+  `\e` escape, the `__attribute` and `__alignof` spellings, `%P` on a memory operand, and pointer `==`/`!=` between
+  distinct pointer types or `void *` and a function pointer (compared as addresses; gcc warns).
 
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
