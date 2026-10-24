@@ -73,15 +73,18 @@ module NativeCoreDirectFallback
   end
 
   # Verified entries for `name` at this arity whose owner nothing in the closed
-  # world can shadow. Closed world only: outside Ruby is otherwise unknown.
+  # world can shadow. Closed world only: outside Ruby is otherwise unknown. A core body
+  # compiles with the closed world withheld, but these are program-wide facts, so it
+  # asks the same world (block_core_world), as NATIVE_CORE_DIRECT_REST does.
   def native_core_entries(name, arity)
-    return [] unless @closed_world && @native_name_sources
+    world = block_core_world
+    return [] unless world && @native_name_sources
 
     @native_core_entries ||= {}
     @native_core_entries.fetch([name, arity]) do
       @native_core_entries[[name, arity]] =
         NativeCoreDirect::ENTRIES.select do |entry|
-          entry.name == name && entry.arity == arity && native_core_entry_safe?(entry)
+          entry.name == name && entry.arity == arity && native_core_entry_safe?(entry, world)
         end
     end
   end
@@ -192,7 +195,7 @@ module NativeCoreDirectFallback
     when :none then true
     when :nil_or_string then %w[NilClass String].include?(site[:arg_class].call(0))
     when :array then site[:arg_class].call(0) == 'Array'
-    when :integer then false
+    when :integer, :two_integers then false
     end
   end
 
@@ -201,7 +204,7 @@ module NativeCoreDirectFallback
     return entry.guard(recv, argv) unless site && entry.owner == site[:klass]
 
     arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
-    arg_guard ? format(arg_guard, a: argv.first) : 'true'
+    arg_guard ? format(arg_guard, a: argv.first, b: argv[1]) : 'true'
   end
 
   def exact_code_line(d, recv, argv, entry)
