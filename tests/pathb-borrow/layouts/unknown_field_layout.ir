@@ -1,0 +1,6 @@
+(ir-module "semantic" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Pad") 8 4 (field "self" 0 (struct "Missing")))
+(function "test" (ret int) (params)
+(slot "s" (struct "Pad") 8 4)
+(decl $"s" val) (store char $"s" (const char 2)) (store int (offset $"s" 4) (const int 5))(return (const int 0))
+)

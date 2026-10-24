@@ -222,17 +222,119 @@ but does not establish usable pointer provenance.
 
 This initial model supports LP64 widths and slots of 1–4096 bytes. It refuses other supplied data
 layouts, dynamic offsets/indices, out-of-bounds accesses, external pointer projections, and accesses
-outside a loan's range. Aggregate value loads/transfers remain refused. Whole-object loan widths
-come from the matching root slot; nested aggregate widths that cannot be established are refused.
-Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
+outside a loan's range. Aggregate value loads/transfers remain refused. Without semantic metadata,
+whole-object loan widths come from the matching root slot. With the metadata below, nested aggregate
+widths come from validated descriptors. Unknown nested widths are refused. Constant offset forms are accepted as address operands by both QBE emitters as well as in ordinary
 three-address IR, and explicit projected moves/copies lower to the same typed loads.
 
-The model tracks **physical byte initialization**, not a semantic field-layout tree. Whole-object
-loans conservatively require all bytes initialized, including padding. Ordinary field accesses do
-not require padding initialization. Layout facts that distinguish fields, padding, and drop behavior
-are needed before general ownership-aware frontend emission can use whole-object loans reliably.
-The C++ integration tests cover field initialization, references to padded structs, uninitialized
-fields, and dangling field pointers. Frontends still do not emit loan or value-transfer annotations.
+The underlying model tracks **physical byte initialization**. Without semantic metadata,
+whole-object loans conservatively require all bytes initialized, including padding. Ordinary field
+accesses do not require padding initialization. The C++ integration tests cover field initialization,
+references to padded structs, uninitialized fields, and dangling field pointers.
+
+## Semantic struct layouts
+
+Optional module-level metadata separates value fields from physical padding:
+
+```text
+(borrow-layout (struct "Pad") 8 4
+  (field "a" 0 char)
+  (field "b" 4 int))
+```
+
+The size and alignment are 8 and 4 bytes. Field names are unique, offsets are absolute within the
+struct, and field types determine widths and alignment. Scalars, pointers, and other declared struct
+layouts are supported. Pointers do not recursively embed their pointee, so self-referential pointer
+types are valid. By-value cycles, missing nested layouts, duplicate fields/layouts, and out-of-bounds
+fields are errors. Overlapping or unaligned fields, arrays, and union descriptors are refused.
+This excludes packed layouts and overlapping empty subobjects for now.
+
+A slot using a known layout must match its size and provide sufficient alignment. Known aggregate
+borrows must identify the root object or a declared nested subobject of the requested type at the
+correct offset. An arbitrary same-size byte range cannot claim a different struct's initialization
+mask. Layout validation runs before analysis and before code-generation pruning, including for
+unused descriptors.
+
+Whole-aggregate borrow and reborrow creation checks only declared field bytes, recursively ignoring
+padding. Every field must still be initialized and unmoved. Empty structs with positive physical
+size have no field initialization requirements, but their storage must still be alive. Slot storage
+size zero remains unsupported. Loan conflicts and bounds continue to cover physical ranges;
+semantic padding does not authorize an overlapping write through a live loan.
+
+These facts **do not initialize padding**. Ordinary typed loads, copies, moves, and zero-fill retain
+physical-byte behavior. A raw integer read spanning uninitialized padding still fails after a valid
+semantic aggregate borrow. Missing metadata retains the conservative physical-byte fallback.
+
+Both QBE emitters validate the descriptor graph and emit no code for it. Removing metadata produces
+identical QBE and native behavior. Layout records are trusted frontend contracts: validation checks
+internal consistency, not correspondence with Rust or C++ source or completeness against a source
+type. Neither frontend emits these records or ownership loan/transfer forms yet. Source-language
+drop, active-member, and trait rules remain separate work.
+
+## Explicit drop-state contracts
+
+Drop-state forms describe an ownership protocol for declared local values. They are **checking
+facts**, not destructor instructions: the producer must supply any real cleanup and runtime guard
+code separately. Neither frontend emits these facts yet, and calls still require unsupported
+lifetime/effect contracts. This stage cannot certify actual destructor, deallocation, or unwind
+behavior.
+
+```text
+(drop-obligation "x" int $"x")
+(decl $"x" val)
+(store int $"x" (const int 7))
+(drop-live "x")
+(drop-state "x")
+(scope-end $"x")
+```
+
+`drop-obligation` is function-level metadata with a unique nonempty ID, value type, and direct
+local or constant-offset field place. Scalar/pointer values and aggregates with known semantic
+layouts are supported. Obligations cannot overlap; nested destructor/field cleanup requires a
+future hierarchical contract. These annotations assert a non-bitwise-copyable owner policy;
+integer examples model consuming handles rather than Rust integer types implementing `Drop`.
+
+The protocol tracks five states:
+
+| State | Meaning |
+| --- | --- |
+| dead | Target storage has not started or has ended. |
+| vacant | Live storage has no registered value, including after a move. |
+| building | Writes started constructing/reconstructing a value, but it has not been registered. |
+| live | Construction completed and cleanup is owed. |
+| dropped | The registered value was consumed by a cleanup fact. |
+
+Writes to vacant or dropped storage mark construction in progress. `drop-live` registers completed
+construction and requires every semantic field byte initialized; padding is excluded. Empty structs
+can be registered without field writes, while still requiring live storage. Repeatedly registering
+a live value is an error. Reinitialization after a move or cleanup requires a new registration.
+
+A whole-value overwrite of a live owner is an error until its prior value is consumed. Field
+mutation preserves the enclosing live obligation. Exact typed moves clear the source obligation;
+partial or reinterpreted moves of that owner are refused. Explicit bitwise copies of a live owner
+require a copy contract and are refused. A non-owning aggregate can instead declare separate,
+disjoint field obligations, allowing one field to move while siblings still require cleanup.
+Tracking the destination or result of a move is the producer's responsibility; this is not a proof
+of leak freedom or a replacement for source-language move/copy policy.
+
+`drop-state` requires the value live on every incoming path. `drop-state-if-live` consumes only live
+paths and skips vacant or already-dropped paths, allowing cleanup after conditional construction or
+moves. Construction-in-progress is never silently skipped: missing registration remains an error
+after guarded cleanup. Guarded facts still require live storage; they cannot extend declaration
+lifetimes. Flags preserve the correlation between a live value and its initialized field bytes.
+Loan conflicts remain conservative at joins rather than using full relational path reasoning.
+
+Both forms check overlapping live loans as a consuming access. Last-use inference can release a
+loan before cleanup. Known pointer-field loan identities are conservatively kept needed through
+consumption; no pointee access or free is proved. Cleanup marks bytes logically dropped without
+clearing physical memory. Later reads, borrows, and moves fail until reinitialization. A second
+unconditional consumption is an error; repeated guarded cleanup can legitimately do nothing.
+
+Normal returns, fallthrough, storage end, and redeclaration reject live obligations or unfinished
+construction. Explicit `unreachable`/abort paths do not require cleanup; exception cleanup edges
+remain unsupported. The marker asserts that the matching real cleanup or runtime guard exists;
+the checker does not generate or verify that code. The QBE emitter and oracle accept these facts
+as validated no-ops, and a native integer test verifies marker erasure preserves generated code.
 
 ## Refusals and limits
 
@@ -259,7 +361,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next shared-IR extensions are semantic field layouts, drop flags, call
+The next steps are frontend layout/ownership emission, actual cleanup/effect contracts, call
 effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -274,7 +376,12 @@ parent/child demands. Refusal cases are also run with inference enabled. Value-t
 run in both loan modes and cover moved-state joins, reinitialization,
 consuming pointer carriers, and conflicts with live loans. Field-range fixtures cover partial
 moves, byte repairs, overlapping loans, projected reborrows, pointer-field provenance, storage
-reuse, and conservative padding checks. The explicit-loan and
+reuse, and conservative padding checks. Semantic-layout fixtures verify field-only initialization,
+nested layouts, moved fields, raw padding reads, storage lifetimes, and malformed descriptor graphs.
+Drop-state fixtures check conditional flags, double consumption, missing cleanup, construction
+registration, field ownership, typed transfers, reconstruction, and live-loan conflicts.
+A native test checks both the unchanged QBE and the stricter conservative result when metadata is
+removed. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,
 loop iterations, parent restoration, nested children, shared siblings, and invalid parent graphs. A native execution check verifies that loan metadata erasure leaves the QBE output
 unchanged and that the emitter agrees with its oracle. The Path B CI workflow runs this suite

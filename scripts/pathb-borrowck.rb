@@ -136,11 +136,109 @@ def bname(x)
   x.is_a?(IRStr) ? x.to_s : x
 end
 
+# Semantic layouts are checker contracts, not ABI classification. Keep this
+# validator in sync in the standalone checker, QBE emitter, and emitter oracle.
+class BorrowLayouts
+  PRIMITIVES = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
+                'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
+                'long'=>8, 'unsigned_long'=>8, 'long_long'=>8, 'unsigned_long_long'=>8,
+                'float'=>4, 'double'=>8}
+
+  def initialize(forms, bad, refused)
+    @bad = bad
+    @refused = refused
+    @raw = {}
+    @resolved = {}
+    forms.each do |f|
+      next unless head(f) == 'borrow-layout'
+      raise @bad, 'borrow-layout form' unless f.length >= 4
+      raise @refused, 'semantic layouts currently require struct types' unless head(f[1]) == 'struct'
+      k = key(f[1])
+      raise @bad, "duplicate semantic layout #{k[1]}" if @raw.key?(k)
+      @raw[k] = f
+    end
+    @raw.each_key { |k| resolve(k, []) }
+  end
+
+  def head(x)
+    x.is_a?(Array) ? x[0] : nil
+  end
+
+  def key(ty)
+    return nil unless head(ty) == 'struct'
+    raise @bad, 'semantic layout type form' unless ty.length == 2 && ty[1].is_a?(IRStr) && !ty[1].to_s.empty?
+    ['struct', ty[1].to_s]
+  end
+
+  def number(x)
+    unless x.is_a?(String) && !x.empty? && x.bytes.all? { |c| c >= 48 && c <= 57 }
+      raise @bad, 'semantic layout requires nonnegative integer constants'
+    end
+    x.to_i
+  end
+
+  def lookup(ty)
+    k = key(ty)
+    k ? @resolved[k] : nil
+  end
+
+  def field_type(ty, visiting)
+    if ty.is_a?(String) && PRIMITIVES.key?(ty)
+      n = PRIMITIVES[ty]
+      return {size: n, align: n, used: (0...n).to_a, objects: []}
+    end
+    if head(ty) == 'ptr'
+      raise @bad, 'semantic pointer field type' unless ty.length == 2
+      return {size: 8, align: 8, used: (0...8).to_a, objects: []}
+    end
+    k = key(ty)
+    raise @refused, 'unsupported semantic field type' unless k
+    resolve(k, visiting)
+  end
+
+  def resolve(k, visiting)
+    raise @bad, "cyclic semantic layout #{k[1]}" if visiting.include?(k)
+    return @resolved[k] if @resolved.key?(k)
+    raise @bad, "unknown semantic layout #{k[1]}" unless @raw.key?(k)
+    f = @raw[k]
+    size = number(f[2])
+    align = number(f[3])
+    unless size > 0 && size <= 4096 && align > 0 && align <= 4096 && (align & (align - 1)) == 0 && size % align == 0
+      raise @bad, "invalid semantic size/alignment for #{k[1]}"
+    end
+    names = {}
+    ranges = []
+    used = []
+    objects = [[0, k]]
+    f.drop(4).each do |field|
+      unless head(field) == 'field' && field.length == 4 && field[1].is_a?(IRStr) && !field[1].to_s.empty?
+        raise @bad, 'semantic field form'
+      end
+      name = field[1].to_s
+      raise @bad, "duplicate semantic field #{name}" if names[name]
+      names[name] = true
+      off = number(field[2])
+      desc = field_type(field[3], visiting + [k])
+      n = desc[:size]
+      raise @bad, "semantic field #{name} exceeds its object" if off + n > size
+      raise @refused, 'unaligned semantic fields are unsupported' if off % desc[:align] != 0 || align < desc[:align]
+      if ranges.any? { |o, len| off < o + len && o < off + n }
+        raise @refused, 'overlapping semantic fields are unsupported'
+      end
+      ranges << [off, n]
+      used.concat(desc[:used].map { |i| off + i })
+      objects.concat(desc[:objects].map { |o, ty| [off + o, ty] })
+    end
+    @resolved[k] = {size: size, align: align, used: used.sort, objects: objects}
+  end
+end
+
 class LocalLifetime
   attr_reader :errors
 
-  def initialize(f, infer_loan_ends = false)
+  def initialize(f, infer_loan_ends = false, semantic_layouts = nil)
     @infer_loan_ends = infer_loan_ends
+    @layouts = semantic_layouts || BorrowLayouts.new([], BadIR, BorrowRefused)
     raise BadIR, 'function header' unless f.length >= 4 && bh(f[2]) == 'ret' && bh(f[3]) == 'params'
     @name = bname(f[1])
     @slots = {}
@@ -154,6 +252,7 @@ class LocalLifetime
     @report = false
     @declared = {}
     @loans = {}
+    @drops = {}
     scan = lambda do |x|
       return unless x.is_a?(Array)
       if bh(x) == 'decl' && x[1].is_a?(IRSym) && x[1].sig == '$'
@@ -165,13 +264,13 @@ class LocalLifetime
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
         place = direct_place(x[4])
         raise BorrowRefused, 'borrow requires a direct local place or constant field offset; use reborrow with an explicit parent' unless place
-        @loans[id] = [place[0], x[3], nil, place[1], x[1][1]]
+        @loans[id] = [place[0], x[3], nil, place[1], x[1][1], x[1][1]]
       end
       if bh(x) == 'reborrow'
         raise BadIR, 'reborrow form' unless x.length == 6 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
         id = bname(x[2])
         raise BadIR, "duplicate loan #{id}" if @loans.key?(id)
-        @loans[id] = [nil, x[3], bname(x[4]), expression_offset(x[5]), x[1][1]]
+        @loans[id] = [nil, x[3], bname(x[4]), expression_offset(x[5]), x[1][1], x[1][1]]
       end
       x.each { |y| scan.call(y) }
     end
@@ -185,7 +284,12 @@ class LocalLifetime
         raise BorrowRefused, 'local byte-range analysis requires slot sizes from 1 to 4096' unless size > 0 && size <= 4096
         name = bname(x[1])
         raise BadIR, "duplicate local slot #{name}" if @slots[name]
-        @slot_info[name] = [@slots.length, size, x[2]]
+        align = constant_offset(x[4])
+        desc = @layouts.lookup(x[2])
+        if desc && (size != desc[:size] || align < desc[:align] || align % desc[:align] != 0)
+          raise BadIR, "slot #{name} disagrees with semantic layout"
+        end
+        @slot_info[name] = [@slots.length, size, x[2], align]
         @slots[name] = true
       end
     end
@@ -203,8 +307,32 @@ class LocalLifetime
     @loans.each_value do |loan|
       raise BadIR, "loan refers to unknown slot #{loan[0]}" unless @slots[loan[0]]
     end
-    body = f.drop(4).reject { |x| ['slot', 'static', 'weak'].include?(bh(x)) }
-    @entry = sequence(body, node(['join'], []), nil, nil)
+    f.drop(4).each do |part|
+      next unless bh(part) == 'drop-obligation'
+      unless part.length == 4 && part[1].is_a?(IRStr) && !part[1].to_s.empty?
+        raise BadIR, 'drop-obligation form'
+      end
+      id = part[1].to_s
+      raise BadIR, "duplicate drop obligation #{id}" if @drops.key?(id)
+      place = direct_place(part[3])
+      raise BorrowRefused, 'drop obligations require direct local slots or constant field offsets' unless place
+      root, off = place
+      raise BadIR, "drop obligation refers to unknown slot #{root}" unless @slots[root]
+      ty = part[2]
+      desc = @layouts.lookup(ty)
+      if %w[struct union array].include?(bh(ty)) && !desc
+        raise BorrowRefused, 'aggregate drop obligations require semantic layouts'
+      end
+      width = type_width(ty, root, off)
+      check_range(root, off, width)
+      required = semantic_bytes(root, off, ty) || (0...width).to_a
+      if @drops.values.any? { |d| d[:root] == root && overlaps(off, width, d[:off], d[:width]) }
+        raise BorrowRefused, 'overlapping drop obligations require hierarchical cleanup contracts'
+      end
+      @drops[id] = {root: root, off: off, width: width, type: ty, required: required}
+    end
+    body = f.drop(4).reject { |x| ['slot', 'static', 'weak', 'drop-obligation'].include?(bh(x)) }
+    @entry = sequence(body, node(['function-exit'], []), nil, nil)
     @nodes.each do |n|
       n[1].map! do |edge|
         if edge.is_a?(String)
@@ -234,6 +362,7 @@ class LocalLifetime
     raise BadIR, "loan refers to unknown slot #{loan[0]}" unless @slots[loan[0]]
     loan[4] = type_width(loan[4], loan[0], loan[3])
     check_range(loan[0], loan[3], loan[4])
+    semantic_bytes(loan[0], loan[3], loan[5])
     if parent
       p = @loans[parent]
       raise BorrowRefused, 'reborrow range escapes its parent' unless loan[3] >= p[3] && loan[3] + loan[4] <= p[3] + p[4]
@@ -261,6 +390,8 @@ class LocalLifetime
   end
 
   def type_width(ty, root = nil, off = 0)
+    desc = @layouts.lookup(ty)
+    return desc[:size] if desc
     return 8 if bh(ty) == 'ptr'
     widths = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
               'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
@@ -272,6 +403,16 @@ class LocalLifetime
       return @slot_info[root][1]
     end
     raise BorrowRefused, 'unknown aggregate access width'
+  end
+
+  def semantic_bytes(root, off, ty)
+    desc = @layouts.lookup(ty)
+    return nil unless desc
+    root_desc = @layouts.lookup(@slot_info[root][2])
+    unless root_desc && root_desc[:objects].include?([off, @layouts.key(ty)])
+      raise BorrowRefused, 'semantic aggregate borrow does not match a declared subobject'
+    end
+    desc[:used]
   end
 
   def check_range(root, off, width)
@@ -343,6 +484,110 @@ class LocalLifetime
     state.keys.each { |key| state[key] = ['unknown'] if key.start_with?(prefix) } if clear_pointers
   end
 
+  def same_type?(a, b)
+    return a.is_a?(IRStr) && b.is_a?(IRStr) && a.to_s == b.to_s if a.is_a?(IRStr) || b.is_a?(IRStr)
+    if a.is_a?(Array) || b.is_a?(Array)
+      return false unless a.is_a?(Array) && b.is_a?(Array) && a.length == b.length
+      return a.each_with_index.all? { |v, i| same_type?(v, b[i]) }
+    end
+    a == b
+  end
+
+  def drop_key(id)
+    'drop:' + id
+  end
+
+  def reset_drop_flags(root, state, status)
+    @drops.each { |id, d| state[drop_key(id)] = [status] if d[:root] == root }
+  end
+
+  def check_pending_drops(state, root = nil)
+    @drops.each do |id, d|
+      next if root && d[:root] != root
+      flags = state[drop_key(id)]
+      diagnostic('missing-drop', id) if flags.include?('live')
+      diagnostic('unarmed-drop-value', id) if flags.include?('building')
+    end
+  end
+
+  def track_drop_write(root, off, width, state)
+    @drops.each do |id, d|
+      next unless d[:root] == root && overlaps(off, width, d[:off], d[:width])
+      flags = state[drop_key(id)]
+      full = off <= d[:off] && off + width >= d[:off] + d[:width]
+      diagnostic('overwrite-live-drop', id) if full && flags.include?('live')
+      state[drop_key(id)] = flags.map { |f| ['dead', 'live'].include?(f) ? f : 'building' }.uniq.sort
+    end
+  end
+
+  def track_drop_transfer(root, off, width, ty, moving, state)
+    @drops.each do |id, d|
+      next unless d[:root] == root && overlaps(off, width, d[:off], d[:width])
+      exact = off == d[:off] && width == d[:width] && same_type?(ty, d[:type])
+      if moving && !exact
+        raise BorrowRefused, 'partial or reinterpreted moves of drop-obligated values require cleanup contracts'
+      end
+      flags = state[drop_key(id)]
+      if !moving && exact && flags.include?('live')
+        raise BorrowRefused, 'copy of a drop-obligated value requires a copy contract'
+      end
+      next unless moving
+      diagnostic('move-unarmed-drop', id) if flags.include?('building')
+      state[drop_key(id)] = flags.map { |f| f == 'live' ? 'vacant' : f }.uniq.sort
+    end
+  end
+
+  def drop_event(x, state)
+    unless x.length == 2 && x[1].is_a?(IRStr) && @drops.key?(x[1].to_s)
+      raise BadIR, 'drop event requires a declared obligation ID'
+    end
+    id = x[1].to_s
+    d = @drops[id]
+    flags = state[drop_key(id)]
+    root, off, width = d[:root], d[:off], d[:width]
+    place = project('local:' + root, off)
+    if bh(x) == 'drop-live'
+      diagnostic('drop-already-live', id) if flags.include?('live')
+      access(place, state, true, nil, width, d[:type])
+      live_storage = (0...width).all? { |i| !(state[byte_key(root, off + i)] || ['dead']).include?('dead') }
+      complete = d[:required].all? { |i| state[byte_key(root, off + i)] == ['initialized'] }
+      state[drop_key(id)] = ['live'] if live_storage && complete
+      return state
+    end
+    diagnostic('drop-outside-storage', id) if flags.include?('dead')
+    diagnostic('unarmed-drop-value', id) if flags.include?('building')
+    if bh(x) == 'drop-state'
+      diagnostic('drop-not-live', id) if flags.include?('vacant')
+      diagnostic('double-drop', id) if flags.include?('dropped')
+    end
+    return state unless flags.include?('live')
+    # Whole-value arming and moves maintain correlation between a live flag
+    # and initialized required bytes. Guarded cleanup reads only live paths.
+    guarded = state.dup
+    d[:required].each do |i|
+      key = byte_key(root, off + i)
+      raise BorrowRefused, 'drop flag initialization invariant is not established' unless state[key].include?('initialized')
+      guarded[key] = ['initialized']
+    end
+    access(place, guarded, true, 'exclusive', width, d[:type])
+    prefix = 'pointer:' + @slot_info[root][0].to_s + ':'
+    state.each do |key, values|
+      next unless key.start_with?(prefix)
+      parts = key.split(':')
+      record_loan_values(values) if overlaps(off, width, parts[2].to_i, parts[3].to_i)
+    end
+    width.times do |i|
+      key = byte_key(root, off + i)
+      state[key] = if flags == ['live']
+                     ['dropped']
+                   else
+                     (state[key].map { |s| s == 'initialized' ? 'dropped' : s } + ['dropped']).uniq.sort
+                   end
+    end
+    state[drop_key(id)] = flags.map { |f| f == 'live' ? 'dropped' : f }.uniq.sort
+    state
+  end
+
   def node(x, edges)
     id = @nodes.length
     @nodes << [x, edges.compact]
@@ -407,7 +652,7 @@ class LocalLifetime
 
   # Each storage state is a set: dead, uninitialized, initialized, moved. Pointer
   # provenance is a set of local storage identities, or external/unknown.
-  def access(place, state, read, borrowing = nil, width = nil)
+  def access(place, state, read, borrowing = nil, width = nil, semantic_type = nil)
     base = base_origin(place)
     return if base == 'external'
     if base.start_with?('ended:')
@@ -434,8 +679,13 @@ class LocalLifetime
     label = off == 0 && width == @slot_info[name][1] ? name : name + '[' + off.to_s + '..' + (off + width).to_s + ']'
     status = (0...width).flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
     diagnostic('use-after-scope', label) if status.include?('dead')
+    required = semantic_type ? semantic_bytes(name, off, semantic_type) : nil
+    if required
+      status = required.flat_map { |i| state[byte_key(name, off + i)] || ['dead'] }.uniq
+    end
     diagnostic('uninitialized', label) if read && status.include?('uninitialized')
     diagnostic('use-after-move', label) if read && status.include?('moved')
+    diagnostic('use-after-drop', label) if read && status.include?('dropped')
     @loans.each do |id, loan|
       next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
       next unless overlaps(off, width, loan[3], loan[4])
@@ -497,6 +747,7 @@ class LocalLifetime
       raise BadIR, "value transfer refers to unknown slot #{name}" unless @slots[name]
       width = type_width(x[1])
       moving = bh(x) == 'move-value'
+      track_drop_transfer(name, off, width, x[1], moving, state)
       access(project('local:' + name, off), state, true, moving ? 'exclusive' : nil, width)
       result = bh(x[1]) == 'ptr' ? record_loan_values(state[pointer_key(name, off, width)] || ['unknown']) : []
       if moving
@@ -511,7 +762,7 @@ class LocalLifetime
       loan = @loans[id]
       record_loan_definition(id)
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
-      access(project('local:' + loan[0], loan[3]), state, true, loan[1], loan[4])
+      access(project('local:' + loan[0], loan[3]), state, true, loan[1], loan[4], loan[5])
       state['loan:' + id] = ['active']
       ['loan:' + id]
     when 'reborrow'
@@ -527,7 +778,7 @@ class LocalLifetime
       sources.each do |p|
         a = address(p)
         raise BorrowRefused, 'reborrow source offset does not match its declared range' if a && a[1] != loan[3]
-        access(p, state, true, loan[1], loan[4])
+        access(p, state, true, loan[1], loan[4], loan[5])
       end
       state['loan:' + id] = ['active']
       ['loan:' + id]
@@ -566,12 +817,16 @@ class LocalLifetime
   end
 
   def transfer(x, state)
-    arities = {'join'=>[1], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
+    arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[4], 'store'=>[4], 'return'=>[1,2],
                'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
+    when 'function-exit'
+      check_pending_drops(state)
+    when 'drop-live', 'drop-state', 'drop-state-if-live'
+      return drop_event(x, state)
     when 'join', 'unreachable', 'loc'
       # Locations are preserved in input; diagnostics currently identify functions and slots.
     when 'decl'
@@ -580,14 +835,18 @@ class LocalLifetime
       if k && k.start_with?('slot:')
         name = k[5..-1]
         raise BadIR, "undeclared slot #{name}" unless @slots[name]
+        check_pending_drops(state, name)
         reset_storage(name, state, 'uninitialized')
+        reset_drop_flags(name, state, 'vacant')
       end
     when 'scope-end'
       k = key(x[1])
       raise BadIR, 'scope-end requires a local slot' unless k && k.start_with?('slot:')
       name = k[5..-1]
       raise BadIR, "unknown local slot #{name}" unless @slots[name]
+      check_pending_drops(state, name)
       reset_storage(name, state, 'dead', false)
+      reset_drop_flags(name, state, 'dead')
       # A new lifetime in this slot cannot revive pointers from the old one.
       origins = ['local:' + name]
       @loans.each do |id, loan|
@@ -632,6 +891,7 @@ class LocalLifetime
       raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
       a = address(dest[0])
       return state unless a
+      track_drop_write(a[0], a[1], width, state)
       write_memory(a[0], a[1], width, state, !zero && bh(x[1]) == 'ptr' ? v : nil)
     when 'return'
       refs = x[1] ? value(x[1], state) : []
@@ -644,6 +904,7 @@ class LocalLifetime
           diagnostic('return-local-address', base_origin(p).start_with?('ended:') ? base_origin(p)[6..-1] : storage(p))
         end
       end
+      check_pending_drops(state)
     when 'condition', 'eval', 'nonnull'
       value(x[1], state)
     when 'rref-arg'
@@ -657,9 +918,13 @@ class LocalLifetime
   def initial_state
     initial = {}
     @slots.each_key { |s| reset_storage(s, initial, 'dead') }
+    @drops.each_key { |id| initial[drop_key(id)] = ['dead'] }
     @params.each do |p, name, pointer|
       initial['value:' + p] = pointer ? ['external'] : []
-      reset_storage(name, initial, 'uninitialized') if @slots[name]
+      if @slots[name]
+        reset_storage(name, initial, 'uninitialized')
+        reset_drop_flags(name, initial, 'vacant')
+      end
     end
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
     initial
@@ -763,11 +1028,12 @@ begin
       end
     end
   end
+  semantic_layouts = BorrowLayouts.new(forms, BadIR, BorrowRefused)
   functions = forms.select { |f| bh(f) == 'function' }
   raise BorrowRefused, 'no functions to analyze' if functions.empty?
   errors = []
   functions.each do |f|
-    checker = LocalLifetime.new(f, infer)
+    checker = LocalLifetime.new(f, infer, semantic_layouts)
     checker.run
     errors.concat(checker.errors)
   end
