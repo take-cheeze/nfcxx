@@ -664,9 +664,60 @@ class LocalLifetime
     nil
   end
 
+  # A ranged view points somewhere within the array its base names: the whole
+  # array slot, or the range of a loan of one. Dynamic indices produce it, and
+  # so does a join of different offsets from one base.
+  def ranged?(origin)
+    origin.start_with?('view:') && @views[origin[5..-1].to_i][1].nil?
+  end
+
+  def array_range(base)
+    if base.start_with?('local:')
+      root = base[6..-1]
+      lo, n, own = 0, @slot_info[root] && @slot_info[root][1], nil
+    elsif base.start_with?('loan:')
+      own = base[5..-1]
+      root, lo, n = @loans[own][0], @loans[own][3], @loans[own][4]
+    else
+      return nil
+    end
+    return nil unless @slot_info[root] && bh(@slot_info[root][2]) == 'array'
+    return nil if @regions.values.any? { |r| r[:name] == root }
+    [root, lo, n, own]
+  end
+
+  def ranged(origin)
+    base = base_origin(origin)
+    return base if base.start_with?('expired:') || base.start_with?('ended:')
+    raise BorrowRefused, 'pointer arithmetic requires a local array object' unless array_range(base)
+    pair = [base, nil]
+    unless @view_ids.key?(pair)
+      @view_ids[pair] = 'view:' + @views.length.to_s
+      @views << pair
+    end
+    @view_ids[pair]
+  end
+
+  # Merge the origins of one base at different offsets into its ranged view,
+  # so that a pointer advanced in a loop converges.
+  def widen(values)
+    groups = {}
+    values.each do |p|
+      base = base_origin(p)
+      next unless base.start_with?('local:') || base.start_with?('loan:')
+      (groups[base] ||= []) << p
+    end
+    groups.each do |base, ps|
+      next if ps.length < 2 || !array_range(base)
+      values = (values - ps + [ranged(base)]).uniq.sort
+    end
+    values
+  end
+
   def project(origin, offset)
     base = base_origin(origin)
     return base if base.start_with?('expired:') || base.start_with?('ended:')
+    return origin if ranged?(origin)
     old = origin.start_with?('view:') ? @views[origin[5..-1].to_i][1] : 0
     raise BorrowRefused, 'projection requires known local pointer provenance' unless address(origin)
     a = address(origin)
@@ -880,6 +931,7 @@ class LocalLifetime
       diagnostic('inactive-loan', base[8..-1])
       return
     end
+    return ranged_access(place, state, read, borrowing, width, semantic_type) if ranged?(place)
     a = address(place)
     raise BorrowRefused, 'unknown pointer provenance' unless a
     name, off, own = a
@@ -911,6 +963,33 @@ class LocalLifetime
     [name, off, width]
   end
 
+  # An access at an unknown position of an array: every byte of the range must
+  # allow it, and a write initializes none (a weak update).
+  def ranged_access(place, state, read, borrowing, width, semantic_type)
+    raise BorrowRefused, 'borrow through a dynamic index' if borrowing || semantic_type
+    name, lo, n, own = array_range(base_origin(place))
+    raise BorrowRefused, 'access through a dynamic index requires a width' unless width
+    raise BorrowRefused, 'access wider than its array' if width > n
+    if own
+      ([own] + @ancestors[own]).each do |id|
+        diagnostic('inactive-loan', id) unless state['loan:' + id] == ['active']
+      end
+      diagnostic('write-through-shared-loan', own) if !read && @loans[own][1] == 'shared'
+    end
+    label = lo == 0 && n == @slot_info[name][1] ? name : name + '[' + lo.to_s + '..' + (lo + n).to_s + ']'
+    status = (0...n).flat_map { |i| state[byte_key(name, lo + i)] || ['dead'] }.uniq
+    diagnostic('use-after-scope', label) if status.include?('dead')
+    diagnostic('uninitialized', label) if read && status.include?('uninitialized')
+    diagnostic('use-after-move', label) if read && status.include?('moved')
+    diagnostic('use-after-drop', label) if read && status.include?('dropped')
+    @loans.each do |id, loan|
+      next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
+      next unless overlaps(lo, n, loan[3], loan[4])
+      diagnostic('loan-conflict', label + ' (' + id + ')') if loan[1] == 'exclusive' || !read
+    end
+    nil
+  end
+
   def invalidate_pointers(state, from, to)
     state.keys.each do |entry|
       if entry.start_with?('value:') || entry.start_with?('pointer:')
@@ -920,6 +999,7 @@ class LocalLifetime
   end
 
   def storage(place)
+    return array_range(base_origin(place))[0] if ranged?(place)
     a = address(place)
     a ? a[0] : nil
   end
@@ -1145,6 +1225,7 @@ class LocalLifetime
       diagnostic('loan-already-active', id) if state['loan:' + id].include?('active')
       diagnostic('exclusive-reborrow-of-shared', id) if loan[1] == 'exclusive' && @loans[parent][1] == 'shared'
       sources.each do |p|
+        raise BorrowRefused, 'reborrow through a dynamic index' if ranged?(p)
         a = address(p)
         raise BorrowRefused, 'reborrow source offset does not match its declared range' if a && a[1] != loan[3]
         access(p, state, true, loan[1], loan[4], loan[5])
@@ -1155,6 +1236,19 @@ class LocalLifetime
       raise BadIR, 'offset form' unless x.length == 3
       delta = constant_offset(x[2])
       value(x[1], state).map { |p| project(p, delta) }.uniq
+    when 'index'
+      raise BadIR, 'index form' unless x.length == 4
+      size = constant_offset(x[3])
+      bases = value(x[1], state)
+      raise BorrowRefused, 'pointer arithmetic requires place projections' if bases.empty?
+      if bh(x[2]) == 'const'
+        raise BadIR, 'index constant form' unless x[2].length == 3
+        delta = constant_offset(x[2][2]) * size
+        bases.map { |p| project(p, delta) }.uniq
+      else
+        raise BorrowRefused, 'pointer-valued index' unless value(x[2], state).empty?
+        bases.map { |p| ranged(p) }.uniq
+      end
     when 'load'
       borrow_scalar_type!(x[1])
       places = value(x[2], state)
@@ -1180,6 +1274,12 @@ class LocalLifetime
       # increment to scalar arithmetic and conversions on non-pointer values.
       allowed = %w[wadd wsub wmul cadd csub cmul cdiv crem cshl cshr and or xor eq ne lt.s lt.u le.s le.u gt.s gt.u ge.s ge.u iconv]
       raise BorrowRefused, "expression #{bh(x)}" unless allowed.include?(bh(x))
+      # Comparing addresses reads no memory and its result has no provenance.
+      if bh(x[1]) == 'ptr' && %w[eq ne lt.u le.u gt.u ge.u].include?(bh(x))
+        raise BadIR, "#{bh(x)} form" unless x.length == 4
+        x.drop(2).each { |v| value(v, state) }
+        return []
+      end
       raise BorrowRefused, 'pointer conversion requires provenance' if bh(x[1]) == 'ptr'
       vals = x.drop(2).flat_map { |v| value(v, state) }
       raise BorrowRefused, 'pointer arithmetic/conversion requires place projections' unless vals.empty?
@@ -1190,7 +1290,7 @@ class LocalLifetime
   def transfer(x, state)
     arities = {'join'=>[1], 'function-exit'=>[1], 'drop-live'=>[2], 'drop-state'=>[2], 'drop-state-if-live'=>[2], 'unreachable'=>[1], 'decl'=>[3], 'scope-end'=>[2],
                'let'=>[4], 'set'=>[4], 'store'=>[4], 'return'=>[1,2],
-               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
+               'condition'=>[2], 'eval'=>[2], 'nonnull'=>[2], 'bounds'=>[3], 'rref-arg'=>[2], 'loan-end'=>[2], 'zero-fill'=>[3]}
     sizes = arities[bh(x)]
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
@@ -1262,6 +1362,13 @@ class LocalLifetime
       dest.each { |p| access(p, state, false, nil, width) }
       raise BorrowRefused, 'store through external storage may escape a local address' if dest.any? { |p| base_origin(p) == 'external' }
       raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
+      if ranged?(dest[0])
+        raise BorrowRefused, 'pointer store through a dynamic index' if !zero && bh(x[1]) == 'ptr'
+        root, lo, n, = array_range(base_origin(dest[0]))
+        raise BorrowRefused, 'store through a dynamic index into drop-obligated storage' if @drops.values.any? { |d| d[:root] == root }
+        forget_pointer_values(root, lo, n, state)
+        return state
+      end
       a = address(dest[0])
       return state unless a
       if v && @regions.values.any? { |r| r[:name] == a[0] }
@@ -1290,6 +1397,9 @@ class LocalLifetime
       check_pending_drops(state)
     when 'condition', 'eval', 'nonnull'
       value(x[1], state)
+    when 'bounds'
+      raise BorrowRefused, 'pointer-valued index' unless value(x[1], state).empty?
+      value(x[2], state)
     when 'rref-arg'
       raise BorrowRefused, 'rvalue-reference arguments require language-specific move contracts'
     else
@@ -1358,6 +1468,7 @@ class LocalLifetime
             a = old[k] || ['unknown']
             b = edge[k] || ['unknown']
             merged[k] = (a + b).uniq.sort
+            merged[k] = widen(merged[k]) if k.start_with?('value:') || k.start_with?('pointer:')
           end
         end
         if old != merged
