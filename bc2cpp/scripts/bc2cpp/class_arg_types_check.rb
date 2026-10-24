@@ -128,7 +128,7 @@ class ClassArgTypesTest < Minitest::Test
 
   # A packed caller whose argument array sits in R2 (LOADNIL R3; MOVE R2 R3 stands in for the array build).
   def packed_caller(name = 'set')
-    irep('packed', [InsnStub.new(op: 'LOADNIL', args: 'R3'), InsnStub.new(op: 'MOVE', args: "R2\tR3"),
+    irep('packed', [InsnStub.new(op: 'LOADNIL', args: "R3\t(nil)"), InsnStub.new(op: 'MOVE', args: "R2\tR3"),
                     send_insn(1, name, '*')])
   end
 
@@ -223,7 +223,7 @@ class ClassArgTypesTest < Minitest::Test
 
   def test_packed_block_passing_caller_gives_no_argument_type_fact
     plain = irep('plain', [InsnStub.new(op: 'LOADI_1', args: "R2\t(1)"), send_insn(1, 'set', 1)])
-    packed_blk = irep('packed_blk', [InsnStub.new(op: 'LOADNIL', args: 'R3'), InsnStub.new(op: 'MOVE', args: "R2\tR3"),
+    packed_blk = irep('packed_blk', [InsnStub.new(op: 'LOADNIL', args: "R3\t(nil)"), InsnStub.new(op: 'MOVE', args: "R2\tR3"),
                                      sendb_insn(1, 'set', '*')])
     assert_equal [nil], arg_types_for('plain' => plain, 'packed_blk' => packed_blk)
   end
@@ -277,7 +277,7 @@ class ClassArgTypesTest < Minitest::Test
 
   # The keyword key sits in R2 (LOADSYM :k), the value in R3; the Hash lands at R2, the callee's position 1.
   def keyword_caller(name = 'set')
-    irep('kw', [InsnStub.new(op: 'LOADSYM', args: "R2\t:k"), InsnStub.new(op: 'LOADNIL', args: 'R3'),
+    irep('kw', [InsnStub.new(op: 'LOADSYM', args: "R2\t:k"), InsnStub.new(op: 'LOADNIL', args: "R3\t(nil)"),
                 keyword_send(1, name, 0, 1)])
   end
 
