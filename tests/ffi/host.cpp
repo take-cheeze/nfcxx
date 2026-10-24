@@ -204,7 +204,7 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   CHECK(lib.callable("add_int") && lib.callable("scale") && lib.callable("halve") && lib.callable("mixed"));
   CHECK(lib.callable("count_bytes") && lib.callable("call_back"));
   CHECK(lib.callable("vec_add") && lib.callable("big_make"));    // structs by value
-  CHECK(!lib.callable("sum_all"));                                // variadic
+  CHECK(lib.callable("sum_all"));                                // variadic: callable with extra arguments
   CHECK(lib.declarations().size() == 9);                          // every function is listed
 
   Value sum = lib.call("add_int", {Value::of_signed(4), Value::of_signed(5)});
@@ -230,6 +230,20 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   CHECK(lib.call("call_back", {Value::of_pointer(reinterpret_cast<const void*>(&twice_fn)), Value::of_signed(21)})
             .as_signed() == 42);  // the C code calls a host function through a pointer
 
+  // Variadic functions: the extra arguments are passed by their promoted kinds (integer, double, pointer).
+  nfcffi::Library vlib = ffi.load(dir + "/var.h", "", {"snprintf"});
+  CHECK(vlib.callable("snprintf"));
+  char buf[64] = {0};
+  Value written = vlib.call("snprintf", {Value::of_pointer(buf), Value::of_unsigned(sizeof buf),
+                                         Value::of_pointer("%d-%s-%.2f"), Value::of_signed(42),
+                                         Value::of_pointer("hi"), Value::of_float(3.14159)});
+  CHECK(written.as_signed() == 10 && std::strcmp(buf, "42-hi-3.14") == 0);
+  // The same function with another kind sequence (a second wrapper, compiled on demand).
+  char buf2[32] = {0};
+  CHECK(vlib.call("snprintf", {Value::of_pointer(buf2), Value::of_unsigned(sizeof buf2), Value::of_pointer("%ld"),
+                               Value::of_unsigned(1234567890123ULL)}).as_signed() == 13 &&
+        std::strcmp(buf2, "1234567890123") == 0);
+
   // Errors: an uncallable name, a wrong count, a wrong kind, and an accessor for another kind.
   auto throws = [](auto&& f) {
     try {
@@ -245,6 +259,7 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   CHECK(throws([&] { lib.call("add_int", {Value::of_signed(1)}); }));
   CHECK(throws([&] { lib.call("add_int", {Value::of_pointer(nullptr), Value::of_signed(1)}); }));
   CHECK(throws([&] { lib.call("halve", {Value::of_pointer("x")}); }));
+  CHECK(throws([&] { vlib.call("snprintf", {Value::of_pointer(buf)}); }));  // fewer than the fixed arguments
   CHECK(throws([&] { sum.as_float(); }));
 
   // A function of the C library by name, from a header that includes <string.h>; only strlen is wrapped.

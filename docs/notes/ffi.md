@@ -1,6 +1,6 @@
 # nfcffi: calling C compiled at run time (`lib/ffi`)
 
-Status: **Milestones 1 to 4 (structs by value), experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
+Status: **Milestones 1 to 6 (Python through nfcpoly), experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
 loaded; its functions, and the C library's, are called through C++ function types written at the call site. The
 design is DragonFFI's idea (a C library called from a host at run time, without writing bindings by hand), without
 its header parser and without libffi.
@@ -106,11 +106,17 @@ lib.callable("vec_add");   // false: a struct by value
   result with `*(T *)r = ...`, so the C compiler applies the ABI. A layout function, `nfcffi_layout_NAME`, reports
   `sizeof` for each struct position; `Library::call` checks the size of each struct argument against it and allocates
   the result buffer. The host's struct must have the C layout (a C++ struct with the same members, in the same order).
-- **Not callable** (listed by `declarations`, `callable` is false): `long double`, 128-bit integers, variadic functions,
-  and overload sets. Calling them throws `Error`.
+- **Variadic functions** (`snprintf`, a declaration with `...`) are callable with extra arguments. Each extra argument
+  takes the C default promotion of its `Value`: an integer as `long long`, a float as `double`, a pointer as a pointer.
+  The callee's format must match them, as in C. The fixed arguments must be scalars. The first call with a new sequence
+  of extra kinds compiles a wrapper for it (the header and source again, cached like any other build), so later calls
+  with the same sequence are direct.
+- **Not callable** (listed by `declarations`, `callable` is false): `long double`, 128-bit integers, and overload sets.
+  Calling them throws `Error`.
 - **Value.** `Value::of_signed`, `of_unsigned`, `of_float`, `of_pointer`, `of_bytes(p, n)`; the accessors throw `Error`
   on another kind.
-- **Tests.** `tests/ffi/host.cpp` `check_library`: the callable/not-callable split on `dyn.h` (structs, a variadic
+- **Tests.** `tests/ffi/host.cpp` `check_library` (variadic: `snprintf` with integer, string and double extras, and a
+  second sequence): the callable/not-callable split on `dyn.h` (structs, a variadic
   function), integer and floating conversions, a pointer argument, a host callback through a pointer, arity and kind
   errors, `strlen` from `<string.h>` loaded with a filter, and structs by value (`vec_add`, `big_make`, in and out, with a
   size and a kind error). 73 checks on both backends.
@@ -118,10 +124,29 @@ lib.callable("vec_add");   // false: a struct by value
   use `only` for the functions you need. A function declared in the header but defined nowhere fails the `dlopen`
   (`RTLD_NOW`), so every referenced function must be defined by the header's libraries or by `source`.
 
+## Python (Milestone 6)
+
+`lib/ffi/nfcffi_poly.{hpp,cpp}` binds the library into an `nfcpoly::Context` (`nfcffi::bind_poly(ctx)`), so Python, and
+every other language nfcpoly has, can load a header and call it:
+
+```cpp
+nfcpoly::Context ctx;
+nfcffi::bind_poly(ctx);
+ctx.eval<long long>("python", "lib = ffi_load('/abs/dyn.h', src_text, ['add_int'])\nlib.call('add_int', [4, 5])");   // 9
+```
+
+- `ffi_load(header, source, [names])` returns an `FfiLibrary`. The names are optional (the default wraps every callable
+  function of the header; a function that does not compile in the wrappers fails the whole load, so name what you need).
+- `lib.call(name, [args])` and `lib.callable(name)`. An argument is an integer, a boolean, a float, a string (a C string
+  for the call), nil (a null pointer, or 0), or an array of integers 0..255 (the bytes of a struct or union).
+- A result is an integer, a float, nil (a null pointer), or an array of bytes (a struct or union). A pointer result is its
+  address as an integer.
+- Errors reach the script as script errors (an `Error` of the library is a `RuntimeError`-like error in each language).
+- Test: `tests/ffi/poly_host.cpp`, with CPython (`python3-config`); `tests/ffi/run.sh` builds it when the CPython
+  development files are present and skips it otherwise.
+
 ## Not yet
 
-- **Variadic functions** (`printf`) cannot be called by name: the wrapper cannot pass a runtime number of arguments.
-  A call would need a wrapper per sequence of argument kinds, compiled on demand.
 - **ABI.** The checks above cover the SysV x86-64 cases the tests use. Other targets are not covered.
 - **Host and module compiler.** The module must be built by the same nfcxx backend as the host for C++ types to match;
   the test runs both with the same backend.
@@ -132,5 +157,5 @@ lib.callable("vec_add");   // false: a struct by value
 2. (done) Declarations from headers: typed `sig` records, `Ffi::declarations`, C and C++ dialects.
 3. (done) Calls by name: kinds per declaration, wrappers compiled with the header, `Library::call` with `Value`s.
 4. (done) Structs and unions by value, as bytes with the C layout.
-5. Variadic calls (a wrapper per argument-kind sequence, compiled on demand).
-6. A Python binding through `nfcpoly`, which already runs Python from C++ (`docs/notes/poly.md`).
+5. (done) Variadic calls: a wrapper per sequence of extra argument kinds, compiled on first use.
+6. (done) Python through `nfcpoly` (`nfcffi_poly.cpp`): `ffi_load` and `FfiLibrary.call`, with the same argument rules.

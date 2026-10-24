@@ -1,0 +1,82 @@
+// nfcffi from nfcpoly scripts (Python): builds the context with nfcffi::bind_poly and runs the same calls as tests/ffi/host.cpp
+// through ffi_load and lib.call. Usage: poly_host <dir with the tests/ffi files>. Exits 0 when every check passes.
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+#include "nfcffi_poly.hpp"
+
+namespace {
+
+int failures = 0, checks = 0;
+
+void check(bool ok, const char* what) {
+  ++checks;
+  if (!ok) {
+    ++failures;
+    std::printf("FAIL %s\n", what);
+  }
+}
+
+std::string read_text(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+}  // namespace
+
+static int run(const std::string& dir);
+
+int main(int argc, char** argv) {
+  if (argc != 2) {
+    std::fprintf(stderr, "usage: %s <dir with the tests/ffi files>\n", argv[0]);
+    return 2;
+  }
+  try {
+    return run(argv[1]);
+  } catch (const std::exception& e) {
+    std::printf("FAILED: %s\n", e.what());
+    return 1;
+  }
+}
+
+static int run(const std::string& dir) {
+  const std::string src = read_text(dir + "/dyn_impl.c");
+
+  nfcpoly::Context ctx;
+  nfcffi::bind_poly(ctx);
+
+  // Python: integers, floats, a C string argument, and a struct by value through an array of its bytes.
+  const std::string load = "lib = ffi_load('" + dir + "/dyn.h', '''" + src + "''')\n";
+  ctx.eval<void>("python", load);
+  check(ctx.eval<long long>("python", "lib.call('add_int', [4, 5])") == 9, "python add_int");
+  check(ctx.eval<double>("python", "lib.call('scale', [1.5, 4])") == 6.0, "python scale (integer to double)");
+  check(ctx.eval<double>("python", "lib.call('halve', [3.0])") == 1.5, "python halve");
+  check(ctx.eval<long long>("python", "lib.call('count_bytes', ['hello'])") == 5, "python count_bytes (string)");
+  check(ctx.eval<bool>("python", "lib.callable('vec_add') and not lib.callable('no_such')"), "python callable");
+  check(ctx.eval<double>("python",
+                         "import struct\n"
+                         "sum(struct.unpack('dd', bytes(lib.call('vec_add', [list(struct.pack('dd', 1, 2)), "
+                         "list(struct.pack('dd', 3, 4))]))))") == 10.0,
+        "python vec_add (struct by value through bytes)");
+
+  // The same library from Python, with a variadic C function from <stdio.h>.
+  ctx.eval<void>("python", "cstd = ffi_load('" + dir + "/var.h', '', ['snprintf'])\n");
+  check(ctx.eval<long long>("python", "cstd.call('snprintf', [None, 0, '%d-%s', 42, 'hi'])") == 5,
+        "python snprintf (variadic: the length with a null buffer)");
+
+  // Errors reach the script as script errors, and the C++ side can read the result of an eval.
+  bool error = false;
+  try {
+    ctx.eval<long long>("python", "lib.call('vec_add', [1, 2])");
+  } catch (const std::exception&) {
+    error = true;
+  }
+  check(error, "python: wrong argument count is an error");
+
+  std::printf("%s: %d of %d checks passed\n", failures ? "FAILED" : "ok", checks - failures, checks);
+  return failures ? 1 : 0;
+}
