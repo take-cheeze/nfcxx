@@ -37,6 +37,7 @@ declared = lambda do |source, sig|
       report: result.report.join("\n"),
       containers: result.containers,
       integer_names: result.integer_names,
+      integer_keys: result.integer_keys,
       rows_sum: rows.key?('X'),
       ireps: ireps,
       sites: sites
@@ -187,6 +188,19 @@ reads_of = lambda do |source|
     reads
   end
 end
+
+puts '== a same-named constant in another scope (lexical, like the runtime)'
+# A::X proves on its own assignment; C::X = 'a' only withholds the bare-name fact, as reads resolve per scope.
+scoped_src = "module A; X = 16; def self.f; X; end; end\nmodule C; X = 'a'; def self.f; X; end; end\n"
+scoped = declared.call(scoped_src, "module A\n  X: Integer\nend\n")
+check.call('A::X: Integer proves beside a String C::X (no TC1011 error)', scoped[:errors].empty?)
+check.call('the fact is keyed by the definition A::X, not the bare name X',
+           scoped[:integer_keys].include?('A::X') && !scoped[:integer_names].include?('X'))
+site_keys = LexicalConsts.analyze(scoped[:ireps], static: true).site_keys
+check.call('LEXICAL_CONST qualifies the fact\'s own SETCONST as A::X too (bc2cpp.rb keeps the key)',
+           site_keys[scoped[:integer_keys]['A::X']] == 'A::X')
+scoped_reads = reads_of.call(scoped_src).select { |op, name,| op == 'GETCONST' && name == 'X' }.map(&:last)
+check.call('the X read in A resolves to A::X and the one in C to C::X', scoped_reads.sort == %w[A::X C::X])
 
 puts '== a scoped read through a ternary holder'
 holder = reads_of.call(<<~RUBY)

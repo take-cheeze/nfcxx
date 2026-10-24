@@ -77,6 +77,19 @@ class CodeGen
     end
   end
 
+  # INTEGER_CONSTANT_PROOF for one GETCONST/GETMCNST: its bare name is proven, or it resolves (LEXICAL_CONST) to a
+  # definition DECLARED_CONSTANT_CHECK proved on its own (CodeGen.integer_constant_keys).
+  def integer_constant_read?(insn)
+    name = insn.op == 'GETMCNST' ? insn.mcnst_name : insn.const_name
+    return true if name && @integer_constants&.include?(name)
+
+    keys = self.class.integer_constant_keys
+    return false if keys.nil? || keys.empty? || !lexical_consts_enabled?
+
+    key = const_group_key(insn)
+    !key.nil? && keys.include?(key)
+  end
+
   def numeric_const_group(insn)
     key = const_group_key(insn)
     group = key && @numeric_const_groups && @numeric_const_groups[key]
@@ -87,8 +100,7 @@ class CodeGen
     group = numeric_const_group(insn)
     return group.mask if group
 
-    name = insn.const_name
-    name && @integer_constants.include?(name) ? NumericFlow::INT : NumericFlow::OTHER
+    integer_constant_read?(insn) ? NumericFlow::INT : NumericFlow::OTHER
   end
 
   # One growth pass; true when any mask changed or a group failed.
