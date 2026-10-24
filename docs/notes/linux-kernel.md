@@ -72,7 +72,7 @@ The qbe backend still refuses every option it cannot honour. In this mode it acc
 
 - honoured by cproc: `-funsigned-char` (cproc `-u`), `-fshort-wchar` (`-W`: wide literals are `unsigned short`),
   `-ftrivial-auto-var-init=zero` (`-z`: automatic objects without an initializer are zeroed);
-- honoured by QBE (scripts/qbe-nfcxx.patch): `-fno-asynchronous-unwind-tables` (`qbe -U`: no `.cfi` directives,
+- honoured by QBE (a commit of the fork, 3rd/qbe): `-fno-asynchronous-unwind-tables` (`qbe -U`: no `.cfi` directives,
   so no `.eh_frame`, which the kernel's link would otherwise take as an orphan section);
 - true of QBE's code by construction: `-mno-red-zone` (QBE reserves its frame with `subq` and never addresses below
   `%rsp`), `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`,
@@ -80,7 +80,7 @@ The qbe backend still refuses every option it cannot honour. In this mode it acc
   its `@GOTPCREL` loads, and the kernel's linker script checks no GOT is left), and the alignment and tuning options;
 - checked: `-mno-sse`, `-mno-80387` and the other no-floating-point options. QBE has no such switch, so `qbe-cc` refuses
   a translation unit whose QBE code names an SSE or x87 register or an x87 instruction. Inline asm is the program's own,
-  as with gcc. With `-mno-sse` qbe-cc runs `qbe -n` (scripts/qbe-nfcxx.patch): QBE moves an integer between two stack
+  as with gcc. With `-mno-sse` qbe-cc runs `qbe -n` (a commit of the fork, 3rd/qbe): QBE moves an integer between two stack
   slots through `%rax` (saved and restored around the move, the function keeping an `%rbp` frame) instead of
   `%xmm15`, and a variadic function's prologue saves no `%xmm` registers (no caller passes floating-point arguments;
   a `va_arg` of a floating type would be floating-point code, which the check refuses).

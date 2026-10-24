@@ -1,0 +1,5 @@
+(ir-module "fields" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "s" (struct "Ptrs") 16 8) (slot "x" int 4 4)
+(decl $"s" val)(decl $"x" val) (store int $"x" (const int 7))(store (ptr int) (offset $"s" 8) $"x")(let %0 (ptr int) (move-value (ptr int) (offset $"s" 8))) (let %1 (ptr int) (copy-value (ptr int) (offset $"s" 8)))(return (const int 0))
+)

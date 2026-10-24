@@ -1,0 +1,4 @@
+(ir-module "bad_drop_event" (layout (pointer 8) (int 4)))
+(function "main" (ret int) (params)
+  (drop-state x)
+  (return (const int 0)))

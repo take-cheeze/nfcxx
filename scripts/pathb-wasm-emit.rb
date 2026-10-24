@@ -684,8 +684,22 @@ end
 def build_statics(mod, objs, asan = false)
   mod.add_statics(objs)
   end_addr = layout_statics(objs, asan)
-  objs.each do |o|
-    o.bytes = static_contents(mod, o) unless o.data || !o.refusal.nil?
+  # An object whose contents this emitter cannot lower (a type it does not have, such as the std::float16_t constants
+  # of <numbers> that every C++ program declares) is refused where it is used, not here: most are never used. An object
+  # that points at a refused one is refused too, so the contents are made again until no new refusal appears.
+  loop do
+    refused = false
+    objs.each do |o|
+      next if o.data || !o.refusal.nil?
+      begin
+        o.bytes = static_contents(mod, o)
+      rescue Refused => e
+        o.refusal = "global #{o.name}: #{e.message}"
+        o.bytes = nil
+        refused = true
+      end
+    end
+    break unless refused
   end
   end_addr
 end
@@ -765,7 +779,8 @@ class Fn
           raise Refused, "aggregate parameter #{form_text(p)}" if wtype(ty).nil? || !(ty[0] == "int" || ty[0] == "ptr" || ty[0] == "float")
           params << [wtype(ty), ty, reg]
         end
-      elsif h == "static"
+      elsif h == "static" || h == "weak"
+        # linkage: (static), and (weak) or (weak attr), which in a module of one translation unit is a definition
         nil
       elsif h == "slot"
         # (slot "x" TYPE [SIZE ALIGN]): the size and alignment are given for aggregates, and a scalar has its own
@@ -818,7 +833,7 @@ class Fn
   def body_forms
     @form.drop(2).reject do |f|
       h = head_of(f)
-      h == "ret" || h == "params" || h == "static" || h == "slot"
+      h == "ret" || h == "params" || h == "static" || h == "weak" || h == "slot"
     end
   end
 
@@ -1568,8 +1583,12 @@ class Fn
       end
       restore_sp
       e(0x0f)
-    when "loc", "likely", "unlikely"
-      # source position and branch hints (docs/notes/ubsan.md): no code
+    when "loc"
+      # (loc "FILE" LINE): the source position of what follows (NFCXX_IR_LOC, NFCXX_IR_SANITIZE): no code, but a
+      # refusal names it (compile)
+      @loc = "#{s[1]}:#{s[2]}"
+    when "likely", "unlikely"
+      # branch hints (docs/notes/ubsan.md): no code
     when "unreachable", "trap"
       e(0x00)
     when "nonnull"
@@ -1871,7 +1890,15 @@ class Fn
 
   # ---- the whole function
 
+  # The function's code. A refusal names the function, and the source line of the last (loc ...) before it when the IR
+  # has them: "variadic call (in main, at prog.c:6)", which the wasm explorer puts on that line of the editor.
   def compile
+    compile_body
+  rescue Refused => e
+    raise Refused, "#{e.message} (in #{@form[1]}#{@loc ? ", at #{@loc}" : ''})"
+  end
+
+  def compile_body
     setup
     # prologue: the frame base lies below the stack pointer found on entry, aligned to 16
     e(0x23); leb_u(0)                      # global.get 0
@@ -2144,7 +2171,11 @@ end
 # is added only with a source that names both sides.
 EMSCRIPTEN_IMPORT_NAMES = {}
 
-USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [--memory64] [FILE.ir | -] > out.wasm\n"
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [--memory64] [--names] [FILE.ir | -] > out.wasm\n"
+
+# --names: a "name" custom section that names the module's functions, so that an engine's stack trace (and a trap's)
+# names them rather than numbering them (the wasm explorer). Without it the module is the same as before.
+$names = false
 
 def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false)
   forms = parse_forms(tokenize(src))
@@ -2184,7 +2215,19 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
     elsif h == "global"
       objs << parse_global(f)
     elsif h == "data"
-      objs << parse_data(f)
+      begin
+        objs << parse_data(f)
+      rescue Refused => e
+        # string data this emitter cannot lower (a wide string): refused where it is used, as an unusable global is
+        o = StaticObj.new(f[1].to_s, 0, 1, nil, true)
+        o.refusal = "data #{f[1]}: #{e.message}"
+        objs << o
+      end
+    elsif h == "abi-type" || h == "x87-thunk"
+      # for the QBE emitter only: the C ABI shape of an aggregate passed or returned by value, and the assembly thunks of
+      # long double calls. This emitter refuses such a parameter, result, argument or call where it is used (in the
+      # function, with its line), not here
+      next
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end
@@ -2440,6 +2483,29 @@ def encode_module(mod, bodies)
     end
     section(11, dsec, out)
   end
+  out.concat(name_section(mod, bodies)) if $names
+  out
+end
+
+# The custom section "name" with its function names subsection (1): the imports, the defined functions, and the
+# functions of the modes (asan's check and allocator).
+def name_section(mod, bodies)
+  names = []
+  mod.imports.each_with_index { |(nm, _), i| names << [i, nm] }
+  bodies.each_with_index { |(nm, _), i| names << [mod.imports.length + i, nm] }
+  if mod.asan
+    names << [mod.check_index, "__asan_check"] << [mod.alloc_index["malloc"], "malloc"] << [mod.alloc_index["free"], "free"]
+  end
+  sub = []
+  uleb(names.length, sub)
+  names.each { |i, nm| uleb(i, sub); name_bytes(nm, sub) }
+  body = []
+  name_bytes("name", body)
+  body << 1
+  uleb(sub.length, body)
+  body.concat(sub)
+  out = []
+  section(0, body, out)
   out
 end
 
@@ -2464,6 +2530,8 @@ def main(argv)
       import_memory = true
     elsif flag == "--memory64"
       memory64 = true
+    elsif flag == "--names"
+      $names = true
     else
       $stderr.write(USAGE)
       return 1

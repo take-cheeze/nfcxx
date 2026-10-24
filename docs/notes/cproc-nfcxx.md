@@ -1,9 +1,9 @@
 # nfcxx's cproc changes
 
 cproc (the C front end of the qbe backend, `3rd/cproc`, a fork of michaelforney/cproc) carries nfcxx-specific changes
-that are not yet commits of the fork. `scripts/setup-qbe.sh` applies them to the build copy as `scripts/cproc-nfcxx.patch`;
-regenerate the patch with a `diff -u` of `3rd/cproc` against `build/cproc` after editing the copy. The changes exist to
-let through the C that real-world gnu11 code -- the Linux kernel's headers in particular -- relies on.
+as commits of the fork, on its branch `nfcxx-linux-kernel` (the pin): make a change as a commit there, push it, and move
+the submodule pin. The changes exist to let through the C that real-world gnu11 code -- the Linux kernel's headers in
+particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cproc`) pass as they do upstream.
 
 ## Changes
 
@@ -186,8 +186,8 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   any other pragma (`weak`, `redefine_extname`, ...) is refused. Before, 31 kernel files that include the ACPI
   headers were compiled with those tables laid out as if there were no pragma.
 
-- **Calls of a function whose body is `{ return C; }`** (C an integer constant) are C when the arguments have no
-  side effects: gcc inlines such a function and folds what depends on it -- the kernel's `pmd_trans_huge()` is 0
+- **Calls of a function whose body is `{ return C; }`** (C an integer constant), under `-p` (the kernel mode; elsewhere
+  a call stays a call and no constant expression), are C when the arguments have no side effects: gcc inlines such a function and folds what depends on it -- the kernel's `pmd_trans_huge()` is 0
   without transparent huge pages, and the call it guards names a function this configuration does not have. The
   call has no effect to keep (the body only returns C); an argument with a side effect keeps the call. Likewise a
   call of a function whose body is `{}` is nothing (`__apply_fineibt()` without CFI; `noinline` too, as gcc finds

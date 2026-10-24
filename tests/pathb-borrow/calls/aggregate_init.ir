@@ -1,0 +1,9 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Pad") 8 4 (field "a" 0 char) (field "b" 4 int))
+(call-effects "pad_init" (returns void) (nothrow) (noescape) (closed) (args (init (struct "Pad"))))
+(call-effects "pad_read" (returns void) (nothrow) (noescape) (closed) (args (read (struct "Pad"))))
+(function "test" (ret int) (params )
+(slot "s" (struct "Pad") 8 4)
+
+(decl $"s" val) (eval (call void &"pad_init" $"s")) (eval (call void &"pad_read" $"s"))(return (const int 0))
+)

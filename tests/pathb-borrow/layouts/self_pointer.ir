@@ -1,0 +1,6 @@
+(ir-module "semantic" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Node") 16 8 (field "n" 0 int) (field "next" 8 (ptr (struct "Node"))))
+(function "test" (ret int) (params)
+(slot "s" (struct "Node") 16 8)
+(decl $"s" val) (store int $"s" (const int 1)) (store (ptr (struct "Node")) (offset $"s" 8) $"s")(let %0 (ptr (struct "Node")) (borrow (ptr (struct "Node")) "p" shared $"s")) (loan-end "p")(return (const int 0))
+)

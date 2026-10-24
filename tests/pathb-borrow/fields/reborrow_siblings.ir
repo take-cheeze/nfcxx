@@ -1,0 +1,6 @@
+(ir-module "fields" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "s" (struct "Pair") 8 4)
+(decl $"s" val) (zero-fill 8 $"s")
+(let %0 (ptr (struct "Pair")) (borrow (ptr (struct "Pair")) "parent" exclusive $"s"))(let %1 (ptr int) (reborrow (ptr int) "child" exclusive "parent" (offset %0 4)))(let %2 (ptr int) (reborrow (ptr int) "left" exclusive "parent" %0)) (store int %1 (const int 2)) (store int %2 (const int 3)) (loan-end "left") (loan-end "child") (loan-end "parent")(return (const int 0))
+)

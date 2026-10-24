@@ -1,0 +1,7 @@
+(ir-module "fields" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "s" (union "Pair") 8 4)
+(decl $"s" val) (zero-fill 8 $"s")
+(let %0 int (move-value int (offset $"s" 0)))
+(let %2 long (load long $"s"))(return (const int 0))
+)

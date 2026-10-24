@@ -14,25 +14,17 @@ const args = process.argv.slice(2);
 const outIndex = args.indexOf("--out");
 const out = outIndex >= 0 ? path.resolve(args[outIndex + 1]) : path.join(root, "_site");
 
-// The module's main, run the way the page runs it, with the same browser bindings (bindings.js). Returns main's
+// The module's main, run the way the page runs it (bindings.runMain, with the same browser bindings). Returns main's
 // result, or the status of the exit binding (C's exit, Go's os.Exit) as "exit N", and the output the module wrote
-// (the Console tab's text).
+// (the Console's text). A run that ends any other way (a trap, an abort) is an error.
 function runMain(bytes) {
-  const module = new WebAssembly.Module(bytes);
   let output = "";
-  let memory = null;
-  const ctx = bindings.makeContext({ write: (text) => { output += text; }, memory: () => memory });
-  let result;
-  try {
-    const instance = new WebAssembly.Instance(module, bindings.importsFor(module, ctx, bytes));
-    memory = instance.exports.memory || null;
-    result = String(instance.exports.main());
-  } catch (e) {
-    if (!(e instanceof bindings.Exit)) throw e;
-    result = `exit ${e.status}`;
+  const out = bindings.runMain(new WebAssembly.Module(bytes), bytes, { write: (text) => { output += text; } });
+  if (out.kind !== "value" && out.kind !== "exit") {
+    throw new Error(`${out.result}${out.explain ? ` (${out.explain})` : ""}${out.frames && out.frames.length
+      ? ` at ${out.frames.join(" < ")}` : ""}`);
   }
-  ctx.flush();
-  return { result, output };
+  return { result: out.result, output };
 }
 
 async function buildExample(entry, examplesDir) {
@@ -53,7 +45,11 @@ async function buildExample(entry, examplesDir) {
     if (entry.output !== undefined && output !== entry.output) {
       throw new Error(`${entry.id} [${mode}]: output ${JSON.stringify(output)}, expected ${JSON.stringify(entry.output)}`);
     }
-    builds[mode] = { ir: result.ir, wasm: result.wasm, diagnostics: result.diagnostics, result: got, output };
+    // the IR of a mode that is the same as an earlier mode's is stored once (irFrom names that mode): the modes that
+    // differ only in the emitter's flags share it, and a large program's IR (go-fmt's) is megabytes
+    const same = Object.keys(builds).find((m) => builds[m].ir === result.ir);
+    builds[mode] = Object.assign(same ? { irFrom: same } : { ir: result.ir },
+      { wasm: result.wasm, names: result.names, diagnostics: result.diagnostics, result: got, output });
   }
   return { id: entry.id, title: entry.title, file: entry.file, language, expect: entry.expect, source, builds };
 }

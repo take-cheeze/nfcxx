@@ -104,8 +104,7 @@ if [ $macos = 1 ]; then
   # struct of the same size stands in for it (only the layout of those ucontext members is affected).
   # __int128_t is a 64-bit integer here: libc++'s filesystem clock uses it for nanosecond counts that fit in 64 bits, and
   # cproc can compare and compute with a long long where it cannot with a struct.
-  # __int128_t and __uint128_t are clang builtins (no header typedef): name cproc's 128-bit integer types
-  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar= '-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
+  darwin=(-U__BLOCKS__ -D_Nullable= -D_Nonnull= -D_Null_unspecified= -D__compar=)
   # Native macOS only: the SDK's TargetConditionals.h stops with "unknown compiler" under -undef, because -undef removes the
   # compiler and target macros it reads. Predefine its include guard so the header is skipped, as mruby's common.h expects
   # on macOS. TARGET_OS_IPHONE is then undefined, which mruby-io reads as 0 (macOS), so its branches are unchanged.
@@ -114,6 +113,8 @@ if [ $macos = 1 ]; then
     darwin+=(-D__TARGETCONDITIONALS__)
   fi
 fi
+# __int128_t and __uint128_t are gcc and clang builtin typedefs (no header declares them): name cproc's 128-bit integer types.
+darwin+=('-D__uint128_t=unsigned __int128' '-D__int128_t=__int128')
 if [ -n "${NFCXX_QBE_KERNEL:-}" ]; then
   # The Linux kernel (nfcc's NFCXX_QBE_KERNEL): preprocessed exactly as gcc preprocesses it, with gcc's predefined
   # macros and the kernel's options, so cproc sees the same translation unit as the gcc backend's reference object.
@@ -176,8 +177,11 @@ cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t
 asmarg=()
 if [ $macos = 0 ] && [ -z "${NFCXX_CIL:-}" ]; then asmarg=(-a "$tmp/asm.s"); : > "$tmp/asm.s"; fi
 # true/false/nullptr/bool are C23 keywords; before C23 (the default, and the gnu* dialects) they are ordinary
-# identifiers, which is how the Linux kernel's headers use them. cproc -c re-enables the keyword meaning.
-for a in ${cppflags[@]+"${cppflags[@]}"}; do case $a in -std=c23|-std=c2x|-std=gnu23|-std=gnu2x) cprocarg+=(-c) ;; esac; done
+# identifiers, which is how the Linux kernel's headers use them. cproc -K takes them as identifiers (its own default is
+# C23), so it is passed unless the standard is C23.
+c23=0
+for a in ${cppflags[@]+"${cppflags[@]}"}; do case $a in -std=c23|-std=c2x|-std=gnu23|-std=gnu2x) c23=1 ;; -std=*) c23=0 ;; esac; done
+[ $c23 = 1 ] || cprocarg+=(-K)
 "$cproc" ${cprocarg[@]+"${cprocarg[@]}"} ${kcproc[@]+"${kcproc[@]}"} ${asmarg[@]+"${asmarg[@]}"} < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 if [ -n "${NFCXX_CIL:-}" ]; then
@@ -190,7 +194,7 @@ fi
 t=$(trace_start)
 # A cross check from a non-Darwin host: QBE's default target there is ELF, so the Apple arm64 target is named.
 qbetarget=(); if [ -n "${NFCXX_MACOS_SYSROOT:-}" ]; then qbetarget=(-t arm64_apple); fi
-# -mno-sse: qbe -n moves integers between stack slots through %rax, not %xmm15 (scripts/qbe-nfcxx.patch)
+# -mno-sse: qbe -n moves integers between stack slots through %rax, not %xmm15 (a commit of the fork, 3rd/qbe)
 qbenofp=(); [ $nofp = 0 ] || qbenofp=(-n)
 [ $nounwind = 0 ] || qbenofp+=(-U)
 "$qbe" ${qbetarget[@]+"${qbetarget[@]}"} ${qbenofp[@]+"${qbenofp[@]}"} "$tmp/out.ssa" > "$tmp/out.s"
@@ -209,6 +213,15 @@ t=$(trace_start)
 symprefix=()
 if [ $macos = 1 ]; then symprefix=(--sym-prefix=_); fi
 "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${symprefix[@]+"${symprefix[@]}"} ${prepflags[@]+${prepflags[@]+"${prepflags[@]}"}} "$tmp/prep.c" "$tmp/out.s"
+# Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
+# __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
+# that text (weak-symbols.rb gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
+if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
+  if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
+     grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
+    "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" --c-input "$tmp/pp.weak.c" "$tmp/out.s"
+  fi
+fi
 cat "$tmp/tail.s" >> "$tmp/out.s"
 [ ${#asmarg[@]} -eq 0 ] || cat "$tmp/asm.s" >> "$tmp/out.s"   # inline-asm thunks, appended as local functions
 # The weak or visibility directive of a symbol the unit only declares ("#nfcxx:ifused NAME", cproc's emitsymattr) stays

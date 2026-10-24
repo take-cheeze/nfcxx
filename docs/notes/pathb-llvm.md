@@ -61,9 +61,12 @@ These are the choices the subset makes where LLVM IR leaves room. A choice is re
   such register is a slot of the frame, and `insertvalue`, `extractvalue`, a `phi`, a `select`, a `load` and a `store`
   of one are copies. Within the module, an aggregate argument is passed as a pointer to the caller's value, and an
   aggregate result through a pointer to the caller's slot (a first parameter); a function of another module that takes
-  or returns one is refused, since its convention is not known.
+  or returns one is refused, since its convention is not known. A call through a function pointer takes the module's
+  convention too (a trait object's method that returns a `&str`): a pointer can only hold the address of a function
+  of this module, or of an external one without aggregates, since taking the address of an external function whose
+  signature has one is refused.
 - Globals: `external`, `internal`, `private`, `linkonce_odr`, `weak_odr`, `weak` (with the linkage markers of section 6);
-  initializers `zeroinitializer`, `undef`, scalar constants, `null`, function and global addresses, constant
+  without an `align`, a global takes its type's alignment; initializers `zeroinitializer`, `undef`, scalar constants, `null`, function and global addresses, constant
   `getelementptr` (also of a `getelementptr`, and with struct indices), `inttoptr`, and arrays and structs of those
   (flattened to items at byte offsets; a `c"..."` inside a struct is bytes). A constant `[N x i8] c"..."` string becomes a
   `(data ...)` node. Debug metadata on a global (`, !dbg !5`) is ignored.

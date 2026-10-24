@@ -52,7 +52,7 @@ done
 # Ruby reference refuses them (its launch argument split has the same `->` bug, and it refuses __device__ constants).
 cxx="$root/build/cuda-rewrite"
 [ -x "$cxx" ] || make -s -C "$root/tools/cuda-rewrite" || exit 1
-for c in launch_arrow_args device_const_scalar host_cub_helper bare_dim template_alias_fnptr vec4_alignas nested_fnptr helper_launch addr_taken constexpr_guard default_targs dynshared_operator dep_enumerate braced_range_for; do
+for c in launch_arrow_args device_const_scalar host_cub_helper bare_dim template_alias_fnptr vec4_alignas nested_fnptr helper_launch addr_taken constexpr_guard default_targs dynshared_operator dep_enumerate braced_range_for extern_instances; do
   if "$cxx" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
      && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
     echo "device unit $c: ok"
@@ -170,5 +170,7 @@ if [ -z "$left" ]; then echo "no .nfcxx left in the tree: ok"; else echo "no .nf
 "$root/tests/cuda/launch/run.sh" || fail=1
 # 5. Kernels split into several device modules (the driver's grouping; tests/cuda/groups/run.sh).
 "$root/tests/cuda/groups/run.sh" || fail=1
+# 6. Instances declared extern in a header are compiled only by the unit that defines them (tests/cuda/extern_inst/run.sh).
+"$root/tests/cuda/extern_inst/run.sh" || fail=1
 
 exit $fail

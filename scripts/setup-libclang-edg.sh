@@ -7,7 +7,13 @@
 #                                      That configuration keeps the source sequence lists (declarations in source
 #                                      order, with their scopes) and the per-class member lists, which the back end
 #                                      reads. EDG rejects those lists together with IL lowering.
-# Result: build/libclang-edg/cmake/bin/cpfe. scripts/libclang-cursors runs it; lib/libclang-edg uses that.
+#   src/nfcxx-so/                      the same front end and back end again, as position-independent code with
+#                                      EDG_MAIN=nfcxx_edg_main (EDG's callable front end, basics.h) and the entry point
+#                                      be/nfcxx_edg_entry.c: the archive libedgfe-pic.a that scripts/build-libclang-edg.sh
+#                                      links into libclang-edg.so, which then runs the front end in-process.
+# Result: build/libclang-edg/cmake/bin/cpfe (scripts/libclang-cursors runs it; lib/libclang-edg runs that when it is
+# built without the archive) and build/libclang-edg/cmake/src/nfcxx-so/libedgfe-pic.a.
+#   LIBCLANG_EDG_IN_PROCESS=0   build cpfe only
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 src=${LIBCLANG_EDG_SRC:-$root/3rd/edg}   # an EDG checkout elsewhere (worktrees with an empty 3rd/)
@@ -38,7 +44,7 @@ link_all "$src/cmake/macro-conf" "$tree/cmake/macro-conf" nfcxx-libclang
 #    expr_has_comma_operation), but its back_end() is renamed in the tree copy, so the C++ generator never runs.
 sed 's/ cp_gen_be\.c / cp_gen_be.c nfcxx_decl.c /' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
 grep -q ' cp_gen_be.c nfcxx_decl.c ' "$tree/src/CMakeLists.txt" || { echo "setup-libclang-edg: CORE list patch failed" >&2; exit 1; }
-cp "$root/be/nfcxx_decl.c" "$tree/src/"
+cp "$root/be/nfcxx_decl.c" "$root/be/nfcxx_edg_entry.c" "$tree/src/"
 rm -f "$tree/src/cp_gen_be.c"  # a symlink into the submodule: write a copy, never through the link
 sed 's/^void back_end(void)/void nfcxx_cp_gen_back_end_unused(void)/' "$src/src/cp_gen_be.c" > "$tree/src/cp_gen_be.c"
 grep -q 'nfcxx_cp_gen_back_end_unused(void)' "$tree/src/cp_gen_be.c" || { echo "setup-libclang-edg: cp_gen_be.c rename failed" >&2; exit 1; }
@@ -52,6 +58,23 @@ anchor = next(i for i, l in enumerate(lines) if 'Conditionally open the "edg" na
 lines.insert(anchor, 'namespace edg { extern char *mangled_typeinfo_string(a_type *type); }  /* nfcxx: see setup-libclang-edg.sh */')
 open(sys.argv[2], 'w').write('\n'.join(lines))
 PY
+
+# The in-process library: the CORE list (with nfcxx_decl.c) and the entry point, under cpfe's macro configuration.
+# Hidden visibility keeps EDG's symbols inside libclang-edg.so; nfcxx_edg_run is the one it exports.
+mkdir -p "$tree/src/nfcxx-so"
+cat > "$tree/src/nfcxx-so/CMakeLists.txt" <<'CM'
+# libclang-edg (scripts/setup-libclang-edg.sh): the front end as an archive of position-independent objects.
+set(NFCXX_SO_FILES ${CORE_FRONT_END_SOURCE_FILES} ${PROJECT_SOURCE_DIR}/nfcxx_edg_entry.c)
+macro_configuration_to_compile_definitions("cpfe")
+add_compile_definitions(EDG_MAIN=nfcxx_edg_main)
+set_source_files_properties(${NFCXX_SO_FILES} PROPERTIES LANGUAGE CXX)
+add_library(edgfe-pic STATIC ${NFCXX_SO_FILES})
+add_dependencies(edgfe-pic error-info)
+set_target_properties(edgfe-pic PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_softfloat_to_target(edgfe-pic)
+CM
+printf '\nadd_subdirectory(nfcxx-so)  # nfcxx: scripts/setup-libclang-edg.sh\n' >> "$tree/src/CMakeLists.txt"
 
 # 2. Macro config: EDG's C++ back-end configuration (default/cpfe-cp), with the Linux and release options.
 cat > "$tree/cmake/macro-conf/nfcxx-libclang/base.cmakedef" <<'CFG'
@@ -85,5 +108,7 @@ EDG_BASE=$base cmake -G Ninja -S "$tree" -B "$out/cmake" -DCMAKE_BUILD_TYPE=Rele
   -DEDG_MACRO_CONF=nfcxx-libclang -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ >"$out/configure.log" 2>&1 \
   || { tail -30 "$out/configure.log" >&2; exit 1; }
 cd "$out/cmake"
-ninja ${LIBCLANG_EDG_JOBS:+-j$LIBCLANG_EDG_JOBS} bin/cpfe >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
+targets=(bin/cpfe); [ "${LIBCLANG_EDG_IN_PROCESS:-1}" = 0 ] || targets+=(edgfe-pic)
+ninja ${LIBCLANG_EDG_JOBS:+-j$LIBCLANG_EDG_JOBS} "${targets[@]}" >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
 echo "libclang-edg cpfe built: $out/cmake/bin/cpfe (base dir: $base)"
+[ "${LIBCLANG_EDG_IN_PROCESS:-1}" = 0 ] || echo "libclang-edg front-end archive built: $out/cmake/src/nfcxx-so/libedgfe-pic.a"

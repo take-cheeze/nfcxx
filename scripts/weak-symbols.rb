@@ -18,18 +18,35 @@ def ident_start?(c)
   c == "_" || (c >= "a" && c <= "z") || (c >= "A" && c <= "Z")
 end
 
-# Remove __attribute__((...)) groups, which may contain nested parentheses.
+# The first whole-word occurrence of kw in s at or after i, or nil.
+def keyword_at(s, kw, i)
+  while true
+    j = s.index(kw, i)
+    return nil if j.nil?
+    return j unless (j > 0 && word_char?(s[j - 1])) || (j + kw.size < s.size && word_char?(s[j + kw.size]))
+    i = j + 1
+  end
+end
+
+# Remove __attribute__((...)) groups, which may contain nested parentheses, and _Alignas(...): qbe-prep.rb turns
+# `T x[N] __attribute__((__aligned__(A)))` into `T _Alignas(A) x[N]`, and its "(" is not a function's.
 def strip_attributes(s)
   out = []
   i = 0
   while true
-    j = s.index("__attribute__", i)
+    j = keyword_at(s, "__attribute__", i)
+    a = keyword_at(s, "_Alignas", i)
+    kw = "__attribute__"
+    if a && (j.nil? || a < j)
+      j = a
+      kw = "_Alignas"
+    end
     if j.nil?
       out << s[i, s.size - i]
       return out.join
     end
     out << s[i, j - i]
-    k = j + "__attribute__".size
+    k = j + kw.size
     k += 1 while k < s.size && SPACE.include?(s[k])
     depth = 0
     while k < s.size
@@ -121,6 +138,27 @@ def chunk_around(text, w)
   [b, e]
 end
 
+# Whether the __attribute__ at position a has a group that names weak (hand-written C: __attribute__((weak)); EDG's
+# __weak__ is found on its own).
+def attribute_weak?(text, a)
+  i = text.index("(", a)
+  return false if i.nil?
+  depth = 0
+  j = i
+  while j < text.size
+    c = text[j]
+    if c == "("
+      depth += 1
+    elsif c == ")"
+      depth -= 1
+      break if depth == 0
+    end
+    j += 1
+  end
+  group = text[i, j - i + 1]
+  has_word?(group, "weak") || has_word?(group, "__weak__")
+end
+
 # Declarations and definitions are delimited by ; { } at top level; each chunk that mentions __weak__
 # names the function or object it declares. A function is the first identifier followed by "(". An object
 # (COMDAT data: variable templates, static data members of templates, local statics of inline functions,
@@ -133,8 +171,14 @@ end
 def weak_names(text, extern_inline)
   names = {}
   pos = 0
+  nw = text.index("__weak__", 0)       # the next EDG spelling
+  na = text.index("__attribute__", 0)  # the next attribute group, which may be hand-written C's __attribute__((weak))
   while true
-    w = text.index("__weak__", pos)
+    # An attribute group counts when it names weak or __weak__.
+    while na && !attribute_weak?(text, na)
+      na = text.index("__attribute__", na + 13)
+    end
+    w = (nw && na) ? (nw < na ? nw : na) : (nw || na)
     break if w.nil?
     b, e = chunk_around(text, w)
     s = strip_attributes(text[b, e - b])
@@ -147,6 +191,8 @@ def weak_names(text, extern_inline)
       identifiers(s).each { |x| names[x] = true }
     end
     pos = e + 1
+    nw = text.index("__weak__", pos) if nw && nw < pos
+    na = text.index("__attribute__", pos) if na && na < pos
   end
   if extern_inline
     pos = 0

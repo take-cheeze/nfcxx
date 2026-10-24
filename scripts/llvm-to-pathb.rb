@@ -265,6 +265,7 @@ class Translator
     @file = path
     @funcs = {}       # functions defined or declared in the module: direct callees are &"f"
     @defined = {}     # the functions defined here: their aggregate parameters and results take this module's convention
+    @agg_externals = {}   # functions only declared here whose signature has an aggregate: their address is refused
     @out_globals = []
     @out_data = []
     @out_funcs = []
@@ -280,6 +281,10 @@ class Translator
         tname, body = line.split(" = type ", 2)
         NAMED_TYPES[tname.strip] = strip_comment(body)
       end
+    end
+    lines.each do |raw|
+      line = raw.strip
+      @agg_externals[function_name(line)] = true if line.start_with?("declare ") && aggregate_signature?(line)
     end
     i = 0
     while i < lines.size
@@ -338,7 +343,8 @@ class Translator
     init = tail[0]
     init = nil if init && init.start_with?("align")
     align_text = (tail + [""]).find { |t| t.start_with?("align ") }
-    align = align_text ? align_text.split(" ")[1].to_i : (ty[1] > 0 ? ty[1] : 1)
+    # without an align, the type's own alignment (its size would be wrong for an array or a struct)
+    align = align_text ? align_text.split(" ")[1].to_i : ll_align(type_text)
     if init.nil? && @wasm && name == "environ"
       # libc's environment (TinyGo's os reads it): an empty one, a null-terminated array of no strings
       @out_globals << "(global \"__nfcxx_no_env\" (ptr void) 8 8 (static) (init (zero 0 8)))"
@@ -766,6 +772,9 @@ class Translator
       "%#{reg(t)}"
     elsif t.start_with?("@")
       name = global_name(t)
+      # a function pointer may be called with this module's convention for aggregates (call), so the address of a
+      # function of another module that takes or returns one is refused
+      refuse("address of #{name}, which takes or returns an aggregate and is not defined here") if @agg_externals[name]
       @funcs.key?(name) ? "&\"#{name}\"" : "@\"#{name}\""
     elsif t.start_with?("getelementptr")
       constant_gep(t)
@@ -839,6 +848,15 @@ class Translator
     end
     return [word, rest] if aggregate?(word) && !rest.start_with?("%") && !rest.include?(" %")
     [word, last_word(s)]
+  end
+
+  # Whether a declare line's result or a parameter is a struct or an array (named types are known by now).
+  def aggregate_signature?(line)
+    at = line.index("@")
+    pre = line[0, at]
+    return true if pre.include?("{") || pre.include?("[") || NAMED_TYPES.keys.any? { |t| pre.include?(t + " ") }
+    lp = line.index("(", name_end(line, at))
+    split_top(line[lp + 1, close_of(line, lp) - lp - 1]).any? { |p| aggregate?(p.start_with?("{") || p.start_with?("<{") || p.start_with?("[") ? split_type(p)[0] : first_word(p)) }
   end
 
   # ---- aggregate values ----------------------------------------------------------------------------------
@@ -1322,7 +1340,9 @@ class Translator
              else
                operand(callee, "ptr")
              end
-    own = callee.start_with?("@") && @defined[global_name(callee)]
+    # a direct callee defined here, or a function pointer (whose value is the address of a function of this module, or
+    # of an external one without aggregates: see operand), takes this module's convention for aggregates
+    own = callee.start_with?("@") ? @defined[global_name(callee)] : true
     args = split_top(r[lp + 1, close_of(r, lp) - lp - 1]).map do |a|
       refuse("argument #{a}") if a.split(" ").any? { |w| w.start_with?("byval") || w.start_with?("sret") }
       al, av = typed(a)

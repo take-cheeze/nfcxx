@@ -1,2 +1,2 @@
 3
-refused: borrow requires a direct local place; use reborrow with an explicit parent
+refused: borrow requires a direct local place or constant field offset; use reborrow with an explicit parent
