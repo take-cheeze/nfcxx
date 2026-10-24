@@ -1205,10 +1205,14 @@ static a_type_ptr ir_arg_param_type(an_expr_node_ptr f, int idx, int nargs)
   return p != NULL ? p->type : NULL;
 }
 
-/* A nonstatic object of the function that has an ordinary slot (no VLA, no template-dependent or ignored object). */
+/* A nonstatic object of the function that has an ordinary slot (no template-dependent or ignored object, and no VLA
+   unless the lowering made it the ordinary pointer to its storage). */
 static int ir_fact_var(a_variable_ptr var)
 {
-  if (var->is_vla || ignore_variable_in_back_end(var) || is_template_dependent_type(var->type)) return 0;
+#if !LOWER_VARIABLE_LENGTH_ARRAYS
+  if (var->is_vla) return 0;
+#endif
+  if (ignore_variable_in_back_end(var) || is_template_dependent_type(var->type)) return 0;
   return !var_has_static_or_thread_storage_duration(var);
 }
 

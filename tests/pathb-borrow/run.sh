@@ -208,6 +208,18 @@ printf '%s\n' '(borrow-layout (struct "Plain") 16 8 (field "z" 0 int) (field "ne
 scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nolay.ir" > /dev/null
 echo "ok   frontend borrow-layout records, record-less mutant, unsupported structs, and native execution"
 pass=$((pass + 1))
+# A lowered VLA's pointer local has declaration facts. (EDG's exception-stack
+# registration around it is still refused, for its own reason.)
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/vla.cpp > "$tmp/vla.ir"
+grep -Fq '(decl $"a" val)' "$tmp/vla.ir" && grep -Fq '(scope-end $"a")' "$tmp/vla.ir" ||
+  { echo "FAIL vla.cpp: no facts for the VLA"; exit 1; }
+rc=0
+scripts/mrb scripts/pathb-borrowck.rb "$tmp/vla.ir" > "$tmp/out" 2>&1 || rc=$?
+if [ "$rc" != 3 ] || grep -Fq 'missing declaration facts' "$tmp/out"; then
+  echo "FAIL vla.cpp: expected a refusal other than missing facts, got $rc"; cat "$tmp/out"; exit 1
+fi
+echo "ok   declaration facts for lowered VLAs"
+pass=$((pass + 1))
 # Call-argument temporaries get (decl ... temp) facts around their full expression,
 # so a recursive callee gets a summary. An uninitialized argument is still found.
 temps=tests/pathb-borrow/contracts/temporaries.cpp

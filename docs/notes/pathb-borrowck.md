@@ -39,6 +39,10 @@ The C++ frontend also prints facts for storage that no declaration names:
 - A named local that no declaration statement introduces, such as a range-based for's variable,
   which the lowering initializes by assignment. It is declared at its first use and ends with
   that block.
+- A variable-length array. EDG's lowering makes it an ordinary local pointer to storage from
+  `__vla_alloc`, so it gets the facts of any local. The checker still refuses the function: the
+  lowering registers the array on EDG's exception-handling stack by storing a local address in a
+  global.
 
 Exception-handling bookkeeping temporaries get the same treatment, which is conservative: a value
 or address carried to a later statement reads as uninitialized or out of scope, never as valid.
