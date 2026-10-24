@@ -176,8 +176,9 @@ module BlockCoreDirectFallback
     region = @call_block_region
     block_free = !!(region && region[:direct_entry] && region[:yield_free])
     unguarded = block_free && core_body_relaxable?(arm[:target].irep)
-    site = (@yf_arm_sites ||= {})[[region && region[:parent_irep]&.label, region && region[:block_addr]]] ||=
-             { block_free: false, arms: Set.new, unguarded: Set.new }
+    # An `&expr` site (EXPLICIT_BLOCK_ARG_DIRECT) has no BLOCK instruction: its SENDB names it.
+    key = [region && region[:parent_irep]&.label, region && (region[:block_addr] || region[:sendb_addr])]
+    site = (@yf_arm_sites ||= {})[key] ||= { block_free: false, arms: Set.new, unguarded: Set.new }
     site[:block_free] = block_free
     site[:arms] << arm[:class]
     site[:unguarded] << arm[:class] if unguarded
