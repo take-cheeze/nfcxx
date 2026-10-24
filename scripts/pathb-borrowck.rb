@@ -286,7 +286,7 @@ class LocalLifetime
     raise BorrowRefused, 'unsupported place'
   end
 
-  # Each storage state is a set: dead, uninitialized, initialized. Pointer
+  # Each storage state is a set: dead, uninitialized, initialized, moved. Pointer
   # provenance is a set of local storage identities, or external/unknown.
   def access(place, state, read, borrowing = nil)
     return if place == 'external'
@@ -314,6 +314,7 @@ class LocalLifetime
     status = state['life:' + name] || ['dead']
     diagnostic('use-after-scope', name) if status.include?('dead')
     diagnostic('uninitialized', name) if read && status.include?('uninitialized')
+    diagnostic('use-after-move', name) if read && status.include?('moved')
     @loans.each do |id, loan|
       next if id == own || (own && @ancestors[own].include?(id)) || loan[0] != name || !(state['loan:' + id] || []).include?('active')
       if loan[1] == 'exclusive' || !read || borrowing == 'exclusive'
@@ -366,6 +367,22 @@ class LocalLifetime
     when 'const'
       borrow_scalar_type!(x[1])
       bh(x[1]) == 'ptr' ? ['unknown'] : []
+    when 'move-value', 'copy-value'
+      raise BadIR, "#{bh(x)} form" unless x.length == 3
+      borrow_scalar_type!(x[1])
+      place = x[2]
+      raise BorrowRefused, 'value transfers currently require direct local slots' unless place.is_a?(IRSym) && place.sig == '$'
+      name = place.name
+      raise BadIR, "value transfer refers to unknown slot #{name}" unless @slots[name]
+      moving = bh(x) == 'move-value'
+      # Consuming a value needs read access and conflicts with every live loan.
+      # Reinitialization is a store, so it can restore moved storage later.
+      access('local:' + name, state, true, moving ? 'exclusive' : nil)
+      result = bh(x[1]) == 'ptr' ? record_loan_values(state['pointer:' + name] || ['unknown']) : []
+      if moving
+        state['life:' + name] = (state['life:' + name] || ['dead']).map { |s| s == 'initialized' ? 'moved' : s }.uniq.sort
+      end
+      result
     when 'borrow'
       id = bname(x[2])
       loan = @loans[id]

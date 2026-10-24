@@ -1,0 +1,7 @@
+(ir-module "moves" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 7))
+(let %2 (ptr int) (borrow (ptr int) "a" shared $"x"))(let %3 int (load int %2))(let %0 int (move-value int $"x"))
+(loan-end "a")(return (const int 0))
+)

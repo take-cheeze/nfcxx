@@ -1,0 +1,6 @@
+(ir-module "moves" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4) (slot "p" (ptr int) 8 8)
+(decl $"x" val) (store int $"x" (const int 7))
+(decl $"p" ref) (store (ptr int) $"p" $"x")(let %0 (ptr int) (move-value (ptr int) $"p"))(let %1 (ptr int) (copy-value (ptr int) $"p"))(return (const int 0))
+)

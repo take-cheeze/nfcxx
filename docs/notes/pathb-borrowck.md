@@ -142,6 +142,41 @@ bypass uninitialized borrows, permission checks, local-address returns, or unsup
 refusals. A dangling use can be diagnosed as an inactive loan after inferred expiry rather than as
 use-after-scope. Source locations and language-level region contracts remain future work.
 
+## Explicit value moves and copies
+
+```text
+(let %0 int (copy-value int $"x"))
+(let %1 int (move-value int $"x"))
+(store int $"x" (const int 3))
+```
+
+`copy-value` reads the value and preserves initialization. `move-value` reads the value and marks
+its source as moved. Later reads, copies, borrows, or moves of that source are errors until a store
+reinitializes it. A move conflicts with every live loan of the source, including shared loans.
+Copying has normal read permissions. These rules apply in both loan modes; inferred expiry can
+permit a move after the loan's last use.
+
+Initialization states join across all CFG paths, including backedges: a move on one path prevents
+an unconditional later read. Reinitializing on every incoming path restores reads. A store through
+a known single-local alias can also reinitialize storage, and moving a value back into its own
+source is modeled in evaluation order. Scope end remains separate from move state.
+
+For pointer values, transfers preserve referent and loan provenance. Moving a pointer slot makes
+that slot unreadable but leaves the transferred pointer usable under the original loan's
+permissions and ancestor lifetimes. Physical bytes are not cleared. Both value-transfer forms
+lower to ordinary typed loads, with initialization policy enforced by the separate checker.
+
+This is an **explicit IR ownership contract**, not trait inference. The frontend must select copy
+versus move from the source language's rules, including Rust's `Copy` trait; the checker does not
+prove that a type is copyable. Scalar representations in tests can model consuming handles and
+are not claims that moving a Rust integer makes it unusable. Transfers currently require whole,
+direct local scalar/pointer slots. Aggregates, partial moves, indirect moves, drops, and
+ownership effects of calls remain unsupported. Neither frontend emits these forms yet.
+
+C++ `rref-arg` is still refused: an rvalue-reference argument alone does not authorize treating the
+source as dead. Ordinary C++ moved-from objects can remain usable; their contracts need separate
+modeling before a frontend can emit a consuming transfer.
+
 ## Refusals and limits
 
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
@@ -154,9 +189,9 @@ external stores, and stores through multiple possible destinations. Unknown inst
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
 silently checked using function-wide storage lifetimes.
 
-Rust moves, C++ destructor interpretation, exception cleanup analysis, container invalidation,
-interior mutability and cross-function region inference are not implemented. `rref-arg` does not
-mean that an ordinary C++ moved-from value is dead.
+Full Rust move semantics, C++ destructor interpretation, exception cleanup analysis, container
+invalidation, interior mutability and cross-function region inference are not implemented.
+`rref-arg` does not mean that an ordinary C++ moved-from value is dead.
 
 ## Rust frontend boundary
 
@@ -167,7 +202,7 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next shared-IR extensions are explicit move/copy, field-sensitive places, call
+The next shared-IR extensions are field-sensitive places, partial moves, drops, call
 effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
@@ -178,7 +213,9 @@ The C++ IR must also remain accepted by the QBE emitter. Tests include branch jo
 backedges, zero-iteration loops, redeclarations, local-address returns, and explicit refusals.
 Paired fixtures in `tests/pathb-borrow/inferred` check both explicit and inferred results, including
 last-use release, future-use conflicts, branch-specific release, backedges, stored pointers, and
-parent/child demands. Refusal cases are also run with inference enabled. The explicit-loan and
+parent/child demands. Refusal cases are also run with inference enabled. Value-transfer fixtures
+run in both loan modes and cover moved-state joins, reinitialization,
+consuming pointer carriers, and conflicts with live loans. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,
 loop iterations, parent restoration, nested children, shared siblings, and invalid parent graphs. A native execution check verifies that loan metadata erasure leaves the QBE output
 unchanged and that the emitter agrees with its oracle. The Path B CI workflow runs this suite

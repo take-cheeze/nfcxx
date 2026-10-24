@@ -45,6 +45,27 @@ for src in tests/pathb-borrow/inferred/*.ir; do
     pass=$((pass + 1))
   done
 done
+# Value transfers are checked in explicit and inferred loan modes.
+for src in tests/pathb-borrow/moves/*.ir; do
+  for mode in explicit inferred; do
+    options=()
+    expected=${src%.ir}.expect
+    if [ "$mode" = inferred ]; then
+      options=(--infer-loan-ends)
+      [ ! -f "${src%.ir}.inferred.expect" ] || expected=${src%.ir}.inferred.expect
+    fi
+    want=$(head -1 "$expected")
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
+      echo "FAIL $src ($mode): expected exit $want, got $rc"
+      cat "$tmp/out"
+      exit 1
+    fi
+    echo "ok   $src ($mode)"
+    pass=$((pass + 1))
+  done
+done
 # Real C++ lowering already emits decl/scope-end facts. Compare the checker
 # against source expectations, and require accepted IR to remain emit-able.
 for src in tests/pathb-borrow/cpp/*.cpp; do
@@ -62,15 +83,15 @@ for src in tests/pathb-borrow/cpp/*.cpp; do
   echo "ok   $src"
   pass=$((pass + 1))
 done
-# Loans carry checking facts only. Erasing those facts must yield exactly the
-# same QBE, and the generated native program must still return its written value.
-for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir; do
+# Checking facts and value-transfer policy must not change native execution.
+# Loan erasure and replacing explicit transfers with loads must yield the same QBE.
+for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir tests/mruby/pathb-edge/move_facts.ir; do
 scripts/mrb scripts/pathb-borrowck.rb "$loan_ir" > "$tmp/loan-check"
 scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends "$loan_ir" > "$tmp/inferred-check"
 scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/loans.qbe"
 scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/oracle.qbe"
 cmp "$tmp/loans.qbe" "$tmp/oracle.qbe"
-sed -E 's/\(reborrow \(ptr int\) "[^"]+" (shared|exclusive) "[^"]+" (%[0-9]+)\)/\2/g; s/\(borrow \(ptr int\) "[^"]+" (shared|exclusive) (\$"x")\)/\2/g; /\(loan-end /d' "$loan_ir" > "$tmp/plain.ir"
+sed -E 's/\((move-value|copy-value) int (\$"x")\)/\(load int \2\)/g; s/\(reborrow \(ptr int\) "[^"]+" (shared|exclusive) "[^"]+" (%[0-9]+)\)/\2/g; s/\(borrow \(ptr int\) "[^"]+" (shared|exclusive) (\$"x")\)/\2/g; /\(loan-end /d' "$loan_ir" > "$tmp/plain.ir"
 scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/plain.ir" > "$tmp/plain.qbe"
 cmp "$tmp/loans.qbe" "$tmp/plain.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/loans.qbe" -o "$tmp/loans.s"
