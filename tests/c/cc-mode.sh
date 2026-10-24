@@ -431,6 +431,16 @@ EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -fno-asynchronous-unwind-tables -c kunw.c -o kunw.o 2>/dev/null && ! readelf -SW kunw.o | grep -q eh_frame
     then ok "kernel mode: -fno-asynchronous-unwind-tables honoured"
     else bad "kernel mode: -fno-asynchronous-unwind-tables honoured" "$(readelf -SW kunw.o 2>&1 | grep -c eh_frame) .eh_frame"; fi
+    # #pragma GCC visibility push(hidden) (the kernel's compressed boot code, -include hidden.h) as gcc; a pragma that
+    # could change what the program means (#pragma pack) is refused
+    printf '#pragma GCC diagnostic push\n#pragma GCC visibility push(hidden)\nint cpu;\nint error(void) { return cpu; }\n#pragma GCC visibility pop\nint visible(void) { return 1; }\n' > kvis.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kvis.c -o kvis.o 2>/dev/null && objdump -t kvis.o | grep -q '.hidden error' &&
+       objdump -t kvis.o | grep -q '.hidden cpu' && ! objdump -t kvis.o | grep -q '.hidden visible'; then ok "kernel mode: #pragma GCC visibility"
+    else bad "kernel mode: #pragma GCC visibility" "$(objdump -t kvis.o 2>&1 | tail -4 | tr '\n' ' ')"; fi
+    printf '#pragma pack(1)\nstruct s { char c; int i; } v;\n' > kpack.c
+    if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kpack.c -o kpack.o 2>&1); then bad "kernel mode: #pragma pack refused" "was accepted"
+    elif grep -q "unsupported #pragma pack" <<<"$out"; then ok "kernel mode: #pragma pack refused"
+    else bad "kernel mode: #pragma pack refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -499,6 +509,17 @@ EOC
       NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kneed.c -o kneed.o
     if grep -q '^qbe kneed.c$' qbe.log; then ok "qbe-try: a symbol the kernel defines is not missing"
     else bad "qbe-try: a symbol the kernel defines is not missing" "$(tr '\n' '|' < qbe.log)"; fi
+    # a special section only the qbe object has (code gcc folded away after inlining): taken when it is harmless
+    # (.discard.*), refused otherwise (an initcall would run)
+    for sec in .discard.addressable .initcall6.init; do
+      printf 'static inline void f(int x) { if (x) __asm__ volatile(".pushsection %s,\\"a\\"; .long 0; .popsection"); }\nint g(void) { f(0); return 1; }\n' "$sec" > ksec.c
+      rm -f qbe.log
+      NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c ksec.c -o ksec.o
+      cp qbe.log "qbe-$sec.log"
+    done
+    if grep -q '^qbe ksec.c$' qbe-.discard.addressable.log && grep -q '^gcc ksec.c: sections differ: > .initcall6.init' qbe-.initcall6.init.log
+    then ok "qbe-try: an extra harmless section is taken, an extra initcall is not"
+    else bad "qbe-try: an extra harmless section is taken, an extra initcall is not" "$(cat qbe-*.log | tr '\n' '|')"; fi
     # with the init symbols of a gcc-built kernel (NFCXX_QBE_INITSYMS), an undefined symbol not among them is not init
     rm -f qbe.log; printf 'memblock_alloc_try_nid\n' > initsyms.txt
     NFCXX_QBE_INITSYMS=$PWD/initsyms.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log \

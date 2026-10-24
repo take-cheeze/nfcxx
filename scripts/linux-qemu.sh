@@ -79,20 +79,39 @@ kmake -s olddefconfig
 kmake -s -j"$(nproc)" bzImage
 cp "$out/arch/x86/boot/bzImage" "$dir/bzImage-$tag"
 
-# The initramfs is busybox plus one /init script; busybox --install creates the applet links the script uses.
+# The initramfs is busybox plus one /init script; busybox --install creates the applet links the script uses. Before
+# the marker the script exercises more of the kernel than the boot does -- processes, pipes, files and their contents,
+# signals -- and prints the marker only when every result is the expected one: with most of the kernel from the qbe
+# backend (QBE_TRY), reaching /init is not enough to trust it.
 root=$dir/initramfs
 rm -rf "$root"
-mkdir -p "$root/bin" "$root/proc" "$root/sys" "$root/dev"
+mkdir -p "$root/bin" "$root/proc" "$root/sys" "$root/dev" "$root/tmp"
 cp "$busybox" "$root/bin/busybox"
-cat > "$root/init" <<EOF
+cat > "$root/init" <<'EOF'
 #!/bin/busybox sh
 /bin/busybox --install -s /bin
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
-echo "$marker"
+mount -t devtmpfs devtmpfs /dev
+fail=0
+check() { [ "$2" = "$3" ] || { echo "check $1: got '$2', expected '$3'"; fail=1; }; }
+check pipe "$(seq 1 2000 | sort -rn | head -n 1)" 2000
+i=0; while [ $i -lt 300 ]; do /bin/true || fail=1; i=$((i + 1)); done; check fork $i 300
+dd if=/dev/zero of=/tmp/zero bs=1024 count=512 2>/dev/null
+check size "$(wc -c < /tmp/zero)" 524288
+check md5 "$(md5sum < /tmp/zero | cut -d' ' -f1)" 59071590099d21dd439896592338bf95
+printf 'abc%.0s' $(seq 1 1000) > /tmp/abc; cp /tmp/abc /tmp/abc2; mv /tmp/abc2 /tmp/abc3
+check copy "$(md5sum < /tmp/abc3 | cut -d' ' -f1)" 8f33d0ecfe648a745b169baf8a77658b
+mkdir -p /tmp/d/e/f && ln -s /tmp/abc /tmp/d/e/f/link && check symlink "$(wc -c < /tmp/d/e/f/link)" 3000
+rm -r /tmp/d; check rmdir "$(ls /tmp | tr '\n' ' ')" "abc abc3 zero "
+sleep 5 & pid=$!; kill -TERM $pid; wait $pid; check signal $? 143
+check self "$(sha256sum /bin/busybox | cut -c1-64)" "$(cat /bin/busybox | sha256sum | cut -c1-64)"
+check proc "$(grep -c '^processor' /proc/cpuinfo)" 1
+[ $fail = 0 ] && echo "MARKER"
 uname -a
 reboot -f
 EOF
+sed -i "s/MARKER/$marker/" "$root/init"
 chmod +x "$root/init"
 (cd "$root" && find . | cpio -o -H newc --owner=0:0 --quiet) > "$dir/initramfs.cpio"
 

@@ -94,18 +94,28 @@ is not an error, and that function's asm thunks are dropped with it (docs/notes/
 
 ### Status (tinyconfig, Linux 6.8)
 
-615 C files are tried; 3 move, among them `arch/x86/lib/misc.c`, which is linked into `vmlinux`, and the kernel boots.
-What keeps the rest on gcc, by the number of files whose first error it is:
+615 C files are tried; 541 of them are in the kernel from the qbe backend, and it boots and runs the init script's
+checks (processes, pipes, files, signals). The migration went 3, 8, 19, 42, 47, 87, 252, 403, 541 over the runs that
+took the blockers below away, largest first; the ones that mattered beyond compiling were:
+
+- `asm goto`, constant-argument clones of `always_inline` functions (`_static_cpu_has`'s `"i"(1 << (bit & 7))`),
+  and `gnu_inline` (an `extern inline` defines no symbol), which together moved about 400 files;
+- GNU `cleanup` at scope exit (`guard()`): cproc ran it only on a throw, and files using guards stayed on gcc
+  only by the accident of their unwind tables;
+- qbe-try's own checks: undefined symbols (objdump gives them no binding flag, so none was seen), lasting code
+  that calls init code (modpost), and the symbol indexes of a gcc-built kernel;
+- two kernels that linked and did not run, found by `scripts/linux-qemu-bisect.sh`: `put_user`'s pointer
+  truncated by an `asm` input tied to a narrower output (`/init` failed with EFAULT).
+
+What keeps the other 74 on gcc, by the number of files whose first error or difference it is:
 
 | files | reason |
 | ----: | ------ |
-| 426 | the global register variable `register unsigned long current_stack_pointer asm("rsp")` (`asm/asm.h`) |
-|  85 | `aligned` (65) and `packed` (20) attributes in positions cproc does not take yet |
-|  51 | the `asm` keyword (GNU C; cproc knows `__asm__`) |
 |  20 | `-m16`: the real-mode boot code, which stays on gcc |
-|   9 | `__builtin_choose_expr` |
-|   8 | `-fno-function-sections`, `-foptimize-sibling-calls` (2) not yet accepted |
-|   3 | data symbols: QBE gives them no `@object` type, so the definitions differ |
-
-Each fix exposes the next first error, and statement expressions (`({ ... })`, used by `min`, `max`, `container_of`)
-and volatile accesses (`READ_ONCE`) are expected behind these.
+|  17 | the qbe object calls a function this configuration does not have, where gcc inlined a `static inline` that returns a constant and folded the call away (`pmd_trans_huge()` is 0 without transparent huge pages) |
+|  16 | an extra special section after code gcc folded away (now taken when harmless: `.discard.*`, alternatives, init data) |
+|   8 | `#pragma GCC visibility push(hidden)` in the compressed boot code (now honoured) |
+|   3 | more register operands in one `asm` than the thunk's register pool |
+|   2 | a static initializer of a flexible array member (`init_mm.cpu_bitmap`) |
+|   2 | lasting code calling init code where gcc's inlined copy is in init code |
+|   6 | one each: `__builtin_extract_return_addr`, a range designator with a value that is not constant, an alignment above 4096 (`irq_stack_backing_store`), `aligned` on a function declaration, and two more |

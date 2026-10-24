@@ -315,7 +315,7 @@
  };
  
  struct switchcases {
-@@ -522,21 +629,35 @@
+@@ -522,21 +629,36 @@
  	struct array *asanopen;
  };
  
@@ -334,6 +334,7 @@
 +void funcalloc(struct func *, struct decl *);   /* the storage of an automatic object */
 +/* cproc -G, GNU cleanup semantics (qbe.c): the cleanup of a block-scope object runs when it leaves its scope */
 +extern bool gnucleanup;
++extern const char *pragmavisibility;   /* #pragma GCC visibility push (pp.c) */
 +size_t funccleanmark(struct func *);
 +void funccleanleave(struct func *, size_t);   /* the cleanups of the objects above the mark, innermost first */
 +void funccleanpop(struct func *, size_t);     /* and they are no longer live */
@@ -352,7 +353,7 @@
  void funcjnz(struct func *, struct value *, struct type *, struct block *, struct block *);
  void funcret(struct func *, struct value *);
  void funchlt(struct func *);
-@@ -546,6 +667,13 @@
+@@ -546,6 +668,13 @@
  void asanswitch(struct func *, struct switchcases *);
  void asancase(struct func *, struct switchcases *);
  void funcswitch(struct func *, struct value *, struct switchcases *, struct block *);
@@ -818,7 +819,7 @@
  		}
  		if (tok.kind == TSEMICOLON)
  			break;
-@@ -1062,6 +1265,39 @@
+@@ -1062,6 +1265,41 @@
  	return d;
  }
  
@@ -836,6 +837,8 @@
 +		d->weak = true;
 +	if (declattr.visibility)
 +		d->visibility = declattr.visibility;
++	else if (pragmavisibility && !d->visibility)
++		d->visibility = pragmavisibility;
 +	if (declattr.alias)
 +		d->alias = declattr.alias;
 +	/* weak and visibility are directives for the symbol, written at the end (emitsymattrs) */
@@ -858,7 +861,7 @@
  static void
  defineobj(struct decl *d, struct init *init, bool hasinit, struct func *f)
  {
-@@ -1070,7 +1306,7 @@
+@@ -1070,7 +1308,7 @@
  	if (d->u.obj.align < d->type->align)
  		d->u.obj.align = d->type->align;
  	if (d->u.obj.storage == SDAUTO)
@@ -867,7 +870,7 @@
  	else
  		emitdata(d, init);
  	d->defined = true;
-@@ -1088,7 +1324,11 @@
+@@ -1088,7 +1326,11 @@
  	struct init *init;
  	bool hasinit;
  	char *name, *asmname;
@@ -879,7 +882,7 @@
  	struct decl *d, *prior;
  	enum declkind kind;
  	struct scope *funcscope;
-@@ -1096,10 +1336,31 @@
+@@ -1096,10 +1338,31 @@
  
  	if (staticassert(s))
  		return true;
@@ -911,7 +914,7 @@
  	if (!base.type)
  		return false;
  	if (f) {
-@@ -1109,16 +1370,18 @@
+@@ -1109,16 +1372,18 @@
  		/* 6.9p2 */
  		if (sc & SCAUTO)
  			error(&tok.loc, "external declaration must not contain 'auto'");
@@ -933,7 +936,7 @@
  		t = qt.type;
  		tq = qt.qual;
  		if (consume(T__ASM__)) {
-@@ -1135,6 +1398,36 @@
+@@ -1135,6 +1400,36 @@
  		}
  		gnuattr(&a, 0);  /* appertains to identifier */
  		kind = sc & SCTYPEDEF ? DECLTYPE : t->kind == TYPEFUNC ? DECLFUNC : DECLOBJECT;
@@ -970,7 +973,7 @@
  		prior = scopegetdecl(s, name, false);
  		/* a file-scope function may declare a name that is a builtin (as GCC allows for library-like builtins, such as
  		 * the generic __atomic_* forms): the declaration replaces the builtin, and calls go to the declared function */
-@@ -1144,10 +1437,32 @@
+@@ -1144,10 +1439,32 @@
  			error(&tok.loc, "'%s' redeclared with different kind", name);
  		switch (kind) {
  		case DECLTYPE:
@@ -1005,7 +1008,7 @@
  			if (!prior)
  				scopeputdecl(s, mkdecl(name, DECLTYPE, t, tq, LINKNONE));
  			else if (!typesame(prior->type, t) || prior->qual != tq)
-@@ -1157,9 +1472,20 @@
+@@ -1157,9 +1474,20 @@
  			if (align && align < t->align)
  				error(&tok.loc, "object '%s' requires alignment %d, which is stricter than specified alignment %d", name, t->align, align);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1026,7 +1029,7 @@
  			declcleanup = NULL;
  			if (d->u.obj.cleanup && s == &filescope)
  				error(&tok.loc, "cleanup attribute on '%s', which is not a block-scope object", name);
-@@ -1176,11 +1502,23 @@
+@@ -1176,11 +1504,23 @@
  				funcexpr(f, base.expr);
  			init = NULL;
  			hasinit = false;
@@ -1050,7 +1053,7 @@
  				init = parseinit(s, d->type);
  				hasinit = true;
  			} else if (sc & SCEXTERN) {
-@@ -1201,8 +1539,14 @@
+@@ -1201,8 +1541,14 @@
  			if (f && sc && sc != SCEXTERN)  /* 6.7.1p7 */
  				error(&tok.loc, "function '%s' with block scope may only have storage class 'extern'", name);
  			d = declcommon(s, kind, name, asmname, t, tq, sc, prior);
@@ -1066,7 +1069,7 @@
  			d->u.func.isnoreturn = fs & FUNCNORETURN || a.kind & ATTRNORETURN;
  			if (tok.kind == TLBRACE) {
  				if (!allowfunc)
-@@ -1213,12 +1557,43 @@
+@@ -1213,12 +1559,43 @@
  				assert(funcscope);
  				s = funcscope;
  				f = mkfunc(d, name, t, s);
@@ -1111,7 +1114,7 @@
  				s = delscope(s);
  				delfunc(f);
  				d->defined = true;
-@@ -1226,6 +1601,10 @@
+@@ -1226,6 +1603,10 @@
  			} else if (funcscope) {
  				delscope(funcscope);
  			}
@@ -1122,7 +1125,7 @@
  			break;
  		}
  		if (consume(TSEMICOLON))
-@@ -1268,3 +1647,127 @@
+@@ -1268,3 +1649,127 @@
  			defineobj(d, NULL, false, NULL);
  	}
  }
@@ -2459,7 +2462,86 @@
  }
 --- a/pp.c
 +++ b/pp.c
-@@ -407,6 +407,14 @@
+@@ -300,6 +300,68 @@
+ 	scan(&tok);
+ }
+ 
++/* GNU #pragma GCC visibility push(V): the visibility of the declarations with external linkage that follow, until the
++ * matching pop (the kernel's arch/x86/boot/compressed, -include hidden.h); decl.c declapplyattr reads it */
++const char *pragmavisibility;
++static const char *visstack[16];
++static int visdepth;
++
++/*
++A #pragma. EDG-made C keeps cproc's reading (every pragma ignored). Under -G, GNU C written by hand, an ignored pragma
++could change what the program means -- #pragma pack a layout, #pragma weak a binding -- so only the ones that are
++diagnostics or hints are ignored, GCC visibility is honoured, and any other is refused.
++*/
++static void
++pragma(void)
++{
++	char words[4][32] = {{0}};
++	int n = 0;
++
++	next();   /* past "pragma" */
++	for (; tok.kind != TNEWLINE && tok.kind != TEOF; next()) {
++		const char *w = tok.lit ? tok.lit : tokenstr(tok.kind);
++
++		if (n < 4 && w && (n == 0 || tok.kind != TLPAREN)) {
++			snprintf(words[n], sizeof words[n], "%s", w);
++			++n;
++		}
++	}
++	if (!gnucleanup)
++		return;
++	if (strcmp(words[0], "GCC") == 0 && strcmp(words[1], "visibility") == 0) {
++		if (strcmp(words[2], "push") == 0) {
++			if (visdepth == 16)
++				error(&tok.loc, "#pragma GCC visibility nested too deeply");
++			if (strcmp(words[3], "default") && strcmp(words[3], "hidden") && strcmp(words[3], "protected") &&
++			    strcmp(words[3], "internal"))
++				error(&tok.loc, "unknown visibility '%s' in #pragma GCC visibility", words[3]);
++			visstack[visdepth++] = pragmavisibility;
++			pragmavisibility = NULL;
++			if (strcmp(words[3], "default")) {
++				char *v = xmalloc(strlen(words[3]) + 1);
++
++				strcpy(v, words[3]);
++				pragmavisibility = v;
++			}
++		} else if (strcmp(words[2], "pop") == 0) {
++			if (!visdepth)
++				error(&tok.loc, "#pragma GCC visibility pop without a push");
++			pragmavisibility = visstack[--visdepth];
++		} else {
++			error(&tok.loc, "unsupported #pragma GCC visibility %s", words[2]);
++		}
++		return;
++	}
++	if (strcmp(words[0], "once") == 0 || strcmp(words[0], "STDC") == 0 ||
++	    strcmp(words[0], "GCC") == 0 && (strcmp(words[1], "diagnostic") == 0 || strcmp(words[1], "system_header") == 0 ||
++	     strcmp(words[1], "poison") == 0 || strcmp(words[1], "unroll") == 0 || strcmp(words[1], "ivdep") == 0 ||
++	     strcmp(words[1], "push_options") == 0 || strcmp(words[1], "pop_options") == 0 || strcmp(words[1], "optimize") == 0 ||
++	     strcmp(words[1], "warning") == 0 || strcmp(words[1], "error") == 0) ||
++	    strcmp(words[0], "clang") == 0 || strcmp(words[0], "message") == 0)
++		return;
++	error(&tok.loc, "unsupported #pragma %s%s%s (it could change what the program means)", words[0], *words[1] ? " " : "", words[1]);
++}
++
+ static void
+ directive(void)
+ {
+@@ -380,8 +442,7 @@
+ 			exit(1);
+ 		break;
+ 	case TPRAGMA:
+-		while (tok.kind != TNEWLINE && tok.kind != TEOF)
+-			next();
++		pragma();
+ 		break;
+ 	default:
+ 		error(&tok.loc, "invalid preprocessor directive #%s", tokenstr(tok.kind));
+@@ -407,6 +468,14 @@
  	}
  }
  
@@ -2474,7 +2556,7 @@
  static struct token *
  rawnext(void)
  {
-@@ -562,15 +570,22 @@
+@@ -562,15 +631,22 @@
  {
  	struct token *t;
  
@@ -2499,7 +2581,7 @@
  	case ALIAS__INLINE:
  	case ALIAS__INLINE__:     tok.kind = TINLINE;        break;
  	case ALIAS__SIGNED:
-@@ -581,8 +596,34 @@
+@@ -581,8 +657,34 @@
  	case ALIAS__TYPEOF:
  	case ALIAS__TYPEOF__:     tok.kind = TTYPEOF;        break;
  	case ALIAS__VOLATILE__:   tok.kind = TVOLATILE;      break;
@@ -2534,7 +2616,7 @@
  }
  
  bool
-@@ -597,6 +638,13 @@
+@@ -597,6 +699,13 @@
  		next();
  		return true;
  	}

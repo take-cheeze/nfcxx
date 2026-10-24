@@ -177,6 +177,11 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   binding and `.type` gcc gives an alias, its target kept by a `# nfcxx:ref` line. tests/c/cc-mode.sh compares the
   symbol table with gcc's.
 
+- **`#pragma` under `-G`**: GNU C written by hand must not lose a pragma that changes what the program means, as
+  cproc's reading for EDG-made C (every pragma ignored) would. `GCC visibility push/pop` is honoured (the
+  visibility of the external declarations that follow, `visibility` attributes aside), diagnostics and hints
+  (`GCC diagnostic`, `once`, `STDC`, `GCC unroll`, ...) are ignored, and any other (`pack`, `weak`, ...) is refused.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
