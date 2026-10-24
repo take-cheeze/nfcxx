@@ -70,5 +70,19 @@ for src in tests/libclang-edg/cases/*.cpp; do
       fi
     fi
   fi
+  # The front end inside the library (when it was built in): the same records through the runner process
+  # (LIBCLANG_EDG_RUNNER), three parses in one process, and a parse after one that failed (a missing file, EDG's
+  # catastrophic error) give the same walk.
+  if [ -f build/libclang-edg/edg_args.h ]; then
+    before=$status
+    LIBCLANG_EDG_RUNNER=$root/scripts/libclang-cursors "$work/walk-edg" "$src" -std=c++17 > "$work/$name.proc" &&
+      cmp -s "$work/$name.edg" "$work/$name.proc" || { echo "FAIL $name: in-process and runner walks differ"; status=1; }
+    WALK_REPEAT=3 "$work/walk-edg" "$src" -std=c++17 > "$work/$name.rep" &&
+      cmp -s <(cat "$work/$name.edg" "$work/$name.edg" "$work/$name.edg") "$work/$name.rep" ||
+      { echo "FAIL $name: repeated in-process parses differ"; status=1; }
+    WALK_FIRST=$work/no-such-file.cpp "$work/walk-edg" "$src" -std=c++17 > "$work/$name.after" 2>/dev/null &&
+      cmp -s "$work/$name.edg" "$work/$name.after" || { echo "FAIL $name: a parse after a failed one differs"; status=1; }
+    [ $status != $before ] || echo "ok   $name in-process (= runner; repeated; after a failure)"
+  fi
 done
 exit $status
