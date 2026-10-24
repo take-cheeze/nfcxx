@@ -2752,7 +2752,26 @@
  		if (d == f->namedecl) {
  			fputs("data ", stdout);
  			emitname(d->value);
-@@ -2136,6 +2387,141 @@
+@@ -1937,6 +2188,18 @@
+ 	struct value *v;
+ 	struct block *b;
+ 
++	/* a condition that folds to a constant (the kernel's udelay: if ((10) / 20000 >= 1) __bad_udelay();) is a jump:
++	 * the other way is unreachable, and neither cproc's asm thunks nor QBE keep code that only it reaches -- gcc
++	 * never emits that call, whose symbol may not exist */
++	if (!(e->type->prop & PROPSOFT)) {
++		struct expr *c = eval(e);
++
++		if (c->kind == EXPRCONST && c->type->prop & PROPINT) {
++			funcjmp(f, c->u.constant.u ? bt : bf);
++			return mkintconst(c->u.constant.u);
++		}
++		e = c;
++	}
+ 	/* Maybe we we could do something for EXPRCOND as well. */
+ 	switch (e->kind) {
+ 	case EXPRBINARY:
+@@ -2136,6 +2399,141 @@
  	return funcexpr(f, e);
  }
  
@@ -2894,7 +2913,7 @@
  struct value *
  funcexpr(struct func *f, struct expr *e)
  {
-@@ -2154,10 +2540,20 @@
+@@ -2154,10 +2552,20 @@
  
  	calcvla(f, e->type);
  	switch (e->kind) {
@@ -2916,7 +2935,7 @@
  		case DECLCONST:  return d->value;
  		default:
  			fatal("unimplemented declaration kind %d", d->kind);
-@@ -2182,10 +2578,10 @@
+@@ -2182,10 +2590,10 @@
  	case EXPRBITFIELD:
  	case EXPRCOMPOUND:
  		lval = funclval(f, e);
@@ -2929,7 +2948,7 @@
  		t = e->type;
  		if (t->prop & PROPSOFT) {
  			/* the old value is copied out first: the store overwrites the object that l addresses */
-@@ -2206,10 +2602,11 @@
+@@ -2206,10 +2614,11 @@
  			return e->u.incdec.post ? l : v;
  		}
  		if (t->kind == TYPEPOINTER) {
@@ -2943,7 +2962,7 @@
  			}
  		} else if (t->prop & PROPINT) {
  			r = mkintconst(1);
-@@ -2230,6 +2627,8 @@
+@@ -2230,6 +2639,8 @@
  			callee = callee->base;  /* a function designator, decayed to a pointer */
  		if (callee->kind == EXPRIDENT && callee->u.ident.decl->kind == DECLFUNC && (e->type->kind == TYPEFLOAT128 || anyf128arg(e)))
  			addf128call(callee->u.ident.decl);
@@ -2952,7 +2971,7 @@
  		argvals = xreallocarray(NULL, e->u.call.nargs, sizeof(argvals[0]));
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
  			emittype(arg->type);
-@@ -2244,7 +2643,10 @@
+@@ -2244,7 +2655,10 @@
  			v = softtemp(f);
  			funcinst(f, ICALL, 0, funcexpr(f, e->base), NULL);
  		} else {
@@ -2964,7 +2983,7 @@
  		}
  		functype = e->base->type->base;
  		for (arg = e->u.call.args, i = 0; arg; arg = arg->next, ++i) {
-@@ -2277,7 +2679,7 @@
+@@ -2277,7 +2691,7 @@
  			return lval.addr;
  		case TMUL:
  			r = funcexpr(f, e->base);
@@ -2973,7 +2992,7 @@
  		case TSUB:
  			r = funcexpr(f, e->base);
  			if (e->type->prop & PROPSOFT)
-@@ -2439,6 +2841,35 @@
+@@ -2439,6 +2853,35 @@
  		return funcexpr(f, e);
  	case EXPRBUILTIN:
  		switch (e->u.builtin.kind) {
@@ -3009,7 +3028,7 @@
  		case BUILTINVASTART:
  			l = funcvalistaddr(f, e->base);
  			funcinst(f, IVASTART, 0, l, NULL);
-@@ -2627,7 +3058,7 @@
+@@ -2627,7 +3070,7 @@
  		funcjmp(f, defaultlabel);
  		return;
  	}
@@ -3018,7 +3037,7 @@
  		funcjmp(f, c->body);
  		return;
  	}
-@@ -2636,7 +3067,12 @@
+@@ -2636,7 +3079,12 @@
  	label[2] = mkblock("switch_gt");
  
  	key = mkintconst(c->node.key);
@@ -3032,7 +3051,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3080,829 @@
+@@ -2644,17 +3092,829 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -3292,7 +3311,7 @@
 +	}
 +	if (r->reg < 0) {   /* immediate */
 +		switch (mod) {
-+		case 'c': fprintf(asmout, "%ld", r->imm); break;
++		case 'c': case 'P': case 'p': fprintf(asmout, "%ld", r->imm); break;   /* bare, as gcc prints them */
 +		case 'n': fprintf(asmout, "$%ld", -r->imm); break;
 +		default:  fprintf(asmout, "$%ld", r->imm); break;
 +		}
@@ -3864,7 +3883,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4170,12 @@
+@@ -2922,6 +4182,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -3877,7 +3896,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4188,7 @@
+@@ -2934,7 +4200,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -3886,7 +3905,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4198,7 @@
+@@ -2944,6 +4210,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -3894,7 +3913,7 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4330,18 @@
+@@ -3075,6 +4342,18 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);

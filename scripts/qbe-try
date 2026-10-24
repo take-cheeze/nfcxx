@@ -61,8 +61,8 @@ syms() {
       head = $1; nt = split($2, tail, " "); name = tail[nt]; vis = nt > 2 ? tail[2] : "default"
       bind = substr(head, 18, 1); weak = substr(head, 19, 1); kind = substr(head, 24, 1)
       n = split(head, f, " "); sec = f[n]
+      if (sec == "*UND*") { print "U " name; next }   # objdump gives an undefined symbol no binding flag
       if (bind != "g" && bind != "u" && weak != "w") next
-      if (sec == "*UND*") { print "U " name; next }
       if (sec ~ /^\.text(\.(unlikely|hot|startup))?$/) sec = "text"
       else if (sec ~ /^\.(data|bss|rodata)(\.rel(\.ro)?(\.local)?)?$|^\.rodata\.(str|cst)/) sec = "data"
       else if (sec == "*COM*") sec = "common"
@@ -111,7 +111,10 @@ if ! cmp -s "$tmp/g.def" "$tmp/q.def"; then
   note "gcc $src: definitions differ: $(diff "$tmp/g.def" "$tmp/q.def" | grep '^[<>]' | head -2 | tr '\n' ' ')"
   exit 0
 fi
-extra=$(comm -13 <(grep '^U ' "$tmp/g.syms") <(grep '^U ' "$tmp/q.syms") | head -3 | tr '\n' ' ')
+# _GLOBAL_OFFSET_TABLE_ comes with QBE's @GOTPCREL loads; the linker relaxes them (the kernel's linker script
+# checks that no GOT is left)
+extra=$(comm -13 <(grep '^U ' "$tmp/g.syms") <(grep '^U ' "$tmp/q.syms") | grep -vx 'U _GLOBAL_OFFSET_TABLE_' |
+  head -3 | tr '\n' ' ')
 if [ -n "$extra" ]; then note "gcc $src: qbe object needs more symbols: $extra"; exit 0; fi
 # a reference from lasting code to init (or unknown) code that gcc's object makes only from init code, or not at all
 refs "$obj" | awk '{print $2}' | sort -u > "$tmp/g.refs"; refs "$tmp/q.o" | awk '$1 == "init" {print $2}' | sort -u > "$tmp/q.init"

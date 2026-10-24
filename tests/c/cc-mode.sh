@@ -379,6 +379,12 @@ EOC
     if out=$(NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kclone2.c -o kclone2.o 2>&1); then bad "kernel mode: a variable argument is still refused" "was accepted"
     elif grep -q "immediate operand" <<<"$out"; then ok "kernel mode: a variable argument is still refused"
     else bad "kernel mode: a variable argument is still refused" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+    # a condition that folds to a constant leaves no code for the other way (the kernel's udelay(10) never calls
+    # __bad_udelay), and %P of an immediate is the bare number (call __get_user_%P4)
+    printf 'void bad(void);\nvoid cu(unsigned long);\n#define udelay(n) ({ if (__builtin_constant_p(n)) { if ((n) / 20000 >= 1) bad(); else cu((n) * 0x10C7ul); } })\nvoid g(void) { udelay(10); }\nint h(void) { int r; __asm__("movl $%%P1, %%0" : "=r"(r) : "i"(8)); return r; }\n' > kfold.c
+    if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -c kfold.c -o kfold.o 2>/dev/null && ! nm kfold.o | grep -q ' U bad' && nm kfold.o | grep -q ' U cu' &&
+       objdump -d kfold.o | grep -q 'mov *\$0x8,'; then ok "kernel mode: constant conditions fold, %P of an immediate is bare"
+    else bad "kernel mode: constant conditions fold, %P of an immediate is bare" "$(nm kfold.o 2>&1 | tr '\n' ' ')"; fi
     NFCXX_QBE_KERNEL=1 rejects "kernel mode still refuses -m16" "m16" -m16 -c util.c -o rej.o
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
     # two, and a polling loop loads on every iteration; signed char loads are sign-extended
@@ -434,6 +440,13 @@ EOC
     if grep -q '^qbe kinit.c$' qbe.log && grep -q '^gcc kinit2.c: lasting code references init code' qbe.log &&
        ! nm kinit.o | grep -q unused_init; then ok "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc"
     else bad "qbe-try: init-only helpers go to .init.text, lasting callers of init code stay on gcc" "$(tr '\n' '|' < qbe.log)"; fi
+    # a call gcc's object does not make (gcc folds the inlined branch away) keeps the gcc object; objdump gives an
+    # undefined symbol no binding flag, which an earlier qbe-try missed
+    printf 'void bad(void);\nstatic inline void g(int x) { if (x > 100) bad(); }\nint f(void) { g(5); return 0; }\n' > kneed.c
+    rm -f qbe.log
+    NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log "$nfcc" -O2 -fno-PIE -mno-sse -c kneed.c -o kneed.o
+    if grep -q '^gcc kneed.c: qbe object needs more symbols: U bad' qbe.log; then ok "qbe-try: an extra undefined symbol keeps the gcc object"
+    else bad "qbe-try: an extra undefined symbol keeps the gcc object" "$(tr '\n' '|' < qbe.log)"; fi
     # with the init symbols of a gcc-built kernel (NFCXX_QBE_INITSYMS), an undefined symbol not among them is not init
     rm -f qbe.log; printf 'memblock_alloc_try_nid\n' > initsyms.txt
     NFCXX_QBE_INITSYMS=$PWD/initsyms.txt NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 NFCXX_QBE_TRY='*' NFCXX_QBE_LOG=$PWD/qbe.log \

@@ -157,6 +157,10 @@ let through the C that real-world gnu11 code -- the Linux kernel's headers in pa
   body that does not compile so keeps the call on the function, and a body with a static local is not cloned
   (gcc's inlined copies share it). Calls with other arguments stay refused.
 
+- **Constant conditions** (`if`, `while`, `&&`, `||`, `?:`) that `eval` folds are a jump: the other way is
+  unreachable, so neither its asm thunks nor (QBE drops unreachable blocks) its calls remain -- the kernel's
+  `udelay(10)` expands to `if ((10) / 20000 >= 1) __bad_udelay();`, a call gcc never emits and no object defines.
+
 - **File-scope basic asm** (`__asm__("text");`), written to the inline-asm side file.
 
 - **Lazy refusals under `-p`**: a refusal inside a function body (an asm operand only inlining could satisfy) is
