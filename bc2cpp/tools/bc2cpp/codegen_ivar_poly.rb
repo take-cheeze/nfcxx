@@ -722,6 +722,14 @@ def index_else_statement(d, s)
   outlined_index_call('getidx', "r#{d}", "r#{d}", "r#{s}").chomp
 end
 
+# The else of GETIDX0's Array or Hash arm: the `[]` send with 0 vm.c's getidx0_fallback makes, as the by-name line
+# (the owner call when the closed world names every class answering `[]`).
+def index0_else_statement(d, s)
+  return "r#{d} = mrb_funcall(M, r#{s}, \"[]\", 1, mrb_fixnum_value(0));" if devirt_blocked_name?('[]')
+
+  dynamic_dispatch_line(d, "r#{s}", '[]', ['mrb_fixnum_value(0)']).chomp
+end
+
 # The else of an Array or Hash `[]=` arm (SETIDX with a static class): bc2cpp_setidx, whose arms repeat the same tests
 # and return the value as the []= send does, so the site has no by-name send of its own. Keeps the send when `[]=`
 # is devirt-blocked by a runtime definer.
