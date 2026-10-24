@@ -4,10 +4,13 @@
 // output element (per row for trsm), the products summed in float in index order, so results match a float CPU
 // reference to rounding, not oneMKL's blocking. Element types are float, sycl::half and bfloat16, converted to float;
 // the result is rounded to the type of C. With beta == 0, C is not read (as in BLAS: a NaN in C does not survive).
-// A form not listed throws sycl::exception (errc::feature_not_supported).
+// A form not listed, and other element types (double and the complex types, which the dpct helper instantiates for every
+// library_data_t but ggml does not call), throw sycl::exception (errc::feature_not_supported) without a kernel.
 #pragma once
 #include <sycl/sycl.hpp>
+#include <sycl/half_type.hpp>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 namespace oneapi {
@@ -23,6 +26,15 @@ namespace detail {
 template <class T> inline float to_f(T v) { return static_cast<float>(v); }
 template <class T> inline T from_f(float v) { return static_cast<T>(v); }
 inline bool trans(transpose t) { return t != transpose::nontrans; }   // real types: conjtrans is trans
+// the element types the kernels take (float arithmetic on the device)
+template <class T> constexpr bool lowp() {
+  return std::is_same<T, float>::value || std::is_same<T, sycl::half>::value ||
+         std::is_same<T, sycl::ext::oneapi::bfloat16>::value;
+}
+template <class... T> constexpr bool all_lowp() { return (lowp<T>() && ...); }
+[[noreturn]] inline void unsupported() {
+  throw sycl::exception(sycl::errc::feature_not_supported, "oneapi::mkl::blas: only float, sycl::half and bfloat16 elements");
+}
 }  // namespace detail
 
 // C(m x n) = alpha op(A)(m x k) op(B)(k x n) + beta C, for `batch` matrices at the given element strides.
@@ -31,6 +43,9 @@ sycl::event gemm_batch(sycl::queue &q, transpose ta, transpose tb, std::int64_t 
                        Ts alpha, const Ta *a, std::int64_t lda, std::int64_t stride_a, const Tb *b, std::int64_t ldb,
                        std::int64_t stride_b, Ts beta, Tc *c, std::int64_t ldc, std::int64_t stride_c, std::int64_t batch,
                        const std::vector<sycl::event> & = {}) {
+  if constexpr (!detail::all_lowp<Ts, Ta, Tb, Tc>()) {
+    detail::unsupported();
+  } else {
   if (m <= 0 || n <= 0 || batch <= 0) return sycl::event();
   const bool at = detail::trans(ta), bt = detail::trans(tb);
   const float al = detail::to_f(alpha), be = detail::to_f(beta);
@@ -49,6 +64,7 @@ sycl::event gemm_batch(sycl::queue &q, transpose ta, transpose tb, std::int64_t 
     if (be != 0.0f) r += be * detail::to_f(cp[i + j * ldc]);
     cp[i + j * ldc] = detail::from_f<Tc>(r);
   });
+  }
 }
 
 template <class Ts, class Ta, class Tb, class Tc>
@@ -65,6 +81,9 @@ sycl::event gemm_batch(sycl::queue &q, const transpose *ta, const transpose *tb,
                        const std::int64_t *n, const std::int64_t *k, const Ts *alpha, const Ta **a, const std::int64_t *lda,
                        const Tb **b, const std::int64_t *ldb, const Ts *beta, Tc **c, const std::int64_t *ldc,
                        std::int64_t group_count, const std::int64_t *group_size, const std::vector<sycl::event> & = {}) {
+  if constexpr (!detail::all_lowp<Ts, Ta, Tb, Tc>()) {
+    detail::unsupported();
+  } else {
   std::int64_t first = 0;
   for (std::int64_t g = 0; g < group_count; first += group_size[g], g++) {
     const std::int64_t gm = m[g], gn = n[g], gk = k[g], la = lda[g], lb = ldb[g], lc = ldc[g], cnt = group_size[g];
@@ -91,6 +110,7 @@ sycl::event gemm_batch(sycl::queue &q, const transpose *ta, const transpose *tb,
     });
   }
   return sycl::event();
+  }
 }
 
 // B(m x n) := alpha B op(A)^-1 for side right with op(A) = A: X A = alpha B is solved in place, column by column, one
@@ -99,6 +119,9 @@ template <class T>
 sycl::event trsm_batch(sycl::queue &q, side sd, uplo ul, transpose ta, diag dg, std::int64_t m, std::int64_t n, T alpha,
                        const T *a, std::int64_t lda, std::int64_t stride_a, T *b, std::int64_t ldb, std::int64_t stride_b,
                        std::int64_t batch, const std::vector<sycl::event> & = {}) {
+  if constexpr (!detail::all_lowp<T>()) {
+    detail::unsupported();
+  } else {
   if (sd != side::right || ta != transpose::nontrans)
     throw sycl::exception(sycl::errc::feature_not_supported, "oneapi::mkl::blas::trsm_batch: only side::right with transpose::nontrans");
   if (m <= 0 || n <= 0 || batch <= 0) return sycl::event();
@@ -118,6 +141,7 @@ sycl::event trsm_batch(sycl::queue &q, side sd, uplo ul, transpose ta, diag dg, 
       bp[i + j * ldb] = (T)s;
     }
   });
+  }
 }
 
 }  // namespace column_major
