@@ -2,7 +2,9 @@
 # with this change; it is in the git history at 972fccf). It follows the original exactly, quirks included, so that
 # tests/mruby/run.sh can compare the production script against it. Known differences of scripts/weak-symbols.rb from
 # the original (this file matches the original): a digit run inside a name ("0x1F" gives the name "x1F"); input that
-# is not UTF-8 (the original stops with status 1); a lone CR as a line end in the assembly.
+# is not UTF-8 (the original stops with status 1); a lone CR as a line end in the assembly; `_Alignas(N)`, which
+# qbe-prep.rb writes for an aligned object (the original takes `_Alignas` for the name of a weak function, and the
+# object stays strong).
 #
 # Emit `.weak` directives for functions and data objects that EDG marks __attribute__((__weak__)).
 #
