@@ -18,8 +18,9 @@ module SymbolCache
   # NATIVE_SINGLETON_CALL: `bc2cpp_native_singleton_named` is an explicit-receiver by-name call whose
   # method the compiler proved to be one native singleton function; it keeps level 2 as its fallback is a
   # checked send, and gets a per-site method cache slot (BC2CPP_NSC_SLOT).
+  # CORE_SELF_NATIVE: `bc2cpp_native_owner_named` is the same for a self call (level 1: no visibility check).
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
-                       'bc2cpp_native_singleton_named' => 2 }.freeze
+                       'bc2cpp_native_singleton_named' => 2, 'bc2cpp_native_owner_named' => 1 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
   FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_owner_call_named|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
   FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
@@ -114,7 +115,7 @@ module SymbolCache
         table.violation_used = true if kind == 'bc2cpp_guard_violation_named'
         table.hint_violation_used = true if kind == 'bc2cpp_hint_violation_named'
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
-        table.native_singleton_used = true if kind == 'bc2cpp_native_singleton_named'
+        table.native_singleton_used = true if %w[bc2cpp_native_singleton_named bc2cpp_native_owner_named].include?(kind)
         table.owner_call_used = true if kind == 'bc2cpp_owner_call_named'
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
@@ -124,6 +125,7 @@ module SymbolCache
                       when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       when 'bc2cpp_owner_call_named' then "bc2cpp_owner_call(M, #{receiver}, #{index}"
                       when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
+                      when 'bc2cpp_native_owner_named' then "bc2cpp_native_owner(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
         out << code[pos...start] << replacement.b
@@ -144,7 +146,7 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|owner_call)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton|native_owner|owner_call)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       match = recv_end && SEND_INDEX.match(code, recv_end)
@@ -284,12 +286,10 @@ module SymbolCache
       struct RClass* owner;
     };
     #define BC2CPP_NSC_SLOT ([]() -> bc2cpp_nsc_slot& { static bc2cpp_nsc_slot s; return s; }())
-    [[gnu::noinline]] static bool bc2cpp_nsc_fill(mrb_state* M, bc2cpp_nsc_slot& s, mrb_value recv, mrb_sym mid, mrb_int argc) {
-      if (mrb_type(recv) != MRB_TT_CLASS && mrb_type(recv) != MRB_TT_MODULE) return false;
-      struct RClass* c = mrb_class(M, recv);
-      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+    // Keeps `m` (found on `c`) in the slot for `key`, or refuses: not a C function, or an argument count the
+    // function cannot take.
+    static bool bc2cpp_nsc_accept(mrb_state* M, bc2cpp_nsc_slot& s, struct RObject* key, mrb_method_t m, struct RClass* c, mrb_int argc) {
       if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) return false;
-      if (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL)) return false;
       if (!MRB_METHOD_PROC_P(m)) {
         // A raw C function: OP_SEND checks the aspec it was registered with (vm.c check_argument_count) before the call.
         mrb_aspec aspec = MRB_MT_ASPEC(m.flags);
@@ -304,10 +304,17 @@ module SymbolCache
       }
       s.epoch = bc2cpp_nsc_epoch;
       s.state = M;
-      s.recv = mrb_obj_ptr(recv);
+      s.recv = key;
       s.m = m;
       s.owner = c;
       return true;
+    }
+    [[gnu::noinline]] static bool bc2cpp_nsc_fill(mrb_state* M, bc2cpp_nsc_slot& s, mrb_value recv, mrb_sym mid, mrb_int argc) {
+      if (mrb_type(recv) != MRB_TT_CLASS && mrb_type(recv) != MRB_TT_MODULE) return false;
+      struct RClass* c = mrb_class(M, recv);
+      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      if (!MRB_METHOD_UNDEF_P(m) && (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL))) return false;
+      return bc2cpp_nsc_accept(M, s, mrb_obj_ptr(recv), m, c, argc);
     }
     static mrb_value bc2cpp_native_singleton(mrb_state* M, mrb_value recv, int i, bc2cpp_nsc_slot& s, mrb_int argc, ...) {
       mrb_value argv[16];
@@ -322,6 +329,27 @@ module SymbolCache
       if (cached || bc2cpp_nsc_fill(M, s, recv, mid, argc)) {
         return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value());
       }
+      if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, bc2cpp_sym_check[i] == 2);
+      return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
+    }
+    // CORE_SELF_NATIVE: a self call whose method the compiler proved to be the C function registered on `owner`
+    // (codegen_core_self_native.rb). Every receiver's lookup ends at that registration, so the method is looked up
+    // on `owner` itself, once per site and VM; the slot is keyed by the owner, not the receiver.
+    static mrb_value bc2cpp_native_owner(mrb_state* M, mrb_value recv, int i, bc2cpp_nsc_slot& s, struct RClass* owner, mrb_int argc, ...) {
+      mrb_value argv[16];
+      if (argc > 16) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "ArgumentError")), "Too long arguments. (limit=16)");
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      mrb_sym mid = bc2cpp_sym(M, i);
+      bool cached = owner && s.epoch == bc2cpp_nsc_epoch && s.state == M && s.recv == (struct RObject*)owner;
+      if (!cached && owner) {
+        struct RClass* c = owner;
+        mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+        cached = bc2cpp_nsc_accept(M, s, (struct RObject*)owner, m, c, argc);
+      }
+      if (cached) return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value());
       if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, bc2cpp_sym_check[i] == 2);
       return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
     }
