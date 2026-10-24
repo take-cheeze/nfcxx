@@ -275,9 +275,9 @@ drop, active-member, and trait rules remain separate work.
 
 Drop-state forms describe an ownership protocol for declared local values. They are **checking
 facts**, not destructor instructions: the producer must supply any real cleanup and runtime guard
-code separately. Neither frontend emits these facts yet, and calls still require unsupported
-lifetime/effect contracts. This stage cannot certify actual destructor, deallocation, or unwind
-behavior.
+code separately. Neither frontend emits these facts yet. The bounded call contracts below can
+connect actual calls to checking effects; they do not prove general destructor, deallocation, or
+unwind behavior.
 
 ```text
 (drop-obligation "x" int $"x")
@@ -336,13 +336,105 @@ remain unsupported. The marker asserts that the matching real cleanup or runtime
 the checker does not generate or verify that code. The QBE emitter and oracle accept these facts
 as validated no-ops, and a native integer test verifies marker erasure preserves generated code.
 
+## Closed call-effect contracts
+
+Actual direct calls can now use an explicitly trusted module-level summary:
+
+```text
+(call-effects "finish" (returns void)
+  (nothrow) (noescape) (closed)
+  (args (consume int)))
+```
+
+The argument list is complete and ordered. Every call must match its contract's arity and return
+type. Known scalar argument ABI classes must match; memory arguments must use pointer-width
+representations with known local provenance. This is not full C/C++ prototype verification.
+Contracts are validated before pruning, including unused declarations.
+
+| Argument effect | Required behavior and analysis |
+| --- | --- |
+| `value TYPE` | A nonpointer scalar value; carries no tracked address provenance. |
+| `read TYPE` | Reads an initialized value through the argument without changing it. |
+| `write TYPE` | Reads/mutates an existing initialized value, preserving its ownership identity. |
+| `init TYPE` | Definitely initializes the value's required bytes without reading the old value. |
+| `consume TYPE` | Consumes a matching live drop obligation on normal return. |
+
+`nothrow` excludes exceptional continuations. `noescape` promises that argument addresses are not
+retained beyond the call, except for an explicitly declared returned alias. `closed` promises no access to globals, hidden pointees, or other externally
+visible memory outside the declared argument regions; private callee-local storage is permitted.
+These are trusted imports, not facts inferred from names or checked against callee implementations.
+The producer must ensure the real callee satisfies the summary. Functions defined in the IR are
+still analyzed individually; checking their agreement with a summary is not implemented.
+
+Read effects may have several possible known local targets, all of which are checked. Mutation,
+initialization, and consumption require one known place. Read/read aliases are allowed; arguments
+whose ranges overlap and include mutation are refused before applying postconditions. Summaries do
+not prescribe ordering inside a callee, so an initializer cannot silently make a same-call reader
+safe. More permissive alias/ordering contracts remain future work.
+
+Effects respect loan permissions and ranges. Shared loans cannot authorize mutation or
+initialization. Stored pointer identities are counted as possible uses when a call reads them,
+so last-use inference cannot end those loans before the call. Mutation and initialization forget
+resulting pointer provenance. Unknown returned/outgoing pointer relationships are never guessed.
+
+Typed aggregate initialization establishes only declared field bytes. Mutation preserves existing
+field initialization. Both forget padding initialization, even if the caller previously zeroed the
+object: the summary does not promise defined padding on return. Read effects do not erase padding.
+`init` starts construction for intersecting drop obligations; a following `drop-live` registers the
+completed owner. Reinitializing an already-live owner without consuming it remains an error.
+
+A consuming call must target an unborrowed owned place with an exact matching obligation and live
+flag. Its normal-return postcondition performs the same logical consumption as `drop-state`, so a
+separate marker is unnecessary. Unlike a marker, the **call itself remains executable code**. A
+consume call does not implicitly drop a possibly absent value; guard correlation and unwind cleanup
+remain unsupported. Passing an exclusive loan alone does not establish ownership for consumption.
+
+This stage supports direct symbols, void/scalar results or the returned aliases below, and bounded local argument effects.
+Indirect/variadic calls, uncontracted pointer/reference or aggregate returns, unknown external targets, retained
+borrows, heap/deallocation effects, hidden globals/pointees, and potentially throwing calls remain
+refused. A native test links small C helpers and observes actual initialization/read/mutation/
+consumption results. It demonstrates call execution and state propagation, not general destructor
+or resource-release verification. Removing the summaries leaves identical QBE while the checker
+correctly returns to refusing those calls.
+
+
+## Returned alias loans
+
+A trusted summary may return a pointer into one argument's declared memory region:
+
+```text
+(call-effects "identity"
+  (returns (ptr int) (from-arg 0 0 shared))
+  (nothrow) (noescape) (closed) (args (read int)))
+(let %r (ptr int)
+  (call-borrow (ptr int) "R" root &"identity" $"x"))
+```
+
+`from-arg` takes a zero-based argument index, a nonnegative byte offset, and `shared` or
+`exclusive`. The returned pointee must fit wholly inside that argument's region. Shared results
+require a `read` or `write` source; exclusive results require `write`. `value`, `init`, and `consume`
+sources are refused. An ordinary `call` cannot discard the required returned-loan identity.
+
+`root` requires a direct local place or constant offset. For a result derived from an existing
+loan, use `(parent "P")` instead; the actual source must preserve that parent's identity and
+constant offset. The result cannot upgrade shared permission, outlive the parent or referent,
+or escape the checked function as a local address. Existing `loan-end` and opt-in last-use inference
+apply to the returned loan and its ancestors. Field-range results protect only their returned range
+after the call, while call preconditions still cover the complete argument effect region.
+
+These contracts remain trusted: the checker does not inspect the callee to prove where its pointer
+actually points. Heap-owned returns, aliases selected from several arguments, retained borrows,
+generic lifetime signatures, and Rust frontend emission remain unsupported. The emitter erases
+`call-borrow` to an ordinary call. A native C identity helper verifies the actual pointer return,
+write through the result, byte-identical metadata erasure, and emitter/oracle agreement.
+
 ## Refusals and limits
 
 Exit status is 0 for supported local checks passing, 1 for a detected lifetime/initialization
 error, 2 for malformed IR, and 3 when analysis is unsupported. Diagnostics currently identify
 functions and slots; source spans remain future work.
 
-Calls require effect/lifetime contracts and are refused. So are rvalue-reference arguments,
+Calls without a supported closed effect contract are refused. So are rvalue-reference arguments,
 aggregate values, dynamic indices, general pointer arithmetic, unknown pointer provenance,
 external stores, and stores through multiple possible destinations. Unknown instructions are
 refused. Escapes never establish initialization. Unannotated functions are refused rather than
@@ -361,8 +453,8 @@ substitute. The next frontend task is to preserve storage and borrow facts from 
 lowering erases them. Full Rust conformance also requires checking generic bodies before
 monomorphization, including bodies not instantiated by a program.
 
-The next steps are frontend layout/ownership emission, actual cleanup/effect contracts, call
-effects, signature lifetime relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
+The next steps are frontend layout/ownership emission, callee-summary verification, general returned and
+retained reference relationships, cleanup edges, and source locations. They should be added with a must-accept/must-reject pair for each rule.
 
 ## Tests
 
@@ -380,6 +472,10 @@ reuse, and conservative padding checks. Semantic-layout fixtures verify field-on
 nested layouts, moved fields, raw padding reads, storage lifetimes, and malformed descriptor graphs.
 Drop-state fixtures check conditional flags, double consumption, missing cleanup, construction
 registration, field ownership, typed transfers, reconstruction, and live-loan conflicts.
+Call fixtures cover preconditions, aliasing, scalar signatures, initialization, ownership
+consumption, stored-pointer lifetimes, and padding/provenance invalidation. Returned-loan fixtures
+cover root/parent identities, field ranges, permissions, scope and parent expiry, malformed
+contracts, and inferred last-use release.
 A native test checks both the unchanged QBE and the stricter conservative result when metadata is
 removed. The explicit-loan and
 reborrow cases cover permissions, overlapping loans, copies, branch joins,

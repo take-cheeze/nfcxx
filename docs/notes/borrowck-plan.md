@@ -6,9 +6,11 @@ commands, tests, and the Rust frontend boundary. Explicit shared/exclusive loans
 implemented, including parent/child reborrows and opt-in local last-use inference. Explicit
 scalar/pointer moves and copies are checked, including constant-offset partial moves and
 byte-range loan conflicts. Optional nested struct layouts make aggregate borrowing padding-aware;
-explicit local drop obligations and guarded consumption are tracked. Frontend fact emission,
-source-language ownership policy, actual destructor/unwind effects, and interprocedural region
-inference remain planned. The historical design below was written against `origin/main` at
+explicit local drop obligations and guarded consumption are tracked. Closed non-throwing call
+contracts model bounded reads, mutation, initialization, and owner consumption. Explicit returned
+loans can alias one bounded argument region with a declared parent and permission. Frontend fact emission,
+callee-summary verification, source-language ownership policy, general lifetime signatures, and unwind cleanup
+remain planned. The historical design below was written against `origin/main` at
 `265991b`. Every claim about the code cites a file and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
 
 ## 0. Summary
