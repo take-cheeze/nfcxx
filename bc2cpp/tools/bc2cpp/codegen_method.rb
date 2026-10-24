@@ -490,7 +490,10 @@ class CodeGen
     if ensure_region
       open_glue, ok = emit_ensure_guard(ensure_region, irep, d)
       if ok
-        prefix_at[ensure_region[:begin_addr]] = open_glue
+        # ENSURE_ENTRY_LABEL: a jump onto the first protected instruction lands before the guard's scope opens.
+        entry = ensure_region[:entry_label] ? "  L#{ensure_region[:begin_addr]}:;\n" : ''
+        prefix_at[ensure_region[:begin_addr]] = entry + open_glue
+        targets -= [ensure_region[:begin_addr]] if ensure_region[:entry_label]
         prefix_at[ensure_region[:except_addr]] = "  } // ensure guard leaves scope: runs the ensure body\n"
         # ENSURE_DISPATCH_MERGE_SUPPORT: jumps landing exactly on the handler address
         # (see recognize_ensure_region) become `goto L<raiseif_addr>`: leave the guard
