@@ -60,7 +60,10 @@ With `NFCXX_QBE_TRY="PATTERN ..."` on the gcc backend, nfcc hands each compile t
    to `NFCXX_QBE_LOG`: `qbe SRC`, or `gcc SRC: reason` (the first error, or what differed).
 
 The kernel then has to boot. The log is the migration's to-do list: sorted by reason, it says which missing feature
-keeps the most files on gcc.
+keeps the most files on gcc. When the kernel does not boot, `scripts/linux-qemu-bisect.sh` finds the qbe objects that
+break it without compiling anything: each has a gcc twin in `DIR/out-nfcc`, and it puts sets of them back, links and
+boots again, and halves the set until the culprits are left (an `asm` input tied to a narrower output was loaded at
+the output's width, truncating the user pointer of `put_user`, and `/init` failed with EFAULT).
 
 ### `NFCXX_QBE_KERNEL=1`: the kernel's options on the qbe backend
 

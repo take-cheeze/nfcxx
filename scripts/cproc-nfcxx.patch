@@ -3394,7 +3394,7 @@
  	funcjnz(f, res, NULL, c->body, label[0]);
  	funclabel(f, label[0]);
  	res = funcinst(f, class == 'w' ? ICULTW : ICULTL, 'w', v, key);
-@@ -2644,17 +3206,901 @@
+@@ -2644,17 +3206,906 @@
  	funclabel(f, label[1]);
  	casesearch(f, class, v, c->node.child[0], defaultlabel, min, c->node.key - 1);
  	funclabel(f, label[2]);
@@ -3494,6 +3494,7 @@
 +struct asmrec {
 +	int reg;      /* register index, or -1 for an immediate */
 +	int size;     /* operand size in bytes (1,2,4,8) */
++	int feedsize; /* a tied input wider than its output: the bytes the thunk loads into the register (0: size) */
 +	long slot;    /* byte offset of this operand's slot, or -1 (immediate, or tied: shares another's) */
 +	bool feed;    /* the thunk loads this operand from its slot on entry */
 +	bool prestore;/* the caller stores a value into this operand's slot before the call ("+" outputs and inputs) */
@@ -3800,6 +3801,7 @@
 +		rec[i].slot = -1;
 +		rec[i].feed = rec[i].prestore = rec[i].back = false;
 +		rec[i].pseudo = rec[i].mem = false;
++		rec[i].feedsize = 0;
 +		rec[i].flag = NULL;
 +		rec[i].immsym = NULL;
 +		rec[i].imm = 0;
@@ -3846,6 +3848,9 @@
 +			rec[i].reg = rec[m].reg;
 +			rec[i].size = asmopsize(op->expr->type);
 +			rec[m].feed = true;   /* the thunk loads the tied value the input writes into the output's slot */
++			/* all of it: the kernel's put_user ties its user pointer to an int output, "=c"(ret) : "0"(ptr) */
++			if (rec[i].size > rec[m].size && rec[i].size > rec[m].feedsize)
++				rec[m].feedsize = rec[i].size;
 +			continue;
 +		}
 +		{
@@ -4062,7 +4067,7 @@
 +	fprintf(asmout, "\tmovq %%rdi, %%%s\n", regname[holder][0]);
 +	for (i = 0; i < total; ++i)   /* load fed operands from the slot */
 +		if (rec[i].slot >= 0 && rec[i].feed) {
-+			int col = regsizecol(rec[i].size);
++			int col = regsizecol(rec[i].feedsize > rec[i].size ? rec[i].feedsize : rec[i].size);
 +			fprintf(asmout, "\tmov%c %ld(%%%s), %%%s\n", "qlwb"[col], rec[i].slot, regname[holder][0], regname[rec[i].reg][col]);
 +		}
 +	fputs("\t", asmout);
@@ -4298,7 +4303,7 @@
  static void
  emitname(struct value *v)
  {
-@@ -2922,6 +4368,12 @@
+@@ -2922,6 +4373,12 @@
  		asanfree(f);
  	if (asanon && f->asanlo)
  		asandynret(f);
@@ -4311,7 +4316,7 @@
  	if (global)
  		puts("export");
  	fputs("function ", stdout);
-@@ -2934,7 +4386,7 @@
+@@ -2934,7 +4391,7 @@
  	for (p = f->type->u.func.params, v = f->paramtemps; p; p = p->next, ++v) {
  		if (p != f->type->u.func.params)
  			fputs(", ", stdout);
@@ -4320,7 +4325,7 @@
  		putchar(' ');
  		emitname(v);
  	}
-@@ -2944,6 +4396,7 @@
+@@ -2944,6 +4401,7 @@
  		fputs("...", stdout);
  	}
  	puts(") {");
@@ -4328,7 +4333,7 @@
  	for (b = f->start; b; b = b->next) {
  		emitname(&b->label);
  		putchar('\n');
-@@ -3075,6 +4528,18 @@
+@@ -3075,6 +4533,18 @@
  	size = d->type->size;
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);

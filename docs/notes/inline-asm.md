@@ -61,7 +61,8 @@ operand has its own register and the values round-trip through the slot.
 - Symbolic operands `%[name]`; operand modifiers `%b %w %k %q` (byte/word/long/quad register names), `%c`/`%n`
   (bare / negated immediate), and `%=` (a unique number per expansion).
 - Clobbers: `"memory"` and `"cc"` (no-ops — the call is already a full barrier), and named general registers.
-- Scalar operands up to 8 bytes in registers.
+- Scalar operands up to 8 bytes in registers; a tied input wider than its output is loaded whole (the kernel's
+  `put_user` ties a pointer to an `int` output).
 - Memory operands `m`, `o`, `V`: the slot carries the object's address, the thunk loads it into a register, and `%N`
   is `(reg)`, so the asm reads and writes the object itself (an array is the array, not its decayed pointer; a large
   struct is fine: only the address moves). Nothing is copied back.
