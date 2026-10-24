@@ -3,6 +3,7 @@ name: wasm explorer (GitHub Pages)
 # Builds the wasm explorer's static site (tools/wasm-explorer/build-static.cjs) and deploys it to GitHub Pages. The
 # compiler runs here, in CI: the Path B harness and the mruby tool are built as in pathb.yml, and each example is
 # compiled ahead of time in every mode and checked against its expected result, so a broken example fails this job.
+# The Rust and Go examples also need rustc (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh).
 # The page on Pages cannot compile other code (it has no server); it shows the example builds.
 #
 # One-time repository setting: Settings > Pages > Build and deployment > Source: "GitHub Actions".
@@ -15,6 +16,7 @@ on:
       - "3rd/edg"
       - "scripts/pathb-*"
       - "scripts/llvm-to-pathb.rb"
+      - "scripts/setup-tinygo.sh"
       - "scripts/setup-pathb.sh"
       - "scripts/setup-edg.sh"
       - "scripts/host-sys.sh"
@@ -29,6 +31,7 @@ on:
       - "3rd/edg"
       - "scripts/pathb-*"
       - "scripts/llvm-to-pathb.rb"
+      - "scripts/setup-tinygo.sh"
       - "scripts/setup-pathb.sh"
       - "scripts/setup-edg.sh"
       - "scripts/host-sys.sh"
@@ -86,6 +89,31 @@ jobs:
       - name: Build the mruby interpreter
         if: steps.mruby.outputs.cache-hit != 'true'
         run: scripts/setup-mruby.sh
+
+      # The Rust examples: rustc's LLVM IR, which llvm-to-pathb.rb reads, changes between releases, so the version is
+      # pinned (the runner's rustup installs it).
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          echo "RUSTC=$(rustup which --toolchain 1.97.0 rustc)" >> "$GITHUB_ENV"
+
+      # The Go examples: TinyGo (scripts/setup-tinygo.sh, pinned) runs the Go toolchain.
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Restore TinyGo
+        id: tinygo
+        uses: actions/cache@v6
+        with:
+          path: build/tinygo
+          key: tinygo-${{ runner.os }}-${{ hashFiles('scripts/setup-tinygo.sh') }}
+
+      - name: Install TinyGo
+        if: steps.tinygo.outputs.cache-hit != 'true'
+        run: scripts/setup-tinygo.sh
 
       - name: Build the static site (compiles and checks every example in every mode)
         run: node tools/wasm-explorer/build-static.cjs --out _site

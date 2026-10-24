@@ -1883,7 +1883,8 @@ def s_vlaalloc(fn, x)
 end
 
 def s_copy(fn, x)
-  n = as_int(x[1])
+  # BYTES is a constant, or a register of type unsigned_long (a run-time length, from llvm-to-pathb.rb)
+  n = x[1].is_a?(String) && x[1][0] == "%" ? fn.opnd(x[1], "l").t : as_int(x[1])
   dst = fn.opnd(x[2], "l")
   src = fn.opnd(x[3], "l")
   return if n == 0
@@ -1892,7 +1893,7 @@ end
 
 # (zero-fill BYTES DST): clear an aggregate object (the part of a constant initializer that names no element).
 def s_zero_fill(fn, x)
-  n = as_int(x[1])
+  n = x[1].is_a?(String) && x[1][0] == "%" ? fn.opnd(x[1], "l").t : as_int(x[1])
   dst = fn.opnd(x[2], "l")
   return if n == 0
   fn.emit("call $memset(l #{dst.t}, w 0, l #{n})")

@@ -15,15 +15,22 @@ const outIndex = args.indexOf("--out");
 const out = outIndex >= 0 ? path.resolve(args[outIndex + 1]) : path.join(root, "_site");
 
 // The module's main, run the way the page runs it, with the same browser bindings (bindings.js). Returns main's
-// result and the output the module wrote (the Console tab's text).
+// result, or the status of the exit binding (C's exit, Go's os.Exit) as "exit N", and the output the module wrote
+// (the Console tab's text).
 function runMain(bytes) {
   const module = new WebAssembly.Module(bytes);
   let output = "";
   let memory = null;
   const ctx = bindings.makeContext({ write: (text) => { output += text; }, memory: () => memory });
-  const instance = new WebAssembly.Instance(module, bindings.importsFor(module, ctx));
-  memory = instance.exports.memory || null;
-  const result = String(instance.exports.main());
+  let result;
+  try {
+    const instance = new WebAssembly.Instance(module, bindings.importsFor(module, ctx, bytes));
+    memory = instance.exports.memory || null;
+    result = String(instance.exports.main());
+  } catch (e) {
+    if (!(e instanceof bindings.Exit)) throw e;
+    result = `exit ${e.status}`;
+  }
   ctx.flush();
   return { result, output };
 }

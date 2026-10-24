@@ -53,8 +53,9 @@
 # and unreachable, a body of labels and gotos without loops (dispatch_body), and static data: the defined globals and
 # string data, at fixed addresses in the memory, with their initializers.
 # Everything else is refused with the reason on stderr: other goto and labels, extern and dynamically initialized
-# globals (when used), bit-field access, aggregate parameters, results and arguments, variadic calls, function pointers,
-# indirect calls, inline assembly, VLAs, exceptions and the 16-byte types. Those refusals are the next steps, not silent
+# globals (when used), bit-field access, aggregate parameters, results and arguments, variadic calls, inline assembly,
+# VLAs, exceptions and the 16-byte types. Function pointers are slots of a function table (address_taken), and a call
+# through one is call_indirect. Those refusals are the next steps, not silent
 # drops.
 
 class Refused < StandardError; end   # a node this emitter does not handle (exit status 3)
@@ -379,6 +380,7 @@ class Module_
   attr_accessor :stack_fns   # --emscripten: the stack functions [name, type index, body] (see emscripten_stack_fns)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
   attr_accessor :alloc_index, :alloc_type   # asan: the function index and the type of malloc and free (name => ...)
+  attr_accessor :table   # the functions whose address is taken: name => slot of the function table (from 1)
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
@@ -388,6 +390,12 @@ class Module_
     @imports = []                # [name, type index]
     @import_index = {}           # name => function index
     @defined_index = {}          # name => function index (after the imports)
+    @table = {}
+  end
+
+  # The value of the function address &"name": its slot in the table (address_taken found every one).
+  def table_slot(name)
+    @table.fetch(name) { raise BadIR, "function address &\"#{name}\" not in the table" }
   end
 
   def type_of(params, result)
@@ -606,8 +614,8 @@ def static_contents(mod, o)
       add = as_int(it[4].to_s)
       raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
       raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
-      raise Refused, "address of the function #{target.name} in a static initializer (a function table is not lowered)" if target.sig == "&"
-      items << [off, $ptr_bytes, false, le_bytes(mod.static_addr(target.name) + add, $ptr_bytes)]
+      value = target.sig == "&" ? mod.table_slot(target.name) : mod.static_addr(target.name)
+      items << [off, $ptr_bytes, false, le_bytes(value + add, $ptr_bytes)]
     elsif h == "bytes"
       off = as_int(it[1].to_s)
       n = as_int(it[2].to_s)
@@ -872,7 +880,6 @@ class Fn
       return reg_info(op)[2]
     end
     if op.is_a?(IRSym)
-      raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
       @mod.static_addr(op.name) if op.sig == "@"    # checks that the object is defined here
       return ["ptr", nil]
     end
@@ -892,6 +899,8 @@ class Fn
       e(0x20); leb_u(reg_info(op)[0])
     elsif op.is_a?(IRSym) && op.sig == "@"
       ptr_const(@mod.static_addr(op.name))   # the address of the static object
+    elsif op.is_a?(IRSym) && op.sig == "&"
+      ptr_const(@mod.table_slot(op.name))    # a function's address: its slot in the table
     elsif op.is_a?(IRSym)
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
@@ -908,7 +917,6 @@ class Fn
   # The wasm type of an operand, without pushing it.
   def op_wtype(op)
     if op.is_a?(IRSym)
-      raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
       @mod.static_addr(op.name) if op.sig == "@"
       return ptr_wtype
     end
@@ -947,12 +955,32 @@ class Fn
     e(@mod.memory64 ? 0x42 : 0x41); leb_s(n)
   end
 
+  def run_time_length?(x)
+    x.is_a?(String) && x[0] == "%"
+  end
+
+  # The length of memory.copy or memory.fill: the constant n, or the register x (an i64 under LP64) at the memory's
+  # address width.
+  def mem_length(x, n)
+    return mem_const(n) if n
+    w = push_op(x)
+    if @mod.memory64
+      e(0xad) if w == :i32                 # i64.extend_i32_u
+    elsif w == :i64
+      e(0xa7)                              # i32.wrap_i64
+    end
+  end
+
   # asan: pushes the address of an access of size bytes after a call of the check, which traps on a violation. The
   # address goes through the scratch local, since the check takes it as an argument and the access needs it again.
   def asan_addr(op, size)
     push_addr(op)
     e(0x22); leb_u(@tmp32)                 # local.tee
-    e(0x41); leb_s(size)
+    if size.is_a?(Integer)
+      e(0x41); leb_s(size)
+    else
+      e(0xa7) if push_op(size) == :i64     # a run-time size (a register), as the check's i32
+    end
     e(0x10); leb_u(@mod.check_index)       # call the check: (address, size)
     e(0x20); leb_u(@tmp32)                 # local.get: the address of the access
   end
@@ -1291,8 +1319,13 @@ class Fn
     when "bitcast"
       dst = parse_type(x[1])
       src = op_type(x[2])
-      raise Refused, "bitcast between #{src[0]} and #{dst[0]}" if wtype(dst) != wtype(src)
       push_op(x[2])
+      if wtype(dst) != wtype(src)
+        # the bits of a float as an integer of its size, or back (llvm-to-pathb.rb's bitcast i32 to float)
+        op = { [:f32, :i32] => 0xbc, [:f64, :i64] => 0xbd, [:i32, :f32] => 0xbe, [:i64, :f64] => 0xbf }[[wtype(src), wtype(dst)]]
+        raise Refused, "bitcast between #{src[0]} and #{dst[0]}" if op.nil? || (dst[0] == "int" && dst[1] < 4)
+        e(op)
+      end
       wtype(dst)
     when "const"
       push_const(parse_type(x[1]), x[2])
@@ -1368,7 +1401,6 @@ class Fn
   def call(x)
     ret = parse_type(x[1])
     callee = x[2]
-    raise Refused, "indirect call" unless callee.is_a?(IRSym) && callee.sig == "&"
     args = x.drop(3)
     raise Refused, "variadic call" if head_of(args[0]) == "variadic"
     args.each do |a|
@@ -1377,6 +1409,14 @@ class Fn
     end
     arg_types = args.map { |a| wtype(op_type(a)) }
     args.each { |a| push_op(a) }
+    unless callee.is_a?(IRSym) && callee.sig == "&"
+      # through a function pointer: its value is a slot of the table, and the call's types are the signature, which
+      # call_indirect checks (a mismatch, or the null slot 0, traps)
+      w = push_op(callee)
+      e(0xa7) if w == :i64                 # i32.wrap_i64: the table index
+      e(0x11); leb_u(@mod.type_of(arg_types, wtype(ret))); e(0x00)
+      return wtype(ret)
+    end
     name = callee.name
     idx = if @mod.defines?(name)
             @mod.defined_index.fetch(name) { raise BadIR, "no index for #{name}" }
@@ -1438,11 +1478,18 @@ class Fn
       push_op(s[3], wtype(ty))
       store_op(ty)
     when "copy"
-      n = as_int(s[1])
-      mem_addr(s[2], n)
-      mem_addr(s[3], n)
-      mem_const(n)
+      # the length is a constant, or a register (an unsigned_long: llvm-to-pathb.rb's memcpy of a run-time length)
+      n = run_time_length?(s[1]) ? nil : as_int(s[1])
+      mem_addr(s[2], n || s[1])
+      mem_addr(s[3], n || s[1])
+      mem_length(s[1], n)
       e(0xfc, 0x0a, 0x00, 0x00)            # memory.copy: destination, source, length
+    when "zero-fill"
+      n = run_time_length?(s[1]) ? nil : as_int(s[1])
+      mem_addr(s[2], n || s[1])
+      e(0x41); leb_s(0)
+      mem_length(s[1], n)
+      e(0xfc, 0x0b, 0x00)                  # memory.fill: destination, value, length
     when "eval"
       inner = s[1]
       raise Refused, "eval of #{head_of(inner)}" unless head_of(inner) == "call"
@@ -1869,7 +1916,8 @@ end
 # poison code of the granule, or for a partial granule (k in 1..7, which ends an object) the code of the next granule,
 # the redzone that follows the object. The function is the module's last one (after the defined functions).
 #
-#   if n == 0 return;  last = a + n - 1;  g = a >> 3
+#   if n == 0 return;  if a >= shadow_base return (the shadow, and the pages that memory.grow added after it: a host's
+#   mmap for TinyGo's heap, are not checked);  last = a + n - 1;  g = a >> 3
 #   loop:  s = shadow[g];  if s != 0:  end = min(last - 8g + 1, 8)
 #            if !(s < 8 && end <= s): report(a, n, s >= 0x80 ? s : shadow[g + 1]); unreachable
 #          g = g + 1; br_if loop while g <= last >> 3
@@ -1879,6 +1927,8 @@ def asan_check_body(mod)
   c = []
   c.concat([0x01, 0x04, VT[:i32]])                  # locals: last, g, s, end (after the parameters a and n)
   c.concat([0x20, 1, 0x45, 0x04, 0x40, 0x0f, 0x0b]) # if n == 0: return
+  c.concat([0x20, 0, 0x41]); sleb(sh, c)             # if a >= shadow_base: return (i32.ge_u)
+  c.concat([0x4f, 0x04, 0x40, 0x0f, 0x0b])
   c.concat([0x20, 0, 0x20, 1, 0x6a, 0x41, 1, 0x6b, 0x21, 2])   # last = a + n - 1
   c.concat([0x20, 0, 0x41, 3, 0x76, 0x21, 3])                  # g = a >> 3
   c.concat([0x03, 0x40])                                       # loop
@@ -2145,6 +2195,7 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
     end
   end
   mod = Module_.new(defs)
+  address_taken(forms).each_with_index { |nm, i| mod.table[nm] = i + 1 }
   mod.asan = asan
   mod.emscripten = emscripten
   mod.import_memory = import_memory
@@ -2177,6 +2228,34 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false, me
     [nm, fn]
   end
   encode_module(mod, bodies)
+end
+
+# The functions whose address the IR takes (&"f" anywhere but as the callee of a call), in order of first use: the
+# slots of the function table. Slot 0 stays empty, so a call through a null function pointer traps.
+def address_taken(forms)
+  names = []
+  forms.each { |f| collect_addresses(f, names) }
+  names
+end
+
+def collect_addresses(x, names)
+  return unless x.is_a?(Array)
+  x.each_with_index do |y, i|
+    next if i == 2 && head_of(x) == "call"   # the callee of a direct call
+    if y.is_a?(IRSym) && y.sig == "&"
+      names << y.name unless names.include?(y.name)
+    else
+      collect_addresses(y, names)
+    end
+  end
+end
+
+# The function index of a slot of the table: a defined function, or one that the module calls (an import). A function
+# that is neither has no index (its signature is not known), so taking its address is refused.
+def table_function(mod, name)
+  return mod.defined_index[name] if mod.defined_index.key?(name)
+  return mod.import_index[name] if mod.import_index.key?(name)
+  raise Refused, "address of the function #{name}, which the module neither defines nor calls"
 end
 
 def encode_module(mod, bodies)
@@ -2230,13 +2309,13 @@ def encode_module(mod, bodies)
   uleb(mod.ctors_type, fsec) if mod.emscripten
   mod.stack_fns.each { |_, ti, _| uleb(ti, fsec) } if mod.emscripten
   section(3, fsec, out)
-  # emscripten: the function table, exported empty. The emitter has no indirect calls and no function values (both are
-  # refused, see Fn#call and op_type), so no element segment is needed. It is exported under the name the glue looks for.
-  if mod.emscripten
+  # the function table: slot 0 empty, then the functions whose address is taken (Module_#table). emscripten: it is
+  # exported under the name the glue looks for, empty when no address is taken.
+  if mod.emscripten || !mod.table.empty?
     tb = []
     uleb(1, tb)
     tb << 0x70 << 0x00                   # funcref, limits without a maximum
-    uleb(0, tb)                          # minimum 0 elements
+    uleb(mod.table.empty? ? 0 : mod.table.length + 1, tb)
     section(4, tb, out)
   end
   # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow. With
@@ -2315,6 +2394,15 @@ def encode_module(mod, bodies)
     uleb(mod.imports.length + i, ex)
   end
   section(7, ex, out)
+  # elements: the table's slots from 1, an active segment of function indices
+  unless mod.table.empty?
+    el = []
+    uleb(1, el)
+    el << 0x00 << 0x41 << 0x01 << 0x0b   # table 0, offset i32.const 1
+    uleb(mod.table.length, el)
+    mod.table.keys.each { |nm| uleb(table_function(mod, nm), el) }
+    section(9, el, out)
+  end
   # code
   code = []
   uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0), code)

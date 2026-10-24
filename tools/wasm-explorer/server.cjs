@@ -1,5 +1,5 @@
 // The wasm explorer's server: serves index.html, the examples, and POST /api/compile, which compiles the posted source
-// (C++, C, LLVM IR or the nfcxx IR) with the pipeline in pipeline.cjs. The page also runs without this server, on a
+// (C++, C, Rust, Go, LLVM IR or the nfcxx IR) with the pipeline in pipeline.cjs. The page also runs without this server, on a
 // static host (build-static.cjs).
 //
 // Usage: node tools/wasm-explorer/server.cjs [--port 8080] [--host 127.0.0.1]
@@ -16,7 +16,7 @@ const MAX_JOBS = 2;   // compiles in flight; more get 503 rather than queueing w
 const TEXT = "text/plain; charset=utf-8";
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json",
-  ".cpp": TEXT, ".c": TEXT, ".ll": TEXT, ".ir": TEXT,   // the example sources, one extension per language
+  ".cpp": TEXT, ".c": TEXT, ".rs": TEXT, ".go": TEXT, ".ll": TEXT, ".ir": TEXT,   // the example sources
 };
 
 const args = process.argv.slice(2);

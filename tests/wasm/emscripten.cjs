@@ -62,9 +62,18 @@ const ex = new WebAssembly.Instance(mod, imports).exports;
 const mem = importMode ? imports.env.memory : ex.memory;
 if (!(mem instanceof WebAssembly.Memory)) fail("memory is not a WebAssembly.Memory");
 if (!(ex.__indirect_function_table instanceof WebAssembly.Table)) fail("__indirect_function_table is not a table");
-if (ex.__indirect_function_table.length !== 0) fail("__indirect_function_table has elements (the emitter has none)");
-// No call_indirect is emitted, so no module code calls through the table. Its growth from the JS side must work (no
-// maximum), which is what an addFunction-style grow needs: grow it by one and check the length.
+// The table holds the functions whose address the module takes, from slot 1; slot 0 stays null (a call through a null
+// function pointer traps). A module that takes no address has an empty table.
+{
+  const t = ex.__indirect_function_table;
+  if (t.length === 1) fail("__indirect_function_table has a null slot and no functions");
+  if (t.length > 0 && t.get(0) !== null) fail("__indirect_function_table slot 0 is not null");
+  for (let i = 1; i < t.length; i++) {
+    if (typeof t.get(i) !== "function") fail(`__indirect_function_table slot ${i} is not a function`);
+  }
+}
+// Its growth from the JS side must work (no maximum), which is what an addFunction-style grow needs: grow it by one
+// and check the length.
 {
   const t = ex.__indirect_function_table;
   const before = t.length;

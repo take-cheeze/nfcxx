@@ -1,7 +1,7 @@
 # The wasm explorer: an online compiler page for the wasm emitter
 
-`tools/wasm-explorer/` is a page for trying the Path B WebAssembly emitter (`pathb-wasm.md`): C++, C, LLVM IR or the
-mid-level IR itself in (see "Languages"), the IR, the WebAssembly text and the binary out, and the module runs in the page with the browser's WebAssembly. It is an explorer
+`tools/wasm-explorer/` is a page for trying the Path B WebAssembly emitter (`pathb-wasm.md`): C++, C, Rust, Go, LLVM IR
+or the mid-level IR itself in (see "Languages"), the IR, the WebAssembly text and the binary out, and the module runs in the page with the browser's WebAssembly. It is an explorer
 in the sense of Compiler Explorer, for one backend.
 
 It runs in two ways:
@@ -12,6 +12,7 @@ It runs in two ways:
 
 ```
 scripts/setup-pathb.sh && scripts/setup-mruby.sh    # the harness and the mruby tool (once)
+scripts/setup-tinygo.sh                              # Go: TinyGo (pinned), which runs go (1.22 to 1.25); Rust: rustc on PATH
 node tools/wasm-explorer/server.cjs                  # live: http://127.0.0.1:8080/ (--port, --host)
 node tools/wasm-explorer/build-static.cjs            # static: _site/, the examples built and checked
 ```
@@ -24,7 +25,7 @@ has no dependency beyond node (22 was used).
 
 | File | What it is |
 | --- | --- |
-| `pipeline.cjs` | The compile: the language's front end (`pathb-dump --ir`, or `llvm-to-pathb.rb`), then `pathb-wasm-emit.rb`, in a temporary directory. Options: the language, the standard and the mode. Diagnostics with line numbers. |
+| `pipeline.cjs` | The compile: the language's front end (`pathb-dump --ir`; or rustc or TinyGo, then `llvm-to-pathb.rb`), then `pathb-wasm-emit.rb`, in a temporary directory. Options: the language, the standard and the mode. Diagnostics with line numbers. |
 | `server.cjs` | The live server: the page, `examples/`, `GET /api/health`, `POST /api/compile`. |
 | `build-static.cjs` | The static site: each example in every mode of its language, run and checked, then the page and `builds/<id>.json`. |
 | `index.html` | The page (one file, no build step). |
@@ -54,6 +55,8 @@ its standards or empty (the front end's default), and `mode` is one of its modes
 | --- | --- | --- | --- |
 | `c++` | `pathb-dump --ir` (EDG, C++23 by default) | `c++17`, `c++20`, `c++23` | all |
 | `c` | `pathb-dump --ir -std=cNN` (EDG in C mode, `--gcc`, C17 by default) | `c89`, `c99`, `c11`, `c17`, `c23` | all |
+| `rust` | `rustc --crate-type=cdylib --emit=llvm-ir -C opt-level=1 -C panic=abort -C overflow-checks=on`, then `llvm-to-pathb.rb --wasm` | editions `2015`, `2018`, `2021` (default), `2024` | `lp64`, `asan` |
+| `go` | `tinygo build -o prog.ll -gc=leaking -scheduler=none -panic=trap -opt=1`, a `main()` wrapper, then `llvm-to-pathb.rb --wasm` | none | `lp64`, `asan` |
 | `llvm` | `llvm-to-pathb.rb` (`pathb-llvm.md`: the subset of `clang -S -emit-llvm` it reads) | none | `lp64`, `asan` |
 | `ir` | none: the source is the IR (`pathb-stage2.md`, section 6); lines that start with `;` are blanked first | none | `lp64`, `asan` |
 
@@ -63,12 +66,32 @@ compiler's (`host_sys_includes c`, `gcc -x c`), not the C++ library's. LLVM IR a
 (`llvm-to-pathb.rb` writes the x86-64 one), so the `emscripten` mode, whose IR is ILP32 from EDG's `linux_riscv32`
 target, is not theirs.
 
+**Rust** is compiled by rustc (`RUSTC`, else `rustc` on PATH; CI pins 1.97.0) to LLVM IR at `-O1`, with overflow
+checks on, as a `#![no_std]` `#![no_main]` crate: `main` is an `extern "C"` function that the page calls, the browser
+bindings are `extern "C"` declarations, and a panic (an overflow, an index out of range) calls a function of `core` that
+the module does not have, a stub, after which the code traps (`unreachable`). Enums, slices, iterators, closures, trait
+objects (`dyn`) and function pointers work. `-O0` is not used: its code keeps unwinding edges (`invoke`, `resume`),
+which the translator refuses. `std` is not available (it needs an operating system the module does not have).
+
+**Go** is compiled by TinyGo (`TINYGO`, else `build/tinygo/bin/tinygo` from `scripts/setup-tinygo.sh`, else `tinygo` on
+PATH) for its Linux target, which writes the whole program, runtime included, as one LLVM IR module. The flags: a
+leaking heap (`-gc=leaking`: TinyGo's bump allocator, which takes its memory from `mmap`), no goroutines
+(`-scheduler=none`), and panics that trap (`-panic=trap`). TinyGo's `main` is the C entry point `main(argc, argv)`;
+the pipeline renames it and adds a `main()` that calls it, so the page runs it as any other module. The runtime's
+system calls go to bindings (below): `println` and `fmt` print to the Console, `os.Exit(n)` ends the run with
+`exit n`, and `time.Now` reads the clock. Interfaces, maps, slices and `append`, strings and `strconv`, closures,
+`errors` and `fmt.Println`/`Printf` work; `fmt` makes a module of about 640 KB that takes about 20 s to compile.
+Goroutines and channels do not (no scheduler), nor does anything that needs a file system.
+
 LLVM IR needed three things of the emitter that EDG's IR did not: the checked arithmetic (`nsw` becomes `cadd`, `csub`,
 `cmul`), `alloca` (each local of `clang -O0`), and the flat control flow graph of labels and gotos, which the emitter now
 lowers as a dispatch loop (`pathb-wasm.md`, "What is handled"). So `clang-18 -O0 -S -emit-llvm` output runs when it stays
-in the translator's subset (no structs, no `udiv`, ...). Not added: Rust (`mrustc-monomir.md`), whose front end is a
-build of mrustc and its standard library that the static build cannot carry, and Cpp2 (`cpp2.md`), whose runtime
-header EDG rejects in most programs.
+in the translator's subset. Rust and Go needed more, in the translator (structs and aggregate values, overflow
+intrinsics, atomics and system calls under `--wasm`, and others: `pathb-llvm.md`) and in the emitter: function
+pointers (a function table and `call_indirect`), `copy` and `zero-fill` of a run-time length, float and integer
+`bitcast` (`pathb-wasm.md`). The repository's own Rust front end, mrustc (`mrustc-monomir.md`), is not used: it needs a
+build of mrustc and of its standard library (a 270 MB download and minutes of build) that rustc makes unnecessary here.
+Cpp2 (`cpp2.md`) is not added: EDG rejects its runtime header in most programs.
 
 Limits: 64 KB of source (413 past it), 60 s per compiler step, two compiles at a time (503 past that). The server listens
 on 127.0.0.1 by default, because it runs the compiler on whatever source it is sent. Exposing it needs a process sandbox
@@ -107,8 +130,10 @@ Actions.
 
 ## Checks
 
-- `build-static.cjs` is the check for the examples: 7 examples (C++ and C) x 3 modes and 2 (LLVM IR and IR) x 2 modes,
-  each run and compared with its expected result. The C++ results were also checked against `g++ -O0` (modulo 256, the
+- `build-static.cjs` is the check for the examples: 7 examples (C++ and C) x 3 modes and 4 (Rust, Go, LLVM IR and IR)
+  x 2 modes, each run and compared with its expected result (and output, where `index.json` states one). The Rust and
+  Go results were also checked by hand: the Rust example's arithmetic (95 + 24), and the Go one's printed values (95,
+  37) and status (132). The C++ results were also checked against `g++ -O0` (modulo 256, the
   process status), the C one against `gcc -std=c11`, and the LLVM IR one against `gcc` of the C it was written from (`clang-18 -O0`
   of that C, translated and emitted, gives the same 88).
 - The languages, by hand in a headless Chromium (live and static, with Monaco routed to the npm package): switching
@@ -127,7 +152,7 @@ A module's imports (functions of module `env` that the program declares and does
 features by name. The table is `BINDINGS` in `index.html`; the page lists it in the Module tab, and each import of the
 module is marked "browser binding" or "stub" in the imports table. A stub returns its first argument plus one, as before.
 
-| Declaration (C++) | Browser feature |
+| Declaration (C) | Browser feature |
 | --- | --- |
 | `void log_i32(int)` | the Console tab (the value) |
 | `void log_i64(long)` | the Console tab (the value, as a BigInt) |
@@ -139,6 +164,16 @@ module is marked "browser binding" or "stub" in the imports table. A stub return
 | `int putchar(int)`, `int puts(const char*)` | stdout: the Console tab (`putchar` shows a line when it ends) |
 | `int write(int fd, const void* buf, unsigned long n)` | fd 1 is stdout; fd 2 is shown as `[stderr]` |
 | `int fflush(void*)` | shows what `putchar` has left waiting |
+| `void exit(int status)` | ends the run, whose result is `exit N` (C's `exit`, Go's `os.Exit`) |
+| `void* mmap(...)` | `memory.grow` by the pages of the size asked: TinyGo's heap, after everything the module laid out |
+| `int clock_gettime(int, struct timespec*)` | `performance.timeOrigin + performance.now()` (Go's `time.Now`) |
+| `ssize_t getrandom(void*, size_t, unsigned)` | `crypto.getRandomValues` |
+| `size_t strlen(const char*)` | the length of the C string in memory |
+| `long __syscall(long nr, ...)` | a Linux system call (`llvm-to-pathb.rb --wasm`): `write` as the binding above, `exit` and `exit_group` as `exit`, `getpid` is 1, the others fail with `ENOSYS` (TinyGo's `os`) |
+
+The JavaScript side of an import cannot see its signature, and an import with an i64 result must return a BigInt, so
+`importsFor` reads the result types from the module's type and import sections and converts each binding's (and each
+stub's) value.
 
 The emitter passes an i32 as a Number, an i64 or an LP64 pointer as a BigInt, and an f64 as a Number. A return value must
 match the declared type. The Console tab shows the output of the last Run. The example `browser-bindings` uses the first seven and returns 3 whatever the timer and random values are. The example
@@ -161,8 +196,8 @@ and input events.
 | --- | --- | --- |
 | Editor with highlighting and diagnostics | done | Monaco, from the CDN. |
 | Compile on edit, and on demand | done | Auto on the live server only. |
-| Examples | done (9) | Each checked in every mode of its language at build time. |
-| Several languages | done (4) | C++, C, LLVM IR, the IR. See "Languages". |
+| Examples | done (11) | Each checked in every mode of its language at build time. |
+| Several languages | done (6) | C++, C, Rust, Go, LLVM IR, the IR. See "Languages". |
 | Options: standard, emitter mode | done | `pipeline.cjs` takes them. |
 | Run the output | done | `main`; imports bound to browser features (see "Browser bindings"), others stubbed. |
 | Compiler errors | done | Text, and markers on the lines. |

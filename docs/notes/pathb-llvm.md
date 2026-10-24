@@ -3,7 +3,7 @@
 Status: **first slice, tested.** An LLVM IR text reader that writes nfcxx IR (`docs/notes/pathb-stage2.md`, section 6),
 so LLVM IR from `clang -S -emit-llvm` goes through Path B's existing back ends: `scripts/pathb-qbe-emit.rb` (QBE),
 `scripts/pathb-cil-emit.rb` (CIL), and `scripts/pathb-wasm-emit.rb` (WebAssembly: the wasm explorer's LLVM IR language,
-`wasm-explorer.md`). It is a second front end beside EDG. It does not use LLVM as a library, and it has no
+`wasm-explorer.md`, also its Rust and Go through rustc's and TinyGo's LLVM IR). It is a second front end beside EDG. It does not use LLVM as a library, and it has no
 LLVM build dependency. `clang-18` is only the source of the test inputs and the reference results.
 
 ```
@@ -17,9 +17,10 @@ stderr, 1 malformed input). The translator is written in the subset of Ruby the 
 Tests: `tests/llvm-pathb/run.sh`. Each `tests/llvm-pathb/cases/*.c` is compiled by clang-18 (`-O0`, or `-O1` with
 `// OPT: 1`), translated, emitted, linked and run. Its exit code must equal the `// EXPECT:` value and the clang `-O0` binary
 of the same source. `// TRAP: 1` programs must die with SIGABRT. A construct the subset refuses is reported as
-REFUSED, not as a failure. Last run: 9 programs, all built and ran, 8 matched `EXPECT` and clang `-O0`, and the trap
+REFUSED, not as a failure. Last run: 10 programs, all built and ran, 9 matched `EXPECT` and clang `-O0`, and the trap
 case trapped (`arith`, `arrays`, `calls`, `control`, `floats`, `globals`, `opt1` (-O1: phi, select, the swap loop),
-`unsigned`, and `trap`). The runner needs `build/qbe/qbe` (`scripts/setup-qbe.sh`) and `clang-18`. It is not in CI yet.
+`structs` (nested, packed and named struct layouts, struct constants in globals, a struct memcpy), `unsigned`, and
+`trap`). `structs.c` also gives 124 through the wasm emitter at `-O0`, `-O1` and `-O2`. The runner needs `build/qbe/qbe` (`scripts/setup-qbe.sh`) and `clang-18`. It is not in CI yet.
 
 ## Policy decisions
 
@@ -52,49 +53,85 @@ These are the choices the subset makes where LLVM IR leaves room. A choice is re
 ## What is in the subset
 
 - Module: `source_filename`, a 64-bit target triple, globals and functions. Top-level `module asm` is refused.
-- Types: `i1` (bool), `i8`, `i16`, `i32`, `i64`, `float`, `double`, `ptr`, and arrays of those (nested to any depth in
-  initializers and `getelementptr`).
+- Types: `i1` (bool), `i8`, `i16`, `i32`, `i64`, `float`, `double`, `ptr`, arrays, and structs: literal (`{ i32, ptr }`),
+  packed (`<{ ... }>`) and named (`%T = type { ... }`, read before the functions). A struct is laid out by the x86-64
+  data layout's rules (each field at the next multiple of its alignment, 1 when packed; the size rounded up to the
+  largest alignment), and its IR type is a byte array: the IR reaches its fields by offset.
+- Aggregate values in registers (first-class structs and arrays: TinyGo's strings and interfaces, rustc's pairs): each
+  such register is a slot of the frame, and `insertvalue`, `extractvalue`, a `phi`, a `select`, a `load` and a `store`
+  of one are copies. Within the module, an aggregate argument is passed as a pointer to the caller's value, and an
+  aggregate result through a pointer to the caller's slot (a first parameter); a function of another module that takes
+  or returns one is refused, since its convention is not known.
 - Globals: `external`, `internal`, `private`, `linkonce_odr`, `weak_odr`, `weak` (with the linkage markers of section 6);
-  initializers `zeroinitializer`, scalar constants, `null`, function and global addresses, constant `getelementptr`,
-  and arrays of those (flattened to items at byte offsets). Private `c"..."` strings become `(data ...)` nodes.
-- Instructions: `alloca`, `load`, `store` (with `volatile`), integer `add sub mul sdiv srem shl lshr ashr and or xor`
-  (`and`, `or`, `xor` also on `i1`), `fadd fsub fmul fdiv fneg`, `icmp` (all ten predicates; pointers compare as
-  unsigned longs), `fcmp` (`oeq une olt ole ogt oge`), `sext zext trunc sitofp fptosi fpext fptrunc ptrtoint inttoptr`,
-  pointer `bitcast`, `getelementptr` (any number of indices into arrays), `call` (direct and through a pointer, with
-  `(variadic N)` for `...`), `select`, `phi`, `br`, `switch`, `ret`, `unreachable`.
-- Intrinsics: `llvm.memcpy` with a constant length (a `copy`), `llvm.memset` of zero (a `zero-fill`), `llvm.fmuladd`,
-  `llvm.smax`, `smin`, `umax`, `umin`.
-- Calls may carry return-value and argument attributes (`noundef`, `noalias`, ...); a `byval` or `sret` argument is refused.
+  initializers `zeroinitializer`, `undef`, scalar constants, `null`, function and global addresses, constant
+  `getelementptr` (also of a `getelementptr`, and with struct indices), `inttoptr`, and arrays and structs of those
+  (flattened to items at byte offsets; a `c"..."` inside a struct is bytes). A constant `[N x i8] c"..."` string becomes a
+  `(data ...)` node. Debug metadata on a global (`, !dbg !5`) is ignored.
+- Instructions: `alloca` (in the entry block a slot of the frame, which the wasm emitter's ASan mode checks; after it, a
+  dynamic `alloca`), `load`, `store` (with `volatile`), integer `add sub mul sdiv srem udiv urem shl lshr ashr and or
+  xor` (`and`, `or`, `xor` also on `i1`; `udiv` and `urem` are checked unsigned operations, which the wasm emitter takes
+  and the QBE emitter refuses), `fadd fsub fmul fdiv fneg`, `icmp` (all ten predicates; pointers compare as unsigned
+  longs), `fcmp` (all sixteen: `ord` is neither operand NaN, `one` ordered and unequal, each `u*` the negation of the
+  opposite ordered predicate), `sext zext trunc sitofp fptosi fpext fptrunc ptrtoint inttoptr` (`trunc` to `i1` takes
+  the low bit, `sext` from `i1` gives 0 or -1), `bitcast` of a pointer or between a float and an integer of its size,
+  `getelementptr` (any number of indices into arrays and structs), `call` (direct and through a pointer, with
+  `(variadic N)` for `...`), `select`, `phi`, `br`, `switch`, `ret`, `unreachable`, `freeze` (the value itself), and
+  `extractvalue` and `insertvalue` (above).
+- Intrinsics: `llvm.memcpy` and `llvm.memmove` (a `copy`, which has memmove's semantics) and `llvm.memset` of zero (a
+  `zero-fill`), with a constant length or a run-time one (an `unsigned_long` register); `llvm.memset` of another byte
+  and a constant length of at most 512 (stores of the byte repeated in a long); `llvm.fmuladd`, `llvm.smax`, `smin`,
+  `umax`, `umin`, `llvm.abs`, `llvm.usub.sat`, `uadd.sat`, `llvm.ctlz`, `cttz` (a binary search over halves),
+  `llvm.fshl`, `fshr`, `llvm.trap`, and `llvm.{s,u}{add,sub,mul}.with.overflow` (rustc's overflow checks: the
+  `{ iN, i1 }` result is two registers, the wrapped value and the flag, which `extractvalue` reads). Hints are dropped:
+  `llvm.lifetime.*`, `llvm.assume`, `llvm.experimental.noalias.scope.decl`, `llvm.dbg.*`, and `llvm.stacksave` and
+  `stackrestore` (the dynamic allocas after a stacksave are released at the return instead).
+- Calls and definitions may carry attributes (`noundef`, `noalias`, `range(i32 0, 10)`, `align 8`, ...) and the calling
+  conventions `fastcc` and `ccc`, which mean nothing within one module; a `byval` or `sret` argument is refused.
+- Names: quoted global and block names (`@"(*strings.Builder).String"`, `%"f[[]int].exit"`) may hold spaces and
+  parentheses. Debug records (`#dbg_value`, LLVM 19) are skipped.
+- Block order: the blocks are written in reverse post-order from the entry (unreachable ones last), so each register
+  is declared before its uses in the text, as the QBE emitter needs; LLVM's own order does not promise it (rustc's
+  `-Os` puts a returning block before the block that computes its value).
+
+`--wasm` (the wasm explorer's Rust and Go): the IR is for a WebAssembly module, which runs on one thread and has no
+operating system. The atomic operations (`load atomic`, `store atomic`, `cmpxchg`, `atomicrmw`, `fence`) become plain
+loads and stores (`cmpxchg` gives the `{ T, i1 }` pair). An x86-64 `syscall` in inline assembly becomes a call of the
+import `__syscall(nr, a1 .. a6)`, which the host answers. TinyGo's `setjmp` for `defer` (its inline `leaq 1f(%rip)`)
+is 0, its first return: with `-panic=trap` nothing jumps back to it. A global `environ` that the module only declares
+gets storage, an empty environment. Without `--wasm`, all of these are refused: a native program may have threads and
+its own system calls.
 
 ## Refused, and why
 
 These are gaps, not design decisions. Each is a `refused:` line, so a program that uses one is never miscompiled silently.
 
-- **Structs** (`%struct.*`, literal `{ ... }` types, and GEPs into them): the struct layout is not in the `.ll`
-  text; the IR's `(offset ...)` needs the field offsets. The next big step.
+- **Aggregates across a module boundary**: an argument or result of struct or array type in a call of a function this
+  module does not define (its convention is the target's ABI, which the `.ll` does not spell out).
 - **`x86_fp80`** (`long double`), `half`, `fp128`, `i128`: the emitter has `long double` (`pathb-longdouble.md`), but the
   translator does not yet map `x86_fp80`.
-- **Variable-length arrays** (`llvm.stacksave`, `llvm.stackrestore`, `alloca` with a count): the emitter has
-  `vlaalloc`; the translator does not yet map them.
-- **`udiv`, `urem`**: the emitter refuses checked unsigned operations, so there is no checked form to map to yet.
-- **`llvm.va_start`/`va_end`, `llvm.fabs`, `llvm.is.fpclass`, `llvm.ptrmask`**, other intrinsics.
-- **Exceptions** (`invoke`, `landingpad`), inline asm, vector types, atomics, `select` on vectors, `freeze`,
-  `extractvalue`/`insertvalue`: not in the subset.
+- **Variable-length arrays** (`alloca` with a count): the emitter has `vlaalloc`; the translator does not yet map them.
+- **`llvm.va_start`/`va_end`, `llvm.fabs`, `llvm.is.fpclass`, `llvm.ptrmask`**, other intrinsics, and `fptoui`.
+- **Exceptions** (`invoke`, `landingpad`, `resume`: rustc's `-O0` code keeps them even with `panic=abort`), other inline
+  assembly, vector types, `select` on vectors; atomics and `syscall` without `--wasm`.
 - **Metadata** (`!dbg`, `!llvm.loop`) is ignored, which is correct: it does not change what the code does.
 
 ## Measured coverage
 
-On the repository's own C files (the first 60 `.c` files outside `tests/macos*` and `tests/upstream`, compiled by
-`clang-18 -O0 -S -emit-llvm`; 6 do not compile for x86-64 at all: Hexagon assembly fixtures and deliberately malformed
-`tests/mruby/strip-atomic` inputs): 20 translate and 34 are refused, for the reasons above (the most frequent: structs 14,
-`x86_fp80` 7, stack save 5). **The 20 that translate are not run**:
+On the repository's own C files (the first 60 `.c` files of `git ls-files` outside `tests/macos*` and `tests/upstream`,
+compiled by `clang-18 -O0 -S -emit-llvm`): 19 translate, 29 are refused and 12 do not compile for x86-64. The most
+frequent refusals are variable-length allocas (8), `half` (4), `x86_fp80` and `fp128` (3 each); structs are no longer
+among them. (An earlier run, on the list of that time, had 20 translated and 34 refused, 14 of them for structs.)
+**The ones that translate are not run**:
 only the programs in `tests/llvm-pathb/cases` are validated end to end. Running the rest needs their own main programs
 and libraries; that is the next validation step.
 
+Other front ends, beside `clang`: rustc (`--emit=llvm-ir -C opt-level=1`, a `#![no_std]` crate) and TinyGo (`tinygo
+build -o prog.ll`, with `--wasm`) are the wasm explorer's Rust and Go (`wasm-explorer.md`). Their example programs, and
+five more Rust programs (enums, slices, iterators, trait objects, function pointers, `-O1` and `-Os`, overflow checks on),
+were checked through both back ends: the QBE binaries exit with the wasm modules' results, modulo 256.
+
 ## Next steps
 
-1. Structs: layouts from the `%struct` definitions (fields at their offsets, with the same rules as the IR's
-   `(layout ...)`), then GEPs with a struct index as `(offset ...)`.
-2. `x86_fp80` through the emitter's long-double thunks (`pathb-longdouble.md`), `i128` through its existing lowering.
-3. Wire `tests/llvm-pathb/run.sh` into `.github/workflows/pathb.yml` (it needs `clang-18`).
-4. Validate the translated programs of a larger corpus, not only the cases.
+1. `x86_fp80` through the emitter's long-double thunks (`pathb-longdouble.md`), `i128` through its existing lowering.
+2. Wire `tests/llvm-pathb/run.sh` into `.github/workflows/pathb.yml` (it needs `clang-18`).
+3. Validate the translated programs of a larger corpus, not only the cases.

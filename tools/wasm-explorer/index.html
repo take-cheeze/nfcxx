@@ -100,7 +100,7 @@
 <body>
 <header>
   <h1>nfcxx wasm explorer</h1>
-  <span class="sub">C++, C, LLVM IR &rarr; mid-level IR &rarr; WebAssembly, run in this page</span>
+  <span class="sub">C++, C, Rust, Go, LLVM IR &rarr; mid-level IR &rarr; WebAssembly, run in this page</span>
   <span class="status" id="status">checking server&hellip;</span>
 </header>
 <p class="note" id="static-note" hidden>
@@ -143,7 +143,7 @@
       </div>
       <div class="card">
         <h2>Browser bindings</h2>
-        <table><thead><tr><th>import (module env)</th><th>C / C++ declaration</th><th>browser feature</th></tr></thead>
+        <table><thead><tr><th>import (module env)</th><th>C declaration</th><th>browser feature</th></tr></thead>
           <tbody id="bindings"></tbody></table>
         <p class="muted" style="margin:8px 0 0;font-size:12px">A string is read from the module's exported memory at the
           pointer given (LP64 pointers are 64-bit, so the page reads them as BigInt).</p>
@@ -200,14 +200,17 @@
   const WABT_URL = "https://cdn.jsdelivr.net/npm/wabt@1.0.37/index.js";
   const AUTO_DELAY = 700;   // ms after the last edit before an automatic compile (live server only)
 
-  // The source languages, as pipeline.cjs LANGUAGES names them: the standards the front end takes, the modes (LLVM IR
-  // and the IR text are LP64), and the editor's language. Monaco has C, C++ and Scheme (the IR is s-expressions);
-  // LLVM IR gets the small tokenizer in registerLlvm.
+  // The source languages, as pipeline.cjs LANGUAGES names them: the standards the front end takes (Rust's are its
+  // editions), the modes (the languages that go through LLVM IR, and the IR text, are LP64), and the editor's language.
+  // Monaco has C, C++, Rust, Go and Scheme (the IR is s-expressions); LLVM IR gets the small tokenizer in registerLlvm.
   const LANGUAGES = {
     "c++": { title: "C++", editor: "cpp", standards: ["c++17", "c++20", "c++23"],
       modes: ["lp64", "asan", "emscripten"] },
     c: { title: "C", editor: "c", standards: ["c89", "c99", "c11", "c17", "c23"],
       modes: ["lp64", "asan", "emscripten"] },
+    rust: { title: "Rust", editor: "rust", standards: ["2015", "2018", "2021", "2024"], modes: ["lp64", "asan"],
+      prefix: "edition " },
+    go: { title: "Go", editor: "go", standards: [], modes: ["lp64", "asan"] },
     llvm: { title: "LLVM IR", editor: "llvm", standards: [], modes: ["lp64", "asan"] },
     ir: { title: "nfcxx IR", editor: "scheme", standards: [], modes: ["lp64", "asan"] },
   };
@@ -347,12 +350,17 @@
     });
     const out = $("result");
     try {
-      const instance = new WebAssembly.Instance(state.current.module, B.importsFor(state.current.module, ctx));
+      const instance = new WebAssembly.Instance(state.current.module,
+        B.importsFor(state.current.module, ctx, state.current.bytes));
       memory = instance.exports.memory || null;
       out.textContent = String(instance.exports.main());
     } catch (e) {
-      out.textContent = (e instanceof WebAssembly.RuntimeError ? "trap: " : "") + String((e && e.message) || e);
-      out.classList.add("trap");
+      if (e instanceof B.Exit) {
+        out.textContent = `exit ${e.status}`;   // the exit binding (C's exit, Go's os.Exit) ended the run
+      } else {
+        out.textContent = (e instanceof WebAssembly.RuntimeError ? "trap: " : "") + String((e && e.message) || e);
+        out.classList.add("trap");
+      }
     } finally {
       ctx.flush();
       document.title = titleAtLoad;
@@ -638,7 +646,8 @@
     for (const value of ["", ...lang.standards]) {
       const o = document.createElement("option");
       o.value = value;
-      o.textContent = value ? "-std=" + value : lang.standards.length ? "default std" : "no standard";
+      o.textContent = value ? (lang.prefix || "-std=") + value
+        : lang.standards.length ? (lang.prefix ? "default edition" : "default std") : "no standard";
       std.appendChild(o);
     }
     std.value = lang.standards.includes(keepStd) ? keepStd : "";

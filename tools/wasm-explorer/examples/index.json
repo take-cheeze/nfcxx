@@ -45,6 +45,22 @@
     "expect": 111
   },
   {
+    "id": "rust-shapes",
+    "title": "Rust: enums, slices, iterators, extern \"C\" bindings",
+    "file": "rust-shapes.rs",
+    "language": "rust",
+    "expect": 119,
+    "output": "hello from rust\n24\n"
+  },
+  {
+    "id": "go-shapes",
+    "title": "Go: interfaces, slices, println, os.Exit",
+    "file": "go-shapes.go",
+    "language": "go",
+    "expect": "exit 132",
+    "output": "hello from go: 95 37\n"
+  },
+  {
     "id": "llvm-fib",
     "title": "LLVM IR: phi loop and recursion",
     "file": "llvm-fib.ll",
