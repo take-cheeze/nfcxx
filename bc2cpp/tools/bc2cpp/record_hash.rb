@@ -34,6 +34,11 @@ module RecordHash
     def consumer_tier
       ENV['BC2CPP_RECORD_HASH_TIER'] == 'trusted' ? :trusted : :strict
     end
+
+    # BC2CPP_RECORD_HASH_UPDATE=0 treats `update`/`merge!` as an escape again (the output before the update step).
+    def update_stores?
+      ENV['BC2CPP_RECORD_HASH_UPDATE'] != '0'
+    end
   end
 
   Slot = Struct.new(:name, :keys, :literals, :reads, :stores, keyword_init: true)
@@ -570,7 +575,9 @@ module RecordHash
         insn.ivar == @name ? state : escape("stored to @#{insn.ivar}")
       when 'SEND'
         return delete_step(irep, k, insn, state, lead) if insn.sym == 'delete' && state.include?(lead)
-        return update_step(irep, k, insn, state, lead) if UPDATE_SENDS.include?(insn.sym) && state.include?(lead)
+        if UPDATE_SENDS.include?(insn.sym) && state.include?(lead) && RecordHash.update_stores?
+          return update_step(irep, k, insn, state, lead)
+        end
 
         generic_step(insn, state, lead)
       else

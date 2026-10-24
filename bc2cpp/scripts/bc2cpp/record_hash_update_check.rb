@@ -87,6 +87,10 @@ suite.compile(source) do |ireps, _root, _directory|
   other_update = MethodDef.new(name: 'update', owner: 'RPG2k::Window', core: false)
   check.call('an update on an unrelated class is admitted',
              scan.call('ui', registry: { 'update' => [other_update] }).is_a?(RecordHash::Slot))
+
+  ENV['BC2CPP_RECORD_HASH_UPDATE'] = '0'
+  check.call('BC2CPP_RECORD_HASH_UPDATE=0 restores the escape', scan.call('ui').to_s.include?('operand of SEND'))
+  ENV.delete('BC2CPP_RECORD_HASH_UPDATE')
 end
 
 suite.finish!
