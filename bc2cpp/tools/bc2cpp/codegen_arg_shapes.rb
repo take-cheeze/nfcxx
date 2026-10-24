@@ -343,7 +343,8 @@ module ArgShapeCalls
     return true if live_calls == direct_calls
     return false unless direct_impls && block_arm_reach?
 
-    live_by_name = live.scan(/\b(\w+_impl)\(M\b/).flatten.tally
+    # cpp_name spells `!`/`?` as `$21`/`$3f`: `$` is part of the name (`Array_reject$21_impl`).
+    live_by_name = live.scan(/(?<![\w$])([\w$]+_impl)\(M\b/).flatten.tally
     live_by_name.sum { |_, count| count } == live_calls && live_by_name.all? { |name, count| count <= direct_impls[name] }
   end
 

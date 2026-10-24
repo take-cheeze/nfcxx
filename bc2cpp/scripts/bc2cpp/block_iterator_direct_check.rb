@@ -49,6 +49,7 @@ SRC = <<~'RUBY'
     def map_sq(a); a.map { |x| x * x }; end
     def sel(a); a.select { |x| x.even? }; end
     def rej(a); a.reject { |x| x.even? }; end
+    def rej_bang(a); a.reject! { |x| x.even? }; end
     def any_all(a); [a.any? { |x| x > 2 }, a.all? { |x| x > 0 }]; end
     def red(a); a.reduce(0) { |m, x| m + x }; end
     def red_break(a); a.reduce(0) { |m, x| break [:stop, m] if x > 2; m + x }; end
@@ -129,6 +130,9 @@ chars = code_of(code, 'chars')
 check.call('chars: an unproven each_char receiver gets an exact-String arm with the send as its else',
            chars.match?(/if \(mrb_string_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->string_class\) \{\n\s+r\d+ = String_each_char_impl\(M, .*\} else \{\n\s+r\d+ = #{ELSE_SEND}/m))
 check.call('str_lines: each_line gets the String arm', code_of(code, 'str_lines').include?('String_each_line_impl(M, '))
+# A `!`/`?` name is spelled with `$` in C++ (`Array_reject$21_impl`); the arm check must still count those calls.
+check.call('rej_bang: reject! calls the compiled Array body, no by-name send left',
+           code_of(code, 'rej_bang').include?('Array_reject$21_impl(M, ') && !code_of(code, 'rej_bang').include?(DYNAMIC))
 # IO#each_line is an alias in mruby-io's Ruby, never a registry definition: the owner call must still name IO.
 lines_owner = code_of(code, 'str_lines')[/BC2CPP_OWNERS\(([^)]*)\)[^;]*; \/\* CLOSED_WORLD owner-call: each_line/, 1]
 check.call('str_lines: an owner-call else lists IO, whose each_line is a core alias',
@@ -179,7 +183,7 @@ DRIVER = <<~'RUBY'
   coll = BiColl.new(1, 2, 3)
   arrays = [[1, 2, 3, 4], [], [5], [0, 1], (1..40).to_a, [1, 2, 3].freeze]
   arrays.each_with_index do |a, i|
-    %i[each_sum each_break each_next each_return map_sq sel rej any_all red red_break ewi eidx].each do |m|
+    %i[each_sum each_break each_next each_return map_sq sel rej rej_bang any_all red red_break ewi eidx].each do |m|
       show.call("#{m}/#{i}") { fx.send(m, a.frozen? ? a : a.dup) }
     end
   end
@@ -220,7 +224,7 @@ DRIVER = <<~'RUBY'
   show.call('lp_drain empty') { fx.lp_drain([]) }
   # Unproven receivers: a user Enumerable, a Range, a Hash where an Array was meant, nil, a String.
   [coll, 1..4, { k: 1 }, [9, 8]].each_with_index do |o, i|
-    %i[map_sq sel rej any_all red user_each ewi].each { |m| show.call("#{m}/u#{i}") { fx.send(m, o) } }
+    %i[map_sq sel rej rej_bang any_all red user_each ewi].each { |m| show.call("#{m}/u#{i}") { fx.send(m, o) } }
   end
   # A File's each_line is IO's core-Ruby alias; an Enumerator's each_with_index is its own core-Ruby method.
   File.open('bc2cpp_bi_lines.txt', 'w') { |f| f.write("p\nqq\n") }
