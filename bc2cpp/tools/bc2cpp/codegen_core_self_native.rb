@@ -72,14 +72,48 @@ module CoreSelfNative
     return nil if arms.nil? || arms.empty?
 
     args = argv.map { |arg| ", #{arg}" }.join
-    fallback = dynamic_dispatch_line_without_core_self(d, name, argv)
+    complete = core_self_native_arms_complete?(owner_def, arms)
+    fallback = if complete
+                 guard_violation_line(d, 'self', name, argv, 'core_self_native_arms')
+               else
+                 dynamic_dispatch_line_without_core_self(d, name, argv)
+               end
     branches = arms.map do |klass, definer|
       "if (mrb_obj_class(M, self) == #{owner_class_ptr_expr(klass)}) {\n" \
         "    r#{d} = bc2cpp_native_owner_named(M, self, \"#{name}\", #{owner_class_ptr_expr(definer)}, #{argv.size}#{args}); " \
         "/* CORE_SELF_NATIVE: #{klass}##{name} is #{definer}'s registration */\n  } else "
     end
+    other = complete ? 'no other class runs it' : 'or another class'
     "// CORE_SELF_NATIVE_ARMS :#{name} -- self of #{owner_def.owner}##{owner_def.name} is one of #{arms.keys.join(', ')} " \
-      "or another class\n  #{branches.join}{\n    #{fallback.chomp}\n  }\n"
+      "#{other}\n  #{branches.join}{\n    #{fallback.chomp}\n  }\n"
+  end
+
+  # CORE_SELF_NATIVE_ARMS_COMPLETE: the arms name every class whose instances can run the enclosing method. Over
+  # CallFacts' classes (every declared, core and native class, as core_self_native_refusal), each one whose lookup of
+  # the method reaches its owner first has an arm, so `self` matches one of them and the else is a closed-world
+  # violation (GUARD_VIOLATION), not a by-name send.
+  def core_self_native_arms_complete?(owner_def, arms)
+    return false unless guard_violation_enabled?
+
+    answers = core_self_call_facts
+    method_defs = core_self_with_hidden(answers, answers.all_definers(owner_def.name, instance: true), owner_def.name)
+    return false unless method_defs
+
+    own = answers.simple(owner_def.owner)
+    # A module's instance method also runs for a class object that extends it, and an Object/Kernel/Module/Class one
+    # for any class object: only an owner that is a class below that chain keeps class objects out of `self`.
+    return false unless CallFacts::CORE_SUPER.key?(own) && !CallFacts::EVERYTHING.include?(own) &&
+                        !CallFacts::CLASS_OR_MODULE.include?(own)
+
+    method_all = method_defs[:ruby] | method_defs[:native] | method_defs[:foreign]
+    answers.classes.all? do |klass|
+      next true if klass == CallFacts::CLASS_OBJECT # an instance of a class below Object is no class or module object
+
+      ancestors, unknown = answers.ancestors(klass)
+      next false if unknown
+
+      ancestors.find { |a| method_all.include?(a) } != own || arms.key?(klass)
+    end
   end
 
   # The line the arms fall back to: what this site would emit without CORE_SELF_NATIVE.
@@ -109,16 +143,21 @@ module CoreSelfNative
     return nil if !@native_name_sources.key?(name) || core_self_native_undef?(name)
 
     answers = core_self_call_facts
-    method_defs = answers.all_definers(owner_def.name, instance: true)
-    name_defs = answers.all_definers(name, instance: true)
-    return nil if method_defs.nil? || name_defs.nil? || method_defs[:singleton] || name_defs[:singleton]
+    method_defs = core_self_with_hidden(answers, answers.all_definers(owner_def.name, instance: true), owner_def.name)
+    name_defs = core_self_with_hidden(answers, answers.all_definers(name, instance: true), name)
+    return nil if method_defs.nil? || name_defs.nil?
 
+    # A singleton definer (`def self.clamp` on Game) sits on one object's singleton class. With no singleton class on
+    # any other object (exact_instances_singleton_free?), only a class or module object, or the main object (an
+    # Object), can have one; an arm for any other class tests an instance whose lookup starts at its class.
+    singleton = method_defs[:singleton] || name_defs[:singleton]
     own = answers.simple(owner_def.owner)
     method_all = method_defs[:ruby] | method_defs[:native] | method_defs[:foreign]
     name_all = name_defs[:ruby] | name_defs[:native] | name_defs[:foreign]
     targets = {}
     CallFacts::CORE_SUPER.each_key do |klass|
       next if klass == 'BasicObject'
+      next if singleton && (klass == 'Object' || CallFacts::CLASS_OR_MODULE.include?(klass))
 
       ancestors, unknown = answers.ancestors(klass)
       next if unknown || ancestors.find { |a| method_all.include?(a) } != own
@@ -150,7 +189,7 @@ module CoreSelfNative
     return :boot_class if ClosedWorld::BOOT_CLASSES.include?(owner)
 
     answers = core_self_call_facts
-    definers = answers.definers(name, instance: true)
+    definers = core_self_with_hidden(answers, answers.definers(name, instance: true), name)
     return :unbounded_name unless definers
 
     own = answers.simple(owner)
@@ -173,6 +212,25 @@ module CoreSelfNative
       return :"answered_first_by(#{klass}:#{first})" unless first == own
     end
     nil
+  end
+
+  # `defs` (a CallFacts definer set) with the core Ruby definitions of `name` the registry leaves out: a core
+  # definition whose name a native also registers is compiled but kept out of the registry (core_hidden_defs), so
+  # CallFacts cannot see it (Symbol#capitalize beside String's native capitalize). Each is one more Ruby definer.
+  def core_self_with_hidden(answers, defs, name)
+    return nil unless defs
+
+    hidden = (self.class.core_hidden_defs || []).select { |d| d.name == name }
+    return defs if hidden.empty?
+
+    ruby = defs[:ruby].dup
+    singleton = defs[:singleton]
+    hidden.each do |d|
+      next singleton = true if d.owner.end_with?('.singleton')
+
+      ruby << answers.simple(d.owner)
+    end
+    defs.merge(ruby: ruby, singleton: singleton)
   end
 
   # CallFacts over the program's world (a core body is compiled with no closed world of its own).
