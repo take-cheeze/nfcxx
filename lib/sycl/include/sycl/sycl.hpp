@@ -1572,7 +1572,16 @@ class device {
   info::device_type info_of(info::device::device_type *) const { return is_gpu() ? info::device_type::gpu : info::device_type::cpu; }
   size_t info_of(info::device::max_work_group_size *) const { return is_gpu() ? 256 : 1024; }
   unsigned info_of(info::device::max_work_item_dimensions *) const { return 3; }
-  unsigned info_of(info::device::max_compute_units *) const { return 1; }
+  // OpenCL and Level Zero: the device's count (the EUs of an Intel GPU, as DPC++ reports it; ggml-sycl divides it by 16
+  // for its Xe cores, so 1 would give it none). Elsewhere 1.
+  unsigned info_of(info::device::max_compute_units *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().compute_units();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().compute_units();
+#endif
+    return 1;
+  }
   unsigned long info_of(info::device::global_mem_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
   unsigned long info_of(info::device::global_mem_cache_size *) const { return 1ul << 20; }
   unsigned info_of(info::device::mem_base_addr_align *) const { return 1024; }
