@@ -1,6 +1,6 @@
 # nfcffi: calling C compiled at run time (`lib/ffi`)
 
-Status: **Milestones 1 to 3, experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
+Status: **Milestones 1 to 4 (structs by value), experimental.** A C source text is compiled with `nfcxx -shared` into a cached shared object and
 loaded; its functions, and the C library's, are called through C++ function types written at the call site. The
 design is DragonFFI's idea (a C library called from a host at run time, without writing bindings by hand), without
 its header parser and without libffi.
@@ -94,27 +94,34 @@ lib.callable("vec_add");   // false: a struct by value
 
 - **Kinds.** The front end writes a `kinds` record per function (`be/nfcxx_decl.c`, `nf_kind`): one letter for the
   return type and one per parameter. `i` signed integer, `u` unsigned integer (`bool` too), `f` float or double, `p`
-  pointer or array, `v` void, `x` anything else. `Declaration::return_kind` and `param_kinds` carry them.
+  pointer or array, `v` void, `s` struct or union, `x` anything else. `Declaration::return_kind` and `param_kinds` carry
+  them.
 - **Wrappers.** `void nfcffi_call_NAME(void **a, void *r)` converts each argument from `a[i]` (a `long long`, an
   `unsigned long long`, a `double` or a `void *`, by kind) to the declared parameter type in the cast, calls `NAME` and
   stores the result by kind. The types are spelled by the declarations' abstract types, so the header is what
   defines them: the wrapper is compiled with it.
 - **Conversions.** Signed and unsigned integers convert to each other, and integers convert to `float`/`double`. A
   pointer parameter takes a pointer or the integer 0. Any other kind is an `Error` that names the argument.
-- **Not callable** (listed by `declarations`, `callable` is false): a struct, union or enum-by-value part that is not an
-  integer, `long double`, 128-bit integers, variadic functions, and overload sets. Calling them throws `Error`.
-- **Value.** `Value::of_signed`, `of_unsigned`, `of_float`, `of_pointer`; the accessors throw `Error` on another kind.
+- **Structs and unions by value** travel as bytes. Each wrapper casts its argument with `*(T *)a[i]` and stores a struct
+  result with `*(T *)r = ...`, so the C compiler applies the ABI. A layout function, `nfcffi_layout_NAME`, reports
+  `sizeof` for each struct position; `Library::call` checks the size of each struct argument against it and allocates
+  the result buffer. The host's struct must have the C layout (a C++ struct with the same members, in the same order).
+- **Not callable** (listed by `declarations`, `callable` is false): `long double`, 128-bit integers, variadic functions,
+  and overload sets. Calling them throws `Error`.
+- **Value.** `Value::of_signed`, `of_unsigned`, `of_float`, `of_pointer`, `of_bytes(p, n)`; the accessors throw `Error`
+  on another kind.
 - **Tests.** `tests/ffi/host.cpp` `check_library`: the callable/not-callable split on `dyn.h` (structs, a variadic
   function), integer and floating conversions, a pointer argument, a host callback through a pointer, arity and kind
-  errors, and `strlen` from `<string.h>` loaded with a filter. 68 checks on both backends.
+  errors, `strlen` from `<string.h>` loaded with a filter, and structs by value (`vec_add`, `big_make`, in and out, with a
+  size and a kind error). 73 checks on both backends.
 - **Limits.** The whole header goes into one translation unit, so one wrapper that does not compile fails the load:
   use `only` for the functions you need. A function declared in the header but defined nowhere fails the `dlopen`
   (`RTLD_NOW`), so every referenced function must be defined by the header's libraries or by `source`.
 
-## Not yet (Milestone 4)
+## Not yet
 
 - **Variadic functions** (`printf`) cannot be called by name: the wrapper cannot pass a runtime number of arguments.
-- **Structs by value and in results** need their layout as C passes them; the kinds stop at scalars.
+  A call would need a wrapper per sequence of argument kinds, compiled on demand.
 - **ABI.** The checks above cover the SysV x86-64 cases the tests use. Other targets are not covered.
 - **Host and module compiler.** The module must be built by the same nfcxx backend as the host for C++ types to match;
   the test runs both with the same backend.
@@ -124,5 +131,6 @@ lib.callable("vec_add");   // false: a struct by value
 1. (done) The C++ API over the compile and cache path, with the tests above.
 2. (done) Declarations from headers: typed `sig` records, `Ffi::declarations`, C and C++ dialects.
 3. (done) Calls by name: kinds per declaration, wrappers compiled with the header, `Library::call` with `Value`s.
-4. A Python binding through `nfcpoly`, which already runs Python from C++ (`docs/notes/poly.md`). Structs by value and
-   variadic calls remain open.
+4. (done) Structs and unions by value, as bytes with the C layout.
+5. Variadic calls (a wrapper per argument-kind sequence, compiled on demand).
+6. A Python binding through `nfcpoly`, which already runs Python from C++ (`docs/notes/poly.md`).

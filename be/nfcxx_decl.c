@@ -17,7 +17,8 @@ A function declaration is followed by one signature record for it (nfcxx-ffi, li
 ID is the function's record id, RETURN the spelling of its return type, VARIADIC 1 for a trailing "...", and each
 PARAM the spelling of a parameter type with "@" where its name goes ("int @", "int (*@)(const void *, const void *)").
 A kinds record follows it (lib/ffi calls functions by kind): kinds <TAB> ID <TAB> RETURN-KIND <TAB> PARAM-KINDS, one
-letter per parameter ("ifp"): i signed, u unsigned, f float or double, p pointer or array, v void, x other.
+letter per parameter ("ifp"): i signed, u unsigned, f float or double, p pointer or array, v void, s struct or union,
+x other.
 Spellings are C declarations. A function with a type that has no spelling (an anonymous struct, a C++ reference)
 gets no sig record. PARENT is 0 for a declaration at file scope. KIND is one of: namespace, struct, class, union, enum,
 enumerator, typedef, function, method, constructor, destructor, var, field, param, function_template,
@@ -255,7 +256,8 @@ static int nf_spell(a_type_ptr t, const char *inner, char *out, size_t cap)
 }
 
 /* How a value of type T crosses a call made by lib/ffi (kinds records): 'i' signed integer, 'u' unsigned integer
-   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 'x' anything else. */
+   (bool included), 'f' float or double, 'p' pointer or array (a parameter), 'v' void, 's' struct or union (by value),
+   'x' anything else. */
 static char nf_kind(a_type_ptr t)
 {
   t = skip_typerefs(t);
@@ -271,6 +273,10 @@ static char nf_kind(a_type_ptr t)
       return t->variant.pointer.is_reference || t->variant.pointer.is_rvalue_reference ? 'x' : 'p';
     case tk_array:
       return 'p';
+    case tk_class:
+    case tk_struct:
+    case tk_union:
+      return 's';
     default:
       return 'x';
   }

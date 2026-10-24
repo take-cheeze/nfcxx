@@ -203,7 +203,7 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
 
   CHECK(lib.callable("add_int") && lib.callable("scale") && lib.callable("halve") && lib.callable("mixed"));
   CHECK(lib.callable("count_bytes") && lib.callable("call_back"));
-  CHECK(!lib.callable("vec_add") && !lib.callable("big_make"));  // structs by value
+  CHECK(lib.callable("vec_add") && lib.callable("big_make"));    // structs by value
   CHECK(!lib.callable("sum_all"));                                // variadic
   CHECK(lib.declarations().size() == 9);                          // every function is listed
 
@@ -214,6 +214,18 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
   CHECK(lib.call("halve", {Value::of_float(3.0)}).as_float() == 1.5);
   CHECK(lib.call("mixed", {Value::of_float(0.5), Value::of_signed(2), Value::of_float(0.25), Value::of_signed(1)})
             .as_float() == 3.75);
+  // Structs by value: the bytes of a host struct with the C layout, in and out.
+  Vec2 p{1, 2}, q{3, 4};
+  Value vsum = lib.call("vec_add", {Value::of_bytes(&p, sizeof p), Value::of_bytes(&q, sizeof q)});
+  CHECK(vsum.kind() == Value::Kind::Bytes && vsum.as_bytes().size() == sizeof(Vec2));
+  Vec2 vout{};
+  std::memcpy(&vout, vsum.as_bytes().data(), sizeof vout);
+  CHECK(vout.x == 4 && vout.y == 6);
+  Value big = lib.call("big_make", {Value::of_signed(7)});
+  Big bout{};
+  std::memcpy(&bout, big.as_bytes().data(), sizeof bout);
+  CHECK(big.as_bytes().size() == sizeof(Big) && bout.a == 7 && bout.b == 14 && bout.c == 21);
+
   CHECK(lib.call("count_bytes", {Value::of_pointer("hello")}).as_unsigned() == 5);
   CHECK(lib.call("call_back", {Value::of_pointer(reinterpret_cast<const void*>(&twice_fn)), Value::of_signed(21)})
             .as_signed() == 42);  // the C code calls a host function through a pointer
@@ -228,6 +240,8 @@ void check_library(const nfcffi::Ffi& ffi, const std::string& dir) {
     return false;
   };
   CHECK(throws([&] { lib.call("vec_add", {}); }));
+  CHECK(throws([&] { lib.call("vec_add", {Value::of_bytes(&p, 8), Value::of_bytes(&q, sizeof q)}); }));  // size
+  CHECK(throws([&] { lib.call("vec_add", {Value::of_signed(1), Value::of_bytes(&q, sizeof q)}); }));     // kind
   CHECK(throws([&] { lib.call("add_int", {Value::of_signed(1)}); }));
   CHECK(throws([&] { lib.call("add_int", {Value::of_pointer(nullptr), Value::of_signed(1)}); }));
   CHECK(throws([&] { lib.call("halve", {Value::of_pointer("x")}); }));
