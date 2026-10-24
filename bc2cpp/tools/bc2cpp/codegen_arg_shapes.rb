@@ -260,8 +260,9 @@ module ArgShapeCalls
   # site: it must not inherit this one's block.
   def with_fresh_method_state
     saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region,
-             @call_block_direct_impls]
+             @call_block_direct_impls, @call_block_stack_expr]
     @call_block_expr = nil
+    @call_block_stack_expr = nil
     reset_call_block_counts
     @extended_callee_shapes = false
     @no_by_name_mono = false
@@ -269,7 +270,7 @@ module ArgShapeCalls
     super
   ensure
     @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region,
-      @call_block_direct_impls = saved if saved
+      @call_block_direct_impls, @call_block_stack_expr = saved if saved
   end
 
   # ARG_SHAPES_BLOCK: the SENDB `region` (a literal block already built into
@@ -279,8 +280,12 @@ module ArgShapeCalls
   # went through direct_call_args (so carries the block) and no block-less
   # dynamic call remains.
   # `inline_offset` is the register shift of a block nested in an inlined loop body.
-  def compile_direct_block_send(region, block_expr, owner_def, inline_offset: nil)
-    with_private_poly_diag_cache { compile_direct_block_send_body(region, block_expr, owner_def, inline_offset) }
+  # STACK_BLOCK: `stack_expr` is the same block as a frame-local RProc, which arms whose callee
+  # only calls its block take instead of `block_expr` (see stack_block_args).
+  def compile_direct_block_send(region, block_expr, owner_def, inline_offset: nil, stack_expr: nil)
+    with_private_poly_diag_cache do
+      compile_direct_block_send_body(region, block_expr, owner_def, inline_offset, stack_expr)
+    end
   end
 
   # An attempt that is dropped must not leave its diagnostic reasons behind: a
@@ -294,7 +299,7 @@ module ArgShapeCalls
     @poly_diagnostic_reason_cache = saved
   end
 
-  def compile_direct_block_send_body(region, block_expr, owner_def, inline_offset = nil)
+  def compile_direct_block_send_body(region, block_expr, owner_def, inline_offset = nil, stack_expr = nil)
     irep = region[:parent_irep]
     return nil unless irep && owner_def
 
@@ -304,8 +309,10 @@ module ArgShapeCalls
     offset = inline_offset || 0
     insn = Insn.synthetic(region[:self_implicit] ? 'SSEND' : 'SEND',
                           "R#{region[:dest_reg].to_i + offset} :#{region[:name]} n=#{region[:n]}")
-    saved = [@call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls]
+    saved = [@call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls,
+             @call_block_stack_expr]
     @call_block_expr = block_expr
+    @call_block_stack_expr = stack_expr
     reset_call_block_counts
     @call_block_region = region
     begin
@@ -314,7 +321,8 @@ module ArgShapeCalls
       code = compile_send(insn, self_implicit: region[:self_implicit], irep: irep, owner_def: owner_def, **sites)
       accepted = direct_block_code?(code, @call_block_direct_calls, @call_block_direct_impls)
     ensure
-      @call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls = saved
+      @call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls,
+        @call_block_stack_expr = saved
     end
     accepted ? code : nil
   end
@@ -343,7 +351,8 @@ module ArgShapeCalls
     return true if live_calls == direct_calls
     return false unless direct_impls && block_arm_reach?
 
-    live_by_name = live.scan(/\b(\w+_impl)\(M\b/).flatten.tally
+    # cpp_name spells `!`/`?` as `$21`/`$3f`: `$` is part of the name (`Array_reject$21_impl`).
+    live_by_name = live.scan(/(?<![\w$])([\w$]+_impl)\(M\b/).flatten.tally
     live_by_name.sum { |_, count| count } == live_calls && live_by_name.all? { |name, count| count <= direct_impls[name] }
   end
 

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'native_core_direct'
+require_relative 'core_hierarchy_sigs'
 
 # NATIVE_CORE_DIRECT: exact builtin-class arms that call a core
 # native's frame-independent body (NativeCoreDirect::ENTRIES) in front of a
@@ -73,15 +74,18 @@ module NativeCoreDirectFallback
   end
 
   # Verified entries for `name` at this arity whose owner nothing in the closed
-  # world can shadow. Closed world only: outside Ruby is otherwise unknown.
+  # world can shadow. Closed world only: outside Ruby is otherwise unknown. A core body
+  # compiles with the closed world withheld, but these are program-wide facts, so it
+  # asks the same world (block_core_world), as NATIVE_CORE_DIRECT_REST does.
   def native_core_entries(name, arity)
-    return [] unless @closed_world && @native_name_sources
+    world = block_core_world
+    return [] unless world && @native_name_sources
 
     @native_core_entries ||= {}
     @native_core_entries.fetch([name, arity]) do
       @native_core_entries[[name, arity]] =
         NativeCoreDirect::ENTRIES.select do |entry|
-          entry.name == name && entry.arity == arity && native_core_entry_safe?(entry)
+          entry.name == name && entry.arity == arity && native_core_entry_safe?(entry, world)
         end
     end
   end
@@ -106,23 +110,61 @@ module NativeCoreDirectFallback
   # receiver can lack Kernel (ClosedWorld#kernel_native_dispatch_safe?). Core bodies
   # get it too: these are program-wide facts, not the static-binding proofs a core
   # body is denied (block_core_world).
-  def kernel_direct_code(name, d, recv, argv)
-    entry = !devirt_blocked_name?(name) && kernel_direct_entry(name, argv.size)
+  def kernel_direct_code(name, d, recv, argv, self_implicit = true)
+    entry = !devirt_blocked_name?(name) && kernel_direct_entry(name, argv.size, self_implicit)
     return nil unless entry
 
-    "  // KERNEL_DIRECT :#{name} -- implicit-self #{entry.owner}##{name} is the only definition; " \
-      "the audited native body runs with no dispatch\n" \
-      "  r#{d} = #{entry.call(recv, argv)};\n"
+    note = "  // KERNEL_DIRECT :#{name} -- #{self_implicit ? 'implicit-self' : 'explicit-receiver'} #{entry.owner}##{name} is the only definition; " \
+           "the audited native body runs with no dispatch\n"
+    call = "r#{d} = #{entry.call(recv, argv)};\n"
+    guards = []
+    # An explicit receiver may be a bare BasicObject (basic_object_subclass_free? rules out subclasses only), which
+    # lacks Kernel.
+    if !self_implicit && entry.owner != 'BasicObject' && !kernel_receiver_sealed?
+      guards << "mrb_obj_is_kind_of(M, #{recv}, M->kernel_module)"
+    end
+    arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
+    guards << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard
+    return "#{note}  #{call}" if guards.empty?
+
+    # A receiver or argument the guards reject keeps the send, so the method's own error is unchanged.
+    "#{note}  if (#{guards.join(' && ')}) {\n    #{call}  } else {\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
   end
 
-  def kernel_direct_entry(name, arity)
+  # BASIC_OBJECT_SEALED: the Kernel guard of an explicit-receiver row is dead when no bare BasicObject can exist
+  # (ClosedWorld#basic_object_instance_free?) and no native can make one: a native source may name the class only to
+  # define it (mruby's class.c) or to register methods on it.
+  NATIVE_BASIC_OBJECT_USE = /MRB_MT_INIT_ROM|mrb_define_(?:class|const|method|module_function)\w*\(/
+
+  def kernel_receiver_sealed?
+    return @kernel_receiver_sealed if defined?(@kernel_receiver_sealed)
+
+    @kernel_receiver_sealed = !!(@closed_world&.basic_object_instance_free? && @native_name_sources &&
+                                 native_basic_object_registration_only?)
+  end
+
+  def native_basic_object_registration_only?
+    @native_name_sources.values.flatten.uniq.all? do |path|
+      next true if path.end_with?('/src/class.c')
+
+      File.foreach(path, encoding: 'BINARY').all? do |line|
+        !line.include?('BasicObject') || line.match?(NATIVE_BASIC_OBJECT_USE) || line.lstrip.start_with?('//', '/*', '*')
+      end
+    end
+  end
+
+  # An explicit receiver needs a row marked explicit_receiver, and a public one: a private native is a NoMethodError there.
+  def kernel_direct_entry(name, arity, self_implicit = true)
     return nil unless block_core_world && @native_name_sources
 
     @kernel_direct_entries ||= {}
-    @kernel_direct_entries.fetch([name, arity]) do
-      @kernel_direct_entries[[name, arity]] =
-        NativeCoreDirect::KERNEL_ENTRIES.find do |entry|
-          entry.name == name && entry.arity == arity && kernel_direct_entry_safe?(entry)
+    @kernel_direct_entries.fetch([name, arity, self_implicit]) do
+      @kernel_direct_entries[[name, arity, self_implicit]] =
+        (NativeCoreDirect::KERNEL_ENTRIES + NativeCoreDirect::KERNEL_ANY_RECEIVER_ENTRIES).find do |entry|
+          next false unless entry.name == name && entry.arity == arity
+          next false unless self_implicit || (entry.explicit_receiver && !entry.aspec.include?('MRB_MT_PRIVATE'))
+
+          kernel_direct_entry_safe?(entry)
         end
     end
   end
@@ -166,6 +208,80 @@ module NativeCoreDirectFallback
       "  }\n"
   end
 
+  # FLOW_NATIVE_CORE_EXACT: FLOW_CORE_DIRECT's audited native, for a name the compiled core does not define (a C body,
+  # such as Array#delete). The guard chain it replaces lists only project classes, none of which an exact core receiver
+  # can be, so its arms are dead and its else is the by-name send.
+  def flow_native_core_exact_line(d, recv, name, argv)
+    return nil if devirt_blocked_name?(name)
+
+    exact = native_core_exact_entry(native_core_entries(name, argv.size), recv, name, argv)
+    return exact_code_line(d, recv, argv, exact) if exact
+
+    site = exact_core_site_for(recv, name)
+    inherited = site && inherited_core_entry(site[:klass], name, argv.size)
+    inherited && inherited_code_line(d, recv, name, argv, inherited, site[:klass])
+  end
+
+  # INHERITED_CORE_DIRECT: the audited Kernel/BasicObject native an exact `klass` receiver reaches for `name`, or nil.
+  # Lookup walks the class, its mixins, then its superclasses (CoreHierarchySigs.ancestors), so the native answers only
+  # when nothing earlier in that walk defines the name: no native registration, no compiled or outside Ruby definition,
+  # no prepend or project mixin that defines it, and no runtime installer of the name.
+  def inherited_core_entry(klass, name, arity)
+    @inherited_core_entries ||= {}
+    key = [klass, name, arity]
+    return @inherited_core_entries[key] if @inherited_core_entries.key?(key)
+
+    @inherited_core_entries[key] = inherited_core_entry_uncached(klass, name, arity)
+  end
+
+  def inherited_core_entry_uncached(klass, name, arity)
+    world = block_core_world
+    return nil unless world && @native_name_sources && !devirt_blocked_name?(name)
+
+    entry = NativeCoreDirect::INHERITED_ENTRIES.find { |e| e.name == name && e.arity == arity }
+    return nil unless entry && CoreHierarchySigs.declared_class?(klass)
+
+    paths = @native_name_sources.values.flatten.uniq
+    return nil unless NativeCoreDirect.verified?(paths, entry)
+
+    installed = symbol_installed_names
+    return nil if installed.nil? || installed.include?(name)
+
+    chain = CoreHierarchySigs.ancestors(klass)
+    at = chain.index(entry.owner)
+    return nil unless at
+
+    lookup = chain[0..at]
+    registrations, opaque = NativeExpressionDevirt.class_registrations(paths)
+    # An unattributed registration of the name could be on any class in the walk.
+    return nil unless opaque.fetch(name, []).empty?
+
+    natives = registrations.fetch(name, []).map { |g| g[:owner] && g[:owner][:class_name] }
+    return nil if natives.any? { |owner| owner.nil? || (lookup.include?(owner) && owner != entry.owner) }
+
+    defs = @registry[name] || []
+    mixins = lookup.flat_map { |a| Array(@included_modules[a]) + Array(@prepended_modules[a]) } - chain
+    return nil if defs.any? { |definition| lookup.include?(definition.owner) || mixins.include?(definition.owner) }
+    return nil if mixins.any? { |mod| !Array(@included_modules[mod]).empty? || !Array(@prepended_modules[mod]).empty? }
+    return nil if lookup.any? { |a| !Array(@prepended_modules[a]).empty? || @unknown_mixins.include?(a) }
+    return nil unless lookup.all? { |a| world.core_native_arm_safe?(name, a) }
+
+    entry
+  end
+
+  def inherited_code_line(d, recv, name, argv, entry, klass)
+    note = "// INHERITED_CORE_DIRECT :#{name} -- exact #{klass} receiver reaches #{entry.owner}##{name} first in its " \
+           "lookup; verified core body, no dispatch\n"
+    arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
+    return "#{note}  r#{d} = #{entry.call(recv, argv)};\n" unless arg_guard
+
+    "#{note}  if (#{format(arg_guard, a: argv.first, b: argv[1])}) {\n" \
+      "    r#{d} = #{entry.call(recv, argv)};\n" \
+      "  } else {\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv).chomp}\n" \
+      "  }\n"
+  end
+
   # EXACT_CORE_RECEIVER: the entry whose owner the receiver provably is, when its
   # argument guard is proven too; the send is then dead code.
   def native_core_exact_entry(entries, recv, name, argv)
@@ -181,7 +297,8 @@ module NativeCoreDirectFallback
     case entry.arg
     when :none then true
     when :nil_or_string then %w[NilClass String].include?(site[:arg_class].call(0))
-    when :integer then false
+    when :array then site[:arg_class].call(0) == 'Array'
+    when :integer, :two_integers then false
     end
   end
 
@@ -190,7 +307,7 @@ module NativeCoreDirectFallback
     return entry.guard(recv, argv) unless site && entry.owner == site[:klass]
 
     arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
-    arg_guard ? format(arg_guard, a: argv.first) : 'true'
+    arg_guard ? format(arg_guard, a: argv.first, b: argv[1]) : 'true'
   end
 
   def exact_code_line(d, recv, argv, entry)

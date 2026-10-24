@@ -26,6 +26,11 @@ module BlockSelf
                        'GE' => 2, 'GETIDX' => 2, 'SETIDX' => 3, 'ADDI' => 1, 'SUBI' => 1, 'ADDILV' => 1,
                        'SUBILV' => 1 }.freeze
 
+  # Operators whose read set the operand count fixes (vm.c): ARRAY a b reads R(a)..R(a+b-1), ARRAY2 a b c reads
+  # R(b)..R(b+c-1), ARYPUSH a b reads R(a)..R(a+b), HASH a b reads R(a)..R(a+2b-1), HASHADD a b reads R(a)..R(a+2b),
+  # and ARYCAT/HASHCAT/STRCAT a read R(a) and R(a+1), ARYSPLAT a only R(a).
+  COUNTED_WINDOW_OPS = %w[ARRAY ARYPUSH HASH HASHADD ARYCAT HASHCAT STRCAT ARYSPLAT].freeze
+
   module_function
 
   # nil when the Ruby method body +irep+ (and its nested blocks, from +ireps+) only calls its block, else why not.
@@ -98,16 +103,52 @@ module BlockSelf
     end
   end
 
+  # The registers after R(a) a send reads (vm.c OP_SEND): its positional arguments, one Array for a splat; its
+  # keywords, a key and a value each or one Hash for `**`; and the block of a B-suffixed send.
+  def send_window(insn)
+    op = insn.op
+    block = BytecodeIR::Ops::B_SUFFIX_OPS.include?(op) ? 1 : 0
+    return block if BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(op)
+
+    spec = insn.argc_operand or return nil
+    n, nk, plain = spec
+    positional = n.nil? ? 1 : n
+    keywords = if plain then 0
+               elsif nk.nil? then 1
+               else 2 * nk
+               end
+    positional + keywords + block
+  end
+
+  # The registers a COUNTED_WINDOW_OPS operator reads, or nil when its operands do not parse.
+  def counted_window(insn)
+    a = insn.reg&.to_i or return nil
+    count = insn.typed.find { |operand| operand.kind == :int }&.value
+    case insn.op
+    when 'ARRAY'
+      regs = insn.regs
+      return nil unless count
+
+      # ARRAY2 prints as ARRAY with its source register in front of the count.
+      from = regs.size > 1 ? regs[1].to_i : a
+      (from...(from + count)).to_a
+    when 'ARYPUSH' then count && (a..(a + count)).to_a
+    when 'HASH' then count && (a...(a + (2 * count))).to_a
+    when 'HASHADD' then count && (a..(a + (2 * count))).to_a
+    when 'ARYSPLAT' then [a]
+    else [a, a + 1]
+    end
+  end
+
   # [[register, :receiver | :argument], ...] the instruction reads, or nil when its read set is not modelled.
   def reads_of(irep, insn)
     op = insn.op
     regs = insn.regs
     if BytecodeIR::Ops::SEND.include?(op)
-      no_args = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(op)
-      return nil unless insn.reg && (no_args || insn.plain_fixed_argc?)
+      n = send_window(insn)
+      return nil unless insn.reg && n
 
       d = insn.reg.to_i
-      n = (no_args ? 0 : insn.argc.to_i) + (BytecodeIR::Ops::B_SUFFIX_OPS.include?(op) ? 1 : 0)
       args = (1..n).map { |k| [(d + k).to_s, :argument] }
       return BytecodeIR::Ops::SELF_SEND.include?(op) ? args : [[d.to_s, :receiver]] + args
     end
@@ -127,6 +168,11 @@ module BlockSelf
       return nil unless insn.reg
 
       FIXED_WINDOW_OPS[op].times.map { |k| [(insn.reg.to_i + k).to_s, :argument] }
+    when *COUNTED_WINDOW_OPS
+      window = counted_window(insn)
+      return nil unless window
+
+      window.map { |r| [r.to_s, :argument] }
     else
       # An operator window (ADD, ARRAY, HASH, STRCAT, ...) reads past its listed registers: every register from the
       # lowest listed one up to the frame's last.

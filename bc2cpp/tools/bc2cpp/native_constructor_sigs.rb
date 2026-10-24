@@ -5,6 +5,7 @@ require_relative 'native_direct'
 require_relative 'native_owner_map'
 require_relative 'native_core_result_sigs'
 require_relative 'ruby_parse_cache'
+require_relative 'scan_cache'
 
 # NativeConstructorSigs: the constructor overloads of sig/bc2cpp/declarations.rbs#rgss_constructors (OVERLOADED_CONSTRUCT),
 # each audited against the source of the initialize it describes.
@@ -348,10 +349,14 @@ module NativeConstructorSigs
   end
 
   # NativeDirect.class_variables of a stripped source. Both its inputs are the key: the text and the sibling owners.
+  # Across processes the key is the file and its siblings, which determine both (text is stripped(path)).
   def class_vars(path, text)
     owners = NativeDirect.sibling_param_owners(path)
     @class_vars ||= {}
-    @class_vars[[text, owners]] ||= NativeDirect.class_variables(text, owners)
+    @class_vars[[text, owners]] ||= ScanCache.fetch('native_constructor_sigs.class_variables',
+                                                    [path, *NativeDirect.sibling_sources(path)]) do
+      NativeDirect.class_variables(text, owners)
+    end
   end
 
   def lambda_body(text)

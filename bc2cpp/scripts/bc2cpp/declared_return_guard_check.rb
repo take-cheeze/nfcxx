@@ -154,6 +154,22 @@ poly_defs = defs + [MethodDef.new(name: 'count', owner: 'Baz', irep: 'L5')]
 poly = GuardHarness.new(poly_defs, ireps.merge('L5' => Irep.new(label: 'L5', instructions: [], reps: [])))
 check.call('a POLY name declared on one definition only adds no fact (every definition must carry the check)',
            poly.declared_return_refusal('count')&.first == 'info' && !poly.declared_return_facts(:fixnum).include?('count'))
+# A POLY name declared alike on every definition, first asked while a core body compiles (compile_method hides
+# @closed_world then and keeps the program's world in @core_program_world).
+World = Struct.new(:visible) do
+  def name_fully_visible?(_name) = visible
+end
+poly_ireps = ireps.merge('L5' => Irep.new(label: 'L5', instructions: [], reps: []))
+poly_entries = hints + [entry.call('Baz', 'count', 'L5', :fixnum, 'Integer', 'Integer')]
+in_core = GuardHarness.new(poly_defs, poly_ireps)
+in_core.instance_variable_set(:@declared_return_entries, poly_entries)
+in_core.instance_variable_set(:@core_program_world, World.new(true))
+check.call('a POLY name declared on every definition takes its fact from the program world inside a core compile',
+           in_core.declared_return_refusal('count').nil? && in_core.declared_return_facts(:fixnum).include?('count'))
+no_world = GuardHarness.new(poly_defs, poly_ireps)
+no_world.instance_variable_set(:@declared_return_entries, poly_entries)
+check.call('with no world at all the POLY name stays refused (info)',
+           no_world.declared_return_refusal('count')&.first == 'info')
 
 outside = GuardHarness.new(defs, ireps)
 outside.instance_variable_get(:@foreign_method_names) << 'count'

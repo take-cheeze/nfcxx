@@ -31,6 +31,7 @@ class CodeGen
     #endif
     // Whole bodies of Integer#% and Float#% (the pinned fork commit (mruby-expose-misc-bodies, docs/patch-fork-tracking.md), ADR 0367).
     extern "C" mrb_value mrb_int_mod_impl(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_str_mod_impl(mrb_state*, mrb_value, mrb_value);
     #ifndef MRB_NO_FLOAT
     extern "C" mrb_value mrb_flo_mod_impl(mrb_state*, mrb_value, mrb_value);
     #endif
@@ -50,6 +51,7 @@ class CodeGen
 
   NUMERIC_SLOW_ARITH = { 'add' => ['+', 'mrb_num_add'], 'sub' => ['-', 'mrb_num_sub'],
                          'mul' => ['*', 'mrb_num_mul'] }.freeze
+  NUMERIC_SLOW_TIME_IMPL = { 'add' => 'mrb_time_plus_impl', 'sub' => 'mrb_time_minus_impl' }.freeze
   NUMERIC_SLOW_CMP = { 'lt' => '<', 'le' => '<=', 'gt' => '>', 'ge' => '>=' }.freeze
   NUMERIC_SLOW_BITS = { 'and' => ['&', 'mrb_bint_and'], 'or' => ['|', 'mrb_bint_or'],
                         'xor' => ['^', 'mrb_bint_xor'] }.freeze
@@ -74,9 +76,9 @@ class CodeGen
   # which the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `- & | <<`
   # run bodies that mruby keeps static, which the pinned fork commit (mruby-expose-collection-op-bodies, docs/patch-fork-tracking.md) exports; they also need
   # numeric_slow_collection_ready?.
-  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String],
+  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String Time],
                           '*' => %w[Integer Float Array String], '^' => %w[Integer NilClass TrueClass FalseClass],
-                          '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array],
+                          '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array Time],
                           '&' => %w[Integer NilClass TrueClass FalseClass Array],
                           '|' => %w[Integer NilClass TrueClass FalseClass Array],
                           '<<' => %w[Integer Array String IO] }.freeze
@@ -91,10 +93,64 @@ class CodeGen
     answers = call_facts_answers
     definers = answers.definers(name)
     return false if definers.nil? || definers[:singleton]
-    return false unless %i[ruby foreign modules].all? { |kind| definers[kind].empty? }
+    return false unless %i[foreign modules].all? { |kind| definers[kind].empty? }
+
+    ruby = numeric_slow_ruby_owners(name, definers[:ruby])
+    return false unless ruby
 
     members = numeric_slow_members(answers, name)
-    !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, owners) }
+    !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, owners + ruby) }
+  end
+
+  # NUMERIC_SLOW_RUBY_ARM: operators whose closed form carries a direct-call arm per Ruby definer.
+  NUMERIC_SLOW_RUBY_ARM_OPS = %w[<<].freeze
+
+  # The Ruby definers of `name` as extra candidate owners: [] for none, nil when one has no arm.
+  def numeric_slow_ruby_owners(name, ruby)
+    return [] if ruby.empty?
+    return nil unless NUMERIC_SLOW_RUBY_ARM_OPS.include?(name)
+
+    arms = numeric_slow_ruby_arms(name)
+    return nil unless arms
+
+    # CallFacts answers name classes by their simple name, the registry by the full one.
+    simple = arms.map { |arm| arm[:owner].split('::').last }
+    simple.sort == ruby.to_a.map { |owner| owner.split('::').last }.sort ? simple : nil
+  end
+
+  # { owner:, impl:, args: } per Ruby definition of `name`, or nil. Each must be the one public, clean, yield-free
+  # compiled definition on its owner (a direct call skips the entry's Fiber guard), and no owner may inherit another,
+  # so the order of the arms cannot pick a superclass body over a subclass override.
+  def numeric_slow_ruby_arms(name)
+    @numeric_slow_ruby_arms ||= {}
+    @numeric_slow_ruby_arms.fetch(name) { @numeric_slow_ruby_arms[name] = numeric_slow_ruby_arms_proof(name) }
+  end
+
+  def numeric_slow_ruby_arms_proof(name)
+    return nil unless @yield_reach && @closed_world.visibility_stable?(name)
+    return nil if devirt_blocked_name?(name) || symbol_installed_names.nil? || symbol_installed_names.include?(name)
+
+    # The `<native>` placeholder stands for the native definers, which the helper's own arms and the collection
+    # proof cover.
+    defs = (@registry[name] || []).reject { |d| d.owner == '<native>' }
+    owners = defs.map { |d| d.owner.split('::').last }
+    return nil if defs.empty? || owners.uniq.size != owners.size
+
+    answers = call_facts_answers
+    defs.map do |d|
+      return nil unless d.irep && d.visibility == :public && !d.owner.end_with?('.singleton')
+      return nil unless compiles_clean?(d.irep) && @yield_reach.yield_free?(d.irep)
+
+      own = d.owner.split('::').last
+      ancestors, unknown = answers.ancestors(own)
+      return nil if unknown || (ancestors & (owners - [own])).any?
+
+      impl = "#{cpp_name(d.owner, d.name)}_impl"
+      args, = direct_call_args(d, ['b'], impl)
+      return nil unless args
+
+      { owner: d.owner, impl: impl, args: args }
+    end
   end
 
   # `klass` is an owner, or a class whose whole lookup path is known and runs through an owner: with no Ruby, module
@@ -225,6 +281,9 @@ class CodeGen
       zero ? numeric_slow_closed_zero_source(head, zero) : nil
     elsif key == 'mod'
       numeric_slow_mod_direct? ? numeric_slow_closed_mod_source(head) : nil
+    elsif key == 'neg'
+      target = numeric_slow_neg_target
+      target ? numeric_slow_closed_neg_source(head, target) : nil
     elsif numeric_slow_closed?(op)
       case key
       when 'div' then numeric_slow_closed_div_source(head)
@@ -293,36 +352,7 @@ class CodeGen
     elsif %w[lshift rshift].include?(key)
       numeric_slow_shift_source(key, head)
     elsif key == 'neg'
-      # Numeric#-@ is `0 - self`, evaluated by OP_SUB: an Integer overflows into mrb_bint_sub_ii (not
-      # Integer#-, whose MRB_INT_MIN operand is wrong in the bigint core), a bigint takes Integer#-, a
-      # Float the inline 0 - float (so -0.0 stays +0.0).
-      float_arm = float ? "\n#ifndef MRB_NO_FLOAT\n  if (mrb_float_p(a)) {\n    int ai = mrb_gc_arena_save(M);\n    " \
-                          "mrb_value r = mrb_float_value(M, (mrb_float)0 - mrb_float(a));\n    " \
-                          "mrb_gc_arena_restore(M, ai);\n    mrb_gc_protect(M, r);\n    return r;\n  }\n#endif" : ''
-      <<~CPP
-        #{head}) {
-        #ifdef MRB_USE_BIGINT
-          if (mrb_integer_p(a)) {
-            mrb_int x = mrb_integer(a), z;
-            if (!mrb_int_sub_overflow(0, x, &z)) return mrb_int_value(M, z);
-            int ai = mrb_gc_arena_save(M);
-            mrb_value r = mrb_bint_sub_ii(M, 0, x);
-            mrb_gc_arena_restore(M, ai);
-            mrb_gc_protect(M, r);
-            return r;
-          }
-          if (mrb_bigint_p(a)) {
-            int ai = mrb_gc_arena_save(M);
-            mrb_value r = mrb_num_sub(M, mrb_fixnum_value(0), a);
-            mrb_gc_arena_restore(M, ai);
-            mrb_gc_protect(M, r);
-            return r;
-          }
-        #endif#{float_arm}
-          return mrb_funcall(M, a, "-@", 0);
-        }
-
-      CPP
+      numeric_slow_neg_source(head, float, "  return mrb_funcall(M, a, \"-@\", 0);\n")
     elsif key == 'zero'
       # Numeric#zero? is `self == 0`; a Float compares as the VM's inline (Float, Integer) pair.
       <<~CPP
@@ -399,6 +429,11 @@ class CodeGen
     # `-` has no String arm (String#- does not exist), so that receiver falls to the proven NoMethodError.
     string_arm = arms[:string] ? "\n  else if (mrb_string_p(a)) {\n#{arms[:string]}\n  }" : ''
     extern = key == 'sub' ? numeric_slow_extern('mrb_ary_ext_sub_impl') : ''
+    # Time#+ and Time#- are the exported bodies of mruby-time (their wrappers call them after argument parsing), and
+    # a Time subclass inherits them, so one kind check covers every receiver that answers the operator.
+    time_impl = NUMERIC_SLOW_TIME_IMPL[key]
+    time_arm = time_impl ? "\n        else if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, \"Time\"))) {\n          r = #{time_impl}(M, a, b);\n        }" : ''
+    extern += numeric_slow_extern(time_impl) if time_impl
     <<~CPP
       #{extern}#{head}, mrb_value b) {
       #{numeric_slow_int_pair_source(key)}
@@ -415,7 +450,7 @@ class CodeGen
       #endif#{string_arm}
         else if (mrb_array_p(a)) {
       #{arms.fetch(:array)}
-        }
+        }#{time_arm}
         else {
           return bc2cpp_nomethod_named(M, a, "#{op}", 1, b);
         }
@@ -566,9 +601,18 @@ class CodeGen
     definers = call_facts_answers.definers('%')
     return false if definers.nil? || definers[:singleton] || !definers[:class_native].empty?
     return false unless definers[:ruby].empty? && definers[:modules].empty?
-    return false unless definers[:native].to_a.sort == %w[Float Integer]
+    return false unless definers[:native].to_a.sort == %w[Float Integer String]
 
     definers[:foreign].subset?(Set['String'])
+  end
+
+  # Every class that answers `%` inherits Integer, Float or String (the arms below), so any other receiver is a proven
+  # NoMethodError instead of a by-name call.
+  def numeric_slow_mod_fallback
+    answers = call_facts_answers
+    members = numeric_slow_members(answers, '%')
+    closed = !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, %w[Integer Float String]) }
+    closed ? 'return bc2cpp_nomethod_named(M, a, "%", 1, b);' : 'return mrb_funcall(M, a, "%", 1, b);'
   end
 
   def numeric_slow_closed_mod_source(head)
@@ -580,7 +624,8 @@ class CodeGen
       #ifndef MRB_NO_FLOAT
         else if (mrb_float_p(a)) r = mrb_flo_mod_impl(M, a, b);
       #endif
-        else return mrb_funcall(M, a, "%", 1, b);
+        else if (mrb_string_p(a)) r = mrb_str_mod_impl(M, a, b);
+        else #{numeric_slow_mod_fallback}
         #{NUMERIC_SLOW_DONE}
       }
 
@@ -708,6 +753,90 @@ class CodeGen
       }
 
     CPP
+  end
+
+  # Numeric#-@ is `0 - self`, evaluated by OP_SUB: an Integer overflows into mrb_bint_sub_ii (not
+  # Integer#-, whose MRB_INT_MIN operand is wrong in the bigint core), a bigint takes Integer#-, a
+  # Float the inline 0 - float (so -0.0 stays +0.0). `fallback` is the last arm for any other receiver.
+  def numeric_slow_neg_source(head, float, fallback)
+    float_arm = float ? "\n#ifndef MRB_NO_FLOAT\n  if (mrb_float_p(a)) {\n    int ai = mrb_gc_arena_save(M);\n    " \
+                        "mrb_value r = mrb_float_value(M, (mrb_float)0 - mrb_float(a));\n    " \
+                        "mrb_gc_arena_restore(M, ai);\n    mrb_gc_protect(M, r);\n    return r;\n  }\n#endif" : ''
+    <<~CPP
+      #{head}) {
+      #ifdef MRB_USE_BIGINT
+        if (mrb_integer_p(a)) {
+          mrb_int x = mrb_integer(a), z;
+          if (!mrb_int_sub_overflow(0, x, &z)) return mrb_int_value(M, z);
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r = mrb_bint_sub_ii(M, 0, x);
+          mrb_gc_arena_restore(M, ai);
+          mrb_gc_protect(M, r);
+          return r;
+        }
+        if (mrb_bigint_p(a)) {
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r = mrb_num_sub(M, mrb_fixnum_value(0), a);
+          mrb_gc_arena_restore(M, ai);
+          mrb_gc_protect(M, r);
+          return r;
+        }
+      #endif#{float_arm}
+      #{fallback}}
+
+    CPP
+  end
+
+  # Closed `-@`: an Integer or Float takes the inline arms above, a String String#-@'s exported body, and any other
+  # Numeric the compiled Numeric#-@ (see numeric_slow_neg_proof). Anything else is a proven NoMethodError.
+  def numeric_slow_closed_neg_source(head, target)
+    impl = "#{cpp_name(target.owner, target.name)}_impl"
+    fallback = <<~CPP.gsub(/^(?=.)/, '  ')
+      if (mrb_string_p(a)) return mrb_str_uminus_impl(M, a);
+      // CORE_COMPILED_NEG -- every other Numeric runs the compiled Numeric#-@ body, no by-name call
+      if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) {
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r = #{impl}(M, a);
+        mrb_gc_arena_restore(M, ai);
+        mrb_gc_protect(M, r);
+        return r;
+      }
+      return bc2cpp_nomethod_named(M, a, "-@", 0);
+    CPP
+    numeric_slow_extern_unary('mrb_str_uminus_impl') + numeric_slow_neg_source(head, true, fallback)
+  end
+
+  # CORE_COMPILED_NEG: the compiled Numeric#-@ (`0 - self`) the closed helper calls, or nil.
+  def numeric_slow_neg_target
+    return @numeric_slow_neg_target if defined?(@numeric_slow_neg_target)
+
+    @numeric_slow_neg_target = numeric_slow_neg_proof
+  end
+
+  # As numeric_slow_zero_target: the one foreign definer is the compiled core body every Numeric's lookup reaches,
+  # and it is yield-free (a direct call skips the entry's Fiber guard). The only native definer is String#-@, whose
+  # export the collection proof checks, so the owners cover every member.
+  def numeric_slow_neg_proof
+    return nil unless numeric_slow_closed_world? && numeric_slow_collection_ready?('-@')
+    return nil unless @yield_reach && block_core_world && @native_name_sources
+
+    answers = call_facts_answers
+    definers = answers.definers('-@')
+    return nil if definers.nil? || definers[:singleton] || !definers[:class_native].empty?
+    return nil unless definers[:ruby].empty? && definers[:modules].empty? && definers[:foreign] == Set['Numeric']
+    return nil unless definers[:native].to_a == %w[String]
+
+    defs = core_compiled_definers('-@')
+    return nil unless defs.keys == ['Numeric'] && defs['Numeric'].one? && answers.foreign_definer?('-@', 'Numeric')
+
+    target = block_core_target('Integer', NUMERIC_SLOW_ZERO_CHAIN, '-@', 0, blockless: true)
+    return nil unless target && target.owner == 'Numeric' && @yield_reach.yield_free?(target.irep)
+
+    members = numeric_slow_members(answers, '-@')
+    return nil unless members&.all? { |klass| numeric_slow_inherits_owner?(answers, klass, %w[Numeric String]) }
+    return nil unless @closed_world.core_constant_plain?('Numeric', global_only: true)
+
+    target
   end
 
   # int_lshift / int_rshift for an Integer count; MRB_INT_MIN, a Float or bigint count keep the method.

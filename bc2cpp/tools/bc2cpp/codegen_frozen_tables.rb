@@ -274,8 +274,7 @@ end
     when 'SEND0' then frozen_table_freeze_slot(irep, defs.first.index, writer)
     when 'RANGE_INC', 'RANGE_EXC' then NumericFlow::RNG
     when 'GETCONST', 'GETMCNST'
-      name = writer.const_name
-      name && @integer_constants&.include?(name) ? NumericFlow::INT : NumericFlow::OTHER
+      integer_constant_read?(writer) ? NumericFlow::INT : NumericFlow::OTHER
     # Only the literal LOADSYM is a Symbol here; SYMBOL interns a string at run time and stays OTHER.
     when 'LOADSYM' then frozen_symbol_bit || NumericFlow::OTHER
     else NumericFlow::OTHER

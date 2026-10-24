@@ -45,15 +45,20 @@ class CodeGen
         @class_ivar_pools[key] = 0
       elsif (stores = checked_group_stores(group))
         # SETTER_POOLS: the setter calls and audited natives are this group's other writers.
-        @class_ivar_pools[key] = stores[:classes].reduce(NumericFlow::CHECKED) { |mask, klass| mask | numeric_class_bit(klass) }
-        @checked_pools_used = true
+        base = setter_stores_unguarded?(stores) ? 0 : NumericFlow::CHECKED
+        @class_ivar_pools[key] = stores[:classes].reduce(base) { |mask, klass| mask | numeric_class_bit(klass) }
+        @checked_pools_used = true unless base.zero?
       end
     end
     (@entry_cand || {}).each_key { |key| @class_arg_pools[key] = 0 }
     poly_arg_candidates.each_key { |key| @class_arg_pools[key] = 0 }
     setter_arg_candidates.each_key do |key|
-      @class_arg_pools[key] = NumericFlow::CHECKED
-      @checked_pools_used = true
+      if setter_unguarded?(setter_arg_names.fetch(key))
+        @class_arg_pools[key] = 0
+      else
+        @class_arg_pools[key] = NumericFlow::CHECKED
+        @checked_pools_used = true
+      end
     end
     return unless const_missing_free?
 
@@ -147,7 +152,7 @@ class CodeGen
     key = const_group_key(insn)
     pooled = key && @class_const_pools[key]
     return pooled if pooled
-    return NumericFlow::INT if @integer_constants&.include?(name)
+    return NumericFlow::INT if integer_constant_read?(insn)
 
     # The IR's whole-program class of a constant with one container class (CodeGen.constant_value_classes).
     value_class = self.class.constant_value_classes&.[](name)

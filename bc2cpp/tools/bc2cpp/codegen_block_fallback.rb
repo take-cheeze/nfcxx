@@ -730,7 +730,7 @@ class CodeGen
       next if nested_suppressed.include?(nregion[:sendb_addr])
 
       nested_suppressed << nregion[:sendb_addr]
-      nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion)
+      nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion, owner_def: d)
     end
 
     # RUNTIME_DEF_FALLBACK_SUPPORT: a `def` inside an EXEC-opened class body
@@ -1091,11 +1091,14 @@ class CodeGen
                                               yield_free: region[:yield_free])
     # ARG_SHAPES_BLOCK: a top-level site whose call resolves to compiled code.
     # BLOCK_ARM_REACH: a block nested in an inlined loop body takes the same arms, shifted.
+    stack_expr = stack_block_expr(region)
     direct = if inline_offset.nil?
-               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def)
+               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, stack_expr: stack_expr)
              elsif owner_def && block_arm_reach?
-               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, inline_offset: inline_offset)
+               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, inline_offset: inline_offset,
+                                                                                         stack_expr: stack_expr)
              end
+    ctor, direct = stack_block_glue(region, rproc_var, ctor, direct) if direct && stack_expr && direct.include?(stack_expr)
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), #{direct ? 'direct call with the block' : 'dynamic dispatch'}\n"
@@ -1133,6 +1136,37 @@ class CodeGen
     out
   end
 
+  # STACK_BLOCK (docs/bc2cpp-stack-blocks.md): a direct-entry block may be built in the frame instead of on the
+  # heap. The forwarded frame block (`needs_blk`) is left out: the heap env is what keeps that value rooted.
+  def stack_block_expr(region)
+    return nil unless stack_blocks? && region[:direct_entry] && !region[:needs_blk]
+
+    "bc2cpp_blk_stack_#{region[:block_addr]}.value()"
+  end
+
+  # The arms took the frame-local block: build it over the env array, and build the heap RProc only where the
+  # remaining code still dispatches (the by-name else), when it runs.
+  def stack_block_glue(region, rproc_var, ctor, direct)
+    addr = region[:block_addr]
+    heap_line = ctor[/^ *struct RProc\* #{rproc_var} = (mrb_proc_new_cfunc_with_env\(M, \w+, (\d+), bc2cpp_blk_env_#{addr}\));\n/]
+    return [ctor, direct] unless heap_line
+
+    alloc = Regexp.last_match(1)
+    len = Regexp.last_match(2)
+    heap_ref = "mrb_obj_value(#{rproc_var})"
+    lines = "    Bc2cppStackBlock bc2cpp_blk_stack_#{addr}(M, #{len}, bc2cpp_blk_env_#{addr});\n"
+    if direct.include?(heap_ref)
+      lines << "    auto bc2cpp_blk_heap_#{addr} = [&]() { return mrb_obj_value(#{alloc}); };\n"
+      direct = direct.gsub(heap_ref, "bc2cpp_blk_heap_#{addr}()")
+    end
+    [ctor.sub(heap_line, lines), direct]
+  end
+
+  # BC2CPP_STACK_BLOCKS=0 builds every block on the heap again.
+  def stack_blocks?
+    ENV['BC2CPP_STACK_BLOCKS'] != '0'
+  end
+
   # EXPLICIT_BLOCK_ARG_SUPPORT: `ary.select(&:defending)`, `ary.each(&proc_var)`,
   # `ary.map(&method(:bar))`: no BLOCK instruction, just `expr` evaluated into
   # R(dest+n+1) before the SENDB/SSENDB. No body to compile:
@@ -1168,13 +1202,16 @@ class CodeGen
         n = insn.n_spec.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
                      blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
-                     self_implicit: insn.op == 'SSENDB' }
+                     self_implicit: insn.op == 'SSENDB', parent_irep: irep }
       end
     end
     regions
   end
 
-  def emit_explicit_block_arg_glue(region)
+  def emit_explicit_block_arg_glue(region, owner_def: nil)
+    direct = emit_explicit_block_arg_direct(region, owner_def)
+    return direct if direct
+
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     out = String.new
@@ -1204,6 +1241,34 @@ class CodeGen
     out
   end
 
+  # EXPLICIT_BLOCK_ARG_DIRECT: a fixed-arity `&expr` site whose call resolves to compiled code
+  # (ARG_SHAPES_BLOCK). The `_impl` gets the block as the VM's OP_SENDB would hand it on:
+  # ensure_block's to_proc conversion runs first, once, before any arm or by-name else.
+  # See docs/bc2cpp-explicit-block-args.md.
+  def emit_explicit_block_arg_direct(region, owner_def)
+    return nil unless explicit_block_arg_direct? && owner_def && region[:n].is_a?(Integer)
+
+    blk = "bc2cpp_ebarg_blk_#{region[:sendb_addr]}"
+    direct = compile_direct_block_send(region, blk, owner_def)
+    return nil unless direct
+
+    out = String.new
+    out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- &expr converted as OP_SENDB does (ensure_block), " \
+           "direct call with the block\n"
+    out << "  {\n"
+    out << "    mrb_value #{blk} = r#{region[:blk_reg]};\n"
+    out << "    if (!mrb_nil_p(#{blk}) && !mrb_proc_p(#{blk})) " \
+           "#{blk} = mrb_type_convert(M, #{blk}, MRB_TT_PROC, mrb_intern_lit(M, \"to_proc\"));\n"
+    out << direct.lines.map { |line| "  #{line}" }.join
+    out << "  }\n"
+    out
+  end
+
+  # BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT=0 keeps every `&expr` site on mrb_funcall_with_block.
+  def explicit_block_arg_direct?
+    ENV['BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT'] != '0'
+  end
+
   # RESCUE_BODY_BLOCK_SUPPORT: the shared BLOCK_FALLBACK/EXPLICIT_BLOCK_ARG
   # suppress-and-glue pass, used by compile_method and emit_rescue_try_body.
   # Takes recognized region lists (the caller chooses the scope), mutates the
@@ -1225,7 +1290,7 @@ class CodeGen
       next if suppressed.include?(region[:sendb_addr])
 
       suppressed << region[:sendb_addr]
-      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region)
+      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region, owner_def: d)
     end
     pre
   end
