@@ -42,7 +42,7 @@ module NativeCoreDirect
   # registration's]; the first is the registered function. Bodies are compared with
   # whitespace and comments removed. `internals` and `implicit_self` are KERNEL_ENTRIES' (below).
   Entry = Struct.new(:name, :owner, :arity, :arg, :aspec, :expression, :checks, :apis, :helper, :internals,
-                     :implicit_self, keyword_init: true) do
+                     :implicit_self, :explicit_receiver, keyword_init: true) do
     def function
       checks.first.first
     end
@@ -602,6 +602,15 @@ module NativeCoreDirect
               C
   ].freeze
 
+  # KERNEL_DIRECT for any receiver: the INHERITED_ENTRIES rows audited as implicit_self (no other class registers the
+  # name), so a send whose receiver class is unknown reaches the same body (CodeGen#kernel_direct_code guards it).
+  KERNEL_ANY_RECEIVER_ENTRIES = INHERITED_ENTRIES.map do |entry|
+    entry.dup.tap do |row|
+      row.implicit_self = true
+      row.explicit_receiver = true
+    end
+  end.freeze
+
   # The C text of each helper, emitted once per output that calls it.
   HAND_HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
@@ -799,7 +808,7 @@ module NativeCoreDirect
     files = Array(paths).select { |path| File.file?(path) }
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
-    headers = (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
+    headers = (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES + KERNEL_ANY_RECEIVER_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
     key += headers.map(&:first).uniq.map do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
@@ -814,7 +823,7 @@ module NativeCoreDirect
   def audit_files(files)
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
-    (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES).to_h do |entry|
+    (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES + INHERITED_ENTRIES + KERNEL_ANY_RECEIVER_ENTRIES).to_h do |entry|
       [entry, audit_entry(entry, registrations, opaque_owners, include_dir)]
     end
   end

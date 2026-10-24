@@ -110,23 +110,37 @@ module NativeCoreDirectFallback
   # receiver can lack Kernel (ClosedWorld#kernel_native_dispatch_safe?). Core bodies
   # get it too: these are program-wide facts, not the static-binding proofs a core
   # body is denied (block_core_world).
-  def kernel_direct_code(name, d, recv, argv)
-    entry = !devirt_blocked_name?(name) && kernel_direct_entry(name, argv.size)
+  def kernel_direct_code(name, d, recv, argv, self_implicit = true)
+    entry = !devirt_blocked_name?(name) && kernel_direct_entry(name, argv.size, self_implicit)
     return nil unless entry
 
-    "  // KERNEL_DIRECT :#{name} -- implicit-self #{entry.owner}##{name} is the only definition; " \
-      "the audited native body runs with no dispatch\n" \
-      "  r#{d} = #{entry.call(recv, argv)};\n"
+    note = "  // KERNEL_DIRECT :#{name} -- #{self_implicit ? 'implicit-self' : 'explicit-receiver'} #{entry.owner}##{name} is the only definition; " \
+           "the audited native body runs with no dispatch\n"
+    call = "r#{d} = #{entry.call(recv, argv)};\n"
+    guards = []
+    # An explicit receiver may be a bare BasicObject (basic_object_subclass_free? rules out subclasses only), which
+    # lacks Kernel.
+    guards << "mrb_obj_is_kind_of(M, #{recv}, M->kernel_module)" if !self_implicit && entry.owner != 'BasicObject'
+    arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
+    guards << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard
+    return "#{note}  #{call}" if guards.empty?
+
+    # A receiver or argument the guards reject keeps the send, so the method's own error is unchanged.
+    "#{note}  if (#{guards.join(' && ')}) {\n    #{call}  } else {\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
   end
 
-  def kernel_direct_entry(name, arity)
+  # An explicit receiver needs a row marked explicit_receiver, and a public one: a private native is a NoMethodError there.
+  def kernel_direct_entry(name, arity, self_implicit = true)
     return nil unless block_core_world && @native_name_sources
 
     @kernel_direct_entries ||= {}
-    @kernel_direct_entries.fetch([name, arity]) do
-      @kernel_direct_entries[[name, arity]] =
-        NativeCoreDirect::KERNEL_ENTRIES.find do |entry|
-          entry.name == name && entry.arity == arity && kernel_direct_entry_safe?(entry)
+    @kernel_direct_entries.fetch([name, arity, self_implicit]) do
+      @kernel_direct_entries[[name, arity, self_implicit]] =
+        (NativeCoreDirect::KERNEL_ENTRIES + NativeCoreDirect::KERNEL_ANY_RECEIVER_ENTRIES).find do |entry|
+          next false unless entry.name == name && entry.arity == arity
+          next false unless self_implicit || (entry.explicit_receiver && !entry.aspec.include?('MRB_MT_PRIVATE'))
+
+          kernel_direct_entry_safe?(entry)
         end
     end
   end
