@@ -3,8 +3,9 @@
 Status: initial local lifetime checker implemented in `scripts/pathb-borrowck.rb`, using the existing
 `decl` and `scope-end` facts. See [pathb-borrowck.md](pathb-borrowck.md) for the implemented subset,
 commands, tests, and the Rust frontend boundary. Explicit shared/exclusive loans are also
-implemented, including parent/child reborrows and opt-in local last-use inference. Moves and
-interprocedural region inference remain planned. The historical design below was written against `origin/main` at
+implemented, including parent/child reborrows and opt-in local last-use inference. Explicit
+whole-local scalar/pointer moves and copies are checked; source-language move policy, partial
+moves, drops, and interprocedural region inference remain planned. The historical design below was written against `origin/main` at
 `265991b`. Every claim about the code cites a file and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
 
 ## 0. Summary

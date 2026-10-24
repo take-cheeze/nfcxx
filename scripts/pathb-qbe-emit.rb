@@ -1339,6 +1339,12 @@ def r_i2p(fn, x)
 end
 
 # Explicit loans affect checking only; their runtime value is the original address.
+# Move/copy policy is checked before codegen; both transfer the stored value.
+def r_value_transfer(fn, x)
+  raise BadIR, "#{x[0]} form" unless x.length == 3 && x[2].is_a?(IRSym) && x[2].sig == "$"
+  r_load(fn, ["load", x[1], x[2]])
+end
+
 def r_borrow(fn, x)
   raise BadIR, "borrow form" unless x.length == 5 && x[2].is_a?(IRStr) && ["shared", "exclusive"].include?(x[3])
   pt = parse_type(x[1])
@@ -1675,6 +1681,8 @@ RVAL = {
   "iconv" => ->(fn, x) { r_iconv(fn, x) }, "p2i" => ->(fn, x) { r_p2i(fn, x) },
   "i2p" => ->(fn, x) { r_i2p(fn, x) }, "bitcast" => ->(fn, x) { r_bitcast(fn, x) },
   "borrow" => ->(fn, x) { r_borrow(fn, x) },
+  "move-value" => ->(fn, x) { r_value_transfer(fn, x) },
+  "copy-value" => ->(fn, x) { r_value_transfer(fn, x) },
   "reborrow" => ->(fn, x) { r_reborrow(fn, x) },
   "i2f" => ->(fn, x) { r_i2f(fn, x) }, "u2f" => ->(fn, x) { r_i2f(fn, x) },
   "fconv" => ->(fn, x) { r_fconv(fn, x) }, "cf2i" => ->(fn, x) { r_cf2i(fn, x) },
