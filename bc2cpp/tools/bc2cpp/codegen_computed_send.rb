@@ -61,7 +61,8 @@ module ComputedSend
   # nil, or the proven name set with the site the arms are compiled for.
   def computed_send_plan(insn, kwargs)
     irep, idx = kwargs.values_at(:irep, :idx)
-    return nil unless irep && idx && %w[SEND SSEND].include?(insn.op) && computed_send_name?(insn.sym)
+    return nil unless irep && idx && %w[SEND SSEND].include?(insn.op) &&
+                      computed_send_name?(insn.sym, insn.op == 'SSEND' ? kwargs[:owner_def]&.owner : nil)
     return nil unless kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil? && @call_block_expr.nil?
     return nil unless ENV[KILL_SWITCH] != '0' && NomethodReviewed.guard_violation_enabled? && insn.plain_fixed_argc?
 
@@ -79,17 +80,41 @@ module ComputedSend
     { names: names, irep: irep, idx: idx, owner_def: kwargs[:owner_def] }
   end
 
-  def computed_send_name?(name)
+  # `owner`: the class of self at the site, whose own ancestors are the only definers that matter.
+  def computed_send_name?(name, owner = nil)
     return true if SEND_NAMES.include?(name)
+    return false unless METAPROG_SEND_NAMES.include?(name) && @closed_world
 
-    METAPROG_SEND_NAMES.include?(name) && @closed_world && outside_owner_call_owners(name) == ['Kernel']
+    owners = outside_owner_call_owners(name)
+    return false unless owners&.include?('Kernel')
+    return owners == ['Kernel'] unless owner
+
+    chain = computed_send_chain(owner)
+    chain && (owners - ['Kernel']).none? { |definer| chain.include?(definer) }
+  end
+
+  # `owner`, its program superclasses and their modules, and Object's own chain; nil for a module (any class
+  # may include it) or a class whose chain reaches a core class other than Object.
+  def computed_send_chain(owner)
+    return nil unless @superclass_of.key?(owner)
+
+    chain = []
+    klass = owner
+    while klass.is_a?(String) && @superclass_of.key?(klass) && !chain.include?(klass)
+      chain << klass
+      chain.concat(Array(@included_modules[klass]), Array(@prepended_modules[klass]))
+      klass = @superclass_of[klass]
+    end
+    return nil unless klass == :none || klass == 'Object'
+
+    chain + %w[Object Kernel BasicObject]
   end
 
   # COMPUTED_SEND_GUARDED: the expansion of an unproven name on self, or nil.
   def computed_send_guarded(insn, kwargs, &)
     irep, idx, owner_def = kwargs.values_at(:irep, :idx, :owner_def)
     return nil unless ENV[KILL_SWITCH] != '0' && ENV[GUARDED_SWITCH] != '0' && irep && idx && insn.op == 'SSEND'
-    return nil unless computed_send_name?(insn.sym) && owner_def
+    return nil unless owner_def && computed_send_name?(insn.sym, owner_def.owner)
     return nil unless kwargs[:call_receiver].nil? && kwargs[:call_arguments].nil? && @call_block_expr.nil?
     return nil unless computed_send_kernel?(insn.sym) && computed_send_world_static?
 
