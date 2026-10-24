@@ -1,0 +1,8 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "write" (returns void) (nothrow) (noescape) (closed) (args (write int)))
+(call-effects "read_ptr" (returns void) (nothrow) (noescape) (closed) (args (read (ptr int))))
+(function "test" (ret int) (params )
+(slot "x" int 4 4) (slot "p" (ptr int) 8 8)
+
+(decl $"x" val) (store int $"x" (const int 7))(let %0 (ptr int) (borrow (ptr int) "a" shared $"x"))(decl $"p" ref) (store (ptr int) $"p" %0)(eval (call void &"write" $"x"))(eval (call void &"read_ptr" $"p")) (loan-end "a")(return (const int 0))
+)

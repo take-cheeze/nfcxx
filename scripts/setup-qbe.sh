@@ -11,6 +11,12 @@
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
+# The pin is a3ac6af, on the fork's branch nfcxx-linux-kernel: the earlier pin (9f706f5, nfcxx-stmt-expr: GNU statement
+# expressions ({ ... }), which ASTro's baruby_precise needs, docs/notes/astro.md) plus the __extension__ keyword, GNU
+# extended inline asm lowered to out-of-line thunks (docs/notes/inline-asm.md; qbe-cc passes -a so cproc writes the
+# thunks to a side file appended to the assembly), the pre-C23 reading of true/false/nullptr/bool as identifiers
+# (cproc -K; qbe-cc passes it unless -std=c23), the aligned attribute on a typedef, and GNU attributes between a pointer
+# and the declarator name: the C the Linux kernel's gnu11 headers use (docs/notes/cproc-nfcxx.md).
 # The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, branch nfcxx-patched, the pin in 3rd/qbe): no patch files are applied.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,12 +30,6 @@ for p in qbe cproc; do
   cp -r "$root/3rd/$p" "$root/build/$p"
   rm -rf "$root/build/$p/.git"
 done
-# scripts/cproc-nfcxx.patch: nfcxx's cproc changes, not yet commits of the fork (docs/notes/cproc-nfcxx.md). It adds the
-# __extension__ keyword; GNU extended inline asm lowered to out-of-line thunks (docs/notes/inline-asm.md; qbe-cc passes
-# -a so cproc writes the thunks to a side file appended to the assembly); the pre-C23 reading of true/false/nullptr/bool
-# as identifiers (cproc -c restores the C23 keywords); the aligned attribute on a typedef; and GNU attributes between a
-# pointer and the declarator name. These let the C the Linux kernel's gnu11 headers use through.
-patch -s -p1 -d "$root/build/cproc" --batch < "$root/scripts/cproc-nfcxx.patch" || { echo "setup-qbe: cproc-nfcxx.patch failed" >&2; exit 1; }
 # rega.c holds at most NPm (64) copies in one parallel move, the copies a block edge needs (phi operands, call
 # arguments). A join with more (regex_automata 0.4.18, built by mrustc from the 1.13 regex crate) stops QBE with
 # "no more pm slots". The array is static, so 1024 costs nothing. A fork commit would be the proper home for this.

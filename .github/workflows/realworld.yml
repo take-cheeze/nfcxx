@@ -46,10 +46,37 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Three shards run in parallel, each on its own runner with its own checkout, so the wall time is the slowest shard
+# (SDCC alone, about 8 minutes) instead of the sum of all nine scripts (about 18). Shards share no build output: each
+# script clones its own upstream into build/realworld, and optcarrot builds its own mruby.
 jobs:
   realworld:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: SDCC
+            packages: make ruby rake bison flex libboost-graph-dev
+            run: |
+              tests/realworld/run_sdcc.sh
+
+          - name: doctest, mruby, optcarrot
+            packages: make ruby rake
+            run: |
+              tests/realworld/run_doctest.sh
+              tests/realworld/run_mruby.sh
+              tests/realworld/run_optcarrot.sh
+
+          - name: Lua, TinyCC, CoreCLR GC, ASTro
+            packages: make ruby rake
+            run: |
+              tests/realworld/run_lua.sh
+              tests/realworld/run_lua_make.sh
+              tests/realworld/run_tinycc.sh
+              tests/realworld/run_coreclr_gc.sh
+              tests/realworld/run_astro.sh
     env:
       SCCACHE_GHA_ENABLED: "true"
       CMAKE_C_COMPILER_LAUNCHER: sccache
@@ -59,38 +86,14 @@ jobs:
         with:
           submodules: true
 
-      # ruby and rake: the mruby interpreter bootstrap (scripts/setup-mruby.sh) and run_mruby.sh's own rake build.
-      # make: Lua's makefile (run_lua_make.sh). bison, flex and libboost-graph-dev: SDCC's build (run_sdcc.sh).
+      # Per shard: ruby and rake (the mruby bootstrap and build, ASTroGen), make (Lua's and TinyCC's makefiles, SDCC),
+      # bison, flex and libboost-graph-dev (SDCC's build).
       - uses: ./.github/actions/toolchain
         with:
-          packages: make ruby rake bison flex libboost-graph-dev
+          packages: ${{ matrix.packages }}
 
-      - name: doctest (hosted C++, gcc backend; the qbe request is reported as a documented SKIP)
-        run: tests/realworld/run_doctest.sh
-
-      - name: Lua 5.4 as C inputs (both backends)
-        run: tests/realworld/run_lua.sh
-
-      - name: Lua 5.4 through its own makefile with nfcc (both backends)
-        run: tests/realworld/run_lua_make.sh
-
-      - name: mruby rake build with nfcc (both backends)
-        run: tests/realworld/run_mruby.sh
-
-      - name: TinyCC 0.9.27 built with its own makefile and nfcc, then its tests2 suite (both backends)
-        run: tests/realworld/run_tinycc.sh
-
-      - name: SDCC 4.6.0 mcs51 compiler built by nfcc (gcc backend); assembly compared with the gcc build
-        run: tests/realworld/run_sdcc.sh
-
-      - name: optcarrot benchmark on an nfcc-built mruby (both backends, checksum 59662)
-        run: tests/realworld/run_optcarrot.sh
-
-      - name: CoreCLR workstation GC, 34 translation units (both backends; docs/notes/coreclr-gc.md)
-        run: tests/realworld/run_coreclr_gc.sh
-
-      - name: ASTro (ko1/astro) calc and luastro built by nfcc, Code Store compiling its SD_*.c through nfcc (both backends)
-        run: tests/realworld/run_astro.sh
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
 
       - name: sccache stats
         if: always()

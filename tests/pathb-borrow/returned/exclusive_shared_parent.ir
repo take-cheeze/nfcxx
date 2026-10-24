@@ -1,0 +1,8 @@
+(ir-module "returned" (layout (pointer 8) (int 4)))
+(call-effects "identity" (returns (ptr int) (from-arg 0 0 exclusive)) (nothrow) (noescape) (closed) (args (write int)))
+(function "test" (ret int) (params)
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 7))
+(let %p (ptr int) (borrow (ptr int) "P" shared $"x")) (let %r (ptr int) (call-borrow (ptr int) "R" (parent "P") &"identity" %p))
+(return (load int %r))
+)

@@ -1,9 +1,9 @@
 # nfcxx's cproc changes
 
 cproc (the C front end of the qbe backend, `3rd/cproc`, a fork of michaelforney/cproc) carries nfcxx-specific changes
-that are not yet commits of the fork. `scripts/setup-qbe.sh` applies them to the build copy as `scripts/cproc-nfcxx.patch`;
-regenerate the patch with a `diff -u` of `3rd/cproc` against `build/cproc` after editing the copy. The changes exist to
-let through the C that real-world gnu11 code -- the Linux kernel's headers in particular -- relies on.
+as commits of the fork, on its branch `nfcxx-linux-kernel` (the pin): make a change as a commit there, push it, and move
+the submodule pin. The changes exist to let through the C that real-world gnu11 code -- the Linux kernel's headers in
+particular -- relies on. The fork's own tests (`make check` in a copy of `3rd/cproc`) pass as they do upstream.
 
 ## Changes
 

@@ -1,0 +1,8 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "init" (returns void) (nothrow) (noescape) (closed) (args (init int)))
+(call-effects "destroy" (returns int) (nothrow) (noescape) (closed) (args (consume int)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4)
+(drop-obligation "x" int $"x")
+(decl $"x" val)(eval (call void &"init" $"x"))(drop-live "x")(let %1 int (call int &"destroy" $"x"))(return (const int 0))
+)

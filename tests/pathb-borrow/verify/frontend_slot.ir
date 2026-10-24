@@ -1,0 +1,7 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "_Z1wPi" (returns void) (nothrow) (noescape) (closed) (args (write int)))
+(function "_Z1wPi" (ret void) (params (param %0 "p" (ptr int)))
+(slot "p" (ptr int) 8 8)
+(decl %0 param) (store (ptr int) $"p" %0) (let %1 (ptr int) (load (ptr int) $"p"))
+(nonnull %1) (store int %1 (const int 3)) (scope-end $"p") (return)
+)

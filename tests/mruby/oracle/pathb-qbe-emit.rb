@@ -455,6 +455,173 @@ def parse_forms(toks)
   stack[0]
 end
 
+# Semantic layouts are checker contracts, not ABI classification. Keep this
+# validator in sync in the standalone checker, QBE emitter, and emitter oracle.
+class BorrowLayouts
+  PRIMITIVES = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
+                'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
+                'long'=>8, 'unsigned_long'=>8, 'long_long'=>8, 'unsigned_long_long'=>8,
+                'float'=>4, 'double'=>8}
+
+  def initialize(forms, bad, refused)
+    @bad = bad
+    @refused = refused
+    @raw = {}
+    @resolved = {}
+    forms.each do |f|
+      next unless head(f) == 'borrow-layout'
+      raise @bad, 'borrow-layout form' unless f.length >= 4
+      raise @refused, 'semantic layouts currently require struct types' unless head(f[1]) == 'struct'
+      k = key(f[1])
+      raise @bad, "duplicate semantic layout #{k[1]}" if @raw.key?(k)
+      @raw[k] = f
+    end
+    @raw.each_key { |k| resolve(k, []) }
+  end
+
+  def head(x)
+    x.is_a?(Array) ? x[0] : nil
+  end
+
+  def key(ty)
+    return nil unless head(ty) == 'struct'
+    raise @bad, 'semantic layout type form' unless ty.length == 2 && ty[1].is_a?(IRStr) && !ty[1].to_s.empty?
+    ['struct', ty[1].to_s]
+  end
+
+  def number(x)
+    unless x.is_a?(String) && !x.empty? && x.bytes.all? { |c| c >= 48 && c <= 57 }
+      raise @bad, 'semantic layout requires nonnegative integer constants'
+    end
+    x.to_i
+  end
+
+  def lookup(ty)
+    k = key(ty)
+    k ? @resolved[k] : nil
+  end
+
+  def field_type(ty, visiting)
+    if ty.is_a?(String) && PRIMITIVES.key?(ty)
+      n = PRIMITIVES[ty]
+      return {size: n, align: n, used: (0...n).to_a, objects: []}
+    end
+    if head(ty) == 'ptr'
+      raise @bad, 'semantic pointer field type' unless ty.length == 2
+      return {size: 8, align: 8, used: (0...8).to_a, objects: []}
+    end
+    k = key(ty)
+    raise @refused, 'unsupported semantic field type' unless k
+    resolve(k, visiting)
+  end
+
+  def resolve(k, visiting)
+    raise @bad, "cyclic semantic layout #{k[1]}" if visiting.include?(k)
+    return @resolved[k] if @resolved.key?(k)
+    raise @bad, "unknown semantic layout #{k[1]}" unless @raw.key?(k)
+    f = @raw[k]
+    size = number(f[2])
+    align = number(f[3])
+    unless size > 0 && size <= 4096 && align > 0 && align <= 4096 && (align & (align - 1)) == 0 && size % align == 0
+      raise @bad, "invalid semantic size/alignment for #{k[1]}"
+    end
+    names = {}
+    ranges = []
+    used = []
+    objects = [[0, k]]
+    f.drop(4).each do |field|
+      unless head(field) == 'field' && field.length == 4 && field[1].is_a?(IRStr) && !field[1].to_s.empty?
+        raise @bad, 'semantic field form'
+      end
+      name = field[1].to_s
+      raise @bad, "duplicate semantic field #{name}" if names[name]
+      names[name] = true
+      off = number(field[2])
+      desc = field_type(field[3], visiting + [k])
+      n = desc[:size]
+      raise @bad, "semantic field #{name} exceeds its object" if off + n > size
+      raise @refused, 'unaligned semantic fields are unsupported' if off % desc[:align] != 0 || align < desc[:align]
+      if ranges.any? { |o, len| off < o + len && o < off + n }
+        raise @refused, 'overlapping semantic fields are unsupported'
+      end
+      ranges << [off, n]
+      used.concat(desc[:used].map { |i| off + i })
+      objects.concat(desc[:objects].map { |o, ty| [off + o, ty] })
+    end
+    @resolved[k] = {size: size, align: align, used: used.sort, objects: objects}
+  end
+end
+
+# Closed summaries are trusted contracts, not a verification of callee bodies.
+# Keep this validator synchronized across the three standalone IR tools.
+class BorrowCallEffects
+  def initialize(forms, layouts, bad, refused)
+    @entries = {}
+    forms.each do |f|
+      next unless f.is_a?(Array) && f[0] == 'call-effects'
+      unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
+             f[2].is_a?(Array) && f[2][0] == 'returns' && [2, 3].include?(f[2].length) &&
+             f[6].is_a?(Array) && f[6][0] == 'args'
+        raise bad, 'call-effects form'
+      end
+      name = f[1].to_s
+      raise bad, "duplicate call effects #{name}" if @entries.key?(name)
+      unless f[3] == ['nothrow'] && f[4] == ['noescape'] && f[5] == ['closed']
+        raise refused, 'call contracts require nothrow, noescape, and closed effects'
+      end
+      result = f[2][1]
+      alias_result = f[2][2]
+      unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
+        raise refused, 'call effects support only void or scalar results'
+      end
+      args = f[6].drop(1)
+      args.each do |arg|
+        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume].include?(arg[0])
+          raise bad, 'call argument effect form'
+        end
+        ty = arg[1]
+        if arg[0] == 'value'
+          unless ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
+            raise refused, 'value effects require nonpointer scalar arguments'
+          end
+        elsif ty.is_a?(Array) && ty[0] == 'struct' && !layouts.lookup(ty)
+          raise refused, 'call aggregate effects require semantic layouts'
+        else
+          layouts.field_type(ty, [])
+        end
+      end
+      if alias_result
+        unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+               alias_result.is_a?(Array) && alias_result.length == 4 && alias_result[0] == 'from-arg' &&
+               %w[shared exclusive].include?(alias_result[3])
+          raise bad, 'returned alias contract form'
+        end
+        index = layouts.number(alias_result[1])
+        offset = layouts.number(alias_result[2])
+        source = args[index]
+        unless source && %w[read write].include?(source[0])
+          raise refused, 'returned aliases require a read or write source argument'
+        end
+        if alias_result[3] == 'exclusive' && source[0] != 'write'
+          raise refused, 'exclusive returned aliases require a write source argument'
+        end
+        width = layouts.field_type(result[1], [])[:size]
+        if offset + width > layouts.field_type(source[1], [])[:size]
+          raise refused, 'returned alias range escapes its source argument'
+        end
+        alias_result = {arg: index, offset: offset, kind: alias_result[3]}
+      elsif result.is_a?(Array)
+        raise refused, 'call effects support only void or scalar results'
+      end
+      @entries[name] = {result: result, args: args, alias: alias_result}
+    end
+  end
+
+  def lookup(name)
+    @entries[name]
+  end
+end
+
 # ------------------------------------------------------------------ types
 # A type is an Array standing for the Python tuple: ["int", size, signed, bool], ["float", size], ["ptr", pointee|nil],
 # ["array", n, elem], ["agg", head, name], ["fn"], ["void"].
@@ -1023,6 +1190,7 @@ class Fn
       end
     end
     return const(op) if head_of(op) == "const"
+    return r_offset(self, op) if head_of(op) == "offset"
     if head_of(op) == "null"
       ty = parse_type(op[1])
       return Val.new("0", "l", ty)
@@ -1383,7 +1551,9 @@ end
 # Explicit loans affect checking only; their runtime value is the original address.
 # Move/copy policy is checked before codegen; both transfer the stored value.
 def r_value_transfer(fn, x)
-  raise BadIR, "#{x[0]} form" unless x.length == 3 && x[2].is_a?(IRSym) && x[2].sig == "$"
+  place = x[2]
+  place = place[1] while head_of(place) == "offset" && place.length == 3
+  raise BadIR, "#{x[0]} form" unless x.length == 3 && place.is_a?(IRSym) && place.sig == "$"
   r_load(fn, ["load", x[1], x[2]])
 end
 
@@ -1486,6 +1656,7 @@ def cf2i_bounds(ty)
 end
 
 def r_offset(fn, x)
+  raise BadIR, "offset form" unless x.length == 3
   a = fn.opnd(x[1], "l")
   n = as_int(x[2])
   t = fn.tmp
@@ -1731,6 +1902,14 @@ RVAL = {
   "offset" => ->(fn, x) { r_offset(fn, x) }, "index" => ->(fn, x) { r_index(fn, x) },
   "pdiff" => ->(fn, x) { r_pdiff(fn, x) },
   "bfload" => ->(fn, x) { r_bfload(fn, x) }, "bfload.v" => ->(fn, x) { r_bfload(fn, x) },
+  "call-borrow" => ->(fn, x) {
+    unless x.length >= 5 && head_of(x[1]) == 'ptr' && x[2].is_a?(IRStr) &&
+           (x[3] == 'root' || (head_of(x[3]) == 'parent' && x[3].length == 2 && x[3][1].is_a?(IRStr))) &&
+           x[4].is_a?(IRSym) && x[4].sig == '&'
+      raise BadIR, 'call-borrow form'
+    end
+    r_call(fn, ['call', x[1], x[4]] + x.drop(5))
+  },
   "call" => ->(fn, x) { r_call(fn, x) }, "rdtsc" => ->(fn, x) { r_rdtsc(fn, x) },
 }
 
@@ -2021,6 +2200,21 @@ end
 # Borrow facts (NFCXX_PATHB_BORROW=1, docs/notes/borrowck-plan.md 1.3): where a local is declared (decl OP ref|val|param),
 # where it ends (scope-end OP), and the rvalue-reference argument of the call that follows (rref-arg OP). They describe
 # the code and do not change it, so they are accepted as no-ops; only the shape is checked.
+# Drop-state records describe checking policy only. Cleanup code must already
+# exist in the producer's IR; these forms do not call or synthesize a destructor.
+def s_drop_obligation(fn, x)
+  place = x[3]
+  place = place[1] while head_of(place) == "offset" && place.length == 3
+  unless x.length == 4 && x[1].is_a?(IRStr) && !x[1].to_s.empty? && place.is_a?(IRSym) && place.sig == "$"
+    raise BadIR, "drop-obligation form"
+  end
+  parse_type(x[2])
+end
+
+def s_drop_event(fn, x)
+  raise BadIR, "drop event form" unless x.length == 2 && x[1].is_a?(IRStr) && !x[1].to_s.empty?
+end
+
 def s_loan_end(fn, x)
   raise BadIR, "loan-end form" unless x.length == 2 && x[1].is_a?(IRStr)
 end
@@ -2269,6 +2463,10 @@ STMT = {
   "decl" => ->(fn, x) { s_decl(fn, x) }, "scope-end" => ->(fn, x) { s_scope_end(fn, x) },
   "rref-arg" => ->(fn, x) { s_rref_arg(fn, x) },
   "loan-end" => ->(fn, x) { s_loan_end(fn, x) },
+  "drop-obligation" => ->(fn, x) { s_drop_obligation(fn, x) },
+  "drop-live" => ->(fn, x) { s_drop_event(fn, x) },
+  "drop-state" => ->(fn, x) { s_drop_event(fn, x) },
+  "drop-state-if-live" => ->(fn, x) { s_drop_event(fn, x) },
 }
 
 # ------------------------------------------------------------------ module and functions
@@ -2969,6 +3167,8 @@ def emit_module(text, do_prune = true, ld_trap = false)
   forms = parse_forms(tokenize(text))
   raise BadIR, "the input is not an (ir-module ...) IR text" if forms.empty? || head_of(forms[0]) != "ir-module"
   check_layout(forms[0])
+  semantic_layouts = BorrowLayouts.new(forms, BadIR, Refused)
+  BorrowCallEffects.new(forms, semantic_layouts, BadIR, Refused)
   forms = stub_long_double(forms) if ld_trap
   mod = Module_.new
   all_forms = forms
@@ -3001,7 +3201,7 @@ def emit_module(text, do_prune = true, ld_trap = false)
     elsif h == "alias"
       name, target, kind, weak = alias_parts(f)
       mod.out << "#{ALIAS_MARK}#{kind} #{qsym(name)} #{qsym(target)}#{weak ? " weak" : ""}"
-    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk"
+    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk" && h != "borrow-layout" && h != "call-effects"
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end

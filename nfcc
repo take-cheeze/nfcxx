@@ -12,11 +12,16 @@
 #   -MD -MMD -MF f -MT t -MQ t -MP   dependency file from the host preprocessor (gcc -M/-MM), with -c
 #   honoured:  -std=* (C only), -ansi, -D -U -I -isystem -iquote -idirafter -include -imacros, -x c, -x none,
 #              -l -L -Wl,* -Xlinker -shared -static -rdynamic -pie -no-pie -s -nostdlib -pthread -o
+#              --bundle-libs, --bundle-exclude=*, --bundle-only=* (the libraries copied into the output: docs/notes/bundle.md)
+#              --cuda-driver=auto|cudart|libcuda (a libcuda on the link line goes through libcudart by default:
+#              docs/notes/cuda-driver.md)
 #              -Wa,* (given to the assembler); -Wp,-D/-U/-I<arg>, -Wp,-isystem/-iquote/-idirafter/-include/-imacros,<arg>
 #              and -Wp,-MD/-MMD,<file>, -Wp,-MF/-MT/-MQ,<arg>, -Wp,-MP (as the options without the -Wp,)
 #              gcc backend: -O0 -O1 -O2 -O3 -Os -Og (-O2 when none is given) and -g, -g0..-g3, -ggdb, -gdwarf-N
 #              gcc backend: -march=* and the ISA options -msse*, -mavx*, -mfma, -mbmi*, -mpopcnt, -mlzcnt, -mf16c,
 #              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (qbe: ignored)
+#              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (qbe: ignored)
+#              gcc backend: -fno-jump-tables, and -fno-crossjumping when the host gcc is GNU gcc, given to the C compile (qbe: ignored)
 #   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
 #              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
@@ -74,6 +79,9 @@ add_arg() {   # add_arg ARG DEPTH: ARG, or the arguments in the response file it
 }
 for a in "$@"; do add_arg "$a" 0; done
 set -- "${expanded[@]+"${expanded[@]}"}"
+source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcc" "$@"   # --bundle-libs (docs/notes/bundle.md)
+source "$root/scripts/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcc" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
+set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
 
 # Queries first: they take no input files.
 if [ $# -eq 0 ]; then die "no input files"; fi
@@ -111,6 +119,11 @@ asm=0        # -S
 asf=()       # -Wa,* (assembler options)
 optlvl=-O2      # gcc backend: last -O option (-O2 when none)
 dbg=()       # gcc backend: -g options, in order
+gnu_gcc=
+host_is_gnu_gcc() {  # whether the gcc backend's host compiler is GNU gcc (on macOS "gcc" is Apple clang); asked once, when first needed
+  if [ -z "$gnu_gcc" ]; then gcc --version 2>&1 | grep -q 'Free Software Foundation' && gnu_gcc=1 || gnu_gcc=0; fi
+  [ "$gnu_gcc" = 1 ]
+}
 isa=()       # gcc backend: -march and the ISA -m options (-msse*, -mavx*, ...), given to the C compile
 # NFCXX_GCC_PASSTHROUGH=1 with the gcc backend: the options QBE cannot honour but gcc can (codegen -m options,
 # -ffreestanding, -funsigned-char, -fno-PIE, --param ...) go to gcc unchanged, in command-line order, instead of being
@@ -184,6 +197,15 @@ for ((i = 0; i < n; i++)); do
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
     -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) gcconly "$a" || isa+=("$a") ;;
+    # --param name=value: gcc's inlining and optimisation tuning knobs (ASTro's code store passes early-inlining-insns). They
+    # change no meaning, only how hard gcc optimises, so the gcc backend gets them and QBE, which has no such knobs, ignores them.
+    --param=*) isa+=("$a") ;;
+    # -fno-jump-tables and -fno-crossjumping (ASTro's code store passes both) only steer gcc's code generation: gcc gets them;
+    # QBE makes no jump tables and does no cross jumping.
+    # -fno-crossjumping is GNU gcc only (clang stops with "unknown argument"), so it goes to the host compiler only when that is gcc.
+    -fno-jump-tables) isa+=("$a") ;;
+    -fno-crossjumping) host_is_gnu_gcc && isa+=("$a") ;;
+    --param) need; isa+=("$a" "${args[++i]}") ;;
     -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || : ;;
     -m*) gcconly "$a" || die "$a is not supported" ;;
     -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gcconly "$a" || : ;;

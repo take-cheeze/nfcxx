@@ -1,0 +1,8 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Pad") 8 4 (field "a" 0 char) (field "b" 4 int))
+(call-effects "pad_write" (returns void) (nothrow) (noescape) (closed) (args (write (struct "Pad"))))
+(function "test" (ret int) (params )
+(slot "s" (struct "Pad") 8 4)
+
+(decl $"s" val) (zero-fill 8 $"s") (eval (call void &"pad_write" $"s")) (let %1 long (load long $"s"))(return (const int 0))
+)

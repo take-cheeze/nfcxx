@@ -63,10 +63,10 @@ jobs:
         run: scripts/setup-mruby.sh
 
       # The Rust examples: rustc's LLVM IR, which llvm-to-pathb.rb reads, changes between releases, so the version is
-      # pinned (the runner's rustup installs it).
+      # pinned (the runner's rustup installs it), with llvm-tools for the llvm-dis of the module after LTO.
       - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install 1.97.0 --profile minimal
+          rustup toolchain install 1.97.0 --profile minimal --component llvm-tools
           echo "RUSTC=$(rustup which --toolchain 1.97.0 rustc)" >> "$GITHUB_ENV"
 
       # The Go examples: TinyGo (scripts/setup-tinygo.sh, pinned) runs the Go toolchain.
