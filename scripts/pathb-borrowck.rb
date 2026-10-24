@@ -233,7 +233,8 @@ class BorrowLayouts
   end
 end
 
-# Closed summaries are trusted contracts, not a verification of callee bodies.
+# Closed summaries are trusted at calls. A body defined in the same module is
+# checked against its summary (LocalLifetime#contract_regions).
 # Keep this validator synchronized across the three standalone IR tools.
 class BorrowCallEffects
   def initialize(forms, layouts, bad, refused)
@@ -312,6 +313,7 @@ class LocalLifetime
     @call_effects = call_effects || BorrowCallEffects.new([], @layouts, BadIR, BorrowRefused)
     raise BadIR, 'function header' unless f.length >= 4 && bh(f[2]) == 'ret' && bh(f[3]) == 'params'
     @name = bname(f[1])
+    @ret = f[2][1]
     @slots = {}
     @slot_info = {}
     @views = []
@@ -325,15 +327,18 @@ class LocalLifetime
     @loans = {}
     @drops = {}
     @register_types = {}
+    @symbols = {}
     scan = lambda do |x|
+      @symbols[x.name] = true if x.is_a?(IRSym) && x.sig == '$'
       return unless x.is_a?(Array)
       if %w[param let set].include?(bh(x)) && x.length == 4 && x[1].is_a?(String)
         ty = bh(x) == 'param' ? x[3] : x[2]
         list = (@register_types[x[1]] ||= [])
         list << ty unless list.any? { |old| same_type?(old, ty) }
       end
-      if bh(x) == 'decl' && x[1].is_a?(IRSym) && x[1].sig == '$'
-        @declared[x[1].name] = true
+      if bh(x) == 'decl'
+        @has_facts = true
+        @declared[x[1].name] = true if x[1].is_a?(IRSym) && x[1].sig == '$'
       end
       if bh(x) == 'borrow'
         raise BadIR, 'borrow form' unless x.length == 5 && bh(x[1]) == 'ptr' && x[2].is_a?(IRStr) && %w[shared exclusive].include?(x[3])
@@ -375,7 +380,7 @@ class LocalLifetime
       x.each { |y| scan.call(y) }
     end
     scan.call(f)
-    raise BorrowRefused, 'no local declaration facts; use NFCXX_PATHB_BORROW=1' if @declared.empty?
+    raise BorrowRefused, 'no local declaration facts; use NFCXX_PATHB_BORROW=1' unless @has_facts
     f.drop(4).each do |x|
       if bh(x) == 'slot'
         raise BadIR, 'slot form' unless x.length == 5
@@ -395,13 +400,16 @@ class LocalLifetime
     end
     f[3].drop(1).each do |p|
       raise BadIR, 'param form' unless bh(p) == 'param'
-      @params << [p[1], bname(p[2]), bh(p[3]) == 'ptr']
+      @params << [p[1], bname(p[2]), bh(p[3]) == 'ptr', p[3]]
     end
     @slots.each_key do |name|
       unless @declared[name] || @params.any? { |p| p[1] == name }
         raise BorrowRefused, "missing declaration facts for slot #{name}"
       end
     end
+    @summary = @call_effects.lookup(@name)
+    @regions = {}
+    contract_regions if @summary
     @ancestors = {}
     @loans.each_key { |id| resolve_loan(id, []) }
     @loans.each_value do |loan|
@@ -431,6 +439,11 @@ class LocalLifetime
       end
       @drops[id] = {root: root, off: off, width: width, type: ty, required: required}
     end
+    @regions.each_value do |r|
+      next unless r[:mode] == 'consume'
+      raise BadIR, "drop obligation #{r[:name]} collides with a contract argument" if @drops.key?(r[:name])
+      @drops[r[:name]] = {root: r[:name], off: 0, width: r[:width], type: r[:type], required: r[:required]}
+    end
     body = f.drop(4).reject { |x| ['slot', 'static', 'weak', 'drop-obligation'].include?(bh(x)) }
     @entry = sequence(body, node(['function-exit'], []), nil, nil)
     @nodes.each do |n|
@@ -442,6 +455,64 @@ class LocalLifetime
           edge
         end
       end
+    end
+  end
+
+  # A defined function with a call-effects summary is checked against it. Each
+  # memory argument's pointee becomes a region named *%N. Read, write, and init
+  # arguments are reached through a loan of that name lasting the whole call;
+  # consume arguments are owned places with a live obligation of that name.
+  def contract_regions
+    unless same_type?(@ret, @summary[:result])
+      raise BadIR, 'function return type disagrees with its effect contract'
+    end
+    unless @params.length == @summary[:args].length
+      raise BadIR, 'function arity disagrees with its effect contract'
+    end
+    @params.each_with_index do |(reg, _name, pointer, pty), i|
+      mode, ty = @summary[:args][i]
+      if mode == 'value'
+        unless !pointer && scalar_abi_class(pty) == scalar_abi_class(ty)
+          raise BadIR, 'function parameter disagrees with its effect contract'
+        end
+        next
+      end
+      raise BadIR, 'function parameter disagrees with its effect contract' unless pointer
+      name = '*' + reg
+      if @slots[name] || @symbols[name] || @loans.key?(name)
+        raise BadIR, "contract argument #{name} collides with a local name"
+      end
+      desc = @layouts.lookup(ty)
+      width = type_width(ty)
+      @slot_info[name] = [@slots.length, width, ty, desc ? desc[:align] : width]
+      @slots[name] = true
+      required = semantic_bytes(name, 0, ty) || (0...width).to_a
+      @regions[reg] = {name: name, mode: mode, type: ty, width: width, required: required}
+      @loans[name] = [name, mode == 'read' ? 'shared' : 'exclusive', nil, 0, ty, ty] unless mode == 'consume'
+    end
+  end
+
+  # Write and init promise defined fields on every normal return; consume
+  # obligations are checked with the other pending drops.
+  def check_contract_exit(state)
+    @regions.each_value do |r|
+      next unless %w[write init].include?(r[:mode])
+      ok = r[:required].all? { |i| state[byte_key(r[:name], i)] == ['initialized'] }
+      diagnostic('contract-output-uninitialized', r[:name]) unless ok
+    end
+  end
+
+  def check_contract_return(refs)
+    a = @summary[:alias]
+    return unless a
+    region = @regions[@params[a[:arg]][0]][:name]
+    diagnostic('contract-return-mismatch', region) if refs.empty?
+    refs.each do |p|
+      next if base_origin(p).start_with?('expired:') || base_origin(p).start_with?('ended:')
+      root, off, own = address(p)
+      exact = root == region && off == a[:offset] && own &&
+              (a[:kind] == 'shared' || ([own] + @ancestors[own]).all? { |id| @loans[id][1] == 'exclusive' })
+      diagnostic('contract-return-mismatch', region) unless exact
     end
   end
 
@@ -753,7 +824,10 @@ class LocalLifetime
   # provenance is a set of local storage identities, or external/unknown.
   def access(place, state, read, borrowing = nil, width = nil, semantic_type = nil)
     base = base_origin(place)
-    return if base == 'external'
+    if base == 'external'
+      diagnostic('contract-not-closed', 'external memory') if @summary
+      return
+    end
     if base.start_with?('ended:')
       diagnostic('use-after-scope', base[6..-1])
       return
@@ -1076,6 +1150,7 @@ class LocalLifetime
     raise BadIR, "#{bh(x)} form" if sizes && !sizes.include?(x.length)
     case bh(x)
     when 'function-exit'
+      check_contract_exit(state) if @summary
       check_pending_drops(state)
     when 'drop-live', 'drop-state', 'drop-state-if-live'
       return drop_event(x, state)
@@ -1113,6 +1188,7 @@ class LocalLifetime
       raise BadIR, 'loan-end form' unless x[1].is_a?(IRStr)
       id = bname(x[1])
       raise BadIR, "unknown loan #{id}" unless @loans.key?(id)
+      raise BadIR, "contract argument loan #{id} cannot end inside the call" if contract_loan?(id)
       record_loan_definition(id)
       status = state['loan:' + id]
       valid = status == ['active'] || (@infer_loan_ends && status.all? { |s| ['active', 'inferred-ended'].include?(s) })
@@ -1143,13 +1219,23 @@ class LocalLifetime
       raise BorrowRefused, 'store through an aliased destination' unless dest.length == 1
       a = address(dest[0])
       return state unless a
+      if v && @regions.values.any? { |r| r[:name] == a[0] }
+        raise BorrowRefused, 'store of unknown pointer provenance into argument memory' if v.include?('unknown')
+        diagnostic('contract-escape', a[0]) if v.any? { |p| p != 'external' }
+      end
       track_drop_write(a[0], a[1], width, state)
       write_memory(a[0], a[1], width, state, !zero && bh(x[1]) == 'ptr' ? v : nil)
     when 'return'
       refs = x[1] ? value(x[1], state) : []
       raise BorrowRefused, 'return with unknown pointer provenance' if refs.include?('unknown')
+      if @summary
+        check_contract_return(refs)
+        check_contract_exit(state)
+      end
       refs.each do |p|
         next if p == 'external'
+        # Argument pointers are checked against the returned alias contract.
+        next if @regions.values.any? { |r| r[:name] == storage(p) }
         if p.start_with?('expired:')
           diagnostic('inactive-loan', p[8..-1])
         else
@@ -1179,13 +1265,31 @@ class LocalLifetime
       end
     end
     @loans.each_key { |id| initial['loan:' + id] = ['inactive'] }
+    @regions.each do |reg, r|
+      name = r[:name]
+      r[:width].times { |i| initial[byte_key(name, i)] = ['uninitialized'] }
+      unless r[:mode] == 'init'
+        r[:required].each { |i| initial[byte_key(name, i)] = ['initialized'] }
+      end
+      if r[:mode] == 'consume'
+        initial['value:' + reg] = ['local:' + name]
+        initial[drop_key(name)] = ['live']
+      else
+        initial['value:' + reg] = ['loan:' + name]
+        initial['loan:' + name] = ['active']
+      end
+    end
     initial
+  end
+
+  def contract_loan?(id)
+    @regions.values.any? { |r| r[:name] == id && r[:mode] != 'consume' }
   end
 
   def expire_dead_loans(state, needed)
     @loans.each_key do |id|
       status = state['loan:' + id]
-      next if needed.include?(id) || !status.include?('active')
+      next if needed.include?(id) || contract_loan?(id) || !status.include?('active')
       state['loan:' + id] = status.map { |s| s == 'active' ? 'inferred-ended' : s }.uniq.sort
       invalidate_pointers(state, ['loan:' + id], 'expired:' + id)
     end

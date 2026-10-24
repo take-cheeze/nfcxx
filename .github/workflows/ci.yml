@@ -75,13 +75,14 @@ jobs:
               tests/realworld/run.sh
               tests/realworld/run_json.sh
               tests/realworld/run_fmt.sh
-          - name: multi-TU, modules, EH shim, nfceval, bundled libraries, call ABI
+          - name: multi-TU, modules, EH shim, nfceval, nfcffi, bundled libraries, call ABI
             run: |
               tests/multi-tu/run.sh
               tests/modules/run.sh
               tests/ehshim/run.sh
               tests/eh-unwind/run.sh
               tests/eval/run.sh
+              tests/ffi/run.sh
               tests/bundle/run.sh
               tests/call-abi/run.sh
           # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1; tests/ehshim/unwind_members.cpp). gcc: gcc's

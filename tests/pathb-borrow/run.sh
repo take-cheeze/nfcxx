@@ -46,7 +46,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
   done
 done
 # Value transfers are checked in explicit and inferred loan modes.
-for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir; do
+for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pathb-borrow/layouts/*.ir tests/pathb-borrow/drops/*.ir tests/pathb-borrow/calls/*.ir tests/pathb-borrow/returned/*.ir tests/pathb-borrow/verify/*.ir; do
   for mode in explicit inferred; do
     options=()
     expected=${src%.ir}.expect
@@ -81,6 +81,25 @@ for src in tests/pathb-borrow/cpp/*.cpp; do
   fi
   scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/source.ir" > "$tmp/source.qbe"
   echo "ok   $src"
+  pass=$((pass + 1))
+done
+# Summaries of functions defined in the module are checked against their bodies.
+# The same lowered C++ verifies under correct summaries and fails under wrong ones.
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir tests/pathb-borrow/contracts/callees.cpp > "$tmp/callees.ir"
+for effects in tests/pathb-borrow/contracts/*.effects; do
+  { head -1 "$tmp/callees.ir"; cat "$effects"; tail -n +2 "$tmp/callees.ir"; } > "$tmp/contracted.ir"
+  expected=${effects%.effects}.expect
+  want=$(head -1 "$expected")
+  for options in "" --infer-loan-ends; do
+    rc=0
+    scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/contracted.ir" > "$tmp/out" 2>&1 || rc=$?
+    if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
+      echo "FAIL $effects ${options:-explicit}: expected exit $want, got $rc"
+      exit 1
+    fi
+  done
+  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/contracted.ir" > "$tmp/contracted.qbe"
+  echo "ok   $effects against lowered C++ bodies"
   pass=$((pass + 1))
 done
 # Checking facts and value-transfer policy must not change native execution.
@@ -178,5 +197,22 @@ rc=0
 "$tmp/returned" || rc=$?
 [ "$rc" = 7 ] || { echo "FAIL returned alias runtime: expected 7, got $rc"; exit 1; }
 echo "ok   returned alias calls, metadata erasure, oracle, and native execution"
+pass=$((pass + 1))
+# Verified callees and their caller in one module run natively.
+verified_ir=tests/mruby/pathb-edge/verified_callee_facts.ir
+for mode in explicit inferred; do
+  options=()
+  [ "$mode" = explicit ] || options=(--infer-loan-ends)
+  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$verified_ir" > "$tmp/verified-check"
+done
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$verified_ir" > "$tmp/verified.qbe"
+scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$verified_ir" > "$tmp/verified-oracle.qbe"
+cmp "$tmp/verified.qbe" "$tmp/verified-oracle.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/verified.qbe" -o "$tmp/verified.s"
+cc "$tmp/verified.s" -o "$tmp/verified"
+rc=0
+"$tmp/verified" || rc=$?
+[ "$rc" = 7 ] || { echo "FAIL verified callees runtime: expected 7, got $rc"; exit 1; }
+echo "ok   verified callee bodies, caller, oracle, and native execution"
 pass=$((pass + 1))
 echo "pass $pass fail 0"
