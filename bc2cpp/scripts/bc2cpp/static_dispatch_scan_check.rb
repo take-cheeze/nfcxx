@@ -10,6 +10,8 @@
 #   NON_LOOKUP_HELPERS: a generated symbol whose every use is bc2cpp_nomethod(_raise), bc2cpp_guard_violation,
 #     bc2cpp_hint_violation or bc2cpp_nil_receiver is no dynamic lookup; any bc2cpp_send, owner call or
 #     bc2cpp_sym(M, i) use keeps it one.
+#   BYTECODE_PROC: what counts as generated C building a proc over a bytecode irep (which keeps every block of a
+#     registered compiled method runnable as bytecode).
 #   OTHER_MAKER_GEMS: the closed scan reads none of the other makers' sources.
 #
 # Usage: ruby scripts/bc2cpp/static_dispatch_scan_check.rb   (no mrbc needed)
@@ -81,6 +83,11 @@ check('non-lookup: only nomethod / nil_receiver / hint_violation uses', free.inc
 check('non-lookup: a bc2cpp_send use is a lookup', !free.include?('sent'))
 check('non-lookup: a bc2cpp_sym(M, i) use is a lookup', !free.include?('symbol'))
 check('non-lookup: an owner call next to a guard violation is a lookup', !free.include?('mixed'))
+
+# --- BYTECODE_PROC ---
+check('bytecode proc: mrb_proc_new / mrb_closure_new',
+      'p = mrb_proc_new(M, irep);'.match?(S::BYTECODE_PROC) && 'mrb_closure_new (M, irep)'.match?(S::BYTECODE_PROC))
+check('bytecode proc: a C proc is not one', !'mrb_proc_new_cfunc_with_env(M, f, 1, &v)'.match?(S::BYTECODE_PROC))
 
 # --- OTHER_MAKER_GEMS ---
 ruby, natives = S.outside_world_files(root, closed_only: true)

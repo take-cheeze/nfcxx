@@ -115,6 +115,9 @@ module StaticDispatchRegistrations
     \s*r\d+\ =\ bc2cpp_send\(M,\ [^,]+,\ (\d+),
   }x
 
+  # A proc over a bytecode irep (mrb_proc_new, mrb_closure_new), as opposed to mrb_proc_new_cfunc*.
+  BYTECODE_PROC = /\bmrb_(?:proc_new|closure_new)\s*\(/
+
   # NON_LOOKUP_HELPERS: the generated helpers whose use of a name finds no compiled method. Each is the else arm of
   # a proof (symbol_cache.rb): bc2cpp_guard_violation and bc2cpp_hint_violation raise without dispatching;
   # bc2cpp_nomethod(_raise) dispatches only to report a violated proof, for a receiver the closed world proved
@@ -381,9 +384,12 @@ module StaticDispatchRegistrations
     # the root and class bodies (and blocks made in them) plus by the bodies
     # those names reach. Everything else -- an uncompiled method, a compiled
     # one left unregistered -- runs whenever its name is looked up at all.
-    # Blocks run whenever their method might: always inside a registered
-    # compiled method (bc2cpp may keep a block as a bytecode proc), otherwise
-    # with the method. Names are only ever added, so both fixpoints converge.
+    # Blocks run whenever their method might. Inside a registered compiled
+    # method that is the LOAD phase too, unless the generated C++ builds a
+    # bytecode proc somewhere (BYTECODE_PROC): every block the compiled code
+    # makes is otherwise a C proc (mrb_proc_new_cfunc_with_env), so the block's
+    # irep runs only from the method's own bytecode. Names are only ever added,
+    # so both fixpoints converge.
     sends = lambda do |irep, into|
       grew = false
       BytecodeIR.for(irep).each_source do |insn, _index|
@@ -410,13 +416,14 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden)
     dynamic.merge(load_names)
+    bytecode_blocks = runs.each_value.any? { |r| r[:gen].match?(BYTECODE_PROC) || r[:hand].match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
       m = method_of[label]
       next true if m.nil?
 
       owner, name = body_of[m]
       if overridden.include?("#{owner}##{name}")
-        label == m ? load_bodies.include?(m) : true
+        bytecode_blocks && label != m ? true : load_bodies.include?(m)
       else
         dynamic.include?(name)
       end
