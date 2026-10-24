@@ -1,7 +1,10 @@
 # Borrow checker for the Path B IR: design plan
 
-Status: plan only, no code. Written against `origin/main` at `265991b`. Every claim about the code cites a file
-and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
+Status: initial local lifetime checker implemented in `scripts/pathb-borrowck.rb`, using the existing
+`decl` and `scope-end` facts. See [pathb-borrowck.md](pathb-borrowck.md) for the implemented subset,
+commands, tests, and the Rust frontend boundary. Loan exclusivity, moves, and interprocedural
+region inference remain planned. The historical design below was written against `origin/main` at
+`265991b`. Every claim about the code cites a file and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
 
 ## 0. Summary
 
@@ -113,8 +116,8 @@ a pointer to it passed to a call), `move` (a `(rref-arg)`), `drop` (the destruct
 **Algorithm.** Forward "maybe uninitialized" and "maybe moved" analyses, meet by union, worklist to a fixed point, over
 the event sequence of each block. A read of a slot that is maybe-uninitialized on some path is an error, and so is a
 use of a maybe-moved slot, for a type marked as moved-from-is-dead (section 3). Field granularity applies only to
-direct member stores (`(offset $"s" N)`). An address that escapes (stored to memory, or passed to a function that
-takes a raw pointer) makes the slot "initialized by unknown code" from then on, so the analysis does not report it.
+direct member stores (`(offset $"s" N)`). An address that escapes to unknown code requires an
+effect/lifetime contract. Without one, the checker refuses the function; escape must never be treated as proof of initialization or safety.
 
 **Proves.** A read of a local that no path initializes is an error. A read of a local that some path leaves
 uninitialized is an error, which is stricter than C++ (C++ only says the read is undefined). A use of a moved-from

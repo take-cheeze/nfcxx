@@ -37,6 +37,7 @@ covers say so.
 | [pathb-longdouble.md](notes/pathb-longdouble.md) | Path B `long double`: 16-byte objects, helper calls compiled by gcc, x87 thunks for the C calling convention; tests and named limits. |
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
+| [pathb-borrowck.md](notes/pathb-borrowck.md) | Opt-in local lifetime analysis on annotated Path B IR: initialization, dangling accesses, local-address returns, refusal boundaries, and the next steps toward shared Rust/C++ borrow checking. |
 | [pathb-stage3.md](notes/pathb-stage3.md) | The IR-to-QBE emitter, translation validation, and the rounds of closed gaps (volatile, TLS, exceptions, dynamic init, bit-fields, VLAs). |
 | [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the ILP32 layout of wasm32 under `--emscripten` (i32 pointers), the 64-bit memory under `--memory64`, the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`, with the Emscripten glue of emcc when it is installed). |
 | [wasm-explorer.md](notes/wasm-explorer.md) | The wasm explorer page (`tools/wasm-explorer/`): compile C++ to wasm on a local server, run the module in the page; Compiler Explorer feature coverage; memory64 (wasm64) as a change to the emitter. |
