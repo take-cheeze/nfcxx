@@ -21,7 +21,8 @@ module NativeCoreDirect
   OWNERS = {
     'Array' => { guard: 'mrb_array_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->array_class' },
     'String' => { guard: 'mrb_string_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->string_class' },
-    'Integer' => { guard: 'mrb_integer_p(%<r>s)' }
+    'Integer' => { guard: 'mrb_integer_p(%<r>s)' },
+    'Range' => { guard: 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class' }
   }.freeze
 
   # A guard that keeps the C wrapper's argument coercion out of the fast path:
@@ -31,6 +32,7 @@ module NativeCoreDirect
     integer: 'mrb_integer_p(%<a>s)',
     # 'A' only type-checks (mrb_ensure_array_type), so any Array passes through as is.
     array: 'mrb_array_p(%<a>s)',
+    two_integers: 'mrb_integer_p(%<a>s) && mrb_integer_p(%<b>s)',
     nil_or_string: '(mrb_nil_p(%<a>s) || mrb_string_p(%<a>s))'
   }.freeze
 
@@ -46,7 +48,7 @@ module NativeCoreDirect
     def guard(recv, argv)
       parts = [format(OWNERS.fetch(owner)[:guard], r: recv)]
       arg_guard = ARG_GUARDS.fetch(arg)
-      parts << format(arg_guard, a: argv.first) if arg_guard
+      parts << format(arg_guard, a: argv.first, b: argv[1]) if arg_guard
       parts.join(' && ')
     end
 
@@ -324,6 +326,123 @@ module NativeCoreDirect
                 }
                 return mrb_str_to_integer(mrb, self, base, FALSE);
               C
+    # Range#__empty_range? reads (begin, end, exclusive) with "oob"; 'b' is mrb_test, and the receiver is unused.
+    Entry.new(name: '__empty_range?', owner: 'Range', arity: 3, arg: :none, aspec: 'MRB_ARGS_REQ(3)',
+              expression: 'bc2cpp_range_empty_p(M, ARG0, ARG1, ARG2)', helper: 'bc2cpp_range_empty_p',
+              apis: [%w[mruby.h mrb_cmp]],
+              checks: [['range_empty_p', <<~C, :exact]]),
+                mrb_value b, e;
+                mrb_bool excl;
+                mrb_get_args(mrb, "oob", &b, &e, &excl);
+                if (mrb_nil_p(b) || mrb_nil_p(e))
+                  return mrb_false_value();
+                mrb_int comp = mrb_cmp(mrb, b, e);
+                return mrb_bool_value(comp == -2 || comp > 0 || (comp == 0 && excl));
+              C
+    # Array#__fetch(index, default, none): the index is mrb_as_int'd, so the Integer guard is on it (ARG0).
+    Entry.new(name: '__fetch', owner: 'Array', arity: 3, arg: :integer, aspec: 'MRB_ARGS_REQ(3)',
+              expression: 'bc2cpp_ary_fetch(M, recv, ARG0, ARG1, ARG2)', helper: 'bc2cpp_ary_fetch',
+              apis: [%w[mruby.h mrb_obj_equal], %w[mruby.h mrb_raisef]],
+              checks: [['ary_fetch', <<~C, :exact]]),
+                mrb_value index_val, default_val, none;
+                mrb_get_args(mrb, "ooo", &index_val, &default_val, &none);
+                mrb_int index = mrb_as_int(mrb, index_val);
+                mrb_int original_index = index;
+                struct RArray *ary = mrb_ary_ptr(self);
+                mrb_int len = ARY_LEN(ary);
+                if (index < 0) {
+                  index += len;
+                }
+                if (index < 0 || index >= len) {
+                  if (mrb_obj_equal(mrb, default_val, none)) {
+                    mrb_raisef(mrb, E_INDEX_ERROR,
+                               "index %i outside of array bounds: %i...%i",
+                               original_index, -len, len);
+                  }
+                  return default_val;
+                }
+                return ARY_PTR(ary)[index];
+              C
+    # String#byteslice with fixnum arguments: the one-argument Integer arm (len 1, a zero-length slice is nil) and the
+    # two-argument "ii" arm. A Range argument keeps the send. Both helpers call internal.h's non-static functions.
+    Entry.new(name: 'byteslice', owner: 'String', arity: 1, arg: :integer, aspec: 'MRB_ARGS_ARG(1,1)',
+              expression: 'bc2cpp_str_byteslice1(M, recv, ARG0)', helper: 'bc2cpp_str_byteslice1',
+              apis: [],
+              internals: [%w[mruby/internal.h mrb_str_beg_len], %w[mruby/internal.h mrb_str_byte_subseq]],
+              checks: [['mrb_str_byteslice', <<~C, :exact]]),
+                mrb_value a1;
+                mrb_int str_len, beg, len;
+                mrb_bool empty = TRUE;
+                len = mrb_get_argc(mrb);
+                switch (len) {
+                case 2:
+                  mrb_get_args(mrb, "ii", &beg, &len);
+                  str_len = RSTRING_LEN(str);
+                  break;
+                case 1:
+                  a1 = mrb_get_arg1(mrb);
+                  str_len = RSTRING_LEN(str);
+                  if (mrb_range_p(a1)) {
+                    if (mrb_range_beg_len(mrb, a1, &beg, &len, str_len, TRUE) != MRB_RANGE_OK) {
+                      return mrb_nil_value();
+                    }
+                  }
+                  else {
+                    beg = mrb_as_int(mrb, a1);
+                    len = 1;
+                    empty = FALSE;
+                  }
+                  break;
+                default:
+                  mrb_argnum_error(mrb, len, 1, 2);
+                  break;
+                }
+                if (mrb_str_beg_len(str_len, &beg, &len) && (empty || len != 0)) {
+                  return mrb_str_byte_subseq(mrb, str, beg, len);
+                }
+                else {
+                  return mrb_nil_value();
+                }
+              C
+    Entry.new(name: 'byteslice', owner: 'String', arity: 2, arg: :two_integers, aspec: 'MRB_ARGS_ARG(1,1)',
+              expression: 'bc2cpp_str_byteslice2(M, recv, ARG0, ARG1)', helper: 'bc2cpp_str_byteslice2',
+              apis: [],
+              internals: [%w[mruby/internal.h mrb_str_beg_len], %w[mruby/internal.h mrb_str_byte_subseq]],
+              checks: [['mrb_str_byteslice', <<~C, :exact]]),
+                mrb_value a1;
+                mrb_int str_len, beg, len;
+                mrb_bool empty = TRUE;
+                len = mrb_get_argc(mrb);
+                switch (len) {
+                case 2:
+                  mrb_get_args(mrb, "ii", &beg, &len);
+                  str_len = RSTRING_LEN(str);
+                  break;
+                case 1:
+                  a1 = mrb_get_arg1(mrb);
+                  str_len = RSTRING_LEN(str);
+                  if (mrb_range_p(a1)) {
+                    if (mrb_range_beg_len(mrb, a1, &beg, &len, str_len, TRUE) != MRB_RANGE_OK) {
+                      return mrb_nil_value();
+                    }
+                  }
+                  else {
+                    beg = mrb_as_int(mrb, a1);
+                    len = 1;
+                    empty = FALSE;
+                  }
+                  break;
+                default:
+                  mrb_argnum_error(mrb, len, 1, 2);
+                  break;
+                }
+                if (mrb_str_beg_len(str_len, &beg, &len) && (empty || len != 0)) {
+                  return mrb_str_byte_subseq(mrb, str, beg, len);
+                }
+                else {
+                  return mrb_nil_value();
+                }
+              C
     # mrb_ary_svalue is static, so the call is a mirror in emit_native_core_helpers.
     Entry.new(name: '__svalue', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: 'bc2cpp_ary_svalue(M, recv)', helper: 'bc2cpp_ary_svalue',
@@ -464,6 +583,59 @@ module NativeCoreDirect
         if (i == j) return mrb_nil_value();
         ARY_SET_LEN(ary, j);
         return ret;
+      }
+    CPP
+    'bc2cpp_range_empty_p' => <<~CPP,
+      static inline mrb_value bc2cpp_range_empty_p(mrb_state* M, mrb_value b, mrb_value e, mrb_value excl_value) {
+        mrb_bool excl = mrb_test(excl_value);
+        if (mrb_nil_p(b) || mrb_nil_p(e))
+          return mrb_false_value();
+        mrb_int comp = mrb_cmp(M, b, e);
+        return mrb_bool_value(comp == -2 || comp > 0 || (comp == 0 && excl));
+      }
+    CPP
+    'bc2cpp_ary_fetch' => <<~CPP,
+      static inline mrb_value bc2cpp_ary_fetch(mrb_state* M, mrb_value self, mrb_value index_val, mrb_value default_val,
+                                               mrb_value none) {
+        mrb_int index = mrb_integer(index_val);
+        mrb_int original_index = index;
+        struct RArray *ary = mrb_ary_ptr(self);
+        mrb_int len = ARY_LEN(ary);
+        if (index < 0) {
+          index += len;
+        }
+        if (index < 0 || index >= len) {
+          if (mrb_obj_equal(M, default_val, none)) {
+            mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "IndexError")),
+                       "index %i outside of array bounds: %i...%i",
+                       original_index, -len, len);
+          }
+          return default_val;
+        }
+        return ARY_PTR(ary)[index];
+      }
+    CPP
+    # mrb_str_beg_len and mrb_str_byte_subseq are internal.h's, which has no C linkage guard.
+    'bc2cpp_str_byteslice1' => <<~CPP,
+      extern "C" mrb_bool mrb_str_beg_len(mrb_int, mrb_int*, mrb_int*);
+      extern "C" mrb_value mrb_str_byte_subseq(mrb_state*, mrb_value, mrb_int, mrb_int);
+      static inline mrb_value bc2cpp_str_byteslice1(mrb_state* M, mrb_value str, mrb_value pos) {
+        mrb_int beg = mrb_integer(pos), len = 1;
+        if (mrb_str_beg_len(RSTRING_LEN(str), &beg, &len) && len != 0) {
+          return mrb_str_byte_subseq(M, str, beg, len);
+        }
+        return mrb_nil_value();
+      }
+    CPP
+    'bc2cpp_str_byteslice2' => <<~CPP,
+      extern "C" mrb_bool mrb_str_beg_len(mrb_int, mrb_int*, mrb_int*);
+      extern "C" mrb_value mrb_str_byte_subseq(mrb_state*, mrb_value, mrb_int, mrb_int);
+      static inline mrb_value bc2cpp_str_byteslice2(mrb_state* M, mrb_value str, mrb_value pos, mrb_value count) {
+        mrb_int beg = mrb_integer(pos), len = mrb_integer(count);
+        if (mrb_str_beg_len(RSTRING_LEN(str), &beg, &len)) {
+          return mrb_str_byte_subseq(M, str, beg, len);
+        }
+        return mrb_nil_value();
       }
     CPP
     'bc2cpp_str_getbyte' => <<~CPP,
@@ -625,7 +797,7 @@ module NativeCoreDirect
     end
     Array(entry.internals).each do |header, function|
       text = File.read(File.join(include_dir, header), encoding: 'UTF-8')
-      return "#{function} is not declared in #{header}" unless text.match?(/^mrb_value\s+#{function}\s*\(/)
+      return "#{function} is not declared in #{header}" unless text.match?(/^(?:mrb_value|mrb_bool)\s+#{function}\s*\(/)
     end
     nil
   end
