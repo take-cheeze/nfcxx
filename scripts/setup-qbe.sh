@@ -11,15 +11,15 @@
 # array-qual) are commits of a44a644 itself; see
 # docs/notes/freestanding.md and docs/notes/realworld.md for what each one fixes. Move the pin in the submodule and
 # this comment together when rebasing those patches onto a new upstream.
-# The pin is a303890, on the fork's branch nfcxx-linux-kernel: the earlier pin (9f706f5, nfcxx-stmt-expr: GNU statement
-# expressions ({ ... }), which ASTro's baruby_precise needs, docs/notes/astro.md) plus four commits: the __extension__
+# The pin is 78b430a, on the fork's branch nfcxx-linux-kernel: the earlier pin (9f706f5, nfcxx-stmt-expr: GNU statement
+# expressions ({ ... }), which ASTro's baruby_precise needs, docs/notes/astro.md) plus five commits: the __extension__
 # keyword, GNU extended inline asm lowered to out-of-line thunks (docs/notes/inline-asm.md; qbe-cc passes -a so cproc
 # writes the thunks to a side file appended to the assembly), the pre-C23 reading of true/false/nullptr/bool as
 # identifiers (cproc -K; qbe-cc passes it unless -std=c23), the aligned attribute on a typedef, and GNU attributes
 # between a pointer and the declarator name; then the GNU C of the Linux kernel, implemented as gcc does it or refused
 # (cproc -p, -V, -G: docs/notes/cproc-nfcxx.md, docs/notes/linux-kernel.md); and weak/visibility without effect where
 # there is no inline-asm side file (Mach-O), outside -p, as before cproc took them; and GNU mode on declarations of
-# integer types (glibc's register_t).
+# integer types (glibc's register_t); and C + (x + C1) folded without overwriting the inner sum.
 # The nfcxx QBE fixes are commits of the fork (take-cheeze/qbe, the pin in 3rd/qbe): the pin is 55947e6, on its branch
 # nfcxx-linux-kernel: the earlier pin (5c5b125) plus 1024 copies in one parallel move (rega.c NPm), and what the kernel's
 # objects need (ELF .type/.size for data, -n without floating-point registers for -mno-sse, -U without unwind tables,
