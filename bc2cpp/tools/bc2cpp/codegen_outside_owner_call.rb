@@ -170,6 +170,17 @@ module OutsideOwnerCall
       "#{argv.size}#{args}); /* CLOSED_WORLD owner-call: #{name} */"
   end
 
+  # BLOCK_OWNER_CALL over a splat: the args are an Array's items (`argc`, `argv` are C expressions), as the
+  # `mrb_funcall_with_block(M, recv, mid, ary_size(a), ary_items(a), blk)` it replaces passes them.
+  def block_owner_call_argv_line(dest, recv, name, argc, argv, blk)
+    owners = name_owner_set(name)
+    return nil unless owners
+
+    list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
+    "#{dest} = bc2cpp_owner_call_argv_named(M, #{recv}, \"#{name}\", 0, BC2CPP_OWNERS(#{list}), #{blk}, " \
+      "#{argc}, #{argv}); /* CLOSED_WORLD owner-call: #{name} */"
+  end
+
   # The sorted owners of every outside definition of `name`, or nil when one cannot be named.
   def outside_owner_call_owners(name, allow_empty: false)
     @outside_owner_call_owners ||= {}
