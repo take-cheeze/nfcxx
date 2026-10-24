@@ -22,6 +22,9 @@
 #                  <stem>.ii and <stem>.ti beside its object in any case: the link that follows reads them there.
 #   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
 #                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
+#   --bundle-libs [--bundle-exclude=NAME,...] [--bundle-only=NAME,...]: after the link, the shared libraries the output
+#                  needs (libstdc++, libgcc_s, the program's own; never glibc) are copied into it, so it runs without them
+#                  (tools/bundle, docs/notes/bundle.md). Executables and -shared objects.
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
 #   NFCXX_CACHE=DIR: keeps each -c compile in DIR and takes it back when nothing it depends on changed (docs/notes/cxx-driver.md).
 #   NFCXX_CACHE_LOG=FILE: with NFCXX_CACHE, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
@@ -36,6 +39,7 @@
 #                  host cc must not compile it: give it to a cross compiler. docs/notes/freestanding.md, "Targets".
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
+source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 
