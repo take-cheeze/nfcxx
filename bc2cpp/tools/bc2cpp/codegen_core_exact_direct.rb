@@ -65,18 +65,91 @@ module CoreExactDirect
   # the name up. EnumeratorModel proves Kernel#to_enum is the program's only to_enum/enum_for and that nothing replaces
   # the construction chain; the constant must be stable and no runtime installer may name the involved methods.
   def to_enum_direct_line(d, recv, name, argv, site)
+    return nil unless TO_ENUM_DIRECT_CLASSES.include?(site[:klass]) && to_enum_direct_proven?(argv)
+
+    to_enum_construction_line(d, recv, name, argv, "proven #{site[:klass]} receiver")
+  end
+
+  # TO_ENUM_DIRECT on any receiver (closed world): the program's one Kernel#to_enum answers every object that has
+  # Kernel in its ancestry, and BASIC_OBJECT_SEALED (CodeGen#kernel_receiver_sealed?) proves every object does, unless
+  # a class below Kernel defines the name again. The outside Ruby may (mruby-enum-lazy's Enumerator::Lazy#to_enum):
+  # a receiver of such a class takes the owner call over exactly those owners, any other builds the Enumerator.
+  # A core body (`return to_enum(:each) unless block_given?`) uses the program's world: Kernel#to_enum is itself a
+  # core definition, the one kind a core body may bind to.
+  def to_enum_any_receiver_line(d, recv, name, argv)
+    world = @closed_world || @core_program_world
+    return nil unless EnumeratorModel::NAMES.include?(name) && world && !@call_block_expr && core_extend_enabled?
+    return nil unless kernel_receiver_sealed?(world) && argv.size <= CodeGen::FUNCALL_ARGC_MAX
+    return nil unless to_enum_direct_proven?(argv)
+
+    overriders = to_enum_overriders(world)
+    return nil unless overriders
+
+    build = to_enum_construction_line(d, recv, name, argv, 'closed world, Kernel#to_enum answers this receiver')
+    return build if overriders.empty?
+
+    test = overriders.map do |owner|
+      "((bc2cpp_te_c = #{owner_class_ptr_expr(owner)}) && mrb_obj_is_kind_of(M, #{recv}, bc2cpp_te_c))"
+    end
+    "  // TO_ENUM_DIRECT :#{name} -- an instance of #{overriders.join(', ')} takes its own #{name}\n" \
+      "  { struct RClass* bc2cpp_te_c;\n  if (#{test.join(' || ')}) {\n" \
+      "    #{outside_owner_call_line(d, recv, name, argv, overriders)}\n" \
+      "  } else {\n  #{build.gsub("\n  ", "\n    ")}  } }\n"
+  end
+
+  # The classes besides Kernel that define to_enum/enum_for, or nil when one cannot be named: no definition the
+  # registry cannot see (computed or native), and every outside or core Ruby one named. A Kernel definition may come
+  # only from mruby's own Ruby: the core mrblib's (kernel.rb's NotImplementedError stub) loads before any gem, so the
+  # mruby-enumerator body EnumeratorModel proved replaces it; any other outside Kernel definition refuses.
+  MRUBY_CORE_MRBLIB = File.expand_path('../../3rd/mruby/mrblib', __dir__) + '/'
+
+  def to_enum_overriders(world)
+    @to_enum_overriders ||= {}
+    @to_enum_overriders.fetch(world.object_id) do
+      @to_enum_overriders[world.object_id] = to_enum_overriders_decide(world)
+    end
+  end
+
+  def to_enum_overriders_decide(world)
+    names = EnumeratorModel::NAMES
+    return nil if world.global_refusal || names.any? { |n| world.unknown_def?(n) || @native_name_sources&.key?(n) }
+
+    owners_in = lambda do |paths|
+      result = OutsideRubyOwners.scan(paths)
+      return nil if result.unknown.include?(:all) || names.any? { |n| result.unknown.include?(n) } || !result.wild.empty?
+
+      names.flat_map { |n| result.names.fetch(n, Set.new).to_a }.uniq
+    end
+    core = owners_in.call(program_core_ruby_paths)
+    return nil unless core && (core - ['Kernel']).empty?
+
+    overriders = []
+    Array(world.ruby_paths).each do |path|
+      owners = owners_in.call([path])
+      return nil unless owners
+      return nil if owners.include?('Kernel') && !File.expand_path(path).start_with?(MRUBY_CORE_MRBLIB)
+
+      overriders |= owners - ['Kernel']
+    end
+    return nil if overriders.any? { |o| !o.match?(OutsideOwnerCall::OWNER_PATH) || o.end_with?('.singleton') }
+
+    overriders.sort
+  end
+
+  def to_enum_direct_proven?(argv)
     model = self.class.enumerator_model
-    return nil unless model&.to_enum_direct && TO_ENUM_DIRECT_CLASSES.include?(site[:klass]) && argv.size <= 8
-    return nil unless model.constant_stable
-    return nil if (EnumeratorModel::NAMES + EnumeratorModel::CONSTRUCTION_NAMES).any? { |n| devirt_blocked_name?(n) }
+    return false unless model&.to_enum_direct && model.constant_stable && argv.size <= 8
+    return false if (EnumeratorModel::NAMES + EnumeratorModel::CONSTRUCTION_NAMES).any? { |n| devirt_blocked_name?(n) }
 
     # Only the names an installer creates or replaces matter: `alias_method :_old_initialize, :initialize` copies, it does not install `initialize`.
     installed = symbol_installed_destinations
-    return nil unless installed && (EnumeratorModel::NAMES + EnumeratorModel::CONSTRUCTION_NAMES).none? { |n| installed.include?(n) }
+    !!installed && (EnumeratorModel::NAMES + EnumeratorModel::CONSTRUCTION_NAMES).none? { |n| installed.include?(n) }
+  end
 
+  def to_enum_construction_line(d, recv, name, argv, why)
     meth = argv.empty? ? 'mrb_symbol_value(mrb_intern_lit(M, "each"))' : argv.first
     vector = [recv, meth, *argv.drop(1)]
-    "#{TO_ENUM_DIRECT_NOTE}#{name} -- proven #{site[:klass]} receiver: builds Enumerator.new(self, meth, *args) as " \
+    "#{TO_ENUM_DIRECT_NOTE}#{name} -- #{why}: builds Enumerator.new(self, meth, *args) as " \
       "Kernel#to_enum does, no lookup of #{name}\n" \
       "  { mrb_value bc2cpp_te_argv[] = { #{vector.join(', ')} }; " \
       "r#{d} = bc2cpp_to_enum(M, #{vector.size}, bc2cpp_te_argv); }\n"

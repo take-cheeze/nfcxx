@@ -216,6 +216,9 @@ module RbsSignatures
       merged.ret = prev.ret
       merged.return_type = prev.return_type
     end
+    # A declaration without a block says nothing about it: `def each: () -> Integer` must not erase another file's
+    # `def each: () { (Integer) -> void } -> untyped`, which RBS_BLOCK_PARAM_HINT and BLOCK_RETURNS read.
+    merged.block_type ||= prev.block_type
     merged
   end
 

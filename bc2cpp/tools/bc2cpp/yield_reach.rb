@@ -8,6 +8,7 @@ require_relative 'ir_block_operands'
 require_relative 'ir_symbol_flow'
 require_relative 'predicate_returns'
 require_relative 'send_names'
+require_relative 'dynamic_names'
 
 # YIELD_REACH: a whole-program, by-name "may this code suspend the current Fiber?"
 # analysis over the ireps of a closed world. A compiled frame that sits between a Fiber's entry
@@ -42,6 +43,10 @@ class YieldReach
   STORED_READS = %w[[] fetch dig default values_at fetch_values].freeze
   # Core methods whose computed send names a method some Symbol was converted for.
   CALLABLE_SEND_METHODS = %w[to_proc inject reduce].freeze
+  # A native's callback into Ruby is a C-boundary frame no yield crosses (see nb_cause). BC2CPP_YIELD_C_BOUNDARY=0
+  # counts native callbacks and stored-block reads as yield paths again.
+  C_BOUNDARY = ENV['BC2CPP_YIELD_C_BOUNDARY'] != '0'
+  SPELLED_SENDS = ENV['BC2CPP_YIELD_SPELLED_SENDS'] != '0'
   # Symbol#to_proc and Method objects turn a method into a Proc value.
   CALLABLE_MAKERS = %w[to_proc method instance_method singleton_method].freeze
   # Blocks handed to these constants' `new` receive an Enumerator::Yielder as their first argument.
@@ -73,7 +78,7 @@ class YieldReach
                     :unknown_call, :proc_call, :unknown_block, :invokes, :stored_read, :fiber_body,
                     :yield_unknown, :super_forward, :forwards, :captured, :fwd_any, :fwd_enum, :enum_lit,
                     :any_lit, :enum_send, :klass, :generator, :yielder_calls, :yielder_leak, :callable_send, :fwd_callable,
-                    keyword_init: true)
+                    :dyn_other, keyword_init: true)
 
   attr_reader :nodes, :defs_by_name, :fiber_roots_unknown, :reasons, :enum_names
 
@@ -280,7 +285,7 @@ class YieldReach
              stored_read: false, fiber_body: false, yield_unknown: false, super_forward: false,
              forwards: Set.new, captured: false, fwd_any: false, fwd_enum: false, enum_lit: [], any_lit: [],
              enum_send: false, klass: nil, generator: false, yielder_calls: Set.new, yielder_leak: false,
-             callable_send: false, fwd_callable: false)
+             callable_send: false, fwd_callable: false, dyn_other: false)
   end
 
   # The method whose block a `yield` in this node reaches: the nearest enclosing method.
@@ -594,6 +599,9 @@ class YieldReach
       return nil
     end
     node.unknown_call = true
+    # A computed send on self dispatches within self's class chain (self_dispatch_may_yield?); any other receiver can
+    # be any object.
+    node.dyn_other = true unless BytecodeIR::Ops::SELF_SEND.include?(insn.op)
     node.fwd_any = true if forward
     node.any_lit << lit_block if lit_block
     @reasons[:dynamic_send] += 1
@@ -623,7 +631,10 @@ class YieldReach
       node.seed = true if @sound
       @reasons[:eval] += 1
     elsif BLOCK_EXEC.include?(name)
-      node.unknown_call = true unless lit_block
+      unless lit_block
+        node.unknown_call = true
+        node.dyn_other = true
+      end
     elsif PROC_CALLS.include?(name) && !(name == 'yield' && recv_const == 'Fiber')
       # `Fiber.yield` (the `yield` here) runs no Proc: scan_fiber_call already marked the suspension.
       recv = explicit ? classify_reg(node, program, idx, dest) : [:unknown]
@@ -1197,11 +1208,41 @@ class YieldReach
   # Facts of the current iteration that many nodes ask about.
   def solve_context
     {
-      any_code: @nodes.each_value.any? { |n| @nb[n.label] && n.kind == :method && !@yielder_methods&.include?(n) } ||
-        @esc.any? { |b| @nb[b] },
+      any_code: @nodes.each_value.any? do |n|
+        @nb[n.label] && n.kind == :method && !@yielder_methods&.include?(n) && dynamic_target?(n.name)
+      end || @esc.any? { |b| @nb[b] },
       # A block run by an unknown Proc call gets its own block from that call site, so only nb counts.
-      any_block: @esc.any? { |b| @nb[b] }
+      any_block: @esc.any? { |b| @nb[b] },
+      # Methods a computed send can name that may yield (dynamic_target?), for self_dispatch_may_yield?.
+      dynamic_nb: @nodes.values.select { |n| @nb[n.label] && n.kind == :method && dynamic_target?(n.name) }
     }
+  end
+
+  # A computed send reaches only a name the program spells as a Symbol or String literal (DynamicNames). A name
+  # assembled from string pieces escapes this; if it reaches a yield across a compiled frame, mruby's C-boundary check
+  # raises FiberError rather than suspending (see docs/bc2cpp-yield-c-boundary.md). BC2CPP_YIELD_SPELLED_SENDS=0 lets a
+  # computed send reach every method again.
+  def dynamic_target?(name)
+    return true unless SPELLED_SENDS
+
+    @dynamic_universe ||= DynamicNames.universe(@ireps)
+    @dynamic_universe.include?(name)
+  end
+
+  # A computed send whose receiver is self reaches a method of self's class, its superclass chain, a module (mixins are
+  # not resolved) or an unknown owner, as super_targets does, or that chain's method_missing. An unknown chain is any.
+  def self_dispatch_may_yield?(n, ctx)
+    return ctx[:any_code] unless SPELLED_SENDS
+
+    chain = n.klass && ancestors_of(n.klass)
+    return ctx[:any_code] unless chain
+
+    reachable = lambda do |m|
+      m.klass.nil? || m.klass == n.klass || chain.include?(m.klass) || @module_names.include?(m.klass)
+    end
+    return true if ctx[:dynamic_nb].any?(&reachable)
+
+    @defs_by_name.fetch('method_missing', []).any? { |d| @nb[d] && reachable.call(@nodes[d]) }
   end
 
   def nb_cause(n, opaque, ctx, callable)
@@ -1219,7 +1260,7 @@ class YieldReach
     return [:lit, x] if x
     return nil unless @sound # unknown code is only accounted for in a closed world
 
-    return [:unknown_call] if n.unknown_call && ctx[:any_code]
+    return [:unknown_call] if n.unknown_call && (n.dyn_other ? ctx[:any_code] : self_dispatch_may_yield?(n, ctx))
 
     if n.callable_send
       d = callable.find { |y| @nb[y] }
@@ -1231,6 +1272,12 @@ class YieldReach
       d = callable.find { |y| @nb[y] }
       return [:proc_call, nil, d] if d
     end
+    # A native that calls back into Ruby (mrb_funcall, mrb_yield, a stored block) enters it as a C-boundary frame, and
+    # mruby's Fiber.yield raises FiberError across one (fiber_check_cfunc), so no yield suspends through it. The natives
+    # that run Ruby inside the VM instead (send, Proc#call, Method#call, eval, instance_exec) are the dynamic send,
+    # proc call and eval seed above. See docs/bc2cpp-yield-c-boundary.md.
+    return nil if C_BOUNDARY
+
     if n.native
       d = opaque.find { |y| @nb[y] }
       return [:native, nil, d] if d

@@ -1515,6 +1515,9 @@ class CodeGen
       if %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
         kernel_code = kernel_direct_code(name, d, recv, argv, self_implicit)
         return kernel_code if kernel_code
+
+        to_enum_code = to_enum_any_receiver_line(d, recv, name, argv)
+        return to_enum_code if to_enum_code
       end
 
       if name == 'call' && !self_implicit && call_receiver.nil?
