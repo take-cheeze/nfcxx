@@ -166,6 +166,16 @@ module NativeCoreDirectFallback
       "  }\n"
   end
 
+  # FLOW_NATIVE_CORE_EXACT: FLOW_CORE_DIRECT's audited native, for a name the compiled core does not define (a C body,
+  # such as Array#delete). The guard chain it replaces lists only project classes, none of which an exact core receiver
+  # can be, so its arms are dead and its else is the by-name send.
+  def flow_native_core_exact_line(d, recv, name, argv)
+    return nil if devirt_blocked_name?(name)
+
+    exact = native_core_exact_entry(native_core_entries(name, argv.size), recv, name, argv)
+    exact && exact_code_line(d, recv, argv, exact)
+  end
+
   # EXACT_CORE_RECEIVER: the entry whose owner the receiver provably is, when its
   # argument guard is proven too; the send is then dead code.
   def native_core_exact_entry(entries, recv, name, argv)

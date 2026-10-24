@@ -127,7 +127,7 @@ module NativeCoreDirect
                 mrb_int i, j = 0;
                 mrb_int len = ARY_LEN(a);
                 mrb_ary_modify(mrb, a);
-                mrb_value *ptr = ary_items(self);
+                mrb_value *ptr = RARRAY_PTR(self);
                 for (i = 0; i < len; i++) {
                   if (!mrb_nil_p(ptr[i])) {
                     if (i != j) ptr[j] = ptr[i];
@@ -147,15 +147,15 @@ module NativeCoreDirect
                   return mrb_funcall_id(mrb, self, MRB_SYM(to_enum), 1, mrb_symbol_value(MRB_SYM(index)));
                 }
                 if (mrb_nil_p(blk)) {
-                  for (mrb_int i = 0; i < ary_size(self); i++) {
-                    if (mrb_equal(mrb, ary_items(self)[i], obj)) {
+                  for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+                    if (mrb_equal(mrb, RARRAY_PTR(self)[i], obj)) {
                       return mrb_int_value(mrb, i);
                     }
                   }
                 }
                 else {
-                  for (mrb_int i = 0; i < ary_size(self); i++) {
-                    mrb_value eq = mrb_yield(mrb, blk, ary_items(self)[i]);
+                  for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+                    mrb_value eq = mrb_yield(mrb, blk, RARRAY_PTR(self)[i]);
                     if (mrb_test(eq)) {
                       return mrb_int_value(mrb, i);
                     }
@@ -163,16 +163,53 @@ module NativeCoreDirect
                 }
                 return mrb_nil_value();
               C
+    # ary_modify is static, so the call is a mirror in emit_native_core_helpers: the block-less arm, with the public
+    # mrb_ary_modify (ary_modify plus a write barrier) in place of ary_modify.
+    Entry.new(name: 'delete', owner: 'Array', arity: 1, arg: :none, aspec: 'MRB_ARGS_REQ(1)',
+              expression: 'bc2cpp_ary_delete(M, recv, ARG0)', helper: 'bc2cpp_ary_delete',
+              apis: [%w[mruby/array.h mrb_ary_modify], %w[mruby.h mrb_equal], %w[mruby.h mrb_gc_protect]],
+              checks: [['mrb_ary_delete', <<~C, :exact]]),
+                mrb_value obj, blk;
+                mrb_get_args(mrb, "o&", &obj, &blk);
+                struct RArray *ary = RARRAY(self);
+                mrb_value ret = obj;
+                int ai = mrb_gc_arena_save(mrb);
+                mrb_int i = 0;
+                mrb_int j = 0;
+                for (; i < ARY_LEN(ary); i++) {
+                  mrb_value elem = ARY_PTR(ary)[i];
+                  if (mrb_equal(mrb, elem, obj)) {
+                    mrb_gc_arena_restore(mrb, ai);
+                    mrb_gc_protect(mrb, elem);
+                    ret = elem;
+                    continue;
+                  }
+                  if (i != j) {
+                    if (j >= ARY_LEN(ary)) {
+                      mrb_raise(mrb, E_RUNTIME_ERROR, "array modified during delete");
+                    }
+                    ary_modify(mrb, ary);
+                    ARY_PTR(ary)[j] = elem;
+                  }
+                  j++;
+                }
+                if (i == j) {
+                  if (mrb_nil_p(blk)) return mrb_nil_value();
+                  return mrb_yield(mrb, blk, obj);
+                }
+                ARY_SET_LEN(ary, j);
+                return ret;
+              C
     # mrb_ary_svalue is static, so the call is a mirror in emit_native_core_helpers.
     Entry.new(name: '__svalue', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: 'bc2cpp_ary_svalue(M, recv)', helper: 'bc2cpp_ary_svalue',
               apis: [],
               checks: [['mrb_ary_svalue', <<~C, :exact]]),
-                switch (ary_size(ary)) {
+                switch (RARRAY_LEN(ary)) {
                 case 0:
                   return mrb_nil_value();
                 case 1:
-                  return ary_items(ary)[0];
+                  return RARRAY_PTR(ary)[0];
                 default:
                   return ary;
                 }
@@ -261,28 +298,57 @@ module NativeCoreDirect
   HAND_HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
       static inline mrb_value bc2cpp_ary_compact(mrb_state* M, mrb_value self) {
-        mrb_value ary = mrb_ary_new_capa(M, ary_size(self));
-        for (mrb_int i = 0; i < ary_size(self); i++) {
-          if (!mrb_nil_p(ary_items(self)[i])) mrb_ary_push(M, ary, ary_items(self)[i]);
+        mrb_value ary = mrb_ary_new_capa(M, RARRAY_LEN(self));
+        for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+          if (!mrb_nil_p(RARRAY_PTR(self)[i])) mrb_ary_push(M, ary, RARRAY_PTR(self)[i]);
         }
         return ary;
       }
     CPP
     'bc2cpp_ary_index' => <<~CPP,
       static inline mrb_value bc2cpp_ary_index(mrb_state* M, mrb_value self, mrb_value obj) {
-        for (mrb_int i = 0; i < ary_size(self); i++) {
-          if (mrb_equal(M, ary_items(self)[i], obj)) return mrb_int_value(M, i);
+        for (mrb_int i = 0; i < RARRAY_LEN(self); i++) {
+          if (mrb_equal(M, RARRAY_PTR(self)[i], obj)) return mrb_int_value(M, i);
         }
         return mrb_nil_value();
       }
     CPP
+    'bc2cpp_ary_delete' => <<~CPP,
+      static inline mrb_value bc2cpp_ary_delete(mrb_state* M, mrb_value self, mrb_value obj) {
+        struct RArray *ary = RARRAY(self);
+        mrb_value ret = obj;
+        int ai = mrb_gc_arena_save(M);
+        mrb_int i = 0;
+        mrb_int j = 0;
+        for (; i < ARY_LEN(ary); i++) {
+          mrb_value elem = ARY_PTR(ary)[i];
+          if (mrb_equal(M, elem, obj)) {
+            mrb_gc_arena_restore(M, ai);
+            mrb_gc_protect(M, elem);
+            ret = elem;
+            continue;
+          }
+          if (i != j) {
+            if (j >= ARY_LEN(ary)) {
+              mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "array modified during delete");
+            }
+            mrb_ary_modify(M, ary);
+            ARY_PTR(ary)[j] = elem;
+          }
+          j++;
+        }
+        if (i == j) return mrb_nil_value();
+        ARY_SET_LEN(ary, j);
+        return ret;
+      }
+    CPP
     'bc2cpp_ary_svalue' => <<~CPP,
       static inline mrb_value bc2cpp_ary_svalue(mrb_state* M, mrb_value ary) {
-        switch (ary_size(ary)) {
+        switch (RARRAY_LEN(ary)) {
         case 0:
           return mrb_nil_value();
         case 1:
-          return ary_items(ary)[0];
+          return RARRAY_PTR(ary)[0];
         default:
           return ary;
         }
