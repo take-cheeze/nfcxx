@@ -89,6 +89,8 @@ class CodeGen
           next
         end
 
+        inlined = drop_unused_registers(inlined) if single_block?(inlined)
+
         if try_range && !rescue_try_glue_safe?(inlined, try_range)
           @inline_nested_pre.slice!(pre_start..) # the refused body's nested cfuncs are not used either
           next
@@ -782,6 +784,23 @@ class CodeGen
   # initializer has no effect (nil, or a plain identifier: self, an argument); an
   # inlined loop's per-iteration frame (inline_block_frame) is covered as well.
   UNUSED_REGISTER_DECLARATION = /^ +mrb_value r(\d+) = (?:mrb_nil_value\(\)|[A-Za-z_]\w*);\n/
+
+  # Whether +code+ is one braced block: every declaration in it is scoped inside it,
+  # so drop_unused_registers on the snippet alone is sound (an inlined loop redeclares
+  # its frame per loop, and the whole function would see each name more than once).
+  # String and character literals are skipped; any other shape answers false.
+  def single_block?(code)
+    text = code.gsub(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/, '""').strip
+    return false unless text.start_with?('{') && text.end_with?('}')
+
+    depth = 0
+    text.each_char.with_index do |char, index|
+      depth += 1 if char == '{'
+      depth -= 1 if char == '}'
+      return false if depth.zero? && index != text.length - 1
+    end
+    depth.zero?
+  end
 
   def drop_unused_registers(code)
     uses = Hash.new(0)
