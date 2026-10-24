@@ -9,8 +9,10 @@ class CodeGen
   # Every native registration of the operator the closed form accounts for: [class, function, source path]. A
   # registration outside the list (another gem's `Array#-`, a second `Array#<<`) keeps the helper open.
   NUMERIC_SLOW_NATIVES = {
+    '+' => [%w[Integer int_add src/numeric.c], %w[Float flo_add src/numeric.c], %w[Array mrb_ary_plus src/array.c],
+            %w[String mrb_str_plus_m src/string.c], %w[Time time_plus mrbgems/mruby-time/src/time.c]],
     '-' => [%w[Integer int_sub src/numeric.c], %w[Float flo_sub src/numeric.c],
-            %w[Array ary_sub mrbgems/mruby-array-ext/src/array.c]],
+            %w[Array ary_sub mrbgems/mruby-array-ext/src/array.c], %w[Time time_minus mrbgems/mruby-time/src/time.c]],
     '&' => [%w[Integer int_and src/numeric.c], %w[NilClass false_and src/object.c], %w[TrueClass true_and src/object.c],
             %w[FalseClass false_and src/object.c], %w[Array ary_intersection mrbgems/mruby-array-ext/src/array.c]],
     '|' => [%w[Integer int_or src/numeric.c], %w[NilClass false_or src/object.c], %w[TrueClass true_or src/object.c],
@@ -18,17 +20,17 @@ class CodeGen
     '<<' => [%w[Integer int_lshift src/numeric.c], %w[Array mrb_ary_push_m src/array.c],
              %w[String str_concat_m mrbgems/mruby-string-ext/src/string.c], %w[IO io_lshift mrbgems/mruby-io/src/io.c]]
   }.freeze
-  # Time#- (mruby-time) is the one more definer a build may link; numeric_slow_members removes it with the gem.
-  NUMERIC_SLOW_TIME_MINUS = %w[Time time_minus mrbgems/mruby-time/src/time.c].freeze
-
   # The gems whose natives the closed form calls: a build without one cannot have the exported body to link.
-  NUMERIC_SLOW_COLLECTION_GEMS = { '-' => %w[mruby-array-ext], '&' => %w[mruby-array-ext], '|' => %w[mruby-array-ext],
+  NUMERIC_SLOW_COLLECTION_GEMS = { '+' => %w[mruby-time], '-' => %w[mruby-array-ext mruby-time],
+                                   '&' => %w[mruby-array-ext], '|' => %w[mruby-array-ext],
                                    '<<' => %w[mruby-string-ext mruby-io] }.freeze
 
   # [wrapper function, exported body, the call the wrapper must make]: the wrapper stays the method, so the export
   # is the method's body only while the wrapper calls it.
   NUMERIC_SLOW_EXPORTS = {
-    '-' => [['ary_sub', 'mrb_ary_ext_sub_impl', 'mrb_ary_ext_sub_impl(mrb, self, other)']],
+    '+' => [['time_plus', 'mrb_time_plus_impl', 'mrb_time_plus_impl(mrb, self, mrb_get_arg1(mrb))']],
+    '-' => [['ary_sub', 'mrb_ary_ext_sub_impl', 'mrb_ary_ext_sub_impl(mrb, self, other)'],
+            ['time_minus', 'mrb_time_minus_impl', 'mrb_time_minus_impl(mrb, self, mrb_get_arg1(mrb))']],
     '&' => [['ary_intersection', 'mrb_ary_ext_and_impl', 'mrb_ary_ext_and_impl(mrb, self, other)']],
     '|' => [['ary_union', 'mrb_ary_ext_or_impl', 'mrb_ary_ext_or_impl(mrb, self, other)']],
     '<<' => [['str_concat_m', 'mrb_str_ext_concat_impl', 'mrb_str_ext_concat_impl(mrb, self, mrb_get_arg1(mrb))'],
@@ -59,7 +61,6 @@ class CodeGen
       [entry[:owner]&.fetch(:class_name, nil), entry[:function], entry[:path].to_s]
     end
     expected = NUMERIC_SLOW_NATIVES.fetch(name)
-    found = found.reject { |owner, function, path| name == '-' && [owner, function] == NUMERIC_SLOW_TIME_MINUS.first(2) && path.end_with?(NUMERIC_SLOW_TIME_MINUS.last) }
     return false unless found.size == expected.size
 
     paths = expected.to_h do |owner, function, suffix|
