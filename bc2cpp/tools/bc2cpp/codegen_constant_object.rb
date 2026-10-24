@@ -43,6 +43,32 @@ class CodeGen
     "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
   end
 
+  # The CLOSED_WORLD_CONSTANT_OBJECT or NATIVE_SINGLETON_CALL form of a send whose receiver is a stable
+  # class/module constant, or nil: an explicit receiver register that reads the constant, or the implicit self of a
+  # module's own `def self.x` (ClosedWorld#module_object_self?: nothing but the module runs those bodies).
+  def constant_receiver_send_code(name, n, d, recv, argv, irep, site_idx, reg, owner_def, self_implicit: false)
+    return nil unless @closed_world && irep && site_idx
+
+    op = BytecodeIR.for(irep).source_at(site_idx).op
+    return nil unless %w[SEND0 SEND SSEND0 SSEND].include?(op)
+
+    if self_implicit
+      base = owner_def&.owner&.end_with?('.singleton') && owner_def.owner.delete_suffix('.singleton')
+      return nil unless base && @closed_world.module_object_self?(base)
+
+      constant_owner = base
+    else
+      constant_owner = constant_object_owner(irep, site_idx, reg, owner_def&.owner)
+    end
+    code = constant_owner && constant_object_send_code(name, n, d, recv, argv, constant_owner)
+    return code if code
+    # A bare send is SSEND: the helper's lookup takes only a public method, and anything else goes through the
+    # slot's own checked dispatch, so the self-call check level is kept.
+    return nil unless self_implicit || %w[SEND0 SEND].include?(op)
+
+    native_singleton_call_code(name, n, d, recv, argv, irep, site_idx, reg, owner_def&.owner, constant_owner)
+  end
+
   # An `alias`/`undef` (including one inside `class << Const`) can give the name a
   # body the registry does not list, and a world with a dynamic installer or mixin
   # (a refused ClosedWorld) can prepend to a singleton at run time.
