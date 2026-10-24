@@ -1,5 +1,10 @@
 # frozen_string_literal: true
 
+require 'set'
+require_relative 'core_defs'
+require_relative 'core_hierarchy_sigs'
+require_relative 'outside_ruby_owners'
+
 # CLOSED_WORLD_CONSTANT_OBJECT: a send whose receiver is a stable
 # class/module constant resolves to the singleton method mruby's lookup finds
 # for that class object, instead of dispatching by name.
@@ -12,6 +17,7 @@ class CodeGen
     return nil if devirt_blocked_name?(name) || constant_object_name_rebound?(name)
 
     candidate = constant_object_singleton_def(name, constant_owner)
+    return constant_object_core_block_code(name, n, d, recv, argv, constant_owner) if candidate.nil?
     return nil unless candidate&.visibility == :public
 
     singleton_owner = candidate.owner
@@ -41,6 +47,64 @@ class CodeGen
            "(stable class/module constant, unique public singleton definition#{inherited}), direct C++ call " \
            "without mrb_funcall#{native_note}.\n"
     "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+  end
+
+  # CONSTANT_OBJECT_CORE_BLOCK: a literal-block send whose stable class constant receiver reaches a compiled core
+  # class method (`File.open(path) { |f| ... }` is IO.open, mruby-io's io.rb) calls that body. A core body needs the
+  # root context (its yields cross no Fiber), so the by-name send stays the else, as BLOCK_CORE_DIRECT's arms do.
+  def constant_object_core_block_code(name, n, d, recv, argv, constant_owner)
+    return nil unless @call_block_expr && block_core_direct_enabled? && block_core_world && @native_name_sources
+
+    target = constant_object_core_def(name, constant_owner)
+    return nil unless target && block_core_callable(target, n, "#{constant_owner}.singleton", name)
+
+    impl = "#{cpp_name(target.owner, target.name)}_impl"
+    call_argv, = direct_call_args(target, argv, impl)
+    "  // CONSTANT_OBJECT_CORE_BLOCK :#{name} -> #{target.owner}##{target.name} (stable class constant, compiled core " \
+      "class method) at the root context with the block\n" \
+      "  if (M->c == M->root_c) {\n" \
+      "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
+      "  } else {\n" \
+      "  #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "  }\n"
+  end
+
+  # The compiled core class method `constant_owner`'s singleton lookup reaches for `name`, or nil. Nothing on the way
+  # may answer first or replace it: a program definition, a mixin on a singleton, a definition in Ruby outside mruby's
+  # core (OutsideRubyOwners names `def self.x` owners), or a native registration on any singleton of the chain
+  # (NATIVE_OWNER_MAP, which tells a class method from an instance method).
+  def constant_object_core_def(name, constant_owner)
+    return nil if native_owner_map.nil?
+
+    outside = OutsideRubyOwners.scan(Array(@closed_world.ruby_paths).reject { |path| CoreDefs.core_source?(path) })
+    return nil if outside.unknown.include?(name) || outside.unknown.include?(:all)
+
+    outside_owners = outside.names.fetch(name, Set.new) | outside.wild
+    klass = constant_owner
+    chain = []
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      singleton = "#{klass}.singleton"
+      return nil if @unknown_mixins.include?(singleton) || !Array(@included_modules[singleton]).empty? ||
+                    !Array(@prepended_modules[singleton]).empty?
+      return nil if @registry.fetch(name, []).any? { |md| md.owner == singleton } || outside_owners.include?(singleton)
+
+      chain << singleton
+      defs = block_core_index[[singleton, name]]
+      if defs
+        return nil unless defs.one?
+
+        verdict = NativeOwnerMap.verdict(native_owner_map, name, chain, core_dynamic_trusted: native_owner_map_mode == :trusted)
+        return verdict == [:proven] ? defs.first : nil
+      end
+      klass = @closed_world.class_parent(klass) || core_superclass(klass)
+    end
+    nil
+  end
+
+  # A core class's superclass (declarations.rbs#core_hierarchy), which the closed world does not declare.
+  def core_superclass(klass)
+    CoreHierarchySigs.declared_class?(klass) ? CoreHierarchySigs.hierarchy[0][klass] : nil
   end
 
   # The CLOSED_WORLD_CONSTANT_OBJECT or NATIVE_SINGLETON_CALL form of a send whose receiver is a stable
