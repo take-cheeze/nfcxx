@@ -138,6 +138,7 @@ class CodeGen
   # A prepend can sit ahead of the native method, so decline the fast path
   # for any base class with a known or unresolved prepend.
   def builtin_class_send_safe?(name, builtins)
+    builtins = method_resolution_owners(builtins)
     @builtin_class_send_safe ||= {}
     cache_key = [name, builtins]
     return @builtin_class_send_safe[cache_key] if @builtin_class_send_safe.key?(cache_key)
@@ -148,6 +149,24 @@ class CodeGen
                                           builtins.none? do |owner|
                                             !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
                                           end
+  end
+
+  # Every class or module a lookup on an instance of +owners+ can reach: the owners, their superclasses, and the
+  # modules included or prepended into each. Any of them can answer the name before the native registration, so
+  # the definition check must see the whole closure, not only the owners' own tables.
+  def method_resolution_owners(owners)
+    reached = owners.dup
+    queue = owners.dup
+    until queue.empty?
+      owner = queue.shift
+      [@superclass_of[owner], *Array(@included_modules[owner]), *Array(@prepended_modules[owner])].each do |mod|
+        next unless mod.is_a?(String) && !reached.include?(mod)
+
+        reached << mod
+        queue << mod
+      end
+    end
+    reached
   end
 
   # Classes whose instances are immediate values: a type-tag test is their whole class
