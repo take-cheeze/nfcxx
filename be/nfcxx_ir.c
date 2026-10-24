@@ -947,6 +947,11 @@ static const char *ir_slot_op(const void *key, const char *base, a_type_ptr t, u
   return op;
 }
 
+static void ir_tmp_note(const char *op);
+static int ir_fact_var(a_variable_ptr var);
+static int ir_fact_is_open(a_variable_ptr var);
+static void ir_fact_first_use(a_variable_ptr var, const char *op);
+
 /* A fresh anonymous stack slot for an aggregate temporary. */
 static ir_val ir_temp(a_type_ptr t)
 {
@@ -956,6 +961,7 @@ static ir_val ir_temp(a_type_ptr t)
   nf_put_type(t);
   fprintf(nf_out, " %lu %lu)", ir_size_of(t), ir_align_of(t));
   ir_buf_end(&ir_slot_buf);
+  ir_tmp_note(op);
   return ir_mk_addr((char *)op, t, 0);
 }
 
@@ -969,11 +975,17 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
   if (var->is_vla) return ir_vla_addr(var, t, vol); /* else the lowered VLA variable is an ordinary pointer */
 #endif
   op = ir_tab_find(&ir_slots, var);
-  if (op != NULL) return ir_mk_addr((char *)op, t, vol);
-  if (var_has_static_or_thread_storage_duration(var)) {
+  if (op == NULL && var_has_static_or_thread_storage_duration(var)) {
     return ir_mk_addr((char *)ir_global_op(var), t, vol);
   }
-  return ir_mk_addr((char *)ir_slot_op(var, ir_name_or(var->source_corresp.name, "tmp"), var->type, (unsigned long)alignment_of_variable(var)), t, vol);
+  if (op == NULL) op = ir_slot_op(var, ir_name_or(var->source_corresp.name, "tmp"), var->type, (unsigned long)alignment_of_variable(var));
+  /* a temporary: made by the lowering, or an unnamed object of the front end's (a range-based for's range and iterators) */
+  if ((var->lowering_generated || var->source_corresp.name == NULL) && ir_fact_var(var) && !ir_fact_is_open(var)) {
+    ir_tmp_note(op);
+  } else {
+    ir_fact_first_use(var, op);
+  }
+  return ir_mk_addr((char *)op, t, vol);
 }
 
 /* ================================================================ borrow facts (NFCXX_PATHB_BORROW=1)
@@ -990,6 +1002,7 @@ typedef struct ir_decl_rec {
 } ir_decl_rec;
 static ir_decl_rec *ir_decl_top = NULL;
 static int ir_decl_n;                   /* the length of ir_decl_top */
+static ir_decl_rec *ir_decl_seen = NULL; /* every local opened in the function so far, closed or not */
 
 /* The open-local count at each label of the function, filled by ir_scan_labels before the body is lowered (flag only). A
    jump (goto, continue, and a break, which is a goto to the label after the loop) leaves the locals above its target's count. */
@@ -1050,6 +1063,43 @@ static void ir_fact_open(a_variable_ptr var)
   r->prev = ir_decl_top;
   ir_decl_top = r;
   ir_decl_n++;
+  r = (ir_decl_rec *)malloc(sizeof *r);
+  if (r == NULL) abort();
+  r->var = var;
+  r->prev = ir_decl_seen;
+  ir_decl_seen = r;
+}
+
+/* A named local used before any declaration of it in the function: the variable of a range-based for, which the
+   lowering initializes by an assignment and no stmk_decl declares. It is declared at its first use, and ends with the
+   block it is used in, as a block's own locals do. A local whose scope has ended is not declared again. */
+static void ir_fact_first_use(a_variable_ptr var, const char *op)
+{
+  ir_decl_rec *r;
+  if (!ir_borrow || !ir_fact_var(var) || var->source_corresp.name == NULL) return;
+  for (r = ir_decl_seen; r != NULL; r = r->prev)
+    if (r->var == var) return;
+  ir_line(ir_depth, ir_fmt("(decl %s %s)", op, ir_is_ref_type(var->type) ? "ref" : "val"));
+  ir_fact_open(var);
+}
+
+/* Forget the locals of the function (at its end). */
+static void ir_fact_forget(void)
+{
+  while (ir_decl_seen != NULL) {
+    ir_decl_rec *r = ir_decl_seen;
+    ir_decl_seen = r->prev;
+    free(r);
+  }
+}
+
+/* The variable was declared by a stmk_decl and is still open: its facts are the declaration's, not a temporary's. */
+static int ir_fact_is_open(a_variable_ptr var)
+{
+  ir_decl_rec *r;
+  for (r = ir_decl_top; r != NULL; r = r->prev)
+    if (r->var == var) return 1;
+  return 0;
 }
 
 /* (decl OP KIND) at a declaration point: KIND is ref for a reference, val for an object. */
@@ -1062,8 +1112,8 @@ static void ir_fact_decl(a_statement_ptr s, int d)
     if (entry->entity.kind != iek_variable) continue;
     var = (a_variable_ptr)entry->entity.ptr;
     if (!ir_fact_var(var)) continue;
+    ir_fact_open(var); /* first: naming its slot below is not a use before its declaration */
     ir_line(d, ir_fmt("(decl %s %s)", ir_var_addr(var, var->type, 0).s, ir_is_ref_type(var->type) ? "ref" : "val"));
-    ir_fact_open(var);
   }
 }
 
@@ -1080,12 +1130,15 @@ static void ir_fact_close_to(ir_decl_rec *mark, int d, int emit)
 }
 
 /* A return leaves every open scope of the function: close all, but keep the list (the code after it is still lowered). */
+static void ir_tmp_mark(int d, int entry);
+
 static void ir_fact_close_all(int d)
 {
   ir_decl_rec *r;
   if (!ir_borrow) return;
   for (r = ir_decl_top; r != NULL; r = r->prev)
     ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
+  ir_tmp_mark(d, 0);
 }
 
 /* The labels of a function, with the open-local count at each (flag only). A block restores the count at its end, as
@@ -1163,6 +1216,174 @@ static void ir_fact_jump(void *lbl, int d)
     ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
 }
 
+/* Temporaries (flag only): the lowering's own (make_local_temporary reuses one from a full expression to the next) and
+   this printer's aggregate temporaries (ir_temp). No stmk_decl names them. The code of each full expression is buffered
+   while the temporaries it touches are noted, then (decl OP temp) is printed before the code, so that every path through
+   it starts with live storage, and (scope-end OP) after the value's last use. A temporary's storage thus ends with its
+   full expression, and a pointer to it cannot outlive it unnoticed.
+   Some temporaries carry a value from one statement to the next (a returned aggregate, the range and iterators of a
+   range-based for, the exception-handling stack entry). Whether a temporary is one of them is known only at the end of
+   the function, so the per-expression facts are printed marked, as \001OP\002FACT\002, and so are the function's exits,
+   as \003, and its entry, as \004. ir_tmp_write keeps the facts of a temporary used in exactly one full expression, and
+   gives every other temporary one (decl) at the entry and a (scope-end) at each exit instead. */
+typedef struct ir_tmp_scope {
+  char **ops;
+  int n, cap;
+  int active;
+  ir_buf buf;
+  struct ir_tmp_scope *outer;
+} ir_tmp_scope;
+static ir_tmp_scope *ir_tmp_cur = NULL;
+
+/* The temporaries of the function, in first-use order, and how many full expressions use each (-1: one is used outside
+   a buffered full expression, or in more than one). */
+typedef struct ir_tmp_use {
+  char *op;
+  int uses;
+  struct ir_tmp_use *next;
+} ir_tmp_use;
+static ir_tmp_use *ir_tmp_uses = NULL, **ir_tmp_uses_end = &ir_tmp_uses;
+
+static ir_tmp_use *ir_tmp_use_of(const char *op)
+{
+  ir_tmp_use *u;
+  for (u = ir_tmp_uses; u != NULL; u = u->next)
+    if (strcmp(u->op, op) == 0) return u;
+  u = (ir_tmp_use *)malloc(sizeof *u);
+  if (u == NULL) abort();
+  u->op = ir_dup(op);
+  u->uses = 0;
+  u->next = NULL;
+  *ir_tmp_uses_end = u;
+  ir_tmp_uses_end = &u->next;
+  return u;
+}
+
+static void ir_tmp_note(const char *op)
+{
+  int i;
+  ir_tmp_scope *t = ir_tmp_cur;
+  ir_tmp_use *u;
+  if (!ir_borrow) return;
+  u = ir_tmp_use_of(op);
+  if (t == NULL) {
+    u->uses = -1;
+    return;
+  }
+  for (i = 0; i < t->n; i++)
+    if (strcmp(t->ops[i], op) == 0) return;
+  u->uses = u->uses == 0 ? 1 : -1;
+  if (t->n == t->cap) {
+    t->cap = t->cap == 0 ? 4 : t->cap * 2;
+    t->ops = (char **)realloc(t->ops, (size_t)t->cap * sizeof *t->ops);
+    if (t->ops == NULL) abort();
+  }
+  t->ops[t->n++] = ir_dup(op);
+}
+
+/* Start buffering a full expression. Nested full expressions (in a statement expression) have their own scope. */
+static void ir_tmp_begin(ir_tmp_scope *t)
+{
+  t->ops = NULL;
+  t->n = t->cap = 0;
+  t->active = ir_borrow;
+  if (!t->active) return;
+  t->outer = ir_tmp_cur;
+  ir_tmp_cur = t;
+  ir_buf_open(&t->buf);
+  ir_buf_begin(&t->buf);
+}
+
+/* The full expression's code is done: print the marked (decl) facts at depth d, then the code. */
+static void ir_tmp_flush(ir_tmp_scope *t, int d)
+{
+  int i;
+  if (!t->active) return;
+  ir_buf_end(&t->buf);
+  ir_tmp_cur = t->outer;
+  for (i = 0; i < t->n; i++) ir_line(d, ir_fmt("\001%s\002(decl %s temp)\002", t->ops[i], t->ops[i]));
+  ir_buf_write(&t->buf, nf_out);
+  ir_buf_close(&t->buf);
+  free(t->buf.data);
+}
+
+/* The value of the full expression has been used: end the temporaries, most recent first (marked). */
+static void ir_tmp_end(ir_tmp_scope *t, int d)
+{
+  int i;
+  if (!t->active) return;
+  for (i = t->n - 1; i >= 0; i--) {
+    ir_line(d, ir_fmt("\001%s\002(scope-end %s)\002", t->ops[i], t->ops[i]));
+    free(t->ops[i]);
+  }
+  free(t->ops);
+  t->active = 0;
+}
+
+/* A function exit (\003) or the entry (\004), resolved by ir_tmp_write. */
+static void ir_tmp_mark(int d, int entry)
+{
+  if (ir_borrow) ir_line(d, entry ? "\004" : "\003");
+}
+
+/* Write the function body text with its temporary facts resolved (above), and forget the function's temporaries. Text
+   that followed a dropped line on the same line (a closing parenthesis) is kept, joined to the line before. */
+static void ir_tmp_write(const char *data, size_t len, FILE *out)
+{
+  size_t i = 0;
+  ir_tmp_use *u, *v;
+  while (i < len) {
+    size_t eol = i, p, rest;
+    while (eol < len && data[eol] != '\n') eol++;
+    p = i;
+    while (p < eol && data[p] == ' ') p++;
+    if (p < eol && data[p] == '\001') {
+      size_t op = p + 1, fact, end;
+      fact = op;
+      while (fact < eol && data[fact] != '\002') fact++;
+      end = fact + 1;
+      while (end < eol && data[end] != '\002') end++;
+      u = ir_tmp_use_of(ir_fmt("%.*s", (int)(fact - op), data + op));
+      if (u->uses == 1) {
+        fputc('\n', out);
+        fwrite(data + i, 1, p - i, out);
+        fwrite(data + fact + 1, 1, end - fact - 1, out);
+      }
+      rest = end + 1;
+    } else if (p < eol && (data[p] == '\003' || data[p] == '\004')) {
+      int entry = data[p] == '\004';
+      int n = 0, k;
+      for (u = ir_tmp_uses; u != NULL; u = u->next) n++;
+      /* the exit ends them most recent first */
+      for (k = 0; k < n; k++) {
+        int j;
+        u = ir_tmp_uses;
+        for (j = 0; j < (entry ? k : n - 1 - k); j++) u = u->next;
+        if (u->uses == 1) continue;
+        fputc('\n', out);
+        fwrite(data + i, 1, p - i, out);
+        fputs(ir_fmt(entry ? "(decl %s temp)" : "(scope-end %s)", u->op), out);
+      }
+      rest = p + 1;
+    } else {
+      if (i > 0) fputc('\n', out);
+      fwrite(data + i, 1, eol - i, out);
+      i = eol + 1;
+      continue;
+    }
+    fwrite(data + rest, 1, eol - rest, out);
+    i = eol + 1;
+  }
+  if (len > 0 && data[len - 1] == '\n') fputc('\n', out);
+  for (u = ir_tmp_uses; u != NULL; u = v) {
+    v = u->next;
+    free(u->op);
+    free(u);
+  }
+  ir_tmp_uses = NULL;
+  ir_tmp_uses_end = &ir_tmp_uses;
+}
+
 /* Marker for a node that is not lowered. The value of the marker has the type t (void: a statement). */
 static ir_val ir_gap(a_type_ptr t, const char *what, int cls, int kind)
 {
@@ -1177,6 +1398,7 @@ static ir_val ir_gap(a_type_ptr t, const char *what, int cls, int kind)
 /* ================================================================ variable-length arrays and bit-fields */
 
 static void ir_stmt(a_statement_ptr s, int d);
+static void ir_stmt_init(a_statement_ptr s, int d);
 static int ir_ends_in_return(a_statement_ptr body);
 static ir_val ir_rval(an_expr_node_ptr e);
 
@@ -5097,11 +5319,14 @@ static void ir_stmt_list(a_statement_ptr s, int d)
 /* The loop-exit test: (if COND (then) (else (break))). */
 static void ir_exit_unless(int d, an_expr_node_ptr cond)
 {
+  ir_tmp_scope tmps;
+  char *cb;
   ir_depth = d;
-  {
-    char *cb = ir_to_bool(ir_rval(cond));
-    ir_line(d, ir_fmt("(if %s (then) (else (break)))", cb));
-  }
+  ir_tmp_begin(&tmps);
+  cb = ir_to_bool(ir_rval(cond));
+  ir_tmp_flush(&tmps, d);
+  ir_tmp_end(&tmps, d);
+  ir_line(d, ir_fmt("(if %s (then) (else (break)))", cb));
 }
 
 /* ---- inline assembly. QBE has no inline asm, so only templates whose effect QBE can express are lowered:
@@ -5463,10 +5688,15 @@ static void ir_stmt(a_statement_ptr s, int d)
     case stmk_empty:
       ir_note(1, stmk_empty, 1);
       return;
-    case stmk_expr:
+    case stmk_expr: {
+      ir_tmp_scope tmps;
       ir_note(1, stmk_expr, 1);
+      ir_tmp_begin(&tmps);
       (void)ir_rval(s->expr);
+      ir_tmp_flush(&tmps, d);
+      ir_tmp_end(&tmps, d);
       return;
+    }
     case stmk_block: {
       ir_decl_rec *mark = ir_decl_top;
       ir_note(1, stmk_block, 1);
@@ -5478,9 +5708,13 @@ static void ir_stmt(a_statement_ptr s, int d)
     }
     case stmk_if: {
       char *cb;
+      ir_tmp_scope tmps;
       ir_note(1, stmk_if, 1);
       ir_depth = d;
+      ir_tmp_begin(&tmps);
       cb = ir_to_bool(ir_rval(s->expr));
+      ir_tmp_flush(&tmps, d);
+      ir_tmp_end(&tmps, d);
       ir_line(d, ir_fmt("(if %s", cb));
       ir_line(d + 1, "(then");
       ir_branch_hint(s->variant.if_stmt.then_statement, d + 2);
@@ -5551,9 +5785,13 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_close(1);
       ir_line(d + 1, "(step");
       if (extra != NULL && extra->increment != NULL) {
+        ir_tmp_scope tmps;
         ir_loc_again(s, d + 2);
         ir_depth = d + 2;
+        ir_tmp_begin(&tmps);
         (void)ir_rval(extra->increment);
+        ir_tmp_flush(&tmps, d + 2);
+        ir_tmp_end(&tmps, d + 2);
       }
       ir_close(1);
       ir_close(1);
@@ -5561,13 +5799,18 @@ static void ir_stmt(a_statement_ptr s, int d)
     }
     case stmk_switch: {
       ir_val v;
+      ir_tmp_scope tmps;
       ir_note(1, stmk_switch, 1);
       ir_depth = d;
+      ir_tmp_begin(&tmps);
       v = ir_rval(s->expr);
-      if (ir_is_i128(v.t)) { /* a 128-bit selector: see ir_switch_wide */
+      ir_tmp_flush(&tmps, d);
+      if (ir_is_i128(v.t)) { /* a 128-bit selector: see ir_switch_wide, which reads v (its temporaries stay open) */
         ir_switch_wide(s, v, d);
+        ir_tmp_end(&tmps, d);
         return;
       }
+      ir_tmp_end(&tmps, d);
       ir_line(d, ir_fmt("(switch %s", v.s));
       ir_line(d + 1, "(body");
       ir_sw_push(0);
@@ -5632,19 +5875,18 @@ static void ir_stmt(a_statement_ptr s, int d)
         if (ir_is_void(ir_ret_type) || ir_is_memval(ir_ret_type)) ir_line(d, "(return)");
         else if (ir_in_main) ir_line(d, ir_fmt("(return %s)", ir_zero(ir_ret_type)));
         else ir_line(d, ir_ubsan ? "(unreachable missing-return)" : "(unreachable)");
-      } else if (ir_is_void(s->expr->type)) {
-        (void)ir_rval(s->expr);
-        ir_fact_close_all(d);
-        ir_line(d, "(return)");
-      } else if (ir_is_memval(ir_ret_type)) {
-        ir_val v = ir_rval(s->expr);
-        ir_copy(ir_ret_type, ir_sret, v.s);
-        ir_fact_close_all(d);
-        ir_line(d, "(return)");
       } else {
-        ir_val v = ir_rval(s->expr);
+        /* The temporaries of the returned expression end with the locals, after the value is computed or copied. */
+        ir_tmp_scope tmps;
+        ir_val v;
+        ir_tmp_begin(&tmps);
+        v = ir_rval(s->expr);
+        if (!ir_is_void(s->expr->type) && ir_is_memval(ir_ret_type)) ir_copy(ir_ret_type, ir_sret, v.s);
+        ir_tmp_flush(&tmps, d);
         ir_fact_close_all(d);
-        ir_line(d, ir_fmt("(return %s)", v.s));
+        ir_tmp_end(&tmps, d);
+        if (ir_is_void(s->expr->type) || ir_is_memval(ir_ret_type)) ir_line(d, "(return)");
+        else ir_line(d, ir_fmt("(return %s)", v.s));
       }
       return;
     case stmk_decl:
@@ -5679,56 +5921,12 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_asm_stmt(s->variant.asm_entry, d);
       return;
     case stmk_init: {
-      a_dynamic_init_ptr init = s->variant.dynamic_init;
-      ir_note(1, stmk_init, 1);
-      if (init->variable == NULL) {
-        ir_line(d, "(unsupported init no-variable)");
-        return;
-      }
-      if (init->kind == dik_constant) {
-        ir_val dst = ir_var_addr(init->variable, init->variable->type, ir_is_volatile(init->variable->type));
-        ir_init_constant(dst, init->variant.constant.ptr, init->variable->type);
-        return;
-      }
-      if (init->kind == dik_expression) {
-        ir_val v = ir_rval(init->variant.expression);
-        ir_val dst = ir_var_addr(init->variable, init->variable->type, ir_is_volatile(init->variable->type));
-        if (ir_is_aggregate(dst.t)) ir_copy(dst.t, dst.s, v.s);
-        else ir_store(dst.t, dst.s, v.s, dst.vol);
-        ir_note(4, dik_expression, 1);
-        return;
-      }
-      if (init->kind == dik_constructor && init->variant.constructor.ptr != NULL &&
-          !init->variant.constructor.is_copy_constructor_with_implied_source && !init->variant.constructor.is_array_copy &&
-          !init->variant.constructor.value_initialization) {
-        /* A constructor call on the object: (eval (call void &"ctor" OBJ ARG*)). DO_IL_LOWERING expands every
-           constructor into an explicit call before we see the IL, so this form is not reached on the programs in
-           tests (it is the shape the unlowered IL would need); array copies, implied copy sources and value
-           initialization stay unsupported. */
-        a_routine_ptr ctor = init->variant.constructor.ptr;
-        a_type_ptr ct = skip_typerefs(ctor->type);
-        if (ct->variant.routine.extra_info == NULL || !ct->variant.routine.extra_info->has_ellipsis) {
-          ir_val dst = ir_var_addr(init->variable, init->variable->type, 0);
-          char *args = ir_fmt(" %s", dst.s);
-          an_expr_node_ptr arg;
-          for (arg = init->variant.constructor.args; arg != NULL; arg = arg->next) {
-            ir_val a = ir_rval(arg);
-            if (ir_is_aggregate(a.t)) {
-              ir_val tmp = ir_temp(a.t);
-              ir_copy(a.t, tmp.s, a.s);
-              args = ir_fmt("%s %s", args, tmp.s);
-            } else {
-              args = ir_fmt("%s %s", args, a.s);
-            }
-          }
-          ir_note(4, dik_constructor, 1);
-          ir_line(d, ir_fmt("(eval (call void &\"%s\"%s))", ir_rout_name(ctor), args));
-          return;
-        }
-      }
-      ir_note(4, (int)init->kind, 0);
-      ir_line(d, ir_fmt("(unsupported init %s)",
-                        nfcxx_dik_name(init->kind) != NULL ? nfcxx_dik_name(init->kind) : "?"));
+      /* An initializer is a full expression: its temporaries end after the store or constructor call. */
+      ir_tmp_scope tmps;
+      ir_tmp_begin(&tmps);
+      ir_stmt_init(s, d);
+      ir_tmp_flush(&tmps, d);
+      ir_tmp_end(&tmps, d);
       return;
     }
     default:
@@ -5737,6 +5935,61 @@ static void ir_stmt(a_statement_ptr s, int d)
                         nfcxx_stmk_name(s->kind) != NULL ? nfcxx_stmk_name(s->kind) : "?"));
       return;
   }
+}
+
+/* The dynamic initialization of a variable (stmk_init). */
+static void ir_stmt_init(a_statement_ptr s, int d)
+{
+  a_dynamic_init_ptr init = s->variant.dynamic_init;
+  ir_note(1, stmk_init, 1);
+  if (init->variable == NULL) {
+    ir_line(d, "(unsupported init no-variable)");
+    return;
+  }
+  if (init->kind == dik_constant) {
+    ir_val dst = ir_var_addr(init->variable, init->variable->type, ir_is_volatile(init->variable->type));
+    ir_init_constant(dst, init->variant.constant.ptr, init->variable->type);
+    return;
+  }
+  if (init->kind == dik_expression) {
+    ir_val v = ir_rval(init->variant.expression);
+    ir_val dst = ir_var_addr(init->variable, init->variable->type, ir_is_volatile(init->variable->type));
+    if (ir_is_aggregate(dst.t)) ir_copy(dst.t, dst.s, v.s);
+    else ir_store(dst.t, dst.s, v.s, dst.vol);
+    ir_note(4, dik_expression, 1);
+    return;
+  }
+  if (init->kind == dik_constructor && init->variant.constructor.ptr != NULL &&
+      !init->variant.constructor.is_copy_constructor_with_implied_source && !init->variant.constructor.is_array_copy &&
+      !init->variant.constructor.value_initialization) {
+    /* A constructor call on the object: (eval (call void &"ctor" OBJ ARG*)). DO_IL_LOWERING expands every
+       constructor into an explicit call before we see the IL, so this form is not reached on the programs in
+       tests (it is the shape the unlowered IL would need); array copies, implied copy sources and value
+       initialization stay unsupported. */
+    a_routine_ptr ctor = init->variant.constructor.ptr;
+    a_type_ptr ct = skip_typerefs(ctor->type);
+    if (ct->variant.routine.extra_info == NULL || !ct->variant.routine.extra_info->has_ellipsis) {
+      ir_val dst = ir_var_addr(init->variable, init->variable->type, 0);
+      char *args = ir_fmt(" %s", dst.s);
+      an_expr_node_ptr arg;
+      for (arg = init->variant.constructor.args; arg != NULL; arg = arg->next) {
+        ir_val a = ir_rval(arg);
+        if (ir_is_aggregate(a.t)) {
+          ir_val tmp = ir_temp(a.t);
+          ir_copy(a.t, tmp.s, a.s);
+          args = ir_fmt("%s %s", args, tmp.s);
+        } else {
+          args = ir_fmt("%s %s", args, a.s);
+        }
+      }
+      ir_note(4, dik_constructor, 1);
+      ir_line(d, ir_fmt("(eval (call void &\"%s\"%s))", ir_rout_name(ctor), args));
+      return;
+    }
+  }
+  ir_note(4, (int)init->kind, 0);
+  ir_line(d, ir_fmt("(unsupported init %s)",
+                    nfcxx_dik_name(init->kind) != NULL ? nfcxx_dik_name(init->kind) : "?"));
 }
 
 /* 1 when the body statement ends in a return (so no fall-through marker is needed). */
@@ -5915,6 +6168,7 @@ static void ir_function(a_routine_ptr rout)
       }
     }
     for (param = scope->variant.routine.parameters; param != NULL; param = param->next) ir_fact_open(param);
+    ir_tmp_mark(1, 1);
   }
   {
     int i;
@@ -5938,6 +6192,7 @@ static void ir_function(a_routine_ptr rout)
   }
   /* The function's locals and parameters end here, unless the body ends in a return (which closed them). */
   ir_fact_close_to(NULL, 1, !ir_ends_in_return(scope->assoc_block));
+  if (!ir_ends_in_return(scope->assoc_block)) ir_tmp_mark(1, 0);
   /* Falling off the end of a non-void routine is UB in C++; main returns 0. Both forms are explicit. */
   if (!ir_is_void(ret) && !ir_ends_in_return(scope->assoc_block)) {
     if (strcmp(rout->source_corresp.name != NULL ? rout->source_corresp.name : "", "main") == 0) {
@@ -5970,7 +6225,9 @@ static void ir_function(a_routine_ptr rout)
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
   ir_startup_markers(rout);
   ir_buf_write(&ir_slot_buf, nf_out);
-  ir_buf_write(&body, nf_out);
+  if (ir_borrow) ir_tmp_write(body.data, body.len, nf_out);
+  else ir_buf_write(&body, nf_out);
+  ir_fact_forget();
   fputs(")\n", nf_out);
   ir_buf_end(&ir_out_funcs);
 

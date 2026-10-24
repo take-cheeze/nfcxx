@@ -155,6 +155,31 @@ cc "$tmp/inferred.s" -o "$tmp/inferred"
 "$tmp/inferred" || { echo "FAIL inferred.cpp runtime: expected 0"; exit 1; }
 echo "ok   inferred summaries for lowered C++ callees, mutant, and native execution"
 pass=$((pass + 1))
+# Call-argument temporaries get (decl ... temp) facts around their full expression,
+# so a recursive callee gets a summary. An uninitialized argument is still found.
+temps=tests/pathb-borrow/contracts/temporaries.cpp
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$temps" > "$tmp/temps.ir"
+grep -Fq '(decl $"tmp" temp)' "$tmp/temps.ir" && grep -Fq '(scope-end $"tmp")' "$tmp/temps.ir" ||
+  { echo "FAIL $temps: missing temporary facts"; exit 1; }
+sed 's/int c = 0;/int c;/' "$temps" > "$tmp/temps_uninit.cpp"
+NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$tmp/temps_uninit.cpp" > "$tmp/temps_uninit.ir"
+for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/temps.ir" > "$tmp/out"
+  grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $temps ($options)"; cat "$tmp/out"; exit 1; }
+  rc=0
+  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/temps_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+  if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: c' "$tmp/out"; then
+    echo "FAIL $temps with an uninitialized argument ($options): expected exit 1, got $rc"
+    cat "$tmp/out"
+    exit 1
+  fi
+done
+scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/temps.ir" > "$tmp/temps.qbe"
+"${QBE:-build/qbe/qbe}" "$tmp/temps.qbe" -o "$tmp/temps.s"
+cc "$tmp/temps.s" -o "$tmp/temps"
+"$tmp/temps" || { echo "FAIL $temps runtime: expected 0"; exit 1; }
+echo "ok   temporary facts for lowered C++ call arguments, mutant, and native execution"
+pass=$((pass + 1))
 # Checking facts and value-transfer policy must not change native execution.
 # Loan erasure and replacing explicit transfers with loads must yield the same QBE.
 for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir tests/mruby/pathb-edge/move_facts.ir tests/mruby/pathb-edge/field_move_facts.ir tests/mruby/pathb-edge/drop_state_facts.ir; do
