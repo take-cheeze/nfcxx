@@ -136,6 +136,11 @@
   This is the static build: the examples are compiled ahead of time, and other code needs the local server
   (<code>node tools/wasm-explorer/server.cjs</code>, see docs/notes/wasm-explorer.md).
 </p>
+<p class="note" id="inbrowser-note" hidden>
+  This page compiles C, C++, LLVM IR and the IR itself: EDG's front end and the wasm emitter run here, as wasm (about
+  5 MB to download, the first time something other than an unedited example is compiled). Rust and Go, and programs
+  that include the C or C++ library headers, need the local server (<code>node tools/wasm-explorer/server.cjs</code>).
+</p>
 
 <main>
   <section class="pane" aria-label="Source">
@@ -255,6 +260,7 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     live: false,         // the local server answers the compile API; false on a static host
+    inBrowser: false,    // static host only: the in-browser compiler is there (inbrowser/, compile-worker.js)
     examples: [],        // [{id, title, file, language, expect}] from examples/index.json
     builds: {},          // static only: id -> a promise of the prebuilt example (builds/<id>.json), fetched when needed
     current: null,       // the last successful compile: { bytes, module, names, wat? }
@@ -298,7 +304,12 @@
     const box = $("error");
     box.hidden = !message;
     box.textContent = message ? `${stage}: ${message}` : "";
-    const hint = message && stage !== "front-end" ? refusalHint(message) : null;
+    const hint = !message ? null
+      : stage !== "front-end" ? refusalHint(message)
+        : state.inBrowser && /cannot open source file/.test(message)
+          ? "The in-browser compiler has no C or C++ library headers: declare what the program uses (the Browser " +
+            "bindings card lists the functions the page provides), or compile it with the local server."
+          : null;
     if (hint) {
       const h = document.createElement("span");
       h.className = "hint-line";
@@ -625,9 +636,50 @@
     }
     return state.builds[id];
   }
+  // The languages whose front end runs in the page (inbrowser.js); Rust and Go need their compilers.
+  const IN_BROWSER = ["c++", "c", "llvm", "ir"];
+  let compileWorker = null, workerJobId = 0;
+  const workerJobs = new Map();
+  // Compiles in the worker (compile-worker.js), which loads the front end and the emitter the first time.
+  function workerCompile(src, opts) {
+    if (!compileWorker) {
+      compileWorker = new Worker("compile-worker.js");
+      compileWorker.onmessage = (e) => {
+        const job = workerJobs.get(e.data.id);
+        if (!job) return;
+        if (e.data.progress) return job.progress(e.data.progress);
+        workerJobs.delete(e.data.id);
+        job.resolve(e.data.result);
+      };
+      compileWorker.onerror = (e) => {
+        e.preventDefault();
+        for (const job of workerJobs.values()) {
+          job.resolve({ ok: false, stage: "browser", diagnostics: [],
+            message: "the in-browser compiler did not load: " + (e.message || "compile-worker.js failed") });
+        }
+        workerJobs.clear();
+        compileWorker = null;
+      };
+    }
+    const id = ++workerJobId;
+    return new Promise((resolve) => {
+      workerJobs.set(id, { resolve, progress: (text) => setStatus(text, "") });
+      compileWorker.postMessage({ id, source: src, options: opts });
+    });
+  }
+
   async function staticResult(src, opts) {
     const entry = state.examples.find((ex) => exampleTexts[ex.id] === src && languageOf(ex) === opts.language);
     const example = entry ? await exampleBuild(entry.id) : null;
+    if (!example || opts.std) {
+      // not an example as it is: the in-browser compiler, for the languages it has
+      if (state.inBrowser && IN_BROWSER.includes(opts.language)) return workerCompile(src, opts);
+      if (state.inBrowser) {
+        return { ok: false, stage: "static", diagnostics: [],
+          message: `${LANGUAGES[opts.language].title} needs its compiler, which runs on the local server only; ` +
+            "the examples are compiled ahead of time." };
+      }
+    }
     if (!example) {
       return { ok: false, stage: "static", diagnostics: [],
         message: "this is the static build, so only the examples compile here. Other code needs the local server." };
@@ -642,7 +694,8 @@
         message: `${opts.mode} is not a mode of ${LANGUAGES[opts.language].title}.` };
     }
     // a mode whose IR is another mode's stores it there (build-static.cjs, irFrom)
-    return Object.assign({ ok: true }, build, { ir: build.irFrom ? example.builds[build.irFrom].ir : build.ir });
+    return Object.assign({ ok: true, prebuilt: true }, build,
+      { ir: build.irFrom ? example.builds[build.irFrom].ir : build.ir });
   }
 
   // Compiles the editor's source; with run (Ctrl+Enter, or Cmd+Enter on a Mac), runs main() when the compile
@@ -653,7 +706,7 @@
     const seq = ++state.seq;
     const src = source();
     const opts = options();
-    setStatus(state.live ? "compiling…" : "static build", "");
+    setStatus(state.live || state.inBrowser ? "compiling…" : "static build", "");
     const t0 = performance.now();
     let data;
     try {
@@ -697,15 +750,17 @@
       return;
     }
     $("ir").textContent = data.ir || "";
-    setStatus(state.live ? `compiled in ${(ms / 1000).toFixed(1)} s` : "static build", "ok");
-    if (state.live) writeHash();
+    setStatus(state.live ? `compiled in ${(ms / 1000).toFixed(1)} s`
+      : data.prebuilt ? "static build (prebuilt example)" : state.inBrowser ? `compiled in the browser in ${(ms / 1000).toFixed(1)} s`
+        : "static build", "ok");
+    if (state.live || state.inBrowser) writeHash();
     if ($("tab-wat").getAttribute("aria-selected") === "true") renderWat();
     if (run && !$("run").disabled) runMain();
   }
   const compileAndRun = () => compile(true);
 
   function scheduleAuto() {
-    if (!state.live || !$("auto").checked) return;
+    if (!(state.live || state.inBrowser) || !$("auto").checked) return;
     clearTimeout(state.autoTimer);
     state.autoTimer = setTimeout(compile, AUTO_DELAY);
   }
@@ -884,6 +939,16 @@
     return exampleFetches[ex.id];
   }
 
+  // A static host: the in-browser compiler is there when its manifest is (build-static.cjs writes it with the tools).
+  async function detectInBrowser() {
+    if (typeof Worker !== "function" || typeof WebAssembly !== "object") return false;
+    try {
+      const r = await fetch("inbrowser/manifest.json", { method: "HEAD" });
+      return r.ok;
+    } catch (e) {
+      return false;
+    }
+  }
   async function detectServer() {
     try {
       const r = await fetch("api/health");
@@ -919,9 +984,11 @@
     const server = await detectServer();
     state.live = !!server.live;
     if (!state.live) {
-      $("static-note").hidden = false;
+      state.inBrowser = await detectInBrowser();
+      $(state.inBrowser ? "inbrowser-note" : "static-note").hidden = false;
+      // auto: off at first on a static host (its first compile of an edited source downloads the compiler)
       $("auto").checked = false;
-      $("auto").disabled = true;
+      $("auto").disabled = !state.inBrowser;
     }
     fillLanguages();
     await loadExamples();
@@ -948,7 +1015,7 @@
     await loadMonaco().then(createEditor, () => showFallback());
 
     if (!state.live) {
-      setStatus("static build", "");
+      setStatus(state.inBrowser ? "compiles in the browser" : "static build", "");
     } else if (!server.ready) {
       setStatus("server up, harness not built", "bad");
       $("compile").disabled = true;

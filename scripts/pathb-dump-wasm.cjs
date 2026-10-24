@@ -33,7 +33,11 @@ for (let i = 0; i < args.length; i++) {
   else if (a.startsWith("-std=c++")) std = "--c++" + a.slice(8);
   else if (/^-std=(c89|c99|c11|c17|c18|c23)$/.test(a)) std = "--" + a.slice(5);
   else if (a.startsWith("-std=")) { console.error(`pathb-dump-wasm: unknown standard ${a.slice(5)}`); process.exit(2); }
-  else if (a.startsWith("-I") && a.length > 2) { const d = path.resolve(a.slice(2)); incDirs.push(d); userOpts.push("-I" + d); }
+  else if (a.startsWith("-I") && a.length > 2) {
+    const d = path.resolve(a.slice(2));   // the front end runs with --wdir /: an absolute path
+    incDirs.push(d);
+    userOpts.push("-I" + d);
+  }
   else if (/^-[DU]./.test(a) || a.startsWith("--diag_")) userOpts.push(a);
   else if (a === "-Wno-narrowing") userOpts.push("--diag_warning=narrowing_conversion");
   else if (a.startsWith("-W")) { /* other warnings do not change the object code */ }

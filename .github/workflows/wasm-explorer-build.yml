@@ -5,7 +5,9 @@ name: wasm explorer (build)
 # wasm-explorer-preview.yml to a Cloudflare Pages preview. The compiler runs here, in CI: the Path B harness and the
 # mruby tool are built as in pathb.yml, and each example is compiled ahead of time in every mode of its language and
 # checked against its expected result, so a broken example fails this job. The Rust and Go examples also need rustc
-# (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh).
+# (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh). The in-browser compiler (docs/notes/pathb-wasm-frontend.md:
+# the same front end and emitter, built with Emscripten) is built and checked against the native one here too, and the
+# site carries it (inbrowser/), so the page compiles C, C++, LLVM IR and the IR without a server.
 #
 # This job runs the code it checks out (the compiler, the examples), so it has no secrets and reads the repository only.
 on:
@@ -22,7 +24,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in pathb.yml
       PATHB_JOBS: "4"
@@ -87,8 +89,49 @@ jobs:
         if: steps.tinygo.outputs.cache-hit != 'true'
         run: scripts/setup-tinygo.sh
 
+      # The in-browser compiler: Emscripten (pinned), the front end built with it (with SoftFloat) and mruby built with it.
+      - name: Restore Emscripten
+        id: emsdk
+        uses: actions/cache@v6
+        with:
+          path: build/emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/setup-emsdk.sh') }}
+
+      - name: Install Emscripten
+        if: steps.emsdk.outputs.cache-hit != 'true'
+        run: scripts/setup-emsdk.sh
+
+      - name: Restore the in-browser front end
+        id: pathbwasm
+        uses: actions/cache@v6
+        with:
+          path: |
+            build/pathb-wasm
+            build/softfloat
+          key: pathb-wasm-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh', 'scripts/setup-emsdk.sh') }}
+
+      - name: Restore the in-browser mruby
+        id: mrubywasm
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-wasm
+          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/setup-mruby-wasm.sh', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.sh') }}
+
+      - name: Build the in-browser compiler
+        if: steps.pathbwasm.outputs.cache-hit != 'true' || steps.mrubywasm.outputs.cache-hit != 'true'
+        run: |
+          source build/emsdk/emsdk_env.sh
+          [ "${{ steps.pathbwasm.outputs.cache-hit }}" = true ] || PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh
+          [ "${{ steps.mrubywasm.outputs.cache-hit }}" = true ] || scripts/setup-mruby-wasm.sh
+
+      - name: Check the in-browser front end against the native one
+        run: tests/pathb-wasm-frontend/run.sh
+
+      - name: Check the in-browser compile against the server's (every example in every mode)
+        run: node tools/wasm-explorer/test-inbrowser.cjs
+
       - name: Build the static site (compiles and checks every example in every mode)
-        run: node tools/wasm-explorer/build-static.cjs --out _site
+        run: node tools/wasm-explorer/build-static.cjs --out _site --require-inbrowser
 
       - name: Upload the site
         uses: actions/upload-pages-artifact@v5

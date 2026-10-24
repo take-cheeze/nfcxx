@@ -3,8 +3,9 @@
 Status: **builds and matches the native front end.** `PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh` builds the Path B
 harness (EDG with `be/nfcxx_be.c` and `be/nfcxx_ir.c`, `docs/notes/pathb-stage1.md`) as a WebAssembly module. On the
 151 C and C++ files of `tests/pathb-wasm-frontend/run.sh` its IR is byte for byte the native front end's on 149, and
-the other two are known differences where the browser build is the correct one (below). Nothing in the wasm explorer
-uses it yet: the page still compiles on the server (`docs/notes/wasm-explorer.md`).
+the other two are known differences where the browser build is the correct one (below). With mruby built with
+Emscripten too (`scripts/setup-mruby-wasm.sh`, for the emitter), the wasm explorer's static site compiles C, C++, LLVM
+IR and the IR in the page, with the server's result byte for byte (`docs/notes/wasm-explorer.md`, "Static build").
 
 ## Build and run
 
@@ -67,12 +68,20 @@ A wasm64 (memory64) build would have made the host LP64 like the native one, wit
 the alignment and integer settings. Chrome and Firefox ship memory64, Safari did not (2025), so the front end stays
 wasm32, which every browser runs. SoftFloat is needed either way: wasm64's `long double` is binary128 too.
 
+## mruby for the browser
+
+`scripts/setup-mruby-wasm.sh` builds the interpreter of `scripts/mrb` with Emscripten (mruby's own `emscripten`
+toolchain, wasm exceptions for its `setjmp`), `createMruby` like `createCpfe`: `build/mruby-wasm/out/wasm/bin/mruby.js`
+and `mruby.wasm` (0.9 MB, 0.3 MB gzip). Its `Integer` is 64-bit (`MRB_INT64`, with `MRB_NO_BOXING`, which mruby needs
+for it on a 32-bit target): mruby's default on wasm32 is 32-bit, and with it the emitter's output changed (a LEB128
+encoding of a 64-bit value). `tools/wasm-explorer/inbrowser.js` runs both tools; its stdout is captured as bytes
+(`FS.init`), since the emitter writes a binary module there.
+
 ## Next steps
 
-1. **The explorer page**: run `createCpfe` in the page's worker, with the base directory (and, for hosted C++, the
-   headers) loaded into its file system. Freestanding C and C++ need only the base directory; the hosted headers are
-   about 17 MB (libstdc++ 14 MB, GCC's own 3 MB, glibc's), so they would be loaded on demand or not offered.
-2. **The emitter in the browser**: `scripts/pathb-wasm-emit.rb` runs under mruby; mruby built with Emscripten runs the
-   same script. Then a C or C++ program compiles to wasm without a server.
+1. **Hosted headers**: the page has EDG's own headers only, so a program that includes `<stdio.h>` or `<vector>`
+   compiles on the server only. The host's headers are about 17 MB (libstdc++ 14 MB, GCC's own 3 MB, glibc's); a
+   bundle of the headers a program actually includes, loaded on demand, would bring the common ones.
+2. **Demangling** in the page (a trap's frames show `_Z4deepi`, where the server shows `deep(int)` through c++filt).
 3. **Rust**: mrustc's monomorphised MIR to Path B IR (`docs/notes/mrustc-monomir.md`), the same IR, so C and Rust can be
    one module. Go has no front end of nfcxx's own (TinyGo stays on the server).
