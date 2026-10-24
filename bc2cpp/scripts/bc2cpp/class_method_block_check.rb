@@ -78,6 +78,9 @@ ensure
 end
 
 DYNAMIC = 'mrb_funcall_with_block('
+# The by-name block send as an else: the send itself, or its owner call carrying the block (BLOCK_OWNER_CALL) when
+# the closed world names every owner.
+ELSE_SEND = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS\([^)]*\), (?!mrb_nil_value\(\))/
 
 baseline_dir = Dir.mktmpdir('bc2cpp-class-method-block')
 at_exit { FileUtils.remove_entry(baseline_dir) }
@@ -93,11 +96,11 @@ check.call('keep: a class method that stores its block gets the heap block',
              !code_of(code, 'keep').include?('Bc2cppStackBlock'))
 sio = code_of(code, 'sio')
 check.call('sio: StringIO.open calls the compiled core class method at the root context, the send as the else',
-           sio.match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = StringIO_singleton_open_impl\(M, /) && sio.include?(DYNAMIC))
+           sio.match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = StringIO_singleton_open_impl\(M, /) && sio.match?(ELSE_SEND))
 %w[fopen fread ftop].each do |m|
   check.call("#{m}: File.open calls the compiled IO.open at the root context, the send as the else",
              code_of(code, m).match?(/if \(M->c == M->root_c\) \{\n\s+r\d+ = IO_singleton_open_impl\(M, /) &&
-               code_of(code, m).include?(DYNAMIC))
+               code_of(code, m).match?(ELSE_SEND))
 end
 c, = generate_world(SRC + "class StringIO\n  def self.open(*a); yield :mine; end\nend\n")
 check.call('a program StringIO.open withdraws the core call', !code_of(c, 'sio').include?('StringIO_singleton_open_impl(M, '))

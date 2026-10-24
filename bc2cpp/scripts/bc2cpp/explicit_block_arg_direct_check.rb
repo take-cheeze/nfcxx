@@ -112,8 +112,10 @@ saved = ENV['BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT']
 begin
   ENV['BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT'] = '0'
   off_code, = runtime.generate(BASE, Dir.mktmpdir, only_owners: OWNERS)
-  check.call('the kill switch keeps every &expr site on mrb_funcall_with_block',
-             DIRECT.all? { |m| body.call(off_code, "Bag_#{m}").include?('mrb_funcall_with_block(') })
+  # The by-name block send, or its owner call carrying the block (BLOCK_OWNER_CALL), when the owner set is named.
+  by_name_block = /mrb_funcall_with_block\(|bc2cpp_owner_call\(M, [^;]*BC2CPP_OWNERS\([^)]*\), (?!mrb_nil_value\(\))/
+  check.call('the kill switch keeps every &expr site on the by-name block send',
+             DIRECT.all? { |m| body.call(off_code, "Bag_#{m}").match?(by_name_block) })
   ENV['BC2CPP_EXPLICIT_BLOCK_ARG_DIRECT'] = nil
 
   Dir.mktmpdir do |dir|
