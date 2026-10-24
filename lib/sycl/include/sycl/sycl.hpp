@@ -2119,7 +2119,11 @@ enum class alloc { host, device, shared, unknown };
 }
 
 namespace detail {
+// A USM allocation starts at a multiple of the device's mem_base_addr_align (1024 bits) at least, as DPC++'s do: ggml takes
+// the base of a buffer from malloc_device to be aligned to its buffer type's 128 bytes.
+constexpr size_t usm_align = 128;
 inline void *usm_malloc(size_t bytes, size_t align, int kind) {
+  if (align < usm_align) align = usm_align;
   void *p = backend_usm_alloc(bytes, (unsigned)align, kind);
   if (!p && bytes) throw exception(errc::memory_allocation, "sycl: USM allocation failed");
   return p;
