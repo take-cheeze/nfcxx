@@ -14,6 +14,7 @@ require 'open3'
 require 'rbconfig'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/closed_world_env'
+require_relative 'fixture_runtime'
 
 ROOT = File.expand_path('../..', __dir__)
 BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
@@ -25,7 +26,7 @@ check = lambda do |what, ok|
 end
 
 # By-name dispatch the expansion must not leave behind in a live line.
-BY_NAME = /\bbc2cpp_send\(|\bbc2cpp_owner_call(?:_named)?\(|\bmrb_funcall\w*\(/
+BY_NAME = /\bbc2cpp_send\(|\bbc2cpp_owner_call(?:_named)?\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall\w*\(/
 
 FIXTURE = <<~RUBY
   module CsCheck
@@ -70,6 +71,30 @@ FIXTURE = <<~RUBY
         __send__(TABLE[i] + "", x)
       end
     end
+
+    class Guarded
+      NAMES = [:one, :two, :zero]
+
+      def one(x) = x + 1
+      def two(x) = x + 2
+      def zero = 0
+
+      def via_send(name, x)
+        send(name, x)
+      end
+
+      def via_dunder(name, x)
+        __send__(name, x)
+      end
+
+      def via_splat(args)
+        send(*args)
+      end
+
+      def other_receiver(obj, name, x)
+        obj.send(name, x)
+      end
+    end
   end
 RUBY
 
@@ -78,11 +103,11 @@ puts '  SKIP generated fixture: set MRBC' if MRBC_BIN.nil?
 Dir.mktmpdir do |dir|
   src = File.join(dir, 'cs.rb')
   File.write(src, FIXTURE)
-  generate = lambda do |switch|
-    out_dir = File.join(dir, "out-#{switch}")
+  generate = lambda do |switch, extra = {}|
+    out_dir = File.join(dir, "out-#{switch}-#{extra.size}")
     Dir.mkdir(out_dir)
     env = { 'MRBC' => MRBC_BIN, 'SKIP_UNSUPPORTED' => '1', 'OUT_SYMBOL' => 'cs', 'OUT_DIR' => out_dir,
-            'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_COMPUTED_SEND' => switch }
+            'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '', 'BC2CPP_COMPUTED_SEND' => switch, **extra }
     out, err, status = Open3.capture3(bc2cpp_closed_world_probe_env(env), RbConfig.ruby, BC2CPP, '--annotated', src)
     abort "bc2cpp.rb failed:\n#{err[-3000..]}" unless status.success?
     out
@@ -110,12 +135,127 @@ Dir.mktmpdir do |dir|
       check.call("#{name}: the unproven name is not expanded and keeps its by-name send",
                  !expanded.call(name) && by_name.call(name))
     end
+    guarded_body = ->(code, name) { code[/^mrb_value CsCheck__Guarded_#{name}_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value |\z)/m].to_s }
+    %w[via_send via_dunder].each do |name|
+      text = guarded_body.call(on, name)
+      check.call("#{name}: an unproven name on self takes the guarded expansion",
+                 text.include?('// COMPUTED_SEND_GUARDED'))
+      check.call("#{name}: each spelled one-argument name of the class is a direct arm, the zero-argument one is not",
+                 text.include?('CsCheck__Guarded_one_impl(M') && text.include?('CsCheck__Guarded_two_impl(M') &&
+                 !text.include?('CsCheck__Guarded_zero_impl(M'))
+      check.call("#{name}: the guarded expansion keeps the original send for any other value",
+                 by_name_lines.call(text).any?)
+    end
+    splat = guarded_body.call(on, 'via_splat')
+    check.call('via_splat: a splat send on self takes the guarded expansion by arity',
+               splat.include?('// COMPUTED_SEND_GUARDED :send n=*') && splat.include?('case 0:') && splat.include?('case 1:'))
+    check.call('via_splat: every arity of the spelled names is a direct arm',
+               %w[one two zero].all? { |name| splat.include?("CsCheck__Guarded_#{name}_impl(M") })
+    check.call('via_splat: the guarded splat keeps the original send for any other value', by_name_lines.call(splat).any?)
+    check.call('other_receiver: a computed send on another receiver is not guarded',
+               !guarded_body.call(on, 'other_receiver').include?('// COMPUTED_SEND_GUARDED'))
+    guarded_off = generate.call('1', 'BC2CPP_COMPUTED_SEND_GUARDED' => '0')
+    check.call('BC2CPP_COMPUTED_SEND_GUARDED=0 emits no guarded expansion',
+               guarded_off.lines.none? { |line| line.include?('// COMPUTED_SEND_GUARDED') })
     check.call('the kill switch BC2CPP_COMPUTED_SEND=0 emits no COMPUTED_SEND line',
                off.lines.none? { |line| line.include?('// COMPUTED_SEND') })
     check.call('the kill switch keeps the proven table site as a by-name send',
                by_name_lines.call(body.call(off, 'table')).any?)
   end
 end if MRBC_BIN
+
+# COMPUTED_SEND_GUARDED on real mruby: every arm, and every value that must take the original send, behaves as
+# the interpreter does.
+GUARDED_SRC = <<~RUBY
+  class GsFx
+    NAMES = %i[one two zero hidden].freeze
+
+    def one(x) = x + 1
+    def two(x, y = 10) = x + y
+    def zero = :zero
+
+    def via_send(name, *rest)
+      case rest.size
+      when 0 then send(name)
+      when 1 then send(name, rest[0])
+      else send(name, rest[0], rest[1])
+      end
+    end
+
+    def via_splat(args)
+      send(*args)
+    end
+
+    private
+
+    def hidden(x) = [:hidden, x]
+  end
+RUBY
+
+GUARDED_DRIVER = <<~'RUBY'
+  fx = GsFx.new
+  show = lambda do |label, &blk|
+    out = begin
+      blk.call.inspect
+    rescue Exception => e
+      e.class.to_s
+    end
+    puts "#{label}: #{out}"
+  end
+  show.call('send one') { fx.via_send(:one, 1) }
+  show.call('send two default') { fx.via_send(:two, 1) }
+  show.call('send two both') { fx.via_send(:two, 1, 2) }
+  show.call('send zero') { fx.via_send(:zero) }
+  show.call('send private') { fx.via_send(:hidden, 3) }
+  show.call('send string name') { fx.via_send('one', 4) }
+  show.call('send unknown') { fx.via_send(:nope, 1) }
+  # No zero-argument method with an argument: the runner registers every compiled method MRB_ARGS_ANY, so the
+  # zero-argument wrapper would accept one whichever way the send went.
+  show.call('send wrong arity') { fx.via_send(:one, 1, 2) }
+  show.call('send non-name') { fx.via_send(5, 1) }
+  show.call('splat one') { fx.via_splat([:one, 1]) }
+  show.call('splat zero') { fx.via_splat([:zero]) }
+  show.call('splat two') { fx.via_splat([:two, 1, 2]) }
+  show.call('splat empty') { fx.via_splat([]) }
+  show.call('splat wrong arity') { fx.via_splat([:one]) }
+  show.call('splat unknown') { fx.via_splat([:nope]) }
+  puts 'end'
+RUBY
+
+if MRBC_BIN && ENV['CC_GENERATED_ONLY'] != '1'
+  build = Bc2cppFixtureRuntime.full_or_build
+  if build.nil?
+    puts '  SKIP guarded behaviour: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake, g++ and 3rd/mruby)'
+  else
+    dir = Dir.mktmpdir('bc2cpp-guarded-send')
+    at_exit { FileUtils.remove_entry(dir) }
+    code, err = Bc2cppFixtureRuntime.generate(GUARDED_SRC, dir, core: true, only_owners: %w[GsFx])
+    check.call('guarded fixture: via_send and via_splat take the guarded expansion',
+               code.scan('// COMPUTED_SEND_GUARDED').size >= 3)
+    body = <<~CPP
+      static int scenario(mrb_state* M) {
+        std::fflush(stdout);
+        const char* src = R"GSD(#{GUARDED_DRIVER})GSD";
+        mrb_load_string(M, src);
+        std::fflush(stdout);
+        if (M->exc) { mrb_print_error(M); M->exc = nullptr; return 1; }
+        return 0;
+      }
+    CPP
+    built, output = Bc2cppFixtureRuntime.run(dir, err, %w[GsFx], body, build: build, full: true)
+    check.call('guarded fixture: builds and runs', built)
+    sections = Bc2cppFixtureRuntime.sections(output)
+    interpreted = sections['interpreted']
+    compiled = sections['compiled']
+    check.call('guarded fixture: both runs reach the end', interpreted&.last == 'end' && compiled&.last == 'end')
+    check.call('guarded fixture: interpreted and compiled runs print the same', interpreted == compiled)
+    interpreted.to_a.zip(compiled.to_a).reject { |a, b| a == b }.first(10).each do |a, b|
+      puts "    interpreted: #{a}\n    compiled:    #{b}"
+    end
+    check.call('guarded fixture: an arm returns the method result', interpreted.to_a.include?('send one: 2'))
+    puts output.lines.last(30).join unless built && interpreted && compiled
+  end
+end
 
 if failures.empty?
   puts 'bc2cpp computed send check: PASS'
